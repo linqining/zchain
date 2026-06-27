@@ -1,3 +1,2047 @@
-//! 治理模块（Phase 2/3 实现）。当前为 stub。
+//! 治理与参数管理（Task 33）。
 //!
-//! Phase 2/3 将实现 validator 集治理、紧急升级（90% quorum）、tag 引入提案等。
+//! 严格遵循 spec.md（FROZEN 2026-06-27）第 825-863 行：
+//! - **SubTask 33.1**：参数调整提案（parameter_name, new_value）+ 投票期 `voting_period_blocks`
+//! - **SubTask 33.2**：2/3 validator 赞成 → 通过；敏感参数需 90% quorum（SEC-H4 补全 9 项 +
+//!   SEC-C2 validator_set_size）；timelock `parameter_delay_blocks`（默认 2000）；
+//!   timelock 撤销机制（SEC-H8：≥90% 反对立即生效）；quorum 分母规则（SEC2-M6）
+//! - **SubTask 33.3**：参数上下界约束（R4-H4 / R5-H2 / R5-M3 / R7-* 修正）
+//! - **SubTask 33.4**：可治理参数完整列表（NEW-M12 / R4-M3 / R5-H8 修正）
+//! - **SubTask 33.5**：Validator 集更新提案（加入/踢出），epoch 边界生效
+//! - **SubTask 33.6**：verifier_status 治理（NEW-C1 + SEC-M4 per-chain_id 命名空间隔离）
+//!
+//! # 安全约束
+//!
+//! - **SEC-H4**：敏感参数 90% quorum 补全 9 项
+//! - **SEC-C2**：validator_set_size 90% quorum + 下限 5
+//! - **SEC-H8**：timelock 撤销须 ≥90% 反对，立即生效
+//! - **SEC2-M6**：quorum 分母 = 当前 epoch validator 集大小（含离线）；参与率下限 2/3 / 90%
+//! - **SEC-M2**：单次缩减比例 <= 20%
+//! - **SEC-M4**：verifier_status per-chain_id（BTreeMap<chain_id, VerifierStatus>）
+//! - **SEC2-H4**：密钥轮换 timelock（key_rotation_delay_blocks）
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::consensus::{Epoch, ValidatorSet};
+use crate::error::{PokerL1Error, PokerL1Result};
+use crate::signature::TaggedPubkey;
+use crate::{BlockHeight, ChainId};
+
+// ===== 默认值常量 =====
+
+/// 默认投票期（block 数）。
+pub const DEFAULT_VOTING_PERIOD_BLOCKS: u64 = 1000;
+/// 默认参数延迟期（R3-M4：由 500 提升至 2000）。
+pub const DEFAULT_PARAMETER_DELAY_BLOCKS: u64 = 2000;
+/// 默认 epoch 长度。
+pub const DEFAULT_EPOCH_LENGTH_BLOCKS: u64 = 1000;
+/// 默认 turn 超时。
+pub const DEFAULT_TURN_TIMEOUT_BLOCKS: u64 = 30;
+/// 默认 max_interval_ms。
+pub const DEFAULT_MAX_INTERVAL_MS: u64 = 2000;
+/// 默认 block_gas_limit（100M gas）。
+pub const DEFAULT_BLOCK_GAS_LIMIT: u64 = 100_000_000;
+/// 默认 slash_percentage（NEW-M15：100%）。
+pub const DEFAULT_SLASH_PERCENTAGE: u64 = 100;
+/// 默认 downtime_slash_percentage（NEW-L2：10%）。
+pub const DEFAULT_DOWNTIME_SLASH_PERCENTAGE: u64 = 10;
+/// 默认 defense_window_blocks。
+pub const DEFAULT_DEFENSE_WINDOW_BLOCKS: u64 = 500;
+/// 默认 checkpoint_multi_replica_count（NEW-M3：5）。
+pub const DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT: u64 = 5;
+/// 默认 delegated_escape_max_expiry_blocks。
+pub const DEFAULT_DELEGATED_ESCAPE_MAX_EXPIRY_BLOCKS: u64 = 100;
+/// 默认 game_validator_timeout_blocks（= floor(turn_timeout_blocks / 2)）。
+pub const DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS: u64 = 15;
+/// 默认 ack_deadline_blocks。
+pub const DEFAULT_ACK_DEADLINE_BLOCKS: u64 = 3;
+/// 默认 max_skip_segments。
+pub const DEFAULT_MAX_SKIP_SEGMENTS: u64 = 3;
+/// 默认 max_active_games_per_player。
+pub const DEFAULT_MAX_ACTIVE_GAMES_PER_PLAYER: u64 = 10;
+/// 默认 max_vertex_size（256KB）。
+pub const DEFAULT_MAX_VERTEX_SIZE: u64 = 256 * 1024;
+/// 默认 bonding_period_blocks（= 1 epoch）。
+pub const DEFAULT_BONDING_PERIOD_BLOCKS: u64 = 1000;
+/// 默认 unbonding_period_blocks（= 2 × epoch）。
+pub const DEFAULT_UNBONDING_PERIOD_BLOCKS: u64 = 2000;
+/// 默认 downtime_threshold_blocks。
+pub const DEFAULT_DOWNTIME_THRESHOLD_BLOCKS: u64 = 100;
+/// 默认 under_investigation_threshold。
+pub const DEFAULT_UNDER_INVESTIGATION_THRESHOLD: u64 = 3;
+/// 默认 max_designated_operator_check_exemptions。
+pub const DEFAULT_MAX_DESIGNATED_OPERATOR_CHECK_EXEMPTIONS: u64 = 3;
+/// 默认 hand_max_duration_blocks。
+pub const DEFAULT_HAND_MAX_DURATION_BLOCKS: u64 = 120;
+/// 默认 archive_node_min_count。
+pub const DEFAULT_ARCHIVE_NODE_MIN_COUNT: u64 = 3;
+/// 默认 recovery_window_blocks。
+pub const DEFAULT_RECOVERY_WINDOW_BLOCKS: u64 = 100;
+/// 默认 checkpoint_interval_blocks。
+pub const DEFAULT_CHECKPOINT_INTERVAL_BLOCKS: u64 = 5;
+/// 默认 da_window_blocks。
+pub const DEFAULT_DA_WINDOW_BLOCKS: u64 = 500;
+/// 默认 dispute_window_blocks。
+pub const DEFAULT_DISPUTE_WINDOW_BLOCKS: u64 = 500;
+/// 默认 tx_prune_after_blocks。
+pub const DEFAULT_TX_PRUNE_AFTER_BLOCKS: u64 = 1000;
+/// 默认 vertex_prune_after_blocks。
+pub const DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS: u64 = 10_000;
+/// 默认 archive_retention_blocks。
+pub const DEFAULT_ARCHIVE_RETENTION_BLOCKS: u64 = 100_000;
+/// 默认 epoch_transition_window_blocks。
+pub const DEFAULT_EPOCH_TRANSITION_WINDOW_BLOCKS: u64 = 10;
+/// 默认 malicious_refuse_threshold。
+pub const DEFAULT_MALICIOUS_REFUSE_THRESHOLD: u64 = 3;
+/// 默认 max_request_ack_per_turn_timeout。
+pub const DEFAULT_MAX_REQUEST_ACK_PER_TURN_TIMEOUT: u64 = 3;
+/// 默认 max_clock_drift_ms。
+pub const DEFAULT_MAX_CLOCK_DRIFT_MS: u64 = 500;
+/// 默认 forfeit_deposit_ratio（%）。
+pub const DEFAULT_FORFEIT_DEPOSIT_RATIO: u64 = 50;
+/// 默认 challenge_deposit_ratio（SEC-C4：50）。
+pub const DEFAULT_CHALLENGE_DEPOSIT_RATIO: u64 = 50;
+/// 默认 challenge_reward_ratio（SEC-C4：100）。
+pub const DEFAULT_CHALLENGE_REWARD_RATIO: u64 = 100;
+/// 默认 designated_operator_bond_amount。
+pub const DEFAULT_DESIGNATED_OPERATOR_BOND_AMOUNT: u64 = 10_000;
+/// 默认 key_rotation_delay_blocks。
+pub const DEFAULT_KEY_ROTATION_DELAY_BLOCKS: u64 = 1000;
+/// 默认 validator_set_size。
+pub const DEFAULT_VALIDATOR_SET_SIZE: u64 = 10;
+/// 默认 max_partial_checkin_count（SEC-H1：3）。
+pub const DEFAULT_MAX_PARTIAL_CHECKIN_COUNT: u64 = 3;
+
+// ===== VerifierStatus（NEW-C1 + SEC-M4） =====
+
+/// ZK verifier 状态（NEW-C1：Stub / Production）。
+///
+/// SEC-M4：per-chain_id 命名空间隔离，存储为 `BTreeMap<chain_id, VerifierStatus>`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerifierStatus {
+    /// Stub 模式：主网 chain_id 拒绝 OffChain checkout。
+    Stub,
+    /// Production 模式：主网允许 OffChain checkout。
+    Production,
+}
+
+// ===== ParamName（可治理参数完整列表，NEW-M12 / R4-M3 / R5-H8 / R7-M2/M5） =====
+
+/// 可治理参数名（强类型枚举）。
+///
+/// 完整列表见 spec.md 第 847-851 行（NEW-M12 / R4-M3 / R5-H8 / R7-M2/M5 修正）。
+/// 共 41 个可治理参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ParamName {
+    /// turn_timeout_blocks
+    TurnTimeoutBlocks,
+    /// hand_max_duration_blocks
+    HandMaxDurationBlocks,
+    /// dispute_window_blocks
+    DisputeWindowBlocks,
+    /// da_window_blocks
+    DaWindowBlocks,
+    /// recovery_window_blocks
+    RecoveryWindowBlocks,
+    /// checkpoint_interval_blocks
+    CheckpointIntervalBlocks,
+    /// game_validator_timeout_blocks
+    GameValidatorTimeoutBlocks,
+    /// ack_deadline_blocks
+    AckDeadlineBlocks,
+    /// max_skip_segments
+    MaxSkipSegments,
+    /// malicious_refuse_threshold
+    MaliciousRefuseThreshold,
+    /// max_interval_ms
+    MaxIntervalMs,
+    /// max_active_games_per_player
+    MaxActiveGamesPerPlayer,
+    /// epoch_length_blocks
+    EpochLengthBlocks,
+    /// max_vertex_size
+    MaxVertexSize,
+    /// block_gas_limit
+    BlockGasLimit,
+    /// tx_prune_after_blocks
+    TxPruneAfterBlocks,
+    /// vertex_prune_after_blocks
+    VertexPruneAfterBlocks,
+    /// archive_node_min_count
+    ArchiveNodeMinCount,
+    /// checkpoint_multi_replica_count
+    CheckpointMultiReplicaCount,
+    /// delegated_escape_max_expiry_blocks
+    DelegatedEscapeMaxExpiryBlocks,
+    /// defense_window_blocks
+    DefenseWindowBlocks,
+    /// parameter_delay_blocks
+    ParameterDelayBlocks,
+    /// epoch_transition_window_blocks
+    EpochTransitionWindowBlocks,
+    /// bonding_period_blocks
+    BondingPeriodBlocks,
+    /// slash_percentage
+    SlashPercentage,
+    /// downtime_slash_percentage
+    DowntimeSlashPercentage,
+    /// verifier_status（敏感 90% quorum）
+    VerifierStatus,
+    /// downtime_threshold_blocks
+    DowntimeThresholdBlocks,
+    /// voting_period_blocks
+    VotingPeriodBlocks,
+    /// max_designated_operator_check_exemptions
+    MaxDesignatedOperatorCheckExemptions,
+    /// under_investigation_threshold
+    UnderInvestigationThreshold,
+    /// max_request_ack_per_turn_timeout
+    MaxRequestAckPerTurnTimeout,
+    /// max_clock_drift_ms
+    MaxClockDriftMs,
+    /// forfeit_deposit_ratio
+    ForfeitDepositRatio,
+    /// challenge_deposit_ratio
+    ChallengeDepositRatio,
+    /// challenge_reward_ratio
+    ChallengeRewardRatio,
+    /// designated_operator_bond_amount
+    DesignatedOperatorBondAmount,
+    /// unbonding_period_blocks
+    UnbondingPeriodBlocks,
+    /// key_rotation_delay_blocks
+    KeyRotationDelayBlocks,
+    /// archive_retention_blocks
+    ArchiveRetentionBlocks,
+    /// validator_set_size（SEC-C2：敏感 90% quorum）
+    ValidatorSetSize,
+    /// max_partial_checkin_count（SEC-H1）
+    MaxPartialCheckinCount,
+}
+
+impl ParamName {
+    /// 返回参数的字符串名（用于错误信息）。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnTimeoutBlocks => "turn_timeout_blocks",
+            Self::HandMaxDurationBlocks => "hand_max_duration_blocks",
+            Self::DisputeWindowBlocks => "dispute_window_blocks",
+            Self::DaWindowBlocks => "da_window_blocks",
+            Self::RecoveryWindowBlocks => "recovery_window_blocks",
+            Self::CheckpointIntervalBlocks => "checkpoint_interval_blocks",
+            Self::GameValidatorTimeoutBlocks => "game_validator_timeout_blocks",
+            Self::AckDeadlineBlocks => "ack_deadline_blocks",
+            Self::MaxSkipSegments => "max_skip_segments",
+            Self::MaliciousRefuseThreshold => "malicious_refuse_threshold",
+            Self::MaxIntervalMs => "max_interval_ms",
+            Self::MaxActiveGamesPerPlayer => "max_active_games_per_player",
+            Self::EpochLengthBlocks => "epoch_length_blocks",
+            Self::MaxVertexSize => "max_vertex_size",
+            Self::BlockGasLimit => "block_gas_limit",
+            Self::TxPruneAfterBlocks => "tx_prune_after_blocks",
+            Self::VertexPruneAfterBlocks => "vertex_prune_after_blocks",
+            Self::ArchiveNodeMinCount => "archive_node_min_count",
+            Self::CheckpointMultiReplicaCount => "checkpoint_multi_replica_count",
+            Self::DelegatedEscapeMaxExpiryBlocks => "delegated_escape_max_expiry_blocks",
+            Self::DefenseWindowBlocks => "defense_window_blocks",
+            Self::ParameterDelayBlocks => "parameter_delay_blocks",
+            Self::EpochTransitionWindowBlocks => "epoch_transition_window_blocks",
+            Self::BondingPeriodBlocks => "bonding_period_blocks",
+            Self::SlashPercentage => "slash_percentage",
+            Self::DowntimeSlashPercentage => "downtime_slash_percentage",
+            Self::VerifierStatus => "verifier_status",
+            Self::DowntimeThresholdBlocks => "downtime_threshold_blocks",
+            Self::VotingPeriodBlocks => "voting_period_blocks",
+            Self::MaxDesignatedOperatorCheckExemptions => "max_designated_operator_check_exemptions",
+            Self::UnderInvestigationThreshold => "under_investigation_threshold",
+            Self::MaxRequestAckPerTurnTimeout => "max_request_ack_per_turn_timeout",
+            Self::MaxClockDriftMs => "max_clock_drift_ms",
+            Self::ForfeitDepositRatio => "forfeit_deposit_ratio",
+            Self::ChallengeDepositRatio => "challenge_deposit_ratio",
+            Self::ChallengeRewardRatio => "challenge_reward_ratio",
+            Self::DesignatedOperatorBondAmount => "designated_operator_bond_amount",
+            Self::UnbondingPeriodBlocks => "unbonding_period_blocks",
+            Self::KeyRotationDelayBlocks => "key_rotation_delay_blocks",
+            Self::ArchiveRetentionBlocks => "archive_retention_blocks",
+            Self::ValidatorSetSize => "validator_set_size",
+            Self::MaxPartialCheckinCount => "max_partial_checkin_count",
+        }
+    }
+
+    /// 判断是否为敏感参数（需 90% quorum）。
+    ///
+    /// 敏感参数完整列表（spec.md 第 839 行）：
+    /// - R3-H1 修正（8 项）：block_gas_limit / epoch_length_blocks / validator_set 更新 /
+    ///   slash_percentage / downtime_slash_percentage / verifier_status /
+    ///   parameter_delay_blocks / defense_window_blocks
+    /// - SEC-H4 补全（9 项）：bonding_period_blocks / unbonding_period_blocks /
+    ///   key_rotation_delay_blocks / checkpoint_multi_replica_count /
+    ///   archive_retention_blocks / max_skip_segments / turn_timeout_blocks /
+    ///   malicious_refuse_threshold / max_request_ack_per_turn_timeout
+    /// - SEC-C2（1 项）：validator_set_size
+    #[must_use]
+    pub const fn is_sensitive(self) -> bool {
+        matches!(
+            self,
+            Self::BlockGasLimit
+                | Self::EpochLengthBlocks
+                | Self::SlashPercentage
+                | Self::DowntimeSlashPercentage
+                | Self::VerifierStatus
+                | Self::ParameterDelayBlocks
+                | Self::DefenseWindowBlocks
+                | Self::BondingPeriodBlocks
+                | Self::UnbondingPeriodBlocks
+                | Self::KeyRotationDelayBlocks
+                | Self::CheckpointMultiReplicaCount
+                | Self::ArchiveRetentionBlocks
+                | Self::MaxSkipSegments
+                | Self::TurnTimeoutBlocks
+                | Self::MaliciousRefuseThreshold
+                | Self::MaxRequestAckPerTurnTimeout
+                | Self::ValidatorSetSize
+        )
+    }
+}
+
+// ===== GovernanceParams（参数集合 + 边界校验） =====
+
+/// 治理参数集合（所有可治理参数的当前值）。
+///
+/// 每个参数的默认值与边界见 spec.md 第 841-845 行。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernanceParams {
+    /// turn_timeout_blocks ∈ [3, 1000]
+    pub turn_timeout_blocks: u64,
+    /// hand_max_duration_blocks ∈ [turn_timeout_blocks*4, 100000]
+    pub hand_max_duration_blocks: u64,
+    /// dispute_window_blocks ∈ [10, 10000]
+    pub dispute_window_blocks: u64,
+    /// da_window_blocks ∈ [10, 10000]
+    pub da_window_blocks: u64,
+    /// recovery_window_blocks ∈ [10, 10000]
+    pub recovery_window_blocks: u64,
+    /// checkpoint_interval_blocks ∈ [1, 1000]
+    pub checkpoint_interval_blocks: u64,
+    /// game_validator_timeout_blocks ∈ [1, floor(turn_timeout_blocks / 2)]
+    pub game_validator_timeout_blocks: u64,
+    /// ack_deadline_blocks ∈ [1, 100]
+    pub ack_deadline_blocks: u64,
+    /// max_skip_segments ∈ [1, 10]
+    pub max_skip_segments: u64,
+    /// malicious_refuse_threshold ∈ [1, 100]
+    pub malicious_refuse_threshold: u64,
+    /// max_interval_ms ∈ [500, 60000]
+    pub max_interval_ms: u64,
+    /// max_active_games_per_player ∈ [1, 1000]
+    pub max_active_games_per_player: u64,
+    /// epoch_length_blocks ∈ [100, 10000]
+    pub epoch_length_blocks: u64,
+    /// max_vertex_size ∈ [64KB, 4MB]
+    pub max_vertex_size: u64,
+    /// block_gas_limit ∈ [10M, 200M]
+    pub block_gas_limit: u64,
+    /// tx_prune_after_blocks ∈ [100, 100000]
+    pub tx_prune_after_blocks: u64,
+    /// vertex_prune_after_blocks ∈ [100, 100000]
+    pub vertex_prune_after_blocks: u64,
+    /// archive_node_min_count ∈ [1, 100]
+    pub archive_node_min_count: u64,
+    /// checkpoint_multi_replica_count ∈ [3, 15]
+    pub checkpoint_multi_replica_count: u64,
+    /// delegated_escape_max_expiry_blocks ∈ [10, 1000]
+    pub delegated_escape_max_expiry_blocks: u64,
+    /// defense_window_blocks ∈ [10, 1000]
+    pub defense_window_blocks: u64,
+    /// parameter_delay_blocks ∈ [100, 10000]
+    pub parameter_delay_blocks: u64,
+    /// epoch_transition_window_blocks ∈ [1, 100]
+    pub epoch_transition_window_blocks: u64,
+    /// bonding_period_blocks ∈ [epoch_length_blocks, 10*epoch_length_blocks]
+    pub bonding_period_blocks: u64,
+    /// slash_percentage ∈ [1, 100]
+    pub slash_percentage: u64,
+    /// downtime_slash_percentage ∈ [1, 100]
+    pub downtime_slash_percentage: u64,
+    /// downtime_threshold_blocks ∈ [10, 10000]
+    pub downtime_threshold_blocks: u64,
+    /// voting_period_blocks ∈ [10, 10000]
+    pub voting_period_blocks: u64,
+    /// max_designated_operator_check_exemptions ∈ [0, 10]
+    pub max_designated_operator_check_exemptions: u64,
+    /// under_investigation_threshold ∈ [1, 100]
+    pub under_investigation_threshold: u64,
+    /// max_request_ack_per_turn_timeout ∈ [1, 100]
+    pub max_request_ack_per_turn_timeout: u64,
+    /// max_clock_drift_ms ∈ [0, 60000]
+    pub max_clock_drift_ms: u64,
+    /// forfeit_deposit_ratio ∈ [10, 200]
+    pub forfeit_deposit_ratio: u64,
+    /// challenge_deposit_ratio ∈ [1, 100]
+    pub challenge_deposit_ratio: u64,
+    /// challenge_reward_ratio ∈ [10, 100]
+    pub challenge_reward_ratio: u64,
+    /// designated_operator_bond_amount ∈ [1, 10^9]
+    pub designated_operator_bond_amount: u64,
+    /// unbonding_period_blocks ∈ [epoch_length_blocks, 10*epoch_length_blocks]
+    pub unbonding_period_blocks: u64,
+    /// key_rotation_delay_blocks ∈ [100, 10000]
+    pub key_rotation_delay_blocks: u64,
+    /// archive_retention_blocks ∈ [1000, 1000000]
+    pub archive_retention_blocks: u64,
+    /// validator_set_size ∈ [5, 1000]（SEC-C2）
+    pub validator_set_size: u64,
+    /// max_partial_checkin_count ∈ [1, 10]（SEC-H1）
+    pub max_partial_checkin_count: u64,
+}
+
+impl GovernanceParams {
+    /// 创建默认参数集（所有参数取默认值）。
+    #[must_use]
+    pub const fn default_values() -> Self {
+        Self {
+            turn_timeout_blocks: DEFAULT_TURN_TIMEOUT_BLOCKS,
+            hand_max_duration_blocks: DEFAULT_HAND_MAX_DURATION_BLOCKS,
+            dispute_window_blocks: DEFAULT_DISPUTE_WINDOW_BLOCKS,
+            da_window_blocks: DEFAULT_DA_WINDOW_BLOCKS,
+            recovery_window_blocks: DEFAULT_RECOVERY_WINDOW_BLOCKS,
+            checkpoint_interval_blocks: DEFAULT_CHECKPOINT_INTERVAL_BLOCKS,
+            game_validator_timeout_blocks: DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS,
+            ack_deadline_blocks: DEFAULT_ACK_DEADLINE_BLOCKS,
+            max_skip_segments: DEFAULT_MAX_SKIP_SEGMENTS,
+            malicious_refuse_threshold: DEFAULT_MALICIOUS_REFUSE_THRESHOLD,
+            max_interval_ms: DEFAULT_MAX_INTERVAL_MS,
+            max_active_games_per_player: DEFAULT_MAX_ACTIVE_GAMES_PER_PLAYER,
+            epoch_length_blocks: DEFAULT_EPOCH_LENGTH_BLOCKS,
+            max_vertex_size: DEFAULT_MAX_VERTEX_SIZE,
+            block_gas_limit: DEFAULT_BLOCK_GAS_LIMIT,
+            tx_prune_after_blocks: DEFAULT_TX_PRUNE_AFTER_BLOCKS,
+            vertex_prune_after_blocks: DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
+            archive_node_min_count: DEFAULT_ARCHIVE_NODE_MIN_COUNT,
+            checkpoint_multi_replica_count: DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT,
+            delegated_escape_max_expiry_blocks: DEFAULT_DELEGATED_ESCAPE_MAX_EXPIRY_BLOCKS,
+            defense_window_blocks: DEFAULT_DEFENSE_WINDOW_BLOCKS,
+            parameter_delay_blocks: DEFAULT_PARAMETER_DELAY_BLOCKS,
+            epoch_transition_window_blocks: DEFAULT_EPOCH_TRANSITION_WINDOW_BLOCKS,
+            bonding_period_blocks: DEFAULT_BONDING_PERIOD_BLOCKS,
+            slash_percentage: DEFAULT_SLASH_PERCENTAGE,
+            downtime_slash_percentage: DEFAULT_DOWNTIME_SLASH_PERCENTAGE,
+            downtime_threshold_blocks: DEFAULT_DOWNTIME_THRESHOLD_BLOCKS,
+            voting_period_blocks: DEFAULT_VOTING_PERIOD_BLOCKS,
+            max_designated_operator_check_exemptions: DEFAULT_MAX_DESIGNATED_OPERATOR_CHECK_EXEMPTIONS,
+            under_investigation_threshold: DEFAULT_UNDER_INVESTIGATION_THRESHOLD,
+            max_request_ack_per_turn_timeout: DEFAULT_MAX_REQUEST_ACK_PER_TURN_TIMEOUT,
+            max_clock_drift_ms: DEFAULT_MAX_CLOCK_DRIFT_MS,
+            forfeit_deposit_ratio: DEFAULT_FORFEIT_DEPOSIT_RATIO,
+            challenge_deposit_ratio: DEFAULT_CHALLENGE_DEPOSIT_RATIO,
+            challenge_reward_ratio: DEFAULT_CHALLENGE_REWARD_RATIO,
+            designated_operator_bond_amount: DEFAULT_DESIGNATED_OPERATOR_BOND_AMOUNT,
+            unbonding_period_blocks: DEFAULT_UNBONDING_PERIOD_BLOCKS,
+            key_rotation_delay_blocks: DEFAULT_KEY_ROTATION_DELAY_BLOCKS,
+            archive_retention_blocks: DEFAULT_ARCHIVE_RETENTION_BLOCKS,
+            validator_set_size: DEFAULT_VALIDATOR_SET_SIZE,
+            max_partial_checkin_count: DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
+        }
+    }
+
+    /// 获取指定参数的当前值。
+    #[must_use]
+    pub const fn get(&self, name: ParamName) -> u64 {
+        match name {
+            ParamName::TurnTimeoutBlocks => self.turn_timeout_blocks,
+            ParamName::HandMaxDurationBlocks => self.hand_max_duration_blocks,
+            ParamName::DisputeWindowBlocks => self.dispute_window_blocks,
+            ParamName::DaWindowBlocks => self.da_window_blocks,
+            ParamName::RecoveryWindowBlocks => self.recovery_window_blocks,
+            ParamName::CheckpointIntervalBlocks => self.checkpoint_interval_blocks,
+            ParamName::GameValidatorTimeoutBlocks => self.game_validator_timeout_blocks,
+            ParamName::AckDeadlineBlocks => self.ack_deadline_blocks,
+            ParamName::MaxSkipSegments => self.max_skip_segments,
+            ParamName::MaliciousRefuseThreshold => self.malicious_refuse_threshold,
+            ParamName::MaxIntervalMs => self.max_interval_ms,
+            ParamName::MaxActiveGamesPerPlayer => self.max_active_games_per_player,
+            ParamName::EpochLengthBlocks => self.epoch_length_blocks,
+            ParamName::MaxVertexSize => self.max_vertex_size,
+            ParamName::BlockGasLimit => self.block_gas_limit,
+            ParamName::TxPruneAfterBlocks => self.tx_prune_after_blocks,
+            ParamName::VertexPruneAfterBlocks => self.vertex_prune_after_blocks,
+            ParamName::ArchiveNodeMinCount => self.archive_node_min_count,
+            ParamName::CheckpointMultiReplicaCount => self.checkpoint_multi_replica_count,
+            ParamName::DelegatedEscapeMaxExpiryBlocks => self.delegated_escape_max_expiry_blocks,
+            ParamName::DefenseWindowBlocks => self.defense_window_blocks,
+            ParamName::ParameterDelayBlocks => self.parameter_delay_blocks,
+            ParamName::EpochTransitionWindowBlocks => self.epoch_transition_window_blocks,
+            ParamName::BondingPeriodBlocks => self.bonding_period_blocks,
+            ParamName::SlashPercentage => self.slash_percentage,
+            ParamName::DowntimeSlashPercentage => self.downtime_slash_percentage,
+            ParamName::VerifierStatus => 0, // VerifierStatus 单独存储，不在此处
+            ParamName::DowntimeThresholdBlocks => self.downtime_threshold_blocks,
+            ParamName::VotingPeriodBlocks => self.voting_period_blocks,
+            ParamName::MaxDesignatedOperatorCheckExemptions => {
+                self.max_designated_operator_check_exemptions
+            }
+            ParamName::UnderInvestigationThreshold => self.under_investigation_threshold,
+            ParamName::MaxRequestAckPerTurnTimeout => self.max_request_ack_per_turn_timeout,
+            ParamName::MaxClockDriftMs => self.max_clock_drift_ms,
+            ParamName::ForfeitDepositRatio => self.forfeit_deposit_ratio,
+            ParamName::ChallengeDepositRatio => self.challenge_deposit_ratio,
+            ParamName::ChallengeRewardRatio => self.challenge_reward_ratio,
+            ParamName::DesignatedOperatorBondAmount => self.designated_operator_bond_amount,
+            ParamName::UnbondingPeriodBlocks => self.unbonding_period_blocks,
+            ParamName::KeyRotationDelayBlocks => self.key_rotation_delay_blocks,
+            ParamName::ArchiveRetentionBlocks => self.archive_retention_blocks,
+            ParamName::ValidatorSetSize => self.validator_set_size,
+            ParamName::MaxPartialCheckinCount => self.max_partial_checkin_count,
+        }
+    }
+
+    /// 设置指定参数的值（不校验边界，调用方须先调用 [`validate_param`]）。
+    pub const fn set(&mut self, name: ParamName, value: u64) {
+        match name {
+            ParamName::TurnTimeoutBlocks => self.turn_timeout_blocks = value,
+            ParamName::HandMaxDurationBlocks => self.hand_max_duration_blocks = value,
+            ParamName::DisputeWindowBlocks => self.dispute_window_blocks = value,
+            ParamName::DaWindowBlocks => self.da_window_blocks = value,
+            ParamName::RecoveryWindowBlocks => self.recovery_window_blocks = value,
+            ParamName::CheckpointIntervalBlocks => self.checkpoint_interval_blocks = value,
+            ParamName::GameValidatorTimeoutBlocks => self.game_validator_timeout_blocks = value,
+            ParamName::AckDeadlineBlocks => self.ack_deadline_blocks = value,
+            ParamName::MaxSkipSegments => self.max_skip_segments = value,
+            ParamName::MaliciousRefuseThreshold => self.malicious_refuse_threshold = value,
+            ParamName::MaxIntervalMs => self.max_interval_ms = value,
+            ParamName::MaxActiveGamesPerPlayer => self.max_active_games_per_player = value,
+            ParamName::EpochLengthBlocks => self.epoch_length_blocks = value,
+            ParamName::MaxVertexSize => self.max_vertex_size = value,
+            ParamName::BlockGasLimit => self.block_gas_limit = value,
+            ParamName::TxPruneAfterBlocks => self.tx_prune_after_blocks = value,
+            ParamName::VertexPruneAfterBlocks => self.vertex_prune_after_blocks = value,
+            ParamName::ArchiveNodeMinCount => self.archive_node_min_count = value,
+            ParamName::CheckpointMultiReplicaCount => self.checkpoint_multi_replica_count = value,
+            ParamName::DelegatedEscapeMaxExpiryBlocks => {
+                self.delegated_escape_max_expiry_blocks = value;
+            }
+            ParamName::DefenseWindowBlocks => self.defense_window_blocks = value,
+            ParamName::ParameterDelayBlocks => self.parameter_delay_blocks = value,
+            ParamName::EpochTransitionWindowBlocks => self.epoch_transition_window_blocks = value,
+            ParamName::BondingPeriodBlocks => self.bonding_period_blocks = value,
+            ParamName::SlashPercentage => self.slash_percentage = value,
+            ParamName::DowntimeSlashPercentage => self.downtime_slash_percentage = value,
+            ParamName::VerifierStatus => {
+                // VerifierStatus 单独存储，不应通过此路径设置
+            }
+            ParamName::DowntimeThresholdBlocks => self.downtime_threshold_blocks = value,
+            ParamName::VotingPeriodBlocks => self.voting_period_blocks = value,
+            ParamName::MaxDesignatedOperatorCheckExemptions => {
+                self.max_designated_operator_check_exemptions = value;
+            }
+            ParamName::UnderInvestigationThreshold => self.under_investigation_threshold = value,
+            ParamName::MaxRequestAckPerTurnTimeout => self.max_request_ack_per_turn_timeout = value,
+            ParamName::MaxClockDriftMs => self.max_clock_drift_ms = value,
+            ParamName::ForfeitDepositRatio => self.forfeit_deposit_ratio = value,
+            ParamName::ChallengeDepositRatio => self.challenge_deposit_ratio = value,
+            ParamName::ChallengeRewardRatio => self.challenge_reward_ratio = value,
+            ParamName::DesignatedOperatorBondAmount => self.designated_operator_bond_amount = value,
+            ParamName::UnbondingPeriodBlocks => self.unbonding_period_blocks = value,
+            ParamName::KeyRotationDelayBlocks => self.key_rotation_delay_blocks = value,
+            ParamName::ArchiveRetentionBlocks => self.archive_retention_blocks = value,
+            ParamName::ValidatorSetSize => self.validator_set_size = value,
+            ParamName::MaxPartialCheckinCount => self.max_partial_checkin_count = value,
+        }
+    }
+}
+
+impl Default for GovernanceParams {
+    fn default() -> Self {
+        Self::default_values()
+    }
+}
+
+// ===== 参数边界校验（R4-H4 / R5-H2 / R5-M3 / R7-* 修正） =====
+
+/// 校验参数值是否在边界内。
+///
+/// 返回 `(min, max)` 表示边界；若 `value` 越界返回 `Err(ParamOutOfBounds)`。
+///
+/// # 依赖参数
+///
+/// 部分参数的边界依赖其他参数的当前值：
+/// - `game_validator_timeout_blocks ∈ [1, floor(turn_timeout_blocks / 2)]`（R5-H2）
+/// - `hand_max_duration_blocks ∈ [turn_timeout_blocks*4, 100000]`
+/// - `bonding_period_blocks ∈ [epoch_length_blocks, 10*epoch_length_blocks]`
+/// - `unbonding_period_blocks ∈ [epoch_length_blocks, 10*epoch_length_blocks]`
+///
+/// # VerifierStatus 特殊处理
+///
+/// `verifier_status` 非 u64 数值，而是一个枚举（Stub/Production）。
+/// 此函数对 `VerifierStatus` 返回 `(0, 1)`（0=Stub, 1=Production），
+/// 实际状态切换由 [`GovernanceState::set_verifier_status`] 处理。
+pub const fn validate_param(
+    params: &GovernanceParams,
+    name: ParamName,
+    value: u64,
+) -> PokerL1Result<(u64, u64)> {
+    let (min, max) = match name {
+        ParamName::TurnTimeoutBlocks => (3, 1000),
+        ParamName::HandMaxDurationBlocks => (params.turn_timeout_blocks * 4, 100_000),
+        ParamName::DisputeWindowBlocks => (10, 10_000),
+        ParamName::DaWindowBlocks => (10, 10_000),
+        ParamName::RecoveryWindowBlocks => (10, 10_000),
+        ParamName::CheckpointIntervalBlocks => (1, 1000),
+        ParamName::GameValidatorTimeoutBlocks => (1, params.turn_timeout_blocks / 2),
+        ParamName::AckDeadlineBlocks => (1, 100),
+        ParamName::MaxSkipSegments => (1, 10),
+        ParamName::MaliciousRefuseThreshold => (1, 100),
+        ParamName::MaxIntervalMs => (500, 60_000),
+        ParamName::MaxActiveGamesPerPlayer => (1, 1000),
+        ParamName::EpochLengthBlocks => (100, 10_000),
+        ParamName::MaxVertexSize => (64 * 1024, 4 * 1024 * 1024),
+        ParamName::BlockGasLimit => (10_000_000, 200_000_000),
+        ParamName::TxPruneAfterBlocks => (100, 100_000),
+        ParamName::VertexPruneAfterBlocks => (100, 100_000),
+        ParamName::ArchiveNodeMinCount => (1, 100),
+        ParamName::CheckpointMultiReplicaCount => (3, 15),
+        ParamName::DelegatedEscapeMaxExpiryBlocks => (10, 1000),
+        ParamName::DefenseWindowBlocks => (10, 1000),
+        ParamName::ParameterDelayBlocks => (100, 10_000),
+        ParamName::EpochTransitionWindowBlocks => (1, 100),
+        ParamName::BondingPeriodBlocks => {
+            (params.epoch_length_blocks, params.epoch_length_blocks * 10)
+        }
+        ParamName::SlashPercentage => (1, 100),
+        ParamName::DowntimeSlashPercentage => (1, 100),
+        ParamName::VerifierStatus => (0, 1), // 0=Stub, 1=Production
+        ParamName::DowntimeThresholdBlocks => (10, 10_000),
+        ParamName::VotingPeriodBlocks => (10, 10_000),
+        ParamName::MaxDesignatedOperatorCheckExemptions => (0, 10),
+        ParamName::UnderInvestigationThreshold => (1, 100),
+        ParamName::MaxRequestAckPerTurnTimeout => (1, 100),
+        ParamName::MaxClockDriftMs => (0, 60_000),
+        ParamName::ForfeitDepositRatio => (10, 200),
+        ParamName::ChallengeDepositRatio => (1, 100),
+        ParamName::ChallengeRewardRatio => (10, 100),
+        ParamName::DesignatedOperatorBondAmount => (1, 1_000_000_000),
+        ParamName::UnbondingPeriodBlocks => {
+            (params.epoch_length_blocks, params.epoch_length_blocks * 10)
+        }
+        ParamName::KeyRotationDelayBlocks => (100, 10_000),
+        ParamName::ArchiveRetentionBlocks => (1000, 1_000_000),
+        ParamName::ValidatorSetSize => (5, 1000), // SEC-C2
+        ParamName::MaxPartialCheckinCount => (1, 10), // SEC-H1
+    };
+    if value < min || value > max {
+        return Err(PokerL1Error::ParamOutOfBounds {
+            param: name.as_str(),
+            value,
+            min,
+            max,
+        });
+    }
+    Ok((min, max))
+}
+
+// ===== Quorum 计算（SEC2-M6） =====
+
+/// 计算普通参数（2/3 quorum）所需的赞成票数。
+///
+/// SEC2-M6：分母 = 当前 epoch validator 集大小（含离线）。
+/// 向上取整：`ceil(validator_count * 2 / 3)`。
+#[must_use]
+pub const fn required_yes_votes_normal(validator_count: usize) -> usize {
+    if validator_count == 0 {
+        return 0;
+    }
+    (validator_count * 2).div_ceil(3) // ceil(n * 2 / 3)
+}
+
+/// 计算敏感参数（90% quorum）所需的赞成票数。
+///
+/// SEC2-M6：分母 = 当前 epoch validator 集大小（含离线）。
+/// 向上取整：`ceil(validator_count * 9 / 10)`。
+#[must_use]
+pub const fn required_yes_votes_sensitive(validator_count: usize) -> usize {
+    if validator_count == 0 {
+        return 0;
+    }
+    (validator_count * 9).div_ceil(10) // ceil(n * 9 / 10)
+}
+
+/// 计算投票参与率下限（SEC2-M6：普通 2/3，敏感 90%）。
+#[must_use]
+pub const fn required_participation(is_sensitive: bool, validator_count: usize) -> usize {
+    if is_sensitive {
+        required_yes_votes_sensitive(validator_count)
+    } else {
+        required_yes_votes_normal(validator_count)
+    }
+}
+
+/// 计算撤销提案所需赞成票数（SEC-H8：≥90%）。
+#[must_use]
+pub const fn required_revocation_votes(validator_count: usize) -> usize {
+    required_yes_votes_sensitive(validator_count)
+}
+
+// ===== 提案类型 =====
+
+/// 提案类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalKind {
+    /// 参数调整提案（SubTask 33.1）。
+    ParameterChange {
+        /// 目标参数名。
+        param: ParamName,
+        /// 提议新值。
+        new_value: u64,
+        /// 目标 chain_id（SEC-M4：verifier_status per-chain_id）。
+        target_chain_id: ChainId,
+    },
+    /// Validator 集更新提案（SubTask 33.5）。
+    ValidatorSetUpdate {
+        /// 加入的 validator（pubkey + vrf_pubkey + stake）。
+        additions: Vec<ValidatorAddition>,
+        /// 踢出的 validator pubkey。
+        removals: Vec<TaggedPubkey>,
+        /// 生效 epoch。
+        effective_epoch: Epoch,
+    },
+    /// 密钥轮换提案（R5-L5）。
+    KeyRotation {
+        /// 旧 pubkey。
+        old_pubkey: TaggedPubkey,
+        /// 新 pubkey。
+        new_pubkey: TaggedPubkey,
+        /// timelock 结束 height。
+        effective_height: BlockHeight,
+    },
+    /// Timelock 撤销提案（SEC-H8）。
+    TimelockRevocation {
+        /// 被撤销的原提案 ID。
+        original_proposal_id: u64,
+    },
+}
+
+/// Validator 加入提案的参数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatorAddition {
+    /// 新 validator 的 tagged pubkey。
+    pub pubkey: TaggedPubkey,
+    /// 质押金额。
+    pub stake: u64,
+}
+
+// ===== 提案状态 =====
+
+/// 提案状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalStatus {
+    /// 投票中。
+    Voting,
+    /// 投票通过，等待 timelock 结束（普通参数）。
+    Timelock,
+    /// 投票通过且无 timelock，待执行（validator 集更新 / 密钥轮换 / 撤销提案）。
+    Passed,
+    /// 已执行。
+    Executed,
+    /// 投票未通过（赞成不足 / 参与率不足）。
+    Rejected,
+    /// timelock 内被撤销（SEC-H8）。
+    Revoked,
+}
+
+// ===== 提案 =====
+
+/// 治理提案。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Proposal {
+    /// 提案 ID（全局唯一，单调递增）。
+    pub id: u64,
+    /// 提案类型。
+    pub kind: ProposalKind,
+    /// 提案者（validator pubkey）。
+    pub proposer: TaggedPubkey,
+    /// 提案提交时的 block height。
+    pub submit_height: BlockHeight,
+    /// 投票期结束 height（= submit_height + voting_period_blocks）。
+    pub voting_end_height: BlockHeight,
+    /// 赞成票（validator pubkey 集合）。
+    pub yes_votes: Vec<TaggedPubkey>,
+    /// 反对票（validator pubkey 集合）。
+    pub no_votes: Vec<TaggedPubkey>,
+    /// 当前状态。
+    pub status: ProposalStatus,
+    /// timelock 结束 height（Passed/Timelock 状态下有意义）。
+    pub timelock_end_height: Option<BlockHeight>,
+}
+
+impl Proposal {
+    /// 总投票数（赞成 + 反对）。
+    #[must_use]
+    pub const fn total_votes(&self) -> usize {
+        self.yes_votes.len() + self.no_votes.len()
+    }
+
+    /// 是否已投票。
+    #[must_use]
+    pub fn has_voted(&self, validator: &TaggedPubkey) -> bool {
+        self.yes_votes.contains(validator) || self.no_votes.contains(validator)
+    }
+}
+
+// ===== GovernanceState =====
+
+/// 治理状态（全局唯一）。
+///
+/// 管理所有提案 + 参数 + verifier_status（per-chain_id）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernanceState {
+    /// 当前参数集。
+    pub params: GovernanceParams,
+    /// 所有提案（按 ID 索引）。
+    pub proposals: BTreeMap<u64, Proposal>,
+    /// 下一个提案 ID。
+    pub next_proposal_id: u64,
+    /// verifier_status per chain_id（SEC-M4）。
+    pub verifier_statuses: BTreeMap<ChainId, VerifierStatus>,
+    /// 已消费的 bridge nonce（防重放，跨链桥模块共享此状态）。
+    pub consumed_bridges: BTreeMap<ChainId, u64>,
+}
+
+impl GovernanceState {
+    /// 创建默认治理状态（所有参数取默认值，verifier_status 全部为 Stub）。
+    #[must_use]
+    pub fn new() -> Self {
+        let mut verifier_statuses = BTreeMap::new();
+        // SEC-M4：mainnet chain_id 初始为 Stub
+        verifier_statuses.insert(crate::DEFAULT_CHAIN_ID, VerifierStatus::Stub);
+        Self {
+            params: GovernanceParams::default_values(),
+            proposals: BTreeMap::new(),
+            next_proposal_id: 1,
+            verifier_statuses,
+            consumed_bridges: BTreeMap::new(),
+        }
+    }
+
+    /// 获取指定 chain_id 的 verifier_status（SEC-M4）。
+    #[must_use]
+    pub fn verifier_status(&self, chain_id: ChainId) -> VerifierStatus {
+        self.verifier_statuses
+            .get(&chain_id)
+            .copied()
+            .unwrap_or(VerifierStatus::Stub)
+    }
+
+    /// 设置指定 chain_id 的 verifier_status（SEC-M4）。
+    ///
+    /// 仅由治理提案执行路径调用，不直接暴露给合约。
+    pub fn set_verifier_status(&mut self, chain_id: ChainId, status: VerifierStatus) {
+        self.verifier_statuses.insert(chain_id, status);
+    }
+
+    /// 校验 OffChain checkout 是否被允许（NEW-C1）。
+    ///
+    /// 主网 chain_id + verifier_status=Stub → 拒绝（返回 `OffChainDisabledOnMainnet`）。
+    /// testnet/devnet 不受限制。
+    #[must_use]
+    pub fn is_offchain_checkout_allowed(&self, chain_id: ChainId) -> bool {
+        if chain_id == crate::DEFAULT_CHAIN_ID {
+            // 主网：须 Production
+            self.verifier_status(chain_id) == VerifierStatus::Production
+        } else {
+            // testnet/devnet：不受限制
+            true
+        }
+    }
+
+    /// 创建参数调整提案（SubTask 33.1）。
+    ///
+    /// 校验：
+    /// 1. 参数边界（`validate_param`）
+    /// 2. chain_id 与网络一致（SEC-M4，仅 verifier_status 提案需要）
+    ///
+    /// # 参数
+    /// - `param`：目标参数
+    /// - `new_value`：提议新值
+    /// - `target_chain_id`：目标 chain_id（verifier_status 提案用，其他参数忽略）
+    /// - `proposer`：提案者
+    /// - `current_height`：当前 block height
+    /// - `network_chain_id`：网络 chain_id（校验用）
+    pub fn create_parameter_proposal(
+        &mut self,
+        param: ParamName,
+        new_value: u64,
+        target_chain_id: ChainId,
+        proposer: TaggedPubkey,
+        current_height: BlockHeight,
+        network_chain_id: ChainId,
+    ) -> PokerL1Result<u64> {
+        // SEC-M4：verifier_status 提案须校验 chain_id == network_chain_id
+        if param == ParamName::VerifierStatus && target_chain_id != network_chain_id {
+            return Err(PokerL1Error::ProposalChainIdMismatch {
+                proposal: target_chain_id,
+                network: network_chain_id,
+            });
+        }
+
+        // 校验参数边界
+        validate_param(&self.params, param, new_value)?;
+
+        let voting_period = self.params.voting_period_blocks;
+        let proposal_id = self.next_proposal_id;
+        self.next_proposal_id += 1;
+
+        let proposal = Proposal {
+            id: proposal_id,
+            kind: ProposalKind::ParameterChange {
+                param,
+                new_value,
+                target_chain_id,
+            },
+            proposer,
+            submit_height: current_height,
+            voting_end_height: current_height + voting_period,
+            yes_votes: vec![],
+            no_votes: vec![],
+            status: ProposalStatus::Voting,
+            timelock_end_height: None,
+        };
+
+        self.proposals.insert(proposal_id, proposal);
+        Ok(proposal_id)
+    }
+
+    /// 创建 validator 集更新提案（SubTask 33.5）。
+    ///
+    /// 校验：
+    /// 1. SEC-C2：新 validator 集大小 >= 5
+    /// 2. SEC-M2：单次缩减比例 <= 20%
+    ///
+    /// # 参数
+    /// - `current_set`：当前 validator 集（用于校验缩减比例）
+    /// - `additions`：加入的 validator 列表
+    /// - `removals`：踢出的 validator pubkey 列表
+    /// - `effective_epoch`：生效 epoch
+    /// - `proposer`：提案者
+    /// - `current_height`：当前 block height
+    pub fn create_validator_set_update_proposal(
+        &mut self,
+        current_set: &ValidatorSet,
+        additions: Vec<ValidatorAddition>,
+        removals: Vec<TaggedPubkey>,
+        effective_epoch: Epoch,
+        proposer: TaggedPubkey,
+        current_height: BlockHeight,
+    ) -> PokerL1Result<u64> {
+        let prev_size = current_set.validators.len();
+        let new_size = prev_size + additions.len() - removals.len();
+
+        // SEC-C2：新 validator 集大小 >= 5
+        if new_size < 5 {
+            return Err(PokerL1Error::ValidatorSetReductionTooSmall { new_size });
+        }
+
+        // SEC-M2：单次缩减比例 <= 20%
+        if !removals.is_empty() {
+            let max_removals = prev_size * 20 / 100; // 20%
+            if removals.len() > max_removals.max(1) {
+                return Err(PokerL1Error::SingleReductionRatioExceeded {
+                    removed: removals.len(),
+                    prev_size,
+                });
+            }
+        }
+
+        let voting_period = self.params.voting_period_blocks;
+        let proposal_id = self.next_proposal_id;
+        self.next_proposal_id += 1;
+
+        let proposal = Proposal {
+            id: proposal_id,
+            kind: ProposalKind::ValidatorSetUpdate {
+                additions,
+                removals,
+                effective_epoch,
+            },
+            proposer,
+            submit_height: current_height,
+            voting_end_height: current_height + voting_period,
+            yes_votes: vec![],
+            no_votes: vec![],
+            status: ProposalStatus::Voting,
+            timelock_end_height: None,
+        };
+
+        self.proposals.insert(proposal_id, proposal);
+        Ok(proposal_id)
+    }
+
+    /// 创建密钥轮换提案（R5-L5 / SEC2-H4）。
+    ///
+    /// timelock = `key_rotation_delay_blocks`，期间旧密钥仍可用于 slashing 证据。
+    pub fn create_key_rotation_proposal(
+        &mut self,
+        old_pubkey: TaggedPubkey,
+        new_pubkey: TaggedPubkey,
+        proposer: TaggedPubkey,
+        current_height: BlockHeight,
+    ) -> PokerL1Result<u64> {
+        let voting_period = self.params.voting_period_blocks;
+        let proposal_id = self.next_proposal_id;
+        self.next_proposal_id += 1;
+
+        let proposal = Proposal {
+            id: proposal_id,
+            kind: ProposalKind::KeyRotation {
+                old_pubkey,
+                new_pubkey,
+                effective_height: current_height + voting_period + self.params.key_rotation_delay_blocks,
+            },
+            proposer,
+            submit_height: current_height,
+            voting_end_height: current_height + voting_period,
+            yes_votes: vec![],
+            no_votes: vec![],
+            status: ProposalStatus::Voting,
+            timelock_end_height: None,
+        };
+
+        self.proposals.insert(proposal_id, proposal);
+        Ok(proposal_id)
+    }
+
+    /// 创建 timelock 撤销提案（SEC-H8）。
+    ///
+    /// 撤销提案无 timelock，通过后立即生效。
+    pub fn create_revocation_proposal(
+        &mut self,
+        original_proposal_id: u64,
+        proposer: TaggedPubkey,
+        current_height: BlockHeight,
+    ) -> PokerL1Result<u64> {
+        // 校验原提案存在且在 timelock 期
+        let original = self
+            .proposals
+            .get(&original_proposal_id)
+            .ok_or_else(|| PokerL1Error::Other(format!("original proposal {original_proposal_id} not found")))?;
+        if original.status != ProposalStatus::Timelock {
+            return Err(PokerL1Error::ProposalNotInTimelock(original.status));
+        }
+
+        let voting_period = self.params.voting_period_blocks;
+        let proposal_id = self.next_proposal_id;
+        self.next_proposal_id += 1;
+
+        let proposal = Proposal {
+            id: proposal_id,
+            kind: ProposalKind::TimelockRevocation {
+                original_proposal_id,
+            },
+            proposer,
+            submit_height: current_height,
+            voting_end_height: current_height + voting_period,
+            yes_votes: vec![],
+            no_votes: vec![],
+            status: ProposalStatus::Voting,
+            timelock_end_height: None,
+        };
+
+        self.proposals.insert(proposal_id, proposal);
+        Ok(proposal_id)
+    }
+
+    /// 投票（赞成或反对）。
+    ///
+    /// # 参数
+    /// - `proposal_id`：提案 ID
+    /// - `voter`：投票 validator pubkey
+    /// - `approve`：true=赞成，false=反对
+    /// - `current_height`：当前 block height
+    pub fn vote(
+        &mut self,
+        proposal_id: u64,
+        voter: TaggedPubkey,
+        approve: bool,
+        current_height: BlockHeight,
+    ) -> PokerL1Result<()> {
+        let proposal = self
+            .proposals
+            .get_mut(&proposal_id)
+            .ok_or_else(|| PokerL1Error::Other(format!("proposal {proposal_id} not found")))?;
+
+        // 校验投票期
+        if proposal.status != ProposalStatus::Voting {
+            return Err(PokerL1Error::ProposalNotInVoting(proposal.status));
+        }
+        if current_height > proposal.voting_end_height {
+            return Err(PokerL1Error::ProposalNotInVoting(proposal.status));
+        }
+
+        // 校验未重复投票
+        if proposal.has_voted(&voter) {
+            return Err(PokerL1Error::DuplicateVote(voter));
+        }
+
+        if approve {
+            proposal.yes_votes.push(voter);
+        } else {
+            proposal.no_votes.push(voter);
+        }
+        Ok(())
+    }
+
+    /// 结束投票期，判定提案是否通过（SubTask 33.2 + SEC2-M6）。
+    ///
+    /// # 判定逻辑
+    /// 1. quorum 分母 = validator_count（含离线）
+    /// 2. 参与率下限：普通 2/3，敏感 90%
+    /// 3. 赞成票下限：普通 2/3，敏感 90%
+    /// 4. 撤销提案：90% quorum（SEC-H8）
+    /// 5. validator 集更新 / 密钥轮换：通过后直接 Passed（无 timelock）
+    /// 6. 参数调整：通过后进入 Timelock（parameter_delay_blocks）
+    /// 7. 撤销提案：通过后立即撤销原提案（无 timelock）
+    ///
+    /// # 参数
+    /// - `proposal_id`：提案 ID
+    /// - `validator_count`：当前 epoch validator 集大小（含离线）
+    /// - `current_height`：当前 block height
+    pub fn finalize_voting(
+        &mut self,
+        proposal_id: u64,
+        validator_count: usize,
+        current_height: BlockHeight,
+    ) -> PokerL1Result<ProposalStatus> {
+        let proposal = self
+            .proposals
+            .get_mut(&proposal_id)
+            .ok_or_else(|| PokerL1Error::Other(format!("proposal {proposal_id} not found")))?;
+
+        // 校验投票期已结束
+        if proposal.status != ProposalStatus::Voting {
+            return Err(PokerL1Error::ProposalNotInVoting(proposal.status));
+        }
+        if current_height < proposal.voting_end_height {
+            return Err(PokerL1Error::ProposalNotInVoting(proposal.status));
+        }
+
+        // 判断是否为敏感提案
+        let is_sensitive = match &proposal.kind {
+            ProposalKind::ParameterChange { param, .. } => param.is_sensitive(),
+            ProposalKind::ValidatorSetUpdate { .. } => true, // validator 集更新始终 90%
+            ProposalKind::KeyRotation { .. } => true,        // 密钥轮换始终 90%
+            ProposalKind::TimelockRevocation { .. } => true, // 撤销提案 90%（SEC-H8）
+        };
+
+        // SEC2-M6：参与率下限
+        let required_participation = required_participation(is_sensitive, validator_count);
+        if proposal.total_votes() < required_participation {
+            proposal.status = ProposalStatus::Rejected;
+            return Ok(ProposalStatus::Rejected);
+        }
+
+        // 赞成票下限
+        let required_yes = if is_sensitive {
+            required_yes_votes_sensitive(validator_count)
+        } else {
+            required_yes_votes_normal(validator_count)
+        };
+        if proposal.yes_votes.len() < required_yes {
+            proposal.status = ProposalStatus::Rejected;
+            return Ok(ProposalStatus::Rejected);
+        }
+
+        // 通过：根据提案类型决定后续状态
+        match &proposal.kind {
+            ProposalKind::ParameterChange { .. } => {
+                // 参数调整：进入 timelock
+                let timelock_end = current_height + self.params.parameter_delay_blocks;
+                proposal.timelock_end_height = Some(timelock_end);
+                proposal.status = ProposalStatus::Timelock;
+                Ok(ProposalStatus::Timelock)
+            }
+            ProposalKind::ValidatorSetUpdate { .. } | ProposalKind::KeyRotation { .. } => {
+                // validator 集更新 / 密钥轮换：直接 Passed（epoch 边界生效）
+                proposal.status = ProposalStatus::Passed;
+                Ok(ProposalStatus::Passed)
+            }
+            ProposalKind::TimelockRevocation { original_proposal_id } => {
+                // 撤销提案：立即撤销原提案（无 timelock）
+                let orig_id = *original_proposal_id;
+                proposal.status = ProposalStatus::Passed;
+                // 撤销原提案
+                if let Some(orig) = self.proposals.get_mut(&orig_id) {
+                    orig.status = ProposalStatus::Revoked;
+                }
+                Ok(ProposalStatus::Passed)
+            }
+        }
+    }
+
+    /// 执行已通过 timelock 的提案（SubTask 33.2）。
+    ///
+    /// # 参数调整提案
+    /// - timelock 结束后可执行
+    /// - 执行后参数生效
+    ///
+    /// # validator 集更新 / 密钥轮换
+    /// - Passed 状态即可执行（epoch 边界 / timelock 结束）
+    pub fn execute_proposal(
+        &mut self,
+        proposal_id: u64,
+        current_height: BlockHeight,
+    ) -> PokerL1Result<()> {
+        // 先提取提案信息（避免持有可变 borrow 时调用 self 方法）
+        let (status, kind) = {
+            let proposal = self
+                .proposals
+                .get(&proposal_id)
+                .ok_or_else(|| PokerL1Error::Other(format!("proposal {proposal_id} not found")))?;
+            (proposal.status, proposal.kind.clone())
+        };
+
+        // 校验状态
+        match status {
+            ProposalStatus::Timelock => {
+                // 校验 timelock 已结束
+                if let Some(end) = self.proposals[&proposal_id].timelock_end_height
+                    && current_height < end
+                {
+                    return Err(PokerL1Error::Other(format!(
+                        "timelock not expired: remaining={}",
+                        end - current_height
+                    )));
+                }
+            }
+            ProposalStatus::Passed => {
+                // validator 集更新 / 密钥轮换 / 撤销提案：直接执行
+            }
+            ProposalStatus::Voting | ProposalStatus::Rejected | ProposalStatus::Executed | ProposalStatus::Revoked => {
+                return Err(PokerL1Error::ProposalNotInTimelock(status));
+            }
+        }
+
+        // 执行参数调整（已释放 borrow，可安全调用 self 方法）
+        match kind {
+            ProposalKind::ParameterChange {
+                param,
+                new_value,
+                target_chain_id,
+            } => {
+                if param == ParamName::VerifierStatus {
+                    // SEC-M4：verifier_status per-chain_id
+                    let verifier_status = if new_value == 1 {
+                        VerifierStatus::Production
+                    } else {
+                        VerifierStatus::Stub
+                    };
+                    self.set_verifier_status(target_chain_id, verifier_status);
+                } else {
+                    self.params.set(param, new_value);
+                }
+            }
+            ProposalKind::ValidatorSetUpdate { .. } | ProposalKind::KeyRotation { .. } => {
+                // 实际 validator 集更新由 consensus 模块在 epoch 边界应用
+                // 此处仅标记提案已执行
+            }
+            ProposalKind::TimelockRevocation { .. } => {
+                // 原提案已在 finalize_voting 中被撤销，此处仅标记撤销提案已执行
+            }
+        }
+
+        // 标记提案已执行
+        self.proposals.get_mut(&proposal_id).expect("proposal exists").status = ProposalStatus::Executed;
+        Ok(())
+    }
+
+    /// 检查 timelock 内是否有撤销提案（SEC-H8）。
+    ///
+    /// 返回 true 表示原提案已被撤销，不可执行。
+    #[must_use]
+    pub fn is_proposal_revoked(&self, proposal_id: u64) -> bool {
+        self.proposals
+            .get(&proposal_id)
+            .is_some_and(|p| p.status == ProposalStatus::Revoked)
+    }
+
+    /// 检测投票期 DDoS（SEC2-M6：离线率 > 30%）。
+    ///
+    /// 返回 true 表示应延长投票期。
+    ///
+    /// # 参数
+    /// - `proposal_id`：提案 ID
+    /// - `validator_count`：当前 epoch validator 集大小
+    #[must_use]
+    pub fn detect_voting_ddos(&self, proposal_id: u64, validator_count: usize) -> bool {
+        let Some(proposal) = self.proposals.get(&proposal_id) else {
+            return false;
+        };
+        if proposal.status != ProposalStatus::Voting {
+            return false;
+        }
+        let participation = proposal.total_votes();
+        let offline = validator_count.saturating_sub(participation);
+        validator_count > 0 && offline * 100 / validator_count > 30
+    }
+}
+
+impl Default for GovernanceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signature::{SignatureScheme, CURRENT_VERSION};
+
+    fn make_pubkey(byte: u8) -> TaggedPubkey {
+        let mut raw = vec![byte];
+        raw.extend_from_slice(&[0x02u8; 32]);
+        TaggedPubkey::new(SignatureScheme::Secp256k1, CURRENT_VERSION, raw).unwrap()
+    }
+
+    fn make_pubkeys(count: usize) -> Vec<TaggedPubkey> {
+        (0..count).map(|i| make_pubkey(0x10 + i as u8)).collect()
+    }
+
+    // ===== ParamName 测试 =====
+
+    #[test]
+    fn test_param_name_as_str() {
+        assert_eq!(ParamName::TurnTimeoutBlocks.as_str(), "turn_timeout_blocks");
+        assert_eq!(ParamName::VerifierStatus.as_str(), "verifier_status");
+        assert_eq!(ParamName::ValidatorSetSize.as_str(), "validator_set_size");
+    }
+
+    #[test]
+    fn test_is_sensitive_param_r3_h1() {
+        // R3-H1：8 项敏感参数
+        assert!(ParamName::BlockGasLimit.is_sensitive());
+        assert!(ParamName::EpochLengthBlocks.is_sensitive());
+        assert!(ParamName::SlashPercentage.is_sensitive());
+        assert!(ParamName::DowntimeSlashPercentage.is_sensitive());
+        assert!(ParamName::VerifierStatus.is_sensitive());
+        assert!(ParamName::ParameterDelayBlocks.is_sensitive());
+        assert!(ParamName::DefenseWindowBlocks.is_sensitive());
+    }
+
+    #[test]
+    fn test_is_sensitive_param_sec_h4() {
+        // SEC-H4：补全 9 项
+        assert!(ParamName::BondingPeriodBlocks.is_sensitive());
+        assert!(ParamName::UnbondingPeriodBlocks.is_sensitive());
+        assert!(ParamName::KeyRotationDelayBlocks.is_sensitive());
+        assert!(ParamName::CheckpointMultiReplicaCount.is_sensitive());
+        assert!(ParamName::ArchiveRetentionBlocks.is_sensitive());
+        assert!(ParamName::MaxSkipSegments.is_sensitive());
+        assert!(ParamName::TurnTimeoutBlocks.is_sensitive());
+        assert!(ParamName::MaliciousRefuseThreshold.is_sensitive());
+        assert!(ParamName::MaxRequestAckPerTurnTimeout.is_sensitive());
+    }
+
+    #[test]
+    fn test_is_sensitive_param_sec_c2() {
+        // SEC-C2：validator_set_size
+        assert!(ParamName::ValidatorSetSize.is_sensitive());
+    }
+
+    #[test]
+    fn test_non_sensitive_params() {
+        // TurnTimeoutBlocks 是敏感参数（SEC-H4），不在此测试中
+        assert!(!ParamName::AckDeadlineBlocks.is_sensitive());
+        assert!(!ParamName::MaxActiveGamesPerPlayer.is_sensitive());
+        assert!(!ParamName::ArchiveNodeMinCount.is_sensitive());
+        assert!(!ParamName::CheckpointIntervalBlocks.is_sensitive());
+        assert!(!ParamName::RecoveryWindowBlocks.is_sensitive());
+        assert!(!ParamName::DaWindowBlocks.is_sensitive());
+        assert!(!ParamName::DisputeWindowBlocks.is_sensitive());
+        assert!(!ParamName::HandMaxDurationBlocks.is_sensitive());
+        assert!(!ParamName::GameValidatorTimeoutBlocks.is_sensitive());
+        assert!(!ParamName::MaxIntervalMs.is_sensitive());
+        assert!(!ParamName::TxPruneAfterBlocks.is_sensitive());
+        assert!(!ParamName::VertexPruneAfterBlocks.is_sensitive());
+        assert!(!ParamName::DelegatedEscapeMaxExpiryBlocks.is_sensitive());
+        assert!(!ParamName::EpochTransitionWindowBlocks.is_sensitive());
+        assert!(!ParamName::DowntimeThresholdBlocks.is_sensitive());
+        assert!(!ParamName::VotingPeriodBlocks.is_sensitive());
+        assert!(!ParamName::MaxDesignatedOperatorCheckExemptions.is_sensitive());
+        assert!(!ParamName::UnderInvestigationThreshold.is_sensitive());
+        assert!(!ParamName::MaxClockDriftMs.is_sensitive());
+        assert!(!ParamName::ForfeitDepositRatio.is_sensitive());
+        assert!(!ParamName::ChallengeDepositRatio.is_sensitive());
+        assert!(!ParamName::ChallengeRewardRatio.is_sensitive());
+        assert!(!ParamName::DesignatedOperatorBondAmount.is_sensitive());
+        assert!(!ParamName::MaxPartialCheckinCount.is_sensitive());
+    }
+
+    // ===== GovernanceParams 测试 =====
+
+    #[test]
+    fn test_default_params() {
+        let params = GovernanceParams::default_values();
+        assert_eq!(params.turn_timeout_blocks, DEFAULT_TURN_TIMEOUT_BLOCKS);
+        assert_eq!(params.parameter_delay_blocks, DEFAULT_PARAMETER_DELAY_BLOCKS);
+        assert_eq!(params.epoch_length_blocks, DEFAULT_EPOCH_LENGTH_BLOCKS);
+        assert_eq!(params.validator_set_size, DEFAULT_VALIDATOR_SET_SIZE);
+        assert_eq!(params.max_partial_checkin_count, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT);
+    }
+
+    #[test]
+    fn test_params_get_set() {
+        let mut params = GovernanceParams::default_values();
+        assert_eq!(params.get(ParamName::TurnTimeoutBlocks), DEFAULT_TURN_TIMEOUT_BLOCKS);
+        params.set(ParamName::TurnTimeoutBlocks, 100);
+        assert_eq!(params.get(ParamName::TurnTimeoutBlocks), 100);
+    }
+
+    // ===== validate_param 测试 =====
+
+    #[test]
+    fn test_validate_param_in_bounds() {
+        let params = GovernanceParams::default_values();
+        assert!(validate_param(&params, ParamName::TurnTimeoutBlocks, 30).is_ok());
+        assert!(validate_param(&params, ParamName::TurnTimeoutBlocks, 3).is_ok());
+        assert!(validate_param(&params, ParamName::TurnTimeoutBlocks, 1000).is_ok());
+    }
+
+    #[test]
+    fn test_validate_param_out_of_bounds() {
+        let params = GovernanceParams::default_values();
+        assert!(validate_param(&params, ParamName::TurnTimeoutBlocks, 2).is_err());
+        assert!(validate_param(&params, ParamName::TurnTimeoutBlocks, 1001).is_err());
+        assert!(validate_param(&params, ParamName::SlashPercentage, 0).is_err());
+        assert!(validate_param(&params, ParamName::SlashPercentage, 101).is_err());
+        assert!(validate_param(&params, ParamName::ValidatorSetSize, 4).is_err());
+        assert!(validate_param(&params, ParamName::ValidatorSetSize, 1001).is_err());
+    }
+
+    #[test]
+    fn test_validate_param_dependency() {
+        // game_validator_timeout_blocks ∈ [1, floor(turn_timeout_blocks / 2)]
+        let mut params = GovernanceParams::default_values();
+        params.turn_timeout_blocks = 30;
+        assert!(validate_param(&params, ParamName::GameValidatorTimeoutBlocks, 15).is_ok());
+        assert!(validate_param(&params, ParamName::GameValidatorTimeoutBlocks, 16).is_err());
+
+        // 修改 turn_timeout_blocks 后边界变化
+        params.turn_timeout_blocks = 100;
+        assert!(validate_param(&params, ParamName::GameValidatorTimeoutBlocks, 50).is_ok());
+        assert!(validate_param(&params, ParamName::GameValidatorTimeoutBlocks, 51).is_err());
+    }
+
+    #[test]
+    fn test_validate_param_bonding_period() {
+        // bonding_period_blocks ∈ [epoch_length_blocks, 10*epoch_length_blocks]
+        let mut params = GovernanceParams::default_values();
+        params.epoch_length_blocks = 1000;
+        assert!(validate_param(&params, ParamName::BondingPeriodBlocks, 1000).is_ok());
+        assert!(validate_param(&params, ParamName::BondingPeriodBlocks, 10_000).is_ok());
+        assert!(validate_param(&params, ParamName::BondingPeriodBlocks, 999).is_err());
+        assert!(validate_param(&params, ParamName::BondingPeriodBlocks, 10_001).is_err());
+    }
+
+    // ===== Quorum 计算测试 =====
+
+    #[test]
+    fn test_required_yes_votes_normal() {
+        // 2/3 quorum，向上取整
+        assert_eq!(required_yes_votes_normal(3), 2);
+        assert_eq!(required_yes_votes_normal(5), 4); // ceil(5*2/3) = ceil(3.33) = 4
+        assert_eq!(required_yes_votes_normal(10), 7); // ceil(10*2/3) = ceil(6.67) = 7
+        assert_eq!(required_yes_votes_normal(0), 0);
+    }
+
+    #[test]
+    fn test_required_yes_votes_sensitive() {
+        // 90% quorum，向上取整
+        assert_eq!(required_yes_votes_sensitive(5), 5); // ceil(5*0.9) = 5
+        assert_eq!(required_yes_votes_sensitive(10), 9); // ceil(10*0.9) = 9
+        assert_eq!(required_yes_votes_sensitive(100), 90);
+        assert_eq!(required_yes_votes_sensitive(0), 0);
+    }
+
+    #[test]
+    fn test_required_participation() {
+        assert_eq!(required_participation(false, 10), 7); // 普通 2/3
+        assert_eq!(required_participation(true, 10), 9); // 敏感 90%
+    }
+
+    #[test]
+    fn test_required_revocation_votes() {
+        // SEC-H8：撤销 90%
+        assert_eq!(required_revocation_votes(10), 9);
+    }
+
+    // ===== GovernanceState 测试 =====
+
+    #[test]
+    fn test_governance_state_new() {
+        let state = GovernanceState::new();
+        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+        assert_eq!(state.next_proposal_id, 1);
+        assert!(state.proposals.is_empty());
+    }
+
+    #[test]
+    fn test_verifier_status_per_chain_id() {
+        let mut state = GovernanceState::new();
+        // 默认 mainnet = Stub
+        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+        // testnet 初始也 = Stub
+        assert_eq!(state.verifier_status(0x1234), VerifierStatus::Stub);
+        // 设置 testnet = Production
+        state.set_verifier_status(0x1234, VerifierStatus::Production);
+        assert_eq!(state.verifier_status(0x1234), VerifierStatus::Production);
+        // mainnet 不受影响（SEC-M4 命名空间隔离）
+        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+    }
+
+    #[test]
+    fn test_offchain_checkout_allowed() {
+        let mut state = GovernanceState::new();
+        // mainnet + Stub → 拒绝
+        assert!(!state.is_offchain_checkout_allowed(crate::DEFAULT_CHAIN_ID));
+        // mainnet + Production → 允许
+        state.set_verifier_status(crate::DEFAULT_CHAIN_ID, VerifierStatus::Production);
+        assert!(state.is_offchain_checkout_allowed(crate::DEFAULT_CHAIN_ID));
+        // testnet 始终允许
+        assert!(state.is_offchain_checkout_allowed(0x1234));
+    }
+
+    // ===== 提案创建测试 =====
+
+    #[test]
+    fn test_create_parameter_proposal() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let id = state
+            .create_parameter_proposal(
+                ParamName::TurnTimeoutBlocks,
+                50,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(state.next_proposal_id, 2);
+        let proposal = &state.proposals[&id];
+        assert_eq!(proposal.status, ProposalStatus::Voting);
+        assert_eq!(proposal.submit_height, 100);
+        assert_eq!(proposal.voting_end_height, 100 + DEFAULT_VOTING_PERIOD_BLOCKS);
+    }
+
+    #[test]
+    fn test_create_parameter_proposal_out_of_bounds() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        // turn_timeout_blocks = 2 < 3 → 拒绝
+        let result = state.create_parameter_proposal(
+            ParamName::TurnTimeoutBlocks,
+            2,
+            crate::DEFAULT_CHAIN_ID,
+            proposer,
+            100,
+            crate::DEFAULT_CHAIN_ID,
+        );
+        assert!(matches!(result, Err(PokerL1Error::ParamOutOfBounds { .. })));
+    }
+
+    #[test]
+    fn test_create_verifier_status_proposal_chain_id_mismatch() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        // SEC-M4：verifier_status 提案 chain_id 须与网络一致
+        let result = state.create_parameter_proposal(
+            ParamName::VerifierStatus,
+            1,
+            0x9999, // 错误 chain_id
+            proposer,
+            100,
+            crate::DEFAULT_CHAIN_ID,
+        );
+        assert!(matches!(result, Err(PokerL1Error::ProposalChainIdMismatch { .. })));
+    }
+
+    #[test]
+    fn test_create_validator_set_update_proposal() {
+        use crate::consensus::validator_set::{ValidatorEntry, ValidatorSet, ValidatorStatus, VRF_PUBKEY_SIZE};
+        use crate::consensus::validator_set::compute_genesis_chain_randomness;
+
+        let validators: Vec<ValidatorEntry> = (0..10)
+            .map(|i| {
+                let mut v = ValidatorEntry::new(make_pubkey(0x10 + i as u8), [0u8; VRF_PUBKEY_SIZE], 1_000_000, 0);
+                v.status = ValidatorStatus::Active;
+                v
+            })
+            .collect();
+        let genesis_randomness = compute_genesis_chain_randomness(&validators);
+        let mut set = ValidatorSet {
+            epoch: 1,
+            validators,
+            validator_set_hash: [0u8; 32],
+            epoch_randomness: [0u8; 32],
+            prev_epoch_randomness: [0u8; 32],
+            genesis_chain_randomness: genesis_randomness,
+        };
+        set.validator_set_hash = set.compute_hash();
+
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+
+        // 加入 1 个 validator
+        let addition = ValidatorAddition {
+            pubkey: make_pubkey(0x20),
+            stake: 1_000_000,
+        };
+        let id = state
+            .create_validator_set_update_proposal(
+                &set,
+                vec![addition],
+                vec![],
+                2,
+                proposer,
+                100,
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn test_validator_set_update_reject_below_min() {
+        use crate::consensus::validator_set::{ValidatorEntry, ValidatorSet, ValidatorStatus, VRF_PUBKEY_SIZE};
+        use crate::consensus::validator_set::compute_genesis_chain_randomness;
+
+        let validators: Vec<ValidatorEntry> = (0..5)
+            .map(|i| {
+                let mut v = ValidatorEntry::new(make_pubkey(0x10 + i as u8), [0u8; VRF_PUBKEY_SIZE], 1_000_000, 0);
+                v.status = ValidatorStatus::Active;
+                v
+            })
+            .collect();
+        let genesis_randomness = compute_genesis_chain_randomness(&validators);
+        let mut set = ValidatorSet {
+            epoch: 1,
+            validators,
+            validator_set_hash: [0u8; 32],
+            epoch_randomness: [0u8; 32],
+            prev_epoch_randomness: [0u8; 32],
+            genesis_chain_randomness: genesis_randomness,
+        };
+        set.validator_set_hash = set.compute_hash();
+
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+
+        // 踢出 1 个 → 5-1=4 < 5 → SEC-C2 拒绝
+        let result = state.create_validator_set_update_proposal(
+            &set,
+            vec![],
+            vec![make_pubkey(0x10)],
+            2,
+            proposer,
+            100,
+        );
+        assert!(matches!(result, Err(PokerL1Error::ValidatorSetReductionTooSmall { new_size: 4 })));
+    }
+
+    #[test]
+    fn test_validator_set_update_reject_excessive_reduction() {
+        use crate::consensus::validator_set::{ValidatorEntry, ValidatorSet, ValidatorStatus, VRF_PUBKEY_SIZE};
+        use crate::consensus::validator_set::compute_genesis_chain_randomness;
+
+        // 10 个 validator
+        let validators: Vec<ValidatorEntry> = (0..10)
+            .map(|i| {
+                let mut v = ValidatorEntry::new(make_pubkey(0x10 + i as u8), [0u8; VRF_PUBKEY_SIZE], 1_000_000, 0);
+                v.status = ValidatorStatus::Active;
+                v
+            })
+            .collect();
+        let genesis_randomness = compute_genesis_chain_randomness(&validators);
+        let mut set = ValidatorSet {
+            epoch: 1,
+            validators,
+            validator_set_hash: [0u8; 32],
+            epoch_randomness: [0u8; 32],
+            prev_epoch_randomness: [0u8; 32],
+            genesis_chain_randomness: genesis_randomness,
+        };
+        set.validator_set_hash = set.compute_hash();
+
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+
+        // 踢出 3 个 → 3/10 = 30% > 20% → SEC-M2 拒绝
+        let result = state.create_validator_set_update_proposal(
+            &set,
+            vec![],
+            vec![make_pubkey(0x10), make_pubkey(0x11), make_pubkey(0x12)],
+            2,
+            proposer,
+            100,
+        );
+        assert!(matches!(result, Err(PokerL1Error::SingleReductionRatioExceeded { .. })));
+    }
+
+    // ===== 投票 + 结束投票测试 =====
+
+    #[test]
+    fn test_vote_and_finalize_normal_param_pass() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        // 创建普通参数提案（ack_deadline_blocks，非敏感）
+        let id = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        // 7 个赞成（2/3 of 10 = 7）
+        for pk in &pubkeys[0..7] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+
+        // 结束投票（voting_end_height = 100 + 1000 = 1100）
+        let status = state.finalize_voting(id, 10, 1100).unwrap();
+        assert_eq!(status, ProposalStatus::Timelock);
+
+        // timelock 结束后执行
+        let timelock_end = 1100 + DEFAULT_PARAMETER_DELAY_BLOCKS;
+        state.execute_proposal(id, timelock_end).unwrap();
+        assert_eq!(state.params.ack_deadline_blocks, 10);
+    }
+
+    #[test]
+    fn test_vote_and_finalize_sensitive_param_requires_90() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        // 创建敏感参数提案（slash_percentage，敏感 90%）
+        let id = state
+            .create_parameter_proposal(
+                ParamName::SlashPercentage,
+                50,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        // 仅 7 个赞成（< 9 = 90% of 10）→ 应被拒绝
+        for pk in &pubkeys[0..7] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+
+        let status = state.finalize_voting(id, 10, 1100).unwrap();
+        assert_eq!(status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn test_vote_and_finalize_sensitive_param_pass() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        let id = state
+            .create_parameter_proposal(
+                ParamName::SlashPercentage,
+                50,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        // 9 个赞成（= 90% of 10）→ 通过
+        for pk in &pubkeys[0..9] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+
+        let status = state.finalize_voting(id, 10, 1100).unwrap();
+        assert_eq!(status, ProposalStatus::Timelock);
+    }
+
+    #[test]
+    fn test_vote_participation_too_low() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        let id = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        // 仅 5 个投票（< 7 = 2/3 of 10）→ 参与率不足
+        for pk in &pubkeys[0..5] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+
+        let status = state.finalize_voting(id, 10, 1100).unwrap();
+        assert_eq!(status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn test_duplicate_vote_rejected() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let voter = make_pubkey(0x02);
+
+        let id = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        state.vote(id, voter.clone(), true, 100).unwrap();
+        // 重复投票 → 拒绝
+        let result = state.vote(id, voter, true, 100);
+        assert!(matches!(result, Err(PokerL1Error::DuplicateVote(_))));
+    }
+
+    #[test]
+    fn test_vote_outside_voting_period() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let voter = make_pubkey(0x02);
+
+        let id = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        // voting_end_height = 1100，在 1101 投票 → 拒绝
+        let result = state.vote(id, voter, true, 1101);
+        assert!(matches!(result, Err(PokerL1Error::ProposalNotInVoting(_))));
+    }
+
+    // ===== Timelock 撤销测试（SEC-H8） =====
+
+    #[test]
+    fn test_timelock_revocation() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        // 1. 创建普通参数提案并通过
+        let id1 = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer.clone(),
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+        for pk in &pubkeys[0..7] {
+            state.vote(id1, pk.clone(), true, 100).unwrap();
+        }
+        state.finalize_voting(id1, 10, 1100).unwrap();
+        assert_eq!(state.proposals[&id1].status, ProposalStatus::Timelock);
+
+        // 2. 创建撤销提案（timelock 内）
+        let rev_id = state
+            .create_revocation_proposal(id1, proposer, 1200)
+            .unwrap();
+
+        // 3. 9 个赞成撤销（90% of 10）
+        for pk in &pubkeys[0..9] {
+            state.vote(rev_id, pk.clone(), true, 1200).unwrap();
+        }
+
+        // 4. 结束撤销投票 → 通过 + 原提案被撤销
+        let status = state.finalize_voting(rev_id, 10, 1200 + DEFAULT_VOTING_PERIOD_BLOCKS).unwrap();
+        assert_eq!(status, ProposalStatus::Passed);
+        assert_eq!(state.proposals[&id1].status, ProposalStatus::Revoked);
+
+        // 5. 执行原提案 → 应失败（已撤销）
+        let result = state.execute_proposal(id1, 5000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_revocation_quorum_insufficient() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        // 创建并通过原提案
+        let id1 = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+        for pk in &pubkeys[0..7] {
+            state.vote(id1, pk.clone(), true, 100).unwrap();
+        }
+        state.finalize_voting(id1, 10, 1100).unwrap();
+
+        // 创建撤销提案
+        let rev_id = state.create_revocation_proposal(id1, make_pubkey(0x02), 1200).unwrap();
+
+        // 仅 8 个赞成（< 9 = 90% of 10）→ 撤销失败
+        for pk in &pubkeys[0..8] {
+            state.vote(rev_id, pk.clone(), true, 1200).unwrap();
+        }
+        let status = state.finalize_voting(rev_id, 10, 1200 + DEFAULT_VOTING_PERIOD_BLOCKS).unwrap();
+        assert_eq!(status, ProposalStatus::Rejected);
+        // 原提案仍为 Timelock
+        assert_eq!(state.proposals[&id1].status, ProposalStatus::Timelock);
+    }
+
+    // ===== verifier_status 治理测试 =====
+
+    #[test]
+    fn test_verifier_status_governance() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        // mainnet 默认 Stub
+        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+
+        // 创建 verifier_status 提案（升级为 Production）
+        let id = state
+            .create_parameter_proposal(
+                ParamName::VerifierStatus,
+                1, // Production
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        // 9 个赞成（90%）
+        for pk in &pubkeys[0..9] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+        state.finalize_voting(id, 10, 1100).unwrap();
+
+        // timelock 结束后执行
+        state.execute_proposal(id, 1100 + DEFAULT_PARAMETER_DELAY_BLOCKS).unwrap();
+        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Production);
+        assert!(state.is_offchain_checkout_allowed(crate::DEFAULT_CHAIN_ID));
+    }
+
+    // ===== 密钥轮换测试 =====
+
+    #[test]
+    fn test_key_rotation_proposal() {
+        let mut state = GovernanceState::new();
+        let old_pk = make_pubkey(0x01);
+        let new_pk = make_pubkey(0x02);
+        let pubkeys = make_pubkeys(10);
+
+        let id = state
+            .create_key_rotation_proposal(old_pk, new_pk, make_pubkey(0x03), 100)
+            .unwrap();
+
+        // 9 个赞成（90%）
+        for pk in &pubkeys[0..9] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+        let status = state.finalize_voting(id, 10, 1100).unwrap();
+        assert_eq!(status, ProposalStatus::Passed); // 密钥轮换无 timelock（直接 Passed）
+
+        // 执行
+        state.execute_proposal(id, 1100).unwrap();
+        assert_eq!(state.proposals[&id].status, ProposalStatus::Executed);
+    }
+
+    // ===== DDoS 检测测试 =====
+
+    #[test]
+    fn test_detect_voting_ddos() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        let id = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        // 仅 5 个投票（5/10 离线率 = 50% > 30%）→ DDoS 检测
+        for pk in &pubkeys[0..5] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+        assert!(state.detect_voting_ddos(id, 10));
+
+        // 8 个投票（2/10 离线率 = 20% < 30%）→ 无 DDoS
+        for pk in &pubkeys[5..8] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+        assert!(!state.detect_voting_ddos(id, 10));
+    }
+
+    #[test]
+    fn test_execute_before_timelock_ends() {
+        let mut state = GovernanceState::new();
+        let proposer = make_pubkey(0x01);
+        let pubkeys = make_pubkeys(10);
+
+        let id = state
+            .create_parameter_proposal(
+                ParamName::AckDeadlineBlocks,
+                10,
+                crate::DEFAULT_CHAIN_ID,
+                proposer,
+                100,
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+        for pk in &pubkeys[0..7] {
+            state.vote(id, pk.clone(), true, 100).unwrap();
+        }
+        state.finalize_voting(id, 10, 1100).unwrap();
+
+        // timelock 未结束就执行 → 失败
+        let result = state.execute_proposal(id, 1100 + DEFAULT_PARAMETER_DELAY_BLOCKS - 1);
+        assert!(result.is_err());
+    }
+}

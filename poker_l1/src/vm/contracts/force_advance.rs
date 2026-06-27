@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Address;
 
-use super::types::{BettingRound, GameAction, HandState};
+use super::types::{BettingRound, GameAction, GameContract, HandState};
 
 /// force_advance 输入参数。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,10 +162,95 @@ pub fn force_advance_action(
     Ok(action)
 }
 
+/// 应用 force_advance 到 GameContract（SubTask 28.2）。
+///
+/// 状态更新：
+/// 1. 调用 `force_advance_action` 判定动作（fold / check）
+/// 2. Fold → 标记超时玩家 `folded = true`
+/// 3. Check → 玩家筹码不变，仅推进轮次
+/// 4. **R5-L1 修正**：更新 `last_action_height = block_height`（hand 级 + game 级），
+///    实现自然频率限制（每 `turn_timeout_blocks` 最多 1 次 force_advance）
+/// 5. 推进 `current_turn` 到下一个未 fold 玩家
+/// 6. 递增 `game.version`
+///
+/// # 参数
+/// - `game`：可变的 GameContract 引用
+/// - `input`：force_advance 输入（超时玩家 + 当前 block height）
+///
+/// # 返回
+/// 应用的动作（Fold / Check），供调用方记录日志
+///
+/// # 错误
+/// - [`ForceAdvanceError::HandAlreadySettled`]：手牌已结算
+/// - [`ForceAdvanceError::PlayerNotInGame`]：超时玩家不在游戏中
+/// - [`ForceAdvanceError::PlayerAlreadyFolded`]：超时玩家已 fold
+/// - [`ForceAdvanceError::NotTimedOut`]：尚未超时
+pub fn apply_force_advance(
+    game: &mut GameContract,
+    input: &ForceAdvanceInput,
+) -> Result<GameAction, ForceAdvanceError> {
+    let hand = game
+        .current_hand
+        .as_mut()
+        .ok_or(ForceAdvanceError::HandAlreadySettled)?;
+
+    // 判定动作（复用已有逻辑）
+    let action = force_advance_action(hand, input, game.turn_timeout_blocks)?;
+
+    let player_idx = hand
+        .find_player(&input.timeout_player)
+        .expect("force_advance_action 已校验玩家存在");
+
+    // 应用动作
+    match action {
+        GameAction::Fold => {
+            hand.players[player_idx].folded = true;
+        }
+        GameAction::Check => {
+            // check：筹码不变，仅推进轮次
+        }
+        GameAction::Call | GameAction::Raise { .. } | GameAction::Bet { .. } => {
+            // force_advance 不会产生这些动作
+            return Err(ForceAdvanceError::HandAlreadySettled);
+        }
+    }
+
+    // R5-L1：更新 last_action_height（hand 级 + game 级）
+    hand.last_action_height = input.current_block_height;
+    game.last_action_height = input.current_block_height;
+
+    // 推进 current_turn 到下一个未 fold 玩家
+    advance_to_next_active_player(hand, player_idx);
+
+    game.version = game.version.saturating_add(1);
+
+    Ok(action)
+}
+
+/// 推进 `current_turn` 到下一个未 fold 玩家。
+///
+/// 从 `from_idx` 的下一个位置开始扫描，找到第一个未 fold 玩家。
+/// 若所有其他玩家都已 fold，则 `current_turn` 保持不变（仅剩一人，即将结算）。
+fn advance_to_next_active_player(hand: &mut HandState, from_idx: usize) {
+    let n = hand.players.len();
+    if n <= 1 {
+        return;
+    }
+    for offset in 1..=n {
+        let idx = (from_idx + offset) % n;
+        if !hand.players[idx].folded {
+            hand.current_turn = hand.players[idx].address;
+            return;
+        }
+    }
+    // 所有玩家都已 fold（不应发生，但防御性处理）
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::contracts::types::{GamePhase, PlayerStack};
+    use crate::vm::contracts::types::{ExecutionMode, GamePhase, PlayerStack, RakeConfigRef};
+    use crate::object_model::ObjectID;
 
     fn make_addr(byte: u8) -> Address {
         [byte; 20]
@@ -525,5 +610,204 @@ mod tests {
 
         let result = force_advance_action(&hand, &input, 0);
         assert!(result.is_ok(), "timeout=0 时立即超时");
+    }
+
+    // ===== apply_force_advance 测试（SubTask 28.2）=====
+
+    fn make_game_with_hand(
+        phase: GamePhase,
+        current_bet: u64,
+        raise_count: u32,
+        bet_count: u32,
+        last_action_height: u64,
+        players: &[(Address, bool, bool)],
+    ) -> GameContract {
+        let hand = make_hand(phase, current_bet, raise_count, bet_count, last_action_height, players);
+        let mut game = GameContract::new(
+            ObjectID::new([0x42; 20], 1),
+            make_addr(0x01),
+            crate::signature::TaggedPubkey {
+                tag: 0x01,
+                raw: vec![0xFF; 33],
+            },
+            ExecutionMode::OffChain,
+            RakeConfigRef {
+                rake_rate_bps: 0,
+                rake_cap: 0,
+                rake_recipient: make_addr(0x00),
+            },
+            DEFAULT_TIMEOUT_BLOCKS,
+        );
+        game.last_action_height = last_action_height;
+        game.current_hand = Some(hand);
+        game
+    }
+
+    #[test]
+    fn test_apply_force_advance_fold_marks_player_folded() {
+        // preflop 有人 raise → fold → 玩家被标记 folded
+        let bb = make_addr(0x01);
+        let other = make_addr(0x02);
+        let mut game = make_game_with_hand(
+            GamePhase::Preflop,
+            40, // > big_blind_amount
+            1,  // raise_count > 0
+            0,
+            100,
+            &[(bb, true, false), (other, false, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 110);
+
+        let action = apply_force_advance(&mut game, &input).expect("应成功");
+        assert_eq!(action, GameAction::Fold);
+
+        let hand = game.current_hand.as_ref().expect("手牌应存在");
+        let bb_idx = hand.find_player(&bb).expect("BB 应存在");
+        assert!(hand.players[bb_idx].folded, "BB 应被标记 folded");
+    }
+
+    #[test]
+    fn test_apply_force_advance_check_no_chip_change() {
+        // postflop 无人下注 → check → 玩家筹码不变
+        let p1 = make_addr(0x01);
+        let mut game = make_game_with_hand(
+            GamePhase::Flop,
+            0,
+            0,
+            0,
+            100,
+            &[(p1, false, false)],
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        let action = apply_force_advance(&mut game, &input).expect("应成功");
+        assert_eq!(action, GameAction::Check);
+
+        let hand = game.current_hand.as_ref().expect("手牌应存在");
+        let p1_idx = hand.find_player(&p1).expect("p1 应存在");
+        assert!(!hand.players[p1_idx].folded, "check 不应 fold");
+    }
+
+    #[test]
+    fn test_apply_force_advance_updates_last_action_height() {
+        // R5-L1：last_action_height 更新（hand 级 + game 级）
+        let bb = make_addr(0x01);
+        let mut game = make_game_with_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 120);
+
+        apply_force_advance(&mut game, &input).expect("应成功");
+
+        assert_eq!(game.last_action_height, 120, "game.last_action_height 应更新");
+        let hand = game.current_hand.as_ref().expect("手牌应存在");
+        assert_eq!(hand.last_action_height, 120, "hand.last_action_height 应更新");
+    }
+
+    #[test]
+    fn test_apply_force_advance_advances_current_turn() {
+        // fold 后 current_turn 推进到下一个未 fold 玩家
+        let p1 = make_addr(0x01);
+        let p2 = make_addr(0x02);
+        let mut game = make_game_with_hand(
+            GamePhase::Preflop,
+            40,
+            1,
+            0,
+            100,
+            &[(p1, true, false), (p2, false, false)],
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        apply_force_advance(&mut game, &input).expect("应成功");
+
+        let hand = game.current_hand.as_ref().expect("手牌应存在");
+        assert_eq!(hand.current_turn, p2, "current_turn 应推进到 p2");
+    }
+
+    #[test]
+    fn test_apply_force_advance_increments_version() {
+        let bb = make_addr(0x01);
+        let mut game = make_game_with_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let old_version = game.version;
+        let input = ForceAdvanceInput::new(bb, 110);
+
+        apply_force_advance(&mut game, &input).expect("应成功");
+        assert_eq!(game.version, old_version + 1, "version 应递增");
+    }
+
+    #[test]
+    fn test_apply_force_advance_natural_frequency_limit() {
+        // R5-L1：第一次 force_advance 后 last_action_height 更新，
+        // 第二次须再等 turn_timeout_blocks 个 block
+        let bb = make_addr(0x01);
+        let mut game = make_game_with_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+
+        // 第一次：block 110，elapsed = 10 == timeout → 成功
+        let input1 = ForceAdvanceInput::new(bb, 110);
+        apply_force_advance(&mut game, &input1).expect("第一次应成功");
+        assert_eq!(game.last_action_height, 110);
+
+        // 恢复玩家 fold 状态（模拟下一轮）
+        if let Some(hand) = game.current_hand.as_mut()
+            && let Some(idx) = hand.find_player(&bb)
+        {
+            hand.players[idx].folded = false;
+        }
+
+        // 第二次：block 115，elapsed = 5 < 10 → 未超时，应失败
+        let input2 = ForceAdvanceInput::new(bb, 115);
+        let result = apply_force_advance(&mut game, &input2);
+        assert!(
+            matches!(result, Err(ForceAdvanceError::NotTimedOut { .. })),
+            "R5-L1：第二次须等 turn_timeout_blocks 后才可触发"
+        );
+
+        // 第三次：block 120，elapsed = 10 == timeout → 成功
+        let input3 = ForceAdvanceInput::new(bb, 120);
+        apply_force_advance(&mut game, &input3).expect("第三次应成功");
+    }
+
+    #[test]
+    fn test_apply_force_advance_no_hand_returns_error() {
+        // current_hand = None → HandAlreadySettled
+        let mut game = GameContract::new(
+            ObjectID::new([0x42; 20], 1),
+            make_addr(0x01),
+            crate::signature::TaggedPubkey {
+                tag: 0x01,
+                raw: vec![0xFF; 33],
+            },
+            ExecutionMode::OffChain,
+            RakeConfigRef {
+                rake_rate_bps: 0,
+                rake_cap: 0,
+                rake_recipient: make_addr(0x00),
+            },
+            DEFAULT_TIMEOUT_BLOCKS,
+        );
+        let input = ForceAdvanceInput::new(make_addr(0x01), 110);
+
+        let result = apply_force_advance(&mut game, &input);
+        assert!(matches!(result, Err(ForceAdvanceError::HandAlreadySettled)));
     }
 }

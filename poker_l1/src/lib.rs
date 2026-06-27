@@ -35,6 +35,7 @@ pub mod network;
 pub mod node;
 pub mod object_model;
 pub mod offline;
+pub mod rpc;
 pub mod signature;
 pub mod storage;
 pub mod transaction;

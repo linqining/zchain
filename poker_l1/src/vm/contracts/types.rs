@@ -224,6 +224,7 @@ impl HandState {
 /// - `designated_operator_check_exemptions`：designated operator check 豁免次数（SubTask 27.5）
 /// - `under_investigation_count`：assigned_validator 审查调查累积计数（SubTask 27.5a）
 /// - `forfeit_deposit`：操作方预锁 forfeit 保证金（SubTask 28.9）
+/// - `designated_operator_bond`：designated operator 保证金金额（SubTask 28.9 / R5-H3 / SEC-L8）
 /// - `partial_checkin_count`：partial_checkin 已提交次数（SubTask 28.7a）
 /// - `malicious_refuse_count`：恶意 refuse_ack 累计计数（SubTask 27.9）
 /// - `no_progress_count`：无进度 checkpoint_anchor 计数（SubTask 28.3 / SEC-H2）
@@ -270,6 +271,12 @@ pub struct GameContract {
     pub under_investigation_count: u32,
     /// 操作方预锁 forfeit 保证金（SubTask 28.9，= 桌面总 buy-in * forfeit_deposit_ratio / 100）。
     pub forfeit_deposit: u64,
+    /// designated operator 保证金金额（SubTask 28.9 / R5-H3 / SEC-L8）。
+    ///
+    /// 若操作方为 designated operator（非玩家），forfeit 保证金 =
+    /// `designated_operator_bond_amount`（默认 = 桌面 buy-in 中位数）。
+    /// 0 表示非 designated operator 场景（使用 `forfeit_deposit` 基于 buy-in 计算）。
+    pub designated_operator_bond: u64,
     /// partial_checkin 已提交次数（SubTask 28.7a，上限 `max_partial_checkin_count` 默认 3）。
     pub partial_checkin_count: u32,
     /// 恶意 refuse_ack 累计计数（SubTask 27.9，达阈值默认 3 触发 slashing）。
@@ -280,6 +287,9 @@ pub struct GameContract {
     pub last_checkpoint_state_hash: Option<Hash>,
     /// partial_checkin 锚点（SubTask 28.7a，None 表示无 partial_checkin 记录）。
     pub last_partial_fold: Option<crate::offline::state::LastPartialFold>,
+    /// 最后一次 checkout/checkin commitment（SubTask 28.1，OffChain 模式下
+    /// 由 checkout 写入 / checkin 清除；用于 force_checkin / request_revert 回退锚点）。
+    pub last_commitment: Option<Hash>,
 }
 
 /// 台费配置（引用类型，避免循环依赖）。
@@ -326,11 +336,13 @@ impl GameContract {
             designated_operator_check_exemptions: 0,
             under_investigation_count: 0,
             forfeit_deposit: 0,
+            designated_operator_bond: 0,
             partial_checkin_count: 0,
             malicious_refuse_count: 0,
             no_progress_count: 0,
             last_checkpoint_state_hash: None,
             last_partial_fold: None,
+            last_commitment: None,
         }
     }
 

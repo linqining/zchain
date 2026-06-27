@@ -19,7 +19,19 @@
 pub mod block_store;
 pub mod dag_vertex_store;
 pub mod object_db;
+pub mod pruning;
 
 pub use block_store::BlockStore;
 pub use dag_vertex_store::DagVertexStore;
 pub use object_db::ObjectDb;
+pub use pruning::{
+    archive_zk_proof, check_game_pruning_eligibility, check_pruning_allowed,
+    check_tx_pruning_eligibility, check_vertex_pruning_eligibility,
+    check_zk_proof_pruning_eligibility, compute_proof_hash, handle_historical_data_request,
+    is_archive_node_sufficient, is_permanently_retained, mark_blob_expired, prune_tx,
+    prune_vertex, ArchivedZkProof, HistoricalDataRequest, HistoricalDataType,
+    HistoricalDataResponse, NodeRole, PermanentRetentionItem, PrunedTx, PrunedVertex,
+    PruningConfig, PruningEligibility, DEFAULT_ARCHIVE_NODE_MIN_COUNT,
+    DEFAULT_ARCHIVE_RETENTION_BLOCKS, DEFAULT_TX_PRUNE_AFTER_BLOCKS,
+    DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, MIN_ZK_PROOF_REPLICA_COUNT,
+};

@@ -37,8 +37,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
+use crate::Hash;
 
-use super::types::GameContract;
+use super::types::{GameContract, GamePhase};
 
 // ===== 常量 =====
 
@@ -378,6 +379,155 @@ pub fn validate_force_checkin_game_id(
     Ok(())
 }
 
+// ===== apply_force_checkin（SubTask 28.3） =====
+
+/// force_checkin 输入参数（SubTask 28.3）。
+///
+/// 由任意参与者构造（非操作方），基于已广播的 checkpoint state 自行计算 (π', Δ')。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForceCheckinInput {
+    /// 当前 block height（用于 forfeit 边界判定）。
+    pub current_block_height: u64,
+    /// 操作方是否为 designated operator（影响 boundary：turn_timeout_blocks * 2）。
+    pub is_designated_operator: bool,
+    /// turn_timeout_blocks（来自 TimeConsensusConfig）。
+    pub turn_timeout_blocks: u64,
+    /// 参与者自行计算的 new_commitment（结算后状态）。
+    ///
+    /// spec.md L665-669：checkin tx 携带 `(π, Δ, new_commitment, ack_chain)`。
+    pub new_commitment: Hash,
+    /// 参与者自行计算的状态增量 Δ'。
+    pub state_delta: Vec<u8>,
+}
+
+impl ForceCheckinInput {
+    /// 创建 force_checkin 输入。
+    #[must_use]
+    pub const fn new(
+        current_block_height: u64,
+        is_designated_operator: bool,
+        turn_timeout_blocks: u64,
+        new_commitment: Hash,
+        state_delta: Vec<u8>,
+    ) -> Self {
+        Self {
+            current_block_height,
+            is_designated_operator,
+            turn_timeout_blocks,
+            new_commitment,
+            state_delta,
+        }
+    }
+}
+
+/// force_checkin 应用结果（SubTask 28.3）。
+///
+/// 调用方据 `should_forfeit` 决定是否触发 forfeit 保证金扣除流程。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForceCheckinOutcome {
+    /// 判定的场景（MaliciousWithholding / MachineFailure）。
+    pub scenario: ForceCheckinScenario,
+    /// 是否应触发 forfeit（H4 边界判定）。
+    pub should_forfeit: bool,
+    /// forfeit 原因（与 `request_revert` reason 字段语义兼容）。
+    pub reason: ForfeitReason,
+    /// `block.height - game.last_action_height`（已过的 block 数，BEFORE mutation）。
+    pub last_checkpoint_age: u64,
+    /// forfeit 边界（turn_timeout_blocks 或 * 2 for designated operator）。
+    pub boundary: u64,
+}
+
+/// 应用 force_checkin 到 GameContract（SubTask 28.3）。
+///
+/// spec.md L697-699 + tasks.md SubTask 28.3：
+/// 1. 判定场景（MaliciousWithholding / MachineFailure / NotFeasible）
+/// 2. NotFeasible（无 checkpoint 广播）→ 拒绝，caller 须改走 `request_revert`
+/// 3. 可行 → 应用 Δ' 结算手牌（标记 phase = Settled）
+/// 4. 清除 `last_commitment`（checkin 完成 checkout cycle，SubTask 28.1）
+/// 5. 清除 `last_checkpoint_state_hash`（已消费）
+/// 6. 更新 `last_action_height = current_block_height`（force_checkin 是活动事件）
+/// 7. 递增 `version`
+///
+/// **H4 修复 — forfeit 边界判定**：
+/// - `last_checkpoint_age <= turn_timeout_blocks` → MaliciousWithholding →
+///   返回 `should_forfeit = true`，caller 据此扣除 forfeit_deposit
+/// - `last_checkpoint_age > turn_timeout_blocks` → MachineFailure →
+///   返回 `should_forfeit = false`（参与者重折叠，无 forfeit）
+///
+/// **NEW-M4 修复**：designated operator 场景下 boundary 加倍为
+/// `turn_timeout_blocks * 2`，由 `is_designated_operator` 控制。
+///
+/// # 参数
+/// - `game`：可变的 GameContract 引用
+/// - `input`：force_checkin 输入
+///
+/// # 返回
+/// [`ForceCheckinOutcome`]，caller 据此决定是否触发 forfeit 流程。
+///
+/// # 错误
+/// - [`PokerL1Error::Other`]：场景为 NotFeasibleRequiresRevert（无 checkpoint 广播，
+///   caller 须改走 `request_revert`）
+pub fn apply_force_checkin(
+    game: &mut GameContract,
+    input: &ForceCheckinInput,
+) -> Result<ForceCheckinOutcome, PokerL1Error> {
+    // 1. 判定场景（BEFORE mutation，基于当前 last_action_height）
+    let scenario = determine_force_checkin_scenario(
+        game,
+        input.current_block_height,
+        input.turn_timeout_blocks,
+        input.is_designated_operator,
+    );
+
+    // 2. NotFeasible → 拒绝（caller 须改走 request_revert）
+    if matches!(scenario, ForceCheckinScenario::NotFeasibleRequiresRevert) {
+        return Err(PokerL1Error::Other(
+            "force_checkin not feasible: no checkpoint broadcast, use request_revert".to_string(),
+        ));
+    }
+
+    // 3. 计算 forfeit decision（BEFORE mutation，基于当前 last_action_height）
+    let decision = ForfeitDecision::compute(
+        game,
+        input.current_block_height,
+        input.turn_timeout_blocks,
+        input.is_designated_operator,
+    );
+
+    // 4. 校验 last_checkpoint_state_hash 存在（与 NotFeasible 检查一致，防御性）
+    if game.last_checkpoint_state_hash.is_none() {
+        return Err(PokerL1Error::Other(
+            "last_checkpoint_state_hash missing despite scenario != NotFeasible".to_string(),
+        ));
+    }
+
+    // 5. 应用 Δ'：标记当前手牌结算
+    if let Some(hand) = game.current_hand.as_mut() {
+        hand.phase = GamePhase::Settled;
+        hand.last_action_height = input.current_block_height;
+    }
+
+    // 6. 更新 game.last_action_height（force_checkin 是活动事件）
+    game.last_action_height = input.current_block_height;
+
+    // 7. 清除 last_commitment（checkin 完成 checkout cycle，SubTask 28.1）
+    game.last_commitment = None;
+
+    // 8. 清除 last_checkpoint_state_hash（已消费）
+    game.last_checkpoint_state_hash = None;
+
+    // 9. 递增 version
+    game.version = game.version.saturating_add(1);
+
+    Ok(ForceCheckinOutcome {
+        scenario,
+        should_forfeit: decision.should_forfeit,
+        reason: decision.reason,
+        last_checkpoint_age: decision.last_checkpoint_age,
+        boundary: decision.boundary,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,5 +849,178 @@ mod tests {
             DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT, 2,
             "NEW-M4 / R3-M7: designated operator check 豁免上限默认 2"
         );
+    }
+
+    // ===== apply_force_checkin 测试（SubTask 28.3）=====
+
+    fn make_force_checkin_input(
+        current_block_height: u64,
+        is_designated_operator: bool,
+        turn_timeout_blocks: u64,
+    ) -> ForceCheckinInput {
+        ForceCheckinInput::new(
+            current_block_height,
+            is_designated_operator,
+            turn_timeout_blocks,
+            [0xAB; 32],
+            vec![0xCD; 16],
+        )
+    }
+
+    #[test]
+    fn test_apply_force_checkin_malicious_withholding_forfeits() {
+        // last_action_height = 100, current = 120, turn_timeout = 30
+        // age = 20 <= 30 → MaliciousWithholding → should_forfeit = true
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        game.last_commitment = Some([0x11; 32]);
+        let input = make_force_checkin_input(120, false, 30);
+
+        let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
+        assert_eq!(outcome.scenario, ForceCheckinScenario::MaliciousWithholding);
+        assert!(outcome.should_forfeit, "age 20 <= 30 应 forfeit");
+        assert_eq!(outcome.reason, ForfeitReason::MaliciousWithholding);
+        assert_eq!(outcome.last_checkpoint_age, 20);
+        assert_eq!(outcome.boundary, 30);
+        // 状态变更
+        assert_eq!(game.last_action_height, 120);
+        assert!(game.last_commitment.is_none(), "checkin 完成 → last_commitment 清除");
+        assert!(game.last_checkpoint_state_hash.is_none(), "已消费");
+        assert!(game.version > 0);
+    }
+
+    #[test]
+    fn test_apply_force_checkin_machine_failure_no_forfeit() {
+        // last_action_height = 100, current = 200, turn_timeout = 30
+        // age = 100 > 30 → MachineFailure → should_forfeit = false
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        game.last_commitment = Some([0x11; 32]);
+        let input = make_force_checkin_input(200, false, 30);
+
+        let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
+        assert_eq!(outcome.scenario, ForceCheckinScenario::MachineFailure);
+        assert!(!outcome.should_forfeit, "age 100 > 30 应不 forfeit");
+        assert_eq!(outcome.reason, ForfeitReason::MachineFailure);
+    }
+
+    #[test]
+    fn test_apply_force_checkin_designated_operator_boundary_doubled() {
+        // NEW-M4: designated operator → boundary = 30 * 2 = 60
+        // last_action_height = 100, current = 150, age = 50 <= 60 → MaliciousWithholding
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        game.last_commitment = Some([0x11; 32]);
+        let input = make_force_checkin_input(150, true, 30);
+
+        let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
+        assert!(outcome.should_forfeit, "designated operator: age 50 <= 60 应 forfeit");
+        assert_eq!(outcome.boundary, 60);
+    }
+
+    #[test]
+    fn test_apply_force_checkin_designated_operator_machine_failure() {
+        // NEW-M4: designated operator → boundary = 60
+        // age = 70 > 60 → MachineFailure
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        let input = make_force_checkin_input(170, true, 30);
+
+        let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
+        assert!(!outcome.should_forfeit, "designated operator: age 70 > 60 应不 forfeit");
+        assert_eq!(outcome.boundary, 60);
+    }
+
+    #[test]
+    fn test_apply_force_checkin_not_feasible_no_checkpoint() {
+        // 无 checkpoint 广播 → NotFeasibleRequiresRevert → 拒绝
+        let mut game = make_game(100); // last_checkpoint_state_hash = None
+        let input = make_force_checkin_input(120, false, 30);
+
+        let result = apply_force_checkin(&mut game, &input);
+        assert!(result.is_err(), "无 checkpoint 广播应拒绝");
+        // 状态不变（mutation 未发生）
+        assert_eq!(game.last_action_height, 100);
+    }
+
+    #[test]
+    fn test_apply_force_checkin_clears_last_commitment() {
+        // SubTask 28.1：checkin 完成 checkout cycle → last_commitment 清除
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        game.last_commitment = Some([0x22; 32]);
+        let input = make_force_checkin_input(120, false, 30);
+
+        apply_force_checkin(&mut game, &input).expect("应成功");
+        assert!(
+            game.last_commitment.is_none(),
+            "force_checkin 后 last_commitment 必须清除"
+        );
+    }
+
+    #[test]
+    fn test_apply_force_checkin_updates_last_action_height() {
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        let input = make_force_checkin_input(150, false, 30);
+
+        apply_force_checkin(&mut game, &input).expect("应成功");
+        assert_eq!(
+            game.last_action_height, 150,
+            "force_checkin 是活动事件，须更新 last_action_height"
+        );
+    }
+
+    #[test]
+    fn test_apply_force_checkin_clears_last_checkpoint_state_hash() {
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        let input = make_force_checkin_input(120, false, 30);
+
+        apply_force_checkin(&mut game, &input).expect("应成功");
+        assert!(
+            game.last_checkpoint_state_hash.is_none(),
+            "force_checkin 后 last_checkpoint_state_hash 必须清除（已消费）"
+        );
+    }
+
+    #[test]
+    fn test_apply_force_checkin_increments_version() {
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        let prev_version = game.version;
+        let input = make_force_checkin_input(120, false, 30);
+
+        apply_force_checkin(&mut game, &input).expect("应成功");
+        assert_eq!(
+            game.version,
+            prev_version.saturating_add(1),
+            "version 须递增 1"
+        );
+    }
+
+    #[test]
+    fn test_apply_force_checkin_boundary_inclusive() {
+        // SEC2-L6: <= 边界判定
+        // last_action_height = 100, current = 130, age = 30 == 30 → MaliciousWithholding
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        let input = make_force_checkin_input(130, false, 30);
+
+        let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
+        assert!(outcome.should_forfeit, "age 30 == boundary 30 应 forfeit (<= 边界)");
+        assert_eq!(outcome.reason, ForfeitReason::MaliciousWithholding);
+    }
+
+    #[test]
+    fn test_apply_force_checkin_just_after_boundary() {
+        // age = 31 > 30 → MachineFailure
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        let input = make_force_checkin_input(131, false, 30);
+
+        let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
+        assert!(!outcome.should_forfeit, "age 31 > 30 应不 forfeit");
+        assert_eq!(outcome.reason, ForfeitReason::MachineFailure);
+    }
+
+    #[test]
+    fn test_apply_force_checkin_zero_state_delta_allowed() {
+        // state_delta 可为空（Δ' = 空表示无状态变更，仅结算）
+        let mut game = make_game_with_checkpoint(100, 0xAB);
+        let input = ForceCheckinInput::new(120, false, 30, [0xAB; 32], Vec::new());
+
+        let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
+        assert!(outcome.should_forfeit);
     }
 }

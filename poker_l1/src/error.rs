@@ -490,6 +490,110 @@ pub enum PokerL1Error {
     /// 裁剪被拒绝（archive node 数量 < archive_node_min_count，SubTask 29.4）。
     #[error("pruning rejected: archive node count {actual} < min {limit}")]
     PruningRejectedArchiveInsufficient { actual: u32, limit: u32 },
+
+    // ===== Phase 6: 治理（Task 33） =====
+    /// 参数值越界（R4-H4 / R5-H2 / R5-M3 / R7-* 修正）。
+    #[error("parameter {param} out of bounds: value={value}, min={min}, max={max}")]
+    ParamOutOfBounds {
+        /// 参数名。
+        param: &'static str,
+        /// 提议值。
+        value: u64,
+        /// 下界。
+        min: u64,
+        /// 上界。
+        max: u64,
+    },
+    /// 未知参数名。
+    #[error("unknown parameter: {0}")]
+    UnknownParameter(&'static str),
+    /// 投票参与率不足（SEC2-M6：分母 = 当前 epoch validator 集大小，参与率下限 2/3 或 90%）。
+    #[error("voting participation too low: actual={actual}, required={required}")]
+    VotingParticipationTooLow { actual: usize, required: usize },
+    /// 赞成票未达 quorum（普通 2/3 / 敏感 90%）。
+    #[error("yes votes insufficient: yes={yes}, required={required}")]
+    YesVotesInsufficient { yes: usize, required: usize },
+    /// 提案不在投票期（已结束 / 未开始 / 已执行 / 已撤销）。
+    #[error("proposal not in voting period: status={0:?}")]
+    ProposalNotInVoting(crate::governance::ProposalStatus),
+    /// 提案不在 timelock 期（无法撤销 / 无法执行）。
+    #[error("proposal not in timelock: status={0:?}")]
+    ProposalNotInTimelock(crate::governance::ProposalStatus),
+    /// 撤销提案 quorum 不足（须 >= 90%，SEC-H8）。
+    #[error("revocation quorum insufficient: yes={yes}, required={required}")]
+    RevocationQuorumInsufficient { yes: usize, required: usize },
+    /// validator 重复投票。
+    #[error("duplicate vote: validator={0:?}")]
+    DuplicateVote(crate::signature::TaggedPubkey),
+    /// 提案 chain_id 与网络 chain_id 不匹配（SEC-M4：verifier_status per-chain_id）。
+    #[error("proposal chain_id mismatch: proposal={proposal}, network={network}")]
+    ProposalChainIdMismatch { proposal: u64, network: u64 },
+    /// validator 集缩减至 < 5（SEC-C2）。
+    #[error("validator set reduction below minimum: new_size={new_size}, min=5")]
+    ValidatorSetReductionTooSmall { new_size: usize },
+    /// 单次缩减比例超过 20%（SEC-M2）。
+    #[error("single reduction ratio exceeds 20%: removed={removed}, prev_size={prev_size}")]
+    SingleReductionRatioExceeded { removed: usize, prev_size: usize },
+    /// 密钥轮换处于 timelock 期（SEC2-H4）。
+    #[error("key rotation in timelock: remaining_blocks={0}")]
+    KeyRotationInTimelock(u64),
+
+    // ===== Phase 6: 跨链桥（Task 34） =====
+    /// bridge_verify 被合约直接调用（SubTask 34.2：必须由协议层调用）。
+    #[error("bridge_verify must be called by protocol layer, not contract")]
+    BridgeVerifyNotAuthorized,
+    /// 桥签名验证失败（SubTask 34.3）。
+    #[error("bridge signature verification failed: {0}")]
+    BridgeSignatureInvalid(String),
+    /// 桥 nonce 已被消费（防重放，SubTask 34.3）。
+    #[error("bridge nonce already consumed: nonce={0}")]
+    BridgeNonceConsumed(u64),
+    /// bridge_verify tx 非 recipient 本人签名（SEC2-M1 抢跑防护）。
+    #[error("bridge_verify tx must be signed by recipient")]
+    BridgeVerifyNotSignedByRecipient,
+    /// burn proof 验证失败（SubTask 34.4）。
+    #[error("burn proof verification failed: {0}")]
+    BurnProofInvalid(String),
+    /// 桥验证器插槽未注册（SubTask 34.5）。
+    #[error("bridge validator slot not registered: {0:?}")]
+    BridgeValidatorSlotNotRegistered(crate::signature::TaggedPubkey),
+
+    // ===== Phase 6: 网络层（Task 30） =====
+    /// tx 序列化后超过 128KB（SubTask 30.6）。
+    #[error("tx too large: {actual} > {limit}")]
+    TxTooLarge { actual: usize, limit: usize },
+    /// block 序列化后超过 4MB（SubTask 30.6）。
+    #[error("block too large: {actual} > {limit}")]
+    BlockTooLarge { actual: usize, limit: usize },
+    /// Compact Block Relay short ID 冲突（SEC2-L3：多个 tx 匹配同一 short ID）。
+    #[error("short id collision: {0:?}")]
+    ShortIdCollision([u8; 8]),
+    /// short ID → tx hash 映射表超限（SEC2-L3：防内存膨胀）。
+    #[error("short id map full: {actual} >= {limit}")]
+    ShortIdMapFull { actual: usize, limit: usize },
+    /// 无 mempool 缓冲超时（SubTask 30.7：tx 在缓冲中超过 100ms 未装入 vertex）。
+    #[error("mempool buffer timeout: tx={0:?}")]
+    MempoolBufferTimeout(crate::Hash),
+    /// 多副本广播失败（SubTask 30.8：所有副本均未接受）。
+    #[error("multi-replica broadcast failed: tx={tx_hash:?}, attempts={attempts}")]
+    MultiReplicaBroadcastFailed {
+        /// 失败的 tx 哈希。
+        tx_hash: crate::Hash,
+        /// 尝试的副本数。
+        attempts: usize,
+    },
+    /// P2P 网络传输错误。
+    #[error("network transport error: {0}")]
+    NetworkTransport(String),
+    /// peer 未找到。
+    #[error("peer not found: {0}")]
+    PeerNotFound(String),
+    /// sync protocol 错误（按 range 请求 blocks / DAG vertex 失败）。
+    #[error("sync error: {0}")]
+    SyncError(String),
+    /// 轻客户端 block header 订阅：签名不足 2/3 quorum（SubTask 30.4）。
+    #[error("light client header quorum insufficient: actual={actual}, required={required}")]
+    LightClientQuorumInsufficient { actual: usize, required: usize },
 }
 
 /// 库统一 Result 别名。

@@ -61,7 +61,7 @@ impl RakeConfig {
 }
 
 /// settle 结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettleResult {
     /// 底池总额。
     pub pot: u64,

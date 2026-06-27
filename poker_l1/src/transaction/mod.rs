@@ -46,9 +46,10 @@ pub enum TxLane {
 /// spec：
 /// - GameTurn + CheckpointAnchor → assigned_validator
 /// - ForceSync + Public → 任意 validator（客户端多副本广播）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum RouteHint {
     /// 路由到任意 validator（Public / ForceSync 通道）。
+    #[default]
     AnyValidator,
     /// 路由到 assigned_validator（GameTurn / CheckpointAnchor 通道）。
     AssignedValidator,
@@ -60,7 +61,7 @@ pub enum RouteHint {
 /// - `budget`：tx 愿意支付的最大 gas 量（tx gas limit = 10,000,000）
 /// - `price`：每 gas 单价（用于 priority 排序）
 /// - GameTurn 通道 tx 的 gas 字段忽略（免 gas），由买入锁仓作为反滥用保障
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Gas {
     /// Gas 预算上限。
     pub budget: u64,

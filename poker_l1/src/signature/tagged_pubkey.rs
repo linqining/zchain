@@ -65,7 +65,7 @@ pub const CURRENT_VERSION: u8 = 1;
 /// Tagged Pubkey：1B tag || raw pubkey bytes。
 ///
 /// tag = `(scheme_id: 4 bits high) || (version_id: 4 bits low)`
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaggedPubkey {
     /// 1 字节 tag（scheme_id << 4 | version_id）。
     pub tag: u8,
