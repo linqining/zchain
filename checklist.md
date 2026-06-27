@@ -1,0 +1,254 @@
+# Checklist
+
+## Phase 1: 链骨架与对象模型与账户抽象
+- [ ] `poker_l1` crate 已加入 workspace 且 `cargo build` 通过
+- [ ] `Object` 与 `ObjectID` 定义完整（含 `assigned_validator` 字段），BCS 序列化往返一致；**NEW-L4 修复**：`ObjectID = (creator_address: [u8;20], creation_nonce: u64)` 二元组，全局唯一性由创建账户 nonce 单调递增 + 不同 creator address 保证；`ObjectStore` 创建时校验 `ObjectID` 不存在，冲突返回 `ObjectIDCollision`
+- [ ] `ObjectStore` 支持 create / read / update / version 查询，Sparse Merkle Root 计算正确
+- [ ] `Block` 与 `Transaction` 结构定义，`Block` 含 `public_txs` / `gameturn_txs` 两通道字段 + `dag_commit_certificate`；**NEW-M14 修复**：block header 含 `public_tx_root`（Public 通道 tx 的 Merkle root）+ `gameturn_tx_root`（GameTurn + CheckpointAnchor 通道 tx 的 Merkle root），拆分为两个独立 tx_root 以支持双通道独立验证与轻客户端按通道过滤查询（原单一 `tx_root` 字段已废弃）
+- [ ] `DagVertex`（round、author、tx_list、parent_hashes、author_sig）与 `DagCommitCertificate`（round、vertex_hashes、signature_list、signer_bitmap）定义完整
+- [ ] `Transaction` 含 `chain_id` 与 `nonce` 字段（M10 重放保护）+ `route_hint` 字段 + **`gameturn_nonce: Option<u64>`（NEW-M9 修复 — GameTurn tx 专用 per-game nonce，与 account nonce 解耦）**
+- [ ] `BlockStore` / `ObjectStore` / `DagVertexStore` rocksdb 持久化 round-trip 测试通过
+- [ ] `SignatureScheme` 枚举定义，secp256k1 与 ed25519 验证各自通过已知测试向量
+- [ ] tagged pubkey 编码（1B scheme tag + raw bytes）：0x00 = secp256k1 compressed 33B，0x01 = ed25519 32B（S7 修复）
+- [ ] 统一 `verify_signature(tagged_pubkey, sig, msg_hash)` 按 tag 路由，未知 tag 返回 `UnknownScheme`
+- [ ] secp256k1 ECDSA recoverable 签名编码：`r (32B) || s (32B) || v (1B)`，v ∈ {0, 1}；**NEW-L1 修复**：强制 low-s（BIP-62）— 校验 `s <= n/2`，`s > n/2` 返回 `InvalidSignatureLowS`（防 malleability），应用于所有 secp256k1 签名路径（tx / vertex / receipt / operator_ack / ACK）
+- [ ] 账户模型 `Account { address, tagged_pubkey, nonce: u64, balance: u64 }` 定义完整（M9 修复）
+- [ ] 地址派生：`address = blake2b_256(tagged_pubkey)[0..20]`，不同曲线不产生地址碰撞（S7 修复）
+- [ ] tx 重放保护：validator 校验 `tx.chain_id == network_chain_id` 且 `tx.nonce == account.nonce`，通过后 `account.nonce += 1`（M10 修复）；**NEW-M9 修复**：GameTurn 通道 tx 可使用 `gameturn_nonce`（per-game per-player 计数器）替代 account nonce — validator 校验 `gameturn_nonce == game.player_nonce[player]` 后 `+= 1`；GameTurn tx 不阻塞 account nonce 链（account nonce 仅由 Public / ForceSync tx 推进）；fallback 接受的 GameTurn tx（NEW-H2）同样使用 `gameturn_nonce`
+- [ ] 账户余额管理：Public 通道 tx 扣 gas 从 balance 扣除，余额不足返回 `InsufficientBalance`
+- [ ] **Task 38 模块测试通过**：基础类型 BCS/JSON 序列化往返；tagged pubkey 正向 + 反向签名验证 + **NEW-L1：secp256k1 high-s 签名返回 `InvalidSignatureLowS`**；ObjectID/UID/Owner 唯一性 + **NEW-L4：`ObjectID = (creator_address, creation_nonce)` 全局唯一性 — 同一 creator nonce 单调递增不复用、不同 creator address 不碰撞、冲突返回 `ObjectIDCollision`**；链存储 put/get/delete/batch_write；账户抽象 nonce/chain_id/balance 校验；Phase 1 行覆盖率 >= 80%（安全路径 >= 95%）
+
+## Phase 2: Narwhal-Bullshark DAG 共识与游戏分配与双模式排序与时间共识
+- [ ] `TxLane` 枚举能正确将 tx 路由到 Public / GameTurn / CheckpointAnchor / ForceSync 通道
+- [ ] tx 路由规则：GameTurn + CheckpointAnchor → assigned_validator（CheckpointAnchor 不参与 turn ordering）；ForceSync + Public → 任意 validator（客户端多副本广播）；force_checkpoint → 任意 validator（escape hatch）；**NEW-H2 修复 + R3-H4/R3-H5 修正**：GameTurn tx 在 assigned_validator `game_validator_timeout_blocks` 内未装入 vertex 时，客户端可向非 assigned_validator 提交（附 `assigned_validator_timeout_proof`，**R3-H4 + R4-H6：需 ≥3 副本 validator secp256k1 签名见证，使用与 force_checkpoint 相同的阈值公式 `required_witness_count = max(3, floor(checkpoint_multi_replica_count * 2 / 3))`（3-of-5）防伪造（R4-H6 修正 — 原 2-of-N 阈值过低，fallback 允许非 assigned_validator 接受 GameTurn tx 绕过轮转排序独占权，2-of-5 合谋即可伪造 timeout_proof）**），fallback tx 走 Public 通道正常计费 gas，**R3-H5：执行排序仍按 GameTurn 通道语义（current_turn 排序），S9 规则适用**，使用 `gameturn_nonce`（NEW-M9）
+- [ ] 非 assigned_validator 收到 GameTurn tx 时返回 `NotAssignedValidator` 或转发
+- [ ] `TurnRule` 能从 Game 对象状态正确推导 `current_turn`
+- [ ] assigned_validator 校验轮转约束，非当前轮次玩家写交易返回 `NotYourTurn`，允许 read-only
+- [ ] validator 收到 tx 后装入本地待出 vertex 缓冲（默认 100ms 内必出 vertex）
+- [ ] vertex 组装：tx_list + 引用 ≥2/3 validator 的上一轮 vertex hash + 自身 secp256k1 签名（R4-H7 — vertex 签名对象 `hash(chain_id || round || vertex_hash || parent_hashes)` 绑定 chain_id）
+- [ ] vertex 大小上限 `max_vertex_size`（默认 256KB），超出分多个 vertex
+- [ ] assigned_validator 把自己负责 game 的 GameTurn tx 分组为 game sub-block（每 game 一个）
+- [ ] game sub-block 内部按 `(current_turn, arrival)` 排序
+- [ ] GameTurn 通道游戏操作 tx（call/check/raise/bet/fold）执行时不扣 gas
+- [ ] 买入资金锁仓在 Game 对象中，作为免 gas 通道的反滥用保障
+- [ ] 未买入或买入锁仓已释放的玩家写交易被拒绝（返回 `NotStaked`）
+- [ ] 每玩家活跃 Game 数量上限：join 时校验 <= `max_active_games_per_player`（默认 10），超出返回 `TooManyActiveGames`（S8 修复）
+- [ ] vertex 通过 gossipsub 广播给所有 validator（R4-L3 — gossipsub Sybil 攻击防护：validator-only topic 仅接受已认证 peer — libp2p identify 握手 + validator secp256k1 公钥签名（`hash(chain_id || peer_id || timestamp)`），校验 pubkey 在 ValidatorSet 中方可加入并发布；非 validator 全节点只读；防 Sybil 节点灌入垃圾 vertex）（R5-M1 修正 — epoch 边界 ± epoch_transition_window_blocks 内 gossipsub 认证同时接受旧集与新集 validator pubkey grace period）
+- [ ] **vertex 内排序（S9 修复）**：同一 vertex 内 GameTurn tx 先于 ForceSync tx 执行；force_sync 判定使用"该 vertex 内已执行 GameTurn tx 后的虚拟 last_action_height"（R4-M4 修正 — 跨 vertex 排序规则：同一 Bullshark commit（round）内所有 vertex 的 GameTurn tx 先于所有 ForceSync/force_advance tx 执行，即 commit 级别 S9 规则，防攻击者利用 Bullshark 排序不确定性使 force_advance 先执行）
+- [ ] DAG commit certificate 检测：某轮 vertex 获得 ≥2/3 validator 引用
+- [ ] Bullshark 算法对 DAG vertex 线性排序正确
+- [ ] 从 DAG commit 投影产出 block 序列（block = commit 内 vertex 的 tx 聚合 + 排序）
+- [ ] block header 含 `dag_commit_certificate`（round、vertex_hashes、signature_list、signer_bitmap）
+- [ ] Block 最终性：commit certificate 含 2/3 secp256k1 多签（signer_bitmap + signature_list） → finalized
+- [ ] validator 失败不丢 tx（DAG 冗余）：客户端多副本广播，其他 validator 在 vertex 中包含该 tx
+- [ ] block 验证器调用多曲线签名验证 + chain_id + nonce + 检测两通道排序违规，拒绝坏块
+- [ ] block 验证器确认 GameTurn 游戏操作 tx 未被错误扣 gas
+- [ ] block 验证器验证 game sub-block 的 turn ordering 约束 + assigned_validator 签名
+- [ ] block 验证器验证 dag_commit_certificate 的 2/3 secp256k1 多签（signer_bitmap + signature_list）
+- [ ] 两通道状态根转移验证通过
+- [ ] block header 含 `timestamp_ms` 与 `height`，`height = prev.height + 1` 严格单调递增
+- [ ] validator 拒绝 `timestamp_ms < prev.timestamp_ms`（非单调）与 `timestamp_ms > prev.timestamp_ms + max_interval_ms`（最大间隔）的 block（S10 修复）（R5-L4 修正 — timestamp_ms 为软引用，硬截止以 block.height 为权威）
+- [ ] validator 不使用本地时钟校验 timestamp（避免共识分叉）（S10 修复）
+- [ ] 超时参数（`turn_timeout_blocks` / `hand_max_duration_blocks` / `dispute_window_blocks` / `da_window_blocks` / `checkpoint_interval_blocks` / `game_validator_timeout_blocks`）均以 block height 计量
+- [ ] `turn_timeout_blocks` 默认 >= 3，吸收区块传播延迟（M3 修复）
+- [ ] Game 对象维护 `last_action_height` / `hand_start_height` 字段，由 GameTurn tx、checkpoint_anchor tx 与 force_sync tx 正确更新（O11 修复：字段名统一为 `_height`）
+- [ ] 轻客户端能订阅 block header 并获取权威 `height` 与 `timestamp_ms`，链下参与者据此判定超时（R4-L5 — 轻客户端 validator 集同步机制：从 trusted checkpoint 获取 validator_set_hash → 请求后续 ValidatorSetUpdate tx 链 → 逐个验证签名 + quorum → 推导当前 ValidatorSet → 验证最新 commit certificate；允许从任意 trusted checkpoint 同步无需下载全链历史）（R5-H5 修正 — ValidatorSetUpdate tx 格式 (epoch, prev_validator_set_hash, new_validator_set, new_validator_set_hash, signer_bitmap, signature_list)；签名域 hash(chain_id||epoch||prev_validator_set_hash||new_validator_set_hash)；threshold = 2/3 of prev_set；hash chain：prev_hash 必须等于上一 tx 的 new_hash）（R5-M8 修正 — 轻客户端状态验证：state_root 为 Sparse Merkle Tree root；get_state_proof(object_id) RPC 返回 (object_data, sparse_merkle_path)；轻客户端用 state_root 校验验证对象真实性）
+- [ ] 链下参与者本地时钟漂移不影响以 `block.height` 为准的硬截止判定
+- [ ] Game 创建时计算 `assigned_validator = validator_set[hash(G.id, current_epoch) % |V|]`，写入 Game 对象
+- [ ] 客户端本地路由发现：`hash(game_id, epoch) % |validator_set|` 计算结果与链上一致，零延迟路由
+- [ ] epoch 边界（每 `epoch_length_blocks` 默认 1000 block）自动重分配所有活跃 Game；**NEW-M10 修复 — OffChain 模式 Game epoch 过渡协议**：(a) 操作方在 epoch 边界前 `epoch_transition_window_blocks`（默认 10）内必须提交过渡锚点 checkpoint_anchor（带 ack）；(b) 未提交 → 任意参与者触发 `force_advance` 或 `request_revert`；(c) `last_partial_fold` 状态保留，新 assigned_validator 接受后续 `partial_checkin` / `checkin` 校验 `intermediate_commitment` 连续性；(d) 过渡期间 `force_checkpoint` 的 `assigned_validator_failure_proof` 仅可指控一个 assigned_validator（旧或新）（R4-H2 修正 — 由链上 tx 提交时的 current_epoch 权威决定，非客户端本地判断 — 客户端通过轻客户端获取权威 current_epoch，避免时钟偏差或 epoch 边界同步延迟导致指控错误的 assigned_validator）
+- [ ] assigned_validator 失败自动接管：`game_validator_timeout_blocks`（默认 2（R4-L8 修正 — 原 3 与 turn_timeout_blocks 同值致竞争条件，降为 2 给 fallback tx 留处理窗口））内未提交含该 game 的 vertex，其他 validator 可在 vertex 中包含该 game 的 tx（DAG 冗余）
+- [ ] ValidatorSet 定义（secp256k1 pubkey 集 + 质押金额），genesis 初始化；**NEW-L3 修复**：新 validator 需经历 `bonding_period_blocks`（默认 = 1 epoch = `epoch_length_blocks`）锁定期，期间可同步链状态但不参与共识出块（R5-H7 修正 — validator 退出 unbonding 期：unbonding_period_blocks（默认 2×epoch_length_blocks），期间不参与共识但质押仍可被 slashing；防 equivocation 后立即退出逃避 slashing）
+- [ ] Slashing — vertex equivocation：提交两个冲突 vertex + 两个签名证据 → 踢出 + 罚没保证金；**NEW-M15 修复**：`slash_amount = stake * slash_percentage / 100`，`slash_percentage` 默认 100%（可治理）
+- [ ] Slashing — 停机：连续 `downtime_threshold_blocks`（默认 100）未提交任何 vertex → 治理踢出；**NEW-L2 修复**：停机 validator 罚没 `downtime_slash_percentage`（默认 10%（R4-L1 修正 — 由 5% 提升至 10%，5% 罚没可能不足以威慑为协助审查而故意停机的 validator））保证金 + 失去出块资格
+- [ ] 审查缓解：force_* tx 任何 validator 必须接受并装入 vertex；审查证据可作治理踢出依据；**NEW-H1 修复**：`force_checkpoint` 触发 assigned_validator `under_investigation` + `defense_window_blocks`（默认 50）防御窗口（而非自动 slashing），窗口内可申辩免责（R4-H5 修正 — 累积惩罚仅申辩失败递增 + 衰减机制：`under_investigation_count` 仅当申辩无效或无申辩时 +1（原"无论申辩是否成功 +1"可被恶意参与者 griefing 诚实 validator）；衰减机制：每 epoch 衰减 1（最低为 0），防止历史指控永久累积导致诚实 validator 被追溯惩罚）
+- [ ] **Task 39 模块测试通过**：tx 双通道分类路由正确 + **NEW-H2：GameTurn fallback 接受**；DAG vertex 组装 + 256KB 分片 + 100ms 缓冲；4 validator Bullshark 共识 + secp256k1 多签验证；block 验证器（tx 签名 / gas / object 版本 / vertex 内排序）；时间共识 height 单调 + max_interval；游戏分配 hash + epoch 重分配 + 客户端路由 + **NEW-M10：OffChain epoch 过渡**；validator 失败接管；slashing（**NEW-M15：slash_amount / NEW-L2：停机 10%（R4-L1/R5-H1 修正 — 由 5% 提升至 10%）/ NEW-H1：审查调查流程 / NEW-L3：bonding 期**）；Phase 2 行覆盖率 >= 80%（共识/slashing/时间共识 >= 95%）
+
+## Phase 3: rBPF VM 与 Syscalls 与合约升级
+- [ ] `solana_rbpf` runtime 成功加载并执行示例 BPF 合约
+- [ ] `object_read` / `object_write` / `object_create` / `emit_event` / `log` / `panic` syscall 工作正常
+- [ ] `verify_signature` syscall 可被合约调用并正确返回
+- [ ] `get_block_height` / `get_timestamp` syscall 暴露时间共识给合约
+- [ ] **Gas 计费表（M8 修复 + NEW-M16 修复 + R3-M3 修正）**：算术指令 = 1 gas，内存 = 3 gas，分支 = 2 gas；syscall：object_read = 10，object_write = 20，**`secp256k1_verify` = 500（R3-M3 修正 — 原未列出）**，bls_g1_mul = 500，bls_pairing = 5000，hypernova_verify = 50000，groth16_verify = 20000，ipa_verify = 15000，**`verify_failure_proof` = 5000（NEW-M16 + R3-M3 验算 3×500+~1000+~1500≈4000<5000 足够）**；block gas limit = 50M，tx gas limit = 10M；**`force_checkpoint` tx 提交方需预付含 `verify_failure_proof` gas，evidence 验证失败 gas 不退（反 spam）**
+- [ ] gas 计量生效，超限 tx 失败并回滚
+- [ ] 示例合约能创建 / 修改 Game 对象并 emit 事件
+- [ ] poker 合约 settle 函数能按配置的台费规则（比例 / 封顶 / 收款方）从底池扣除台费并分配给胜者
+- [ ] 台费规则（比例 / 封顶 / 收款方）完全由合约配置，链底层不硬编码
+- [ ] **底池为 0 时跳过台费（M1 修复）**：settle 时 pot = 0 不产生负数，台费 = 0
+- [ ] poker 合约 HandStarted 时按 `execution_mode` 参数分支：OnChain 全链上 / OffChain 触发 checkout
+- [ ] **force_advance fold/check 规则（M6 修复）**：默认 fold，大盲位无人加注时 check
+- [ ] **合约升级（M4 修复）**：部署时创建 `UpgradeCap` 对象并 transfer 给部署者（R4-L4 — UpgradeCap 多签/timelock 建议：强烈建议 governance multisig ≥2/3 quorum 或 timelock（延迟 parameter_delay_blocks 默认 2000 个 block，期间可审查 + 紧急撤销）；不在共识层强制但 spec 文档化）
+- [ ] 升级 tx：提交新字节码 + UpgradeCap → 注册新版本，contract_id 不变，version += 1
+- [ ] 旧版本字节码变为不可调用
+- [ ] **Task 40 模块测试通过**：rBPF VM 加载合法/非法字节码 + entrypoint + gas 计费表；syscall（object_*/emit_event/log/panic/verify_signature/get_block_height/get_timestamp）正向 + 反向；gas 计费超限返回 `OutOfGas` + worst-case syscall 计费；**NEW-M16：`verify_failure_proof` syscall gas = 5000 + `force_checkpoint` 预付 gas + evidence 验证失败 gas 不退**；示例合约（minimal / Game 对象 / 修改状态 / poker settle 台费）；合约升级（UpgradeCap + version += 1 + 旧版本不可调用 + 非授权返回 `NotAuthorized`）；HandStarted OnChain/OffChain 分支 + force_advance fold/check；Phase 3 行覆盖率 >= 80%（gas 计费/合约升级 >= 95%）
+
+## Phase 4: BLS12-381 原生预编译（含子群检查）
+- [ ] G1 / G2 add / mul / neg syscall 结果与 blstrs 直接计算一致
+- [ ] **子群检查（S6 修复）**：所有 G1/G2 输入先做子群检查（`is_in_subgroup()`），失败返回 `InvalidSubgroup` 错误
+- [ ] G1 标量乘法 gas = 500（含子群检查开销），常数时间实现
+- [ ] `pairing_check` 在 RFC 9380 / 已知测试向量上正确
+- [ ] pairing_check 对所有 4 个输入做子群检查（G2 子群检查开销约 1ms），gas = 5000（worst-case）
+- [ ] `hash_to_g1` / `hash_to_g2` 符合 RFC 9380，gas = 1000 + 10 * msg.len()，msg 最大 65536B（超出返回 `InputTooLong`）
+- [ ] 子群检查防止 DoS：非子群 G2 元素调用 pairing 在 pairing 之前被拒绝
+- [ ] secp256k1 多签验证 RPC 工作（DAG consensus）+ BLS12-381 syscall RPC 工作（仅合约层 ZK 证明验证）
+- [ ] syscall gas 计费按 worst-case（pairing > mul > add）
+- [ ] 复用 `poker_protocol::crypto::Bls12381Curve` (blstrs) 实现
+- [ ] **Task 41 模块测试通过**：BLS12-381 G1/G2 操作与 blstrs 一致 + compressed bytes 48/96 序列化往返；子群检查非子群元素返回 `InvalidSubgroup`（DoS 防护）；pairing_check RFC 9380 测试向量 + 4 输入子群检查 + gas 5000；hash_to_g1/g2 RFC 9380 合规 + msg > 65536B 返回 `InputTooLong`；miller_loop/final_exp 一致；节点 API（secp256k1_aggregate_verify / bls_verify）正向 + 反向；gas 计费超限；模糊测试 >= 10000 随机输入；Phase 4 行覆盖率 >= 80%（子群检查/pairing >= 95%）
+
+## Phase 5: 链下执行 + ZK 证明验证 + 通信协议 + 裁剪
+- [ ] OnChain 模式：游戏步骤全链上 GameTurn 通道执行，无 checkout，仍享轮转排序 + 免 gas
+- [ ] OffChain 模式：仅当 `execution_mode = OffChain` 时开局后 checkout 触发，写入 `OfflineState` commitment
+- [ ] `OfflineState { game_id, version, state_root, participants, nonce, execution_mode }` 定义完整
+- [ ] Checkin tx：验证 proof 后应用 Δ 更新 Game 对象（R5-M6 修正 — checkin tx 签名域 hash(chain_id||game_id||π_hash||state_delta_hash||new_commitment||ack_chain_hash)；partial_checkin tx 签名域 hash(chain_id||game_id||π_partial_hash||folded_step_count||intermediate_commitment||ack_chain_partial_hash)，操作方签名，绑定 chain_id 防跨链重放）
+- [ ] **Partial checkin（π_partial — 折叠中断恢复）**：`partial_checkin` tx（任意 validator，escape hatch 类，正常计费 gas）：`(game_id, π_partial, folded_step_count=N, intermediate_commitment, ack_chain_partial)`；链上 verifier 验证 π_partial（与最终 π 相同 public_io 边界，`fold_step_count = N`，`final_commitment = intermediate_commitment`）；验证通过记录 `last_partial_fold = (intermediate_commitment, N, π_partial_hash, ack_chain_partial_hash)`，**不应用 Δ 不结算**，仅作锚点；**NEW-C2 修复**：不推进 `last_action_height`（字段名统一为 `_height`，所有 operator 活动追踪使用单一字段）；不触发 forfeit；可多次提交覆盖（R5-M5 修正 — ack_chain_partial_hash = MerkleRoot(ack_chain[0..N])，与 ack_chain_hash 相同 RFC 6962 构造，确保算法一致性）
+- [ ] **Partial checkin 与完整 checkin 衔接（NEW-M5 + NEW-M6 + R3-M2/R3-H3 修正）**：完整 checkin 时校验 π_final 的 `initial_commitment` == 已记录 `intermediate_commitment` 且 `fold_step_count = M - N`；**NEW-M6 修复 — ack_chain 前缀验证**：完整 checkin 校验 `ack_chain[0..N]` hash == `last_partial_fold` 中记录的 `ack_chain_partial_hash`（防 ack 链断裂/篡改）**；**NEW-M5 修复 + R3-M2/R3-H3 修正 — ack_chain_hash 算法定义**：`ack_chain_hash = MerkleRoot(ack_1 || ack_2 || ... || ack_n)`，其中 `ack_i = hash(chain_id || game_id || current_turn || state_hash || checkpoint_seq || participant_tagged_pubkey || participant_signature)`（**R3-H3：增加 chain_id 绑定防跨链重放**；Merkle 根结构保证顺序 + 防篡改）；**R3-M2 修正 — RFC 6962 风格 domain separation 防二次原像攻击**：叶子节点哈希为 `H(0x00 || ack_i)`，内部节点哈希为 `H(0x01 || left_child || right_child)`（区分叶子与内部节点）**；**（R4-M5 修正 — RFC 6962 风格 domain separation：叶子节点 `H(0x00 || ack_i)`，内部节点 `H(0x01 || left_child || right_child)` 防二次原像；R4-M1 修正 — 边界情况：空树→`H(0x00 || "")`，单叶子→`H(0x00 || ack_1)`，不平衡树→RFC 6962 filled subtree 补齐 `H(0x00 || empty)`）**；通过 → 结算 + 清除 `last_partial_fold`；无 partial_checkin 记录时向后兼容（`fold_step_count` 为总步数）
+- [ ] `ZkVerifier` trait 与 syscall 注册表定义清晰，支持热插拔
+- [ ] 通用 `zk_verify(scheme_id, proof, public_io)` syscall 工作
+- [ ] Hypernova proof 格式定义清晰，`hypernova_verify` 注册成功
+- [ ] **Hypernova public_io 边界（O15 修复 + 审查截断容错）**：包含 initial_commitment、final_commitment、state_delta_hash、ack_chain_hash（仅正常 checkpoint 聚合）、skip_count、segment_continuity_proof、fold_step_count（上限 1000），verifier 校验 public_io 完整性
+- [ ] Groth16 `Vk` / `Proof` 结构定义，`groth16_verify` 复用 BLS12-381 pairing（含子群检查），注册成功（R4-L2 — Groth16 trusted setup 流程：链下 MPC ceremony 生成 CRS，verifying_key 通过治理提案上链注册到 ZkVerifierRegistry，proving_key 链下分发，toxic waste 由参与方销毁；不在共识层强制但 spec 文档化提醒合约方自行组织可信 setup）
+- [ ] IPA `IpaProof` 结构定义，`ipa_verify` 注册成功
+- [ ] MVP verifier（stub）各自接受格式合法的 proof，拒绝格式错误
+- [ ] 链下 prover 能折叠 ≥2 步 CCS 实例为单个 proof
+- [ ] `poker_protocol::zk_shuffle` 电路作为 CCS 实例可被 prover 消费
+- [ ] **checkpoint_anchor tx（S2 修复 + 审查截断防护 — 方案 A 被动检测 + C1 栽赃防护 + NEW-M3 修复）**：操作方每 `checkpoint_interval_blocks`（默认 5）提交一次轻量 checkpoint_anchor，**走 CheckpointAnchor 通道（路由到 assigned_validator，与 GameTurn 同路由但独立 lane 不参与 turn ordering），通过 gossipsub 广播提交（确保所有 validator 包括 assigned_validator 必然收到 — 防栽赃）**，免 gas（system tx 类别），客户端多副本广播默认 `checkpoint_multi_replica_count`**=5（NEW-M3 修复 — 由 3 提升至 5 以增加合谋难度）**个作为审查检测证据（副本 validator 仅见证不装入 vertex），内容为 `(game_id, current_turn, state_hash, ack_signatures, opt_out_ack_proof?)`（R5-M2 修正 — 小 validator 集 |V|<5 时 checkpoint_multi_replica_count 自动降为 |V|-1，阈值降为 max(2, floor((|V|-1)*2/3))；主网建议 |V|>=5）
+- [ ] checkpoint_anchor tx 更新链上 `last_action_height = block.height`（S2 修复）；操作方提交后无需观察 on-chain confirmation（被动检测模式）；assigned_validator 拒收由 `force_checkpoint` 逃生 tx 触发（R5-L2 修正 — checkpoint_anchor 去重：相同 (game_id, checkpoint_seq) 仅首次生效，后续返回 DuplicateCheckpoint）
+- [ ] **force_checkpoint 逃生 tx（审查截断防护 — assigned_validator 审查 checkpoint_anchor + NEW-C2 + NEW-H1 + R3-M6 修正）**：任何节点可提交 `force_checkpoint`（任意 validator，escape hatch 类，**走 Public 通道正常计费 gas** — 避免免 gas spam 风险）：`(game_id, current_turn, state_hash, ack_signatures, opt_out_ack_proof?, assigned_validator_failure_proof)`；链上验证 evidence 后接受，**NEW-C2 修复**：更新 `last_action_height`（**R3-H6 修正**：request_ack 不再更新此字段）；**NEW-H1 修复 + R3-M6 修正**：触发 assigned_validator `under_investigation = true` + `defense_window_blocks`（默认 50）防御窗口（而非自动 slashing），窗口内 validator 可提交"未收到证明"申辩（**R3-M6：申辩需 ≥2/3 validator gossipsub 日志佐证**），申辩有效 → 豁免仅记录嫌疑，无申辩或申辩无效 → 治理 slashing；**R3-M6：累积惩罚** — `under_investigation_count` 达阈值（默认 3）后即使申辩也触发 slashing，标记保留 N epoch；支持 `opt_out_ack_proof` 字段（与 checkpoint_anchor 等价语义）
+- [ ] **assigned_validator_failure_proof 验证（含 C1 栽赃防护 + C6 非包含证明 + NEW-M3 修复）**：evidence 含 `(原始 checkpoint_anchor tx 内容 + gossipsub 广播证据 + multi-replica receipt signatures（**≥3 个副本 validator 接收见证签名，3-of-N 多签阈值，N=checkpoint_multi_replica_count=5（NEW-M3 修复 — 由 2-of-3 提升至 3-of-5 以提高合谋门槛；阈值公式 `required_witness_count = max(3, floor(checkpoint_multi_replica_count * 2 / 3))`（R3-C1 修正 — N=5→3，N=7→4，修正原 `ceil(N*2/3)+1` 对 N=5 得 5 的数学错误），治理可调但下限 ≥3）**）+ assigned_validator 应出 vertex 但未出的 round 范围 + 非包含证明)`；链上验证：(1) 原始 checkpoint_anchor 内容合法；(2) **≥3 个副本 validator 见证签名有效（multi-replica receipt signatures）**；(3) **栽赃防护：gossipsub 广播 + ≥3 副本见证 → assigned_validator 必然收到**（操作方无法跳过 assigned_validator）；(4) assigned_validator 在 `game_validator_timeout_blocks` 内未装入 vertex（通过 round 范围 + 非包含证明，见"round 范围非包含证明"项）；任一失败 → 拒绝 force_checkpoint
+- [ ] **委托逃生机制（操作方离线容忍 + C3 撤销注册表 + NEW-M1 + NEW-M2 修复）**：操作方预先签署 `delegated_escape_authorization` 凭证（`game_id` + 委托方 `tagged_pubkey` + `expiry_height` + **`credential_nonce`** + 操作方签名）（R4-H7 — 签名对象 `hash(chain_id || game_id || tagged_pubkey || expiry_height || credential_nonce)` 绑定 chain_id 防跨链重放）；任一方检测到审查可凭凭证代为提交 `force_checkpoint`；链上验证委托凭证（签名 + 未过期 + game_id 匹配 + **NEW-M2 修复 — `expiry_height` 为绝对 block height（非相对偏移），校验 `block.height <= expiry_height` 且 `expiry_height - tx.block_height <= delegated_escape_max_expiry_blocks`（默认 100，限制凭证最大有效窗口防长期未撤销滥用）** + **`credential_nonce > Game.delegated_escape_nonce`**）+ 代提交方签名后接受；**NEW-M1 修复 — 凭证一次性消费**：`force_checkpoint` 接受委托凭证后 `Game.delegated_escape_nonce = credential_nonce`（消费该 nonce，防止同一凭证被多 watchtower 重复提交 force_checkpoint spam）；**撤销机制**：操作方提交 `revoke_delegated_escape` tx → `Game.delegated_escape_nonce += 1` → 旧 nonce 凭证失效；默认 `delegated_escape_max_expiry_blocks` = 100
+- [ ] **多副本检测协议（NEW-M3 修复）**：副本 validator 收到 checkpoint_anchor 但发现 assigned_validator 在 `game_validator_timeout_blocks` 内未装入 vertex → 签发"审查见证证据"（内容哈希 + 接收时所在 block height + round 范围 + 副本 validator secp256k1 签名（R4-H7 — 见证签名对象 `hash(chain_id || game_id || content_hash || block_height || round_range)` 绑定 chain_id））；**需 ≥3 个副本 validator 的见证签名方可构成有效 `assigned_validator_failure_proof`（NEW-M3 修复 — 由 2 提升至 3，N=5，3-of-5 多签阈值，防止单一/双副本合谋伪造）**；可附在 `force_checkpoint` 的 `assigned_validator_failure_proof` 中，亦可独立提交治理 slashing 提案；副本 validator 不得直接把 checkpoint_anchor 装入自己的 vertex；副本 validator 签发虚假见证证据 → 治理 slashing（罚没保证金）
+- [ ] **round 范围非包含证明（C6 修复）**：`assigned_validator_failure_proof` 含非包含证明 `(round_range [R, R+k], assigned_validator_pubkey, vertex_list, non_inclusion_proofs)`；vertex_list 列出 [R, R+k] 内 assigned_validator 所有 vertex（round + author + vertex_hash + tx_merkle_root）；完备性由 DAG commit certificate 结构验证（缺失即不完整）；assigned_validator 某 round 未产出 vertex 需 ≥2/3 validator 缺席见证签名；non_inclusion_proofs 对每个 vertex 提供 Merkle 非包含证明（tx_hash 不在 tx_merkle_tree 中）；证据须在 `vertex_prune_after_blocks`（默认 10000）内提交（R4-M7 修正 — round 缺席见证签名生成机制：每轮 Bullshark commit certificate 中附带 `round_attendance_bitmap`（第 i 位标记 validator vi 该轮是否产出 vertex）；缺席见证无需独立签名 tx — 直接从 commit certificate 的 bitmap 派生（commit certificate 已含 ≥2/3 validator secp256k1 多签，bitmap 为 signed payload 一部分）；assigned_validator bit=0 即 round 缺席证据）（R5-H4 修正 — tx_merkle_tree 采用 sparse Merkle tree（tx_hash 为 key，256-bit depth）；非包含证明 (tx_hash, sparse_merkle_path)，叶子 = empty_placeholder；proof size ≤ 8KB，gas 5000 足够）
+- [ ] **多方签名 ACK（S4 修复 + NEW-H3 + NEW-M11 + R3-H3 修正）**：checkpoint_anchor 必须包含所有活跃参与者的 tagged pubkey 签名 ack（secp256k1/ed25519 钱包密钥）；**NEW-M11 修复 — 活跃参与者定义**：当前手牌未 fold 且未 sit-out 的在座玩家（fold 后自动退出 ACK 集合，ACK 集合随 fold 事件动态收缩）；**NEW-H3 修复 + R3-H3 修正 — ACK 签名域分离**：ACK 签名消息为 `hash(chain_id || game_id || current_turn || state_hash || checkpoint_seq)`（**增加 chain_id 防跨链重放** + 域分离 + 绑定 game_id，防跨 Game 重放 + 防跨 checkpoint_seq 重放）；缺少任一活跃参与者 ack 被任何接收 validator 拒绝（返回 `MissingAck`）；opt_out_ack_proof 字段用于 ack_deadline 逾期默认 ACK
+- [ ] **审查截断防护 — request_ack / ack_deadline（NEW-M7 + R3-H6 修正）**：操作方可提交 `request_ack` tx（任意 validator，免 gas），链上设定 `ack_deadline = block.height + ack_deadline_blocks`（默认 3），写入 Game.`pending_ack_requests`；**R3-H6 修正 — `request_ack` 不再更新 `last_action_height`**（ACK 收集动作非游戏推进，更新会被操作方对不同 P 轮流提交滥用拖延 force_advance）；**NEW-M7 修复 + R3-H6 修正 — 频率限制防 spam**：每个 Game 对每个参与者 P 同时只允许 1 个 active `pending_ack_request`（即同一 `(game_id, target_participant)` 在 `ack_deadline` 未过期前不得提交新的 `request_ack`，违反返回 `PendingAckExists`）；**R4-M2 修正 — 同一 Game 在 `turn_timeout_blocks` 内最多提交 `min(活跃参与者数, max_request_ack_per_turn_timeout)` 次 request_ack（默认 = 活跃参与者数，上限 10）— 原 1 次过度限制正常 ACK 收集（违反返回 `RequestAckTooFrequent`）**（R5-L6 修正 — pending_ack_request 在 P 提交 ACK/refuse_ack 后立即清除，无需等 ack_deadline 过期）
+- [ ] **审查截断防护 — refuse_ack**：参与者可在 deadline 内提交 `refuse_ack` tx（任意 validator，免 gas）含 `(request_id, reason, evidence)`（R4-H7 — refuse_ack 签名对象 `hash(chain_id || game_id || request_id || reason)` 绑定 chain_id）；evidence 验证失败 → 该参与者 forfeit 保证金；进入 dispute 流程
+- [ ] **审查截断防护 — opt-out 默认 ACK**：`block.height > ack_deadline` 且无 ACK 无 refuse_ack → 视为默认 ACK；操作方提交带 `opt_out_ack_proof` 的 checkpoint_anchor，链上验证后接受
+- [ ] **治理 slashing 恶意 refuse_ack**：累计 `malicious_refuse_count` >= `malicious_refuse_threshold`（默认 3）→ 罚没保证金分配给被恶意拒绝的操作方
+- [ ] **审查截断容错 — checkpoint_skip**：操作方可提交 `checkpoint_skip` tx（任意 validator，免 gas）：`(game_id, skip_segment_start, skip_segment_end, last_known_state_hash, continuity_proof)`；仅更新 `last_action_height` 与 `skip_count += 1`，**不推进 ack_chain_hash**（R4-M6 修正 — continuity_proof 格式：`(start_state_proof, end_state_proof)`，start_state_proof 为 ≥2/3 参与者 ACK 签名聚合证据（签名对象 `hash(chain_id || game_id || checkpoint_seq || state_hash)`）；链上校验签名有效性 + 签名者 ≥2/3 活跃参与者 + state_hash == last_acked_checkpoint.state_hash；失败 → checkpoint_skip 拒绝，操作方必须提交 request_revert）（R5-H6 修正 — end_state_proof 终态验证完整性：(1) 连续 skip 段间 end_state == 下段 start_state；(2) skip 结束回退时 end_state == last_acked_checkpoint.state_hash；(3) skip 后 checkin 时最后段 end_state == π.initial_commitment；(4) verify_segment_chain() 逐段校验，断裂 → 拒绝 + forfeit）
+- [ ] **skip_count 上限**：`max_skip_segments`（默认 3），超出则操作方必须提交 `request_revert`
+- [ ] **链上 verifier 校验**：`skip_count <= max_skip_segments` + segment_continuity_proof 验证（跳过段起点状态 == 上一正常 checkpoint 终点状态，终点状态 == 下一正常 checkpoint 起点状态）；任一失败 → checkin 拒绝，操作方进入 forfeit 流程
+- [ ] **force_checkin 可行性条件（S3 修复 + 机器故障覆盖 + H4 修复 — forfeit 边界判定 + NEW-C2 + NEW-M4 + R3-M1/R3-M7 修正）**：覆盖两种场景 — (1) 操作方已通过 checkpoint_anchor 广播中间 state_hash 但拒绝提交最终 checkin（恶意扣留）；(2) 操作方机器故障导致无法提交 checkin；两种场景下其他参与者均可基于已广播 checkpoint state 自行计算 (π', Δ')；机器故障场景下参与者可汇集签名动作日志从最后 ACKed checkpoint 重新折叠；force_checkin 成功 → 游戏正常结算；纯扣留（无 checkpoint 广播）走 request_revert；**H4 修复 — forfeit 边界判定基于 `last_checkpoint_age = block.height - Game.last_action_height`（纯 timer 驱动；NEW-C2 修复：字段名统一为 `last_action_height`）**：`<= turn_timeout_blocks` → 恶意扣留 → forfeit；`> turn_timeout_blocks` → 机器故障 → 不 forfeit；与 `request_revert` reason 字段语义兼容；**NEW-M4 修复 + R3-M1/R3-M7 修正 — 指定操作方场景**：forfeit 边界阈值翻倍 `turn_timeout_blocks * 2`；force_advance 时**无条件豁免当前轮次玩家**（check 而非 fold，**R3-M1：不需"证明短暂网络抖动"，与纯 timer 驱动一致；豁免对象是当前轮次玩家而非 designated operator**）；**R3-M7：check 豁免次数上限** — `designated_operator_check_exemptions` 达上限（默认 2）后恢复 fold 语义，防恶意 designated operator 循环停发无限拖延（R5-M4 修正 — designated_operator_check_exemptions 在 designated operator 成功提交 checkpoint_anchor 时重置为 0）
+- [ ] **force_advance 判定（S2 修复 + NEW-C2 修复）**：基于 `block.height > last_action_height + turn_timeout_blocks`（NEW-C2 修复：字段名统一为 `last_action_height`，原 `last_checkpoint_height` 已合并）；force_advance 路由到任意 validator（R5-L1 修正 — force_advance 自然频率限制：每 turn_timeout_blocks 最多 1 次，无需额外限制）
+- [ ] Game 对象链上维护 `last_action_height` / `hand_start_height` / `last_commitment`（O11 修复：字段名统一为 `_height`）
+- [ ] `force_advance`：轮次超时后能推进 Game（默认 fold，大盲位无人加注时 check），更新 current_turn（M6 修复）；路由到任意 validator
+- [ ] `force_checkin`：基于已广播 checkpoint state，其他参与者能提交自行计算的 (π', Δ') 完成结算（S3 修复，覆盖恶意扣留 + 机器故障）；**H4 修复 — forfeit 边界判定基于 `last_checkpoint_age = block.height - Game.last_action_height`（NEW-C2 修复：字段名统一为 `last_action_height`）**：`<= turn_timeout_blocks` → 恶意扣留 → forfeit；`> turn_timeout_blocks` → 机器故障 → 不 forfeit；**NEW-M4 修复 — 指定操作方场景阈值翻倍 `turn_timeout_blocks * 2`**；路由到任意 validator
+- [ ] `request_revert` / `force_revert`：内容为 `(game_id, last_acked_checkpoint, reason)`；`reason` 枚举 `technical_interrupt` / `malicious_withholding` / `data_unavailable`；**`reason=technical_interrupt` → 回退到最后 ACKed checkpoint_state，操作方不 forfeit**（技术中断豁免）；`reason=malicious_withholding` 或 `data_unavailable` → 回退 + forfeit；与故障恢复流程兼容（阶段 1-2 technical_interrupt 无 forfeit；阶段 3 technical_interrupt 仍无 forfeit，reason 优先于阶段判定）；路由到任意 validator
+- [ ] **challenge_delta 语义（S5 修复 + NEW-H4 修复）**：从 π 的 public_io 重新派生 Δ'（不需 witness），对比 Δ 与 Δ'；不一致则提交方 forfeit；**NEW-H4 修复 — `state_delta_hash` 不可逆性**：`state_delta_hash` 为 hash，无法从中派生原始 Δ'（challenge 仅能比对 hash 不一致，不能恢复 Δ 用于继续执行）；挑战成功后链上状态需回退到最后 ACKed checkpoint_state（触发 `request_revert` reason=`malicious_withholding`），而非"应用正确 Δ 继续"；路由到任意 validator（R4-L7 — 挑战方保证金机制：challenge_delta 提交方须预锁挑战保证金 = buy_in_amount * challenge_deposit_ratio / 100，challenge_deposit_ratio 默认 10 可治理 ∈ [1, 100]；挑战成立 → 保证金退还 + 从操作方 forfeit 保证金分得奖励（challenge_reward_ratio 默认 50 可治理 ∈ [10, 100]）；挑战失败 → 保证金没收分配给被挑战方；防恶意挑战方无成本骚扰）
+- [ ] `request_da`：能要求操作方在 da_window_blocks 内发布状态；进入操作方故障恢复流程阶段 2；da_window_blocks + recovery_window_blocks 过期且无 force_checkin 且操作方未恢复 → 触发 force_revert；路由到任意 validator
+- [ ] **操作方故障恢复流程（3 阶段时间窗口，不要求故障证据）**：阶段 1 `turn_timeout_blocks`（操作方可恢复，force_advance 可触发，无 forfeit）；阶段 2 `da_window_blocks` + `recovery_window_blocks`（request_da + 参与者重折叠 force_checkin，窗口内无 forfeit）；阶段 3 forfeit + force_revert（窗口过期 + 无 force_checkin + 操作方未恢复 → forfeit 保证金 + 回退到最后 ACKed checkpoint）；纯 timer 驱动，不要求故障证据
+- [ ] **动作日志可选保存（H5 修复 — operator ack 签名 + 冲突裁决 + NEW-H5 + R3-H3 修正）**：日志格式 `(step_index, action, state_hash_before, state_hash_after, participant_tagged_pubkey, participant_signature, operator_tagged_pubkey, operator_ack_signature)`；**NEW-H5 修复 + R3-H3 修正 — operator_ack_signature 域分离**：`operator_ack_signature` 为操作方对 `hash(chain_id || game_id || step_index || action || state_hash_before || state_hash_after || participant_tagged_pubkey)` 的签名（**R3-H3：增加 chain_id 绑定防跨链重放** + 绑定 game_id 防跨 Game 重放 + 防栽赃 — 操作方无法用 Game A 的签名否认 Game B 的动作，亦无法用 testnet 签名否认 mainnet 动作；原 H5 域 `hash(step_index || action || state_hash_before || state_hash_after || participant_tagged_pubkey)` 已废弃）；保存日志的参与者在操作方故障后可汇集日志 → 校验双签有效 → 从最后 ACKed checkpoint 重新折叠 → 提交 force_checkin；缺少 `operator_ack_signature` 的日志仅作参考；未保存日志的参与者放弃重折叠权，只能依赖 request_revert；动作日志非链上数据；**H5 冲突裁决**：同一 `step_index` 冲突日志且两者均带有效 `operator_ack_signature` → 操作方 equivocation（双签）→ 链上验证冲突证据后操作方 forfeit 保证金（与 vertex equivocation slashing 同语义）；仅一方有 operator ack → 以带 ack 条目为准；两方均无 → 走 request_revert；**反规避**：操作方无法对 A/B 签不同日志（双签直接 forfeit），无法事后否认已签动作（非否认性）；参与者伪造 operator_ack_signature → 签名验证失败 → 伪造方 forfeit
+- [ ] `force_settle`：整局超时后能强制结算，不永久锁仓；路由到任意 validator
+- [ ] `partial_checkin`：折叠中断 → 提交 π_partial 锚点 → 恢复后从锚点续折叠 → 完整 checkin 衔接校验通过；路由到任意 validator
+- [ ] `dispute_window_blocks` 挑战窗口 + fraud proof + 惩罚保证金机制工作
+- [ ] forfeit 规则由合约定义，扣留方/超时方锁仓资金能补偿其他参与者（R4-L6 — forfeit 保证金金额/比例：Game 创建时操作方预锁 forfeit 保证金 = buy_in_amount * forfeit_deposit_ratio / 100，forfeit_deposit_ratio 默认 100 可治理 ∈ [10, 200]；存入 Game.forfeit_deposit 字段；触发 forfeit 时全额扣除分配给受害参与者；独立于 slashing 保证金；结算后未触发则退还）（R5-H3 修正 — designated operator forfeit 保证金：非玩家操作方无 buy_in_amount，forfeit 保证金 = designated_operator_bond_amount（可治理）；Game 对象增加 designated_operator_bond 字段；任命 tx 签名 hash(chain_id||game_id||operator_pubkey||bond_amount||expiry_height)）
+- [ ] **状态裁剪（M2 修复）**：结算后 dispute_window_blocks 过期后可裁剪 Game 对象中间版本，保留最终版本 + state root commitment
+- [ ] State root commitment 永久保留（每个 block 的 Sparse Merkle Root）
+- [ ] **历史 tx 内容压缩（M2 扩展）**：block 距 finality 过 `tx_prune_after_blocks`（默认 1000）+ block 内所有 Game 结算 + dispute 过期 → 丢弃完整 tx 内容，仅保留 `(tx_hash, tx_type, merkle_proof)`；block header 的 `tx_merkle_root` 永久保留以支持存在性证明
+- [ ] **DAG vertex 压缩（NEW-M13 修复）**：vertex 所在 round 距 finality 过 `vertex_prune_after_blocks`（**默认 10000（NEW-M13 修复 — 由 1000 统一提升至 10000，与 round 范围非包含证明证据保留期一致）**）→ 丢弃 `tx_list` + `parent_hashes` 详情，保留 `(round, author, vertex_hash, tx_count, parent_count, author_sig)`；共识仍正常运行
+- [ ] **ZK proof 归档到 DA 层**：checkin 的 (π, Δ, ack_chain) 所在 Game 结算 + dispute 过期 → π 移到 Walrus DA 层，链上仅保留 `(proof_hash, verification_result, walrus_blob_id)`；archive node 数量 < `archive_node_min_count`（默认 3）时不得裁剪（R5-M7 修正 — Walrus DA 集成：付费由 da_storage_fee 预扣；proof_hash = blake2b(π||Δ||ack_chain) 验证完整性；blob 过期 archive node 续费；不可用返回 HistoricalDataUnavailable 不影响最终性）
+- [ ] **永久保留项**：block header / ValidatorSet 变更记录（含 slashing 证据 + 罚没金额）/ 治理参数变更记录（参数名 / 旧值 / 新值 / 生效 height）/ Game 最终结算版本 + 台费分配 / slashing 证据（vertex equivocation / 停机 / 恶意 refuse_ack 累计）
+- [ ] **节点角色分层**：archive node（永不裁剪，提供 `request_historical_data` RPC）/ full node（Layer 1-3 裁剪）/ light node（仅 block header + state root commitment 订阅）
+- [ ] **数据可恢复性**：`request_historical_data(tx_hash | vertex_hash | proof_hash)` RPC 工作；archive node 响应延迟 < 5s；archive node 数量不足时 full node 自动升级为 archive mode
+- [ ] **Compact Block Relay 协同**：short ID 映射表随 tx 内容一起裁剪；archive node 维护完整映射；新节点 fast sync 跳过历史 short ID
+- [ ] **Task 42 模块测试通过**：OfflineState 序列化 + checkout/checkin + OnChain 跳过；ZkVerifier trait + 热插拔 + zk_verify 正向/反向；Hypernova/Groth16/IPA verifier Proof 结构 + public_io 边界 + MVP stub；链下折叠 ≥2 步 + zk_shuffle 电路消费 + Fiat-Shamir；**partial_checkin（NEW-M5：ack_chain_hash MerkleRoot 算法 / NEW-M6：ack_chain 前缀验证 / NEW-C2：last_action_height 字段统一 / R3-M2：RFC 6962 domain separation 叶子 `H(0x00||ack_i)` + 内部 `H(0x01||left||right)` 防二次原像 / R3-H3：ack_i 含 chain_id 防跨链重放）**；链下通信协议（checkpoint_anchor CheckpointAnchor 通道 + **NEW-M3：multi_replica_count=5** + 多方 ACK **NEW-H3：ACK 签名域分离 + NEW-M11：活跃参与者定义 + R3-H3：ACK 域含 chain_id** + force_* + force_checkpoint 走 Public 通道正常计费 gas + **NEW-C2：last_action_height 更新 / NEW-H1：under_investigation 调查流程**）；审查截断防护 9 子项（force_checkpoint 逃生 / assigned_validator_failure_proof 验证（**NEW-M3：≥3 副本 3-of-5 多签 + R3-C1：阈值公式 `max(3, floor(N*2/3))` 验算 N=5→3/N=7→4，修正原 `ceil(N*2/3)+1` N=5 得 5 的数学错误**）/ 委托逃生 **NEW-M1：凭证一次性消费 + NEW-M2：expiry_height 绝对 block height** / 多副本检测 **NEW-M3：3-of-5** / ack_deadline opt-out / refuse_ack dispute / checkpoint_skip / skip_count > max_skip_segments / 伪造 evidence 拒绝 / 副本 validator 虚假见证 slashing / **NEW-M7：request_ack 频率限制 PendingAckExists + R3-H6：request_ack 不更新 last_action_height + 同一 Game turn_timeout_blocks 内最多 1 次返回 RequestAckTooFrequent**）；**NEW-H2 GameTurn fallback（R3-H4：timeout_proof 需 ≥2 副本 secp256k1 签名 2-of-N / R3-H5：fallback tx 执行按 GameTurn 通道排序 S9 规则适用）**；**NEW-M10 epoch 过渡（R3-M5：assigned_validator 由 tx 提交时链上权威 current_epoch 决定，非客户端判断，仅可指控一个 assigned_validator）**；操作方故障恢复流程 6 子项（阶段 1 恢复 / 阶段 1 force_advance **NEW-M4：指定操作方 check 豁免 + R3-M1：豁免不需证明 jitter，对象为当前轮次玩家 + R3-M7：designated_operator_check_exemptions 达上限（默认 2）后恢复 fold 语义** / 阶段 2 重折叠 / 阶段 2 操作方恢复 / 阶段 3 forfeit / 无动作日志）+ 动作日志可选保存 **NEW-H5：operator_ack_signature 绑定 game_id 域分离 + R3-H3：域含 chain_id 防跨链重放**；**force_checkpoint R3-M6：under_investigation_count 累积惩罚达阈值（默认 3）触发 slashing + 申辩需 ≥2/3 validator gossipsub 日志佐证 + 标记保留 N epoch**；**challenge_delta NEW-H4：state_delta_hash 不可逆 + request_revert 回退**；强制同步 6 类 tx；状态裁剪 5 子项（**NEW-M13：vertex_prune_after_blocks=10000**）+ 节点角色分层 + request_historical_data RPC；模糊测试 >= 10000 随机输入（含 force_checkpoint assigned_validator_failure_proof + delegated_escape_authorization）；Phase 5 行覆盖率 >= 80%（ZK verifier/ACK/裁剪/强制同步/force_checkpoint/故障恢复 >= 95%）
+
+## Phase 6: 网络与节点与治理
+- [ ] libp2p gossipsub 能在 2 节点间广播 DAG vertex / tx
+- [ ] peer discovery 工作
+- [ ] sync protocol（按 range 请求 blocks + DAG vertex + fast sync）工作
+- [ ] 轻客户端 block header 订阅协议（secp256k1 多签验证 + 2/3 quorum）工作
+- [ ] **Compact Block Relay（M12 修复）**：先广播 compact vertex（header + tx short IDs），接收节点从本地已收 tx 集合匹配
+- [ ] **Block/tx/vertex 大小上限（M12 修复）**：block <= 4MB，tx <= 128KB，vertex <= `max_vertex_size`（默认 256KB）
+- [ ] **无 mempool（O1 移除）**：validator 收到 tx 后直接装入下一个 vertex，不维护 gossiped pending tx pool；validator 内存中仅保留待装 vertex 的 tx 短暂缓冲（默认 100ms）
+- [ ] 客户端多副本广播：Public tx + force_* tx（含 force_checkpoint）广播给多 validator 副本以提高确定性；checkpoint_anchor 多副本广播作为审查检测证据（副本 validator 仅见证不装入 vertex）（R4-M8 修正 — 副本 validator 确定性选择：`replica_set = top_N(hash(game_id, epoch, round) % |V|, validator_set, N=checkpoint_multi_replica_count)`，非客户端自由选择 — 防恶意客户端选择合谋副本 validator 签发虚假见证证据）（R5-L3 修正 — replica_set 使用 checkpoint_seq 而非 DAG round，每 checkpoint 提交时计算一次）
+- [ ] JSON-RPC `get_block` / `get_object` / `get_tx` / `submit_tx` / `get_account` / `get_dag_vertex` 工作
+- [ ] `secp256k1_aggregate_verify` / `bls_verify`（ZK）/ `zk_verify` RPC 工作
+- [ ] WebSocket 事件订阅推送及时
+- [ ] validator 节点（含 DAG vertex 产出 + Bullshark 共识 + game sub-block）能独立运行
+- [ ] full node 能同步并验证整条链
+- [ ] CLI keygen 能生成 secp256k1 与 ed25519 密钥对（tagged pubkey 编码）
+- [ ] CLI 支持 query、deploy contract、send tx、upgrade contract、本地计算 assigned_validator
+- [ ] `BridgeHook` trait + `bridge_verify` syscall 接口定义完整，预留插槽可注册
+- [ ] **桥安全约束（M7 修复）**：`bridge_verify` 必须由协议层在 deposit 流程中调用，不允许任意合约直接调用
+- [ ] 桥签名绑定 `(nonce, source_chain_id, dest_chain_id, asset, amount)` 防重放（M7 修复）
+- [ ] 反向操作需 burn wrapped 对象 + burn proof（burn-on-source）（M7 修复）
+- [ ] **治理（M11 修复 + NEW-M8 + NEW-M12 + NEW-C1 + R3-H1/R3-M4 修正）**：参数调整提案（parameter_name, new_value）+ 投票期 `voting_period_blocks`；**NEW-M8 修复 + R3-M4 修正 — timelock + bounds**：提案通过后需等待 `parameter_delay_blocks`（**默认 2000（R3-M4 修正 — 由 500 提升至 2000，按 block interval ≤ 2s 计约 67 分钟，给参与者充足时间发现恶意提案并退出）**）timelock 期间方可生效（防闪电式参数调整攻击），timelock 内可由更高 quorum 反对提案撤销；**参数边界校验**：`turn_timeout_blocks ∈ [3, 1000]`、`max_interval_ms ∈ [500, 60000]`、`block_gas_limit ∈ [10M, 200M]`、`epoch_length_blocks ∈ [100, 10000]`，越界提案投票期即拒绝；**R3-H1 修正 — 敏感参数 90% quorum（补全列表）**：`block_gas_limit` / `epoch_length_blocks` / `validator_set 更新` / `slash_percentage` / `downtime_slash_percentage` / `verifier_status` / `parameter_delay_blocks` / `defense_window_blocks` 需 90% validator 赞成（非 2/3，原仅列 3 项不足）；**R4-H4 修正 — 敏感参数边界**：`slash_percentage ∈ [1, 100]`、`downtime_slash_percentage ∈ [1, 100]`、`parameter_delay_blocks ∈ [100, 10000]`、`defense_window_blocks ∈ [10, 1000]`、`checkpoint_multi_replica_count ∈ [3, 15]`、`delegated_escape_max_expiry_blocks ∈ [10, 1000]`（否则 slash_percentage 可降至 0 使 equivocation 无经济惩罚）（R5-H2 修正 — `game_validator_timeout_blocks ∈ [1, floor(turn_timeout_blocks / 2)]`，否则治理可设为 > turn_timeout_blocks 使 fallback 机制失效）（R5-M3 修正 — 补全上下界：ack_deadline_blocks∈[1,100]、max_skip_segments∈[1,10]、max_active_games_per_player∈[1,1000]、bonding_period_blocks∈[epoch_length_blocks,10*epoch_length_blocks]、downtime_threshold_blocks∈[10,10000]、voting_period_blocks∈[10,10000]、under_investigation_threshold∈[1,100]、max_designated_operator_check_exemptions∈[0,10]、hand_max_duration_blocks∈[turn_timeout_blocks*4,100000]、archive_node_min_count∈[1,100]、recovery_window_blocks∈[10,10000]、checkpoint_interval_blocks∈[1,1000]、da_window_blocks∈[10,10000]、dispute_window_blocks∈[10,10000]、tx_prune_after_blocks∈[100,100000]、epoch_transition_window_blocks∈[1,100]）
+- [ ] 2/3 validator 赞成 → 参数生效（M11 修复；**NEW-M8：敏感参数需 90%，且生效前有 `parameter_delay_blocks` timelock**）
+- [ ] **可治理参数（NEW-M12 修复 — 扩展列表）**：turn_timeout_blocks / hand_max_duration_blocks / dispute_window_blocks / da_window_blocks / recovery_window_blocks / checkpoint_interval_blocks / game_validator_timeout_blocks / ack_deadline_blocks / max_skip_segments / malicious_refuse_threshold / max_interval_ms / max_active_games_per_player / epoch_length_blocks / max_vertex_size / block_gas_limit / tx_prune_after_blocks / vertex_prune_after_blocks / archive_node_min_count / checkpoint_multi_replica_count / delegated_escape_max_expiry_blocks / **`slash_percentage`（NEW-M15）/ `downtime_slash_percentage`（NEW-L2）/ `bonding_period_blocks`（NEW-L3）/ `defense_window_blocks`（NEW-H1）/ `parameter_delay_blocks`（NEW-M8）/ `epoch_transition_window_blocks`（NEW-M10）/ `verifier_status`（NEW-C1，敏感参数 90% quorum）/ `downtime_threshold_blocks` / `voting_period_blocks` / `max_designated_operator_check_exemptions` / `under_investigation_threshold`（R4-M3 修正 — 原 4 个参数缺失可治理列表）**（R5-H8 修正 — 补全遗漏可治理参数：max_request_ack_per_turn_timeout、max_clock_drift_ms、forfeit_deposit_ratio、challenge_deposit_ratio、challenge_reward_ratio、designated_operator_bond_amount、unbonding_period_blocks）
+- [ ] Validator 集更新提案（加入/踢出），epoch 边界生效（R5-L5 修正 — validator 密钥轮换：rotate_validator_key tx + key_rotation_delay_blocks timelock）（R5-L7 修正 — 治理提案校验 new_validator_set_size >= 3，拒绝缩减至 < 3）
+- [ ] **Task 43 模块测试通过**：libp2p gossipsub 2 节点广播 + peer discovery + sync protocol + in-memory mock；Compact Block Relay + short ID 冲突；大小上限超限返回 `InputTooLarge`；无 mempool 100ms 缓冲；客户端多副本广播（Public + force_* 含 force_checkpoint + checkpoint_anchor 见证）；RPC server（JSON-RPC + WebSocket + verify RPCs）；节点二进制 4 种模式（validator/full/archive/light）+ CLI keygen；治理参数调整 + validator 集更新 + 完整可治理参数列表（含 checkpoint_multi_replica_count / delegated_escape_max_expiry_blocks / recovery_window_blocks）；**NEW-M8 + R3-M4 修正：timelock + bounds 校验（turn_timeout_blocks [3,1000] / max_interval_ms [500,60000] / block_gas_limit [10M,200M] / epoch_length_blocks [100,10000]）+ `parameter_delay_blocks` 默认 2000（由 500 提升）+ 敏感参数 90% quorum + R3-H1 修正补全列表（block_gas_limit / epoch_length_blocks / validator_set 更新 / slash_percentage / downtime_slash_percentage / verifier_status / parameter_delay_blocks / defense_window_blocks 共 8 项）+ timelock 内撤销**；**NEW-M12：扩展参数列表（slash_percentage / downtime_slash_percentage / bonding_period_blocks / defense_window_blocks / parameter_delay_blocks / epoch_transition_window_blocks / verifier_status）**；**NEW-C1：verifier_status 治理切换（Stub ↔ Production）+ mainnet chain_id 下 Stub 拒绝 OffChain checkout（返回 `OffChainDisabledOnMainnet`）**；跨链桥接口 + bridge_verify 协议层强制 + nonce 防重放 + burn-on-source；模糊测试 >= 10000 随机输入；Phase 6 行覆盖率 >= 80%（治理/桥接防重放/gossipsub >= 95%）
+
+## Phase 7: 集成与测试
+- [ ] **前置依赖**：Task 38-43 模块测试全部通过（端到端测试需所有模块测试通过）
+- [ ] 端到端：全链上一局牌走通（shuffle → bet → reveal → settle）
+- [ ] 端到端：开局后 checkout → checkpoint_anchor → offline → checkin 一局牌走通（S2/S3/S4 验证）
+- [ ] 端到端：游戏操作 tx（call/check/raise/bet/fold）全程未扣 gas
+- [ ] 端到端：结算时台费按合约规则从底池正确扣除并转入收款方
+- [ ] 端到端：底池为 0 场景台费正确跳过（M1 验证）
+- [ ] 端到端：block height 单调递增、timestamp 单调不减 + max_interval 约束、超时以 height 判定生效（含链下轻客户端同步）（S10 验证）
+- [ ] 端到端：Narwhal-Bullshark DAG 共识 — 多 validator 并行出 vertex + Bullshark 排序 + DAG commit finality
+- [ ] 端到端：游戏分配 — Game 创建时 assigned_validator 正确分配 + epoch 切换时重分配
+- [ ] 端到端：validator 失败自动接管 — 某 validator 离线后 tx 仍上链（DAG 冗余，零丢失零延迟）
+- [ ] 端到端：secp256k1 与 ed25519 钱包各发起一笔 tx 均被正确验证与执行（S7 验证）；**NEW-L1：secp256k1 high-s 签名被拒绝返回 `InvalidSignatureLowS`，low-s 签名正常执行**
+- [ ] 端到端：tx 重放保护 — chain_id + nonce 拒绝重放（M10 验证）；**NEW-M9：GameTurn tx 使用 `gameturn_nonce` 不阻塞 account nonce 链，Public tx nonce 阻塞时 GameTurn tx 仍可上链**
+- [ ] 端到端：活跃 Game 上限 — 第 11 个 join 被拒绝（S8 验证）
+- [ ] 端到端：vertex 内排序 — GameTurn tx 优先于 force_sync tx（S9 验证）
+- [ ] 端到端：BLS 子群检查 — 非子群输入被拒绝（S6 验证）
+- [ ] 端到端：合约升级 — UpgradeCap 持有者能部署新版本（M4 验证）
+- [ ] 端到端：链下通信协议 — checkpoint_anchor（CheckpointAnchor 通道多副本见证）+ 多方 ACK + force_advance/force_checkin 流程 + force_checkpoint 逃生（S2/S3/S4 验证）
+- [ ] 端到端：**审查截断防护 — force_checkpoint 逃生** — assigned_validator 拒收 checkpoint_anchor → 副本 validator 见证（**NEW-M3：≥3 个，3-of-5 多签**）→ force_checkpoint 提交（附 assigned_validator_failure_proof，走 Public 通道正常计费 gas + **NEW-M16：预付 verify_failure_proof gas**）→ 链上验证接受 → last_action_height 正确更新 → force_advance 不误触发 → **NEW-H1：assigned_validator 标记 under_investigation + defense_window_blocks 调查流程（非自动 slashing）**
+- [ ] 端到端：**审查截断防护 — 委托逃生** — 操作方离线 → watchtower/参与者凭 delegated_escape_authorization 代提交 force_checkpoint → 链上验证委托凭证（**NEW-M2：expiry_height 绝对 block height 校验**）+ 代提交方签名接受 → last_action_height 更新 → **NEW-M1：凭证一次性消费（delegated_escape_nonce 推进，同凭证不可重复使用）**
+- [ ] 端到端：**审查截断防护 — 多副本检测** — 副本 validator 收到 checkpoint_anchor 但 assigned_validator 未装入 vertex → 副本 validator 签发审查见证证据（**NEW-M3：≥3 个，3-of-5 多签**）→ 独立提交治理 slashing 提案 → 验证通过
+- [ ] 端到端：**审查截断防护 — 伪造 evidence 拒绝** — 伪造 assigned_validator_failure_proof（无副本 validator 见证 / **NEW-M3：见证签名不足 3 个** / 见证签名无效 / round 范围不正确）→ force_checkpoint 被拒绝 + **NEW-M16：evidence 验证失败 gas 不退**
+- [ ] 端到端：**审查截断防护 — 副本 validator 虚假见证 slashing** — 副本 validator 签发虚假见证证据 → 治理 slashing 罚没保证金
+- [ ] 端到端：**审查截断防护 — ack_deadline opt-out** — 参与者恶意拒 ACK → 操作方提交 request_ack → ack_deadline 逾期 → opt_out_ack_proof 验证通过 → checkpoint_anchor 接受（或 force_checkpoint 接受，若 checkpoint_anchor 被审查）
+- [ ] 端到端：**审查截断防护 — refuse_ack dispute** — 参与者提交 refuse_ack + 有效 evidence → 进入 dispute；evidence 无效 → 参与者 forfeit 保证金；累计 3 次 → 治理 slashing
+- [ ] 端到端：**审查截断容错 — checkpoint_skip** — 中间 checkpoint 失败 → 操作方提交 checkpoint_skip → skip_count 累计 → 最终 checkin π 验证 skip_count + segment_continuity_proof 通过；skip_count > max_skip_segments → 强制 request_revert
+- [ ] 端到端：**NEW-H2 GameTurn fallback 接受（R3-H4/R3-H5 修正）** — assigned_validator 在 `game_validator_timeout_blocks` 内未装入 GameTurn tx → 客户端向非 assigned_validator 提交（附 `assigned_validator_timeout_proof` — **R3-H4 + R4-H6：需 ≥3 副本 validator secp256k1 签名见证，使用与 force_checkpoint 相同的阈值公式 `required_witness_count = max(3, floor(checkpoint_multi_replica_count * 2 / 3))`（3-of-5）防伪造（R4-H6 修正 — 原 2-of-N 阈值过低，fallback 允许非 assigned_validator 接受 GameTurn tx 绕过轮转排序独占权，2-of-5 合谋即可伪造 timeout_proof）**）→ 非 assigned_validator 验证后接受装入 vertex → fallback tx 走 Public 通道正常计费 gas + 使用 `gameturn_nonce`（NEW-M9）→ **R3-H5：fallback tx 按 GameTurn 通道语义（current_turn 排序）执行，S9 规则适用** → last_action_height 更新 → 玩家不被不公平 fold
+- [ ] 端到端：**NEW-M10 OffChain epoch 过渡（R3-M5 修正）** — OffChain 模式 Game 接近 epoch 边界 → 操作方在 `epoch_transition_window_blocks` 内提交过渡锚点 checkpoint_anchor（带 ack）→ 新 assigned_validator 从此锚点继续 → `last_partial_fold` 状态保留 → 后续 partial_checkin / checkin 校验 `intermediate_commitment` 连续性通过；未提交过渡锚点 → 任意参与者触发 force_advance 或 request_revert；**R3-M5：过渡期间 force_checkpoint 的 assigned_validator 归属由链上 tx 提交时权威 `current_epoch` 决定（非客户端本地判断），仅可指控一个 assigned_validator（旧或新）**
+- [ ] 端到端：**NEW-M7 request_ack 频率限制（R3-H6 修正）** — 操作方对同一 `(game_id, target_participant)` 在 `ack_deadline` 未过期前提交第二个 `request_ack` → 返回 `PendingAckExists` → 防止 spam；**R3-H6：操作方在 `turn_timeout_blocks` 内对多个不同 P 轮流提交 request_ack → 第 2 次起返回 `RequestAckTooFrequent`（同一 Game 总频率限制 1 次/turn_timeout_blocks）→ 防 griefing 拖延 force_advance；request_ack 不更新 last_action_height**
+- [ ] 端到端：**NEW-L4 ObjectID 全局唯一性** — 同一 creator 的 creation_nonce 单调递增不复用 → ObjectID 不碰撞；不同 creator address 不碰撞；冲突创建返回 `ObjectIDCollision`
+- [ ] 端到端：**NEW-M4 指定操作方 forfeit 边界（R3-M1/R3-M7 修正）** — Game 有指定操作方 → forfeit 边界阈值翻倍为 `turn_timeout_blocks * 2` → 在 `turn_timeout_blocks` 到 `turn_timeout_blocks * 2` 之间恢复 → 不 forfeit；force_advance 对当前轮次玩家"check 而非 fold"豁免（**R3-M1：无条件豁免，不需证明短暂网络抖动；豁免对象是当前轮次玩家而非 designated operator**）；**R3-M7：`designated_operator_check_exemptions` 达上限（默认 2）后 force_advance 恢复 fold 语义 → 防恶意 designated operator 循环停发无限拖延**
+- [ ] 端到端：**NEW-M1 凭证一次性消费** — 同一 delegated_escape_authorization 凭证被两个 watchtower 先后提交 force_checkpoint → 第一次接受（delegated_escape_nonce 推进）→ 第二次拒绝（nonce 已消费）
+- [ ] 端到端：**操作方故障恢复 — 阶段 1 恢复** — 操作方机器故障 → 在 turn_timeout_blocks 内恢复 → 提交 checkpoint_anchor → 游戏继续，无 forfeit
+- [ ] 端到端：**操作方故障恢复 — 阶段 2 重折叠** — 操作方故障 + 参与者有动作日志（含 operator_ack_signature）→ 汇集日志 → 校验双签有效 → 从最后 ACKed checkpoint 重新折叠 → force_checkin 成功 → 游戏正常结算，操作方不 forfeit
+- [ ] 端到端：**操作方故障恢复 — 阶段 3 forfeit** — da_window_blocks + recovery_window_blocks 过期 + 无 force_checkin + 操作方未恢复 → force_revert → 操作方 forfeit 保证金 → 游戏从最后 ACKed checkpoint 继续
+- [ ] 端到端：**操作方故障恢复 — 无动作日志** — 参与者未保存动作日志 → 无法重折叠 → 只能等阶段 3 force_revert
+- [ ] 端到端：**H5 动作日志冲突裁决 — operator equivocation** — 操作方对参与者 A 与 B 签署同一 step_index 不同 action 的日志 → 两方均带有效 operator_ack_signature（**NEW-H5：签名域含 game_id**）→ 链上验证冲突证据 → 操作方 forfeit 保证金（双签 = equivocation）
+- [ ] 端到端：**H5 动作日志冲突裁决 — 单方签名** — 冲突日志仅一方有 operator_ack_signature → 以带 ack 条目为准，未签名方丢弃该步
+- [ ] 端到端：**H5 动作日志冲突裁决 — 参与者伪造签名** — 参与者伪造 operator_ack_signature → 签名验证失败 → 伪造方 forfeit
+- [ ] 端到端：**NEW-H5 跨 Game 重放防护 + R3-H3 跨链重放防护** — 操作方用 Game A 的 operator_ack_signature 试图否认 Game B 的动作 → 签名域含 game_id → 验证失败 → 操作方不可抵赖；**R3-H3：同一 creator 在 testnet/mainnet 以相同 creation_nonce 创建 table 导致 game_id 碰撞 → 操作方用 testnet 的 operator_ack_signature 试图否认 mainnet 动作 → 签名域含 chain_id → 验证失败 → 跨链重放被阻止**；同理 ACK 签名域含 chain_id 防跨链重放
+- [ ] 端到端：challenge_delta 语义 — 从 π public_io 重派生 Δ' 对比 Δ（S5 验证）；**NEW-H4：state_delta_hash 不可逆 → 挑战成功后触发 request_revert reason=malicious_withholding 回退到最后 ACKed checkpoint_state（非"应用正确 Δ 继续"）**
+- [ ] 端到端：状态裁剪 — 结算后历史版本可裁剪，state root 仍可验证（M2 验证）
+- [ ] 端到端：**历史 tx 压缩** — block 过 `tx_prune_after_blocks` + Game 结算 → tx 内容裁剪为 (tx_hash, tx_type, merkle_proof)；tx_merkle_root 仍可验证存在性
+- [ ] 端到端：**DAG vertex 压缩（NEW-M13）** — vertex 过 `vertex_prune_after_blocks`（**默认 10000**）→ tx_list + parent_hashes 裁剪，保留 vertex commitment；Bullshark 共识仍正常运行
+- [ ] 端到端：**ZK proof 归档** — Game 结算 + dispute 过期 → π 移到 Walrus，链上仅留 (proof_hash, verification_result, walrus_blob_id)；通过 walrus_blob_id 可恢复完整 proof
+- [ ] 端到端：**节点角色分层** — archive node 保留全数据 / full node Layer 1-3 裁剪 / light node 仅 block header；full node 通过 `request_historical_data` RPC 从 archive node 获取已裁剪数据；archive node < 3 个时 full node 自动升级
+- [ ] 端到端：非游戏交易（转账 / 合约部署 / checkin 结算 / bridge 操作）正常计费（O12 验证）
+- [ ] 端到端：资产锁定与铸造场景 — 买入锁仓、结算分配、台费收款、forfeit 补偿均正确（O12 验证）
+- [ ] 端到端：治理参数调整 + validator 集更新（M11 验证）；**NEW-M8 + R3-M4：timelock `parameter_delay_blocks`（默认 2000）生效前不可应用 + 边界校验（turn_timeout_blocks [3,1000] 等）+ R3-H1：敏感参数 8 项（block_gas_limit / epoch_length_blocks / validator_set 更新 / slash_percentage / downtime_slash_percentage / verifier_status / parameter_delay_blocks / defense_window_blocks）需 90% quorum**；**NEW-C1：verifier_status 治理切换 Stub → Production，mainnet chain_id 下 Stub 状态拒绝 OffChain checkout 返回 `OffChainDisabledOnMainnet`**
+- [ ] 端到端：网络层约束 — block <= 4MB、tx <= 128KB、vertex <= 256KB、Compact Block Relay、无 mempool（M12/O1 验证）
+- [ ] 端到端：slashing — vertex equivocation 双签证据 → 踢出 + 罚没；**NEW-M15：`slash_amount = stake * slash_percentage / 100`（默认 100%）**；**NEW-L2：停机 validator 罚没 10%（R4-L1/R5-H1 修正 — 由 5% 提升至 10%）+ 失去出块资格**；**NEW-L3：新 validator bonding 期内不参与共识**
+- [ ] 端到端：客户端本地路由发现 — `hash(game_id, epoch) % |V|` 计算结果与链上一致
+- [ ] 端到端：**R3-C1 NEW-M3 阈值公式验证** — `checkpoint_multi_replica_count=5` → `required_witness_count = max(3, floor(5*2/3)) = 3`（3-of-5）；`checkpoint_multi_replica_count=7` → `max(3, floor(7*2/3)) = 4`（4-of-7）；仅 2 个副本见证签名 → force_checkpoint 拒绝；治理调低至下限 <3 → 拒绝（下限 ≥3）
+- [ ] 端到端：**R3-C2 NEW-L1 low-s 拒绝（不规范化）** — secp256k1 签名 `s > n/2` → 返回 `InvalidSignatureLowS`（应用于 tx / vertex / receipt / operator_ack / ACK 所有路径）；**验证链不进行规范化转换**（规范化会接受 high-s 变体，无法消除延展性）；同一私钥对同一消息的 high-s 与 low-s 签名视为不同签名（延展性消除）
+- [ ] 端到端：**R3-M2 Merkle domain separation 防二次原像** — 构造 ack_chain 使得某内部节点哈希值等于某叶子 ack_i 的哈希 → 无 domain separation 时可伪造证明 → 有 RFC 6962 domain separation（叶子 `H(0x00||ack_i)` / 内部 `H(0x01||left||right)`）时伪造失败 → 二次原像攻击被阻止
+- [ ] 端到端：**R3-M3 secp256k1_verify gas 计费** — 合约调用 `verify_signature` syscall → 扣 500 gas；`verify_failure_proof` syscall 扣 5000 gas（worst-case 3×500 + Merkle~1000 + round~1500 ≈ 4000 < 5000）；gas 不足返回 `OutOfGas`
+- [ ] 端到端：**R3-M6 force_checkpoint 累积惩罚** — assigned_validator 被指控 force_checkpoint 3 次（每次申辩成功）→ 第 3 次达 `under_investigation_count` 阈值（默认 3）→ 即使申辩有效也触发治理 slashing → 标记保留 N epoch；申辩仅提供自述（无 ≥2/3 validator gossipsub 日志）→ 申辩无效 → 治理 slashing
+- [ ] 端到端：**R4-H5 e2e**: under_investigation_count 衰减机制 — validator 1 epoch 内无新指控后 count 减 1
+- [ ] 端到端：**R4-H6 e2e**: fallback timeout_proof 3-of-5 阈值 — 2-of-5 见证签名被拒绝，3-of-5 接受
+- [ ] 端到端：**R4-M8 e2e**: 副本 validator 确定性选择 — 同一 (game_id, epoch, round) 所有客户端计算相同 replica_set
+- [ ] 端到端：**R4-M6 e2e**: checkpoint_skip continuity_proof 验证 — start_state_proof 签名者 < 2/3 被拒绝
+- [ ] 端到端：**R4-L6 e2e**: forfeit 保证金锁定 + 没收 + 退还流程
+- [ ] 端到端：**R4-L7 e2e**: challenge_delta 挑战方保证金 — 挑战成立退还 + 奖励，挑战失败没收
+- [ ] 端到端：**R5-H4 e2e**: sparse Merkle tree 非包含证明 — tx_hash 不在 vertex 中时验证通过，在 vertex 中时验证失败
+- [ ] 端到端：**R5-H5 e2e**: ValidatorSetUpdate hash chain — 中间 tx 隐瞒时轻客户端检测到 prev_hash 不匹配
+- [ ] 端到端：**R5-H6 e2e**: continuity_proof 终态验证 — 连续 skip 段间 end_state != start_state 时 checkin 拒绝
+- [ ] 端到端：**R5-H7 e2e**: validator unbonding 期 — equivocation 后退出，unbonding 期内仍可 slashing
+- [ ] 端到端：**R5-M2 e2e**: 小 validator 集 N=3 — checkpoint_multi_replica_count 自动降为 2
+- [ ] 端到端：**R5-M4 e2e**: check_exemptions 重置 — designated operator 提交 checkpoint_anchor 后计数器归 0
+- [ ] 多 validator DAG 并行 TPS 基准报告产出
+- [ ] BLS12-381 syscall 单次 G1 mul 延迟 < 5ms（含子群检查）
+- [ ] Hypernova fold step 延迟报告产出
+- [ ] Groth16 / IPA verifier 延迟报告产出
+- [ ] DAG vertex 传播延迟 + Bullshark 共识延迟报告产出
+- [ ] 部署 / 合约开发 / 链下证明 / 跨链桥扩展 / 治理操作 / DAG 共识运维六份文档完成
