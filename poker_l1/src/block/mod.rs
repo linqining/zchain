@@ -9,6 +9,29 @@
 //! Phase 1 定义数据结构 + 哈希计算；
 //! Phase 2 实现时间共识（timestamp 单调性校验）与 block 投影逻辑。
 
+/// 时间共识（Task 11）：block 时间校验 + 超时参数配置 + 轻客户端 quorum 骨架。
+pub mod time_consensus;
+/// Block 验证器（Task 10）：tx 签名 / chain_id / nonce / GameTurn 免 gas / 多签验证。
+pub mod validator;
+
+// 重新导出 time_consensus 公开 API，便于上层直接 `block::TimeConsensusConfig` 等使用。
+pub use time_consensus::{
+    epoch_of, in_epoch_transition_window, is_da_window_passed, is_dispute_window_passed,
+    is_epoch_boundary, is_hand_timeout, is_turn_timeout, is_validator_timeout,
+    should_submit_checkpoint, validate_block_time, verify_block_header_quorum,
+    LightClientVerifyRequest, TimeConsensusConfig,
+};
+
+// 重新导出 validator 模块公开 API（Task 10）。
+pub use validator::{
+    validate_block_header_and_body, validate_block_tx_roots, validate_commit_certificate_signatures,
+    validate_game_sub_block, validate_game_sub_block_signature,
+    validate_game_sub_block_turn_ordering, validate_gameturn_no_gas, validate_public_tx_root,
+    validate_public_tx_ordering, validate_gameturn_tx_root, validate_state_root_transition,
+    validate_tx_chain_id, validate_tx_full, validate_tx_nonce, validate_tx_signature,
+    validate_vertex_tx_ordering, BlockValidatorConfig,
+};
+
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
 use serde::{Deserialize, Serialize};

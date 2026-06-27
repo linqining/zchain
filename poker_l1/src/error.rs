@@ -1,6 +1,7 @@
-//! 统一错误类型。覆盖 Phase 1 所有错误场景，便于 validator / RPC 返回精确错误码。
+//! 统一错误类型。覆盖 Phase 1 + Phase 2 所有错误场景，便于 validator / RPC 返回精确错误码。
 //!
-//! 安全路径相关错误（签名 / nonce / chain_id / ObjectID）须包含足够上下文以供审计追溯。
+//! 安全路径相关错误（签名 / nonce / chain_id / ObjectID / 轮转 / assigned_validator）
+//! 须包含足够上下文以供审计追溯。
 
 use thiserror::Error;
 
@@ -98,6 +99,189 @@ pub enum PokerL1Error {
     /// 其他错误（带字符串上下文）。
     #[error("{0}")]
     Other(String),
+
+    // ===== Phase 2: 路由 / 轮转 / 游戏分配（Task 7 / 8 / 12） =====
+    /// tx 通道与路由提示不匹配（SubTask 7.2：GameTurn+CheckpointAnchor 应路由到 assigned_validator）。
+    #[error("wrong lane: lane={lane:?}, route={route:?}, expected assigned_validator for GameTurn/CheckpointAnchor")]
+    WrongLane {
+        /// tx 通道。
+        lane: crate::transaction::TxLane,
+        /// 路由提示。
+        route: crate::transaction::RouteHint,
+    },
+    /// GameTurn / CheckpointAnchor tx 提交给了非 assigned_validator 的 validator（SubTask 7.5）。
+    #[error("not assigned validator for game (game_id={game_id:?}, assigned={assigned:?}, receiver={receiver:?})")]
+    NotAssignedValidator {
+        /// Game 对象 ID。
+        game_id: crate::object_model::ObjectID,
+        /// 链上记录的 assigned_validator pubkey。
+        assigned: crate::signature::TaggedPubkey,
+        /// 当前接收 tx 的 validator pubkey。
+        receiver: crate::signature::TaggedPubkey,
+    },
+    /// 非当前轮次玩家提交 GameTurn tx（SubTask 7.4：轮转约束）。
+    #[error("not your turn (game_id={game_id:?}, current_turn={current_turn:?}, actor={actor:?})")]
+    NotYourTurn {
+        /// Game 对象 ID。
+        game_id: crate::object_model::ObjectID,
+        /// 当前轮次玩家地址。
+        current_turn: crate::Address,
+        /// 实际提交 tx 的玩家地址。
+        actor: crate::Address,
+    },
+    /// 玩家活跃 Game 数量超限（SubTask 8.7：S8 修复，max_active_games_per_player 默认 10）。
+    #[error("too many active games: player={player:?}, active={active}, limit={limit}")]
+    TooManyActiveGames {
+        /// 玩家地址。
+        player: crate::Address,
+        /// 当前活跃 Game 数。
+        active: u32,
+        /// 上限。
+        limit: u32,
+    },
+    /// Game 对象不存在或未激活。
+    #[error("game not found or inactive: {0:?}")]
+    GameNotFound(crate::object_model::ObjectID),
+    /// assigned_validator 未在指定 block 范围内装入 GameTurn tx（SubTask 8.9：NEW-H2 fallback 触发条件）。
+    #[error("assigned validator timeout: game_id={game_id:?}, timeout_blocks={timeout_blocks}")]
+    AssignedValidatorTimeout {
+        /// Game 对象 ID。
+        game_id: crate::object_model::ObjectID,
+        /// 超时阈值（block 数）。
+        timeout_blocks: u64,
+    },
+    /// fallback tx 缺少 assigned_validator_timeout_proof（SubTask 8.9：NEW-H2）。
+    #[error("fallback tx missing timeout proof")]
+    MissingTimeoutProof,
+    /// fallback tx 的 timeout_proof 验证失败（SubTask 8.9：多副本见证签名不足 / round 范围不正确）。
+    #[error("invalid timeout proof: {0}")]
+    InvalidTimeoutProof(String),
+
+    // ===== Phase 2: 时间共识（Task 11） =====
+    /// block.height 不等于 prev.height + 1（S10：严格单调递增）。
+    #[error("block height not strictly increasing: prev={prev}, got={got}")]
+    BlockHeightNotIncreasing { prev: u64, got: u64 },
+    /// block.timestamp_ms < prev.timestamp_ms（S10：单调不减）。
+    #[error("block timestamp moved backwards: prev={prev}, got={got}")]
+    BlockTimestampMovedBackwards { prev: u64, got: u64 },
+    /// block.timestamp_ms > prev.timestamp_ms + max_interval_ms（S10：最大间隔约束）。
+    #[error("block timestamp interval exceeded: prev={prev}, got={got}, max_interval={max_interval}")]
+    BlockTimestampIntervalExceeded {
+        prev: u64,
+        got: u64,
+        max_interval: u64,
+    },
+
+    // ===== Phase 2: DAG 共识 / Bullshark（Task 8 / 9） =====
+    /// vertex 签名验证失败（SEC-C1：签名对象 = hash(chain_id || epoch || round || author_pubkey || vertex_hash || parent_hashes)）。
+    #[error("dag vertex signature verification failed")]
+    InvalidVertexSignature,
+    /// vertex parent_hashes 数量不足 2/3 validator（spec：vertex 须引用 ≥2/3 validator 的上一轮 vertex hash）。
+    #[error("vertex parent count {actual} < required {required} (2/3 of validator set)")]
+    InsufficientParents { actual: usize, required: usize },
+    /// vertex 大小超限（max_vertex_size 默认 256KB）。
+    #[error("vertex size {actual} exceeds max_vertex_size {limit}")]
+    VertexTooLarge { actual: usize, limit: usize },
+    /// commit certificate 签名数不足 2/3 quorum（SubTask 9.1 / 10.7）。
+    #[error("commit certificate signer count {actual} < quorum {required}")]
+    InsufficientQuorum { actual: usize, required: usize },
+    /// commit certificate 签名验证失败（SubTask 10.7）。
+    #[error("commit certificate signature verification failed for signer index {signer_idx}")]
+    InvalidCommitCertificateSignature { signer_idx: usize },
+    /// commit certificate 的 epoch / prev_commit_hash / state_root 字段与本地不匹配（SEC2-C1）。
+    #[error("commit certificate field mismatch: {0}")]
+    CommitCertificateMismatch(String),
+
+    // ===== Phase 2: Block 验证器（Task 10） =====
+    /// Public 通道 tx 排序不合法（gas/arrival 非单调，SubTask 10.2）。
+    #[error("invalid public tx ordering: tx[{idx}] gas_price={tx_price} < prev_price={prev_price}")]
+    InvalidTxOrdering {
+        /// 出错 tx 的索引。
+        idx: usize,
+        /// 出错 tx 的 gas price。
+        tx_price: u64,
+        /// 前一个 tx 的 gas price。
+        prev_price: u64,
+    },
+    /// GameTurn 通道 tx 被错误计费 gas（SubTask 10.4：GameTurn 通道免 gas）。
+    #[error("GameTurn tx charged gas: budget={budget}, price={price}")]
+    GameTurnGasCharged {
+        /// tx 声明的 gas budget。
+        budget: u64,
+        /// tx 声明的 gas price。
+        price: u64,
+    },
+    /// 状态根不匹配（SubTask 10.5：两通道状态根转移校验）。
+    #[error("state root mismatch: expected={expected:?}, got={got:?}")]
+    StateRootMismatch {
+        /// 期望的状态根。
+        expected: crate::Hash,
+        /// 实际的状态根。
+        got: crate::Hash,
+    },
+    /// public_tx_root 不匹配（SubTask 10.5）。
+    #[error("public_tx_root mismatch: expected={expected:?}, got={got:?}")]
+    PublicTxRootMismatch {
+        /// 期望的 public_tx_root。
+        expected: crate::Hash,
+        /// 实际的 public_tx_root。
+        got: crate::Hash,
+    },
+    /// gameturn_tx_root 不匹配（SubTask 10.5）。
+    #[error("gameturn_tx_root mismatch: expected={expected:?}, got={got:?}")]
+    GameTurnTxRootMismatch {
+        /// 期望的 gameturn_tx_root。
+        expected: crate::Hash,
+        /// 实际的 gameturn_tx_root。
+        got: crate::Hash,
+    },
+    /// game sub-block 的 assigned_validator 签名验证失败（SubTask 10.3）。
+    #[error("invalid game sub-block signature: game_id={game_id:?}")]
+    InvalidGameSubBlockSignature {
+        /// Game 对象 ID。
+        game_id: crate::object_model::ObjectID,
+    },
+    /// vertex 内 tx 排序违反 S9 规则（SubTask 10.6：GameTurn 应优先于 ForceSync）。
+    #[error("vertex tx ordering violates S9: ForceSync tx at idx {force_idx} before GameTurn tx at idx {turn_idx}")]
+    InvalidVertexTxOrdering {
+        /// ForceSync tx 的索引。
+        force_idx: usize,
+        /// GameTurn tx 的索引。
+        turn_idx: usize,
+    },
+
+    // ===== Phase 2: ValidatorSet / Slashing（Task 13） =====
+    /// validator 集规模不足（SEC-C2：主网 |V| < 5 时 OffChain 模式 Game 创建被拒绝）。
+    #[error("validator set too small for OffChain: size={size}, required>=5")]
+    ValidatorSetTooSmallForOffChain { size: usize },
+    /// validator 不在当前 ValidatorSet 中。
+    #[error("validator not in set: {0:?}")]
+    ValidatorNotInSet(crate::signature::TaggedPubkey),
+    /// 同一 (epoch, round, author_pubkey) 出现两个冲突 vertex（equivocation slashing）。
+    #[error("vertex equivocation detected: epoch={epoch}, round={round}, author={author:?}")]
+    VertexEquivocation {
+        epoch: u64,
+        round: u64,
+        author: crate::signature::TaggedPubkey,
+    },
+    /// 同一 (epoch, commit_round) 出现两个冲突 commit certificate（commit cert equivocation slashing）。
+    #[error("commit certificate equivocation: epoch={epoch}, commit_round={commit_round}")]
+    CommitCertEquivocation { epoch: u64, commit_round: u64 },
+    /// VRF proof 验证失败（IMPL-SEC-2：ECVRF-secp256k1，97B proof）。
+    #[error("vrf proof verification failed")]
+    InvalidVrfProof,
+    /// VRF input 与链上 epoch 不匹配（SEC2-C2：VRF input = hash(chain_id || epoch || prev_epoch_randomness)）。
+    #[error("vrf input mismatch: expected epoch={expected}, got={got}")]
+    VrfInputMismatch { expected: u64, got: u64 },
+    /// VRF output 与链上 epoch_randomness 不匹配（SEC2-M10）。
+    #[error("vrf output mismatch")]
+    VrfOutputMismatch,
+    /// validator 处于 bonding 期，不可参与共识（NEW-L3）。
+    #[error("validator in bonding period: pubkey={0:?}")]
+    ValidatorInBonding(crate::signature::TaggedPubkey),
+    /// validator 处于 unbonding 期，不可参与共识但可被 slashing（R5-H7）。
+    #[error("validator in unbonding period: pubkey={0:?}")]
+    ValidatorInUnbonding(crate::signature::TaggedPubkey),
 }
 
 /// 库统一 Result 别名。
