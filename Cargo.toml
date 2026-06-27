@@ -1,6 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["poker_l1"]
+
+# zchain root package 本身作为 workspace 的 bin 入口保留
 [package]
 name = "zchain"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+poker_l1 = { path = "poker_l1" }
+
+[workspace.dependencies]
+# 共享依赖集中管理，便于版本一致与升级
+poker_protocol = { path = "../zgame/poker_protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bcs = "0.1.6"
+sha2 = "0.10.8"
+blake2 = "0.10.6"
+hex = "0.4.3"
+thiserror = "1.0.61"
+rand = "0.8.5"
+secp256k1 = { version = "0.29", features = ["recovery", "rand", "global-context"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+subtle = "2.5"
+rocksdb = { version = "0.22", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tracing = "0.1"

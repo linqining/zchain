@@ -1,0 +1,401 @@
+//! DAG 共识结构（Task 3 / SubTask 3.3）
+//!
+//! 严格遵循 spec.md（FROZEN 2026-06-27）：
+//! - **SEC-C1**：DagVertex 签名对象 = `hash(chain_id || epoch || round || author_pubkey || vertex_hash || parent_hashes)`
+//!   - 绑定 `chain_id` 防跨链重放
+//!   - 绑定 `epoch` 防 epoch 边界 equivocation 证据歧义
+//!   - 绑定 `author_pubkey` 使 slashing 证据归属不依赖 ECDSA recovery 反推
+//! - **SEC2-C1**：DagCommitCertificate 签名对象 = `hash(chain_id || epoch || commit_round || prev_commit_hash || vertex_hash_list || round_attendance_bitmap || state_root || public_tx_root || gameturn_tx_root)`
+//!   - 绑定 `epoch` 防 epoch 边界 equivocation 证据歧义
+//!   - 绑定 `prev_commit_hash` 形成 hash chain 防 long-range attack
+//!   - 绑定 `state_root` / `public_tx_root` / `gameturn_tx_root` 防 commit certificate 被重用到不同 block 内容
+//!
+//! Phase 1 定义数据结构 + 签名哈希计算；
+//! Phase 2 实现 Bullshark 排序与 commit certificate 组装逻辑。
+
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
+use serde::{Deserialize, Serialize};
+
+use crate::signature::TaggedPubkey;
+use crate::transaction::Transaction;
+use crate::{ChainId, Hash};
+
+/// DAG round 编号（全局递增，跨 epoch 不重置）。
+pub type Round = u64;
+
+/// Epoch 编号（validator 集重分配周期）。
+pub type Epoch = u64;
+
+/// Commit round 编号（Bullshark 共识产出 commit 的轮次）。
+pub type CommitRound = u64;
+
+/// 签名域分隔前缀。
+const VERTEX_SIG_DOMAIN: u8 = 0x56; // 'V' for Vertex
+const COMMIT_CERT_SIG_DOMAIN: u8 = 0x43; // 'C' for Commit Certificate
+
+/// Narwhal-style DAG vertex（数据平面）。
+///
+/// spec：
+/// - validator 把 tx 批量打包为 vertex
+/// - 含 tx list + 引用 ≥2/3 validator 的上一轮 vertex hash + 自身 secp256k1 签名
+/// - vertex 上限 `max_vertex_size`（默认 256KB），超出分多个 vertex
+///
+/// SEC-C1 修复：签名对象含 `epoch` 与 `author_pubkey` 字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DagVertex {
+    /// 当前 epoch（SEC-C1：绑定 epoch 防 equivocation 证据歧义）。
+    pub epoch: Epoch,
+    /// DAG round（全局递增，跨 epoch 不重置）。
+    pub round: Round,
+    /// 作者 validator 的 tagged pubkey（SEC-C1：author_pubkey 字段）。
+    pub author_pubkey: TaggedPubkey,
+    /// 交易列表（tx 批量）。
+    pub tx_list: Vec<Transaction>,
+    /// 引用的上一轮 vertex hash 列表（≥2/3 validator 的 vertex hash）。
+    pub parent_hashes: Vec<Hash>,
+    /// 作者 validator 的 secp256k1 签名（签名对象见 `signing_hash`）。
+    pub author_sig: Vec<u8>,
+}
+
+/// vertex 上限 256KB（spec：max_vertex_size 默认 256KB）。
+pub const MAX_VERTEX_SIZE: usize = 256 * 1024;
+
+impl DagVertex {
+    /// 计算 vertex_hash（vertex 内容哈希，用于 DAG 引用与 commit certificate）。
+    ///
+    /// vertex_hash = blake2b_256(0x56 || epoch || round || author_pubkey || tx_hashes || parent_hashes)
+    ///
+    /// 注意：vertex_hash 不含 author_sig（签名不参与自身的内容哈希）。
+    pub fn vertex_hash(&self) -> Hash {
+        let mut h = Blake2bVar::new(32).expect("32 <= 64");
+        h.update(&[VERTEX_SIG_DOMAIN]);
+        h.update(&self.epoch.to_le_bytes());
+        h.update(&self.round.to_le_bytes());
+        h.update(&self.author_pubkey.to_bytes());
+        // tx_list：用 tx_hash 摘要
+        for tx in &self.tx_list {
+            h.update(&tx.tx_hash());
+        }
+        // parent_hashes
+        for parent in &self.parent_hashes {
+            h.update(parent);
+        }
+        let mut out = [0u8; 32];
+        h.finalize_variable(&mut out).expect("32 <= 64");
+        out
+    }
+
+    /// 计算签名对象哈希（SEC-C1）。
+    ///
+    /// signing_hash = blake2b_256(chain_id || epoch || round || author_pubkey || vertex_hash || parent_hashes)
+    ///
+    /// spec SEC-C1：绑定 chain_id 防跨链重放；绑定 epoch 防 epoch 边界 equivocation 证据歧义；
+    /// 绑定 author_pubkey 使 slashing 证据归属不依赖 ECDSA recovery 反推。
+    pub fn signing_hash(&self, chain_id: ChainId) -> Hash {
+        let vertex_hash = self.vertex_hash();
+        let mut h = Blake2bVar::new(32).expect("32 <= 64");
+        h.update(&chain_id.to_le_bytes());
+        h.update(&self.epoch.to_le_bytes());
+        h.update(&self.round.to_le_bytes());
+        h.update(&self.author_pubkey.to_bytes());
+        h.update(&vertex_hash);
+        for parent in &self.parent_hashes {
+            h.update(parent);
+        }
+        let mut out = [0u8; 32];
+        h.finalize_variable(&mut out).expect("32 <= 64");
+        out
+    }
+
+    /// BCS 序列化。
+    pub fn to_bcs(&self) -> crate::error::PokerL1Result<Vec<u8>> {
+        Ok(bcs::to_bytes(self)?)
+    }
+
+    /// 从 BCS 反序列化。
+    pub fn from_bcs(bytes: &[u8]) -> crate::error::PokerL1Result<Self> {
+        Ok(bcs::from_bytes(bytes)?)
+    }
+}
+
+/// Bullshark commit certificate（共识平面）。
+///
+/// spec：
+/// - 某轮 vertex 获得 ≥2/3 validator 引用 → 形成 commit certificate
+/// - commit certificate 中的所有 vertex 及其引用的祖先 vertex 被视为 finalized
+/// - 轻客户端只需验证 commit certificate 的 2/3 secp256k1 多签即可信任 block header
+///
+/// SEC2-C1 修复：签名对象含 `epoch` / `prev_commit_hash` / `state_root` / `public_tx_root` / `gameturn_tx_root`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DagCommitCertificate {
+    /// 当前 epoch（SEC2-C1：绑定 epoch 防 equivocation 证据歧义）。
+    pub epoch: Epoch,
+    /// Bullshark commit 轮次。
+    pub commit_round: CommitRound,
+    /// 前一个 commit certificate 的哈希（SEC2-C1：形成 hash chain 防 long-range attack）。
+    pub prev_commit_hash: Hash,
+    /// 本 commit 涵盖的 vertex hash 列表（Bullshark 排序后的 vertex 序列）。
+    pub vertex_hash_list: Vec<Hash>,
+    /// 本轮出勤 bitmap（标记哪些 validator 参与了本轮 commit）。
+    pub round_attendance_bitmap: Vec<u8>,
+    /// 本 commit 产出的 block 的 state_root。
+    pub state_root: Hash,
+    /// Public 通道 tx 的 Merkle root（NEW-M14）。
+    pub public_tx_root: Hash,
+    /// GameTurn + CheckpointAnchor 通道 tx 的 Merkle root（NEW-M14）。
+    pub gameturn_tx_root: Hash,
+    /// validator secp256k1 签名列表（与 signer_bitmap 对应）。
+    pub signature_list: Vec<Vec<u8>>,
+    /// 签名者 bitmap（标记哪些 validator 签名了本 commit certificate）。
+    pub signer_bitmap: Vec<u8>,
+}
+
+impl DagCommitCertificate {
+    /// 计算签名对象哈希（SEC2-C1）。
+    ///
+    /// signing_hash = blake2b_256(chain_id || epoch || commit_round || prev_commit_hash
+    ///                       || vertex_hash_list || round_attendance_bitmap
+    ///                       || state_root || public_tx_root || gameturn_tx_root)
+    ///
+    /// spec SEC2-C1：绑定 prev_commit_hash 形成 hash chain 防 long-range attack；
+    /// 绑定 state_root / public_tx_root / gameturn_tx_root 防 commit certificate 被重用到不同 block。
+    pub fn signing_hash(&self, chain_id: ChainId) -> Hash {
+        let mut h = Blake2bVar::new(32).expect("32 <= 64");
+        h.update(&[COMMIT_CERT_SIG_DOMAIN]);
+        h.update(&chain_id.to_le_bytes());
+        h.update(&self.epoch.to_le_bytes());
+        h.update(&self.commit_round.to_le_bytes());
+        h.update(&self.prev_commit_hash);
+        for vh in &self.vertex_hash_list {
+            h.update(vh);
+        }
+        h.update(&self.round_attendance_bitmap);
+        h.update(&self.state_root);
+        h.update(&self.public_tx_root);
+        h.update(&self.gameturn_tx_root);
+        let mut out = [0u8; 32];
+        h.finalize_variable(&mut out).expect("32 <= 64");
+        out
+    }
+
+    /// 计算 commit certificate 自身的哈希（用于 prev_commit_hash 链式引用）。
+    ///
+    /// cert_hash = blake2b_256(signing_hash || signature_list || signer_bitmap)
+    pub fn cert_hash(&self, chain_id: ChainId) -> Hash {
+        let signing = self.signing_hash(chain_id);
+        let mut h = Blake2bVar::new(32).expect("32 <= 64");
+        h.update(&signing);
+        for sig in &self.signature_list {
+            h.update(&(sig.len() as u64).to_le_bytes());
+            h.update(sig);
+        }
+        h.update(&self.signer_bitmap);
+        let mut out = [0u8; 32];
+        h.finalize_variable(&mut out).expect("32 <= 64");
+        out
+    }
+
+    /// 统计 signer_bitmap 中签名者数量。
+    pub fn signer_count(&self) -> usize {
+        self.signer_bitmap
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum()
+    }
+
+    /// BCS 序列化。
+    pub fn to_bcs(&self) -> crate::error::PokerL1Result<Vec<u8>> {
+        Ok(bcs::to_bytes(self)?)
+    }
+
+    /// 从 BCS 反序列化。
+    pub fn from_bcs(bytes: &[u8]) -> crate::error::PokerL1Result<Self> {
+        Ok(bcs::from_bytes(bytes)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+
+    fn dummy_tagged_pubkey() -> TaggedPubkey {
+        TaggedPubkey {
+            tag: encode_tag(SignatureScheme::Secp256k1, 1),
+            raw: vec![0x02u8; 33],
+        }
+    }
+
+    fn dummy_vertex() -> DagVertex {
+        DagVertex {
+            epoch: 1,
+            round: 10,
+            author_pubkey: dummy_tagged_pubkey(),
+            tx_list: vec![],
+            parent_hashes: vec![[0u8; 32], [1u8; 32]],
+            author_sig: vec![0u8; 65],
+        }
+    }
+
+    fn dummy_commit_cert() -> DagCommitCertificate {
+        DagCommitCertificate {
+            epoch: 1,
+            commit_round: 5,
+            prev_commit_hash: [0xAAu8; 32],
+            vertex_hash_list: vec![[0xBBu8; 32], [0xCCu8; 32]],
+            round_attendance_bitmap: vec![0xFF, 0x0F],
+            state_root: [0x11u8; 32],
+            public_tx_root: [0x22u8; 32],
+            gameturn_tx_root: [0x33u8; 32],
+            signature_list: vec![vec![0u8; 65], vec![0u8; 65]],
+            signer_bitmap: vec![0b00000011, 0b00000000],
+        }
+    }
+
+    #[test]
+    fn vertex_hash_deterministic() {
+        let v = dummy_vertex();
+        let h1 = v.vertex_hash();
+        let h2 = v.vertex_hash();
+        assert_eq!(h1, h2, "vertex_hash 必须确定性");
+    }
+
+    #[test]
+    fn vertex_hash_excludes_author_sig() {
+        // author_sig 不参与 vertex_hash
+        let mut v = dummy_vertex();
+        let h1 = v.vertex_hash();
+        v.author_sig = vec![0xFFu8; 65];
+        let h2 = v.vertex_hash();
+        assert_eq!(h1, h2, "author_sig 不应影响 vertex_hash");
+    }
+
+    #[test]
+    fn vertex_signing_hash_changes_with_chain_id() {
+        let v = dummy_vertex();
+        let h1 = v.signing_hash(crate::DEFAULT_CHAIN_ID);
+        let h2 = v.signing_hash(0xDEAD_BEEF);
+        assert_ne!(h1, h2, "chain_id 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn vertex_signing_hash_changes_with_epoch() {
+        let mut v = dummy_vertex();
+        let h1 = v.signing_hash(crate::DEFAULT_CHAIN_ID);
+        v.epoch = 2;
+        let h2 = v.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h1, h2, "epoch 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn vertex_signing_hash_changes_with_round() {
+        let mut v = dummy_vertex();
+        let h1 = v.signing_hash(crate::DEFAULT_CHAIN_ID);
+        v.round = 20;
+        let h2 = v.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h1, h2, "round 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn vertex_signing_hash_changes_with_author_pubkey() {
+        let mut v = dummy_vertex();
+        let h1 = v.signing_hash(crate::DEFAULT_CHAIN_ID);
+        v.author_pubkey = TaggedPubkey {
+            tag: encode_tag(SignatureScheme::Ed25519, 1),
+            raw: vec![0x03u8; 32],
+        };
+        let h2 = v.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h1, h2, "author_pubkey 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn vertex_bcs_roundtrip() {
+        let v = dummy_vertex();
+        let bytes = v.to_bcs().expect("BCS 序列化");
+        let v2 = DagVertex::from_bcs(&bytes).expect("BCS 反序列化");
+        assert_eq!(v, v2, "BCS 往返必须保持一致");
+    }
+
+    #[test]
+    fn commit_cert_signing_hash_changes_with_chain_id() {
+        let c = dummy_commit_cert();
+        let h1 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        let h2 = c.signing_hash(0xDEAD_BEEF);
+        assert_ne!(h1, h2, "chain_id 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn commit_cert_signing_hash_changes_with_prev_commit_hash() {
+        let mut c = dummy_commit_cert();
+        let h1 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        c.prev_commit_hash = [0x99u8; 32];
+        let h2 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h1, h2, "prev_commit_hash 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn commit_cert_signing_hash_changes_with_state_root() {
+        let mut c = dummy_commit_cert();
+        let h1 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        c.state_root = [0x99u8; 32];
+        let h2 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h1, h2, "state_root 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn commit_cert_signing_hash_changes_with_tx_roots() {
+        let mut c = dummy_commit_cert();
+        let h1 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        c.public_tx_root = [0x99u8; 32];
+        let h2 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h1, h2, "public_tx_root 变化必须改变 signing_hash");
+
+        c.gameturn_tx_root = [0x88u8; 32];
+        let h3 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h2, h3, "gameturn_tx_root 变化必须改变 signing_hash");
+    }
+
+    #[test]
+    fn commit_cert_signing_hash_excludes_signatures() {
+        // signature_list 和 signer_bitmap 不参与 signing_hash
+        let mut c = dummy_commit_cert();
+        let h1 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        c.signature_list = vec![vec![0xFFu8; 65]];
+        let h2 = c.signing_hash(crate::DEFAULT_CHAIN_ID);
+        assert_eq!(h1, h2, "signature_list 不应影响 signing_hash");
+    }
+
+    #[test]
+    fn commit_cert_cert_hash_includes_signatures() {
+        // cert_hash 包含 signatures
+        let mut c = dummy_commit_cert();
+        let h1 = c.cert_hash(crate::DEFAULT_CHAIN_ID);
+        c.signature_list = vec![vec![0xFFu8; 65]];
+        let h2 = c.cert_hash(crate::DEFAULT_CHAIN_ID);
+        assert_ne!(h1, h2, "signature_list 变化必须改变 cert_hash");
+    }
+
+    #[test]
+    fn commit_cert_signer_count() {
+        let c = dummy_commit_cert();
+        // signer_bitmap = [0b00000011, 0b00000000] → 2 个签名者
+        assert_eq!(c.signer_count(), 2);
+    }
+
+    #[test]
+    fn commit_cert_bcs_roundtrip() {
+        let c = dummy_commit_cert();
+        let bytes = c.to_bcs().expect("BCS 序列化");
+        let c2 = DagCommitCertificate::from_bcs(&bytes).expect("BCS 反序列化");
+        assert_eq!(c, c2, "BCS 往返必须保持一致");
+    }
+
+    #[test]
+    fn commit_cert_json_roundtrip() {
+        let c = dummy_commit_cert();
+        let json = serde_json::to_string(&c).expect("JSON 序列化");
+        let c2: DagCommitCertificate = serde_json::from_str(&json).expect("JSON 反序列化");
+        assert_eq!(c, c2, "JSON 往返必须保持一致");
+    }
+}
