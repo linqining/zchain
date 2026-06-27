@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
 use crate::Address;
+use crate::Hash;
 
 /// 游戏执行模式（spec.md 第 527-553 行）。
 ///
@@ -214,6 +215,20 @@ impl HandState {
 ///
 /// 存储在 ObjectStore 中，通过 `object_create` 创建，`object_write` 修改。
 /// 包含牌桌元数据 + 当前手牌状态。
+///
+/// Phase 5b/5c 扩展字段（SubTask 27.x / 28.x）：
+/// - `checkpoint_seq`：checkpoint_anchor 序号（SubTask 27.1）
+/// - `pending_ack_requests`：未完成的 ACK 请求（SubTask 27.6，地址→deadline height）
+/// - `skip_count`：checkpoint_skip 段计数（SubTask 27.10）
+/// - `delegated_escape_nonce`：委托逃生凭证 nonce（SubTask 27.5c）
+/// - `designated_operator_check_exemptions`：designated operator check 豁免次数（SubTask 27.5）
+/// - `under_investigation_count`：assigned_validator 审查调查累积计数（SubTask 27.5a）
+/// - `forfeit_deposit`：操作方预锁 forfeit 保证金（SubTask 28.9）
+/// - `partial_checkin_count`：partial_checkin 已提交次数（SubTask 28.7a）
+/// - `malicious_refuse_count`：恶意 refuse_ack 累计计数（SubTask 27.9）
+/// - `no_progress_count`：无进度 checkpoint_anchor 计数（SubTask 28.3 / SEC-H2）
+/// - `last_checkpoint_state_hash`：上一次 checkpoint_anchor 的 state_hash（SEC-H2 无进度检测）
+/// - `last_partial_fold`：partial_checkin 锚点（SubTask 28.7a）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameContract {
     /// 合约对象 ID（全局唯一）。
@@ -234,6 +249,37 @@ pub struct GameContract {
     pub turn_timeout_blocks: u64,
     /// 对象版本号（optimistic concurrency）。
     pub version: u64,
+    // ===== Phase 5b/5c 扩展字段（SubTask 27.x / 28.x）=====
+    /// Game 级 last_action_height（SubTask 28.1 / 27.2 / 27.4 / 28.3）。
+    /// 由 checkpoint_anchor / force_checkpoint / GameTurn tx 更新；
+    /// force_advance / force_checkin 判定依据 `block.height - last_action_height`。
+    /// 注意：`HandState.last_action_height` 为 per-hand 追踪，本字段为 game 级。
+    pub last_action_height: u64,
+    /// checkpoint_anchor 序号（SubTask 27.1，单调递增，去重判定依据）。
+    pub checkpoint_seq: u64,
+    /// 未完成的 ACK 请求（SubTask 27.6，地址→ack_deadline height）。
+    /// 每 Game 每参与者同时只允许 1 个 active 请求（NEW-M7）。
+    pub pending_ack_requests: BTreeMap<Address, u64>,
+    /// checkpoint_skip 段计数（SubTask 27.10，上限 `max_skip_segments` 默认 3）。
+    pub skip_count: u32,
+    /// 委托逃生凭证 nonce（SubTask 27.5c，初始 0，消费后递增）。
+    pub delegated_escape_nonce: u64,
+    /// designated operator check 豁免次数（SubTask 27.5，上限默认 2）。
+    pub designated_operator_check_exemptions: u32,
+    /// assigned_validator 审查调查累积计数（SubTask 27.5a，达阈值默认 3 触发 slashing）。
+    pub under_investigation_count: u32,
+    /// 操作方预锁 forfeit 保证金（SubTask 28.9，= 桌面总 buy-in * forfeit_deposit_ratio / 100）。
+    pub forfeit_deposit: u64,
+    /// partial_checkin 已提交次数（SubTask 28.7a，上限 `max_partial_checkin_count` 默认 3）。
+    pub partial_checkin_count: u32,
+    /// 恶意 refuse_ack 累计计数（SubTask 27.9，达阈值默认 3 触发 slashing）。
+    pub malicious_refuse_count: u32,
+    /// 无进度 checkpoint_anchor 计数（SubTask 28.3 / SEC-H2，达阈值默认 2 触发 force_revert）。
+    pub no_progress_count: u32,
+    /// 上一次 checkpoint_anchor 的 state_hash（SEC-H2，用于无进度检测）。
+    pub last_checkpoint_state_hash: Option<Hash>,
+    /// partial_checkin 锚点（SubTask 28.7a，None 表示无 partial_checkin 记录）。
+    pub last_partial_fold: Option<crate::offline::state::LastPartialFold>,
 }
 
 /// 台费配置（引用类型，避免循环依赖）。
@@ -271,6 +317,20 @@ impl GameContract {
             rake_config,
             turn_timeout_blocks,
             version: 0,
+            // Phase 5b/5c 扩展字段默认值
+            last_action_height: 0,
+            checkpoint_seq: 0,
+            pending_ack_requests: BTreeMap::new(),
+            skip_count: 0,
+            delegated_escape_nonce: 0,
+            designated_operator_check_exemptions: 0,
+            under_investigation_count: 0,
+            forfeit_deposit: 0,
+            partial_checkin_count: 0,
+            malicious_refuse_count: 0,
+            no_progress_count: 0,
+            last_checkpoint_state_hash: None,
+            last_partial_fold: None,
         }
     }
 

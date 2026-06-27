@@ -357,6 +357,139 @@ pub enum PokerL1Error {
     /// BLS12-381 标量反序列化失败。
     #[error("invalid bls scalar: {0}")]
     InvalidBlsScalar(String),
+
+    // ===== Phase 5a: OfflineState / ZK Verifier（Task 21 / 22 / 23 / 24 / 25 / 26） =====
+    /// verifier_status=Stub 时主网 chain_id 拒绝 OffChain checkout（NEW-C1）。
+    #[error("offchain mode disabled on mainnet while verifier_status=Stub")]
+    OffChainDisabledOnMainnet,
+    /// Groth16 verifying_key 被替换：blake2b_256(stored_vk) != crs_fingerprint（SEC-M10）。
+    #[error("crs fingerprint mismatch: vk_id={vk_id:?}")]
+    CrsFingerprintMismatch { vk_id: crate::Hash },
+    /// zk_verify 收到未知 scheme_id（SubTask 22.2）。
+    #[error("unknown zk scheme_id: {0}")]
+    UnknownZkScheme(u32),
+    /// ZK proof 格式错误（长度 / 编码不合法）。
+    #[error("invalid zk proof format: {0}")]
+    InvalidZkProofFormat(String),
+    /// ZK public_io 缺失或格式错误（O15：initial_commitment / final_commitment / state_delta_hash / ack_chain_hash / fold_step_count / skip_count / segment_continuity_proof）。
+    #[error("invalid zk public_io: {0}")]
+    InvalidZkPublicIo(String),
+    /// fold_step_count 超过上限 1000（O15 修复）。
+    #[error("fold_step_count {actual} exceeds limit {limit}")]
+    FoldStepCountExceeded { actual: u32, limit: u32 },
+    /// ack_chain 长度超过 max_ack_chain_length（SEC2-M4，默认 1000）。
+    #[error("ack_chain length {actual} exceeds max_ack_chain_length {limit}")]
+    AckChainLengthExceeded { actual: u32, limit: u32 },
+    /// ZK verifier 未注册（scheme_id 已知但 registry 中无对应 verifier）。
+    #[error("zk verifier not registered for scheme_id={0}")]
+    ZkVerifierNotRegistered(u32),
+    /// Groth16 verifying_key 未注册到 ZkVerifierRegistry（SubTask 24.3a）。
+    #[error("groth16 verifying_key not registered: vk_id={0:?}")]
+    Groth16VkNotRegistered(crate::Hash),
+    /// partial_checkin 与 last_partial_fold 不匹配（NEW-M6：ack_chain[0..N] 哈希不匹配 / initial_commitment 不匹配 / fold_step_count 不匹配）。
+    #[error("partial_checkin mismatch: {0}")]
+    PartialCheckinMismatch(String),
+    /// 完整 checkin 装入 vertex 后 partial_checkin 被拒绝（SEC2-M8）。
+    #[error("game already checked in: game_id={0:?}")]
+    GameAlreadyCheckedIn(crate::object_model::ObjectID),
+    /// partial_checkin 的 folded_step_count 未严格大于上一次记录（SEC-H1）。
+    #[error("no progress partial_checkin: new_folded_step_count={new_count}, last_recorded={last_recorded}")]
+    NoProgressPartialCheckin {
+        new_count: u32,
+        last_recorded: u32,
+    },
+    /// partial_checkin 提交次数超过 max_partial_checkin_count（SEC-H1，默认 3）。
+    #[error("partial_checkin count {actual} exceeds max_partial_checkin_count {limit}")]
+    PartialCheckinLimitExceeded { actual: u32, limit: u32 },
+
+    // ===== Phase 5a: ACK 链与签名验证（Task 27.3 / 27.10） =====
+    /// checkpoint_anchor 缺少活跃参与者的 ACK 签名（SubTask 27.3）。
+    #[error("missing ack for checkpoint: game_id={game_id:?}, missing_participant={participant:?}")]
+    MissingAck {
+        game_id: crate::object_model::ObjectID,
+        participant: crate::signature::TaggedPubkey,
+    },
+    /// ACK 签名者 tagged pubkey 不在 Game.active_participants 集合中（SEC2-M9）。
+    #[error("ack signer not participant: game_id={game_id:?}, signer={signer:?}")]
+    AckSignerNotParticipant {
+        game_id: crate::object_model::ObjectID,
+        signer: crate::signature::TaggedPubkey,
+    },
+    /// 相同 (game_id, checkpoint_seq) 重复提交（R5-L2 去重）。
+    #[error("duplicate checkpoint: game_id={game_id:?}, checkpoint_seq={checkpoint_seq}")]
+    DuplicateCheckpoint {
+        game_id: crate::object_model::ObjectID,
+        checkpoint_seq: u64,
+    },
+    /// skip 段 ack_set 与上一正常 checkpoint 不一致（SEC-M6）。
+    #[error("ack set mismatch: expected_count={expected}, got_count={got}")]
+    AckSetMismatch { expected: usize, got: usize },
+
+    // ===== Phase 5b: 审查截断防护（Task 27.5a / 27.6 / 27.7 / 27.9） =====
+    /// 同一 (game_id, target_participant) 已有未过期 pending_ack_request（NEW-M7）。
+    #[error("pending ack request exists: game_id={game_id:?}, target={target:?}")]
+    PendingAckExists {
+        game_id: crate::object_model::ObjectID,
+        target: crate::signature::TaggedPubkey,
+    },
+    /// turn_timeout_blocks 内 request_ack 次数超限（NEW-M7）。
+    #[error("request_ack too frequent: count={actual}, limit={limit}")]
+    RequestAckTooFrequent { actual: u32, limit: u32 },
+    /// validator 处于 under_investigation 状态（NEW-H1）。
+    #[error("validator under investigation: pubkey={0:?}")]
+    UnderInvestigation(crate::signature::TaggedPubkey),
+    /// refuse_ack evidence 验证失败（SubTask 27.7）。
+    #[error("invalid refuse_ack evidence: {0}")]
+    InvalidRefuseAckEvidence(String),
+    /// assigned_validator_failure_proof 验证失败（SubTask 27.5b）。
+    #[error("invalid assigned_validator_failure_proof: {0}")]
+    InvalidAssignedValidatorFailureProof(String),
+    /// delegated_escape_authorization 凭证无效（SubTask 27.5c）。
+    #[error("invalid delegated escape authorization: {0}")]
+    InvalidDelegatedEscapeAuthorization(String),
+    /// delegated_escape_authorization 已过期（NEW-M2）。
+    #[error("delegated escape authorization expired: expiry_height={expiry}, current={current}")]
+    DelegatedEscapeExpired { expiry: u64, current: u64 },
+    /// delegated_escape_authorization credential_nonce 已被消费（NEW-M1）。
+    #[error("delegated escape credential nonce already consumed: nonce={0}")]
+    DelegatedEscapeNonceConsumed(u64),
+    /// force_checkpoint evidence 验证失败（SEC2-M3）。
+    #[error("force_checkpoint evidence verification failed: {0}")]
+    ForceCheckpointEvidenceFailed(String),
+
+    // ===== Phase 5c: 强制同步 / 争议解决（Task 28） =====
+    /// 阶段 3 内操作方本人提交 force_revert/request_revert(reason=technical_interrupt) 被拒（R7-M6）。
+    #[error("operator cannot claim technical_interrupt in stage 3: game_id={0:?}")]
+    OperatorCannotClaimTechnicalInterrupt(crate::object_model::ObjectID),
+    /// designated operator 任命 tx bond_amount 与治理参数不匹配（SEC2-M7）。
+    #[error("invalid bond amount: expected={expected}, got={got}")]
+    InvalidBondAmount { expected: u64, got: u64 },
+    /// designated operator bond_amount < 桌面总 buy-in（SEC2-M7）。
+    #[error("insufficient operator bond: bond={bond}, required={required}")]
+    InsufficientOperatorBond { bond: u64, required: u64 },
+    /// challenge_delta 失败：hash(Δ) == state_delta_hash（恶意挑战，挑战方 forfeit 保证金）。
+    #[error("challenge_delta failed: delta matches state_delta_hash (malicious challenge)")]
+    ChallengeFailed,
+    /// challenge_delta 成立：hash(Δ) != state_delta_hash（操作方 forfeit 保证金 + 触发 request_revert）。
+    #[error("challenge_delta succeeded: delta mismatch state_delta_hash (operator forfeits)")]
+    ChallengeSucceeded,
+    /// skip_count 超过 max_skip_segments（SubTask 27.11，默认 3）。
+    #[error("skip_count {actual} exceeds max_skip_segments {limit}")]
+    SkipCountExceeded { actual: u32, limit: u32 },
+    /// segment_continuity_proof 验证失败（R5-H6：段间状态不连续）。
+    #[error("continuity proof invalid: {0}")]
+    ContinuityProofInvalid(String),
+    /// checkin tx 缺少 has_partial_checkin 字段或字段与链上状态不一致（SEC2-M8）。
+    #[error("partial_checkin flag mismatch: declared={declared}, actual_state={actual_state}")]
+    PartialCheckinFlagMismatch { declared: bool, actual_state: bool },
+
+    // ===== Phase 5c: 状态裁剪 / DA（Task 29） =====
+    /// 历史数据不可用（Walrus blob 过期 / archive node 不足 / 裁剪后无法检索，R5-M7）。
+    #[error("historical data unavailable: {0}")]
+    HistoricalDataUnavailable(String),
+    /// 裁剪被拒绝（archive node 数量 < archive_node_min_count，SubTask 29.4）。
+    #[error("pruning rejected: archive node count {actual} < min {limit}")]
+    PruningRejectedArchiveInsufficient { actual: u32, limit: u32 },
 }
 
 /// 库统一 Result 别名。

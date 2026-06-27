@@ -1,0 +1,506 @@
+//! ZK Verifier trait 与热插拔注册表（Task 22 — SubTask 22.1 / 22.2 + NEW-C1）。
+//!
+//! 严格遵循 spec.md L493–525 + L853–857（FROZEN 2026-06-27）：
+//! - **ZkVerifier trait**：统一接口，支持 Hypernova / Groth16 / IPA 三种 scheme
+//! - **ZkVerifierRegistry**：热插拔注册表，节点升级新增 verifier 无需重编译已部署合约
+//! - **verifier_status 治理开关**（NEW-C1）：per-`chain_id`，`Stub` → `Production` 须治理 90% quorum + `parameter_delay_blocks` timelock
+//! - **zk_verify(scheme_id, proof, public_io) -> bool** 通用 syscall 入口
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::error::PokerL1Error;
+use crate::Hash;
+
+/// ZK 证明 scheme 标识符（u32，与 syscall 接口一致）。
+pub type SchemeId = u32;
+
+/// Hypernova scheme_id（spec.md L499）。
+pub const SCHEME_HYPERNOVA: SchemeId = 1;
+/// Groth16 scheme_id（spec.md L505）。
+pub const SCHEME_GROTH16: SchemeId = 2;
+/// IPA scheme_id（spec.md L511）。
+pub const SCHEME_IPA: SchemeId = 3;
+
+/// Verifier 状态（NEW-C1，spec.md L853–857）。
+///
+/// - `Stub`：MVP 阶段，仅校验 proof 格式合法性，不实际验证
+/// - `Production`：完整验证
+///
+/// 升级须治理 90% quorum + `parameter_delay_blocks` timelock 双重保护。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierStatus {
+    /// Stub 状态：仅校验格式，主网 chain_id 拒绝 OffChain checkout（NEW-C1）。
+    Stub,
+    /// Production 状态：完整 ZK 验证。
+    Production,
+}
+
+impl VerifierStatus {
+    /// 是否允许 OffChain checkout（NEW-C1）。
+    ///
+    /// `Stub` 状态下主网 chain_id 拒绝 OffChain checkout。
+    pub fn allows_offchain(self, chain_id: crate::ChainId, is_mainnet: bool) -> bool {
+        if self == Self::Stub && is_mainnet {
+            return false;
+        }
+        let _ = chain_id;
+        true
+    }
+}
+
+/// ZK 证明的 public_io 边界（O15 修复 — spec.md L521–525）。
+///
+/// 所有 ZK scheme 的最终 π 都须包含此边界。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZkPublicIo {
+    /// 折叠起点状态承诺。
+    pub initial_commitment: Hash,
+    /// 折叠终点状态承诺（== checkin tx 的 new_commitment）。
+    pub final_commitment: Hash,
+    /// 状态增量哈希（用于 challenge_delta 比对，NEW-H4：不可逆）。
+    pub state_delta_hash: Hash,
+    /// 所有 checkpoint ack 的聚合哈希（MerkleRoot，仅正常 checkpoint 聚合）。
+    pub ack_chain_hash: Hash,
+    /// 折叠步数，上限 1000（O15）。
+    pub fold_step_count: u32,
+    /// 被跳过的 checkpoint 段数（默认上限 3，SubTask 27.11）。
+    pub skip_count: u32,
+    /// 段间连续性证明（R5-H6：verify_segment_chain 校验）。
+    pub segment_continuity_proof: Vec<u8>,
+}
+
+impl ZkPublicIo {
+    /// 校验 public_io 边界完整性（O15 + SEC2-M4 + SubTask 27.11）。
+    ///
+    /// - `fold_step_count <= 1000`（O15）
+    /// - `skip_count <= max_skip_segments`（默认 3）
+    /// - `ack_chain_length <= max_ack_chain_length`（默认 1000，由调用方传入或使用默认值）
+    pub const fn validate(
+        &self,
+        max_skip_segments: u32,
+        max_ack_chain_length: u32,
+    ) -> Result<(), PokerL1Error> {
+        use crate::offline::MAX_FOLD_STEP_COUNT;
+
+        if self.fold_step_count > MAX_FOLD_STEP_COUNT {
+            return Err(PokerL1Error::FoldStepCountExceeded {
+                actual: self.fold_step_count,
+                limit: MAX_FOLD_STEP_COUNT,
+            });
+        }
+        if self.skip_count > max_skip_segments {
+            return Err(PokerL1Error::SkipCountExceeded {
+                actual: self.skip_count,
+                limit: max_skip_segments,
+            });
+        }
+        let _ = max_ack_chain_length; // ack_chain_length 由 ack_chain 模块自行校验
+        Ok(())
+    }
+
+    /// 序列化为字节（用于 proof hash 计算 + syscall 传输）。
+    ///
+    /// 布局：
+    /// ```text
+    /// | 偏移 | 长度 | 字段                       |
+    /// |------|------|----------------------------|
+    /// | 0    | 32   | initial_commitment         |
+    /// | 32   | 32   | final_commitment           |
+    /// | 64   | 32   | state_delta_hash           |
+    /// | 96   | 32   | ack_chain_hash             |
+    /// | 128  | 4    | fold_step_count (BE u32)   |
+    /// | 132  | 4    | skip_count (BE u32)        |
+    /// | 136  | 变长 | segment_continuity_proof   |
+    /// ```
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * 4 + 4 + 4 + self.segment_continuity_proof.len());
+        out.extend_from_slice(&self.initial_commitment);
+        out.extend_from_slice(&self.final_commitment);
+        out.extend_from_slice(&self.state_delta_hash);
+        out.extend_from_slice(&self.ack_chain_hash);
+        out.extend_from_slice(&self.fold_step_count.to_be_bytes());
+        out.extend_from_slice(&self.skip_count.to_be_bytes());
+        out.extend_from_slice(&self.segment_continuity_proof);
+        out
+    }
+
+    /// 最小字节数（不含变长 `segment_continuity_proof`）。
+    pub const MIN_BYTES: usize = 32 * 4 + 4 + 4;
+
+    /// 从字节反序列化（[`to_bytes`] 的逆操作）。
+    ///
+    /// 返回 `None` 当输入长度不足或字段非法。
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::MIN_BYTES {
+            return None;
+        }
+        let mut initial_commitment = [0u8; 32];
+        initial_commitment.copy_from_slice(&bytes[..32]);
+        let mut final_commitment = [0u8; 32];
+        final_commitment.copy_from_slice(&bytes[32..64]);
+        let mut state_delta_hash = [0u8; 32];
+        state_delta_hash.copy_from_slice(&bytes[64..96]);
+        let mut ack_chain_hash = [0u8; 32];
+        ack_chain_hash.copy_from_slice(&bytes[96..128]);
+        let fold_step_count = u32::from_be_bytes([
+            bytes[128], bytes[129], bytes[130], bytes[131],
+        ]);
+        let skip_count = u32::from_be_bytes([
+            bytes[132], bytes[133], bytes[134], bytes[135],
+        ]);
+        let segment_continuity_proof = bytes[136..].to_vec();
+        Some(Self {
+            initial_commitment,
+            final_commitment,
+            state_delta_hash,
+            ack_chain_hash,
+            fold_step_count,
+            skip_count,
+            segment_continuity_proof,
+        })
+    }
+}
+
+/// ZK 证明验证结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZkVerifyResult {
+    /// 是否验证通过。
+    pub verified: bool,
+    /// Verifier 状态（Stub / Production）。
+    pub verifier_status: VerifierStatus,
+    /// scheme_id。
+    pub scheme_id: SchemeId,
+}
+
+/// ZK Verifier trait — 统一接口（SubTask 22.1）。
+///
+/// 每个 scheme（Hypernova / Groth16 / IPA）实现此 trait，
+/// 注册到 [`ZkVerifierRegistry`] 后即可通过 `zk_verify` syscall 调用。
+pub trait ZkVerifier: Send + Sync {
+    /// scheme_id（SCHEME_HYPERNOVA / SCHEME_GROTH16 / SCHEME_IPA）。
+    fn scheme_id(&self) -> SchemeId;
+
+    /// 验证 ZK proof。
+    ///
+    /// # 参数
+    /// - `proof`：proof 字节
+    /// - `public_io`：public_io 边界
+    /// - `status`：当前 verifier 状态（Stub 时仅校验格式）
+    ///
+    /// # 返回
+    /// `true` 当且仅当 proof 合法（Stub 状态下 = 格式校验通过）。
+    fn verify(
+        &self,
+        proof: &[u8],
+        public_io: &ZkPublicIo,
+        status: VerifierStatus,
+    ) -> Result<bool, PokerL1Error>;
+
+    /// 校验 proof 格式（不实际验证）。
+    ///
+    /// Stub 状态下仅调用此方法。
+    fn validate_proof_format(&self, proof: &[u8]) -> Result<(), PokerL1Error>;
+}
+
+/// ZK Verifier 热插拔注册表（SubTask 22.1）。
+///
+/// 节点升级新增 verifier 时，只需实现 [`ZkVerifier`] trait 并注册到此 registry，
+/// 无需重新编译已部署合约（spec.md L515–519）。
+#[derive(Clone, Default)]
+pub struct ZkVerifierRegistry {
+    /// scheme_id → verifier 实例。
+    verifiers: BTreeMap<SchemeId, Arc<dyn ZkVerifier>>,
+    /// per-chain_id verifier_status（NEW-C1）。
+    statuses: BTreeMap<crate::ChainId, VerifierStatus>,
+}
+
+impl std::fmt::Debug for ZkVerifierRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZkVerifierRegistry")
+            .field("registered_schemes", &self.verifiers.keys().collect::<Vec<_>>())
+            .field("statuses", &self.statuses)
+            .finish()
+    }
+}
+
+impl ZkVerifierRegistry {
+    /// 创建空 registry。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注册 verifier（热插拔）。
+    pub fn register(&mut self, verifier: Arc<dyn ZkVerifier>) {
+        let scheme_id = verifier.scheme_id();
+        self.verifiers.insert(scheme_id, verifier);
+    }
+
+    /// 注销 verifier。
+    pub fn unregister(&mut self, scheme_id: SchemeId) -> Option<Arc<dyn ZkVerifier>> {
+        self.verifiers.remove(&scheme_id)
+    }
+
+    /// 查询 verifier。
+    pub fn get(&self, scheme_id: SchemeId) -> Option<&Arc<dyn ZkVerifier>> {
+        self.verifiers.get(&scheme_id)
+    }
+
+    /// 列出所有已注册 scheme_id。
+    pub fn registered_schemes(&self) -> Vec<SchemeId> {
+        self.verifiers.keys().copied().collect()
+    }
+
+    /// 设置 per-chain_id verifier_status（NEW-C1）。
+    ///
+    /// 升级为 `Production` 须治理 90% quorum + `parameter_delay_blocks` timelock。
+    pub fn set_verifier_status(&mut self, chain_id: crate::ChainId, status: VerifierStatus) {
+        self.statuses.insert(chain_id, status);
+    }
+
+    /// 查询 per-chain_id verifier_status（NEW-C1）。
+    ///
+    /// 未设置时默认 `Stub`（NEW-C1：初始 Stub）。
+    pub fn verifier_status(&self, chain_id: crate::ChainId) -> VerifierStatus {
+        self.statuses
+            .get(&chain_id)
+            .copied()
+            .unwrap_or(VerifierStatus::Stub)
+    }
+
+    /// 通用 `zk_verify(scheme_id, proof, public_io) -> bool` 入口（SubTask 22.2）。
+    ///
+    /// 步骤：
+    /// 1. 查找 verifier（未注册返回 `ZkVerifierNotRegistered`）
+    /// 2. 查询 `verifier_status`（per-chain_id）
+    /// 3. 校验 public_io 边界（O15 + SubTask 27.11）
+    /// 4. 调用 verifier.verify()（Stub 状态下仅校验格式）
+    pub fn zk_verify(
+        &self,
+        chain_id: crate::ChainId,
+        scheme_id: SchemeId,
+        proof: &[u8],
+        public_io: &ZkPublicIo,
+        max_skip_segments: u32,
+        max_ack_chain_length: u32,
+    ) -> Result<ZkVerifyResult, PokerL1Error> {
+        let verifier = self
+            .verifiers
+            .get(&scheme_id)
+            .ok_or(PokerL1Error::ZkVerifierNotRegistered(scheme_id))?;
+
+        let status = self.verifier_status(chain_id);
+
+        // 校验 public_io 边界（O15 + SubTask 27.11）
+        public_io.validate(max_skip_segments, max_ack_chain_length)?;
+
+        // 校验 proof 格式（无论 Stub/Production 都校验）
+        verifier.validate_proof_format(proof)?;
+
+        // 验证 proof
+        let verified = verifier.verify(proof, public_io, status)?;
+
+        Ok(ZkVerifyResult {
+            verified,
+            verifier_status: status,
+            scheme_id,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::offline::MAX_FOLD_STEP_COUNT;
+
+    /// 用于测试的 stub verifier — 仅校验 proof 非空。
+    struct StubVerifier {
+        scheme_id: SchemeId,
+    }
+
+    impl ZkVerifier for StubVerifier {
+        fn scheme_id(&self) -> SchemeId {
+            self.scheme_id
+        }
+
+        fn verify(
+            &self,
+            proof: &[u8],
+            _public_io: &ZkPublicIo,
+            _status: VerifierStatus,
+        ) -> Result<bool, PokerL1Error> {
+            Ok(!proof.is_empty())
+        }
+
+        fn validate_proof_format(&self, proof: &[u8]) -> Result<(), PokerL1Error> {
+            if proof.is_empty() {
+                return Err(PokerL1Error::InvalidZkProofFormat(
+                    "proof 不能为空".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    fn make_public_io(fold_step_count: u32, skip_count: u32) -> ZkPublicIo {
+        ZkPublicIo {
+            initial_commitment: [0x01; 32],
+            final_commitment: [0x02; 32],
+            state_delta_hash: [0x03; 32],
+            ack_chain_hash: [0x04; 32],
+            fold_step_count,
+            skip_count,
+            segment_continuity_proof: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_register_and_lookup() {
+        let mut registry = ZkVerifierRegistry::new();
+        let verifier = Arc::new(StubVerifier { scheme_id: 99 });
+        registry.register(verifier);
+
+        assert!(registry.get(99).is_some());
+        assert!(registry.get(98).is_none());
+        assert_eq!(registry.registered_schemes(), vec![99]);
+    }
+
+    #[test]
+    fn test_unregister() {
+        let mut registry = ZkVerifierRegistry::new();
+        registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
+        assert!(registry.unregister(99).is_some());
+        assert!(registry.get(99).is_none());
+    }
+
+    #[test]
+    fn test_default_verifier_status_is_stub() {
+        let registry = ZkVerifierRegistry::new();
+        assert_eq!(
+            registry.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Stub
+        );
+    }
+
+    #[test]
+    fn test_set_verifier_status() {
+        let mut registry = ZkVerifierRegistry::new();
+        registry.set_verifier_status(crate::DEFAULT_CHAIN_ID, VerifierStatus::Production);
+        assert_eq!(
+            registry.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Production
+        );
+    }
+
+    #[test]
+    fn test_zk_verify_unregistered_scheme() {
+        let registry = ZkVerifierRegistry::new();
+        let public_io = make_public_io(1, 0);
+        let result = registry.zk_verify(
+            crate::DEFAULT_CHAIN_ID,
+            999,
+            &[0x01],
+            &public_io,
+            3,
+            1000,
+        );
+        assert!(matches!(result, Err(PokerL1Error::ZkVerifierNotRegistered(999))));
+    }
+
+    #[test]
+    fn test_zk_verify_invalid_proof_format() {
+        let mut registry = ZkVerifierRegistry::new();
+        registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
+        let public_io = make_public_io(1, 0);
+        let result = registry.zk_verify(
+            crate::DEFAULT_CHAIN_ID,
+            99,
+            &[],
+            &public_io,
+            3,
+            1000,
+        );
+        assert!(matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))));
+    }
+
+    #[test]
+    fn test_zk_verify_fold_step_count_exceeded() {
+        let mut registry = ZkVerifierRegistry::new();
+        registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
+        let public_io = make_public_io(MAX_FOLD_STEP_COUNT + 1, 0);
+        let result = registry.zk_verify(
+            crate::DEFAULT_CHAIN_ID,
+            99,
+            &[0x01],
+            &public_io,
+            3,
+            1000,
+        );
+        assert!(matches!(result, Err(PokerL1Error::FoldStepCountExceeded { .. })));
+    }
+
+    #[test]
+    fn test_zk_verify_skip_count_exceeded() {
+        let mut registry = ZkVerifierRegistry::new();
+        registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
+        let public_io = make_public_io(1, 10);
+        let result = registry.zk_verify(
+            crate::DEFAULT_CHAIN_ID,
+            99,
+            &[0x01],
+            &public_io,
+            3,
+            1000,
+        );
+        assert!(matches!(result, Err(PokerL1Error::SkipCountExceeded { .. })));
+    }
+
+    #[test]
+    fn test_zk_verify_success_stub() {
+        let mut registry = ZkVerifierRegistry::new();
+        registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
+        let public_io = make_public_io(1, 0);
+        let result = registry
+            .zk_verify(crate::DEFAULT_CHAIN_ID, 99, &[0x01], &public_io, 3, 1000)
+            .expect("zk_verify 应成功");
+        assert!(result.verified);
+        assert_eq!(result.verifier_status, VerifierStatus::Stub);
+        assert_eq!(result.scheme_id, 99);
+    }
+
+    #[test]
+    fn test_verifier_status_allows_offchain() {
+        // Stub + mainnet → 拒绝
+        assert!(!VerifierStatus::Stub.allows_offchain(crate::DEFAULT_CHAIN_ID, true));
+        // Stub + testnet → 允许
+        assert!(VerifierStatus::Stub.allows_offchain(crate::DEFAULT_CHAIN_ID, false));
+        // Production + mainnet → 允许
+        assert!(VerifierStatus::Production.allows_offchain(crate::DEFAULT_CHAIN_ID, true));
+    }
+
+    #[test]
+    fn test_public_io_validate_at_boundaries() {
+        // fold_step_count = 1000 应通过（边界）
+        let pi = make_public_io(MAX_FOLD_STEP_COUNT, 0);
+        assert!(pi.validate(3, 1000).is_ok());
+        // fold_step_count = 1001 应失败
+        let pi = make_public_io(MAX_FOLD_STEP_COUNT + 1, 0);
+        assert!(pi.validate(3, 1000).is_err());
+        // skip_count = 3 应通过（边界）
+        let pi = make_public_io(1, 3);
+        assert!(pi.validate(3, 1000).is_ok());
+        // skip_count = 4 应失败
+        let pi = make_public_io(1, 4);
+        assert!(pi.validate(3, 1000).is_err());
+    }
+
+    #[test]
+    fn test_public_io_to_bytes_deterministic() {
+        let pi1 = make_public_io(5, 2);
+        let pi2 = make_public_io(5, 2);
+        assert_eq!(pi1.to_bytes(), pi2.to_bytes());
+
+        let pi3 = make_public_io(6, 2);
+        assert_ne!(pi1.to_bytes(), pi3.to_bytes());
+    }
+}

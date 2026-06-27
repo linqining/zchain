@@ -97,6 +97,13 @@ pub const GAS_HYPERNOVA_VERIFY: u64 = 50000;
 pub const GAS_GROTH16_VERIFY: u64 = 20000;
 /// `ipa_verify` gas。
 pub const GAS_IPA_VERIFY: u64 = 15000;
+/// `zk_verify` syscall 默认 gas（用于未知 scheme_id 时的 fallback 计费）。
+///
+/// 实际计费通过 [`zk_verify_gas`] 按 scheme 分派：
+/// - Hypernova → [`GAS_HYPERNOVA_VERIFY`] = 50000
+/// - Groth16 → [`GAS_GROTH16_VERIFY`] = 20000
+/// - IPA → [`GAS_IPA_VERIFY`] = 15000
+pub const GAS_ZK_VERIFY: u64 = 50000;
 /// `verify_failure_proof` gas（SEC-H9 修复 — 256-bit sparse Merkle 非包含证明 + 多签验证）。
 ///
 /// 256 层路径 × ~200 gas ≈ 51200 + 3×secp256k1_verify(500) + round 校验 ~1500 + 3×500 ≈ 55700，
@@ -170,6 +177,21 @@ pub const fn bls_hash_to_g2_gas(msg_len: u64) -> u64 {
     GAS_BLS_HASH_TO_G2_BASE + GAS_BLS_HASH_TO_G2_PER_BYTE * msg_len
 }
 
+/// 计算 `zk_verify` syscall 的 gas（按 scheme_id 分派，Task 22.2）。
+///
+/// - `SCHEME_HYPERNOVA` (1) → [`GAS_HYPERNOVA_VERIFY`] = 50000
+/// - `SCHEME_GROTH16` (2) → [`GAS_GROTH16_VERIFY`] = 20000
+/// - `SCHEME_IPA` (3) → [`GAS_IPA_VERIFY`] = 15000
+/// - 未知 scheme → [`GAS_ZK_VERIFY`] = 50000（fallback，实际会在 verifier 查找阶段失败）
+pub const fn zk_verify_gas(scheme_id: u32) -> u64 {
+    match scheme_id {
+        1 => GAS_HYPERNOVA_VERIFY,
+        2 => GAS_GROTH16_VERIFY,
+        3 => GAS_IPA_VERIFY,
+        _ => GAS_ZK_VERIFY,
+    }
+}
+
 /// 检查 BLS hash_to_curve 消息长度是否超限（spec：msg ≤ 65536 字节）。
 pub const fn check_bls_hash_msg_len(msg_len: usize) -> crate::error::PokerL1Result<()> {
     if msg_len > MAX_BLS_HASH_MSG_SIZE {
@@ -195,9 +217,21 @@ mod tests {
         assert_eq!(GAS_HYPERNOVA_VERIFY, 50000);
         assert_eq!(GAS_GROTH16_VERIFY, 20000);
         assert_eq!(GAS_IPA_VERIFY, 15000);
+        assert_eq!(GAS_ZK_VERIFY, 50000);
         assert_eq!(GAS_VERIFY_FAILURE_PROOF, 80000);
         assert_eq!(BLOCK_GAS_LIMIT, 50_000_000);
         assert_eq!(TX_GAS_LIMIT, 10_000_000);
+    }
+
+    #[test]
+    fn test_zk_verify_gas_dispatch() {
+        // Task 22.2：zk_verify_gas 按 scheme_id 分派
+        assert_eq!(zk_verify_gas(1), GAS_HYPERNOVA_VERIFY); // Hypernova
+        assert_eq!(zk_verify_gas(2), GAS_GROTH16_VERIFY); // Groth16
+        assert_eq!(zk_verify_gas(3), GAS_IPA_VERIFY); // IPA
+        // 未知 scheme → fallback GAS_ZK_VERIFY（实际会在 verifier 查找阶段失败）
+        assert_eq!(zk_verify_gas(0), GAS_ZK_VERIFY);
+        assert_eq!(zk_verify_gas(99), GAS_ZK_VERIFY);
     }
 
     #[test]

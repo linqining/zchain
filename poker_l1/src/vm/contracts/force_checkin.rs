@@ -1,0 +1,703 @@
+//! force_checkin 故障恢复 + H4 forfeit 边界判定（Task 27 — SubTask 27.5 / 27.5e）。
+//!
+//! 严格遵循 spec.md（FROZEN 2026-06-27）：
+//! - **SubTask 27.5 — force_checkin 可行性条件**：覆盖两种场景：
+//!   (1) 操作方已广播 checkpoint state 但拒绝 checkin（恶意扣留）；
+//!   (2) 操作方机器故障导致无法提交 checkin（机器故障）。
+//!   两种场景下其他参与者均可基于已广播 checkpoint state 自行计算 (π', Δ')。
+//!   纯扣留（无 checkpoint 广播）走 `request_revert`。
+//!
+//! - **H4 修复 — forfeit 边界判定**（NEW-C2 修复：字段统一为 `last_action_height`）：
+//!   基于 `last_checkpoint_age = block.height - Game.last_action_height`
+//!   （纯 timer 驱动，不要求故障证据）：
+//!   - `last_checkpoint_age <= turn_timeout_blocks` → 恶意扣留 → forfeit
+//!   - `last_checkpoint_age > turn_timeout_blocks` → 机器故障 → 不 forfeit（可重折叠）
+//!   - 判定与 `request_revert` 的 reason 字段语义兼容
+//!
+//! - **NEW-M4 修复 — designated operator 场景**（R3-M1 + R3-M7 修正）：
+//!   若操作方为 designated operator（非当前轮次玩家），forfeit 边界加倍为
+//!   `last_checkpoint_age <= turn_timeout_blocks * 2`；force_advance 时**无条件豁免
+//!   当前轮次玩家**（改为 check 而非 fold）。
+//!   - **R3-M1 修正**：不需"证明短暂网络抖动"，与纯 timer 驱动一致；豁免对象是
+//!     当前轮次玩家而非 designated operator
+//!   - **R3-M7 修正**：Game 维护 `designated_operator_check_exemptions` 计数器，
+//!     达上限（默认 2）后恢复 fold 语义，防恶意 designated operator 循环停发无限拖延
+//!   - **反规避**：停发 checkpoint_anchor 超 turn_timeout_blocks 先触发 force_advance
+//!     （fold 损失筹码）
+//!
+//! - **SubTask 27.5e — 操作方故障恢复流程（3 阶段时间窗口，不要求故障证据）**：
+//!   - 阶段 1 `turn_timeout_blocks`（操作方可恢复，force_advance 可触发，无 forfeit）
+//!   - 阶段 2 `da_window_blocks + recovery_window_blocks`（request_da + 参与者重折叠
+//!     force_checkin，窗口内无 forfeit）
+//!   - 阶段 3 forfeit + force_revert（窗口过期 + 无 force_checkin + 操作方未恢复 →
+//!     forfeit 保证金 + 回退到最后 ACKed checkpoint）
+//!   - **不要求故障证据**（任何证据可伪造，时间窗口不可伪造）
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::PokerL1Error;
+use crate::object_model::ObjectID;
+
+use super::types::GameContract;
+
+// ===== 常量 =====
+
+/// 阶段 2 恢复窗口默认值（SubTask 27.5e）。
+///
+/// 阶段 2 总窗口 = `da_window_blocks + recovery_window_blocks`。
+pub const DEFAULT_RECOVERY_WINDOW_BLOCKS: u64 = 100;
+/// designated operator check 豁免次数上限（NEW-M4 / R3-M7：默认 2）。
+pub const DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT: u32 = 2;
+
+// ===== ForfeitReason / ForfeitDecision =====
+
+/// forfeit 边界判定原因（H4 修复）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForfeitReason {
+    /// 恶意扣留：`last_checkpoint_age <= boundary`（H4：操作方有能力提交但拒绝）。
+    MaliciousWithholding,
+    /// 机器故障：`last_checkpoint_age > boundary`（H4：操作方无法提交）。
+    MachineFailure,
+}
+
+/// forfeit 边界判定结果（H4 修复 + NEW-M4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForfeitDecision {
+    /// 是否应触发 forfeit。
+    pub should_forfeit: bool,
+    /// 判定原因。
+    pub reason: ForfeitReason,
+    /// `block.height - game.last_action_height`（已过的 block 数）。
+    pub last_checkpoint_age: u64,
+    /// forfeit 边界（turn_timeout_blocks 或 * 2 for designated operator）。
+    pub boundary: u64,
+    /// 是否为 designated operator 场景（影响 boundary）。
+    pub is_designated_operator: bool,
+}
+
+impl ForfeitDecision {
+    /// 计算 forfeit 边界判定（H4 修复 + NEW-M4）。
+    ///
+    /// # 参数
+    /// - `game`：当前 GameContract 状态
+    /// - `current_block_height`：当前 block height
+    /// - `turn_timeout_blocks`：turn 超时阈值（来自 TimeConsensusConfig）
+    /// - `is_designated_operator`：操作方是否为 designated operator
+    ///
+    /// # 返回
+    /// [`ForfeitDecision`]，caller 据此决定是否触发 forfeit 流程。
+    ///
+    /// # Panics
+    /// 不会 panic；`current_block_height < game.last_action_height` 时 age = 0
+    /// （视为刚活动过，无超时）。
+    #[must_use]
+    pub const fn compute(
+        game: &GameContract,
+        current_block_height: u64,
+        turn_timeout_blocks: u64,
+        is_designated_operator: bool,
+    ) -> Self {
+        // last_checkpoint_age = block.height - game.last_action_height
+        // 防下溢：current < last_action_height 时 age = 0
+        let last_checkpoint_age = current_block_height
+            .saturating_sub(game.last_action_height);
+
+        // NEW-M4: designated operator 边界加倍
+        let boundary = if is_designated_operator {
+            turn_timeout_blocks.saturating_mul(2)
+        } else {
+            turn_timeout_blocks
+        };
+
+        // H4: last_checkpoint_age <= boundary → MaliciousWithholding (forfeit)
+        //     last_checkpoint_age > boundary  → MachineFailure (no forfeit)
+        let (should_forfeit, reason) = if last_checkpoint_age <= boundary {
+            (true, ForfeitReason::MaliciousWithholding)
+        } else {
+            (false, ForfeitReason::MachineFailure)
+        };
+
+        Self {
+            should_forfeit,
+            reason,
+            last_checkpoint_age,
+            boundary,
+            is_designated_operator,
+        }
+    }
+}
+
+// ===== RecoveryStage（SubTask 27.5e — 3 阶段时间窗口） =====
+
+/// 操作方故障恢复阶段（SubTask 27.5e）。
+///
+/// 3 阶段时间窗口（不要求故障证据，纯 timer 驱动）：
+/// - [`RecoveryStage::Stage1`]：`turn_timeout_blocks` 内，操作方可恢复，
+///   force_advance 可触发，无 forfeit
+/// - [`RecoveryStage::Stage2`]：`turn_timeout_blocks` 之后 `da_window_blocks +
+///   recovery_window_blocks` 内，request_da + 参与者重折叠 force_checkin，无 forfeit
+/// - [`RecoveryStage::Stage3`]：阶段 2 窗口过期 + 无 force_checkin + 操作方未恢复 →
+///   forfeit 保证金 + force_revert
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryStage {
+    /// 阶段 1：操作方可恢复（`elapsed <= turn_timeout_blocks`）。
+    Stage1 {
+        /// 自 last_action_height 起经过的 block 数。
+        elapsed: u64,
+        /// 阶段 1 总长度（= turn_timeout_blocks）。
+        window_end: u64,
+    },
+    /// 阶段 2：request_da + 重折叠窗口（`turn_timeout_blocks < elapsed <=
+    /// turn_timeout_blocks + da_window_blocks + recovery_window_blocks`）。
+    Stage2 {
+        /// 自 last_action_height 起经过的 block 数。
+        elapsed: u64,
+        /// 阶段 2 结束相对 last_action_height 的偏移。
+        window_end: u64,
+    },
+    /// 阶段 3：forfeit + force_revert（阶段 2 窗口过期）。
+    Stage3 {
+        /// 自 last_action_height 起经过的 block 数。
+        elapsed: u64,
+        /// 阶段 3 起始相对 last_action_height 的偏移。
+        window_start: u64,
+    },
+}
+
+impl RecoveryStage {
+    /// 计算当前所处的故障恢复阶段（SubTask 27.5e）。
+    ///
+    /// # 参数
+    /// - `game`：当前 GameContract 状态
+    /// - `current_block_height`：当前 block height
+    /// - `turn_timeout_blocks`：阶段 1 长度（来自 TimeConsensusConfig）
+    /// - `da_window_blocks`：DA 窗口（来自 TimeConsensusConfig）
+    /// - `recovery_window_blocks`：恢复窗口（默认 100）
+    ///
+    /// # 返回
+    /// [`RecoveryStage`]，caller 据此决定允许的操作（force_advance / request_da /
+    /// force_checkin / forfeit + force_revert）。
+    ///
+    /// # 阶段边界（SEC2-L6：`<=` 边界判定）
+    /// - `elapsed <= turn_timeout_blocks` → Stage1
+    /// - `elapsed <= turn_timeout_blocks + da_window_blocks + recovery_window_blocks` → Stage2
+    /// - 否则 → Stage3
+    #[must_use]
+    pub const fn compute(
+        game: &GameContract,
+        current_block_height: u64,
+        turn_timeout_blocks: u64,
+        da_window_blocks: u64,
+        recovery_window_blocks: u64,
+    ) -> Self {
+        let elapsed = current_block_height.saturating_sub(game.last_action_height);
+
+        // 阶段 1: elapsed <= turn_timeout_blocks (SEC2-L6: <= 边界)
+        let stage1_end = turn_timeout_blocks;
+        if elapsed <= stage1_end {
+            return Self::Stage1 {
+                elapsed,
+                window_end: stage1_end,
+            };
+        }
+
+        // 阶段 2: elapsed <= turn_timeout_blocks + da_window_blocks + recovery_window_blocks
+        let stage2_end = turn_timeout_blocks
+            .saturating_add(da_window_blocks)
+            .saturating_add(recovery_window_blocks);
+        if elapsed <= stage2_end {
+            return Self::Stage2 {
+                elapsed,
+                window_end: stage2_end,
+            };
+        }
+
+        // 阶段 3: 窗口过期
+        Self::Stage3 {
+            elapsed,
+            window_start: stage2_end,
+        }
+    }
+
+    /// 是否允许 force_advance（阶段 1 内允许）。
+    #[must_use]
+    pub const fn allows_force_advance(&self) -> bool {
+        matches!(self, Self::Stage1 { .. })
+    }
+
+    /// 是否允许 force_checkin（阶段 2 内允许）。
+    #[must_use]
+    pub const fn allows_force_checkin(&self) -> bool {
+        matches!(self, Self::Stage2 { .. })
+    }
+
+    /// 是否应触发 forfeit + force_revert（阶段 3）。
+    #[must_use]
+    pub const fn requires_forfeit_and_revert(&self) -> bool {
+        matches!(self, Self::Stage3 { .. })
+    }
+}
+
+// ===== Designated Operator Check 豁免（NEW-M4 / R3-M1 / R3-M7） =====
+
+/// 判定 force_advance 时当前轮次玩家是否应豁免（改为 check 而非 fold）。
+///
+/// **NEW-M4 修复 + R3-M1 + R3-M7 修正**：
+/// - 豁免对象是**当前轮次玩家**（若为 designated operator）而非 designated
+///   operator 本身
+/// - 不需"证明短暂网络抖动"，与纯 timer 驱动一致
+/// - Game 维护 `designated_operator_check_exemptions` 计数器，达上限（默认 2）后
+///   恢复 fold 语义
+///
+/// # 参数
+/// - `game`：当前 GameContract 状态
+/// - `is_current_turn_designated_operator`：当前轮次玩家是否为 designated operator
+/// - `exemption_limit`：豁免次数上限（默认 2）
+///
+/// # 返回
+/// - `true`：应豁免（check）
+/// - `false`：不应豁免（fold）
+#[must_use]
+pub const fn should_exempt_current_turn_player(
+    game: &GameContract,
+    is_current_turn_designated_operator: bool,
+    exemption_limit: u32,
+) -> bool {
+    is_current_turn_designated_operator
+        && game.designated_operator_check_exemptions < exemption_limit
+}
+
+/// 应用 designated operator check 豁免（递增 `designated_operator_check_exemptions`）。
+///
+/// 仅在 force_advance 实际触发 check 豁免时调用（即
+/// [`should_exempt_current_turn_player`] 返回 `true` 且 force_advance 决定为 check）。
+///
+/// # 参数
+/// - `game`：可变的 GameContract 引用
+///
+/// # 返回
+/// - `Ok(())`：豁免计数已递增
+/// - `Err(Other)`：豁免计数溢出（saturating 后仍达上限）
+pub const fn apply_designated_operator_check_exemption(
+    game: &mut GameContract,
+) -> Result<(), PokerL1Error> {
+    game.designated_operator_check_exemptions = game
+        .designated_operator_check_exemptions
+        .saturating_add(1);
+    game.version = game.version.saturating_add(1);
+    Ok(())
+}
+
+/// 判定是否已耗尽 designated operator check 豁免次数（恢复 fold 语义）。
+///
+/// R3-M7：达上限后恢复 fold 语义，防恶意 designated operator 循环停发无限拖延。
+#[must_use]
+pub const fn is_designated_operator_exemption_exhausted(
+    game: &GameContract,
+    exemption_limit: u32,
+) -> bool {
+    game.designated_operator_check_exemptions >= exemption_limit
+}
+
+// ===== force_checkin 可行性条件（SubTask 27.5） =====
+
+/// force_checkin 可行性条件（SubTask 27.5）。
+///
+/// 覆盖两种场景：
+/// - (1) 操作方已广播 checkpoint state 但拒绝 checkin（恶意扣留）
+/// - (2) 操作方机器故障导致无法提交 checkin（机器故障）
+///
+/// 两种场景下其他参与者均可基于已广播 checkpoint state 自行计算 (π', Δ')。
+/// 纯扣留（无 checkpoint 广播）走 `request_revert`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForceCheckinScenario {
+    /// 场景 1：操作方已广播 checkpoint state 但拒绝 checkin（恶意扣留）。
+    /// `last_checkpoint_state_hash` 存在 + forfeit 边界判定为 MaliciousWithholding。
+    MaliciousWithholding,
+    /// 场景 2：操作方机器故障导致无法提交 checkin。
+    /// `last_checkpoint_state_hash` 存在 + forfeit 边界判定为 MachineFailure。
+    MachineFailure,
+    /// 不可行：纯扣留（无 checkpoint 广播）→ 走 `request_revert`。
+    NotFeasibleRequiresRevert,
+}
+
+/// 判定 force_checkin 可行性与场景（SubTask 27.5）。
+///
+/// # 参数
+/// - `game`：当前 GameContract 状态
+/// - `current_block_height`：当前 block height
+/// - `turn_timeout_blocks`：turn 超时阈值
+/// - `is_designated_operator`：操作方是否为 designated operator
+///
+/// # 返回
+/// [`ForceCheckinScenario`]，caller 据此决定走 force_checkin 还是 request_revert。
+///
+/// # 判定逻辑
+/// - `game.last_checkpoint_state_hash` 为 None（无 checkpoint 广播）→
+///   [`ForceCheckinScenario::NotFeasibleRequiresRevert`]（纯扣留走 request_revert）
+/// - 有 checkpoint 广播 + H4 判定为 MaliciousWithholding →
+///   [`ForceCheckinScenario::MaliciousWithholding`]
+/// - 有 checkpoint 广播 + H4 判定为 MachineFailure →
+///   [`ForceCheckinScenario::MachineFailure`]
+#[must_use]
+pub const fn determine_force_checkin_scenario(
+    game: &GameContract,
+    current_block_height: u64,
+    turn_timeout_blocks: u64,
+    is_designated_operator: bool,
+) -> ForceCheckinScenario {
+    // 纯扣留（无 checkpoint 广播）→ 走 request_revert
+    if game.last_checkpoint_state_hash.is_none() {
+        return ForceCheckinScenario::NotFeasibleRequiresRevert;
+    }
+
+    // 有 checkpoint 广播 → 根据 H4 forfeit 边界判定场景
+    let decision = ForfeitDecision::compute(
+        game,
+        current_block_height,
+        turn_timeout_blocks,
+        is_designated_operator,
+    );
+
+    match decision.reason {
+        ForfeitReason::MaliciousWithholding => ForceCheckinScenario::MaliciousWithholding,
+        ForfeitReason::MachineFailure => ForceCheckinScenario::MachineFailure,
+    }
+}
+
+/// 校验 force_checkin tx 的 game_id 一致性。
+///
+/// 通用辅助函数，确保 tx 携带的 game_id 与链上 Game 对象匹配。
+pub fn validate_force_checkin_game_id(
+    game: &GameContract,
+    tx_game_id: &ObjectID,
+) -> Result<(), PokerL1Error> {
+    if &game.id != tx_game_id {
+        return Err(PokerL1Error::GameNotFound(*tx_game_id));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+    use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
+    use crate::Address;
+
+    fn make_addr(byte: u8) -> Address {
+        [byte; 20]
+    }
+
+    fn make_game_id() -> ObjectID {
+        ObjectID::new(make_addr(0x01), 1)
+    }
+
+    fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
+        let mut raw = vec![byte];
+        raw.extend_from_slice(&[0x02u8; 32]);
+        TaggedPubkey::new(SignatureScheme::Secp256k1, CURRENT_VERSION, raw)
+            .expect("构造 tagged pubkey 不应失败")
+    }
+
+    fn make_game(last_action_height: u64) -> GameContract {
+        let mut game = GameContract::new(
+            make_game_id(),
+            make_addr(0x01),
+            make_tagged_pubkey(0xFF),
+            ExecutionMode::OffChain,
+            RakeConfigRef {
+                rake_rate_bps: 0,
+                rake_cap: 0,
+                rake_recipient: make_addr(0x00),
+            },
+            10,
+        );
+        game.last_action_height = last_action_height;
+        game
+    }
+
+    fn make_game_with_checkpoint(last_action_height: u64, state_byte: u8) -> GameContract {
+        let mut game = make_game(last_action_height);
+        game.last_checkpoint_state_hash = Some([state_byte; 32]);
+        game
+    }
+
+    // ===== ForfeitDecision 测试 =====
+
+    #[test]
+    fn test_forfeit_decision_malicious_withholding() {
+        // last_action_height = 100, current = 120, turn_timeout = 30
+        // age = 20 <= 30 → MaliciousWithholding (forfeit)
+        let game = make_game(100);
+        let decision = ForfeitDecision::compute(&game, 120, 30, false);
+        assert!(decision.should_forfeit, "age 20 <= 30 应 forfeit");
+        assert_eq!(decision.reason, ForfeitReason::MaliciousWithholding);
+        assert_eq!(decision.last_checkpoint_age, 20);
+        assert_eq!(decision.boundary, 30);
+        assert!(!decision.is_designated_operator);
+    }
+
+    #[test]
+    fn test_forfeit_decision_machine_failure() {
+        // last_action_height = 100, current = 200, turn_timeout = 30
+        // age = 100 > 30 → MachineFailure (no forfeit)
+        let game = make_game(100);
+        let decision = ForfeitDecision::compute(&game, 200, 30, false);
+        assert!(!decision.should_forfeit, "age 100 > 30 应不 forfeit");
+        assert_eq!(decision.reason, ForfeitReason::MachineFailure);
+        assert_eq!(decision.last_checkpoint_age, 100);
+        assert_eq!(decision.boundary, 30);
+    }
+
+    #[test]
+    fn test_forfeit_decision_boundary_inclusive() {
+        // SEC2-L6: <= 边界判定
+        // last_action_height = 100, current = 130, turn_timeout = 30
+        // age = 30 == 30 → MaliciousWithholding (<= 边界)
+        let game = make_game(100);
+        let decision = ForfeitDecision::compute(&game, 130, 30, false);
+        assert!(decision.should_forfeit, "age 30 == boundary 30 应 forfeit (<= 边界)");
+        assert_eq!(decision.reason, ForfeitReason::MaliciousWithholding);
+    }
+
+    #[test]
+    fn test_forfeit_decision_just_after_boundary() {
+        // age = 31 > 30 → MachineFailure
+        let game = make_game(100);
+        let decision = ForfeitDecision::compute(&game, 131, 30, false);
+        assert!(!decision.should_forfeit, "age 31 > 30 应不 forfeit");
+        assert_eq!(decision.reason, ForfeitReason::MachineFailure);
+    }
+
+    #[test]
+    fn test_forfeit_decision_designated_operator_boundary_doubled() {
+        // NEW-M4: designated operator → boundary = 30 * 2 = 60
+        // last_action_height = 100, current = 150, age = 50 <= 60 → MaliciousWithholding
+        let game = make_game(100);
+        let decision = ForfeitDecision::compute(&game, 150, 30, true);
+        assert!(decision.should_forfeit, "designated operator: age 50 <= 60 应 forfeit");
+        assert_eq!(decision.reason, ForfeitReason::MaliciousWithholding);
+        assert_eq!(decision.boundary, 60, "NEW-M4: boundary = turn_timeout * 2 = 60");
+        assert!(decision.is_designated_operator);
+    }
+
+    #[test]
+    fn test_forfeit_decision_designated_operator_machine_failure() {
+        // NEW-M4: designated operator → boundary = 60
+        // age = 70 > 60 → MachineFailure
+        let game = make_game(100);
+        let decision = ForfeitDecision::compute(&game, 170, 30, true);
+        assert!(!decision.should_forfeit, "designated operator: age 70 > 60 应不 forfeit");
+        assert_eq!(decision.reason, ForfeitReason::MachineFailure);
+        assert_eq!(decision.boundary, 60);
+    }
+
+    #[test]
+    fn test_forfeit_decision_current_before_last_action() {
+        // 防下溢：current < last_action_height → age = 0
+        let game = make_game(200);
+        let decision = ForfeitDecision::compute(&game, 150, 30, false);
+        assert_eq!(decision.last_checkpoint_age, 0, "防下溢 age = 0");
+        assert!(decision.should_forfeit, "age 0 <= 30 应 forfeit (刚活动过)");
+        assert_eq!(decision.reason, ForfeitReason::MaliciousWithholding);
+    }
+
+    // ===== RecoveryStage 测试 =====
+
+    #[test]
+    fn test_recovery_stage_stage1() {
+        // last_action_height = 100, current = 120, turn_timeout = 30
+        // elapsed = 20 <= 30 → Stage1
+        let game = make_game(100);
+        let stage = RecoveryStage::compute(&game, 120, 30, 500, 100);
+        assert!(matches!(stage, RecoveryStage::Stage1 { elapsed: 20, window_end: 30 }));
+        assert!(stage.allows_force_advance());
+        assert!(!stage.allows_force_checkin());
+        assert!(!stage.requires_forfeit_and_revert());
+    }
+
+    #[test]
+    fn test_recovery_stage_stage1_boundary_inclusive() {
+        // SEC2-L6: <= 边界判定
+        // elapsed = 30 == turn_timeout → Stage1
+        let game = make_game(100);
+        let stage = RecoveryStage::compute(&game, 130, 30, 500, 100);
+        assert!(matches!(stage, RecoveryStage::Stage1 { elapsed: 30, window_end: 30 }));
+        assert!(stage.allows_force_advance());
+    }
+
+    #[test]
+    fn test_recovery_stage_stage2() {
+        // last_action_height = 100, current = 200, turn_timeout = 30,
+        // da_window = 500, recovery_window = 100
+        // elapsed = 100, stage2_end = 30 + 500 + 100 = 630, 100 <= 630 → Stage2
+        let game = make_game(100);
+        let stage = RecoveryStage::compute(&game, 200, 30, 500, 100);
+        assert!(matches!(stage, RecoveryStage::Stage2 { elapsed: 100, window_end: 630 }));
+        assert!(!stage.allows_force_advance());
+        assert!(stage.allows_force_checkin());
+        assert!(!stage.requires_forfeit_and_revert());
+    }
+
+    #[test]
+    fn test_recovery_stage_stage2_boundary_inclusive() {
+        // SEC2-L6: <= 边界判定
+        // elapsed = 630 == stage2_end → Stage2
+        let game = make_game(100);
+        let stage = RecoveryStage::compute(&game, 730, 30, 500, 100);
+        assert!(matches!(stage, RecoveryStage::Stage2 { elapsed: 630, window_end: 630 }));
+        assert!(stage.allows_force_checkin());
+    }
+
+    #[test]
+    fn test_recovery_stage_stage3() {
+        // elapsed = 631 > 630 → Stage3
+        let game = make_game(100);
+        let stage = RecoveryStage::compute(&game, 731, 30, 500, 100);
+        assert!(matches!(stage, RecoveryStage::Stage3 { elapsed: 631, window_start: 630 }));
+        assert!(!stage.allows_force_advance());
+        assert!(!stage.allows_force_checkin());
+        assert!(stage.requires_forfeit_and_revert());
+    }
+
+    #[test]
+    fn test_recovery_stage_just_after_stage1() {
+        // elapsed = 31 > 30 → Stage2 (just entered)
+        let game = make_game(100);
+        let stage = RecoveryStage::compute(&game, 131, 30, 500, 100);
+        assert!(matches!(stage, RecoveryStage::Stage2 { elapsed: 31, window_end: 630 }));
+    }
+
+    // ===== Designated Operator Check 豁免测试 =====
+
+    #[test]
+    fn test_should_exempt_current_turn_player_yes() {
+        // is_designated_operator = true, exemptions = 0 < 2 → 豁免
+        let game = make_game(100);
+        assert!(should_exempt_current_turn_player(&game, true, 2));
+    }
+
+    #[test]
+    fn test_should_exempt_current_turn_player_no_not_designated() {
+        // is_designated_operator = false → 不豁免
+        let game = make_game(100);
+        assert!(!should_exempt_current_turn_player(&game, false, 2));
+    }
+
+    #[test]
+    fn test_should_exempt_current_turn_player_no_exhausted() {
+        // exemptions = 2 >= 2 → 不豁免（R3-M7：达上限恢复 fold 语义）
+        let mut game = make_game(100);
+        game.designated_operator_check_exemptions = 2;
+        assert!(!should_exempt_current_turn_player(&game, true, 2));
+    }
+
+    #[test]
+    fn test_should_exempt_current_turn_player_one_left() {
+        // exemptions = 1 < 2 → 豁免
+        let mut game = make_game(100);
+        game.designated_operator_check_exemptions = 1;
+        assert!(should_exempt_current_turn_player(&game, true, 2));
+    }
+
+    #[test]
+    fn test_apply_designated_operator_check_exemption_increments() {
+        let mut game = make_game(100);
+        assert_eq!(game.designated_operator_check_exemptions, 0);
+        apply_designated_operator_check_exemption(&mut game).expect("应成功");
+        assert_eq!(game.designated_operator_check_exemptions, 1);
+        apply_designated_operator_check_exemption(&mut game).expect("应成功");
+        assert_eq!(game.designated_operator_check_exemptions, 2);
+        // saturating_add：超过上限不溢出
+        apply_designated_operator_check_exemption(&mut game).expect("应成功");
+        assert_eq!(game.designated_operator_check_exemptions, 3);
+    }
+
+    #[test]
+    fn test_is_designated_operator_exemption_exhausted() {
+        let mut game = make_game(100);
+        assert!(!is_designated_operator_exemption_exhausted(&game, 2));
+        game.designated_operator_check_exemptions = 2;
+        assert!(is_designated_operator_exemption_exhausted(&game, 2));
+        game.designated_operator_check_exemptions = 3;
+        assert!(is_designated_operator_exemption_exhausted(&game, 2));
+    }
+
+    // ===== determine_force_checkin_scenario 测试 =====
+
+    #[test]
+    fn test_determine_scenario_not_feasible_no_checkpoint() {
+        // 无 checkpoint 广播 → NotFeasibleRequiresRevert
+        let game = make_game(100); // last_checkpoint_state_hash = None
+        let scenario = determine_force_checkin_scenario(&game, 120, 30, false);
+        assert_eq!(scenario, ForceCheckinScenario::NotFeasibleRequiresRevert);
+    }
+
+    #[test]
+    fn test_determine_scenario_malicious_withholding() {
+        // 有 checkpoint + age 20 <= 30 → MaliciousWithholding
+        let game = make_game_with_checkpoint(100, 0xAB);
+        let scenario = determine_force_checkin_scenario(&game, 120, 30, false);
+        assert_eq!(scenario, ForceCheckinScenario::MaliciousWithholding);
+    }
+
+    #[test]
+    fn test_determine_scenario_machine_failure() {
+        // 有 checkpoint + age 100 > 30 → MachineFailure
+        let game = make_game_with_checkpoint(100, 0xAB);
+        let scenario = determine_force_checkin_scenario(&game, 200, 30, false);
+        assert_eq!(scenario, ForceCheckinScenario::MachineFailure);
+    }
+
+    #[test]
+    fn test_determine_scenario_designated_operator_boundary_doubled() {
+        // NEW-M4: designated operator → boundary = 60
+        // age = 50 <= 60 → MaliciousWithholding
+        let game = make_game_with_checkpoint(100, 0xAB);
+        let scenario = determine_force_checkin_scenario(&game, 150, 30, true);
+        assert_eq!(scenario, ForceCheckinScenario::MaliciousWithholding);
+    }
+
+    #[test]
+    fn test_determine_scenario_designated_operator_machine_failure() {
+        // NEW-M4: designated operator → boundary = 60
+        // age = 70 > 60 → MachineFailure
+        let game = make_game_with_checkpoint(100, 0xAB);
+        let scenario = determine_force_checkin_scenario(&game, 170, 30, true);
+        assert_eq!(scenario, ForceCheckinScenario::MachineFailure);
+    }
+
+    // ===== validate_force_checkin_game_id 测试 =====
+
+    #[test]
+    fn test_validate_game_id_match() {
+        let game = make_game(100);
+        assert!(validate_force_checkin_game_id(&game, &make_game_id()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_game_id_mismatch() {
+        let game = make_game(100);
+        let wrong_id = ObjectID::new([0xFF; 20], 999);
+        let result = validate_force_checkin_game_id(&game, &wrong_id);
+        assert!(
+            matches!(result, Err(PokerL1Error::GameNotFound(_))),
+            "game_id 不匹配应返回 GameNotFound"
+        );
+    }
+
+    // ===== 常量测试 =====
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(
+            DEFAULT_RECOVERY_WINDOW_BLOCKS, 100,
+            "SubTask 27.5e: 阶段 2 恢复窗口默认 100"
+        );
+        assert_eq!(
+            DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT, 2,
+            "NEW-M4 / R3-M7: designated operator check 豁免上限默认 2"
+        );
+    }
+}

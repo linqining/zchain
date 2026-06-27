@@ -20,6 +20,7 @@
 //! | `get_block_height`     | 15.7    | 1                            | 查询当前 block height      |
 //! | `get_timestamp`        | 15.7    | 1                            | 查询当前 block timestamp   |
 //! | `verify_failure_proof` | 15.8    | 80000                        | 验证 SMT 非包含证明        |
+//! | `zk_verify`            | 22.2    | 50000/20000/15000 (按 scheme)| 通用 ZK 证明验证           |
 
 use std::slice::{from_raw_parts, from_raw_parts_mut};
 
@@ -644,6 +645,112 @@ declare_builtin_function!(
 // 为了使用 SparseMerkleTree::verify，需要引入
 use crate::object_model::smt::SparseMerkleTree;
 
+// ===== SubTask 22.2: zk_verify syscall（Phase 5a） =====
+//
+// 严格遵循 spec.md L493–525 + L853–857（FROZEN 2026-06-27）：
+// - 通用 `zk_verify(scheme_id, proof, public_io) -> bool` 入口
+// - gas 按 scheme 分派（zk_verify_gas：Hypernova=50000 / Groth16=20000 / IPA=15000）
+// - 通过 ctx.zk_verifier 注入 ZkVerifierRegistry（None → ZkVerifierNotRegistered）
+// - Stub 状态下仅校验 proof 格式（verifier_status 由 registry 管理）
+
+use crate::offline::zk_verifier::{ZkPublicIo, ZkVerifierRegistry};
+
+/// `zk_verify` public_io 最大字节数（防 DoS，segment_continuity_proof 上限）。
+const MAX_ZK_PUBLIC_IO_BYTES: u64 = 64 * 1024;
+
+/// `zk_verify` proof 最大字节数（防 DoS）。
+const MAX_ZK_PROOF_BYTES: u64 = 256 * 1024;
+
+declare_builtin_function!(
+    /// 通用 ZK 证明验证 syscall（Task 22.2）。
+    ///
+    /// # 参数
+    /// - `scheme_id`：ZK scheme 标识（低 32 位有效）
+    ///   - `1` = Hypernova, `2` = Groth16, `3` = IPA
+    /// - `proof_ptr` / `proof_len`：proof 字节，位于 heap region
+    /// - `public_io_ptr` / `public_io_len`：[`ZkPublicIo`] 序列化字节，位于 heap region
+    ///
+    /// # 返回
+    /// - 0：验证通过（proof 合法）
+    /// - 1：验证失败（proof 不合法或验证不通过）
+    /// - Err：参数无效 / gas 不足 / verifier 未注册 / registry 未注入
+    ///
+    /// # Gas
+    /// 按 scheme_id 分派（[`zk_verify_gas`]）：
+    /// - Hypernova → 50000
+    /// - Groth16 → 20000
+    /// - IPA → 15000
+    SyscallZkVerify,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        scheme_id_raw: u64,
+        proof_ptr: u64,
+        proof_len: u64,
+        public_io_ptr: u64,
+        public_io_len: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(proof_ptr, proof_len)?;
+        validate_heap_ptr(public_io_ptr, public_io_len)?;
+
+        // 长度上限校验（防 DoS）
+        if proof_len > MAX_ZK_PROOF_BYTES {
+            return Err(to_syscall_err(PokerL1Error::InputTooLong {
+                actual: proof_len as usize,
+                limit: MAX_ZK_PROOF_BYTES as usize,
+            }));
+        }
+        if public_io_len > MAX_ZK_PUBLIC_IO_BYTES {
+            return Err(to_syscall_err(PokerL1Error::InputTooLong {
+                actual: public_io_len as usize,
+                limit: MAX_ZK_PUBLIC_IO_BYTES as usize,
+            }));
+        }
+
+        // scheme_id 取低 32 位
+        let scheme_id = scheme_id_raw as u32;
+
+        // 扣费（按 scheme 分派）
+        charge_gas(ctx, zk_verify_gas(scheme_id))?;
+
+        // 读取 proof + public_io
+        let proof_bytes = read_vm_memory(memory_mapping, proof_ptr, proof_len)?;
+        let public_io_bytes = read_vm_memory(memory_mapping, public_io_ptr, public_io_len)?;
+
+        // 反序列化 public_io
+        let public_io = ZkPublicIo::from_bytes(&public_io_bytes).ok_or_else(|| {
+            to_syscall_err(PokerL1Error::InvalidZkPublicIo(
+                "public_io 反序列化失败：长度不足或格式错误".to_string(),
+            ))
+        })?;
+
+        // 获取 registry（未注入 → 错误）
+        let registry: &ZkVerifierRegistry = ctx.zk_verifier.as_ref().ok_or_else(|| {
+            to_syscall_err(PokerL1Error::ZkVerifierNotRegistered(scheme_id))
+        })?;
+
+        // 调用 registry.zk_verify
+        // max_skip_segments = 3（默认，SubTask 27.11）
+        // max_ack_chain_length = DEFAULT_MAX_ACK_CHAIN_LENGTH（默认 1000）
+        const DEFAULT_MAX_SKIP_SEGMENTS: u32 = 3;
+        let result = registry.zk_verify(
+            ctx.tx.chain_id,
+            scheme_id,
+            &proof_bytes,
+            &public_io,
+            DEFAULT_MAX_SKIP_SEGMENTS,
+            crate::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH,
+        );
+
+        match result {
+            Ok(r) => Ok(if r.verified { 0 } else { 1 }),
+            // verifier 未注册 / public_io 边界违规 / proof 格式错误 → Err（trap VM）
+            Err(e) => Err(to_syscall_err(e)),
+        }
+    }
+);
+
 // ===== SubTask 19.1 ~ 19.3: BLS12-381 预编译 syscalls =====
 //
 // 严格遵循 spec.md（FROZEN 2026-06-27）+ Task 19：
@@ -1040,6 +1147,7 @@ declare_builtin_function!(
 /// | `get_block_height`      | [`SyscallGetBlockHeight`]   |
 /// | `get_timestamp`         | [`SyscallGetTimestamp`]     |
 /// | `verify_failure_proof`  | [`SyscallVerifyFailureProof`] |
+/// | `zk_verify`             | [`SyscallZkVerify`]          |
 /// | `bls12_381_g1_add`      | [`SyscallBlsG1Add`]         |
 /// | `bls12_381_g1_mul`      | [`SyscallBlsG1Mul`]         |
 /// | `bls12_381_g1_neg`      | [`SyscallBlsG1Neg`]         |
@@ -1084,6 +1192,11 @@ pub fn register_poker_l1_syscalls(
     registry
         .register_function_hashed(*b"verify_failure_proof", SyscallVerifyFailureProof::vm)
         .map_err(|e| PokerL1Error::Other(format!("register verify_failure_proof: {e}")))?;
+
+    // Task 22.2 — 通用 ZK 证明验证 syscall（Phase 5a）
+    registry
+        .register_function_hashed(*b"zk_verify", SyscallZkVerify::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register zk_verify: {e}")))?;
 
     // Task 19 — BLS12-381 预编译 syscalls（含子群检查）
     registry
@@ -1663,6 +1776,260 @@ mod tests {
         assert_eq!(result, 1, "过短的证明应判定无效");
     }
 
+    // ===== SubTask 22.2: zk_verify 测试 =====
+
+    /// 构造测试用 ZkVerifierRegistry（注册 Hypernova + Groth16 + IPA stub）。
+    fn make_test_zk_registry() -> crate::offline::zk_verifier::ZkVerifierRegistry {
+        let mut registry = crate::offline::zk_verifier::ZkVerifierRegistry::new();
+        crate::offline::hypernova::register_hypernova_verifier(&mut registry);
+        crate::offline::groth16::register_groth16_verifier(&mut registry);
+        crate::offline::ipa::register_ipa_verifier(&mut registry);
+        registry
+    }
+
+    /// 构造合法 ZkPublicIo 字节（fold_step_count=1, skip_count=0）。
+    fn make_valid_public_io_bytes() -> Vec<u8> {
+        use crate::offline::zk_verifier::ZkPublicIo;
+        let pio = ZkPublicIo {
+            initial_commitment: [0x01; 32],
+            final_commitment: [0x02; 32],
+            state_delta_hash: [0x03; 32],
+            ack_chain_hash: [0x04; 32],
+            fold_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
+        };
+        pio.to_bytes()
+    }
+
+    #[test]
+    fn test_zk_verify_success_stub_hypernova() {
+        // Stub 状态下，非空 proof → 验证通过（返回 0）
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let registry = make_test_zk_registry();
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
+            .with_zk_verifier(registry);
+
+        let proof = vec![0xAAu8; 64];
+        let pio_bytes = make_valid_public_io_bytes();
+
+        // 布局：proof @ offset 0，public_io @ offset 512
+        heap[..proof.len()].copy_from_slice(&proof);
+        heap[512..512 + pio_bytes.len()].copy_from_slice(&pio_bytes);
+
+        let result = SyscallZkVerify::rust(
+            &mut ctx,
+            1, // SCHEME_HYPERNOVA
+            HEAP_BASE,
+            proof.len() as u64,
+            HEAP_BASE + 512,
+            pio_bytes.len() as u64,
+            &mut mapping,
+        )
+        .expect("Stub 验证应成功");
+
+        assert_eq!(result, 0, "Stub 状态下合法 proof 应验证通过");
+        // Hypernova gas = 50000
+        assert_eq!(ctx.gas_used(), 50000);
+    }
+
+    #[test]
+    fn test_zk_verify_gas_dispatch_by_scheme() {
+        // 验证不同 scheme 扣不同 gas：Groth16=20000（proof 须 192B）, IPA=15000（proof ≥ 32B）
+        // (scheme_id, expected_gas, proof_len)
+        for (scheme_id, expected_gas, proof_len) in [(2u32, 20000u64, 192usize), (3, 15000, 32)] {
+            let mut heap = vec![0u8; 4096];
+            let mut mapping = make_test_mapping(&mut heap);
+            let registry = make_test_zk_registry();
+            let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
+                .with_zk_verifier(registry);
+
+            let proof = vec![0xBBu8; proof_len];
+            let pio_bytes = make_valid_public_io_bytes();
+            heap[..proof.len()].copy_from_slice(&proof);
+            heap[512..512 + pio_bytes.len()].copy_from_slice(&pio_bytes);
+
+            let result = SyscallZkVerify::rust(
+                &mut ctx,
+                scheme_id as u64,
+                HEAP_BASE,
+                proof.len() as u64,
+                HEAP_BASE + 512,
+                pio_bytes.len() as u64,
+                &mut mapping,
+            )
+            .expect("Stub 验证应成功");
+
+            assert_eq!(result, 0, "scheme {scheme_id} 应验证通过");
+            assert_eq!(
+                ctx.gas_used(),
+                expected_gas,
+                "scheme {scheme_id} gas 应为 {expected_gas}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zk_verify_empty_proof_returns_err() {
+        // 空 proof → Err（InvalidZkProofFormat，trap VM）
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let registry = make_test_zk_registry();
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
+            .with_zk_verifier(registry);
+
+        let pio_bytes = make_valid_public_io_bytes();
+        heap[..pio_bytes.len()].copy_from_slice(&pio_bytes);
+
+        let result = SyscallZkVerify::rust(
+            &mut ctx,
+            1, // SCHEME_HYPERNOVA
+            HEAP_BASE,
+            0, // proof_len = 0
+            HEAP_BASE,
+            pio_bytes.len() as u64,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "空 proof 应返回 Err（trap VM）");
+    }
+
+    #[test]
+    fn test_zk_verify_no_registry_returns_err() {
+        // ctx 无 zk_verifier → Err（ZkVerifierNotRegistered）
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        // 注意：不调用 with_zk_verifier
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+
+        let proof = vec![0xCCu8; 32];
+        let pio_bytes = make_valid_public_io_bytes();
+        heap[..proof.len()].copy_from_slice(&proof);
+        heap[512..512 + pio_bytes.len()].copy_from_slice(&pio_bytes);
+
+        let result = SyscallZkVerify::rust(
+            &mut ctx,
+            1,
+            HEAP_BASE,
+            proof.len() as u64,
+            HEAP_BASE + 512,
+            pio_bytes.len() as u64,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "无 registry 应返回 Err");
+    }
+
+    #[test]
+    fn test_zk_verify_invalid_public_io_returns_err() {
+        // public_io 长度不足 → Err（InvalidZkPublicIo）
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let registry = make_test_zk_registry();
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
+            .with_zk_verifier(registry);
+
+        let proof = vec![0xDDu8; 32];
+        let short_pio = vec![0u8; 10]; // 远小于 MIN_BYTES=136
+        heap[..proof.len()].copy_from_slice(&proof);
+        heap[512..512 + short_pio.len()].copy_from_slice(&short_pio);
+
+        let result = SyscallZkVerify::rust(
+            &mut ctx,
+            1,
+            HEAP_BASE,
+            proof.len() as u64,
+            HEAP_BASE + 512,
+            short_pio.len() as u64,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "public_io 过短应返回 Err");
+    }
+
+    #[test]
+    fn test_zk_verify_gas_insufficient_returns_err() {
+        // gas 不足 → Err（OutOfGas）
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let registry = make_test_zk_registry();
+        // 仅 100 gas，远不够 Hypernova 的 50000
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100)
+            .with_zk_verifier(registry);
+
+        let proof = vec![0xEEu8; 32];
+        let pio_bytes = make_valid_public_io_bytes();
+        heap[..proof.len()].copy_from_slice(&proof);
+        heap[512..512 + pio_bytes.len()].copy_from_slice(&pio_bytes);
+
+        let result = SyscallZkVerify::rust(
+            &mut ctx,
+            1,
+            HEAP_BASE,
+            proof.len() as u64,
+            HEAP_BASE + 512,
+            pio_bytes.len() as u64,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "gas 不足应返回 Err");
+        // gas 未被扣除（charge_gas 失败前不扣）
+        assert_eq!(ctx.remaining_gas(), 100);
+    }
+
+    #[test]
+    fn test_zk_verify_unregistered_scheme_returns_err() {
+        // 未知 scheme_id (99) → verifier 查找失败 → Err
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let registry = make_test_zk_registry();
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
+            .with_zk_verifier(registry);
+
+        let proof = vec![0xFFu8; 32];
+        let pio_bytes = make_valid_public_io_bytes();
+        heap[..proof.len()].copy_from_slice(&proof);
+        heap[512..512 + pio_bytes.len()].copy_from_slice(&pio_bytes);
+
+        let result = SyscallZkVerify::rust(
+            &mut ctx,
+            99, // 未知 scheme
+            HEAP_BASE,
+            proof.len() as u64,
+            HEAP_BASE + 512,
+            pio_bytes.len() as u64,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "未知 scheme 应返回 Err");
+        // gas 已被扣除（zk_verify_gas(99) = GAS_ZK_VERIFY = 50000）
+        assert_eq!(ctx.gas_used(), 50000);
+    }
+
+    #[test]
+    fn test_zk_verify_heap_violation_returns_err() {
+        // 指针不在 heap region → Err
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let registry = make_test_zk_registry();
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
+            .with_zk_verifier(registry);
+
+        // proof_ptr 指向 stack 区域（非法）
+        let result = SyscallZkVerify::rust(
+            &mut ctx,
+            1,
+            ebpf::MM_STACK_START, // 非法地址
+            32,
+            HEAP_BASE,
+            136,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "heap 违规应返回 Err");
+    }
+
     // ===== 注册函数测试 =====
 
     #[test]
@@ -1671,7 +2038,7 @@ mod tests {
             FunctionRegistry::default();
         register_poker_l1_syscalls(&mut registry).expect("注册应成功");
 
-        // 验证所有 21 个 syscall 已注册（10 核心 + 11 BLS 预编译）
+        // 验证所有 22 个 syscall 已注册（10 核心 + 1 zk_verify + 11 BLS 预编译）
         for name in [
             &b"object_read"[..],
             b"object_write",
@@ -1683,6 +2050,8 @@ mod tests {
             b"get_block_height",
             b"get_timestamp",
             b"verify_failure_proof",
+            // Task 22.2 — 通用 ZK 证明验证
+            b"zk_verify",
             // Task 19 — BLS12-381 预编译
             b"bls12_381_g1_add",
             b"bls12_381_g1_mul",

@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use crate::object_model::ObjectID;
+use crate::offline::zk_verifier::ZkVerifierRegistry;
 use crate::signature::TaggedPubkey;
 use crate::{Address, BlockHeight, ChainId, TimestampMs};
 
@@ -64,6 +65,7 @@ pub struct TxContext {
 /// - 交易上下文（`tx` 字段）
 /// - 合约对象读写缓存（`object_cache` 字段）
 /// - 事件收集（`events` 字段）
+/// - ZK verifier 注册表（`zk_verifier` 字段，Phase 5a — `zk_verify` syscall 使用）
 #[derive(Debug, Clone)]
 pub struct PokerL1Context {
     /// 剩余 gas（指令级 + syscall 级共享）。
@@ -80,10 +82,15 @@ pub struct PokerL1Context {
     pub created_objects: Vec<ObjectID>,
     /// panic 消息（若合约调用 panic syscall）。
     pub panic_message: Option<String>,
+    /// ZK verifier 注册表（Phase 5a，Task 22.2）。
+    ///
+    /// `None` 时 `zk_verify` syscall 返回 `ZkVerifierNotRegistered` 错误。
+    /// 由节点层在构造 `PokerL1Context` 时注入（[`with_zk_verifier`]）。
+    pub zk_verifier: Option<ZkVerifierRegistry>,
 }
 
 impl PokerL1Context {
-    /// 创建新上下文。
+    /// 创建新上下文（无 ZK verifier）。
     ///
     /// 参数：
     /// - `tx`：交易上下文
@@ -97,7 +104,20 @@ impl PokerL1Context {
             events: Vec::new(),
             created_objects: Vec::new(),
             panic_message: None,
+            zk_verifier: None,
         }
+    }
+
+    /// 注入 ZK verifier 注册表（builder 模式，Task 22.2）。
+    ///
+    /// 节点层在构造 context 时调用：
+    /// ```ignore
+    /// let ctx = PokerL1Context::new(tx, gas_limit)
+    ///     .with_zk_verifier(registry);
+    /// ```
+    pub fn with_zk_verifier(mut self, registry: ZkVerifierRegistry) -> Self {
+        self.zk_verifier = Some(registry);
+        self
     }
 
     /// 返回已消耗的 gas。
