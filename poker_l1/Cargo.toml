@@ -21,6 +21,9 @@ ed25519-dalek = { workspace = true }
 subtle = { workspace = true }
 rocksdb = { workspace = true }
 solana_rbpf = { workspace = true }
+blstrs = { workspace = true }
+group = { workspace = true }
+pairing = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

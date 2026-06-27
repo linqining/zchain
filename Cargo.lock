@@ -910,9 +910,12 @@ version = "0.1.0"
 dependencies = [
  "bcs",
  "blake2",
+ "blstrs",
  "criterion",
  "ed25519-dalek",
+ "group",
  "hex",
+ "pairing",
  "poker_protocol",
  "rand",
  "rocksdb",

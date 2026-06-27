@@ -67,10 +67,22 @@ pub const GAS_GET_TIMESTAMP: u64 = 1;
 pub const GAS_SECP256K1_VERIFY: u64 = 500;
 /// `bls12_381_g1_mul` gas（含子群检查）。
 pub const GAS_BLS_G1_MUL: u64 = 500;
+/// `bls12_381_g1_add` gas（含子群检查，与 g1_mul 同价）。
+pub const GAS_BLS_G1_ADD: u64 = 500;
+/// `bls12_381_g1_neg` gas（含子群检查，与 g1_mul 同价）。
+pub const GAS_BLS_G1_NEG: u64 = 500;
 /// `bls12_381_g2_mul` gas（含子群检查）。
 pub const GAS_BLS_G2_MUL: u64 = 500;
+/// `bls12_381_g2_add` gas（含子群检查）。
+pub const GAS_BLS_G2_ADD: u64 = 500;
+/// `bls12_381_g2_neg` gas（含子群检查）。
+pub const GAS_BLS_G2_NEG: u64 = 500;
 /// `bls12_381_pairing_check` gas（4 输入子群检查 + worst-case）。
 pub const GAS_BLS_PAIRING: u64 = 5000;
+/// `bls12_381_miller_loop` gas（worst-case；pairing = 2×miller + 1×final_exp = 5000）。
+pub const GAS_BLS_MILLER_LOOP: u64 = 2000;
+/// `bls12_381_final_exp` gas（worst-case）。
+pub const GAS_BLS_FINAL_EXP: u64 = 1000;
 /// `bls12_381_hash_to_g1` 基础 gas。
 pub const GAS_BLS_HASH_TO_G1_BASE: u64 = 1000;
 /// `bls12_381_hash_to_g1` 每字节 gas。
@@ -110,6 +122,8 @@ pub const MAX_HEAP_SIZE: usize = 1024 * 1024;
 pub const MAX_STACK_SIZE: usize = 64 * 1024;
 /// BPF 输入数据最大字节数。
 pub const MAX_INPUT_SIZE: usize = 64 * 1024;
+/// BLS12-381 hash_to_curve 消息最大字节数（spec：65536）。
+pub const MAX_BLS_HASH_MSG_SIZE: usize = 65_536;
 
 /// 计算 `object_read` syscall 的 gas。
 ///
@@ -154,6 +168,17 @@ pub const fn bls_hash_to_g1_gas(msg_len: u64) -> u64 {
 /// 计算 `bls12_381_hash_to_g2` gas（按字节线性计费）。
 pub const fn bls_hash_to_g2_gas(msg_len: u64) -> u64 {
     GAS_BLS_HASH_TO_G2_BASE + GAS_BLS_HASH_TO_G2_PER_BYTE * msg_len
+}
+
+/// 检查 BLS hash_to_curve 消息长度是否超限（spec：msg ≤ 65536 字节）。
+pub const fn check_bls_hash_msg_len(msg_len: usize) -> crate::error::PokerL1Result<()> {
+    if msg_len > MAX_BLS_HASH_MSG_SIZE {
+        return Err(crate::error::PokerL1Error::InputTooLong {
+            actual: msg_len,
+            limit: MAX_BLS_HASH_MSG_SIZE,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

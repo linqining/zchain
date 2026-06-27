@@ -644,6 +644,383 @@ declare_builtin_function!(
 // 为了使用 SparseMerkleTree::verify，需要引入
 use crate::object_model::smt::SparseMerkleTree;
 
+// ===== SubTask 19.1 ~ 19.3: BLS12-381 预编译 syscalls =====
+//
+// 严格遵循 spec.md（FROZEN 2026-06-27）+ Task 19：
+// - SubTask 19.1：注册到 rBPF syscall table
+// - SubTask 19.2：序列化格式（compressed bytes 48 / 96 / 288）
+// - SubTask 19.3：gas 计费按 worst-case（g1_mul=500，pairing=5000，hash=1000+10*B）
+//
+// 所有 G1/G2 输入通过 `from_compressed` 内含子群检查（DoS 防护）。
+// GameTurn 通道免 gas（与其它 syscall 一致）。
+
+/// 读取 G1 compressed point（48 字节）从 VM 内存。
+fn read_g1_from_vm(
+    memory_mapping: &mut MemoryMapping,
+    ptr: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    validate_heap_ptr(ptr, bls::G1_COMPRESSED_SIZE as u64)?;
+    read_vm_memory(memory_mapping, ptr, bls::G1_COMPRESSED_SIZE as u64)
+}
+
+/// 读取 G2 compressed point（96 字节）从 VM 内存。
+fn read_g2_from_vm(
+    memory_mapping: &mut MemoryMapping,
+    ptr: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    validate_heap_ptr(ptr, bls::G2_COMPRESSED_SIZE as u64)?;
+    read_vm_memory(memory_mapping, ptr, bls::G2_COMPRESSED_SIZE as u64)
+}
+
+/// 读取 GT compressed（288 字节）从 VM 内存。
+fn read_gt_from_vm(
+    memory_mapping: &mut MemoryMapping,
+    ptr: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    validate_heap_ptr(ptr, bls::GT_COMPRESSED_SIZE as u64)?;
+    read_vm_memory(memory_mapping, ptr, bls::GT_COMPRESSED_SIZE as u64)
+}
+
+/// 读取 Scalar（32 字节）从 VM 内存。
+fn read_scalar_from_vm(
+    memory_mapping: &mut MemoryMapping,
+    ptr: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    validate_heap_ptr(ptr, bls::SCALAR_SIZE as u64)?;
+    read_vm_memory(memory_mapping, ptr, bls::SCALAR_SIZE as u64)
+}
+
+use crate::crypto_precompiles::bls;
+
+declare_builtin_function!(
+    /// `bls12_381_g1_add(a_ptr, b_ptr, out_ptr)` — G1 点加法（含子群检查）。
+    ///
+    /// # 参数
+    /// - `a_ptr`：G1 compressed（48 字节），位于 heap region
+    /// - `b_ptr`：G1 compressed（48 字节），位于 heap region
+    /// - `out_ptr`：输出缓冲区（48 字节），位于 heap region
+    ///
+    /// # 返回
+    /// - 0：成功
+    /// - Err：子群检查失败 / gas 不足 / heap 违规
+    ///
+    /// # Gas
+    /// 500（`GAS_BLS_G1_ADD`）
+    SyscallBlsG1Add,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        a_ptr: u64,
+        b_ptr: u64,
+        out_ptr: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let a = read_g1_from_vm(memory_mapping, a_ptr)?;
+        let b = read_g1_from_vm(memory_mapping, b_ptr)?;
+        validate_heap_ptr(out_ptr, bls::G1_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_G1_ADD)?;
+
+        let result = bls::bls_g1_add(&a, &b).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_g1_mul(point_ptr, scalar_ptr, out_ptr)` — G1 标量乘法（含子群检查）。
+    ///
+    /// # 参数
+    /// - `point_ptr`：G1 compressed（48 字节），位于 heap region
+    /// - `scalar_ptr`：Scalar（32 字节，大端序），位于 heap region
+    /// - `out_ptr`：输出缓冲区（48 字节），位于 heap region
+    ///
+    /// # Gas
+    /// 500（`GAS_BLS_G1_MUL`）
+    SyscallBlsG1Mul,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        point_ptr: u64,
+        scalar_ptr: u64,
+        out_ptr: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let point = read_g1_from_vm(memory_mapping, point_ptr)?;
+        let scalar = read_scalar_from_vm(memory_mapping, scalar_ptr)?;
+        validate_heap_ptr(out_ptr, bls::G1_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_G1_MUL)?;
+
+        let result = bls::bls_g1_mul(&point, &scalar).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_g1_neg(point_ptr, out_ptr)` — G1 取负（含子群检查）。
+    ///
+    /// # Gas
+    /// 500（`GAS_BLS_G1_NEG`）
+    SyscallBlsG1Neg,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        point_ptr: u64,
+        out_ptr: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let point = read_g1_from_vm(memory_mapping, point_ptr)?;
+        validate_heap_ptr(out_ptr, bls::G1_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_G1_NEG)?;
+
+        let result = bls::bls_g1_neg(&point).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_g2_add(a_ptr, b_ptr, out_ptr)` — G2 点加法（含子群检查）。
+    ///
+    /// # Gas
+    /// 500（`GAS_BLS_G2_ADD`）
+    SyscallBlsG2Add,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        a_ptr: u64,
+        b_ptr: u64,
+        out_ptr: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let a = read_g2_from_vm(memory_mapping, a_ptr)?;
+        let b = read_g2_from_vm(memory_mapping, b_ptr)?;
+        validate_heap_ptr(out_ptr, bls::G2_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_G2_ADD)?;
+
+        let result = bls::bls_g2_add(&a, &b).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_g2_mul(point_ptr, scalar_ptr, out_ptr)` — G2 标量乘法（含子群检查）。
+    ///
+    /// # Gas
+    /// 500（`GAS_BLS_G2_MUL`）
+    SyscallBlsG2Mul,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        point_ptr: u64,
+        scalar_ptr: u64,
+        out_ptr: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let point = read_g2_from_vm(memory_mapping, point_ptr)?;
+        let scalar = read_scalar_from_vm(memory_mapping, scalar_ptr)?;
+        validate_heap_ptr(out_ptr, bls::G2_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_G2_MUL)?;
+
+        let result = bls::bls_g2_mul(&point, &scalar).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_g2_neg(point_ptr, out_ptr)` — G2 取负（含子群检查）。
+    ///
+    /// # Gas
+    /// 500（`GAS_BLS_G2_NEG`）
+    SyscallBlsG2Neg,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        point_ptr: u64,
+        out_ptr: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let point = read_g2_from_vm(memory_mapping, point_ptr)?;
+        validate_heap_ptr(out_ptr, bls::G2_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_G2_NEG)?;
+
+        let result = bls::bls_g2_neg(&point).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_pairing_check(a_g1_ptr, b_g2_ptr, c_g1_ptr, d_g2_ptr)` — 双线性配对检查。
+    ///
+    /// 对所有 4 个输入做子群检查，失败返回 Err（DoS 防护）。
+    ///
+    /// # 返回
+    /// - 0：`e(a,b) == e(c,d)` 成立
+    /// - 1：不成立
+    /// - Err：子群检查失败 / gas 不足 / heap 违规
+    ///
+    /// # Gas
+    /// 5000（`GAS_BLS_PAIRING`，worst-case）
+    SyscallBlsPairingCheck,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        a_g1_ptr: u64,
+        b_g2_ptr: u64,
+        c_g1_ptr: u64,
+        d_g2_ptr: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let a = read_g1_from_vm(memory_mapping, a_g1_ptr)?;
+        let b = read_g2_from_vm(memory_mapping, b_g2_ptr)?;
+        let c = read_g1_from_vm(memory_mapping, c_g1_ptr)?;
+        let d = read_g2_from_vm(memory_mapping, d_g2_ptr)?;
+
+        charge_gas(ctx, GAS_BLS_PAIRING)?;
+
+        let equal = bls::bls_pairing_check(&a, &b, &c, &d).map_err(to_syscall_err)?;
+        Ok(if equal { 0 } else { 1 })
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_hash_to_g1(msg_ptr, msg_len, out_ptr)` — RFC 9380 hash to G1。
+    ///
+    /// SEC2-L2 修复：DST 固定，runtime 自动附加，不允许合约自定义。
+    ///
+    /// # Gas
+    /// `1000 + 10 * msg_len`（`bls_hash_to_g1_gas`）
+    SyscallBlsHashToG1,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        msg_ptr: u64,
+        msg_len: u64,
+        out_ptr: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        validate_heap_ptr(msg_ptr, msg_len)?;
+        validate_heap_ptr(out_ptr, bls::G1_COMPRESSED_SIZE as u64)?;
+
+        // 先校验 msg 长度（避免 read 巨量数据前提前拒绝）
+        check_bls_hash_msg_len(msg_len as usize).map_err(to_syscall_err)?;
+
+        // gas 按字节线性计费（worst-case）
+        charge_gas(ctx, bls_hash_to_g1_gas(msg_len))?;
+
+        let msg = read_vm_memory(memory_mapping, msg_ptr, msg_len)?;
+        let result = bls::bls_hash_to_g1(&msg).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_hash_to_g2(msg_ptr, msg_len, out_ptr)` — RFC 9380 hash to G2。
+    ///
+    /// # Gas
+    /// `1000 + 10 * msg_len`（`bls_hash_to_g2_gas`）
+    SyscallBlsHashToG2,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        msg_ptr: u64,
+        msg_len: u64,
+        out_ptr: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        validate_heap_ptr(msg_ptr, msg_len)?;
+        validate_heap_ptr(out_ptr, bls::G2_COMPRESSED_SIZE as u64)?;
+
+        check_bls_hash_msg_len(msg_len as usize).map_err(to_syscall_err)?;
+
+        charge_gas(ctx, bls_hash_to_g2_gas(msg_len))?;
+
+        let msg = read_vm_memory(memory_mapping, msg_ptr, msg_len)?;
+        let result = bls::bls_hash_to_g2(&msg).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_miller_loop(a_g1_ptr, b_g2_ptr, out_ptr)` — Miller loop + final exp。
+    ///
+    /// 注意：blstrs `MillerLoopResult` 不可序列化，因此本函数执行完整 pairing
+    /// （miller + final_exp）并返回 GT compressed bytes（288 字节）。
+    ///
+    /// # Gas
+    /// 2000（`GAS_BLS_MILLER_LOOP`）
+    SyscallBlsMillerLoop,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        a_g1_ptr: u64,
+        b_g2_ptr: u64,
+        out_ptr: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let a = read_g1_from_vm(memory_mapping, a_g1_ptr)?;
+        let b = read_g2_from_vm(memory_mapping, b_g2_ptr)?;
+        validate_heap_ptr(out_ptr, bls::GT_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_MILLER_LOOP)?;
+
+        let result = bls::bls_miller_loop(&a, &b).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// `bls12_381_final_exp(gt_ptr, out_ptr)` — Final exponentiation（identity）。
+    ///
+    /// 由于 `miller_loop` 已执行完整 pairing，本函数为 identity（仅校验 GT 反序列化）。
+    /// 保留以满足 SubTask 18.5 API 完整性。
+    ///
+    /// # Gas
+    /// 1000（`GAS_BLS_FINAL_EXP`）
+    SyscallBlsFinalExp,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        gt_ptr: u64,
+        out_ptr: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let gt = read_gt_from_vm(memory_mapping, gt_ptr)?;
+        validate_heap_ptr(out_ptr, bls::GT_COMPRESSED_SIZE as u64)?;
+
+        charge_gas(ctx, GAS_BLS_FINAL_EXP)?;
+
+        let result = bls::bls_final_exp(&gt).map_err(to_syscall_err)?;
+        write_vm_memory(memory_mapping, out_ptr, &result)?;
+        Ok(0)
+    }
+);
+
 // ===== Syscall 注册 =====
 
 /// 注册 Poker L1 全部核心 syscalls 到 [`FunctionRegistry`]。
@@ -663,6 +1040,17 @@ use crate::object_model::smt::SparseMerkleTree;
 /// | `get_block_height`      | [`SyscallGetBlockHeight`]   |
 /// | `get_timestamp`         | [`SyscallGetTimestamp`]     |
 /// | `verify_failure_proof`  | [`SyscallVerifyFailureProof`] |
+/// | `bls12_381_g1_add`      | [`SyscallBlsG1Add`]         |
+/// | `bls12_381_g1_mul`      | [`SyscallBlsG1Mul`]         |
+/// | `bls12_381_g1_neg`      | [`SyscallBlsG1Neg`]         |
+/// | `bls12_381_g2_add`      | [`SyscallBlsG2Add`]         |
+/// | `bls12_381_g2_mul`      | [`SyscallBlsG2Mul`]         |
+/// | `bls12_381_g2_neg`      | [`SyscallBlsG2Neg`]         |
+/// | `bls12_381_pairing_check` | [`SyscallBlsPairingCheck`] |
+/// | `bls12_381_hash_to_g1`  | [`SyscallBlsHashToG1`]      |
+/// | `bls12_381_hash_to_g2`  | [`SyscallBlsHashToG2`]      |
+/// | `bls12_381_miller_loop` | [`SyscallBlsMillerLoop`]    |
+/// | `bls12_381_final_exp`   | [`SyscallBlsFinalExp`]      |
 pub fn register_poker_l1_syscalls(
     registry: &mut FunctionRegistry<BuiltinFunction<PokerL1Context>>,
 ) -> Result<(), PokerL1Error> {
@@ -696,6 +1084,41 @@ pub fn register_poker_l1_syscalls(
     registry
         .register_function_hashed(*b"verify_failure_proof", SyscallVerifyFailureProof::vm)
         .map_err(|e| PokerL1Error::Other(format!("register verify_failure_proof: {e}")))?;
+
+    // Task 19 — BLS12-381 预编译 syscalls（含子群检查）
+    registry
+        .register_function_hashed(*b"bls12_381_g1_add", SyscallBlsG1Add::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_g1_add: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_g1_mul", SyscallBlsG1Mul::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_g1_mul: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_g1_neg", SyscallBlsG1Neg::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_g1_neg: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_g2_add", SyscallBlsG2Add::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_g2_add: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_g2_mul", SyscallBlsG2Mul::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_g2_mul: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_g2_neg", SyscallBlsG2Neg::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_g2_neg: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_pairing_check", SyscallBlsPairingCheck::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_pairing_check: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_hash_to_g1", SyscallBlsHashToG1::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_hash_to_g1: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_hash_to_g2", SyscallBlsHashToG2::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_hash_to_g2: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_miller_loop", SyscallBlsMillerLoop::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_miller_loop: {e}")))?;
+    registry
+        .register_function_hashed(*b"bls12_381_final_exp", SyscallBlsFinalExp::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register bls12_381_final_exp: {e}")))?;
     Ok(())
 }
 
@@ -1248,7 +1671,7 @@ mod tests {
             FunctionRegistry::default();
         register_poker_l1_syscalls(&mut registry).expect("注册应成功");
 
-        // 验证所有 10 个 syscall 已注册（按 hash key 可 lookup）
+        // 验证所有 21 个 syscall 已注册（10 核心 + 11 BLS 预编译）
         for name in [
             &b"object_read"[..],
             b"object_write",
@@ -1260,6 +1683,18 @@ mod tests {
             b"get_block_height",
             b"get_timestamp",
             b"verify_failure_proof",
+            // Task 19 — BLS12-381 预编译
+            b"bls12_381_g1_add",
+            b"bls12_381_g1_mul",
+            b"bls12_381_g1_neg",
+            b"bls12_381_g2_add",
+            b"bls12_381_g2_mul",
+            b"bls12_381_g2_neg",
+            b"bls12_381_pairing_check",
+            b"bls12_381_hash_to_g1",
+            b"bls12_381_hash_to_g2",
+            b"bls12_381_miller_loop",
+            b"bls12_381_final_exp",
         ] {
             let key = solana_rbpf::ebpf::hash_symbol_name(name);
             assert!(
@@ -1275,6 +1710,11 @@ mod tests {
         // 注册不同函数指针到同名 syscall 应失败（SymbolHashCollision）
         let result = registry.register_function_hashed(*b"object_read", SyscallObjectWrite::vm);
         assert!(result.is_err(), "注册不同函数到同名 syscall 应冲突");
+
+        // BLS syscall 哈希冲突检查
+        let result =
+            registry.register_function_hashed(*b"bls12_381_g1_add", SyscallBlsG1Mul::vm);
+        assert!(result.is_err(), "注册不同函数到同名 BLS syscall 应冲突");
     }
 
     // ===== 辅助函数测试 =====
@@ -1310,5 +1750,532 @@ mod tests {
         let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
         assert!(charge_gas(&mut ctx, 101).is_err());
         assert_eq!(ctx.remaining_gas(), 100, "不足时不应扣减");
+    }
+
+    // ===== SubTask 19.1 ~ 19.3: BLS12-381 syscall 测试 =====
+
+    use blstrs::{G1Projective, G2Projective, Scalar};
+    use group::Group;
+
+    /// 生成 G1 generator compressed bytes 并放入 heap 指定偏移。
+    fn place_g1_generator(heap: &mut [u8], offset: usize) {
+        let g = G1Projective::generator();
+        let bytes = g.to_compressed();
+        heap[offset..offset + bls::G1_COMPRESSED_SIZE].copy_from_slice(&bytes);
+    }
+
+    /// 生成 G2 generator compressed bytes 并放入 heap 指定偏移。
+    fn place_g2_generator(heap: &mut [u8], offset: usize) {
+        let g = G2Projective::generator();
+        let bytes = g.to_compressed();
+        heap[offset..offset + bls::G2_COMPRESSED_SIZE].copy_from_slice(&bytes);
+    }
+
+    /// 生成 Scalar=2 compressed bytes 并放入 heap 指定偏移。
+    fn place_scalar_two(heap: &mut [u8], offset: usize) {
+        let s = Scalar::from(2u64);
+        let be = s.to_bytes_be();
+        heap[offset..offset + bls::SCALAR_SIZE].copy_from_slice(&be);
+    }
+
+    #[test]
+    fn test_bls_g1_add_syscall_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        place_g1_generator(&mut heap, 0);
+        place_g1_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
+
+        let out_ptr = HEAP_BASE + 2 * bls::G1_COMPRESSED_SIZE as u64;
+        let result = SyscallBlsG1Add::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            out_ptr,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_g1_add 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_BLS_G1_ADD);
+
+        // 验证输出 = G + G = 2G
+        let out_bytes =
+            &heap[2 * bls::G1_COMPRESSED_SIZE..3 * bls::G1_COMPRESSED_SIZE];
+        let expected = G1Projective::generator() + G1Projective::generator();
+        assert_eq!(out_bytes, &expected.to_compressed()[..]);
+    }
+
+    #[test]
+    fn test_bls_g1_mul_syscall_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        place_g1_generator(&mut heap, 0);
+        place_scalar_two(&mut heap, bls::G1_COMPRESSED_SIZE);
+
+        let out_ptr = HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64 + bls::SCALAR_SIZE as u64;
+        let result = SyscallBlsG1Mul::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            out_ptr,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_g1_mul 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_BLS_G1_MUL);
+
+        let out_offset = bls::G1_COMPRESSED_SIZE + bls::SCALAR_SIZE;
+        let out_bytes = &heap[out_offset..out_offset + bls::G1_COMPRESSED_SIZE];
+        let expected = G1Projective::generator() * Scalar::from(2u64);
+        assert_eq!(out_bytes, &expected.to_compressed()[..]);
+    }
+
+    #[test]
+    fn test_bls_g1_neg_syscall_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        place_g1_generator(&mut heap, 0);
+
+        let result = SyscallBlsG1Neg::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            0,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_g1_neg 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_BLS_G1_NEG);
+
+        let out_bytes =
+            &heap[bls::G1_COMPRESSED_SIZE..2 * bls::G1_COMPRESSED_SIZE];
+        let expected = -G1Projective::generator();
+        assert_eq!(out_bytes, &expected.to_compressed()[..]);
+    }
+
+    #[test]
+    fn test_bls_g2_add_syscall_basic() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        place_g2_generator(&mut heap, 0);
+        place_g2_generator(&mut heap, bls::G2_COMPRESSED_SIZE);
+
+        let out_ptr = HEAP_BASE + 2 * bls::G2_COMPRESSED_SIZE as u64;
+        let result = SyscallBlsG2Add::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G2_COMPRESSED_SIZE as u64,
+            out_ptr,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_g2_add 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_BLS_G2_ADD);
+
+        let out_offset = 2 * bls::G2_COMPRESSED_SIZE;
+        let out_bytes = &heap[out_offset..out_offset + bls::G2_COMPRESSED_SIZE];
+        let expected = G2Projective::generator() + G2Projective::generator();
+        assert_eq!(out_bytes, &expected.to_compressed()[..]);
+    }
+
+    #[test]
+    fn test_bls_g2_mul_syscall_basic() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        place_g2_generator(&mut heap, 0);
+        place_scalar_two(&mut heap, bls::G2_COMPRESSED_SIZE);
+
+        let out_ptr = HEAP_BASE + bls::G2_COMPRESSED_SIZE as u64 + bls::SCALAR_SIZE as u64;
+        let result = SyscallBlsG2Mul::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G2_COMPRESSED_SIZE as u64,
+            out_ptr,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_g2_mul 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_BLS_G2_MUL);
+
+        let out_offset = bls::G2_COMPRESSED_SIZE + bls::SCALAR_SIZE;
+        let out_bytes = &heap[out_offset..out_offset + bls::G2_COMPRESSED_SIZE];
+        let expected = G2Projective::generator() * Scalar::from(2u64);
+        assert_eq!(out_bytes, &expected.to_compressed()[..]);
+    }
+
+    #[test]
+    fn test_bls_g2_neg_syscall_basic() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        place_g2_generator(&mut heap, 0);
+
+        let result = SyscallBlsG2Neg::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G2_COMPRESSED_SIZE as u64,
+            0,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_g2_neg 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_BLS_G2_NEG);
+
+        let out_bytes =
+            &heap[bls::G2_COMPRESSED_SIZE..2 * bls::G2_COMPRESSED_SIZE];
+        let expected = -G2Projective::generator();
+        assert_eq!(out_bytes, &expected.to_compressed()[..]);
+    }
+
+    #[test]
+    fn test_bls_pairing_check_syscall_equal() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        // e(g1, g2) == e(g1, g2) → 返回 0
+        place_g1_generator(&mut heap, 0);
+        place_g2_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
+        place_g1_generator(&mut heap, bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE);
+        place_g2_generator(
+            &mut heap,
+            2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE,
+        );
+
+        let result = SyscallBlsPairingCheck::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            HEAP_BASE + (bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
+            HEAP_BASE + (2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_pairing_check 应成功");
+
+        assert_eq!(result, 0, "e(g1,g2) == e(g1,g2) 应返回 0");
+        assert_eq!(ctx.gas_used(), GAS_BLS_PAIRING);
+    }
+
+    #[test]
+    fn test_bls_pairing_check_syscall_unequal() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        // e(g1, g2) != e(2g1, g2) → 返回 1
+        place_g1_generator(&mut heap, 0);
+        place_g2_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
+        // 2*g1
+        let g1_double = G1Projective::generator() * Scalar::from(2u64);
+        let g1_double_bytes = g1_double.to_compressed();
+        heap[bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE
+            ..2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE]
+            .copy_from_slice(&g1_double_bytes);
+        place_g2_generator(
+            &mut heap,
+            2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE,
+        );
+
+        let result = SyscallBlsPairingCheck::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            HEAP_BASE + (bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
+            HEAP_BASE + (2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_pairing_check 应成功");
+
+        assert_eq!(result, 1, "e(g1,g2) != e(2g1,g2) 应返回 1");
+    }
+
+    #[test]
+    fn test_bls_hash_to_g1_syscall_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        let msg = b"hello world";
+        heap[..msg.len()].copy_from_slice(msg);
+
+        let out_ptr = HEAP_BASE + 256;
+        let result = SyscallBlsHashToG1::rust(
+            &mut ctx,
+            HEAP_BASE,
+            msg.len() as u64,
+            out_ptr,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_hash_to_g1 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ctx.gas_used(),
+            bls_hash_to_g1_gas(msg.len() as u64)
+        );
+
+        let out_bytes = &heap[256..256 + bls::G1_COMPRESSED_SIZE];
+        // 确定性：与直接调用 bls_hash_to_g1 一致
+        let expected = crate::crypto_precompiles::bls::bls_hash_to_g1(msg).unwrap();
+        assert_eq!(out_bytes, &expected[..]);
+    }
+
+    #[test]
+    fn test_bls_hash_to_g2_syscall_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        let msg = b"hello world";
+        heap[..msg.len()].copy_from_slice(msg);
+
+        let out_ptr = HEAP_BASE + 256;
+        let result = SyscallBlsHashToG2::rust(
+            &mut ctx,
+            HEAP_BASE,
+            msg.len() as u64,
+            out_ptr,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_hash_to_g2 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ctx.gas_used(),
+            bls_hash_to_g2_gas(msg.len() as u64)
+        );
+
+        let out_bytes = &heap[256..256 + bls::G2_COMPRESSED_SIZE];
+        let expected = crate::crypto_precompiles::bls::bls_hash_to_g2(msg).unwrap();
+        assert_eq!(out_bytes, &expected[..]);
+    }
+
+    #[test]
+    fn test_bls_hash_to_g1_syscall_msg_too_long() {
+        let mut heap = vec![0u8; MAX_BLS_HASH_MSG_SIZE + 1024];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), u64::MAX);
+
+        let result = SyscallBlsHashToG1::rust(
+            &mut ctx,
+            HEAP_BASE,
+            (MAX_BLS_HASH_MSG_SIZE + 1) as u64,
+            HEAP_BASE + 256,
+            0,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "超长 msg 应返回错误");
+        assert_eq!(ctx.gas_used(), 0, "校验失败不应扣 gas");
+    }
+
+    #[test]
+    fn test_bls_miller_loop_syscall_basic() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        place_g1_generator(&mut heap, 0);
+        place_g2_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
+
+        let out_ptr = HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64 + bls::G2_COMPRESSED_SIZE as u64;
+        let result = SyscallBlsMillerLoop::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            out_ptr,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_miller_loop 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_BLS_MILLER_LOOP);
+
+        let out_offset = bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE;
+        let out_bytes = &heap[out_offset..out_offset + bls::GT_COMPRESSED_SIZE];
+        // 验证与直接调用一致
+        let expected =
+            crate::crypto_precompiles::bls::bls_miller_loop(
+                &G1Projective::generator().to_compressed(),
+                &G2Projective::generator().to_compressed(),
+            )
+            .unwrap();
+        assert_eq!(out_bytes, &expected[..]);
+    }
+
+    #[test]
+    fn test_bls_final_exp_syscall_identity() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        // 先执行 miller_loop 获取 GT
+        place_g1_generator(&mut heap, 0);
+        place_g2_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
+        let gt_offset = bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE;
+        SyscallBlsMillerLoop::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            HEAP_BASE + gt_offset as u64,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("miller_loop 应成功");
+
+        // 重置 gas 以独立验证 final_exp
+        let mut ctx2 = PokerL1Context::new(make_tx_context(false), 10_000);
+        let out_ptr = HEAP_BASE + gt_offset as u64 + bls::GT_COMPRESSED_SIZE as u64;
+
+        let result = SyscallBlsFinalExp::rust(
+            &mut ctx2,
+            HEAP_BASE + gt_offset as u64,
+            out_ptr,
+            0,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("bls12_381_final_exp 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx2.gas_used(), GAS_BLS_FINAL_EXP);
+
+        // final_exp 是 identity，输出应等于输入
+        let in_bytes = &heap[gt_offset..gt_offset + bls::GT_COMPRESSED_SIZE];
+        let out_bytes = &heap[gt_offset + bls::GT_COMPRESSED_SIZE..gt_offset + 2 * bls::GT_COMPRESSED_SIZE];
+        assert_eq!(in_bytes, out_bytes, "final_exp identity 应返回相同值");
+    }
+
+    #[test]
+    fn test_bls_g1_add_syscall_out_of_gas() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        // gas 不足：GAS_BLS_G1_ADD = 500，仅给 499
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 499);
+
+        place_g1_generator(&mut heap, 0);
+        place_g1_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
+
+        let result = SyscallBlsG1Add::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            HEAP_BASE + 2 * bls::G1_COMPRESSED_SIZE as u64,
+            0,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "gas 不足应返回错误");
+    }
+
+    #[test]
+    fn test_bls_g1_add_syscall_heap_violation() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        // 使用 stack 区域指针（非 heap）
+        let result = SyscallBlsG1Add::rust(
+            &mut ctx,
+            ebpf::MM_STACK_START,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            0,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "非 heap 指针应返回错误");
+    }
+
+    #[test]
+    fn test_bls_g1_add_syscall_subgroup_check_failure() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        // 全零 bytes 不是合法的 compressed point
+        // heap 已全为 0
+
+        let result = SyscallBlsG1Add::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            HEAP_BASE + 2 * bls::G1_COMPRESSED_SIZE as u64,
+            0,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "非法 G1 点应被子群检查拒绝");
+    }
+
+    #[test]
+    fn test_bls_pairing_check_syscall_gameturn_gas_free() {
+        let mut heap = vec![0u8; 8192];
+        let mut mapping = make_test_mapping(&mut heap);
+        // GameTurn 通道免 gas
+        let mut ctx = PokerL1Context::new(make_tx_context(true), u64::MAX);
+
+        place_g1_generator(&mut heap, 0);
+        place_g2_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
+        place_g1_generator(&mut heap, bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE);
+        place_g2_generator(
+            &mut heap,
+            2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE,
+        );
+
+        let _ = SyscallBlsPairingCheck::rust(
+            &mut ctx,
+            HEAP_BASE,
+            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
+            HEAP_BASE + (bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
+            HEAP_BASE + (2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
+            0,
+            &mut mapping,
+        )
+        .expect("GameTurn 通道 pairing_check 应成功");
+
+        assert_eq!(ctx.gas_used(), 0, "GameTurn 通道 BLS syscall 免 gas");
     }
 }

@@ -346,6 +346,17 @@ pub enum PokerL1Error {
     /// 紧急升级安全审计期内被 dispute（SEC2-M11）。
     #[error("emergency upgrade disputed during audit period")]
     EmergencyUpgradeDisputed,
+
+    // ===== Phase 4: BLS12-381 预编译（Task 18 / 19） =====
+    /// BLS12-381 子群检查失败（SubTask 18.6）。
+    #[error("invalid subgroup: {0}")]
+    InvalidSubgroup(&'static str),
+    /// BLS12-381 compressed bytes 反序列化失败（长度错误 / 非法编码 / 不在曲线上）。
+    #[error("invalid bls point: {0}")]
+    InvalidBlsPoint(String),
+    /// BLS12-381 标量反序列化失败。
+    #[error("invalid bls scalar: {0}")]
+    InvalidBlsScalar(String),
 }
 
 /// 库统一 Result 别名。
