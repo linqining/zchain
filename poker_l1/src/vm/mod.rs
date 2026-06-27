@@ -1,4 +1,33 @@
-//! rBPF VM 模块（Phase 3 实现）。
+//! rBPF VM 模块（Phase 3 — Task 14 / 15 / 17）。
 //!
-//! 当前为 stub。Phase 3 将集成 `solana_rbpf` runtime，实现 syscall 表与 gas 计费
-//! （IMPL-SEC-4 沙箱 + 字节级 gas 计量）。
+//! 严格遵循 spec.md（FROZEN 2026-06-27）：
+//! - **Task 14**：集成 `solana_rbpf` runtime（含 gas 计费表 + IMPL-SEC-4 沙箱）
+//! - **Task 15**：核心 syscalls（object_read/write/create + emit_event + log/panic +
+//!   verify_signature + get_block_height/timestamp + verify_failure_proof）
+//! - **Task 17**：合约升级机制（UpgradeCap + timelock + SEC-L7 共识层强制）
+//!
+//! # 安全说明
+//!
+//! 本模块 `allow(unsafe_code)` 仅因 `solana_rbpf` 的 syscall 注册机制需要
+//! 裸指针交互（`*mut EbpfVm<C>`）。所有 unsafe 操作封装在 `syscalls` 模块内，
+//! 附安全不变式注释。其他子模块（gas_table / context / loader / upgrade）不含 unsafe。
+
+#![allow(unsafe_code)]
+
+pub mod context;
+pub mod contract;
+pub mod contracts;
+pub mod gas_table;
+pub mod loader;
+pub mod syscalls;
+pub mod upgrade;
+
+pub use context::{ContractCallResult, PokerL1Context, TxContext};
+pub use contract::{ContractObject, ContractRegistry, UpgradeCap, UpgradeState};
+pub use gas_table::*;
+pub use loader::{execute_contract, load_contract_bytecode, LoadedContract, RbpfLoaderConfig};
+pub use syscalls::register_poker_l1_syscalls;
+pub use upgrade::{
+    cancel_upgrade, commit_upgrade, dispute_emergency_upgrade, dispute_upgrade, emergency_upgrade,
+    initiate_upgrade, process_pending_upgrades, UpgradeConfig, UpgradeError,
+};

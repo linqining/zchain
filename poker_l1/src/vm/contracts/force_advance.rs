@@ -1,0 +1,529 @@
+//! force_advance fold/check 规则（Task 16 — SubTask 16.6）。
+//!
+//! 严格遵循 spec.md（FROZEN 2026-06-27）第 683-693 行：
+//! - **第 683-687 行（轮次超时强制推进）**：当前轮次玩家在 `turn_timeout_blocks` 内
+//!   未提交 GameTurn tx（OnChain）或未提交 checkpoint_anchor（OffChain）时，
+//!   任何参与者可提交 `force_advance` tx（路由到任意 validator）；超时玩家按 fold
+//!   处理（弃牌失去本轮投入），除非当前轮次无人下注且该玩家在大盲位（按 check 处理）（M6 修复）。
+//! - **第 689-693 行（force_advance 的 fold/check 规则）**：
+//!   - 默认超时 = fold（玩家弃牌，失去本轮已投入筹码）
+//!   - 例外：当前下注轮无人加注（current_bet == 0 且无 raise）且超时玩家是大盲位，
+//!     则超时 = check（过牌，不丢失筹码）
+//!   - **SEC2-L5 修复 — fold/check 规则边界修正**：
+//!     1. **preflop 阶段**：当前下注轮无人 raise（即 `current_bet == big_blind_amount`
+//!        且 `raise_count == 0`）且超时玩家是大盲位 → check
+//!     2. **postflop 阶段**：当前下注轮无人下注（`current_bet == 0` 且 `bet_count == 0`）→
+//!        任何超时玩家 check（不仅限大盲位）
+//!     3. 规则由协议层定义，合约可覆盖
+//!
+//! # 判定流程
+//!
+//! ```text
+//! force_advance(timeout_player) → Action:
+//!   1. if betting_round == Preflop:
+//!        if current_bet == big_blind_amount AND raise_count == 0
+//!           AND timeout_player == big_blind_player:
+//!          → Check
+//!        else:
+//!          → Fold
+//!   2. if betting_round == Postflop:
+//!        if current_bet == 0 AND bet_count == 0:
+//!          → Check  (任意超时玩家)
+//!        else:
+//!          → Fold
+//! ```
+
+use serde::{Deserialize, Serialize};
+
+use crate::Address;
+
+use super::types::{BettingRound, GameAction, HandState};
+
+/// force_advance 输入参数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForceAdvanceInput {
+    /// 超时玩家地址。
+    pub timeout_player: Address,
+    /// 当前 block height（用于判定是否真的超时）。
+    pub current_block_height: u64,
+}
+
+impl ForceAdvanceInput {
+    /// 创建 force_advance 输入。
+    #[must_use]
+    pub const fn new(timeout_player: Address, current_block_height: u64) -> Self {
+        Self {
+            timeout_player,
+            current_block_height,
+        }
+    }
+}
+
+/// force_advance 错误。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ForceAdvanceError {
+    /// 超时玩家不在游戏中。
+    #[error("timeout player {0:?} not in game")]
+    PlayerNotInGame(Address),
+    /// 超时玩家已 fold。
+    #[error("timeout player {0:?} already folded")]
+    PlayerAlreadyFolded(Address),
+    /// 尚未超时（current_block_height - last_action_height < turn_timeout_blocks）。
+    #[error("not timed out yet: elapsed={elapsed}, timeout={timeout}")]
+    NotTimedOut {
+        /// 已经过的 block 数。
+        elapsed: u64,
+        /// 超时阈值。
+        timeout: u64,
+    },
+    /// 手牌已结算。
+    #[error("hand already settled")]
+    HandAlreadySettled,
+}
+
+/// 判定 force_advance 的动作（fold / check）。
+///
+/// 严格遵循 spec.md 第 689-693 行 SEC2-L5 修复后的规则。
+///
+/// # 参数
+///
+/// - `hand`：当前手牌状态
+/// - `input`：force_advance 输入（超时玩家 + 当前 block height）
+///
+/// # 返回
+///
+/// - [`GameAction::Check`]：超时玩家可过牌（不丢失筹码）
+/// - [`GameAction::Fold`]：超时玩家弃牌（失去本轮已投入筹码）
+///
+/// # 错误
+///
+/// - [`ForceAdvanceError::PlayerNotInGame`]：超时玩家不在游戏中
+/// - [`ForceAdvanceError::PlayerAlreadyFolded`]：超时玩家已 fold
+/// - [`ForceAdvanceError::NotTimedOut`]：尚未超时
+/// - [`ForceAdvanceError::HandAlreadySettled`]：手牌已结算
+pub fn force_advance_action(
+    hand: &HandState,
+    input: &ForceAdvanceInput,
+    turn_timeout_blocks: u64,
+) -> Result<GameAction, ForceAdvanceError> {
+    // 校验手牌未结算
+    if hand.phase.is_settled() {
+        return Err(ForceAdvanceError::HandAlreadySettled);
+    }
+
+    // 校验超时玩家在游戏中
+    let player_idx = hand
+        .find_player(&input.timeout_player)
+        .ok_or(ForceAdvanceError::PlayerNotInGame(input.timeout_player))?;
+
+    // 校验超时玩家未 fold
+    if hand.players[player_idx].folded {
+        return Err(ForceAdvanceError::PlayerAlreadyFolded(input.timeout_player));
+    }
+
+    // 校验确实超时（current_block_height - last_action_height >= turn_timeout_blocks）
+    let elapsed = input
+        .current_block_height
+        .saturating_sub(hand.last_action_height);
+    if elapsed < turn_timeout_blocks {
+        return Err(ForceAdvanceError::NotTimedOut {
+            elapsed,
+            timeout: turn_timeout_blocks,
+        });
+    }
+
+    // 按 betting_round 分支判定 fold / check（SEC2-L5 修复）
+    let action = match hand.betting_round() {
+        BettingRound::Preflop => {
+            // preflop：current_bet == big_blind_amount AND raise_count == 0
+            //          AND 超时玩家是大盲位 → check
+            //          否则 → fold
+            let is_big_blind = hand.players[player_idx].is_big_blind;
+            if hand.current_bet == hand.big_blind_amount
+                && hand.raise_count == 0
+                && is_big_blind
+            {
+                GameAction::Check
+            } else {
+                GameAction::Fold
+            }
+        }
+        BettingRound::Postflop => {
+            // postflop：current_bet == 0 AND bet_count == 0 → check（任意玩家）
+            //          否则 → fold
+            if hand.current_bet == 0 && hand.bet_count == 0 {
+                GameAction::Check
+            } else {
+                GameAction::Fold
+            }
+        }
+    };
+
+    Ok(action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::contracts::types::{GamePhase, PlayerStack};
+
+    fn make_addr(byte: u8) -> Address {
+        [byte; 20]
+    }
+
+    /// 创建测试用手牌状态。
+    ///
+    /// `players` 为 (address, is_big_blind, folded) 元组列表。
+    fn make_hand(
+        phase: GamePhase,
+        current_bet: u64,
+        raise_count: u32,
+        bet_count: u32,
+        last_action_height: u64,
+        players: &[(Address, bool, bool)],
+    ) -> HandState {
+        let players: Vec<PlayerStack> = players
+            .iter()
+            .map(|(addr, is_bb, folded)| {
+                let mut p = PlayerStack::new(*addr);
+                p.is_big_blind = *is_bb;
+                p.folded = *folded;
+                p
+            })
+            .collect();
+        HandState {
+            phase,
+            pot: 100,
+            current_bet,
+            big_blind_amount: 20,
+            small_blind_amount: 10,
+            raise_count,
+            bet_count,
+            current_turn: players[0].address,
+            players,
+            last_action_height,
+            hand_start_height: 90,
+        }
+    }
+
+    const DEFAULT_TIMEOUT_BLOCKS: u64 = 10;
+
+    // ===== preflop 分支测试（SEC2-L5 修复 1）=====
+
+    #[test]
+    fn test_force_advance_preflop_bb_check_no_raise() {
+        // preflop, current_bet == big_blind_amount, raise_count == 0, 超时玩家 == BB → check
+        let bb = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20, // == big_blind_amount
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 110); // elapsed = 10 == timeout
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Check, "BB preflop 无人 raise 应 check");
+    }
+
+    #[test]
+    fn test_force_advance_preflop_bb_fold_when_raised() {
+        // preflop, current_bet > big_blind_amount (有人 raise) → fold
+        let bb = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            40, // > big_blind_amount
+            1,  // raise_count > 0
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 110);
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Fold, "preflop 有人 raise 应 fold");
+    }
+
+    #[test]
+    fn test_force_advance_preflop_non_bb_fold_no_raise() {
+        // preflop, 无人 raise，但超时玩家不是 BB → fold
+        let bb = make_addr(0x01);
+        let other = make_addr(0x02);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20, // == big_blind_amount
+            0,
+            0,
+            100,
+            &[(bb, true, false), (other, false, false)],
+        );
+        let input = ForceAdvanceInput::new(other, 110); // 超时玩家不是 BB
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Fold, "非 BB 超时 应 fold");
+    }
+
+    #[test]
+    fn test_force_advance_preflop_bb_fold_when_raise_count_positive() {
+        // preflop, current_bet == big_blind_amount 但 raise_count > 0 → fold
+        // （理论上 raise 后 current_bet 应增加，此处测试边界条件防御）
+        let bb = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20, // == big_blind_amount
+            1,  // raise_count > 0
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 110);
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Fold, "raise_count > 0 应 fold");
+    }
+
+    // ===== postflop 分支测试（SEC2-L5 修复 2）=====
+
+    #[test]
+    fn test_force_advance_postflop_check_no_bet() {
+        // postflop, current_bet == 0, bet_count == 0 → check（任意玩家）
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Flop,
+            0, // current_bet == 0
+            0,
+            0, // bet_count == 0
+            100,
+            &[(p1, false, false)],
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Check, "postflop 无人下注应 check");
+    }
+
+    #[test]
+    fn test_force_advance_postflop_check_any_player() {
+        // postflop, 无人下注，任意超时玩家（不仅限 BB）→ check
+        let p1 = make_addr(0x01);
+        let p2 = make_addr(0x02);
+        let hand = make_hand(
+            GamePhase::Turn,
+            0,
+            0,
+            0,
+            100,
+            &[(p1, true, false), (p2, false, false)],
+        );
+        let input = ForceAdvanceInput::new(p2, 110); // p2 不是 BB
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(
+            action,
+            GameAction::Check,
+            "postflop 无人下注，任意玩家超时应 check"
+        );
+    }
+
+    #[test]
+    fn test_force_advance_postflop_fold_when_bet() {
+        // postflop, current_bet > 0 → fold
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Flop,
+            50, // current_bet > 0
+            0,
+            1, // bet_count > 0
+            100,
+            &[(p1, false, false)],
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Fold, "postflop 有人下注应 fold");
+    }
+
+    #[test]
+    fn test_force_advance_postflop_fold_when_bet_count_positive() {
+        // postflop, current_bet == 0 但 bet_count > 0 → fold（防御边界）
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Flop,
+            0,
+            0,
+            1, // bet_count > 0
+            100,
+            &[(p1, false, false)],
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Fold, "bet_count > 0 应 fold");
+    }
+
+    #[test]
+    fn test_force_advance_river_postflop_check() {
+        // River 阶段也属于 postflop
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::River,
+            0,
+            0,
+            0,
+            100,
+            &[(p1, false, false)],
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
+        assert_eq!(action, GameAction::Check, "River 无人下注应 check");
+    }
+
+    // ===== 错误场景测试 =====
+
+    #[test]
+    fn test_force_advance_player_not_in_game() {
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(p1, true, false)],
+        );
+        let unknown = make_addr(0xff);
+        let input = ForceAdvanceInput::new(unknown, 110);
+
+        let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
+        assert!(matches!(result, Err(ForceAdvanceError::PlayerNotInGame(_))));
+    }
+
+    #[test]
+    fn test_force_advance_player_already_folded() {
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(p1, true, true)], // 已 fold
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
+        assert!(matches!(result, Err(ForceAdvanceError::PlayerAlreadyFolded(_))));
+    }
+
+    #[test]
+    fn test_force_advance_not_timed_out() {
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(p1, true, false)],
+        );
+        // elapsed = 105 - 100 = 5 < 10 → 未超时
+        let input = ForceAdvanceInput::new(p1, 105);
+
+        let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
+        assert!(matches!(result, Err(ForceAdvanceError::NotTimedOut { elapsed: 5, timeout: 10 })));
+    }
+
+    #[test]
+    fn test_force_advance_hand_already_settled() {
+        let p1 = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Settled,
+            0,
+            0,
+            0,
+            100,
+            &[(p1, true, false)],
+        );
+        let input = ForceAdvanceInput::new(p1, 110);
+
+        let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
+        assert!(matches!(result, Err(ForceAdvanceError::HandAlreadySettled)));
+    }
+
+    // ===== 边界条件测试 =====
+
+    #[test]
+    fn test_force_advance_exact_timeout_boundary() {
+        // elapsed == timeout_blocks（边界，恰好超时）
+        let bb = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 110); // elapsed = 10 == timeout
+
+        let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
+        assert!(result.is_ok(), "恰好超时应允许 force_advance");
+    }
+
+    #[test]
+    fn test_force_advance_one_block_past_timeout() {
+        // elapsed = timeout + 1（超过超时阈值）
+        let bb = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 111); // elapsed = 11 > 10
+
+        let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_force_advance_one_block_before_timeout() {
+        // elapsed = timeout - 1（未到超时阈值）
+        let bb = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 109); // elapsed = 9 < 10
+
+        let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
+        assert!(matches!(result, Err(ForceAdvanceError::NotTimedOut { .. })));
+    }
+
+    #[test]
+    fn test_force_advance_zero_timeout_blocks() {
+        // turn_timeout_blocks = 0（立即超时）
+        let bb = make_addr(0x01);
+        let hand = make_hand(
+            GamePhase::Preflop,
+            20,
+            0,
+            0,
+            100,
+            &[(bb, true, false)],
+        );
+        let input = ForceAdvanceInput::new(bb, 100); // elapsed = 0
+
+        let result = force_advance_action(&hand, &input, 0);
+        assert!(result.is_ok(), "timeout=0 时立即超时");
+    }
+}

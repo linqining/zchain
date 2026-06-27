@@ -1,0 +1,1314 @@
+//! 核心 syscalls 实现（Task 15 — SubTask 15.1~15.8）。
+//!
+//! 严格遵循 spec.md（FROZEN 2026-06-27）+ IMPL-SEC-4 沙箱规范：
+//! - (4) syscall 指针须验证 heap region
+//! - (5) 执行前扣费（syscall 内部 `consume_gas`，余额不足返回 Err 触发 trap）
+//! - (6) object_read/write/create + emit_event 按字节计费
+//! - (7) Object ≤ 64KB
+//!
+//! ## Syscall 一览
+//!
+//! | Syscall                | SubTask | Gas                          | 说明                       |
+//! |------------------------|---------|------------------------------|----------------------------|
+//! | `object_read`          | 15.1    | 10 + 1 * bytes_returned      | 读取对象数据到合约 heap    |
+//! | `object_write`         | 15.2    | 20 + 1 * data_len            | 写入/更新对象              |
+//! | `object_create`        | 15.3    | 20 + 1 * data_len            | 创建新对象，返回 ObjectID  |
+//! | `emit_event`           | 15.4    | 10 + 1 * payload_len (≤16KB) | 发射事件                   |
+//! | `log`                  | 15.5    | 10                           | 记录日志                   |
+//! | `panic`                | 15.5    | 10                           | 合约 panic，trap VM        |
+//! | `verify_signature`     | 15.6    | 500                          | 统一签名验证               |
+//! | `get_block_height`     | 15.7    | 1                            | 查询当前 block height      |
+//! | `get_timestamp`        | 15.7    | 1                            | 查询当前 block timestamp   |
+//! | `verify_failure_proof` | 15.8    | 80000                        | 验证 SMT 非包含证明        |
+
+use std::slice::{from_raw_parts, from_raw_parts_mut};
+
+use solana_rbpf::{
+    declare_builtin_function, ebpf, error::EbpfError,
+    memory_region::{AccessType, MemoryMapping},
+    program::{BuiltinFunction, FunctionRegistry},
+};
+
+use crate::error::PokerL1Error;
+use crate::object_model::smt::MerklePath;
+use crate::object_model::ObjectID;
+use crate::signature::unified::verify_signature;
+use crate::signature::TaggedPubkey;
+
+use super::context::PokerL1Context;
+use super::gas_table::*;
+
+// ===== 辅助函数 =====
+
+/// 将 [`PokerL1Error`] 转换为 syscall 错误（`Box<dyn Error>`）。
+fn to_syscall_err(e: PokerL1Error) -> Box<dyn std::error::Error> {
+    Box::new(e)
+}
+
+/// 校验指针位于 heap region 内（IMPL-SEC-4：(4)）。
+///
+/// heap region 范围：`[MM_HEAP_START, MM_HEAP_START + MAX_HEAP_SIZE)`。
+fn validate_heap_ptr(vm_addr: u64, len: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let heap_start = ebpf::MM_HEAP_START;
+    let heap_end = heap_start
+        .checked_add(MAX_HEAP_SIZE as u64)
+        .ok_or_else(|| {
+            to_syscall_err(PokerL1Error::InvalidSyscallArgument(format!(
+                "heap region overflow: start={heap_start:#x}"
+            )))
+        })?;
+
+    let ptr_end = vm_addr.checked_add(len).ok_or_else(|| {
+        to_syscall_err(PokerL1Error::HeapAccessViolation { ptr: vm_addr, len })
+    })?;
+
+    if vm_addr < heap_start || ptr_end > heap_end {
+        return Err(to_syscall_err(PokerL1Error::HeapAccessViolation {
+            ptr: vm_addr,
+            len,
+        }));
+    }
+    Ok(())
+}
+
+/// 从 VM 内存读取数据（复制到 `Vec<u8>`）。
+///
+/// # Safety
+///
+/// `memory_mapping.map(AccessType::Load, ...)` 已校验 `[vm_addr, vm_addr+len)`
+/// 位于合法注册的内存 region 内。返回的 host_addr 指向该 region 内的有效内存。
+fn read_vm_memory(
+    memory_mapping: &mut MemoryMapping,
+    vm_addr: u64,
+    len: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    // solana_rbpf 的 map() 返回 StableResult，需用 .into() 转换为标准 Result
+    let host_addr: Result<u64, EbpfError> =
+        memory_mapping.map(AccessType::Load, vm_addr, len).into();
+    let host_addr = host_addr.map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    // SAFETY: map() 已校验地址合法，host_addr 指向有效内存区域。
+    Ok(unsafe { from_raw_parts(host_addr as *const u8, len as usize) }.to_vec())
+}
+
+/// 向 VM 内存写入数据。
+///
+/// # Safety
+///
+/// `memory_mapping.map(AccessType::Store, ...)` 已校验 `[vm_addr, vm_addr+len)`
+/// 位于合法可写 region 内。
+fn write_vm_memory(
+    memory_mapping: &mut MemoryMapping,
+    vm_addr: u64,
+    data: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let len = data.len() as u64;
+    let host_addr: Result<u64, EbpfError> =
+        memory_mapping.map(AccessType::Store, vm_addr, len).into();
+    let host_addr = host_addr.map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    // SAFETY: map() 已校验地址合法且可写，host_addr 指向可写内存区域。
+    unsafe {
+        from_raw_parts_mut(host_addr as *mut u8, data.len()).copy_from_slice(data);
+    }
+    Ok(())
+}
+
+/// 检查并消耗 gas，不足时返回 `OutOfGas` 错误。
+fn charge_gas(
+    ctx: &mut PokerL1Context,
+    amount: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !ctx.consume_gas(amount) {
+        let used = ctx.gas_used().saturating_add(amount);
+        let limit = ctx.gas_used().saturating_add(ctx.remaining_gas());
+        return Err(to_syscall_err(PokerL1Error::OutOfGas { used, limit }));
+    }
+    Ok(())
+}
+
+// ===== SubTask 15.1: object_read =====
+
+declare_builtin_function!(
+    /// 读取对象数据到合约 heap。
+    ///
+    /// # 参数
+    /// - `id_ptr` / `id_len`：ObjectID 字节（28 字节），位于 heap region
+    /// - `out_ptr` / `out_capacity`：输出缓冲区，位于 heap region
+    /// - `arg5`：未使用
+    ///
+    /// # 返回
+    /// - 成功：实际读取的字节数
+    /// - 失败：`ObjectNotFound` / `OutOfGas` / `HeapAccessViolation`
+    ///
+    /// # Gas
+    /// `10 + 1 * bytes_returned`（IMPL-SEC-4：(6)）
+    SyscallObjectRead,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        id_ptr: u64,
+        id_len: u64,
+        out_ptr: u64,
+        out_capacity: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(id_ptr, id_len)?;
+        validate_heap_ptr(out_ptr, out_capacity)?;
+
+        // 校验 id 长度（ObjectID = 28 字节）
+        if id_len != ObjectID::new([0u8; 20], 0).to_bytes().len() as u64 {
+            return Err(to_syscall_err(PokerL1Error::InvalidSyscallArgument(format!(
+                "object_read: id_len must be 28, got {id_len}"
+            ))));
+        }
+
+        let id_bytes = read_vm_memory(memory_mapping, id_ptr, id_len)?;
+        let object_id = ObjectID::from_bytes(&id_bytes).ok_or_else(|| {
+            to_syscall_err(PokerL1Error::InvalidSyscallArgument(
+                "object_read: invalid ObjectID bytes".to_string(),
+            ))
+        })?;
+
+        // 查找对象（clone 以释放不可变借用，后续可变借用 consume_gas）
+        let data = ctx
+            .object_cache
+            .get(&object_id)
+            .cloned()
+            .ok_or_else(|| to_syscall_err(PokerL1Error::ObjectNotFound(object_id)))?;
+
+        // 校验 out_capacity 足够
+        if out_capacity < data.len() as u64 {
+            return Err(to_syscall_err(PokerL1Error::InvalidSyscallArgument(format!(
+                "object_read: out_capacity={out_capacity} < data_len={}",
+                data.len()
+            ))));
+        }
+
+        // IMPL-SEC-4 (5)(6)：执行前扣费
+        let gas = object_read_gas(data.len() as u64);
+        charge_gas(ctx, gas)?;
+
+        // 写入输出缓冲区
+        write_vm_memory(memory_mapping, out_ptr, &data)?;
+
+        Ok(data.len() as u64)
+    }
+);
+
+// ===== SubTask 15.2: object_write =====
+
+declare_builtin_function!(
+    /// 写入/更新对象数据。
+    ///
+    /// # 参数
+    /// - `id_ptr` / `id_len`：ObjectID 字节（28 字节），位于 heap region
+    /// - `data_ptr` / `data_len`：待写入数据，位于 heap region
+    /// - `arg5`：未使用
+    ///
+    /// # 返回
+    /// - 成功：0
+    /// - 失败：`ObjectTooLarge` / `OutOfGas` / `HeapAccessViolation`
+    ///
+    /// # Gas
+    /// `20 + 1 * data_len`（IMPL-SEC-4：(6)）
+    SyscallObjectWrite,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        id_ptr: u64,
+        id_len: u64,
+        data_ptr: u64,
+        data_len: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(id_ptr, id_len)?;
+        validate_heap_ptr(data_ptr, data_len)?;
+
+        // IMPL-SEC-4 (7)：Object ≤ 64KB
+        if data_len as usize > MAX_OBJECT_SIZE {
+            return Err(to_syscall_err(PokerL1Error::ObjectTooLarge {
+                actual: data_len as usize,
+                limit: MAX_OBJECT_SIZE,
+            }));
+        }
+
+        // 校验 id 长度
+        if id_len != 28 {
+            return Err(to_syscall_err(PokerL1Error::InvalidSyscallArgument(format!(
+                "object_write: id_len must be 28, got {id_len}"
+            ))));
+        }
+
+        let id_bytes = read_vm_memory(memory_mapping, id_ptr, id_len)?;
+        let object_id = ObjectID::from_bytes(&id_bytes).ok_or_else(|| {
+            to_syscall_err(PokerL1Error::InvalidSyscallArgument(
+                "object_write: invalid ObjectID bytes".to_string(),
+            ))
+        })?;
+
+        // IMPL-SEC-4 (5)(6)：执行前扣费
+        let gas = object_write_gas(data_len);
+        charge_gas(ctx, gas)?;
+
+        // 读取数据并写入 cache
+        let data = read_vm_memory(memory_mapping, data_ptr, data_len)?;
+        ctx.object_cache.insert(object_id, data);
+
+        Ok(0)
+    }
+);
+
+// ===== SubTask 15.3: object_create =====
+
+declare_builtin_function!(
+    /// 创建新对象，返回 ObjectID。
+    ///
+    /// ObjectID 生成：`(caller_address, creation_nonce)`，其中 `creation_nonce`
+    /// 由 `block_height << 20 | created_objects.len()` 确定性生成。
+    ///
+    /// # 参数
+    /// - `data_ptr` / `data_len`：对象初始数据，位于 heap region
+    /// - `out_id_ptr` / `out_id_len`：ObjectID 输出缓冲区（28 字节），位于 heap region
+    /// - `arg5`：未使用
+    ///
+    /// # 返回
+    /// - 成功：0
+    /// - 失败：`ObjectTooLarge` / `OutOfGas` / `HeapAccessViolation`
+    ///
+    /// # Gas
+    /// `20 + 1 * data_len`（IMPL-SEC-4：(6)）
+    SyscallObjectCreate,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        data_ptr: u64,
+        data_len: u64,
+        out_id_ptr: u64,
+        out_id_len: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(data_ptr, data_len)?;
+        validate_heap_ptr(out_id_ptr, out_id_len)?;
+
+        // IMPL-SEC-4 (7)：Object ≤ 64KB
+        if data_len as usize > MAX_OBJECT_SIZE {
+            return Err(to_syscall_err(PokerL1Error::ObjectTooLarge {
+                actual: data_len as usize,
+                limit: MAX_OBJECT_SIZE,
+            }));
+        }
+
+        // 校验 out_id_len
+        if out_id_len != 28 {
+            return Err(to_syscall_err(PokerL1Error::InvalidSyscallArgument(format!(
+                "object_create: out_id_len must be 28, got {out_id_len}"
+            ))));
+        }
+
+        // IMPL-SEC-4 (5)(6)：执行前扣费
+        let gas = object_create_gas(data_len);
+        charge_gas(ctx, gas)?;
+
+        // 生成 ObjectID（确定性：caller + block_height + 本次调用内计数器）
+        let creation_nonce = ctx
+            .tx
+            .block_height
+            .wrapping_shl(20)
+            .wrapping_add(ctx.created_objects.len() as u64);
+        let object_id = ObjectID::new(ctx.tx.caller, creation_nonce);
+
+        // 读取数据并写入 cache
+        let data = read_vm_memory(memory_mapping, data_ptr, data_len)?;
+        ctx.object_cache.insert(object_id, data);
+        ctx.record_created_object(object_id);
+
+        // 写入 ObjectID 到输出缓冲区
+        write_vm_memory(memory_mapping, out_id_ptr, &object_id.to_bytes())?;
+
+        Ok(0)
+    }
+);
+
+// ===== SubTask 15.4: emit_event =====
+
+declare_builtin_function!(
+    /// 发射事件。
+    ///
+    /// # 参数
+    /// - `payload_ptr` / `payload_len`：事件 payload，位于 heap region（≤ 16KB）
+    /// - `arg3` / `arg4` / `arg5`：未使用
+    ///
+    /// # 返回
+    /// - 成功：0
+    /// - 失败：`EventTooLarge` / `OutOfGas` / `HeapAccessViolation`
+    ///
+    /// # Gas
+    /// `10 + 1 * payload_len`（IMPL-SEC-4：(6)）
+    SyscallEmitEvent,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        payload_ptr: u64,
+        payload_len: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(payload_ptr, payload_len)?;
+
+        // IMPL-SEC-4 (6)：payload ≤ 16KB
+        if payload_len as usize > MAX_EVENT_PAYLOAD_SIZE {
+            return Err(to_syscall_err(PokerL1Error::EventTooLarge {
+                actual: payload_len as usize,
+                limit: MAX_EVENT_PAYLOAD_SIZE,
+            }));
+        }
+
+        // IMPL-SEC-4 (5)(6)：执行前扣费
+        let gas = emit_event_gas(payload_len);
+        charge_gas(ctx, gas)?;
+
+        // 读取 payload 并记录事件
+        let payload = read_vm_memory(memory_mapping, payload_ptr, payload_len)?;
+        ctx.emit_event(payload);
+
+        Ok(0)
+    }
+);
+
+// ===== SubTask 15.5: log / panic =====
+
+declare_builtin_function!(
+    /// 记录日志消息。
+    ///
+    /// # 参数
+    /// - `msg_ptr` / `msg_len`：消息内容（UTF-8），位于 heap region
+    /// - `arg3` / `arg4` / `arg5`：未使用
+    ///
+    /// # 返回
+    /// - 成功：0
+    ///
+    /// # Gas
+    /// 10
+    SyscallLog,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        msg_ptr: u64,
+        msg_len: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(msg_ptr, msg_len)?;
+
+        // 扣费
+        charge_gas(ctx, GAS_LOG)?;
+
+        // 读取消息并记录（tracing 默认关闭，此处仅消费 gas）
+        let _msg = read_vm_memory(memory_mapping, msg_ptr, msg_len)?;
+
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// 合约 panic — 记录消息并 trap VM。
+    ///
+    /// # 参数
+    /// - `msg_ptr` / `msg_len`：panic 消息（UTF-8），位于 heap region
+    /// - `arg3` / `arg4` / `arg5`：未使用
+    ///
+    /// # 返回
+    /// - 始终返回 `Err(SyscallPanic)`，VM trap
+    ///
+    /// # Gas
+    /// 10
+    SyscallPanic,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        msg_ptr: u64,
+        msg_len: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(msg_ptr, msg_len)?;
+
+        // 扣费
+        charge_gas(ctx, GAS_PANIC)?;
+
+        // 读取消息
+        let msg_bytes = read_vm_memory(memory_mapping, msg_ptr, msg_len)?;
+        let msg = String::from_utf8_lossy(&msg_bytes).into_owned();
+
+        // 记录 panic 并返回错误（trap VM）
+        ctx.panic(msg.clone());
+        Err(to_syscall_err(PokerL1Error::SyscallPanic(msg)))
+    }
+);
+
+// ===== SubTask 15.6: verify_signature =====
+
+declare_builtin_function!(
+    /// 统一签名验证（按 tagged pubkey tag 路由到 secp256k1 / ed25519）。
+    ///
+    /// # 参数
+    /// - `pubkey_ptr` / `pubkey_len`：tagged pubkey 字节（1B tag || raw pubkey）
+    /// - `sig_ptr` / `sig_len`：签名字节
+    /// - `msg_hash_ptr`：32 字节消息哈希
+    ///
+    /// # 返回
+    /// - 0：验证通过
+    /// - 1：验证失败（签名不匹配）
+    /// - Err：参数无效 / gas 不足
+    ///
+    /// # Gas
+    /// 500（`GAS_SECP256K1_VERIFY`，R3-M3 修正）
+    SyscallVerifySignature,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        pubkey_ptr: u64,
+        pubkey_len: u64,
+        sig_ptr: u64,
+        sig_len: u64,
+        msg_hash_ptr: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(pubkey_ptr, pubkey_len)?;
+        validate_heap_ptr(sig_ptr, sig_len)?;
+        validate_heap_ptr(msg_hash_ptr, 32)?;
+
+        // 扣费（固定 500 gas）
+        charge_gas(ctx, GAS_SECP256K1_VERIFY)?;
+
+        // 读取数据
+        let pubkey_bytes = read_vm_memory(memory_mapping, pubkey_ptr, pubkey_len)?;
+        let sig_bytes = read_vm_memory(memory_mapping, sig_ptr, sig_len)?;
+        let msg_hash_bytes = read_vm_memory(memory_mapping, msg_hash_ptr, 32)?;
+
+        // 解析 tagged pubkey
+        if pubkey_bytes.is_empty() {
+            return Ok(1); // 验证失败
+        }
+        let tag = pubkey_bytes[0];
+        let raw = pubkey_bytes[1..].to_vec();
+        let tagged_pubkey = TaggedPubkey { tag, raw };
+
+        // msg_hash 转 [u8; 32]
+        let mut msg_hash = [0u8; 32];
+        msg_hash.copy_from_slice(&msg_hash_bytes);
+
+        // 调用统一签名验证
+        match verify_signature(&tagged_pubkey, &sig_bytes, &msg_hash) {
+            Ok(()) => Ok(0),
+            Err(_) => Ok(1),
+        }
+    }
+);
+
+// ===== SubTask 15.7: get_block_height / get_timestamp =====
+
+declare_builtin_function!(
+    /// 查询当前 block height。
+    ///
+    /// # 返回
+    /// - 当前 block height（u64）
+    ///
+    /// # Gas
+    /// 1
+    SyscallGetBlockHeight,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        _arg1: u64,
+        _arg2: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        _memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        charge_gas(ctx, GAS_GET_BLOCK_HEIGHT)?;
+        Ok(ctx.tx.block_height)
+    }
+);
+
+declare_builtin_function!(
+    /// 查询当前 block timestamp（毫秒）。
+    ///
+    /// # 返回
+    /// - 当前 block timestamp（u64，毫秒）
+    ///
+    /// # Gas
+    /// 1
+    SyscallGetTimestamp,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        _arg1: u64,
+        _arg2: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        _memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        charge_gas(ctx, GAS_GET_TIMESTAMP)?;
+        Ok(ctx.tx.block_timestamp)
+    }
+);
+
+// ===== SubTask 15.8: verify_failure_proof =====
+
+/// `verify_failure_proof` 输入布局：
+///
+/// | 偏移  | 长度  | 字段                |
+/// |-------|-------|---------------------|
+/// | 0     | 32    | expected SMT root   |
+/// | 32    | 32    | key hash            |
+/// | 64    | 变长  | BCS-encoded MerklePath |
+const FAILURE_PROOF_HEADER_SIZE: usize = 64;
+
+declare_builtin_function!(
+    /// 验证 SMT 非包含证明（SEC-H9 修复 — 256-bit sparse Merkle 非包含证明）。
+    ///
+    /// # 参数
+    /// - `proof_ptr` / `proof_len`：证明数据，位于 heap region
+    ///   - bytes 0..32：expected SMT root
+    ///   - bytes 32..64：key hash（待证明不存在的 key）
+    ///   - bytes 64..：BCS-serialized [`MerklePath`]
+    /// - `arg3` / `arg4` / `arg5`：未使用
+    ///
+    /// # 返回
+    /// - 0：证明有效（key 确实不在 tree 中）
+    /// - 1：证明无效
+    /// - Err：参数无效 / gas 不足
+    ///
+    /// # Gas
+    /// 80000（SEC-H9 修复 — 含 256 层路径验证 + 多签验证预留）
+    SyscallVerifyFailureProof,
+    fn rust(
+        ctx: &mut PokerL1Context,
+        proof_ptr: u64,
+        proof_len: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        // IMPL-SEC-4 (4)：校验指针位于 heap region
+        validate_heap_ptr(proof_ptr, proof_len)?;
+
+        // 扣费（固定 80000 gas，SEC-H9）
+        charge_gas(ctx, GAS_VERIFY_FAILURE_PROOF)?;
+
+        // 校验最小长度
+        if (proof_len as usize) < FAILURE_PROOF_HEADER_SIZE {
+            return Ok(1); // 证明无效
+        }
+
+        // 读取证明数据
+        let proof_bytes = read_vm_memory(memory_mapping, proof_ptr, proof_len)?;
+
+        // 解析 header
+        let mut root = [0u8; 32];
+        root.copy_from_slice(&proof_bytes[..32]);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&proof_bytes[32..64]);
+
+        // BCS 反序列化 MerklePath
+        let path: MerklePath = match bcs::from_bytes(&proof_bytes[FAILURE_PROOF_HEADER_SIZE..]) {
+            Ok(p) => p,
+            Err(_) => return Ok(1), // 反序列化失败 → 证明无效
+        };
+
+        // 调用 SMT 验证（非包含：value=None, is_empty_leaf=true）
+        // 注意：SEC-H9 完整规范还包括多签验证，此处仅验证 SMT 非包含证明。
+        // 多签验证将在 Phase 5c（争议解决）中集成。
+        let valid = SparseMerkleTree::verify(&root, &key, None, &path);
+
+        Ok(if valid { 0 } else { 1 })
+    }
+);
+
+// 为了使用 SparseMerkleTree::verify，需要引入
+use crate::object_model::smt::SparseMerkleTree;
+
+// ===== Syscall 注册 =====
+
+/// 注册 Poker L1 全部核心 syscalls 到 [`FunctionRegistry`]。
+///
+/// 在 [`crate::vm::loader::load_contract_bytecode`] 中调用，
+/// 使所有合约可调用以下 syscalls：
+///
+/// | Syscall name            | 对应结构体                  |
+/// |-------------------------|-----------------------------|
+/// | `object_read`           | [`SyscallObjectRead`]       |
+/// | `object_write`          | [`SyscallObjectWrite`]      |
+/// | `object_create`         | [`SyscallObjectCreate`]     |
+/// | `emit_event`            | [`SyscallEmitEvent`]        |
+/// | `log`                   | [`SyscallLog`]              |
+/// | `panic`                 | [`SyscallPanic`]            |
+/// | `verify_signature`      | [`SyscallVerifySignature`]  |
+/// | `get_block_height`      | [`SyscallGetBlockHeight`]   |
+/// | `get_timestamp`         | [`SyscallGetTimestamp`]     |
+/// | `verify_failure_proof`  | [`SyscallVerifyFailureProof`] |
+pub fn register_poker_l1_syscalls(
+    registry: &mut FunctionRegistry<BuiltinFunction<PokerL1Context>>,
+) -> Result<(), PokerL1Error> {
+    registry
+        .register_function_hashed(*b"object_read", SyscallObjectRead::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register object_read: {e}")))?;
+    registry
+        .register_function_hashed(*b"object_write", SyscallObjectWrite::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register object_write: {e}")))?;
+    registry
+        .register_function_hashed(*b"object_create", SyscallObjectCreate::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register object_create: {e}")))?;
+    registry
+        .register_function_hashed(*b"emit_event", SyscallEmitEvent::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register emit_event: {e}")))?;
+    registry
+        .register_function_hashed(*b"log", SyscallLog::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register log: {e}")))?;
+    registry
+        .register_function_hashed(*b"panic", SyscallPanic::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register panic: {e}")))?;
+    registry
+        .register_function_hashed(*b"verify_signature", SyscallVerifySignature::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register verify_signature: {e}")))?;
+    registry
+        .register_function_hashed(*b"get_block_height", SyscallGetBlockHeight::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register get_block_height: {e}")))?;
+    registry
+        .register_function_hashed(*b"get_timestamp", SyscallGetTimestamp::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register get_timestamp: {e}")))?;
+    registry
+        .register_function_hashed(*b"verify_failure_proof", SyscallVerifyFailureProof::vm)
+        .map_err(|e| PokerL1Error::Other(format!("register verify_failure_proof: {e}")))?;
+    Ok(())
+}
+
+// ===== 测试 =====
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_model::smt::SparseMerkleTree;
+    use crate::signature::TaggedPubkey;
+    use crate::vm::context::TxContext;
+    use solana_rbpf::{
+        ebpf,
+        memory_region::{MemoryMapping, MemoryRegion},
+        program::SBPFVersion,
+        vm::Config,
+    };
+
+    /// 构造测试用 [`TxContext`]。
+    fn make_tx_context(is_gameturn: bool) -> TxContext {
+        TxContext {
+            caller: [1u8; 20],
+            caller_pubkey: TaggedPubkey {
+                tag: 0x01,
+                raw: vec![0x02; 33],
+            },
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce: 0,
+            block_height: 100,
+            block_timestamp: 100_000,
+            is_gameturn,
+        }
+    }
+
+    /// 创建测试用 MemoryMapping（仅 heap region）。
+    ///
+    /// 使用 `aligned_memory_mapping: false` 的 Config，避免 aligned 模式下
+    /// 强制 4GB 边界对齐（生产环境由 EbpfVm 提供完整 4 个 region，测试只需 heap）。
+    ///
+    /// 使用 `Box::leak` 获取 `'static` Config / SBPFVersion 引用，
+    /// 避免自引用结构问题。测试场景下少量内存泄漏可接受。
+    ///
+    /// **注意**：调用方须保证 `heap` 在 MemoryMapping 使用期间不被 resize / drop。
+    fn make_test_mapping(heap: &mut [u8]) -> MemoryMapping<'static> {
+        let regions = vec![MemoryRegion::new_writable(heap, ebpf::MM_HEAP_START)];
+        let config: &'static Config = Box::leak(Box::new(Config {
+            aligned_memory_mapping: false,
+            ..Config::default()
+        }));
+        let sbpf_version: &'static SBPFVersion = Box::leak(Box::new(SBPFVersion::V2));
+        MemoryMapping::new(regions, config, sbpf_version).expect("MemoryMapping creation")
+    }
+
+    /// heap 基地址（VM 虚拟地址）。
+    const HEAP_BASE: u64 = ebpf::MM_HEAP_START;
+
+    // ===== SubTask 15.1: object_read 测试 =====
+
+    #[test]
+    fn test_object_read_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        let id = ObjectID::new([1u8; 20], 42);
+        ctx.object_cache.insert(id, b"hello world".to_vec());
+
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let result = SyscallObjectRead::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            1024,
+            0,
+            &mut mapping,
+        )
+        .expect("object_read 应成功");
+
+        assert_eq!(result, 11);
+        assert_eq!(&heap[100..111], b"hello world");
+        assert_eq!(ctx.gas_used(), 21); // 10 + 11
+    }
+
+    #[test]
+    fn test_object_read_not_found() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        let id = ObjectID::new([0xff; 20], 999);
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let result = SyscallObjectRead::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            1024,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "对象不存在应返回错误");
+    }
+
+    #[test]
+    fn test_object_read_out_of_gas() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 5);
+
+        let id = ObjectID::new([1u8; 20], 42);
+        ctx.object_cache.insert(id, b"data".to_vec());
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let result = SyscallObjectRead::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            1024,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "gas 不足应返回错误");
+    }
+
+    #[test]
+    fn test_object_read_capacity_too_small() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        let id = ObjectID::new([1u8; 20], 42);
+        ctx.object_cache.insert(id, b"hello world".to_vec());
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let result = SyscallObjectRead::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            5, // out_capacity=5 < data_len=11
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "out_capacity 不足应返回错误");
+    }
+
+    #[test]
+    fn test_object_read_heap_violation() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        // 使用 stack 区域指针（非 heap）
+        let result = SyscallObjectRead::rust(
+            &mut ctx,
+            ebpf::MM_STACK_START,
+            28,
+            HEAP_BASE + 100,
+            1024,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "非 heap 指针应返回错误");
+    }
+
+    #[test]
+    fn test_object_read_gameturn_gas_free() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(true), u64::MAX);
+
+        let id = ObjectID::new([1u8; 20], 42);
+        ctx.object_cache.insert(id, b"data".to_vec());
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let _ = SyscallObjectRead::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            1024,
+            0,
+            &mut mapping,
+        )
+        .expect("object_read 应成功");
+
+        assert_eq!(ctx.gas_used(), 0, "GameTurn 通道免 gas");
+    }
+
+    // ===== SubTask 15.2: object_write 测试 =====
+
+    #[test]
+    fn test_object_write_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        let id = ObjectID::new([1u8; 20], 42);
+        heap[..28].copy_from_slice(&id.to_bytes());
+        heap[100..108].copy_from_slice(b"new data");
+
+        let result = SyscallObjectWrite::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            8,
+            0,
+            &mut mapping,
+        )
+        .expect("object_write 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.object_cache.get(&id).unwrap(), b"new data");
+        assert_eq!(ctx.gas_used(), 28); // 20 + 8
+    }
+
+    #[test]
+    fn test_object_write_too_large() {
+        let mut heap = vec![0u8; MAX_OBJECT_SIZE + 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), u64::MAX);
+
+        let id = ObjectID::new([1u8; 20], 42);
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let result = SyscallObjectWrite::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            MAX_OBJECT_SIZE as u64 + 1,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "超长数据应返回 ObjectTooLarge");
+    }
+
+    // ===== SubTask 15.3: object_create 测试 =====
+
+    #[test]
+    fn test_object_create_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        heap[0..11].copy_from_slice(b"object data");
+
+        let result = SyscallObjectCreate::rust(
+            &mut ctx,
+            HEAP_BASE,
+            11,
+            HEAP_BASE + 100,
+            28,
+            0,
+            &mut mapping,
+        )
+        .expect("object_create 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.created_objects.len(), 1);
+        assert_eq!(ctx.gas_used(), 31); // 20 + 11
+
+        let id_bytes = &heap[100..128];
+        let object_id = ObjectID::from_bytes(id_bytes).expect("ObjectID 反序列化");
+        assert_eq!(object_id.creator_address, ctx.tx.caller);
+        assert!(ctx.object_cache.contains_key(&object_id));
+    }
+
+    #[test]
+    fn test_object_create_multiple_unique_ids() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+
+        heap[0..4].copy_from_slice(b"data");
+
+        let mut ids = Vec::new();
+        for i in 0..3u8 {
+            let out_offset = 100 + i as usize * 28;
+            SyscallObjectCreate::rust(
+                &mut ctx,
+                HEAP_BASE,
+                4,
+                HEAP_BASE + out_offset as u64,
+                28,
+                0,
+                &mut mapping,
+            )
+            .unwrap();
+            let id = ObjectID::from_bytes(&heap[out_offset..out_offset + 28]).unwrap();
+            ids.push(id);
+        }
+
+        assert_eq!(ids.len(), 3);
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+    }
+
+    // ===== SubTask 15.4: emit_event 测试 =====
+
+    #[test]
+    fn test_emit_event_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        heap[0..13].copy_from_slice(b"event payload");
+
+        let result = SyscallEmitEvent::rust(&mut ctx, HEAP_BASE, 13, 0, 0, 0, &mut mapping)
+            .expect("emit_event 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.events.len(), 1);
+        assert_eq!(ctx.events[0].payload, b"event payload");
+        assert_eq!(ctx.gas_used(), 23); // 10 + 13
+    }
+
+    #[test]
+    fn test_emit_event_too_large() {
+        let mut heap = vec![0u8; MAX_EVENT_PAYLOAD_SIZE + 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), u64::MAX);
+
+        let result = SyscallEmitEvent::rust(
+            &mut ctx,
+            HEAP_BASE,
+            MAX_EVENT_PAYLOAD_SIZE as u64 + 1,
+            0,
+            0,
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "超长 payload 应返回 EventTooLarge");
+    }
+
+    // ===== SubTask 15.5: log / panic 测试 =====
+
+    #[test]
+    fn test_log_basic() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        heap[0..11].copy_from_slice(b"log message");
+
+        let result = SyscallLog::rust(&mut ctx, HEAP_BASE, 11, 0, 0, 0, &mut mapping)
+            .expect("log 应成功");
+
+        assert_eq!(result, 0);
+        assert_eq!(ctx.gas_used(), GAS_LOG);
+    }
+
+    #[test]
+    fn test_panic_traps_vm() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        heap[0..16].copy_from_slice(b"assertion failed");
+
+        let result = SyscallPanic::rust(&mut ctx, HEAP_BASE, 16, 0, 0, 0, &mut mapping);
+
+        assert!(result.is_err(), "panic 应返回错误 trap VM");
+        assert_eq!(
+            ctx.panic_message.as_deref(),
+            Some("assertion failed"),
+            "panic 消息应被记录"
+        );
+    }
+
+    // ===== SubTask 15.6: verify_signature 测试 =====
+
+    #[test]
+    fn test_verify_signature_empty_pubkey() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+
+        // 空 pubkey → 验证失败
+        heap[100..103].copy_from_slice(b"sig");
+        heap[200..232].copy_from_slice(&[0u8; 32]);
+
+        let result = SyscallVerifySignature::rust(
+            &mut ctx,
+            HEAP_BASE, // pubkey_ptr（len=0，空数据）
+            0,
+            HEAP_BASE + 100,
+            3,
+            HEAP_BASE + 200,
+            &mut mapping,
+        )
+        .expect("空 pubkey 应返回 Ok(1) 验证失败");
+
+        assert_eq!(result, 1);
+        assert_eq!(ctx.gas_used(), GAS_SECP256K1_VERIFY);
+    }
+
+    // ===== SubTask 15.7: get_block_height / get_timestamp 测试 =====
+
+    #[test]
+    fn test_get_block_height() {
+        let mut heap = vec![0u8; 64];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+
+        let result =
+            SyscallGetBlockHeight::rust(&mut ctx, 0, 0, 0, 0, 0, &mut mapping)
+                .expect("get_block_height 应成功");
+
+        assert_eq!(result, 100);
+        assert_eq!(ctx.gas_used(), GAS_GET_BLOCK_HEIGHT);
+    }
+
+    #[test]
+    fn test_get_timestamp() {
+        let mut heap = vec![0u8; 64];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+
+        let result = SyscallGetTimestamp::rust(&mut ctx, 0, 0, 0, 0, 0, &mut mapping)
+            .expect("get_timestamp 应成功");
+
+        assert_eq!(result, 100_000);
+        assert_eq!(ctx.gas_used(), GAS_GET_TIMESTAMP);
+    }
+
+    // ===== SubTask 15.8: verify_failure_proof 测试 =====
+
+    #[test]
+    fn test_verify_failure_proof_valid_non_inclusion() {
+        let mut heap = vec![0u8; 16 * 1024];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+
+        // 构造 SMT 并生成非包含证明
+        let mut smt = SparseMerkleTree::new();
+        let key1 = [0xaa; 32];
+        smt.upsert(key1, b"value1");
+        let root = smt.root();
+
+        // 对不存在的 key2 生成非包含证明
+        let key2 = [0xbb; 32];
+        let path = smt.prove(&key2);
+        assert!(path.is_empty_leaf, "key2 应为空叶（非包含）");
+
+        let path_bytes = bcs::to_bytes(&path).expect("BCS encode MerklePath");
+
+        // 组装 proof：root(32) + key(32) + path_bytes
+        let mut proof = Vec::with_capacity(FAILURE_PROOF_HEADER_SIZE + path_bytes.len());
+        proof.extend_from_slice(&root);
+        proof.extend_from_slice(&key2);
+        proof.extend_from_slice(&path_bytes);
+
+        heap[..proof.len()].copy_from_slice(&proof);
+
+        let result = SyscallVerifyFailureProof::rust(
+            &mut ctx,
+            HEAP_BASE,
+            proof.len() as u64,
+            0,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("verify_failure_proof 应成功");
+
+        assert_eq!(result, 0, "非包含证明应验证通过");
+        assert_eq!(ctx.gas_used(), GAS_VERIFY_FAILURE_PROOF);
+    }
+
+    #[test]
+    fn test_verify_failure_proof_invalid() {
+        let mut heap = vec![0u8; 16 * 1024];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+
+        let mut smt = SparseMerkleTree::new();
+        let key1 = [0xaa; 32];
+        smt.upsert(key1, b"value1");
+        let root = smt.root();
+
+        // 对存在的 key1 生成包含证明，但声称非包含 → 应验证失败
+        let path = smt.prove(&key1);
+        assert!(!path.is_empty_leaf, "key1 应为非空叶（包含）");
+
+        let path_bytes = bcs::to_bytes(&path).unwrap();
+
+        let mut proof = Vec::with_capacity(FAILURE_PROOF_HEADER_SIZE + path_bytes.len());
+        proof.extend_from_slice(&root);
+        proof.extend_from_slice(&key1);
+        proof.extend_from_slice(&path_bytes);
+
+        heap[..proof.len()].copy_from_slice(&proof);
+
+        let result = SyscallVerifyFailureProof::rust(
+            &mut ctx,
+            HEAP_BASE,
+            proof.len() as u64,
+            0,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("verify_failure_proof 应成功");
+
+        assert_eq!(result, 1, "包含证明冒充非包含应验证失败");
+    }
+
+    #[test]
+    fn test_verify_failure_proof_too_short() {
+        let mut heap = vec![0u8; 1024];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+
+        // 仅 32 字节（< 64 字节 header）
+        let proof = vec![0u8; 32];
+        heap[..32].copy_from_slice(&proof);
+
+        let result = SyscallVerifyFailureProof::rust(
+            &mut ctx,
+            HEAP_BASE,
+            32,
+            0,
+            0,
+            0,
+            &mut mapping,
+        )
+        .expect("应返回 Ok(1) 证明无效");
+
+        assert_eq!(result, 1, "过短的证明应判定无效");
+    }
+
+    // ===== 注册函数测试 =====
+
+    #[test]
+    fn test_register_poker_l1_syscalls() {
+        let mut registry: FunctionRegistry<BuiltinFunction<PokerL1Context>> =
+            FunctionRegistry::default();
+        register_poker_l1_syscalls(&mut registry).expect("注册应成功");
+
+        // 验证所有 10 个 syscall 已注册（按 hash key 可 lookup）
+        for name in [
+            &b"object_read"[..],
+            b"object_write",
+            b"object_create",
+            b"emit_event",
+            b"log",
+            b"panic",
+            b"verify_signature",
+            b"get_block_height",
+            b"get_timestamp",
+            b"verify_failure_proof",
+        ] {
+            let key = solana_rbpf::ebpf::hash_symbol_name(name);
+            assert!(
+                registry.lookup_by_key(key).is_some(),
+                "syscall {name:?} 应已注册"
+            );
+        }
+
+        // 重复注册同一函数指针是幂等的（solana_rbpf 行为：value 相同返回 Ok）
+        let result = registry.register_function_hashed(*b"object_read", SyscallObjectRead::vm);
+        assert!(result.is_ok(), "重复注册同一函数指针应幂等返回 Ok");
+
+        // 注册不同函数指针到同名 syscall 应失败（SymbolHashCollision）
+        let result = registry.register_function_hashed(*b"object_read", SyscallObjectWrite::vm);
+        assert!(result.is_err(), "注册不同函数到同名 syscall 应冲突");
+    }
+
+    // ===== 辅助函数测试 =====
+
+    #[test]
+    fn test_validate_heap_ptr_valid() {
+        assert!(validate_heap_ptr(ebpf::MM_HEAP_START, 1).is_ok());
+        assert!(validate_heap_ptr(ebpf::MM_HEAP_START + MAX_HEAP_SIZE as u64 - 1, 1).is_ok());
+        assert!(validate_heap_ptr(ebpf::MM_HEAP_START, 0).is_ok());
+    }
+
+    #[test]
+    fn test_validate_heap_ptr_invalid() {
+        // stack 区域
+        assert!(validate_heap_ptr(ebpf::MM_STACK_START, 28).is_err());
+        // input 区域
+        assert!(validate_heap_ptr(ebpf::MM_INPUT_START, 32).is_err());
+        // heap 越界
+        assert!(validate_heap_ptr(ebpf::MM_HEAP_START + MAX_HEAP_SIZE as u64, 1).is_err());
+        // 溢出
+        assert!(validate_heap_ptr(u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn test_charge_gas_sufficient() {
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+        assert!(charge_gas(&mut ctx, 50).is_ok());
+        assert_eq!(ctx.remaining_gas(), 50);
+    }
+
+    #[test]
+    fn test_charge_gas_insufficient() {
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+        assert!(charge_gas(&mut ctx, 101).is_err());
+        assert_eq!(ctx.remaining_gas(), 100, "不足时不应扣减");
+    }
+}

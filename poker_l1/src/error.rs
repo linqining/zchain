@@ -282,6 +282,70 @@ pub enum PokerL1Error {
     /// validator 处于 unbonding 期，不可参与共识但可被 slashing（R5-H7）。
     #[error("validator in unbonding period: pubkey={0:?}")]
     ValidatorInUnbonding(crate::signature::TaggedPubkey),
+
+    // ===== Phase 3: rBPF VM / Syscalls / 合约升级（Task 14 / 15 / 17） =====
+    /// BPF 字节码验证失败（IMPL-SEC-4：强制 Verifier）。
+    #[error("invalid bytecode: {0}")]
+    InvalidBytecode(String),
+    /// gas 耗尽（IMPL-SEC-4：指令执行前扣费，余额不足立即 trap）。
+    #[error("out of gas: used={used}, limit={limit}")]
+    OutOfGas { used: u64, limit: u64 },
+    /// Object 序列化后超过 64KB（IMPL-SEC-4：(7)）。
+    #[error("object too large: {actual} > {limit}")]
+    ObjectTooLarge { actual: usize, limit: usize },
+    /// 合约不存在。
+    #[error("contract not found: {0:?}")]
+    ContractNotFound(crate::object_model::ObjectID),
+    /// 合约版本不存在。
+    #[error("contract version not found: contract_id={contract_id:?}, version={version}")]
+    ContractVersionNotFound {
+        contract_id: crate::object_model::ObjectID,
+        version: u32,
+    },
+    /// 非 UpgradeCap 持有者尝试升级合约（SubTask 17.2）。
+    #[error("not authorized: caller is not UpgradeCap holder for contract {contract_id:?}")]
+    NotAuthorized {
+        contract_id: crate::object_model::ObjectID,
+    },
+    /// 升级处于 timelock 期，新版本不可调用（SEC-L7）。
+    #[error("upgrade in timelock: contract_id={contract_id:?}, remaining_blocks={remaining_blocks}")]
+    UpgradeInTimelock {
+        contract_id: crate::object_model::ObjectID,
+        remaining_blocks: u64,
+    },
+    /// 升级 timelock 未到期时尝试强制生效。
+    #[error("upgrade timelock not expired: contract_id={contract_id:?}, remaining_blocks={remaining_blocks}")]
+    UpgradeTimelockNotExpired {
+        contract_id: crate::object_model::ObjectID,
+        remaining_blocks: u64,
+    },
+    /// 旧版本合约已不可调用（SubTask 17.3）。
+    #[error("contract version {version} is no longer callable for {contract_id:?}")]
+    OldVersionNotCallable {
+        contract_id: crate::object_model::ObjectID,
+        version: u32,
+    },
+    /// syscall 参数无效（指针越界 / 长度非法等）。
+    #[error("invalid syscall argument: {0}")]
+    InvalidSyscallArgument(String),
+    /// 合约 panic（SubTask 15.5）。
+    #[error("contract panic: {0}")]
+    SyscallPanic(String),
+    /// emit_event payload 超过 16KB（IMPL-SEC-4：(6)）。
+    #[error("event payload too large: {actual} > {limit}")]
+    EventTooLarge { actual: usize, limit: usize },
+    /// syscall 指针不在合约 heap region（IMPL-SEC-4：(4)）。
+    #[error("heap access violation: ptr={ptr:#x}, len={len}")]
+    HeapAccessViolation { ptr: u64, len: u64 },
+    /// 合约执行失败（VM 返回错误）。
+    #[error("contract execution failed: {0}")]
+    ContractExecutionFailed(String),
+    /// 紧急升级缺少关键漏洞证据（SEC2-M11）。
+    #[error("emergency upgrade missing critical vulnerability proof")]
+    MissingCriticalVulnerabilityProof,
+    /// 紧急升级安全审计期内被 dispute（SEC2-M11）。
+    #[error("emergency upgrade disputed during audit period")]
+    EmergencyUpgradeDisputed,
 }
 
 /// 库统一 Result 别名。
