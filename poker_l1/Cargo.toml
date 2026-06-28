@@ -31,3 +31,17 @@ tracing = { workspace = true }
 # 测试专用，避免影响生产二进制大小
 tempfile = "3.10"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# ===== Task 36 性能基准（criterion harness = false）=====
+
+[[bench]]
+name = "task36_dag_consensus"
+harness = false
+
+[[bench]]
+name = "task36_bls_syscall"
+harness = false
+
+[[bench]]
+name = "task36_zk_verifier"
+harness = false
