@@ -12,6 +12,8 @@
 
 poker_l1 OffChain 执行模型采用「链下计算 + ZK 证明结算」范式：参与者将 Game 状态从链上 checkout 到链下执行环境，链下完成多手牌计算后通过 checkin tx 提交 ZK proof π、状态增量 Δ、新承诺 `new_commitment` 与 `ack_chain` 进行结算。链上 verifier 验证 π 通过后，应用 Δ 更新 Game 对象并解锁 checkout 锁定。
 
+> **三层信任模型**：OffChain 模式属于 zchain 三层信任架构的 Layer 3（密码学信任），与 Layer 1（Public 通道，全共识）和 Layer 2（Game tx 通道，assigned_validator）协同。详细分析见 [37-10-trust-layer-model.md](37-10-trust-layer-model.md)。
+
 ### 执行模式
 
 `OfflineState.execution_mode` 决定 Game 是否走链下通道（`poker_l1/src/offline/state.rs:52-58`）：

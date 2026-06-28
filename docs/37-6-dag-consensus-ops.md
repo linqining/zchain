@@ -786,6 +786,36 @@ assigned_validator 申辩须提供：
 
 申辩成功豁免 slashing；无申辩或申辩无效 → 治理 slashing。
 
+### 8.5 assigned_validator 作恶场景全景
+
+assigned_validator 权力集中，作恶面涵盖 7 大类：审查 / 伪造 / 抢跑 / Equivocation / 状态篡改 / 超时滥用 / 跨阶段作恶。本节给出索引，详细分析与防护矩阵见独立文档 [37-9-assigned-validator-security.md](37-9-assigned-validator-security.md)。
+
+**行业对比**：assigned_validator 设计与 Near chunk producer、Arbitrum AnyTrust DAC、Cosmos ICS、Algorand VRF leader 等设计有相似性，详细对比见 [37-9 §1.4 行业对比与设计渊源](37-9-assigned-validator-security.md#14-行业对比与设计渊源)。
+
+**三层信任模型**：assigned_validator 属于 zchain 三层信任架构的 Layer 2，与 Layer 1（Public 通道，全共识）和 Layer 3（OffChain，ZK 密码学）协同。详细分析见 [37-10-trust-layer-model.md](37-10-trust-layer-model.md)。
+
+| 作恶类别 | 核心防护 | 详细文档章节 |
+| --- | --- | --- |
+| 审查（Censorship） | fallback tx + TimeoutProof witness（≥4 独立）+ SEC-M1 自动 slashing | 37-9 §2 |
+| 伪造（Forgery） | 玩家签名 + gameturn_nonce + SEC-H7 fallback 标记 | 37-9 §3 |
+| 抢跑（Front-running） | SEC-H6 跨 commit force_advance 防护 + S9/R4-M4 排序 | 37-9 §4 |
+| Equivocation | SEC-C1/SEC2-C1 签名绑定 + 100% slashing | 37-9 §5 |
+| 状态篡改 | tx-driven 状态 + state_root 绑定 | 37-9 §6 |
+| 超时滥用 | 合理超时配置 + block.height 单调 + downtime slashing | 37-9 §7 |
+| 跨阶段作恶 | advance_phase 约束 + 状态机固定 + LeaveProof 签名 | 37-9 §8 |
+
+**防护层次矩阵**（详见 [37-9 §9](37-9-assigned-validator-security.md#9-防护层次矩阵)）：
+
+| 作恶类别 | L1 协议层 | L2 共识层 | L3 经济层 | L4 治理层 |
+| --- | --- | --- | --- | --- |
+| 审查 | fallback tx | TimeoutProof witness | downtime slashing | 治理踢出 |
+| 伪造 | 签名验证 | nonce 校验 | - | - |
+| 抢跑 | SEC-H6 | S9/R4-M4 排序 | - | - |
+| Equivocation | 签名绑定 | vertex_hash/cert_hash | 100% slashing | - |
+| 状态篡改 | tx-driven | state_root 绑定 | - | 玩家审计 |
+| 超时滥用 | 超时配置 | block.height 单调 | downtime slashing | - |
+| 跨阶段 | advance_phase 约束 | 状态机固定 | - | - |
+
 ---
 
 ## 9. 故障排查
