@@ -25,13 +25,24 @@ pub mod slashing;
 pub mod game_assignment;
 /// Bullshark 共识与 block 投影（Task 9）。
 pub mod bullshark;
+/// Texas Hold'em 完整轮转规则（Phase 2 Task 4）。
+pub mod texas_holdem_turn_rule;
+/// 多玩家阶段超时惩罚执行（Phase 4 Task 8）。
+pub mod phase_timeout;
 
 // 重新导出 routing 模块公开 API，便于上层直接 `consensus::GameStatus` 等使用。
 pub use routing::{
-    validate_active_games_limit, validate_assigned_validator, validate_lane_route,
-    validate_turn_order, ExecutionMode, GameStatus, SimpleTurnRule, TurnRule,
+    validate_active_games_limit, validate_assigned_validator, validate_game_turn_phase_aware,
+    validate_lane_route, validate_turn_order, BettingRound, ExecutionMode, GamePhase, GameStatus,
+    PhaseTransitionError, SimpleTurnRule, SubmitPhaseKind, TurnRule,
     DEFAULT_MAX_ACTIVE_GAMES_PER_PLAYER,
 };
+
+// 重新导出 texas_holdem_turn_rule 模块公开 API。
+pub use texas_holdem_turn_rule::TexasHoldemTurnRule;
+
+// 重新导出 phase_timeout 模块公开 API（Phase 4 Task 8）。
+pub use phase_timeout::{handle_submit_phase_timeout, KickResult};
 
 // 重新导出 vertex_production 模块公开 API。
 pub use vertex_production::{

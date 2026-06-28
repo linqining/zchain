@@ -339,9 +339,104 @@ pub fn sort_commit_txs_r4m4(commit_vertex_txs: Vec<Vec<Transaction>>) -> Vec<Tra
 }
 ```
 
+### 4.5.1 多玩家阶段 sub-block 排序（spec Phase 5 Task 9）
+
+> **来源**：`extend-game-multiplayer-phases` spec（FROZEN）— Phase 5 扩展 `build_game_sub_block()` 按 `game.phase` 选择排序键，覆盖多玩家并行提交阶段。
+
+`build_game_sub_block(txs, game, turn_rule)`（源码：`poker_l1/src/consensus/vertex_production.rs`）按当前 `GamePhase` 分支选择排序策略：
+
+| 当前 `game.phase` | 排序键 | 说明 |
+| --- | --- | --- |
+| `Betting { round }` | `(current_turn 优先, arrival)` | 当前轮次玩家的 GameTurn tx 排首位，其余按 arrival 顺序（既有行为，向后兼容） |
+| `MultiPlayerSubmit { kind }` | `arrival`（FIFO） | 多玩家阶段所有提交者平等，仅按 tx 到达 vertex 的顺序排序，不区分优先级 |
+
+#### 排序算法细节
+
+```rust
+// Betting 阶段：current_turn 优先
+let current_turn_player = turn_rule.current_turn(game);  // Option<Address>
+let mut sorted: Vec<Transaction> = txs.iter()
+    .filter(|tx| tx.lane_hint == TxLane::GameTurn)
+    .cloned()
+    .collect();
+sorted.sort_by_key(|tx| {
+    let actor = derive_address(&tx.tagged_pubkey);
+    // current_turn 玩家的 tx 排首位（key=0），其余按 arrival（key=1+index）
+    if Some(actor) == current_turn_player { 0 } else { 1 + arrival_index(tx) }
+});
+
+// MultiPlayerSubmit 阶段：纯 arrival 顺序
+let mut sorted: Vec<Transaction> = txs.iter()
+    .filter(|tx| tx.lane_hint == TxLane::GameTurn)
+    .cloned()
+    .collect();
+sorted.sort_by_key(|tx| arrival_index(tx));  // 稳定排序，保持 arrival 顺序
+```
+
+#### 跨 commit 排序保证
+
+多玩家阶段的 tx 可能分布在多个 vertex（即跨多个 commit），排序保证：
+
+1. **commit 内**：按上述 `build_game_sub_block` 规则排序
+2. **commit 间**：由 `bullshark_linear_order` 按 `(round, author_pubkey_bytes, vertex_hash)` 线性排序 vertex，commit 内的 tx 顺序随之确定
+3. **跨 commit 排序**：`check_sech6_cross_commit_force_advance()` 校验多玩家阶段前一 commit 有 GameTurn tx 时拒绝 force_advance（详见 4.6）
+
+#### 非法 tx 过滤
+
+`build_game_sub_block` 仅保留 `tx.lane_hint == TxLane::GameTurn` 的 tx，Public / ForceSync / CheckpointAnchor 通道的 tx 被过滤掉，不参与 game sub-block 排序。
+
 ### 4.6 SEC-H6 跨 commit 抢跑防护
 
 `check_sech6_cross_commit_force_advance()` 校验：force_advance 所在 commit 的前一个 commit 内若有该 Game 的 GameTurn tx，则 `last_action_height` 视为已更新，force_advance 判定为 false 被拒绝。
+
+#### 4.6.1 多玩家阶段扩展（spec Phase 5 Task 10）
+
+> **来源**：`extend-game-multiplayer-phases` spec（FROZEN）— Phase 5 扩展 SEC-H6 覆盖 `MultiPlayerSubmit` 阶段，防止多玩家阶段被恶意 force_advance 抢跑。
+
+函数签名（源码：`poker_l1/src/consensus/vertex_production.rs`）：
+
+```rust
+pub fn check_sech6_cross_commit_force_advance(
+    prev_commit_game_turns: &[Transaction],   // 前一 commit 内该 Game 的 GameTurn tx 列表
+    force_advance_game_id: &ObjectID,          // force_advance tx 携带的 game_id
+    game_id: &ObjectID,                        // 校验目标 Game 的 game_id
+    game_phase: GamePhase,                     // 当前 Game 阶段
+) -> PokerL1Result<()>;
+```
+
+#### 校验逻辑
+
+| 步骤 | 校验项 | 失败返回 |
+| --- | --- | --- |
+| 1 | `force_advance_game_id == game_id` | `PokerL1Error::GameNotFound`（game_id 不匹配） |
+| 2 | `prev_commit_game_turns.is_empty()` | 通过（前一 commit 无 GameTurn tx，允许 force_advance） |
+| 3 | `!prev_commit_game_turns.is_empty()` | `PokerL1Error::Other("SEC-H6 rejected: prev commit has GameTurn tx")`（拒绝 force_advance） |
+
+**多玩家阶段覆盖**（Phase 5 Task 10 扩展）：
+
+| 当前 `game_phase` | force_advance 行为 |
+| --- | --- |
+| `Betting { .. }` | 前一 commit 有 GameTurn tx → **拒绝** force_advance（既有行为） |
+| `MultiPlayerSubmit { kind: Shuffle }` | 前一 commit 有 GameTurn tx → **拒绝** force_advance（**新增**覆盖） |
+| `MultiPlayerSubmit { kind: RevealToken }` | 前一 commit 有 GameTurn tx → **拒绝** force_advance（**新增**覆盖） |
+| `MultiPlayerSubmit { kind: Reconstruct }` | 前一 commit 有 GameTurn tx → **拒绝** force_advance（**新增**覆盖） |
+| `MultiPlayerSubmit { kind: LeaveProof }` | 前一 commit 有 GameTurn tx → **拒绝** force_advance（**新增**覆盖） |
+
+> **安全语义**：多玩家阶段的 GameTurn tx（如 Shuffle / RevealToken 提交）会更新 `last_action_height`，因此前一 commit 有此类 tx 时，force_advance 的"超时"前提不成立，须被拒绝。这防止恶意参与者在多玩家阶段中途抢跑 force_advance 偷走底池。
+
+#### 4.6.2 调用示例
+
+```rust
+use poker_l1::consensus::{check_sech6_cross_commit_force_advance, GamePhase, SubmitPhaseKind};
+
+let result = check_sech6_cross_commit_force_advance(
+    &prev_commit_game_turns,   // 前一 commit 的 GameTurn tx 列表
+    &force_advance.game_id,    // force_advance 携带的 game_id
+    &game.id,                  // 校验目标 game_id
+    game.phase,                // 当前阶段（如 MultiPlayerSubmit { kind: Shuffle }）
+);
+assert!(result.is_err(), "前一 commit 有 GameTurn tx 时应拒绝 force_advance");
+```
 
 ### 4.7 validate_size
 
@@ -752,6 +847,62 @@ assigned_validator 申辩须提供：
 | 申辩窗口过期 | 超过 `defense_window_blocks` (50) | 检查 `InvestigationState::is_window_expired()`，过期后不可申辩 |
 | 优先级处理错误 | 多重 slashing 顺序错 | 检查 `apply_multi_slashing()` 按 `priority()` 排序：vertex > commit > checkpoint > downtime > ack |
 
+### 9.8 多玩家阶段超时（spec Phase 4）
+
+> **来源**：`extend-game-multiplayer-phases` spec（FROZEN）— Phase 4 引入多玩家并行提交阶段，每个阶段独立超时判定与惩罚。
+
+| 症状 | 可能原因 | 诊断方法 |
+|------|----------|----------|
+| `pending_submitters` 长期不清空 | 玩家离线或网络分区 | 检查 `is_submit_phase_timed_out(game, current_height, config)`，对照 `phase_started_height + <phase>_timeout_blocks` 判定是否超时 |
+| 诚实玩家被误 kick | 超时阈值过短或网络延迟 | 检查 `shuffle_timeout_blocks` / `reveal_token_timeout_blocks` / `reconstruct_timeout_blocks` 配置，确认 `current_height > phase_started_height + timeout_blocks` 严格大于判定 |
+| `LeaveProof` 阶段卡住 | 误以为 LeaveProof 会超时 | LeaveProof 为被动行为，**永不超时**，`is_submit_phase_timed_out()` 返回 `None`，无需 kick |
+| force_advance 在多玩家阶段被拒 | 前一 commit 有 GameTurn tx | 检查 `check_sech6_cross_commit_force_advance()`，多玩家阶段前一 commit 有 GameTurn tx → SEC-H6 拒绝 force_advance |
+| `NotEligibleSubmitter` 错误 | 玩家不在 `pending_submitters` 中 | 检查 `validate_game_turn_phase_aware()`，MultiPlayerSubmit 阶段校验提交者在 `pending_submitters`，LeaveProof 校验在 `active_participants` |
+| kick 后剩余玩家 < 2 | 多人超时触发 `end_without_showdown` | 检查 `handle_submit_phase_timeout()` 返回的 `Vec<KickResult>`，若剩余 `active_participants < 2` 则直接 finalize |
+
+#### 9.8.1 超时判定诊断流程
+
+```rust
+use poker_l1::block::{is_submit_phase_timed_out, TimeConsensusConfig};
+use poker_l1::consensus::SubmitPhaseKind;
+
+let config = TimeConsensusConfig::default();
+match is_submit_phase_timed_out(&game, current_height, &config) {
+    Some(SubmitPhaseKind::Shuffle) => {
+        // Shuffle 超时：current > phase_started_height + 100
+        let deadline = game.phase_started_height + config.shuffle_timeout_blocks;
+        println!("Shuffle 超时：current={}, deadline={}", current_height, deadline);
+    }
+    Some(SubmitPhaseKind::RevealToken) => {
+        // RevealToken 超时：current > phase_started_height + 50
+        let deadline = game.phase_started_height + config.reveal_token_timeout_blocks;
+        println!("RevealToken 超时：current={}, deadline={}", current_height, deadline);
+    }
+    Some(SubmitPhaseKind::Reconstruct) => {
+        // Reconstruct 超时：current > phase_started_height + 100
+        let deadline = game.phase_started_height + config.reconstruct_timeout_blocks;
+        println!("Reconstruct 超时：current={}, deadline={}", current_height, deadline);
+    }
+    None => {
+        // 未超时或 LeaveProof（永不超时）或 Betting（走 is_turn_timeout）
+        println!("未超时：phase={:?}", game.phase);
+    }
+}
+```
+
+#### 9.8.2 kick 退款金额校验
+
+`handle_submit_phase_timeout()` 通过 `refund_calc: F` 闭包计算退款金额，运维须确认：
+
+| 校验项 | 期望值 | 说明 |
+| --- | --- | --- |
+| `KickResult.player` | 在原 `pending_submitters` 中 | 被踢玩家须是未提交者 |
+| `KickResult.refund_amount` | = 玩家 `total_bet` | 全额退款（无罚没，超时非恶意行为） |
+| kick 后 `active_participants` | 移除被踢玩家 | 玩家从 active 集合移除 |
+| kick 后 `pending_submitters` | 移除被踢玩家 | 玩家从 pending 集合移除 |
+| kick 后 `completed_submitters` | 移除被踢玩家 | 防止已提交者被误踢（正常应为空交集） |
+| 剩余 `active_participants < 2` | 触发 `end_without_showdown` | 直接结算，剩余 1 人获得底池 |
+
 ---
 
 ## 10. 监控指标
@@ -768,6 +919,13 @@ assigned_validator 申辩须提供：
 | archive node 数量 | ≥ `DEFAULT_ARCHIVE_NODE_MIN_COUNT` (3) | < 3 → 禁止裁剪 | `is_archive_node_sufficient()` |
 | DAG vertex 裁剪 | `vertex_prune_after_blocks` (10000) 后裁剪 | 裁剪失败 → 存储压力 | `check_vertex_pruning_eligibility()` |
 | tx 裁剪 | `tx_prune_after_blocks` (1000) 后裁剪 | 裁剪失败 → 存储压力 | `check_tx_pruning_eligibility()` |
+| 多玩家阶段 Shuffle 超时 | `phase_started_height` → `+100` block | 超时触发 kick → 告警监控 kick 频率 | `is_submit_phase_timed_out` 返回 `Some(Shuffle)` |
+| 多玩家阶段 RevealToken 超时 | `phase_started_height` → `+50` block | 超时触发 kick → 告警监控 kick 频率 | `is_submit_phase_timed_out` 返回 `Some(RevealToken)` |
+| 多玩家阶段 Reconstruct 超时 | `phase_started_height` → `+100` block | 超时触发 kick → 告警监控 kick 频率 | `is_submit_phase_timed_out` 返回 `Some(Reconstruct)` |
+| `pending_submitters` 大小 | 随阶段切换重置为 0 | 长期非零且未超时 → 玩家离线 | `game.pending_submitters.len()` |
+| `completed_submitters` 增长 | 单调递增至 `pending` 清空 | 停滞 → 玩家未提交，可能触发超时 | `game.completed_submitters.len()` |
+| force_advance SEC-H6 拒绝计数 | 0 | > 0 → 多玩家阶段被抢跑尝试 | `check_sech6_cross_commit_force_advance` 错误计数 |
+| `end_without_showdown` 触发计数 | 低 | 频繁触发 → 超时阈值过短或网络问题 | `handle_submit_phase_timeout` 后 `active < 2` 计数 |
 
 ### 10.2 节点角色分层
 
@@ -883,6 +1041,19 @@ cargo bench --bench task36_dag_consensus --bench task36_bls_syscall --bench task
 - [ ] 永久保留项未误裁剪（`PermanentRetentionItem` 全部保留）
 - [ ] Walrus blob 未过期（`ArchivedZkProof.blob_expired` = false）
 
+### 12.5 多玩家阶段运维检查（spec Phase 4 / Phase 5）
+
+- [ ] `TimeConsensusConfig` 多玩家阶段超时字段配置正确（`shuffle_timeout_blocks=100` / `reveal_token_timeout_blocks=50` / `reconstruct_timeout_blocks=100`）
+- [ ] `is_submit_phase_timed_out()` 监控正常，超时事件告警已接入
+- [ ] `handle_submit_phase_timeout()` 执行后 `KickResult` 退款金额 = 玩家 `total_bet`（无罚没）
+- [ ] kick 后 `active_participants` / `pending_submitters` / `completed_submitters` 同步移除被踢玩家
+- [ ] 剩余 `active_participants < 2` 时触发 `end_without_showdown` 直接结算
+- [ ] `build_game_sub_block()` 排序规则正确：Betting 阶段 current_turn 优先，MultiPlayerSubmit 阶段纯 arrival 顺序
+- [ ] `check_sech6_cross_commit_force_advance()` 多玩家阶段覆盖正确（4 种 SubmitPhaseKind 均拒绝前一 commit 有 GameTurn tx 的 force_advance）
+- [ ] `validate_game_turn_phase_aware()` 校验逻辑正确：MultiPlayerSubmit 校验 `pending_submitters`，LeaveProof 校验 `active_participants`
+- [ ] `NotEligibleSubmitter` 错误的 `phase` / `pending` / `actor` 字段信息完整，便于排查
+- [ ] `LeaveProof` 阶段不触发超时（`is_submit_phase_timed_out` 返回 `None`），玩家可随时提交离场证明
+
 ---
 
 ## 附录 A：关键常量速查
@@ -919,6 +1090,9 @@ cargo bench --bench task36_dag_consensus --bench task36_bls_syscall --bench task
 | `DEFAULT_TX_PRUNE_AFTER_BLOCKS` | 1000 | `storage/pruning.rs` |
 | `DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS` | 10000 | `storage/pruning.rs` |
 | `DEFAULT_ARCHIVE_NODE_MIN_COUNT` | 3 | `storage/pruning.rs` |
+| `shuffle_timeout_blocks`（默认） | 100 | `block/time_consensus.rs`（spec Phase 4 Task 7） |
+| `reveal_token_timeout_blocks`（默认） | 50 | `block/time_consensus.rs`（spec Phase 4 Task 7） |
+| `reconstruct_timeout_blocks`（默认） | 100 | `block/time_consensus.rs`（spec Phase 4 Task 7） |
 
 ---
 
@@ -943,4 +1117,4 @@ cargo bench --bench task36_dag_consensus --bench task36_bls_syscall --bench task
 
 ---
 
-*文档版本：SubTask 37.6 — DAG 共识运维文档（FROZEN 2026-06-27 spec 对齐）*
+*文档版本：SubTask 37.6 — DAG 共识运维文档（FROZEN 2026-06-27 spec 对齐）+ Phase 6 SubTask 12.2 多玩家阶段排序与超时运维扩展（`extend-game-multiplayer-phases` spec）*

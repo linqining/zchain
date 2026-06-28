@@ -52,6 +52,10 @@ use crate::{Address, BlockHeight};
 ///   （NEW-C2 修复：字段统一为 `last_action_height`，force_advance 判定依据）
 /// - `execution_mode`：OnChain / OffChain（影响 Phase 5 流程，Phase 2 仅记录）
 /// - `is_finalized`：结算后冻结为 true（spec：结算后 Game 对象变 Immutable）
+/// - `phase`：当前游戏阶段（Betting 或 MultiPlayerSubmit），默认 `Betting { Preflop }`
+/// - `pending_submitters`：多玩家阶段待提交者集合（下注阶段为空）
+/// - `phase_started_height`：当前阶段开始的 block height（用于超时判定）
+/// - `completed_submitters`：多玩家阶段已提交者集合（用于进度追踪）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameStatus {
     /// Game 对象 ID。
@@ -77,6 +81,18 @@ pub struct GameStatus {
     pub execution_mode: ExecutionMode,
     /// 是否已结算（结算后 Game 对象冻结为 Immutable）。
     pub is_finalized: bool,
+    /// 当前游戏阶段（Betting 或 MultiPlayerSubmit）。
+    /// 默认 `Betting { round: Preflop }`，向后兼容既有 GameStatus。
+    pub phase: GamePhase,
+    /// 多玩家阶段待提交者集合（下注阶段为空）。
+    /// 阶段切换时重置为该阶段的合法提交者集合；玩家成功提交后从此集合移除。
+    pub pending_submitters: BTreeSet<Address>,
+    /// 当前阶段开始的 block height（用于超时判定）。
+    /// 阶段切换时更新为 `last_action_height + 1`。
+    pub phase_started_height: BlockHeight,
+    /// 多玩家阶段已提交者集合（用于进度追踪）。
+    /// 阶段切换时清空；玩家成功提交后插入此集合。
+    pub completed_submitters: BTreeSet<Address>,
 }
 
 /// Game 执行模式（spec：合约可选 OnChain 默认 / OffChain 可选）。
@@ -88,23 +104,143 @@ pub enum ExecutionMode {
     OffChain,
 }
 
+/// 下注轮次（Texas Hold'em 四轮下注 + 摊牌）。
+///
+/// 用于 [`GamePhase::Betting`] 标记当前下注轮次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BettingRound {
+    /// Preflop：翻牌前下注轮（盲注后、翻牌前）。
+    Preflop,
+    /// Flop：翻牌后下注轮（前三张公共牌发出后）。
+    Flop,
+    /// Turn：转牌下注轮（第四张公共牌发出后）。
+    Turn,
+    /// River：河牌下注轮（第五张公共牌发出后）。
+    River,
+    /// Showdown：摊牌阶段（所有下注结束，比较手牌）。
+    Showdown,
+}
+
+/// 多玩家提交阶段的子类型（spec：4 种并行/顺序提交阶段）。
+///
+/// 用于 [`GamePhase::MultiPlayerSubmit`] 标记当前多玩家提交子阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmitPhaseKind {
+    /// 洗牌提交：活跃玩家依次提交 shuffle proof（顺序）。
+    Shuffle,
+    /// Reveal Token 提交：每张牌的密钥持有者并行提交 reveal token。
+    RevealToken,
+    /// Reconstruct Deck 提交：所有活跃玩家并行提交重建牌组。
+    Reconstruct,
+    /// Leave Proof 提交：任意活跃玩家可随时提交离开证明（非阶段绑定，被动行为）。
+    LeaveProof,
+}
+
+/// Game 阶段枚举（spec：区分下注阶段与多玩家提交阶段）。
+///
+/// - [`GamePhase::Betting`]：单玩家轮转（Preflop / Flop / Turn / River / Showdown betting），
+///   使用 `current_turn_player` 与 [`TurnRule::current_turn`] 校验
+/// - [`GamePhase::MultiPlayerSubmit`]：一组玩家并行/顺序提交（shuffle / reveal / reconstruct / leave），
+///   使用 `pending_submitters` 与 [`TurnRule::current_submitters`] 校验
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GamePhase {
+    /// 下注阶段：单玩家轮转。
+    Betting {
+        /// 当前下注轮次。
+        round: BettingRound,
+    },
+    /// 多玩家提交阶段：一组玩家并行/顺序提交。
+    MultiPlayerSubmit {
+        /// 子阶段类型。
+        kind: SubmitPhaseKind,
+    },
+}
+
+impl GamePhase {
+    /// 默认阶段：Betting { round: Preflop }（向后兼容）。
+    pub const fn default_phase() -> Self {
+        Self::Betting {
+            round: BettingRound::Preflop,
+        }
+    }
+
+    /// 判定是否为下注阶段。
+    pub const fn is_betting(&self) -> bool {
+        matches!(self, Self::Betting { .. })
+    }
+
+    /// 判定是否为多玩家提交阶段。
+    pub const fn is_multi_player_submit(&self) -> bool {
+        matches!(self, Self::MultiPlayerSubmit { .. })
+    }
+}
+
+impl Default for GamePhase {
+    fn default() -> Self {
+        Self::default_phase()
+    }
+}
+
 /// 轮转规则 trait（SubTask 7.3）。
 ///
 /// 给定 Game 状态，计算 `current_turn` 玩家地址。
 /// 不同扑克变体（Texas Hold'em / Omaha / Stud / ...）可实现不同轮转规则。
 ///
 /// Phase 2 提供默认实现 [`SimpleTurnRule`]：按 `active_participants` BTreeSet 顺序轮转。
+///
+/// # 多玩家阶段扩展
+///
+/// `current_turn()` 在 [`GamePhase::MultiPlayerSubmit`] 阶段返回 `None`（无单一当前轮次玩家）；
+/// 此时应使用 [`Self::current_submitters`] 获取合法提交者集合，
+/// [`Self::is_submission_complete`] 判定是否所有提交者已完成，
+/// [`Self::advance_phase`] 推进到下一阶段。
 pub trait TurnRule: Send + Sync {
     /// 计算当前轮次玩家地址。
     ///
-    /// 返回 `None` 表示无活跃玩家（Game 已结束或异常状态）。
+    /// 返回 `None` 表示无活跃玩家（Game 已结束或异常状态），
+    /// 或当前处于 [`GamePhase::MultiPlayerSubmit`] 阶段（多玩家阶段无单一 current_turn）。
     fn current_turn(&self, game: &GameStatus) -> Option<Address>;
 
     /// 推进到下一轮次玩家。
     ///
     /// 调用方负责在 GameTurn tx 执行成功后调用此方法更新 `game.current_turn_player`。
     /// 返回新的当前轮次玩家地址；返回 `None` 表示无下一玩家（Game 结束）。
+    ///
+    /// 仅 [`GamePhase::Betting`] 阶段有效；多玩家阶段调用为 no-op 返回 `None`。
     fn advance_turn(&self, game: &mut GameStatus) -> Option<Address>;
+
+    /// 返回当前阶段合法提交者集合（多玩家阶段）。
+    ///
+    /// - [`GamePhase::Betting`] 阶段：返回空集合（下注阶段使用 `current_turn()` 校验）
+    /// - [`GamePhase::MultiPlayerSubmit`] 阶段：返回该子阶段的合法提交者集合
+    ///   - `Shuffle` / `Reconstruct` / `LeaveProof`：返回 `active_participants` 副本
+    ///   - `RevealToken`：返回 `pending_submitters` 副本（密钥持有者已在 pending 中）
+    fn current_submitters(&self, game: &GameStatus) -> BTreeSet<Address>;
+
+    /// 判定多玩家阶段是否所有提交者已完成。
+    ///
+    /// - [`GamePhase::Betting`] 阶段：返回 `true`（下注阶段不使用此判定）
+    /// - [`GamePhase::MultiPlayerSubmit`] 阶段：返回 `pending_submitters.is_empty()`
+    fn is_submission_complete(&self, game: &GameStatus) -> bool;
+
+    /// 推进到下一阶段（多玩家 → 下阶段 / 回到 Betting）。
+    ///
+    /// 推进时重置 `pending_submitters` / `completed_submitters` / `phase_started_height`
+    /// （设为 `last_action_height + 1`）。
+    ///
+    /// 返回新的 [`GamePhase`]；失败返回 [`PhaseTransitionError`]。
+    fn advance_phase(&self, game: &mut GameStatus) -> Result<GamePhase, PhaseTransitionError>;
+}
+
+/// 阶段切换错误（[`TurnRule::advance_phase`] 返回）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PhaseTransitionError {
+    /// 待提交者集合非空，不可推进阶段（须先完成所有提交或超时 kick）。
+    #[error("pending submitters not empty: count={0}")]
+    PendingSubmittersNotEmpty(usize),
+    /// 非法的阶段转换（如 Betting 阶段调用 advance_phase，或 Unsupported 转换路径）。
+    #[error("invalid phase transition from {0:?}")]
+    InvalidPhaseTransition(GamePhase),
 }
 
 /// 默认轮转规则：按 `active_participants` BTreeSet 顺序循环轮转。
@@ -116,6 +252,10 @@ pub struct SimpleTurnRule;
 
 impl TurnRule for SimpleTurnRule {
     fn current_turn(&self, game: &GameStatus) -> Option<Address> {
+        // 多玩家阶段无单一 current_turn
+        if game.phase.is_multi_player_submit() {
+            return None;
+        }
         if game.is_finalized || game.active_participants.is_empty() {
             return None;
         }
@@ -129,6 +269,10 @@ impl TurnRule for SimpleTurnRule {
     }
 
     fn advance_turn(&self, game: &mut GameStatus) -> Option<Address> {
+        // 多玩家阶段不推进 current_turn
+        if game.phase.is_multi_player_submit() {
+            return None;
+        }
         if game.is_finalized || game.active_participants.is_empty() {
             return None;
         }
@@ -140,6 +284,23 @@ impl TurnRule for SimpleTurnRule {
         let next_idx = (current_idx + 1) % participants.len();
         game.current_turn_player = participants[next_idx];
         Some(game.current_turn_player)
+    }
+
+    fn current_submitters(&self, game: &GameStatus) -> BTreeSet<Address> {
+        // SimpleTurnRule 仅支持下注阶段：返回空集合
+        let _ = game;
+        BTreeSet::new()
+    }
+
+    fn is_submission_complete(&self, game: &GameStatus) -> bool {
+        // SimpleTurnRule 仅支持下注阶段：视为已完成
+        let _ = game;
+        true
+    }
+
+    fn advance_phase(&self, game: &mut GameStatus) -> Result<GamePhase, PhaseTransitionError> {
+        // SimpleTurnRule 不处理多玩家阶段：Betting 阶段调用返回 InvalidPhaseTransition
+        Err(PhaseTransitionError::InvalidPhaseTransition(game.phase))
     }
 }
 
@@ -225,11 +386,84 @@ pub fn validate_turn_order(
     if current != actor {
         return Err(PokerL1Error::NotYourTurn {
             game_id: game.id,
+            phase: game.phase,
             current_turn: current,
             actor,
         });
     }
     Ok(())
+}
+
+/// 阶段感知的 GameTurn tx 校验（spec：多玩家并行提交阶段扩展）。
+///
+/// 根据 [`GameStatus::phase`] 分支校验：
+/// - 非 GameTurn 通道：跳过校验
+/// - [`GamePhase::Betting`]：保持原 `current_turn_player` 匹配逻辑（调用 [`validate_turn_order`]）
+/// - [`GamePhase::MultiPlayerSubmit`]（除 LeaveProof）：校验 `actor` 在 `pending_submitters` 中，
+///   否则返回 [`PokerL1Error::NotEligibleSubmitter`]
+/// - [`SubmitPhaseKind::LeaveProof`]：校验 `actor` 在 `active_participants` 中
+///   （不要求在 `pending_submitters` 中）
+///
+/// 成功后更新追踪集合：
+/// - 非 LeaveProof 多玩家阶段：从 `pending_submitters` 移除 actor，插入 `completed_submitters`
+/// - LeaveProof 阶段：从 `pending_submitters` 移除 actor（若在），插入 `completed_submitters`，
+///   并从 `active_participants` 移除 actor
+///
+/// 参数：
+/// - `tx`：待校验交易
+/// - `game`：Game 状态（`&mut` 用于更新 pending_submitters / completed_submitters / active_participants）
+/// - `actor`：tx 签名者派生地址
+/// - `turn_rule`：轮转规则实现
+pub fn validate_game_turn_phase_aware(
+    tx: &Transaction,
+    game: &mut GameStatus,
+    actor: Address,
+    turn_rule: &dyn TurnRule,
+) -> PokerL1Result<()> {
+    // 非 GameTurn 通道跳过
+    if tx.lane_hint != TxLane::GameTurn {
+        return Ok(());
+    }
+
+    match game.phase {
+        GamePhase::Betting { .. } => {
+            // 下注阶段：保持原 current_turn_player 匹配逻辑
+            validate_turn_order(tx, game, actor, turn_rule)
+        }
+        GamePhase::MultiPlayerSubmit { kind } => match kind {
+            SubmitPhaseKind::LeaveProof => {
+                // LeaveProof：校验 actor 在 active_participants 中（不要求在 pending_submitters）
+                if !game.active_participants.contains(&actor) {
+                    return Err(PokerL1Error::NotEligibleSubmitter {
+                        game_id: game.id,
+                        phase: game.phase,
+                        pending: game.pending_submitters.clone(),
+                        actor,
+                    });
+                }
+                // 成功：从 active_participants 移除，从 pending_submitters 移除（若在），插入 completed
+                game.active_participants.remove(&actor);
+                game.pending_submitters.remove(&actor);
+                game.completed_submitters.insert(actor);
+                Ok(())
+            }
+            _ => {
+                // Shuffle / RevealToken / Reconstruct：校验 actor 在 pending_submitters 中
+                if !game.pending_submitters.contains(&actor) {
+                    return Err(PokerL1Error::NotEligibleSubmitter {
+                        game_id: game.id,
+                        phase: game.phase,
+                        pending: game.pending_submitters.clone(),
+                        actor,
+                    });
+                }
+                // 成功：从 pending_submitters 移除，插入 completed_submitters
+                game.pending_submitters.remove(&actor);
+                game.completed_submitters.insert(actor);
+                Ok(())
+            }
+        },
+    }
 }
 
 /// 校验玩家活跃 Game 数量是否超限（SubTask 8.7：S8 修复）。
@@ -296,6 +530,10 @@ mod tests {
             hand_start_height: 90,
             execution_mode: ExecutionMode::OnChain,
             is_finalized: false,
+            phase: GamePhase::default_phase(),
+            pending_submitters: BTreeSet::new(),
+            phase_started_height: 0,
+            completed_submitters: BTreeSet::new(),
         };
         (game, assigned_tp, assigned_addr, addrs)
     }
@@ -556,5 +794,333 @@ mod tests {
         let id = ObjectID::new([1u8; 20], 0);
         let _ = Ownership::Shared;
         assert_eq!(id.creation_nonce, 0);
+    }
+
+    // ===== Phase 1 Task 1: GamePhase / BettingRound / SubmitPhaseKind 测试 =====
+
+    #[test]
+    fn betting_round_bcs_roundtrip() {
+        for round in [
+            BettingRound::Preflop,
+            BettingRound::Flop,
+            BettingRound::Turn,
+            BettingRound::River,
+            BettingRound::Showdown,
+        ] {
+            let bytes = bcs::to_bytes(&round).unwrap();
+            let recovered: BettingRound = bcs::from_bytes(&bytes).unwrap();
+            assert_eq!(round, recovered);
+        }
+    }
+
+    #[test]
+    fn submit_phase_kind_bcs_roundtrip() {
+        for kind in [
+            SubmitPhaseKind::Shuffle,
+            SubmitPhaseKind::RevealToken,
+            SubmitPhaseKind::Reconstruct,
+            SubmitPhaseKind::LeaveProof,
+        ] {
+            let bytes = bcs::to_bytes(&kind).unwrap();
+            let recovered: SubmitPhaseKind = bcs::from_bytes(&bytes).unwrap();
+            assert_eq!(kind, recovered);
+        }
+    }
+
+    #[test]
+    fn game_phase_bcs_roundtrip_all_variants() {
+        let phases = vec![
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
+            GamePhase::Betting {
+                round: BettingRound::Flop,
+            },
+            GamePhase::Betting {
+                round: BettingRound::Turn,
+            },
+            GamePhase::Betting {
+                round: BettingRound::River,
+            },
+            GamePhase::Betting {
+                round: BettingRound::Showdown,
+            },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::RevealToken,
+            },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Reconstruct,
+            },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::LeaveProof,
+            },
+        ];
+        for phase in &phases {
+            let bytes = bcs::to_bytes(phase).unwrap();
+            let recovered: GamePhase = bcs::from_bytes(&bytes).unwrap();
+            assert_eq!(*phase, recovered);
+        }
+    }
+
+    #[test]
+    fn game_phase_json_roundtrip_all_variants() {
+        let phases = vec![
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::LeaveProof,
+            },
+        ];
+        for phase in &phases {
+            let json = serde_json::to_string(phase).unwrap();
+            let recovered: GamePhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(*phase, recovered);
+        }
+    }
+
+    #[test]
+    fn game_phase_default_is_betting_preflop() {
+        let phase = GamePhase::default_phase();
+        assert_eq!(phase, GamePhase::Betting { round: BettingRound::Preflop });
+        assert!(phase.is_betting());
+        assert!(!phase.is_multi_player_submit());
+    }
+
+    #[test]
+    fn game_phase_is_helpers_correct() {
+        let betting = GamePhase::Betting { round: BettingRound::Flop };
+        assert!(betting.is_betting());
+        assert!(!betting.is_multi_player_submit());
+
+        let multi = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        assert!(!multi.is_betting());
+        assert!(multi.is_multi_player_submit());
+    }
+
+    #[test]
+    fn game_phase_copy_semantics() {
+        // GamePhase 派生 Copy，赋值后修改不影响原值
+        let phase1 = GamePhase::Betting { round: BettingRound::Preflop };
+        let phase2 = phase1;
+        // 编译期保证 Copy：phase1 仍可用
+        assert_eq!(phase1, phase2);
+    }
+
+    // ===== Phase 1 Task 2: GameStatus 新字段默认值与阶段切换测试 =====
+
+    #[test]
+    fn game_status_new_fields_have_correct_defaults() {
+        let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        assert_eq!(game.phase, GamePhase::Betting { round: BettingRound::Preflop });
+        assert!(game.pending_submitters.is_empty());
+        assert_eq!(game.phase_started_height, 0);
+        assert!(game.completed_submitters.is_empty());
+    }
+
+    #[test]
+    fn game_status_phase_switch_resets_tracking_fields() {
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        // 模拟多玩家阶段填充
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.pending_submitters.insert([0x10; 20]);
+        game.pending_submitters.insert([0x20; 20]);
+        game.completed_submitters.insert([0x10; 20]);
+        game.phase_started_height = 50;
+        // 阶段切换：重置追踪集合
+        game.phase = GamePhase::Betting { round: BettingRound::Flop };
+        game.pending_submitters.clear();
+        game.completed_submitters.clear();
+        game.phase_started_height = 0;
+        assert!(game.pending_submitters.is_empty());
+        assert!(game.completed_submitters.is_empty());
+        assert_eq!(game.phase_started_height, 0);
+        assert_eq!(game.phase, GamePhase::Betting { round: BettingRound::Flop });
+    }
+
+    #[test]
+    fn game_status_with_multi_player_phase_bcs_roundtrip() {
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.pending_submitters.insert([0x10; 20]);
+        game.pending_submitters.insert([0x20; 20]);
+        game.completed_submitters.insert([0x10; 20]);
+        game.phase_started_height = 100;
+        let bytes = bcs::to_bytes(&game).unwrap();
+        let recovered: GameStatus = bcs::from_bytes(&bytes).unwrap();
+        assert_eq!(game, recovered);
+    }
+
+    #[test]
+    fn game_status_with_multi_player_phase_json_roundtrip() {
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken };
+        game.pending_submitters.insert([0x10; 20]);
+        game.phase_started_height = 100;
+        let json = serde_json::to_string(&game).unwrap();
+        let recovered: GameStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(game, recovered);
+    }
+
+    // ===== Phase 2 Task 3: TurnRule trait 扩展 + SimpleTurnRule 新方法测试 =====
+
+    #[test]
+    fn simple_turn_rule_current_submitters_returns_empty_for_betting() {
+        let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        let rule = SimpleTurnRule;
+        assert!(rule.current_submitters(&game).is_empty());
+    }
+
+    #[test]
+    fn simple_turn_rule_is_submission_complete_returns_true_for_betting() {
+        let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        let rule = SimpleTurnRule;
+        assert!(rule.is_submission_complete(&game));
+    }
+
+    #[test]
+    fn simple_turn_rule_advance_phase_returns_invalid_for_betting() {
+        let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        let expected_phase = game.phase;
+        let mut g = game;
+        let rule = SimpleTurnRule;
+        let err = rule.advance_phase(&mut g).unwrap_err();
+        assert_eq!(err, PhaseTransitionError::InvalidPhaseTransition(expected_phase));
+    }
+
+    #[test]
+    fn simple_turn_rule_current_turn_returns_none_in_multi_player_phase() {
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        let rule = SimpleTurnRule;
+        // 多玩家阶段 current_turn 返回 None
+        assert_eq!(rule.current_turn(&game), None);
+    }
+
+    #[test]
+    fn simple_turn_rule_advance_turn_returns_none_in_multi_player_phase() {
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        let rule = SimpleTurnRule;
+        // 多玩家阶段 advance_turn 返回 None（no-op）
+        assert_eq!(rule.advance_turn(&mut game), None);
+        // current_turn_player 不变
+        assert_eq!(game.current_turn_player, [0x10; 20]);
+    }
+
+    #[test]
+    fn phase_transition_error_pending_submitters_not_empty_display() {
+        let err = PhaseTransitionError::PendingSubmittersNotEmpty(3);
+        let msg = format!("{}", err);
+        assert!(msg.contains("3"));
+    }
+
+    #[test]
+    fn phase_transition_error_invalid_phase_transition_display() {
+        let err = PhaseTransitionError::InvalidPhaseTransition(GamePhase::Betting {
+            round: BettingRound::Preflop,
+        });
+        let msg = format!("{}", err);
+        assert!(msg.contains("Betting"));
+    }
+
+    // ===== Phase 3 Task 5: validate_game_turn_phase_aware 测试 =====
+
+    #[test]
+    fn validate_game_turn_phase_aware_betting_ok() {
+        // 下注阶段：current_turn_player 提交 → 通过
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        let rule = SimpleTurnRule;
+        let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
+        // game.phase 默认为 Betting { Preflop }
+        validate_game_turn_phase_aware(&tx, &mut game, [0x10; 20], &rule)
+            .expect("下注阶段 current_turn_player 提交应通过");
+    }
+
+    #[test]
+    fn validate_game_turn_phase_aware_betting_rejects_wrong_player() {
+        // 下注阶段：非 current_turn_player 提交 → NotYourTurn
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        let rule = SimpleTurnRule;
+        let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
+        let err = validate_game_turn_phase_aware(&tx, &mut game, [0x20; 20], &rule).unwrap_err();
+        assert!(matches!(err, PokerL1Error::NotYourTurn { .. }));
+    }
+
+    #[test]
+    fn validate_game_turn_phase_aware_multi_player_submit_ok() {
+        // 多玩家阶段（Shuffle）：pending_submitter 提交 → 通过，pending 移除、completed 插入
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.pending_submitters.insert([0x10; 20]);
+        game.pending_submitters.insert([0x20; 20]);
+        let rule = SimpleTurnRule;
+        let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
+        validate_game_turn_phase_aware(&tx, &mut game, [0x10; 20], &rule)
+            .expect("多玩家阶段 pending_submitter 提交应通过");
+        // 校验追踪集合更新：0x10 从 pending 移除，插入 completed
+        assert!(!game.pending_submitters.contains(&[0x10; 20]));
+        assert!(game.completed_submitters.contains(&[0x10; 20]));
+        // 另一提交者 0x20 仍在 pending
+        assert!(game.pending_submitters.contains(&[0x20; 20]));
+    }
+
+    #[test]
+    fn validate_game_turn_phase_aware_multi_player_submit_rejects_non_pending() {
+        // 多玩家阶段（Shuffle）：非 pending_submitter 提交 → NotEligibleSubmitter
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.pending_submitters.insert([0x10; 20]);
+        let rule = SimpleTurnRule;
+        let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
+        // 0x20 在 active_participants 但不在 pending_submitters
+        let err = validate_game_turn_phase_aware(&tx, &mut game, [0x20; 20], &rule).unwrap_err();
+        assert!(matches!(err, PokerL1Error::NotEligibleSubmitter { .. }));
+    }
+
+    #[test]
+    fn validate_game_turn_phase_aware_leave_proof_ok() {
+        // LeaveProof 阶段：active_participant 提交 → 通过，从 active/pending 移除
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof };
+        game.pending_submitters.insert([0x10; 20]);
+        let rule = SimpleTurnRule;
+        let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
+        validate_game_turn_phase_aware(&tx, &mut game, [0x20; 20], &rule)
+            .expect("LeaveProof 阶段 active_participant 提交应通过");
+        // 0x20 从 active_participants 移除
+        assert!(!game.active_participants.contains(&[0x20; 20]));
+        // 0x20 插入 completed_submitters
+        assert!(game.completed_submitters.contains(&[0x20; 20]));
+        // 0x10 仍在 active_participants
+        assert!(game.active_participants.contains(&[0x10; 20]));
+    }
+
+    #[test]
+    fn validate_game_turn_phase_aware_leave_proof_rejects_non_active() {
+        // LeaveProof 阶段：非 active_participant 提交 → NotEligibleSubmitter
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof };
+        let rule = SimpleTurnRule;
+        let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
+        // 0x30 不在 active_participants
+        let err = validate_game_turn_phase_aware(&tx, &mut game, [0x30; 20], &rule).unwrap_err();
+        assert!(matches!(err, PokerL1Error::NotEligibleSubmitter { .. }));
+    }
+
+    #[test]
+    fn validate_game_turn_phase_aware_skips_non_gameturn_lane() {
+        // 非 GameTurn 通道 → 跳过校验
+        let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        let rule = SimpleTurnRule;
+        let tx = make_tx(TxLane::Public, RouteHint::AnyValidator, false);
+        validate_game_turn_phase_aware(&tx, &mut game, [0x99; 20], &rule)
+            .expect("非 GameTurn 通道应跳过校验");
     }
 }

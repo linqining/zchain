@@ -522,6 +522,85 @@ poker_l1_node \
 | `is_dispute_window_passed` | `current > block_height + dispute_window_blocks` | 链下执行结果视为 final |
 | `should_submit_checkpoint` | `current >= last_checkpoint + checkpoint_interval_blocks` | 应提交新 checkpoint_anchor |
 | `is_epoch_boundary` | `current % epoch_length_blocks == 0` | 触发 validator 重分配 |
+| `is_submit_phase_timed_out` | `current > phase_started_height + <phase>_timeout_blocks` | kick pending_submitters 中玩家 + 退款（spec Phase 4） |
+
+### 5.4 多玩家提交阶段超时配置（spec Phase 4 Task 7）
+
+> **来源**：`extend-game-multiplayer-phases` spec（FROZEN）— Phase 4 引入多玩家并行提交阶段（Shuffle / RevealToken / Reconstruct / LeaveProof），每个阶段独立配置超时阈值。
+
+`TimeConsensusConfig` 在原有 10 个字段基础上新增 3 个多玩家阶段超时字段（源码：`poker_l1/src/block/time_consensus.rs`）：
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `shuffle_timeout_blocks` | `100` | Shuffle 阶段超时阈值（block 数） |
+| `reveal_token_timeout_blocks` | `50` | RevealToken 阶段超时阈值（block 数，最短，防玩家故意拖延揭牌） |
+| `reconstruct_timeout_blocks` | `100` | Reconstruct 阶段超时阈值（block 数） |
+
+> **LeaveProof 不超时**：`SubmitPhaseKind::LeaveProof` 为被动行为（玩家可随时提交离场证明），无超时阈值，`is_submit_phase_timed_out()` 对此阶段始终返回 `None`。
+
+#### 5.4.1 超时判定规则
+
+`is_submit_phase_timed_out(game, current_height, config) -> Option<SubmitPhaseKind>`：
+
+| 当前 `game.phase` | 使用阈值 | 判定逻辑 |
+| --- | --- | --- |
+| `Betting { .. }` | 不适用 | 返回 `None`（下注阶段走 `is_turn_timeout`） |
+| `MultiPlayerSubmit { kind: Shuffle }` | `shuffle_timeout_blocks` (100) | `current > phase_started_height + 100` → `Some(Shuffle)` |
+| `MultiPlayerSubmit { kind: RevealToken }` | `reveal_token_timeout_blocks` (50) | `current > phase_started_height + 50` → `Some(RevealToken)` |
+| `MultiPlayerSubmit { kind: Reconstruct }` | `reconstruct_timeout_blocks` (100) | `current > phase_started_height + 100` → `Some(Reconstruct)` |
+| `MultiPlayerSubmit { kind: LeaveProof }` | 不适用 | 返回 `None`（LeaveProof 永不超时） |
+
+**边界判定**（严格大于 `>`）：
+- `current == phase_started_height + timeout_blocks` → **未超时**（边界值不触发）
+- `current == phase_started_height + timeout_blocks + 1` → **已超时**
+- overflow（`checked_add` 失败）→ 返回 `None`（保守不超时，避免误 kick）
+
+#### 5.4.2 超时惩罚执行（handle_submit_phase_timeout）
+
+超时触发后由 `handle_submit_phase_timeout()`（源码：`poker_l1/src/consensus/phase_timeout.rs`）执行：
+
+1. 遍历 `game.pending_submitters`，对每个未提交玩家执行 kick
+2. 从 `active_participants` / `pending_submitters` / `completed_submitters` 同时移除该玩家
+3. 退款 `total_bet`（由调用方通过 `refund_calc: F` 闭包计算）
+4. 若剩余 `active_participants < 2` → 触发 `end_without_showdown` 直接结算
+
+返回 `Vec<KickResult>`，每项含 `{ player: Address, refund_amount: u64 }`。
+
+#### 5.4.3 genesis 配置示例（多玩家阶段超时）
+
+在 genesis `time_consensus` 段新增三个字段：
+
+```json
+{
+  "time_consensus": {
+    "max_interval_ms": 30000,
+    "max_clock_drift_ms": 5000,
+    "turn_timeout_blocks": 30,
+    "hand_max_duration_blocks": 300,
+    "dispute_window_blocks": 200,
+    "da_window_blocks": 500,
+    "checkpoint_interval_blocks": 100,
+    "game_validator_timeout_blocks": 50,
+    "epoch_length_blocks": 1000,
+    "epoch_transition_window_blocks": 10,
+    "shuffle_timeout_blocks": 100,
+    "reveal_token_timeout_blocks": 50,
+    "reconstruct_timeout_blocks": 100
+  }
+}
+```
+
+> **默认值兼容**：未显式配置时，`TimeConsensusConfig::default()` / `TimeConsensusConfig::new()` 自动填入上述默认值，既有 genesis 文件无需修改即可向后兼容。
+
+#### 5.4.4 部署建议
+
+| 场景 | 建议配置 | 理由 |
+| --- | --- | --- |
+| 主网（mainnet） | 保持默认值 | 100 block Shuffle 超时足够覆盖网络分区恢复；50 block RevealToken 防玩家故意拖延 |
+| 测试网（testnet） | 可降至默认值的 50%（Shuffle=50 / RevealToken=25 / Reconstruct=50） | 加速测试用例流转 |
+| 高延迟网络 | 可提升至默认值的 200%（Shuffle=200 / RevealToken=100 / Reconstruct=200） | 防诚实玩家因网络延迟被误 kick |
+
+> **SEC-M5 约束**：所有超时判定以 `block.height` 为权威，禁止以 `timestamp_ms` 触发。`shuffle_timeout_blocks` 等参数均以 block 高度计量，不受 proposer 任意选 `timestamp_ms` 影响。
 
 ---
 
@@ -665,7 +744,8 @@ validator 退出时**必须销毁 VRF 私钥**并提交 `vrf_key_destroy_proof`�
 | chain_id | `poker_l1/src/lib.rs` | `DEFAULT_CHAIN_ID = 0x706F_6B31` |
 | NodeRole / NodeConfig | `poker_l1/src/node/mod.rs` | `NodeRole::{Validator, Full, Archive, Light}`，`NodeConfig` |
 | ValidatorKey | `poker_l1/src/node/mod.rs` | `ValidatorKey`（secp256k1，32B 私钥 + tagged pubkey） |
-| TimeConsensusConfig | `poker_l1/src/block/time_consensus.rs` | `TimeConsensusConfig`（10 个字段） |
+| TimeConsensusConfig | `poker_l1/src/block/time_consensus.rs` | `TimeConsensusConfig`（13 个字段，含 `shuffle_timeout_blocks` / `reveal_token_timeout_blocks` / `reconstruct_timeout_blocks`） |
+| 多玩家阶段超时惩罚 | `poker_l1/src/consensus/phase_timeout.rs` | `handle_submit_phase_timeout()` / `KickResult`（spec Phase 4 Task 8） |
 | ValidatorEntry / ValidatorStatus | `poker_l1/src/consensus/validator_set.rs` | `ValidatorEntry`，`ValidatorStatus`，`MIN_VALIDATOR_SET_SIZE=5` |
 | VRF 常量 | `poker_l1/src/consensus/validator_set.rs` | `VRF_PUBKEY_SIZE=33`，`VRF_PROOF_SIZE=97`，`VRF_OUTPUT_SIZE=32` |
 | MAX_SINGLE_REDUCTION_RATIO | `poker_l1/src/consensus/validator_set.rs` | `MAX_SINGLE_REDUCTION_RATIO=20` |

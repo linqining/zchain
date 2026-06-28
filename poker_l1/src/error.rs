@@ -120,12 +120,26 @@ pub enum PokerL1Error {
         receiver: crate::signature::TaggedPubkey,
     },
     /// 非当前轮次玩家提交 GameTurn tx（SubTask 7.4：轮转约束）。
-    #[error("not your turn (game_id={game_id:?}, current_turn={current_turn:?}, actor={actor:?})")]
+    #[error("not your turn (game_id={game_id:?}, phase={phase:?}, current_turn={current_turn:?}, actor={actor:?})")]
     NotYourTurn {
         /// Game 对象 ID。
         game_id: crate::object_model::ObjectID,
+        /// 当前游戏阶段（Betting 或 MultiPlayerSubmit）。
+        phase: crate::consensus::GamePhase,
         /// 当前轮次玩家地址。
         current_turn: crate::Address,
+        /// 实际提交 tx 的玩家地址。
+        actor: crate::Address,
+    },
+    /// 多玩家提交阶段，提交者不在 pending_submitters 中（spec：NotEligibleSubmitter）。
+    #[error("not eligible submitter (game_id={game_id:?}, phase={phase:?}, pending={pending:?}, actor={actor:?})")]
+    NotEligibleSubmitter {
+        /// Game 对象 ID。
+        game_id: crate::object_model::ObjectID,
+        /// 当前游戏阶段。
+        phase: crate::consensus::GamePhase,
+        /// 当前待提交者集合。
+        pending: std::collections::BTreeSet<crate::Address>,
         /// 实际提交 tx 的玩家地址。
         actor: crate::Address,
     },

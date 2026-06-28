@@ -37,7 +37,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::routing::{GameStatus, TurnRule};
-use crate::consensus::{DagVertex, Epoch, MAX_VERTEX_SIZE, Round};
+use crate::consensus::{DagVertex, Epoch, GamePhase, MAX_VERTEX_SIZE, Round};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
 use crate::transaction::{Gas, RouteHint, Transaction, TxLane};
@@ -201,12 +201,15 @@ pub struct GameSubBlock {
     pub arrival_order: Vec<u64>,
 }
 
-/// 构造 game sub-block（SubTask 8.4）。
+/// 构造 game sub-block（SubTask 8.4 / Phase 5 Task 9）。
 ///
 /// assigned_validator 把自己负责 game 的 GameTurn tx 分组为 game sub-block，
-/// sub-block 内按 `(current_turn, arrival)` 排序：
-/// 1. 当前轮次玩家的 tx 优先
-/// 2. 同玩家按 arrival 顺序
+/// sub-block 内排序键根据 [`GameStatus::phase`] 选择：
+/// 1. [`GamePhase::Betting`]：按 `(current_turn 优先, arrival)` 排序
+///    — 当前轮次玩家的 tx 优先，同玩家按 arrival 顺序（既有行为，保持兼容）
+/// 2. [`GamePhase::MultiPlayerSubmit`]：按 `(phase_kind, arrival)` 排序
+///    — 多玩家阶段无单一 current_turn，按到达顺序稳定排序
+///    （同一 game 的 phase_kind 恒定，等价于 arrival 顺序）
 ///
 /// 参数：
 /// - `txs`：待分组的 GameTurn tx 列表（按 arrival 顺序，索引即 arrival 序号）
@@ -220,7 +223,6 @@ pub fn build_game_sub_block(
     turn_rule: &dyn TurnRule,
 ) -> PokerL1Result<GameSubBlock> {
     let game_id = game.id;
-    let current_turn = turn_rule.current_turn(game);
 
     // 过滤仅保留 GameTurn 通道 tx，记录原始 arrival 序号
     let mut filtered: Vec<(u64, Transaction)> = txs
@@ -230,27 +232,32 @@ pub fn build_game_sub_block(
         .map(|(idx, tx)| (idx as u64, tx))
         .collect();
 
-    // 按 (current_turn 优先, arrival 顺序) 排序
-    // current_turn 玩家的 tx 排前，其他玩家按 arrival 顺序排后
-    filtered.sort_by(|(arr_a, tx_a), (arr_b, tx_b)| {
-        let a_is_current = current_turn
-            .map(|ct| {
-                let actor_a = derive_actor_address(tx_a);
-                actor_a == ct
-            })
-            .unwrap_or(false);
-        let b_is_current = current_turn
-            .map(|ct| {
-                let actor_b = derive_actor_address(tx_b);
-                actor_b == ct
-            })
-            .unwrap_or(false);
-        match (a_is_current, b_is_current) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => arr_a.cmp(arr_b),
+    // 按 game.phase 选择排序键
+    match game.phase {
+        GamePhase::Betting { .. } => {
+            // 下注阶段：按 (current_turn 优先, arrival 顺序) 排序
+            let current_turn = turn_rule.current_turn(game);
+            filtered.sort_by(|(arr_a, tx_a), (arr_b, tx_b)| {
+                let a_is_current = current_turn
+                    .map(|ct| derive_actor_address(tx_a) == ct)
+                    .unwrap_or(false);
+                let b_is_current = current_turn
+                    .map(|ct| derive_actor_address(tx_b) == ct)
+                    .unwrap_or(false);
+                match (a_is_current, b_is_current) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => arr_a.cmp(arr_b),
+                }
+            });
         }
-    });
+        GamePhase::MultiPlayerSubmit { .. } => {
+            // 多玩家阶段：按 (phase_kind, arrival) 排序
+            // 同一 game 的 phase_kind 恒定，等价于按 arrival 顺序稳定排序
+            // （多玩家阶段 current_turn 返回 None，不使用 current_turn 优先级）
+            filtered.sort_by_key(|(arr, _)| *arr);
+        }
+    }
 
     let arrival_order: Vec<u64> = filtered.iter().map(|(arr, _)| *arr).collect();
     let sorted_txs: Vec<Transaction> = filtered.into_iter().map(|(_, tx)| tx).collect();
@@ -268,18 +275,20 @@ pub fn build_game_sub_block(
 /// 1. tx 通道与路由提示一致（`validate_lane_route`）
 /// 2. GameTurn 通道免 gas（`gas == Gas::zero()`）
 /// 3. 正常 GameTurn tx 不得设 `is_fallback = true`（SEC-H7）
-/// 4. 轮转约束（`validate_turn_order`）
+/// 4. 阶段感知轮转约束（`validate_game_turn_phase_aware`）：
+///    - Betting 阶段：`current_turn_player` 匹配
+///    - MultiPlayerSubmit 阶段：`pending_submitters` 校验
 ///
 /// 买入锁仓校验属 Phase 3 合约层，本函数不涉及。
 ///
 /// 参数：
 /// - `tx`：待校验交易
-/// - `game`：Game 状态
+/// - `game`：Game 状态（`&mut` 用于多玩家阶段更新 pending_submitters）
 /// - `actor`：tx 签名者派生地址
 /// - `turn_rule`：轮转规则
 pub fn validate_game_turn_tx(
     tx: &Transaction,
-    game: &GameStatus,
+    game: &mut GameStatus,
     actor: crate::Address,
     turn_rule: &dyn TurnRule,
 ) -> PokerL1Result<()> {
@@ -296,8 +305,8 @@ pub fn validate_game_turn_tx(
         return Err(PokerL1Error::InvalidFallbackFlag);
     }
 
-    // 4. 轮转约束（含 fallback tx 仍按 GameTurn 通道语义校验，R3-H5）
-    crate::consensus::validate_turn_order(tx, game, actor, turn_rule)?;
+    // 4. 阶段感知轮转约束（Betting: current_turn 匹配；MultiPlayerSubmit: pending_submitters 校验）
+    crate::consensus::validate_game_turn_phase_aware(tx, game, actor, turn_rule)?;
 
     Ok(())
 }
@@ -361,33 +370,40 @@ pub fn sort_commit_txs_r4m4(commit_vertex_txs: Vec<Vec<Transaction>>) -> Vec<Tra
     sort_vertex_txs_s9(aggregated)
 }
 
-/// SEC-H6 跨 commit force_advance 抢跑防护校验（SubTask 8.6）。
+/// SEC-H6 跨 commit force_advance 抢跑防护校验（SubTask 8.6 / Phase 5 Task 10）。
 ///
 /// spec SEC-H6 修复：跨 commit（不同 block）的 force_advance 判定需额外校验 —
 /// force_advance 所在 commit 的前一个 commit 内是否有该 Game 的 GameTurn tx，
 /// 若有则 `last_action_height` 视为已更新，force_advance 判定为 false 被拒绝。
+///
+/// **Phase 5 Task 10 扩展**：覆盖 [`GamePhase::MultiPlayerSubmit`] 阶段 —
+/// 多玩家阶段（Shuffle / RevealToken / Reconstruct / LeaveProof）的 GameTurn tx
+/// 同样视为更新 `last_action_height`，前一 commit 有此类 tx 时 force_advance 被拒绝。
 ///
 /// 参数：
 /// - `prev_commit_game_turns`：前一个 commit 内该 Game 的 GameTurn tx 列表
 ///   （空表示前一 commit 无该 Game 的 GameTurn tx）
 /// - `force_advance_game_id`：force_advance tx 涉及的 Game ID
 /// - `game_id`：待校验的 Game ID（应与 force_advance_game_id 一致）
+/// - `game_phase`：当前 Game 阶段（Betting 或 MultiPlayerSubmit）
 ///
 /// 返回 `Ok(())` 表示 force_advance 可执行；`Err` 表示被 SEC-H6 拒绝。
 pub fn check_sech6_cross_commit_force_advance(
     prev_commit_game_turns: &[Transaction],
     force_advance_game_id: &crate::object_model::ObjectID,
     game_id: &crate::object_model::ObjectID,
+    game_phase: &GamePhase,
 ) -> PokerL1Result<()> {
     // Game ID 一致性校验
     if force_advance_game_id != game_id {
         return Err(PokerL1Error::GameNotFound(*force_advance_game_id));
     }
     // SEC-H6：前一 commit 有该 Game 的 GameTurn tx → last_action_height 视为已更新
+    // 覆盖 Betting 与 MultiPlayerSubmit 阶段：多玩家阶段的提交 tx 同样更新 last_action_height
     if !prev_commit_game_turns.is_empty() {
         return Err(PokerL1Error::Other(format!(
-            "SEC-H6: force_advance rejected — prev commit has GameTurn txs for game {:?}",
-            game_id
+            "SEC-H6: force_advance rejected — prev commit has GameTurn txs for game {:?} (phase={:?})",
+            game_id, game_phase
         )));
     }
     Ok(())
@@ -574,6 +590,10 @@ mod tests {
             hand_start_height: 90,
             execution_mode: ExecutionMode::OnChain,
             is_finalized: false,
+            phase: crate::consensus::GamePhase::default_phase(),
+            pending_submitters: BTreeSet::new(),
+            phase_started_height: 0,
+            completed_submitters: BTreeSet::new(),
         };
         (game, assigned_tp)
     }
@@ -753,6 +773,10 @@ mod tests {
             hand_start_height: 90,
             execution_mode: ExecutionMode::OnChain,
             is_finalized: false,
+            phase: crate::consensus::GamePhase::default_phase(),
+            pending_submitters: BTreeSet::new(),
+            phase_started_height: 0,
+            completed_submitters: BTreeSet::new(),
         };
         let rule = SimpleTurnRule;
         // arrival 顺序：0x20 先到（nonce=1），0x10 后到（nonce=2）
@@ -793,6 +817,23 @@ mod tests {
         assert_eq!(sub.txs.len(), 1, "仅保留 GameTurn 通道 tx");
     }
 
+    #[test]
+    fn build_game_sub_block_multi_player_submit_sorts_by_arrival() {
+        // 多玩家阶段：不使用 current_turn 优先级，按 arrival 顺序排序
+        let (mut game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        game.phase = crate::consensus::GamePhase::MultiPlayerSubmit {
+            kind: crate::consensus::SubmitPhaseKind::Shuffle,
+        };
+        let rule = SimpleTurnRule;
+        // arrival 顺序：0x20 先到（nonce=1），0x10 后到（nonce=2）
+        // current_turn_player=0x10，但多玩家阶段不应优先
+        let txs = vec![make_gameturn_tx(0x20, 1, false), make_gameturn_tx(0x10, 2, false)];
+        let sub = build_game_sub_block(txs, &game, &rule).expect("构造 sub-block");
+        // 多玩家阶段按 arrival 顺序：0x20（nonce=1）在前，0x10（nonce=2）在后
+        assert_eq!(sub.txs[0].gameturn_nonce, Some(1));
+        assert_eq!(sub.txs[1].gameturn_nonce, Some(2));
+    }
+
     // ===== validate_game_turn_tx / validate_gameturn_gas_free 测试 =====
 
     #[test]
@@ -817,30 +858,30 @@ mod tests {
 
     #[test]
     fn validate_game_turn_tx_ok_for_current_player() {
-        let (game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        let (mut game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
         let rule = SimpleTurnRule;
         let tx = make_gameturn_tx(0x10, 1, false);
-        validate_game_turn_tx(&tx, &game, [0x10; 20], &rule)
+        validate_game_turn_tx(&tx, &mut game, [0x10; 20], &rule)
             .expect("当前轮次玩家 GameTurn tx 应通过");
     }
 
     #[test]
     fn validate_game_turn_tx_rejects_wrong_player() {
-        let (game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        let (mut game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
         let rule = SimpleTurnRule;
         let tx = make_gameturn_tx(0x20, 1, false);
-        let err = validate_game_turn_tx(&tx, &game, [0x20; 20], &rule).unwrap_err();
+        let err = validate_game_turn_tx(&tx, &mut game, [0x20; 20], &rule).unwrap_err();
         assert!(matches!(err, PokerL1Error::NotYourTurn { .. }));
     }
 
     #[test]
     fn validate_game_turn_tx_rejects_gameturn_lane_with_fallback_flag() {
         // SEC-H7：GameTurn 通道 tx 不得设置 is_fallback = true
-        let (game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
+        let (mut game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
         let rule = SimpleTurnRule;
         let mut tx = make_gameturn_tx(0x10, 1, false);
         tx.is_fallback = true; // 错误：GameTurn 通道不应设置 fallback 标识
-        let err = validate_game_turn_tx(&tx, &game, [0x10; 20], &rule).unwrap_err();
+        let err = validate_game_turn_tx(&tx, &mut game, [0x10; 20], &rule).unwrap_err();
         assert!(matches!(err, PokerL1Error::InvalidFallbackFlag));
     }
 
@@ -920,7 +961,8 @@ mod tests {
     fn check_sech6_ok_when_prev_commit_has_no_gameturn() {
         let game_id = ObjectID::new([0xAA; 20], 1);
         let prev_turns: Vec<Transaction> = vec![];
-        check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id)
+        let phase = crate::consensus::GamePhase::default_phase();
+        check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
             .expect("前一 commit 无 GameTurn → force_advance 可执行");
     }
 
@@ -928,7 +970,8 @@ mod tests {
     fn check_sech6_rejects_when_prev_commit_has_gameturn() {
         let game_id = ObjectID::new([0xAA; 20], 1);
         let prev_turns = vec![make_gameturn_tx(0x10, 1, false)];
-        let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id)
+        let phase = crate::consensus::GamePhase::default_phase();
+        let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
             .unwrap_err();
         assert!(matches!(err, PokerL1Error::Other(_)));
     }
@@ -938,9 +981,35 @@ mod tests {
         let game_id_a = ObjectID::new([0xAA; 20], 1);
         let game_id_b = ObjectID::new([0xBB; 20], 1);
         let prev_turns: Vec<Transaction> = vec![];
-        let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id_a, &game_id_b)
+        let phase = crate::consensus::GamePhase::default_phase();
+        let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id_a, &game_id_b, &phase)
             .unwrap_err();
         assert!(matches!(err, PokerL1Error::GameNotFound(_)));
+    }
+
+    #[test]
+    fn check_sech6_rejects_multi_player_submit_with_prev_gameturn() {
+        // Phase 5 Task 10：多玩家阶段前一 commit 有 GameTurn tx → force_advance 被拒绝
+        let game_id = ObjectID::new([0xAA; 20], 1);
+        let prev_turns = vec![make_gameturn_tx(0x10, 1, false)];
+        let phase = crate::consensus::GamePhase::MultiPlayerSubmit {
+            kind: crate::consensus::SubmitPhaseKind::Shuffle,
+        };
+        let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
+            .unwrap_err();
+        assert!(matches!(err, PokerL1Error::Other(_)));
+    }
+
+    #[test]
+    fn check_sech6_ok_for_multi_player_submit_without_prev_gameturn() {
+        // 多玩家阶段前一 commit 无 GameTurn tx → force_advance 可执行
+        let game_id = ObjectID::new([0xAA; 20], 1);
+        let prev_turns: Vec<Transaction> = vec![];
+        let phase = crate::consensus::GamePhase::MultiPlayerSubmit {
+            kind: crate::consensus::SubmitPhaseKind::RevealToken,
+        };
+        check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
+            .expect("多玩家阶段前一 commit 无 GameTurn → force_advance 可执行");
     }
 
     // ===== TimeoutProof + validate_fallback_tx 测试 =====

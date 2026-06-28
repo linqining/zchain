@@ -17,9 +17,9 @@ pub mod validator;
 // 重新导出 time_consensus 公开 API，便于上层直接 `block::TimeConsensusConfig` 等使用。
 pub use time_consensus::{
     epoch_of, in_epoch_transition_window, is_da_window_passed, is_dispute_window_passed,
-    is_epoch_boundary, is_hand_timeout, is_turn_timeout, is_validator_timeout,
-    should_submit_checkpoint, validate_block_time, verify_block_header_quorum,
-    LightClientVerifyRequest, TimeConsensusConfig,
+    is_epoch_boundary, is_hand_timeout, is_submit_phase_timed_out, is_turn_timeout,
+    is_validator_timeout, should_submit_checkpoint, validate_block_time,
+    verify_block_header_quorum, LightClientVerifyRequest, TimeConsensusConfig,
 };
 
 // 重新导出 validator 模块公开 API（Task 10）。

@@ -1572,7 +1572,10 @@ dependencies = [
 name = "zchain"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "poker_l1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -619,6 +619,10 @@ mod tests {
             hand_start_height: 0,
             execution_mode: ExecutionMode::OffChain,
             is_finalized: false,
+            phase: crate::consensus::GamePhase::default_phase(),
+            pending_submitters: BTreeSet::new(),
+            phase_started_height: 0,
+            completed_submitters: BTreeSet::new(),
         }
     }
 

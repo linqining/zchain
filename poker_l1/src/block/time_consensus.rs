@@ -103,6 +103,27 @@ pub struct TimeConsensusConfig {
     /// OffChain 模式 Game 操作方须在 epoch 边界前此窗口内提交 `checkpoint_anchor`。
     /// 默认 10 block。
     pub epoch_transition_window_blocks: u64,
+
+    /// Shuffle 阶段超时（block 数，spec Phase 4 Task 7）。
+    ///
+    /// 多玩家提交阶段 `SubmitPhaseKind::Shuffle` 的最大持续 block 数。
+    /// 超出 → `pending_submitters` 中的玩家被 kick + 退款。
+    /// 默认 100 block。
+    pub shuffle_timeout_blocks: u64,
+
+    /// RevealToken 阶段超时（block 数，spec Phase 4 Task 7）。
+    ///
+    /// 多玩家提交阶段 `SubmitPhaseKind::RevealToken` 的最大持续 block 数。
+    /// 超出 → `pending_submitters` 中的玩家被 kick + 退款。
+    /// 默认 50 block。
+    pub reveal_token_timeout_blocks: u64,
+
+    /// Reconstruct 阶段超时（block 数，spec Phase 4 Task 7）。
+    ///
+    /// 多玩家提交阶段 `SubmitPhaseKind::Reconstruct` 的最大持续 block 数。
+    /// 超出 → `pending_submitters` 中的玩家被 kick + 退款。
+    /// 默认 100 block。
+    pub reconstruct_timeout_blocks: u64,
 }
 
 impl Default for TimeConsensusConfig {
@@ -118,6 +139,9 @@ impl Default for TimeConsensusConfig {
             game_validator_timeout_blocks: 50,
             epoch_length_blocks: 1000,
             epoch_transition_window_blocks: 10,
+            shuffle_timeout_blocks: 100,
+            reveal_token_timeout_blocks: 50,
+            reconstruct_timeout_blocks: 100,
         }
     }
 }
@@ -136,6 +160,9 @@ impl TimeConsensusConfig {
             game_validator_timeout_blocks: 50,
             epoch_length_blocks: 1000,
             epoch_transition_window_blocks: 10,
+            shuffle_timeout_blocks: 100,
+            reveal_token_timeout_blocks: 50,
+            reconstruct_timeout_blocks: 100,
         }
     }
 }
@@ -250,6 +277,76 @@ pub const fn is_hand_timeout(
     config: &TimeConsensusConfig,
 ) -> bool {
     current_height > hand_start_height + config.hand_max_duration_blocks
+}
+
+/// 判定多玩家提交阶段是否超时（spec Phase 4 Task 7.2）。
+///
+/// SEC-M5 安全约束：以 `block.height` 为权威，禁止以 `timestamp_ms` 触发。
+///
+/// 根据当前 [`GameStatus::phase`] 选择对应超时阈值：
+/// - `Betting { .. }`：下注阶段不走此超时，返回 `None`
+/// - `MultiPlayerSubmit { kind: Shuffle }`：使用 `shuffle_timeout_blocks`
+/// - `MultiPlayerSubmit { kind: RevealToken }`：使用 `reveal_token_timeout_blocks`
+/// - `MultiPlayerSubmit { kind: Reconstruct }`：使用 `reconstruct_timeout_blocks`
+/// - `MultiPlayerSubmit { kind: LeaveProof }`：LeaveProof 为被动行为，不超时，返回 `None`
+///
+/// 超时判定使用严格大于 `>`：
+/// `current_height > phase_started_height + timeout_blocks` → 返回 `Some(kind)`
+/// 边界 `current_height == phase_started_height + timeout_blocks` 视为未超时。
+///
+/// 使用 `checked_add` 防 overflow，溢出返回 `None`（保守不超时，避免误 kick）。
+///
+/// 参数：
+/// - `game`：当前 Game 状态（消费 `phase` / `phase_started_height`）
+/// - `current_height`：当前链 tip height
+/// - `config`：时间共识配置
+///
+/// 返回 `Some(SubmitPhaseKind)` 表示对应阶段已超时；`None` 表示未超时或不适用此判定。
+pub fn is_submit_phase_timed_out(
+    game: &crate::consensus::GameStatus,
+    current_height: crate::BlockHeight,
+    config: &TimeConsensusConfig,
+) -> Option<crate::consensus::SubmitPhaseKind> {
+    use crate::consensus::{GamePhase, SubmitPhaseKind};
+
+    match game.phase {
+        // 下注阶段不走此超时
+        GamePhase::Betting { .. } => None,
+        GamePhase::MultiPlayerSubmit { kind } => match kind {
+            SubmitPhaseKind::Shuffle => {
+                let deadline = game
+                    .phase_started_height
+                    .checked_add(config.shuffle_timeout_blocks)?;
+                if current_height > deadline {
+                    Some(SubmitPhaseKind::Shuffle)
+                } else {
+                    None
+                }
+            }
+            SubmitPhaseKind::RevealToken => {
+                let deadline = game
+                    .phase_started_height
+                    .checked_add(config.reveal_token_timeout_blocks)?;
+                if current_height > deadline {
+                    Some(SubmitPhaseKind::RevealToken)
+                } else {
+                    None
+                }
+            }
+            SubmitPhaseKind::Reconstruct => {
+                let deadline = game
+                    .phase_started_height
+                    .checked_add(config.reconstruct_timeout_blocks)?;
+                if current_height > deadline {
+                    Some(SubmitPhaseKind::Reconstruct)
+                } else {
+                    None
+                }
+            }
+            // LeaveProof 为被动行为，不超时
+            SubmitPhaseKind::LeaveProof => None,
+        },
+    }
 }
 
 /// 判定 block 是否已过 DA 窗口（SubTask 11.3）。
@@ -684,5 +781,196 @@ mod tests {
     #[test]
     fn config_default_matches_new() {
         assert_eq!(TimeConsensusConfig::default(), TimeConsensusConfig::new());
+    }
+
+    // ===== Phase 4 Task 7: 多玩家阶段超时配置默认值测试 =====
+
+    #[test]
+    fn config_default_phase4_timeouts() {
+        let cfg = TimeConsensusConfig::default();
+        assert_eq!(cfg.shuffle_timeout_blocks, 100);
+        assert_eq!(cfg.reveal_token_timeout_blocks, 50);
+        assert_eq!(cfg.reconstruct_timeout_blocks, 100);
+        // new() 与 default() 一致
+        let cfg2 = TimeConsensusConfig::new();
+        assert_eq!(cfg, cfg2);
+    }
+
+    // ===== Phase 4 Task 7.2 / 7.3: is_submit_phase_timed_out 测试 =====
+
+    /// 构造测试用 GameStatus（仅 phase / phase_started_height 字段有意义，其余为默认值）。
+    fn make_game_status(
+        phase: crate::consensus::GamePhase,
+        phase_started_height: u64,
+    ) -> crate::consensus::GameStatus {
+        use crate::consensus::{ExecutionMode, GameStatus};
+        use crate::object_model::ObjectID;
+        use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+        use crate::signature::TaggedPubkey;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let assigned_tp = TaggedPubkey {
+            tag: encode_tag(SignatureScheme::Secp256k1, 1),
+            raw: vec![0x02u8; 33],
+        };
+        GameStatus {
+            id: ObjectID::new([0xAA; 20], 1),
+            assigned_validator: assigned_tp,
+            current_turn_player: [0x10; 20],
+            active_participants: BTreeSet::from([[0x10; 20], [0x20; 20], [0x30; 20]]),
+            player_nonce: BTreeMap::new(),
+            last_action_height: 100,
+            hand_start_height: 90,
+            execution_mode: ExecutionMode::OnChain,
+            is_finalized: false,
+            phase,
+            pending_submitters: BTreeSet::new(),
+            phase_started_height,
+            completed_submitters: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_shuffle_just_timed_out() {
+        // Shuffle 阶段恰好超时：current = phase_started + shuffle_timeout + 1 → Some(Shuffle)
+        use crate::consensus::{GamePhase, SubmitPhaseKind};
+        let cfg = default_config();
+        // shuffle_timeout_blocks = 100
+        let game = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            1000,
+        );
+        // 边界：1000 + 100 = 1100，current=1100 不超时（`>` 严格大于）
+        assert_eq!(is_submit_phase_timed_out(&game, 1100, &cfg), None);
+        // 恰好超时：current=1101
+        assert_eq!(
+            is_submit_phase_timed_out(&game, 1101, &cfg),
+            Some(SubmitPhaseKind::Shuffle)
+        );
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_shuffle_within_window() {
+        // Shuffle 阶段未超时：current = phase_started + shuffle_timeout → None（边界不超时）
+        use crate::consensus::{GamePhase, SubmitPhaseKind};
+        let cfg = default_config();
+        let game = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            1000,
+        );
+        // current = 1000 + 100 = 1100，边界视为未超时
+        assert_eq!(is_submit_phase_timed_out(&game, 1100, &cfg), None);
+        // 更早的时间更不超时
+        assert_eq!(is_submit_phase_timed_out(&game, 1050, &cfg), None);
+        assert_eq!(is_submit_phase_timed_out(&game, 1000, &cfg), None);
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_reveal_token_timed_out() {
+        // RevealToken 阶段超时：current > phase_started + 50 → Some(RevealToken)
+        use crate::consensus::{GamePhase, SubmitPhaseKind};
+        let cfg = default_config();
+        let game = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken },
+            2000,
+        );
+        // 边界：2000 + 50 = 2050，current=2050 不超时
+        assert_eq!(is_submit_phase_timed_out(&game, 2050, &cfg), None);
+        // current=2051 超时
+        assert_eq!(
+            is_submit_phase_timed_out(&game, 2051, &cfg),
+            Some(SubmitPhaseKind::RevealToken)
+        );
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_reconstruct_timed_out() {
+        // Reconstruct 阶段超时：current > phase_started + 100 → Some(Reconstruct)
+        use crate::consensus::{GamePhase, SubmitPhaseKind};
+        let cfg = default_config();
+        let game = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Reconstruct },
+            3000,
+        );
+        // 边界：3000 + 100 = 3100，current=3100 不超时
+        assert_eq!(is_submit_phase_timed_out(&game, 3100, &cfg), None);
+        // current=3101 超时
+        assert_eq!(
+            is_submit_phase_timed_out(&game, 3101, &cfg),
+            Some(SubmitPhaseKind::Reconstruct)
+        );
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_leave_proof_never_times_out() {
+        // LeaveProof 阶段从不超时：任何高度都返回 None
+        use crate::consensus::{GamePhase, SubmitPhaseKind};
+        let cfg = default_config();
+        let game = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof },
+            1000,
+        );
+        assert_eq!(is_submit_phase_timed_out(&game, 1000, &cfg), None);
+        assert_eq!(is_submit_phase_timed_out(&game, 5000, &cfg), None);
+        assert_eq!(is_submit_phase_timed_out(&game, u64::MAX, &cfg), None);
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_betting_never_times_out() {
+        // Betting 阶段从不走此超时：任何高度都返回 None
+        use crate::consensus::{BettingRound, GamePhase};
+        let cfg = default_config();
+        let game = make_game_status(
+            GamePhase::Betting { round: BettingRound::Preflop },
+            1000,
+        );
+        assert_eq!(is_submit_phase_timed_out(&game, 1000, &cfg), None);
+        assert_eq!(is_submit_phase_timed_out(&game, 100_000, &cfg), None);
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_overflow_returns_none() {
+        // overflow 场景：phase_started_height + timeout_blocks 溢出 → 返回 None（保守不超时）
+        use crate::consensus::{GamePhase, SubmitPhaseKind};
+        let cfg = default_config();
+        // 构造 phase_started_height = u64::MAX，任何 timeout_blocks > 0 都会溢出
+        let game = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            u64::MAX,
+        );
+        // shuffle_timeout_blocks = 100，u64::MAX + 100 溢出 → None
+        assert_eq!(is_submit_phase_timed_out(&game, u64::MAX, &cfg), None);
+        // RevealToken / Reconstruct 同理
+        let game_rt = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken },
+            u64::MAX,
+        );
+        assert_eq!(is_submit_phase_timed_out(&game_rt, u64::MAX, &cfg), None);
+        let game_rc = make_game_status(
+            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Reconstruct },
+            u64::MAX,
+        );
+        assert_eq!(is_submit_phase_timed_out(&game_rc, u64::MAX, &cfg), None);
+    }
+
+    #[test]
+    fn is_submit_phase_timed_out_betting_all_rounds_no_timeout() {
+        // 覆盖所有 BettingRound，确认下注阶段任意 round 都不超时
+        use crate::consensus::{BettingRound, GamePhase};
+        let cfg = default_config();
+        for round in [
+            BettingRound::Preflop,
+            BettingRound::Flop,
+            BettingRound::Turn,
+            BettingRound::River,
+            BettingRound::Showdown,
+        ] {
+            let game = make_game_status(GamePhase::Betting { round }, 100);
+            assert_eq!(
+                is_submit_phase_timed_out(&game, 1_000_000, &cfg),
+                None,
+                "Betting::{round:?} 不应超时"
+            );
+        }
     }
 }
