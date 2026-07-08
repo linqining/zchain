@@ -21,6 +21,91 @@ pub const SCHEME_HYPERNOVA: SchemeId = 1;
 pub const SCHEME_GROTH16: SchemeId = 2;
 /// IPA scheme_id（spec.md L511）。
 pub const SCHEME_IPA: SchemeId = 3;
+/// ZkShuffle scheme_id（v1.2 spec.md L766 — `ProofKind::ZkShuffle → SCHEME_ZKSHUFFLE`）。
+///
+/// grace 期后 `scheme_id=4` 走既有 ZkShuffle Production verifier（非 stub、非 Hypernova）。
+pub const SCHEME_ZKSHUFFLE: SchemeId = 4;
+
+/// Proof kind（v1.2 spec.md L765-767 — 与 `scheme_id` 双向映射）。
+///
+/// M2-004 修复：单个 CheckinTx 同一时刻仅有一种合法签名形式（由 `scheme_id` 决定）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofKind {
+    /// ZkShuffle 旧 proof（对应 `SCHEME_ZKSHUFFLE = 4`）。
+    ///
+    /// grace 期内走 stub 路径，签名形式为旧签名（无 `proof_kind` 字段）。
+    ZkShuffle,
+    /// Zkvm 新 proof（对应 `SCHEME_HYPERNOVA = 1`）。
+    ///
+    /// 强制走 Production 路径，签名形式为新签名（含 `proof_kind` 字段）。
+    Zkvm,
+}
+
+impl ProofKind {
+    /// 由 `scheme_id` 反推期望的 `ProofKind`（spec.md L768）。
+    ///
+    /// 不匹配的 `scheme_id` 返回 `None`（调用方应返回 `ProofKindMismatch` 错误）。
+    #[must_use]
+    pub const fn from_scheme_id(scheme_id: SchemeId) -> Option<Self> {
+        match scheme_id {
+            SCHEME_ZKSHUFFLE => Some(Self::ZkShuffle),
+            SCHEME_HYPERNOVA => Some(Self::Zkvm),
+            _ => None,
+        }
+    }
+
+    /// 是否为新签名形式（含 `proof_kind` 字段）— M2-004。
+    ///
+    /// - `ZkShuffle` → 旧签名（无 `proof_kind` 字段）
+    /// - `Zkvm` → 新签名（含 `proof_kind` 字段）
+    #[must_use]
+    pub const fn expects_new_signature(self) -> bool {
+        matches!(self, Self::Zkvm)
+    }
+}
+
+/// ZK 验证上下文（Phase 8 — v1.2 双通道 grace period + M2-003/004 所需的链上状态）。
+///
+/// `HypernovaVerifier::verify_with_context` 接收此上下文以实现：
+/// - **grace period 双通道**：根据 `production_switch_height` + `current_height` 判定是否在 grace 期内
+/// - **M2-003**：`last_partial_fold.proof_partial_hash` 链上不可变校验
+/// - **M2-004**：签名形式与 `scheme_id` 一致性校验
+#[derive(Debug, Clone, Default)]
+pub struct ZkVerifyContext<'a> {
+    /// 当前 block height（用于判定 grace 期是否结束）。
+    pub current_height: u64,
+    /// `production_switch_height`（治理切换时写入；0 表示尚未切换）。
+    pub production_switch_height: u64,
+    /// `PRODUCTION_GRACE_BLOCKS` 常量（默认 7200；测试可覆盖）。
+    pub grace_blocks: u64,
+    /// 链上已存的 `last_partial_fold.proof_partial_hash`（M2-003 校验用）。
+    ///
+    /// `None` 表示尚未写入；`Some(hash)` 表示已写入且不可变。
+    /// grace 期内 `proof_kind = ZkShuffle` 的 stub 路径要求 `proof_hash` 匹配此值。
+    pub last_partial_proof_hash: Option<&'a crate::Hash>,
+    /// 是否使用新签名形式（含 `proof_kind` 字段）— M2-004。
+    ///
+    /// 由调用方根据 CheckinTx 签名结构判定后传入。
+    pub uses_new_signature: bool,
+}
+
+impl<'a> ZkVerifyContext<'a> {
+    /// 是否处于 grace 期内（`production_switch_height > 0` 且
+    /// `current_height <= production_switch_height + grace_blocks`）。
+    #[must_use]
+    pub fn in_grace_period(&self) -> bool {
+        self.production_switch_height > 0
+            && self.current_height <= self.production_switch_height.saturating_add(self.grace_blocks)
+    }
+
+    /// grace 期是否已结束（`production_switch_height > 0` 且
+    /// `current_height > production_switch_height + grace_blocks`）。
+    #[must_use]
+    pub fn grace_period_ended(&self) -> bool {
+        self.production_switch_height > 0
+            && self.current_height > self.production_switch_height.saturating_add(self.grace_blocks)
+    }
+}
 
 /// Verifier 状态（NEW-C1，spec.md L853–857）。
 ///
@@ -197,6 +282,28 @@ pub trait ZkVerifier: Send + Sync {
         status: VerifierStatus,
     ) -> Result<bool, PokerL1Error>;
 
+    /// 带 grace period 上下文的验证（Phase 8 SubTask 8.2.3-8.2.7）。
+    ///
+    /// 默认实现委托到 [`verify`](Self::verify)，不参与 grace period 双通道。
+    /// Hypernova verifier 覆写此方法以实现：
+    /// - grace 期内 `proof_kind = ZkShuffle` 旧 proof 走 stub 路径（须匹配 `proof_partial_hash`）
+    /// - grace 期内 `proof_kind = Zkvm` 新 proof 强制 Production 路径
+    /// - grace 期结束后所有 proof 强制 Production 路径
+    /// - M2-004 签名形式与 `scheme_id` 一致性校验
+    ///
+    /// # 参数
+    /// - `ctx`：grace period + M2-003/004 所需的链上状态上下文
+    fn verify_with_context(
+        &self,
+        proof: &[u8],
+        public_io: &ZkPublicIo,
+        status: VerifierStatus,
+        ctx: &ZkVerifyContext<'_>,
+    ) -> Result<bool, PokerL1Error> {
+        let _ = ctx;
+        self.verify(proof, public_io, status)
+    }
+
     /// 校验 proof 格式（不实际验证）。
     ///
     /// Stub 状态下仅调用此方法。
@@ -299,6 +406,47 @@ impl ZkVerifierRegistry {
 
         // 验证 proof
         let verified = verifier.verify(proof, public_io, status)?;
+
+        Ok(ZkVerifyResult {
+            verified,
+            verifier_status: status,
+            scheme_id,
+        })
+    }
+
+    /// 带 grace period 上下文的 `zk_verify` 入口（Phase 8 SubTask 8.2.3-8.2.7）。
+    ///
+    /// 与 [`zk_verify`](Self::zk_verify) 的差异：
+    /// - 委托到 `verifier.verify_with_context`，传入 `ZkVerifyContext`
+    /// - Hypernova verifier 据此实现 grace period 双通道 + M2-003/004 校验
+    ///
+    /// # 参数
+    /// - `ctx`：grace period + M2-003/004 所需的链上状态上下文
+    pub fn zk_verify_with_context(
+        &self,
+        chain_id: crate::ChainId,
+        scheme_id: SchemeId,
+        proof: &[u8],
+        public_io: &ZkPublicIo,
+        max_skip_segments: u32,
+        max_ack_chain_length: u32,
+        ctx: &ZkVerifyContext<'_>,
+    ) -> Result<ZkVerifyResult, PokerL1Error> {
+        let verifier = self
+            .verifiers
+            .get(&scheme_id)
+            .ok_or(PokerL1Error::ZkVerifierNotRegistered(scheme_id))?;
+
+        let status = self.verifier_status(chain_id);
+
+        // 校验 public_io 边界（O15 + SubTask 27.11）
+        public_io.validate(max_skip_segments, max_ack_chain_length)?;
+
+        // 校验 proof 格式（无论 Stub/Production 都校验）
+        verifier.validate_proof_format(proof)?;
+
+        // 验证 proof（带 context）
+        let verified = verifier.verify_with_context(proof, public_io, status, ctx)?;
 
         Ok(ZkVerifyResult {
             verified,

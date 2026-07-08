@@ -333,13 +333,19 @@ pub fn execute_checkin(
     )
 }
 
-/// 处理 partial_checkin tx（SubTask 28.7a）。
+/// 处理 partial_checkin tx（SubTask 28.7a + Phase 8 M2-003）。
 ///
 /// 返回更新后的 `LastPartialFold`。
 ///
 /// # 校验
 /// - `folded_step_count` 严格大于上一次记录（SEC-H1）
 /// - 链上 verifier 验证 π_partial（Stub 状态下仅校验格式）
+/// - **v1.3 M2-003**：`last_partial_fold.proof_partial_hash` 链上不可变约束
+///   - 首次设置（`proof_partial_hash == None`）允许
+///   - 幂等重提交（整个 `PartialCheckinTx` 内容幂等）允许
+///   - 覆盖已有值返回 `PartialFoldHashImmutable` 错误
+/// - **v1.4 Min3-003**：幂等重提交范围 = 整个 `PartialCheckinTx` 内容幂等
+///   （`proof_partial_hash` + `intermediate_commitment` + `ack_chain_partial` 全部相等）
 #[allow(clippy::too_many_arguments)] // 8 参数均为 spec 要求的安全校验参数
 pub fn execute_partial_checkin(
     tx: &PartialCheckinTx,
@@ -359,7 +365,30 @@ pub fn execute_partial_checkin(
         });
     }
 
-    // SEC-H1：进度校验
+    // v1.3 M2-003 + v1.4 Min3-003：proof_partial_hash 链上不可变 + 幂等重提交范围校验
+    // 注：幂等重提交校验须在进度校验之前，因幂等重提交时 folded_step_count 相等
+    if let Some(prev) = last_partial_fold {
+        let tx_proof_partial_hash = tx.proof_partial_hash();
+        if prev.proof_partial_hash == tx_proof_partial_hash {
+            // proof_partial_hash 匹配 — 须为整个 PartialCheckinTx 内容幂等（Min3-003）
+            if prev.intermediate_commitment == tx.intermediate_commitment
+                && prev.ack_chain_partial_hash == tx.ack_chain_partial_hash()
+                && prev.folded_step_count == tx.folded_step_count
+            {
+                // 完全幂等重提交 — 允许，返回链上已存值
+                return Ok(prev.clone());
+            }
+            // proof_partial_hash 匹配但其他字段不一致 — 视为覆盖，拒绝（Min3-003）
+            return Err(PokerL1Error::PartialFoldHashImmutable);
+        } else {
+            // proof_partial_hash 不匹配 — 覆盖已有值，拒绝（M2-003）
+            // spec：last_partial_fold.proof_partial_hash 一旦写入即冻结，
+            // 后续 PartialCheckinTx 不允许覆盖已存的 proof_partial_hash 字段
+            return Err(PokerL1Error::PartialFoldHashImmutable);
+        }
+    }
+
+    // SEC-H1：进度校验（仅首次设置时执行，因 prev 已在上方处理）
     if let Some(prev) = last_partial_fold
         && tx.folded_step_count <= prev.folded_step_count {
             return Err(PokerL1Error::NoProgressPartialCheckin {
@@ -397,7 +426,7 @@ pub fn execute_partial_checkin(
         ));
     }
 
-    // 记录 last_partial_fold
+    // 记录 last_partial_fold（首次设置 proof_partial_hash）
     Ok(LastPartialFold {
         intermediate_commitment: tx.intermediate_commitment,
         folded_step_count: tx.folded_step_count,
@@ -750,6 +779,8 @@ mod tests {
 
     #[test]
     fn test_execute_partial_checkin_no_progress() {
+        // Phase 8 M2-003 修正：proof_partial_hash 不匹配时优先返回 PartialFoldHashImmutable
+        // （M2-003 不可变约束比 SEC-H1 进度校验更严格）
         let registry = make_registry_with_all_verifiers();
         let last = LastPartialFold {
             intermediate_commitment: [0xBB; 32],
@@ -759,7 +790,7 @@ mod tests {
         };
         let tx = PartialCheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
-            proof_partial: vec![0xAA; 64],
+            proof_partial: vec![0xAA; 64], // hash 不匹配 [0xAA; 32]
             folded_step_count: 5, // 不大于上一次
             intermediate_commitment: [0xBB; 32],
             ack_chain_partial: vec![make_ack_entry(1)],
@@ -776,7 +807,8 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
         );
-        assert!(matches!(result, Err(PokerL1Error::NoProgressPartialCheckin { .. })));
+        // M2-003：proof_partial_hash 不匹配 → PartialFoldHashImmutable（优先于 NoProgressPartialCheckin）
+        assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
     }
 
     #[test]

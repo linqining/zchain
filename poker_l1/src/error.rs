@@ -608,6 +608,41 @@ pub enum PokerL1Error {
     /// 轻客户端 block header 订阅：签名不足 2/3 quorum（SubTask 30.4）。
     #[error("light client header quorum insufficient: actual={actual}, required={required}")]
     LightClientQuorumInsufficient { actual: usize, required: usize },
+
+    // ===== Phase 8: 链上 Verifier Production 相关（SubTask 8.2.2） =====
+    /// 外层 sumcheck 验证失败（G(r_x_L) != u'）。
+    #[error("sumcheck verification failed: G(r_x_L) != u'")]
+    SumcheckVerificationFailed,
+    /// cross-language claim 验证失败（u'/v'/z_at_point 链断裂）。
+    #[error("cross-language claim verification failed")]
+    CrossLanguageClaimFailed,
+    /// transcript 一致性校验失败（challenge 派生顺序不匹配）。
+    #[error("transcript consistency mismatch")]
+    TranscriptMismatch,
+    /// PCS opening 验证失败（z'(r_y) 承诺不匹配）。
+    #[error("pcs opening verification failed")]
+    PcsVerificationFailed,
+    /// proof abi_version 不匹配。
+    #[error("abi version mismatch: expected={expected}, actual={actual}")]
+    AbiVersionMismatch { expected: u8, actual: u8 },
+    /// ZKVM syscall 使用无效 slot（非白名单）。
+    #[error("invalid syscall slot: {0}")]
+    InvalidSlot(u32),
+    /// CycleFold 递归深度超限。
+    #[error("recursion depth exceeded: actual={actual}, limit={limit}")]
+    RecursionDepthExceeded { actual: u32, limit: u32 },
+    /// proof_kind 与 scheme_id 不一致。
+    #[error("proof_kind mismatch: declared={declared}, actual={actual}")]
+    ProofKindMismatch { declared: u8, actual: u8 },
+    /// ZKVM 未初始化内存读取。
+    #[error("uninitialized memory read at slot {slot}")]
+    UninitializedRead { slot: u32 },
+    /// M2-003：last_partial_fold.proof_partial_hash 链上不可变（覆盖已有值）。
+    #[error("partial fold hash immutable: proof_partial_hash already set and cannot be overwritten")]
+    PartialFoldHashImmutable,
+    /// M2-004：签名形式与 scheme_id 不匹配。
+    #[error("signature form mismatch: scheme_id={scheme_id} expects different signature form")]
+    SignatureFormMismatch { scheme_id: u32 },
 }
 
 /// 库统一 Result 别名。

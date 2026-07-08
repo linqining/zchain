@@ -113,6 +113,10 @@ pub const DEFAULT_KEY_ROTATION_DELAY_BLOCKS: u64 = 1000;
 pub const DEFAULT_VALIDATOR_SET_SIZE: u64 = 10;
 /// 默认 max_partial_checkin_count（SEC-H1：3）。
 pub const DEFAULT_MAX_PARTIAL_CHECKIN_COUNT: u64 = 3;
+/// Production verifier 切换后的 grace 期 block 数（v1.2 SubTask 8.2.3）。
+///
+/// grace 期内 proof_kind 双通道：ZkShuffle 旧 Stub proof + Zkvm Production proof 并存。
+pub const PRODUCTION_GRACE_BLOCKS: u64 = 7200;
 
 // ===== VerifierStatus（NEW-C1 + SEC-M4） =====
 
@@ -219,6 +223,8 @@ pub enum ParamName {
     ValidatorSetSize,
     /// max_partial_checkin_count（SEC-H1）
     MaxPartialCheckinCount,
+    /// production_switch_height（v1.2 SubTask 11.5.2.10 — 一次性写入字段，敏感 90% quorum）
+    ProductionSwitchHeight,
 }
 
 impl ParamName {
@@ -268,6 +274,7 @@ impl ParamName {
             Self::ArchiveRetentionBlocks => "archive_retention_blocks",
             Self::ValidatorSetSize => "validator_set_size",
             Self::MaxPartialCheckinCount => "max_partial_checkin_count",
+            Self::ProductionSwitchHeight => "production_switch_height",
         }
     }
 
@@ -303,6 +310,7 @@ impl ParamName {
                 | Self::MaliciousRefuseThreshold
                 | Self::MaxRequestAckPerTurnTimeout
                 | Self::ValidatorSetSize
+                | Self::ProductionSwitchHeight
         )
     }
 }
@@ -396,6 +404,11 @@ pub struct GovernanceParams {
     pub validator_set_size: u64,
     /// max_partial_checkin_count ∈ [1, 10]（SEC-H1）
     pub max_partial_checkin_count: u64,
+    /// production_switch_height（v1.2 SubTask 11.5.2.10 — 一次性写入字段，默认 0 表示未切换）。
+    ///
+    /// 治理切换 `verifier_status` 从 `Stub` 到 `Production` 时写入当前 block height，
+    /// grace 期起算点；grace 期结束后可清零。非持续调整参数，但写入须 90% quorum。
+    pub production_switch_height: u64,
 }
 
 impl GovernanceParams {
@@ -444,6 +457,7 @@ impl GovernanceParams {
             archive_retention_blocks: DEFAULT_ARCHIVE_RETENTION_BLOCKS,
             validator_set_size: DEFAULT_VALIDATOR_SET_SIZE,
             max_partial_checkin_count: DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
+            production_switch_height: 0,
         }
     }
 
@@ -495,6 +509,7 @@ impl GovernanceParams {
             ParamName::ArchiveRetentionBlocks => self.archive_retention_blocks,
             ParamName::ValidatorSetSize => self.validator_set_size,
             ParamName::MaxPartialCheckinCount => self.max_partial_checkin_count,
+            ParamName::ProductionSwitchHeight => self.production_switch_height,
         }
     }
 
@@ -549,6 +564,7 @@ impl GovernanceParams {
             ParamName::ArchiveRetentionBlocks => self.archive_retention_blocks = value,
             ParamName::ValidatorSetSize => self.validator_set_size = value,
             ParamName::MaxPartialCheckinCount => self.max_partial_checkin_count = value,
+            ParamName::ProductionSwitchHeight => self.production_switch_height = value,
         }
     }
 }
@@ -630,6 +646,8 @@ pub const fn validate_param(
         ParamName::ArchiveRetentionBlocks => (1000, 1_000_000),
         ParamName::ValidatorSetSize => (5, 1000), // SEC-C2
         ParamName::MaxPartialCheckinCount => (1, 10), // SEC-H1
+        // production_switch_height：0 表示未切换；非 0 值须 ≥ 1（无上界，由一次性写入语义约束）
+        ParamName::ProductionSwitchHeight => (0, u64::MAX),
     };
     if value < min || value > max {
         return Err(PokerL1Error::ParamOutOfBounds {
@@ -1346,6 +1364,40 @@ mod tests {
     fn test_is_sensitive_param_sec_c2() {
         // SEC-C2：validator_set_size
         assert!(ParamName::ValidatorSetSize.is_sensitive());
+    }
+
+    #[test]
+    fn test_is_sensitive_param_production_switch_height() {
+        // v1.2 SubTask 11.5.2.10：production_switch_height 敏感 90% quorum
+        assert!(ParamName::ProductionSwitchHeight.is_sensitive());
+    }
+
+    #[test]
+    fn test_production_switch_height_default_zero() {
+        let params = GovernanceParams::default_values();
+        assert_eq!(params.production_switch_height, 0, "默认值应为 0（未切换）");
+        assert_eq!(
+            params.get(ParamName::ProductionSwitchHeight),
+            0,
+            "get() 应返回 0"
+        );
+    }
+
+    #[test]
+    fn test_production_switch_height_one_time_write() {
+        let mut params = GovernanceParams::default_values();
+        // 一次性写入：设置非 0 值
+        params.set(ParamName::ProductionSwitchHeight, 1000);
+        assert_eq!(params.production_switch_height, 1000);
+        assert_eq!(params.get(ParamName::ProductionSwitchHeight), 1000);
+        // grace 期结束后可清零
+        params.set(ParamName::ProductionSwitchHeight, 0);
+        assert_eq!(params.production_switch_height, 0);
+    }
+
+    #[test]
+    fn test_production_grace_blocks_constant() {
+        assert_eq!(PRODUCTION_GRACE_BLOCKS, 7200);
     }
 
     #[test]

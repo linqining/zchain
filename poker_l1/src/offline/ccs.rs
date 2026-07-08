@@ -47,6 +47,16 @@ pub struct CcsInstance {
 ///
 /// 每种具体电路（如 `poker_protocol::zk_shuffle`）实现此 trait，
 /// 提供约束矩阵 / 公共输入 / 见证接口。
+///
+/// # 已废弃（Phase 10 迁移）
+///
+/// 此 trait 基于 `Hash` 类型，已被 `poker_zkvm::precompiles::CcsCircuit`（Fr-based 新签名）取代。
+/// Phase 11 将完成完整迁移：poker_l1 通过 `pub use poker_zkvm::precompiles::CcsCircuit;` re-export，
+/// 旧调用方迁移到新类型。新代码应使用 `poker_zkvm::precompiles::CcsCircuit`。
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `poker_zkvm::precompiles::CcsCircuit` (Fr-based) instead. Phase 11 将完成迁移。"
+)]
 pub trait CcsCircuit: Send + Sync {
     /// 电路名称（用于日志 / 调试）。
     fn name(&self) -> &str;
@@ -237,6 +247,16 @@ pub fn fold_loop(
 ///
 /// 将 `poker_protocol::zk_shuffle` 电路适配为 CCS 实例。
 /// MVP 阶段：仅提供 trait 实现，实际电路转换在 Production 阶段实现。
+///
+/// # 已废弃（Phase 10 迁移）
+///
+/// 此类型已迁移到 `poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit`（Fr-based 新签名）。
+/// Phase 11 将通过 `pub use` re-export 新类型，旧调用方迁移到新类型。
+/// 新代码应使用 `poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit`。
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit` (Fr-based) instead. Phase 11 将完成迁移。"
+)]
 pub struct ZkShuffleCcsCircuit {
     /// 电路名称。
     name: String,
@@ -426,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_zk_shuffle_circuit_name() {
         let circuit = ZkShuffleCcsCircuit::new();
         assert_eq!(circuit.name(), "zk_shuffle");
@@ -433,6 +454,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_zk_shuffle_to_instance() {
         let circuit = ZkShuffleCcsCircuit::new();
         let instance = circuit

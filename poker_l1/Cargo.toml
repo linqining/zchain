@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 poker_protocol = { workspace = true }
+poker_zkvm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bcs = { workspace = true }
@@ -31,6 +32,8 @@ tracing = { workspace = true }
 # 测试专用，避免影响生产二进制大小
 tempfile = "3.10"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# 启用 poker_zkvm 的 test-helpers feature 以访问 generate_test_proof 等测试辅助函数
+poker_zkvm = { workspace = true, features = ["test-helpers"] }
 
 # ===== Task 36 性能基准（criterion harness = false）=====
 

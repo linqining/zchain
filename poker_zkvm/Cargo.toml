@@ -1,0 +1,43 @@
+[package]
+name = "poker_zkvm"
+version = "0.1.0"
+edition = "2024"
+description = "Hypernova + CCS zero-knowledge VM for zchain OffChain mode"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# 测试辅助功能：启用跨 crate 测试辅助函数（如 `generate_test_proof`）
+default = []
+test-helpers = []
+
+[dependencies]
+ark-ff = { workspace = true }
+ark-ec = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-grumpkin = { workspace = true }
+ark-crypto-primitives = { workspace = true }
+sha2 = { workspace = true }
+secp256k1 = { workspace = true }
+blake2 = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+rayon = { workspace = true }
+goblin = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+hex = { workspace = true }
+
+# ===== Phase 12 性能基准（占位，Phase 12 填充）=====
+
+[[bench]]
+name = "phase12_benchmarks"
+harness = false
+path = "benches/phase12_benchmarks.rs"

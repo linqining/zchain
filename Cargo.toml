@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["poker_l1"]
+members = ["poker_l1", "poker_zkvm"]
 
 # zchain root package 本身作为 workspace 的 bin 入口保留
 [package]
@@ -17,6 +17,7 @@ hex = { workspace = true }
 [workspace.dependencies]
 # 共享依赖集中管理，便于版本一致与升级
 poker_protocol = { path = "../zgame/poker_protocol" }
+poker_zkvm = { path = "poker_zkvm" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcs = "0.1.6"
@@ -35,3 +36,17 @@ group = "0.13"
 pairing = "0.23"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"
+# ===== poker_zkvm 依赖（arkworks 0.6 主线 + 工具链）=====
+ark-ff = { version = "0.6", features = ["std"] }
+ark-ec = { version = "0.6", features = ["std"] }
+ark-poly = { version = "0.6", features = ["std"] }
+ark-serialize = { version = "0.6", features = ["std"] }
+ark-std = { version = "0.6", features = ["std"] }
+ark-bn254 = "0.6"
+ark-grumpkin = "0.6"
+ark-groth16 = { version = "0.6", default-features = false }
+ark-crypto-primitives = { version = "0.6.0", default-features = false, features = ["crh", "std"] }
+rayon = "1"
+goblin = { version = "0.8", default-features = false, features = ["elf32", "elf64", "endian_fd"] }
+proptest = "1"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
