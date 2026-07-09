@@ -24,6 +24,8 @@ pub mod groth16_compress;
 pub mod spartan;
 
 use ark_serialize::CanonicalSerialize;
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 use crate::ccs::Fr as ZkvmFr;
 use crate::compiler::elf_validator::validate_elf;
@@ -244,32 +246,37 @@ fn read_u32_le(bytes: &[u8], pos: &mut usize) -> Result<u32, ZkvmError> {
 /// proof 序列化 magic 头。
 const PROOF_MAGIC: &[u8; 4] = b"HYPN";
 
-/// proof 序列化版本号（v2 = 含 CCS 序列化；v1 不含 CCS，已废弃）。
-const PROOF_VERSION: u8 = 2;
+/// proof 序列化版本号（v3 = 完整 verifier 版本，含 fold_steps + ccs_commitment + public_io_commitment；
+/// v2 = 含 CCS 序列化，已废弃；v1 不含 CCS，已废弃）。
+const PROOF_VERSION: u8 = 3;
 
 /// proof 总长度上限（v1.3 M2-002 单项子分配之和：8KB + 8KB + 16KB + 8KB = 40KB，留余量至 48KB）。
-pub const MAX_PROOF_TOTAL_SIZE: usize = 48 * 1024;
-
-/// 序列化 HypernovaProof 为二进制格式。
 ///
-/// 格式（v2）：
-/// - magic(4B) + version(1B) + abi_version(1B)
-/// - folded_instance.ccs_ref（length-prefixed CCS bytes）
-/// - folded_instance.u_l（32B）
-/// - folded_instance.x_l / trace_l / r_x_l / v_l（length-prefixed Fr 序列）
-/// - witness_commitment（compressed G1 point, length-prefixed）
-/// - final_sumcheck（outer_round_polys + v_pp + inner_round_polys）
-/// - pcs_opening（l_vec + r_vec + a_final）
-/// - r_y（length-prefixed Fr 序列）
-/// - z_at_point（32B Fr）
-pub(crate) fn serialize_proof(proof: &HypernovaProof) -> Result<Vec<u8>, ZkvmError> {
-    let mut out = Vec::new();
-    out.extend_from_slice(PROOF_MAGIC);
-    out.push(PROOF_VERSION);
-    out.push(proof.abi_version);
+/// **注**：完整 verifier 版本（v3）proof 含所有 fold 步骤数据（每步 ~2-3KB），
+/// MVP 限制 `fold_steps.len() ≤ 100`，proof 可达 ~300KB。
+/// 生产环境用 CycleFold 压缩（Phase 12）后恢复至 48KB。
+pub const MAX_PROOF_TOTAL_SIZE: usize = 512 * 1024;
 
-    // folded_instance (Lcccs) — 先序列化 ccs_ref
-    let lcccs = &proof.folded_instance;
+/// 计算 public_io 的承诺哈希（Blake2b-256，带域分离前缀）。
+///
+/// 用于将 proof 与 public_io 绑定，防止恶意 prover 替换 public_io（重放攻击）。
+/// prover 在 transcript 初始化时 absorb 此哈希，verifier 重放时校验 `hash_public_io(public_io) == proof.public_io_commitment`。
+///
+/// # 格式
+/// `Blake2b-256(b"poker_zkvm_public_io" || public_io.to_bytes())`
+pub fn hash_public_io(public_io: &ZkPublicIo) -> [u8; 32] {
+    let mut hasher = Blake2bVar::new(32).expect("Blake2bVar(32) 初始化不应失败");
+    hasher.update(b"poker_zkvm_public_io");
+    hasher.update(&public_io.to_bytes());
+    let mut out = [0u8; 32];
+    hasher
+        .finalize_variable(&mut out)
+        .expect("Blake2bVar finalize 不应失败");
+    out
+}
+
+/// 序列化 Lcccs 到输出缓冲（ccs_ref + u_l + x_l + trace_l + r_x_l + v_l）。
+fn serialize_lcccs(lcccs: &crate::fold::lcccs::Lcccs, out: &mut Vec<u8>) -> Result<(), ZkvmError> {
     let ccs_bytes = lcccs.ccs_ref.to_bytes();
     out.extend_from_slice(&(ccs_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&ccs_bytes);
@@ -280,34 +287,26 @@ pub(crate) fn serialize_proof(proof: &HypernovaProof) -> Result<Vec<u8>, ZkvmErr
     for x in &lcccs.x_l {
         out.extend_from_slice(&x.to_canonical_bytes());
     }
-
     out.extend_from_slice(&(lcccs.trace_l.len() as u32).to_le_bytes());
     for t in &lcccs.trace_l {
         out.extend_from_slice(&t.to_canonical_bytes());
     }
-
     out.extend_from_slice(&(lcccs.r_x_l.len() as u32).to_le_bytes());
     for r in &lcccs.r_x_l {
         out.extend_from_slice(&r.to_canonical_bytes());
     }
-
     out.extend_from_slice(&(lcccs.v_l.len() as u32).to_le_bytes());
     for v in &lcccs.v_l {
         out.extend_from_slice(&v.to_canonical_bytes());
     }
+    Ok(())
+}
 
-    // witness_commitment (IpaCommitment = G1Affine)
-    let mut commitment_bytes = Vec::new();
-    proof
-        .witness_commitment
-        .0
-        .serialize_compressed(&mut commitment_bytes)
-        .map_err(|e| ZkvmError::Other(format!("serialize commitment: {e}")))?;
-    out.extend_from_slice(&(commitment_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&commitment_bytes);
-
-    // final_sumcheck (SumcheckProof: outer_round_polys + v_pp + inner_round_polys)
-    let sc = &proof.final_sumcheck;
+/// 序列化 SumcheckProof 到输出缓冲（outer_round_polys + v_pp + inner_round_polys）。
+fn serialize_sumcheck(
+    sc: &crate::fold::sumcheck::SumcheckProof,
+    out: &mut Vec<u8>,
+) -> Result<(), ZkvmError> {
     out.extend_from_slice(&(sc.outer_round_polys.len() as u32).to_le_bytes());
     for round in &sc.outer_round_polys {
         out.extend_from_slice(&(round.len() as u32).to_le_bytes());
@@ -326,9 +325,36 @@ pub(crate) fn serialize_proof(proof: &HypernovaProof) -> Result<Vec<u8>, ZkvmErr
             out.extend_from_slice(&e.to_canonical_bytes());
         }
     }
+    Ok(())
+}
 
-    // pcs_opening (IpaProof: l_vec + r_vec + a_final)
-    let opening = &proof.pcs_opening;
+/// 序列化 IpaCommitment（compressed G1 point, length-prefixed）。
+fn serialize_commitment(
+    cmt: &crate::pcs::ipa::IpaCommitment,
+    out: &mut Vec<u8>,
+) -> Result<(), ZkvmError> {
+    let mut bytes = Vec::new();
+    cmt.0
+        .serialize_compressed(&mut bytes)
+        .map_err(|e| ZkvmError::Other(format!("serialize commitment: {e}")))?;
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&bytes);
+    Ok(())
+}
+
+/// 序列化 Fr 切片（length-prefixed）。
+fn serialize_fr_slice(elems: &[ZkvmFr], out: &mut Vec<u8>) {
+    out.extend_from_slice(&(elems.len() as u32).to_le_bytes());
+    for e in elems {
+        out.extend_from_slice(&e.to_canonical_bytes());
+    }
+}
+
+/// 序列化 IpaProof（l_vec + r_vec + a_final）。
+fn serialize_ipa_proof(
+    opening: &crate::pcs::ipa::IpaProof,
+    out: &mut Vec<u8>,
+) -> Result<(), ZkvmError> {
     out.extend_from_slice(&(opening.l_vec.len() as u32).to_le_bytes());
     for p in &opening.l_vec {
         let mut b = Vec::new();
@@ -346,23 +372,205 @@ pub(crate) fn serialize_proof(proof: &HypernovaProof) -> Result<Vec<u8>, ZkvmErr
         out.extend_from_slice(&b);
     }
     out.extend_from_slice(&opening.a_final.to_canonical_bytes());
+    Ok(())
+}
 
-    // r_y
-    out.extend_from_slice(&(proof.r_y.len() as u32).to_le_bytes());
-    for r in &proof.r_y {
-        out.extend_from_slice(&r.to_canonical_bytes());
+/// 序列化 HypernovaProof 为二进制格式（v3 — 完整 verifier 版本）。
+///
+/// 格式（v3）：
+/// - magic(4B) + version(1B) + abi_version(1B)
+/// - ccs_commitment(32B) + public_io_commitment(32B)
+/// - batch_public_inputs: count(4B LE) + 每组 [count(4B LE) + Fr×count]
+/// - initial_lcccs(ccs_ref + u_l + x_l + trace_l + r_x_l + v_l)
+/// - initial_witness_commitment(compressed G1, len-prefixed)
+/// - fold_steps: count(4B LE) + 每步:
+///     ccccs_witness_commitment + ccccs_u_c + ccccs_x_c + ccccs_trace_c
+///     + sumcheck_proof + r_y + z_at_r_y + actual_u_prime
+///     + folded_lcccs + folded_witness_commitment
+/// - final_sumcheck(outer_round_polys + v_pp + inner_round_polys)
+/// - pcs_opening(l_vec + r_vec + a_final)
+/// - r_y(length-prefixed Fr 序列) + z_at_point(32B Fr)
+pub fn serialize_proof(proof: &HypernovaProof) -> Result<Vec<u8>, ZkvmError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(PROOF_MAGIC);
+    out.push(PROOF_VERSION);
+    out.push(proof.abi_version);
+
+    // ccs_commitment + public_io_commitment
+    out.extend_from_slice(&proof.ccs_commitment);
+    out.extend_from_slice(&proof.public_io_commitment);
+
+    // batch_public_inputs: count + 每组 [count + Fr×count]
+    out.extend_from_slice(&(proof.batch_public_inputs.len() as u32).to_le_bytes());
+    for group in &proof.batch_public_inputs {
+        serialize_fr_slice(group, &mut out);
     }
 
-    // z_at_point
+    // initial_lcccs
+    serialize_lcccs(&proof.initial_lcccs, &mut out)?;
+
+    // initial_witness_commitment
+    serialize_commitment(&proof.initial_witness_commitment, &mut out)?;
+
+    // fold_steps
+    out.extend_from_slice(&(proof.fold_steps.len() as u32).to_le_bytes());
+    for step in &proof.fold_steps {
+        // ccccs_witness_commitment
+        serialize_commitment(&step.ccccs_witness_commitment, &mut out)?;
+        // ccccs_u_c + ccccs_x_c + ccccs_trace_c
+        out.extend_from_slice(&step.ccccs_u_c.to_canonical_bytes());
+        serialize_fr_slice(&step.ccccs_x_c, &mut out);
+        serialize_fr_slice(&step.ccccs_trace_c, &mut out);
+        // sumcheck_proof
+        serialize_sumcheck(&step.sumcheck_proof, &mut out)?;
+        // r_y + z_at_r_y + actual_u_prime
+        serialize_fr_slice(&step.r_y, &mut out);
+        out.extend_from_slice(&step.z_at_r_y.to_canonical_bytes());
+        out.extend_from_slice(&step.actual_u_prime.to_canonical_bytes());
+        // folded_lcccs + folded_witness_commitment
+        serialize_lcccs(&step.folded_lcccs, &mut out)?;
+        serialize_commitment(&step.folded_witness_commitment, &mut out)?;
+    }
+
+    // final_sumcheck
+    serialize_sumcheck(&proof.final_sumcheck, &mut out)?;
+
+    // pcs_opening
+    serialize_ipa_proof(&proof.pcs_opening, &mut out)?;
+
+    // r_y + z_at_point
+    serialize_fr_slice(&proof.r_y, &mut out);
     out.extend_from_slice(&proof.z_at_point.to_canonical_bytes());
 
     Ok(out)
 }
 
-/// 反序列化 HypernovaProof。
+/// 反序列化 Lcccs（ccs_ref + u_l + x_l + trace_l + r_x_l + v_l），含维度校验。
+fn deserialize_lcccs(bytes: &[u8], pos: &mut usize) -> Result<crate::fold::lcccs::Lcccs, ZkvmError> {
+    let ccs_bytes = read_length_prefixed(bytes, pos)?;
+    let ccs_ref = crate::ccs::Ccs::from_bytes(&ccs_bytes)?;
+
+    let u_l = read_field(bytes, pos)?;
+
+    let x_l_len = read_u32_le(bytes, pos)? as usize;
+    let mut x_l = Vec::with_capacity(x_l_len);
+    for _ in 0..x_l_len {
+        x_l.push(read_field(bytes, pos)?);
+    }
+    let trace_l_len = read_u32_le(bytes, pos)? as usize;
+    let mut trace_l = Vec::with_capacity(trace_l_len);
+    for _ in 0..trace_l_len {
+        trace_l.push(read_field(bytes, pos)?);
+    }
+    let r_x_l_len = read_u32_le(bytes, pos)? as usize;
+    let mut r_x_l = Vec::with_capacity(r_x_l_len);
+    for _ in 0..r_x_l_len {
+        r_x_l.push(read_field(bytes, pos)?);
+    }
+    let v_l_len = read_u32_le(bytes, pos)? as usize;
+    let mut v_l = Vec::with_capacity(v_l_len);
+    for _ in 0..v_l_len {
+        v_l.push(read_field(bytes, pos)?);
+    }
+
+    crate::fold::lcccs::Lcccs::new(ccs_ref, u_l, x_l, trace_l, r_x_l, v_l)
+}
+
+/// 反序列化 SumcheckProof（outer_round_polys + v_pp + inner_round_polys）。
+fn deserialize_sumcheck(
+    bytes: &[u8],
+    pos: &mut usize,
+) -> Result<crate::fold::sumcheck::SumcheckProof, ZkvmError> {
+    let outer_len = read_u32_le(bytes, pos)? as usize;
+    let mut outer_round_polys = Vec::with_capacity(outer_len);
+    for _ in 0..outer_len {
+        let round_len = read_u32_le(bytes, pos)? as usize;
+        let mut round = Vec::with_capacity(round_len);
+        for _ in 0..round_len {
+            round.push(read_field(bytes, pos)?);
+        }
+        outer_round_polys.push(round);
+    }
+    let v_pp_len = read_u32_le(bytes, pos)? as usize;
+    let mut v_pp = Vec::with_capacity(v_pp_len);
+    for _ in 0..v_pp_len {
+        v_pp.push(read_field(bytes, pos)?);
+    }
+    let inner_len = read_u32_le(bytes, pos)? as usize;
+    let mut inner_round_polys = Vec::with_capacity(inner_len);
+    for _ in 0..inner_len {
+        let round_len = read_u32_le(bytes, pos)? as usize;
+        let mut round = Vec::with_capacity(round_len);
+        for _ in 0..round_len {
+            round.push(read_field(bytes, pos)?);
+        }
+        inner_round_polys.push(round);
+    }
+    Ok(crate::fold::sumcheck::SumcheckProof {
+        outer_round_polys,
+        v_pp,
+        inner_round_polys,
+    })
+}
+
+/// 反序列化 IpaCommitment（compressed G1 point, length-prefixed）。
+fn deserialize_commitment(
+    bytes: &[u8],
+    pos: &mut usize,
+) -> Result<crate::pcs::ipa::IpaCommitment, ZkvmError> {
+    use ark_serialize::CanonicalDeserialize;
+    let b = read_length_prefixed(bytes, pos)?;
+    let point = ark_bn254::G1Affine::deserialize_compressed(&b[..])
+        .map_err(|e| ZkvmError::Other(format!("deserialize commitment: {e}")))?;
+    Ok(crate::pcs::ipa::IpaCommitment(point))
+}
+
+/// 反序列化 Fr 切片（length-prefixed）。
+fn deserialize_fr_slice(bytes: &[u8], pos: &mut usize) -> Result<Vec<ZkvmFr>, ZkvmError> {
+    let len = read_u32_le(bytes, pos)? as usize;
+    let mut elems = Vec::with_capacity(len);
+    for _ in 0..len {
+        elems.push(read_field(bytes, pos)?);
+    }
+    Ok(elems)
+}
+
+/// 反序列化 IpaProof（l_vec + r_vec + a_final）。
+fn deserialize_ipa_proof(
+    bytes: &[u8],
+    pos: &mut usize,
+) -> Result<crate::pcs::ipa::IpaProof, ZkvmError> {
+    use ark_serialize::CanonicalDeserialize;
+    let l_vec_len = read_u32_le(bytes, pos)? as usize;
+    let mut l_vec = Vec::with_capacity(l_vec_len);
+    for _ in 0..l_vec_len {
+        let b = read_length_prefixed(bytes, pos)?;
+        l_vec.push(
+            ark_bn254::G1Affine::deserialize_compressed(&b[..])
+                .map_err(|e| ZkvmError::Other(format!("deserialize L point: {e}")))?,
+        );
+    }
+    let r_vec_len = read_u32_le(bytes, pos)? as usize;
+    let mut r_vec = Vec::with_capacity(r_vec_len);
+    for _ in 0..r_vec_len {
+        let b = read_length_prefixed(bytes, pos)?;
+        r_vec.push(
+            ark_bn254::G1Affine::deserialize_compressed(&b[..])
+                .map_err(|e| ZkvmError::Other(format!("deserialize R point: {e}")))?,
+        );
+    }
+    let a_final = read_field(bytes, pos)?;
+    Ok(crate::pcs::ipa::IpaProof {
+        l_vec,
+        r_vec,
+        a_final,
+    })
+}
+
+/// 反序列化 HypernovaProof（v3 格式）。
 ///
 /// 校验 magic / version / abi_version；总长度优先校验（v1.3 M2-002）；
-/// 反序列化后调用 `Lcccs::new` 校验维度一致性。
+/// 反序列化后各 Lcccs 由 `Lcccs::new` 校验维度一致性。
 pub fn deserialize_proof(bytes: &[u8]) -> Result<HypernovaProof, ZkvmError> {
     // 总长度优先校验
     if bytes.len() > MAX_PROOF_TOTAL_SIZE {
@@ -388,133 +596,96 @@ pub fn deserialize_proof(bytes: &[u8]) -> Result<HypernovaProof, ZkvmError> {
     let version = bytes[4];
     if version != PROOF_VERSION {
         return Err(ZkvmError::InvalidZkProofFormat(format!(
-            "proof version {version} != {} (v2 含 CCS)",
+            "proof version {version} != {} (v3 完整 verifier 版本)",
             PROOF_VERSION
         )));
     }
     let abi_version = bytes[5];
-    let mut pos = 6;
+    let mut pos: usize = 6;
 
-    // folded_instance.ccs_ref（length-prefixed）
-    let ccs_bytes = read_length_prefixed(bytes, &mut pos)?;
-    let ccs_ref = crate::ccs::Ccs::from_bytes(&ccs_bytes)?;
+    // ccs_commitment + public_io_commitment（各 32B）
+    let mut ccs_commitment = [0u8; 32];
+    let mut public_io_commitment = [0u8; 32];
+    let end_ccs = pos.checked_add(32).ok_or_else(|| {
+        ZkvmError::InvalidZkProofFormat("ccs_commitment overflow".to_string())
+    })?;
+    if end_ccs > bytes.len() {
+        return Err(ZkvmError::InvalidZkProofFormat(
+            "ccs_commitment data too short".to_string(),
+        ));
+    }
+    ccs_commitment.copy_from_slice(&bytes[pos..end_ccs]);
+    pos = end_ccs;
+    let end_pio = pos.checked_add(32).ok_or_else(|| {
+        ZkvmError::InvalidZkProofFormat("public_io_commitment overflow".to_string())
+    })?;
+    if end_pio > bytes.len() {
+        return Err(ZkvmError::InvalidZkProofFormat(
+            "public_io_commitment data too short".to_string(),
+        ));
+    }
+    public_io_commitment.copy_from_slice(&bytes[pos..end_pio]);
+    pos = end_pio;
 
-    // u_l
-    let u_l = read_field(bytes, &mut pos)?;
-
-    // x_l
-    let x_l_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut x_l = Vec::with_capacity(x_l_len);
-    for _ in 0..x_l_len {
-        x_l.push(read_field(bytes, &mut pos)?);
+    // batch_public_inputs: count + 每组 [count + Fr×count]
+    let batch_count = read_u32_le(bytes, &mut pos)? as usize;
+    let mut batch_public_inputs = Vec::with_capacity(batch_count);
+    for _ in 0..batch_count {
+        batch_public_inputs.push(deserialize_fr_slice(bytes, &mut pos)?);
     }
 
-    // trace_l
-    let trace_l_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut trace_l = Vec::with_capacity(trace_l_len);
-    for _ in 0..trace_l_len {
-        trace_l.push(read_field(bytes, &mut pos)?);
+    // initial_lcccs
+    let initial_lcccs = deserialize_lcccs(bytes, &mut pos)?;
+
+    // initial_witness_commitment
+    let initial_witness_commitment = deserialize_commitment(bytes, &mut pos)?;
+
+    // fold_steps
+    let fold_steps_count = read_u32_le(bytes, &mut pos)? as usize;
+    let mut fold_steps = Vec::with_capacity(fold_steps_count);
+    for _ in 0..fold_steps_count {
+        let ccccs_witness_commitment = deserialize_commitment(bytes, &mut pos)?;
+        let ccccs_u_c = read_field(bytes, &mut pos)?;
+        let ccccs_x_c = deserialize_fr_slice(bytes, &mut pos)?;
+        let ccccs_trace_c = deserialize_fr_slice(bytes, &mut pos)?;
+        let sumcheck_proof = deserialize_sumcheck(bytes, &mut pos)?;
+        let r_y = deserialize_fr_slice(bytes, &mut pos)?;
+        let z_at_r_y = read_field(bytes, &mut pos)?;
+        let actual_u_prime = read_field(bytes, &mut pos)?;
+        let folded_lcccs = deserialize_lcccs(bytes, &mut pos)?;
+        let folded_witness_commitment = deserialize_commitment(bytes, &mut pos)?;
+        fold_steps.push(crate::fold::fold_loop::FoldStepData {
+            ccccs_witness_commitment,
+            ccccs_u_c,
+            ccccs_x_c,
+            ccccs_trace_c,
+            sumcheck_proof,
+            r_y,
+            z_at_r_y,
+            actual_u_prime,
+            folded_lcccs,
+            folded_witness_commitment,
+        });
     }
-
-    // r_x_l
-    let r_x_l_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut r_x_l = Vec::with_capacity(r_x_l_len);
-    for _ in 0..r_x_l_len {
-        r_x_l.push(read_field(bytes, &mut pos)?);
-    }
-
-    // v_l
-    let v_l_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut v_l = Vec::with_capacity(v_l_len);
-    for _ in 0..v_l_len {
-        v_l.push(read_field(bytes, &mut pos)?);
-    }
-
-    // Lcccs 维度一致性校验
-    let folded_instance = crate::fold::lcccs::Lcccs::new(
-        ccs_ref, u_l, x_l, trace_l, r_x_l, v_l,
-    )?;
-
-    // witness_commitment
-    let commitment_bytes = read_length_prefixed(bytes, &mut pos)?;
-    use ark_serialize::CanonicalDeserialize;
-    let witness_commitment = crate::pcs::ipa::IpaCommitment(
-        ark_bn254::G1Affine::deserialize_compressed(&commitment_bytes[..])
-            .map_err(|e| ZkvmError::Other(format!("deserialize commitment: {e}")))?,
-    );
 
     // final_sumcheck
-    let outer_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut outer_round_polys = Vec::with_capacity(outer_len);
-    for _ in 0..outer_len {
-        let round_len = read_u32_le(bytes, &mut pos)? as usize;
-        let mut round = Vec::with_capacity(round_len);
-        for _ in 0..round_len {
-            round.push(read_field(bytes, &mut pos)?);
-        }
-        outer_round_polys.push(round);
-    }
-    let v_pp_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut v_pp = Vec::with_capacity(v_pp_len);
-    for _ in 0..v_pp_len {
-        v_pp.push(read_field(bytes, &mut pos)?);
-    }
-    let inner_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut inner_round_polys = Vec::with_capacity(inner_len);
-    for _ in 0..inner_len {
-        let round_len = read_u32_le(bytes, &mut pos)? as usize;
-        let mut round = Vec::with_capacity(round_len);
-        for _ in 0..round_len {
-            round.push(read_field(bytes, &mut pos)?);
-        }
-        inner_round_polys.push(round);
-    }
-    let final_sumcheck = crate::fold::sumcheck::SumcheckProof {
-        outer_round_polys,
-        v_pp,
-        inner_round_polys,
-    };
+    let final_sumcheck = deserialize_sumcheck(bytes, &mut pos)?;
 
     // pcs_opening
-    let l_vec_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut l_vec = Vec::with_capacity(l_vec_len);
-    for _ in 0..l_vec_len {
-        let b = read_length_prefixed(bytes, &mut pos)?;
-        l_vec.push(
-            ark_bn254::G1Affine::deserialize_compressed(&b[..])
-                .map_err(|e| ZkvmError::Other(format!("deserialize L point: {e}")))?,
-        );
-    }
-    let r_vec_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut r_vec = Vec::with_capacity(r_vec_len);
-    for _ in 0..r_vec_len {
-        let b = read_length_prefixed(bytes, &mut pos)?;
-        r_vec.push(
-            ark_bn254::G1Affine::deserialize_compressed(&b[..])
-                .map_err(|e| ZkvmError::Other(format!("deserialize R point: {e}")))?,
-        );
-    }
-    let a_final = read_field(bytes, &mut pos)?;
-    let pcs_opening = crate::pcs::ipa::IpaProof {
-        l_vec,
-        r_vec,
-        a_final,
-    };
+    let pcs_opening = deserialize_ipa_proof(bytes, &mut pos)?;
 
-    // r_y
-    let r_y_len = read_u32_le(bytes, &mut pos)? as usize;
-    let mut r_y = Vec::with_capacity(r_y_len);
-    for _ in 0..r_y_len {
-        r_y.push(read_field(bytes, &mut pos)?);
-    }
-
-    // z_at_point
+    // r_y + z_at_point
+    let r_y = deserialize_fr_slice(bytes, &mut pos)?;
     let z_at_point = read_field(bytes, &mut pos)?;
 
     Ok(HypernovaProof {
         abi_version,
-        folded_instance,
-        witness_commitment,
+        ccs_commitment,
+        public_io_commitment,
+        batch_public_inputs,
+        initial_lcccs,
+        initial_witness_commitment,
+        fold_steps,
         final_sumcheck,
         pcs_opening,
         r_y,
@@ -570,6 +741,22 @@ pub fn prove(
     };
     let exec_result = execute_elf_with_config(elf_bytes, exec_config)?;
 
+    // 2.5 提前构造 ZkPublicIo（需在 transcript 初始化前计算 public_io_commitment）
+    // 所有字段在执行后均已可用：input/output/randomness_seed/initial_commitment/final_commitment/event_hashes
+    let public_io = ZkPublicIo {
+        input: input.to_vec(),
+        output: exec_result.output.clone(),
+        randomness_seed: config.randomness_seed,
+        initial_commitment: config.initial_commitment,
+        final_commitment: config.final_commitment,
+        event_hashes: exec_result
+            .events
+            .iter()
+            .map(|f| ZkvmFr::from_fr(*f))
+            .collect(),
+    };
+    let public_io_commitment = hash_public_io(&public_io);
+
     // 3. trace padding
     let mut trace = exec_result.trace;
     pad_trace(&mut trace, config.batch_size)?;
@@ -617,7 +804,15 @@ pub fn prove(
     let pcs = IpaPcs::new(pcs_n_vars)?;
     let mut transcript = Transcript::with_domain(b"poker_zkvm_prover_v1");
 
+    // absorb public_io_commitment 在 ccs_commitment 之前（verifier 需重放相同顺序）
+    transcript.absorb(HYPERNOVA_FOLD_DOMAIN_TAG, &public_io_commitment);
     transcript.absorb(HYPERNOVA_FOLD_DOMAIN_TAG, &expected_commitment);
+
+    // 收集 batch_public_inputs（每组 [batch_id, first_idx, last_idx]），并 absorb 到 transcript
+    let batch_public_inputs: Vec<Vec<ZkvmFr>> = ccs_instances
+        .iter()
+        .map(|inst| inst.public_inputs.clone())
+        .collect();
     for inst in &ccs_instances {
         for pi in &inst.public_inputs {
             transcript.absorb_field(HYPERNOVA_FOLD_DOMAIN_TAG, pi);
@@ -655,7 +850,7 @@ pub fn prove(
         ccccs_instances.push(ccccs);
     }
 
-    // 9. fold_loop
+    // 9. fold_loop（传递 ccs_commitment + public_io_commitment + batch_public_inputs）
     let proof = fold_loop(
         &ccs,
         initial_lcccs,
@@ -663,6 +858,9 @@ pub fn prove(
         &ccccs_instances,
         &pcs,
         &mut transcript,
+        expected_commitment,
+        public_io_commitment,
+        batch_public_inputs,
     )?;
 
     // 10. 序列化
@@ -676,20 +874,6 @@ pub fn prove(
             config.proof_size_limit
         )));
     }
-
-    // 12. 构造 ZkPublicIo
-    let public_io = ZkPublicIo {
-        input: input.to_vec(),
-        output: exec_result.output,
-        randomness_seed: config.randomness_seed,
-        initial_commitment: config.initial_commitment,
-        final_commitment: config.final_commitment,
-        event_hashes: exec_result
-            .events
-            .iter()
-            .map(|f| ZkvmFr::from_fr(*f))
-            .collect(),
-    };
 
     Ok((proof_bytes, public_io))
 }
@@ -795,11 +979,11 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
     }
 
     let text = encode_text(&[
-        encode_i(0x13, 0, 1, 0, 0),   // ADDI x1, x0, 0 (NOP)
-        encode_i(0x13, 0, 1, 0, 0),   // ADDI x1, x0, 0 (NOP)
-        encode_i(0x13, 0, 1, 0, 0),   // ADDI x1, x0, 0 (NOP)
-        encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-        0x00000073,                    // ECALL
+        // LUI a0, 1 — a0 = 0x1000 (text segment start, 32 bytes 可读)
+        (1 << 12) | (10 << 7) | 0x37,
+        encode_i(0x13, 0, 11, 0, 32),  // ADDI a1, x0, 32 (output len = 32 bytes)
+        encode_i(0x13, 0, 17, 0, 2),   // ADDI a7, x0, 2 (commit_output)
+        0x00000073,                     // ECALL
     ]);
     let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -808,7 +992,21 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
         ..Default::default()
     };
 
-    prove(&elf, &[], &config).expect("prove 应成功")
+    // 使用 32 字节 input，使 poker_l1 public_io 双向转换可逆
+    let input = vec![0u8; 32];
+    prove(&elf, &input, &config).expect("prove 应成功")
+}
+
+/// 构造默认 CCS 白名单（从 `generate_test_proof` 提取 ccs_commitment）。
+///
+/// **MVP 权宜之计**：仅供测试、基准测试和 MVP 生产调用方使用。
+/// 生产环境应由链上治理配置白名单。
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn default_ccs_whitelist() -> Vec<[u8; 32]> {
+    let (proof_bytes, _) = generate_test_proof();
+    let proof = deserialize_proof(&proof_bytes)
+        .expect("deserialize generate_test_proof 应成功");
+    vec![proof.ccs_commitment]
 }
 
 #[cfg(test)]

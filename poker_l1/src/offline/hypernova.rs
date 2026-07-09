@@ -206,7 +206,8 @@ impl ZkVerifier for HypernovaVerifier {
 
         // Production 状态：调用 poker_zkvm::verifier::verify_production（SubTask 8.2.1）
         let zkvm_public_io = Self::public_io_to_zkvm(public_io);
-        match poker_zkvm::verifier::verify_production(proof, &zkvm_public_io) {
+        let ccs_whitelist = poker_zkvm::prover::default_ccs_whitelist();
+        match poker_zkvm::verifier::verify_production(proof, &zkvm_public_io, &ccs_whitelist) {
             Ok(true) => Ok(true),
             Ok(false) => Err(PokerL1Error::InvalidZkProofFormat(
                 "verify_production 返回 false".to_string(),
@@ -460,6 +461,29 @@ mod tests {
         }
     }
 
+    /// 将 poker_zkvm::prover::ZkPublicIo 反向转换为 poker_l1 ZkPublicIo，
+    /// 使 public_io_to_zkvm(zkvm_to_public_io(zkvm_pio)) == zkvm_pio。
+    fn zkvm_to_public_io(zkvm_pio: &poker_zkvm::prover::ZkPublicIo) -> ZkPublicIo {
+        use poker_zkvm::field::ZkvmField;
+        let mut state_delta_hash = [0u8; 32];
+        let len = zkvm_pio.input.len().min(32);
+        state_delta_hash[..len].copy_from_slice(&zkvm_pio.input[..len]);
+
+        let mut ack_chain_hash = [0u8; 32];
+        let len = zkvm_pio.output.len().min(32);
+        ack_chain_hash[..len].copy_from_slice(&zkvm_pio.output[..len]);
+
+        ZkPublicIo {
+            initial_commitment: zkvm_pio.initial_commitment.to_canonical_bytes(),
+            final_commitment: zkvm_pio.final_commitment.to_canonical_bytes(),
+            state_delta_hash,
+            ack_chain_hash,
+            fold_step_count: 0,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_scheme_id() {
         let v = HypernovaVerifier::new();
@@ -614,9 +638,9 @@ mod tests {
     #[test]
     fn test_production_verify_valid_proof() {
         // 使用 poker_zkvm 的 generate_test_proof 生成合法 proof
-        let (proof_bytes, _zkvm_public_io) = poker_zkvm::prover::generate_test_proof();
+        let (proof_bytes, zkvm_public_io) = poker_zkvm::prover::generate_test_proof();
         let v = HypernovaVerifier::new();
-        let public_io = make_public_io(1);
+        let public_io = zkvm_to_public_io(&zkvm_public_io);
 
         // Production 状态：调用 verify_production
         let result = v.verify(&proof_bytes, &public_io, VerifierStatus::Production);
@@ -687,9 +711,9 @@ mod tests {
     /// 测试 5：grace 期内 Zkvm 强制 Production 路径（SubTask 8.2.3）
     #[test]
     fn test_grace_period_zkvm_forced_production() {
-        let (proof_bytes, _) = poker_zkvm::prover::generate_test_proof();
+        let (proof_bytes, zkvm_public_io) = poker_zkvm::prover::generate_test_proof();
         let v = HypernovaVerifier::new();
-        let public_io = make_public_io(1);
+        let public_io = zkvm_to_public_io(&zkvm_public_io);
 
         let ctx = make_ctx_in_grace(None);
         // status = Stub 但 grace 期内 Zkvm 应强制 Production
@@ -701,9 +725,9 @@ mod tests {
     /// 测试 6：grace 期后 stub 路径彻底关闭（SubTask 8.2.4）
     #[test]
     fn test_after_grace_stub_closed() {
-        let (proof_bytes, _) = poker_zkvm::prover::generate_test_proof();
+        let (proof_bytes, zkvm_public_io) = poker_zkvm::prover::generate_test_proof();
         let v = HypernovaVerifier::new();
-        let public_io = make_public_io(1);
+        let public_io = zkvm_to_public_io(&zkvm_public_io);
 
         let ctx = make_ctx_after_grace();
         // status = Stub 但 grace 期后应强制 Production

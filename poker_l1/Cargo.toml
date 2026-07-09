@@ -8,7 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 poker_protocol = { workspace = true }
-poker_zkvm = { workspace = true }
+poker_zkvm = { workspace = true, features = ["test-helpers"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bcs = { workspace = true }

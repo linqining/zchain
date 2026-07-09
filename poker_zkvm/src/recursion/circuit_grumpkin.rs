@@ -29,6 +29,7 @@
 //! [`CircuitBn254`]: crate::recursion::circuit_bn254::CircuitBn254
 
 use crate::error::ZkvmError;
+#[allow(deprecated)]
 use crate::fold::fold_loop::verify_hypernova;
 use crate::pcs::ipa::IpaPcs;
 use crate::prover::deserialize_proof;
@@ -104,6 +105,7 @@ impl RecursiveVerifierCircuit for CircuitGrumpkin<'_> {
     /// [`CircuitBn254::verify_native`]: crate::recursion::circuit_bn254::CircuitBn254::verify_native
     fn verify_native(&self) -> Result<bool, ZkvmError> {
         let proof = deserialize_proof(self.sub_proof_bytes)?;
+        #[allow(deprecated)]
         verify_hypernova(&proof, self.pcs)
     }
 
@@ -181,7 +183,7 @@ mod tests {
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
         let ccccs = ccs.to_cccs(&z_c, vec![], cmt_c).expect("to_cccs");
         let mut transcript = Transcript::new();
-        fold_loop(&ccs, lcccs, cmt_l, &[ccccs], pcs, &mut transcript)
+        fold_loop(&ccs, lcccs, cmt_l, &[ccccs], pcs, &mut transcript, ccs.ccs_commitment(), [0u8; 32], vec![vec![]])
             .expect("fold_loop 应成功")
     }
 

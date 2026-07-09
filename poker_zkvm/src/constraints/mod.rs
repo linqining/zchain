@@ -193,12 +193,14 @@ fn compile_batch_to_ccs(
 
 /// 校验 batch 间连续性（前一 batch 末步 idx + 1 == 后一 batch 首步 idx）。
 ///
-/// 此函数用于测试验证，生产环境由 verifier 侧校验 public_inputs。
-#[cfg(test)]
-fn verify_batch_continuity(instances: &[CcsInstance]) -> bool {
-    for w in instances.windows(2) {
-        let prev_last = &w[0].public_inputs;
-        let next_first = &w[1].public_inputs;
+/// 每组 public_inputs 格式为 `[batch_id, first_idx, last_idx]`。
+/// 校验：对相邻两组，`prev.last_idx + 1 == next.first_idx`。
+///
+/// 此函数由 verifier 在 fold 验证后调用，确保 batch 序列连续无间断。
+pub fn verify_batch_continuity(public_inputs: &[Vec<Fr>]) -> bool {
+    for w in public_inputs.windows(2) {
+        let prev_last = &w[0];
+        let next_first = &w[1];
         // public_inputs: [batch_id, first_idx, last_idx]
         if prev_last.len() < 3 || next_first.len() < 3 {
             return false;
@@ -339,7 +341,8 @@ mod tests {
         assert!(instances[1].is_satisfied().expect("batch 1 应满足"));
 
         // batch 间连续性：batch 0 last_idx(4) + 1 == batch 1 first_idx(5)
-        assert!(verify_batch_continuity(&instances));
+        let public_inputs: Vec<Vec<Fr>> = instances.iter().map(|i| i.public_inputs.clone()).collect();
+        assert!(verify_batch_continuity(&public_inputs));
     }
 
     #[test]
@@ -379,7 +382,8 @@ mod tests {
         assert!(instances[1].is_satisfied().expect("batch 1 应满足"));
 
         // batch 间连续性应失败：batch 0 last_idx(4) + 1 = 5 ≠ batch 1 first_idx(100)
-        assert!(!verify_batch_continuity(&instances));
+        let public_inputs: Vec<Vec<Fr>> = instances.iter().map(|i| i.public_inputs.clone()).collect();
+        assert!(!verify_batch_continuity(&public_inputs));
     }
 
     #[test]

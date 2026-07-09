@@ -22,6 +22,7 @@ pub mod circuit_bn254;
 pub mod circuit_grumpkin;
 
 use crate::error::ZkvmError;
+#[allow(deprecated)]
 use crate::fold::fold_loop::{verify_hypernova, HypernovaProof};
 use crate::pcs::ipa::IpaPcs;
 use crate::prover::{serialize_proof, MAX_RECURSION_DEPTH, MAX_ZKVM_PROOF_SIZE};
@@ -197,6 +198,7 @@ pub fn tree_aggregate(
 
     // 1. 验证所有 sub-proof（soundness 保证）
     for (i, proof) in sub_proofs.iter().enumerate() {
+        #[allow(deprecated)]
         if !verify_hypernova(proof, pcs)? {
             return Err(ZkvmError::Other(format!(
                 "tree_aggregate: sub_proof[{i}] 原生验证失败"
@@ -297,6 +299,7 @@ pub fn check_proof_size(proof: &HypernovaProof) -> Result<(), ZkvmError> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::ccs::{Ccs, Fr, SparseMatrix};
@@ -358,7 +361,7 @@ mod tests {
         let ccccs = ccs.to_cccs(&z_c, vec![], cmt_c).expect("to_cccs");
 
         let mut transcript = Transcript::new();
-        fold_loop(&ccs, lcccs, cmt_l, &[ccccs], pcs, &mut transcript)
+        fold_loop(&ccs, lcccs, cmt_l, &[ccccs], pcs, &mut transcript, ccs.ccs_commitment(), [0u8; 32], vec![vec![]])
             .expect("fold_loop 应成功")
     }
 
