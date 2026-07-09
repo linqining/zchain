@@ -384,9 +384,9 @@ fn serialize_ipa_proof(
 /// - initial_lcccs(ccs_ref + u_l + x_l + trace_l + r_x_l + v_l)
 /// - initial_witness_commitment(compressed G1, len-prefixed)
 /// - fold_steps: count(4B LE) + 每步:
-///     ccccs_witness_commitment + ccccs_u_c + ccccs_x_c + ccccs_trace_c
-///     + sumcheck_proof + r_y + z_at_r_y + actual_u_prime
-///     + folded_lcccs + folded_witness_commitment
+///   ccccs_witness_commitment + ccccs_u_c + ccccs_x_c + ccccs_trace_c
+///   + sumcheck_proof + r_y + z_at_r_y + actual_u_prime
+///   + folded_lcccs + folded_witness_commitment
 /// - final_sumcheck(outer_round_polys + v_pp + inner_round_polys)
 /// - pcs_opening(l_vec + r_vec + a_final)
 /// - r_y(length-prefixed Fr 序列) + z_at_point(32B Fr)
@@ -984,6 +984,10 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
         encode_i(0x13, 0, 11, 0, 32),  // ADDI a1, x0, 32 (output len = 32 bytes)
         encode_i(0x13, 0, 17, 0, 2),   // ADDI a7, x0, 2 (commit_output)
         0x00000073,                     // ECALL
+        encode_i(0x13, 0, 0, 0, 0),    // NOP (padding 使 text ≥ 32 bytes)
+        encode_i(0x13, 0, 0, 0, 0),    // NOP
+        encode_i(0x13, 0, 0, 0, 0),    // NOP
+        encode_i(0x13, 0, 0, 0, 0),    // NOP
     ]);
     let elf = build_test_elf(0x1000, 0x1000, &text);
 

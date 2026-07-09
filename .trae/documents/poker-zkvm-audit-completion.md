@@ -19,21 +19,26 @@
 - 2 个回归测试（test_verify_production_rejects_pcs_sumcheck_decoupling / test_verify_production_rejects_empty_fold_steps）✓
 - `default_ccs_whitelist()` 函数（#[cfg(any(test, feature = "test-helpers"))] 门控）✓
 
-### 当前测试状态
+### 最终测试状态（Step 6 验证完成 ✓）
 
 | 测试套件 | 通过 | 失败 | 状态 |
 |----------|------|------|------|
-| 单元测试 (lib) | 31 | 0 | ✓ |
+| poker_zkvm 单元测试 (lib) | 713 | 0 | ✓ |
+| poker_zkvm prover 单元测试 | 31 | 0 | ✓ |
+| e2e_fibonacci | 7 | 0 | ✓ |
 | e2e_sha256_chain | 5 | 0 | ✓ |
 | e2e_poker_hand_eval | 5 | 0 | ✓ |
-| soundness_tests | 12 | 1 | ✗ |
-| e2e_fibonacci | 4 | 3 | ✗ |
-| poker_l1 build | - | - | ✓ 编译通过 |
-| poker_l1 test | 未验证 | - | ? |
+| soundness_tests | 13 | 0 | ✓ |
+| poker_l1 全部测试 | 全部通过（含 22 个 hypernova 测试） | 0 | ✓ |
+| poker_zkvm clippy --all-features -- -D warnings | - | 0 | ✓ |
+| poker_l1 clippy --all-features -- -D warnings | - | 0 | ✓（poker_protocol 传递依赖有非阻塞警告） |
+| poker_zkvm benches 编译 | - | - | ✓ |
 
-### 待修复问题
+**总计**：poker_zkvm 774 个测试全部通过，poker_l1 全部测试通过，clippy 检查通过，基准测试可编译。
 
-#### 问题 1：e2e_fibonacci 3 个测试失败（proof 大小超限）
+### 已修复问题（Step 6 验证完成 ✓）
+
+#### 问题 1：e2e_fibonacci 3 个测试失败（proof 大小超限） — 已修复 ✓
 
 **失败测试**：
 - `test_fibonacci_n50` — proof 179214 bytes > 65536 limit
@@ -56,7 +61,7 @@
 - `prove()` 的默认行为保持不变（生产环境仍会拒绝 > 64KB 的 proof，提示需要 CycleFold）
 - `MAX_PROOF_TOTAL_SIZE = 512KB` 是 `deserialize_proof` 的硬限制，proof 不会超过此值
 
-#### 问题 2：soundness_tests 1 个失败（硬编码偏移量不匹配）
+#### 问题 2：soundness_tests 1 个失败（硬编码偏移量不匹配） — 已修复 ✓
 
 **失败测试**：`test_soundness_tampered_proof_payload_fails`
 
@@ -68,7 +73,7 @@
 
 **方案**：改为反序列化 → 篡改字段 → 重新序列化方式，不依赖硬编码偏移量。
 
-#### 问题 3：7 个 build warnings
+#### 问题 3：7 个 build warnings — 已修复 ✓
 
 - `unused import: crate::field::ZkvmField`（fold_loop.rs:35）
 - `use of deprecated function verify_hypernova`（recursion/circuit_bn254.rs, circuit_grumpkin.rs）
@@ -76,7 +81,7 @@
 
 **方案**：清理 unused imports，将 recursion 模块中的 `verify_hypernova` 替换为 `verify_production`（需适配签名）或添加 `#[allow(deprecated)]` 注释（因 MVP 阶段 recursion 仍需原生验证）。
 
-## 实施计划
+## 实施计划（全部完成 ✓）
 
 ### Step 1：修复 e2e_fibonacci proof 大小超限
 
@@ -171,3 +176,47 @@ fn test_soundness_tampered_proof_payload_fails() {
 2. **e2e 测试放宽 `proof_size_limit` 到 `MAX_PROOF_TOTAL_SIZE` (512KB)**：MVP 阶段 CycleFold 未实现，proof 不会压缩。测试显式声明放宽限制。
 3. **recursion 模块保留 `verify_hypernova` 使用**：MVP 阶段 recursion 需要原生验证模拟，真实 SNARK 电路推迟到 Phase 12/13。使用 `#[allow(deprecated)]` 而非替换为 `verify_production`（因 `verify_production` 需要 ccs_whitelist 参数，recursion 上下文中不适用）。
 4. **soundness_tests 改为反序列化方式**：避免依赖硬编码偏移量，使测试与序列化格式解耦。
+
+## 实际执行结果（Step 6 完成）
+
+### 验证全部通过 ✓
+
+1. **cargo build --all-features -p poker_zkvm**：通过（0 warnings）
+2. **poker_zkvm 测试**：774 全部通过
+   - 单元测试 (lib)：713 passed
+   - prover 单元测试：31 passed
+   - e2e_fibonacci：7 passed
+   - e2e_sha256_chain：5 passed
+   - e2e_poker_hand_eval：5 passed
+   - soundness_tests：13 passed
+3. **poker_l1 测试**：全部通过（含 22 个 hypernova 测试）
+4. **poker_zkvm clippy --all-features -- -D warnings**：通过
+   - 修复了 `too_many_arguments`（fold_loop 函数 9 参数，添加 `#[allow(clippy::too_many_arguments)]`）
+   - 修复了 `doc_overindented_list_items`（prover/mod.rs + fold_loop.rs 文档注释子列表缩进 4→2 空格）
+5. **poker_l1 clippy --all-features -- -D warnings**：通过
+   - 仅传递依赖 `poker_protocol` 有非阻塞警告（snake_case 命名），poker_l1 自身代码清洁
+6. **poker_zkvm benches 编译**：通过
+
+### 计划外的额外修复
+
+修复过程中发现 `poker_l1/src/offline/hypernova.rs` 3 个测试因 `public_io` 不匹配而失败：
+
+- **根因**：`generate_test_proof()` 产生空 input/output，但 poker_l1 的 `public_io_to_zkvm` 转换总是产生 32 字节 input/output，导致 `hash_public_io(public_io) != proof.public_io_commitment`
+- **修复 1**：添加 `zkvm_to_public_io` 反向转换函数
+- **修复 2**：修改 `generate_test_proof()` ELF 使用 `LUI a0, 1` + `ADDI a1, x0, 32` + `ADDI a7, x0, 2 (commit_output)` + `ECALL` + 4 NOP padding，使 input/output 均为 32 字节
+- **修复 3**：将 `serialize_proof` 从 `pub(crate)` 改为 `pub`（soundness_tests 需要反序列化→篡改→序列化）
+
+3 个 poker_l1 测试改用 `zkvm_to_public_io(&zkvm_public_io)` 替代 `make_public_io(1)`：
+- `test_production_verify_valid_proof`
+- `test_grace_period_zkvm_forced_production`
+- `test_after_grace_stub_closed`
+
+### 审核收尾结论
+
+**poker_zkvm 安全审核全部完成**：
+
+- 8 个安全漏洞（5 原有 CRITICAL/MAJOR + Finding A/B/C）全部修复并通过测试验证
+- `verify_production` 完整 verifier 实现 soundness 链：CCS 白名单 → public_io 绑定 → fold challenge 重派生 → fold commitment 等式 → batch 连续性 → PCS-sumcheck 绑定 → 最终 PCS opening
+- 774 个 poker_zkvm 测试 + 全部 poker_l1 测试通过
+- clippy 检查清洁，基准测试可编译
+- 2 个回归测试覆盖 Finding A（PCS-sumcheck 解耦）和 Finding B（空 fold_steps）

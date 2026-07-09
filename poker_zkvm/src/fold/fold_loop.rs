@@ -125,14 +125,15 @@ pub struct HypernovaProof {
 ///
 /// 1. 校验 `ccccs_instances.len() ≤ MAX_FOLD_STEP_COUNT`
 /// 2. 对每个 CCCCS 实例：
-///    - `fold_step::fold(lcccs, commitment, ccccs, transcript)` → folded LCCCS + z' + C'
-///    - `sumcheck::prove(ccs, z', r_x_l, u_prime_spec, fresh_transcript)` → sumcheck proof + r_y + z_at_r_y + actual_u_prime
-///    - 更新 folded LCCCS 的 `u_l = actual_u_prime`（非线性 CCS 修正）
-///    - 收集 `FoldStepData`（含 CCCCS 输入 + sumcheck + folded 输出）
+///   - `fold_step::fold(lcccs, commitment, ccccs, transcript)` → folded LCCCS + z' + C'
+///   - `sumcheck::prove(ccs, z', r_x_l, u_prime_spec, fresh_transcript)` → sumcheck proof + r_y + z_at_r_y + actual_u_prime
+///   - 更新 folded LCCCS 的 `u_l = actual_u_prime`（非线性 CCS 修正）
+///   - 收集 `FoldStepData`（含 CCCCS 输入 + sumcheck + folded 输出）
 /// 3. 最终折叠后：
-///    - 构造 `MultilinearPoly` from folded witness
-///    - `pcs.open(poly, r_y, transcript)` → PCS opening proof
+///   - 构造 `MultilinearPoly` from folded witness
+///   - `pcs.open(poly, r_y, transcript)` → PCS opening proof
 /// 4. 返回 `HypernovaProof`（含 `initial_lcccs` + `fold_steps` + final PCS opening）
+#[allow(clippy::too_many_arguments)]
 pub fn fold_loop(
     ccs: &Ccs,
     initial_lcccs: Lcccs,
