@@ -354,11 +354,11 @@
 
 ## Phase 13：文档
 
-- [ ] `poker_zkvm/README.md` 快速上手指南已编写
-- [ ] `docs/38-1-zkvm-architecture.md` 架构文档已编写
-- [ ] `docs/38-2-zkvm-compiler-guide.md` 编译器使用指南已编写
-- [ ] `docs/38-3-zkvm-syscall-reference.md` Syscall 参考已编写
-- [ ] **`docs/38-4-zkvm-migration-guide.md` 从既有 hash-based CcsInstance 迁移到新类型的指南已编写**
+- [x] `poker_zkvm/README.md` 快速上手指南已编写（架构概览图 + build/test/prove/verify API + ProverConfig + 基准测试表 + MVP 限制）
+- [x] `docs/38-1-zkvm-architecture.md` 架构文档已编写（6 层架构 + CCS 约束格式 + Hypernova fold 流水线 + proof 序列化布局 + 安全参数 + 治理切换）
+- [x] `docs/38-2-zkvm-compiler-guide.md` 编译器使用指南已编写（cargo-zkvm 5 子命令 + CompilerConfig + 11 条 ELF 校验规则 + test_helpers + RV32I 编码 + while-loop 模式）
+- [x] `docs/38-3-zkvm-syscall-reference.md` Syscall 参考已编写（10 个 syscall ABI + gas 公式 + slot 白名单 + SyscallId/SyscallContext/SyscallRegistry/ZkvmHostState/Syscall trait）
+- [x] **`docs/38-4-zkvm-migration-guide.md` 从既有 hash-based CcsInstance 迁移到新类型的指南已编写**（新旧类型差异 + trait 签名变更 + 迁移步骤 + 迁移示例 + ZkPublicIo 字段映射 + LegacyCcsInstanceAdapter 失败语义 + fold_step/fold_loop 迁移 + CheckinTx signing_hash 兼容性 + grace 期签名形式分派 + FAQ + 检查清单）
 
 ## 安全与合规检查
 

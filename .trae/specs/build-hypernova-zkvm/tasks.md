@@ -373,11 +373,11 @@
 
 ## Phase 13：文档与示例
 
-- [ ] Task 13.1：编写 `poker_zkvm/README.md` — 快速上手指南
-- [ ] Task 13.2：编写 `docs/38-1-zkvm-architecture.md` — ZKVM 架构文档
-- [ ] Task 13.3：编写 `docs/38-2-zkvm-compiler-guide.md` — 编译器使用指南
-- [ ] Task 13.4：编写 `docs/38-3-zkvm-syscall-reference.md` — Syscall 参考
-- [ ] Task 13.5：编写 `docs/38-4-zkvm-migration-guide.md` — **新增**：从既有 hash-based CcsInstance 迁移到新类型的指南
+- [x] Task 13.1：编写 `poker_zkvm/README.md` — 快速上手指南
+- [x] Task 13.2：编写 `docs/38-1-zkvm-architecture.md` — ZKVM 架构文档
+- [x] Task 13.3：编写 `docs/38-2-zkvm-compiler-guide.md` — 编译器使用指南
+- [x] Task 13.4：编写 `docs/38-3-zkvm-syscall-reference.md` — Syscall 参考
+- [x] Task 13.5：编写 `docs/38-4-zkvm-migration-guide.md` — **新增**：从既有 hash-based CcsInstance 迁移到新类型的指南（含新旧类型差异、迁移步骤、LegacyCcsInstanceAdapter 失败语义、CheckinTx signing_hash 兼容性、grace 期签名形式分派、检查清单）
 
 # Task Dependencies
 
