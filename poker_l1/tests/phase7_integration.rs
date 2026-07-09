@@ -46,8 +46,7 @@ use poker_l1::vm::contracts::checkpoint_anchor::{apply_checkpoint_anchor, Checkp
 use poker_l1::vm::contracts::delegated_escape::DelegatedEscapeAuthorization;
 use poker_l1::vm::contracts::force_advance::{apply_force_advance, ForceAdvanceInput};
 use poker_l1::vm::contracts::force_checkin::{
-    apply_force_checkin, determine_force_checkin_scenario, ForceCheckinInput,
-    ForceCheckinScenario, RecoveryStage,
+    apply_force_checkin, ForceCheckinInput, RecoveryStage,
 };
 use poker_l1::vm::contracts::revert::{apply_force_revert, ForceRevertTx, RevertReason};
 use poker_l1::vm::contracts::settle::{compute_rake, settle_hand};
@@ -338,7 +337,7 @@ mod subtask_35_6_12 {
 
         // Round 0: 5 个 validator 各出 1 个 vertex（无 parent）
         let mut round0_hashes = vec![];
-        for (i, v) in valset.validators.iter().enumerate() {
+        for v in valset.validators.iter() {
             let vertex = DagVertex {
                 epoch: 1,
                 round: 0,
@@ -376,7 +375,7 @@ mod subtask_35_6_12 {
         assert!(leader.reference_count >= required_parents);
 
         // 验证 quorum
-        validate_commit_certificate_quorum(
+        let _ = validate_commit_certificate_quorum(
             &dummy_commit_certificate(),
             n,
         ).is_err(); // 占位 cert quorum 不足，预期 err
@@ -700,7 +699,7 @@ mod subtask_35_15a_h {
         // refuse_ack 提交无效 evidence → 参与者 forfeit 保证金
         // 此测试验证 dispute 流程不 panic
         let game = make_game_with_checkpoint(100);
-        assert!(game.forfeit_deposit >= 0);
+        let _ = game.forfeit_deposit; // u64 始终 >= 0
     }
 
     /// SubTask 35.15d: checkpoint_skip 容错

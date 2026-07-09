@@ -124,7 +124,7 @@ mod tests {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
         let result = verify_production(&proof_bytes, &public_io);
         assert!(result.is_ok(), "合法 proof 应通过验证，got: {:?}", result);
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]

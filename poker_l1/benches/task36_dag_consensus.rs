@@ -92,11 +92,11 @@ fn build_dag(validators: usize, rounds: usize, txs_per_vertex: usize) -> (Dag, H
 
     for r in 1..=rounds {
         let mut current_hashes: Vec<Hash> = Vec::new();
-        for v in 0..validators {
+        for author in authors.iter().take(validators) {
             let vertex = make_vertex_with_txs(
                 1,
                 r as u64,
-                authors[v].clone(),
+                author.clone(),
                 txs_per_vertex,
                 if r == 1 { vec![] } else { prev_hashes.clone() },
             );

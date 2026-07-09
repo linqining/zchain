@@ -172,9 +172,9 @@ impl HypernovaVerifier {
 
         // initial_commitment / final_commitment：从 32B Hash 解析为 Fr
         let initial_commitment = ZkvmFr::from_canonical_bytes(&public_io.initial_commitment)
-            .unwrap_or(ZkvmFr::zero());
+            .unwrap_or_else(|_| ZkvmFr::zero());
         let final_commitment = ZkvmFr::from_canonical_bytes(&public_io.final_commitment)
-            .unwrap_or(ZkvmFr::zero());
+            .unwrap_or_else(|_| ZkvmFr::zero());
 
         poker_zkvm::prover::ZkPublicIo {
             input: public_io.state_delta_hash.to_vec(), // 状态增量作为输入
@@ -224,7 +224,7 @@ impl ZkVerifier for HypernovaVerifier {
     ) -> Result<bool, PokerL1Error> {
         // M2-004：通过 scheme_id 反推期望的签名形式
         let proof_kind = ProofKind::from_scheme_id(SCHEME_HYPERNOVA)
-            .ok_or_else(|| PokerL1Error::ProofKindMismatch {
+            .ok_or(PokerL1Error::ProofKindMismatch {
                 declared: 0,
                 actual: SCHEME_HYPERNOVA as u8,
             })?;
@@ -331,7 +331,7 @@ impl ZkVerifier for ZkShuffleVerifier {
         // M2-004：ZkShuffle (scheme_id=4) 期望旧签名（uses_new_signature=false）
         // grace 期后所有 CheckinTx 须使用新签名（含 proof_kind 字段）
         let proof_kind = ProofKind::from_scheme_id(SCHEME_ZKSHUFFLE)
-            .ok_or_else(|| PokerL1Error::ProofKindMismatch {
+            .ok_or(PokerL1Error::ProofKindMismatch {
                 declared: 0,
                 actual: SCHEME_ZKSHUFFLE as u8,
             })?;
@@ -759,6 +759,7 @@ mod tests {
             intermediate_commitment: [0xEE; 32],
             ack_chain_partial: vec![make_ack(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
         };
 
         let result = execute_partial_checkin(
@@ -770,6 +771,7 @@ mod tests {
             crate::offline::DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             3,
             crate::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_ctx_default(),
         );
         assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
     }
@@ -777,9 +779,7 @@ mod tests {
     /// 测试 8：M2-003 幂等重提交允许（整个 PartialCheckinTx 内容幂等）
     #[test]
     fn test_m2_003_idempotent_resubmit_allowed() {
-        use crate::offline::state::{
-            execute_partial_checkin, LastPartialFold, PartialCheckinTx,
-        };
+        use crate::offline::state::{execute_partial_checkin, PartialCheckinTx};
         use crate::offline::ack_chain::AckEntry;
         use crate::object_model::ObjectID;
 
@@ -806,8 +806,9 @@ mod tests {
             proof_partial: vec![0xAA; 64],
             folded_step_count: 5,
             intermediate_commitment: [0xBB; 32],
-            ack_chain_partial: ack_chain.clone(),
+            ack_chain_partial: ack_chain,
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
         };
 
         // 首次提交
@@ -820,6 +821,7 @@ mod tests {
             crate::offline::DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             3,
             crate::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_ctx_default(),
         )
         .expect("首次提交应成功");
 
@@ -833,6 +835,7 @@ mod tests {
             crate::offline::DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             3,
             crate::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_ctx_default(),
         )
         .expect("幂等重提交应成功");
 
@@ -878,11 +881,12 @@ mod tests {
         // proof_partial 相同（hash 匹配）但 intermediate_commitment 不同
         let tx = PartialCheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
-            proof_partial: proof_partial.clone(),
+            proof_partial,
             folded_step_count: 5,
             intermediate_commitment: [0xDD; 32], // 不同的 intermediate_commitment
             ack_chain_partial: vec![make_ack(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
         };
 
         let result = execute_partial_checkin(
@@ -894,6 +898,7 @@ mod tests {
             crate::offline::DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             3,
             crate::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_ctx_default(),
         );
         assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
     }

@@ -104,8 +104,8 @@ pub struct CheckoutTx {
 ///
 /// spec.md L665–669：玩家提交 `(π, Δ, new_commitment, ack_chain)` 作为 checkin 结算交易。
 ///
-/// 完整 checkin tx 签名域（R5-M6）：
-/// `hash(chain_id || game_id || π_hash || state_delta_hash || new_commitment || ack_chain_hash)`
+/// 完整 checkin tx 签名域（R5-M6 + v1.2 SubTask 11.2.3 BREAKING）：
+/// `hash(chain_id || proof_kind || game_id || π_hash || state_delta_hash || new_commitment || ack_chain_hash)`
 #[derive(Debug, Clone)]
 pub struct CheckinTx {
     /// Game 对象 ID。
@@ -120,6 +120,8 @@ pub struct CheckinTx {
     pub ack_chain: Vec<AckEntry>,
     /// scheme_id（Hypernova / Groth16 / IPA）。
     pub scheme_id: u32,
+    /// proof_kind（v1.2 SubTask 11.2.3 — 与 `scheme_id` 双向映射，作为 1-byte 前缀进入 `signing_hash`）。
+    pub proof_kind: super::zk_verifier::ProofKind,
     /// 是否基于 partial_checkin 衔接（SEC2-M8）。
     pub has_partial_checkin: bool,
 }
@@ -152,15 +154,19 @@ impl CheckinTx {
         super::ack_chain::compute_ack_chain_hash(&self.ack_chain)
     }
 
-    /// 计算 checkin tx 签名域哈希（R5-M6）。
+    /// 计算 checkin tx 签名域哈希（R5-M6 + v1.2 SubTask 11.2.3 BREAKING）。
     ///
-    /// `hash(chain_id || game_id || π_hash || state_delta_hash || new_commitment || ack_chain_hash)`
+    /// `hash(chain_id || proof_kind || game_id || π_hash || state_delta_hash || new_commitment || ack_chain_hash)`
+    ///
+    /// `proof_kind` 作为 1-byte 前缀插入 `chain_id` 之后 — **BREAKING**：破坏旧签名，
+    /// 升级时所有在途 `CheckinTx` 须在 `PRODUCTION_GRACE_BLOCKS` 内重提交或失效。
     pub fn signing_hash(
         &self,
         chain_id: crate::ChainId,
     ) -> Hash {
         let mut hasher = Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
         hasher.update(&chain_id.to_be_bytes());
+        hasher.update(&[self.proof_kind.to_byte()]); // v1.2 BREAKING — proof_kind 前缀
         hasher.update(&self.game_id.to_bytes());
         hasher.update(&self.proof_hash());
         hasher.update(&self.state_delta_hash());
@@ -191,6 +197,8 @@ pub struct PartialCheckinTx {
     pub ack_chain_partial: Vec<AckEntry>,
     /// scheme_id。
     pub scheme_id: u32,
+    /// proof_kind（v1.2 SubTask 11.2.6 — 与 `scheme_id` 双向映射，序列化策略与 `CheckinTx` 一致）。
+    pub proof_kind: super::zk_verifier::ProofKind,
 }
 
 impl PartialCheckinTx {
@@ -210,12 +218,15 @@ impl PartialCheckinTx {
         super::ack_chain::compute_ack_chain_partial_hash(&self.ack_chain_partial)
     }
 
-    /// 计算 partial_checkin tx 签名域哈希（R5-M6）。
+    /// 计算 partial_checkin tx 签名域哈希（R5-M6 + v1.2 SubTask 11.2.6 BREAKING）。
     ///
-    /// `hash(chain_id || game_id || π_partial_hash || folded_step_count || intermediate_commitment || ack_chain_partial_hash)`
+    /// `hash(chain_id || proof_kind || game_id || π_partial_hash || folded_step_count || intermediate_commitment || ack_chain_partial_hash)`
+    ///
+    /// `proof_kind` 作为 1-byte 前缀插入 `chain_id` 之后 — 序列化策略与 `CheckinTx` 一致（**BREAKING**）。
     pub fn signing_hash(&self, chain_id: crate::ChainId) -> Hash {
         let mut hasher = Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
         hasher.update(&chain_id.to_be_bytes());
+        hasher.update(&[self.proof_kind.to_byte()]); // v1.2 BREAKING — proof_kind 前缀
         hasher.update(&self.game_id.to_bytes());
         hasher.update(&self.proof_partial_hash());
         hasher.update(&self.folded_step_count.to_be_bytes());
@@ -256,12 +267,16 @@ pub fn execute_checkout(state: &OfflineState) -> Option<Hash> {
     Some(state.commitment())
 }
 
-/// 执行 checkin（SubTask 21.3）。
+/// 执行 checkin（SubTask 21.3 + v1.2 SubTask 11.2.4/11.2.5）。
 ///
 /// spec.md L665–669：
 /// 1. 链上 verifier 验证 π（含 ack_chain_hash + skip_count + segment_continuity_proof 校验）
 /// 2. 通过后应用 Δ 更新 Game 对象
 /// 3. 解锁 checkout 锁定
+///
+/// v1.2 SubTask 11.2.4：按 `scheme_id` 分派 verifier；`proof_kind` 与 `scheme_id` 不一致返回 `ProofKindMismatch`。
+/// v1.2 SubTask 11.2.5（v1.4 Min3-004 修正）：grace 期签名形式分派由 verifier 内部
+/// `verify_with_context` 实现（`SignatureFormMismatch` 兜底）。
 ///
 /// # 参数
 /// - `tx`：checkin tx
@@ -270,6 +285,8 @@ pub fn execute_checkout(state: &OfflineState) -> Option<Hash> {
 /// - `last_partial_fold`：若 has_partial_checkin=true，须提供
 /// - `max_skip_segments`：skip_count 上限（默认 3）
 /// - `max_ack_chain_length`：ack_chain 长度上限（默认 1000）
+/// - `ctx`：grace period + M2-003/004 所需的链上状态上下文（v1.2 SubTask 11.2.4）
+#[allow(clippy::too_many_arguments)] // 7 参数均为 spec 要求的安全校验参数
 pub fn execute_checkin(
     tx: &CheckinTx,
     registry: &ZkVerifierRegistry,
@@ -277,12 +294,26 @@ pub fn execute_checkin(
     last_partial_fold: Option<&LastPartialFold>,
     max_skip_segments: u32,
     max_ack_chain_length: u32,
+    ctx: &super::zk_verifier::ZkVerifyContext<'_>,
 ) -> Result<ZkVerifyResult, PokerL1Error> {
     // SEC2-M4：ack_chain 长度校验
     if tx.ack_chain.len() as u32 > max_ack_chain_length {
         return Err(PokerL1Error::AckChainLengthExceeded {
             actual: tx.ack_chain.len() as u32,
             limit: max_ack_chain_length,
+        });
+    }
+
+    // v1.2 SubTask 11.2.4：proof_kind 与 scheme_id 一致性校验
+    let expected_kind = super::zk_verifier::ProofKind::from_scheme_id(tx.scheme_id)
+        .ok_or_else(|| PokerL1Error::ProofKindMismatch {
+            declared: tx.proof_kind.to_byte(),
+            actual: tx.scheme_id as u8,
+        })?;
+    if expected_kind != tx.proof_kind {
+        return Err(PokerL1Error::ProofKindMismatch {
+            declared: tx.proof_kind.to_byte(),
+            actual: tx.scheme_id as u8,
         });
     }
 
@@ -322,18 +353,19 @@ pub fn execute_checkin(
         });
     }
 
-    // zk_verify
-    registry.zk_verify(
+    // zk_verify（v1.2 SubTask 11.2.4 — 带 grace period 上下文）
+    registry.zk_verify_with_context(
         chain_id,
         tx.scheme_id,
         &tx.proof,
         &public_io,
         max_skip_segments,
         max_ack_chain_length,
+        ctx,
     )
 }
 
-/// 处理 partial_checkin tx（SubTask 28.7a + Phase 8 M2-003）。
+/// 处理 partial_checkin tx（SubTask 28.7a + Phase 8 M2-003 + v1.2 SubTask 11.2.4/11.2.6）。
 ///
 /// 返回更新后的 `LastPartialFold`。
 ///
@@ -346,7 +378,12 @@ pub fn execute_checkin(
 ///   - 覆盖已有值返回 `PartialFoldHashImmutable` 错误
 /// - **v1.4 Min3-003**：幂等重提交范围 = 整个 `PartialCheckinTx` 内容幂等
 ///   （`proof_partial_hash` + `intermediate_commitment` + `ack_chain_partial` 全部相等）
-#[allow(clippy::too_many_arguments)] // 8 参数均为 spec 要求的安全校验参数
+/// - **v1.2 SubTask 11.2.4**：`proof_kind` 与 `scheme_id` 一致性校验（不一致返回 `ProofKindMismatch`）
+/// - **v1.2 SubTask 11.2.6**：`proof_kind` 字段进入 `signing_hash`（BREAKING）
+///
+/// # 参数
+/// - `ctx`：grace period + M2-003/004 所需的链上状态上下文（v1.2 SubTask 11.2.4）
+#[allow(clippy::too_many_arguments)] // 9 参数均为 spec 要求的安全校验参数
 pub fn execute_partial_checkin(
     tx: &PartialCheckinTx,
     registry: &ZkVerifierRegistry,
@@ -356,7 +393,21 @@ pub fn execute_partial_checkin(
     max_partial_checkin_count: u32,
     max_skip_segments: u32,
     max_ack_chain_length: u32,
+    ctx: &super::zk_verifier::ZkVerifyContext<'_>,
 ) -> Result<LastPartialFold, PokerL1Error> {
+    // v1.2 SubTask 11.2.4：proof_kind 与 scheme_id 一致性校验（先于其他校验，提前失败）
+    let expected_kind = super::zk_verifier::ProofKind::from_scheme_id(tx.scheme_id)
+        .ok_or_else(|| PokerL1Error::ProofKindMismatch {
+            declared: tx.proof_kind.to_byte(),
+            actual: tx.scheme_id as u8,
+        })?;
+    if expected_kind != tx.proof_kind {
+        return Err(PokerL1Error::ProofKindMismatch {
+            declared: tx.proof_kind.to_byte(),
+            actual: tx.scheme_id as u8,
+        });
+    }
+
     // SEC-H1：提交次数上限
     if partial_checkin_count >= max_partial_checkin_count {
         return Err(PokerL1Error::PartialCheckinLimitExceeded {
@@ -379,13 +430,11 @@ pub fn execute_partial_checkin(
                 return Ok(prev.clone());
             }
             // proof_partial_hash 匹配但其他字段不一致 — 视为覆盖，拒绝（Min3-003）
-            return Err(PokerL1Error::PartialFoldHashImmutable);
-        } else {
-            // proof_partial_hash 不匹配 — 覆盖已有值，拒绝（M2-003）
-            // spec：last_partial_fold.proof_partial_hash 一旦写入即冻结，
-            // 后续 PartialCheckinTx 不允许覆盖已存的 proof_partial_hash 字段
-            return Err(PokerL1Error::PartialFoldHashImmutable);
         }
+        // proof_partial_hash 不匹配或匹配但非幂等 — 均视为覆盖，拒绝（M2-003 + Min3-003）
+        // spec：last_partial_fold.proof_partial_hash 一旦写入即冻结，
+        // 后续 PartialCheckinTx 不允许覆盖已存的 proof_partial_hash 字段
+        return Err(PokerL1Error::PartialFoldHashImmutable);
     }
 
     // SEC-H1：进度校验（仅首次设置时执行，因 prev 已在上方处理）
@@ -410,14 +459,15 @@ pub fn execute_partial_checkin(
         segment_continuity_proof: Vec::new(),
     };
 
-    // zk_verify π_partial
-    let result = registry.zk_verify(
+    // zk_verify π_partial（v1.2 SubTask 11.2.4 — 带 grace period 上下文）
+    let result = registry.zk_verify_with_context(
         chain_id,
         tx.scheme_id,
         &tx.proof_partial,
         &public_io,
         max_skip_segments,
         max_ack_chain_length,
+        ctx,
     )?;
 
     if !result.verified {
@@ -455,10 +505,23 @@ mod tests {
     use super::*;
     use crate::offline::ack_chain::AckEntry;
     use crate::offline::groth16::register_groth16_verifier;
-    use crate::offline::hypernova::register_hypernova_verifier;
+    use crate::offline::hypernova::{register_hypernova_verifier, register_zkshuffle_verifier};
     use crate::offline::ipa::register_ipa_verifier;
-    use crate::offline::zk_verifier::VerifierStatus;
+    use crate::offline::zk_verifier::{
+        ProofKind, VerifierStatus, ZkVerifyContext, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE,
+    };
     use crate::offline::{DEFAULT_MAX_ACK_CHAIN_LENGTH, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT};
+
+    /// 构造默认 ZkVerifyContext（切换前 + Zkvm 新签名）— 既有 scheme_id=1 测试用。
+    fn make_default_ctx() -> ZkVerifyContext<'static> {
+        ZkVerifyContext {
+            current_height: 0,
+            production_switch_height: 0, // 切换前
+            grace_blocks: 7200,
+            last_partial_proof_hash: None,
+            uses_new_signature: true, // Zkvm 期望新签名
+        }
+    }
 
     fn make_offline_state(mode: ExecutionMode) -> OfflineState {
         OfflineState {
@@ -557,6 +620,7 @@ mod tests {
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
         };
 
@@ -574,6 +638,7 @@ mod tests {
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
         };
 
@@ -593,6 +658,7 @@ mod tests {
             new_commitment: [0xCC; 32],
             ack_chain: ack_chain.clone(),
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
         };
 
@@ -635,6 +701,7 @@ mod tests {
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
             scheme_id: 1, // Hypernova
+            proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
         };
 
@@ -645,6 +712,7 @@ mod tests {
             None,
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
         )
         .expect("checkin 应成功");
 
@@ -663,6 +731,7 @@ mod tests {
             new_commitment: [0xCC; 32],
             ack_chain,
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
         };
 
@@ -673,6 +742,7 @@ mod tests {
             None,
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
         );
         assert!(matches!(result, Err(PokerL1Error::AckChainLengthExceeded { .. })));
     }
@@ -687,6 +757,7 @@ mod tests {
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
             has_partial_checkin: true,
         };
 
@@ -697,6 +768,7 @@ mod tests {
             None,
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
         );
         assert!(matches!(result, Err(PokerL1Error::PartialCheckinMismatch(_))));
     }
@@ -711,6 +783,7 @@ mod tests {
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
         };
 
@@ -728,6 +801,7 @@ mod tests {
             Some(&last_partial_fold),
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
         );
         assert!(matches!(result, Err(PokerL1Error::PartialCheckinFlagMismatch { .. })));
     }
@@ -741,6 +815,7 @@ mod tests {
             intermediate_commitment: [0xBB; 32],
             ack_chain_partial: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
         };
 
         let h1 = tx.signing_hash(crate::DEFAULT_CHAIN_ID);
@@ -758,6 +833,7 @@ mod tests {
             intermediate_commitment: [0xBB; 32],
             ack_chain_partial: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
         };
 
         let result = execute_partial_checkin(
@@ -769,6 +845,7 @@ mod tests {
             DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
         )
         .expect("partial_checkin 应成功");
 
@@ -795,6 +872,7 @@ mod tests {
             intermediate_commitment: [0xBB; 32],
             ack_chain_partial: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
         };
 
         let result = execute_partial_checkin(
@@ -806,6 +884,7 @@ mod tests {
             DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
         );
         // M2-003：proof_partial_hash 不匹配 → PartialFoldHashImmutable（优先于 NoProgressPartialCheckin）
         assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
@@ -821,6 +900,7 @@ mod tests {
             intermediate_commitment: [0xBB; 32],
             ack_chain_partial: vec![make_ack_entry(1)],
             scheme_id: 1,
+            proof_kind: ProofKind::Zkvm,
         };
 
         let result = execute_partial_checkin(
@@ -832,7 +912,192 @@ mod tests {
             DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
         );
         assert!(matches!(result, Err(PokerL1Error::PartialCheckinLimitExceeded { .. })));
+    }
+
+    // ===== SubTask 11.2.7：proof_kind 一致性集成测试 =====
+
+    /// SubTask 11.2.7：scheme_id=1 + proof_kind=Zkvm + 合法 proof → 通过。
+    ///
+    /// 验证 `execute_checkin` 在 proof_kind 与 scheme_id 一致时正常分派到
+    /// Hypernova verifier 的 stub 路径。
+    #[test]
+    fn test_execute_checkin_zkvm_proof_kind_consistency() {
+        let registry = make_registry_with_all_verifiers();
+        let tx = CheckinTx {
+            game_id: ObjectID::new([0x01; 20], 1),
+            proof: vec![0xAA; 64],
+            state_delta: vec![0xBB; 32],
+            new_commitment: [0xCC; 32],
+            ack_chain: vec![make_ack_entry(1)],
+            scheme_id: SCHEME_HYPERNOVA,
+            proof_kind: ProofKind::Zkvm,
+            has_partial_checkin: false,
+        };
+
+        let result = execute_checkin(
+            &tx,
+            &registry,
+            crate::DEFAULT_CHAIN_ID,
+            None,
+            3,
+            DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
+        )
+        .expect("scheme_id=1 + proof_kind=Zkvm 一致时应成功");
+
+        assert!(result.verified, "Stub 状态下合法 proof 应验证通过");
+        assert_eq!(result.scheme_id, SCHEME_HYPERNOVA);
+        assert_eq!(result.verifier_status, VerifierStatus::Stub);
+    }
+
+    /// SubTask 11.2.7：scheme_id=4 + proof_kind=ZkShuffle + grace 期 ctx + 匹配
+    /// `last_partial_proof_hash` → 通过 stub 路径。
+    ///
+    /// 验证 `execute_checkin` 在 ZkShuffle proof 的 grace 期 stub 路径下，
+    /// `proof_hash` 匹配链上 `last_partial_fold.proof_partial_hash` 时通过（M2-003）。
+    #[test]
+    fn test_execute_checkin_zkshuffle_proof_kind_consistency() {
+        let mut registry = make_registry_with_all_verifiers();
+        register_zkshuffle_verifier(&mut registry);
+
+        let tx = CheckinTx {
+            game_id: ObjectID::new([0x01; 20], 1),
+            proof: vec![0xAA; 64],
+            state_delta: vec![0xBB; 32],
+            new_commitment: [0xCC; 32],
+            ack_chain: vec![make_ack_entry(1)],
+            scheme_id: SCHEME_ZKSHUFFLE,
+            proof_kind: ProofKind::ZkShuffle,
+            has_partial_checkin: false,
+        };
+
+        // grace 期 ctx：uses_new_signature=false（ZkShuffle 旧签名），
+        // last_partial_proof_hash 须匹配 tx.proof_hash()（M2-003）
+        let proof_hash = tx.proof_hash();
+        let ctx = ZkVerifyContext {
+            current_height: 100,
+            production_switch_height: 100,
+            grace_blocks: 7200,
+            last_partial_proof_hash: Some(&proof_hash),
+            uses_new_signature: false,
+        };
+
+        let result = execute_checkin(
+            &tx,
+            &registry,
+            crate::DEFAULT_CHAIN_ID,
+            None,
+            3,
+            DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &ctx,
+        )
+        .expect("grace 期 ZkShuffle + 匹配 proof_hash 时应成功");
+
+        assert!(result.verified, "grace 期 ZkShuffle stub 路径应验证通过");
+        assert_eq!(result.scheme_id, SCHEME_ZKSHUFFLE);
+        assert_eq!(result.verifier_status, VerifierStatus::Stub);
+    }
+
+    // ===== SubTask 11.2.8：proof_kind 健壮性负测试 =====
+
+    /// SubTask 11.2.8：scheme_id=1 + proof_kind=ZkShuffle → ProofKindMismatch。
+    ///
+    /// 验证 `execute_checkin` 在 proof_kind 与 scheme_id 不一致时拒绝执行，
+    /// 防止攻击者通过操纵 proof_kind 字段绕过签名形式校验（M2-004）。
+    #[test]
+    fn test_execute_checkin_proof_kind_mismatch() {
+        let registry = make_registry_with_all_verifiers();
+        let tx = CheckinTx {
+            game_id: ObjectID::new([0x01; 20], 1),
+            proof: vec![0xAA; 64],
+            state_delta: vec![0xBB; 32],
+            new_commitment: [0xCC; 32],
+            ack_chain: vec![make_ack_entry(1)],
+            scheme_id: SCHEME_HYPERNOVA,
+            proof_kind: ProofKind::ZkShuffle,
+            has_partial_checkin: false,
+        };
+
+        let result = execute_checkin(
+            &tx,
+            &registry,
+            crate::DEFAULT_CHAIN_ID,
+            None,
+            3,
+            DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
+        );
+
+        assert!(
+            matches!(result, Err(PokerL1Error::ProofKindMismatch { .. })),
+            "scheme_id=1 + proof_kind=ZkShuffle 不一致应返回 ProofKindMismatch"
+        );
+    }
+
+    /// SubTask 11.2.8：scheme_id=99（未知）→ ProofKindMismatch。
+    ///
+    /// 验证 `execute_checkin` 在 scheme_id 无法映射到任何 ProofKind 时拒绝执行，
+    /// 防止未知 scheme_id 绕过 proof_kind 一致性校验。
+    #[test]
+    fn test_execute_checkin_unknown_scheme_id() {
+        let registry = make_registry_with_all_verifiers();
+        let tx = CheckinTx {
+            game_id: ObjectID::new([0x01; 20], 1),
+            proof: vec![0xAA; 64],
+            state_delta: vec![0xBB; 32],
+            new_commitment: [0xCC; 32],
+            ack_chain: vec![make_ack_entry(1)],
+            scheme_id: 99,
+            proof_kind: ProofKind::Zkvm,
+            has_partial_checkin: false,
+        };
+
+        let result = execute_checkin(
+            &tx,
+            &registry,
+            crate::DEFAULT_CHAIN_ID,
+            None,
+            3,
+            DEFAULT_MAX_ACK_CHAIN_LENGTH,
+            &make_default_ctx(),
+        );
+
+        assert!(
+            matches!(result, Err(PokerL1Error::ProofKindMismatch { .. })),
+            "未知 scheme_id=99 应返回 ProofKindMismatch"
+        );
+    }
+
+    /// SubTask 11.2.8：proof_kind 作为 1-byte 前缀进入 `signing_hash` — 同一 tx
+    /// 仅 proof_kind 不同 → signing_hash 不同。
+    ///
+    /// 验证 v1.2 BREAKING 变更：proof_kind 前缀确实影响了签名域哈希，
+    /// 防止旧签名被复用到不同 proof_kind 的 tx 上（签名域隔离）。
+    #[test]
+    fn test_checkin_tx_signing_hash_includes_proof_kind() {
+        let base_tx = CheckinTx {
+            game_id: ObjectID::new([0x01; 20], 1),
+            proof: vec![0xAA; 64],
+            state_delta: vec![0xBB; 32],
+            new_commitment: [0xCC; 32],
+            ack_chain: vec![make_ack_entry(1)],
+            scheme_id: SCHEME_HYPERNOVA,
+            proof_kind: ProofKind::Zkvm,
+            has_partial_checkin: false,
+        };
+
+        let hash_zkvm = base_tx.signing_hash(crate::DEFAULT_CHAIN_ID);
+
+        let mut zkshuffle_tx = base_tx;
+        zkshuffle_tx.proof_kind = ProofKind::ZkShuffle;
+        let hash_zkshuffle = zkshuffle_tx.signing_hash(crate::DEFAULT_CHAIN_ID);
+
+        assert_ne!(
+            hash_zkvm, hash_zkshuffle,
+            "不同 proof_kind 应产生不同 signing_hash（proof_kind 作为 1-byte 前缀）"
+        );
     }
 }

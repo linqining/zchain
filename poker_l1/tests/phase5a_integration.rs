@@ -8,6 +8,7 @@
 //! - SubTask 42.5：链下折叠（CCS fold loop + ZkShuffleCcsCircuit）
 
 use poker_l1::offline::ack_chain::{compute_ack_chain_hash, AckEntry};
+#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
 use poker_l1::offline::ccs::{
     fold_loop, fold_step, CcsCircuit, CcsInstance, ZkShuffleCcsCircuit,
 };
@@ -21,10 +22,11 @@ use poker_l1::offline::hypernova::{
 use poker_l1::offline::ipa::{register_ipa_verifier, IpaProof, IpaVerifier, IPA_PROOF_MIN_SIZE};
 use poker_l1::offline::state::{
     check_offchain_allowed, execute_checkin, execute_checkout, execute_partial_checkin,
-    CheckinTx, ExecutionMode, LastPartialFold, OfflineState, PartialCheckinTx,
+    CheckinTx, ExecutionMode, OfflineState, PartialCheckinTx,
 };
 use poker_l1::offline::zk_verifier::{
-    VerifierStatus, ZkPublicIo, ZkVerifierRegistry, SCHEME_GROTH16, SCHEME_HYPERNOVA, SCHEME_IPA,
+    ProofKind, VerifierStatus, ZkPublicIo, ZkVerifyContext, ZkVerifierRegistry, SCHEME_GROTH16,
+    SCHEME_HYPERNOVA, SCHEME_IPA,
 };
 use poker_l1::offline::{
     DEFAULT_MAX_ACK_CHAIN_LENGTH, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT, MAX_FOLD_STEP_COUNT,
@@ -41,6 +43,17 @@ fn make_full_registry() -> ZkVerifierRegistry {
     register_groth16_verifier(&mut registry);
     register_ipa_verifier(&mut registry);
     registry
+}
+
+/// 构造默认 ZkVerifyContext（切换前 + Zkvm 新签名）— v1.2 SubTask 11.2.4 接线用。
+fn make_default_ctx() -> ZkVerifyContext<'static> {
+    ZkVerifyContext {
+        current_height: 0,
+        production_switch_height: 0, // 切换前
+        grace_blocks: 7200,
+        last_partial_proof_hash: None,
+        uses_new_signature: true, // Zkvm 期望新签名
+    }
 }
 
 /// 构造合法 ZkPublicIo（fold_step_count=1, skip_count=0）。
@@ -157,6 +170,7 @@ fn subtask_42_1_checkin_tx_with_valid_proof_succeeds() {
         new_commitment,
         ack_chain: ack_entries,
         scheme_id: SCHEME_HYPERNOVA,
+        proof_kind: ProofKind::Zkvm,
         has_partial_checkin: false,
     };
 
@@ -179,6 +193,7 @@ fn subtask_42_1_checkin_tx_with_valid_proof_succeeds() {
         None,
         3,
         DEFAULT_MAX_ACK_CHAIN_LENGTH,
+        &make_default_ctx(),
     )
     .expect("checkin 应成功");
 
@@ -202,6 +217,7 @@ fn subtask_42_1_checkin_tx_ack_chain_too_long_rejected() {
         new_commitment: [0xBB; 32],
         ack_chain: ack_entries,
         scheme_id: SCHEME_HYPERNOVA,
+        proof_kind: ProofKind::Zkvm,
         has_partial_checkin: false,
     };
 
@@ -212,6 +228,7 @@ fn subtask_42_1_checkin_tx_ack_chain_too_long_rejected() {
         None,
         3,
         3, // max_ack_chain_length=3，但 ack_chain 有 5 个
+        &make_default_ctx(),
     );
 
     assert!(result.is_err(), "ack_chain 过长应被拒绝");
@@ -228,6 +245,7 @@ fn subtask_42_1_checkin_tx_partial_checkin_mismatch_rejected() {
         new_commitment: [0xBB; 32],
         ack_chain: vec![make_ack_entry(1, 0xAA)],
         scheme_id: SCHEME_HYPERNOVA,
+        proof_kind: ProofKind::Zkvm,
         has_partial_checkin: true, // 声明有 partial 但不提供 last_partial_fold
     };
 
@@ -238,6 +256,7 @@ fn subtask_42_1_checkin_tx_partial_checkin_mismatch_rejected() {
         None, // 缺失 last_partial_fold
         3,
         DEFAULT_MAX_ACK_CHAIN_LENGTH,
+        &make_default_ctx(),
     );
 
     assert!(result.is_err(), "partial_checkin 不一致应被拒绝");
@@ -245,30 +264,24 @@ fn subtask_42_1_checkin_tx_partial_checkin_mismatch_rejected() {
 
 #[test]
 fn subtask_42_1_partial_checkin_progress_succeeds() {
-    // 构造合法 PartialCheckinTx + LastPartialFold → execute_partial_checkin 成功
+    // 构造合法 PartialCheckinTx（首次提交，无 last_partial_fold）→ execute_partial_checkin 成功
+    // 注：M2-003 约束下，proof_partial_hash 一旦写入即不可变，故 "progress" 场景
+    // 仅适用于首次提交（last_partial_fold=None）。后续提交须为幂等重提交。
     let registry = make_full_registry();
-    let intermediate = [0x11; 32];
     let new_intermediate = [0x22; 32];
 
     let ack_entries = vec![make_ack_entry(1, 0xAA)];
-    let ack_chain_partial_hash = compute_ack_chain_hash(&ack_entries);
-
-    let last_partial = LastPartialFold {
-        intermediate_commitment: intermediate,
-        folded_step_count: 1,
-        proof_partial_hash: [0u8; 32],
-        ack_chain_partial_hash,
-    };
 
     let proof = vec![0xEE; HYPERNOVA_PROOF_MIN_SIZE];
 
     let tx = PartialCheckinTx {
         game_id: ObjectID::new([0x42; 20], 1),
         proof_partial: proof,
-        folded_step_count: 2, // 必须严格大于 last_partial.folded_step_count（=1）
+        folded_step_count: 2,
         intermediate_commitment: new_intermediate,
         ack_chain_partial: ack_entries,
         scheme_id: SCHEME_HYPERNOVA,
+        proof_kind: ProofKind::Zkvm,
     };
 
     // 验证 partial_checkin 签名哈希确定性
@@ -280,15 +293,16 @@ fn subtask_42_1_partial_checkin_progress_succeeds() {
         &tx,
         &registry,
         poker_l1::DEFAULT_CHAIN_ID,
-        Some(&last_partial),
-        0, // partial_checkin_count（首次）
+        None, // 首次提交，无 last_partial_fold
+        0,    // partial_checkin_count（首次）
         DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
         3, // max_skip_segments
         DEFAULT_MAX_ACK_CHAIN_LENGTH,
+        &make_default_ctx(),
     )
     .expect("partial_checkin 应成功");
 
-    assert_eq!(result.folded_step_count, 2, "step_count 应从 1 → 2");
+    assert_eq!(result.folded_step_count, 2, "step_count 应为 2");
     assert_eq!(result.intermediate_commitment, new_intermediate);
 }
 
@@ -941,6 +955,7 @@ fn subtask_42_5_fold_loop_max_boundary_accepted() {
 }
 
 #[test]
+#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
 fn subtask_42_5_zk_shuffle_ccs_circuit_trait() {
     // ZkShuffleCcsCircuit 实现 CcsCircuit trait
     let circuit = ZkShuffleCcsCircuit::new();
@@ -966,6 +981,7 @@ fn subtask_42_5_zk_shuffle_ccs_circuit_trait() {
 }
 
 #[test]
+#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
 fn subtask_42_5_zk_shuffle_circuit_consumed_by_fold_loop() {
     // 端到端：ZkShuffleCcsCircuit → to_instance → fold_loop
     let circuit = ZkShuffleCcsCircuit::new();
@@ -1039,6 +1055,7 @@ fn subtask_42_5_fold_loop_produces_valid_public_io_for_checkin() {
         new_commitment: fold_result.public_io.final_commitment,
         ack_chain: ack_entries,
         scheme_id: SCHEME_HYPERNOVA,
+        proof_kind: ProofKind::Zkvm,
         has_partial_checkin: false,
     };
 
@@ -1050,6 +1067,7 @@ fn subtask_42_5_fold_loop_produces_valid_public_io_for_checkin() {
         None,
         3,
         DEFAULT_MAX_ACK_CHAIN_LENGTH,
+        &make_default_ctx(),
     )
     .expect("checkin 应成功");
 

@@ -315,9 +315,9 @@
 
 - **CCS 数据结构**（Step 1）：`SparseMatrix`（COO 格式）+ `Ccs`（矩阵 M_j / 子集 S_i / 系数 c_i）+ `CcsInstance`（ccs + witness + public_inputs）。`satisfied_by(z)` 校验 `Σ_i c_i · Π_{j∈S_i} ⟨M_j, z⟩ = 0`。
 - **双 trait 设计**（Step 2）：`PrecompileCircuit`（约束结构 + witness 赋值 + gas 计费）+ `CcsCircuit`（实例生成，Fr-based 新签名，从 poker_l1 迁移）。
-- **Poseidon 电路**（Step 3）：MVP 实现 S-box `x^5 = x·x·x·x·x` 的 4 约束（5 个 witness 变量 x/x2/x3/x4/x5），与 host `poseidon_hash_bytes` 输出一致。
-- **SHA-256 电路**（Step 4）：MVP 实现 Ch 函数 `Ch(x,y,z) = (x&y) ⊕ (¬x&z)` 的 3 约束（6 个 witness 变量），与 `sha2::Sha256::digest` 一致。
-- **ECDSA 电路**（Step 5）：MVP 实现 double-and-add 单步（3 约束：bit 范围检查 + 条件乘法 + 条件加法，7 个 row-isolated 矩阵），secp256k1 曲线，gas=100_000。
+- **Poseidon 电路**（Step 3）：MVP 实现 S-box `x^5 = x^4·x` 的 3 行约束（6 subsets / 7 row-isolated 矩阵 / 5 个 witness 变量 `[1, x, x2, x4, x5]`），与 `ark_bn254::Fr` 的 `x^5` 一致（完整 permutation + host `poseidon_hash_bytes` 一致性延至 Phase 12+）。
+- **SHA-256 电路**（Step 4）：MVP 实现 Ch 函数 `Ch(x,y,z) = z + x·(y-z)` 的 2 行约束（6 subsets / 7 row-isolated 矩阵 / 6 个 witness 变量 `[1, x, y, z_var, y_minus_z, ch]`），Ch 输出与 bitwise Ch 一致；host `sha2` crate known vectors 已验证（完整 64-round compression 延至 Phase 12+）。
+- **ECDSA 电路**（Step 5）：MVP 实现 double-and-add 单步的 3 行约束（7 subsets / 7 row-isolated 矩阵 / 6 个 witness 变量 `[1, bit, R, P, bit_P, R_new]`：bit 范围检查 + 条件乘法 + 条件加法），secp256k1 曲线，gas=100_000（完整 256-step 标量乘 + verify equation ~110k 约束延至 Phase 12+）。
 - **ZkShuffle 迁移**（Step 6）：stub 实现（`assign_witness` 和 `to_ccs_instance` 返回 `Err("Phase 11 pending")`），poker_l1 旧类型标记 `#[deprecated]`。
 - **行隔离原则**：每个矩阵只在单行有非零条目，同变量在不同行需不同矩阵。
 
@@ -658,3 +658,39 @@
 ### Phase 8 完成状态
 
 - Phase 8 已完成（13 个 Step 全部实现，poker_zkvm 651 lib tests + poker_l1 1271 lib tests 通过，clippy lib 零错误，链上 Verifier Production 完整实现：CCS 序列化 + serialize/deserialize_proof v2 + verify_production + HypernovaVerifier Production 分支 + ZkShuffleVerifier grace 期双通道 + M2-003 proof_partial_hash 不可变 + M2-004 签名形式校验 + 12 个 Phase 8 集成测试）
+
+---
+
+## Phase 9 — CycleFold 递归聚合
+
+### 推荐方案（已实现）— MVP 原生验证 + 电路定义
+
+- **Task 9.1 + 9.2**：完整实现 — `cyclic/mod.rs` 曲线 cycle 抽象（`CycleCurve` trait + `Bn254GrumpkinCycle` + cycle 性质运行时校验）+ `recursion/mod.rs` CycleFold 树形聚合（`CycleFoldNode` + `aggregate` + `tree_aggregate` + 递归终止条件 + 原生验证）
+- **Task 9.3 + 9.4**：电路结构定义（`RecursiveVerifierCircuit` trait + `CircuitBn254` / `CircuitGrumpkin` + 6 条约束文档化 + 约束数估算 100k-200k）+ 原生验证模拟（`verify_native` 委托到 `verify_hypernova`）。真实 R1CS / PLONKish 电路编译推迟到 Phase 12/13。
+- **理由**：与 Phase 8 一致（`verify_production` 也是原生验证而非电路内验证）；spec L590/L599 明确将"递归电路本身的 SNARK 证明"推迟到 Phase 12/13（Spartan / Groth16 压缩）。
+
+### 备选方案 A — 完整 arkworks R1CS 电路
+
+- **描述**：添加 `ark-r1cs-std` + `ark-relations` 依赖，实现真实 R1CS 约束（EC 点算术 + IPA verify + sumcheck verify）。
+- **未选理由**：10-20 万约束/层，工作量巨大；arkworks R1CS EC 算术复杂；Phase 12/13 才需真实 SNARK；MVP 阶段原生验证已提供 soundness 保证。
+
+### 备选方案 B — halo2 PLONKish 电路
+
+- **描述**：使用 `halo2_proofs` 实现 PLONKish 电路。
+- **未选理由**：与 arkworks 栈不一致；alternatives 文档 Phase 0 已拒绝 halo2（Hypernova 折叠生态在 arkworks 更成熟）。
+
+### 备选方案 C — 递归聚合返回 CycleFoldNode 而非 HypernovaProof
+
+- **描述**：`aggregate` 返回树结构而非单个 proof。
+- **未选理由**：tasks.md 签名要求返回 `HypernovaProof`；树结构作为 `tree_aggregate` 的内部实现，`aggregate` 从树根提取 proof。
+
+### Implementation Discovered（实现中发现）
+
+1. **`verify_hypernova` 需真实 IPA commitment** — `fold_loop` 的 `initial_commitment` 参数若使用 stub（`G1Affine::generator()`），最终 `witness_commitment = stub + r·C_C` 不匹配实际 folded witness，导致 `pcs.verify` 失败。测试辅助函数 `make_proof` 须使用 `commit_witness(pcs, &z_l)` 构造真实 commitment（参考 `fold_loop.rs` L557-587 的 `test_verify_hypernova_linear_ccs_valid`）。
+2. **`recursion/mod.rs` 从单文件转为目录模块** — Phase 13 占位为单文件 `recursion/mod.rs`，Phase 9 需添加 `circuit_bn254.rs` / `circuit_grumpkin.rs` 子模块，转为目录模块。Phase 13 的 Spartan/Groth16 压缩逻辑将在 `recursion/` 下新增子模块（如 `recursion/spartan.rs`），不与 Phase 9 冲突。
+3. **曲线交替规则** — 叶节点为 BN254（HypernovaProof 基于 BN254 IPA PCS），depth 1 = Grumpkin（C_Grumpkin 验证 BN254 叶 proofs），depth 2 = BN254，依此类推。奇数 depth = Grumpkin，偶数 depth = Bn254。
+4. **MVP `aggregated_proof` 取左子树 proof** — 真实 CycleFold 压缩需 SNARK 电路将两个子 proof 压缩为一个更小的 proof。MVP 阶段 `aggregated_proof = left.proof().clone()`，仅验证所有 sub-proof 的 soundness，不压缩 proof 大小。
+
+### Phase 9 完成状态
+
+- Phase 9 已完成（Task 9.1/9.2/9.3/9.4 全部实现，poker_zkvm 693 lib tests 通过（+36 新增 Phase 9 测试），clippy lib 零警告，CycleFold 树形聚合 + 递归终止条件 + C_BN254/C_Grumpkin 电路定义 + 6 条约束文档化 + 原生验证模拟）

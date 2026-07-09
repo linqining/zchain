@@ -41,3 +41,4 @@ hex = { workspace = true }
 name = "phase12_benchmarks"
 harness = false
 path = "benches/phase12_benchmarks.rs"
+required-features = ["test-helpers"]

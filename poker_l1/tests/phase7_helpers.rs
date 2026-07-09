@@ -240,6 +240,7 @@ pub fn make_rake_config() -> RakeConfig {
 
 /// 构造 OnChain 模式 GameContract。
 #[must_use]
+#[allow(dead_code)] // 保留供未来测试使用
 pub fn make_onchain_game(last_action_height: BlockHeight) -> GameContract {
     let mut game = GameContract::new(
         make_game_id(0x01, 1),

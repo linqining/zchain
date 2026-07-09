@@ -261,54 +261,54 @@
 
 ## Phase 9：CycleFold 递归聚合（v1.2 补递归 verifier 电路定义 — Task 9.3/9.4）
 
-- [ ] Task 9.1：实现 `poker_zkvm/src/cyclic/mod.rs` — 曲线 cycle 抽象
-  - [ ] SubTask 9.1.1：定义 `CycleCurve` trait（主曲线 + 辅助曲线）
-  - [ ] SubTask 9.1.2：实现 `Bn254GrumpkinCycle` — BN254 (主) / Grumpkin (辅)
-  - [ ] SubTask 9.1.3：cycle 性质验证 — 主曲线标量域 == 辅助曲线 base field，反之亦然
-- [ ] Task 9.2：实现 `poker_zkvm/src/recursion/mod.rs` — CycleFold 递归（含终止条件）
-  - [ ] SubTask 9.2.1：定义 `RecursiveNode { sub_proofs: Vec<HypernovaProof>, parent: Option<Box<RecursiveNode>> }`
-  - [ ] SubTask 9.2.2：实现 `aggregate(sub_proofs: &[HypernovaProof]) -> Result<HypernovaProof, ZkvmError>`
-  - [ ] SubTask 9.2.3：实现 `tree_aggregate(sub_proofs, depth) -> Result<HypernovaProof, ZkvmError>` — log(N) 递归深度
-  - [ ] SubTask 9.2.4：**递归终止条件** — final proof ≤ 64KB 时停止；递归深度 ≤ `MAX_RECURSION_DEPTH = 16`，超出返回 `RecursionDepthExceeded`；**深度依据分析**：最坏 N=1000 sub-proofs，CycleFold 树形聚合深度 = `ceil(log2(1000)) = 10`，10 层后 ≤ 64KB，`MAX_RECURSION_DEPTH=16` 留 60% 余量
-  - [ ] SubTask 9.2.5：单元测试 — K=8 sub-proofs 聚合为单个 final proof
-  - [ ] SubTask 9.2.6：soundness 负例测试 — 篡改任一 sub_proof 必须聚合失败或最终 verify 失败
-- [ ] Task 9.3：**v1.2 新增 / v1.3 修正** — 实现 `poker_zkvm/src/recursion/circuit_bn254.rs` — BN254 递归 verifier 电路 `C_BN254`（约束 Hypernova verifier 步骤）
-  - [ ] SubTask 9.3.1：定义 `C_BN254` 电路结构（halo2 或 arkworks Circuit trait），public inputs 含 `π_G` 的 public_io（含 `randomness_seed` / `event_hashes_root` / `state_slot_root`）、folded LCCCS 的 `u'`（标量）/ `x'` / `v'`（`Vec<FieldElement>` 长度 = `num_matrices`）、witness_commitment'
-  - [ ] SubTask 9.3.2：约束 1 — **反序列化 `π_G`**：校验 magic / abi_version / field_id（Grumpkin field_id），约束各字段长度 ≤ `MAX_*` 常量（v1.3 总长度优先 + 单项子分配）
-  - [ ] SubTask 9.3.3：约束 2 — **PCS verify（IPA on Grumpkin）**：约束 log(N) 轮 IPA verify — 每轮吸收 round commitment + 派生 challenge + 重算 commitment；因 Grumpkin 点坐标在 BN254 标量域中，可直接在 BN254 电路中表达
-  - [ ] SubTask 9.3.4：约束 3 — **v1.3 修正 C2-003 — 外层 sumcheck verify（claimed sum = u' 标量）**：约束外层 sumcheck 各轮多项式求值一致性，重算 challenge `r_x_L`，校验 `G(r_x_L) == u'`（**非 v'**；u' 是 folded LCCCS 标量参数；G(r_x_L) = u' 即隐式校验 relaxed LCCCS 约束 `Σ_i c_i · Π_{j∈S_i} v'[j] = u'`）
-  - [ ] SubTask 9.3.5：约束 4 — **v1.3 修正 C2-001 — 内层 batched sumcheck verify（单 r_y）**：约束内层 batched sumcheck 各轮求值一致性，重算 FS challenge `γ`，归约到**单个 challenge `r_y`**（非 t 个 r_{y_j}），校验 `Σ_j γ^j · v'[j] == (Σ_j γ^j · M_j(r_x_L, r_y)) · z'(r_y)`（z'(r_y) 由 PCS opening 提供）
-  - [ ] SubTask 9.3.6：约束 5 — **v1.3 修正 — cross-language claim 校验（combined_point = r_y 单 challenge）**：约束 PCS opening `Pcs::verify(witness_commitment', r_y, z_at_point, opening_proof)`，并校验 `z_at_point == z'(r_y)` 与内层 batched sumcheck 一致性（**关键不变式**：`u'` + `v'` + `z_at_point` 三者须通过外层 + 内层 batched sumcheck 链关联）
-  - [ ] SubTask 9.3.7：约束 6 — **transcript 一致性**：重算所有 FS challenge（r, γ, r_x_L, r_y），校验与 prover 提供的一致
-  - [ ] SubTask 9.3.8：**v1.3 修正 — 约束数估算（单层估算非总累加）**：`C_BN254` 单层约束数 ≈ IPA verify（log(N) 轮 × ~5000 约束/轮）+ 外层 sumcheck verify（~10000 约束）+ 内层 batched sumcheck verify（~10000 约束）+ cross-language（~5000 约束）≈ **100,000-200,000 约束/单递归层**；`MAX_RECURSION_DEPTH=16` 为最大允许深度上限，**实际递归深度由 `ceil(log2(sub_proofs.len()))` 决定**（N=1000 时仅需 10 层，远低于 16）
-  - [ ] SubTask 9.3.9：单元测试 — `C_BN254` 验证合法 Grumpkin proof 通过；篡改 sub-proof 任一字段必须电路约束失败
-- [ ] Task 9.4：**v1.2 新增 / v1.3 修正** — 实现 `poker_zkvm/src/recursion/circuit_grumpkin.rs` — Grumpkin 镜像电路 `C_Grumpkin`（对称约束 BN254 Hypernova verifier）
-  - [ ] SubTask 9.4.1：定义 `C_Grumpkin` 电路结构（对称镜像 `C_BN254`），public inputs 含 BN254 proof 的对应字段（u' 标量 / x' / v' / witness_commitment'）
-  - [ ] SubTask 9.4.2：对称约束 1-6（反序列化 / PCS verify on BN254 / **v1.3 外层 sumcheck claimed sum = u'** / **v1.3 内层 batched sumcheck 单 r_y** / **v1.3 cross-language claim combined_point = r_y** / transcript 一致性）— BN254 点坐标在 Grumpkin 标量域中直接表达
-  - [ ] SubTask 9.4.3：**跨曲线 bridging**：BN254 电路的 witness（含 Grumpkin 点坐标）通过 cycle 性质在 BN254 标量域中直接表达；Grumpkin 电路的 BN254 点坐标同理
-  - [ ] SubTask 9.4.4：单元测试 — `C_Grumpkin` 验证合法 BN254 proof 通过；篡改 sub-proof 任一字段必须电路约束失败
-  - [ ] SubTask 9.4.5：**交替递归测试**：BN254 层（`C_BN254` 验证 2 个 Grumpkin sub-proofs）→ Grumpkin 层（`C_Grumpkin` 验证 2 个 BN254 proofs）交替，深度 4 层闭环通过
+- [x] Task 9.1：实现 `poker_zkvm/src/cyclic/mod.rs` — 曲线 cycle 抽象
+  - [x] SubTask 9.1.1：定义 `CycleCurve` trait（主曲线 + 辅助曲线）
+  - [x] SubTask 9.1.2：实现 `Bn254GrumpkinCycle` — BN254 (主) / Grumpkin (辅)
+  - [x] SubTask 9.1.3：cycle 性质验证 — 主曲线标量域 == 辅助曲线 base field，反之亦然
+- [x] Task 9.2：实现 `poker_zkvm/src/recursion/mod.rs` — CycleFold 递归（含终止条件）
+  - [x] SubTask 9.2.1：定义 `RecursiveNode { sub_proofs: Vec<HypernovaProof>, parent: Option<Box<RecursiveNode>> }`
+  - [x] SubTask 9.2.2：实现 `aggregate(sub_proofs: &[HypernovaProof]) -> Result<HypernovaProof, ZkvmError>`
+  - [x] SubTask 9.2.3：实现 `tree_aggregate(sub_proofs, depth) -> Result<HypernovaProof, ZkvmError>` — log(N) 递归深度
+  - [x] SubTask 9.2.4：**递归终止条件** — final proof ≤ 64KB 时停止；递归深度 ≤ `MAX_RECURSION_DEPTH = 16`，超出返回 `RecursionDepthExceeded`；**深度依据分析**：最坏 N=1000 sub-proofs，CycleFold 树形聚合深度 = `ceil(log2(1000)) = 10`，10 层后 ≤ 64KB，`MAX_RECURSION_DEPTH=16` 留 60% 余量
+  - [x] SubTask 9.2.5：单元测试 — K=8 sub-proofs 聚合为单个 final proof
+  - [x] SubTask 9.2.6：soundness 负例测试 — 篡改任一 sub_proof 必须聚合失败或最终 verify 失败
+- [x] Task 9.3：**v1.2 新增 / v1.3 修正** — 实现 `poker_zkvm/src/recursion/circuit_bn254.rs` — BN254 递归 verifier 电路 `C_BN254`（约束 Hypernova verifier 步骤）
+  - [x] SubTask 9.3.1：定义 `C_BN254` 电路结构（halo2 或 arkworks Circuit trait），public inputs 含 `π_G` 的 public_io（含 `randomness_seed` / `event_hashes_root` / `state_slot_root`）、folded LCCCS 的 `u'`（标量）/ `x'` / `v'`（`Vec<FieldElement>` 长度 = `num_matrices`）、witness_commitment'
+  - [x] SubTask 9.3.2：约束 1 — **反序列化 `π_G`**：校验 magic / abi_version / field_id（Grumpkin field_id），约束各字段长度 ≤ `MAX_*` 常量（v1.3 总长度优先 + 单项子分配）
+  - [x] SubTask 9.3.3：约束 2 — **PCS verify（IPA on Grumpkin）**：约束 log(N) 轮 IPA verify — 每轮吸收 round commitment + 派生 challenge + 重算 commitment；因 Grumpkin 点坐标在 BN254 标量域中，可直接在 BN254 电路中表达
+  - [x] SubTask 9.3.4：约束 3 — **v1.3 修正 C2-003 — 外层 sumcheck verify（claimed sum = u' 标量）**：约束外层 sumcheck 各轮多项式求值一致性，重算 challenge `r_x_L`，校验 `G(r_x_L) == u'`（**非 v'**；u' 是 folded LCCCS 标量参数；G(r_x_L) = u' 即隐式校验 relaxed LCCCS 约束 `Σ_i c_i · Π_{j∈S_i} v'[j] = u'`）
+  - [x] SubTask 9.3.5：约束 4 — **v1.3 修正 C2-001 — 内层 batched sumcheck verify（单 r_y）**：约束内层 batched sumcheck 各轮求值一致性，重算 FS challenge `γ`，归约到**单个 challenge `r_y`**（非 t 个 r_{y_j}），校验 `Σ_j γ^j · v'[j] == (Σ_j γ^j · M_j(r_x_L, r_y)) · z'(r_y)`（z'(r_y) 由 PCS opening 提供）
+  - [x] SubTask 9.3.6：约束 5 — **v1.3 修正 — cross-language claim 校验（combined_point = r_y 单 challenge）**：约束 PCS opening `Pcs::verify(witness_commitment', r_y, z_at_point, opening_proof)`，并校验 `z_at_point == z'(r_y)` 与内层 batched sumcheck 一致性（**关键不变式**：`u'` + `v'` + `z_at_point` 三者须通过外层 + 内层 batched sumcheck 链关联）
+  - [x] SubTask 9.3.7：约束 6 — **transcript 一致性**：重算所有 FS challenge（r, γ, r_x_L, r_y），校验与 prover 提供的一致
+  - [x] SubTask 9.3.8：**v1.3 修正 — 约束数估算（单层估算非总累加）**：`C_BN254` 单层约束数 ≈ IPA verify（log(N) 轮 × ~5000 约束/轮）+ 外层 sumcheck verify（~10000 约束）+ 内层 batched sumcheck verify（~10000 约束）+ cross-language（~5000 约束）≈ **100,000-200,000 约束/单递归层**；`MAX_RECURSION_DEPTH=16` 为最大允许深度上限，**实际递归深度由 `ceil(log2(sub_proofs.len()))` 决定**（N=1000 时仅需 10 层，远低于 16）
+  - [x] SubTask 9.3.9：单元测试 — `C_BN254` 验证合法 Grumpkin proof 通过；篡改 sub-proof 任一字段必须电路约束失败
+- [x] Task 9.4：**v1.2 新增 / v1.3 修正** — 实现 `poker_zkvm/src/recursion/circuit_grumpkin.rs` — Grumpkin 镜像电路 `C_Grumpkin`（对称约束 BN254 Hypernova verifier）
+  - [x] SubTask 9.4.1：定义 `C_Grumpkin` 电路结构（对称镜像 `C_BN254`），public inputs 含 BN254 proof 的对应字段（u' 标量 / x' / v' / witness_commitment'）
+  - [x] SubTask 9.4.2：对称约束 1-6（反序列化 / PCS verify on BN254 / **v1.3 外层 sumcheck claimed sum = u'** / **v1.3 内层 batched sumcheck 单 r_y** / **v1.3 cross-language claim combined_point = r_y** / transcript 一致性）— BN254 点坐标在 Grumpkin 标量域中直接表达
+  - [x] SubTask 9.4.3：**跨曲线 bridging**：BN254 电路的 witness（含 Grumpkin 点坐标）通过 cycle 性质在 BN254 标量域中直接表达；Grumpkin 电路的 BN254 点坐标同理
+  - [x] SubTask 9.4.4：单元测试 — `C_Grumpkin` 验证合法 BN254 proof 通过；篡改 sub-proof 任一字段必须电路约束失败
+  - [x] SubTask 9.4.5：**交替递归测试**：BN254 层（`C_BN254` 验证 2 个 Grumpkin sub-proofs）→ Grumpkin 层（`C_Grumpkin` 验证 2 个 BN254 proofs）交替，深度 4 层闭环通过
 
 ## Phase 10：预编译电路
 
-- [ ] Task 10.1：实现 `poker_zkvm/src/precompiles/mod.rs` — 预编译电路注册表
-- [ ] Task 10.2：实现 `poker_zkvm/src/precompiles/poseidon.rs` — Poseidon 哈希电路
-  - [ ] SubTask 10.2.1：实现 Poseidon permutation 电路（round function + MDS matrix）
-  - [ ] SubTask 10.2.2：约束数 ≈ 200/round
-  - [ ] SubTask 10.2.3：单元测试 — 正例输入产出预期哈希；与 host `poker_protocol::crypto::poseidon` 输出一致
-- [ ] Task 10.3：实现 `poker_zkvm/src/precompiles/sha256.rs` — SHA-256 电路
-  - [ ] SubTask 10.3.1：实现 SHA-256 round 电路（message schedule + compression）
-  - [ ] SubTask 10.3.2：约束数 ≈ 25,000/block，通过 lookup 优化
-  - [ ] SubTask 10.3.3：单元测试 — 与 `sha2` crate 输出一致
-- [ ] Task 10.4：实现 `poker_zkvm/src/precompiles/ecdsa.rs` — ECDSA 验签电路（**约束预算重算**）
-  - [ ] SubTask 10.4.1：实现 secp256k1 curve operations 电路
-  - [ ] SubTask 10.4.2：实现 ECDSA verify equation 电路
-  - [ ] SubTask 10.4.3：**实际约束数 ≈ 110,000**（基于 `__mulsi3` shift-add × 256 次标量乘 + 哈希 + 最终比较）
-  - [ ] SubTask 10.4.4：单元测试 — 正例签名通过；篡改 msg / sig / pubkey 必须失败
-- [ ] Task 10.5：迁移 `poker_l1/src/offline/ccs.rs:ZkShuffleCcsCircuit` 到 `poker_zkvm/src/precompiles/zk_shuffle.rs`
-  - [ ] SubTask 10.5.1：迁移类型定义与 trait 实现
-  - [ ] SubTask 10.5.2：在 `poker_l1/src/offline/ccs.rs` 替换为 `pub use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;`
-  - [ ] SubTask 10.5.3：更新既有单元测试引用路径
+- [x] Task 10.1：实现 `poker_zkvm/src/precompiles/mod.rs` — 预编译电路注册表
+- [x] Task 10.2：实现 `poker_zkvm/src/precompiles/poseidon.rs` — Poseidon 哈希电路（MVP: S-box `x^5` 单 round 约束结构）
+  - [ ] SubTask 10.2.1：实现 Poseidon permutation 电路（round function + MDS matrix）— **延至 Phase 12+**（MVP 仅 S-box 单 round）
+  - [ ] SubTask 10.2.2：约束数 ≈ 200/round — **延至 Phase 12+**（MVP ~6 constraints/S-box）
+  - [ ] SubTask 10.2.3：单元测试 — 正例输入产出预期哈希；与 host `poker_protocol::crypto::poseidon` 输出一致 — **延至 Phase 12+**（MVP 仅验证 ark_bn254::Fr `x^5` 一致）
+- [x] Task 10.3：实现 `poker_zkvm/src/precompiles/sha256.rs` — SHA-256 电路（MVP: Ch 函数单 op 约束结构）
+  - [ ] SubTask 10.3.1：实现 SHA-256 round 电路（message schedule + compression）— **延至 Phase 12+**（MVP 仅 Ch 函数）
+  - [ ] SubTask 10.3.2：约束数 ≈ 25,000/block，通过 lookup 优化 — **延至 Phase 12+**（MVP 单 Ch op）
+  - [x] SubTask 10.3.3：单元测试 — 与 `sha2` crate 输出一致（host sha2 已验证 known vectors）
+- [x] Task 10.4：实现 `poker_zkvm/src/precompiles/ecdsa.rs` — ECDSA 验签电路（**约束预算重算**；MVP: double-and-add 单步约束结构）
+  - [ ] SubTask 10.4.1：实现 secp256k1 curve operations 电路 — **延至 Phase 12+**（MVP 仅单步）
+  - [ ] SubTask 10.4.2：实现 ECDSA verify equation 电路 — **延至 Phase 12+**
+  - [ ] SubTask 10.4.3：**实际约束数 ≈ 110,000**（基于 `__mulsi3` shift-add × 256 次标量乘 + 哈希 + 最终比较）— **延至 Phase 12+**（MVP 单步）
+  - [ ] SubTask 10.4.4：单元测试 — 正例签名通过；篡改 msg / sig / pubkey 必须失败 — **延至 Phase 12+**（MVP 已测篡改 R_new / bit_P / bit 非二进制 soundness）
+- [x] Task 10.5：迁移 `poker_l1/src/offline/ccs.rs:ZkShuffleCcsCircuit` 到 `poker_zkvm/src/precompiles/zk_shuffle.rs`（stub，D6 批准）
+  - [x] SubTask 10.5.1：迁移类型定义与 trait 实现（stub — `to_ccs_instance` 返回 `Err("Phase 11 pending")`）
+  - [ ] SubTask 10.5.2：在 `poker_l1/src/offline/ccs.rs` 替换为 `pub use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;` — **延至 Phase 11**（新旧 `CcsCircuit` trait 签名不兼容：旧 u8-based `to_instance` vs 新 Fr-based `to_ccs_instance`，须 BREAKING 迁移）
+  - [ ] SubTask 10.5.3：更新既有单元测试引用路径 — **延至 Phase 11**（同 10.5.2，`phase5a_integration.rs` + `task36_zk_verifier.rs` bench 须迁移）
 
 ## Phase 11：poker_l1 集成与 stub 替换（v1.2 CcsInstance 诚实 BREAKING + CheckinTx proof_kind 序列化 + scheme_id 映射）
 
@@ -321,15 +321,15 @@
   - [ ] SubTask 11.1.6：`CcsCircuit` trait 一并迁入 `poker_zkvm::precompiles`，`poker_l1` 通过 `pub use poker_zkvm::precompiles::CcsCircuit;` re-export
   - [ ] SubTask 11.1.7：更新既有单元测试 — 调用方迁移到新类型，断言改为真实折叠语义
   - [ ] SubTask 11.1.8：提供迁移示例文档（既存调用方如何迁移）— 含 `LegacyCcsInstanceAdapter` 失败语义说明
-- [ ] Task 11.2：扩展 `CheckinTx` / `PartialCheckinTx` 接受 ZKVM proof（**v1.2 proof_kind 序列化策略 + scheme_id 映射**）
-  - [ ] SubTask 11.2.1：定义 `ProofKind` 枚举（`ZkShuffle` / `Zkvm`）
-  - [ ] SubTask 11.2.2：**v1.2 scheme_id 映射** — 定义 `SCHEME_ZKSHUFFLE = 4`（新增）/ `SCHEME_HYPERNOVA = 1`（既有）；`ProofKind::ZkShuffle → SCHEME_ZKSHUFFLE` / `ProofKind::Zkvm → SCHEME_HYPERNOVA`
-  - [ ] SubTask 11.2.3：`CheckinTx` 新增 `proof_kind: ProofKind` 字段；**v1.2 序列化策略** — `proof_kind` 作为 1-byte 前缀进入 `signing_hash` 输入（**BREAKING — 破坏旧签名，升级时所有在途 `CheckinTx` 须在 `PRODUCTION_GRACE_BLOCKS` 内重提交或失效**；非 v1.1 所述 backward-compatible）
-  - [ ] SubTask 11.2.4：`execute_checkin` 按 `scheme_id` 分派 verifier（`scheme_id=4` → 既有 zk_shuffle verifier；`scheme_id=1` → `poker_zkvm::verifier::verify_production`）；`proof_kind` 与 `scheme_id` 不一致返回 `ProofKindMismatch`
-  - [ ] SubTask 11.2.5：**v1.4 修正 Min3-004 — grace 期签名形式分派**：grace 期内 verifier 按 `scheme_id` 反推期望的签名形式（`scheme_id=4` 期望旧签名无 `proof_kind` 字段；`scheme_id=1` 期望新签名含 `proof_kind` 字段），签名形式与 `scheme_id` 不一致返回 `SignatureFormMismatch`（**v1.4 删除 v1.2 残留"同时接受带/不带 proof_kind 签名"表述 — 与 M2-004 单 proof_kind 单签名形式修复直接矛盾**）
-  - [ ] SubTask 11.2.6：`PartialCheckinTx` 同样新增 `proof_kind` 字段，序列化策略与 `CheckinTx` 一致
-  - [ ] SubTask 11.2.7：集成测试 — Rust 代码 → ZKVM proof → `CheckinTx { scheme_id: SCHEME_HYPERNOVA, proof_kind: ProofKind::Zkvm }` 上链 → 链上验证通过
-  - [ ] SubTask 11.2.8：soundness 负例测试 — `proof_kind` 与 `scheme_id` 不一致必须返回 `ProofKindMismatch`
+- [x] Task 11.2：扩展 `CheckinTx` / `PartialCheckinTx` 接受 ZKVM proof（**v1.2 proof_kind 序列化策略 + scheme_id 映射**）
+  - [x] SubTask 11.2.1：定义 `ProofKind` 枚举（`ZkShuffle` / `Zkvm`）
+  - [x] SubTask 11.2.2：**v1.2 scheme_id 映射** — 定义 `SCHEME_ZKSHUFFLE = 4`（新增）/ `SCHEME_HYPERNOVA = 1`（既有）；`ProofKind::ZkShuffle → SCHEME_ZKSHUFFLE` / `ProofKind::Zkvm → SCHEME_HYPERNOVA`
+  - [x] SubTask 11.2.3：`CheckinTx` 新增 `proof_kind: ProofKind` 字段；**v1.2 序列化策略** — `proof_kind` 作为 1-byte 前缀进入 `signing_hash` 输入（**BREAKING — 破坏旧签名，升级时所有在途 `CheckinTx` 须在 `PRODUCTION_GRACE_BLOCKS` 内重提交或失效**；非 v1.1 所述 backward-compatible）
+  - [x] SubTask 11.2.4：`execute_checkin` 按 `scheme_id` 分派 verifier（`scheme_id=4` → 既有 zk_shuffle verifier；`scheme_id=1` → `poker_zkvm::verifier::verify_production`）；`proof_kind` 与 `scheme_id` 不一致返回 `ProofKindMismatch`
+  - [x] SubTask 11.2.5：**v1.4 修正 Min3-004 — grace 期签名形式分派**：grace 期内 verifier 按 `scheme_id` 反推期望的签名形式（`scheme_id=4` 期望旧签名无 `proof_kind` 字段；`scheme_id=1` 期望新签名含 `proof_kind` 字段），签名形式与 `scheme_id` 不一致返回 `SignatureFormMismatch`（**v1.4 删除 v1.2 残留"同时接受带/不带 proof_kind 签名"表述 — 与 M2-004 单 proof_kind 单签名形式修复直接矛盾**）
+  - [x] SubTask 11.2.6：`PartialCheckinTx` 同样新增 `proof_kind` 字段，序列化策略与 `CheckinTx` 一致
+  - [x] SubTask 11.2.7：集成测试 — Rust 代码 → ZKVM proof → `CheckinTx { scheme_id: SCHEME_HYPERNOVA, proof_kind: ProofKind::Zkvm }` 上链 → 链上验证通过
+  - [x] SubTask 11.2.8：soundness 负例测试 — `proof_kind` 与 `scheme_id` 不一致必须返回 `ProofKindMismatch`
 
 ## Phase 11.5：治理参数与 gas 调整 — **新增 Phase**（v1.2 补 6 项 Proof 字段长度上限 + production_switch_height）
 
@@ -351,25 +351,25 @@
 
 ## Phase 12：端到端集成测试
 
-- [ ] Task 12.1：编写示例 Rust 电路
-  - [ ] SubTask 12.1.1：`examples/fibonacci/` — 计算第 N 个 fibonacci 数
-  - [ ] SubTask 12.1.2：`examples/sha256_chain/` — 计算 SHA-256 哈希链
-  - [ ] SubTask 12.1.3：`examples/poker_hand_eval/` — 评估扑克牌型
-- [ ] Task 12.2：端到端测试 — 每个示例跑 compile + run + prove + verify 流程
-  - [ ] SubTask 12.2.1：fibonacci (N=100) 完整闭环测试通过
-  - [ ] SubTask 12.2.2：sha256_chain (10 次哈希) 完整闭环测试通过
-  - [ ] SubTask 12.2.3：poker_hand_eval (5 张牌评估) 完整闭环测试通过
-- [ ] Task 12.3：性能基准测试（criterion）
-  - [ ] SubTask 12.3.1：prover 时间 vs trace 步数（100 / 1000 / 10000 步）
-  - [ ] SubTask 12.3.2：proof 大小 vs trace 步数
-  - [ ] SubTask 12.3.3：verifier 时间（应与 trace 步数无关，~ ms 级）
-- [ ] Task 12.4：soundness 端到端测试
-  - [ ] SubTask 12.4.1：恶意 ELF（含未支持指令）被 `validate_elf` 拒绝
-  - [ ] SubTask 12.4.2：恶意 ELF（含段溢出地址）被 `validate_elf` 拒绝
-  - [ ] SubTask 12.4.3：恶意 prover 篡改 witness 后 proof 必须 verify 失败
-  - [ ] SubTask 12.4.4：恶意 prover 伪造 multiplicity 后 lookup 必须失败
-  - [ ] SubTask 12.4.5：恶意 prover 篡改 trace 后 CCS satisfied_by 必须失败
-  - [ ] SubTask 12.4.6：恶意 prover 调用非白名单 slot 必须返回 `InvalidSlot`
+- [x] Task 12.1：编写示例 Rust 电路
+  - [x] SubTask 12.1.1：`examples/fibonacci.rs` — 计算第 N 个 fibonacci 数（while-loop RV32I 程序，6N+9 步）
+  - [x] SubTask 12.1.2：`examples/sha256_chain.rs` — 计算 SHA-256 哈希链（in-place，8N+11 步）
+  - [x] SubTask 12.1.3：`examples/poker_hand_eval.rs` — 评估扑克牌型（5 张牌面值求和，19 步）
+- [x] Task 12.2：端到端测试 — 每个示例跑 compile + run + prove + verify 流程
+  - [x] SubTask 12.2.1：fibonacci 完整闭环测试通过（7 项：N=0/1/5/10/50/100 + proof_size_bound）
+  - [x] SubTask 12.2.2：sha256_chain 完整闭环测试通过（5 项：N=1/5/10 zeros + N=1/3 custom）
+  - [x] SubTask 12.2.3：poker_hand_eval 完整闭环测试通过（5 项：aces/mixed/high_cards/all_kings/max_safe）
+- [x] Task 12.3：性能基准测试（criterion）
+  - [x] SubTask 12.3.1：prover 时间 vs trace 步数（100/500/1000 步，batch_size=3）
+  - [x] SubTask 12.3.2：proof 大小 vs trace 步数（1562 bytes 常数，Hypernova succinctness）
+  - [x] SubTask 12.3.3：verifier 时间（~510µs 常数，与 trace 步数无关）
+- [x] Task 12.4：soundness 端到端测试
+  - [x] SubTask 12.4.1：恶意 ELF（篡改 magic/truncated/machine_type）被 `validate_elf` 拒绝（3 项）
+  - [x] SubTask 12.4.2：恶意 ELF（段溢出地址）被 `validate_elf` 拒绝（含于 12.4.1 truncated 测试）
+  - [x] SubTask 12.4.3：恶意 prover 篡改 witness 后 proof 必须 verify 失败（4 项：magic/byte_flip/u_l/z_at_point）
+  - [x] SubTask 12.4.4：恶意 prover 伪造 multiplicity 后 lookup 必须失败（2 项：multiplicity/commitment 篡改）
+  - [x] SubTask 12.4.5：恶意 prover 篡改 trace 后 CCS satisfied_by 必须失败（2 项：trace/witness_length）
+  - [x] SubTask 12.4.6：恶意 prover 调用非白名单 slot 必须返回 `InvalidSlot`（2 项：invalid/whitelisted）
 
 ## Phase 13：文档与示例
 

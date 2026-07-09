@@ -62,6 +62,18 @@ impl ProofKind {
     pub const fn expects_new_signature(self) -> bool {
         matches!(self, Self::Zkvm)
     }
+
+    /// 转为 1-byte 表示（用于 `signing_hash` 序列化，SubTask 11.2.3）。
+    ///
+    /// - `ZkShuffle` → 4（`SCHEME_ZKSHUFFLE`）
+    /// - `Zkvm` → 1（`SCHEME_HYPERNOVA`）
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::ZkShuffle => SCHEME_ZKSHUFFLE as u8,
+            Self::Zkvm => SCHEME_HYPERNOVA as u8,
+        }
+    }
 }
 
 /// ZK 验证上下文（Phase 8 — v1.2 双通道 grace period + M2-003/004 所需的链上状态）。
@@ -93,7 +105,7 @@ impl<'a> ZkVerifyContext<'a> {
     /// 是否处于 grace 期内（`production_switch_height > 0` 且
     /// `current_height <= production_switch_height + grace_blocks`）。
     #[must_use]
-    pub fn in_grace_period(&self) -> bool {
+    pub const fn in_grace_period(&self) -> bool {
         self.production_switch_height > 0
             && self.current_height <= self.production_switch_height.saturating_add(self.grace_blocks)
     }
@@ -101,7 +113,7 @@ impl<'a> ZkVerifyContext<'a> {
     /// grace 期是否已结束（`production_switch_height > 0` 且
     /// `current_height > production_switch_height + grace_blocks`）。
     #[must_use]
-    pub fn grace_period_ended(&self) -> bool {
+    pub const fn grace_period_ended(&self) -> bool {
         self.production_switch_height > 0
             && self.current_height > self.production_switch_height.saturating_add(self.grace_blocks)
     }
@@ -422,6 +434,7 @@ impl ZkVerifierRegistry {
     ///
     /// # 参数
     /// - `ctx`：grace period + M2-003/004 所需的链上状态上下文
+    #[allow(clippy::too_many_arguments)] // 8 参数均为 spec 要求的安全校验参数
     pub fn zk_verify_with_context(
         &self,
         chain_id: crate::ChainId,

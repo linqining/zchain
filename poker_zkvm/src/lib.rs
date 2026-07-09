@@ -46,6 +46,7 @@ pub mod constraints;
 pub mod fold;
 
 // ===== Layer 4 — Hypernova Protocol（Phase 7-9）=====
+pub mod cyclic;
 pub mod hypernova;
 
 // ===== Layer 5 — Precompile Circuits & Prover/Verifier（Phase 10-11）=====
@@ -56,3 +57,7 @@ pub mod verifier;
 // ===== Layer 6 — Recursion & Compression（Phase 12-13）=====
 pub mod cyclegfold;
 pub mod recursion;
+
+// ===== 测试辅助（test-helpers feature 门控）=====
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_helpers;

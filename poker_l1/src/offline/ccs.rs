@@ -264,6 +264,7 @@ pub struct ZkShuffleCcsCircuit {
     num_mats: usize,
 }
 
+#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
 impl ZkShuffleCcsCircuit {
     /// 创建 ZkShuffle CCS 电路。
     pub fn new() -> Self {
@@ -274,12 +275,14 @@ impl ZkShuffleCcsCircuit {
     }
 }
 
+#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
 impl Default for ZkShuffleCcsCircuit {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
 impl CcsCircuit for ZkShuffleCcsCircuit {
     fn name(&self) -> &str {
         &self.name
