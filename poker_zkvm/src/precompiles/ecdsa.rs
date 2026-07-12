@@ -22,7 +22,7 @@
 //! 验签等式：`s·R' = z·G + r·P`，其中 R' = (r, ry)（ry 为 hint）。
 //! 避免 in-circuit 计算 s⁻¹ mod n，直接验证乘法形式等式。
 //!
-//! 测试使用 `scalar_num_bits=8`（截断标量到低 8 位）以控制约束规模。
+//! 生产默认 256-bit 完整标量；快速测试使用 `new_full_with_bits(8)` 截断到低 8 位。
 
 use crate::ccs::{Ccs, CcsInstance, Fr, SparseMatrix};
 use crate::error::ZkvmError;
@@ -59,13 +59,13 @@ impl EcdsaVerifyCircuit {
         }
     }
 
-    /// 创建 Full 模式 ECDSA 验签电路，默认 8-bit 截断标量。
+    /// 创建 Full 模式 ECDSA 验签电路，默认 256-bit 完整标量。
     #[must_use]
     pub fn new_full() -> Self {
         Self {
             curve: "secp256k1",
             full_mode: true,
-            scalar_num_bits: 8,
+            scalar_num_bits: 256,
         }
     }
 
@@ -272,9 +272,10 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
     fn gas_cost(&self) -> u64 {
         if self.full_mode {
             // Full 模式: 3 次 scalar_mul(num_bits) + 1 次 point_add + assert_point_equal
-            // 256-bit 时约 3×256×25200 + 16800 + 5600 ≈ 19M 约束
-            // gas 按约束数比例缩放
-            3_000_000
+            // per_bit: 3 × 25200 = 75600；fixed: 16800 + 5600 = 22400
+            let per_bit_gas: u64 = 75_600;
+            let fixed_gas: u64 = 22_400;
+            per_bit_gas * self.scalar_num_bits as u64 + fixed_gas
         } else {
             // spec L660: GAS_ZKVM_ECDSA_VERIFY = 100_000（与既有 GAS_SECP256K1_VERIFY 对齐）
             // MVP 单步返回完整 gas（与 SHA-256 模式一致 — 单 Ch 操作返回 25_000 block gas）
@@ -317,7 +318,8 @@ mod tests {
     use super::*;
     use crate::precompiles::PrecompileRegistry;
     use crate::precompiles::non_native::{
-        host_add_mod, host_sub_mod, host_mul_mod, host_inv_mod, SECP256K1_P_CURVE,
+        host_add_mod, host_sub_mod, host_mul_mod, host_inv_mod, host_lt, host_sub,
+        SECP256K1_P_CURVE, SECP256K1_N,
     };
 
     // ===== 辅助函数 =====
@@ -432,6 +434,32 @@ mod tests {
         (x, y)
     }
 
+    /// Host 端标量乘法：scalar · P（double-and-add，匹配电路 scalar_mul 逻辑）。
+    ///
+    /// 从高位到低位迭代 256 位，使用 "started" 标志避免对无穷远点调用 point_add。
+    fn host_scalar_mul(scalar: &[u64; 4], p: &HostPoint) -> HostPoint {
+        let mut result = ([1u64, 0, 0, 0], [1u64, 0, 0, 0], [0u64, 0, 0, 0]); // 无穷远点
+        let mut started = false;
+
+        for bit_idx in (0..256).rev() {
+            if started {
+                result = host_point_double(&result);
+            }
+            let limb_idx = bit_idx / 64;
+            let bit_in_limb = bit_idx % 64;
+            let bit = (scalar[limb_idx] >> bit_in_limb) & 1;
+            if bit == 1 {
+                if started {
+                    result = host_point_add(&result, p);
+                } else {
+                    result = *p;
+                    started = true;
+                }
+            }
+        }
+        result
+    }
+
     /// 模幂：base^exp mod modulus
     fn host_pow_mod(base: &[u64; 4], exp: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
         let mut result = [1u64, 0, 0, 0];
@@ -472,12 +500,12 @@ mod tests {
         host_pow_mod(a, &exp, p)
     }
 
-    /// 构造 Full 模式测试输入
+    /// 构造 Full 模式测试输入（小标量，用于 8-bit 快速测试）。
     ///
     /// 使用小标量（s=3, z=2, r=1，均 < 256 满足 8-bit recompose 约束）。
     /// R' = (1, sqrt(8) mod p) — 曲线上的有效点（1³ + 7 = 8，8 是 QR mod p）。
     /// P = 3·R' - 2·G，使等式 3·R' = 2·G + 1·P 成立。
-    fn make_full_mode_test_inputs() -> Vec<Fr> {
+    fn make_full_mode_test_inputs_small() -> Vec<Fr> {
         let r: [u64; 4] = [1, 0, 0, 0];
         let ry = host_sqrt_mod(&[8, 0, 0, 0]);
 
@@ -508,6 +536,53 @@ mod tests {
         inputs.extend(u256_to_fr_vec(&[2, 0, 0, 0])); // z = 2
         inputs.extend(u256_to_fr_vec(&px)); // px
         inputs.extend(u256_to_fr_vec(&py)); // py
+        inputs
+    }
+
+    /// 构造 Full 模式测试输入（真实 256-bit ECDSA 签名）。
+    ///
+    /// 测试向量：私钥 d=1，消息哈希 z=1，nonce k=2。
+    /// - P = d·G = G（公钥）
+    /// - R = k·G = 2·G（nonce 点）
+    /// - r = R.x mod n（256-bit 签名分量）
+    /// - s = k⁻¹·(z + r·d) mod n（256-bit 签名分量）
+    /// - 验证等式：s·R' = z·G + r·P ⟺ (1+r)·G = (1+r)·G ✓
+    fn make_full_mode_test_inputs() -> Vec<Fr> {
+        let n = &SECP256K1_N;
+        let g = host_from_affine(&SECP256K1_GX, &SECP256K1_GY);
+
+        // d = 1, z = 1, k = 2
+        let d: [u64; 4] = [1, 0, 0, 0];
+        let z: [u64; 4] = [1, 0, 0, 0];
+        let k: [u64; 4] = [2, 0, 0, 0];
+
+        // P = d·G = G
+        let p_point = host_scalar_mul(&d, &g);
+        let (px, py) = host_to_affine(&p_point);
+
+        // R = k·G = 2·G
+        let r_point = host_scalar_mul(&k, &g);
+        let (r_x, r_y) = host_to_affine(&r_point);
+
+        // r = R.x mod n
+        let r = if host_lt(&r_x, n) { r_x } else { host_sub(&r_x, n).0 };
+        debug_assert!(host_lt(&r, n), "r < n");
+
+        // ry = R.y（hint，用于构造 R' = (r, ry)）
+        let ry = r_y;
+
+        // s = k⁻¹ · (z + r·d) mod n = k⁻¹ · (1 + r) mod n
+        let k_inv = host_inv_mod(&k, n);
+        let z_plus_rd = host_add_mod(&z, &r, n); // z + r·d = 1 + r (d=1)
+        let s = host_mul_mod(&k_inv, &z_plus_rd, n);
+
+        let mut inputs: Vec<Fr> = Vec::with_capacity(24);
+        inputs.extend(u256_to_fr_vec(&s)); // s (4 limbs)
+        inputs.extend(u256_to_fr_vec(&r)); // r (4 limbs)
+        inputs.extend(u256_to_fr_vec(&ry)); // ry (4 limbs)
+        inputs.extend(u256_to_fr_vec(&z)); // z (4 limbs)
+        inputs.extend(u256_to_fr_vec(&px)); // px (4 limbs)
+        inputs.extend(u256_to_fr_vec(&py)); // py (4 limbs)
         inputs
     }
 
@@ -697,7 +772,7 @@ mod tests {
 
         let full = EcdsaVerifyCircuit::new_full();
         assert!(full.is_full_mode(), "new_full() 应为 Full 模式");
-        assert_eq!(full.scalar_num_bits(), 8, "new_full() 默认 8-bit");
+        assert_eq!(full.scalar_num_bits(), 256, "new_full() 默认 256-bit");
 
         let custom = EcdsaVerifyCircuit::new_full_with_bits(16);
         assert!(custom.is_full_mode());
@@ -708,8 +783,8 @@ mod tests {
     fn test_ecdsa_full_mode_basic_satisfied() {
         // 等式: 3·R' = 2·G + 1·P，其中 R'=(1, sqrt(8)), P=3·R'-2·G
         // s=3, z=2, r=1 — 均小于 256，满足 8-bit recompose 约束
-        let circuit = EcdsaVerifyCircuit::new_full();
-        let inputs = make_full_mode_test_inputs();
+        let circuit = EcdsaVerifyCircuit::new_full_with_bits(8);
+        let inputs = make_full_mode_test_inputs_small();
         let (ccs, witness) = circuit.run_full(&inputs).expect("run_full 应成功");
         assert!(
             ccs.satisfied_by(&witness).expect("satisfied_by"),
@@ -722,8 +797,11 @@ mod tests {
         let mvp = EcdsaVerifyCircuit::new();
         assert_eq!(mvp.gas_cost(), 100_000, "MVP gas_cost = 100_000");
 
-        let full = EcdsaVerifyCircuit::new_full();
-        assert_eq!(full.gas_cost(), 3_000_000, "Full gas_cost = 3_000_000");
+        let full_256 = EcdsaVerifyCircuit::new_full();
+        assert_eq!(full_256.gas_cost(), 19_376_000, "Full 256-bit gas_cost = 19_376_000");
+
+        let full_8 = EcdsaVerifyCircuit::new_full_with_bits(8);
+        assert_eq!(full_8.gas_cost(), 627_200, "Full 8-bit gas_cost = 627_200");
     }
 
     #[test]
@@ -745,8 +823,8 @@ mod tests {
 
     #[test]
     fn test_ecdsa_full_mode_tampered_s() {
-        let circuit = EcdsaVerifyCircuit::new_full();
-        let mut inputs = make_full_mode_test_inputs();
+        let circuit = EcdsaVerifyCircuit::new_full_with_bits(8);
+        let mut inputs = make_full_mode_test_inputs_small();
         // 篡改 s[0]: 3 → 4 → 4·R' ≠ 2·G + 1·P = 3·R'
         inputs[0] = Fr::from_u64(4);
         let (ccs, witness) = circuit.run_full(&inputs).expect("run_full 应成功");
@@ -758,8 +836,8 @@ mod tests {
 
     #[test]
     fn test_ecdsa_full_mode_tampered_r() {
-        let circuit = EcdsaVerifyCircuit::new_full();
-        let mut inputs = make_full_mode_test_inputs();
+        let circuit = EcdsaVerifyCircuit::new_full_with_bits(8);
+        let mut inputs = make_full_mode_test_inputs_small();
         // 篡改 r[0]: 1 → 2 → r·P 变为 2·P，且 R'=(2, sqrt(8)) 不再匹配
         inputs[4] = Fr::from_u64(2);
         let (ccs, witness) = circuit.run_full(&inputs).expect("run_full 应成功");
@@ -771,8 +849,8 @@ mod tests {
 
     #[test]
     fn test_ecdsa_full_mode_tampered_px() {
-        let circuit = EcdsaVerifyCircuit::new_full();
-        let mut inputs = make_full_mode_test_inputs();
+        let circuit = EcdsaVerifyCircuit::new_full_with_bits(8);
+        let mut inputs = make_full_mode_test_inputs_small();
         // 篡改 px[0]: 原值 + 1 → P 不再是正确的点
         inputs[16] = inputs[16].add(&Fr::one());
         let (ccs, witness) = circuit.run_full(&inputs).expect("run_full 应成功");
@@ -807,5 +885,54 @@ mod tests {
             .assign_witness(&[Fr::one(), Fr::from_u32_with_wrap(42), Fr::from_u32_with_wrap(100)])
             .expect("assign_witness 应成功");
         assert!(ccs.satisfied_by(&witness).expect("satisfied_by"));
+    }
+
+    // ===== 256-bit ECDSA 测试（Phase H）=====
+
+    #[test]
+    fn test_host_scalar_mul_2g() {
+        let g = host_from_affine(&SECP256K1_GX, &SECP256K1_GY);
+        let two_g = host_scalar_mul(&[2, 0, 0, 0], &g);
+        let expected = host_point_double(&g);
+        let (x, _) = host_to_affine(&two_g);
+        let (ex, _) = host_to_affine(&expected);
+        assert_eq!(x, ex, "2·G 应等于 double(G)");
+    }
+
+    #[test]
+    fn test_host_scalar_mul_3g() {
+        let g = host_from_affine(&SECP256K1_GX, &SECP256K1_GY);
+        let three_g = host_scalar_mul(&[3, 0, 0, 0], &g);
+        let two_g = host_point_double(&g);
+        let expected = host_point_add(&two_g, &g);
+        let (x, _) = host_to_affine(&three_g);
+        let (ex, _) = host_to_affine(&expected);
+        assert_eq!(x, ex, "3·G 应等于 double(G) + G");
+    }
+
+    #[test]
+    #[ignore = "256-bit ECDSA 需 ~19.4M 约束，用 --release --ignored 运行"]
+    fn test_ecdsa_full_mode_256bit_satisfied() {
+        let circuit = EcdsaVerifyCircuit::new_full(); // 默认 256-bit
+        let inputs = make_full_mode_test_inputs();
+        let (ccs, witness) = circuit.run_full(&inputs).expect("run_full 应成功");
+        assert!(
+            ccs.satisfied_by(&witness).expect("satisfied_by"),
+            "256-bit ECDSA 真实验签等式应满足"
+        );
+    }
+
+    #[test]
+    #[ignore = "256-bit ECDSA 需 ~19.4M 约束，用 --release --ignored 运行"]
+    fn test_ecdsa_full_mode_256bit_tampered_s() {
+        let circuit = EcdsaVerifyCircuit::new_full();
+        let mut inputs = make_full_mode_test_inputs();
+        // 篡改 s[0]：+1 → 等式不成立
+        inputs[0] = inputs[0].add(&Fr::one());
+        let (ccs, witness) = circuit.run_full(&inputs).expect("run_full 应成功");
+        assert!(
+            !ccs.satisfied_by(&witness).expect("satisfied_by"),
+            "篡改 s 后 256-bit 等式应不满足"
+        );
     }
 }
