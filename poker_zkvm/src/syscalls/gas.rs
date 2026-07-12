@@ -11,6 +11,7 @@
 //! gas 计费是 on-chain 概念，host 执行不实际扣 gas。
 //! [`syscall_gas`] 函数供 executor / prover 估算 syscall gas 开销。
 
+use crate::isa::Instruction;
 use crate::syscalls::SyscallId;
 
 /// `read_input` 基础 gas。
@@ -78,6 +79,42 @@ pub const GAS_ZKVM_BN254_PAIRING_MVP: u64 = 30_000;
 
 /// `bn254_pairing` Full gas（双 G1 + hint）。
 pub const GAS_ZKVM_BN254_PAIRING_FULL: u64 = 80_000;
+
+// ===== Per-Instruction Gas（Phase L — 对齐 L1 BPF + SP1 模型）=====
+
+/// 算术指令 gas（ADD/SUB/AND/OR/XOR/SLT/SLTU + I-type 变体）。
+/// 对齐 L1 GAS_ARITHMETIC=1 + SP1 per-insn base。
+pub const GAS_INSN_ARITHMETIC: u64 = 1;
+
+/// 内存加载/存储指令基础 gas（LB/LH/LW/LBU/LHU/SB/SH/SW）。
+/// 对齐 L1 GAS_MEMORY_BASE=3。
+pub const GAS_INSN_MEMORY_BASE: u64 = 3;
+
+/// 内存加载/存储指令每字节附加 gas。
+/// 对齐 L1 GAS_MEMORY_PER_BYTE=2（IMPL-SEC-4 修复）。
+pub const GAS_INSN_MEMORY_PER_BYTE: u64 = 2;
+
+/// 分支指令 gas（BEQ/BNE/BLT/BGE/BLTU/BGEU/JAL/JALR）。
+/// 对齐 L1 GAS_BRANCH=2。
+pub const GAS_INSN_BRANCH: u64 = 2;
+
+/// 移位指令 gas（SLL/SRL/SRA/SLLI/SRLI/SRAI）。
+/// 移位约束复杂度高于算术，设为 2。
+pub const GAS_INSN_SHIFT: u64 = 2;
+
+/// M 扩展乘法指令 gas（MUL/MULH/MULHSU/MULHU）。
+/// 乘法约束（64-bit 乘积分解）远重于算术，对齐 modexp PER_BIT 量级。
+pub const GAS_INSN_MUL: u64 = 20;
+
+/// M 扩展除法指令 gas（DIV/DIVU/REM/REMU）。
+/// MVP trust witness 模式下约束轻，但语义复杂；完整约束后应提升。
+pub const GAS_INSN_DIV: u64 = 20;
+
+/// LUI/AUIPC gas（高位立即数，等同算术）。
+pub const GAS_INSN_UPPER_IMM: u64 = 1;
+
+/// FENCE/ECALL/EBREAK gas。
+pub const GAS_INSN_SYSTEM: u64 = 2;
 
 /// Syscall gas 参数（从寄存器读取后传入）。
 ///
@@ -148,6 +185,84 @@ pub fn syscall_gas(id: SyscallId, args: &SyscallGasArgs) -> u64 {
         }
         SyscallId::Bn254Pairing => GAS_ZKVM_BN254_PAIRING_FULL,
     }
+}
+
+/// 计算单条指令的 gas 开销（不含 syscall gas）。
+///
+/// # 模型
+///
+/// | 类别 | 指令 | Gas |
+/// |------|------|-----|
+/// | 算术 | ADD/SUB/AND/OR/XOR/SLT/SLTU + I-type | `GAS_INSN_ARITHMETIC` |
+/// | 内存 | LB/LH/LW/LBU/LHU | `GAS_INSN_MEMORY_BASE + GAS_INSN_MEMORY_PER_BYTE * bytes` |
+/// | Store | SB/SH/SW | `GAS_INSN_MEMORY_BASE + GAS_INSN_MEMORY_PER_BYTE * bytes` |
+/// | 分支 | BEQ/BNE/BLT/BGE/BLTU/BGEU/JAL/JALR | `GAS_INSN_BRANCH` |
+/// | 移位 | SLL/SRL/SRA/SLLI/SRLI/SRAI | `GAS_INSN_SHIFT` |
+/// | 乘法 | MUL/MULH/MULHSU/MULHU | `GAS_INSN_MUL` |
+/// | 除法 | DIV/DIVU/REM/REMU | `GAS_INSN_DIV` |
+/// | 高位立即数 | LUI/AUIPC | `GAS_INSN_UPPER_IMM` |
+/// | 系统 | FENCE/ECALL/EBREAK | `GAS_INSN_SYSTEM` |
+///
+/// # 参数
+/// - `insn` — 解码后的指令
+/// - `mem_bytes` — 内存访问字节数（1/2/4），非内存指令传 0
+#[must_use]
+pub fn instruction_gas(insn: &Instruction, mem_bytes: u32) -> u64 {
+    match insn {
+        Instruction::Lb { .. }
+        | Instruction::Lh { .. }
+        | Instruction::Lw { .. }
+        | Instruction::Lbu { .. }
+        | Instruction::Lhu { .. }
+        | Instruction::Sb { .. }
+        | Instruction::Sh { .. }
+        | Instruction::Sw { .. } => {
+            GAS_INSN_MEMORY_BASE + GAS_INSN_MEMORY_PER_BYTE * mem_bytes as u64
+        }
+        Instruction::Beq { .. }
+        | Instruction::Bne { .. }
+        | Instruction::Blt { .. }
+        | Instruction::Bge { .. }
+        | Instruction::Bltu { .. }
+        | Instruction::Bgeu { .. }
+        | Instruction::Jal { .. }
+        | Instruction::Jalr { .. } => GAS_INSN_BRANCH,
+        Instruction::Sll { .. }
+        | Instruction::Srl { .. }
+        | Instruction::Sra { .. }
+        | Instruction::Slli { .. }
+        | Instruction::Srli { .. }
+        | Instruction::Srai { .. } => GAS_INSN_SHIFT,
+        Instruction::Mul { .. }
+        | Instruction::Mulh { .. }
+        | Instruction::Mulhsu { .. }
+        | Instruction::Mulhu { .. } => GAS_INSN_MUL,
+        Instruction::Div { .. }
+        | Instruction::Divu { .. }
+        | Instruction::Rem { .. }
+        | Instruction::Remu { .. } => GAS_INSN_DIV,
+        Instruction::Lui { .. } | Instruction::Auipc { .. } => GAS_INSN_UPPER_IMM,
+        Instruction::Fence | Instruction::Ecall | Instruction::Ebreak => GAS_INSN_SYSTEM,
+        // 其余算术（ADD/SUB/AND/OR/XOR/SLT/SLTU + I-type 变体）
+        _ => GAS_INSN_ARITHMETIC,
+    }
+}
+
+/// 计算单步执行的 gas（指令 gas + syscall gas，若为 ECALL）。
+///
+/// ECALL 指令本身的 gas + 对应 syscall 的 gas。
+#[must_use]
+pub fn total_step_gas(
+    insn: &Instruction,
+    mem_bytes: u32,
+    syscall_id: Option<SyscallId>,
+    syscall_args: &SyscallGasArgs,
+) -> u64 {
+    let insn_gas = instruction_gas(insn, mem_bytes);
+    let sys_gas = syscall_id
+        .map(|id| syscall_gas(id, syscall_args))
+        .unwrap_or(0);
+    insn_gas + sys_gas
 }
 
 #[cfg(test)]
@@ -359,5 +474,232 @@ mod tests {
             let gas = syscall_gas(id, &args);
             assert!(gas < u64::MAX, "syscall {id:?} gas 不应溢出");
         }
+    }
+
+    // ===== Per-Instruction Gas 常量值测试 =====
+
+    #[test]
+    fn test_instruction_gas_constants_values() {
+        assert_eq!(GAS_INSN_ARITHMETIC, 1);
+        assert_eq!(GAS_INSN_MEMORY_BASE, 3);
+        assert_eq!(GAS_INSN_MEMORY_PER_BYTE, 2);
+        assert_eq!(GAS_INSN_BRANCH, 2);
+        assert_eq!(GAS_INSN_SHIFT, 2);
+        assert_eq!(GAS_INSN_MUL, 20);
+        assert_eq!(GAS_INSN_DIV, 20);
+        assert_eq!(GAS_INSN_UPPER_IMM, 1);
+        assert_eq!(GAS_INSN_SYSTEM, 2);
+    }
+
+    // ===== instruction_gas 函数测试 =====
+
+    #[test]
+    fn test_instruction_gas_arithmetic() {
+        // R-type 算术
+        assert_eq!(instruction_gas(&Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::Xor { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::Or { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::And { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        // I-type 算术
+        assert_eq!(instruction_gas(&Instruction::Addi { rd: 1, rs1: 2, imm: 10 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::Xori { rd: 1, rs1: 2, imm: 10 }, 0), 1);
+        assert_eq!(instruction_gas(&Instruction::Andi { rd: 1, rs1: 2, imm: 10 }, 0), 1);
+    }
+
+    #[test]
+    fn test_instruction_gas_memory() {
+        // LW = 4 bytes → 3 + 2*4 = 11
+        assert_eq!(
+            instruction_gas(&Instruction::Lw { rd: 1, rs1: 2, imm: 0 }, 4),
+            11
+        );
+        // LH = 2 bytes → 3 + 2*2 = 7
+        assert_eq!(
+            instruction_gas(&Instruction::Lh { rd: 1, rs1: 2, imm: 0 }, 2),
+            7
+        );
+        // LB = 1 byte → 3 + 2*1 = 5
+        assert_eq!(
+            instruction_gas(&Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, 1),
+            5
+        );
+        // LBU = 1 byte → 5
+        assert_eq!(
+            instruction_gas(&Instruction::Lbu { rd: 1, rs1: 2, imm: 0 }, 1),
+            5
+        );
+        // LHU = 2 bytes → 7
+        assert_eq!(
+            instruction_gas(&Instruction::Lhu { rd: 1, rs1: 2, imm: 0 }, 2),
+            7
+        );
+        // SW = 4 bytes → 11
+        assert_eq!(
+            instruction_gas(&Instruction::Sw { rs1: 2, rs2: 3, imm: 0 }, 4),
+            11
+        );
+        // SH = 2 bytes → 7
+        assert_eq!(
+            instruction_gas(&Instruction::Sh { rs1: 2, rs2: 3, imm: 0 }, 2),
+            7
+        );
+        // SB = 1 byte → 5
+        assert_eq!(
+            instruction_gas(&Instruction::Sb { rs1: 2, rs2: 3, imm: 0 }, 1),
+            5
+        );
+    }
+
+    #[test]
+    fn test_instruction_gas_branch() {
+        assert_eq!(
+            instruction_gas(&Instruction::Beq { rs1: 1, rs2: 2, imm: 0 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Bne { rs1: 1, rs2: 2, imm: 0 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Blt { rs1: 1, rs2: 2, imm: 0 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Bgeu { rs1: 1, rs2: 2, imm: 0 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Jal { rd: 1, imm: 100 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Jalr { rd: 1, rs1: 2, imm: 0 }, 0),
+            2
+        );
+    }
+
+    #[test]
+    fn test_instruction_gas_shift() {
+        // R-type 移位
+        assert_eq!(
+            instruction_gas(&Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Srl { rd: 1, rs1: 2, rs2: 3 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Sra { rd: 1, rs1: 2, rs2: 3 }, 0),
+            2
+        );
+        // I-type 移位
+        assert_eq!(
+            instruction_gas(&Instruction::Slli { rd: 1, rs1: 2, shamt: 4 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Srli { rd: 1, rs1: 2, shamt: 4 }, 0),
+            2
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Srai { rd: 1, rs1: 2, shamt: 4 }, 0),
+            2
+        );
+    }
+
+    #[test]
+    fn test_instruction_gas_mul() {
+        assert_eq!(
+            instruction_gas(&Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+    }
+
+    #[test]
+    fn test_instruction_gas_div() {
+        assert_eq!(
+            instruction_gas(&Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            20
+        );
+    }
+
+    #[test]
+    fn test_instruction_gas_upper_imm() {
+        assert_eq!(
+            instruction_gas(&Instruction::Lui { rd: 1, imm: 0x1000 }, 0),
+            1
+        );
+        assert_eq!(
+            instruction_gas(&Instruction::Auipc { rd: 1, imm: 0x1000 }, 0),
+            1
+        );
+    }
+
+    #[test]
+    fn test_instruction_gas_system() {
+        assert_eq!(instruction_gas(&Instruction::Fence, 0), 2);
+        assert_eq!(instruction_gas(&Instruction::Ecall, 0), 2);
+        assert_eq!(instruction_gas(&Instruction::Ebreak, 0), 2);
+    }
+
+    #[test]
+    fn test_total_step_gas_ecall() {
+        // ECALL 指令 gas (2) + Poseidon syscall gas (100 + 50*1 = 150) = 152
+        let insn = Instruction::Ecall;
+        let syscall_args = SyscallGasArgs {
+            input_len: 32,
+            ..Default::default()
+        };
+        let total = total_step_gas(&insn, 0, Some(SyscallId::Poseidon), &syscall_args);
+        // Poseidon: 100 + 50 * ceil(32/32) = 100 + 50 = 150
+        // ECALL insn: 2
+        // Total: 152
+        assert_eq!(total, 152);
+    }
+
+    #[test]
+    fn test_total_step_gas_no_syscall() {
+        // ADD 指令无 syscall → 仅指令 gas = 1
+        let insn = Instruction::Add { rd: 1, rs1: 2, rs2: 3 };
+        let syscall_args = SyscallGasArgs::default();
+        let total = total_step_gas(&insn, 0, None, &syscall_args);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn test_total_step_gas_memory_with_syscall() {
+        // LW 指令 (11) 无 syscall → 11
+        let insn = Instruction::Lw { rd: 1, rs1: 2, imm: 0 };
+        let syscall_args = SyscallGasArgs::default();
+        let total = total_step_gas(&insn, 4, None, &syscall_args);
+        assert_eq!(total, 11);
     }
 }

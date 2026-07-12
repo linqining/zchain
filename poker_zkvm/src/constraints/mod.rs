@@ -922,9 +922,9 @@ mod tests {
         // z[0] = 1（常数）
         assert_eq!(inst.witness[0], Fr::one());
         // 步 0 的 idx = 0
-        assert_eq!(inst.witness[1 + 0 * STEP_VARS + OFF_IDX], Fr::from_u64(0));
+        assert_eq!(inst.witness[1 + OFF_IDX], Fr::from_u64(0));
         // 步 1 的 idx = 1
-        assert_eq!(inst.witness[1 + 1 * STEP_VARS + OFF_IDX], Fr::from_u64(1));
+        assert_eq!(inst.witness[1 + STEP_VARS + OFF_IDX], Fr::from_u64(1));
         // 步 2 的 idx = 2
         assert_eq!(inst.witness[1 + 2 * STEP_VARS + OFF_IDX], Fr::from_u64(2));
     }

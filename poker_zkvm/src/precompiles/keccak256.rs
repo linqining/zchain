@@ -659,7 +659,7 @@ mod tests {
         let rate = RATE_BITS / 8; // 136
         let mut padded = input.to_vec();
         padded.push(0x01);
-        while padded.len() % rate != 0 {
+        while !padded.len().is_multiple_of(rate) {
             padded.push(0x00);
         }
         let last_idx = padded.len() - 1;
@@ -853,7 +853,7 @@ mod tests {
     fn test_keccak_full_abc() {
         // keccak256("abc") = 0x4e0365...
         // "abc" = 3 bytes, padding: 0x61 0x62 0x63 0x01 ... 0x80 (rate=136 bytes)
-        let mut padded = vec![0u8; 136];
+        let mut padded = [0u8; 136];
         padded[0] = 0x61; // 'a'
         padded[1] = 0x62; // 'b'
         padded[2] = 0x63; // 'c'

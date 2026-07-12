@@ -949,7 +949,7 @@ pub fn execute(
         Instruction::Divu { rd, rs1, rs2 } => {
             let a = state.read_register(rs1);
             let b = state.read_register(rs2);
-            let result = if b == 0 { u32::MAX } else { a / b };
+            let result = a.checked_div(b).unwrap_or(u32::MAX);
             state.write_register(rd, result);
         }
         Instruction::Rem { rd, rs1, rs2 } => {

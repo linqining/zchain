@@ -622,7 +622,7 @@ impl MulhCircuit {
                 Fr::one(),                   // S_6
                 Fr::zero().sub(&pow32),      // S_7: -2^32
                 Fr::zero().sub(&pow32),      // S_8: -2^32
-                pow64.clone(),               // S_9: +2^64
+                pow64,                       // S_9: +2^64
                 Fr::one(),                   // S_10
                 pow64,                       // S_11: +2^64
                 Fr::one(),
