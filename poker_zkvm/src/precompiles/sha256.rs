@@ -43,8 +43,7 @@ const SHA256_K: [u32; 64] = [
 /// SHA-256 initial hash values H0[0..7] (FIPS 180-4 Section 5.3.3).
 #[allow(dead_code)]
 const SHA256_H0: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 /// 完整模式 gas 成本（spec L637: SHA-256 ~25,000 gas/block）。
@@ -160,8 +159,14 @@ impl Sha256Circuit {
 
         // 4. 初始化工作变量
         let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) = (
-            h[0].clone(), h[1].clone(), h[2].clone(), h[3].clone(),
-            h[4].clone(), h[5].clone(), h[6].clone(), h[7].clone(),
+            h[0].clone(),
+            h[1].clone(),
+            h[2].clone(),
+            h[3].clone(),
+            h[4].clone(),
+            h[5].clone(),
+            h[6].clone(),
+            h[7].clone(),
         );
 
         // 5. 64 rounds compression
@@ -311,14 +316,7 @@ impl Sha256Circuit {
         Ccs::new(
             6,
             vec![m_y_r0, m_z_r0, m_ymz_r0, m_x_r1, m_ymz_r1, m_ch_r1, m_z_r1],
-            vec![
-                vec![0],
-                vec![1],
-                vec![2],
-                vec![3, 4],
-                vec![5],
-                vec![6],
-            ],
+            vec![vec![0], vec![1], vec![2], vec![3, 4], vec![5], vec![6]],
             vec![Fr::one(), neg_one, neg_one, Fr::one(), neg_one, Fr::one()],
         )
         .expect("Sha256Circuit MVP CCS 构造应成功")
@@ -441,17 +439,21 @@ impl FullBuilder {
 
             let ab = self.alloc(ab_val);
             let r_mult = self.ccs.alloc_row();
-            self.ccs.add_multiplication(r_mult, a.bits[i], b.bits[i], ab);
+            self.ccs
+                .add_multiplication(r_mult, a.bits[i], b.bits[i], ab);
 
             let out_val = a_val.add(&b_val).sub(&two.mul(&ab_val));
             let out = self.alloc(out_val);
             let r_lin = self.ccs.alloc_row();
-            self.ccs.add_linear(r_lin, &[
-                (a.bits[i], Fr::one()),
-                (b.bits[i], Fr::one()),
-                (ab, two.neg()),
-                (out, Fr::one().neg()),
-            ]);
+            self.ccs.add_linear(
+                r_lin,
+                &[
+                    (a.bits[i], Fr::one()),
+                    (b.bits[i], Fr::one()),
+                    (ab, two.neg()),
+                    (out, Fr::one().neg()),
+                ],
+            );
             result.push(out);
         }
         Word { bits: result }
@@ -482,11 +484,14 @@ impl FullBuilder {
 
             let out = self.alloc(out_val);
             let row = self.ccs.alloc_row();
-            self.ccs.add_linear(row, &[
-                (0, Fr::one()),
-                (a.bits[i], Fr::one().neg()),
-                (out, Fr::one().neg()),
-            ]);
+            self.ccs.add_linear(
+                row,
+                &[
+                    (0, Fr::one()),
+                    (a.bits[i], Fr::one().neg()),
+                    (out, Fr::one().neg()),
+                ],
+            );
             result.push(out);
         }
         Word { bits: result }
@@ -540,12 +545,15 @@ impl FullBuilder {
             let s_val = a_val.add(&b_val).sub(&two.mul(&p_val));
             let s = self.alloc(s_val);
             let r_s = self.ccs.alloc_row();
-            self.ccs.add_linear(r_s, &[
-                (a.bits[i], Fr::one()),
-                (b.bits[i], Fr::one()),
-                (p, two.neg()),
-                (s, Fr::one().neg()),
-            ]);
+            self.ccs.add_linear(
+                r_s,
+                &[
+                    (a.bits[i], Fr::one()),
+                    (b.bits[i], Fr::one()),
+                    (p, two.neg()),
+                    (s, Fr::one().neg()),
+                ],
+            );
 
             let sc_val = s_val.mul(&carry_val);
             let sc = self.alloc(sc_val);
@@ -555,12 +563,15 @@ impl FullBuilder {
             let sum_val = s_val.add(&carry_val).sub(&two.mul(&sc_val));
             let sum = self.alloc(sum_val);
             let r_sum = self.ccs.alloc_row();
-            self.ccs.add_linear(r_sum, &[
-                (s, Fr::one()),
-                (carry, Fr::one()),
-                (sc, two.neg()),
-                (sum, Fr::one().neg()),
-            ]);
+            self.ccs.add_linear(
+                r_sum,
+                &[
+                    (s, Fr::one()),
+                    (carry, Fr::one()),
+                    (sc, two.neg()),
+                    (sum, Fr::one().neg()),
+                ],
+            );
             sum_bits.push(sum);
 
             let psc_val = p_val.mul(&sc_val);
@@ -571,12 +582,15 @@ impl FullBuilder {
             let next_carry_val = p_val.add(&sc_val).sub(&psc_val);
             let next_carry = self.alloc(next_carry_val);
             let r_carry = self.ccs.alloc_row();
-            self.ccs.add_linear(r_carry, &[
-                (p, Fr::one()),
-                (sc, Fr::one()),
-                (psc, Fr::one().neg()),
-                (next_carry, Fr::one().neg()),
-            ]);
+            self.ccs.add_linear(
+                r_carry,
+                &[
+                    (p, Fr::one()),
+                    (sc, Fr::one()),
+                    (psc, Fr::one().neg()),
+                    (next_carry, Fr::one().neg()),
+                ],
+            );
             carry = next_carry;
         }
 
@@ -615,7 +629,9 @@ mod tests {
             Fr::from_u32_with_wrap(1),
             Fr::from_u32_with_wrap(0),
         ];
-        let witness = circuit.assign_witness(&inputs).expect("assign_witness 应成功");
+        let witness = circuit
+            .assign_witness(&inputs)
+            .expect("assign_witness 应成功");
         assert_eq!(witness.len(), 6);
         assert!(ccs.satisfied_by(&witness).expect("satisfied_by 应成功"));
     }
@@ -629,7 +645,9 @@ mod tests {
             Fr::from_u32_with_wrap(1),
             Fr::from_u32_with_wrap(0),
         ];
-        let mut witness = circuit.assign_witness(&inputs).expect("assign_witness 应成功");
+        let mut witness = circuit
+            .assign_witness(&inputs)
+            .expect("assign_witness 应成功");
         witness[5] = Fr::from_u32_with_wrap(0);
         assert!(!ccs.satisfied_by(&witness).expect("satisfied_by 应成功"));
     }
@@ -643,7 +661,9 @@ mod tests {
             Fr::from_u32_with_wrap(1),
             Fr::from_u32_with_wrap(0),
         ];
-        let mut witness = circuit.assign_witness(&inputs).expect("assign_witness 应成功");
+        let mut witness = circuit
+            .assign_witness(&inputs)
+            .expect("assign_witness 应成功");
         witness[4] = Fr::from_u32_with_wrap(2);
         assert!(!ccs.satisfied_by(&witness).expect("satisfied_by 应成功"));
     }
@@ -684,8 +704,14 @@ mod tests {
     fn test_sha256_circuit_known_vectors() {
         use sha2::{Digest, Sha256};
         let cases = [
-            ("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
-            ("hello world", "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                "hello world",
+                "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            ),
         ];
         for (msg, expected_hex) in cases {
             let mut hasher = Sha256::new();
@@ -741,7 +767,9 @@ mod tests {
             Fr::from_u32_with_wrap(0),
             Fr::from_u32_with_wrap(1),
         ];
-        let witness = circuit.assign_witness(&inputs).expect("assign_witness 应成功");
+        let witness = circuit
+            .assign_witness(&inputs)
+            .expect("assign_witness 应成功");
         let public_inputs = vec![Fr::one()];
 
         let ccs_circuit: &dyn CcsCircuit = &circuit;
@@ -781,8 +809,7 @@ mod tests {
         }
 
         let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h) = (
-            state[0], state[1], state[2], state[3],
-            state[4], state[5], state[6], state[7],
+            state[0], state[1], state[2], state[3], state[4], state[5], state[6], state[7],
         );
 
         for t in 0..64 {
@@ -820,7 +847,11 @@ mod tests {
 
     /// 构造测试输入（24 个 Fr 值：8 state + 16 message words）。
     fn make_full_inputs(state: &[u32; 8], block: &[u32; 16]) -> Vec<Fr> {
-        state.iter().chain(block.iter()).map(|&v| Fr::from_u32_with_wrap(v)).collect()
+        state
+            .iter()
+            .chain(block.iter())
+            .map(|&v| Fr::from_u32_with_wrap(v))
+            .collect()
     }
 
     #[test]
@@ -890,10 +921,7 @@ mod tests {
 
             let expected = sha256_compress_ref(&state, &block);
 
-            assert_eq!(
-                circuit_output, expected,
-                "电路输出与参考实现不一致"
-            );
+            assert_eq!(circuit_output, expected, "电路输出与参考实现不一致");
         }
     }
 
@@ -925,8 +953,7 @@ mod tests {
         let inputs = make_full_inputs(&SHA256_H0, &block);
         let (_ccs, witness, output) = circuit.run_full(&inputs).expect("run_full 应成功");
 
-        let circuit_output: Vec<u32> =
-            output.iter().map(|w| word_to_u32(&witness, w)).collect();
+        let circuit_output: Vec<u32> = output.iter().map(|w| word_to_u32(&witness, w)).collect();
 
         // 使用 sha2 crate 验证
         let mut hasher = Sha256::new();
@@ -939,10 +966,7 @@ mod tests {
             .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
 
-        assert_eq!(
-            circuit_output, sha2_output,
-            "电路输出与 sha2 crate 不一致"
-        );
+        assert_eq!(circuit_output, sha2_output, "电路输出与 sha2 crate 不一致");
     }
 
     #[test]

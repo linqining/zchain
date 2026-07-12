@@ -27,63 +27,15 @@
 use crate::ccs::{Ccs, CcsInstance, Fr, SparseMatrix};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
-use crate::precompiles::non_native::{
-    host_add_mod, host_mul_mod, NonNativeBuilder, NonNativeElement,
-};
+use crate::precompiles::bn254_ops::assert_g1_on_curve;
+use crate::precompiles::non_native::NonNativeBuilder;
 use crate::precompiles::{CcsCircuit, PrecompileCircuit};
-
-// ===== BN254 常量（[u64; 4] little-endian）=====
-
-/// BN254 基域 p = 21888242871839275222246405745257275088696311157297823662689037894645226208583。
-const BN254_P: [u64; 4] = [
-    0x3C20_8C16_D87C_FD47,
-    0x9781_6A91_6871_CA8D,
-    0xB850_45B6_8181_585D,
-    0x3064_4E72_E131_A029,
-];
-
-/// G1 曲线参数 b = 3。
-const BN254_B: [u64; 4] = [3, 0, 0, 0];
-
-/// BN254 G1 生成元 x = 1。
-const BN254_G1_X: [u64; 4] = [1, 0, 0, 0];
-
-/// BN254 G1 生成元 y = 2。
-const BN254_G1_Y: [u64; 4] = [2, 0, 0, 0];
 
 /// BN254 pairing MVP gas。
 const GAS_BN254_PAIRING_MVP: u64 = 30_000;
 
 /// BN254 pairing Full gas。
 const GAS_BN254_PAIRING_FULL: u64 = 80_000;
-
-// ===== G1 曲线检查 =====
-
-/// 验证 G1 点在曲线上：`y² = x³ + b (mod p)`。
-///
-/// affine 坐标直接验证，约 3 mul_mod ≈ 4300 约束。
-pub(crate) fn assert_g1_on_curve(
-    builder: &mut NonNativeBuilder,
-    x: &NonNativeElement,
-    y: &NonNativeElement,
-) {
-    let m = &BN254_P;
-
-    // y²
-    let y_sq = builder.mul_mod(y, y, m);
-
-    // x²
-    let x_sq = builder.mul_mod(x, x, m);
-    // x³ = x² * x
-    let x_cubed = builder.mul_mod(&x_sq, x, m);
-
-    // x³ + b
-    let b_elem = builder.from_u256(&BN254_B);
-    let rhs = builder.add_mod(&x_cubed, &b_elem, m);
-
-    // y² == x³ + b
-    builder.assert_equal(&y_sq, &rhs);
-}
 
 // ===== Bn254PairingCircuit =====
 
@@ -181,13 +133,9 @@ impl Bn254PairingCircuit {
         // assert hint == 1
         let one_var = builder.alloc(Fr::one());
         let row = builder.ccs.alloc_row();
-        builder.ccs.add_linear(
-            row,
-            &[
-                (hint_var, Fr::one()),
-                (one_var, Fr::one().neg()),
-            ],
-        );
+        builder
+            .ccs
+            .add_linear(row, &[(hint_var, Fr::one()), (one_var, Fr::one().neg())]);
 
         let witness = builder.witness.clone();
         let ccs = builder.build()?;
@@ -207,11 +155,7 @@ impl PrecompileCircuit for Bn254PairingCircuit {
     }
 
     fn num_variables(&self) -> usize {
-        if self.full_mode {
-            0
-        } else {
-            4
-        }
+        if self.full_mode { 0 } else { 4 }
     }
 
     fn build_ccs(&self) -> Ccs {
@@ -285,11 +229,7 @@ impl CcsCircuit for Bn254PairingCircuit {
     }
 
     fn num_matrices(&self) -> usize {
-        if self.full_mode {
-            0
-        } else {
-            3
-        }
+        if self.full_mode { 0 } else { 3 }
     }
 
     fn to_ccs_instance(
@@ -328,23 +268,13 @@ fn u256_to_fr_vec(val: &[u64; 4]) -> Vec<Fr> {
     ]
 }
 
-// ===== host 侧参考计算 =====
-
-fn host_g1_on_curve(x: &[u64; 4], y: &[u64; 4]) -> bool {
-    let m = &BN254_P;
-    let y_sq = host_mul_mod(y, y, m);
-    let x_sq = host_mul_mod(x, x, m);
-    let x_cubed = host_mul_mod(&x_sq, x, m);
-    let rhs = host_add_mod(&x_cubed, &BN254_B, m);
-    y_sq == rhs
-}
-
 // ===== 测试 =====
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::precompiles::PrecompileRegistry;
+    use crate::precompiles::bn254_ops::{BN254_G1_X, BN254_G1_Y, host_g1_on_curve};
 
     #[test]
     fn test_bn254_g1_on_curve_generator() {
@@ -381,7 +311,10 @@ mod tests {
         let circuit = Bn254PairingCircuit::new();
         let (ccs, witness) = circuit.run_mvp(&inputs).expect("run_mvp ok");
         let instance = CcsInstance::new(ccs, witness, vec![]).expect("instance");
-        assert!(!instance.is_satisfied().expect("is_satisfied"), "不在曲线上的点应不满足约束");
+        assert!(
+            !instance.is_satisfied().expect("is_satisfied"),
+            "不在曲线上的点应不满足约束"
+        );
     }
 
     #[test]
@@ -414,7 +347,10 @@ mod tests {
         let circuit = Bn254PairingCircuit::new_full();
         let (ccs, witness) = circuit.run_full(&inputs).expect("run_full ok");
         let instance = CcsInstance::new(ccs, witness, vec![]).expect("instance");
-        assert!(!instance.is_satisfied().expect("is_satisfied"), "hint=0 应不满足");
+        assert!(
+            !instance.is_satisfied().expect("is_satisfied"),
+            "hint=0 应不满足"
+        );
     }
 
     #[test]

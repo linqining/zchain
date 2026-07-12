@@ -27,9 +27,7 @@
 use crate::ccs::{Ccs, CcsInstance, Fr, SparseMatrix};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
-use crate::precompiles::non_native::{
-    NonNativeBuilder, SECP256K1_GX, SECP256K1_GY,
-};
+use crate::precompiles::non_native::{NonNativeBuilder, SECP256K1_GX, SECP256K1_GY};
 use crate::precompiles::secp256k1_ops::{assert_point_equal, from_affine, point_add, scalar_mul};
 use crate::precompiles::{CcsCircuit, PrecompileCircuit};
 
@@ -220,22 +218,22 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
                 m_bit_r0, m_bit_r1, m_p_r1, m_bitp_r1, m_r_r2, m_bitp_r2, m_rnew_r2,
             ],
             vec![
-                vec![0],     // S_0: M_bit_r0 → row 0: +bit
+                vec![0],    // S_0: M_bit_r0 → row 0: +bit
                 vec![0, 0], // S_1: (M_bit_r0)^2 → row 0: -bit*bit
                 vec![1, 2], // S_2: M_bit_r1 * M_P_r1 → row 1: +bit*P
-                vec![3],     // S_3: M_bitP_r1 → row 1: -bit_P
-                vec![4],     // S_4: M_R_r2 → row 2: +R
-                vec![5],     // S_5: M_bitP_r2 → row 2: +bit_P
-                vec![6],     // S_6: M_Rnew_r2 → row 2: -R_new
+                vec![3],    // S_3: M_bitP_r1 → row 1: -bit_P
+                vec![4],    // S_4: M_R_r2 → row 2: +R
+                vec![5],    // S_5: M_bitP_r2 → row 2: +bit_P
+                vec![6],    // S_6: M_Rnew_r2 → row 2: -R_new
             ],
             vec![
-                Fr::one(),  // c_0: +bit
-                neg_one,    // c_1: -bit*bit
-                Fr::one(),  // c_2: +bit*P
-                neg_one,    // c_3: -bit_P
-                Fr::one(),  // c_4: +R
-                Fr::one(),  // c_5: +bit_P
-                neg_one,    // c_6: -R_new
+                Fr::one(), // c_0: +bit
+                neg_one,   // c_1: -bit*bit
+                Fr::one(), // c_2: +bit*P
+                neg_one,   // c_3: -bit_P
+                Fr::one(), // c_4: +R
+                Fr::one(), // c_5: +bit_P
+                neg_one,   // c_6: -R_new
             ],
         )
         .expect("EcdsaVerifyCircuit CCS 构造应成功")
@@ -290,11 +288,7 @@ impl CcsCircuit for EcdsaVerifyCircuit {
     }
 
     fn num_matrices(&self) -> usize {
-        if self.full_mode {
-            0
-        } else {
-            7
-        }
+        if self.full_mode { 0 } else { 7 }
     }
 
     fn to_ccs_instance(
@@ -318,8 +312,8 @@ mod tests {
     use super::*;
     use crate::precompiles::PrecompileRegistry;
     use crate::precompiles::non_native::{
-        host_add_mod, host_sub_mod, host_mul_mod, host_inv_mod, host_lt, host_sub, host_pow_mod,
-        SECP256K1_P_CURVE, SECP256K1_N,
+        SECP256K1_N, SECP256K1_P_CURVE, host_add_mod, host_inv_mod, host_lt, host_mul_mod,
+        host_pow_mod, host_sub, host_sub_mod,
     };
 
     // ===== 辅助函数 =====
@@ -463,12 +457,7 @@ mod tests {
     /// sqrt(a) mod p（p ≡ 3 mod 4，使用 a^((p+1)/4)）
     fn host_sqrt_mod(a: &[u64; 4]) -> [u64; 4] {
         let p = &SECP256K1_P_CURVE;
-        let p_plus_1: [u64; 4] = [
-            p[0].wrapping_add(1),
-            p[1],
-            p[2],
-            p[3],
-        ];
+        let p_plus_1: [u64; 4] = [p[0].wrapping_add(1), p[1], p[2], p[3]];
         let mut exp = [0u64; 4];
         exp[0] = (p_plus_1[0] >> 2) | ((p_plus_1[1] & 3) << 62);
         exp[1] = (p_plus_1[1] >> 2) | ((p_plus_1[2] & 3) << 62);
@@ -543,7 +532,11 @@ mod tests {
         let (r_x, r_y) = host_to_affine(&r_point);
 
         // r = R.x mod n
-        let r = if host_lt(&r_x, n) { r_x } else { host_sub(&r_x, n).0 };
+        let r = if host_lt(&r_x, n) {
+            r_x
+        } else {
+            host_sub(&r_x, n).0
+        };
         debug_assert!(host_lt(&r, n), "r < n");
 
         // ry = R.y（hint，用于构造 R' = (r, ry)）
@@ -699,9 +692,7 @@ mod tests {
         let mut registry = PrecompileRegistry::new();
         registry.register(Box::new(EcdsaVerifyCircuit::new()));
         assert_eq!(registry.len(), 1);
-        let circuit = registry
-            .get("ecdsa_verify")
-            .expect("应找到 ecdsa_verify");
+        let circuit = registry.get("ecdsa_verify").expect("应找到 ecdsa_verify");
         assert_eq!(circuit.name(), "ecdsa_verify");
         assert_eq!(circuit.num_variables(), 6);
         assert_eq!(circuit.gas_cost(), 100_000);
@@ -710,7 +701,11 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_gas_cost() {
         let circuit = EcdsaVerifyCircuit::new();
-        assert_eq!(circuit.gas_cost(), 100_000, "gas_cost 应为 100_000（spec L660）");
+        assert_eq!(
+            circuit.gas_cost(),
+            100_000,
+            "gas_cost 应为 100_000（spec L660）"
+        );
     }
 
     #[test]
@@ -754,7 +749,11 @@ mod tests {
 
         let custom = EcdsaVerifyCircuit::new_full_with_bits(16);
         assert!(custom.is_full_mode());
-        assert_eq!(custom.scalar_num_bits(), 16, "new_full_with_bits(16) 应为 16");
+        assert_eq!(
+            custom.scalar_num_bits(),
+            16,
+            "new_full_with_bits(16) 应为 16"
+        );
     }
 
     #[test]
@@ -776,7 +775,11 @@ mod tests {
         assert_eq!(mvp.gas_cost(), 100_000, "MVP gas_cost = 100_000");
 
         let full_256 = EcdsaVerifyCircuit::new_full();
-        assert_eq!(full_256.gas_cost(), 19_376_000, "Full 256-bit gas_cost = 19_376_000");
+        assert_eq!(
+            full_256.gas_cost(),
+            19_376_000,
+            "Full 256-bit gas_cost = 19_376_000"
+        );
 
         let full_8 = EcdsaVerifyCircuit::new_full_with_bits(8);
         assert_eq!(full_8.gas_cost(), 627_200, "Full 8-bit gas_cost = 627_200");
@@ -860,7 +863,11 @@ mod tests {
 
         // MVP assign_witness 仍正常工作
         let witness = circuit
-            .assign_witness(&[Fr::one(), Fr::from_u32_with_wrap(42), Fr::from_u32_with_wrap(100)])
+            .assign_witness(&[
+                Fr::one(),
+                Fr::from_u32_with_wrap(42),
+                Fr::from_u32_with_wrap(100),
+            ])
             .expect("assign_witness 应成功");
         assert!(ccs.satisfied_by(&witness).expect("satisfied_by"));
     }

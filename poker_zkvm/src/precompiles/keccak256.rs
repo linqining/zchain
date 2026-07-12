@@ -230,7 +230,10 @@ impl KeccakBuilder {
             let not_val = one.sub(&self.get_val(bit));
             let not_bit = self.alloc(not_val);
             let row = self.ccs.alloc_row();
-            self.ccs.add_linear(row, &[(bit, Fr::one()), (not_bit, Fr::one()), (0, Fr::one().neg())]);
+            self.ccs.add_linear(
+                row,
+                &[(bit, Fr::one()), (not_bit, Fr::one()), (0, Fr::one().neg())],
+            );
             result.push(not_bit);
         }
         result
@@ -527,7 +530,8 @@ impl PrecompileCircuit for Keccak256Circuit {
             vec![Fr::zero(); 50]
         };
         let (ccs, _) = if self.full_mode {
-            self.run_full(&dummy).expect("dummy run_full should succeed")
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
         } else {
             self.run_mvp(&dummy).expect("dummy run_mvp should succeed")
         };
@@ -541,9 +545,13 @@ impl PrecompileCircuit for Keccak256Circuit {
             vec![Fr::zero(); 50]
         };
         if self.full_mode {
-            self.run_full(&dummy).expect("dummy run_full should succeed").0
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
         } else {
-            self.run_mvp(&dummy).expect("dummy run_mvp should succeed").0
+            self.run_mvp(&dummy)
+                .expect("dummy run_mvp should succeed")
+                .0
         }
     }
 
@@ -576,7 +584,8 @@ impl CcsCircuit for Keccak256Circuit {
             vec![Fr::zero(); 50]
         };
         let (ccs, _) = if self.full_mode {
-            self.run_full(&dummy).expect("dummy run_full should succeed")
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
         } else {
             self.run_mvp(&dummy).expect("dummy run_mvp should succeed")
         };
@@ -670,9 +679,8 @@ mod tests {
             // XOR block into state
             for lane_idx in 0..RATE_LANES {
                 let offset = block_start + lane_idx * 8;
-                let lane = u64::from_le_bytes(
-                    padded[offset..offset + 8].try_into().expect("8 bytes"),
-                );
+                let lane =
+                    u64::from_le_bytes(padded[offset..offset + 8].try_into().expect("8 bytes"));
                 let x = lane_idx % 5;
                 let y = lane_idx / 5;
                 state[x][y] ^= lane;
@@ -735,7 +743,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "单轮 Keccak-f[1600] 置换应满足约束"
         );
     }
@@ -764,7 +773,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            !ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            !ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "篡改输出后应不满足约束"
         );
     }
@@ -773,10 +783,9 @@ mod tests {
     fn test_host_keccak256_empty() {
         let hash = host_keccak256(b"");
         let expected: [u8; 32] = [
-            0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c,
-            0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03, 0xc0,
-            0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b,
-            0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,
+            0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c, 0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7,
+            0x03, 0xc0, 0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b, 0x7b, 0xfa, 0xd8, 0x04,
+            0x5d, 0x85, 0xa4, 0x70,
         ];
         assert_eq!(hash, expected, "keccak256(\"\") 应匹配已知值");
     }
@@ -785,10 +794,9 @@ mod tests {
     fn test_host_keccak256_abc() {
         let hash = host_keccak256(b"abc");
         let expected: [u8; 32] = [
-            0x4e, 0x03, 0x65, 0x7a, 0xea, 0x45, 0xa9, 0x4f,
-            0xc7, 0xd4, 0x7b, 0xa8, 0x26, 0xc8, 0xd6, 0x67,
-            0xc0, 0xd1, 0xe6, 0xe3, 0x3a, 0x64, 0xa0, 0x36,
-            0xec, 0x44, 0xf5, 0x8f, 0xa1, 0x2d, 0x6c, 0x45,
+            0x4e, 0x03, 0x65, 0x7a, 0xea, 0x45, 0xa9, 0x4f, 0xc7, 0xd4, 0x7b, 0xa8, 0x26, 0xc8,
+            0xd6, 0x67, 0xc0, 0xd1, 0xe6, 0xe3, 0x3a, 0x64, 0xa0, 0x36, 0xec, 0x44, 0xf5, 0x8f,
+            0xa1, 0x2d, 0x6c, 0x45,
         ];
         assert_eq!(hash, expected, "keccak256(\"abc\") 应匹配已知值");
     }
@@ -843,7 +851,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "keccak256(\"\") 应满足约束"
         );
     }
@@ -863,9 +872,7 @@ mod tests {
         let mut state = [[0u64; 5]; 5];
         for lane_idx in 0..RATE_LANES {
             let offset = lane_idx * 8;
-            let lane = u64::from_le_bytes(
-                padded[offset..offset + 8].try_into().expect("8 bytes"),
-            );
+            let lane = u64::from_le_bytes(padded[offset..offset + 8].try_into().expect("8 bytes"));
             let x = lane_idx % 5;
             let y = lane_idx / 5;
             state[x][y] ^= lane;
@@ -889,7 +896,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "keccak256(\"abc\") 应满足约束"
         );
     }

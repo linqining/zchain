@@ -190,8 +190,7 @@ impl PoseidonCircuit {
                     terms.push((sbox_out_j, mds_val.neg()));
                 }
                 if !is_last {
-                    let ark_next =
-                        Bn254ScalarField::from_fr(config.ark[(round + 1) as usize][i]);
+                    let ark_next = Bn254ScalarField::from_fr(config.ark[(round + 1) as usize][i]);
                     terms.push((0, ark_next.neg()));
                 }
                 builder.add_linear(row, &terms);
@@ -274,8 +273,7 @@ impl PoseidonCircuit {
                     sum = sum.add(&mds_val.mul(&sbox_out_j));
                 }
                 if !is_last {
-                    let ark_next =
-                        Bn254ScalarField::from_fr(config.ark[(round + 1) as usize][i]);
+                    let ark_next = Bn254ScalarField::from_fr(config.ark[(round + 1) as usize][i]);
                     sum = sum.add(&ark_next);
                 }
                 *new_state_i = sum;
@@ -339,7 +337,9 @@ impl PoseidonCircuit {
     fn build_mvp_ccs(&self) -> Ccs {
         // 7 个行隔离矩阵，每个 3 行 × 5 列
         let mut m_x_r0 = SparseMatrix::new(3, 5);
-        m_x_r0.add_entry(0, 1, Fr::one()).expect("M_x_r0: row 0 col 1");
+        m_x_r0
+            .add_entry(0, 1, Fr::one())
+            .expect("M_x_r0: row 0 col 1");
 
         let mut m_x2_r0 = SparseMatrix::new(3, 5);
         m_x2_r0
@@ -493,7 +493,9 @@ mod tests {
     fn test_poseidon_circuit_consistency_with_host() {
         let circuit = PoseidonCircuit::new();
         let x_bn = Fr::from_u32_with_wrap(7);
-        let witness = circuit.assign_witness(&[x_bn]).expect("assign_witness 应成功");
+        let witness = circuit
+            .assign_witness(&[x_bn])
+            .expect("assign_witness 应成功");
         let x5 = witness[4];
 
         let x_fr = x_bn.into_fr();
@@ -558,8 +560,7 @@ mod tests {
 
         // 变量数应为 439
         assert_eq!(
-            ccs.num_vars,
-            FULL_MODE_NUM_VARS,
+            ccs.num_vars, FULL_MODE_NUM_VARS,
             "完整模式应有 {FULL_MODE_NUM_VARS} 个变量，实际 {}",
             ccs.num_vars
         );
@@ -573,10 +574,7 @@ mod tests {
 
         // 行数应 > 0
         let num_rows = ccs.num_rows();
-        assert!(
-            num_rows > 400,
-            "完整模式行数应 > 400，实际 {num_rows}"
-        );
+        assert!(num_rows > 400, "完整模式行数应 > 400，实际 {num_rows}");
 
         // 矩阵数应 > 0
         let num_matrices = ccs.num_matrices();
@@ -668,10 +666,7 @@ mod tests {
         // z[56..62]=round 4 (6 vars, partial), z[62..68]=round 5 (partial)
         // round 5 S-box elem 0: sq=z[62], quad=z[63], quint=z[64]
         // 篡改 quint (z[64])
-        assert!(
-            witness.len() > 65,
-            "witness 应足够长以包含 round 5 的变量"
-        );
+        assert!(witness.len() > 65, "witness 应足够长以包含 round 5 的变量");
         witness[64] = witness[64].add(&Fr::one()); // 篡改: +1
 
         assert!(
@@ -760,9 +755,7 @@ mod tests {
             "输入长度 1 应返回错误"
         );
         assert!(
-            circuit
-                .assign_witness(&[Fr::one(), Fr::one()])
-                .is_err(),
+            circuit.assign_witness(&[Fr::one(), Fr::one()]).is_err(),
             "输入长度 2 应返回错误"
         );
         assert!(
@@ -806,7 +799,11 @@ mod tests {
         let circuit = PoseidonCircuit::new_full();
         let config = poseidon_config();
 
-        let inputs = [Fr::from_u32_with_wrap(7), Fr::from_u32_with_wrap(3), Fr::from_u32_with_wrap(2)];
+        let inputs = [
+            Fr::from_u32_with_wrap(7),
+            Fr::from_u32_with_wrap(3),
+            Fr::from_u32_with_wrap(2),
+        ];
         let witness = circuit
             .assign_witness(&inputs)
             .expect("assign_full_witness 应成功");
@@ -827,11 +824,20 @@ mod tests {
 
         // 验证 ARK[0] 正确：a_i = inputs[i] + ark[0][i]
         let expected_a0 = inputs[0].add(&Bn254ScalarField::from_fr(config.ark[0][0]));
-        assert_eq!(a0, expected_a0, "ARK[0] 输出应与 inputs[0] + ark[0][0] 一致");
+        assert_eq!(
+            a0, expected_a0,
+            "ARK[0] 输出应与 inputs[0] + ark[0][0] 一致"
+        );
         let expected_a1 = inputs[1].add(&Bn254ScalarField::from_fr(config.ark[0][1]));
-        assert_eq!(a1, expected_a1, "ARK[0] 输出应与 inputs[1] + ark[0][1] 一致");
+        assert_eq!(
+            a1, expected_a1,
+            "ARK[0] 输出应与 inputs[1] + ark[0][1] 一致"
+        );
         let expected_a2 = inputs[2].add(&Bn254ScalarField::from_fr(config.ark[0][2]));
-        assert_eq!(a2, expected_a2, "ARK[0] 输出应与 inputs[2] + ark[0][2] 一致");
+        assert_eq!(
+            a2, expected_a2,
+            "ARK[0] 输出应与 inputs[2] + ark[0][2] 一致"
+        );
     }
 
     #[test]

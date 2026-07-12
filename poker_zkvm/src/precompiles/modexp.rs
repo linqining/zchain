@@ -54,7 +54,10 @@ impl ModexpCircuit {
     /// 创建 Full 模式电路（square-and-multiply，n 位指数）。
     #[must_use]
     pub fn new_full_with_bits(num_bits: usize) -> Self {
-        assert!(num_bits > 0 && num_bits <= 64, "num_bits must be in (0, 64]");
+        assert!(
+            num_bits > 0 && num_bits <= 64,
+            "num_bits must be in (0, 64]"
+        );
         Self {
             num_bits,
             full_mode: true,
@@ -166,19 +169,29 @@ impl PrecompileCircuit for ModexpCircuit {
     fn num_variables(&self) -> usize {
         if self.full_mode {
             let dummy = vec![Fr::zero(); 16];
-            self.run_full(&dummy).expect("dummy run_full should succeed").0.num_vars
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_vars
         } else {
             let dummy = vec![Fr::zero(); 16];
-            self.run_mvp(&dummy).expect("dummy run_mvp should succeed").0.num_vars
+            self.run_mvp(&dummy)
+                .expect("dummy run_mvp should succeed")
+                .0
+                .num_vars
         }
     }
 
     fn build_ccs(&self) -> Ccs {
         let dummy = vec![Fr::zero(); 16];
         if self.full_mode {
-            self.run_full(&dummy).expect("dummy run_full should succeed").0
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
         } else {
-            self.run_mvp(&dummy).expect("dummy run_mvp should succeed").0
+            self.run_mvp(&dummy)
+                .expect("dummy run_mvp should succeed")
+                .0
         }
     }
 
@@ -207,9 +220,15 @@ impl CcsCircuit for ModexpCircuit {
     fn num_matrices(&self) -> usize {
         let dummy = vec![Fr::zero(); 16];
         if self.full_mode {
-            self.run_full(&dummy).expect("dummy run_full should succeed").0.num_matrices()
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_matrices()
         } else {
-            self.run_mvp(&dummy).expect("dummy run_mvp should succeed").0.num_matrices()
+            self.run_mvp(&dummy)
+                .expect("dummy run_mvp should succeed")
+                .0
+                .num_matrices()
         }
     }
 
@@ -289,27 +308,35 @@ fn conditional_select(
         let diff_val = true_v.sub(&false_v);
         let diff_var = builder.alloc(diff_val);
         let row_diff = builder.ccs.alloc_row();
-        builder.ccs.add_linear(row_diff, &[
-            (diff_var, Fr::one()),
-            (true_val.limbs[k], Fr::one().neg()),
-            (false_val.limbs[k], Fr::one()),
-        ]);
+        builder.ccs.add_linear(
+            row_diff,
+            &[
+                (diff_var, Fr::one()),
+                (true_val.limbs[k], Fr::one().neg()),
+                (false_val.limbs[k], Fr::one()),
+            ],
+        );
 
         // bit_diff = bit * diff
         let bit_diff_val = builder.get_val(*bit).mul(&diff_val);
         let bit_diff_var = builder.alloc(bit_diff_val);
         let row_bd = builder.ccs.alloc_row();
-        builder.ccs.add_multiplication(row_bd, *bit, diff_var, bit_diff_var);
+        builder
+            .ccs
+            .add_multiplication(row_bd, *bit, diff_var, bit_diff_var);
 
         // result = false_val + bit_diff
         let result_val = false_v.add(&bit_diff_val);
         let result_var = builder.alloc(result_val);
         let row_r = builder.ccs.alloc_row();
-        builder.ccs.add_linear(row_r, &[
-            (result_var, Fr::one()),
-            (false_val.limbs[k], Fr::one().neg()),
-            (bit_diff_var, Fr::one().neg()),
-        ]);
+        builder.ccs.add_linear(
+            row_r,
+            &[
+                (result_var, Fr::one()),
+                (false_val.limbs[k], Fr::one().neg()),
+                (bit_diff_var, Fr::one().neg()),
+            ],
+        );
 
         limbs[k] = result_var;
     }
@@ -333,7 +360,12 @@ mod tests {
     }
 
     /// 构造 modexp 输入：[base(4), exp(4), modulus(4), result(4)]
-    fn make_inputs(base: &[u64; 4], exp: &[u64; 4], modulus: &[u64; 4], result: &[u64; 4]) -> Vec<Fr> {
+    fn make_inputs(
+        base: &[u64; 4],
+        exp: &[u64; 4],
+        modulus: &[u64; 4],
+        result: &[u64; 4],
+    ) -> Vec<Fr> {
         let mut inputs = Vec::with_capacity(16);
         inputs.extend_from_slice(&u256_to_fr_vec(base));
         inputs.extend_from_slice(&u256_to_fr_vec(exp));
@@ -359,7 +391,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "2 * 3 = 6 mod 7 应满足约束"
         );
     }
@@ -378,7 +411,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            !ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            !ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "篡改 result 后应不满足约束"
         );
     }
@@ -401,7 +435,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "2^10 = 1024 mod 1000000007 应满足约束"
         );
     }
@@ -423,7 +458,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            !ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            !ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "篡改 base 后应不满足约束"
         );
     }
@@ -486,7 +522,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "3^5 = 5 mod 7 应满足约束"
         );
     }
@@ -506,7 +543,8 @@ mod tests {
             .expect("assign_witness should succeed");
 
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "2^0 = 1 mod 7 应满足约束"
         );
     }

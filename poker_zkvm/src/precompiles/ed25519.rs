@@ -29,9 +29,7 @@
 use crate::ccs::{Ccs, CcsInstance, Fr, SparseMatrix};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
-use crate::precompiles::non_native::{
-    NonNativeBuilder, NonNativeElement,
-};
+use crate::precompiles::non_native::{NonNativeBuilder, NonNativeElement};
 use crate::precompiles::{CcsCircuit, PrecompileCircuit};
 
 // ===== Curve25519 / Ed25519 常量（[u64; 4] little-endian）=====
@@ -581,9 +579,21 @@ impl Ed25519VerifyCircuit {
         let p3_x = [inputs[16], inputs[17], inputs[18], inputs[19]];
         let p3_y = [inputs[20], inputs[21], inputs[22], inputs[23]];
 
-        let p1 = from_affine(&mut builder, &fr_limbs_to_u256(&p1_x), &fr_limbs_to_u256(&p1_y));
-        let p2 = from_affine(&mut builder, &fr_limbs_to_u256(&p2_x), &fr_limbs_to_u256(&p2_y));
-        let p3 = from_affine(&mut builder, &fr_limbs_to_u256(&p3_x), &fr_limbs_to_u256(&p3_y));
+        let p1 = from_affine(
+            &mut builder,
+            &fr_limbs_to_u256(&p1_x),
+            &fr_limbs_to_u256(&p1_y),
+        );
+        let p2 = from_affine(
+            &mut builder,
+            &fr_limbs_to_u256(&p2_x),
+            &fr_limbs_to_u256(&p2_y),
+        );
+        let p3 = from_affine(
+            &mut builder,
+            &fr_limbs_to_u256(&p3_x),
+            &fr_limbs_to_u256(&p3_y),
+        );
 
         // P1 + P2
         let sum = point_add(&mut builder, &p1, &p2);
@@ -615,9 +625,17 @@ impl Ed25519VerifyCircuit {
         let r_x = [inputs[12], inputs[13], inputs[14], inputs[15]];
         let r_y = [inputs[16], inputs[17], inputs[18], inputs[19]];
 
-        let p = from_affine(&mut builder, &fr_limbs_to_u256(&p_x), &fr_limbs_to_u256(&p_y));
+        let p = from_affine(
+            &mut builder,
+            &fr_limbs_to_u256(&p_x),
+            &fr_limbs_to_u256(&p_y),
+        );
         let scalar_elem = builder.alloc_element(sc);
-        let result = from_affine(&mut builder, &fr_limbs_to_u256(&r_x), &fr_limbs_to_u256(&r_y));
+        let result = from_affine(
+            &mut builder,
+            &fr_limbs_to_u256(&r_x),
+            &fr_limbs_to_u256(&r_y),
+        );
 
         let computed = scalar_mul(&mut builder, &p, &scalar_elem, self.scalar_num_bits);
 
@@ -641,11 +659,7 @@ impl PrecompileCircuit for Ed25519VerifyCircuit {
     }
 
     fn num_variables(&self) -> usize {
-        if self.full_mode {
-            0
-        } else {
-            6
-        }
+        if self.full_mode { 0 } else { 6 }
     }
 
     fn build_ccs(&self) -> Ccs {
@@ -689,13 +703,13 @@ impl PrecompileCircuit for Ed25519VerifyCircuit {
                 m_bit_r0, m_bit_r1, m_p_r1, m_bitp_r1, m_p2_r2, m_bitp_r2, m_pnew_r2,
             ],
             vec![
-                vec![0],     // S_0: +bit
-                vec![0, 0],  // S_1: -bit*bit
-                vec![1, 2],  // S_2: +bit*P
-                vec![3],     // S_3: -bit_P
-                vec![4],     // S_4: +P2
-                vec![5],     // S_5: +bit_P
-                vec![6],     // S_6: -P_new
+                vec![0],    // S_0: +bit
+                vec![0, 0], // S_1: -bit*bit
+                vec![1, 2], // S_2: +bit*P
+                vec![3],    // S_3: -bit_P
+                vec![4],    // S_4: +P2
+                vec![5],    // S_5: +bit_P
+                vec![6],    // S_6: -P_new
             ],
             vec![
                 Fr::one(),
@@ -748,11 +762,7 @@ impl CcsCircuit for Ed25519VerifyCircuit {
     }
 
     fn num_matrices(&self) -> usize {
-        if self.full_mode {
-            0
-        } else {
-            7
-        }
+        if self.full_mode { 0 } else { 7 }
     }
 
     fn to_ccs_instance(
@@ -797,7 +807,7 @@ fn u256_to_fr_vec(val: &[u64; 4]) -> Vec<Fr> {
 mod tests {
     use super::*;
     use crate::precompiles::PrecompileRegistry;
-    use crate::precompiles::non_native::{host_add_mod, host_sub_mod, host_mul_mod, host_inv_mod};
+    use crate::precompiles::non_native::{host_add_mod, host_inv_mod, host_mul_mod, host_sub_mod};
 
     type HostPoint = ([u64; 4], [u64; 4], [u64; 4], [u64; 4]); // (X, Y, T, Z) Extended
 

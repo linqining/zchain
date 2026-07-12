@@ -81,11 +81,14 @@ impl MerkleVerifyCircuit {
         let parent = builder.alloc_var(); // 3
         let row = builder.alloc_row();
         // parent - 2*left - right = 0
-        builder.add_linear(row, &[
-            (parent, Fr::one()),
-            (left, Fr::from_u64(2).neg()),
-            (right, Fr::one().neg()),
-        ]);
+        builder.add_linear(
+            row,
+            &[
+                (parent, Fr::one()),
+                (left, Fr::from_u64(2).neg()),
+                (right, Fr::one().neg()),
+            ],
+        );
         builder.build().expect("MVP CCS build should succeed")
     }
 
@@ -169,33 +172,42 @@ impl MerkleVerifyCircuit {
             let h_left_val = current_val.mul(&two).add(&sibling_val);
             witness.push(h_left_val);
             let row_hl = builder.alloc_row();
-            builder.add_linear(row_hl, &[
-                (h_left_var, Fr::one()),
-                (current_var, two.neg()),
-                (sibling_vars[i], Fr::one().neg()),
-            ]);
+            builder.add_linear(
+                row_hl,
+                &[
+                    (h_left_var, Fr::one()),
+                    (current_var, two.neg()),
+                    (sibling_vars[i], Fr::one().neg()),
+                ],
+            );
 
             // H_right = sibling * 2 + current
             let h_right_var = builder.alloc_var();
             let h_right_val = sibling_val.mul(&two).add(&current_val);
             witness.push(h_right_val);
             let row_hr = builder.alloc_row();
-            builder.add_linear(row_hr, &[
-                (h_right_var, Fr::one()),
-                (sibling_vars[i], two.neg()),
-                (current_var, Fr::one().neg()),
-            ]);
+            builder.add_linear(
+                row_hr,
+                &[
+                    (h_right_var, Fr::one()),
+                    (sibling_vars[i], two.neg()),
+                    (current_var, Fr::one().neg()),
+                ],
+            );
 
             // diff = H_right - H_left
             let diff_var = builder.alloc_var();
             let diff_val = h_right_val.sub(&h_left_val);
             witness.push(diff_val);
             let row_diff = builder.alloc_row();
-            builder.add_linear(row_diff, &[
-                (diff_var, Fr::one()),
-                (h_right_var, Fr::one().neg()),
-                (h_left_var, Fr::one()),
-            ]);
+            builder.add_linear(
+                row_diff,
+                &[
+                    (diff_var, Fr::one()),
+                    (h_right_var, Fr::one().neg()),
+                    (h_left_var, Fr::one()),
+                ],
+            );
 
             // bit_diff = direction * diff
             let bit_diff_var = builder.alloc_var();
@@ -209,11 +221,14 @@ impl MerkleVerifyCircuit {
             let parent_val = h_left_val.add(&bit_diff_val);
             witness.push(parent_val);
             let row_parent = builder.alloc_row();
-            builder.add_linear(row_parent, &[
-                (parent_var, Fr::one()),
-                (h_left_var, Fr::one().neg()),
-                (bit_diff_var, Fr::one().neg()),
-            ]);
+            builder.add_linear(
+                row_parent,
+                &[
+                    (parent_var, Fr::one()),
+                    (h_left_var, Fr::one().neg()),
+                    (bit_diff_var, Fr::one().neg()),
+                ],
+            );
 
             current_var = parent_var;
             current_val = parent_val;
@@ -221,10 +236,10 @@ impl MerkleVerifyCircuit {
 
         // 最终约束：root - last_parent = 0
         let row_final = builder.alloc_row();
-        builder.add_linear(row_final, &[
-            (root_var, Fr::one()),
-            (current_var, Fr::one().neg()),
-        ]);
+        builder.add_linear(
+            row_final,
+            &[(root_var, Fr::one()), (current_var, Fr::one().neg())],
+        );
 
         let ccs = builder.build()?;
         Ok((ccs, witness))
@@ -255,7 +270,9 @@ impl PrecompileCircuit for MerkleVerifyCircuit {
         if self.full_mode {
             let d = self.depth;
             let dummy = vec![Fr::zero(); 2 + 2 * d];
-            self.run_full(&dummy).expect("dummy run_full should succeed").0
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
         } else {
             self.build_mvp_ccs()
         }
@@ -282,7 +299,10 @@ impl CcsCircuit for MerkleVerifyCircuit {
     fn num_matrices(&self) -> usize {
         if self.full_mode {
             let dummy = vec![Fr::zero(); 2 + 2 * self.depth];
-            self.run_full(&dummy).expect("dummy run_full should succeed").0.num_matrices()
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_matrices()
         } else {
             3
         }
@@ -337,7 +357,10 @@ mod tests {
             .assign_witness(&[left, right, parent])
             .expect("assign_witness should succeed");
         assert_eq!(witness.len(), 4);
-        assert!(ccs.satisfied_by(&witness).expect("satisfied_by should succeed"));
+        assert!(
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed")
+        );
     }
 
     #[test]
@@ -352,7 +375,8 @@ mod tests {
             .assign_witness(&[left, right, parent])
             .expect("assign_witness should succeed");
         assert!(
-            !ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            !ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "篡改 parent 后应不满足约束"
         );
     }
@@ -371,7 +395,8 @@ mod tests {
             .expect("assign_witness should succeed");
         witness[1] = Fr::from_u64(5); // left 3 → 5
         assert!(
-            !ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            !ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "篡改 left 后应不满足约束"
         );
     }
@@ -403,7 +428,8 @@ mod tests {
             .expect("assign_witness should succeed");
         assert_eq!(witness.len(), circuit.num_variables());
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "3 层 Merkle 路径验证应通过"
         );
     }
@@ -430,7 +456,8 @@ mod tests {
         // 篡改 leaf
         witness[1] = Fr::from_u64(99);
         assert!(
-            !ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            !ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "篡改 leaf 后应不满足约束"
         );
     }
@@ -457,7 +484,8 @@ mod tests {
         // 篡改 sibling[0]（var index = 3）
         witness[3] = Fr::from_u64(99);
         assert!(
-            !ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            !ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "篡改 sibling 后应不满足约束"
         );
     }
@@ -481,7 +509,8 @@ mod tests {
             .assign_witness(&inputs)
             .expect("assign_witness should succeed");
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "1 层 Merkle 路径验证应通过"
         );
     }
@@ -506,7 +535,8 @@ mod tests {
             .assign_witness(&inputs)
             .expect("assign_witness should succeed");
         assert!(
-            ccs.satisfied_by(&witness).expect("satisfied_by should succeed"),
+            ccs.satisfied_by(&witness)
+                .expect("satisfied_by should succeed"),
             "direction=1 (右子节点) 路径验证应通过"
         );
     }
@@ -546,6 +576,10 @@ mod tests {
         let instance = circuit
             .to_ccs_instance(&witness, &public_inputs)
             .expect("to_ccs_instance should succeed");
-        assert!(instance.is_satisfied().expect("is_satisfied should succeed"));
+        assert!(
+            instance
+                .is_satisfied()
+                .expect("is_satisfied should succeed")
+        );
     }
 }

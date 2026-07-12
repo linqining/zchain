@@ -24,9 +24,7 @@
 
 use crate::ccs::Fr;
 use crate::field::ZkvmField;
-use crate::precompiles::non_native::{
-    NonNativeBuilder, NonNativeElement, SECP256K1_P_CURVE,
-};
+use crate::precompiles::non_native::{NonNativeBuilder, NonNativeElement, SECP256K1_P_CURVE};
 
 // ===== Point 结构 =====
 
@@ -64,7 +62,9 @@ fn select_fr(builder: &mut NonNativeBuilder, bit: usize, if_one: usize, if_zero:
     let bit_diff_val = builder.get_val(bit).mul(&diff_val);
     let bit_diff_var = builder.alloc(bit_diff_val);
     let row = builder.ccs.alloc_row();
-    builder.ccs.add_multiplication(row, bit, diff_var, bit_diff_var);
+    builder
+        .ccs
+        .add_multiplication(row, bit, diff_var, bit_diff_var);
 
     // result = if_zero + bit_diff
     let result_val = if_zero_val.add(&bit_diff_val);
@@ -97,7 +97,12 @@ fn select_element(
 }
 
 /// 条件选择两个 Point：result = bit ? if_one : if_zero。
-fn select_point(builder: &mut NonNativeBuilder, bit: usize, if_one: &Point, if_zero: &Point) -> Point {
+fn select_point(
+    builder: &mut NonNativeBuilder,
+    bit: usize,
+    if_one: &Point,
+    if_zero: &Point,
+) -> Point {
     Point {
         x: select_element(builder, bit, &if_one.x, &if_zero.x),
         y: select_element(builder, bit, &if_one.y, &if_zero.y),
@@ -183,7 +188,11 @@ pub(crate) fn point_double(builder: &mut NonNativeBuilder, p: &Point) -> Point {
     // Z3 = 2*Y*Z
     let z3 = builder.mul_mod(&two_y, &p.z, m);
 
-    Point { x: x3, y: y3, z: z3 }
+    Point {
+        x: x3,
+        y: y3,
+        z: z3,
+    }
 }
 
 /// Jacobian 点加法：P + Q（假设 P ≠ ±Q，两者均非无穷远点）。
@@ -250,7 +259,11 @@ pub(crate) fn point_add(builder: &mut NonNativeBuilder, p: &Point, q: &Point) ->
     let z1z2 = builder.mul_mod(&p.z, &q.z, m);
     let z3 = builder.mul_mod(&z1z2, &h, m);
 
-    Point { x: x3, y: y3, z: z3 }
+    Point {
+        x: x3,
+        y: y3,
+        z: z3,
+    }
 }
 
 /// 标量乘法：scalar * P。
@@ -355,7 +368,9 @@ pub(crate) fn scalar_mul(
         let sb_var = builder.alloc(sb_val);
         {
             let row = builder.ccs.alloc_row();
-            builder.ccs.add_multiplication(row, started_var, bit_var, sb_var);
+            builder
+                .ccs
+                .add_multiplication(row, started_var, bit_var, sb_var);
         }
         let started_new_val = builder
             .get_val(started_var)
@@ -466,7 +481,11 @@ mod tests {
         assert!(ccs.satisfied_by(&witness).expect("satisfied_by"));
 
         // Z should be 0
-        assert_eq!(z_u256, [0, 0, 0, 0], "doubling identity should give identity (Z=0)");
+        assert_eq!(
+            z_u256,
+            [0, 0, 0, 0],
+            "doubling identity should give identity (Z=0)"
+        );
     }
 
     #[test]

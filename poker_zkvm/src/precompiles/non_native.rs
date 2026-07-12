@@ -330,7 +330,9 @@ impl NonNativeBuilder {
         let l1 = self.alloc(limbs[1]);
         let l2 = self.alloc(limbs[2]);
         let l3 = self.alloc(limbs[3]);
-        NonNativeElement { limbs: [l0, l1, l2, l3] }
+        NonNativeElement {
+            limbs: [l0, l1, l2, l3],
+        }
     }
 
     /// 从 host [u64; 4] 创建元素。
@@ -392,10 +394,7 @@ impl NonNativeBuilder {
             let row = self.ccs.alloc_row();
             self.ccs.add_linear(
                 row,
-                &[
-                    (a.limbs[k], Fr::one()),
-                    (b.limbs[k], Fr::one().neg()),
-                ],
+                &[(a.limbs[k], Fr::one()), (b.limbs[k], Fr::one().neg())],
             );
         }
     }
@@ -538,7 +537,8 @@ impl NonNativeBuilder {
             let rm_var = self.alloc(reduced_modulus);
             let m_var = self.bound_var(m_v);
             let r_mult = self.ccs.alloc_row();
-            self.ccs.add_multiplication(r_mult, reduced_var, m_var, rm_var);
+            self.ccs
+                .add_multiplication(r_mult, reduced_var, m_var, rm_var);
 
             self.ccs.add_linear(
                 row,
@@ -624,7 +624,8 @@ impl NonNativeBuilder {
             let bm_var = self.alloc(borrowed_modulus);
             let m_var = self.bound_var(m_v);
             let r_mult = self.ccs.alloc_row();
-            self.ccs.add_multiplication(r_mult, borrowed_var, m_var, bm_var);
+            self.ccs
+                .add_multiplication(r_mult, borrowed_var, m_var, bm_var);
 
             // 约束: a[k] - b[k] + borrowed*modulus[k] + borrow_in[k] - result[k] - borrow_out*2^64 = 0
             let row = self.ccs.alloc_row();
@@ -752,11 +753,7 @@ impl NonNativeBuilder {
     ///
     /// 使用 schoolbook 算法 + carry 链。
     /// 每个 product limb 范围检查 < 2^64。
-    fn mul_big_circuit(
-        &mut self,
-        a: &NonNativeElement,
-        b: &NonNativeElement,
-    ) -> [usize; 8] {
+    fn mul_big_circuit(&mut self, a: &NonNativeElement, b: &NonNativeElement) -> [usize; 8] {
         let a_u256 = self.element_to_u256(a);
         let b_u256 = self.element_to_u256(b);
 
@@ -774,7 +771,8 @@ impl NonNativeBuilder {
             for j in 0..4 {
                 let p_var = self.alloc(product_vals[i][j]);
                 let row = self.ccs.alloc_row();
-                self.ccs.add_multiplication(row, a.limbs[i], b.limbs[j], p_var);
+                self.ccs
+                    .add_multiplication(row, a.limbs[i], b.limbs[j], p_var);
                 p_vars[i][j] = p_var;
             }
         }
@@ -833,10 +831,7 @@ impl NonNativeBuilder {
         let row = self.ccs.alloc_row();
         self.ccs.add_linear(
             row,
-            &[
-                (carry_var, Fr::one()),
-                (product_var, Fr::one().neg()),
-            ],
+            &[(carry_var, Fr::one()), (product_var, Fr::one().neg())],
         );
         product_vars[7] = product_var;
 

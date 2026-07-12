@@ -18,10 +18,13 @@
 //! - `zk_shuffle` — ZkShuffle CCS 电路迁移（Task 10.5）
 
 pub mod bit_ops;
+pub mod bn254_ops;
 pub mod bn254_pairing;
 pub mod ccs_builder;
-pub mod ed25519;
+pub mod dleq;
 pub mod ecdsa;
+pub mod ed25519;
+pub mod elgamal;
 pub mod keccak256;
 pub mod merkle_verify;
 pub mod modexp;
@@ -369,10 +372,10 @@ mod tests {
         assert_eq!(ecdsa.num_variables(), 6);
         assert_eq!(ecdsa.gas_cost(), 100_000);
 
-        // ZkShuffle（stub）
+        // ZkShuffle
         let zk_shuffle = registry.get("zk_shuffle").expect("应找到 zk_shuffle");
-        assert_eq!(zk_shuffle.num_variables(), 0);
-        assert_eq!(zk_shuffle.gas_cost(), 0);
+        assert!(zk_shuffle.num_variables() > 1000, "zk_shuffle 应有大量变量");
+        assert_eq!(zk_shuffle.gas_cost(), 1_780_000); // Light mode
 
         // Keccak256 (MVP)
         let keccak = registry.get("keccak256").expect("应找到 keccak256");
@@ -448,15 +451,15 @@ mod tests {
     #[test]
     fn test_phase10_gas_costs_reasonable() {
         let cases = [
-            ("poseidon", 200u64, 1_000u64),         // ~200 gas/round
-            ("sha256", 25_000, 100_000),             // ~25k gas/block
-            ("ecdsa_verify", 100_000, 200_000),      // ~100k gas/verify
-            ("zk_shuffle", 0, 1),                     // stub = 0
-            ("keccak256", 5_000, 15_000),            // MVP = 10_000
-            ("modexp", 10_000, 100_000),             // MVP = 50_000
-            ("merkle_verify", 1, 1_000),             // MVP = 100
-            ("ed25519", 5_000, 100_000),             // MVP = 50_000
-            ("bn254_pairing", 1_000, 100_000),       // MVP = 30_000
+            ("poseidon", 200u64, 1_000u64),       // ~200 gas/round
+            ("sha256", 25_000, 100_000),          // ~25k gas/block
+            ("ecdsa_verify", 100_000, 200_000),   // ~100k gas/verify
+            ("zk_shuffle", 1_000_000, 5_000_000), // Light = 1_780_000
+            ("keccak256", 5_000, 15_000),         // MVP = 10_000
+            ("modexp", 10_000, 100_000),          // MVP = 50_000
+            ("merkle_verify", 1, 1_000),          // MVP = 100
+            ("ed25519", 5_000, 100_000),          // MVP = 50_000
+            ("bn254_pairing", 1_000, 100_000),    // MVP = 30_000
         ];
 
         let mut registry = PrecompileRegistry::new();
@@ -471,7 +474,9 @@ mod tests {
         registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new()));
 
         for (name, min, max) in cases {
-            let circuit = registry.get(name).unwrap_or_else(|| panic!("应找到 {name}"));
+            let circuit = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("应找到 {name}"));
             let gas = circuit.gas_cost();
             assert!(
                 gas >= min && gas < max,

@@ -30,10 +30,7 @@ enum Constraint {
         row: usize,
     },
     /// `sum(coeff * z[col]) = 0`
-    Linear {
-        terms: Vec<(usize, Fr)>,
-        row: usize,
-    },
+    Linear { terms: Vec<(usize, Fr)>, row: usize },
     /// `z[col]^2 - z[col] = 0`
     BitCheck { col: usize, row: usize },
 }
@@ -117,11 +114,10 @@ impl CcsBuilder {
     ///
     /// 每个 term 生成 1 个行隔离矩阵 + 1 个单元素 subset。
     pub fn add_linear(&mut self, row: usize, terms: &[(usize, Fr)]) {
-        self.constraints
-            .push(Constraint::Linear {
-                terms: terms.to_vec(),
-                row,
-            });
+        self.constraints.push(Constraint::Linear {
+            terms: terms.to_vec(),
+            row,
+        });
     }
 
     /// 约束 `z[col] * (1 - z[col]) = 0`（在指定 row）。
@@ -261,10 +257,18 @@ mod tests {
         assert_eq!(ccs.num_matrices(), 3);
         assert_eq!(ccs.num_constraints(), 2);
 
-        let witness = vec![Fr::one(), Fr::from_u32_with_wrap(3), Fr::from_u32_with_wrap(9)];
+        let witness = vec![
+            Fr::one(),
+            Fr::from_u32_with_wrap(3),
+            Fr::from_u32_with_wrap(9),
+        ];
         assert!(ccs.satisfied_by(&witness).expect("satisfied_by"));
 
-        let bad = vec![Fr::one(), Fr::from_u32_with_wrap(3), Fr::from_u32_with_wrap(10)];
+        let bad = vec![
+            Fr::one(),
+            Fr::from_u32_with_wrap(3),
+            Fr::from_u32_with_wrap(10),
+        ];
         assert!(!ccs.satisfied_by(&bad).expect("satisfied_by bad"));
     }
 
@@ -275,11 +279,10 @@ mod tests {
         let y = builder.alloc_var();
         let result = builder.alloc_var();
         let row = builder.alloc_row();
-        builder.add_linear(row, &[
-            (x, Fr::one()),
-            (y, Fr::one()),
-            (result, Fr::one().neg()),
-        ]);
+        builder.add_linear(
+            row,
+            &[(x, Fr::one()), (y, Fr::one()), (result, Fr::one().neg())],
+        );
 
         let ccs = builder.build().expect("build 应成功");
         assert_eq!(ccs.num_vars, 4);
@@ -318,7 +321,8 @@ mod tests {
         assert!(ccs.satisfied_by(&[Fr::one(), Fr::zero()]).expect("bit=0"));
         assert!(ccs.satisfied_by(&[Fr::one(), Fr::one()]).expect("bit=1"));
         assert!(
-            !ccs.satisfied_by(&[Fr::one(), Fr::from_u32_with_wrap(2)]).expect("bit=2 should fail")
+            !ccs.satisfied_by(&[Fr::one(), Fr::from_u32_with_wrap(2)])
+                .expect("bit=2 should fail")
         );
     }
 
@@ -429,7 +433,8 @@ mod tests {
 
         assert!(ccs.satisfied_by(&[Fr::one(), Fr::one()]).expect("x=1"));
         assert!(
-            !ccs.satisfied_by(&[Fr::one(), Fr::from_u32_with_wrap(2)]).expect("x=2 should fail")
+            !ccs.satisfied_by(&[Fr::one(), Fr::from_u32_with_wrap(2)])
+                .expect("x=2 should fail")
         );
     }
 
@@ -451,14 +456,16 @@ mod tests {
         assert_eq!(ccs.num_rows(), 2);
 
         // x=1, y=1, z=1 (1*1=1, 1 是 bit)
-        assert!(ccs
-            .satisfied_by(&[Fr::one(), Fr::one(), Fr::one(), Fr::one()])
-            .expect("valid"));
+        assert!(
+            ccs.satisfied_by(&[Fr::one(), Fr::one(), Fr::one(), Fr::one()])
+                .expect("valid")
+        );
 
         // x=1, y=0, z=0 (1*0=0, 0 是 bit)
-        assert!(ccs
-            .satisfied_by(&[Fr::one(), Fr::one(), Fr::zero(), Fr::zero()])
-            .expect("valid"));
+        assert!(
+            ccs.satisfied_by(&[Fr::one(), Fr::one(), Fr::zero(), Fr::zero()])
+                .expect("valid")
+        );
 
         // x=2, y=3, z=6 (2*3=6, 6 不是 bit → 位检查失败)
         assert!(

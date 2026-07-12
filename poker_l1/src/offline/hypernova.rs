@@ -17,15 +17,15 @@
 
 use std::sync::Arc;
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
-use crate::error::PokerL1Error;
 use crate::Hash;
+use crate::error::PokerL1Error;
 
 use super::zk_verifier::{
-    ProofKind, SchemeId, VerifierStatus, ZkVerifyContext, ZkVerifier, SCHEME_HYPERNOVA,
-    SCHEME_ZKSHUFFLE,
+    ProofKind, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE, SchemeId, VerifierStatus, ZkVerifier,
+    ZkVerifyContext,
 };
 
 /// Hypernova Proof 最小字节数（SubTask 23.1）。
@@ -33,6 +33,21 @@ use super::zk_verifier::{
 /// MVP stub 仅要求 proof 非空且 >= 此下限。
 /// Production 实现须解析具体字段。
 pub const HYPERNOVA_PROOF_MIN_SIZE: usize = 64;
+
+/// ZkShuffle combined proof magic（`b"ZKSF"`）。
+const ZKSHUFFLE_MAGIC: [u8; 4] = *b"ZKSF";
+
+/// ZkShuffle combined proof 版本。
+const ZKSHUFFLE_VERSION: u32 = 1;
+
+/// ZkShuffle combined proof 最小字节数（magic + version + ccs_len + dleq_len + dleq_proof）。
+const ZKSHUFFLE_PROOF_MIN_SIZE: usize = 4 + 4 + 4 + 4 + 97;
+
+/// ZkShuffle DLEq proof 固定长度。
+const DLEQ_PROOF_SIZE: usize = 97;
+
+/// ZkShuffle public_io 中 G1 点的字节长度（x||y 各 32B LE）。
+const G1_POINT_SIZE: usize = 64;
 
 /// Hypernova folded instance 字段（SubTask 23.1）。
 ///
@@ -178,7 +193,7 @@ impl HypernovaVerifier {
 
         poker_zkvm::prover::ZkPublicIo {
             input: public_io.state_delta_hash.to_vec(), // 状态增量作为输入
-            output: public_io.ack_chain_hash.to_vec(), // ack_chain 作为输出
+            output: public_io.ack_chain_hash.to_vec(),  // ack_chain 作为输出
             randomness_seed: ZkvmFr::zero(),
             initial_commitment,
             final_commitment,
@@ -224,8 +239,8 @@ impl ZkVerifier for HypernovaVerifier {
         ctx: &ZkVerifyContext<'_>,
     ) -> Result<bool, PokerL1Error> {
         // M2-004：通过 scheme_id 反推期望的签名形式
-        let proof_kind = ProofKind::from_scheme_id(SCHEME_HYPERNOVA)
-            .ok_or(PokerL1Error::ProofKindMismatch {
+        let proof_kind =
+            ProofKind::from_scheme_id(SCHEME_HYPERNOVA).ok_or(PokerL1Error::ProofKindMismatch {
                 declared: 0,
                 actual: SCHEME_HYPERNOVA as u8,
             })?;
@@ -296,6 +311,124 @@ impl ZkShuffleVerifier {
     pub fn into_registry_verifier() -> Arc<dyn ZkVerifier> {
         Arc::new(Self::new())
     }
+
+    /// ZkShuffle Production 验证：解析 combined proof 并验证 CCS + DLEq。
+    ///
+    /// Combined proof 格式：
+    /// `magic(4) | version(4) | ccs_len(4) | ccs_proof(N) | dleq_len(4) | dleq_proof(97)`
+    fn verify_production(
+        &self,
+        proof: &[u8],
+        public_io: &super::zk_verifier::ZkPublicIo,
+    ) -> Result<bool, PokerL1Error> {
+        // 1. 解析 combined proof 格式
+        let (ccs_proof, dleq_proof) = Self::parse_combined_proof(proof)?;
+
+        // 2. 委托 HypernovaVerifier 验证 CCS proof
+        let hypernova = HypernovaVerifier::new();
+        hypernova.verify(ccs_proof, public_io, VerifierStatus::Production)?;
+
+        // 3. 从 public_io 提取 (g, pk, ΔC, ΔD)
+        let (g_bytes, pk_bytes, delta_c_bytes, delta_d_bytes) = parse_shuffle_public_io(public_io)?;
+
+        // 4. 验证 DLEq proof
+        let dleq_valid = poker_zkvm::precompiles::dleq::batch_dleq_verify_bytes(
+            &g_bytes,
+            &pk_bytes,
+            &delta_c_bytes,
+            &delta_d_bytes,
+            dleq_proof,
+        );
+        if !dleq_valid {
+            return Err(PokerL1Error::InvalidZkProofFormat(
+                "ZkShuffle DLEq proof 验证失败".to_string(),
+            ));
+        }
+
+        Ok(true)
+    }
+
+    /// 解析 combined proof 格式。
+    ///
+    /// 返回 (ccs_proof, dleq_proof) 切片。
+    fn parse_combined_proof(proof: &[u8]) -> Result<(&[u8], &[u8]), PokerL1Error> {
+        if proof.len() < ZKSHUFFLE_PROOF_MIN_SIZE {
+            return Err(PokerL1Error::InvalidZkProofFormat(format!(
+                "ZkShuffle proof 长度 {} < 最小要求 {}",
+                proof.len(),
+                ZKSHUFFLE_PROOF_MIN_SIZE
+            )));
+        }
+
+        let magic = &proof[0..4];
+        if magic != ZKSHUFFLE_MAGIC {
+            return Err(PokerL1Error::InvalidZkProofFormat(format!(
+                "ZkShuffle proof magic 不匹配: expected {:?}, got {:?}",
+                ZKSHUFFLE_MAGIC, magic
+            )));
+        }
+
+        let version = u32::from_be_bytes(proof[4..8].try_into().expect("4 bytes"));
+        if version != ZKSHUFFLE_VERSION {
+            return Err(PokerL1Error::InvalidZkProofFormat(format!(
+                "ZkShuffle proof version 不匹配: expected {}, got {}",
+                ZKSHUFFLE_VERSION, version
+            )));
+        }
+
+        let ccs_len = u32::from_be_bytes(proof[8..12].try_into().expect("4 bytes")) as usize;
+        let ccs_end = 12 + ccs_len;
+        if ccs_end + 4 + DLEQ_PROOF_SIZE > proof.len() {
+            return Err(PokerL1Error::InvalidZkProofFormat(format!(
+                "ZkShuffle proof: ccs_len {} 超出 proof 总长 {}",
+                ccs_len,
+                proof.len()
+            )));
+        }
+
+        let dleq_len =
+            u32::from_be_bytes(proof[ccs_end..ccs_end + 4].try_into().expect("4 bytes")) as usize;
+        if dleq_len != DLEQ_PROOF_SIZE {
+            return Err(PokerL1Error::InvalidZkProofFormat(format!(
+                "ZkShuffle proof: dleq_len {} != {}",
+                dleq_len, DLEQ_PROOF_SIZE
+            )));
+        }
+
+        let ccs_proof = &proof[12..ccs_end];
+        let dleq_proof = &proof[ccs_end + 4..ccs_end + 4 + DLEQ_PROOF_SIZE];
+        Ok((ccs_proof, dleq_proof))
+    }
+}
+
+/// 从 ZkPublicIo 提取 ZkShuffle 公共输入 (g, pk, ΔC, ΔD)。
+///
+/// `segment_continuity_proof` 格式：`pk(64B) + delta_c(64B) + delta_d(64B) = 192B`
+/// `g` 为 BN254 G1 生成元（常量，从 poker_zkvm 获取）。
+#[allow(clippy::type_complexity)]
+fn parse_shuffle_public_io(
+    public_io: &super::zk_verifier::ZkPublicIo,
+) -> Result<([u8; 64], [u8; 64], [u8; 64], [u8; 64]), PokerL1Error> {
+    let data = &public_io.segment_continuity_proof;
+    let expected = G1_POINT_SIZE * 3;
+    if data.len() < expected {
+        return Err(PokerL1Error::InvalidZkProofFormat(format!(
+            "ZkShuffle public_io: segment_continuity_proof len {} < {}",
+            data.len(),
+            expected
+        )));
+    }
+
+    let g_bytes = poker_zkvm::precompiles::dleq::generator_bytes();
+    let pk_bytes: [u8; 64] = data[0..G1_POINT_SIZE].try_into().expect("64 bytes");
+    let delta_c_bytes: [u8; 64] = data[G1_POINT_SIZE..G1_POINT_SIZE * 2]
+        .try_into()
+        .expect("64 bytes");
+    let delta_d_bytes: [u8; 64] = data[G1_POINT_SIZE * 2..G1_POINT_SIZE * 3]
+        .try_into()
+        .expect("64 bytes");
+
+    Ok((g_bytes, pk_bytes, delta_c_bytes, delta_d_bytes))
 }
 
 impl ZkVerifier for ZkShuffleVerifier {
@@ -306,7 +439,7 @@ impl ZkVerifier for ZkShuffleVerifier {
     fn verify(
         &self,
         proof: &[u8],
-        _public_io: &super::zk_verifier::ZkPublicIo,
+        public_io: &super::zk_verifier::ZkPublicIo,
         status: VerifierStatus,
     ) -> Result<bool, PokerL1Error> {
         // Stub 状态：仅校验格式
@@ -315,11 +448,8 @@ impl ZkVerifier for ZkShuffleVerifier {
             return Ok(true);
         }
 
-        // Production 状态：ZkShuffle Production verifier（Phase 11 迁移）
-        // 当前未实现，返回错误（grace 期结束后须迁移到完整 ZkShuffle Production verifier）
-        Err(PokerL1Error::Other(
-            "ZkShuffle Production verifier 尚未迁移（Phase 11）".to_string(),
-        ))
+        // Production 状态：ZkShuffle Production verifier
+        self.verify_production(proof, public_io)
     }
 
     fn verify_with_context(
@@ -331,8 +461,8 @@ impl ZkVerifier for ZkShuffleVerifier {
     ) -> Result<bool, PokerL1Error> {
         // M2-004：ZkShuffle (scheme_id=4) 期望旧签名（uses_new_signature=false）
         // grace 期后所有 CheckinTx 须使用新签名（含 proof_kind 字段）
-        let proof_kind = ProofKind::from_scheme_id(SCHEME_ZKSHUFFLE)
-            .ok_or(PokerL1Error::ProofKindMismatch {
+        let proof_kind =
+            ProofKind::from_scheme_id(SCHEME_ZKSHUFFLE).ok_or(PokerL1Error::ProofKindMismatch {
                 declared: 0,
                 actual: SCHEME_ZKSHUFFLE as u8,
             })?;
@@ -423,31 +553,25 @@ fn map_zkvm_error(e: poker_zkvm::error::ZkvmError) -> PokerL1Error {
                 )),
             }
         }
-        ZkvmError::InvalidZkProofFormat(msg) => {
-            PokerL1Error::InvalidZkProofFormat(msg)
-        }
+        ZkvmError::InvalidZkProofFormat(msg) => PokerL1Error::InvalidZkProofFormat(msg),
         other => PokerL1Error::Other(format!("poker_zkvm error: {other}")),
     }
 }
 
 /// 便捷函数：注册 Hypernova verifier 到 registry。
-pub fn register_hypernova_verifier(
-    registry: &mut super::zk_verifier::ZkVerifierRegistry,
-) {
+pub fn register_hypernova_verifier(registry: &mut super::zk_verifier::ZkVerifierRegistry) {
     registry.register(HypernovaVerifier::into_registry_verifier());
 }
 
 /// 便捷函数：注册 ZkShuffle verifier 到 registry（Phase 8 SubTask 8.2.3）。
-pub fn register_zkshuffle_verifier(
-    registry: &mut super::zk_verifier::ZkVerifierRegistry,
-) {
+pub fn register_zkshuffle_verifier(registry: &mut super::zk_verifier::ZkVerifierRegistry) {
     registry.register(ZkShuffleVerifier::into_registry_verifier());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::zk_verifier::{ZkPublicIo, ZkVerifierRegistry};
+    use super::*;
 
     fn make_public_io(fold_step_count: u32) -> ZkPublicIo {
         ZkPublicIo {
@@ -549,7 +673,14 @@ mod tests {
         let public_io = make_public_io(5);
         let proof = vec![0xAA; HYPERNOVA_PROOF_MIN_SIZE];
         let result = registry
-            .zk_verify(crate::DEFAULT_CHAIN_ID, SCHEME_HYPERNOVA, &proof, &public_io, 3, 1000)
+            .zk_verify(
+                crate::DEFAULT_CHAIN_ID,
+                SCHEME_HYPERNOVA,
+                &proof,
+                &public_io,
+                3,
+                1000,
+            )
             .expect("zk_verify 应成功");
         assert!(result.verified);
         assert_eq!(result.verifier_status, VerifierStatus::Stub);
@@ -596,9 +727,7 @@ mod tests {
 
     // ===== Phase 8 SubTask 8.2.8 集成测试 =====
 
-    use super::super::zk_verifier::{
-        ProofKind, ZkVerifyContext, SCHEME_ZKSHUFFLE,
-    };
+    use super::super::zk_verifier::{ProofKind, SCHEME_ZKSHUFFLE, ZkVerifyContext};
     use crate::governance::PRODUCTION_GRACE_BLOCKS;
 
     /// 辅助：构造默认 ZkVerifyContext（切换前状态）。
@@ -613,7 +742,9 @@ mod tests {
     }
 
     /// 辅助：构造 grace 期内的 ZkVerifyContext。
-    fn make_ctx_in_grace(last_partial_proof_hash: Option<&'static crate::Hash>) -> ZkVerifyContext<'static> {
+    fn make_ctx_in_grace(
+        last_partial_proof_hash: Option<&'static crate::Hash>,
+    ) -> ZkVerifyContext<'static> {
         ZkVerifyContext {
             current_height: 100,
             production_switch_height: 100,
@@ -686,7 +817,10 @@ mod tests {
         };
 
         let result = v.verify_with_context(&proof, &public_io, VerifierStatus::Stub, &ctx);
-        assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PartialFoldHashImmutable)
+        ));
     }
 
     /// 测试 4：grace 期内 ZkShuffle 无 last_partial_proof_hash 拒绝（防伪造新游戏）
@@ -744,11 +878,9 @@ mod tests {
     /// 测试 7：M2-003 覆盖已有 proof_partial_hash 返回 PartialFoldHashImmutable
     #[test]
     fn test_m2_003_overwrite_proof_partial_hash_rejected() {
-        use crate::offline::state::{
-            execute_partial_checkin, LastPartialFold, PartialCheckinTx,
-        };
-        use crate::offline::ack_chain::AckEntry;
         use crate::object_model::ObjectID;
+        use crate::offline::ack_chain::AckEntry;
+        use crate::offline::state::{LastPartialFold, PartialCheckinTx, execute_partial_checkin};
 
         let mut registry = ZkVerifierRegistry::new();
         register_hypernova_verifier(&mut registry);
@@ -779,7 +911,7 @@ mod tests {
         let tx = PartialCheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
             proof_partial: vec![0xDD; 64], // 不同的 proof → 不同的 hash
-            folded_step_count: 10, // 进度推进
+            folded_step_count: 10,         // 进度推进
             intermediate_commitment: [0xEE; 32],
             ack_chain_partial: vec![make_ack(1)],
             scheme_id: 1,
@@ -797,15 +929,18 @@ mod tests {
             crate::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_ctx_default(),
         );
-        assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PartialFoldHashImmutable)
+        ));
     }
 
     /// 测试 8：M2-003 幂等重提交允许（整个 PartialCheckinTx 内容幂等）
     #[test]
     fn test_m2_003_idempotent_resubmit_allowed() {
-        use crate::offline::state::{execute_partial_checkin, PartialCheckinTx};
-        use crate::offline::ack_chain::AckEntry;
         use crate::object_model::ObjectID;
+        use crate::offline::ack_chain::AckEntry;
+        use crate::offline::state::{PartialCheckinTx, execute_partial_checkin};
 
         let mut registry = ZkVerifierRegistry::new();
         register_hypernova_verifier(&mut registry);
@@ -869,11 +1004,9 @@ mod tests {
     /// 测试 9：M2-003 幂等范围 — proof_hash 匹配但其他字段不一致拒绝（Min3-003）
     #[test]
     fn test_m2_003_idempotent_range_other_fields_mismatch() {
-        use crate::offline::state::{
-            execute_partial_checkin, LastPartialFold, PartialCheckinTx,
-        };
-        use crate::offline::ack_chain::AckEntry;
         use crate::object_model::ObjectID;
+        use crate::offline::ack_chain::AckEntry;
+        use crate::offline::state::{LastPartialFold, PartialCheckinTx, execute_partial_checkin};
 
         let mut registry = ZkVerifierRegistry::new();
         register_hypernova_verifier(&mut registry);
@@ -924,7 +1057,10 @@ mod tests {
             crate::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_ctx_default(),
         );
-        assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PartialFoldHashImmutable)
+        ));
     }
 
     /// 测试 10：M2-004 scheme_id=1 新签名通过 / 旧签名返回 SignatureFormMismatch
@@ -948,14 +1084,23 @@ mod tests {
             ..make_ctx_default()
         };
         let result = v.verify_with_context(&proof, &public_io, VerifierStatus::Stub, &ctx_old_sig);
-        assert!(matches!(result, Err(PokerL1Error::SignatureFormMismatch { scheme_id: 1 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::SignatureFormMismatch { scheme_id: 1 })
+        ));
     }
 
     /// 测试 11：ProofKind::from_scheme_id 映射（SubTask 8.2.7）
     #[test]
     fn test_proof_kind_from_scheme_id() {
-        assert_eq!(ProofKind::from_scheme_id(SCHEME_HYPERNOVA), Some(ProofKind::Zkvm));
-        assert_eq!(ProofKind::from_scheme_id(SCHEME_ZKSHUFFLE), Some(ProofKind::ZkShuffle));
+        assert_eq!(
+            ProofKind::from_scheme_id(SCHEME_HYPERNOVA),
+            Some(ProofKind::Zkvm)
+        );
+        assert_eq!(
+            ProofKind::from_scheme_id(SCHEME_ZKSHUFFLE),
+            Some(ProofKind::ZkShuffle)
+        );
         assert_eq!(ProofKind::from_scheme_id(99), None);
 
         // Zkvm 期望新签名
@@ -992,5 +1137,112 @@ mod tests {
             .finalize_variable(&mut out)
             .expect("Blake2bVar finalize 不应失败");
         out
+    }
+
+    // ===== ZkShuffle Production verifier 测试 =====
+
+    #[test]
+    fn test_zkshuffle_verify_production_short_proof() {
+        let v = ZkShuffleVerifier::new();
+        let public_io = make_public_io(0);
+        let short_proof = vec![0x00; ZKSHUFFLE_PROOF_MIN_SIZE - 1];
+        let result = v.verify(&short_proof, &public_io, VerifierStatus::Production);
+        assert!(
+            matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))),
+            "短 proof 应返回 InvalidZkProofFormat"
+        );
+    }
+
+    #[test]
+    fn test_zkshuffle_verify_production_invalid_magic() {
+        let v = ZkShuffleVerifier::new();
+        let public_io = make_public_io(0);
+        let mut proof = vec![0x00u8; ZKSHUFFLE_PROOF_MIN_SIZE];
+        proof[0..4].copy_from_slice(b"XXXX");
+        let result = v.verify(&proof, &public_io, VerifierStatus::Production);
+        assert!(
+            matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))),
+            "错误 magic 应返回 InvalidZkProofFormat"
+        );
+    }
+
+    #[test]
+    fn test_zkshuffle_verify_production_invalid_version() {
+        let v = ZkShuffleVerifier::new();
+        let public_io = make_public_io(0);
+        let mut proof = vec![0x00u8; ZKSHUFFLE_PROOF_MIN_SIZE];
+        proof[0..4].copy_from_slice(&ZKSHUFFLE_MAGIC);
+        proof[4..8].copy_from_slice(&99u32.to_be_bytes());
+        let result = v.verify(&proof, &public_io, VerifierStatus::Production);
+        assert!(
+            matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))),
+            "错误 version 应返回 InvalidZkProofFormat"
+        );
+    }
+
+    #[test]
+    fn test_zkshuffle_parse_combined_proof_valid() {
+        let ccs_proof = vec![0xAB; 32];
+        let dleq_proof = vec![0xCD; DLEQ_PROOF_SIZE];
+        let mut proof = Vec::new();
+        proof.extend_from_slice(&ZKSHUFFLE_MAGIC);
+        proof.extend_from_slice(&ZKSHUFFLE_VERSION.to_be_bytes());
+        proof.extend_from_slice(&(ccs_proof.len() as u32).to_be_bytes());
+        proof.extend_from_slice(&ccs_proof);
+        proof.extend_from_slice(&(dleq_proof.len() as u32).to_be_bytes());
+        proof.extend_from_slice(&dleq_proof);
+
+        let (parsed_ccs, parsed_dleq) = ZkShuffleVerifier::parse_combined_proof(&proof)
+            .expect("合法 combined proof 应解析成功");
+        assert_eq!(parsed_ccs, &ccs_proof[..]);
+        assert_eq!(parsed_dleq, &dleq_proof[..]);
+    }
+
+    #[test]
+    fn test_zkshuffle_parse_combined_proof_wrong_dleq_len() {
+        let ccs_proof = vec![0xAB; 32];
+        let dleq_proof = vec![0xCD; 50]; // 错误长度
+        let mut proof = Vec::new();
+        proof.extend_from_slice(&ZKSHUFFLE_MAGIC);
+        proof.extend_from_slice(&ZKSHUFFLE_VERSION.to_be_bytes());
+        proof.extend_from_slice(&(ccs_proof.len() as u32).to_be_bytes());
+        proof.extend_from_slice(&ccs_proof);
+        proof.extend_from_slice(&(dleq_proof.len() as u32).to_be_bytes());
+        proof.extend_from_slice(&dleq_proof);
+
+        let result = ZkShuffleVerifier::parse_combined_proof(&proof);
+        assert!(
+            matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))),
+            "错误 dleq_len 应返回 InvalidZkProofFormat"
+        );
+    }
+
+    #[test]
+    fn test_zkshuffle_parse_shuffle_public_io_short() {
+        let public_io = ZkPublicIo {
+            initial_commitment: [0; 32],
+            final_commitment: [0; 32],
+            state_delta_hash: [0; 32],
+            ack_chain_hash: [0; 32],
+            fold_step_count: 0,
+            skip_count: 0,
+            segment_continuity_proof: vec![0; 100], // < 192
+        };
+        let result = parse_shuffle_public_io(&public_io);
+        assert!(
+            matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))),
+            "segment_continuity_proof 过短应返回错误"
+        );
+    }
+
+    #[test]
+    fn test_zkshuffle_stub_still_works() {
+        let v = ZkShuffleVerifier::new();
+        let public_io = make_public_io(0);
+        let proof = vec![0x00; HYPERNOVA_PROOF_MIN_SIZE];
+        let result = v
+            .verify(&proof, &public_io, VerifierStatus::Stub)
+            .expect("stub verify 应成功");
+        assert!(result);
     }
 }
