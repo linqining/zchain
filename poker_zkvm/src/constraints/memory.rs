@@ -1,18 +1,27 @@
-//! 内存访问与一致性电路（Phase 5 — Task 5.3）。
+//! 内存访问与一致性电路（Phase 5 — Task 5.3，Phase G — LogUp 升级）。
 //!
 //! 严格遵循 spec.md L288-298（v1.4 FROZEN）：
 //! - **byte-level permutation**（非 word-level）— 所有访问展开为字节级
-//! - permutation key: `(byte_addr, byte_val, step_index)`
+//! - permutation key: `(byte_addr, byte_val)`
 //! - **混合尺寸重叠访问** — LW 写 4B 后 LB 读 1B 能正确匹配
 //! - `step_index` 单调性显式约束
 //! - **未初始化读取检测** — read 集合中无 write 对应记录返回 `UninitializedRead`
 //!
-//! ## MVP 策略
+//! ## LogUp 协议（Phase G）
 //!
-//! Step 10 实现 byte-level 展开 + 集合相等性校验（直接比较）。
-//! LogUp-based permutation proof 在 Step 13 实现。
+//! `verify_memory_permutation` 使用 LogUp permutation argument 替代 O(n²) 集合比较：
+//! - Table T = 去重后的 write keys（`(byte_addr, byte_val)` 编码为 Fr）
+//! - Witness F = read keys
+//! - Multiplicity m_i = 匹配 write key i 的 read 数量
+//! - 等式 `Σ m_i/(β-t_i) == Σ 1/(β-f_j)` 证明 read 多重集 == write 多重集
+//! - 时序由 `check_uninitialized_read` 前置检查保证
 
+use std::collections::HashSet;
+
+use crate::ccs::Fr;
+use crate::constraints::lookup::{compute_multiplicity, LogUpCommitments, LogUpProof, LookupTable};
 use crate::error::ZkvmError;
+use crate::field::ZkvmField;
 use crate::trace::{MemAccess, MemOp};
 
 /// 字节级内存访问记录（permutation key 组成部分）。
@@ -26,6 +35,64 @@ pub struct ByteAccess {
     pub byte_val: u8,
     /// 步序号（单调递增）
     pub step_index: u64,
+}
+
+/// 将 ByteAccess 编码为单个 Fr（permutation key）。
+/// key = from_u64(byte_addr | (byte_val << 32))
+/// step_index 不编入 key — 时序由 check_uninitialized_read 保证。
+fn byte_access_to_fr(ba: &ByteAccess) -> Fr {
+    let packed = (ba.byte_addr as u64) | ((ba.byte_val as u64) << 32);
+    Fr::from_u64(packed)
+}
+
+/// 将 MemAccess 列表展开为字节级 reads 和 writes。
+fn expand_reads_writes(
+    accesses: &[MemAccess],
+    step_index: u64,
+) -> Result<(Vec<ByteAccess>, Vec<ByteAccess>), ZkvmError> {
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    for access in accesses {
+        let byte_accesses = expand_to_bytes(access, step_index)?;
+        match access.op {
+            MemOp::Read => reads.extend(byte_accesses),
+            MemOp::Write => writes.extend(byte_accesses),
+        }
+    }
+    Ok((reads, writes))
+}
+
+/// 从字节级 reads/writes 构建 LogUp permutation proof。
+///
+/// - Table T = 去重后的 write keys（唯一 (byte_addr, byte_val) 的 Fr 编码）
+/// - Witness F = read keys（每个 read 一个 Fr）
+/// - Multiplicity m_i = 匹配 write key i 的 read 数量
+///
+/// # 错误
+/// - `LogUpProof::create` 内部错误（table.len != multiplicity.len）透传
+pub fn build_logup_proof(
+    reads: &[ByteAccess],
+    writes: &[ByteAccess],
+) -> Result<(LogUpProof, LogUpCommitments), ZkvmError> {
+    // 1. writes → 去重 → table
+    let mut seen: HashSet<Fr> = HashSet::new();
+    let mut table: Vec<Fr> = Vec::new();
+    for w in writes {
+        let key = byte_access_to_fr(w);
+        if seen.insert(key) {
+            table.push(key);
+        }
+    }
+
+    // 2. reads → witness
+    let witness: Vec<Fr> = reads.iter().map(byte_access_to_fr).collect();
+
+    // 3. multiplicity
+    let lookup_table = LookupTable::from_entries(table.clone());
+    let multiplicity = compute_multiplicity(&lookup_table, &witness);
+
+    // 4. create
+    LogUpProof::create(table, witness, multiplicity)
 }
 
 /// 将 MemAccess 展开为字节级记录（spec L292）。
@@ -107,14 +174,17 @@ pub fn check_uninitialized_read(
     Ok(())
 }
 
-/// 校验内存 permutation（MVP: 集合相等性检查）。
+/// 校验内存 permutation（LogUp permutation argument）。
 ///
 /// spec L293: 证明 read 集合 == write 集合（permutation argument）。
 ///
-/// MVP 策略：直接比较 read 和 write 的 `(byte_addr, byte_val)` 集合。
-/// 对于每个 read，找到对应的 write（相同 byte_addr + byte_val + write.step < read.step）。
+/// 使用 LogUp 协议替代 O(n²) 集合比较：
+/// - Table T = 去重后的 write keys（`(byte_addr, byte_val)` 编码为 Fr）
+/// - Witness F = read keys
+/// - Multiplicity m_i = 匹配 write key i 的 read 数量
+/// - 等式 `Σ m_i/(β-t_i) == Σ 1/(β-f_j)` 证明 read 多重集 == write 多重集
 ///
-/// 完整实现（Step 13）：使用 LogUp 协议生成 permutation proof。
+/// 时序由 `check_uninitialized_read` 前置检查保证。
 ///
 /// # 参数
 /// - `accesses` — 单步内的所有内存访问（按时间顺序）
@@ -127,36 +197,50 @@ pub fn verify_memory_permutation(
     accesses: &[MemAccess],
     step_index: u64,
 ) -> Result<(), ZkvmError> {
-    let mut reads = Vec::new();
-    let mut writes = Vec::new();
+    let (reads, writes) = expand_reads_writes(accesses, step_index)?;
 
-    for access in accesses {
-        let byte_accesses = expand_to_bytes(access, step_index)?;
-        match access.op {
-            MemOp::Read => reads.extend(byte_accesses),
-            MemOp::Write => writes.extend(byte_accesses),
-        }
-    }
-
-    // 1. 未初始化读取检测
+    // 1. 未初始化读取检测（时序保证）
     check_uninitialized_read(&reads, &writes)?;
 
-    // 2. permutation 校验（MVP: 每个 read 需有对应 write）
-    for read in &reads {
-        let matched = writes.iter().any(|w| {
-            w.byte_addr == read.byte_addr
-                && w.byte_val == read.byte_val
-                && w.step_index <= read.step_index
-        });
-        if !matched {
-            return Err(ZkvmError::Other(format!(
-                "permutation 不匹配: byte_addr=0x{:08x} byte_val=0x{:02x} 无对应 write",
-                read.byte_addr, read.byte_val
-            )));
-        }
+    // 2. permutation 校验（LogUp 协议）
+    let (proof, commits) = build_logup_proof(&reads, &writes)?;
+    if !proof.verify(&commits)? {
+        return Err(ZkvmError::Other(
+            "permutation 不匹配: LogUp 等式校验失败".to_string(),
+        ));
     }
 
     Ok(())
+}
+
+/// 验证内存 permutation 并返回 LogUp proof（供 CCS/Hypernova 折叠）。
+///
+/// 与 `verify_memory_permutation` 语义相同，但返回 LogUp proof 和承诺，
+/// 可通过 `proof.to_ccs_instance()` 转为可折叠的 CCS 实例。
+///
+/// # 参数
+/// - `accesses` — 单步内的所有内存访问（按时间顺序）
+/// - `step_index` — 该步的步序号
+///
+/// # 返回
+/// `(LogUpProof, LogUpCommitments)` — 证明与承诺三元组
+///
+/// # 错误
+/// - 未初始化读取返回 `ZkvmError::UninitializedRead`
+/// - permutation 不匹配返回 `ZkvmError::Other`
+pub fn verify_memory_permutation_logup(
+    accesses: &[MemAccess],
+    step_index: u64,
+) -> Result<(LogUpProof, LogUpCommitments), ZkvmError> {
+    let (reads, writes) = expand_reads_writes(accesses, step_index)?;
+    check_uninitialized_read(&reads, &writes)?;
+    let (proof, commits) = build_logup_proof(&reads, &writes)?;
+    if !proof.verify(&commits)? {
+        return Err(ZkvmError::Other(
+            "permutation 不匹配: LogUp 等式校验失败".to_string(),
+        ));
+    }
+    Ok((proof, commits))
 }
 
 /// 校验 step_index 单调性（spec L296）。
@@ -576,5 +660,130 @@ mod tests {
                 .max_by_key(|w| w.step_index);
             assert_eq!(latest_write.unwrap().byte_val, r.byte_val);
         }
+    }
+
+    // ===== LogUp 测试（Phase G）=====
+
+    #[test]
+    fn test_logup_build_proof_basic() {
+        // SW 0xDEADBEEF 到 0x100（step 0），LW 读取（step 1）
+        let writes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand write");
+        let reads = expand_to_bytes(&make_access(0x100, MemOp::Read, 0xDEADBEEF, 4), 1).expect("expand read");
+
+        let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
+        assert!(proof.verify(&commits).expect("verify"), "LogUp proof 应验证通过");
+    }
+
+    #[test]
+    fn test_logup_verify_writes_only() {
+        // 仅 writes（空 witness），LogUp 等式 0==0 通过
+        let writes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand write");
+        let reads: Vec<ByteAccess> = vec![];
+
+        let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
+        assert!(proof.verify(&commits).expect("verify"), "空 witness 应通过（0==0）");
+    }
+
+    #[test]
+    fn test_logup_verify_empty() {
+        // 空 accesses，verify_memory_permutation 通过
+        assert!(verify_memory_permutation(&[], 0).is_ok());
+    }
+
+    #[test]
+    fn test_logup_multiple_reads_same_key() {
+        // 1 write + 2 reads 同 key，multiplicity=[2]
+        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
+        let reads = vec![
+            ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 1 },
+            ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 2 },
+        ];
+
+        let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
+        assert_eq!(proof.table.len(), 1, "去重后 table 应有 1 个 entry");
+        assert_eq!(proof.multiplicity.len(), 1);
+        assert_eq!(proof.multiplicity[0], Fr::from_u64(2), "multiplicity 应为 2");
+        assert!(proof.verify(&commits).expect("verify"), "LogUp 等式应成立");
+    }
+
+    #[test]
+    fn test_logup_mixed_size_lw_then_lb() {
+        // SW 4B + LB 1B，跨尺寸匹配
+        let write_bytes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand write");
+        let read_bytes = expand_to_bytes(&make_access(0x100, MemOp::Read, 0xEF, 1), 1).expect("expand read");
+
+        let (proof, commits) = build_logup_proof(&read_bytes, &write_bytes).expect("build_logup_proof");
+        assert!(proof.verify(&commits).expect("verify"), "跨尺寸匹配应通过");
+    }
+
+    #[test]
+    fn test_logup_verify_memory_permutation_logup_returns_proof() {
+        // verify_memory_permutation_logup 返回值可 to_ccs_instance
+        let write_access = make_access(0x100, MemOp::Write, 0xDEADBEEF, 4);
+        let (proof, _commits) = verify_memory_permutation_logup(&[write_access], 0).expect("verify");
+
+        let ccs_instance = proof.to_ccs_instance().expect("to_ccs_instance");
+        assert!(ccs_instance.is_satisfied().expect("is_satisfied"), "CCS 实例应满足");
+    }
+
+    #[test]
+    fn test_logup_soundness_wrong_value() {
+        // byte aliasing 攻击：write 0xEF, read 声称 0xFF
+        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0xEF, step_index: 0 }];
+        let reads = vec![ByteAccess { byte_addr: 0x100, byte_val: 0xFF, step_index: 1 }];
+
+        let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
+        assert!(!proof.verify(&commits).expect("verify"), "byte aliasing 攻击应被 LogUp 检测");
+    }
+
+    #[test]
+    fn test_logup_soundness_read_not_in_writes() {
+        // 读未写入的地址
+        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
+        let reads = vec![ByteAccess { byte_addr: 0x200, byte_val: 0x42, step_index: 1 }];
+
+        // check_uninitialized_read 检测
+        let err = check_uninitialized_read(&reads, &writes).unwrap_err();
+        assert!(matches!(err, ZkvmError::UninitializedRead { addr: 0x200 }));
+
+        // LogUp 也检测（read key 不在 table 中）
+        let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
+        assert!(!proof.verify(&commits).expect("verify"), "未写入地址的 read 应被 LogUp 检测");
+    }
+
+    #[test]
+    fn test_logup_soundness_tampered_table() {
+        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
+        let reads = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 1 }];
+
+        let (mut proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
+        assert!(proof.verify(&commits).expect("verify original"), "原始 proof 应通过");
+
+        // 篡改 table
+        proof.table[0] = Fr::from_u64(0xDEAD);
+        assert!(!proof.verify(&commits).expect("verify tampered"), "篡改 table 应被检测");
+    }
+
+    #[test]
+    fn test_logup_soundness_tampered_witness() {
+        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
+        let reads = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 1 }];
+
+        let (mut proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
+        assert!(proof.verify(&commits).expect("verify original"), "原始 proof 应通过");
+
+        // 篡改 witness
+        proof.witness[0] = Fr::from_u64(0xBEEF);
+        assert!(!proof.verify(&commits).expect("verify tampered"), "篡改 witness 应被检测");
+    }
+
+    #[test]
+    fn test_logup_memory_to_ccs_instance() {
+        // memory → LogUp → CcsInstance → is_satisfied
+        let write_access = make_access(0x100, MemOp::Write, 0xDEADBEEF, 4);
+        let (proof, _commits) = verify_memory_permutation_logup(&[write_access], 0).expect("verify");
+
+        let ccs_instance = proof.to_ccs_instance().expect("to_ccs_instance");
+        assert!(ccs_instance.is_satisfied().expect("is_satisfied"), "CCS 实例应满足");
     }
 }

@@ -41,9 +41,10 @@ use crate::syscalls::StubHostState;
 use crate::trace::{Step, Trace};
 use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
 
-/// 最大 proof 字节数（spec L692 — 64KB）。
+/// 上链 proof 字节数上限（spec L692 — 64KB）。
 ///
-/// 超出此大小的 proof 须触发 CycleFold 递归压缩（Phase 12）。
+/// 超出此大小的 proof 须触发 CycleFold 递归压缩（Stage 3）。
+/// batch_size=256 时单实例 proof（≤256 步）~48KB < 64KB，可直接上链。
 pub const MAX_ZKVM_PROOF_SIZE: usize = 64 * 1024;
 
 /// 最大递归深度（spec L565 / L694 — 16 层）。
@@ -56,10 +57,10 @@ pub const MAX_RECURSION_DEPTH: u32 = 16;
 /// 控制 prove() 的 batching / PCS 上限 / proof 大小限制 / 递归深度等参数。
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
-    /// 每 batch 步数（默认 [`crate::constraints::ZKVM_BATCH_SIZE`] = 1024）。
+    /// 每 batch 步数（默认 256，[`crate::constraints::ZKVM_BATCH_SIZE`] = 1024 为 spec 上限）。
     ///
-    /// **MVP 限制**：`batch_size + 1` 须为 2 的幂（IPA PCS 要求）。
-    /// 如 batch_size = 3 → num_vars = 4 = 2^2。
+    /// Stage 1.1 padding 保证 `num_vars`/`num_rows` 为 2 的幂，不再需要 `batch_size + 1` 为 2 的幂。
+    /// batch_size=256 时单实例 proof（≤256 步）~48KB < 64KB 上链限制。
     pub batch_size: usize,
     /// IPA PCS 最大变量数（N = 2^max_n_vars ≤ 2^24）。
     pub max_n_vars: usize,
@@ -78,11 +79,11 @@ pub struct ProverConfig {
 impl Default for ProverConfig {
     fn default() -> Self {
         Self {
-            // MVP 限制：batch_size + 1 须为 2 的幂（IPA PCS 要求）。
-            // batch_size = 3 → num_vars = 4 = 2^2。
-            // Phase 5 增强版将在 CCS 构造时自动 padding 到 2 的幂，
-            // 届时可恢复为 ZKVM_BATCH_SIZE = 1024。
-            batch_size: 3,
+            // batch_size=256：Stage 1.1 padding 保证 num_vars/num_rows 为 2 的幂，
+            // 不再需要 batch_size+1 为 2 的幂。
+            // 单实例 proof（≤256 步）~48KB < 64KB 上链限制。
+            // 多步 proof（如 1000 步→4 batches→3 fold steps）~245KB，需 CycleFold 压缩至 64KB（Stage 3）。
+            batch_size: 256,
             max_n_vars: 20,
             proof_size_limit: MAX_ZKVM_PROOF_SIZE,
             max_recursion_depth: MAX_RECURSION_DEPTH,
@@ -250,11 +251,19 @@ const PROOF_MAGIC: &[u8; 4] = b"HYPN";
 /// v2 = 含 CCS 序列化，已废弃；v1 不含 CCS，已废弃）。
 const PROOF_VERSION: u8 = 3;
 
-/// proof 总长度上限（v1.3 M2-002 单项子分配之和：8KB + 8KB + 16KB + 8KB = 40KB，留余量至 48KB）。
+/// proof 反序列化/DoS 总长度上限（512KB）。
 ///
-/// **注**：完整 verifier 版本（v3）proof 含所有 fold 步骤数据（每步 ~2-3KB），
-/// MVP 限制 `fold_steps.len() ≤ 100`，proof 可达 ~300KB。
-/// 生产环境用 CycleFold 压缩（Phase 12）后恢复至 48KB。
+/// 用途：`deserialize_proof` 在分配内存前先校验总长度，防止 OOM DoS。
+/// 与 [`MAX_ZKVM_PROOF_SIZE`]（64KB 上链限制）的区别：
+/// - 本常量 = 压缩前 proof 的反序列化上限（含所有 fold 步骤数据）
+/// - [`MAX_ZKVM_PROOF_SIZE`] = 压缩后上链 proof 上限
+///
+/// batch_size=256 时多步 proof 大小参考：
+/// - 100 步 → 1 batch → 单实例 ~48KB
+/// - 500 步 → 2 batches → 1 fold step ~80KB
+/// - 1000 步 → 4 batches → 3 fold steps ~245KB
+///
+/// 均远小于 512KB 限制。CycleFold 压缩（Stage 3）后可恢复至 64KB 上链。
 pub const MAX_PROOF_TOTAL_SIZE: usize = 512 * 1024;
 
 /// 计算 public_io 的承诺哈希（Blake2b-256，带域分离前缀）。
@@ -764,20 +773,19 @@ pub fn prove(
     // 4. 编译 CCS 实例
     let ccs_instances = compile_trace_to_ccs(&trace, config.batch_size)?;
 
-    if ccs_instances.len() < 2 {
-        return Err(ZkvmError::Other(format!(
-            "prove: 至少需要 2 个 CCS 实例（当前 {}），增加 trace 长度或减小 batch_size",
-            ccs_instances.len()
-        )));
+    if ccs_instances.is_empty() {
+        return Err(ZkvmError::Other(
+            "prove: CCS 实例为空（trace 为空或 batch_size 过大）".to_string(),
+        ));
     }
 
-    // 5. CCS 一致性校验 + num_vars 须为 2 的幂
+    // 5. CCS 一致性校验 + num_vars 须为 2 的幂（由 compile_batch_to_ccs padding 保证）
     let ccs = ccs_instances[0].ccs.clone();
     let num_vars = ccs.num_vars;
     if !num_vars.is_power_of_two() {
         return Err(ZkvmError::Other(format!(
             "prove: num_vars = {num_vars} 不是 2 的幂（IPA PCS 要求）。\
-             当前 MVP 限制：batch_size + 1 须为 2 的幂（如 batch_size = 3 → num_vars = 4）"
+             compile_batch_to_ccs 应已 padding，此错误表示 padding 逻辑缺陷"
         )));
     }
     let pcs_n_vars = num_vars.trailing_zeros() as usize;
@@ -881,6 +889,7 @@ pub fn prove(
 /// 对 trace 追加 dummy NOP Step 使其长度整除 batch_size。
 ///
 /// padding Step 的 step_index 从原 trace 末步 +1 开始递增，
+/// pc 从原 trace 末步 pc + 4 开始递增（保证 PC 连续性约束 Group B 成立），
 /// instruction = `Addi { rd: 0, rs1: 0, imm: 0 }`（RISC-V NOP），
 /// registers = [0; 32]，mem_access = vec![]。
 ///
@@ -903,10 +912,15 @@ fn pad_trace(trace: &mut Trace, batch_size: usize) -> Result<(), ZkvmError> {
     } else {
         trace.step(len - 1)?.step_index + 1
     };
+    let mut next_pc = if len == 0 {
+        0
+    } else {
+        trace.step(len - 1)?.pc.wrapping_add(4)
+    };
     for _ in 0..pad_count {
         trace.push_step(Step {
             step_index: next_index,
-            pc: 0,
+            pc: next_pc,
             instruction: Instruction::Addi {
                 rd: 0,
                 rs1: 0,
@@ -916,6 +930,7 @@ fn pad_trace(trace: &mut Trace, batch_size: usize) -> Result<(), ZkvmError> {
             mem_access: vec![],
         });
         next_index += 1;
+        next_pc = next_pc.wrapping_add(4);
     }
     Ok(())
 }
@@ -993,12 +1008,82 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
 
     let config = ProverConfig {
         batch_size: 3,
+        proof_size_limit: MAX_PROOF_TOTAL_SIZE,
         ..Default::default()
     };
 
     // 使用 32 字节 input，使 poker_l1 public_io 双向转换可逆
     let input = vec![0u8; 32];
     prove(&elf, &input, &config).expect("prove 应成功")
+}
+
+/// 测试辅助：生成单实例 proof bytes + public_io。
+///
+/// 构造 2 步程序（ADDI + ECALL），batch_size=3 → padding 到 3 步 → 1 batch → 单实例 proof。
+/// 用于验证单实例 proof 路径的端到端 verify。
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn generate_single_instance_test_proof() -> (Vec<u8>, ZkPublicIo) {
+    fn encode_i(opcode: u32, funct3: u8, rd: u8, rs1: u8, imm12: u32) -> u32 {
+        ((imm12 & 0xFFF) << 20)
+            | ((rs1 as u32) << 15)
+            | ((funct3 as u32) << 12)
+            | ((rd as u32) << 7)
+            | opcode
+    }
+
+    fn build_test_elf(entry: u32, text_vaddr: u32, text_bytes: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(84 + text_bytes.len());
+        bytes.extend_from_slice(&[
+            0x7f, b'E', b'L', b'F',
+            1, 1, 1, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&0xF3u16.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&entry.to_le_bytes());
+        bytes.extend_from_slice(&52u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&52u16.to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&40u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        let p_offset = 84u32;
+        let p_filesz = text_bytes.len() as u32;
+        let p_memsz = text_bytes.len() as u32;
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&p_offset.to_le_bytes());
+        bytes.extend_from_slice(&text_vaddr.to_le_bytes());
+        bytes.extend_from_slice(&text_vaddr.to_le_bytes());
+        bytes.extend_from_slice(&p_filesz.to_le_bytes());
+        bytes.extend_from_slice(&p_memsz.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&0x1000u32.to_le_bytes());
+        bytes.extend_from_slice(text_bytes);
+        bytes
+    }
+
+    fn encode_text(words: &[u32]) -> Vec<u8> {
+        words.iter().copied().flat_map(u32::to_le_bytes).collect()
+    }
+
+    let text = encode_text(&[
+        encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
+        0x00000073,                     // ECALL
+    ]);
+    let elf = build_test_elf(0x1000, 0x1000, &text);
+
+    let config = ProverConfig {
+        batch_size: 3,
+        proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+        ..Default::default()
+    };
+
+    let input = vec![0u8; 32];
+    prove(&elf, &input, &config).expect("单实例 prove 应成功")
 }
 
 /// 构造默认 CCS 白名单（从 `generate_test_proof` 提取 ccs_commitment）。
@@ -1023,8 +1108,8 @@ mod tests {
     fn test_prover_config_default_valid() {
         let config = ProverConfig::default();
         config.validate().expect("默认配置应通过校验");
-        // MVP 默认 batch_size = 3（num_vars = 4 = 2^2，满足 IPA PCS 要求）
-        assert_eq!(config.batch_size, 3);
+        // 默认 batch_size = 256（Stage 1.1 padding 后不再需要 2 的幂约束）
+        assert_eq!(config.batch_size, 256);
         assert_eq!(config.max_n_vars, 20);
         assert_eq!(config.proof_size_limit, MAX_ZKVM_PROOF_SIZE);
         assert_eq!(config.max_recursion_depth, MAX_RECURSION_DEPTH);
@@ -1278,6 +1363,7 @@ mod tests {
 
         let config = ProverConfig {
             batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
 
@@ -1308,6 +1394,7 @@ mod tests {
 
         let config = ProverConfig {
             batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
 
@@ -1326,10 +1413,10 @@ mod tests {
     }
 
     #[test]
-    fn test_prove_num_vars_not_power_of_two_errors() {
-        // batch_size = 4 → num_vars = 5 (非 2 的幂)
-        // 需 ≥2 batches 才能通过 "至少 2 个 CCS 实例" 检查到达 power-of-2 检查
-        // 5 步 → padding 到 8 → 2 batches (8/4=2)
+    fn test_prove_padding_enables_non_power_of_two_batch_size() {
+        // batch_size = 4 → raw num_vars = 5 (非 2 的幂)，padding 到 8
+        // 6 步 → padding 到 8 → 2 batches (8/4=2)
+        // Stage 1.1 padding 使 num_vars 始终为 2 的幂，prove 应成功
         let text = encode_text(&[
             encode_i(0x13, 0, 1, 0, 0),   // NOP
             encode_i(0x13, 0, 1, 0, 0),   // NOP
@@ -1342,20 +1429,20 @@ mod tests {
 
         let config = ProverConfig {
             batch_size: 4,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
 
-        let err = prove(&elf, &[], &config).unwrap_err();
-        assert!(
-            matches!(err, ZkvmError::Other(ref m) if m.contains("2 的幂")),
-            "expected num_vars power-of-2 error, got {err:?}"
-        );
+        let (proof_bytes, _public_io) = prove(&elf, &[], &config)
+            .expect("padding 应使 batch_size=4 可用");
+        assert!(!proof_bytes.is_empty());
     }
 
     #[test]
-    fn test_prove_insufficient_instances_errors() {
+    fn test_prove_single_instance_succeeds() {
         // 仅 2 步（ADDI + ECALL），batch_size = 3
-        // padding 到 3 步 → 1 batch → 不足 2 实例
+        // padding 到 3 步 → 1 batch → 1 实例 → 单实例 proof 路径
+        // Stage 1.2 单实例路径应成功
         let text = encode_text(&[
             encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2
             0x00000073,                    // ECALL
@@ -1364,14 +1451,13 @@ mod tests {
 
         let config = ProverConfig {
             batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
 
-        let err = prove(&elf, &[], &config).unwrap_err();
-        assert!(
-            matches!(err, ZkvmError::Other(ref m) if m.contains("2 个 CCS 实例")),
-            "expected insufficient instances error, got {err:?}"
-        );
+        let (proof_bytes, _public_io) = prove(&elf, &[], &config)
+            .expect("单实例 proof 应成功");
+        assert!(!proof_bytes.is_empty());
     }
 
     #[test]
@@ -1413,6 +1499,7 @@ mod tests {
         let elf = build_test_elf(0x1000, 0x1000, &text);
         let config = ProverConfig {
             batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
         let (proof_bytes, _public_io) = prove(&elf, &[], &config).expect("prove 应成功");

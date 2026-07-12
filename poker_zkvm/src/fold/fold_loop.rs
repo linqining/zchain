@@ -136,7 +136,7 @@ pub struct HypernovaProof {
 #[allow(clippy::too_many_arguments)]
 pub fn fold_loop(
     ccs: &Ccs,
-    initial_lcccs: Lcccs,
+    mut initial_lcccs: Lcccs,
     initial_commitment: IpaCommitment,
     ccccs_instances: &[Ccccs],
     pcs: &IpaPcs,
@@ -211,24 +211,60 @@ pub fn fold_loop(
     }
 
     // 3. 生成 PCS opening（使用 final sumcheck 的 transcript，链式）
-    // 若无 CCCCS 实例（N=1），则无 sumcheck，使用 fresh transcript
-    if fold_steps.is_empty() {
-        return Err(ZkvmError::Other(
-            "fold_loop: 至少需要 1 个 CCCCS 实例（N ≥ 2）".to_string(),
-        ));
-    }
+    //
+    // 单实例路径（N=1，ccccs_instances 为空）：
+    //   - 不执行任何 fold，直接对初始 LCCCS 运行 sumcheck 证明 CCS satisfaction
+    //   - u_prime = initial_lcccs.u_l（初始 spec 值，对非线性 CCS 可能 ≠ 0）
+    //   - actual_u_prime = Σ_row eq(r_x_l, row) · F'(row)（对 satisfied CCS = 0）
+    //   - 修正：initial_lcccs.u_l = actual_u_prime（使 verifier transcript 对齐）
+    //   - z_prime = initial_lcccs.trace_l（= 初始 witness）
+    //   - PCS opening 在 sumcheck 产生的 r_y 处打开 witness
+    //
+    // 多实例路径（N≥2）：
+    //   - 提取最后一步的 sumcheck proof + r_y + z_at_r_y
+    //   - PCS opening 在 last r_y 处打开 folded witness
+    let (final_sumcheck, last_r_y, last_z_at_r_y, pcs_transcript, pcs_witness) =
+        if fold_steps.is_empty() {
+            // 单实例：直接对初始 LCCCS 运行 sumcheck
+            let u_prime_spec = initial_lcccs.u_l;
+            let mut sumcheck_transcript = Transcript::new();
+            let sumcheck_output = sumcheck::prove(
+                ccs,
+                &initial_lcccs.trace_l,
+                &initial_lcccs.r_x_l,
+                u_prime_spec,
+                &mut sumcheck_transcript,
+            )?;
+            // 非线性 CCS 修正：u_l = Σ_i c_i · Π v_l[j]（乘积之和）≠
+            // actual_u_prime = Σ_row eq(r_x_l, row) · F'(row)（和之乘积）
+            // 即使 CCS 被满足（所有 F'(row)=0），u_l 可能 ≠ 0。
+            // 多实例路径通过 corrected_lcccs.u_l = actual_u_prime 修正；
+            // 单实例路径同样需更新 initial_lcccs.u_l，使 verifier 使用正确的 claimed sum。
+            initial_lcccs.u_l = sumcheck_output.actual_u_prime;
+            (
+                sumcheck_output.proof,
+                sumcheck_output.r_y,
+                sumcheck_output.z_at_r_y,
+                sumcheck_transcript,
+                initial_lcccs.trace_l.clone(),
+            )
+        } else {
+            // 多实例：提取最后一步数据
+            let last_step = fold_steps.last().expect("fold_steps 非空（已校验）");
+            (
+                last_step.sumcheck_proof.clone(),
+                last_step.r_y.clone(),
+                last_step.z_at_r_y,
+                last_sumcheck_transcript.unwrap_or_default(),
+                current_witness.clone(),
+            )
+        };
 
-    // 提取最后一步的数据（冗余字段，便于 PCS transcript 链式 + verifier 直接访问）
-    let last_step = fold_steps.last().expect("fold_steps 非空（已校验）");
-    let final_sumcheck = last_step.sumcheck_proof.clone();
-    let last_r_y = last_step.r_y.clone();
-    let last_z_at_r_y = last_step.z_at_r_y;
+    let mut pcs_transcript = pcs_transcript;
 
-    let mut pcs_transcript = last_sumcheck_transcript.unwrap_or_default();
-
-    // 构造 MultilinearPoly from folded witness
+    // 构造 MultilinearPoly from PCS witness（单实例=初始 witness，多实例=folded witness）
     // witness.len() = num_vars（已为 2 的幂，由 sumcheck 校验）
-    let poly = MultilinearPoly::from_evals(current_witness.clone())?;
+    let poly = MultilinearPoly::from_evals(pcs_witness)?;
 
     // PCS opening 在 r_y 处打开 z'（r_y 来自最后一步 sumcheck 的内部 challenge）
     let (pcs_opening, pcs_eval) = pcs.open(&poly, &last_r_y, &mut pcs_transcript)?;
@@ -595,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_fold_loop_no_ccccs_instances() {
-        // 0 个 CCCCS 实例 → 应返回错误（至少需要 1 个）
+        // 0 个 CCCCS 实例 → 单实例路径：直接对初始 LCCCS 运行 sumcheck + PCS opening
         let ccs = make_linear_ccs();
         let z_l = vec![f(1), f(5), f(5), f(0)];
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
@@ -604,7 +640,13 @@ mod tests {
         let pcs = make_ipa_pcs();
 
         let result = fold_loop(&ccs, lcccs, stub_commitment(), &[], &pcs, &mut transcript, ccs.ccs_commitment(), [0u8; 32], vec![vec![]]);
-        assert!(result.is_err(), "0 个 CCCCS 实例应返回错误");
+        assert!(result.is_ok(), "0 个 CCCCS 实例应走单实例路径成功，got: {:?}", result.err());
+        let proof = result.expect("已校验 is_ok");
+        assert!(proof.fold_steps.is_empty(), "单实例 proof 的 fold_steps 应为空");
+        assert!(!proof.r_y.is_empty(), "单实例 proof 应有 r_y");
+        // final_sumcheck 应非空（单实例 sumcheck 证明 CCS satisfaction）
+        assert_eq!(proof.final_sumcheck.outer_round_polys.len(), ccs.num_rows().trailing_zeros() as usize);
+        assert_eq!(proof.final_sumcheck.inner_round_polys.len(), ccs.num_vars.trailing_zeros() as usize);
     }
 
     // ===== 边界：实例数超限 =====

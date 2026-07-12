@@ -58,6 +58,7 @@ checksum = "6bc66f96ebe2a17a499475b4f94791d379817592ef494171586967ffdc6f95db"
 dependencies = [
  "ark-ec",
  "ark-ff",
+ "ark-r1cs-std",
  "ark-std",
 ]
 
@@ -159,6 +160,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-groth16"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a293328aa422e65527e285614ce5d1dceb0bd7b8b18d18b1b63191ee1f74cb41"
+dependencies = [
+ "ark-crypto-primitives",
+ "ark-ec",
+ "ark-ff",
+ "ark-poly",
+ "ark-relations",
+ "ark-serialize",
+ "ark-snark",
+ "ark-std",
+]
+
+[[package]]
 name = "ark-grumpkin"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -167,6 +184,7 @@ dependencies = [
  "ark-bn254",
  "ark-ec",
  "ark-ff",
+ "ark-r1cs-std",
  "ark-std",
 ]
 
@@ -1495,9 +1513,13 @@ dependencies = [
  "ark-crypto-primitives",
  "ark-ec",
  "ark-ff",
+ "ark-groth16",
  "ark-grumpkin",
  "ark-poly",
+ "ark-r1cs-std",
+ "ark-relations",
  "ark-serialize",
+ "ark-snark",
  "ark-std",
  "blake2",
  "criterion",

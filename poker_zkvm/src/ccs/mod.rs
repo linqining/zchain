@@ -292,6 +292,12 @@ impl Ccs {
     ///
     /// 逐行计算 `Σ_i c_i · Π_{j∈S_i} (M_j · z)[r]`，全部为 0 则返回 `true`。
     ///
+    /// # 性能
+    ///
+    /// - **快速路径**：当所有矩阵都是 row-isolated（≤1 个非零项，如 `CcsBuilder` 生成的 CCS），
+    ///   时间复杂度 O(matrices + subsets + num_rows)，内存 O(matrices + num_rows)。
+    /// - **通用路径**：矩阵有多个非零项时，回退到原始 O(matrices × num_rows) 实现。
+    ///
     /// # 错误
     /// - `z.len() != num_vars`
     /// - 矩阵 evaluate 失败（维度不匹配）
@@ -304,29 +310,93 @@ impl Ccs {
             )));
         }
 
-        // 计算每个矩阵的 M_j · z（mz[j] 是长度 num_rows 的列向量）
+        let num_rows = self.num_rows();
+        if num_rows == 0 || self.matrices.is_empty() {
+            return Ok(true);
+        }
+
+        let all_row_isolated = self.matrices.iter().all(|m| m.entries.len() <= 1);
+        if all_row_isolated {
+            self.satisfied_by_row_isolated(z, num_rows)
+        } else {
+            self.satisfied_by_general(z, num_rows)
+        }
+    }
+
+    /// 快速路径：所有矩阵 row-isolated（≤1 entry）。
+    ///
+    /// 对每个矩阵 j，`(M_j · z)` 仅在 `entry.row` 处非零，值为 `entry.value * z[entry.col]`。
+    /// 对每个 subset S_i，所有矩阵应属于同一行（`CcsBuilder` 保证），否则乘积为 0。
+    fn satisfied_by_row_isolated(&self, z: &[Fr], num_rows: usize) -> Result<bool, ZkvmError> {
+        let mut row_sums = vec![Fr::zero(); num_rows];
+
+        let matrix_vals: Vec<(usize, Fr)> = self
+            .matrices
+            .iter()
+            .map(|m| {
+                if let Some(e) = m.entries.first() {
+                    (e.row, e.value.mul(&z[e.col]))
+                } else {
+                    (0, Fr::zero())
+                }
+            })
+            .collect();
+
+        let mut empty_subset_sum = Fr::zero();
+        for (i, s) in self.subsets.iter().enumerate() {
+            if s.is_empty() {
+                empty_subset_sum = empty_subset_sum.add(&self.coeffs[i]);
+                continue;
+            }
+            let row = matrix_vals[s[0]].0;
+            let mut prod = self.coeffs[i];
+            let mut all_same_row = true;
+            for &j in s {
+                let (j_row, j_val) = matrix_vals[j];
+                if j_row != row {
+                    all_same_row = false;
+                    break;
+                }
+                prod = prod.mul(&j_val);
+            }
+            if all_same_row {
+                row_sums[row] = row_sums[row].add(&prod);
+            }
+        }
+
+        if !empty_subset_sum.is_zero() {
+            for sum in &mut row_sums {
+                *sum = sum.add(&empty_subset_sum);
+            }
+        }
+
+        for sum in &row_sums {
+            if !sum.is_zero() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// 通用路径：矩阵可能有多个非零项（原始实现）。
+    fn satisfied_by_general(&self, z: &[Fr], num_rows: usize) -> Result<bool, ZkvmError> {
         let mz: Vec<Vec<Fr>> = self
             .matrices
             .iter()
             .map(|m| m.evaluate(z))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // 转置为行优先：row_vals[r][j] = mz[j][r]，便于逐行迭代
-        let num_rows = self.num_rows();
         let row_vals: Vec<Vec<Fr>> = (0..num_rows)
             .map(|r| mz.iter().map(|col| col[r]).collect())
             .collect();
 
-        // 逐行校验 Σ_i c_i · Π_{j∈S_i} (M_j · z)[r] = 0
         for row in &row_vals {
             let mut sum = Fr::zero();
             for (i, s) in self.subsets.iter().enumerate() {
-                // 计算 Π_{j∈S_i} (M_j · z)[r]
                 let mut prod = Fr::one();
                 for &j in s {
                     prod = prod.mul(&row[j]);
                 }
-                // sum += c_i * prod
                 let term = self.coeffs[i].mul(&prod);
                 sum = sum.add(&term);
             }

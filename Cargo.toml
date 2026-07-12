@@ -42,9 +42,12 @@ ark-ec = { version = "0.6", features = ["std"] }
 ark-poly = { version = "0.6", features = ["std"] }
 ark-serialize = { version = "0.6", features = ["std"] }
 ark-std = { version = "0.6", features = ["std"] }
-ark-bn254 = "0.6"
-ark-grumpkin = "0.6"
-ark-groth16 = { version = "0.6", default-features = false }
+ark-bn254 = { version = "0.6", features = ["r1cs"] }
+ark-grumpkin = { version = "0.6", features = ["r1cs"] }
+ark-groth16 = { version = "0.6", default-features = false, features = ["std"] }
+ark-r1cs-std = { version = "0.6", default-features = false, features = ["std"] }
+ark-relations = { version = "0.6", default-features = false, features = ["std"] }
+ark-snark = { version = "0.6", default-features = false }
 ark-crypto-primitives = { version = "0.6.0", default-features = false, features = ["crh", "std"] }
 rayon = "1"
 goblin = { version = "0.8", default-features = false, features = ["elf32", "elf64", "endian_fd"] }

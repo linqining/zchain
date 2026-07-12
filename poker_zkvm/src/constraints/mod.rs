@@ -30,7 +30,8 @@ pub mod syscall_circuit;
 use crate::ccs::{Ccs, CcsInstance, Fr, SparseMatrix};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
-use crate::trace::Trace;
+use crate::isa::Instruction;
+use crate::trace::{Step, Trace};
 
 /// 默认 batch 大小（spec L276：K = 1024）。
 ///
@@ -42,6 +43,328 @@ pub const ZKVM_BATCH_SIZE: usize = 1024;
 /// `compile_trace_to_ccs` 返回的 CCS 实例数上限。
 /// 即 trace 步数 N ≤ 1000 × 1024 = 1,024,000 ≈ MAX_ZKVM_TRACE_STEPS。
 pub const MAX_FOLD_STEP_COUNT: usize = 1000;
+
+// ===========================================================================
+// Stage 2 — 统一 witness 布局 + selector-gated 约束
+// ===========================================================================
+
+/// 每步 witness 变量数（Stage 2 设计）。
+///
+/// 布局：`[idx, pc, next_pc, rs1_val, rs2_val, rd_val, imm, carry, taken, shamt, branch_cond, aux, sel_0..sel_33]`
+pub const STEP_VARS: usize = 46;
+
+/// 指令语义组数（one-hot selector 数量）。
+pub const NUM_CATEGORIES: usize = 34;
+
+// Witness 偏移量（每步内部）
+const OFF_IDX: usize = 0;
+const OFF_PC: usize = 1;
+const OFF_NEXT_PC: usize = 2;
+#[cfg_attr(not(test), allow(dead_code))]
+const OFF_RS1_VAL: usize = 3;
+#[cfg_attr(not(test), allow(dead_code))]
+const OFF_RS2_VAL: usize = 4;
+#[allow(dead_code)]
+const OFF_RD_VAL: usize = 5;
+#[allow(dead_code)]
+const OFF_IMM: usize = 6;
+#[allow(dead_code)]
+const OFF_CARRY: usize = 7;
+#[cfg_attr(not(test), allow(dead_code))]
+const OFF_TAKEN: usize = 8;
+#[allow(dead_code)]
+const OFF_SHAMT: usize = 9;
+#[allow(dead_code)]
+const OFF_BRANCH_COND: usize = 10;
+const OFF_AUX: usize = 11;
+const OFF_SEL_START: usize = 12;
+
+// 42-matrix CCS 矩阵索引
+const M_A_NEXT: usize = 0;
+const M_A_CUR: usize = 1;
+const M_CONST_A: usize = 2;
+const M_B_NEXT: usize = 3;
+const M_B_CUR: usize = 4;
+const M_C_BASE: usize = 5; // M_C_0..M_C_33 = 5..38
+const M_CONST_C: usize = 39;
+const M_D_SQ: usize = 40;
+const M_D_LIN: usize = 41;
+
+// Phase 2b — 算术指令约束矩阵（索引 42..47）
+const M_E_RS1: usize = 42;
+const M_E_RS2: usize = 43;
+const M_E_RD: usize = 44;
+const M_E_IMM: usize = 45;
+const M_E_CARRY: usize = 46;
+const M_E_PC: usize = 47;
+const M_E_AUX: usize = 48;
+const NUM_CCS_MATRICES: usize = 49;
+
+/// 算术指令类别列表（对应 [`instruction_category`] 返回值）。
+///
+/// 顺序决定 Group E 行内偏移：LUI=0, AUIPC=1, ADDI=2, SLTI=3, SLTIU=4, ADD=5, SUB=6, SLT=7, SLTU=8。
+#[allow(dead_code)]
+const ARITH_CATEGORIES: [usize; 9] = [0, 1, 12, 13, 14, 21, 22, 24, 25];
+#[allow(dead_code)]
+const NUM_ARITH: usize = 9;
+
+/// 返回指令的语义组 ID（0..33）。
+fn instruction_category(insn: &Instruction) -> usize {
+    match insn {
+        Instruction::Lui { .. } => 0,
+        Instruction::Auipc { .. } => 1,
+        Instruction::Jal { .. } => 2,
+        Instruction::Jalr { .. } => 3,
+        Instruction::Beq { .. } => 4,
+        Instruction::Bne { .. } => 5,
+        Instruction::Blt { .. } => 6,
+        Instruction::Bge { .. } => 7,
+        Instruction::Bltu { .. } => 8,
+        Instruction::Bgeu { .. } => 9,
+        Instruction::Lb { .. }
+        | Instruction::Lh { .. }
+        | Instruction::Lw { .. }
+        | Instruction::Lbu { .. }
+        | Instruction::Lhu { .. } => 10,
+        Instruction::Sb { .. } | Instruction::Sh { .. } | Instruction::Sw { .. } => 11,
+        Instruction::Addi { .. } => 12,
+        Instruction::Slti { .. } => 13,
+        Instruction::Sltiu { .. } => 14,
+        Instruction::Xori { .. } => 15,
+        Instruction::Ori { .. } => 16,
+        Instruction::Andi { .. } => 17,
+        Instruction::Slli { .. } => 18,
+        Instruction::Srli { .. } => 19,
+        Instruction::Srai { .. } => 20,
+        Instruction::Add { .. } => 21,
+        Instruction::Sub { .. } => 22,
+        Instruction::Sll { .. } => 23,
+        Instruction::Slt { .. } => 24,
+        Instruction::Sltu { .. } => 25,
+        Instruction::Xor { .. } => 26,
+        Instruction::Srl { .. } => 27,
+        Instruction::Sra { .. } => 28,
+        Instruction::Or { .. } => 29,
+        Instruction::And { .. } => 30,
+        Instruction::Fence => 31,
+        Instruction::Ecall => 32,
+        Instruction::Ebreak => 33,
+    }
+}
+
+/// 根据指令类型返回 one-hot selector 数组。
+fn assign_selectors(insn: &Instruction) -> [Fr; NUM_CATEGORIES] {
+    let mut sels = [Fr::zero(); NUM_CATEGORIES];
+    sels[instruction_category(insn)] = Fr::one();
+    sels
+}
+
+/// 从指令中提取寄存器索引和立即数。
+///
+/// 返回 `(rs1_idx, rs2_idx, rd_idx, imm, shamt)`，不适用的字段为 `None` / `0`。
+fn extract_insn_fields(insn: &Instruction) -> (Option<u8>, Option<u8>, Option<u8>, u32, u8) {
+    match insn {
+        Instruction::Lui { rd, imm } => (None, None, Some(*rd), *imm, 0),
+        Instruction::Auipc { rd, imm } => (None, None, Some(*rd), *imm, 0),
+        Instruction::Jal { rd, imm } => (None, None, Some(*rd), *imm, 0),
+        Instruction::Jalr { rd, rs1, imm } => (Some(*rs1), None, Some(*rd), *imm, 0),
+        Instruction::Beq { rs1, rs2, imm }
+        | Instruction::Bne { rs1, rs2, imm }
+        | Instruction::Blt { rs1, rs2, imm }
+        | Instruction::Bge { rs1, rs2, imm }
+        | Instruction::Bltu { rs1, rs2, imm }
+        | Instruction::Bgeu { rs1, rs2, imm } => (Some(*rs1), Some(*rs2), None, *imm, 0),
+        Instruction::Lb { rd, rs1, imm }
+        | Instruction::Lh { rd, rs1, imm }
+        | Instruction::Lw { rd, rs1, imm }
+        | Instruction::Lbu { rd, rs1, imm }
+        | Instruction::Lhu { rd, rs1, imm } => (Some(*rs1), None, Some(*rd), *imm, 0),
+        Instruction::Sb { rs1, rs2, imm }
+        | Instruction::Sh { rs1, rs2, imm }
+        | Instruction::Sw { rs1, rs2, imm } => (Some(*rs1), Some(*rs2), None, *imm, 0),
+        Instruction::Addi { rd, rs1, imm }
+        | Instruction::Slti { rd, rs1, imm }
+        | Instruction::Sltiu { rd, rs1, imm }
+        | Instruction::Xori { rd, rs1, imm }
+        | Instruction::Ori { rd, rs1, imm }
+        | Instruction::Andi { rd, rs1, imm } => (Some(*rs1), None, Some(*rd), *imm, 0),
+        Instruction::Slli { rd, rs1, shamt }
+        | Instruction::Srli { rd, rs1, shamt }
+        | Instruction::Srai { rd, rs1, shamt } => (Some(*rs1), None, Some(*rd), 0, *shamt),
+        Instruction::Add { rd, rs1, rs2 }
+        | Instruction::Sub { rd, rs1, rs2 }
+        | Instruction::Sll { rd, rs1, rs2 }
+        | Instruction::Slt { rd, rs1, rs2 }
+        | Instruction::Sltu { rd, rs1, rs2 }
+        | Instruction::Xor { rd, rs1, rs2 }
+        | Instruction::Srl { rd, rs1, rs2 }
+        | Instruction::Sra { rd, rs1, rs2 }
+        | Instruction::Or { rd, rs1, rs2 }
+        | Instruction::And { rd, rs1, rs2 } => (Some(*rs1), Some(*rs2), Some(*rd), 0, 0),
+        Instruction::Fence | Instruction::Ecall | Instruction::Ebreak => {
+            (None, None, None, 0, 0)
+        }
+    }
+}
+
+/// 计算分支 taken flag。
+fn compute_taken(insn: &Instruction, rs1_val: u32, rs2_val: u32) -> bool {
+    match insn {
+        Instruction::Beq { .. } => rs1_val == rs2_val,
+        Instruction::Bne { .. } => rs1_val != rs2_val,
+        Instruction::Blt { .. } => (rs1_val as i32) < (rs2_val as i32),
+        Instruction::Bge { .. } => (rs1_val as i32) >= (rs2_val as i32),
+        Instruction::Bltu { .. } => rs1_val < rs2_val,
+        Instruction::Bgeu { .. } => rs1_val >= rs2_val,
+        _ => false,
+    }
+}
+
+/// 从指令语义计算后继 PC。
+fn compute_next_pc(pc: u32, insn: &Instruction, rs1_val: u32, rs2_val: u32) -> u32 {
+    match insn {
+        Instruction::Jal { imm, .. } => pc.wrapping_add(*imm),
+        Instruction::Jalr { imm, .. } => (rs1_val.wrapping_add(*imm)) & !1,
+        Instruction::Beq { imm, .. }
+        | Instruction::Bne { imm, .. }
+        | Instruction::Blt { imm, .. }
+        | Instruction::Bge { imm, .. }
+        | Instruction::Bltu { imm, .. }
+        | Instruction::Bgeu { imm, .. } => {
+            if compute_taken(insn, rs1_val, rs2_val) {
+                pc.wrapping_add(*imm)
+            } else {
+                pc.wrapping_add(4)
+            }
+        }
+        _ => pc.wrapping_add(4),
+    }
+}
+
+/// 编译单步 witness（46 个变量）。
+///
+/// # 参数
+/// - `step` — 当前步
+/// - `prev_step` — 前一步（用于提取 rs1/rs2 值），首步为 `None`
+/// - `next_step_pc` — 下一步的 PC（用于 next_pc），末步为 `None` 时从指令计算
+fn compile_step_witness(
+    step: &Step,
+    prev_step: Option<&Step>,
+    next_step_pc: Option<u32>,
+) -> Vec<Fr> {
+    let (rs1_idx, rs2_idx, rd_idx, imm, extracted_shamt) = extract_insn_fields(&step.instruction);
+
+    let (rs1_val, rs2_val) = match prev_step {
+        Some(prev) => {
+            let rs1 = rs1_idx.map_or(0, |idx| prev.registers[idx as usize]);
+            let rs2 = rs2_idx.map_or(0, |idx| prev.registers[idx as usize]);
+            (rs1, rs2)
+        }
+        None => (0, 0),
+    };
+
+    let shamt = match &step.instruction {
+        Instruction::Sll { .. } | Instruction::Srl { .. } | Instruction::Sra { .. } => {
+            (rs2_val & 0x1F) as u8
+        }
+        _ => extracted_shamt,
+    };
+
+    let rd_val = rd_idx.map_or(0, |idx| step.registers[idx as usize]);
+
+    let next_pc = next_step_pc
+        .unwrap_or_else(|| compute_next_pc(step.pc, &step.instruction, rs1_val, rs2_val));
+
+    let taken = compute_taken(&step.instruction, rs1_val, rs2_val);
+    let selectors = assign_selectors(&step.instruction);
+
+    let carry: u32 = match &step.instruction {
+        Instruction::Add { .. } => {
+            if (rs1_val as u64) + (rs2_val as u64) >= (1u64 << 32) {
+                1
+            } else {
+                0
+            }
+        }
+        Instruction::Addi { .. } => {
+            if (rs1_val as u64) + (imm as u64) >= (1u64 << 32) {
+                1
+            } else {
+                0
+            }
+        }
+        Instruction::Sub { .. } => {
+            if rs1_val < rs2_val {
+                1
+            } else {
+                0
+            }
+        }
+        Instruction::Slt { .. } => {
+            if (rs1_val as i32) < (rs2_val as i32) {
+                1
+            } else {
+                0
+            }
+        }
+        Instruction::Sltu { .. } => {
+            if rs1_val < rs2_val {
+                1
+            } else {
+                0
+            }
+        }
+        Instruction::Slti { .. } => {
+            if (rs1_val as i32) < (imm as i32) {
+                1
+            } else {
+                0
+            }
+        }
+        Instruction::Sltiu { .. } => {
+            if rs1_val < imm {
+                1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+
+    let aux: u32 = match &step.instruction {
+        Instruction::Xori { .. } => rs1_val ^ imm,
+        Instruction::Ori { .. } => rs1_val | imm,
+        Instruction::Andi { .. } => rs1_val & imm,
+        Instruction::Xor { .. } => rs1_val ^ rs2_val,
+        Instruction::Or { .. } => rs1_val | rs2_val,
+        Instruction::And { .. } => rs1_val & rs2_val,
+        Instruction::Slli { .. } => rs1_val << shamt,
+        Instruction::Srli { .. } => rs1_val >> shamt,
+        Instruction::Srai { .. } => ((rs1_val as i32) >> shamt) as u32,
+        Instruction::Sll { .. } => rs1_val << shamt,
+        Instruction::Srl { .. } => rs1_val >> shamt,
+        Instruction::Sra { .. } => ((rs1_val as i32) >> shamt) as u32,
+        _ => 0,
+    };
+
+    let mut witness = Vec::with_capacity(STEP_VARS);
+    witness.push(Fr::from_u64(step.step_index));
+    witness.push(Fr::from_u32_with_wrap(step.pc));
+    witness.push(Fr::from_u32_with_wrap(next_pc));
+    witness.push(Fr::from_u32_with_wrap(rs1_val));
+    witness.push(Fr::from_u32_with_wrap(rs2_val));
+    witness.push(Fr::from_u32_with_wrap(rd_val));
+    witness.push(Fr::from_u32_with_wrap(imm));
+    witness.push(Fr::from_u32_with_wrap(carry));
+    witness.push(Fr::from_u32_with_wrap(if taken { 1 } else { 0 }));
+    witness.push(Fr::from_u32_with_wrap(shamt as u32));
+    witness.push(Fr::zero()); // branch_cond — Phase 2d 填充
+    witness.push(Fr::from_u32_with_wrap(aux));
+    witness.extend_from_slice(&selectors);
+
+    assert_eq!(witness.len(), STEP_VARS);
+    witness
+}
 
 /// 将 execution trace 编译为 CCS 实例列表（spec L268-279）。
 ///
@@ -107,28 +430,33 @@ pub fn compile_trace_to_ccs(
     Ok(instances)
 }
 
-/// 编译单个 batch 为 CCS 实例（Step 8 MVP）。
+/// 编译单个 batch 为 CCS 实例（Stage 2 Phase 2c — 49-matrix selector-gated 框架）。
 ///
-/// # MVP 约束设计
+/// # 49-matrix CCS 设计
 ///
-/// witness 布局：`z = [1, idx_0, idx_1, ..., idx_{K-1}]`（长度 = K+1）
-/// - `z[0] = 1`（常数项）
-/// - `z[i+1] = step[i].step_index`（第 i 步的 step_index，i = 0..K-1）
+/// Witness 布局：`z = [1, w_0, w_1, ..., w_{K-1}, padding]`，每步 `STEP_VARS=46` 个变量。
+/// 详见 [`compile_step_witness`] 和 [`STEP_VARS`]。
 ///
-/// 约束（K-1 行）：step_index 单调递增
-/// ```text
-/// Row i (i = 0..K-2): idx_{i+1} - idx_i - 1 = 0
-/// ```
+/// 6 个约束组（共享 93 个 subset，矩阵仅在对应组行有非零条目）：
 ///
-/// 矩阵（3 个，每个 (K-1) × (K+1)）：
-/// - `M_plus`：row i, col i+2 = +1（idx_{i+1}）
-/// - `M_minus`：row i, col i+1 = -1（idx_i）
-/// - `M_const`：row i, col 0 = -1（常数 -1）
+/// | 组 | 行范围 | 行数 | 约束 |
+/// |----|--------|------|------|
+/// | A | 0..K-2 | K-1 | `idx_{i+1} - idx_i - 1 = 0`（step_index 连续性） |
+/// | B | K-1..2K-3 | K-1 | `next_pc_i - pc_{i+1} = 0`（PC 连续性） |
+/// | C | 2K-2..3K-3 | K | `Σ_j sel_j(i) - 1 = 0`（selector one-hot） |
+/// | D | 3K-2..37K-3 | 34K | `sel_j(i)² - sel_j(i) = 0`（selector 二值性） |
+/// | E | 37K-2..38K-3 | K | 算术/逻辑/移位语义 + carry²-carry（selector-gated） |
+/// | F | 38K-2..39K-3 | K | `carry(i)² - carry(i) = 0`（carry 二值性） |
 ///
-/// 子集：`S_0 = {0}, S_1 = {1}, S_2 = {2}`（线性约束，每个子集单矩阵）
-/// 系数：`c_0 = 1, c_1 = 1, c_2 = 1`
+/// Group E 每步 1 行，通过 selector gating 同时检查所有指令类别。
+/// M_CONST_C 在 Group E 行使用 +1（非 Group C 行的 -1），维持 `Σ sel_j - 1 = 0`。
 ///
-/// public_inputs：`[batch_id, first_idx, last_idx]`（用于 batch 间连续性）
+/// 总行数 = 39K-2，矩阵数 = 49，subset 数 = 93。
+///
+/// # Power-of-2 Padding
+///
+/// Hypernova 折叠要求 `num_vars` 和 `num_rows` 均为 2 的幂。padding 行/列为隐式 0
+/// （dummy 约束 `0 = 0`，vacuously satisfied）。
 fn compile_batch_to_ccs(
     steps: &[&crate::trace::Step],
     batch_id: u64,
@@ -140,38 +468,202 @@ fn compile_batch_to_ccs(
         ));
     }
 
-    let num_vars = k + 1;
-    let num_rows = k.saturating_sub(1);
+    let raw_num_vars = 1 + k * STEP_VARS;
+    let raw_num_rows = 39 * k - 2; // (K-1) + (K-1) + K + 34*K + K(Group E) + K(Group F)
+    let padded_num_vars = raw_num_vars.next_power_of_two().max(2);
+    let padded_num_rows = raw_num_rows.max(1).next_power_of_two();
 
-    // witness: z = [1, idx_0, idx_1, ..., idx_{K-1}]
-    let mut witness = Vec::with_capacity(num_vars);
+    // --- Witness: [1, w_0, w_1, ..., w_{K-1}, padding] ---
+    let mut witness = Vec::with_capacity(padded_num_vars);
     witness.push(Fr::one());
-    for step in steps {
-        witness.push(Fr::from_u64(step.step_index));
+    for (i, step) in steps.iter().enumerate() {
+        let prev_step = if i > 0 { Some(steps[i - 1]) } else { None };
+        let step_witness = compile_step_witness(step, prev_step, None);
+        witness.extend_from_slice(&step_witness);
     }
+    witness.resize(padded_num_vars, Fr::zero());
 
-    // 3 个矩阵
-    let mut m_plus = SparseMatrix::new(num_rows, num_vars);
-    let mut m_minus = SparseMatrix::new(num_rows, num_vars);
-    let mut m_const = SparseMatrix::new(num_rows, num_vars);
-
+    // --- 49 矩阵（padded 维度，padding 行/列隐式为 0） ---
     let neg_one = Fr::zero().sub(&Fr::one());
+    let mut matrices: Vec<SparseMatrix> = (0..NUM_CCS_MATRICES)
+        .map(|_| SparseMatrix::new(padded_num_rows, padded_num_vars))
+        .collect();
 
-    for i in 0..num_rows {
-        // M_plus: row i, col (i+2) = +1
-        m_plus.add_entry(i, i + 2, Fr::one())?;
-        // M_minus: row i, col (i+1) = -1
-        m_minus.add_entry(i, i + 1, neg_one)?;
-        // M_const: row i, col 0 = -1
-        m_const.add_entry(i, 0, neg_one)?;
+    // Group A: step_index continuity (rows 0..K-2)
+    for i in 0..k.saturating_sub(1) {
+        let row = i;
+        let col_next = 1 + (i + 1) * STEP_VARS + OFF_IDX;
+        let col_cur = 1 + i * STEP_VARS + OFF_IDX;
+        matrices[M_A_NEXT].add_entry(row, col_next, Fr::one())?;
+        matrices[M_A_CUR].add_entry(row, col_cur, neg_one)?;
+        matrices[M_CONST_A].add_entry(row, 0, neg_one)?;
     }
 
-    let ccs = Ccs::new(
-        num_vars,
-        vec![m_plus, m_minus, m_const],
-        vec![vec![0], vec![1], vec![2]],
-        vec![Fr::one(), Fr::one(), Fr::one()],
-    )?;
+    // Group B: PC continuity (rows K-1..2K-3)
+    for i in 0..k.saturating_sub(1) {
+        let row = (k - 1) + i;
+        let col_next_pc = 1 + i * STEP_VARS + OFF_NEXT_PC;
+        let col_next_step_pc = 1 + (i + 1) * STEP_VARS + OFF_PC;
+        matrices[M_B_NEXT].add_entry(row, col_next_pc, Fr::one())?;
+        matrices[M_B_CUR].add_entry(row, col_next_step_pc, neg_one)?;
+    }
+
+    // Group C: selector one-hot (rows 2K-2..3K-3)
+    for i in 0..k {
+        let row = 2 * (k - 1) + i; // 2K-2 + i
+        for j in 0..NUM_CATEGORIES {
+            let col = 1 + i * STEP_VARS + OFF_SEL_START + j;
+            matrices[M_C_BASE + j].add_entry(row, col, Fr::one())?;
+        }
+        // M_CONST_C entry = +1; sign comes from subset coefficient (-1)
+        // Contribution: (-1) * (+1 * z[0]) = -1, giving Σ sel_j - 1 = 0
+        matrices[M_CONST_C].add_entry(row, 0, Fr::one())?;
+    }
+
+    // Group D: selector binary (rows 3K-2..37K-3)
+    for i in 0..k {
+        for j in 0..NUM_CATEGORIES {
+            let row = 3 * k - 2 + i * NUM_CATEGORIES + j; // 3K-2 + i*34 + j
+            let col = 1 + i * STEP_VARS + OFF_SEL_START + j;
+            matrices[M_D_SQ].add_entry(row, col, Fr::one())?;
+            matrices[M_D_LIN].add_entry(row, col, Fr::one())?;
+        }
+    }
+
+    // Group E: arithmetic constraints (rows 37K-2..38K-3, K rows)
+    // 每步 1 行，所有 9 个算术类别通过 selector gating 同时检查。
+    // M_CONST_C 使用 +1（非 Group C 的 -1）以维持 Σ sel_j - 1 = 0。
+    for i in 0..k {
+        let row = 37 * k - 2 + i;
+        let base = 1 + i * STEP_VARS;
+        // 所有 34 个 selector 矩阵 +1（使 M_C_j·z[row] = sel_j(i)）
+        for j in 0..NUM_CATEGORIES {
+            matrices[M_C_BASE + j].add_entry(row, base + OFF_SEL_START + j, Fr::one())?;
+        }
+        // M_CONST_C +1（使 Group C 在此行：Σ sel_j - 1 = 0）
+        matrices[M_CONST_C].add_entry(row, 0, Fr::one())?;
+        // 6 个操作数矩阵 +1
+        matrices[M_E_RS1].add_entry(row, base + OFF_RS1_VAL, Fr::one())?;
+        matrices[M_E_RS2].add_entry(row, base + OFF_RS2_VAL, Fr::one())?;
+        matrices[M_E_RD].add_entry(row, base + OFF_RD_VAL, Fr::one())?;
+        matrices[M_E_IMM].add_entry(row, base + OFF_IMM, Fr::one())?;
+        matrices[M_E_CARRY].add_entry(row, base + OFF_CARRY, Fr::one())?;
+        matrices[M_E_PC].add_entry(row, base + OFF_PC, Fr::one())?;
+        matrices[M_E_AUX].add_entry(row, base + OFF_AUX, Fr::one())?;
+    }
+
+    // Group F: carry binary (rows 38K-2..39K-3, K rows)
+    for i in 0..k {
+        let row = 38 * k - 2 + i;
+        let col = 1 + i * STEP_VARS + OFF_CARRY;
+        matrices[M_E_CARRY].add_entry(row, col, Fr::one())?;
+    }
+
+    // --- 93 subsets + coefficients ---
+    let neg_two_pow_32 = Fr::zero().sub(&Fr::from_u64(1u64 << 32));
+    let mut subsets: Vec<Vec<usize>> = Vec::with_capacity(93);
+    let mut coeffs: Vec<Fr> = Vec::with_capacity(93);
+    // Group A: {0}→1, {1}→1, {2}→1
+    subsets.push(vec![M_A_NEXT]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_A_CUR]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_CONST_A]);
+    coeffs.push(Fr::one());
+    // Group B: {3}→1, {4}→1
+    subsets.push(vec![M_B_NEXT]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_B_CUR]);
+    coeffs.push(Fr::one());
+    // Group C: {5+j}→1 for j=0..33, {39}→-1
+    for j in 0..NUM_CATEGORIES {
+        subsets.push(vec![M_C_BASE + j]);
+        coeffs.push(Fr::one());
+    }
+    subsets.push(vec![M_CONST_C]);
+    coeffs.push(neg_one);
+    // Group D: {40,40}→1, {41}→-1
+    subsets.push(vec![M_D_SQ, M_D_SQ]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_D_LIN]);
+    coeffs.push(neg_one);
+    // Group E: 25 arithmetic subsets (selector-gated degree-2)
+    // LUI (cat=0): sel_0 * (rd - imm) = 0
+    subsets.push(vec![M_C_BASE, M_E_RD]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE, M_E_IMM]);
+    coeffs.push(neg_one);
+    // AUIPC (cat=1): sel_1 * (rd - pc - imm) = 0
+    subsets.push(vec![M_C_BASE + 1, M_E_RD]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 1, M_E_PC]);
+    coeffs.push(neg_one);
+    subsets.push(vec![M_C_BASE + 1, M_E_IMM]);
+    coeffs.push(neg_one);
+    // ADDI (cat=12): sel_12 * (rs1 + imm - rd - 2^32*carry) = 0
+    subsets.push(vec![M_C_BASE + 12, M_E_RS1]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 12, M_E_IMM]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 12, M_E_RD]);
+    coeffs.push(neg_one);
+    subsets.push(vec![M_C_BASE + 12, M_E_CARRY]);
+    coeffs.push(neg_two_pow_32);
+    // SLTI (cat=13): sel_13 * (rd - carry) = 0
+    subsets.push(vec![M_C_BASE + 13, M_E_RD]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 13, M_E_CARRY]);
+    coeffs.push(neg_one);
+    // SLTIU (cat=14): sel_14 * (rd - carry) = 0
+    subsets.push(vec![M_C_BASE + 14, M_E_RD]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 14, M_E_CARRY]);
+    coeffs.push(neg_one);
+    // ADD (cat=21): sel_21 * (rs1 + rs2 - rd - 2^32*carry) = 0
+    subsets.push(vec![M_C_BASE + 21, M_E_RS1]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 21, M_E_RS2]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 21, M_E_RD]);
+    coeffs.push(neg_one);
+    subsets.push(vec![M_C_BASE + 21, M_E_CARRY]);
+    coeffs.push(neg_two_pow_32);
+    // SUB (cat=22): sel_22 * (rd - rs1 + rs2 - 2^32*carry) = 0
+    subsets.push(vec![M_C_BASE + 22, M_E_RD]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 22, M_E_RS1]);
+    coeffs.push(neg_one);
+    subsets.push(vec![M_C_BASE + 22, M_E_RS2]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 22, M_E_CARRY]);
+    coeffs.push(neg_two_pow_32);
+    // SLT (cat=24): sel_24 * (rd - carry) = 0
+    subsets.push(vec![M_C_BASE + 24, M_E_RD]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 24, M_E_CARRY]);
+    coeffs.push(neg_one);
+    // SLTU (cat=25): sel_25 * (rd - carry) = 0
+    subsets.push(vec![M_C_BASE + 25, M_E_RD]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_C_BASE + 25, M_E_CARRY]);
+    coeffs.push(neg_one);
+    // Phase 2c: 逻辑 + 移位指令约束（12 类 × 2 subset = 24）
+    // 模式：sel_cat × (rd - aux) = 0
+    // XORI(15), ORI(16), ANDI(17), SLLI(18), SRLI(19), SRAI(20),
+    // SLL(23), XOR(26), SRL(27), SRA(28), OR(29), AND(30)
+    for &cat in &[15, 16, 17, 18, 19, 20, 23, 26, 27, 28, 29, 30] {
+        subsets.push(vec![M_C_BASE + cat, M_E_RD]);
+        coeffs.push(Fr::one());
+        subsets.push(vec![M_C_BASE + cat, M_E_AUX]);
+        coeffs.push(neg_one);
+    }
+    // Group F: carry² - carry = 0
+    subsets.push(vec![M_E_CARRY, M_E_CARRY]);
+    coeffs.push(Fr::one());
+    subsets.push(vec![M_E_CARRY]);
+    coeffs.push(neg_one);
+
+    let ccs = Ccs::new(padded_num_vars, matrices, subsets, coeffs)?;
 
     // public_inputs: [batch_id, first_idx, last_idx]
     let first_idx = steps
@@ -261,13 +753,13 @@ mod tests {
         assert_eq!(instances.len(), 1);
 
         let inst = &instances[0];
-        // num_vars = 5 + 1 = 6
-        assert_eq!(inst.ccs.num_vars, 6);
-        // 4 个连续性约束行（5-1=4）
-        assert_eq!(inst.ccs.num_rows(), 4);
-        // 3 个矩阵
-        assert_eq!(inst.ccs.num_matrices(), 3);
-        // witness 满足约束
+        // num_vars = 1 + 5*46 = 231 → padding 到 256
+        assert_eq!(inst.ccs.num_vars, 256);
+        // num_rows = 39*5 - 2 = 193 → padding 到 256
+        assert_eq!(inst.ccs.num_rows(), 256);
+        // 49 个矩阵
+        assert_eq!(inst.ccs.num_matrices(), 49);
+        // witness 满足约束（padding 列为 0，dummy 约束 vacuously true）
         assert!(inst.is_satisfied().expect("应满足"));
         // public_inputs: [batch_id=0, first_idx=0, last_idx=4]
         assert_eq!(inst.public_inputs.len(), 3);
@@ -388,35 +880,36 @@ mod tests {
 
     #[test]
     fn test_single_step_batch_no_continuity_constraint() {
-        // 单步 batch（K=1）没有连续性约束（K-1=0 行）
+        // 单步 batch（K=1）：Group A/B 各 0 行，Group C 1 行，Group D 34 行
         let trace = make_trace(1);
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
         assert_eq!(instances.len(), 1);
 
         let inst = &instances[0];
-        // num_vars = 1 + 1 = 2
-        assert_eq!(inst.ccs.num_vars, 2);
-        // 0 个约束行
-        assert_eq!(inst.ccs.num_rows(), 0);
-        // 仍然满足（空约束 vacuously true）
+        // num_vars = 1 + 1*46 = 47 → padding 到 64
+        assert_eq!(inst.ccs.num_vars, 64);
+        // num_rows = 39*1 - 2 = 37 → padding 到 64
+        assert_eq!(inst.ccs.num_rows(), 64);
+        // 仍然满足（selector one-hot + binary + padding dummy 约束 vacuously true）
         assert!(inst.is_satisfied().expect("应满足"));
     }
 
     #[test]
     fn test_witness_layout() {
-        // 验证 witness 布局：z = [1, idx_0, idx_1, ..., idx_{K-1}]
+        // 验证 witness 布局：z = [1, w_0[0..45], w_1[0..45], w_2[0..45], padding]
+        // 每步 46 变量，步 i 的 idx 位于 z[1 + i*46 + OFF_IDX] = z[1 + i*46]
         let trace = make_trace(3);
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
         let inst = &instances[0];
 
-        // z[0] = 1
+        // z[0] = 1（常数）
         assert_eq!(inst.witness[0], Fr::one());
-        // z[1] = idx_0 = 0
+        // 步 0 的 idx = 0，位于 z[1 + 0*46 + 0] = z[1]
         assert_eq!(inst.witness[1], Fr::from_u64(0));
-        // z[2] = idx_1 = 1
-        assert_eq!(inst.witness[2], Fr::from_u64(1));
-        // z[3] = idx_2 = 2
-        assert_eq!(inst.witness[3], Fr::from_u64(2));
+        // 步 1 的 idx = 1，位于 z[1 + 1*46 + 0] = z[47]
+        assert_eq!(inst.witness[47], Fr::from_u64(1));
+        // 步 2 的 idx = 2，位于 z[1 + 2*46 + 0] = z[93]
+        assert_eq!(inst.witness[93], Fr::from_u64(2));
     }
 
     #[test]
@@ -467,9 +960,55 @@ mod tests {
         let trace = make_trace(ZKVM_BATCH_SIZE);
         let instances = compile_trace_to_ccs(&trace, ZKVM_BATCH_SIZE).expect("应成功");
         assert_eq!(instances.len(), 1);
-        // 1023 个连续性约束
-        assert_eq!(instances[0].ccs.num_rows(), ZKVM_BATCH_SIZE - 1);
+        // num_vars = 1 + 1024*46 = 47105 → padding 到 65536
+        assert_eq!(instances[0].ccs.num_vars, 65536);
+        // num_rows = 39*1024 - 2 = 39934 → padding 到 65536
+        assert_eq!(instances[0].ccs.num_rows(), 65536);
         assert!(instances[0].is_satisfied().expect("应满足"));
+    }
+
+    #[test]
+    fn test_padding_power_of_two_invariant() {
+        // 验证 padding 后 num_vars 和 num_rows 均为 2 的幂
+        for k in [1usize, 2, 3, 5, 7, 10, 100, 255, 256, 257, 1023, 1024] {
+            let trace = make_trace(k);
+            let instances = compile_trace_to_ccs(&trace, k.max(1)).expect("应成功");
+            let inst = &instances[0];
+            assert!(
+                inst.ccs.num_vars.is_power_of_two(),
+                "k={k}: num_vars={} 应为 2 的幂",
+                inst.ccs.num_vars
+            );
+            assert!(
+                inst.ccs.num_rows().is_power_of_two(),
+                "k={k}: num_rows={} 应为 2 的幂",
+                inst.ccs.num_rows()
+            );
+            assert!(
+                inst.ccs.num_vars >= 2,
+                "k={k}: num_vars 应 >= 2",
+            );
+            assert!(
+                inst.ccs.num_rows() >= 1,
+                "k={k}: num_rows 应 >= 1",
+            );
+            assert!(inst.is_satisfied().expect("应满足"));
+        }
+    }
+
+    #[test]
+    fn test_padding_witness_zero_filled() {
+        // 验证 padding 后 witness 尾部为 0
+        // k=5, num_vars = 1 + 5*46 = 231, padded to 256
+        let trace = make_trace(5);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        let inst = &instances[0];
+        assert_eq!(inst.ccs.num_vars, 256);
+        assert_eq!(inst.witness.len(), 256);
+        // z[0] = 1, z[1..231] = step witnesses, z[231..256] = 0 (padding)
+        assert_eq!(inst.witness[0], Fr::one());
+        assert_eq!(inst.witness[231], Fr::zero());
+        assert_eq!(inst.witness[255], Fr::zero());
     }
 
     #[test]
@@ -736,4 +1275,725 @@ mod tests {
         // CCS 满足
         assert!(instance.is_satisfied().expect("is_satisfied"));
     }
+
+    // ===== Stage 2 Phase 2a 测试 =====
+
+    #[test]
+    fn test_49_matrix_ccs_structure() {
+        // 验证 49-matrix CCS 结构：49 矩阵、93 subset、Group D/E/F subset 布局
+        let trace = make_trace(3);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        let inst = &instances[0];
+
+        assert_eq!(inst.ccs.num_matrices(), 49, "应有 49 个矩阵");
+        assert_eq!(
+            inst.ccs.num_constraints(),
+            93,
+            "应有 93 个 subset（约束方程）"
+        );
+
+        // subset[40] = {40, 40}（Group D 的 sel² 子集，利用重复索引）
+        // 0-indexed: 3(A)+2(B)+34(C)+1(const_C) = 40
+        let subset_d_sq = &inst.ccs.subsets[40];
+        assert_eq!(
+            subset_d_sq,
+            &vec![M_D_SQ, M_D_SQ],
+            "Group D square subset 应为 [40, 40]"
+        );
+
+        // subset[42] = {M_C_0, M_E_RD} = {5, 44}（Group E LUI 第一个 subset）
+        let subset_e_lui = &inst.ccs.subsets[42];
+        assert_eq!(
+            subset_e_lui,
+            &vec![M_C_BASE, M_E_RD],
+            "Group E LUI subset 应为 [5, 44]"
+        );
+
+        // subset[67] = {M_C_15, M_E_RD} = {20, 44}（Phase 2c XORI 第一个 subset）
+        // 0-indexed: 3(A)+2(B)+35(C)+2(D)+25(E_arith) = 67
+        let subset_p2c_xori = &inst.ccs.subsets[67];
+        assert_eq!(
+            subset_p2c_xori,
+            &vec![M_C_BASE + 15, M_E_RD],
+            "Phase 2c XORI subset 应为 [20, 44]"
+        );
+
+        // subset[91] = {M_E_CARRY, M_E_CARRY} = {46, 46}（Group F carry² 子集）
+        // 0-indexed: 67 + 24(Phase 2c) = 91
+        let subset_f_sq = &inst.ccs.subsets[91];
+        assert_eq!(
+            subset_f_sq,
+            &vec![M_E_CARRY, M_E_CARRY],
+            "Group F carry² subset 应为 [46, 46]"
+        );
+    }
+
+    #[test]
+    fn test_group_a_step_index_continuity() {
+        // step_index 连续 → Group A 满足
+        let trace = make_trace(5); // step_index = 0,1,2,3,4
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(
+            instances[0].is_satisfied().expect("连续 step_index 应满足")
+        );
+
+        // step_index 跳跃 → Group A 不满足
+        let mut trace_gap = Trace::new();
+        trace_gap.push_step(make_step(0));
+        trace_gap.push_step(make_step(5)); // 跳跃：0 → 5
+        trace_gap.push_step(make_step(6));
+
+        let instances_gap = compile_trace_to_ccs(&trace_gap, 10).expect("应成功");
+        assert!(
+            !instances_gap[0].is_satisfied().expect("跳跃 step_index 应不满足"),
+            "Group A 应检测到 step_index 不连续"
+        );
+    }
+
+    #[test]
+    fn test_group_b_pc_continuity() {
+        // pc 连续（pc = step_index * 4，ECALL → next_pc = pc + 4）→ Group B 满足
+        let trace = make_trace(5);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("连续 PC 应满足"));
+
+        // pc 跳跃 → Group B 不满足
+        let mut trace_pc_gap = Trace::new();
+        trace_pc_gap.push_step(make_step(0)); // pc=0
+        let mut bad_step = make_step(1);
+        bad_step.pc = 100; // 错误 PC：0+4≠100
+        trace_pc_gap.push_step(bad_step);
+        trace_pc_gap.push_step(make_step(2));
+
+        let instances_gap = compile_trace_to_ccs(&trace_pc_gap, 10).expect("应成功");
+        assert!(
+            !instances_gap[0].is_satisfied().expect("跳跃 PC 应不满足"),
+            "Group B 应检测到 PC 不连续"
+        );
+    }
+
+    #[test]
+    fn test_group_c_selector_one_hot() {
+        // ECALL 步的 selector one-hot：sel_32=1，其余=0
+        let trace = make_trace(2); // 每步都是 ECALL
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        let inst = &instances[0];
+
+        // 步 0 的 selector 区域：z[1 + 0*46 + 12 .. 1 + 0*46 + 46]
+        let sel_start_0 = 1 + OFF_SEL_START;
+        for j in 0..NUM_CATEGORIES {
+            let val = inst.witness[sel_start_0 + j];
+            if j == 32 {
+                // ECALL = category 32
+                assert_eq!(val, Fr::one(), "ECALL selector (idx 32) 应为 1");
+            } else {
+                assert_eq!(val, Fr::zero(), "非 ECALL selector (idx {j}) 应为 0");
+            }
+        }
+
+        // Group C 约束满足（Σ sel = 1）
+        assert!(inst.is_satisfied().expect("one-hot selector 应满足"));
+    }
+
+    #[test]
+    fn test_group_d_selector_binary() {
+        // 验证所有 selector 为 0 或 1（满足 sel² - sel = 0）
+        let trace = make_trace(3);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        let inst = &instances[0];
+
+        // 检查每步的每个 selector 是 0 或 1
+        for i in 0..3 {
+            let sel_start = 1 + i * STEP_VARS + OFF_SEL_START;
+            for j in 0..NUM_CATEGORIES {
+                let val = inst.witness[sel_start + j];
+                assert!(
+                    val == Fr::zero() || val == Fr::one(),
+                    "步 {i} selector {j} 应为 0 或 1，实际 {:?}",
+                    val
+                );
+            }
+        }
+
+        // Group D 约束满足
+        assert!(inst.is_satisfied().expect("binary selector 应满足"));
+    }
+
+    #[test]
+    fn test_compile_step_witness_layout() {
+        // 验证 compile_step_witness 返回 46 个变量，布局正确
+        let step = make_step(5);
+        let witness = compile_step_witness(&step, None, None);
+
+        assert_eq!(witness.len(), STEP_VARS, "witness 长度应为 46");
+
+        // idx = step_index = 5
+        assert_eq!(witness[OFF_IDX], Fr::from_u64(5));
+        // pc = 5 * 4 = 20
+        assert_eq!(witness[OFF_PC], Fr::from_u32_with_wrap(20));
+        // next_pc = pc + 4 = 24（ECALL 非分支）
+        assert_eq!(witness[OFF_NEXT_PC], Fr::from_u32_with_wrap(24));
+        // rs1_val = 0（无 prev_step）
+        assert_eq!(witness[OFF_RS1_VAL], Fr::zero());
+        // rs2_val = 0
+        assert_eq!(witness[OFF_RS2_VAL], Fr::zero());
+        // taken = 0（ECALL 非分支）
+        assert_eq!(witness[OFF_TAKEN], Fr::zero());
+        // ECALL selector = 1
+        assert_eq!(witness[OFF_SEL_START + 32], Fr::one());
+        // 其余 selector = 0
+        assert_eq!(witness[OFF_SEL_START], Fr::zero());
+    }
+
+    #[test]
+    fn test_instruction_category_coverage() {
+        // 验证所有 40 个 Instruction 变体映射到有效 category 0..33
+        let insns: Vec<Instruction> = vec![
+            Instruction::Lui { rd: 1, imm: 0x1000 },
+            Instruction::Auipc { rd: 1, imm: 0x1000 },
+            Instruction::Jal { rd: 1, imm: 0x100 },
+            Instruction::Jalr { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Beq { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Bne { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Blt { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Bge { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Bltu { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Bgeu { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Lb { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lh { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lw { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lbu { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lhu { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Sb { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Sh { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            Instruction::Addi { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Slti { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Sltiu { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Xori { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Ori { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Andi { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Slli { rd: 1, rs1: 2, shamt: 1 },
+            Instruction::Srli { rd: 1, rs1: 2, shamt: 1 },
+            Instruction::Srai { rd: 1, rs1: 2, shamt: 1 },
+            Instruction::Add { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Sub { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Sll { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Slt { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Xor { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Srl { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Sra { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Or { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::And { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Fence,
+            Instruction::Ecall,
+            Instruction::Ebreak,
+        ];
+
+        assert_eq!(insns.len(), 40, "应有 40 个 Instruction 变体");
+
+        for insn in &insns {
+            let cat = instruction_category(insn);
+            assert!(
+                cat < NUM_CATEGORIES,
+                "category {cat} >= NUM_CATEGORIES {NUM_CATEGORIES}"
+            );
+        }
+
+        // 验证 assign_selectors 返回的 one-hot 数组恰好有一个 1
+        for insn in &insns {
+            let sels = assign_selectors(insn);
+            let sum: usize = sels
+                .iter()
+                .map(|s| if *s == Fr::one() { 1 } else { 0 })
+                .sum();
+            assert_eq!(sum, 1, "每条指令应恰好激活 1 个 selector");
+        }
+    }
+
+    // ===== Stage 2 Phase 2b 测试 =====
+
+    /// 构造测试用 Step（指定指令和寄存器状态）。
+    fn make_step_with_insn(
+        step_index: u64,
+        instruction: Instruction,
+        registers: [u32; 32],
+    ) -> Step {
+        Step {
+            step_index,
+            pc: (step_index * 4) as u32,
+            instruction,
+            registers,
+            mem_access: vec![],
+        }
+    }
+
+    /// 构造 ECALL 步并设置寄存器（用于算术指令的 prev_step）。
+    fn make_ecall_step_with_regs(step_index: u64, registers: [u32; 32]) -> Step {
+        make_step_with_insn(step_index, Instruction::Ecall, registers)
+    }
+
+    #[test]
+    fn test_group_e_add_constraint() {
+        // K=2: 步 0 ECALL 设 regs[2]=100, regs[3]=200; 步 1 ADD {rd:1,rs1:2,rs2:3} regs[1]=300
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 100;
+        regs0[3] = 200;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 300;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 ADD 应满足"));
+
+        // 篡改 rd_val → 约束失败
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + STEP_VARS + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::from_u32_with_wrap(301);
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "Group E 应检测到 ADD rd 错误"
+        );
+    }
+
+    #[test]
+    fn test_group_e_add_overflow_constraint() {
+        // K=2: 步 0 设 regs[2]=0xFFFFFFFF, regs[3]=1; 步 1 ADD regs[1]=0（wrapping）
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xFFFFFFFF;
+        regs0[3] = 1;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, [0u32; 32]);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        // carry=1, rs1+rs2-rd-2^32*carry = 0xFFFFFFFF+1-0-2^32 = 0
+        assert!(instances[0].is_satisfied().expect("ADD overflow 应满足"));
+    }
+
+    #[test]
+    fn test_group_e_sub_constraint() {
+        // K=2: 步 0 设 regs[2]=100, regs[3]=200; 步 1 SUB {rd:1,rs1:2,rs2:3} regs[1]=0xFFFFFF9C
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 100;
+        regs0[3] = 200;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xFFFFFF9C; // 100 - 200 wrapping
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        // carry=1(borrow), rd-rs1+rs2-2^32*carry = 0xFFFFFF9C-100+200-2^32 = 0
+        assert!(instances[0].is_satisfied().expect("正确 SUB 应满足"));
+
+        // 篡改 carry → 0（应为 1），约束失败
+        let mut inst = instances[0].clone();
+        let carry_col = 1 + STEP_VARS + OFF_CARRY;
+        inst.witness[carry_col] = Fr::zero();
+        assert!(
+            !inst.is_satisfied().expect("篡改 carry 应不满足"),
+            "Group E 应检测到 SUB carry 错误"
+        );
+    }
+
+    #[test]
+    fn test_group_e_lui_constraint() {
+        // K=1: LUI {rd:1, imm:0x12340000}, regs[1]=0x12340000
+        let mut regs = [0u32; 32];
+        regs[1] = 0x12340000;
+        let step0 = make_step_with_insn(0, Instruction::Lui { rd: 1, imm: 0x12340000 }, regs);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 LUI 应满足"));
+
+        // 篡改 rd → 0，约束失败
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::zero();
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "Group E 应检测到 LUI rd 错误"
+        );
+    }
+
+    #[test]
+    fn test_group_e_auipc_constraint() {
+        // K=1: AUIPC {rd:1, imm:0x1000}, pc=0, regs[1]=0x1000
+        let mut regs = [0u32; 32];
+        regs[1] = 0x1000;
+        let step0 = make_step_with_insn(0, Instruction::Auipc { rd: 1, imm: 0x1000 }, regs);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        // rd - pc - imm = 0x1000 - 0 - 0x1000 = 0
+        assert!(instances[0].is_satisfied().expect("正确 AUIPC 应满足"));
+    }
+
+    #[test]
+    fn test_group_e_addi_constraint() {
+        // K=2: 步 0 设 regs[2]=100; 步 1 ADDI {rd:1,rs1:2,imm:50} regs[1]=150
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 100;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 150;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Addi { rd: 1, rs1: 2, imm: 50 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        // rs1 + imm - rd - 2^32*carry = 100 + 50 - 150 - 0 = 0
+        assert!(instances[0].is_satisfied().expect("正确 ADDI 应满足"));
+    }
+
+    #[test]
+    fn test_group_f_carry_binary() {
+        // K=1 ECALL batch，篡改 carry=2 → carry²-carry = 4-2 = 2 ≠ 0
+        let trace = make_trace(1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+
+        let mut inst = instances[0].clone();
+        let carry_col = 1 + OFF_CARRY;
+        inst.witness[carry_col] = Fr::from_u32_with_wrap(2);
+        assert!(
+            !inst.is_satisfied().expect("carry=2 应不满足"),
+            "Group F 应检测到 carry 非二值"
+        );
+    }
+
+    #[test]
+    fn test_arith_soundness_wrong_operand() {
+        // K=2 ADD batch: regs[2]=100, [3]=200, [1]=300
+        // 篡改 rd_val 为 301 → rs1+rs2-rd = 100+200-301 = -1 ≠ 0
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 100;
+        regs0[3] = 200;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 300;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 witness 应满足"));
+
+        // 篡改 rd_val → 301
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + STEP_VARS + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::from_u32_with_wrap(301);
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "Group E 算术 soundness 应检测到错误 operand"
+        );
+    }
+
+    // ===== Stage 2 Phase 2c 测试（逻辑 + 移位指令）=====
+
+    #[test]
+    fn test_group_e_xor_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xF0;
+        regs0[3] = 0x0F;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xFF;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Xor { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 XOR 应满足"));
+
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + STEP_VARS + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::from_u32_with_wrap(0xFE);
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "XOR soundness 应检测到 rd ≠ aux"
+        );
+    }
+
+    #[test]
+    fn test_group_e_or_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xF0;
+        regs0[3] = 0x0F;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xFF;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Or { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 OR 应满足"));
+
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + STEP_VARS + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::from_u32_with_wrap(0xF0);
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "OR soundness 应检测到 rd ≠ aux"
+        );
+    }
+
+    #[test]
+    fn test_group_e_and_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xFF;
+        regs0[3] = 0x0F;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0x0F;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::And { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 AND 应满足"));
+
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + STEP_VARS + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::from_u32_with_wrap(0xFF);
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "AND soundness 应检测到 rd ≠ aux"
+        );
+    }
+
+    #[test]
+    fn test_group_e_xori_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xF0;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xFF;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Xori { rd: 1, rs1: 2, imm: 0x0F }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 XORI 应满足"));
+    }
+
+    #[test]
+    fn test_group_e_ori_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xF0;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xFF;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Ori { rd: 1, rs1: 2, imm: 0x0F }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 ORI 应满足"));
+    }
+
+    #[test]
+    fn test_group_e_andi_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xFF;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0x0F;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Andi { rd: 1, rs1: 2, imm: 0x0F }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 ANDI 应满足"));
+    }
+
+    #[test]
+    fn test_group_e_slli_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0x1;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0x10;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Slli { rd: 1, rs1: 2, shamt: 4 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 SLLI 应满足"));
+
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + STEP_VARS + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::from_u32_with_wrap(0x20);
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "SLLI soundness 应检测到 rd ≠ aux"
+        );
+    }
+
+    #[test]
+    fn test_group_e_srli_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0x80000000;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0x40000000;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Srli { rd: 1, rs1: 2, shamt: 1 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 SRLI 应满足"));
+    }
+
+    #[test]
+    fn test_group_e_srai_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0x80000000;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xC0000000;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Srai { rd: 1, rs1: 2, shamt: 1 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 SRAI 算术右移应满足"));
+    }
+
+    #[test]
+    fn test_group_e_sll_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0x1;
+        regs0[3] = 4;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0x10;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 SLL 应满足"));
+
+        let inst = &instances[0];
+        let shamt_col = 1 + STEP_VARS + OFF_SHAMT;
+        assert_eq!(
+            inst.witness[shamt_col],
+            Fr::from_u32_with_wrap(4),
+            "SLL shamt 应为 rs2 & 0x1F = 4"
+        );
+    }
+
+    #[test]
+    fn test_group_e_srl_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0x80000000;
+        regs0[3] = 1;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0x40000000;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Srl { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 SRL 应满足"));
+    }
+
+    #[test]
+    fn test_group_e_sra_constraint() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0x80000000;
+        regs0[3] = 1;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xC0000000;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Sra { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 SRA 算术右移应满足"));
+    }
+
+    #[test]
+    fn test_shift_shamt_from_rs2_low_5_bits() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0x1;
+        regs0[3] = 35;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0x8;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+
+        let inst = &instances[0];
+        let shamt_col = 1 + STEP_VARS + OFF_SHAMT;
+        assert_eq!(
+            inst.witness[shamt_col],
+            Fr::from_u32_with_wrap(3),
+            "SLL shamt 应为 35 & 0x1F = 3，而非 35"
+        );
+        assert!(
+            inst.is_satisfied().expect("1 << 3 = 8 应满足"),
+            "shamt=3 时 rd=0x8 应满足约束"
+        );
+    }
+
+    #[test]
+    fn test_logical_shift_soundness_wrong_operand() {
+        let mut regs0 = [0u32; 32];
+        regs0[2] = 0xF0;
+        regs0[3] = 0x0F;
+        let mut regs1 = [0u32; 32];
+        regs1[1] = 0xFF;
+        let step0 = make_ecall_step_with_regs(0, regs0);
+        let step1 = make_step_with_insn(1, Instruction::Xor { rd: 1, rs1: 2, rs2: 3 }, regs1);
+
+        let mut trace = Trace::new();
+        trace.push_step(step0);
+        trace.push_step(step1);
+        let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
+        assert!(instances[0].is_satisfied().expect("正确 witness 应满足"));
+
+        let mut inst = instances[0].clone();
+        let rd_col = 1 + STEP_VARS + OFF_RD_VAL;
+        inst.witness[rd_col] = Fr::from_u32_with_wrap(0xEE);
+        assert!(
+            !inst.is_satisfied().expect("篡改 rd 应不满足"),
+            "逻辑指令 soundness 应检测到 rd ≠ aux"
+        );
+    }
+
 }

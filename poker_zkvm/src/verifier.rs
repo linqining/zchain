@@ -258,6 +258,23 @@ pub fn verify_production(
         last_sumcheck_transcript = Some(fresh_t);
     }
 
+    // 6.5 单实例路径（fold_steps 为空）：验证 final_sumcheck 直接证明 CCS satisfaction
+    if proof.fold_steps.is_empty() {
+        let mut fresh_t = Transcript::new();
+        let sumcheck_valid = sumcheck::verify(
+            &proof.final_sumcheck,
+            ccs,
+            &current_lcccs.r_x_l,
+            current_lcccs.u_l,
+            proof.z_at_point,
+            &mut fresh_t,
+        )?;
+        if !sumcheck_valid {
+            return Err(ZkvmError::SumcheckVerificationFailed);
+        }
+        last_sumcheck_transcript = Some(fresh_t);
+    }
+
     // 7. batch 连续性校验
     if !verify_batch_continuity(&proof.batch_public_inputs) {
         return Err(ZkvmError::Other(
@@ -266,18 +283,21 @@ pub fn verify_production(
     }
 
     // 7.5 PCS-sumcheck 绑定校验（Finding A + B）
-    let last_step = proof.fold_steps.last().ok_or_else(|| {
-        ZkvmError::InvalidZkProofFormat("fold_steps 为空：无法链接 PCS opening".to_string())
-    })?;
-    if proof.r_y != last_step.r_y {
-        return Err(ZkvmError::Other(
-            "PCS opening 解耦：proof.r_y != fold_steps.last().r_y".to_string(),
-        ));
-    }
-    if proof.z_at_point != last_step.z_at_r_y {
-        return Err(ZkvmError::Other(
-            "PCS opening 解耦：proof.z_at_point != fold_steps.last().z_at_r_y".to_string(),
-        ));
+    // 单实例路径：r_y 和 z_at_point 直接来自 final_sumcheck，无 fold step 可比对
+    if !proof.fold_steps.is_empty() {
+        let last_step = proof.fold_steps.last().ok_or_else(|| {
+            ZkvmError::InvalidZkProofFormat("fold_steps 为空：无法链接 PCS opening".to_string())
+        })?;
+        if proof.r_y != last_step.r_y {
+            return Err(ZkvmError::Other(
+                "PCS opening 解耦：proof.r_y != fold_steps.last().r_y".to_string(),
+            ));
+        }
+        if proof.z_at_point != last_step.z_at_r_y {
+            return Err(ZkvmError::Other(
+                "PCS opening 解耦：proof.z_at_point != fold_steps.last().z_at_r_y".to_string(),
+            ));
+        }
     }
 
     // 8. 最终 PCS opening 验证（使用最后一步的 fresh transcript，链式）
@@ -653,13 +673,22 @@ mod tests {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
         let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
-        // 清空 fold_steps
+        // 清空 fold_steps（篡改：从多步 proof 中删除所有 fold 步骤）
         proof.fold_steps.clear();
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
         let result = verify_production(&tampered, &public_io, &ccs_whitelist);
         assert!(
-            matches!(result, Err(ZkvmError::InvalidZkProofFormat(ref m)) if m.contains("fold_steps 为空")),
-            "空 fold_steps 应被拒绝，got: {result:?}"
+            result.is_err(),
+            "篡改 proof（清空 fold_steps）应被拒绝，got: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_verify_production_single_instance_proof_accepted() {
+        let (proof_bytes, public_io) = crate::prover::generate_single_instance_test_proof();
+        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let result = verify_production(&proof_bytes, &public_io, &ccs_whitelist);
+        assert!(result.is_ok(), "单实例 proof 应通过验证，got: {:?}", result);
+        assert!(result.unwrap());
     }
 }

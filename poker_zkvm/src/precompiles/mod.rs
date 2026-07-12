@@ -17,9 +17,13 @@
 //! - `ecdsa` — ECDSA 验签电路（Task 10.4）
 //! - `zk_shuffle` — ZkShuffle CCS 电路迁移（Task 10.5）
 
+pub mod bit_ops;
+pub mod ccs_builder;
 pub mod poseidon;
 pub mod sha256;
 pub mod ecdsa;
+pub mod non_native;
+pub mod secp256k1_ops;
 pub mod zk_shuffle;
 
 use std::collections::HashMap;

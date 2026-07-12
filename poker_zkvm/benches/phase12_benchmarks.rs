@@ -6,8 +6,8 @@
 //! - **verifier_time**：`verify_production()` 验证时间
 //!
 //! 步数梯度：100 / 500 / 1000 步
-//! - MVP 限制：batch_size=3（唯一满足 num_vars=4=2^2 且 num_rows=2=2^1 的值）
-//! - 100 步 → 34 batches，500 步 → 167 batches，1000 步 → 334 batches（均 ≤ MAX_FOLD_STEP_COUNT=1000）
+//! - batch_size=256（Stage 1 默认值，Stage 1.1 padding 保证 num_vars/num_rows 为 2 的幂）
+//! - 100 步 → 1 batch（单实例），500 步 → 2 batches（1 fold step），1000 步 → 4 batches（3 fold steps）
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use poker_zkvm::prover::{prove, MAX_PROOF_TOTAL_SIZE, MAX_ZKVM_PROOF_SIZE, ProverConfig};
@@ -17,8 +17,8 @@ use poker_zkvm::verifier::verify_production;
 /// 基准步数列表
 const STEP_COUNTS: &[usize] = &[100, 500, 1000];
 
-/// MVP 限制下唯一合法的 batch_size（num_vars=4=2^2 且 num_rows=2=2^1）
-const BATCH_SIZE: usize = 3;
+/// batch_size=256（Stage 1 默认值）
+const BATCH_SIZE: usize = 256;
 
 /// 端到端 prover 基准：prove() 全流程时间
 fn bench_prover_time(c: &mut Criterion) {
@@ -30,6 +30,7 @@ fn bench_prover_time(c: &mut Criterion) {
         let elf = build_nop_elf(steps);
         let config = ProverConfig {
             batch_size,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
 
@@ -59,6 +60,7 @@ fn bench_proof_size(c: &mut Criterion) {
         let elf = build_nop_elf(steps);
         let config = ProverConfig {
             batch_size,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
 
@@ -67,16 +69,16 @@ fn bench_proof_size(c: &mut Criterion) {
 
         group.bench_function(format!("steps_{}", steps), |b| {
             b.iter(|| {
-                assert!(size <= MAX_ZKVM_PROOF_SIZE, "proof 过大");
-                assert!(size <= MAX_PROOF_TOTAL_SIZE, "proof 超 M2-002 上限");
+                // 多步 proof 超 64KB 上链限制，但须 < 512KB DoS 限制
+                assert!(size <= MAX_PROOF_TOTAL_SIZE, "proof 超 DoS 上限");
                 black_box(size);
             });
         });
 
         // 输出 proof 大小信息
         println!(
-            "  proof_size(steps={}) = {} bytes (limit={}, batch_size={})",
-            steps, size, MAX_ZKVM_PROOF_SIZE, batch_size
+            "  proof_size(steps={}) = {} bytes (on_chain_limit={}, dos_limit={}, batch_size={})",
+            steps, size, MAX_ZKVM_PROOF_SIZE, MAX_PROOF_TOTAL_SIZE, batch_size
         );
     }
     group.finish();
@@ -92,6 +94,7 @@ fn bench_verifier_time(c: &mut Criterion) {
         let elf = build_nop_elf(steps);
         let config = ProverConfig {
             batch_size,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
             ..Default::default()
         };
 
