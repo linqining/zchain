@@ -146,8 +146,11 @@ pub(crate) fn host_sub_mod(a: &[u64; 4], b: &[u64; 4], modulus: &[u64; 4]) -> [u
 }
 
 /// 512-bit / 256-bit 除法，返回 (quotient, remainder)
+///
+/// 注：商在内部以 512-bit 计算（`[u64; 8]`），但我们的用例中
+/// `a, b < modulus` 保证 `q < modulus < 2^256`，因此安全截断为 `[u64; 4]`。
 pub(crate) fn host_div_mod(dividend: &[u64; 8], divisor: &[u64; 4]) -> ([u64; 4], [u64; 4]) {
-    let mut quotient = [0u64; 4];
+    let mut quotient = [0u64; 8];
     let mut remainder = [0u64; 4];
 
     for bit in (0..512).rev() {
@@ -172,7 +175,9 @@ pub(crate) fn host_div_mod(dividend: &[u64; 8], divisor: &[u64; 4]) -> ([u64; 4]
         }
     }
 
-    (quotient, remainder)
+    // 截断到 [u64; 4]（仅在 q < 2^256 时安全，即 a, b < modulus 的用例）
+    let quotient_truncated: [u64; 4] = [quotient[0], quotient[1], quotient[2], quotient[3]];
+    (quotient_truncated, remainder)
 }
 
 /// 256-bit 乘法 mod modulus
@@ -231,6 +236,28 @@ pub(crate) fn host_inv_mod(a: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
         exp[3] >>= 1;
         // 检查 exp == 0
         if exp == [0u64; 4] {
+            break;
+        }
+    }
+    result
+}
+
+/// 256-bit 模幂：base^exp mod modulus（square-and-multiply）
+pub(crate) fn host_pow_mod(base: &[u64; 4], exp: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
+    let mut result = [1u64, 0, 0, 0];
+    let mut b = *base;
+    let mut e = *exp;
+
+    for _ in 0..256 {
+        if e[0] & 1 == 1 {
+            result = host_mul_mod(&result, &b, modulus);
+        }
+        b = host_mul_mod(&b, &b, modulus);
+        for k in 0..3 {
+            e[k] = (e[k] >> 1) | (e[k + 1] << 63);
+        }
+        e[3] >>= 1;
+        if e == [0u64; 4] {
             break;
         }
     }

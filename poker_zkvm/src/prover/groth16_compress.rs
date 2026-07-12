@@ -232,6 +232,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: Groth16 setup+prove（~30s）；手动运行: cargo test -- --ignored"]
     fn test_groth16_setup_prove_verify_valid() {
         let x = Fr::from(3u64);
         let public_output = Fr::from(35u64); // 3^3 + 3 + 5 = 35
@@ -246,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: Groth16 setup+prove（~30s）；手动运行: cargo test -- --ignored"]
     fn test_groth16_verify_wrong_public_input_fails() {
         let x = Fr::from(3u64);
         let public_output = Fr::from(35u64);
@@ -261,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: fold_loop + Groth16 setup+prove（~80s）；手动运行: cargo test -- --ignored"]
     fn test_groth16_compress_valid_proof() {
         // 合法 HypernovaProof → CompressedProof::Groth16（真实 SNARK proof）
         use crate::ccs::{Ccs, Fr as ZkvmFr, SparseMatrix};

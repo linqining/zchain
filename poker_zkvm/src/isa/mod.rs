@@ -388,6 +388,80 @@ pub enum Instruction {
         rs2: u8,
     },
 
+    // ===== R-type M 扩展（funct7=0x01）=====
+    /// MUL rd, rs1, rs2 —— 低 32 位乘法
+    Mul {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+    /// MULH rd, rs1, rs2 —— 有符号×有符号高 32 位
+    Mulh {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+    /// MULHSU rd, rs1, rs2 —— 有符号×无符号高 32 位
+    Mulhsu {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+    /// MULHU rd, rs1, rs2 —— 无符号×无符号高 32 位
+    Mulhu {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+    /// DIV rd, rs1, rs2 —— 有符号除法
+    Div {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+    /// DIVU rd, rs1, rs2 —— 无符号除法
+    Divu {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+    /// REM rd, rs1, rs2 —— 有符号取余
+    Rem {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+    /// REMU rd, rs1, rs2 —— 无符号取余
+    Remu {
+        /// 目标寄存器（0-31）
+        rd: u8,
+        /// 源寄存器 1（0-31）
+        rs1: u8,
+        /// 源寄存器 2（0-31）
+        rs2: u8,
+    },
+
     // ===== SYSTEM / MISC =====
     /// FENCE —— 内存屏障（ZKVM 中作为 NOP，无副作用）
     Fence,
@@ -578,6 +652,15 @@ pub fn decode(word: u32) -> Result<Instruction, ZkvmError> {
             (5, 0x20) => Ok(Instruction::Sra { rd, rs1, rs2 }),
             (6, 0x00) => Ok(Instruction::Or { rd, rs1, rs2 }),
             (7, 0x00) => Ok(Instruction::And { rd, rs1, rs2 }),
+            // M 扩展（funct7=0x01）
+            (0, 0x01) => Ok(Instruction::Mul { rd, rs1, rs2 }),
+            (1, 0x01) => Ok(Instruction::Mulh { rd, rs1, rs2 }),
+            (2, 0x01) => Ok(Instruction::Mulhsu { rd, rs1, rs2 }),
+            (3, 0x01) => Ok(Instruction::Mulhu { rd, rs1, rs2 }),
+            (4, 0x01) => Ok(Instruction::Div { rd, rs1, rs2 }),
+            (5, 0x01) => Ok(Instruction::Divu { rd, rs1, rs2 }),
+            (6, 0x01) => Ok(Instruction::Rem { rd, rs1, rs2 }),
+            (7, 0x01) => Ok(Instruction::Remu { rd, rs1, rs2 }),
             _ => Err(ZkvmError::UnsupportedInstruction(format!(
                 "R-type funct3={funct3} funct7={funct7}"
             ))),
@@ -828,6 +911,64 @@ pub fn execute(
         }
         Instruction::And { rd, rs1, rs2 } => {
             state.write_register(rd, state.read_register(rs1) & state.read_register(rs2));
+        }
+
+        // ===== R-type M 扩展 =====
+        Instruction::Mul { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1) as u64;
+            let b = state.read_register(rs2) as u64;
+            state.write_register(rd, (a * b) as u32);
+        }
+        Instruction::Mulh { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1) as i32 as i64;
+            let b = state.read_register(rs2) as i32 as i64;
+            state.write_register(rd, ((a * b) >> 32) as u32);
+        }
+        Instruction::Mulhsu { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1) as i32 as i64;
+            let b = state.read_register(rs2) as u64 as i64;
+            state.write_register(rd, ((a * b) >> 32) as u32);
+        }
+        Instruction::Mulhu { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1) as u64;
+            let b = state.read_register(rs2) as u64;
+            state.write_register(rd, ((a * b) >> 32) as u32);
+        }
+        Instruction::Div { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1) as i32;
+            let b = state.read_register(rs2) as i32;
+            let result = if b == 0 {
+                -1i32
+            } else if a == i32::MIN && b == -1 {
+                i32::MIN
+            } else {
+                a / b
+            };
+            state.write_register(rd, result as u32);
+        }
+        Instruction::Divu { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1);
+            let b = state.read_register(rs2);
+            let result = if b == 0 { u32::MAX } else { a / b };
+            state.write_register(rd, result);
+        }
+        Instruction::Rem { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1) as i32;
+            let b = state.read_register(rs2) as i32;
+            let result = if b == 0 {
+                a
+            } else if a == i32::MIN && b == -1 {
+                0
+            } else {
+                a % b
+            };
+            state.write_register(rd, result as u32);
+        }
+        Instruction::Remu { rd, rs1, rs2 } => {
+            let a = state.read_register(rs1);
+            let b = state.read_register(rs2);
+            let result = if b == 0 { a } else { a % b };
+            state.write_register(rd, result);
         }
 
         // ===== SYSTEM / MISC =====
@@ -1135,6 +1276,24 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_m_extension() {
+        let cases = [
+            (0u8, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }),
+            (1, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }),
+            (2, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }),
+            (3, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }),
+            (4, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }),
+            (5, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }),
+            (6, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }),
+            (7, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }),
+        ];
+        for (funct3, expected) in cases {
+            let word = encode_r(0x33, funct3, 0x01, 1, 2, 3);
+            assert_eq!(decode(word).unwrap(), expected, "funct3={funct3}");
+        }
+    }
+
+    #[test]
     fn test_decode_ecall_ebreak() {
         // ECALL = 0x00000073
         assert_eq!(decode(0x00000073).unwrap(), Instruction::Ecall);
@@ -1252,6 +1411,144 @@ mod tests {
         state.write_register(3, 4);
         execute(&mut state, Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }).unwrap();
         assert_eq!(state.read_register(1), 0x10, "1 << 4 = 16");
+    }
+
+    // ===== M 扩展 execute 测试 =====
+
+    #[test]
+    fn test_execute_mul() {
+        let mut state = state::VmState::new();
+        state.write_register(2, 6);
+        state.write_register(3, 7);
+        execute(&mut state, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 42, "6 * 7 = 42");
+
+        // 0xFFFFFFFF * 2 = 0x1_FFFFFFFE, 低 32 位 = 0xFFFFFFFE
+        state.write_register(2, 0xFFFF_FFFF);
+        state.write_register(3, 2);
+        execute(&mut state, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0xFFFF_FFFE, "低 32 位");
+    }
+
+    #[test]
+    fn test_execute_mulh() {
+        let mut state = state::VmState::new();
+        // (-1) * (-1) = 1, 高 32 位 = 0
+        state.write_register(2, 0xFFFF_FFFF); // -1
+        state.write_register(3, 0xFFFF_FFFF); // -1
+        execute(&mut state, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0, "(-1)*(-1) 高 32 位 = 0");
+
+        // 0x7FFFFFFF * 0x7FFFFFFF = 0x3FFFFFFF_00000001, 高 32 位 = 0x3FFFFFFF
+        state.write_register(2, 0x7FFF_FFFF);
+        state.write_register(3, 0x7FFF_FFFF);
+        execute(&mut state, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0x3FFF_FFFF, "有符号高 32 位");
+    }
+
+    #[test]
+    fn test_execute_mulhu() {
+        let mut state = state::VmState::new();
+        // 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE_00000001, 高 32 位 = 0xFFFFFFFE
+        state.write_register(2, 0xFFFF_FFFF);
+        state.write_register(3, 0xFFFF_FFFF);
+        execute(&mut state, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0xFFFF_FFFE, "无符号高 32 位");
+    }
+
+    #[test]
+    fn test_execute_mulhsu() {
+        let mut state = state::VmState::new();
+        // (-1 as i64) * 0xFFFFFFFF = -0xFFFFFFFF = 0xFFFFFFFF_00000001 (as u64)
+        // 高 32 位 = 0xFFFFFFFF
+        state.write_register(2, 0xFFFF_FFFF); // -1 signed
+        state.write_register(3, 0xFFFF_FFFF); // unsigned
+        execute(&mut state, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0xFFFF_FFFF, "有符号×无符号高 32 位");
+    }
+
+    #[test]
+    fn test_execute_div() {
+        let mut state = state::VmState::new();
+        state.write_register(2, 100);
+        state.write_register(3, 7);
+        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 14, "100 / 7 = 14");
+
+        // -100 / 7 = -14
+        state.write_register(2, (-100i32) as u32);
+        state.write_register(3, 7);
+        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), (-14i32) as u32, "-100 / 7 = -14");
+
+        // DIV by 0 → -1
+        state.write_register(2, 100);
+        state.write_register(3, 0);
+        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0xFFFF_FFFF, "DIV by 0 → -1");
+
+        // INT_MIN / -1 → INT_MIN (overflow)
+        state.write_register(2, i32::MIN as u32);
+        state.write_register(3, (-1i32) as u32);
+        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), i32::MIN as u32, "overflow → INT_MIN");
+    }
+
+    #[test]
+    fn test_execute_divu() {
+        let mut state = state::VmState::new();
+        state.write_register(2, 0xFFFF_FFFF);
+        state.write_register(3, 2);
+        execute(&mut state, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0x7FFF_FFFF, "0xFFFFFFFF / 2");
+
+        // DIVU by 0 → 0xFFFFFFFF
+        state.write_register(2, 100);
+        state.write_register(3, 0);
+        execute(&mut state, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0xFFFF_FFFF, "DIVU by 0 → 0xFFFFFFFF");
+    }
+
+    #[test]
+    fn test_execute_rem() {
+        let mut state = state::VmState::new();
+        state.write_register(2, 100);
+        state.write_register(3, 7);
+        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 2, "100 % 7 = 2");
+
+        // -100 % 7 = -2
+        state.write_register(2, (-100i32) as u32);
+        state.write_register(3, 7);
+        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), (-2i32) as u32, "-100 % 7 = -2");
+
+        // REM by 0 → rs1
+        state.write_register(2, 42);
+        state.write_register(3, 0);
+        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 42, "REM by 0 → rs1");
+
+        // INT_MIN % -1 → 0 (overflow)
+        state.write_register(2, i32::MIN as u32);
+        state.write_register(3, (-1i32) as u32);
+        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 0, "overflow → 0");
+    }
+
+    #[test]
+    fn test_execute_remu() {
+        let mut state = state::VmState::new();
+        state.write_register(2, 0xFFFF_FFFF);
+        state.write_register(3, 2);
+        execute(&mut state, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 1, "0xFFFFFFFF % 2 = 1");
+
+        // REMU by 0 → rs1
+        state.write_register(2, 42);
+        state.write_register(3, 0);
+        execute(&mut state, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        assert_eq!(state.read_register(1), 42, "REMU by 0 → rs1");
     }
 
     #[test]

@@ -336,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
     fn test_g1_scalar_mul_identity_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();
@@ -349,6 +350,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
     fn test_g1_scalar_mul_generator_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let g = G1Projective::generator();
@@ -360,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
     fn test_g1_scalar_mul_small_bn254() {
         // 2 * G == G.double()
         let cs = ConstraintSystem::<Fr>::new_ref();
@@ -374,6 +377,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
     fn test_g1_point_add_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();
@@ -394,6 +398,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
     fn test_fold_commitment_check_valid_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();
@@ -410,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
     fn test_fold_commitment_check_invalid_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();

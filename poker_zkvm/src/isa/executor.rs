@@ -392,13 +392,13 @@ mod tests {
 
     #[test]
     fn test_execute_elf_unknown_syscall() {
-        // ADDI a7, x0, 0x0B (unknown) + ECALL
-        let text = encode_text(&[encode_i(0x13, 0, 17, 0, 0x0B), 0x00000073]);
+        // ADDI a7, x0, 0x10 (unknown) + ECALL
+        let text = encode_text(&[encode_i(0x13, 0, 17, 0, 0x10), 0x00000073]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
         let err = execute_elf(&elf, &[]).unwrap_err();
         assert!(
-            matches!(err, ZkvmError::Other(ref msg) if msg.contains("unknown syscall id: 0x0b")),
+            matches!(err, ZkvmError::Other(ref msg) if msg.contains("unknown syscall id: 0x10")),
             "expected unknown syscall id error, got {err:?}"
         );
     }

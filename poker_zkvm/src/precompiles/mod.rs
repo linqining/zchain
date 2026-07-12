@@ -18,12 +18,17 @@
 //! - `zk_shuffle` — ZkShuffle CCS 电路迁移（Task 10.5）
 
 pub mod bit_ops;
+pub mod bn254_pairing;
 pub mod ccs_builder;
-pub mod poseidon;
-pub mod sha256;
+pub mod ed25519;
 pub mod ecdsa;
+pub mod keccak256;
+pub mod merkle_verify;
+pub mod modexp;
 pub mod non_native;
+pub mod poseidon;
 pub mod secp256k1_ops;
+pub mod sha256;
 pub mod zk_shuffle;
 
 use std::collections::HashMap;
@@ -333,7 +338,7 @@ mod tests {
 
     // ===== Phase 10 集成测试（Step 7）=====
 
-    /// 注册全部 4 个预编译电路并验证名称 / gas / 变量数。
+    /// 注册全部 9 个预编译电路并验证名称 / gas / 变量数。
     #[test]
     fn test_phase10_registry_full() {
         let mut registry = PrecompileRegistry::new();
@@ -341,8 +346,13 @@ mod tests {
         registry.register(Box::new(sha256::Sha256Circuit::new()));
         registry.register(Box::new(ecdsa::EcdsaVerifyCircuit::new()));
         registry.register(Box::new(zk_shuffle::ZkShuffleCcsCircuit::new()));
+        registry.register(Box::new(keccak256::Keccak256Circuit::new()));
+        registry.register(Box::new(modexp::ModexpCircuit::new()));
+        registry.register(Box::new(merkle_verify::MerkleVerifyCircuit::new()));
+        registry.register(Box::new(ed25519::Ed25519VerifyCircuit::new()));
+        registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new()));
 
-        assert_eq!(registry.len(), 4, "应有 4 个预编译电路");
+        assert_eq!(registry.len(), 9, "应有 9 个预编译电路");
 
         // Poseidon
         let poseidon = registry.get("poseidon").expect("应找到 poseidon");
@@ -363,6 +373,26 @@ mod tests {
         let zk_shuffle = registry.get("zk_shuffle").expect("应找到 zk_shuffle");
         assert_eq!(zk_shuffle.num_variables(), 0);
         assert_eq!(zk_shuffle.gas_cost(), 0);
+
+        // Keccak256 (MVP)
+        let keccak = registry.get("keccak256").expect("应找到 keccak256");
+        assert_eq!(keccak.gas_cost(), 10_000);
+
+        // Modexp (MVP)
+        let modexp = registry.get("modexp").expect("应找到 modexp");
+        assert_eq!(modexp.gas_cost(), 50_000);
+
+        // MerkleVerify (MVP)
+        let merkle = registry.get("merkle_verify").expect("应找到 merkle_verify");
+        assert_eq!(merkle.gas_cost(), 100);
+
+        // Ed25519 (MVP)
+        let ed25519_circuit = registry.get("ed25519").expect("应找到 ed25519");
+        assert_eq!(ed25519_circuit.gas_cost(), 50_000);
+
+        // BN254 Pairing (MVP)
+        let bn254 = registry.get("bn254_pairing").expect("应找到 bn254_pairing");
+        assert_eq!(bn254.gas_cost(), 30_000);
     }
 
     /// 验证所有预编译电路都实现 PrecompileCircuit + CcsCircuit 双 trait。
@@ -387,6 +417,31 @@ mod tests {
         let zk_shuffle = zk_shuffle::ZkShuffleCcsCircuit::new();
         let _: &dyn PrecompileCircuit = &zk_shuffle;
         let _: &dyn CcsCircuit = &zk_shuffle;
+
+        // Keccak256
+        let keccak_circuit = keccak256::Keccak256Circuit::new();
+        let _: &dyn PrecompileCircuit = &keccak_circuit;
+        let _: &dyn CcsCircuit = &keccak_circuit;
+
+        // Modexp
+        let modexp_circuit = modexp::ModexpCircuit::new();
+        let _: &dyn PrecompileCircuit = &modexp_circuit;
+        let _: &dyn CcsCircuit = &modexp_circuit;
+
+        // MerkleVerify
+        let merkle_circuit = merkle_verify::MerkleVerifyCircuit::new();
+        let _: &dyn PrecompileCircuit = &merkle_circuit;
+        let _: &dyn CcsCircuit = &merkle_circuit;
+
+        // Ed25519
+        let ed25519_circuit = ed25519::Ed25519VerifyCircuit::new();
+        let _: &dyn PrecompileCircuit = &ed25519_circuit;
+        let _: &dyn CcsCircuit = &ed25519_circuit;
+
+        // BN254 Pairing
+        let bn254_circuit = bn254_pairing::Bn254PairingCircuit::new();
+        let _: &dyn PrecompileCircuit = &bn254_circuit;
+        let _: &dyn CcsCircuit = &bn254_circuit;
     }
 
     /// 验证 gas 成本合理性（spec L637/L660 对齐）。
@@ -397,6 +452,11 @@ mod tests {
             ("sha256", 25_000, 100_000),             // ~25k gas/block
             ("ecdsa_verify", 100_000, 200_000),      // ~100k gas/verify
             ("zk_shuffle", 0, 1),                     // stub = 0
+            ("keccak256", 5_000, 15_000),            // MVP = 10_000
+            ("modexp", 10_000, 100_000),             // MVP = 50_000
+            ("merkle_verify", 1, 1_000),             // MVP = 100
+            ("ed25519", 5_000, 100_000),             // MVP = 50_000
+            ("bn254_pairing", 1_000, 100_000),       // MVP = 30_000
         ];
 
         let mut registry = PrecompileRegistry::new();
@@ -404,6 +464,11 @@ mod tests {
         registry.register(Box::new(sha256::Sha256Circuit::new()));
         registry.register(Box::new(ecdsa::EcdsaVerifyCircuit::new()));
         registry.register(Box::new(zk_shuffle::ZkShuffleCcsCircuit::new()));
+        registry.register(Box::new(keccak256::Keccak256Circuit::new()));
+        registry.register(Box::new(modexp::ModexpCircuit::new()));
+        registry.register(Box::new(merkle_verify::MerkleVerifyCircuit::new()));
+        registry.register(Box::new(ed25519::Ed25519VerifyCircuit::new()));
+        registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new()));
 
         for (name, min, max) in cases {
             let circuit = registry.get(name).unwrap_or_else(|| panic!("应找到 {name}"));

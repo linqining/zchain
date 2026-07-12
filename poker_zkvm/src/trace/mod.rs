@@ -472,9 +472,17 @@ fn serialize_instruction(insn: &Instruction, out: &mut Vec<u8>) {
         Instruction::Sra { rd, rs1, rs2 } => w!(34, *rd as u32, *rs1 as u32, *rs2 as u32),
         Instruction::Or { rd, rs1, rs2 } => w!(35, *rd as u32, *rs1 as u32, *rs2 as u32),
         Instruction::And { rd, rs1, rs2 } => w!(36, *rd as u32, *rs1 as u32, *rs2 as u32),
-        Instruction::Fence => out.push(37),
-        Instruction::Ecall => out.push(38),
-        Instruction::Ebreak => out.push(39),
+        Instruction::Mul { rd, rs1, rs2 } => w!(37, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Mulh { rd, rs1, rs2 } => w!(38, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Mulhsu { rd, rs1, rs2 } => w!(39, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Mulhu { rd, rs1, rs2 } => w!(40, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Div { rd, rs1, rs2 } => w!(41, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Divu { rd, rs1, rs2 } => w!(42, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Rem { rd, rs1, rs2 } => w!(43, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Remu { rd, rs1, rs2 } => w!(44, *rd as u32, *rs1 as u32, *rs2 as u32),
+        Instruction::Fence => out.push(45),
+        Instruction::Ecall => out.push(46),
+        Instruction::Ebreak => out.push(47),
     }
 }
 
@@ -704,9 +712,41 @@ fn deserialize_instruction(bytes: &[u8]) -> Result<(Instruction, usize), ZkvmErr
             let (rd, rs1, rs2) = r3r!();
             Ok((Instruction::And { rd, rs1, rs2 }, 1 + 12))
         }
-        37 => Ok((Instruction::Fence, 1)),
-        38 => Ok((Instruction::Ecall, 1)),
-        39 => Ok((Instruction::Ebreak, 1)),
+        37 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Mul { rd, rs1, rs2 }, 1 + 12))
+        }
+        38 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Mulh { rd, rs1, rs2 }, 1 + 12))
+        }
+        39 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Mulhsu { rd, rs1, rs2 }, 1 + 12))
+        }
+        40 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Mulhu { rd, rs1, rs2 }, 1 + 12))
+        }
+        41 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Div { rd, rs1, rs2 }, 1 + 12))
+        }
+        42 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Divu { rd, rs1, rs2 }, 1 + 12))
+        }
+        43 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Rem { rd, rs1, rs2 }, 1 + 12))
+        }
+        44 => {
+            let (rd, rs1, rs2) = r3r!();
+            Ok((Instruction::Remu { rd, rs1, rs2 }, 1 + 12))
+        }
+        45 => Ok((Instruction::Fence, 1)),
+        46 => Ok((Instruction::Ecall, 1)),
+        47 => Ok((Instruction::Ebreak, 1)),
         _ => Err(ZkvmError::InvalidZkProofFormat(format!(
             "invalid Instruction tag: {tag}"
         ))),

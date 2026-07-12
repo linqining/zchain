@@ -2,7 +2,7 @@
 //!
 //! 严格遵循 spec.md L193-265 / L637-669（v1.4 FROZEN）：
 //! - [`ZKVM_ABI_VERSION`] — ABI 版本号，写入 proof header
-//! - [`SyscallId`] — 10 个 syscall ID 枚举（0x01-0x0A）
+//! - [`SyscallId`] — 15 个 syscall ID 枚举（0x01-0x0F）
 //!
 //! # Syscall 列表
 //!
@@ -18,6 +18,11 @@
 //! | 0x08 | `panic` | (ptr, len) | 终止执行 |
 //! | 0x09 | `get_randomness` | (out_ptr) | 从 host seed 派生（deterministic） |
 //! | 0x0A | `read_state` | (slot, out_ptr) | 仅允许白名单 slot |
+//! | 0x0B | `keccak256` | (ptr, len, out_ptr) | Keccak-256 哈希（Phase I） |
+//! | 0x0C | `modexp` | (base_ptr, exp_ptr, mod_ptr, result_ptr, num_bits) | 大数模幂（Phase I） |
+//! | 0x0D | `merkle_verify` | (leaf, path, indices, root, depth) | Merkle 路径验证（Phase I） |
+//! | 0x0E | `ed25519_verify` | (msg_ptr, msg_len, sig_ptr, pubkey_ptr) → bool | Ed25519 验签（Phase I Batch 2） |
+//! | 0x0F | `bn254_pairing` | (a_ptr, b_ptr, c_ptr, d_ptr) → bool | BN254 配对等式验证（Phase I Batch 2） |
 
 use crate::error::ZkvmError;
 use crate::isa::state::VmState;
@@ -31,7 +36,7 @@ pub mod host_state;
 /// Poseidon 哈希封装（Task 4.2.3）。
 pub mod poseidon;
 
-/// 10 个 ZKVM Syscall 的 Host 实现（Task 4.2）。
+/// 10 个 ZKVM Syscall 的 Host 实现（Task 4.2，0x0B-0x0D 暂无 host 实现）。
 pub mod host;
 
 /// Host 状态读取 trait 的 re-export（便利访问）。
@@ -54,7 +59,7 @@ pub const REG_A7: u8 = 17;
 /// 未来 ABI 升级须 bump 版本号 + 链上 verifier 兼容性矩阵。
 pub const ZKVM_ABI_VERSION: u32 = 1;
 
-/// Syscall ID 枚举（spec L196-206，10 个 syscall）。
+/// Syscall ID 枚举（spec L196-206，15 个 syscall）。
 ///
 /// `#[repr(u32)]` 确保 `as u32` 转换得到正确的 ID 值。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,13 +85,23 @@ pub enum SyscallId {
     GetRandomness = 0x09,
     /// `zkvm_read_state(slot, out_ptr)` — 仅允许白名单 slot。
     ReadState = 0x0A,
+    /// `zkvm_keccak256(ptr, len, out_ptr)` — Keccak-256 哈希。
+    Keccak256 = 0x0B,
+    /// `zkvm_modexp(base_ptr, exp_ptr, mod_ptr, result_ptr, num_bits)` — 大数模幂。
+    Modexp = 0x0C,
+    /// `zkvm_merkle_verify(leaf, path, indices, root, depth)` — Merkle 路径验证。
+    MerkleVerify = 0x0D,
+    /// `zkvm_ed25519_verify(msg_ptr, msg_len, sig_ptr, pubkey_ptr) -> bool` — Ed25519 验签。
+    Ed25519Verify = 0x0E,
+    /// `zkvm_bn254_pairing(a_ptr, b_ptr, c_ptr, d_ptr) -> bool` — BN254 配对等式验证。
+    Bn254Pairing = 0x0F,
 }
 
 impl SyscallId {
     /// 从 `u32` 构造 [`SyscallId`]，非法 ID 返回 `Err(ZkvmError::Other)`。
     ///
     /// # Errors
-    /// - `ZkvmError::Other` — `id` 不在 0x01-0x0A 范围内。
+    /// - `ZkvmError::Other` — `id` 不在 0x01-0x0F 范围内。
     pub fn from_u32(id: u32) -> Result<Self, ZkvmError> {
         match id {
             0x01 => Ok(Self::ReadInput),
@@ -99,13 +114,18 @@ impl SyscallId {
             0x08 => Ok(Self::Panic),
             0x09 => Ok(Self::GetRandomness),
             0x0A => Ok(Self::ReadState),
+            0x0B => Ok(Self::Keccak256),
+            0x0C => Ok(Self::Modexp),
+            0x0D => Ok(Self::MerkleVerify),
+            0x0E => Ok(Self::Ed25519Verify),
+            0x0F => Ok(Self::Bn254Pairing),
             _ => Err(ZkvmError::Other(format!("unknown syscall id: 0x{id:02x}"))),
         }
     }
 
-    /// 返回全部 10 个 syscall ID（按枚举顺序）。
+    /// 返回全部 15 个 syscall ID（按枚举顺序）。
     #[must_use]
-    pub fn all() -> [Self; 10] {
+    pub fn all() -> [Self; 15] {
         [
             Self::ReadInput,
             Self::CommitOutput,
@@ -117,6 +137,11 @@ impl SyscallId {
             Self::Panic,
             Self::GetRandomness,
             Self::ReadState,
+            Self::Keccak256,
+            Self::Modexp,
+            Self::MerkleVerify,
+            Self::Ed25519Verify,
+            Self::Bn254Pairing,
         ]
     }
 }
@@ -283,10 +308,10 @@ pub trait Syscall: std::fmt::Debug + Send + Sync {
 /// Syscall 注册表 — 按 [`SyscallId`] 分派到对应实现。
 ///
 /// 内部使用 `Vec<Option<Box<dyn Syscall>>>`，index = `SyscallId as usize - 1`。
-/// `new()` 注册全部 10 个 syscall。
+/// `new()` 注册全部 10 个 host syscall（0x0B-0x0F 暂无 host 实现，slot 为 None）。
 pub struct SyscallRegistry {
-    /// 10 个 syscall 实现，index = SyscallId as usize - 1。
-    syscalls: [Option<Box<dyn Syscall>>; 10],
+    /// 15 个 syscall 实现，index = SyscallId as usize - 1。
+    syscalls: [Option<Box<dyn Syscall>>; 15],
 }
 
 impl std::fmt::Debug for SyscallRegistry {
@@ -306,6 +331,11 @@ impl std::fmt::Debug for SyscallRegistry {
                 8 => "Panic",
                 9 => "GetRandomness",
                 10 => "ReadState",
+                11 => "Keccak256",
+                12 => "Modexp",
+                13 => "MerkleVerify",
+                14 => "Ed25519Verify",
+                15 => "Bn254Pairing",
                 _ => "Unknown",
             }))
             .collect();
@@ -324,7 +354,7 @@ impl SyscallRegistry {
         }
     }
 
-    /// 创建注册表并注册全部 10 个 syscall。
+    /// 创建注册表并注册全部 10 个 host syscall。
     ///
     /// 委托到 [`host::create_full_registry`]。
     #[must_use]
@@ -415,6 +445,11 @@ mod tests {
             (0x08, SyscallId::Panic),
             (0x09, SyscallId::GetRandomness),
             (0x0A, SyscallId::ReadState),
+            (0x0B, SyscallId::Keccak256),
+            (0x0C, SyscallId::Modexp),
+            (0x0D, SyscallId::MerkleVerify),
+            (0x0E, SyscallId::Ed25519Verify),
+            (0x0F, SyscallId::Bn254Pairing),
         ];
         for (id, expected) in cases {
             let result = SyscallId::from_u32(id).unwrap();
@@ -426,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_from_u32_invalid_ids() {
-        let invalid_ids = [0x00u32, 0x0B, 0x0C, 0xFF, 0x100, u32::MAX];
+        let invalid_ids = [0x00u32, 0x10, 0xFF, 0x100, u32::MAX];
         for id in invalid_ids {
             let result = SyscallId::from_u32(id);
             assert!(
@@ -454,14 +489,19 @@ mod tests {
         assert_eq!(SyscallId::Panic as u32, 0x08);
         assert_eq!(SyscallId::GetRandomness as u32, 0x09);
         assert_eq!(SyscallId::ReadState as u32, 0x0A);
+        assert_eq!(SyscallId::Keccak256 as u32, 0x0B);
+        assert_eq!(SyscallId::Modexp as u32, 0x0C);
+        assert_eq!(SyscallId::MerkleVerify as u32, 0x0D);
+        assert_eq!(SyscallId::Ed25519Verify as u32, 0x0E);
+        assert_eq!(SyscallId::Bn254Pairing as u32, 0x0F);
     }
 
     // ===== SyscallId all() 测试 =====
 
     #[test]
-    fn test_all_returns_ten_syscalls() {
+    fn test_all_returns_fifteen_syscalls() {
         let all = SyscallId::all();
-        assert_eq!(all.len(), 10, "应有 10 个 syscall");
+        assert_eq!(all.len(), 15, "应有 15 个 syscall");
         // 验证 ID 连续递增
         for (i, id) in all.iter().enumerate() {
             assert_eq!(*id as u32, (i + 1) as u32, "all()[{i}] 的 ID 应为 {}", i + 1);
@@ -548,7 +588,7 @@ mod tests {
         // 非法 ID
         let err = registry.dispatch(0x00, &mut ctx, &mut state).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(_)));
-        let err = registry.dispatch(0x0B, &mut ctx, &mut state).unwrap_err();
+        let err = registry.dispatch(0x10, &mut ctx, &mut state).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(_)));
     }
 

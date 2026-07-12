@@ -583,7 +583,7 @@ mod tests {
 
     // ===== 辅助函数 =====
 
-    /// 创建注册全部 10 个 syscall 的 registry。
+    /// 创建注册全部 10 个 host syscall 的 registry。
     fn full_registry() -> SyscallRegistry {
         create_full_registry()
     }

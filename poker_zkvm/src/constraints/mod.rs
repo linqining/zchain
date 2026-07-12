@@ -50,11 +50,11 @@ pub const MAX_FOLD_STEP_COUNT: usize = 1000;
 
 /// 每步 witness 变量数（Stage 2 设计）。
 ///
-/// 布局：`[idx, pc, next_pc, rs1_val, rs2_val, rd_val, imm, carry, taken, shamt, branch_cond, aux, sel_0..sel_33]`
-pub const STEP_VARS: usize = 46;
+/// 布局：`[idx, pc, next_pc, rs1_val, rs2_val, rd_val, imm, carry, taken, shamt, branch_cond, aux, sel_0..sel_34]`
+pub const STEP_VARS: usize = 47;
 
 /// 指令语义组数（one-hot selector 数量）。
-pub const NUM_CATEGORIES: usize = 34;
+pub const NUM_CATEGORIES: usize = 35;
 
 // Witness 偏移量（每步内部）
 const OFF_IDX: usize = 0;
@@ -85,20 +85,20 @@ const M_A_CUR: usize = 1;
 const M_CONST_A: usize = 2;
 const M_B_NEXT: usize = 3;
 const M_B_CUR: usize = 4;
-const M_C_BASE: usize = 5; // M_C_0..M_C_33 = 5..38
-const M_CONST_C: usize = 39;
-const M_D_SQ: usize = 40;
-const M_D_LIN: usize = 41;
+const M_C_BASE: usize = 5; // M_C_0..M_C_{NUM_CATEGORIES-1} = 5..(5+NUM_CATEGORIES-1)
+const M_CONST_C: usize = M_C_BASE + NUM_CATEGORIES; // 5 + 35 = 40
+const M_D_SQ: usize = M_CONST_C + 1; // 41
+const M_D_LIN: usize = M_CONST_C + 2; // 42
 
-// Phase 2b — 算术指令约束矩阵（索引 42..47）
-const M_E_RS1: usize = 42;
-const M_E_RS2: usize = 43;
-const M_E_RD: usize = 44;
-const M_E_IMM: usize = 45;
-const M_E_CARRY: usize = 46;
-const M_E_PC: usize = 47;
-const M_E_AUX: usize = 48;
-const NUM_CCS_MATRICES: usize = 49;
+// Phase 2b — 算术指令约束矩阵
+const M_E_RS1: usize = M_D_LIN + 1; // 43
+const M_E_RS2: usize = M_D_LIN + 2; // 44
+const M_E_RD: usize = M_D_LIN + 3; // 45
+const M_E_IMM: usize = M_D_LIN + 4; // 46
+const M_E_CARRY: usize = M_D_LIN + 5; // 47
+const M_E_PC: usize = M_D_LIN + 6; // 48
+const M_E_AUX: usize = M_D_LIN + 7; // 49
+const NUM_CCS_MATRICES: usize = M_E_AUX + 1; // 50
 
 /// 算术指令类别列表（对应 [`instruction_category`] 返回值）。
 ///
@@ -146,9 +146,17 @@ fn instruction_category(insn: &Instruction) -> usize {
         Instruction::Sra { .. } => 28,
         Instruction::Or { .. } => 29,
         Instruction::And { .. } => 30,
-        Instruction::Fence => 31,
-        Instruction::Ecall => 32,
-        Instruction::Ebreak => 33,
+        Instruction::Mul { .. }
+        | Instruction::Mulh { .. }
+        | Instruction::Mulhsu { .. }
+        | Instruction::Mulhu { .. }
+        | Instruction::Div { .. }
+        | Instruction::Divu { .. }
+        | Instruction::Rem { .. }
+        | Instruction::Remu { .. } => 31,
+        Instruction::Fence => 32,
+        Instruction::Ecall => 33,
+        Instruction::Ebreak => 34,
     }
 }
 
@@ -200,7 +208,15 @@ fn extract_insn_fields(insn: &Instruction) -> (Option<u8>, Option<u8>, Option<u8
         | Instruction::Srl { rd, rs1, rs2 }
         | Instruction::Sra { rd, rs1, rs2 }
         | Instruction::Or { rd, rs1, rs2 }
-        | Instruction::And { rd, rs1, rs2 } => (Some(*rs1), Some(*rs2), Some(*rd), 0, 0),
+        | Instruction::And { rd, rs1, rs2 }
+        | Instruction::Mul { rd, rs1, rs2 }
+        | Instruction::Mulh { rd, rs1, rs2 }
+        | Instruction::Mulhsu { rd, rs1, rs2 }
+        | Instruction::Mulhu { rd, rs1, rs2 }
+        | Instruction::Div { rd, rs1, rs2 }
+        | Instruction::Divu { rd, rs1, rs2 }
+        | Instruction::Rem { rd, rs1, rs2 }
+        | Instruction::Remu { rd, rs1, rs2 } => (Some(*rs1), Some(*rs2), Some(*rd), 0, 0),
         Instruction::Fence | Instruction::Ecall | Instruction::Ebreak => {
             (None, None, None, 0, 0)
         }
@@ -247,6 +263,7 @@ fn compute_next_pc(pc: u32, insn: &Instruction, rs1_val: u32, rs2_val: u32) -> u
 /// - `step` — 当前步
 /// - `prev_step` — 前一步（用于提取 rs1/rs2 值），首步为 `None`
 /// - `next_step_pc` — 下一步的 PC（用于 next_pc），末步为 `None` 时从指令计算
+#[allow(clippy::collapsible_match)]
 fn compile_step_witness(
     step: &Step,
     prev_step: Option<&Step>,
@@ -469,7 +486,7 @@ fn compile_batch_to_ccs(
     }
 
     let raw_num_vars = 1 + k * STEP_VARS;
-    let raw_num_rows = 39 * k - 2; // (K-1) + (K-1) + K + 34*K + K(Group E) + K(Group F)
+    let raw_num_rows = (NUM_CATEGORIES + 5) * k - 2; // (K-1)+(K-1)+K+NUM_CATEGORIES*K+K(Group E)+K(Group F)
     let padded_num_vars = raw_num_vars.next_power_of_two().max(2);
     let padded_num_rows = raw_num_rows.max(1).next_power_of_two();
 
@@ -530,13 +547,13 @@ fn compile_batch_to_ccs(
         }
     }
 
-    // Group E: arithmetic constraints (rows 37K-2..38K-3, K rows)
+    // Group E: arithmetic constraints (rows (NUM_CATEGORIES+3)K-2..(NUM_CATEGORIES+4)K-3, K rows)
     // 每步 1 行，所有 9 个算术类别通过 selector gating 同时检查。
     // M_CONST_C 使用 +1（非 Group C 的 -1）以维持 Σ sel_j - 1 = 0。
     for i in 0..k {
-        let row = 37 * k - 2 + i;
+        let row = (NUM_CATEGORIES + 3) * k - 2 + i;
         let base = 1 + i * STEP_VARS;
-        // 所有 34 个 selector 矩阵 +1（使 M_C_j·z[row] = sel_j(i)）
+        // 所有 selector 矩阵 +1（使 M_C_j·z[row] = sel_j(i)）
         for j in 0..NUM_CATEGORIES {
             matrices[M_C_BASE + j].add_entry(row, base + OFF_SEL_START + j, Fr::one())?;
         }
@@ -552,9 +569,9 @@ fn compile_batch_to_ccs(
         matrices[M_E_AUX].add_entry(row, base + OFF_AUX, Fr::one())?;
     }
 
-    // Group F: carry binary (rows 38K-2..39K-3, K rows)
+    // Group F: carry binary (rows (NUM_CATEGORIES+4)K-2..(NUM_CATEGORIES+5)K-3, K rows)
     for i in 0..k {
-        let row = 38 * k - 2 + i;
+        let row = (NUM_CATEGORIES + 4) * k - 2 + i;
         let col = 1 + i * STEP_VARS + OFF_CARRY;
         matrices[M_E_CARRY].add_entry(row, col, Fr::one())?;
     }
@@ -757,8 +774,8 @@ mod tests {
         assert_eq!(inst.ccs.num_vars, 256);
         // num_rows = 39*5 - 2 = 193 → padding 到 256
         assert_eq!(inst.ccs.num_rows(), 256);
-        // 49 个矩阵
-        assert_eq!(inst.ccs.num_matrices(), 49);
+        // NUM_CCS_MATRICES 个矩阵
+        assert_eq!(inst.ccs.num_matrices(), NUM_CCS_MATRICES);
         // witness 满足约束（padding 列为 0，dummy 约束 vacuously true）
         assert!(inst.is_satisfied().expect("应满足"));
         // public_inputs: [batch_id=0, first_idx=0, last_idx=4]
@@ -896,20 +913,20 @@ mod tests {
 
     #[test]
     fn test_witness_layout() {
-        // 验证 witness 布局：z = [1, w_0[0..45], w_1[0..45], w_2[0..45], padding]
-        // 每步 46 变量，步 i 的 idx 位于 z[1 + i*46 + OFF_IDX] = z[1 + i*46]
+        // 验证 witness 布局：z = [1, w_0, w_1, w_2, padding]
+        // 每步 STEP_VARS 变量，步 i 的 idx 位于 z[1 + i*STEP_VARS + OFF_IDX]
         let trace = make_trace(3);
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
         let inst = &instances[0];
 
         // z[0] = 1（常数）
         assert_eq!(inst.witness[0], Fr::one());
-        // 步 0 的 idx = 0，位于 z[1 + 0*46 + 0] = z[1]
-        assert_eq!(inst.witness[1], Fr::from_u64(0));
-        // 步 1 的 idx = 1，位于 z[1 + 1*46 + 0] = z[47]
-        assert_eq!(inst.witness[47], Fr::from_u64(1));
-        // 步 2 的 idx = 2，位于 z[1 + 2*46 + 0] = z[93]
-        assert_eq!(inst.witness[93], Fr::from_u64(2));
+        // 步 0 的 idx = 0
+        assert_eq!(inst.witness[1 + 0 * STEP_VARS + OFF_IDX], Fr::from_u64(0));
+        // 步 1 的 idx = 1
+        assert_eq!(inst.witness[1 + 1 * STEP_VARS + OFF_IDX], Fr::from_u64(1));
+        // 步 2 的 idx = 2
+        assert_eq!(inst.witness[1 + 2 * STEP_VARS + OFF_IDX], Fr::from_u64(2));
     }
 
     #[test]
@@ -1280,51 +1297,54 @@ mod tests {
 
     #[test]
     fn test_49_matrix_ccs_structure() {
-        // 验证 49-matrix CCS 结构：49 矩阵、93 subset、Group D/E/F subset 布局
+        // 验证 CCS 结构：NUM_CCS_MATRICES 矩阵、subset 布局
         let trace = make_trace(3);
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
         let inst = &instances[0];
 
-        assert_eq!(inst.ccs.num_matrices(), 49, "应有 49 个矩阵");
+        assert_eq!(inst.ccs.num_matrices(), NUM_CCS_MATRICES, "矩阵数应匹配");
+        // subset 数 = 3(A)+2(B)+NUM_CATEGORIES(C)+1(const_C)+2(D)+25(E_arith)+24(Phase2c)+2(F)
+        let expected_subsets = 3 + 2 + NUM_CATEGORIES + 1 + 2 + 25 + 24 + 2;
         assert_eq!(
             inst.ccs.num_constraints(),
-            93,
-            "应有 93 个 subset（约束方程）"
+            expected_subsets,
+            "subset 数应匹配"
         );
 
-        // subset[40] = {40, 40}（Group D 的 sel² 子集，利用重复索引）
-        // 0-indexed: 3(A)+2(B)+34(C)+1(const_C) = 40
-        let subset_d_sq = &inst.ccs.subsets[40];
+        // Group D 的 sel² 子集索引 = 3(A)+2(B)+NUM_CATEGORIES(C)+1(const_C)
+        let idx_d_sq = 3 + 2 + NUM_CATEGORIES + 1;
+        let subset_d_sq = &inst.ccs.subsets[idx_d_sq];
         assert_eq!(
             subset_d_sq,
             &vec![M_D_SQ, M_D_SQ],
-            "Group D square subset 应为 [40, 40]"
+            "Group D square subset 应为 [M_D_SQ, M_D_SQ]"
         );
 
-        // subset[42] = {M_C_0, M_E_RD} = {5, 44}（Group E LUI 第一个 subset）
-        let subset_e_lui = &inst.ccs.subsets[42];
+        // Group E LUI 第一个 subset 索引 = idx_d_sq + 2(D)
+        let idx_e_lui = idx_d_sq + 2;
+        let subset_e_lui = &inst.ccs.subsets[idx_e_lui];
         assert_eq!(
             subset_e_lui,
             &vec![M_C_BASE, M_E_RD],
-            "Group E LUI subset 应为 [5, 44]"
+            "Group E LUI subset 应为 [M_C_BASE, M_E_RD]"
         );
 
-        // subset[67] = {M_C_15, M_E_RD} = {20, 44}（Phase 2c XORI 第一个 subset）
-        // 0-indexed: 3(A)+2(B)+35(C)+2(D)+25(E_arith) = 67
-        let subset_p2c_xori = &inst.ccs.subsets[67];
+        // Phase 2c XORI 第一个 subset 索引 = idx_e_lui + 25(E_arith)
+        let idx_p2c_xori = idx_e_lui + 25;
+        let subset_p2c_xori = &inst.ccs.subsets[idx_p2c_xori];
         assert_eq!(
             subset_p2c_xori,
             &vec![M_C_BASE + 15, M_E_RD],
-            "Phase 2c XORI subset 应为 [20, 44]"
+            "Phase 2c XORI subset 应为 [M_C_BASE+15, M_E_RD]"
         );
 
-        // subset[91] = {M_E_CARRY, M_E_CARRY} = {46, 46}（Group F carry² 子集）
-        // 0-indexed: 67 + 24(Phase 2c) = 91
-        let subset_f_sq = &inst.ccs.subsets[91];
+        // Group F carry² 子集索引 = idx_p2c_xori + 24(Phase 2c)
+        let idx_f_sq = idx_p2c_xori + 24;
+        let subset_f_sq = &inst.ccs.subsets[idx_f_sq];
         assert_eq!(
             subset_f_sq,
             &vec![M_E_CARRY, M_E_CARRY],
-            "Group F carry² subset 应为 [46, 46]"
+            "Group F carry² subset 应为 [M_E_CARRY, M_E_CARRY]"
         );
     }
 
@@ -1374,18 +1394,17 @@ mod tests {
 
     #[test]
     fn test_group_c_selector_one_hot() {
-        // ECALL 步的 selector one-hot：sel_32=1，其余=0
+        // ECALL 步的 selector one-hot：sel_{Ecall}=1，其余=0
         let trace = make_trace(2); // 每步都是 ECALL
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
         let inst = &instances[0];
 
-        // 步 0 的 selector 区域：z[1 + 0*46 + 12 .. 1 + 0*46 + 46]
+        let ecall_cat = instruction_category(&Instruction::Ecall);
         let sel_start_0 = 1 + OFF_SEL_START;
         for j in 0..NUM_CATEGORIES {
             let val = inst.witness[sel_start_0 + j];
-            if j == 32 {
-                // ECALL = category 32
-                assert_eq!(val, Fr::one(), "ECALL selector (idx 32) 应为 1");
+            if j == ecall_cat {
+                assert_eq!(val, Fr::one(), "ECALL selector (idx {ecall_cat}) 应为 1");
             } else {
                 assert_eq!(val, Fr::zero(), "非 ECALL selector (idx {j}) 应为 0");
             }
@@ -1440,7 +1459,8 @@ mod tests {
         // taken = 0（ECALL 非分支）
         assert_eq!(witness[OFF_TAKEN], Fr::zero());
         // ECALL selector = 1
-        assert_eq!(witness[OFF_SEL_START + 32], Fr::one());
+        let ecall_cat = instruction_category(&Instruction::Ecall);
+        assert_eq!(witness[OFF_SEL_START + ecall_cat], Fr::one());
         // 其余 selector = 0
         assert_eq!(witness[OFF_SEL_START], Fr::zero());
     }

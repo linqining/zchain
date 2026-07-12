@@ -318,7 +318,7 @@ mod tests {
     use super::*;
     use crate::precompiles::PrecompileRegistry;
     use crate::precompiles::non_native::{
-        host_add_mod, host_sub_mod, host_mul_mod, host_inv_mod, host_lt, host_sub,
+        host_add_mod, host_sub_mod, host_mul_mod, host_inv_mod, host_lt, host_sub, host_pow_mod,
         SECP256K1_P_CURVE, SECP256K1_N,
     };
 
@@ -455,28 +455,6 @@ mod tests {
                     result = *p;
                     started = true;
                 }
-            }
-        }
-        result
-    }
-
-    /// 模幂：base^exp mod modulus
-    fn host_pow_mod(base: &[u64; 4], exp: &[u64; 4], modulus: &[u64; 4]) -> [u64; 4] {
-        let mut result = [1u64, 0, 0, 0];
-        let mut b = *base;
-        let mut e = *exp;
-
-        for _ in 0..256 {
-            if e[0] & 1 == 1 {
-                result = host_mul_mod(&result, &b, modulus);
-            }
-            b = host_mul_mod(&b, &b, modulus);
-            for k in 0..3 {
-                e[k] = (e[k] >> 1) | (e[k + 1] << 63);
-            }
-            e[3] >>= 1;
-            if e == [0u64; 4] {
-                break;
             }
         }
         result

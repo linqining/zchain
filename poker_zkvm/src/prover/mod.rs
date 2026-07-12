@@ -895,6 +895,7 @@ pub fn prove(
 ///
 /// padding 不影响执行结果（output/events 已在 ExecuteResult 中固定），
 /// 仅保证所有 batch 生成相同结构的 CCS（num_vars / num_rows 一致）。
+#[allow(clippy::explicit_counter_loop)]
 fn pad_trace(trace: &mut Trace, batch_size: usize) -> Result<(), ZkvmError> {
     if batch_size == 0 {
         return Err(ZkvmError::Other(
