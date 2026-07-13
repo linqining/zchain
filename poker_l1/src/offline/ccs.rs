@@ -21,14 +21,15 @@ use crate::error::PokerL1Error;
 use super::hypernova::{FinalSumcheck, FoldedInstance, HypernovaProof, WitnessCommitment};
 use super::zk_verifier::ZkPublicIo;
 
-// ===== Phase 11 Re-export：新 Fr-based 类型（迁移目标）=====
+// ===== Phase 11 Re-export：Fr-based 类型（迁移完成 — SubTask 10.5.2）=====
 pub use poker_zkvm::ccs::{Ccs as NewCcs, CcsInstance as NewCcsInstance, Fr as ZkvmFr};
 pub use poker_zkvm::fold::ccccs::Ccccs;
 pub use poker_zkvm::fold::fold_loop::HypernovaProof as ZkvmHypernovaProof;
 pub use poker_zkvm::fold::fold_step::FoldStepOutput;
 pub use poker_zkvm::fold::lcccs::Lcccs;
 pub use poker_zkvm::pcs::ipa::{IpaCommitment, IpaPcs};
-pub use poker_zkvm::precompiles::CcsCircuit as NewCcsCircuit;
+pub use poker_zkvm::precompiles::CcsCircuit;
+pub use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;
 pub use poker_zkvm::transcript::Transcript as ZkvmTranscript;
 
 /// CCS 电路实例（SubTask 26.1）。
@@ -60,42 +61,6 @@ pub struct CcsInstance {
     pub state_delta_hash: Hash,
     /// 该步对应的 ack 集合哈希（用于 ack_chain_hash 聚合）。
     pub ack_step_hash: Hash,
-}
-
-/// CCS 电路 trait（SubTask 26.1）。
-///
-/// 每种具体电路（如 `poker_protocol::zk_shuffle`）实现此 trait，
-/// 提供约束矩阵 / 公共输入 / 见证接口。
-///
-/// # 已废弃（Phase 10 迁移）
-///
-/// 此 trait 基于 `Hash` 类型，已被 `poker_zkvm::precompiles::CcsCircuit`（Fr-based 新签名）取代。
-/// Phase 11 将完成完整迁移：poker_l1 通过 `pub use poker_zkvm::precompiles::CcsCircuit;` re-export，
-/// 旧调用方迁移到新类型。新代码应使用 `poker_zkvm::precompiles::CcsCircuit`。
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `poker_zkvm::precompiles::CcsCircuit` (Fr-based) instead. Phase 11 将完成迁移。"
-)]
-#[allow(deprecated)]
-pub trait CcsCircuit: Send + Sync {
-    /// 电路名称（用于日志 / 调试）。
-    fn name(&self) -> &str;
-
-    /// 约束矩阵数量。
-    fn num_matrices(&self) -> usize;
-
-    /// 生成 CCS 实例（SubTask 26.1）。
-    ///
-    /// 输入：见证 + 公共输入 + 状态增量。
-    /// 输出：CCS 实例（含 commitments）。
-    #[allow(deprecated)]
-    fn to_instance(
-        &self,
-        witness: &[u8],
-        public_inputs: &[u8],
-        state_delta: &[u8],
-        ack_step_hash: Hash,
-    ) -> Result<CcsInstance, PokerL1Error>;
 }
 
 /// Hypernova fold step 结果（SubTask 26.2）。
@@ -202,92 +167,8 @@ pub fn fold_loop(
     ))
 }
 
-/// ZkShuffle CCS 电路适配器（SubTask 26.4）。
-///
-/// 将 `poker_protocol::zk_shuffle` 电路适配为 CCS 实例。
-/// MVP 阶段：仅提供 trait 实现，实际电路转换在 Production 阶段实现。
-///
-/// # 已废弃（Phase 10 迁移）
-///
-/// 此类型已迁移到 `poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit`（Fr-based 新签名）。
-/// Phase 11 将通过 `pub use` re-export 新类型，旧调用方迁移到新类型。
-/// 新代码应使用 `poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit`。
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit` (Fr-based) instead. Phase 11 将完成迁移。"
-)]
-pub struct ZkShuffleCcsCircuit {
-    /// 电路名称。
-    name: String,
-    /// 约束矩阵数量。
-    num_mats: usize,
-}
-
-#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
-impl ZkShuffleCcsCircuit {
-    /// 创建 ZkShuffle CCS 电路。
-    pub fn new() -> Self {
-        Self {
-            name: "zk_shuffle".to_string(),
-            num_mats: 3, // CCS 标准要求 q=2 → 3 个矩阵（A, B, C）
-        }
-    }
-}
-
-#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
-impl Default for ZkShuffleCcsCircuit {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
-impl CcsCircuit for ZkShuffleCcsCircuit {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn num_matrices(&self) -> usize {
-        self.num_mats
-    }
-
-    fn to_instance(
-        &self,
-        witness: &[u8],
-        public_inputs: &[u8],
-        state_delta: &[u8],
-        ack_step_hash: Hash,
-    ) -> Result<CcsInstance, PokerL1Error> {
-        // MVP：直接对输入做哈希作为 commitments
-        let hash_data = |data: &[u8]| -> Hash {
-            let mut hasher = blake2::Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
-            use blake2::digest::Update;
-            hasher.update(data);
-            let mut out = [0u8; 32];
-            use blake2::digest::VariableOutput;
-            hasher
-                .finalize_variable(&mut out)
-                .expect("Blake2bVar finalize 不应失败");
-            out
-        };
-
-        let mat_commitments = (0..self.num_mats)
-            .map(|i| {
-                let mut input = witness.to_vec();
-                input.push(i as u8);
-                hash_data(&input)
-            })
-            .collect();
-
-        Ok(CcsInstance {
-            mat_commitments,
-            public_input_hash: hash_data(public_inputs),
-            witness_commitment: hash_data(witness),
-            state_delta_hash: hash_data(state_delta),
-            ack_step_hash,
-        })
-    }
-}
+// ZkShuffleCcsCircuit 已迁移到 poker_zkvm::precompiles::zk_shuffle（SubTask 10.5.2 完成）
+// 通过上方 `pub use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;` re-export
 
 // ===== Phase 11: LegacyCcsInstanceAdapter（编译兼容，运行时 Err）=====
 
@@ -328,7 +209,7 @@ impl LegacyCcsInstanceAdapter {
 }
 
 #[allow(deprecated)]
-impl NewCcsCircuit for LegacyCcsInstanceAdapter {
+impl CcsCircuit for LegacyCcsInstanceAdapter {
     fn name(&self) -> &str {
         "legacy_hash_based_adapter"
     }
@@ -429,8 +310,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn test_deprecated_zk_shuffle_circuit_still_compiles() {
+    fn test_zk_shuffle_circuit_reexported() {
         let circuit = ZkShuffleCcsCircuit::new();
         assert_eq!(circuit.name(), "zk_shuffle");
         assert_eq!(circuit.num_matrices(), 3);

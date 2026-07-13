@@ -1469,6 +1469,7 @@ dependencies = [
  "pairing",
  "poker_protocol",
  "poker_zkvm",
+ "proptest",
  "rand 0.8.6",
  "rocksdb",
  "secp256k1",

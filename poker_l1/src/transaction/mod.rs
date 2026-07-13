@@ -503,6 +503,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_tx_limits_rejects_too_many_outputs() {
+        let mut tx = dummy_tx();
+        tx.outputs = vec![dummy_object(); 257];
+        let err = validate_tx_limits(&tx).unwrap_err();
+        assert!(matches!(
+            err,
+            PokerL1Error::InputTooLong {
+                actual: 257,
+                limit: 256
+            }
+        ));
+    }
+
+    #[test]
     fn validate_tx_limits_rejects_too_long_sig() {
         let mut tx = dummy_tx();
         tx.signature = vec![0u8; 100];

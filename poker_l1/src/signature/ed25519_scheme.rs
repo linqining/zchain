@@ -174,6 +174,28 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_wrong_pubkey_length() {
+        let msg = [0x42u8; 32];
+        let (_tp, sig) = sign_and_get_tagged(&msg);
+
+        // raw.len()=31（应为 32）的 ed25519 tagged pubkey
+        let wrong_tp = TaggedPubkey {
+            tag: encode_tag(SignatureScheme::Ed25519, 1),
+            raw: vec![0u8; 31],
+        };
+
+        let err = verify(&wrong_tp, &sig, &msg).unwrap_err();
+        assert!(matches!(
+            err,
+            PokerL1Error::InvalidPubkeyLength {
+                actual: 31,
+                expected: 32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn verify_rejects_non_canonical_s() {
         let msg = [0x42u8; 32];
         let (tp, mut sig) = sign_and_get_tagged(&msg);

@@ -149,7 +149,7 @@
 - [ ] Task 5.5：实现 `poker_zkvm/src/constraints/syscall_circuit.rs` — Syscall 子电路
   - [ ] SubTask 5.5.1：实现 ECALL 子电路 — 解码 `a7`，根据 syscall_id 选择对应预编译子电路
   - [ ] SubTask 5.5.2：每个 syscall 调用产生一个独立 CCS 实例（与指令实例合并折叠）
-  - [ ] SubTask 5.5.3：**依赖 Phase 10 预编译电路**（Poseidon / SHA-256 / ECDSA）— 此 Task 须在 Phase 10 完成后才能完整测试
+  - [x] SubTask 5.5.3：**依赖 Phase 10 预编译电路**（Poseidon / SHA-256 / ECDSA）— Phase 10 已完成，syscall_circuit.rs 已实现 dispatch_syscall 委托预编译电路
 - [ ] Task 5.6：实现 `poker_zkvm/src/constraints/lookup.rs` — LogUp lookup 协议（**正确公式 + v1.2 严格 β 派生时机**）
   - [ ] SubTask 5.6.1：定义 `LookupTable { entries: Vec<FieldElement>, f: fn(FieldElement) -> FieldElement }`
   - [ ] SubTask 5.6.2：实现 `LogUpProof` — **严格 absorb 顺序**：prover 提交 table 承诺 `C_T` → witness 承诺 `C_f` → multiplicity 承诺 `C_m` → `transcript.absorb(LOOKUP_TAG || C_T || C_f || C_m)` → **β ← transcript.challenge(LOOKUP_TAG)`**（**β 必须在 witness 承诺之后派生**）；校验等式 `Σ_i m_i / (β - t_i) == Σ_j 1 / (β - f_j)`
@@ -229,7 +229,7 @@
   - [x] SubTask 7.2.5：CCS 注册表迁移 — Spartan proof 去除内嵌 CCS（~1.9MB → ~7KB），`verify_production` 签名改为 `ccs_registry: &[Ccs]`，verifier 按 `ccs_commitment` 从注册表查找 CCS；HYPN/SPRT magic 字节分派 + `MAX_PROOF_TOTAL_SIZE` 预检；`default_ccs_whitelist` 保留为 deprecated 别名
 - [x] Task 7.3：实现 `poker_zkvm/src/prover/groth16_compress.rs` — Groth16 备选压缩（可选）
   - [x] SubTask 7.3.1：实现 `groth16_compress(lcccs: &Lcccs, crs: &Crs) -> Result<Groth16Proof, ZkvmError>`（stub — Phase 12 实现）
-  - [ ] SubTask 7.3.2：复用 `poker_l1/src/offline/groth16.rs` 既有 verifier（stub — Phase 12 实现）
+  - [x] SubTask 7.3.2：复用 `poker_l1/src/offline/groth16.rs` 既有 verifier — `groth16_compress.rs` 已实现完整 Groth16 setup/prove/verify（基于 ark-groth16 0.6 GR1CS）
 
 ## Phase 8：链上 Verifier Production 实现（v1.3 修正 cross-language claim + 双通道 grace period + M2-003/004 修复）
 
@@ -308,8 +308,8 @@
   - [x] SubTask 10.4.4：单元测试 — 正例签名通过；篡改 msg / sig / pubkey 必须失败
 - [x] Task 10.5：迁移 `poker_l1/src/offline/ccs.rs:ZkShuffleCcsCircuit` 到 `poker_zkvm/src/precompiles/zk_shuffle.rs`（stub，D6 批准）
   - [x] SubTask 10.5.1：迁移类型定义与 trait 实现（stub — `to_ccs_instance` 返回 `Err("Phase 11 pending")`）
-  - [ ] SubTask 10.5.2：在 `poker_l1/src/offline/ccs.rs` 替换为 `pub use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;` — **延至 Phase 11**（新旧 `CcsCircuit` trait 签名不兼容：旧 u8-based `to_instance` vs 新 Fr-based `to_ccs_instance`，须 BREAKING 迁移）
-  - [ ] SubTask 10.5.3：更新既有单元测试引用路径 — **延至 Phase 11**（同 10.5.2，`phase5a_integration.rs` + `task36_zk_verifier.rs` bench 须迁移）
+  - [x] SubTask 10.5.2：在 `poker_l1/src/offline/ccs.rs` 替换为 `pub use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;` — **已完成（BREAKING 迁移）**：移除旧 hash-based `ZkShuffleCcsCircuit` + 旧 `CcsCircuit` trait，re-export 新 Fr-based 类型
+  - [x] SubTask 10.5.3：更新既有单元测试引用路径 — **已完成**：`phase5a_integration.rs` 已使用新类型；`test_deprecated_zk_shuffle_circuit_still_compiles` 改为 `test_zk_shuffle_circuit_reexported`
 
 ## Phase 11：poker_l1 集成与 stub 替换（v1.2 CcsInstance 诚实 BREAKING + CheckinTx proof_kind 序列化 + scheme_id 映射）
 
