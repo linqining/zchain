@@ -18,7 +18,7 @@ use poker_zkvm::error::ZkvmError;
 use poker_zkvm::field::ZkvmField;
 use poker_zkvm::isa::executor::execute_elf;
 use poker_zkvm::prover::{
-    default_ccs_whitelist, deserialize_proof, generate_test_proof, serialize_proof,
+    default_ccs_registry, deserialize_proof, generate_test_proof, serialize_proof,
 };
 use poker_zkvm::test_helpers::{addi, build_elf32, ecall, encode_text};
 use poker_zkvm::verifier::verify_production;
@@ -63,8 +63,8 @@ fn test_soundness_malicious_elf_tampered_machine_type() {
 fn test_soundness_tampered_proof_magic_fails() {
     let (mut proof_bytes, public_io) = generate_test_proof();
     proof_bytes[0] = b'X'; // 篡改 magic
-    let ccs_whitelist = default_ccs_whitelist();
-    let result = verify_production(&proof_bytes, &public_io, &ccs_whitelist);
+    let ccs_registry = default_ccs_registry();
+    let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
     assert!(
         matches!(result, Err(ZkvmError::InvalidZkProofFormat(ref m)) if m.contains("magic")),
         "篡改 magic 应返回 InvalidZkProofFormat，got: {result:?}"
@@ -77,8 +77,8 @@ fn test_soundness_tampered_proof_byte_flip_fails() {
     // 翻转最后一个字节（不影响 header，但破坏 payload）
     let last = proof_bytes.len() - 1;
     proof_bytes[last] ^= 0xFF;
-    let ccs_whitelist = default_ccs_whitelist();
-    let result = verify_production(&proof_bytes, &public_io, &ccs_whitelist);
+    let ccs_registry = default_ccs_registry();
+    let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
     assert!(
         result.is_err(),
         "篡改 proof payload 应导致验证失败，got: {result:?}"
@@ -274,8 +274,8 @@ fn test_soundness_tampered_proof_payload_fails() {
     }
 
     let tampered = serialize_proof(&proof).expect("serialize 应成功");
-    let ccs_whitelist = default_ccs_whitelist();
-    let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+    let ccs_registry = default_ccs_registry();
+    let result = verify_production(&tampered, &public_io, &ccs_registry);
     assert!(result.is_err(), "篡改 u_l 应导致验证失败，got: {result:?}");
 }
 
@@ -285,8 +285,8 @@ fn test_soundness_tampered_proof_z_at_point_fails() {
     // 篡改 proof 最后 32 字节中的 1 字节（z_at_point 是最后 32 字节 Fr）
     let last_fr_offset = proof_bytes.len() - 16;
     proof_bytes[last_fr_offset] ^= 0xFF;
-    let ccs_whitelist = default_ccs_whitelist();
-    let result = verify_production(&proof_bytes, &public_io, &ccs_whitelist);
+    let ccs_registry = default_ccs_registry();
+    let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
     assert!(
         result.is_err(),
         "篡改 z_at_point 区域应导致验证失败，got: {result:?}"

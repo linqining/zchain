@@ -51,7 +51,7 @@ fn point_to_bytes(p: &ark_bn254::G1Affine) -> Vec<u8> {
 /// # 参数
 /// - `proof_bytes` — 序列化的 HypernovaProof 字节
 /// - `public_io` — 公共输入输出（与 proof 绑定校验）
-/// - `ccs_whitelist` — 允许的 CCS commitment 列表（白名单）
+/// - `ccs_registry` — 允许的 CCS commitment 列表（白名单）
 ///
 /// # 返回
 /// - `Ok(true)` — proof 验证通过
@@ -62,18 +62,57 @@ fn point_to_bytes(p: &ark_bn254::G1Affine) -> Vec<u8> {
 /// 完整 verifier 恢复 soundness 保证：恶意 prover 无法通过篡改 CCS 结构、
 /// 替换 public_io、伪造 fold challenge、篡改中间 sumcheck 或 fold commitment
 /// 来生成通过验证的 proof。
+///
+/// # Magic 字节分派
+///
+/// - `b"HYPN"` → HYPN 路径（完整 HypernovaProof，含 fold_steps + 内嵌 CCS）
+/// - `b"SPRT"` → Spartan 路径（压缩 proof，CCS 从 `ccs_registry` 查找）
 pub fn verify_production(
     proof_bytes: &[u8],
     public_io: &ZkPublicIo,
-    ccs_whitelist: &[[u8; 32]],
+    ccs_registry: &[crate::ccs::Ccs],
+) -> Result<bool, ZkvmError> {
+    // 总长度优先校验（防 OOM DoS — 在 magic 分派前拦截）
+    if proof_bytes.len() > crate::prover::MAX_PROOF_TOTAL_SIZE {
+        return Err(ZkvmError::InvalidZkProofFormat(format!(
+            "proof 总长度 {} > MAX_PROOF_TOTAL_SIZE {}",
+            proof_bytes.len(),
+            crate::prover::MAX_PROOF_TOTAL_SIZE
+        )));
+    }
+    if proof_bytes.len() < 4 {
+        return Err(ZkvmError::InvalidZkProofFormat(
+            "proof 过短（< 4 字节 magic）".to_string(),
+        ));
+    }
+    match &proof_bytes[0..4] {
+        b"HYPN" => verify_hypernova(proof_bytes, public_io, ccs_registry),
+        b"SPRT" => verify_spartan(proof_bytes, public_io, ccs_registry),
+        _ => Err(ZkvmError::InvalidZkProofFormat(format!(
+            "未知 magic: {:?}",
+            &proof_bytes[0..4]
+        ))),
+    }
+}
+
+/// HYPN 路径验证（完整 HypernovaProof，含 fold_steps + 内嵌 CCS）。
+///
+/// 内部逻辑与旧 `verify_production` 一致，仅 CCS 白名单校验改为从 `ccs_registry` 查找。
+fn verify_hypernova(
+    proof_bytes: &[u8],
+    public_io: &ZkPublicIo,
+    ccs_registry: &[crate::ccs::Ccs],
 ) -> Result<bool, ZkvmError> {
     // 1. 反序列化 proof
     let proof = deserialize_proof(proof_bytes)?;
 
-    // 2. CCS 白名单校验
-    if !ccs_whitelist.contains(&proof.ccs_commitment) {
+    // 2. CCS 注册表校验（commitment 匹配）
+    if !ccs_registry
+        .iter()
+        .any(|c| c.ccs_commitment() == proof.ccs_commitment)
+    {
         return Err(ZkvmError::Other(format!(
-            "CCS 不在白名单: commitment {:?}..",
+            "CCS 不在注册表: commitment {:?}..",
             &proof.ccs_commitment[..8]
         )));
     }
@@ -318,6 +357,58 @@ pub fn verify_production(
     Ok(true)
 }
 
+/// SPRT 路径验证（Spartan 压缩 proof，不含 CCS — 从 `ccs_registry` 查找）。
+///
+/// 流程：
+/// 1. 反序列化 Spartan proof（不含 CCS）
+/// 2. CCS 注册表查找（按 ccs_commitment 匹配）
+/// 3. public_io 绑定校验
+/// 4. IpaPcs 创建 + spartan_verify（sumcheck + PCS opening）
+fn verify_spartan(
+    proof_bytes: &[u8],
+    public_io: &ZkPublicIo,
+    ccs_registry: &[crate::ccs::Ccs],
+) -> Result<bool, ZkvmError> {
+    let proof = crate::prover::deserialize_spartan_proof(proof_bytes)?;
+
+    // CCS 注册表查找
+    let ccs = ccs_registry
+        .iter()
+        .find(|c| c.ccs_commitment() == proof.ccs_commitment)
+        .ok_or_else(|| {
+            ZkvmError::Other(format!(
+                "CCS 不在注册表: commitment {:?}..",
+                &proof.ccs_commitment[..8]
+            ))
+        })?;
+
+    // public_io 绑定校验
+    if hash_public_io(public_io) != proof.public_io_commitment {
+        return Err(ZkvmError::Other(
+            "public_io 不匹配: hash_public_io(public_io) != proof.public_io_commitment".to_string(),
+        ));
+    }
+
+    // IpaPcs 创建
+    let num_vars = ccs.num_vars;
+    if !num_vars.is_power_of_two() {
+        return Err(ZkvmError::InvalidZkProofFormat(format!(
+            "ccs.num_vars {num_vars} 非 2 的幂"
+        )));
+    }
+    let pcs_n_vars = num_vars.trailing_zeros() as usize;
+    let pcs = IpaPcs::new(pcs_n_vars)?;
+
+    // Spartan 验证（sumcheck + PCS opening）
+    let valid = crate::prover::spartan::spartan_verify(&proof, ccs, &pcs)?;
+    if !valid {
+        return Err(ZkvmError::Other(
+            "spartan_verify 返回 false（sumcheck 或 PCS 验证失败）".to_string(),
+        ));
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,17 +419,17 @@ mod tests {
         crate::prover::generate_test_proof()
     }
 
-    /// 辅助：从 proof bytes 提取 ccs_commitment 作为白名单。
-    fn extract_ccs_whitelist(proof_bytes: &[u8]) -> Vec<[u8; 32]> {
+    /// 辅助：从 proof bytes 提取完整 CCS 结构作为注册表。
+    fn extract_ccs_registry(proof_bytes: &[u8]) -> Vec<crate::ccs::Ccs> {
         let proof = deserialize_proof(proof_bytes).expect("deserialize 应成功");
-        vec![proof.ccs_commitment]
+        vec![proof.initial_lcccs.ccs_ref]
     }
 
     #[test]
     fn test_verify_production_valid_proof_passes() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
-        let result = verify_production(&proof_bytes, &public_io, &ccs_whitelist);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
+        let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
         assert!(result.is_ok(), "合法 proof 应通过验证，got: {:?}", result);
         assert!(result.unwrap());
     }
@@ -346,9 +437,9 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_magic_fails() {
         let (mut proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         proof_bytes[0] = b'X'; // 篡改 magic
-        let result = verify_production(&proof_bytes, &public_io, &ccs_whitelist);
+        let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
         assert!(
             matches!(result, Err(ZkvmError::InvalidZkProofFormat(ref m)) if m.contains("magic")),
             "expected InvalidZkProofFormat with magic error, got: {result:?}"
@@ -358,12 +449,12 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_abi_version_fails() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         // 反序列化 → 篡改 abi_version → 重新序列化
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         proof.abi_version = proof.abi_version.wrapping_add(1);
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         // abi_version 篡改不应导致验证失败（advisory 字段）
         assert!(
             result.is_ok(),
@@ -374,7 +465,7 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_folded_lcccs_u_l_fails() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改最后一步的 folded_lcccs.u_l
         let last_step = proof.fold_steps.last_mut().expect("fold_steps 非空");
@@ -383,7 +474,7 @@ mod tests {
             .u_l
             .add(&ZkvmFr::from_u32_with_wrap(1));
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(
                 result,
@@ -398,7 +489,7 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_witness_commitment_fails() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 替换最后一步的 folded_witness_commitment 为一个不同的点
         use ark_bn254::G1Affine;
@@ -406,7 +497,7 @@ mod tests {
         let last_step = proof.fold_steps.last_mut().expect("fold_steps 非空");
         last_step.folded_witness_commitment = IpaCommitment(G1Affine::generator());
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(
                 result,
@@ -419,7 +510,7 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_sumcheck_fails() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改最后一步的 sumcheck_proof
         let last_step = proof.fold_steps.last_mut().expect("fold_steps 非空");
@@ -431,7 +522,7 @@ mod tests {
                 val.add(&ZkvmFr::from_u32_with_wrap(1));
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(
                 result,
@@ -444,14 +535,14 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_pcs_opening_fails() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         proof.pcs_opening.a_final = proof
             .pcs_opening
             .a_final
             .add(&ZkvmFr::from_u32_with_wrap(1));
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(
                 result,
@@ -464,14 +555,14 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_r_y_fails() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         if !proof.r_y.is_empty() {
             let val = proof.r_y[0];
             proof.r_y[0] = val.add(&ZkvmFr::from_u32_with_wrap(1));
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(
                 result,
@@ -486,11 +577,11 @@ mod tests {
     #[test]
     fn test_verify_production_tampered_z_at_point_fails() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         proof.z_at_point = proof.z_at_point.add(&ZkvmFr::from_u32_with_wrap(1));
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(
                 result,
@@ -525,19 +616,19 @@ mod tests {
     #[test]
     fn test_verify_production_rejects_unregistered_ccs() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        // 使用空白名单（不含 proof.ccs_commitment）
-        let empty_whitelist: Vec<[u8; 32]> = vec![];
-        let result = verify_production(&proof_bytes, &public_io, &empty_whitelist);
+        // 使用空注册表（不含 proof.ccs_commitment）
+        let empty_registry: Vec<crate::ccs::Ccs> = vec![];
+        let result = verify_production(&proof_bytes, &public_io, &empty_registry);
         assert!(
-            matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("CCS 不在白名单")),
-            "CCS 不在白名单应被拒绝，got: {result:?}"
+            matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("CCS 不在注册表")),
+            "CCS 不在注册表应被拒绝，got: {result:?}"
         );
     }
 
     #[test]
     fn test_verify_production_rejects_mismatched_public_io() {
         let (proof_bytes, _public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         // 构造不同的 public_io（修改 output）
         let tampered_public_io = ZkPublicIo {
             input: vec![0xFF],
@@ -547,7 +638,7 @@ mod tests {
             final_commitment: ZkvmFr::zero(),
             event_hashes: Vec::new(),
         };
-        let result = verify_production(&proof_bytes, &tampered_public_io, &ccs_whitelist);
+        let result = verify_production(&proof_bytes, &tampered_public_io, &ccs_registry);
         assert!(
             matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("public_io 不匹配")),
             "public_io 不匹配应被拒绝，got: {result:?}"
@@ -557,7 +648,7 @@ mod tests {
     #[test]
     fn test_verify_production_rejects_tampered_fold_challenge() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改第一步的 ccccs_u_c（fold challenge 重派生将不匹配）
         if !proof.fold_steps.is_empty() {
@@ -565,7 +656,7 @@ mod tests {
             proof.fold_steps[0].ccccs_u_c = val.add(&ZkvmFr::from_u32_with_wrap(1));
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             result.is_err(),
             "篡改 ccccs_u_c 应导致 fold challenge 重派生失败，got: {result:?}"
@@ -575,7 +666,7 @@ mod tests {
     #[test]
     fn test_verify_production_rejects_tampered_intermediate_sumcheck() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改第一步（非最后一步）的 sumcheck_proof
         // generate_test_proof 产生 2 个 CCS 实例 → 1 个 fold_step，故只有 1 步
@@ -591,7 +682,7 @@ mod tests {
             }
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(
                 result,
@@ -604,7 +695,7 @@ mod tests {
     #[test]
     fn test_verify_production_rejects_non_continuous_batch() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改 batch_public_inputs 使不连续（修改第二组的 first_idx）
         if proof.batch_public_inputs.len() >= 2 {
@@ -612,7 +703,7 @@ mod tests {
             proof.batch_public_inputs[1][1] = val.add(&ZkvmFr::from_u32_with_wrap(100));
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("batch 不连续")
                 || m.contains("r_x_l 不匹配")
@@ -624,7 +715,7 @@ mod tests {
     #[test]
     fn test_verify_production_rejects_tampered_fold_commitment() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改第一步的 folded_witness_commitment（fold commitment 等式将失败）
         use ark_bn254::G1Affine;
@@ -633,7 +724,7 @@ mod tests {
             proof.fold_steps[0].folded_witness_commitment = IpaCommitment(G1Affine::generator());
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("fold commitment 等式失败")
                 || m.contains("PCS")),
@@ -644,7 +735,7 @@ mod tests {
     #[test]
     fn test_verify_production_rejects_pcs_sumcheck_decoupling() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改 proof.r_y（使其 != fold_steps.last().r_y）
         if !proof.r_y.is_empty() {
@@ -652,7 +743,7 @@ mod tests {
             proof.r_y[0] = val.add(&ZkvmFr::from_u32_with_wrap(1));
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("PCS opening 解耦")),
             "PCS-sumcheck 解耦应被拒绝，got: {result:?}"
@@ -662,12 +753,12 @@ mod tests {
     #[test]
     fn test_verify_production_rejects_empty_fold_steps() {
         let (proof_bytes, public_io) = make_valid_proof_and_public_io();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 清空 fold_steps（篡改：从多步 proof 中删除所有 fold 步骤）
         proof.fold_steps.clear();
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
-        let result = verify_production(&tampered, &public_io, &ccs_whitelist);
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
         assert!(
             result.is_err(),
             "篡改 proof（清空 fold_steps）应被拒绝，got: {result:?}"
@@ -677,9 +768,150 @@ mod tests {
     #[test]
     fn test_verify_production_single_instance_proof_accepted() {
         let (proof_bytes, public_io) = crate::prover::generate_single_instance_test_proof();
-        let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
-        let result = verify_production(&proof_bytes, &public_io, &ccs_whitelist);
+        let ccs_registry = extract_ccs_registry(&proof_bytes);
+        let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
         assert!(result.is_ok(), "单实例 proof 应通过验证，got: {:?}", result);
         assert!(result.unwrap());
+    }
+
+    // ===== Spartan 路径测试 =====
+
+    /// 辅助：生成 Spartan proof bytes（多 batch → 自动压缩）+ public_io + ccs_registry。
+    fn make_spartan_proof_and_registry() -> (Vec<u8>, ZkPublicIo, Vec<crate::ccs::Ccs>) {
+        use crate::prover::{MAX_ZKVM_PROOF_SIZE, ProverConfig, prove};
+
+        // 构造多 batch 程序（5 步 → batch_size=3 → 2 batches → HYPN > 64KB → Spartan 压缩）
+        fn encode_i(opcode: u32, funct3: u8, rd: u8, rs1: u8, imm12: u32) -> u32 {
+            ((imm12 & 0xFFF) << 20)
+                | ((rs1 as u32) << 15)
+                | ((funct3 as u32) << 12)
+                | ((rd as u32) << 7)
+                | opcode
+        }
+        let text: Vec<u8> = [
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 17, 0, 2),
+            0x00000073,
+        ]
+        .iter()
+        .copied()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+
+        let mut elf = Vec::with_capacity(84 + text.len());
+        elf.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        elf.extend_from_slice(&2u16.to_le_bytes());
+        elf.extend_from_slice(&0xF3u16.to_le_bytes());
+        elf.extend_from_slice(&1u32.to_le_bytes());
+        elf.extend_from_slice(&0x1000u32.to_le_bytes());
+        elf.extend_from_slice(&52u32.to_le_bytes());
+        elf.extend_from_slice(&0u32.to_le_bytes());
+        elf.extend_from_slice(&0u32.to_le_bytes());
+        elf.extend_from_slice(&52u16.to_le_bytes());
+        elf.extend_from_slice(&32u16.to_le_bytes());
+        elf.extend_from_slice(&1u16.to_le_bytes());
+        elf.extend_from_slice(&40u16.to_le_bytes());
+        elf.extend_from_slice(&0u16.to_le_bytes());
+        elf.extend_from_slice(&0u16.to_le_bytes());
+        elf.extend_from_slice(&1u32.to_le_bytes());
+        elf.extend_from_slice(&84u32.to_le_bytes());
+        elf.extend_from_slice(&0x1000u32.to_le_bytes());
+        elf.extend_from_slice(&0x1000u32.to_le_bytes());
+        elf.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        elf.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        elf.extend_from_slice(&5u32.to_le_bytes());
+        elf.extend_from_slice(&0x1000u32.to_le_bytes());
+        elf.extend_from_slice(&text);
+
+        let config = ProverConfig {
+            batch_size: 3,
+            proof_size_limit: MAX_ZKVM_PROOF_SIZE,
+            ..Default::default()
+        };
+        let (proof_bytes, public_io) = prove(&elf, &[], &config).expect("prove 应成功");
+        assert_eq!(&proof_bytes[0..4], b"SPRT", "应为 Spartan proof");
+
+        // 从 prove 生成的 CCS 注册表（通过反序列化 Spartan proof 取 ccs_commitment，
+        // 再从 generate_test_proof 提取对应 CCS — 测试场景下 CCS 相同）
+        let registry = crate::prover::default_ccs_registry();
+        (proof_bytes, public_io, registry)
+    }
+
+    #[test]
+    fn test_verify_production_spartan_branch() {
+        // Spartan proof → verify_production 往返通过
+        let (proof_bytes, public_io, ccs_registry) = make_spartan_proof_and_registry();
+        let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
+        assert!(result.is_ok(), "Spartan proof 应通过验证，got: {:?}", result);
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_verify_production_spartan_tampered() {
+        // 篡改 Spartan proof 的 final_u_l → 验证失败
+        let (proof_bytes, public_io, ccs_registry) = make_spartan_proof_and_registry();
+
+        // 反序列化 → 篡改 final_u_l → 重新序列化
+        let mut spartan = crate::prover::deserialize_spartan_proof(&proof_bytes)
+            .expect("deserialize_spartan 应成功");
+        spartan.final_u_l = spartan.final_u_l.add(&ZkvmFr::from_u32_with_wrap(1));
+        let tampered = crate::prover::serialize_spartan_proof(&spartan).expect("serialize 应成功");
+
+        let result = verify_production(&tampered, &public_io, &ccs_registry);
+        assert!(
+            result.is_err(),
+            "篡改 Spartan final_u_l 应导致验证失败，got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_production_magic_dispatch() {
+        // HYPN 和 SPRT 各走对应分支
+        let (hypn_bytes, public_io) = make_valid_proof_and_public_io();
+        let ccs_registry = extract_ccs_registry(&hypn_bytes);
+
+        // HYPN 路径
+        assert_eq!(&hypn_bytes[0..4], b"HYPN");
+        let result = verify_production(&hypn_bytes, &public_io, &ccs_registry);
+        assert!(result.is_ok(), "HYPN proof 应通过验证");
+
+        // SPRT 路径
+        let (spartan_bytes, spartan_public_io, _) = make_spartan_proof_and_registry();
+        assert_eq!(&spartan_bytes[0..4], b"SPRT");
+        let result = verify_production(&spartan_bytes, &spartan_public_io, &ccs_registry);
+        assert!(result.is_ok(), "SPRT proof 应通过验证");
+    }
+
+    #[test]
+    fn test_verify_production_spartan_rejects_unregistered_ccs() {
+        // Spartan proof 的 ccs_commitment 不在注册表 → 拒绝
+        let (proof_bytes, public_io, _registry) = make_spartan_proof_and_registry();
+        let empty_registry: Vec<crate::ccs::Ccs> = vec![];
+        let result = verify_production(&proof_bytes, &public_io, &empty_registry);
+        assert!(
+            matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("CCS 不在注册表")),
+            "CCS 不在注册表应被拒绝，got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_production_spartan_rejects_mismatched_public_io() {
+        // Spartan proof 的 public_io 不匹配 → 拒绝
+        let (proof_bytes, _public_io, ccs_registry) = make_spartan_proof_and_registry();
+        let tampered_public_io = ZkPublicIo {
+            input: vec![0xFF],
+            output: vec![0xAA],
+            randomness_seed: ZkvmFr::zero(),
+            initial_commitment: ZkvmFr::zero(),
+            final_commitment: ZkvmFr::zero(),
+            event_hashes: Vec::new(),
+        };
+        let result = verify_production(&proof_bytes, &tampered_public_io, &ccs_registry);
+        assert!(
+            matches!(result, Err(ZkvmError::Other(ref m)) if m.contains("public_io 不匹配")),
+            "public_io 不匹配应被拒绝，got: {result:?}"
+        );
     }
 }

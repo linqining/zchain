@@ -9,7 +9,7 @@
 mod common;
 
 use common::build_sha256_chain_elf;
-use poker_zkvm::prover::{MAX_PROOF_TOTAL_SIZE, ProverConfig, default_ccs_whitelist, prove};
+use poker_zkvm::prover::{MAX_PROOF_TOTAL_SIZE, ProverConfig, default_ccs_registry, prove};
 use poker_zkvm::verifier::verify_production;
 use sha2::{Digest, Sha256};
 
@@ -46,8 +46,8 @@ fn run_sha256_chain_e2e(iterations: u32, input: &[u8]) {
         prove(&elf, input, &config).unwrap_or_else(|e| panic!("prove 失败: {e:?}"));
 
     // 2. verify
-    let ccs_whitelist = default_ccs_whitelist();
-    let ok = verify_production(&proof_bytes, &public_io, &ccs_whitelist)
+    let ccs_registry = default_ccs_registry();
+    let ok = verify_production(&proof_bytes, &public_io, &ccs_registry)
         .unwrap_or_else(|e| panic!("verify_production 错误: {e:?}"));
     assert!(ok, "verify_production 应返回 true");
 

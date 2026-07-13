@@ -60,8 +60,8 @@ let (proof_bytes, public_io) = prove(elf_bytes, input, &config)
     .expect("prove 失败");
 
 // 2. 验证证明
-let ccs_whitelist = poker_zkvm::prover::default_ccs_whitelist();
-let ok = verify_production(&proof_bytes, &public_io, &ccs_whitelist)
+let ccs_registry = poker_zkvm::prover::default_ccs_registry();
+let ok = verify_production(&proof_bytes, &public_io, &ccs_registry)
     .expect("verify 错误");
 assert!(ok);
 ```
@@ -133,7 +133,7 @@ Pipeline：`validate_elf` → `execute_elf` → `compile_trace_to_ccs` → `fold
 pub fn verify_production(
     proof_bytes: &[u8],
     public_io: &ZkPublicIo,
-    ccs_whitelist: &[[u8; 32]],
+    ccs_registry: &[crate::ccs::Ccs],
 ) -> Result<bool, ZkvmError>;
 ```
 

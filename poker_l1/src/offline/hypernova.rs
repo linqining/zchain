@@ -221,8 +221,8 @@ impl ZkVerifier for HypernovaVerifier {
 
         // Production 状态：调用 poker_zkvm::verifier::verify_production（SubTask 8.2.1）
         let zkvm_public_io = Self::public_io_to_zkvm(public_io);
-        let ccs_whitelist = poker_zkvm::prover::default_ccs_whitelist();
-        match poker_zkvm::verifier::verify_production(proof, &zkvm_public_io, &ccs_whitelist) {
+        let ccs_registry = poker_zkvm::prover::default_ccs_registry();
+        match poker_zkvm::verifier::verify_production(proof, &zkvm_public_io, &ccs_registry) {
             Ok(true) => Ok(true),
             Ok(false) => Err(PokerL1Error::InvalidZkProofFormat(
                 "verify_production 返回 false".to_string(),

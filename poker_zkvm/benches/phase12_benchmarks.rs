@@ -107,11 +107,11 @@ fn bench_verifier_time(c: &mut Criterion) {
             &steps,
             |b, _| {
                 b.iter(|| {
-                    let ccs_whitelist = poker_zkvm::prover::default_ccs_whitelist();
+                    let ccs_registry = poker_zkvm::prover::default_ccs_registry();
                     let ok = verify_production(
                         black_box(&proof_bytes),
                         black_box(&public_io),
-                        black_box(&ccs_whitelist),
+                        black_box(&ccs_registry),
                     )
                     .expect("verify 应成功");
                     assert!(ok);

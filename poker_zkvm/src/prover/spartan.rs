@@ -33,13 +33,19 @@ use crate::pcs::ipa::{IpaCommitment, IpaEval, IpaPcs, IpaProof};
 use crate::prover::groth16_compress::CompressedProof;
 use crate::transcript::Transcript;
 
+/// Spartan proof ABI 版本（写入 header）。
+pub const SPARTAN_ABI_VERSION: u8 = 1;
+
 /// Spartan 压缩 proof — 含 final sumcheck + PCS opening + 最终 LCCCS 公共数据。
 ///
 /// verifier 通过 `spartan_verify` 重放 sumcheck + IPA verify 即可密码学验证
 /// 最终 folded LCCCS 满足 relaxed CCS 约束,无需重新验证 fold 链。
+///
+/// **CCS 来源**：proof 仅含 `ccs_commitment`（32B），完整 CCS 结构由 verifier 从
+/// `ccs_registry: &[Ccs]` 注册表按 commitment 查找（生产 CCS ~1.9MB，无法内嵌到 64KB proof）。
 #[derive(Debug, Clone)]
 pub struct SpartanCompressedProof {
-    /// CCS 结构承诺(32B Blake2b),verifier 用于 CCS 白名单校验。
+    /// CCS 结构承诺(32B Blake2b),verifier 用于从 ccs_registry 查找 CCS。
     pub ccs_commitment: [u8; 32],
     /// public_io 承诺(32B Blake2b),verifier 用于 public_io 绑定校验。
     pub public_io_commitment: [u8; 32],
@@ -114,7 +120,7 @@ pub fn spartan_compress(proof: &HypernovaProof) -> Result<CompressedProof, ZkvmE
         )
     };
 
-    // 3. 构造 SpartanCompressedProof
+    // 3. 构造 SpartanCompressedProof（不含 CCS — verifier 从 ccs_registry 查找）
     Ok(CompressedProof::Spartan(Box::new(SpartanCompressedProof {
         ccs_commitment: proof.ccs_commitment,
         public_io_commitment: proof.public_io_commitment,

@@ -256,6 +256,21 @@ const PROOF_MAGIC: &[u8; 4] = b"HYPN";
 /// v2 = 含 CCS 序列化，已废弃；v1 不含 CCS，已废弃）。
 const PROOF_VERSION: u8 = 3;
 
+/// Spartan proof 序列化 magic 头（区分于 HYPN 的 HypernovaProof）。
+///
+/// `prove()` 在 HYPN proof 超过 `MAX_ZKVM_PROOF_SIZE` 时自动调用 `spartan_compress`
+/// 并序列化为 SPRT 格式返回；`verify_production` 根据 magic 字节分派 HYPN/SPRT 验证路径。
+pub const SPARTAN_PROOF_MAGIC: &[u8; 4] = b"SPRT";
+
+/// Spartan proof 序列化版本号。
+pub const SPARTAN_PROOF_VERSION: u8 = 1;
+
+/// Spartan proof 反序列化总长度上限（64KB — 与 [`MAX_ZKVM_PROOF_SIZE`] 一致）。
+///
+/// Spartan proof 实测 ~6-7KB（不含 CCS）+ CCS（测试 ~236B，生产 ~10-30KB）。
+/// 64KB 上限足够覆盖生产 CCS 内嵌场景；超限则证明 CCS 结构异常大，拒绝反序列化防 OOM DoS。
+pub const SPARTAN_MAX_PROOF_TOTAL_SIZE: usize = 64 * 1024;
+
 /// proof 反序列化/DoS 总长度上限（512KB）。
 ///
 /// 用途：`deserialize_proof` 在分配内存前先校验总长度，防止 OOM DoS。
@@ -710,6 +725,189 @@ pub fn deserialize_proof(bytes: &[u8]) -> Result<HypernovaProof, ZkvmError> {
     })
 }
 
+/// 序列化 SpartanCompressedProof 为二进制格式（v1 — 不含 CCS，verifier 从注册表查找）。
+///
+/// # 格式
+/// - magic(4B "SPRT") + version(1B=1) + abi_version(1B)
+/// - ccs_commitment(32B) + public_io_commitment(32B)
+/// - final_witness_commitment(compressed G1, len-prefixed)
+/// - final_u_l(32B Fr)
+/// - final_r_x_l(len-prefixed Fr 切片)
+/// - final_sumcheck(outer_round_polys + v_pp + inner_round_polys)
+/// - pcs_opening(l_vec + r_vec + a_final)
+/// - r_y(len-prefixed Fr 切片)
+/// - z_at_r_y(32B Fr)
+/// - fold_step_count(8B LE u64)
+pub fn serialize_spartan_proof(
+    proof: &crate::prover::spartan::SpartanCompressedProof,
+) -> Result<Vec<u8>, ZkvmError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(SPARTAN_PROOF_MAGIC);
+    out.push(SPARTAN_PROOF_VERSION);
+    out.push(crate::prover::spartan::SPARTAN_ABI_VERSION);
+
+    // ccs_commitment + public_io_commitment
+    out.extend_from_slice(&proof.ccs_commitment);
+    out.extend_from_slice(&proof.public_io_commitment);
+
+    // final_witness_commitment
+    serialize_commitment(&proof.final_witness_commitment, &mut out)?;
+
+    // final_u_l
+    out.extend_from_slice(&proof.final_u_l.to_canonical_bytes());
+
+    // final_r_x_l
+    serialize_fr_slice(&proof.final_r_x_l, &mut out);
+
+    // final_sumcheck
+    serialize_sumcheck(&proof.final_sumcheck, &mut out)?;
+
+    // pcs_opening
+    serialize_ipa_proof(&proof.pcs_opening, &mut out)?;
+
+    // r_y
+    serialize_fr_slice(&proof.r_y, &mut out);
+
+    // z_at_r_y
+    out.extend_from_slice(&proof.z_at_r_y.to_canonical_bytes());
+
+    // fold_step_count (u64 LE)
+    out.extend_from_slice(&(proof.fold_step_count as u64).to_le_bytes());
+
+    Ok(out)
+}
+
+/// 反序列化 SpartanCompressedProof（v1 格式）。
+///
+/// # 校验
+/// - 总长度 ≤ `SPARTAN_MAX_PROOF_TOTAL_SIZE`（防 OOM DoS）
+/// - magic == `SPARTAN_PROOF_MAGIC`
+/// - version == `SPARTAN_PROOF_VERSION`
+///
+/// # 错误
+/// - `InvalidZkProofFormat` — magic/version/长度/字段截断
+pub fn deserialize_spartan_proof(
+    bytes: &[u8],
+) -> Result<crate::prover::spartan::SpartanCompressedProof, ZkvmError> {
+    // 总长度优先校验
+    if bytes.len() > SPARTAN_MAX_PROOF_TOTAL_SIZE {
+        return Err(ZkvmError::InvalidZkProofFormat(format!(
+            "Spartan proof 总长度 {} > SPARTAN_MAX_PROOF_TOTAL_SIZE {}",
+            bytes.len(),
+            SPARTAN_MAX_PROOF_TOTAL_SIZE
+        )));
+    }
+    if bytes.len() < 6 {
+        return Err(ZkvmError::InvalidZkProofFormat(format!(
+            "Spartan proof 头部过短：{} < 6",
+            bytes.len()
+        )));
+    }
+    // magic
+    if &bytes[0..4] != SPARTAN_PROOF_MAGIC {
+        return Err(ZkvmError::InvalidZkProofFormat(format!(
+            "Spartan proof magic 不匹配：{:?} != {:?}",
+            &bytes[0..4],
+            SPARTAN_PROOF_MAGIC
+        )));
+    }
+    // version
+    let version = bytes[4];
+    if version != SPARTAN_PROOF_VERSION {
+        return Err(ZkvmError::InvalidZkProofFormat(format!(
+            "Spartan proof version {version} != {} (v1)",
+            SPARTAN_PROOF_VERSION
+        )));
+    }
+    let abi_version = bytes[5];
+    let _ = abi_version; // abi_version 校验由 verifier 上下文处理
+    let mut pos: usize = 6;
+
+    // ccs_commitment + public_io_commitment
+    let mut ccs_commitment = [0u8; 32];
+    let mut public_io_commitment = [0u8; 32];
+    let end_ccs = pos
+        .checked_add(32)
+        .ok_or_else(|| ZkvmError::InvalidZkProofFormat("ccs_commitment overflow".to_string()))?;
+    if end_ccs > bytes.len() {
+        return Err(ZkvmError::InvalidZkProofFormat(
+            "ccs_commitment data too short".to_string(),
+        ));
+    }
+    ccs_commitment.copy_from_slice(&bytes[pos..end_ccs]);
+    pos = end_ccs;
+    let end_pio = pos.checked_add(32).ok_or_else(|| {
+        ZkvmError::InvalidZkProofFormat("public_io_commitment overflow".to_string())
+    })?;
+    if end_pio > bytes.len() {
+        return Err(ZkvmError::InvalidZkProofFormat(
+            "public_io_commitment data too short".to_string(),
+        ));
+    }
+    public_io_commitment.copy_from_slice(&bytes[pos..end_pio]);
+    pos = end_pio;
+
+    // final_witness_commitment
+    let final_witness_commitment = deserialize_commitment(bytes, &mut pos)?;
+
+    // final_u_l
+    let final_u_l = read_field(bytes, &mut pos)?;
+
+    // final_r_x_l
+    let final_r_x_l = deserialize_fr_slice(bytes, &mut pos)?;
+
+    // final_sumcheck
+    let final_sumcheck = deserialize_sumcheck(bytes, &mut pos)?;
+
+    // pcs_opening
+    let pcs_opening = deserialize_ipa_proof(bytes, &mut pos)?;
+
+    // r_y
+    let r_y = deserialize_fr_slice(bytes, &mut pos)?;
+
+    // z_at_r_y
+    let z_at_r_y = read_field(bytes, &mut pos)?;
+
+    // fold_step_count (u64 LE)
+    if pos.checked_add(8).ok_or_else(|| {
+        ZkvmError::InvalidZkProofFormat("fold_step_count overflow".to_string())
+    })? > bytes.len()
+    {
+        return Err(ZkvmError::InvalidZkProofFormat(
+            "fold_step_count data too short".to_string(),
+        ));
+    }
+    let fold_step_count = u64::from_le_bytes(
+        bytes[pos..pos + 8]
+            .try_into()
+            .map_err(|_| ZkvmError::InvalidZkProofFormat("fold_step_count try_into".to_string()))?,
+    ) as usize;
+    pos += 8;
+
+    // 完整性校验：所有字节应被消费
+    if pos != bytes.len() {
+        return Err(ZkvmError::InvalidZkProofFormat(format!(
+            "Spartan proof 有未消费字节：pos {} != total {}（多余 {} 字节）",
+            pos,
+            bytes.len(),
+            bytes.len() - pos
+        )));
+    }
+
+    Ok(crate::prover::spartan::SpartanCompressedProof {
+        ccs_commitment,
+        public_io_commitment,
+        final_witness_commitment,
+        final_u_l,
+        final_r_x_l,
+        final_sumcheck,
+        pcs_opening,
+        r_y,
+        z_at_r_y,
+        fold_step_count,
+    })
+}
+
 /// 端到端证明生成（spec L689-696）。
 ///
 /// # 流程
@@ -722,7 +920,7 @@ pub fn deserialize_proof(bytes: &[u8]) -> Result<HypernovaProof, ZkvmError> {
 /// 7. 第一个 CcsInstance → LCCCS，其余 → CCCCS
 /// 8. `fold_loop` → HypernovaProof
 /// 9. `serialize_proof` → proof_bytes
-/// 10. proof 大小检查
+/// 10. proof 大小检查（> `proof_size_limit` 时自动调用 `spartan_compress` 压缩为 Spartan proof）
 ///
 /// # 参数
 /// - `elf_bytes` — ELF 字节
@@ -882,16 +1080,35 @@ pub fn prove(
     // 10. 序列化
     let proof_bytes = serialize_proof(&proof)?;
 
-    // 11. proof 大小检查
-    if proof_bytes.len() > config.proof_size_limit {
+    // 11. proof 大小检查 — 超 limit 时自动 Spartan 压缩
+    if proof_bytes.len() <= config.proof_size_limit {
+        return Ok((proof_bytes, public_io));
+    }
+
+    // proof 过大 → Spartan 自动压缩（Phase 7 集成）
+    // spartan_compress 内部先 verify_native fast-fail（fold commitment 链校验），
+    // 再提取 final sumcheck + PCS opening + 最终 LCCCS 公共数据 + 内嵌完整 CCS。
+    let compressed = crate::prover::spartan::spartan_compress(&proof)?;
+    let spartan_bytes = match compressed {
+        crate::prover::groth16_compress::CompressedProof::Spartan(s) => {
+            serialize_spartan_proof(&s)?
+        }
+        _ => {
+            return Err(ZkvmError::Other(
+                "spartan_compress 返回非 Spartan 变体（预期 Spartan）".to_string(),
+            ));
+        }
+    };
+
+    if spartan_bytes.len() > config.proof_size_limit {
         return Err(ZkvmError::Other(format!(
-            "proof 过大 ({} bytes > {} limit)，须 CycleFold 压缩（Phase 12）",
-            proof_bytes.len(),
+            "proof 过大 (Spartan compressed {} bytes > {} limit)",
+            spartan_bytes.len(),
             config.proof_size_limit
         )));
     }
 
-    Ok((proof_bytes, public_io))
+    Ok((spartan_bytes, public_io))
 }
 
 /// 对 trace 追加 dummy NOP Step 使其长度整除 batch_size。
@@ -1085,15 +1302,28 @@ pub fn generate_single_instance_test_proof() -> (Vec<u8>, ZkPublicIo) {
     prove(&elf, &input, &config).expect("单实例 prove 应成功")
 }
 
-/// 构造默认 CCS 白名单（从 `generate_test_proof` 提取 ccs_commitment）。
+/// 构造默认 CCS 注册表（从 `generate_test_proof` 提取完整 CCS 结构）。
 ///
 /// **MVP 权宜之计**：仅供测试、基准测试和 MVP 生产调用方使用。
-/// 生产环境应由链上治理配置白名单。
+/// 生产环境应由链上治理配置注册表（覆盖所有合法 batch_size 的 CCS 结构）。
 #[cfg(any(test, feature = "test-helpers"))]
-pub fn default_ccs_whitelist() -> Vec<[u8; 32]> {
+pub fn default_ccs_registry() -> Vec<crate::ccs::Ccs> {
     let (proof_bytes, _) = generate_test_proof();
     let proof = deserialize_proof(&proof_bytes).expect("deserialize generate_test_proof 应成功");
-    vec![proof.ccs_commitment]
+    vec![proof.initial_lcccs.ccs_ref]
+}
+
+/// 构造默认 CCS commitment 白名单（deprecated — 使用 [`default_ccs_registry`]）。
+///
+/// 向后兼容别名：返回 `Vec<[u8; 32]>`（仅 commitment，不含完整 CCS 结构）。
+/// Spartan proof 验证需要完整 CCS，请改用 [`default_ccs_registry`]。
+#[deprecated(note = "使用 default_ccs_registry() 返回完整 CCS 结构")]
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn default_ccs_whitelist() -> Vec<[u8; 32]> {
+    default_ccs_registry()
+        .iter()
+        .map(|c| c.ccs_commitment())
+        .collect()
 }
 
 #[cfg(test)]
@@ -1475,6 +1705,42 @@ mod tests {
         assert!(
             matches!(err, ZkvmError::Other(ref m) if m.contains("proof 过大")),
             "expected proof too large error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_prove_auto_compresses_to_spartan() {
+        // 多 batch 程序 → HYPN proof > 64KB → 自动 Spartan 压缩
+        let text = encode_text(&[
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 17, 0, 2),
+            0x00000073,
+        ]);
+        let elf = build_test_elf(0x1000, 0x1000, &text);
+
+        let config = ProverConfig {
+            batch_size: 3,
+            proof_size_limit: MAX_ZKVM_PROOF_SIZE, // 64KB
+            ..Default::default()
+        };
+
+        let (proof_bytes, _public_io) = prove(&elf, &[], &config)
+            .expect("prove 应成功（自动 Spartan 压缩）");
+
+        // 验证 magic = SPRT
+        assert_eq!(
+            &proof_bytes[0..4],
+            SPARTAN_PROOF_MAGIC,
+            "自动压缩后 proof magic 应为 SPRT"
+        );
+        // 验证大小 ≤ 64KB
+        assert!(
+            proof_bytes.len() <= MAX_ZKVM_PROOF_SIZE,
+            "Spartan proof {} 应 ≤ {}",
+            proof_bytes.len(),
+            MAX_ZKVM_PROOF_SIZE
         );
     }
 
