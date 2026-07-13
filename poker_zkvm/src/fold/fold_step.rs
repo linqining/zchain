@@ -171,13 +171,26 @@ pub fn fold(
         .map(|(xl, xc)| xl.add(&r.mul(xc)))
         .collect();
 
-    // (c) trace' = trace_L + r · trace_C（向量）
-    let folded_trace: Vec<Fr> = lcccs
-        .trace_l
-        .iter()
-        .zip(ccccs.trace_c.iter())
-        .map(|(tl, tc)| tl.add(&r.mul(tc)))
-        .collect();
+    // (c) z' = trace_L + r · trace_C（folded witness — 同时用于 folded_lcccs.trace_l 和 prover view）
+    //     合并 folded_trace 和 folded_witness 的重复计算（两者完全相同）
+    let trace_len = lcccs.trace_l.len();
+    let folded_witness: Vec<Fr> = if trace_len < 1024 {
+        lcccs
+            .trace_l
+            .iter()
+            .zip(ccccs.trace_c.iter())
+            .map(|(tl, tc)| tl.add(&r.mul(tc)))
+            .collect()
+    } else {
+        use rayon::prelude::*;
+        lcccs
+            .trace_l
+            .par_iter()
+            .zip(ccccs.trace_c.par_iter())
+            .map(|(tl, tc)| tl.add(&r.mul(tc)))
+            .collect()
+    };
+    let folded_trace = folded_witness.clone();
 
     // (d) r_x' = r_x_L（沿用 LCCCS_L 的 r_x）
     let folded_r_x_l = lcccs.r_x_l.clone();
@@ -199,15 +212,6 @@ pub fn fold(
         .iter()
         .zip(v_c_at_r_x_l.iter())
         .map(|(vl, vc)| vl.add(&r.mul(vc)))
-        .collect();
-
-    // (g) z' = z_L + r · z_C（folded witness — prover view，用于 PCS opening）
-    //     z_L = trace_L, z_C = trace_C
-    let folded_witness: Vec<Fr> = lcccs
-        .trace_l
-        .iter()
-        .zip(ccccs.trace_c.iter())
-        .map(|(zl, zc)| zl.add(&r.mul(zc)))
         .collect();
 
     // (h) C' = C_L + r · C_C（folded commitment — EC 点加法）

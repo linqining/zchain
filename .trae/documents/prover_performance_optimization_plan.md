@@ -56,9 +56,13 @@ Spartan CCS 注册表迁移已完成（全部测试通过）。当前 prover 性
   - `actual_u_prime` 计算（阈值 1024）
   - 外层 sumcheck 行循环（阈值 1024）
   - 内层 sumcheck h_sum 循环（阈值 1024）
-- `poker_zkvm/src/pcs/ipa.rs` — 2 项并行化
+- `poker_zkvm/src/pcs/ipa.rs` — 6 项并行化
   - `inner_product`（阈值 1024）
   - `open()` 向量折叠 a/b_curr/g（阈值 1024）
+  - `compute_query_vector`（阈值 1024）— Phase 2 补充
+  - `IpaPcs::new` 生成器预计算（阈值 1024）— Phase 2 补充
+  - `compute_g_final` 标量计算（阈值 1024）— Phase 2 补充
+  - `verify()` b_curr 折叠（阈值 1024）— Phase 2 补充
 
 ### 设计原则
 - 所有并行化使用阈值检查（`PARALLEL_THRESHOLD = 1024`），小数据走顺序路径
@@ -67,9 +71,12 @@ Spartan CCS 注册表迁移已完成（全部测试通过）。当前 prover 性
 
 ### 跳过的项
 - 2f `c_table` 并行化 — scatter 操作有写冲突，不是 embarrassingly parallel
+- `SparseMatrix::evaluate` — scatter 操作（不同 entry 可能写入同一 row），有写冲突
+- `compile_trace_to_ccs` batch 循环 — 通常仅 2-3 个 batch，并行化收益微小
 
 ### 验证结果
 - 编译通过
 - clippy：0 warnings
 - fmt：无 diff
-- 测试待运行
+- soundness tests：13 通过（2.81s）
+- lib/e2e 测试：运行中

@@ -134,9 +134,17 @@ impl Ccs {
                 self.num_vars
             )));
         }
-        (0..self.matrices.len())
-            .map(|j| self.compute_vj_at(z, r_x, j))
-            .collect()
+        if self.matrices.len() < 4 {
+            (0..self.matrices.len())
+                .map(|j| self.compute_vj_at(z, r_x, j))
+                .collect()
+        } else {
+            use rayon::prelude::*;
+            (0..self.matrices.len())
+                .into_par_iter()
+                .map(|j| self.compute_vj_at(z, r_x, j))
+                .collect()
+        }
     }
 
     /// 计算单个 `v[j] = Σ_r eq(r_x, r) · (M_j · z)[r]`。

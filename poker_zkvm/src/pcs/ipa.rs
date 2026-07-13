@@ -95,15 +95,29 @@ fn compute_query_vector(point: &[Fr]) -> Vec<Fr> {
     let m = point.len();
     let n = 1usize << m;
     let one = Fr::one();
-    (0..n)
-        .map(|i| {
-            (0..m).fold(one, |acc, j| {
-                let bit = (i >> j) & 1;
-                let factor = if bit == 1 { point[j] } else { one - point[j] };
-                acc * factor
+    if n < 1024 {
+        (0..n)
+            .map(|i| {
+                (0..m).fold(one, |acc, j| {
+                    let bit = (i >> j) & 1;
+                    let factor = if bit == 1 { point[j] } else { one - point[j] };
+                    acc * factor
+                })
             })
-        })
-        .collect()
+            .collect()
+    } else {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                (0..m).fold(one, |acc, j| {
+                    let bit = (i >> j) & 1;
+                    let factor = if bit == 1 { point[j] } else { one - point[j] };
+                    acc * factor
+                })
+            })
+            .collect()
+    }
 }
 
 /// 计算内积 ⟨a, b⟩ = Σ_i a_i · b_i。
@@ -155,18 +169,35 @@ fn compute_g_final(generators: &[G1Affine], challenges_inv: &[Fr]) -> G1Projecti
         return G1Projective::zero();
     }
     let one = Fr::one();
-    let scalars: Vec<Fr> = (0..n)
-        .map(|i| {
-            (0..m).fold(one, |acc, k| {
-                let bit = (i >> (m - 1 - k)) & 1;
-                if bit == 1 {
-                    acc * challenges_inv[k]
-                } else {
-                    acc
-                }
+    let scalars: Vec<Fr> = if n < 1024 {
+        (0..n)
+            .map(|i| {
+                (0..m).fold(one, |acc, k| {
+                    let bit = (i >> (m - 1 - k)) & 1;
+                    if bit == 1 {
+                        acc * challenges_inv[k]
+                    } else {
+                        acc
+                    }
+                })
             })
-        })
-        .collect();
+            .collect()
+    } else {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                (0..m).fold(one, |acc, k| {
+                    let bit = (i >> (m - 1 - k)) & 1;
+                    if bit == 1 {
+                        acc * challenges_inv[k]
+                    } else {
+                        acc
+                    }
+                })
+            })
+            .collect()
+    };
     msm(&scalars, generators)
 }
 
@@ -216,9 +247,17 @@ impl IpaPcs {
             )));
         }
         let n = 1usize << max_n_vars;
-        let generators: Vec<G1Affine> = (0..n)
-            .map(|i| hash_to_curve(IPA_GEN_DOMAIN, i as u32))
-            .collect();
+        let generators: Vec<G1Affine> = if n < 1024 {
+            (0..n)
+                .map(|i| hash_to_curve(IPA_GEN_DOMAIN, i as u32))
+                .collect()
+        } else {
+            use rayon::prelude::*;
+            (0..n)
+                .into_par_iter()
+                .map(|i| hash_to_curve(IPA_GEN_DOMAIN, i as u32))
+                .collect()
+        };
         let q_generator = hash_to_curve(IPA_Q_DOMAIN, 0);
         Ok(Self {
             generators,
@@ -446,7 +485,15 @@ impl Pcs for IpaPcs {
                 .ok_or_else(|| ZkvmError::Other("IPA challenge inverse 为零".to_string()))?;
 
             // 折叠 b
-            b_curr = (0..half).map(|i| b_l[i] + r_k_inv * b_r[i]).collect();
+            b_curr = if half < 1024 {
+                (0..half).map(|i| b_l[i] + r_k_inv * b_r[i]).collect()
+            } else {
+                use rayon::prelude::*;
+                (0..half)
+                    .into_par_iter()
+                    .map(|i| b_l[i] + r_k_inv * b_r[i])
+                    .collect()
+            };
 
             // 折叠 P
             p = p + l_k_point * r_k + r_k_point * r_k_inv;
