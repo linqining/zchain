@@ -264,9 +264,9 @@ mod tests {
     /// 构建含 3 个预编译电路的注册表。
     fn make_registry() -> PrecompileRegistry {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(PoseidonCircuit::new()));
-        registry.register(Box::new(Sha256Circuit::new()));
-        registry.register(Box::new(EcdsaVerifyCircuit::new()));
+        registry.register(Box::new(PoseidonCircuit::new_mvp()));
+        registry.register(Box::new(Sha256Circuit::new_mvp()));
+        registry.register(Box::new(EcdsaVerifyCircuit::new_mvp()));
         registry
     }
 

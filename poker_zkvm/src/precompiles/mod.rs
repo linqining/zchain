@@ -352,15 +352,15 @@ mod tests {
     #[test]
     fn test_phase10_registry_full() {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(poseidon::PoseidonCircuit::new()));
-        registry.register(Box::new(sha256::Sha256Circuit::new()));
-        registry.register(Box::new(ecdsa::EcdsaVerifyCircuit::new()));
-        registry.register(Box::new(zk_shuffle::ZkShuffleCcsCircuit::new()));
-        registry.register(Box::new(keccak256::Keccak256Circuit::new()));
-        registry.register(Box::new(modexp::ModexpCircuit::new()));
-        registry.register(Box::new(merkle_verify::MerkleVerifyCircuit::new()));
-        registry.register(Box::new(ed25519::Ed25519VerifyCircuit::new()));
-        registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new()));
+        registry.register(Box::new(poseidon::PoseidonCircuit::new_mvp()));
+        registry.register(Box::new(sha256::Sha256Circuit::new_mvp()));
+        registry.register(Box::new(ecdsa::EcdsaVerifyCircuit::new_mvp()));
+        registry.register(Box::new(zk_shuffle::ZkShuffleCcsCircuit::new_light()));
+        registry.register(Box::new(keccak256::Keccak256Circuit::new_mvp()));
+        registry.register(Box::new(modexp::ModexpCircuit::new_mvp()));
+        registry.register(Box::new(merkle_verify::MerkleVerifyCircuit::new_mvp()));
+        registry.register(Box::new(ed25519::Ed25519VerifyCircuit::new_mvp()));
+        registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new_mvp()));
 
         assert_eq!(registry.len(), 9, "应有 9 个预编译电路");
 
@@ -470,15 +470,15 @@ mod tests {
         ];
 
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(poseidon::PoseidonCircuit::new()));
-        registry.register(Box::new(sha256::Sha256Circuit::new()));
-        registry.register(Box::new(ecdsa::EcdsaVerifyCircuit::new()));
-        registry.register(Box::new(zk_shuffle::ZkShuffleCcsCircuit::new()));
-        registry.register(Box::new(keccak256::Keccak256Circuit::new()));
-        registry.register(Box::new(modexp::ModexpCircuit::new()));
-        registry.register(Box::new(merkle_verify::MerkleVerifyCircuit::new()));
-        registry.register(Box::new(ed25519::Ed25519VerifyCircuit::new()));
-        registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new()));
+        registry.register(Box::new(poseidon::PoseidonCircuit::new_mvp()));
+        registry.register(Box::new(sha256::Sha256Circuit::new_mvp()));
+        registry.register(Box::new(ecdsa::EcdsaVerifyCircuit::new_mvp()));
+        registry.register(Box::new(zk_shuffle::ZkShuffleCcsCircuit::new_light()));
+        registry.register(Box::new(keccak256::Keccak256Circuit::new_mvp()));
+        registry.register(Box::new(modexp::ModexpCircuit::new_mvp()));
+        registry.register(Box::new(merkle_verify::MerkleVerifyCircuit::new_mvp()));
+        registry.register(Box::new(ed25519::Ed25519VerifyCircuit::new_mvp()));
+        registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new_mvp()));
 
         for (name, min, max) in cases {
             let circuit = registry
@@ -492,11 +492,39 @@ mod tests {
         }
     }
 
+    /// 验证完整模式电路可注册且 gas 正确（不调用 num_variables / build_ccs，避免慢测试）。
+    #[test]
+    fn test_phase10_registry_full_mode_smoke() {
+        let mut registry = PrecompileRegistry::new();
+        registry.register(Box::new(poseidon::PoseidonCircuit::new()));
+        registry.register(Box::new(sha256::Sha256Circuit::new()));
+        registry.register(Box::new(ecdsa::EcdsaVerifyCircuit::new()));
+        registry.register(Box::new(zk_shuffle::ZkShuffleCcsCircuit::new()));
+        registry.register(Box::new(keccak256::Keccak256Circuit::new()));
+        registry.register(Box::new(modexp::ModexpCircuit::new()));
+        registry.register(Box::new(merkle_verify::MerkleVerifyCircuit::new()));
+        registry.register(Box::new(ed25519::Ed25519VerifyCircuit::new()));
+        registry.register(Box::new(bn254_pairing::Bn254PairingCircuit::new()));
+
+        assert_eq!(registry.len(), 9, "应有 9 个预编译电路");
+
+        // 仅验证 name() + gas_cost()（完整模式 gas 值）
+        assert_eq!(registry.get("poseidon").unwrap().gas_cost(), 12_800);
+        assert_eq!(registry.get("sha256").unwrap().gas_cost(), 25_000);
+        assert_eq!(registry.get("ecdsa_verify").unwrap().gas_cost(), 19_376_000);
+        assert_eq!(registry.get("zk_shuffle").unwrap().gas_cost(), 3_540_000);
+        assert_eq!(registry.get("keccak256").unwrap().gas_cost(), 240_000);
+        assert_eq!(registry.get("modexp").unwrap().gas_cost(), 69_200);
+        assert_eq!(registry.get("merkle_verify").unwrap().gas_cost(), 100);
+        assert_eq!(registry.get("ed25519").unwrap().gas_cost(), 2_066_000);
+        assert_eq!(registry.get("bn254_pairing").unwrap().gas_cost(), 80_000);
+    }
+
     /// 验证 Poseidon/SHA-256/ECDSA 三个真实电路的 CCS 闭环（build → assign → satisfied）。
     #[test]
     fn test_phase10_real_circuits_ccs_closed_loop() {
         // Poseidon: x=3 → x5=243
-        let poseidon = poseidon::PoseidonCircuit::new();
+        let poseidon = poseidon::PoseidonCircuit::new_mvp();
         let ccs = poseidon.build_ccs();
         let witness = poseidon
             .assign_witness(&[Fr::from_u32_with_wrap(3)])
@@ -504,7 +532,7 @@ mod tests {
         assert!(ccs.satisfied_by(&witness).expect("poseidon satisfied_by"));
 
         // SHA-256: x=1, y=1, z=0 → Ch=1
-        let sha256 = sha256::Sha256Circuit::new();
+        let sha256 = sha256::Sha256Circuit::new_mvp();
         let ccs = sha256.build_ccs();
         let witness = sha256
             .assign_witness(&[
@@ -516,7 +544,7 @@ mod tests {
         assert!(ccs.satisfied_by(&witness).expect("sha256 satisfied_by"));
 
         // ECDSA: bit=1, R=42, P=100 → R_new=142
-        let ecdsa = ecdsa::EcdsaVerifyCircuit::new();
+        let ecdsa = ecdsa::EcdsaVerifyCircuit::new_mvp();
         let ccs = ecdsa.build_ccs();
         let witness = ecdsa
             .assign_witness(&[

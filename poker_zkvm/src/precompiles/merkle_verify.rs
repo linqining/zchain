@@ -40,9 +40,18 @@ pub struct MerkleVerifyCircuit {
 }
 
 impl MerkleVerifyCircuit {
-    /// 创建 MVP 模式电路（单层验证）。
+    /// 创建 Full 模式电路（depth=1 路径验证，含 conditional select）。
     #[must_use]
     pub fn new() -> Self {
+        Self {
+            depth: 1,
+            full_mode: true,
+        }
+    }
+
+    /// 创建 MVP 模式电路（单层验证，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self {
             depth: 1,
             full_mode: false,
@@ -346,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_merkle_mvp_satisfied() {
-        let circuit = MerkleVerifyCircuit::new();
+        let circuit = MerkleVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let left = Fr::from_u64(3);
         let right = Fr::from_u64(4);
@@ -365,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_merkle_mvp_tampered_parent() {
-        let circuit = MerkleVerifyCircuit::new();
+        let circuit = MerkleVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let left = Fr::from_u64(3);
         let right = Fr::from_u64(4);
@@ -383,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_merkle_mvp_tampered_left() {
-        let circuit = MerkleVerifyCircuit::new();
+        let circuit = MerkleVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let left = Fr::from_u64(3);
         let right = Fr::from_u64(4);
@@ -543,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_merkle_gas_cost() {
-        let mvp = MerkleVerifyCircuit::new();
+        let mvp = MerkleVerifyCircuit::new_mvp();
         assert_eq!(mvp.gas_cost(), 100);
 
         let full3 = MerkleVerifyCircuit::new_full_with_depth(3);
@@ -555,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_merkle_wrong_input_length() {
-        let circuit = MerkleVerifyCircuit::new();
+        let circuit = MerkleVerifyCircuit::new_mvp();
         let result = circuit.assign_witness(&[Fr::one()]);
         assert!(result.is_err());
 
@@ -566,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_merkle_ccs_circuit_trait() {
-        let circuit = MerkleVerifyCircuit::new();
+        let circuit = MerkleVerifyCircuit::new_mvp();
         let _ccs = circuit.build_ccs();
         let witness = circuit
             .assign_witness(&[Fr::from_u64(3), Fr::from_u64(4), Fr::from_u64(10)])

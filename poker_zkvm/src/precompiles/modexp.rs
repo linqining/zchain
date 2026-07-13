@@ -42,9 +42,18 @@ pub struct ModexpCircuit {
 }
 
 impl ModexpCircuit {
-    /// 创建 MVP 模式电路（单次模乘验证）。
+    /// 创建 Full 模式电路（square-and-multiply，32-bit 指数）。
     #[must_use]
     pub fn new() -> Self {
+        Self {
+            num_bits: 32,
+            full_mode: true,
+        }
+    }
+
+    /// 创建 MVP 模式电路（单次模乘验证，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self {
             num_bits: 0,
             full_mode: false,
@@ -384,7 +393,7 @@ mod tests {
         let modulus = [7u64, 0, 0, 0];
         let result = [6u64, 0, 0, 0];
 
-        let circuit = ModexpCircuit::new();
+        let circuit = ModexpCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let witness = circuit
             .assign_witness(&make_inputs(&base, &exp, &modulus, &result))
@@ -404,7 +413,7 @@ mod tests {
         let modulus = [7u64, 0, 0, 0];
         let result = [5u64, 0, 0, 0]; // 篡改：应为 6
 
-        let circuit = ModexpCircuit::new();
+        let circuit = ModexpCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let witness = circuit
             .assign_witness(&make_inputs(&base, &exp, &modulus, &result))
@@ -485,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_modexp_gas_cost() {
-        let mvp = ModexpCircuit::new();
+        let mvp = ModexpCircuit::new_mvp();
         assert_eq!(mvp.gas_cost(), 50_000);
 
         let full8 = ModexpCircuit::new_full_with_bits(8);
@@ -497,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_modexp_wrong_input_length() {
-        let circuit = ModexpCircuit::new();
+        let circuit = ModexpCircuit::new_mvp();
         let result = circuit.assign_witness(&[Fr::one()]);
         assert!(result.is_err());
 

@@ -520,9 +520,18 @@ pub struct Ed25519VerifyCircuit {
 }
 
 impl Ed25519VerifyCircuit {
-    /// 创建 MVP 模式电路（单点加法验证）。
+    /// 创建 Full 模式电路（252-bit 完整标量乘法）。
     #[must_use]
     pub fn new() -> Self {
+        Self {
+            full_mode: true,
+            scalar_num_bits: 252,
+        }
+    }
+
+    /// 创建 MVP 模式电路（单点加法验证，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self {
             full_mode: false,
             scalar_num_bits: 0,
@@ -659,12 +668,24 @@ impl PrecompileCircuit for Ed25519VerifyCircuit {
     }
 
     fn num_variables(&self) -> usize {
-        if self.full_mode { 0 } else { 6 }
+        if self.full_mode {
+            let dummy = vec![Fr::zero(); 20];
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_vars
+        } else {
+            6
+        }
     }
 
     fn build_ccs(&self) -> Ccs {
         if self.full_mode {
-            return Ccs::new(1, vec![], vec![], vec![]).expect("minimal CCS for full mode");
+            let dummy = vec![Fr::zero(); 20];
+            return self
+                .run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0;
         }
 
         // MVP: 7 个行隔离矩阵（同 ecdsa MVP 模式）
@@ -726,9 +747,7 @@ impl PrecompileCircuit for Ed25519VerifyCircuit {
 
     fn assign_witness(&self, inputs: &[Fr]) -> Result<Vec<Fr>, ZkvmError> {
         if self.full_mode {
-            return Err(ZkvmError::Other(
-                "Ed25519VerifyCircuit: full mode 请使用 run_full() 方法".to_string(),
-            ));
+            return Ok(self.run_full(inputs)?.1);
         }
 
         if inputs.len() != 3 {
@@ -762,7 +781,15 @@ impl CcsCircuit for Ed25519VerifyCircuit {
     }
 
     fn num_matrices(&self) -> usize {
-        if self.full_mode { 0 } else { 7 }
+        if self.full_mode {
+            let dummy = vec![Fr::zero(); 20];
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_matrices()
+        } else {
+            7
+        }
     }
 
     fn to_ccs_instance(
@@ -770,12 +797,6 @@ impl CcsCircuit for Ed25519VerifyCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        if self.full_mode {
-            return Err(ZkvmError::Other(
-                "Ed25519VerifyCircuit: full mode 请使用 run_full() 方法".to_string(),
-            ));
-        }
-
         let ccs = self.build_ccs();
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
@@ -1175,7 +1196,7 @@ mod tests {
         inputs.extend(u256_to_fr_vec(&x2));
         inputs.extend(u256_to_fr_vec(&y2));
 
-        let circuit = Ed25519VerifyCircuit::new();
+        let circuit = Ed25519VerifyCircuit::new_mvp();
         let (ccs, witness) = circuit.run_mvp(&inputs).expect("run_mvp ok");
         assert!(ccs.num_rows() > 1000);
         let instance = CcsInstance::new(ccs, witness, vec![]).expect("instance");
@@ -1205,7 +1226,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_gas_cost() {
-        let mvp = Ed25519VerifyCircuit::new();
+        let mvp = Ed25519VerifyCircuit::new_mvp();
         assert_eq!(mvp.gas_cost(), 50_000);
 
         let full_8 = Ed25519VerifyCircuit::new_full_with_bits(8);
@@ -1217,7 +1238,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_wrong_input_length() {
-        let circuit = Ed25519VerifyCircuit::new();
+        let circuit = Ed25519VerifyCircuit::new_mvp();
         assert!(circuit.run_mvp(&[Fr::zero(); 23]).is_err());
         assert!(circuit.run_mvp(&[Fr::zero(); 25]).is_err());
 
@@ -1256,7 +1277,7 @@ mod tests {
     #[test]
     fn test_ed25519_registers_in_precompile_registry() {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(Ed25519VerifyCircuit::new()));
+        registry.register(Box::new(Ed25519VerifyCircuit::new_mvp()));
         let found = registry.get("ed25519");
         assert!(found.is_some());
         assert_eq!(found.unwrap().gas_cost(), 50_000);

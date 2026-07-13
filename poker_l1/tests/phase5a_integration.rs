@@ -1053,7 +1053,7 @@ fn subtask_42_5_zk_shuffle_ccs_circuit_trait() {
     use poker_zkvm::precompiles::PrecompileCircuit;
     use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;
 
-    let circuit = ZkShuffleCcsCircuit::new();
+    let circuit = ZkShuffleCcsCircuit::new_light();
 
     assert_eq!(circuit.name(), "zk_shuffle");
     // PrecompileCircuit trait

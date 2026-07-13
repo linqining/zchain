@@ -51,9 +51,15 @@ pub struct Bn254PairingCircuit {
 }
 
 impl Bn254PairingCircuit {
-    /// 创建 MVP 模式电路（单 G1 曲线检查）。
+    /// 创建 Full 模式电路（双 G1 检查 + 配对 hint）。
     #[must_use]
     pub fn new() -> Self {
+        Self { full_mode: true }
+    }
+
+    /// 创建 MVP 模式电路（单 G1 曲线检查，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self { full_mode: false }
     }
 
@@ -155,12 +161,24 @@ impl PrecompileCircuit for Bn254PairingCircuit {
     }
 
     fn num_variables(&self) -> usize {
-        if self.full_mode { 0 } else { 4 }
+        if self.full_mode {
+            let dummy = vec![Fr::zero(); 17];
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_vars
+        } else {
+            4
+        }
     }
 
     fn build_ccs(&self) -> Ccs {
         if self.full_mode {
-            return Ccs::new(1, vec![], vec![], vec![]).expect("minimal CCS for full mode");
+            let dummy = vec![Fr::zero(); 17];
+            return self
+                .run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0;
         }
 
         // MVP: 简化版 4 变量（bit-check 风格，与 ed25519/ecdsa MVP 一致）
@@ -194,9 +212,7 @@ impl PrecompileCircuit for Bn254PairingCircuit {
 
     fn assign_witness(&self, inputs: &[Fr]) -> Result<Vec<Fr>, ZkvmError> {
         if self.full_mode {
-            return Err(ZkvmError::Other(
-                "Bn254PairingCircuit: full mode 请使用 run_full() 方法".to_string(),
-            ));
+            return Ok(self.run_full(inputs)?.1);
         }
 
         if inputs.len() != 2 {
@@ -229,7 +245,15 @@ impl CcsCircuit for Bn254PairingCircuit {
     }
 
     fn num_matrices(&self) -> usize {
-        if self.full_mode { 0 } else { 3 }
+        if self.full_mode {
+            let dummy = vec![Fr::zero(); 17];
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_matrices()
+        } else {
+            3
+        }
     }
 
     fn to_ccs_instance(
@@ -237,12 +261,6 @@ impl CcsCircuit for Bn254PairingCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        if self.full_mode {
-            return Err(ZkvmError::Other(
-                "Bn254PairingCircuit: full mode 请使用 run_full() 方法".to_string(),
-            ));
-        }
-
         let ccs = self.build_ccs();
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
@@ -294,7 +312,7 @@ mod tests {
         inputs.extend(u256_to_fr_vec(&BN254_G1_X));
         inputs.extend(u256_to_fr_vec(&BN254_G1_Y));
 
-        let circuit = Bn254PairingCircuit::new();
+        let circuit = Bn254PairingCircuit::new_mvp();
         let (ccs, witness) = circuit.run_mvp(&inputs).expect("run_mvp ok");
         assert!(ccs.num_rows() > 1000);
         let instance = CcsInstance::new(ccs, witness, vec![]).expect("instance");
@@ -308,7 +326,7 @@ mod tests {
         inputs.extend(u256_to_fr_vec(&[1, 0, 0, 0]));
         inputs.extend(u256_to_fr_vec(&[3, 0, 0, 0]));
 
-        let circuit = Bn254PairingCircuit::new();
+        let circuit = Bn254PairingCircuit::new_mvp();
         let (ccs, witness) = circuit.run_mvp(&inputs).expect("run_mvp ok");
         let instance = CcsInstance::new(ccs, witness, vec![]).expect("instance");
         assert!(
@@ -355,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_bn254_pairing_gas_cost() {
-        let mvp = Bn254PairingCircuit::new();
+        let mvp = Bn254PairingCircuit::new_mvp();
         assert_eq!(mvp.gas_cost(), 30_000);
 
         let full = Bn254PairingCircuit::new_full();
@@ -364,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_bn254_pairing_wrong_input_length() {
-        let circuit = Bn254PairingCircuit::new();
+        let circuit = Bn254PairingCircuit::new_mvp();
         assert!(circuit.run_mvp(&[Fr::zero(); 7]).is_err());
         assert!(circuit.run_mvp(&[Fr::zero(); 9]).is_err());
 
@@ -376,7 +394,7 @@ mod tests {
     #[test]
     fn test_bn254_pairing_registers_in_precompile_registry() {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(Bn254PairingCircuit::new()));
+        registry.register(Box::new(Bn254PairingCircuit::new_mvp()));
         let found = registry.get("bn254_pairing");
         assert!(found.is_some());
         assert_eq!(found.unwrap().gas_cost(), 30_000);

@@ -61,9 +61,18 @@ pub struct PoseidonCircuit {
 }
 
 impl PoseidonCircuit {
-    /// 创建 Poseidon 电路（MVP 模式，alpha=5）。
+    /// 创建 Poseidon 电路（完整 64 轮 permutation 模式，alpha=5）。
     #[must_use]
     pub fn new() -> Self {
+        Self {
+            alpha: 5,
+            full_mode: true,
+        }
+    }
+
+    /// 创建 Poseidon 电路（MVP 模式，单 S-box 约束，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self {
             alpha: 5,
             full_mode: false,
@@ -445,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_poseidon_circuit_build_ccs() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         assert_eq!(ccs.num_matrices(), 7, "应有 7 个行隔离矩阵");
         assert_eq!(ccs.num_constraints(), 6, "应有 6 个 subsets");
@@ -455,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_poseidon_circuit_satisfied_by() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let x = Fr::from_u32_with_wrap(3);
         let witness = circuit.assign_witness(&[x]).expect("assign_witness 应成功");
@@ -465,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_poseidon_circuit_soundness_tampered_x5() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let x = Fr::from_u32_with_wrap(3);
         let mut witness = circuit.assign_witness(&[x]).expect("assign_witness 应成功");
@@ -478,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_poseidon_circuit_soundness_tampered_x2() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let x = Fr::from_u32_with_wrap(3);
         let mut witness = circuit.assign_witness(&[x]).expect("assign_witness 应成功");
@@ -491,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_poseidon_circuit_consistency_with_host() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let x_bn = Fr::from_u32_with_wrap(7);
         let witness = circuit
             .assign_witness(&[x_bn])
@@ -505,14 +514,14 @@ mod tests {
 
     #[test]
     fn test_poseidon_circuit_empty_input() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let result = circuit.assign_witness(&[]);
         assert!(result.is_err(), "空输入应返回错误");
     }
 
     #[test]
     fn test_poseidon_circuit_wrong_input_length() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let result = circuit.assign_witness(&[Fr::one(), Fr::one()]);
         assert!(result.is_err(), "输入长度 != 1 应返回错误");
     }
@@ -520,7 +529,7 @@ mod tests {
     #[test]
     fn test_poseidon_circuit_registry_integration() {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(PoseidonCircuit::new()));
+        registry.register(Box::new(PoseidonCircuit::new_mvp()));
         assert_eq!(registry.len(), 1);
         let circuit = registry.get("poseidon").expect("应找到 poseidon");
         assert_eq!(circuit.name(), "poseidon");
@@ -530,13 +539,13 @@ mod tests {
 
     #[test]
     fn test_poseidon_circuit_gas_cost() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         assert_eq!(circuit.gas_cost(), 200, "MVP gas_cost 应为 200");
     }
 
     #[test]
     fn test_poseidon_circuit_ccs_circuit_trait() {
-        let circuit = PoseidonCircuit::new();
+        let circuit = PoseidonCircuit::new_mvp();
         let x = Fr::from_u32_with_wrap(5);
         let witness = circuit.assign_witness(&[x]).expect("assign_witness 应成功");
         let public_inputs = vec![Fr::one()];
@@ -843,7 +852,7 @@ mod tests {
     #[test]
     fn test_poseidon_full_backward_compatibility() {
         // MVP 模式不受完整模式影响
-        let mvp = PoseidonCircuit::new();
+        let mvp = PoseidonCircuit::new_mvp();
         assert!(!mvp.is_full_mode());
         assert_eq!(mvp.num_variables(), 5);
         assert_eq!(mvp.gas_cost(), 200);

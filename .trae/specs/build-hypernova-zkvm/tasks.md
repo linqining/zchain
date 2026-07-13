@@ -292,19 +292,19 @@
 ## Phase 10：预编译电路
 
 - [x] Task 10.1：实现 `poker_zkvm/src/precompiles/mod.rs` — 预编译电路注册表
-- [x] Task 10.2：实现 `poker_zkvm/src/precompiles/poseidon.rs` — Poseidon 哈希电路（MVP: S-box `x^5` 单 round 约束结构）
-  - [ ] SubTask 10.2.1：实现 Poseidon permutation 电路（round function + MDS matrix）— **延至 Phase 12+**（MVP 仅 S-box 单 round）
-  - [ ] SubTask 10.2.2：约束数 ≈ 200/round — **延至 Phase 12+**（MVP ~6 constraints/S-box）
-  - [ ] SubTask 10.2.3：单元测试 — 正例输入产出预期哈希；与 host `poker_protocol::crypto::poseidon` 输出一致 — **延至 Phase 12+**（MVP 仅验证 ark_bn254::Fr `x^5` 一致）
-- [x] Task 10.3：实现 `poker_zkvm/src/precompiles/sha256.rs` — SHA-256 电路（MVP: Ch 函数单 op 约束结构）
-  - [ ] SubTask 10.3.1：实现 SHA-256 round 电路（message schedule + compression）— **延至 Phase 12+**（MVP 仅 Ch 函数）
-  - [ ] SubTask 10.3.2：约束数 ≈ 25,000/block，通过 lookup 优化 — **延至 Phase 12+**（MVP 单 Ch op）
+- [x] Task 10.2：实现 `poker_zkvm/src/precompiles/poseidon.rs` — Poseidon 哈希电路（Full: 64 轮 permutation + MDS matrix；`new()` 默认 Full，`new_mvp()` 保留 MVP）
+  - [x] SubTask 10.2.1：实现 Poseidon permutation 电路（round function + MDS matrix）
+  - [x] SubTask 10.2.2：约束数 ≈ 200/round（Full mode `FULL_MODE_GAS_COST = 12_800`）
+  - [x] SubTask 10.2.3：单元测试 — 正例输入产出预期哈希；与 host `poker_protocol::crypto::poseidon` 输出一致
+- [x] Task 10.3：实现 `poker_zkvm/src/precompiles/sha256.rs` — SHA-256 电路（Full: 完整 compression；`new()` 默认 Full，`new_mvp()` 保留 MVP）
+  - [x] SubTask 10.3.1：实现 SHA-256 round 电路（message schedule + compression）
+  - [x] SubTask 10.3.2：约束数 ≈ 25,000/block（Full mode `FULL_MODE_NUM_VARS = 172_577`，`FULL_MODE_GAS_COST = 25_000`）
   - [x] SubTask 10.3.3：单元测试 — 与 `sha2` crate 输出一致（host sha2 已验证 known vectors）
-- [x] Task 10.4：实现 `poker_zkvm/src/precompiles/ecdsa.rs` — ECDSA 验签电路（**约束预算重算**；MVP: double-and-add 单步约束结构）
-  - [ ] SubTask 10.4.1：实现 secp256k1 curve operations 电路 — **延至 Phase 12+**（MVP 仅单步）
-  - [ ] SubTask 10.4.2：实现 ECDSA verify equation 电路 — **延至 Phase 12+**
-  - [ ] SubTask 10.4.3：**实际约束数 ≈ 110,000**（基于 `__mulsi3` shift-add × 256 次标量乘 + 哈希 + 最终比较）— **延至 Phase 12+**（MVP 单步）
-  - [ ] SubTask 10.4.4：单元测试 — 正例签名通过；篡改 msg / sig / pubkey 必须失败 — **延至 Phase 12+**（MVP 已测篡改 R_new / bit_P / bit 非二进制 soundness）
+- [x] Task 10.4：实现 `poker_zkvm/src/precompiles/ecdsa.rs` — ECDSA 验签电路（Full: 256-bit 完整标量乘；`new()` 默认 Full，`new_mvp()` 保留 MVP）
+  - [x] SubTask 10.4.1：实现 secp256k1 curve operations 电路
+  - [x] SubTask 10.4.2：实现 ECDSA verify equation 电路
+  - [x] SubTask 10.4.3：**实际约束数 ≈ 19,376,000 gas**（基于 256-bit scalar_mul × 3 + point_add + assert_point_equal）
+  - [x] SubTask 10.4.4：单元测试 — 正例签名通过；篡改 msg / sig / pubkey 必须失败
 - [x] Task 10.5：迁移 `poker_l1/src/offline/ccs.rs:ZkShuffleCcsCircuit` 到 `poker_zkvm/src/precompiles/zk_shuffle.rs`（stub，D6 批准）
   - [x] SubTask 10.5.1：迁移类型定义与 trait 实现（stub — `to_ccs_instance` 返回 `Err("Phase 11 pending")`）
   - [ ] SubTask 10.5.2：在 `poker_l1/src/offline/ccs.rs` 替换为 `pub use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;` — **延至 Phase 11**（新旧 `CcsCircuit` trait 签名不兼容：旧 u8-based `to_instance` vs 新 Fr-based `to_ccs_instance`，须 BREAKING 迁移）
@@ -312,15 +312,15 @@
 
 ## Phase 11：poker_l1 集成与 stub 替换（v1.2 CcsInstance 诚实 BREAKING + CheckinTx proof_kind 序列化 + scheme_id 映射）
 
-- [ ] Task 11.1：替换 `poker_l1/src/offline/ccs.rs` 中的 stub fold 实现（**v1.2 诚实 BREAKING 声明**）
-  - [ ] SubTask 11.1.1：旧 `CcsInstance`（hash-based）标记 `#[deprecated(note = "Use poker_zkvm::fold::CcsInstance instead")]`
-  - [ ] SubTask 11.1.2：实现 `LegacyCcsInstanceAdapter` — **v1.2 诚实声明**：仅用于过渡期**编译兼容**，返回 `Err(Other("legacy hash-based instance cannot be really folded — hash is one-way, cannot recover matrices"))`，**不参与真实证明生成**；旧调用方在 Production 下会失败，必须重构以提供真实矩阵
-  - [ ] SubTask 11.1.3：`fold_step` 内部调用 `poker_zkvm::fold::fold_step`（接受新 `CcsInstance` 类型，**外部 trait 签名变更** — 参数类型从旧 hash-based 改为新含矩阵类型，既有调用方必须迁移，无法透明兼容）
-  - [ ] SubTask 11.1.4：`fold_loop` 内部调用 `poker_zkvm::fold::fold_loop`（接受新 `CcsInstance` 类型，同 SubTask 11.1.3 BREAKING）
-  - [ ] SubTask 11.1.5：移除 blake2b 哈希链冒充逻辑
-  - [ ] SubTask 11.1.6：`CcsCircuit` trait 一并迁入 `poker_zkvm::precompiles`，`poker_l1` 通过 `pub use poker_zkvm::precompiles::CcsCircuit;` re-export
-  - [ ] SubTask 11.1.7：更新既有单元测试 — 调用方迁移到新类型，断言改为真实折叠语义
-  - [ ] SubTask 11.1.8：提供迁移示例文档（既存调用方如何迁移）— 含 `LegacyCcsInstanceAdapter` 失败语义说明
+- [x] Task 11.1：替换 `poker_l1/src/offline/ccs.rs` 中的 stub fold 实现（**v1.2 诚实 BREAKING 声明**）
+  - [x] SubTask 11.1.1：旧 `CcsInstance`（hash-based）标记 `#[deprecated(note = "Use poker_zkvm::fold::CcsInstance instead")]`
+  - [x] SubTask 11.1.2：实现 `LegacyCcsInstanceAdapter` — **v1.2 诚实声明**：仅用于过渡期**编译兼容**，返回 `Err(Other("legacy hash-based instance cannot be really folded — hash is one-way, cannot recover matrices"))`，**不参与真实证明生成**；旧调用方在 Production 下会失败，必须重构以提供真实矩阵
+  - [x] SubTask 11.1.3：`fold_step` 内部调用 `poker_zkvm::fold::fold_step`（接受新 `CcsInstance` 类型，**外部 trait 签名变更** — 参数类型从旧 hash-based 改为新含矩阵类型，既有调用方必须迁移，无法透明兼容）
+  - [x] SubTask 11.1.4：`fold_loop` 内部调用 `poker_zkvm::fold::fold_loop`（接受新 `CcsInstance` 类型，同 SubTask 11.1.3 BREAKING）
+  - [x] SubTask 11.1.5：移除 blake2b 哈希链冒充逻辑
+  - [x] SubTask 11.1.6：`CcsCircuit` trait 一并迁入 `poker_zkvm::precompiles`，`poker_l1` 通过 `pub use poker_zkvm::precompiles::CcsCircuit;` re-export
+  - [x] SubTask 11.1.7：更新既有单元测试 — 调用方迁移到新类型，断言改为真实折叠语义
+  - [x] SubTask 11.1.8：提供迁移示例文档（既存调用方如何迁移）— 含 `LegacyCcsInstanceAdapter` 失败语义说明
 - [x] Task 11.2：扩展 `CheckinTx` / `PartialCheckinTx` 接受 ZKVM proof（**v1.2 proof_kind 序列化策略 + scheme_id 映射**）
   - [x] SubTask 11.2.1：定义 `ProofKind` 枚举（`ZkShuffle` / `Zkvm`）
   - [x] SubTask 11.2.2：**v1.2 scheme_id 映射** — 定义 `SCHEME_ZKSHUFFLE = 4`（新增）/ `SCHEME_HYPERNOVA = 1`（既有）；`ProofKind::ZkShuffle → SCHEME_ZKSHUFFLE` / `ProofKind::Zkvm → SCHEME_HYPERNOVA`
@@ -333,21 +333,21 @@
 
 ## Phase 11.5：治理参数与 gas 调整 — **新增 Phase**（v1.2 补 6 项 Proof 字段长度上限 + production_switch_height）
 
-- [ ] Task 11.5.1：调整 `poker_l1/src/vm/gas_table.rs`
-  - [ ] SubTask 11.5.1.1：`GAS_HYPERNOVA_VERIFY` 从 50000 → 300000（**覆盖 Spartan pairing + final exp + IPA verify log(N) 轮 MSM + 余量；本参数须在 Phase 12 性能基准实测后再次校准**）
-  - [ ] SubTask 11.5.1.2：新增 `GAS_ZKVM_POSEIDON_BASE / PER_BLOCK` / `GAS_ZKVM_SHA256_PER_BYTE` / `GAS_ZKVM_ECDSA_VERIFY = 100000` / `GAS_ZKVM_READ_STATE_PER_SLOT` 常量
-- [ ] Task 11.5.2：扩展治理敏感参数清单（`governance_params.rs` 或对应文件）
-  - [ ] SubTask 11.5.2.1：新增 `MAX_ZKVM_TRACE_STEPS = 1,048,576` 到 90% quorum 敏感参数表
-  - [ ] SubTask 11.5.2.2：新增 `MAX_ZKVM_MEMORY = 16MB`
-  - [ ] SubTask 11.5.2.3：新增 `MAX_ZKVM_PROOF_SIZE = 64KB`
-  - [ ] SubTask 11.5.2.4：新增 `ZKVM_BATCH_SIZE = 1024`（含一致性约束 `MAX_ZKVM_TRACE_STEPS / ZKVM_BATCH_SIZE ≤ MAX_FOLD_STEP_COUNT`）
-  - [ ] SubTask 11.5.2.5：新增 `MAX_RECURSION_DEPTH = 16`
-  - [ ] SubTask 11.5.2.6：新增 `MAX_TRACE_HOST_MEMORY = 512MB`
-  - [ ] SubTask 11.5.2.7：新增 `PRODUCTION_GRACE_BLOCKS = 7200`
-  - [ ] SubTask 11.5.2.8：新增 `GAS_HYPERNOVA_VERIFY = 300000` 到敏感参数表
-  - [ ] SubTask 11.5.2.9：**v1.3 修正 M2-002 — Proof 字段长度上限参数（单项子分配，和 ≤ 总上限 ≈ 48KB < 64KB）**（防 verifier OOM DoS，见 Task 5.5.1.5）：`MAX_PUBLIC_IO_SIZE = 8KB` / `MAX_FOLDED_INSTANCE_SIZE = 8KB` / `MAX_SUMCHECK_PROOF_SIZE = 16KB` / `MAX_PCS_OPENING_SIZE = 8KB` / `MAX_EVENT_HASHES_COUNT = 256`（256 × 32 = 8KB）（**注：`witness_commitment_len ≤ 33` 为常量非治理参数**；**v1.2 单项 64KB×3+16KB=208KB > 总 64KB 矛盾，v1.3 修正为子分配**）
-  - [ ] SubTask 11.5.2.10：**v1.2 新增 `production_switch_height` 字段**（`GovernanceParams` 一次性写入字段 — 治理切换 `verifier_status` 从 `Stub` 到 `Production` 时写入当前 block height，grace 期起算点；grace 期结束后可清零；非持续调整参数，但写入须 90% quorum）
-  - [ ] SubTask 11.5.2.11：单元测试 — 所有敏感参数调整须 90% quorum + timelock；`ZKVM_BATCH_SIZE` 调整后一致性约束生效；**`production_switch_height` 一次性写入后不可改（除非 grace 期结束清零）**
+- [x] Task 11.5.1：调整 `poker_l1/src/vm/gas_table.rs`
+  - [x] SubTask 11.5.1.1：`GAS_HYPERNOVA_VERIFY` 从 50000 → 300000（**覆盖 Spartan pairing + final exp + IPA verify log(N) 轮 MSM + 余量；本参数须在 Phase 12 性能基准实测后再次校准**）
+  - [x] SubTask 11.5.1.2：新增 `GAS_ZKVM_POSEIDON_BASE / PER_BLOCK` / `GAS_ZKVM_SHA256_PER_BYTE` / `GAS_ZKVM_ECDSA_VERIFY = 100000` / `GAS_ZKVM_READ_STATE_PER_SLOT` 常量
+- [x] Task 11.5.2：扩展治理敏感参数清单（`governance_params.rs` 或对应文件）
+  - [x] SubTask 11.5.2.1：新增 `MAX_ZKVM_TRACE_STEPS = 1,048,576` 到 90% quorum 敏感参数表
+  - [x] SubTask 11.5.2.2：新增 `MAX_ZKVM_MEMORY = 16MB`
+  - [x] SubTask 11.5.2.3：新增 `MAX_ZKVM_PROOF_SIZE = 64KB`
+  - [x] SubTask 11.5.2.4：新增 `ZKVM_BATCH_SIZE = 1024`（含一致性约束 `MAX_ZKVM_TRACE_STEPS / ZKVM_BATCH_SIZE ≤ MAX_FOLD_STEP_COUNT`）
+  - [x] SubTask 11.5.2.5：新增 `MAX_RECURSION_DEPTH = 16`
+  - [x] SubTask 11.5.2.6：新增 `MAX_TRACE_HOST_MEMORY = 512MB`
+  - [x] SubTask 11.5.2.7：新增 `PRODUCTION_GRACE_BLOCKS = 7200`
+  - [x] SubTask 11.5.2.8：新增 `GAS_HYPERNOVA_VERIFY = 300000` 到敏感参数表
+  - [x] SubTask 11.5.2.9：**v1.3 修正 M2-002 — Proof 字段长度上限参数（单项子分配，和 ≤ 总上限 ≈ 48KB < 64KB）**（防 verifier OOM DoS，见 Task 5.5.1.5）：`MAX_PUBLIC_IO_SIZE = 8KB` / `MAX_FOLDED_INSTANCE_SIZE = 8KB` / `MAX_SUMCHECK_PROOF_SIZE = 16KB` / `MAX_PCS_OPENING_SIZE = 8KB` / `MAX_EVENT_HASHES_COUNT = 256`（256 × 32 = 8KB）（**注：`witness_commitment_len ≤ 33` 为常量非治理参数**；**v1.2 单项 64KB×3+16KB=208KB > 总 64KB 矛盾，v1.3 修正为子分配**）
+  - [x] SubTask 11.5.2.10：**v1.2 新增 `production_switch_height` 字段**（`GovernanceParams` 一次性写入字段 — 治理切换 `verifier_status` 从 `Stub` 到 `Production` 时写入当前 block height，grace 期起算点；grace 期结束后可清零；非持续调整参数，但写入须 90% quorum）
+  - [x] SubTask 11.5.2.11：单元测试 — 所有敏感参数调整须 90% quorum + timelock；`ZKVM_BATCH_SIZE` 调整后一致性约束生效；**`production_switch_height` 一次性写入后不可改（除非 grace 期结束清零）**
 
 ## Phase 12：端到端集成测试
 

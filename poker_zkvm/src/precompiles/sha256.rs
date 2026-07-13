@@ -49,6 +49,10 @@ const SHA256_H0: [u32; 8] = [
 /// 完整模式 gas 成本（spec L637: SHA-256 ~25,000 gas/block）。
 const FULL_MODE_GAS_COST: u64 = 25_000;
 
+/// 完整模式变量数（64-round compression，bit 级展开）。
+/// 硬编码以避免每次 `num_variables()` 调用都构建 ~170K 变量的 CCS。
+const FULL_MODE_NUM_VARS: usize = 172_577;
+
 /// 预计算 2^i (i=0..31) 作为域元素。
 fn power_of_2(i: usize) -> Fr {
     Fr::from_u64(1u64 << i)
@@ -67,9 +71,19 @@ pub struct Sha256Circuit {
 }
 
 impl Sha256Circuit {
-    /// 创建 SHA-256 电路（MVP 模式，block_size=64, output_size=32）。
+    /// 创建 SHA-256 电路（完整 64-round compression 模式，block_size=64, output_size=32）。
     #[must_use]
     pub fn new() -> Self {
+        Self {
+            block_size: 64,
+            output_size: 32,
+            full_mode: true,
+        }
+    }
+
+    /// 创建 SHA-256 电路（MVP 模式，单 Ch 函数约束，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self {
             block_size: 64,
             output_size: 32,
@@ -248,8 +262,7 @@ impl PrecompileCircuit for Sha256Circuit {
 
     fn num_variables(&self) -> usize {
         if self.full_mode {
-            let dummy = vec![Fr::zero(); 24];
-            self.run_full(&dummy).unwrap().0.num_vars
+            FULL_MODE_NUM_VARS
         } else {
             6
         }
@@ -612,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_sha256_circuit_build_ccs() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         let ccs = circuit.build_ccs();
         assert_eq!(ccs.num_matrices(), 7);
         assert_eq!(ccs.num_constraints(), 6);
@@ -622,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_sha256_circuit_satisfied_by() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         let ccs = circuit.build_ccs();
         let inputs = vec![
             Fr::from_u32_with_wrap(1),
@@ -638,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_sha256_circuit_soundness_tampered_ch() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         let ccs = circuit.build_ccs();
         let inputs = vec![
             Fr::from_u32_with_wrap(1),
@@ -654,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_sha256_circuit_soundness_tampered_ymz() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         let ccs = circuit.build_ccs();
         let inputs = vec![
             Fr::from_u32_with_wrap(1),
@@ -670,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_sha256_circuit_consistency_with_bit_ch() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         for x in 0..=1u32 {
             for y in 0..=1u32 {
                 for z in 0..=1u32 {
@@ -723,14 +736,14 @@ mod tests {
 
     #[test]
     fn test_sha256_circuit_empty_input() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         let result = circuit.assign_witness(&[]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_sha256_circuit_wrong_input_length() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         let result = circuit.assign_witness(&[Fr::one(), Fr::one()]);
         assert!(result.is_err());
     }
@@ -738,7 +751,7 @@ mod tests {
     #[test]
     fn test_sha256_circuit_registry_integration() {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(Sha256Circuit::new()));
+        registry.register(Box::new(Sha256Circuit::new_mvp()));
         assert_eq!(registry.len(), 1);
         let circuit = registry.get("sha256").expect("应找到 sha256");
         assert_eq!(circuit.name(), "sha256");
@@ -748,20 +761,20 @@ mod tests {
 
     #[test]
     fn test_sha256_circuit_gas_cost() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         assert_eq!(circuit.gas_cost(), 25_000);
     }
 
     #[test]
     fn test_sha256_circuit_block_and_output_size() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         assert_eq!(circuit.block_size(), 64);
         assert_eq!(circuit.output_size(), 32);
     }
 
     #[test]
     fn test_sha256_circuit_ccs_circuit_trait() {
-        let circuit = Sha256Circuit::new();
+        let circuit = Sha256Circuit::new_mvp();
         let inputs = vec![
             Fr::from_u32_with_wrap(1),
             Fr::from_u32_with_wrap(0),
@@ -1018,7 +1031,7 @@ mod tests {
 
     #[test]
     fn test_sha256_full_backward_compatibility() {
-        let mvp = Sha256Circuit::new();
+        let mvp = Sha256Circuit::new_mvp();
         assert!(!mvp.is_full_mode());
         assert_eq!(mvp.num_variables(), 6);
         assert_eq!(mvp.gas_cost(), 25_000);

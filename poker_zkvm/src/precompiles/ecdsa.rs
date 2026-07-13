@@ -47,9 +47,19 @@ pub struct EcdsaVerifyCircuit {
 }
 
 impl EcdsaVerifyCircuit {
-    /// 创建 MVP ECDSA 验签电路（secp256k1）。
+    /// 创建 ECDSA 验签电路（Full 模式，secp256k1，256-bit 完整标量）。
     #[must_use]
     pub fn new() -> Self {
+        Self {
+            curve: "secp256k1",
+            full_mode: true,
+            scalar_num_bits: 256,
+        }
+    }
+
+    /// 创建 MVP ECDSA 验签电路（secp256k1，double-and-add 单步约束，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self {
             curve: "secp256k1",
             full_mode: false,
@@ -165,7 +175,11 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
 
     fn num_variables(&self) -> usize {
         if self.full_mode {
-            0
+            let dummy = vec![Fr::zero(); 24];
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_vars
         } else {
             // z = [1, bit, R, P, bit_P, R_new]
             6
@@ -174,7 +188,11 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
 
     fn build_ccs(&self) -> Ccs {
         if self.full_mode {
-            return Ccs::new(1, vec![], vec![], vec![]).expect("minimal CCS for full mode");
+            let dummy = vec![Fr::zero(); 24];
+            return self
+                .run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0;
         }
 
         // 7 个行隔离矩阵，每个 3 行 × 6 列
@@ -241,9 +259,7 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
 
     fn assign_witness(&self, inputs: &[Fr]) -> Result<Vec<Fr>, ZkvmError> {
         if self.full_mode {
-            return Err(ZkvmError::Other(
-                "EcdsaVerifyCircuit: full mode 请使用 run_full() 方法".to_string(),
-            ));
+            return Ok(self.run_full(inputs)?.1);
         }
 
         // 输入: [bit, R, P]（3 个域元素，MVP 表示 double-and-add 单步的 3 个输入）
@@ -288,7 +304,15 @@ impl CcsCircuit for EcdsaVerifyCircuit {
     }
 
     fn num_matrices(&self) -> usize {
-        if self.full_mode { 0 } else { 7 }
+        if self.full_mode {
+            let dummy = vec![Fr::zero(); 24];
+            self.run_full(&dummy)
+                .expect("dummy run_full should succeed")
+                .0
+                .num_matrices()
+        } else {
+            7
+        }
     }
 
     fn to_ccs_instance(
@@ -296,12 +320,6 @@ impl CcsCircuit for EcdsaVerifyCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        if self.full_mode {
-            return Err(ZkvmError::Other(
-                "EcdsaVerifyCircuit: full mode 请使用 run_full() 方法".to_string(),
-            ));
-        }
-
         let ccs = self.build_ccs();
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
@@ -561,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_circuit_build_ccs() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         assert_eq!(ccs.num_matrices(), 7, "应有 7 个行隔离矩阵");
         assert_eq!(ccs.num_constraints(), 7, "应有 7 个 subsets");
@@ -572,7 +590,7 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_satisfied_by_bit_zero() {
         // bit=0: bit_P=0, R_new=R
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let bit = Fr::zero();
         let r = Fr::from_u32_with_wrap(42);
@@ -589,7 +607,7 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_satisfied_by_bit_one() {
         // bit=1: bit_P=P, R_new=R+P
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(42);
@@ -604,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_circuit_soundness_bit_not_binary() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let bit = Fr::from_u32_with_wrap(2);
         let r = Fr::from_u32_with_wrap(42);
@@ -620,7 +638,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_circuit_soundness_tampered_rnew() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(42);
@@ -637,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_circuit_soundness_tampered_bitp() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let ccs = circuit.build_ccs();
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(42);
@@ -661,7 +679,7 @@ mod tests {
         let pk_r = sk_r.public_key(&secp);
         let pk_p = sk_p.public_key(&secp);
 
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(1);
         let p = Fr::from_u32_with_wrap(2);
@@ -675,14 +693,14 @@ mod tests {
 
     #[test]
     fn test_ecdsa_circuit_empty_input() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let result = circuit.assign_witness(&[]);
         assert!(result.is_err(), "空输入应返回错误");
     }
 
     #[test]
     fn test_ecdsa_circuit_wrong_input_length() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let result = circuit.assign_witness(&[Fr::one(), Fr::one()]);
         assert!(result.is_err(), "输入长度 != 3 应返回错误");
     }
@@ -690,7 +708,7 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_registry_integration() {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(EcdsaVerifyCircuit::new()));
+        registry.register(Box::new(EcdsaVerifyCircuit::new_mvp()));
         assert_eq!(registry.len(), 1);
         let circuit = registry.get("ecdsa_verify").expect("应找到 ecdsa_verify");
         assert_eq!(circuit.name(), "ecdsa_verify");
@@ -700,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_circuit_gas_cost() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         assert_eq!(
             circuit.gas_cost(),
             100_000,
@@ -710,13 +728,13 @@ mod tests {
 
     #[test]
     fn test_ecdsa_circuit_curve_name() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         assert_eq!(circuit.curve(), "secp256k1", "curve 应为 secp256k1");
     }
 
     #[test]
     fn test_ecdsa_circuit_ccs_circuit_trait() {
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(42);
         let p = Fr::from_u32_with_wrap(100);
@@ -739,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_full_mode_constructors() {
-        let mvp = EcdsaVerifyCircuit::new();
+        let mvp = EcdsaVerifyCircuit::new_mvp();
         assert!(!mvp.is_full_mode(), "new() 应为 MVP 模式");
         assert_eq!(mvp.scalar_num_bits(), 0);
 
@@ -771,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_ecdsa_full_mode_gas_cost() {
-        let mvp = EcdsaVerifyCircuit::new();
+        let mvp = EcdsaVerifyCircuit::new_mvp();
         assert_eq!(mvp.gas_cost(), 100_000, "MVP gas_cost = 100_000");
 
         let full_256 = EcdsaVerifyCircuit::new_full();
@@ -787,11 +805,15 @@ mod tests {
 
     #[test]
     fn test_ecdsa_full_mode_num_variables() {
-        let mvp = EcdsaVerifyCircuit::new();
+        let mvp = EcdsaVerifyCircuit::new_mvp();
         assert_eq!(mvp.num_variables(), 6, "MVP num_variables = 6");
 
         let full = EcdsaVerifyCircuit::new_full();
-        assert_eq!(full.num_variables(), 0, "Full num_variables = 0 (dynamic)");
+        // Full mode 调用 run_full() 构建真实 CCS，变量数 ≈ 29M（256-bit scalar_mul × 3）
+        assert!(
+            full.num_variables() > 1_000_000,
+            "Full num_variables 应 > 1M"
+        );
     }
 
     #[test]
@@ -851,7 +873,7 @@ mod tests {
     #[test]
     fn test_ecdsa_full_mode_mvp_backward_compatible() {
         // new() 仍为 MVP 模式，所有 MVP 行为不变
-        let circuit = EcdsaVerifyCircuit::new();
+        let circuit = EcdsaVerifyCircuit::new_mvp();
         assert!(!circuit.is_full_mode());
         assert_eq!(circuit.num_variables(), 6);
         assert_eq!(circuit.gas_cost(), 100_000);

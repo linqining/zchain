@@ -63,21 +63,26 @@ pub struct ZkShuffleCcsCircuit {
 }
 
 impl ZkShuffleCcsCircuit {
-    /// 创建 Light 模式电路（仅 output on-curve）。
+    /// 创建 Full 模式电路（双向 input + output on-curve 检查）。
     #[must_use]
     pub fn new() -> Self {
         Self {
             name: "zk_shuffle",
             num_mats: 3,
             deck_size: DEFAULT_DECK_SIZE,
-            full_mode: false,
+            full_mode: true,
         }
     }
 
-    /// 创建 Light 模式电路（同 `new()`）。
+    /// 创建 Light 模式电路（仅 output on-curve 检查）。
     #[must_use]
     pub fn new_light() -> Self {
-        Self::new()
+        Self {
+            name: "zk_shuffle",
+            num_mats: 3,
+            deck_size: DEFAULT_DECK_SIZE,
+            full_mode: false,
+        }
     }
 
     /// 创建 Full 模式电路（双向 on-curve）。
@@ -693,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_zk_shuffle_circuit_name_and_num_matrices() {
-        let circuit = ZkShuffleCcsCircuit::new();
+        let circuit = ZkShuffleCcsCircuit::new_light();
         let pre: &dyn PrecompileCircuit = &circuit;
         assert_eq!(pre.name(), "zk_shuffle");
         let ccs: &dyn CcsCircuit = &circuit;
@@ -781,7 +786,7 @@ mod tests {
     #[test]
     fn test_zk_shuffle_registry_integration() {
         let mut registry = PrecompileRegistry::new();
-        registry.register(Box::new(ZkShuffleCcsCircuit::new()));
+        registry.register(Box::new(ZkShuffleCcsCircuit::new_light()));
         assert_eq!(registry.len(), 1);
         let circuit = registry.get("zk_shuffle").expect("应找到 zk_shuffle");
         assert_eq!(circuit.name(), "zk_shuffle");
@@ -795,7 +800,7 @@ mod tests {
         assert_eq!(pre.name(), "zk_shuffle");
         let ccs: &dyn CcsCircuit = &circuit;
         assert_eq!(ccs.num_matrices(), 3);
-        assert!(!circuit.is_full_mode());
+        assert!(circuit.is_full_mode());
     }
 
     #[test]

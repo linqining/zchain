@@ -30,6 +30,10 @@ use crate::precompiles::{CcsCircuit, PrecompileCircuit};
 /// Keccak-256 gas 常量（与 syscalls/gas.rs 对齐）。
 const GAS_PER_ROUND: u64 = 10_000;
 
+/// 完整模式变量数（24 轮 Keccak-f[1600] 置换，bit 级展开）。
+/// 硬编码以避免每次 `num_variables()` 调用都构建 ~350K 变量的 CCS。
+const FULL_MODE_NUM_VARS: usize = 350_838;
+
 /// Rho 旋转偏移量表（FIPS 202 Section 3.2.2）。
 ///
 /// `RHO_OFFSETS[x][y]` = lane (x,y) 的旋转位数。
@@ -380,9 +384,15 @@ pub struct Keccak256Circuit {
 }
 
 impl Keccak256Circuit {
-    /// 创建 MVP 模式电路（单轮 Keccak-f[1600] 置换）。
+    /// 创建 Full 模式电路（24 轮置换 + squeeze）。
     #[must_use]
     pub fn new() -> Self {
+        Self { full_mode: true }
+    }
+
+    /// 创建 MVP 模式电路（单轮 Keccak-f[1600] 置换，用于快速测试）。
+    #[must_use]
+    pub fn new_mvp() -> Self {
         Self { full_mode: false }
     }
 
@@ -524,18 +534,13 @@ impl PrecompileCircuit for Keccak256Circuit {
     }
 
     fn num_variables(&self) -> usize {
-        let dummy = if self.full_mode {
-            vec![Fr::zero(); 29]
+        if self.full_mode {
+            FULL_MODE_NUM_VARS
         } else {
-            vec![Fr::zero(); 50]
-        };
-        let (ccs, _) = if self.full_mode {
-            self.run_full(&dummy)
-                .expect("dummy run_full should succeed")
-        } else {
-            self.run_mvp(&dummy).expect("dummy run_mvp should succeed")
-        };
-        ccs.num_vars
+            let dummy = vec![Fr::zero(); 50];
+            let (ccs, _) = self.run_mvp(&dummy).expect("dummy run_mvp should succeed");
+            ccs.num_vars
+        }
     }
 
     fn build_ccs(&self) -> Ccs {
@@ -736,7 +741,7 @@ mod tests {
         let mut inputs = state_to_fr_vec(&state);
         inputs.extend(state_to_fr_vec(&host_state));
 
-        let circuit = Keccak256Circuit::new();
+        let circuit = Keccak256Circuit::new_mvp();
         let ccs = circuit.build_ccs();
         let witness = circuit
             .assign_witness(&inputs)
@@ -766,7 +771,7 @@ mod tests {
         let mut inputs = state_to_fr_vec(&state);
         inputs.extend(state_to_fr_vec(&host_state));
 
-        let circuit = Keccak256Circuit::new();
+        let circuit = Keccak256Circuit::new_mvp();
         let ccs = circuit.build_ccs();
         let witness = circuit
             .assign_witness(&inputs)
@@ -803,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_keccak_gas_cost() {
-        let mvp = Keccak256Circuit::new();
+        let mvp = Keccak256Circuit::new_mvp();
         assert_eq!(mvp.gas_cost(), 10_000);
 
         let full = Keccak256Circuit::new_full();
@@ -812,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_keccak_wrong_input_length() {
-        let mvp = Keccak256Circuit::new();
+        let mvp = Keccak256Circuit::new_mvp();
         let result = mvp.assign_witness(&[Fr::one()]);
         assert!(result.is_err());
 
