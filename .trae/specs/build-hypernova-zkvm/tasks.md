@@ -222,10 +222,10 @@
   - [x] SubTask 7.1.4：实现 proof 大小检查（MAX_ZKVM_PROOF_SIZE = 64KB），超出触发 CycleFold 递归压缩
   - [x] SubTask 7.1.5：实现错误恢复 — prover 失败返回详细错误，host 端可调整 `ZKVM_BATCH_SIZE` 后重试
 - [x] Task 7.2：实现 `poker_zkvm/src/prover/spartan.rs` — Spartan 最终压缩
-  - [x] SubTask 7.2.1：实现 `spartan_compress(lcccs: &Lcccs) -> Result<SpartanProof, ZkvmError>`（stub — Phase 12 实现）
-  - [ ] SubTask 7.2.2：Spartan proof 大小 ≤ 10KB（stub — Phase 12 实现）
-  - [ ] SubTask 7.2.3：单元测试 — compressed proof 可被 verifier 校验（stub — Phase 12 实现）
-  - [ ] SubTask 7.2.4：soundness 负例测试 — 篡改 Spartan proof 必须失败（stub — Phase 12 实现）
+  - [x] SubTask 7.2.1：实现 `spartan_compress(proof: &HypernovaProof) -> Result<CompressedProof, ZkvmError>`（完整实现 — 复用 final sumcheck + IPA opening，原生验证 fold 链 fast fail）
+  - [x] SubTask 7.2.2：Spartan proof 大小 ≤ 10KB（实测 ~6-7KB：final sumcheck ~4KB + IPA opening ~1.3KB + LCCCS 公共数据 ~1KB）
+  - [x] SubTask 7.2.3：单元测试 — compressed proof 可被 verifier 校验（`test_spartan_compress_valid_proof` 验证端到端 compress → verify 通过）
+  - [x] SubTask 7.2.4：soundness 负例测试 — 篡改 Spartan proof 必须失败（`test_spartan_compress_tampered_commitment` + `test_spartan_verify_tampered_sumcheck`）
 - [x] Task 7.3：实现 `poker_zkvm/src/prover/groth16_compress.rs` — Groth16 备选压缩（可选）
   - [x] SubTask 7.3.1：实现 `groth16_compress(lcccs: &Lcccs, crs: &Crs) -> Result<Groth16Proof, ZkvmError>`（stub — Phase 12 实现）
   - [ ] SubTask 7.3.2：复用 `poker_l1/src/offline/groth16.rs` 既有 verifier（stub — Phase 12 实现）

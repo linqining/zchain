@@ -94,7 +94,7 @@ pub fn groth16_verify(
         .map_err(|e| ZkvmError::Other(format!("groth16_verify: {e}")))
 }
 
-/// 压缩后的 proof（Phase F: 真实 Groth16 SNARK）。
+/// 压缩后的 proof（Phase F: 真实 Groth16 SNARK；Phase 7: Spartan 透明 SNARK）。
 #[derive(Debug, Clone)]
 pub enum CompressedProof {
     /// 原生约束满足性验证（Phase D 遗留）— 电路约束已满足，但未生成 SNARK proof。
@@ -102,6 +102,10 @@ pub enum CompressedProof {
     /// Groth16 SNARK proof（Phase F — 基于 HypernovaVerifierCircuitBN254 生成）。
     /// Box 避免 enum variant size 差异过大（VerifyingKey 较大）。
     Groth16(Box<Groth16CompressedProof>),
+    /// Spartan 透明 SNARK proof（Phase 7 — 基于 final sumcheck + IPA opening）。
+    /// 无需 trusted setup，verifier 通过 `spartan_verify` 密码学验证最终 LCCCS 满足。
+    /// Box 避免 enum variant size 差异过大。
+    Spartan(Box<crate::prover::spartan::SpartanCompressedProof>),
 }
 
 /// 原生压缩 proof（Phase D 遗留）— 含公共输入 + fold 步数。
@@ -185,14 +189,15 @@ pub fn groth16_compress(proof: &HypernovaProof) -> Result<CompressedProof, ZkvmE
     })))
 }
 
-/// 验证 Groth16 压缩 proof（端到端验证入口）。
+/// 验证压缩 proof（端到端验证入口）。
 ///
 /// # 参数
-/// - `compressed` — `groth16_compress` 产出的 `CompressedProof`
+/// - `compressed` — `groth16_compress` 或 `spartan_compress` 产出的 `CompressedProof`
 ///
 /// # 返回
 /// - `Native` 变体：始终返回 `Ok(true)`（Phase D 已在 `groth16_compress` 中验证）
 /// - `Groth16` 变体：调用 `groth16_verify` 验证 SNARK proof
+/// - `Spartan` 变体：返回错误（需 CCS + PCS 参数，调用方应使用 `spartan_verify`）
 pub fn groth16_compress_verify(compressed: &CompressedProof) -> Result<bool, ZkvmError> {
     match compressed {
         CompressedProof::Native(_) => Ok(true),
@@ -201,6 +206,9 @@ pub fn groth16_compress_verify(compressed: &CompressedProof) -> Result<bool, Zkv
             &groth16.public_inputs,
             &groth16.proof,
         ),
+        CompressedProof::Spartan(_) => Err(ZkvmError::Other(
+            "Spartan variant 须使用 spartan_verify(proof, ccs, pcs) 验证".to_string(),
+        )),
     }
 }
 
@@ -347,6 +355,9 @@ mod tests {
             }
             CompressedProof::Native(_) => {
                 panic!("Phase F 应返回 Groth16 变体，而非 Native");
+            }
+            CompressedProof::Spartan(_) => {
+                panic!("此测试期望 Groth16 变体");
             }
         }
     }

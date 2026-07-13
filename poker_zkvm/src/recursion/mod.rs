@@ -734,6 +734,9 @@ mod tests {
             CompressedProof::Native(_) => {
                 panic!("Phase F 应返回 Groth16 变体");
             }
+            CompressedProof::Spartan(_) => {
+                panic!("此测试期望 Groth16 变体");
+            }
         }
     }
 
