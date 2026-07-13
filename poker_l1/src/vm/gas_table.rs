@@ -13,7 +13,7 @@
 //!   - `secp256k1_verify` = 500（R3-M3 修正）
 //!   - `bls12_381_g1_mul` = 500
 //!   - `bls12_381_pairing_check` = 5000
-//!   - `hypernova_verify` = 50000
+//!   - `hypernova_verify` = 300000
 //!   - `groth16_verify` = 20000
 //!   - `ipa_verify` = 15000
 //!   - `verify_failure_proof` = 80000（SEC-H9 修复）
@@ -91,8 +91,8 @@ pub const GAS_BLS_HASH_TO_G1_PER_BYTE: u64 = 10;
 pub const GAS_BLS_HASH_TO_G2_BASE: u64 = 1000;
 /// `bls12_381_hash_to_g2` 每字节 gas。
 pub const GAS_BLS_HASH_TO_G2_PER_BYTE: u64 = 10;
-/// `hypernova_verify` gas。
-pub const GAS_HYPERNOVA_VERIFY: u64 = 50000;
+/// `hypernova_verify` gas（Phase 11.5 调整 — 覆盖 Spartan pairing + final exp + IPA verify log(N) 轮 MSM + 余量）。
+pub const GAS_HYPERNOVA_VERIFY: u64 = 300_000;
 /// `groth16_verify` gas。
 pub const GAS_GROTH16_VERIFY: u64 = 20000;
 /// `ipa_verify` gas。
@@ -100,15 +100,24 @@ pub const GAS_IPA_VERIFY: u64 = 15000;
 /// `zk_verify` syscall 默认 gas（用于未知 scheme_id 时的 fallback 计费）。
 ///
 /// 实际计费通过 [`zk_verify_gas`] 按 scheme 分派：
-/// - Hypernova → [`GAS_HYPERNOVA_VERIFY`] = 50000
+/// - Hypernova → [`GAS_HYPERNOVA_VERIFY`] = 300000
 /// - Groth16 → [`GAS_GROTH16_VERIFY`] = 20000
 /// - IPA → [`GAS_IPA_VERIFY`] = 15000
-pub const GAS_ZK_VERIFY: u64 = 50000;
+pub const GAS_ZK_VERIFY: u64 = 300_000;
 /// `verify_failure_proof` gas（SEC-H9 修复 — 256-bit sparse Merkle 非包含证明 + 多签验证）。
 ///
 /// 256 层路径 × ~200 gas ≈ 51200 + 3×secp256k1_verify(500) + round 校验 ~1500 + 3×500 ≈ 55700，
 /// 预留 30% 安全边际上取整至 80000。
 pub const GAS_VERIFY_FAILURE_PROOF: u64 = 80000;
+
+// ===== ZKVM syscall gas（Phase 11.5 — re-export 自 poker_zkvm 单一事实源）=====
+//
+// 这些常量在 `poker_zkvm::syscalls::gas` 中定义，poker_l1 通过 re-export 复用。
+// 治理运行时调整通过 `GovernanceParams` 的对应字段实现（见 governance/mod.rs）。
+pub use poker_zkvm::syscalls::gas::{
+    GAS_ZKVM_ECDSA_VERIFY, GAS_ZKVM_POSEIDON_BASE, GAS_ZKVM_POSEIDON_PER_BLOCK,
+    GAS_ZKVM_READ_STATE_PER_SLOT, GAS_ZKVM_SHA256_PER_BYTE,
+};
 
 // ===== gas limits =====
 
@@ -179,10 +188,10 @@ pub const fn bls_hash_to_g2_gas(msg_len: u64) -> u64 {
 
 /// 计算 `zk_verify` syscall 的 gas（按 scheme_id 分派，Task 22.2）。
 ///
-/// - `SCHEME_HYPERNOVA` (1) → [`GAS_HYPERNOVA_VERIFY`] = 50000
+/// - `SCHEME_HYPERNOVA` (1) → [`GAS_HYPERNOVA_VERIFY`] = 300000
 /// - `SCHEME_GROTH16` (2) → [`GAS_GROTH16_VERIFY`] = 20000
 /// - `SCHEME_IPA` (3) → [`GAS_IPA_VERIFY`] = 15000
-/// - 未知 scheme → [`GAS_ZK_VERIFY`] = 50000（fallback，实际会在 verifier 查找阶段失败）
+/// - 未知 scheme → [`GAS_ZK_VERIFY`] = 300000（fallback，实际会在 verifier 查找阶段失败）
 pub const fn zk_verify_gas(scheme_id: u32) -> u64 {
     match scheme_id {
         1 => GAS_HYPERNOVA_VERIFY,
@@ -214,10 +223,10 @@ mod tests {
         assert_eq!(GAS_BRANCH, 2);
         assert_eq!(GAS_SECP256K1_VERIFY, 500);
         assert_eq!(GAS_BLS_PAIRING, 5000);
-        assert_eq!(GAS_HYPERNOVA_VERIFY, 50000);
+        assert_eq!(GAS_HYPERNOVA_VERIFY, 300_000);
         assert_eq!(GAS_GROTH16_VERIFY, 20000);
         assert_eq!(GAS_IPA_VERIFY, 15000);
-        assert_eq!(GAS_ZK_VERIFY, 50000);
+        assert_eq!(GAS_ZK_VERIFY, 300_000);
         assert_eq!(GAS_VERIFY_FAILURE_PROOF, 80000);
         assert_eq!(BLOCK_GAS_LIMIT, 50_000_000);
         assert_eq!(TX_GAS_LIMIT, 10_000_000);
@@ -288,5 +297,15 @@ mod tests {
         assert_eq!(MAX_EVENT_PAYLOAD_SIZE, 16 * 1024);
         assert_eq!(MAX_HEAP_SIZE, 1024 * 1024);
         assert_eq!(MAX_STACK_SIZE, 64 * 1024);
+    }
+
+    #[test]
+    fn test_zkvm_gas_constants_reexport() {
+        // Phase 11.5：re-export 自 poker_zkvm::syscalls::gas 的常量值须与源头一致
+        assert_eq!(GAS_ZKVM_POSEIDON_BASE, 100);
+        assert_eq!(GAS_ZKVM_POSEIDON_PER_BLOCK, 50);
+        assert_eq!(GAS_ZKVM_SHA256_PER_BYTE, 1);
+        assert_eq!(GAS_ZKVM_ECDSA_VERIFY, 100_000);
+        assert_eq!(GAS_ZKVM_READ_STATE_PER_SLOT, 50);
     }
 }

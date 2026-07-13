@@ -20,7 +20,7 @@
 //! | `get_block_height`     | 15.7    | 1                            | 查询当前 block height      |
 //! | `get_timestamp`        | 15.7    | 1                            | 查询当前 block timestamp   |
 //! | `verify_failure_proof` | 15.8    | 80000                        | 验证 SMT 非包含证明        |
-//! | `zk_verify`            | 22.2    | 50000/20000/15000 (按 scheme)| 通用 ZK 证明验证           |
+//! | `zk_verify`            | 22.2    | 300000/20000/15000 (按 scheme)| 通用 ZK 证明验证           |
 
 use std::slice::{from_raw_parts, from_raw_parts_mut};
 
@@ -647,7 +647,7 @@ use crate::object_model::smt::SparseMerkleTree;
 //
 // 严格遵循 spec.md L493–525 + L853–857（FROZEN 2026-06-27）：
 // - 通用 `zk_verify(scheme_id, proof, public_io) -> bool` 入口
-// - gas 按 scheme 分派（zk_verify_gas：Hypernova=50000 / Groth16=20000 / IPA=15000）
+// - gas 按 scheme 分派（zk_verify_gas：Hypernova=300000 / Groth16=20000 / IPA=15000）
 // - 通过 ctx.zk_verifier 注入 ZkVerifierRegistry（None → ZkVerifierNotRegistered）
 // - Stub 状态下仅校验 proof 格式（verifier_status 由 registry 管理）
 
@@ -675,7 +675,7 @@ declare_builtin_function!(
     ///
     /// # Gas
     /// 按 scheme_id 分派（[`zk_verify_gas`]）：
-    /// - Hypernova → 50000
+    /// - Hypernova → 300000
     /// - Groth16 → 20000
     /// - IPA → 15000
     SyscallZkVerify,
@@ -1792,7 +1792,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         let mut ctx =
-            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
+            PokerL1Context::new(make_tx_context(false), 500_000).with_zk_verifier(registry);
 
         let proof = vec![0xAAu8; 64];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1813,8 +1813,8 @@ mod tests {
         .expect("Stub 验证应成功");
 
         assert_eq!(result, 0, "Stub 状态下合法 proof 应验证通过");
-        // Hypernova gas = 50000
-        assert_eq!(ctx.gas_used(), 50000);
+        // Hypernova gas = 300000（Phase 11.5 调整）
+        assert_eq!(ctx.gas_used(), 300_000);
     }
 
     #[test]
@@ -1937,7 +1937,7 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        // 仅 100 gas，远不够 Hypernova 的 50000
+        // 仅 100 gas，远不够 Hypernova 的 300000
         let mut ctx = PokerL1Context::new(make_tx_context(false), 100).with_zk_verifier(registry);
 
         let proof = vec![0xEEu8; 32];
@@ -1967,7 +1967,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         let mut ctx =
-            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
+            PokerL1Context::new(make_tx_context(false), 500_000).with_zk_verifier(registry);
 
         let proof = vec![0xFFu8; 32];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1985,8 +1985,8 @@ mod tests {
         );
 
         assert!(result.is_err(), "未知 scheme 应返回 Err");
-        // gas 已被扣除（zk_verify_gas(99) = GAS_ZK_VERIFY = 50000）
-        assert_eq!(ctx.gas_used(), 50000);
+        // gas 已被扣除（zk_verify_gas(99) = GAS_ZK_VERIFY = 300000，Phase 11.5 调整）
+        assert_eq!(ctx.gas_used(), 300_000);
     }
 
     #[test]

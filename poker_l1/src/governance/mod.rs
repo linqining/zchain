@@ -118,6 +118,33 @@ pub const DEFAULT_MAX_PARTIAL_CHECKIN_COUNT: u64 = 3;
 /// grace 期内 proof_kind 双通道：ZkShuffle 旧 Stub proof + Zkvm Production proof 并存。
 pub const PRODUCTION_GRACE_BLOCKS: u64 = 7200;
 
+// ===== Phase 11.5 新增默认值常量（与 poker_zkvm 编译时常量对齐）=====
+
+/// 默认 max_zkvm_trace_steps（= 1000 × 1024，满足一致性约束；poker_zkvm 编译期硬上限 1_048_576）。
+pub const DEFAULT_MAX_ZKVM_TRACE_STEPS: u64 = 1_024_000;
+/// 默认 max_zkvm_memory（16MB，与 `poker_zkvm::compiler::elf_validator::MAX_ZKVM_MEMORY` 对齐）。
+pub const DEFAULT_MAX_ZKVM_MEMORY: u64 = 16 * 1024 * 1024;
+/// 默认 max_zkvm_proof_size（64KB，与 `poker_zkvm::prover::MAX_ZKVM_PROOF_SIZE` 对齐）。
+pub const DEFAULT_MAX_ZKVM_PROOF_SIZE: u64 = 64 * 1024;
+/// 默认 zkvm_batch_size（1024，与 `poker_zkvm::constraints::ZKVM_BATCH_SIZE` 对齐）。
+pub const DEFAULT_ZKVM_BATCH_SIZE: u64 = 1024;
+/// 默认 max_recursion_depth（16，与 `poker_zkvm::prover::MAX_RECURSION_DEPTH` 对齐）。
+pub const DEFAULT_MAX_RECURSION_DEPTH: u64 = 16;
+/// 默认 max_trace_host_memory（512MB，与 `poker_zkvm::trace::MAX_TRACE_HOST_MEMORY` 对齐）。
+pub const DEFAULT_MAX_TRACE_HOST_MEMORY: u64 = 512 * 1024 * 1024;
+/// 默认 gas_hypernova_verify（300000，与 `gas_table::GAS_HYPERNOVA_VERIFY` 对齐）。
+pub const DEFAULT_GAS_HYPERNOVA_VERIFY: u64 = 300_000;
+/// 默认 max_public_io_size（8KB，v1.4 M3-001）。
+pub const DEFAULT_MAX_PUBLIC_IO_SIZE: u64 = 8 * 1024;
+/// 默认 max_folded_instance_size（8KB，v1.4 M3-001）。
+pub const DEFAULT_MAX_FOLDED_INSTANCE_SIZE: u64 = 8 * 1024;
+/// 默认 max_sumcheck_proof_size（16KB，v1.4 M3-001）。
+pub const DEFAULT_MAX_SUMCHECK_PROOF_SIZE: u64 = 16 * 1024;
+/// 默认 max_pcs_opening_size（8KB，v1.4 M3-001）。
+pub const DEFAULT_MAX_PCS_OPENING_SIZE: u64 = 8 * 1024;
+/// 默认 max_event_hashes_count（256，v1.4 M3-001）。
+pub const DEFAULT_MAX_EVENT_HASHES_COUNT: u64 = 256;
+
 // ===== VerifierStatus（NEW-C1 + SEC-M4） =====
 
 /// ZK verifier 状态（NEW-C1：Stub / Production）。
@@ -225,6 +252,32 @@ pub enum ParamName {
     MaxPartialCheckinCount,
     /// production_switch_height（v1.2 SubTask 11.5.2.10 — 一次性写入字段，敏感 90% quorum）
     ProductionSwitchHeight,
+    /// max_zkvm_trace_steps（Phase 11.5 — 敏感 90% quorum）
+    MaxZkvmTraceSteps,
+    /// max_zkvm_memory（Phase 11.5 — 敏感 90% quorum）
+    MaxZkvmMemory,
+    /// max_zkvm_proof_size（Phase 11.5 — 敏感 90% quorum）
+    MaxZkvmProofSize,
+    /// zkvm_batch_size（Phase 11.5 — 敏感 90% quorum；含一致性约束）
+    ZkvmBatchSize,
+    /// max_recursion_depth（Phase 11.5 — 敏感 90% quorum）
+    MaxRecursionDepth,
+    /// max_trace_host_memory（Phase 11.5 — 敏感 90% quorum）
+    MaxTraceHostMemory,
+    /// production_grace_blocks（Phase 11.5 — 敏感 90% quorum）
+    ProductionGraceBlocks,
+    /// gas_hypernova_verify（Phase 11.5 — 敏感 90% quorum）
+    GasHypernovaVerify,
+    /// max_public_io_size（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）
+    MaxPublicIoSize,
+    /// max_folded_instance_size（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）
+    MaxFoldedInstanceSize,
+    /// max_sumcheck_proof_size（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）
+    MaxSumcheckProofSize,
+    /// max_pcs_opening_size（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）
+    MaxPcsOpeningSize,
+    /// max_event_hashes_count（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）
+    MaxEventHashesCount,
 }
 
 impl ParamName {
@@ -277,6 +330,19 @@ impl ParamName {
             Self::ValidatorSetSize => "validator_set_size",
             Self::MaxPartialCheckinCount => "max_partial_checkin_count",
             Self::ProductionSwitchHeight => "production_switch_height",
+            Self::MaxZkvmTraceSteps => "max_zkvm_trace_steps",
+            Self::MaxZkvmMemory => "max_zkvm_memory",
+            Self::MaxZkvmProofSize => "max_zkvm_proof_size",
+            Self::ZkvmBatchSize => "zkvm_batch_size",
+            Self::MaxRecursionDepth => "max_recursion_depth",
+            Self::MaxTraceHostMemory => "max_trace_host_memory",
+            Self::ProductionGraceBlocks => "production_grace_blocks",
+            Self::GasHypernovaVerify => "gas_hypernova_verify",
+            Self::MaxPublicIoSize => "max_public_io_size",
+            Self::MaxFoldedInstanceSize => "max_folded_instance_size",
+            Self::MaxSumcheckProofSize => "max_sumcheck_proof_size",
+            Self::MaxPcsOpeningSize => "max_pcs_opening_size",
+            Self::MaxEventHashesCount => "max_event_hashes_count",
         }
     }
 
@@ -313,6 +379,19 @@ impl ParamName {
                 | Self::MaxRequestAckPerTurnTimeout
                 | Self::ValidatorSetSize
                 | Self::ProductionSwitchHeight
+                | Self::MaxZkvmTraceSteps
+                | Self::MaxZkvmMemory
+                | Self::MaxZkvmProofSize
+                | Self::ZkvmBatchSize
+                | Self::MaxRecursionDepth
+                | Self::MaxTraceHostMemory
+                | Self::ProductionGraceBlocks
+                | Self::GasHypernovaVerify
+                | Self::MaxPublicIoSize
+                | Self::MaxFoldedInstanceSize
+                | Self::MaxSumcheckProofSize
+                | Self::MaxPcsOpeningSize
+                | Self::MaxEventHashesCount
         )
     }
 }
@@ -411,6 +490,33 @@ pub struct GovernanceParams {
     /// 治理切换 `verifier_status` 从 `Stub` 到 `Production` 时写入当前 block height，
     /// grace 期起算点；grace 期结束后可清零。非持续调整参数，但写入须 90% quorum。
     pub production_switch_height: u64,
+    /// max_zkvm_trace_steps ∈ [65536, 16_777_216]（Phase 11.5 — 敏感 90% quorum）。
+    pub max_zkvm_trace_steps: u64,
+    /// max_zkvm_memory ∈ [4MB, 64MB]（Phase 11.5 — 敏感 90% quorum）。
+    pub max_zkvm_memory: u64,
+    /// max_zkvm_proof_size ∈ [16KB, 256KB]（Phase 11.5 — 敏感 90% quorum）。
+    pub max_zkvm_proof_size: u64,
+    /// zkvm_batch_size ∈ [64, 8192]（Phase 11.5 — 敏感 90% quorum；含一致性约束：
+    /// `max_zkvm_trace_steps / zkvm_batch_size ≤ MAX_FOLD_STEP_COUNT=1000`）。
+    pub zkvm_batch_size: u64,
+    /// max_recursion_depth ∈ [4, 32]（Phase 11.5 — 敏感 90% quorum）。
+    pub max_recursion_depth: u64,
+    /// max_trace_host_memory ∈ [128MB, 2GB]（Phase 11.5 — 敏感 90% quorum）。
+    pub max_trace_host_memory: u64,
+    /// production_grace_blocks ∈ [720, 72000]（Phase 11.5 — 敏感 90% quorum）。
+    pub production_grace_blocks: u64,
+    /// gas_hypernova_verify ∈ [100000, 1000000]（Phase 11.5 — 敏感 90% quorum）。
+    pub gas_hypernova_verify: u64,
+    /// max_public_io_size ∈ [4KB, 32KB]（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）。
+    pub max_public_io_size: u64,
+    /// max_folded_instance_size ∈ [4KB, 32KB]（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）。
+    pub max_folded_instance_size: u64,
+    /// max_sumcheck_proof_size ∈ [8KB, 64KB]（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）。
+    pub max_sumcheck_proof_size: u64,
+    /// max_pcs_opening_size ∈ [4KB, 32KB]（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）。
+    pub max_pcs_opening_size: u64,
+    /// max_event_hashes_count ∈ [32, 1024]（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）。
+    pub max_event_hashes_count: u64,
 }
 
 impl GovernanceParams {
@@ -461,6 +567,19 @@ impl GovernanceParams {
             validator_set_size: DEFAULT_VALIDATOR_SET_SIZE,
             max_partial_checkin_count: DEFAULT_MAX_PARTIAL_CHECKIN_COUNT,
             production_switch_height: 0,
+            max_zkvm_trace_steps: DEFAULT_MAX_ZKVM_TRACE_STEPS,
+            max_zkvm_memory: DEFAULT_MAX_ZKVM_MEMORY,
+            max_zkvm_proof_size: DEFAULT_MAX_ZKVM_PROOF_SIZE,
+            zkvm_batch_size: DEFAULT_ZKVM_BATCH_SIZE,
+            max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
+            max_trace_host_memory: DEFAULT_MAX_TRACE_HOST_MEMORY,
+            production_grace_blocks: PRODUCTION_GRACE_BLOCKS,
+            gas_hypernova_verify: DEFAULT_GAS_HYPERNOVA_VERIFY,
+            max_public_io_size: DEFAULT_MAX_PUBLIC_IO_SIZE,
+            max_folded_instance_size: DEFAULT_MAX_FOLDED_INSTANCE_SIZE,
+            max_sumcheck_proof_size: DEFAULT_MAX_SUMCHECK_PROOF_SIZE,
+            max_pcs_opening_size: DEFAULT_MAX_PCS_OPENING_SIZE,
+            max_event_hashes_count: DEFAULT_MAX_EVENT_HASHES_COUNT,
         }
     }
 
@@ -513,6 +632,19 @@ impl GovernanceParams {
             ParamName::ValidatorSetSize => self.validator_set_size,
             ParamName::MaxPartialCheckinCount => self.max_partial_checkin_count,
             ParamName::ProductionSwitchHeight => self.production_switch_height,
+            ParamName::MaxZkvmTraceSteps => self.max_zkvm_trace_steps,
+            ParamName::MaxZkvmMemory => self.max_zkvm_memory,
+            ParamName::MaxZkvmProofSize => self.max_zkvm_proof_size,
+            ParamName::ZkvmBatchSize => self.zkvm_batch_size,
+            ParamName::MaxRecursionDepth => self.max_recursion_depth,
+            ParamName::MaxTraceHostMemory => self.max_trace_host_memory,
+            ParamName::ProductionGraceBlocks => self.production_grace_blocks,
+            ParamName::GasHypernovaVerify => self.gas_hypernova_verify,
+            ParamName::MaxPublicIoSize => self.max_public_io_size,
+            ParamName::MaxFoldedInstanceSize => self.max_folded_instance_size,
+            ParamName::MaxSumcheckProofSize => self.max_sumcheck_proof_size,
+            ParamName::MaxPcsOpeningSize => self.max_pcs_opening_size,
+            ParamName::MaxEventHashesCount => self.max_event_hashes_count,
         }
     }
 
@@ -568,6 +700,19 @@ impl GovernanceParams {
             ParamName::ValidatorSetSize => self.validator_set_size = value,
             ParamName::MaxPartialCheckinCount => self.max_partial_checkin_count = value,
             ParamName::ProductionSwitchHeight => self.production_switch_height = value,
+            ParamName::MaxZkvmTraceSteps => self.max_zkvm_trace_steps = value,
+            ParamName::MaxZkvmMemory => self.max_zkvm_memory = value,
+            ParamName::MaxZkvmProofSize => self.max_zkvm_proof_size = value,
+            ParamName::ZkvmBatchSize => self.zkvm_batch_size = value,
+            ParamName::MaxRecursionDepth => self.max_recursion_depth = value,
+            ParamName::MaxTraceHostMemory => self.max_trace_host_memory = value,
+            ParamName::ProductionGraceBlocks => self.production_grace_blocks = value,
+            ParamName::GasHypernovaVerify => self.gas_hypernova_verify = value,
+            ParamName::MaxPublicIoSize => self.max_public_io_size = value,
+            ParamName::MaxFoldedInstanceSize => self.max_folded_instance_size = value,
+            ParamName::MaxSumcheckProofSize => self.max_sumcheck_proof_size = value,
+            ParamName::MaxPcsOpeningSize => self.max_pcs_opening_size = value,
+            ParamName::MaxEventHashesCount => self.max_event_hashes_count = value,
         }
     }
 }
@@ -651,6 +796,20 @@ pub const fn validate_param(
         ParamName::MaxPartialCheckinCount => (1, 10), // SEC-H1
         // production_switch_height：0 表示未切换；非 0 值须 ≥ 1（无上界，由一次性写入语义约束）
         ParamName::ProductionSwitchHeight => (0, u64::MAX),
+        // Phase 11.5 新增参数边界
+        ParamName::MaxZkvmTraceSteps => (65_536, 16_777_216),
+        ParamName::MaxZkvmMemory => (4 * 1024 * 1024, 64 * 1024 * 1024),
+        ParamName::MaxZkvmProofSize => (16 * 1024, 256 * 1024),
+        ParamName::ZkvmBatchSize => (64, 8192),
+        ParamName::MaxRecursionDepth => (4, 32),
+        ParamName::MaxTraceHostMemory => (128 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+        ParamName::ProductionGraceBlocks => (720, 72_000),
+        ParamName::GasHypernovaVerify => (100_000, 1_000_000),
+        ParamName::MaxPublicIoSize => (4 * 1024, 32 * 1024),
+        ParamName::MaxFoldedInstanceSize => (4 * 1024, 32 * 1024),
+        ParamName::MaxSumcheckProofSize => (8 * 1024, 64 * 1024),
+        ParamName::MaxPcsOpeningSize => (4 * 1024, 32 * 1024),
+        ParamName::MaxEventHashesCount => (32, 1024),
     };
     if value < min || value > max {
         return Err(PokerL1Error::ParamOutOfBounds {
@@ -659,6 +818,34 @@ pub const fn validate_param(
             min,
             max,
         });
+    }
+    // Phase 11.5 跨参数一致性约束（SubTask 11.5.2.4）：
+    // ceil(max_zkvm_trace_steps / zkvm_batch_size) ≤ MAX_FOLD_STEP_COUNT (1000)
+    let fold_limit = crate::offline::MAX_FOLD_STEP_COUNT as u64;
+    match name {
+        ParamName::ZkvmBatchSize if value > 0 => {
+            let max_fold_steps = params.max_zkvm_trace_steps.div_ceil(value);
+            if max_fold_steps > fold_limit {
+                return Err(PokerL1Error::ParamOutOfBounds {
+                    param: name.as_str(),
+                    value,
+                    min: params.max_zkvm_trace_steps.div_ceil(fold_limit),
+                    max,
+                });
+            }
+        }
+        ParamName::MaxZkvmTraceSteps if params.zkvm_batch_size > 0 => {
+            let max_fold_steps = value.div_ceil(params.zkvm_batch_size);
+            if max_fold_steps > fold_limit {
+                return Err(PokerL1Error::ParamOutOfBounds {
+                    param: name.as_str(),
+                    value,
+                    min,
+                    max: params.zkvm_batch_size * fold_limit,
+                });
+            }
+        }
+        _ => {}
     }
     Ok((min, max))
 }
@@ -1412,6 +1599,154 @@ mod tests {
     #[test]
     fn test_production_grace_blocks_constant() {
         assert_eq!(PRODUCTION_GRACE_BLOCKS, 7200);
+    }
+
+    // ===== Phase 11.5 新增参数测试 =====
+
+    #[test]
+    fn test_new_sensitive_params_zkvm_limits() {
+        // Phase 11.5：6 项 ZKVM 限制参数标记为敏感
+        assert!(ParamName::MaxZkvmTraceSteps.is_sensitive());
+        assert!(ParamName::MaxZkvmMemory.is_sensitive());
+        assert!(ParamName::MaxZkvmProofSize.is_sensitive());
+        assert!(ParamName::ZkvmBatchSize.is_sensitive());
+        assert!(ParamName::MaxRecursionDepth.is_sensitive());
+        assert!(ParamName::MaxTraceHostMemory.is_sensitive());
+    }
+
+    #[test]
+    fn test_new_sensitive_params_gas_and_grace() {
+        // Phase 11.5：gas_hypernova_verify / production_grace_blocks 敏感
+        assert!(ParamName::GasHypernovaVerify.is_sensitive());
+        assert!(ParamName::ProductionGraceBlocks.is_sensitive());
+    }
+
+    #[test]
+    fn test_new_sensitive_params_proof_field_limits() {
+        // Phase 11.5 v1.3 M2-002：5 项 Proof 字段长度参数敏感
+        assert!(ParamName::MaxPublicIoSize.is_sensitive());
+        assert!(ParamName::MaxFoldedInstanceSize.is_sensitive());
+        assert!(ParamName::MaxSumcheckProofSize.is_sensitive());
+        assert!(ParamName::MaxPcsOpeningSize.is_sensitive());
+        assert!(ParamName::MaxEventHashesCount.is_sensitive());
+    }
+
+    #[test]
+    fn test_new_params_default_values() {
+        let params = GovernanceParams::default_values();
+        assert_eq!(params.max_zkvm_trace_steps, DEFAULT_MAX_ZKVM_TRACE_STEPS);
+        assert_eq!(params.max_zkvm_memory, DEFAULT_MAX_ZKVM_MEMORY);
+        assert_eq!(params.max_zkvm_proof_size, DEFAULT_MAX_ZKVM_PROOF_SIZE);
+        assert_eq!(params.zkvm_batch_size, DEFAULT_ZKVM_BATCH_SIZE);
+        assert_eq!(params.max_recursion_depth, DEFAULT_MAX_RECURSION_DEPTH);
+        assert_eq!(params.max_trace_host_memory, DEFAULT_MAX_TRACE_HOST_MEMORY);
+        assert_eq!(params.production_grace_blocks, PRODUCTION_GRACE_BLOCKS);
+        assert_eq!(params.gas_hypernova_verify, DEFAULT_GAS_HYPERNOVA_VERIFY);
+        assert_eq!(params.max_public_io_size, DEFAULT_MAX_PUBLIC_IO_SIZE);
+        assert_eq!(
+            params.max_folded_instance_size,
+            DEFAULT_MAX_FOLDED_INSTANCE_SIZE
+        );
+        assert_eq!(
+            params.max_sumcheck_proof_size,
+            DEFAULT_MAX_SUMCHECK_PROOF_SIZE
+        );
+        assert_eq!(params.max_pcs_opening_size, DEFAULT_MAX_PCS_OPENING_SIZE);
+        assert_eq!(
+            params.max_event_hashes_count,
+            DEFAULT_MAX_EVENT_HASHES_COUNT
+        );
+    }
+
+    #[test]
+    fn test_new_params_get_set() {
+        let mut params = GovernanceParams::default_values();
+        // 验证 get() 返回默认值
+        assert_eq!(
+            params.get(ParamName::MaxZkvmTraceSteps),
+            DEFAULT_MAX_ZKVM_TRACE_STEPS
+        );
+        assert_eq!(
+            params.get(ParamName::GasHypernovaVerify),
+            DEFAULT_GAS_HYPERNOVA_VERIFY
+        );
+        // set() 后 get() 返回新值
+        params.set(ParamName::MaxZkvmMemory, 32 * 1024 * 1024);
+        assert_eq!(params.get(ParamName::MaxZkvmMemory), 32 * 1024 * 1024);
+        params.set(ParamName::MaxRecursionDepth, 20);
+        assert_eq!(params.get(ParamName::MaxRecursionDepth), 20);
+        params.set(ParamName::MaxEventHashesCount, 512);
+        assert_eq!(params.get(ParamName::MaxEventHashesCount), 512);
+    }
+
+    #[test]
+    fn test_validate_new_params_in_bounds() {
+        let params = GovernanceParams::default_values();
+        // 边界内值通过（MaxZkvmTraceSteps 须同时满足一致性约束：ceil(N/1024) ≤ 1000 → N ≤ 1_024_000）
+        assert!(validate_param(&params, ParamName::MaxZkvmTraceSteps, 1_024_000).is_ok());
+        assert!(validate_param(&params, ParamName::MaxZkvmTraceSteps, 65_536).is_ok());
+        assert!(validate_param(&params, ParamName::MaxZkvmMemory, 16 * 1024 * 1024).is_ok());
+        assert!(validate_param(&params, ParamName::MaxZkvmProofSize, 64 * 1024).is_ok());
+        assert!(validate_param(&params, ParamName::ZkvmBatchSize, 1024).is_ok());
+        assert!(validate_param(&params, ParamName::MaxRecursionDepth, 16).is_ok());
+        assert!(validate_param(&params, ParamName::MaxTraceHostMemory, 512 * 1024 * 1024).is_ok());
+        assert!(validate_param(&params, ParamName::ProductionGraceBlocks, 7200).is_ok());
+        assert!(validate_param(&params, ParamName::GasHypernovaVerify, 300_000).is_ok());
+        assert!(validate_param(&params, ParamName::MaxPublicIoSize, 8 * 1024).is_ok());
+        assert!(validate_param(&params, ParamName::MaxFoldedInstanceSize, 8 * 1024).is_ok());
+        assert!(validate_param(&params, ParamName::MaxSumcheckProofSize, 16 * 1024).is_ok());
+        assert!(validate_param(&params, ParamName::MaxPcsOpeningSize, 8 * 1024).is_ok());
+        assert!(validate_param(&params, ParamName::MaxEventHashesCount, 256).is_ok());
+    }
+
+    #[test]
+    fn test_validate_new_params_out_of_bounds() {
+        let params = GovernanceParams::default_values();
+        // 越界值被拒
+        assert!(validate_param(&params, ParamName::MaxZkvmTraceSteps, 65_535).is_err());
+        assert!(validate_param(&params, ParamName::MaxZkvmTraceSteps, 16_777_217).is_err());
+        assert!(validate_param(&params, ParamName::MaxZkvmMemory, 3 * 1024 * 1024).is_err());
+        assert!(validate_param(&params, ParamName::MaxZkvmProofSize, 15 * 1024).is_err());
+        assert!(validate_param(&params, ParamName::ZkvmBatchSize, 63).is_err());
+        assert!(validate_param(&params, ParamName::ZkvmBatchSize, 8193).is_err());
+        assert!(validate_param(&params, ParamName::MaxRecursionDepth, 3).is_err());
+        assert!(validate_param(&params, ParamName::MaxRecursionDepth, 33).is_err());
+        assert!(validate_param(&params, ParamName::ProductionGraceBlocks, 719).is_err());
+        assert!(validate_param(&params, ParamName::GasHypernovaVerify, 99_999).is_err());
+        assert!(validate_param(&params, ParamName::MaxPublicIoSize, 3 * 1024).is_err());
+        assert!(validate_param(&params, ParamName::MaxSumcheckProofSize, 7 * 1024).is_err());
+        assert!(validate_param(&params, ParamName::MaxEventHashesCount, 31).is_err());
+        assert!(validate_param(&params, ParamName::MaxEventHashesCount, 1025).is_err());
+    }
+
+    #[test]
+    fn test_zkvm_batch_size_consistency_constraint() {
+        // Phase 11.5 SubTask 11.5.2.4：ceil(max_zkvm_trace_steps / zkvm_batch_size) ≤ MAX_FOLD_STEP_COUNT (1000)
+        let mut params = GovernanceParams::default_values();
+        // 默认配置：ceil(1_024_000 / 1024) = 1000 ≤ 1000 → 通过
+        assert!(validate_param(&params, ParamName::ZkvmBatchSize, 1024).is_ok());
+        // batch_size=512 → ceil(1_024_000 / 512) = 2000 > 1000 → 失败
+        assert!(validate_param(&params, ParamName::ZkvmBatchSize, 512).is_err());
+        // 调整 max_zkvm_trace_steps=512_000 后 batch_size=512 → ceil(512_000/512) = 1000 ≤ 1000 → 通过
+        params.max_zkvm_trace_steps = 512_000;
+        assert!(validate_param(&params, ParamName::ZkvmBatchSize, 512).is_ok());
+        // 反向校验：MaxZkvmTraceSteps 调整后也须满足约束
+        // batch_size=1024, max_zkvm_trace_steps=1_024_001 → ceil(1_024_001/1024) = 1001 > 1000 → 失败
+        params.zkvm_batch_size = 1024;
+        assert!(validate_param(&params, ParamName::MaxZkvmTraceSteps, 1_024_001).is_err());
+        // batch_size=1024, max_zkvm_trace_steps=1_024_000 → ceil(1_024_000/1024) = 1000 ≤ 1000 → 通过
+        assert!(validate_param(&params, ParamName::MaxZkvmTraceSteps, 1_024_000).is_ok());
+    }
+
+    #[test]
+    fn test_production_grace_blocks_default_matches_constant() {
+        // Phase 11.5：production_grace_blocks 字段默认值 = PRODUCTION_GRACE_BLOCKS 常量
+        let params = GovernanceParams::default_values();
+        assert_eq!(params.production_grace_blocks, PRODUCTION_GRACE_BLOCKS);
+        assert_eq!(
+            params.get(ParamName::ProductionGraceBlocks),
+            PRODUCTION_GRACE_BLOCKS
+        );
     }
 
     #[test]
