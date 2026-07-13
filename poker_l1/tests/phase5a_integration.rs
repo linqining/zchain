@@ -194,6 +194,7 @@ fn subtask_42_1_checkin_tx_with_valid_proof_succeeds() {
         3,
         DEFAULT_MAX_ACK_CHAIN_LENGTH,
         &make_default_ctx(),
+        [0xDD; 32], // H6: checkout_commitment ≠ new_commitment
     )
     .expect("checkin 应成功");
 
@@ -229,6 +230,7 @@ fn subtask_42_1_checkin_tx_ack_chain_too_long_rejected() {
         3,
         3, // max_ack_chain_length=3，但 ack_chain 有 5 个
         &make_default_ctx(),
+        [0xDD; 32], // H6: checkout_commitment
     );
 
     assert!(result.is_err(), "ack_chain 过长应被拒绝");
@@ -257,6 +259,7 @@ fn subtask_42_1_checkin_tx_partial_checkin_mismatch_rejected() {
         3,
         DEFAULT_MAX_ACK_CHAIN_LENGTH,
         &make_default_ctx(),
+        [0xDD; 32], // H6: checkout_commitment
     );
 
     assert!(result.is_err(), "partial_checkin 不一致应被拒绝");
@@ -1111,6 +1114,7 @@ fn subtask_42_5_fold_loop_produces_valid_public_io_for_checkin() {
         3,
         DEFAULT_MAX_ACK_CHAIN_LENGTH,
         &make_default_ctx(),
+        [0xDD; 32], // H6: checkout_commitment ≠ public_io.final_commitment
     )
     .expect("checkin 应成功");
 

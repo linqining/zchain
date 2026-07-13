@@ -243,6 +243,18 @@ impl ShortIdMap {
         self.conflicts.contains(short_id)
     }
 
+    /// 移除 (short_id, tx_hash) 映射（H7 修复 — tx_cache FIFO 淘汰时联动清理）。
+    ///
+    /// 仅当 short_id 当前映射的 tx_hash 与传入值一致时移除，
+    /// 防止误删已映射到新 tx 的条目。
+    pub fn remove(&mut self, short_id: &ShortId, tx_hash: &Hash) {
+        if let Some(&existing) = self.map.get(short_id) {
+            if existing == *tx_hash {
+                self.map.remove(short_id);
+            }
+        }
+    }
+
     /// 当前映射表大小。
     #[must_use]
     pub fn len(&self) -> usize {
@@ -730,9 +742,20 @@ pub fn verify_light_client_header(
     // 计算所需 quorum（2/3，向上取整）
     let required = crate::governance::required_yes_votes_normal(validator_set_size);
 
-    if header.signatures.len() < required {
+    // H2 修复：签名者去重，防止重复签名通过 quorum
+    let mut seen = BTreeSet::new();
+    for sig in &header.signatures {
+        if !seen.insert(sig.validator.clone()) {
+            return Err(PokerL1Error::DuplicateLightClientSigner(
+                sig.validator.clone(),
+            ));
+        }
+    }
+    let unique_count = seen.len();
+
+    if unique_count < required {
         return Err(PokerL1Error::LightClientQuorumInsufficient {
-            actual: header.signatures.len(),
+            actual: unique_count,
             required,
         });
     }
@@ -753,6 +776,12 @@ pub fn verify_light_client_header(
 
 // ===== Gossip 管理器（SubTask 30.1 / 30.5） =====
 
+/// tx_cache 默认最大条目数（H7 修复 — 防止内存 DoS）。
+///
+/// 攻击者可通过持续广播 tx 使 tx_cache 无限增长。此上限触发 FIFO 淘汰，
+/// 保证内存占用有界。10,000 条足以覆盖 compact block relay 匹配窗口。
+pub const MAX_TX_CACHE_SIZE: usize = 10_000;
+
 /// Gossip 管理器：协调 Compact Block Relay + tx 缓冲 + short ID 映射。
 ///
 /// 集成 SubTask 30.5（Compact Block Relay）+ SubTask 30.7（无 mempool 缓冲）。
@@ -761,6 +790,10 @@ pub struct GossipManager {
     short_id_map: ShortIdMap,
     /// 本地已收 tx 缓存（tx_hash → Transaction）。
     tx_cache: HashMap<Hash, Transaction>,
+    /// tx_cache 插入顺序（H7 修复 — FIFO 淘汰追踪）。
+    tx_cache_order: VecDeque<Hash>,
+    /// tx_cache 最大条目数（H7 修复 — 超限时 FIFO 淘汰）。
+    max_tx_cache_size: usize,
     /// 无 mempool tx 缓冲（SubTask 30.7）。
     tx_buf: TxBuf,
 }
@@ -769,9 +802,17 @@ impl GossipManager {
     /// 创建空 gossip 管理器。
     #[must_use]
     pub fn new() -> Self {
+        Self::with_max_tx_cache_size(MAX_TX_CACHE_SIZE)
+    }
+
+    /// 创建指定 tx_cache 上限的 gossip 管理器（H7 修复 — 测试 / 配置用）。
+    #[must_use]
+    pub fn with_max_tx_cache_size(max_tx_cache_size: usize) -> Self {
         Self {
             short_id_map: ShortIdMap::new(),
             tx_cache: HashMap::new(),
+            tx_cache_order: VecDeque::new(),
+            max_tx_cache_size,
             tx_buf: TxBuf::new(),
         }
     }
@@ -794,8 +835,26 @@ impl GossipManager {
         // SEC2-L3：插入 short ID 映射（冲突检测）
         self.short_id_map.insert(short_id, tx_hash)?;
 
-        // 缓存 tx
+        // 缓存 tx（H7 修复：FIFO 淘汰防止内存 DoS）
+        // 若 tx_hash 已存在，先从顺序队列移除旧条目（避免重复追踪）
+        if !self.tx_cache.contains_key(&tx_hash) {
+            self.tx_cache_order.push_back(tx_hash);
+        }
         self.tx_cache.insert(tx_hash, tx.clone());
+
+        // H7 修复：超限时淘汰最旧条目
+        while self.tx_cache.len() > self.max_tx_cache_size {
+            if let Some(old_hash) = self.tx_cache_order.pop_front() {
+                // 仅当 old_hash 与当前缓存一致时移除（防止重复 hash 的误删）
+                if self.tx_cache.remove(&old_hash).is_some() {
+                    // 同时清理 short_id_map 中对应条目（避免残留映射）
+                    let old_short_id = compute_short_id(&old_hash);
+                    self.short_id_map.remove(&old_short_id, &old_hash);
+                }
+            } else {
+                break;
+            }
+        }
 
         // SubTask 30.7：加入无 mempool 缓冲
         self.tx_buf.push(tx);
@@ -871,7 +930,7 @@ mod tests {
     use crate::transaction::{Gas, RouteHint, TxLane};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
-        let raw = vec![0x02; 33];
+        let raw = vec![byte; 33];
         TaggedPubkey::new(SignatureScheme::Secp256k1, CURRENT_VERSION, raw).unwrap_or_else(|_| {
             // fallback：直接构造
             TaggedPubkey {
@@ -1197,6 +1256,71 @@ mod tests {
         let (txs, timeout) = manager.drain_tx_for_vertex();
         assert_eq!(txs.len(), 1);
         assert!(timeout.is_empty());
+    }
+
+    // ===== H7 修复测试：tx_cache FIFO 淘汰 =====
+
+    /// H7：tx_cache 超限时淘汰最旧条目，防止内存 DoS。
+    #[test]
+    fn test_tx_cache_fifo_eviction() {
+        let mut manager = GossipManager::with_max_tx_cache_size(3);
+        let mut tx_hashes = Vec::new();
+
+        for i in 1..=4u64 {
+            let tx = Transaction {
+                inputs: vec![],
+                outputs: vec![],
+                contract_call: None,
+                tagged_pubkey: make_tagged_pubkey(0x01),
+                signature: vec![0x42; 65],
+                gas: Gas::default(),
+                lane_hint: TxLane::Public,
+                route_hint: RouteHint::default(),
+                chain_id: crate::DEFAULT_CHAIN_ID,
+                nonce: i,
+                gameturn_nonce: None,
+                is_fallback: false,
+            };
+            let h = tx.tx_hash();
+            tx_hashes.push(h);
+            manager.receive_tx(tx).unwrap();
+        }
+
+        // 缓存上限为 3，插入 4 条后应仅保留最新 3 条
+        assert_eq!(manager.tx_cache().len(), 3, "tx_cache 应被淘汰至 max");
+        assert!(
+            !manager.tx_cache().contains_key(&tx_hashes[0]),
+            "最旧 tx 应被淘汰"
+        );
+        assert!(manager.tx_cache().contains_key(&tx_hashes[1]));
+        assert!(manager.tx_cache().contains_key(&tx_hashes[2]));
+        assert!(manager.tx_cache().contains_key(&tx_hashes[3]));
+    }
+
+    /// H7：重复 tx_hash 不增加缓存条目数。
+    #[test]
+    fn test_tx_cache_dedup() {
+        let mut manager = GossipManager::with_max_tx_cache_size(3);
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            contract_call: None,
+            tagged_pubkey: make_tagged_pubkey(0x01),
+            signature: vec![0x42; 65],
+            gas: Gas::default(),
+            lane_hint: TxLane::Public,
+            route_hint: RouteHint::default(),
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce: 1,
+            gameturn_nonce: None,
+            is_fallback: false,
+        };
+
+        manager.receive_tx(tx.clone()).unwrap();
+        manager.receive_tx(tx.clone()).unwrap();
+        manager.receive_tx(tx).unwrap();
+
+        assert_eq!(manager.tx_cache().len(), 1, "重复 tx 不应增加缓存条目");
     }
 
     // ===== 轻客户端 header 验证测试（SubTask 30.4） =====

@@ -590,6 +590,9 @@ pub enum PokerL1Error {
     /// 桥验证器插槽未注册（SubTask 34.5）。
     #[error("bridge validator slot not registered: {0:?}")]
     BridgeValidatorSlotNotRegistered(crate::signature::TaggedPubkey),
+    /// 桥验证器签名重复（同一验证器签名出现多次，H1 修复）。
+    #[error("duplicate bridge validator signature: {0:?}")]
+    DuplicateBridgeValidator(crate::signature::TaggedPubkey),
 
     // ===== Phase 6: 网络层（Task 30） =====
     /// tx 序列化后超过 128KB（SubTask 30.6）。
@@ -627,6 +630,9 @@ pub enum PokerL1Error {
     /// 轻客户端 block header 订阅：签名不足 2/3 quorum（SubTask 30.4）。
     #[error("light client header quorum insufficient: actual={actual}, required={required}")]
     LightClientQuorumInsufficient { actual: usize, required: usize },
+    /// 轻客户端 block header 订阅：签名者重复（H2 修复）。
+    #[error("duplicate light client signer: {0:?}")]
+    DuplicateLightClientSigner(crate::signature::TaggedPubkey),
 
     // ===== Phase 8: 链上 Verifier Production 相关（SubTask 8.2.2） =====
     /// 外层 sumcheck 验证失败（G(r_x_L) != u'）。

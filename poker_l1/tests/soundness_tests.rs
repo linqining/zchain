@@ -462,3 +462,273 @@ fn test_soundness_vertex_too_large_fails() {
         "300KB vertex 应返回 VertexTooLarge, got: {result:?}"
     );
 }
+
+// ===========================================================================
+// 7. P0 安全修复 — 重复签名 / identity point / partial hash / Fr 归零 / 内存 DoS
+// ===========================================================================
+
+/// H1：Bridge quorum bypass — 重复验证器签名应被拒绝。
+///
+/// 攻击者用同一 validator 的签名填充签名列表以达到 quorum。
+#[test]
+fn test_p0_bridge_duplicate_validator_sig_rejected() {
+    use poker_l1::bridge::{BridgeValidatorSig, BridgeValidatorSlot};
+
+    let validator = make_tagged_pubkey_secp(0x10);
+    let validators: BTreeSet<_> = std::iter::once(validator.clone()).collect();
+    let slot = BridgeValidatorSlot::new(0xAAAA, validators);
+
+    // 同一 validator 的 2 份签名（模拟 quorum bypass）
+    let sigs = vec![
+        BridgeValidatorSig {
+            validator: validator.clone(),
+            signature: vec![0u8; 65],
+        },
+        BridgeValidatorSig {
+            validator: validator.clone(),
+            signature: vec![0u8; 65],
+        },
+    ];
+
+    let result = slot.validate_signers(&sigs);
+    assert!(
+        matches!(result, Err(PokerL1Error::DuplicateBridgeValidator(_))),
+        "重复验证器签名应返回 DuplicateBridgeValidator, got: {result:?}"
+    );
+}
+
+/// H2：Light client quorum bypass — 重复签名者应被拒绝。
+///
+/// 攻击者用同一 validator 的签名填充签名列表以达到 2/3 quorum。
+#[test]
+fn test_p0_light_client_duplicate_signer_rejected() {
+    use poker_l1::network::{LightClientHeader, ValidatorSig, verify_light_client_header};
+
+    let validator = make_tagged_pubkey_secp(0x10);
+    let header = LightClientHeader {
+        header_bytes: vec![0x42; 100],
+        signatures: vec![
+            ValidatorSig {
+                validator: validator.clone(),
+                signature: vec![0u8; 65],
+            },
+            ValidatorSig {
+                validator: validator.clone(),
+                signature: vec![0u8; 65],
+            },
+        ],
+        signer_bitmap: vec![true, true, false],
+    };
+
+    // validator_set_size=3, required=2，但仅 1 个 unique signer
+    let result = verify_light_client_header(&header, 3, |_, _, _| Ok(()));
+    assert!(
+        matches!(result, Err(PokerL1Error::DuplicateLightClientSigner(_))),
+        "重复签名者应返回 DuplicateLightClientSigner, got: {result:?}"
+    );
+}
+
+/// H3：BLS identity point 攻击 — signature_g1 为 identity point 应被拒绝。
+///
+/// 当 signature_g1 = O（identity）时，e(O, G2) = 1，对任意消息都返回 true。
+#[test]
+fn test_p0_bls_identity_signature_rejected() {
+    use poker_l1::crypto_precompiles::native_api::bls_verify;
+
+    // BLS12-381 G1 identity point: 首字节 0xc0，其余全零
+    let identity_sig = [
+        0xc0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let pubkey = [0u8; 96]; // 不影响测试，identity 检查在长度校验之后
+
+    let result = bls_verify(&pubkey, &identity_sig, b"any message");
+    assert!(
+        matches!(result, Err(PokerL1Error::InvalidBlsPoint(_))),
+        "identity point 签名应返回 InvalidBlsPoint, got: {result:?}"
+    );
+}
+
+/// H3：BLS identity point 攻击 — pubkey_g2 为 identity point 应被拒绝。
+///
+/// 当 pubkey_g2 = O（identity）时，e(H_m, O) = 1，对任意消息都返回 true。
+#[test]
+fn test_p0_bls_identity_pubkey_rejected() {
+    use poker_l1::crypto_precompiles::native_api::bls_verify;
+
+    // BLS12-381 G2 identity point: 首字节 0xc0，其余全零
+    let identity_pubkey = [
+        0xc0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let sig = [0u8; 48]; // 不影响测试，identity 检查在长度校验之后
+
+    let result = bls_verify(&identity_pubkey, &sig, b"any message");
+    assert!(
+        matches!(result, Err(PokerL1Error::InvalidBlsPoint(_))),
+        "identity point 公钥应返回 InvalidBlsPoint, got: {result:?}"
+    );
+}
+
+/// H4：ack_chain partial hash 不匹配应被拒绝。
+///
+/// 攻击者提交 has_partial_checkin=true 但 ack_chain 前 N 项与
+/// last_partial_fold.ack_chain_partial_hash 不匹配的 checkin tx。
+#[test]
+fn test_p0_ack_chain_partial_hash_mismatch_rejected() {
+    use poker_l1::offline::ack_chain::AckEntry;
+    use poker_l1::offline::state::{CheckinTx, LastPartialFold, execute_checkin};
+    use poker_l1::offline::zk_verifier::{ProofKind, ZkVerifierRegistry, ZkVerifyContext};
+    use poker_l1::signature::TaggedPubkey;
+
+    let mut registry = ZkVerifierRegistry::new();
+    registry.register(poker_l1::offline::hypernova::HypernovaVerifier::into_registry_verifier());
+
+    let make_ack = |seq: u64| AckEntry {
+        chain_id: DEFAULT_CHAIN_ID,
+        epoch: 1,
+        game_id: poker_l1::object_model::ObjectID::new([0x01; 20], 1),
+        current_turn: [0x02; 20],
+        state_hash: [0x42; 32],
+        checkpoint_seq: seq,
+        participant: TaggedPubkey {
+            tag: 0x01,
+            raw: vec![0xAA; 33],
+        },
+        participant_signature: vec![0xBB; 64],
+    };
+
+    let ack_chain = vec![make_ack(1), make_ack(2)];
+
+    let tx = CheckinTx {
+        game_id: poker_l1::object_model::ObjectID::new([0x01; 20], 1),
+        proof: vec![0xAA; 64],
+        state_delta: vec![0xBB; 32],
+        new_commitment: [0xCC; 32],
+        ack_chain,
+        scheme_id: 1,
+        proof_kind: ProofKind::Zkvm,
+        has_partial_checkin: true,
+    };
+
+    // last_partial_fold 的 ack_chain_partial_hash 故意不匹配
+    let last_partial_fold = LastPartialFold {
+        intermediate_commitment: [0xDD; 32],
+        folded_step_count: 2,
+        proof_partial_hash: [0xEE; 32],
+        ack_chain_partial_hash: [0xFF; 32], // 故意错误
+    };
+
+    let ctx = ZkVerifyContext {
+        current_height: 0,
+        production_switch_height: 0,
+        grace_blocks: 0,
+        last_partial_proof_hash: None,
+        uses_new_signature: true,
+    };
+
+    let result = execute_checkin(
+        &tx,
+        &registry,
+        DEFAULT_CHAIN_ID,
+        Some(&last_partial_fold),
+        3,
+        1000,
+        &ctx,
+        [0xDD; 32],
+    );
+
+    assert!(
+        matches!(result, Err(PokerL1Error::PartialCheckinMismatch(_))),
+        "ack_chain_partial_hash 不匹配应返回 PartialCheckinMismatch, got: {result:?}"
+    );
+}
+
+/// H5：Hypernova Fr 静默归零 — 非规范化 Fr 字节应被拒绝。
+///
+/// 攻击者研磨 new_commitment 使其 >= BLS12-381 标量域模数，
+/// 导致 from_canonical_bytes 失败时静默归零，提交平凡证明。
+#[test]
+fn test_p0_hypernova_fr_non_canonical_rejected() {
+    use poker_l1::offline::hypernova::HypernovaVerifier;
+    use poker_l1::offline::zk_verifier::{VerifierStatus, ZkPublicIo, ZkVerifier};
+
+    let verifier = HypernovaVerifier::new();
+
+    // BLS12-381 标量域模数:
+    // 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
+    // [0xFF; 32] 明显大于此模数
+    let non_canonical_commitment = [0xFFu8; 32];
+
+    let public_io = ZkPublicIo {
+        initial_commitment: [0u8; 32],
+        final_commitment: non_canonical_commitment,
+        state_delta_hash: [0u8; 32],
+        ack_chain_hash: [0u8; 32],
+        fold_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
+    };
+
+    let result = verifier.verify(&[0xAA; 64], &public_io, VerifierStatus::Production);
+
+    assert!(
+        matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))),
+        "非规范化 Fr 字节应返回 InvalidZkProofFormat, got: {result:?}"
+    );
+}
+
+/// H7：tx_cache FIFO 淘汰 — 超限时最旧条目应被淘汰。
+///
+/// 攻击者持续广播 tx 使 tx_cache 无限增长，FIFO 淘汰保证内存有界。
+#[test]
+fn test_p0_tx_cache_bounded_eviction() {
+    use poker_l1::network::GossipManager;
+    use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
+
+    let mut manager = GossipManager::with_max_tx_cache_size(5);
+
+    // 插入 7 条 tx（超过上限 5）
+    let mut hashes = Vec::new();
+    for i in 1..=7u64 {
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            contract_call: None,
+            tagged_pubkey: make_tagged_pubkey_secp(0x02),
+            signature: vec![0u8; 65],
+            gas: Gas::default(),
+            lane_hint: TxLane::Public,
+            route_hint: RouteHint::default(),
+            chain_id: DEFAULT_CHAIN_ID,
+            nonce: i,
+            gameturn_nonce: None,
+            is_fallback: false,
+        };
+        let h = tx.tx_hash();
+        hashes.push(h);
+        manager.receive_tx(tx).unwrap();
+    }
+
+    // 缓存应被限制在 5 条
+    assert_eq!(manager.tx_cache().len(), 5, "tx_cache 应被淘汰至 max=5");
+
+    // 最旧 2 条应已被淘汰
+    assert!(
+        !manager.tx_cache().contains_key(&hashes[0]),
+        "tx[0] 应被淘汰"
+    );
+    assert!(
+        !manager.tx_cache().contains_key(&hashes[1]),
+        "tx[1] 应被淘汰"
+    );
+    // 最新 5 条应保留
+    for i in 2..7 {
+        assert!(
+            manager.tx_cache().contains_key(&hashes[i]),
+            "tx[{i}] 应保留"
+        );
+    }
+}

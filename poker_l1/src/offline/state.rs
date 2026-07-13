@@ -283,7 +283,8 @@ pub fn execute_checkout(state: &OfflineState) -> Option<Hash> {
 /// - `max_skip_segments`：skip_count 上限（默认 3）
 /// - `max_ack_chain_length`：ack_chain 长度上限（默认 1000）
 /// - `ctx`：grace period + M2-003/004 所需的链上状态上下文（v1.2 SubTask 11.2.4）
-#[allow(clippy::too_many_arguments)] // 7 参数均为 spec 要求的安全校验参数
+/// - `checkout_commitment`：checkout 时锚定的链上 commitment（H6 修复 — 无 partial fold 时作为 initial_commitment）
+#[allow(clippy::too_many_arguments)] // 8 参数均为 spec 要求的安全校验参数
 pub fn execute_checkin(
     tx: &CheckinTx,
     registry: &ZkVerifierRegistry,
@@ -292,6 +293,7 @@ pub fn execute_checkin(
     max_skip_segments: u32,
     max_ack_chain_length: u32,
     ctx: &super::zk_verifier::ZkVerifyContext<'_>,
+    checkout_commitment: Hash,
 ) -> Result<ZkVerifyResult, PokerL1Error> {
     // SEC2-M4：ack_chain 长度校验
     if tx.ack_chain.len() as u32 > max_ack_chain_length {
@@ -322,7 +324,7 @@ pub fn execute_checkin(
     let public_io = super::zk_verifier::ZkPublicIo {
         initial_commitment: last_partial_fold
             .map(|p| p.intermediate_commitment)
-            .unwrap_or(tx.new_commitment), // 简化：无 partial 时 initial == final
+            .unwrap_or(checkout_commitment), // H6 修复：无 partial 时使用 checkout commitment
         final_commitment: tx.new_commitment,
         state_delta_hash,
         ack_chain_hash,
@@ -338,8 +340,19 @@ pub fn execute_checkin(
                 "has_partial_checkin=true 但 last_partial_fold 不存在".to_string(),
             )
         })?;
-        // NEW-M6：ack_chain[0..N] 哈希校验
-        if p.ack_chain_partial_hash != tx.ack_chain_hash() {
+        // H4 修复 + NEW-M6：ack_chain[0..N] 哈希校验
+        // 须比较 partial hash（前 N 条目的哈希），而非完整 ack_chain hash
+        let n = p.folded_step_count as usize;
+        if tx.ack_chain.len() < n {
+            return Err(PokerL1Error::PartialCheckinMismatch(format!(
+                "ack_chain length {} < folded_step_count {}",
+                tx.ack_chain.len(),
+                n
+            )));
+        }
+        let expected_partial_hash =
+            super::ack_chain::compute_ack_chain_partial_hash(&tx.ack_chain[..n]);
+        if p.ack_chain_partial_hash != expected_partial_hash {
             return Err(PokerL1Error::PartialCheckinMismatch(
                 "ack_chain_partial_hash 不匹配".to_string(),
             ));
@@ -718,6 +731,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
+            [0xDD; 32], // H6: checkout_commitment ≠ new_commitment
         )
         .expect("checkin 应成功");
 
@@ -748,6 +762,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
+            [0xDD; 32], // H6: checkout_commitment
         );
         assert!(matches!(
             result,
@@ -777,6 +792,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
+            [0xDD; 32], // H6: checkout_commitment
         );
         assert!(matches!(
             result,
@@ -813,6 +829,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
+            [0xDD; 32], // H6: checkout_commitment（有 partial fold 时不使用）
         );
         assert!(matches!(
             result,
@@ -965,6 +982,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
+            [0xDD; 32], // H6: checkout_commitment ≠ new_commitment
         )
         .expect("scheme_id=1 + proof_kind=Zkvm 一致时应成功");
 
@@ -1013,6 +1031,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &ctx,
+            [0xDD; 32], // H6: checkout_commitment ≠ new_commitment
         )
         .expect("grace 期 ZkShuffle + 匹配 proof_hash 时应成功");
 
@@ -1049,6 +1068,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
+            [0xDD; 32], // H6: checkout_commitment
         );
 
         assert!(
@@ -1083,6 +1103,7 @@ mod tests {
             3,
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
+            [0xDD; 32], // H6: checkout_commitment
         );
 
         assert!(

@@ -77,6 +77,18 @@ pub fn bls_verify(pubkey_g2: &[u8], signature_g1: &[u8], msg: &[u8]) -> PokerL1R
         )));
     }
 
+    // H3 修复：拒绝 identity point（防止 e(O, G2) == e(H_m, O) == 1 伪造签名）
+    if is_identity_g1(signature_g1) {
+        return Err(PokerL1Error::InvalidBlsPoint(
+            "signature_g1 is identity point (not a valid BLS signature)".to_string(),
+        ));
+    }
+    if is_identity_g2(pubkey_g2) {
+        return Err(PokerL1Error::InvalidBlsPoint(
+            "pubkey_g2 is identity point (not a valid BLS pubkey)".to_string(),
+        ));
+    }
+
     // hash msg to G1（使用固定 DST）
     let h_m = bls::bls_hash_to_g1(msg)?;
 
@@ -95,6 +107,19 @@ pub fn bls_verify(pubkey_g2: &[u8], signature_g1: &[u8], msg: &[u8]) -> PokerL1R
     // bls_pairing_check(a, b, c, d) 内部计算 e(a,b) * e(-c, d) == identity
     // 即 e(a,b) == e(c,d)，因此直接传 h_m（不预先取负）
     bls::bls_pairing_check(signature_g1, &g2_gen, &h_m, pubkey_g2)
+}
+
+/// 检查 G1 compressed bytes 是否为 identity point（H3 修复）。
+///
+/// BLS12-381 ZCash compressed 格式：首字节 bit7=compression, bit6=infinity。
+/// identity point 首字节 = 0xc0，其余全零。
+fn is_identity_g1(bytes: &[u8]) -> bool {
+    bytes.len() == G1_COMPRESSED_SIZE && bytes[0] == 0xc0 && bytes[1..].iter().all(|&b| b == 0)
+}
+
+/// 检查 G2 compressed bytes 是否为 identity point（H3 修复）。
+fn is_identity_g2(bytes: &[u8]) -> bool {
+    bytes.len() == G2_COMPRESSED_SIZE && bytes[0] == 0xc0 && bytes[1..].iter().all(|&b| b == 0)
 }
 
 #[cfg(test)]

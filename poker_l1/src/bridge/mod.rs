@@ -203,11 +203,17 @@ impl BridgeValidatorSlot {
         sig_count >= self.quorum
     }
 
-    /// 校验签名者是否全部在插槽中。
+    /// 校验签名者是否全部在插槽中，且无重复签名（H1 修复）。
     pub fn validate_signers(&self, sigs: &[BridgeValidatorSig]) -> PokerL1Result<()> {
+        let mut seen = BTreeSet::new();
         for sig in sigs {
             if !self.validators.contains(&sig.validator) {
                 return Err(PokerL1Error::BridgeValidatorSlotNotRegistered(
+                    sig.validator.clone(),
+                ));
+            }
+            if !seen.insert(sig.validator.clone()) {
+                return Err(PokerL1Error::DuplicateBridgeValidator(
                     sig.validator.clone(),
                 ));
             }

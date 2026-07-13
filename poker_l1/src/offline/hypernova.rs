@@ -21,7 +21,7 @@ use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 
 use crate::Hash;
-use crate::error::PokerL1Error;
+use crate::error::{PokerL1Error, PokerL1Result};
 
 use super::zk_verifier::{
     ProofKind, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE, SchemeId, VerifierStatus, ZkVerifier,
@@ -181,24 +181,35 @@ impl HypernovaVerifier {
     /// （实际绑定通过 proof 结构内的 `folded_instance.x_l` 隐式保证）。
     fn public_io_to_zkvm(
         public_io: &super::zk_verifier::ZkPublicIo,
-    ) -> poker_zkvm::prover::ZkPublicIo {
+    ) -> PokerL1Result<poker_zkvm::prover::ZkPublicIo> {
         use poker_zkvm::ccs::Fr as ZkvmFr;
         use poker_zkvm::field::ZkvmField;
 
-        // initial_commitment / final_commitment：从 32B Hash 解析为 Fr
+        // H5 修复：from_canonical_bytes 失败时返回错误，而非静默替换为零
+        // 防止攻击者研磨 new_commitment 使其归约到零后提交平凡证明
         let initial_commitment = ZkvmFr::from_canonical_bytes(&public_io.initial_commitment)
-            .unwrap_or_else(|_| ZkvmFr::zero());
-        let final_commitment = ZkvmFr::from_canonical_bytes(&public_io.final_commitment)
-            .unwrap_or_else(|_| ZkvmFr::zero());
+            .map_err(|_| {
+                PokerL1Error::InvalidZkProofFormat(format!(
+                    "initial_commitment {:?} is not a canonical Fr (>= field modulus)",
+                    public_io.initial_commitment
+                ))
+            })?;
+        let final_commitment =
+            ZkvmFr::from_canonical_bytes(&public_io.final_commitment).map_err(|_| {
+                PokerL1Error::InvalidZkProofFormat(format!(
+                    "final_commitment {:?} is not a canonical Fr (>= field modulus)",
+                    public_io.final_commitment
+                ))
+            })?;
 
-        poker_zkvm::prover::ZkPublicIo {
-            input: public_io.state_delta_hash.to_vec(), // 状态增量作为输入
-            output: public_io.ack_chain_hash.to_vec(),  // ack_chain 作为输出
+        Ok(poker_zkvm::prover::ZkPublicIo {
+            input: public_io.state_delta_hash.to_vec(),
+            output: public_io.ack_chain_hash.to_vec(),
             randomness_seed: ZkvmFr::zero(),
             initial_commitment,
             final_commitment,
             event_hashes: Vec::new(),
-        }
+        })
     }
 }
 
@@ -220,7 +231,7 @@ impl ZkVerifier for HypernovaVerifier {
         }
 
         // Production 状态：调用 poker_zkvm::verifier::verify_production（SubTask 8.2.1）
-        let zkvm_public_io = Self::public_io_to_zkvm(public_io);
+        let zkvm_public_io = Self::public_io_to_zkvm(public_io)?;
         let ccs_registry = poker_zkvm::prover::default_ccs_registry();
         match poker_zkvm::verifier::verify_production(proof, &zkvm_public_io, &ccs_registry) {
             Ok(true) => Ok(true),
