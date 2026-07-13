@@ -412,11 +412,9 @@ pub const fn should_submit_checkpoint(
 /// - `config`：时间共识配置
 ///
 /// 返回 `true` 表示当前位于 epoch 边界前的过渡窗口内。
-pub const fn in_epoch_transition_window(
-    current_height: u64,
-    config: &TimeConsensusConfig,
-) -> bool {
-    let epoch_end = ((current_height / config.epoch_length_blocks) + 1) * config.epoch_length_blocks;
+pub const fn in_epoch_transition_window(current_height: u64, config: &TimeConsensusConfig) -> bool {
+    let epoch_end =
+        ((current_height / config.epoch_length_blocks) + 1) * config.epoch_length_blocks;
     // 距 epoch 边界不足 epoch_transition_window_blocks → 在过渡窗口内
     epoch_end.saturating_sub(current_height) <= config.epoch_transition_window_blocks
 }
@@ -437,6 +435,7 @@ pub const fn is_epoch_boundary(current_height: u64, config: &TimeConsensusConfig
 /// 计算给定 height 所属的 epoch 编号（SubTask 11.3 / Task 12）。
 ///
 /// epoch = height / epoch_length_blocks（向下取整）。
+#[allow(clippy::manual_checked_ops)]
 pub const fn epoch_of(current_height: u64, config: &TimeConsensusConfig) -> u64 {
     if config.epoch_length_blocks == 0 {
         0
@@ -546,8 +545,7 @@ mod tests {
     fn validate_block_time_ok_for_normal_progress() {
         let prev = dummy_header(10, 1_000);
         let curr = dummy_header(11, 1_500);
-        validate_block_time(Some(&prev), &curr, &default_config())
-            .expect("正常推进应通过");
+        validate_block_time(Some(&prev), &curr, &default_config()).expect("正常推进应通过");
     }
 
     #[test]
@@ -589,7 +587,10 @@ mod tests {
         let prev = dummy_header(10, 1_500);
         let curr = dummy_header(11, 1_000); // timestamp 回退
         let err = validate_block_time(Some(&prev), &curr, &default_config()).unwrap_err();
-        assert!(matches!(err, PokerL1Error::BlockTimestampMovedBackwards { .. }));
+        assert!(matches!(
+            err,
+            PokerL1Error::BlockTimestampMovedBackwards { .. }
+        ));
     }
 
     #[test]
@@ -597,7 +598,10 @@ mod tests {
         let prev = dummy_header(10, 1_000);
         let curr = dummy_header(11, 1_000 + 30_001); // 超出 1ms
         let err = validate_block_time(Some(&prev), &curr, &default_config()).unwrap_err();
-        assert!(matches!(err, PokerL1Error::BlockTimestampIntervalExceeded { .. }));
+        assert!(matches!(
+            err,
+            PokerL1Error::BlockTimestampIntervalExceeded { .. }
+        ));
     }
 
     // ===== SubTask 11.3: 超时判定函数测试 =====
@@ -805,8 +809,8 @@ mod tests {
     ) -> crate::consensus::GameStatus {
         use crate::consensus::{ExecutionMode, GameStatus};
         use crate::object_model::ObjectID;
-        use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
         use crate::signature::TaggedPubkey;
+        use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
         use std::collections::{BTreeMap, BTreeSet};
 
         let assigned_tp = TaggedPubkey {
@@ -837,7 +841,9 @@ mod tests {
         let cfg = default_config();
         // shuffle_timeout_blocks = 100
         let game = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             1000,
         );
         // 边界：1000 + 100 = 1100，current=1100 不超时（`>` 严格大于）
@@ -855,7 +861,9 @@ mod tests {
         use crate::consensus::{GamePhase, SubmitPhaseKind};
         let cfg = default_config();
         let game = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             1000,
         );
         // current = 1000 + 100 = 1100，边界视为未超时
@@ -871,7 +879,9 @@ mod tests {
         use crate::consensus::{GamePhase, SubmitPhaseKind};
         let cfg = default_config();
         let game = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::RevealToken,
+            },
             2000,
         );
         // 边界：2000 + 50 = 2050，current=2050 不超时
@@ -889,7 +899,9 @@ mod tests {
         use crate::consensus::{GamePhase, SubmitPhaseKind};
         let cfg = default_config();
         let game = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Reconstruct },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Reconstruct,
+            },
             3000,
         );
         // 边界：3000 + 100 = 3100，current=3100 不超时
@@ -907,7 +919,9 @@ mod tests {
         use crate::consensus::{GamePhase, SubmitPhaseKind};
         let cfg = default_config();
         let game = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::LeaveProof,
+            },
             1000,
         );
         assert_eq!(is_submit_phase_timed_out(&game, 1000, &cfg), None);
@@ -921,7 +935,9 @@ mod tests {
         use crate::consensus::{BettingRound, GamePhase};
         let cfg = default_config();
         let game = make_game_status(
-            GamePhase::Betting { round: BettingRound::Preflop },
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
             1000,
         );
         assert_eq!(is_submit_phase_timed_out(&game, 1000, &cfg), None);
@@ -935,19 +951,25 @@ mod tests {
         let cfg = default_config();
         // 构造 phase_started_height = u64::MAX，任何 timeout_blocks > 0 都会溢出
         let game = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             u64::MAX,
         );
         // shuffle_timeout_blocks = 100，u64::MAX + 100 溢出 → None
         assert_eq!(is_submit_phase_timed_out(&game, u64::MAX, &cfg), None);
         // RevealToken / Reconstruct 同理
         let game_rt = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::RevealToken,
+            },
             u64::MAX,
         );
         assert_eq!(is_submit_phase_timed_out(&game_rt, u64::MAX, &cfg), None);
         let game_rc = make_game_status(
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Reconstruct },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Reconstruct,
+            },
             u64::MAX,
         );
         assert_eq!(is_submit_phase_timed_out(&game_rc, u64::MAX, &cfg), None);

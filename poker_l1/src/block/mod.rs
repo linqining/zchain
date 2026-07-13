@@ -16,24 +16,24 @@ pub mod validator;
 
 // 重新导出 time_consensus 公开 API，便于上层直接 `block::TimeConsensusConfig` 等使用。
 pub use time_consensus::{
-    epoch_of, in_epoch_transition_window, is_da_window_passed, is_dispute_window_passed,
-    is_epoch_boundary, is_hand_timeout, is_submit_phase_timed_out, is_turn_timeout,
-    is_validator_timeout, should_submit_checkpoint, validate_block_time,
-    verify_block_header_quorum, LightClientVerifyRequest, TimeConsensusConfig,
+    LightClientVerifyRequest, TimeConsensusConfig, epoch_of, in_epoch_transition_window,
+    is_da_window_passed, is_dispute_window_passed, is_epoch_boundary, is_hand_timeout,
+    is_submit_phase_timed_out, is_turn_timeout, is_validator_timeout, should_submit_checkpoint,
+    validate_block_time, verify_block_header_quorum,
 };
 
 // 重新导出 validator 模块公开 API（Task 10）。
 pub use validator::{
-    validate_block_header_and_body, validate_block_tx_roots, validate_commit_certificate_signatures,
-    validate_game_sub_block, validate_game_sub_block_signature,
-    validate_game_sub_block_turn_ordering, validate_gameturn_no_gas, validate_public_tx_root,
-    validate_public_tx_ordering, validate_gameturn_tx_root, validate_state_root_transition,
-    validate_tx_chain_id, validate_tx_full, validate_tx_nonce, validate_tx_signature,
-    validate_vertex_tx_ordering, BlockValidatorConfig,
+    BlockValidatorConfig, validate_block_header_and_body, validate_block_tx_roots,
+    validate_commit_certificate_signatures, validate_game_sub_block,
+    validate_game_sub_block_signature, validate_game_sub_block_turn_ordering,
+    validate_gameturn_no_gas, validate_gameturn_tx_root, validate_public_tx_ordering,
+    validate_public_tx_root, validate_state_root_transition, validate_tx_chain_id,
+    validate_tx_full, validate_tx_nonce, validate_tx_signature, validate_vertex_tx_ordering,
 };
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::DagCommitCertificate;
@@ -198,7 +198,7 @@ pub fn genesis_block(
 mod tests {
     use super::*;
     use crate::consensus::DagCommitCertificate;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, TxLane};
 
     fn dummy_tagged_pubkey() -> crate::signature::TaggedPubkey {
@@ -371,7 +371,10 @@ mod tests {
         let root = compute_tx_merkle_root(&[tx]);
         // 非空树根 ≠ 空树根
         let empty_root = compute_tx_merkle_root(&[]);
-        assert_ne!(root, empty_root, "非空 tx 列表的 Merkle root 必须不同于空树根");
+        assert_ne!(
+            root, empty_root,
+            "非空 tx 列表的 Merkle root 必须不同于空树根"
+        );
     }
 
     #[test]

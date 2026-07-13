@@ -20,11 +20,11 @@
 //! - GameTurn 通道免 gas 硬约束（SubTask 10.4）
 
 use crate::consensus::{
-    validate_commit_certificate_quorum, validate_turn_order, DagCommitCertificate,
-    GameStatus, TurnRule,
+    DagCommitCertificate, GameStatus, TurnRule, validate_commit_certificate_quorum,
+    validate_turn_order,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::signature::{unified::verify_signature, TaggedPubkey};
+use crate::signature::{TaggedPubkey, unified::verify_signature};
 use crate::transaction::{Gas, Transaction, TxLane};
 use crate::{Address, ChainId, Hash};
 
@@ -197,10 +197,7 @@ pub fn validate_public_tx_ordering(txs: &[Transaction]) -> PokerL1Result<()> {
         let curr = window[1];
         if curr.gas.price < prev.gas.price {
             // 找到原始索引以报告
-            let curr_idx = txs
-                .iter()
-                .position(|t| std::ptr::eq(t, curr))
-                .unwrap_or(0);
+            let curr_idx = txs.iter().position(|t| std::ptr::eq(t, curr)).unwrap_or(0);
             return Err(PokerL1Error::InvalidTxOrdering {
                 idx: curr_idx,
                 tx_price: curr.gas.price,
@@ -352,10 +349,7 @@ pub fn validate_state_root_transition(
 /// 校验 public_tx_root 一致性（SubTask 10.5）。
 ///
 /// validator 重新计算 public_txs 的 Merkle root，与 block header 中的 public_tx_root 比较。
-pub fn validate_public_tx_root(
-    expected: Hash,
-    actual: Hash,
-) -> PokerL1Result<()> {
+pub fn validate_public_tx_root(expected: Hash, actual: Hash) -> PokerL1Result<()> {
     if expected != actual {
         return Err(PokerL1Error::PublicTxRootMismatch {
             expected,
@@ -366,10 +360,7 @@ pub fn validate_public_tx_root(
 }
 
 /// 校验 gameturn_tx_root 一致性（SubTask 10.5）。
-pub fn validate_gameturn_tx_root(
-    expected: Hash,
-    actual: Hash,
-) -> PokerL1Result<()> {
+pub fn validate_gameturn_tx_root(expected: Hash, actual: Hash) -> PokerL1Result<()> {
     if expected != actual {
         return Err(PokerL1Error::GameTurnTxRootMismatch {
             expected,
@@ -557,10 +548,10 @@ fn derive_actor_address(tx: &Transaction) -> Address {
 mod tests {
     use super::*;
     use crate::consensus::{
-        assemble_commit_certificate, DagCommitCertificate, ExecutionMode, GameStatus,
-        SimpleTurnRule,
+        DagCommitCertificate, ExecutionMode, GameStatus, SimpleTurnRule,
+        assemble_commit_certificate,
     };
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, TxLane};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -833,8 +824,7 @@ mod tests {
     fn validate_block_tx_roots_gameturn_mismatch() {
         let txs = vec![make_gameturn_tx(0)];
         let empty_root = crate::block::compute_tx_merkle_root(&[]);
-        let err =
-            validate_block_tx_roots(&[], &txs, empty_root, [0xFF; 32]).unwrap_err();
+        let err = validate_block_tx_roots(&[], &txs, empty_root, [0xFF; 32]).unwrap_err();
         assert!(matches!(err, PokerL1Error::GameTurnTxRootMismatch { .. }));
     }
 
@@ -886,11 +876,15 @@ mod tests {
         // 注意：签名是 dummy（全 0），实际签名验证会失败
         // 此测试仅验证 quorum + bitmap 一致性，不验证签名内容
         // 真实签名验证在集成测试中
-        let result = validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID);
+        let result =
+            validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID);
         // 签名验证会失败（dummy 签名），但 quorum + bitmap 一致性已校验
         assert!(result.is_err(), "dummy 签名应验证失败");
         let err = result.unwrap_err();
-        assert!(matches!(err, PokerL1Error::InvalidCommitCertificateSignature { .. }));
+        assert!(matches!(
+            err,
+            PokerL1Error::InvalidCommitCertificateSignature { .. }
+        ));
     }
 
     #[test]
@@ -898,7 +892,8 @@ mod tests {
         // 4 validators，quorum = 3，但只有 2 个签名
         let cert = make_dummy_cert(2);
         let pubkeys: Vec<TaggedPubkey> = (0..4).map(|i| make_tagged_pubkey(0x10 + i)).collect();
-        let err = validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID).unwrap_err();
+        let err = validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID)
+            .unwrap_err();
         assert!(matches!(err, PokerL1Error::InsufficientQuorum { .. }));
     }
 
@@ -909,7 +904,8 @@ mod tests {
         // 删除一个签名但保留 bitmap
         cert.signature_list.pop();
         let pubkeys: Vec<TaggedPubkey> = (0..4).map(|i| make_tagged_pubkey(0x10 + i)).collect();
-        let err = validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID).unwrap_err();
+        let err = validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID)
+            .unwrap_err();
         assert!(matches!(err, PokerL1Error::CommitCertificateMismatch(_)));
     }
 
@@ -936,7 +932,10 @@ mod tests {
         // 签名验证失败
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, PokerL1Error::InvalidCommitCertificateSignature { .. }));
+        assert!(matches!(
+            err,
+            PokerL1Error::InvalidCommitCertificateSignature { .. }
+        ));
     }
 
     #[test]

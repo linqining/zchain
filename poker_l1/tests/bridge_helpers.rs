@@ -2,12 +2,12 @@
 //!
 //! 从 `src/bridge/mod.rs` 测试代码中提取，避免在集成测试中重复实现。
 
+use poker_l1::DEFAULT_CHAIN_ID;
 use poker_l1::account::derive_address;
 use poker_l1::bridge::{BridgeDeposit, BridgeValidatorSig, BridgeVerifyTx};
-use poker_l1::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
-use poker_l1::DEFAULT_CHAIN_ID;
-use secp256k1::rand::rngs::OsRng;
+use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
 use secp256k1::Secp256k1;
+use secp256k1::rand::rngs::OsRng;
 
 /// 生成真实的 secp256k1 密钥对（用于桥测试）。
 ///

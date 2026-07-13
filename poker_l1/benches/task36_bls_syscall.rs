@@ -10,7 +10,7 @@
 //! - bls_miller_loop / bls_final_exp（拆分 pairing）
 //! - bls_hash_to_g1 / bls_hash_to_g2（RFC 9380 hash-to-curve）
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use poker_l1::crypto_precompiles::bls::{
     bls_final_exp, bls_g1_add, bls_g1_mul, bls_g1_neg, bls_g2_add, bls_g2_mul, bls_g2_neg,
     bls_hash_to_g1, bls_hash_to_g2, bls_miller_loop, bls_pairing_check,
@@ -119,9 +119,13 @@ fn bench_pairing_check(c: &mut Criterion) {
 
     c.bench_function("bls_pairing_check", |bencher| {
         bencher.iter(|| {
-            let result =
-                bls_pairing_check(black_box(&a_g1), black_box(&b_g2), black_box(&c_g1), black_box(&d_g2))
-                    .expect("pairing_check");
+            let result = bls_pairing_check(
+                black_box(&a_g1),
+                black_box(&b_g2),
+                black_box(&c_g1),
+                black_box(&d_g2),
+            )
+            .expect("pairing_check");
             black_box(result);
         });
     });

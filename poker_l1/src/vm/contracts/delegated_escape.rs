@@ -23,15 +23,15 @@
 //!   - 同一 nonce 每 turn_timeout_blocks 最多 1 次
 //!   - 消费时机 = force_checkpoint tx finality 后
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
-use crate::error::PokerL1Error;
-use crate::object_model::ObjectID;
-use crate::signature::{verify_signature, TaggedPubkey};
 use crate::ChainId;
 use crate::Hash;
+use crate::error::PokerL1Error;
+use crate::object_model::ObjectID;
+use crate::signature::{TaggedPubkey, verify_signature};
 
 use super::types::GameContract;
 
@@ -168,11 +168,7 @@ impl RevokeDelegatedEscapeTx {
     }
 
     /// 验证撤销 tx 签名 + game_id 匹配。
-    pub fn verify(
-        &self,
-        chain_id: ChainId,
-        game: &GameContract,
-    ) -> Result<(), PokerL1Error> {
+    pub fn verify(&self, chain_id: ChainId, game: &GameContract) -> Result<(), PokerL1Error> {
         // game_id 匹配
         if self.game_id != game.id {
             return Err(PokerL1Error::GameNotFound(self.game_id));
@@ -250,9 +246,9 @@ pub fn apply_revoke_delegated_escape(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
-    use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
     use crate::Address;
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
+    use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_test_tagged_pubkey(byte: u8) -> TaggedPubkey {
         let mut raw = vec![byte];
@@ -360,7 +356,10 @@ mod tests {
         let game = make_minimal_game();
         let result = auth.verify(crate::DEFAULT_CHAIN_ID, &game, 500, 1000);
         assert!(
-            matches!(result, Err(PokerL1Error::InvalidDelegatedEscapeAuthorization { .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::InvalidDelegatedEscapeAuthorization { .. })
+            ),
             "game_id 不匹配应返回 InvalidDelegatedEscapeAuthorization"
         );
     }
@@ -372,7 +371,13 @@ mod tests {
         let game = make_minimal_game();
         let result = auth.verify(crate::DEFAULT_CHAIN_ID, &game, 1500, 1000);
         assert!(
-            matches!(result, Err(PokerL1Error::DelegatedEscapeExpired { expiry: 1000, current: 1500 })),
+            matches!(
+                result,
+                Err(PokerL1Error::DelegatedEscapeExpired {
+                    expiry: 1000,
+                    current: 1500
+                })
+            ),
             "过期应返回 DelegatedEscapeExpired"
         );
     }
@@ -398,7 +403,10 @@ mod tests {
         let game = make_minimal_game();
         let result = auth.verify(crate::DEFAULT_CHAIN_ID, &game, 500, 1000);
         assert!(
-            matches!(result, Err(PokerL1Error::InvalidDelegatedEscapeAuthorization { .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::InvalidDelegatedEscapeAuthorization { .. })
+            ),
             "expiry_delta 超限应失败"
         );
     }
@@ -479,7 +487,10 @@ mod tests {
         let game = make_minimal_game();
         let result = tx.verify(crate::DEFAULT_CHAIN_ID, &game);
         assert!(
-            matches!(result, Err(PokerL1Error::InvalidDelegatedEscapeAuthorization { .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::InvalidDelegatedEscapeAuthorization { .. })
+            ),
             "非 assigned_validator 应失败"
         );
     }

@@ -17,15 +17,15 @@
 //!   R4-L8 修正 — 原 3 与 turn_timeout_blocks 同值致竞争条件，降为 2 给 fallback tx 留处理窗口）
 //!   内未提交含该 game 的 vertex，其他 validator 可在 vertex 中包含该 game 的 tx（DAG 冗余）
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
+use crate::BlockHeight;
 use crate::block::TimeConsensusConfig;
 use crate::consensus::ValidatorSet;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
-use crate::BlockHeight;
 
 /// 默认 game_validator_timeout_blocks（SubTask 12.4：R4-L8 修正，默认 2）。
 pub const DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS: BlockHeight = 2;
@@ -205,7 +205,8 @@ pub const fn is_validator_failover_triggered(
     current_height: BlockHeight,
     config: &GameAssignmentConfig,
 ) -> bool {
-    current_height.saturating_sub(last_vertex_with_game_height) > config.game_validator_timeout_blocks
+    current_height.saturating_sub(last_vertex_with_game_height)
+        > config.game_validator_timeout_blocks
 }
 
 /// 计算给定 block height 所在的 epoch（R4-H2：链上权威判定）。
@@ -279,7 +280,8 @@ pub fn validate_force_advance_during_transition(
     }
 
     // SEC2-H3：窗口内 force_advance 须证明操作方未提交过渡锚点
-    let allowed = transition_state.force_advance_allowed(current_height, has_missing_anchor_proof)?;
+    let allowed =
+        transition_state.force_advance_allowed(current_height, has_missing_anchor_proof)?;
     if !allowed {
         return Err(PokerL1Error::Other(
             "SEC2-H3: force_advance not allowed — anchor already submitted or no proof provided"
@@ -290,9 +292,7 @@ pub fn validate_force_advance_during_transition(
 }
 
 /// 从 TimeConsensusConfig 构造 GameAssignmentConfig（参数对齐）。
-pub const fn config_from_time_consensus(
-    time_config: &TimeConsensusConfig,
-) -> GameAssignmentConfig {
+pub const fn config_from_time_consensus(time_config: &TimeConsensusConfig) -> GameAssignmentConfig {
     GameAssignmentConfig {
         game_validator_timeout_blocks: DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS,
         epoch_length_blocks: time_config.epoch_length_blocks,
@@ -388,9 +388,9 @@ mod tests {
     use super::*;
     use crate::block::TimeConsensusConfig;
     use crate::consensus::validator_set::{
-        compute_genesis_chain_randomness, ValidatorEntry, ValidatorStatus,
+        ValidatorEntry, ValidatorStatus, compute_genesis_chain_randomness,
     };
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
         TaggedPubkey {
@@ -491,7 +491,10 @@ mod tests {
         };
         let game_id = make_game_id(1);
         let err = client_route_validator(&game_id, 1, &set).unwrap_err();
-        assert!(matches!(err, PokerL1Error::ValidatorSetTooSmallForOffChain { .. }));
+        assert!(matches!(
+            err,
+            PokerL1Error::ValidatorSetTooSmallForOffChain { .. }
+        ));
     }
 
     // ===== assign_validator_for_game 测试（SubTask 12.1） =====
@@ -640,7 +643,9 @@ mod tests {
         let mut state = EpochTransitionState::new(2, 990, 1000);
         state.submit_anchor(995).expect("提交锚点");
         // 已提交锚点 → force_advance 不被允许
-        let allowed = state.force_advance_allowed(996, true).expect("应返回 false");
+        let allowed = state
+            .force_advance_allowed(996, true)
+            .expect("应返回 false");
         assert!(!allowed, "已提交锚点时 force_advance 应被拒绝");
     }
 
@@ -743,7 +748,11 @@ mod tests {
         let game_id = make_game_id(1);
         let assigned = assign_validator_for_game(&set, &game_id).expect("分配");
         // 将 assigned validator 设为 Bonding
-        let idx = set.validators.iter().position(|v| v.pubkey == assigned).unwrap();
+        let idx = set
+            .validators
+            .iter()
+            .position(|v| v.pubkey == assigned)
+            .unwrap();
         set.validators[idx].status = ValidatorStatus::Bonding;
         let err = validate_epoch_reassignment(&set, &game_id, &assigned, 1, 1).unwrap_err();
         assert!(matches!(err, PokerL1Error::Other(_)));

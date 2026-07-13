@@ -11,47 +11,46 @@
 //!   (b) 阶段 1 force_advance；(c) 阶段 2 force_checkin；(e) 阶段 3 force_revert；
 //!   (g) H4 恶意扣留 forfeit；(h) H4 机器故障不 forfeit
 
+use poker_l1::Address;
 use poker_l1::consensus::validator_set::{
-    compute_genesis_chain_randomness, ValidatorEntry, ValidatorSet, ValidatorStatus,
-    VRF_PUBKEY_SIZE,
+    VRF_PUBKEY_SIZE, ValidatorEntry, ValidatorSet, ValidatorStatus,
+    compute_genesis_chain_randomness,
 };
 use poker_l1::object_model::ObjectID;
-use poker_l1::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
 use poker_l1::vm::contracts::ack_protocol::{
-    apply_refuse_ack, apply_request_ack, check_ack_deadline_expired, clear_pending_ack,
-    RefuseAckReason, RefuseAckTx, RequestAckTx,
-    DEFAULT_MALICIOUS_REFUSE_THRESHOLD, MIN_ACK_DEADLINE_BLOCKS,
+    DEFAULT_MALICIOUS_REFUSE_THRESHOLD, MIN_ACK_DEADLINE_BLOCKS, RefuseAckReason, RefuseAckTx,
+    RequestAckTx, apply_refuse_ack, apply_request_ack, check_ack_deadline_expired,
+    clear_pending_ack,
 };
 use poker_l1::vm::contracts::censor_detection::{
-    compute_replica_set, gossipsub_mesh_size, is_witness_in_replica_set,
-    CensorshipWitnessEvidence, FalseWitnessEvidence, DEFAULT_GOSSIPSUB_MESH_SIZE,
-    FALSE_WITNESS_SLASH_PERCENTAGE,
+    CensorshipWitnessEvidence, DEFAULT_GOSSIPSUB_MESH_SIZE, FALSE_WITNESS_SLASH_PERCENTAGE,
+    FalseWitnessEvidence, compute_replica_set, gossipsub_mesh_size, is_witness_in_replica_set,
 };
 use poker_l1::vm::contracts::checkpoint_anchor::{
-    apply_checkpoint_anchor, is_opt_out_ack_valid, CheckpointAnchorTx, OptOutAckProof,
-    DEFAULT_NO_PROGRESS_THRESHOLD,
+    CheckpointAnchorTx, DEFAULT_NO_PROGRESS_THRESHOLD, OptOutAckProof, apply_checkpoint_anchor,
+    is_opt_out_ack_valid,
 };
 use poker_l1::vm::contracts::checkpoint_skip::{
-    apply_checkpoint_skip, verify_segment_chain, CheckpointSkipTx, SegmentContinuityProof, StateProof,
+    CheckpointSkipTx, SegmentContinuityProof, StateProof, apply_checkpoint_skip,
+    verify_segment_chain,
 };
 use poker_l1::vm::contracts::delegated_escape::{
+    DEFAULT_DELEGATED_ESCAPE_MAX_EXPIRY_BLOCKS, DelegatedEscapeAuthorization,
     compute_next_credential_nonce, consume_delegated_escape_authorization,
-    DelegatedEscapeAuthorization,
-    DEFAULT_DELEGATED_ESCAPE_MAX_EXPIRY_BLOCKS,
 };
 use poker_l1::vm::contracts::force_checkin::{
-    determine_force_checkin_scenario, ForfeitDecision, ForfeitReason, ForceCheckinScenario,
-    RecoveryStage, DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT,
-    DEFAULT_RECOVERY_WINDOW_BLOCKS,
+    DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT, DEFAULT_RECOVERY_WINDOW_BLOCKS,
+    ForceCheckinScenario, ForfeitDecision, ForfeitReason, RecoveryStage,
+    determine_force_checkin_scenario,
 };
 use poker_l1::vm::contracts::force_checkpoint::{
-    apply_force_checkpoint, AssignedValidatorFailureProof, ForceCheckpointTx, MultiReplicaReceipt,
-    RoundRangeNonInclusionProof, VertexInfo, DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT,
+    AssignedValidatorFailureProof, DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT,
     DEFAULT_INVESTIGATION_THRESHOLD, DEFAULT_REPLICA_WITNESS_THRESHOLD,
-    DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
+    DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, ForceCheckpointTx, MultiReplicaReceipt,
+    RoundRangeNonInclusionProof, VertexInfo, apply_force_checkpoint,
 };
 use poker_l1::vm::contracts::types::{ExecutionMode, GameContract, RakeConfigRef};
-use poker_l1::Address;
 
 // ===== 辅助函数 =====
 
@@ -86,9 +85,8 @@ fn make_validator(byte: u8) -> ValidatorEntry {
 }
 
 fn make_validator_set(count: usize) -> ValidatorSet {
-    let validators: Vec<ValidatorEntry> = (0..count)
-        .map(|i| make_validator(0x10 + i as u8))
-        .collect();
+    let validators: Vec<ValidatorEntry> =
+        (0..count).map(|i| make_validator(0x10 + i as u8)).collect();
     let genesis_randomness = compute_genesis_chain_randomness(&validators);
     let mut set = ValidatorSet {
         epoch: 1,
@@ -176,12 +174,18 @@ fn subtask_42_6_checkpoint_anchor_no_progress_detection() {
     // 第二次相同 state_hash → no_progress_count += 1
     let tx2 = make_checkpoint_anchor_tx(2, 0xAB); // 相同 state_hash
     apply_checkpoint_anchor(&mut game, &tx2, 155).expect("第二次 checkpoint");
-    assert_eq!(game.no_progress_count, 1, "相同 state_hash 应递增 no_progress_count");
+    assert_eq!(
+        game.no_progress_count, 1,
+        "相同 state_hash 应递增 no_progress_count"
+    );
 
     // 第三次相同 state_hash → no_progress_count = 2，达阈值
     let tx3 = make_checkpoint_anchor_tx(3, 0xAB);
     apply_checkpoint_anchor(&mut game, &tx3, 160).expect("第三次 checkpoint");
-    assert_eq!(game.no_progress_count, DEFAULT_NO_PROGRESS_THRESHOLD, "达阈值应触发 force_revert");
+    assert_eq!(
+        game.no_progress_count, DEFAULT_NO_PROGRESS_THRESHOLD,
+        "达阈值应触发 force_revert"
+    );
 }
 
 #[test]
@@ -282,13 +286,9 @@ fn subtask_42_7a_assigned_validator_rejection_triggers_force_checkpoint() {
             },
         },
     };
-    let trigger_slashing = apply_force_checkpoint(
-        &mut game,
-        &tx,
-        200,
-        DEFAULT_INVESTIGATION_THRESHOLD,
-    )
-    .expect("force_checkpoint 应成功");
+    let trigger_slashing =
+        apply_force_checkpoint(&mut game, &tx, 200, DEFAULT_INVESTIGATION_THRESHOLD)
+            .expect("force_checkpoint 应成功");
     assert!(!trigger_slashing, "首次未达阈值");
     assert_eq!(game.last_action_height, 200, "last_action_height 应更新");
     assert_eq!(game.under_investigation_count, 1, "调查计数应递增");
@@ -307,7 +307,11 @@ fn subtask_42_7b_delegated_escape_authorization_flow() {
     };
 
     // 凭证 nonce 计算
-    assert_eq!(compute_next_credential_nonce(&game), 1, "下一个 nonce = 0 + 1");
+    assert_eq!(
+        compute_next_credential_nonce(&game),
+        1,
+        "下一个 nonce = 0 + 1"
+    );
 
     // 消费凭证（NEW-M1：一次性消费）
     let result = consume_delegated_escape_authorization(&mut game, &auth);
@@ -335,7 +339,10 @@ fn subtask_42_7c_censorship_witness_evidence_multi_replica_detection() {
     )
     .expect("应成功");
     assert_eq!(replica_set.len(), 5, "replica_set 应有 5 个 validator");
-    assert!(!replica_set.contains(&assigned), "不应包含 assigned_validator");
+    assert!(
+        !replica_set.contains(&assigned),
+        "不应包含 assigned_validator"
+    );
 
     // gossipsub mesh 大小
     assert_eq!(
@@ -381,14 +388,8 @@ fn subtask_42_7d_request_ack_then_opt_out_ack_proof() {
         game_id: make_game_id(),
         target_participant: make_tagged_pubkey(0x20),
     };
-    let ack_deadline = apply_request_ack(
-        &mut game,
-        &req_tx,
-        100,
-        MIN_ACK_DEADLINE_BLOCKS,
-        5,
-    )
-    .expect("request_ack 应成功");
+    let ack_deadline = apply_request_ack(&mut game, &req_tx, 100, MIN_ACK_DEADLINE_BLOCKS, 5)
+        .expect("request_ack 应成功");
     assert_eq!(ack_deadline, 100 + MIN_ACK_DEADLINE_BLOCKS);
 
     // block.height > ack_deadline → 视为逾期
@@ -407,8 +408,14 @@ fn subtask_42_7d_request_ack_then_opt_out_ack_proof() {
         request_ack_block_height: 100,
         ack_deadline,
     };
-    assert!(is_opt_out_ack_valid(&proof, ack_deadline + 1), "逾期后 opt_out 应有效");
-    assert!(!is_opt_out_ack_valid(&proof, ack_deadline), "未逾期 opt_out 应无效");
+    assert!(
+        is_opt_out_ack_valid(&proof, ack_deadline + 1),
+        "逾期后 opt_out 应有效"
+    );
+    assert!(
+        !is_opt_out_ack_valid(&proof, ack_deadline),
+        "未逾期 opt_out 应无效"
+    );
 
     // 清除 pending_ack
     let target_addr = poker_l1::account::derive_address(&req_tx.target_participant);
@@ -424,14 +431,8 @@ fn subtask_42_7e_refuse_ack_with_invalid_evidence_triggers_forfeit() {
         game_id: make_game_id(),
         target_participant: make_tagged_pubkey(0x20),
     };
-    let ack_deadline = apply_request_ack(
-        &mut game,
-        &req_tx,
-        100,
-        MIN_ACK_DEADLINE_BLOCKS,
-        5,
-    )
-    .expect("request_ack 应成功");
+    let ack_deadline = apply_request_ack(&mut game, &req_tx, 100, MIN_ACK_DEADLINE_BLOCKS, 5)
+        .expect("request_ack 应成功");
 
     // 参与者提交 refuse_ack + 无效 evidence
     let refuse_tx = RefuseAckTx {
@@ -539,9 +540,7 @@ fn subtask_42_7h_forged_failure_proof_with_insufficient_witnesses_rejected() {
         },
     };
 
-    let active_validator_set: Vec<TaggedPubkey> = (0x10..=0x16)
-        .map(make_tagged_pubkey)
-        .collect();
+    let active_validator_set: Vec<TaggedPubkey> = (0x10..=0x16).map(make_tagged_pubkey).collect();
     let active_participants: Vec<TaggedPubkey> = vec![make_tagged_pubkey(0x20)];
 
     let result = tx.verify(
@@ -549,12 +548,15 @@ fn subtask_42_7h_forged_failure_proof_with_insufficient_witnesses_rejected() {
         &active_participants,
         &active_validator_set,
         DEFAULT_REPLICA_WITNESS_THRESHOLD, // 3
-        100, // max_round_span
-        200, // current_block_height
+        100,                               // max_round_span
+        200,                               // current_block_height
         DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
     );
     assert!(
-        matches!(result, Err(poker_l1::error::PokerL1Error::ForceCheckpointEvidenceFailed(_))),
+        matches!(
+            result,
+            Err(poker_l1::error::PokerL1Error::ForceCheckpointEvidenceFailed(_))
+        ),
         "见证签名不足 3 个应拒绝"
     );
 }
@@ -616,7 +618,10 @@ fn subtask_42_7a_stage1_operator_not_recovered_force_advance() {
     // elapsed = 30 == turn_timeout → Stage1 (<= 边界)
     assert!(matches!(stage, RecoveryStage::Stage1 { .. }));
     assert!(stage.allows_force_advance());
-    assert!(!stage.requires_forfeit_and_revert(), "阶段 1 不应触发 forfeit");
+    assert!(
+        !stage.requires_forfeit_and_revert(),
+        "阶段 1 不应触发 forfeit"
+    );
 }
 
 #[test]
@@ -626,7 +631,10 @@ fn subtask_42_7a_stage2_force_checkin_allowed() {
     let stage = RecoveryStage::compute(&game, 200, 30, 500, DEFAULT_RECOVERY_WINDOW_BLOCKS);
     assert!(matches!(stage, RecoveryStage::Stage2 { .. }));
     assert!(stage.allows_force_checkin());
-    assert!(!stage.requires_forfeit_and_revert(), "阶段 2 不应触发 forfeit");
+    assert!(
+        !stage.requires_forfeit_and_revert(),
+        "阶段 2 不应触发 forfeit"
+    );
 }
 
 #[test]
@@ -636,7 +644,10 @@ fn subtask_42_7a_stage3_requires_forfeit_and_revert() {
     // elapsed = 700 > 30 + 500 + 100 = 630
     let stage = RecoveryStage::compute(&game, 800, 30, 500, DEFAULT_RECOVERY_WINDOW_BLOCKS);
     assert!(matches!(stage, RecoveryStage::Stage3 { .. }));
-    assert!(stage.requires_forfeit_and_revert(), "阶段 3 应触发 forfeit + force_revert");
+    assert!(
+        stage.requires_forfeit_and_revert(),
+        "阶段 3 应触发 forfeit + force_revert"
+    );
 }
 
 #[test]
@@ -680,13 +691,19 @@ fn subtask_42_7a_designated_operator_boundary_doubled() {
     let game = make_game_with_checkpoint(100);
     // age = 50 <= 60 → MaliciousWithholding (designated operator)
     let decision = ForfeitDecision::compute(&game, 150, 30, true);
-    assert!(decision.should_forfeit, "designated operator: age 50 <= 60 应 forfeit");
+    assert!(
+        decision.should_forfeit,
+        "designated operator: age 50 <= 60 应 forfeit"
+    );
     assert_eq!(decision.boundary, 60, "boundary 应加倍为 60");
     assert_eq!(decision.reason, ForfeitReason::MaliciousWithholding);
 
     // age = 70 > 60 → MachineFailure
     let decision2 = ForfeitDecision::compute(&game, 170, 30, true);
-    assert!(!decision2.should_forfeit, "designated operator: age 70 > 60 应不 forfeit");
+    assert!(
+        !decision2.should_forfeit,
+        "designated operator: age 70 > 60 应不 forfeit"
+    );
     assert_eq!(decision2.reason, ForfeitReason::MachineFailure);
 }
 
@@ -701,8 +718,7 @@ fn subtask_42_7a_designated_operator_check_exemption_flow() {
         true,
         DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT,
     ));
-    poker_l1::vm::contracts::apply_designated_operator_check_exemption(&mut game)
-        .expect("应成功");
+    poker_l1::vm::contracts::apply_designated_operator_check_exemption(&mut game).expect("应成功");
     assert_eq!(game.designated_operator_check_exemptions, 1);
 
     // 第二次豁免
@@ -711,8 +727,7 @@ fn subtask_42_7a_designated_operator_check_exemption_flow() {
         true,
         DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT,
     ));
-    poker_l1::vm::contracts::apply_designated_operator_check_exemption(&mut game)
-        .expect("应成功");
+    poker_l1::vm::contracts::apply_designated_operator_check_exemption(&mut game).expect("应成功");
     assert_eq!(game.designated_operator_check_exemptions, 2);
 
     // 第三次 → 已耗尽，恢复 fold 语义
@@ -779,20 +794,19 @@ fn subtask_42_6_full_censorship_resistance_flow() {
             },
         },
     };
-    let trigger_slashing = apply_force_checkpoint(
-        &mut game,
-        &force_tx,
-        200,
-        DEFAULT_INVESTIGATION_THRESHOLD,
-    )
-    .expect("force_checkpoint 应成功");
+    let trigger_slashing =
+        apply_force_checkpoint(&mut game, &force_tx, 200, DEFAULT_INVESTIGATION_THRESHOLD)
+            .expect("force_checkpoint 应成功");
     assert!(!trigger_slashing, "首次未达阈值");
     assert_eq!(game.last_action_height, 200, "last_action_height 应更新");
     assert_eq!(game.under_investigation_count, 1, "调查应累积");
 
     // 5. 恢复阶段判定（force_checkpoint 更新了 last_action_height）
     let stage = RecoveryStage::compute(&game, 210, 30, 500, DEFAULT_RECOVERY_WINDOW_BLOCKS);
-    assert!(matches!(stage, RecoveryStage::Stage1 { .. }), "应回到阶段 1");
+    assert!(
+        matches!(stage, RecoveryStage::Stage1 { .. }),
+        "应回到阶段 1"
+    );
 }
 
 #[test]
@@ -862,14 +876,23 @@ fn subtask_42_7_constants_alignment() {
         DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT, 2,
         "R3-M7: 豁免上限 = 2"
     );
-    assert_eq!(DEFAULT_RECOVERY_WINDOW_BLOCKS, 100, "SubTask 27.5e: 恢复窗口 = 100");
+    assert_eq!(
+        DEFAULT_RECOVERY_WINDOW_BLOCKS, 100,
+        "SubTask 27.5e: 恢复窗口 = 100"
+    );
     assert_eq!(DEFAULT_INVESTIGATION_THRESHOLD, 3, "NEW-H1: 调查阈值 = 3");
     assert_eq!(
         DEFAULT_DELEGATED_ESCAPE_MAX_EXPIRY_BLOCKS, 100,
         "NEW-M2: 委托逃生有效期 = 100"
     );
-    assert_eq!(FALSE_WITNESS_SLASH_PERCENTAGE, 100, "虚假见证 slashing = 100%");
-    assert_eq!(MIN_ACK_DEADLINE_BLOCKS, 10, "SEC2-H1: ack_deadline 下限 = 10");
+    assert_eq!(
+        FALSE_WITNESS_SLASH_PERCENTAGE, 100,
+        "虚假见证 slashing = 100%"
+    );
+    assert_eq!(
+        MIN_ACK_DEADLINE_BLOCKS, 10,
+        "SEC2-H1: ack_deadline 下限 = 10"
+    );
     assert_eq!(
         DEFAULT_MALICIOUS_REFUSE_THRESHOLD, 3,
         "SubTask 27.9: 恶意 refuse_ack 阈值 = 3"

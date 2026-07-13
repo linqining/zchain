@@ -23,8 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{PokerL1Error, PokerL1Result};
 use crate::Address;
+use crate::error::{PokerL1Error, PokerL1Result};
 
 use super::types::HandState;
 
@@ -107,9 +107,7 @@ pub fn compute_rake(pot: u64, config: &RakeConfig) -> u64 {
         return 0; // M1 修复：底池为 0 跳过台费
     }
     // rake = pot * rake_rate_bps / 10_000
-    let rake_by_rate = pot
-        .saturating_mul(u64::from(config.rake_rate_bps))
-        / 10_000;
+    let rake_by_rate = pot.saturating_mul(u64::from(config.rake_rate_bps)) / 10_000;
     // rake = min(rake_by_rate, rake_cap)
     let rake = rake_by_rate.min(config.rake_cap);
     // 安全约束：rake <= pot（防止配置错误导致负数）
@@ -152,9 +150,7 @@ pub fn settle_hand(hand: &HandState, config: &RakeConfig) -> Result<SettleResult
     let rake = compute_rake(pot, config);
 
     // 安全约束：rake <= pot（compute_rake 已保证，此处二次校验）
-    let winner_payout = pot
-        .checked_sub(rake)
-        .ok_or(SettleError::PotUnderflow)?;
+    let winner_payout = pot.checked_sub(rake).ok_or(SettleError::PotUnderflow)?;
 
     Ok(SettleResult {
         pot,

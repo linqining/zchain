@@ -15,46 +15,47 @@
 use poker_l1::consensus::DagVertex;
 use poker_l1::error::PokerL1Error;
 use poker_l1::object_model::ObjectID;
-use poker_l1::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
 use poker_l1::storage::pruning::{
-    archive_zk_proof, check_game_pruning_eligibility, check_pruning_allowed,
-    check_tx_pruning_eligibility, check_vertex_pruning_eligibility, check_zk_proof_pruning_eligibility,
-    compute_proof_hash, handle_historical_data_request, is_archive_node_sufficient,
-    is_permanently_retained, mark_blob_expired, prune_tx, prune_vertex,
-    HistoricalDataRequest, HistoricalDataType, HistoricalDataResponse, NodeRole,
-    PermanentRetentionItem, PruningConfig,
-    DEFAULT_ARCHIVE_NODE_MIN_COUNT, DEFAULT_TX_PRUNE_AFTER_BLOCKS, DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
+    DEFAULT_ARCHIVE_NODE_MIN_COUNT, DEFAULT_TX_PRUNE_AFTER_BLOCKS,
+    DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, HistoricalDataRequest, HistoricalDataResponse,
+    HistoricalDataType, NodeRole, PermanentRetentionItem, PruningConfig, archive_zk_proof,
+    check_game_pruning_eligibility, check_pruning_allowed, check_tx_pruning_eligibility,
+    check_vertex_pruning_eligibility, check_zk_proof_pruning_eligibility, compute_proof_hash,
+    handle_historical_data_request, is_archive_node_sufficient, is_permanently_retained,
+    mark_blob_expired, prune_tx, prune_vertex,
 };
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 use poker_l1::vm::contracts::challenge_delta::{
+    ChallengeDeltaTx, DEFAULT_CHALLENGE_DEPOSIT_RATIO, DEFAULT_CHALLENGE_REWARD_RATIO,
     apply_challenge_delta, compute_challenge_delta_outcome, compute_challenger_deposit,
     compute_challenger_reward, hash_state_delta, validate_challenge_deposit_ratio,
-    validate_challenge_reward_ratio, ChallengeDeltaTx, DEFAULT_CHALLENGE_DEPOSIT_RATIO,
-    DEFAULT_CHALLENGE_REWARD_RATIO,
+    validate_challenge_reward_ratio,
 };
 use poker_l1::vm::contracts::force_advance::{
-    apply_force_advance, ForceAdvanceError, ForceAdvanceInput,
+    ForceAdvanceError, ForceAdvanceInput, apply_force_advance,
 };
 use poker_l1::vm::contracts::force_checkin::{
-    apply_force_checkin, determine_force_checkin_scenario, ForfeitDecision, ForfeitReason,
-    ForceCheckinInput, ForceCheckinScenario, RecoveryStage,
+    ForceCheckinInput, ForceCheckinScenario, ForfeitDecision, ForfeitReason, RecoveryStage,
+    apply_force_checkin, determine_force_checkin_scenario,
 };
 use poker_l1::vm::contracts::force_settle::{
-    apply_force_settle, is_force_settle_allowed, ForceSettleTx,
+    ForceSettleTx, apply_force_settle, is_force_settle_allowed,
 };
 use poker_l1::vm::contracts::forfeit::{
-    apply_forfeit, apply_forfeit_refund, compute_designated_operator_bond, compute_forfeit_deposit,
-    compute_forfeit_distribution, validate_designated_operator_bond, validate_forfeit_deposit_ratio,
-    DEFAULT_FORFEIT_DEPOSIT_RATIO,
+    DEFAULT_FORFEIT_DEPOSIT_RATIO, apply_forfeit, apply_forfeit_refund,
+    compute_designated_operator_bond, compute_forfeit_deposit, compute_forfeit_distribution,
+    validate_designated_operator_bond, validate_forfeit_deposit_ratio,
 };
-use poker_l1::vm::contracts::request_da::{apply_request_da, is_request_da_appropriate, RequestDaTx};
+use poker_l1::vm::contracts::request_da::{
+    RequestDaTx, apply_request_da, is_request_da_appropriate,
+};
 use poker_l1::vm::contracts::revert::{
-    apply_force_revert, apply_request_revert, ForceRevertTx, RequestRevertTx, RevertReason,
+    ForceRevertTx, RequestRevertTx, RevertReason, apply_force_revert, apply_request_revert,
 };
 use poker_l1::vm::contracts::settle::RakeConfig;
 use poker_l1::vm::contracts::types::{
-    GameContract, GamePhase, HandState, PlayerStack, RakeConfigRef,
-    ExecutionMode,
+    ExecutionMode, GameContract, GamePhase, HandState, PlayerStack, RakeConfigRef,
 };
 
 // ===== 辅助函数 =====
@@ -141,7 +142,10 @@ fn make_game_with_hand(last_action_height: u64) -> GameContract {
     game
 }
 
-fn make_force_advance_input(timeout_player: poker_l1::Address, current_block_height: u64) -> ForceAdvanceInput {
+fn make_force_advance_input(
+    timeout_player: poker_l1::Address,
+    current_block_height: u64,
+) -> ForceAdvanceInput {
     ForceAdvanceInput::new(timeout_player, current_block_height)
 }
 
@@ -340,7 +344,10 @@ mod subtask_42_8_force_sync {
         game.current_hand.as_mut().unwrap().players[0].folded = true;
         let input = make_force_advance_input(make_addr(0x10), 131);
         let result = apply_force_advance(&mut game, &input);
-        assert!(matches!(result, Err(ForceAdvanceError::PlayerAlreadyFolded(_))));
+        assert!(matches!(
+            result,
+            Err(ForceAdvanceError::PlayerAlreadyFolded(_))
+        ));
     }
 
     // ----- force_checkin（H4 修复 — forfeit 边界判定基于 last_checkpoint_age）-----
@@ -351,7 +358,10 @@ mod subtask_42_8_force_sync {
         let mut game = make_game_with_forfeit_deposit(100, 5000);
         let input = make_force_checkin_input(130, false, 30); // age=30 <= 30
         let outcome = apply_force_checkin(&mut game, &input).expect("force_checkin 应成功");
-        assert!(outcome.should_forfeit, "age <= timeout 应 forfeit（恶意扣留）");
+        assert!(
+            outcome.should_forfeit,
+            "age <= timeout 应 forfeit（恶意扣留）"
+        );
         assert_eq!(outcome.reason, ForfeitReason::MaliciousWithholding);
         assert_eq!(outcome.scenario, ForceCheckinScenario::MaliciousWithholding);
     }
@@ -362,7 +372,10 @@ mod subtask_42_8_force_sync {
         let mut game = make_game_with_forfeit_deposit(100, 5000);
         let input = make_force_checkin_input(131, false, 30); // age=31 > 30
         let outcome = apply_force_checkin(&mut game, &input).expect("force_checkin 应成功");
-        assert!(!outcome.should_forfeit, "age > timeout 不应 forfeit（机器故障）");
+        assert!(
+            !outcome.should_forfeit,
+            "age > timeout 不应 forfeit（机器故障）"
+        );
         assert_eq!(outcome.reason, ForfeitReason::MachineFailure);
         assert_eq!(outcome.scenario, ForceCheckinScenario::MachineFailure);
     }
@@ -374,7 +387,10 @@ mod subtask_42_8_force_sync {
         // age=40 <= 60 (30*2) → 恶意扣留
         let input = make_force_checkin_input(140, true, 30);
         let outcome = apply_force_checkin(&mut game, &input).expect("force_checkin 应成功");
-        assert!(outcome.should_forfeit, "designated operator age <= 2*timeout 应 forfeit");
+        assert!(
+            outcome.should_forfeit,
+            "designated operator age <= 2*timeout 应 forfeit"
+        );
         assert_eq!(outcome.boundary, 60, "designated operator 边界应加倍");
     }
 
@@ -384,7 +400,10 @@ mod subtask_42_8_force_sync {
         // age=61 > 60 → 机器故障
         let input = make_force_checkin_input(161, true, 30);
         let outcome = apply_force_checkin(&mut game, &input).expect("force_checkin 应成功");
-        assert!(!outcome.should_forfeit, "designated operator age > 2*timeout 不应 forfeit");
+        assert!(
+            !outcome.should_forfeit,
+            "designated operator age > 2*timeout 不应 forfeit"
+        );
     }
 
     #[test]
@@ -435,7 +454,8 @@ mod subtask_42_8_force_sync {
     fn test_request_revert_technical_interrupt_no_forfeit() {
         let mut game = make_game_with_forfeit_deposit(100, 5000);
         let tx = make_request_revert_tx(RevertReason::TechnicalInterrupt);
-        let outcome = apply_request_revert(&mut game, &tx, 150, 30, 500, 100).expect("request_revert 应成功");
+        let outcome =
+            apply_request_revert(&mut game, &tx, 150, 30, 500, 100).expect("request_revert 应成功");
         assert!(!outcome.should_forfeit, "TechnicalInterrupt 不应 forfeit");
     }
 
@@ -443,7 +463,8 @@ mod subtask_42_8_force_sync {
     fn test_request_revert_malicious_withholding_forfeit() {
         let mut game = make_game_with_forfeit_deposit(100, 5000);
         let tx = make_request_revert_tx(RevertReason::MaliciousWithholding);
-        let outcome = apply_request_revert(&mut game, &tx, 150, 30, 500, 100).expect("request_revert 应成功");
+        let outcome =
+            apply_request_revert(&mut game, &tx, 150, 30, 500, 100).expect("request_revert 应成功");
         assert!(outcome.should_forfeit, "MaliciousWithholding 应 forfeit");
     }
 
@@ -451,7 +472,8 @@ mod subtask_42_8_force_sync {
     fn test_request_revert_data_unavailable_forfeit() {
         let mut game = make_game_with_forfeit_deposit(100, 5000);
         let tx = make_request_revert_tx(RevertReason::DataUnavailable);
-        let outcome = apply_request_revert(&mut game, &tx, 150, 30, 500, 100).expect("request_revert 应成功");
+        let outcome =
+            apply_request_revert(&mut game, &tx, 150, 30, 500, 100).expect("request_revert 应成功");
         assert!(outcome.should_forfeit, "DataUnavailable 应 forfeit");
     }
 
@@ -479,7 +501,10 @@ mod subtask_42_8_force_sync {
         // current_block_height=1000 → age=900 远超 boundary
         let tx = make_force_revert_tx(RevertReason::MaliciousWithholding, 1000, false);
         let outcome = apply_force_revert(&mut game, &tx).expect("force_revert 应成功");
-        assert!(outcome.should_forfeit, "reason 优先 — MaliciousWithholding 即使超边界仍 forfeit");
+        assert!(
+            outcome.should_forfeit,
+            "reason 优先 — MaliciousWithholding 即使超边界仍 forfeit"
+        );
         assert_eq!(outcome.reason, Some(ForfeitReason::MaliciousWithholding));
     }
 
@@ -498,7 +523,12 @@ mod subtask_42_8_force_sync {
         let mut game = make_game_with_forfeit_deposit(100, 5000);
         let tx = make_challenge_delta_tx(vec![0xAA], 1000);
         let on_chain_hash = hash_state_delta(&[0xBB]); // 不同的 delta
-        let result = apply_challenge_delta(&mut game, &tx, on_chain_hash, DEFAULT_CHALLENGE_REWARD_RATIO);
+        let result = apply_challenge_delta(
+            &mut game,
+            &tx,
+            on_chain_hash,
+            DEFAULT_CHALLENGE_REWARD_RATIO,
+        );
         assert!(matches!(result, Err(PokerL1Error::ChallengeSucceeded)));
         assert_eq!(game.forfeit_deposit, 0, "挑战成立后 forfeit_deposit 清零");
     }
@@ -510,9 +540,17 @@ mod subtask_42_8_force_sync {
         let claimed_delta = vec![0xAA];
         let on_chain_hash = hash_state_delta(&claimed_delta); // 一致
         let tx = make_challenge_delta_tx(claimed_delta, 1000);
-        let result = apply_challenge_delta(&mut game, &tx, on_chain_hash, DEFAULT_CHALLENGE_REWARD_RATIO);
+        let result = apply_challenge_delta(
+            &mut game,
+            &tx,
+            on_chain_hash,
+            DEFAULT_CHALLENGE_REWARD_RATIO,
+        );
         assert!(matches!(result, Err(PokerL1Error::ChallengeFailed)));
-        assert_eq!(game.forfeit_deposit, 6000, "挑战失败后 forfeit_deposit += challenger_deposit");
+        assert_eq!(
+            game.forfeit_deposit, 6000,
+            "挑战失败后 forfeit_deposit += challenger_deposit"
+        );
     }
 
     #[test]
@@ -520,7 +558,12 @@ mod subtask_42_8_force_sync {
         let game = make_game_with_forfeit_deposit(100, 5000);
         let tx = make_challenge_delta_tx(vec![0xAA], 1000);
         let on_chain_hash = hash_state_delta(&[0xBB]);
-        let outcome = compute_challenge_delta_outcome(&game, &tx, on_chain_hash, DEFAULT_CHALLENGE_REWARD_RATIO);
+        let outcome = compute_challenge_delta_outcome(
+            &game,
+            &tx,
+            on_chain_hash,
+            DEFAULT_CHALLENGE_REWARD_RATIO,
+        );
         assert!(outcome.succeeded, "Δ 不一致 → 挑战成立");
         assert_eq!(outcome.operator_forfeit_amount, 5000);
         assert_eq!(outcome.challenger_reward, 5000); // 100% reward ratio
@@ -530,14 +573,20 @@ mod subtask_42_8_force_sync {
     fn test_challenge_deposit_computation() {
         // SEC-C4: challenge_deposit = buy_in * ratio / 100
         assert_eq!(compute_challenger_deposit(1000, 50), 500);
-        assert_eq!(compute_challenger_deposit(1000, DEFAULT_CHALLENGE_DEPOSIT_RATIO), 500);
+        assert_eq!(
+            compute_challenger_deposit(1000, DEFAULT_CHALLENGE_DEPOSIT_RATIO),
+            500
+        );
     }
 
     #[test]
     fn test_challenge_reward_computation() {
         // SEC-C4: challenge_reward = forfeit_deposit * ratio / 100
         assert_eq!(compute_challenger_reward(5000, 100), 5000);
-        assert_eq!(compute_challenger_reward(5000, DEFAULT_CHALLENGE_REWARD_RATIO), 5000);
+        assert_eq!(
+            compute_challenger_reward(5000, DEFAULT_CHALLENGE_REWARD_RATIO),
+            5000
+        );
     }
 
     #[test]
@@ -563,7 +612,10 @@ mod subtask_42_8_force_sync {
         let outcome = apply_request_da(&mut game, &tx).expect("request_da 应成功");
         assert!(matches!(outcome.stage, RecoveryStage::Stage2 { .. }));
         assert!(!outcome.triggers_force_revert, "Stage2 不触发 force_revert");
-        assert_eq!(game.last_action_height, 100, "request_da 不更新 last_action_height");
+        assert_eq!(
+            game.last_action_height, 100,
+            "request_da 不更新 last_action_height"
+        );
     }
 
     #[test]
@@ -579,8 +631,14 @@ mod subtask_42_8_force_sync {
     #[test]
     fn test_is_request_da_appropriate() {
         let game = make_game_with_checkpoint(100);
-        assert!(!is_request_da_appropriate(&game, 105, 30), "elapsed=5 <= 30 不应 request_da");
-        assert!(is_request_da_appropriate(&game, 131, 30), "elapsed=31 > 30 应 request_da");
+        assert!(
+            !is_request_da_appropriate(&game, 105, 30),
+            "elapsed=5 <= 30 不应 request_da"
+        );
+        assert!(
+            is_request_da_appropriate(&game, 131, 30),
+            "elapsed=31 > 30 应 request_da"
+        );
     }
 
     // ----- force_settle -----
@@ -597,7 +655,8 @@ mod subtask_42_8_force_sync {
     fn test_force_settle_allowed_in_stage3() {
         let mut game = make_game_with_hand(100);
         let tx = make_force_settle_tx(800); // Stage3
-        let outcome = apply_force_settle(&mut game, &tx, &make_rake_config()).expect("force_settle 应成功");
+        let outcome =
+            apply_force_settle(&mut game, &tx, &make_rake_config()).expect("force_settle 应成功");
         assert_eq!(outcome.settle_result.pot, 100, "底池应正确结算");
         assert!(game.is_hand_settled(), "手牌应标记为 Settled");
     }
@@ -605,8 +664,14 @@ mod subtask_42_8_force_sync {
     #[test]
     fn test_is_force_settle_allowed_stage_check() {
         let game = make_game_with_hand(100);
-        assert!(!is_force_settle_allowed(&game, 150, 30, 500, 100), "Stage2 不允许");
-        assert!(is_force_settle_allowed(&game, 800, 30, 500, 100), "Stage3 允许");
+        assert!(
+            !is_force_settle_allowed(&game, 150, 30, 500, 100),
+            "Stage2 不允许"
+        );
+        assert!(
+            is_force_settle_allowed(&game, 800, 30, 500, 100),
+            "Stage3 允许"
+        );
     }
 
     // ----- forfeit 保证金（SubTask 28.9）-----
@@ -615,7 +680,10 @@ mod subtask_42_8_force_sync {
     fn test_compute_forfeit_deposit_default_ratio() {
         // SEC-C4: forfeit_deposit = total_table_buy_in * ratio / 100，默认 ratio=100
         assert_eq!(compute_forfeit_deposit(5000, 100), 5000);
-        assert_eq!(compute_forfeit_deposit(5000, DEFAULT_FORFEIT_DEPOSIT_RATIO), 5000);
+        assert_eq!(
+            compute_forfeit_deposit(5000, DEFAULT_FORFEIT_DEPOSIT_RATIO),
+            5000
+        );
     }
 
     #[test]
@@ -646,14 +714,26 @@ mod subtask_42_8_force_sync {
     fn test_validate_designated_operator_bond_mismatch() {
         // SEC2-M7: bond != governed → InvalidBondAmount
         let result = validate_designated_operator_bond(4000, 5000, 3000);
-        assert!(matches!(result, Err(PokerL1Error::InvalidBondAmount { expected: 5000, got: 4000 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::InvalidBondAmount {
+                expected: 5000,
+                got: 4000
+            })
+        ));
     }
 
     #[test]
     fn test_validate_designated_operator_bond_insufficient() {
         // SEC2-M7: bond < total_buy_in → InsufficientOperatorBond
         let result = validate_designated_operator_bond(5000, 5000, 6000);
-        assert!(matches!(result, Err(PokerL1Error::InsufficientOperatorBond { bond: 5000, required: 6000 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::InsufficientOperatorBond {
+                bond: 5000,
+                required: 6000
+            })
+        ));
     }
 
     #[test]
@@ -667,7 +747,8 @@ mod subtask_42_8_force_sync {
             Some(make_addr(0x02)),
             5000, // challenger_reward = 100%
             &victims,
-        ).expect("apply_forfeit 应成功");
+        )
+        .expect("apply_forfeit 应成功");
         assert!(outcome.forfeited);
         assert_eq!(outcome.forfeit_amount, 5000);
         assert_eq!(game.forfeit_deposit, 0, "forfeit_deposit 应清零");
@@ -707,17 +788,29 @@ mod subtask_42_9_pruning {
     fn test_game_pruning_after_settle_and_dispute_expiry() {
         // (a) Game 结算 + dispute 过期 → 可裁剪
         assert!(check_game_pruning_eligibility(true, true).can_prune());
-        assert!(!check_game_pruning_eligibility(false, true).can_prune(), "未结算不可裁剪");
-        assert!(!check_game_pruning_eligibility(true, false).can_prune(), "dispute 未过期不可裁剪");
+        assert!(
+            !check_game_pruning_eligibility(false, true).can_prune(),
+            "未结算不可裁剪"
+        );
+        assert!(
+            !check_game_pruning_eligibility(true, false).can_prune(),
+            "dispute 未过期不可裁剪"
+        );
     }
 
     #[test]
     fn test_tx_pruning_after_window() {
         // (b) block 过 tx_prune_after_blocks → tx 压缩
         assert!(check_tx_pruning_eligibility(1500, 1000, true, true).can_prune());
-        assert!(!check_tx_pruning_eligibility(500, 1000, true, true).can_prune(), "窗口未过不可裁剪");
+        assert!(
+            !check_tx_pruning_eligibility(500, 1000, true, true).can_prune(),
+            "窗口未过不可裁剪"
+        );
         // SEC2-L6: >= 边界
-        assert!(check_tx_pruning_eligibility(1000, 1000, true, true).can_prune(), "边界 == 应可裁剪");
+        assert!(
+            check_tx_pruning_eligibility(1000, 1000, true, true).can_prune(),
+            "边界 == 应可裁剪"
+        );
     }
 
     #[test]
@@ -768,7 +861,10 @@ mod subtask_42_9_pruning {
         // (d) ZK proof 归档到 Walrus DA 层
         let blob_id = [0xDD; 32];
         let archived = archive_zk_proof(&[0xAA], &[0xBB], &[0xCC], true, blob_id);
-        assert_eq!(archived.proof_hash, compute_proof_hash(&[0xAA], &[0xBB], &[0xCC]));
+        assert_eq!(
+            archived.proof_hash,
+            compute_proof_hash(&[0xAA], &[0xBB], &[0xCC])
+        );
         assert!(archived.verification_result);
         assert_eq!(archived.walrus_blob_id, blob_id);
         assert!(!archived.blob_expired);
@@ -777,8 +873,14 @@ mod subtask_42_9_pruning {
     #[test]
     fn test_zk_proof_pruning_requires_archive_nodes() {
         // (e) archive node < archive_node_min_count 时不得裁剪
-        assert!(!check_zk_proof_pruning_eligibility(true, true, 2, 3).can_prune(), "archive 不足不可裁剪");
-        assert!(check_zk_proof_pruning_eligibility(true, true, 3, 3).can_prune(), "boundary == min 可裁剪");
+        assert!(
+            !check_zk_proof_pruning_eligibility(true, true, 2, 3).can_prune(),
+            "archive 不足不可裁剪"
+        );
+        assert!(
+            check_zk_proof_pruning_eligibility(true, true, 3, 3).can_prune(),
+            "boundary == min 可裁剪"
+        );
         assert!(check_zk_proof_pruning_eligibility(true, true, 5, 3).can_prune());
     }
 
@@ -786,7 +888,13 @@ mod subtask_42_9_pruning {
     fn test_check_pruning_allowed_rejects_insufficient_archive() {
         let config = PruningConfig::new();
         let result = check_pruning_allowed(2, &config);
-        assert!(matches!(result, Err(PokerL1Error::PruningRejectedArchiveInsufficient { actual: 2, limit: 3 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PruningRejectedArchiveInsufficient {
+                actual: 2,
+                limit: 3
+            })
+        ));
         assert!(check_pruning_allowed(3, &config).is_ok());
     }
 
@@ -822,7 +930,10 @@ mod subtask_42_9_pruning {
             PermanentRetentionItem::BridgeOperation,
         ];
         for item in items {
-            assert!(is_permanently_retained(item), "所有 PermanentRetentionItem 应永久保留");
+            assert!(
+                is_permanently_retained(item),
+                "所有 PermanentRetentionItem 应永久保留"
+            );
         }
     }
 
@@ -830,8 +941,14 @@ mod subtask_42_9_pruning {
     fn test_pruning_config_defaults() {
         let config = PruningConfig::new();
         assert_eq!(config.tx_prune_after_blocks, DEFAULT_TX_PRUNE_AFTER_BLOCKS);
-        assert_eq!(config.vertex_prune_after_blocks, DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS);
-        assert_eq!(config.archive_node_min_count, DEFAULT_ARCHIVE_NODE_MIN_COUNT);
+        assert_eq!(
+            config.vertex_prune_after_blocks,
+            DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS
+        );
+        assert_eq!(
+            config.archive_node_min_count,
+            DEFAULT_ARCHIVE_NODE_MIN_COUNT
+        );
     }
 }
 
@@ -849,7 +966,10 @@ mod subtask_42_10_node_roles {
 
     #[test]
     fn test_full_node_prunes() {
-        assert!(NodeRole::Full.should_prune(), "Full node 执行 Layer 1-3 裁剪");
+        assert!(
+            NodeRole::Full.should_prune(),
+            "Full node 执行 Layer 1-3 裁剪"
+        );
         assert!(!NodeRole::Full.retains_full_data());
         assert!(!NodeRole::Full.can_serve_historical_data());
     }
@@ -900,9 +1020,18 @@ mod subtask_42_10_node_roles {
 
     #[test]
     fn test_historical_data_request_types() {
-        let req_tx = HistoricalDataRequest { key: [0x01; 32], request_type: HistoricalDataType::Transaction };
-        let req_vertex = HistoricalDataRequest { key: [0x02; 32], request_type: HistoricalDataType::DagVertex };
-        let req_proof = HistoricalDataRequest { key: [0x03; 32], request_type: HistoricalDataType::ZkProof };
+        let req_tx = HistoricalDataRequest {
+            key: [0x01; 32],
+            request_type: HistoricalDataType::Transaction,
+        };
+        let req_vertex = HistoricalDataRequest {
+            key: [0x02; 32],
+            request_type: HistoricalDataType::DagVertex,
+        };
+        let req_proof = HistoricalDataRequest {
+            key: [0x03; 32],
+            request_type: HistoricalDataType::ZkProof,
+        };
         assert_eq!(req_tx.request_type, HistoricalDataType::Transaction);
         assert_eq!(req_vertex.request_type, HistoricalDataType::DagVertex);
         assert_eq!(req_proof.request_type, HistoricalDataType::ZkProof);
@@ -916,7 +1045,9 @@ mod subtask_42_11_fuzz {
 
     /// 简单 LCG 伪随机数生成器（确定性，无外部依赖）。
     fn lcg_next(state: &mut u64) -> u64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *state
     }
 
@@ -931,7 +1062,11 @@ mod subtask_42_11_fuzz {
             let last_action_height = 100 + (lcg_next(&mut state) % 500);
             let current_height = last_action_height + (lcg_next(&mut state) % 100);
             let mut game = make_game_with_hand(last_action_height);
-            let player_addr = if lcg_next(&mut state).is_multiple_of(2) { make_addr(0x10) } else { make_addr(0x20) };
+            let player_addr = if lcg_next(&mut state).is_multiple_of(2) {
+                make_addr(0x10)
+            } else {
+                make_addr(0x20)
+            };
             let input = make_force_advance_input(player_addr, current_height);
 
             let elapsed = current_height - last_action_height;
@@ -940,13 +1075,22 @@ mod subtask_42_11_fuzz {
             if elapsed < turn_timeout {
                 // 未超时 → 应返回 NotTimedOut（除非玩家已 fold 或不在游戏）
                 if player_addr == make_addr(0x10) || player_addr == make_addr(0x20) {
-                    assert!(matches!(result, Err(ForceAdvanceError::NotTimedOut { .. })),
-                        "elapsed={} < {} 应 NotTimedOut", elapsed, turn_timeout);
+                    assert!(
+                        matches!(result, Err(ForceAdvanceError::NotTimedOut { .. })),
+                        "elapsed={} < {} 应 NotTimedOut",
+                        elapsed,
+                        turn_timeout
+                    );
                 }
             } else {
                 // 已超时（elapsed >= turn_timeout，SEC2-L6 <= 边界）→ 应成功
                 if player_addr == make_addr(0x10) || player_addr == make_addr(0x20) {
-                    assert!(result.is_ok(), "elapsed={} >= {} 应成功", elapsed, turn_timeout);
+                    assert!(
+                        result.is_ok(),
+                        "elapsed={} >= {} 应成功",
+                        elapsed,
+                        turn_timeout
+                    );
                 }
             }
             tested += 1;
@@ -969,14 +1113,26 @@ mod subtask_42_11_fuzz {
 
             let input = make_force_checkin_input(current_height, is_designated, turn_timeout);
             let age = current_height - last_action_height;
-            let boundary = if is_designated { turn_timeout * 2 } else { turn_timeout };
+            let boundary = if is_designated {
+                turn_timeout * 2
+            } else {
+                turn_timeout
+            };
 
             let result = apply_force_checkin(&mut game, &input);
             if let Ok(outcome) = result {
                 if age <= boundary {
-                    assert!(outcome.should_forfeit, "age={} <= boundary={} 应 forfeit", age, boundary);
+                    assert!(
+                        outcome.should_forfeit,
+                        "age={} <= boundary={} 应 forfeit",
+                        age, boundary
+                    );
                 } else {
-                    assert!(!outcome.should_forfeit, "age={} > boundary={} 不应 forfeit", age, boundary);
+                    assert!(
+                        !outcome.should_forfeit,
+                        "age={} > boundary={} 不应 forfeit",
+                        age, boundary
+                    );
                 }
             }
             tested += 1;
@@ -992,22 +1148,35 @@ mod subtask_42_11_fuzz {
 
         for _ in 0..10_000 {
             let delta_len = (lcg_next(&mut state) % 64) as usize;
-            let claimed_delta: Vec<u8> = (0..delta_len).map(|_| (lcg_next(&mut state) & 0xFF) as u8).collect();
-            let on_chain_delta: Vec<u8> = (0..delta_len).map(|_| (lcg_next(&mut state) & 0xFF) as u8).collect();
+            let claimed_delta: Vec<u8> = (0..delta_len)
+                .map(|_| (lcg_next(&mut state) & 0xFF) as u8)
+                .collect();
+            let on_chain_delta: Vec<u8> = (0..delta_len)
+                .map(|_| (lcg_next(&mut state) & 0xFF) as u8)
+                .collect();
 
             let claimed_hash = hash_state_delta(&claimed_delta);
             let on_chain_hash = hash_state_delta(&on_chain_delta);
 
             let mut game = make_game_with_forfeit_deposit(100, 5000);
             let tx = make_challenge_delta_tx(claimed_delta, 1000);
-            let result = apply_challenge_delta(&mut game, &tx, on_chain_hash, DEFAULT_CHALLENGE_REWARD_RATIO);
+            let result = apply_challenge_delta(
+                &mut game,
+                &tx,
+                on_chain_hash,
+                DEFAULT_CHALLENGE_REWARD_RATIO,
+            );
 
             if claimed_hash == on_chain_hash {
-                assert!(matches!(result, Err(PokerL1Error::ChallengeFailed)),
-                    "哈希一致 → 挑战失败");
+                assert!(
+                    matches!(result, Err(PokerL1Error::ChallengeFailed)),
+                    "哈希一致 → 挑战失败"
+                );
             } else {
-                assert!(matches!(result, Err(PokerL1Error::ChallengeSucceeded)),
-                    "哈希不一致 → 挑战成立");
+                assert!(
+                    matches!(result, Err(PokerL1Error::ChallengeSucceeded)),
+                    "哈希不一致 → 挑战成立"
+                );
             }
             tested += 1;
         }
@@ -1029,7 +1198,8 @@ mod subtask_42_11_fuzz {
             let archive_count = (lcg_next(&mut state) % 10) as u32;
 
             // tx 裁剪
-            let tx_result = check_tx_pruning_eligibility(block_age, tx_window, all_settled, dispute_expired);
+            let tx_result =
+                check_tx_pruning_eligibility(block_age, tx_window, all_settled, dispute_expired);
             if block_age >= tx_window && all_settled && dispute_expired {
                 assert!(tx_result.can_prune(), "满足全部条件应可裁剪 tx");
             } else {
@@ -1045,7 +1215,8 @@ mod subtask_42_11_fuzz {
             }
 
             // zk proof 裁剪
-            let zk_result = check_zk_proof_pruning_eligibility(all_settled, dispute_expired, archive_count, 3);
+            let zk_result =
+                check_zk_proof_pruning_eligibility(all_settled, dispute_expired, archive_count, 3);
             if all_settled && dispute_expired && archive_count >= 3 {
                 assert!(zk_result.can_prune());
             } else {
@@ -1066,7 +1237,11 @@ mod subtask_42_11_fuzz {
         for _ in 0..10_000 {
             let forfeit_amount = 1 + (lcg_next(&mut state) % 10_000);
             let has_challenger = lcg_next(&mut state).is_multiple_of(2);
-            let challenger = if has_challenger { Some(make_addr(0x02)) } else { None };
+            let challenger = if has_challenger {
+                Some(make_addr(0x02))
+            } else {
+                None
+            };
             let challenger_reward = lcg_next(&mut state) % (forfeit_amount + 1);
             let victim_count = 1 + (lcg_next(&mut state) % 5) as usize;
             let victims: Vec<(poker_l1::Address, u64)> = (0..victim_count)
@@ -1076,11 +1251,19 @@ mod subtask_42_11_fuzz {
                 })
                 .collect();
 
-            let dist = compute_forfeit_distribution(forfeit_amount, challenger, challenger_reward, &victims);
+            let dist = compute_forfeit_distribution(
+                forfeit_amount,
+                challenger,
+                challenger_reward,
+                &victims,
+            );
 
             // 不变量：分配总额 == forfeit_amount（舍入余额归最后一个 victim）
-            assert_eq!(dist.total_distributed, forfeit_amount,
-                "分配总额必须等于 forfeit_amount，tested={}", tested);
+            assert_eq!(
+                dist.total_distributed, forfeit_amount,
+                "分配总额必须等于 forfeit_amount，tested={}",
+                tested
+            );
             // challenger_reward 不超过 forfeit_amount
             assert!(dist.challenger_reward <= forfeit_amount);
             tested += 1;
@@ -1102,13 +1285,20 @@ mod subtask_42_11_fuzz {
             let result = validate_designated_operator_bond(bond, governed, total_buy_in);
 
             if bond != governed {
-                assert!(matches!(result, Err(PokerL1Error::InvalidBondAmount { .. })),
-                    "bond != governed 应 InvalidBondAmount");
+                assert!(
+                    matches!(result, Err(PokerL1Error::InvalidBondAmount { .. })),
+                    "bond != governed 应 InvalidBondAmount"
+                );
             } else if bond < total_buy_in {
-                assert!(matches!(result, Err(PokerL1Error::InsufficientOperatorBond { .. })),
-                    "bond < total_buy_in 应 InsufficientOperatorBond");
+                assert!(
+                    matches!(result, Err(PokerL1Error::InsufficientOperatorBond { .. })),
+                    "bond < total_buy_in 应 InsufficientOperatorBond"
+                );
             } else {
-                assert!(result.is_ok(), "bond == governed && bond >= total_buy_in 应通过");
+                assert!(
+                    result.is_ok(),
+                    "bond == governed && bond >= total_buy_in 应通过"
+                );
             }
             tested += 1;
         }
@@ -1125,9 +1315,15 @@ mod subtask_42_11_fuzz {
             let proof_len = (lcg_next(&mut state) % 128) as usize;
             let delta_len = (lcg_next(&mut state) % 128) as usize;
             let ack_len = (lcg_next(&mut state) % 128) as usize;
-            let proof: Vec<u8> = (0..proof_len).map(|_| (lcg_next(&mut state) & 0xFF) as u8).collect();
-            let delta: Vec<u8> = (0..delta_len).map(|_| (lcg_next(&mut state) & 0xFF) as u8).collect();
-            let ack: Vec<u8> = (0..ack_len).map(|_| (lcg_next(&mut state) & 0xFF) as u8).collect();
+            let proof: Vec<u8> = (0..proof_len)
+                .map(|_| (lcg_next(&mut state) & 0xFF) as u8)
+                .collect();
+            let delta: Vec<u8> = (0..delta_len)
+                .map(|_| (lcg_next(&mut state) & 0xFF) as u8)
+                .collect();
+            let ack: Vec<u8> = (0..ack_len)
+                .map(|_| (lcg_next(&mut state) & 0xFF) as u8)
+                .collect();
 
             let h1 = compute_proof_hash(&proof, &delta, &ack);
             let h2 = compute_proof_hash(&proof, &delta, &ack);

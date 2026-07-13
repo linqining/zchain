@@ -18,13 +18,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
-use crate::error::PokerL1Error;
 use crate::Hash;
+use crate::error::PokerL1Error;
 
-use super::zk_verifier::{SchemeId, VerifierStatus, ZkVerifier, SCHEME_GROTH16};
+use super::zk_verifier::{SCHEME_GROTH16, SchemeId, VerifierStatus, ZkVerifier};
 
 /// Groth16 verifying key（SubTask 24.1）。
 ///
@@ -255,16 +255,14 @@ impl ZkVerifier for Groth16Verifier {
 }
 
 /// 便捷函数：注册 Groth16 verifier 到 ZkVerifierRegistry。
-pub fn register_groth16_verifier(
-    registry: &mut super::zk_verifier::ZkVerifierRegistry,
-) {
+pub fn register_groth16_verifier(registry: &mut super::zk_verifier::ZkVerifierRegistry) {
     registry.register(Groth16Verifier::into_registry_verifier());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::zk_verifier::{ZkPublicIo, ZkVerifierRegistry};
+    use super::*;
 
     fn make_vk() -> Groth16Vk {
         Groth16Vk {
@@ -356,7 +354,10 @@ mod tests {
     fn test_verify_crs_fingerprint_unregistered() {
         let registry = Groth16VkRegistry::new();
         let result = registry.verify_crs_fingerprint(&[0xFF; 32]);
-        assert!(matches!(result, Err(PokerL1Error::Groth16VkNotRegistered(_))));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::Groth16VkNotRegistered(_))
+        ));
     }
 
     #[test]
@@ -411,7 +412,14 @@ mod tests {
         let pi = make_public_io();
         let proof = make_proof();
         let result = registry
-            .zk_verify(crate::DEFAULT_CHAIN_ID, SCHEME_GROTH16, &proof, &pi, 3, 1000)
+            .zk_verify(
+                crate::DEFAULT_CHAIN_ID,
+                SCHEME_GROTH16,
+                &proof,
+                &pi,
+                3,
+                1000,
+            )
             .expect("zk_verify 应成功");
         assert!(result.verified);
         assert_eq!(result.scheme_id, SCHEME_GROTH16);

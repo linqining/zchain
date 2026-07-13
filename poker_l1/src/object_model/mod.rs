@@ -16,5 +16,8 @@ pub mod store;
 pub use id::ObjectID;
 pub use object::{Object, ObjectData, ObjectType, Version};
 pub use ownership::Ownership;
-pub use smt::{MerklePath, SparseMerkleTree, TREE_DEPTH, empty_hashes, empty_leaf_hash, internal_hash, leaf_hash};
+pub use smt::{
+    MerklePath, SparseMerkleTree, TREE_DEPTH, empty_hashes, empty_leaf_hash, internal_hash,
+    leaf_hash,
+};
 pub use store::ObjectStore;

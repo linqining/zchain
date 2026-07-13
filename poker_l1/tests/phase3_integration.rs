@@ -9,26 +9,26 @@
 //! - SubTask 40.6：HandStarted 分支 + force_advance 联动测试
 //! - SubTask 40.7：覆盖率门禁（通过完整测试覆盖保证）
 
+use poker_l1::Address;
 use poker_l1::object_model::ObjectID;
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme};
 use poker_l1::signature::TaggedPubkey;
-use poker_l1::vm::contracts::{
-    compute_rake, force_advance_action, hand_started_branch, settle_hand, ForceAdvanceInput,
-    GameAction, GameContract, GamePhase, HandStartedInput, HandState, PlayerStack, RakeConfig,
-};
+use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 use poker_l1::vm::contracts::hand_started::HandStartedResult;
 use poker_l1::vm::contracts::types::{ExecutionMode, RakeConfigRef};
+use poker_l1::vm::contracts::{
+    ForceAdvanceInput, GameAction, GameContract, GamePhase, HandStartedInput, HandState,
+    PlayerStack, RakeConfig, compute_rake, force_advance_action, hand_started_branch, settle_hand,
+};
 use poker_l1::vm::{
+    PokerL1Context, TxContext,
     contract::{ContractRegistry, UpgradeState},
     gas_table::*,
     register_poker_l1_syscalls,
     upgrade::{
-        cancel_upgrade, dispute_emergency_upgrade, dispute_upgrade, emergency_upgrade,
-        initiate_upgrade, process_pending_upgrades, UpgradeConfig,
+        UpgradeConfig, cancel_upgrade, dispute_emergency_upgrade, dispute_upgrade,
+        emergency_upgrade, initiate_upgrade, process_pending_upgrades,
     },
-    PokerL1Context, TxContext,
 };
-use poker_l1::Address;
 
 // ===== 辅助构造函数 =====
 
@@ -120,9 +120,8 @@ fn subtask_40_1_vm_context_with_syscalls_registered() {
     // 验证 PokerL1Context + syscalls 注册完整性
     use solana_rbpf::program::{BuiltinProgram, FunctionRegistry};
 
-    let mut registry: FunctionRegistry<
-        solana_rbpf::program::BuiltinFunction<PokerL1Context>,
-    > = FunctionRegistry::default();
+    let mut registry: FunctionRegistry<solana_rbpf::program::BuiltinFunction<PokerL1Context>> =
+        FunctionRegistry::default();
     register_poker_l1_syscalls(&mut registry).expect("注册 syscalls 不应失败");
 
     // 验证所有 10 个 syscall 已注册
@@ -149,10 +148,8 @@ fn subtask_40_1_vm_context_with_syscalls_registered() {
     }
 
     // 验证 BuiltinProgram 可构造（loader 集成）
-    let loader = BuiltinProgram::<PokerL1Context>::new_loader(
-        solana_rbpf::vm::Config::default(),
-        registry,
-    );
+    let loader =
+        BuiltinProgram::<PokerL1Context>::new_loader(solana_rbpf::vm::Config::default(), registry);
     assert!(loader.get_config().enable_instruction_meter);
 }
 
@@ -242,7 +239,10 @@ fn subtask_40_3_gas_table_worst_case_syscalls() {
     let verify_failure_gas = GAS_VERIFY_FAILURE_PROOF;
 
     assert_eq!(verify_sig_gas, 500, "verify_signature gas = 500");
-    assert_eq!(verify_failure_gas, 80_000, "verify_failure_proof gas = 80000");
+    assert_eq!(
+        verify_failure_gas, 80_000,
+        "verify_failure_proof gas = 80000"
+    );
 
     // 100 次 verify_signature 不会超过 tx gas limit (10M)
     let batch_verify_gas = verify_sig_gas * 100;
@@ -275,7 +275,10 @@ fn subtask_40_4_game_lifecycle_create_modify_settle() {
     let input = HandStartedInput::new(hand);
     let result = hand_started_branch(&mut game, input).expect("HandStarted 应成功");
 
-    assert!(matches!(result, HandStartedResult::OnChain { hand_number: 1, .. }));
+    assert!(matches!(
+        result,
+        HandStartedResult::OnChain { hand_number: 1, .. }
+    ));
     assert!(!game.is_hand_settled());
 
     // 3. force_advance（超时，BB 无人 raise → check）
@@ -304,10 +307,10 @@ fn subtask_40_4_settle_rake_calculation_various_pots() {
     let config = make_rake_config();
 
     let test_cases = [
-        (0u64, 0u64),   // M1 修复：底池为 0 → 台费 0
-        (100, 5),       // 100 * 5% = 5
-        (1000, 50),     // 1000 * 5% = 50
-        (10_000, 500),  // 10000 * 5% = 500
+        (0u64, 0u64),    // M1 修复：底池为 0 → 台费 0
+        (100, 5),        // 100 * 5% = 5
+        (1000, 50),      // 1000 * 5% = 50
+        (10_000, 500),   // 10000 * 5% = 500
         (100_000, 1000), // 100000 * 5% = 5000, but cap = 1000
     ];
 
@@ -399,9 +402,7 @@ fn subtask_40_5_upgrade_unauthorized_caller() {
     let attacker = make_addr(0x02);
     let config = make_short_timelock_config();
 
-    let (contract_id, _) = registry
-        .deploy(b"v1".to_vec(), deployer, 100)
-        .unwrap();
+    let (contract_id, _) = registry.deploy(b"v1".to_vec(), deployer, 100).unwrap();
 
     let result = initiate_upgrade(
         &mut registry,
@@ -412,7 +413,10 @@ fn subtask_40_5_upgrade_unauthorized_caller() {
         100,
     );
     assert!(
-        matches!(result, Err(poker_l1::error::PokerL1Error::NotAuthorized { .. })),
+        matches!(
+            result,
+            Err(poker_l1::error::PokerL1Error::NotAuthorized { .. })
+        ),
         "非持有者升级应返回 NotAuthorized, got: {result:?}"
     );
 }
@@ -506,10 +510,7 @@ fn subtask_40_6_hand_started_onchain_then_force_advance_fold() {
     let other_addr = make_addr(0x03);
 
     // 构造有 raise 的手牌
-    let mut players = vec![
-        PlayerStack::new(bb_addr),
-        PlayerStack::new(other_addr),
-    ];
+    let mut players = vec![PlayerStack::new(bb_addr), PlayerStack::new(other_addr)];
     players[0].is_big_blind = true;
     let hand = HandState {
         phase: GamePhase::Preflop,
@@ -753,21 +754,11 @@ fn subtask_40_7_force_advance_safety_paths_covered() {
     };
 
     // 1. BB preflop 无人 raise → check
-    let r1 = force_advance_action(
-        &hand,
-        &ForceAdvanceInput::new(bb, 110),
-        10,
-    )
-    .unwrap();
+    let r1 = force_advance_action(&hand, &ForceAdvanceInput::new(bb, 110), 10).unwrap();
     assert_eq!(r1, GameAction::Check);
 
     // 2. 非 BB 超时 → fold
-    let r2 = force_advance_action(
-        &hand,
-        &ForceAdvanceInput::new(other, 110),
-        10,
-    )
-    .unwrap();
+    let r2 = force_advance_action(&hand, &ForceAdvanceInput::new(other, 110), 10).unwrap();
     assert_eq!(r2, GameAction::Fold);
 
     // 3. 未超时 → 错误
@@ -775,10 +766,6 @@ fn subtask_40_7_force_advance_safety_paths_covered() {
     assert!(r3.is_err());
 
     // 4. 玩家不在游戏中 → 错误
-    let r4 = force_advance_action(
-        &hand,
-        &ForceAdvanceInput::new(make_addr(0xff), 110),
-        10,
-    );
+    let r4 = force_advance_action(&hand, &ForceAdvanceInput::new(make_addr(0xff), 110), 10);
     assert!(r4.is_err());
 }

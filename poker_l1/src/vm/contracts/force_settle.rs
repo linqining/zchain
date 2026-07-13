@@ -30,12 +30,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Address;
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
-use crate::Address;
 
 use super::force_checkin::RecoveryStage;
-use super::settle::{settle_hand, RakeConfig, SettleResult};
+use super::settle::{RakeConfig, SettleResult, settle_hand};
 use super::types::{GameContract, GamePhase};
 
 /// force_settle tx（SubTask 28.7）。
@@ -177,8 +177,10 @@ pub const fn is_force_settle_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
-    use crate::vm::contracts::types::{ExecutionMode, GamePhase, HandState, PlayerStack, RakeConfigRef};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
+    use crate::vm::contracts::types::{
+        ExecutionMode, GamePhase, HandState, PlayerStack, RakeConfigRef,
+    };
 
     fn make_addr(byte: u8) -> Address {
         [byte; 20]
@@ -364,7 +366,10 @@ mod tests {
         let tx = make_force_settle_tx(730); // 730 - 100 = 630 == stage2_end
 
         let result = apply_force_settle(&mut game, &tx, &make_rake_config());
-        assert!(result.is_err(), "elapsed == stage2_end 仍为 Stage2，force_settle 被拒");
+        assert!(
+            result.is_err(),
+            "elapsed == stage2_end 仍为 Stage2，force_settle 被拒"
+        );
     }
 
     #[test]
@@ -374,7 +379,10 @@ mod tests {
         let tx = make_force_settle_tx(731);
 
         let outcome = apply_force_settle(&mut game, &tx, &make_rake_config());
-        assert!(outcome.is_ok(), "elapsed = 631 > 630 → Stage3，force_settle 应成功");
+        assert!(
+            outcome.is_ok(),
+            "elapsed = 631 > 630 → Stage3，force_settle 应成功"
+        );
     }
 
     // ===== is_force_settle_allowed 测试 =====

@@ -13,10 +13,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::object_model::ObjectID;
-use crate::signature::TaggedPubkey;
 use crate::Address;
 use crate::Hash;
+use crate::object_model::ObjectID;
+use crate::signature::TaggedPubkey;
 
 /// 游戏执行模式（spec.md 第 527-553 行）。
 ///
@@ -544,14 +544,7 @@ mod tests {
             rake_cap: 1000,
             rake_recipient: make_addr(0xff),
         };
-        let mut game = GameContract::new(
-            id,
-            owner,
-            validator,
-            ExecutionMode::OnChain,
-            rake,
-            10,
-        );
+        let mut game = GameContract::new(id, owner, validator, ExecutionMode::OnChain, rake, 10);
 
         assert_eq!(game.hand_number, 0);
         assert!(game.current_hand.is_none());

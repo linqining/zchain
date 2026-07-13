@@ -7,8 +7,8 @@
 //! 所有 scheme 内部均使用常数时间实现。
 
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::signature::secp256k1_scheme;
 use crate::signature::ed25519_scheme;
+use crate::signature::secp256k1_scheme;
 use crate::signature::tagged_pubkey::{SignatureScheme, TaggedPubkey};
 
 /// 统一签名验证：按 tagged pubkey 的 tag 路由到对应曲线验证器。

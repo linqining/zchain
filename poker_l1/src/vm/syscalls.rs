@@ -25,16 +25,17 @@
 use std::slice::{from_raw_parts, from_raw_parts_mut};
 
 use solana_rbpf::{
-    declare_builtin_function, ebpf, error::EbpfError,
+    declare_builtin_function, ebpf,
+    error::EbpfError,
     memory_region::{AccessType, MemoryMapping},
     program::{BuiltinFunction, FunctionRegistry},
 };
 
 use crate::error::PokerL1Error;
-use crate::object_model::smt::MerklePath;
 use crate::object_model::ObjectID;
-use crate::signature::unified::verify_signature;
+use crate::object_model::smt::MerklePath;
 use crate::signature::TaggedPubkey;
+use crate::signature::unified::verify_signature;
 
 use super::context::PokerL1Context;
 use super::gas_table::*;
@@ -59,9 +60,9 @@ fn validate_heap_ptr(vm_addr: u64, len: u64) -> Result<(), Box<dyn std::error::E
             )))
         })?;
 
-    let ptr_end = vm_addr.checked_add(len).ok_or_else(|| {
-        to_syscall_err(PokerL1Error::HeapAccessViolation { ptr: vm_addr, len })
-    })?;
+    let ptr_end = vm_addr
+        .checked_add(len)
+        .ok_or_else(|| to_syscall_err(PokerL1Error::HeapAccessViolation { ptr: vm_addr, len }))?;
 
     if vm_addr < heap_start || ptr_end > heap_end {
         return Err(to_syscall_err(PokerL1Error::HeapAccessViolation {
@@ -120,10 +121,7 @@ fn write_vm_memory(
 }
 
 /// 检查并消耗 gas，不足时返回 `OutOfGas` 错误。
-fn charge_gas(
-    ctx: &mut PokerL1Context,
-    amount: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn charge_gas(ctx: &mut PokerL1Context, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
     if !ctx.consume_gas(amount) {
         let used = ctx.gas_used().saturating_add(amount);
         let limit = ctx.gas_used().saturating_add(ctx.remaining_gas());
@@ -1441,16 +1439,9 @@ mod tests {
         heap[..28].copy_from_slice(&id.to_bytes());
         heap[100..108].copy_from_slice(b"new data");
 
-        let result = SyscallObjectWrite::rust(
-            &mut ctx,
-            HEAP_BASE,
-            28,
-            HEAP_BASE + 100,
-            8,
-            0,
-            &mut mapping,
-        )
-        .expect("object_write 应成功");
+        let result =
+            SyscallObjectWrite::rust(&mut ctx, HEAP_BASE, 28, HEAP_BASE + 100, 8, 0, &mut mapping)
+                .expect("object_write 应成功");
 
         assert_eq!(result, 0);
         assert_eq!(ctx.object_cache.get(&id).unwrap(), b"new data");
@@ -1589,8 +1580,8 @@ mod tests {
 
         heap[0..11].copy_from_slice(b"log message");
 
-        let result = SyscallLog::rust(&mut ctx, HEAP_BASE, 11, 0, 0, 0, &mut mapping)
-            .expect("log 应成功");
+        let result =
+            SyscallLog::rust(&mut ctx, HEAP_BASE, 11, 0, 0, 0, &mut mapping).expect("log 应成功");
 
         assert_eq!(result, 0);
         assert_eq!(ctx.gas_used(), GAS_LOG);
@@ -1649,9 +1640,8 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
 
-        let result =
-            SyscallGetBlockHeight::rust(&mut ctx, 0, 0, 0, 0, 0, &mut mapping)
-                .expect("get_block_height 应成功");
+        let result = SyscallGetBlockHeight::rust(&mut ctx, 0, 0, 0, 0, 0, &mut mapping)
+            .expect("get_block_height 应成功");
 
         assert_eq!(result, 100);
         assert_eq!(ctx.gas_used(), GAS_GET_BLOCK_HEIGHT);
@@ -1762,16 +1752,9 @@ mod tests {
         let proof = vec![0u8; 32];
         heap[..32].copy_from_slice(&proof);
 
-        let result = SyscallVerifyFailureProof::rust(
-            &mut ctx,
-            HEAP_BASE,
-            32,
-            0,
-            0,
-            0,
-            &mut mapping,
-        )
-        .expect("应返回 Ok(1) 证明无效");
+        let result =
+            SyscallVerifyFailureProof::rust(&mut ctx, HEAP_BASE, 32, 0, 0, 0, &mut mapping)
+                .expect("应返回 Ok(1) 证明无效");
 
         assert_eq!(result, 1, "过短的证明应判定无效");
     }
@@ -1808,8 +1791,8 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
-            .with_zk_verifier(registry);
+        let mut ctx =
+            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
 
         let proof = vec![0xAAu8; 64];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1842,8 +1825,8 @@ mod tests {
             let mut heap = vec![0u8; 4096];
             let mut mapping = make_test_mapping(&mut heap);
             let registry = make_test_zk_registry();
-            let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
-                .with_zk_verifier(registry);
+            let mut ctx =
+                PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
 
             let proof = vec![0xBBu8; proof_len];
             let pio_bytes = make_valid_public_io_bytes();
@@ -1876,8 +1859,8 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
-            .with_zk_verifier(registry);
+        let mut ctx =
+            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
 
         let pio_bytes = make_valid_public_io_bytes();
         heap[..pio_bytes.len()].copy_from_slice(&pio_bytes);
@@ -1927,8 +1910,8 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
-            .with_zk_verifier(registry);
+        let mut ctx =
+            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
 
         let proof = vec![0xDDu8; 32];
         let short_pio = vec![0u8; 10]; // 远小于 MIN_BYTES=136
@@ -1955,8 +1938,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         // 仅 100 gas，远不够 Hypernova 的 50000
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100)
-            .with_zk_verifier(registry);
+        let mut ctx = PokerL1Context::new(make_tx_context(false), 100).with_zk_verifier(registry);
 
         let proof = vec![0xEEu8; 32];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1984,8 +1966,8 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
-            .with_zk_verifier(registry);
+        let mut ctx =
+            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
 
         let proof = vec![0xFFu8; 32];
         let pio_bytes = make_valid_public_io_bytes();
@@ -2013,8 +1995,8 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000)
-            .with_zk_verifier(registry);
+        let mut ctx =
+            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
 
         // proof_ptr 指向 stack 区域（非法）
         let result = SyscallZkVerify::rust(
@@ -2081,8 +2063,7 @@ mod tests {
         assert!(result.is_err(), "注册不同函数到同名 syscall 应冲突");
 
         // BLS syscall 哈希冲突检查
-        let result =
-            registry.register_function_hashed(*b"bls12_381_g1_add", SyscallBlsG1Mul::vm);
+        let result = registry.register_function_hashed(*b"bls12_381_g1_add", SyscallBlsG1Mul::vm);
         assert!(result.is_err(), "注册不同函数到同名 BLS syscall 应冲突");
     }
 
@@ -2172,8 +2153,7 @@ mod tests {
         assert_eq!(ctx.gas_used(), GAS_BLS_G1_ADD);
 
         // 验证输出 = G + G = 2G
-        let out_bytes =
-            &heap[2 * bls::G1_COMPRESSED_SIZE..3 * bls::G1_COMPRESSED_SIZE];
+        let out_bytes = &heap[2 * bls::G1_COMPRESSED_SIZE..3 * bls::G1_COMPRESSED_SIZE];
         let expected = G1Projective::generator() + G1Projective::generator();
         assert_eq!(out_bytes, &expected.to_compressed()[..]);
     }
@@ -2230,8 +2210,7 @@ mod tests {
         assert_eq!(result, 0);
         assert_eq!(ctx.gas_used(), GAS_BLS_G1_NEG);
 
-        let out_bytes =
-            &heap[bls::G1_COMPRESSED_SIZE..2 * bls::G1_COMPRESSED_SIZE];
+        let out_bytes = &heap[bls::G1_COMPRESSED_SIZE..2 * bls::G1_COMPRESSED_SIZE];
         let expected = -G1Projective::generator();
         assert_eq!(out_bytes, &expected.to_compressed()[..]);
     }
@@ -2318,8 +2297,7 @@ mod tests {
         assert_eq!(result, 0);
         assert_eq!(ctx.gas_used(), GAS_BLS_G2_NEG);
 
-        let out_bytes =
-            &heap[bls::G2_COMPRESSED_SIZE..2 * bls::G2_COMPRESSED_SIZE];
+        let out_bytes = &heap[bls::G2_COMPRESSED_SIZE..2 * bls::G2_COMPRESSED_SIZE];
         let expected = -G2Projective::generator();
         assert_eq!(out_bytes, &expected.to_compressed()[..]);
     }
@@ -2410,10 +2388,7 @@ mod tests {
         .expect("bls12_381_hash_to_g1 应成功");
 
         assert_eq!(result, 0);
-        assert_eq!(
-            ctx.gas_used(),
-            bls_hash_to_g1_gas(msg.len() as u64)
-        );
+        assert_eq!(ctx.gas_used(), bls_hash_to_g1_gas(msg.len() as u64));
 
         let out_bytes = &heap[256..256 + bls::G1_COMPRESSED_SIZE];
         // 确定性：与直接调用 bls_hash_to_g1 一致
@@ -2443,10 +2418,7 @@ mod tests {
         .expect("bls12_381_hash_to_g2 应成功");
 
         assert_eq!(result, 0);
-        assert_eq!(
-            ctx.gas_used(),
-            bls_hash_to_g2_gas(msg.len() as u64)
-        );
+        assert_eq!(ctx.gas_used(), bls_hash_to_g2_gas(msg.len() as u64));
 
         let out_bytes = &heap[256..256 + bls::G2_COMPRESSED_SIZE];
         let expected = crate::crypto_precompiles::bls::bls_hash_to_g2(msg).unwrap();
@@ -2500,12 +2472,11 @@ mod tests {
         let out_offset = bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE;
         let out_bytes = &heap[out_offset..out_offset + bls::GT_COMPRESSED_SIZE];
         // 验证与直接调用一致
-        let expected =
-            crate::crypto_precompiles::bls::bls_miller_loop(
-                &G1Projective::generator().to_compressed(),
-                &G2Projective::generator().to_compressed(),
-            )
-            .unwrap();
+        let expected = crate::crypto_precompiles::bls::bls_miller_loop(
+            &G1Projective::generator().to_compressed(),
+            &G2Projective::generator().to_compressed(),
+        )
+        .unwrap();
         assert_eq!(out_bytes, &expected[..]);
     }
 
@@ -2550,7 +2521,8 @@ mod tests {
 
         // final_exp 是 identity，输出应等于输入
         let in_bytes = &heap[gt_offset..gt_offset + bls::GT_COMPRESSED_SIZE];
-        let out_bytes = &heap[gt_offset + bls::GT_COMPRESSED_SIZE..gt_offset + 2 * bls::GT_COMPRESSED_SIZE];
+        let out_bytes =
+            &heap[gt_offset + bls::GT_COMPRESSED_SIZE..gt_offset + 2 * bls::GT_COMPRESSED_SIZE];
         assert_eq!(in_bytes, out_bytes, "final_exp identity 应返回相同值");
     }
 

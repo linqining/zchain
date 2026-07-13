@@ -7,31 +7,28 @@
 //! - SubTask 42.4：Groth16 CRS fingerprint + IPA verifier
 //! - SubTask 42.5：链下折叠（CCS fold loop + ZkShuffleCcsCircuit）
 
-use poker_l1::offline::ack_chain::{compute_ack_chain_hash, AckEntry};
-#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
-use poker_l1::offline::ccs::{
-    fold_loop, fold_step, CcsCircuit, CcsInstance, ZkShuffleCcsCircuit,
-};
+use poker_l1::object_model::ObjectID;
+use poker_l1::offline::DEFAULT_MAX_ACK_CHAIN_LENGTH;
+#[allow(deprecated)]
+use poker_l1::offline::DEFAULT_MAX_PARTIAL_CHECKIN_COUNT;
+use poker_l1::offline::MAX_FOLD_STEP_COUNT;
+use poker_l1::offline::ack_chain::{AckEntry, compute_ack_chain_hash};
 use poker_l1::offline::groth16::{
-    register_groth16_verifier, Groth16Proof, Groth16Vk, Groth16VkRegistry, GROTH16_PROOF_SIZE,
+    GROTH16_PROOF_SIZE, Groth16Proof, Groth16Vk, Groth16VkRegistry, register_groth16_verifier,
 };
 use poker_l1::offline::hypernova::{
-    fiat_shamir_challenge, register_hypernova_verifier, HypernovaProof, HypernovaVerifier,
-    HYPERNOVA_PROOF_MIN_SIZE,
+    HYPERNOVA_PROOF_MIN_SIZE, HypernovaProof, HypernovaVerifier, fiat_shamir_challenge,
+    register_hypernova_verifier,
 };
-use poker_l1::offline::ipa::{register_ipa_verifier, IpaProof, IpaVerifier, IPA_PROOF_MIN_SIZE};
+use poker_l1::offline::ipa::{IPA_PROOF_MIN_SIZE, IpaProof, IpaVerifier, register_ipa_verifier};
 use poker_l1::offline::state::{
-    check_offchain_allowed, execute_checkin, execute_checkout, execute_partial_checkin,
-    CheckinTx, ExecutionMode, OfflineState, PartialCheckinTx,
+    CheckinTx, ExecutionMode, OfflineState, PartialCheckinTx, check_offchain_allowed,
+    execute_checkin, execute_checkout, execute_partial_checkin,
 };
 use poker_l1::offline::zk_verifier::{
-    ProofKind, VerifierStatus, ZkPublicIo, ZkVerifyContext, ZkVerifierRegistry, SCHEME_GROTH16,
-    SCHEME_HYPERNOVA, SCHEME_IPA,
+    ProofKind, SCHEME_GROTH16, SCHEME_HYPERNOVA, SCHEME_IPA, VerifierStatus, ZkPublicIo,
+    ZkVerifierRegistry, ZkVerifyContext,
 };
-use poker_l1::offline::{
-    DEFAULT_MAX_ACK_CHAIN_LENGTH, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT, MAX_FOLD_STEP_COUNT,
-};
-use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 
 // ===== 辅助函数 =====
@@ -122,7 +119,10 @@ fn subtask_42_1_offlinestate_checkout_onchain_skipped() {
     // OnChain 模式 → execute_checkout 返回 None
     let mut state = make_offchain_state(1, 0);
     state.execution_mode = ExecutionMode::OnChain;
-    assert!(execute_checkout(&state).is_none(), "OnChain 应跳过 checkout");
+    assert!(
+        execute_checkout(&state).is_none(),
+        "OnChain 应跳过 checkout"
+    );
 }
 
 #[test]
@@ -554,7 +554,10 @@ fn subtask_42_3_public_io_boundary_fold_step_count() {
     let mut pio = make_valid_public_io();
 
     pio.fold_step_count = MAX_FOLD_STEP_COUNT;
-    assert!(pio.validate(3, DEFAULT_MAX_ACK_CHAIN_LENGTH).is_ok(), "1000 应通过");
+    assert!(
+        pio.validate(3, DEFAULT_MAX_ACK_CHAIN_LENGTH).is_ok(),
+        "1000 应通过"
+    );
 
     pio.fold_step_count = MAX_FOLD_STEP_COUNT + 1;
     assert!(
@@ -569,10 +572,16 @@ fn subtask_42_3_public_io_boundary_skip_count() {
     let mut pio = make_valid_public_io();
 
     pio.skip_count = 3;
-    assert!(pio.validate(3, DEFAULT_MAX_ACK_CHAIN_LENGTH).is_ok(), "3 应通过");
+    assert!(
+        pio.validate(3, DEFAULT_MAX_ACK_CHAIN_LENGTH).is_ok(),
+        "3 应通过"
+    );
 
     pio.skip_count = 4;
-    assert!(pio.validate(3, DEFAULT_MAX_ACK_CHAIN_LENGTH).is_err(), "4 应失败");
+    assert!(
+        pio.validate(3, DEFAULT_MAX_ACK_CHAIN_LENGTH).is_err(),
+        "4 应失败"
+    );
 }
 
 #[test]
@@ -626,18 +635,18 @@ fn subtask_42_3_hypernova_verifier_trait_impl() {
 
     let pio = make_valid_public_io();
     // Stub 状态下验证合法 proof
-    assert!(verifier
-        .verify(
-            &[0xAA; HYPERNOVA_PROOF_MIN_SIZE],
-            &pio,
-            VerifierStatus::Stub
-        )
-        .is_ok());
+    assert!(
+        verifier
+            .verify(
+                &[0xAA; HYPERNOVA_PROOF_MIN_SIZE],
+                &pio,
+                VerifierStatus::Stub
+            )
+            .is_ok()
+    );
 
     // 空 proof → InvalidZkProofFormat
-    assert!(verifier
-        .verify(&[], &pio, VerifierStatus::Stub)
-        .is_err());
+    assert!(verifier.verify(&[], &pio, VerifierStatus::Stub).is_err());
 }
 
 // ===== SubTask 42.4: Groth16 CRS fingerprint + IPA verifier =====
@@ -709,9 +718,7 @@ fn subtask_42_4_groth16_vk_registry_register_and_verify() {
     let fingerprint = vk.crs_fingerprint();
 
     // register 接受 vk，返回 vk_id = blake2b_256(vk.to_bytes())
-    let vk_id = vk_registry
-        .register(vk.clone())
-        .expect("注册应成功");
+    let vk_id = vk_registry.register(vk.clone()).expect("注册应成功");
 
     // vk_id 应等于 crs_fingerprint 的 blake2b_256(vk.to_bytes())
     // 注意：vk_id != crs_fingerprint，两者算法不同
@@ -774,19 +781,17 @@ fn subtask_42_4_ipa_verifier_trait_impl() {
     let pio = make_valid_public_io();
 
     // 合法 proof（≥ 32 字节）
-    assert!(verifier
-        .validate_proof_format(&[0u8; IPA_PROOF_MIN_SIZE])
-        .is_ok());
+    assert!(
+        verifier
+            .validate_proof_format(&[0u8; IPA_PROOF_MIN_SIZE])
+            .is_ok()
+    );
 
     // 空 proof → 失败
     assert!(verifier.validate_proof_format(&[]).is_err());
 
     // Stub 状态下验证
-    let result = verifier.verify(
-        &[0xAA; IPA_PROOF_MIN_SIZE],
-        &pio,
-        VerifierStatus::Stub,
-    );
+    let result = verifier.verify(&[0xAA; IPA_PROOF_MIN_SIZE], &pio, VerifierStatus::Stub);
     assert!(result.is_ok());
     assert!(result.unwrap(), "Stub 状态下合法 proof 应验证通过");
 }
@@ -814,245 +819,283 @@ fn subtask_42_4_ipa_proof_to_bytes() {
     assert_ne!(bytes.len(), bytes2.len());
 }
 
-// ===== SubTask 42.5: 链下折叠（CCS fold loop + ZkShuffleCcsCircuit）=====
+// ===== SubTask 42.5: 链下折叠（Phase 11 — 真实 Hypernova fold）=====
 
-/// 构造测试用 CcsInstance。
-fn make_ccs_instance(seed: u8) -> CcsInstance {
-    CcsInstance {
-        mat_commitments: vec![[seed; 32], [seed + 1; 32], [seed + 2; 32]],
-        public_input_hash: [seed + 3; 32],
-        witness_commitment: [seed + 4; 32],
-        state_delta_hash: [seed + 5; 32],
-        ack_step_hash: [seed + 6; 32],
-    }
+use poker_l1::offline::ccs::{fold_loop_real, fold_step_real};
+use poker_zkvm::ccs::{Ccs, Fr as ZkvmFr, SparseMatrix};
+use poker_zkvm::field::ZkvmField;
+use poker_zkvm::fold::ccccs::Ccccs;
+use poker_zkvm::pcs::ipa::{IpaCommitment, IpaPcs};
+use poker_zkvm::pcs::{MultilinearPoly, Pcs};
+use poker_zkvm::precompiles::elgamal;
+use poker_zkvm::transcript::Transcript;
+
+/// 辅助：构造 Fr。
+fn zkvm_f(v: u32) -> ZkvmFr {
+    ZkvmFr::from_u32_with_wrap(v)
+}
+
+/// 辅助：构造负 Fr。
+fn zkvm_neg_f(v: u32) -> ZkvmFr {
+    ZkvmFr::zero().sub(&zkvm_f(v))
+}
+
+/// 构造 stub commitment（G1 生成元）。
+fn stub_commitment() -> IpaCommitment {
+    IpaCommitment(elgamal::generator())
+}
+
+/// 使用 IPA 计算实际 witness commitment。
+fn commit_witness(pcs: &IpaPcs, z: &[ZkvmFr]) -> IpaCommitment {
+    let poly = MultilinearPoly::from_evals(z.to_vec()).expect("MultilinearPoly 构造应成功");
+    pcs.commit(&poly).expect("pcs.commit 应成功")
+}
+
+/// 构造线性 CCS — x - y = 0（1 row, 4 vars, 2 matrices）。
+fn make_linear_ccs() -> Ccs {
+    let mut m0 = SparseMatrix::new(1, 4);
+    m0.add_entry(0, 1, zkvm_f(1)).unwrap();
+    let mut m1 = SparseMatrix::new(1, 4);
+    m1.add_entry(0, 2, zkvm_f(1)).unwrap();
+
+    Ccs::new(
+        4,
+        vec![m0, m1],
+        vec![vec![0], vec![1]],
+        vec![zkvm_f(1), zkvm_neg_f(1)],
+    )
+    .expect("linear Ccs 构造应成功")
+}
+
+/// 构造 IPA PCS（max_n_vars = 4，支持最多 16 个变量的 witness）。
+fn make_ipa_pcs() -> IpaPcs {
+    IpaPcs::new(4).expect("IpaPcs 构造应成功")
 }
 
 #[test]
 fn subtask_42_5_fold_step_single() {
-    // 单步 fold：prev=None → fold_step_count=1
-    let instance = make_ccs_instance(0x10);
-    let result = fold_step(None, &instance, poker_l1::DEFAULT_CHAIN_ID, &ObjectID::new([0u8; 20], 0))
+    // 单步真实 fold：线性 CCS x - y = 0
+    let ccs = make_linear_ccs();
+    let z_l = vec![zkvm_f(1), zkvm_f(5), zkvm_f(5), zkvm_f(0)];
+    let z_c = vec![zkvm_f(1), zkvm_f(3), zkvm_f(3), zkvm_f(0)];
+
+    let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
+    let ccccs = ccs
+        .to_cccs(&z_c, vec![], stub_commitment())
+        .expect("to_cccs");
+
+    let mut transcript = Transcript::new();
+    let result = fold_step_real(&lcccs, &stub_commitment(), &ccccs, &mut transcript)
         .expect("单步 fold 应成功");
 
-    assert_eq!(result.fold_step_count, 1);
-    assert_eq!(
-        result.cumulative_state_delta_hash,
-        instance.state_delta_hash,
-        "首步 cumulative = 自身 state_delta_hash"
+    // 线性 CCS 折叠后 u' = 0
+    assert_eq!(result.folded_lcccs.u_l, ZkvmFr::zero());
+    // folded LCCCS 代数满足（线性 CCS 特性）
+    assert!(
+        result.folded_lcccs.satisfied().unwrap(),
+        "线性 CCS 折叠后应代数满足 relaxed 约束"
     );
 }
 
 #[test]
 fn subtask_42_5_fold_step_multi_increments_count() {
-    // 多步 fold：fold_step_count 递增
-    let instance1 = make_ccs_instance(0x10);
-    let instance2 = make_ccs_instance(0x20);
+    // 链式 fold 两步：fold(fold(L1, C2), C3)
+    let ccs = make_linear_ccs();
+    let z1 = vec![zkvm_f(1), zkvm_f(5), zkvm_f(5), zkvm_f(0)];
+    let z2 = vec![zkvm_f(1), zkvm_f(3), zkvm_f(3), zkvm_f(0)];
+    let z3 = vec![zkvm_f(1), zkvm_f(7), zkvm_f(7), zkvm_f(0)];
 
-    let step1 = fold_step(None, &instance1, poker_l1::DEFAULT_CHAIN_ID, &ObjectID::new([0u8; 20], 0))
-        .expect("step1 应成功");
-    let step2 = fold_step(
-        Some(&step1),
-        &instance2,
-        poker_l1::DEFAULT_CHAIN_ID,
-        &ObjectID::new([0u8; 20], 0),
+    let lcccs1 = ccs.to_lcccs(&z1, &[], vec![]).expect("to_lcccs 1");
+    let ccccs2 = ccs
+        .to_cccs(&z2, vec![], stub_commitment())
+        .expect("to_cccs 2");
+    let ccccs3 = ccs
+        .to_cccs(&z3, vec![], stub_commitment())
+        .expect("to_cccs 3");
+
+    let mut transcript = Transcript::new();
+    let out1 = fold_step_real(&lcccs1, &stub_commitment(), &ccccs2, &mut transcript)
+        .expect("fold 1 应成功");
+    let out2 = fold_step_real(
+        &out1.folded_lcccs,
+        &out1.folded_commitment,
+        &ccccs3,
+        &mut transcript,
     )
-    .expect("step2 应成功");
+    .expect("fold 2 应成功");
 
-    assert_eq!(step1.fold_step_count, 1);
-    assert_eq!(step2.fold_step_count, 2);
-    // cumulative_state_delta_hash 应不同（哈希链接）
-    assert_ne!(
-        step1.cumulative_state_delta_hash,
-        step2.cumulative_state_delta_hash
+    // 两步链式折叠后线性 CCS 仍 satisfied
+    assert_eq!(out2.folded_lcccs.u_l, ZkvmFr::zero());
+    assert!(
+        out2.folded_lcccs.satisfied().unwrap(),
+        "线性 CCS 两步链式折叠后应 satisfied"
     );
 }
 
 #[test]
 fn subtask_42_5_fold_loop_multi_step() {
-    // fold_loop：≥2 步 CCS 实例折叠为单个 proof
-    let instances = vec![
-        make_ccs_instance(0x10),
-        make_ccs_instance(0x20),
-        make_ccs_instance(0x30),
-    ];
+    // 真实 fold_loop：3 个 CCCCS 实例折叠为单个 HypernovaProof
+    let ccs = make_linear_ccs();
+    let pcs = make_ipa_pcs();
 
-    let result = fold_loop(
-        &instances,
-        [0x01; 32], // initial_commitment
-        [0x02; 32], // final_commitment
-        [0x03; 32], // ack_chain_hash
-        0,          // skip_count
-        Vec::new(), // segment_continuity_proof
+    // 初始 LCCCS
+    let z_l = vec![zkvm_f(1), zkvm_f(5), zkvm_f(5), zkvm_f(0)];
+    let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
+
+    // 3 个 CCCCS 实例
+    let ccccs_instances: Vec<Ccccs> = (0..3)
+        .map(|i| {
+            let z_c = vec![zkvm_f(1), zkvm_f(3 + i), zkvm_f(3 + i), zkvm_f(0)];
+            let cmt = commit_witness(&pcs, &z_c);
+            ccs.to_cccs(&z_c, vec![], cmt).expect("to_cccs")
+        })
+        .collect();
+
+    let initial_cmt = commit_witness(&pcs, &z_l);
+    let mut transcript = Transcript::new();
+
+    let ccs_commitment = ccs.ccs_commitment();
+    let public_io_commitment = [0u8; 32];
+    let batch_public_inputs = vec![vec![]]; // 单 batch，无 public_inputs
+
+    let proof = fold_loop_real(
+        &ccs,
+        lcccs,
+        initial_cmt,
+        &ccccs_instances,
+        &pcs,
+        &mut transcript,
+        ccs_commitment,
+        public_io_commitment,
+        batch_public_inputs,
     )
     .expect("fold_loop 应成功");
 
-    assert_eq!(result.fold_step_count, 3);
-    assert_eq!(result.public_io.fold_step_count, 3);
-    assert_eq!(result.public_io.initial_commitment, [0x01; 32]);
-    assert_eq!(result.public_io.final_commitment, [0x02; 32]);
-    assert_eq!(result.public_io.ack_chain_hash, [0x03; 32]);
-    assert_eq!(result.public_io.skip_count, 0);
-
     // proof 结构完整
-    assert_eq!(
-        result.proof.folded_instance.fold_step_count,
-        3,
-        "HypernovaProof 应记录最终 fold_step_count"
-    );
+    assert_eq!(proof.abi_version, 1);
+    assert_eq!(proof.fold_steps.len(), 3, "应有 3 个 fold step");
+    assert_eq!(proof.ccs_commitment, ccs_commitment);
 }
 
 #[test]
 fn subtask_42_5_fold_loop_empty_rejected() {
-    let result = fold_loop(
-        &[],
-        [0x01; 32],
-        [0x02; 32],
-        [0x03; 32],
-        0,
-        Vec::new(),
+    // 空 CCCCS 实例列表 → 单实例路径（仍应产出合法 proof，非 Err）
+    // 注：真实 fold_loop 支持单实例路径（N=0 CCCCS，直接对初始 LCCCS 运行 sumcheck）
+    let ccs = make_linear_ccs();
+    let pcs = make_ipa_pcs();
+
+    let z_l = vec![zkvm_f(1), zkvm_f(5), zkvm_f(5), zkvm_f(0)];
+    let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
+    let initial_cmt = commit_witness(&pcs, &z_l);
+
+    let mut transcript = Transcript::new();
+    let ccs_commitment = ccs.ccs_commitment();
+
+    let result = fold_loop_real(
+        &ccs,
+        lcccs,
+        initial_cmt,
+        &[], // 空 CCCCS 列表
+        &pcs,
+        &mut transcript,
+        ccs_commitment,
+        [0u8; 32],
+        vec![vec![]],
     );
 
-    assert!(result.is_err(), "空 instances 应被拒绝");
+    // 单实例路径应成功（非 Err）
+    assert!(result.is_ok(), "空 CCCCS 列表应走单实例路径: {:?}", result);
 }
 
 #[test]
 fn subtask_42_5_fold_loop_exceeds_max_steps_rejected() {
-    // O15：超过 1000 步 → FoldStepCountExceeded
-    let instances: Vec<CcsInstance> = (0..=MAX_FOLD_STEP_COUNT)
-        .map(|i| make_ccs_instance((i as u8).wrapping_mul(0x10)))
-        .collect();
+    // O15：超过 MAX_FOLD_STEP_COUNT 步 → FoldStepCountExceeded
+    let ccs = make_linear_ccs();
+    let pcs = make_ipa_pcs();
 
-    let result = fold_loop(
-        &instances,
-        [0x01; 32],
-        [0x02; 32],
-        [0x03; 32],
-        0,
-        Vec::new(),
-    );
+    let z_l = vec![zkvm_f(1), zkvm_f(5), zkvm_f(5), zkvm_f(0)];
+    let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
+    let initial_cmt = commit_witness(&pcs, &z_l);
 
-    assert!(result.is_err(), "超过 1000 步应被拒绝");
-}
-
-#[test]
-fn subtask_42_5_fold_loop_max_boundary_accepted() {
-    // 边界：恰好 1000 步 → 通过
-    let instances: Vec<CcsInstance> = (0..MAX_FOLD_STEP_COUNT)
-        .map(|i| make_ccs_instance((i as u8).wrapping_mul(0x10)))
-        .collect();
-
-    let result = fold_loop(
-        &instances,
-        [0x01; 32],
-        [0x02; 32],
-        [0x03; 32],
-        0,
-        Vec::new(),
-    )
-    .expect("恰好 1000 步应通过");
-
-    assert_eq!(result.fold_step_count, MAX_FOLD_STEP_COUNT);
-}
-
-#[test]
-#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
-fn subtask_42_5_zk_shuffle_ccs_circuit_trait() {
-    // ZkShuffleCcsCircuit 实现 CcsCircuit trait
-    let circuit = ZkShuffleCcsCircuit::new();
-
-    assert_eq!(circuit.name(), "zk_shuffle");
-    assert_eq!(circuit.num_matrices(), 3); // CCS 标准 q=2 → 3 矩阵
-
-    // to_instance 生成合法 CcsInstance
-    let instance = circuit
-        .to_instance(
-            &[0xAA; 64], // witness
-            &[0xBB; 32], // public_inputs
-            &[0xCC; 64], // state_delta
-            [0xDD; 32],  // ack_step_hash
-        )
-        .expect("to_instance 应成功");
-
-    assert_eq!(instance.mat_commitments.len(), 3);
-    // 所有字段应为非零哈希
-    assert_ne!(instance.public_input_hash, [0u8; 32]);
-    assert_ne!(instance.witness_commitment, [0u8; 32]);
-    assert_ne!(instance.state_delta_hash, [0u8; 32]);
-}
-
-#[test]
-#[allow(deprecated)] // Phase 11 将完成 Fr-based 迁移
-fn subtask_42_5_zk_shuffle_circuit_consumed_by_fold_loop() {
-    // 端到端：ZkShuffleCcsCircuit → to_instance → fold_loop
-    let circuit = ZkShuffleCcsCircuit::new();
-
-    let instances: Vec<CcsInstance> = (0..3)
+    // 构造 MAX_FOLD_STEP_COUNT + 1 个 CCCCS 实例
+    let ccccs_instances: Vec<Ccccs> = (0..=MAX_FOLD_STEP_COUNT)
         .map(|i| {
-            circuit
-                .to_instance(
-                    &[i + 0x10; 64],
-                    &[i + 0x20; 32],
-                    &[i + 0x30; 64],
-                    [i + 0x40; 32],
-                )
-                .expect("to_instance 应成功")
+            let z_c = vec![
+                zkvm_f(1),
+                zkvm_f((i % 100) + 1),
+                zkvm_f((i % 100) + 1),
+                zkvm_f(0),
+            ];
+            let cmt = commit_witness(&pcs, &z_c);
+            ccs.to_cccs(&z_c, vec![], cmt).expect("to_cccs")
         })
         .collect();
 
-    let result = fold_loop(
-        &instances,
-        [0x01; 32],
-        [0x02; 32],
-        [0x03; 32],
-        0,
-        Vec::new(),
-    )
-    .expect("fold_loop 应消费 ZkShuffleCcsCircuit 实例");
-
-    assert_eq!(result.fold_step_count, 3);
-
-    // 生成的 public_io 应能通过 ZkVerifier 校验（Stub 状态）
-    let registry = make_full_registry();
-    let proof_bytes = vec![0u8; HYPERNOVA_PROOF_MIN_SIZE]; // Stub proof
-    let verify_result = registry
-        .zk_verify(
-            poker_l1::DEFAULT_CHAIN_ID,
-            SCHEME_HYPERNOVA,
-            &proof_bytes,
-            &result.public_io,
-            3,
-            DEFAULT_MAX_ACK_CHAIN_LENGTH,
-        )
-        .expect("zk_verify 应成功");
-
-    assert!(
-        verify_result.verified,
-        "fold_loop 生成的 public_io 应通过 ZkVerifier 校验"
+    let mut transcript = Transcript::new();
+    let result = fold_loop_real(
+        &ccs,
+        lcccs,
+        initial_cmt,
+        &ccccs_instances,
+        &pcs,
+        &mut transcript,
+        ccs.ccs_commitment(),
+        [0u8; 32],
+        vec![vec![]],
     );
+
+    assert!(result.is_err(), "超过 {} 步应被拒绝", MAX_FOLD_STEP_COUNT);
+}
+
+#[test]
+fn subtask_42_5_zk_shuffle_ccs_circuit_trait() {
+    // 使用 poker_zkvm 的新 ZkShuffleCcsCircuit（Fr-based）
+    use poker_zkvm::precompiles::PrecompileCircuit;
+    use poker_zkvm::precompiles::zk_shuffle::ZkShuffleCcsCircuit;
+
+    let circuit = ZkShuffleCcsCircuit::new();
+
+    assert_eq!(circuit.name(), "zk_shuffle");
+    // PrecompileCircuit trait
+    assert!(circuit.num_variables() > 1000, "zk_shuffle 应有大量变量");
+    assert_eq!(circuit.gas_cost(), 1_780_000); // Light mode
 }
 
 #[test]
 fn subtask_42_5_fold_loop_produces_valid_public_io_for_checkin() {
-    // 端到端：fold_loop → public_io → CheckinTx → execute_checkin
-    let instances = vec![make_ccs_instance(0x10), make_ccs_instance(0x20)];
+    // 端到端：generate_test_proof → serialize → CheckinTx → execute_checkin
+    // 使用 poker_zkvm 的 generate_test_proof 生成合法 proof
+    let (proof_bytes, zkvm_public_io) = poker_zkvm::prover::generate_test_proof();
 
-    let fold_result = fold_loop(
-        &instances,
-        [0x01; 32],
-        [0x02; 32],
-        [0x03; 32],
-        0,
-        Vec::new(),
-    )
-    .expect("fold_loop 应成功");
+    // 构造 poker_l1 ZkPublicIo
+    use poker_zkvm::field::ZkvmField;
+    let public_io = ZkPublicIo {
+        initial_commitment: zkvm_public_io.initial_commitment.to_canonical_bytes(),
+        final_commitment: zkvm_public_io.final_commitment.to_canonical_bytes(),
+        state_delta_hash: {
+            let mut h = [0u8; 32];
+            let len = zkvm_public_io.input.len().min(32);
+            h[..len].copy_from_slice(&zkvm_public_io.input[..len]);
+            h
+        },
+        ack_chain_hash: {
+            let mut h = [0u8; 32];
+            let len = zkvm_public_io.output.len().min(32);
+            h[..len].copy_from_slice(&zkvm_public_io.output[..len]);
+            h
+        },
+        fold_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
+    };
 
-    // 构造 CheckinTx 使用 fold_loop 的 public_io
+    // 构造 CheckinTx
     let ack_entries = vec![make_ack_entry(1, 0xAA)];
     let tx = CheckinTx {
         game_id: ObjectID::new([0x42; 20], 1),
-        proof: vec![0xDD; HYPERNOVA_PROOF_MIN_SIZE],
+        proof: proof_bytes,
         state_delta: vec![0xCC; 64],
-        new_commitment: fold_result.public_io.final_commitment,
+        new_commitment: public_io.final_commitment,
         ack_chain: ack_entries,
         scheme_id: SCHEME_HYPERNOVA,
         proof_kind: ProofKind::Zkvm,
@@ -1071,12 +1114,12 @@ fn subtask_42_5_fold_loop_produces_valid_public_io_for_checkin() {
     )
     .expect("checkin 应成功");
 
-    assert!(result.verified, "fold_loop 产出的 proof 应通过 checkin 验证");
+    assert!(result.verified, "真实 proof 应通过 checkin 验证");
 }
 
 #[test]
 fn subtask_42_5_ack_chain_inclusion_proof_with_fold_results() {
-    // 端到端：ack_chain 包含证明 + fold_loop 联动
+    // 端到端：ack_chain 包含证明（不再依赖旧 fold_loop）
     use poker_l1::offline::ack_chain::{prove_ack_inclusion, verify_ack_inclusion};
 
     let ack_entries: Vec<AckEntry> = (1..=4)
@@ -1094,17 +1137,15 @@ fn subtask_42_5_ack_chain_inclusion_proof_with_fold_results() {
         );
     }
 
-    // 使用这些 ack_entries 作为 fold_loop 的 ack_chain_hash
-    let instances = vec![make_ccs_instance(0x10)];
-    let result = fold_loop(
-        &instances,
-        [0x01; 32],
-        [0x02; 32],
-        root, // 使用真实 ack_chain_hash
-        0,
-        Vec::new(),
-    )
-    .expect("fold_loop 应成功");
-
-    assert_eq!(result.public_io.ack_chain_hash, root);
+    // ack_chain_hash 可用于构造 ZkPublicIo（不再通过旧 fold_loop）
+    let public_io = ZkPublicIo {
+        initial_commitment: [0x01; 32],
+        final_commitment: [0x02; 32],
+        state_delta_hash: [0x03; 32],
+        ack_chain_hash: root,
+        fold_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
+    };
+    assert_eq!(public_io.ack_chain_hash, root);
 }

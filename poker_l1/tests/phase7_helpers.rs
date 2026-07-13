@@ -5,11 +5,9 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use poker_l1::block::{Block, BlockHeader};
-use poker_l1::consensus::{
-    DagCommitCertificate, DagVertex, Epoch, ValidatorEntry, ValidatorSet,
-};
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme, CURRENT_VERSION};
+use poker_l1::consensus::{DagCommitCertificate, DagVertex, Epoch, ValidatorEntry, ValidatorSet};
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 use poker_l1::vm::contracts::settle::RakeConfig;
 use poker_l1::vm::contracts::types::{
@@ -49,8 +47,7 @@ pub fn make_game_id(addr_byte: u8, nonce: u64) -> poker_l1::object_model::Object
 /// 生成真实 secp256k1 密钥对。
 ///
 /// 返回 `(secret_key, public_key, tagged_pubkey)`。
-pub fn real_secp_keypair(
-) -> (secp256k1::SecretKey, secp256k1::PublicKey, TaggedPubkey) {
+pub fn real_secp_keypair() -> (secp256k1::SecretKey, secp256k1::PublicKey, TaggedPubkey) {
     let secp = Secp256k1::new();
     let mut rng = OsRng;
     let (secret, public) = secp.generate_keypair(&mut rng);
@@ -70,12 +67,8 @@ pub fn real_secp_keypair(
 pub fn real_ed25519_keypair() -> (SigningKey, TaggedPubkey) {
     let sk = SigningKey::generate(&mut OsRng);
     let pk_bytes = sk.verifying_key().to_bytes();
-    let tagged = TaggedPubkey::new(
-        SignatureScheme::Ed25519,
-        CURRENT_VERSION,
-        pk_bytes.to_vec(),
-    )
-    .expect("构造 ed25519 tagged pubkey 不应失败");
+    let tagged = TaggedPubkey::new(SignatureScheme::Ed25519, CURRENT_VERSION, pk_bytes.to_vec())
+        .expect("构造 ed25519 tagged pubkey 不应失败");
     (sk, tagged)
 }
 
@@ -149,11 +142,7 @@ pub fn make_vertex(epoch: Epoch, round: u64, author: TaggedPubkey) -> DagVertex 
 
 /// 构造 Public tx（非游戏，正常计费 gas）。
 #[must_use]
-pub fn make_public_tx(
-    signer: TaggedPubkey,
-    nonce: u64,
-    chain_id: ChainId,
-) -> Transaction {
+pub fn make_public_tx(signer: TaggedPubkey, nonce: u64, chain_id: ChainId) -> Transaction {
     Transaction {
         inputs: vec![],
         outputs: vec![],
@@ -195,11 +184,7 @@ pub fn make_gameturn_tx(
 
 /// 构造 ForceSync tx（非游戏，正常计费 gas）。
 #[must_use]
-pub fn make_forcesync_tx(
-    signer: TaggedPubkey,
-    nonce: u64,
-    chain_id: ChainId,
-) -> Transaction {
+pub fn make_forcesync_tx(signer: TaggedPubkey, nonce: u64, chain_id: ChainId) -> Transaction {
     Transaction {
         inputs: vec![],
         outputs: vec![],

@@ -21,8 +21,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PokerL1Error, PokerL1Result};
@@ -207,7 +207,9 @@ impl BridgeValidatorSlot {
     pub fn validate_signers(&self, sigs: &[BridgeValidatorSig]) -> PokerL1Result<()> {
         for sig in sigs {
             if !self.validators.contains(&sig.validator) {
-                return Err(PokerL1Error::BridgeValidatorSlotNotRegistered(sig.validator.clone()));
+                return Err(PokerL1Error::BridgeValidatorSlotNotRegistered(
+                    sig.validator.clone(),
+                ));
             }
         }
         Ok(())
@@ -246,7 +248,11 @@ pub trait BridgeHook: Send + Sync {
     /// # 返回
     /// - `Ok(())`：验证通过
     /// - `Err(_)`：签名不足 / 验证器未注册 / 签名无效
-    fn verify_deposit(&self, deposit: &BridgeDeposit, sigs: &[BridgeValidatorSig]) -> PokerL1Result<()>;
+    fn verify_deposit(
+        &self,
+        deposit: &BridgeDeposit,
+        sigs: &[BridgeValidatorSig],
+    ) -> PokerL1Result<()>;
 
     /// 验证 burn proof（SubTask 34.4）。
     ///
@@ -299,12 +305,14 @@ impl BridgeRegistry {
     /// 检查 burn nonce 是否已消费。
     #[must_use]
     pub fn is_burn_nonce_consumed(&self, dest_chain_id: ChainId, burn_nonce: u64) -> bool {
-        self.consumed_burn_nonces.contains(&(dest_chain_id, burn_nonce))
+        self.consumed_burn_nonces
+            .contains(&(dest_chain_id, burn_nonce))
     }
 
     /// 标记 burn nonce 已消费。
     pub fn consume_burn_nonce(&mut self, dest_chain_id: ChainId, burn_nonce: u64) {
-        self.consumed_burn_nonces.insert((dest_chain_id, burn_nonce));
+        self.consumed_burn_nonces
+            .insert((dest_chain_id, burn_nonce));
     }
 }
 
@@ -369,11 +377,9 @@ pub fn bridge_verify(
     }
 
     // 4. 校验桥验证器签名
-    let slot = registry
-        .slot(tx.deposit.source_chain_id)
-        .ok_or_else(|| {
-            PokerL1Error::BridgeValidatorSlotNotRegistered(tx.recipient_pubkey.clone())
-        })?;
+    let slot = registry.slot(tx.deposit.source_chain_id).ok_or_else(|| {
+        PokerL1Error::BridgeValidatorSlotNotRegistered(tx.recipient_pubkey.clone())
+    })?;
 
     // 校验签名者全部在插槽中
     slot.validate_signers(&tx.validator_signatures)?;
@@ -492,9 +498,9 @@ pub const fn bridge_verify_contract_call_denied() -> PokerL1Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
-    use secp256k1::{Message, Secp256k1};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
     use secp256k1::rand::rngs::OsRng;
+    use secp256k1::{Message, Secp256k1};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
         let mut raw = vec![byte];
@@ -528,11 +534,16 @@ mod tests {
             SignatureScheme::Secp256k1,
             CURRENT_VERSION,
             compressed.to_vec(),
-        ).unwrap();
+        )
+        .unwrap();
         (secret_key, public_key, tagged)
     }
 
-    fn sign_with_key(secp: &Secp256k1<secp256k1::All>, secret: &secp256k1::SecretKey, msg_hash: &Hash) -> Vec<u8> {
+    fn sign_with_key(
+        secp: &Secp256k1<secp256k1::All>,
+        secret: &secp256k1::SecretKey,
+        msg_hash: &Hash,
+    ) -> Vec<u8> {
         let msg = Message::from_digest_slice(msg_hash).unwrap();
         // secp256k1_scheme::verify 期望 r(32) || s(32) || v(1) = 65 字节
         let sig = secp.sign_ecdsa_recoverable(&msg, secret);
@@ -589,9 +600,8 @@ mod tests {
 
     #[test]
     fn test_validator_slot_new() {
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators);
         assert_eq!(slot.source_chain_id, 0xAAAA);
         assert_eq!(slot.validators.len(), 5);
@@ -600,9 +610,8 @@ mod tests {
 
     #[test]
     fn test_validator_slot_has_quorum() {
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators);
         assert!(!slot.has_quorum(3));
         assert!(slot.has_quorum(4));
@@ -611,26 +620,26 @@ mod tests {
 
     #[test]
     fn test_validator_slot_validate_signers_ok() {
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators.clone());
 
-        let sigs: Vec<BridgeValidatorSig> = validators.iter().take(4).map(|v| {
-            BridgeValidatorSig {
+        let sigs: Vec<BridgeValidatorSig> = validators
+            .iter()
+            .take(4)
+            .map(|v| BridgeValidatorSig {
                 validator: v.clone(),
                 signature: vec![0u8; 65],
-            }
-        }).collect();
+            })
+            .collect();
 
         assert!(slot.validate_signers(&sigs).is_ok());
     }
 
     #[test]
     fn test_validator_slot_validate_signers_reject_unknown() {
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators);
 
         // 未注册的 validator
@@ -668,9 +677,8 @@ mod tests {
     #[test]
     fn test_registry_register_slot() {
         let mut registry = BridgeRegistry::new();
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators);
         registry.register_slot(slot);
         assert!(registry.slot(0xAAAA).is_some());
@@ -691,7 +699,10 @@ mod tests {
         };
         // is_protocol_caller = false → 拒绝
         let result = bridge_verify(&mut registry, &tx, crate::DEFAULT_CHAIN_ID, false);
-        assert!(matches!(result, Err(PokerL1Error::BridgeVerifyNotAuthorized)));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::BridgeVerifyNotAuthorized)
+        ));
     }
 
     #[test]
@@ -713,7 +724,10 @@ mod tests {
             preferred_relayer: None,
         };
         let result = bridge_verify(&mut registry, &tx, crate::DEFAULT_CHAIN_ID, true);
-        assert!(matches!(result, Err(PokerL1Error::BridgeSignatureInvalid(_))));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::BridgeSignatureInvalid(_))
+        ));
     }
 
     #[test]
@@ -736,9 +750,8 @@ mod tests {
     fn test_bridge_verify_nonce_consumed() {
         let mut registry = BridgeRegistry::new();
         // 预先注册 slot
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators);
         registry.register_slot(slot);
 
@@ -759,9 +772,8 @@ mod tests {
     #[test]
     fn test_bridge_verify_insufficient_quorum() {
         let mut registry = BridgeRegistry::new();
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators);
         registry.register_slot(slot);
 
@@ -794,7 +806,8 @@ mod tests {
         let (recipient_secret, _recipient_public, recipient_tagged) = make_real_keypair();
 
         // 生成 5 个桥验证器密钥对
-        let validator_keys: Vec<(secp256k1::SecretKey, secp256k1::PublicKey, TaggedPubkey)> = (0..5)
+        let validator_keys: Vec<(secp256k1::SecretKey, secp256k1::PublicKey, TaggedPubkey)> = (0
+            ..5)
             .map(|_| {
                 let (s, p) = secp.generate_keypair(&mut OsRng);
                 let compressed = p.serialize();
@@ -802,13 +815,15 @@ mod tests {
                     SignatureScheme::Secp256k1,
                     CURRENT_VERSION,
                     compressed.to_vec(),
-                ).unwrap();
+                )
+                .unwrap();
                 (s, p, tagged)
             })
             .collect();
 
         // 注册 slot
-        let validator_set: BTreeSet<TaggedPubkey> = validator_keys.iter().map(|(_, _, t)| t.clone()).collect();
+        let validator_set: BTreeSet<TaggedPubkey> =
+            validator_keys.iter().map(|(_, _, t)| t.clone()).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validator_set);
         registry.register_slot(slot);
 
@@ -821,13 +836,17 @@ mod tests {
         let recipient_sig = sign_with_key(&secp, &recipient_secret, &msg_hash);
 
         // 桥验证器签名（4 个 = quorum）
-        let validator_sigs: Vec<BridgeValidatorSig> = validator_keys.iter().take(4).map(|(s, _, t)| {
-            let sig = sign_with_key(&secp, s, &msg_hash);
-            BridgeValidatorSig {
-                validator: t.clone(),
-                signature: sig,
-            }
-        }).collect();
+        let validator_sigs: Vec<BridgeValidatorSig> = validator_keys
+            .iter()
+            .take(4)
+            .map(|(s, _, t)| {
+                let sig = sign_with_key(&secp, s, &msg_hash);
+                BridgeValidatorSig {
+                    validator: t.clone(),
+                    signature: sig,
+                }
+            })
+            .collect();
 
         let tx = BridgeVerifyTx {
             deposit,
@@ -851,9 +870,8 @@ mod tests {
     #[test]
     fn test_bridge_verify_recipient_signature_invalid() {
         let mut registry = BridgeRegistry::new();
-        let validators: BTreeSet<TaggedPubkey> = (0..5)
-            .map(|i| make_tagged_pubkey(0x10 + i as u8))
-            .collect();
+        let validators: BTreeSet<TaggedPubkey> =
+            (0..5).map(|i| make_tagged_pubkey(0x10 + i as u8)).collect();
         let slot = BridgeValidatorSlot::new(0xAAAA, validators);
         registry.register_slot(slot);
 
@@ -866,7 +884,10 @@ mod tests {
             preferred_relayer: None,
         };
         let result = bridge_verify(&mut registry, &tx, crate::DEFAULT_CHAIN_ID, true);
-        assert!(matches!(result, Err(PokerL1Error::BridgeSignatureInvalid(_))));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::BridgeSignatureInvalid(_))
+        ));
     }
 
     // ===== burn_on_source 测试 =====

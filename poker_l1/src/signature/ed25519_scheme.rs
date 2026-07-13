@@ -19,9 +19,8 @@ pub const ED25519_SIG_LEN: usize = 64;
 /// ed25519 子群阶数 L = 2^252 + 27742317777372353535851937790883648493
 /// big-endian: 0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
 const L_BE: [u8; 32] = [
-    0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x14, 0xDE, 0xF9, 0xDE, 0xA2, 0xF7, 0x9C, 0xD6, 0x58, 0x12, 0x63, 0x1A, 0x5C, 0xF5,
-    0xD3, 0xED,
+    0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x14, 0xDE, 0xF9, 0xDE, 0xA2, 0xF7, 0x9C, 0xD6, 0x58, 0x12, 0x63, 0x1A, 0x5C, 0xF5, 0xD3, 0xED,
 ];
 
 /// 素数 p = 2^255 - 19
@@ -91,19 +90,22 @@ pub fn verify(
     }
 
     // === ed25519-dalek 验证 ===
-    let pk_bytes: [u8; 32] = tagged_pubkey.raw.as_slice().try_into().map_err(|_| {
-        PokerL1Error::InvalidPubkeyLength {
-            tag: tagged_pubkey.tag,
-            actual: tagged_pubkey.raw.len(),
-            expected: 32,
-        }
-    })?;
-    let vk = VerifyingKey::from_bytes(&pk_bytes)
-        .map_err(|_| PokerL1Error::InvalidSignature)?;
+    let pk_bytes: [u8; 32] =
+        tagged_pubkey
+            .raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| PokerL1Error::InvalidPubkeyLength {
+                tag: tagged_pubkey.tag,
+                actual: tagged_pubkey.raw.len(),
+                expected: 32,
+            })?;
+    let vk = VerifyingKey::from_bytes(&pk_bytes).map_err(|_| PokerL1Error::InvalidSignature)?;
     let sig_arr: [u8; 64] = sig_bytes.try_into().unwrap();
     let sig = Signature::from_bytes(&sig_arr);
 
-    vk.verify(msg_hash.as_slice(), &sig).map_err(|_| PokerL1Error::InvalidSignature)?;
+    vk.verify(msg_hash.as_slice(), &sig)
+        .map_err(|_| PokerL1Error::InvalidSignature)?;
     Ok(())
 }
 
@@ -120,7 +122,7 @@ fn le_to_be(le: &[u8; 32]) -> [u8; 32] {
 mod tests {
     use super::*;
     use crate::signature::tagged_pubkey::encode_tag;
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
     fn sign_and_get_tagged(msg_hash: &[u8; 32]) -> (TaggedPubkey, Vec<u8>) {

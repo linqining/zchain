@@ -35,9 +35,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Hash;
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
-use crate::Hash;
 
 use super::types::{GameContract, GamePhase};
 
@@ -100,8 +100,7 @@ impl ForfeitDecision {
     ) -> Self {
         // last_checkpoint_age = block.height - game.last_action_height
         // 防下溢：current < last_action_height 时 age = 0
-        let last_checkpoint_age = current_block_height
-            .saturating_sub(game.last_action_height);
+        let last_checkpoint_age = current_block_height.saturating_sub(game.last_action_height);
 
         // NEW-M4: designated operator 边界加倍
         let boundary = if is_designated_operator {
@@ -282,9 +281,8 @@ pub const fn should_exempt_current_turn_player(
 pub const fn apply_designated_operator_check_exemption(
     game: &mut GameContract,
 ) -> Result<(), PokerL1Error> {
-    game.designated_operator_check_exemptions = game
-        .designated_operator_check_exemptions
-        .saturating_add(1);
+    game.designated_operator_check_exemptions =
+        game.designated_operator_check_exemptions.saturating_add(1);
     game.version = game.version.saturating_add(1);
     Ok(())
 }
@@ -531,9 +529,9 @@ pub fn apply_force_checkin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
-    use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
     use crate::Address;
+    use crate::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
+    use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_addr(byte: u8) -> Address {
         [byte; 20]
@@ -607,7 +605,10 @@ mod tests {
         // age = 30 == 30 → MaliciousWithholding (<= 边界)
         let game = make_game(100);
         let decision = ForfeitDecision::compute(&game, 130, 30, false);
-        assert!(decision.should_forfeit, "age 30 == boundary 30 应 forfeit (<= 边界)");
+        assert!(
+            decision.should_forfeit,
+            "age 30 == boundary 30 应 forfeit (<= 边界)"
+        );
         assert_eq!(decision.reason, ForfeitReason::MaliciousWithholding);
     }
 
@@ -626,9 +627,15 @@ mod tests {
         // last_action_height = 100, current = 150, age = 50 <= 60 → MaliciousWithholding
         let game = make_game(100);
         let decision = ForfeitDecision::compute(&game, 150, 30, true);
-        assert!(decision.should_forfeit, "designated operator: age 50 <= 60 应 forfeit");
+        assert!(
+            decision.should_forfeit,
+            "designated operator: age 50 <= 60 应 forfeit"
+        );
         assert_eq!(decision.reason, ForfeitReason::MaliciousWithholding);
-        assert_eq!(decision.boundary, 60, "NEW-M4: boundary = turn_timeout * 2 = 60");
+        assert_eq!(
+            decision.boundary, 60,
+            "NEW-M4: boundary = turn_timeout * 2 = 60"
+        );
         assert!(decision.is_designated_operator);
     }
 
@@ -638,7 +645,10 @@ mod tests {
         // age = 70 > 60 → MachineFailure
         let game = make_game(100);
         let decision = ForfeitDecision::compute(&game, 170, 30, true);
-        assert!(!decision.should_forfeit, "designated operator: age 70 > 60 应不 forfeit");
+        assert!(
+            !decision.should_forfeit,
+            "designated operator: age 70 > 60 应不 forfeit"
+        );
         assert_eq!(decision.reason, ForfeitReason::MachineFailure);
         assert_eq!(decision.boundary, 60);
     }
@@ -661,7 +671,13 @@ mod tests {
         // elapsed = 20 <= 30 → Stage1
         let game = make_game(100);
         let stage = RecoveryStage::compute(&game, 120, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage1 { elapsed: 20, window_end: 30 }));
+        assert!(matches!(
+            stage,
+            RecoveryStage::Stage1 {
+                elapsed: 20,
+                window_end: 30
+            }
+        ));
         assert!(stage.allows_force_advance());
         assert!(!stage.allows_force_checkin());
         assert!(!stage.requires_forfeit_and_revert());
@@ -673,7 +689,13 @@ mod tests {
         // elapsed = 30 == turn_timeout → Stage1
         let game = make_game(100);
         let stage = RecoveryStage::compute(&game, 130, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage1 { elapsed: 30, window_end: 30 }));
+        assert!(matches!(
+            stage,
+            RecoveryStage::Stage1 {
+                elapsed: 30,
+                window_end: 30
+            }
+        ));
         assert!(stage.allows_force_advance());
     }
 
@@ -684,7 +706,13 @@ mod tests {
         // elapsed = 100, stage2_end = 30 + 500 + 100 = 630, 100 <= 630 → Stage2
         let game = make_game(100);
         let stage = RecoveryStage::compute(&game, 200, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage2 { elapsed: 100, window_end: 630 }));
+        assert!(matches!(
+            stage,
+            RecoveryStage::Stage2 {
+                elapsed: 100,
+                window_end: 630
+            }
+        ));
         assert!(!stage.allows_force_advance());
         assert!(stage.allows_force_checkin());
         assert!(!stage.requires_forfeit_and_revert());
@@ -696,7 +724,13 @@ mod tests {
         // elapsed = 630 == stage2_end → Stage2
         let game = make_game(100);
         let stage = RecoveryStage::compute(&game, 730, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage2 { elapsed: 630, window_end: 630 }));
+        assert!(matches!(
+            stage,
+            RecoveryStage::Stage2 {
+                elapsed: 630,
+                window_end: 630
+            }
+        ));
         assert!(stage.allows_force_checkin());
     }
 
@@ -705,7 +739,13 @@ mod tests {
         // elapsed = 631 > 630 → Stage3
         let game = make_game(100);
         let stage = RecoveryStage::compute(&game, 731, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage3 { elapsed: 631, window_start: 630 }));
+        assert!(matches!(
+            stage,
+            RecoveryStage::Stage3 {
+                elapsed: 631,
+                window_start: 630
+            }
+        ));
         assert!(!stage.allows_force_advance());
         assert!(!stage.allows_force_checkin());
         assert!(stage.requires_forfeit_and_revert());
@@ -716,7 +756,13 @@ mod tests {
         // elapsed = 31 > 30 → Stage2 (just entered)
         let game = make_game(100);
         let stage = RecoveryStage::compute(&game, 131, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage2 { elapsed: 31, window_end: 630 }));
+        assert!(matches!(
+            stage,
+            RecoveryStage::Stage2 {
+                elapsed: 31,
+                window_end: 630
+            }
+        ));
     }
 
     // ===== Designated Operator Check 豁免测试 =====
@@ -883,7 +929,10 @@ mod tests {
         assert_eq!(outcome.boundary, 30);
         // 状态变更
         assert_eq!(game.last_action_height, 120);
-        assert!(game.last_commitment.is_none(), "checkin 完成 → last_commitment 清除");
+        assert!(
+            game.last_commitment.is_none(),
+            "checkin 完成 → last_commitment 清除"
+        );
         assert!(game.last_checkpoint_state_hash.is_none(), "已消费");
         assert!(game.version > 0);
     }
@@ -911,7 +960,10 @@ mod tests {
         let input = make_force_checkin_input(150, true, 30);
 
         let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
-        assert!(outcome.should_forfeit, "designated operator: age 50 <= 60 应 forfeit");
+        assert!(
+            outcome.should_forfeit,
+            "designated operator: age 50 <= 60 应 forfeit"
+        );
         assert_eq!(outcome.boundary, 60);
     }
 
@@ -923,7 +975,10 @@ mod tests {
         let input = make_force_checkin_input(170, true, 30);
 
         let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
-        assert!(!outcome.should_forfeit, "designated operator: age 70 > 60 应不 forfeit");
+        assert!(
+            !outcome.should_forfeit,
+            "designated operator: age 70 > 60 应不 forfeit"
+        );
         assert_eq!(outcome.boundary, 60);
     }
 
@@ -999,7 +1054,10 @@ mod tests {
         let input = make_force_checkin_input(130, false, 30);
 
         let outcome = apply_force_checkin(&mut game, &input).expect("应成功");
-        assert!(outcome.should_forfeit, "age 30 == boundary 30 应 forfeit (<= 边界)");
+        assert!(
+            outcome.should_forfeit,
+            "age 30 == boundary 30 应 forfeit (<= 边界)"
+        );
         assert_eq!(outcome.reason, ForfeitReason::MaliciousWithholding);
     }
 

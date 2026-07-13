@@ -18,8 +18,8 @@
 //! - 重放保护校验函数（chain_id / nonce / gameturn_nonce / is_fallback）
 //! - 余额管理（debit / credit）
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -114,7 +114,10 @@ pub fn derive_address(tagged_pubkey: &TaggedPubkey) -> Address {
 /// 校验 tx 的 chain_id 与网络 chain_id 一致（SEC-L4 修复）。
 ///
 /// 不匹配返回 `WrongChainId`（防跨链重放）。
-pub const fn validate_chain_id(tx_chain_id: ChainId, network_chain_id: ChainId) -> PokerL1Result<()> {
+pub const fn validate_chain_id(
+    tx_chain_id: ChainId,
+    network_chain_id: ChainId,
+) -> PokerL1Result<()> {
     if tx_chain_id != network_chain_id {
         return Err(PokerL1Error::WrongChainId {
             tx: tx_chain_id,
@@ -311,7 +314,7 @@ impl AccountStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, TxLane};
 
     /// 构造测试用 tagged pubkey（不验证签名，仅用于地址派生）。
@@ -431,7 +434,13 @@ mod tests {
         let tp = make_tagged_pubkey(0x22, SignatureScheme::Secp256k1);
         let mut account = Account::new(tp, 100);
         let err = account.debit(500).unwrap_err();
-        assert!(matches!(err, PokerL1Error::InsufficientBalance { needed: 500, has: 100 }));
+        assert!(matches!(
+            err,
+            PokerL1Error::InsufficientBalance {
+                needed: 500,
+                has: 100
+            }
+        ));
     }
 
     #[test]
@@ -462,7 +471,13 @@ mod tests {
     #[test]
     fn validate_chain_id_fails_when_mismatch() {
         let err = validate_chain_id(NETWORK, NETWORK + 1).unwrap_err();
-        assert!(matches!(err, PokerL1Error::WrongChainId { tx: NETWORK, network: _ }));
+        assert!(matches!(
+            err,
+            PokerL1Error::WrongChainId {
+                tx: NETWORK,
+                network: _
+            }
+        ));
     }
 
     #[test]
@@ -480,7 +495,10 @@ mod tests {
         account.increment_nonce(); // account.nonce = 1
         let tx = make_tx(NETWORK, 0, None, false, TxLane::Public); // tx.nonce = 0 < 1
         let err = validate_public_tx(&account, &tx, NETWORK).unwrap_err();
-        assert!(matches!(err, PokerL1Error::NonceTooLow { tx: 0, account: 1 }));
+        assert!(matches!(
+            err,
+            PokerL1Error::NonceTooLow { tx: 0, account: 1 }
+        ));
     }
 
     #[test]
@@ -489,7 +507,10 @@ mod tests {
         let account = Account::new(tp, 1_000_000); // nonce = 0
         let tx = make_tx(NETWORK, 5, None, false, TxLane::Public); // tx.nonce = 5 > 0
         let err = validate_public_tx(&account, &tx, NETWORK).unwrap_err();
-        assert!(matches!(err, PokerL1Error::NonceTooHigh { tx: 5, account: 0 }));
+        assert!(matches!(
+            err,
+            PokerL1Error::NonceTooHigh { tx: 5, account: 0 }
+        ));
     }
 
     #[test]
@@ -529,7 +550,13 @@ mod tests {
         let mut account = Account::new(tp, 10_000_000);
         let tx = make_tx(NETWORK, 0, None, false, TxLane::Public); // budget = 1_000_000
         let err = apply_public_tx(&mut account, &tx, 2_000_000).unwrap_err();
-        assert!(matches!(err, PokerL1Error::GasExceedsBudget { used: 2_000_000, budget: 1_000_000 }));
+        assert!(matches!(
+            err,
+            PokerL1Error::GasExceedsBudget {
+                used: 2_000_000,
+                budget: 1_000_000
+            }
+        ));
         assert_eq!(account.nonce, 0, "失败时 nonce 不推进");
         assert_eq!(account.balance, 10_000_000, "失败时不扣费");
     }
@@ -546,7 +573,10 @@ mod tests {
     fn validate_gameturn_tx_rejects_mismatch() {
         let tx = make_tx(NETWORK, 0, Some(3), false, TxLane::GameTurn);
         let err = validate_gameturn_tx(7, &tx, NETWORK).unwrap_err();
-        assert!(matches!(err, PokerL1Error::GameTurnNonceMismatch { tx: 3, game: 7 }));
+        assert!(matches!(
+            err,
+            PokerL1Error::GameTurnNonceMismatch { tx: 3, game: 7 }
+        ));
     }
 
     #[test]

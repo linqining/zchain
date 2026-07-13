@@ -23,16 +23,16 @@
 //! 连续 2 次 checkpoint_anchor 的 state_hash 相同 → 视为无进度，
 //! `no_progress_count` 递增，达阈值（默认 2）触发 `force_revert`。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
-use crate::error::PokerL1Error;
-use crate::object_model::ObjectID;
-use crate::signature::{verify_signature, TaggedPubkey};
 use crate::Address;
 use crate::ChainId;
 use crate::Hash;
+use crate::error::PokerL1Error;
+use crate::object_model::ObjectID;
+use crate::signature::{TaggedPubkey, verify_signature};
 
 use super::types::GameContract;
 
@@ -103,11 +103,7 @@ impl CheckpointAnchorTx {
     ///   显式 domain separation
     /// - 绑定 `game_id` 防跨 Game 重放
     #[must_use]
-    pub fn ack_signing_hash(
-        &self,
-        chain_id: ChainId,
-        epoch: u64,
-    ) -> Hash {
+    pub fn ack_signing_hash(&self, chain_id: ChainId, epoch: u64) -> Hash {
         let mut hasher = Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
         hasher.update(&chain_id.to_be_bytes());
         hasher.update(&epoch.to_be_bytes());
@@ -243,9 +239,10 @@ pub fn apply_checkpoint_anchor(
     block_height: u64,
 ) -> Result<(), PokerL1Error> {
     // 去重校验：checkpoint_seq 必须严格递增
-    let expected_seq = game.checkpoint_seq.checked_add(1).ok_or_else(|| {
-        PokerL1Error::Other("checkpoint_seq overflow".to_string())
-    })?;
+    let expected_seq = game
+        .checkpoint_seq
+        .checked_add(1)
+        .ok_or_else(|| PokerL1Error::Other("checkpoint_seq overflow".to_string()))?;
     if tx.checkpoint_seq != expected_seq {
         return Err(PokerL1Error::DuplicateCheckpoint {
             game_id: tx.game_id,
@@ -277,7 +274,7 @@ pub fn apply_checkpoint_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
 
     fn make_test_tagged_pubkey(byte: u8) -> TaggedPubkey {
         // secp256k1 v1: 33 bytes raw (compressed)
@@ -385,7 +382,8 @@ mod tests {
         let tx = make_checkpoint_anchor_tx(1, 0xAB, 1);
         // active_participants 为空，ack_signatures 中的签名者不在其中
         let active_participants: Vec<TaggedPubkey> = vec![];
-        let result = verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
+        let result =
+            verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
         assert!(
             matches!(result, Err(PokerL1Error::AckSignerNotParticipant { .. })),
             "签名者不在 active_participants 中应返回 AckSignerNotParticipant"
@@ -396,11 +394,9 @@ mod tests {
     fn test_verify_checkpoint_anchor_missing_ack() {
         // 2 个活跃参与者，但 ack_signatures 为空
         let tx = make_checkpoint_anchor_tx(1, 0xAB, 0);
-        let active_participants = vec![
-            make_test_tagged_pubkey(1),
-            make_test_tagged_pubkey(2),
-        ];
-        let result = verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
+        let active_participants = vec![make_test_tagged_pubkey(1), make_test_tagged_pubkey(2)];
+        let result =
+            verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
         assert!(
             matches!(result, Err(PokerL1Error::MissingAck { .. })),
             "缺少 ACK 应返回 MissingAck"
@@ -435,7 +431,8 @@ mod tests {
         // 由于签名验证会失败，我们期望 InvalidSignature 错误
         // 但这证明了逻辑流程正确（先检查 AckSignerNotParticipant，再检查签名，最后检查覆盖性）
         let active_participants = vec![participant1, participant2];
-        let result = verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
+        let result =
+            verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
         // 签名是占位符，应返回 InvalidSignature（证明签名验证被触发）
         assert!(
             matches!(result, Err(PokerL1Error::InvalidSignature)),
@@ -466,7 +463,8 @@ mod tests {
             opt_out_ack_proof: None,
         };
         let active_participants = vec![participant];
-        let result = verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
+        let result =
+            verify_checkpoint_anchor(&tx, crate::DEFAULT_CHAIN_ID, 1, &active_participants);
         // 第一个签名是占位符 → InvalidSignature（证明仅首个被验证）
         assert!(
             matches!(result, Err(PokerL1Error::InvalidSignature)),
@@ -482,7 +480,10 @@ mod tests {
             ack_deadline: 100,
         };
         assert!(is_opt_out_ack_valid(&proof, 101), "block > deadline 应有效");
-        assert!(!is_opt_out_ack_valid(&proof, 100), "block == deadline 应无效（须严格大于）");
+        assert!(
+            !is_opt_out_ack_valid(&proof, 100),
+            "block == deadline 应无效（须严格大于）"
+        );
         assert!(!is_opt_out_ack_valid(&proof, 99), "block < deadline 应无效");
     }
 
@@ -496,7 +497,10 @@ mod tests {
         assert_eq!(game.last_action_height, 500);
         assert_eq!(game.no_progress_count, 0, "首次 checkpoint 视为有进度");
         assert_eq!(game.last_checkpoint_state_hash, Some([0xAB; 32]));
-        assert_eq!(game.designated_operator_check_exemptions, 0, "state_hash 变化应重置");
+        assert_eq!(
+            game.designated_operator_check_exemptions, 0,
+            "state_hash 变化应重置"
+        );
         assert_eq!(game.version, 1);
     }
 
@@ -507,7 +511,13 @@ mod tests {
         let tx = make_checkpoint_anchor_tx(3, 0xAB, 0); // seq == game.checkpoint_seq，非 +1
         let result = apply_checkpoint_anchor(&mut game, &tx, 500);
         assert!(
-            matches!(result, Err(PokerL1Error::DuplicateCheckpoint { checkpoint_seq: 3, .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::DuplicateCheckpoint {
+                    checkpoint_seq: 3,
+                    ..
+                })
+            ),
             "重复 seq 应返回 DuplicateCheckpoint"
         );
     }
@@ -535,7 +545,10 @@ mod tests {
         // 第二次：相同 state_hash → 无进度
         let tx2 = make_checkpoint_anchor_tx(2, 0xAB, 0);
         apply_checkpoint_anchor(&mut game, &tx2, 505).expect("第二次应成功");
-        assert_eq!(game.no_progress_count, 1, "相同 state_hash 应递增 no_progress_count");
+        assert_eq!(
+            game.no_progress_count, 1,
+            "相同 state_hash 应递增 no_progress_count"
+        );
 
         // 第三次：相同 state_hash → 无进度（达阈值 2）
         let tx3 = make_checkpoint_anchor_tx(3, 0xAB, 0);
@@ -559,9 +572,15 @@ mod tests {
         // 第三次：不同 → 重置
         let tx3 = make_checkpoint_anchor_tx(3, 0xCD, 0);
         apply_checkpoint_anchor(&mut game, &tx3, 510).expect("第三次应成功");
-        assert_eq!(game.no_progress_count, 0, "不同 state_hash 应重置 no_progress_count");
+        assert_eq!(
+            game.no_progress_count, 0,
+            "不同 state_hash 应重置 no_progress_count"
+        );
         assert_eq!(game.last_checkpoint_state_hash, Some([0xCD; 32]));
-        assert_eq!(game.designated_operator_check_exemptions, 0, "应重置豁免计数");
+        assert_eq!(
+            game.designated_operator_check_exemptions, 0,
+            "应重置豁免计数"
+        );
     }
 
     fn make_minimal_game() -> GameContract {
@@ -584,10 +603,12 @@ mod tests {
     fn test_checkpoint_interval_blocks_constants() {
         assert_eq!(DEFAULT_CHECKPOINT_INTERVAL_BLOCKS, 5);
         assert_eq!(MIN_CHECKPOINT_INTERVAL_BLOCKS, 3);
-        const { assert!(
-            DEFAULT_CHECKPOINT_INTERVAL_BLOCKS >= MIN_CHECKPOINT_INTERVAL_BLOCKS,
-            "默认值须 >= 下限"
-        ); }
+        const {
+            assert!(
+                DEFAULT_CHECKPOINT_INTERVAL_BLOCKS >= MIN_CHECKPOINT_INTERVAL_BLOCKS,
+                "默认值须 >= 下限"
+            );
+        }
     }
 
     #[test]

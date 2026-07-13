@@ -2,53 +2,85 @@
 //!
 //! 严格遵循 spec.md（FROZEN 2026-06-27）+ tasks.md Task 36：
 //! - SubTask 36.3: Hypernova fold step 延迟
-//!   测量 CCS fold_step 单步延迟（首次 + 累计）+ 多步 fold_loop + Fiat-Shamir challenge 派生
+//!   测量真实 CCS fold_step 单步延迟 + 多步 fold_loop + Fiat-Shamir challenge 派生
 //! - SubTask 36.4: Groth16 / IPA verifier 延迟
 //!   测量 Groth16 stub verify + CRS fingerprint 计算/校验 + VK 注册
 //!   测量 IPA stub verify + 端到端 zk_verify syscall（含 public_io 边界校验）
 //!
-//! ## MVP 说明
+//! ## Phase 11 迁移说明
 //!
-//! 当前 Hypernova / Groth16 / IPA verifier 均为 Stub 状态（仅校验 proof 格式）。
-//! fold_step 为 MVP 占位实现（blake2b 哈希链累计，不实际折叠），但可 benchmark。
+//! fold_step / fold_loop 已从 stub（blake2b 哈希链）迁移到真实 Hypernova 折叠
+//! （委托 `poker_zkvm::fold::fold_step::fold` / `poker_zkvm::fold::fold_loop::fold_loop`）。
+//! Groth16 / IPA verifier 仍为 Stub 状态（仅校验 proof 格式），将在后续 Phase 升级。
 //! 这些基准用于：
-//! 1. 建立 Stub → Production 升级前的性能基线
-//! 2. 量化 Stub verifier 的格式校验开销
-//! 3. 量化 fold_step 哈希链累计开销（Production 折叠算法的对比基线）
+//! 1. 量化真实 Hypernova fold 的单步/多步延迟
+//! 2. 建立 Stub → Production verifier 升级前的性能基线
+//! 3. 量化 fold_step_count 规模对 fold_loop 延迟的影响（O15 上限 1000）
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use poker_l1::offline::ccs::{fold_loop, fold_step, CcsInstance};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use poker_l1::offline::ccs::{fold_loop_real, fold_step_real};
 use poker_l1::offline::groth16::{
     Groth16Proof, Groth16Verifier, Groth16Vk, Groth16VkRegistry, register_groth16_verifier,
 };
 use poker_l1::offline::hypernova::{
-    fiat_shamir_challenge, register_hypernova_verifier, HypernovaVerifier,
-    HYPERNOVA_PROOF_MIN_SIZE,
+    HYPERNOVA_PROOF_MIN_SIZE, HypernovaVerifier, fiat_shamir_challenge, register_hypernova_verifier,
 };
-use poker_l1::offline::ipa::{register_ipa_verifier, IpaVerifier, IPA_PROOF_MIN_SIZE};
+use poker_l1::offline::ipa::{IPA_PROOF_MIN_SIZE, IpaVerifier, register_ipa_verifier};
 use poker_l1::offline::zk_verifier::{
-    VerifierStatus, ZkPublicIo, ZkVerifier, ZkVerifierRegistry, SCHEME_GROTH16,
-    SCHEME_HYPERNOVA, SCHEME_IPA,
+    SCHEME_GROTH16, SCHEME_HYPERNOVA, SCHEME_IPA, VerifierStatus, ZkPublicIo, ZkVerifier,
+    ZkVerifierRegistry,
 };
-use poker_l1::object_model::ObjectID;
-use poker_l1::{ChainId, Hash, DEFAULT_CHAIN_ID};
+use poker_l1::{ChainId, DEFAULT_CHAIN_ID};
+use poker_zkvm::ccs::{Ccs, Fr as ZkvmFr, SparseMatrix};
+use poker_zkvm::field::ZkvmField;
+use poker_zkvm::fold::ccccs::Ccccs;
+use poker_zkvm::pcs::ipa::{IpaCommitment, IpaPcs};
+use poker_zkvm::pcs::{MultilinearPoly, Pcs};
+use poker_zkvm::precompiles::elgamal;
+use poker_zkvm::transcript::Transcript;
 
 // ===== 测试数据准备 =====
 
-/// 构造 CCS 实例（用于 fold_step 基准）。
-fn make_ccs_instance(step: u8) -> CcsInstance {
-    CcsInstance {
-        mat_commitments: vec![[step; 32]],
-        public_input_hash: [step.wrapping_mul(2); 32],
-        witness_commitment: [step.wrapping_mul(3); 32],
-        state_delta_hash: [step.wrapping_mul(4); 32],
-        ack_step_hash: [step.wrapping_mul(5); 32],
-    }
+/// 构造 Fr。
+fn zkvm_f(v: u32) -> ZkvmFr {
+    ZkvmFr::from_u32_with_wrap(v)
 }
 
-/// 构造 N 个 CCS 实例（用于 fold_loop 基准）。
-fn make_ccs_instances(n: usize) -> Vec<CcsInstance> {
-    (0..n).map(|i| make_ccs_instance((i % 255) as u8 + 1)).collect()
+/// 构造负 Fr。
+fn zkvm_neg_f(v: u32) -> ZkvmFr {
+    ZkvmFr::zero().sub(&zkvm_f(v))
+}
+
+/// 构造 stub commitment（G1 生成元）。
+fn stub_commitment() -> IpaCommitment {
+    IpaCommitment(elgamal::generator())
+}
+
+/// 使用 IPA 计算实际 witness commitment。
+fn commit_witness(pcs: &IpaPcs, z: &[ZkvmFr]) -> IpaCommitment {
+    let poly = MultilinearPoly::from_evals(z.to_vec()).expect("MultilinearPoly 构造应成功");
+    pcs.commit(&poly).expect("pcs.commit 应成功")
+}
+
+/// 构造线性 CCS — x - y = 0（1 row, 4 vars, 2 matrices）。
+fn make_linear_ccs() -> Ccs {
+    let mut m0 = SparseMatrix::new(1, 4);
+    m0.add_entry(0, 1, zkvm_f(1)).unwrap();
+    let mut m1 = SparseMatrix::new(1, 4);
+    m1.add_entry(0, 2, zkvm_f(1)).unwrap();
+
+    Ccs::new(
+        4,
+        vec![m0, m1],
+        vec![vec![0], vec![1]],
+        vec![zkvm_f(1), zkvm_neg_f(1)],
+    )
+    .expect("linear Ccs 构造应成功")
+}
+
+/// 构造 IPA PCS（max_n_vars = 4，支持最多 16 个变量的 witness）。
+fn make_ipa_pcs() -> IpaPcs {
+    IpaPcs::new(4).expect("IpaPcs 构造应成功")
 }
 
 /// 构造 ZK public_io（用于 verifier 基准）。
@@ -62,11 +94,6 @@ fn make_public_io(fold_step_count: u32) -> ZkPublicIo {
         skip_count: 0,
         segment_continuity_proof: Vec::new(),
     }
-}
-
-/// 构造占位 game_id（用于 fold_step）。
-fn make_game_id() -> ObjectID {
-    ObjectID::new([0u8; 20], 0)
 }
 
 /// 构造 Groth16 VK（用于 CRS fingerprint 基准）。
@@ -102,43 +129,29 @@ fn make_ipa_proof() -> Vec<u8> {
 
 // ===== SubTask 36.3: Hypernova fold step 延迟 =====
 
-/// 测量单步 fold_step 延迟（首次 + 累计）。
+/// 测量单步 fold_step_real 延迟（真实 Hypernova fold）。
 fn bench_fold_step_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("task36_3_fold_step_single");
     group.sample_size(100);
 
-    let instance = make_ccs_instance(1);
-    let game_id = make_game_id();
+    let ccs = make_linear_ccs();
+    let z_l = vec![zkvm_f(1), zkvm_f(5), zkvm_f(5), zkvm_f(0)];
+    let z_c = vec![zkvm_f(1), zkvm_f(3), zkvm_f(3), zkvm_f(0)];
+    let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
+    let ccccs = ccs
+        .to_cccs(&z_c, vec![], stub_commitment())
+        .expect("to_cccs");
 
-    // 首次 fold（prev = None）
-    group.bench_function("first_fold", |b| {
+    group.bench_function("single_fold", |b| {
         b.iter(|| {
-            let result = fold_step(
-                black_box(None),
-                black_box(&instance),
-                black_box(DEFAULT_CHAIN_ID),
-                black_box(&game_id),
+            let mut transcript = Transcript::new();
+            let result = fold_step_real(
+                black_box(&lcccs),
+                black_box(&stub_commitment()),
+                black_box(&ccccs),
+                black_box(&mut transcript),
             )
-            .expect("first fold");
-            black_box(result);
-        });
-    });
-
-    // 累计 fold（prev = Some）— 含 cumulative hash 计算
-    // 预先构造一个 prev，使基准仅测量后续步骤的累计开销
-    let prev = fold_step(None, &instance, DEFAULT_CHAIN_ID, &game_id)
-        .expect("prev fold 应成功");
-    let instance2 = make_ccs_instance(2);
-
-    group.bench_function("cumulative_fold", |b| {
-        b.iter(|| {
-            let result = fold_step(
-                black_box(Some(&prev)),
-                black_box(&instance2),
-                black_box(DEFAULT_CHAIN_ID),
-                black_box(&game_id),
-            )
-            .expect("cumulative fold");
+            .expect("fold_step_real");
             black_box(result);
         });
     });
@@ -146,35 +159,55 @@ fn bench_fold_step_single(c: &mut Criterion) {
     group.finish();
 }
 
-/// 测量多步 fold_loop 延迟（不同步数）。
+/// 测量多步 fold_loop_real 延迟（真实 Hypernova fold_loop，不同步数）。
 ///
 /// 测试规模：10 / 100 / 1000 步（O15 上限边界）。
 fn bench_fold_loop(c: &mut Criterion) {
     let mut group = c.benchmark_group("task36_3_fold_loop");
     group.sample_size(20);
 
+    let ccs = make_linear_ccs();
+    let pcs = make_ipa_pcs();
+    let ccs_commitment = ccs.ccs_commitment();
+
     for &steps in &[10usize, 100, 1000] {
-        let instances = make_ccs_instances(steps);
-        let initial_commitment: Hash = [0x01; 32];
-        let final_commitment: Hash = [0x02; 32];
-        let ack_chain_hash: Hash = [0xAB; 32];
+        let z_l = vec![zkvm_f(1), zkvm_f(5), zkvm_f(5), zkvm_f(0)];
+        let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
+        let initial_cmt = commit_witness(&pcs, &z_l);
+
+        let ccccs_instances: Vec<Ccccs> = (0..steps)
+            .map(|i| {
+                let z_c = vec![
+                    zkvm_f(1),
+                    zkvm_f((i % 100) as u32 + 1),
+                    zkvm_f((i % 100) as u32 + 1),
+                    zkvm_f(0),
+                ];
+                let cmt = commit_witness(&pcs, &z_c);
+                ccs.to_cccs(&z_c, vec![], cmt).expect("to_cccs")
+            })
+            .collect();
 
         group.throughput(Throughput::Elements(steps as u64));
 
         group.bench_with_input(
-            BenchmarkId::new("fold_loop", format!("steps_{}", steps)),
-            &instances,
-            |b, instances| {
+            BenchmarkId::new("fold_loop_real", format!("steps_{}", steps)),
+            &ccccs_instances,
+            |b, ccccs_instances| {
                 b.iter(|| {
-                    let result = fold_loop(
-                        black_box(instances),
-                        black_box(initial_commitment),
-                        black_box(final_commitment),
-                        black_box(ack_chain_hash),
-                        black_box(0),
-                        black_box(Vec::new()),
+                    let mut transcript = Transcript::new();
+                    let result = fold_loop_real(
+                        black_box(&ccs),
+                        black_box(lcccs.clone()),
+                        black_box(initial_cmt.clone()),
+                        black_box(ccccs_instances),
+                        black_box(&pcs),
+                        black_box(&mut transcript),
+                        black_box(ccs_commitment),
+                        black_box([0u8; 32]),
+                        black_box(vec![vec![]]),
                     )
-                    .expect("fold_loop");
+                    .expect("fold_loop_real");
                     black_box(result);
                 });
             },

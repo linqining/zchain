@@ -23,10 +23,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::BlockHeight;
 use crate::consensus::{Epoch, ValidatorSet};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
-use crate::BlockHeight;
 
 /// 默认 slashing 百分比（NEW-M15：equivocation 全额罚没，可治理）。
 pub const DEFAULT_SLASH_PERCENTAGE: u32 = 100;
@@ -213,7 +213,11 @@ impl InvestigationState {
     /// 返回 `Ok(should_slash)`：
     /// - `true`：申辩无效或未提交 → 治理 slashing
     /// - `false`：申辩有效 → 豁免 slashing
-    pub fn resolve(&mut self, current_height: BlockHeight, defense_valid: bool) -> PokerL1Result<bool> {
+    pub fn resolve(
+        &mut self,
+        current_height: BlockHeight,
+        defense_valid: bool,
+    ) -> PokerL1Result<bool> {
         if self.resolved {
             return Err(PokerL1Error::Other(
                 "investigation already resolved".to_string(),
@@ -376,7 +380,8 @@ impl VertexEquivocationEvidence {
     pub fn validate(&self) -> PokerL1Result<()> {
         if self.vertex_hash_1 == self.vertex_hash_2 {
             return Err(PokerL1Error::Other(
-                "vertex equivocation: vertex_hash_1 == vertex_hash_2 (not equivocation)".to_string(),
+                "vertex equivocation: vertex_hash_1 == vertex_hash_2 (not equivocation)"
+                    .to_string(),
             ));
         }
         if self.signature_1.is_empty() || self.signature_2.is_empty() {
@@ -454,9 +459,9 @@ pub fn check_downtime_slashing(
 mod tests {
     use super::*;
     use crate::consensus::validator_set::{
-        compute_genesis_chain_randomness, ValidatorEntry, ValidatorStatus,
+        ValidatorEntry, ValidatorStatus, compute_genesis_chain_randomness,
     };
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
         TaggedPubkey {
@@ -499,17 +504,32 @@ mod tests {
 
     #[test]
     fn slashing_reason_priority_order() {
-        assert!(SlashingReason::VertexEquivocation.priority() < SlashingReason::CommitCertEquivocation.priority());
-        assert!(SlashingReason::CommitCertEquivocation.priority() < SlashingReason::RefuseCheckpoint.priority());
+        assert!(
+            SlashingReason::VertexEquivocation.priority()
+                < SlashingReason::CommitCertEquivocation.priority()
+        );
+        assert!(
+            SlashingReason::CommitCertEquivocation.priority()
+                < SlashingReason::RefuseCheckpoint.priority()
+        );
         assert!(SlashingReason::RefuseCheckpoint.priority() < SlashingReason::Downtime.priority());
         assert!(SlashingReason::Downtime.priority() < SlashingReason::RefuseAck.priority());
     }
 
     #[test]
     fn slashing_reason_default_slash_percentage() {
-        assert_eq!(SlashingReason::VertexEquivocation.default_slash_percentage(), 100);
-        assert_eq!(SlashingReason::CommitCertEquivocation.default_slash_percentage(), 100);
-        assert_eq!(SlashingReason::RefuseCheckpoint.default_slash_percentage(), 100);
+        assert_eq!(
+            SlashingReason::VertexEquivocation.default_slash_percentage(),
+            100
+        );
+        assert_eq!(
+            SlashingReason::CommitCertEquivocation.default_slash_percentage(),
+            100
+        );
+        assert_eq!(
+            SlashingReason::RefuseCheckpoint.default_slash_percentage(),
+            100
+        );
         assert_eq!(SlashingReason::Downtime.default_slash_percentage(), 10);
         assert_eq!(SlashingReason::RefuseAck.default_slash_percentage(), 100);
     }
@@ -601,8 +621,13 @@ mod tests {
         let target = set.validators[0].pubkey.clone();
         let config = SlashingConfig::default();
 
-        let result = apply_slashing(&mut set, &target, SlashingReason::VertexEquivocation, &config)
-            .expect("slashing 应成功");
+        let result = apply_slashing(
+            &mut set,
+            &target,
+            SlashingReason::VertexEquivocation,
+            &config,
+        )
+        .expect("slashing 应成功");
 
         assert_eq!(result.reason, SlashingReason::VertexEquivocation);
         assert_eq!(result.stake_before, 1_000_000);
@@ -639,8 +664,13 @@ mod tests {
         set.validators[0].stake = 500_000;
         let config = SlashingConfig::default();
 
-        let result = apply_slashing(&mut set, &target, SlashingReason::CommitCertEquivocation, &config)
-            .expect("已 Slashed 的 validator 应可继续 slashing（SEC2-H2）");
+        let result = apply_slashing(
+            &mut set,
+            &target,
+            SlashingReason::CommitCertEquivocation,
+            &config,
+        )
+        .expect("已 Slashed 的 validator 应可继续 slashing（SEC2-H2）");
         assert_eq!(result.stake_before, 500_000);
         assert_eq!(result.slash_amount, 500_000); // 100% of remaining
         assert_eq!(result.stake_after, 0);
@@ -653,8 +683,13 @@ mod tests {
         set.validators[0].status = ValidatorStatus::Retired;
         let config = SlashingConfig::default();
 
-        let err = apply_slashing(&mut set, &target, SlashingReason::VertexEquivocation, &config)
-            .unwrap_err();
+        let err = apply_slashing(
+            &mut set,
+            &target,
+            SlashingReason::VertexEquivocation,
+            &config,
+        )
+        .unwrap_err();
         assert!(matches!(err, PokerL1Error::Other(_)));
     }
 
@@ -664,8 +699,13 @@ mod tests {
         let unknown = make_tagged_pubkey(0xFF);
         let config = SlashingConfig::default();
 
-        let err = apply_slashing(&mut set, &unknown, SlashingReason::VertexEquivocation, &config)
-            .unwrap_err();
+        let err = apply_slashing(
+            &mut set,
+            &unknown,
+            SlashingReason::VertexEquivocation,
+            &config,
+        )
+        .unwrap_err();
         assert!(matches!(err, PokerL1Error::ValidatorNotInSet(_)));
     }
 
@@ -677,8 +717,13 @@ mod tests {
         let target = set.validators[0].pubkey.clone();
         let config = SlashingConfig::default();
 
-        let result = apply_slashing(&mut set, &target, SlashingReason::VertexEquivocation, &config)
-            .expect("slashing 应成功");
+        let result = apply_slashing(
+            &mut set,
+            &target,
+            SlashingReason::VertexEquivocation,
+            &config,
+        )
+        .expect("slashing 应成功");
 
         // stake=50, slash_percentage=100% → slash_amount=50, 但 stake < amount → 全额扣除 + 欠款
         assert_eq!(result.stake_before, 50);

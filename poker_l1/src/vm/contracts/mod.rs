@@ -30,11 +30,11 @@ pub mod checkpoint_anchor;
 pub mod checkpoint_skip;
 pub mod delegated_escape;
 pub mod examples;
-pub mod forfeit;
 pub mod force_advance;
 pub mod force_checkin;
 pub mod force_checkpoint;
 pub mod force_settle;
+pub mod forfeit;
 pub mod hand_started;
 pub mod request_da;
 pub mod revert;
@@ -42,60 +42,62 @@ pub mod settle;
 pub mod types;
 
 pub use ack_protocol::{
-    apply_refuse_ack, apply_request_ack, check_ack_deadline_expired, clear_expired_pending_acks,
-    clear_pending_ack, RefuseAckReason, RefuseAckTx, RequestAckTx,
+    RefuseAckReason, RefuseAckTx, RequestAckTx, apply_refuse_ack, apply_request_ack,
+    check_ack_deadline_expired, clear_expired_pending_acks, clear_pending_ack,
 };
 pub use censor_detection::{
-    compute_replica_set, gossipsub_mesh_size, is_witness_in_replica_set,
-    CensorshipWitnessEvidence, FalseWitnessEvidence, DEFAULT_GOSSIPSUB_MESH_SIZE,
-    FALSE_WITNESS_SLASH_PERCENTAGE, MIN_CANDIDATE_VALIDATORS_FOR_REPLICA,
-};
-pub use checkpoint_anchor::{
-    apply_checkpoint_anchor, verify_checkpoint_anchor, AckSignature, CheckpointAnchorTx,
-    OptOutAckProof,
-};
-pub use checkpoint_skip::{
-    apply_checkpoint_skip, verify_segment_chain, CheckpointSkipTx, SegmentContinuityProof, StateProof,
-};
-pub use delegated_escape::{
-    apply_revoke_delegated_escape, compute_next_credential_nonce,
-    consume_delegated_escape_authorization, DelegatedEscapeAuthorization,
-    RevokeDelegatedEscapeTx,
-};
-pub use force_checkin::{
-    apply_designated_operator_check_exemption, apply_force_checkin,
-    determine_force_checkin_scenario, is_designated_operator_exemption_exhausted,
-    should_exempt_current_turn_player, validate_force_checkin_game_id, ForceCheckinInput,
-    ForceCheckinOutcome, ForfeitDecision, ForfeitReason, ForceCheckinScenario, RecoveryStage,
-    DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT, DEFAULT_RECOVERY_WINDOW_BLOCKS,
-};
-pub use force_checkpoint::{
-    apply_force_checkpoint, compute_force_checkpoint_deposit, AssignedValidatorFailureProof,
-    ForceCheckpointTx, MultiReplicaReceipt, NonInclusionProof, RoundRangeNonInclusionProof,
-    VertexInfo,
-};
-pub use force_advance::{apply_force_advance, force_advance_action, ForceAdvanceError, ForceAdvanceInput};
-pub use hand_started::{hand_started_branch, HandStartedError, HandStartedInput};
-pub use revert::{
-    apply_force_revert, apply_request_revert, ForceRevertTx, RequestRevertTx, RevertOutcome,
-    RevertReason,
+    CensorshipWitnessEvidence, DEFAULT_GOSSIPSUB_MESH_SIZE, FALSE_WITNESS_SLASH_PERCENTAGE,
+    FalseWitnessEvidence, MIN_CANDIDATE_VALIDATORS_FOR_REPLICA, compute_replica_set,
+    gossipsub_mesh_size, is_witness_in_replica_set,
 };
 pub use challenge_delta::{
-    apply_challenge_delta, compute_challenge_delta_outcome, compute_challenger_deposit,
-    compute_challenger_reward, hash_state_delta, validate_challenge_deposit_ratio,
-    validate_challenge_reward_ratio, ChallengeDeltaOutcome, ChallengeDeltaTx,
-    DEFAULT_CHALLENGE_DEPOSIT_RATIO, DEFAULT_CHALLENGE_REWARD_RATIO, MAX_CHALLENGE_DEPOSIT_RATIO,
-    MAX_CHALLENGE_REWARD_RATIO, MIN_CHALLENGE_DEPOSIT_RATIO, MIN_CHALLENGE_REWARD_RATIO,
+    ChallengeDeltaOutcome, ChallengeDeltaTx, DEFAULT_CHALLENGE_DEPOSIT_RATIO,
+    DEFAULT_CHALLENGE_REWARD_RATIO, MAX_CHALLENGE_DEPOSIT_RATIO, MAX_CHALLENGE_REWARD_RATIO,
+    MIN_CHALLENGE_DEPOSIT_RATIO, MIN_CHALLENGE_REWARD_RATIO, apply_challenge_delta,
+    compute_challenge_delta_outcome, compute_challenger_deposit, compute_challenger_reward,
+    hash_state_delta, validate_challenge_deposit_ratio, validate_challenge_reward_ratio,
 };
-pub use request_da::{apply_request_da, is_request_da_appropriate, RequestDaOutcome, RequestDaTx};
-pub use force_settle::{apply_force_settle, is_force_settle_allowed, ForceSettleOutcome, ForceSettleTx};
+pub use checkpoint_anchor::{
+    AckSignature, CheckpointAnchorTx, OptOutAckProof, apply_checkpoint_anchor,
+    verify_checkpoint_anchor,
+};
+pub use checkpoint_skip::{
+    CheckpointSkipTx, SegmentContinuityProof, StateProof, apply_checkpoint_skip,
+    verify_segment_chain,
+};
+pub use delegated_escape::{
+    DelegatedEscapeAuthorization, RevokeDelegatedEscapeTx, apply_revoke_delegated_escape,
+    compute_next_credential_nonce, consume_delegated_escape_authorization,
+};
+pub use force_advance::{
+    ForceAdvanceError, ForceAdvanceInput, apply_force_advance, force_advance_action,
+};
+pub use force_checkin::{
+    DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT, DEFAULT_RECOVERY_WINDOW_BLOCKS,
+    ForceCheckinInput, ForceCheckinOutcome, ForceCheckinScenario, ForfeitDecision, ForfeitReason,
+    RecoveryStage, apply_designated_operator_check_exemption, apply_force_checkin,
+    determine_force_checkin_scenario, is_designated_operator_exemption_exhausted,
+    should_exempt_current_turn_player, validate_force_checkin_game_id,
+};
+pub use force_checkpoint::{
+    AssignedValidatorFailureProof, ForceCheckpointTx, MultiReplicaReceipt, NonInclusionProof,
+    RoundRangeNonInclusionProof, VertexInfo, apply_force_checkpoint,
+    compute_force_checkpoint_deposit,
+};
+pub use force_settle::{
+    ForceSettleOutcome, ForceSettleTx, apply_force_settle, is_force_settle_allowed,
+};
 pub use forfeit::{
-    apply_forfeit, apply_forfeit_refund, compute_designated_operator_bond,
-    compute_forfeit_deposit, compute_forfeit_distribution, validate_designated_operator_bond,
-    validate_forfeit_deposit_ratio, ForfeitDistribution, ForfeitOutcome, RefundOutcome,
-    DEFAULT_FORFEIT_DEPOSIT_RATIO, MAX_FORFEIT_DEPOSIT_RATIO, MIN_FORFEIT_DEPOSIT_RATIO,
+    DEFAULT_FORFEIT_DEPOSIT_RATIO, ForfeitDistribution, ForfeitOutcome, MAX_FORFEIT_DEPOSIT_RATIO,
+    MIN_FORFEIT_DEPOSIT_RATIO, RefundOutcome, apply_forfeit, apply_forfeit_refund,
+    compute_designated_operator_bond, compute_forfeit_deposit, compute_forfeit_distribution,
+    validate_designated_operator_bond, validate_forfeit_deposit_ratio,
 };
-pub use settle::{compute_rake, settle_hand, RakeConfig, SettleError, SettleResult};
-pub use types::{
-    BettingRound, GameAction, GameContract, GamePhase, HandState, PlayerStack,
+pub use hand_started::{HandStartedError, HandStartedInput, hand_started_branch};
+pub use request_da::{RequestDaOutcome, RequestDaTx, apply_request_da, is_request_da_appropriate};
+pub use revert::{
+    ForceRevertTx, RequestRevertTx, RevertOutcome, RevertReason, apply_force_revert,
+    apply_request_revert,
 };
+pub use settle::{RakeConfig, SettleError, SettleResult, compute_rake, settle_hand};
+pub use types::{BettingRound, GameAction, GameContract, GamePhase, HandState, PlayerStack};

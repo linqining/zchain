@@ -20,15 +20,15 @@
 //! - **SubTask 27.9**：治理 slashing 恶意 refuse_ack：累计 `malicious_refuse_count`
 //!   >= `malicious_refuse_threshold`（默认 3）→ 罚没保证金。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
+use crate::ChainId;
 use crate::account::derive_address;
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
-use crate::signature::{verify_signature, TaggedPubkey};
-use crate::ChainId;
+use crate::signature::{TaggedPubkey, verify_signature};
 
 use super::types::GameContract;
 
@@ -194,9 +194,9 @@ pub fn apply_request_ack(
     }
 
     // 设定 ack_deadline
-    let ack_deadline = block_height.checked_add(ack_deadline_blocks).ok_or_else(|| {
-        PokerL1Error::Other("ack_deadline overflow".to_string())
-    })?;
+    let ack_deadline = block_height
+        .checked_add(ack_deadline_blocks)
+        .ok_or_else(|| PokerL1Error::Other("ack_deadline overflow".to_string()))?;
 
     // 写入 pending_ack_requests（request_id = ack_deadline）
     game.pending_ack_requests.insert(target_addr, ack_deadline);
@@ -347,7 +347,7 @@ pub fn check_ack_deadline_expired(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
     use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_test_tagged_pubkey(byte: u8) -> TaggedPubkey {
@@ -464,7 +464,7 @@ mod tests {
             &tx,
             500,
             MIN_ACK_DEADLINE_BLOCKS, // 使用下限值
-            5,                        // 5 个活跃参与者
+            5,                       // 5 个活跃参与者
         );
         assert!(result.is_ok(), "首次 request_ack 应成功");
         let ack_deadline = result.unwrap();
@@ -505,10 +505,16 @@ mod tests {
             target_participant: participant,
         };
         // 首次提交
-        let deadline = apply_request_ack(&mut game, &tx, 500, MIN_ACK_DEADLINE_BLOCKS, 5)
-            .expect("首次应成功");
+        let deadline =
+            apply_request_ack(&mut game, &tx, 500, MIN_ACK_DEADLINE_BLOCKS, 5).expect("首次应成功");
         // 在 deadline 内再次提交 → PendingAckExists
-        let result = apply_request_ack(&mut game, &tx, 500 + MIN_ACK_DEADLINE_BLOCKS - 1, MIN_ACK_DEADLINE_BLOCKS, 5);
+        let result = apply_request_ack(
+            &mut game,
+            &tx,
+            500 + MIN_ACK_DEADLINE_BLOCKS - 1,
+            MIN_ACK_DEADLINE_BLOCKS,
+            5,
+        );
         assert!(
             matches!(result, Err(PokerL1Error::PendingAckExists { .. })),
             "未过期前重复提交应返回 PendingAckExists"
@@ -531,10 +537,8 @@ mod tests {
             game_id: make_game_id(),
             target_participant: make_test_tagged_pubkey(2),
         };
-        apply_request_ack(&mut game, &tx1, 500, MIN_ACK_DEADLINE_BLOCKS, 2)
-            .expect("第一个应成功");
-        apply_request_ack(&mut game, &tx2, 500, MIN_ACK_DEADLINE_BLOCKS, 2)
-            .expect("第二个应成功");
+        apply_request_ack(&mut game, &tx1, 500, MIN_ACK_DEADLINE_BLOCKS, 2).expect("第一个应成功");
+        apply_request_ack(&mut game, &tx2, 500, MIN_ACK_DEADLINE_BLOCKS, 2).expect("第二个应成功");
 
         // 第三个不同参与者 → 超出 limit
         let tx3 = RequestAckTx {
@@ -543,7 +547,13 @@ mod tests {
         };
         let result = apply_request_ack(&mut game, &tx3, 500, MIN_ACK_DEADLINE_BLOCKS, 2);
         assert!(
-            matches!(result, Err(PokerL1Error::RequestAckTooFrequent { actual: 2, limit: 2 })),
+            matches!(
+                result,
+                Err(PokerL1Error::RequestAckTooFrequent {
+                    actual: 2,
+                    limit: 2
+                })
+            ),
             "超出 limit 应返回 RequestAckTooFrequent"
         );
     }
@@ -556,8 +566,7 @@ mod tests {
             game_id: make_game_id(),
             target_participant: make_test_tagged_pubkey(1),
         };
-        apply_request_ack(&mut game, &tx, 500, MIN_ACK_DEADLINE_BLOCKS, 5)
-            .expect("应成功");
+        apply_request_ack(&mut game, &tx, 500, MIN_ACK_DEADLINE_BLOCKS, 5).expect("应成功");
         // R3-H6: request_ack 不更新 last_action_height
         assert_eq!(
             game.last_action_height, 400,
@@ -712,7 +721,8 @@ mod tests {
         // 3 个 pending requests，deadline 分别为 510, 520, 530
         for (i, p) in [&p1, &p2, &p3].iter().enumerate() {
             let addr = derive_address(p);
-            game.pending_ack_requests.insert(addr, 510 + (i as u64) * 10);
+            game.pending_ack_requests
+                .insert(addr, 510 + (i as u64) * 10);
         }
 
         // block_height = 525 → p1(510) 和 p2(520) 过期，p3(530) 未过期

@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::account::{Account, AccountStore};
 use crate::block::Block;
 use crate::consensus::DagVertex;
-use crate::crypto_precompiles::native_api::{bls_verify as native_bls_verify, secp256k1_aggregate_verify as native_secp256k1_aggregate_verify};
+use crate::crypto_precompiles::native_api::{
+    bls_verify as native_bls_verify,
+    secp256k1_aggregate_verify as native_secp256k1_aggregate_verify,
+};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID};
 use crate::offline::zk_verifier::{SchemeId, ZkPublicIo, ZkVerifierRegistry, ZkVerifyResult};
@@ -429,11 +432,17 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
                 crate::account::derive_address(&tagged_pubkey)
             }
         };
-        let account = self.backend.get_account(&address).map_err(|e| e.to_string())?;
+        let account = self
+            .backend
+            .get_account(&address)
+            .map_err(|e| e.to_string())?;
         serde_json::to_value(account).map_err(|e| e.to_string())
     }
 
-    fn handle_get_dag_vertex(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn handle_get_dag_vertex(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         let p: GetDagVertexParams =
             serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
         let vertex = self
@@ -458,15 +467,14 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
         let sig_refs: Vec<&[u8]> = p.sigs.iter().map(|s| s.as_slice()).collect();
         let verified = native_secp256k1_aggregate_verify(&p.pubkeys, &msg_refs, &sig_refs)
             .map_err(|e| e.to_string())?;
-        serde_json::to_value(Secp256k1AggregateVerifyResult { verified })
-            .map_err(|e| e.to_string())
+        serde_json::to_value(Secp256k1AggregateVerifyResult { verified }).map_err(|e| e.to_string())
     }
 
     fn handle_bls_verify(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let p: BlsVerifyParams =
             serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
-        let verified = native_bls_verify(&p.pubkey_g2, &p.signature_g1, &p.msg)
-            .map_err(|e| e.to_string())?;
+        let verified =
+            native_bls_verify(&p.pubkey_g2, &p.signature_g1, &p.msg).map_err(|e| e.to_string())?;
         serde_json::to_value(BlsVerifyResult { verified }).map_err(|e| e.to_string())
     }
 
@@ -565,11 +573,7 @@ impl MemoryBackend {
 
     /// 取出待装 vertex 的 tx（测试辅助）。
     pub fn drain_pending_tx(&self) -> Vec<Transaction> {
-        self.pending_tx
-            .lock()
-            .unwrap()
-            .drain(..)
-            .collect()
+        self.pending_tx.lock().unwrap().drain(..).collect()
     }
 }
 
@@ -634,13 +638,13 @@ impl RpcBackend for MemoryBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DEFAULT_CHAIN_ID;
     use crate::account::Account;
     use crate::block::{Block, BlockHeader};
     use crate::consensus::DagVertex;
     use crate::object_model::{Object, ObjectID, Ownership};
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, Transaction, TxLane};
-    use crate::DEFAULT_CHAIN_ID;
 
     fn dummy_tagged_pubkey() -> TaggedPubkey {
         TaggedPubkey {
@@ -741,8 +745,7 @@ mod tests {
         };
         let resp = handler.handle(&req);
         assert!(resp.error.is_none(), "get_block 应成功");
-        let block_resp: Block =
-            serde_json::from_value(resp.result.unwrap()).unwrap();
+        let block_resp: Block = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert_eq!(block_resp.header.height, 10);
         // hash 一致
         assert_eq!(block_resp.block_hash(DEFAULT_CHAIN_ID), hash);
@@ -800,8 +803,7 @@ mod tests {
         };
         let resp = handler.handle(&req);
         assert!(resp.error.is_none(), "submit_tx 应成功");
-        let result: SubmitTxResult =
-            serde_json::from_value(resp.result.unwrap()).unwrap();
+        let result: SubmitTxResult = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert_eq!(result.tx_hash, expected_hash);
 
         // pending_tx 应有一笔

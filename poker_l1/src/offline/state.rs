@@ -17,14 +17,14 @@
 //! 该交易走 Public 通道排序（路由到任意 validator）；链上 verifier 验证 π，
 //! 通过后应用 Δ 更新 Game 对象，解锁 checkout 锁定。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
+use crate::Hash;
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
-use crate::Hash;
 
 use super::ack_chain::AckEntry;
 use super::zk_verifier::{ZkVerifierRegistry, ZkVerifyResult};
@@ -160,10 +160,7 @@ impl CheckinTx {
     ///
     /// `proof_kind` 作为 1-byte 前缀插入 `chain_id` 之后 — **BREAKING**：破坏旧签名，
     /// 升级时所有在途 `CheckinTx` 须在 `PRODUCTION_GRACE_BLOCKS` 内重提交或失效。
-    pub fn signing_hash(
-        &self,
-        chain_id: crate::ChainId,
-    ) -> Hash {
+    pub fn signing_hash(&self, chain_id: crate::ChainId) -> Hash {
         let mut hasher = Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
         hasher.update(&chain_id.to_be_bytes());
         hasher.update(&[self.proof_kind.to_byte()]); // v1.2 BREAKING — proof_kind 前缀
@@ -305,10 +302,12 @@ pub fn execute_checkin(
     }
 
     // v1.2 SubTask 11.2.4：proof_kind 与 scheme_id 一致性校验
-    let expected_kind = super::zk_verifier::ProofKind::from_scheme_id(tx.scheme_id)
-        .ok_or_else(|| PokerL1Error::ProofKindMismatch {
-            declared: tx.proof_kind.to_byte(),
-            actual: tx.scheme_id as u8,
+    let expected_kind =
+        super::zk_verifier::ProofKind::from_scheme_id(tx.scheme_id).ok_or_else(|| {
+            PokerL1Error::ProofKindMismatch {
+                declared: tx.proof_kind.to_byte(),
+                actual: tx.scheme_id as u8,
+            }
         })?;
     if expected_kind != tx.proof_kind {
         return Err(PokerL1Error::ProofKindMismatch {
@@ -396,10 +395,12 @@ pub fn execute_partial_checkin(
     ctx: &super::zk_verifier::ZkVerifyContext<'_>,
 ) -> Result<LastPartialFold, PokerL1Error> {
     // v1.2 SubTask 11.2.4：proof_kind 与 scheme_id 一致性校验（先于其他校验，提前失败）
-    let expected_kind = super::zk_verifier::ProofKind::from_scheme_id(tx.scheme_id)
-        .ok_or_else(|| PokerL1Error::ProofKindMismatch {
-            declared: tx.proof_kind.to_byte(),
-            actual: tx.scheme_id as u8,
+    let expected_kind =
+        super::zk_verifier::ProofKind::from_scheme_id(tx.scheme_id).ok_or_else(|| {
+            PokerL1Error::ProofKindMismatch {
+                declared: tx.proof_kind.to_byte(),
+                actual: tx.scheme_id as u8,
+            }
         })?;
     if expected_kind != tx.proof_kind {
         return Err(PokerL1Error::ProofKindMismatch {
@@ -439,12 +440,13 @@ pub fn execute_partial_checkin(
 
     // SEC-H1：进度校验（仅首次设置时执行，因 prev 已在上方处理）
     if let Some(prev) = last_partial_fold
-        && tx.folded_step_count <= prev.folded_step_count {
-            return Err(PokerL1Error::NoProgressPartialCheckin {
-                new_count: tx.folded_step_count,
-                last_recorded: prev.folded_step_count,
-            });
-        }
+        && tx.folded_step_count <= prev.folded_step_count
+    {
+        return Err(PokerL1Error::NoProgressPartialCheckin {
+            new_count: tx.folded_step_count,
+            last_recorded: prev.folded_step_count,
+        });
+    }
 
     // 构造 public_io（与最终 π 相同的边界格式，fold_step_count = N，final_commitment = intermediate_commitment）
     let public_io = super::zk_verifier::ZkPublicIo {
@@ -508,7 +510,7 @@ mod tests {
     use crate::offline::hypernova::{register_hypernova_verifier, register_zkshuffle_verifier};
     use crate::offline::ipa::register_ipa_verifier;
     use crate::offline::zk_verifier::{
-        ProofKind, VerifierStatus, ZkVerifyContext, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE,
+        ProofKind, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE, VerifierStatus, ZkVerifyContext,
     };
     use crate::offline::{DEFAULT_MAX_ACK_CHAIN_LENGTH, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT};
 
@@ -671,7 +673,10 @@ mod tests {
         // NEW-C1：Stub + mainnet → 拒绝
         let registry = make_registry_with_all_verifiers();
         let result = check_offchain_allowed(&registry, crate::DEFAULT_CHAIN_ID, true);
-        assert!(matches!(result, Err(PokerL1Error::OffChainDisabledOnMainnet)));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::OffChainDisabledOnMainnet)
+        ));
     }
 
     #[test]
@@ -744,7 +749,10 @@ mod tests {
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
         );
-        assert!(matches!(result, Err(PokerL1Error::AckChainLengthExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::AckChainLengthExceeded { .. })
+        ));
     }
 
     #[test]
@@ -770,7 +778,10 @@ mod tests {
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
         );
-        assert!(matches!(result, Err(PokerL1Error::PartialCheckinMismatch(_))));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PartialCheckinMismatch(_))
+        ));
     }
 
     #[test]
@@ -803,7 +814,10 @@ mod tests {
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
         );
-        assert!(matches!(result, Err(PokerL1Error::PartialCheckinFlagMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PartialCheckinFlagMismatch { .. })
+        ));
     }
 
     #[test]
@@ -868,7 +882,7 @@ mod tests {
         let tx = PartialCheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
             proof_partial: vec![0xAA; 64], // hash 不匹配 [0xAA; 32]
-            folded_step_count: 5, // 不大于上一次
+            folded_step_count: 5,          // 不大于上一次
             intermediate_commitment: [0xBB; 32],
             ack_chain_partial: vec![make_ack_entry(1)],
             scheme_id: 1,
@@ -887,7 +901,10 @@ mod tests {
             &make_default_ctx(),
         );
         // M2-003：proof_partial_hash 不匹配 → PartialFoldHashImmutable（优先于 NoProgressPartialCheckin）
-        assert!(matches!(result, Err(PokerL1Error::PartialFoldHashImmutable)));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PartialFoldHashImmutable)
+        ));
     }
 
     #[test]
@@ -914,7 +931,10 @@ mod tests {
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &make_default_ctx(),
         );
-        assert!(matches!(result, Err(PokerL1Error::PartialCheckinLimitExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PartialCheckinLimitExceeded { .. })
+        ));
     }
 
     // ===== SubTask 11.2.7：proof_kind 一致性集成测试 =====

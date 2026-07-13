@@ -261,7 +261,9 @@ impl ParamName {
             Self::VerifierStatus => "verifier_status",
             Self::DowntimeThresholdBlocks => "downtime_threshold_blocks",
             Self::VotingPeriodBlocks => "voting_period_blocks",
-            Self::MaxDesignatedOperatorCheckExemptions => "max_designated_operator_check_exemptions",
+            Self::MaxDesignatedOperatorCheckExemptions => {
+                "max_designated_operator_check_exemptions"
+            }
             Self::UnderInvestigationThreshold => "under_investigation_threshold",
             Self::MaxRequestAckPerTurnTimeout => "max_request_ack_per_turn_timeout",
             Self::MaxClockDriftMs => "max_clock_drift_ms",
@@ -444,7 +446,8 @@ impl GovernanceParams {
             downtime_slash_percentage: DEFAULT_DOWNTIME_SLASH_PERCENTAGE,
             downtime_threshold_blocks: DEFAULT_DOWNTIME_THRESHOLD_BLOCKS,
             voting_period_blocks: DEFAULT_VOTING_PERIOD_BLOCKS,
-            max_designated_operator_check_exemptions: DEFAULT_MAX_DESIGNATED_OPERATOR_CHECK_EXEMPTIONS,
+            max_designated_operator_check_exemptions:
+                DEFAULT_MAX_DESIGNATED_OPERATOR_CHECK_EXEMPTIONS,
             under_investigation_threshold: DEFAULT_UNDER_INVESTIGATION_THRESHOLD,
             max_request_ack_per_turn_timeout: DEFAULT_MAX_REQUEST_ACK_PER_TURN_TIMEOUT,
             max_clock_drift_ms: DEFAULT_MAX_CLOCK_DRIFT_MS,
@@ -1015,7 +1018,9 @@ impl GovernanceState {
             kind: ProposalKind::KeyRotation {
                 old_pubkey,
                 new_pubkey,
-                effective_height: current_height + voting_period + self.params.key_rotation_delay_blocks,
+                effective_height: current_height
+                    + voting_period
+                    + self.params.key_rotation_delay_blocks,
             },
             proposer,
             submit_height: current_height,
@@ -1040,10 +1045,11 @@ impl GovernanceState {
         current_height: BlockHeight,
     ) -> PokerL1Result<u64> {
         // 校验原提案存在且在 timelock 期
-        let original = self
-            .proposals
-            .get(&original_proposal_id)
-            .ok_or_else(|| PokerL1Error::Other(format!("original proposal {original_proposal_id} not found")))?;
+        let original = self.proposals.get(&original_proposal_id).ok_or_else(|| {
+            PokerL1Error::Other(format!(
+                "original proposal {original_proposal_id} not found"
+            ))
+        })?;
         if original.status != ProposalStatus::Timelock {
             return Err(PokerL1Error::ProposalNotInTimelock(original.status));
         }
@@ -1184,7 +1190,9 @@ impl GovernanceState {
                 proposal.status = ProposalStatus::Passed;
                 Ok(ProposalStatus::Passed)
             }
-            ProposalKind::TimelockRevocation { original_proposal_id } => {
+            ProposalKind::TimelockRevocation {
+                original_proposal_id,
+            } => {
                 // 撤销提案：立即撤销原提案（无 timelock）
                 let orig_id = *original_proposal_id;
                 proposal.status = ProposalStatus::Passed;
@@ -1235,7 +1243,10 @@ impl GovernanceState {
             ProposalStatus::Passed => {
                 // validator 集更新 / 密钥轮换 / 撤销提案：直接执行
             }
-            ProposalStatus::Voting | ProposalStatus::Rejected | ProposalStatus::Executed | ProposalStatus::Revoked => {
+            ProposalStatus::Voting
+            | ProposalStatus::Rejected
+            | ProposalStatus::Executed
+            | ProposalStatus::Revoked => {
                 return Err(PokerL1Error::ProposalNotInTimelock(status));
             }
         }
@@ -1269,7 +1280,10 @@ impl GovernanceState {
         }
 
         // 标记提案已执行
-        self.proposals.get_mut(&proposal_id).expect("proposal exists").status = ProposalStatus::Executed;
+        self.proposals
+            .get_mut(&proposal_id)
+            .expect("proposal exists")
+            .status = ProposalStatus::Executed;
         Ok(())
     }
 
@@ -1313,7 +1327,7 @@ impl Default for GovernanceState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
 
     fn make_pubkey(byte: u8) -> TaggedPubkey {
         let mut raw = vec![byte];
@@ -1435,16 +1449,25 @@ mod tests {
     fn test_default_params() {
         let params = GovernanceParams::default_values();
         assert_eq!(params.turn_timeout_blocks, DEFAULT_TURN_TIMEOUT_BLOCKS);
-        assert_eq!(params.parameter_delay_blocks, DEFAULT_PARAMETER_DELAY_BLOCKS);
+        assert_eq!(
+            params.parameter_delay_blocks,
+            DEFAULT_PARAMETER_DELAY_BLOCKS
+        );
         assert_eq!(params.epoch_length_blocks, DEFAULT_EPOCH_LENGTH_BLOCKS);
         assert_eq!(params.validator_set_size, DEFAULT_VALIDATOR_SET_SIZE);
-        assert_eq!(params.max_partial_checkin_count, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT);
+        assert_eq!(
+            params.max_partial_checkin_count,
+            DEFAULT_MAX_PARTIAL_CHECKIN_COUNT
+        );
     }
 
     #[test]
     fn test_params_get_set() {
         let mut params = GovernanceParams::default_values();
-        assert_eq!(params.get(ParamName::TurnTimeoutBlocks), DEFAULT_TURN_TIMEOUT_BLOCKS);
+        assert_eq!(
+            params.get(ParamName::TurnTimeoutBlocks),
+            DEFAULT_TURN_TIMEOUT_BLOCKS
+        );
         params.set(ParamName::TurnTimeoutBlocks, 100);
         assert_eq!(params.get(ParamName::TurnTimeoutBlocks), 100);
     }
@@ -1532,7 +1555,10 @@ mod tests {
     #[test]
     fn test_governance_state_new() {
         let state = GovernanceState::new();
-        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+        assert_eq!(
+            state.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Stub
+        );
         assert_eq!(state.next_proposal_id, 1);
         assert!(state.proposals.is_empty());
     }
@@ -1541,14 +1567,20 @@ mod tests {
     fn test_verifier_status_per_chain_id() {
         let mut state = GovernanceState::new();
         // 默认 mainnet = Stub
-        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+        assert_eq!(
+            state.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Stub
+        );
         // testnet 初始也 = Stub
         assert_eq!(state.verifier_status(0x1234), VerifierStatus::Stub);
         // 设置 testnet = Production
         state.set_verifier_status(0x1234, VerifierStatus::Production);
         assert_eq!(state.verifier_status(0x1234), VerifierStatus::Production);
         // mainnet 不受影响（SEC-M4 命名空间隔离）
-        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+        assert_eq!(
+            state.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Stub
+        );
     }
 
     #[test]
@@ -1584,7 +1616,10 @@ mod tests {
         let proposal = &state.proposals[&id];
         assert_eq!(proposal.status, ProposalStatus::Voting);
         assert_eq!(proposal.submit_height, 100);
-        assert_eq!(proposal.voting_end_height, 100 + DEFAULT_VOTING_PERIOD_BLOCKS);
+        assert_eq!(
+            proposal.voting_end_height,
+            100 + DEFAULT_VOTING_PERIOD_BLOCKS
+        );
     }
 
     #[test]
@@ -1616,17 +1651,27 @@ mod tests {
             100,
             crate::DEFAULT_CHAIN_ID,
         );
-        assert!(matches!(result, Err(PokerL1Error::ProposalChainIdMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::ProposalChainIdMismatch { .. })
+        ));
     }
 
     #[test]
     fn test_create_validator_set_update_proposal() {
-        use crate::consensus::validator_set::{ValidatorEntry, ValidatorSet, ValidatorStatus, VRF_PUBKEY_SIZE};
         use crate::consensus::validator_set::compute_genesis_chain_randomness;
+        use crate::consensus::validator_set::{
+            VRF_PUBKEY_SIZE, ValidatorEntry, ValidatorSet, ValidatorStatus,
+        };
 
         let validators: Vec<ValidatorEntry> = (0..10)
             .map(|i| {
-                let mut v = ValidatorEntry::new(make_pubkey(0x10 + i as u8), [0u8; VRF_PUBKEY_SIZE], 1_000_000, 0);
+                let mut v = ValidatorEntry::new(
+                    make_pubkey(0x10 + i as u8),
+                    [0u8; VRF_PUBKEY_SIZE],
+                    1_000_000,
+                    0,
+                );
                 v.status = ValidatorStatus::Active;
                 v
             })
@@ -1651,26 +1696,26 @@ mod tests {
             stake: 1_000_000,
         };
         let id = state
-            .create_validator_set_update_proposal(
-                &set,
-                vec![addition],
-                vec![],
-                2,
-                proposer,
-                100,
-            )
+            .create_validator_set_update_proposal(&set, vec![addition], vec![], 2, proposer, 100)
             .unwrap();
         assert_eq!(id, 1);
     }
 
     #[test]
     fn test_validator_set_update_reject_below_min() {
-        use crate::consensus::validator_set::{ValidatorEntry, ValidatorSet, ValidatorStatus, VRF_PUBKEY_SIZE};
         use crate::consensus::validator_set::compute_genesis_chain_randomness;
+        use crate::consensus::validator_set::{
+            VRF_PUBKEY_SIZE, ValidatorEntry, ValidatorSet, ValidatorStatus,
+        };
 
         let validators: Vec<ValidatorEntry> = (0..5)
             .map(|i| {
-                let mut v = ValidatorEntry::new(make_pubkey(0x10 + i as u8), [0u8; VRF_PUBKEY_SIZE], 1_000_000, 0);
+                let mut v = ValidatorEntry::new(
+                    make_pubkey(0x10 + i as u8),
+                    [0u8; VRF_PUBKEY_SIZE],
+                    1_000_000,
+                    0,
+                );
                 v.status = ValidatorStatus::Active;
                 v
             })
@@ -1698,18 +1743,28 @@ mod tests {
             proposer,
             100,
         );
-        assert!(matches!(result, Err(PokerL1Error::ValidatorSetReductionTooSmall { new_size: 4 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::ValidatorSetReductionTooSmall { new_size: 4 })
+        ));
     }
 
     #[test]
     fn test_validator_set_update_reject_excessive_reduction() {
-        use crate::consensus::validator_set::{ValidatorEntry, ValidatorSet, ValidatorStatus, VRF_PUBKEY_SIZE};
         use crate::consensus::validator_set::compute_genesis_chain_randomness;
+        use crate::consensus::validator_set::{
+            VRF_PUBKEY_SIZE, ValidatorEntry, ValidatorSet, ValidatorStatus,
+        };
 
         // 10 个 validator
         let validators: Vec<ValidatorEntry> = (0..10)
             .map(|i| {
-                let mut v = ValidatorEntry::new(make_pubkey(0x10 + i as u8), [0u8; VRF_PUBKEY_SIZE], 1_000_000, 0);
+                let mut v = ValidatorEntry::new(
+                    make_pubkey(0x10 + i as u8),
+                    [0u8; VRF_PUBKEY_SIZE],
+                    1_000_000,
+                    0,
+                );
                 v.status = ValidatorStatus::Active;
                 v
             })
@@ -1737,7 +1792,10 @@ mod tests {
             proposer,
             100,
         );
-        assert!(matches!(result, Err(PokerL1Error::SingleReductionRatioExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::SingleReductionRatioExceeded { .. })
+        ));
     }
 
     // ===== 投票 + 结束投票测试 =====
@@ -1935,7 +1993,9 @@ mod tests {
         }
 
         // 4. 结束撤销投票 → 通过 + 原提案被撤销
-        let status = state.finalize_voting(rev_id, 10, 1200 + DEFAULT_VOTING_PERIOD_BLOCKS).unwrap();
+        let status = state
+            .finalize_voting(rev_id, 10, 1200 + DEFAULT_VOTING_PERIOD_BLOCKS)
+            .unwrap();
         assert_eq!(status, ProposalStatus::Passed);
         assert_eq!(state.proposals[&id1].status, ProposalStatus::Revoked);
 
@@ -1967,13 +2027,17 @@ mod tests {
         state.finalize_voting(id1, 10, 1100).unwrap();
 
         // 创建撤销提案
-        let rev_id = state.create_revocation_proposal(id1, make_pubkey(0x02), 1200).unwrap();
+        let rev_id = state
+            .create_revocation_proposal(id1, make_pubkey(0x02), 1200)
+            .unwrap();
 
         // 仅 8 个赞成（< 9 = 90% of 10）→ 撤销失败
         for pk in &pubkeys[0..8] {
             state.vote(rev_id, pk.clone(), true, 1200).unwrap();
         }
-        let status = state.finalize_voting(rev_id, 10, 1200 + DEFAULT_VOTING_PERIOD_BLOCKS).unwrap();
+        let status = state
+            .finalize_voting(rev_id, 10, 1200 + DEFAULT_VOTING_PERIOD_BLOCKS)
+            .unwrap();
         assert_eq!(status, ProposalStatus::Rejected);
         // 原提案仍为 Timelock
         assert_eq!(state.proposals[&id1].status, ProposalStatus::Timelock);
@@ -1988,7 +2052,10 @@ mod tests {
         let pubkeys = make_pubkeys(10);
 
         // mainnet 默认 Stub
-        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Stub);
+        assert_eq!(
+            state.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Stub
+        );
 
         // 创建 verifier_status 提案（升级为 Production）
         let id = state
@@ -2009,8 +2076,13 @@ mod tests {
         state.finalize_voting(id, 10, 1100).unwrap();
 
         // timelock 结束后执行
-        state.execute_proposal(id, 1100 + DEFAULT_PARAMETER_DELAY_BLOCKS).unwrap();
-        assert_eq!(state.verifier_status(crate::DEFAULT_CHAIN_ID), VerifierStatus::Production);
+        state
+            .execute_proposal(id, 1100 + DEFAULT_PARAMETER_DELAY_BLOCKS)
+            .unwrap();
+        assert_eq!(
+            state.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Production
+        );
         assert!(state.is_offchain_checkout_allowed(crate::DEFAULT_CHAIN_ID));
     }
 

@@ -13,8 +13,8 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::ct_util::ct_lt_be32;
 use crate::signature::tagged_pubkey::{SignatureScheme, TaggedPubkey};
 use secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId},
     Message,
+    ecdsa::{RecoverableSignature, RecoveryId},
 };
 use subtle::ConstantTimeEq as _;
 
@@ -79,8 +79,8 @@ pub fn verify(
     // === libsecp256k1 解析 + 恢复 ===
     // secp256k1 0.29 API：from_compact(data: &[u8], recid: RecoveryId)
     // 只取 r||s 部分（前 64 字节），v 单独传入 RecoveryId
-    let recovery_id = RecoveryId::from_i32(v_byte as i32)
-        .map_err(|_| PokerL1Error::InvalidSignature)?;
+    let recovery_id =
+        RecoveryId::from_i32(v_byte as i32).map_err(|_| PokerL1Error::InvalidSignature)?;
     let recoverable = RecoverableSignature::from_compact(&sig_bytes[0..64], recovery_id)
         .map_err(|_| PokerL1Error::InvalidSignature)?;
 
@@ -112,9 +112,7 @@ mod tests {
     use rand::rngs::OsRng;
     use secp256k1::Secp256k1;
 
-    fn sign_and_get_tagged(
-        msg_hash: &[u8; 32],
-    ) -> (TaggedPubkey, Vec<u8>) {
+    fn sign_and_get_tagged(msg_hash: &[u8; 32]) -> (TaggedPubkey, Vec<u8>) {
         let secp = Secp256k1::new();
         let mut rng = OsRng;
         let (sk, pk) = secp.generate_keypair(&mut rng);

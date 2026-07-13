@@ -9,8 +9,8 @@
 use super::id::ObjectID;
 use super::object::Object;
 use super::smt::SparseMerkleTree;
-use crate::error::{PokerL1Error, PokerL1Result};
 use crate::Address;
+use crate::error::{PokerL1Error, PokerL1Result};
 use std::collections::HashMap;
 
 /// 内存版 ObjectStore + SMT backing。
@@ -43,9 +43,8 @@ impl ObjectStore {
             return Err(PokerL1Error::ObjectIDCollision(object.id));
         }
         let key = object.id.merkle_key();
-        let value = bcs::to_bytes(&object).map_err(|e| {
-            PokerL1Error::Serialization(format!("Object BCS encode: {e}"))
-        })?;
+        let value = bcs::to_bytes(&object)
+            .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
         self.smt.upsert(key, &value);
         self.objects.insert(object.id, object);
         Ok(())
@@ -89,9 +88,8 @@ impl ObjectStore {
 
         // SMT 同步：用新 BCS(Object) 覆盖
         let key = obj.id.merkle_key();
-        let value = bcs::to_bytes(obj).map_err(|e| {
-            PokerL1Error::Serialization(format!("Object BCS encode: {e}"))
-        })?;
+        let value = bcs::to_bytes(obj)
+            .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
         self.smt.upsert(key, &value);
         Ok(())
     }
@@ -119,9 +117,8 @@ impl ObjectStore {
         obj.bump_version();
 
         let key = obj.id.merkle_key();
-        let value = bcs::to_bytes(obj).map_err(|e| {
-            PokerL1Error::Serialization(format!("Object BCS encode: {e}"))
-        })?;
+        let value = bcs::to_bytes(obj)
+            .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
         self.smt.upsert(key, &value);
         Ok(())
     }

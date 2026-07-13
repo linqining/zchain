@@ -123,9 +123,7 @@ pub fn hand_started_branch(
     }
 
     // 读取 execution_mode（override 优先）
-    let execution_mode = input
-        .execution_mode_override
-        .unwrap_or(game.execution_mode);
+    let execution_mode = input.execution_mode_override.unwrap_or(game.execution_mode);
 
     // 记录当前轮次玩家（在 start_new_hand 之前读取）
     let current_turn = input.hand_state.current_turn;
@@ -161,8 +159,8 @@ pub fn hand_started_branch(
 /// 当前实现：blake2b_256(BCS-encoded hand_state)
 /// Phase 5 将扩展为完整的 state commitment（含 merkle root）。
 fn compute_offline_state_commitment(game: &GameContract) -> [u8; 32] {
-    use blake2::digest::{Update, VariableOutput};
     use blake2::Blake2bVar;
+    use blake2::digest::{Update, VariableOutput};
 
     let mut h = Blake2bVar::new(32).expect("32 <= 64");
     // 简化：对 game_id + hand_number + version 做 hash
@@ -179,10 +177,10 @@ fn compute_offline_state_commitment(game: &GameContract) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Address;
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
     use crate::vm::contracts::types::{GamePhase, PlayerStack, RakeConfigRef};
-    use crate::Address;
 
     fn make_addr(byte: u8) -> Address {
         [byte; 20]
@@ -334,7 +332,10 @@ mod tests {
         // 第一手牌
         let input1 = HandStartedInput::new(make_hand_state());
         let r1 = hand_started_branch(&mut game, input1).expect("第一手应成功");
-        assert!(matches!(r1, HandStartedResult::OnChain { hand_number: 1, .. }));
+        assert!(matches!(
+            r1,
+            HandStartedResult::OnChain { hand_number: 1, .. }
+        ));
 
         // 结算第一手牌
         if let Some(hand) = &mut game.current_hand {
@@ -344,7 +345,10 @@ mod tests {
         // 第二手牌
         let input2 = HandStartedInput::new(make_hand_state());
         let r2 = hand_started_branch(&mut game, input2).expect("第二手应成功");
-        assert!(matches!(r2, HandStartedResult::OnChain { hand_number: 2, .. }));
+        assert!(matches!(
+            r2,
+            HandStartedResult::OnChain { hand_number: 2, .. }
+        ));
 
         assert_eq!(game.version, 2);
     }

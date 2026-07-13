@@ -10,14 +10,14 @@
 //! Phase 1 定义数据结构 + 序列化 + 签名哈希计算；
 //! Phase 2 实现路由与轮转校验逻辑。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
+use crate::ChainId;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID};
 use crate::signature::TaggedPubkey;
-use crate::ChainId;
 
 /// 交易通道分类（SubTask 7.1 — Phase 2 路由用，Phase 1 仅定义枚举）。
 ///
@@ -77,7 +77,10 @@ impl Gas {
 
     /// GameTurn 通道免 gas 用的零 Gas。
     pub const fn zero() -> Self {
-        Self { budget: 0, price: 0 }
+        Self {
+            budget: 0,
+            price: 0,
+        }
     }
 }
 
@@ -336,12 +339,13 @@ pub const fn validate_tx_limits(tx: &Transaction) -> PokerL1Result<()> {
         });
     }
     if let Some(cc) = &tx.contract_call
-        && cc.args.len() > MAX_ARGS_LEN {
-            return Err(PokerL1Error::InputTooLong {
-                actual: cc.args.len(),
-                limit: MAX_ARGS_LEN,
-            });
-        }
+        && cc.args.len() > MAX_ARGS_LEN
+    {
+        return Err(PokerL1Error::InputTooLong {
+            actual: cc.args.len(),
+            limit: MAX_ARGS_LEN,
+        });
+    }
     Ok(())
 }
 
@@ -349,7 +353,7 @@ pub const fn validate_tx_limits(tx: &Transaction) -> PokerL1Result<()> {
 mod tests {
     use super::*;
     use crate::object_model::{Object, ObjectID, Ownership};
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn dummy_tagged_pubkey() -> TaggedPubkey {
         TaggedPubkey {

@@ -286,7 +286,7 @@ pub fn apply_force_revert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
     use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_addr(byte: u8) -> Address {
@@ -375,8 +375,7 @@ mod tests {
         let mut game = make_game(100);
         let tx = make_request_revert_tx(RevertReason::TechnicalInterrupt);
 
-        let outcome =
-            apply_request_revert(&mut game, &tx, 120, 30, 500, 100).expect("应成功");
+        let outcome = apply_request_revert(&mut game, &tx, 120, 30, 500, 100).expect("应成功");
         assert!(!outcome.should_forfeit, "technical_interrupt 无 forfeit");
         assert!(outcome.reason.is_none());
         // 状态变更
@@ -393,9 +392,11 @@ mod tests {
         let mut game = make_game(100);
         let tx = make_request_revert_tx(RevertReason::MaliciousWithholding);
 
-        let outcome =
-            apply_request_revert(&mut game, &tx, 120, 30, 500, 100).expect("应成功");
-        assert!(outcome.should_forfeit, "malicious_withholding 应触发 forfeit");
+        let outcome = apply_request_revert(&mut game, &tx, 120, 30, 500, 100).expect("应成功");
+        assert!(
+            outcome.should_forfeit,
+            "malicious_withholding 应触发 forfeit"
+        );
         assert_eq!(outcome.reason, Some(ForfeitReason::MaliciousWithholding));
     }
 
@@ -404,8 +405,7 @@ mod tests {
         let mut game = make_game(100);
         let tx = make_request_revert_tx(RevertReason::DataUnavailable);
 
-        let outcome =
-            apply_request_revert(&mut game, &tx, 120, 30, 500, 100).expect("应成功");
+        let outcome = apply_request_revert(&mut game, &tx, 120, 30, 500, 100).expect("应成功");
         assert!(outcome.should_forfeit, "data_unavailable 应触发 forfeit");
     }
 
@@ -417,9 +417,11 @@ mod tests {
         let mut game = make_game(100);
         let tx = make_request_revert_tx(RevertReason::MaliciousWithholding);
 
-        let outcome =
-            apply_request_revert(&mut game, &tx, 200, 30, 500, 100).expect("应成功");
-        assert!(outcome.should_forfeit, "reason=malicious_withholding 即使 age 超边界仍 forfeit");
+        let outcome = apply_request_revert(&mut game, &tx, 200, 30, 500, 100).expect("应成功");
+        assert!(
+            outcome.should_forfeit,
+            "reason=malicious_withholding 即使 age 超边界仍 forfeit"
+        );
         assert_eq!(
             outcome.reason,
             Some(ForfeitReason::MaliciousWithholding),
@@ -436,7 +438,10 @@ mod tests {
 
         let result = apply_request_revert(&mut game, &tx, 800, 30, 500, 100);
         assert!(
-            matches!(result, Err(PokerL1Error::OperatorCannotClaimTechnicalInterrupt(_))),
+            matches!(
+                result,
+                Err(PokerL1Error::OperatorCannotClaimTechnicalInterrupt(_))
+            ),
             "阶段 3 + technical_interrupt 应被 R7-M6 拒绝"
         );
         // 状态不变
@@ -473,7 +478,10 @@ mod tests {
         let tx = make_request_revert_tx(RevertReason::TechnicalInterrupt);
 
         apply_request_revert(&mut game, &tx, 120, 30, 500, 100).expect("应成功");
-        assert!(game.last_commitment.is_none(), "回退后 last_commitment 清除");
+        assert!(
+            game.last_commitment.is_none(),
+            "回退后 last_commitment 清除"
+        );
     }
 
     #[test]
@@ -508,7 +516,10 @@ mod tests {
         let tx = make_force_revert_tx(RevertReason::MaliciousWithholding, 800, false);
 
         let outcome = apply_force_revert(&mut game, &tx).expect("应成功");
-        assert!(outcome.should_forfeit, "force_revert malicious_withholding 应 forfeit");
+        assert!(
+            outcome.should_forfeit,
+            "force_revert malicious_withholding 应 forfeit"
+        );
         assert_eq!(outcome.reason, Some(ForfeitReason::MaliciousWithholding));
     }
 
@@ -518,7 +529,10 @@ mod tests {
         let tx = make_force_revert_tx(RevertReason::DataUnavailable, 800, false);
 
         let outcome = apply_force_revert(&mut game, &tx).expect("应成功");
-        assert!(outcome.should_forfeit, "force_revert data_unavailable 应 forfeit");
+        assert!(
+            outcome.should_forfeit,
+            "force_revert data_unavailable 应 forfeit"
+        );
     }
 
     #[test]
@@ -543,7 +557,10 @@ mod tests {
         let tx = make_force_revert_tx(RevertReason::MaliciousWithholding, 170, true);
 
         let outcome = apply_force_revert(&mut game, &tx).expect("应成功");
-        assert!(outcome.should_forfeit, "reason 优先：即使 age > boundary 仍 forfeit");
+        assert!(
+            outcome.should_forfeit,
+            "reason 优先：即使 age > boundary 仍 forfeit"
+        );
         assert_eq!(
             outcome.reason,
             Some(ForfeitReason::MaliciousWithholding),
@@ -559,7 +576,10 @@ mod tests {
 
         let result = apply_force_revert(&mut game, &tx);
         assert!(
-            matches!(result, Err(PokerL1Error::OperatorCannotClaimTechnicalInterrupt(_))),
+            matches!(
+                result,
+                Err(PokerL1Error::OperatorCannotClaimTechnicalInterrupt(_))
+            ),
             "force_revert 阶段 3 + technical_interrupt 应被 R7-M6 拒绝"
         );
     }
@@ -572,7 +592,10 @@ mod tests {
         let tx = make_force_revert_tx(RevertReason::TechnicalInterrupt, 120, false);
 
         let outcome = apply_force_revert(&mut game, &tx).expect("应成功");
-        assert!(!outcome.should_forfeit, "阶段 1 内 technical_interrupt 无 forfeit");
+        assert!(
+            !outcome.should_forfeit,
+            "阶段 1 内 technical_interrupt 无 forfeit"
+        );
         assert!(outcome.reason.is_none());
     }
 

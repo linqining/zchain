@@ -13,12 +13,12 @@
 
 use poker_l1::crypto_precompiles::bls;
 use poker_l1::crypto_precompiles::native_api::{bls_verify, secp256k1_aggregate_verify};
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme};
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
 use blstrs::{G1Projective, G2Projective, Scalar};
-use group::ff::Field;
 use group::Group;
+use group::ff::Field;
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
 
@@ -137,14 +137,13 @@ fn subtask_41_6_bls_verify_positive() {
     let h_m = {
         let mut arr = [0u8; bls::G1_COMPRESSED_SIZE];
         arr.copy_from_slice(&h_m_bytes);
-        ct_g1_to_opt(G1Projective::from_compressed(&arr))
-            .expect("hash_to_g1 结果应可反序列化")
+        ct_g1_to_opt(G1Projective::from_compressed(&arr)).expect("hash_to_g1 结果应可反序列化")
     };
     let signature_g1 = h_m * sk;
     let signature_g1_bytes = signature_g1.to_compressed();
 
-    let result = bls_verify(&pubkey_g2_bytes, &signature_g1_bytes, msg)
-        .expect("bls_verify 应成功执行");
+    let result =
+        bls_verify(&pubkey_g2_bytes, &signature_g1_bytes, msg).expect("bls_verify 应成功执行");
     assert!(result, "真实 BLS 签名应验证通过");
 }
 
@@ -164,8 +163,7 @@ fn subtask_41_6_bls_verify_negative_tampered_signature() {
     let h_m = {
         let mut arr = [0u8; bls::G1_COMPRESSED_SIZE];
         arr.copy_from_slice(&h_m_bytes);
-        ct_g1_to_opt(G1Projective::from_compressed(&arr))
-            .expect("hash_to_g1 结果应可反序列化")
+        ct_g1_to_opt(G1Projective::from_compressed(&arr)).expect("hash_to_g1 结果应可反序列化")
     };
     let mut signature_g1 = h_m * sk;
     // 篡改：signature = signature + G1_generator（改变签名点）
@@ -194,15 +192,14 @@ fn subtask_41_6_bls_verify_negative_wrong_msg() {
     let h_m = {
         let mut arr = [0u8; bls::G1_COMPRESSED_SIZE];
         arr.copy_from_slice(&h_m_bytes);
-        ct_g1_to_opt(G1Projective::from_compressed(&arr))
-            .expect("hash_to_g1 结果应可反序列化")
+        ct_g1_to_opt(G1Projective::from_compressed(&arr)).expect("hash_to_g1 结果应可反序列化")
     };
     let signature_g1 = h_m * sk;
     let signature_g1_bytes = signature_g1.to_compressed();
 
     // 用 msg_b 验证（签的是 msg_a）
-    let result = bls_verify(&pubkey_g2_bytes, &signature_g1_bytes, msg_b)
-        .expect("bls_verify 应成功执行");
+    let result =
+        bls_verify(&pubkey_g2_bytes, &signature_g1_bytes, msg_b).expect("bls_verify 应成功执行");
     assert!(!result, "msg 不匹配应导致验证失败");
 }
 

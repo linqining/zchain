@@ -28,16 +28,16 @@
 //!   实际装入了 vertex 但见证证据声称未装入）→ 治理 slashing，罚没保证金
 //!   全额 `slash_percentage = 100%`
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
-use crate::consensus::validator_set::{ValidatorEntry, ValidatorSet, MIN_VALIDATOR_SET_SIZE};
+use crate::ChainId;
+use crate::Hash;
+use crate::consensus::validator_set::{MIN_VALIDATOR_SET_SIZE, ValidatorEntry, ValidatorSet};
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
-use crate::ChainId;
-use crate::Hash;
 
 use super::force_checkpoint::{MultiReplicaReceipt, VertexInfo};
 
@@ -125,7 +125,8 @@ pub fn compute_replica_set(
         .expect("Blake2bVar finalize 不应失败");
 
     // (5) 对每个候选 validator 计算 H(seed || validator_pubkey)，按哈希升序排序
-    let mut sorted_candidates: Vec<(&ValidatorEntry, [u8; 32])> = Vec::with_capacity(candidates.len());
+    let mut sorted_candidates: Vec<(&ValidatorEntry, [u8; 32])> =
+        Vec::with_capacity(candidates.len());
     for candidate in &candidates {
         let mut h = Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
         h.update(&seed);
@@ -149,10 +150,7 @@ pub fn compute_replica_set(
 
 /// 校验某 witness 是否在指定的 replica_set 中。
 #[must_use]
-pub fn is_witness_in_replica_set(
-    witness: &TaggedPubkey,
-    replica_set: &[TaggedPubkey],
-) -> bool {
+pub fn is_witness_in_replica_set(witness: &TaggedPubkey, replica_set: &[TaggedPubkey]) -> bool {
     replica_set.contains(witness)
 }
 
@@ -371,11 +369,11 @@ impl FalseWitnessEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::validator_set::{
-        compute_genesis_chain_randomness, ValidatorEntry, ValidatorStatus,
-    };
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
     use crate::Address;
+    use crate::consensus::validator_set::{
+        ValidatorEntry, ValidatorStatus, compute_genesis_chain_randomness,
+    };
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
 
     fn make_test_tagged_pubkey(byte: u8) -> TaggedPubkey {
         let mut raw = vec![byte];
@@ -408,9 +406,8 @@ mod tests {
     }
 
     fn make_validator_set(count: usize) -> ValidatorSet {
-        let validators: Vec<ValidatorEntry> = (0..count)
-            .map(|i| make_validator(0x10 + i as u8))
-            .collect();
+        let validators: Vec<ValidatorEntry> =
+            (0..count).map(|i| make_validator(0x10 + i as u8)).collect();
         let genesis_randomness = compute_genesis_chain_randomness(&validators);
         let mut set = ValidatorSet {
             epoch: 1,
@@ -445,16 +442,9 @@ mod tests {
     fn test_compute_replica_set_success() {
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10); // 第一个 validator
-        let replica_set = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0u8; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("7 validators + 1 assigned 排除后剩 6 >= 5 应成功");
+        let replica_set =
+            compute_replica_set(&make_game_id(), 1, 1, &[0u8; 32], &set, &assigned, 5)
+                .expect("7 validators + 1 assigned 排除后剩 6 >= 5 应成功");
         assert_eq!(replica_set.len(), 5);
         // 不包含 assigned_validator
         assert!(!replica_set.contains(&assigned));
@@ -465,17 +455,12 @@ mod tests {
         // SEC-C2: |V| < 5 → 拒绝
         let set = make_validator_set(4);
         let assigned = make_test_tagged_pubkey(0x10);
-        let result = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0u8; 32],
-            &set,
-            &assigned,
-            5,
-        );
+        let result = compute_replica_set(&make_game_id(), 1, 1, &[0u8; 32], &set, &assigned, 5);
         assert!(
-            matches!(result, Err(PokerL1Error::ValidatorSetTooSmallForOffChain { size: 4 })),
+            matches!(
+                result,
+                Err(PokerL1Error::ValidatorSetTooSmallForOffChain { size: 4 })
+            ),
             "SEC-C2: |V| < 5 应拒绝"
         );
     }
@@ -485,35 +470,17 @@ mod tests {
         // 6 validators, 1 assigned 排除后剩 5，但 replica_count = 6 → 失败
         let set = make_validator_set(6);
         let assigned = make_test_tagged_pubkey(0x10);
-        let result = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0u8; 32],
-            &set,
-            &assigned,
-            6,
-        );
-        assert!(
-            result.is_err(),
-            "候选数 5 < replica_count 6 应失败"
-        );
+        let result = compute_replica_set(&make_game_id(), 1, 1, &[0u8; 32], &set, &assigned, 6);
+        assert!(result.is_err(), "候选数 5 < replica_count 6 应失败");
     }
 
     #[test]
     fn test_compute_replica_set_excludes_assigned_validator() {
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x13); // 第 4 个 validator
-        let replica_set = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0u8; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
+        let replica_set =
+            compute_replica_set(&make_game_id(), 1, 1, &[0u8; 32], &set, &assigned, 5)
+                .expect("应成功");
         assert!(
             !replica_set.contains(&assigned),
             "replica_set 不应包含 assigned_validator"
@@ -524,26 +491,10 @@ mod tests {
     fn test_compute_replica_set_deterministic() {
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10);
-        let r1 = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0xAB; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
-        let r2 = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0xAB; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
+        let r1 = compute_replica_set(&make_game_id(), 1, 1, &[0xAB; 32], &set, &assigned, 5)
+            .expect("应成功");
+        let r2 = compute_replica_set(&make_game_id(), 1, 1, &[0xAB; 32], &set, &assigned, 5)
+            .expect("应成功");
         assert_eq!(r1, r2, "相同输入应产生相同 replica_set");
     }
 
@@ -552,28 +503,15 @@ mod tests {
         // SEC-M11: epoch_randomness 变化应改变 replica_set
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10);
-        let r1 = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0xAA; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
-        let r2 = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0xBB; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
+        let r1 = compute_replica_set(&make_game_id(), 1, 1, &[0xAA; 32], &set, &assigned, 5)
+            .expect("应成功");
+        let r2 = compute_replica_set(&make_game_id(), 1, 1, &[0xBB; 32], &set, &assigned, 5)
+            .expect("应成功");
         // 不同 epoch_randomness 应产生不同 replica_set（极大概率）
-        assert_ne!(r1, r2, "SEC-M11: 不同 epoch_randomness 应产生不同 replica_set");
+        assert_ne!(
+            r1, r2,
+            "SEC-M11: 不同 epoch_randomness 应产生不同 replica_set"
+        );
     }
 
     #[test]
@@ -581,26 +519,10 @@ mod tests {
         // R5-L3: 使用 checkpoint_seq，不同 checkpoint_seq 应产生不同 replica_set
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10);
-        let r1 = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0u8; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
-        let r2 = compute_replica_set(
-            &make_game_id(),
-            1,
-            2,
-            &[0u8; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
+        let r1 = compute_replica_set(&make_game_id(), 1, 1, &[0u8; 32], &set, &assigned, 5)
+            .expect("应成功");
+        let r2 = compute_replica_set(&make_game_id(), 1, 2, &[0u8; 32], &set, &assigned, 5)
+            .expect("应成功");
         assert_ne!(r1, r2, "R5-L3: 不同 checkpoint_seq 应产生不同 replica_set");
     }
 
@@ -610,14 +532,8 @@ mod tests {
         let assigned = make_test_tagged_pubkey(0x10);
         let gid1 = ObjectID::new(make_addr(0x01), 1);
         let gid2 = ObjectID::new(make_addr(0x02), 1);
-        let r1 = compute_replica_set(
-            &gid1, 1, 1, &[0u8; 32], &set, &assigned, 5,
-        )
-        .expect("应成功");
-        let r2 = compute_replica_set(
-            &gid2, 1, 1, &[0u8; 32], &set, &assigned, 5,
-        )
-        .expect("应成功");
+        let r1 = compute_replica_set(&gid1, 1, 1, &[0u8; 32], &set, &assigned, 5).expect("应成功");
+        let r2 = compute_replica_set(&gid2, 1, 1, &[0u8; 32], &set, &assigned, 5).expect("应成功");
         assert_ne!(r1, r2, "不同 game_id 应产生不同 replica_set");
     }
 
@@ -630,16 +546,19 @@ mod tests {
             make_test_tagged_pubkey(0x12),
             make_test_tagged_pubkey(0x13),
         ];
-        assert!(is_witness_in_replica_set(&make_test_tagged_pubkey(0x12), &set));
+        assert!(is_witness_in_replica_set(
+            &make_test_tagged_pubkey(0x12),
+            &set
+        ));
     }
 
     #[test]
     fn test_is_witness_in_replica_set_absent() {
-        let set = vec![
-            make_test_tagged_pubkey(0x11),
-            make_test_tagged_pubkey(0x12),
-        ];
-        assert!(!is_witness_in_replica_set(&make_test_tagged_pubkey(0xFF), &set));
+        let set = vec![make_test_tagged_pubkey(0x11), make_test_tagged_pubkey(0x12)];
+        assert!(!is_witness_in_replica_set(
+            &make_test_tagged_pubkey(0xFF),
+            &set
+        ));
     }
 
     // ===== gossipsub_mesh_size 测试 =====
@@ -684,14 +603,7 @@ mod tests {
         };
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10);
-        let result = evidence.verify(
-            crate::DEFAULT_CHAIN_ID,
-            &set,
-            &assigned,
-            &[0u8; 32],
-            5,
-            3,
-        );
+        let result = evidence.verify(crate::DEFAULT_CHAIN_ID, &set, &assigned, &[0u8; 32], 5, 3);
         assert!(
             matches!(result, Err(PokerL1Error::ForceCheckpointEvidenceFailed(_))),
             "receipts < threshold 应失败"
@@ -713,14 +625,7 @@ mod tests {
         };
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10);
-        let result = evidence.verify(
-            crate::DEFAULT_CHAIN_ID,
-            &set,
-            &assigned,
-            &[0u8; 32],
-            5,
-            3,
-        );
+        let result = evidence.verify(crate::DEFAULT_CHAIN_ID, &set, &assigned, &[0u8; 32], 5, 3);
         assert!(
             matches!(result, Err(PokerL1Error::ForceCheckpointEvidenceFailed(_))),
             "content_hash 不一致应失败"
@@ -744,14 +649,7 @@ mod tests {
         };
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10);
-        let result = evidence.verify(
-            crate::DEFAULT_CHAIN_ID,
-            &set,
-            &assigned,
-            &[0u8; 32],
-            5,
-            3,
-        );
+        let result = evidence.verify(crate::DEFAULT_CHAIN_ID, &set, &assigned, &[0u8; 32], 5, 3);
         assert!(
             matches!(result, Err(PokerL1Error::ForceCheckpointEvidenceFailed(_))),
             "witness 不在 replica_set 应失败"
@@ -764,16 +662,9 @@ mod tests {
         let set = make_validator_set(7);
         let assigned = make_test_tagged_pubkey(0x10);
         // 先计算 replica_set
-        let replica_set = compute_replica_set(
-            &make_game_id(),
-            1,
-            1,
-            &[0u8; 32],
-            &set,
-            &assigned,
-            5,
-        )
-        .expect("应成功");
+        let replica_set =
+            compute_replica_set(&make_game_id(), 1, 1, &[0u8; 32], &set, &assigned, 5)
+                .expect("应成功");
 
         // 用 replica_set 中的前 3 个 validator 作为 witness
         let receipts: Vec<MultiReplicaReceipt> = replica_set
@@ -789,14 +680,7 @@ mod tests {
             content_hash: [0xAB; 32],
             receipts,
         };
-        let result = evidence.verify(
-            crate::DEFAULT_CHAIN_ID,
-            &set,
-            &assigned,
-            &[0u8; 32],
-            5,
-            3,
-        );
+        let result = evidence.verify(crate::DEFAULT_CHAIN_ID, &set, &assigned, &[0u8; 32], 5, 3);
         // 占位签名应失败
         assert!(
             matches!(result, Err(PokerL1Error::InvalidSignature)),
@@ -823,9 +707,7 @@ mod tests {
             epoch: 1,
             checkpoint_seq: 1,
             content_hash: [0xAB; 32],
-            receipts: vec![
-                make_receipt(0x11, [0xAB; 32], 100, (10, 15)),
-            ],
+            receipts: vec![make_receipt(0x11, [0xAB; 32], 100, (10, 15))],
         };
         let actual_vertex_list = vec![VertexInfo {
             round: 12,

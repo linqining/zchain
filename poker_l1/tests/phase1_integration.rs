@@ -8,22 +8,22 @@
 //! - SubTask 38.5：账户抽象端到端（创建账户 → 签名 tx → 验证 → 执行 → 余额变更）
 
 use poker_l1::account::{
-    apply_gameturn_tx, apply_public_tx, derive_address, validate_gameturn_tx,
-    validate_normal_gameturn_not_fallback, validate_public_tx, Account, AccountStore,
+    Account, AccountStore, apply_gameturn_tx, apply_public_tx, derive_address,
+    validate_gameturn_tx, validate_normal_gameturn_not_fallback, validate_public_tx,
 };
-use poker_l1::block::{compute_tx_merkle_root, Block, BlockHeader};
+use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
 use poker_l1::consensus::{DagCommitCertificate, DagVertex};
 use poker_l1::error::PokerL1Error;
 use poker_l1::object_model::{Object, ObjectID, ObjectStore, Ownership};
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme};
-use poker_l1::signature::unified::verify_signature;
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
+use poker_l1::signature::unified::verify_signature;
 use poker_l1::storage::{BlockStore, DagVertexStore, ObjectDb};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 use poker_l1::{ChainId, DEFAULT_CHAIN_ID};
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
 // ===== 辅助构造函数 =====
 
@@ -225,7 +225,7 @@ fn subtask_38_1_compute_tx_merkle_root_consistent_with_store() {
 fn subtask_38_2_secp256k1_sign_verify_roundtrip() {
     // 端到端：生成 secp256k1 密钥 → 签名 → unified verify
     use rand::rngs::OsRng;
-    use secp256k1::{generate_keypair, Message};
+    use secp256k1::{Message, generate_keypair};
 
     let (secret, public) = generate_keypair(&mut OsRng);
     let compressed = public.serialize();
@@ -256,8 +256,8 @@ fn subtask_38_2_curve_mismatch_rejected() {
     // pubkey 是 secp256k1，签名声称 ed25519 → CurveMismatch
     let tagged_sec = make_tagged_pubkey_secp(0x02);
     let sig = vec![0u8; 65]; // secp256k1 长度
-                              // 注意：unified verify 会先 parse tag，pubkey tag=0x01 (secp256k1)
-                              // 这里测试的是 pubkey 与 sig scheme 必须匹配
+    // 注意：unified verify 会先 parse tag，pubkey tag=0x01 (secp256k1)
+    // 这里测试的是 pubkey 与 sig scheme 必须匹配
     let msg = blake2b_256(b"test");
     // secp256k1 pubkey + 65B sig → 走 secp256k1 路径（签名无效返回 InvalidSignature，非 CurveMismatch）
     let result = verify_signature(&tagged_sec, &sig, &msg);
@@ -354,7 +354,9 @@ fn subtask_38_3_unauthorized_write_rejected() {
     let obj = Object::new(id, Ownership::AddressOwned { owner }, "Game", vec![], None);
     store.create(obj).unwrap();
 
-    let err = store.update(&id, &attacker, b"hacked".to_vec()).unwrap_err();
+    let err = store
+        .update(&id, &attacker, b"hacked".to_vec())
+        .unwrap_err();
     assert!(matches!(err, PokerL1Error::NotOwner(_)));
 }
 
@@ -406,7 +408,13 @@ fn subtask_38_4_object_db_persist_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let id = ObjectID::new([1u8; 20], 1);
     let owner = [1u8; 20];
-    let obj = Object::new(id, Ownership::AddressOwned { owner }, "Game", b"data".to_vec(), None);
+    let obj = Object::new(
+        id,
+        Ownership::AddressOwned { owner },
+        "Game",
+        b"data".to_vec(),
+        None,
+    );
 
     let root_before = {
         let mut db = ObjectDb::open(dir.path()).unwrap();
@@ -453,7 +461,14 @@ fn subtask_38_5_account_nonce_monotonic_and_replay_rejected() {
     let network = DEFAULT_CHAIN_ID;
 
     // 第一次 tx（nonce=0）合法
-    let tx1 = make_tx(account.tagged_pubkey.clone(), network, 0, None, false, TxLane::Public);
+    let tx1 = make_tx(
+        account.tagged_pubkey.clone(),
+        network,
+        0,
+        None,
+        false,
+        TxLane::Public,
+    );
     validate_public_tx(&account, &tx1, network).unwrap();
     apply_public_tx(&mut account, &tx1, 100).unwrap();
     assert_eq!(account.nonce, 1);
@@ -461,15 +476,35 @@ fn subtask_38_5_account_nonce_monotonic_and_replay_rejected() {
 
     // 重放 tx1（nonce=0 < account.nonce=1）→ NonceTooLow
     let err = validate_public_tx(&account, &tx1, network).unwrap_err();
-    assert!(matches!(err, PokerL1Error::NonceTooLow { tx: 0, account: 1 }));
+    assert!(matches!(
+        err,
+        PokerL1Error::NonceTooLow { tx: 0, account: 1 }
+    ));
 
     // 跳号 tx（nonce=5 > account.nonce=1）→ NonceTooHigh
-    let tx3 = make_tx(account.tagged_pubkey.clone(), network, 5, None, false, TxLane::Public);
+    let tx3 = make_tx(
+        account.tagged_pubkey.clone(),
+        network,
+        5,
+        None,
+        false,
+        TxLane::Public,
+    );
     let err = validate_public_tx(&account, &tx3, network).unwrap_err();
-    assert!(matches!(err, PokerL1Error::NonceTooHigh { tx: 5, account: 1 }));
+    assert!(matches!(
+        err,
+        PokerL1Error::NonceTooHigh { tx: 5, account: 1 }
+    ));
 
     // 正确的下一个 tx（nonce=1）
-    let tx2 = make_tx(account.tagged_pubkey.clone(), network, 1, None, false, TxLane::Public);
+    let tx2 = make_tx(
+        account.tagged_pubkey.clone(),
+        network,
+        1,
+        None,
+        false,
+        TxLane::Public,
+    );
     validate_public_tx(&account, &tx2, network).unwrap();
     apply_public_tx(&mut account, &tx2, 200).unwrap();
     assert_eq!(account.nonce, 2);
@@ -483,7 +518,14 @@ fn subtask_38_5_wrong_chain_id_rejected() {
     let network = DEFAULT_CHAIN_ID;
 
     // tx 声称不同 chain_id
-    let tx = make_tx(account.tagged_pubkey.clone(), network + 999, 0, None, false, TxLane::Public);
+    let tx = make_tx(
+        account.tagged_pubkey.clone(),
+        network + 999,
+        0,
+        None,
+        false,
+        TxLane::Public,
+    );
     let err = validate_public_tx(&account, &tx, network).unwrap_err();
     assert!(matches!(err, PokerL1Error::WrongChainId { .. }));
 }
@@ -494,11 +536,24 @@ fn subtask_38_5_insufficient_balance_rejected() {
     let mut account = Account::new(tp, 100);
     let network = DEFAULT_CHAIN_ID;
 
-    let tx = make_tx(account.tagged_pubkey.clone(), network, 0, None, false, TxLane::Public);
+    let tx = make_tx(
+        account.tagged_pubkey.clone(),
+        network,
+        0,
+        None,
+        false,
+        TxLane::Public,
+    );
     validate_public_tx(&account, &tx, network).unwrap();
     // gas 超过余额
     let err = apply_public_tx(&mut account, &tx, 500).unwrap_err();
-    assert!(matches!(err, PokerL1Error::InsufficientBalance { needed: 500, has: 100 }));
+    assert!(matches!(
+        err,
+        PokerL1Error::InsufficientBalance {
+            needed: 500,
+            has: 100
+        }
+    ));
     // 失败时 nonce 不推进
     assert_eq!(account.nonce, 0);
 }
@@ -530,7 +585,14 @@ fn subtask_38_5_gameturn_tx_does_not_block_account_nonce() {
     assert_eq!(account.balance, 1_000_000, "GameTurn tx 免 gas");
 
     // 之后提交 Public tx，account nonce 从 0 开始
-    let public_tx = make_tx(account.tagged_pubkey.clone(), network, 0, None, false, TxLane::Public);
+    let public_tx = make_tx(
+        account.tagged_pubkey.clone(),
+        network,
+        0,
+        None,
+        false,
+        TxLane::Public,
+    );
     validate_public_tx(&account, &public_tx, network).unwrap();
     apply_public_tx(&mut account, &public_tx, 50).unwrap();
     assert_eq!(account.nonce, 1);

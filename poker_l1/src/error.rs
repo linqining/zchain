@@ -18,7 +18,11 @@ pub enum PokerL1Error {
     UnknownScheme { tag: u8 },
     /// tagged pubkey 长度不匹配该 tag 的预期。
     #[error("tagged pubkey length {actual} != expected {expected} for tag 0x{tag:02x}")]
-    InvalidPubkeyLength { tag: u8, actual: usize, expected: usize },
+    InvalidPubkeyLength {
+        tag: u8,
+        actual: usize,
+        expected: usize,
+    },
     /// secp256k1 high-s 签名（BIP-62 / NEW-L1）— 拒绝，不规范化转换。
     #[error("secp256k1 signature s > n/2 (high-s rejected per BIP-62)")]
     InvalidSignatureLowS,
@@ -102,7 +106,9 @@ pub enum PokerL1Error {
 
     // ===== Phase 2: 路由 / 轮转 / 游戏分配（Task 7 / 8 / 12） =====
     /// tx 通道与路由提示不匹配（SubTask 7.2：GameTurn+CheckpointAnchor 应路由到 assigned_validator）。
-    #[error("wrong lane: lane={lane:?}, route={route:?}, expected assigned_validator for GameTurn/CheckpointAnchor")]
+    #[error(
+        "wrong lane: lane={lane:?}, route={route:?}, expected assigned_validator for GameTurn/CheckpointAnchor"
+    )]
     WrongLane {
         /// tx 通道。
         lane: crate::transaction::TxLane,
@@ -110,7 +116,9 @@ pub enum PokerL1Error {
         route: crate::transaction::RouteHint,
     },
     /// GameTurn / CheckpointAnchor tx 提交给了非 assigned_validator 的 validator（SubTask 7.5）。
-    #[error("not assigned validator for game (game_id={game_id:?}, assigned={assigned:?}, receiver={receiver:?})")]
+    #[error(
+        "not assigned validator for game (game_id={game_id:?}, assigned={assigned:?}, receiver={receiver:?})"
+    )]
     NotAssignedValidator {
         /// Game 对象 ID。
         game_id: crate::object_model::ObjectID,
@@ -120,7 +128,9 @@ pub enum PokerL1Error {
         receiver: crate::signature::TaggedPubkey,
     },
     /// 非当前轮次玩家提交 GameTurn tx（SubTask 7.4：轮转约束）。
-    #[error("not your turn (game_id={game_id:?}, phase={phase:?}, current_turn={current_turn:?}, actor={actor:?})")]
+    #[error(
+        "not your turn (game_id={game_id:?}, phase={phase:?}, current_turn={current_turn:?}, actor={actor:?})"
+    )]
     NotYourTurn {
         /// Game 对象 ID。
         game_id: crate::object_model::ObjectID,
@@ -132,7 +142,9 @@ pub enum PokerL1Error {
         actor: crate::Address,
     },
     /// 多玩家提交阶段，提交者不在 pending_submitters 中（spec：NotEligibleSubmitter）。
-    #[error("not eligible submitter (game_id={game_id:?}, phase={phase:?}, pending={pending:?}, actor={actor:?})")]
+    #[error(
+        "not eligible submitter (game_id={game_id:?}, phase={phase:?}, pending={pending:?}, actor={actor:?})"
+    )]
     NotEligibleSubmitter {
         /// Game 对象 ID。
         game_id: crate::object_model::ObjectID,
@@ -179,7 +191,9 @@ pub enum PokerL1Error {
     #[error("block timestamp moved backwards: prev={prev}, got={got}")]
     BlockTimestampMovedBackwards { prev: u64, got: u64 },
     /// block.timestamp_ms > prev.timestamp_ms + max_interval_ms（S10：最大间隔约束）。
-    #[error("block timestamp interval exceeded: prev={prev}, got={got}, max_interval={max_interval}")]
+    #[error(
+        "block timestamp interval exceeded: prev={prev}, got={got}, max_interval={max_interval}"
+    )]
     BlockTimestampIntervalExceeded {
         prev: u64,
         got: u64,
@@ -256,7 +270,9 @@ pub enum PokerL1Error {
         game_id: crate::object_model::ObjectID,
     },
     /// vertex 内 tx 排序违反 S9 规则（SubTask 10.6：GameTurn 应优先于 ForceSync）。
-    #[error("vertex tx ordering violates S9: ForceSync tx at idx {force_idx} before GameTurn tx at idx {turn_idx}")]
+    #[error(
+        "vertex tx ordering violates S9: ForceSync tx at idx {force_idx} before GameTurn tx at idx {turn_idx}"
+    )]
     InvalidVertexTxOrdering {
         /// ForceSync tx 的索引。
         force_idx: usize,
@@ -322,13 +338,17 @@ pub enum PokerL1Error {
         contract_id: crate::object_model::ObjectID,
     },
     /// 升级处于 timelock 期，新版本不可调用（SEC-L7）。
-    #[error("upgrade in timelock: contract_id={contract_id:?}, remaining_blocks={remaining_blocks}")]
+    #[error(
+        "upgrade in timelock: contract_id={contract_id:?}, remaining_blocks={remaining_blocks}"
+    )]
     UpgradeInTimelock {
         contract_id: crate::object_model::ObjectID,
         remaining_blocks: u64,
     },
     /// 升级 timelock 未到期时尝试强制生效。
-    #[error("upgrade timelock not expired: contract_id={contract_id:?}, remaining_blocks={remaining_blocks}")]
+    #[error(
+        "upgrade timelock not expired: contract_id={contract_id:?}, remaining_blocks={remaining_blocks}"
+    )]
     UpgradeTimelockNotExpired {
         contract_id: crate::object_model::ObjectID,
         remaining_blocks: u64,
@@ -407,11 +427,10 @@ pub enum PokerL1Error {
     #[error("game already checked in: game_id={0:?}")]
     GameAlreadyCheckedIn(crate::object_model::ObjectID),
     /// partial_checkin 的 folded_step_count 未严格大于上一次记录（SEC-H1）。
-    #[error("no progress partial_checkin: new_folded_step_count={new_count}, last_recorded={last_recorded}")]
-    NoProgressPartialCheckin {
-        new_count: u32,
-        last_recorded: u32,
-    },
+    #[error(
+        "no progress partial_checkin: new_folded_step_count={new_count}, last_recorded={last_recorded}"
+    )]
+    NoProgressPartialCheckin { new_count: u32, last_recorded: u32 },
     /// partial_checkin 提交次数超过 max_partial_checkin_count（SEC-H1，默认 3）。
     #[error("partial_checkin count {actual} exceeds max_partial_checkin_count {limit}")]
     PartialCheckinLimitExceeded { actual: u32, limit: u32 },
@@ -638,7 +657,9 @@ pub enum PokerL1Error {
     #[error("uninitialized memory read at slot {slot}")]
     UninitializedRead { slot: u32 },
     /// M2-003：last_partial_fold.proof_partial_hash 链上不可变（覆盖已有值）。
-    #[error("partial fold hash immutable: proof_partial_hash already set and cannot be overwritten")]
+    #[error(
+        "partial fold hash immutable: proof_partial_hash already set and cannot be overwritten"
+    )]
     PartialFoldHashImmutable,
     /// M2-004：签名形式与 scheme_id 不匹配。
     #[error("signature form mismatch: scheme_id={scheme_id} expects different signature form")]

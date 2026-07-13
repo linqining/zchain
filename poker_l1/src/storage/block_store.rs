@@ -17,7 +17,7 @@ use rocksdb::{ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, Writ
 
 use crate::block::Block;
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::{ChainId, BlockHeight, Hash};
+use crate::{BlockHeight, ChainId, Hash};
 
 /// `blocks` 列族名。
 const BLOCKS_CF: &str = "blocks";
@@ -209,19 +209,16 @@ impl BlockStore {
     ///
     /// 实现：以 `IteratorMode::From(start_le, Forward)` 正向遍历 `height_index`，
     /// 直到 key > end_le 停止。
-    pub fn get_range(
-        &self,
-        start: BlockHeight,
-        end: BlockHeight,
-    ) -> PokerL1Result<Vec<Block>> {
+    pub fn get_range(&self, start: BlockHeight, end: BlockHeight) -> PokerL1Result<Vec<Block>> {
         if start > end {
             return Ok(Vec::new());
         }
         let start_key = start.to_le_bytes();
         let end_key = end.to_le_bytes();
-        let iter = self
-            .db
-            .iterator_cf(self.height_cf(), IteratorMode::From(&start_key, Direction::Forward));
+        let iter = self.db.iterator_cf(
+            self.height_cf(),
+            IteratorMode::From(&start_key, Direction::Forward),
+        );
 
         let mut blocks = Vec::new();
         for item in iter {
@@ -249,7 +246,7 @@ mod tests {
     use super::*;
     use crate::block::BlockHeader;
     use crate::consensus::DagCommitCertificate;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, TxLane};
 
     fn dummy_tagged_pubkey() -> crate::signature::TaggedPubkey {
@@ -304,7 +301,11 @@ mod tests {
     }
 
     fn dummy_block(height: BlockHeight, prev_hash: Hash) -> Block {
-        Block::new(dummy_header(height, prev_hash), vec![dummy_tx(height)], vec![])
+        Block::new(
+            dummy_header(height, prev_hash),
+            vec![dummy_tx(height)],
+            vec![],
+        )
     }
 
     #[test]
@@ -399,11 +400,17 @@ mod tests {
         assert_eq!(store.len().unwrap(), 0);
         assert!(store.is_empty().unwrap());
 
-        store.put(&dummy_block(0, [0u8; 32]), crate::DEFAULT_CHAIN_ID).unwrap();
+        store
+            .put(&dummy_block(0, [0u8; 32]), crate::DEFAULT_CHAIN_ID)
+            .unwrap();
         assert_eq!(store.len().unwrap(), 1);
 
-        store.put(&dummy_block(1, [0u8; 32]), crate::DEFAULT_CHAIN_ID).unwrap();
-        store.put(&dummy_block(2, [0u8; 32]), crate::DEFAULT_CHAIN_ID).unwrap();
+        store
+            .put(&dummy_block(1, [0u8; 32]), crate::DEFAULT_CHAIN_ID)
+            .unwrap();
+        store
+            .put(&dummy_block(2, [0u8; 32]), crate::DEFAULT_CHAIN_ID)
+            .unwrap();
         assert_eq!(store.len().unwrap(), 3);
     }
 

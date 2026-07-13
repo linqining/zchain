@@ -21,15 +21,15 @@
 //!   end_state_proof 待下一 checkpoint 提交时隐式补全。
 //!   **R5-H6**：verify_segment_chain() 逐段校验段间状态连续性。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
-use crate::error::PokerL1Error;
-use crate::object_model::ObjectID;
-use crate::signature::{verify_signature, TaggedPubkey};
 use crate::ChainId;
 use crate::Hash;
+use crate::error::PokerL1Error;
+use crate::object_model::ObjectID;
+use crate::signature::{TaggedPubkey, verify_signature};
 
 use super::checkpoint_anchor::AckSignature;
 use super::types::GameContract;
@@ -281,12 +281,9 @@ pub fn verify_segment_chain(
 
     // 结构性检查先行：最后一段 end_state_proof 必须补全（否则后续签名验证无意义）
     let last_segment = segments.last().expect("非空已校验");
-    let end_proof = last_segment
-        .end_state_proof
-        .as_ref()
-        .ok_or_else(|| PokerL1Error::ContinuityProofInvalid(
-            "最后一段 end_state_proof 未补全".to_string(),
-        ))?;
+    let end_proof = last_segment.end_state_proof.as_ref().ok_or_else(|| {
+        PokerL1Error::ContinuityProofInvalid("最后一段 end_state_proof 未补全".to_string())
+    })?;
     if end_proof.state_hash != *final_state_hash {
         return Err(PokerL1Error::ContinuityProofInvalid(
             "最后一段 end_state != final_state_hash".to_string(),
@@ -314,9 +311,7 @@ pub fn verify_segment_chain(
         // 中间段（非最后一段）必须有 end_state_proof 以便下一段做连续性校验
         if i + 1 < segments.len() {
             let mid_end = segment.end_state_proof.as_ref().ok_or_else(|| {
-                PokerL1Error::ContinuityProofInvalid(format!(
-                    "段 {i}: 中间段缺少 end_state_proof"
-                ))
+                PokerL1Error::ContinuityProofInvalid(format!("段 {i}: 中间段缺少 end_state_proof"))
             })?;
             prev_end_state = Some(&mid_end.state_hash);
         }
@@ -331,7 +326,7 @@ pub fn verify_segment_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
     use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_test_tagged_pubkey(byte: u8) -> TaggedPubkey {
@@ -429,7 +424,13 @@ mod tests {
         ];
         let result = proof.verify(crate::DEFAULT_CHAIN_ID, &make_game_id(), &active);
         assert!(
-            matches!(result, Err(PokerL1Error::AckSetMismatch { expected: 2, got: 0 })),
+            matches!(
+                result,
+                Err(PokerL1Error::AckSetMismatch {
+                    expected: 2,
+                    got: 0
+                })
+            ),
             "签名不足应返回 AckSetMismatch"
         );
     }
@@ -481,7 +482,13 @@ mod tests {
         let tx = make_skip_tx(1, 3, 0xAB);
         let result = apply_checkpoint_skip(&mut game, &tx, 500, DEFAULT_MAX_SKIP_SEGMENTS);
         assert!(
-            matches!(result, Err(PokerL1Error::SkipCountExceeded { actual: 3, limit: 3 })),
+            matches!(
+                result,
+                Err(PokerL1Error::SkipCountExceeded {
+                    actual: 3,
+                    limit: 3
+                })
+            ),
             "超出上限应返回 SkipCountExceeded"
         );
     }
@@ -492,7 +499,8 @@ mod tests {
         // skip 3 次（达到上限）
         for i in 0..DEFAULT_MAX_SKIP_SEGMENTS {
             let tx = make_skip_tx(i as u64 + 1, i as u64 + 2, 0xAB);
-            let result = apply_checkpoint_skip(&mut game, &tx, 500 + i as u64, DEFAULT_MAX_SKIP_SEGMENTS);
+            let result =
+                apply_checkpoint_skip(&mut game, &tx, 500 + i as u64, DEFAULT_MAX_SKIP_SEGMENTS);
             assert!(result.is_ok(), "第 {} 次 skip 应成功", i + 1);
         }
         assert_eq!(game.skip_count, DEFAULT_MAX_SKIP_SEGMENTS);

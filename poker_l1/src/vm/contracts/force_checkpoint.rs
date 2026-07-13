@@ -48,18 +48,20 @@
 //!   (R5-H4：tx_merkle_tree 采用 sparse Merkle tree，depth=256；
 //!   SEC-H9：verify_failure_proof gas = 80000)
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
-use crate::error::PokerL1Error;
-use crate::object_model::ObjectID;
-use crate::signature::{verify_signature, TaggedPubkey};
 use crate::Address;
 use crate::ChainId;
 use crate::Hash;
+use crate::error::PokerL1Error;
+use crate::object_model::ObjectID;
+use crate::signature::{TaggedPubkey, verify_signature};
 
-use super::checkpoint_anchor::{verify_checkpoint_anchor, AckSignature, CheckpointAnchorTx, OptOutAckProof};
+use super::checkpoint_anchor::{
+    AckSignature, CheckpointAnchorTx, OptOutAckProof, verify_checkpoint_anchor,
+};
 use super::types::GameContract;
 
 // ===== 常量 =====
@@ -112,11 +114,7 @@ impl MultiReplicaReceipt {
     ///
     /// `hash(chain_id || game_id || content_hash || block_height || round_range)`
     #[must_use]
-    pub fn signing_hash(
-        &self,
-        chain_id: ChainId,
-        game_id: &ObjectID,
-    ) -> Hash {
+    pub fn signing_hash(&self, chain_id: ChainId, game_id: &ObjectID) -> Hash {
         let mut hasher = Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
         hasher.update(&chain_id.to_be_bytes());
         hasher.update(&game_id.to_bytes());
@@ -132,11 +130,7 @@ impl MultiReplicaReceipt {
     }
 
     /// 验证单个副本 validator 见证签名有效性。
-    pub fn verify(
-        &self,
-        chain_id: ChainId,
-        game_id: &ObjectID,
-    ) -> Result<(), PokerL1Error> {
+    pub fn verify(&self, chain_id: ChainId, game_id: &ObjectID) -> Result<(), PokerL1Error> {
         let msg_hash = self.signing_hash(chain_id, game_id);
         verify_signature(&self.witness, &self.signature, &msg_hash)
     }
@@ -338,7 +332,11 @@ impl RoundRangeNonInclusionProof {
                 self.vertex_list.len()
             )));
         }
-        for (v, p) in self.vertex_list.iter().zip(self.non_inclusion_proofs.iter()) {
+        for (v, p) in self
+            .vertex_list
+            .iter()
+            .zip(self.non_inclusion_proofs.iter())
+        {
             // 非包含证明的 expected_root 须 == vertex 的 tx_merkle_root
             if p.expected_root != v.tx_merkle_root {
                 return Err(PokerL1Error::InvalidAssignedValidatorFailureProof(format!(
@@ -438,23 +436,29 @@ impl AssignedValidatorFailureProof {
         }
 
         // (5) content_hash 一致性
-        let original_hash = self.original_checkpoint_anchor.ack_signing_hash(
-            chain_id,
-            self.non_inclusion_proof.epoch,
-        );
+        let original_hash = self
+            .original_checkpoint_anchor
+            .ack_signing_hash(chain_id, self.non_inclusion_proof.epoch);
         for receipt in &self.multi_replica_receipts {
             if receipt.content_hash != original_hash {
                 return Err(PokerL1Error::ForceCheckpointEvidenceFailed(
-                    "multi_replica_receipt.content_hash != hash(original_checkpoint_anchor)".to_string(),
+                    "multi_replica_receipt.content_hash != hash(original_checkpoint_anchor)"
+                        .to_string(),
                 ));
             }
         }
 
         // (6) round_range 一致性
         for receipt in &self.multi_replica_receipts {
-            if receipt.round_range != (self.non_inclusion_proof.round_start, self.non_inclusion_proof.round_end) {
+            if receipt.round_range
+                != (
+                    self.non_inclusion_proof.round_start,
+                    self.non_inclusion_proof.round_end,
+                )
+            {
                 return Err(PokerL1Error::ForceCheckpointEvidenceFailed(
-                    "multi_replica_receipt.round_range != non_inclusion_proof.round_range".to_string(),
+                    "multi_replica_receipt.round_range != non_inclusion_proof.round_range"
+                        .to_string(),
                 ));
             }
         }
@@ -527,7 +531,9 @@ impl ForceCheckpointTx {
         vertex_prune_after_blocks: u64,
     ) -> Result<(), PokerL1Error> {
         // (1) game_id 一致性
-        let original = &self.assigned_validator_failure_proof.original_checkpoint_anchor;
+        let original = &self
+            .assigned_validator_failure_proof
+            .original_checkpoint_anchor;
         if self.game_id != original.game_id {
             return Err(PokerL1Error::ForceCheckpointEvidenceFailed(
                 "force_checkpoint.game_id != original_checkpoint_anchor.game_id".to_string(),
@@ -611,7 +617,7 @@ pub fn apply_force_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
     use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_test_tagged_pubkey(byte: u8) -> TaggedPubkey {
@@ -673,7 +679,9 @@ mod tests {
         leaf_hasher.update(&[0x00]);
         leaf_hasher.update(b"");
         let mut current = [0u8; 32];
-        leaf_hasher.finalize_variable(&mut current).expect("finalize");
+        leaf_hasher
+            .finalize_variable(&mut current)
+            .expect("finalize");
 
         let tx_hash = [tx_hash_byte; 32];
         let merkle_path: Vec<Hash> = (0..TX_MERKLE_TREE_DEPTH)
@@ -690,7 +698,9 @@ mod tests {
                     internal_hasher.update(&current);
                 }
                 let mut next = [0u8; 32];
-                internal_hasher.finalize_variable(&mut next).expect("finalize");
+                internal_hasher
+                    .finalize_variable(&mut next)
+                    .expect("finalize");
                 next
             })
             .collect();
@@ -753,8 +763,7 @@ mod tests {
     ) -> ForceCheckpointTx {
         let anchor = make_checkpoint_anchor_tx(state_byte);
         let ack_signatures = anchor.ack_signatures.clone();
-        let proof =
-            make_assigned_validator_failure_proof(anchor, witnesses, assigned_validator);
+        let proof = make_assigned_validator_failure_proof(anchor, witnesses, assigned_validator);
         ForceCheckpointTx {
             game_id: make_game_id(),
             current_turn: make_addr(0x05),
@@ -828,7 +837,9 @@ mod tests {
         let mut leaf_hasher = Blake2bVar::new(32).expect("Blake2bVar(32)");
         leaf_hasher.update(&[0x00]);
         leaf_hasher.update(b"");
-        leaf_hasher.finalize_variable(&mut current).expect("finalize");
+        leaf_hasher
+            .finalize_variable(&mut current)
+            .expect("finalize");
 
         let mut empty_subtree = [0u8; 32];
         let mut h = Blake2bVar::new(32).expect("Blake2bVar(32)");
@@ -913,7 +924,10 @@ mod tests {
         // bitmap 设置 1 位但 vertex_list 仍为空
         proof.round_attendance_bitmap[0] = 0b00000001;
         let result = proof.verify(10, 1000, DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS);
-        assert!(result.is_err(), "bitmap set bits != vertex_list.len() 应失败");
+        assert!(
+            result.is_err(),
+            "bitmap set bits != vertex_list.len() 应失败"
+        );
     }
 
     // ===== AssignedValidatorFailureProof 测试 =====
@@ -922,27 +936,28 @@ mod tests {
     fn test_failure_proof_insufficient_witnesses() {
         let anchor = make_checkpoint_anchor_tx(0xAB);
         // 仅 2 个 witness（< 阈值 3）
-        let witnesses = vec![
-            make_test_tagged_pubkey(10),
-            make_test_tagged_pubkey(11),
-        ];
-        let proof = make_assigned_validator_failure_proof(
-            anchor,
-            witnesses,
-            make_test_tagged_pubkey(0xFE),
-        );
+        let witnesses = vec![make_test_tagged_pubkey(10), make_test_tagged_pubkey(11)];
+        let proof =
+            make_assigned_validator_failure_proof(anchor, witnesses, make_test_tagged_pubkey(0xFE));
         let result = proof.verify(
             crate::DEFAULT_CHAIN_ID,
             &make_game_id(),
             &[make_test_tagged_pubkey(1)],
-            &[make_test_tagged_pubkey(10), make_test_tagged_pubkey(11), make_test_tagged_pubkey(12)],
+            &[
+                make_test_tagged_pubkey(10),
+                make_test_tagged_pubkey(11),
+                make_test_tagged_pubkey(12),
+            ],
             DEFAULT_REPLICA_WITNESS_THRESHOLD,
             10,
             1000,
             DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
         );
         assert!(
-            matches!(result, Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })
+            ),
             "witness 数量 < 阈值应返回 ForceCheckpointEvidenceFailed"
         );
     }
@@ -955,24 +970,28 @@ mod tests {
             make_test_tagged_pubkey(11),
             make_test_tagged_pubkey(99), // 不在 validator_set 中
         ];
-        let proof = make_assigned_validator_failure_proof(
-            anchor,
-            witnesses,
-            make_test_tagged_pubkey(0xFE),
-        );
+        let proof =
+            make_assigned_validator_failure_proof(anchor, witnesses, make_test_tagged_pubkey(0xFE));
         // validator_set 仅含 10, 11, 12（不含 99）
         let result = proof.verify(
             crate::DEFAULT_CHAIN_ID,
             &make_game_id(),
             &[make_test_tagged_pubkey(1)],
-            &[make_test_tagged_pubkey(10), make_test_tagged_pubkey(11), make_test_tagged_pubkey(12)],
+            &[
+                make_test_tagged_pubkey(10),
+                make_test_tagged_pubkey(11),
+                make_test_tagged_pubkey(12),
+            ],
             DEFAULT_REPLICA_WITNESS_THRESHOLD,
             10,
             1000,
             DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
         );
         assert!(
-            matches!(result, Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })
+            ),
             "witness 不在 validator_set 应失败"
         );
     }
@@ -986,16 +1005,17 @@ mod tests {
             make_test_tagged_pubkey(10), // 重复
             make_test_tagged_pubkey(11),
         ];
-        let proof = make_assigned_validator_failure_proof(
-            anchor,
-            witnesses,
-            make_test_tagged_pubkey(0xFE),
-        );
+        let proof =
+            make_assigned_validator_failure_proof(anchor, witnesses, make_test_tagged_pubkey(0xFE));
         let result = proof.verify(
             crate::DEFAULT_CHAIN_ID,
             &make_game_id(),
             &[make_test_tagged_pubkey(1)],
-            &[make_test_tagged_pubkey(10), make_test_tagged_pubkey(11), make_test_tagged_pubkey(12)],
+            &[
+                make_test_tagged_pubkey(10),
+                make_test_tagged_pubkey(11),
+                make_test_tagged_pubkey(12),
+            ],
             DEFAULT_REPLICA_WITNESS_THRESHOLD,
             10,
             1000,
@@ -1021,7 +1041,10 @@ mod tests {
             DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
         );
         assert!(
-            matches!(result, Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })
+            ),
             "game_id 不匹配应失败"
         );
     }
@@ -1040,7 +1063,10 @@ mod tests {
             DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS,
         );
         assert!(
-            matches!(result, Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })),
+            matches!(
+                result,
+                Err(PokerL1Error::ForceCheckpointEvidenceFailed { .. })
+            ),
             "state_hash 不匹配应失败"
         );
     }
@@ -1104,13 +1130,15 @@ mod tests {
     #[test]
     fn test_compute_force_checkpoint_deposit_default() {
         // 10% of 1000 = 100
-        let deposit = compute_force_checkpoint_deposit(1000, DEFAULT_FORCE_CHECKPOINT_DEPOSIT_RATIO_BPS);
+        let deposit =
+            compute_force_checkpoint_deposit(1000, DEFAULT_FORCE_CHECKPOINT_DEPOSIT_RATIO_BPS);
         assert_eq!(deposit, 100);
     }
 
     #[test]
     fn test_compute_force_checkpoint_deposit_zero_buy_in() {
-        let deposit = compute_force_checkpoint_deposit(0, DEFAULT_FORCE_CHECKPOINT_DEPOSIT_RATIO_BPS);
+        let deposit =
+            compute_force_checkpoint_deposit(0, DEFAULT_FORCE_CHECKPOINT_DEPOSIT_RATIO_BPS);
         assert_eq!(deposit, 0);
     }
 
@@ -1125,13 +1153,22 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_FORCE_CHECKPOINT_DEPOSIT_RATIO_BPS, 1000, "SEC2-M3: 10%");
-        assert_eq!(MAX_FORCE_CHECKPOINT_PER_BLOCK, 5, "SEC2-M3: 全局每 block 上限 5");
+        assert_eq!(
+            DEFAULT_FORCE_CHECKPOINT_DEPOSIT_RATIO_BPS, 1000,
+            "SEC2-M3: 10%"
+        );
+        assert_eq!(
+            MAX_FORCE_CHECKPOINT_PER_BLOCK, 5,
+            "SEC2-M3: 全局每 block 上限 5"
+        );
         assert_eq!(DEFAULT_INVESTIGATION_THRESHOLD, 3, "NEW-H1: 累积阈值 3");
         assert_eq!(DEFAULT_REPLICA_WITNESS_THRESHOLD, 3, "NEW-M3: 3-of-N");
         assert_eq!(DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT, 5, "NEW-M3: N=5");
         assert_eq!(VERIFY_FAILURE_PROOF_GAS, 80000, "SEC-H9");
-        assert_eq!(DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, 10000, "SubTask 27.5g (4)");
+        assert_eq!(
+            DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, 10000,
+            "SubTask 27.5g (4)"
+        );
         assert_eq!(TX_MERKLE_TREE_DEPTH, 256, "R5-H4: 256-bit depth");
     }
 }

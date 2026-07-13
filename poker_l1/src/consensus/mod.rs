@@ -13,81 +13,80 @@
 //! Phase 1 定义数据结构 + 签名哈希计算；
 //! Phase 2 实现 Bullshark 排序与 commit certificate 组装逻辑。
 
-/// tx 双通道分类与客户端路由（Task 7）。
-pub mod routing;
-/// DAG vertex 产出与 game sub-block 嵌入（Task 8）。
-pub mod vertex_production;
-/// ValidatorSet 与 VRF（Task 13 / SubTask 13.1）。
-pub mod validator_set;
-/// Slashing 与审查调查（Task 13 / SubTask 13.2-13.5）。
-pub mod slashing;
-/// 游戏分配与 epoch 重分配（Task 12）。
-pub mod game_assignment;
 /// Bullshark 共识与 block 投影（Task 9）。
 pub mod bullshark;
-/// Texas Hold'em 完整轮转规则（Phase 2 Task 4）。
-pub mod texas_holdem_turn_rule;
+/// 游戏分配与 epoch 重分配（Task 12）。
+pub mod game_assignment;
 /// 多玩家阶段超时惩罚执行（Phase 4 Task 8）。
 pub mod phase_timeout;
+/// tx 双通道分类与客户端路由（Task 7）。
+pub mod routing;
+/// Slashing 与审查调查（Task 13 / SubTask 13.2-13.5）。
+pub mod slashing;
+/// Texas Hold'em 完整轮转规则（Phase 2 Task 4）。
+pub mod texas_holdem_turn_rule;
+/// ValidatorSet 与 VRF（Task 13 / SubTask 13.1）。
+pub mod validator_set;
+/// DAG vertex 产出与 game sub-block 嵌入（Task 8）。
+pub mod vertex_production;
 
 // 重新导出 routing 模块公开 API，便于上层直接 `consensus::GameStatus` 等使用。
 pub use routing::{
-    validate_active_games_limit, validate_assigned_validator, validate_game_turn_phase_aware,
-    validate_lane_route, validate_turn_order, BettingRound, ExecutionMode, GamePhase, GameStatus,
-    PhaseTransitionError, SimpleTurnRule, SubmitPhaseKind, TurnRule,
-    DEFAULT_MAX_ACTIVE_GAMES_PER_PLAYER,
+    BettingRound, DEFAULT_MAX_ACTIVE_GAMES_PER_PLAYER, ExecutionMode, GamePhase, GameStatus,
+    PhaseTransitionError, SimpleTurnRule, SubmitPhaseKind, TurnRule, validate_active_games_limit,
+    validate_assigned_validator, validate_game_turn_phase_aware, validate_lane_route,
+    validate_turn_order,
 };
 
 // 重新导出 texas_holdem_turn_rule 模块公开 API。
 pub use texas_holdem_turn_rule::TexasHoldemTurnRule;
 
 // 重新导出 phase_timeout 模块公开 API（Phase 4 Task 8）。
-pub use phase_timeout::{handle_submit_phase_timeout, KickResult};
+pub use phase_timeout::{KickResult, handle_submit_phase_timeout};
 
 // 重新导出 vertex_production 模块公开 API。
 pub use vertex_production::{
+    DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT, GameSubBlock, TimeoutProof, VertexBuilder,
     build_game_sub_block, check_sech6_cross_commit_force_advance, required_parent_count,
     required_quorum, required_witness_count, sort_commit_txs_r4m4, sort_vertex_txs_s9,
     validate_fallback_tx, validate_game_turn_tx, validate_gameturn_gas_free,
-    DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT, GameSubBlock, TimeoutProof, VertexBuilder,
 };
 
 // 重新导出 validator_set 模块公开 API（Task 13 / SubTask 13.1）。
 pub use validator_set::{
-    compute_genesis_chain_randomness, compute_vrf_input, compute_vrf_output, StubVrfVerifier,
-    ValidatorEntry, ValidatorSet, ValidatorStatus, VrfProof, VrfVerifier,
-    MAX_SINGLE_REDUCTION_RATIO, MIN_VALIDATOR_SET_SIZE, VRF_OUTPUT_SIZE, VRF_PUBKEY_SIZE,
-    VRF_PROOF_SIZE,
+    MAX_SINGLE_REDUCTION_RATIO, MIN_VALIDATOR_SET_SIZE, StubVrfVerifier, VRF_OUTPUT_SIZE,
+    VRF_PROOF_SIZE, VRF_PUBKEY_SIZE, ValidatorEntry, ValidatorSet, ValidatorStatus, VrfProof,
+    VrfVerifier, compute_genesis_chain_randomness, compute_vrf_input, compute_vrf_output,
 };
 
 // 重新导出 slashing 模块公开 API（Task 13 / SubTask 13.2-13.5）。
 pub use slashing::{
+    CommitCertEquivocationEvidence, DEFAULT_DEFENSE_WINDOW_BLOCKS,
+    DEFAULT_DOWNTIME_SLASH_PERCENTAGE, DEFAULT_DOWNTIME_THRESHOLD_BLOCKS, DEFAULT_SLASH_PERCENTAGE,
+    InvestigationState, SlashingConfig, SlashingReason, SlashingResult, VertexEquivocationEvidence,
     apply_multi_slashing, apply_slashing, check_downtime_slashing, compute_slash_amount,
-    is_downtime_auto_slashable, is_downtime_governance_kickout, CommitCertEquivocationEvidence,
-    InvestigationState, SlashingConfig, SlashingReason, SlashingResult,
-    VertexEquivocationEvidence, DEFAULT_DEFENSE_WINDOW_BLOCKS, DEFAULT_DOWNTIME_SLASH_PERCENTAGE,
-    DEFAULT_DOWNTIME_THRESHOLD_BLOCKS, DEFAULT_SLASH_PERCENTAGE,
+    is_downtime_auto_slashable, is_downtime_governance_kickout,
 };
 
 // 重新导出 game_assignment 模块公开 API（Task 12）。
 pub use game_assignment::{
-    assign_validator_for_game, client_route_validator, compute_current_epoch,
+    DEFAULT_FORFEIT_BOND_PERCENTAGE, DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS, EpochTransitionState,
+    GameAssignmentConfig, assign_validator_for_game, client_route_validator, compute_current_epoch,
     compute_forfeit_amount, config_from_time_consensus, create_epoch_transition_state,
     is_in_epoch_transition_window, is_validator_failover_triggered,
     validate_client_route_consistency, validate_epoch_reassignment,
-    validate_force_advance_during_transition, EpochTransitionState, GameAssignmentConfig,
-    DEFAULT_FORFEIT_BOND_PERCENTAGE, DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS,
+    validate_force_advance_during_transition,
 };
 
 // 重新导出 bullshark 模块公开 API（Task 9）。
 pub use bullshark::{
-    assemble_commit_certificate, bullshark_linear_order, detect_commit_cert_equivocation,
-    detect_commit_leader, project_block_from_commit, validate_commit_certificate_fields,
-    validate_commit_certificate_quorum, BlockProjection, CommitLeader, Dag,
+    BlockProjection, CommitLeader, Dag, assemble_commit_certificate, bullshark_linear_order,
+    detect_commit_cert_equivocation, detect_commit_leader, project_block_from_commit,
+    validate_commit_certificate_fields, validate_commit_certificate_quorum,
 };
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 use crate::signature::TaggedPubkey;
@@ -291,7 +290,7 @@ impl DagCommitCertificate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn dummy_tagged_pubkey() -> TaggedPubkey {
         TaggedPubkey {

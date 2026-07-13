@@ -6,13 +6,13 @@
 //! - SubTask 36.5: DAG vertex 传播延迟 + Bullshark 共识延迟
 //!   测量 detect_commit_leader + bullshark_linear_order + project_block_from_commit 单次延迟
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use poker_l1::consensus::bullshark::{
-    bullshark_linear_order, detect_commit_leader, project_block_from_commit, Dag,
+    Dag, bullshark_linear_order, detect_commit_leader, project_block_from_commit,
 };
 use poker_l1::consensus::{DagCommitCertificate, DagVertex};
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme, CURRENT_VERSION};
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 use poker_l1::{ChainId, Hash};
 
@@ -87,7 +87,9 @@ fn make_commit_cert() -> DagCommitCertificate {
 /// 返回 (dag, leader_hash)，leader 为最后一轮的第一个 vertex。
 fn build_dag(validators: usize, rounds: usize, txs_per_vertex: usize) -> (Dag, Hash) {
     let mut dag = Dag::new();
-    let authors: Vec<TaggedPubkey> = (0..validators).map(|i| make_tagged(0x10 + i as u8)).collect();
+    let authors: Vec<TaggedPubkey> = (0..validators)
+        .map(|i| make_tagged(0x10 + i as u8))
+        .collect();
     let mut prev_hashes: Vec<Hash> = Vec::new();
 
     for r in 1..=rounds {
@@ -147,13 +149,7 @@ fn bench_dag_tps(c: &mut Criterion) {
                     if let Some(cl) = leader {
                         let cert = make_commit_cert();
                         let _projection = project_block_from_commit(
-                            &dag,
-                            &cl,
-                            cert,
-                            [0u8; 32],
-                            [0u8; 32],
-                            1,
-                            1000,
+                            &dag, &cl, cert, [0u8; 32], [0u8; 32], 1, 1000,
                         )
                         .expect("project");
                     }
@@ -176,8 +172,7 @@ fn bench_dag_tps(c: &mut Criterion) {
                     let mut dag = Dag::new();
                     let author = make_tagged(0x10);
                     for r in 1..=10 {
-                        let vertex =
-                            make_vertex_with_txs(1, r as u64, author.clone(), txs, vec![]);
+                        let vertex = make_vertex_with_txs(1, r as u64, author.clone(), txs, vec![]);
                         dag.insert(vertex);
                     }
                     black_box(dag.len());
@@ -205,37 +200,28 @@ fn bench_consensus_latency(c: &mut Criterion) {
             format!("detect_commit_leader_v{}_r{}", validators, rounds),
             |b| {
                 b.iter(|| {
-                    let result = detect_commit_leader(&dag, &leader_hash, validators).expect("detect");
+                    let result =
+                        detect_commit_leader(&dag, &leader_hash, validators).expect("detect");
                     black_box(result);
                 });
             },
         );
 
         // 完整共识 pipeline 延迟
-        group.bench_function(
-            format!("full_pipeline_v{}_r{}", validators, rounds),
-            |b| {
-                b.iter(|| {
-                    let leader = detect_commit_leader(&dag, &leader_hash, validators).expect("detect");
-                    if let Some(ref cl) = leader {
-                        let ordered =
-                            bullshark_linear_order(&dag, &cl.referencing_hashes).expect("order");
-                        let cert = make_commit_cert();
-                        let _projection = project_block_from_commit(
-                            &dag,
-                            cl,
-                            cert,
-                            [0u8; 32],
-                            [0u8; 32],
-                            1,
-                            1000,
-                        )
-                        .expect("project");
-                        black_box(ordered.len());
-                    }
-                });
-            },
-        );
+        group.bench_function(format!("full_pipeline_v{}_r{}", validators, rounds), |b| {
+            b.iter(|| {
+                let leader = detect_commit_leader(&dag, &leader_hash, validators).expect("detect");
+                if let Some(ref cl) = leader {
+                    let ordered =
+                        bullshark_linear_order(&dag, &cl.referencing_hashes).expect("order");
+                    let cert = make_commit_cert();
+                    let _projection =
+                        project_block_from_commit(&dag, cl, cert, [0u8; 32], [0u8; 32], 1, 1000)
+                            .expect("project");
+                    black_box(ordered.len());
+                }
+            });
+        });
     }
 
     group.finish();

@@ -278,10 +278,7 @@ mod tests {
     fn test_contract_sources_contain_no_std() {
         // 所有合约应为 no_std（BPF 环境无标准库）
         for (name, src) in all_examples() {
-            assert!(
-                src.contains("#![no_std]"),
-                "合约 {name} 应为 no_std"
-            );
+            assert!(src.contains("#![no_std]"), "合约 {name} 应为 no_std");
         }
     }
 

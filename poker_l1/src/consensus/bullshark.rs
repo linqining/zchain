@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
 use crate::consensus::{
-    required_quorum, sort_commit_txs_r4m4, CommitRound, DagCommitCertificate, DagVertex, Epoch,
-    Round,
+    CommitRound, DagCommitCertificate, DagVertex, Epoch, Round, required_quorum,
+    sort_commit_txs_r4m4,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::transaction::Transaction;
@@ -54,10 +54,7 @@ impl Dag {
 
         // 更新 children 索引（parent → child）
         for parent in &vertex.parent_hashes {
-            self.children
-                .entry(*parent)
-                .or_default()
-                .push(hash);
+            self.children.entry(*parent).or_default().push(hash);
         }
 
         // 存储 vertex
@@ -76,18 +73,12 @@ impl Dag {
 
     /// 获取某轮的所有 vertex hash。
     pub fn round_vertices(&self, round: Round) -> &[Hash] {
-        self.rounds
-            .get(&round)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.rounds.get(&round).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// 获取引用某 vertex 的下一轮 vertex hash 列表。
     pub fn children_of(&self, hash: &Hash) -> &[Hash] {
-        self.children
-            .get(hash)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.children.get(hash).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// 获取 DAG 中所有 vertex 数量。
@@ -225,17 +216,17 @@ pub fn bullshark_linear_order(dag: &Dag, commit_hashes: &[Hash]) -> PokerL1Resul
     // 转为 Vec 并按 (round, author_pubkey_bytes) 排序
     let mut sorted: Vec<Hash> = all_hashes.into_iter().collect();
     sorted.sort_by(|a, b| {
-        let va = dag
-            .get(a)
-            .expect("vertex must exist in DAG");
-        let vb = dag
-            .get(b)
-            .expect("vertex must exist in DAG");
+        let va = dag.get(a).expect("vertex must exist in DAG");
+        let vb = dag.get(b).expect("vertex must exist in DAG");
         // 先按 round 排序
         va.round
             .cmp(&vb.round)
             // 同 round 按 author_pubkey_bytes 排序
-            .then_with(|| va.author_pubkey.to_bytes().cmp(&vb.author_pubkey.to_bytes()))
+            .then_with(|| {
+                va.author_pubkey
+                    .to_bytes()
+                    .cmp(&vb.author_pubkey.to_bytes())
+            })
             // 同 author 按 vertex_hash 排序（确定性）
             .then_with(|| a.cmp(b))
     });
@@ -348,10 +339,7 @@ pub fn validate_commit_certificate_quorum(
     let required = required_quorum(validator_count);
     let actual = cert.signer_count();
     if actual < required {
-        return Err(PokerL1Error::InsufficientQuorum {
-            actual,
-            required,
-        });
+        return Err(PokerL1Error::InsufficientQuorum { actual, required });
     }
     Ok(())
 }
@@ -508,8 +496,8 @@ pub fn detect_commit_cert_equivocation(
 mod tests {
     use super::*;
     use crate::consensus::{DagVertex, MAX_VERTEX_SIZE};
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
     use crate::signature::TaggedPubkey;
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, TxLane};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
@@ -731,16 +719,9 @@ mod tests {
             signer_bitmap: vec![0xFF],
         };
 
-        let projection = project_block_from_commit(
-            &dag,
-            &leader,
-            cert,
-            [0u8; 32],
-            [0u8; 32],
-            1,
-            1000,
-        )
-        .expect("投影应成功");
+        let projection =
+            project_block_from_commit(&dag, &leader, cert, [0u8; 32], [0u8; 32], 1, 1000)
+                .expect("投影应成功");
 
         // GameTurn tx 应在 gameturn_txs，ForceSync tx 应在 public_txs
         assert_eq!(projection.gameturn_txs.len(), 1);
@@ -856,14 +837,19 @@ mod tests {
 
     #[test]
     fn assemble_commit_certificate_sets_bitmap_correctly() {
-        let sigs: Vec<(usize, Vec<u8>)> = vec![
-            (0, vec![0u8; 65]),
-            (2, vec![0u8; 65]),
-            (5, vec![0u8; 65]),
-        ];
+        let sigs: Vec<(usize, Vec<u8>)> =
+            vec![(0, vec![0u8; 65]), (2, vec![0u8; 65]), (5, vec![0u8; 65])];
         let cert = assemble_commit_certificate(
-            1, 1, [0u8; 32], vec![], vec![0xFF], [0u8; 32], [0u8; 32], [0u8; 32],
-            &sigs, 8,
+            1,
+            1,
+            [0u8; 32],
+            vec![],
+            vec![0xFF],
+            [0u8; 32],
+            [0u8; 32],
+            [0u8; 32],
+            &sigs,
+            8,
         )
         .expect("组装应成功");
 
@@ -879,8 +865,16 @@ mod tests {
     fn assemble_commit_certificate_rejects_out_of_range_index() {
         let sigs: Vec<(usize, Vec<u8>)> = vec![(10, vec![0u8; 65])];
         let err = assemble_commit_certificate(
-            1, 1, [0u8; 32], vec![], vec![0xFF], [0u8; 32], [0u8; 32], [0u8; 32],
-            &sigs, 5,
+            1,
+            1,
+            [0u8; 32],
+            vec![],
+            vec![0xFF],
+            [0u8; 32],
+            [0u8; 32],
+            [0u8; 32],
+            &sigs,
+            5,
         )
         .unwrap_err();
         assert!(matches!(err, PokerL1Error::Other(_)));
@@ -915,7 +909,10 @@ mod tests {
             signer_bitmap: vec![0xFF],
         };
         let evidence = detect_commit_cert_equivocation(&cert1, &cert2, crate::DEFAULT_CHAIN_ID);
-        assert!(evidence.is_some(), "同 (epoch, commit_round) 不同 vertex_hash_list 应检测到 equivocation");
+        assert!(
+            evidence.is_some(),
+            "同 (epoch, commit_round) 不同 vertex_hash_list 应检测到 equivocation"
+        );
     }
 
     #[test]

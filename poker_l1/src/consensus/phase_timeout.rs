@@ -109,8 +109,8 @@ mod tests {
     use super::*;
     use crate::consensus::{ExecutionMode, GamePhase, GameStatus};
     use crate::object_model::ObjectID;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
     use crate::signature::TaggedPubkey;
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use std::collections::BTreeMap;
 
     /// 构造测试用 tagged pubkey。
@@ -167,12 +167,8 @@ mod tests {
         let mut game =
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::Shuffle);
 
-        let results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::Shuffle,
-            1101,
-            |_player| 500,
-        );
+        let results =
+            handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |_player| 500);
 
         // 返回 1 个 KickResult
         assert_eq!(results.len(), 1);
@@ -206,11 +202,8 @@ mod tests {
         let mut game =
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::Shuffle);
 
-        let results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::Shuffle,
-            1101,
-            |player| {
+        let results =
+            handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |player| {
                 // 不同玩家返回不同金额，验证闭包被正确调用
                 if *player == addr(0x10) {
                     100
@@ -219,8 +212,7 @@ mod tests {
                 } else {
                     300
                 }
-            },
-        );
+            });
 
         // 返回 3 个 KickResult，按 BTreeSet 升序（0x10 < 0x20 < 0x30）
         assert_eq!(results.len(), 3);
@@ -260,12 +252,10 @@ mod tests {
         let mut game =
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::RevealToken);
 
-        let results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::RevealToken,
-            2051,
-            |_player| 1000,
-        );
+        let results =
+            handle_submit_phase_timeout(&mut game, SubmitPhaseKind::RevealToken, 2051, |_player| {
+                1000
+            });
 
         // 返回 2 个 KickResult（0x10 / 0x20）
         assert_eq!(results.len(), 2);
@@ -308,15 +298,11 @@ mod tests {
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::Reconstruct);
 
         // 闭包：根据玩家地址首字节返回不同金额
-        let results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::Reconstruct,
-            3101,
-            |player| {
+        let results =
+            handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Reconstruct, 3101, |player| {
                 let byte = player[0];
                 (byte as u64) * 10 // 0x10 → 160, 0x30 → 480
-            },
-        );
+            });
 
         // 2 个 KickResult
         assert_eq!(results.len(), 2);
@@ -350,12 +336,8 @@ mod tests {
         let mut game =
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::LeaveProof);
 
-        let results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::LeaveProof,
-            5000,
-            |_| 999,
-        );
+        let results =
+            handle_submit_phase_timeout(&mut game, SubmitPhaseKind::LeaveProof, 5000, |_| 999);
 
         // 行为与 Shuffle 一致：2 个 pending 玩家被 kick
         assert_eq!(results.len(), 2);
@@ -386,12 +368,7 @@ mod tests {
         let mut game =
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::Shuffle);
 
-        let results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::Shuffle,
-            1101,
-            |_| 0,
-        );
+        let results = handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |_| 0);
 
         // 无 KickResult
         assert!(results.is_empty());
@@ -416,12 +393,8 @@ mod tests {
         let mut game =
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::Shuffle);
 
-        let results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::Shuffle,
-            1101,
-            |_| 100,
-        );
+        let results =
+            handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |_| 100);
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].player, addr(0x10));
@@ -447,12 +420,8 @@ mod tests {
         let mut game =
             make_game_with_phase(&active, &pending, &completed, SubmitPhaseKind::Shuffle);
 
-        let _results = handle_submit_phase_timeout(
-            &mut game,
-            SubmitPhaseKind::Shuffle,
-            1101,
-            |_| 0,
-        );
+        let _results =
+            handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |_| 0);
 
         assert_eq!(game.active_participants.len(), 2);
         // 边界：剩余 2 == 2，不 < 2 → 不 finalize
@@ -479,8 +448,14 @@ mod tests {
 
             // 行为一致：3 个 pending 玩家被 kick
             assert_eq!(results.len(), 3, "kind={kind:?} 应 kick 3 玩家");
-            assert!(game.pending_submitters.is_empty(), "kind={kind:?} pending 应清空");
-            assert!(game.active_participants.is_empty(), "kind={kind:?} active 应清空");
+            assert!(
+                game.pending_submitters.is_empty(),
+                "kind={kind:?} pending 应清空"
+            );
+            assert!(
+                game.active_participants.is_empty(),
+                "kind={kind:?} active 应清空"
+            );
             assert!(game.is_finalized, "kind={kind:?} 应 finalize");
         }
     }

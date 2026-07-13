@@ -28,9 +28,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Address;
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
-use crate::Address;
 
 use super::force_checkin::RecoveryStage;
 use super::types::GameContract;
@@ -154,7 +154,7 @@ pub const fn is_request_da_appropriate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
     use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_addr(byte: u8) -> Address {
@@ -243,10 +243,7 @@ mod tests {
 
         let outcome = apply_request_da(&mut game, &tx).expect("应成功");
         assert!(matches!(outcome.stage, RecoveryStage::Stage3 { .. }));
-        assert!(
-            outcome.triggers_force_revert,
-            "Stage 3 应触发 force_revert"
-        );
+        assert!(outcome.triggers_force_revert, "Stage 3 应触发 force_revert");
     }
 
     #[test]

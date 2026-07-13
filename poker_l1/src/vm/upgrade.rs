@@ -29,11 +29,11 @@
 //!                                   └──dispute_emergency──► EmergencyAudit{disputed=true}
 //! ```
 
+use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::vm::contract::{ContractRegistry, UpgradeState};
 use crate::vm::gas_table::MAX_OBJECT_SIZE;
-use crate::Address;
 
 /// 升级配置。
 ///
@@ -1102,14 +1102,10 @@ mod tests {
         let config = UpgradeConfig::default();
         assert_eq!(config.upgrade_delay_blocks, 2000, "SEC-L7 (1) 默认 2000");
         assert_eq!(
-            config.emergency_audit_period_blocks,
-            1000,
+            config.emergency_audit_period_blocks, 1000,
             "SEC2-M11 (3) 默认 1000"
         );
-        assert_eq!(
-            config.emergency_quorum_threshold, 90,
-            "SEC-L7 (5) 默认 90%"
-        );
+        assert_eq!(config.emergency_quorum_threshold, 90, "SEC-L7 (5) 默认 90%");
     }
 
     #[test]

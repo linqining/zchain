@@ -25,9 +25,9 @@ pub mod upgrade;
 pub use context::{ContractCallResult, PokerL1Context, TxContext};
 pub use contract::{ContractObject, ContractRegistry, UpgradeCap, UpgradeState};
 pub use gas_table::*;
-pub use loader::{execute_contract, load_contract_bytecode, LoadedContract, RbpfLoaderConfig};
+pub use loader::{LoadedContract, RbpfLoaderConfig, execute_contract, load_contract_bytecode};
 pub use syscalls::register_poker_l1_syscalls;
 pub use upgrade::{
-    cancel_upgrade, commit_upgrade, dispute_emergency_upgrade, dispute_upgrade, emergency_upgrade,
-    initiate_upgrade, process_pending_upgrades, UpgradeConfig, UpgradeError,
+    UpgradeConfig, UpgradeError, cancel_upgrade, commit_upgrade, dispute_emergency_upgrade,
+    dispute_upgrade, emergency_upgrade, initiate_upgrade, process_pending_upgrades,
 };

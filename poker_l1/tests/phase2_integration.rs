@@ -11,21 +11,22 @@
 //! - SubTask 39.8：slashing 端到端
 
 use poker_l1::block::{
-    validate_block_header_and_body, validate_block_time, BlockHeader, BlockValidatorConfig,
-    TimeConsensusConfig,
+    BlockHeader, BlockValidatorConfig, TimeConsensusConfig, validate_block_header_and_body,
+    validate_block_time,
 };
 use poker_l1::consensus::{
-    apply_multi_slashing, apply_slashing, assemble_commit_certificate, assign_validator_for_game,
-    bullshark_linear_order, client_route_validator, compute_current_epoch, detect_commit_leader,
-    detect_commit_cert_equivocation, is_validator_failover_triggered, project_block_from_commit,
+    Dag, DagCommitCertificate, DagVertex, GameAssignmentConfig, SlashingConfig, SlashingReason,
+    ValidatorEntry, ValidatorSet, ValidatorStatus, apply_multi_slashing, apply_slashing,
+    assemble_commit_certificate, assign_validator_for_game, bullshark_linear_order,
+    client_route_validator, compute_current_epoch, detect_commit_cert_equivocation,
+    detect_commit_leader, is_validator_failover_triggered, project_block_from_commit,
     required_quorum, validate_commit_certificate_fields, validate_commit_certificate_quorum,
-    validate_lane_route, Dag, DagCommitCertificate, DagVertex, GameAssignmentConfig,
-    SlashingConfig, SlashingReason, ValidatorEntry, ValidatorSet, ValidatorStatus,
+    validate_lane_route,
 };
 use poker_l1::error::PokerL1Error;
 use poker_l1::object_model::ObjectID;
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme};
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 use poker_l1::{BlockHeight, DEFAULT_CHAIN_ID};
 
@@ -57,8 +58,7 @@ fn make_validator_set(count: usize) -> ValidatorSet {
     let validators: Vec<ValidatorEntry> = (0..count)
         .map(|i| make_validator(0x10 + i as u8, 1_000_000))
         .collect();
-    let genesis_randomness =
-        poker_l1::consensus::compute_genesis_chain_randomness(&validators);
+    let genesis_randomness = poker_l1::consensus::compute_genesis_chain_randomness(&validators);
     let mut set = ValidatorSet {
         epoch: 1,
         validators,
@@ -187,7 +187,10 @@ fn subtask_39_2_dag_vertex_production() {
 
     // 验证 children 索引
     let children_of_first = dag.children_of(&round1_hashes[0]);
-    assert!(!children_of_first.is_empty(), "round1 第一个 vertex 应有 children");
+    assert!(
+        !children_of_first.is_empty(),
+        "round1 第一个 vertex 应有 children"
+    );
 }
 
 // ===== SubTask 39.3: Bullshark 共识完整流程 =====
@@ -224,8 +227,8 @@ fn subtask_39_3_bullshark_full_pipeline() {
     assert_eq!(commit_leader.required_quorum, required);
 
     // 2. bullshark_linear_order
-    let ordered = bullshark_linear_order(&dag, &commit_leader.referencing_hashes)
-        .expect("排序应成功");
+    let ordered =
+        bullshark_linear_order(&dag, &commit_leader.referencing_hashes).expect("排序应成功");
     assert!(!ordered.is_empty());
 
     // 3. 组装 commit certificate
@@ -235,27 +238,13 @@ fn subtask_39_3_bullshark_full_pipeline() {
     validate_commit_certificate_quorum(&cert, validator_count).expect("quorum 校验应通过");
 
     // 5. validate_commit_certificate_fields
-    validate_commit_certificate_fields(
-        &cert,
-        1,
-        [0u8; 32],
-        [0u8; 32],
-        [0u8; 32],
-        [0u8; 32],
-    )
-    .expect("字段一致性校验应通过");
+    validate_commit_certificate_fields(&cert, 1, [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32])
+        .expect("字段一致性校验应通过");
 
     // 6. project_block_from_commit
-    let projection = project_block_from_commit(
-        &dag,
-        &commit_leader,
-        cert,
-        [0u8; 32],
-        [0u8; 32],
-        1,
-        1000,
-    )
-    .expect("block 投影应成功");
+    let projection =
+        project_block_from_commit(&dag, &commit_leader, cert, [0u8; 32], [0u8; 32], 1, 1000)
+            .expect("block 投影应成功");
     assert_eq!(projection.header.height, 1);
     assert_eq!(projection.ordered_vertex_hashes, ordered);
 }
@@ -323,7 +312,10 @@ fn subtask_39_4_block_validator_e2e() {
     // dummy 签名验证失败
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, PokerL1Error::InvalidCommitCertificateSignature { .. }));
+    assert!(matches!(
+        err,
+        PokerL1Error::InvalidCommitCertificateSignature { .. }
+    ));
 }
 
 #[test]
@@ -381,7 +373,10 @@ fn subtask_39_5_time_consensus_e2e() {
         ..new_header.clone()
     };
     let err = validate_block_time(Some(&prev_header), &bad_header, &config).unwrap_err();
-    assert!(matches!(err, PokerL1Error::BlockTimestampMovedBackwards { .. }));
+    assert!(matches!(
+        err,
+        PokerL1Error::BlockTimestampMovedBackwards { .. }
+    ));
 
     // timestamp 超过 max_interval → 失败
     let far_header = BlockHeader {
@@ -389,7 +384,10 @@ fn subtask_39_5_time_consensus_e2e() {
         ..new_header.clone()
     };
     let err = validate_block_time(Some(&prev_header), &far_header, &config).unwrap_err();
-    assert!(matches!(err, PokerL1Error::BlockTimestampIntervalExceeded { .. }));
+    assert!(matches!(
+        err,
+        PokerL1Error::BlockTimestampIntervalExceeded { .. }
+    ));
 }
 
 // ===== SubTask 39.6: 游戏分配端到端 =====
@@ -401,8 +399,7 @@ fn subtask_39_6_game_assignment_e2e() {
     let epoch = validator_set.epoch;
 
     // 1. 链上 assigned_validator 计算
-    let assigned =
-        assign_validator_for_game(&validator_set, &game_id).expect("分配应成功");
+    let assigned = assign_validator_for_game(&validator_set, &game_id).expect("分配应成功");
 
     // 2. 客户端本地路由发现应与链上一致
     let client_routed =
@@ -420,12 +417,10 @@ fn subtask_39_6_game_assignment_e2e() {
     // 4. 不同 epoch 的 assigned_validator 可能不同
     let mut next_set = validator_set.clone();
     next_set.epoch = 2;
-    let next_assigned =
-        assign_validator_for_game(&next_set, &game_id).expect("epoch 2 分配应成功");
+    let next_assigned = assign_validator_for_game(&next_set, &game_id).expect("epoch 2 分配应成功");
     // 注意：由于 epoch_randomness 可能相同，assigned_validator 不一定变化
     // 但分配逻辑应确定性
-    let next_assigned_2 =
-        assign_validator_for_game(&next_set, &game_id).expect("再次分配应成功");
+    let next_assigned_2 = assign_validator_for_game(&next_set, &game_id).expect("再次分配应成功");
     assert_eq!(next_assigned, next_assigned_2, "相同输入应确定性分配");
 }
 
@@ -453,24 +448,21 @@ fn subtask_39_7_validator_failover_e2e() {
     );
 
     // 未超时 → 不触发
-    let not_triggered =
-        is_validator_failover_triggered(100, 101, &config);
+    let not_triggered = is_validator_failover_triggered(100, 101, &config);
     assert!(
         !not_triggered,
         "未超过 game_validator_timeout_blocks 不应触发 failover"
     );
 
     // 边界：刚好 2 个 block → 不触发（需 > timeout）
-    let boundary =
-        is_validator_failover_triggered(100, 102, &config);
+    let boundary = is_validator_failover_triggered(100, 102, &config);
     assert!(
         !boundary,
         "刚好等于 game_validator_timeout_blocks 不应触发（需 > timeout）"
     );
 
     // 边界：3 个 block → 触发
-    let over_boundary =
-        is_validator_failover_triggered(100, 103, &config);
+    let over_boundary = is_validator_failover_triggered(100, 103, &config);
     assert!(
         over_boundary,
         "> game_validator_timeout_blocks 应触发 failover"
@@ -492,7 +484,10 @@ fn subtask_39_7_failover_allows_other_validators() {
 
     // 其他 validator 可接受该 game 的 GameTurn tx（DAG 冗余）
     // 这里验证其他 validator 的 pubkey 与 assigned 不同
-    assert_ne!(assigned, other_validator, "其他 validator 应不同于 assigned");
+    assert_ne!(
+        assigned, other_validator,
+        "其他 validator 应不同于 assigned"
+    );
 
     // 实际场景中，其他 validator 会在自己的 vertex 中包含该 game 的 tx
     // 此处验证 failover 触发条件正确，其他 validator 可接管
@@ -549,12 +544,8 @@ fn subtask_39_8_downtime_slashing_e2e() {
     let current_height: BlockHeight = 1000; // 远超 downtime_threshold
 
     // 检查停机 slashing
-    let result = check_downtime_slashing_for_test(
-        &mut validator_set,
-        &validator,
-        current_height,
-        &config,
-    );
+    let result =
+        check_downtime_slashing_for_test(&mut validator_set, &validator, current_height, &config);
 
     // 应触发停机 slashing
     assert!(result.is_some(), "应触发停机 slashing");
@@ -598,13 +589,8 @@ fn subtask_39_8_multi_slashing_priority_e2e() {
     ];
 
     let config = SlashingConfig::default();
-    let results = apply_multi_slashing(
-        &mut validator_set,
-        &validator,
-        reasons,
-        &config,
-    )
-    .expect("multi-slashing 应成功");
+    let results = apply_multi_slashing(&mut validator_set, &validator, reasons, &config)
+        .expect("multi-slashing 应成功");
 
     // 应按优先级排序处理
     assert_eq!(results.len(), 3, "应处理 3 个 slashing");
@@ -615,7 +601,10 @@ fn subtask_39_8_multi_slashing_priority_e2e() {
         .expect("validator 应存在")
         .stake;
     // VertexEquivocation 100% 罚没 → stake = 0
-    assert_eq!(final_stake, 0, "VertexEquivocation 100% 罚没后 stake 应为 0");
+    assert_eq!(
+        final_stake, 0,
+        "VertexEquivocation 100% 罚没后 stake 应为 0"
+    );
 }
 
 // ===== SubTask 39.9: 综合覆盖率验证（通过测试数量间接验证）=====
@@ -637,7 +626,11 @@ fn subtask_39_9_phase2_test_coverage_summary() {
     // slashing 模块
     let _config = SlashingConfig::default();
     let _reason = SlashingReason::VertexEquivocation;
-    assert_eq!(_reason.priority(), 1, "VertexEquivocation 优先级 = 1（最高）");
+    assert_eq!(
+        _reason.priority(),
+        1,
+        "VertexEquivocation 优先级 = 1（最高）"
+    );
 
     // game_assignment 模块
     let _game_config = GameAssignmentConfig::default();

@@ -9,8 +9,8 @@
 use super::id::ObjectID;
 use super::ownership::Ownership;
 use crate::Address;
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 /// 对象类型标签（字符串形式，如 "Game" / "Account" / "Contract" / "UpgradeCap"）。

@@ -17,43 +17,43 @@ mod phase7_helpers;
 
 use phase7_helpers::*;
 
-use poker_l1::block::time_consensus::{validate_block_time, TimeConsensusConfig};
-use poker_l1::block::{genesis_block, Block, BlockHeader};
-use poker_l1::consensus::bullshark::{
-    detect_commit_leader, validate_commit_certificate_quorum, Dag,
-};
+use poker_l1::block::time_consensus::{TimeConsensusConfig, validate_block_time};
+use poker_l1::block::{Block, BlockHeader, genesis_block};
 use poker_l1::consensus::DagVertex;
+use poker_l1::consensus::bullshark::{
+    Dag, detect_commit_leader, validate_commit_certificate_quorum,
+};
 use poker_l1::consensus::routing::validate_active_games_limit;
 use poker_l1::consensus::slashing::{
-    apply_slashing, check_downtime_slashing, SlashingConfig, SlashingReason,
-    VertexEquivocationEvidence,
+    SlashingConfig, SlashingReason, VertexEquivocationEvidence, apply_slashing,
+    check_downtime_slashing,
 };
 use poker_l1::consensus::vertex_production::{sort_vertex_txs_s9, validate_gameturn_gas_free};
 use poker_l1::governance::{GovernanceState, ParamName, ProposalStatus, VerifierStatus};
 use poker_l1::network::{validate_block_size, validate_tx_size, validate_vertex_size};
-use poker_l1::object_model::smt::SparseMerkleTree;
 use poker_l1::object_model::ObjectID;
+use poker_l1::object_model::smt::SparseMerkleTree;
 use poker_l1::signature::secp256k1_scheme;
 use poker_l1::signature::unified::verify_signature;
 use poker_l1::storage::pruning::{
-    check_pruning_allowed, check_tx_pruning_eligibility, check_vertex_pruning_eligibility,
-    NodeRole as PruningNodeRole, PruningConfig,
+    NodeRole as PruningNodeRole, PruningConfig, check_pruning_allowed,
+    check_tx_pruning_eligibility, check_vertex_pruning_eligibility,
 };
 use poker_l1::transaction::{Gas, RouteHint, TxLane};
-use poker_l1::vm::contracts::ack_protocol::{apply_request_ack, RequestAckTx};
-use poker_l1::vm::contracts::challenge_delta::{apply_challenge_delta, ChallengeDeltaTx};
-use poker_l1::vm::contracts::checkpoint_anchor::{apply_checkpoint_anchor, CheckpointAnchorTx};
+use poker_l1::vm::contracts::ack_protocol::{RequestAckTx, apply_request_ack};
+use poker_l1::vm::contracts::challenge_delta::{ChallengeDeltaTx, apply_challenge_delta};
+use poker_l1::vm::contracts::checkpoint_anchor::{CheckpointAnchorTx, apply_checkpoint_anchor};
 use poker_l1::vm::contracts::delegated_escape::DelegatedEscapeAuthorization;
-use poker_l1::vm::contracts::force_advance::{apply_force_advance, ForceAdvanceInput};
+use poker_l1::vm::contracts::force_advance::{ForceAdvanceInput, apply_force_advance};
 use poker_l1::vm::contracts::force_checkin::{
-    apply_force_checkin, ForceCheckinInput, RecoveryStage,
+    ForceCheckinInput, RecoveryStage, apply_force_checkin,
 };
-use poker_l1::vm::contracts::revert::{apply_force_revert, ForceRevertTx, RevertReason};
+use poker_l1::vm::contracts::revert::{ForceRevertTx, RevertReason, apply_force_revert};
 use poker_l1::vm::contracts::settle::{compute_rake, settle_hand};
 use poker_l1::vm::contracts::types::{
     ExecutionMode, GameContract, GamePhase, HandState, PlayerStack,
 };
-use poker_l1::{Hash, DEFAULT_CHAIN_ID};
+use poker_l1::{DEFAULT_CHAIN_ID, Hash};
 
 // ===== SubTask 35.1~35.5: 基础游戏流程 e2e =====
 
@@ -190,7 +190,10 @@ mod subtask_35_1_5 {
         let input = ForceCheckinInput::new(140, false, 30, [0xCD; 32], vec![0xEF; 16]);
         let outcome = apply_force_checkin(&mut game, &input).expect("force_checkin 应成功");
         // age = 140 - 105 = 35 > 30 → 机器故障 → 不 forfeit
-        assert!(!outcome.should_forfeit, "age > timeout → 机器故障不应 forfeit");
+        assert!(
+            !outcome.should_forfeit,
+            "age > timeout → 机器故障不应 forfeit"
+        );
     }
 
     /// SubTask 35.4: secp256k1 与 ed25519 钱包各发起一笔 tx
@@ -202,12 +205,14 @@ mod subtask_35_1_5 {
         // secp256k1 签名 tx
         let tx1 = signed_public_tx_secp(&secp_secret, &secp_tagged, 1, DEFAULT_CHAIN_ID);
         let signing_hash1 = tx1.signing_hash();
-        verify_signature(&secp_tagged, &tx1.signature, &signing_hash1).expect("secp256k1 签名验证应通过");
+        verify_signature(&secp_tagged, &tx1.signature, &signing_hash1)
+            .expect("secp256k1 签名验证应通过");
 
         // ed25519 签名 tx
         let tx2 = signed_public_tx_ed25519(&ed_sk, &ed_tagged, 1, DEFAULT_CHAIN_ID);
         let signing_hash2 = tx2.signing_hash();
-        verify_signature(&ed_tagged, &tx2.signature, &signing_hash2).expect("ed25519 签名验证应通过");
+        verify_signature(&ed_tagged, &tx2.signature, &signing_hash2)
+            .expect("ed25519 签名验证应通过");
     }
 
     /// SubTask 35.5: 验证游戏操作 tx 全程未扣 gas，台费正确扣除（含底池为 0 场景）
@@ -276,7 +281,8 @@ mod subtask_35_6_12 {
             vec![],
             vec![],
         );
-        validate_block_time(Some(&genesis.header), &block1.header, &config).expect("正常序列应通过");
+        validate_block_time(Some(&genesis.header), &block1.header, &config)
+            .expect("正常序列应通过");
 
         let block2 = Block::new(
             BlockHeader {
@@ -354,7 +360,11 @@ mod subtask_35_6_12 {
         // Round 1: 5 个 validator 各出 1 个 vertex，引用 round 0 的 >= 2/3 vertex
         let required_parents = (n * 2).div_ceil(3);
         for v in &valset.validators {
-            let parents: Vec<Hash> = round0_hashes.iter().take(required_parents).copied().collect();
+            let parents: Vec<Hash> = round0_hashes
+                .iter()
+                .take(required_parents)
+                .copied()
+                .collect();
             let vertex = DagVertex {
                 epoch: 1,
                 round: 1,
@@ -375,10 +385,7 @@ mod subtask_35_6_12 {
         assert!(leader.reference_count >= required_parents);
 
         // 验证 quorum
-        let _ = validate_commit_certificate_quorum(
-            &dummy_commit_certificate(),
-            n,
-        ).is_err(); // 占位 cert quorum 不足，预期 err
+        let _ = validate_commit_certificate_quorum(&dummy_commit_certificate(), n).is_err(); // 占位 cert quorum 不足，预期 err
     }
 
     /// SubTask 35.8: 验证游戏分配：Game 创建时 assigned_validator 正确分配 + epoch 切换时重分配
@@ -444,15 +451,27 @@ mod subtask_35_6_12 {
         let tx2 = signed_public_tx_secp(&secret, &tagged, 1, DEFAULT_CHAIN_ID);
 
         // 相同 nonce + chain_id → 相同 tx_hash（重放）
-        assert_eq!(tx1.tx_hash(), tx2.tx_hash(), "相同 nonce+chain_id 应产生相同 tx_hash");
+        assert_eq!(
+            tx1.tx_hash(),
+            tx2.tx_hash(),
+            "相同 nonce+chain_id 应产生相同 tx_hash"
+        );
 
         // 不同 chain_id → 不同 tx_hash
         let tx_other_chain = signed_public_tx_secp(&secret, &tagged, 1, 999);
-        assert_ne!(tx1.tx_hash(), tx_other_chain.tx_hash(), "不同 chain_id 应产生不同 tx_hash");
+        assert_ne!(
+            tx1.tx_hash(),
+            tx_other_chain.tx_hash(),
+            "不同 chain_id 应产生不同 tx_hash"
+        );
 
         // 不同 nonce → 不同 tx_hash
         let tx_next_nonce = signed_public_tx_secp(&secret, &tagged, 2, DEFAULT_CHAIN_ID);
-        assert_ne!(tx1.tx_hash(), tx_next_nonce.tx_hash(), "不同 nonce 应产生不同 tx_hash");
+        assert_ne!(
+            tx1.tx_hash(),
+            tx_next_nonce.tx_hash(),
+            "不同 nonce 应产生不同 tx_hash"
+        );
     }
 
     /// SubTask 35.11: 验证活跃 Game 上限：第 11 个 join 被拒绝
@@ -491,7 +510,10 @@ mod subtask_35_6_12 {
         for tx in &sorted {
             match tx.lane_hint {
                 TxLane::GameTurn | TxLane::CheckpointAnchor => {
-                    assert!(!found_public && !found_forcesync, "GameTurn 应在 Public/ForceSync 之前");
+                    assert!(
+                        !found_public && !found_forcesync,
+                        "GameTurn 应在 Public/ForceSync 之前"
+                    );
                 }
                 TxLane::Public => {
                     found_public = true;
@@ -551,7 +573,10 @@ mod subtask_35_13_16 {
         // force_advance: 超时强制推进
         let input = ForceAdvanceInput::new(make_addr(0x10), 131); // elapsed=31 > 30
         let action = apply_force_advance(&mut game, &input).expect("force_advance 应成功");
-        assert!(action.is_fold() || action.is_check(), "force_advance 应返回有效 action");
+        assert!(
+            action.is_fold() || action.is_check(),
+            "force_advance 应返回有效 action"
+        );
         assert_eq!(game.last_action_height, 131);
     }
 
@@ -582,8 +607,8 @@ mod subtask_35_13_16 {
 
     /// 计算 blake2b_256 哈希（辅助）。
     fn blake2b_256(data: &[u8]) -> Hash {
-        use blake2::digest::{Update, VariableOutput};
         use blake2::Blake2bVar;
+        use blake2::digest::{Update, VariableOutput};
         let mut h = Blake2bVar::new(32).expect("32 <= 64");
         h.update(data);
         let mut out = [0u8; 32];
@@ -720,7 +745,10 @@ mod subtask_35_15a_h {
         let game = make_game_with_checkpoint(100);
         // 阶段 1: elapsed <= turn_timeout_blocks → Stage1，允许 force_advance，无 forfeit
         let stage = RecoveryStage::compute(&game, 120, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage1 { .. }), "elapsed 20 <= 30 应为 Stage1");
+        assert!(
+            matches!(stage, RecoveryStage::Stage1 { .. }),
+            "elapsed 20 <= 30 应为 Stage1"
+        );
         assert!(stage.allows_force_advance(), "阶段 1 应允许 force_advance");
         assert!(!stage.requires_forfeit_and_revert(), "阶段 1 不应 forfeit");
     }
@@ -732,7 +760,10 @@ mod subtask_35_15a_h {
 
         // 阶段 2: elapsed > turn_timeout_blocks → Stage2，允许 force_checkin
         let stage = RecoveryStage::compute(&game, 200, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage2 { .. }), "elapsed 100 > 30 应为 Stage2");
+        assert!(
+            matches!(stage, RecoveryStage::Stage2 { .. }),
+            "elapsed 100 > 30 应为 Stage2"
+        );
         assert!(stage.allows_force_checkin(), "阶段 2 应允许 force_checkin");
         assert!(!stage.requires_forfeit_and_revert(), "阶段 2 不应 forfeit");
 
@@ -753,8 +784,14 @@ mod subtask_35_15a_h {
         // current = 700 → elapsed = 600 > 630? No, 600 <= 630 → Stage2
         // current = 800 → elapsed = 700 > 630 → Stage3
         let stage = RecoveryStage::compute(&game, 800, 30, 500, 100);
-        assert!(matches!(stage, RecoveryStage::Stage3 { .. }), "elapsed 700 > 630 应为 Stage3");
-        assert!(stage.requires_forfeit_and_revert(), "阶段 3 应要求 forfeit + revert");
+        assert!(
+            matches!(stage, RecoveryStage::Stage3 { .. }),
+            "elapsed 700 > 630 应为 Stage3"
+        );
+        assert!(
+            stage.requires_forfeit_and_revert(),
+            "阶段 3 应要求 forfeit + revert"
+        );
         assert!(!stage.allows_force_advance(), "阶段 3 不允许 force_advance");
         assert!(!stage.allows_force_checkin(), "阶段 3 不允许 force_checkin");
     }
@@ -777,9 +814,18 @@ mod subtask_35_17_21 {
         let config = PruningConfig::default();
         // check_pruning_allowed(archive_node_count, &config) → Result
         // archive_node_count >= archive_node_min_count（默认 3）→ Ok
-        assert!(check_pruning_allowed(5, &config).is_ok(), "5 archive nodes >= min 3 应允许裁剪");
-        assert!(check_pruning_allowed(3, &config).is_ok(), "边界：== min 应允许");
-        assert!(check_pruning_allowed(2, &config).is_err(), "2 < min 3 应拒绝");
+        assert!(
+            check_pruning_allowed(5, &config).is_ok(),
+            "5 archive nodes >= min 3 应允许裁剪"
+        );
+        assert!(
+            check_pruning_allowed(3, &config).is_ok(),
+            "边界：== min 应允许"
+        );
+        assert!(
+            check_pruning_allowed(2, &config).is_err(),
+            "2 < min 3 应拒绝"
+        );
     }
 
     /// SubTask 35.17a: 历史 tx 压缩
@@ -790,11 +836,14 @@ mod subtask_35_17_21 {
         // 返回 PruningEligibility（非 bool），用 .can_prune() 判定
         let result = check_tx_pruning_eligibility(
             config.tx_prune_after_blocks + 100, // block_finality_age
-            config.tx_prune_after_blocks,        // tx_prune_after_blocks
-            true,                                // all_games_settled
-            true,                                // all_disputes_expired
+            config.tx_prune_after_blocks,       // tx_prune_after_blocks
+            true,                               // all_games_settled
+            true,                               // all_disputes_expired
         );
-        assert!(result.can_prune(), "过 prune_after_blocks 且游戏已结算应可裁剪");
+        assert!(
+            result.can_prune(),
+            "过 prune_after_blocks 且游戏已结算应可裁剪"
+        );
 
         // 未过窗口 → 不可裁剪
         let result2 = check_tx_pruning_eligibility(500, config.tx_prune_after_blocks, true, true);
@@ -855,7 +904,10 @@ mod subtask_35_17_21 {
         let mut settled_hand = hand;
         settled_hand.phase = GamePhase::Showdown;
         let result = settle_hand(&settled_hand, &rake_config).expect("settle 应成功");
-        assert!(result.winner_payout > 0 || result.pot == 0, "非空底池应有奖金分配");
+        assert!(
+            result.winner_payout > 0 || result.pot == 0,
+            "非空底池应有奖金分配"
+        );
     }
 
     /// SubTask 35.20: 治理参数调整 + validator 集更新
@@ -874,22 +926,26 @@ mod subtask_35_17_21 {
                 20, // new_value
                 DEFAULT_CHAIN_ID,
                 proposer.clone(),
-                100,   // current_height → voting_end = 1100
+                100, // current_height → voting_end = 1100
                 DEFAULT_CHAIN_ID,
             )
             .expect("创建提案应成功");
 
         // 全部 validator 投赞成
         for v in &valset.validators {
-            gov.vote(proposal_id, v.pubkey.clone(), true, 100).expect("投票应成功");
+            gov.vote(proposal_id, v.pubkey.clone(), true, 100)
+                .expect("投票应成功");
         }
 
         // finalize voting（须在 voting_end_height 之后）
-        let status = gov.finalize_voting(proposal_id, n, 1100).expect("finalize 应成功");
+        let status = gov
+            .finalize_voting(proposal_id, n, 1100)
+            .expect("finalize 应成功");
         assert_eq!(status, ProposalStatus::Timelock, "通过后应进入 timelock");
 
         // timelock 结束后执行（timelock_end = 1100 + 2000 = 3100）
-        gov.execute_proposal(proposal_id, 3100).expect("timelock 后执行应成功");
+        gov.execute_proposal(proposal_id, 3100)
+            .expect("timelock 后执行应成功");
         assert_eq!(gov.params.max_active_games_per_player, 20, "参数应已更新");
     }
 
@@ -901,15 +957,24 @@ mod subtask_35_17_21 {
 
         // tx <= 128KB
         let normal_tx = make_public_tx(tagged.clone(), 1, chain_id);
-        assert!(validate_tx_size(&normal_tx).is_ok(), "正常 tx 应通过大小校验");
+        assert!(
+            validate_tx_size(&normal_tx).is_ok(),
+            "正常 tx 应通过大小校验"
+        );
 
         // block <= 4MB
         let block = dummy_block(1);
-        assert!(validate_block_size(&block).is_ok(), "空 block 应通过大小校验");
+        assert!(
+            validate_block_size(&block).is_ok(),
+            "空 block 应通过大小校验"
+        );
 
         // vertex <= 256KB
         let vertex = make_vertex(1, 1, tagged);
-        assert!(validate_vertex_size(&vertex).is_ok(), "空 vertex 应通过大小校验");
+        assert!(
+            validate_vertex_size(&vertex).is_ok(),
+            "空 vertex 应通过大小校验"
+        );
     }
 }
 
@@ -943,7 +1008,8 @@ mod subtask_35_22_27 {
             &offender,
             SlashingReason::VertexEquivocation,
             &config,
-        ).expect("slashing 应成功");
+        )
+        .expect("slashing 应成功");
         assert_eq!(result.reason, SlashingReason::VertexEquivocation);
         assert_eq!(result.slash_amount, 100_000); // 100% of 100_000 stake
         assert_eq!(result.stake_after, 0);
@@ -970,12 +1036,10 @@ mod subtask_35_22_27 {
 
         // 本地计算返回 Option<&TaggedPubkey>（仅用 active validator 集）
         // 注意：须将 Vec 绑定到局部变量，避免临时值在借用期间被释放
-        let validator_pubkeys: Vec<_> = valset.validators.iter().map(|v| v.pubkey.clone()).collect();
-        let local = poker_l1::node::compute_assigned_validator_local(
-            &game_id,
-            epoch,
-            &validator_pubkeys,
-        );
+        let validator_pubkeys: Vec<_> =
+            valset.validators.iter().map(|v| v.pubkey.clone()).collect();
+        let local =
+            poker_l1::node::compute_assigned_validator_local(&game_id, epoch, &validator_pubkeys);
         // 链上 assigned_validator_for_game 返回 Result<TaggedPubkey>（使用 self.epoch）
         let onchain = valset.assigned_validator_for_game(&game_id);
 
@@ -1146,7 +1210,9 @@ mod subtask_r5_r7_e2e {
         let config = SlashingConfig::default();
 
         // 启动 unbonding
-        valset.start_unbonding(&offender, 100).expect("start_unbonding 应成功");
+        valset
+            .start_unbonding(&offender, 100)
+            .expect("start_unbonding 应成功");
 
         // unbonding 期内仍可 slashing（can_be_slashed = true）
         assert!(valset.validators[0].can_be_slashed());
@@ -1192,7 +1258,10 @@ mod subtask_r5_r7_e2e {
         };
         apply_checkpoint_anchor(&mut game, &anchor_tx, 105).expect("checkpoint_anchor 应成功");
         // designated_operator_check_exemptions 应被重置为 0
-        assert_eq!(game.designated_operator_check_exemptions, 0, "提交 checkpoint_anchor 后豁免计数应重置");
+        assert_eq!(
+            game.designated_operator_check_exemptions, 0,
+            "提交 checkpoint_anchor 后豁免计数应重置"
+        );
     }
 
     /// R4-H5 e2e: under_investigation_count 衰减机制
@@ -1204,7 +1273,10 @@ mod subtask_r5_r7_e2e {
 
         // 1 个 epoch 后 count 减 1
         valset.advance_epoch(2);
-        assert_eq!(valset.validators[0].under_investigation_count, 2, "epoch 后应衰减 1");
+        assert_eq!(
+            valset.validators[0].under_investigation_count, 2,
+            "epoch 后应衰减 1"
+        );
 
         valset.advance_epoch(3);
         assert_eq!(valset.validators[0].under_investigation_count, 1);
@@ -1214,7 +1286,10 @@ mod subtask_r5_r7_e2e {
 
         // 最低为 0（不会变负）
         valset.advance_epoch(5);
-        assert_eq!(valset.validators[0].under_investigation_count, 0, "衰减最低为 0");
+        assert_eq!(
+            valset.validators[0].under_investigation_count, 0,
+            "衰减最低为 0"
+        );
     }
 
     /// R7-M6 e2e: 阶段 3 操作方抢跑 technical_interrupt 被拒
@@ -1239,7 +1314,10 @@ mod subtask_r5_r7_e2e {
 
         // 阶段 3 操作方不能 claim technical_interrupt
         let result = apply_force_revert(&mut game, &tx);
-        assert!(result.is_err(), "阶段 3 操作方 technical_interrupt 应被拒绝");
+        assert!(
+            result.is_err(),
+            "阶段 3 操作方 technical_interrupt 应被拒绝"
+        );
     }
 
     /// R7-H2 e2e: unbonding_period_blocks 边界校验
@@ -1269,7 +1347,10 @@ mod subtask_r5_r7_e2e {
             100,
             DEFAULT_CHAIN_ID,
         );
-        assert!(r2.is_err(), "unbonding_period_blocks < epoch_length 应被拒绝");
+        assert!(
+            r2.is_err(),
+            "unbonding_period_blocks < epoch_length 应被拒绝"
+        );
 
         // 设为 epoch_length → 通过
         let r3 = gov.create_parameter_proposal(

@@ -19,8 +19,8 @@
 //! 这样空叶的"默认值"仍为 b""，且空子树哈希按层缓存实现 O(log n) 更新。
 //! 轻客户端验证空叶证明时，校验 leaf_hash == empty_leaf_hash() 即可。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -404,8 +404,18 @@ mod tests {
 
         // 验证新 root 下的包含证明
         let path = t.prove(&key);
-        assert!(SparseMerkleTree::verify(&t.root(), &key, Some(b"v2"), &path));
-        assert!(!SparseMerkleTree::verify(&t.root(), &key, Some(b"v1"), &path));
+        assert!(SparseMerkleTree::verify(
+            &t.root(),
+            &key,
+            Some(b"v2"),
+            &path
+        ));
+        assert!(!SparseMerkleTree::verify(
+            &t.root(),
+            &key,
+            Some(b"v1"),
+            &path
+        ));
     }
 
     #[test]
@@ -445,7 +455,12 @@ mod tests {
         let key = [42u8; 32];
         t.upsert(key, b"real");
         let path = t.prove(&key);
-        assert!(!SparseMerkleTree::verify(&t.root(), &key, Some(b"fake"), &path));
+        assert!(!SparseMerkleTree::verify(
+            &t.root(),
+            &key,
+            Some(b"fake"),
+            &path
+        ));
     }
 
     #[test]
@@ -455,6 +470,11 @@ mod tests {
         t.upsert(key, b"real");
         let path = t.prove(&key);
         let fake_root = [0xff; 32];
-        assert!(!SparseMerkleTree::verify(&fake_root, &key, Some(b"real"), &path));
+        assert!(!SparseMerkleTree::verify(
+            &fake_root,
+            &key,
+            Some(b"real"),
+            &path
+        ));
     }
 }

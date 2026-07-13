@@ -492,7 +492,7 @@ pub const DEFAULT_MAX_ACTIVE_GAMES_PER_PLAYER: u32 = 10;
 mod tests {
     use super::*;
     use crate::object_model::{ObjectID, Ownership};
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, Transaction};
 
     /// 构造测试用 tagged pubkey（不验证签名，仅用于地址派生与比对）。
@@ -555,7 +555,11 @@ mod tests {
             route_hint: route,
             chain_id: crate::DEFAULT_CHAIN_ID,
             nonce: 0,
-            gameturn_nonce: if lane == TxLane::GameTurn { Some(0) } else { None },
+            gameturn_nonce: if lane == TxLane::GameTurn {
+                Some(0)
+            } else {
+                None
+            },
             is_fallback,
         }
     }
@@ -622,8 +626,7 @@ mod tests {
         let err = validate_assigned_validator(&tx, &game, &other_tp).unwrap_err();
         assert!(matches!(err, PokerL1Error::NotAssignedValidator { .. }));
         // assigned_tp 应能通过（对照）
-        validate_assigned_validator(&tx, &game, &assigned_tp)
-            .expect("assigned_validator 应通过");
+        validate_assigned_validator(&tx, &game, &assigned_tp).expect("assigned_validator 应通过");
     }
 
     #[test]
@@ -701,8 +704,7 @@ mod tests {
         let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
         let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
         let rule = SimpleTurnRule;
-        validate_turn_order(&tx, &game, [0x10; 20], &rule)
-            .expect("当前轮次玩家应通过");
+        validate_turn_order(&tx, &game, [0x10; 20], &rule).expect("当前轮次玩家应通过");
     }
 
     #[test]
@@ -720,8 +722,7 @@ mod tests {
         let rule = SimpleTurnRule;
         // Public / ForceSync / CheckpointAnchor 通道不走轮转约束
         let tx_pub = make_tx(TxLane::Public, RouteHint::AnyValidator, false);
-        validate_turn_order(&tx_pub, &game, [0x99; 20], &rule)
-            .expect("Public 通道不走轮转约束");
+        validate_turn_order(&tx_pub, &game, [0x99; 20], &rule).expect("Public 通道不走轮转约束");
         let tx_ca = make_tx(
             TxLane::CheckpointAnchor,
             RouteHint::AssignedValidator,
@@ -747,8 +748,7 @@ mod tests {
         let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
         let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, true);
         let rule = SimpleTurnRule;
-        validate_turn_order(&tx, &game, [0x10; 20], &rule)
-            .expect("fallback tx 当前轮次玩家应通过");
+        validate_turn_order(&tx, &game, [0x10; 20], &rule).expect("fallback tx 当前轮次玩家应通过");
     }
 
     // ===== SubTask 8.7: validate_active_games_limit 测试 =====
@@ -888,18 +888,27 @@ mod tests {
     #[test]
     fn game_phase_default_is_betting_preflop() {
         let phase = GamePhase::default_phase();
-        assert_eq!(phase, GamePhase::Betting { round: BettingRound::Preflop });
+        assert_eq!(
+            phase,
+            GamePhase::Betting {
+                round: BettingRound::Preflop
+            }
+        );
         assert!(phase.is_betting());
         assert!(!phase.is_multi_player_submit());
     }
 
     #[test]
     fn game_phase_is_helpers_correct() {
-        let betting = GamePhase::Betting { round: BettingRound::Flop };
+        let betting = GamePhase::Betting {
+            round: BettingRound::Flop,
+        };
         assert!(betting.is_betting());
         assert!(!betting.is_multi_player_submit());
 
-        let multi = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        let multi = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::Shuffle,
+        };
         assert!(!multi.is_betting());
         assert!(multi.is_multi_player_submit());
     }
@@ -907,7 +916,9 @@ mod tests {
     #[test]
     fn game_phase_copy_semantics() {
         // GamePhase 派生 Copy，赋值后修改不影响原值
-        let phase1 = GamePhase::Betting { round: BettingRound::Preflop };
+        let phase1 = GamePhase::Betting {
+            round: BettingRound::Preflop,
+        };
         let phase2 = phase1;
         // 编译期保证 Copy：phase1 仍可用
         assert_eq!(phase1, phase2);
@@ -918,7 +929,12 @@ mod tests {
     #[test]
     fn game_status_new_fields_have_correct_defaults() {
         let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        assert_eq!(game.phase, GamePhase::Betting { round: BettingRound::Preflop });
+        assert_eq!(
+            game.phase,
+            GamePhase::Betting {
+                round: BettingRound::Preflop
+            }
+        );
         assert!(game.pending_submitters.is_empty());
         assert_eq!(game.phase_started_height, 0);
         assert!(game.completed_submitters.is_empty());
@@ -928,26 +944,37 @@ mod tests {
     fn game_status_phase_switch_resets_tracking_fields() {
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
         // 模拟多玩家阶段填充
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::Shuffle,
+        };
         game.pending_submitters.insert([0x10; 20]);
         game.pending_submitters.insert([0x20; 20]);
         game.completed_submitters.insert([0x10; 20]);
         game.phase_started_height = 50;
         // 阶段切换：重置追踪集合
-        game.phase = GamePhase::Betting { round: BettingRound::Flop };
+        game.phase = GamePhase::Betting {
+            round: BettingRound::Flop,
+        };
         game.pending_submitters.clear();
         game.completed_submitters.clear();
         game.phase_started_height = 0;
         assert!(game.pending_submitters.is_empty());
         assert!(game.completed_submitters.is_empty());
         assert_eq!(game.phase_started_height, 0);
-        assert_eq!(game.phase, GamePhase::Betting { round: BettingRound::Flop });
+        assert_eq!(
+            game.phase,
+            GamePhase::Betting {
+                round: BettingRound::Flop
+            }
+        );
     }
 
     #[test]
     fn game_status_with_multi_player_phase_bcs_roundtrip() {
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::Shuffle,
+        };
         game.pending_submitters.insert([0x10; 20]);
         game.pending_submitters.insert([0x20; 20]);
         game.completed_submitters.insert([0x10; 20]);
@@ -960,7 +987,9 @@ mod tests {
     #[test]
     fn game_status_with_multi_player_phase_json_roundtrip() {
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::RevealToken,
+        };
         game.pending_submitters.insert([0x10; 20]);
         game.phase_started_height = 100;
         let json = serde_json::to_string(&game).unwrap();
@@ -991,13 +1020,18 @@ mod tests {
         let mut g = game;
         let rule = SimpleTurnRule;
         let err = rule.advance_phase(&mut g).unwrap_err();
-        assert_eq!(err, PhaseTransitionError::InvalidPhaseTransition(expected_phase));
+        assert_eq!(
+            err,
+            PhaseTransitionError::InvalidPhaseTransition(expected_phase)
+        );
     }
 
     #[test]
     fn simple_turn_rule_current_turn_returns_none_in_multi_player_phase() {
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::Shuffle,
+        };
         let rule = SimpleTurnRule;
         // 多玩家阶段 current_turn 返回 None
         assert_eq!(rule.current_turn(&game), None);
@@ -1006,7 +1040,9 @@ mod tests {
     #[test]
     fn simple_turn_rule_advance_turn_returns_none_in_multi_player_phase() {
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::Shuffle,
+        };
         let rule = SimpleTurnRule;
         // 多玩家阶段 advance_turn 返回 None（no-op）
         assert_eq!(rule.advance_turn(&mut game), None);
@@ -1057,7 +1093,9 @@ mod tests {
     fn validate_game_turn_phase_aware_multi_player_submit_ok() {
         // 多玩家阶段（Shuffle）：pending_submitter 提交 → 通过，pending 移除、completed 插入
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::Shuffle,
+        };
         game.pending_submitters.insert([0x10; 20]);
         game.pending_submitters.insert([0x20; 20]);
         let rule = SimpleTurnRule;
@@ -1075,7 +1113,9 @@ mod tests {
     fn validate_game_turn_phase_aware_multi_player_submit_rejects_non_pending() {
         // 多玩家阶段（Shuffle）：非 pending_submitter 提交 → NotEligibleSubmitter
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::Shuffle,
+        };
         game.pending_submitters.insert([0x10; 20]);
         let rule = SimpleTurnRule;
         let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
@@ -1088,7 +1128,9 @@ mod tests {
     fn validate_game_turn_phase_aware_leave_proof_ok() {
         // LeaveProof 阶段：active_participant 提交 → 通过，从 active/pending 移除
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::LeaveProof,
+        };
         game.pending_submitters.insert([0x10; 20]);
         let rule = SimpleTurnRule;
         let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
@@ -1106,7 +1148,9 @@ mod tests {
     fn validate_game_turn_phase_aware_leave_proof_rejects_non_active() {
         // LeaveProof 阶段：非 active_participant 提交 → NotEligibleSubmitter
         let (mut game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
-        game.phase = GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof };
+        game.phase = GamePhase::MultiPlayerSubmit {
+            kind: SubmitPhaseKind::LeaveProof,
+        };
         let rule = SimpleTurnRule;
         let tx = make_tx(TxLane::GameTurn, RouteHint::AssignedValidator, false);
         // 0x30 不在 active_participants

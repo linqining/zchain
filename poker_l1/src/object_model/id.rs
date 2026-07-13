@@ -8,8 +8,8 @@
 //! ObjectStore 创建时校验 ObjectID 不存在，冲突返回 `ObjectIDCollision`。
 
 use crate::Address;
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 /// 对象创建 nonce（每账户单调递增）。
@@ -72,7 +72,12 @@ impl ObjectID {
 
 impl std::fmt::Display for ObjectID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "0x{}{}", hex::encode(self.creator_address), hex::encode(self.creation_nonce.to_le_bytes()))
+        write!(
+            f,
+            "0x{}{}",
+            hex::encode(self.creator_address),
+            hex::encode(self.creation_nonce.to_le_bytes())
+        )
     }
 }
 

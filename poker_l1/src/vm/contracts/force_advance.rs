@@ -139,10 +139,7 @@ pub fn force_advance_action(
             //          AND 超时玩家是大盲位 → check
             //          否则 → fold
             let is_big_blind = hand.players[player_idx].is_big_blind;
-            if hand.current_bet == hand.big_blind_amount
-                && hand.raise_count == 0
-                && is_big_blind
-            {
+            if hand.current_bet == hand.big_blind_amount && hand.raise_count == 0 && is_big_blind {
                 GameAction::Check
             } else {
                 GameAction::Fold
@@ -249,8 +246,8 @@ fn advance_to_next_active_player(hand: &mut HandState, from_idx: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::contracts::types::{ExecutionMode, GamePhase, PlayerStack, RakeConfigRef};
     use crate::object_model::ObjectID;
+    use crate::vm::contracts::types::{ExecutionMode, GamePhase, PlayerStack, RakeConfigRef};
 
     fn make_addr(byte: u8) -> Address {
         [byte; 20]
@@ -452,14 +449,7 @@ mod tests {
     fn test_force_advance_river_postflop_check() {
         // River 阶段也属于 postflop
         let p1 = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::River,
-            0,
-            0,
-            0,
-            100,
-            &[(p1, false, false)],
-        );
+        let hand = make_hand(GamePhase::River, 0, 0, 0, 100, &[(p1, false, false)]);
         let input = ForceAdvanceInput::new(p1, 110);
 
         let action = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS).unwrap();
@@ -471,14 +461,7 @@ mod tests {
     #[test]
     fn test_force_advance_player_not_in_game() {
         let p1 = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(p1, true, false)],
-        );
+        let hand = make_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(p1, true, false)]);
         let unknown = make_addr(0xff);
         let input = ForceAdvanceInput::new(unknown, 110);
 
@@ -500,38 +483,33 @@ mod tests {
         let input = ForceAdvanceInput::new(p1, 110);
 
         let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
-        assert!(matches!(result, Err(ForceAdvanceError::PlayerAlreadyFolded(_))));
+        assert!(matches!(
+            result,
+            Err(ForceAdvanceError::PlayerAlreadyFolded(_))
+        ));
     }
 
     #[test]
     fn test_force_advance_not_timed_out() {
         let p1 = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(p1, true, false)],
-        );
+        let hand = make_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(p1, true, false)]);
         // elapsed = 105 - 100 = 5 < 10 → 未超时
         let input = ForceAdvanceInput::new(p1, 105);
 
         let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
-        assert!(matches!(result, Err(ForceAdvanceError::NotTimedOut { elapsed: 5, timeout: 10 })));
+        assert!(matches!(
+            result,
+            Err(ForceAdvanceError::NotTimedOut {
+                elapsed: 5,
+                timeout: 10
+            })
+        ));
     }
 
     #[test]
     fn test_force_advance_hand_already_settled() {
         let p1 = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::Settled,
-            0,
-            0,
-            0,
-            100,
-            &[(p1, true, false)],
-        );
+        let hand = make_hand(GamePhase::Settled, 0, 0, 0, 100, &[(p1, true, false)]);
         let input = ForceAdvanceInput::new(p1, 110);
 
         let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
@@ -544,14 +522,7 @@ mod tests {
     fn test_force_advance_exact_timeout_boundary() {
         // elapsed == timeout_blocks（边界，恰好超时）
         let bb = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(bb, true, false)],
-        );
+        let hand = make_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(bb, true, false)]);
         let input = ForceAdvanceInput::new(bb, 110); // elapsed = 10 == timeout
 
         let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
@@ -562,14 +533,7 @@ mod tests {
     fn test_force_advance_one_block_past_timeout() {
         // elapsed = timeout + 1（超过超时阈值）
         let bb = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(bb, true, false)],
-        );
+        let hand = make_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(bb, true, false)]);
         let input = ForceAdvanceInput::new(bb, 111); // elapsed = 11 > 10
 
         let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
@@ -580,14 +544,7 @@ mod tests {
     fn test_force_advance_one_block_before_timeout() {
         // elapsed = timeout - 1（未到超时阈值）
         let bb = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(bb, true, false)],
-        );
+        let hand = make_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(bb, true, false)]);
         let input = ForceAdvanceInput::new(bb, 109); // elapsed = 9 < 10
 
         let result = force_advance_action(&hand, &input, DEFAULT_TIMEOUT_BLOCKS);
@@ -598,14 +555,7 @@ mod tests {
     fn test_force_advance_zero_timeout_blocks() {
         // turn_timeout_blocks = 0（立即超时）
         let bb = make_addr(0x01);
-        let hand = make_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(bb, true, false)],
-        );
+        let hand = make_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(bb, true, false)]);
         let input = ForceAdvanceInput::new(bb, 100); // elapsed = 0
 
         let result = force_advance_action(&hand, &input, 0);
@@ -622,7 +572,14 @@ mod tests {
         last_action_height: u64,
         players: &[(Address, bool, bool)],
     ) -> GameContract {
-        let hand = make_hand(phase, current_bet, raise_count, bet_count, last_action_height, players);
+        let hand = make_hand(
+            phase,
+            current_bet,
+            raise_count,
+            bet_count,
+            last_action_height,
+            players,
+        );
         let mut game = GameContract::new(
             ObjectID::new([0x42; 20], 1),
             make_addr(0x01),
@@ -670,14 +627,7 @@ mod tests {
     fn test_apply_force_advance_check_no_chip_change() {
         // postflop 无人下注 → check → 玩家筹码不变
         let p1 = make_addr(0x01);
-        let mut game = make_game_with_hand(
-            GamePhase::Flop,
-            0,
-            0,
-            0,
-            100,
-            &[(p1, false, false)],
-        );
+        let mut game = make_game_with_hand(GamePhase::Flop, 0, 0, 0, 100, &[(p1, false, false)]);
         let input = ForceAdvanceInput::new(p1, 110);
 
         let action = apply_force_advance(&mut game, &input).expect("应成功");
@@ -692,21 +642,20 @@ mod tests {
     fn test_apply_force_advance_updates_last_action_height() {
         // R5-L1：last_action_height 更新（hand 级 + game 级）
         let bb = make_addr(0x01);
-        let mut game = make_game_with_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(bb, true, false)],
-        );
+        let mut game = make_game_with_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(bb, true, false)]);
         let input = ForceAdvanceInput::new(bb, 120);
 
         apply_force_advance(&mut game, &input).expect("应成功");
 
-        assert_eq!(game.last_action_height, 120, "game.last_action_height 应更新");
+        assert_eq!(
+            game.last_action_height, 120,
+            "game.last_action_height 应更新"
+        );
         let hand = game.current_hand.as_ref().expect("手牌应存在");
-        assert_eq!(hand.last_action_height, 120, "hand.last_action_height 应更新");
+        assert_eq!(
+            hand.last_action_height, 120,
+            "hand.last_action_height 应更新"
+        );
     }
 
     #[test]
@@ -733,14 +682,7 @@ mod tests {
     #[test]
     fn test_apply_force_advance_increments_version() {
         let bb = make_addr(0x01);
-        let mut game = make_game_with_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(bb, true, false)],
-        );
+        let mut game = make_game_with_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(bb, true, false)]);
         let old_version = game.version;
         let input = ForceAdvanceInput::new(bb, 110);
 
@@ -753,14 +695,7 @@ mod tests {
         // R5-L1：第一次 force_advance 后 last_action_height 更新，
         // 第二次须再等 turn_timeout_blocks 个 block
         let bb = make_addr(0x01);
-        let mut game = make_game_with_hand(
-            GamePhase::Preflop,
-            20,
-            0,
-            0,
-            100,
-            &[(bb, true, false)],
-        );
+        let mut game = make_game_with_hand(GamePhase::Preflop, 20, 0, 0, 100, &[(bb, true, false)]);
 
         // 第一次：block 110，elapsed = 10 == timeout → 成功
         let input1 = ForceAdvanceInput::new(bb, 110);

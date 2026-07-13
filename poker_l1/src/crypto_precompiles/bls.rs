@@ -21,9 +21,7 @@
 
 use std::io::Cursor;
 
-use blstrs::{
-    Bls12, Compress, G1Projective, G2Prepared, G2Projective, Gt, Scalar,
-};
+use blstrs::{Bls12, Compress, G1Projective, G2Prepared, G2Projective, Gt, Scalar};
 use group::{Curve, Group};
 use pairing::{MillerLoopResult as _, MultiMillerLoop};
 use subtle::CtOption;
@@ -71,8 +69,9 @@ fn parse_g1(bytes: &[u8]) -> PokerL1Result<G1Projective> {
     }
     let mut arr = [0u8; G1_COMPRESSED_SIZE];
     arr.copy_from_slice(bytes);
-    ct_opt_to_opt(G1Projective::from_compressed(&arr))
-        .ok_or(PokerL1Error::InvalidSubgroup("G1 point failed subgroup check or not on curve"))
+    ct_opt_to_opt(G1Projective::from_compressed(&arr)).ok_or(PokerL1Error::InvalidSubgroup(
+        "G1 point failed subgroup check or not on curve",
+    ))
 }
 
 /// 序列化 G1 点为 compressed bytes（48 字节）。
@@ -109,10 +108,7 @@ pub fn bls_g1_add(a: &[u8], b: &[u8]) -> PokerL1Result<[u8; G1_COMPRESSED_SIZE]>
 /// `bls12_381_g1_mul(point, scalar)` — G1 标量乘法（含子群检查）。
 ///
 /// gas = [`GAS_BLS_G1_MUL`](crate::vm::gas_table::GAS_BLS_G1_MUL) = 500。
-pub fn bls_g1_mul(
-    point: &[u8],
-    scalar: &[u8],
-) -> PokerL1Result<[u8; G1_COMPRESSED_SIZE]> {
+pub fn bls_g1_mul(point: &[u8], scalar: &[u8]) -> PokerL1Result<[u8; G1_COMPRESSED_SIZE]> {
     let p = parse_g1(point)?;
     let s = parse_scalar(scalar)?;
     let result = p * s;
@@ -141,8 +137,9 @@ fn parse_g2(bytes: &[u8]) -> PokerL1Result<G2Projective> {
     }
     let mut arr = [0u8; G2_COMPRESSED_SIZE];
     arr.copy_from_slice(bytes);
-    ct_opt_to_opt(G2Projective::from_compressed(&arr))
-        .ok_or(PokerL1Error::InvalidSubgroup("G2 point failed subgroup check or not on curve"))
+    ct_opt_to_opt(G2Projective::from_compressed(&arr)).ok_or(PokerL1Error::InvalidSubgroup(
+        "G2 point failed subgroup check or not on curve",
+    ))
 }
 
 /// 序列化 G2 点为 compressed bytes（96 字节）。
@@ -163,10 +160,7 @@ pub fn bls_g2_add(a: &[u8], b: &[u8]) -> PokerL1Result<[u8; G2_COMPRESSED_SIZE]>
 /// `bls12_381_g2_mul(point, scalar)` — G2 标量乘法（含子群检查）。
 ///
 /// gas = [`GAS_BLS_G2_MUL`](crate::vm::gas_table::GAS_BLS_G2_MUL) = 500。
-pub fn bls_g2_mul(
-    point: &[u8],
-    scalar: &[u8],
-) -> PokerL1Result<[u8; G2_COMPRESSED_SIZE]> {
+pub fn bls_g2_mul(point: &[u8], scalar: &[u8]) -> PokerL1Result<[u8; G2_COMPRESSED_SIZE]> {
     let p = parse_g2(point)?;
     let s = parse_scalar(scalar)?;
     let result = p * s;
@@ -260,10 +254,7 @@ fn parse_gt(bytes: &[u8]) -> PokerL1Result<Gt> {
 /// miller_loop + final_exponentiation 并返回 `Gt` compressed bytes。
 /// 调用方如需 multi-pairing，应使用 `bls_pairing_check`。
 /// gas = [`GAS_BLS_MILLER_LOOP`](crate::vm::gas_table::GAS_BLS_MILLER_LOOP) = 2000。
-pub fn bls_miller_loop(
-    a_g1: &[u8],
-    b_g2: &[u8],
-) -> PokerL1Result<[u8; GT_COMPRESSED_SIZE]> {
+pub fn bls_miller_loop(a_g1: &[u8], b_g2: &[u8]) -> PokerL1Result<[u8; GT_COMPRESSED_SIZE]> {
     let a = parse_g1(a_g1)?.to_affine();
     let b = G2Prepared::from(parse_g2(b_g2)?.to_affine());
     let ml = Bls12::multi_miller_loop(&[(&a, &b)]);
@@ -512,10 +503,7 @@ mod tests {
         // 全零 bytes 不是合法的 compressed point
         let zero_g1 = [0u8; G1_COMPRESSED_SIZE];
         let result = bls_g1_neg(&zero_g1);
-        assert!(
-            result.is_err(),
-            "全零 G1 compressed 应被拒绝（不在曲线上）"
-        );
+        assert!(result.is_err(), "全零 G1 compressed 应被拒绝（不在曲线上）");
 
         let zero_g2 = [0u8; G2_COMPRESSED_SIZE];
         let result2 = bls_g2_neg(&zero_g2);
@@ -541,9 +529,6 @@ mod tests {
         let good_g1 = serialize_g1(&g1_generator());
 
         let result = bls_pairing_check(&bad_g1, &g2, &good_g1, &g2);
-        assert!(
-            result.is_err(),
-            "非法 G1 应在 pairing 之前被拒绝"
-        );
+        assert!(result.is_err(), "非法 G1 应在 pairing 之前被拒绝");
     }
 }

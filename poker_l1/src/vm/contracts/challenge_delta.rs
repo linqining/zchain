@@ -24,8 +24,8 @@
 //! - 剩余按 buy_in 比例分配给其他受害者玩家
 //! - 防恶意挑战方无成本骚扰
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 use crate::error::PokerL1Error;
@@ -124,10 +124,7 @@ pub fn hash_state_delta(state_delta: &[u8]) -> Hash {
 ///
 /// `challenger_deposit = buy_in_amount * challenge_deposit_ratio / 100`
 #[must_use]
-pub const fn compute_challenger_deposit(
-    buy_in_amount: u64,
-    challenge_deposit_ratio: u32,
-) -> u64 {
+pub const fn compute_challenger_deposit(buy_in_amount: u64, challenge_deposit_ratio: u32) -> u64 {
     buy_in_amount.saturating_mul(challenge_deposit_ratio as u64) / 100
 }
 
@@ -135,10 +132,7 @@ pub const fn compute_challenger_deposit(
 ///
 /// `challenger_reward = forfeit_deposit * challenge_reward_ratio / 100`
 #[must_use]
-pub const fn compute_challenger_reward(
-    forfeit_deposit: u64,
-    challenge_reward_ratio: u32,
-) -> u64 {
+pub const fn compute_challenger_reward(forfeit_deposit: u64, challenge_reward_ratio: u32) -> u64 {
     forfeit_deposit.saturating_mul(challenge_reward_ratio as u64) / 100
 }
 
@@ -205,8 +199,7 @@ pub fn apply_challenge_delta(
     if claimed_hash != on_chain_state_delta_hash {
         // 挑战成立（succeeded）：操作方 forfeit 保证金
         let operator_forfeit = game.forfeit_deposit;
-        let challenger_reward =
-            compute_challenger_reward(operator_forfeit, challenge_reward_ratio);
+        let challenger_reward = compute_challenger_reward(operator_forfeit, challenge_reward_ratio);
 
         // 扣除操作方 forfeit 保证金（全额）
         game.forfeit_deposit = 0;
@@ -245,8 +238,7 @@ pub fn compute_challenge_delta_outcome(
 
     if succeeded {
         let operator_forfeit = game.forfeit_deposit;
-        let challenger_reward =
-            compute_challenger_reward(operator_forfeit, challenge_reward_ratio);
+        let challenger_reward = compute_challenger_reward(operator_forfeit, challenge_reward_ratio);
         ChallengeDeltaOutcome {
             succeeded: true,
             challenger_deposit_refunded: true,
@@ -270,7 +262,7 @@ pub fn compute_challenge_delta_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
     use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_addr(byte: u8) -> Address {
@@ -370,7 +362,10 @@ mod tests {
     #[test]
     fn test_claimed_delta_hash_matches_hash_state_delta() {
         let tx = make_tx(vec![0xAA, 0xBB, 0xCC], 100);
-        assert_eq!(tx.claimed_delta_hash(), hash_state_delta(&[0xAA, 0xBB, 0xCC]));
+        assert_eq!(
+            tx.claimed_delta_hash(),
+            hash_state_delta(&[0xAA, 0xBB, 0xCC])
+        );
     }
 
     // ===== apply_challenge_delta 测试 =====
@@ -465,11 +460,13 @@ mod tests {
         let tx = make_tx(vec![0xAA], 500);
         let on_chain_hash = [0xFF; 32];
 
-        let outcome =
-            compute_challenge_delta_outcome(&game, &tx, on_chain_hash, 100);
+        let outcome = compute_challenge_delta_outcome(&game, &tx, on_chain_hash, 100);
         assert!(outcome.succeeded);
         assert!(outcome.challenger_deposit_refunded);
-        assert_eq!(outcome.challenger_reward, 10000, "SEC-C4: ratio=100 → 全额奖励");
+        assert_eq!(
+            outcome.challenger_reward, 10000,
+            "SEC-C4: ratio=100 → 全额奖励"
+        );
         assert_eq!(outcome.operator_forfeit_amount, 10000);
         assert_eq!(outcome.challenger_forfeit_amount, 0);
         assert!(outcome.triggers_request_revert);
@@ -514,6 +511,9 @@ mod tests {
 
         let _ = compute_challenge_delta_outcome(&game, &tx, [0xFF; 32], 100);
         assert_eq!(game.version, prev_version, "compute 不应修改 version");
-        assert_eq!(game.forfeit_deposit, 10000, "compute 不应修改 forfeit_deposit");
+        assert_eq!(
+            game.forfeit_deposit, 10000,
+            "compute 不应修改 forfeit_deposit"
+        );
     }
 }

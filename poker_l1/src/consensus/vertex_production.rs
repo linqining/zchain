@@ -36,12 +36,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::BlockHeight;
 use crate::consensus::routing::{GameStatus, TurnRule};
 use crate::consensus::{DagVertex, Epoch, GamePhase, MAX_VERTEX_SIZE, Round};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
 use crate::transaction::{Gas, RouteHint, Transaction, TxLane};
-use crate::BlockHeight;
 
 /// 默认 checkpoint 多副本见证数（spec：3-of-5）。
 pub const DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT: usize = 5;
@@ -53,11 +53,7 @@ pub const DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT: usize = 5;
 /// 默认 5 副本 → `max(3, floor(10/3)) = max(3, 3) = 3`（3-of-5）。
 pub const fn required_witness_count(checkpoint_multi_replica_count: usize) -> usize {
     let computed = checkpoint_multi_replica_count * 2 / 3;
-    if computed > 3 {
-        computed
-    } else {
-        3
-    }
+    if computed > 3 { computed } else { 3 }
 }
 
 /// 计算某轮 vertex 引用 parent 所需的最小 quorum（≥2/3 validator）。
@@ -148,7 +144,11 @@ impl VertexBuilder {
             size += 8; // inputs len
             size += tx.inputs.iter().map(|i| i.to_bytes().len()).sum::<usize>();
             size += 8; // outputs len
-            size += tx.outputs.iter().map(|o| o.content_hash().len()).sum::<usize>();
+            size += tx
+                .outputs
+                .iter()
+                .map(|o| o.content_hash().len())
+                .sum::<usize>();
             size += 1 + tx.signature.len();
             size += 8 + 8; // gas budget + price
         }
@@ -340,13 +340,23 @@ pub fn validate_gameturn_gas_free(tx: &Transaction) -> PokerL1Result<()> {
 pub fn sort_vertex_txs_s9(txs: Vec<Transaction>) -> Vec<Transaction> {
     let mut result: Vec<Transaction> = Vec::with_capacity(txs.len());
     // 1. GameTurn + CheckpointAnchor 优先
-    result.extend(txs.iter().filter(|tx| {
-        matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor)
-    }).cloned());
+    result.extend(
+        txs.iter()
+            .filter(|tx| matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor))
+            .cloned(),
+    );
     // 2. Public 中间
-    result.extend(txs.iter().filter(|tx| tx.lane_hint == TxLane::Public).cloned());
+    result.extend(
+        txs.iter()
+            .filter(|tx| tx.lane_hint == TxLane::Public)
+            .cloned(),
+    );
     // 3. ForceSync 后置
-    result.extend(txs.iter().filter(|tx| tx.lane_hint == TxLane::ForceSync).cloned());
+    result.extend(
+        txs.iter()
+            .filter(|tx| tx.lane_hint == TxLane::ForceSync)
+            .cloned(),
+    );
     result
 }
 
@@ -467,9 +477,9 @@ impl TimeoutProof {
     /// spec：见证 validator 须为非 assigned_validator 的其他 validator，
     /// 防 assigned_validator 自签伪造 timeout_proof。
     pub fn validate_witness_independence(
-    &self,
-    assigned_validator: &TaggedPubkey,
-) -> PokerL1Result<()> {
+        &self,
+        assigned_validator: &TaggedPubkey,
+    ) -> PokerL1Result<()> {
         for pk in &self.witness_pubkeys {
             if pk == assigned_validator {
                 return Err(PokerL1Error::InvalidTimeoutProof(
@@ -523,10 +533,7 @@ pub fn validate_fallback_tx(
 
     // 3. NEW-M9：fallback tx 使用 gameturn_nonce
     if fallback_tx.gameturn_nonce.is_none() {
-        return Err(PokerL1Error::GameTurnNonceMismatch {
-            tx: 0,
-            game: 0,
-        });
+        return Err(PokerL1Error::GameTurnNonceMismatch { tx: 0, game: 0 });
     }
 
     // 4. R4-H6：witness 数量达标
@@ -558,7 +565,7 @@ mod tests {
     use super::*;
     use crate::consensus::routing::{ExecutionMode, SimpleTurnRule};
     use crate::object_model::{Object, ObjectID, Ownership};
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, Transaction, TxLane};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -605,9 +612,21 @@ mod tests {
             contract_call: None,
             tagged_pubkey: make_tagged_pubkey(actor_byte, SignatureScheme::Secp256k1),
             signature: vec![0; 65],
-            gas: if is_fallback { Gas::new(1_000_000, 1) } else { Gas::zero() },
-            lane_hint: if is_fallback { TxLane::Public } else { TxLane::GameTurn },
-            route_hint: if is_fallback { RouteHint::AnyValidator } else { RouteHint::AssignedValidator },
+            gas: if is_fallback {
+                Gas::new(1_000_000, 1)
+            } else {
+                Gas::zero()
+            },
+            lane_hint: if is_fallback {
+                TxLane::Public
+            } else {
+                TxLane::GameTurn
+            },
+            route_hint: if is_fallback {
+                RouteHint::AnyValidator
+            } else {
+                RouteHint::AssignedValidator
+            },
             chain_id: crate::DEFAULT_CHAIN_ID,
             nonce: 0,
             gameturn_nonce: Some(gameturn_nonce),
@@ -690,11 +709,11 @@ mod tests {
     #[test]
     fn required_parent_count_two_thirds_quorum() {
         // ceil(n * 2 / 3)
-        assert_eq!(required_parent_count(3), 2);  // ceil(6/3) = 2
-        assert_eq!(required_parent_count(5), 4);  // ceil(10/3) = 4
-        assert_eq!(required_parent_count(6), 4);  // ceil(12/3) = 4
-        assert_eq!(required_parent_count(7), 5);  // ceil(14/3) = 5
-        assert_eq!(required_parent_count(9), 6);  // ceil(18/3) = 6
+        assert_eq!(required_parent_count(3), 2); // ceil(6/3) = 2
+        assert_eq!(required_parent_count(5), 4); // ceil(10/3) = 4
+        assert_eq!(required_parent_count(6), 4); // ceil(12/3) = 4
+        assert_eq!(required_parent_count(7), 5); // ceil(14/3) = 5
+        assert_eq!(required_parent_count(9), 6); // ceil(18/3) = 6
     }
 
     #[test]
@@ -725,11 +744,16 @@ mod tests {
     #[test]
     fn vertex_builder_validate_parents_rejects_insufficient() {
         let author = make_tagged_pubkey(0x01, SignatureScheme::Secp256k1);
-        let builder = VertexBuilder::new(1, 10, author)
-            .with_parents(vec![[0u8; 32]]); // 仅 1 个 parent
+        let builder = VertexBuilder::new(1, 10, author).with_parents(vec![[0u8; 32]]); // 仅 1 个 parent
         // 5 validator → 需要 4 个 parent
         let err = builder.validate_parents(5).unwrap_err();
-        assert!(matches!(err, PokerL1Error::InsufficientParents { actual: 1, required: 4 }));
+        assert!(matches!(
+            err,
+            PokerL1Error::InsufficientParents {
+                actual: 1,
+                required: 4
+            }
+        ));
     }
 
     #[test]
@@ -738,14 +762,15 @@ mod tests {
         let builder = VertexBuilder::new(1, 10, author)
             .with_parents(vec![[0u8; 32], [1u8; 32], [2u8; 32], [3u8; 32]]);
         // 5 validator → 需要 4 个 parent，正好 4 个
-        builder.validate_parents(5).expect("4 个 parent 应满足 5 validator quorum");
+        builder
+            .validate_parents(5)
+            .expect("4 个 parent 应满足 5 validator quorum");
     }
 
     #[test]
     fn vertex_builder_validate_size_ok_for_small_vertex() {
         let author = make_tagged_pubkey(0x01, SignatureScheme::Secp256k1);
-        let builder = VertexBuilder::new(1, 10, author)
-            .with_parents(vec![[0u8; 32]]);
+        let builder = VertexBuilder::new(1, 10, author).with_parents(vec![[0u8; 32]]);
         builder.validate_size().expect("小 vertex 不应超限");
     }
 
@@ -810,7 +835,7 @@ mod tests {
         let rule = SimpleTurnRule;
         let txs = vec![
             make_gameturn_tx(0x10, 1, false),
-            make_public_tx(1),   // 非 GameTurn，应被过滤
+            make_public_tx(1),     // 非 GameTurn，应被过滤
             make_force_sync_tx(2), // 非 GameTurn，应被过滤
         ];
         let sub = build_game_sub_block(txs, &game, &rule).expect("构造 sub-block");
@@ -827,7 +852,10 @@ mod tests {
         let rule = SimpleTurnRule;
         // arrival 顺序：0x20 先到（nonce=1），0x10 后到（nonce=2）
         // current_turn_player=0x10，但多玩家阶段不应优先
-        let txs = vec![make_gameturn_tx(0x20, 1, false), make_gameturn_tx(0x10, 2, false)];
+        let txs = vec![
+            make_gameturn_tx(0x20, 1, false),
+            make_gameturn_tx(0x10, 2, false),
+        ];
         let sub = build_game_sub_block(txs, &game, &rule).expect("构造 sub-block");
         // 多玩家阶段按 arrival 顺序：0x20（nonce=1）在前，0x10（nonce=2）在后
         assert_eq!(sub.txs[0].gameturn_nonce, Some(1));
@@ -949,7 +977,10 @@ mod tests {
 
     #[test]
     fn sort_commit_txs_r4m4_single_vertex() {
-        let commit = vec![vec![make_force_sync_tx(1), make_gameturn_tx(0x10, 2, false)]];
+        let commit = vec![vec![
+            make_force_sync_tx(1),
+            make_gameturn_tx(0x10, 2, false),
+        ]];
         let sorted = sort_commit_txs_r4m4(commit);
         assert_eq!(sorted[0].lane_hint, TxLane::GameTurn);
         assert_eq!(sorted[1].lane_hint, TxLane::ForceSync);
@@ -982,8 +1013,9 @@ mod tests {
         let game_id_b = ObjectID::new([0xBB; 20], 1);
         let prev_turns: Vec<Transaction> = vec![];
         let phase = crate::consensus::GamePhase::default_phase();
-        let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id_a, &game_id_b, &phase)
-            .unwrap_err();
+        let err =
+            check_sech6_cross_commit_force_advance(&prev_turns, &game_id_a, &game_id_b, &phase)
+                .unwrap_err();
         assert!(matches!(err, PokerL1Error::GameNotFound(_)));
     }
 
@@ -1060,7 +1092,8 @@ mod tests {
         let original = make_gameturn_tx(0x10, 1, false);
         let proof = make_timeout_proof(original, 3, false, 0x01);
         let assigned = make_tagged_pubkey(0x01, SignatureScheme::Secp256k1);
-        proof.validate_witness_independence(&assigned)
+        proof
+            .validate_witness_independence(&assigned)
             .expect("无 assigned_validator 应通过");
     }
 
@@ -1080,8 +1113,7 @@ mod tests {
         let original = make_gameturn_tx(0x10, 5, false);
         let proof = make_timeout_proof(original, 3, false, 0x01);
         let fallback = make_gameturn_tx(0x10, 5, true);
-        validate_fallback_tx(&fallback, &proof, &assigned, 5)
-            .expect("合法 fallback tx 应通过");
+        validate_fallback_tx(&fallback, &proof, &assigned, 5).expect("合法 fallback tx 应通过");
     }
 
     #[test]
@@ -1159,7 +1191,10 @@ mod tests {
     fn game_sub_block_bcs_roundtrip() {
         let (game, _) = make_game(0x01, 0x10, &[0x10, 0x20]);
         let rule = SimpleTurnRule;
-        let txs = vec![make_gameturn_tx(0x10, 1, false), make_gameturn_tx(0x10, 2, false)];
+        let txs = vec![
+            make_gameturn_tx(0x10, 1, false),
+            make_gameturn_tx(0x10, 2, false),
+        ];
         let sub = build_game_sub_block(txs, &game, &rule).expect("构造 sub-block");
         let bytes = bcs::to_bytes(&sub).unwrap();
         let recovered: GameSubBlock = bcs::from_bytes(&bytes).unwrap();

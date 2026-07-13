@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
-use crate::Address;
 
 /// 合约对象类型名。
 pub const CONTRACT_TYPE: &str = "Contract";
@@ -171,8 +171,7 @@ impl ContractRegistry {
 
         self.contracts.insert(contract_id, contract);
         self.upgrade_caps.insert(contract_id, cap);
-        self.upgrade_states
-            .insert(contract_id, UpgradeState::Idle);
+        self.upgrade_states.insert(contract_id, UpgradeState::Idle);
 
         Ok((contract_id, cap_id))
     }
@@ -281,11 +280,7 @@ impl ContractRegistry {
     }
 
     /// 检查指定版本是否可调用（当前活跃版本可调用，旧版本不可）。
-    pub fn is_version_callable(
-        &self,
-        contract_id: &ObjectID,
-        version: u32,
-    ) -> PokerL1Result<bool> {
+    pub fn is_version_callable(&self, contract_id: &ObjectID, version: u32) -> PokerL1Result<bool> {
         let contract = self.get_contract(contract_id)?;
         Ok(contract.version == version && contract.is_active)
     }
@@ -344,9 +339,7 @@ mod tests {
     fn test_activate_version() {
         let mut registry = ContractRegistry::new();
         let deployer = make_address(0x01);
-        let (contract_id, _) = registry
-            .deploy(b"v1".to_vec(), deployer, 100)
-            .unwrap();
+        let (contract_id, _) = registry.deploy(b"v1".to_vec(), deployer, 100).unwrap();
 
         // 激活 v2
         registry
@@ -369,9 +362,7 @@ mod tests {
     fn test_is_version_callable() {
         let mut registry = ContractRegistry::new();
         let deployer = make_address(0x01);
-        let (contract_id, _) = registry
-            .deploy(b"v1".to_vec(), deployer, 100)
-            .unwrap();
+        let (contract_id, _) = registry.deploy(b"v1".to_vec(), deployer, 100).unwrap();
 
         assert!(registry.is_version_callable(&contract_id, 1).unwrap());
         assert!(!registry.is_version_callable(&contract_id, 2).unwrap());

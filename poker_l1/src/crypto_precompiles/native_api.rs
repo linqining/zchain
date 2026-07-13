@@ -9,7 +9,7 @@
 
 use crate::crypto_precompiles::bls::{self, G1_COMPRESSED_SIZE, G2_COMPRESSED_SIZE};
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::signature::{verify_signature, TaggedPubkey};
+use crate::signature::{TaggedPubkey, verify_signature};
 
 /// `secp256k1_aggregate_verify(pubkeys, msg_hashes, sigs)` — DAG consensus 多签验证。
 ///
@@ -61,11 +61,7 @@ pub fn secp256k1_aggregate_verify(
 /// - `pubkey_g2`：签名者公钥（G2 compressed，96 字节）
 /// - `signature_g1`：签名（G1 compressed，48 字节）
 /// - `msg`：被签名的消息
-pub fn bls_verify(
-    pubkey_g2: &[u8],
-    signature_g1: &[u8],
-    msg: &[u8],
-) -> PokerL1Result<bool> {
+pub fn bls_verify(pubkey_g2: &[u8], signature_g1: &[u8], msg: &[u8]) -> PokerL1Result<bool> {
     if pubkey_g2.len() != G2_COMPRESSED_SIZE {
         return Err(PokerL1Error::InvalidBlsPoint(format!(
             "pubkey_g2 size mismatch: {} != {}",
@@ -104,7 +100,7 @@ pub fn bls_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
         TaggedPubkey {

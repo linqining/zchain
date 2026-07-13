@@ -169,11 +169,7 @@ impl PokerL1Context {
             gas_used: self.gas_used(),
             events: self.events,
             created_objects: self.created_objects,
-            modified_objects: self
-                .object_cache
-                .keys()
-                .copied()
-                .collect(),
+            modified_objects: self.object_cache.keys().copied().collect(),
         }
     }
 }

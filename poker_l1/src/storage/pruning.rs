@@ -25,15 +25,15 @@
 //!   challenge_delta 证据 / request_revert 证据 / ZK proof hash 链等）
 //! - **SEC2-M5 修复**：archive node 勾结检测（PoSt 存储证明）
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
+use crate::Hash;
 use crate::consensus::{DagVertex, Epoch, Round};
 use crate::error::PokerL1Error;
 use crate::signature::TaggedPubkey;
 use crate::transaction::{Transaction, TxLane};
-use crate::Hash;
 
 // ===== 常量 =====
 
@@ -375,11 +375,7 @@ pub fn prune_vertex(vertex: &DagVertex) -> PrunedVertex {
 ///
 /// `proof_hash = blake2b_256(π || Δ || ack_chain)`
 #[must_use]
-pub fn compute_proof_hash(
-    proof: &[u8],
-    state_delta: &[u8],
-    ack_chain: &[u8],
-) -> Hash {
+pub fn compute_proof_hash(proof: &[u8], state_delta: &[u8], ack_chain: &[u8]) -> Hash {
     let mut hasher = Blake2bVar::new(32).expect("Blake2bVar(32) 初始化不应失败");
     hasher.update(proof);
     hasher.update(state_delta);
@@ -574,7 +570,7 @@ pub const fn check_pruning_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
     use crate::transaction::{Gas, RouteHint};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
@@ -588,10 +584,22 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_TX_PRUNE_AFTER_BLOCKS, 1000, "SubTask 29.2: tx 裁剪窗口默认 1000");
-        assert_eq!(DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, 10_000, "SubTask 29.3 / NEW-M13: vertex 裁剪窗口默认 10000");
-        assert_eq!(DEFAULT_ARCHIVE_NODE_MIN_COUNT, 3, "SubTask 29.4: archive node 最少 3");
-        assert_eq!(MIN_ZK_PROOF_REPLICA_COUNT, 3, "SEC-M7: ZK proof Walrus 副本数 >= 3");
+        assert_eq!(
+            DEFAULT_TX_PRUNE_AFTER_BLOCKS, 1000,
+            "SubTask 29.2: tx 裁剪窗口默认 1000"
+        );
+        assert_eq!(
+            DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, 10_000,
+            "SubTask 29.3 / NEW-M13: vertex 裁剪窗口默认 10000"
+        );
+        assert_eq!(
+            DEFAULT_ARCHIVE_NODE_MIN_COUNT, 3,
+            "SubTask 29.4: archive node 最少 3"
+        );
+        assert_eq!(
+            MIN_ZK_PROOF_REPLICA_COUNT, 3,
+            "SEC-M7: ZK proof Walrus 副本数 >= 3"
+        );
     }
 
     #[test]
@@ -614,7 +622,10 @@ mod tests {
 
     #[test]
     fn test_node_role_full_prunes() {
-        assert!(NodeRole::Full.should_prune(), "Full node 执行 Layer 1-3 裁剪");
+        assert!(
+            NodeRole::Full.should_prune(),
+            "Full node 执行 Layer 1-3 裁剪"
+        );
         assert!(!NodeRole::Full.retains_full_data());
         assert!(!NodeRole::Full.can_serve_historical_data());
     }
@@ -756,14 +767,23 @@ mod tests {
     fn test_check_pruning_allowed_ok() {
         let config = PruningConfig::new();
         assert!(check_pruning_allowed(5, &config).is_ok());
-        assert!(check_pruning_allowed(3, &config).is_ok(), "boundary: == min");
+        assert!(
+            check_pruning_allowed(3, &config).is_ok(),
+            "boundary: == min"
+        );
     }
 
     #[test]
     fn test_check_pruning_allowed_rejected() {
         let config = PruningConfig::new();
         let result = check_pruning_allowed(2, &config);
-        assert!(matches!(result, Err(PokerL1Error::PruningRejectedArchiveInsufficient { actual: 2, limit: 3 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::PruningRejectedArchiveInsufficient {
+                actual: 2,
+                limit: 3
+            })
+        ));
     }
 
     // ===== prune_tx 测试（SubTask 29.2）=====
@@ -836,7 +856,11 @@ mod tests {
         assert_eq!(pruned.vertex_hash, vertex_hash, "vertex_hash 永久保留");
         assert_eq!(pruned.tx_count, 3, "tx_list 长度保留");
         assert_eq!(pruned.parent_count, 2, "parent_hashes 长度保留");
-        assert_eq!(pruned.author_sig, vec![0xCC; 65], "author_sig 保留（slashing 证据）");
+        assert_eq!(
+            pruned.author_sig,
+            vec![0xCC; 65],
+            "author_sig 保留（slashing 证据）"
+        );
     }
 
     #[test]
@@ -892,7 +916,10 @@ mod tests {
         assert_eq!(archived.walrus_blob_id, blob_id);
         assert!(!archived.blob_expired, "新归档的 blob 未过期");
         // proof_hash 应与手动计算一致
-        assert_eq!(archived.proof_hash, compute_proof_hash(&[0xAA], &[0xBB], &[0xCC]));
+        assert_eq!(
+            archived.proof_hash,
+            compute_proof_hash(&[0xAA], &[0xBB], &[0xCC])
+        );
     }
 
     #[test]
@@ -911,7 +938,10 @@ mod tests {
         mark_blob_expired(&mut archived);
         assert!(archived.blob_expired, "SEC-M7: blob 过期后标记 true");
         // proof_hash 与 verification_result 仍永久保留
-        assert_eq!(archived.proof_hash, compute_proof_hash(&[0xAA], &[0xBB], &[0xCC]));
+        assert_eq!(
+            archived.proof_hash,
+            compute_proof_hash(&[0xAA], &[0xBB], &[0xCC])
+        );
         assert!(archived.verification_result);
     }
 
@@ -938,7 +968,10 @@ mod tests {
             PermanentRetentionItem::BridgeOperation,
         ];
         for item in items {
-            assert!(is_permanently_retained(item), "所有 PermanentRetentionItem 应永久保留");
+            assert!(
+                is_permanently_retained(item),
+                "所有 PermanentRetentionItem 应永久保留"
+            );
         }
     }
 

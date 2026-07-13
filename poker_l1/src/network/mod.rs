@@ -20,8 +20,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 use crate::block::Block;
@@ -57,7 +57,8 @@ const SHORT_ID_DOMAIN: u8 = 0x53; // 'S' for Short ID
 ///
 /// 超出返回 `TxTooLarge`。
 pub fn validate_tx_size(tx: &Transaction) -> PokerL1Result<()> {
-    let serialized = bcs::to_bytes(tx).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
+    let serialized =
+        bcs::to_bytes(tx).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
     if serialized.len() > MAX_TX_SIZE {
         return Err(PokerL1Error::TxTooLarge {
             actual: serialized.len(),
@@ -71,7 +72,8 @@ pub fn validate_tx_size(tx: &Transaction) -> PokerL1Result<()> {
 ///
 /// 超出返回 `BlockTooLarge`。
 pub fn validate_block_size(block: &Block) -> PokerL1Result<()> {
-    let serialized = bcs::to_bytes(block).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
+    let serialized =
+        bcs::to_bytes(block).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
     if serialized.len() > MAX_BLOCK_SIZE {
         return Err(PokerL1Error::BlockTooLarge {
             actual: serialized.len(),
@@ -85,7 +87,8 @@ pub fn validate_block_size(block: &Block) -> PokerL1Result<()> {
 ///
 /// 超出返回 `VertexTooLarge`。
 pub fn validate_vertex_size(vertex: &DagVertex) -> PokerL1Result<()> {
-    let serialized = bcs::to_bytes(vertex).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
+    let serialized =
+        bcs::to_bytes(vertex).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
     if serialized.len() > MAX_VERTEX_SIZE {
         return Err(PokerL1Error::VertexTooLarge {
             actual: serialized.len(),
@@ -579,8 +582,11 @@ pub trait NetworkTransport: Send + Sync {
     ) -> PokerL1Result<Vec<Block>>;
 
     /// 按 round range 请求 DAG vertices（SubTask 30.3 sync protocol）。
-    fn request_vertices_by_range(&self, start_round: u64, end_round: u64)
-        -> PokerL1Result<Vec<DagVertex>>;
+    fn request_vertices_by_range(
+        &self,
+        start_round: u64,
+        end_round: u64,
+    ) -> PokerL1Result<Vec<DagVertex>>;
 
     /// 订阅轻客户端 block header（SubTask 30.4）。
     fn subscribe_light_headers(&self) -> PokerL1Result<Vec<LightClientHeader>>;
@@ -861,7 +867,7 @@ impl Default for GossipManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme};
     use crate::transaction::{Gas, RouteHint, TxLane};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
@@ -1074,7 +1080,10 @@ mod tests {
         let config = BroadcastConfig::default();
 
         let result = multi_replica_broadcast(tx_hash, &replicas, &accepted, &witnesses, &config);
-        assert!(matches!(result, Err(PokerL1Error::MultiReplicaBroadcastFailed { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::MultiReplicaBroadcastFailed { .. })
+        ));
     }
 
     #[test]
@@ -1117,10 +1126,7 @@ mod tests {
         };
 
         transport
-            .gossip_broadcast(
-                GossipTopic::Transaction,
-                &NetworkMessage::Transaction(tx),
-            )
+            .gossip_broadcast(GossipTopic::Transaction, &NetworkMessage::Transaction(tx))
             .unwrap();
 
         let messages = transport.broadcasted_messages(GossipTopic::Transaction);
@@ -1233,7 +1239,10 @@ mod tests {
         // validator_set_size = 3, required = ceil(3*2/3) = 2
         // signatures = 1 < 2 → quorum 不足
         let result = verify_light_client_header(&header, 3, |_, _, _| Ok(()));
-        assert!(matches!(result, Err(PokerL1Error::LightClientQuorumInsufficient { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::LightClientQuorumInsufficient { .. })
+        ));
     }
 
     #[test]
@@ -1254,9 +1263,8 @@ mod tests {
         };
 
         // quorum 足够但签名验证失败
-        let result = verify_light_client_header(&header, 3, |_, _, _| {
-            Err(PokerL1Error::InvalidSignature)
-        });
+        let result =
+            verify_light_client_header(&header, 3, |_, _, _| Err(PokerL1Error::InvalidSignature));
         assert!(matches!(result, Err(PokerL1Error::InvalidSignature)));
     }
 

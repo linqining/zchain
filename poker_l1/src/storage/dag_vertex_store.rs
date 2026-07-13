@@ -17,10 +17,10 @@ use std::sync::Arc;
 
 use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options, WriteBatch};
 
+use crate::Hash;
 use crate::consensus::{DagVertex, Epoch, Round};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
-use crate::Hash;
 
 /// `vertices` 列族名。
 const VERTICES_CF: &str = "vertices";
@@ -49,12 +49,8 @@ impl DagVertexStore {
         let round_cf = ColumnFamilyDescriptor::new(ROUND_INDEX_CF, Options::default());
         let author_cf = ColumnFamilyDescriptor::new(AUTHOR_INDEX_CF, Options::default());
 
-        let db = DB::open_cf_descriptors(
-            &db_opts,
-            path,
-            vec![vertices_cf, round_cf, author_cf],
-        )
-        .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+        let db = DB::open_cf_descriptors(&db_opts, path, vec![vertices_cf, round_cf, author_cf])
+            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -225,7 +221,7 @@ impl DagVertexStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn make_pubkey(byte: u8) -> TaggedPubkey {
         TaggedPubkey {
@@ -439,7 +435,12 @@ mod tests {
         for epoch in 1..=5u64 {
             for round in 1..=10u64 {
                 for author_byte in 0x02..=0x04u8 {
-                    let v = make_vertex(epoch, round, author_byte, ((epoch * 100 + round) % 255) as u8);
+                    let v = make_vertex(
+                        epoch,
+                        round,
+                        author_byte,
+                        ((epoch * 100 + round) % 255) as u8,
+                    );
                     store.put(&v).unwrap();
                 }
             }
@@ -454,7 +455,13 @@ mod tests {
         }
         // 每个 author 应有 50 个 vertex
         for author_byte in 0x02..=0x04u8 {
-            assert_eq!(store.get_by_author(&make_pubkey(author_byte)).unwrap().len(), 50);
+            assert_eq!(
+                store
+                    .get_by_author(&make_pubkey(author_byte))
+                    .unwrap()
+                    .len(),
+                50
+            );
         }
     }
 }

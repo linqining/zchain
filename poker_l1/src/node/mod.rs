@@ -24,8 +24,8 @@ use crate::block::Block;
 use crate::consensus::DagVertex;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID};
-use crate::signature::tagged_pubkey::{SignatureScheme, CURRENT_VERSION};
 use crate::signature::TaggedPubkey;
+use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
 use crate::storage::{BlockStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb};
 use crate::transaction::Transaction;
 use crate::{Address, BlockHeight, ChainId, Hash};
@@ -473,8 +473,8 @@ pub fn compute_assigned_validator_local<'a>(
     epoch: crate::consensus::Epoch,
     validator_set: &'a [TaggedPubkey],
 ) -> Option<&'a TaggedPubkey> {
-    use blake2::digest::{Update, VariableOutput};
     use blake2::Blake2bVar;
+    use blake2::digest::{Update, VariableOutput};
     if validator_set.is_empty() {
         return None;
     }
@@ -588,9 +588,9 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object_model::{Object, ObjectID, Ownership};
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
     use crate::DEFAULT_CHAIN_ID;
+    use crate::object_model::{Object, ObjectID, Ownership};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn dummy_tagged_pubkey() -> TaggedPubkey {
         TaggedPubkey {
@@ -601,10 +601,7 @@ mod tests {
 
     #[test]
     fn node_role_to_pruning_role() {
-        assert_eq!(
-            NodeRole::Validator.to_pruning_role(),
-            PruningNodeRole::Full
-        );
+        assert_eq!(NodeRole::Validator.to_pruning_role(), PruningNodeRole::Full);
         assert_eq!(NodeRole::Full.to_pruning_role(), PruningNodeRole::Full);
         assert_eq!(
             NodeRole::Archive.to_pruning_role(),
@@ -945,9 +942,7 @@ mod tests {
         let backend = NodeRpcBackend::new(node);
         assert_eq!(backend.chain_id(), DEFAULT_CHAIN_ID);
         // get_object 返回 None（空库）
-        let result = backend
-            .get_object(&ObjectID::new([0xCC; 20], 0))
-            .unwrap();
+        let result = backend.get_object(&ObjectID::new([0xCC; 20], 0)).unwrap();
         assert!(result.is_none());
     }
 }

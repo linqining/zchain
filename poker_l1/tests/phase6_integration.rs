@@ -18,23 +18,22 @@ use poker_l1::account::Account;
 use poker_l1::block::{Block, BlockHeader};
 use poker_l1::consensus::{DagCommitCertificate, DagVertex};
 use poker_l1::network::{
+    GossipManager, InMemoryTransport, NetworkMessage, NetworkTransport, ShortIdMap,
     validate_tx_size, validate_vertex_size,
-    GossipManager, InMemoryTransport, NetworkMessage, NetworkTransport,
-    ShortIdMap,
 };
 use poker_l1::node::{
-    compute_assigned_validator_local, keygen, keygen_ed25519, keygen_secp256k1,
-    query_node_info, Node, NodeRole, NodeRpcBackend, ValidatorKey,
+    Node, NodeRole, NodeRpcBackend, ValidatorKey, compute_assigned_validator_local, keygen,
+    keygen_ed25519, keygen_secp256k1, query_node_info,
 };
 use poker_l1::object_model::{Object, ObjectID, Ownership};
 use poker_l1::rpc::{
-    EventType, EventMessage, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, RpcBackend, RpcHandler, SubscribeRequest,
+    EventMessage, EventType, JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcBackend, RpcHandler,
+    SubscribeRequest,
 };
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme};
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
-use poker_l1::{Hash, DEFAULT_CHAIN_ID};
+use poker_l1::{DEFAULT_CHAIN_ID, Hash};
 
 use bridge_helpers::{make_real_keypair, make_valid_bridge_verify_tx};
 use rand::{Rng, RngCore};
@@ -132,27 +131,22 @@ mod subtask_43_6_rpc {
         let handler = RpcHandler::new(&backend);
 
         // 按 hash 查询
-        let req1 = make_rpc_request(
-            "get_block",
-            serde_json::json!({"hash": block_hash}),
-            1,
-        );
+        let req1 = make_rpc_request("get_block", serde_json::json!({"hash": block_hash}), 1);
         let resp1 = handler.handle(&req1);
         assert!(resp1.error.is_none(), "get_block by hash 应成功");
         let block1: Block = serde_json::from_value(resp1.result.unwrap()).unwrap();
         assert_eq!(block1.header.height, 42);
 
         // 按 height 查询
-        let req2 = make_rpc_request(
-            "get_block",
-            serde_json::json!({"height": 42}),
-            2,
-        );
+        let req2 = make_rpc_request("get_block", serde_json::json!({"height": 42}), 2);
         let resp2 = handler.handle(&req2);
         assert!(resp2.error.is_none(), "get_block by height 应成功");
         let block2: Block = serde_json::from_value(resp2.result.unwrap()).unwrap();
         assert_eq!(block2.header.height, 42);
-        assert_eq!(block1.block_hash(DEFAULT_CHAIN_ID), block2.block_hash(DEFAULT_CHAIN_ID));
+        assert_eq!(
+            block1.block_hash(DEFAULT_CHAIN_ID),
+            block2.block_hash(DEFAULT_CHAIN_ID)
+        );
     }
 
     #[test]
@@ -165,11 +159,7 @@ mod subtask_43_6_rpc {
         let handler = RpcHandler::new(&backend);
 
         // 查询存在的对象
-        let req1 = make_rpc_request(
-            "get_object",
-            serde_json::json!({"id": id}),
-            1,
-        );
+        let req1 = make_rpc_request("get_object", serde_json::json!({"id": id}), 1);
         let resp1 = handler.handle(&req1);
         assert!(resp1.error.is_none());
         let obj_resp: Object = serde_json::from_value(resp1.result.unwrap()).unwrap();
@@ -196,11 +186,7 @@ mod subtask_43_6_rpc {
         let tx_bytes = tx.to_bcs().unwrap();
 
         // submit_tx
-        let req1 = make_rpc_request(
-            "submit_tx",
-            serde_json::json!({"tx_bytes": tx_bytes}),
-            1,
-        );
+        let req1 = make_rpc_request("submit_tx", serde_json::json!({"tx_bytes": tx_bytes}), 1);
         let resp1 = handler.handle(&req1);
         assert!(resp1.error.is_none(), "submit_tx 应成功");
         let result: serde_json::Value = resp1.result.unwrap();
@@ -208,11 +194,7 @@ mod subtask_43_6_rpc {
         assert_eq!(tx_hash, expected_hash);
 
         // get_tx
-        let req2 = make_rpc_request(
-            "get_tx",
-            serde_json::json!({"tx_hash": expected_hash}),
-            2,
-        );
+        let req2 = make_rpc_request("get_tx", serde_json::json!({"tx_hash": expected_hash}), 2);
         let resp2 = handler.handle(&req2);
         assert!(resp2.error.is_none());
         let tx_resp: Transaction = serde_json::from_value(resp2.result.unwrap()).unwrap();
@@ -230,11 +212,7 @@ mod subtask_43_6_rpc {
         let handler = RpcHandler::new(&backend);
 
         // 按 address 查询
-        let req1 = make_rpc_request(
-            "get_account",
-            serde_json::json!({"address": address}),
-            1,
-        );
+        let req1 = make_rpc_request("get_account", serde_json::json!({"address": address}), 1);
         let resp1 = handler.handle(&req1);
         assert!(resp1.error.is_none());
         let acc1: Account = serde_json::from_value(resp1.result.unwrap()).unwrap();
@@ -380,11 +358,7 @@ mod subtask_43_6_rpc {
 
         // 128KB + 1 字节应被拒绝
         let big_bytes: Vec<u8> = vec![0u8; 128 * 1024 + 1];
-        let req = make_rpc_request(
-            "submit_tx",
-            serde_json::json!({"tx_bytes": big_bytes}),
-            1,
-        );
+        let req = make_rpc_request("submit_tx", serde_json::json!({"tx_bytes": big_bytes}), 1);
         let resp = handler.handle(&req);
         assert!(resp.error.is_some(), "超大 tx 应被拒绝");
         assert_eq!(resp.error.unwrap().code, JsonRpcError::INVALID_PARAMS);
@@ -592,7 +566,7 @@ mod subtask_43_7_node {
 
 mod subtask_43_10_fuzz {
     use super::*;
-    use poker_l1::bridge::{bridge_verify, BridgeRegistry};
+    use poker_l1::bridge::{BridgeRegistry, bridge_verify};
 
     #[test]
     fn subtask_43_10_a_fuzz_rpc_invalid_params_10000_inputs() {
@@ -641,9 +615,7 @@ mod subtask_43_10_fuzz {
             // 构造一个合法结构的 BridgeVerifyTx，但用随机伪造的签名
             let mut tx = make_valid_bridge_verify_tx(&recipient_tagged);
             // 用随机字节替换签名
-            tx.recipient_sig = (0..65)
-                .map(|_| rng.r#gen::<u8>())
-                .collect();
+            tx.recipient_sig = (0..65).map(|_| rng.r#gen::<u8>()).collect();
             // 随机替换 validator 签名
             for sig in &mut tx.validator_signatures {
                 sig.signature = (0..65).map(|_| rng.r#gen::<u8>()).collect();

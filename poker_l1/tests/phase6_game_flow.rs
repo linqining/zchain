@@ -12,16 +12,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use poker_l1::account::derive_address;
-use poker_l1::block::{is_submit_phase_timed_out, TimeConsensusConfig};
+use poker_l1::block::{TimeConsensusConfig, is_submit_phase_timed_out};
 use poker_l1::consensus::{
-    build_game_sub_block, check_sech6_cross_commit_force_advance, handle_submit_phase_timeout,
-    validate_game_turn_phase_aware, BettingRound, ExecutionMode, GamePhase, GameStatus,
-    PhaseTransitionError, SimpleTurnRule, SubmitPhaseKind, TexasHoldemTurnRule, TurnRule,
+    BettingRound, ExecutionMode, GamePhase, GameStatus, PhaseTransitionError, SimpleTurnRule,
+    SubmitPhaseKind, TexasHoldemTurnRule, TurnRule, build_game_sub_block,
+    check_sech6_cross_commit_force_advance, handle_submit_phase_timeout,
+    validate_game_turn_phase_aware,
 };
 use poker_l1::error::PokerL1Error;
 use poker_l1::object_model::ObjectID;
-use poker_l1::signature::tagged_pubkey::{encode_tag, SignatureScheme};
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 use poker_l1::{Address, BlockHeight, DEFAULT_CHAIN_ID};
 
@@ -56,10 +57,7 @@ fn make_game(
     for &b in pending {
         pending_set.insert(addr(b));
     }
-    let current_turn = participants
-        .first()
-        .copied()
-        .unwrap_or(0x10);
+    let current_turn = participants.first().copied().unwrap_or(0x10);
     GameStatus {
         id: ObjectID::new([0xAA; 20], 1),
         assigned_validator: assigned_tp,
@@ -218,7 +216,9 @@ fn full_hand_flow_betting_shuffle_reveal_betting() {
     assert!(rule.is_submission_complete(&game));
 
     // ===== advance_phase: Shuffle → RevealToken =====
-    let new_phase = rule.advance_phase(&mut game).expect("Shuffle → RevealToken");
+    let new_phase = rule
+        .advance_phase(&mut game)
+        .expect("Shuffle → RevealToken");
     assert_eq!(
         new_phase,
         GamePhase::MultiPlayerSubmit {
@@ -362,15 +362,11 @@ fn timeout_recovery_shuffle_kick_all_finalizes() {
     );
 
     // 执行超时惩罚：kick pending 中的 B/C
-    let results = handle_submit_phase_timeout(
-        &mut game,
-        SubmitPhaseKind::Shuffle,
-        1101,
-        |player| {
+    let results =
+        handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |player| {
             // 退款金额 = 玩家 total_bet（此处用地址首字节模拟）
             (player[0] as u64) * 10
-        },
-    );
+        });
 
     // 2 个 KickResult（B=0x20, C=0x30，按 BTreeSet 升序）
     assert_eq!(results.len(), 2);
@@ -415,12 +411,8 @@ fn timeout_recovery_reveal_token_partial_kick_continues() {
     );
 
     // 执行超时惩罚：仅 kick C
-    let results = handle_submit_phase_timeout(
-        &mut game,
-        SubmitPhaseKind::RevealToken,
-        2051,
-        |_| 1000,
-    );
+    let results =
+        handle_submit_phase_timeout(&mut game, SubmitPhaseKind::RevealToken, 2051, |_| 1000);
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].player, addr(0x30));
@@ -510,8 +502,7 @@ fn timeout_recovery_empty_pending_no_op() {
         &[], // pending 为空
         1000,
     );
-    let results =
-        handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |_| 100);
+    let results = handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |_| 100);
     // 无 KickResult
     assert!(results.is_empty());
     // active 不变
@@ -723,7 +714,7 @@ fn build_sub_block_filters_non_gameturn_txs() {
     );
     let txs = vec![
         make_gameturn_tx(0x10, 1),
-        make_public_tx(1), // 非 GameTurn，应被过滤
+        make_public_tx(1),     // 非 GameTurn，应被过滤
         make_force_sync_tx(2), // 非 GameTurn，应被过滤
         make_gameturn_tx(0x10, 2),
     ];
@@ -812,8 +803,8 @@ fn check_sech6_rejects_prev_gameturn_betting() {
     let phase = GamePhase::Betting {
         round: BettingRound::Preflop,
     };
-    let err =
-        check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase).unwrap_err();
+    let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
+        .unwrap_err();
     assert!(matches!(err, PokerL1Error::Other(_)));
 }
 
@@ -826,9 +817,8 @@ fn check_sech6_rejects_game_id_mismatch() {
     let phase = GamePhase::Betting {
         round: BettingRound::Preflop,
     };
-    let err =
-        check_sech6_cross_commit_force_advance(&prev_turns, &game_id_a, &game_id_b, &phase)
-            .unwrap_err();
+    let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id_a, &game_id_b, &phase)
+        .unwrap_err();
     assert!(matches!(err, PokerL1Error::GameNotFound(_)));
 }
 
@@ -840,8 +830,8 @@ fn check_sech6_rejects_multi_player_shuffle_with_prev_gameturn() {
     let phase = GamePhase::MultiPlayerSubmit {
         kind: SubmitPhaseKind::Shuffle,
     };
-    let err =
-        check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase).unwrap_err();
+    let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
+        .unwrap_err();
     assert!(matches!(err, PokerL1Error::Other(_)));
 }
 
@@ -869,9 +859,8 @@ fn check_sech6_all_multi_player_kinds_reject_prev_gameturn() {
         SubmitPhaseKind::LeaveProof,
     ] {
         let phase = GamePhase::MultiPlayerSubmit { kind };
-        let err =
-            check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
-                .unwrap_err();
+        let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
+            .unwrap_err();
         assert!(
             matches!(err, PokerL1Error::Other(_)),
             "kind={kind:?} 前一 commit 有 GameTurn 应被拒绝"
@@ -891,8 +880,8 @@ fn check_sech6_rejects_multiple_prev_gameturns() {
     let phase = GamePhase::Betting {
         round: BettingRound::Flop,
     };
-    let err =
-        check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase).unwrap_err();
+    let err = check_sech6_cross_commit_force_advance(&prev_turns, &game_id, &game_id, &phase)
+        .unwrap_err();
     assert!(matches!(err, PokerL1Error::Other(_)));
 }
 
@@ -921,12 +910,7 @@ fn e2e_timeout_then_continue_with_remaining_players() {
     assert_eq!(timed_out, Some(SubmitPhaseKind::Shuffle));
 
     // 执行 kick：仅 B
-    let results = handle_submit_phase_timeout(
-        &mut game,
-        SubmitPhaseKind::Shuffle,
-        1101,
-        |_| 500,
-    );
+    let results = handle_submit_phase_timeout(&mut game, SubmitPhaseKind::Shuffle, 1101, |_| 500);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].player, addr(0x20));
     assert_eq!(results[0].refund_amount, 500);
@@ -937,7 +921,9 @@ fn e2e_timeout_then_continue_with_remaining_players() {
     assert!(game.pending_submitters.is_empty());
 
     // 推进阶段：Shuffle → RevealToken
-    let new_phase = rule.advance_phase(&mut game).expect("Shuffle → RevealToken");
+    let new_phase = rule
+        .advance_phase(&mut game)
+        .expect("Shuffle → RevealToken");
     assert_eq!(
         new_phase,
         GamePhase::MultiPlayerSubmit {
@@ -958,7 +944,9 @@ fn e2e_timeout_then_continue_with_remaining_players() {
     assert!(game.pending_submitters.is_empty());
 
     // 推进：RevealToken → Betting{Preflop}
-    let new_phase = rule.advance_phase(&mut game).expect("RevealToken → Betting");
+    let new_phase = rule
+        .advance_phase(&mut game)
+        .expect("RevealToken → Betting");
     assert_eq!(
         new_phase,
         GamePhase::Betting {

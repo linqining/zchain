@@ -499,9 +499,6 @@ mod tests {
         );
         assert_eq!(config.max_call_depth, MAX_CALL_DEPTH);
         assert!(config.enable_instruction_meter, "应启用 instruction meter");
-        assert!(
-            config.stack_size() <= MAX_STACK_SIZE,
-            "stack 不得超过 64KB"
-        );
+        assert!(config.stack_size() <= MAX_STACK_SIZE, "stack 不得超过 64KB");
     }
 }

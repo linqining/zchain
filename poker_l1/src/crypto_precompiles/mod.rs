@@ -15,7 +15,7 @@ pub mod bls;
 pub mod native_api;
 
 pub use bls::{
-    bls_final_exp, bls_g1_add, bls_g1_mul, bls_g1_neg, bls_g2_add, bls_g2_mul, bls_g2_neg,
-    bls_hash_to_g1, bls_hash_to_g2, bls_miller_loop, bls_pairing_check, BLS_G1_DST, BLS_G2_DST,
-    G1_COMPRESSED_SIZE, G2_COMPRESSED_SIZE, GT_COMPRESSED_SIZE, SCALAR_SIZE,
+    BLS_G1_DST, BLS_G2_DST, G1_COMPRESSED_SIZE, G2_COMPRESSED_SIZE, GT_COMPRESSED_SIZE,
+    SCALAR_SIZE, bls_final_exp, bls_g1_add, bls_g1_mul, bls_g1_neg, bls_g2_add, bls_g2_mul,
+    bls_g2_neg, bls_hash_to_g1, bls_hash_to_g2, bls_miller_loop, bls_pairing_check,
 };

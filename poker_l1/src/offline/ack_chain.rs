@@ -23,12 +23,12 @@
 //!
 //! skip 段不参与 ack_chain（R5-M5：`ack_chain_partial_hash` 使用完全相同的 RFC 6962 构造）。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
+use crate::Hash;
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
-use crate::Hash;
 
 use super::{ACK_DOMAIN_TAG, ACK_MERKLE_INTERNAL_PREFIX, ACK_MERKLE_LEAF_PREFIX};
 
@@ -254,7 +254,11 @@ fn prove_leaves_inclusion(leaves: &[Hash], leaf_index: usize) -> Option<AckMerkl
 
     while current.len() > 1 {
         // 兄弟节点索引：偶数 → idx+1，奇数 → idx-1
-        let sibling_idx = if idx.is_multiple_of(2) { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
         siblings.push(current[sibling_idx]);
 
         // 上一层
@@ -399,8 +403,9 @@ mod tests {
 
     #[test]
     fn test_prove_and_verify_inclusion() {
-        let entries: Vec<AckEntry> =
-            (1..=5).map(|i| make_ack_entry(i, (i as u8) * 0x10)).collect();
+        let entries: Vec<AckEntry> = (1..=5)
+            .map(|i| make_ack_entry(i, (i as u8) * 0x10))
+            .collect();
         let root = compute_ack_chain_hash(&entries);
 
         for i in 0..entries.len() {
@@ -415,8 +420,9 @@ mod tests {
 
     #[test]
     fn test_verify_rejects_wrong_leaf() {
-        let entries: Vec<AckEntry> =
-            (1..=4).map(|i| make_ack_entry(i, (i as u8) * 0x10)).collect();
+        let entries: Vec<AckEntry> = (1..=4)
+            .map(|i| make_ack_entry(i, (i as u8) * 0x10))
+            .collect();
         let root = compute_ack_chain_hash(&entries);
 
         let proof = prove_ack_inclusion(&entries, 0).expect("proof 应生成");
@@ -426,8 +432,9 @@ mod tests {
 
     #[test]
     fn test_verify_rejects_wrong_root() {
-        let entries: Vec<AckEntry> =
-            (1..=4).map(|i| make_ack_entry(i, (i as u8) * 0x10)).collect();
+        let entries: Vec<AckEntry> = (1..=4)
+            .map(|i| make_ack_entry(i, (i as u8) * 0x10))
+            .collect();
         let wrong_root = [0xFF; 32];
 
         let proof = prove_ack_inclusion(&entries, 0).expect("proof 应生成");
@@ -437,8 +444,9 @@ mod tests {
 
     #[test]
     fn test_prove_out_of_bounds_returns_none() {
-        let entries: Vec<AckEntry> =
-            (1..=4).map(|i| make_ack_entry(i, (i as u8) * 0x10)).collect();
+        let entries: Vec<AckEntry> = (1..=4)
+            .map(|i| make_ack_entry(i, (i as u8) * 0x10))
+            .collect();
         assert!(prove_ack_inclusion(&entries, 4).is_none());
         assert!(prove_ack_inclusion(&entries, 100).is_none());
     }
@@ -525,7 +533,10 @@ mod tests {
         for &i in &[0, 1, 500, 999] {
             let proof = prove_ack_inclusion(&entries, i).expect("proof 应生成");
             let leaf = entries[i].ack_hash();
-            assert!(verify_ack_inclusion(&root, &leaf, &proof), "leaf {i} 应通过");
+            assert!(
+                verify_ack_inclusion(&root, &leaf, &proof),
+                "leaf {i} 应通过"
+            );
         }
     }
 

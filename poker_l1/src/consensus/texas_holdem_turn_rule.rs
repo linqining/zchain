@@ -38,11 +38,11 @@
 
 use std::collections::BTreeSet;
 
+use crate::Address;
 use crate::consensus::routing::{
     BettingRound, GamePhase, GameStatus, PhaseTransitionError, SimpleTurnRule, SubmitPhaseKind,
     TurnRule,
 };
-use crate::Address;
 
 /// Texas Hold'em 完整轮转规则。
 ///
@@ -185,8 +185,8 @@ mod tests {
     use super::*;
     use crate::consensus::routing::{ExecutionMode, GameStatus};
     use crate::object_model::ObjectID;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
     use crate::signature::TaggedPubkey;
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use std::collections::{BTreeMap, BTreeSet};
 
     /// 构造测试用 tagged pubkey。
@@ -239,7 +239,9 @@ mod tests {
     fn current_turn_returns_player_in_betting_phase() {
         let (game, addrs) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::Betting { round: BettingRound::Preflop },
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -250,7 +252,9 @@ mod tests {
     fn current_turn_returns_none_in_shuffle_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -261,7 +265,9 @@ mod tests {
     fn current_turn_returns_none_in_reveal_token_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::RevealToken,
+            },
             &[0x10],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -274,7 +280,9 @@ mod tests {
     fn advance_turn_rotates_in_betting_phase() {
         let (mut game, addrs) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::Betting { round: BettingRound::Preflop },
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -287,7 +295,9 @@ mod tests {
     fn advance_turn_returns_none_in_multi_player_phase() {
         let (mut game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[0x10, 0x20],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -300,7 +310,9 @@ mod tests {
     fn current_submitters_empty_in_betting_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::Betting { round: BettingRound::Preflop },
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -311,7 +323,9 @@ mod tests {
     fn current_submitters_returns_active_in_shuffle_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -326,7 +340,9 @@ mod tests {
     fn current_submitters_returns_pending_in_reveal_token_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::RevealToken,
+            },
             &[0x10, 0x20], // pending = 密钥持有者
         );
         let rule = TexasHoldemTurnRule::new();
@@ -341,7 +357,9 @@ mod tests {
     fn current_submitters_returns_active_in_reconstruct_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Reconstruct },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Reconstruct,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -353,7 +371,9 @@ mod tests {
     fn current_submitters_returns_active_in_leave_proof_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::LeaveProof,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -367,7 +387,9 @@ mod tests {
     fn is_submission_complete_true_in_betting_phase() {
         let (game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::Betting { round: BettingRound::Preflop },
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -378,7 +400,9 @@ mod tests {
     fn is_submission_complete_false_when_pending_non_empty() {
         let (game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[0x10], // pending 非空
         );
         let rule = TexasHoldemTurnRule::new();
@@ -389,7 +413,9 @@ mod tests {
     fn is_submission_complete_true_when_pending_empty() {
         let (game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[], // pending 为空
         );
         let rule = TexasHoldemTurnRule::new();
@@ -402,7 +428,9 @@ mod tests {
     fn advance_phase_rejects_betting_phase() {
         let (mut game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::Betting { round: BettingRound::Preflop },
+            GamePhase::Betting {
+                round: BettingRound::Preflop,
+            },
             &[],
         );
         let rule = TexasHoldemTurnRule::new();
@@ -419,7 +447,9 @@ mod tests {
     fn advance_phase_rejects_when_pending_non_empty() {
         let (mut game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[0x10], // pending 非空
         );
         let rule = TexasHoldemTurnRule::new();
@@ -431,7 +461,9 @@ mod tests {
     fn advance_phase_shuffle_to_reveal_token() {
         let (mut game, _) = make_game(
             &[0x10, 0x20, 0x30],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[], // pending 为空
         );
         let rule = TexasHoldemTurnRule::new();
@@ -455,7 +487,9 @@ mod tests {
     fn advance_phase_reveal_token_to_betting() {
         let (mut game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::RevealToken },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::RevealToken,
+            },
             &[], // pending 为空
         );
         let rule = TexasHoldemTurnRule::new();
@@ -477,7 +511,9 @@ mod tests {
     fn advance_phase_reconstruct_to_betting() {
         let (mut game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Reconstruct },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Reconstruct,
+            },
             &[], // pending 为空
         );
         let rule = TexasHoldemTurnRule::new();
@@ -496,7 +532,9 @@ mod tests {
     fn advance_phase_leave_proof_keeps_current_phase() {
         let (mut game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::LeaveProof },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::LeaveProof,
+            },
             &[0x10], // pending 非空，但 LeaveProof 不检查
         );
         let rule = TexasHoldemTurnRule::new();
@@ -519,7 +557,9 @@ mod tests {
     fn full_state_machine_shuffle_reveal_betting() {
         let (mut game, _) = make_game(
             &[0x10, 0x20],
-            GamePhase::MultiPlayerSubmit { kind: SubmitPhaseKind::Shuffle },
+            GamePhase::MultiPlayerSubmit {
+                kind: SubmitPhaseKind::Shuffle,
+            },
             &[], // pending 为空（所有玩家已完成 shuffle）
         );
         let rule = TexasHoldemTurnRule::new();

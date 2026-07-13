@@ -35,9 +35,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Address;
 use crate::error::PokerL1Error;
 use crate::object_model::ObjectID;
-use crate::Address;
 
 use super::force_checkin::ForfeitReason;
 use super::types::GameContract;
@@ -114,10 +114,7 @@ pub struct RefundOutcome {
 /// - `total_table_buy_in`：桌面所有玩家 buy-in 之和（SEC-C4：基数改为桌面总 buy-in）
 /// - `forfeit_deposit_ratio`：forfeit 保证金比例（默认 100，可治理 ∈ [10, 200]）
 #[must_use]
-pub const fn compute_forfeit_deposit(
-    total_table_buy_in: u64,
-    forfeit_deposit_ratio: u32,
-) -> u64 {
+pub const fn compute_forfeit_deposit(total_table_buy_in: u64, forfeit_deposit_ratio: u32) -> u64 {
     total_table_buy_in.saturating_mul(forfeit_deposit_ratio as u64) / 100
 }
 
@@ -254,15 +251,17 @@ pub fn compute_forfeit_distribution(
                 // 最后一个 victim 得舍入余额（防总额短缺）
                 remaining - distributed
             } else {
-                remaining * (*buy_in) / total_victims_buy_in
+                (remaining * (*buy_in))
+                    .checked_div(total_victims_buy_in)
+                    .unwrap_or(0)
             };
             victim_distributions.push((*addr, amount));
             distributed += amount;
         }
     }
 
-    let total_distributed = actual_challenger_reward
-        .saturating_add(victim_distributions.iter().map(|(_, a)| *a).sum());
+    let total_distributed =
+        actual_challenger_reward.saturating_add(victim_distributions.iter().map(|(_, a)| *a).sum());
 
     ForfeitDistribution {
         operator_forfeit_amount: forfeit_amount,
@@ -322,12 +321,8 @@ pub fn apply_forfeit(
     game.forfeit_deposit = 0;
 
     // 4. 计算分配方案
-    let distribution = compute_forfeit_distribution(
-        forfeit_amount,
-        challenger,
-        challenger_reward,
-        victims,
-    );
+    let distribution =
+        compute_forfeit_distribution(forfeit_amount, challenger, challenger_reward, victims);
 
     // 5. 递增 version
     game.version = game.version.saturating_add(1);
@@ -357,10 +352,7 @@ pub fn apply_forfeit(
 ///
 /// # 返回
 /// [`RefundOutcome`]，`refunded = false` 当 `game.forfeit_deposit` 已为 0。
-pub const fn apply_forfeit_refund(
-    game: &mut GameContract,
-    operator: Address,
-) -> RefundOutcome {
+pub const fn apply_forfeit_refund(game: &mut GameContract, operator: Address) -> RefundOutcome {
     let refund_amount = game.forfeit_deposit;
     game.forfeit_deposit = 0;
     game.version = game.version.saturating_add(1);
@@ -376,7 +368,7 @@ pub const fn apply_forfeit_refund(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::{SignatureScheme, CURRENT_VERSION, TaggedPubkey};
+    use crate::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
     use crate::vm::contracts::types::{ExecutionMode, RakeConfigRef};
 
     fn make_addr(byte: u8) -> Address {
@@ -531,14 +523,26 @@ mod tests {
     fn test_validate_designated_operator_bond_mismatch() {
         // bond_amount != governed
         let result = validate_designated_operator_bond(500, 1000, 800);
-        assert!(matches!(result, Err(PokerL1Error::InvalidBondAmount { expected: 1000, got: 500 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::InvalidBondAmount {
+                expected: 1000,
+                got: 500
+            })
+        ));
     }
 
     #[test]
     fn test_validate_designated_operator_bond_insufficient() {
         // bond_amount < total_buy_in
         let result = validate_designated_operator_bond(500, 500, 800);
-        assert!(matches!(result, Err(PokerL1Error::InsufficientOperatorBond { bond: 500, required: 800 })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::InsufficientOperatorBond {
+                bond: 500,
+                required: 800
+            })
+        ));
     }
 
     // ===== compute_forfeit_distribution 测试（SEC-C4）=====
@@ -599,12 +603,7 @@ mod tests {
     #[test]
     fn test_distribution_no_victims() {
         // 无受害者：挑战方得全额（或全部"丢失"若无挑战方）
-        let dist = compute_forfeit_distribution(
-            10000,
-            Some(make_addr(0x02)),
-            10000,
-            &[],
-        );
+        let dist = compute_forfeit_distribution(10000, Some(make_addr(0x02)), 10000, &[]);
         assert_eq!(dist.challenger_reward, 10000);
         assert!(dist.victim_distributions.is_empty());
         assert_eq!(dist.total_distributed, 10000);
@@ -613,12 +612,8 @@ mod tests {
     #[test]
     fn test_distribution_zero_forfeit_amount() {
         // forfeit_deposit = 0：无分配
-        let dist = compute_forfeit_distribution(
-            0,
-            Some(make_addr(0x02)),
-            0,
-            &[(make_addr(0x03), 100)],
-        );
+        let dist =
+            compute_forfeit_distribution(0, Some(make_addr(0x02)), 0, &[(make_addr(0x03), 100)]);
         assert_eq!(dist.operator_forfeit_amount, 0);
         assert_eq!(dist.challenger_reward, 0);
         assert_eq!(dist.total_distributed, 0);
@@ -644,7 +639,11 @@ mod tests {
             9000,
             None,
             0,
-            &[(make_addr(0x03), 0), (make_addr(0x04), 0), (make_addr(0x05), 0)],
+            &[
+                (make_addr(0x03), 0),
+                (make_addr(0x04), 0),
+                (make_addr(0x05), 0),
+            ],
         );
         // remaining = 9000, 3 victims → 3000 each
         // 但用均分：9000 / 3 = 3000, 最后一个得 9000 - 6000 = 3000
@@ -661,7 +660,11 @@ mod tests {
             100,
             None,
             0,
-            &[(make_addr(0x03), 1), (make_addr(0x04), 1), (make_addr(0x05), 1)],
+            &[
+                (make_addr(0x03), 1),
+                (make_addr(0x04), 1),
+                (make_addr(0x05), 1),
+            ],
         );
         // remaining = 100, total_buy_in = 3
         // victim1 = 100 * 1 / 3 = 33
@@ -688,7 +691,8 @@ mod tests {
             None,
             0,
             &victims,
-        ).expect("应成功");
+        )
+        .expect("应成功");
 
         assert!(outcome.forfeited);
         assert_eq!(outcome.forfeit_amount, 10000);
@@ -711,13 +715,20 @@ mod tests {
             Some(make_addr(0x02)),
             5000, // challenger 得 50%
             &victims,
-        ).expect("应成功");
+        )
+        .expect("应成功");
 
         assert_eq!(outcome.distribution.challenger_reward, 5000);
         assert_eq!(outcome.distribution.challenger, Some(make_addr(0x02)));
         // remaining = 5000, victim1 = 5000*300/1000 = 1500, victim2 = 3500
-        assert_eq!(outcome.distribution.victim_distributions[0], (make_addr(0x03), 1500));
-        assert_eq!(outcome.distribution.victim_distributions[1], (make_addr(0x04), 3500));
+        assert_eq!(
+            outcome.distribution.victim_distributions[0],
+            (make_addr(0x03), 1500)
+        );
+        assert_eq!(
+            outcome.distribution.victim_distributions[1],
+            (make_addr(0x04), 3500)
+        );
     }
 
     #[test]
@@ -731,7 +742,8 @@ mod tests {
             None,
             0,
             &[(make_addr(0x03), 100)],
-        ).expect("应成功");
+        )
+        .expect("应成功");
 
         assert!(!outcome.forfeited, "forfeit_deposit=0 → forfeited=false");
         assert_eq!(outcome.forfeit_amount, 0);
@@ -768,7 +780,8 @@ mod tests {
             None,
             0,
             &[],
-        ).expect("应成功");
+        )
+        .expect("应成功");
 
         assert_eq!(game.version, prev_version.saturating_add(1));
     }
@@ -776,14 +789,8 @@ mod tests {
     #[test]
     fn test_apply_forfeit_machine_failure_reason() {
         let mut game = make_game(1000);
-        let outcome = apply_forfeit(
-            &mut game,
-            None,
-            ForfeitReason::MachineFailure,
-            None,
-            0,
-            &[],
-        ).expect("应成功");
+        let outcome = apply_forfeit(&mut game, None, ForfeitReason::MachineFailure, None, 0, &[])
+            .expect("应成功");
 
         assert_eq!(outcome.reason, ForfeitReason::MachineFailure);
     }
@@ -839,7 +846,8 @@ mod tests {
             None,
             0,
             &[],
-        ).expect("forfeit 应成功");
+        )
+        .expect("forfeit 应成功");
 
         let outcome = apply_forfeit_refund(&mut game, make_addr(0x01));
         assert!(!outcome.refunded, "forfeit 已扣除 → refund 得 0");
@@ -851,7 +859,10 @@ mod tests {
     #[test]
     fn test_game_contract_has_designated_operator_bond_field() {
         let game = make_game(0);
-        assert_eq!(game.designated_operator_bond, 0, "新 Game 默认 designated_operator_bond = 0");
+        assert_eq!(
+            game.designated_operator_bond, 0,
+            "新 Game 默认 designated_operator_bond = 0"
+        );
     }
 
     #[test]

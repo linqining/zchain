@@ -534,7 +534,7 @@ impl ZkVerifier for ZkShuffleVerifier {
 }
 
 /// 将 `poker_zkvm::error::ZkvmError` 映射为 `PokerL1Error`（SubTask 8.2.2）。
-fn map_zkvm_error(e: poker_zkvm::error::ZkvmError) -> PokerL1Error {
+pub(crate) fn map_zkvm_error(e: poker_zkvm::error::ZkvmError) -> PokerL1Error {
     use poker_zkvm::error::ZkvmError;
 
     match e {

@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::error::PokerL1Error;
 use crate::Hash;
+use crate::error::PokerL1Error;
 
 /// ZK 证明 scheme 标识符（u32，与 syscall 接口一致）。
 pub type SchemeId = u32;
@@ -107,7 +107,10 @@ impl<'a> ZkVerifyContext<'a> {
     #[must_use]
     pub const fn in_grace_period(&self) -> bool {
         self.production_switch_height > 0
-            && self.current_height <= self.production_switch_height.saturating_add(self.grace_blocks)
+            && self.current_height
+                <= self
+                    .production_switch_height
+                    .saturating_add(self.grace_blocks)
     }
 
     /// grace 期是否已结束（`production_switch_height > 0` 且
@@ -115,7 +118,10 @@ impl<'a> ZkVerifyContext<'a> {
     #[must_use]
     pub const fn grace_period_ended(&self) -> bool {
         self.production_switch_height > 0
-            && self.current_height > self.production_switch_height.saturating_add(self.grace_blocks)
+            && self.current_height
+                > self
+                    .production_switch_height
+                    .saturating_add(self.grace_blocks)
     }
 }
 
@@ -240,12 +246,8 @@ impl ZkPublicIo {
         state_delta_hash.copy_from_slice(&bytes[64..96]);
         let mut ack_chain_hash = [0u8; 32];
         ack_chain_hash.copy_from_slice(&bytes[96..128]);
-        let fold_step_count = u32::from_be_bytes([
-            bytes[128], bytes[129], bytes[130], bytes[131],
-        ]);
-        let skip_count = u32::from_be_bytes([
-            bytes[132], bytes[133], bytes[134], bytes[135],
-        ]);
+        let fold_step_count = u32::from_be_bytes([bytes[128], bytes[129], bytes[130], bytes[131]]);
+        let skip_count = u32::from_be_bytes([bytes[132], bytes[133], bytes[134], bytes[135]]);
         let segment_continuity_proof = bytes[136..].to_vec();
         Some(Self {
             initial_commitment,
@@ -337,7 +339,10 @@ pub struct ZkVerifierRegistry {
 impl std::fmt::Debug for ZkVerifierRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZkVerifierRegistry")
-            .field("registered_schemes", &self.verifiers.keys().collect::<Vec<_>>())
+            .field(
+                "registered_schemes",
+                &self.verifiers.keys().collect::<Vec<_>>(),
+            )
             .field("statuses", &self.statuses)
             .finish()
     }
@@ -557,15 +562,11 @@ mod tests {
     fn test_zk_verify_unregistered_scheme() {
         let registry = ZkVerifierRegistry::new();
         let public_io = make_public_io(1, 0);
-        let result = registry.zk_verify(
-            crate::DEFAULT_CHAIN_ID,
-            999,
-            &[0x01],
-            &public_io,
-            3,
-            1000,
-        );
-        assert!(matches!(result, Err(PokerL1Error::ZkVerifierNotRegistered(999))));
+        let result = registry.zk_verify(crate::DEFAULT_CHAIN_ID, 999, &[0x01], &public_io, 3, 1000);
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::ZkVerifierNotRegistered(999))
+        ));
     }
 
     #[test]
@@ -573,14 +574,7 @@ mod tests {
         let mut registry = ZkVerifierRegistry::new();
         registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
         let public_io = make_public_io(1, 0);
-        let result = registry.zk_verify(
-            crate::DEFAULT_CHAIN_ID,
-            99,
-            &[],
-            &public_io,
-            3,
-            1000,
-        );
+        let result = registry.zk_verify(crate::DEFAULT_CHAIN_ID, 99, &[], &public_io, 3, 1000);
         assert!(matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))));
     }
 
@@ -589,15 +583,11 @@ mod tests {
         let mut registry = ZkVerifierRegistry::new();
         registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
         let public_io = make_public_io(MAX_FOLD_STEP_COUNT + 1, 0);
-        let result = registry.zk_verify(
-            crate::DEFAULT_CHAIN_ID,
-            99,
-            &[0x01],
-            &public_io,
-            3,
-            1000,
-        );
-        assert!(matches!(result, Err(PokerL1Error::FoldStepCountExceeded { .. })));
+        let result = registry.zk_verify(crate::DEFAULT_CHAIN_ID, 99, &[0x01], &public_io, 3, 1000);
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::FoldStepCountExceeded { .. })
+        ));
     }
 
     #[test]
@@ -605,15 +595,11 @@ mod tests {
         let mut registry = ZkVerifierRegistry::new();
         registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
         let public_io = make_public_io(1, 10);
-        let result = registry.zk_verify(
-            crate::DEFAULT_CHAIN_ID,
-            99,
-            &[0x01],
-            &public_io,
-            3,
-            1000,
-        );
-        assert!(matches!(result, Err(PokerL1Error::SkipCountExceeded { .. })));
+        let result = registry.zk_verify(crate::DEFAULT_CHAIN_ID, 99, &[0x01], &public_io, 3, 1000);
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::SkipCountExceeded { .. })
+        ));
     }
 
     #[test]

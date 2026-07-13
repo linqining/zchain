@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use crate::error::PokerL1Error;
 
-use super::zk_verifier::{SchemeId, VerifierStatus, ZkVerifier, SCHEME_IPA};
+use super::zk_verifier::{SCHEME_IPA, SchemeId, VerifierStatus, ZkVerifier};
 
 /// IPA proof 最小字节数（MVP stub 下限）。
 ///
@@ -125,16 +125,14 @@ impl ZkVerifier for IpaVerifier {
 }
 
 /// 便捷函数：注册 IPA verifier 到 ZkVerifierRegistry。
-pub fn register_ipa_verifier(
-    registry: &mut super::zk_verifier::ZkVerifierRegistry,
-) {
+pub fn register_ipa_verifier(registry: &mut super::zk_verifier::ZkVerifierRegistry) {
     registry.register(IpaVerifier::into_registry_verifier());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::zk_verifier::{ZkPublicIo, ZkVerifierRegistry};
+    use super::*;
 
     fn make_public_io() -> ZkPublicIo {
         ZkPublicIo {

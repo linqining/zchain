@@ -15,12 +15,21 @@
 //!
 //! 当前实现 CCS trait + fold step 接口骨架，具体折叠算法在 Production 阶段实现。
 
-use crate::error::PokerL1Error;
 use crate::Hash;
+use crate::error::PokerL1Error;
 
 use super::hypernova::{FinalSumcheck, FoldedInstance, HypernovaProof, WitnessCommitment};
 use super::zk_verifier::ZkPublicIo;
-use super::MAX_FOLD_STEP_COUNT;
+
+// ===== Phase 11 Re-export：新 Fr-based 类型（迁移目标）=====
+pub use poker_zkvm::ccs::{Ccs as NewCcs, CcsInstance as NewCcsInstance, Fr as ZkvmFr};
+pub use poker_zkvm::fold::ccccs::Ccccs;
+pub use poker_zkvm::fold::fold_loop::HypernovaProof as ZkvmHypernovaProof;
+pub use poker_zkvm::fold::fold_step::FoldStepOutput;
+pub use poker_zkvm::fold::lcccs::Lcccs;
+pub use poker_zkvm::pcs::ipa::{IpaCommitment, IpaPcs};
+pub use poker_zkvm::precompiles::CcsCircuit as NewCcsCircuit;
+pub use poker_zkvm::transcript::Transcript as ZkvmTranscript;
 
 /// CCS 电路实例（SubTask 26.1）。
 ///
@@ -29,6 +38,16 @@ use super::MAX_FOLD_STEP_COUNT;
 /// - 公共输入（public_inputs）
 /// - 见证（witness）
 /// - 状态增量（state_delta）
+///
+/// # 已废弃（Phase 11 迁移）
+///
+/// 此 struct 基于 `Hash` 类型，已被 `poker_zkvm::ccs::CcsInstance`（Fr-based 新类型）取代。
+/// Phase 11 BREAKING 迁移：旧 `fold_step` / `fold_loop` 已返回 Err，
+/// 调用方必须迁移到 `poker_zkvm::fold::fold_step::fold` / `poker_zkvm::fold::fold_loop::fold_loop`。
+#[deprecated(
+    since = "0.3.0",
+    note = "Use `poker_zkvm::ccs::CcsInstance` (Fr-based) instead. Phase 11 BREAKING migration."
+)]
 #[derive(Debug, Clone)]
 pub struct CcsInstance {
     /// 约束矩阵哈希列表（每个矩阵的 commitment）。
@@ -57,6 +76,7 @@ pub struct CcsInstance {
     since = "0.2.0",
     note = "Use `poker_zkvm::precompiles::CcsCircuit` (Fr-based) instead. Phase 11 将完成迁移。"
 )]
+#[allow(deprecated)]
 pub trait CcsCircuit: Send + Sync {
     /// 电路名称（用于日志 / 调试）。
     fn name(&self) -> &str;
@@ -68,6 +88,7 @@ pub trait CcsCircuit: Send + Sync {
     ///
     /// 输入：见证 + 公共输入 + 状态增量。
     /// 输出：CCS 实例（含 commitments）。
+    #[allow(deprecated)]
     fn to_instance(
         &self,
         witness: &[u8],
@@ -78,6 +99,14 @@ pub trait CcsCircuit: Send + Sync {
 }
 
 /// Hypernova fold step 结果（SubTask 26.2）。
+///
+/// # 已废弃（Phase 11 迁移）
+///
+/// 被 `poker_zkvm::fold::fold_step::FoldStepOutput` 取代（含真实 folded LCCCS + witness + commitment）。
+#[deprecated(
+    since = "0.3.0",
+    note = "Use `poker_zkvm::fold::fold_step::FoldStepOutput` instead. Phase 11 BREAKING migration."
+)]
 #[derive(Debug, Clone)]
 pub struct FoldStepResult {
     /// 折叠后的 folded instance。
@@ -96,78 +125,36 @@ pub struct FoldStepResult {
 
 /// 执行单步 Hypernova fold（SubTask 26.2）。
 ///
-/// MVP 阶段：仅生成占位结构，不实际折叠。
-/// Production 阶段须实现完整的 Hypernova 折叠算法。
+/// # 已废弃（Phase 11 迁移）
+///
+/// 此函数为 MVP stub，使用 blake2b 哈希链冒充折叠，**Phase 11 已移除该逻辑**。
+/// 调用此函数将返回 `Err`。请使用 [`fold_step_real`] 或 `poker_zkvm::fold::fold_step::fold`。
+#[deprecated(
+    since = "0.3.0",
+    note = "Use `fold_step_real` or `poker_zkvm::fold::fold_step::fold` instead. Phase 11 BREAKING migration."
+)]
+#[allow(deprecated)]
 pub fn fold_step(
-    prev: Option<&FoldStepResult>,
-    instance: &CcsInstance,
-    chain_id: crate::ChainId,
-    game_id: &crate::object_model::ObjectID,
+    _prev: Option<&FoldStepResult>,
+    _instance: &CcsInstance,
+    _chain_id: crate::ChainId,
+    _game_id: &crate::object_model::ObjectID,
 ) -> Result<FoldStepResult, PokerL1Error> {
-    let _ = (chain_id, game_id);
-
-    let fold_step_count = prev.map(|p| p.fold_step_count + 1).unwrap_or(1);
-
-    // O15 上限校验
-    if fold_step_count > MAX_FOLD_STEP_COUNT {
-        return Err(PokerL1Error::FoldStepCountExceeded {
-            actual: fold_step_count,
-            limit: MAX_FOLD_STEP_COUNT,
-        });
-    }
-
-    // MVP：直接使用 instance 的 commitments 作为 folded 结果
-    let folded_instance = FoldedInstance {
-        instance_commitment: instance.mat_commitments[0],
-        fold_step_count,
-    };
-    let witness_commitment = WitnessCommitment {
-        commitment: instance.witness_commitment,
-    };
-    let sumcheck = FinalSumcheck {
-        evaluations: vec![instance.public_input_hash],
-        final_sum: instance.state_delta_hash,
-    };
-
-    // 累计 state_delta_hash：简单哈希链接
-    let cumulative_state_delta_hash = prev.map_or(instance.state_delta_hash, |p| {
-        let mut hasher = blake2::Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
-        use blake2::digest::Update;
-        hasher.update(&p.cumulative_state_delta_hash);
-        hasher.update(&instance.state_delta_hash);
-        let mut out = [0u8; 32];
-        use blake2::digest::VariableOutput;
-        hasher
-            .finalize_variable(&mut out)
-            .expect("Blake2bVar finalize 不应失败");
-        out
-    });
-
-    // 累计 ack_chain_hash：简单哈希链接
-    let cumulative_ack_chain_hash = prev.map_or(instance.ack_step_hash, |p| {
-        let mut hasher = blake2::Blake2bVar::new(32).expect("Blake2bVar(32) 不应失败");
-        use blake2::digest::Update;
-        hasher.update(&p.cumulative_ack_chain_hash);
-        hasher.update(&instance.ack_step_hash);
-        let mut out = [0u8; 32];
-        use blake2::digest::VariableOutput;
-        hasher
-            .finalize_variable(&mut out)
-            .expect("Blake2bVar finalize 不应失败");
-        out
-    });
-
-    Ok(FoldStepResult {
-        folded_instance,
-        witness_commitment,
-        sumcheck,
-        cumulative_state_delta_hash,
-        cumulative_ack_chain_hash,
-        fold_step_count,
-    })
+    Err(PokerL1Error::Other(
+        "Phase 11 BREAKING: fold_step stub removed. Use poker_zkvm::fold::fold_step::fold instead."
+            .to_string(),
+    ))
 }
 
 /// 多步折叠循环结果（SubTask 26.3）。
+///
+/// # 已废弃（Phase 11 迁移）
+///
+/// 被 `poker_zkvm::fold::fold_loop::HypernovaProof` 取代（含完整 fold_steps + final_sumcheck + PCS opening）。
+#[deprecated(
+    since = "0.3.0",
+    note = "Use `poker_zkvm::fold::fold_loop::HypernovaProof` instead. Phase 11 BREAKING migration."
+)]
 #[derive(Debug, Clone)]
 pub struct FoldLoopResult {
     /// 最终 Hypernova proof。
@@ -192,55 +179,27 @@ pub struct FoldLoopResult {
 ///
 /// # 上限
 /// `instances.len()` <= 1000（O15 修复 — fold_step_count 上限 1000）。
+///
+/// # 已废弃（Phase 11 迁移）
+///
+/// 此函数为 MVP stub，使用 blake2b 哈希链冒充折叠，**Phase 11 已移除该逻辑**。
+/// 调用此函数将返回 `Err`。请使用 [`fold_loop_real`] 或 `poker_zkvm::fold::fold_loop::fold_loop`。
+#[deprecated(
+    since = "0.3.0",
+    note = "Use `fold_loop_real` or `poker_zkvm::fold::fold_loop::fold_loop` instead. Phase 11 BREAKING migration."
+)]
+#[allow(deprecated)]
 pub fn fold_loop(
-    instances: &[CcsInstance],
-    initial_commitment: Hash,
-    final_commitment: Hash,
-    ack_chain_hash: Hash,
-    skip_count: u32,
-    segment_continuity_proof: Vec<u8>,
+    _instances: &[CcsInstance],
+    _initial_commitment: Hash,
+    _final_commitment: Hash,
+    _ack_chain_hash: Hash,
+    _skip_count: u32,
+    _segment_continuity_proof: Vec<u8>,
 ) -> Result<FoldLoopResult, PokerL1Error> {
-    if instances.is_empty() {
-        return Err(PokerL1Error::Other(
-            "fold_loop: instances 不能为空".to_string(),
-        ));
-    }
-    if instances.len() as u32 > MAX_FOLD_STEP_COUNT {
-        return Err(PokerL1Error::FoldStepCountExceeded {
-            actual: instances.len() as u32,
-            limit: MAX_FOLD_STEP_COUNT,
-        });
-    }
-
-    let mut prev: Option<FoldStepResult> = None;
-    for instance in instances {
-        let step_result = fold_step(prev.as_ref(), instance, crate::DEFAULT_CHAIN_ID, &crate::object_model::ObjectID::new([0u8; 20], 0))?;
-        prev = Some(step_result);
-    }
-
-    let final_step = prev.expect("fold_loop: 至少有一个 step result");
-
-    let proof = HypernovaProof {
-        folded_instance: final_step.folded_instance,
-        witness_commitment: final_step.witness_commitment,
-        final_sumcheck: final_step.sumcheck,
-    };
-
-    let public_io = ZkPublicIo {
-        initial_commitment,
-        final_commitment,
-        state_delta_hash: final_step.cumulative_state_delta_hash,
-        ack_chain_hash,
-        skip_count,
-        segment_continuity_proof,
-        fold_step_count: final_step.fold_step_count,
-    };
-
-    Ok(FoldLoopResult {
-        proof,
-        public_io,
-        fold_step_count: final_step.fold_step_count,
-    })
+    Err(PokerL1Error::Other(
+        "Phase 11 BREAKING: fold_loop stub removed. Use poker_zkvm::fold::fold_loop::fold_loop instead.".to_string(),
+    ))
 }
 
 /// ZkShuffle CCS 电路适配器（SubTask 26.4）。
@@ -330,127 +289,148 @@ impl CcsCircuit for ZkShuffleCcsCircuit {
     }
 }
 
+// ===== Phase 11: LegacyCcsInstanceAdapter（编译兼容，运行时 Err）=====
+
+/// 旧 hash-based CcsInstance 的编译兼容适配器（Phase 11 过渡）。
+///
+/// **v1.2 诚实声明**：仅用于过渡期编译兼容，`to_ccs_instance()` 运行时返回 `Err`。
+/// hash 是单向的，无法恢复真实 CCS 矩阵 / witness / public_inputs。
+/// 旧调用方在 Production 下会失败，必须重构以提供真实矩阵。
+///
+/// # 迁移指南
+///
+/// 旧代码：
+/// ```ignore
+/// let instance: CcsInstance = circuit.to_instance(witness, pub_inputs, state_delta, ack_hash)?;
+/// ```
+///
+/// 新代码：
+/// ```ignore
+/// use poker_zkvm::precompiles::CcsCircuit;
+/// let instance = circuit.to_ccs_instance(&witness_fr, &public_inputs_fr)?;
+/// ```
+#[deprecated(
+    since = "0.3.0",
+    note = "Migrate to poker_zkvm::ccs::CcsInstance with real matrices"
+)]
+#[allow(deprecated)]
+pub struct LegacyCcsInstanceAdapter {
+    /// 旧 hash-based 实例（仅保留用于 `name()` / `num_matrices()` 查询）。
+    pub legacy: CcsInstance,
+}
+
+#[allow(deprecated)]
+impl LegacyCcsInstanceAdapter {
+    /// 从旧 hash-based CcsInstance 构造适配器。
+    pub const fn new(legacy: CcsInstance) -> Self {
+        Self { legacy }
+    }
+}
+
+#[allow(deprecated)]
+impl NewCcsCircuit for LegacyCcsInstanceAdapter {
+    fn name(&self) -> &str {
+        "legacy_hash_based_adapter"
+    }
+
+    fn num_matrices(&self) -> usize {
+        self.legacy.mat_commitments.len()
+    }
+
+    fn to_ccs_instance(
+        &self,
+        _witness: &[ZkvmFr],
+        _public_inputs: &[ZkvmFr],
+    ) -> Result<NewCcsInstance, poker_zkvm::error::ZkvmError> {
+        Err(poker_zkvm::error::ZkvmError::Other(
+            "legacy hash-based instance cannot be really folded — hash is one-way, cannot recover matrices".to_string(),
+        ))
+    }
+}
+
+// ===== Phase 11: 真实 Hypernova fold thin wrapper =====
+
+/// 真实 Hypernova 单步折叠（委托到 `poker_zkvm::fold::fold_step::fold`）。
+///
+/// 这是 Phase 11 迁移后的推荐入口，替代旧 `fold_step` stub。
+///
+/// # 参数
+/// - `lcccs` — LCCCS_L 实例（running instance）
+/// - `witness_commitment_l` — LCCCS_L 的 witness commitment `C_L`
+/// - `ccccs` — CCCCS_C 实例（incoming instance）
+/// - `transcript` — Fiat-Shamir transcript
+pub fn fold_step_real(
+    lcccs: &Lcccs,
+    witness_commitment_l: &IpaCommitment,
+    ccccs: &Ccccs,
+    transcript: &mut ZkvmTranscript,
+) -> Result<FoldStepOutput, PokerL1Error> {
+    poker_zkvm::fold::fold_step::fold(lcccs, witness_commitment_l, ccccs, transcript)
+        .map_err(super::hypernova::map_zkvm_error)
+}
+
+/// 真实 Hypernova 多步折叠循环（委托到 `poker_zkvm::fold::fold_loop::fold_loop`）。
+///
+/// 这是 Phase 11 迁移后的推荐入口，替代旧 `fold_loop` stub。
+#[allow(clippy::too_many_arguments)]
+pub fn fold_loop_real(
+    ccs: &NewCcs,
+    initial_lcccs: Lcccs,
+    initial_commitment: IpaCommitment,
+    ccccs_instances: &[Ccccs],
+    pcs: &IpaPcs,
+    transcript: &mut ZkvmTranscript,
+    ccs_commitment: [u8; 32],
+    public_io_commitment: [u8; 32],
+    batch_public_inputs: Vec<Vec<ZkvmFr>>,
+) -> Result<ZkvmHypernovaProof, PokerL1Error> {
+    poker_zkvm::fold::fold_loop::fold_loop(
+        ccs,
+        initial_lcccs,
+        initial_commitment,
+        ccccs_instances,
+        pcs,
+        transcript,
+        ccs_commitment,
+        public_io_commitment,
+        batch_public_inputs,
+    )
+    .map_err(super::hypernova::map_zkvm_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_ccs_instance(step: u8) -> CcsInstance {
-        CcsInstance {
-            mat_commitments: vec![[step; 32]],
-            public_input_hash: [step; 32],
-            witness_commitment: [step; 32],
-            state_delta_hash: [step; 32],
-            ack_step_hash: [step; 32],
-        }
-    }
-
     #[test]
-    fn test_fold_step_first() {
-        let instance = make_ccs_instance(1);
-        let result = fold_step(None, &instance, crate::DEFAULT_CHAIN_ID, &crate::object_model::ObjectID::new([0u8; 20], 0))
-            .expect("首次 fold 应成功");
-        assert_eq!(result.fold_step_count, 1);
-        assert_eq!(result.cumulative_state_delta_hash, instance.state_delta_hash);
-        assert_eq!(result.cumulative_ack_chain_hash, instance.ack_step_hash);
-    }
-
-    #[test]
-    fn test_fold_step_cumulative() {
-        let i1 = make_ccs_instance(1);
-        let r1 = fold_step(None, &i1, crate::DEFAULT_CHAIN_ID, &crate::object_model::ObjectID::new([0u8; 20], 0)).unwrap();
-
-        let i2 = make_ccs_instance(2);
-        let r2 = fold_step(Some(&r1), &i2, crate::DEFAULT_CHAIN_ID, &crate::object_model::ObjectID::new([0u8; 20], 0)).unwrap();
-
-        assert_eq!(r2.fold_step_count, 2);
-        // cumulative 应不同于任一单独 hash
-        assert_ne!(r2.cumulative_state_delta_hash, i1.state_delta_hash);
-        assert_ne!(r2.cumulative_state_delta_hash, i2.state_delta_hash);
-    }
-
-    #[test]
-    fn test_fold_step_exceeds_limit() {
-        // 构造 prev.fold_step_count = MAX_FOLD_STEP_COUNT，下一步应失败
-        let prev = FoldStepResult {
-            folded_instance: FoldedInstance {
-                instance_commitment: [0; 32],
-                fold_step_count: MAX_FOLD_STEP_COUNT,
-            },
-            witness_commitment: WitnessCommitment {
-                commitment: [0; 32],
-            },
-            sumcheck: FinalSumcheck {
-                evaluations: vec![],
-                final_sum: [0; 32],
-            },
-            cumulative_state_delta_hash: [0; 32],
-            cumulative_ack_chain_hash: [0; 32],
-            fold_step_count: MAX_FOLD_STEP_COUNT,
+    #[allow(deprecated)]
+    fn test_deprecated_fold_step_returns_error() {
+        let instance = CcsInstance {
+            mat_commitments: vec![[0; 32]],
+            public_input_hash: [0; 32],
+            witness_commitment: [0; 32],
+            state_delta_hash: [0; 32],
+            ack_step_hash: [0; 32],
         };
-
-        let instance = make_ccs_instance(1);
-        let result = fold_step(Some(&prev), &instance, crate::DEFAULT_CHAIN_ID, &crate::object_model::ObjectID::new([0u8; 20], 0));
-        assert!(matches!(result, Err(PokerL1Error::FoldStepCountExceeded { .. })));
-    }
-
-    #[test]
-    fn test_fold_loop_empty_instances() {
-        let result = fold_loop(&[], [0; 32], [0; 32], [0; 32], 0, Vec::new());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fold_loop_exceeds_limit() {
-        let instances: Vec<CcsInstance> = (0..=MAX_FOLD_STEP_COUNT)
-            .map(|i| make_ccs_instance(i as u8))
-            .collect();
-        let result = fold_loop(&instances, [0; 32], [0; 32], [0; 32], 0, Vec::new());
-        assert!(matches!(result, Err(PokerL1Error::FoldStepCountExceeded { .. })));
-    }
-
-    #[test]
-    fn test_fold_loop_two_steps() {
-        let instances = vec![make_ccs_instance(1), make_ccs_instance(2)];
-        let ack_chain_hash = [0xAB; 32];
-        let result = fold_loop(
-            &instances,
-            [0x01; 32],
-            [0x02; 32],
-            ack_chain_hash,
-            0,
-            Vec::new(),
-        )
-        .expect("fold_loop 应成功");
-
-        assert_eq!(result.fold_step_count, 2);
-        assert_eq!(result.public_io.fold_step_count, 2);
-        assert_eq!(result.public_io.initial_commitment, [0x01; 32]);
-        assert_eq!(result.public_io.final_commitment, [0x02; 32]);
-        assert_eq!(result.public_io.ack_chain_hash, ack_chain_hash);
-        assert_eq!(result.public_io.skip_count, 0);
-    }
-
-    #[test]
-    fn test_fold_loop_max_steps_boundary() {
-        // MAX_FOLD_STEP_COUNT 步应通过（边界）
-        let instances: Vec<CcsInstance> = (0..MAX_FOLD_STEP_COUNT)
-            .map(|i| make_ccs_instance((i % 256) as u8))
-            .collect();
-        let result = fold_loop(
-            &instances,
-            [0x01; 32],
-            [0x02; 32],
-            [0xAB; 32],
-            0,
-            Vec::new(),
-        )
-        .expect("fold_loop 应成功");
-        assert_eq!(result.fold_step_count, MAX_FOLD_STEP_COUNT);
+        let result = fold_step(
+            None,
+            &instance,
+            crate::DEFAULT_CHAIN_ID,
+            &crate::object_model::ObjectID::new([0u8; 20], 0),
+        );
+        assert!(matches!(result, Err(PokerL1Error::Other(_))));
     }
 
     #[test]
     #[allow(deprecated)]
-    fn test_zk_shuffle_circuit_name() {
+    fn test_deprecated_fold_loop_returns_error() {
+        let result = fold_loop(&[], [0; 32], [0; 32], [0; 32], 0, Vec::new());
+        assert!(matches!(result, Err(PokerL1Error::Other(_))));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_zk_shuffle_circuit_still_compiles() {
         let circuit = ZkShuffleCcsCircuit::new();
         assert_eq!(circuit.name(), "zk_shuffle");
         assert_eq!(circuit.num_matrices(), 3);
@@ -458,37 +438,18 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn test_zk_shuffle_to_instance() {
-        let circuit = ZkShuffleCcsCircuit::new();
-        let instance = circuit
-            .to_instance(&[0x01, 0x02], &[0x03, 0x04], &[0x05, 0x06], [0x07; 32])
-            .expect("to_instance 应成功");
-
-        assert_eq!(instance.mat_commitments.len(), 3);
-        // 不同 witness 应产生不同 commitments
-        let instance2 = circuit
-            .to_instance(&[0xFF, 0x02], &[0x03, 0x04], &[0x05, 0x06], [0x07; 32])
-            .unwrap();
-        assert_ne!(instance.witness_commitment, instance2.witness_commitment);
-    }
-
-    #[test]
-    fn test_fold_loop_public_io_validation() {
-        let instances = vec![make_ccs_instance(1)];
-        let result = fold_loop(
-            &instances,
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            0,
-            Vec::new(),
-        )
-        .expect("fold_loop 应成功");
-
-        // public_io 应通过校验
-        result
-            .public_io
-            .validate(3, 1000)
-            .expect("public_io 应通过校验");
+    fn test_legacy_adapter_returns_error() {
+        let legacy = CcsInstance {
+            mat_commitments: vec![[0; 32], [1; 32], [2; 32]],
+            public_input_hash: [3; 32],
+            witness_commitment: [4; 32],
+            state_delta_hash: [5; 32],
+            ack_step_hash: [6; 32],
+        };
+        let adapter = LegacyCcsInstanceAdapter::new(legacy);
+        assert_eq!(adapter.name(), "legacy_hash_based_adapter");
+        assert_eq!(adapter.num_matrices(), 3);
+        let result = adapter.to_ccs_instance(&[], &[]);
+        assert!(result.is_err());
     }
 }

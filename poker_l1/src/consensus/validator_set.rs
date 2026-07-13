@@ -24,8 +24,8 @@
 //! Phase 2 范围：数据结构 + input/output 计算 + 验证 trait 接口；
 //! 实际 ECVRF proof 生成与验证由 IMPL-SEC-2 专项任务实现（标注 TODO）。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::Epoch;
@@ -577,7 +577,7 @@ pub fn compute_genesis_chain_randomness(validators: &[ValidatorEntry]) -> [u8; 3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::tagged_pubkey::{encode_tag, SignatureScheme};
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
     fn make_tagged_pubkey(byte: u8) -> TaggedPubkey {
         TaggedPubkey {
@@ -672,7 +672,10 @@ mod tests {
     fn compute_vrf_input_binds_prev_randomness() {
         let input1 = compute_vrf_input(0x706F_6B31, 1, &[0xAA; 32]);
         let input2 = compute_vrf_input(0x706F_6B31, 1, &[0xBB; 32]);
-        assert_ne!(input1, input2, "prev_epoch_randomness 变化必须改变 VRF input");
+        assert_ne!(
+            input1, input2,
+            "prev_epoch_randomness 变化必须改变 VRF input"
+        );
     }
 
     #[test]
@@ -773,14 +776,18 @@ mod tests {
     #[test]
     fn validator_set_validate_size_for_offchain_ok() {
         let set = make_validator_set(5);
-        set.validate_size_for_offchain().expect("5 validator 应通过 SEC-C2");
+        set.validate_size_for_offchain()
+            .expect("5 validator 应通过 SEC-C2");
     }
 
     #[test]
     fn validator_set_validate_size_for_offchain_rejects_small() {
         let set = make_validator_set(4);
         let err = set.validate_size_for_offchain().unwrap_err();
-        assert!(matches!(err, PokerL1Error::ValidatorSetTooSmallForOffChain { size: 4 }));
+        assert!(matches!(
+            err,
+            PokerL1Error::ValidatorSetTooSmallForOffChain { size: 4 }
+        ));
     }
 
     #[test]
@@ -804,7 +811,10 @@ mod tests {
         set.validators[0].under_investigation_count = 3;
         set.validators[1].under_investigation_count = 0;
         set.advance_epoch(2);
-        assert_eq!(set.validators[0].under_investigation_count, 2, "每 epoch 衰减 1");
+        assert_eq!(
+            set.validators[0].under_investigation_count, 2,
+            "每 epoch 衰减 1"
+        );
         assert_eq!(set.validators[1].under_investigation_count, 0, "最低为 0");
         assert_eq!(set.epoch, 2);
         assert_eq!(set.prev_epoch_randomness, [0u8; 32]);
@@ -878,7 +888,8 @@ mod tests {
     fn validator_set_record_vertex_production_ok() {
         let mut set = make_validator_set(5);
         let target = set.validators[0].pubkey.clone();
-        set.record_vertex_production(&target, 500).expect("记录 vertex 生产");
+        set.record_vertex_production(&target, 500)
+            .expect("记录 vertex 生产");
         assert_eq!(set.validators[0].last_vertex_height, 500);
     }
 
@@ -940,7 +951,10 @@ mod tests {
         let game_id = crate::object_model::ObjectID::new([0xBB; 20], 1);
         let assigned1 = set.assigned_validator_for_game(&game_id).expect("分配");
         let assigned2 = set.assigned_validator_for_game(&game_id).expect("分配");
-        assert_eq!(assigned1, assigned2, "同一 Game 的 assigned_validator 必须确定性");
+        assert_eq!(
+            assigned1, assigned2,
+            "同一 Game 的 assigned_validator 必须确定性"
+        );
     }
 
     #[test]

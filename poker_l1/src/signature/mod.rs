@@ -13,5 +13,5 @@ pub mod secp256k1_scheme;
 pub mod tagged_pubkey;
 pub mod unified;
 
-pub use tagged_pubkey::{SignatureScheme, TaggedPubkey, encode_tag, CURRENT_VERSION};
+pub use tagged_pubkey::{CURRENT_VERSION, SignatureScheme, TaggedPubkey, encode_tag};
 pub use unified::verify_signature;
