@@ -13,6 +13,9 @@ poker_l1 = { path = "poker_l1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { workspace = true, features = ["signal", "rt"] }
 
 [workspace.dependencies]
 # 共享依赖集中管理，便于版本一致与升级

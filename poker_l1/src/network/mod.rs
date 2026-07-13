@@ -248,10 +248,10 @@ impl ShortIdMap {
     /// 仅当 short_id 当前映射的 tx_hash 与传入值一致时移除，
     /// 防止误删已映射到新 tx 的条目。
     pub fn remove(&mut self, short_id: &ShortId, tx_hash: &Hash) {
-        if let Some(&existing) = self.map.get(short_id) {
-            if existing == *tx_hash {
-                self.map.remove(short_id);
-            }
+        if let Some(&existing) = self.map.get(short_id)
+            && existing == *tx_hash
+        {
+            self.map.remove(short_id);
         }
     }
 

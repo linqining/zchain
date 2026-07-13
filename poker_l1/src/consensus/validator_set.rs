@@ -146,9 +146,13 @@ pub trait VrfVerifier: Send + Sync {
 ///
 /// 始终返回固定 output，不实际验证 ECVRF proof。
 /// 生产环境必须替换为真实 ECVRF-secp256k1 实现。
+///
+/// 通过 `test-helpers` feature 或 `#[cfg(test)]` 门控，防止生产环境误用。
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StubVrfVerifier;
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl VrfVerifier for StubVrfVerifier {
     fn verify(
         &self,

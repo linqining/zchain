@@ -54,10 +54,14 @@ pub use vertex_production::{
 
 // 重新导出 validator_set 模块公开 API（Task 13 / SubTask 13.1）。
 pub use validator_set::{
-    MAX_SINGLE_REDUCTION_RATIO, MIN_VALIDATOR_SET_SIZE, StubVrfVerifier, VRF_OUTPUT_SIZE,
-    VRF_PROOF_SIZE, VRF_PUBKEY_SIZE, ValidatorEntry, ValidatorSet, ValidatorStatus, VrfProof,
-    VrfVerifier, compute_genesis_chain_randomness, compute_vrf_input, compute_vrf_output,
+    MAX_SINGLE_REDUCTION_RATIO, MIN_VALIDATOR_SET_SIZE, VRF_OUTPUT_SIZE, VRF_PROOF_SIZE,
+    VRF_PUBKEY_SIZE, ValidatorEntry, ValidatorSet, ValidatorStatus, VrfProof, VrfVerifier,
+    compute_genesis_chain_randomness, compute_vrf_input, compute_vrf_output,
 };
+
+// StubVrfVerifier 仅在 test-helpers feature 或 #[cfg(test)] 下导出（P1 修复 — 防止生产误用）
+#[cfg(any(test, feature = "test-helpers"))]
+pub use validator_set::StubVrfVerifier;
 
 // 重新导出 slashing 模块公开 API（Task 13 / SubTask 13.2-13.5）。
 pub use slashing::{

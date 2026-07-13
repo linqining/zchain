@@ -3,6 +3,11 @@ name = "poker_l1"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# test-helpers：暴露 StubVrfVerifier 等测试专用类型，仅供集成测试 / 基准测试使用。
+# 生产环境绝不可启用 — StubVrfVerifier 不执行真实 ECVRF-secp256k1 验证。
+test-helpers = []
+
 [lib]
 path = "src/lib.rs"
 
