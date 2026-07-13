@@ -38,7 +38,7 @@ use crate::ccs::{Ccs, Fr};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
 use crate::fold::lcccs::eq_eval;
-use crate::transcript::{Transcript, SUMCHECK_DOMAIN_TAG};
+use crate::transcript::{SUMCHECK_DOMAIN_TAG, Transcript};
 
 // ============ 辅助函数 ============
 
@@ -343,8 +343,7 @@ pub fn prove(
             let e_fr = Fr::from_u32_with_wrap(e as u32);
             // 临时 bind X_k = e
             let eq_e = bind_var(&eq_table, &e_fr);
-            let vjp_e: Vec<Vec<Fr>> =
-                vjp_tables.iter().map(|t| bind_var(t, &e_fr)).collect();
+            let vjp_e: Vec<Vec<Fr>> = vjp_tables.iter().map(|t| bind_var(t, &e_fr)).collect();
 
             // F_e[i] = Σ_i c_i · Π_{j∈S_i} vjp_e[j][i]
             let half = eq_e.len();
@@ -395,10 +394,7 @@ pub fn prove(
         let last_round = &outer_round_polys[m - 1];
         let last_r = r_x_prime[m - 1];
         let expected = eval_poly_at(last_round, &last_r);
-        debug_assert_eq!(
-            g_at_r_x_prime, expected,
-            "外层 sumcheck final check 应一致"
-        );
+        debug_assert_eq!(g_at_r_x_prime, expected, "外层 sumcheck final check 应一致");
     }
 
     // ===== 5. 吸收 v_pp，派生 γ =====
@@ -488,10 +484,7 @@ pub fn prove(
         let last_round = &inner_round_polys[n - 1];
         let last_r = r_y[n - 1];
         let expected = eval_poly_at(last_round, &last_r);
-        debug_assert_eq!(
-            h_at_r_y, expected,
-            "内层 sumcheck final check 应一致"
-        );
+        debug_assert_eq!(h_at_r_y, expected, "内层 sumcheck final check 应一致");
     }
 
     Ok(SumcheckProverOutput {
@@ -743,8 +736,13 @@ mod tests {
         let mut m1 = SparseMatrix::new(1, 4);
         m1.add_entry(0, 2, f(1)).unwrap();
 
-        Ccs::new(4, vec![m0, m1], vec![vec![0], vec![1]], vec![f(1), neg_f(1)])
-            .expect("linear Ccs 构造应成功")
+        Ccs::new(
+            4,
+            vec![m0, m1],
+            vec![vec![0], vec![1]],
+            vec![f(1), neg_f(1)],
+        )
+        .expect("linear Ccs 构造应成功")
     }
 
     /// 构造非线性 CCS — x * y - z = 0（1 row, 4 vars, 3 matrices）
@@ -774,8 +772,13 @@ mod tests {
         m1.add_entry(0, 2, f(1)).unwrap();
         m1.add_entry(1, 3, f(1)).unwrap();
 
-        Ccs::new(4, vec![m0, m1], vec![vec![0], vec![1]], vec![f(1), neg_f(1)])
-            .expect("2-row linear Ccs 构造应成功")
+        Ccs::new(
+            4,
+            vec![m0, m1],
+            vec![vec![0], vec![1]],
+            vec![f(1), neg_f(1)],
+        )
+        .expect("2-row linear Ccs 构造应成功")
     }
 
     /// 构造 4-row 线性 CCS — 4 个约束行（num_vars=4，z = [1, x, y, 0]）
@@ -791,8 +794,13 @@ mod tests {
         m1.add_entry(2, 2, f(1)).unwrap();
         m1.add_entry(3, 2, f(1)).unwrap();
 
-        Ccs::new(4, vec![m0, m1], vec![vec![0], vec![1]], vec![f(1), neg_f(1)])
-            .expect("4-row linear Ccs 构造应成功")
+        Ccs::new(
+            4,
+            vec![m0, m1],
+            vec![vec![0], vec![1]],
+            vec![f(1), neg_f(1)],
+        )
+        .expect("4-row linear Ccs 构造应成功")
     }
 
     // ===== 辅助函数测试 =====
@@ -929,7 +937,8 @@ mod tests {
 
         // 非线性 CCS: u_prime_spec = u_L + r·u_C = 0 + r·0 = 0（两 satisfied CCS）
         assert_eq!(
-            u_prime_spec, Fr::zero(),
+            u_prime_spec,
+            Fr::zero(),
             "u_L + r·u_C 应为 0（两 satisfied CCS 的 u 均为 0）"
         );
         // 但 actual_u_prime ≠ 0（因 Π 不分配 +，产生 r² 等交叉项）
@@ -955,7 +964,10 @@ mod tests {
         )
         .expect("verify");
 
-        assert!(result, "非线性 CCS 1-row sumcheck 应验证通过（使用 actual_u_prime）");
+        assert!(
+            result,
+            "非线性 CCS 1-row sumcheck 应验证通过（使用 actual_u_prime）"
+        );
 
         // 反例：使用 spec 的 u_prime 应验证失败
         let mut verify_t2 = fold_t.clone();
@@ -1027,7 +1039,9 @@ mod tests {
         let z_c = vec![f(1), f(4), f(4), f(0)]; // 所有行: 4-4=0
 
         // r_x_l = [0, 0]，x_l 长度须 = x_c 长度 = log2(num_rows) = 2
-        let lcccs = ccs.to_lcccs(&z_l, &[f(0), f(0)], vec![f(0), f(0)]).expect("to_lcccs");
+        let lcccs = ccs
+            .to_lcccs(&z_l, &[f(0), f(0)], vec![f(0), f(0)])
+            .expect("to_lcccs");
         let ccccs = ccs
             .to_cccs(&z_c, vec![f(0), f(0)], stub_commitment())
             .expect("to_cccs");

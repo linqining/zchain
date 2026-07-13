@@ -217,9 +217,7 @@ fn extract_insn_fields(insn: &Instruction) -> (Option<u8>, Option<u8>, Option<u8
         | Instruction::Divu { rd, rs1, rs2 }
         | Instruction::Rem { rd, rs1, rs2 }
         | Instruction::Remu { rd, rs1, rs2 } => (Some(*rs1), Some(*rs2), Some(*rd), 0, 0),
-        Instruction::Fence | Instruction::Ecall | Instruction::Ebreak => {
-            (None, None, None, 0, 0)
-        }
+        Instruction::Fence | Instruction::Ecall | Instruction::Ebreak => (None, None, None, 0, 0),
     }
 }
 
@@ -438,8 +436,9 @@ pub fn compile_trace_to_ccs(
     for batch_id in 0..num_batches {
         let start = batch_id * batch_size;
         let end = usize::min(start + batch_size, num_steps);
-        let batch_steps: Vec<&crate::trace::Step> =
-            (start..end).map(|i| trace.step(i)).collect::<Result<Vec<_>, _>>()?;
+        let batch_steps: Vec<&crate::trace::Step> = (start..end)
+            .map(|i| trace.step(i))
+            .collect::<Result<Vec<_>, _>>()?;
         let instance = compile_batch_to_ccs(&batch_steps, batch_id as u64)?;
         instances.push(instance);
     }
@@ -850,7 +849,8 @@ mod tests {
         assert!(instances[1].is_satisfied().expect("batch 1 应满足"));
 
         // batch 间连续性：batch 0 last_idx(4) + 1 == batch 1 first_idx(5)
-        let public_inputs: Vec<Vec<Fr>> = instances.iter().map(|i| i.public_inputs.clone()).collect();
+        let public_inputs: Vec<Vec<Fr>> =
+            instances.iter().map(|i| i.public_inputs.clone()).collect();
         assert!(verify_batch_continuity(&public_inputs));
     }
 
@@ -891,7 +891,8 @@ mod tests {
         assert!(instances[1].is_satisfied().expect("batch 1 应满足"));
 
         // batch 间连续性应失败：batch 0 last_idx(4) + 1 = 5 ≠ batch 1 first_idx(100)
-        let public_inputs: Vec<Vec<Fr>> = instances.iter().map(|i| i.public_inputs.clone()).collect();
+        let public_inputs: Vec<Vec<Fr>> =
+            instances.iter().map(|i| i.public_inputs.clone()).collect();
         assert!(!verify_batch_continuity(&public_inputs));
     }
 
@@ -1001,14 +1002,8 @@ mod tests {
                 "k={k}: num_rows={} 应为 2 的幂",
                 inst.ccs.num_rows()
             );
-            assert!(
-                inst.ccs.num_vars >= 2,
-                "k={k}: num_vars 应 >= 2",
-            );
-            assert!(
-                inst.ccs.num_rows() >= 1,
-                "k={k}: num_rows 应 >= 1",
-            );
+            assert!(inst.ccs.num_vars >= 2, "k={k}: num_vars 应 >= 2",);
+            assert!(inst.ccs.num_rows() >= 1, "k={k}: num_rows 应 >= 1",);
             assert!(inst.is_satisfied().expect("应满足"));
         }
     }
@@ -1157,7 +1152,7 @@ mod tests {
     #[test]
     fn test_phase5_integration_memory_uninitialized_read_detection() {
         // 内存子电路：未初始化读取检测
-        use crate::constraints::memory::{check_uninitialized_read, ByteAccess};
+        use crate::constraints::memory::{ByteAccess, check_uninitialized_read};
 
         // write 在 step 10，read 在 step 20 → 合法
         let writes = vec![ByteAccess {
@@ -1190,7 +1185,7 @@ mod tests {
     #[test]
     fn test_phase5_integration_logup_with_u8_range() {
         // 端到端：u8 range table + 多个 witness 值
-        use crate::constraints::lookup::{compute_multiplicity, LogUpProof, LookupTable};
+        use crate::constraints::lookup::{LogUpProof, LookupTable, compute_multiplicity};
         use crate::field::ZkvmField;
 
         let table = LookupTable::u8_range();
@@ -1213,7 +1208,7 @@ mod tests {
     #[test]
     fn test_phase5_integration_logup_with_truth_tables() {
         // 端到端：AND/OR/XOR 真值表 lookup
-        use crate::constraints::lookup::{compute_multiplicity, LogUpProof, LookupTable};
+        use crate::constraints::lookup::{LogUpProof, LookupTable, compute_multiplicity};
 
         for table in [
             LookupTable::and_truth_table(),
@@ -1283,7 +1278,10 @@ mod tests {
         // CCS 结构合理性
         assert!(instance.ccs.num_vars >= 3, "num_vars 应 >= 3");
         assert!(instance.ccs.num_matrices() >= 2, "num_matrices 应 >= 2");
-        assert!(instance.ccs.num_constraints() >= 2, "num_constraints 应 >= 2");
+        assert!(
+            instance.ccs.num_constraints() >= 2,
+            "num_constraints 应 >= 2"
+        );
         assert!(instance.ccs.num_rows() >= 1, "num_rows 应 >= 1");
 
         // witness 长度 = num_vars
@@ -1353,9 +1351,7 @@ mod tests {
         // step_index 连续 → Group A 满足
         let trace = make_trace(5); // step_index = 0,1,2,3,4
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
-        assert!(
-            instances[0].is_satisfied().expect("连续 step_index 应满足")
-        );
+        assert!(instances[0].is_satisfied().expect("连续 step_index 应满足"));
 
         // step_index 跳跃 → Group A 不满足
         let mut trace_gap = Trace::new();
@@ -1365,7 +1361,9 @@ mod tests {
 
         let instances_gap = compile_trace_to_ccs(&trace_gap, 10).expect("应成功");
         assert!(
-            !instances_gap[0].is_satisfied().expect("跳跃 step_index 应不满足"),
+            !instances_gap[0]
+                .is_satisfied()
+                .expect("跳跃 step_index 应不满足"),
             "Group A 应检测到 step_index 不连续"
         );
     }
@@ -1472,40 +1470,176 @@ mod tests {
             Instruction::Lui { rd: 1, imm: 0x1000 },
             Instruction::Auipc { rd: 1, imm: 0x1000 },
             Instruction::Jal { rd: 1, imm: 0x100 },
-            Instruction::Jalr { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Beq { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Bne { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Blt { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Bge { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Bltu { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Bgeu { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Lb { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Lh { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Lw { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Lbu { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Lhu { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Sb { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Sh { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
-            Instruction::Addi { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Slti { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Sltiu { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Xori { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Ori { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Andi { rd: 1, rs1: 2, imm: 0 },
-            Instruction::Slli { rd: 1, rs1: 2, shamt: 1 },
-            Instruction::Srli { rd: 1, rs1: 2, shamt: 1 },
-            Instruction::Srai { rd: 1, rs1: 2, shamt: 1 },
-            Instruction::Add { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Sub { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Sll { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Slt { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Xor { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Srl { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Sra { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::Or { rd: 1, rs1: 2, rs2: 3 },
-            Instruction::And { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Beq {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Bne {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Blt {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Bge {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Bltu {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Bgeu {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Lh {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Lbu {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Lhu {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Sb {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Sh {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction::Addi {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Slti {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Sltiu {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Xori {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Ori {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Andi {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            Instruction::Slli {
+                rd: 1,
+                rs1: 2,
+                shamt: 1,
+            },
+            Instruction::Srli {
+                rd: 1,
+                rs1: 2,
+                shamt: 1,
+            },
+            Instruction::Srai {
+                rd: 1,
+                rs1: 2,
+                shamt: 1,
+            },
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Sub {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Sll {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Sltu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Xor {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Srl {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Sra {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::Or {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            Instruction::And {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
             Instruction::Fence,
             Instruction::Ecall,
             Instruction::Ebreak,
@@ -1563,7 +1697,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 300;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1588,7 +1730,15 @@ mod tests {
         regs0[2] = 0xFFFFFFFF;
         regs0[3] = 1;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, [0u32; 32]);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            [0u32; 32],
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1607,7 +1757,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xFFFFFF9C; // 100 - 200 wrapping
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Sub {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1631,7 +1789,14 @@ mod tests {
         // K=1: LUI {rd:1, imm:0x12340000}, regs[1]=0x12340000
         let mut regs = [0u32; 32];
         regs[1] = 0x12340000;
-        let step0 = make_step_with_insn(0, Instruction::Lui { rd: 1, imm: 0x12340000 }, regs);
+        let step0 = make_step_with_insn(
+            0,
+            Instruction::Lui {
+                rd: 1,
+                imm: 0x12340000,
+            },
+            regs,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1670,7 +1835,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 150;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Addi { rd: 1, rs1: 2, imm: 50 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Addi {
+                rd: 1,
+                rs1: 2,
+                imm: 50,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1705,7 +1878,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 300;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1733,7 +1914,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xFF;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Xor { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Xor {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1758,7 +1947,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xFF;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Or { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Or {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1783,7 +1980,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0x0F;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::And { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::And {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1807,7 +2012,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xFF;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Xori { rd: 1, rs1: 2, imm: 0x0F }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Xori {
+                rd: 1,
+                rs1: 2,
+                imm: 0x0F,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1823,7 +2036,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xFF;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Ori { rd: 1, rs1: 2, imm: 0x0F }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Ori {
+                rd: 1,
+                rs1: 2,
+                imm: 0x0F,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1839,7 +2060,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0x0F;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Andi { rd: 1, rs1: 2, imm: 0x0F }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Andi {
+                rd: 1,
+                rs1: 2,
+                imm: 0x0F,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1855,7 +2084,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0x10;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Slli { rd: 1, rs1: 2, shamt: 4 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Slli {
+                rd: 1,
+                rs1: 2,
+                shamt: 4,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1879,7 +2116,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0x40000000;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Srli { rd: 1, rs1: 2, shamt: 1 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Srli {
+                rd: 1,
+                rs1: 2,
+                shamt: 1,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1895,13 +2140,25 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xC0000000;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Srai { rd: 1, rs1: 2, shamt: 1 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Srai {
+                rd: 1,
+                rs1: 2,
+                shamt: 1,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
         trace.push_step(step1);
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
-        assert!(instances[0].is_satisfied().expect("正确 SRAI 算术右移应满足"));
+        assert!(
+            instances[0]
+                .is_satisfied()
+                .expect("正确 SRAI 算术右移应满足")
+        );
     }
 
     #[test]
@@ -1912,7 +2169,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0x10;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Sll {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1937,7 +2202,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0x40000000;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Srl { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Srl {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1954,13 +2227,25 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xC0000000;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Sra { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Sra {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
         trace.push_step(step1);
         let instances = compile_trace_to_ccs(&trace, 10).expect("应成功");
-        assert!(instances[0].is_satisfied().expect("正确 SRA 算术右移应满足"));
+        assert!(
+            instances[0]
+                .is_satisfied()
+                .expect("正确 SRA 算术右移应满足")
+        );
     }
 
     #[test]
@@ -1971,7 +2256,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0x8;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Sll {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -1999,7 +2292,15 @@ mod tests {
         let mut regs1 = [0u32; 32];
         regs1[1] = 0xFF;
         let step0 = make_ecall_step_with_regs(0, regs0);
-        let step1 = make_step_with_insn(1, Instruction::Xor { rd: 1, rs1: 2, rs2: 3 }, regs1);
+        let step1 = make_step_with_insn(
+            1,
+            Instruction::Xor {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            regs1,
+        );
 
         let mut trace = Trace::new();
         trace.push_step(step0);
@@ -2015,5 +2316,4 @@ mod tests {
             "逻辑指令 soundness 应检测到 rd ≠ aux"
         );
     }
-
 }

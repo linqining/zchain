@@ -64,27 +64,33 @@ impl AddCircuit {
         m_b.add_entry(0, 2, Fr::one()).expect("M_b");
 
         let mut m_result = SparseMatrix::new(num_rows, num_vars);
-        m_result.add_entry(0, 3, Fr::zero().sub(&Fr::one())).expect("M_result");
+        m_result
+            .add_entry(0, 3, Fr::zero().sub(&Fr::one()))
+            .expect("M_result");
 
         let mut m_ovf = SparseMatrix::new(num_rows, num_vars);
-        m_ovf.add_entry(0, 4, Fr::zero().sub(&two_pow_32())).expect("M_ovf");
+        m_ovf
+            .add_entry(0, 4, Fr::zero().sub(&two_pow_32()))
+            .expect("M_ovf");
 
         let mut m_bit_pos = SparseMatrix::new(num_rows, num_vars);
         m_bit_pos.add_entry(1, 4, Fr::one()).expect("M_bit_pos");
 
         let mut m_bit_neg = SparseMatrix::new(num_rows, num_vars);
-        m_bit_neg.add_entry(1, 4, Fr::zero().sub(&Fr::one())).expect("M_bit_neg");
+        m_bit_neg
+            .add_entry(1, 4, Fr::zero().sub(&Fr::one()))
+            .expect("M_bit_neg");
 
         Ccs::new(
             num_vars,
             vec![m_a, m_b, m_result, m_ovf, m_bit_pos, m_bit_neg],
             vec![
-                vec![0],       // S_0: +a
-                vec![1],       // S_1: +b
-                vec![2],       // S_2: -result
-                vec![3],       // S_3: -2^32 * overflow_bit
-                vec![4, 4],    // S_4: +overflow_bit²
-                vec![5],       // S_5: -overflow_bit
+                vec![0],    // S_0: +a
+                vec![1],    // S_1: +b
+                vec![2],    // S_2: -result
+                vec![3],    // S_3: -2^32 * overflow_bit
+                vec![4, 4], // S_4: +overflow_bit²
+                vec![5],    // S_5: -overflow_bit
             ],
             vec![
                 Fr::one(),
@@ -169,10 +175,13 @@ impl SubCircuit {
         m_a.add_entry(0, 1, Fr::one()).expect("M_a");
 
         let mut m_b = SparseMatrix::new(num_rows, num_vars);
-        m_b.add_entry(0, 2, Fr::zero().sub(&Fr::one())).expect("M_b");
+        m_b.add_entry(0, 2, Fr::zero().sub(&Fr::one()))
+            .expect("M_b");
 
         let mut m_result = SparseMatrix::new(num_rows, num_vars);
-        m_result.add_entry(0, 3, Fr::zero().sub(&Fr::one())).expect("M_result");
+        m_result
+            .add_entry(0, 3, Fr::zero().sub(&Fr::one()))
+            .expect("M_result");
 
         let mut m_borrow = SparseMatrix::new(num_rows, num_vars);
         m_borrow.add_entry(0, 4, two_pow_32()).expect("M_borrow");
@@ -181,18 +190,20 @@ impl SubCircuit {
         m_bit_pos.add_entry(1, 4, Fr::one()).expect("M_bit_pos");
 
         let mut m_bit_neg = SparseMatrix::new(num_rows, num_vars);
-        m_bit_neg.add_entry(1, 4, Fr::zero().sub(&Fr::one())).expect("M_bit_neg");
+        m_bit_neg
+            .add_entry(1, 4, Fr::zero().sub(&Fr::one()))
+            .expect("M_bit_neg");
 
         Ccs::new(
             num_vars,
             vec![m_a, m_b, m_result, m_borrow, m_bit_pos, m_bit_neg],
             vec![
-                vec![0],       // S_0: +a
-                vec![1],       // S_1: -b
-                vec![2],       // S_2: -result
-                vec![3],       // S_3: +2^32 * borrow_bit
-                vec![4, 4],    // S_4: +borrow_bit²
-                vec![5],       // S_5: -borrow_bit
+                vec![0],    // S_0: +a
+                vec![1],    // S_1: -b
+                vec![2],    // S_2: -result
+                vec![3],    // S_3: +2^32 * borrow_bit
+                vec![4, 4], // S_4: +borrow_bit²
+                vec![5],    // S_5: -borrow_bit
             ],
             vec![
                 Fr::one(),
@@ -259,7 +270,9 @@ impl AndCircuit {
         m_result.add_entry(0, 3, Fr::one()).expect("M_result");
 
         let mut m_computed = SparseMatrix::new(num_rows, num_vars);
-        m_computed.add_entry(0, 3, Fr::zero().sub(&Fr::one())).expect("M_computed");
+        m_computed
+            .add_entry(0, 3, Fr::zero().sub(&Fr::one()))
+            .expect("M_computed");
 
         // MVP: result - result = 0（trivially satisfied，soundness 依赖 witness 赋值）
         // 完整实现需 bit decomposition（Step 13）
@@ -416,8 +429,7 @@ impl MulCircuit {
             .expect("M_hi");
 
         let mut m_lo = SparseMatrix::new(num_rows, num_vars);
-        m_lo
-            .add_entry(1, 5, Fr::zero().sub(&Fr::one()))
+        m_lo.add_entry(1, 5, Fr::zero().sub(&Fr::one()))
             .expect("M_lo");
 
         Ccs::new(
@@ -425,18 +437,12 @@ impl MulCircuit {
             vec![m_a, m_b, m_prod_neg, m_prod_pos, m_hi, m_lo],
             vec![
                 vec![0, 1], // S_0: +a*b (Row 0)
-                vec![2],     // S_1: -product (Row 0)
-                vec![3],     // S_2: +product (Row 1)
-                vec![4],     // S_3: -2^32*hi (Row 1)
-                vec![5],     // S_4: -lo (Row 1)
+                vec![2],    // S_1: -product (Row 0)
+                vec![3],    // S_2: +product (Row 1)
+                vec![4],    // S_3: -2^32*hi (Row 1)
+                vec![5],    // S_4: -lo (Row 1)
             ],
-            vec![
-                Fr::one(),
-                Fr::one(),
-                Fr::one(),
-                Fr::one(),
-                Fr::one(),
-            ],
+            vec![Fr::one(), Fr::one(), Fr::one(), Fr::one(), Fr::one()],
         )
         .expect("MulCircuit CCS 构造应成功")
     }
@@ -559,13 +565,17 @@ impl MulhCircuit {
         let mut m_bs_r3 = SparseMatrix::new(num_rows, num_vars);
         m_bs_r3.add_entry(3, 7, Fr::one()).expect("M_bs_r3");
         let mut m_prod_neg_r3 = SparseMatrix::new(num_rows, num_vars);
-        m_prod_neg_r3.add_entry(3, 3, neg_one).expect("M_prod_neg_r3");
+        m_prod_neg_r3
+            .add_entry(3, 3, neg_one)
+            .expect("M_prod_neg_r3");
         let mut m_ns_r3 = SparseMatrix::new(num_rows, num_vars);
         m_ns_r3.add_entry(3, 8, Fr::one()).expect("M_ns_r3");
 
         // Row 4: prod - hi*2^32 - lo = 0
         let mut m_prod_pos_r4 = SparseMatrix::new(num_rows, num_vars);
-        m_prod_pos_r4.add_entry(4, 3, Fr::one()).expect("M_prod_pos_r4");
+        m_prod_pos_r4
+            .add_entry(4, 3, Fr::one())
+            .expect("M_prod_pos_r4");
         let mut m_hi_r4 = SparseMatrix::new(num_rows, num_vars);
         m_hi_r4
             .add_entry(4, 4, Fr::zero().sub(&two_pow_32()))
@@ -580,33 +590,43 @@ impl MulhCircuit {
             num_vars,
             vec![
                 // 0-1: Row 0 a_sign bit
-                m_as_pos_r0, m_as_neg_r0,
+                m_as_pos_r0,
+                m_as_neg_r0,
                 // 2-3: Row 1 b_sign bit
-                m_bs_pos_r1, m_bs_neg_r1,
+                m_bs_pos_r1,
+                m_bs_neg_r1,
                 // 4-5: Row 2 neg_sign bit
-                m_ns_pos_r2, m_ns_neg_r2,
+                m_ns_pos_r2,
+                m_ns_neg_r2,
                 // 6-8: Row 3 product (a, b, a_sign, b_sign, prod, neg_sign)
-                m_a_r3, m_b_r3, m_as_r3, m_bs_r3, m_prod_neg_r3, m_ns_r3,
+                m_a_r3,
+                m_b_r3,
+                m_as_r3,
+                m_bs_r3,
+                m_prod_neg_r3,
+                m_ns_r3,
                 // 12-14: Row 4 decomposition
-                m_prod_pos_r4, m_hi_r4, m_lo_r4,
+                m_prod_pos_r4,
+                m_hi_r4,
+                m_lo_r4,
             ],
             vec![
                 // Row 0: a_sign² - a_sign
                 vec![0, 0], // S_0: +a_sign²
-                vec![1],     // S_1: -a_sign
+                vec![1],    // S_1: -a_sign
                 // Row 1: b_sign² - b_sign
                 vec![2, 2], // S_2: +b_sign²
-                vec![3],     // S_3: -b_sign
+                vec![3],    // S_3: -b_sign
                 // Row 2: neg_sign² - neg_sign
                 vec![4, 4], // S_4: +neg_sign²
-                vec![5],     // S_5: -neg_sign
+                vec![5],    // S_5: -neg_sign
                 // Row 3: expanded product constraint
-                vec![6, 7],          // S_6: +a*b
-                vec![6, 9],          // S_7: -2^32*a*b_sign → c = -2^32
-                vec![8, 7],          // S_8: -2^32*a_sign*b → c = -2^32  (M_as_r3 is idx 8)
-                vec![8, 9],          // S_9: +2^64*a_sign*b_sign → c = +2^64 (M_bs_r3 is idx 9)
-                vec![10],            // S_10: -prod (M_prod_neg_r3 is idx 10)
-                vec![11],            // S_11: +2^64*neg_sign (M_ns_r3 is idx 11)
+                vec![6, 7], // S_6: +a*b
+                vec![6, 9], // S_7: -2^32*a*b_sign → c = -2^32
+                vec![8, 7], // S_8: -2^32*a_sign*b → c = -2^32  (M_as_r3 is idx 8)
+                vec![8, 9], // S_9: +2^64*a_sign*b_sign → c = +2^64 (M_bs_r3 is idx 9)
+                vec![10],   // S_10: -prod (M_prod_neg_r3 is idx 10)
+                vec![11],   // S_11: +2^64*neg_sign (M_ns_r3 is idx 11)
                 // Row 4: prod - hi*2^32 - lo
                 vec![12], // S_12: +prod
                 vec![13], // S_13: -2^32*hi
@@ -619,12 +639,12 @@ impl MulhCircuit {
                 Fr::one(),
                 Fr::one(),
                 Fr::one(),
-                Fr::one(),                   // S_6
-                Fr::zero().sub(&pow32),      // S_7: -2^32
-                Fr::zero().sub(&pow32),      // S_8: -2^32
-                pow64,                       // S_9: +2^64
-                Fr::one(),                   // S_10
-                pow64,                       // S_11: +2^64
+                Fr::one(),              // S_6
+                Fr::zero().sub(&pow32), // S_7: -2^32
+                Fr::zero().sub(&pow32), // S_8: -2^32
+                pow64,                  // S_9: +2^64
+                Fr::one(),              // S_10
+                pow64,                  // S_11: +2^64
                 Fr::one(),
                 Fr::one(),
                 Fr::one(),
@@ -720,13 +740,17 @@ impl MulhsuCircuit {
         let mut m_as_r2 = SparseMatrix::new(num_rows, num_vars);
         m_as_r2.add_entry(2, 6, Fr::one()).expect("M_as_r2");
         let mut m_prod_neg_r2 = SparseMatrix::new(num_rows, num_vars);
-        m_prod_neg_r2.add_entry(2, 3, neg_one).expect("M_prod_neg_r2");
+        m_prod_neg_r2
+            .add_entry(2, 3, neg_one)
+            .expect("M_prod_neg_r2");
         let mut m_ns_r2 = SparseMatrix::new(num_rows, num_vars);
         m_ns_r2.add_entry(2, 7, Fr::one()).expect("M_ns_r2");
 
         // Row 3: prod - hi*2^32 - lo = 0
         let mut m_prod_pos_r3 = SparseMatrix::new(num_rows, num_vars);
-        m_prod_pos_r3.add_entry(3, 3, Fr::one()).expect("M_prod_pos_r3");
+        m_prod_pos_r3
+            .add_entry(3, 3, Fr::one())
+            .expect("M_prod_pos_r3");
         let mut m_hi_r3 = SparseMatrix::new(num_rows, num_vars);
         m_hi_r3
             .add_entry(3, 4, Fr::zero().sub(&two_pow_32()))
@@ -741,26 +765,34 @@ impl MulhsuCircuit {
             num_vars,
             vec![
                 // 0-1: Row 0 a_sign bit
-                m_as_pos_r0, m_as_neg_r0,
+                m_as_pos_r0,
+                m_as_neg_r0,
                 // 2-3: Row 1 neg_sign bit
-                m_ns_pos_r1, m_ns_neg_r1,
+                m_ns_pos_r1,
+                m_ns_neg_r1,
                 // 4-8: Row 2 product (a, b, a_sign, prod, neg_sign)
-                m_a_r2, m_b_r2, m_as_r2, m_prod_neg_r2, m_ns_r2,
+                m_a_r2,
+                m_b_r2,
+                m_as_r2,
+                m_prod_neg_r2,
+                m_ns_r2,
                 // 9-11: Row 3 decomposition
-                m_prod_pos_r3, m_hi_r3, m_lo_r3,
+                m_prod_pos_r3,
+                m_hi_r3,
+                m_lo_r3,
             ],
             vec![
                 // Row 0: a_sign² - a_sign
                 vec![0, 0], // S_0: +a_sign²
-                vec![1],     // S_1: -a_sign
+                vec![1],    // S_1: -a_sign
                 // Row 1: neg_sign² - neg_sign
                 vec![2, 2], // S_2: +neg_sign²
-                vec![3],     // S_3: -neg_sign
+                vec![3],    // S_3: -neg_sign
                 // Row 2: expanded product
-                vec![4, 5],          // S_4: +a*b
-                vec![6, 5],          // S_5: -2^32*a_sign*b → c = -2^32
-                vec![7],             // S_6: -prod
-                vec![8],             // S_7: +2^64*neg_sign → c = +2^64
+                vec![4, 5], // S_4: +a*b
+                vec![6, 5], // S_5: -2^32*a_sign*b → c = -2^32
+                vec![7],    // S_6: -prod
+                vec![8],    // S_7: +2^64*neg_sign → c = +2^64
                 // Row 3: prod - hi*2^32 - lo
                 vec![9],  // S_8: +prod
                 vec![10], // S_9: -2^32*hi
@@ -771,10 +803,10 @@ impl MulhsuCircuit {
                 Fr::one(),
                 Fr::one(),
                 Fr::one(),
-                Fr::one(),                  // S_4
-                Fr::zero().sub(&pow32),     // S_5: -2^32
-                Fr::one(),                  // S_6
-                pow64,                      // S_7: +2^64
+                Fr::one(),              // S_4
+                Fr::zero().sub(&pow32), // S_5: -2^32
+                Fr::one(),              // S_6
+                pow64,                  // S_7: +2^64
                 Fr::one(),
                 Fr::one(),
                 Fr::one(),
@@ -874,7 +906,13 @@ impl DivCircuit {
         let result = a_signed
             .checked_div(b_signed)
             .map(|v| v as u32)
-            .unwrap_or_else(|| if b_signed == 0 { 0xFFFFFFFF } else { 0x80000000 });
+            .unwrap_or_else(|| {
+                if b_signed == 0 {
+                    0xFFFFFFFF
+                } else {
+                    0x80000000
+                }
+            });
         vec![
             Fr::one(),
             Fr::from_u32_with_wrap(a),
@@ -892,7 +930,13 @@ impl DivCircuit {
         let result = a_signed
             .checked_div(b_signed)
             .map(|v| v as u32)
-            .unwrap_or_else(|| if b_signed == 0 { 0xFFFFFFFF } else { 0x80000000 });
+            .unwrap_or_else(|| {
+                if b_signed == 0 {
+                    0xFFFFFFFF
+                } else {
+                    0x80000000
+                }
+            });
         let public_inputs = vec![
             Fr::from_u32_with_wrap(a),
             Fr::from_u32_with_wrap(b),

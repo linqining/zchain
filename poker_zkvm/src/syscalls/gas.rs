@@ -314,27 +314,45 @@ mod tests {
     #[test]
     fn test_poseidon_gas_calculation() {
         // 0 字节 → 0 blocks → 100 (仅 base)
-        let args = SyscallGasArgs { input_len: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Poseidon, &args), 100);
 
         // 1 字节 → 1 block → 100 + 50 = 150
-        let args = SyscallGasArgs { input_len: 1, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 1,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Poseidon, &args), 150);
 
         // 32 字节 → 1 block → 150
-        let args = SyscallGasArgs { input_len: 32, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 32,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Poseidon, &args), 150);
 
         // 33 字节 → 2 blocks → 100 + 100 = 200
-        let args = SyscallGasArgs { input_len: 33, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 33,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Poseidon, &args), 200);
 
         // 64 字节 → 2 blocks → 200
-        let args = SyscallGasArgs { input_len: 64, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 64,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Poseidon, &args), 200);
 
         // 65 字节 → 3 blocks → 100 + 150 = 250
-        let args = SyscallGasArgs { input_len: 65, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 65,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Poseidon, &args), 250);
     }
 
@@ -342,16 +360,28 @@ mod tests {
 
     #[test]
     fn test_sha256_gas_calculation() {
-        let args = SyscallGasArgs { input_len: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Sha256, &args), 0);
 
-        let args = SyscallGasArgs { input_len: 1, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 1,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Sha256, &args), 1);
 
-        let args = SyscallGasArgs { input_len: 100, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 100,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Sha256, &args), 100);
 
-        let args = SyscallGasArgs { input_len: 1024, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 1024,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Sha256, &args), 1024);
     }
 
@@ -359,19 +389,31 @@ mod tests {
 
     #[test]
     fn test_emit_event_gas_calculation() {
-        let args = SyscallGasArgs { input_len: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::EmitEvent, &args), 10);
 
-        let args = SyscallGasArgs { input_len: 100, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 100,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::EmitEvent, &args), 110);
     }
 
     #[test]
     fn test_log_gas_calculation() {
-        let args = SyscallGasArgs { input_len: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Log, &args), 10);
 
-        let args = SyscallGasArgs { input_len: 50, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 50,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Log, &args), 60);
     }
 
@@ -379,13 +421,22 @@ mod tests {
 
     #[test]
     fn test_read_state_gas_calculation() {
-        let args = SyscallGasArgs { num_slots: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_slots: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::ReadState, &args), 0);
 
-        let args = SyscallGasArgs { num_slots: 1, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_slots: 1,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::ReadState, &args), 50);
 
-        let args = SyscallGasArgs { num_slots: 5, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_slots: 5,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::ReadState, &args), 250);
     }
 
@@ -394,15 +445,24 @@ mod tests {
     #[test]
     fn test_keccak256_gas_calculation() {
         // 0 字节 → 10000 * 24 + 2 * 0 = 240_000
-        let args = SyscallGasArgs { input_len: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Keccak256, &args), 240_000);
 
         // 1 字节 → 240_000 + 2 = 240_002
-        let args = SyscallGasArgs { input_len: 1, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 1,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Keccak256, &args), 240_002);
 
         // 136 字节（1 rate block）→ 240_000 + 272 = 240_272
-        let args = SyscallGasArgs { input_len: 136, ..Default::default() };
+        let args = SyscallGasArgs {
+            input_len: 136,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Keccak256, &args), 240_272);
     }
 
@@ -411,15 +471,24 @@ mod tests {
     #[test]
     fn test_modexp_gas_calculation() {
         // 0 bits → 50_000
-        let args = SyscallGasArgs { num_bits: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_bits: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Modexp, &args), 50_000);
 
         // 8 bits → 50_000 + 4_800 = 54_800
-        let args = SyscallGasArgs { num_bits: 8, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_bits: 8,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Modexp, &args), 54_800);
 
         // 256 bits → 50_000 + 153_600 = 203_600
-        let args = SyscallGasArgs { num_bits: 256, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_bits: 256,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Modexp, &args), 203_600);
     }
 
@@ -428,15 +497,24 @@ mod tests {
     #[test]
     fn test_merkle_verify_gas_calculation() {
         // depth 0 → 0
-        let args = SyscallGasArgs { depth: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            depth: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::MerkleVerify, &args), 0);
 
         // depth 1 → 100
-        let args = SyscallGasArgs { depth: 1, ..Default::default() };
+        let args = SyscallGasArgs {
+            depth: 1,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::MerkleVerify, &args), 100);
 
         // depth 32 → 3_200
-        let args = SyscallGasArgs { depth: 32, ..Default::default() };
+        let args = SyscallGasArgs {
+            depth: 32,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::MerkleVerify, &args), 3_200);
     }
 
@@ -445,15 +523,24 @@ mod tests {
     #[test]
     fn test_ed25519_gas_calculation() {
         // 0 bits → 50_000
-        let args = SyscallGasArgs { num_bits: 0, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_bits: 0,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Ed25519Verify, &args), 50_000);
 
         // 8 bits → 50_000 + 64_000 = 114_000
-        let args = SyscallGasArgs { num_bits: 8, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_bits: 8,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Ed25519Verify, &args), 114_000);
 
         // 252 bits → 50_000 + 2_016_000 = 2_066_000
-        let args = SyscallGasArgs { num_bits: 252, ..Default::default() };
+        let args = SyscallGasArgs {
+            num_bits: 252,
+            ..Default::default()
+        };
         assert_eq!(syscall_gas(SyscallId::Ed25519Verify, &args), 2_066_000);
     }
 
@@ -469,7 +556,12 @@ mod tests {
 
     #[test]
     fn test_all_syscalls_have_gas() {
-        let args = SyscallGasArgs { input_len: 32, num_slots: 1, num_bits: 256, depth: 20 };
+        let args = SyscallGasArgs {
+            input_len: 32,
+            num_slots: 1,
+            num_bits: 256,
+            depth: 20,
+        };
         for id in SyscallId::all() {
             let gas = syscall_gas(id, &args);
             assert!(gas < u64::MAX, "syscall {id:?} gas 不应溢出");
@@ -496,59 +588,215 @@ mod tests {
     #[test]
     fn test_instruction_gas_arithmetic() {
         // R-type 算术
-        assert_eq!(instruction_gas(&Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::Xor { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::Or { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::And { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 }, 0), 1);
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Add {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Sub {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Xor {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Or {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::And {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Slt {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Sltu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
+            1
+        );
         // I-type 算术
-        assert_eq!(instruction_gas(&Instruction::Addi { rd: 1, rs1: 2, imm: 10 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::Xori { rd: 1, rs1: 2, imm: 10 }, 0), 1);
-        assert_eq!(instruction_gas(&Instruction::Andi { rd: 1, rs1: 2, imm: 10 }, 0), 1);
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Addi {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 10
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Xori {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 10
+                },
+                0
+            ),
+            1
+        );
+        assert_eq!(
+            instruction_gas(
+                &Instruction::Andi {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 10
+                },
+                0
+            ),
+            1
+        );
     }
 
     #[test]
     fn test_instruction_gas_memory() {
         // LW = 4 bytes → 3 + 2*4 = 11
         assert_eq!(
-            instruction_gas(&Instruction::Lw { rd: 1, rs1: 2, imm: 0 }, 4),
+            instruction_gas(
+                &Instruction::Lw {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 0
+                },
+                4
+            ),
             11
         );
         // LH = 2 bytes → 3 + 2*2 = 7
         assert_eq!(
-            instruction_gas(&Instruction::Lh { rd: 1, rs1: 2, imm: 0 }, 2),
+            instruction_gas(
+                &Instruction::Lh {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 0
+                },
+                2
+            ),
             7
         );
         // LB = 1 byte → 3 + 2*1 = 5
         assert_eq!(
-            instruction_gas(&Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, 1),
+            instruction_gas(
+                &Instruction::Lb {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 0
+                },
+                1
+            ),
             5
         );
         // LBU = 1 byte → 5
         assert_eq!(
-            instruction_gas(&Instruction::Lbu { rd: 1, rs1: 2, imm: 0 }, 1),
+            instruction_gas(
+                &Instruction::Lbu {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 0
+                },
+                1
+            ),
             5
         );
         // LHU = 2 bytes → 7
         assert_eq!(
-            instruction_gas(&Instruction::Lhu { rd: 1, rs1: 2, imm: 0 }, 2),
+            instruction_gas(
+                &Instruction::Lhu {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 0
+                },
+                2
+            ),
             7
         );
         // SW = 4 bytes → 11
         assert_eq!(
-            instruction_gas(&Instruction::Sw { rs1: 2, rs2: 3, imm: 0 }, 4),
+            instruction_gas(
+                &Instruction::Sw {
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0
+                },
+                4
+            ),
             11
         );
         // SH = 2 bytes → 7
         assert_eq!(
-            instruction_gas(&Instruction::Sh { rs1: 2, rs2: 3, imm: 0 }, 2),
+            instruction_gas(
+                &Instruction::Sh {
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0
+                },
+                2
+            ),
             7
         );
         // SB = 1 byte → 5
         assert_eq!(
-            instruction_gas(&Instruction::Sb { rs1: 2, rs2: 3, imm: 0 }, 1),
+            instruction_gas(
+                &Instruction::Sb {
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0
+                },
+                1
+            ),
             5
         );
     }
@@ -556,27 +804,59 @@ mod tests {
     #[test]
     fn test_instruction_gas_branch() {
         assert_eq!(
-            instruction_gas(&Instruction::Beq { rs1: 1, rs2: 2, imm: 0 }, 0),
+            instruction_gas(
+                &Instruction::Beq {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 0
+                },
+                0
+            ),
             2
         );
         assert_eq!(
-            instruction_gas(&Instruction::Bne { rs1: 1, rs2: 2, imm: 0 }, 0),
+            instruction_gas(
+                &Instruction::Bne {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 0
+                },
+                0
+            ),
             2
         );
         assert_eq!(
-            instruction_gas(&Instruction::Blt { rs1: 1, rs2: 2, imm: 0 }, 0),
+            instruction_gas(
+                &Instruction::Blt {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 0
+                },
+                0
+            ),
             2
         );
         assert_eq!(
-            instruction_gas(&Instruction::Bgeu { rs1: 1, rs2: 2, imm: 0 }, 0),
+            instruction_gas(
+                &Instruction::Bgeu {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 0
+                },
+                0
+            ),
             2
         );
+        assert_eq!(instruction_gas(&Instruction::Jal { rd: 1, imm: 100 }, 0), 2);
         assert_eq!(
-            instruction_gas(&Instruction::Jal { rd: 1, imm: 100 }, 0),
-            2
-        );
-        assert_eq!(
-            instruction_gas(&Instruction::Jalr { rd: 1, rs1: 2, imm: 0 }, 0),
+            instruction_gas(
+                &Instruction::Jalr {
+                    rd: 1,
+                    rs1: 2,
+                    imm: 0
+                },
+                0
+            ),
             2
         );
     }
@@ -585,28 +865,70 @@ mod tests {
     fn test_instruction_gas_shift() {
         // R-type 移位
         assert_eq!(
-            instruction_gas(&Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Sll {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             2
         );
         assert_eq!(
-            instruction_gas(&Instruction::Srl { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Srl {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             2
         );
         assert_eq!(
-            instruction_gas(&Instruction::Sra { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Sra {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             2
         );
         // I-type 移位
         assert_eq!(
-            instruction_gas(&Instruction::Slli { rd: 1, rs1: 2, shamt: 4 }, 0),
+            instruction_gas(
+                &Instruction::Slli {
+                    rd: 1,
+                    rs1: 2,
+                    shamt: 4
+                },
+                0
+            ),
             2
         );
         assert_eq!(
-            instruction_gas(&Instruction::Srli { rd: 1, rs1: 2, shamt: 4 }, 0),
+            instruction_gas(
+                &Instruction::Srli {
+                    rd: 1,
+                    rs1: 2,
+                    shamt: 4
+                },
+                0
+            ),
             2
         );
         assert_eq!(
-            instruction_gas(&Instruction::Srai { rd: 1, rs1: 2, shamt: 4 }, 0),
+            instruction_gas(
+                &Instruction::Srai {
+                    rd: 1,
+                    rs1: 2,
+                    shamt: 4
+                },
+                0
+            ),
             2
         );
     }
@@ -614,19 +936,47 @@ mod tests {
     #[test]
     fn test_instruction_gas_mul() {
         assert_eq!(
-            instruction_gas(&Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Mul {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
         assert_eq!(
-            instruction_gas(&Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Mulh {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
         assert_eq!(
-            instruction_gas(&Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Mulhsu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
         assert_eq!(
-            instruction_gas(&Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Mulhu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
     }
@@ -634,19 +984,47 @@ mod tests {
     #[test]
     fn test_instruction_gas_div() {
         assert_eq!(
-            instruction_gas(&Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Div {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
         assert_eq!(
-            instruction_gas(&Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Divu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
         assert_eq!(
-            instruction_gas(&Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Rem {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
         assert_eq!(
-            instruction_gas(&Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }, 0),
+            instruction_gas(
+                &Instruction::Remu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3
+                },
+                0
+            ),
             20
         );
     }
@@ -688,7 +1066,11 @@ mod tests {
     #[test]
     fn test_total_step_gas_no_syscall() {
         // ADD 指令无 syscall → 仅指令 gas = 1
-        let insn = Instruction::Add { rd: 1, rs1: 2, rs2: 3 };
+        let insn = Instruction::Add {
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+        };
         let syscall_args = SyscallGasArgs::default();
         let total = total_step_gas(&insn, 0, None, &syscall_args);
         assert_eq!(total, 1);
@@ -697,7 +1079,11 @@ mod tests {
     #[test]
     fn test_total_step_gas_memory_with_syscall() {
         // LW 指令 (11) 无 syscall → 11
-        let insn = Instruction::Lw { rd: 1, rs1: 2, imm: 0 };
+        let insn = Instruction::Lw {
+            rd: 1,
+            rs1: 2,
+            imm: 0,
+        };
         let syscall_args = SyscallGasArgs::default();
         let total = total_step_gas(&insn, 4, None, &syscall_args);
         assert_eq!(total, 11);

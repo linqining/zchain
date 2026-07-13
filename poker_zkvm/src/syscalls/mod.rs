@@ -289,11 +289,7 @@ pub trait Syscall: std::fmt::Debug + Send + Sync {
     ///
     /// # Errors
     /// 返回 [`ZkvmError`] 表示执行失败（如非法内存访问、非法 slot 等）。
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError>;
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError>;
 
     /// 估算 gas 开销（读寄存器估算）。
     ///
@@ -320,24 +316,26 @@ impl std::fmt::Debug for SyscallRegistry {
             .syscalls
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.as_ref().map(|_| match i + 1 {
-                1 => "ReadInput",
-                2 => "CommitOutput",
-                3 => "Poseidon",
-                4 => "Sha256",
-                5 => "EcdsaVerify",
-                6 => "EmitEvent",
-                7 => "Log",
-                8 => "Panic",
-                9 => "GetRandomness",
-                10 => "ReadState",
-                11 => "Keccak256",
-                12 => "Modexp",
-                13 => "MerkleVerify",
-                14 => "Ed25519Verify",
-                15 => "Bn254Pairing",
-                _ => "Unknown",
-            }))
+            .filter_map(|(i, s)| {
+                s.as_ref().map(|_| match i + 1 {
+                    1 => "ReadInput",
+                    2 => "CommitOutput",
+                    3 => "Poseidon",
+                    4 => "Sha256",
+                    5 => "EcdsaVerify",
+                    6 => "EmitEvent",
+                    7 => "Log",
+                    8 => "Panic",
+                    9 => "GetRandomness",
+                    10 => "ReadState",
+                    11 => "Keccak256",
+                    12 => "Modexp",
+                    13 => "MerkleVerify",
+                    14 => "Ed25519Verify",
+                    15 => "Bn254Pairing",
+                    _ => "Unknown",
+                })
+            })
             .collect();
         f.debug_struct("SyscallRegistry")
             .field("registered", &registered)
@@ -464,10 +462,7 @@ mod tests {
         let invalid_ids = [0x00u32, 0x10, 0xFF, 0x100, u32::MAX];
         for id in invalid_ids {
             let result = SyscallId::from_u32(id);
-            assert!(
-                result.is_err(),
-                "from_u32(0x{id:02x}) 应返回错误"
-            );
+            assert!(result.is_err(), "from_u32(0x{id:02x}) 应返回错误");
             assert!(
                 matches!(result, Err(ZkvmError::Other(_))),
                 "from_u32(0x{id:02x}) 应返回 Other 错误"
@@ -504,7 +499,12 @@ mod tests {
         assert_eq!(all.len(), 15, "应有 15 个 syscall");
         // 验证 ID 连续递增
         for (i, id) in all.iter().enumerate() {
-            assert_eq!(*id as u32, (i + 1) as u32, "all()[{i}] 的 ID 应为 {}", i + 1);
+            assert_eq!(
+                *id as u32,
+                (i + 1) as u32,
+                "all()[{i}] 的 ID 应为 {}",
+                i + 1
+            );
         }
     }
 

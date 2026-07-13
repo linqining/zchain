@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 
 use ark_bn254::Fr;
 use ark_crypto_primitives::sponge::poseidon::{
-    find_poseidon_ark_and_mds, PoseidonConfig, PoseidonSponge,
+    PoseidonConfig, PoseidonSponge, find_poseidon_ark_and_mds,
 };
 use ark_crypto_primitives::sponge::{CryptographicSponge, FieldBasedCryptographicSponge};
 use ark_ff::{BigInteger, PrimeField};
@@ -162,7 +162,11 @@ mod tests {
     fn test_poseidon_hash_different_inputs() {
         let a = vec![Fr::from(1u64), Fr::from(2u64)];
         let b = vec![Fr::from(1u64), Fr::from(3u64)];
-        assert_ne!(poseidon_hash(&a), poseidon_hash(&b), "不同输入应产生不同输出");
+        assert_ne!(
+            poseidon_hash(&a),
+            poseidon_hash(&b),
+            "不同输入应产生不同输出"
+        );
     }
 
     // ===== poseidon_hash_bytes 测试 =====

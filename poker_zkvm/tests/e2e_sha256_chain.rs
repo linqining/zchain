@@ -9,7 +9,7 @@
 mod common;
 
 use common::build_sha256_chain_elf;
-use poker_zkvm::prover::{default_ccs_whitelist, prove, MAX_PROOF_TOTAL_SIZE, ProverConfig};
+use poker_zkvm::prover::{MAX_PROOF_TOTAL_SIZE, ProverConfig, default_ccs_whitelist, prove};
 use poker_zkvm::verifier::verify_production;
 use sha2::{Digest, Sha256};
 
@@ -52,11 +52,7 @@ fn run_sha256_chain_e2e(iterations: u32, input: &[u8]) {
     assert!(ok, "verify_production 应返回 true");
 
     // 3. 输出正确性
-    assert_eq!(
-        public_io.output.len(),
-        32,
-        "SHA-256 输出应为 32 字节"
-    );
+    assert_eq!(public_io.output.len(), 32, "SHA-256 输出应为 32 字节");
     let expected = sha256_chain_expected(input, iterations);
     assert_eq!(
         public_io.output, expected,

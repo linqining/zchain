@@ -16,7 +16,7 @@
 //! Phase D 的 Grumpkin Groth16 电路（scalar field = Fq）将使用这些 gadget
 //! 原生验证 BN254 G1 commitment 等式。
 
-use ark_bn254::{constraints::GVar as Bn254G1Var, Fq, Fr};
+use ark_bn254::{Fq, Fr, constraints::GVar as Bn254G1Var};
 use ark_r1cs_std::fields::emulated_fp::EmulatedFpVar;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
@@ -50,10 +50,7 @@ pub fn point_add_gadget(a: &G1Var, b: &G1Var) -> Result<G1Var, SynthesisError> {
 ///
 /// 标量类型为 `ScalarVar`（= `EmulatedFpVar<Fr, Fq>`），
 /// 在 Fq-based CS 中模拟 Fr 标量。
-pub fn scalar_mul_gadget(
-    point: &G1Var,
-    scalar: &ScalarVar,
-) -> Result<G1Var, SynthesisError> {
+pub fn scalar_mul_gadget(point: &G1Var, scalar: &ScalarVar) -> Result<G1Var, SynthesisError> {
     Ok(point.clone() * scalar)
 }
 
@@ -65,10 +62,7 @@ pub fn scalar_mul_gadget(
 /// # 约束数估算
 /// 每点标量乘法 ~2500 约束（EmulatedFpVar 开销），
 /// N=512 点时约 1.3M 约束。
-pub fn msm_gadget(
-    points: &[G1Var],
-    scalars: &[ScalarVar],
-) -> Result<G1Var, SynthesisError> {
+pub fn msm_gadget(points: &[G1Var], scalars: &[ScalarVar]) -> Result<G1Var, SynthesisError> {
     assert_eq!(
         points.len(),
         scalars.len(),
@@ -111,7 +105,7 @@ mod tests {
     use ark_ec::PrimeGroup;
     use ark_ff::{One, Zero};
     use ark_relations::gr1cs::{ConstraintSystem, ConstraintSystemRef};
-    use ark_std::{test_rng, UniformRand};
+    use ark_std::{UniformRand, test_rng};
 
     /// 辅助：在 CS<Fq> 中分配 G1 witness
     fn alloc_g1(cs: ConstraintSystemRef<Fq>, point: G1Projective) -> G1Var {
@@ -216,9 +210,6 @@ mod tests {
         let c_c_var = alloc_g1(cs.clone(), c_c);
         let r_var = alloc_scalar(cs.clone(), r);
         fold_commitment_check(&c_prime_var, &c_l_var, &c_c_var, &r_var).unwrap();
-        assert!(
-            !cs.is_satisfied().unwrap(),
-            "错误 C' 应导致 CS 不满足"
-        );
+        assert!(!cs.is_satisfied().unwrap(), "错误 C' 应导致 CS 不满足");
     }
 }

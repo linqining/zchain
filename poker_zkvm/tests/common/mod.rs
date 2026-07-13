@@ -8,9 +8,7 @@
 
 #![allow(dead_code)]
 
-use poker_zkvm::test_helpers::{
-    add, addi, beq, build_elf32, ecall, encode_text, lb, lui, nop, sw,
-};
+use poker_zkvm::test_helpers::{add, addi, beq, build_elf32, ecall, encode_text, lb, lui, nop, sw};
 
 // ===========================================================================
 // Fibonacci 电路
@@ -51,7 +49,10 @@ use poker_zkvm::test_helpers::{
 /// # 参数
 /// - `n` — Fibonacci 迭代次数（须 ≤ 2047，受 ADDI 12 位立即数限制）
 pub fn build_fibonacci_elf(n: u32) -> Vec<u8> {
-    assert!(n <= 2047, "build_fibonacci_elf: n 须 ≤ 2047（ADDI 12 位立即数限制）");
+    assert!(
+        n <= 2047,
+        "build_fibonacci_elf: n 须 ≤ 2047（ADDI 12 位立即数限制）"
+    );
 
     let text: Vec<u32> = vec![
         // Init (instr 0-2)
@@ -61,18 +62,18 @@ pub fn build_fibonacci_elf(n: u32) -> Vec<u8> {
         // Loop check (instr 3): BEQ x4, x0, +24 → jump to instr 9 (6 ahead)
         beq(4, 0, 24),
         // Loop body (instr 4-7)
-        add(3, 1, 2),         // x3 = temp = a + b
-        addi(1, 2, 0),        // x1 = a = b
-        addi(2, 3, 0),        // x2 = b = temp
-        addi(4, 4, -1),       // x4 = counter--
+        add(3, 1, 2),   // x3 = temp = a + b
+        addi(1, 2, 0),  // x1 = a = b
+        addi(2, 3, 0),  // x2 = b = temp
+        addi(4, 4, -1), // x4 = counter--
         // Unconditional jump back (instr 8): BEQ x0, x0, -20 → jump to instr 3 (5 back)
         beq(0, 0, -20),
         // Output (instr 9-13)
-        sw(1, 0, 0),          // SW x1, 0(x0) — store a = fib(N) to addr 0
-        addi(10, 0, 0),       // a0 = 0
-        addi(11, 0, 4),       // a1 = 4
-        addi(17, 0, 2),       // a7 = 2 (commit_output)
-        ecall(),              // ECALL
+        sw(1, 0, 0),    // SW x1, 0(x0) — store a = fib(N) to addr 0
+        addi(10, 0, 0), // a0 = 0
+        addi(11, 0, 4), // a1 = 4
+        addi(17, 0, 2), // a7 = 2 (commit_output)
+        ecall(),        // ECALL
     ];
 
     let text_bytes = encode_text(&text);
@@ -151,19 +152,19 @@ pub fn build_sha256_chain_elf(iterations: u32) -> Vec<u8> {
         // Loop check (instr 6): BEQ x4, x0, +32 → jump to instr 14 (8 ahead = output section)
         beq(4, 0, 32),
         // Loop body (instr 7-12)
-        addi(10, 20, 0),               // a0 = 0x2000
-        addi(11, 0, 32),               // a1 = 32
-        addi(12, 20, 0),               // a2 = 0x2000 (in-place)
-        addi(17, 0, 4),                // a7 = 4 (sha256)
-        ecall(),                       // sha256
-        addi(4, 4, -1),                // counter--
+        addi(10, 20, 0), // a0 = 0x2000
+        addi(11, 0, 32), // a1 = 32
+        addi(12, 20, 0), // a2 = 0x2000 (in-place)
+        addi(17, 0, 4),  // a7 = 4 (sha256)
+        ecall(),         // sha256
+        addi(4, 4, -1),  // counter--
         // Unconditional jump back (instr 13): BEQ x0, x0, -28 → jump to instr 6 (7 back)
         beq(0, 0, -28),
         // Output (instr 14-17)
-        addi(10, 20, 0),               // a0 = 0x2000
-        addi(11, 0, 32),               // a1 = 32
-        addi(17, 0, 2),                // a7 = 2 (commit_output)
-        ecall(),                       // commit_output
+        addi(10, 20, 0), // a0 = 0x2000
+        addi(11, 0, 32), // a1 = 32
+        addi(17, 0, 2),  // a7 = 2 (commit_output)
+        ecall(),         // commit_output
     ];
 
     let text_bytes = encode_text(&text);
@@ -214,28 +215,28 @@ pub fn build_sha256_chain_elf(iterations: u32) -> Vec<u8> {
 pub fn build_poker_hand_eval_elf() -> Vec<u8> {
     let text: Vec<u32> = vec![
         // Setup
-        lui(20, 0x2),          // x20 = 0x2000
-        addi(10, 20, 0),       // a0 = 0x2000
-        addi(11, 0, 5),        // a1 = 5
-        addi(17, 0, 1),        // a7 = 1 (read_input)
-        ecall(),               // read_input
+        lui(20, 0x2),    // x20 = 0x2000
+        addi(10, 20, 0), // a0 = 0x2000
+        addi(11, 0, 5),  // a1 = 5
+        addi(17, 0, 1),  // a7 = 1 (read_input)
+        ecall(),         // read_input
         // Load 5 cards
-        lb(1, 20, 0),          // x1 = card1
-        lb(2, 20, 1),          // x2 = card2
-        lb(3, 20, 2),          // x3 = card3
-        lb(4, 20, 3),          // x4 = card4
-        lb(5, 20, 4),          // x5 = card5
+        lb(1, 20, 0), // x1 = card1
+        lb(2, 20, 1), // x2 = card2
+        lb(3, 20, 2), // x3 = card3
+        lb(4, 20, 3), // x4 = card4
+        lb(5, 20, 4), // x5 = card5
         // Sum
-        add(6, 1, 2),          // x6 = card1 + card2
-        add(6, 6, 3),          // x6 += card3
-        add(6, 6, 4),          // x6 += card4
-        add(6, 6, 5),          // x6 += card5
+        add(6, 1, 2), // x6 = card1 + card2
+        add(6, 6, 3), // x6 += card3
+        add(6, 6, 4), // x6 += card4
+        add(6, 6, 5), // x6 += card5
         // Output
-        sw(6, 0, 0),           // SW x6, 0(x0) — store sum to addr 0
-        addi(10, 0, 0),        // a0 = 0
-        addi(11, 0, 4),        // a1 = 4
-        addi(17, 0, 2),        // a7 = 2 (commit_output)
-        ecall(),               // ECALL
+        sw(6, 0, 0),    // SW x6, 0(x0) — store sum to addr 0
+        addi(10, 0, 0), // a0 = 0
+        addi(11, 0, 4), // a1 = 4
+        addi(17, 0, 2), // a7 = 2 (commit_output)
+        ecall(),        // ECALL
     ];
 
     let text_bytes = encode_text(&text);
@@ -262,13 +263,7 @@ pub fn build_minimal_valid_elf() -> Vec<u8> {
 
 /// 构建最小合法 ELF，返回 text 段在文件中的偏移量（供注入篡改指令使用）。
 pub fn build_minimal_valid_elf_with_text_offset() -> (Vec<u8>, usize) {
-    let text = encode_text(&[
-        nop(),
-        nop(),
-        nop(),
-        addi(17, 0, 2),
-        ecall(),
-    ]);
+    let text = encode_text(&[nop(), nop(), nop(), addi(17, 0, 2), ecall()]);
     let text_offset = 84; // 52 (ELF header) + 32 (prog header)
     let elf = build_elf32(0x1000, 0x1000, &text);
     (elf, text_offset)

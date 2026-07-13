@@ -10,10 +10,10 @@
 //! 作为 cargo 子命令运行：`cargo zkvm build`（cargo 自动调用 `cargo-zkvm build`）。
 //! 也可直接运行：`cargo-zkvm build`。
 
-use std::path::{Path, PathBuf};
-use poker_zkvm::compiler::{compile_crate, CompilerConfig};
 use poker_zkvm::compiler::elf_validator::validate_elf;
-use poker_zkvm::prover::{prove, ProverConfig};
+use poker_zkvm::compiler::{CompilerConfig, compile_crate};
+use poker_zkvm::prover::{ProverConfig, prove};
+use std::path::{Path, PathBuf};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -37,9 +37,9 @@ fn dispatch(args: &[String], cwd: &Path) -> Result<String, String> {
         args
     };
 
-    let subcommand = args
-        .first()
-        .ok_or_else(|| "missing subcommand. Usage: cargo zkvm <build|run|prove|verify|test>".to_string())?;
+    let subcommand = args.first().ok_or_else(|| {
+        "missing subcommand. Usage: cargo zkvm <build|run|prove|verify|test>".to_string()
+    })?;
 
     match subcommand.as_str() {
         "build" => cmd_build(&args[1..], cwd),
@@ -58,14 +58,12 @@ fn dispatch(args: &[String], cwd: &Path) -> Result<String, String> {
 fn cmd_build(_args: &[String], cwd: &Path) -> Result<String, String> {
     let config = CompilerConfig::default();
 
-    let elf_path = compile_crate(cwd, &config)
-        .map_err(|e| format!("compile failed: {e}"))?;
+    let elf_path = compile_crate(cwd, &config).map_err(|e| format!("compile failed: {e}"))?;
 
     let elf_bytes = std::fs::read(&elf_path)
         .map_err(|e| format!("failed to read ELF {}: {e}", elf_path.display()))?;
 
-    let metadata = validate_elf(&elf_bytes)
-        .map_err(|e| format!("ELF validation failed: {e}"))?;
+    let metadata = validate_elf(&elf_bytes).map_err(|e| format!("ELF validation failed: {e}"))?;
 
     let text_size = metadata.text.as_ref().map(|t| t.data.len()).unwrap_or(0);
     Ok(format!(
@@ -115,8 +113,8 @@ fn cmd_prove(args: &[String]) -> Result<String, String> {
         .map_err(|e| format!("failed to read input {}: {e}", input_path.display()))?;
 
     let config = ProverConfig::default();
-    let (proof_bytes, public_io) = prove(&elf_bytes, &input, &config)
-        .map_err(|e| format!("prove failed: {e}"))?;
+    let (proof_bytes, public_io) =
+        prove(&elf_bytes, &input, &config).map_err(|e| format!("prove failed: {e}"))?;
 
     std::fs::write(&output_path, &proof_bytes)
         .map_err(|e| format!("failed to write proof {}: {e}", output_path.display()))?;
@@ -129,8 +127,12 @@ fn cmd_prove(args: &[String]) -> Result<String, String> {
         p
     };
     let public_io_bytes = public_io.to_bytes();
-    std::fs::write(&public_io_path, &public_io_bytes)
-        .map_err(|e| format!("failed to write public_io {}: {e}", public_io_path.display()))?;
+    std::fs::write(&public_io_path, &public_io_bytes).map_err(|e| {
+        format!(
+            "failed to write public_io {}: {e}",
+            public_io_path.display()
+        )
+    })?;
 
     Ok(format!(
         "Prove successful: {} bytes proof + {} bytes public_io (output={})",
@@ -380,9 +382,7 @@ mod tests {
 
         let mut elf = Vec::with_capacity(84 + text.len());
         // ELF32 header (52 bytes)
-        elf.extend_from_slice(&[
-            0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        elf.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
         elf.extend_from_slice(&0xF3u16.to_le_bytes()); // e_machine = EM_RISCV
         elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
@@ -468,9 +468,9 @@ mod tests {
         }
 
         let text: Vec<u8> = [
-            encode_i(0x13, 0, 1, 0, 0), // NOP
-            encode_i(0x13, 0, 1, 0, 0), // NOP
-            encode_i(0x13, 0, 1, 0, 0), // NOP
+            encode_i(0x13, 0, 1, 0, 0),  // NOP
+            encode_i(0x13, 0, 1, 0, 0),  // NOP
+            encode_i(0x13, 0, 1, 0, 0),  // NOP
             encode_i(0x13, 0, 17, 0, 2), // commit_output
             0x00000073,                  // ECALL
         ]
@@ -480,9 +480,7 @@ mod tests {
         .collect();
 
         let mut elf = Vec::with_capacity(84 + text.len());
-        elf.extend_from_slice(&[
-            0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        elf.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         elf.extend_from_slice(&2u16.to_le_bytes());
         elf.extend_from_slice(&0xF3u16.to_le_bytes());
         elf.extend_from_slice(&1u32.to_le_bytes());
@@ -725,7 +723,10 @@ mod tests {
 
     #[test]
     fn test_extract_fn_name_simple() {
-        assert_eq!(extract_fn_name("fn my_func() {}"), Some("my_func".to_string()));
+        assert_eq!(
+            extract_fn_name("fn my_func() {}"),
+            Some("my_func".to_string())
+        );
     }
 
     #[test]

@@ -387,8 +387,7 @@ mod tests {
             let f = Bn254ScalarField::from_u32_with_wrap(v);
             let bytes = f.to_canonical_bytes();
             assert_eq!(bytes.len(), 32, "canonical bytes 应为 32 字节");
-            let f2 = Bn254ScalarField::from_canonical_bytes(&bytes)
-                .expect("roundtrip 应成功");
+            let f2 = Bn254ScalarField::from_canonical_bytes(&bytes).expect("roundtrip 应成功");
             assert_eq!(f, f2, "u32={v} 的 roundtrip 不一致");
         }
     }

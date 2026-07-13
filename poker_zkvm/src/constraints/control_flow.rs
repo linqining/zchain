@@ -64,7 +64,9 @@ impl JalCircuit {
         m_pcnew_neg.add_entry(0, 4, neg_one).expect("M_pcnew_neg");
 
         let mut m_pccarry_neg = SparseMatrix::new(num_rows, num_vars);
-        m_pccarry_neg.add_entry(0, 5, neg_2p32).expect("M_pccarry_neg");
+        m_pccarry_neg
+            .add_entry(0, 5, neg_2p32)
+            .expect("M_pccarry_neg");
 
         // Row 1: pc + 4 - rd_val - 2^32 * rd_carry = 0
         let mut m_pc_r1 = SparseMatrix::new(num_rows, num_vars);
@@ -77,7 +79,9 @@ impl JalCircuit {
         m_rd_neg.add_entry(1, 3, neg_one).expect("M_rd_neg");
 
         let mut m_rdcarry_neg = SparseMatrix::new(num_rows, num_vars);
-        m_rdcarry_neg.add_entry(1, 6, neg_2p32).expect("M_rdcarry_neg");
+        m_rdcarry_neg
+            .add_entry(1, 6, neg_2p32)
+            .expect("M_rdcarry_neg");
 
         // Row 2: pc_carry² - pc_carry = 0
         let mut m_pcc_sq = SparseMatrix::new(num_rows, num_vars);
@@ -96,16 +100,32 @@ impl JalCircuit {
         Ccs::new(
             num_vars,
             vec![
-                m_pc_r0, m_imm_r0, m_pcnew_neg, m_pccarry_neg, // Row 0
-                m_pc_r1, m_const4_r1, m_rd_neg, m_rdcarry_neg, // Row 1
-                m_pcc_sq, m_pcc_neg,                            // Row 2
-                m_rdc_sq, m_rdc_neg,                            // Row 3
+                m_pc_r0,
+                m_imm_r0,
+                m_pcnew_neg,
+                m_pccarry_neg, // Row 0
+                m_pc_r1,
+                m_const4_r1,
+                m_rd_neg,
+                m_rdcarry_neg, // Row 1
+                m_pcc_sq,
+                m_pcc_neg, // Row 2
+                m_rdc_sq,
+                m_rdc_neg, // Row 3
             ],
             vec![
-                vec![0], vec![1], vec![2], vec![3], // Row 0
-                vec![4], vec![5], vec![6], vec![7], // Row 1
-                vec![8, 8], vec![9],                // Row 2
-                vec![10, 10], vec![11],             // Row 3
+                vec![0],
+                vec![1],
+                vec![2],
+                vec![3], // Row 0
+                vec![4],
+                vec![5],
+                vec![6],
+                vec![7], // Row 1
+                vec![8, 8],
+                vec![9], // Row 2
+                vec![10, 10],
+                vec![11], // Row 3
             ],
             vec![Fr::one(); 12],
         )
@@ -196,7 +216,9 @@ impl BeqCircuit {
         let mut m_taken_sq = SparseMatrix::new(num_rows, num_vars);
         m_taken_sq.add_entry(1, 5, Fr::one()).expect("M_taken_sq");
         let mut m_taken_neg_r1 = SparseMatrix::new(num_rows, num_vars);
-        m_taken_neg_r1.add_entry(1, 5, neg_one).expect("M_taken_neg_r1");
+        m_taken_neg_r1
+            .add_entry(1, 5, neg_one)
+            .expect("M_taken_neg_r1");
 
         // Row 2: pc + imm*taken + 4 - 4*taken - pc_new - 2^32*carry = 0
         let mut m_pc_r2 = SparseMatrix::new(num_rows, num_vars);
@@ -211,34 +233,60 @@ impl BeqCircuit {
         m_const4_r2.add_entry(2, 0, const4).expect("M_const4_r2");
         // -4*taken
         let mut m_taken_neg4_r2 = SparseMatrix::new(num_rows, num_vars);
-        m_taken_neg4_r2.add_entry(2, 5, neg4).expect("M_taken_neg4_r2");
+        m_taken_neg4_r2
+            .add_entry(2, 5, neg4)
+            .expect("M_taken_neg4_r2");
         // -pc_new
         let mut m_pcnew_neg_r2 = SparseMatrix::new(num_rows, num_vars);
-        m_pcnew_neg_r2.add_entry(2, 6, neg_one).expect("M_pcnew_neg_r2");
+        m_pcnew_neg_r2
+            .add_entry(2, 6, neg_one)
+            .expect("M_pcnew_neg_r2");
         // -2^32*carry
         let mut m_carry_neg2p32_r2 = SparseMatrix::new(num_rows, num_vars);
-        m_carry_neg2p32_r2.add_entry(2, 7, neg_2p32).expect("M_carry_neg2p32_r2");
+        m_carry_neg2p32_r2
+            .add_entry(2, 7, neg_2p32)
+            .expect("M_carry_neg2p32_r2");
 
         // Row 3: carry² - carry = 0
         let mut m_carry_sq = SparseMatrix::new(num_rows, num_vars);
         m_carry_sq.add_entry(3, 7, Fr::one()).expect("M_carry_sq");
         let mut m_carry_neg_r3 = SparseMatrix::new(num_rows, num_vars);
-        m_carry_neg_r3.add_entry(3, 7, neg_one).expect("M_carry_neg_r3");
+        m_carry_neg_r3
+            .add_entry(3, 7, neg_one)
+            .expect("M_carry_neg_r3");
 
         Ccs::new(
             num_vars,
             vec![
-                m_taken_r0a, m_rs1_r0, m_taken_r0b, m_rs2_neg_r0, // Row 0
-                m_taken_sq, m_taken_neg_r1,                        // Row 1
-                m_pc_r2, m_imm_r2, m_taken_r2, m_const4_r2,
-                m_taken_neg4_r2, m_pcnew_neg_r2, m_carry_neg2p32_r2, // Row 2
-                m_carry_sq, m_carry_neg_r3,                        // Row 3
+                m_taken_r0a,
+                m_rs1_r0,
+                m_taken_r0b,
+                m_rs2_neg_r0, // Row 0
+                m_taken_sq,
+                m_taken_neg_r1, // Row 1
+                m_pc_r2,
+                m_imm_r2,
+                m_taken_r2,
+                m_const4_r2,
+                m_taken_neg4_r2,
+                m_pcnew_neg_r2,
+                m_carry_neg2p32_r2, // Row 2
+                m_carry_sq,
+                m_carry_neg_r3, // Row 3
             ],
             vec![
-                vec![0, 1], vec![2, 3],          // Row 0: taken*rs1 - taken*rs2
-                vec![4, 4], vec![5],             // Row 1: taken² - taken
-                vec![6], vec![7, 8], vec![9], vec![10], vec![11], vec![12], // Row 2
-                vec![13, 13], vec![14],          // Row 3: carry² - carry
+                vec![0, 1],
+                vec![2, 3], // Row 0: taken*rs1 - taken*rs2
+                vec![4, 4],
+                vec![5], // Row 1: taken² - taken
+                vec![6],
+                vec![7, 8],
+                vec![9],
+                vec![10],
+                vec![11],
+                vec![12], // Row 2
+                vec![13, 13],
+                vec![14], // Row 3: carry² - carry
             ],
             vec![Fr::one(); 12],
         )
@@ -280,7 +328,11 @@ impl BeqCircuit {
         let ccs = Self::build_ccs();
         let witness = Self::assign_witness(pc, rs1, rs2, imm);
         let taken = rs1 == rs2;
-        let pc_new = if taken { pc.wrapping_add(imm) } else { pc.wrapping_add(4) };
+        let pc_new = if taken {
+            pc.wrapping_add(imm)
+        } else {
+            pc.wrapping_add(4)
+        };
         let public_inputs = vec![
             Fr::from_u32_with_wrap(pc),
             Fr::from_u32_with_wrap(imm),
@@ -348,10 +400,7 @@ impl LuiCircuit {
         let ccs = Self::build_ccs();
         let witness = Self::assign_witness(imm);
         let rd_val = imm.wrapping_mul(4096);
-        let public_inputs = vec![
-            Fr::from_u32_with_wrap(imm),
-            Fr::from_u32_with_wrap(rd_val),
-        ];
+        let public_inputs = vec![Fr::from_u32_with_wrap(imm), Fr::from_u32_with_wrap(rd_val)];
         CcsInstance::new(ccs, witness, public_inputs)
     }
 }
@@ -386,13 +435,17 @@ impl AuipcCircuit {
         m_pc_r0.add_entry(0, 1, Fr::one()).expect("M_pc_r0");
 
         let mut m_imm_4096_r0 = SparseMatrix::new(num_rows, num_vars);
-        m_imm_4096_r0.add_entry(0, 2, const4096).expect("M_imm_4096_r0");
+        m_imm_4096_r0
+            .add_entry(0, 2, const4096)
+            .expect("M_imm_4096_r0");
 
         let mut m_rd_neg_r0 = SparseMatrix::new(num_rows, num_vars);
         m_rd_neg_r0.add_entry(0, 3, neg_one).expect("M_rd_neg_r0");
 
         let mut m_carry_neg2p32_r0 = SparseMatrix::new(num_rows, num_vars);
-        m_carry_neg2p32_r0.add_entry(0, 4, neg_2p32).expect("M_carry_neg2p32_r0");
+        m_carry_neg2p32_r0
+            .add_entry(0, 4, neg_2p32)
+            .expect("M_carry_neg2p32_r0");
 
         // Row 1: carry² - carry = 0
         let mut m_carry_sq = SparseMatrix::new(num_rows, num_vars);
@@ -404,12 +457,20 @@ impl AuipcCircuit {
         Ccs::new(
             num_vars,
             vec![
-                m_pc_r0, m_imm_4096_r0, m_rd_neg_r0, m_carry_neg2p32_r0, // Row 0
-                m_carry_sq, m_carry_neg,                                  // Row 1
+                m_pc_r0,
+                m_imm_4096_r0,
+                m_rd_neg_r0,
+                m_carry_neg2p32_r0, // Row 0
+                m_carry_sq,
+                m_carry_neg, // Row 1
             ],
             vec![
-                vec![0], vec![1], vec![2], vec![3], // Row 0
-                vec![4, 4], vec![5],                // Row 1
+                vec![0],
+                vec![1],
+                vec![2],
+                vec![3], // Row 0
+                vec![4, 4],
+                vec![5], // Row 1
             ],
             vec![Fr::one(); 6],
         )
@@ -763,7 +824,7 @@ mod tests {
         // imm*4096 = 0x1000, pc + 0x1000 = 0xFFFFF000 + 0x1000 = 0x100000000 mod 2^32 = 0
         // carry=1
         assert_eq!(witness[3], Fr::zero()); // rd_val=0
-        assert_eq!(witness[4], Fr::one());  // carry=1
+        assert_eq!(witness[4], Fr::one()); // carry=1
         assert!(ccs.satisfied_by(&witness).expect("应满足"));
     }
 
@@ -775,7 +836,7 @@ mod tests {
         // imm*4096 = 0xFFFFF000, pc + 0xFFFFF000 = 0x1000 + 0xFFFFF000 = 0x100000000 mod 2^32 = 0
         // carry=1
         assert_eq!(witness[3], Fr::zero()); // rd_val=0
-        assert_eq!(witness[4], Fr::one());  // carry=1
+        assert_eq!(witness[4], Fr::one()); // carry=1
         assert!(ccs.satisfied_by(&witness).expect("应满足"));
     }
 

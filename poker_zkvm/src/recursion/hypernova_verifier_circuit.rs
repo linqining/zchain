@@ -24,15 +24,17 @@
 use ark_bn254::{Fq, Fr, G1Projective};
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_r1cs_std::prelude::*;
-use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError};
+use ark_relations::gr1cs::{
+    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError,
+};
 use ark_serialize::CanonicalSerialize;
 
 use crate::ccs::Fr as ZkvmFr;
 use crate::error::ZkvmError;
 use crate::fold::fold_loop::HypernovaProof;
 use crate::pcs::ipa::IpaCommitment;
-use crate::recursion::r1cs_gadgets::{fold_commitment_check, G1Var, ScalarVar};
-use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
+use crate::recursion::r1cs_gadgets::{G1Var, ScalarVar, fold_commitment_check};
+use crate::transcript::{HYPERNOVA_FOLD_DOMAIN_TAG, Transcript};
 
 /// 将 G1Affine 压缩序列化为字节(匹配 verifier.rs / fold_step.rs 的 point_to_bytes)。
 fn point_to_bytes(p: &ark_bn254::G1Affine) -> Vec<u8> {
@@ -91,11 +93,16 @@ impl HypernovaVerifierCircuit {
     /// 构造 `ConstraintSystem<Fq>`,生成约束,返回 `is_satisfied()`。
     pub fn verify_native(&self) -> Result<bool, ZkvmError> {
         let cs = ConstraintSystem::<Fq>::new_ref();
-        self.clone()
-            .generate_constraints(cs.clone())
-            .map_err(|e| ZkvmError::Other(format!("HypernovaVerifierCircuit: generate_constraints failed: {e}")))?;
-        cs.is_satisfied()
-            .map_err(|e| ZkvmError::Other(format!("HypernovaVerifierCircuit: is_satisfied failed: {e}")))
+        self.clone().generate_constraints(cs.clone()).map_err(|e| {
+            ZkvmError::Other(format!(
+                "HypernovaVerifierCircuit: generate_constraints failed: {e}"
+            ))
+        })?;
+        cs.is_satisfied().map_err(|e| {
+            ZkvmError::Other(format!(
+                "HypernovaVerifierCircuit: is_satisfied failed: {e}"
+            ))
+        })
     }
 }
 
@@ -272,15 +279,16 @@ impl HypernovaVerifierCircuitBN254 {
     /// 构造 `ConstraintSystem<Fr>`，生成约束，返回 `is_satisfied()`。
     pub fn verify_native(&self) -> Result<bool, ZkvmError> {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        self.clone()
-            .generate_constraints(cs.clone())
-            .map_err(|e| ZkvmError::Other(format!(
+        self.clone().generate_constraints(cs.clone()).map_err(|e| {
+            ZkvmError::Other(format!(
                 "HypernovaVerifierCircuitBN254: generate_constraints failed: {e}"
-            )))?;
-        cs.is_satisfied()
-            .map_err(|e| ZkvmError::Other(format!(
+            ))
+        })?;
+        cs.is_satisfied().map_err(|e| {
+            ZkvmError::Other(format!(
                 "HypernovaVerifierCircuitBN254: is_satisfied failed: {e}"
-            )))
+            ))
+        })
     }
 
     /// 提取公共输入的 Fr 表示（用于 groth16_verify）。
@@ -296,15 +304,16 @@ impl HypernovaVerifierCircuitBN254 {
     /// `[initial_commitment_limbs..., final_commitment_limbs...]`
     pub fn public_inputs_to_fr(&self) -> Result<Vec<Fr>, ZkvmError> {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        self.clone()
-            .generate_constraints(cs.clone())
-            .map_err(|e| ZkvmError::Other(format!(
+        self.clone().generate_constraints(cs.clone()).map_err(|e| {
+            ZkvmError::Other(format!(
                 "HypernovaVerifierCircuitBN254: generate_constraints for public inputs failed: {e}"
-            )))?;
-        let full = cs.instance_assignment()
-            .map_err(|e| ZkvmError::Other(format!(
+            ))
+        })?;
+        let full = cs.instance_assignment().map_err(|e| {
+            ZkvmError::Other(format!(
                 "HypernovaVerifierCircuitBN254: instance_assignment failed: {e}"
-            )))?;
+            ))
+        })?;
         Ok(full.into_iter().skip(1).collect())
     }
 }
@@ -312,7 +321,7 @@ impl HypernovaVerifierCircuitBN254 {
 impl ConstraintSynthesizer<Fr> for HypernovaVerifierCircuitBN254 {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         use crate::recursion::r1cs_gadgets_bn254::{
-            fold_commitment_check_bn254, FrVar, G1VarBN254,
+            FrVar, G1VarBN254, fold_commitment_check_bn254,
         };
 
         // 1. 分配公共输入:initial_commitment + final_commitment
@@ -374,7 +383,7 @@ mod tests {
     use crate::transcript::Transcript;
     use ark_ec::CurveGroup;
     use ark_ff::One;
-    use ark_std::{test_rng, UniformRand};
+    use ark_std::{UniformRand, test_rng};
 
     /// 辅助:构造 Fr。
     fn f(v: u32) -> Fr {
@@ -800,7 +809,10 @@ mod tests {
 
         // 约束数打印（用于性能分析）
         eprintln!("num_constraints = {}", cs.num_constraints());
-        eprintln!("num_instance_variables = {} (含前导 Fr::one())", num_instance_vars);
+        eprintln!(
+            "num_instance_variables = {} (含前导 Fr::one())",
+            num_instance_vars
+        );
 
         let public_inputs = circuit.public_inputs_to_fr().expect("public_inputs_to_fr");
 

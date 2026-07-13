@@ -85,13 +85,17 @@ fn main() {
     // 算法对照表
     println!("\n--- 算法对照表 ---");
     for (label, hand) in &[
-        ("Aces",      [1u8, 1, 1, 1, 1]),
-        ("Mixed",     [2u8, 7, 11, 1, 13]),
+        ("Aces", [1u8, 1, 1, 1, 1]),
+        ("Mixed", [2u8, 7, 11, 1, 13]),
         ("HighCards", [10u8, 11, 12, 13, 1]),
-        ("AllKings",  [13u8, 13, 13, 13, 13]),
-        ("MaxSafe",   [127u8, 127, 127, 127, 127]),
+        ("AllKings", [13u8, 13, 13, 13, 13]),
+        ("MaxSafe", [127u8, 127, 127, 127, 127]),
     ] {
-        println!("{label:10} {:?} → sum = {}", hand, poker_hand_eval_expected(hand));
+        println!(
+            "{label:10} {:?} → sum = {}",
+            hand,
+            poker_hand_eval_expected(hand)
+        );
     }
 
     println!("\n--- 注意 ---");

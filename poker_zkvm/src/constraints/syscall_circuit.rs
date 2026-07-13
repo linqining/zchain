@@ -53,7 +53,9 @@ impl SyscallAbiCircuit {
         m_a7.add_entry(0, 1, Fr::one()).expect("M_a7");
 
         let mut m_expected_neg = SparseMatrix::new(num_rows, num_vars);
-        m_expected_neg.add_entry(0, 2, neg_one).expect("M_expected_neg");
+        m_expected_neg
+            .add_entry(0, 2, neg_one)
+            .expect("M_expected_neg");
 
         Ccs::new(
             num_vars,
@@ -272,7 +274,8 @@ mod tests {
     fn test_dispatch_non_cryptographic_single_instance() {
         let registry = make_registry();
         // read_input: 非加密，仅 ABI 实例
-        let instances = dispatch_syscall(SyscallId::ReadInput, 0x01, &registry, &[]).expect("应成功");
+        let instances =
+            dispatch_syscall(SyscallId::ReadInput, 0x01, &registry, &[]).expect("应成功");
         assert_eq!(instances.len(), 1);
         assert!(instances[0].is_satisfied().expect("ABI 应满足"));
     }
@@ -321,9 +324,9 @@ mod tests {
         let registry = make_registry();
         // ECDSA 预编译 MVP 需要 3 个输入: [bit, R, P]
         let inputs = [
-            Fr::one(),                       // bit=1
-            Fr::from_u32_with_wrap(42),      // R
-            Fr::from_u32_with_wrap(99),      // P
+            Fr::one(),                  // bit=1
+            Fr::from_u32_with_wrap(42), // R
+            Fr::from_u32_with_wrap(99), // P
         ];
         let instances =
             dispatch_syscall(SyscallId::EcdsaVerify, 0x05, &registry, &inputs).expect("应成功");
@@ -344,7 +347,8 @@ mod tests {
         // 空注册表 → 加密 syscall 分派失败
         let empty_registry = PrecompileRegistry::new();
         let inputs = [Fr::from_u32_with_wrap(42)];
-        let err = dispatch_syscall(SyscallId::Poseidon, 0x03, &empty_registry, &inputs).unwrap_err();
+        let err =
+            dispatch_syscall(SyscallId::Poseidon, 0x03, &empty_registry, &inputs).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(ref msg) if msg.contains("未注册")));
     }
 
@@ -377,9 +381,8 @@ mod tests {
         let registry = make_registry();
         // Poseidon 需要 1 个输入 [x]
         let inputs_poseidon = [Fr::from_u32_with_wrap(42)];
-        let instances =
-            dispatch_syscall(SyscallId::Poseidon, 0x03, &registry, &inputs_poseidon)
-                .expect("应成功");
+        let instances = dispatch_syscall(SyscallId::Poseidon, 0x03, &registry, &inputs_poseidon)
+            .expect("应成功");
         assert_eq!(instances.len(), 2, "Poseidon 应产生 2 个实例");
 
         // SHA-256 需要 3 个输入 [x, y, z]
@@ -389,8 +392,7 @@ mod tests {
             Fr::from_u32_with_wrap(0xEF),
         ];
         let instances =
-            dispatch_syscall(SyscallId::Sha256, 0x04, &registry, &inputs_sha)
-                .expect("应成功");
+            dispatch_syscall(SyscallId::Sha256, 0x04, &registry, &inputs_sha).expect("应成功");
         assert_eq!(instances.len(), 2, "SHA-256 应产生 2 个实例");
 
         // ECDSA 需要 3 个输入 [bit, R, P]
@@ -399,9 +401,8 @@ mod tests {
             Fr::from_u32_with_wrap(42),
             Fr::from_u32_with_wrap(99),
         ];
-        let instances =
-            dispatch_syscall(SyscallId::EcdsaVerify, 0x05, &registry, &inputs_ecdsa)
-                .expect("应成功");
+        let instances = dispatch_syscall(SyscallId::EcdsaVerify, 0x05, &registry, &inputs_ecdsa)
+            .expect("应成功");
         assert_eq!(instances.len(), 2, "ECDSA 应产生 2 个实例");
     }
 

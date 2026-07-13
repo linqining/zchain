@@ -22,10 +22,10 @@ use crate::constraints::verify_batch_continuity;
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
 use crate::fold::sumcheck;
-use crate::pcs::ipa::{IpaCommitment, IpaEval, IpaPcs};
 use crate::pcs::Pcs;
-use crate::prover::{deserialize_proof, hash_public_io, ZkPublicIo};
-use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
+use crate::pcs::ipa::{IpaCommitment, IpaEval, IpaPcs};
+use crate::prover::{ZkPublicIo, deserialize_proof, hash_public_io};
+use crate::transcript::{HYPERNOVA_FOLD_DOMAIN_TAG, Transcript};
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_serialize::CanonicalSerialize;
 
@@ -101,7 +101,8 @@ pub fn verify_production(
     let initial_ccs_commit = ccs.ccs_commitment();
     if proof.ccs_commitment != initial_ccs_commit {
         return Err(ZkvmError::Other(
-            "ccs_commitment 不匹配：proof.ccs_commitment != initial_lcccs.ccs_ref.ccs_commitment()".to_string(),
+            "ccs_commitment 不匹配：proof.ccs_commitment != initial_lcccs.ccs_ref.ccs_commitment()"
+                .to_string(),
         ));
     }
 
@@ -376,10 +377,7 @@ mod tests {
         let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改最后一步的 folded_lcccs.u_l
-        let last_step = proof
-            .fold_steps
-            .last_mut()
-            .expect("fold_steps 非空");
+        let last_step = proof.fold_steps.last_mut().expect("fold_steps 非空");
         last_step.folded_lcccs.u_l = last_step
             .folded_lcccs
             .u_l
@@ -405,10 +403,7 @@ mod tests {
         // 替换最后一步的 folded_witness_commitment 为一个不同的点
         use ark_bn254::G1Affine;
         use ark_ec::AffineRepr;
-        let last_step = proof
-            .fold_steps
-            .last_mut()
-            .expect("fold_steps 非空");
+        let last_step = proof.fold_steps.last_mut().expect("fold_steps 非空");
         last_step.folded_witness_commitment = IpaCommitment(G1Affine::generator());
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
         let result = verify_production(&tampered, &public_io, &ccs_whitelist);
@@ -427,10 +422,7 @@ mod tests {
         let ccs_whitelist = extract_ccs_whitelist(&proof_bytes);
         let mut proof = deserialize_proof(&proof_bytes).expect("deserialize 应成功");
         // 篡改最后一步的 sumcheck_proof
-        let last_step = proof
-            .fold_steps
-            .last_mut()
-            .expect("fold_steps 非空");
+        let last_step = proof.fold_steps.last_mut().expect("fold_steps 非空");
         if !last_step.sumcheck_proof.outer_round_polys.is_empty()
             && !last_step.sumcheck_proof.outer_round_polys[0].is_empty()
         {
@@ -638,8 +630,7 @@ mod tests {
         use ark_bn254::G1Affine;
         use ark_ec::AffineRepr;
         if !proof.fold_steps.is_empty() {
-            proof.fold_steps[0].folded_witness_commitment =
-                IpaCommitment(G1Affine::generator());
+            proof.fold_steps[0].folded_witness_commitment = IpaCommitment(G1Affine::generator());
         }
         let tampered = serialize_proof(&proof).expect("serialize 应成功");
         let result = verify_production(&tampered, &public_io, &ccs_whitelist);

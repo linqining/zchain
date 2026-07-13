@@ -129,7 +129,7 @@ mod tests {
     use super::*;
     use crate::ccs::{Ccs, Fr, SparseMatrix};
     use crate::field::ZkvmField;
-    use crate::fold::fold_loop::{fold_loop, HypernovaProof};
+    use crate::fold::fold_loop::{HypernovaProof, fold_loop};
     use crate::pcs::ipa::{IpaCommitment, IpaPcs};
     use crate::pcs::{MultilinearPoly, Pcs};
     use crate::prover::serialize_proof;
@@ -182,8 +182,18 @@ mod tests {
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
         let ccccs = ccs.to_cccs(&z_c, vec![], cmt_c).expect("to_cccs");
         let mut transcript = Transcript::new();
-        fold_loop(&ccs, lcccs, cmt_l, &[ccccs], pcs, &mut transcript, ccs.ccs_commitment(), [0u8; 32], vec![vec![]])
-            .expect("fold_loop 应成功")
+        fold_loop(
+            &ccs,
+            lcccs,
+            cmt_l,
+            &[ccccs],
+            pcs,
+            &mut transcript,
+            ccs.ccs_commitment(),
+            [0u8; 32],
+            vec![vec![]],
+        )
+        .expect("fold_loop 应成功")
     }
 
     // ===== SubTask 9.3.1: CircuitBn254 结构 + public inputs =====
@@ -191,10 +201,7 @@ mod tests {
     #[test]
     fn test_circuit_bn254_curve_kind() {
         assert_eq!(CircuitBn254::curve_kind(), CurveKind::Bn254);
-        assert_eq!(
-            CircuitBn254::sub_proof_curve_kind(),
-            CurveKind::Grumpkin
-        );
+        assert_eq!(CircuitBn254::sub_proof_curve_kind(), CurveKind::Grumpkin);
     }
 
     #[test]
@@ -285,10 +292,7 @@ mod tests {
     fn test_verify_native_empty_bytes_fails() {
         let pcs = make_ipa_pcs();
         let circuit = CircuitBn254::new(&[], &pcs);
-        assert!(
-            circuit.verify_native().is_err(),
-            "空 bytes 应返回错误"
-        );
+        assert!(circuit.verify_native().is_err(), "空 bytes 应返回错误");
     }
 
     #[test]

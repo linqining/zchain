@@ -87,10 +87,7 @@ fn sha256_chain_expected(input: &[u8], iterations: u32) -> [u8; 32] {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let iterations: u32 = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+    let iterations: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
 
     // 默认 input：32 字节零
     let input = [0u8; 32];

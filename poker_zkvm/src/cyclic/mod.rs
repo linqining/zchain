@@ -154,10 +154,7 @@ mod tests {
     fn test_primary_scalar_ne_primary_base() {
         let ps = Bn254GrumpkinCycle::primary_scalar_modulus();
         let pb = Bn254GrumpkinCycle::primary_base_modulus();
-        assert_ne!(
-            ps, pb,
-            "BN254 标量域 ≠ base field（否则曲线不安全）"
-        );
+        assert_ne!(ps, pb, "BN254 标量域 ≠ base field（否则曲线不安全）");
     }
 
     /// 验证 arkworks 类型层面 cycle：ark_grumpkin::Fq == ark_bn254::Fr。

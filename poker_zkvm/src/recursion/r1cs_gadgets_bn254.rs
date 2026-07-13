@@ -184,7 +184,11 @@ fn point_double(p: &G1VarBN254) -> G1VarBN254 {
     let yz = &p.y * &p.z;
     let z3 = &yz + &yz;
 
-    G1VarBN254 { x: x3, y: y3, z: z3 }
+    G1VarBN254 {
+        x: x3,
+        y: y3,
+        z: z3,
+    }
 }
 
 /// 不完全加法：P1 + P2（假设 P1 ≠ ±P2，均非无穷远点）。
@@ -234,7 +238,11 @@ fn add_incomplete(a: &G1VarBN254, b: &G1VarBN254) -> G1VarBN254 {
     let two_z1_z2 = &z1_z2 + &z1_z2;
     let z3 = &two_z1_z2 * &h;
 
-    G1VarBN254 { x: x3, y: y3, z: z3 }
+    G1VarBN254 {
+        x: x3,
+        y: y3,
+        z: z3,
+    }
 }
 
 /// 安全加法：P1 + P2（处理无穷远点）。
@@ -279,11 +287,7 @@ pub fn scalar_mul_gadget_bn254(
     }
     let zero_point = G1VarBN254::zero();
     // 初始化：MSB（LE 序列最后一个 bit）为 1 时从 point 开始，否则从 zero 开始
-    let mut result = G1VarBN254::conditionally_select(
-        bits.last().unwrap(),
-        point,
-        &zero_point,
-    )?;
+    let mut result = G1VarBN254::conditionally_select(bits.last().unwrap(), point, &zero_point)?;
     // 处理剩余比特（MSB-1 到 LSB）
     for bit in bits.iter().rev().skip(1) {
         let doubled = safe_double(&result)?;
@@ -323,7 +327,7 @@ mod tests {
     use ark_ec::{AdditiveGroup, PrimeGroup};
     use ark_ff::One;
     use ark_relations::gr1cs::{ConstraintSystem, ConstraintSystemRef};
-    use ark_std::{test_rng, UniformRand};
+    use ark_std::{UniformRand, test_rng};
 
     /// 辅助：在 CS<Fr> 中分配 G1 witness
     fn alloc_g1(cs: ConstraintSystemRef<Fr>, point: G1Projective) -> G1VarBN254 {
@@ -336,7 +340,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行"
+    )]
     fn test_g1_scalar_mul_identity_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();
@@ -350,7 +357,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行"
+    )]
     fn test_g1_scalar_mul_generator_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let g = G1Projective::generator();
@@ -362,7 +372,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行"
+    )]
     fn test_g1_scalar_mul_small_bn254() {
         // 2 * G == G.double()
         let cs = ConstraintSystem::<Fr>::new_ref();
@@ -377,7 +390,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行"
+    )]
     fn test_g1_point_add_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();
@@ -398,7 +414,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行"
+    )]
     fn test_fold_commitment_check_valid_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();
@@ -411,11 +430,17 @@ mod tests {
         let c_c_var = alloc_g1(cs.clone(), c_c);
         let r_var = alloc_fr(cs.clone(), r);
         fold_commitment_check_bn254(&c_prime_var, &c_l_var, &c_c_var, &r_var).unwrap();
-        assert!(cs.is_satisfied().unwrap(), "合法 fold commitment 应满足约束");
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "合法 fold commitment 应满足约束"
+        );
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行")]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "arkworks 在 debug (O0) 下极慢；用 --release 运行"
+    )]
     fn test_fold_commitment_check_invalid_bn254() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let mut rng = test_rng();
@@ -428,9 +453,6 @@ mod tests {
         let c_c_var = alloc_g1(cs.clone(), c_c);
         let r_var = alloc_fr(cs.clone(), r);
         fold_commitment_check_bn254(&c_prime_var, &c_l_var, &c_c_var, &r_var).unwrap();
-        assert!(
-            !cs.is_satisfied().unwrap(),
-            "错误 C' 应导致 CS 不满足"
-        );
+        assert!(!cs.is_satisfied().unwrap(), "错误 C' 应导致 CS 不满足");
     }
 }

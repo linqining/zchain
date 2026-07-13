@@ -191,38 +191,38 @@ pub fn build_elf32(entry: u32, text_vaddr: u32, text_bytes: &[u8]) -> Vec<u8> {
     // e_ident (16 bytes)
     bytes.extend_from_slice(&[
         0x7f, b'E', b'L', b'F', // magic
-        1,   // EI_CLASS = ELFCLASS32
-        1,   // EI_DATA = ELFDATA2LSB (little-endian)
-        1,   // EI_VERSION = EV_CURRENT
-        0,   // EI_OSABI = ELFOSABI_NONE
+        1,    // EI_CLASS = ELFCLASS32
+        1,    // EI_DATA = ELFDATA2LSB (little-endian)
+        1,    // EI_VERSION = EV_CURRENT
+        0,    // EI_OSABI = ELFOSABI_NONE
         0, 0, 0, 0, 0, 0, 0, 0, // EI_ABIVERSION + padding
     ]);
-    bytes.extend_from_slice(&2u16.to_le_bytes());    // e_type = ET_EXEC
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
     bytes.extend_from_slice(&0xF3u16.to_le_bytes()); // e_machine = EM_RISCV
-    bytes.extend_from_slice(&1u32.to_le_bytes());    // e_version
-    bytes.extend_from_slice(&entry.to_le_bytes());   // e_entry
-    bytes.extend_from_slice(&52u32.to_le_bytes());   // e_phoff
-    bytes.extend_from_slice(&0u32.to_le_bytes());    // e_shoff
-    bytes.extend_from_slice(&0u32.to_le_bytes());    // e_flags
-    bytes.extend_from_slice(&52u16.to_le_bytes());   // e_ehsize
-    bytes.extend_from_slice(&32u16.to_le_bytes());   // e_phentsize
-    bytes.extend_from_slice(&1u16.to_le_bytes());    // e_phnum
-    bytes.extend_from_slice(&0u16.to_le_bytes());    // e_shentsize
-    bytes.extend_from_slice(&0u16.to_le_bytes());    // e_shnum
-    bytes.extend_from_slice(&0u16.to_le_bytes());    // e_shstrndx
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    bytes.extend_from_slice(&entry.to_le_bytes()); // e_entry
+    bytes.extend_from_slice(&52u32.to_le_bytes()); // e_phoff
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // e_shoff
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    bytes.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
+    bytes.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // e_shentsize
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header (32 bytes) ---
     let p_offset = 84u32;
     let p_filesz = text_bytes.len() as u32;
     let p_memsz = text_bytes.len() as u32;
-    bytes.extend_from_slice(&1u32.to_le_bytes());           // p_type = PT_LOAD
-    bytes.extend_from_slice(&p_offset.to_le_bytes());       // p_offset
-    bytes.extend_from_slice(&text_vaddr.to_le_bytes());     // p_vaddr
-    bytes.extend_from_slice(&text_vaddr.to_le_bytes());     // p_paddr
-    bytes.extend_from_slice(&p_filesz.to_le_bytes());       // p_filesz
-    bytes.extend_from_slice(&p_memsz.to_le_bytes());        // p_memsz
-    bytes.extend_from_slice(&5u32.to_le_bytes());           // p_flags = PF_R | PF_X
-    bytes.extend_from_slice(&0x1000u32.to_le_bytes());      // p_align
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    bytes.extend_from_slice(&p_offset.to_le_bytes()); // p_offset
+    bytes.extend_from_slice(&text_vaddr.to_le_bytes()); // p_vaddr
+    bytes.extend_from_slice(&text_vaddr.to_le_bytes()); // p_paddr
+    bytes.extend_from_slice(&p_filesz.to_le_bytes()); // p_filesz
+    bytes.extend_from_slice(&p_memsz.to_le_bytes()); // p_memsz
+    bytes.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+    bytes.extend_from_slice(&0x1000u32.to_le_bytes()); // p_align
 
     // --- text segment ---
     bytes.extend_from_slice(text_bytes);
@@ -318,7 +318,7 @@ mod tests {
         let word = lb(1, 20, 0);
         assert_eq!(word & 0x7F, 0x03);
         assert_eq!((word >> 12) & 0x7, 0);
-        assert_eq!((word >> 7) & 0x1F, 1);  // rd=1
+        assert_eq!((word >> 7) & 0x1F, 1); // rd=1
         assert_eq!((word >> 15) & 0x1F, 20); // rs1=20
     }
 

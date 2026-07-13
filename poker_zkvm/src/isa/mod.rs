@@ -547,11 +547,20 @@ pub fn decode(word: u32) -> Result<Instruction, ZkvmError> {
 
     match opcode {
         // ===== U-type =====
-        0x37 => Ok(Instruction::Lui { rd, imm: decode_u_imm(word) }),
-        0x17 => Ok(Instruction::Auipc { rd, imm: decode_u_imm(word) }),
+        0x37 => Ok(Instruction::Lui {
+            rd,
+            imm: decode_u_imm(word),
+        }),
+        0x17 => Ok(Instruction::Auipc {
+            rd,
+            imm: decode_u_imm(word),
+        }),
 
         // ===== J-type =====
-        0x6F => Ok(Instruction::Jal { rd, imm: decode_j_imm(word) }),
+        0x6F => Ok(Instruction::Jal {
+            rd,
+            imm: decode_j_imm(word),
+        }),
 
         // ===== I-type 跳转 =====
         0x67 => {
@@ -560,7 +569,11 @@ pub fn decode(word: u32) -> Result<Instruction, ZkvmError> {
                     "JALR funct3={funct3} (expected 0)"
                 )));
             }
-            Ok(Instruction::Jalr { rd, rs1, imm: decode_i_imm(word) })
+            Ok(Instruction::Jalr {
+                rd,
+                rs1,
+                imm: decode_i_imm(word),
+            })
         }
 
         // ===== B-type 条件分支 =====
@@ -624,13 +637,25 @@ pub fn decode(word: u32) -> Result<Instruction, ZkvmError> {
                             "SLLI funct7={funct7} (expected 0)"
                         )));
                     }
-                    Ok(Instruction::Slli { rd, rs1, shamt: rs2 })
+                    Ok(Instruction::Slli {
+                        rd,
+                        rs1,
+                        shamt: rs2,
+                    })
                 }
                 5 => {
                     // SRLI（funct7=0）/ SRAI（funct7=0x20）
                     match funct7 {
-                        0 => Ok(Instruction::Srli { rd, rs1, shamt: rs2 }),
-                        0x20 => Ok(Instruction::Srai { rd, rs1, shamt: rs2 }),
+                        0 => Ok(Instruction::Srli {
+                            rd,
+                            rs1,
+                            shamt: rs2,
+                        }),
+                        0x20 => Ok(Instruction::Srai {
+                            rd,
+                            rs1,
+                            shamt: rs2,
+                        }),
                         _ => Err(ZkvmError::UnsupportedInstruction(format!(
                             "SRLI/SRAI funct7={funct7}"
                         ))),
@@ -789,31 +814,56 @@ pub fn execute(
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_memory_byte(addr)? as i8 as i32 as u32;
             state.write_register(rd, val);
-            mem_access.push(MemAccess { addr, op: MemOp::Read, value: val, size: 1 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Read,
+                value: val,
+                size: 1,
+            });
         }
         Instruction::Lh { rd, rs1, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_memory_halfword(addr)? as i16 as i32 as u32;
             state.write_register(rd, val);
-            mem_access.push(MemAccess { addr, op: MemOp::Read, value: val, size: 2 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Read,
+                value: val,
+                size: 2,
+            });
         }
         Instruction::Lw { rd, rs1, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_memory_word(addr)?;
             state.write_register(rd, val);
-            mem_access.push(MemAccess { addr, op: MemOp::Read, value: val, size: 4 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Read,
+                value: val,
+                size: 4,
+            });
         }
         Instruction::Lbu { rd, rs1, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_memory_byte(addr)? as u32;
             state.write_register(rd, val);
-            mem_access.push(MemAccess { addr, op: MemOp::Read, value: val, size: 1 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Read,
+                value: val,
+                size: 1,
+            });
         }
         Instruction::Lhu { rd, rs1, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_memory_halfword(addr)? as u32;
             state.write_register(rd, val);
-            mem_access.push(MemAccess { addr, op: MemOp::Read, value: val, size: 2 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Read,
+                value: val,
+                size: 2,
+            });
         }
 
         // ===== S-type Store =====
@@ -821,19 +871,34 @@ pub fn execute(
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_register(rs2);
             state.write_memory_byte(addr, val as u8)?;
-            mem_access.push(MemAccess { addr, op: MemOp::Write, value: val, size: 1 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Write,
+                value: val,
+                size: 1,
+            });
         }
         Instruction::Sh { rs1, rs2, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_register(rs2);
             state.write_memory_halfword(addr, val as u16)?;
-            mem_access.push(MemAccess { addr, op: MemOp::Write, value: val, size: 2 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Write,
+                value: val,
+                size: 2,
+            });
         }
         Instruction::Sw { rs1, rs2, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
             let val = state.read_register(rs2);
             state.write_memory_word(addr, val)?;
-            mem_access.push(MemAccess { addr, op: MemOp::Write, value: val, size: 4 });
+            mem_access.push(MemAccess {
+                addr,
+                op: MemOp::Write,
+                value: val,
+                size: 4,
+            });
         }
 
         // ===== I-type OP-IMM =====
@@ -873,11 +938,15 @@ pub fn execute(
 
         // ===== R-type OP =====
         Instruction::Add { rd, rs1, rs2 } => {
-            let result = state.read_register(rs1).wrapping_add(state.read_register(rs2));
+            let result = state
+                .read_register(rs1)
+                .wrapping_add(state.read_register(rs2));
             state.write_register(rd, result);
         }
         Instruction::Sub { rd, rs1, rs2 } => {
-            let result = state.read_register(rs1).wrapping_sub(state.read_register(rs2));
+            let result = state
+                .read_register(rs1)
+                .wrapping_sub(state.read_register(rs2));
             state.write_register(rd, result);
         }
         Instruction::Sll { rd, rs1, rs2 } => {
@@ -1021,10 +1090,18 @@ mod tests {
 
     #[test]
     fn test_instruction_clone_eq() {
-        let a = Instruction::Add { rd: 1, rs1: 2, rs2: 3 };
+        let a = Instruction::Add {
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+        };
         let b = a.clone();
         assert_eq!(a, b);
-        let c = Instruction::Add { rd: 1, rs1: 2, rs2: 4 };
+        let c = Instruction::Add {
+            rd: 1,
+            rs1: 2,
+            rs2: 4,
+        };
         assert_ne!(a, c);
     }
 
@@ -1049,51 +1126,191 @@ mod tests {
             Instruction::Auipc { rd: 0, imm: 0 },
             // J-type / I-type 跳转 (2)
             Instruction::Jal { rd: 0, imm: 0 },
-            Instruction::Jalr { rd: 0, rs1: 0, imm: 0 },
+            Instruction::Jalr {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
             // B-type (6)
-            Instruction::Beq { rs1: 0, rs2: 0, imm: 0 },
-            Instruction::Bne { rs1: 0, rs2: 0, imm: 0 },
-            Instruction::Blt { rs1: 0, rs2: 0, imm: 0 },
-            Instruction::Bge { rs1: 0, rs2: 0, imm: 0 },
-            Instruction::Bltu { rs1: 0, rs2: 0, imm: 0 },
-            Instruction::Bgeu { rs1: 0, rs2: 0, imm: 0 },
+            Instruction::Beq {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction::Bne {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction::Blt {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction::Bge {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction::Bltu {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction::Bgeu {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
             // Load (5)
-            Instruction::Lb { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Lh { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Lw { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Lbu { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Lhu { rd: 0, rs1: 0, imm: 0 },
+            Instruction::Lb {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Lh {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Lw {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Lbu {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Lhu {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
             // Store (3)
-            Instruction::Sb { rs1: 0, rs2: 0, imm: 0 },
-            Instruction::Sh { rs1: 0, rs2: 0, imm: 0 },
-            Instruction::Sw { rs1: 0, rs2: 0, imm: 0 },
+            Instruction::Sb {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction::Sh {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+            Instruction::Sw {
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
             // OP-IMM (9)
-            Instruction::Addi { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Slti { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Sltiu { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Xori { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Ori { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Andi { rd: 0, rs1: 0, imm: 0 },
-            Instruction::Slli { rd: 0, rs1: 0, shamt: 0 },
-            Instruction::Srli { rd: 0, rs1: 0, shamt: 0 },
-            Instruction::Srai { rd: 0, rs1: 0, shamt: 0 },
+            Instruction::Addi {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Slti {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Sltiu {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Xori {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Ori {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Andi {
+                rd: 0,
+                rs1: 0,
+                imm: 0,
+            },
+            Instruction::Slli {
+                rd: 0,
+                rs1: 0,
+                shamt: 0,
+            },
+            Instruction::Srli {
+                rd: 0,
+                rs1: 0,
+                shamt: 0,
+            },
+            Instruction::Srai {
+                rd: 0,
+                rs1: 0,
+                shamt: 0,
+            },
             // OP (10)
-            Instruction::Add { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Sub { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Sll { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Slt { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Sltu { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Xor { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Srl { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Sra { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Or { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::And { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Add {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Sub {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Sll {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Slt {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Sltu {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Xor {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Srl {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Sra {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Or {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::And {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
             // SYSTEM / MISC (3)
             Instruction::Fence,
             Instruction::Ecall,
             Instruction::Ebreak,
         ];
-        assert_eq!(variants.len(), 40, "RV32I + ECALL/EBREAK/FENCE = 40 variants");
+        assert_eq!(
+            variants.len(),
+            40,
+            "RV32I + ECALL/EBREAK/FENCE = 40 variants"
+        );
     }
 
     // ===== Step D: decode 测试 =====
@@ -1105,14 +1322,23 @@ mod tests {
 
     /// 辅助：编码 I-type 指令
     fn encode_i(opcode: u32, funct3: u8, rd: u8, rs1: u8, imm12: u32) -> u32 {
-        ((imm12 & 0xFFF) << 20) | ((rs1 as u32) << 15) | ((funct3 as u32) << 12) | ((rd as u32) << 7) | opcode
+        ((imm12 & 0xFFF) << 20)
+            | ((rs1 as u32) << 15)
+            | ((funct3 as u32) << 12)
+            | ((rd as u32) << 7)
+            | opcode
     }
 
     /// 辅助：编码 S-type 指令
     fn encode_s(opcode: u32, funct3: u8, rs1: u8, rs2: u8, imm12: u32) -> u32 {
         let imm_hi = (imm12 >> 5) & 0x7F;
         let imm_lo = imm12 & 0x1F;
-        (imm_hi << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | ((funct3 as u32) << 12) | (imm_lo << 7) | opcode
+        (imm_hi << 25)
+            | ((rs2 as u32) << 20)
+            | ((rs1 as u32) << 15)
+            | ((funct3 as u32) << 12)
+            | (imm_lo << 7)
+            | opcode
     }
 
     /// 辅助：编码 B-type 指令
@@ -1121,7 +1347,14 @@ mod tests {
         let b11 = (imm13 >> 11) & 0x1;
         let b10_5 = (imm13 >> 5) & 0x3F;
         let b4_1 = (imm13 >> 1) & 0xF;
-        (b12 << 31) | (b10_5 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | ((funct3 as u32) << 12) | (b4_1 << 8) | (b11 << 7) | opcode
+        (b12 << 31)
+            | (b10_5 << 25)
+            | ((rs2 as u32) << 20)
+            | ((rs1 as u32) << 15)
+            | ((funct3 as u32) << 12)
+            | (b4_1 << 8)
+            | (b11 << 7)
+            | opcode
     }
 
     /// 辅助：编码 J-type 指令
@@ -1135,7 +1368,12 @@ mod tests {
 
     /// 辅助：编码 R-type 指令
     fn encode_r(opcode: u32, funct3: u8, funct7: u8, rd: u8, rs1: u8, rs2: u8) -> u32 {
-        ((funct7 as u32) << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | ((funct3 as u32) << 12) | ((rd as u32) << 7) | opcode
+        ((funct7 as u32) << 25)
+            | ((rs2 as u32) << 20)
+            | ((rs1 as u32) << 15)
+            | ((funct3 as u32) << 12)
+            | ((rd as u32) << 7)
+            | opcode
     }
 
     #[test]
@@ -1143,14 +1381,26 @@ mod tests {
         // LUI x1, 0x1000 → imm = 0x1000 << 12 = 0x01000000
         let word = encode_u(0x37, 1, 0x1000);
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Lui { rd: 1, imm: 0x01000000 });
+        assert_eq!(
+            insn,
+            Instruction::Lui {
+                rd: 1,
+                imm: 0x01000000
+            }
+        );
     }
 
     #[test]
     fn test_decode_auipc() {
         let word = encode_u(0x17, 2, 0x1000);
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Auipc { rd: 2, imm: 0x01000000 });
+        assert_eq!(
+            insn,
+            Instruction::Auipc {
+                rd: 2,
+                imm: 0x01000000
+            }
+        );
     }
 
     #[test]
@@ -1166,7 +1416,14 @@ mod tests {
         // JALR x1, x2, 4
         let word = encode_i(0x67, 0, 1, 2, 4);
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 });
+        assert_eq!(
+            insn,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 4
+            }
+        );
     }
 
     #[test]
@@ -1174,18 +1431,67 @@ mod tests {
         // BEQ x1, x2, 8
         let word = encode_b(0x63, 0, 1, 2, 8);
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Beq { rs1: 1, rs2: 2, imm: 8 });
+        assert_eq!(
+            insn,
+            Instruction::Beq {
+                rs1: 1,
+                rs2: 2,
+                imm: 8
+            }
+        );
     }
 
     #[test]
     fn test_decode_branch_all_types() {
         let cases = [
-            (0u8, Instruction::Beq { rs1: 1, rs2: 2, imm: 8 }),
-            (1, Instruction::Bne { rs1: 1, rs2: 2, imm: 8 }),
-            (4, Instruction::Blt { rs1: 1, rs2: 2, imm: 8 }),
-            (5, Instruction::Bge { rs1: 1, rs2: 2, imm: 8 }),
-            (6, Instruction::Bltu { rs1: 1, rs2: 2, imm: 8 }),
-            (7, Instruction::Bgeu { rs1: 1, rs2: 2, imm: 8 }),
+            (
+                0u8,
+                Instruction::Beq {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 8,
+                },
+            ),
+            (
+                1,
+                Instruction::Bne {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 8,
+                },
+            ),
+            (
+                4,
+                Instruction::Blt {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 8,
+                },
+            ),
+            (
+                5,
+                Instruction::Bge {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 8,
+                },
+            ),
+            (
+                6,
+                Instruction::Bltu {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 8,
+                },
+            ),
+            (
+                7,
+                Instruction::Bgeu {
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 8,
+                },
+            ),
         ];
         for (funct3, expected) in cases {
             let word = encode_b(0x63, funct3, 1, 2, 8);
@@ -1199,17 +1505,29 @@ mod tests {
         // LW x1, 0(x2)
         assert_eq!(
             decode(encode_i(0x03, 2, 1, 2, 0)).unwrap(),
-            Instruction::Lw { rd: 1, rs1: 2, imm: 0 }
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 0
+            }
         );
         // LB x1, 0(x2)
         assert_eq!(
             decode(encode_i(0x03, 0, 1, 2, 0)).unwrap(),
-            Instruction::Lb { rd: 1, rs1: 2, imm: 0 }
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0
+            }
         );
         // LBU x1, 0(x2)
         assert_eq!(
             decode(encode_i(0x03, 4, 1, 2, 0)).unwrap(),
-            Instruction::Lbu { rd: 1, rs1: 2, imm: 0 }
+            Instruction::Lbu {
+                rd: 1,
+                rs1: 2,
+                imm: 0
+            }
         );
     }
 
@@ -1218,12 +1536,20 @@ mod tests {
         // SW x2, 0(x1)
         assert_eq!(
             decode(encode_s(0x23, 2, 1, 2, 0)).unwrap(),
-            Instruction::Sw { rs1: 1, rs2: 2, imm: 0 }
+            Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0
+            }
         );
         // SB x2, 0(x1)
         assert_eq!(
             decode(encode_s(0x23, 0, 1, 2, 0)).unwrap(),
-            Instruction::Sb { rs1: 1, rs2: 2, imm: 0 }
+            Instruction::Sb {
+                rs1: 1,
+                rs2: 2,
+                imm: 0
+            }
         );
     }
 
@@ -1232,7 +1558,14 @@ mod tests {
         // ADDI x1, x0, -1 → imm = 0xFFFFFFFF
         let word = encode_i(0x13, 0, 1, 0, 0xFFF);
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Addi { rd: 1, rs1: 0, imm: 0xFFFFFFFF });
+        assert_eq!(
+            insn,
+            Instruction::Addi {
+                rd: 1,
+                rs1: 0,
+                imm: 0xFFFFFFFF
+            }
+        );
     }
 
     #[test]
@@ -1240,7 +1573,14 @@ mod tests {
         // SLLI x1, x2, 5
         let word = encode_i(0x13, 1, 1, 2, 5); // shamt in imm field
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Slli { rd: 1, rs1: 2, shamt: 5 });
+        assert_eq!(
+            insn,
+            Instruction::Slli {
+                rd: 1,
+                rs1: 2,
+                shamt: 5
+            }
+        );
     }
 
     #[test]
@@ -1248,7 +1588,14 @@ mod tests {
         // SRAI x1, x2, 5 → funct7=0x20, shamt=5
         let word = encode_r(0x13, 5, 0x20, 1, 2, 5);
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Srai { rd: 1, rs1: 2, shamt: 5 });
+        assert_eq!(
+            insn,
+            Instruction::Srai {
+                rd: 1,
+                rs1: 2,
+                shamt: 5
+            }
+        );
     }
 
     #[test]
@@ -1256,7 +1603,14 @@ mod tests {
         // SRLI x1, x2, 5 → funct7=0x00
         let word = encode_r(0x13, 5, 0x00, 1, 2, 5);
         let insn = decode(word).unwrap();
-        assert_eq!(insn, Instruction::Srli { rd: 1, rs1: 2, shamt: 5 });
+        assert_eq!(
+            insn,
+            Instruction::Srli {
+                rd: 1,
+                rs1: 2,
+                shamt: 5
+            }
+        );
     }
 
     #[test]
@@ -1265,27 +1619,91 @@ mod tests {
         let word = encode_r(0x33, 0, 0x00, 1, 2, 3);
         assert_eq!(
             decode(word).unwrap(),
-            Instruction::Add { rd: 1, rs1: 2, rs2: 3 }
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3
+            }
         );
         // SUB x1, x2, x3 → funct7=0x20
         let word = encode_r(0x33, 0, 0x20, 1, 2, 3);
         assert_eq!(
             decode(word).unwrap(),
-            Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }
+            Instruction::Sub {
+                rd: 1,
+                rs1: 2,
+                rs2: 3
+            }
         );
     }
 
     #[test]
     fn test_decode_m_extension() {
         let cases = [
-            (0u8, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }),
-            (1, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }),
-            (2, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }),
-            (3, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }),
-            (4, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }),
-            (5, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }),
-            (6, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }),
-            (7, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }),
+            (
+                0u8,
+                Instruction::Mul {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
+            (
+                1,
+                Instruction::Mulh {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
+            (
+                2,
+                Instruction::Mulhsu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
+            (
+                3,
+                Instruction::Mulhu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
+            (
+                4,
+                Instruction::Div {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
+            (
+                5,
+                Instruction::Divu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
+            (
+                6,
+                Instruction::Rem {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
+            (
+                7,
+                Instruction::Remu {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                },
+            ),
         ];
         for (funct3, expected) in cases {
             let word = encode_r(0x33, funct3, 0x01, 1, 2, 3);
@@ -1336,7 +1754,15 @@ mod tests {
     fn test_execute_addi() {
         let mut state = state::VmState::new();
         state.pc = 0x1000;
-        let log = execute(&mut state, Instruction::Addi { rd: 1, rs1: 0, imm: 42 }).unwrap();
+        let log = execute(
+            &mut state,
+            Instruction::Addi {
+                rd: 1,
+                rs1: 0,
+                imm: 42,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 42);
         assert_eq!(state.pc, 0x1004);
         assert_eq!(log.pc, 0x1000);
@@ -1346,7 +1772,15 @@ mod tests {
     fn test_execute_addi_overflow_wraps() {
         let mut state = state::VmState::new();
         state.write_register(2, 0xFFFF_FFFF);
-        execute(&mut state, Instruction::Addi { rd: 1, rs1: 2, imm: 1 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Addi {
+                rd: 1,
+                rs1: 2,
+                imm: 1,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0, "0xFFFFFFFF + 1 wraps to 0");
     }
 
@@ -1355,7 +1789,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 10);
         state.write_register(3, 20);
-        execute(&mut state, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 30);
     }
 
@@ -1364,7 +1806,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 10);
         state.write_register(3, 3);
-        execute(&mut state, Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Sub {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 7);
     }
 
@@ -1373,7 +1823,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0xFFFF_FFFF); // -1
         state.write_register(3, 1);
-        execute(&mut state, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 1, "-1 < 1");
     }
 
@@ -1382,7 +1840,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0xFFFF_FFFF);
         state.write_register(3, 1);
-        execute(&mut state, Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Sltu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0, "0xFFFFFFFF > 1 unsigned");
     }
 
@@ -1391,8 +1857,20 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0x8000_0000);
         state.write_register(3, 4);
-        execute(&mut state, Instruction::Sra { rd: 1, rs1: 2, rs2: 3 }).unwrap();
-        assert_eq!(state.read_register(1), 0xF800_0000, "arithmetic right shift");
+        execute(
+            &mut state,
+            Instruction::Sra {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.read_register(1),
+            0xF800_0000,
+            "arithmetic right shift"
+        );
     }
 
     #[test]
@@ -1400,7 +1878,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0x8000_0000);
         state.write_register(3, 4);
-        execute(&mut state, Instruction::Srl { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Srl {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0x0800_0000, "logical right shift");
     }
 
@@ -1409,7 +1895,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 1);
         state.write_register(3, 4);
-        execute(&mut state, Instruction::Sll { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Sll {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0x10, "1 << 4 = 16");
     }
 
@@ -1420,13 +1914,29 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 6);
         state.write_register(3, 7);
-        execute(&mut state, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 42, "6 * 7 = 42");
 
         // 0xFFFFFFFF * 2 = 0x1_FFFFFFFE, 低 32 位 = 0xFFFFFFFE
         state.write_register(2, 0xFFFF_FFFF);
         state.write_register(3, 2);
-        execute(&mut state, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0xFFFF_FFFE, "低 32 位");
     }
 
@@ -1436,13 +1946,29 @@ mod tests {
         // (-1) * (-1) = 1, 高 32 位 = 0
         state.write_register(2, 0xFFFF_FFFF); // -1
         state.write_register(3, 0xFFFF_FFFF); // -1
-        execute(&mut state, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0, "(-1)*(-1) 高 32 位 = 0");
 
         // 0x7FFFFFFF * 0x7FFFFFFF = 0x3FFFFFFF_00000001, 高 32 位 = 0x3FFFFFFF
         state.write_register(2, 0x7FFF_FFFF);
         state.write_register(3, 0x7FFF_FFFF);
-        execute(&mut state, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0x3FFF_FFFF, "有符号高 32 位");
     }
 
@@ -1452,7 +1978,15 @@ mod tests {
         // 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE_00000001, 高 32 位 = 0xFFFFFFFE
         state.write_register(2, 0xFFFF_FFFF);
         state.write_register(3, 0xFFFF_FFFF);
-        execute(&mut state, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Mulhu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0xFFFF_FFFE, "无符号高 32 位");
     }
 
@@ -1463,7 +1997,15 @@ mod tests {
         // 高 32 位 = 0xFFFFFFFF
         state.write_register(2, 0xFFFF_FFFF); // -1 signed
         state.write_register(3, 0xFFFF_FFFF); // unsigned
-        execute(&mut state, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Mulhsu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0xFFFF_FFFF, "有符号×无符号高 32 位");
     }
 
@@ -1472,26 +2014,62 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 100);
         state.write_register(3, 7);
-        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 14, "100 / 7 = 14");
 
         // -100 / 7 = -14
         state.write_register(2, (-100i32) as u32);
         state.write_register(3, 7);
-        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), (-14i32) as u32, "-100 / 7 = -14");
 
         // DIV by 0 → -1
         state.write_register(2, 100);
         state.write_register(3, 0);
-        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0xFFFF_FFFF, "DIV by 0 → -1");
 
         // INT_MIN / -1 → INT_MIN (overflow)
         state.write_register(2, i32::MIN as u32);
         state.write_register(3, (-1i32) as u32);
-        execute(&mut state, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }).unwrap();
-        assert_eq!(state.read_register(1), i32::MIN as u32, "overflow → INT_MIN");
+        execute(
+            &mut state,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.read_register(1),
+            i32::MIN as u32,
+            "overflow → INT_MIN"
+        );
     }
 
     #[test]
@@ -1499,14 +2077,34 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0xFFFF_FFFF);
         state.write_register(3, 2);
-        execute(&mut state, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Divu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0x7FFF_FFFF, "0xFFFFFFFF / 2");
 
         // DIVU by 0 → 0xFFFFFFFF
         state.write_register(2, 100);
         state.write_register(3, 0);
-        execute(&mut state, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
-        assert_eq!(state.read_register(1), 0xFFFF_FFFF, "DIVU by 0 → 0xFFFFFFFF");
+        execute(
+            &mut state,
+            Instruction::Divu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.read_register(1),
+            0xFFFF_FFFF,
+            "DIVU by 0 → 0xFFFFFFFF"
+        );
     }
 
     #[test]
@@ -1514,25 +2112,57 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 100);
         state.write_register(3, 7);
-        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Rem {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 2, "100 % 7 = 2");
 
         // -100 % 7 = -2
         state.write_register(2, (-100i32) as u32);
         state.write_register(3, 7);
-        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Rem {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), (-2i32) as u32, "-100 % 7 = -2");
 
         // REM by 0 → rs1
         state.write_register(2, 42);
         state.write_register(3, 0);
-        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Rem {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 42, "REM by 0 → rs1");
 
         // INT_MIN % -1 → 0 (overflow)
         state.write_register(2, i32::MIN as u32);
         state.write_register(3, (-1i32) as u32);
-        execute(&mut state, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Rem {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0, "overflow → 0");
     }
 
@@ -1541,20 +2171,43 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0xFFFF_FFFF);
         state.write_register(3, 2);
-        execute(&mut state, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Remu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 1, "0xFFFFFFFF % 2 = 1");
 
         // REMU by 0 → rs1
         state.write_register(2, 42);
         state.write_register(3, 0);
-        execute(&mut state, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Remu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 42, "REMU by 0 → rs1");
     }
 
     #[test]
     fn test_execute_lui() {
         let mut state = state::VmState::new();
-        execute(&mut state, Instruction::Lui { rd: 1, imm: 0x01000000 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Lui {
+                rd: 1,
+                imm: 0x01000000,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0x01000000);
     }
 
@@ -1562,8 +2215,19 @@ mod tests {
     fn test_execute_auipc() {
         let mut state = state::VmState::new();
         state.pc = 0x1000;
-        execute(&mut state, Instruction::Auipc { rd: 1, imm: 0x01000000 }).unwrap();
-        assert_eq!(state.read_register(1), 0x01001000, "pc + imm = 0x1000 + 0x01000000");
+        execute(
+            &mut state,
+            Instruction::Auipc {
+                rd: 1,
+                imm: 0x01000000,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.read_register(1),
+            0x01001000,
+            "pc + imm = 0x1000 + 0x01000000"
+        );
     }
 
     #[test]
@@ -1581,7 +2245,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.pc = 0x1000;
         state.write_register(2, 0x2000);
-        execute(&mut state, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 4,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0x1004, "link = pc + 4");
         assert_eq!(state.pc, 0x2004, "target = (rs1 + imm) & !1");
     }
@@ -1591,7 +2263,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.pc = 0x1000;
         state.write_register(2, 0x2000);
-        execute(&mut state, Instruction::Jalr { rd: 1, rs1: 2, imm: 5 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 5,
+            },
+        )
+        .unwrap();
         assert_eq!(state.pc, 0x2004, "target = (0x2000 + 5) & !1 = 0x2004");
     }
 
@@ -1601,7 +2281,15 @@ mod tests {
         state.pc = 0x1000;
         state.write_register(1, 42);
         state.write_register(2, 42);
-        execute(&mut state, Instruction::Beq { rs1: 1, rs2: 2, imm: 8 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Beq {
+                rs1: 1,
+                rs2: 2,
+                imm: 8,
+            },
+        )
+        .unwrap();
         assert_eq!(state.pc, 0x1008, "branch taken: pc + imm");
     }
 
@@ -1611,7 +2299,15 @@ mod tests {
         state.pc = 0x1000;
         state.write_register(1, 42);
         state.write_register(2, 43);
-        execute(&mut state, Instruction::Beq { rs1: 1, rs2: 2, imm: 8 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Beq {
+                rs1: 1,
+                rs2: 2,
+                imm: 8,
+            },
+        )
+        .unwrap();
         assert_eq!(state.pc, 0x1004, "branch not taken: pc + 4");
     }
 
@@ -1621,7 +2317,15 @@ mod tests {
         state.pc = 0x1000;
         state.write_register(1, 0xFFFF_FFFF); // -1
         state.write_register(2, 1);
-        execute(&mut state, Instruction::Blt { rs1: 1, rs2: 2, imm: 8 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Blt {
+                rs1: 1,
+                rs2: 2,
+                imm: 8,
+            },
+        )
+        .unwrap();
         assert_eq!(state.pc, 0x1008, "-1 < 1 signed → taken");
     }
 
@@ -1631,7 +2335,15 @@ mod tests {
         state.pc = 0x1000;
         state.write_register(1, 2);
         state.write_register(2, 1);
-        execute(&mut state, Instruction::Bgeu { rs1: 1, rs2: 2, imm: 8 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Bgeu {
+                rs1: 1,
+                rs2: 2,
+                imm: 8,
+            },
+        )
+        .unwrap();
         assert_eq!(state.pc, 0x1008, "2 >= 1 unsigned → taken");
     }
 
@@ -1640,7 +2352,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0x1000);
         state.write_memory_word(0x1000, 0xDEAD_BEEF).unwrap();
-        let log = execute(&mut state, Instruction::Lw { rd: 1, rs1: 2, imm: 0 }).unwrap();
+        let log = execute(
+            &mut state,
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0xDEAD_BEEF);
         assert_eq!(log.mem_access.len(), 1);
         assert_eq!(log.mem_access[0].op, crate::trace::MemOp::Read);
@@ -1652,7 +2372,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0x1000);
         state.write_memory_byte(0x1000, 0xFF).unwrap();
-        execute(&mut state, Instruction::Lb { rd: 1, rs1: 2, imm: 0 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0xFFFF_FFFF, "0xFF sign-extended");
     }
 
@@ -1661,7 +2389,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(2, 0x1000);
         state.write_memory_byte(0x1000, 0xFF).unwrap();
-        execute(&mut state, Instruction::Lbu { rd: 1, rs1: 2, imm: 0 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Lbu {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0x0000_00FF, "0xFF zero-extended");
     }
 
@@ -1670,7 +2406,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(1, 0xDEAD_BEEF);
         state.write_register(2, 0x1000);
-        let log = execute(&mut state, Instruction::Sw { rs1: 2, rs2: 1, imm: 0 }).unwrap();
+        let log = execute(
+            &mut state,
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 1,
+                imm: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_memory_word(0x1000).unwrap(), 0xDEAD_BEEF);
         assert_eq!(log.mem_access.len(), 1);
         assert_eq!(log.mem_access[0].op, crate::trace::MemOp::Write);
@@ -1682,7 +2426,15 @@ mod tests {
         let mut state = state::VmState::new();
         state.write_register(1, 0xDEAD_BEEF);
         state.write_register(2, 0x1000);
-        execute(&mut state, Instruction::Sb { rs1: 2, rs2: 1, imm: 0 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Sb {
+                rs1: 2,
+                rs2: 1,
+                imm: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_memory_byte(0x1000).unwrap(), 0xEF, "low byte");
     }
 
@@ -1692,10 +2444,26 @@ mod tests {
         state.write_register(2, 0x1000);
         state.write_memory_halfword(0x1000, 0xFFFF).unwrap();
         // LH sign-extend
-        execute(&mut state, Instruction::Lh { rd: 1, rs1: 2, imm: 0 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Lh {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(1), 0xFFFF_FFFF, "0xFFFF sign-extended");
         // LHU zero-extend
-        execute(&mut state, Instruction::Lhu { rd: 3, rs1: 2, imm: 0 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Lhu {
+                rd: 3,
+                rs1: 2,
+                imm: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(3), 0x0000_FFFF, "0xFFFF zero-extended");
     }
 
@@ -1703,7 +2471,15 @@ mod tests {
     fn test_execute_unaligned_lw() {
         let mut state = state::VmState::new();
         state.write_register(2, 0x1001); // unaligned
-        let err = execute(&mut state, Instruction::Lw { rd: 1, rs1: 2, imm: 0 }).unwrap_err();
+        let err = execute(
+            &mut state,
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+        )
+        .unwrap_err();
         assert!(matches!(err, ZkvmError::UnalignedAccess { addr: 0x1001 }));
     }
 
@@ -1711,7 +2487,15 @@ mod tests {
     fn test_execute_uninitialized_lw() {
         let mut state = state::VmState::new();
         state.write_register(2, 0x2000); // uninitialized
-        let err = execute(&mut state, Instruction::Lw { rd: 1, rs1: 2, imm: 0 }).unwrap_err();
+        let err = execute(
+            &mut state,
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+        )
+        .unwrap_err();
         assert!(matches!(err, ZkvmError::UninitializedRead { addr: 0x2000 }));
     }
 
@@ -1745,7 +2529,15 @@ mod tests {
     fn test_execute_write_x0_discarded() {
         let mut state = state::VmState::new();
         state.write_register(1, 99);
-        execute(&mut state, Instruction::Addi { rd: 0, rs1: 1, imm: 42 }).unwrap();
+        execute(
+            &mut state,
+            Instruction::Addi {
+                rd: 0,
+                rs1: 1,
+                imm: 42,
+            },
+        )
+        .unwrap();
         assert_eq!(state.read_register(0), 0, "x0 must remain 0");
     }
 
@@ -1753,7 +2545,11 @@ mod tests {
     fn test_execute_steplog_contents() {
         let mut state = state::VmState::new();
         state.pc = 0x1000;
-        let insn = Instruction::Addi { rd: 1, rs1: 0, imm: 42 };
+        let insn = Instruction::Addi {
+            rd: 1,
+            rs1: 0,
+            imm: 42,
+        };
         let log = execute(&mut state, insn.clone()).unwrap();
         assert_eq!(log.pc, 0x1000, "StepLog.pc = execution PC");
         assert_eq!(log.instruction, insn, "StepLog.instruction = executed insn");

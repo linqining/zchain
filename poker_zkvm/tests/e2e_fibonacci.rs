@@ -9,7 +9,7 @@
 mod common;
 
 use common::{build_fibonacci_elf, fibonacci_expected};
-use poker_zkvm::prover::{default_ccs_whitelist, prove, MAX_PROOF_TOTAL_SIZE, ProverConfig};
+use poker_zkvm::prover::{MAX_PROOF_TOTAL_SIZE, ProverConfig, default_ccs_whitelist, prove};
 use poker_zkvm::verifier::verify_production;
 
 /// 构造 Fibonacci prove 配置。
@@ -43,11 +43,7 @@ fn run_fibonacci_e2e(n: u32) {
         4,
         "Fibonacci 输出应为 4 字节（u32）"
     );
-    let got = u32::from_le_bytes(
-        public_io.output[..4]
-            .try_into()
-            .expect("输出至少 4 字节"),
-    );
+    let got = u32::from_le_bytes(public_io.output[..4].try_into().expect("输出至少 4 字节"));
     let expected = fibonacci_expected(n);
     assert_eq!(
         got, expected,
@@ -98,8 +94,7 @@ fn test_fibonacci_n100() {
 fn test_fibonacci_proof_size_bound() {
     // 单独检查 proof 大小，便于调试
     let elf = build_fibonacci_elf(20);
-    let (proof_bytes, _public_io) =
-        prove(&elf, &[], &fib_config()).expect("prove 应成功");
+    let (proof_bytes, _public_io) = prove(&elf, &[], &fib_config()).expect("prove 应成功");
     println!(
         "Fibonacci(20) proof size = {} bytes (limit = {})",
         proof_bytes.len(),

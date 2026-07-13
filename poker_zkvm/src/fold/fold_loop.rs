@@ -168,8 +168,7 @@ pub fn fold_loop(
 
     for ccccs in ccccs_instances.iter() {
         // (a) fold_step — 使用主 transcript 派生 fold challenge r
-        let fold_output =
-            fold_step::fold(&current_lcccs, &current_commitment, ccccs, transcript)?;
+        let fold_output = fold_step::fold(&current_lcccs, &current_commitment, ccccs, transcript)?;
 
         // (b) sumcheck::prove — 使用 fresh transcript（见 alternatives.md）
         let u_prime_spec = fold_output.folded_lcccs.u_l; // u_L + r·u_C（spec 公式）
@@ -453,7 +452,9 @@ mod tests {
         let z_c = vec![f(1), f(3), f(3), f(0)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -475,9 +476,15 @@ mod tests {
         assert_eq!(proof.abi_version, 1);
         assert_eq!(proof.r_y.len(), 2); // log2(num_vars=4) = 2
         // 线性 CCS: actual_u_prime = u_L + r·u_C = 0
-        assert_eq!(proof.fold_steps.last().unwrap().folded_lcccs.u_l, Fr::zero());
+        assert_eq!(
+            proof.fold_steps.last().unwrap().folded_lcccs.u_l,
+            Fr::zero()
+        );
         // folded witness 长度 = num_vars = 4
-        assert_eq!(proof.fold_steps.last().unwrap().folded_lcccs.trace_l.len(), 4);
+        assert_eq!(
+            proof.fold_steps.last().unwrap().folded_lcccs.trace_l.len(),
+            4
+        );
     }
 
     #[test]
@@ -490,7 +497,9 @@ mod tests {
         let z_c = vec![f(1), f(2), f(5), f(10)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -531,8 +540,12 @@ mod tests {
         let z3 = vec![f(1), f(7), f(7), f(0)];
 
         let lcccs = ccs.to_lcccs(&z1, &[], vec![]).expect("to_lcccs 1");
-        let ccccs2 = ccs.to_cccs(&z2, vec![], stub_commitment()).expect("to_cccs 2");
-        let ccccs3 = ccs.to_cccs(&z3, vec![], stub_commitment()).expect("to_cccs 3");
+        let ccccs2 = ccs
+            .to_cccs(&z2, vec![], stub_commitment())
+            .expect("to_cccs 2");
+        let ccccs3 = ccs
+            .to_cccs(&z3, vec![], stub_commitment())
+            .expect("to_cccs 3");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -551,7 +564,10 @@ mod tests {
         .expect("fold_loop 应成功");
 
         // 线性 CCS 链式折叠后 u' = 0
-        assert_eq!(proof.fold_steps.last().unwrap().folded_lcccs.u_l, Fr::zero());
+        assert_eq!(
+            proof.fold_steps.last().unwrap().folded_lcccs.u_l,
+            Fr::zero()
+        );
         assert_eq!(proof.r_y.len(), 2);
     }
 
@@ -565,8 +581,12 @@ mod tests {
         let z3 = vec![f(1), f(6), f(7), f(42)];
 
         let lcccs = ccs.to_lcccs(&z1, &[], vec![]).expect("to_lcccs 1");
-        let ccccs2 = ccs.to_cccs(&z2, vec![], stub_commitment()).expect("to_cccs 2");
-        let ccccs3 = ccs.to_cccs(&z3, vec![], stub_commitment()).expect("to_cccs 3");
+        let ccccs2 = ccs
+            .to_cccs(&z2, vec![], stub_commitment())
+            .expect("to_cccs 2");
+        let ccccs3 = ccs
+            .to_cccs(&z3, vec![], stub_commitment())
+            .expect("to_cccs 3");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -585,7 +605,10 @@ mod tests {
         .expect("fold_loop 应成功");
 
         // 非线性 CCS 链式折叠后 u' ≠ 0
-        assert_ne!(proof.fold_steps.last().unwrap().folded_lcccs.u_l, Fr::zero());
+        assert_ne!(
+            proof.fold_steps.last().unwrap().folded_lcccs.u_l,
+            Fr::zero()
+        );
     }
 
     // ===== 正例：4-row CCS =====
@@ -624,7 +647,10 @@ mod tests {
 
         // 4-row CCS: r_y 长度 = log2(num_vars=4) = 2
         assert_eq!(proof.r_y.len(), 2);
-        assert_eq!(proof.fold_steps.last().unwrap().folded_lcccs.u_l, Fr::zero());
+        assert_eq!(
+            proof.fold_steps.last().unwrap().folded_lcccs.u_l,
+            Fr::zero()
+        );
     }
 
     // ===== 边界：0 个 CCCCS 实例 =====
@@ -639,14 +665,37 @@ mod tests {
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
 
-        let result = fold_loop(&ccs, lcccs, stub_commitment(), &[], &pcs, &mut transcript, ccs.ccs_commitment(), [0u8; 32], vec![vec![]]);
-        assert!(result.is_ok(), "0 个 CCCCS 实例应走单实例路径成功，got: {:?}", result.err());
+        let result = fold_loop(
+            &ccs,
+            lcccs,
+            stub_commitment(),
+            &[],
+            &pcs,
+            &mut transcript,
+            ccs.ccs_commitment(),
+            [0u8; 32],
+            vec![vec![]],
+        );
+        assert!(
+            result.is_ok(),
+            "0 个 CCCCS 实例应走单实例路径成功，got: {:?}",
+            result.err()
+        );
         let proof = result.expect("已校验 is_ok");
-        assert!(proof.fold_steps.is_empty(), "单实例 proof 的 fold_steps 应为空");
+        assert!(
+            proof.fold_steps.is_empty(),
+            "单实例 proof 的 fold_steps 应为空"
+        );
         assert!(!proof.r_y.is_empty(), "单实例 proof 应有 r_y");
         // final_sumcheck 应非空（单实例 sumcheck 证明 CCS satisfaction）
-        assert_eq!(proof.final_sumcheck.outer_round_polys.len(), ccs.num_rows().trailing_zeros() as usize);
-        assert_eq!(proof.final_sumcheck.inner_round_polys.len(), ccs.num_vars.trailing_zeros() as usize);
+        assert_eq!(
+            proof.final_sumcheck.outer_round_polys.len(),
+            ccs.num_rows().trailing_zeros() as usize
+        );
+        assert_eq!(
+            proof.final_sumcheck.inner_round_polys.len(),
+            ccs.num_vars.trailing_zeros() as usize
+        );
     }
 
     // ===== 边界：实例数超限 =====
@@ -802,7 +851,9 @@ mod tests {
         let z_c = vec![f(1), f(3), f(3), f(0)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -834,7 +885,9 @@ mod tests {
         let z_c = vec![f(1), f(2), f(5), f(10)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -866,7 +919,9 @@ mod tests {
         let z_c = vec![f(1), f(3), f(3), f(0)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -900,7 +955,9 @@ mod tests {
         let z_c = vec![f(1), f(3), f(3), f(0)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -938,7 +995,9 @@ mod tests {
         let z_c = vec![f(1), f(2), f(5), f(10)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -977,7 +1036,8 @@ mod tests {
         .expect("fold_loop");
 
         assert_eq!(
-            proof.fold_steps.last().unwrap().folded_lcccs.u_l, sumcheck_out.actual_u_prime,
+            proof.fold_steps.last().unwrap().folded_lcccs.u_l,
+            sumcheck_out.actual_u_prime,
             "fold_loop 应将 folded LCCCS 的 u_l 更新为 actual_u_prime"
         );
     }
@@ -990,7 +1050,9 @@ mod tests {
         let z_c = vec![f(1), f(3), f(3), f(0)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -1009,7 +1071,10 @@ mod tests {
         .expect("fold_loop");
 
         // 线性 CCS: u_l = 0 = u_L + r·u_C = actual_u_prime
-        assert_eq!(proof.fold_steps.last().unwrap().folded_lcccs.u_l, Fr::zero());
+        assert_eq!(
+            proof.fold_steps.last().unwrap().folded_lcccs.u_l,
+            Fr::zero()
+        );
     }
 
     // ===== PCS opening 一致性 =====
@@ -1021,7 +1086,9 @@ mod tests {
         let z_c = vec![f(1), f(2), f(5), f(10)];
 
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
-        let ccccs = ccs.to_cccs(&z_c, vec![], stub_commitment()).expect("to_cccs");
+        let ccccs = ccs
+            .to_cccs(&z_c, vec![], stub_commitment())
+            .expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let pcs = make_ipa_pcs();
@@ -1040,8 +1107,16 @@ mod tests {
         .expect("fold_loop");
 
         // 手动构造 MultilinearPoly 并在 r_y 处求值，应 = z_at_point
-        let poly =
-            MultilinearPoly::from_evals(proof.fold_steps.last().unwrap().folded_lcccs.trace_l.clone()).expect("poly");
+        let poly = MultilinearPoly::from_evals(
+            proof
+                .fold_steps
+                .last()
+                .unwrap()
+                .folded_lcccs
+                .trace_l
+                .clone(),
+        )
+        .expect("poly");
         // 使用 IPA 的 open 重新打开，验证 eval 一致
         let mut t = Transcript::new();
         // 先吸收 sumcheck 数据以对齐 transcript
@@ -1091,10 +1166,10 @@ mod tests {
 
         // 手动计算 C' = C_L + r·C_C
         let mut fold_t = Transcript::new();
-        let fold_out =
-            fold_step::fold(&lcccs, &cmt_l, &ccccs, &mut fold_t).expect("fold_step");
+        let fold_out = fold_step::fold(&lcccs, &cmt_l, &ccccs, &mut fold_t).expect("fold_step");
         assert_eq!(
-            proof.fold_steps.last().unwrap().folded_witness_commitment.0, fold_out.folded_commitment.0,
+            proof.fold_steps.last().unwrap().folded_witness_commitment.0,
+            fold_out.folded_commitment.0,
             "fold_loop 的 witness_commitment 应 = fold_step 的 folded_commitment"
         );
     }

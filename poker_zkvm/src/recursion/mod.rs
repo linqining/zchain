@@ -26,10 +26,10 @@ pub mod r1cs_gadgets_bn254;
 
 use crate::error::ZkvmError;
 #[allow(deprecated)]
-use crate::fold::fold_loop::{verify_hypernova, HypernovaProof};
+use crate::fold::fold_loop::{HypernovaProof, verify_hypernova};
 use crate::pcs::ipa::IpaPcs;
-use crate::prover::groth16_compress::{groth16_compress, CompressedProof};
-use crate::prover::{serialize_proof, MAX_RECURSION_DEPTH, MAX_ZKVM_PROOF_SIZE};
+use crate::prover::groth16_compress::{CompressedProof, groth16_compress};
+use crate::prover::{MAX_RECURSION_DEPTH, MAX_ZKVM_PROOF_SIZE, serialize_proof};
 
 /// 曲线种类（交替递归用，spec L572/587）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,9 +125,7 @@ impl CycleFoldNode {
     pub fn leaf_count(&self) -> usize {
         match self {
             CycleFoldNode::Leaf { .. } => 1,
-            CycleFoldNode::Node { left, right, .. } => {
-                left.leaf_count() + right.leaf_count()
-            }
+            CycleFoldNode::Node { left, right, .. } => left.leaf_count() + right.leaf_count(),
         }
     }
 }
@@ -176,10 +174,7 @@ pub trait RecursiveVerifierCircuit {
 /// - `sub_proofs` 为空
 /// - 任一 sub-proof 验证失败
 /// - 递归深度超限（> [`MAX_RECURSION_DEPTH`] = 16）
-pub fn aggregate(
-    sub_proofs: &[HypernovaProof],
-    pcs: &IpaPcs,
-) -> Result<HypernovaProof, ZkvmError> {
+pub fn aggregate(sub_proofs: &[HypernovaProof], pcs: &IpaPcs) -> Result<HypernovaProof, ZkvmError> {
     let root = tree_aggregate(sub_proofs, MAX_RECURSION_DEPTH, pcs)?;
     Ok(root.proof().clone())
 }
@@ -343,7 +338,7 @@ mod tests {
     use crate::pcs::ipa::{IpaCommitment, IpaPcs};
     use crate::pcs::{MultilinearPoly, Pcs};
     use crate::prover::groth16_compress::groth16_compress_verify;
-    use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
+    use crate::transcript::{HYPERNOVA_FOLD_DOMAIN_TAG, Transcript};
 
     /// 辅助：构造 Fr。
     fn f(v: u32) -> Fr {
@@ -453,9 +448,7 @@ mod tests {
         for (i, proof) in sub_proofs.iter().enumerate() {
             #[allow(deprecated)]
             if !verify_hypernova(proof, pcs)? {
-                return Err(ZkvmError::Other(format!(
-                    "sub_proof[{i}] 原生验证失败"
-                )));
+                return Err(ZkvmError::Other(format!("sub_proof[{i}] 原生验证失败")));
             }
         }
         let leaves: Vec<CycleFoldNode> = sub_proofs
@@ -513,8 +506,8 @@ mod tests {
     fn test_tree_aggregate_k8() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 8);
-        let root = tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=8 聚合应成功");
+        let root =
+            tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=8 聚合应成功");
 
         // 根节点应有 8 个叶节点
         assert_eq!(root.leaf_count(), 8);
@@ -528,8 +521,8 @@ mod tests {
     fn test_tree_aggregate_k4() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 4);
-        let root = tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=4 聚合应成功");
+        let root =
+            tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=4 聚合应成功");
 
         assert_eq!(root.leaf_count(), 4);
         // 深度 = ceil(log2(4)) = 2
@@ -542,8 +535,8 @@ mod tests {
     fn test_tree_aggregate_k2() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 2);
-        let root = tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=2 聚合应成功");
+        let root =
+            tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=2 聚合应成功");
 
         assert_eq!(root.leaf_count(), 2);
         assert_eq!(root.depth(), 1);
@@ -555,8 +548,7 @@ mod tests {
     fn test_tree_aggregate_k1() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 1);
-        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=1 聚合应成功");
+        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=1 聚合应成功");
 
         // 单个 proof → 直接返回叶节点
         assert_eq!(root.leaf_count(), 1);
@@ -597,8 +589,8 @@ mod tests {
     fn test_aggregate_k8_returns_valid_proof() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 8);
-        let root = tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=8 聚合应成功");
+        let root =
+            tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=8 聚合应成功");
         let final_proof = root.proof().clone();
 
         // final proof 应可通过原生验证
@@ -691,8 +683,8 @@ mod tests {
         let pcs = make_ipa_pcs();
         // K=5（奇数）— 奇数节点应传递到下一层
         let proofs = make_k_proofs(&pcs, 5);
-        let root = tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=5 聚合应成功");
+        let root =
+            tree_aggregate_no_compress(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=5 聚合应成功");
         assert_eq!(root.leaf_count(), 5);
         // 深度 = ceil(log2(5)) = 3
         assert_eq!(root.depth(), 3);
@@ -727,11 +719,12 @@ mod tests {
     fn test_compressed_proof_in_internal_node() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 2);
-        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=2 聚合应成功");
+        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=2 聚合应成功");
 
         // 内部节点应有压缩 proof
-        let compressed = root.compressed_proof().expect("内部节点应有 compressed_proof");
+        let compressed = root
+            .compressed_proof()
+            .expect("内部节点应有 compressed_proof");
         match compressed {
             CompressedProof::Groth16(groth16) => {
                 assert_eq!(groth16.fold_step_count, 1, "fold_step_count 应 = 1");
@@ -749,24 +742,22 @@ mod tests {
     fn test_compressed_proof_matches_direct_call() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 2);
-        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=2 聚合应成功");
+        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=2 聚合应成功");
 
         // 直接调用 groth16_compress
         let direct = groth16_compress(root.proof()).expect("直接 groth16_compress 应成功");
 
         // 树中的 compressed_proof 应与直接调用结果一致（fold_step_count 相同）
-        let in_tree = root.compressed_proof().expect("内部节点应有 compressed_proof");
+        let in_tree = root
+            .compressed_proof()
+            .expect("内部节点应有 compressed_proof");
         match (&direct, in_tree) {
             (CompressedProof::Groth16(d), CompressedProof::Groth16(t)) => {
                 assert_eq!(
                     d.fold_step_count, t.fold_step_count,
                     "fold_step_count 应一致"
                 );
-                assert_eq!(
-                    d.public_inputs, t.public_inputs,
-                    "public_inputs 应一致"
-                );
+                assert_eq!(d.public_inputs, t.public_inputs, "public_inputs 应一致");
             }
             _ => panic!("Phase F 双方均应为 Groth16 变体"),
         }
@@ -777,8 +768,7 @@ mod tests {
     fn test_compressed_proof_all_internal_nodes_k8() {
         let pcs = make_ipa_pcs();
         let proofs = make_k_proofs(&pcs, 8);
-        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs)
-            .expect("K=8 聚合应成功");
+        let root = tree_aggregate(&proofs, MAX_RECURSION_DEPTH, &pcs).expect("K=8 聚合应成功");
 
         // 递归检查所有内部节点都有压缩 proof
         fn check_all_internal(node: &CycleFoldNode) {

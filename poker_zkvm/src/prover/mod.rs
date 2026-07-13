@@ -24,22 +24,22 @@ pub mod groth16_compress;
 pub mod spartan;
 
 use ark_serialize::CanonicalSerialize;
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
 use crate::ccs::Fr as ZkvmFr;
 use crate::compiler::elf_validator::validate_elf;
 use crate::constraints::compile_trace_to_ccs;
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
-use crate::fold::fold_loop::{fold_loop, HypernovaProof};
-use crate::isa::executor::{execute_elf_with_config, ZkvmExecutionConfig};
+use crate::fold::fold_loop::{HypernovaProof, fold_loop};
 use crate::isa::Instruction;
+use crate::isa::executor::{ZkvmExecutionConfig, execute_elf_with_config};
 use crate::pcs::ipa::{IpaPcs, MAX_N_VARS};
 use crate::pcs::{MultilinearPoly, Pcs};
 use crate::syscalls::StubHostState;
 use crate::trace::{Step, Trace};
-use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
+use crate::transcript::{HYPERNOVA_FOLD_DOMAIN_TAG, Transcript};
 
 /// 上链 proof 字节数上限（spec L692 — 64KB）。
 ///
@@ -216,9 +216,9 @@ fn read_length_prefixed(bytes: &[u8], pos: &mut usize) -> Result<Vec<u8>, ZkvmEr
 
 /// 读取 32B 域元素。
 fn read_field(bytes: &[u8], pos: &mut usize) -> Result<ZkvmFr, ZkvmError> {
-    let end = pos.checked_add(32).ok_or_else(|| {
-        ZkvmError::InvalidZkProofFormat("ZkPublicIo: field overflow".to_string())
-    })?;
+    let end = pos
+        .checked_add(32)
+        .ok_or_else(|| ZkvmError::InvalidZkProofFormat("ZkPublicIo: field overflow".to_string()))?;
     if end > bytes.len() {
         return Err(ZkvmError::InvalidZkProofFormat(
             "ZkPublicIo: field data too short".to_string(),
@@ -231,15 +231,20 @@ fn read_field(bytes: &[u8], pos: &mut usize) -> Result<ZkvmFr, ZkvmError> {
 
 /// 读取 4B LE u32。
 fn read_u32_le(bytes: &[u8], pos: &mut usize) -> Result<u32, ZkvmError> {
-    let end = pos.checked_add(4).ok_or_else(|| {
-        ZkvmError::InvalidZkProofFormat("ZkPublicIo: u32 overflow".to_string())
-    })?;
+    let end = pos
+        .checked_add(4)
+        .ok_or_else(|| ZkvmError::InvalidZkProofFormat("ZkPublicIo: u32 overflow".to_string()))?;
     if end > bytes.len() {
         return Err(ZkvmError::InvalidZkProofFormat(
             "ZkPublicIo: u32 data too short".to_string(),
         ));
     }
-    let val = u32::from_le_bytes([bytes[*pos], bytes[*pos + 1], bytes[*pos + 2], bytes[*pos + 3]]);
+    let val = u32::from_le_bytes([
+        bytes[*pos],
+        bytes[*pos + 1],
+        bytes[*pos + 2],
+        bytes[*pos + 3],
+    ]);
     *pos = end;
     Ok(val)
 }
@@ -455,7 +460,10 @@ pub fn serialize_proof(proof: &HypernovaProof) -> Result<Vec<u8>, ZkvmError> {
 }
 
 /// 反序列化 Lcccs（ccs_ref + u_l + x_l + trace_l + r_x_l + v_l），含维度校验。
-fn deserialize_lcccs(bytes: &[u8], pos: &mut usize) -> Result<crate::fold::lcccs::Lcccs, ZkvmError> {
+fn deserialize_lcccs(
+    bytes: &[u8],
+    pos: &mut usize,
+) -> Result<crate::fold::lcccs::Lcccs, ZkvmError> {
     let ccs_bytes = read_length_prefixed(bytes, pos)?;
     let ccs_ref = crate::ccs::Ccs::from_bytes(&ccs_bytes)?;
 
@@ -615,9 +623,9 @@ pub fn deserialize_proof(bytes: &[u8]) -> Result<HypernovaProof, ZkvmError> {
     // ccs_commitment + public_io_commitment（各 32B）
     let mut ccs_commitment = [0u8; 32];
     let mut public_io_commitment = [0u8; 32];
-    let end_ccs = pos.checked_add(32).ok_or_else(|| {
-        ZkvmError::InvalidZkProofFormat("ccs_commitment overflow".to_string())
-    })?;
+    let end_ccs = pos
+        .checked_add(32)
+        .ok_or_else(|| ZkvmError::InvalidZkProofFormat("ccs_commitment overflow".to_string()))?;
     if end_ccs > bytes.len() {
         return Err(ZkvmError::InvalidZkProofFormat(
             "ccs_commitment data too short".to_string(),
@@ -898,9 +906,7 @@ pub fn prove(
 #[allow(clippy::explicit_counter_loop)]
 fn pad_trace(trace: &mut Trace, batch_size: usize) -> Result<(), ZkvmError> {
     if batch_size == 0 {
-        return Err(ZkvmError::Other(
-            "pad_trace: batch_size 须 > 0".to_string(),
-        ));
+        return Err(ZkvmError::Other("pad_trace: batch_size 须 > 0".to_string()));
     }
     let len = trace.len();
     let remainder = len % batch_size;
@@ -956,11 +962,7 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
     // 构造最小 ELF32
     fn build_test_elf(entry: u32, text_vaddr: u32, text_bytes: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(84 + text_bytes.len());
-        bytes.extend_from_slice(&[
-            0x7f, b'E', b'L', b'F',
-            1, 1, 1, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        bytes.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         bytes.extend_from_slice(&2u16.to_le_bytes());
         bytes.extend_from_slice(&0xF3u16.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
@@ -997,13 +999,13 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
     let text = encode_text(&[
         // LUI a0, 1 — a0 = 0x1000 (text segment start, 32 bytes 可读)
         (1 << 12) | (10 << 7) | 0x37,
-        encode_i(0x13, 0, 11, 0, 32),  // ADDI a1, x0, 32 (output len = 32 bytes)
-        encode_i(0x13, 0, 17, 0, 2),   // ADDI a7, x0, 2 (commit_output)
-        0x00000073,                     // ECALL
-        encode_i(0x13, 0, 0, 0, 0),    // NOP (padding 使 text ≥ 32 bytes)
-        encode_i(0x13, 0, 0, 0, 0),    // NOP
-        encode_i(0x13, 0, 0, 0, 0),    // NOP
-        encode_i(0x13, 0, 0, 0, 0),    // NOP
+        encode_i(0x13, 0, 11, 0, 32), // ADDI a1, x0, 32 (output len = 32 bytes)
+        encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
+        0x00000073,                   // ECALL
+        encode_i(0x13, 0, 0, 0, 0),   // NOP (padding 使 text ≥ 32 bytes)
+        encode_i(0x13, 0, 0, 0, 0),   // NOP
+        encode_i(0x13, 0, 0, 0, 0),   // NOP
+        encode_i(0x13, 0, 0, 0, 0),   // NOP
     ]);
     let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -1034,11 +1036,7 @@ pub fn generate_single_instance_test_proof() -> (Vec<u8>, ZkPublicIo) {
 
     fn build_test_elf(entry: u32, text_vaddr: u32, text_bytes: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(84 + text_bytes.len());
-        bytes.extend_from_slice(&[
-            0x7f, b'E', b'L', b'F',
-            1, 1, 1, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        bytes.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         bytes.extend_from_slice(&2u16.to_le_bytes());
         bytes.extend_from_slice(&0xF3u16.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
@@ -1072,8 +1070,8 @@ pub fn generate_single_instance_test_proof() -> (Vec<u8>, ZkPublicIo) {
     }
 
     let text = encode_text(&[
-        encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-        0x00000073,                     // ECALL
+        encode_i(0x13, 0, 17, 0, 2), // ADDI a7, x0, 2 (commit_output)
+        0x00000073,                  // ECALL
     ]);
     let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -1094,8 +1092,7 @@ pub fn generate_single_instance_test_proof() -> (Vec<u8>, ZkPublicIo) {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn default_ccs_whitelist() -> Vec<[u8; 32]> {
     let (proof_bytes, _) = generate_test_proof();
-    let proof = deserialize_proof(&proof_bytes)
-        .expect("deserialize generate_test_proof 应成功");
+    let proof = deserialize_proof(&proof_bytes).expect("deserialize generate_test_proof 应成功");
     vec![proof.ccs_commitment]
 }
 
@@ -1296,11 +1293,7 @@ mod tests {
     /// 构造最小 ELF32（复制自 executor::tests，因该函数为私有）。
     fn build_test_elf(entry: u32, text_vaddr: u32, text_bytes: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(84 + text_bytes.len());
-        bytes.extend_from_slice(&[
-            0x7f, b'E', b'L', b'F',
-            1, 1, 1, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        bytes.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         bytes.extend_from_slice(&2u16.to_le_bytes());
         bytes.extend_from_slice(&0xF3u16.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
@@ -1354,11 +1347,11 @@ mod tests {
         // batch_size = 3 → padding 到 6 步 → 2 batches
         // 每批 3 步 → num_vars = 4 = 2^2, num_rows = 2 = 2^1
         let text = encode_text(&[
-            encode_i(0x13, 0, 1, 0, 0),   // ADDI x1, x0, 0 (NOP)
-            encode_i(0x13, 0, 1, 0, 0),   // ADDI x1, x0, 0 (NOP)
-            encode_i(0x13, 0, 1, 0, 0),   // ADDI x1, x0, 0 (NOP)
-            encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-            0x00000073,                    // ECALL
+            encode_i(0x13, 0, 1, 0, 0),  // ADDI x1, x0, 0 (NOP)
+            encode_i(0x13, 0, 1, 0, 0),  // ADDI x1, x0, 0 (NOP)
+            encode_i(0x13, 0, 1, 0, 0),  // ADDI x1, x0, 0 (NOP)
+            encode_i(0x13, 0, 17, 0, 2), // ADDI a7, x0, 2 (commit_output)
+            0x00000073,                  // ECALL
         ]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -1385,11 +1378,11 @@ mod tests {
     fn test_prove_returns_public_io_with_input() {
         // 构造 read_input + commit_output 程序
         let text = encode_text(&[
-            encode_i(0x13, 0, 17, 0, 1),  // ADDI a7, x0, 1 (read_input)
-            encode_i(0x13, 0, 11, 0, 3),  // ADDI a1, x0, 3 (len=3)
-            0x00000073,                    // ECALL (read_input)
-            encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-            0x00000073,                    // ECALL (commit_output)
+            encode_i(0x13, 0, 17, 0, 1), // ADDI a7, x0, 1 (read_input)
+            encode_i(0x13, 0, 11, 0, 3), // ADDI a1, x0, 3 (len=3)
+            0x00000073,                  // ECALL (read_input)
+            encode_i(0x13, 0, 17, 0, 2), // ADDI a7, x0, 2 (commit_output)
+            0x00000073,                  // ECALL (commit_output)
         ]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -1419,12 +1412,12 @@ mod tests {
         // 6 步 → padding 到 8 → 2 batches (8/4=2)
         // Stage 1.1 padding 使 num_vars 始终为 2 的幂，prove 应成功
         let text = encode_text(&[
-            encode_i(0x13, 0, 1, 0, 0),   // NOP
-            encode_i(0x13, 0, 1, 0, 0),   // NOP
-            encode_i(0x13, 0, 1, 0, 0),   // NOP
-            encode_i(0x13, 0, 1, 0, 0),   // NOP
-            encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-            0x00000073,                    // ECALL
+            encode_i(0x13, 0, 1, 0, 0),  // NOP
+            encode_i(0x13, 0, 1, 0, 0),  // NOP
+            encode_i(0x13, 0, 1, 0, 0),  // NOP
+            encode_i(0x13, 0, 1, 0, 0),  // NOP
+            encode_i(0x13, 0, 17, 0, 2), // ADDI a7, x0, 2 (commit_output)
+            0x00000073,                  // ECALL
         ]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -1434,8 +1427,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (proof_bytes, _public_io) = prove(&elf, &[], &config)
-            .expect("padding 应使 batch_size=4 可用");
+        let (proof_bytes, _public_io) =
+            prove(&elf, &[], &config).expect("padding 应使 batch_size=4 可用");
         assert!(!proof_bytes.is_empty());
     }
 
@@ -1445,8 +1438,8 @@ mod tests {
         // padding 到 3 步 → 1 batch → 1 实例 → 单实例 proof 路径
         // Stage 1.2 单实例路径应成功
         let text = encode_text(&[
-            encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2
-            0x00000073,                    // ECALL
+            encode_i(0x13, 0, 17, 0, 2), // ADDI a7, x0, 2
+            0x00000073,                  // ECALL
         ]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -1456,8 +1449,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (proof_bytes, _public_io) = prove(&elf, &[], &config)
-            .expect("单实例 proof 应成功");
+        let (proof_bytes, _public_io) = prove(&elf, &[], &config).expect("单实例 proof 应成功");
         assert!(!proof_bytes.is_empty());
     }
 

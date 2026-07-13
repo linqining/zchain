@@ -10,7 +10,7 @@
 mod common;
 
 use common::build_poker_hand_eval_elf;
-use poker_zkvm::prover::{default_ccs_whitelist, prove, MAX_PROOF_TOTAL_SIZE, ProverConfig};
+use poker_zkvm::prover::{MAX_PROOF_TOTAL_SIZE, ProverConfig, default_ccs_whitelist, prove};
 use poker_zkvm::verifier::verify_production;
 
 /// 构造扑克牌型评估 prove 配置。
@@ -42,16 +42,8 @@ fn run_poker_hand_eval_e2e(cards: &[u8; 5]) {
     assert!(ok, "verify_production 应返回 true");
 
     // 3. 输出正确性
-    assert_eq!(
-        public_io.output.len(),
-        4,
-        "输出应为 4 字节（u32）"
-    );
-    let got = u32::from_le_bytes(
-        public_io.output[..4]
-            .try_into()
-            .expect("输出至少 4 字节"),
-    );
+    assert_eq!(public_io.output.len(), 4, "输出应为 4 字节（u32）");
+    let got = u32::from_le_bytes(public_io.output[..4].try_into().expect("输出至少 4 字节"));
     // 由于 LB 符号扩展，面值 1-13（< 128）保持不变
     let expected: u32 = cards.iter().map(|&c| c as u32).sum();
     assert_eq!(

@@ -8,8 +8,8 @@
 //! - canonical 编码：域元素 32 bytes LE
 //! - 域分离常量：FOLD=0x10 / SUMCHECK=0x11 / LOOKUP=0x12 / MEM_CHECK=0x13 / PCS_OPEN=0x14
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
 use crate::error::ZkvmError;
 use crate::field::{Bn254ScalarField, ZkvmField};
@@ -70,8 +70,7 @@ impl Transcript {
     /// 创建新 transcript（初始状态为空）。
     pub fn new() -> Self {
         Self {
-            state: Blake2bVar::new(TRANSCRIPT_OUTPUT_SIZE)
-                .expect("Blake2bVar(32) 初始化不应失败"),
+            state: Blake2bVar::new(TRANSCRIPT_OUTPUT_SIZE).expect("Blake2bVar(32) 初始化不应失败"),
             counter: 0,
         }
     }
@@ -231,10 +230,7 @@ mod tests {
         t2.absorb(SUMCHECK_DOMAIN_TAG, b"bc");
         let c2 = t2.challenge(SUMCHECK_DOMAIN_TAG);
 
-        assert_ne!(
-            c1, c2,
-            "length-prefix 应使 \"ab\"+\"c\" ≠ \"a\"+\"bc\""
-        );
+        assert_ne!(c1, c2, "length-prefix 应使 \"ab\"+\"c\" ≠ \"a\"+\"bc\"");
     }
 
     /// 空字节 + 非空 vs 非空 + 空字节 也应不同。
@@ -450,7 +446,10 @@ mod tests {
         // 所有的 challenge 应不同
         for i in 0..5 {
             for j in (i + 1)..5 {
-                assert_ne!(challenges[i], challenges[j], "challenge[{i}] != challenge[{j}]");
+                assert_ne!(
+                    challenges[i], challenges[j],
+                    "challenge[{i}] != challenge[{j}]"
+                );
             }
         }
     }
@@ -501,7 +500,10 @@ mod tests {
         let f = bytes_to_field(&bytes).expect("全零 bytes 应转为 zero");
         assert!(f.is_zero());
 
-        let bytes = [1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let bytes = [
+            1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+        ];
         let f = bytes_to_field(&bytes).expect("应成功");
         assert_eq!(f, Bn254ScalarField::one());
     }

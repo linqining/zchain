@@ -96,7 +96,15 @@ impl MemAccess {
         let op = MemOp::from_byte(bytes[4])?;
         let value = u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
         let size = bytes[9];
-        Ok((MemAccess { addr, op, value, size }, 10))
+        Ok((
+            MemAccess {
+                addr,
+                op,
+                value,
+                size,
+            },
+            10,
+        ))
     }
 }
 
@@ -280,12 +288,12 @@ impl Trace {
 
         // 第 1 步：总大小估算 + 早夭
         let step_estimate = 160usize; // 每步估算上限
-        let total_estimate = (num_steps as usize)
-            .checked_mul(step_estimate)
-            .ok_or(ZkvmError::TraceHostMemoryExceeded {
+        let total_estimate = (num_steps as usize).checked_mul(step_estimate).ok_or(
+            ZkvmError::TraceHostMemoryExceeded {
                 actual: usize::MAX,
                 limit: MAX_TRACE_HOST_MEMORY,
-            })?;
+            },
+        )?;
         if total_estimate > MAX_TRACE_HOST_MEMORY {
             return Err(ZkvmError::TraceHostMemoryExceeded {
                 actual: total_estimate,
@@ -831,7 +839,11 @@ mod tests {
         trace.push_step(Step {
             step_index: 0,
             pc: 0x1000,
-            instruction: Instruction::Addi { rd: 1, rs1: 0, imm: 42 },
+            instruction: Instruction::Addi {
+                rd: 1,
+                rs1: 0,
+                imm: 42,
+            },
             registers: {
                 let mut r = [0u32; 32];
                 r[1] = 42;
@@ -850,11 +862,25 @@ mod tests {
         trace.push_step(Step {
             step_index: 5,
             pc: 0x2000,
-            instruction: Instruction::Sw { rs1: 1, rs2: 2, imm: 0x10 },
+            instruction: Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0x10,
+            },
             registers: [0u32; 32],
             mem_access: vec![
-                MemAccess { addr: 0x2010, op: MemOp::Write, value: 0xABCD, size: 4 },
-                MemAccess { addr: 0x2014, op: MemOp::Read, value: 0x1234, size: 2 },
+                MemAccess {
+                    addr: 0x2010,
+                    op: MemOp::Write,
+                    value: 0xABCD,
+                    size: 4,
+                },
+                MemAccess {
+                    addr: 0x2014,
+                    op: MemOp::Read,
+                    value: 0x1234,
+                    size: 2,
+                },
             ],
         });
         let bytes = trace.serialize();
@@ -869,7 +895,11 @@ mod tests {
             trace.push_step(Step {
                 step_index: i,
                 pc: (i * 4) as u32,
-                instruction: Instruction::Add { rd: i as u8 % 31 + 1, rs1: 0, rs2: 0 },
+                instruction: Instruction::Add {
+                    rd: i as u8 % 31 + 1,
+                    rs1: 0,
+                    rs2: 0,
+                },
                 registers: [0; 32],
                 mem_access: vec![],
             });
@@ -920,20 +950,32 @@ mod tests {
         let usage = trace.host_memory_usage();
         // 每步至少 8+4+1+16+128+4 = 161 bytes
         assert!(usage >= 161, "usage should be >= 161, got {usage}");
-        assert!(usage < 1024, "single step no mem should be < 1KB, got {usage}");
+        assert!(
+            usage < 1024,
+            "single step no mem should be < 1KB, got {usage}"
+        );
     }
 
     #[test]
     fn test_step_from_log() {
         let log = StepLog {
             pc: 0x1000,
-            instruction: Instruction::Add { rd: 1, rs1: 2, rs2: 3 },
+            instruction: Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
             registers: {
                 let mut r = [0u32; 32];
                 r[1] = 42;
                 r
             },
-            mem_access: vec![MemAccess { addr: 0x200, op: MemOp::Write, value: 0xAB, size: 1 }],
+            mem_access: vec![MemAccess {
+                addr: 0x200,
+                op: MemOp::Write,
+                value: 0xAB,
+                size: 1,
+            }],
         };
         let step = Step::from_log(7, log);
         assert_eq!(step.step_index, 7);

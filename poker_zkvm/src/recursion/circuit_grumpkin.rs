@@ -129,7 +129,7 @@ mod tests {
     use crate::ccs::{Ccs, Fr, SparseMatrix};
     use crate::cyclic::CycleCurve;
     use crate::field::ZkvmField;
-    use crate::fold::fold_loop::{fold_loop, HypernovaProof};
+    use crate::fold::fold_loop::{HypernovaProof, fold_loop};
     use crate::pcs::ipa::{IpaCommitment, IpaPcs};
     use crate::pcs::{MultilinearPoly, Pcs};
     use crate::prover::serialize_proof;
@@ -183,8 +183,18 @@ mod tests {
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
         let ccccs = ccs.to_cccs(&z_c, vec![], cmt_c).expect("to_cccs");
         let mut transcript = Transcript::new();
-        fold_loop(&ccs, lcccs, cmt_l, &[ccccs], pcs, &mut transcript, ccs.ccs_commitment(), [0u8; 32], vec![vec![]])
-            .expect("fold_loop 应成功")
+        fold_loop(
+            &ccs,
+            lcccs,
+            cmt_l,
+            &[ccccs],
+            pcs,
+            &mut transcript,
+            ccs.ccs_commitment(),
+            [0u8; 32],
+            vec![vec![]],
+        )
+        .expect("fold_loop 应成功")
     }
 
     // ===== SubTask 9.4.1: CircuitGrumpkin 结构 =====
@@ -192,10 +202,7 @@ mod tests {
     #[test]
     fn test_circuit_grumpkin_curve_kind() {
         assert_eq!(CircuitGrumpkin::curve_kind(), CurveKind::Grumpkin);
-        assert_eq!(
-            CircuitGrumpkin::sub_proof_curve_kind(),
-            CurveKind::Bn254
-        );
+        assert_eq!(CircuitGrumpkin::sub_proof_curve_kind(), CurveKind::Bn254);
     }
 
     #[test]
@@ -227,10 +234,7 @@ mod tests {
         // C_Grumpkin 与 C_BN254 约束数应相同（对称结构）
         let count_bn = CircuitBn254::constraint_count(65536, 3);
         let count_gr = CircuitGrumpkin::constraint_count(65536, 3);
-        assert_eq!(
-            count_bn, count_gr,
-            "C_BN254 与 C_Grumpkin 约束数应对称相等"
-        );
+        assert_eq!(count_bn, count_gr, "C_BN254 与 C_Grumpkin 约束数应对称相等");
     }
 
     // ===== SubTask 9.4.3: 跨曲线 bridging 文档验证 =====

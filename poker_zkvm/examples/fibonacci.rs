@@ -60,10 +60,7 @@ fn fibonacci_expected(n: u32) -> u32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let n: u32 = args
-        .get(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
+    let n: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(100);
 
     let result = fibonacci_expected(n);
     println!("=== Fibonacci ZKVM 示例 ===");

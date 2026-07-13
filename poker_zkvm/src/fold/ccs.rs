@@ -17,14 +17,14 @@
 //! - **ccs_commitment**：Blake2b 串联 hash（非 Merkle root），因矩阵数量少（t ≤ 10），
 //!   串联 hash 足够防碰撞且实现简单
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
 use crate::ccs::{Ccs, Fr};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
 use crate::fold::ccccs::Ccccs;
-use crate::fold::lcccs::{eq_eval, Lcccs};
+use crate::fold::lcccs::{Lcccs, eq_eval};
 use crate::pcs::ipa::IpaCommitment;
 
 /// CCS 承诺域分离标签。
@@ -59,12 +59,7 @@ impl Ccs {
     /// 这是因为 CCS 约束 `Σ_i c_i · Π ⟨M_j, z⟩ = 0` 逐行成立，
     /// 而 `v_l[j] = Σ_r eq(r_x_l, r) · (M_j · z)[r]` 是 `M_j · z` 在 r_x_l 处的多线性扩展求值，
     /// relaxed 约束 `Σ_i c_i · Π v_l[j]` 是 CCS 约束的多线性扩展在 r_x_l 处的求值。
-    pub fn to_lcccs(
-        &self,
-        z: &[Fr],
-        r_x_l: &[Fr],
-        x_l: Vec<Fr>,
-    ) -> Result<Lcccs, ZkvmError> {
+    pub fn to_lcccs(&self, z: &[Fr], r_x_l: &[Fr], x_l: Vec<Fr>) -> Result<Lcccs, ZkvmError> {
         if z.len() != self.num_vars {
             return Err(ZkvmError::Other(format!(
                 "to_lcccs: z.len() {} != num_vars {}",
@@ -284,9 +279,7 @@ mod tests {
         let ccs = make_mul_ccs();
         let z = vec![f(1), f(3), f(4), f(12)]; // x=3, y=4, z_val=12
 
-        let lcccs = ccs
-            .to_lcccs(&z, &[], vec![])
-            .expect("to_lcccs 应成功");
+        let lcccs = ccs.to_lcccs(&z, &[], vec![]).expect("to_lcccs 应成功");
 
         // u_l = 0（satisfied CCS）
         assert_eq!(lcccs.u_l, Fr::zero());
@@ -305,9 +298,7 @@ mod tests {
         let ccs = make_multi_row_ccs();
         let z = vec![f(1), f(3), f(4), f(7), f(12)]; // x=3, y=4, z_val=7, w_val=12
 
-        let lcccs = ccs
-            .to_lcccs(&z, &[f(0)], vec![])
-            .expect("to_lcccs 应成功");
+        let lcccs = ccs.to_lcccs(&z, &[f(0)], vec![]).expect("to_lcccs 应成功");
 
         // 在 row 0 处: v_l = [3, 4, 7, 0, 0, 0]
         // 约束 = 3 + 4 - 7 + 0*0 - 0 = 0
@@ -315,9 +306,7 @@ mod tests {
         assert!(lcccs.satisfied().unwrap());
 
         // 在 row 1 处: r_x_l = [1]
-        let lcccs2 = ccs
-            .to_lcccs(&z, &[f(1)], vec![])
-            .expect("to_lcccs 应成功");
+        let lcccs2 = ccs.to_lcccs(&z, &[f(1)], vec![]).expect("to_lcccs 应成功");
 
         // v_l = [0, 0, 0, 3, 4, 12]
         // 约束 = 0 + 0 - 0 + 3*4 - 12 = 0
@@ -338,9 +327,7 @@ mod tests {
         let ccs = make_mul_ccs();
         let z = vec![f(1), f(3), f(4), f(13)];
 
-        let lcccs = ccs
-            .to_lcccs(&z, &[], vec![])
-            .expect("to_lcccs 应成功");
+        let lcccs = ccs.to_lcccs(&z, &[], vec![]).expect("to_lcccs 应成功");
 
         // u_l = -1（relaxed 约束结果）
         assert_eq!(lcccs.u_l, neg_f(1));

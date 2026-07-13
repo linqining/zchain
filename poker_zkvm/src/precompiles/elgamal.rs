@@ -23,7 +23,7 @@
 #![allow(dead_code)]
 
 use ark_bn254::{Fq, Fr, G1Affine, G1Projective};
-use ark_ec::{CurveGroup, PrimeGroup};
+use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField, Zero};
 use ark_std::UniformRand;
 
@@ -52,6 +52,16 @@ pub struct ElGamalCiphertext {
     pub c: G1Affine,
     /// 密文第二分量 `d = m · pk^r`。
     pub d: G1Affine,
+}
+
+impl ElGamalCiphertext {
+    /// 校验密文有效性：c 和 d 均非 identity 点。
+    ///
+    /// 兼容 poker_protocol `ElGamalCiphertextGeneric::is_valid()`，
+    /// 用于 RemaskProof/LeaveProof verify 时校验输入/输出密文。
+    pub fn is_valid(&self) -> bool {
+        !self.c.is_zero() && !self.d.is_zero()
+    }
 }
 
 // ===== Host-side 运算 =====

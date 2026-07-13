@@ -47,7 +47,7 @@ use crate::field::ZkvmField;
 use crate::fold::ccccs::Ccccs;
 use crate::fold::lcccs::Lcccs;
 use crate::pcs::ipa::IpaCommitment;
-use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
+use crate::transcript::{HYPERNOVA_FOLD_DOMAIN_TAG, Transcript};
 
 /// 将 G1Affine 点序列化为 compressed bytes（用于 transcript absorb）。
 fn point_to_bytes(p: &G1Affine) -> Vec<u8> {
@@ -259,7 +259,9 @@ mod tests {
 
     /// 构造不同的 stub commitment（用于测试 commitment 绑定）。
     fn stub_commitment_2() -> IpaCommitment {
-        IpaCommitment((G1Affine::generator().into_group() * ark_bn254::Fr::from(2u64)).into_affine())
+        IpaCommitment(
+            (G1Affine::generator().into_group() * ark_bn254::Fr::from(2u64)).into_affine(),
+        )
     }
 
     /// 构造线性 CCS（所有 |S_i| = 1）— 约束：x - y = 0
@@ -347,7 +349,8 @@ mod tests {
             .expect("to_cccs");
 
         let mut transcript = Transcript::new();
-        let output = fold(&lcccs, &stub_commitment(), &ccccs, &mut transcript).expect("fold 应成功");
+        let output =
+            fold(&lcccs, &stub_commitment(), &ccccs, &mut transcript).expect("fold 应成功");
 
         // 线性 CCS: u' = u_L + r·u_C = 0 + r·0 = 0
         assert_eq!(output.folded_lcccs.u_l, Fr::zero());
@@ -424,9 +427,7 @@ mod tests {
         let lcccs = ccs.to_lcccs(&z_l, &[], vec![]).expect("to_lcccs");
         let cmt_l = stub_commitment();
         let cmt_c = stub_commitment_2();
-        let ccccs = ccs
-            .to_cccs(&z_c, vec![], cmt_c.clone())
-            .expect("to_cccs");
+        let ccccs = ccs.to_cccs(&z_c, vec![], cmt_c.clone()).expect("to_cccs");
 
         let mut transcript = Transcript::new();
         let output = fold(&lcccs, &cmt_l, &ccccs, &mut transcript).expect("fold");
@@ -683,15 +684,8 @@ mod tests {
         // 构造 v_l 被篡改的 LCCCS
         let mut tampered_v = lcccs1.v_l.clone();
         tampered_v[0] = f(99);
-        let lcccs2 = Lcccs::new(
-            ccs.clone(),
-            lcccs1.u_l,
-            vec![],
-            z_l,
-            vec![],
-            tampered_v,
-        )
-        .expect("Lcccs 构造");
+        let lcccs2 = Lcccs::new(ccs.clone(), lcccs1.u_l, vec![], z_l, vec![], tampered_v)
+            .expect("Lcccs 构造");
 
         let z_c = vec![f(1), f(3), f(3)];
         let ccccs = ccs
@@ -738,13 +732,8 @@ mod tests {
             .expect("to_cccs");
 
         let mut transcript = Transcript::new();
-        let output = fold(
-            &lcccs_tampered,
-            &stub_commitment(),
-            &ccccs,
-            &mut transcript,
-        )
-        .expect("fold");
+        let output =
+            fold(&lcccs_tampered, &stub_commitment(), &ccccs, &mut transcript).expect("fold");
 
         // u' = 99 + r·0 = 99 ≠ 0（代数约束结果）
         assert_eq!(output.folded_lcccs.u_l, f(99));
@@ -807,8 +796,12 @@ mod tests {
         let z3 = vec![f(1), f(7), f(7)];
 
         let lcccs1 = ccs.to_lcccs(&z1, &[], vec![]).expect("to_lcccs 1");
-        let ccccs2 = ccs.to_cccs(&z2, vec![], stub_commitment()).expect("to_cccs 2");
-        let ccccs3 = ccs.to_cccs(&z3, vec![], stub_commitment()).expect("to_cccs 3");
+        let ccccs2 = ccs
+            .to_cccs(&z2, vec![], stub_commitment())
+            .expect("to_cccs 2");
+        let ccccs3 = ccs
+            .to_cccs(&z3, vec![], stub_commitment())
+            .expect("to_cccs 3");
 
         // 第一步：fold(lcccs1, ccccs2)
         let mut transcript = Transcript::new();

@@ -5,7 +5,11 @@
 //! 拒绝动态链接，强制 RV32I 指令子集。
 
 use crate::error::ZkvmError;
-use goblin::elf::{Elf, header::EM_RISCV, program_header::{PT_LOAD, PT_DYNAMIC, PF_X}};
+use goblin::elf::{
+    Elf,
+    header::EM_RISCV,
+    program_header::{PF_X, PT_DYNAMIC, PT_LOAD},
+};
 
 /// ZKVM 最大可用内存（spec L164）。
 pub const MAX_ZKVM_MEMORY: usize = 16 * 1024 * 1024; // 16MB
@@ -59,9 +63,8 @@ pub struct ElfMetadata {
 /// 11. RV32I 指令子集校验
 pub fn validate_elf(elf_bytes: &[u8]) -> Result<ElfMetadata, ZkvmError> {
     // 校验 1：ELF 解析
-    let elf = Elf::parse(elf_bytes).map_err(|e| {
-        ZkvmError::Other(format!("ELF parse error: {e}"))
-    })?;
+    let elf =
+        Elf::parse(elf_bytes).map_err(|e| ZkvmError::Other(format!("ELF parse error: {e}")))?;
 
     // 校验 2：Header — class / endian / machine
     check_header(&elf)?;
@@ -125,12 +128,12 @@ fn check_section_table_overflow(elf: &Elf, bytes_len: usize) -> Result<(), ZkvmE
     if shnum == 0 {
         return Ok(());
     }
-    let table_size = shnum
-        .checked_mul(shentsize)
-        .ok_or_else(|| ZkvmError::Other("section header table overflow: e_shnum * e_shentsize".to_string()))?;
-    let table_end = shoff
-        .checked_add(table_size)
-        .ok_or_else(|| ZkvmError::Other("section header table overflow: e_shoff + size".to_string()))?;
+    let table_size = shnum.checked_mul(shentsize).ok_or_else(|| {
+        ZkvmError::Other("section header table overflow: e_shnum * e_shentsize".to_string())
+    })?;
+    let table_end = shoff.checked_add(table_size).ok_or_else(|| {
+        ZkvmError::Other("section header table overflow: e_shoff + size".to_string())
+    })?;
     if table_end > bytes_len {
         return Err(ZkvmError::Other(format!(
             "section header table exceeds file: end=0x{table_end:x} > file_len=0x{bytes_len:x}"
@@ -165,10 +168,7 @@ fn check_no_dt_needed(elf: &Elf) -> Result<(), ZkvmError> {
 /// 校验所有 PT_LOAD 段并提取 `LoadedSegment`。
 ///
 /// 执行：地址范围 checked_add（防 wrap）、段数据拷贝、总内存累加。
-fn check_and_extract_segments(
-    elf: &Elf,
-    bytes: &[u8],
-) -> Result<Vec<LoadedSegment>, ZkvmError> {
+fn check_and_extract_segments(elf: &Elf, bytes: &[u8]) -> Result<Vec<LoadedSegment>, ZkvmError> {
     let mut segments: Vec<LoadedSegment> = Vec::new();
     let mut total_memory: u64 = 0;
 
@@ -183,13 +183,11 @@ fn check_and_extract_segments(
         let flags = ph.p_flags;
 
         // 校验 6：地址范围 checked_add（防 wrap 攻击）
-        let end = vaddr
-            .checked_add(memsz)
-            .ok_or_else(|| {
-                ZkvmError::Other(format!(
-                    "segment address wrap: vaddr=0x{vaddr:08x} + memsz=0x{memsz:08x} overflows u32"
-                ))
-            })?;
+        let end = vaddr.checked_add(memsz).ok_or_else(|| {
+            ZkvmError::Other(format!(
+                "segment address wrap: vaddr=0x{vaddr:08x} + memsz=0x{memsz:08x} overflows u32"
+            ))
+        })?;
         if end as usize > MAX_ZKVM_MEMORY {
             return Err(ZkvmError::Other(format!(
                 "segment out of range: end=0x{end:08x} > MAX_ZKVM_MEMORY=0x{MAX_ZKVM_MEMORY:x}"
@@ -197,13 +195,11 @@ fn check_and_extract_segments(
         }
 
         // 校验文件数据范围
-        let data_end = offset
-            .checked_add(filesz)
-            .ok_or_else(|| {
-                ZkvmError::Other(format!(
-                    "file offset wrap: offset=0x{offset:x} + filesz=0x{filesz:x} overflows usize"
-                ))
-            })?;
+        let data_end = offset.checked_add(filesz).ok_or_else(|| {
+            ZkvmError::Other(format!(
+                "file offset wrap: offset=0x{offset:x} + filesz=0x{filesz:x} overflows usize"
+            ))
+        })?;
         if data_end > bytes.len() {
             return Err(ZkvmError::Other(format!(
                 "segment data exceeds file: offset=0x{offset:x} + filesz=0x{filesz:x} > file_len=0x{}",
@@ -215,9 +211,9 @@ fn check_and_extract_segments(
         let data = bytes[offset..data_end].to_vec();
 
         // 累加总内存（校验 8，使用 checked_add）
-        total_memory = total_memory
-            .checked_add(memsz as u64)
-            .ok_or_else(|| ZkvmError::Other("total memory overflow during accumulation".to_string()))?;
+        total_memory = total_memory.checked_add(memsz as u64).ok_or_else(|| {
+            ZkvmError::Other("total memory overflow during accumulation".to_string())
+        })?;
 
         segments.push(LoadedSegment {
             vaddr,
@@ -252,7 +248,8 @@ fn check_no_overlap(segments: &[LoadedSegment]) -> Result<(), ZkvmError> {
         if prev_end > sorted[i].vaddr {
             return Err(ZkvmError::Other(format!(
                 "overlapping segments: [0x{:08x}, 0x{prev_end:08x}) vs [0x{:08x}, ...)",
-                sorted[i - 1].vaddr, sorted[i].vaddr
+                sorted[i - 1].vaddr,
+                sorted[i].vaddr
             )));
         }
     }
@@ -391,30 +388,18 @@ mod tests {
             0,    // EI_OSABI = ELFOSABI_NONE
             0, 0, 0, 0, 0, 0, 0, 0, // padding (8 bytes)
             // --- e_type (2) = ET_EXEC ---
-            2, 0,
-            // --- e_machine (2) = EM_RISCV (243) ---
-            0xf3, 0,
-            // --- e_version (4) = 1 ---
-            1, 0, 0, 0,
-            // --- e_entry (4) = 0x1000 ---
-            0x00, 0x10, 0x00, 0x00,
-            // --- e_phoff (4) = 52 ---
-            0x34, 0x00, 0x00, 0x00,
-            // --- e_shoff (4) = 0 ---
-            0x00, 0x00, 0x00, 0x00,
-            // --- e_flags (4) = 0 ---
-            0x00, 0x00, 0x00, 0x00,
-            // --- e_ehsize (2) = 52 ---
-            0x34, 0x00,
-            // --- e_phentsize (2) = 32 ---
-            0x20, 0x00,
-            // --- e_phnum (2) = 1 ---
-            0x01, 0x00,
-            // --- e_shentsize (2) = 40 ---
-            0x28, 0x00,
-            // --- e_shnum (2) = 0 ---
-            0x00, 0x00,
-            // --- e_shstrndx (2) = 0 ---
+            2, 0, // --- e_machine (2) = EM_RISCV (243) ---
+            0xf3, 0, // --- e_version (4) = 1 ---
+            1, 0, 0, 0, // --- e_entry (4) = 0x1000 ---
+            0x00, 0x10, 0x00, 0x00, // --- e_phoff (4) = 52 ---
+            0x34, 0x00, 0x00, 0x00, // --- e_shoff (4) = 0 ---
+            0x00, 0x00, 0x00, 0x00, // --- e_flags (4) = 0 ---
+            0x00, 0x00, 0x00, 0x00, // --- e_ehsize (2) = 52 ---
+            0x34, 0x00, // --- e_phentsize (2) = 32 ---
+            0x20, 0x00, // --- e_phnum (2) = 1 ---
+            0x01, 0x00, // --- e_shentsize (2) = 40 ---
+            0x28, 0x00, // --- e_shnum (2) = 0 ---
+            0x00, 0x00, // --- e_shstrndx (2) = 0 ---
             0x00, 0x00,
         ];
         assert_eq!(bytes.len(), 52, "ELF header should be 52 bytes");
@@ -528,20 +513,20 @@ mod tests {
     fn build_elf_with_dt_needed() -> Vec<u8> {
         let mut bytes = vec![
             // --- ELF header (52 bytes) ---
-            0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            2, 0,                          // e_type = ET_EXEC
-            0xf3, 0,                       // e_machine = EM_RISCV
-            1, 0, 0, 0,                    // e_version
-            0x00, 0x10, 0x00, 0x00,        // e_entry = 0x1000
-            0x34, 0x00, 0x00, 0x00,        // e_phoff = 52
-            0x00, 0x00, 0x00, 0x00,        // e_shoff = 0
-            0x00, 0x00, 0x00, 0x00,        // e_flags
-            0x34, 0x00,                    // e_ehsize = 52
-            0x20, 0x00,                    // e_phentsize = 32
-            0x02, 0x00,                    // e_phnum = 2
-            0x28, 0x00,                    // e_shentsize = 40
-            0x00, 0x00,                    // e_shnum = 0
-            0x00, 0x00,                    // e_shstrndx = 0
+            0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+            0, // e_type = ET_EXEC
+            0xf3, 0, // e_machine = EM_RISCV
+            1, 0, 0, 0, // e_version
+            0x00, 0x10, 0x00, 0x00, // e_entry = 0x1000
+            0x34, 0x00, 0x00, 0x00, // e_phoff = 52
+            0x00, 0x00, 0x00, 0x00, // e_shoff = 0
+            0x00, 0x00, 0x00, 0x00, // e_flags
+            0x34, 0x00, // e_ehsize = 52
+            0x20, 0x00, // e_phentsize = 32
+            0x02, 0x00, // e_phnum = 2
+            0x28, 0x00, // e_shentsize = 40
+            0x00, 0x00, // e_shnum = 0
+            0x00, 0x00, // e_shstrndx = 0
         ];
         // PH1 — PT_LOAD: .text(8) + pad(4) + strtab(12) = 24 bytes at vaddr 0x1000
         bytes.extend(&[
@@ -654,7 +639,9 @@ mod tests {
         mutate_seg_vaddr(&mut bytes, MAX_ZKVM_MEMORY as u32);
         let err = validate_elf(&bytes).unwrap_err();
         match err {
-            ZkvmError::Other(msg) => assert!(msg.contains("range") || msg.contains("MAX_ZKVM_MEMORY")),
+            ZkvmError::Other(msg) => {
+                assert!(msg.contains("range") || msg.contains("MAX_ZKVM_MEMORY"))
+            }
             other => panic!("expected Other, got {other:?}"),
         }
     }
@@ -725,7 +712,10 @@ mod tests {
         let err = validate_elf(&bytes).unwrap_err();
         match err {
             ZkvmError::Other(msg) => {
-                assert!(msg.contains("text") || msg.contains("MAX_TEXT_SIZE"), "got: {msg}");
+                assert!(
+                    msg.contains("text") || msg.contains("MAX_TEXT_SIZE"),
+                    "got: {msg}"
+                );
             }
             other => panic!("expected Other, got {other:?}"),
         }
@@ -819,7 +809,13 @@ mod tests {
         assert_eq!(seg.data.len(), 8);
         assert!(seg.flags & PF_X != 0, "segment should be executable");
         // Verify .text data is LUI + ECALL
-        assert_eq!(u32::from_le_bytes([seg.data[0], seg.data[1], seg.data[2], seg.data[3]]), 0x000000b7);
-        assert_eq!(u32::from_le_bytes([seg.data[4], seg.data[5], seg.data[6], seg.data[7]]), 0x00000073);
+        assert_eq!(
+            u32::from_le_bytes([seg.data[0], seg.data[1], seg.data[2], seg.data[3]]),
+            0x000000b7
+        );
+        assert_eq!(
+            u32::from_le_bytes([seg.data[4], seg.data[5], seg.data[6], seg.data[7]]),
+            0x00000073
+        );
     }
 }

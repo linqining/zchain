@@ -187,7 +187,7 @@ mod tests {
         let ccccs = Ccccs::new(
             ccs.clone(),
             Fr::zero(),
-            vec![], // x_c
+            vec![],                        // x_c
             vec![f(1), f(3), f(4), f(12)], // trace_c = z
             stub_commitment(),
         )
@@ -397,7 +397,7 @@ mod tests {
         // （x_c 非布尔点时，CCS 约束不一定满足 — 这是多项式身份只在布尔点成立）
         let ccccs3 = Ccccs::new(
             ccs,
-            Fr::zero(), // u_c = 0, 但实际约束 = -3
+            Fr::zero(),                    // u_c = 0, 但实际约束 = -3
             vec![f(2).inverse().unwrap()], // x_c = [0.5] (2 的逆元)
             z,
             stub_commitment(),

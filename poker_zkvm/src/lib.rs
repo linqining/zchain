@@ -34,13 +34,13 @@ pub mod pcs;
 // ===== Layer 2 — Frontend & Execution（Phase 2-4）=====
 pub mod compiler;
 pub mod isa;
-pub mod trace;
 pub mod syscalls;
+pub mod trace;
 
 // ===== Layer 3 — Constraint System（Phase 5-6）=====
 pub mod ccs;
-pub mod lookup;
 pub mod constraints;
+pub mod lookup;
 
 // ===== Layer 3.5 — Hypernova Fold（Phase 6）=====
 pub mod fold;

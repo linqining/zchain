@@ -19,7 +19,7 @@
 use std::collections::HashSet;
 
 use crate::ccs::Fr;
-use crate::constraints::lookup::{compute_multiplicity, LogUpCommitments, LogUpProof, LookupTable};
+use crate::constraints::lookup::{LogUpCommitments, LogUpProof, LookupTable, compute_multiplicity};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
 use crate::trace::{MemAccess, MemOp};
@@ -123,13 +123,12 @@ pub fn expand_to_bytes(access: &MemAccess, step_index: u64) -> Result<Vec<ByteAc
     }
 
     // checked_add 防多字节访问 wrap 攻击（spec L294）
-    let end_addr = access
-        .addr
-        .checked_add(access.size as u32)
-        .ok_or_else(|| ZkvmError::Other(format!(
+    let end_addr = access.addr.checked_add(access.size as u32).ok_or_else(|| {
+        ZkvmError::Other(format!(
             "expand_to_bytes: addr 0x{:08x} + size {} 溢出",
             access.addr, size
-        )))?;
+        ))
+    })?;
 
     let bytes = access.value.to_le_bytes();
     let mut result = Vec::with_capacity(size);
@@ -162,9 +161,9 @@ pub fn check_uninitialized_read(
     writes: &[ByteAccess],
 ) -> Result<(), ZkvmError> {
     for read in reads {
-        let has_prior_write = writes.iter().any(|w| {
-            w.byte_addr == read.byte_addr && w.step_index < read.step_index
-        });
+        let has_prior_write = writes
+            .iter()
+            .any(|w| w.byte_addr == read.byte_addr && w.step_index < read.step_index);
         if !has_prior_write {
             return Err(ZkvmError::UninitializedRead {
                 addr: read.byte_addr,
@@ -193,10 +192,7 @@ pub fn check_uninitialized_read(
 /// # 错误
 /// - 未初始化读取返回 `ZkvmError::UninitializedRead`
 /// - permutation 不匹配返回 `ZkvmError::Other`
-pub fn verify_memory_permutation(
-    accesses: &[MemAccess],
-    step_index: u64,
-) -> Result<(), ZkvmError> {
+pub fn verify_memory_permutation(accesses: &[MemAccess], step_index: u64) -> Result<(), ZkvmError> {
     let (reads, writes) = expand_reads_writes(accesses, step_index)?;
 
     // 1. 未初始化读取检测（时序保证）
@@ -435,7 +431,8 @@ mod tests {
         assert!(verify_memory_permutation(&[write_access], 0).is_ok());
 
         // 跨步校验：step 0 的 write + step 1 的 read
-        let write_bytes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand");
+        let write_bytes =
+            expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand");
         let read_bytes = expand_to_bytes(&read_access, 1).expect("expand");
         assert!(check_uninitialized_read(&read_bytes, &write_bytes).is_ok());
     }
@@ -446,17 +443,11 @@ mod tests {
         // step 0: SW 0xDEADBEEF 到 0x100（4 字节写）
         // step 1: LB 从 0x100 读取（读低字节 0xEF）
 
-        let write_bytes = expand_to_bytes(
-            &make_access(0x100, MemOp::Write, 0xDEADBEEF, 4),
-            0,
-        )
-        .expect("expand write");
+        let write_bytes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0)
+            .expect("expand write");
 
-        let read_bytes = expand_to_bytes(
-            &make_access(0x100, MemOp::Read, 0xEF, 1),
-            1,
-        )
-        .expect("expand read");
+        let read_bytes =
+            expand_to_bytes(&make_access(0x100, MemOp::Read, 0xEF, 1), 1).expect("expand read");
 
         // 验证 read 的 byte_val == write 的对应字节
         assert_eq!(read_bytes[0].byte_val, 0xEF);
@@ -472,17 +463,11 @@ mod tests {
         // step 0: SB 0x42 到 0x100（1 字节写）
         // step 1: LW 从 0x100 读取 4 字节
 
-        let write_bytes = expand_to_bytes(
-            &make_access(0x100, MemOp::Write, 0x42, 1),
-            0,
-        )
-        .expect("expand write");
+        let write_bytes =
+            expand_to_bytes(&make_access(0x100, MemOp::Write, 0x42, 1), 0).expect("expand write");
 
-        let read_bytes = expand_to_bytes(
-            &make_access(0x100, MemOp::Read, 0x42, 4),
-            1,
-        )
-        .expect("expand read");
+        let read_bytes =
+            expand_to_bytes(&make_access(0x100, MemOp::Read, 0x42, 4), 1).expect("expand read");
 
         // read 包含 4 个字节，但 write 只有 1 个 → 地址 0x101/0x102/0x103 未初始化
         let err = check_uninitialized_read(&read_bytes, &write_bytes).unwrap_err();
@@ -492,18 +477,12 @@ mod tests {
     #[test]
     fn test_permutation_mixed_size_lw_then_lb_high_byte() {
         // LW 写 4B，LB 读第 2 字节（addr+1）
-        let write_bytes = expand_to_bytes(
-            &make_access(0x100, MemOp::Write, 0xDEADBEEF, 4),
-            0,
-        )
-        .expect("expand write");
+        let write_bytes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0)
+            .expect("expand write");
 
         // 读 0x101 字节 = 0xBE
-        let read_bytes = expand_to_bytes(
-            &make_access(0x101, MemOp::Read, 0xBE, 1),
-            1,
-        )
-        .expect("expand read");
+        let read_bytes =
+            expand_to_bytes(&make_access(0x101, MemOp::Read, 0xBE, 1), 1).expect("expand read");
 
         assert_eq!(read_bytes[0].byte_val, 0xBE);
         assert_eq!(write_bytes[1].byte_val, 0xBE);
@@ -585,11 +564,8 @@ mod tests {
     #[test]
     fn test_soundness_byte_aliasing_attack() {
         // 攻击: SW 0xDEADBEEF 到 0x100，LB 从 0x100 读但声称值为 0xFF（不是 0xEF）
-        let write_bytes = expand_to_bytes(
-            &make_access(0x100, MemOp::Write, 0xDEADBEEF, 4),
-            0,
-        )
-        .expect("expand write");
+        let write_bytes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0)
+            .expect("expand write");
 
         let read_bytes = [ByteAccess {
             byte_addr: 0x100,
@@ -629,23 +605,13 @@ mod tests {
     #[test]
     fn test_multiple_writes_same_addr() {
         // 同地址多次写：最新值应覆盖旧值
-        let write1 = expand_to_bytes(
-            &make_access(0x100, MemOp::Write, 0xAAAA, 2),
-            0,
-        )
-        .expect("expand");
+        let write1 =
+            expand_to_bytes(&make_access(0x100, MemOp::Write, 0xAAAA, 2), 0).expect("expand");
 
-        let write2 = expand_to_bytes(
-            &make_access(0x100, MemOp::Write, 0xBBBB, 2),
-            1,
-        )
-        .expect("expand");
+        let write2 =
+            expand_to_bytes(&make_access(0x100, MemOp::Write, 0xBBBB, 2), 1).expect("expand");
 
-        let read = expand_to_bytes(
-            &make_access(0x100, MemOp::Read, 0xBBBB, 2),
-            2,
-        )
-        .expect("expand");
+        let read = expand_to_bytes(&make_access(0x100, MemOp::Read, 0xBBBB, 2), 2).expect("expand");
 
         let all_writes: Vec<ByteAccess> = write1.iter().chain(write2.iter()).cloned().collect();
 
@@ -667,21 +633,30 @@ mod tests {
     #[test]
     fn test_logup_build_proof_basic() {
         // SW 0xDEADBEEF 到 0x100（step 0），LW 读取（step 1）
-        let writes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand write");
-        let reads = expand_to_bytes(&make_access(0x100, MemOp::Read, 0xDEADBEEF, 4), 1).expect("expand read");
+        let writes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0)
+            .expect("expand write");
+        let reads = expand_to_bytes(&make_access(0x100, MemOp::Read, 0xDEADBEEF, 4), 1)
+            .expect("expand read");
 
         let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
-        assert!(proof.verify(&commits).expect("verify"), "LogUp proof 应验证通过");
+        assert!(
+            proof.verify(&commits).expect("verify"),
+            "LogUp proof 应验证通过"
+        );
     }
 
     #[test]
     fn test_logup_verify_writes_only() {
         // 仅 writes（空 witness），LogUp 等式 0==0 通过
-        let writes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand write");
+        let writes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0)
+            .expect("expand write");
         let reads: Vec<ByteAccess> = vec![];
 
         let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
-        assert!(proof.verify(&commits).expect("verify"), "空 witness 应通过（0==0）");
+        assert!(
+            proof.verify(&commits).expect("verify"),
+            "空 witness 应通过（0==0）"
+        );
     }
 
     #[test]
@@ -693,26 +668,45 @@ mod tests {
     #[test]
     fn test_logup_multiple_reads_same_key() {
         // 1 write + 2 reads 同 key，multiplicity=[2]
-        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
+        let writes = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0x42,
+            step_index: 0,
+        }];
         let reads = vec![
-            ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 1 },
-            ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 2 },
+            ByteAccess {
+                byte_addr: 0x100,
+                byte_val: 0x42,
+                step_index: 1,
+            },
+            ByteAccess {
+                byte_addr: 0x100,
+                byte_val: 0x42,
+                step_index: 2,
+            },
         ];
 
         let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
         assert_eq!(proof.table.len(), 1, "去重后 table 应有 1 个 entry");
         assert_eq!(proof.multiplicity.len(), 1);
-        assert_eq!(proof.multiplicity[0], Fr::from_u64(2), "multiplicity 应为 2");
+        assert_eq!(
+            proof.multiplicity[0],
+            Fr::from_u64(2),
+            "multiplicity 应为 2"
+        );
         assert!(proof.verify(&commits).expect("verify"), "LogUp 等式应成立");
     }
 
     #[test]
     fn test_logup_mixed_size_lw_then_lb() {
         // SW 4B + LB 1B，跨尺寸匹配
-        let write_bytes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0).expect("expand write");
-        let read_bytes = expand_to_bytes(&make_access(0x100, MemOp::Read, 0xEF, 1), 1).expect("expand read");
+        let write_bytes = expand_to_bytes(&make_access(0x100, MemOp::Write, 0xDEADBEEF, 4), 0)
+            .expect("expand write");
+        let read_bytes =
+            expand_to_bytes(&make_access(0x100, MemOp::Read, 0xEF, 1), 1).expect("expand read");
 
-        let (proof, commits) = build_logup_proof(&read_bytes, &write_bytes).expect("build_logup_proof");
+        let (proof, commits) =
+            build_logup_proof(&read_bytes, &write_bytes).expect("build_logup_proof");
         assert!(proof.verify(&commits).expect("verify"), "跨尺寸匹配应通过");
     }
 
@@ -720,27 +714,50 @@ mod tests {
     fn test_logup_verify_memory_permutation_logup_returns_proof() {
         // verify_memory_permutation_logup 返回值可 to_ccs_instance
         let write_access = make_access(0x100, MemOp::Write, 0xDEADBEEF, 4);
-        let (proof, _commits) = verify_memory_permutation_logup(&[write_access], 0).expect("verify");
+        let (proof, _commits) =
+            verify_memory_permutation_logup(&[write_access], 0).expect("verify");
 
         let ccs_instance = proof.to_ccs_instance().expect("to_ccs_instance");
-        assert!(ccs_instance.is_satisfied().expect("is_satisfied"), "CCS 实例应满足");
+        assert!(
+            ccs_instance.is_satisfied().expect("is_satisfied"),
+            "CCS 实例应满足"
+        );
     }
 
     #[test]
     fn test_logup_soundness_wrong_value() {
         // byte aliasing 攻击：write 0xEF, read 声称 0xFF
-        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0xEF, step_index: 0 }];
-        let reads = vec![ByteAccess { byte_addr: 0x100, byte_val: 0xFF, step_index: 1 }];
+        let writes = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0xEF,
+            step_index: 0,
+        }];
+        let reads = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0xFF,
+            step_index: 1,
+        }];
 
         let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
-        assert!(!proof.verify(&commits).expect("verify"), "byte aliasing 攻击应被 LogUp 检测");
+        assert!(
+            !proof.verify(&commits).expect("verify"),
+            "byte aliasing 攻击应被 LogUp 检测"
+        );
     }
 
     #[test]
     fn test_logup_soundness_read_not_in_writes() {
         // 读未写入的地址
-        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
-        let reads = vec![ByteAccess { byte_addr: 0x200, byte_val: 0x42, step_index: 1 }];
+        let writes = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0x42,
+            step_index: 0,
+        }];
+        let reads = vec![ByteAccess {
+            byte_addr: 0x200,
+            byte_val: 0x42,
+            step_index: 1,
+        }];
 
         // check_uninitialized_read 检测
         let err = check_uninitialized_read(&reads, &writes).unwrap_err();
@@ -748,42 +765,77 @@ mod tests {
 
         // LogUp 也检测（read key 不在 table 中）
         let (proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
-        assert!(!proof.verify(&commits).expect("verify"), "未写入地址的 read 应被 LogUp 检测");
+        assert!(
+            !proof.verify(&commits).expect("verify"),
+            "未写入地址的 read 应被 LogUp 检测"
+        );
     }
 
     #[test]
     fn test_logup_soundness_tampered_table() {
-        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
-        let reads = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 1 }];
+        let writes = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0x42,
+            step_index: 0,
+        }];
+        let reads = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0x42,
+            step_index: 1,
+        }];
 
         let (mut proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
-        assert!(proof.verify(&commits).expect("verify original"), "原始 proof 应通过");
+        assert!(
+            proof.verify(&commits).expect("verify original"),
+            "原始 proof 应通过"
+        );
 
         // 篡改 table
         proof.table[0] = Fr::from_u64(0xDEAD);
-        assert!(!proof.verify(&commits).expect("verify tampered"), "篡改 table 应被检测");
+        assert!(
+            !proof.verify(&commits).expect("verify tampered"),
+            "篡改 table 应被检测"
+        );
     }
 
     #[test]
     fn test_logup_soundness_tampered_witness() {
-        let writes = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 0 }];
-        let reads = vec![ByteAccess { byte_addr: 0x100, byte_val: 0x42, step_index: 1 }];
+        let writes = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0x42,
+            step_index: 0,
+        }];
+        let reads = vec![ByteAccess {
+            byte_addr: 0x100,
+            byte_val: 0x42,
+            step_index: 1,
+        }];
 
         let (mut proof, commits) = build_logup_proof(&reads, &writes).expect("build_logup_proof");
-        assert!(proof.verify(&commits).expect("verify original"), "原始 proof 应通过");
+        assert!(
+            proof.verify(&commits).expect("verify original"),
+            "原始 proof 应通过"
+        );
 
         // 篡改 witness
         proof.witness[0] = Fr::from_u64(0xBEEF);
-        assert!(!proof.verify(&commits).expect("verify tampered"), "篡改 witness 应被检测");
+        assert!(
+            !proof.verify(&commits).expect("verify tampered"),
+            "篡改 witness 应被检测"
+        );
     }
 
     #[test]
     fn test_logup_memory_to_ccs_instance() {
         // memory → LogUp → CcsInstance → is_satisfied
         let write_access = make_access(0x100, MemOp::Write, 0xDEADBEEF, 4);
-        let (proof, _commits) = verify_memory_permutation_logup(&[write_access], 0).expect("verify");
+        let (proof, _commits) =
+            verify_memory_permutation_logup(&[write_access], 0).expect("verify");
 
         let ccs_instance = proof.to_ccs_instance().expect("to_ccs_instance");
-        assert!(ccs_instance.is_satisfied().expect("is_satisfied"), "CCS 实例应满足");
+        assert!(
+            ccs_instance.is_satisfied().expect("is_satisfied"),
+            "CCS 实例应满足"
+        );
     }
 }

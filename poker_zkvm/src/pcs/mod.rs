@@ -53,8 +53,10 @@ impl MultilinearPoly {
 
     /// 从 u32 求值构造（便捷方法）。
     pub fn from_u32_evals(evals: &[u32]) -> Result<Self, ZkvmError> {
-        let evals: Vec<Bn254ScalarField> =
-            evals.iter().map(|&v| Bn254ScalarField::from_u32_with_wrap(v)).collect();
+        let evals: Vec<Bn254ScalarField> = evals
+            .iter()
+            .map(|&v| Bn254ScalarField::from_u32_with_wrap(v))
+            .collect();
         Self::from_evals(evals)
     }
 

@@ -19,9 +19,9 @@ use ark_ff::Zero;
 
 use crate::compiler::elf_validator::validate_elf;
 use crate::error::ZkvmError;
-use crate::isa::state::{load_elf, VmState};
+use crate::isa::state::{VmState, load_elf};
 use crate::syscalls::{StubHostState, SyscallContext, SyscallRegistry, ZkvmHostState};
-use crate::trace::{Step, Trace, MAX_TRACE_HOST_MEMORY};
+use crate::trace::{MAX_TRACE_HOST_MEMORY, Step, Trace};
 
 /// 最大 trace 步数（spec L257）。
 pub const MAX_ZKVM_TRACE_STEPS: usize = 1_048_576;
@@ -107,7 +107,12 @@ pub fn execute_elf(elf_bytes: &[u8], input: &[u8]) -> Result<ExecuteResult, Zkvm
         input: input.to_vec(),
         ..Default::default()
     };
-    execute_elf_with_limits_and_config(elf_bytes, config, MAX_ZKVM_TRACE_STEPS, MAX_TRACE_HOST_MEMORY)
+    execute_elf_with_limits_and_config(
+        elf_bytes,
+        config,
+        MAX_ZKVM_TRACE_STEPS,
+        MAX_TRACE_HOST_MEMORY,
+    )
 }
 
 /// 执行 ELF（完整配置，默认上限）。
@@ -306,11 +311,7 @@ mod tests {
 
     /// 将多个 u32 指令编码为 LE 字节序列。
     fn encode_text(words: &[u32]) -> Vec<u8> {
-        words
-            .iter()
-            .copied()
-            .flat_map(u32::to_le_bytes)
-            .collect()
+        words.iter().copied().flat_map(u32::to_le_bytes).collect()
     }
 
     // ===== TDD 测试 =====
@@ -338,7 +339,13 @@ mod tests {
 
         let err = execute_elf_with_limits(&elf, &[], 2, MAX_TRACE_HOST_MEMORY).unwrap_err();
         assert!(
-            matches!(err, ZkvmError::TraceTooLong { actual: 3, limit: 2 }),
+            matches!(
+                err,
+                ZkvmError::TraceTooLong {
+                    actual: 3,
+                    limit: 2
+                }
+            ),
             "expected TraceTooLong, got {err:?}"
         );
     }
@@ -363,11 +370,11 @@ mod tests {
         // read_input: a0=0 → HEAP_START, a1=5 → 写 5 字节
         // commit_output: a0=HEAP_START, a1=5 → 读 5 字节 → halt
         let text = encode_text(&[
-            encode_i(0x13, 0, 17, 0, 1),  // ADDI a7, x0, 1 (read_input)
-            encode_i(0x13, 0, 11, 0, 5),  // ADDI a1, x0, 5 (len=5)
-            0x00000073,                    // ECALL
-            encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-            0x00000073,                    // ECALL
+            encode_i(0x13, 0, 17, 0, 1), // ADDI a7, x0, 1 (read_input)
+            encode_i(0x13, 0, 11, 0, 5), // ADDI a1, x0, 5 (len=5)
+            0x00000073,                  // ECALL
+            encode_i(0x13, 0, 17, 0, 2), // ADDI a7, x0, 2 (commit_output)
+            0x00000073,                  // ECALL
         ]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -425,13 +432,13 @@ mod tests {
         // ADDI a7, x0, 1 (read_input) + ADDI a1, x0, 3 + ECALL → a0=HEAP_START, a1=3
         // ADDI a7, x0, 7 (log) + ECALL → log(a0=HEAP_START, a1=3)
         let text = encode_text(&[
-            encode_i(0x13, 0, 17, 0, 1),  // ADDI a7, x0, 1 (read_input)
-            encode_i(0x13, 0, 11, 0, 3),  // ADDI a1, x0, 3 (len=3)
-            0x00000073,                    // ECALL
-            encode_i(0x13, 0, 17, 0, 7),  // ADDI a7, x0, 7 (log)
-            0x00000073,                    // ECALL
-            encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-            0x00000073,                    // ECALL → halt
+            encode_i(0x13, 0, 17, 0, 1), // ADDI a7, x0, 1 (read_input)
+            encode_i(0x13, 0, 11, 0, 3), // ADDI a1, x0, 3 (len=3)
+            0x00000073,                  // ECALL
+            encode_i(0x13, 0, 17, 0, 7), // ADDI a7, x0, 7 (log)
+            0x00000073,                  // ECALL
+            encode_i(0x13, 0, 17, 0, 2), // ADDI a7, x0, 2 (commit_output)
+            0x00000073,                  // ECALL → halt
         ]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
@@ -444,6 +451,9 @@ mod tests {
         assert_eq!(result.trace.len(), 7);
         assert_eq!(result.logs.len(), 1, "应有 1 条 log");
         assert_eq!(result.logs[0], b"hi\n");
-        assert_eq!(result.output, b"hi\n", "commit_output with a0=HEAP_START, a1=3 → 3 bytes");
+        assert_eq!(
+            result.output, b"hi\n",
+            "commit_output with a0=HEAP_START, a1=3 → 3 bytes"
+        );
     }
 }

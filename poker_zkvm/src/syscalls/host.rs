@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ZkvmError;
 use crate::isa::state::{HEAP_START, VmState};
-use crate::syscalls::gas::{syscall_gas, SyscallGasArgs};
+use crate::syscalls::gas::{SyscallGasArgs, syscall_gas};
 use crate::syscalls::poseidon::{fr_to_bytes_le, poseidon_hash, poseidon_hash_bytes};
 use crate::syscalls::{Syscall, SyscallContext, SyscallId};
 
@@ -88,11 +88,7 @@ impl Syscall for ReadInputSyscall {
         SyscallId::ReadInput
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let ptr = state.read_register(crate::syscalls::REG_A0);
         let len = state.read_register(crate::syscalls::REG_A1);
 
@@ -136,11 +132,7 @@ impl Syscall for CommitOutputSyscall {
         SyscallId::CommitOutput
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let ptr = state.read_register(crate::syscalls::REG_A0);
         let len = state.read_register(crate::syscalls::REG_A1);
 
@@ -308,7 +300,7 @@ impl Syscall for EcdsaVerifySyscall {
 ///
 /// 任何错误（格式错误、验证失败）都返回 `false`。
 fn verify_ecdsa(msg_hash: &[u8; 32], sig: &[u8], pubkey: &[u8]) -> bool {
-    use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
+    use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 
     let secp = Secp256k1::verification_only();
 
@@ -348,11 +340,7 @@ impl Syscall for EmitEventSyscall {
         SyscallId::EmitEvent
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let ptr = state.read_register(crate::syscalls::REG_A0);
         let len = state.read_register(crate::syscalls::REG_A1);
 
@@ -389,11 +377,7 @@ impl Syscall for LogSyscall {
         SyscallId::Log
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let ptr = state.read_register(crate::syscalls::REG_A0);
         let len = state.read_register(crate::syscalls::REG_A1);
 
@@ -472,11 +456,7 @@ impl Syscall for GetRandomnessSyscall {
         SyscallId::GetRandomness
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let out_ptr = state.read_register(crate::syscalls::REG_A0);
 
         let counter_fr = Fr::from(ctx.randomness_counter);
@@ -528,11 +508,7 @@ impl Syscall for ReadStateSyscall {
         SyscallId::ReadState
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let slot = state.read_register(crate::syscalls::REG_A0);
         let out_ptr = state.read_register(crate::syscalls::REG_A1);
 
@@ -579,7 +555,7 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
 mod tests {
     use super::*;
     use crate::isa::state::VmState;
-    use crate::syscalls::{SyscallContext, SyscallRegistry, REG_A0, REG_A1, REG_A2, REG_A3};
+    use crate::syscalls::{REG_A0, REG_A1, REG_A2, REG_A3, SyscallContext, SyscallRegistry};
 
     // ===== 辅助函数 =====
 
@@ -637,10 +613,7 @@ mod tests {
 
         assert_eq!(state.read_register(REG_A0), HEAP_START);
         assert_eq!(state.read_register(REG_A1), 1);
-        assert_eq!(
-            state.read_memory_byte(HEAP_START).unwrap(),
-            0x42
-        );
+        assert_eq!(state.read_memory_byte(HEAP_START).unwrap(), 0x42);
     }
 
     #[test]
@@ -1010,7 +983,10 @@ mod tests {
         state2.write_register(REG_A1, 4);
         registry.dispatch(0x06, &mut ctx2, &mut state2).unwrap();
 
-        assert_ne!(ctx1.events[0], ctx2.events[0], "不同 step_index 应产生不同 hash");
+        assert_ne!(
+            ctx1.events[0], ctx2.events[0],
+            "不同 step_index 应产生不同 hash"
+        );
     }
 
     #[test]

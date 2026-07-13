@@ -42,13 +42,13 @@
 //! - `to_ccs_instance()` 提供简化 CCS 编码（单行 `lhs - rhs = 0`），
 //!   完整 per-entry binding（inv 变量）留待 Hypernova 折叠集成阶段
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
 use crate::ccs::{Ccs, CcsInstance, Fr, SparseMatrix};
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
-use crate::transcript::{Transcript, LOOKUP_DOMAIN_TAG};
+use crate::transcript::{LOOKUP_DOMAIN_TAG, Transcript};
 
 /// 承诺域分离标签（内部使用，与 transcript 的 domain_tag 区分）。
 const COMMIT_DOMAIN: &[u8] = b"poker_zkvm_lookup_commit";
@@ -343,9 +343,7 @@ impl LogUpProof {
                 ));
             }
             let inv = denom.inverse().ok_or_else(|| {
-                ZkvmError::Other(
-                    "LogUpProof::verify_equation: (β - t_i) 逆元不存在".to_string(),
-                )
+                ZkvmError::Other("LogUpProof::verify_equation: (β - t_i) 逆元不存在".to_string())
             })?;
             lhs = lhs.add(&m.mul(&inv));
         }
@@ -360,9 +358,7 @@ impl LogUpProof {
                 ));
             }
             let inv = denom.inverse().ok_or_else(|| {
-                ZkvmError::Other(
-                    "LogUpProof::verify_equation: (β - f_j) 逆元不存在".to_string(),
-                )
+                ZkvmError::Other("LogUpProof::verify_equation: (β - f_j) 逆元不存在".to_string())
             })?;
             rhs = rhs.add(&inv);
         }
@@ -722,7 +718,10 @@ mod tests {
         let multiplicity = vec![f(1)]; // 长度 != table.len()
 
         let result = LogUpProof::create(table, witness, multiplicity);
-        assert!(result.is_err(), "table.len() != multiplicity.len() 应返回错误");
+        assert!(
+            result.is_err(),
+            "table.len() != multiplicity.len() 应返回错误"
+        );
     }
 
     // ===== soundness 负例测试 =====
@@ -818,8 +817,7 @@ mod tests {
         let correct_mult = vec![f(1), f(2), f(3)];
 
         // 正常创建
-        let (proof, commits) =
-            LogUpProof::create(table, witness, correct_mult).expect("create");
+        let (proof, commits) = LogUpProof::create(table, witness, correct_mult).expect("create");
         let original_beta = proof.beta;
 
         // 攻击者试图用不同 multiplicity 但保留原 β
@@ -887,8 +885,7 @@ mod tests {
         let witness = vec![f(99)]; // 99 不在表中
         let multiplicity = vec![f(0), f(0)]; // 全 0（因 witness 不匹配任何表项）
 
-        let (proof, commits) =
-            LogUpProof::create(table, witness, multiplicity).expect("create");
+        let (proof, commits) = LogUpProof::create(table, witness, multiplicity).expect("create");
         // 承诺一致，β 一致，但等式不成立
         assert!(
             !proof.verify(&commits).expect("verify"),
@@ -921,7 +918,10 @@ mod tests {
         let (proof, _) = LogUpProof::create(table, witness, multiplicity).expect("create");
         let instance = proof.to_ccs_instance().expect("to_ccs_instance");
 
-        assert_eq!(instance.ccs.num_vars, 3, "witness 应为 3 变量 [1, lhs, rhs]");
+        assert_eq!(
+            instance.ccs.num_vars, 3,
+            "witness 应为 3 变量 [1, lhs, rhs]"
+        );
         assert_eq!(instance.ccs.num_matrices(), 2);
         assert_eq!(instance.ccs.num_constraints(), 2);
         assert_eq!(instance.ccs.num_rows(), 1);

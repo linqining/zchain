@@ -479,9 +479,8 @@ impl Ccs {
             }
             let mut s = Vec::with_capacity(s_len);
             for j in 0..s_len {
-                let idx = u32::from_le_bytes(
-                    rest[j * 4..j * 4 + 4].try_into().expect("4 字节切片"),
-                ) as usize;
+                let idx = u32::from_le_bytes(rest[j * 4..j * 4 + 4].try_into().expect("4 字节切片"))
+                    as usize;
                 if idx >= matrices_count {
                     return Err(ZkvmError::InvalidZkProofFormat(format!(
                         "Ccs::from_bytes: subset[{i}][{j}] index {idx} >= matrices_count {matrices_count}",
@@ -497,8 +496,7 @@ impl Ccs {
                 "Ccs::from_bytes: coeffs_count 截断".to_string(),
             ));
         }
-        let coeffs_count =
-            u32::from_le_bytes(rest[0..4].try_into().expect("4 字节切片")) as usize;
+        let coeffs_count = u32::from_le_bytes(rest[0..4].try_into().expect("4 字节切片")) as usize;
         rest = &rest[4..];
         if subsets_count != coeffs_count {
             return Err(ZkvmError::InvalidZkProofFormat(format!(
@@ -541,11 +539,7 @@ pub struct CcsInstance {
 
 impl CcsInstance {
     /// 创建 CCS 实例并校验 witness 长度。
-    pub fn new(
-        ccs: Ccs,
-        witness: Vec<Fr>,
-        public_inputs: Vec<Fr>,
-    ) -> Result<Self, ZkvmError> {
+    pub fn new(ccs: Ccs, witness: Vec<Fr>, public_inputs: Vec<Fr>) -> Result<Self, ZkvmError> {
         if witness.len() != ccs.num_vars {
             return Err(ZkvmError::Other(format!(
                 "CcsInstance::new: witness.len() {} != ccs.num_vars {}",
@@ -839,13 +833,8 @@ mod tests {
         let mut m0 = SparseMatrix::new(1, 1);
         m0.add_entry(0, 0, f(1)).unwrap();
 
-        let ccs = Ccs::new(
-            1,
-            vec![m0],
-            vec![vec![], vec![0]],
-            vec![f(5), neg_f(1)],
-        )
-        .expect("Ccs 构造应成功");
+        let ccs = Ccs::new(1, vec![m0], vec![vec![], vec![0]], vec![f(5), neg_f(1)])
+            .expect("Ccs 构造应成功");
 
         // x = 5 → 5 - 5 = 0 ✓
         let z_ok = vec![f(5)];

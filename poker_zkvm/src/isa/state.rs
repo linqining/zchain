@@ -439,7 +439,10 @@ mod tests {
         }
         // 第 4097 页应失败
         let err = state.write_memory_byte(4096 * 4096, 0xBB).unwrap_err();
-        assert!(matches!(err, ZkvmError::OutOfMemory), "expected OutOfMemory, got {err:?}");
+        assert!(
+            matches!(err, ZkvmError::OutOfMemory),
+            "expected OutOfMemory, got {err:?}"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ use crate::error::ZkvmError;
 use crate::fold::fold_loop::HypernovaProof;
 use ark_bn254::{Bn254, Fr};
 use ark_groth16::{
-    prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey,
+    Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey, prepare_verifying_key,
 };
 use ark_relations::gr1cs::ConstraintSynthesizer;
 use ark_std::test_rng;
@@ -148,7 +148,7 @@ pub struct Groth16CompressedProof {
 /// - `groth16_setup` / `groth16_prove` 失败（SNARK 生成错误）
 pub fn groth16_compress(proof: &HypernovaProof) -> Result<CompressedProof, ZkvmError> {
     use crate::recursion::hypernova_verifier_circuit::{
-        extract_fold_chain, HypernovaVerifierCircuitBN254,
+        HypernovaVerifierCircuitBN254, extract_fold_chain,
     };
 
     // 1. 从 HypernovaProof 提取 fold chain
@@ -196,9 +196,11 @@ pub fn groth16_compress(proof: &HypernovaProof) -> Result<CompressedProof, ZkvmE
 pub fn groth16_compress_verify(compressed: &CompressedProof) -> Result<bool, ZkvmError> {
     match compressed {
         CompressedProof::Native(_) => Ok(true),
-        CompressedProof::Groth16(groth16) => {
-            groth16_verify(&groth16.verifying_key, &groth16.public_inputs, &groth16.proof)
-        }
+        CompressedProof::Groth16(groth16) => groth16_verify(
+            &groth16.verifying_key,
+            &groth16.public_inputs,
+            &groth16.proof,
+        ),
     }
 }
 
@@ -271,7 +273,7 @@ mod tests {
         use crate::fold::fold_loop::fold_loop;
         use crate::pcs::ipa::IpaPcs;
         use crate::pcs::{MultilinearPoly, Pcs};
-        use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
+        use crate::transcript::{HYPERNOVA_FOLD_DOMAIN_TAG, Transcript};
 
         fn f(v: u32) -> ZkvmFr {
             ZkvmFr::from_u32_with_wrap(v)
@@ -357,9 +359,9 @@ mod tests {
         use crate::fold::fold_loop::fold_loop;
         use crate::pcs::ipa::IpaPcs;
         use crate::pcs::{MultilinearPoly, Pcs};
-        use crate::transcript::{Transcript, HYPERNOVA_FOLD_DOMAIN_TAG};
+        use crate::transcript::{HYPERNOVA_FOLD_DOMAIN_TAG, Transcript};
         use ark_ec::CurveGroup;
-        use ark_std::{test_rng, UniformRand};
+        use ark_std::{UniformRand, test_rng};
 
         fn f(v: u32) -> ZkvmFr {
             ZkvmFr::from_u32_with_wrap(v)
@@ -425,8 +427,7 @@ mod tests {
         // 篡改 folded_witness_commitment:替换为随机点
         let mut rng = test_rng();
         let wrong_point = ark_bn254::G1Projective::rand(&mut rng).into_affine();
-        proof.fold_steps[0].folded_witness_commitment =
-            crate::pcs::ipa::IpaCommitment(wrong_point);
+        proof.fold_steps[0].folded_witness_commitment = crate::pcs::ipa::IpaCommitment(wrong_point);
 
         let result = groth16_compress(&proof);
         assert!(

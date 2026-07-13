@@ -91,9 +91,7 @@ pub fn compile_crate(crate_path: &Path, config: &CompilerConfig) -> Result<PathB
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ZkvmError::Other(format!(
-            "cargo build failed: {stderr}"
-        )));
+        return Err(ZkvmError::Other(format!("cargo build failed: {stderr}")));
     }
 
     let elf_path = crate_path

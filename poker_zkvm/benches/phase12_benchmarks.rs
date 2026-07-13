@@ -9,8 +9,8 @@
 //! - batch_size=256（Stage 1 默认值，Stage 1.1 padding 保证 num_vars/num_rows 为 2 的幂）
 //! - 100 步 → 1 batch（单实例），500 步 → 2 batches（1 fold step），1000 步 → 4 batches（3 fold steps）
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use poker_zkvm::prover::{prove, MAX_PROOF_TOTAL_SIZE, MAX_ZKVM_PROOF_SIZE, ProverConfig};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use poker_zkvm::prover::{MAX_PROOF_TOTAL_SIZE, MAX_ZKVM_PROOF_SIZE, ProverConfig, prove};
 use poker_zkvm::test_helpers::build_nop_elf;
 use poker_zkvm::verifier::verify_production;
 
@@ -113,7 +113,7 @@ fn bench_verifier_time(c: &mut Criterion) {
                         black_box(&public_io),
                         black_box(&ccs_whitelist),
                     )
-                        .expect("verify 应成功");
+                    .expect("verify 应成功");
                     assert!(ok);
                 });
             },
@@ -122,5 +122,10 @@ fn bench_verifier_time(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_prover_time, bench_proof_size, bench_verifier_time);
+criterion_group!(
+    benches,
+    bench_prover_time,
+    bench_proof_size,
+    bench_verifier_time
+);
 criterion_main!(benches);

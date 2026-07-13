@@ -16,13 +16,13 @@ use ark_bn254::{Fq, Fr, G1Affine, G1Projective};
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{Field, One, PrimeField, Zero};
 use ark_serialize::CanonicalSerialize;
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
 use crate::error::ZkvmError;
 use crate::field::Bn254ScalarField;
 use crate::pcs::{MultilinearPoly, Pcs};
-use crate::transcript::{Transcript, PCS_OPEN_DOMAIN_TAG};
+use crate::transcript::{PCS_OPEN_DOMAIN_TAG, Transcript};
 
 /// IPA generators 派生 domain tag（spec L330）。
 const IPA_GEN_DOMAIN: &[u8] = b"poker_zkvm_ipa_gen";
@@ -55,8 +55,7 @@ fn hash_to_curve(domain: &[u8], index: u32) -> G1Affine {
         let mut h = hasher.clone();
         h.update(&counter.to_le_bytes());
         let mut out = [0u8; 32];
-        h.finalize_variable(&mut out)
-            .expect("Blake2bVar finalize");
+        h.finalize_variable(&mut out).expect("Blake2bVar finalize");
         let x = Fq::from_le_bytes_mod_order(&out);
         if let Some(p) = G1Affine::get_point_from_x_unchecked(x, true) {
             return p;
@@ -109,7 +108,9 @@ fn compute_query_vector(point: &[Fr]) -> Vec<Fr> {
 
 /// 计算内积 ⟨a, b⟩ = Σ_i a_i · b_i。
 fn inner_product(a: &[Fr], b: &[Fr]) -> Fr {
-    a.iter().zip(b.iter()).fold(Fr::zero(), |acc, (ai, bi)| acc + *ai * bi)
+    a.iter()
+        .zip(b.iter())
+        .fold(Fr::zero(), |acc, (ai, bi)| acc + *ai * bi)
 }
 
 /// 多标量乘法 MSM：Σ_i scalars[i] · bases[i]。
@@ -334,12 +335,8 @@ impl Pcs for IpaPcs {
                 .ok_or_else(|| ZkvmError::Other("IPA challenge inverse 为零".to_string()))?;
 
             // 折叠 a, b, G
-            a = (0..half)
-                .map(|i| a_l[i] + r_k * a_r[i])
-                .collect();
-            b_curr = (0..half)
-                .map(|i| b_l[i] + r_k_inv * b_r[i])
-                .collect();
+            a = (0..half).map(|i| a_l[i] + r_k * a_r[i]).collect();
+            b_curr = (0..half).map(|i| b_l[i] + r_k_inv * b_r[i]).collect();
             g = (0..half)
                 .map(|i| (g_l[i].into_group() + g_r[i] * r_k_inv).into_affine())
                 .collect();
@@ -425,9 +422,7 @@ impl Pcs for IpaPcs {
                 .ok_or_else(|| ZkvmError::Other("IPA challenge inverse 为零".to_string()))?;
 
             // 折叠 b
-            b_curr = (0..half)
-                .map(|i| b_l[i] + r_k_inv * b_r[i])
-                .collect();
+            b_curr = (0..half).map(|i| b_l[i] + r_k_inv * b_r[i]).collect();
 
             // 折叠 P
             p = p + l_k_point * r_k + r_k_point * r_k_inv;
@@ -589,7 +584,9 @@ mod tests {
         // 篡改 eval
         let tampered_eval = IpaEval(Bn254ScalarField::from_u32_with_wrap(999));
         let mut t2 = Transcript::new();
-        let result = pcs.verify(&c, &point, &tampered_eval, &proof, &mut t2).unwrap();
+        let result = pcs
+            .verify(&c, &point, &tampered_eval, &proof, &mut t2)
+            .unwrap();
         assert!(!result, "篡改 eval 应 verify 失败");
     }
 

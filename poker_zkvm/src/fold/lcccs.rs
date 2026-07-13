@@ -153,11 +153,7 @@ pub fn eq_eval(x: &[Fr], r: usize) -> Result<Fr, ZkvmError> {
     for &x_i in x {
         let bit = (r_bits & 1) == 1;
         r_bits >>= 1;
-        let term = if bit {
-            x_i
-        } else {
-            Fr::one().sub(&x_i)
-        };
+        let term = if bit { x_i } else { Fr::one().sub(&x_i) };
         result = result.mul(&term);
     }
     Ok(result)
@@ -290,10 +286,10 @@ mod tests {
         let v_l = vec![f(3), f(4), f(12)];
         let lcccs = Lcccs::new(
             ccs.clone(),
-            Fr::zero(), // u_l = 0
-            vec![],     // x_l
+            Fr::zero(),                    // u_l = 0
+            vec![],                        // x_l
             vec![f(1), f(3), f(4), f(12)], // trace_l = z
-            vec![],     // r_x_l (num_rows=1, log2=0)
+            vec![],                        // r_x_l (num_rows=1, log2=0)
             v_l,
         )
         .expect("Lcccs 构造应成功");
