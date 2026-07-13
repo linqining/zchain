@@ -844,7 +844,11 @@ mod tests {
         // Spartan proof → verify_production 往返通过
         let (proof_bytes, public_io, ccs_registry) = make_spartan_proof_and_registry();
         let result = verify_production(&proof_bytes, &public_io, &ccs_registry);
-        assert!(result.is_ok(), "Spartan proof 应通过验证，got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Spartan proof 应通过验证，got: {:?}",
+            result
+        );
         assert!(result.unwrap());
     }
 

@@ -108,9 +108,17 @@ fn compute_query_vector(point: &[Fr]) -> Vec<Fr> {
 
 /// 计算内积 ⟨a, b⟩ = Σ_i a_i · b_i。
 fn inner_product(a: &[Fr], b: &[Fr]) -> Fr {
-    a.iter()
-        .zip(b.iter())
-        .fold(Fr::zero(), |acc, (ai, bi)| acc + *ai * bi)
+    if a.len() < 1024 {
+        a.iter()
+            .zip(b.iter())
+            .fold(Fr::zero(), |acc, (ai, bi)| acc + *ai * bi)
+    } else {
+        use rayon::prelude::*;
+        a.par_iter()
+            .zip(b.par_iter())
+            .map(|(ai, bi)| *ai * bi)
+            .reduce(Fr::zero, |a, b| a + b)
+    }
 }
 
 /// 多标量乘法 MSM：Σ_i scalars[i] · bases[i]。
@@ -335,11 +343,27 @@ impl Pcs for IpaPcs {
                 .ok_or_else(|| ZkvmError::Other("IPA challenge inverse 为零".to_string()))?;
 
             // 折叠 a, b, G
-            a = (0..half).map(|i| a_l[i] + r_k * a_r[i]).collect();
-            b_curr = (0..half).map(|i| b_l[i] + r_k_inv * b_r[i]).collect();
-            g = (0..half)
-                .map(|i| (g_l[i].into_group() + g_r[i] * r_k_inv).into_affine())
-                .collect();
+            if half < 1024 {
+                a = (0..half).map(|i| a_l[i] + r_k * a_r[i]).collect();
+                b_curr = (0..half).map(|i| b_l[i] + r_k_inv * b_r[i]).collect();
+                g = (0..half)
+                    .map(|i| (g_l[i].into_group() + g_r[i] * r_k_inv).into_affine())
+                    .collect();
+            } else {
+                use rayon::prelude::*;
+                a = (0..half)
+                    .into_par_iter()
+                    .map(|i| a_l[i] + r_k * a_r[i])
+                    .collect();
+                b_curr = (0..half)
+                    .into_par_iter()
+                    .map(|i| b_l[i] + r_k_inv * b_r[i])
+                    .collect();
+                g = (0..half)
+                    .into_par_iter()
+                    .map(|i| (g_l[i].into_group() + g_r[i] * r_k_inv).into_affine())
+                    .collect();
+            }
 
             // 折叠 P
             p = p + l_k_affine * r_k + r_k_affine * r_k_inv;

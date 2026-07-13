@@ -40,6 +40,9 @@ use crate::field::ZkvmField;
 use crate::fold::lcccs::eq_eval;
 use crate::transcript::{SUMCHECK_DOMAIN_TAG, Transcript};
 
+/// 并行化阈值：低于此值时走顺序路径（避免 rayon 调度开销）。
+const PARALLEL_THRESHOLD: usize = 1024;
+
 // ============ 辅助函数 ============
 
 /// 计算两个向量的多线性 eq 函数：`eq(a, b) = Π_i (a_i·b_i + (1-a_i)·(1-b_i))`。
@@ -73,13 +76,25 @@ fn eq_eval_vec(a: &[Fr], b: &[Fr]) -> Result<Fr, ZkvmError> {
 fn bind_var(table: &[Fr], r: &Fr) -> Vec<Fr> {
     let n = table.len() / 2;
     let one_minus_r = Fr::one().sub(r);
-    (0..n)
-        .map(|i| {
-            let lo = table[2 * i];
-            let hi = table[2 * i + 1];
-            one_minus_r.mul(&lo).add(&r.mul(&hi))
-        })
-        .collect()
+    if n < PARALLEL_THRESHOLD {
+        (0..n)
+            .map(|i| {
+                let lo = table[2 * i];
+                let hi = table[2 * i + 1];
+                one_minus_r.mul(&lo).add(&r.mul(&hi))
+            })
+            .collect()
+    } else {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let lo = table[2 * i];
+                let hi = table[2 * i + 1];
+                one_minus_r.mul(&lo).add(&r.mul(&hi))
+            })
+            .collect()
+    }
 }
 
 /// 使用 Lagrange 插值在 evaluation points `[g(0), g(1), ..., g(D)]` 上求值 `g(r)`。
@@ -123,14 +138,30 @@ const INNER_DEGREE: usize = 2;
 
 /// 计算 eq_table[row] = eq(r_x_l, row) for all boolean rows。
 fn compute_eq_table(r_x_l: &[Fr], num_rows: usize) -> Result<Vec<Fr>, ZkvmError> {
-    (0..num_rows).map(|row| eq_eval(r_x_l, row)).collect()
+    if num_rows < PARALLEL_THRESHOLD {
+        (0..num_rows).map(|row| eq_eval(r_x_l, row)).collect()
+    } else {
+        use rayon::prelude::*;
+        (0..num_rows)
+            .into_par_iter()
+            .map(|row| eq_eval(r_x_l, row))
+            .collect()
+    }
 }
 
 /// 计算 vjp_tables[j][row] = (M_j · z')[row] for all j and boolean rows。
 ///
 /// 这是 v'(j)(X) 的 MLE 在 boolean hypercube 上的求值。
 fn compute_vjp_tables(ccs: &Ccs, z_prime: &[Fr]) -> Result<Vec<Vec<Fr>>, ZkvmError> {
-    ccs.matrices.iter().map(|m| m.evaluate(z_prime)).collect()
+    if ccs.matrices.len() < 4 {
+        ccs.matrices.iter().map(|m| m.evaluate(z_prime)).collect()
+    } else {
+        use rayon::prelude::*;
+        ccs.matrices
+            .par_iter()
+            .map(|m| m.evaluate(z_prime))
+            .collect()
+    }
 }
 
 /// 计算 `M_j(r_x, r_y) = Σ_{(row,col,val) ∈ entries} val · eq(r_x, row_bits) · eq(r_y, col_bits)`。
@@ -303,19 +334,39 @@ pub fn prove(
     // 对于非线性 CCS（存在 |S_i| ≥ 2）：actual_u_prime ≠ u_prime
     //   因为 Π_{j∈S_i} (v_L[j] + r·v_C[j]) ≠ Π v_L[j] + r·Π v_C[j]
     // 使用实际值作为 claimed sum（见 alternatives.md Phase 6 数学说明）
-    let mut actual_u_prime = Fr::zero();
-    for row in 0..num_rows {
-        let eq_val = eq_table[row];
-        let mut f_val = Fr::zero();
-        for (si, s) in ccs.subsets.iter().enumerate() {
-            let mut prod = Fr::one();
-            for &j in s {
-                prod = prod.mul(&vjp_tables[j][row]);
+    let actual_u_prime = if num_rows < PARALLEL_THRESHOLD {
+        let mut sum = Fr::zero();
+        for row in 0..num_rows {
+            let eq_val = eq_table[row];
+            let mut f_val = Fr::zero();
+            for (si, s) in ccs.subsets.iter().enumerate() {
+                let mut prod = Fr::one();
+                for &j in s {
+                    prod = prod.mul(&vjp_tables[j][row]);
+                }
+                f_val = f_val.add(&ccs.coeffs[si].mul(&prod));
             }
-            f_val = f_val.add(&ccs.coeffs[si].mul(&prod));
+            sum = sum.add(&eq_val.mul(&f_val));
         }
-        actual_u_prime = actual_u_prime.add(&eq_val.mul(&f_val));
-    }
+        sum
+    } else {
+        use rayon::prelude::*;
+        (0..num_rows)
+            .into_par_iter()
+            .map(|row| {
+                let eq_val = eq_table[row];
+                let mut f_val = Fr::zero();
+                for (si, s) in ccs.subsets.iter().enumerate() {
+                    let mut prod = Fr::one();
+                    for &j in s {
+                        prod = prod.mul(&vjp_tables[j][row]);
+                    }
+                    f_val = f_val.add(&ccs.coeffs[si].mul(&prod));
+                }
+                eq_val.mul(&f_val)
+            })
+            .reduce(Fr::zero, |a, b| a.add(&b))
+    };
 
     // ===== 3. 吸收 claimed sum（使用实际值） =====
     transcript.absorb_field(SUMCHECK_DOMAIN_TAG, &actual_u_prime);
@@ -347,19 +398,37 @@ pub fn prove(
 
             // F_e[i] = Σ_i c_i · Π_{j∈S_i} vjp_e[j][i]
             let half = eq_e.len();
-            let mut g_sum = Fr::zero();
-            for i in 0..half {
-                let mut f_val = Fr::zero();
-                for (si, s) in ccs.subsets.iter().enumerate() {
-                    let mut prod = Fr::one();
-                    for &j in s {
-                        prod = prod.mul(&vjp_e[j][i]);
+            let g_sum = if half < PARALLEL_THRESHOLD {
+                let mut sum = Fr::zero();
+                for i in 0..half {
+                    let mut f_val = Fr::zero();
+                    for (si, s) in ccs.subsets.iter().enumerate() {
+                        let mut prod = Fr::one();
+                        for &j in s {
+                            prod = prod.mul(&vjp_e[j][i]);
+                        }
+                        f_val = f_val.add(&ccs.coeffs[si].mul(&prod));
                     }
-                    f_val = f_val.add(&ccs.coeffs[si].mul(&prod));
+                    sum = sum.add(&eq_e[i].mul(&f_val));
                 }
-                let g_val = eq_e[i].mul(&f_val);
-                g_sum = g_sum.add(&g_val);
-            }
+                sum
+            } else {
+                use rayon::prelude::*;
+                (0..half)
+                    .into_par_iter()
+                    .map(|i| {
+                        let mut f_val = Fr::zero();
+                        for (si, s) in ccs.subsets.iter().enumerate() {
+                            let mut prod = Fr::one();
+                            for &j in s {
+                                prod = prod.mul(&vjp_e[j][i]);
+                            }
+                            f_val = f_val.add(&ccs.coeffs[si].mul(&prod));
+                        }
+                        eq_e[i].mul(&f_val)
+                    })
+                    .reduce(Fr::zero, |a, b| a.add(&b))
+            };
             evals.push(g_sum);
         }
 
@@ -451,10 +520,19 @@ pub fn prove(
 
             // H_e[i] = c_e[i] · z_e[i]
             let half = c_e.len();
-            let mut h_sum = Fr::zero();
-            for i in 0..half {
-                h_sum = h_sum.add(&c_e[i].mul(&z_e[i]));
-            }
+            let h_sum = if half < PARALLEL_THRESHOLD {
+                let mut sum = Fr::zero();
+                for i in 0..half {
+                    sum = sum.add(&c_e[i].mul(&z_e[i]));
+                }
+                sum
+            } else {
+                use rayon::prelude::*;
+                (0..half)
+                    .into_par_iter()
+                    .map(|i| c_e[i].mul(&z_e[i]))
+                    .reduce(Fr::zero, |a, b| a.add(&b))
+            };
             evals.push(h_sum);
         }
 

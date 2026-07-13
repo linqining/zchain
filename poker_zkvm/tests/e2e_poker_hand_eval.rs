@@ -16,7 +16,6 @@ use poker_zkvm::verifier::verify_production;
 /// 构造扑克牌型评估 prove 配置。
 fn poker_config() -> ProverConfig {
     ProverConfig {
-        batch_size: 3,
         proof_size_limit: MAX_PROOF_TOTAL_SIZE,
         ..Default::default()
     }

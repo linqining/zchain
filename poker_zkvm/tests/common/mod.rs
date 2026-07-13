@@ -44,7 +44,7 @@ use poker_zkvm::test_helpers::{add, addi, beq, build_elf32, ecall, encode_text, 
 ///
 /// `3 + 6*N + 1 + 5 = 6N + 9`
 ///
-/// N=0 → 9 步，N=100 → 609 步。batch_size=3 → 3/203 batches。
+/// N=0 → 9 步，N=100 → 609 步。batch_size=256 → 1/3 batches。
 ///
 /// # 参数
 /// - `n` — Fibonacci 迭代次数（须 ≤ 2047，受 ADDI 12 位立即数限制）
@@ -131,7 +131,7 @@ pub fn fibonacci_expected(n: u32) -> u32 {
 ///
 /// `6 + 8*N + 1 + 4 = 8N + 11`
 ///
-/// N=0 → 11 步，N=10 → 91 步。batch_size=3 → 4/31 batches。
+/// N=0 → 11 步，N=10 → 91 步。batch_size=256 → 1/1 batches。
 ///
 /// # 参数
 /// - `iterations` — SHA-256 哈希迭代次数（须 ≤ 2047）
@@ -207,7 +207,7 @@ pub fn build_sha256_chain_elf(iterations: u32) -> Vec<u8> {
 ///
 /// # Trace 步数
 ///
-/// 19 步。batch_size=3 → 7 batches。
+/// 19 步。batch_size=256 → 1 batch。
 ///
 /// # 输入
 ///

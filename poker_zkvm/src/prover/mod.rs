@@ -869,9 +869,10 @@ pub fn deserialize_spartan_proof(
     let z_at_r_y = read_field(bytes, &mut pos)?;
 
     // fold_step_count (u64 LE)
-    if pos.checked_add(8).ok_or_else(|| {
-        ZkvmError::InvalidZkProofFormat("fold_step_count overflow".to_string())
-    })? > bytes.len()
+    if pos
+        .checked_add(8)
+        .ok_or_else(|| ZkvmError::InvalidZkProofFormat("fold_step_count overflow".to_string()))?
+        > bytes.len()
     {
         return Err(ZkvmError::InvalidZkProofFormat(
             "fold_step_count data too short".to_string(),
@@ -1167,7 +1168,18 @@ fn pad_trace(trace: &mut Trace, batch_size: usize) -> Result<(), ZkvmError> {
 /// 跨 crate 测试（如 poker_l1 集成测试）需在 `Cargo.toml` 中启用 `poker_zkvm` 的 `test-helpers` feature。
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
-    // 编码 I-type 指令
+    generate_test_proof_with_config(ProverConfig {
+        batch_size: 3,
+        proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+        ..Default::default()
+    })
+}
+
+/// 测试辅助：构造标准测试 ELF 字节（5 步程序：LUI + ADDI + ADDI + ECALL + 4 NOP）。
+///
+/// 供 [`generate_test_proof_with_config`] 和 [`generate_ccs_for_config`] 共享。
+#[cfg(any(test, feature = "test-helpers"))]
+fn build_test_elf_bytes() -> Vec<u8> {
     fn encode_i(opcode: u32, funct3: u8, rd: u8, rs1: u8, imm12: u32) -> u32 {
         ((imm12 & 0xFFF) << 20)
             | ((rs1 as u32) << 15)
@@ -1176,7 +1188,6 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
             | opcode
     }
 
-    // 构造最小 ELF32
     fn build_test_elf(entry: u32, text_vaddr: u32, text_bytes: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(84 + text_bytes.len());
         bytes.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -1208,33 +1219,55 @@ pub fn generate_test_proof() -> (Vec<u8>, ZkPublicIo) {
         bytes
     }
 
-    // 将 u32 指令序列编码为 LE 字节
     fn encode_text(words: &[u32]) -> Vec<u8> {
         words.iter().copied().flat_map(u32::to_le_bytes).collect()
     }
 
     let text = encode_text(&[
-        // LUI a0, 1 — a0 = 0x1000 (text segment start, 32 bytes 可读)
         (1 << 12) | (10 << 7) | 0x37,
-        encode_i(0x13, 0, 11, 0, 32), // ADDI a1, x0, 32 (output len = 32 bytes)
-        encode_i(0x13, 0, 17, 0, 2),  // ADDI a7, x0, 2 (commit_output)
-        0x00000073,                   // ECALL
-        encode_i(0x13, 0, 0, 0, 0),   // NOP (padding 使 text ≥ 32 bytes)
-        encode_i(0x13, 0, 0, 0, 0),   // NOP
-        encode_i(0x13, 0, 0, 0, 0),   // NOP
-        encode_i(0x13, 0, 0, 0, 0),   // NOP
+        encode_i(0x13, 0, 11, 0, 32),
+        encode_i(0x13, 0, 17, 0, 2),
+        0x00000073,
+        encode_i(0x13, 0, 0, 0, 0),
+        encode_i(0x13, 0, 0, 0, 0),
+        encode_i(0x13, 0, 0, 0, 0),
+        encode_i(0x13, 0, 0, 0, 0),
     ]);
-    let elf = build_test_elf(0x1000, 0x1000, &text);
+    build_test_elf(0x1000, 0x1000, &text)
+}
 
-    let config = ProverConfig {
-        batch_size: 3,
-        proof_size_limit: MAX_PROOF_TOTAL_SIZE,
-        ..Default::default()
-    };
-
-    // 使用 32 字节 input，使 poker_l1 public_io 双向转换可逆
+/// 测试辅助：使用指定 ProverConfig 生成 proof bytes + public_io。
+///
+/// 与 [`generate_test_proof`] 相同的 ELF 程序，但接受自定义 config（用于不同 batch_size 的 CCS 生成）。
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn generate_test_proof_with_config(config: ProverConfig) -> (Vec<u8>, ZkPublicIo) {
+    let elf = build_test_elf_bytes();
     let input = vec![0u8; 32];
     prove(&elf, &input, &config).expect("prove 应成功")
+}
+
+/// 测试辅助：使用指定 ProverConfig 直接生成 CCS（不经过 fold/serialize，避免大 proof 序列化问题）。
+///
+/// 与 [`generate_test_proof_with_config`] 相同的 ELF 程序，但仅执行到 CCS 编译步骤，
+/// 直接返回 CCS 结构。用于 `default_ccs_registry()` 中批量生成不同 batch_size 的 CCS。
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn generate_ccs_for_config(config: ProverConfig) -> crate::ccs::Ccs {
+    let elf = build_test_elf_bytes();
+
+    let exec_config = ZkvmExecutionConfig {
+        input: vec![0u8; 32],
+        randomness_seed: config.randomness_seed.into_fr(),
+        initial_commitment: config.initial_commitment.into_fr(),
+        final_commitment: config.final_commitment.into_fr(),
+        host_state: Box::new(StubHostState),
+    };
+    let exec_result = execute_elf_with_config(&elf, exec_config).expect("execute 应成功");
+
+    let mut trace = exec_result.trace;
+    pad_trace(&mut trace, config.batch_size).expect("pad_trace 应成功");
+
+    let ccs_instances = compile_trace_to_ccs(&trace, config.batch_size).expect("compile 应成功");
+    ccs_instances[0].ccs.clone()
 }
 
 /// 测试辅助：生成单实例 proof bytes + public_io。
@@ -1302,15 +1335,26 @@ pub fn generate_single_instance_test_proof() -> (Vec<u8>, ZkPublicIo) {
     prove(&elf, &input, &config).expect("单实例 prove 应成功")
 }
 
-/// 构造默认 CCS 注册表（从 `generate_test_proof` 提取完整 CCS 结构）。
+/// 构造默认 CCS 注册表（包含 batch_size=3 和 batch_size=256 两种 CCS）。
+///
+/// - batch_size=3 CCS：供 soundness tests 使用（`generate_test_proof()` 用 batch_size=3）
+/// - batch_size=256 CCS：供 e2e tests 和生产使用（`ProverConfig::default()` 用 batch_size=256）
+///
+/// 使用 [`generate_ccs_for_config`] 直接生成 CCS，避免大 proof 序列化/反序列化。
 ///
 /// **MVP 权宜之计**：仅供测试、基准测试和 MVP 生产调用方使用。
 /// 生产环境应由链上治理配置注册表（覆盖所有合法 batch_size 的 CCS 结构）。
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn default_ccs_registry() -> Vec<crate::ccs::Ccs> {
-    let (proof_bytes, _) = generate_test_proof();
-    let proof = deserialize_proof(&proof_bytes).expect("deserialize generate_test_proof 应成功");
-    vec![proof.initial_lcccs.ccs_ref]
+    vec![
+        // batch_size=3 CCS（soundness tests 使用）
+        generate_ccs_for_config(ProverConfig {
+            batch_size: 3,
+            ..Default::default()
+        }),
+        // batch_size=256 CCS（e2e tests + 生产使用）
+        generate_ccs_for_config(ProverConfig::default()),
+    ]
 }
 
 /// 构造默认 CCS commitment 白名单（deprecated — 使用 [`default_ccs_registry`]）。
@@ -1726,8 +1770,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (proof_bytes, _public_io) = prove(&elf, &[], &config)
-            .expect("prove 应成功（自动 Spartan 压缩）");
+        let (proof_bytes, _public_io) =
+            prove(&elf, &[], &config).expect("prove 应成功（自动 Spartan 压缩）");
 
         // 验证 magic = SPRT
         assert_eq!(

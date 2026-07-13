@@ -16,7 +16,6 @@ use sha2::{Digest, Sha256};
 /// 构造 SHA-256 哈希链 prove 配置。
 fn sha_config() -> ProverConfig {
     ProverConfig {
-        batch_size: 3,
         proof_size_limit: MAX_PROOF_TOTAL_SIZE,
         ..Default::default()
     }
@@ -69,7 +68,7 @@ fn run_sha256_chain_e2e(iterations: u32, input: &[u8]) {
 
 #[test]
 fn test_sha256_chain_n1_zeros() {
-    // N=1 → 7*1+11=18 步，batch_size=3 → 6 batches
+    // N=1 → 7*1+11=18 步，batch_size=256 → 1 batch
     let input = [0u8; 32];
     run_sha256_chain_e2e(1, &input);
 }
@@ -83,7 +82,7 @@ fn test_sha256_chain_n5_zeros() {
 
 #[test]
 fn test_sha256_chain_n10_zeros() {
-    // N=10 → 7*10+11=81 步，batch_size=3 → 27 batches
+    // N=10 → 7*10+11=81 步，batch_size=256 → 1 batch
     let input = [0u8; 32];
     run_sha256_chain_e2e(10, &input);
 }

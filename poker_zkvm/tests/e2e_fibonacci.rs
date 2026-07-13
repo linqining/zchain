@@ -15,7 +15,6 @@ use poker_zkvm::verifier::verify_production;
 /// 构造 Fibonacci prove 配置。
 fn fib_config() -> ProverConfig {
     ProverConfig {
-        batch_size: 3,
         proof_size_limit: MAX_PROOF_TOTAL_SIZE,
         ..Default::default()
     }
@@ -80,13 +79,13 @@ fn test_fibonacci_n10() {
 
 #[test]
 fn test_fibonacci_n50() {
-    // N=50 → 6*50+9=309 步，batch_size=3 → 103 batches
+    // N=50 → 6*50+9=309 步，batch_size=256 → 2 batches
     run_fibonacci_e2e(50);
 }
 
 #[test]
 fn test_fibonacci_n100() {
-    // N=100 → 6*100+9=609 步，batch_size=3 → 203 batches
+    // N=100 → 6*100+9=609 步，batch_size=256 → 3 batches
     run_fibonacci_e2e(100);
 }
 
