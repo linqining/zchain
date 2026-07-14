@@ -2581,8 +2581,12 @@ dependencies = [
 name = "zchain"
 version = "0.1.0"
 dependencies = [
+ "bcs",
+ "blake2",
  "hex",
  "poker_l1",
+ "rand 0.8.6",
+ "secp256k1",
  "serde",
  "serde_json",
  "tokio",

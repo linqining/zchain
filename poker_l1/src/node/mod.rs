@@ -284,6 +284,8 @@ pub struct Node {
     tx_cache: std::sync::Mutex<TxCacheState>,
     /// 待装 vertex 的 tx 缓冲（仅 Validator 角色）。
     pending_tx: std::sync::Mutex<std::collections::VecDeque<Transaction>>,
+    /// pending_tx 的 Condvar — submit_tx 时 notify，validator loop 用 wait_timeout 等待。
+    pending_tx_condvar: std::sync::Condvar,
 }
 
 impl Node {
@@ -303,6 +305,7 @@ impl Node {
             account_store: std::sync::Mutex::new(AccountStore::new()),
             tx_cache: std::sync::Mutex::new(TxCacheState::new()),
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            pending_tx_condvar: std::sync::Condvar::new(),
         })
     }
 
@@ -323,6 +326,7 @@ impl Node {
             account_store: std::sync::Mutex::new(AccountStore::new()),
             tx_cache: std::sync::Mutex::new(TxCacheState::new()),
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            pending_tx_condvar: std::sync::Condvar::new(),
         })
     }
 
@@ -453,6 +457,8 @@ impl Node {
             while pending.len() > MAX_PENDING_TX_SIZE {
                 pending.pop_front();
             }
+            // 唤醒 validator loop（混合模式：有 tx 时立即出 vertex）
+            self.pending_tx_condvar.notify_one();
         }
         Ok(tx_hash)
     }
@@ -474,6 +480,26 @@ impl Node {
             .unwrap_or_else(|e| e.into_inner())
             .drain(..)
             .collect()
+    }
+
+    /// 等待 pending_tx 非空或超时（混合模式核心）。
+    ///
+    /// - 如果 pending_tx 已有 tx → 立即返回 `true`
+    /// - 否则阻塞等待，被 `submit_tx` 的 `notify_one` 唤醒后返回 `true`
+    /// - 超时返回 `false`（调用方据此决定是否产出空 vertex 推进 commit）
+    pub fn wait_for_pending_tx(&self, timeout: std::time::Duration) -> bool {
+        let guard = self
+            .pending_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !guard.is_empty() {
+            return true;
+        }
+        let result = self
+            .pending_tx_condvar
+            .wait_timeout(guard, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        !result.0.is_empty()
     }
 
     /// 是否提供历史数据 RPC（仅 Archive 节点）。

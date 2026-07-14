@@ -16,7 +16,7 @@
 //! - 纯库代码，可单元测试；集成测试见 `tests/phase6_integration.rs`
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -617,7 +617,7 @@ pub struct RpcHandler<'a, B: RpcBackend> {
     /// 后端。
     backend: &'a B,
     /// 安全守卫（H-1 修复 — 认证 + 限流）。
-    guard: Option<RpcGuard>,
+    guard: Option<Arc<RpcGuard>>,
 }
 
 impl<'a, B: RpcBackend> RpcHandler<'a, B> {
@@ -630,7 +630,9 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
     }
 
     /// 创建带安全守卫的 handler（H-1 修复）。
-    pub const fn with_guard(backend: &'a B, guard: RpcGuard) -> Self {
+    ///
+    /// guard 以 `Arc` 共享，使多连接共享同一限流窗口与认证配置。
+    pub fn with_guard(backend: &'a B, guard: Arc<RpcGuard>) -> Self {
         Self {
             backend,
             guard: Some(guard),
@@ -1563,7 +1565,7 @@ mod tests {
             ..Default::default()
         };
         let guard = RpcGuard::rate_limit_only(config);
-        let handler = RpcHandler::with_guard(&backend, guard);
+        let handler = RpcHandler::with_guard(&backend, Arc::new(guard));
 
         let client = RpcClientInfo {
             client_id: Some("test-client".to_string()),
@@ -1616,7 +1618,7 @@ mod tests {
             ..Default::default()
         };
         let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
-        let handler = RpcHandler::with_guard(&backend, guard);
+        let handler = RpcHandler::with_guard(&backend, Arc::new(guard));
 
         let client = RpcClientInfo::default(); // 无 API key
         let req = JsonRpcRequest {
@@ -1639,7 +1641,7 @@ mod tests {
             ..Default::default()
         };
         let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
-        let handler = RpcHandler::with_guard(&backend, guard);
+        let handler = RpcHandler::with_guard(&backend, Arc::new(guard));
 
         let client = RpcClientInfo {
             api_key: Some("wrong-key".to_string()),
@@ -1665,7 +1667,7 @@ mod tests {
             ..Default::default()
         };
         let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
-        let handler = RpcHandler::with_guard(&backend, guard);
+        let handler = RpcHandler::with_guard(&backend, Arc::new(guard));
 
         let tx = signed_dummy_tx();
         let tx_bytes = tx.to_bcs().unwrap();
@@ -1692,7 +1694,7 @@ mod tests {
             allowed_api_keys: HashSet::from(["secret-key".to_string()]),
         };
         let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
-        let handler = RpcHandler::with_guard(&backend, guard);
+        let handler = RpcHandler::with_guard(&backend, Arc::new(guard));
 
         // Read 请求不需要认证
         let client = RpcClientInfo::default();
@@ -1714,7 +1716,7 @@ mod tests {
             ..Default::default()
         };
         let guard = RpcGuard::rate_limit_only(config);
-        let handler = RpcHandler::with_guard(&backend, guard);
+        let handler = RpcHandler::with_guard(&backend, Arc::new(guard));
 
         // client_a 用尽 read 配额
         let client_a = RpcClientInfo {
