@@ -30,6 +30,12 @@ use crate::storage::{BlockStore, DagVertexStore, NodeRole as PruningNodeRole, Ob
 use crate::transaction::Transaction;
 use crate::{Address, BlockHeight, ChainId, Hash};
 
+/// tx_cache 最大条目数（C-2 修复 — 防止内存 DoS）。
+const MAX_NODE_TX_CACHE_SIZE: usize = 10_000;
+
+/// pending_tx 最大条目数（C-2 修复 — 防止内存 DoS）。
+const MAX_PENDING_TX_SIZE: usize = 10_000;
+
 // ===== SubTask 32.1 ~ 32.4: 节点角色 =====
 
 /// 节点角色（spec SubTask 32.1 ~ 32.4）。
@@ -168,12 +174,29 @@ impl NodeConfig {
 ///
 /// 用于 DAG vertex 签名与 commit certificate 签名。
 /// 注意：私钥仅在 validator 节点内存中持有，不持久化到磁盘。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// M-4 修复：实现 `Drop` 自动 zeroize 私钥，自定义 `Debug` 隐藏私钥内容。
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ValidatorKey {
     /// secp256k1 私钥（32 字节）。
     pub secret_key_bytes: [u8; 32],
     /// 对应的 tagged pubkey。
     pub tagged_pubkey: TaggedPubkey,
+}
+
+impl std::fmt::Debug for ValidatorKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatorKey")
+            .field("secret_key_bytes", &"[REDACTED]")
+            .field("tagged_pubkey", &self.tagged_pubkey)
+            .finish()
+    }
+}
+
+impl Drop for ValidatorKey {
+    fn drop(&mut self) {
+        self.secret_key_bytes.fill(0);
+    }
 }
 
 impl ValidatorKey {
@@ -201,6 +224,47 @@ impl ValidatorKey {
 
 // ===== Node =====
 
+/// tx 缓存状态（M-6 修复 — 合并 cache + order 到单个 Mutex 避免多锁死锁）。
+///
+/// C-2 修复：FIFO 淘汰机制防止内存 DoS（上限 10,000 条）。
+struct TxCacheState {
+    /// tx_hash → tx 映射。
+    cache: std::collections::HashMap<Hash, Transaction>,
+    /// 插入顺序（FIFO 淘汰追踪）。
+    order: std::collections::VecDeque<Hash>,
+}
+
+impl TxCacheState {
+    /// 创建空状态。
+    fn new() -> Self {
+        Self {
+            cache: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 插入 tx，若已存在则更新；若新插入则追加到 order 队列。
+    /// 超过 max_size 时 FIFO 淘汰最旧条目。
+    fn insert(&mut self, tx_hash: Hash, tx: Transaction, max_size: usize) {
+        if !self.cache.contains_key(&tx_hash) {
+            self.order.push_back(tx_hash);
+        }
+        self.cache.insert(tx_hash, tx);
+        while self.cache.len() > max_size {
+            if let Some(old_hash) = self.order.pop_front() {
+                self.cache.remove(&old_hash);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// 按 hash 查询 tx。
+    fn get(&self, tx_hash: &Hash) -> Option<&Transaction> {
+        self.cache.get(tx_hash)
+    }
+}
+
 /// 节点实例 — 持有存储后端与可选 validator 密钥。
 ///
 /// 不直接运行网络/event loop；由上层二进制集成 tokio runtime + network + RPC server。
@@ -216,8 +280,8 @@ pub struct Node {
     vertex_store: DagVertexStore,
     /// AccountStore（内存版，Phase 4 接入 rocksdb）。
     account_store: std::sync::Mutex<AccountStore>,
-    /// 已提交的 tx 缓存（tx_hash → tx）。
-    tx_cache: std::sync::Mutex<std::collections::HashMap<Hash, Transaction>>,
+    /// 已提交的 tx 缓存（M-6 修复 — cache + order 合并到单个 Mutex）。
+    tx_cache: std::sync::Mutex<TxCacheState>,
     /// 待装 vertex 的 tx 缓冲（仅 Validator 角色）。
     pending_tx: std::sync::Mutex<std::collections::VecDeque<Transaction>>,
 }
@@ -237,7 +301,7 @@ impl Node {
             object_db: std::sync::Mutex::new(object_db),
             vertex_store,
             account_store: std::sync::Mutex::new(AccountStore::new()),
-            tx_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            tx_cache: std::sync::Mutex::new(TxCacheState::new()),
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
         })
     }
@@ -257,7 +321,7 @@ impl Node {
             object_db: std::sync::Mutex::new(ObjectDb::open_inmemory()?),
             vertex_store: DagVertexStore::open_inmemory()?,
             account_store: std::sync::Mutex::new(AccountStore::new()),
-            tx_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            tx_cache: std::sync::Mutex::new(TxCacheState::new()),
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
         })
     }
@@ -317,12 +381,19 @@ impl Node {
 
     /// 写入对象。
     pub fn put_object(&self, object: Object) -> PokerL1Result<()> {
-        self.object_db.lock().unwrap().create(object)
+        self.object_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .create(object)
     }
 
     /// 查询对象。
     pub fn get_object(&self, id: &ObjectID) -> PokerL1Result<Option<Object>> {
-        let result = self.object_db.lock().unwrap().read(id);
+        let result = self
+            .object_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .read(id);
         match result {
             Ok(obj) => Ok(Some(obj)),
             Err(PokerL1Error::ObjectNotFound(_)) => Ok(None),
@@ -346,34 +417,63 @@ impl Node {
 
     /// 写入 account。
     pub fn put_account(&self, account: Account) -> PokerL1Result<()> {
-        self.account_store.lock().unwrap().create(account)
+        self.account_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .create(account)
     }
 
     /// 按 address 查询 account。
     pub fn get_account(&self, address: &Address) -> PokerL1Result<Option<Account>> {
-        Ok(self.account_store.lock().unwrap().get(address).cloned())
+        Ok(self
+            .account_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(address)
+            .cloned())
     }
 
     /// 提交 tx（缓存 + pending 缓冲）。
     ///
     /// Validator 节点会将 tx 装入下一个 vertex；非 Validator 节点仅缓存用于查询。
+    /// C-2 修复：tx_cache 和 pending_tx 均有 FIFO 驱逐上限（10,000 条）。
+    /// M-6 修复：tx_cache + order 合并到单个 Mutex，消除多锁死锁风险。
     pub fn submit_tx(&self, tx: Transaction) -> PokerL1Result<Hash> {
         let tx_hash = tx.tx_hash();
-        self.tx_cache.lock().unwrap().insert(tx_hash, tx.clone());
+
+        // M-6 修复：单次 lock 即可完成 cache + order 操作
+        {
+            let mut cache = self.tx_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.insert(tx_hash, tx.clone(), MAX_NODE_TX_CACHE_SIZE);
+        }
+
         if self.config.role.is_validator() {
-            self.pending_tx.lock().unwrap().push_back(tx);
+            let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
+            pending.push_back(tx);
+            while pending.len() > MAX_PENDING_TX_SIZE {
+                pending.pop_front();
+            }
         }
         Ok(tx_hash)
     }
 
     /// 按 hash 查询 tx（从缓存；archive node 可遍历 block）。
     pub fn get_tx(&self, tx_hash: &Hash) -> PokerL1Result<Option<Transaction>> {
-        Ok(self.tx_cache.lock().unwrap().get(tx_hash).cloned())
+        Ok(self
+            .tx_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tx_hash)
+            .cloned())
     }
 
     /// 取出待装 vertex 的 tx（仅 Validator 角色有效）。
     pub fn drain_pending_tx(&self) -> Vec<Transaction> {
-        self.pending_tx.lock().unwrap().drain(..).collect()
+        self.pending_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect()
     }
 
     /// 是否提供历史数据 RPC（仅 Archive 节点）。
@@ -487,7 +587,8 @@ pub fn compute_assigned_validator_local<'a>(
     // 取前 8 字节作为 u64 索引
     let mut idx_bytes = [0u8; 8];
     idx_bytes.copy_from_slice(&out[..8]);
-    let idx = u64::from_le_bytes(idx_bytes) as usize % validator_set.len();
+    // M-8 修复：先在 u64 上取模再转 usize，避免 32-bit 平台截断
+    let idx = (u64::from_le_bytes(idx_bytes) % validator_set.len() as u64) as usize;
     validator_set.get(idx)
 }
 

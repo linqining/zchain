@@ -124,6 +124,12 @@ pub struct CheckinTx {
     pub proof_kind: super::zk_verifier::ProofKind,
     /// 是否基于 partial_checkin 衔接（SEC2-M8）。
     pub has_partial_checkin: bool,
+    /// H-6 修复：折叠步数（由 prover 提供，进入 ZkPublicIo 而非硬编码）。
+    pub folded_step_count: u32,
+    /// H-6 修复：被跳过的 checkpoint 段数（由 prover 提供）。
+    pub skip_count: u32,
+    /// H-6 修复：段间连续性证明（由 prover 提供）。
+    pub segment_continuity_proof: Vec<u8>,
 }
 
 impl CheckinTx {
@@ -296,9 +302,11 @@ pub fn execute_checkin(
     checkout_commitment: Hash,
 ) -> Result<ZkVerifyResult, PokerL1Error> {
     // SEC2-M4：ack_chain 长度校验
-    if tx.ack_chain.len() as u32 > max_ack_chain_length {
+    // M-13 修复：在 usize 域比较，避免 64-bit 平台 `as u32` 截断绕过上限检查
+    if tx.ack_chain.len() > max_ack_chain_length as usize {
+        let actual_u32 = u32::try_from(tx.ack_chain.len()).unwrap_or(u32::MAX);
         return Err(PokerL1Error::AckChainLengthExceeded {
-            actual: tx.ack_chain.len() as u32,
+            actual: actual_u32,
             limit: max_ack_chain_length,
         });
     }
@@ -318,7 +326,7 @@ pub fn execute_checkin(
         });
     }
 
-    // 构造 public_io
+    // 构造 public_io（H-6 修复：使用 tx 提供的实际值而非硬编码）
     let ack_chain_hash = tx.ack_chain_hash();
     let state_delta_hash = tx.state_delta_hash();
     let public_io = super::zk_verifier::ZkPublicIo {
@@ -328,9 +336,9 @@ pub fn execute_checkin(
         final_commitment: tx.new_commitment,
         state_delta_hash,
         ack_chain_hash,
-        fold_step_count: 1, // MVP：单步
-        skip_count: 0,
-        segment_continuity_proof: Vec::new(),
+        fold_step_count: tx.folded_step_count,
+        skip_count: tx.skip_count,
+        segment_continuity_proof: tx.segment_continuity_proof.clone(),
     };
 
     // SEC2-M8：has_partial_checkin 一致性校验
@@ -637,6 +645,9 @@ mod tests {
             scheme_id: 1,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let h1 = tx.signing_hash(crate::DEFAULT_CHAIN_ID);
@@ -655,6 +666,9 @@ mod tests {
             scheme_id: 1,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let h1 = tx.signing_hash(crate::DEFAULT_CHAIN_ID);
@@ -675,6 +689,9 @@ mod tests {
             scheme_id: 1,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let expected = super::super::ack_chain::compute_ack_chain_hash(&ack_chain);
@@ -721,6 +738,9 @@ mod tests {
             scheme_id: 1, // Hypernova
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let result = execute_checkin(
@@ -752,6 +772,9 @@ mod tests {
             scheme_id: 1,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let result = execute_checkin(
@@ -782,6 +805,9 @@ mod tests {
             scheme_id: 1,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: true,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let result = execute_checkin(
@@ -812,6 +838,9 @@ mod tests {
             scheme_id: 1,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let last_partial_fold = LastPartialFold {
@@ -972,6 +1001,9 @@ mod tests {
             scheme_id: SCHEME_HYPERNOVA,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let result = execute_checkin(
@@ -1010,6 +1042,9 @@ mod tests {
             scheme_id: SCHEME_ZKSHUFFLE,
             proof_kind: ProofKind::ZkShuffle,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         // grace 期 ctx：uses_new_signature=false（ZkShuffle 旧签名），
@@ -1058,6 +1093,9 @@ mod tests {
             scheme_id: SCHEME_HYPERNOVA,
             proof_kind: ProofKind::ZkShuffle,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let result = execute_checkin(
@@ -1093,6 +1131,9 @@ mod tests {
             scheme_id: 99,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let result = execute_checkin(
@@ -1128,6 +1169,9 @@ mod tests {
             scheme_id: SCHEME_HYPERNOVA,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
+            folded_step_count: 1,
+            skip_count: 0,
+            segment_continuity_proof: Vec::new(),
         };
 
         let hash_zkvm = base_tx.signing_hash(crate::DEFAULT_CHAIN_ID);

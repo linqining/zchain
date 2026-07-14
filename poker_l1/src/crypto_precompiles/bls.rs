@@ -210,7 +210,7 @@ pub fn bls_pairing_check(
 /// SEC2-L2 修复：DST 固定为 [`BLS_G1_DST`]，runtime 自动附加，不允许合约自定义。
 /// gas = `1000 + 10 * msg.len()`；msg > 65536 字节返回 `InputTooLong`。
 pub fn bls_hash_to_g1(msg: &[u8]) -> PokerL1Result<[u8; G1_COMPRESSED_SIZE]> {
-    crate::vm::gas_table::check_bls_hash_msg_len(msg.len())?;
+    crate::vm::gas_table::check_bls_hash_msg_len(msg.len() as u64)?;
     let point = G1Projective::hash_to_curve(msg, BLS_G1_DST, &[]);
     Ok(serialize_g1(&point))
 }
@@ -220,7 +220,7 @@ pub fn bls_hash_to_g1(msg: &[u8]) -> PokerL1Result<[u8; G1_COMPRESSED_SIZE]> {
 /// SEC2-L2 修复：DST 固定为 [`BLS_G2_DST`]，runtime 自动附加，不允许合约自定义。
 /// gas = `1000 + 10 * msg.len()`；msg > 65536 字节返回 `InputTooLong`。
 pub fn bls_hash_to_g2(msg: &[u8]) -> PokerL1Result<[u8; G2_COMPRESSED_SIZE]> {
-    crate::vm::gas_table::check_bls_hash_msg_len(msg.len())?;
+    crate::vm::gas_table::check_bls_hash_msg_len(msg.len() as u64)?;
     let point = G2Projective::hash_to_curve(msg, BLS_G2_DST, &[]);
     Ok(serialize_g2(&point))
 }

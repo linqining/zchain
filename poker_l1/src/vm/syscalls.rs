@@ -231,7 +231,8 @@ declare_builtin_function!(
         validate_heap_ptr(data_ptr, data_len)?;
 
         // IMPL-SEC-4 (7)：Object ≤ 64KB
-        if data_len as usize > MAX_OBJECT_SIZE {
+        // M-8 修复：在 u64 域比较，避免 32-bit 平台 `as usize` 截断绕过上限
+        if data_len > MAX_OBJECT_SIZE as u64 {
             return Err(to_syscall_err(PokerL1Error::ObjectTooLarge {
                 actual: data_len as usize,
                 limit: MAX_OBJECT_SIZE,
@@ -251,6 +252,13 @@ declare_builtin_function!(
                 "object_write: invalid ObjectID bytes".to_string(),
             ))
         })?;
+
+        // H-5 修复：所有权检查 — 仅允许写入本次执行创建的或已缓存的对象
+        if !ctx.created_objects.contains(&object_id) && !ctx.object_cache.contains_key(&object_id) {
+            return Err(to_syscall_err(PokerL1Error::InvalidSyscallArgument(format!(
+                "object_write: caller does not own object {object_id:?}"
+            ))));
+        }
 
         // IMPL-SEC-4 (5)(6)：执行前扣费
         let gas = object_write_gas(data_len);
@@ -298,7 +306,8 @@ declare_builtin_function!(
         validate_heap_ptr(out_id_ptr, out_id_len)?;
 
         // IMPL-SEC-4 (7)：Object ≤ 64KB
-        if data_len as usize > MAX_OBJECT_SIZE {
+        // M-8 修复：在 u64 域比较，避免 32-bit 平台 `as usize` 截断绕过上限
+        if data_len > MAX_OBJECT_SIZE as u64 {
             return Err(to_syscall_err(PokerL1Error::ObjectTooLarge {
                 actual: data_len as usize,
                 limit: MAX_OBJECT_SIZE,
@@ -316,11 +325,13 @@ declare_builtin_function!(
         let gas = object_create_gas(data_len);
         charge_gas(ctx, gas)?;
 
-        // 生成 ObjectID（确定性：caller + block_height + 本次调用内计数器）
+        // 生成 ObjectID（确定性：caller + block_height + tx.nonce + 本次调用内计数器）
+        // H-3 修复：加入 tx.nonce 防止同一 caller 在同一 block 内多笔 tx 产生 ObjectID 碰撞
         let creation_nonce = ctx
             .tx
             .block_height
-            .wrapping_shl(20)
+            .wrapping_shl(40)
+            .wrapping_add(ctx.tx.nonce.wrapping_shl(20))
             .wrapping_add(ctx.created_objects.len() as u64);
         let object_id = ObjectID::new(ctx.tx.caller, creation_nonce);
 
@@ -365,7 +376,8 @@ declare_builtin_function!(
         validate_heap_ptr(payload_ptr, payload_len)?;
 
         // IMPL-SEC-4 (6)：payload ≤ 16KB
-        if payload_len as usize > MAX_EVENT_PAYLOAD_SIZE {
+        // M-8 修复：在 u64 域比较，避免 32-bit 平台 `as usize` 截断绕过上限
+        if payload_len > MAX_EVENT_PAYLOAD_SIZE as u64 {
             return Err(to_syscall_err(PokerL1Error::EventTooLarge {
                 actual: payload_len as usize,
                 limit: MAX_EVENT_PAYLOAD_SIZE,
@@ -612,7 +624,8 @@ declare_builtin_function!(
         charge_gas(ctx, GAS_VERIFY_FAILURE_PROOF)?;
 
         // 校验最小长度
-        if (proof_len as usize) < FAILURE_PROOF_HEADER_SIZE {
+        // M-8 修复：在 u64 域比较，避免 32-bit 平台 `as usize` 截断导致大值绕过下限检查
+        if proof_len < FAILURE_PROOF_HEADER_SIZE as u64 {
             return Ok(1); // 证明无效
         }
 
@@ -1026,7 +1039,8 @@ declare_builtin_function!(
         validate_heap_ptr(out_ptr, bls::G1_COMPRESSED_SIZE as u64)?;
 
         // 先校验 msg 长度（避免 read 巨量数据前提前拒绝）
-        check_bls_hash_msg_len(msg_len as usize).map_err(to_syscall_err)?;
+        // M-8 修复：check_bls_hash_msg_len 现接受 u64，避免 32-bit 截断
+        check_bls_hash_msg_len(msg_len).map_err(to_syscall_err)?;
 
         // gas 按字节线性计费（worst-case）
         charge_gas(ctx, bls_hash_to_g1_gas(msg_len))?;
@@ -1056,7 +1070,8 @@ declare_builtin_function!(
         validate_heap_ptr(msg_ptr, msg_len)?;
         validate_heap_ptr(out_ptr, bls::G2_COMPRESSED_SIZE as u64)?;
 
-        check_bls_hash_msg_len(msg_len as usize).map_err(to_syscall_err)?;
+        // M-8 修复：check_bls_hash_msg_len 现接受 u64，避免 32-bit 截断
+        check_bls_hash_msg_len(msg_len).map_err(to_syscall_err)?;
 
         charge_gas(ctx, bls_hash_to_g2_gas(msg_len))?;
 
@@ -1436,6 +1451,9 @@ mod tests {
         let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
 
         let id = ObjectID::new([1u8; 20], 42);
+        // H-5 修复：object_write 须验证 caller 拥有对象。
+        // 预填充 object_cache 模拟先前 object_read 获取的对象。
+        ctx.object_cache.insert(id, b"old data".to_vec());
         heap[..28].copy_from_slice(&id.to_bytes());
         heap[100..108].copy_from_slice(b"new data");
 

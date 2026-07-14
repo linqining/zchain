@@ -559,7 +559,8 @@ impl ValidatorSet {
         // 取前 8 字节作为 u64 索引
         let mut idx_bytes = [0u8; 8];
         idx_bytes.copy_from_slice(&hash[0..8]);
-        let idx = u64::from_le_bytes(idx_bytes) as usize % active.len();
+        // M-8 修复：先在 u64 上取模再转 usize，避免 32-bit 平台截断
+        let idx = (u64::from_le_bytes(idx_bytes) % active.len() as u64) as usize;
         Ok(active[idx].pubkey.clone())
     }
 }

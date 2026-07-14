@@ -631,24 +631,36 @@ impl InMemoryTransport {
 
     /// 添加已知 peer。
     pub fn add_peer(&self, peer: PeerInfo) {
-        self.peers.lock().unwrap().push(peer);
+        self.peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(peer);
     }
 
     /// 注入 block 到模拟存储（测试用）。
     pub fn inject_block(&self, block: Block) {
         let height = block.header.height;
-        self.blocks.lock().unwrap().insert(height, block);
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(height, block);
     }
 
     /// 注入 vertex 到模拟存储（测试用）。
     pub fn inject_vertex(&self, vertex: DagVertex) {
         let round = vertex.round;
-        self.vertices.lock().unwrap().insert(round, vertex);
+        self.vertices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(round, vertex);
     }
 
     /// 注入轻客户端 header（测试用）。
     pub fn inject_light_header(&self, header: LightClientHeader) {
-        self.light_headers.lock().unwrap().push(header);
+        self.light_headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(header);
     }
 
     /// 获取已广播的消息（测试验证用）。
@@ -679,7 +691,7 @@ impl NetworkTransport for InMemoryTransport {
     }
 
     fn discover_peers(&self) -> PokerL1Result<Vec<PeerInfo>> {
-        Ok(self.peers.lock().unwrap().clone())
+        Ok(self.peers.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
     fn request_blocks_by_range(
@@ -687,7 +699,7 @@ impl NetworkTransport for InMemoryTransport {
         start: BlockHeight,
         end: BlockHeight,
     ) -> PokerL1Result<Vec<Block>> {
-        let blocks = self.blocks.lock().unwrap();
+        let blocks = self.blocks.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
         for height in start..=end {
             if let Some(block) = blocks.get(&height) {
@@ -702,7 +714,7 @@ impl NetworkTransport for InMemoryTransport {
         start_round: u64,
         end_round: u64,
     ) -> PokerL1Result<Vec<DagVertex>> {
-        let vertices = self.vertices.lock().unwrap();
+        let vertices = self.vertices.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
         for round in start_round..=end_round {
             if let Some(vertex) = vertices.get(&round) {
@@ -713,7 +725,11 @@ impl NetworkTransport for InMemoryTransport {
     }
 
     fn subscribe_light_headers(&self) -> PokerL1Result<Vec<LightClientHeader>> {
-        Ok(self.light_headers.lock().unwrap().clone())
+        Ok(self
+            .light_headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 }
 
@@ -785,15 +801,24 @@ pub const MAX_TX_CACHE_SIZE: usize = 10_000;
 /// Gossip 管理器：协调 Compact Block Relay + tx 缓冲 + short ID 映射。
 ///
 /// 集成 SubTask 30.5（Compact Block Relay）+ SubTask 30.7（无 mempool 缓冲）。
+///
+/// M-9 修复：内部使用 `Mutex` 同步，方法签名从 `&mut self` 改为 `&self`，
+/// 使 `GossipManager` 成为 `Sync` 类型，可通过 `Arc<GossipManager>` 共享。
 pub struct GossipManager {
+    /// 可变状态（M-9 修复 — 合并到单个 Mutex 减少锁竞争）。
+    state: std::sync::Mutex<GossipState>,
+    /// tx_cache 最大条目数（H7 修复 — 超限时 FIFO 淘汰，构造后不可变）。
+    max_tx_cache_size: usize,
+}
+
+/// GossipManager 的可变状态。
+struct GossipState {
     /// short ID → tx_hash 映射表（SEC2-L3）。
     short_id_map: ShortIdMap,
     /// 本地已收 tx 缓存（tx_hash → Transaction）。
     tx_cache: HashMap<Hash, Transaction>,
     /// tx_cache 插入顺序（H7 修复 — FIFO 淘汰追踪）。
     tx_cache_order: VecDeque<Hash>,
-    /// tx_cache 最大条目数（H7 修复 — 超限时 FIFO 淘汰）。
-    max_tx_cache_size: usize,
     /// 无 mempool tx 缓冲（SubTask 30.7）。
     tx_buf: TxBuf,
 }
@@ -809,11 +834,13 @@ impl GossipManager {
     #[must_use]
     pub fn with_max_tx_cache_size(max_tx_cache_size: usize) -> Self {
         Self {
-            short_id_map: ShortIdMap::new(),
-            tx_cache: HashMap::new(),
-            tx_cache_order: VecDeque::new(),
+            state: std::sync::Mutex::new(GossipState {
+                short_id_map: ShortIdMap::new(),
+                tx_cache: HashMap::new(),
+                tx_cache_order: VecDeque::new(),
+                tx_buf: TxBuf::new(),
+            }),
             max_tx_cache_size,
-            tx_buf: TxBuf::new(),
         }
     }
 
@@ -825,31 +852,32 @@ impl GossipManager {
     /// 3. 插入 short ID 映射表（SEC2-L3 冲突检测）
     /// 4. 缓存 tx 到本地（供 compact block relay 匹配）
     /// 5. 加入无 mempool 缓冲（100ms 内必装 vertex，SubTask 30.7）
-    pub fn receive_tx(&mut self, tx: Transaction) -> PokerL1Result<()> {
-        // SubTask 30.6：大小校验
+    ///
+    /// M-9 修复：`&self` + 内部 Mutex，支持 `Arc<GossipManager>` 共享。
+    pub fn receive_tx(&self, tx: Transaction) -> PokerL1Result<()> {
+        // SubTask 30.6：大小校验（无需持锁）
         validate_tx_size(&tx)?;
 
         let tx_hash = tx.tx_hash();
         let short_id = compute_short_id(&tx_hash);
 
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
         // SEC2-L3：插入 short ID 映射（冲突检测）
-        self.short_id_map.insert(short_id, tx_hash)?;
+        state.short_id_map.insert(short_id, tx_hash)?;
 
         // 缓存 tx（H7 修复：FIFO 淘汰防止内存 DoS）
-        // 若 tx_hash 已存在，先从顺序队列移除旧条目（避免重复追踪）
-        if !self.tx_cache.contains_key(&tx_hash) {
-            self.tx_cache_order.push_back(tx_hash);
+        if !state.tx_cache.contains_key(&tx_hash) {
+            state.tx_cache_order.push_back(tx_hash);
         }
-        self.tx_cache.insert(tx_hash, tx.clone());
+        state.tx_cache.insert(tx_hash, tx.clone());
 
         // H7 修复：超限时淘汰最旧条目
-        while self.tx_cache.len() > self.max_tx_cache_size {
-            if let Some(old_hash) = self.tx_cache_order.pop_front() {
-                // 仅当 old_hash 与当前缓存一致时移除（防止重复 hash 的误删）
-                if self.tx_cache.remove(&old_hash).is_some() {
-                    // 同时清理 short_id_map 中对应条目（避免残留映射）
+        while state.tx_cache.len() > self.max_tx_cache_size {
+            if let Some(old_hash) = state.tx_cache_order.pop_front() {
+                if state.tx_cache.remove(&old_hash).is_some() {
                     let old_short_id = compute_short_id(&old_hash);
-                    self.short_id_map.remove(&old_short_id, &old_hash);
+                    state.short_id_map.remove(&old_short_id, &old_hash);
                 }
             } else {
                 break;
@@ -857,7 +885,7 @@ impl GossipManager {
         }
 
         // SubTask 30.7：加入无 mempool 缓冲
-        self.tx_buf.push(tx);
+        state.tx_buf.push(tx);
 
         Ok(())
     }
@@ -886,7 +914,8 @@ impl GossipManager {
         &self,
         compact: &CompactVertex,
     ) -> PokerL1Result<(Vec<Hash>, Vec<ShortId>)> {
-        reconstruct_vertex_tx_hashes(compact, &self.short_id_map, &self.tx_cache)
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        reconstruct_vertex_tx_hashes(compact, &state.short_id_map, &state.tx_cache)
     }
 
     /// 取出缓冲中的 tx 用于装入下一个 vertex（SubTask 30.7）。
@@ -894,26 +923,46 @@ impl GossipManager {
     /// 返回 `(txs, timeout_hashes)`：
     /// - `txs`：未超时的 tx 列表（应装入下一个 vertex）
     /// - `timeout_hashes`：超时的 tx 哈希列表（应记录并丢弃）
-    pub fn drain_tx_for_vertex(&mut self) -> (Vec<Transaction>, Vec<Hash>) {
-        self.tx_buf.drain_for_vertex()
+    pub fn drain_tx_for_vertex(&self) -> (Vec<Transaction>, Vec<Hash>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.tx_buf.drain_for_vertex()
     }
 
     /// 检查是否应 drain tx 缓冲（最早 tx 已超时或缓冲非空，SubTask 30.7）。
     #[must_use]
     pub fn should_drain_tx(&self) -> bool {
-        self.tx_buf.should_drain()
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.tx_buf.should_drain()
     }
 
-    /// 获取 short ID 映射表（测试用）。
+    /// 获取 short ID 映射表长度（测试用）。
     #[must_use]
-    pub const fn short_id_map(&self) -> &ShortIdMap {
-        &self.short_id_map
+    pub fn short_id_map_len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .short_id_map
+            .len()
     }
 
-    /// 获取本地 tx 缓存（测试用）。
+    /// 检查 tx_cache 是否包含指定 hash（测试用）。
     #[must_use]
-    pub const fn tx_cache(&self) -> &HashMap<Hash, Transaction> {
-        &self.tx_cache
+    pub fn tx_cache_contains(&self, tx_hash: &Hash) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tx_cache
+            .contains_key(tx_hash)
+    }
+
+    /// 获取本地 tx 缓存条目数（测试用）。
+    #[must_use]
+    pub fn tx_cache_len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tx_cache
+            .len()
     }
 }
 
@@ -1211,7 +1260,7 @@ mod tests {
 
     #[test]
     fn test_gossip_manager_receive_tx() {
-        let mut manager = GossipManager::new();
+        let manager = GossipManager::new();
         let tx = Transaction {
             inputs: vec![],
             outputs: vec![],
@@ -1230,13 +1279,13 @@ mod tests {
         manager.receive_tx(tx.clone()).unwrap();
 
         let tx_hash = tx.tx_hash();
-        assert!(manager.tx_cache().contains_key(&tx_hash));
-        assert_eq!(manager.short_id_map().len(), 1);
+        assert!(manager.tx_cache_contains(&tx_hash));
+        assert_eq!(manager.short_id_map_len(), 1);
     }
 
     #[test]
     fn test_gossip_manager_drain_tx() {
-        let mut manager = GossipManager::new();
+        let manager = GossipManager::new();
         let tx = Transaction {
             inputs: vec![],
             outputs: vec![],
@@ -1263,7 +1312,7 @@ mod tests {
     /// H7：tx_cache 超限时淘汰最旧条目，防止内存 DoS。
     #[test]
     fn test_tx_cache_fifo_eviction() {
-        let mut manager = GossipManager::with_max_tx_cache_size(3);
+        let manager = GossipManager::with_max_tx_cache_size(3);
         let mut tx_hashes = Vec::new();
 
         for i in 1..=4u64 {
@@ -1287,20 +1336,20 @@ mod tests {
         }
 
         // 缓存上限为 3，插入 4 条后应仅保留最新 3 条
-        assert_eq!(manager.tx_cache().len(), 3, "tx_cache 应被淘汰至 max");
+        assert_eq!(manager.tx_cache_len(), 3, "tx_cache 应被淘汰至 max");
         assert!(
-            !manager.tx_cache().contains_key(&tx_hashes[0]),
+            !manager.tx_cache_contains(&tx_hashes[0]),
             "最旧 tx 应被淘汰"
         );
-        assert!(manager.tx_cache().contains_key(&tx_hashes[1]));
-        assert!(manager.tx_cache().contains_key(&tx_hashes[2]));
-        assert!(manager.tx_cache().contains_key(&tx_hashes[3]));
+        assert!(manager.tx_cache_contains(&tx_hashes[1]));
+        assert!(manager.tx_cache_contains(&tx_hashes[2]));
+        assert!(manager.tx_cache_contains(&tx_hashes[3]));
     }
 
     /// H7：重复 tx_hash 不增加缓存条目数。
     #[test]
     fn test_tx_cache_dedup() {
-        let mut manager = GossipManager::with_max_tx_cache_size(3);
+        let manager = GossipManager::with_max_tx_cache_size(3);
         let tx = Transaction {
             inputs: vec![],
             outputs: vec![],
@@ -1320,7 +1369,7 @@ mod tests {
         manager.receive_tx(tx.clone()).unwrap();
         manager.receive_tx(tx).unwrap();
 
-        assert_eq!(manager.tx_cache().len(), 1, "重复 tx 不应增加缓存条目");
+        assert_eq!(manager.tx_cache_len(), 1, "重复 tx 不应增加缓存条目");
     }
 
     // ===== 轻客户端 header 验证测试（SubTask 30.4） =====
@@ -1338,13 +1387,16 @@ mod tests {
                     validator: make_tagged_pubkey(0x02),
                     signature: vec![0; 65],
                 },
+                ValidatorSig {
+                    validator: make_tagged_pubkey(0x03),
+                    signature: vec![0; 65],
+                },
             ],
-            signer_bitmap: vec![true, true, false],
+            signer_bitmap: vec![true, true, true],
         };
 
-        // validator_set_size = 3, required = ceil(3*2/3) = 2
-        // signatures = 2 >= 2 → 通过 quorum
-        // verify_fn 始终返回 Ok（测试用）
+        // validator_set_size = 3, required = 2*3/3+1 = 3（严格 >2/3，C-3 修复）
+        // signatures = 3 >= 3 → 通过 quorum
         let result = verify_light_client_header(&header, 3, |_, _, _| Ok(()));
         assert!(result.is_ok());
     }
@@ -1360,8 +1412,8 @@ mod tests {
             signer_bitmap: vec![true, false, false],
         };
 
-        // validator_set_size = 3, required = ceil(3*2/3) = 2
-        // signatures = 1 < 2 → quorum 不足
+        // validator_set_size = 3, required = 2*3/3+1 = 3（严格 >2/3，C-3 修复）
+        // signatures = 1 < 3 → quorum 不足
         let result = verify_light_client_header(&header, 3, |_, _, _| Ok(()));
         assert!(matches!(
             result,
@@ -1382,11 +1434,15 @@ mod tests {
                     validator: make_tagged_pubkey(0x02),
                     signature: vec![0; 65],
                 },
+                ValidatorSig {
+                    validator: make_tagged_pubkey(0x03),
+                    signature: vec![0; 65],
+                },
             ],
-            signer_bitmap: vec![true, true, false],
+            signer_bitmap: vec![true, true, true],
         };
 
-        // quorum 足够但签名验证失败
+        // quorum 足够（3 >= 3，C-3 修复）但签名验证失败
         let result =
             verify_light_client_header(&header, 3, |_, _, _| Err(PokerL1Error::InvalidSignature));
         assert!(matches!(result, Err(PokerL1Error::InvalidSignature)));

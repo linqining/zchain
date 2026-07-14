@@ -90,7 +90,7 @@ impl StateProof {
                 "active_participants 为空，无法验证 state proof".to_string(),
             ));
         }
-        let required = (total * 2).div_ceil(3); // ≥2/3，向上取整
+        let required = 2 * total / 3 + 1; // 严格 >2/3（C-3 修复）
 
         // 收集有效签名（去重：同一 participant 多个签名仅首个有效）
         let mut verified_count: u32 = 0;
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_state_proof_verify_insufficient_signatures() {
-        // 3 个活跃参与者，需要 ≥2/3 = 2 个签名，但 ack_signatures 为空
+        // 3 个活跃参与者，需要严格 >2/3 = 3 个签名（C-3 修复），但 ack_signatures 为空
         let proof = make_state_proof(1, 0xAB);
         let active = vec![
             make_test_tagged_pubkey(1),
@@ -427,7 +427,7 @@ mod tests {
             matches!(
                 result,
                 Err(PokerL1Error::AckSetMismatch {
-                    expected: 2,
+                    expected: 3,
                     got: 0
                 })
             ),

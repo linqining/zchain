@@ -25,7 +25,7 @@ use crate::consensus::{
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::{TaggedPubkey, unified::verify_signature};
-use crate::transaction::{Gas, Transaction, TxLane};
+use crate::transaction::{Gas, Transaction, TxLane, validate_tx_limits};
 use crate::{Address, ChainId, Hash};
 
 /// Block 验证器配置。
@@ -62,6 +62,7 @@ impl BlockValidatorConfig {
 ///
 /// spec SEC-L4：validator 校验签名前先校验 `chain_id == network_chain_id`，
 /// 不匹配返回 `WrongChainId`。防跨链重放（testnet/devnet/mainnet 同名 tx 跨链重放）。
+#[must_use]
 pub const fn validate_tx_chain_id(
     tx: &Transaction,
     network_chain_id: ChainId,
@@ -83,6 +84,7 @@ pub const fn validate_tx_chain_id(
 /// - 常数时间实现（IMPL-SEC-1）
 ///
 /// 注意：调用前应先校验 chain_id（`validate_tx_chain_id`）。
+#[must_use]
 pub fn validate_tx_signature(tx: &Transaction) -> PokerL1Result<()> {
     let msg_hash = tx.signing_hash();
     verify_signature(&tx.tagged_pubkey, &tx.signature, &msg_hash)
@@ -156,9 +158,11 @@ pub fn validate_tx_nonce(
     Ok(())
 }
 
-/// 综合 SubTask 10.1：校验 tx 签名 + chain_id + nonce。
+/// 综合 SubTask 10.1：校验 tx 字段边界 + 签名 + chain_id + nonce。
 ///
-/// 等价于依次调用 `validate_tx_chain_id` → `validate_tx_signature` → `validate_tx_nonce`。
+/// 等价于依次调用 `validate_tx_limits` → `validate_tx_chain_id` → `validate_tx_signature` → `validate_tx_nonce`。
+/// H-7 修复：补全 `validate_tx_limits` 调用，防止 block 内交易路径缺少每字段边界保护。
+#[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn validate_tx_full(
     tx: &Transaction,
@@ -166,6 +170,7 @@ pub fn validate_tx_full(
     account_nonce: u64,
     game_player_nonce: Option<u64>,
 ) -> PokerL1Result<()> {
+    validate_tx_limits(tx)?;
     validate_tx_chain_id(tx, network_chain_id)?;
     validate_tx_signature(tx)?;
     validate_tx_nonce(tx, account_nonce, game_player_nonce)?;
@@ -187,17 +192,17 @@ pub fn validate_tx_full(
 /// 若排序违反单调性，返回 `InvalidTxOrdering`。
 pub fn validate_public_tx_ordering(txs: &[Transaction]) -> PokerL1Result<()> {
     // 仅校验 Public 通道 tx（ForceSync tx 不参与 gas price 排序）
-    let public_txs: Vec<&Transaction> = txs
+    // M-12 修复：使用 enumerate 追踪原始索引，避免脆弱的 std::ptr::eq 查找
+    let public_txs: Vec<(usize, &Transaction)> = txs
         .iter()
-        .filter(|tx| tx.lane_hint == TxLane::Public)
+        .enumerate()
+        .filter(|(_, tx)| tx.lane_hint == TxLane::Public)
         .collect();
 
     for window in public_txs.windows(2) {
-        let prev = window[0];
-        let curr = window[1];
+        let (_, prev) = window[0];
+        let (curr_idx, curr) = window[1];
         if curr.gas.price < prev.gas.price {
-            // 找到原始索引以报告
-            let curr_idx = txs.iter().position(|t| std::ptr::eq(t, curr)).unwrap_or(0);
             return Err(PokerL1Error::InvalidTxOrdering {
                 idx: curr_idx,
                 tx_price: curr.gas.price,

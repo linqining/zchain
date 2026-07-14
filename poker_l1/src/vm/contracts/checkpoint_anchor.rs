@@ -120,6 +120,11 @@ impl CheckpointAnchorTx {
     }
 }
 
+/// ack_signatures 最大数量（M-7 修复 — 防止 O(n*m) 签名验证 DoS）。
+///
+/// 上限设为 256（远超实际游戏参与者数量，poker 最多 ~10 人）。
+pub const MAX_ACK_SIGNATURES: usize = 256;
+
 /// 验证 checkpoint_anchor 的 ACK 签名（SubTask 27.3）。
 ///
 /// 校验逻辑：
@@ -129,6 +134,10 @@ impl CheckpointAnchorTx {
 /// 3. ack_signatures（+ opt_out_ack_proof）须覆盖全部 `active_participants`
 ///    （缺少返回 `MissingAck`）
 /// 4. 每个签名的消息哈希为 `ack_signing_hash(chain_id, epoch)`
+///
+/// M-7 修复：
+/// - `ack_signatures` 数量上限 `MAX_ACK_SIGNATURES`（256），防止 O(n*m) DoS
+/// - 使用 `HashSet` 去重，将 O(n²) 降为 O(n)
 ///
 /// # 参数
 /// - `tx`：checkpoint_anchor tx
@@ -142,32 +151,53 @@ pub fn verify_checkpoint_anchor(
     epoch: u64,
     active_participants: &[TaggedPubkey],
 ) -> Result<(), PokerL1Error> {
+    // M-7 修复：ack_signatures 数量上限校验
+    if tx.ack_signatures.len() > MAX_ACK_SIGNATURES {
+        return Err(PokerL1Error::Other(format!(
+            "ack_signatures count {} exceeds limit {}",
+            tx.ack_signatures.len(),
+            MAX_ACK_SIGNATURES
+        )));
+    }
+
     let msg_hash = tx.ack_signing_hash(chain_id, epoch);
 
+    // 构建 active_participants 的 HashSet 用于 O(1) 查找
+    let active_set: std::collections::HashSet<&TaggedPubkey> = active_participants.iter().collect();
+
     // 收集已 ACK 的参与者（去重：同一 participant 多个 ack 仅首个有效）
-    let mut acked_participants: Vec<&TaggedPubkey> = Vec::with_capacity(tx.ack_signatures.len());
+    // M-7 修复：使用 HashSet 替代 Vec::contains，将去重从 O(n²) 降为 O(n)
+    let mut acked_participants: std::collections::HashSet<&TaggedPubkey> =
+        std::collections::HashSet::new();
     for ack in &tx.ack_signatures {
         // 校验签名者是否在 active_participants 中
-        if !active_participants.contains(&ack.participant) {
+        if !active_set.contains(&ack.participant) {
             return Err(PokerL1Error::AckSignerNotParticipant {
                 game_id: tx.game_id,
                 signer: ack.participant.clone(),
             });
         }
         // 同一 participant 多个 ack 仅首个有效（后续忽略）
-        if acked_participants.contains(&&ack.participant) {
+        if !acked_participants.insert(&ack.participant) {
             continue;
         }
         // 验证签名
         verify_signature(&ack.participant, &ack.signature, &msg_hash)?;
-        acked_participants.push(&ack.participant);
     }
 
     // 收集 opt_out_ack_proof 覆盖的参与者
-    let mut opted_out_participants: Vec<&TaggedPubkey> = Vec::new();
+    let mut opted_out_participants: std::collections::HashSet<&TaggedPubkey> =
+        std::collections::HashSet::new();
     if let Some(proofs) = &tx.opt_out_ack_proof {
+        if proofs.len() > MAX_ACK_SIGNATURES {
+            return Err(PokerL1Error::Other(format!(
+                "opt_out_ack_proof count {} exceeds limit {}",
+                proofs.len(),
+                MAX_ACK_SIGNATURES
+            )));
+        }
         for proof in proofs {
-            if !active_participants.contains(&proof.participant) {
+            if !active_set.contains(&proof.participant) {
                 return Err(PokerL1Error::AckSignerNotParticipant {
                     game_id: tx.game_id,
                     signer: proof.participant.clone(),
@@ -181,14 +211,14 @@ pub fn verify_checkpoint_anchor(
                     proof.ack_deadline, proof.request_ack_block_height
                 )));
             }
-            opted_out_participants.push(&proof.participant);
+            opted_out_participants.insert(&proof.participant);
         }
     }
 
     // 校验所有 active_participants 都已 ACK 或 opt_out
     for participant in active_participants {
-        let acked = acked_participants.contains(&participant);
-        let opted_out = opted_out_participants.contains(&participant);
+        let acked = acked_participants.contains(participant);
+        let opted_out = opted_out_participants.contains(participant);
         if !acked && !opted_out {
             return Err(PokerL1Error::MissingAck {
                 game_id: tx.game_id,

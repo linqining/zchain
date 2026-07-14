@@ -90,7 +90,8 @@ pub fn client_route_validator(
     // 取前 8 字节作为 u64 索引
     let mut idx_bytes = [0u8; 8];
     idx_bytes.copy_from_slice(&hash[0..8]);
-    let idx = u64::from_le_bytes(idx_bytes) as usize % active.len();
+    // M-8 修复：先在 u64 上取模再转 usize，避免 32-bit 平台截断
+    let idx = (u64::from_le_bytes(idx_bytes) % active.len() as u64) as usize;
     Ok(active[idx].pubkey.clone())
 }
 
@@ -187,8 +188,10 @@ impl EpochTransitionState {
 /// 计算 forfeit 保证金扣除金额（SEC2-H3）。
 ///
 /// spec SEC2-H3：操作方未提交过渡锚点 → forfeit 保证金按比例扣除（最低 50%）。
+///
+/// M-3 修复：使用 `saturating_mul` 防止 u64 乘法溢出。
 pub const fn compute_forfeit_amount(bond: u64, forfeit_percentage: u32) -> u64 {
-    bond * forfeit_percentage as u64 / 100
+    bond.saturating_mul(forfeit_percentage as u64) / 100
 }
 
 /// 判定 assigned_validator 是否失效（SubTask 12.4）。

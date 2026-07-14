@@ -202,10 +202,13 @@ pub const fn zk_verify_gas(scheme_id: u32) -> u64 {
 }
 
 /// 检查 BLS hash_to_curve 消息长度是否超限（spec：msg ≤ 65536 字节）。
-pub const fn check_bls_hash_msg_len(msg_len: usize) -> crate::error::PokerL1Result<()> {
-    if msg_len > MAX_BLS_HASH_MSG_SIZE {
+///
+/// M-8 修复：参数改为 `u64`，避免 32-bit 平台 `u64 as usize` 截断绕过上限检查。
+/// 安全比较在 u64 域完成；`actual` 字段仅用于错误显示，截断不影响安全性。
+pub const fn check_bls_hash_msg_len(msg_len: u64) -> crate::error::PokerL1Result<()> {
+    if msg_len > MAX_BLS_HASH_MSG_SIZE as u64 {
         return Err(crate::error::PokerL1Error::InputTooLong {
-            actual: msg_len,
+            actual: msg_len as usize,
             limit: MAX_BLS_HASH_MSG_SIZE,
         });
     }

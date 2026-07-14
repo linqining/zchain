@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::gas_table::MAX_OBJECT_SIZE;
 use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
@@ -157,14 +158,28 @@ impl ContractRegistry {
     ///
     /// 创建 ContractObject（version=1）+ UpgradeCap（transfer 给 deployer）。
     /// 返回 (contract_id, upgrade_cap_id)。
+    /// H-2 修复：强制合约字节码 ≤ 64KB（MAX_OBJECT_SIZE），防止超大合约导致内存耗尽。
     pub fn deploy(
         &mut self,
         bytecode: Vec<u8>,
         deployer: Address,
         deploy_height: u64,
     ) -> PokerL1Result<(ObjectID, ObjectID)> {
+        if bytecode.len() > MAX_OBJECT_SIZE {
+            return Err(PokerL1Error::ObjectTooLarge {
+                actual: bytecode.len(),
+                limit: MAX_OBJECT_SIZE,
+            });
+        }
+
         let contract_id = ObjectID::new(deployer, deploy_height);
-        let cap_id = ObjectID::new(deployer, deploy_height + 1);
+        // M-10 修复：checked_add 防止 deploy_height = u64::MAX 时溢出导致 cap_id 碰撞
+        let cap_nonce = deploy_height.checked_add(1).ok_or_else(|| {
+            PokerL1Error::InvalidSyscallArgument(format!(
+                "deploy_height {deploy_height} overflow: cannot allocate cap_nonce"
+            ))
+        })?;
+        let cap_id = ObjectID::new(deployer, cap_nonce);
 
         let contract = ContractObject::new(contract_id, 1, bytecode, deployer, deploy_height);
         let cap = UpgradeCap::new(contract_id, deployer, deploy_height);

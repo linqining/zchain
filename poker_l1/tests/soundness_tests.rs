@@ -611,6 +611,9 @@ fn test_p0_ack_chain_partial_hash_mismatch_rejected() {
         scheme_id: 1,
         proof_kind: ProofKind::Zkvm,
         has_partial_checkin: true,
+        folded_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
     };
 
     // last_partial_fold 的 ack_chain_partial_hash 故意不匹配
@@ -688,7 +691,7 @@ fn test_p0_tx_cache_bounded_eviction() {
     use poker_l1::network::GossipManager;
     use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 
-    let mut manager = GossipManager::with_max_tx_cache_size(5);
+    let manager = GossipManager::with_max_tx_cache_size(5);
 
     // 插入 7 条 tx（超过上限 5）
     let mut hashes = Vec::new();
@@ -713,22 +716,13 @@ fn test_p0_tx_cache_bounded_eviction() {
     }
 
     // 缓存应被限制在 5 条
-    assert_eq!(manager.tx_cache().len(), 5, "tx_cache 应被淘汰至 max=5");
+    assert_eq!(manager.tx_cache_len(), 5, "tx_cache 应被淘汰至 max=5");
 
     // 最旧 2 条应已被淘汰
-    assert!(
-        !manager.tx_cache().contains_key(&hashes[0]),
-        "tx[0] 应被淘汰"
-    );
-    assert!(
-        !manager.tx_cache().contains_key(&hashes[1]),
-        "tx[1] 应被淘汰"
-    );
+    assert!(!manager.tx_cache_contains(&hashes[0]), "tx[0] 应被淘汰");
+    assert!(!manager.tx_cache_contains(&hashes[1]), "tx[1] 应被淘汰");
     // 最新 5 条应保留
     for i in 2..7 {
-        assert!(
-            manager.tx_cache().contains_key(&hashes[i]),
-            "tx[{i}] 应保留"
-        );
+        assert!(manager.tx_cache_contains(&hashes[i]), "tx[{i}] 应保留");
     }
 }

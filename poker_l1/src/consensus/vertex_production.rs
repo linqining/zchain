@@ -63,9 +63,9 @@ pub const fn required_witness_count(checkpoint_multi_replica_count: usize) -> us
 /// 参数：
 /// - `validator_count`：当前 ValidatorSet 规模 |V|
 ///
-/// 返回 `ceil(validator_count * 2 / 3)`。
+/// 返回严格 >2/3 的最小整数（C-3 修复）。
 pub const fn required_parent_count(validator_count: usize) -> usize {
-    (validator_count * 2).div_ceil(3)
+    2 * validator_count / 3 + 1
 }
 
 /// 计算某轮 commit certificate 所需的最小签名 quorum（≥2/3 validator）。
@@ -153,7 +153,10 @@ impl VertexBuilder {
             size += 8 + 8; // gas budget + price
         }
         size += 8; // parent_hashes len
-        size += self.parent_hashes.len() * 32;
+        // M-11 修复：saturating_mul 防止 parent_hashes.len() * 32 溢出绕过 MAX_VERTEX_SIZE 检查
+        size = size.saturating_add(self.parent_hashes.len().saturating_mul(32));
+        // L-3 修复：预留 author_sig 空间（secp256k1 = 65B + BCS len prefix）
+        size = size.saturating_add(8 + 65);
         size
     }
 
@@ -708,12 +711,12 @@ mod tests {
 
     #[test]
     fn required_parent_count_two_thirds_quorum() {
-        // ceil(n * 2 / 3)
-        assert_eq!(required_parent_count(3), 2); // ceil(6/3) = 2
-        assert_eq!(required_parent_count(5), 4); // ceil(10/3) = 4
-        assert_eq!(required_parent_count(6), 4); // ceil(12/3) = 4
-        assert_eq!(required_parent_count(7), 5); // ceil(14/3) = 5
-        assert_eq!(required_parent_count(9), 6); // ceil(18/3) = 6
+        // 严格 >2/3（C-3 修复）
+        assert_eq!(required_parent_count(3), 3); // 2*3/3+1 = 3
+        assert_eq!(required_parent_count(5), 4); // 2*5/3+1 = 4
+        assert_eq!(required_parent_count(6), 5); // 2*6/3+1 = 5
+        assert_eq!(required_parent_count(7), 5); // 2*7/3+1 = 5
+        assert_eq!(required_parent_count(9), 7); // 2*9/3+1 = 7
     }
 
     #[test]

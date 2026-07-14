@@ -222,13 +222,13 @@ impl BridgeValidatorSlot {
     }
 }
 
-/// 计算桥验证器 quorum（2/3，向上取整）。
+/// 计算桥验证器 quorum（严格 >2/3）。
 #[must_use]
 pub const fn required_bridge_quorum(validator_count: usize) -> usize {
     if validator_count == 0 {
         return 0;
     }
-    (validator_count * 2).div_ceil(3) // ceil(n * 2 / 3)
+    2 * validator_count / 3 + 1 // 严格 >2/3（C-3 修复）
 }
 
 // ===== BridgeHook trait（SubTask 34.1） =====
@@ -599,9 +599,9 @@ mod tests {
     fn test_required_bridge_quorum() {
         assert_eq!(required_bridge_quorum(0), 0);
         assert_eq!(required_bridge_quorum(1), 1);
-        assert_eq!(required_bridge_quorum(3), 2); // ceil(3*2/3) = 2
-        assert_eq!(required_bridge_quorum(5), 4); // ceil(5*2/3) = 4
-        assert_eq!(required_bridge_quorum(10), 7); // ceil(10*2/3) = 7
+        assert_eq!(required_bridge_quorum(3), 3); // 2*3/3+1 = 3（严格 >2/3）
+        assert_eq!(required_bridge_quorum(5), 4); // 2*5/3+1 = 4
+        assert_eq!(required_bridge_quorum(10), 7); // 2*10/3+1 = 7
     }
 
     #[test]

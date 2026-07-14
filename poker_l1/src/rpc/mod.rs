@@ -15,10 +15,15 @@
 //! - 不绑定具体传输层（HTTP / WebSocket）；由上层 node 二进制集成 axum / tungstenite
 //! - 纯库代码，可单元测试；集成测试见 `tests/phase6_integration.rs`
 
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 
-use crate::account::{Account, AccountStore};
+use crate::account::{Account, AccountStore, derive_address};
 use crate::block::Block;
+use crate::block::validator::{validate_tx_chain_id, validate_tx_nonce, validate_tx_signature};
 use crate::consensus::DagVertex;
 use crate::crypto_precompiles::native_api::{
     bls_verify as native_bls_verify,
@@ -29,7 +34,7 @@ use crate::object_model::{Object, ObjectID};
 use crate::offline::zk_verifier::{SchemeId, ZkPublicIo, ZkVerifierRegistry, ZkVerifyResult};
 use crate::signature::TaggedPubkey;
 use crate::storage::{BlockStore, DagVertexStore, ObjectDb};
-use crate::transaction::Transaction;
+use crate::transaction::{Transaction, validate_tx_limits};
 use crate::{Address, BlockHeight, ChainId, Hash};
 
 /// JSON-RPC 2.0 请求（spec：https://www.jsonrpc.org/specification）。
@@ -303,6 +308,276 @@ pub struct EventMessage {
     pub payload: Vec<u8>,
 }
 
+// ===== H-1 修复：RPC 认证与限流 =====
+
+/// RPC 方法类别（用于差异化限流）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpcMethodCategory {
+    /// 读请求（get_block / get_object / get_tx / get_account / get_dag_vertex）。
+    Read,
+    /// 写请求（submit_tx）。
+    Write,
+    /// 加密验证请求（secp256k1_aggregate_verify / bls_verify / zk_verify）。
+    Crypto,
+}
+
+impl RpcMethodCategory {
+    /// 根据方法名推断类别。
+    pub fn from_method(method: &str) -> Self {
+        match method {
+            "submit_tx" => Self::Write,
+            "secp256k1_aggregate_verify" | "bls_verify" | "zk_verify" => Self::Crypto,
+            _ => Self::Read,
+        }
+    }
+}
+
+/// RPC 限流配置（H-1 修复）。
+///
+/// 使用滑动窗口算法，按客户端独立计数。
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// 读请求：每秒最大请求数。
+    pub read_rps: u32,
+    /// 写请求：每秒最大请求数。
+    pub write_rps: u32,
+    /// 加密验证请求：每秒最大请求数。
+    pub crypto_rps: u32,
+    /// 滑动窗口大小。
+    pub window: Duration,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            read_rps: 100,
+            write_rps: 10,
+            crypto_rps: 5,
+            window: Duration::from_secs(1),
+        }
+    }
+}
+
+/// RPC 认证配置（H-1 修复）。
+#[derive(Debug, Clone, Default)]
+pub struct AuthConfig {
+    /// 是否要求 write 端点认证。
+    pub require_auth_for_write: bool,
+    /// 是否要求 crypto 端点认证。
+    pub require_auth_for_crypto: bool,
+    /// 允许的 API key 集合。
+    pub allowed_api_keys: HashSet<String>,
+}
+
+/// RPC 客户端身份信息（H-1 修复 — 用于认证与限流）。
+///
+/// 由传输层（HTTP server / WebSocket）提取并传入。
+#[derive(Debug, Clone, Default)]
+pub struct RpcClientInfo {
+    /// 客户端标识（IP 地址或连接 ID，用于限流）。
+    pub client_id: Option<String>,
+    /// API key（由请求头 `X-API-Key` 提供）。
+    pub api_key: Option<String>,
+}
+
+/// 滑动窗口内记录的请求时间戳。
+struct SlidingWindow {
+    timestamps: VecDeque<Instant>,
+}
+
+/// RPC 安全守卫（H-1 修复 — 限流 + 认证）。
+///
+/// 由 `RpcHandler` 持有，在 `handle_with_client` 中对每个请求执行：
+/// 1. 认证检查（write/crypto 端点可能要求 API key）
+/// 2. 限流检查（按 client_id + 方法类别独立计数）
+pub struct RpcGuard {
+    /// 限流配置。
+    rate_limit_config: RateLimitConfig,
+    /// 认证配置。
+    auth_config: AuthConfig,
+    /// per-client per-category 滑动窗口。
+    windows: Mutex<HashMap<(String, RpcMethodCategory), SlidingWindow>>,
+}
+
+impl std::fmt::Debug for RpcGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcGuard")
+            .field("rate_limit_config", &self.rate_limit_config)
+            .field("auth_config", &self.auth_config)
+            .finish_non_exhaustive()
+    }
+}
+
+/// RPC 守卫检查结果错误。
+#[derive(Debug)]
+pub enum RpcGuardError {
+    /// 认证失败。
+    Auth(String),
+    /// 限流超限。
+    RateLimited(String),
+}
+
+impl RpcGuard {
+    /// 创建守卫。
+    pub fn new(rate_limit_config: RateLimitConfig, auth_config: AuthConfig) -> Self {
+        Self {
+            rate_limit_config,
+            auth_config,
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 创建无需认证的守卫（仅限流）。
+    pub fn rate_limit_only(config: RateLimitConfig) -> Self {
+        Self::new(config, AuthConfig::default())
+    }
+
+    /// 创建默认配置的守卫。
+    pub fn default_config() -> Self {
+        Self::new(RateLimitConfig::default(), AuthConfig::default())
+    }
+
+    /// 检查请求是否通过认证与限流。
+    ///
+    /// 返回 `Ok(())` 表示通过，`Err(RpcGuardError)` 表示被拒绝。
+    pub fn check(&self, method: &str, client: &RpcClientInfo) -> Result<(), RpcGuardError> {
+        let category = RpcMethodCategory::from_method(method);
+
+        // 1. 认证检查
+        self.check_auth(category, client)?;
+
+        // 2. 限流检查
+        self.check_rate_limit(category, client)?;
+
+        Ok(())
+    }
+
+    /// 认证检查。
+    fn check_auth(
+        &self,
+        category: RpcMethodCategory,
+        client: &RpcClientInfo,
+    ) -> Result<(), RpcGuardError> {
+        let need_auth = match category {
+            RpcMethodCategory::Write => self.auth_config.require_auth_for_write,
+            RpcMethodCategory::Crypto => self.auth_config.require_auth_for_crypto,
+            RpcMethodCategory::Read => false,
+        };
+
+        if need_auth {
+            let api_key = client
+                .api_key
+                .as_ref()
+                .ok_or_else(|| RpcGuardError::Auth("此端点要求 API key 认证".to_string()))?;
+
+            if !self.auth_config.allowed_api_keys.contains(api_key) {
+                return Err(RpcGuardError::Auth("无效的 API key".to_string()));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 限流检查（滑动窗口）。
+    fn check_rate_limit(
+        &self,
+        category: RpcMethodCategory,
+        client: &RpcClientInfo,
+    ) -> Result<(), RpcGuardError> {
+        let client_id = client.client_id.as_deref().unwrap_or("anonymous");
+        let max_rps = match category {
+            RpcMethodCategory::Read => self.rate_limit_config.read_rps,
+            RpcMethodCategory::Write => self.rate_limit_config.write_rps,
+            RpcMethodCategory::Crypto => self.rate_limit_config.crypto_rps,
+        };
+
+        let key = (client_id.to_string(), category);
+        let now = Instant::now();
+        let window = self.rate_limit_config.window;
+
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = windows.entry(key).or_insert_with(|| SlidingWindow {
+            timestamps: VecDeque::with_capacity(max_rps as usize + 1),
+        });
+
+        // 淘汰窗口外的旧时间戳
+        while entry
+            .timestamps
+            .front()
+            .is_some_and(|&t| now.duration_since(t) > window)
+        {
+            entry.timestamps.pop_front();
+        }
+
+        if entry.timestamps.len() >= max_rps as usize {
+            return Err(RpcGuardError::RateLimited(format!(
+                "请求频率超限：{category:?} 上限 {max_rps} req/{window:?}"
+            )));
+        }
+
+        entry.timestamps.push_back(now);
+        Ok(())
+    }
+}
+
+/// 限流拒绝错误码（JSON-RPC 自定义错误码 -32001）。
+pub const RATE_LIMIT_EXCEEDED: i32 = -32001;
+/// 认证失败错误码（JSON-RPC 自定义错误码 -32002）。
+pub const AUTH_FAILED: i32 = -32002;
+
+/// JSON-RPC 请求 params 最大字节数（L-4 修复 — 防止非 tx 方法的超大 payload DoS）。
+pub const MAX_RPC_PARAMS_SIZE: usize = 256 * 1024;
+
+// ===== M-5 修复：RPC 错误脱敏 =====
+
+/// RPC handler 处理错误（M-5 修复 — 区分客户端错误与内部错误以使用正确错误码）。
+///
+/// - `Client`：客户端可见错误（无效参数 / 签名失败 / nonce 不匹配等），
+///   映射到 JSON-RPC `INVALID_PARAMS` (-32602)
+/// - `Internal`：内部错误（存储 / 序列化 / VM 执行等），已脱敏，
+///   映射到 JSON-RPC `INTERNAL_ERROR` (-32603)，详细原因通过 tracing 记录
+#[derive(Debug)]
+pub enum RpcHandlerError {
+    /// 客户端错误 — 消息可直接返回给客户端。
+    Client(String),
+    /// 内部错误 — 消息已脱敏，实际错误已通过 tracing 记录。
+    Internal(String),
+}
+
+impl RpcHandlerError {
+    /// 从 `PokerL1Error` 构造，自动判断客户端/内部错误并脱敏。
+    pub fn from_poker_error(e: PokerL1Error) -> Self {
+        match &e {
+            // 内部错误 — 脱敏，仅返回通用消息，详细原因记录到日志
+            PokerL1Error::Rocksdb(_)
+            | PokerL1Error::Serialization(_)
+            | PokerL1Error::Other(_)
+            | PokerL1Error::Secp256k1(_)
+            | PokerL1Error::NetworkTransport(_)
+            | PokerL1Error::SyncError(_)
+            | PokerL1Error::ContractExecutionFailed(_)
+            | PokerL1Error::SyscallPanic(_) => {
+                tracing::warn!(error = %e, "RPC internal error (sanitized)");
+                Self::Internal("internal server error".to_string())
+            }
+            // 客户端可见错误 — 保留具体消息（不泄漏实现细节）
+            _ => Self::Client(e.to_string()),
+        }
+    }
+
+    /// 从 `serde_json::Error` 构造 — 脱敏为 "invalid params"。
+    pub fn from_serde_error(e: serde_json::Error) -> Self {
+        tracing::warn!(error = %e, "RPC params deserialization failed (sanitized)");
+        Self::Client("invalid params".to_string())
+    }
+}
+
+impl From<String> for RpcHandlerError {
+    fn from(s: String) -> Self {
+        Self::Client(s)
+    }
+}
+
 // ===== RpcBackend trait =====
 
 /// RPC 后端 trait — 提供存储与状态访问抽象。
@@ -336,19 +611,80 @@ pub trait RpcBackend: Send + Sync {
 ///
 /// 持有 [`RpcBackend`] 引用，将 JSON-RPC 请求派发到后端方法。
 /// 方法名匹配 spec SubTask 31.1 / 31.3。
+///
+/// H-1 修复：可选持有 [`RpcGuard`] 执行认证与限流。
 pub struct RpcHandler<'a, B: RpcBackend> {
     /// 后端。
     backend: &'a B,
+    /// 安全守卫（H-1 修复 — 认证 + 限流）。
+    guard: Option<RpcGuard>,
 }
 
 impl<'a, B: RpcBackend> RpcHandler<'a, B> {
-    /// 创建 handler。
+    /// 创建 handler（无守卫 — 向后兼容）。
     pub const fn new(backend: &'a B) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            guard: None,
+        }
     }
 
-    /// 处理 JSON-RPC 请求，返回 JSON-RPC 响应。
+    /// 创建带安全守卫的 handler（H-1 修复）。
+    pub const fn with_guard(backend: &'a B, guard: RpcGuard) -> Self {
+        Self {
+            backend,
+            guard: Some(guard),
+        }
+    }
+
+    /// 处理 JSON-RPC 请求（无客户端信息 — 向后兼容）。
+    ///
+    /// 等价于 `handle_with_client(req, &RpcClientInfo::default())`。
     pub fn handle(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        self.handle_with_client(req, &RpcClientInfo::default())
+    }
+
+    /// 处理 JSON-RPC 请求，携带客户端身份信息（H-1 修复）。
+    ///
+    /// 若设置了 [`RpcGuard`]，先执行认证 + 限流检查，被拒绝时返回对应错误码：
+    /// - 认证失败 → `-32002` (AUTH_FAILED)
+    /// - 限流超限 → `-32001` (RATE_LIMIT_EXCEEDED)
+    pub fn handle_with_client(
+        &self,
+        req: &JsonRpcRequest,
+        client: &RpcClientInfo,
+    ) -> JsonRpcResponse {
+        // L-4 修复：params 序列化大小校验（防止超大 JSON payload DoS）
+        // submit_tx 有独立的 MAX_TX_SIZE 检查，此处跳过
+        if req.method != "submit_tx" {
+            if let Ok(params_str) = serde_json::to_string(&req.params) {
+                if params_str.len() > MAX_RPC_PARAMS_SIZE {
+                    return JsonRpcResponse::error(
+                        JsonRpcError::new(
+                            JsonRpcError::INVALID_PARAMS,
+                            format!(
+                                "params too large: {} > {}",
+                                params_str.len(),
+                                MAX_RPC_PARAMS_SIZE
+                            ),
+                        ),
+                        req.id.clone(),
+                    );
+                }
+            }
+        }
+
+        // H-1 修复：认证 + 限流检查
+        if let Some(guard) = &self.guard
+            && let Err(err) = guard.check(&req.method, client)
+        {
+            let (code, msg) = match err {
+                RpcGuardError::Auth(m) => (AUTH_FAILED, m),
+                RpcGuardError::RateLimited(m) => (RATE_LIMIT_EXCEEDED, m),
+            };
+            return JsonRpcResponse::error(JsonRpcError::new(code, msg), req.id.clone());
+        }
+
         // 解析 params 为 serde_json::Value，方法内部再反序列化为具体类型
         let result = match req.method.as_str() {
             "get_block" => self.handle_get_block(&req.params),
@@ -373,59 +709,113 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
 
         match result {
             Ok(value) => JsonRpcResponse::success(value, req.id.clone()),
-            Err(err) => JsonRpcResponse::error(
-                JsonRpcError::new(JsonRpcError::INVALID_PARAMS, err),
+            // M-5 修复：区分客户端错误与内部错误，使用正确错误码
+            Err(RpcHandlerError::Client(msg)) => JsonRpcResponse::error(
+                JsonRpcError::new(JsonRpcError::INVALID_PARAMS, msg),
+                req.id.clone(),
+            ),
+            Err(RpcHandlerError::Internal(msg)) => JsonRpcResponse::error(
+                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, msg),
                 req.id.clone(),
             ),
         }
     }
 
     // ===== SubTask 31.1: JSON-RPC 方法 =====
+    // M-5 修复：所有 handler 返回 RpcHandlerError 以区分客户端/内部错误
 
-    fn handle_get_block(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn handle_get_block(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: GetBlockParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
         let block = match p {
             GetBlockParams::ByHash { hash } => self.backend.get_block_by_hash(&hash),
             GetBlockParams::ByHeight { height } => self.backend.get_block_by_height(height),
         }
-        .map_err(|e| e.to_string())?;
-        serde_json::to_value(block).map_err(|e| e.to_string())
+        .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(block).map_err(RpcHandlerError::from_serde_error)
     }
 
-    fn handle_get_object(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn handle_get_object(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: GetObjectParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
-        let obj = self.backend.get_object(&p.id).map_err(|e| e.to_string())?;
-        serde_json::to_value(obj).map_err(|e| e.to_string())
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let obj = self
+            .backend
+            .get_object(&p.id)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(obj).map_err(RpcHandlerError::from_serde_error)
     }
 
-    fn handle_get_tx(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let p: GetTxParams = serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
-        let tx = self.backend.get_tx(&p.tx_hash).map_err(|e| e.to_string())?;
-        serde_json::to_value(tx).map_err(|e| e.to_string())
+    fn handle_get_tx(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let p: GetTxParams =
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let tx = self
+            .backend
+            .get_tx(&p.tx_hash)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(tx).map_err(RpcHandlerError::from_serde_error)
     }
 
-    fn handle_submit_tx(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn handle_submit_tx(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: SubmitTxParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
         // tx_bytes 边界校验（SubTask 30.6：tx <= 128KB）
         const MAX_TX_SIZE: usize = 128 * 1024;
         if p.tx_bytes.len() > MAX_TX_SIZE {
-            return Err(PokerL1Error::TxTooLarge {
-                actual: p.tx_bytes.len(),
-                limit: MAX_TX_SIZE,
-            }
-            .to_string());
+            return Err(RpcHandlerError::Client(
+                PokerL1Error::TxTooLarge {
+                    actual: p.tx_bytes.len(),
+                    limit: MAX_TX_SIZE,
+                }
+                .to_string(),
+            ));
         }
-        let tx = Transaction::from_bcs(&p.tx_bytes).map_err(|e| e.to_string())?;
-        let tx_hash = self.backend.submit_tx(tx).map_err(|e| e.to_string())?;
-        serde_json::to_value(SubmitTxResult { tx_hash }).map_err(|e| e.to_string())
+        let tx = Transaction::from_bcs(&p.tx_bytes).map_err(RpcHandlerError::from_poker_error)?;
+
+        // C-1 安全修复：反序列化后立即执行完整验证
+        // 1. 每字段边界校验（MAX_INPUTS/MAX_OUTPUTS/MAX_SIG_LEN/MAX_ARGS_LEN）
+        validate_tx_limits(&tx).map_err(RpcHandlerError::from_poker_error)?;
+        // 2. chain_id 校验（SEC-L4：防跨链重放）
+        validate_tx_chain_id(&tx, self.backend.chain_id())
+            .map_err(RpcHandlerError::from_poker_error)?;
+        // 3. 签名验证（常数时间，IMPL-SEC-1）
+        validate_tx_signature(&tx).map_err(RpcHandlerError::from_poker_error)?;
+        // 4. nonce 校验（Public/ForceSync/CheckpointAnchor 通道）
+        //    GameTurn 通道的 game_player_nonce 需游戏状态，RPC 层无法获取，
+        //    留待 block 验证时检查
+        let caller_address = derive_address(&tx.tagged_pubkey);
+        let account_nonce = self
+            .backend
+            .get_account(&caller_address)
+            .map_err(RpcHandlerError::from_poker_error)?
+            .map(|a| a.nonce)
+            .unwrap_or(0);
+        validate_tx_nonce(&tx, account_nonce, None).map_err(RpcHandlerError::from_poker_error)?;
+
+        let tx_hash = self
+            .backend
+            .submit_tx(tx)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(SubmitTxResult { tx_hash }).map_err(RpcHandlerError::from_serde_error)
     }
 
-    fn handle_get_account(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn handle_get_account(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: GetAccountParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
         let address = match p {
             GetAccountParams::ByAddress { address } => address,
             GetAccountParams::ByPubkey { tagged_pubkey } => {
@@ -435,21 +825,21 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
         let account = self
             .backend
             .get_account(&address)
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(account).map_err(|e| e.to_string())
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(account).map_err(RpcHandlerError::from_serde_error)
     }
 
     fn handle_get_dag_vertex(
         &self,
         params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: GetDagVertexParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
         let vertex = self
             .backend
             .get_dag_vertex(&p.vertex_hash)
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(vertex).map_err(|e| e.to_string())
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(vertex).map_err(RpcHandlerError::from_serde_error)
     }
 
     // ===== SubTask 31.3: crypto verify RPC =====
@@ -457,37 +847,47 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
     fn handle_secp256k1_aggregate_verify(
         &self,
         params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: Secp256k1AggregateVerifyParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
         if p.pubkeys.len() != p.msg_hashes.len() || p.pubkeys.len() != p.sigs.len() {
-            return Err("pubkeys / msg_hashes / sigs length mismatch".to_string());
+            return Err(RpcHandlerError::Client(
+                "pubkeys / msg_hashes / sigs length mismatch".to_string(),
+            ));
         }
         let msg_refs: Vec<&[u8; 32]> = p.msg_hashes.iter().collect();
         let sig_refs: Vec<&[u8]> = p.sigs.iter().map(|s| s.as_slice()).collect();
         let verified = native_secp256k1_aggregate_verify(&p.pubkeys, &msg_refs, &sig_refs)
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(Secp256k1AggregateVerifyResult { verified }).map_err(|e| e.to_string())
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(Secp256k1AggregateVerifyResult { verified })
+            .map_err(RpcHandlerError::from_serde_error)
     }
 
-    fn handle_bls_verify(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn handle_bls_verify(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: BlsVerifyParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
-        let verified =
-            native_bls_verify(&p.pubkey_g2, &p.signature_g1, &p.msg).map_err(|e| e.to_string())?;
-        serde_json::to_value(BlsVerifyResult { verified }).map_err(|e| e.to_string())
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let verified = native_bls_verify(&p.pubkey_g2, &p.signature_g1, &p.msg)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(BlsVerifyResult { verified })
+            .map_err(RpcHandlerError::from_serde_error)
     }
 
-    fn handle_zk_verify(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn handle_zk_verify(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
         let p: ZkVerifyParams =
-            serde_json::from_value(params.clone()).map_err(|e| e.to_string())?;
-        let registry = self
-            .backend
-            .zk_verifier_registry()
-            .ok_or_else(|| "zk verifier registry not available".to_string())?;
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let registry = self.backend.zk_verifier_registry().ok_or_else(|| {
+            RpcHandlerError::Client("zk verifier registry not available".to_string())
+        })?;
         // 反序列化 public_io（ZkPublicIo::from_bytes 内部固定布局）
-        let public_io = ZkPublicIo::from_bytes(&p.public_io_bytes)
-            .ok_or_else(|| "public_io 反序列化失败：长度不足或格式错误".to_string())?;
+        let public_io = ZkPublicIo::from_bytes(&p.public_io_bytes).ok_or_else(|| {
+            RpcHandlerError::Client("public_io deserialization failed".to_string())
+        })?;
         let result: ZkVerifyResult = registry
             .zk_verify(
                 self.backend.chain_id(),
@@ -497,17 +897,58 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
                 p.max_skip_segments,
                 p.max_ack_chain_length,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(RpcHandlerError::from_poker_error)?;
         serde_json::to_value(ZkVerifyRpcResult {
             verified: result.verified,
             verifier_status: format!("{:?}", result.verifier_status),
             scheme_id: result.scheme_id,
         })
-        .map_err(|e| e.to_string())
+        .map_err(RpcHandlerError::from_serde_error)
     }
 }
 
 // ===== MemoryBackend（用于测试） =====
+
+/// tx_cache 最大条目数（C-2 修复 — 防止内存 DoS）。
+const MAX_RPC_TX_CACHE_SIZE: usize = 10_000;
+
+/// pending_tx 最大条目数（C-2 修复 — 防止内存 DoS）。
+const MAX_RPC_PENDING_TX_SIZE: usize = 10_000;
+
+/// RPC 层 tx 缓存状态（M-6 修复 — 合并 cache + order 到单个 Mutex 避免多锁死锁）。
+struct RpcTxCacheState {
+    /// tx_hash → tx 映射。
+    cache: HashMap<Hash, Transaction>,
+    /// 插入顺序（FIFO 淘汰追踪）。
+    order: VecDeque<Hash>,
+}
+
+impl RpcTxCacheState {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, tx_hash: Hash, tx: Transaction, max_size: usize) {
+        if !self.cache.contains_key(&tx_hash) {
+            self.order.push_back(tx_hash);
+        }
+        self.cache.insert(tx_hash, tx);
+        while self.cache.len() > max_size {
+            if let Some(old_hash) = self.order.pop_front() {
+                self.cache.remove(&old_hash);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn get(&self, tx_hash: &Hash) -> Option<&Transaction> {
+        self.cache.get(tx_hash)
+    }
+}
 
 /// 内存后端 — 用于单元测试与集成测试。
 ///
@@ -523,8 +964,8 @@ pub struct MemoryBackend {
     account_store: std::sync::Mutex<AccountStore>,
     /// chain_id。
     chain_id: ChainId,
-    /// 已提交的 tx 缓存（tx_hash → tx），用于 get_tx RPC。
-    tx_cache: std::sync::Mutex<std::collections::HashMap<Hash, Transaction>>,
+    /// 已提交的 tx 缓存（M-6 修复 — cache + order 合并到单个 Mutex）。
+    tx_cache: std::sync::Mutex<RpcTxCacheState>,
     /// 待装 vertex 的 tx 缓冲（submit_tx 写入）。
     pending_tx: std::sync::Mutex<std::collections::VecDeque<Transaction>>,
     /// ZK verifier registry（可选）。
@@ -540,7 +981,7 @@ impl MemoryBackend {
             vertex_store: DagVertexStore::open_inmemory()?,
             account_store: std::sync::Mutex::new(AccountStore::new()),
             chain_id,
-            tx_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            tx_cache: std::sync::Mutex::new(RpcTxCacheState::new()),
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
             zk_registry: None,
         })
@@ -558,7 +999,10 @@ impl MemoryBackend {
 
     /// 注入对象（测试辅助）。
     pub fn insert_object(&self, object: Object) -> PokerL1Result<()> {
-        self.object_db.lock().unwrap().create(object)
+        self.object_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .create(object)
     }
 
     /// 注入 DAG vertex（测试辅助）。
@@ -568,12 +1012,19 @@ impl MemoryBackend {
 
     /// 注入 account（测试辅助）。
     pub fn insert_account(&self, account: Account) -> PokerL1Result<()> {
-        self.account_store.lock().unwrap().create(account)
+        self.account_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .create(account)
     }
 
     /// 取出待装 vertex 的 tx（测试辅助）。
     pub fn drain_pending_tx(&self) -> Vec<Transaction> {
-        self.pending_tx.lock().unwrap().drain(..).collect()
+        self.pending_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect()
     }
 }
 
@@ -595,7 +1046,11 @@ impl RpcBackend for MemoryBackend {
     }
 
     fn get_object(&self, id: &ObjectID) -> PokerL1Result<Option<Object>> {
-        let result = self.object_db.lock().unwrap().read(id);
+        let result = self
+            .object_db
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .read(id);
         match result {
             Ok(obj) => Ok(Some(obj)),
             Err(PokerL1Error::ObjectNotFound(_)) => Ok(None),
@@ -604,18 +1059,38 @@ impl RpcBackend for MemoryBackend {
     }
 
     fn get_tx(&self, tx_hash: &Hash) -> PokerL1Result<Option<Transaction>> {
-        Ok(self.tx_cache.lock().unwrap().get(tx_hash).cloned())
+        Ok(self
+            .tx_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tx_hash)
+            .cloned())
     }
 
     fn submit_tx(&self, tx: Transaction) -> PokerL1Result<Hash> {
         let tx_hash = tx.tx_hash();
-        self.tx_cache.lock().unwrap().insert(tx_hash, tx.clone());
-        self.pending_tx.lock().unwrap().push_back(tx);
+
+        // M-6 修复：单次 lock 完成 cache + order 操作
+        {
+            let mut cache = self.tx_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.insert(tx_hash, tx.clone(), MAX_RPC_TX_CACHE_SIZE);
+        }
+
+        let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
+        pending.push_back(tx);
+        while pending.len() > MAX_RPC_PENDING_TX_SIZE {
+            pending.pop_front();
+        }
         Ok(tx_hash)
     }
 
     fn get_account(&self, address: &Address) -> PokerL1Result<Option<Account>> {
-        Ok(self.account_store.lock().unwrap().get(address).cloned())
+        Ok(self
+            .account_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(address)
+            .cloned())
     }
 
     fn get_dag_vertex(&self, vertex_hash: &Hash) -> PokerL1Result<Option<DagVertex>> {
@@ -643,14 +1118,53 @@ mod tests {
     use crate::block::{Block, BlockHeader};
     use crate::consensus::DagVertex;
     use crate::object_model::{Object, ObjectID, Ownership};
-    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
+    use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, Transaction, TxLane};
+    use secp256k1::rand::rngs::OsRng;
+    use secp256k1::{Message, Secp256k1};
 
     fn dummy_tagged_pubkey() -> TaggedPubkey {
         TaggedPubkey {
             tag: encode_tag(SignatureScheme::Secp256k1, 1),
             raw: vec![0x02u8; 33],
         }
+    }
+
+    /// 生成真实 secp256k1 签名的 dummy tx（nonce=0，适配新账户）。
+    fn signed_dummy_tx() -> Transaction {
+        let secp = Secp256k1::new();
+        let mut rng = OsRng;
+        let (secret, public) = secp.generate_keypair(&mut rng);
+        let compressed = public.serialize();
+        let tagged = TaggedPubkey::new(
+            SignatureScheme::Secp256k1,
+            CURRENT_VERSION,
+            compressed.to_vec(),
+        )
+        .expect("构造 tagged pubkey 不应失败");
+
+        let mut tx = Transaction {
+            inputs: vec![ObjectID::new([0u8; 20], 1)],
+            outputs: vec![dummy_object(1)],
+            contract_call: None,
+            tagged_pubkey: tagged,
+            signature: vec![0u8; 65],
+            gas: Gas::new(1000, 1),
+            lane_hint: TxLane::Public,
+            route_hint: RouteHint::AnyValidator,
+            chain_id: DEFAULT_CHAIN_ID,
+            nonce: 0,
+            gameturn_nonce: None,
+            is_fallback: false,
+        };
+        let signing_hash = tx.signing_hash();
+        let msg = Message::from_digest_slice(&signing_hash).expect("signing_hash 32 bytes");
+        let sig = secp.sign_ecdsa_recoverable(&msg, &secret);
+        let (recovery_id, compact) = sig.serialize_compact();
+        let mut sig_bytes = compact.to_vec();
+        sig_bytes.push(recovery_id.to_i32() as u8);
+        tx.signature = sig_bytes;
+        tx
     }
 
     fn dummy_object(id_byte: u8) -> Object {
@@ -692,23 +1206,6 @@ mod tests {
             vec![],
             vec![],
         )
-    }
-
-    fn dummy_tx() -> Transaction {
-        Transaction {
-            inputs: vec![ObjectID::new([0u8; 20], 1)],
-            outputs: vec![dummy_object(1)],
-            contract_call: None,
-            tagged_pubkey: dummy_tagged_pubkey(),
-            signature: vec![0u8; 65],
-            gas: Gas::new(1000, 1),
-            lane_hint: TxLane::Public,
-            route_hint: RouteHint::AnyValidator,
-            chain_id: DEFAULT_CHAIN_ID,
-            nonce: 1,
-            gameturn_nonce: None,
-            is_fallback: false,
-        }
     }
 
     #[test]
@@ -790,7 +1287,7 @@ mod tests {
     #[test]
     fn submit_tx_returns_tx_hash() {
         let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
-        let tx = dummy_tx();
+        let tx = signed_dummy_tx();
         let expected_hash = tx.tx_hash();
         let tx_bytes = tx.to_bcs().unwrap();
 
@@ -1029,7 +1526,7 @@ mod tests {
     #[test]
     fn get_tx_returns_tx_after_submit() {
         let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
-        let tx = dummy_tx();
+        let tx = signed_dummy_tx();
         let tx_hash = tx.tx_hash();
         let tx_bytes = tx.to_bcs().unwrap();
 
@@ -1054,5 +1551,343 @@ mod tests {
         assert!(resp.error.is_none());
         let tx_resp: Transaction = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert_eq!(tx_resp.tx_hash(), tx_hash);
+    }
+
+    // ===== H-1 修复测试：RPC 认证与限流 =====
+
+    #[test]
+    fn h1_rate_limit_rejects_excessive_write_requests() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let config = RateLimitConfig {
+            write_rps: 2,
+            ..Default::default()
+        };
+        let guard = RpcGuard::rate_limit_only(config);
+        let handler = RpcHandler::with_guard(&backend, guard);
+
+        let client = RpcClientInfo {
+            client_id: Some("test-client".to_string()),
+            ..Default::default()
+        };
+
+        // 前两次请求应通过
+        for _ in 0..2 {
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "get_block".to_string(), // Read 请求不受 write_rps 限制
+                params: serde_json::json!({"height": 0u64}),
+                id: serde_json::json!(1),
+            };
+            let resp = handler.handle_with_client(&req, &client);
+            // get_block height=0 不存在，返回 result: null（非错误）
+            assert!(resp.error.is_none(), "read 请求不应被 write 限流拒绝");
+        }
+
+        // write 请求（submit_tx）超过 write_rps=2 后应被限流
+        let tx = signed_dummy_tx();
+        let tx_bytes = tx.to_bcs().unwrap();
+        for i in 0..3 {
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "submit_tx".to_string(),
+                params: serde_json::json!({"tx_bytes": tx_bytes.clone()}),
+                id: serde_json::json!(i),
+            };
+            let resp = handler.handle_with_client(&req, &client);
+            if i < 2 {
+                // nonce 检查可能拒绝第 2 次（相同 nonce），但不应是限流错误
+                if let Some(err) = &resp.error {
+                    assert_ne!(err.code, RATE_LIMIT_EXCEEDED, "前 {i} 次请求不应被限流");
+                }
+            } else {
+                // 第 3 次应被限流
+                assert!(resp.error.is_some(), "第 {i} 次 write 请求应被限流");
+                assert_eq!(resp.error.unwrap().code, RATE_LIMIT_EXCEEDED);
+            }
+        }
+    }
+
+    #[test]
+    fn h1_auth_rejects_missing_api_key() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let auth_config = AuthConfig {
+            require_auth_for_write: true,
+            allowed_api_keys: HashSet::from(["secret-key".to_string()]),
+            ..Default::default()
+        };
+        let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
+        let handler = RpcHandler::with_guard(&backend, guard);
+
+        let client = RpcClientInfo::default(); // 无 API key
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "submit_tx".to_string(),
+            params: serde_json::json!({"tx_bytes": vec![0u8; 32]}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle_with_client(&req, &client);
+        assert!(resp.error.is_some(), "无 API key 应被拒绝");
+        assert_eq!(resp.error.unwrap().code, AUTH_FAILED);
+    }
+
+    #[test]
+    fn h1_auth_rejects_invalid_api_key() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let auth_config = AuthConfig {
+            require_auth_for_write: true,
+            allowed_api_keys: HashSet::from(["secret-key".to_string()]),
+            ..Default::default()
+        };
+        let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
+        let handler = RpcHandler::with_guard(&backend, guard);
+
+        let client = RpcClientInfo {
+            api_key: Some("wrong-key".to_string()),
+            ..Default::default()
+        };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "submit_tx".to_string(),
+            params: serde_json::json!({"tx_bytes": vec![0u8; 32]}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle_with_client(&req, &client);
+        assert!(resp.error.is_some(), "错误 API key 应被拒绝");
+        assert_eq!(resp.error.unwrap().code, AUTH_FAILED);
+    }
+
+    #[test]
+    fn h1_auth_allows_valid_api_key() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let auth_config = AuthConfig {
+            require_auth_for_write: true,
+            allowed_api_keys: HashSet::from(["secret-key".to_string()]),
+            ..Default::default()
+        };
+        let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
+        let handler = RpcHandler::with_guard(&backend, guard);
+
+        let tx = signed_dummy_tx();
+        let tx_bytes = tx.to_bcs().unwrap();
+        let client = RpcClientInfo {
+            api_key: Some("secret-key".to_string()),
+            client_id: Some("test-client".to_string()),
+        };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "submit_tx".to_string(),
+            params: serde_json::json!({"tx_bytes": tx_bytes}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle_with_client(&req, &client);
+        assert!(resp.error.is_none(), "正确 API key 应通过认证");
+    }
+
+    #[test]
+    fn h1_read_endpoints_no_auth_required() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let auth_config = AuthConfig {
+            require_auth_for_write: true,
+            require_auth_for_crypto: true,
+            allowed_api_keys: HashSet::from(["secret-key".to_string()]),
+        };
+        let guard = RpcGuard::new(RateLimitConfig::default(), auth_config);
+        let handler = RpcHandler::with_guard(&backend, guard);
+
+        // Read 请求不需要认证
+        let client = RpcClientInfo::default();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_block".to_string(),
+            params: serde_json::json!({"height": 0u64}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle_with_client(&req, &client);
+        assert!(resp.error.is_none(), "read 请求不应要求认证");
+    }
+
+    #[test]
+    fn h1_rate_limit_independent_per_client() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let config = RateLimitConfig {
+            read_rps: 2,
+            ..Default::default()
+        };
+        let guard = RpcGuard::rate_limit_only(config);
+        let handler = RpcHandler::with_guard(&backend, guard);
+
+        // client_a 用尽 read 配额
+        let client_a = RpcClientInfo {
+            client_id: Some("client-a".to_string()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "get_block".to_string(),
+                params: serde_json::json!({"height": 0u64}),
+                id: serde_json::json!(1),
+            };
+            let _ = handler.handle_with_client(&req, &client_a);
+        }
+        // client_a 第 3 次应被限流
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_block".to_string(),
+            params: serde_json::json!({"height": 0u64}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle_with_client(&req, &client_a);
+        assert_eq!(
+            resp.error.as_ref().unwrap().code,
+            RATE_LIMIT_EXCEEDED,
+            "client_a 应被限流"
+        );
+
+        // client_b 不受 client_a 影响
+        let client_b = RpcClientInfo {
+            client_id: Some("client-b".to_string()),
+            ..Default::default()
+        };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_block".to_string(),
+            params: serde_json::json!({"height": 0u64}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle_with_client(&req, &client_b);
+        assert!(resp.error.is_none(), "client_b 不应被 client_a 的限流影响");
+    }
+
+    #[test]
+    fn h1_handler_without_guard_backward_compatible() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let handler = RpcHandler::new(&backend); // 无 guard
+
+        let client = RpcClientInfo::default();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_block".to_string(),
+            params: serde_json::json!({"height": 0u64}),
+            id: serde_json::json!(1),
+        };
+        // handle() 和 handle_with_client() 都应正常工作
+        let resp1 = handler.handle(&req);
+        let resp2 = handler.handle_with_client(&req, &client);
+        assert!(resp1.error.is_none());
+        assert!(resp2.error.is_none());
+    }
+
+    // ===== M-5 修复测试：RPC 错误脱敏 =====
+
+    #[test]
+    fn m5_internal_error_sanitized_to_generic_message() {
+        // Rocksdb 错误应被脱敏为 "internal server error"
+        let err = RpcHandlerError::from_poker_error(PokerL1Error::Rocksdb(
+            "disk I/O failure at /var/data/db".to_string(),
+        ));
+        match err {
+            RpcHandlerError::Internal(msg) => {
+                assert_eq!(msg, "internal server error");
+                // 确保不泄漏原始路径
+                assert!(!msg.contains("/var/data"));
+                assert!(!msg.contains("disk I/O"));
+            }
+            RpcHandlerError::Client(_) => panic!("Rocksdb 错误应被分类为 Internal"),
+        }
+    }
+
+    #[test]
+    fn m5_serialization_error_sanitized() {
+        let err = RpcHandlerError::from_poker_error(PokerL1Error::Serialization(
+            "bcs: invalid field 'secret_key' at offset 42".to_string(),
+        ));
+        match err {
+            RpcHandlerError::Internal(msg) => {
+                assert_eq!(msg, "internal server error");
+                assert!(!msg.contains("secret_key"));
+                assert!(!msg.contains("offset 42"));
+            }
+            RpcHandlerError::Client(_) => panic!("Serialization 错误应被分类为 Internal"),
+        }
+    }
+
+    #[test]
+    fn m5_other_error_sanitized() {
+        let err = RpcHandlerError::from_poker_error(PokerL1Error::Other(
+            "internal state corruption in module xyz".to_string(),
+        ));
+        match err {
+            RpcHandlerError::Internal(msg) => {
+                assert_eq!(msg, "internal server error");
+                assert!(!msg.contains("corruption"));
+                assert!(!msg.contains("xyz"));
+            }
+            RpcHandlerError::Client(_) => panic!("Other 错误应被分类为 Internal"),
+        }
+    }
+
+    #[test]
+    fn m5_client_error_preserves_specific_message() {
+        // TxTooLarge 是客户端错误，应保留具体消息
+        let err = RpcHandlerError::from_poker_error(PokerL1Error::TxTooLarge {
+            actual: 200_000,
+            limit: 131_072,
+        });
+        match err {
+            RpcHandlerError::Client(msg) => {
+                assert!(msg.contains("200000"));
+                assert!(msg.contains("131072"));
+            }
+            RpcHandlerError::Internal(_) => panic!("TxTooLarge 应被分类为 Client"),
+        }
+    }
+
+    #[test]
+    fn m5_signature_error_preserves_specific_message() {
+        let err = RpcHandlerError::from_poker_error(PokerL1Error::InvalidSignature);
+        match err {
+            RpcHandlerError::Client(msg) => {
+                assert!(msg.contains("signature verification failed"));
+            }
+            RpcHandlerError::Internal(_) => panic!("InvalidSignature 应被分类为 Client"),
+        }
+    }
+
+    #[test]
+    fn m5_invalid_params_uses_correct_error_code() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let handler = RpcHandler::new(&backend);
+
+        // 提交无效 JSON 参数 → 应返回 INVALID_PARAMS 而非 INTERNAL_ERROR
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_block".to_string(),
+            params: serde_json::json!("not an object"), // 无效参数类型
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle(&req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, JsonRpcError::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn m5_tx_too_large_uses_invalid_params_code() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let handler = RpcHandler::new(&backend);
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "submit_tx".to_string(),
+            params: serde_json::json!({"tx_bytes": vec![0u8; 200_000]}), // 超过 128KB
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle(&req);
+        assert!(resp.error.is_some());
+        let err = resp.error.unwrap();
+        // TxTooLarge 是客户端错误 → INVALID_PARAMS
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        // 消息应包含具体限制信息（客户端可见）
+        assert!(err.message.contains("131072"));
     }
 }

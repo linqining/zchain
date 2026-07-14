@@ -11,6 +11,7 @@ use super::object::Object;
 use super::smt::SparseMerkleTree;
 use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::vm::gas_table::MAX_OBJECT_SIZE;
 use std::collections::HashMap;
 
 /// 内存版 ObjectStore + SMT backing。
@@ -38,7 +39,14 @@ impl ObjectStore {
     }
 
     /// 创建对象。ObjectID 冲突返回 `ObjectIDCollision`（NEW-L4）。
+    /// L-1 修复：校验 data 大小 ≤ MAX_OBJECT_SIZE（defense in depth，syscall 层已校验）。
     pub fn create(&mut self, object: Object) -> PokerL1Result<()> {
+        if object.data.len() > MAX_OBJECT_SIZE {
+            return Err(PokerL1Error::ObjectTooLarge {
+                actual: object.data.len(),
+                limit: MAX_OBJECT_SIZE,
+            });
+        }
         if self.objects.contains_key(&object.id) {
             return Err(PokerL1Error::ObjectIDCollision(object.id));
         }
@@ -62,14 +70,22 @@ impl ObjectStore {
         Ok(self.read(id)?.version)
     }
 
-    /// 更新对象。校验：对象存在、可写（非 Immutable）、actor 有写权。
+    /// 更新对象。校验：对象存在、可写（非 Immutable）、actor 有写权、data 大小 ≤ MAX_OBJECT_SIZE。
     /// 成功后 version += 1，SMT 同步更新。
+    /// L-2 修复：校验 new_data 大小（defense in depth，syscall 层已校验）。
     pub fn update(
         &mut self,
         id: &ObjectID,
         actor: &Address,
         new_data: Vec<u8>,
     ) -> PokerL1Result<()> {
+        if new_data.len() > MAX_OBJECT_SIZE {
+            return Err(PokerL1Error::ObjectTooLarge {
+                actual: new_data.len(),
+                limit: MAX_OBJECT_SIZE,
+            });
+        }
+
         let obj = self
             .objects
             .get_mut(id)

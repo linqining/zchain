@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use super::gas_table::TX_GAS_LIMIT;
 use crate::object_model::ObjectID;
 use crate::offline::zk_verifier::ZkVerifierRegistry;
 use crate::signature::TaggedPubkey;
@@ -95,10 +96,20 @@ impl PokerL1Context {
     /// 参数：
     /// - `tx`：交易上下文
     /// - `gas_limit`：gas 上限（GameTurn 通道传 `u64::MAX` 表示免 gas）
+    ///
+    /// H-4 修复：非 GameTurn 通道的 gas_limit 被限制在 TX_GAS_LIMIT（10M）以内，
+    /// 防止恶意 tx 设置超大 gas_limit 导致 CPU DoS。
     pub const fn new(tx: TxContext, gas_limit: u64) -> Self {
+        let effective_gas = if gas_limit == u64::MAX {
+            gas_limit
+        } else if gas_limit > TX_GAS_LIMIT {
+            TX_GAS_LIMIT
+        } else {
+            gas_limit
+        };
         Self {
-            remaining: gas_limit,
-            initial_gas: gas_limit,
+            remaining: effective_gas,
+            initial_gas: effective_gas,
             tx,
             object_cache: BTreeMap::new(),
             events: Vec::new(),

@@ -855,13 +855,13 @@ pub const fn validate_param(
 /// 计算普通参数（2/3 quorum）所需的赞成票数。
 ///
 /// SEC2-M6：分母 = 当前 epoch validator 集大小（含离线）。
-/// 向上取整：`ceil(validator_count * 2 / 3)`。
+/// 严格 >2/3 的最小整数（C-3 修复）。
 #[must_use]
 pub const fn required_yes_votes_normal(validator_count: usize) -> usize {
     if validator_count == 0 {
         return 0;
     }
-    (validator_count * 2).div_ceil(3) // ceil(n * 2 / 3)
+    2 * validator_count / 3 + 1 // 严格 >2/3
 }
 
 /// 计算敏感参数（90% quorum）所需的赞成票数。
@@ -1857,10 +1857,10 @@ mod tests {
 
     #[test]
     fn test_required_yes_votes_normal() {
-        // 2/3 quorum，向上取整
-        assert_eq!(required_yes_votes_normal(3), 2);
-        assert_eq!(required_yes_votes_normal(5), 4); // ceil(5*2/3) = ceil(3.33) = 4
-        assert_eq!(required_yes_votes_normal(10), 7); // ceil(10*2/3) = ceil(6.67) = 7
+        // 严格 >2/3（C-3 修复）
+        assert_eq!(required_yes_votes_normal(3), 3); // 2*3/3+1 = 3
+        assert_eq!(required_yes_votes_normal(5), 4); // 2*5/3+1 = 4
+        assert_eq!(required_yes_votes_normal(10), 7); // 2*10/3+1 = 7
         assert_eq!(required_yes_votes_normal(0), 0);
     }
 

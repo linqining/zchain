@@ -31,12 +31,14 @@ use poker_l1::rpc::{
     SubscribeRequest,
 };
 use poker_l1::signature::TaggedPubkey;
-use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
+use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
 use poker_l1::{DEFAULT_CHAIN_ID, Hash};
 
 use bridge_helpers::{make_real_keypair, make_valid_bridge_verify_tx};
 use rand::{Rng, RngCore};
+use secp256k1::rand::rngs::OsRng;
+use secp256k1::{Message, Secp256k1};
 
 mod bridge_helpers;
 
@@ -47,6 +49,43 @@ fn dummy_tagged_pubkey() -> TaggedPubkey {
         tag: encode_tag(SignatureScheme::Secp256k1, 1),
         raw: vec![0x02u8; 33],
     }
+}
+
+/// 生成真实 secp256k1 签名的 dummy tx（nonce=0，适配新账户）。
+fn signed_dummy_tx() -> Transaction {
+    let secp = Secp256k1::new();
+    let mut rng = OsRng;
+    let (secret, public) = secp.generate_keypair(&mut rng);
+    let compressed = public.serialize();
+    let tagged = TaggedPubkey::new(
+        SignatureScheme::Secp256k1,
+        CURRENT_VERSION,
+        compressed.to_vec(),
+    )
+    .expect("构造 tagged pubkey 不应失败");
+
+    let mut tx = Transaction {
+        inputs: vec![ObjectID::new([0u8; 20], 1)],
+        outputs: vec![dummy_object(1)],
+        contract_call: None,
+        tagged_pubkey: tagged,
+        signature: vec![0u8; 65],
+        gas: Gas::new(1000, 1),
+        lane_hint: TxLane::Public,
+        route_hint: RouteHint::AnyValidator,
+        chain_id: DEFAULT_CHAIN_ID,
+        nonce: 0,
+        gameturn_nonce: None,
+        is_fallback: false,
+    };
+    let signing_hash = tx.signing_hash();
+    let msg = Message::from_digest_slice(&signing_hash).expect("signing_hash 32 bytes");
+    let sig = secp.sign_ecdsa_recoverable(&msg, &secret);
+    let (recovery_id, compact) = sig.serialize_compact();
+    let mut sig_bytes = compact.to_vec();
+    sig_bytes.push(recovery_id.to_i32() as u8);
+    tx.signature = sig_bytes;
+    tx
 }
 
 fn dummy_object(id_byte: u8) -> Object {
@@ -181,7 +220,7 @@ mod subtask_43_6_rpc {
         let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
         let handler = RpcHandler::new(&backend);
 
-        let tx = dummy_tx(1);
+        let tx = signed_dummy_tx();
         let expected_hash = tx.tx_hash();
         let tx_bytes = tx.to_bcs().unwrap();
 

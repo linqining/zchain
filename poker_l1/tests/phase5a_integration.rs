@@ -172,6 +172,9 @@ fn subtask_42_1_checkin_tx_with_valid_proof_succeeds() {
         scheme_id: SCHEME_HYPERNOVA,
         proof_kind: ProofKind::Zkvm,
         has_partial_checkin: false,
+        folded_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
     };
 
     // 验证签名哈希确定性
@@ -220,6 +223,9 @@ fn subtask_42_1_checkin_tx_ack_chain_too_long_rejected() {
         scheme_id: SCHEME_HYPERNOVA,
         proof_kind: ProofKind::Zkvm,
         has_partial_checkin: false,
+        folded_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
     };
 
     let result = execute_checkin(
@@ -249,6 +255,9 @@ fn subtask_42_1_checkin_tx_partial_checkin_mismatch_rejected() {
         scheme_id: SCHEME_HYPERNOVA,
         proof_kind: ProofKind::Zkvm,
         has_partial_checkin: true, // 声明有 partial 但不提供 last_partial_fold
+        folded_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
     };
 
     let result = execute_checkin(
@@ -1103,6 +1112,9 @@ fn subtask_42_5_fold_loop_produces_valid_public_io_for_checkin() {
         scheme_id: SCHEME_HYPERNOVA,
         proof_kind: ProofKind::Zkvm,
         has_partial_checkin: false,
+        folded_step_count: 1,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
     };
 
     let registry = make_full_registry();

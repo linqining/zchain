@@ -131,8 +131,10 @@ impl SlashingConfig {
 /// `slash_amount = remaining_stake * slash_percentage / 100`
 ///
 /// SEC2-H2：扣除基数 = 剩余质押（非原始质押），每项 slashing 基于当时剩余质押计算。
+///
+/// M-2 修复：使用 `saturating_mul` 防止 u64 乘法溢出。
 pub const fn compute_slash_amount(remaining_stake: u64, slash_percentage: u32) -> u64 {
-    remaining_stake * slash_percentage as u64 / 100
+    remaining_stake.saturating_mul(slash_percentage as u64) / 100
 }
 
 /// 判定是否触发治理踢出（SubTask 13.3：连续 `downtime_threshold_blocks` 未提交 vertex）。
