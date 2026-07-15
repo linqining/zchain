@@ -33,6 +33,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 rayon = { workspace = true }
 goblin = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

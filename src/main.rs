@@ -30,6 +30,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
+use poker_l1::account::derive_address;
+use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, validate_tx_signature};
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
 use poker_l1::consensus::{
     Dag, DagCommitCertificate, DagVertex, VertexBuilder, detect_commit_leader,
@@ -37,12 +39,12 @@ use poker_l1::consensus::{
 use poker_l1::error::PokerL1Result;
 use poker_l1::network::{GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
 use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
-use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
+use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane, validate_tx_limits};
 use poker_l1::{Address, Hash};
 use poker_l1::rpc::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcClientInfo, RpcGuard, RpcHandler,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// 程序版本。
@@ -243,7 +245,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let mut config = match role {
         NodeRole::Validator => {
             let key_hex = resolve_validator_key(validator_key_file, validator_key_hex)?;
-            let key_bytes =
+            let mut key_bytes =
                 hex::decode(key_hex.trim()).map_err(|e| format!("私钥 hex 解码失败：{e}"))?;
             if key_bytes.len() != 32 {
                 return Err(format!(
@@ -253,7 +255,10 @@ fn run_node(args: &[String]) -> Result<(), String> {
             }
             let mut sk = [0u8; 32];
             sk.copy_from_slice(&key_bytes);
+            // 安全擦除含私钥明文的中间变量（ValidatorKey 内部有独立副本并实现 Drop zeroize）
+            key_bytes.fill(0);
             let vkey = ValidatorKey::from_secret_bytes(sk).map_err(|e| format!("私钥无效：{e}"))?;
+            sk.fill(0);
             NodeConfig::validator(data_dir.clone(), vkey)
         }
         NodeRole::Full => NodeConfig::default_full(data_dir.clone()),
@@ -585,7 +590,10 @@ impl TcpTransport {
 
     /// 添加已连接的 peer stream。
     fn add_peer(&self, stream: TcpStream) {
-        self.peers.lock().unwrap().push(stream);
+        self.peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(stream);
     }
 
     /// 主动连接到 peer。
@@ -598,7 +606,7 @@ impl TcpTransport {
 
     /// 获取当前 peer 数量。
     fn peer_count(&self) -> usize {
-        self.peers.lock().unwrap().len()
+        self.peers.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
@@ -613,7 +621,7 @@ impl NetworkTransport for TcpTransport {
         let mut frame = len.to_be_bytes().to_vec();
         frame.extend_from_slice(&bytes);
 
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         let mut failed = Vec::new();
         for (i, stream) in peers.iter_mut().enumerate() {
             if let Err(e) = stream.write_all(&frame).and_then(|_| stream.flush()) {
@@ -628,12 +636,15 @@ impl NetworkTransport for TcpTransport {
         Ok(())
     }
 
-    fn send_to(&self, _peer: &PeerInfo, _message: &NetworkMessage) -> PokerL1Result<()> {
-        // 简化实现：不维护 peer 地址到 stream 的映射，send_to 等价于 gossip_broadcast
-        Ok(())
+    fn send_to(&self, _peer: &PeerInfo, message: &NetworkMessage) -> PokerL1Result<()> {
+        // 简化实现：不维护 peer 地址到 stream 的映射，退化为广播。
+        // TODO: 实现 peer 地址 → stream 的映射以支持定向通信。
+        warn!("send_to 退化为广播（未维护 peer 地址映射）");
+        self.gossip_broadcast(GossipTopic::DagVertex, message)
     }
 
     fn discover_peers(&self) -> PokerL1Result<Vec<PeerInfo>> {
+        // TODO: 实现 peer 发现协议。
         Ok(Vec::new())
     }
 
@@ -642,6 +653,7 @@ impl NetworkTransport for TcpTransport {
         _start: poker_l1::BlockHeight,
         _end: poker_l1::BlockHeight,
     ) -> PokerL1Result<Vec<Block>> {
+        // TODO: 实现区块同步请求-响应协议。
         Ok(Vec::new())
     }
 
@@ -650,12 +662,14 @@ impl NetworkTransport for TcpTransport {
         _start_round: u64,
         _end_round: u64,
     ) -> PokerL1Result<Vec<DagVertex>> {
+        // TODO: 实现 vertex 同步请求-响应协议。
         Ok(Vec::new())
     }
 
     fn subscribe_light_headers(
         &self,
     ) -> PokerL1Result<Vec<poker_l1::network::LightClientHeader>> {
+        // TODO: 实现轻客户端 header 订阅。
         Ok(Vec::new())
     }
 }
@@ -725,6 +739,34 @@ fn handle_p2p_connection(
                         }
                     }
                     NetworkMessage::Transaction(tx) => {
+                        // C-1 安全修复：P2P 路径必须与 RPC 路径执行一致的验证链，
+                        // 防止恶意节点注入未签名/跨链重放/超大交易进入 pending_tx。
+                        let chain_id = node.chain_id();
+                        if let Err(e) = validate_tx_limits(&tx) {
+                            warn!("P2P 交易拒绝（limits）：{e}");
+                            continue;
+                        }
+                        if let Err(e) = validate_tx_chain_id(&tx, chain_id) {
+                            warn!("P2P 交易拒绝（chain_id）：{e}");
+                            continue;
+                        }
+                        if let Err(e) = validate_tx_signature(&tx) {
+                            warn!("P2P 交易拒绝（签名无效）：{e}");
+                            continue;
+                        }
+                        // nonce 校验：Public/ForceSync/CheckpointAnchor 用 account nonce；
+                        // GameTurn 的 game_player_nonce 需游戏状态，留待 block 验证。
+                        let caller_address = derive_address(&tx.tagged_pubkey);
+                        let account_nonce = node
+                            .get_account(&caller_address)
+                            .ok()
+                            .flatten()
+                            .map(|a| a.nonce)
+                            .unwrap_or(0);
+                        if let Err(e) = validate_tx_nonce(&tx, account_nonce, None) {
+                            warn!("P2P 交易拒绝（nonce）：{e}");
+                            continue;
+                        }
                         if let Err(e) = node.submit_tx(tx) {
                             warn!("P2P submit_tx 失败：{e}");
                         }
@@ -739,10 +781,10 @@ fn handle_p2p_connection(
                     NetworkMessage::CompactVertex(compact) => {
                         // 简化：compact vertex 需要从本地 tx_cache 重建，暂不支持
                         let _ = compact;
-                        debug_log("收到 CompactVertex（暂不支持重建）");
+                        debug!("收到 CompactVertex（暂不支持重建）");
                     }
                     other => {
-                        debug_log(&format!("收到未处理的 P2P 消息类型：{other:?}"));
+                        debug!("收到未处理的 P2P 消息类型：{other:?}");
                     }
                 }
             }
@@ -755,17 +797,6 @@ fn handle_p2p_connection(
                 break;
             }
         }
-    }
-}
-
-/// 简易调试日志（避免引入 tracing debug level 依赖）。
-fn debug_log(msg: &str) {
-    // 仅在 RUST_LOG=debug 时输出，否则静默
-    if std::env::var("RUST_LOG")
-        .map(|v| v.contains("debug"))
-        .unwrap_or(false)
-    {
-        eprintln!("[debug] {msg}");
     }
 }
 
@@ -812,7 +843,9 @@ fn build_block_from_vertex(
     // 3. 计算 roots
     let public_tx_root = compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = compute_tx_merkle_root(&gameturn_txs);
-    let state_root = [0u8; 32]; // 暂无状态机执行层
+    // TODO(state-machine): 接入状态机执行层后计算真实 state_root。
+    // 当前为占位零值，不反映交易执行后状态；轻客户端不应将其视为有效状态承诺。
+    let state_root = [0u8; 32];
 
     // 4. 构造 commit certificate（先不含签名）
     let vertex_hash = vertex.vertex_hash();
@@ -950,11 +983,15 @@ fn run_validator_loop(
 
         // 插入 Dag + 持久化 + 广播
         let vertex_hash = {
-            let mut dag_guard = dag.lock().unwrap();
+            let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
             dag_guard.insert(vertex.clone())
         };
         if let Err(e) = node.put_vertex(&vertex) {
-            warn!("put_vertex 失败：{e}");
+            // put_vertex 持久化失败：跳过本轮 commit 与广播，避免基于未持久化 vertex 出块。
+            warn!("put_vertex 失败，跳过本轮 commit：{e}");
+            last_vertex = Some(vertex);
+            round += 1;
+            continue;
         }
         let _ = transport.gossip_broadcast(
             GossipTopic::DagVertex,
@@ -971,7 +1008,7 @@ fn run_validator_loop(
         // 从第 2 轮起，检测 commit 并产出 block
         if let Some(prev_vertex) = &last_vertex {
             let prev_hash = prev_vertex.vertex_hash();
-            match detect_commit_leader(&dag.lock().unwrap(), &prev_hash, 1) {
+            match detect_commit_leader(&dag.lock().unwrap_or_else(|e| e.into_inner()), &prev_hash, 1) {
                 Ok(Some(_leader)) => {
                     // 从上一个 vertex（被 commit 的）构造 block
                     // 这样 block 包含的是被 commit 的 tx，而非当前 vertex 的 tx
@@ -1015,7 +1052,7 @@ fn run_validator_loop(
                                     prev_block_hash = block_hash;
 
                                     // 清空 Dag，只保留当前 vertex
-                                    let mut dag_guard = dag.lock().unwrap();
+                                    let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
                                     *dag_guard = Dag::new();
                                     dag_guard.insert(vertex.clone());
                                 }

@@ -395,9 +395,14 @@ impl PrecompileCircuit for ZkShuffleCcsCircuit {
         match self.build_circuit(&dummy_w, &dummy_p) {
             Ok((ccs, _)) => ccs,
             Err(e) => {
-                // 如果 dummy 数据构建失败，返回最小 CCS 作为 fallback
-                // 这不应发生在生产环境
-                eprintln!("ZkShuffleCcsCircuit::build_ccs: dummy build failed: {e}");
+                // dummy 数据构建失败表示电路本身存在缺陷，不应发生在生产环境。
+                // 返回最小 CCS 作为 fallback 并记录错误；
+                // TODO(build_ccs-result): 将 PrecompileCircuit::build_ccs 改为返回 Result，
+                // 使调用方能显式处理失败而非静默回退。
+                tracing::error!(
+                    "ZkShuffleCcsCircuit::build_ccs: dummy build failed (deck_size={}): {e}",
+                    self.deck_size
+                );
                 Ccs::new(1, vec![], vec![], vec![]).expect("minimal fallback CCS")
             }
         }
