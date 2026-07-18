@@ -146,6 +146,13 @@ declare_builtin_function!(
     ///
     /// # Gas
     /// `10 + 1 * bytes_returned`（IMPL-SEC-4：(6)）
+    ///
+    /// # DoS 防护（SEC-FIX-1）
+    /// 采用"预扣上界 + 事后退款"模式：
+    /// 1. lookup 前按 `out_capacity`（bytes_returned 上界）预扣 gas
+    /// 2. lookup 后按实际 `data.len()` 退还差额
+    /// 净效果：成功调用支付 `object_read_gas(data.len())`（与原语义一致），
+    /// 但失败调用（ObjectNotFound / capacity 不足）也支付 gas，防止免费 DoS。
     SyscallObjectRead,
     fn rust(
         ctx: &mut PokerL1Context,
@@ -174,14 +181,19 @@ declare_builtin_function!(
             ))
         })?;
 
-        // 查找对象（clone 以释放不可变借用，后续可变借用 consume_gas）
+        // SEC-FIX-1：lookup 前按 out_capacity 预扣 gas（防免费 DoS）
+        // out_capacity 是 bytes_returned 的上界（成功时 data.len() ≤ out_capacity）
+        let prepaid_gas = object_read_gas(out_capacity);
+        charge_gas(ctx, prepaid_gas)?;
+
+        // 查找对象（clone 以释放不可变借用，后续可变借用 refund_gas）
         let data = ctx
             .object_cache
             .get(&object_id)
             .cloned()
             .ok_or_else(|| to_syscall_err(PokerL1Error::ObjectNotFound(object_id)))?;
 
-        // 校验 out_capacity 足够
+        // 校验 out_capacity 足够（不足时不退款，调用方为无效调用付费）
         if out_capacity < data.len() as u64 {
             return Err(to_syscall_err(PokerL1Error::InvalidSyscallArgument(format!(
                 "object_read: out_capacity={out_capacity} < data_len={}",
@@ -189,9 +201,12 @@ declare_builtin_function!(
             ))));
         }
 
-        // IMPL-SEC-4 (5)(6)：执行前扣费
-        let gas = object_read_gas(data.len() as u64);
-        charge_gas(ctx, gas)?;
+        // 退还差额：prepaid_gas - actual_gas
+        let actual_gas = object_read_gas(data.len() as u64);
+        let refund = prepaid_gas.saturating_sub(actual_gas);
+        if refund > 0 {
+            ctx.refund_gas(refund);
+        }
 
         // 写入输出缓冲区
         write_vm_memory(memory_mapping, out_ptr, &data)?;
@@ -1306,7 +1321,8 @@ mod tests {
     fn test_object_read_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
+        // SEC-FIX-1：gas_limit 需覆盖 prepaid（out_capacity=1024 → prepaid=1034）
+        let mut ctx = PokerL1Context::new(make_tx_context(), 2000);
 
         let id = ObjectID::new([1u8; 20], 42);
         ctx.object_cache.insert(id, b"hello world".to_vec());
@@ -1326,6 +1342,7 @@ mod tests {
 
         assert_eq!(result, 11);
         assert_eq!(&heap[100..111], b"hello world");
+        // SEC-FIX-1：预扣 1034，退款 1013，净 gas_used = 21（与原语义一致）
         assert_eq!(ctx.gas_used(), 21); // 10 + 11
     }
 
@@ -1333,7 +1350,8 @@ mod tests {
     fn test_object_read_not_found() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
+        // SEC-FIX-1：gas 需足够覆盖 prepaid（out_capacity=1024 → prepaid=1034）
+        let mut ctx = PokerL1Context::new(make_tx_context(), 2000);
 
         let id = ObjectID::new([0xff; 20], 999);
         heap[..28].copy_from_slice(&id.to_bytes());
@@ -1349,12 +1367,21 @@ mod tests {
         );
 
         assert!(result.is_err(), "对象不存在应返回错误");
+        // SEC-FIX-1：失败调用也消耗 prepaid gas（防免费 DoS）
+        // prepaid = 10 + 1024 = 1034，无退款
+        assert_eq!(
+            ctx.gas_used(),
+            1034,
+            "ObjectNotFound 应消耗 prepaid gas（DoS 防护）"
+        );
     }
 
     #[test]
     fn test_object_read_out_of_gas() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
+        // SEC-FIX-1：gas_limit=5 < prepaid(1034)，在预扣阶段即失败
+        // 这正是 DoS 防护的体现：gas 不足时连 lookup 都不会执行
         let mut ctx = PokerL1Context::new(make_tx_context(), 5);
 
         let id = ObjectID::new([1u8; 20], 42);
@@ -1395,6 +1422,80 @@ mod tests {
         );
 
         assert!(result.is_err(), "out_capacity 不足应返回错误");
+        // SEC-FIX-1：capacity 不足时消耗 prepaid gas（10 + 5 = 15），无退款
+        assert_eq!(
+            ctx.gas_used(),
+            15,
+            "capacity 不足应消耗 prepaid gas（DoS 防护）"
+        );
+    }
+
+    /// SEC-FIX-1：验证成功读取的 gas 退款正确性。
+    ///
+    /// out_capacity 远大于 data.len() 时，预扣后应正确退款，
+    /// 净 gas_used = object_read_gas(data.len())，与原语义一致。
+    #[test]
+    fn test_object_read_refund_correctness() {
+        let mut heap = vec![0u8; 4096];
+        let mut mapping = make_test_mapping(&mut heap);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
+
+        let id = ObjectID::new([2u8; 20], 7);
+        ctx.object_cache.insert(id, b"abc".to_vec()); // data.len() = 3
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let result = SyscallObjectRead::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            2048, // out_capacity 远大于 data.len()=3
+            0,
+            &mut mapping,
+        )
+        .expect("object_read 应成功");
+
+        assert_eq!(result, 3);
+        // 净 gas: prepaid(10+2048=2058) - refund(2058-13=2045) = 13 = object_read_gas(3)
+        assert_eq!(
+            ctx.gas_used(),
+            13,
+            "成功读取应净收 object_read_gas(data.len())=13，预扣退款后余额应正确"
+        );
+    }
+
+    /// SEC-FIX-1：验证 DoS 防护——攻击者无法免费触发大对象 lookup。
+    ///
+    /// 场景：攻击者合约对链上已知大对象反复调用 object_read，
+    /// 但 gas_limit 不足以覆盖 prepaid。应在 lookup 前即失败，
+    /// 节点不执行任何 clone 工作。
+    #[test]
+    fn test_object_read_dos_protection_large_object() {
+        let mut heap = vec![0u8; 65536]; // 64KB heap 模拟大对象场景
+        let mut mapping = make_test_mapping(&mut heap);
+        // gas_limit 仅够 base fee，不足以覆盖大 out_capacity 预扣
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100);
+
+        let id = ObjectID::new([3u8; 20], 1);
+        // 模拟链上已知大对象（32KB）
+        let large_data = vec![0xABu8; 32768];
+        ctx.object_cache.insert(id, large_data);
+        heap[..28].copy_from_slice(&id.to_bytes());
+
+        let result = SyscallObjectRead::rust(
+            &mut ctx,
+            HEAP_BASE,
+            28,
+            HEAP_BASE + 100,
+            32768, // 请求读取 32KB
+            0,
+            &mut mapping,
+        );
+
+        assert!(result.is_err(), "gas 不足以 prepaid 应在 lookup 前失败");
+        // SEC-FIX-1：charge_gas 失败时 consume_gas 返回 false，不递减 remaining
+        // 关键点是 lookup/clone 未执行（DoS 防护），而非 gas 是否被消耗
+        assert_eq!(ctx.gas_used(), 0, "gas 不足时 charge_gas 不递减 remaining，但 lookup 未执行");
     }
 
     #[test]

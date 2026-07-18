@@ -153,6 +153,19 @@ impl PokerL1Context {
         true
     }
 
+    /// 退还 gas（用于"预扣上界 + 事后退款"模式）。
+    ///
+    /// 典型场景：`object_read` 在 lookup 前按 `out_capacity` 预扣 gas，
+    /// lookup 后按实际 `data.len()` 退还差额，既防止 DoS 又保持 gas 语义。
+    ///
+    /// 退还量会被钳制到已消耗量内（`refund <= gas_used`），防止恶意退款导致
+    /// `remaining` 超过 `initial_gas`。退款不会超过初始 gas 上限。
+    pub fn refund_gas(&mut self, amount: u64) {
+        let max_refund = self.gas_used();
+        let actual_refund = amount.min(max_refund);
+        self.remaining = self.remaining.saturating_add(actual_refund);
+    }
+
     /// 记录事件（`emit_event` syscall 调用）。
     pub fn emit_event(&mut self, payload: Vec<u8>) {
         self.events.push(ContractEvent { payload });
@@ -247,6 +260,44 @@ mod tests {
         assert!(!ctx.consume_gas(101), "应返回 false");
         assert!(ctx.consume_gas(100), "刚好够应返回 true");
         assert!(!ctx.consume_gas(1), "耗尽后应返回 false");
+    }
+
+    /// SEC-FIX-1：验证 `refund_gas` 的基本语义与安全钳制。
+    #[test]
+    fn test_refund_gas_basic_and_clamp() {
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
+
+        // 预扣 500
+        assert!(ctx.consume_gas(500));
+        assert_eq!(ctx.gas_used(), 500);
+        assert_eq!(ctx.remaining_gas(), 500);
+
+        // 退还 300
+        ctx.refund_gas(300);
+        assert_eq!(ctx.gas_used(), 200);
+        assert_eq!(ctx.remaining_gas(), 800);
+
+        // 安全钳制：退款超过已消耗量时，仅退到 initial_gas
+        // 当前 gas_used=200，退款 u64::MAX 应只退 200
+        ctx.refund_gas(u64::MAX);
+        assert_eq!(ctx.gas_used(), 0, "退款不应使 gas_used 变负");
+        assert_eq!(ctx.remaining_gas(), 1000, "退款不应使 remaining 超过 initial_gas");
+    }
+
+    /// SEC-FIX-1：验证 `refund_gas` 不会超过初始 gas 上限（防恶意退款）。
+    #[test]
+    fn test_refund_gas_no_overflow() {
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100);
+
+        // 预扣 30，退 30 → remaining 应为 100，不超过 initial_gas
+        assert!(ctx.consume_gas(30));
+        ctx.refund_gas(30);
+        assert_eq!(ctx.remaining_gas(), 100);
+        assert_eq!(ctx.gas_used(), 0);
+
+        // 再次退款不应使 remaining 超过 100
+        ctx.refund_gas(50);
+        assert_eq!(ctx.remaining_gas(), 100, "退款不应使 remaining 超过 initial_gas");
     }
 
     #[test]

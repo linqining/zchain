@@ -78,6 +78,9 @@ pub enum PokerL1Error {
     /// 余额不足支付 gas。
     #[error("insufficient balance: needed={needed}, has={has}")]
     InsufficientBalance { needed: u64, has: u64 },
+    /// 余额溢出（credit 时 balance + amount > u64::MAX，SEC-FIX-3）。
+    #[error("balance overflow: current={current}, credit={credit}")]
+    BalanceOverflow { current: u64, credit: u64 },
     /// 实际 gas 消耗超过 tx 声明的预算（VM 执行后校验）。
     #[error("gas used {used} exceeds tx budget {budget}")]
     GasExceedsBudget { used: u64, budget: u64 },

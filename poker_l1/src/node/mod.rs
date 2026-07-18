@@ -805,7 +805,10 @@ impl Node {
 // ===== SubTask 32.5: CLI 工具函数 =====
 
 /// CLI keygen 结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// SEC-FIX-2：实现 `Drop` 自动 zeroize 私钥字节，自定义 `Debug` 隐藏私钥内容，
+/// 与 `ValidatorKey` 保持一致的安全处理模式。
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeygenResult {
     /// 签名方案。
     pub scheme: SignatureScheme,
@@ -815,6 +818,23 @@ pub struct KeygenResult {
     pub tagged_pubkey: TaggedPubkey,
     /// 派生的账户地址。
     pub address: Address,
+}
+
+impl std::fmt::Debug for KeygenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeygenResult")
+            .field("scheme", &self.scheme)
+            .field("secret_key_bytes", &"[REDACTED]")
+            .field("tagged_pubkey", &self.tagged_pubkey)
+            .field("address", &self.address)
+            .finish()
+    }
+}
+
+impl Drop for KeygenResult {
+    fn drop(&mut self) {
+        self.secret_key_bytes.fill(0);
+    }
 }
 
 /// 生成 secp256k1 tagged pubkey 密钥对。

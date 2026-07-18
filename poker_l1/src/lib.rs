@@ -32,6 +32,7 @@ pub mod crypto_precompiles;
 pub mod error;
 pub mod executor;
 pub mod governance;
+pub mod indexer;
 pub mod network;
 pub mod node;
 pub mod object_model;
@@ -39,6 +40,7 @@ pub mod offline;
 pub mod rpc;
 pub mod signature;
 pub mod storage;
+pub mod sync;
 pub mod transaction;
 pub mod vm;
 

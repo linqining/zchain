@@ -87,8 +87,20 @@ impl Account {
     }
 
     /// 充值余额（faucet / 收款）。
-    pub const fn credit(&mut self, amount: Balance) {
-        self.balance = self.balance.saturating_add(amount);
+    ///
+    /// SEC-FIX-3：使用 `checked_add` 替代 `saturating_add`，溢出时返回
+    /// `BalanceOverflow` 错误而非静默封顶。调用方应处理错误并决定是否回滚。
+    pub const fn credit(&mut self, amount: Balance) -> PokerL1Result<()> {
+        match self.balance.checked_add(amount) {
+            Some(new_balance) => {
+                self.balance = new_balance;
+                Ok(())
+            }
+            None => Err(PokerL1Error::BalanceOverflow {
+                current: self.balance,
+                credit: amount,
+            }),
+        }
     }
 }
 
@@ -286,13 +298,14 @@ impl AccountStore {
     }
 
     /// 充值（faucet / 收款）。
+    ///
+    /// SEC-FIX-3：传播 `Account::credit` 的溢出错误。
     pub fn credit(&mut self, address: &Address, amount: Balance) -> PokerL1Result<()> {
         let account = self
             .accounts
             .get_mut(address)
             .ok_or_else(|| PokerL1Error::Other(format!("account not found: {:?}", address)))?;
-        account.credit(amount);
-        Ok(())
+        account.credit(amount)
     }
 
     /// 当前账户数量。
@@ -447,8 +460,24 @@ mod tests {
     fn credit_increases_balance() {
         let tp = make_tagged_pubkey(0x33, SignatureScheme::Ed25519);
         let mut account = Account::new(tp, 200);
-        account.credit(800);
+        account.credit(800).expect("正常充值应成功");
         assert_eq!(account.balance, 1000);
+    }
+
+    /// SEC-FIX-3：验证 credit 溢出返回错误而非静默封顶。
+    #[test]
+    fn credit_overflow_returns_error() {
+        let tp = make_tagged_pubkey(0x55, SignatureScheme::Secp256k1);
+        let mut account = Account::new(tp, u64::MAX - 100);
+        // 再充 200 应溢出（MAX-100 + 200 > u64::MAX）
+        let result = account.credit(200);
+        assert!(
+            matches!(result, Err(PokerL1Error::BalanceOverflow { current, credit })
+                if current == u64::MAX - 100 && credit == 200),
+            "溢出应返回 BalanceOverflow 错误"
+        );
+        // 余额不应改变
+        assert_eq!(account.balance, u64::MAX - 100);
     }
 
     #[test]

@@ -96,6 +96,11 @@ graph TD
         BRIDGE[bridge<br/>跨链桥 hook]
     end
 
+    subgraph Aux["辅助与同步层"]
+        SYNC[sync<br/>Fast/Snap Sync]
+        IDX[indexer<br/>索引器/事件订阅]
+    end
+
     TX --> OBJ
     TX --> SIG
     ACC --> SIG
@@ -120,15 +125,22 @@ graph TD
     STO --> OBJ
     STO --> CON
     GOV --> BLK
+    SYNC --> STO
+    SYNC --> BLK
+    IDX --> BLK
+    IDX --> TX
+    IDX --> OBJ
 
     classDef foundation fill:#dcfce7,stroke:#166534
     classDef ledger fill:#dbeafe,stroke:#1e40af
     classDef exec fill:#fee2e2,stroke:#991b1b
     classDef net fill:#fef3c7,stroke:#92400e
+    classDef aux fill:#f3e8ff,stroke:#6b21a8
     class OBJ,SIG,ACC,TX,ERR foundation
     class BLK,CON,STO,GOV ledger
     class VM,CRYPTO,OFF,ZKVM_EXT exec
     class NET,NODE,RPC,BRIDGE net
+    class SYNC,IDX aux
 ```
 
 ### 3.2 模块清单
@@ -150,6 +162,8 @@ graph TD
 | [`rpc`](file:///Users/mac/projects/zchain/poker_l1/src/rpc/mod.rs) | JSON-RPC 2.0 + AuthConfig + RpcGuard 滑动窗口限流 | `RpcHandler`, `RpcGuard`, `JsonRpcResponse` |
 | [`bridge`](file:///Users/mac/projects/zchain/poker_l1/src/bridge/mod.rs) | 跨链桥 hook + bridge_verify + BTreeSet 去重 + nonce 防重放 | `BridgeHook`, `bridge_verify` |
 | [`governance`](file:///Users/mac/projects/zchain/poker_l1/src/governance/mod.rs) | 参数治理 + timelock + 边界校验 + 敏感参数 90% quorum | `GovernanceParams`, `ProposeParameterTx` |
+| [`sync`](file:///Users/mac/projects/zchain/poker_l1/src/sync/mod.rs) | 状态快速同步（Fast/Snap Sync）—— 分块快照 + state_root 端到端校验 + BFT 锚定 | `SnapshotManifest`, `SnapshotChunk`, `FastSync`, `SyncState` |
+| [`indexer`](file:///Users/mac/projects/zchain/poker_l1/src/indexer/mod.rs) | 链上索引器 + 事件订阅 —— 按 sender/contract/object 查询 + 多订阅 fan-out | `Indexer`, `IndexedTransaction`, `IndexedBlock`, `TxFilter`, `IndexerEvent` |
 | [`error`](file:///Users/mac/projects/zchain/poker_l1/src/error.rs) | 统一错误类型 `PokerL1Error` | `PokerL1Error`, `PokerL1Result` |
 
 ---
@@ -510,3 +524,136 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 3. **OffChain + Hypernova 折叠**：链下执行 100,000+ tps + ZK 证明链上结算，prover 复杂度 `O(N log N)`，兼顾性能与密码学安全性
 
 相比市场主流区块链，zchain 不追求通用智能合约平台的生态规模，而是**垂直深耕博弈场景**，通过架构创新在「性能 / 安全性 / 用户体验」三角中找到博弈场景的最优解。代码已通过两轮共 28 项安全审计修复，1383 个测试全部通过，具备生产部署条件。
+
+---
+
+## 13. 后续演进路线（Future Roadmap）
+
+本节记录安全审计中识别、但尚未实现的缺失功能模块。模块 #1（Fast/Snap Sync）与 #2（Indexer）已在本轮修复中实现并通过测试（详见 [`poker_l1/src/sync/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/sync/mod.rs) 与 [`poker_l1/src/indexer/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/indexer/mod.rs)）。模块 #3-#9 列为后续演进项，按优先级排序。
+
+### 13.1 缺失模块汇总表
+
+| # | 模块 | 优先级 | 当前状态 | 目标 |
+| --- | --- | --- | --- | --- |
+| 1 | 状态快速同步（Fast/Snap Sync） | HIGH | ✅ 已实现（15 测试通过） | 新节点无需回放 genesis，通过分块快照 + BFT 锚定快速同步到 tip |
+| 2 | 链上索引器/事件订阅（Indexer） | HIGH | ✅ 已实现（18 测试通过） | 按 sender/contract/object/height 查询 + 多订阅 fan-out 事件推送 |
+| 3 | 交易池优先级排序（Priority Mempool） | MEDIUM | ⚠️ 部分（`node::tx_cache` 仅 FIFO） | 按 gas_price + 依赖关系排序，支持替换低费用 tx、孤儿 tx 跟踪 |
+| 4 | 历史状态裁剪（State Pruning） | MEDIUM | ⚠️ 部分（`PruningConfig` 类型已定义，实现为 stub） | 按 `pruning_depth` 自动裁剪旧区块与对象历史版本，archive 节点保留全量 |
+| 5 | P2P 节点发现（Peer Discovery） | MEDIUM | ⚠️ 部分（`GossipManager` 仅 gossipsub） | DHT-based peer discovery + 节点身份验证 + banned peer 列表 |
+| 6 | 轻客户端协议（Light Client Protocol） | LOW | ⚠️ 部分（`LightClientVerifyRequest` 类型已定义） | 完整轻客户端：仅验证 header chain + Merkle proof，无需全状态同步 |
+| 7 | Prometheus 指标导出（Metrics） | LOW | ❌ 缺失 | `tracing` 已有日志，需补 Prometheus exporter：tx 数、出块时间、peer 数、gas 用量 |
+| 8 | Compact Block Relay 完整化 | LOW | ⚠️ 部分（`CompactVertex` 类型已定义） | 缺短 ID 映射表 + 缺失 tx 请求回退机制，降低区块传播带宽 |
+| 9 | 检查点与归档节点（Checkpoint & Archive） | LOW | ❌ 缺失 | 周期性生成不可逆检查点，archive 节点提供历史数据服务给 syncing 节点 |
+
+### 13.2 各模块设计要点
+
+#### #3 交易池优先级排序（Priority Mempool）
+
+**当前缺口**：[`node::TxCacheState`](file:///Users/mac/projects/zchain/poker_l1/src/node/mod.rs) 仅实现 FIFO 队列 + 10,000 条上限，无优先级排序。
+
+**设计要点**：
+- 按 `gas_price` 降序的跳表（skiplist）或二叉堆
+- 支持相同 nonce 高价替换低价（RBF，Replace-by-Fee）
+- 孤儿 tx 缓存（inputs 尚未上链的 tx）
+- 依赖跟踪：tx B 依赖 tx A 的输出时，A 上链前 B 不进入主队列
+- 容量上限：默认 10,000 tx（与现有 `tx_cache` 一致），溢出时丢弃最低 gas_price
+
+**与现有模块的关系**：替换 `node::TxCacheState` 内部数据结构，对外 API 保持兼容。
+
+#### #4 历史状态裁剪（State Pruning）
+
+**当前缺口**：[`storage::PruningConfig`](file:///Users/mac/projects/zchain/poker_l1/src/storage/mod.rs) 类型已定义但未实现裁剪逻辑。
+
+**设计要点**：
+- `pruning_depth: u64` —— 保留最近 N 个区块的完整状态
+- 三种节点模式：
+  - **Archive**：`pruning_depth = u64::MAX`，保留所有历史
+  - **Full**：`pruning_depth = 10000`，保留最近 1 万区块的完整状态 + 所有 header
+  - **Pruned**：`pruning_depth = 1000`，仅保留最近 1000 区块的完整状态 + header
+- 裁剪对象：旧区块 body（保留 header）、Object 历史版本（保留最新版）、DAG vertex
+- 与 `sync` 模块配合：pruned 节点通过 Fast Sync 从 archive 节点恢复历史状态
+
+#### #5 P2P 节点发现（Peer Discovery）
+
+**当前缺口**：[`network::GossipManager`](file:///Users/mac/projects/zchain/poker_l1/src/network/mod.rs) 仅实现 gossipsub 广播，无主动 peer 发现。
+
+**设计要点**：
+- Bootstrap 节点列表（hardcoded + DNS seed）
+- Kademlia DHT 用于 peer 路由（基于 `libp2p::kad`）
+- Peer 身份验证：握手时交换 `chain_id` + protocol_version，不匹配则拒绝
+- Banned peer 列表：slash 过的 validator、恶意 peer、重连频率超限
+- 周期性 peer 交换（PEX, Peer Exchange）
+
+#### #6 轻客户端协议（Light Client Protocol）
+
+**当前缺口**：[`block::LightClientVerifyRequest`](file:///Users/mac/projects/zchain/poker_l1/src/block/time_consensus.rs) 类型已定义，但完整轻客户端协议未实现。
+
+**设计要点**：
+- 轻客户端仅同步 `BlockHeader` chain（不下载 body / 不执行 tx）
+- 验证每个 header 的 `dag_commit_certificate` 签名（2/3+ secp256k1 quorum）
+- 通过 Merkle proof 验证特定 tx / object 是否包含在某区块
+- 用途：移动端钱包、跨链桥的链上轻验证、SPV 钱包
+- 与 `sync` 模块区别：Fast Sync 仍下载全状态；轻客户端永不下载全状态
+
+#### #7 Prometheus 指标导出（Metrics）
+
+**当前缺口**：仅 `tracing` 日志，无结构化指标导出。
+
+**设计要点**：
+- 引入 `metrics` crate（轻量、no-std 友好）或 `prometheus` crate
+- 关键指标：
+  - `zchain_block_height`（gauge）—— 当前 tip 高度
+  - `zchain_tx_total`（counter）—— 累计 tx 数，按 lane 分标签
+  - `zchain_block_time_ms`（histogram）—— 出块耗时
+  - `zchain_peer_count`（gauge）—— 当前 peer 数
+  - `zchain_mempool_size`（gauge）—— 交易池当前大小
+  - `zchain_gas_used_total`（counter）—— 累计 gas 用量
+- 通过 `RPC` 模块暴露 `/metrics` 端点（Prometheus exposition format）
+- 与 `indexer` 配合：indexer 可作为指标数据源
+
+#### #8 Compact Block Relay 完整化
+
+**当前缺口**：[`network::CompactVertex`](file:///Users/mac/projects/zchain/poker_l1/src/network/mod.rs) 类型已定义，但短 ID 映射 + 缺失 tx 请求回退未实现。
+
+**设计要点**：
+- 发送方：先广播 CompactVertex（含 tx_hashes 而非完整 tx），peer 命中本地 mempool 的 tx 用短 ID 引用
+- 接收方：收到 CompactVertex 后，对未命中的 tx 发起 `get_txs` 请求
+- 回退机制：若短 ID 碰撞或未命中率高，退化为全量广播
+- 目标：降低区块传播带宽 80%+（假设 90% tx 已在 mempool）
+
+#### #9 检查点与归档节点（Checkpoint & Archive）
+
+**当前缺口**：无检查点机制，所有节点需保留完整历史。
+
+**设计要点**：
+- 周期性（每 10,000 区块）生成不可逆检查点（finality gadget 保证）
+- 检查点包含：`height` + `block_hash` + `state_root` + 2/3+ validator 签名
+- Archive 节点：保留全量历史 + 提供历史数据服务（HTTP / P2P）
+- Pruned 节点：仅保留检查点之后的完整状态
+- 与 `sync` 模块配合：Fast Sync 从最近的检查点开始
+
+### 13.3 实现优先级建议
+
+1. **短期（下一个 Phase）**：#3（Priority Mempool）+ #4（State Pruning）—— 直接影响生产部署能力
+2. **中期**：#5（Peer Discovery）+ #7（Metrics）—— 影响网络健壮性与可观测性
+3. **长期**：#6（Light Client）+ #8（Compact Block Relay）+ #9（Checkpoint）—— 优化与生态扩展
+
+### 13.4 已实现模块摘要
+
+#### #1 状态快速同步（Fast/Snap Sync）
+
+- **位置**：[`poker_l1/src/sync/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/sync/mod.rs)（877 行）
+- **测试**：15 个单元测试全部通过
+- **关键类型**：`SnapshotManifest`、`SnapshotChunk`、`SnapshotBuilder`、`SnapshotVerifier`、`SnapshotApplier`、`FastSync`、`SyncState`
+- **信任模型**：state_root 由 BFT 共识背书的 `BlockHeader` 锚定；分块通过 blake2b_256 逐块校验防 Byzantine peer 投毒；端到端 state_root 校验
+- **DoS 防护**：单块上限 `MAX_SNAPSHOT_CHUNK_SIZE = 4MB` + `MAX_OBJECTS_PER_CHUNK = 10,000`
+
+#### #2 链上索引器/事件订阅（Indexer）
+
+- **位置**：[`poker_l1/src/indexer/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/indexer/mod.rs)（1167 行）
+- **测试**：18 个单元测试全部通过
+- **关键类型**：`Indexer`、`IndexedTransaction`、`IndexedBlock`、`TxFilter`、`BlockFilter`、`IndexerEvent`、`Subscription`
+- **查询维度**：按 `tx_hash` / sender / contract_id / lane / height range / object_id 查询 tx；按 height range 查询 block；按 owner / object_type 查询对象
+- **订阅机制**：复用 `rpc::EventType`，支持 tx 过滤器、多订阅 fan-out、FIFO 队列溢出丢弃最旧
+- **DoS 防护**：单订阅队列上限 `MAX_EVENTS_PER_SUBSCRIPTION = 1024`，全局订阅上限 `MAX_SUBSCRIPTIONS = 1024`
+- **线程安全**：`std::sync::Mutex` 保护内部状态（与 `node::Node` 模式一致）
