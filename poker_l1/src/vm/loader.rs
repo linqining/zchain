@@ -293,7 +293,7 @@ mod tests {
     const BPF_EXIT: &[u8] = &[0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
     /// 构造测试用 [`TxContext`]。
-    fn make_tx_context(is_gameturn: bool) -> TxContext {
+    fn make_tx_context() -> TxContext {
         TxContext {
             caller: [1u8; 20],
             caller_pubkey: TaggedPubkey {
@@ -304,7 +304,6 @@ mod tests {
             nonce: 0,
             block_height: 100,
             block_timestamp: 100_000,
-            is_gameturn,
         }
     }
 
@@ -397,7 +396,7 @@ mod tests {
     fn test_execute_exit_instruction_success() {
         // 执行 exit 指令 → exit_code = 0, gas_used ≥ 1
         let loaded = load_from_text_bytes(BPF_EXIT, ObjectID::default(), 1).unwrap();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1_000);
 
         let result = execute_contract(&loaded, &mut ctx, &[]).expect("exit 应执行成功");
 
@@ -417,7 +416,7 @@ mod tests {
     fn test_execute_with_input_data() {
         // 带输入数据执行 exit → 成功
         let loaded = load_from_text_bytes(BPF_EXIT, ObjectID::default(), 1).unwrap();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1_000);
 
         let input = b"hello poker l1".to_vec();
         let result = execute_contract(&loaded, &mut ctx, &input).expect("带输入应执行成功");
@@ -430,7 +429,7 @@ mod tests {
     fn test_execute_out_of_gas() {
         // gas_limit = 0 → OutOfGas
         let loaded = load_from_text_bytes(BPF_EXIT, ObjectID::default(), 1).unwrap();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 0);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 0);
 
         let result = execute_contract(&loaded, &mut ctx, &[]);
 
@@ -448,7 +447,7 @@ mod tests {
     fn test_execute_input_too_long() {
         // input > MAX_INPUT_SIZE → InputTooLong
         let loaded = load_from_text_bytes(BPF_EXIT, ObjectID::default(), 1).unwrap();
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1_000);
 
         let oversized = vec![0u8; MAX_INPUT_SIZE + 1];
         let result = execute_contract(&loaded, &mut ctx, &oversized);
@@ -465,7 +464,7 @@ mod tests {
         // 执行后 ctx 的 gas_used 应与返回值一致
         let loaded = load_from_text_bytes(BPF_EXIT, ObjectID::default(), 1).unwrap();
         let initial_gas = 10_000u64;
-        let mut ctx = PokerL1Context::new(make_tx_context(false), initial_gas);
+        let mut ctx = PokerL1Context::new(make_tx_context(), initial_gas);
 
         let result = execute_contract(&loaded, &mut ctx, &[]).unwrap();
 

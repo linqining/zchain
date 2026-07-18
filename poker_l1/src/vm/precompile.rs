@@ -74,6 +74,26 @@ pub trait Precompile: Send + Sync {
     fn supports_selector(&self, _selector: &[u8; 32]) -> bool {
         true
     }
+
+    /// 该预编译合约是否免 gas。
+    ///
+    /// 免 gas 预编译合约（如 [`crate::vm::contracts::GamePrecompile`]）的调用：
+    /// - 不消耗 gas、不扣费
+    /// - 不推进 account nonce（重放保护由 `gameturn_nonce` + 轮次约束保障）
+    /// - 跳过账户余额预检
+    ///
+    /// 反滥用由游戏买入锁仓 + `gameturn_nonce` + 轮次约束（routing.rs）保障。
+    ///
+    /// 默认 `false`：普通预编译合约（如签名验证、哈希等）仍按 tx gas 策略计费。
+    ///
+    /// # 安全约束
+    ///
+    /// executor 在 `execute_tx_inner` 中强制：`gas-free lane`（`TxLane::GameTurn` /
+    /// `TxLane::CheckpointAnchor`）必须配 `is_gas_free() == true` 的预编译合约，
+    /// 否则直接拒绝执行（防止免费 gas 滥用 DoS）。
+    fn is_gas_free(&self) -> bool {
+        false
+    }
 }
 
 /// 预编译合约执行结果。
@@ -238,6 +258,17 @@ impl PrecompileRegistry {
     /// 判断 ObjectID 是否为预编译合约。
     pub fn is_precompile(&self, id: ObjectID) -> bool {
         self.precompiles.contains_key(&id)
+    }
+
+    /// 查询某 ObjectID 对应的预编译合约是否免 gas。
+    ///
+    /// - 已注册的预编译合约：返回其 [`Precompile::is_gas_free`] 属性
+    /// - 未注册的 ObjectID：返回 `false`（非预编译合约一律按 tx gas 策略计费）
+    ///
+    /// executor 在 `execute_tx_inner` 中调用此方法决定 gas/fee/nonce 策略。
+    #[must_use]
+    pub fn is_gas_free(&self, id: ObjectID) -> bool {
+        self.precompiles.get(&id).is_some_and(|p| p.is_gas_free())
     }
 
     /// 获取所有已注册的预编译合约 ID。
@@ -579,5 +610,89 @@ mod tests {
     fn test_reserved_game_contract_id() {
         let id = reserved::game_contract_id();
         assert_eq!(id.creator_address[0], reserved::PRECOMPILE_PREFIX);
+    }
+
+    // ===== gas-free 属性测试（预编译合约 Gas 策略重构）=====
+
+    /// 测试用 gas-free 预编译合约（覆写 `is_gas_free() = true`）。
+    ///
+    /// 与 executor.rs 中的 `GasFreeTestPrecompile` 独立（不同模块，无冲突），
+    /// 仅用于验证 `PrecompileRegistry::is_gas_free` 查询方法。
+    struct GasFreeTestPrecompile {
+        id: ObjectID,
+    }
+
+    impl GasFreeTestPrecompile {
+        fn new(id: ObjectID) -> Arc<dyn Precompile> {
+            Arc::new(Self { id })
+        }
+    }
+
+    impl Precompile for GasFreeTestPrecompile {
+        fn id(&self) -> ObjectID {
+            self.id
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn call(
+            &self,
+            _caller: &Address,
+            _caller_pubkey: &TaggedPubkey,
+            _method_selector: &[u8; 32],
+            _args: &[u8],
+            _env: &ExecutionEnvironment,
+            _object_db: &mut ObjectDb,
+        ) -> PokerL1Result<DispatchResult> {
+            Ok(DispatchResult::empty())
+        }
+
+        fn is_gas_free(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_precompile_is_gas_free_default_false() {
+        // 未覆写 is_gas_free() 的 TestPrecompile 应返回 false（默认实现）。
+        let precompile = make_test_precompile(ObjectID::new([0xFF; 20], 1), 1);
+        assert!(
+            !precompile.is_gas_free(),
+            "Precompile::is_gas_free() 默认应返回 false"
+        );
+    }
+
+    #[test]
+    fn test_registry_is_gas_free_query() {
+        // 验证 PrecompileRegistry::is_gas_free(id) 查询方法：
+        // - 已注册的 gas-free precompile → true
+        // - 已注册的非 gas-free precompile → false
+        // - 未注册的 ObjectID → false
+        let mut registry = PrecompileRegistry::new();
+        let gas_free_id = ObjectID::new([0xFE; 20], 1);
+        let non_gas_free_id = ObjectID::new([0xFD; 20], 2);
+
+        // 注册 gas-free precompile
+        registry.register(GasFreeTestPrecompile::new(gas_free_id));
+        // 注册普通（非 gas-free）precompile
+        registry.register(make_test_precompile(non_gas_free_id, 1));
+
+        // gas-free precompile 查询返回 true
+        assert!(
+            registry.is_gas_free(gas_free_id),
+            "已注册的 gas-free precompile 应返回 true"
+        );
+        // 普通 precompile 查询返回 false
+        assert!(
+            !registry.is_gas_free(non_gas_free_id),
+            "已注册的非 gas-free precompile 应返回 false"
+        );
+        // 未注册的 ObjectID 查询返回 false
+        assert!(
+            !registry.is_gas_free(ObjectID::new([0x00; 20], 999)),
+            "未注册的 ObjectID 应返回 false"
+        );
     }
 }

@@ -63,7 +63,7 @@ fn make_rake_config() -> RakeConfig {
     }
 }
 
-fn make_tx_context(is_gameturn: bool) -> TxContext {
+fn make_tx_context() -> TxContext {
     TxContext {
         caller: make_addr(0x01),
         caller_pubkey: make_tagged_pubkey(0x01),
@@ -71,7 +71,6 @@ fn make_tx_context(is_gameturn: bool) -> TxContext {
         nonce: 0,
         block_height: 100,
         block_timestamp: 100_000,
-        is_gameturn,
     }
 }
 
@@ -215,16 +214,23 @@ fn subtask_40_2_all_syscalls_uniquely_registered() {
 
 #[test]
 fn subtask_40_3_game_turn_gas_free() {
-    // GameTurn 通道免 gas（spec.md 第 311-315 行）
-    let ctx = PokerL1Context::new(make_tx_context(true), u64::MAX);
-    assert_eq!(ctx.remaining_gas(), u64::MAX, "GameTurn 应免 gas");
-    assert_eq!(ctx.gas_used(), 0, "GameTurn gas_used 应 = 0");
+    // 重构后：gas-free 不再由 PokerL1Context 表达（移除 is_gameturn 字段）。
+    // gas-free precompile 调用由 executor 通过 PrecompileRegistry::execute 直接派发，
+    // 不经 rBPF VM，故 PokerL1Context 永远不为 gas-free tx 构造。
+    // 此处验证新的 clamping 行为：u64::MAX 被钳制到 TX_GAS_LIMIT（防 CPU DoS）。
+    let ctx = PokerL1Context::new(make_tx_context(), u64::MAX);
+    assert_eq!(
+        ctx.remaining_gas(),
+        TX_GAS_LIMIT,
+        "u64::MAX 应被钳制到 TX_GAS_LIMIT"
+    );
+    assert_eq!(ctx.gas_used(), 0, "初始 gas_used 应 = 0");
 }
 
 #[test]
 fn subtask_40_3_public_channel_gas_charged() {
     // Public 通道正常计费
-    let mut ctx = PokerL1Context::new(make_tx_context(false), 1_000);
+    let mut ctx = PokerL1Context::new(make_tx_context(), 1_000);
     assert_eq!(ctx.remaining_gas(), 1_000, "Public 通道应正常计费");
 
     ctx.consume_gas(100);
@@ -620,12 +626,18 @@ fn subtask_40_7_test_coverage_summary() {
 #[test]
 fn subtask_40_7_gas_safety_paths_covered() {
     // 验证 gas 计费安全路径覆盖（spec 要求 >= 95%）
-    // 1. GameTurn 免 gas
-    let gameturn_ctx = PokerL1Context::new(make_tx_context(true), u64::MAX);
-    assert_eq!(gameturn_ctx.gas_used(), 0, "GameTurn gas_used 应 = 0");
+    // 1. gas-free 不再由 PokerL1Context 表达（is_gameturn 字段已移除）；
+    //    u64::MAX 被钳制到 TX_GAS_LIMIT（防 CPU DoS）。
+    let gameturn_ctx = PokerL1Context::new(make_tx_context(), u64::MAX);
+    assert_eq!(
+        gameturn_ctx.remaining_gas(),
+        TX_GAS_LIMIT,
+        "u64::MAX 应被钳制到 TX_GAS_LIMIT"
+    );
+    assert_eq!(gameturn_ctx.gas_used(), 0, "初始 gas_used 应 = 0");
 
     // 2. Public 通道正常计费
-    let mut public_ctx = PokerL1Context::new(make_tx_context(false), 1_000);
+    let mut public_ctx = PokerL1Context::new(make_tx_context(), 1_000);
     assert!(public_ctx.consume_gas(500), "应能消耗 500 gas");
     assert_eq!(public_ctx.gas_used(), 500);
 

@@ -7,8 +7,10 @@
 //!
 //! - 指令级 gas：VM 每执行一条指令调用 `consume(1)`，到 0 抛 `ExceededMaxInstructions`
 //! - syscall 级 gas：syscall 内部可主动调用 `consume(extra)` 对昂贵操作额外计费
-//! - GameTurn 通道 tx 免 gas（`remaining = u64::MAX`）
-//! - Public 通道 tx 按 `tx.gas.budget` 初始化
+//! - gas-free precompile 调用：executor 通过 `PrecompileRegistry::execute` 直接派发，
+//!   不经 rBPF VM，故 `PokerL1Context` 永远不为 gas-free tx 构造（不会出现
+//!   `remaining = u64::MAX` 的免 gas 路径；gas-free 不再由 `TxContext` 字段表达）
+//! - 普通合约调用：按 `tx.gas.budget` 初始化（上限 `TX_GAS_LIMIT`）
 
 use std::collections::BTreeMap;
 
@@ -55,8 +57,6 @@ pub struct TxContext {
     pub block_height: BlockHeight,
     /// 当前 block timestamp（毫秒）。
     pub block_timestamp: TimestampMs,
-    /// 是否为 GameTurn 通道 tx（免 gas）。
-    pub is_gameturn: bool,
 }
 
 /// Poker L1 合约执行上下文。
@@ -95,14 +95,15 @@ impl PokerL1Context {
     ///
     /// 参数：
     /// - `tx`：交易上下文
-    /// - `gas_limit`：gas 上限（GameTurn 通道传 `u64::MAX` 表示免 gas）
+    /// - `gas_limit`：gas 上限（上限被钳制到 `TX_GAS_LIMIT` 以内）
     ///
-    /// H-4 修复：非 GameTurn 通道的 gas_limit 被限制在 TX_GAS_LIMIT（10M）以内，
-    /// 防止恶意 tx 设置超大 gas_limit 导致 CPU DoS。
+    /// H-4 修复：gas_limit 被限制在 TX_GAS_LIMIT（10M）以内，防止恶意 tx 设置
+    /// 超大 gas_limit 导致 CPU DoS。
+    ///
+    /// 注意：gas-free precompile 调用不经 rBPF VM（由 `PrecompileRegistry::execute`
+    /// 直接派发），故本函数不再接收 `u64::MAX` 表示免 gas 的语义。
     pub const fn new(tx: TxContext, gas_limit: u64) -> Self {
-        let effective_gas = if gas_limit == u64::MAX {
-            gas_limit
-        } else if gas_limit > TX_GAS_LIMIT {
+        let effective_gas = if gas_limit > TX_GAS_LIMIT {
             TX_GAS_LIMIT
         } else {
             gas_limit
@@ -132,14 +133,8 @@ impl PokerL1Context {
     }
 
     /// 返回已消耗的 gas。
-    ///
-    /// GameTurn 通道（`initial_gas = u64::MAX`）返回 0。
     pub const fn gas_used(&self) -> u64 {
-        if self.initial_gas == u64::MAX {
-            0
-        } else {
-            self.initial_gas.saturating_sub(self.remaining)
-        }
+        self.initial_gas.saturating_sub(self.remaining)
     }
 
     /// 返回剩余 gas。
@@ -207,7 +202,7 @@ mod tests {
     use super::*;
     use solana_rbpf::vm::ContextObject; // 引入 trait 以调用 `ctx.consume(...)`
 
-    fn make_tx_context(is_gameturn: bool) -> TxContext {
+    fn make_tx_context() -> TxContext {
         TxContext {
             caller: [1u8; 20],
             caller_pubkey: TaggedPubkey {
@@ -218,13 +213,12 @@ mod tests {
             nonce: 0,
             block_height: 100,
             block_timestamp: 100_000,
-            is_gameturn,
         }
     }
 
     #[test]
     fn test_context_gas_tracking() {
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
         assert_eq!(ctx.remaining_gas(), 1000);
         assert_eq!(ctx.gas_used(), 0);
 
@@ -240,17 +234,16 @@ mod tests {
     }
 
     #[test]
-    fn test_gameturn_gas_free() {
-        let mut ctx = PokerL1Context::new(make_tx_context(true), u64::MAX);
-        // GameTurn 免 gas：消耗后 gas_used 仍为 0
-        ctx.consume(1_000_000);
+    fn test_gas_limit_clamped_to_tx_gas_limit() {
+        // gas_limit 超过 TX_GAS_LIMIT 时被钳制（H-4 修复）
+        let ctx = PokerL1Context::new(make_tx_context(), u64::MAX);
+        assert_eq!(ctx.remaining_gas(), TX_GAS_LIMIT);
         assert_eq!(ctx.gas_used(), 0);
-        assert_eq!(ctx.remaining_gas(), u64::MAX - 1_000_000);
     }
 
     #[test]
     fn test_gas_insufficient() {
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100);
         assert!(!ctx.consume_gas(101), "应返回 false");
         assert!(ctx.consume_gas(100), "刚好够应返回 true");
         assert!(!ctx.consume_gas(1), "耗尽后应返回 false");
@@ -258,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_events() {
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
         ctx.emit_event(b"event1".to_vec());
         ctx.emit_event(b"event2".to_vec());
         assert_eq!(ctx.events.len(), 2);
@@ -268,14 +261,14 @@ mod tests {
 
     #[test]
     fn test_panic() {
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
         ctx.panic("assertion failed".to_string());
         assert_eq!(ctx.panic_message.as_deref(), Some("assertion failed"));
     }
 
     #[test]
     fn test_into_result() {
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
         ctx.consume(500);
         ctx.emit_event(b"test".to_vec());
         let id = ObjectID::new([1u8; 20], 0);

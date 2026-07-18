@@ -1264,7 +1264,7 @@ mod tests {
     };
 
     /// 构造测试用 [`TxContext`]。
-    fn make_tx_context(is_gameturn: bool) -> TxContext {
+    fn make_tx_context() -> TxContext {
         TxContext {
             caller: [1u8; 20],
             caller_pubkey: TaggedPubkey {
@@ -1275,7 +1275,6 @@ mod tests {
             nonce: 0,
             block_height: 100,
             block_timestamp: 100_000,
-            is_gameturn,
         }
     }
 
@@ -1307,7 +1306,7 @@ mod tests {
     fn test_object_read_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         let id = ObjectID::new([1u8; 20], 42);
         ctx.object_cache.insert(id, b"hello world".to_vec());
@@ -1334,7 +1333,7 @@ mod tests {
     fn test_object_read_not_found() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         let id = ObjectID::new([0xff; 20], 999);
         heap[..28].copy_from_slice(&id.to_bytes());
@@ -1356,7 +1355,7 @@ mod tests {
     fn test_object_read_out_of_gas() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 5);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 5);
 
         let id = ObjectID::new([1u8; 20], 42);
         ctx.object_cache.insert(id, b"data".to_vec());
@@ -1379,7 +1378,7 @@ mod tests {
     fn test_object_read_capacity_too_small() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         let id = ObjectID::new([1u8; 20], 42);
         ctx.object_cache.insert(id, b"hello world".to_vec());
@@ -1402,7 +1401,7 @@ mod tests {
     fn test_object_read_heap_violation() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         // 使用 stack 区域指针（非 heap）
         let result = SyscallObjectRead::rust(
@@ -1418,29 +1417,11 @@ mod tests {
         assert!(result.is_err(), "非 heap 指针应返回错误");
     }
 
-    #[test]
-    fn test_object_read_gameturn_gas_free() {
-        let mut heap = vec![0u8; 4096];
-        let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(true), u64::MAX);
-
-        let id = ObjectID::new([1u8; 20], 42);
-        ctx.object_cache.insert(id, b"data".to_vec());
-        heap[..28].copy_from_slice(&id.to_bytes());
-
-        let _ = SyscallObjectRead::rust(
-            &mut ctx,
-            HEAP_BASE,
-            28,
-            HEAP_BASE + 100,
-            1024,
-            0,
-            &mut mapping,
-        )
-        .expect("object_read 应成功");
-
-        assert_eq!(ctx.gas_used(), 0, "GameTurn 通道免 gas");
-    }
+    // 注：原 `test_object_read_gameturn_gas_free` 测试已移除。
+    //
+    // 重构后 gas-free precompile 调用经 `PrecompileRegistry::execute` 直接派发，
+    // 不经 rBPF VM；进入 rBPF VM 的 syscall 一律按 gas 计费（无 syscall 级免 gas 旁路）。
+    // 该行为由 executor.rs 的 lane-contract 一致性校验保障，无需在 syscall 层重测。
 
     // ===== SubTask 15.2: object_write 测试 =====
 
@@ -1448,7 +1429,7 @@ mod tests {
     fn test_object_write_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         let id = ObjectID::new([1u8; 20], 42);
         // H-5 修复：object_write 须验证 caller 拥有对象。
@@ -1470,7 +1451,7 @@ mod tests {
     fn test_object_write_too_large() {
         let mut heap = vec![0u8; MAX_OBJECT_SIZE + 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), u64::MAX);
+        let mut ctx = PokerL1Context::new(make_tx_context(), u64::MAX);
 
         let id = ObjectID::new([1u8; 20], 42);
         heap[..28].copy_from_slice(&id.to_bytes());
@@ -1494,7 +1475,7 @@ mod tests {
     fn test_object_create_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         heap[0..11].copy_from_slice(b"object data");
 
@@ -1523,7 +1504,7 @@ mod tests {
     fn test_object_create_multiple_unique_ids() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         heap[0..4].copy_from_slice(b"data");
 
@@ -1556,7 +1537,7 @@ mod tests {
     fn test_emit_event_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         heap[0..13].copy_from_slice(b"event payload");
 
@@ -1573,7 +1554,7 @@ mod tests {
     fn test_emit_event_too_large() {
         let mut heap = vec![0u8; MAX_EVENT_PAYLOAD_SIZE + 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), u64::MAX);
+        let mut ctx = PokerL1Context::new(make_tx_context(), u64::MAX);
 
         let result = SyscallEmitEvent::rust(
             &mut ctx,
@@ -1594,7 +1575,7 @@ mod tests {
     fn test_log_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         heap[0..11].copy_from_slice(b"log message");
 
@@ -1609,7 +1590,7 @@ mod tests {
     fn test_panic_traps_vm() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         heap[0..16].copy_from_slice(b"assertion failed");
 
@@ -1629,7 +1610,7 @@ mod tests {
     fn test_verify_signature_empty_pubkey() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 1000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 1000);
 
         // 空 pubkey → 验证失败
         heap[100..103].copy_from_slice(b"sig");
@@ -1656,7 +1637,7 @@ mod tests {
     fn test_get_block_height() {
         let mut heap = vec![0u8; 64];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100);
 
         let result = SyscallGetBlockHeight::rust(&mut ctx, 0, 0, 0, 0, 0, &mut mapping)
             .expect("get_block_height 应成功");
@@ -1669,7 +1650,7 @@ mod tests {
     fn test_get_timestamp() {
         let mut heap = vec![0u8; 64];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100);
 
         let result = SyscallGetTimestamp::rust(&mut ctx, 0, 0, 0, 0, 0, &mut mapping)
             .expect("get_timestamp 应成功");
@@ -1684,7 +1665,7 @@ mod tests {
     fn test_verify_failure_proof_valid_non_inclusion() {
         let mut heap = vec![0u8; 16 * 1024];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100_000);
 
         // 构造 SMT 并生成非包含证明
         let mut smt = SparseMerkleTree::new();
@@ -1726,7 +1707,7 @@ mod tests {
     fn test_verify_failure_proof_invalid() {
         let mut heap = vec![0u8; 16 * 1024];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100_000);
 
         let mut smt = SparseMerkleTree::new();
         let key1 = [0xaa; 32];
@@ -1764,7 +1745,7 @@ mod tests {
     fn test_verify_failure_proof_too_short() {
         let mut heap = vec![0u8; 1024];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100_000);
 
         // 仅 32 字节（< 64 字节 header）
         let proof = vec![0u8; 32];
@@ -1810,7 +1791,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         let mut ctx =
-            PokerL1Context::new(make_tx_context(false), 500_000).with_zk_verifier(registry);
+            PokerL1Context::new(make_tx_context(), 500_000).with_zk_verifier(registry);
 
         let proof = vec![0xAAu8; 64];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1844,7 +1825,7 @@ mod tests {
             let mut mapping = make_test_mapping(&mut heap);
             let registry = make_test_zk_registry();
             let mut ctx =
-                PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
+                PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
 
             let proof = vec![0xBBu8; proof_len];
             let pio_bytes = make_valid_public_io_bytes();
@@ -1878,7 +1859,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         let mut ctx =
-            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
+            PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
 
         let pio_bytes = make_valid_public_io_bytes();
         heap[..pio_bytes.len()].copy_from_slice(&pio_bytes);
@@ -1902,7 +1883,7 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         // 注意：不调用 with_zk_verifier
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100_000);
 
         let proof = vec![0xCCu8; 32];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1929,7 +1910,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         let mut ctx =
-            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
+            PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
 
         let proof = vec![0xDDu8; 32];
         let short_pio = vec![0u8; 10]; // 远小于 MIN_BYTES=136
@@ -1956,7 +1937,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         // 仅 100 gas，远不够 Hypernova 的 300000
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100).with_zk_verifier(registry);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100).with_zk_verifier(registry);
 
         let proof = vec![0xEEu8; 32];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1985,7 +1966,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         let mut ctx =
-            PokerL1Context::new(make_tx_context(false), 500_000).with_zk_verifier(registry);
+            PokerL1Context::new(make_tx_context(), 500_000).with_zk_verifier(registry);
 
         let proof = vec![0xFFu8; 32];
         let pio_bytes = make_valid_public_io_bytes();
@@ -2014,7 +1995,7 @@ mod tests {
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
         let mut ctx =
-            PokerL1Context::new(make_tx_context(false), 100_000).with_zk_verifier(registry);
+            PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
 
         // proof_ptr 指向 stack 区域（非法）
         let result = SyscallZkVerify::rust(
@@ -2108,14 +2089,14 @@ mod tests {
 
     #[test]
     fn test_charge_gas_sufficient() {
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100);
         assert!(charge_gas(&mut ctx, 50).is_ok());
         assert_eq!(ctx.remaining_gas(), 50);
     }
 
     #[test]
     fn test_charge_gas_insufficient() {
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 100);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100);
         assert!(charge_gas(&mut ctx, 101).is_err());
         assert_eq!(ctx.remaining_gas(), 100, "不足时不应扣减");
     }
@@ -2150,7 +2131,7 @@ mod tests {
     fn test_bls_g1_add_syscall_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         place_g1_generator(&mut heap, 0);
         place_g1_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
@@ -2180,7 +2161,7 @@ mod tests {
     fn test_bls_g1_mul_syscall_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         place_g1_generator(&mut heap, 0);
         place_scalar_two(&mut heap, bls::G1_COMPRESSED_SIZE);
@@ -2210,7 +2191,7 @@ mod tests {
     fn test_bls_g1_neg_syscall_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         place_g1_generator(&mut heap, 0);
 
@@ -2237,7 +2218,7 @@ mod tests {
     fn test_bls_g2_add_syscall_basic() {
         let mut heap = vec![0u8; 8192];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         place_g2_generator(&mut heap, 0);
         place_g2_generator(&mut heap, bls::G2_COMPRESSED_SIZE);
@@ -2267,7 +2248,7 @@ mod tests {
     fn test_bls_g2_mul_syscall_basic() {
         let mut heap = vec![0u8; 8192];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         place_g2_generator(&mut heap, 0);
         place_scalar_two(&mut heap, bls::G2_COMPRESSED_SIZE);
@@ -2297,7 +2278,7 @@ mod tests {
     fn test_bls_g2_neg_syscall_basic() {
         let mut heap = vec![0u8; 8192];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         place_g2_generator(&mut heap, 0);
 
@@ -2324,7 +2305,7 @@ mod tests {
     fn test_bls_pairing_check_syscall_equal() {
         let mut heap = vec![0u8; 8192];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         // e(g1, g2) == e(g1, g2) → 返回 0
         place_g1_generator(&mut heap, 0);
@@ -2354,7 +2335,7 @@ mod tests {
     fn test_bls_pairing_check_syscall_unequal() {
         let mut heap = vec![0u8; 8192];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         // e(g1, g2) != e(2g1, g2) → 返回 1
         place_g1_generator(&mut heap, 0);
@@ -2388,7 +2369,7 @@ mod tests {
     fn test_bls_hash_to_g1_syscall_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         let msg = b"hello world";
         heap[..msg.len()].copy_from_slice(msg);
@@ -2418,7 +2399,7 @@ mod tests {
     fn test_bls_hash_to_g2_syscall_basic() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         let msg = b"hello world";
         heap[..msg.len()].copy_from_slice(msg);
@@ -2447,7 +2428,7 @@ mod tests {
     fn test_bls_hash_to_g1_syscall_msg_too_long() {
         let mut heap = vec![0u8; MAX_BLS_HASH_MSG_SIZE + 1024];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), u64::MAX);
+        let mut ctx = PokerL1Context::new(make_tx_context(), u64::MAX);
 
         let result = SyscallBlsHashToG1::rust(
             &mut ctx,
@@ -2467,7 +2448,7 @@ mod tests {
     fn test_bls_miller_loop_syscall_basic() {
         let mut heap = vec![0u8; 8192];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         place_g1_generator(&mut heap, 0);
         place_g2_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
@@ -2502,7 +2483,7 @@ mod tests {
     fn test_bls_final_exp_syscall_identity() {
         let mut heap = vec![0u8; 8192];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         // 先执行 miller_loop 获取 GT
         place_g1_generator(&mut heap, 0);
@@ -2520,7 +2501,7 @@ mod tests {
         .expect("miller_loop 应成功");
 
         // 重置 gas 以独立验证 final_exp
-        let mut ctx2 = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx2 = PokerL1Context::new(make_tx_context(), 10_000);
         let out_ptr = HEAP_BASE + gt_offset as u64 + bls::GT_COMPRESSED_SIZE as u64;
 
         let result = SyscallBlsFinalExp::rust(
@@ -2549,7 +2530,7 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         // gas 不足：GAS_BLS_G1_ADD = 500，仅给 499
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 499);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 499);
 
         place_g1_generator(&mut heap, 0);
         place_g1_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
@@ -2571,7 +2552,7 @@ mod tests {
     fn test_bls_g1_add_syscall_heap_violation() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         // 使用 stack 区域指针（非 heap）
         let result = SyscallBlsG1Add::rust(
@@ -2591,7 +2572,7 @@ mod tests {
     fn test_bls_g1_add_syscall_subgroup_check_failure() {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
-        let mut ctx = PokerL1Context::new(make_tx_context(false), 10_000);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 10_000);
 
         // 全零 bytes 不是合法的 compressed point
         // heap 已全为 0
@@ -2609,32 +2590,9 @@ mod tests {
         assert!(result.is_err(), "非法 G1 点应被子群检查拒绝");
     }
 
-    #[test]
-    fn test_bls_pairing_check_syscall_gameturn_gas_free() {
-        let mut heap = vec![0u8; 8192];
-        let mut mapping = make_test_mapping(&mut heap);
-        // GameTurn 通道免 gas
-        let mut ctx = PokerL1Context::new(make_tx_context(true), u64::MAX);
-
-        place_g1_generator(&mut heap, 0);
-        place_g2_generator(&mut heap, bls::G1_COMPRESSED_SIZE);
-        place_g1_generator(&mut heap, bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE);
-        place_g2_generator(
-            &mut heap,
-            2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE,
-        );
-
-        let _ = SyscallBlsPairingCheck::rust(
-            &mut ctx,
-            HEAP_BASE,
-            HEAP_BASE + bls::G1_COMPRESSED_SIZE as u64,
-            HEAP_BASE + (bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
-            HEAP_BASE + (2 * bls::G1_COMPRESSED_SIZE + bls::G2_COMPRESSED_SIZE) as u64,
-            0,
-            &mut mapping,
-        )
-        .expect("GameTurn 通道 pairing_check 应成功");
-
-        assert_eq!(ctx.gas_used(), 0, "GameTurn 通道 BLS syscall 免 gas");
-    }
+    // 注：原 `test_bls_pairing_check_syscall_gameturn_gas_free` 测试已移除。
+    //
+    // 重构后 rBPF VM 内的 syscall 不再有"GameTurn 免 gas"旁路：
+    // gas-free precompile 调用经 `PrecompileRegistry::execute` 派发，不经 rBPF VM；
+    // 进入 rBPF VM 的 BLS syscall 一律按 gas 计费。
 }

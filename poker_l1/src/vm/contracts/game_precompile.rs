@@ -15,7 +15,7 @@ use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
 use crate::storage::ObjectDb;
 use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile};
-use crate::{Address, ChainId};
+use crate::Address;
 
 /// 游戏合约预编译实现。
 ///
@@ -108,6 +108,17 @@ impl Precompile for GamePrecompile {
             selectors::refuse_ack(),
         ];
         known_selectors.contains(selector)
+    }
+
+    /// 游戏合约预编译免 gas（spec SubTask 8.5：GameTurn 通道游戏操作 tx 免 gas）。
+    ///
+    /// 反滥用由以下机制保障：
+    /// - 游戏买入锁仓（Phase 3 合约层）
+    /// - `gameturn_nonce` per-game per-player 重放保护（SEC-L3 / NEW-M9）
+    /// - 轮次约束（routing.rs：`validate_turn_order` / `validate_game_turn_phase_aware`）
+    /// - assigned_validator 路由（routing.rs：`validate_assigned_validator`）
+    fn is_gas_free(&self) -> bool {
+        true
     }
 }
 

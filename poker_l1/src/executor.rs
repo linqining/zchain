@@ -4,13 +4,18 @@
 //! 将 block 内 tx 按通道路由执行并提交状态变更：
 //!
 //! - **Public / ForceSync 通道**：account nonce 校验 + gas 计费（`apply_public_tx`）。
-//!   `contract_call` 走 rBPF [`execute_contract`]；`outputs` 直接创建对象。
-//! - **GameTurn / CheckpointAnchor 通道**：免 gas。原生游戏合约 dispatch
-//!   属 P0 第二批（P0-5），骨架期无 `contract_call` 的此类 tx 返回
-//!   `success=false`（fail-closed，不产生任何状态变更）。
+//!   `contract_call` 优先路由至预编译合约（[`PrecompileRegistry`]），未注册则走 rBPF
+//!   [`execute_contract`]；`outputs` 直接创建对象。
+//! - **GameTurn / CheckpointAnchor 通道**（gas-free lane）：必须配 gas-free 预编译合约
+//!   （`Precompile::is_gas_free() == true`）。executor 强制 lane-contract 一致性：
+//!   gas-free lane 调用非 gas-free 合约 → 直接拒绝（防免费 gas 滥用 DoS）。
+//!   gas-free 调用经 [`PrecompileRegistry::execute`] 直接派发，不经 rBPF VM。
 //!
 //! # 安全设计
 //!
+//! - **lane-contract 一致性**：gas-free lane（GameTurn / CheckpointAnchor）必须配
+//!   gas-free precompile；不一致直接拒绝（防止构造 `lane=GameTurn` + 普通 rBPF 合约
+//!   绕过账户/nonce/余额检查 + 获得无限 gas 的 DoS 攻击）。
 //! - 执行前重跑完整校验链（limits / chain_id / 签名 / nonce），纵深防御：
 //!   即使 RPC / P2P 入口校验被绕过，执行层仍拒绝非法 tx。
 //! - rBPF 合约状态提交**全有或全无**：先在内存中校验所有待写对象
@@ -35,7 +40,6 @@ use crate::storage::ObjectDb;
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
-use crate::vm::contracts::{dispatch, DispatchContext, DispatchResult, GameContract};
 use crate::vm::{ContractObject, execute_contract, load_contract_bytecode, PrecompileRegistry};
 use crate::block::validator::{validate_tx_chain_id, validate_tx_signature};
 use crate::{BlockHeight, ChainId, Hash, TimestampMs};
@@ -179,10 +183,44 @@ fn execute_tx_inner(
     validate_tx_signature(tx)?;
 
     let caller = derive_address(&tx.tagged_pubkey);
-    let is_gameturn = matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
+    let is_gas_free_lane = matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
 
-    // ===== 2. 账户与 nonce / 余额预检（Public / ForceSync）=====
-    if !is_gameturn {
+    // ===== 2. 解析目标合约的 gas-free 属性 =====
+    //
+    // gas-free 与否由 `Precompile::is_gas_free()` 决定（注册时声明），而非 tx lane。
+    // 未注册合约 / 无 contract_call → 一律视为非 gas-free（按 Public 计费）。
+    let target_is_gas_free: bool = match (&tx.contract_call, &env.precompile_registry) {
+        (Some(call), Some(registry)) if registry.is_precompile(call.contract_id) => {
+            registry.is_gas_free(call.contract_id)
+        }
+        _ => false,
+    };
+
+    // ===== 3. 安全校验：gas-free lane 必须配 gas-free 预编译合约 =====
+    //
+    // 防止构造 `lane_hint = GameTurn` + 普通 rBPF 合约的恶意 tx：
+    // 旧实现会跳过账户/nonce/余额预检 + 给予 gas_limit = u64::MAX + 不扣费不推进 nonce，
+    // 即免费无限 gas DoS + 绕过 nonce 重放保护。
+    if is_gas_free_lane && !target_is_gas_free {
+        let contract_id_str = tx
+            .contract_call
+            .as_ref()
+            .map(|c| format!("{:?}", c.contract_id))
+            .unwrap_or_else(|| "None".to_string());
+        return Err(PokerL1Error::Other(format!(
+            "gas-free lane {:?} requires gas-free precompile contract; \
+             got contract_id={contract_id_str}, target_is_gas_free={}",
+            tx.lane_hint, target_is_gas_free,
+        )));
+    }
+
+    // ===== 4. 账户与 nonce / 余额预检（仅非 gas-free lane 需要）=====
+    //
+    // gas 策略跟随 lane 而非合约属性（Assumption 3）：
+    // - gas-free lane（GameTurn/CheckpointAnchor）+ gas-free precompile → 免预检
+    // - 非 gas-free lane（Public/ForceSync）+ 任意合约 → 需预检
+    //   （包括调 gas-free precompile 的情况：按 Public 计费、推进 nonce）
+    if !is_gas_free_lane {
         let account = account_store
             .get(&caller)
             .ok_or_else(|| {
@@ -198,7 +236,7 @@ fn execute_tx_inner(
         }
     }
 
-    // ===== 3. 分通道执行 =====
+    // ===== 5. 分通道执行 =====
     let mut all_created: Vec<ObjectID> = Vec::new();
     let mut all_modified: Vec<ObjectID> = Vec::new();
     let mut gas_used: u64 = 0;
@@ -212,9 +250,7 @@ fn execute_tx_inner(
                     block_height: env.block_height,
                     block_timestamp: env.block_timestamp,
                 };
-                let selector: [u8; 32] = call.method_selector
-                    .try_into()
-                    .map_err(|e| PokerL1Error::Serialization(format!("method_selector: {e}")))?;
+                let selector: [u8; 32] = call.method_selector;
                 let dispatch_result = registry.execute(
                     call.contract_id,
                     &caller,
@@ -226,6 +262,9 @@ fn execute_tx_inner(
                 )?;
                 all_created.extend(dispatch_result.created_objects);
                 all_modified.extend(dispatch_result.modified_objects);
+                // 注：precompile 调用不经 rBPF VM，gas_used 保持 0。
+                // 非 gas-free lane 调 precompile 时，步骤 6 仍会扣费（gas_used=0）
+                // 并推进 nonce — 这符合"gas 策略跟随 lane"的设计（Assumption 3）。
             } else {
                 // 非预编译合约，走 rBPF 执行
                 let (created, modified, used) = execute_contract_call(env, tx, &caller, call, object_db)?;
@@ -240,23 +279,27 @@ fn execute_tx_inner(
             all_modified.extend(modified);
             gas_used = used;
         }
-    } else if is_gameturn {
-        return Err(PokerL1Error::Other("GameTurn native dispatch not yet implemented".to_string()));
     }
+    // 注：原 `else if is_gameturn` fail-closed 分支已被步骤 3 的 lane-contract
+    // 一致性校验覆盖：gas-free lane 无 contract_call 时直接在步骤 3 被拒绝。
 
     // tx.outputs 直接创建（与 contract_call 创建的对象并列）。
     let outputs_created = apply_tx_outputs(tx, &caller, object_db)?;
     all_created.extend(outputs_created);
 
-    // ===== 4. 账户结算（仅 Public / ForceSync 成功后）=====
-    let mut fee_charged = 0u64;
-    if !is_gameturn {
+    // ===== 6. 账户结算（仅非 gas-free lane 成功后）=====
+    //
+    // gas 策略跟随 lane：非 gas-free lane 的 tx（含调 gas-free precompile 的情况）
+    // 都需扣费 + 推进 nonce。gas-free lane 的 tx 不扣费不推进 nonce。
+    let fee_charged = if !is_gas_free_lane {
         let account = account_store
             .get_mut(&caller)
             .ok_or_else(|| PokerL1Error::Other("account disappeared mid-execution".into()))?;
         apply_public_tx(account, tx, gas_used)?;
-        fee_charged = gas_used;
-    }
+        gas_used
+    } else {
+        0u64
+    };
 
     Ok(TxReceipt {
         tx_hash: tx.signing_hash(),
@@ -297,13 +340,13 @@ fn execute_contract_call(
     // 2. 加载 + RequisiteVerifier 验证字节码（IMPL-SEC-4：(1)）
     let loaded = load_contract_bytecode(&contract.bytecode, call.contract_id, contract.version)?;
 
-    // 3. 构造执行上下文（gas：GameTurn 免费 / Public 按 budget，上限 TX_GAS_LIMIT）
-    let is_gameturn = matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
-    let gas_limit = if is_gameturn {
-        u64::MAX
-    } else {
-        tx.gas.budget.min(TX_GAS_LIMIT)
-    };
+    // 3. 构造执行上下文（gas_limit 按 tx.gas.budget，上限 TX_GAS_LIMIT）
+    //
+    // 注：gas-free precompile 已在 `execute_tx_inner` 步骤 5 走 `registry.execute`
+    // 分支派发，不会进入此函数。进入此函数的 tx 一律按 Public 计费。
+    // （`u64::MAX` 不再用于表示免 gas；`PokerL1Context::new` 内部会把超过
+    // `TX_GAS_LIMIT` 的 gas_limit 钳制到 `TX_GAS_LIMIT`，防止 CPU DoS。）
+    let gas_limit = tx.gas.budget.min(TX_GAS_LIMIT);
     let tx_ctx = TxContext {
         caller: *caller,
         caller_pubkey: tx.tagged_pubkey.clone(),
@@ -311,7 +354,6 @@ fn execute_contract_call(
         nonce: tx.nonce,
         block_height: env.block_height,
         block_timestamp: env.block_timestamp,
-        is_gameturn,
     };
     let mut ctx = PokerL1Context::new(tx_ctx, gas_limit);
     if let Some(registry) = &env.zk_verifier {
@@ -426,6 +468,13 @@ fn apply_tx_outputs(
 /// - block gas 累计（`receipt.gas_used`）超过 `env.block_gas_limit` 后，
 ///   后续需 gas 的 tx 跳过执行（回执标记 `OutOfGas`），免 gas tx 不受影响。
 /// - 返回的 `state_root` 为全部 tx 执行后的 `ObjectDb` SMT root。
+///
+/// # block-level gas 判定说明
+///
+/// 此处用 `tx.lane_hint` 判定是否跳过 block gas 累计（gas-free lane 不消耗 block gas），
+/// 而非查询 `Precompile::is_gas_free()`。理由：`execute_tx_inner` 步骤 3 已强制
+/// lane-contract 一致性（gas-free lane 必须配 gas-free precompile），故到达 `execute_block`
+/// 时 lane 已是合约 gas 属性的可靠代理。两套判定保持一致。
 pub fn execute_block(
     env: &ExecutionEnvironment,
     txs: &[Transaction],
@@ -449,7 +498,7 @@ pub fn execute_block(
             continue;
         }
         let receipt = execute_tx(env, tx, object_db, account_store);
-        // 仅 gas 计费通道的成功 tx 累计 block gas（GameTurn 免 gas，不计入）
+        // 仅 gas 计费通道的成功 tx 累计 block gas（gas-free lane 不计入）
         if receipt.success && needs_gas {
             total_gas = total_gas.saturating_add(receipt.gas_used);
         }
@@ -472,8 +521,10 @@ mod tests {
     use crate::signature::TaggedPubkey;
     use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{ContractCall, Gas, RouteHint, TxRequest};
+    use crate::vm::precompile::{DispatchResult, ExecutionEnvironment as PrecompileEnv, Precompile};
     use rand::rngs::OsRng;
     use secp256k1::{Message, Secp256k1};
+    use std::sync::Arc;
 
     // ===== 测试辅助：最小 ELF 构造 =====
 
@@ -679,6 +730,63 @@ mod tests {
         ExecutionEnvironment::new(DEFAULT_CHAIN_ID, 100, 1_000_000)
     }
 
+    // ===== 测试辅助：gas-free 预编译合约 stub =====
+
+    /// 简化的 gas-free 预编译合约 stub（用于 executor gas 策略测试）。
+    ///
+    /// 不依赖完整 `GameContract` 状态，`call()` 返回空 `DispatchResult`，
+    /// 仅用于验证 executor 的 lane-contract 一致性校验与 gas 策略。
+    struct GasFreeTestPrecompile {
+        id: ObjectID,
+    }
+
+    impl GasFreeTestPrecompile {
+        fn new(id: ObjectID) -> Arc<dyn Precompile> {
+            Arc::new(Self { id })
+        }
+    }
+
+    impl Precompile for GasFreeTestPrecompile {
+        fn id(&self) -> ObjectID {
+            self.id
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn call(
+            &self,
+            _caller: &crate::Address,
+            _caller_pubkey: &TaggedPubkey,
+            _method_selector: &[u8; 32],
+            _args: &[u8],
+            _env: &PrecompileEnv,
+            _object_db: &mut ObjectDb,
+        ) -> PokerL1Result<DispatchResult> {
+            Ok(DispatchResult::empty())
+        }
+
+        fn is_gas_free(&self) -> bool {
+            true
+        }
+    }
+
+    /// 构造带 GasFreeTestPrecompile 注册的 PrecompileRegistry。
+    ///
+    /// `gas_free_id` 为注册的预编译合约 ObjectID（免 gas）。
+    fn make_registry_with_gas_free_precompile(gas_free_id: ObjectID) -> PrecompileRegistry {
+        let mut registry = PrecompileRegistry::new();
+        registry.register(GasFreeTestPrecompile::new(gas_free_id));
+        registry
+    }
+
+    /// 构造注入 GasFreeTestPrecompile 的执行环境。
+    fn make_gas_free_env(gas_free_id: ObjectID) -> ExecutionEnvironment {
+        let registry = make_registry_with_gas_free_precompile(gas_free_id);
+        make_env().with_precompile_registry(registry)
+    }
+
     /// 基础 fixture：空 ObjectDb + 含 signer 账户（balance=1_000_000）的 AccountStore。
     struct Fixture {
         object_db: ObjectDb,
@@ -799,15 +907,17 @@ mod tests {
 
     #[test]
     fn test_execute_tx_gameturn_contract_call_gas_free() {
+        // 重构后：gas-free lane（GameTurn）+ gas-free precompile → 免 gas 执行。
+        // 必须注入 PrecompileRegistry + gas-free precompile，否则被 lane-contract
+        // 一致性校验拒绝。
         let mut fx = Fixture::new();
-        let env = make_env();
-        let caller = fx.caller();
-        let elf = build_test_elf(&make_program(1));
-        let contract_id = deploy_contract(&mut fx.object_db, caller, elf, 100, true);
+        // 注册一个 gas-free precompile（用保留命名空间外的地址避免冲突）
+        let gas_free_id = ObjectID::new([0xFE; 20], 200);
+        let env = make_gas_free_env(gas_free_id);
 
         let mut req = gameturn_request();
         req.contract_call = Some(ContractCall {
-            contract_id,
+            contract_id: gas_free_id,
             method_selector: [0u8; 32],
             args: vec![],
         });
@@ -815,16 +925,18 @@ mod tests {
 
         let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
 
-        assert!(receipt.success, "GameTurn 合约调用应成功: {:?}", receipt.error);
+        assert!(receipt.success, "GameTurn + gas-free precompile 应成功: {:?}", receipt.error);
         assert_eq!(receipt.gas_used, 0, "GameTurn 免 gas");
         assert_eq!(receipt.fee_charged, 0);
-        // 账户不被触碰（GameTurn 不走 account nonce）
+        // 账户不被触碰（gas-free lane 不走 account nonce）
         assert_eq!(fx.account().nonce, 0);
         assert_eq!(fx.account().balance, 1_000_000);
     }
 
     #[test]
-    fn test_execute_tx_gameturn_without_contract_fail_closed() {
+    fn test_execute_tx_gameturn_without_contract_call_rejected() {
+        // 重构后：gas-free lane（GameTurn）无 contract_call 直接被拒绝
+        // （lane-contract 一致性校验：gas-free lane 必须配 gas-free precompile）。
         let mut fx = Fixture::new();
         let env = make_env();
         let (nonce0, bal0) = (fx.account().nonce, fx.account().balance);
@@ -832,13 +944,13 @@ mod tests {
         let tx = fx.signer.sign(gameturn_request());
         let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
 
-        assert!(!receipt.success, "骨架期游戏原生 tx 应 fail-closed");
+        assert!(!receipt.success, "gas-free lane 无 contract_call 应被拒绝");
         assert!(
             receipt
                 .error
                 .as_deref()
-                .is_some_and(|e| e.contains("not yet implemented")),
-            "错误应说明 dispatch 未实现: {:?}",
+                .is_some_and(|e| e.contains("gas-free lane")),
+            "错误应说明 gas-free lane 一致性校验失败: {:?}",
             receipt.error
         );
         assert_state_unchanged(&fx, nonce0, bal0);
@@ -1277,7 +1389,9 @@ mod tests {
     fn test_execute_block_gas_limit_skips_public_not_gameturn() {
         let mut fx = Fixture::new();
         // block_gas_limit=100：tx1(budget=60) 执行，tx2(budget=99) 超出跳过
-        let env = make_env().with_block_gas_limit(100);
+        // 注入 gas-free precompile registry：tx3 走 gas-free lane + gas-free precompile
+        let gas_free_id = ObjectID::new([0xFE; 20], 200);
+        let env = make_gas_free_env(gas_free_id).with_block_gas_limit(100);
         let caller = fx.caller();
         let elf = build_test_elf(&make_program(1));
         let contract_id = deploy_contract(&mut fx.object_db, caller, elf, 100, true);
@@ -1301,9 +1415,10 @@ mod tests {
         let tx2 = fx.signer.sign(req2);
 
         // GameTurn tx（免 gas）：即使 block gas 受限仍执行
+        // 重构后必须配 gas-free precompile（用 gas_free_id）
         let mut req3 = gameturn_request();
         req3.contract_call = Some(ContractCall {
-            contract_id,
+            contract_id: gas_free_id,
             method_selector: [2u8; 32],
             args: vec![],
         });
@@ -1385,5 +1500,183 @@ mod tests {
         assert!(outcome.receipts.is_empty());
         assert_eq!(outcome.total_gas_used, 0);
         assert_eq!(outcome.state_root, fx.initial_root, "空 block 状态根不变");
+    }
+
+    // ===== 重构新增：lane-contract 一致性 + 非对称 gas 策略测试 =====
+
+    #[test]
+    fn test_gas_free_lane_with_gas_free_precompile_succeeds() {
+        // lane=GameTurn + gas-free precompile → 执行成功，gas_used=0，不扣费不推进 nonce。
+        let mut fx = Fixture::new();
+        let gas_free_id = ObjectID::new([0xFE; 20], 200);
+        let env = make_gas_free_env(gas_free_id);
+
+        let mut req = gameturn_request();
+        req.contract_call = Some(ContractCall {
+            contract_id: gas_free_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(receipt.success, "应执行成功: {:?}", receipt.error);
+        assert_eq!(receipt.gas_used, 0, "gas-free lane 免 gas");
+        assert_eq!(receipt.fee_charged, 0, "gas-free lane 不扣费");
+        assert_eq!(fx.account().nonce, 0, "gas-free lane 不推进 nonce");
+        assert_eq!(fx.account().balance, 1_000_000, "gas-free lane 不扣余额");
+    }
+
+    #[test]
+    fn test_gas_free_lane_with_non_gas_free_contract_rejected() {
+        // 核心安全测试：lane=GameTurn + 普通 rBPF 合约 → 拒绝执行（防免费 gas DoS）。
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        let env = make_env(); // 无 precompile registry
+        let elf = build_test_elf(&make_program(1));
+        let contract_id = deploy_contract(&mut fx.object_db, caller, elf, 100, true);
+
+        let (nonce0, bal0) = (fx.account().nonce, fx.account().balance);
+        let mut req = gameturn_request();
+        req.contract_call = Some(ContractCall {
+            contract_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(!receipt.success, "gas-free lane + 非免 gas 合约必须被拒绝");
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("gas-free lane")),
+            "错误应说明 gas-free lane 一致性校验失败: {:?}",
+            receipt.error
+        );
+        // 状态不变（账户未触碰、state_root 不变）
+        assert_eq!(fx.account().nonce, nonce0);
+        assert_eq!(fx.account().balance, bal0);
+    }
+
+    #[test]
+    fn test_gas_free_lane_with_unregistered_contract_rejected() {
+        // lane=GameTurn + 未注册 ObjectID → 拒绝执行。
+        let mut fx = Fixture::new();
+        let gas_free_id = ObjectID::new([0xFE; 20], 200);
+        let env = make_gas_free_env(gas_free_id); // 仅注册了 gas_free_id
+        let unregistered_id = ObjectID::new([0xFD; 20], 999);
+
+        let (nonce0, bal0) = (fx.account().nonce, fx.account().balance);
+        let mut req = gameturn_request();
+        req.contract_call = Some(ContractCall {
+            contract_id: unregistered_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(!receipt.success, "gas-free lane + 未注册合约必须被拒绝");
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("gas-free lane")),
+            "错误应说明 gas-free lane 一致性校验失败: {:?}",
+            receipt.error
+        );
+        assert_eq!(fx.account().nonce, nonce0);
+        assert_eq!(fx.account().balance, bal0);
+    }
+
+    #[test]
+    fn test_public_lane_with_gas_free_precompile_charges_nonce() {
+        // lane=Public + gas-free precompile → 执行成功，扣 gas_used(=0)，推进 nonce。
+        // 验证非对称策略：gas 策略跟随 lane 而非合约属性（Assumption 3）。
+        let mut fx = Fixture::new();
+        let gas_free_id = ObjectID::new([0xFE; 20], 200);
+        let env = make_gas_free_env(gas_free_id);
+
+        let mut req = public_request(0);
+        req.contract_call = Some(ContractCall {
+            contract_id: gas_free_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(receipt.success, "Public lane + gas-free precompile 应成功: {:?}", receipt.error);
+        // precompile 不经 rBPF VM，gas_used 保持 0
+        assert_eq!(receipt.gas_used, 0, "precompile 调用不消耗 gas");
+        assert_eq!(receipt.fee_charged, 0, "gas_used=0 → fee_charged=0");
+        // 但 Public lane 推进 nonce（重放保护）
+        assert_eq!(fx.account().nonce, 1, "Public lane 必须推进 nonce");
+        assert_eq!(fx.account().balance, 1_000_000, "gas_used=0 → 余额不变");
+    }
+
+    #[test]
+    fn test_checkpoint_anchor_lane_with_gas_free_precompile_succeeds() {
+        // lane=CheckpointAnchor + gas-free precompile → 免 gas 执行（与 GameTurn 同语义）。
+        let mut fx = Fixture::new();
+        let gas_free_id = ObjectID::new([0xFE; 20], 200);
+        let env = make_gas_free_env(gas_free_id);
+
+        let mut req = gameturn_request();
+        req.lane_hint = TxLane::CheckpointAnchor;
+        req.route_hint = RouteHint::AssignedValidator;
+        req.contract_call = Some(ContractCall {
+            contract_id: gas_free_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(receipt.success, "CheckpointAnchor + gas-free precompile 应成功: {:?}", receipt.error);
+        assert_eq!(receipt.gas_used, 0, "gas-free lane 免 gas");
+        assert_eq!(receipt.fee_charged, 0);
+        assert_eq!(fx.account().nonce, 0, "gas-free lane 不推进 nonce");
+        assert_eq!(fx.account().balance, 1_000_000);
+    }
+
+    #[test]
+    fn test_gas_free_lane_without_registry_rejected() {
+        // 无 precompile registry 时，gas-free lane 任意 contract_call 都被拒绝。
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        let env = make_env(); // 无 precompile_registry
+        let elf = build_test_elf(&make_program(1));
+        let contract_id = deploy_contract(&mut fx.object_db, caller, elf, 100, true);
+
+        let (nonce0, bal0) = (fx.account().nonce, fx.account().balance);
+        let mut req = gameturn_request();
+        req.contract_call = Some(ContractCall {
+            contract_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(!receipt.success, "无 registry 时 gas-free lane 必须被拒绝");
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("gas-free lane")),
+            "错误应说明 gas-free lane 一致性校验失败: {:?}",
+            receipt.error
+        );
+        assert_eq!(fx.account().nonce, nonce0);
+        assert_eq!(fx.account().balance, bal0);
     }
 }
