@@ -29,12 +29,14 @@ pub mod challenge_delta;
 pub mod checkpoint_anchor;
 pub mod checkpoint_skip;
 pub mod delegated_escape;
+pub mod dispatch;
 pub mod examples;
 pub mod force_advance;
 pub mod force_checkin;
 pub mod force_checkpoint;
 pub mod force_settle;
 pub mod forfeit;
+pub mod game_precompile;
 pub mod hand_started;
 pub mod request_da;
 pub mod revert;
@@ -93,6 +95,7 @@ pub use forfeit::{
     compute_designated_operator_bond, compute_forfeit_deposit, compute_forfeit_distribution,
     validate_designated_operator_bond, validate_forfeit_deposit_ratio,
 };
+pub use game_precompile::GamePrecompile;
 pub use hand_started::{HandStartedError, HandStartedInput, hand_started_branch};
 pub use request_da::{RequestDaOutcome, RequestDaTx, apply_request_da, is_request_da_appropriate};
 pub use revert::{
@@ -101,3 +104,6 @@ pub use revert::{
 };
 pub use settle::{RakeConfig, SettleError, SettleResult, compute_rake, settle_hand};
 pub use types::{BettingRound, GameAction, GameContract, GamePhase, HandState, PlayerStack};
+pub use dispatch::{
+    DispatchContext, DispatchResult, compute_method_selector, dispatch, selectors,
+};

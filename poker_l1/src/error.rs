@@ -373,6 +373,18 @@ pub enum PokerL1Error {
         contract_id: crate::object_model::ObjectID,
         version: u32,
     },
+    /// 未知的合约方法选择器（P0-5：GameTurn 原生合约 dispatch）。
+    #[error("unknown contract method: selector={selector:?}")]
+    UnknownContractMethod { selector: crate::Hash },
+    /// HandStarted 错误（手牌已在进行中 / 状态非法）。
+    #[error("hand started error: {0}")]
+    HandStartedError(crate::vm::contracts::hand_started::HandStartedError),
+    /// ForceAdvance 错误（超时玩家不存在 / 已 fold / 未超时）。
+    #[error("force advance error: {0}")]
+    ForceAdvanceError(crate::vm::contracts::force_advance::ForceAdvanceError),
+    /// Settle 错误（手牌未到达 showdown / 已结算）。
+    #[error("settle error: {0}")]
+    SettleError(crate::vm::contracts::settle::SettleError),
     /// syscall 参数无效（指针越界 / 长度非法等）。
     #[error("invalid syscall argument: {0}")]
     InvalidSyscallArgument(String),
@@ -704,5 +716,23 @@ impl From<serde_json::Error> for PokerL1Error {
 impl From<blake2::digest::InvalidLength> for PokerL1Error {
     fn from(e: blake2::digest::InvalidLength) -> Self {
         Self::Serialization(format!("blake2 invalid length: {e}"))
+    }
+}
+
+impl From<crate::vm::contracts::hand_started::HandStartedError> for PokerL1Error {
+    fn from(e: crate::vm::contracts::hand_started::HandStartedError) -> Self {
+        Self::HandStartedError(e)
+    }
+}
+
+impl From<crate::vm::contracts::force_advance::ForceAdvanceError> for PokerL1Error {
+    fn from(e: crate::vm::contracts::force_advance::ForceAdvanceError) -> Self {
+        Self::ForceAdvanceError(e)
+    }
+}
+
+impl From<crate::vm::contracts::settle::SettleError> for PokerL1Error {
+    fn from(e: crate::vm::contracts::settle::SettleError) -> Self {
+        Self::SettleError(e)
     }
 }

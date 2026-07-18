@@ -23,7 +23,7 @@ use crate::Address;
 use super::types::{ExecutionMode, GameContract, HandState};
 
 /// HandStarted 分支结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HandStartedResult {
     /// OnChain 模式：手牌已开始，等待 GameTurn tx。
     OnChain {
@@ -141,6 +141,7 @@ pub fn hand_started_branch(
             // 生成 OfflineState commitment（简化版：blake2b_256 of hand state）
             // 实际实现需在 Phase 5 完成（spec.md 第 543-547 行）
             let commitment = compute_offline_state_commitment(game);
+            game.last_commitment = Some(commitment);
             HandStartedResult::OffChain {
                 hand_number: game.hand_number,
                 offline_state_commitment: commitment,

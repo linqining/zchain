@@ -35,9 +35,11 @@ use crate::storage::ObjectDb;
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
-use crate::vm::{ContractObject, execute_contract, load_contract_bytecode};
+use crate::vm::contracts::{dispatch, DispatchContext, DispatchResult, GameContract};
+use crate::vm::{ContractObject, execute_contract, load_contract_bytecode, PrecompileRegistry};
 use crate::block::validator::{validate_tx_chain_id, validate_tx_signature};
 use crate::{BlockHeight, ChainId, Hash, TimestampMs};
+use std::sync::Arc;
 
 /// 执行环境（block 级上下文）。
 #[derive(Debug, Clone)]
@@ -52,6 +54,8 @@ pub struct ExecutionEnvironment {
     pub block_gas_limit: u64,
     /// ZK verifier 注册表（合约内 `zk_verify` syscall 使用；`None` 时该 syscall 报错）。
     pub zk_verifier: Option<ZkVerifierRegistry>,
+    /// 预编译合约注册表（用于路由预编译合约调用）。
+    pub precompile_registry: Option<Arc<PrecompileRegistry>>,
 }
 
 impl ExecutionEnvironment {
@@ -64,6 +68,7 @@ impl ExecutionEnvironment {
             block_timestamp,
             block_gas_limit: BLOCK_GAS_LIMIT,
             zk_verifier: None,
+            precompile_registry: None,
         }
     }
 
@@ -71,6 +76,13 @@ impl ExecutionEnvironment {
     #[must_use]
     pub fn with_zk_verifier(mut self, registry: ZkVerifierRegistry) -> Self {
         self.zk_verifier = Some(registry);
+        self
+    }
+
+    /// 注入预编译合约注册表（builder 模式）。
+    #[must_use]
+    pub fn with_precompile_registry(mut self, registry: PrecompileRegistry) -> Self {
+        self.precompile_registry = Some(Arc::new(registry));
         self
     }
 
@@ -192,18 +204,44 @@ fn execute_tx_inner(
     let mut gas_used: u64 = 0;
 
     if let Some(call) = &tx.contract_call {
-        // rBPF 合约调用（所有通道共用；GameTurn 免 gas 由 gas_limit = u64::MAX 实现）
-        let (created, modified, used) = execute_contract_call(env, tx, &caller, call, object_db)?;
-        all_created.extend(created);
-        all_modified.extend(modified);
-        gas_used = used;
+        // 优先检查预编译合约注册表（参考以太坊预编译合约设计）
+        if let Some(registry) = &env.precompile_registry {
+            if registry.is_precompile(call.contract_id) {
+                let precompile_env = crate::vm::precompile::ExecutionEnvironment {
+                    chain_id: env.chain_id,
+                    block_height: env.block_height,
+                    block_timestamp: env.block_timestamp,
+                };
+                let selector: [u8; 32] = call.method_selector
+                    .try_into()
+                    .map_err(|e| PokerL1Error::Serialization(format!("method_selector: {e}")))?;
+                let dispatch_result = registry.execute(
+                    call.contract_id,
+                    &caller,
+                    &tx.tagged_pubkey,
+                    &selector,
+                    &call.args,
+                    &precompile_env,
+                    object_db,
+                )?;
+                all_created.extend(dispatch_result.created_objects);
+                all_modified.extend(dispatch_result.modified_objects);
+            } else {
+                // 非预编译合约，走 rBPF 执行
+                let (created, modified, used) = execute_contract_call(env, tx, &caller, call, object_db)?;
+                all_created.extend(created);
+                all_modified.extend(modified);
+                gas_used = used;
+            }
+        } else {
+            // 无预编译注册表，所有合约调用走 rBPF
+            let (created, modified, used) = execute_contract_call(env, tx, &caller, call, object_db)?;
+            all_created.extend(created);
+            all_modified.extend(modified);
+            gas_used = used;
+        }
     } else if is_gameturn {
-        // P0-5（第二批）：原生游戏合约 dispatch（force_* / settle / checkin 等）。
-        // 骨架期 fail-closed：无 contract_call 的游戏类 tx 不产生状态变更。
-        return Err(PokerL1Error::Other(format!(
-            "native game contract dispatch not yet implemented (lane={:?})",
-            tx.lane_hint
-        )));
+        return Err(PokerL1Error::Other("GameTurn native dispatch not yet implemented".to_string()));
     }
 
     // tx.outputs 直接创建（与 contract_call 创建的对象并列）。
