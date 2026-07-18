@@ -1484,6 +1484,7 @@ dependencies = [
  "blstrs",
  "criterion",
  "ed25519-dalek",
+ "ff",
  "group",
  "hex",
  "pairing",

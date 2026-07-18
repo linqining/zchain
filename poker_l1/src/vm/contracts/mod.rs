@@ -41,6 +41,8 @@ pub mod hand_started;
 pub mod request_da;
 pub mod revert;
 pub mod settle;
+pub mod texas_poker;
+pub mod texas_poker_precompile;
 pub mod types;
 
 pub use ack_protocol::{
@@ -96,6 +98,7 @@ pub use forfeit::{
     validate_designated_operator_bond, validate_forfeit_deposit_ratio,
 };
 pub use game_precompile::GamePrecompile;
+pub use texas_poker_precompile::TexasPokerPrecompile;
 pub use hand_started::{HandStartedError, HandStartedInput, hand_started_branch};
 pub use request_da::{RequestDaOutcome, RequestDaTx, apply_request_da, is_request_da_appropriate};
 pub use revert::{

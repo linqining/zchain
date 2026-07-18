@@ -739,3 +739,9 @@ impl From<crate::vm::contracts::settle::SettleError> for PokerL1Error {
         Self::SettleError(e)
     }
 }
+
+impl From<crate::vm::contracts::texas_poker::betting::BettingError> for PokerL1Error {
+    fn from(e: crate::vm::contracts::texas_poker::betting::BettingError) -> Self {
+        Self::ContractExecutionFailed(format!("betting error: {e}"))
+    }
+}

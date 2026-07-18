@@ -40,6 +40,7 @@ subtle = "2.5"
 rocksdb = { version = "0.22", default-features = false }
 solana_rbpf = "0.8"
 blstrs = "0.7"
+ff = "0.13"
 group = "0.13"
 pairing = "0.23"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

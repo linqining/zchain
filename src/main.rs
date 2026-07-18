@@ -47,6 +47,8 @@ use poker_l1::rpc::{
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod poker_demo;
+
 /// 程序版本。
 const VERSION: &str = "0.1.0";
 
@@ -91,6 +93,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "poker-demo" => {
+            if let Err(e) = poker_demo::run(rest) {
+                error!("poker-demo 失败：{e}");
+                std::process::exit(1);
+            }
+        }
         "version" | "--version" | "-V" => {
             println!("zchain {VERSION}");
         }
@@ -116,6 +124,7 @@ fn print_usage() {
     eprintln!("  node      启动节点（运行 JSON-RPC server）");
     eprintln!("  keygen    生成密钥对（secp256k1 / ed25519）");
     eprintln!("  test-e2e  端到端链路测试（构造交易→签名→提交→出块→查询）");
+    eprintln!("  poker-demo  运行 Texas Poker 完整牌局演示（in-process，绕过 RPC）");
     eprintln!("  version   打印版本号");
     eprintln!("  help      打印此帮助");
     eprintln!();

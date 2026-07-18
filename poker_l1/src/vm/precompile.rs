@@ -424,6 +424,15 @@ pub mod reserved {
     pub const fn game_contract_id() -> ObjectID {
         ObjectID::new(GAME_CONTRACT_ADDRESS, 0)
     }
+
+    /// Texas Poker 合约预编译地址（0xFF..02）。
+    pub const TEXAS_POKER_CONTRACT_ADDRESS: Address = [PRECOMPILE_PREFIX, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02];
+
+    /// Texas Poker 合约预编译 ObjectID。
+    #[must_use]
+    pub const fn texas_poker_contract_id() -> ObjectID {
+        ObjectID::new(TEXAS_POKER_CONTRACT_ADDRESS, 0)
+    }
 }
 
 #[cfg(test)]

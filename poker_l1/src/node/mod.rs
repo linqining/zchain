@@ -37,6 +37,8 @@ use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
 use crate::signature::unified::verify_signature;
 use crate::storage::{BlockStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb};
 use crate::transaction::{Transaction, validate_tx_limits};
+use crate::vm::PrecompileRegistry;
+use crate::vm::contracts::{GamePrecompile, TexasPokerPrecompile};
 use crate::{Address, BlockHeight, ChainId, Hash};
 
 /// tx_cache 最大条目数（C-2 修复 — 防止内存 DoS）。
@@ -317,6 +319,26 @@ pub struct Node {
     /// - 创世引导期（validators 为空）时，vertex/block 的 validator 成员校验跳过
     /// - 非空时，vertex author 必须是活跃 validator；commit certificate 必须满足动态 quorum
     validator_set: std::sync::Mutex<ValidatorSet>,
+    /// 预编译合约注册表（共享 Arc — block 执行时 clone 引用而非重建）。
+    ///
+    /// 注册内置预编译合约：
+    /// - [`GamePrecompile`]（`0xFF..01`，GameTurn 通道免 gas）
+    /// - [`TexasPokerPrecompile`]（`0xFF..02`，GameTurn 通道免 gas）
+    ///
+    /// 治理升级（版本号 + timelock）经 `propose_upgrade` / `activate_upgrade`，
+    /// 不在此处直接重建。
+    precompile_registry: Arc<PrecompileRegistry>,
+}
+
+/// 构造默认预编译合约注册表并注册内置预编译合约。
+///
+/// 在 [`Node::open`] / [`Node::open_inmemory_with_validators`] 中调用，
+/// 确保 `GamePrecompile` 和 `TexasPokerPrecompile` 在节点启动时即注册。
+fn build_default_precompile_registry() -> Arc<PrecompileRegistry> {
+    let mut registry = PrecompileRegistry::new();
+    registry.register(GamePrecompile::new_arc(1));
+    registry.register(TexasPokerPrecompile::new_arc(1));
+    Arc::new(registry)
 }
 
 /// 从创世 validator 列表构建初始 ValidatorSet（epoch 0）。
@@ -347,6 +369,7 @@ impl Node {
         let object_db = ObjectDb::open(&object_path)?;
         let vertex_store = DagVertexStore::open(&vertex_path)?;
         let validator_set = build_genesis_validator_set(config.genesis_validators.clone());
+        let precompile_registry = build_default_precompile_registry();
         Ok(Self {
             config,
             block_store,
@@ -357,6 +380,7 @@ impl Node {
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
+            precompile_registry,
         })
     }
 
@@ -372,6 +396,7 @@ impl Node {
         genesis_validators: Vec<ValidatorEntry>,
     ) -> PokerL1Result<Self> {
         let validator_set = build_genesis_validator_set(genesis_validators.clone());
+        let precompile_registry = build_default_precompile_registry();
         Ok(Self {
             config: NodeConfig {
                 role,
@@ -390,6 +415,7 @@ impl Node {
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
+            precompile_registry,
         })
     }
 
@@ -681,7 +707,8 @@ impl Node {
             self.config.chain_id,
             header.height,
             header.timestamp_ms,
-        );
+        )
+        .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
         let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
         let outcome = execute_block(&env, &block.public_txs, &mut object_db, &mut account_store);

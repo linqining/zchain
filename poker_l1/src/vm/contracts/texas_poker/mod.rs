@@ -1,0 +1,50 @@
+//! Texas Poker 原生 Precompile 合约（移植自 `/Users/mac/projects/zgame/texas_poker_move`）。
+//!
+//! 本模块将 Sui Move 德州扑克合约（~8000 行，含完整 Mental Poker 协议）
+//! 移植为 zchain 原生预编译合约。合约字节码内嵌于 zchain 节点二进制，
+//! 通过 `PrecompileRegistry` 注册，ObjectID = `reserved::texas_poker_contract_id()`
+//! （`0xFF..02`）。
+//!
+//! # 模块结构
+//!
+//! - `constants`：状态常量（ROUND_*/SHUFFLE_PHASE_*/REVEAL_PHASE_*/...）
+//! - `card`：扑克牌数据结构（Card/PlayingCard + 花色映射）
+//! - `hand_evaluator`：7选5最佳手牌评估（10 种牌型）
+//! - `betting`：下注规则（BettingRound + all-in 处理）
+//! - `side_pot`：边池分层算法（含 M-A3 empty eligible 合并修复）
+//! - `events`：40 种事件类型枚举
+//! - `types`：核心数据结构（TexasPokerTable/Seat/DeckState/ShuffleState/...）
+//! - `state_machine`：状态机推进 + tick + reveal/reconstruct 编排
+//! - `dispatch`：17 个 method selector 路由
+//! - `crypto`：Mental Poker 密码学层（BLS ElGamal + 7 种 ZK proof）
+//!
+//! # Mental Poker 协议
+//!
+//! 1. 玩家轮流 shuffle 加密牌组并提交 shuffle proof
+//! 2. 每个玩家为非自己手牌提交 reveal token（部分解密）
+//! 3. 牌主用自己 sk 完成解密（showdown 阶段）
+//! 4. 公共牌由所有玩家 reveal token 聚合解密
+//!
+//! 链上仅做 verify，链下做 prove（`#[cfg(feature = "client")]` 门控）。
+//!
+//! # ZK 跳过回退（dev chain）
+//!
+//! `TableConfig.zk_skip_enabled = true` 时，所有 ZK verify 直接返回 true，
+//! 便于首版跑通流程。mainnet 启动时由 governance 强制 false。
+
+pub mod betting;
+pub mod card;
+pub mod constants;
+pub mod crypto;
+pub mod events;
+pub mod hand_evaluator;
+pub mod side_pot;
+pub mod types;
+
+// Phase 3: 状态机 + dispatch
+pub mod state_machine;
+pub mod dispatch;
+
+// Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
+// pub struct TexasPokerPrecompile { ... }
+// impl

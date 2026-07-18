@@ -90,6 +90,16 @@ impl ExecutionEnvironment {
         self
     }
 
+    /// 注入预编译合约注册表（Arc 共享，builder 模式）。
+    ///
+    /// 与 [`Self::with_precompile_registry`] 的区别：直接接受 `Arc<PrecompileRegistry>`，
+    /// 适合 `Node` 持有共享 registry、每个 block 执行时 clone Arc 引用而非重建注册表。
+    #[must_use]
+    pub fn with_precompile_registry_arc(mut self, registry: Arc<PrecompileRegistry>) -> Self {
+        self.precompile_registry = Some(registry);
+        self
+    }
+
     /// 覆盖 block gas limit（测试用）。
     #[must_use]
     pub const fn with_block_gas_limit(mut self, limit: u64) -> Self {
