@@ -30,6 +30,9 @@ use crate::isa::state::VmState;
 /// Gas 计费常量与 [`syscall_gas`] 函数（Task 4.3）。
 pub mod gas;
 
+/// Phase 4 — GasStrategy trait 的 zkvm 实现（无 gas 费）。
+pub mod gas_strategy;
+
 /// Host 状态读取 trait + StubHostState 默认实现（Task 4.2.10）。
 pub mod host_state;
 

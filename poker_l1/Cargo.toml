@@ -14,10 +14,12 @@ path = "src/lib.rs"
 [dependencies]
 poker_protocol = { workspace = true }
 poker_zkvm = { workspace = true, features = ["test-helpers"] }
+vm-common = { path = "../vm-common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bcs = { workspace = true }
 sha2 = { workspace = true }
+sha3 = { workspace = true }
 blake2 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }

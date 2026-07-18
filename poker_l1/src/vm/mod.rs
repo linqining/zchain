@@ -17,6 +17,8 @@
 pub mod context;
 pub mod contract;
 pub mod contracts;
+pub mod crypto_blstrs;
+pub mod gas_strategy;
 pub mod gas_table;
 pub mod loader;
 pub mod precompile;

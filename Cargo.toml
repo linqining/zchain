@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["poker_l1", "poker_zkvm"]
+members = ["poker_l1", "poker_zkvm", "vm-common"]
 
 # zchain root package 本身作为 workspace 的 bin 入口保留
 [package]
@@ -29,6 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcs = "0.1.6"
 sha2 = "0.10.8"
+sha3 = "0.10.8"
 blake2 = "0.10.6"
 hex = "0.4.3"
 thiserror = "1.0.61"

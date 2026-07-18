@@ -17,6 +17,7 @@
 //! - `ecdsa` — ECDSA 验签电路（Task 10.4）
 //! - `zk_shuffle` — ZkShuffle CCS 电路迁移（Task 10.5）
 
+pub mod adapter;
 pub mod bit_ops;
 pub mod bn254_ops;
 pub mod bn254_pairing;

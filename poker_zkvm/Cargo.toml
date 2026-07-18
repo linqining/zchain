@@ -14,6 +14,7 @@ default = []
 test-helpers = []
 
 [dependencies]
+vm-common = { path = "../vm-common" }
 ark-ff = { workspace = true }
 ark-ec = { workspace = true }
 ark-poly = { workspace = true }
@@ -27,8 +28,10 @@ ark-r1cs-std = { workspace = true }
 ark-relations = { workspace = true }
 ark-snark = { workspace = true }
 sha2 = { workspace = true }
+sha3 = { workspace = true }
 secp256k1 = { workspace = true }
 blake2 = { workspace = true }
+ed25519-dalek = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 rayon = { workspace = true }

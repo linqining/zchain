@@ -10,77 +10,21 @@
 //!
 //! gas 计费是 on-chain 概念，host 执行不实际扣 gas。
 //! [`syscall_gas`] 函数供 executor / prover 估算 syscall gas 开销。
+//!
+//! # Phase 1 迁移说明
+//!
+//! 跨 VM 共享的 syscall 级 gas 常量已迁至 `vm_common::gas`，本模块通过
+//! `pub use vm_common::gas::*;` re-export 保持外部 API 完全兼容。
+//! 仅 RV32I 指令级常量（`GAS_INSN_*`）与依赖 `Instruction`/`SyscallId` 的
+//! 函数（`SyscallGasArgs`/`syscall_gas`/`instruction_gas`/`total_step_gas`）保留本地。
 
 use crate::isa::Instruction;
 use crate::syscalls::SyscallId;
 
-/// `read_input` 基础 gas。
-pub const GAS_ZKVM_READ_INPUT_BASE: u64 = 10;
+// ===== 跨 VM 共享 gas 常量（单一事实源：vm_common::gas）=====
+pub use vm_common::gas::*;
 
-/// `commit_output` 基础 gas。
-pub const GAS_ZKVM_COMMIT_OUTPUT_BASE: u64 = 10;
-
-/// `poseidon` 基础 gas（spec L646）。
-pub const GAS_ZKVM_POSEIDON_BASE: u64 = 100;
-
-/// `poseidon` 每 32-byte block 的 gas（spec L646）。
-pub const GAS_ZKVM_POSEIDON_PER_BLOCK: u64 = 50;
-
-/// `sha256` 每字节 gas（spec L653）。
-pub const GAS_ZKVM_SHA256_PER_BYTE: u64 = 1;
-
-/// `ecdsa_verify` 固定 gas（spec L660，与既有 `GAS_SECP256K1_VERIFY` 对齐）。
-pub const GAS_ZKVM_ECDSA_VERIFY: u64 = 100_000;
-
-/// `emit_event` 基础 gas。
-pub const GAS_ZKVM_EMIT_EVENT_BASE: u64 = 10;
-
-/// `emit_event` 每字节 gas。
-pub const GAS_ZKVM_EMIT_EVENT_PER_BYTE: u64 = 1;
-
-/// `log` 基础 gas。
-pub const GAS_ZKVM_LOG_BASE: u64 = 10;
-
-/// `log` 每字节 gas。
-pub const GAS_ZKVM_LOG_PER_BYTE: u64 = 1;
-
-/// `panic` 固定 gas。
-pub const GAS_ZKVM_PANIC: u64 = 10;
-
-/// `get_randomness` 固定 gas。
-pub const GAS_ZKVM_GET_RANDOMNESS: u64 = 100;
-
-/// `read_state` 每 slot 的 gas（spec L669）。
-pub const GAS_ZKVM_READ_STATE_PER_SLOT: u64 = 50;
-
-/// `keccak256` 每字节 gas（absorb 阶段）。
-pub const GAS_ZKVM_KECCAK256_PER_BYTE: u64 = 2;
-
-/// `keccak256` 每轮 gas（Keccak-f[1600] 置换，24 轮）。
-pub const GAS_ZKVM_KECCAK256_PER_ROUND: u64 = 10_000;
-
-/// `modexp` 基础 gas。
-pub const GAS_ZKVM_MODEXP_BASE: u64 = 50_000;
-
-/// `modexp` 每指数位 gas。
-pub const GAS_ZKVM_MODEXP_PER_BIT: u64 = 600;
-
-/// `merkle_verify` 每层路径 gas。
-pub const GAS_ZKVM_MERKLE_VERIFY_PER_LEVEL: u64 = 100;
-
-/// `ed25519_verify` 基础 gas。
-pub const GAS_ZKVM_ED25519_BASE: u64 = 50_000;
-
-/// `ed25519_verify` 每标量位 gas。
-pub const GAS_ZKVM_ED25519_PER_BIT: u64 = 8_000;
-
-/// `bn254_pairing` MVP gas（单 G1 检查）。
-pub const GAS_ZKVM_BN254_PAIRING_MVP: u64 = 30_000;
-
-/// `bn254_pairing` Full gas（双 G1 + hint）。
-pub const GAS_ZKVM_BN254_PAIRING_FULL: u64 = 80_000;
-
-// ===== Per-Instruction Gas（Phase L — 对齐 L1 BPF + SP1 模型）=====
+// ===== Per-Instruction Gas（Phase L — 对齐 L1 BPF + SP1 模型，RV32I 专有）=====
 
 /// 算术指令 gas（ADD/SUB/AND/OR/XOR/SLT/SLTU + I-type 变体）。
 /// 对齐 L1 GAS_ARITHMETIC=1 + SP1 per-insn base。

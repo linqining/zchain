@@ -54,6 +54,9 @@ pub mod precompiles;
 pub mod prover;
 pub mod verifier;
 
+// ===== 跨 VM 共享 — CryptoProvider 实现（Phase 3）=====
+pub mod crypto_arkworks;
+
 // ===== Layer 6 — Recursion & Compression（Phase 12-13）=====
 pub mod cyclegfold;
 pub mod recursion;

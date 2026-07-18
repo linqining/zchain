@@ -1496,12 +1496,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sha3",
  "solana_rbpf",
  "subtle",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "vm-common",
 ]
 
 [[package]]
@@ -1544,6 +1546,7 @@ dependencies = [
  "ark-std",
  "blake2",
  "criterion",
+ "ed25519-dalek",
  "goblin",
  "hex",
  "proptest",
@@ -1551,8 +1554,10 @@ dependencies = [
  "secp256k1",
  "serde",
  "sha2",
+ "sha3",
  "thiserror",
  "tracing",
+ "vm-common",
 ]
 
 [[package]]
@@ -2378,6 +2383,13 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vm-common"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "void"
