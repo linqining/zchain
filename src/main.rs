@@ -49,6 +49,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod poker_demo;
+mod poker_rpc_demo;
 
 /// 程序版本。
 const VERSION: &str = "0.1.0";
@@ -100,6 +101,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "poker-rpc-demo" => {
+            if let Err(e) = poker_rpc_demo::run(rest) {
+                error!("poker-rpc-demo 失败：{e}");
+                std::process::exit(1);
+            }
+        }
         "version" | "--version" | "-V" => {
             println!("zchain {VERSION}");
         }
@@ -126,6 +133,7 @@ fn print_usage() {
     eprintln!("  keygen    生成密钥对（secp256k1 / ed25519）");
     eprintln!("  test-e2e  端到端链路测试（构造交易→签名→提交→出块→查询）");
     eprintln!("  poker-demo  运行 Texas Poker 完整牌局演示（in-process，绕过 RPC）");
+    eprintln!("  poker-rpc-demo  通过 RPC 调用运行中的节点完成 Texas Poker 牌局（create→join→start→reset）");
     eprintln!("  version   打印版本号");
     eprintln!("  help      打印此帮助");
     eprintln!();
@@ -900,16 +908,18 @@ fn handle_p2p_connection(
                         }
                         // nonce 校验：Public/ForceSync/CheckpointAnchor 用 account nonce；
                         // GameTurn 的 game_player_nonce 需游戏状态，留待 block 验证。
-                        let caller_address = derive_address(&tx.tagged_pubkey);
-                        let account_nonce = node
-                            .get_account(&caller_address)
-                            .ok()
-                            .flatten()
-                            .map(|a| a.nonce)
-                            .unwrap_or(0);
-                        if let Err(e) = validate_tx_nonce(&tx, account_nonce, None) {
-                            warn!("P2P 交易拒绝（nonce）：{e}");
-                            continue;
+                        if tx.lane_hint != TxLane::GameTurn {
+                            let caller_address = derive_address(&tx.tagged_pubkey);
+                            let account_nonce = node
+                                .get_account(&caller_address)
+                                .ok()
+                                .flatten()
+                                .map(|a| a.nonce)
+                                .unwrap_or(0);
+                            if let Err(e) = validate_tx_nonce(&tx, account_nonce, None) {
+                                warn!("P2P 交易拒绝（nonce）：{e}");
+                                continue;
+                            }
                         }
                         if let Err(e) = node.submit_tx(tx) {
                             warn!("P2P submit_tx 失败：{e}");
@@ -1157,8 +1167,23 @@ fn run_validator_loop(
         // 混合模式核心：等待 tx 或超时
         // - 有 tx 时被 submit_tx 的 notify_one 立即唤醒 → 零延迟出 vertex
         // - 超时返回 false → 检查是否需要出空 vertex 推进 commit
+        // info!("[validator-loop] round={} 进入 wait_for_pending_tx", round);
         let _has_tx = node.wait_for_pending_tx(block_interval);
+        // info!(
+        //     "[validator-loop] round={} wait_for_pending_tx 返回 has_tx={}",
+        //     round, _has_tx
+        // );
         let txs = node.drain_pending_tx();
+
+        if !txs.is_empty() {
+            info!(
+                "[validator-loop] round={} drained {} tx(s) has_tx={} shutdown={}",
+                round,
+                txs.len(),
+                _has_tx,
+                shutdown.load(Ordering::SeqCst)
+            );
+        }
 
         // 决定是否产出 vertex：
         // - 有 tx → 立即出 vertex
@@ -1230,7 +1255,14 @@ fn run_validator_loop(
         // 从第 2 轮起，检测 commit 并产出 block
         if let Some(prev_vertex) = &last_vertex {
             let prev_hash = prev_vertex.vertex_hash();
-            match detect_commit_leader(&dag.lock().unwrap_or_else(|e| e.into_inner()), &prev_hash, 1) {
+            // 注意：必须将 dag.lock() 限制在独立作用域内，否则临时 MutexGuard
+            // 会存活到 match 结束，导致下方 "清空 Dag" 处的 dag.lock() 自死锁
+            // （Rust std::sync::Mutex 不可重入）。
+            let commit_result = {
+                let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                detect_commit_leader(&dag_guard, &prev_hash, 1)
+            };
+            match commit_result {
                 Ok(Some(_leader)) => {
                     // 从上一个 vertex（被 commit 的）构造 block
                     // 这样 block 包含的是被 commit 的 tx，而非当前 vertex 的 tx
@@ -1276,9 +1308,11 @@ fn run_validator_loop(
                                     prev_block_hash = block_hash;
 
                                     // 清空 Dag，只保留当前 vertex
+                                    info!("[validator-loop] block#{} 提交完成，准备清空 Dag", block.header.height);
                                     let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
                                     *dag_guard = Dag::new();
                                     dag_guard.insert(vertex.clone());
+                                    info!("[validator-loop] Dag 已清空，last_vertex 设为 round={} vertex", round);
                                 }
                                 Err(e) => {
                                     error!("put_block 失败：{e}");

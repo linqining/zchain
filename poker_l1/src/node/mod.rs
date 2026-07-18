@@ -814,8 +814,20 @@ impl Node {
             while pending.len() > MAX_PENDING_TX_SIZE {
                 pending.pop_front();
             }
+            let len_after = pending.len();
             // 唤醒 validator loop（混合模式：有 tx 时立即出 vertex）
             self.pending_tx_condvar.notify_one();
+            tracing::info!(
+                "submit_tx: tx_hash={} pending_tx.len()={} role={:?}",
+                hex::encode(tx_hash),
+                len_after,
+                self.config.role
+            );
+        } else {
+            tracing::warn!(
+                "submit_tx: 节点非 validator 角色，tx 仅缓存未加入 pending_tx (tx_hash={})",
+                hex::encode(tx_hash)
+            );
         }
         Ok(tx_hash)
     }

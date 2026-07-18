@@ -10,6 +10,7 @@ edition = "2024"
 
 [dependencies]
 poker_l1 = { path = "poker_l1" }
+poker_protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
@@ -21,6 +22,8 @@ bcs = { workspace = true }
 borsh = { workspace = true }
 blake2 = { workspace = true }
 rand = { workspace = true }
+blstrs = { workspace = true }
+group = { workspace = true }
 
 [workspace.dependencies]
 # 共享依赖集中管理，便于版本一致与升级

@@ -150,7 +150,15 @@ pub mod selectors {
         compute_method_selector("raise")
     }
 
-    /// 返回所有 17 个 selector，供 `supports_selector` 等使用。
+    /// `reset_for_next_hand` — 显式重置桌台到 WAITING（管理员/测试场景）。
+    ///
+    /// 正常对局流程中由 `settle_hand` / `end_without_showdown` / 超时路径内部调用；
+    /// 暴露为 dispatch selector 便于端到端测试与异常恢复。
+    pub fn reset_for_next_hand() -> [u8; 32] {
+        compute_method_selector("reset_for_next_hand")
+    }
+
+    /// 返回所有 18 个 selector，供 `supports_selector` 等使用。
     #[must_use]
     pub fn all() -> Vec<[u8; 32]> {
         vec![
@@ -171,6 +179,7 @@ pub mod selectors {
             check(),
             call(),
             raise(),
+            reset_for_next_hand(),
         ]
     }
 }
@@ -363,6 +372,9 @@ pub fn dispatch(
         s if s == &selectors::check() => dispatch_check(table, args, &mut events),
         s if s == &selectors::call() => dispatch_call(table, args, &mut events),
         s if s == &selectors::raise() => dispatch_raise(table, args, &mut events),
+        s if s == &selectors::reset_for_next_hand() => {
+            dispatch_reset_for_next_hand(table, args, &mut events)
+        }
         _ => {
             return Err(PokerL1Error::UnknownContractMethod {
                 selector: *selector,
@@ -727,6 +739,19 @@ fn dispatch_raise(
     state_machine::apply_raise(table, input.seat_index, input.total_bet, events)
 }
 
+/// `reset_for_next_hand` — 显式重置桌台到 WAITING 状态。
+///
+/// 不接受 args（空 slice），直接调用 `state_machine::reset_for_next_hand`。
+/// 用于端到端测试验证完整对局生命周期：create_table → join_table → start_hand
+/// → reset_for_next_hand。生产环境正常流程中由 settle/end_without_showdown 内部触发。
+fn dispatch_reset_for_next_hand(
+    table: &mut TexasPokerTable,
+    _args: &[u8],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    state_machine::reset_for_next_hand(table, events)
+}
+
 // ========== 单元测试 ==========
 
 #[cfg(test)]
@@ -768,7 +793,7 @@ mod tests {
     #[test]
     fn all_selectors_unique() {
         let sels = selectors::all();
-        assert_eq!(sels.len(), 17, "应有 17 个 selector");
+        assert_eq!(sels.len(), 18, "应有 18 个 selector");
         for i in 0..sels.len() {
             for j in (i + 1)..sels.len() {
                 assert_ne!(sels[i], sels[j], "selector[{i}] == selector[{j}] 不应相等");
@@ -844,6 +869,124 @@ mod tests {
         let leave_bytes = borsh::to_vec(&leave_args).unwrap();
         dispatch(&ctx, &mut table, &selectors::leave_table(), &leave_bytes).unwrap();
         assert_eq!(table.occupied_count(), 0);
+    }
+
+    /// 端到端：完整一局生命周期 create_table → join_table ×2 → start_hand → reset_for_next_hand。
+    ///
+    /// 验证 4 个核心入口通过 dispatch 路由串联：
+    /// 1. `create_table` 覆写桌台为初始 WAITING 状态
+    /// 2. `join_table` 让 2 名玩家入座（pk 必须不同，避免 is_pk_registered 冲突）
+    /// 3. `start_hand` 投盲注 + 设置加密牌组 + 进入 shuffle 阶段
+    /// 4. `reset_for_next_hand` 清理状态回到 WAITING（模拟一局结束后的重置）
+    #[test]
+    fn e2e_full_hand_lifecycle_create_join_start_reset() {
+        let ctx = make_context();
+        let mut table = make_table();
+
+        // ========== Step 1: create_table ==========
+        let create_args = CreateTableArgs {
+            name: "e2e_table".into(),
+            max_players: 2,
+            small_blind: 10,
+            big_blind: 20,
+        };
+        let create_bytes = borsh::to_vec(&create_args).unwrap();
+        dispatch(&ctx, &mut table, &selectors::create_table(), &create_bytes).unwrap();
+
+        // 验证 WAITING 状态 + 参数已设置
+        assert_eq!(table.name, "e2e_table");
+        assert_eq!(table.max_players, 2);
+        assert_eq!(table.small_blind, 10);
+        assert_eq!(table.big_blind, 20);
+        assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
+        assert_eq!(table.occupied_count(), 0);
+        assert_eq!(table.pot, 0);
+
+        // ========== Step 2a: join_table player 1 ==========
+        let join1 = JoinTableArgs {
+            player: [0x11; 20],
+            buy_in: 1000,
+            pk: ECPoint(G1Projective::identity()),
+        };
+        dispatch(
+            &ctx,
+            &mut table,
+            &selectors::join_table(),
+            &borsh::to_vec(&join1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(table.occupied_count(), 1);
+        assert_eq!(table.seats[0].player, [0x11; 20]);
+        assert_eq!(table.seats[0].stack, 1000);
+
+        // ========== Step 2b: join_table player 2（pk 必须不同）==========
+        let join2 = JoinTableArgs {
+            player: [0x22; 20],
+            buy_in: 2000,
+            pk: ECPoint(G1Projective::generator()),
+        };
+        dispatch(
+            &ctx,
+            &mut table,
+            &selectors::join_table(),
+            &borsh::to_vec(&join2).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(table.occupied_count(), 2);
+        assert_eq!(table.seats[1].player, [0x22; 20]);
+        assert_eq!(table.seats[1].stack, 2000);
+
+        // ========== Step 3: start_hand ==========
+        dispatch(&ctx, &mut table, &selectors::start_hand(), &[]).unwrap();
+
+        // 验证：进入 SHUFFLE 阶段，加密牌组已初始化（52 张）。
+        //
+        // 注意：start_hand 不会立即改变 round_state（仍为 ROUND_WAITING），
+        // 因为 round_state 仅在下注阶段开始时切换到 ROUND_PREFLOP。
+        // 对局已开始的标志是 shuffle_state.phase == SHUFFLE_PHASE_BEFORE_PREFLOP
+        // 且 deck_state.encrypted 已填充 52 张加密牌。
+        assert_eq!(
+            table.shuffle_state.phase,
+            super::super::constants::SHUFFLE_PHASE_BEFORE_PREFLOP,
+            "start_hand 后应进入 shuffle BEFORE_PREFLOP 阶段"
+        );
+        assert_eq!(
+            table.deck_state.encrypted.len(),
+            52,
+            "start_hand 应设置 52 张加密牌"
+        );
+
+        // ========== Step 4: reset_for_next_hand ==========
+        dispatch(&ctx, &mut table, &selectors::reset_for_next_hand(), &[]).unwrap();
+
+        // 验证：回到 WAITING 状态，所有对局状态清理
+        assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
+        assert_eq!(table.pot, 0, "reset 后 pot 应清零");
+        assert_eq!(table.community_cards.len(), 0);
+        assert!(table.side_pots.is_empty());
+        assert_eq!(table.deck_state.encrypted.len(), 52, "reset 后重新初始化 52 张牌");
+        assert_eq!(
+            table.shuffle_state.phase,
+            super::super::constants::SHUFFLE_PHASE_NONE,
+            "reset 后 shuffle 阶段应清零"
+        );
+        assert_eq!(
+            table.reveal_token_state.reveal_phase,
+            super::super::constants::REVEAL_PHASE_NONE
+        );
+        assert_eq!(
+            table.reconstruct_state.phase,
+            super::super::constants::RECONSTRUCT_PHASE_NONE
+        );
+        // 玩家仍在座位上（reset 不踢人，除非 stack=0）
+        assert_eq!(table.occupied_count(), 2, "reset 不应踢出有筹码的玩家");
+        assert_eq!(table.seats[0].stack, 1000);
+        assert_eq!(table.seats[1].stack, 2000);
+        // bet/total_bet 应清零
+        assert_eq!(table.seats[0].bet, 0);
+        assert_eq!(table.seats[0].total_bet, 0);
+        assert_eq!(table.seats[1].bet, 0);
+        assert_eq!(table.seats[1].total_bet, 0);
     }
 
     #[test]

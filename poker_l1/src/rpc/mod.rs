@@ -34,7 +34,7 @@ use crate::object_model::{Object, ObjectID};
 use crate::offline::zk_verifier::{SchemeId, ZkPublicIo, ZkVerifierRegistry, ZkVerifyResult};
 use crate::signature::TaggedPubkey;
 use crate::storage::{BlockStore, DagVertexStore, ObjectDb};
-use crate::transaction::{Transaction, validate_tx_limits};
+use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::{Address, BlockHeight, ChainId, Hash};
 
 /// JSON-RPC 2.0 请求（spec：https://www.jsonrpc.org/specification）。
@@ -795,15 +795,18 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
         validate_tx_signature(&tx).map_err(RpcHandlerError::from_poker_error)?;
         // 4. nonce 校验（Public/ForceSync/CheckpointAnchor 通道）
         //    GameTurn 通道的 game_player_nonce 需游戏状态，RPC 层无法获取，
-        //    留待 block 验证时检查
-        let caller_address = derive_address(&tx.tagged_pubkey);
-        let account_nonce = self
-            .backend
-            .get_account(&caller_address)
-            .map_err(RpcHandlerError::from_poker_error)?
-            .map(|a| a.nonce)
-            .unwrap_or(0);
-        validate_tx_nonce(&tx, account_nonce, None).map_err(RpcHandlerError::from_poker_error)?;
+        //    留待 block 验证时检查（跳过 nonce 校验，避免误拒合法 GameTurn tx）
+        if tx.lane_hint != TxLane::GameTurn {
+            let caller_address = derive_address(&tx.tagged_pubkey);
+            let account_nonce = self
+                .backend
+                .get_account(&caller_address)
+                .map_err(RpcHandlerError::from_poker_error)?
+                .map(|a| a.nonce)
+                .unwrap_or(0);
+            validate_tx_nonce(&tx, account_nonce, None)
+                .map_err(RpcHandlerError::from_poker_error)?;
+        }
 
         let tx_hash = self
             .backend

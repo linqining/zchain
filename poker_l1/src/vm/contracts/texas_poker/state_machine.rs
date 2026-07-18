@@ -2285,7 +2285,11 @@ fn refund_all_bets(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
 /// 重置进入下一局。
 ///
 /// 镜像 `table.move::reset_for_next_hand`（line 3550-3621）。
-fn reset_for_next_hand(
+///
+/// 暴露为 pub 供 dispatch 层 `reset_for_next_hand` selector 直接调用，
+/// 用于管理员/测试场景下显式重置桌台到 WAITING 状态（正常对局流程中
+/// 由 `settle_hand` / `end_without_showdown` / 超时路径内部调用）。
+pub fn reset_for_next_hand(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
