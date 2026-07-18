@@ -191,16 +191,16 @@ impl PrecompileCircuit for ModexpCircuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         let dummy = vec![Fr::zero(); 16];
         if self.full_mode {
-            self.run_full(&dummy)
+            Ok(self.run_full(&dummy)
                 .expect("dummy run_full should succeed")
-                .0
+                .0)
         } else {
-            self.run_mvp(&dummy)
+            Ok(self.run_mvp(&dummy)
                 .expect("dummy run_mvp should succeed")
-                .0
+                .0)
         }
     }
 
@@ -246,7 +246,7 @@ impl CcsCircuit for ModexpCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }
@@ -394,7 +394,7 @@ mod tests {
         let result = [6u64, 0, 0, 0];
 
         let circuit = ModexpCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&make_inputs(&base, &exp, &modulus, &result))
             .expect("assign_witness should succeed");
@@ -414,7 +414,7 @@ mod tests {
         let result = [5u64, 0, 0, 0]; // 篡改：应为 6
 
         let circuit = ModexpCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&make_inputs(&base, &exp, &modulus, &result))
             .expect("assign_witness should succeed");
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(result, [1024u64, 0, 0, 0]);
 
         let circuit = ModexpCircuit::new_full_with_bits(8);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&make_inputs(&base, &exp, &modulus, &result))
             .expect("assign_witness should succeed");
@@ -461,7 +461,7 @@ mod tests {
         let tampered_base = [3u64, 0, 0, 0];
 
         let circuit = ModexpCircuit::new_full_with_bits(8);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&make_inputs(&tampered_base, &exp, &modulus, &result))
             .expect("assign_witness should succeed");
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(result, [5u64, 0, 0, 0]);
 
         let circuit = ModexpCircuit::new_full_with_bits(4);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&make_inputs(&base, &exp, &modulus, &result))
             .expect("assign_witness should succeed");
@@ -546,7 +546,7 @@ mod tests {
         let result = [1u64, 0, 0, 0];
 
         let circuit = ModexpCircuit::new_full_with_bits(4);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&make_inputs(&base, &exp, &modulus, &result))
             .expect("assign_witness should succeed");

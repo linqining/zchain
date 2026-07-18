@@ -7,10 +7,13 @@
 //!   测量 detect_commit_leader + bullshark_linear_order + project_block_from_commit 单次延迟
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use poker_l1::account::AccountStore;
 use poker_l1::consensus::bullshark::{
     Dag, bullshark_linear_order, detect_commit_leader, project_block_from_commit,
 };
 use poker_l1::consensus::{DagCommitCertificate, DagVertex};
+use poker_l1::executor::ExecutionEnvironment;
+use poker_l1::storage::ObjectDb;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
@@ -148,8 +151,19 @@ fn bench_dag_tps(c: &mut Criterion) {
                     // project_block_from_commit
                     if let Some(cl) = leader {
                         let cert = make_commit_cert();
+                        let env = ExecutionEnvironment::new(ChainId::from(0x706F_6B31u32), 1, 1000);
+                        let mut object_db = ObjectDb::open_inmemory().expect("打开内存 ObjectDb");
+                        let mut account_store = AccountStore::new();
                         let _projection = project_block_from_commit(
-                            &dag, &cl, cert, [0u8; 32], [0u8; 32], 1, 1000,
+                            &dag,
+                            &cl,
+                            cert,
+                            &env,
+                            &mut object_db,
+                            &mut account_store,
+                            [0u8; 32],
+                            1,
+                            1000,
                         )
                         .expect("project");
                     }
@@ -215,9 +229,21 @@ fn bench_consensus_latency(c: &mut Criterion) {
                     let ordered =
                         bullshark_linear_order(&dag, &cl.referencing_hashes).expect("order");
                     let cert = make_commit_cert();
-                    let _projection =
-                        project_block_from_commit(&dag, cl, cert, [0u8; 32], [0u8; 32], 1, 1000)
-                            .expect("project");
+                    let env = ExecutionEnvironment::new(ChainId::from(0x706F_6B31u32), 1, 1000);
+                    let mut object_db = ObjectDb::open_inmemory().expect("打开内存 ObjectDb");
+                    let mut account_store = AccountStore::new();
+                    let _projection = project_block_from_commit(
+                        &dag,
+                        cl,
+                        cert,
+                        &env,
+                        &mut object_db,
+                        &mut account_store,
+                        [0u8; 32],
+                        1,
+                        1000,
+                    )
+                    .expect("project");
                     black_box(ordered.len());
                 }
             });

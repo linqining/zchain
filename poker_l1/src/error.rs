@@ -202,14 +202,25 @@ pub enum PokerL1Error {
 
     // ===== Phase 2: DAG 共识 / Bullshark（Task 8 / 9） =====
     /// vertex 签名验证失败（SEC-C1：签名对象 = hash(chain_id || epoch || round || author_pubkey || vertex_hash || parent_hashes)）。
-    #[error("dag vertex signature verification failed")]
-    InvalidVertexSignature,
+    #[error("dag vertex signature verification failed: vertex_hash={vertex_hash:?}")]
+    InvalidVertexSignature { vertex_hash: crate::Hash },
     /// vertex parent_hashes 数量不足 2/3 validator（spec：vertex 须引用 ≥2/3 validator 的上一轮 vertex hash）。
     #[error("vertex parent count {actual} < required {required} (2/3 of validator set)")]
     InsufficientParents { actual: usize, required: usize },
     /// vertex 大小超限（max_vertex_size 默认 256KB）。
     #[error("vertex size {actual} exceeds max_vertex_size {limit}")]
     VertexTooLarge { actual: usize, limit: usize },
+    /// vertex 引用的 parent 不存在于已知 DAG 中（P0-3 入库前验证）。
+    #[error("parent vertex not found: {0:?}")]
+    ParentVertexNotFound(crate::Hash),
+    /// block prev_hash 与前一个 block 的 hash 不匹配（P0-3 入库前验证）。
+    #[error("invalid prev_hash: expected={expected:?}, got={got:?}")]
+    InvalidPrevHash {
+        /// 期望的 prev_hash（前一个 block 的 hash）。
+        expected: crate::Hash,
+        /// 实际的 prev_hash。
+        got: crate::Hash,
+    },
     /// commit certificate 签名数不足 2/3 quorum（SubTask 9.1 / 10.7）。
     #[error("commit certificate signer count {actual} < quorum {required}")]
     InsufficientQuorum { actual: usize, required: usize },
@@ -312,6 +323,9 @@ pub enum PokerL1Error {
     /// validator 处于 unbonding 期，不可参与共识但可被 slashing（R5-H7）。
     #[error("validator in unbonding period: pubkey={0:?}")]
     ValidatorInUnbonding(crate::signature::TaggedPubkey),
+    /// vertex author 不是当前活跃 validator（P0-4 动态 quorum：非活跃 validator 产出的 vertex 必须被拒绝）。
+    #[error("vertex author is not an active validator: {0:?}")]
+    VertexAuthorNotActiveValidator(crate::signature::TaggedPubkey),
 
     // ===== Phase 3: rBPF VM / Syscalls / 合约升级（Task 14 / 15 / 17） =====
     /// BPF 字节码验证失败（IMPL-SEC-4：强制 Verifier）。

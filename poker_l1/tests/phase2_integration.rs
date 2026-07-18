@@ -24,7 +24,10 @@ use poker_l1::consensus::{
     validate_lane_route,
 };
 use poker_l1::error::PokerL1Error;
+use poker_l1::executor::ExecutionEnvironment;
 use poker_l1::object_model::ObjectID;
+use poker_l1::account::AccountStore;
+use poker_l1::storage::ObjectDb;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
@@ -242,9 +245,21 @@ fn subtask_39_3_bullshark_full_pipeline() {
         .expect("字段一致性校验应通过");
 
     // 6. project_block_from_commit
-    let projection =
-        project_block_from_commit(&dag, &commit_leader, cert, [0u8; 32], [0u8; 32], 1, 1000)
-            .expect("block 投影应成功");
+    let env = ExecutionEnvironment::new(DEFAULT_CHAIN_ID, 1, 1000);
+    let mut object_db = ObjectDb::open_inmemory().expect("打开内存 ObjectDb");
+    let mut account_store = AccountStore::new();
+    let projection = project_block_from_commit(
+        &dag,
+        &commit_leader,
+        cert,
+        &env,
+        &mut object_db,
+        &mut account_store,
+        [0u8; 32],
+        1,
+        1000,
+    )
+    .expect("block 投影应成功");
     assert_eq!(projection.header.height, 1);
     assert_eq!(projection.ordered_vertex_hashes, ordered);
 }

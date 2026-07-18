@@ -571,13 +571,23 @@ const DEFAULT_BLOCK_INTERVAL_MS: u64 = 1000;
 /// P2P 消息最大长度（16MB，防止恶意大消息 OOM）。
 const MAX_P2P_MSG_SIZE: usize = 16 * 1024 * 1024;
 
+/// 默认 P2P 请求-响应超时（秒）。
+const P2P_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// tokio TCP 轻量 P2P 传输层。
 ///
 /// 实现 [`NetworkTransport`] trait，用 4 字节 length-prefix + BCS 序列化消息。
 /// 不引入 libp2p，避免 musl 静态编译问题。
+///
+/// 重构2：维护 peer 地址列表（`peer_addrs`）以支持定向通信（send_to / request_*）。
+/// - `peers` 仅用于 `gossip_broadcast`（持久写入 stream）
+/// - `peer_addrs` 用于 `send_to` / `request_blocks_by_range` / `request_vertices_by_range`
+///   —— 通过创建临时连接发送，避免与持久读取循环冲突
 struct TcpTransport {
-    /// 已连接的 peer streams（共享给所有线程）。
+    /// 已连接的 peer streams（仅用于 gossip_broadcast）。
     peers: Arc<Mutex<Vec<TcpStream>>>,
+    /// 已连接 peer 的地址信息（用于定向通信）。
+    peer_addrs: Arc<Mutex<Vec<PeerInfo>>>,
 }
 
 impl TcpTransport {
@@ -585,10 +595,11 @@ impl TcpTransport {
     fn new() -> Self {
         Self {
             peers: Arc::new(Mutex::new(Vec::new())),
+            peer_addrs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// 添加已连接的 peer stream。
+    /// 添加已连接的 peer stream（仅加入广播列表）。
     fn add_peer(&self, stream: TcpStream) {
         self.peers
             .lock()
@@ -596,17 +607,36 @@ impl TcpTransport {
             .push(stream);
     }
 
+    /// 注册 peer 地址信息（用于定向通信）。
+    /// 去重以避免同一地址多次注册。
+    fn register_peer_info(&self, peer_info: PeerInfo) {
+        let mut addrs = self.peer_addrs.lock().unwrap_or_else(|e| e.into_inner());
+        if !addrs.iter().any(|p| p.address == peer_info.address) {
+            addrs.push(peer_info);
+        }
+    }
+
     /// 主动连接到 peer。
+    ///
+    /// 连接成功后：stream 加入广播列表，PeerInfo 加入定向通信列表。
     fn connect_peer(&self, addr: &str) -> Result<(), String> {
         let stream = TcpStream::connect(addr).map_err(|e| format!("连接 peer {addr} 失败：{e}"))?;
         info!("已连接 peer：{addr}");
         self.add_peer(stream);
+        self.register_peer_info(PeerInfo {
+            peer_id: addr.to_string(),
+            address: addr.to_string(),
+            validator_pubkey: None,
+        });
         Ok(())
     }
 
-    /// 获取当前 peer 数量。
+    /// 获取当前 peer 数量（按地址计数）。
     fn peer_count(&self) -> usize {
-        self.peers.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.peer_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 }
 
@@ -636,41 +666,138 @@ impl NetworkTransport for TcpTransport {
         Ok(())
     }
 
-    fn send_to(&self, _peer: &PeerInfo, message: &NetworkMessage) -> PokerL1Result<()> {
-        // 简化实现：不维护 peer 地址到 stream 的映射，退化为广播。
-        // TODO: 实现 peer 地址 → stream 的映射以支持定向通信。
-        warn!("send_to 退化为广播（未维护 peer 地址映射）");
-        self.gossip_broadcast(GossipTopic::DagVertex, message)
+    fn send_to(&self, peer: &PeerInfo, message: &NetworkMessage) -> PokerL1Result<()> {
+        // 重构2：通过临时连接定向发送，避免与持久读取循环冲突
+        let mut stream = TcpStream::connect(&peer.address).map_err(|e| {
+            poker_l1::error::PokerL1Error::Other(format!(
+                "send_to: 连接 {} 失败：{e}",
+                peer.address
+            ))
+        })?;
+        stream
+            .set_write_timeout(Some(P2P_REQUEST_TIMEOUT))
+            .map_err(|e| {
+                poker_l1::error::PokerL1Error::Other(format!("set_write_timeout 失败：{e}"))
+            })?;
+        send_p2p_message(&mut stream, message).map_err(|e| {
+            poker_l1::error::PokerL1Error::Other(format!("send_to: 发送失败：{e}"))
+        })?;
+        debug!("send_to: 已发送消息到 peer={}", peer.address);
+        Ok(())
     }
 
     fn discover_peers(&self) -> PokerL1Result<Vec<PeerInfo>> {
-        // TODO: 实现 peer 发现协议。
-        Ok(Vec::new())
+        Ok(self
+            .peer_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     fn request_blocks_by_range(
         &self,
-        _start: poker_l1::BlockHeight,
-        _end: poker_l1::BlockHeight,
+        start: poker_l1::BlockHeight,
+        end: poker_l1::BlockHeight,
     ) -> PokerL1Result<Vec<Block>> {
-        // TODO: 实现区块同步请求-响应协议。
-        Ok(Vec::new())
+        let peers = self
+            .peer_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if peers.is_empty() {
+            return Err(poker_l1::error::PokerL1Error::Other(
+                "request_blocks_by_range: 无可用 peer".to_string(),
+            ));
+        }
+        let req = NetworkMessage::RequestBlocksByRange(start, end);
+        for peer in &peers {
+            match send_request_and_recv(&peer.address, &req) {
+                Ok(NetworkMessage::ResponseBlocks(blocks)) => {
+                    debug!(
+                        "request_blocks_by_range: 从 peer {} 获取 {} 个 block",
+                        peer.address,
+                        blocks.len()
+                    );
+                    return Ok(blocks);
+                }
+                Ok(other) => warn!(
+                    "request_blocks_by_range: peer {} 返回非预期消息类型：{other:?}",
+                    peer.address
+                ),
+                Err(e) => warn!("request_blocks_by_range: peer {} 失败：{e}", peer.address),
+            }
+        }
+        Err(poker_l1::error::PokerL1Error::Other(
+            "request_blocks_by_range: 所有 peer 请求失败".to_string(),
+        ))
     }
 
     fn request_vertices_by_range(
         &self,
-        _start_round: u64,
-        _end_round: u64,
+        start_round: u64,
+        end_round: u64,
     ) -> PokerL1Result<Vec<DagVertex>> {
-        // TODO: 实现 vertex 同步请求-响应协议。
-        Ok(Vec::new())
+        let peers = self
+            .peer_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if peers.is_empty() {
+            return Err(poker_l1::error::PokerL1Error::Other(
+                "request_vertices_by_range: 无可用 peer".to_string(),
+            ));
+        }
+        let req = NetworkMessage::RequestVerticesByRange(start_round, end_round);
+        for peer in &peers {
+            match send_request_and_recv(&peer.address, &req) {
+                Ok(NetworkMessage::ResponseVertices(vertices)) => {
+                    debug!(
+                        "request_vertices_by_range: 从 peer {} 获取 {} 个 vertex",
+                        peer.address,
+                        vertices.len()
+                    );
+                    return Ok(vertices);
+                }
+                Ok(other) => warn!(
+                    "request_vertices_by_range: peer {} 返回非预期消息类型：{other:?}",
+                    peer.address
+                ),
+                Err(e) => warn!("request_vertices_by_range: peer {} 失败：{e}", peer.address),
+            }
+        }
+        Err(poker_l1::error::PokerL1Error::Other(
+            "request_vertices_by_range: 所有 peer 请求失败".to_string(),
+        ))
     }
 
     fn subscribe_light_headers(
         &self,
     ) -> PokerL1Result<Vec<poker_l1::network::LightClientHeader>> {
-        // TODO: 实现轻客户端 header 订阅。
+        // 轻客户端 header 订阅依赖 validator 多签协议，超出本次重构范围
         Ok(Vec::new())
+    }
+}
+
+/// 向 peer 发送请求并接收响应（临时连接，含超时）。
+///
+/// 用于 `request_blocks_by_range` / `request_vertices_by_range` 等请求-响应协议。
+/// 创建独立连接以避免与持久 P2P 读取循环冲突。
+fn send_request_and_recv(
+    peer_addr: &str,
+    req: &NetworkMessage,
+) -> Result<NetworkMessage, String> {
+    let mut stream =
+        TcpStream::connect(peer_addr).map_err(|e| format!("连接 {peer_addr} 失败：{e}"))?;
+    stream
+        .set_read_timeout(Some(P2P_REQUEST_TIMEOUT))
+        .map_err(|e| format!("set_read_timeout 失败：{e}"))?;
+    stream
+        .set_write_timeout(Some(P2P_REQUEST_TIMEOUT))
+        .map_err(|e| format!("set_write_timeout 失败：{e}"))?;
+    send_p2p_message(&mut stream, req)?;
+    match recv_p2p_message(&mut stream)? {
+        Some(msg) => Ok(msg),
+        None => Err("连接在响应前关闭".to_string()),
     }
 }
 
@@ -718,17 +845,24 @@ fn recv_p2p_message(stream: &mut TcpStream) -> Result<Option<NetworkMessage>, St
 ///
 /// 接收消息并分发处理：
 /// - `DagVertex` → `node.put_vertex`
-/// - `Transaction` → `node.submit_tx`
+/// - `Transaction` → `node.submit_tx`（含完整验证链）
 /// - `ResponseBlocks` → 逐个 `node.put_block`
+/// - `RequestBlocksByRange` → 查询本地并回送 `ResponseBlocks`
+/// - `RequestVerticesByRange` → 暂返回空（需 epoch 上下文，超出本次重构范围）
 fn handle_p2p_connection(
     mut stream: TcpStream,
     node: Arc<Node>,
-    _transport: Arc<TcpTransport>,
+    transport: Arc<TcpTransport>,
 ) {
     let peer_addr = stream.peer_addr().ok();
-    // 将连接加入 transport（便于后续广播）
-    // 注意：这里 clone stream 用于接收，原 stream 加入 transport 用于发送
-    // 但 TcpStream 不能 clone 读写共用，所以接收端独立处理
+    // 重构2：注册接入 peer 的地址信息（用于定向通信）
+    if let Some(addr) = peer_addr {
+        transport.register_peer_info(PeerInfo {
+            peer_id: addr.to_string(),
+            address: addr.to_string(),
+            validator_pubkey: None,
+        });
+    }
     loop {
         match recv_p2p_message(&mut stream) {
             Ok(Some(msg)) => {
@@ -778,6 +912,34 @@ fn handle_p2p_connection(
                             }
                         }
                     }
+                    NetworkMessage::ResponseVertices(vertices) => {
+                        for vertex in vertices {
+                            if let Err(e) = node.put_vertex(&vertex) {
+                                warn!("P2P put_vertex 失败：{e}");
+                            }
+                        }
+                    }
+                    NetworkMessage::RequestBlocksByRange(start, end) => {
+                        // 重构2：响应 block range 请求
+                        let blocks = collect_blocks_by_range(&node, start, end);
+                        if let Err(e) =
+                            send_p2p_message(&mut stream, &NetworkMessage::ResponseBlocks(blocks))
+                        {
+                            warn!("P2P 回送 ResponseBlocks 失败：{e}");
+                        }
+                    }
+                    NetworkMessage::RequestVerticesByRange(_start_round, _end_round) => {
+                        // 需 epoch 上下文才能查询 vertex_store.get_by_round(epoch, round)，
+                        // 当前请求未携带 epoch，暂返回空 Vec。
+                        // TODO: 协议升级后补充 epoch 字段。
+                        debug!("收到 RequestVerticesByRange（暂不支持，需 epoch）");
+                        if let Err(e) = send_p2p_message(
+                            &mut stream,
+                            &NetworkMessage::ResponseVertices(Vec::new()),
+                        ) {
+                            warn!("P2P 回送 ResponseVertices 失败：{e}");
+                        }
+                    }
                     NetworkMessage::CompactVertex(compact) => {
                         // 简化：compact vertex 需要从本地 tx_cache 重建，暂不支持
                         let _ = compact;
@@ -800,6 +962,30 @@ fn handle_p2p_connection(
     }
 }
 
+/// 收集指定 height 范围内的 blocks（用于响应 RequestBlocksByRange）。
+///
+/// `start` / `end` 均为闭区间。单个 height 查询失败不影响其他。
+fn collect_blocks_by_range(
+    node: &Node,
+    start: poker_l1::BlockHeight,
+    end: poker_l1::BlockHeight,
+) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    for height in start..=end {
+        match node.get_block_by_height(height) {
+            Ok(Some(block)) => blocks.push(block),
+            Ok(None) => debug!("collect_blocks: height {height} 无 block"),
+            Err(e) => warn!("collect_blocks: 查询 height {height} 失败：{e}"),
+        }
+        // 防止单次请求扫表过大（DoS 防护）
+        if blocks.len() >= 512 {
+            debug!("collect_blocks: 达到 512 上限，截断");
+            break;
+        }
+    }
+    blocks
+}
+
 // ===== validator 产块循环 =====
 
 /// 用 secp256k1 签名 32 字节哈希，返回 65 字节 recoverable 签名（64B compact + 1B recovery_id）。
@@ -818,6 +1004,11 @@ fn secp256k1_sign_hash(secret_key: &secp256k1::SecretKey, msg_hash: &Hash) -> Ve
 /// 单 validator 自闭环模式下，每轮 vertex 直接对应一个 block。
 /// 不调用 `project_block_from_commit`（其 `collect_ancestors` 会包含历史 vertex 的 tx 导致重复），
 /// 而是直接从当前 vertex 的 tx_list 构造 block。
+///
+/// 重构3：`state_root` 参数由 caller 通过 `node.state_root()` 提供。
+/// 注：当前未接入 tx 执行引擎，caller 应传入上一 block 后的 state_root
+/// （即 `prev_block.header.state_root`）。tx 执行引擎接入后，caller 应先
+/// 执行 vertex 的 tx 更新 object_db，再传入执行后的新 state_root。
 fn build_block_from_vertex(
     vertex: &DagVertex,
     chain_id: poker_l1::ChainId,
@@ -825,6 +1016,7 @@ fn build_block_from_vertex(
     prev_commit_hash: Hash,
     prev_block_hash: Hash,
     height: u64,
+    state_root: Hash,
     secret_key: &secp256k1::SecretKey,
 ) -> Result<Block, String> {
     // 1. S9 排序：GameTurn/CheckpointAnchor 优先，Public 中间，ForceSync 后置
@@ -843,9 +1035,7 @@ fn build_block_from_vertex(
     // 3. 计算 roots
     let public_tx_root = compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = compute_tx_merkle_root(&gameturn_txs);
-    // TODO(state-machine): 接入状态机执行层后计算真实 state_root。
-    // 当前为占位零值，不反映交易执行后状态；轻客户端不应将其视为有效状态承诺。
-    let state_root = [0u8; 32];
+    // state_root 由 caller 提供（重构3：消除占位零值，使用真实链上状态根）
 
     // 4. 构造 commit certificate（先不含签名）
     let vertex_hash = vertex.vertex_hash();
@@ -1024,6 +1214,7 @@ fn run_validator_loop(
                             .flatten()
                             .map(|h| h + 1)
                             .unwrap_or(1),
+                        node.state_root(),
                         &secret_key,
                     ) {
                         Ok(block) => {

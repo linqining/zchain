@@ -27,6 +27,9 @@ use crate::consensus::{
     sort_commit_txs_r4m4,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::executor::{ExecutionEnvironment, execute_block};
+use crate::storage::ObjectDb;
+use crate::account::AccountStore;
 use crate::transaction::Transaction;
 use crate::{ChainId, Hash};
 
@@ -257,12 +260,19 @@ pub struct BlockProjection {
 /// - `dag`：DAG 存储
 /// - `commit_leader`：commit leader 检测结果
 /// - `commit_certificate`：已组装的 commit certificate
-/// - `state_root`：本 block 产出的 state_root
+/// - `env`：交易执行环境（chain_id / height / timestamp / gas limit）
+/// - `object_db`：对象数据库（可变引用，执行 tx 后更新状态）
+/// - `account_store`：账户存储（可变引用，执行 tx 后更新状态）
+/// - `prev_hash`：前一个 block 的 hash
+/// - `height`：当前 block height
+/// - `timestamp_ms`：当前 block timestamp（毫秒）
 pub fn project_block_from_commit(
     dag: &Dag,
     commit_leader: &CommitLeader,
     commit_certificate: DagCommitCertificate,
-    state_root: Hash,
+    env: &ExecutionEnvironment,
+    object_db: &mut ObjectDb,
+    account_store: &mut AccountStore,
     prev_hash: Hash,
     height: u64,
     timestamp_ms: u64,
@@ -295,7 +305,11 @@ pub fn project_block_from_commit(
     let public_tx_root = crate::block::compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = crate::block::compute_tx_merkle_root(&gameturn_txs);
 
-    // 6. 构造 block header
+    // 6. 执行交易并获取新的 state_root
+    let outcome = execute_block(env, &public_txs, object_db, account_store);
+    let state_root = outcome.state_root;
+
+    // 7. 构造 block header
     let header = BlockHeader {
         height,
         timestamp_ms,
@@ -719,14 +733,139 @@ mod tests {
             signer_bitmap: vec![0xFF],
         };
 
+        let env = ExecutionEnvironment::new(crate::DEFAULT_CHAIN_ID, 1, 1000);
+        let mut object_db = ObjectDb::open_inmemory().expect("打开内存 ObjectDb");
+        let mut account_store = AccountStore::new();
+
         let projection =
-            project_block_from_commit(&dag, &leader, cert, [0u8; 32], [0u8; 32], 1, 1000)
+            project_block_from_commit(&dag, &leader, cert, &env, &mut object_db, &mut account_store, [0u8; 32], 1, 1000)
                 .expect("投影应成功");
 
         // GameTurn tx 应在 gameturn_txs，ForceSync tx 应在 public_txs
         assert_eq!(projection.gameturn_txs.len(), 1);
         assert_eq!(projection.public_txs.len(), 1);
         assert_eq!(projection.header.height, 1);
+    }
+
+    /// 验证 project_block_from_commit 正确计算 state_root（执行 tx 后的 ObjectDb root）。
+    #[test]
+    fn project_block_from_commit_computes_state_root() {
+        use crate::account::{Account, derive_address};
+        use crate::object_model::{Object, Ownership};
+        use crate::transaction::{Gas, RouteHint, TxRequest};
+
+        let mut dag = Dag::new();
+
+        // 创建签名者
+        let secp = secp256k1::Secp256k1::new();
+        let (sk, pk) = secp.generate_keypair(&mut rand::rngs::OsRng);
+        let tagged_pubkey = crate::signature::TaggedPubkey {
+            tag: crate::signature::tagged_pubkey::encode_tag(
+                crate::signature::tagged_pubkey::SignatureScheme::Secp256k1,
+                1,
+            ),
+            raw: pk.serialize().to_vec(),
+        };
+        let caller = derive_address(&tagged_pubkey);
+
+        // 构造 Public 通道 tx（outputs 创建对象）
+        let req = TxRequest {
+            inputs: vec![],
+            outputs: vec![Object::new(
+                crate::object_model::ObjectID::new(caller, 0),
+                Ownership::AddressOwned { owner: caller },
+                "TestOutput",
+                b"obj0".to_vec(),
+                None,
+            )],
+            contract_call: None,
+            gas: Gas::new(1_000_000, 1),
+            lane_hint: crate::transaction::TxLane::Public,
+            route_hint: RouteHint::AnyValidator,
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce: 0,
+            gameturn_nonce: None,
+            is_fallback: false,
+        };
+        let tx = {
+            let hash = req.signing_hash();
+            let secp = secp256k1::Secp256k1::new();
+            let sig = secp.sign_ecdsa_recoverable(&secp256k1::Message::from_digest(hash), &sk);
+            let (rid, compact) = sig.serialize_compact();
+            let mut full_sig = compact.to_vec();
+            full_sig.push(rid.to_i32() as u8);
+            req.into_transaction(tagged_pubkey.clone(), full_sig)
+        };
+
+        // 构造 vertex 并插入 DAG
+        let mut v = make_vertex(1, 1, 0x10, vec![]);
+        v.tx_list.push(tx);
+        let h = dag.insert(v);
+
+        let leader = CommitLeader {
+            leader_hash: h,
+            leader_round: 1,
+            referencing_hashes: vec![h],
+            reference_count: 1,
+            required_quorum: 1,
+        };
+
+        let cert = DagCommitCertificate {
+            epoch: 1,
+            commit_round: 1,
+            prev_commit_hash: [0u8; 32],
+            vertex_hash_list: vec![h],
+            round_attendance_bitmap: vec![0xFF],
+            state_root: [0u8; 32],
+            public_tx_root: [0u8; 32],
+            gameturn_tx_root: [0u8; 32],
+            signature_list: vec![],
+            signer_bitmap: vec![0xFF],
+        };
+
+        let env = ExecutionEnvironment::new(crate::DEFAULT_CHAIN_ID, 1, 1000);
+        let mut object_db = ObjectDb::open_inmemory().expect("打开内存 ObjectDb");
+        let mut account_store = AccountStore::new();
+
+        // 创建账户（balance 足够支付 gas）
+        let account = Account::new(tagged_pubkey.clone(), 1_000_000);
+        account_store.create(account).expect("创建账户");
+
+        let initial_root = object_db.state_root();
+
+        let projection = project_block_from_commit(
+            &dag,
+            &leader,
+            cert,
+            &env,
+            &mut object_db,
+            &mut account_store,
+            [0u8; 32],
+            1,
+            1000,
+        )
+        .expect("投影应成功");
+
+        // state_root 应该改变（因为创建了对象）
+        assert_ne!(
+            projection.header.state_root, initial_root,
+            "执行 tx 后 state_root 应改变"
+        );
+        // state_root 应该等于 object_db 的当前 root
+        assert_eq!(
+            projection.header.state_root,
+            object_db.state_root(),
+            "state_root 应等于 ObjectDb 的当前 root"
+        );
+        // 对象应已创建
+        let obj_id = crate::object_model::ObjectID::new(caller, 0);
+        object_db.read(&obj_id).expect("对象应已创建");
+        // nonce 应推进
+        assert_eq!(
+            account_store.get(&caller).expect("账户存在").nonce,
+            1,
+            "nonce 应推进"
+        );
     }
 
     // ===== validate_commit_certificate_quorum 测试（SubTask 9.5） =====

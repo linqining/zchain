@@ -275,15 +275,15 @@ impl PrecompileCircuit for MerkleVerifyCircuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         if self.full_mode {
             let d = self.depth;
             let dummy = vec![Fr::zero(); 2 + 2 * d];
-            self.run_full(&dummy)
+            Ok(self.run_full(&dummy)
                 .expect("dummy run_full should succeed")
-                .0
+                .0)
         } else {
-            self.build_mvp_ccs()
+            Ok(self.build_mvp_ccs())
         }
     }
 
@@ -322,7 +322,7 @@ impl CcsCircuit for MerkleVerifyCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_merkle_mvp_satisfied() {
         let circuit = MerkleVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let left = Fr::from_u64(3);
         let right = Fr::from_u64(4);
         let parent = host_hash(left, right); // 3*2 + 4 = 10
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn test_merkle_mvp_tampered_parent() {
         let circuit = MerkleVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let left = Fr::from_u64(3);
         let right = Fr::from_u64(4);
         let parent = Fr::from_u64(11); // 篡改：应为 10
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn test_merkle_mvp_tampered_left() {
         let circuit = MerkleVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let left = Fr::from_u64(3);
         let right = Fr::from_u64(4);
         let parent = host_hash(left, right); // 10
@@ -416,7 +416,7 @@ mod tests {
     fn test_merkle_full_depth3_satisfied() {
         let depth = 3;
         let circuit = MerkleVerifyCircuit::new_full_with_depth(depth);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         // 构造有效 Merkle 路径
         let leaf = Fr::from_u64(42);
@@ -447,7 +447,7 @@ mod tests {
     fn test_merkle_full_tampered_leaf() {
         let depth = 3;
         let circuit = MerkleVerifyCircuit::new_full_with_depth(depth);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         let leaf = Fr::from_u64(42);
         let siblings = vec![Fr::from_u64(1), Fr::from_u64(2), Fr::from_u64(3)];
@@ -475,7 +475,7 @@ mod tests {
     fn test_merkle_full_tampered_sibling() {
         let depth = 3;
         let circuit = MerkleVerifyCircuit::new_full_with_depth(depth);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         let leaf = Fr::from_u64(42);
         let siblings = vec![Fr::from_u64(1), Fr::from_u64(2), Fr::from_u64(3)];
@@ -503,7 +503,7 @@ mod tests {
     fn test_merkle_full_depth1_satisfied() {
         let depth = 1;
         let circuit = MerkleVerifyCircuit::new_full_with_depth(depth);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         let leaf = Fr::from_u64(5);
         let siblings = vec![Fr::from_u64(7)];
@@ -528,7 +528,7 @@ mod tests {
     fn test_merkle_full_direction_right() {
         let depth = 2;
         let circuit = MerkleVerifyCircuit::new_full_with_depth(depth);
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         let leaf = Fr::from_u64(5);
         let siblings = vec![Fr::from_u64(7), Fr::from_u64(11)];
@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn test_merkle_ccs_circuit_trait() {
         let circuit = MerkleVerifyCircuit::new_mvp();
-        let _ccs = circuit.build_ccs();
+        let _ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&[Fr::from_u64(3), Fr::from_u64(4), Fr::from_u64(10)])
             .expect("assign_witness");

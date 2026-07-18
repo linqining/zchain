@@ -186,13 +186,13 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         if self.full_mode {
             let dummy = vec![Fr::zero(); 24];
-            return self
+            return Ok(self
                 .run_full(&dummy)
                 .expect("dummy run_full should succeed")
-                .0;
+                .0);
         }
 
         // 7 个行隔离矩阵，每个 3 行 × 6 列
@@ -230,7 +230,7 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
 
         let neg_one = Fr::zero().sub(&Fr::one());
 
-        Ccs::new(
+        Ok(Ccs::new(
             6,
             vec![
                 m_bit_r0, m_bit_r1, m_p_r1, m_bitp_r1, m_r_r2, m_bitp_r2, m_rnew_r2,
@@ -254,7 +254,7 @@ impl PrecompileCircuit for EcdsaVerifyCircuit {
                 neg_one,   // c_6: -R_new
             ],
         )
-        .expect("EcdsaVerifyCircuit CCS 构造应成功")
+        .expect("EcdsaVerifyCircuit CCS 构造应成功"))
     }
 
     fn assign_witness(&self, inputs: &[Fr]) -> Result<Vec<Fr>, ZkvmError> {
@@ -320,7 +320,7 @@ impl CcsCircuit for EcdsaVerifyCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_build_ccs() {
         let circuit = EcdsaVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         assert_eq!(ccs.num_matrices(), 7, "应有 7 个行隔离矩阵");
         assert_eq!(ccs.num_constraints(), 7, "应有 7 个 subsets");
         assert_eq!(ccs.num_rows(), 3, "应有 3 行约束");
@@ -591,7 +591,7 @@ mod tests {
     fn test_ecdsa_circuit_satisfied_by_bit_zero() {
         // bit=0: bit_P=0, R_new=R
         let circuit = EcdsaVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let bit = Fr::zero();
         let r = Fr::from_u32_with_wrap(42);
         let p = Fr::from_u32_with_wrap(100);
@@ -608,7 +608,7 @@ mod tests {
     fn test_ecdsa_circuit_satisfied_by_bit_one() {
         // bit=1: bit_P=P, R_new=R+P
         let circuit = EcdsaVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(42);
         let p = Fr::from_u32_with_wrap(100);
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_soundness_bit_not_binary() {
         let circuit = EcdsaVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let bit = Fr::from_u32_with_wrap(2);
         let r = Fr::from_u32_with_wrap(42);
         let p = Fr::from_u32_with_wrap(100);
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_soundness_tampered_rnew() {
         let circuit = EcdsaVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(42);
         let p = Fr::from_u32_with_wrap(100);
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn test_ecdsa_circuit_soundness_tampered_bitp() {
         let circuit = EcdsaVerifyCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let bit = Fr::one();
         let r = Fr::from_u32_with_wrap(42);
         let p = Fr::from_u32_with_wrap(100);
@@ -879,7 +879,7 @@ mod tests {
         assert_eq!(circuit.gas_cost(), 100_000);
 
         // MVP CCS 仍可正常使用
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         assert_eq!(ccs.num_matrices(), 7);
         assert_eq!(ccs.num_rows(), 3);
 

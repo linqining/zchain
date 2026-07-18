@@ -1,18 +1,24 @@
-# run_node 集成 DAG 产块循环计划
+# run\_node 集成 DAG 产块循环计划
 
 ## Context
 
 `src/main.rs` 中已实现所有 DAG 产块循环所需的辅助函数：
-- `TcpTransport`（lines 468-556）：实现 `NetworkTransport` trait，4 字节 length-prefix + BCS
-- `send_p2p_message` / `recv_p2p_message`（lines 559-595）：帧编解码
-- `handle_p2p_connection`（lines 603-653）：接收端消息分发（DagVertex/Transaction/ResponseBlocks）
-- `secp256k1_sign_hash`（lines 669-677）：65B recoverable 签名
-- `build_block_from_vertex`（lines 684-753）：从单个 vertex 构造 Block + DagCommitCertificate
-- `run_validator_loop`（lines 762-928）：validator 后台产块循环
+
+* `TcpTransport`（lines 468-556）：实现 `NetworkTransport` trait，4 字节 length-prefix + BCS
+
+* `send_p2p_message` / `recv_p2p_message`（lines 559-595）：帧编解码
+
+* `handle_p2p_connection`（lines 603-653）：接收端消息分发（DagVertex/Transaction/ResponseBlocks）
+
+* `secp256k1_sign_hash`（lines 669-677）：65B recoverable 签名
+
+* `build_block_from_vertex`（lines 684-753）：从单个 vertex 构造 Block + DagCommitCertificate
+
+* `run_validator_loop`（lines 762-928）：validator 后台产块循环
 
 **唯一剩余工作**：修改 `run_node`（lines 151-370）集成上述组件，并更新 `print_usage`。
 
-## 当前 run_node 结构
+## 当前 run\_node 结构
 
 ```
 run_node(args):
@@ -27,7 +33,7 @@ run_node(args):
 
 ## 改动方案
 
-### 1. 新增 CLI 参数解析（run_node 内）
+### 1. 新增 CLI 参数解析（run\_node 内）
 
 在 `--validator-key` 之后、`"--help"` 之前新增两个 match 分支：
 
@@ -49,12 +55,13 @@ run_node(args):
 ```
 
 新增局部变量（在函数开头）：
+
 ```rust
 let mut block_interval_ms: u64 = DEFAULT_BLOCK_INTERVAL_MS; // 1000
 let mut peers: Vec<String> = Vec::new();
 ```
 
-### 2. 集成 P2P + validator 循环（run_node 内，RPC scope 之前）
+### 2. 集成 P2P + validator 循环（run\_node 内，RPC scope 之前）
 
 在 "按 Ctrl+C 退出" 日志之后、`std::thread::scope` 之前插入：
 
@@ -136,10 +143,13 @@ let validator_thread = if role.is_validator() {
 ### 3. RPC scope 之后 join 新线程
 
 将现有的：
+
 ```rust
 let _ = signal_thread.join();
 ```
+
 改为：
+
 ```rust
 let _ = signal_thread.join();
 let _ = p2p_thread.join();
@@ -148,9 +158,10 @@ if let Some(vt) = validator_thread {
 }
 ```
 
-### 4. 更新 print_usage
+### 4. 更新 print\_usage
 
 在 `--validator-key` 行之后新增：
+
 ```
 --block-interval-ms <ms>                  出块间隔毫秒（默认 1000，仅 validator）
 --peer <addr>                             P2P peer 地址（可重复，如 127.0.0.1:9001）
@@ -158,14 +169,15 @@ if let Some(vt) = validator_thread {
 
 ## 关键文件
 
-| 文件 | 改动 |
-| --- | --- |
+| 文件                                                           | 改动                                                         |
+| ------------------------------------------------------------ | ---------------------------------------------------------- |
 | [src/main.rs](file:///Users/mac/projects/zchain/src/main.rs) | 修改 `run_node`（lines 151-370）+ `print_usage`（lines 108-146） |
 
 ## 验证
 
 1. **编译**：`cargo zigbuild --release --target x86_64-unknown-linux-musl`
 2. **本地启动 validator**：
+
    ```
    zchain keygen --scheme secp256k1  # 获取 secret_key_hex
    ZCHAIN_VALIDATOR_KEY=<hex> zchain node --role validator --data-dir /tmp/val1
@@ -175,7 +187,11 @@ if let Some(vt) = validator_thread {
 
 ## 假设与决策
 
-- **P2P listener non-blocking**：与 RPC listener 相同模式，100ms 轮询 shutdown_flag
-- **validator 线程独立 spawn**（非 scoped thread）：因为它需要在 RPC scope 之外持续运行，由 shutdown_flag 协调退出
-- **full/light/archive 角色不 spawn validator loop**，但仍启动 P2P accept loop（可接收同步数据）
-- **不修改任何 poker_l1 库代码**：所有集成在 main.rs 内完成
+* **P2P listener non-blocking**：与 RPC listener 相同模式，100ms 轮询 shutdown\_flag
+
+* **validator 线程独立 spawn**（非 scoped thread）：因为它需要在 RPC scope 之外持续运行，由 shutdown\_flag 协调退出
+
+* **full/light/archive 角色不 spawn validator loop**，但仍启动 P2P accept loop（可接收同步数据）
+
+* **不修改任何 poker\_l1 库代码**：所有集成在 main.rs 内完成
+

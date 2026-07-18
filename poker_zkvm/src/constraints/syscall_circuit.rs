@@ -150,7 +150,7 @@ pub fn dispatch_syscall(
         let circuit = registry.get(name).ok_or_else(|| {
             ZkvmError::Other(format!("dispatch_syscall: 预编译电路 '{name}' 未注册"))
         })?;
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs()?;
         let witness = circuit.assign_witness(precompile_inputs)?;
         let public_inputs = vec![Fr::from_u32_with_wrap(syscall_id as u32)];
         instances.push(CcsInstance::new(ccs, witness, public_inputs)?);

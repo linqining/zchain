@@ -30,6 +30,7 @@ pub mod bridge;
 pub mod consensus;
 pub mod crypto_precompiles;
 pub mod error;
+pub mod executor;
 pub mod governance;
 pub mod network;
 pub mod node;

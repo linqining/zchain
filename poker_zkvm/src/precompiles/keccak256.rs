@@ -543,20 +543,20 @@ impl PrecompileCircuit for Keccak256Circuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         let dummy = if self.full_mode {
             vec![Fr::zero(); 29]
         } else {
             vec![Fr::zero(); 50]
         };
         if self.full_mode {
-            self.run_full(&dummy)
+            Ok(self.run_full(&dummy)
                 .expect("dummy run_full should succeed")
-                .0
+                .0)
         } else {
-            self.run_mvp(&dummy)
+            Ok(self.run_mvp(&dummy)
                 .expect("dummy run_mvp should succeed")
-                .0
+                .0)
         }
     }
 
@@ -602,7 +602,7 @@ impl CcsCircuit for Keccak256Circuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }
@@ -742,7 +742,7 @@ mod tests {
         inputs.extend(state_to_fr_vec(&host_state));
 
         let circuit = Keccak256Circuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&inputs)
             .expect("assign_witness should succeed");
@@ -772,7 +772,7 @@ mod tests {
         inputs.extend(state_to_fr_vec(&host_state));
 
         let circuit = Keccak256Circuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&inputs)
             .expect("assign_witness should succeed");
@@ -850,7 +850,7 @@ mod tests {
         inputs.extend(lanes_to_fr_vec(&expected_lanes));
 
         let circuit = Keccak256Circuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&inputs)
             .expect("assign_witness should succeed");
@@ -895,7 +895,7 @@ mod tests {
         inputs.extend(lanes_to_fr_vec(&expected_lanes));
 
         let circuit = Keccak256Circuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&inputs)
             .expect("assign_witness should succeed");

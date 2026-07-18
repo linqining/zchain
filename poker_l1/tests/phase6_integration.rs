@@ -554,7 +554,22 @@ mod subtask_43_7_node {
     #[test]
     fn subtask_43_7_l_node_put_and_query_block() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
-        let block = dummy_block(10);
+        // P0-3 验证链：tx roots 必须一致；状态根重放必须匹配（空块 → 当前空库 state_root）
+        let empty_root = poker_l1::block::compute_tx_merkle_root(&[]);
+        let state_root = node.state_root();
+        let block = Block::new(
+            BlockHeader {
+                height: 10,
+                timestamp_ms: 10_000,
+                prev_hash: [0u8; 32],
+                state_root,
+                public_tx_root: empty_root,
+                gameturn_tx_root: empty_root,
+                dag_commit_certificate: dummy_commit_certificate(),
+            },
+            vec![],
+            vec![],
+        );
         let hash = node.put_block(&block).unwrap();
 
         // 按 hash 查询
@@ -575,14 +590,24 @@ mod subtask_43_7_node {
     #[test]
     fn subtask_43_7_m_node_put_and_query_vertex() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
-        let vertex = DagVertex {
+        // P0-3 验证链：vertex 必须带真实 author 签名
+        let (secret_key, _public_key, tagged) = make_real_keypair();
+        let mut vertex = DagVertex {
             epoch: 1,
             round: 5,
-            author_pubkey: dummy_tagged_pubkey(),
+            author_pubkey: tagged,
             tx_list: vec![],
             parent_hashes: vec![],
-            author_sig: vec![0u8; 65],
+            author_sig: vec![],
         };
+        let signing_hash = vertex.signing_hash(DEFAULT_CHAIN_ID);
+        let secp = Secp256k1::new();
+        let sig = secp.sign_ecdsa_recoverable(&Message::from_digest(signing_hash), &secret_key);
+        let (rid, compact) = sig.serialize_compact();
+        let mut full_sig = compact.to_vec();
+        full_sig.push(rid.to_i32() as u8);
+        vertex.author_sig = full_sig;
+
         let hash = node.put_vertex(&vertex).unwrap();
         let got = node.get_vertex(&hash).unwrap();
         assert!(got.is_some());

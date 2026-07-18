@@ -55,7 +55,7 @@ use crate::error::ZkvmError;
 /// # 闭环验证
 ///
 /// ```text
-/// let ccs = circuit.build_ccs();
+/// let ccs = circuit.build_ccs()?;
 /// let witness = circuit.assign_witness(inputs)?;
 /// assert!(ccs.satisfied_by(&witness)?);
 /// ```
@@ -67,7 +67,10 @@ pub trait PrecompileCircuit: Debug + Send + Sync {
     fn num_variables(&self) -> usize;
 
     /// 生成 CCS 约束结构（矩阵 M_j / 子集 S_i / 系数 c_i）。
-    fn build_ccs(&self) -> Ccs;
+    ///
+    /// # 错误
+    /// - CCS 构建失败（如约束生成内部错误）返回 `ZkvmError`
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError>;
 
     /// 赋值 witness（从输入计算完整 witness 向量）。
     ///
@@ -194,7 +197,7 @@ mod tests {
             4 // z = [1, x, y, result]
         }
 
-        fn build_ccs(&self) -> Ccs {
+        fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
             let mut m0 = SparseMatrix::new(1, 4);
             m0.add_entry(0, 1, Fr::one()).unwrap();
             let mut m1 = SparseMatrix::new(1, 4);
@@ -202,13 +205,12 @@ mod tests {
             let mut m2 = SparseMatrix::new(1, 4);
             m2.add_entry(0, 3, Fr::one()).unwrap();
 
-            Ccs::new(
+            Ok(Ccs::new(
                 4,
                 vec![m0, m1, m2],
                 vec![vec![0, 1], vec![2]],
                 vec![Fr::one(), Fr::zero().sub(&Fr::one())],
-            )
-            .expect("MockMulCircuit CCS 构造应成功")
+            )?)
         }
 
         fn assign_witness(&self, inputs: &[Fr]) -> Result<Vec<Fr>, ZkvmError> {
@@ -307,7 +309,7 @@ mod tests {
     #[test]
     fn test_precompile_circuit_build_and_satisfy() {
         let circuit = MockMulCircuit::new();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let witness = circuit
             .assign_witness(&[Fr::from_u32_with_wrap(3), Fr::from_u32_with_wrap(4)])
             .expect("assign_witness 应成功");
@@ -525,7 +527,7 @@ mod tests {
     fn test_phase10_real_circuits_ccs_closed_loop() {
         // Poseidon: x=3 → x5=243
         let poseidon = poseidon::PoseidonCircuit::new_mvp();
-        let ccs = poseidon.build_ccs();
+        let ccs = poseidon.build_ccs().expect("build_ccs");
         let witness = poseidon
             .assign_witness(&[Fr::from_u32_with_wrap(3)])
             .expect("poseidon assign_witness");
@@ -533,7 +535,7 @@ mod tests {
 
         // SHA-256: x=1, y=1, z=0 → Ch=1
         let sha256 = sha256::Sha256Circuit::new_mvp();
-        let ccs = sha256.build_ccs();
+        let ccs = sha256.build_ccs().expect("build_ccs");
         let witness = sha256
             .assign_witness(&[
                 Fr::from_u32_with_wrap(1),
@@ -545,7 +547,7 @@ mod tests {
 
         // ECDSA: bit=1, R=42, P=100 → R_new=142
         let ecdsa = ecdsa::EcdsaVerifyCircuit::new_mvp();
-        let ccs = ecdsa.build_ccs();
+        let ccs = ecdsa.build_ccs().expect("build_ccs");
         let witness = ecdsa
             .assign_witness(&[
                 Fr::one(),

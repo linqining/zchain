@@ -268,12 +268,12 @@ impl PrecompileCircuit for Sha256Circuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         if self.full_mode {
             let dummy = vec![Fr::zero(); 24];
-            self.run_full(&dummy).unwrap().0
+            Ok(self.run_full(&dummy)?.0)
         } else {
-            self.build_mvp_ccs()
+            Ok(self.build_mvp_ccs())
         }
     }
 
@@ -371,7 +371,7 @@ impl CcsCircuit for Sha256Circuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn test_sha256_circuit_build_ccs() {
         let circuit = Sha256Circuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         assert_eq!(ccs.num_matrices(), 7);
         assert_eq!(ccs.num_constraints(), 6);
         assert_eq!(ccs.num_rows(), 2);
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn test_sha256_circuit_satisfied_by() {
         let circuit = Sha256Circuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let inputs = vec![
             Fr::from_u32_with_wrap(1),
             Fr::from_u32_with_wrap(1),
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn test_sha256_circuit_soundness_tampered_ch() {
         let circuit = Sha256Circuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let inputs = vec![
             Fr::from_u32_with_wrap(1),
             Fr::from_u32_with_wrap(1),
@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn test_sha256_circuit_soundness_tampered_ymz() {
         let circuit = Sha256Circuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let inputs = vec![
             Fr::from_u32_with_wrap(1),
             Fr::from_u32_with_wrap(1),
@@ -696,7 +696,7 @@ mod tests {
                     let ch_circuit = witness[5];
                     let ch_expected = ch_bit(x, y, z);
                     assert_eq!(ch_circuit.to_u32(), ch_expected);
-                    let ccs = circuit.build_ccs();
+                    let ccs = circuit.build_ccs().expect("build_ccs");
                     assert!(ccs.satisfied_by(&witness).expect("satisfied_by"));
                 }
             }
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn test_sha256_full_build_ccs() {
         let circuit = Sha256Circuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         // 完整模式应有大量变量
         assert!(
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn test_sha256_full_satisfied_by() {
         let circuit = Sha256Circuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         // 使用 SHA256_H0 + 全零消息块
         let mut block = [0u32; 16];
@@ -985,7 +985,7 @@ mod tests {
     #[test]
     fn test_sha256_full_soundness_tampered_output() {
         let circuit = Sha256Circuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         let inputs = make_full_inputs(&SHA256_H0, &[0u32; 16]);
         let (_ccs2, mut witness, output) = circuit.run_full(&inputs).expect("run_full 应成功");
@@ -1042,7 +1042,7 @@ mod tests {
         assert_eq!(full.gas_cost(), FULL_MODE_GAS_COST);
 
         // MVP 模式仍正常工作
-        let mvp_ccs = mvp.build_ccs();
+        let mvp_ccs = mvp.build_ccs().expect("build_ccs");
         assert_eq!(mvp_ccs.num_vars, 6);
     }
 

@@ -679,13 +679,13 @@ impl PrecompileCircuit for Ed25519VerifyCircuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         if self.full_mode {
             let dummy = vec![Fr::zero(); 20];
-            return self
+            return Ok(self
                 .run_full(&dummy)
                 .expect("dummy run_full should succeed")
-                .0;
+                .0);
         }
 
         // MVP: 7 个行隔离矩阵（同 ecdsa MVP 模式）
@@ -718,7 +718,7 @@ impl PrecompileCircuit for Ed25519VerifyCircuit {
 
         let neg_one = Fr::zero().sub(&Fr::one());
 
-        Ccs::new(
+        Ok(Ccs::new(
             6,
             vec![
                 m_bit_r0, m_bit_r1, m_p_r1, m_bitp_r1, m_p2_r2, m_bitp_r2, m_pnew_r2,
@@ -742,7 +742,7 @@ impl PrecompileCircuit for Ed25519VerifyCircuit {
                 neg_one,
             ],
         )
-        .expect("Ed25519VerifyCircuit CCS 构造应成功")
+        .expect("Ed25519VerifyCircuit CCS 构造应成功"))
     }
 
     fn assign_witness(&self, inputs: &[Fr]) -> Result<Vec<Fr>, ZkvmError> {
@@ -797,7 +797,7 @@ impl CcsCircuit for Ed25519VerifyCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }

@@ -172,13 +172,13 @@ impl PrecompileCircuit for Bn254PairingCircuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         if self.full_mode {
             let dummy = vec![Fr::zero(); 17];
-            return self
+            return Ok(self
                 .run_full(&dummy)
                 .expect("dummy run_full should succeed")
-                .0;
+                .0);
         }
 
         // MVP: 简化版 4 变量（bit-check 风格，与 ed25519/ecdsa MVP 一致）
@@ -197,7 +197,7 @@ impl PrecompileCircuit for Bn254PairingCircuit {
 
         let neg_one = Fr::zero().sub(&Fr::one());
 
-        Ccs::new(
+        Ok(Ccs::new(
             4,
             vec![m0, m1, m2],
             vec![
@@ -207,7 +207,7 @@ impl PrecompileCircuit for Bn254PairingCircuit {
             ],
             vec![Fr::one(), neg_one, neg_one],
         )
-        .expect("Bn254PairingCircuit CCS 构造应成功")
+        .expect("Bn254PairingCircuit CCS 构造应成功"))
     }
 
     fn assign_witness(&self, inputs: &[Fr]) -> Result<Vec<Fr>, ZkvmError> {
@@ -261,7 +261,7 @@ impl CcsCircuit for Bn254PairingCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }

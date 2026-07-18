@@ -315,11 +315,11 @@ impl PrecompileCircuit for PoseidonCircuit {
         }
     }
 
-    fn build_ccs(&self) -> Ccs {
+    fn build_ccs(&self) -> Result<Ccs, ZkvmError> {
         if self.full_mode {
-            self.build_full_ccs()
+            Ok(self.build_full_ccs())
         } else {
-            self.build_mvp_ccs()
+            Ok(self.build_mvp_ccs())
         }
     }
 
@@ -439,7 +439,7 @@ impl CcsCircuit for PoseidonCircuit {
         witness: &[Fr],
         public_inputs: &[Fr],
     ) -> Result<CcsInstance, ZkvmError> {
-        let ccs = self.build_ccs();
+        let ccs = self.build_ccs()?;
         CcsInstance::new(ccs, witness.to_vec(), public_inputs.to_vec())
     }
 }
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn test_poseidon_circuit_build_ccs() {
         let circuit = PoseidonCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         assert_eq!(ccs.num_matrices(), 7, "应有 7 个行隔离矩阵");
         assert_eq!(ccs.num_constraints(), 6, "应有 6 个 subsets");
         assert_eq!(ccs.num_rows(), 3, "应有 3 行约束");
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn test_poseidon_circuit_satisfied_by() {
         let circuit = PoseidonCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let x = Fr::from_u32_with_wrap(3);
         let witness = circuit.assign_witness(&[x]).expect("assign_witness 应成功");
         assert_eq!(witness.len(), 5);
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn test_poseidon_circuit_soundness_tampered_x5() {
         let circuit = PoseidonCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let x = Fr::from_u32_with_wrap(3);
         let mut witness = circuit.assign_witness(&[x]).expect("assign_witness 应成功");
         witness[4] = Fr::from_u32_with_wrap(244);
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn test_poseidon_circuit_soundness_tampered_x2() {
         let circuit = PoseidonCircuit::new_mvp();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
         let x = Fr::from_u32_with_wrap(3);
         let mut witness = circuit.assign_witness(&[x]).expect("assign_witness 应成功");
         witness[2] = Fr::from_u32_with_wrap(10);
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn test_poseidon_full_build_ccs() {
         let circuit = PoseidonCircuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         // 变量数应为 439
         assert_eq!(
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn test_poseidon_full_satisfied_by() {
         let circuit = PoseidonCircuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         // 输入: [0, 1, 2]（sponge 初始 state: capacity=0, rate=[1, 2]）
         let inputs = [
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn test_poseidon_full_soundness_tampered_round() {
         let circuit = PoseidonCircuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         let inputs = [
             Fr::zero(),
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn test_poseidon_full_soundness_tampered_final_state() {
         let circuit = PoseidonCircuit::new_full();
-        let ccs = circuit.build_ccs();
+        let ccs = circuit.build_ccs().expect("build_ccs");
 
         let inputs = [
             Fr::zero(),
@@ -863,8 +863,8 @@ mod tests {
         assert_eq!(full.gas_cost(), FULL_MODE_GAS_COST);
 
         // 两种模式可以共存于注册表（同名覆盖，但可分别测试）
-        let mvp_ccs = mvp.build_ccs();
-        let full_ccs = full.build_ccs();
+        let mvp_ccs = mvp.build_ccs().expect("build_ccs");
+        let full_ccs = full.build_ccs().expect("build_ccs");
         assert_eq!(mvp_ccs.num_vars, 5);
         assert_eq!(full_ccs.num_vars, FULL_MODE_NUM_VARS);
     }
