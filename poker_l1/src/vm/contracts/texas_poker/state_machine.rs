@@ -11,7 +11,7 @@
 //!
 //! # ZK 验证策略
 //!
-//! 所有 verify 调用经 `crypto::zk_verifier::verify_or_skip(table.config.skip_*(), ...)`
+//! 所有 verify 调用经 `utils::verify_or_skip(table.config.skip_*(), ...)`
 //! 包装。dev chain 默认全部 skip，mainnet 由 governance 强制 false。
 //!
 //! # 调用约定
@@ -25,17 +25,18 @@
 //! - 错误用 `PokerL1Error::Serialization` 包裹（带上下文 message）
 
 use blstrs::G1Projective;
+use group::Group;
+
+use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ECScalar, ElGamalCiphertext};
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
+use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
+use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 
 use super::betting::{BettingError, BettingRound};
 use super::card::{Card, PlayingCard};
 use super::constants::*;
-use super::crypto::bls_elgamal as elgamal;
-use super::crypto::bls_scalar::{
-    self, g1_add, g1_equal, g1_generator, g1_is_identity, g1_sub, generate_plaintext_cards,
-    hash_to_scalar, parse_g1, parse_scalar, scalar_from_u64, serialize_g1,
-};
-use super::crypto::serialization as ser;
-use super::crypto::zk_verifier;
 use super::events::{
     self, TexasPokerEvent, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE,
     DECK_REBUILT_REASON_SHUFFLE_TIMEOUT, POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN,
@@ -43,29 +44,22 @@ use super::events::{
 };
 use super::side_pot;
 use super::types::{
-    DecryptedCard, ElGamalCiphertext as BytesCiphertext, ReconstructPlayerDeck, RevealAssignment,
-    RevealTokenData, Seat, TexasPokerTable, OWNER_SEAT_PUBLIC,
+    DecryptedCard, ReconstructPlayerDeck, RevealAssignment, RevealTokenData, Seat,
+    TexasPokerTable, OWNER_SEAT_PUBLIC,
+};
+// 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
+// typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
+use super::utils::{
+    self, g1_add, g1_equal, g1_generator, g1_is_identity, g1_sub, generate_plaintext_cards,
+    hash_to_scalar, scalar_from_u64,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 
-// ========== 工具：bytes↔G1 转换 ==========
+// ========== 工具：bytes↔G1 转换（typed 化后大部分不再需要） ==========
 
-/// `types::ElGamalCiphertext`（字节）→ `crypto::bls_elgamal::ElGamalCiphertext`（G1）。
-fn bytes_ct_to_g1(ct: &BytesCiphertext) -> PokerL1Result<elgamal::ElGamalCiphertext> {
-    let c1 = parse_g1(&ct.c1)?;
-    let c2 = parse_g1(&ct.c2)?;
-    Ok(elgamal::ElGamalCiphertext::new(c1, c2))
-}
-
-/// `crypto::bls_elgamal::ElGamalCiphertext`（G1）→ `types::ElGamalCiphertext`（字节）。
-fn g1_ct_to_bytes(ct: &elgamal::ElGamalCiphertext) -> BytesCiphertext {
-    BytesCiphertext::from_arrays(ct.c1_bytes(), ct.c2_bytes())
-}
-
-/// 字节 pk → G1Projective。
-fn pk_to_g1(pk_bytes: &[u8]) -> PokerL1Result<G1Projective> {
-    parse_g1(pk_bytes)
-}
+// 注：types.rs 字段已 typed 化为 G1Projective / ElGamalCiphertext，
+// 原 `bytes_ct_to_g1` / `g1_ct_to_bytes` / `pk_to_g1` 已删除。
+// 残余 RPC 边界转换直接使用 `utils::parse_g1` / `utils::serialize_g1`。
 
 // ========== 状态谓词 ==========
 
@@ -114,10 +108,10 @@ pub fn is_in_list(list: &[u8], value: u8) -> bool {
 
 /// 是否已注册 pk（occupied 且 pk 匹配）。
 #[must_use]
-pub fn is_pk_registered(seats: &[Seat], pk: &[u8]) -> bool {
+pub fn is_pk_registered(seats: &[Seat], pk: &G1Projective) -> bool {
     seats
         .iter()
-        .any(|s| s.is_occupied() && s.pk == pk)
+        .any(|s| s.is_occupied() && &s.pk.0 == pk)
 }
 
 // ========== 座位/玩家辅助 ==========
@@ -195,29 +189,26 @@ pub fn remove_from_pending(list: &mut Vec<u8>, value: u8) {
 
 // ========== PK 聚合 ==========
 
-/// 将 pk 加入聚合 pk：empty + pk = pk；非空走 G1 加法。
-fn add_pk_to_aggregated(old: &[u8], new_pk: &G1Projective) -> PokerL1Result<Vec<u8>> {
-    if old.is_empty() {
-        Ok(serialize_g1(new_pk).to_vec())
-    } else {
-        let old_pt = parse_g1(old)?;
-        let sum = g1_add(&old_pt, new_pk);
-        Ok(serialize_g1(&sum).to_vec())
+/// 将 pk 加入聚合 pk：None + pk = Some(pk)；Some(old) + pk = Some(old + pk)。
+///
+/// typed 化后 `aggregated_pk: Option<G1Projective>`，不再使用字节表示。
+fn add_pk_to_aggregated(old: Option<&G1Projective>, new_pk: &G1Projective) -> Option<G1Projective> {
+    match old {
+        None => Some(*new_pk),
+        Some(old_pt) => Some(g1_add(old_pt, new_pk)),
     }
 }
 
-/// 从聚合 pk 移除 pk：empty 直接返回空；非空走 G1 减法。
-fn remove_pk_from_aggregated(old: &[u8], pk: &G1Projective) -> PokerL1Result<Vec<u8>> {
-    if old.is_empty() {
-        return Ok(vec![]);
-    }
-    let old_pt = parse_g1(old)?;
-    let diff = g1_sub(&old_pt, pk);
-    // 若结果为单位元，返回空 Vec（与 Move 端语义一致）
+/// 从聚合 pk 移除 pk：None 直接返回 None；Some(old) - pk 返回 Some(old - pk) 或 None（若为单位元）。
+///
+/// 若结果为单位元，返回 None（与 Move 端"空 Vec"语义一致）。
+fn remove_pk_from_aggregated(old: Option<&G1Projective>, pk: &G1Projective) -> Option<G1Projective> {
+    let old_pt = old?;
+    let diff = g1_sub(old_pt, pk);
     if g1_is_identity(&diff) {
-        Ok(vec![])
+        None
     } else {
-        Ok(serialize_g1(&diff).to_vec())
+        Some(diff)
     }
 }
 
@@ -235,10 +226,11 @@ pub fn set_initial_encrypted_deck(table: &mut TexasPokerTable) -> PokerL1Result<
         .iter()
         .map(|m| {
             // c1 = G, c2 = m
-            BytesCiphertext::from_arrays(serialize_g1(&g), serialize_g1(m))
+            ElGamalCiphertext { c1: g, c2: *m }
         })
         .collect();
-    table.deck_state.plaintext = plaintexts.iter().map(|m| serialize_g1(m).to_vec()).collect();
+    // Vec<G1Projective> → Vec<ECPoint>（types.rs 字段使用 ECPoint newtype 以支持 Borsh）
+    table.deck_state.plaintext = plaintexts.into_iter().map(ECPoint::from).collect();
     table.deck_state.cards_dealt = 0;
     table.deck_state.decrypted_cards.clear();
     Ok(())
@@ -259,34 +251,35 @@ fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Res
 
     // 初始 (G, plaintext_j)
     let g = g1_generator();
-    let mut new_cts: Vec<elgamal::ElGamalCiphertext> = (0..n)
+    let mut new_cts: Vec<ElGamalCiphertext> = (0..n)
         .map(|j| {
-            let m = parse_g1(&table.deck_state.plaintext[j])?;
-            Ok::<_, PokerL1Error>(elgamal::ElGamalCiphertext::new(g, m))
+            // ECPoint → G1Projective（Deref 后 copy）
+            let m: G1Projective = table.deck_state.plaintext[j].into();
+            Ok::<_, PokerL1Error>(ElGamalCiphertext { c1: g, c2: m })
         })
         .collect::<PokerL1Result<_>>()?;
 
     // 累加每个 player_deck
     for deck in &table.reconstruct_state.player_decks {
         for j in 0..n {
-            let p_ct = bytes_ct_to_g1(&deck.output_cts[j])?;
-            new_cts[j] = elgamal::ElGamalCiphertext::new(
-                g1_add(&new_cts[j].c1, &p_ct.c1),
-                g1_add(&new_cts[j].c2, &p_ct.c2),
-            );
+            let p_ct = &deck.output_cts[j];
+            new_cts[j] = ElGamalCiphertext {
+                c1: g1_add(&new_cts[j].c1, &p_ct.c1),
+                c2: g1_add(&new_cts[j].c2, &p_ct.c2),
+            };
         }
     }
 
     // 减去 plaintext_j（恢复正确语义）
     for j in 0..n {
-        let m = parse_g1(&table.deck_state.plaintext[j])?;
-        new_cts[j] = elgamal::ElGamalCiphertext::new(
-            new_cts[j].c1,
-            g1_sub(&new_cts[j].c2, &m),
-        );
+        let m: G1Projective = table.deck_state.plaintext[j].into();
+        new_cts[j] = ElGamalCiphertext {
+            c1: new_cts[j].c1,
+            c2: g1_sub(&new_cts[j].c2, &m),
+        };
     }
 
-    table.deck_state.encrypted = new_cts.iter().map(g1_ct_to_bytes).collect();
+    table.deck_state.encrypted = new_cts;
     table.deck_state.cards_dealt = 0;
     table.deck_state.decrypted_cards.clear();
     Ok(())
@@ -746,9 +739,10 @@ fn start_showdown_reveal_phase(table: &mut TexasPokerTable, events: &mut Vec<Tex
     let active_seats = get_active_seat_indices(&table.seats);
 
     for &seat in &active_seats {
-        // 在 decrypted_cards 中找属于该玩家且 ciphertext_bytes 非空的部分解密手牌
+        // 在 decrypted_cards 中找属于该玩家且 ciphertext 仍存在的部分解密手牌
         for dc in &table.deck_state.decrypted_cards {
-            if dc.owner_seat_index == seat && !dc.ciphertext_bytes.is_empty() {
+            // typed 化后 ciphertext 是 Option<ElGamalCiphertext>；is_some 等价于旧的 !is_empty()。
+            if dc.owner_seat_index == seat && dc.ciphertext.is_some() {
                 // pending = [seat]（只牌主自己提交）
                 assignments.push(RevealAssignment {
                     encrypted_card_index: dc.encrypted_card_index,
@@ -780,7 +774,8 @@ fn count_pending_community_cards(table: &TexasPokerTable) -> u8 {
         .decrypted_cards
         .iter()
         .filter(|dc| {
-            dc.owner_seat_index == OWNER_SEAT_PUBLIC && dc.plaintext_bytes.is_empty() == false
+            // typed 化后 plaintext 是 Option<G1Projective>；is_some 等价于旧的 !is_empty()。
+            dc.owner_seat_index == OWNER_SEAT_PUBLIC && dc.plaintext.is_some()
         })
         .count() as u8
 }
@@ -838,14 +833,15 @@ fn write_decrypted_cards_to_community(table: &mut TexasPokerTable, events: &mut 
     let mut suits = Vec::new();
 
     for dc in &mut table.deck_state.decrypted_cards {
-        if dc.owner_seat_index == OWNER_SEAT_PUBLIC && !dc.plaintext_bytes.is_empty() {
-            if let Some(card) = plaintext_bytes_to_card(&dc.plaintext_bytes) {
-                table.community_cards.push(card);
-                indices.push(dc.encrypted_card_index);
-                ranks.push(card.rank);
-                suits.push(card.suit);
-                dc.plaintext_bytes.clear(); // 防重复
-            }
+        // typed 化后 plaintext 是 Option<G1Projective>；is_some 等价于旧的 !is_empty()。
+        if dc.owner_seat_index == OWNER_SEAT_PUBLIC && dc.plaintext.is_some() {
+            // 直接通过 encrypted_card_index 反查 Card（plaintext G1 点不可逆）。
+            let card = card_from_encrypted_index(dc.encrypted_card_index);
+            table.community_cards.push(card);
+            indices.push(dc.encrypted_card_index);
+            ranks.push(card.rank);
+            suits.push(card.suit);
+            dc.plaintext = None; // 防重复
         }
     }
 
@@ -865,48 +861,36 @@ fn write_decrypted_cards_to_community(table: &mut TexasPokerTable, events: &mut 
 
 /// 将解密的手牌写入 seat.hand。
 fn write_decrypted_cards_to_hands(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
-    for (i, dc) in table.deck_state.decrypted_cards.clone().iter().enumerate() {
+    for dc in table.deck_state.decrypted_cards.clone().iter() {
         if dc.owner_seat_index != OWNER_SEAT_PUBLIC
-            && !dc.plaintext_bytes.is_empty()
+            && dc.plaintext.is_some()
             && (dc.owner_seat_index as usize) < table.seats.len()
         {
-            if let Some(card) = plaintext_bytes_to_card(&dc.plaintext_bytes) {
-                let seat_idx = dc.owner_seat_index as usize;
-                table.seats[seat_idx].hand.push(card);
+            let card = card_from_encrypted_index(dc.encrypted_card_index);
+            let seat_idx = dc.owner_seat_index as usize;
+            table.seats[seat_idx].hand.push(card);
 
-                let _ = i;
-                if !table.seats[seat_idx].folded {
-                    events::emit_event(
-                        events,
-                        TexasPokerEvent::ShowdownHoleCardsRevealed {
-                            table_id: table.id,
-                            seat_index: dc.owner_seat_index,
-                            player: table.seats[seat_idx].player,
-                            card_indices: vec![dc.encrypted_card_index],
-                            card_ranks: vec![card.rank],
-                            card_suits: vec![card.suit],
-                        },
-                    );
-                }
+            if !table.seats[seat_idx].folded {
+                events::emit_event(
+                    events,
+                    TexasPokerEvent::ShowdownHoleCardsRevealed {
+                        table_id: table.id,
+                        seat_index: dc.owner_seat_index,
+                        player: table.seats[seat_idx].player,
+                        card_indices: vec![dc.encrypted_card_index],
+                        card_ranks: vec![card.rank],
+                        card_suits: vec![card.suit],
+                    },
+                );
             }
         }
     }
 }
 
-/// 将明文 G1 bytes 映射回 Card。
-///
-/// 镜像 `table.move` 中的 plaintext → PlayingCard → Card 映射。
-/// 此处简化：通过对比 `deck_state.plaintext` 索引反查 card_index，再 `Card::from_index`。
-fn plaintext_bytes_to_card(plaintext: &[u8]) -> Option<Card> {
-    // plaintext 是 G1 compressed bytes，无法直接反推 Card。
-    // 实际逻辑：调用方应在 decrypted_cards 中保留 encrypted_card_index，
-    // 通过 index % 52 推断 Card。
-    // 此处保留接口，由调用方传入 encrypted_card_index 时使用。
-    let _ = plaintext;
-    None
-}
-
 /// 根据 encrypted_card_index 反查 Card。
+///
+/// typed 化后 `DecryptedCard` 携带 `encrypted_card_index`，可通过 `% 52` 直接得到 Card。
+/// 原 `plaintext_bytes_to_card` 桩函数已删除（G1 点不可逆）。
 fn card_from_encrypted_index(idx: u8) -> Card {
     Card::from_index(idx % 52)
 }
@@ -914,17 +898,19 @@ fn card_from_encrypted_index(idx: u8) -> Card {
 // ========== 部分解密 ==========
 
 /// 部分解密 c2：`result = c2 - Σ token_point`。
-fn partial_decrypt_c2(c2_bytes: &[u8], tokens: &[Vec<u8>]) -> PokerL1Result<Vec<u8>> {
-    let mut result = parse_g1(c2_bytes)?;
+///
+/// typed 化后直接接收/返回 G1Projective，无需 bytes 转换。
+fn partial_decrypt_c2(c2: &G1Projective, tokens: &[G1Projective]) -> G1Projective {
+    let mut result = *c2;
     for t in tokens {
-        let t_pt = parse_g1(t)?;
-        result = g1_sub(&result, &t_pt);
+        result = g1_sub(&result, t);
     }
-    Ok(serialize_g1(&result).to_vec())
+    result
 }
 
-/// 根据 encrypted_card_index 反查明文 G1 bytes。
-fn plaintext_bytes_by_index(table: &TexasPokerTable, idx: u8) -> PokerL1Result<Vec<u8>> {
+/// 根据 encrypted_card_index 反查明文 G1 点。
+#[allow(dead_code)] // 保留供 future RPC / 测试使用。
+fn plaintext_point_by_index(table: &TexasPokerTable, idx: u8) -> PokerL1Result<G1Projective> {
     if (idx as usize) >= table.deck_state.plaintext.len() {
         return Err(PokerL1Error::Serialization(format!(
             "plaintext index {} out of range {}",
@@ -932,7 +918,7 @@ fn plaintext_bytes_by_index(table: &TexasPokerTable, idx: u8) -> PokerL1Result<V
             table.deck_state.plaintext.len()
         )));
     }
-    Ok(table.deck_state.plaintext[idx as usize].clone())
+    Ok(table.deck_state.plaintext[idx as usize].into())
 }
 
 // ========== Reconstruct 协议 ==========
@@ -945,16 +931,18 @@ fn start_reconstruct(table: &mut TexasPokerTable, now_ms: u64, events: &mut Vec<
     // 生成 coefficient = hash_to_scalar("reconstruct_coefficient/" || table_id_bytes || timestamp_ascii)
     let mut input = b"reconstruct_coefficient/".to_vec();
     input.extend_from_slice(&table.id.to_bytes());
-    input.extend_from_slice(&bls_scalar::u64_to_ascii(now_ms));
+    input.extend_from_slice(&utils::u64_to_ascii(now_ms));
+    // typed 化后 coefficient 直接存 BlsScalar（Option<BlsScalar>）。
     let coefficient = match hash_to_scalar(&input) {
-        Ok(s) => bls_scalar::serialize_scalar(&s).to_vec(),
-        Err(_) => bls_scalar::serialize_scalar(&bls_scalar::scalar_one()).to_vec(),
+        Ok(s) => Some(s),
+        Err(_) => Some(utils::scalar_one()),
     };
 
     table.reconstruct_state = super::types::ReconstructState {
         phase: RECONSTRUCT_PHASE_COLLECTING,
         pending_players: active_seats.clone(),
-        coefficient,
+        // BlsScalar → ECScalar（types.rs 字段使用 ECScalar newtype 以支持 Borsh）
+        coefficient: coefficient.map(ECScalar::from),
         player_decks: vec![],
     };
     table.timestamps.reconstruct_started_at = now_ms;
@@ -1062,12 +1050,12 @@ pub fn apply_join_and_shuffle(
     seat_index: u8,
     player: crate::Address,
     buy_in: u64,
-    pk: Vec<u8>,
+    pk: G1Projective,
     _pk_ownership_proof: Vec<u8>,
-    mask_cards: Vec<u8>,
-    output_cards: Vec<u8>,
-    remask_proof_bytes: Vec<u8>,
-    shuffle_proof_bytes: Vec<u8>,
+    mask_cards: Vec<ElGamalCiphertext>,
+    output_cards: Vec<ElGamalCiphertext>,
+    remask_proof: DLEqProof<DefaultCurve, RemaskKind>,
+    shuffle_proof: ZKShuffleProof<DefaultCurve>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if seat_index >= table.max_players {
@@ -1094,76 +1082,83 @@ pub fn apply_join_and_shuffle(
         return Err(PokerL1Error::Serialization("buy_in must be > 0".into()));
     }
 
-    let pk_pt = parse_g1(&pk)?;
+    let pk_pt = pk;
 
-    // 是否首玩家（deck 为空或全零）
+    // 是否首玩家（deck 为空或全为单位元 placeholder）
     let is_first_player = table.deck_state.encrypted.is_empty()
         || table
             .deck_state
             .encrypted
             .iter()
-            .all(|ct| ct.c1.iter().all(|&b| b == 0) && ct.c2.iter().all(|&b| b == 0));
+            .all(|ct| g1_is_identity(&ct.c1) && g1_is_identity(&ct.c2));
 
     // ZK 验证：pk_ownership（首玩家以外）
     if !is_first_player {
-        let _ = zk_verifier::verify_or_skip(table.config.skip_shuffle(), || {
-            if !zk_verifier::verify_pk_ownership(&pk_pt, &_pk_ownership_proof) {
+        let _ = utils::verify_or_skip(table.config.skip_shuffle(), || {
+            if !utils::verify_pk_ownership(&pk_pt, &_pk_ownership_proof) {
                 return Err(PokerL1Error::Serialization("pk_ownership failed".into()));
             }
             Ok(true)
         })?;
     }
 
-    // 反序列化 mask_cards / output_cards / proofs
-    let mask_cts = ser::deserialize_ciphertexts(&mask_cards)?;
-    let output_cts = ser::deserialize_ciphertexts(&output_cards)?;
-    let remask_proof = ser::deserialize_remask_proof(&remask_proof_bytes)?;
-    let shuffle_proof = ser::deserialize_shuffle_proof(&shuffle_proof_bytes)?;
+    // typed 化后无需反序列化：Args 字段已是 Vec<ElGamalCiphertext> / DLEqProof / ZKShuffleProof
+    let mask_cts = mask_cards;
+    let output_cts = output_cards;
 
     // 首玩家：input = (G, plaintext_i)；后续：input = 当前 deck
-    let input_cts: Vec<elgamal::ElGamalCiphertext> = if is_first_player {
+    let input_cts: Vec<ElGamalCiphertext> = if is_first_player {
         let g = g1_generator();
         table
             .deck_state
             .plaintext
             .iter()
-            .map(|m| {
-                let m_pt = parse_g1(m)?;
-                Ok::<_, PokerL1Error>(elgamal::ElGamalCiphertext::new(g, m_pt))
-            })
-            .collect::<PokerL1Result<Vec<_>>>()?
+            .map(|m| ElGamalCiphertext { c1: g, c2: m.0 })
+            .collect()
     } else {
-        table
-            .deck_state
-            .encrypted
-            .iter()
-            .map(bytes_ct_to_g1)
-            .collect::<PokerL1Result<Vec<_>>>()?
+        table.deck_state.encrypted.clone()
     };
 
     // ZK verify remask (input → mask_cts)
-    let _ = zk_verifier::verify_or_skip(table.config.skip_remask(), || {
-        let mut t = zk_verifier::new_mask_shuffle_transcript();
-        super::crypto::remask_proof::verify(&remask_proof, &input_cts, &mask_cts, &pk_pt, &mut t)
+    let _ = utils::verify_or_skip(table.config.skip_remask(), || {
+        let mut t = utils::new_mask_shuffle_transcript();
+        let ok = DLEqProof::<DefaultCurve, RemaskKind>::verify(
+            &remask_proof,
+            &input_cts,
+            &mask_cts,
+            &pk_pt,
+            &mut t,
+        );
+        if ok {
+            Ok(true)
+        } else {
+            Err(PokerL1Error::Serialization("remask proof failed".into()))
+        }
     })?;
 
     // ZK verify shuffle (mask_cts → output_cts)，用 new_agg_pk
-    let new_agg_pk = add_pk_to_aggregated(&table.deck_state.aggregated_pk, &pk_pt)?;
-    let new_agg_pk_pt = parse_g1(&new_agg_pk)?;
-    let _ = zk_verifier::verify_or_skip(table.config.skip_shuffle(), || {
-        let mut t = zk_verifier::new_mask_shuffle_transcript();
-        super::crypto::shuffle_proof::verify(
+    // ECPoint → G1Projective（types.rs 字段为 Option<ECPoint>，add_pk_to_aggregated 接受 Option<&G1Projective>）
+    let agg_pk_pt: Option<G1Projective> =
+        table.deck_state.aggregated_pk.as_ref().map(|p| p.0);
+    let new_agg_pk = add_pk_to_aggregated(agg_pk_pt.as_ref(), &pk_pt);
+    let new_agg_pk_pt = new_agg_pk.unwrap_or(G1Projective::identity());
+    let _ = utils::verify_or_skip(table.config.skip_shuffle(), || {
+        let mut t = utils::new_mask_shuffle_transcript();
+        ZKShuffleProof::verify(
             &shuffle_proof,
             &mask_cts,
             &output_cts,
             &new_agg_pk_pt,
             &mut t,
         )
+        .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
+        Ok(true)
     })?;
 
     // 应用状态变更
-    table.deck_state.aggregated_pk = new_agg_pk;
-    table.deck_state.encrypted = output_cts.iter().map(g1_ct_to_bytes).collect();
+    // G1Projective → ECPoint（types.rs 字段为 Option<ECPoint>）
+    table.deck_state.aggregated_pk = new_agg_pk.map(ECPoint::from);
+    table.deck_state.encrypted = output_cts;
 
     // 初始化座位
     table.seats[seat_index as usize] = Seat {
@@ -1177,7 +1172,7 @@ pub fn apply_join_and_shuffle(
         acted_this_round: false,
         is_waiting: false,
         left_during_hand: false,
-        pk,
+        pk: ECPoint::from(pk),
         refunded: false,
     };
     table.chip_pool = table.chip_pool.checked_add(buy_in).ok_or_else(|| {
@@ -1209,8 +1204,8 @@ pub fn apply_join_and_shuffle(
 pub fn apply_submit_shuffle_v2(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    output_cards: Vec<u8>,
-    shuffle_proof_bytes: Vec<u8>,
+    output_cards: Vec<ElGamalCiphertext>,
+    shuffle_proof: ZKShuffleProof<DefaultCurve>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.shuffle_state.phase == SHUFFLE_PHASE_NONE {
@@ -1229,33 +1224,38 @@ pub fn apply_submit_shuffle_v2(
         return Err(PokerL1Error::Serialization("already completed shuffle".into()));
     }
 
-    let output_cts = ser::deserialize_ciphertexts(&output_cards)?;
-    let shuffle_proof = ser::deserialize_shuffle_proof(&shuffle_proof_bytes)?;
+    // typed 化后无需反序列化
+    let output_cts = output_cards;
 
-    let input_cts: Vec<elgamal::ElGamalCiphertext> = table
+    // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）
+    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.clone();
+
+    // ECPoint → G1Projective（aggregated_pk 字段为 Option<ECPoint>）
+    let agg_pk_pt: G1Projective = table
         .deck_state
-        .encrypted
-        .iter()
-        .map(bytes_ct_to_g1)
-        .collect::<PokerL1Result<Vec<_>>>()?;
-
-    let agg_pk_pt = parse_g1(&table.deck_state.aggregated_pk)?;
-    let _ = zk_verifier::verify_or_skip(table.config.skip_shuffle(), || {
-        let mut t = zk_verifier::new_shuffle_transcript();
-        super::crypto::shuffle_proof::verify(
+        .aggregated_pk
+        .as_ref()
+        .map(|p| **p)
+        .unwrap_or(G1Projective::identity());
+    let _ = utils::verify_or_skip(table.config.skip_shuffle(), || {
+        let mut t = utils::new_shuffle_transcript();
+        ZKShuffleProof::verify(
             &shuffle_proof,
             &input_cts,
             &output_cts,
             &agg_pk_pt,
             &mut t,
         )
+        .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
+        Ok(true)
     })?;
 
     // 链上注入：new_cts[i] = add_pk_to_c2(output_cts[i], player_pk)
-    let player_pk = parse_g1(&table.seats[seat_index as usize].pk)?;
-    let new_cts: Vec<BytesCiphertext> = output_cts
+    // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
+    let player_pk: G1Projective = table.seats[seat_index as usize].pk.into();
+    let new_cts: Vec<ElGamalCiphertext> = output_cts
         .iter()
-        .map(|ct| g1_ct_to_bytes(&elgamal::add_pk_to_c2(ct, &player_pk)))
+        .map(|ct| utils::add_pk_to_c2(ct, &player_pk))
         .collect();
     table.deck_state.encrypted = new_cts;
 
@@ -1284,18 +1284,18 @@ pub fn apply_submit_player_reveal_tokens(
     table: &mut TexasPokerTable,
     seat_index: u8,
     assignment_indices: Vec<u8>,
-    reveal_tokens: Vec<Vec<u8>>,
-    proof_bytes_list: Vec<Vec<u8>>,
+    reveal_tokens: Vec<G1Projective>,
+    proofs: Vec<RevealTokenProof<DefaultCurve>>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE {
         return Err(PokerL1Error::Serialization("reveal phase is NONE".into()));
     }
     if assignment_indices.len() != reveal_tokens.len()
-        || assignment_indices.len() != proof_bytes_list.len()
+        || assignment_indices.len() != proofs.len()
     {
         return Err(PokerL1Error::Serialization(
-            "assignment_indices/reveal_tokens/proof_bytes_list length mismatch".into(),
+            "assignment_indices/reveal_tokens/proofs length mismatch".into(),
         ));
     }
     if !table.seats[seat_index as usize].is_occupied() {
@@ -1303,8 +1303,8 @@ pub fn apply_submit_player_reveal_tokens(
     }
 
     let phase = table.reveal_token_state.reveal_phase;
-    let player_pk = table.seats[seat_index as usize].pk.clone();
-    let expected_pk = parse_g1(&player_pk)?;
+    // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
+    let expected_pk: G1Projective = table.seats[seat_index as usize].pk.into();
 
     for k in 0..assignment_indices.len() {
         let ai = assignment_indices[k] as usize;
@@ -1335,31 +1335,30 @@ pub fn apply_submit_player_reveal_tokens(
             )));
         }
 
-        let encrypted_card = table.deck_state.encrypted[card_index as usize].clone();
-        let token = &reveal_tokens[k];
-        let proof_bytes = &proof_bytes_list[k];
+        let encrypted_card = table.deck_state.encrypted[card_index as usize];
+        let token = reveal_tokens[k];
+        let proof = &proofs[k];
 
-        let token_pt = parse_g1(token)?;
-        let _ = zk_verifier::verify_or_skip(table.config.skip_reveal(), || {
-            let proof = ser::deserialize_reveal_token_proof(proof_bytes)?;
-            let ct_g1 = bytes_ct_to_g1(&encrypted_card)?;
-            if !super::crypto::reveal_token_proof::verify(
-                &proof,
-                &ct_g1,
+        let token_pt = token;
+        let _ = utils::verify_or_skip(table.config.skip_reveal(), || {
+            RevealTokenProof::verify(
+                proof,
+                &encrypted_card,
                 &token_pt,
                 &expected_pk,
-            )? {
-                return Err(PokerL1Error::Serialization("reveal_token proof failed".into()));
-            }
+                &mut MerlinTranscript::new(b"reveal_token_proof_v3"),
+            )
+            .map_err(|e| PokerL1Error::Serialization(format!("reveal token proof: {e:?}")))?;
             Ok(true)
         })?;
 
         // 追加 token + 移除 pending
         {
             let assignment = &mut table.reveal_token_state.assignments[ai];
+            // G1Projective → ECPoint（RevealTokenData.token 字段为 ECPoint）
             assignment.reveal_tokens.push(RevealTokenData {
                 seat_index,
-                token: token.clone(),
+                token: ECPoint::from(token),
             });
             remove_from_pending(&mut assignment.pending_players, seat_index);
         }
@@ -1377,47 +1376,45 @@ pub fn apply_submit_player_reveal_tokens(
         // 若 pending 为空，执行链上解密
         let pending_empty = table.reveal_token_state.assignments[ai].pending_players.is_empty();
         if pending_empty {
-            let tokens: Vec<Vec<u8>> = table.reveal_token_state.assignments[ai]
+            let tokens: Vec<G1Projective> = table.reveal_token_state.assignments[ai]
                 .reveal_tokens
                 .iter()
-                .map(|d| d.token.clone())
+                .map(|d| d.token.0)
                 .collect();
-            let c2_bytes = &table.deck_state.encrypted[card_index as usize].c2;
-            let decrypted_c2 = partial_decrypt_c2(c2_bytes, &tokens)?;
+            let c2 = table.deck_state.encrypted[card_index as usize].c2;
+            let decrypted_c2 = partial_decrypt_c2(&c2, &tokens);
 
             if phase == REVEAL_PHASE_SHOWDOWN {
                 // 升级已存在的 partial decrypted_card 为 plaintext
                 for dc in &mut table.deck_state.decrypted_cards {
-                    if dc.encrypted_card_index == card_index && !dc.ciphertext_bytes.is_empty() {
-                        let existing_c2 = &dc.ciphertext_bytes[48..]; // 跳过 c1
-                        let mut p = parse_g1(existing_c2)?;
-                        let t_pt = parse_g1(&decrypted_c2)?;
-                        p = g1_sub(&p, &t_pt);
-                        dc.plaintext_bytes = serialize_g1(&p).to_vec();
-                        dc.ciphertext_bytes.clear();
+                    if dc.encrypted_card_index == card_index && dc.ciphertext.is_some() {
+                        let existing_c2 = dc.ciphertext.as_ref().unwrap().c2;
+                        let p = g1_sub(&existing_c2, &decrypted_c2);
+                        dc.plaintext = Some(ECPoint::from(p));
+                        dc.ciphertext = None;
                         break;
                     }
                 }
             } else if phase == REVEAL_PHASE_PREFLOP {
-                // 部分解密：ciphertext_bytes = c1 || partial_c2，plaintext_bytes 空
-                let c1_bytes = &table.deck_state.encrypted[card_index as usize].c1;
-                let mut ct_bytes = Vec::with_capacity(96);
-                ct_bytes.extend_from_slice(c1_bytes);
-                ct_bytes.extend_from_slice(&decrypted_c2);
+                // 部分解密：ciphertext = Some(ElGamalCiphertext { c1, c2: partial })，plaintext = None
+                let c1 = table.deck_state.encrypted[card_index as usize].c1;
                 let owner = find_hand_card_owner(table, card_index).unwrap_or(OWNER_SEAT_PUBLIC);
                 table.deck_state.decrypted_cards.push(DecryptedCard {
                     encrypted_card_index: card_index,
                     owner_seat_index: owner,
-                    ciphertext_bytes: ct_bytes,
-                    plaintext_bytes: vec![],
+                    ciphertext: Some(ElGamalCiphertext {
+                        c1,
+                        c2: decrypted_c2,
+                    }),
+                    plaintext: None,
                 });
             } else {
                 // 公共牌：完全解密
                 table.deck_state.decrypted_cards.push(DecryptedCard {
                     encrypted_card_index: card_index,
                     owner_seat_index: OWNER_SEAT_PUBLIC,
-                    ciphertext_bytes: vec![],
-                    plaintext_bytes: decrypted_c2,
+                    ciphertext: None,
+                    plaintext: Some(ECPoint::from(decrypted_c2)),
                 });
             }
 
@@ -1453,10 +1450,10 @@ fn find_hand_card_owner(table: &TexasPokerTable, card_index: u8) -> Option<u8> {
 pub fn apply_submit_reconstruct_deck(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    output_cards: Vec<u8>,
-    _swap_cards: Vec<u8>,
-    _user_readable_cards: Vec<u8>,
-    proof_bytes: Vec<u8>,
+    output_cards: Vec<ElGamalCiphertext>,
+    swap_cards: Vec<ElGamalCiphertext>,
+    user_readable_cards: Vec<ElGamalCiphertext>,
+    proof: ReconstructProof<DefaultCurve>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.reconstruct_state.phase != RECONSTRUCT_PHASE_COLLECTING {
@@ -1473,29 +1470,29 @@ pub fn apply_submit_reconstruct_deck(
         ));
     }
 
-    let output_cts = ser::deserialize_ciphertexts(&output_cards)?;
-    let proof = ser::deserialize_reconstruct_proof(&proof_bytes)?;
+    // typed 化后无需反序列化：output_cards / swap_cards / user_readable_cards 已是
+    // Vec<ElGamalCiphertext>，proof 已是 ReconstructProof<DefaultCurve>。
+    let output_cts = output_cards;
+    let swap_cts = swap_cards;
+    let readable_cts = user_readable_cards;
 
-    let user_pk = parse_g1(&table.seats[seat_index as usize].pk)?;
-    let card_points: Vec<G1Projective> = table
-        .deck_state
-        .plaintext
-        .iter()
-        .map(|m| parse_g1(m))
-        .collect::<PokerL1Result<Vec<_>>>()?;
+    let user_pk: G1Projective = table.seats[seat_index as usize].pk.0;
+    // ECPoint → G1Projective：types.rs 字段已改为 Vec<ECPoint>，需提取内部 G1Projective。
+    let card_points: Vec<G1Projective> = table.deck_state.plaintext.iter().map(|p| p.0).collect();
 
-    let swap_cts = ser::deserialize_ciphertexts(&_swap_cards).unwrap_or_default();
-    let readable_cts = ser::deserialize_ciphertexts(&_user_readable_cards).unwrap_or_default();
-
-    let _ = zk_verifier::verify_or_skip(table.config.skip_reconstruct(), || {
-        zk_verifier::verify_reconstruct(
+    let _ = utils::verify_or_skip(table.config.skip_reconstruct(), || {
+        let mut t = utils::new_reconstruct_transcript();
+        ReconstructProof::verify(
+            &proof,
             &card_points,
             &output_cts,
             &swap_cts,
             &readable_cts,
             &user_pk,
-            &proof,
+            &mut t,
         )
+        .map_err(|e| PokerL1Error::Serialization(format!("reconstruct proof: {e}")))?;
+        Ok(true)
     })?;
 
     remove_from_pending(&mut table.reconstruct_state.pending_players, seat_index);
@@ -1504,7 +1501,7 @@ pub fn apply_submit_reconstruct_deck(
         .player_decks
         .push(ReconstructPlayerDeck {
             seat_index,
-            output_cts: output_cts.iter().map(g1_ct_to_bytes).collect(),
+            output_cts,
         });
 
     events::emit_event(
@@ -1528,8 +1525,8 @@ pub fn apply_submit_reconstruct_deck(
 pub fn apply_leave_with_proof(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    output_cards: Vec<u8>,
-    leave_proof_bytes: Vec<u8>,
+    output_cards: Vec<ElGamalCiphertext>,
+    leave_proof: DLEqProof<DefaultCurve, LeaveKind>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if seat_index >= table.max_players {
@@ -1547,24 +1544,31 @@ pub fn apply_leave_with_proof(
         ));
     }
 
-    let output_cts = ser::deserialize_ciphertexts(&output_cards)?;
-    let leave_proof = ser::deserialize_leave_proof(&leave_proof_bytes)?;
-
-    let input_cts: Vec<elgamal::ElGamalCiphertext> = table
-        .deck_state
-        .encrypted
-        .iter()
-        .map(bytes_ct_to_g1)
-        .collect::<PokerL1Result<Vec<_>>>()?;
-    let player_pk = parse_g1(&table.seats[seat_index as usize].pk)?;
-    let _ = zk_verifier::verify_or_skip(table.config.skip_remask(), || {
-        let mut t = zk_verifier::new_leave_transcript();
-        super::crypto::leave_proof::verify(&leave_proof, &input_cts, &output_cts, &player_pk, &mut t)
+    // typed 化后无需反序列化。
+    let output_cts = output_cards;
+    // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）。
+    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.clone();
+    let player_pk = table.seats[seat_index as usize].pk;
+    let _ = utils::verify_or_skip(table.config.skip_remask(), || {
+        let mut t = utils::new_leave_transcript();
+        let ok = DLEqProof::<DefaultCurve, LeaveKind>::verify(
+            &leave_proof,
+            &input_cts,
+            &output_cts,
+            &player_pk,
+            &mut t,
+        );
+        if ok {
+            Ok(true)
+        } else {
+            Err(PokerL1Error::Serialization("leave proof verify failed".into()))
+        }
     })?;
 
-    let new_agg = remove_pk_from_aggregated(&table.deck_state.aggregated_pk, &player_pk)?;
-    table.deck_state.aggregated_pk = new_agg;
-    table.deck_state.encrypted = output_cts.iter().map(g1_ct_to_bytes).collect();
+    // remove_pk_from_aggregated 已返回 Option<G1Projective>（None 表示结果为单位元/空）。
+    let new_agg = remove_pk_from_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &player_pk);
+    table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
+    table.deck_state.encrypted = output_cts;
 
     remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
     remove_from_pending(&mut table.shuffle_state.completed_players, seat_index);
@@ -2293,14 +2297,11 @@ fn reset_for_next_hand(
         s.folded = false;
         s.all_in = false;
         s.acted_this_round = false;
-        if s.is_waiting && !s.pk.is_empty() {
-            if let Ok(pk_pt) = parse_g1(&s.pk) {
-                if let Ok(new_agg) =
-                    add_pk_to_aggregated(&table.deck_state.aggregated_pk, &pk_pt)
-                {
-                    table.deck_state.aggregated_pk = new_agg;
-                }
-            }
+        // typed 化后 pk 是 G1Projective；用 is_identity 判断未设置。
+        if s.is_waiting && !g1_is_identity(&s.pk) {
+            // add_pk_to_aggregated 接受 Option<&G1Projective>，返回 Option<G1Projective>。
+            let new_agg = add_pk_to_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &s.pk);
+            table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
         }
         s.is_waiting = false;
         s.left_during_hand = false;
@@ -2314,16 +2315,13 @@ fn reset_for_next_hand(
         }
     }
     for &i in &to_remove {
-        let pk = table.seats[i as usize].pk.clone();
+        // G1Projective 是 Copy，直接拷贝。
+        let pk = table.seats[i as usize].pk;
         let player = table.seats[i as usize].player;
-        if !pk.is_empty() {
-            if let Ok(pk_pt) = parse_g1(&pk) {
-                if let Ok(new_agg) =
-                    remove_pk_from_aggregated(&table.deck_state.aggregated_pk, &pk_pt)
-                {
-                    table.deck_state.aggregated_pk = new_agg;
-                }
-            }
+        if !g1_is_identity(&pk) {
+            let new_agg =
+                remove_pk_from_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &pk);
+            table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
         }
         table.seats[i as usize] = Seat::empty();
         events::emit_event(
@@ -2337,7 +2335,8 @@ fn reset_for_next_hand(
     }
 
     if count_active_occupied(&table.seats) == 0 {
-        table.deck_state.aggregated_pk.clear();
+        // typed 化后 aggregated_pk 是 Option<G1Projective>；用 None 表示空。
+        table.deck_state.aggregated_pk = None;
     }
 
     table.pot = 0;
@@ -2376,7 +2375,8 @@ pub fn kick_player_internal(
 
     let refund_amt = seat.stack;
     let was_waiting = seat.is_waiting;
-    let pk = seat.pk.clone();
+    // G1Projective 是 Copy，无需 clone。
+    let pk = seat.pk;
     let player = seat.player;
 
     table.pot += seat.bet;
@@ -2388,16 +2388,12 @@ pub fn kick_player_internal(
     seat.all_in = false;
     seat.acted_this_round = false;
     seat.is_waiting = false;
-    seat.pk.clear();
+    // typed 化后 pk 是 G1Projective；用 identity 表示空。
+    seat.pk = ECPoint(G1Projective::identity());
 
-    if !pk.is_empty() && !was_waiting {
-        if let Ok(pk_pt) = parse_g1(&pk) {
-            if let Ok(new_agg) =
-                remove_pk_from_aggregated(&table.deck_state.aggregated_pk, &pk_pt)
-            {
-                table.deck_state.aggregated_pk = new_agg;
-            }
-        }
+    if !g1_is_identity(&pk) && !was_waiting {
+        let new_agg = remove_pk_from_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &pk);
+        table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
     }
 
     if refund_amt > 0 {
@@ -2481,21 +2477,23 @@ mod tests {
         assert_eq!(table.deck_state.encrypted.len(), 52);
         assert_eq!(table.deck_state.plaintext.len(), 52);
         for ct in &table.deck_state.encrypted {
-            assert_eq!(ct.c1.len(), 48);
-            assert_eq!(ct.c2.len(), 48);
-            assert!(ct.c1.iter().any(|&b| b != 0));
+            // c1 = G（generator，非 identity）；c2 = plaintext_i（非 identity）。
+            assert!(!g1_is_identity(&ct.c1));
+            assert!(!g1_is_identity(&ct.c2));
         }
     }
 
     #[test]
     fn test_is_pk_registered() {
         let mut table = make_table();
-        let pk = vec![0xAB; 48];
+        let g = g1_generator();
+        let pk = g * scalar_from_u64(0xAB);
         assert!(!is_pk_registered(&table.seats, &pk));
         table.seats[0].player = [0x01; 20];
-        table.seats[0].pk = pk.clone();
+        table.seats[0].pk = ECPoint::from(pk);
         assert!(is_pk_registered(&table.seats, &pk));
-        assert!(!is_pk_registered(&table.seats, &vec![0xCD; 48]));
+        let other_pk = g * scalar_from_u64(0xCD);
+        assert!(!is_pk_registered(&table.seats, &other_pk));
     }
 
     #[test]
@@ -2549,18 +2547,20 @@ mod tests {
         let pk1 = g * scalar_from_u64(111);
         let pk2 = g * scalar_from_u64(222);
 
-        let agg1 = add_pk_to_aggregated(&[], &pk1).unwrap();
-        assert_eq!(agg1, serialize_g1(&pk1).to_vec());
+        // typed 化后 add/remove_pk_to/from_aggregated 接受 Option<&G1Projective>，
+        // 返回 Option<G1Projective>（None = 空/单位元）。
+        let agg1 = add_pk_to_aggregated(None, &pk1);
+        assert_eq!(agg1, Some(pk1));
 
-        let agg2 = add_pk_to_aggregated(&agg1, &pk2).unwrap();
+        let agg2 = add_pk_to_aggregated(agg1.as_ref(), &pk2);
         let expected = g1_add(&pk1, &pk2);
-        assert_eq!(agg2, serialize_g1(&expected).to_vec());
+        assert_eq!(agg2, Some(expected));
 
-        let agg3 = remove_pk_from_aggregated(&agg2, &pk1).unwrap();
-        assert_eq!(agg3, serialize_g1(&pk2).to_vec());
+        let agg3 = remove_pk_from_aggregated(agg2.as_ref(), &pk1);
+        assert_eq!(agg3, Some(pk2));
 
-        let agg4 = remove_pk_from_aggregated(&agg3, &pk2).unwrap();
-        assert!(agg4.is_empty());
+        let agg4 = remove_pk_from_aggregated(agg3.as_ref(), &pk2);
+        assert_eq!(agg4, None);
     }
 
     #[test]
@@ -2738,22 +2738,18 @@ mod tests {
         let pk0 = g * scalar_from_u64(42);
         let pk1 = g * scalar_from_u64(43);
         let pk2 = g * scalar_from_u64(44);
-        let pk0_bytes = serialize_g1(&pk0).to_vec();
-        let pk1_bytes = serialize_g1(&pk1).to_vec();
-        let pk2_bytes = serialize_g1(&pk2).to_vec();
         let agg = pk0 + pk1 + pk2;
-        let agg_bytes = serialize_g1(&agg).to_vec();
 
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 500;
-        table.seats[0].pk = pk0_bytes;
+        table.seats[0].pk = ECPoint::from(pk0);
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 500;
-        table.seats[1].pk = pk1_bytes;
+        table.seats[1].pk = ECPoint::from(pk1);
         table.seats[2].player = [0x03; 20];
         table.seats[2].stack = 500;
-        table.seats[2].pk = pk2_bytes;
-        table.deck_state.aggregated_pk = agg_bytes;
+        table.seats[2].pk = ECPoint::from(pk2);
+        table.deck_state.aggregated_pk = Some(ECPoint::from(agg));
         // 用一个非 NONE 的 round_state，使 reset_for_next_hand 不会被触发
         // （count_active_players 在 kick 后仍 >= MIN_PLAYERS_TO_START）。
         table.round_state = ROUND_PREFLOP;
@@ -2764,9 +2760,10 @@ mod tests {
         assert!(table.seats[0].left_during_hand);
         assert!(table.seats[0].folded);
         assert_eq!(table.seats[0].stack, 0);
-        assert!(table.seats[0].pk.is_empty());
+        // Seat::empty() 后 pk 为 G1Projective::identity()（默认值）。
+        assert!(g1_is_identity(&table.seats[0].pk));
         // aggregated_pk 应 = pk1 + pk2（移除 pk0）。
-        let new_agg = parse_g1(&table.deck_state.aggregated_pk).unwrap();
+        let new_agg = table.deck_state.aggregated_pk.unwrap();
         let expected = pk1 + pk2;
         assert!(g1_equal(&new_agg, &expected));
         assert!(events
@@ -2782,15 +2779,14 @@ mod tests {
         let g = g1_generator();
         let sk = scalar_from_u64(42);
         let pk = g * sk;
-        let plaintext = bls_scalar::hash_to_g1(b"test_card");
+        let plaintext = utils::hash_to_g1(b"test_card");
         let r = scalar_from_u64(7);
-        let ct = elgamal::encrypt(&plaintext, &pk, &r);
-        let token = elgamal::gen_reveal_token(&ct, &sk);
-        let token_bytes = serialize_g1(&token).to_vec();
+        let ct = ElGamalCiphertext::encrypt(&plaintext, &pk, &r);
+        let token = ct.gen_reveal_token(&sk);
 
-        let result = partial_decrypt_c2(&serialize_g1(&ct.c2), &[token_bytes]).unwrap();
-        let result_pt = parse_g1(&result).unwrap();
-        assert!(g1_equal(&result_pt, &plaintext));
+        // typed 化后 partial_decrypt_c2 直接接受 G1Projective，返回 G1Projective。
+        let result = partial_decrypt_c2(&ct.c2, &[token]);
+        assert!(g1_equal(&result, &plaintext));
     }
 
     #[test]

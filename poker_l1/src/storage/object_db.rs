@@ -55,7 +55,7 @@ impl ObjectDb {
         let iter = db.iterator_cf(cf, IteratorMode::Start);
         for item in iter {
             let (_key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
-            let object: Object = bcs::from_bytes(&value)?;
+            let object: Object = borsh::from_slice(&value)?;
             // 启动加载：DB 中的对象不应冲突；若冲突说明 DB 已损坏，返回错误
             store.create(object)?;
         }
@@ -101,7 +101,7 @@ impl ObjectDb {
         }
 
         let key = object.id.to_bytes();
-        let value = bcs::to_bytes(&object)?;
+        let value = borsh::to_vec(&object)?;
 
         // 先持久化
         self.db
@@ -141,7 +141,7 @@ impl ObjectDb {
         // 读取更新后的对象，持久化
         let updated = self.store.read(id)?.clone();
         let key = id.to_bytes();
-        let value = bcs::to_bytes(&updated)?;
+        let value = borsh::to_vec(&updated)?;
         self.db
             .put_cf(self.objects_cf(), key, &value)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
@@ -162,7 +162,7 @@ impl ObjectDb {
         // 持久化更新后的对象
         let updated = self.store.read(id)?.clone();
         let key = id.to_bytes();
-        let value = bcs::to_bytes(&updated)?;
+        let value = borsh::to_vec(&updated)?;
         self.db
             .put_cf(self.objects_cf(), key, &value)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
@@ -209,6 +209,18 @@ impl ObjectDb {
     /// 迭代所有 live 对象（借用内存）。
     pub fn iter(&self) -> impl Iterator<Item = &Object> {
         self.store.iter()
+    }
+
+    /// 创建当前状态的 fork（snapshot），用于 tx 执行引擎的"试执行 → 提交/回滚"模式。
+    ///
+    /// 克隆内存 `ObjectStore`（含 SMT + objects HashMap），不复制 RocksDB。
+    /// 后续 snapshot 上的写操作同时作用于克隆的 store（保持 state_root 一致）和 mutation log。
+    /// `apply_to(self)` 将 mutation log 回放到主 ObjectDb（commit），`discard()` 丢弃（rollback）。
+    ///
+    /// 使用场景：`build_block_from_vertex` 试执行 vertex 的 txs 计算新 state_root，
+    /// 试执行失败或决定不提交时调用 `discard()`，提交时调用 `apply_to()`。
+    pub fn create_snapshot(&self) -> super::object_db_snapshot::ObjectDbSnapshot {
+        super::object_db_snapshot::ObjectDbSnapshot::from_store(self.store.clone())
     }
 }
 
@@ -395,7 +407,7 @@ mod tests {
         db.create(o.clone()).unwrap();
 
         let path = db.prove(&o.id).unwrap();
-        let value_bytes = bcs::to_bytes(&o).unwrap();
+        let value_bytes = borsh::to_vec(&o).unwrap();
         assert!(crate::object_model::SparseMerkleTree::verify(
             &db.state_root(),
             &o.id.merkle_key(),

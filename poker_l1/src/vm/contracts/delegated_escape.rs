@@ -25,6 +25,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::ChainId;
@@ -42,7 +43,7 @@ pub const DEFAULT_DELEGATED_ESCAPE_MAX_EXPIRY_BLOCKS: u64 = 100;
 ///
 /// 操作方签名授权 watchtower/参与者在指定 expiry_height 前代为提交
 /// `force_checkpoint`，用于操作方临时离线场景。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct DelegatedEscapeAuthorization {
     /// Game 对象 ID。
     pub game_id: ObjectID,
@@ -139,7 +140,7 @@ impl DelegatedEscapeAuthorization {
 ///
 /// 操作方签名 → `Game.delegated_escape_nonce += 1` → 所有旧 nonce 凭证失效。
 /// 走 Public 通道，正常计费 gas。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RevokeDelegatedEscapeTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,

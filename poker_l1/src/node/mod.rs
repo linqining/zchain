@@ -30,7 +30,7 @@ use crate::consensus::{
     compute_genesis_chain_randomness,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::executor::{ExecutionEnvironment, execute_block};
+use crate::executor::{BlockExecutionOutcome, ExecutionEnvironment, execute_block};
 use crate::object_model::{Object, ObjectID};
 use crate::signature::TaggedPubkey;
 use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
@@ -711,7 +711,7 @@ impl Node {
         .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
         let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
-        let outcome = execute_block(&env, &block.public_txs, &mut object_db, &mut account_store);
+        let outcome = execute_block(&env, &block.public_txs, &mut *object_db, &mut account_store);
         validate_state_root_transition(outcome.state_root, header.state_root)?;
 
         Ok(())
@@ -719,15 +719,52 @@ impl Node {
 
     /// 当前全局状态根（所有 live 对象的 Sparse Merkle Root）。
     ///
-    /// 重构3：暴露给上层产块逻辑用作 block header 的 `state_root` 字段。
-    /// 注：当前未接入 tx 执行引擎，返回的是 object_db 的当前 SMT root
-    /// （即上一 block 后的状态根）。tx 执行引擎接入后，产块前应先执行 tx
-    /// 更新 object_db，再调用本方法获取执行后的新 state_root。
+    /// 返回 object_db 的当前 SMT root（即上一 block 后的状态根）。
+    /// 产块时应先调用 [`Self::execute_block_on_state`] 执行 vertex 中的 txs，
+    /// 取返回的 `outcome.state_root` 作为新 block header 的 `state_root`。
     pub fn state_root(&self) -> Hash {
         self.object_db
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .state_root()
+    }
+
+    /// 获取预编译合约注册表引用（共享 Arc）。
+    ///
+    /// 供 `build_block_from_vertex` 构造 [`ExecutionEnvironment`] 时使用，
+    /// 避免 main.rs 直接访问 Node 私有字段。
+    #[must_use]
+    pub fn precompile_registry(&self) -> Arc<PrecompileRegistry> {
+        Arc::clone(&self.precompile_registry)
+    }
+
+    /// 在当前链状态上执行 txs，返回执行结果（含新 state_root）。
+    ///
+    /// 供 `build_block_from_vertex` 在产块时调用：执行 vertex 中的 txs，
+    /// 取 `outcome.state_root` 作为新 block 的 state_root。
+    ///
+    /// 内部加锁 `object_db` + `account_store`，调用 [`execute_block`]。
+    /// execute_block 已设计为"失败 tx 返回失败回执，不阻断 block"，
+    /// 故仅在底层错误（锁中毒 / RocksDB 写失败）时返回 `Err`。
+    ///
+    /// # 参数
+    ///
+    /// - `env`：执行环境（chain_id / height / timestamp / gas limit / precompile registry）
+    /// - `txs`：待执行的有序 tx 列表（caller 应先 S9 排序）
+    pub fn execute_block_on_state(
+        &self,
+        env: &ExecutionEnvironment,
+        txs: &[Transaction],
+    ) -> PokerL1Result<BlockExecutionOutcome> {
+        let mut object_db = self
+            .object_db
+            .lock()
+            .map_err(|e| PokerL1Error::Other(format!("object_db mutex poisoned: {e}")))?;
+        let mut account_store = self
+            .account_store
+            .lock()
+            .map_err(|e| PokerL1Error::Other(format!("account_store mutex poisoned: {e}")))?;
+        Ok(execute_block(env, txs, &mut *object_db, &mut *account_store))
     }
 
     /// 按 hash 查询 DAG vertex。

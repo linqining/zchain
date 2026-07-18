@@ -33,6 +33,7 @@
 //! - 轻客户端接口（`LightClientVerifyRequest` / `verify_block_header_quorum`）为骨架，
 //!   实际 secp256k1 多签验证逻辑在 Task 13 ValidatorSet 完成后填充
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockHeader;
@@ -41,7 +42,7 @@ use crate::error::{PokerL1Error, PokerL1Result};
 /// 时间共识可治理参数（SubTask 11.2 / 11.3）。
 ///
 /// 所有 timestamp 相关参数为软引用（SEC-M5），所有超时参数以 block height 计量。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TimeConsensusConfig {
     /// `timestamp_ms` 相对 `prev.timestamp_ms` 的最大间隔（毫秒，软引用）。
     ///
@@ -769,8 +770,8 @@ mod tests {
     #[test]
     fn config_bcs_roundtrip() {
         let cfg = TimeConsensusConfig::new();
-        let bytes = bcs::to_bytes(&cfg).unwrap();
-        let recovered: TimeConsensusConfig = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&cfg).unwrap();
+        let recovered: TimeConsensusConfig = borsh::from_slice(&bytes).unwrap();
         assert_eq!(cfg, recovered);
     }
 

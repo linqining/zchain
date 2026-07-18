@@ -33,7 +33,7 @@ use std::sync::Arc;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
-use crate::storage::ObjectDb;
+use crate::storage::{ObjectBackend, ObjectDb};
 use crate::{Address, BlockHeight, ChainId};
 
 /// 预编译合约 trait（统一接口）。
@@ -54,7 +54,7 @@ pub trait Precompile: Send + Sync {
     /// - `method_selector`：方法选择器（32 字节）
     /// - `args`：调用参数（BCS 编码）
     /// - `env`：执行环境
-    /// - `object_db`：对象数据库
+    /// - `object_db`：对象数据库（通过 `ObjectBackend` trait 抽象，支持 `ObjectDb` 和 `ObjectDbSnapshot`）
     ///
     /// # 返回
     /// DispatchResult 包含状态变更信息。
@@ -65,7 +65,7 @@ pub trait Precompile: Send + Sync {
         method_selector: &[u8; 32],
         args: &[u8],
         env: &ExecutionEnvironment,
-        object_db: &mut ObjectDb,
+        object_db: &mut dyn ObjectBackend,
     ) -> PokerL1Result<DispatchResult>;
 
     /// 校验方法选择器是否属于此预编译合约。
@@ -376,7 +376,7 @@ impl PrecompileRegistry {
         method_selector: &[u8; 32],
         args: &[u8],
         env: &ExecutionEnvironment,
-        object_db: &mut ObjectDb,
+        object_db: &mut dyn ObjectBackend,
     ) -> PokerL1Result<DispatchResult> {
         let precompile = self
             .precompiles
@@ -461,7 +461,7 @@ mod tests {
             _method_selector: &[u8; 32],
             _args: &[u8],
             _env: &ExecutionEnvironment,
-            _object_db: &mut ObjectDb,
+            _object_db: &mut dyn ObjectBackend,
         ) -> PokerL1Result<DispatchResult> {
             Ok(DispatchResult::empty())
         }
@@ -653,7 +653,7 @@ mod tests {
             _method_selector: &[u8; 32],
             _args: &[u8],
             _env: &ExecutionEnvironment,
-            _object_db: &mut ObjectDb,
+            _object_db: &mut dyn ObjectBackend,
         ) -> PokerL1Result<DispatchResult> {
             Ok(DispatchResult::empty())
         }

@@ -3,10 +3,30 @@
 //! 包含桌台、座位、洗牌状态、揭示状态、重构状态、超时配置、时间戳、
 //! 牌组状态等所有状态机所需数据结构。
 //!
-//! 所有结构 `#[derive(Serialize, Deserialize, Clone, Debug)]`，BCS 兼容，
-//! 便于 `TexasPokerPrecompile::call` 通过 BCS 序列化/反序列化存入 ObjectDb。
+//! 所有结构 `#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]`，
+//! borsh 兼容，便于 `TexasPokerPrecompile::call` 通过 borsh 序列化/反序列化存入 ObjectDb。
+//!
+//! # typed 化说明
+//!
+//! 密码学相关字段（pk、token、coefficient、ciphertext_bytes、plaintext_bytes、aggregated_pk、
+//! plaintext）已从 `Vec<u8>` 改为 typed `poker_protocol` 类型（`ECPoint` / `ECScalar` /
+//! `ElGamalCiphertext`），消除 state_machine.rs 中的 bytes↔G1 转换样板代码。
+//! `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
+//! （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: G1Projective`）。
+//!
+//! # Borsh orphan rule 处理
+//!
+//! `G1Projective` / `BlsScalar` 是外部 blstrs 类型，无法在 poker_l1 直接 impl
+//! `BorshSerialize`/`BorshDeserialize`（orphan rule）。所有 struct 字段使用本地 newtype
+//! `ECPoint(pub G1Projective)` / `ECScalar(pub BlsScalar)` 包装，borsh impl 在
+//! `poker_protocol::borsh_impls` 中实现（48B G1 compressed / 32B scalar big-endian）。
 
-use serde::{Deserialize, Serialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use group::Group;
+
+use blstrs::G1Projective;
+use poker_protocol::crypto::types::{ECPoint, ECScalar};
+// 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
 use crate::object_model::ObjectID;
 use crate::Address;
@@ -37,110 +57,16 @@ pub const EMPTY_PLAYER: Address = [0u8; 20];
 
 // ========== ElGamal 密文 ==========
 
-/// G1 compressed bytes 长度（48 字节）。
-pub const G1_COMPRESSED_SIZE: usize = 48;
-
-/// ElGamal 密文（c1 + c2，各 48 字节 G1 compressed）。
-///
-/// 对应 Move `ElGamalCiphertext`（定义在 `bls_elgamal.move`）。
-/// 此处仅存字节，密码学操作在 `crypto::bls_elgamal` 模块完成。
-///
-/// 内部使用 `Vec<u8>` 而非 `[u8; 48]` 以兼容 serde Serialize/Deserialize
-/// （serde 默认不支持 [u8; N] 当 N > 32 的数组派生）。长度由构造函数保证。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ElGamalCiphertext {
-    /// c1 = r·G（48 字节 G1 compressed）。
-    pub c1: Vec<u8>,
-    /// c2 = plaintext + r·pk（48 字节 G1 compressed）。
-    pub c2: Vec<u8>,
-}
-
-impl ElGamalCiphertext {
-    /// 构造空密文（全零字节）。
-    #[must_use]
-    pub fn zero() -> Self {
-        Self {
-            c1: vec![0u8; G1_COMPRESSED_SIZE],
-            c2: vec![0u8; G1_COMPRESSED_SIZE],
-        }
-    }
-
-    /// 从两个 48 字节 slice 构造（拷贝）。
-    ///
-    /// # Panics
-    /// 当 slice 长度不为 48 时 panic（编程错误）。
-    #[must_use]
-    pub fn from_slices(c1: &[u8], c2: &[u8]) -> Self {
-        assert_eq!(
-            c1.len(),
-            G1_COMPRESSED_SIZE,
-            "c1 长度必须为 {G1_COMPRESSED_SIZE}"
-        );
-        assert_eq!(
-            c2.len(),
-            G1_COMPRESSED_SIZE,
-            "c2 长度必须为 {G1_COMPRESSED_SIZE}"
-        );
-        Self {
-            c1: c1.to_vec(),
-            c2: c2.to_vec(),
-        }
-    }
-
-    /// 从两个 `[u8; 48]` 数组构造（零拷贝转 Vec）。
-    #[must_use]
-    pub fn from_arrays(c1: [u8; G1_COMPRESSED_SIZE], c2: [u8; G1_COMPRESSED_SIZE]) -> Self {
-        Self {
-            c1: c1.to_vec(),
-            c2: c2.to_vec(),
-        }
-    }
-
-    /// 拼接为 96 字节 Vec（c1 || c2）。
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(2 * G1_COMPRESSED_SIZE);
-        out.extend_from_slice(&self.c1);
-        out.extend_from_slice(&self.c2);
-        out
-    }
-
-    /// 从 96 字节 slice 反序列化。
-    #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != 2 * G1_COMPRESSED_SIZE {
-            return None;
-        }
-        Some(Self {
-            c1: bytes[..G1_COMPRESSED_SIZE].to_vec(),
-            c2: bytes[G1_COMPRESSED_SIZE..].to_vec(),
-        })
-    }
-
-    /// 获取 c1 的 `[u8; 48]` 视图（拷贝）。
-    ///
-    /// # Panics
-    /// 当 c1 长度不为 48 时 panic（应永远不可能，由构造函数保证）。
-    #[must_use]
-    pub fn c1_array(&self) -> [u8; G1_COMPRESSED_SIZE] {
-        let mut arr = [0u8; G1_COMPRESSED_SIZE];
-        arr.copy_from_slice(&self.c1);
-        arr
-    }
-
-    /// 获取 c2 的 `[u8; 48]` 视图（拷贝）。
-    #[must_use]
-    pub fn c2_array(&self) -> [u8; G1_COMPRESSED_SIZE] {
-        let mut arr = [0u8; G1_COMPRESSED_SIZE];
-        arr.copy_from_slice(&self.c2);
-        arr
-    }
-}
+// `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
+// （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: G1Projective`，
+//   已在 `poker_protocol::borsh_impls` impl BorshSerialize/BorshDeserialize）。
+// 重导出供外部模块使用。
+pub use poker_protocol::crypto::types::ElGamalCiphertext;
 
 // ========== 座位 ==========
 
 /// 玩家座位状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum SeatStatus {
     /// 空座位（player = [0; 20]）。
     Empty,
@@ -163,7 +89,7 @@ impl Default for SeatStatus {
 }
 
 /// 玩家座位（镜像 Move `Seat` struct，table.move:102-115）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Seat {
     /// 玩家地址（[0; 20] 表示空座位）。
     pub player: Address,
@@ -185,8 +111,8 @@ pub struct Seat {
     pub is_waiting: bool,
     /// 本局中途离开（被踢），total_bet 保留供 side pot 计算。
     pub left_during_hand: bool,
-    /// 玩家 ElGamal 公钥（G1 compressed bytes，48 字节）。
-    pub pk: Vec<u8>,
+    /// 玩家 ElGamal 公钥（G1 点，使用 ECPoint newtype 以支持 Borsh）。
+    pub pk: ECPoint,
     /// total_bet 是否已退款（避免重复退款）。
     pub refunded: bool,
 }
@@ -206,7 +132,7 @@ impl Seat {
             acted_this_round: false,
             is_waiting: false,
             left_during_hand: false,
-            pk: vec![],
+            pk: ECPoint(G1Projective::identity()),
             refunded: false,
         }
     }
@@ -241,7 +167,7 @@ impl Seat {
 /// 洗牌状态（镜像 Move `ShuffleState`，table.move:124-129）。
 ///
 /// `phase` 取值见 `constants::SHUFFLE_PHASE_*`（与 Move 端逐字节一致）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ShuffleState {
     /// 洗牌阶段（SHUFFLE_PHASE_NONE/WAITING/RECONSTRUCT/BEFORE_PREFLOP）。
     pub phase: u8,
@@ -267,16 +193,16 @@ impl Default for ShuffleState {
 // ========== Reveal Token 状态 ==========
 
 /// 单个玩家的 reveal token 数据（镜像 Move `RevealTokenData`，table.move:140-143）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RevealTokenData {
     /// 提交者 seat_index。
     pub seat_index: u8,
-    /// token = c1 * sk（48 字节 G1 compressed）。
-    pub token: Vec<u8>,
+    /// token = c1 * sk（G1 点，使用 ECPoint newtype 以支持 Borsh）。
+    pub token: ECPoint,
 }
 
 /// Reveal 分配（镜像 Move `RevealAssignment`，table.move:132-137）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RevealAssignment {
     /// 牌组中的加密牌索引。
     pub encrypted_card_index: u8,
@@ -291,7 +217,7 @@ pub struct RevealAssignment {
 /// Reveal Token 状态（镜像 Move `RevealTokenState`，table.move:146-149）。
 ///
 /// `reveal_phase` 取值见 `constants::REVEAL_PHASE_*`（与 Move 端逐字节一致）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RevealTokenState {
     /// Reveal 阶段（REVEAL_PHASE_NONE/PREFLOP/REDEAL/FLOP/TURN/RIVER/SHOWDOWN）。
     pub reveal_phase: u8,
@@ -311,7 +237,7 @@ impl Default for RevealTokenState {
 // ========== Reconstruct 状态 ==========
 
 /// 单个玩家提交的 reconstruct 输出（镜像 Move `ReconstructPlayerDeck`，table.move:153-156）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ReconstructPlayerDeck {
     /// 提交者 seat_index。
     pub seat_index: u8,
@@ -322,14 +248,14 @@ pub struct ReconstructPlayerDeck {
 /// Reconstruct 状态（镜像 Move `ReconstructState`，table.move:158-164）。
 ///
 /// `phase` 取值见 `constants::RECONSTRUCT_PHASE_*`（与 Move 端逐字节一致）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ReconstructState {
     /// Reconstruct 阶段（RECONSTRUCT_PHASE_NONE/COLLECTING/COMPLETE）。
     pub phase: u8,
     /// 待提交 reconstruct deck 的玩家列表。
     pub pending_players: Vec<u8>,
-    /// 随机系数（scalar bytes，32 字节）。
-    pub coefficient: Vec<u8>,
+    /// 随机系数（None = 未设置，使用 ECScalar newtype 以支持 Borsh）。
+    pub coefficient: Option<ECScalar>,
     /// 所有玩家提交的重建牌组。
     pub player_decks: Vec<ReconstructPlayerDeck>,
 }
@@ -339,7 +265,7 @@ impl Default for ReconstructState {
         Self {
             phase: RECONSTRUCT_PHASE_NONE,
             pending_players: vec![],
-            coefficient: vec![],
+            coefficient: None,
             player_decks: vec![],
         }
     }
@@ -348,7 +274,7 @@ impl Default for ReconstructState {
 // ========== 超时配置 ==========
 
 /// 超时配置（镜像 Move `TimeoutConfig`，table.move:167-175）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TimeoutConfig {
     /// 洗牌超时（默认 10000ms）。
     pub shuffle_timeout_ms: u64,
@@ -383,7 +309,7 @@ impl Default for TimeoutConfig {
 // ========== 时间戳 ==========
 
 /// 时间戳集合（镜像 Move `Timestamps`，table.move:178-186）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, BorshSerialize, BorshDeserialize)]
 pub struct Timestamps {
     /// 准备好开始的时间戳（0=未设置）。
     pub ready_at: u64,
@@ -404,29 +330,29 @@ pub struct Timestamps {
 // ========== 已解密牌 ==========
 
 /// 已解密牌（镜像 Move `DecryptedCard`，table.move:194-199）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DecryptedCard {
     /// 原始加密牌组中的索引。
     pub encrypted_card_index: u8,
     /// 牌主 seat_index（公共牌为 `OWNER_SEAT_PUBLIC` = 255）。
     pub owner_seat_index: u8,
-    /// 部分解密密文（96 字节 c1+c2），空=已完全解密。
-    pub ciphertext_bytes: Vec<u8>,
-    /// 完全解密明文（48 字节 G1 compressed），空=仅部分解密。
-    pub plaintext_bytes: Vec<u8>,
+    /// 部分解密密文（None = 已完全解密）。
+    pub ciphertext: Option<ElGamalCiphertext>,
+    /// 完全解密明文（None = 仅部分解密，使用 ECPoint newtype 以支持 Borsh）。
+    pub plaintext: Option<ECPoint>,
 }
 
 // ========== 牌组状态 ==========
 
 /// 牌组状态（镜像 Move `DeckState`，table.move:211-217）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DeckState {
     /// 加密牌组（52 个 ElGamalCiphertext）。
     pub encrypted: Vec<ElGamalCiphertext>,
-    /// 聚合公钥（G1 compressed bytes，48 字节）。
-    pub aggregated_pk: Vec<u8>,
-    /// 52 张明文牌（G1 compressed bytes），由合约生成。
-    pub plaintext: Vec<Vec<u8>>,
+    /// 聚合公钥（None = 未初始化，使用 ECPoint newtype 以支持 Borsh）。
+    pub aggregated_pk: Option<ECPoint>,
+    /// 52 张明文牌（G1 点，由合约生成；使用 ECPoint newtype 以支持 Borsh）。
+    pub plaintext: Vec<ECPoint>,
     /// 已从牌组发出的牌数量。
     pub cards_dealt: u8,
     /// 已解密的合法牌列表。
@@ -437,7 +363,7 @@ impl Default for DeckState {
     fn default() -> Self {
         Self {
             encrypted: vec![],
-            aggregated_pk: vec![],
+            aggregated_pk: None,
             plaintext: vec![],
             cards_dealt: 0,
             decrypted_cards: vec![],
@@ -448,7 +374,7 @@ impl Default for DeckState {
 // ========== 桌台配置 ==========
 
 /// 桌台配置（控制 ZK skip 等行为，dev chain 友好）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TableConfig {
     /// 是否启用 ZK skip 模式（dev chain 友好；mainnet 强制 false）。
     /// true 时所有 ZK verify 调用直接返回 true。
@@ -507,9 +433,9 @@ impl TableConfig {
 
 /// Texas Poker 桌台（镜像 Move `Table` struct，table.move:270-304）。
 ///
-/// 这是预编译合约的核心状态对象，BCS 编码后存入 ObjectDb，
+/// 这是预编译合约的核心状态对象，borsh 编码后存入 ObjectDb，
 /// ObjectID = `reserved::texas_poker_contract_id()`（`0xFF..02`）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TexasPokerTable {
     /// 桌台 ObjectID（保留 `0xFF..02`）。
     pub id: ObjectID,
@@ -766,23 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn test_elgamal_ciphertext_roundtrip() {
-        let ct = ElGamalCiphertext::from_arrays([0x11; 48], [0x22; 48]);
-        let bytes = ct.to_bytes();
-        assert_eq!(bytes.len(), 96);
-        let recovered = ElGamalCiphertext::from_bytes(&bytes).unwrap();
-        assert_eq!(ct, recovered);
-    }
-
-    #[test]
-    fn test_elgamal_ciphertext_rejects_wrong_length() {
-        assert!(ElGamalCiphertext::from_bytes(&[0u8; 95]).is_none());
-        assert!(ElGamalCiphertext::from_bytes(&[0u8; 97]).is_none());
-        assert!(ElGamalCiphertext::from_bytes(&[]).is_none());
-    }
-
-    #[test]
-    fn test_table_bcs_roundtrip() {
+    fn test_table_borsh_roundtrip() {
         let mut table = TexasPokerTable::new(dummy_table_id(), "test-table".into(), 4, 50, 100);
         table.seats[0].player = [0xAB; 20];
         table.seats[0].stack = 1_000_000;
@@ -790,8 +700,8 @@ mod tests {
         table.community_cards.push(Card::new(0, 14)); // A♠
         table.version = 42;
 
-        let bytes = bcs::to_bytes(&table).unwrap();
-        let recovered: TexasPokerTable = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&table).unwrap();
+        let recovered: TexasPokerTable = borsh::from_slice(&bytes).unwrap();
         assert_eq!(table, recovered);
     }
 
@@ -845,7 +755,7 @@ mod tests {
         let state = ReconstructState::default();
         assert_eq!(state.phase, RECONSTRUCT_PHASE_NONE);
         assert!(state.pending_players.is_empty());
-        assert!(state.coefficient.is_empty());
+        assert!(state.coefficient.is_none());
         assert!(state.player_decks.is_empty());
     }
 
@@ -862,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn test_seat_bcs_roundtrip() {
+    fn test_seat_borsh_roundtrip() {
         let seat = Seat {
             player: [0xCD; 20],
             stack: 5_000,
@@ -874,11 +784,11 @@ mod tests {
             acted_this_round: true,
             is_waiting: false,
             left_during_hand: false,
-            pk: vec![0xAB; 48],
+            pk: ECPoint(G1Projective::identity()),
             refunded: false,
         };
-        let bytes = bcs::to_bytes(&seat).unwrap();
-        let recovered: Seat = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&seat).unwrap();
+        let recovered: Seat = borsh::from_slice(&bytes).unwrap();
         assert_eq!(seat, recovered);
     }
 }

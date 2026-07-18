@@ -19,6 +19,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::BlockHeight;
@@ -34,7 +35,7 @@ pub const DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS: BlockHeight = 2;
 pub const DEFAULT_FORFEIT_BOND_PERCENTAGE: u32 = 50;
 
 /// 游戏分配配置（Task 12 可治理参数）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct GameAssignmentConfig {
     /// assigned_validator 失效超时 block 数（SubTask 12.4：默认 2，R4-L8 修正）。
     pub game_validator_timeout_blocks: BlockHeight,
@@ -98,7 +99,7 @@ pub fn client_route_validator(
 /// epoch 过渡锚点状态（NEW-M10）。
 ///
 /// 追踪操作方在 epoch 边界前 `epoch_transition_window_blocks` 内是否提交了 `checkpoint_anchor`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct EpochTransitionState {
     /// 过渡所属的 epoch（即将进入的新 epoch）。
     pub target_epoch: u64,
@@ -775,16 +776,16 @@ mod tests {
     #[test]
     fn game_assignment_config_bcs_roundtrip() {
         let config = GameAssignmentConfig::default();
-        let bytes = bcs::to_bytes(&config).unwrap();
-        let recovered: GameAssignmentConfig = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&config).unwrap();
+        let recovered: GameAssignmentConfig = borsh::from_slice(&bytes).unwrap();
         assert_eq!(config, recovered);
     }
 
     #[test]
     fn epoch_transition_state_bcs_roundtrip() {
         let state = EpochTransitionState::new(2, 990, 1000);
-        let bytes = bcs::to_bytes(&state).unwrap();
-        let recovered: EpochTransitionState = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&state).unwrap();
+        let recovered: EpochTransitionState = borsh::from_slice(&bytes).unwrap();
         assert_eq!(state, recovered);
     }
 }

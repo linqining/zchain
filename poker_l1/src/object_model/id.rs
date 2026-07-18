@@ -10,6 +10,7 @@
 use crate::Address;
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 /// 对象创建 nonce（每账户单调递增）。
@@ -19,7 +20,10 @@ pub type CreationNonce = u64;
 ///
 /// 28 字节定长：20 字节 creator_address + 8 字节 creation_nonce（little-endian）。
 /// 全局唯一性由「creator nonce 单调递增 + 不同 creator address 不碰撞」保证。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct ObjectID {
     /// 创建者地址（blake2b_256(tagged_pubkey)[0..20]）。
     pub creator_address: Address,
@@ -134,8 +138,8 @@ mod tests {
     #[test]
     fn objectid_bcs_roundtrip() {
         let id = ObjectID::new([0xcd; 20], 999);
-        let bytes = bcs::to_bytes(&id).unwrap();
-        let recovered: ObjectID = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&id).unwrap();
+        let recovered: ObjectID = borsh::from_slice(&bytes).unwrap();
         assert_eq!(id, recovered);
     }
 

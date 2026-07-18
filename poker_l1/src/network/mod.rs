@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::block::Block;
@@ -58,7 +59,7 @@ const SHORT_ID_DOMAIN: u8 = 0x53; // 'S' for Short ID
 /// 超出返回 `TxTooLarge`。
 pub fn validate_tx_size(tx: &Transaction) -> PokerL1Result<()> {
     let serialized =
-        bcs::to_bytes(tx).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
+        borsh::to_vec(tx).map_err(|e| PokerL1Error::Serialization(format!("borsh: {e}")))?;
     if serialized.len() > MAX_TX_SIZE {
         return Err(PokerL1Error::TxTooLarge {
             actual: serialized.len(),
@@ -73,7 +74,7 @@ pub fn validate_tx_size(tx: &Transaction) -> PokerL1Result<()> {
 /// 超出返回 `BlockTooLarge`。
 pub fn validate_block_size(block: &Block) -> PokerL1Result<()> {
     let serialized =
-        bcs::to_bytes(block).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
+        borsh::to_vec(block).map_err(|e| PokerL1Error::Serialization(format!("borsh: {e}")))?;
     if serialized.len() > MAX_BLOCK_SIZE {
         return Err(PokerL1Error::BlockTooLarge {
             actual: serialized.len(),
@@ -88,7 +89,7 @@ pub fn validate_block_size(block: &Block) -> PokerL1Result<()> {
 /// 超出返回 `VertexTooLarge`。
 pub fn validate_vertex_size(vertex: &DagVertex) -> PokerL1Result<()> {
     let serialized =
-        bcs::to_bytes(vertex).map_err(|e| PokerL1Error::Serialization(format!("bcs: {e}")))?;
+        borsh::to_vec(vertex).map_err(|e| PokerL1Error::Serialization(format!("borsh: {e}")))?;
     if serialized.len() > MAX_VERTEX_SIZE {
         return Err(PokerL1Error::VertexTooLarge {
             actual: serialized.len(),
@@ -124,7 +125,7 @@ pub fn compute_short_id(tx_hash: &Hash) -> ShortId {
 ///
 /// validator 先广播 compact vertex（vertex header + tx short IDs），
 /// 接收 validator 从本地已收 tx 集合匹配，仅请求缺失的 tx。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct CompactVertex {
     /// 当前 epoch。
     pub epoch: u64,
@@ -512,7 +513,7 @@ pub enum GossipTopic {
 }
 
 /// 网络消息（SubTask 30.1）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum NetworkMessage {
     /// 完整 DAG vertex。
     DagVertex(DagVertex),
@@ -543,7 +544,7 @@ pub enum NetworkMessage {
 /// 轻客户端 block header（SubTask 30.4）。
 ///
 /// 含 block header + 2/3 validator secp256k1 多签。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct LightClientHeader {
     /// block header 序列化字节（含 height / timestamp / state_root / prev_hash 等）。
     pub header_bytes: Vec<u8>,
@@ -554,7 +555,7 @@ pub struct LightClientHeader {
 }
 
 /// validator 签名（轻客户端订阅用）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ValidatorSig {
     /// validator tagged pubkey。
     pub validator: TaggedPubkey,

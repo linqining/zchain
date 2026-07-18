@@ -12,7 +12,9 @@
 //!
 //! # Args 编码
 //!
-//! 每个 method 对应一个 `*Args` 结构体，使用 BCS 序列化。
+//! 每个 method 对应一个 `*Args` 结构体，使用 **borsh** 序列化（B.4 迁移后）。
+//! 密码学字段（pk/ciphertexts/proofs）为 typed `poker_protocol` 类型，
+//! 消除 dispatch 子函数中手动 `ser::deserialize_*` 调用。
 //!
 //! # Events 处理
 //!
@@ -22,6 +24,15 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blstrs::G1Projective;
+use borsh::{BorshDeserialize, BorshSerialize};
+use group::Group;
+
+use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
+use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
+use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
 
 use super::constants::{FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
 use super::events::TexasPokerEvent;
@@ -164,10 +175,10 @@ pub mod selectors {
     }
 }
 
-// ========== Args 结构体（BCS 序列化）==========
+// ========== Args 结构体（borsh 序列化 + typed 密码学字段） ==========
 
 /// `create_table` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct CreateTableArgs {
     /// 桌台名称。
     pub name: String,
@@ -180,7 +191,7 @@ pub struct CreateTableArgs {
 }
 
 /// `join_and_shuffle` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct JoinAndShuffleArgs {
     /// 座位索引。
     pub seat_index: u8,
@@ -188,65 +199,65 @@ pub struct JoinAndShuffleArgs {
     pub player: Address,
     /// 买入金额。
     pub buy_in: u64,
-    /// 玩家公钥（G1 compressed 48 字节）。
-    pub pk: Vec<u8>,
-    /// pk 所有权证明（暂时未强制验证，保留字段）。
+    /// 玩家 ElGamal 公钥（G1 点，使用 ECPoint newtype 以支持 Borsh）。
+    pub pk: ECPoint,
+    /// pk 所有权证明（80 字节 Schnorr 自定义格式，保留 Vec<u8>）。
     pub pk_ownership_proof: Vec<u8>,
-    /// remask 后的牌组掩码（c1 拼接，48*N 字节）。
-    pub mask_cards: Vec<u8>,
-    /// shuffle 输出牌组（c1||c2 拼接，96*N 字节）。
-    pub output_cards: Vec<u8>,
-    /// remask proof 字节。
-    pub remask_proof: Vec<u8>,
-    /// shuffle proof 字节。
-    pub shuffle_proof: Vec<u8>,
+    /// remask 后的牌组掩码（typed ElGamalCiphertext 列表）。
+    pub mask_cards: Vec<ElGamalCiphertext>,
+    /// shuffle 输出牌组（typed ElGamalCiphertext 列表）。
+    pub output_cards: Vec<ElGamalCiphertext>,
+    /// remask proof（typed DLEqProof<RemaskKind>）。
+    pub remask_proof: DLEqProof<DefaultCurve, RemaskKind>,
+    /// shuffle proof（typed ZKShuffleProof）。
+    pub shuffle_proof: ZKShuffleProof<DefaultCurve>,
 }
 
 /// `leave_with_proof` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct LeaveWithProofArgs {
     /// 座位索引。
     pub seat_index: u8,
-    /// 离场时的牌组输出（用于验证贡献连续性）。
-    pub output_cards: Vec<u8>,
-    /// leave proof 字节。
-    pub leave_proof: Vec<u8>,
+    /// 离场时的牌组输出（typed ElGamalCiphertext 列表，用于验证贡献连续性）。
+    pub output_cards: Vec<ElGamalCiphertext>,
+    /// leave proof（typed DLEqProof<LeaveKind>）。
+    pub leave_proof: DLEqProof<DefaultCurve, LeaveKind>,
 }
 
 /// `join_table` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct JoinTableArgs {
     /// 玩家地址。
     pub player: Address,
     /// 买入金额。
     pub buy_in: u64,
-    /// 玩家公钥（G1 compressed 48 字节）。
-    pub pk: Vec<u8>,
+    /// 玩家 ElGamal 公钥（G1 点，使用 ECPoint newtype 以支持 Borsh）。
+    pub pk: ECPoint,
 }
 
 /// `leave_table` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct LeaveTableArgs {
     /// 座位索引。
     pub seat_index: u8,
 }
 
 /// `tick` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct TickArgs {
     /// 当前时间戳（毫秒）。
     pub now_ms: u64,
 }
 
 /// `auto_fold` / `force_fold` / `fold` / `check` / `call` 参数（仅 seat_index）。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct SeatIndexArgs {
     /// 座位索引。
     pub seat_index: u8,
 }
 
 /// `kick_player` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct KickPlayerArgs {
     /// 座位索引。
     pub seat_index: u8,
@@ -255,46 +266,46 @@ pub struct KickPlayerArgs {
 }
 
 /// `submit_shuffle_v2` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct SubmitShuffleV2Args {
     /// 座位索引。
     pub seat_index: u8,
-    /// shuffle 输出牌组（c1||c2 拼接，96*N 字节）。
-    pub output_cards: Vec<u8>,
-    /// shuffle proof 字节。
-    pub shuffle_proof: Vec<u8>,
+    /// shuffle 输出牌组（typed ElGamalCiphertext 列表）。
+    pub output_cards: Vec<ElGamalCiphertext>,
+    /// shuffle proof（typed ZKShuffleProof）。
+    pub shuffle_proof: ZKShuffleProof<DefaultCurve>,
 }
 
 /// `submit_player_reveal_tokens` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct SubmitRevealTokensArgs {
     /// 座位索引。
     pub seat_index: u8,
     /// 揭牌分配索引列表（每张待揭示牌在 deck 中的位置）。
     pub assignment_indices: Vec<u8>,
-    /// 揭牌令牌列表（每个 = 48 字节 G1 compressed）。
-    pub reveal_tokens: Vec<Vec<u8>>,
-    /// 揭牌 proof 列表（与 reveal_tokens 一一对应）。
-    pub proofs: Vec<Vec<u8>>,
+    /// 揭牌令牌列表（typed ECPoint，Borsh 兼容的 G1 点包装）。
+    pub reveal_tokens: Vec<ECPoint>,
+    /// 揭牌 proof 列表（typed RevealTokenProof，与 reveal_tokens 一一对应）。
+    pub proofs: Vec<RevealTokenProof<DefaultCurve>>,
 }
 
 /// `submit_reconstruct_deck` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct SubmitReconstructDeckArgs {
     /// 座位索引。
     pub seat_index: u8,
-    /// 重构输出牌组（c1||c2 拼接，96*N 字节）。
-    pub output_cards: Vec<u8>,
-    /// swap 牌组（暂时未用，保留）。
-    pub swap_cards: Vec<u8>,
-    /// user_readable 牌组（暂时未用，保留）。
-    pub user_readable_cards: Vec<u8>,
-    /// reconstruct proof 字节。
-    pub proof: Vec<u8>,
+    /// 重构输出牌组（typed ElGamalCiphertext 列表）。
+    pub output_cards: Vec<ElGamalCiphertext>,
+    /// swap 牌组（typed ElGamalCiphertext 列表，暂时未用，保留）。
+    pub swap_cards: Vec<ElGamalCiphertext>,
+    /// user_readable 牌组（typed ElGamalCiphertext 列表，暂时未用，保留）。
+    pub user_readable_cards: Vec<ElGamalCiphertext>,
+    /// reconstruct proof（typed ReconstructProof）。
+    pub proof: ReconstructProof<DefaultCurve>,
 }
 
 /// `raise` 参数。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct RaiseArgs {
     /// 座位索引。
     pub seat_index: u8,
@@ -375,10 +386,10 @@ fn log_events(events: &[TexasPokerEvent]) {
     tracing::debug!("texas_poker dispatch emitted {} events", events.len());
 }
 
-/// BCS 反序列化辅助。
-fn decode_args<T: serde::de::DeserializeOwned>(args: &[u8], method: &str) -> PokerL1Result<T> {
-    bcs::from_bytes(args)
-        .map_err(|e| PokerL1Error::Serialization(format!("{method} args BCS: {e}")))
+/// borsh 反序列化辅助。
+fn decode_args<T: BorshDeserialize>(args: &[u8], method: &str) -> PokerL1Result<T> {
+    borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("{method} args borsh: {e}")))
 }
 
 // ========== 17 个 dispatch_* 子函数 ==========
@@ -424,12 +435,14 @@ fn dispatch_join_and_shuffle(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: JoinAndShuffleArgs = decode_args(args, "join_and_shuffle")?;
+    // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
+    let pk: G1Projective = input.pk.into();
     state_machine::apply_join_and_shuffle(
         table,
         input.seat_index,
         input.player,
         input.buy_in,
-        input.pk,
+        pk,
         input.pk_ownership_proof,
         input.mask_cards,
         input.output_cards,
@@ -470,7 +483,9 @@ fn dispatch_join_table(
             "not in WAITING state, cannot join_table".into(),
         ));
     }
-    if state_machine::is_pk_registered(&table.seats, &input.pk) {
+    // ECPoint → G1Projective（state_machine::is_pk_registered / Seat.pk 使用裸 G1Projective）
+    let pk: G1Projective = input.pk.into();
+    if state_machine::is_pk_registered(&table.seats, &pk) {
         return Err(PokerL1Error::Serialization(
             "pk already registered at this table".into(),
         ));
@@ -487,7 +502,7 @@ fn dispatch_join_table(
     let seat = &mut table.seats[seat_idx as usize];
     seat.player = input.player;
     seat.stack = input.buy_in;
-    seat.pk = input.pk;
+    seat.pk = ECPoint::from(pk);
     seat.is_waiting = false; // WAITING 状态加入，立即参与下一局
     seat.folded = false;
     seat.left_during_hand = false;
@@ -641,11 +656,14 @@ fn dispatch_submit_player_reveal_tokens(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitRevealTokensArgs = decode_args(args, "submit_player_reveal_tokens")?;
+    // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
+    let reveal_tokens: Vec<G1Projective> =
+        input.reveal_tokens.into_iter().map(Into::into).collect();
     state_machine::apply_submit_player_reveal_tokens(
         table,
         input.seat_index,
         input.assignment_indices,
-        input.reveal_tokens,
+        reveal_tokens,
         input.proofs,
         events,
     )
@@ -780,7 +798,7 @@ mod tests {
             small_blind: 25,
             big_blind: 50,
         };
-        let args_bytes = bcs::to_bytes(&args).unwrap();
+        let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes).unwrap();
 
         assert_eq!(table.name, "new_game");
@@ -801,7 +819,7 @@ mod tests {
             small_blind: 25,
             big_blind: 50,
         };
-        let args_bytes = bcs::to_bytes(&args).unwrap();
+        let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::create_table(), &args_bytes);
         assert!(result.is_err());
     }
@@ -814,16 +832,16 @@ mod tests {
         let join_args = JoinTableArgs {
             player: [0x11; 20],
             buy_in: 1000,
-            pk: vec![0xCD; 48],
+            pk: ECPoint(G1Projective::identity()),
         };
-        let join_bytes = bcs::to_bytes(&join_args).unwrap();
+        let join_bytes = borsh::to_vec(&join_args).unwrap();
         dispatch(&ctx, &mut table, &selectors::join_table(), &join_bytes).unwrap();
         assert_eq!(table.occupied_count(), 1);
         assert_eq!(table.seats[0].stack, 1000);
 
         // leave_table
         let leave_args = LeaveTableArgs { seat_index: 0 };
-        let leave_bytes = bcs::to_bytes(&leave_args).unwrap();
+        let leave_bytes = borsh::to_vec(&leave_args).unwrap();
         dispatch(&ctx, &mut table, &selectors::leave_table(), &leave_bytes).unwrap();
         assert_eq!(table.occupied_count(), 0);
     }
@@ -845,7 +863,7 @@ mod tests {
             seat_index: 0,
             reason: 0,
         };
-        let args_bytes = bcs::to_bytes(&args).unwrap();
+        let args_bytes = borsh::to_vec(&args).unwrap();
         dispatch(&ctx, &mut table, &selectors::kick_player(), &args_bytes).unwrap();
         assert!(table.seats[0].folded);
         assert!(table.seats[0].left_during_hand);
@@ -878,7 +896,7 @@ mod tests {
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
         let args = TickArgs { now_ms: 5_000_000 };
-        let args_bytes = bcs::to_bytes(&args).unwrap();
+        let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &args_bytes);
         assert!(result.is_ok());
     }

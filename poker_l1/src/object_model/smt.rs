@@ -24,6 +24,8 @@ use blake2::digest::{Update, VariableOutput};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use borsh::{BorshDeserialize, BorshSerialize};
+
 use crate::Hash;
 
 /// Merkle 树深度（spec：depth = 256，keyed by blake2b_256(ObjectID)）。
@@ -37,7 +39,7 @@ const INTERNAL_DOMAIN: u8 = 0x01;
 ///
 /// `siblings[h]` = 高度 h 处的兄弟节点哈希（h ∈ [0, TREE_DEPTH-1]）。
 /// 验证时从叶到根逐层合并。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct MerklePath {
     /// 从叶（height 0）到根（height 255）的兄弟哈希，共 256 个。
     pub siblings: Vec<Hash>,
@@ -48,6 +50,10 @@ pub struct MerklePath {
 /// Sparse Merkle Tree 主结构。
 ///
 /// 内存版（Phase 1）。Phase 4 将扩展 rocksdb 后端。
+///
+/// `Clone` 用于 `ObjectDbSnapshot` 创建 fork：复制 SMT 内部 HashMap，
+/// 使 snapshot 可独立计算 state_root 并记录 mutation log 供回放。
+#[derive(Clone)]
 pub struct SparseMerkleTree {
     /// 非空叶：key -> value_hash（H(0x00 || key || value)）
     leaves: HashMap<Hash, Hash>,

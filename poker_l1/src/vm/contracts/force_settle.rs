@@ -28,6 +28,7 @@
 //! 3. 清除 `last_commitment` / `last_checkpoint_state_hash`
 //! 4. 递增 `version`
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
@@ -39,7 +40,7 @@ use super::settle::{RakeConfig, SettleResult, settle_hand};
 use super::types::{GameContract, GamePhase};
 
 /// force_settle tx（SubTask 28.7）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ForceSettleTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,
@@ -56,7 +57,7 @@ pub struct ForceSettleTx {
 }
 
 /// force_settle 应用结果（SubTask 28.7）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ForceSettleOutcome {
     /// settle 结果（胜者 + 台费 + 分配）。
     pub settle_result: SettleResult,

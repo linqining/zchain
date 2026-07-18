@@ -1,6 +1,6 @@
 //! Texas Poker 事件定义（移植自 `texas_poker_move/sources/table_events.move`）。
 //!
-//! 将所有 40+ 种事件统一为 `TexasPokerEvent` 枚举，BCS 序列化后由预编译合约
+//! 将所有 40+ 种事件统一为 `TexasPokerEvent` 枚举，Borsh 序列化后由预编译合约
 //! 通过 `emit_event` syscall 写入事件日志（链下索引）。
 //!
 //! 事件分类（与 Move 端一致）：
@@ -18,6 +18,7 @@
 //! 8. 配置与牌组重建：TimeoutConfigUpdated / DeckRebuilt / CurrentTurnChanged
 
 use serde::{Deserialize, Serialize};
+use borsh::{BorshSerialize, BorshDeserialize};
 
 use crate::object_model::ObjectID;
 use crate::Address;
@@ -56,11 +57,11 @@ pub const TRIGGER_ACTION_RAISE_ALL_IN: u8 = 1;
 pub const POT_TYPE_MAIN: u8 = 0;
 pub const POT_TYPE_SIDE: u8 = 1;
 
-/// Texas Poker 事件枚举（所有变体 copy + drop，BCS 友好）。
+/// Texas Poker 事件枚举（所有变体 copy + drop，Borsh 友好）。
 ///
 /// 镜像 `table_events.move` 的所有 struct，统一为 enum 便于在
 /// `dispatch` 阶段收集 `Vec<TexasPokerEvent>` 后批量 emit。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TexasPokerEvent {
     // ========== 1. 牌桌生命周期 ==========
     TableCreated {
@@ -331,18 +332,18 @@ mod tests {
     }
 
     #[test]
-    fn test_event_bcs_roundtrip_table_created() {
+    fn test_event_borsh_roundtrip_table_created() {
         let evt = TexasPokerEvent::TableCreated {
             table_id: dummy_table_id(),
             name: "test-table".to_string(),
         };
-        let bytes = bcs::to_bytes(&evt).unwrap();
-        let recovered: TexasPokerEvent = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&evt).unwrap();
+        let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
         assert_eq!(evt, recovered);
     }
 
     #[test]
-    fn test_event_bcs_roundtrip_player_joined() {
+    fn test_event_borsh_roundtrip_player_joined() {
         let evt = TexasPokerEvent::PlayerJoined {
             table_id: dummy_table_id(),
             seat_index: 3,
@@ -351,13 +352,13 @@ mod tests {
             is_waiting: false,
             active_count_after: 4,
         };
-        let bytes = bcs::to_bytes(&evt).unwrap();
-        let recovered: TexasPokerEvent = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&evt).unwrap();
+        let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
         assert_eq!(evt, recovered);
     }
 
     #[test]
-    fn test_event_bcs_roundtrip_hand_started() {
+    fn test_event_borsh_roundtrip_hand_started() {
         let evt = TexasPokerEvent::HandStarted {
             table_id: dummy_table_id(),
             button: 0,
@@ -365,13 +366,13 @@ mod tests {
             big_blind: 100,
             participants: vec![0, 1, 2, 3],
         };
-        let bytes = bcs::to_bytes(&evt).unwrap();
-        let recovered: TexasPokerEvent = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&evt).unwrap();
+        let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
         assert_eq!(evt, recovered);
     }
 
     #[test]
-    fn test_event_bcs_roundtrip_community_card_revealed() {
+    fn test_event_borsh_roundtrip_community_card_revealed() {
         let evt = TexasPokerEvent::CommunityCardRevealed {
             table_id: dummy_table_id(),
             phase: 3, // flop
@@ -379,34 +380,34 @@ mod tests {
             card_ranks: vec![14, 13, 7], // A, K, 7
             card_suits: vec![0, 1, 2],   // spade, heart, diamond
         };
-        let bytes = bcs::to_bytes(&evt).unwrap();
-        let recovered: TexasPokerEvent = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&evt).unwrap();
+        let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
         assert_eq!(evt, recovered);
     }
 
     #[test]
-    fn test_event_bcs_roundtrip_current_turn_changed() {
+    fn test_event_borsh_roundtrip_current_turn_changed() {
         let evt = TexasPokerEvent::CurrentTurnChanged {
             table_id: dummy_table_id(),
             old_turn: Some(0),
             new_turn: Some(1),
             round_state: 2, // preflop
         };
-        let bytes = bcs::to_bytes(&evt).unwrap();
-        let recovered: TexasPokerEvent = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&evt).unwrap();
+        let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
         assert_eq!(evt, recovered);
     }
 
     #[test]
-    fn test_event_bcs_roundtrip_current_turn_changed_none() {
+    fn test_event_borsh_roundtrip_current_turn_changed_none() {
         let evt = TexasPokerEvent::CurrentTurnChanged {
             table_id: dummy_table_id(),
             old_turn: Some(2),
             new_turn: None,
             round_state: 6, // showdown
         };
-        let bytes = bcs::to_bytes(&evt).unwrap();
-        let recovered: TexasPokerEvent = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&evt).unwrap();
+        let recovered: TexasPokerEvent = borsh::from_slice(&bytes).unwrap();
         assert_eq!(evt, recovered);
     }
 
@@ -468,8 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn test_all_variants_bcs_serializable() {
-        // 烟雾测试：枚举每个分支的 BCS 序列化至少不 panic。
+    fn test_all_variants_borsh_serializable() {
+        // 烟雾测试：枚举每个分支的 Borsh 序列化至少不 panic。
         // 覆盖所有 40 个变体，确保 derive(Serialize, Deserialize) 正确。
         let table_id = dummy_table_id();
         let samples: Vec<TexasPokerEvent> = vec![
@@ -699,9 +700,9 @@ mod tests {
         ];
 
         for evt in &samples {
-            let bytes = bcs::to_bytes(evt).expect("BCS serialize 失败");
+            let bytes = borsh::to_vec(evt).expect("Borsh serialize 失败");
             let _recovered: TexasPokerEvent =
-                bcs::from_bytes(&bytes).expect("BCS deserialize 失败");
+                borsh::from_slice(&bytes).expect("Borsh deserialize 失败");
         }
         // 验证样本数量（39 个变体）
         assert_eq!(samples.len(), 39, "事件变体数应为 39");

@@ -91,6 +91,7 @@ pub use bullshark::{
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::signature::TaggedPubkey;
@@ -118,7 +119,7 @@ const COMMIT_CERT_SIG_DOMAIN: u8 = 0x43; // 'C' for Commit Certificate
 /// - vertex 上限 `max_vertex_size`（默认 256KB），超出分多个 vertex
 ///
 /// SEC-C1 修复：签名对象含 `epoch` 与 `author_pubkey` 字段。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct DagVertex {
     /// 当前 epoch（SEC-C1：绑定 epoch 防 equivocation 证据歧义）。
     pub epoch: Epoch,
@@ -186,12 +187,12 @@ impl DagVertex {
 
     /// BCS 序列化。
     pub fn to_bcs(&self) -> crate::error::PokerL1Result<Vec<u8>> {
-        Ok(bcs::to_bytes(self)?)
+        Ok(borsh::to_vec(self)?)
     }
 
     /// 从 BCS 反序列化。
     pub fn from_bcs(bytes: &[u8]) -> crate::error::PokerL1Result<Self> {
-        Ok(bcs::from_bytes(bytes)?)
+        Ok(borsh::from_slice(bytes)?)
     }
 }
 
@@ -203,7 +204,7 @@ impl DagVertex {
 /// - 轻客户端只需验证 commit certificate 的 2/3 secp256k1 多签即可信任 block header
 ///
 /// SEC2-C1 修复：签名对象含 `epoch` / `prev_commit_hash` / `state_root` / `public_tx_root` / `gameturn_tx_root`。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct DagCommitCertificate {
     /// 当前 epoch（SEC2-C1：绑定 epoch 防 equivocation 证据歧义）。
     pub epoch: Epoch,
@@ -282,12 +283,12 @@ impl DagCommitCertificate {
 
     /// BCS 序列化。
     pub fn to_bcs(&self) -> crate::error::PokerL1Result<Vec<u8>> {
-        Ok(bcs::to_bytes(self)?)
+        Ok(borsh::to_vec(self)?)
     }
 
     /// 从 BCS 反序列化。
     pub fn from_bcs(bytes: &[u8]) -> crate::error::PokerL1Result<Self> {
-        Ok(bcs::from_bytes(bytes)?)
+        Ok(borsh::from_slice(bytes)?)
     }
 }
 

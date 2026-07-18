@@ -225,9 +225,9 @@ fn dispatch_hand_started(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let input: hand_started::HandStartedInput =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("hand_started: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("hand_started: {e}")))?;
     let result = hand_started::hand_started_branch(game, input)?;
-    let return_value = bcs::to_bytes(&result)
+    let return_value = borsh::to_vec(&result)
         .map_err(|e| PokerL1Error::Serialization(format!("hand_started return: {e}")))?;
     Ok(DispatchResult {
         created_objects: vec![],
@@ -243,7 +243,7 @@ fn dispatch_force_advance(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let input: force_advance::ForceAdvanceInput =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("force_advance: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_advance: {e}")))?;
     let _action = force_advance::apply_force_advance(game, &input)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -263,7 +263,7 @@ fn dispatch_settle_hand(
         rake_recipient: game.rake_config.rake_recipient,
     };
     let result = settle::settle_hand(hand, &rake_config)?;
-    let return_value = bcs::to_bytes(&result)
+    let return_value = borsh::to_vec(&result)
         .map_err(|e| PokerL1Error::Serialization(format!("settle_hand return: {e}")))?;
     game.current_hand = None;
     game.hand_number += 1;
@@ -281,7 +281,7 @@ fn dispatch_force_checkpoint(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: force_checkpoint::ForceCheckpointTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("force_checkpoint: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_checkpoint: {e}")))?;
     force_checkpoint::apply_force_checkpoint(game, &tx, context.block_height, 3)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -293,7 +293,7 @@ fn dispatch_checkpoint_anchor(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: checkpoint_anchor::CheckpointAnchorTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("checkpoint_anchor: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("checkpoint_anchor: {e}")))?;
     checkpoint_anchor::apply_checkpoint_anchor(game, &tx, context.block_height)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -305,7 +305,7 @@ fn dispatch_force_checkin(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let input: force_checkin::ForceCheckinInput =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("force_checkin: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_checkin: {e}")))?;
     force_checkin::apply_force_checkin(game, &input)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -317,7 +317,7 @@ fn dispatch_force_settle(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: force_settle::ForceSettleTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("force_settle: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_settle: {e}")))?;
     let rake_config = settle::RakeConfig {
         rake_rate_bps: game.rake_config.rake_rate_bps,
         rake_cap: game.rake_config.rake_cap,
@@ -334,7 +334,7 @@ fn dispatch_request_revert(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: revert::RequestRevertTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("request_revert: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("request_revert: {e}")))?;
     revert::apply_request_revert(game, &tx, context.block_height, 10, 20, 30)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -346,7 +346,7 @@ fn dispatch_force_revert(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: revert::ForceRevertTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("force_revert: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_revert: {e}")))?;
     revert::apply_force_revert(game, &tx)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -368,7 +368,7 @@ fn dispatch_challenge_delta(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: challenge_delta::ChallengeDeltaTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("challenge_delta: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("challenge_delta: {e}")))?;
     challenge_delta::apply_challenge_delta(game, &tx, [0u8; 32], 50)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -380,7 +380,7 @@ fn dispatch_request_da(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: request_da::RequestDaTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("request_da: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("request_da: {e}")))?;
     request_da::apply_request_da(game, &tx)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -392,7 +392,7 @@ fn dispatch_checkpoint_skip(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: checkpoint_skip::CheckpointSkipTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("checkpoint_skip: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("checkpoint_skip: {e}")))?;
     checkpoint_skip::apply_checkpoint_skip(game, &tx, context.block_height, 3)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -403,7 +403,7 @@ fn dispatch_revoke_delegated_escape(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: delegated_escape::RevokeDelegatedEscapeTx = bcs::from_bytes(args)
+    let tx: delegated_escape::RevokeDelegatedEscapeTx = borsh::from_slice(args)
         .map_err(|e| PokerL1Error::Serialization(format!("revoke_delegated_escape: {e}")))?;
     delegated_escape::apply_revoke_delegated_escape(game, &tx, context.chain_id)?;
     Ok(DispatchResult::game_only(game.id))
@@ -416,7 +416,7 @@ fn dispatch_request_ack(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: ack_protocol::RequestAckTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("request_ack: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("request_ack: {e}")))?;
     ack_protocol::apply_request_ack(game, &tx, context.block_height, 20, 2)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -428,7 +428,7 @@ fn dispatch_refuse_ack(
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
     let tx: ack_protocol::RefuseAckTx =
-        bcs::from_bytes(args).map_err(|e| PokerL1Error::Serialization(format!("refuse_ack: {e}")))?;
+        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("refuse_ack: {e}")))?;
     ack_protocol::apply_refuse_ack(game, &tx, context.block_height, context.chain_id, 3)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -540,7 +540,7 @@ mod tests {
             hand_state: create_test_hand_state(),
             execution_mode_override: None,
         };
-        let args = bcs::to_bytes(&input).unwrap();
+        let args = borsh::to_vec(&input).unwrap();
 
         let result = dispatch(&context, &mut game, &selectors::hand_started(), &args).unwrap();
 
@@ -565,7 +565,7 @@ mod tests {
             timeout_player: [5u8; 20],
             current_block_height: 200,
         };
-        let args = bcs::to_bytes(&input).unwrap();
+        let args = borsh::to_vec(&input).unwrap();
 
         let result = dispatch(&context, &mut game, &selectors::force_advance(), &args).unwrap();
 
@@ -610,7 +610,7 @@ mod tests {
             hand_state: create_test_hand_state(),
             execution_mode_override: Some(ExecutionMode::OffChain),
         };
-        let args = bcs::to_bytes(&input).unwrap();
+        let args = borsh::to_vec(&input).unwrap();
 
         let result = dispatch(&context, &mut game, &selectors::hand_started(), &args).unwrap();
 

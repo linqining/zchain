@@ -27,7 +27,7 @@ use super::texas_poker::types::TexasPokerTable;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
-use crate::storage::ObjectDb;
+use crate::storage::{ObjectBackend, ObjectDb};
 use crate::vm::contracts::dispatch::DispatchContext;
 use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile, reserved};
 use crate::Address;
@@ -71,7 +71,7 @@ impl Precompile for TexasPokerPrecompile {
         method_selector: &[u8; 32],
         args: &[u8],
         env: &ExecutionEnvironment,
-        object_db: &mut ObjectDb,
+        object_db: &mut dyn ObjectBackend,
     ) -> PokerL1Result<DispatchResult> {
         let dispatch_context = DispatchContext {
             caller: *caller,
@@ -87,8 +87,8 @@ impl Precompile for TexasPokerPrecompile {
         let (mut table, is_new) = match object_db.read(&table_id) {
             Ok(obj) => {
                 let table: TexasPokerTable =
-                    bcs::from_bytes(&obj.data).map_err(|e| {
-                        PokerL1Error::Serialization(format!("TexasPokerTable BCS: {e}"))
+                    borsh::from_slice(&obj.data).map_err(|e| {
+                        PokerL1Error::Serialization(format!("TexasPokerTable borsh: {e}"))
                     })?;
                 (table, false)
             }
@@ -118,8 +118,8 @@ impl Precompile for TexasPokerPrecompile {
         )?;
 
         // 持久化
-        let table_data = bcs::to_bytes(&table).map_err(|e| {
-            PokerL1Error::Serialization(format!("TexasPokerTable BCS write: {e}"))
+        let table_data = borsh::to_vec(&table).map_err(|e| {
+            PokerL1Error::Serialization(format!("TexasPokerTable borsh write: {e}"))
         })?;
         if is_new {
             let obj = Object::new(
@@ -236,7 +236,7 @@ mod tests {
             small_blind: 25,
             big_blind: 50,
         };
-        let args_bytes = bcs::to_bytes(&args).unwrap();
+        let args_bytes = borsh::to_vec(&args).unwrap();
         let result = precompile
             .call(
                 &caller,
@@ -251,7 +251,7 @@ mod tests {
         assert!(result.created_objects.contains(&table_id));
         // 验证对象已写入 ObjectDb
         let obj = object_db.read(&table_id).unwrap();
-        let table: TexasPokerTable = bcs::from_bytes(&obj.data).unwrap();
+        let table: TexasPokerTable = borsh::from_slice(&obj.data).unwrap();
         assert_eq!(table.name, "first_game");
         assert_eq!(table.max_players, 6);
         assert_eq!(table.big_blind, 50);

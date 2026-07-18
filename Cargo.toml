@@ -18,16 +18,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { workspace = true, features = ["signal", "rt"] }
 secp256k1 = { workspace = true }
 bcs = { workspace = true }
+borsh = { workspace = true }
 blake2 = { workspace = true }
 rand = { workspace = true }
 
 [workspace.dependencies]
 # 共享依赖集中管理，便于版本一致与升级
-poker_protocol = { path = "../zgame/poker_protocol" }
+poker_protocol = { path = "../zgame/poker_protocol", features = ["borsh"] }
 poker_zkvm = { path = "poker_zkvm" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcs = "0.1.6"
+borsh = { version = "1.7", features = ["derive"] }
 sha2 = "0.10.8"
 sha3 = "0.10.8"
 blake2 = "0.10.6"

@@ -7,10 +7,11 @@
 //! - `ChannelOwner`：通道所有者（assigned_validator 独占写权，用于 GameTurn 通道）
 
 use crate::Address;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 /// 对象所有权语义。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default, BorshSerialize, BorshDeserialize)]
 pub enum Ownership {
     /// 单一地址拥有，可转移。
     AddressOwned {
@@ -103,8 +104,8 @@ mod tests {
             },
         ];
         for o in cases {
-            let bytes = bcs::to_bytes(&o).unwrap();
-            let recovered: Ownership = bcs::from_bytes(&bytes).unwrap();
+            let bytes = borsh::to_vec(&o).unwrap();
+            let recovered: Ownership = borsh::from_slice(&bytes).unwrap();
             assert_eq!(o, recovered);
         }
     }

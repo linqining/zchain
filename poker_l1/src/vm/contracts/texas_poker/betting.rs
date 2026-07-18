@@ -5,6 +5,7 @@
 //! - M-D7: `can_raise` 用 `stack > to_call` 允许短 all-in
 //! - M-D8: 减法前 assert 防 u64 下溢
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::constants::{ACTION_CALL, ACTION_CHECK, ACTION_FOLD, ACTION_RAISE};
@@ -12,7 +13,7 @@ use super::constants::{ACTION_CALL, ACTION_CHECK, ACTION_FOLD, ACTION_RAISE};
 /// 下注轮状态。
 ///
 /// 对应 Move `BettingRound` struct（betting.move:24-30）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BettingRound {
     /// 当前轮最高下注。
     pub current_bet: u64,

@@ -26,6 +26,7 @@
 //! 协议层不强制 request_da 必须提交才能进入 Stage 2（Stage 由 block height 自动判定），
 //! 但 request_da 作为链上事件记录，便于审计和争议解决。
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
@@ -36,7 +37,7 @@ use super::force_checkin::RecoveryStage;
 use super::types::GameContract;
 
 /// request_da tx（SubTask 28.6）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RequestDaTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,
@@ -53,7 +54,7 @@ pub struct RequestDaTx {
 }
 
 /// request_da 应用结果（SubTask 28.6）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RequestDaOutcome {
     /// 当前所处的故障恢复阶段。
     pub stage: RecoveryStage,

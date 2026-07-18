@@ -36,7 +36,7 @@ use crate::account::{AccountStore, apply_public_tx, derive_address, validate_pub
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::offline::zk_verifier::ZkVerifierRegistry;
-use crate::storage::ObjectDb;
+use crate::storage::{ObjectBackend, ObjectDb};
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
@@ -168,10 +168,10 @@ pub struct BlockExecutionOutcome {
 /// - `tx`：待执行交易
 /// - `object_db`：对象数据库（直接可变引用，由调用方持有锁）
 /// - `account_store`：账户存储
-pub fn execute_tx(
+pub fn execute_tx<B: ObjectBackend>(
     env: &ExecutionEnvironment,
     tx: &Transaction,
-    object_db: &mut ObjectDb,
+    object_db: &mut B,
     account_store: &mut AccountStore,
 ) -> TxReceipt {
     match execute_tx_inner(env, tx, object_db, account_store) {
@@ -181,10 +181,10 @@ pub fn execute_tx(
 }
 
 /// `execute_tx` 内部实现（错误向上传播，由外层转为失败回执）。
-fn execute_tx_inner(
+fn execute_tx_inner<B: ObjectBackend>(
     env: &ExecutionEnvironment,
     tx: &Transaction,
-    object_db: &mut ObjectDb,
+    object_db: &mut B,
     account_store: &mut AccountStore,
 ) -> PokerL1Result<TxReceipt> {
     // ===== 1. 防御性重校验（limits / chain_id / 签名）=====
@@ -268,7 +268,7 @@ fn execute_tx_inner(
                     &selector,
                     &call.args,
                     &precompile_env,
-                    object_db,
+                    &mut *object_db,
                 )?;
                 all_created.extend(dispatch_result.created_objects);
                 all_modified.extend(dispatch_result.modified_objects);
@@ -326,19 +326,19 @@ fn execute_tx_inner(
 /// 执行 rBPF 合约调用并提交状态（全有或全无）。
 ///
 /// 返回 `(created_objects, modified_objects, gas_used)`。
-fn execute_contract_call(
+fn execute_contract_call<B: ObjectBackend>(
     env: &ExecutionEnvironment,
     tx: &Transaction,
     caller: &crate::Address,
     call: &crate::transaction::ContractCall,
-    object_db: &mut ObjectDb,
+    object_db: &mut B,
 ) -> PokerL1Result<(Vec<ObjectID>, Vec<ObjectID>, u64)> {
     // 1. 读取合约对象并反序列化 ContractObject
     let contract_obj = object_db.read(&call.contract_id).map_err(|e| match e {
         PokerL1Error::ObjectNotFound(_) => PokerL1Error::ContractNotFound(call.contract_id),
         other => other,
     })?;
-    let contract: ContractObject = bcs::from_bytes(&contract_obj.data)
+    let contract: ContractObject = borsh::from_slice(&contract_obj.data)
         .map_err(|e| PokerL1Error::Serialization(format!("ContractObject BCS: {e}")))?;
     if !contract.is_active {
         return Err(PokerL1Error::OldVersionNotCallable {
@@ -393,8 +393,8 @@ fn execute_contract_call(
 /// 阶段 1（只读校验）：所有待更新对象必须存在、caller 可写、数据 ≤ 64KB；
 /// 所有待创建对象必须不存在（防碰撞）。
 /// 阶段 2（写入）：校验全部通过后才落库。
-fn commit_object_cache(
-    object_db: &mut ObjectDb,
+fn commit_object_cache<B: ObjectBackend>(
+    object_db: &mut B,
     caller: &crate::Address,
     ctx: &PokerL1Context,
 ) -> PokerL1Result<()> {
@@ -440,10 +440,10 @@ fn commit_object_cache(
 ///
 /// 校验：creator 必须等于 caller（防冒名创建）、data ≤ 64KB、无 ID 碰撞。
 /// 返回创建的对象 ID 列表。
-fn apply_tx_outputs(
+fn apply_tx_outputs<B: ObjectBackend>(
     tx: &Transaction,
     caller: &crate::Address,
-    object_db: &mut ObjectDb,
+    object_db: &mut B,
 ) -> PokerL1Result<Vec<ObjectID>> {
     // 只读预检（全有或全无）
     for obj in &tx.outputs {
@@ -485,10 +485,10 @@ fn apply_tx_outputs(
 /// 而非查询 `Precompile::is_gas_free()`。理由：`execute_tx_inner` 步骤 3 已强制
 /// lane-contract 一致性（gas-free lane 必须配 gas-free precompile），故到达 `execute_block`
 /// 时 lane 已是合约 gas 属性的可靠代理。两套判定保持一致。
-pub fn execute_block(
+pub fn execute_block<B: ObjectBackend>(
     env: &ExecutionEnvironment,
     txs: &[Transaction],
-    object_db: &mut ObjectDb,
+    object_db: &mut B,
     account_store: &mut AccountStore,
 ) -> BlockExecutionOutcome {
     let mut receipts = Vec::with_capacity(txs.len());
@@ -724,7 +724,7 @@ mod tests {
         let contract_id = ObjectID::new(caller, creation_nonce);
         let mut contract = ContractObject::new(contract_id, 1, bytecode, caller, 0);
         contract.is_active = is_active;
-        let data = bcs::to_bytes(&contract).expect("序列化 ContractObject");
+        let data = borsh::to_vec(&contract).expect("序列化 ContractObject");
         let obj = Object::new(
             contract_id,
             Ownership::AddressOwned { owner: caller },
@@ -772,7 +772,7 @@ mod tests {
             _method_selector: &[u8; 32],
             _args: &[u8],
             _env: &PrecompileEnv,
-            _object_db: &mut ObjectDb,
+            _object_db: &mut dyn ObjectBackend,
         ) -> PokerL1Result<DispatchResult> {
             Ok(DispatchResult::empty())
         }

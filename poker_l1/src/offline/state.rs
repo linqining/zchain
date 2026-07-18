@@ -19,6 +19,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Hash;
@@ -247,7 +248,7 @@ impl PartialCheckinTx {
 ///
 /// 链上记录此锚点用于 partial_checkin 与完整 checkin 衔接。
 /// 需 `Serialize/Deserialize` 因存储于 `GameContract` 对象内（BCS 序列化）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct LastPartialFold {
     /// 中间状态承诺。
     pub intermediate_commitment: Hash,

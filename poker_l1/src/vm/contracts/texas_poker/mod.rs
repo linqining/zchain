@@ -16,7 +16,7 @@
 //! - `types`：核心数据结构（TexasPokerTable/Seat/DeckState/ShuffleState/...）
 //! - `state_machine`：状态机推进 + tick + reveal/reconstruct 编排
 //! - `dispatch`：17 个 method selector 路由
-//! - `crypto`：Mental Poker 密码学层（BLS ElGamal + 7 种 ZK proof）
+//! - `utils`：Mental Poker 密码学适配层（包 `poker_protocol` crate，提供 G1/Scalar 自由函数 + verify_or_skip）
 //!
 //! # Mental Poker 协议
 //!
@@ -35,11 +35,11 @@
 pub mod betting;
 pub mod card;
 pub mod constants;
-pub mod crypto;
 pub mod events;
 pub mod hand_evaluator;
 pub mod side_pot;
 pub mod types;
+pub mod utils;
 
 // Phase 3: 状态机 + dispatch
 pub mod state_machine;

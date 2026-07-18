@@ -654,7 +654,7 @@ declare_builtin_function!(
         key.copy_from_slice(&proof_bytes[32..64]);
 
         // BCS 反序列化 MerklePath
-        let path: MerklePath = match bcs::from_bytes(&proof_bytes[FAILURE_PROOF_HEADER_SIZE..]) {
+        let path: MerklePath = match borsh::from_slice(&proof_bytes[FAILURE_PROOF_HEADER_SIZE..]) {
             Ok(p) => p,
             Err(_) => return Ok(1), // 反序列化失败 → 证明无效
         };
@@ -1779,7 +1779,7 @@ mod tests {
         let path = smt.prove(&key2);
         assert!(path.is_empty_leaf, "key2 应为空叶（非包含）");
 
-        let path_bytes = bcs::to_bytes(&path).expect("BCS encode MerklePath");
+        let path_bytes = borsh::to_vec(&path).expect("BCS encode MerklePath");
 
         // 组装 proof：root(32) + key(32) + path_bytes
         let mut proof = Vec::with_capacity(FAILURE_PROOF_HEADER_SIZE + path_bytes.len());
@@ -1819,7 +1819,7 @@ mod tests {
         let path = smt.prove(&key1);
         assert!(!path.is_empty_leaf, "key1 应为非空叶（包含）");
 
-        let path_bytes = bcs::to_bytes(&path).unwrap();
+        let path_bytes = borsh::to_vec(&path).unwrap();
 
         let mut proof = Vec::with_capacity(FAILURE_PROOF_HEADER_SIZE + path_bytes.len());
         proof.extend_from_slice(&root);

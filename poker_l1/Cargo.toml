@@ -21,6 +21,7 @@ vm-common = { path = "../vm-common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bcs = { workspace = true }
+borsh = { workspace = true }
 sha2 = { workspace = true }
 sha3 = { workspace = true }
 blake2 = { workspace = true }

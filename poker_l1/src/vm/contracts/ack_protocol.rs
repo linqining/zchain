@@ -22,6 +22,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::ChainId;
@@ -48,6 +49,7 @@ pub const DEFAULT_MALICIOUS_REFUSE_THRESHOLD: u32 = 3;
 ///
 /// 编码为 u8 用于签名域。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum RefuseAckReason {
     /// 操作方提交了无效状态（state_hash 与链下执行结果不符）。
     InvalidState = 0x01,
@@ -79,6 +81,25 @@ impl RefuseAckReason {
     }
 }
 
+impl borsh::BorshSerialize for RefuseAckReason {
+    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&[self.as_byte()])
+    }
+}
+
+impl borsh::BorshDeserialize for RefuseAckReason {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut buf = [0u8; 1];
+        reader.read_exact(&mut buf)?;
+        Self::from_byte(buf[0]).ok_or_else(|| {
+            borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "invalid RefuseAckReason byte",
+            )
+        })
+    }
+}
+
 /// request_ack tx（SubTask 27.6）。
 ///
 /// 操作方请求特定参与者对当前 checkpoint 状态提交 ACK。
@@ -86,7 +107,7 @@ impl RefuseAckReason {
 ///
 /// 链上设定 `ack_deadline = block.height + ack_deadline_blocks`，
 /// 写入 `Game.pending_ack_requests[participant_address] = ack_deadline`。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RequestAckTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,
@@ -98,7 +119,7 @@ pub struct RequestAckTx {
 ///
 /// 参与者须在 ack_deadline 内提交，附 reason + evidence。
 /// 签名对象 = `hash(chain_id || game_id || request_id || reason)`（R4-H7）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RefuseAckTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,

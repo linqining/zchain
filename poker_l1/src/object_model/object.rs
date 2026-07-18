@@ -11,6 +11,7 @@ use super::ownership::Ownership;
 use crate::Address;
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 /// 对象类型标签（字符串形式，如 "Game" / "Account" / "Contract" / "UpgradeCap"）。
@@ -23,7 +24,7 @@ pub type Version = u64;
 pub type ObjectData = Vec<u8>;
 
 /// 对象（spec：id / version / owner / type / data / assigned_validator）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Object {
     /// 对象唯一 ID（NEW-L4：creator_address + creation_nonce）。
     pub id: ObjectID,
@@ -78,7 +79,7 @@ impl Object {
 
     /// 计算 content-hash = blake2b_256(BCS(self))。
     pub fn content_hash(&self) -> crate::Hash {
-        let bytes = bcs::to_bytes(self).expect("Object BCS 序列化不会失败");
+        let bytes = borsh::to_vec(self).expect("Object BCS 序列化不会失败");
         let mut h = Blake2bVar::new(32).expect("32 <= 64");
         h.update(&bytes);
         let mut out = [0u8; 32];
@@ -140,8 +141,8 @@ mod tests {
     #[test]
     fn object_bcs_roundtrip() {
         let o = sample_object();
-        let bytes = bcs::to_bytes(&o).unwrap();
-        let recovered: Object = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&o).unwrap();
+        let recovered: Object = borsh::from_slice(&bytes).unwrap();
         assert_eq!(o, recovered);
         assert_eq!(o.content_hash(), recovered.content_hash());
     }

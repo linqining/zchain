@@ -11,19 +11,23 @@
 //!
 //! 通用约束：
 //! - 后端：RocksDB（CF 分离不同索引）
-//! - 序列化：BCS（`bcs::to_bytes` / `bcs::from_bytes`）
+//! - 序列化：BCS（`borsh::to_vec` / `borsh::from_slice`）
 //! - key 编码：u64 用 little-endian 8 字节
 //! - DB 句柄通过 `Arc<DB>` 共享，可被多线程并发访问
 //! - 错误转换：`rocksdb::Error` → `PokerL1Error::Rocksdb`，BCS 错误 → `PokerL1Error::Serialization`
 
 pub mod block_store;
 pub mod dag_vertex_store;
+pub mod object_backend;
 pub mod object_db;
+pub mod object_db_snapshot;
 pub mod pruning;
 
 pub use block_store::BlockStore;
 pub use dag_vertex_store::DagVertexStore;
+pub use object_backend::ObjectBackend;
 pub use object_db::ObjectDb;
+pub use object_db_snapshot::ObjectDbSnapshot;
 pub use pruning::{
     ArchivedZkProof, DEFAULT_ARCHIVE_NODE_MIN_COUNT, DEFAULT_ARCHIVE_RETENTION_BLOCKS,
     DEFAULT_TX_PRUNE_AFTER_BLOCKS, DEFAULT_VERTEX_PRUNE_AFTER_BLOCKS, HistoricalDataRequest,

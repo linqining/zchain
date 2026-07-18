@@ -20,6 +20,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -38,7 +39,7 @@ pub type Balance = u64;
 ///
 /// 一个账户绑定一个 tagged pubkey（MVP 不支持多 key 账户）。
 /// `balance` 用于支付 Public 通道 tx 的 gas；GameTurn 通道 tx 免 gas。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Account {
     /// 账户地址 = `blake2b_256(tagged_pubkey)[0..20]`（S7 修复）。
     pub address: Address,
@@ -418,8 +419,8 @@ mod tests {
     fn account_bcs_roundtrip() {
         let tp = make_tagged_pubkey(0x99, SignatureScheme::Secp256k1);
         let account = Account::new(tp, 500_000);
-        let bytes = bcs::to_bytes(&account).unwrap();
-        let recovered: Account = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&account).unwrap();
+        let recovered: Account = borsh::from_slice(&bytes).unwrap();
         assert_eq!(account, recovered);
     }
 

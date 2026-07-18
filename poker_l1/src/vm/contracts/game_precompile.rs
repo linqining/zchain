@@ -13,7 +13,7 @@ use super::{
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
-use crate::storage::ObjectDb;
+use crate::storage::{ObjectBackend, ObjectDb};
 use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile};
 use crate::Address;
 
@@ -56,7 +56,7 @@ impl Precompile for GamePrecompile {
         method_selector: &[u8; 32],
         args: &[u8],
         env: &ExecutionEnvironment,
-        object_db: &mut ObjectDb,
+        object_db: &mut dyn ObjectBackend,
     ) -> PokerL1Result<DispatchResult> {
         let dispatch_context = dispatch::DispatchContext {
             caller: *caller,
@@ -72,12 +72,12 @@ impl Precompile for GamePrecompile {
             other => other,
         })?;
 
-        let mut game: GameContract = bcs::from_bytes(&game_obj.data)
+        let mut game: GameContract = borsh::from_slice(&game_obj.data)
             .map_err(|e| PokerL1Error::Serialization(format!("GameContract BCS: {e}")))?;
 
         let result = dispatch::dispatch(&dispatch_context, &mut game, method_selector, args)?;
 
-        let game_data = bcs::to_bytes(&game)
+        let game_data = borsh::to_vec(&game)
             .map_err(|e| PokerL1Error::Serialization(format!("GameContract BCS write: {e}")))?;
         object_db.update(&game_id, caller, game_data)?;
 

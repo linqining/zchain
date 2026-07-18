@@ -17,6 +17,10 @@ use std::collections::HashMap;
 /// 内存版 ObjectStore + SMT backing。
 ///
 /// Phase 1 内存实现；Phase 4 扩展 rocksdb 后端。
+///
+/// `Clone` 用于 `ObjectDbSnapshot` 创建 fork：复制内存 SMT + objects HashMap，
+/// 使 snapshot 可以独立计算 state_root 并记录 mutation log 供回放。
+#[derive(Clone)]
 pub struct ObjectStore {
     /// ObjectID -> Object
     objects: HashMap<ObjectID, Object>,
@@ -51,7 +55,7 @@ impl ObjectStore {
             return Err(PokerL1Error::ObjectIDCollision(object.id));
         }
         let key = object.id.merkle_key();
-        let value = bcs::to_bytes(&object)
+        let value = borsh::to_vec(&object)
             .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
         self.smt.upsert(key, &value);
         self.objects.insert(object.id, object);
@@ -104,7 +108,7 @@ impl ObjectStore {
 
         // SMT 同步：用新 BCS(Object) 覆盖
         let key = obj.id.merkle_key();
-        let value = bcs::to_bytes(obj)
+        let value = borsh::to_vec(obj)
             .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
         self.smt.upsert(key, &value);
         Ok(())
@@ -133,7 +137,7 @@ impl ObjectStore {
         obj.bump_version();
 
         let key = obj.id.merkle_key();
-        let value = bcs::to_bytes(obj)
+        let value = borsh::to_vec(obj)
             .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
         self.smt.upsert(key, &value);
         Ok(())
@@ -320,7 +324,7 @@ mod tests {
         s.create(o.clone()).unwrap();
 
         let path = s.prove(&o.id).unwrap();
-        let value_bytes = bcs::to_bytes(&o).unwrap();
+        let value_bytes = borsh::to_vec(&o).unwrap();
         assert!(super::super::smt::SparseMerkleTree::verify(
             &s.state_root(),
             &o.id.merkle_key(),

@@ -34,6 +34,7 @@
 //! - fallback tx 的 timeout_proof 校验为密码学操作（无状态），实际 witness 收集由 Phase 6 网络层完成
 //! - `required_witness_count` 阈值公式按 R4-H6 修正：`max(3, floor(checkpoint_multi_replica_count * 2 / 3))`
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::BlockHeight;
@@ -194,7 +195,7 @@ impl VertexBuilder {
 ///
 /// assigned_validator 把自己负责 game 的 GameTurn tx 分组为 game sub-block（每 game 一个）。
 /// sub-block 内按 `(current_turn, arrival)` 排序：当前轮次玩家优先，同玩家按 arrival 顺序。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct GameSubBlock {
     /// Game 对象 ID。
     pub game_id: crate::object_model::ObjectID,
@@ -432,7 +433,7 @@ pub fn check_sech6_cross_commit_force_advance(
 /// - 提交时对应的 block height（SEC-M5：以 height 为权威）
 /// - 多副本 validator secp256k1 签名见证（≥ `required_witness_count` 个）
 /// - round 范围非包含证明（复用 C6 sparse Merkle 非包含证明格式）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TimeoutProof {
     /// 原始被超时的 GameTurn tx。
     pub original_tx: Transaction,
@@ -1199,8 +1200,8 @@ mod tests {
             make_gameturn_tx(0x10, 2, false),
         ];
         let sub = build_game_sub_block(txs, &game, &rule).expect("构造 sub-block");
-        let bytes = bcs::to_bytes(&sub).unwrap();
-        let recovered: GameSubBlock = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&sub).unwrap();
+        let recovered: GameSubBlock = borsh::from_slice(&bytes).unwrap();
         assert_eq!(sub, recovered);
     }
 
@@ -1208,8 +1209,8 @@ mod tests {
     fn timeout_proof_bcs_roundtrip() {
         let original = make_gameturn_tx(0x10, 5, false);
         let proof = make_timeout_proof(original, 3, false, 0x01);
-        let bytes = bcs::to_bytes(&proof).unwrap();
-        let recovered: TimeoutProof = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&proof).unwrap();
+        let recovered: TimeoutProof = borsh::from_slice(&bytes).unwrap();
         assert_eq!(proof, recovered);
     }
 

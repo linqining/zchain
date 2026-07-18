@@ -13,10 +13,11 @@
 //! IMPL-SEC-1：tag 字节解析须常数时间（防 timing 侧信道泄露 scheme 信息）。
 
 use crate::error::{PokerL1Error, PokerL1Result};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 /// 签名方案枚举（与 tag 低 4 位的 scheme_id 对应）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum SignatureScheme {
     /// secp256k1 ECDSA recoverable（tag scheme_id = 0）
     Secp256k1,
@@ -65,7 +66,7 @@ pub const CURRENT_VERSION: u8 = 1;
 /// Tagged Pubkey：1B tag || raw pubkey bytes。
 ///
 /// tag = `(scheme_id: 4 bits high) || (version_id: 4 bits low)`
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TaggedPubkey {
     /// 1 字节 tag（scheme_id << 4 | version_id）。
     pub tag: u8,
@@ -237,8 +238,8 @@ mod tests {
     #[test]
     fn tagged_pubkey_bcs_roundtrip() {
         let tp = TaggedPubkey::new(SignatureScheme::Ed25519, 1, vec![0xAB; 32]).unwrap();
-        let bytes = bcs::to_bytes(&tp).unwrap();
-        let recovered: TaggedPubkey = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&tp).unwrap();
+        let recovered: TaggedPubkey = borsh::from_slice(&bytes).unwrap();
         assert_eq!(tp, recovered);
     }
 }

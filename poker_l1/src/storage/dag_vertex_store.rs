@@ -104,7 +104,7 @@ impl DagVertexStore {
             return Ok(hash);
         }
 
-        let vertex_bytes = bcs::to_bytes(vertex)?;
+        let vertex_bytes = borsh::to_vec(vertex)?;
         let round_key = Self::round_key(vertex.epoch, vertex.round);
         let author_key = vertex.author_pubkey.to_bytes();
 
@@ -113,7 +113,7 @@ impl DagVertexStore {
             .db
             .get_cf(self.round_cf(), round_key)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
-            .map(|v| bcs::from_bytes(&v))
+            .map(|v| borsh::from_slice(&v))
             .transpose()?
             .unwrap_or_default();
         round_list.push(hash);
@@ -122,13 +122,13 @@ impl DagVertexStore {
             .db
             .get_cf(self.author_cf(), &author_key)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
-            .map(|v| bcs::from_bytes(&v))
+            .map(|v| borsh::from_slice(&v))
             .transpose()?
             .unwrap_or_default();
         author_list.push(hash);
 
-        let round_list_bytes = bcs::to_bytes(&round_list)?;
-        let author_list_bytes = bcs::to_bytes(&author_list)?;
+        let round_list_bytes = borsh::to_vec(&round_list)?;
+        let author_list_bytes = borsh::to_vec(&author_list)?;
 
         // 原子写入三个 CF
         let mut batch = WriteBatch::default();
@@ -149,7 +149,7 @@ impl DagVertexStore {
             .get_cf(self.vertices_cf(), hash)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
             .ok_or(PokerL1Error::DagVertexNotFound)?;
-        let vertex: DagVertex = bcs::from_bytes(&bytes)?;
+        let vertex: DagVertex = borsh::from_slice(&bytes)?;
         Ok(vertex)
     }
 
@@ -162,7 +162,7 @@ impl DagVertexStore {
             .db
             .get_cf(self.round_cf(), key)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
-            .map(|v| bcs::from_bytes(&v))
+            .map(|v| borsh::from_slice(&v))
             .transpose()?
             .unwrap_or_default();
 
@@ -182,7 +182,7 @@ impl DagVertexStore {
             .db
             .get_cf(self.author_cf(), &key)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
-            .map(|v| bcs::from_bytes(&v))
+            .map(|v| borsh::from_slice(&v))
             .transpose()?
             .unwrap_or_default();
 

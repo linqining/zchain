@@ -26,6 +26,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::error::PokerL1Error;
@@ -66,7 +67,7 @@ pub const MAX_CHALLENGE_REWARD_RATIO: u32 = 100;
 /// challenge_delta tx（SubTask 28.5）。
 ///
 /// 内容：`(game_id, challenger, claimed_state_delta, challenger_deposit)`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ChallengeDeltaTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,
@@ -88,7 +89,7 @@ impl ChallengeDeltaTx {
 }
 
 /// challenge_delta 应用结果（SubTask 28.5）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ChallengeDeltaOutcome {
     /// 挑战是否成立（true: Δ 不一致，操作方 forfeit；false: Δ 一致，挑战方 forfeit）。
     pub succeeded: bool,

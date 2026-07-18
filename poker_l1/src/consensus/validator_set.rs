@@ -26,6 +26,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::Epoch;
@@ -79,7 +80,7 @@ mod big_array_33 {
 /// - `gamma`：ECVRF 的 gamma 值（compressed secp256k1 point，33 字节）
 /// - `c`：挑战值（32 字节）
 /// - `s`：响应值（32 字节）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct VrfProof {
     /// ECVRF gamma 值（compressed secp256k1 point）。
     #[serde(with = "big_array_33")]
@@ -207,7 +208,7 @@ pub fn compute_vrf_output(
 }
 
 /// Validator 状态（NEW-L3 / R5-H7 / SEC2-M10）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum ValidatorStatus {
     /// 活跃（参与共识出块）。
     Active,
@@ -222,7 +223,7 @@ pub enum ValidatorStatus {
 }
 
 /// Validator 条目（ValidatorSet 单项）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ValidatorEntry {
     /// validator 的 secp256k1 tagged pubkey（用于 vertex / commit certificate 签名）。
     pub pubkey: TaggedPubkey,
@@ -284,7 +285,7 @@ impl ValidatorEntry {
 }
 
 /// ValidatorSet（SubTask 13.1）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ValidatorSet {
     /// 当前 epoch。
     pub epoch: Epoch,
@@ -994,16 +995,16 @@ mod tests {
     #[test]
     fn validator_entry_bcs_roundtrip() {
         let v = make_validator(0x10, 1_000_000, 1000);
-        let bytes = bcs::to_bytes(&v).unwrap();
-        let recovered: ValidatorEntry = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&v).unwrap();
+        let recovered: ValidatorEntry = borsh::from_slice(&bytes).unwrap();
         assert_eq!(v, recovered);
     }
 
     #[test]
     fn validator_set_bcs_roundtrip() {
         let set = make_validator_set(5);
-        let bytes = bcs::to_bytes(&set).unwrap();
-        let recovered: ValidatorSet = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&set).unwrap();
+        let recovered: ValidatorSet = borsh::from_slice(&bytes).unwrap();
         assert_eq!(set, recovered);
     }
 
@@ -1014,8 +1015,8 @@ mod tests {
             c: [2; 32],
             s: [3; 32],
         };
-        let bytes = bcs::to_bytes(&proof).unwrap();
-        let recovered: VrfProof = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&proof).unwrap();
+        let recovered: VrfProof = borsh::from_slice(&bytes).unwrap();
         assert_eq!(proof, recovered);
     }
 }

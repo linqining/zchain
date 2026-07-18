@@ -124,8 +124,8 @@ fn subtask_38_1_transaction_bcs_json_roundtrip() {
         false,
         TxLane::GameTurn,
     );
-    let bcs_bytes = bcs::to_bytes(&tx).unwrap();
-    let recovered: Transaction = bcs::from_bytes(&bcs_bytes).unwrap();
+    let bcs_bytes = borsh::to_vec(&tx).unwrap();
+    let recovered: Transaction = borsh::from_slice(&bcs_bytes).unwrap();
     assert_eq!(tx, recovered);
 
     let json = serde_json::to_string(&tx).unwrap();
@@ -136,8 +136,8 @@ fn subtask_38_1_transaction_bcs_json_roundtrip() {
 #[test]
 fn subtask_38_1_block_bcs_json_roundtrip() {
     let block = make_block(10, [0xAB; 32]);
-    let bcs_bytes = bcs::to_bytes(&block).unwrap();
-    let recovered: Block = bcs::from_bytes(&bcs_bytes).unwrap();
+    let bcs_bytes = borsh::to_vec(&block).unwrap();
+    let recovered: Block = borsh::from_slice(&bcs_bytes).unwrap();
     assert_eq!(block, recovered);
 
     let json = serde_json::to_string(&block).unwrap();
@@ -148,16 +148,16 @@ fn subtask_38_1_block_bcs_json_roundtrip() {
 #[test]
 fn subtask_38_1_dag_vertex_bcs_roundtrip() {
     let vertex = make_dag_vertex(3, 7);
-    let bcs_bytes = bcs::to_bytes(&vertex).unwrap();
-    let recovered: DagVertex = bcs::from_bytes(&bcs_bytes).unwrap();
+    let bcs_bytes = borsh::to_vec(&vertex).unwrap();
+    let recovered: DagVertex = borsh::from_slice(&bcs_bytes).unwrap();
     assert_eq!(vertex, recovered);
 }
 
 #[test]
 fn subtask_38_1_dag_commit_cert_bcs_json_roundtrip() {
     let cert = dummy_commit_cert();
-    let bcs_bytes = bcs::to_bytes(&cert).unwrap();
-    let recovered: DagCommitCertificate = bcs::from_bytes(&bcs_bytes).unwrap();
+    let bcs_bytes = borsh::to_vec(&cert).unwrap();
+    let recovered: DagCommitCertificate = borsh::from_slice(&bcs_bytes).unwrap();
     assert_eq!(cert, recovered);
 
     let json = serde_json::to_string(&cert).unwrap();

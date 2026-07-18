@@ -12,6 +12,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::ChainId;
@@ -29,7 +30,7 @@ use crate::signature::TaggedPubkey;
 ///   / checkin / challenge_delta / refuse_ack / request_ack / checkpoint_skip /
 ///   force_checkpoint / partial_checkin / revoke_delegated_escape / rotate_validator_key）
 ///   — 路由任意 validator，正常计费（request_ack / refuse_ack / checkpoint_skip 免 gas）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TxLane {
     /// Public 通道：通用交易。
     Public,
@@ -46,7 +47,7 @@ pub enum TxLane {
 /// spec：
 /// - GameTurn + CheckpointAnchor → assigned_validator
 /// - ForceSync + Public → 任意 validator（客户端多副本广播）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum RouteHint {
     /// 路由到任意 validator（Public / ForceSync 通道）。
     #[default]
@@ -61,7 +62,7 @@ pub enum RouteHint {
 /// - `budget`：tx 愿意支付的最大 gas 量（tx gas limit = 10,000,000）
 /// - `price`：每 gas 单价（用于 priority 排序）
 /// - GameTurn 通道 tx 的 gas 字段忽略（免 gas），由买入锁仓作为反滥用保障
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Gas {
     /// Gas 预算上限。
     pub budget: u64,
@@ -87,7 +88,7 @@ impl Gas {
 /// 合约调用载荷。
 ///
 /// spec：tx 可包含 contract_call 字段调用已部署的 rBPF 合约。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ContractCall {
     /// 目标合约对象 ID。
     pub contract_id: ObjectID,
@@ -100,7 +101,7 @@ pub struct ContractCall {
 /// 交易结构（spec：账户抽象与交易安全章节）。
 ///
 /// 字段说明见模块级文档与 spec 各修复项引用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Transaction {
     // ===== 对象模型相关 =====
     /// 引用的输入对象 ID 列表（consumed objects）。
@@ -211,19 +212,19 @@ impl Transaction {
 
     /// BCS 序列化为字节。
     pub fn to_bcs(&self) -> PokerL1Result<Vec<u8>> {
-        Ok(bcs::to_bytes(self)?)
+        Ok(borsh::to_vec(self)?)
     }
 
     /// 从 BCS 字节反序列化。
     pub fn from_bcs(bytes: &[u8]) -> PokerL1Result<Self> {
-        Ok(bcs::from_bytes(bytes)?)
+        Ok(borsh::from_slice(bytes)?)
     }
 }
 
 /// TxRequest：客户端构造 tx 时的请求载荷（未签名）。
 ///
 /// Phase 1 定义结构，Phase 2 实现客户端签名流程。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TxRequest {
     /// 引用的输入对象 ID 列表。
     pub inputs: Vec<ObjectID>,
@@ -544,8 +545,8 @@ mod tests {
             TxLane::CheckpointAnchor,
             TxLane::ForceSync,
         ] {
-            let bytes = bcs::to_bytes(&lane).unwrap();
-            let lane2: TxLane = bcs::from_bytes(&bytes).unwrap();
+            let bytes = borsh::to_vec(&lane).unwrap();
+            let lane2: TxLane = borsh::from_slice(&bytes).unwrap();
             assert_eq!(lane, lane2);
         }
     }

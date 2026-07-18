@@ -16,6 +16,7 @@
 //! 1. **OnChain**：设置 `current_hand`，等待 GameTurn tx
 //! 2. **OffChain**：设置 `current_hand` + 触发 checkout（生成 OfflineState commitment）
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
@@ -23,7 +24,7 @@ use crate::Address;
 use super::types::{ExecutionMode, GameContract, HandState};
 
 /// HandStarted 分支结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum HandStartedResult {
     /// OnChain 模式：手牌已开始，等待 GameTurn tx。
     OnChain {
@@ -44,7 +45,7 @@ pub enum HandStartedResult {
 }
 
 /// HandStarted 输入参数。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct HandStartedInput {
     /// 新手牌状态。
     pub hand_state: HandState,

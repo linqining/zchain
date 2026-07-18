@@ -90,7 +90,7 @@ impl BlockStore {
             return Ok(hash);
         }
         let height_le = block.header.height.to_le_bytes();
-        let value = bcs::to_bytes(block)?;
+        let value = borsh::to_vec(block)?;
 
         let mut batch = WriteBatch::default();
         batch.put_cf(self.blocks_cf(), hash, &value);
@@ -109,7 +109,7 @@ impl BlockStore {
             .get_cf(self.blocks_cf(), hash)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
             .ok_or(PokerL1Error::BlockNotFound)?;
-        let block: Block = bcs::from_bytes(&bytes)?;
+        let block: Block = borsh::from_slice(&bytes)?;
         Ok(block)
     }
 

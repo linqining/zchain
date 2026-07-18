@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::gas_table::MAX_OBJECT_SIZE;
@@ -27,7 +28,7 @@ pub const UPGRADE_CAP_TYPE: &str = "UpgradeCap";
 ///
 /// 存储在 ObjectStore 中，通过 contract_id 索引。
 /// 一个 contract_id 可有多个版本，旧版本在升级后变为不可调用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ContractObject {
     /// 合约 ID（全局唯一，升级后不变）。
     pub contract_id: ObjectID,
@@ -72,7 +73,7 @@ impl ContractObject {
 ///
 /// 部署合约时创建并 transfer 给部署者。
 /// 持有者可发起升级、取消升级、紧急升级。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct UpgradeCap {
     /// 关联的合约 ID。
     pub contract_id: ObjectID,
@@ -104,7 +105,7 @@ impl UpgradeCap {
 }
 
 /// 升级状态（SEC-L7 timelock）。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum UpgradeState {
     /// 无待生效升级。
     #[default]
@@ -136,7 +137,7 @@ pub enum UpgradeState {
 /// 合约注册表（链上 contract_id → ContractObject 映射）。
 ///
 /// 管理所有已部署合约的多版本字节码 + UpgradeCap + 升级状态。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ContractRegistry {
     /// contract_id → 当前活跃合约对象。
     contracts: BTreeMap<ObjectID, ContractObject>,

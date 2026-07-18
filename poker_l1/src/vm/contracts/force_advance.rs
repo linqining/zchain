@@ -33,6 +33,7 @@
 //!          → Fold
 //! ```
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
@@ -40,7 +41,7 @@ use crate::Address;
 use super::types::{BettingRound, GameAction, GameContract, HandState};
 
 /// force_advance 输入参数。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ForceAdvanceInput {
     /// 超时玩家地址。
     pub timeout_player: Address,

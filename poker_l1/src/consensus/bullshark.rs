@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
@@ -101,7 +102,7 @@ impl Dag {
 }
 
 /// Commit leader 检测结果（SubTask 9.1）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct CommitLeader {
     /// 被引用的 leader vertex hash。
     pub leader_hash: Hash,
@@ -238,7 +239,7 @@ pub fn bullshark_linear_order(dag: &Dag, commit_hashes: &[Hash]) -> PokerL1Resul
 }
 
 /// Block 投影结果（SubTask 9.3）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockProjection {
     /// 投影产出的 block header。
     pub header: BlockHeader,
@@ -1113,8 +1114,8 @@ mod tests {
             reference_count: 3,
             required_quorum: 3,
         };
-        let bytes = bcs::to_bytes(&leader).unwrap();
-        let recovered: CommitLeader = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&leader).unwrap();
+        let recovered: CommitLeader = borsh::from_slice(&bytes).unwrap();
         assert_eq!(leader, recovered);
     }
 
@@ -1146,8 +1147,8 @@ mod tests {
             gameturn_txs: vec![],
             ordered_vertex_hashes: vec![[0xAA; 32]],
         };
-        let bytes = bcs::to_bytes(&projection).unwrap();
-        let recovered: BlockProjection = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&projection).unwrap();
+        let recovered: BlockProjection = borsh::from_slice(&bytes).unwrap();
         assert_eq!(projection, recovered);
     }
 

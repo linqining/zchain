@@ -25,6 +25,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
@@ -46,7 +47,7 @@ pub const DEFAULT_NO_PROGRESS_THRESHOLD: u32 = 2;
 /// 单个参与者的 ACK 签名（SubTask 27.3）。
 ///
 /// 每个活跃参与者须对 ACK 签名对象签名，证明其确认该 checkpoint 状态。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct AckSignature {
     /// 签名者 tagged pubkey。
     pub participant: TaggedPubkey,
@@ -58,7 +59,7 @@ pub struct AckSignature {
 ///
 /// `block.height > ack_deadline` 且无 ACK 无 refuse_ack → 视为默认 ACK。
 /// 操作方提交带 `opt_out_ack_proof` 的 checkpoint_anchor（或 force_checkpoint）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct OptOutAckProof {
     /// 逾期的参与者 tagged pubkey。
     pub participant: TaggedPubkey,
@@ -75,7 +76,7 @@ pub struct OptOutAckProof {
 /// 包括 assigned_validator 必然收到 — 防栽赃）。
 ///
 /// 字段：`(game_id, checkpoint_seq, current_turn, state_hash, ack_signatures, opt_out_ack_proof?)`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct CheckpointAnchorTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,

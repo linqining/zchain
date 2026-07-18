@@ -30,6 +30,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PokerL1Error, PokerL1Result};
@@ -56,7 +57,7 @@ use crate::{Address, BlockHeight};
 /// - `pending_submitters`：多玩家阶段待提交者集合（下注阶段为空）
 /// - `phase_started_height`：当前阶段开始的 block height（用于超时判定）
 /// - `completed_submitters`：多玩家阶段已提交者集合（用于进度追踪）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct GameStatus {
     /// Game 对象 ID。
     pub id: crate::object_model::ObjectID,
@@ -96,7 +97,7 @@ pub struct GameStatus {
 }
 
 /// Game 执行模式（spec：合约可选 OnChain 默认 / OffChain 可选）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum ExecutionMode {
     /// 全链上执行（默认）。
     OnChain,
@@ -107,7 +108,7 @@ pub enum ExecutionMode {
 /// 下注轮次（Texas Hold'em 四轮下注 + 摊牌）。
 ///
 /// 用于 [`GamePhase::Betting`] 标记当前下注轮次。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum BettingRound {
     /// Preflop：翻牌前下注轮（盲注后、翻牌前）。
     Preflop,
@@ -124,7 +125,7 @@ pub enum BettingRound {
 /// 多玩家提交阶段的子类型（spec：4 种并行/顺序提交阶段）。
 ///
 /// 用于 [`GamePhase::MultiPlayerSubmit`] 标记当前多玩家提交子阶段。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum SubmitPhaseKind {
     /// 洗牌提交：活跃玩家依次提交 shuffle proof（顺序）。
     Shuffle,
@@ -142,7 +143,7 @@ pub enum SubmitPhaseKind {
 ///   使用 `current_turn_player` 与 [`TurnRule::current_turn`] 校验
 /// - [`GamePhase::MultiPlayerSubmit`]：一组玩家并行/顺序提交（shuffle / reveal / reconstruct / leave），
 ///   使用 `pending_submitters` 与 [`TurnRule::current_submitters`] 校验
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum GamePhase {
     /// 下注阶段：单玩家轮转。
     Betting {
@@ -774,8 +775,8 @@ mod tests {
     #[test]
     fn game_status_bcs_roundtrip() {
         let (game, _, _, _) = make_game(0x01, 0x10, &[0x10, 0x20, 0x30]);
-        let bytes = bcs::to_bytes(&game).unwrap();
-        let recovered: GameStatus = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&game).unwrap();
+        let recovered: GameStatus = borsh::from_slice(&bytes).unwrap();
         assert_eq!(game, recovered);
     }
 
@@ -807,8 +808,8 @@ mod tests {
             BettingRound::River,
             BettingRound::Showdown,
         ] {
-            let bytes = bcs::to_bytes(&round).unwrap();
-            let recovered: BettingRound = bcs::from_bytes(&bytes).unwrap();
+            let bytes = borsh::to_vec(&round).unwrap();
+            let recovered: BettingRound = borsh::from_slice(&bytes).unwrap();
             assert_eq!(round, recovered);
         }
     }
@@ -821,8 +822,8 @@ mod tests {
             SubmitPhaseKind::Reconstruct,
             SubmitPhaseKind::LeaveProof,
         ] {
-            let bytes = bcs::to_bytes(&kind).unwrap();
-            let recovered: SubmitPhaseKind = bcs::from_bytes(&bytes).unwrap();
+            let bytes = borsh::to_vec(&kind).unwrap();
+            let recovered: SubmitPhaseKind = borsh::from_slice(&bytes).unwrap();
             assert_eq!(kind, recovered);
         }
     }
@@ -859,8 +860,8 @@ mod tests {
             },
         ];
         for phase in &phases {
-            let bytes = bcs::to_bytes(phase).unwrap();
-            let recovered: GamePhase = bcs::from_bytes(&bytes).unwrap();
+            let bytes = borsh::to_vec(phase).unwrap();
+            let recovered: GamePhase = borsh::from_slice(&bytes).unwrap();
             assert_eq!(*phase, recovered);
         }
     }
@@ -979,8 +980,8 @@ mod tests {
         game.pending_submitters.insert([0x20; 20]);
         game.completed_submitters.insert([0x10; 20]);
         game.phase_started_height = 100;
-        let bytes = bcs::to_bytes(&game).unwrap();
-        let recovered: GameStatus = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&game).unwrap();
+        let recovered: GameStatus = borsh::from_slice(&bytes).unwrap();
         assert_eq!(game, recovered);
     }
 

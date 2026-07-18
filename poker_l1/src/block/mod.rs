@@ -34,6 +34,7 @@ pub use validator::{
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::DagCommitCertificate;
@@ -53,7 +54,7 @@ const BLOCK_HEADER_DOMAIN: u8 = 0x42; // 'B' for Block
 /// - `public_tx_root`：Public 通道 tx 的 Merkle root
 /// - `gameturn_tx_root`：GameTurn + CheckpointAnchor 通道 tx 的 Merkle root
 /// - `dag_commit_certificate`：Bullshark commit certificate（含 2/3 secp256k1 多签）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockHeader {
     /// 区块高度（严格单调递增，genesis = 0）。
     pub height: BlockHeight,
@@ -102,7 +103,7 @@ impl BlockHeader {
 ///
 /// spec：block 不需要单独 production，而是 DAG commit 的投影。
 /// body 含两个通道的 tx 列表（public_txs / gameturn_txs）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Block {
     /// 区块头。
     pub header: BlockHeader,
@@ -146,12 +147,12 @@ impl Block {
 
     /// BCS 序列化。
     pub fn to_bcs(&self) -> crate::error::PokerL1Result<Vec<u8>> {
-        Ok(bcs::to_bytes(self)?)
+        Ok(borsh::to_vec(self)?)
     }
 
     /// 从 BCS 反序列化。
     pub fn from_bcs(bytes: &[u8]) -> crate::error::PokerL1Result<Self> {
-        Ok(bcs::from_bytes(bytes)?)
+        Ok(borsh::from_slice(bytes)?)
     }
 }
 

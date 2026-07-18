@@ -23,6 +23,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::ChainId;
@@ -41,7 +42,7 @@ pub const DEFAULT_MAX_SKIP_SEGMENTS: u32 = 3;
 ///
 /// 签名对象 = `hash(chain_id || game_id || checkpoint_seq || state_hash)`。
 /// 证明某 checkpoint_seq 时刻的 state_hash 已被 ≥2/3 参与者确认。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct StateProof {
     /// 证明的 checkpoint_seq。
     pub checkpoint_seq: u64,
@@ -131,7 +132,7 @@ impl StateProof {
 /// `continuity_proof = (start_state_proof, end_state_proof)`
 /// - start_state_proof：skip 段起点状态已被 ≥2/3 参与者确认
 /// - end_state_proof：待下一 checkpoint 提交时隐式补全（None = 未补全）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SegmentContinuityProof {
     /// 段起点状态证明。
     pub start_state_proof: StateProof,
@@ -143,7 +144,7 @@ pub struct SegmentContinuityProof {
 ///
 /// 走 CheckpointAnchor 通道，免 gas。仅更新 `last_action_height` 与
 /// `skip_count += 1`，**不推进 ack_chain_hash**。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct CheckpointSkipTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,

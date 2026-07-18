@@ -1,0 +1,133 @@
+//! Object 读写后端抽象（Track A — Task 3：Tx 执行引擎接线）。
+//!
+//! 功能：
+//! - 定义 [`ObjectBackend`] trait，抽象 Object 读写接口
+//! - 使 `executor::execute_block` / `execute_tx` 可在 [`ObjectDb`] 或
+//!   [`ObjectDbSnapshot`] 上泛型工作
+//! - [`ObjectDb`] 实现：直接读写 RocksDB + 内存 SMT
+//! - [`ObjectDbSnapshot`] 实现：在 fork 上试执行，记录 mutation log 供回放
+//!
+//! 设计动机：
+//! - 单 validator 模式下 `build_block_from_vertex` 需要"试执行" vertex 中的 txs
+//!   以计算新 state_root，但试执行失败时不应污染主 ObjectDb
+//! - Fork/Snapshot 机制：克隆内存 SMT，所有写操作记录到 mutation log，
+//!   `apply_to()` 将 log 回放到主 ObjectDb（commit），`discard()` 丢弃（rollback）
+
+use crate::object_model::{Object, ObjectID, Version};
+use crate::{Address, Hash};
+use crate::error::PokerL1Result;
+
+/// Object 读写后端抽象。
+///
+/// 实现者：
+/// - [`ObjectDb`](crate::storage::ObjectDb)：生产环境，直接读写 RocksDB + 内存 SMT
+/// - [`ObjectDbSnapshot`](crate::storage::ObjectDbSnapshot)：fork 环境，克隆 SMT + mutation log
+///
+/// executor 层通过此 trait 泛型化，使"试执行 → 提交/回滚"模式成为可能。
+pub trait ObjectBackend {
+    /// 创建对象。ObjectID 冲突返回 `ObjectIDCollision`。
+    fn create(&mut self, object: Object) -> PokerL1Result<()>;
+
+    /// 读取对象（返回 clone，因为不能借用 RocksDB 内部缓冲区）。
+    fn read(&self, id: &ObjectID) -> PokerL1Result<Object>;
+
+    /// 查询对象版本号。
+    fn version_of(&self, id: &ObjectID) -> PokerL1Result<Version>;
+
+    /// 更新对象。校验：对象存在、可写（非 Immutable）、actor 有写权。
+    /// 成功后 version += 1，SMT 同步更新。
+    fn update(&mut self, id: &ObjectID, actor: &Address, new_data: Vec<u8>) -> PokerL1Result<()>;
+
+    /// 转移所有权（仅 AddressOwned 对象可转移）。
+    fn transfer(&mut self, id: &ObjectID, actor: &Address, new_owner: Address) -> PokerL1Result<()>;
+
+    /// 删除对象（从 SMT 与持久化后端同步移除）。
+    fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object>;
+
+    /// 当前全局状态根（所有 live 对象的 Sparse Merkle Root）。
+    fn state_root(&self) -> Hash;
+}
+
+// ============================================================
+// ObjectDb 实现 ObjectBackend（委托现有方法）
+// ============================================================
+
+use super::object_db::ObjectDb;
+
+impl ObjectBackend for ObjectDb {
+    #[inline]
+    fn create(&mut self, object: Object) -> PokerL1Result<()> {
+        self.create(object)
+    }
+
+    #[inline]
+    fn read(&self, id: &ObjectID) -> PokerL1Result<Object> {
+        self.read(id)
+    }
+
+    #[inline]
+    fn version_of(&self, id: &ObjectID) -> PokerL1Result<Version> {
+        self.version_of(id)
+    }
+
+    #[inline]
+    fn update(&mut self, id: &ObjectID, actor: &Address, new_data: Vec<u8>) -> PokerL1Result<()> {
+        self.update(id, actor, new_data)
+    }
+
+    #[inline]
+    fn transfer(&mut self, id: &ObjectID, actor: &Address, new_owner: Address) -> PokerL1Result<()> {
+        self.transfer(id, actor, new_owner)
+    }
+
+    #[inline]
+    fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object> {
+        self.delete(id)
+    }
+
+    #[inline]
+    fn state_root(&self) -> Hash {
+        self.state_root()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object_model::{Object, ObjectID, Ownership};
+
+    fn make_obj(creator: Address, nonce: u64, owner: Address) -> Object {
+        Object::new(
+            ObjectID::new(creator, nonce),
+            Ownership::AddressOwned { owner },
+            "Test",
+            format!("data-{nonce}").into_bytes(),
+            None,
+        )
+    }
+
+    /// 验证 ObjectDb 实现 ObjectBackend trait（编译时检查 + 运行时委托）。
+    #[test]
+    fn object_db_implements_object_backend() {
+        let mut db = ObjectDb::open_inmemory().expect("打开 ObjectDb 失败");
+        let owner = [1u8; 20];
+        let obj = make_obj(owner, 1, owner);
+
+        // 通过 trait 方法调用
+        let backend: &mut dyn ObjectBackend = &mut db;
+        backend.create(obj.clone()).expect("create via trait");
+        let read = backend.read(&obj.id).expect("read via trait");
+        assert_eq!(read, obj);
+        assert_eq!(backend.version_of(&obj.id).unwrap(), 0);
+
+        backend
+            .update(&obj.id, &owner, b"new data".to_vec())
+            .expect("update via trait");
+        assert_eq!(backend.version_of(&obj.id).unwrap(), 1);
+
+        let root_before = backend.state_root();
+        let _deleted = backend.delete(&obj.id).expect("delete via trait");
+        let root_after = backend.state_root();
+        assert_ne!(root_before, root_after, "删除后状态根应变化");
+    }
+}

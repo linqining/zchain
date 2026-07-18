@@ -50,6 +50,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
@@ -95,7 +96,7 @@ pub const TX_MERKLE_TREE_DEPTH: u32 = 256;
 ///
 /// 签名对象 = `hash(chain_id || game_id || content_hash || block_height || round_range)`
 /// （R4-H7 修正）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct MultiReplicaReceipt {
     /// 见证副本 validator 的 tagged pubkey。
     pub witness: TaggedPubkey,
@@ -137,7 +138,7 @@ impl MultiReplicaReceipt {
 }
 
 /// 单个 vertex 的元信息（SubTask 27.5g (1)）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct VertexInfo {
     /// vertex 所在 round。
     pub round: u64,
@@ -153,7 +154,7 @@ pub struct VertexInfo {
 ///
 /// 证明某个 `tx_hash` 不在 `tx_merkle_tree` 中。叶子值 = `empty_placeholder`
 /// （SEC-L5：empty 叶子值 = 空字节串 `b""`）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct NonInclusionProof {
     /// 待证明不存在的 tx_hash（用作 sparse Merkle tree 的 256-bit key）。
     pub tx_hash: Hash,
@@ -227,7 +228,7 @@ impl NonInclusionProof {
 ///
 /// 证明 assigned_validator 在 `[round_start, round_end]` 范围内未装入
 /// checkpoint_anchor tx 到其 vertex。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RoundRangeNonInclusionProof {
     /// epoch（SEC-C1：绑定 epoch 以判定 round_range 所属 validator 集）。
     pub epoch: u64,
@@ -357,7 +358,7 @@ impl RoundRangeNonInclusionProof {
 /// - 原始 checkpoint_anchor tx 内容
 /// - multi-replica receipt signatures（≥3 个副本 validator 接收见证签名）
 /// - assigned_validator 应出 vertex 但未出的 round 范围 + 非包含证明
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct AssignedValidatorFailureProof {
     /// 原始被审查的 checkpoint_anchor tx 内容。
     pub original_checkpoint_anchor: CheckpointAnchorTx,
@@ -477,7 +478,7 @@ impl AssignedValidatorFailureProof {
 /// Force Checkpoint tx（SubTask 27.5a）。
 ///
 /// 走 Public 通道，正常计费 gas。任意 validator 可接收。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ForceCheckpointTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,

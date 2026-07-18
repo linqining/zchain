@@ -8,6 +8,7 @@
 //!
 //! 本模块同时提供两套常量，并在 `playing_card_to_card` 中处理映射。
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 // ===== Card 花色常量（table.move 编码）=====
@@ -36,7 +37,7 @@ pub const ACE: u8 = 14;
 /// 主牌结构（table.move 编码：suit 0-3, rank 2-14）。
 ///
 /// 与 Move `Card` struct 完全一致，使用 `copy + drop + store` 语义对应 Rust 的 `Copy + Clone`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Card {
     /// 花色：0=SPADES, 1=HEARTS, 2=DIAMONDS, 3=CLUBS。
     pub suit: u8,
@@ -126,7 +127,7 @@ impl std::fmt::Display for Card {
 /// 与 Move `PlayingCard` struct 一致：
 /// - rank: 2-14
 /// - suit: 0=Club, 1=Diamond, 2=Heart, 3=Spade
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PlayingCard {
     pub rank: u8,
     pub suit: u8,

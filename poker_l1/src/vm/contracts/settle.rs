@@ -21,6 +21,7 @@
 //! - 胜者分配金额 = `pot - rake`，不得为负
 //! - 底池为 0 时台费 = 0，跳过分配
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
@@ -31,7 +32,7 @@ use super::types::HandState;
 /// 台费配置（spec.md 第 317-321 行）。
 ///
 /// 由合约部署时配置，链底层不硬编码。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RakeConfig {
     /// 台费比例（basis points，100 = 1%，max 1000 = 10%）。
     ///
@@ -61,7 +62,7 @@ impl RakeConfig {
 }
 
 /// settle 结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SettleResult {
     /// 底池总额。
     pub pot: u64,

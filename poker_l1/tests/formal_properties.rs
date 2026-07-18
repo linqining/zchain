@@ -221,9 +221,9 @@ proptest! {
         let tp = common::make_tagged_pubkey_secp(0x42);
         let tx = make_tx(tp, DEFAULT_CHAIN_ID, nonce, None, is_fallback, TxLane::Public);
 
-        let bytes = bcs::to_bytes(&tx).expect("BCS 序列化不应失败");
+        let bytes = borsh::to_vec(&tx).expect("BCS 序列化不应失败");
         let decoded: poker_l1::transaction::Transaction =
-            bcs::from_bytes(&bytes).expect("BCS 反序列化不应失败");
+            borsh::from_slice(&bytes).expect("BCS 反序列化不应失败");
 
         prop_assert_eq!(tx, decoded, "BCS 往返必须得到原值");
     }

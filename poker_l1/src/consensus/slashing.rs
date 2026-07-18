@@ -21,6 +21,7 @@
 //!   - **R4-H5**：`under_investigation_count` 仅当申辩无效或无申辩时 +1（非"无论申辩是否成功 +1"）；
 //!     衰减机制：每 epoch 衰减 1（最低为 0），防止历史指控永久累积
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::BlockHeight;
@@ -48,7 +49,7 @@ pub const DEFAULT_DEFENSE_WINDOW_BLOCKS: BlockHeight = 50;
 /// 3. `RefuseCheckpoint` — 拒收 checkpoint（审查证据）
 /// 4. `Downtime` — 停机
 /// 5. `RefuseAck` — 拒绝 ACK
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum SlashingReason {
     /// vertex equivocation（最高优先级，SEC2-H2）。
     VertexEquivocation,
@@ -91,7 +92,7 @@ impl SlashingReason {
 }
 
 /// Slashing 配置（可治理参数）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SlashingConfig {
     /// equivocation 类 slashing 百分比（NEW-M15：默认 100%）。
     pub slash_percentage: u32,
@@ -161,7 +162,7 @@ pub const fn is_downtime_auto_slashable(
 /// - `defense_window_blocks` 内可提交"未收到证明"申辩
 /// - 申辩成功 → 豁免 slashing，仅记录审查嫌疑
 /// - 申辩失败或无申辩 → 治理 slashing
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct InvestigationState {
     /// 调查触发 block height（force_checkpoint 提交时的 block height）。
     pub triggered_at_height: BlockHeight,
@@ -243,7 +244,7 @@ impl InvestigationState {
 }
 
 /// Slashing 执行结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SlashingResult {
     /// 被 slashing 的 validator pubkey。
     pub validator: TaggedPubkey,
@@ -359,7 +360,7 @@ pub fn apply_multi_slashing(
 /// vertex equivocation 证据（SubTask 13.2）。
 ///
 /// spec：提交两个冲突 vertex + 两个签名证据 → 踢出 + 罚没保证金。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct VertexEquivocationEvidence {
     /// epoch（SEC-C1：绑定 epoch 防 equivocation 证据歧义）。
     pub epoch: Epoch,
@@ -401,7 +402,7 @@ impl VertexEquivocationEvidence {
 }
 
 /// commit certificate equivocation 证据（SEC2-C1）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct CommitCertEquivocationEvidence {
     /// epoch。
     pub epoch: Epoch,
@@ -1001,8 +1002,8 @@ mod tests {
             SlashingReason::Downtime,
             SlashingReason::RefuseAck,
         ] {
-            let bytes = bcs::to_bytes(&reason).unwrap();
-            let recovered: SlashingReason = bcs::from_bytes(&bytes).unwrap();
+            let bytes = borsh::to_vec(&reason).unwrap();
+            let recovered: SlashingReason = borsh::from_slice(&bytes).unwrap();
             assert_eq!(reason, recovered);
         }
     }
@@ -1010,8 +1011,8 @@ mod tests {
     #[test]
     fn slashing_config_bcs_roundtrip() {
         let config = SlashingConfig::default();
-        let bytes = bcs::to_bytes(&config).unwrap();
-        let recovered: SlashingConfig = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&config).unwrap();
+        let recovered: SlashingConfig = borsh::from_slice(&bytes).unwrap();
         assert_eq!(config, recovered);
     }
 
@@ -1026,8 +1027,8 @@ mod tests {
             signature_1: vec![0u8; 65],
             signature_2: vec![0u8; 65],
         };
-        let bytes = bcs::to_bytes(&evidence).unwrap();
-        let recovered: VertexEquivocationEvidence = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&evidence).unwrap();
+        let recovered: VertexEquivocationEvidence = borsh::from_slice(&bytes).unwrap();
         assert_eq!(evidence, recovered);
     }
 
@@ -1035,8 +1036,8 @@ mod tests {
     fn investigation_state_bcs_roundtrip() {
         let config = SlashingConfig::default();
         let state = InvestigationState::new(1000, &config);
-        let bytes = bcs::to_bytes(&state).unwrap();
-        let recovered: InvestigationState = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&state).unwrap();
+        let recovered: InvestigationState = borsh::from_slice(&bytes).unwrap();
         assert_eq!(state, recovered);
     }
 
@@ -1050,8 +1051,8 @@ mod tests {
             stake_after: 0,
             debt_recorded: false,
         };
-        let bytes = bcs::to_bytes(&result).unwrap();
-        let recovered: SlashingResult = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&result).unwrap();
+        let recovered: SlashingResult = borsh::from_slice(&bytes).unwrap();
         assert_eq!(result, recovered);
     }
 }

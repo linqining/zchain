@@ -33,6 +33,7 @@ use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
 use poker_l1::account::derive_address;
 use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, validate_tx_signature};
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
+use poker_l1::executor::ExecutionEnvironment;
 use poker_l1::consensus::{
     Dag, DagCommitCertificate, DagVertex, VertexBuilder, detect_commit_leader,
 };
@@ -655,7 +656,7 @@ impl NetworkTransport for TcpTransport {
         _topic: GossipTopic,
         message: &NetworkMessage,
     ) -> PokerL1Result<()> {
-        let bytes = bcs::to_bytes(message)?;
+        let bytes = borsh::to_vec(message)?;
         let len = bytes.len() as u32;
         let mut frame = len.to_be_bytes().to_vec();
         frame.extend_from_slice(&bytes);
@@ -813,7 +814,7 @@ fn send_request_and_recv(
 /// 发送一条 length-prefixed BCS 消息到 stream。
 #[allow(dead_code)]
 fn send_p2p_message(stream: &mut TcpStream, msg: &NetworkMessage) -> Result<(), String> {
-    let bytes = bcs::to_bytes(msg).map_err(|e| format!("BCS 序列化失败：{e}"))?;
+    let bytes = borsh::to_vec(msg).map_err(|e| format!("BCS 序列化失败：{e}"))?;
     if bytes.len() > MAX_P2P_MSG_SIZE {
         return Err(format!("消息过大：{} bytes", bytes.len()));
     }
@@ -846,7 +847,7 @@ fn recv_p2p_message(stream: &mut TcpStream) -> Result<Option<NetworkMessage>, St
     stream
         .read_exact(&mut buf)
         .map_err(|e| format!("读取 body 失败：{e}"))?;
-    let msg = bcs::from_bytes(&buf).map_err(|e| format!("BCS 反序列化失败：{e}"))?;
+    let msg = borsh::from_slice(&buf).map_err(|e| format!("BCS 反序列化失败：{e}"))?;
     Ok(Some(msg))
 }
 
@@ -1014,10 +1015,13 @@ fn secp256k1_sign_hash(secret_key: &secp256k1::SecretKey, msg_hash: &Hash) -> Ve
 /// 不调用 `project_block_from_commit`（其 `collect_ancestors` 会包含历史 vertex 的 tx 导致重复），
 /// 而是直接从当前 vertex 的 tx_list 构造 block。
 ///
-/// 重构3：`state_root` 参数由 caller 通过 `node.state_root()` 提供。
-/// 注：当前未接入 tx 执行引擎，caller 应传入上一 block 后的 state_root
-/// （即 `prev_block.header.state_root`）。tx 执行引擎接入后，caller 应先
-/// 执行 vertex 的 tx 更新 object_db，再传入执行后的新 state_root。
+/// tx 执行引擎接入：caller 传入 `node` + `prev_state_root`，本函数：
+/// 1. 对 vertex 的 txs 执行 S9 排序
+/// 2. 调用 `node.execute_block_on_state` 执行全部 txs（含 public + gameturn）
+/// 3. 取 `outcome.state_root` 作为新 block header 的 state_root
+/// 4. 按 public / gameturn 拆分 txs 用于 merkle root 计算 + block body
+///
+/// `prev_state_root` 仅用于日志对比（检测执行引擎是否真正推进了状态）。
 fn build_block_from_vertex(
     vertex: &DagVertex,
     chain_id: poker_l1::ChainId,
@@ -1025,28 +1029,51 @@ fn build_block_from_vertex(
     prev_commit_hash: Hash,
     prev_block_hash: Hash,
     height: u64,
-    state_root: Hash,
+    node: &Node,
+    prev_state_root: Hash,
     secret_key: &secp256k1::SecretKey,
 ) -> Result<Block, String> {
     // 1. S9 排序：GameTurn/CheckpointAnchor 优先，Public 中间，ForceSync 后置
     let sorted_txs = poker_l1::consensus::sort_vertex_txs_s9(vertex.tx_list.clone());
 
-    // 2. 拆分 public / gameturn
+    // 2. 拆分 public / gameturn（用于 merkle root + block body）
     let mut public_txs = Vec::new();
     let mut gameturn_txs = Vec::new();
-    for tx in sorted_txs {
+    for tx in &sorted_txs {
         match tx.lane_hint {
-            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx),
-            _ => public_txs.push(tx),
+            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx.clone()),
+            _ => public_txs.push(tx.clone()),
         }
     }
 
-    // 3. 计算 roots
+    // 3. 计算 timestamp（提前到执行之前，供 ExecutionEnvironment 使用）
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // 4. 执行 txs，得到新 state_root
+    //
+    // execute_block 内部已处理失败 tx（返回失败回执，不阻断 block），
+    // 故此处仅在底层错误（锁中毒 / RocksDB 写失败）时返回 Err。
+    let env = ExecutionEnvironment::new(chain_id, height, timestamp_ms)
+        .with_precompile_registry_arc(node.precompile_registry());
+    let outcome = node
+        .execute_block_on_state(&env, &sorted_txs)
+        .map_err(|e| format!("execute_block failed: {e}"))?;
+    let state_root = outcome.state_root;
+    if state_root == prev_state_root && !sorted_txs.is_empty() {
+        warn!(
+            "执行 {} 笔 tx 后 state_root 未变化（可能全部失败或为无状态 tx）",
+            sorted_txs.len()
+        );
+    }
+
+    // 5. 计算 roots
     let public_tx_root = compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = compute_tx_merkle_root(&gameturn_txs);
-    // state_root 由 caller 提供（重构3：消除占位零值，使用真实链上状态根）
 
-    // 4. 构造 commit certificate（先不含签名）
+    // 6. 构造 commit certificate（先不含签名）
     let vertex_hash = vertex.vertex_hash();
     let cert = DagCommitCertificate {
         epoch: vertex.epoch,
@@ -1061,22 +1088,18 @@ fn build_block_from_vertex(
         signer_bitmap: vec![0x00],
     };
 
-    // 5. 签名 cert
+    // 7. 签名 cert
     let cert_signing_hash = cert.signing_hash(chain_id);
     let cert_sig = secp256k1_sign_hash(secret_key, &cert_signing_hash);
 
-    // 6. 填入签名（validator index = 0，signer_bitmap bit 0 = 1）
+    // 8. 填入签名（validator index = 0，signer_bitmap bit 0 = 1）
     let cert = DagCommitCertificate {
         signature_list: vec![cert_sig],
         signer_bitmap: vec![0x01],
         ..cert
     };
 
-    // 7. 构造 block header
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    // 9. 构造 block header
     let header = BlockHeader {
         height,
         timestamp_ms,
@@ -1223,6 +1246,7 @@ fn run_validator_loop(
                             .flatten()
                             .map(|h| h + 1)
                             .unwrap_or(1),
+                        &node,
                         node.state_root(),
                         &secret_key,
                     ) {

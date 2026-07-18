@@ -704,9 +704,9 @@ pub enum PokerL1Error {
 /// 库统一 Result 别名。
 pub type PokerL1Result<T> = Result<T, PokerL1Error>;
 
-impl From<bcs::Error> for PokerL1Error {
-    fn from(e: bcs::Error) -> Self {
-        Self::Serialization(format!("bcs: {e}"))
+impl From<borsh::io::Error> for PokerL1Error {
+    fn from(e: borsh::io::Error) -> Self {
+        Self::Serialization(format!("borsh: {e}"))
     }
 }
 

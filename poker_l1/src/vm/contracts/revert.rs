@@ -21,6 +21,7 @@
 //!
 //! 协议层不强制提交者身份，但应用层可附加签名校验。
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::error::PokerL1Error;
@@ -31,7 +32,7 @@ use super::force_checkin::{ForfeitDecision, ForfeitReason, RecoveryStage};
 use super::types::GameContract;
 
 /// request_revert / force_revert 的 reason 枚举（SubTask 28.4）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum RevertReason {
     /// 技术中断（操作方特权，无 forfeit；阶段 3 内被 R7-M6 拒绝）。
     TechnicalInterrupt,
@@ -58,7 +59,7 @@ impl RevertReason {
 /// request_revert tx（SubTask 28.4，典型由操作方提交）。
 ///
 /// 内容：`(game_id, last_acked_checkpoint, reason, submitter)`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RequestRevertTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,
@@ -74,7 +75,7 @@ pub struct RequestRevertTx {
 ///
 /// 内容：`(game_id, last_acked_checkpoint, reason, submitter)` +
 /// 阶段判定所需的 block height 参数。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ForceRevertTx {
     /// Game 对象 ID。
     pub game_id: ObjectID,
@@ -97,7 +98,7 @@ pub struct ForceRevertTx {
 }
 
 /// request_revert / force_revert 应用结果（SubTask 28.4）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RevertOutcome {
     /// 是否触发了 forfeit。
     pub should_forfeit: bool,

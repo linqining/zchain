@@ -9,6 +9,7 @@
 //! - M-A3: 最外层 side_pot 的 eligible 为空时合并到上一个有 eligible 的层级
 
 use serde::{Deserialize, Serialize};
+use borsh::{BorshSerialize, BorshDeserialize};
 
 use super::constants::MAX_TOTAL_BET;
 
@@ -16,8 +17,8 @@ use super::constants::MAX_TOTAL_BET;
 ///
 /// 对应 Move `SidePot { amount: u64, eligible_seats: vector<u64> }`。
 /// 使用 `Vec<u8>` 而非 `BTreeSet<u8>`：保留与 Move 端完全一致的顺序语义
-/// （调用方传入顺序即保存顺序），避免 BCS 序列化差异。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// （调用方传入顺序即保存顺序），避免 Borsh 序列化差异。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SidePot {
     /// 该层 pot 总金额。
     pub amount: u64,
@@ -525,10 +526,10 @@ mod tests {
     }
 
     #[test]
-    fn test_side_pot_bcs_roundtrip() {
+    fn test_side_pot_borsh_roundtrip() {
         let pot = SidePot::new(150, vec![0, 2, 3]);
-        let bytes = bcs::to_bytes(&pot).unwrap();
-        let recovered: SidePot = bcs::from_bytes(&bytes).unwrap();
+        let bytes = borsh::to_vec(&pot).unwrap();
+        let recovered: SidePot = borsh::from_slice(&bytes).unwrap();
         assert_eq!(pot, recovered);
     }
 }

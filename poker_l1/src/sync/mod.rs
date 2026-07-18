@@ -30,6 +30,7 @@ use crate::storage::{BlockStore, ObjectDb};
 use crate::{BlockHeight, Hash};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// 快照分块大小上限（4MB，与 `MAX_BLOCK_SIZE` 一致）。
 pub const MAX_SNAPSHOT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
@@ -41,7 +42,7 @@ pub const MAX_OBJECTS_PER_CHUNK: usize = 10_000;
 ///
 /// 由 archive 节点在指定高度生成，syncing 节点据此下载与验证。
 /// 所有字段参与 `manifest_hash` 计算，防 Byzantine peer 篡改清单。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SnapshotManifest {
     /// 快照对应的区块高度。
     pub height: BlockHeight,
@@ -65,7 +66,7 @@ impl SnapshotManifest {
     /// 将所有字段 BCS 序列化后哈希，防清单被篡改。
     #[must_use]
     pub fn manifest_hash(&self) -> Hash {
-        let bytes = bcs::to_bytes(self).unwrap_or_default();
+        let bytes = borsh::to_vec(self).unwrap_or_default();
         hash_bytes(&bytes)
     }
 
@@ -81,7 +82,7 @@ impl SnapshotManifest {
 /// 单个快照分块——包含一批序列化的 `Object`。
 ///
 /// 分块大小受 `MAX_SNAPSHOT_CHUNK_SIZE` 与 `MAX_OBJECTS_PER_CHUNK` 双重限制。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SnapshotChunk {
     /// 分块索引（0-based）。
     pub index: u64,
@@ -93,7 +94,7 @@ impl SnapshotChunk {
     /// 计算分块的 blake2b_256 哈希（用于与 manifest.chunk_hashes[index] 比对）。
     #[must_use]
     pub fn chunk_hash(&self) -> Hash {
-        let bytes = bcs::to_bytes(self).unwrap_or_default();
+        let bytes = borsh::to_vec(self).unwrap_or_default();
         hash_bytes(&bytes)
     }
 
@@ -109,7 +110,7 @@ impl SnapshotChunk {
                 MAX_OBJECTS_PER_CHUNK
             )));
         }
-        let serialized_len = bcs::to_bytes(self)
+        let serialized_len = borsh::to_vec(self)
             .map(|v| v.len())
             .unwrap_or(usize::MAX);
         if serialized_len > MAX_SNAPSHOT_CHUNK_SIZE {
@@ -159,7 +160,7 @@ impl SnapshotBuilder {
         let mut chunk_hashes: Vec<Hash> = Vec::new();
 
         for object in object_db.iter() {
-            let obj_bytes = bcs::to_bytes(object)?;
+            let obj_bytes = borsh::to_vec(object)?;
             let obj_size = obj_bytes.len();
 
             // 若当前块已满（对象数或字节数），先封块
