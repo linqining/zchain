@@ -33,6 +33,12 @@ use crate::field::ZkvmField;
 use crate::isa::Instruction;
 use crate::trace::{Step, Trace};
 
+// Phase 5.1 — rayon 并行 CCS 编译。
+// `compile_batch_to_ccs` 是纯函数（无共享可变状态），`Trace::step(&self, i)` 仅返回
+// 不可变引用，`Step` 仅含 `Send + Sync` 基础类型；故可安全并行编译多个 batch。
+// 当 `num_batches == 1` 时，rayon 的 `into_par_iter()` 几乎无开销（仅一个任务）。
+use rayon::prelude::*;
+
 /// 默认 batch 大小（spec L276：K = 1024）。
 ///
 /// 每 K 步执行生成 1 个 CCS 实例。
@@ -432,18 +438,92 @@ pub fn compile_trace_to_ccs(
         });
     }
 
-    let mut instances = Vec::with_capacity(num_batches);
-    for batch_id in 0..num_batches {
-        let start = batch_id * batch_size;
-        let end = usize::min(start + batch_size, num_steps);
-        let batch_steps: Vec<&crate::trace::Step> = (start..end)
-            .map(|i| trace.step(i))
-            .collect::<Result<Vec<_>, _>>()?;
-        let instance = compile_batch_to_ccs(&batch_steps, batch_id as u64)?;
-        instances.push(instance);
-    }
+    // Phase 5.1 — rayon 并行编译各 batch。
+    // 顺序不变：rayon 的 `into_par_iter().collect()` 保留原始顺序（order-preserving）。
+    // 每个 batch 的 `compile_batch_to_ccs` 互相独立（仅依赖 `&Trace` 不可变借用）。
+    let instances: Vec<CcsInstance> = (0..num_batches)
+        .into_par_iter()
+        .map(|batch_id| -> Result<CcsInstance, ZkvmError> {
+            let start = batch_id * batch_size;
+            let end = usize::min(start + batch_size, num_steps);
+            let batch_steps: Vec<&crate::trace::Step> = (start..end)
+                .map(|i| trace.step(i))
+                .collect::<Result<Vec<_>, _>>()?;
+            compile_batch_to_ccs(&batch_steps, batch_id as u64)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(instances)
+}
+
+/// Phase 5.2 — 带并行开关的 CCS 编译入口。
+///
+/// 与 [`compile_trace_to_ccs`] 行为一致，但允许调用方通过 `parallel` 参数
+/// 选择并行（rayon `into_par_iter`）或顺序（`for` 循环）路径。
+///
+/// # 何时使用顺序路径
+///
+/// - `ProverConfig::parallel_ccs_compile == false`（调试 / 单线程环境）
+/// - `num_batches == 1` 时（rayon 启动开销大于并行收益，但本函数仍按 `parallel` 参数分派，
+///   由调用方决定是否启用此优化）
+///
+/// # 顺序不变性
+///
+/// 两条路径均保证 `instances[i]` 对应 `batch_id == i`，与 [`compile_trace_to_ccs`] 完全一致。
+pub fn compile_trace_to_ccs_with_config(
+    trace: &Trace,
+    batch_size: usize,
+    parallel: bool,
+) -> Result<Vec<CcsInstance>, ZkvmError> {
+    if batch_size == 0 {
+        return Err(ZkvmError::Other(
+            "compile_trace_to_ccs_with_config: batch_size 须 > 0".to_string(),
+        ));
+    }
+    if trace.is_empty() {
+        return Err(ZkvmError::Other(
+            "compile_trace_to_ccs_with_config: trace 为空".to_string(),
+        ));
+    }
+
+    let num_steps = trace.len();
+    let num_batches = num_steps.div_ceil(batch_size);
+
+    if num_batches > MAX_FOLD_STEP_COUNT {
+        return Err(ZkvmError::FoldStepCountExceeded {
+            actual: num_batches as u32,
+            limit: MAX_FOLD_STEP_COUNT as u32,
+        });
+    }
+
+    if parallel {
+        // 并行路径 — 与 compile_trace_to_ccs 等价
+        let instances: Vec<CcsInstance> = (0..num_batches)
+            .into_par_iter()
+            .map(|batch_id| -> Result<CcsInstance, ZkvmError> {
+                let start = batch_id * batch_size;
+                let end = usize::min(start + batch_size, num_steps);
+                let batch_steps: Vec<&crate::trace::Step> = (start..end)
+                    .map(|i| trace.step(i))
+                    .collect::<Result<Vec<_>, _>>()?;
+                compile_batch_to_ccs(&batch_steps, batch_id as u64)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(instances)
+    } else {
+        // 顺序路径 — 用于 parallel_ccs_compile=false 或调试场景
+        let mut instances = Vec::with_capacity(num_batches);
+        for batch_id in 0..num_batches {
+            let start = batch_id * batch_size;
+            let end = usize::min(start + batch_size, num_steps);
+            let batch_steps: Vec<&crate::trace::Step> = (start..end)
+                .map(|i| trace.step(i))
+                .collect::<Result<Vec<_>, _>>()?;
+            let instance = compile_batch_to_ccs(&batch_steps, batch_id as u64)?;
+            instances.push(instance);
+        }
+        Ok(instances)
+    }
 }
 
 /// 编译单个 batch 为 CCS 实例（Stage 2 Phase 2c — 49-matrix selector-gated 框架）。

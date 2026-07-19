@@ -500,6 +500,309 @@ pub fn poker_hand_compare_expected(s1: u32, s2: u32) -> u8 {
 }
 
 // ===========================================================================
+// 完整一手牌流程 ELF（Phase 2.1 — texas_poker 合约 ELF 化）
+// ===========================================================================
+
+/// 构建完整一手牌流程 ELF — 覆盖 init → game_state write/read → card encode/decode →
+/// shuffle_verify → BLS hash → 牌型评估(P1+P2) → showdown → commit_output。
+///
+/// 这是"实际 zkvm 运行方式"的 texas_poker 合约：以手工 RV32I 汇编直接调用 26 个 syscall，
+/// 而非通过 trait 抽象。ELF 加载后由 zkvm 解释执行，trace 进入 Hypernova 折叠证明。
+///
+/// # 输入（62 字节）
+///
+/// - `[0..52]`：deck（必须是 0..51 的排列，供 `shuffle_verify` MVP 校验）
+/// - `[52..57]`：P1 牌 rank（5 字节，值 2..=14）
+/// - `[57..62]`：P2 牌 rank（5 字节，值 2..=14）
+///
+/// # 输出（1 字节）
+///
+/// - addr 0：winner（1=P1 胜, 2=P2 胜, 0=平局）
+///
+/// # RV32I 程序结构（220 条指令，~280 trace 步）
+///
+/// 1. **Setup**（5 条）：`read_input(0x2000, 62)`
+/// 2. **GameState write**（5 条）：`game_state_write(SLOT_PLAYER_HANDS=0x02, 0x2000, 52)` — 模拟初始状态上链
+/// 3. **GameState read**（5 条）：`game_state_read(slot=0x02, 0x2100, 52)` — 读回验证
+/// 4. **CardDecode + CardEncode**（11 条）：对 deck[0] 做 byte → (rank,suit) → byte' 往返
+/// 5. **ShuffleVerify**（6 条）：`shuffle_verify(0x2000, 52, 0x2000, 32)` — 用 deck[0..32] 作 mock proof
+/// 6. **BLS hash_to_curve**（5 条）：`bls_hash_to_curve(0x2000, 32, 0x2500)` — 模拟洗牌密码学
+/// 7. **BLS hash_to_scalar**（5 条）：`bls_hash_to_scalar(0x2000, 32, 0x2600)` — 派生下注签名标量
+/// 8. **P1 牌型评估**（79 条）：input[52..57] → (category, max) → (x21, x22)
+///    - Load(5) + Init(3) + max/min×4(24) + pair_count×10(30) + category(15) + Save(2)
+/// 9. **P2 牌型评估**（79 条）：input[57..62] → (category, max) → (x23, x24)
+/// 10. **Compare + Output**（20 条）：(x21,x22) vs (x23,x24) → x13 = winner → `commit_output(0, 1)`
+///
+/// **合计**：42 + 79 + 79 + 20 = 220 条指令
+///
+/// # 寄存器分配
+///
+/// | 寄存器 | 用途 |
+/// |--------|------|
+/// | x20 | 0x2000 输入缓冲区基址 |
+/// | x1-x5 | 当前方 5 张牌 rank |
+/// | x6 | pair_count |
+/// | x7 | category |
+/// | x8 | max rank |
+/// | x9 | min rank |
+/// | x10/x11/x12/x13/x17 | syscall 参数 a0/a1/a2/a3/a7（兼作临时） |
+/// | x14/x15 | 临时寄存器 |
+/// | x21/x22 | P1 (category, max) |
+/// | x23/x24 | P2 (category, max) |
+///
+/// # 关键设计决策
+///
+/// 1. **不使用 SLLI**：test_helpers.rs 无 SLLI 辅助函数，比较逻辑改为两次 SLT + BNE
+/// 2. **输入布局**：62 字节 = 52B deck + 5B P1 + 5B P2（拆分避免 shuffle_verify 排列校验矛盾）
+/// 3. **shuffle proof 复用**：取 deck[0..32] 作 mock proof（非全零，满足 MVP 校验）
+/// 4. **trace 长度**：~217 条指令 → 执行约 250-400 步 → 单 batch（batch_size=256）可容纳
+pub fn build_texas_poker_full_hand_elf() -> Vec<u8> {
+    let text: Vec<u32> = vec![
+        // === Phase 1: Setup (5 条) — read_input(0x2000, 62) ===
+        lui(20, 0x2),       // x20 = 0x2000
+        addi(10, 20, 0),    // a0 = 0x2000
+        addi(11, 0, 62),    // a1 = 62
+        addi(17, 0, 1),     // a7 = 1 (read_input)
+        ecall(),
+
+        // === Phase 2: GameState write (5 条) — game_state_write(0x02, 0x2000, 52) ===
+        // 模拟 ObjectDb 注册初始状态（SLOT_PLAYER_HANDS = 0x02）
+        addi(10, 0, 0x02),  // a0 = SLOT_PLAYER_HANDS
+        addi(11, 20, 0),    // a1 = 0x2000 (deck[0..52])
+        addi(12, 0, 52),    // a2 = 52
+        addi(17, 0, 0x21),  // a7 = 0x21 (game_state_write)
+        ecall(),
+
+        // === Phase 3: GameState read (5 条) — game_state_read(0x02, 0x2100, 52) ===
+        addi(10, 0, 0x02),  // a0 = slot
+        addi(11, 20, 0x100),// a1 = 0x2100 (out_ptr)
+        addi(12, 0, 52),    // a2 = 52
+        addi(17, 0, 0x20),  // a7 = 0x20 (game_state_read)
+        ecall(),
+
+        // === Phase 4: CardDecode + CardEncode 往返 (11 条) ===
+        // 对 deck[0] 做 byte → (rank, suit) → byte' 校验
+        lb(14, 20, 0),      // x14 = deck[0]
+        addi(10, 14, 0),    // a0 = byte = deck[0]
+        addi(11, 20, 0x200),// a1 = out_rank_ptr = 0x2200
+        addi(12, 20, 0x201),// a2 = out_suit_ptr = 0x2201
+        addi(17, 0, 0x31),  // a7 = 0x31 (card_decode)
+        ecall(),
+        // 重新 encode 回 byte'
+        lb(10, 20, 0x200),  // a0 = rank
+        lb(11, 20, 0x201),  // a1 = suit
+        addi(12, 20, 0x202),// a2 = out_ptr = 0x2202
+        addi(17, 0, 0x30),  // a7 = 0x30 (card_encode)
+        ecall(),
+
+        // === Phase 5: ShuffleVerify (6 条) — shuffle_verify(0x2000, 52, 0x2000, 32) ===
+        // 用 deck[0..32] 作 mock proof（非全零，满足 MVP 校验）
+        addi(10, 20, 0),    // a0 = deck_ptr = 0x2000
+        addi(11, 0, 52),    // a1 = 52
+        addi(12, 20, 0),    // a2 = proof_ptr = 0x2000 (复用 deck 前 32B)
+        addi(13, 0, 32),    // a3 = 32
+        addi(17, 0, 0x32),  // a7 = 0x32 (shuffle_verify)
+        ecall(),
+
+        // === Phase 6: BLS hash_to_curve (5 条) — bls_hash_to_curve(0x2000, 32, 0x2500) ===
+        addi(10, 20, 0),    // a0 = msg_ptr
+        addi(11, 0, 32),    // a1 = 32
+        addi(12, 20, 0x500),// a2 = out_ptr = 0x2500 (48B G1 point)
+        addi(17, 0, 0x10),  // a7 = 0x10 (bls_hash_to_curve)
+        ecall(),
+
+        // === Phase 7: BLS hash_to_scalar (5 条) — bls_hash_to_scalar(0x2000, 32, 0x2600) ===
+        addi(10, 20, 0),    // a0 = msg_ptr
+        addi(11, 0, 32),    // a1 = 32
+        addi(12, 20, 0x600),// a2 = out_ptr = 0x2600 (32B scalar)
+        addi(17, 0, 0x15),  // a7 = 0x15 (bls_hash_to_scalar)
+        ecall(),
+
+        // === Phase 8: P1 牌型评估 (73 条) — input[52..57] → (x21=cat, x22=max) ===
+        // Load P1 cards (5 条)
+        lb(1, 20, 52),      // x1 = P1[0]
+        lb(2, 20, 53),      // x2 = P1[1]
+        lb(3, 20, 54),      // x3 = P1[2]
+        lb(4, 20, 55),      // x4 = P1[3]
+        lb(5, 20, 56),      // x5 = P1[4]
+        // Init accumulators (3 条)
+        addi(6, 0, 0),      // x6 = pair_count = 0
+        addi(8, 1, 0),      // x8 = max = P1[0]
+        addi(9, 1, 0),      // x9 = min = P1[0]
+        // max/min update for x2 (6 条)
+        slt(14, 8, 2),      // x14 = (max < x2) ? 1 : 0
+        beq(14, 0, 8),      // if max >= x2, skip ADDI (→+8 = 下条 SLT)
+        addi(8, 2, 0),      // max = x2
+        slt(15, 2, 9),      // x15 = (x2 < min) ? 1 : 0
+        beq(15, 0, 8),      // if x2 >= min, skip ADDI
+        addi(9, 2, 0),      // min = x2
+        // max/min update for x3 (6 条)
+        slt(14, 8, 3),
+        beq(14, 0, 8),
+        addi(8, 3, 0),
+        slt(15, 3, 9),
+        beq(15, 0, 8),
+        addi(9, 3, 0),
+        // max/min update for x4 (6 条)
+        slt(14, 8, 4),
+        beq(14, 0, 8),
+        addi(8, 4, 0),
+        slt(15, 4, 9),
+        beq(15, 0, 8),
+        addi(9, 4, 0),
+        // max/min update for x5 (6 条)
+        slt(14, 8, 5),
+        beq(14, 0, 8),
+        addi(8, 5, 0),
+        slt(15, 5, 9),
+        beq(15, 0, 8),
+        addi(9, 5, 0),
+        // pair_count: 10 pairs (30 条)
+        sub(13, 1, 2), bne(13, 0, 8), addi(6, 6, 1),  // (0,1)
+        sub(13, 1, 3), bne(13, 0, 8), addi(6, 6, 1),  // (0,2)
+        sub(13, 1, 4), bne(13, 0, 8), addi(6, 6, 1),  // (0,3)
+        sub(13, 1, 5), bne(13, 0, 8), addi(6, 6, 1),  // (0,4)
+        sub(13, 2, 3), bne(13, 0, 8), addi(6, 6, 1),  // (1,2)
+        sub(13, 2, 4), bne(13, 0, 8), addi(6, 6, 1),  // (1,3)
+        sub(13, 2, 5), bne(13, 0, 8), addi(6, 6, 1),  // (1,4)
+        sub(13, 3, 4), bne(13, 0, 8), addi(6, 6, 1),  // (2,3)
+        sub(13, 3, 5), bne(13, 0, 8), addi(6, 6, 1),  // (2,4)
+        sub(13, 4, 5), bne(13, 0, 8), addi(6, 6, 1),  // (3,4)
+        // category inference (15 条) — 末尾 BNE 目标为下方 "Save P1" 块
+        addi(7, 0, 0),      // x7 = category = 0
+        addi(14, 0, 2),     // x14 = 2
+        slt(15, 14, 6),     // x15 = (2 < pair_count) ? 1 : 0
+        beq(15, 0, 12),     // if not, skip to Block B
+        addi(7, 0, 4),      // category = 4
+        jal(0, 20),         // skip to Block C
+        addi(14, 0, 0),     // Block B: x14 = 0
+        slt(15, 14, 6),     // x15 = (0 < pair_count) ? 1 : 0
+        beq(15, 0, 8),      // if not, skip to Block C
+        addi(7, 0, 2),      // category = 2
+        bne(6, 0, 20),      // Block C: if pair_count != 0, skip to Save P1 (→+20)
+        sub(13, 8, 9),      // diff = max - min
+        addi(14, 0, 4),     // x14 = 4
+        bne(13, 14, 8),     // if diff != 4, skip to Save P1 (→+8)
+        addi(7, 0, 5),      // category = 5 (straight)
+
+        // === Save P1 (2 条) — BNE 目标 +20/+8 ===
+        addi(21, 7, 0),     // x21 = P1 category
+        addi(22, 8, 0),     // x22 = P1 max
+
+        // === Phase 9: P2 牌型评估 (73 条) — input[57..62] → (x23=cat, x24=max) ===
+        // Load P2 cards (5 条)
+        lb(1, 20, 57),      // x1 = P2[0]
+        lb(2, 20, 58),      // x2 = P2[1]
+        lb(3, 20, 59),      // x3 = P2[2]
+        lb(4, 20, 60),      // x4 = P2[3]
+        lb(5, 20, 61),      // x5 = P2[4]
+        // Init (3 条)
+        addi(6, 0, 0),
+        addi(8, 1, 0),
+        addi(9, 1, 0),
+        // max/min (24 条 = 4 cards × 6 instrs)
+        slt(14, 8, 2), beq(14, 0, 8), addi(8, 2, 0), slt(15, 2, 9), beq(15, 0, 8), addi(9, 2, 0),
+        slt(14, 8, 3), beq(14, 0, 8), addi(8, 3, 0), slt(15, 3, 9), beq(15, 0, 8), addi(9, 3, 0),
+        slt(14, 8, 4), beq(14, 0, 8), addi(8, 4, 0), slt(15, 4, 9), beq(15, 0, 8), addi(9, 4, 0),
+        slt(14, 8, 5), beq(14, 0, 8), addi(8, 5, 0), slt(15, 5, 9), beq(15, 0, 8), addi(9, 5, 0),
+        // pair_count (30 条)
+        sub(13, 1, 2), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 1, 3), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 1, 4), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 1, 5), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 2, 3), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 2, 4), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 2, 5), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 3, 4), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 3, 5), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 4, 5), bne(13, 0, 8), addi(6, 6, 1),
+        // category inference (15 条) — 末尾 BNE 目标为下方 "Save P2" 块
+        addi(7, 0, 0),
+        addi(14, 0, 2),
+        slt(15, 14, 6),
+        beq(15, 0, 12),
+        addi(7, 0, 4),
+        jal(0, 20),
+        addi(14, 0, 0),
+        slt(15, 14, 6),
+        beq(15, 0, 8),
+        addi(7, 0, 2),
+        bne(6, 0, 20),      // if pair_count != 0, skip to Save P2 (→+20)
+        sub(13, 8, 9),
+        addi(14, 0, 4),
+        bne(13, 14, 8),     // if diff != 4, skip to Save P2 (→+8)
+        addi(7, 0, 5),
+
+        // === Save P2 (2 条) — BNE 目标 +20/+8 ===
+        addi(23, 7, 0),     // x23 = P2 category
+        addi(24, 8, 0),     // x24 = P2 max
+
+        // === Phase 10: Compare (20 条) — (x21,x22) vs (x23,x24) → x13 = winner ===
+        // 不使用 SLLI 合并 score，直接两次 SLT + BNE 比较
+        sub(13, 21, 23),    // x13 = cat1 - cat2
+        bne(13, 0, 20),     // if cat 不同, jump to cat_diff (→+20 = instr +5)
+        sub(13, 22, 24),    // x13 = max1 - max2
+        bne(13, 0, 32),     // if max 不同, jump to max_diff (→+32 = instr +8)
+        addi(13, 0, 0),     // winner = 0 (平局)
+        jal(0, 40),         // skip to output (→+40 = instr +10)
+        // cat_diff (BNE target +20):
+        slt(14, 21, 23),    // x14 = (cat1 < cat2) ? 1 : 0
+        addi(13, 0, 1),     // winner = 1 (default)
+        beq(14, 0, 28),     // if cat1 > cat2, jump to output (→+28 = instr +7)
+        addi(13, 0, 2),     // winner = 2 (cat1 < cat2)
+        jal(0, 20),         // skip to output (→+20 = instr +5)
+        // max_diff (BNE target +32):
+        slt(14, 22, 24),    // x14 = (max1 < max2) ? 1 : 0
+        addi(13, 0, 1),     // winner = 1
+        beq(14, 0, 8),      // if max1 > max2, jump to output (→+8 = instr +2)
+        addi(13, 0, 2),     // winner = 2
+        // output (JAL target +40, JAL target +20, BEQ target +28, BEQ target +8):
+        sb(13, 0, 0),       // store winner to addr 0
+        addi(10, 0, 0),     // a0 = 0
+        addi(11, 0, 1),     // a1 = 1
+        addi(17, 0, 2),     // a7 = 2 (commit_output)
+        ecall(),
+    ];
+
+    let text_bytes = encode_text(&text);
+    build_elf32(0x1000, 0x1000, &text_bytes)
+}
+
+/// host 端参考实现：计算完整一手牌的赢家（与 `build_texas_poker_full_hand_elf` RV32I 算法一致）。
+///
+/// 复用 `poker_hand_eval_v2_expected` 计算每方评分，再用 `poker_hand_compare_expected` 比较。
+///
+/// # 输入
+///
+/// 62 字节：`[0..52]` deck + `[52..57]` P1 ranks + `[57..62]` P2 ranks
+///
+/// # 返回值
+///
+/// 1=P1 胜, 2=P2 胜, 0=平局
+pub fn texas_poker_full_hand_expected(input: &[u8]) -> u8 {
+    assert_eq!(input.len(), 62, "输入必须为 62 字节");
+    let p1: [u8; 5] = input[52..57].try_into().expect("P1 长度");
+    let p2: [u8; 5] = input[57..62].try_into().expect("P2 长度");
+    let s1 = poker_hand_eval_v2_expected(&p1);
+    let s2 = poker_hand_eval_v2_expected(&p2);
+    poker_hand_compare_expected(s1, s2)
+}
+
+/// 构造完整一手牌测试输入（62 字节）。
+///
+/// - `deck`：52 字节，必须是 0..51 的排列（默认使用 0,1,2,...,51）
+/// - `p1`：P1 的 5 张牌 rank（值 2..=14）
+/// - `p2`：P2 的 5 张牌 rank（值 2..=14）
+pub fn make_full_hand_input(p1: [u8; 5], p2: [u8; 5]) -> Vec<u8> {
+    let mut input = Vec::with_capacity(62);
+    input.extend(0..52u8); // deck = [0, 1, 2, ..., 51] — 合法排列
+    input.extend_from_slice(&p1);
+    input.extend_from_slice(&p2);
+    assert_eq!(input.len(), 62);
+    input
+}
+
+// ===========================================================================
 // 测试
 // ===========================================================================
 
@@ -607,5 +910,66 @@ mod tests {
         assert_eq!(bytes.len(), 12);
         // 第一条指令的小端字节
         assert_eq!(&bytes[0..4], &[0x13, 0x00, 0x00, 0x00]);
+    }
+
+    // ===== Phase 2.1 单元测试 — 完整一手牌流程 ELF =====
+
+    #[test]
+    fn test_build_texas_poker_full_hand_elf_size() {
+        let elf = build_texas_poker_full_hand_elf();
+        // magic
+        assert_eq!(&elf[0..4], b"\x7fELF");
+        // e_machine = EM_RISCV (0xF3)
+        assert_eq!(elf[18], 0xF3);
+        // ELF 大小 = 84 (header) + 220 条指令 × 4 字节
+        // 指令分布：Phase 1-7=42 + P1 eval=79 + P2 eval=79 + Compare=20 = 220
+        let expected_text_bytes = 220 * 4;
+        assert_eq!(elf.len(), 84 + expected_text_bytes);
+    }
+
+    #[test]
+    fn test_make_full_hand_input_layout() {
+        let p1 = [14u8, 13, 12, 11, 10]; // A K Q J 10 — straight
+        let p2 = [2u8, 2, 3, 4, 5]; // pair of 2s
+        let input = make_full_hand_input(p1, p2);
+        assert_eq!(input.len(), 62);
+        // deck = 0..51
+        assert_eq!(input[0], 0);
+        assert_eq!(input[51], 51);
+        // P1 在 [52..57]
+        assert_eq!(&input[52..57], &p1[..]);
+        // P2 在 [57..62]
+        assert_eq!(&input[57..62], &p2[..]);
+    }
+
+    #[test]
+    fn test_texas_poker_full_hand_expected_p1_wins() {
+        // P1 = A K Q J 10 (straight, category=5, max=14)
+        // P2 = 2 2 3 4 5 (pair of 2s, category=2, max=5)
+        let input = make_full_hand_input([14, 13, 12, 11, 10], [2, 2, 3, 4, 5]);
+        assert_eq!(texas_poker_full_hand_expected(&input), 1, "P1 应胜");
+    }
+
+    #[test]
+    fn test_texas_poker_full_hand_expected_p2_wins() {
+        // P1 = 2 2 3 4 5 (pair)
+        // P2 = 14 13 12 11 10 (straight)
+        let input = make_full_hand_input([2, 2, 3, 4, 5], [14, 13, 12, 11, 10]);
+        assert_eq!(texas_poker_full_hand_expected(&input), 2, "P2 应胜");
+    }
+
+    #[test]
+    fn test_texas_poker_full_hand_expected_tie() {
+        // 两方相同牌型与最大值 → 平局
+        let input = make_full_hand_input([10, 9, 8, 7, 6], [10, 9, 8, 7, 6]);
+        assert_eq!(texas_poker_full_hand_expected(&input), 0, "应平局");
+    }
+
+    #[test]
+    fn test_texas_poker_full_hand_expected_same_cat_higher_max() {
+        // 两方都是 highcard (category=0)，比 max
+        // P1 max = 14, P2 max = 10 → P1 胜
+        let input = make_full_hand_input([14, 3, 5, 7, 9], [10, 3, 5, 7, 9]);
+        assert_eq!(texas_poker_full_hand_expected(&input), 1, "P1 max 更高应胜");
     }
 }

@@ -101,6 +101,17 @@ pub struct SyscallGasArgs {
 /// | `MerkleVerify` | `PER_LEVEL * depth` |
 /// | `Ed25519Verify` | `BASE + PER_BIT * num_bits` |
 /// | `Bn254Pairing` | `GAS_ZKVM_BN254_PAIRING_FULL`（固定） |
+/// | `Bls12381HashToCurve` | `GAS_ZKVM_BLS_HASH_TO_CURVE`（固定） |
+/// | `Bls12381ScalarMul` | `GAS_ZKVM_BLS_SCALAR_MUL`（固定） |
+/// | `Bls12381G1Add` | `GAS_ZKVM_BLS_G1_ADD`（固定） |
+/// | `Bls12381G1Mul` | `GAS_ZKVM_BLS_G1_MUL`（固定） |
+/// | `Bls12381Pairing` | `GAS_ZKVM_BLS_PAIRING`（固定） |
+/// | `Bls12381HashToScalar` | `GAS_ZKVM_BLS_HASH_TO_SCALAR + PER_BYTE * input_len` |
+/// | `GameStateRead` | `GAS_ZKVM_GAME_STATE_READ`（固定） |
+/// | `GameStateWrite` | `GAS_ZKVM_GAME_STATE_WRITE + PER_BYTE * input_len` |
+/// | `CardEncode` | `GAS_ZKVM_CARD_ENCODE`（固定） |
+/// | `CardDecode` | `GAS_ZKVM_CARD_DECODE`（固定） |
+/// | `ShuffleVerify` | `GAS_ZKVM_SHUFFLE_VERIFY + PER_BYTE * input_len` |
 #[must_use]
 pub fn syscall_gas(id: SyscallId, args: &SyscallGasArgs) -> u64 {
     match id {
@@ -128,8 +139,67 @@ pub fn syscall_gas(id: SyscallId, args: &SyscallGasArgs) -> u64 {
             GAS_ZKVM_ED25519_BASE + GAS_ZKVM_ED25519_PER_BIT * args.num_bits as u64
         }
         SyscallId::Bn254Pairing => GAS_ZKVM_BN254_PAIRING_FULL,
+        // ===== BLS12-381 syscall gas（E2E Phase 1）=====
+        // BLS12-381 比 BN254 字段更大（381-bit vs 254-bit），gas 略高于 BN254 对应操作。
+        SyscallId::Bls12381HashToCurve => GAS_ZKVM_BLS_HASH_TO_CURVE,
+        SyscallId::Bls12381ScalarMul => GAS_ZKVM_BLS_SCALAR_MUL,
+        SyscallId::Bls12381G1Add => GAS_ZKVM_BLS_G1_ADD,
+        SyscallId::Bls12381G1Mul => GAS_ZKVM_BLS_G1_MUL,
+        SyscallId::Bls12381Pairing => GAS_ZKVM_BLS_PAIRING,
+        SyscallId::Bls12381HashToScalar => {
+            GAS_ZKVM_BLS_HASH_TO_SCALAR + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
+        }
+        // ===== GameState mock syscall gas（E2E Phase 1）=====
+        SyscallId::GameStateRead => GAS_ZKVM_GAME_STATE_READ,
+        SyscallId::GameStateWrite => {
+            GAS_ZKVM_GAME_STATE_WRITE + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
+        }
+        // ===== Game-specific syscall gas（E2E Phase 1）=====
+        SyscallId::CardEncode => GAS_ZKVM_CARD_ENCODE,
+        SyscallId::CardDecode => GAS_ZKVM_CARD_DECODE,
+        SyscallId::ShuffleVerify => {
+            GAS_ZKVM_SHUFFLE_VERIFY + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
+        }
     }
 }
+
+// ===== BLS12-381 / GameState / Game-specific syscall gas 常量（E2E Phase 1）=====
+//
+// 这些常量定义在 gas.rs 本地（而非 vm_common::gas），因为它们是 poker_zkvm 专有的
+// E2E 测试用 syscall，不属于跨 VM 共享的 cross-cutting concern。
+
+/// BLS12-381 hash-to-G1 gas（RFC 9380，重于普通哈希）。
+pub const GAS_ZKVM_BLS_HASH_TO_CURVE: u64 = 120_000;
+
+/// BLS12-381 标量乘法 gas（381-bit field mul）。
+pub const GAS_ZKVM_BLS_SCALAR_MUL: u64 = 60_000;
+
+/// BLS12-381 G1 点加 gas。
+pub const GAS_ZKVM_BLS_G1_ADD: u64 = 40_000;
+
+/// BLS12-381 G1 标量乘 gas（重于点加）。
+pub const GAS_ZKVM_BLS_G1_MUL: u64 = 90_000;
+
+/// BLS12-381 配对 gas（最重的 BLS 操作，比 BN254 pairing 高 50%）。
+pub const GAS_ZKVM_BLS_PAIRING: u64 = 120_000;
+
+/// BLS12-381 hash-to-scalar 基础 gas（不含按字节计费）。
+pub const GAS_ZKVM_BLS_HASH_TO_SCALAR: u64 = 15_000;
+
+/// GameState mock 读取 gas（类似 ReadState）。
+pub const GAS_ZKVM_GAME_STATE_READ: u64 = 50;
+
+/// GameState mock 写入基础 gas（不含按字节计费）。
+pub const GAS_ZKVM_GAME_STATE_WRITE: u64 = 100;
+
+/// 扑克牌编码 gas（轻量操作）。
+pub const GAS_ZKVM_CARD_ENCODE: u64 = 10;
+
+/// 扑克牌解码 gas（轻量操作）。
+pub const GAS_ZKVM_CARD_DECODE: u64 = 10;
+
+/// ZKShuffle 验证基础 gas（不含按字节计费，shuffle proof 验证非常重）。
+pub const GAS_ZKVM_SHUFFLE_VERIFY: u64 = 500_000;
 
 /// 计算单条指令的 gas 开销（不含 syscall gas）。
 ///

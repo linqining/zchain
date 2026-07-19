@@ -2,7 +2,7 @@
 //!
 //! 严格遵循 spec.md L193-265 / L637-669（v1.4 FROZEN）：
 //! - [`ZKVM_ABI_VERSION`] — ABI 版本号，写入 proof header
-//! - [`SyscallId`] — 15 个 syscall ID 枚举（0x01-0x0F）
+//! - [`SyscallId`] — 26 个 syscall ID 枚举（0x01-0x0F 基础 + 0x10-0x15 BLS12-381 + 0x20-0x21 GameState + 0x30-0x32 Game）
 //!
 //! # Syscall 列表
 //!
@@ -23,6 +23,17 @@
 //! | 0x0D | `merkle_verify` | (leaf, path, indices, root, depth) | Merkle 路径验证（Phase I） |
 //! | 0x0E | `ed25519_verify` | (msg_ptr, msg_len, sig_ptr, pubkey_ptr) → bool | Ed25519 验签（Phase I Batch 2） |
 //! | 0x0F | `bn254_pairing` | (a_ptr, b_ptr, c_ptr, d_ptr) → bool | BN254 配对等式验证（Phase I Batch 2） |
+//! | 0x10 | `bls_hash_to_curve` | (msg_ptr, msg_len, out_ptr) | BLS12-381 hash-to-G1（E2E Phase 1） |
+//! | 0x11 | `bls_scalar_mul` | (a_ptr, b_ptr, out_ptr) | BLS12-381 标量乘法（E2E Phase 1） |
+//! | 0x12 | `bls_g1_add` | (a_ptr, b_ptr, out_ptr) | BLS12-381 G1 点加（E2E Phase 1） |
+//! | 0x13 | `bls_g1_mul` | (point_ptr, scalar_ptr, out_ptr) | BLS12-381 G1 标量乘（E2E Phase 1） |
+//! | 0x14 | `bls_pairing` | (a_ptr, b_ptr, c_ptr, d_ptr) → bool | BLS12-381 配对等式验证（E2E Phase 1） |
+//! | 0x15 | `bls_hash_to_scalar` | (msg_ptr, msg_len, out_ptr) | BLS12-381 hash-to-scalar（E2E Phase 1） |
+//! | 0x20 | `game_state_read` | (slot, out_ptr, out_len) | GameState mock 读取（E2E Phase 1） |
+//! | 0x21 | `game_state_write` | (slot, in_ptr, in_len) | GameState mock 写入（E2E Phase 1） |
+//! | 0x30 | `card_encode` | (rank, suit, out_ptr) | 扑克牌编码（E2E Phase 1） |
+//! | 0x31 | `card_decode` | (byte, out_rank_ptr, out_suit_ptr) | 扑克牌解码（E2E Phase 1） |
+//! | 0x32 | `shuffle_verify` | (deck_ptr, deck_len, proof_ptr, proof_len) → bool | ZKShuffle 验证（E2E Phase 1） |
 
 use crate::error::ZkvmError;
 use crate::isa::state::VmState;
@@ -41,6 +52,23 @@ pub mod poseidon;
 
 /// 10 个 ZKVM Syscall 的 Host 实现（Task 4.2，0x0B-0x0D 暂无 host 实现）。
 pub mod host;
+
+/// BLS12-381 Syscall 实现（E2E Phase 1 — Task 1.2）。
+///
+/// 6 个 BLS12-381 syscall (0x10-0x15)：hash_to_curve / scalar_mul / g1_add / g1_mul / pairing / hash_to_scalar。
+/// 使用 `blstrs` crate，与 `poker_l1/src/crypto_precompiles/bls.rs` 共享 DST 与算法。
+pub mod bls12381;
+
+/// Game-specific Syscall 实现（E2E Phase 1 — Task 1.3）。
+///
+/// 3 个 game-specific syscall (0x30-0x32)：card_encode / card_decode / shuffle_verify（MVP）。
+pub mod game;
+
+/// GameState Mock Syscall 实现（E2E Phase 1 — Task 1.4）。
+///
+/// 2 个 GameState mock syscall (0x20-0x21)：game_state_read / game_state_write。
+/// 在 `SyscallContext.game_state` 中读写，模拟 ObjectDb。
+pub mod game_state;
 
 /// Host 状态读取 trait 的 re-export（便利访问）。
 pub use host_state::{StubHostState, ZkvmHostState};
@@ -62,9 +90,16 @@ pub const REG_A7: u8 = 17;
 /// 未来 ABI 升级须 bump 版本号 + 链上 verifier 兼容性矩阵。
 pub const ZKVM_ABI_VERSION: u32 = 1;
 
-/// Syscall ID 枚举（spec L196-206，15 个 syscall）。
+/// Syscall ID 枚举（spec L196-206，26 个 syscall）。
 ///
 /// `#[repr(u32)]` 确保 `as u32` 转换得到正确的 ID 值。
+///
+/// # ID 命名空间
+///
+/// - `0x01-0x0F`：基础 syscall（15 个，Phase 4 / Phase I）
+/// - `0x10-0x15`：BLS12-381 syscall（6 个，E2E Phase 1）— 支持 texas_poker 合约 BLS12-381 操作
+/// - `0x20-0x21`：GameState mock syscall（2 个，E2E Phase 1）— zkvm 内模拟 ObjectDb 读写
+/// - `0x30-0x32`：Game-specific syscall（3 个，E2E Phase 1）— card encode/decode + shuffle verify
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum SyscallId {
@@ -98,13 +133,60 @@ pub enum SyscallId {
     Ed25519Verify = 0x0E,
     /// `zkvm_bn254_pairing(a_ptr, b_ptr, c_ptr, d_ptr) -> bool` — BN254 配对等式验证。
     Bn254Pairing = 0x0F,
+    // ===== BLS12-381 syscall（E2E Phase 1，0x10-0x15）=====
+    /// `zkvm_bls_hash_to_curve(msg_ptr, msg_len, out_ptr)` — BLS12-381 hash-to-G1。
+    ///
+    /// 输出 48 字节 compressed G1 point。
+    Bls12381HashToCurve = 0x10,
+    /// `zkvm_bls_scalar_mul(a_ptr, b_ptr, out_ptr)` — BLS12-381 标量乘法。
+    ///
+    /// 输入两个 32 字节 scalar，输出 32 字节 scalar。
+    Bls12381ScalarMul = 0x11,
+    /// `zkvm_bls_g1_add(a_ptr, b_ptr, out_ptr)` — BLS12-381 G1 点加。
+    ///
+    /// 输入两个 48 字节 compressed G1 point，输出 48 字节。
+    Bls12381G1Add = 0x12,
+    /// `zkvm_bls_g1_mul(point_ptr, scalar_ptr, out_ptr)` — BLS12-381 G1 标量乘。
+    ///
+    /// 输入 48 字节 G1 point + 32 字节 scalar，输出 48 字节。
+    Bls12381G1Mul = 0x13,
+    /// `zkvm_bls_pairing(a_ptr, b_ptr, c_ptr, d_ptr) -> bool` — BLS12-381 配对等式验证。
+    ///
+    /// 验证 e(a, b) == e(c, d)，返回 a0 寄存器 0/1。
+    Bls12381Pairing = 0x14,
+    /// `zkvm_bls_hash_to_scalar(msg_ptr, msg_len, out_ptr)` — BLS12-381 hash-to-scalar。
+    ///
+    /// 与 `texas_poker/utils.rs::hash_to_scalar` 一致，输出 32 字节 scalar。
+    Bls12381HashToScalar = 0x15,
+    // ===== GameState mock syscall（E2E Phase 1，0x20-0x21）=====
+    /// `zkvm_game_state_read(slot, out_ptr, out_len)` — GameState mock 读取。
+    ///
+    /// 从 in-memory HashMap<slot, Vec<u8>> 读取（模拟 ObjectDb）。
+    GameStateRead = 0x20,
+    /// `zkvm_game_state_write(slot, in_ptr, in_len)` — GameState mock 写入。
+    ///
+    /// 写入 in-memory HashMap<slot, Vec<u8>>（模拟 ObjectDb）。
+    GameStateWrite = 0x21,
+    // ===== Game-specific syscall（E2E Phase 1，0x30-0x32）=====
+    /// `zkvm_card_encode(rank, suit, out_ptr)` — 扑克牌编码。
+    ///
+    /// rank (0-12) + suit (0-3) → 1 字节编码。
+    CardEncode = 0x30,
+    /// `zkvm_card_decode(byte, out_rank_ptr, out_suit_ptr)` — 扑克牌解码。
+    ///
+    /// 1 字节 → rank + suit。
+    CardDecode = 0x31,
+    /// `zkvm_shuffle_verify(deck_ptr, deck_len, proof_ptr, proof_len) -> bool` — ZKShuffle 验证。
+    ///
+    /// 复用 `poker_protocol::zk_shuffle::shuffle_proof::verify`。
+    ShuffleVerify = 0x32,
 }
 
 impl SyscallId {
     /// 从 `u32` 构造 [`SyscallId`]，非法 ID 返回 `Err(ZkvmError::Other)`。
     ///
     /// # Errors
-    /// - `ZkvmError::Other` — `id` 不在 0x01-0x0F 范围内。
+    /// - `ZkvmError::Other` — `id` 不在合法范围（0x01-0x0F / 0x10-0x15 / 0x20-0x21 / 0x30-0x32）内。
     pub fn from_u32(id: u32) -> Result<Self, ZkvmError> {
         match id {
             0x01 => Ok(Self::ReadInput),
@@ -122,14 +204,29 @@ impl SyscallId {
             0x0D => Ok(Self::MerkleVerify),
             0x0E => Ok(Self::Ed25519Verify),
             0x0F => Ok(Self::Bn254Pairing),
+            // BLS12-381 syscall（E2E Phase 1）
+            0x10 => Ok(Self::Bls12381HashToCurve),
+            0x11 => Ok(Self::Bls12381ScalarMul),
+            0x12 => Ok(Self::Bls12381G1Add),
+            0x13 => Ok(Self::Bls12381G1Mul),
+            0x14 => Ok(Self::Bls12381Pairing),
+            0x15 => Ok(Self::Bls12381HashToScalar),
+            // GameState mock syscall（E2E Phase 1）
+            0x20 => Ok(Self::GameStateRead),
+            0x21 => Ok(Self::GameStateWrite),
+            // Game-specific syscall（E2E Phase 1）
+            0x30 => Ok(Self::CardEncode),
+            0x31 => Ok(Self::CardDecode),
+            0x32 => Ok(Self::ShuffleVerify),
             _ => Err(ZkvmError::Other(format!("unknown syscall id: 0x{id:02x}"))),
         }
     }
 
-    /// 返回全部 15 个 syscall ID（按枚举顺序）。
+    /// 返回全部 26 个 syscall ID（按枚举顺序）。
     #[must_use]
-    pub fn all() -> [Self; 15] {
-        [
+    pub fn all() -> Vec<Self> {
+        vec![
+            // 基础 syscall（0x01-0x0F）
             Self::ReadInput,
             Self::CommitOutput,
             Self::Poseidon,
@@ -145,8 +242,66 @@ impl SyscallId {
             Self::MerkleVerify,
             Self::Ed25519Verify,
             Self::Bn254Pairing,
+            // BLS12-381 syscall（0x10-0x15）
+            Self::Bls12381HashToCurve,
+            Self::Bls12381ScalarMul,
+            Self::Bls12381G1Add,
+            Self::Bls12381G1Mul,
+            Self::Bls12381Pairing,
+            Self::Bls12381HashToScalar,
+            // GameState mock syscall（0x20-0x21）
+            Self::GameStateRead,
+            Self::GameStateWrite,
+            // Game-specific syscall（0x30-0x32）
+            Self::CardEncode,
+            Self::CardDecode,
+            Self::ShuffleVerify,
         ]
     }
+
+    /// 返回 syscall ID 的稀疏索引（用于 SyscallRegistry 数组索引）。
+    ///
+    /// 由于 syscall ID 不是连续的（0x01-0x0F / 0x10-0x15 / 0x20-0x21 / 0x30-0x32），
+    /// 使用 `id as usize` 直接索引会浪费空间。
+    /// 此方法将 ID 映射到 0-25 的连续索引。
+    #[must_use]
+    pub fn sparse_index(&self) -> usize {
+        match self {
+            // 基础 syscall（15 个，索引 0-14）
+            Self::ReadInput => 0,
+            Self::CommitOutput => 1,
+            Self::Poseidon => 2,
+            Self::Sha256 => 3,
+            Self::EcdsaVerify => 4,
+            Self::EmitEvent => 5,
+            Self::Log => 6,
+            Self::Panic => 7,
+            Self::GetRandomness => 8,
+            Self::ReadState => 9,
+            Self::Keccak256 => 10,
+            Self::Modexp => 11,
+            Self::MerkleVerify => 12,
+            Self::Ed25519Verify => 13,
+            Self::Bn254Pairing => 14,
+            // BLS12-381 syscall（6 个，索引 15-20）
+            Self::Bls12381HashToCurve => 15,
+            Self::Bls12381ScalarMul => 16,
+            Self::Bls12381G1Add => 17,
+            Self::Bls12381G1Mul => 18,
+            Self::Bls12381Pairing => 19,
+            Self::Bls12381HashToScalar => 20,
+            // GameState mock syscall（2 个，索引 21-22）
+            Self::GameStateRead => 21,
+            Self::GameStateWrite => 22,
+            // Game-specific syscall（3 个，索引 23-25）
+            Self::CardEncode => 23,
+            Self::CardDecode => 24,
+            Self::ShuffleVerify => 25,
+        }
+    }
+
+    /// 总 syscall 数量。
+    pub const TOTAL_COUNT: usize = 26;
 }
 
 // ===========================================================================
@@ -190,6 +345,11 @@ pub struct SyscallContext {
     pub randomness_counter: u64,
     /// Host 状态读取 trait object。
     pub host_state: Box<dyn ZkvmHostState>,
+    /// E2E Phase 1 — GameState mock 状态存储（`game_state_read` / `game_state_write` 用）。
+    ///
+    /// 在 zkvm 内模拟 ObjectDb 读写：slot → bytes。
+    /// 仅用于 E2E 测试，生产环境链上状态由 `host_state` trait 提供。
+    pub game_state: std::collections::HashMap<u32, Vec<u8>>,
 }
 
 impl std::fmt::Debug for SyscallContext {
@@ -203,6 +363,7 @@ impl std::fmt::Debug for SyscallContext {
             .field("step_index", &self.step_index)
             .field("randomness_counter", &self.randomness_counter)
             .field("host_state", &self.host_state)
+            .field("game_state_slots", &self.game_state.len())
             .finish()
     }
 }
@@ -228,6 +389,7 @@ impl SyscallContext {
             final_commitment: Fr::zero(),
             randomness_counter: 0,
             host_state: Box::new(StubHostState),
+            game_state: std::collections::HashMap::new(),
         }
     }
 
@@ -306,11 +468,13 @@ pub trait Syscall: std::fmt::Debug + Send + Sync {
 
 /// Syscall 注册表 — 按 [`SyscallId`] 分派到对应实现。
 ///
-/// 内部使用 `Vec<Option<Box<dyn Syscall>>>`，index = `SyscallId as usize - 1`。
-/// `new()` 注册全部 10 个 host syscall（0x0B-0x0F 暂无 host 实现，slot 为 None）。
+/// 内部使用固定大小数组 `[Option<Box<dyn Syscall>>; SyscallId::TOTAL_COUNT]`，
+/// index = `SyscallId::sparse_index()`（将稀疏的 0x01-0x32 ID 映射到 0-25 连续索引）。
+/// `new()` 注册全部 10 个 host syscall（0x0B-0x0F 暂无 host 实现，slot 为 None）；
+/// E2E Phase 1 新增的 11 个 syscall（0x10-0x32）需通过 `register_*` 方法注册。
 pub struct SyscallRegistry {
-    /// 15 个 syscall 实现，index = SyscallId as usize - 1。
-    syscalls: [Option<Box<dyn Syscall>>; 15],
+    /// 26 个 syscall 实现，index = SyscallId::sparse_index()。
+    syscalls: [Option<Box<dyn Syscall>>; SyscallId::TOTAL_COUNT],
 }
 
 impl std::fmt::Debug for SyscallRegistry {
@@ -320,22 +484,33 @@ impl std::fmt::Debug for SyscallRegistry {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
-                s.as_ref().map(|_| match i + 1 {
-                    1 => "ReadInput",
-                    2 => "CommitOutput",
-                    3 => "Poseidon",
-                    4 => "Sha256",
-                    5 => "EcdsaVerify",
-                    6 => "EmitEvent",
-                    7 => "Log",
-                    8 => "Panic",
-                    9 => "GetRandomness",
-                    10 => "ReadState",
-                    11 => "Keccak256",
-                    12 => "Modexp",
-                    13 => "MerkleVerify",
-                    14 => "Ed25519Verify",
-                    15 => "Bn254Pairing",
+                s.as_ref().map(|_| match i {
+                    0 => "ReadInput",
+                    1 => "CommitOutput",
+                    2 => "Poseidon",
+                    3 => "Sha256",
+                    4 => "EcdsaVerify",
+                    5 => "EmitEvent",
+                    6 => "Log",
+                    7 => "Panic",
+                    8 => "GetRandomness",
+                    9 => "ReadState",
+                    10 => "Keccak256",
+                    11 => "Modexp",
+                    12 => "MerkleVerify",
+                    13 => "Ed25519Verify",
+                    14 => "Bn254Pairing",
+                    15 => "Bls12381HashToCurve",
+                    16 => "Bls12381ScalarMul",
+                    17 => "Bls12381G1Add",
+                    18 => "Bls12381G1Mul",
+                    19 => "Bls12381Pairing",
+                    20 => "Bls12381HashToScalar",
+                    21 => "GameStateRead",
+                    22 => "GameStateWrite",
+                    23 => "CardEncode",
+                    24 => "CardDecode",
+                    25 => "ShuffleVerify",
                     _ => "Unknown",
                 })
             })
@@ -369,7 +544,7 @@ impl SyscallRegistry {
     /// - `ZkvmError::Other` — syscall ID 已被注册
     pub fn register(&mut self, syscall: Box<dyn Syscall>) -> Result<(), ZkvmError> {
         let id = syscall.id();
-        let idx = id as usize - 1;
+        let idx = id.sparse_index();
         if self.syscalls[idx].is_some() {
             return Err(ZkvmError::Other(format!(
                 "syscall {id:?} already registered"
@@ -396,7 +571,7 @@ impl SyscallRegistry {
         state: &mut VmState,
     ) -> Result<(), ZkvmError> {
         let syscall_id = SyscallId::from_u32(id)?;
-        let idx = syscall_id as usize - 1;
+        let idx = syscall_id.sparse_index();
         let syscall = self.syscalls[idx]
             .as_ref()
             .ok_or_else(|| ZkvmError::Other(format!("syscall {syscall_id:?} not registered")))?;
@@ -436,6 +611,7 @@ mod tests {
     #[test]
     fn test_from_u32_all_valid_ids() {
         let cases = [
+            // 基础 syscall（0x01-0x0F）
             (0x01u32, SyscallId::ReadInput),
             (0x02, SyscallId::CommitOutput),
             (0x03, SyscallId::Poseidon),
@@ -451,6 +627,20 @@ mod tests {
             (0x0D, SyscallId::MerkleVerify),
             (0x0E, SyscallId::Ed25519Verify),
             (0x0F, SyscallId::Bn254Pairing),
+            // BLS12-381 syscall（0x10-0x15）
+            (0x10, SyscallId::Bls12381HashToCurve),
+            (0x11, SyscallId::Bls12381ScalarMul),
+            (0x12, SyscallId::Bls12381G1Add),
+            (0x13, SyscallId::Bls12381G1Mul),
+            (0x14, SyscallId::Bls12381Pairing),
+            (0x15, SyscallId::Bls12381HashToScalar),
+            // GameState mock syscall（0x20-0x21）
+            (0x20, SyscallId::GameStateRead),
+            (0x21, SyscallId::GameStateWrite),
+            // Game-specific syscall（0x30-0x32）
+            (0x30, SyscallId::CardEncode),
+            (0x31, SyscallId::CardDecode),
+            (0x32, SyscallId::ShuffleVerify),
         ];
         for (id, expected) in cases {
             let result = SyscallId::from_u32(id).unwrap();
@@ -462,7 +652,8 @@ mod tests {
 
     #[test]
     fn test_from_u32_invalid_ids() {
-        let invalid_ids = [0x00u32, 0x10, 0xFF, 0x100, u32::MAX];
+        // 0x16-0x1F / 0x22-0x2F / 0x33+ 是无效 ID（命名空间之间的间隙）
+        let invalid_ids = [0x00u32, 0x16, 0x1F, 0x22, 0x2F, 0x33, 0xFF, 0x100, u32::MAX];
         for id in invalid_ids {
             let result = SyscallId::from_u32(id);
             assert!(result.is_err(), "from_u32(0x{id:02x}) 应返回错误");
@@ -477,6 +668,7 @@ mod tests {
 
     #[test]
     fn test_syscall_id_as_u32() {
+        // 基础 syscall（0x01-0x0F）
         assert_eq!(SyscallId::ReadInput as u32, 0x01);
         assert_eq!(SyscallId::CommitOutput as u32, 0x02);
         assert_eq!(SyscallId::Poseidon as u32, 0x03);
@@ -492,23 +684,49 @@ mod tests {
         assert_eq!(SyscallId::MerkleVerify as u32, 0x0D);
         assert_eq!(SyscallId::Ed25519Verify as u32, 0x0E);
         assert_eq!(SyscallId::Bn254Pairing as u32, 0x0F);
+        // BLS12-381 syscall（0x10-0x15）
+        assert_eq!(SyscallId::Bls12381HashToCurve as u32, 0x10);
+        assert_eq!(SyscallId::Bls12381ScalarMul as u32, 0x11);
+        assert_eq!(SyscallId::Bls12381G1Add as u32, 0x12);
+        assert_eq!(SyscallId::Bls12381G1Mul as u32, 0x13);
+        assert_eq!(SyscallId::Bls12381Pairing as u32, 0x14);
+        assert_eq!(SyscallId::Bls12381HashToScalar as u32, 0x15);
+        // GameState mock syscall（0x20-0x21）
+        assert_eq!(SyscallId::GameStateRead as u32, 0x20);
+        assert_eq!(SyscallId::GameStateWrite as u32, 0x21);
+        // Game-specific syscall（0x30-0x32）
+        assert_eq!(SyscallId::CardEncode as u32, 0x30);
+        assert_eq!(SyscallId::CardDecode as u32, 0x31);
+        assert_eq!(SyscallId::ShuffleVerify as u32, 0x32);
     }
 
     // ===== SyscallId all() 测试 =====
 
     #[test]
-    fn test_all_returns_fifteen_syscalls() {
+    fn test_all_returns_twenty_six_syscalls() {
         let all = SyscallId::all();
-        assert_eq!(all.len(), 15, "应有 15 个 syscall");
-        // 验证 ID 连续递增
+        assert_eq!(all.len(), 26, "应有 26 个 syscall");
+        // 验证 sparse_index 连续递增（0-25）
         for (i, id) in all.iter().enumerate() {
             assert_eq!(
-                *id as u32,
-                (i + 1) as u32,
-                "all()[{i}] 的 ID 应为 {}",
-                i + 1
+                id.sparse_index(),
+                i,
+                "all()[{i}].sparse_index() 应为 {i}"
             );
         }
+    }
+
+    // ===== SyscallId sparse_index 测试 =====
+
+    #[test]
+    fn test_sparse_index_round_trip() {
+        // 所有合法 ID 的 sparse_index 应在 0..26 范围内
+        for id in SyscallId::all() {
+            let idx = id.sparse_index();
+            assert!(idx < SyscallId::TOTAL_COUNT, "{id:?}.sparse_index() {idx} 超出范围");
+        }
+        // 验证 TOTAL_COUNT
+        assert_eq!(SyscallId::TOTAL_COUNT, 26);
     }
 
     // ===== derive trait 测试 =====
@@ -588,10 +806,16 @@ mod tests {
         let registry = SyscallRegistry::new_empty();
         let mut ctx = SyscallContext::new(vec![]);
         let mut state = VmState::new();
-        // 非法 ID
+        // 非法 ID（命名空间间隙）
         let err = registry.dispatch(0x00, &mut ctx, &mut state).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(_)));
-        let err = registry.dispatch(0x10, &mut ctx, &mut state).unwrap_err();
+        let err = registry.dispatch(0x16, &mut ctx, &mut state).unwrap_err();
+        assert!(matches!(err, ZkvmError::Other(_)));
+        let err = registry.dispatch(0x22, &mut ctx, &mut state).unwrap_err();
+        assert!(matches!(err, ZkvmError::Other(_)));
+        let err = registry.dispatch(0x33, &mut ctx, &mut state).unwrap_err();
+        assert!(matches!(err, ZkvmError::Other(_)));
+        let err = registry.dispatch(0xFF, &mut ctx, &mut state).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(_)));
     }
 
@@ -682,8 +906,9 @@ mod tests {
     #[test]
     fn test_syscall_registry_default() {
         let registry = SyscallRegistry::default();
-        // default() = new() = 全部 10 个 syscall 已注册
-        assert_eq!(registry.len(), 10);
+        // default() = new() = 全部 21 个 host syscall 已注册
+        // (10 基础 + 6 BLS12-381 + 2 GameState + 3 Game-specific)
+        assert_eq!(registry.len(), 21);
         assert!(!registry.is_empty());
     }
 }

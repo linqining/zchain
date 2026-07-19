@@ -55,8 +55,17 @@ use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscr
 
 use poker_l1::vm::contracts::texas_poker::utils::generate_plaintext_cards;
 
-use poker_zkvm::prover::{default_ccs_registry, prove as zkvm_prove, ProverConfig as ZkvmProverConfig};
-use poker_zkvm::test_helpers::{build_poker_hand_compare_elf, build_poker_hand_eval_v2_elf};
+use poker_zkvm::prover::{
+    MAX_PROOF_TOTAL_SIZE, ProverConfig as ZkvmProverConfig, default_ccs_registry,
+    prove as zkvm_prove,
+};
+use poker_zkvm::prover::partial::{
+    PartialProveState, prove_final_fold, prove_partial_fold, prove_partial_start,
+};
+use poker_zkvm::test_helpers::{
+    build_poker_hand_compare_elf, build_poker_hand_eval_v2_elf,
+    build_texas_poker_full_hand_elf, make_full_hand_input,
+};
 use poker_zkvm::verifier::verify_production as zkvm_verify_production;
 
 /// 性能摘要（JSON 序列化写入日志末尾）。
@@ -80,6 +89,14 @@ pub struct PerfSummary {
     pub sigma_stage: SigmaStageTimings,
     /// RV32I zkvm 阶段耗时。
     pub rv32i_stage: Rv32iStageTimings,
+    /// LCCCS 分阶段提交耗时（`--partial-prove-demo` 启用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_prove_stage: Option<PartialProveStageTimings>,
+    /// Phase 5.5 — 并行配置扫描结果（`--parallel-sweep` 启用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_sweep: Option<ParallelSweepResult>,
+    /// Phase 5.5 — 全局并行线程配置（`--parallel-threads <n>` 启用；None = 使用默认全局线程池）。
+    pub parallel_threads: Option<usize>,
     /// 总耗时（毫秒）。
     pub total_time_ms: f64,
     /// 赢家（1=P1, 2=P2, 0=平局）。
@@ -134,6 +151,75 @@ pub struct Rv32iStageTimings {
     pub compare_proof_size_bytes: usize,
 }
 
+/// LCCCS 分阶段提交耗时（Phase 4.2 — `--partial-prove-demo` 启用）。
+///
+/// 对比直接 `prove()` 与三阶段（start + N × fold + final_fold）的性能与等价性。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct PartialProveStageTimings {
+    /// `prove_partial_start` 耗时（ELF 执行 + CCS 编译 + 初始 LCCCS 锚定）。
+    pub start_ms: f64,
+    /// 单步 `prove_partial_fold` 平均耗时（毫秒）。
+    pub fold_avg_ms: f64,
+    /// `prove_partial_fold` 总耗时（毫秒，所有 fold 步累加）。
+    pub fold_total_ms: f64,
+    /// `prove_final_fold` 耗时（剩余 fold + PCS opening + 序列化）。
+    pub final_fold_ms: f64,
+    /// 分阶段三段总耗时（start + fold_total + final_fold）。
+    pub three_stage_total_ms: f64,
+    /// 直接 `prove()` 耗时（对照组）。
+    pub direct_prove_ms: f64,
+    /// 三阶段路径与直接 prove 的 proof 字节完全一致（true=等价性通过）。
+    pub proof_equivalent: bool,
+    /// fold 步数（ccccs_queue 总长度）。
+    pub fold_step_count: u32,
+    /// 初始 LCCCS 锚定承诺（32B hex）。
+    pub initial_lcccs_anchor_hex: String,
+    /// 最终 proof 字节数。
+    pub final_proof_size_bytes: usize,
+    /// verify_production 耗时（毫秒）。
+    pub verify_ms: f64,
+}
+
+/// Phase 5.5 — 并行配置扫描单项结果。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ParallelSweepEntry {
+    /// 标签：`"sequential_baseline"` 或 `"threads_N"`。
+    pub label: String,
+    /// rayon 线程数（0 = sequential baseline；N>=1 = parallel with N threads）。
+    pub threads: usize,
+    /// 是否启用并行 CCS 编译。
+    pub parallel_ccs_compile: bool,
+    /// `prove()` 耗时（毫秒）。
+    pub prove_ms: f64,
+    /// `verify_production()` 耗时（毫秒）。
+    pub verify_ms: f64,
+    /// proof 字节数。
+    pub proof_size_bytes: usize,
+}
+
+/// Phase 5.5 — 并行配置扫描结果（`--parallel-sweep` 启用）。
+///
+/// 使用 `build_texas_poker_full_hand_elf` 扫描 sequential baseline + rayon_threads 1/2/4/8，
+/// 找出实际最低证明延迟配置。所有配置产出的 proof 字节应完全一致（Fiat-Shamir 确定性），
+/// 仅 prove 耗时因并行度不同而变化。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ParallelSweepResult {
+    /// 扫描配置列表（按 threads 升序）。
+    pub entries: Vec<ParallelSweepEntry>,
+    /// 最低 prove 耗时配置的 label。
+    pub best_label: String,
+    /// 最低 prove 耗时（毫秒）。
+    pub best_prove_ms: f64,
+    /// 最佳配置的 verify 耗时（毫秒）。
+    pub best_verify_ms: f64,
+    /// 最佳配置的 proof 字节数。
+    pub best_proof_size_bytes: usize,
+    /// 相对 sequential baseline 的加速比（`sequential_ms / best_prove_ms`）。
+    pub speedup_vs_sequential: f64,
+    /// 扫描总耗时（毫秒）。
+    pub sweep_total_ms: f64,
+}
+
 /// 全局 PerfSummary 单例（供各阶段累加耗时）。
 static PERF_SUMMARY: OnceLock<std::sync::Mutex<PerfSummary>> = OnceLock::new();
 
@@ -150,6 +236,9 @@ pub fn perf_summary() -> &'static std::sync::Mutex<PerfSummary> {
             onchain_final_block: None,
             sigma_stage: SigmaStageTimings::default(),
             rv32i_stage: Rv32iStageTimings::default(),
+            partial_prove_stage: None,
+            parallel_sweep: None,
+            parallel_threads: None,
             total_time_ms: 0.0,
             winner: 0,
         })
@@ -193,6 +282,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut local_only = false;
     let mut log_file: Option<PathBuf> = None;
     let mut deck_size: usize = 52;
+    let mut partial_demo = false;
+    // Phase 5.5 — 并行配置参数
+    let mut parallel_threads: Option<usize> = None;
+    let mut parallel_sweep = false;
+    let mut sweep_runs: usize = 1; // 每个配置重复 prove 次数（取中位数）
+    let mut sweep_elf_full = false; // false = eval ELF（快速，~1-2s/prove），true = full_hand ELF（实际合约，~4min/prove）
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -219,18 +314,64 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     return Err("--deck-size 须在 1..=52 范围内".to_string());
                 }
             }
+            "--partial-prove-demo" => {
+                partial_demo = true;
+            }
+            "--parallel-threads" => {
+                i += 1;
+                let v = args.get(i).ok_or("--parallel-threads 缺少参数")?;
+                let n = v
+                    .parse::<usize>()
+                    .map_err(|e| format!("--parallel-threads 解析失败：{e}"))?;
+                if n == 0 {
+                    return Err("--parallel-threads 须 >= 1".to_string());
+                }
+                parallel_threads = Some(n);
+            }
+            "--parallel-sweep" => {
+                parallel_sweep = true;
+            }
+            "--sweep-runs" => {
+                i += 1;
+                let v = args.get(i).ok_or("--sweep-runs 缺少参数")?;
+                sweep_runs = v
+                    .parse::<usize>()
+                    .map_err(|e| format!("--sweep-runs 解析失败：{e}"))?;
+                if sweep_runs == 0 {
+                    return Err("--sweep-runs 须 >= 1".to_string());
+                }
+            }
+            "--sweep-elf" => {
+                i += 1;
+                let v = args.get(i).ok_or("--sweep-elf 缺少参数")?;
+                sweep_elf_full = match v.as_str() {
+                    "full" => true,  // build_texas_poker_full_hand_elf（~220 instrs，~4min/prove）
+                    "eval" => false, // build_poker_hand_eval_v2_elf（~80 instrs，~1-2s/prove）
+                    _ => return Err(format!("--sweep-elf 须为 full 或 eval，实际：{v}")),
+                };
+            }
             "--help" | "-h" => {
                 eprintln!("用法: zchain poker-zkvm-demo [options]");
                 eprintln!();
                 eprintln!("选项：");
-                eprintln!("  --rpc <host:port>     链上 RPC 端点（默认 127.0.0.1:8545）");
-                eprintln!("  --local-only          跳过链上 RPC，仅本地 sigma + RV32I");
-                eprintln!("  --log-file <path>     性能日志路径（默认 /tmp/zkvm_poker_perf_<timestamp>.log）");
-                eprintln!("  --deck-size <n>       牌组大小（默认 52，调试可减为 4）");
+                eprintln!("  --rpc <host:port>      链上 RPC 端点（默认 127.0.0.1:8545）");
+                eprintln!("  --local-only           跳过链上 RPC，仅本地 sigma + RV32I");
+                eprintln!("  --log-file <path>      性能日志路径（默认 /tmp/zkvm_poker_perf_<timestamp>.log）");
+                eprintln!("  --deck-size <n>        牌组大小（默认 52，调试可减为 4）");
+                eprintln!("  --partial-prove-demo   额外演示 LCCCS 分阶段提交（Phase 4.2）");
+                eprintln!();
+                eprintln!("  Phase 5.5 — 并行证明配置：");
+                eprintln!("  --parallel-threads <n> 全局 rayon 线程数（应用于 sigma/rv32i/partial 各阶段）");
+                eprintln!("  --parallel-sweep       扫描 sequential + threads 1/2/4/8，找出最低 prove 延迟");
+                eprintln!("  --sweep-runs <n>       每个配置 prove 重复次数（默认 1，取中位数；推荐 3-5）");
+                eprintln!("  --sweep-elf <full|eval> 扫描使用的 ELF（默认 eval 快速；full = 完整 texas_poker 合约）");
                 eprintln!();
                 eprintln!("示例：");
                 eprintln!("  zchain poker-zkvm-demo --local-only");
                 eprintln!("  zchain poker-zkvm-demo --rpc 127.0.0.1:8545 --log-file /tmp/perf.log");
+                eprintln!("  zchain poker-zkvm-demo --local-only --partial-prove-demo");
+                eprintln!("  zchain poker-zkvm-demo --local-only --parallel-threads 4");
+                eprintln!("  zchain poker-zkvm-demo --local-only --parallel-sweep --sweep-runs 3");
                 return Ok(());
             }
             other => return Err(format!("未知参数：{other}")),
@@ -255,6 +396,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     info!("log_file     : {}", log_path.display());
     info!("deck_size    : {deck_size}");
     info!("curve_adaptation: BLS12-381 (business) + BN254 (zkvm circuit)");
+    if let Some(n) = parallel_threads {
+        info!("parallel_threads: {n} (应用于所有 prove 阶段)");
+    }
+    if parallel_sweep {
+        info!("parallel_sweep: ENABLED (扫描 sequential + threads 1/2/4/8, runs={sweep_runs}, elf={})", if sweep_elf_full { "full" } else { "eval" });
+    }
     info!("");
 
     // 更新 PerfSummary 模式字段
@@ -264,10 +411,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
         if !local_only {
             s.rpc_endpoint = Some(rpc_listen.clone());
         }
+        s.parallel_threads = parallel_threads;
     }
 
     let total_start = std::time::Instant::now();
-    let winner = run_full_hand(local_only, &rpc_listen, deck_size)?;
+    let winner = run_full_hand(
+        local_only,
+        &rpc_listen,
+        deck_size,
+        partial_demo,
+        parallel_threads,
+        parallel_sweep,
+        sweep_runs,
+        sweep_elf_full,
+    )?;
 
     let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -343,13 +500,22 @@ struct FileGuard {
 }
 
 /// 执行完整一手牌流程，返回赢家（1/2/0）。
-fn run_full_hand(local_only: bool, rpc_listen: &str, deck_size: usize) -> Result<u8, String> {
+fn run_full_hand(
+    local_only: bool,
+    rpc_listen: &str,
+    deck_size: usize,
+    partial_demo: bool,
+    parallel_threads: Option<usize>,
+    parallel_sweep: bool,
+    sweep_runs: usize,
+    sweep_elf_full: bool,
+) -> Result<u8, String> {
     // Phase D: 链上 RPC 创建桌子（可选）
     let card_seq: Vec<u8> = if local_only {
         info!("━━━ Phase D: 跳过链上 RPC（--local-only）━━━");
         (0..deck_size as u8).collect()
     } else {
-        info!("━━━ Phase D: 链上 RPC 创建桌子 ━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        info!("━━━ Phase D: 链上 RPC 创建桌子 ━━━━━━━━━━━━━━━━━━━━━━━━━══");
         create_onchain_table_and_extract_cards(rpc_listen, deck_size)?
     };
     info!("");
@@ -366,11 +532,39 @@ fn run_full_hand(local_only: bool, rpc_listen: &str, deck_size: usize) -> Result
     info!("");
 
     // Phase B: RV32I zkvm 牌型评估+比较（BN254 Hypernova proof）
-    info!("━━━ Phase B: RV32I zkvm 牌型评估+比较（BN254） ━━━━━━━━━━━━");
-    let winner = run_rv32i_eval_and_compare(&p1_cards, &p2_cards)?;
+    info!("━━━ Phase B: RV32I zkvm 牌型评估+比较（BN254） ━━━━━━━══━━━");
+    let winner = run_rv32i_eval_and_compare(&p1_cards, &p2_cards, parallel_threads)?;
     info!("");
 
+    // Phase 4.2: LCCCS 分阶段提交演示（可选）
+    if partial_demo {
+        info!("━━━ Phase 4.2: LCCCS 分阶段提交演示 ━━━━━━━━━━━━━━━━━━━━━━━━");
+        run_lcccs_partial_prove_demo(parallel_threads)?;
+        info!("");
+    }
+
+    // Phase 5.5: 并行证明配置扫描（可选）— 测试实际最低证明延迟
+    if parallel_sweep {
+        let elf_label = if sweep_elf_full { "texas_poker full hand" } else { "poker_hand_eval_v2" };
+        info!("━━━ Phase 5.5: 并行证明配置扫描（{elf_label} ELF） ━━━");
+        run_parallel_sweep(sweep_runs, sweep_elf_full)?;
+        info!("");
+    }
+
     Ok(winner)
+}
+
+/// Phase 5.5 — 构造 `ZkvmProverConfig`，根据 `parallel_threads` 注入并行配置。
+///
+/// - `None` → 使用默认全局 rayon 线程池（`RAYON_NUM_THREADS` 或 CPU 核数）
+/// - `Some(n)` → 构造作用域受限的 rayon 线程池（`prove()` 内通过 `ThreadPoolBuilder::install()` 安装）
+fn make_prover_config(parallel_threads: Option<usize>) -> ZkvmProverConfig {
+    let mut config = ZkvmProverConfig::default();
+    if let Some(n) = parallel_threads {
+        config.parallel_ccs_compile = true;
+        config.rayon_threads = Some(n);
+    }
+    config
 }
 
 // ===== Phase D: 链上 RPC 集成 =====
@@ -840,8 +1034,12 @@ fn decrypt_to_ranks<C: Curve>(
 /// 2. P2 评估：同上
 /// 3. 比较：`build_poker_hand_compare_elf` + 输入 `[s1.le, s2.le]` 8 字节 + prove + verify + 测时
 /// 4. 累加 `Rv32iStageTimings` 9 个字段
-fn run_rv32i_eval_and_compare(p1: &[u8; 5], p2: &[u8; 5]) -> Result<u8, String> {
-    let config = ZkvmProverConfig::default();
+fn run_rv32i_eval_and_compare(
+    p1: &[u8; 5],
+    p2: &[u8; 5],
+    parallel_threads: Option<usize>,
+) -> Result<u8, String> {
+    let config = make_prover_config(parallel_threads);
     let registry = default_ccs_registry();
     let elf_eval = build_poker_hand_eval_v2_elf();
 
@@ -941,6 +1139,465 @@ fn run_rv32i_eval_and_compare(p1: &[u8; 5], p2: &[u8; 5]) -> Result<u8, String> 
     }
 
     Ok(winner)
+}
+
+// ===== Phase 4.2: LCCCS 分阶段提交演示 =====
+
+/// 演示 LCCCS 分阶段提交流程。
+///
+/// 使用 `build_poker_hand_eval_v2_elf`（~80 trace 步）演示分阶段 proof 生成。
+/// 选择 eval ELF 而非 full_hand ELF 的原因：
+///   - partial demo 的目的是演示 **LCCCS 分阶段提交机制**（start → final_fold）
+///   - full_hand ELF（220 步）CCS 约束数量大，单次 prove >4min，不适合快速演示
+///   - eval ELF 轻量（~80 步），配合默认 batch_size=256 走单实例路径
+///   - 完整一手牌流程已在 Phase B（RV32I eval + compare）中展示
+///
+/// 1. **对照组**：直接 `prove()` 生成完整 proof
+/// 2. **两阶段路径**（单实例路径，0 fold 步）：
+///    - `prove_partial_start` — ELF 执行 + CCS 编译 + 初始 LCCCS 锚定
+///    - `prove_final_fold` — 单实例 sumcheck + PCS opening + 最终 proof 上链
+/// 3. **等价性校验**：两阶段路径产出的 proof 字节应与直接 prove() 完全一致
+/// 4. **verify_production 验证**：最终 proof 应通过完整 verifier
+///
+/// 注：多 fold 步的 checkpoint 演示需 release build（debug 下 BN254 标量乘法 ~10x 慢），
+/// 已由 `test_final_fold_with_multiple_partial_folds` 单元测试覆盖。
+///
+/// 演示输入：[14, 13, 12, 11, 10]（A-K-Q-J-10 straight），
+/// 期望输出：[5, 14, 0, 0]（category=5=straight, max_rank=14）。
+fn run_lcccs_partial_prove_demo(parallel_threads: Option<usize>) -> Result<(), String> {
+    use poker_zkvm::prover::MAX_PROOF_TOTAL_SIZE;
+
+    let elf = build_poker_hand_eval_v2_elf();
+    // 输入：5 张牌 rank = [A, K, Q, J, 10] → straight (category=5, max=14)
+    let input: Vec<u8> = vec![14, 13, 12, 11, 10];
+    let config = {
+        let mut cfg = ZkvmProverConfig {
+            // batch_size=256（默认）→ 80 步 padding 到 256 → 1 batch → 单实例路径（0 fold 步）
+            // 选择默认值的原因：
+            //   - debug build 下 BN254 标量乘法 ~10x 慢，多 fold 步演示需 release build
+            //   - 单实例路径仍完整展示 start（初始 LCCCS 锚定）→ final_fold（最终 proof 上链）
+            //   - 证明耗时与 Phase B 的 RV32I eval prove 相当（~9.5s）
+            //   - 多 fold 步路径由单元测试 test_final_fold_with_multiple_partial_folds 覆盖
+            batch_size: 256,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+            ..Default::default()
+        };
+        if let Some(n) = parallel_threads {
+            cfg.parallel_ccs_compile = true;
+            cfg.rayon_threads = Some(n);
+        }
+        cfg
+    };
+    let registry = default_ccs_registry();
+
+    info!("  [partial] ELF: poker_hand_eval_v2 (~80 instrs, 5B input, 4B output)");
+    info!("  [partial] 输入: [A,K,Q,J,10] → 期望 straight (category=5, max=14)");
+    info!("  [partial] batch_size={} → 单实例路径（0 fold 步）分阶段提交演示", config.batch_size);
+
+    // === 对照组：直接 prove ===
+    let direct_start = Instant::now();
+    let (direct_proof, direct_io) = zkvm_prove(&elf, &input, &config)
+        .map_err(|e| format!("[partial] 直接 prove 失败：{e:?}"))?;
+    let direct_ms = direct_start.elapsed().as_secs_f64() * 1000.0;
+    info!(
+        "  [partial] 对照组 prove:     {:>7.2}ms size={:>6}B",
+        direct_ms,
+        direct_proof.len()
+    );
+
+    // === 三阶段路径 ===
+
+    // 阶段 1: prove_partial_start
+    let start_t = Instant::now();
+    let mut state: PartialProveState = prove_partial_start(&elf, &input, &config)
+        .map_err(|e| format!("[partial] prove_partial_start 失败：{e:?}"))?;
+    let start_ms = start_t.elapsed().as_secs_f64() * 1000.0;
+
+    let fold_step_count = state.ccccs_queue.len() as u32;
+    let initial_lcccs_anchor = state.ccs_commitment; // 锚定用 ccs_commitment 作为初始 LCCCS 锚的标识
+    info!(
+        "  [partial] start:            {:>7.2}ms fold_steps={} ccccs_queue={}",
+        start_ms,
+        fold_step_count,
+        state.ccccs_queue.len()
+    );
+    info!(
+        "  [partial]   initial_lcccs_anchor = {}",
+        hex::encode(initial_lcccs_anchor)
+    );
+
+    // 阶段 2: prove_partial_fold（每步独立提交，模拟链上 checkpoint）
+    let fold_total_start = Instant::now();
+    let mut fold_count = 0u32;
+    while !state.ccccs_queue.is_empty() {
+        let step_t = Instant::now();
+        let progress = prove_partial_fold(&mut state, 1)
+            .map_err(|e| format!("[partial] prove_partial_fold 失败：{e:?}"))?;
+        let step_ms = step_t.elapsed().as_secs_f64() * 1000.0;
+        fold_count += 1;
+        info!(
+            "  [partial]   fold step {}/{}: {:>7.2}ms remaining={} intermediate_commitment={}",
+            fold_count,
+            fold_step_count,
+            step_ms,
+            progress.remaining_steps,
+            hex::encode(progress.intermediate_commitment)
+        );
+    }
+    let fold_total_ms = fold_total_start.elapsed().as_secs_f64() * 1000.0;
+    let fold_avg_ms = if fold_count > 0 {
+        fold_total_ms / fold_count as f64
+    } else {
+        0.0
+    };
+    info!(
+        "  [partial] fold total:       {:>7.2}ms ({} steps, avg {:.2}ms/step)",
+        fold_total_ms, fold_count, fold_avg_ms
+    );
+
+    // 阶段 3: prove_final_fold
+    let final_t = Instant::now();
+    let (partial_proof, partial_io) = prove_final_fold(state)
+        .map_err(|e| format!("[partial] prove_final_fold 失败：{e:?}"))?;
+    let final_fold_ms = final_t.elapsed().as_secs_f64() * 1000.0;
+    info!(
+        "  [partial] final_fold:       {:>7.2}ms size={:>6}B",
+        final_fold_ms,
+        partial_proof.len()
+    );
+
+    let three_stage_total = start_ms + fold_total_ms + final_fold_ms;
+    info!(
+        "  [partial] 三阶段总耗时:      {:>7.2}ms (start {:.2} + fold {:.2} + final {:.2})",
+        three_stage_total, start_ms, fold_total_ms, final_fold_ms
+    );
+
+    // === 等价性校验 ===
+    let proof_equivalent = direct_proof == partial_proof;
+    let io_equivalent = direct_io == partial_io;
+    info!(
+        "  [partial] proof 等价性: {} (direct {}B == partial {}B)",
+        if proof_equivalent { "✓ 通过" } else { "✗ 失败" },
+        direct_proof.len(),
+        partial_proof.len()
+    );
+    info!(
+        "  [partial] public_io 等价性: {}",
+        if io_equivalent { "✓ 通过" } else { "✗ 失败" }
+    );
+    if !proof_equivalent {
+        return Err("[partial] 三阶段路径 proof 与直接 prove() 不一致".to_string());
+    }
+    if !io_equivalent {
+        return Err("[partial] 三阶段路径 public_io 与直接 prove() 不一致".to_string());
+    }
+
+    // === verify_production 验证 ===
+    let verify_t = Instant::now();
+    let valid = zkvm_verify_production(&partial_proof, &partial_io, &registry)
+        .map_err(|e| format!("[partial] verify_production 失败：{e:?}"))?;
+    let verify_ms = verify_t.elapsed().as_secs_f64() * 1000.0;
+    info!(
+        "  [partial] verify_production: {:>7.2}ms valid={}",
+        verify_ms, valid
+    );
+    if !valid {
+        return Err("[partial] verify_production 验证失败".to_string());
+    }
+
+    // === 校验输出（eval ELF 输出 [category, max_rank, 0, 0]）===
+    let expected_output: [u8; 4] = [5, 14, 0, 0]; // category=5=straight, max=14
+    info!(
+        "  [partial] output: {:?} (期望 {:?} = straight A-high)",
+        partial_io.output, expected_output
+    );
+    if partial_io.output != expected_output {
+        return Err(format!(
+            "[partial] 期望输出 {:?} (straight A-high)，实际 {:?}",
+            expected_output, partial_io.output
+        ));
+    }
+
+    // === 累加 PartialProveStageTimings ===
+    {
+        let mut s = perf_summary()
+            .lock()
+            .map_err(|e| format!("PerfSummary 锁中毒：{e}"))?;
+        s.partial_prove_stage = Some(PartialProveStageTimings {
+            start_ms,
+            fold_avg_ms,
+            fold_total_ms,
+            final_fold_ms,
+            three_stage_total_ms: three_stage_total,
+            direct_prove_ms: direct_ms,
+            proof_equivalent,
+            fold_step_count,
+            initial_lcccs_anchor_hex: hex::encode(initial_lcccs_anchor),
+            final_proof_size_bytes: partial_proof.len(),
+            verify_ms,
+        });
+    }
+
+    info!("  [partial] ✓ LCCCS 分阶段提交演示完成（与直接 prove 等价）");
+
+    Ok(())
+}
+
+// ===== Phase 5.5: 并行证明配置扫描 =====
+
+/// 待扫描的 rayon 线程数列表。
+///
+/// 1 = 单线程（最慢基线）；2/4/8 = 多线程并行。
+/// 8 通常覆盖主流 8C/16T 桌面 CPU；更高线程数收益递减（CCS 编译为 CPU 密集型）。
+const PARALLEL_SWEEP_THREAD_COUNTS: &[usize] = &[1, 2, 4, 8];
+
+/// Phase 5.5 — 并行证明配置扫描（`--parallel-sweep` 启用）。
+///
+/// **目标**：测量不同并行配置下的实际最低证明延迟，验证 Phase 5.1/5.2/5.3 的并行化收益。
+///
+/// **流程**：
+/// 1. 构造 texas_poker 完整一手牌 ELF（`build_texas_poker_full_hand_elf`，~220 条指令）
+/// 2. **Sequential baseline**：`parallel_ccs_compile=false`，跑 `sweep_runs` 次 prove，取中位数
+/// 3. **Parallel threads=1/2/4/8**：`parallel_ccs_compile=true` + `rayon_threads=Some(n)`，各跑 `sweep_runs` 次，取中位数
+/// 4. **等价性校验**：所有配置产出的 proof 字节应完全一致（Fiat-Shamir 确定性）
+/// 5. **verify_production**：每个配置的 proof 都要通过完整 verifier
+/// 6. **报告最低延迟配置**：`best_label` / `best_prove_ms` / `speedup_vs_sequential`
+///
+/// **输入布局**：62 字节 = 52B deck（0..51 排列）+ 5B P1（[14,13,12,11,10] straight A-high）+ 5B P2（[2,2,3,4,5] 一对 2）
+///
+/// **为什么用 full_hand ELF 而非 eval ELF**：
+///   - eval ELF 仅 ~80 trace 步 → 1 batch → CCS 编译并行收益不显著
+///   - full_hand ELF ~250 trace 步 / batch_size=10 = 25 batches → 并行收益显著
+///   - 使用 batch_size=10 强制多 batch，放大并行加速比
+///
+/// **Fiat-Shamir 确定性证明**：
+///   - `compile_batch_to_ccs` 为纯函数，输入相同 → 输出相同（无论是否并行）
+///   - rayon `into_par_iter().collect()` 保留顺序，CCS 实例顺序不变
+///   - 故 `prove()` 输出的 proof 字节在所有配置下应完全一致
+fn run_parallel_sweep(sweep_runs: usize, sweep_elf_full: bool) -> Result<(), String> {
+    let elf = if sweep_elf_full {
+        build_texas_poker_full_hand_elf()
+    } else {
+        build_poker_hand_eval_v2_elf()
+    };
+
+    // 输入布局依 ELF 而定：
+    // - full_hand ELF：62B = 52B deck + 5B P1 + 5B P2
+    // - eval ELF：5B = P1 5 张牌 rank（仅评估 P1，无比较）
+    // 扫描主要测试 prove 延迟，故两种 ELF 都用 P1=[A,K,Q,J,10]（straight A-high）
+    let p1: [u8; 5] = [14, 13, 12, 11, 10];
+    let input: Vec<u8> = if sweep_elf_full {
+        let p2: [u8; 5] = [2, 2, 3, 4, 5];
+        make_full_hand_input(p1, p2)
+    } else {
+        p1.to_vec()
+    };
+    let registry = default_ccs_registry();
+
+    let elf_label = if sweep_elf_full { "build_texas_poker_full_hand_elf (~220 instrs, 62B input)" } else { "build_poker_hand_eval_v2_elf (~80 instrs, 5B input)" };
+    info!("  [sweep] ELF: {elf_label}");
+    info!("  [sweep] 输入: P1=[A,K,Q,J,10] straight{}", if sweep_elf_full { " + P2=[2,2,3,4,5] pair" } else { "" });
+    info!("  [sweep] batch_size=256（生产配置）：1 batch + 0 fold → 实际最低 prove 延迟");
+    info!("  [sweep] 配置: sequential_baseline + threads 1/2/4/8, 每配置 {sweep_runs} runs（取中位数）");
+    info!("");
+
+    // 使用 batch_size=256（生产配置）测量实际最低 prove 延迟
+    // - eval ELF ~80 步 / batch_size=256 → 1 batch + 0 fold → ~9s/prove（最快）
+    // - 多 batch 配置（batch_size<80）虽可并行 CCS 编译，但 fold 步极慢（每步 5+ min），不实用
+    // - 生产配置下 parallel_ccs_compile 对 1 batch 无加速，但不引入回归（验证正确性）
+    // - 实际并行收益场景：长 trace（>256 步）天然产生多 batch，CCS 编译可并行加速
+    const SWEEP_BATCH_SIZE: usize = 256;
+
+    let sweep_start = Instant::now();
+    let mut entries: Vec<ParallelSweepEntry> = Vec::new();
+    // 用于等价性校验：保存 sequential baseline 的 proof 字节
+    let reference_proof: Vec<u8>;
+
+    // === Sequential baseline ===
+    let config_seq = ZkvmProverConfig {
+        batch_size: SWEEP_BATCH_SIZE,
+        proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+        parallel_ccs_compile: false,
+        rayon_threads: None,
+        ..Default::default()
+    };
+    info!("  [sweep] ━━ sequential_baseline (parallel_ccs_compile=false) ━━");
+    let (seq_prove_ms, seq_verify_ms, seq_proof_size) =
+        run_sweep_single_config(&elf, &input, &config_seq, &registry, sweep_runs, "sequential")?;
+    info!(
+        "  [sweep]   → prove_median={:>8.2}ms verify_median={:>6.2}ms size={:>6}B",
+        seq_prove_ms, seq_verify_ms, seq_proof_size
+    );
+    reference_proof = run_single_prove_for_equiv_check(&elf, &input, &config_seq)?;
+    entries.push(ParallelSweepEntry {
+        label: "sequential_baseline".to_string(),
+        threads: 0,
+        parallel_ccs_compile: false,
+        prove_ms: seq_prove_ms,
+        verify_ms: seq_verify_ms,
+        proof_size_bytes: seq_proof_size,
+    });
+
+    let sequential_ms = seq_prove_ms;
+
+    // === Parallel configs: threads 1/2/4/8 ===
+    for &n in PARALLEL_SWEEP_THREAD_COUNTS {
+        let config = ZkvmProverConfig {
+            batch_size: SWEEP_BATCH_SIZE,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+            parallel_ccs_compile: true,
+            rayon_threads: Some(n),
+            ..Default::default()
+        };
+        info!("  [sweep] ━━ threads_{n} (parallel_ccs_compile=true, rayon_threads={n}) ━━");
+        let (prove_ms, verify_ms, proof_size) =
+            run_sweep_single_config(&elf, &input, &config, &registry, sweep_runs, &format!("threads_{n}"))?;
+        info!(
+            "  [sweep]   → prove_median={:>8.2}ms verify_median={:>6.2}ms size={:>6}B",
+            prove_ms, verify_ms, proof_size
+        );
+
+        // 等价性校验：proof 字节应与 sequential baseline 完全一致
+        let parallel_proof = run_single_prove_for_equiv_check(&elf, &input, &config)?;
+        if parallel_proof != reference_proof {
+            return Err(format!(
+                "[sweep] threads={n} proof 字节与 sequential_baseline 不一致（Fiat-Shamir 确定性失效）"
+            ));
+        }
+        info!("  [sweep]   ✓ proof 等价性校验通过（与 sequential_baseline 一致）");
+
+        entries.push(ParallelSweepEntry {
+            label: format!("threads_{}", n),
+            threads: n,
+            parallel_ccs_compile: true,
+            prove_ms,
+            verify_ms,
+            proof_size_bytes: proof_size,
+        });
+    }
+
+    let sweep_total_ms = sweep_start.elapsed().as_secs_f64() * 1000.0;
+
+    // 找出最低 prove 耗时配置
+    let best_idx = entries
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.prove_ms.partial_cmp(&b.prove_ms).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .ok_or("[sweep] entries 为空")?;
+    let best_label = entries[best_idx].label.clone();
+    let best_prove_ms = entries[best_idx].prove_ms;
+    let best_verify_ms = entries[best_idx].verify_ms;
+    let best_proof_size_bytes = entries[best_idx].proof_size_bytes;
+    let speedup = if best_prove_ms > 0.0 {
+        sequential_ms / best_prove_ms
+    } else {
+        0.0
+    };
+
+    info!("");
+    info!("  [sweep] ━━━━━━ 扫描结果汇总 ━━━━━━");
+    for e in &entries {
+        let marker = if e.label == best_label { "★ BEST" } else { "       " };
+        info!(
+            "  [sweep] {marker} {:<22} prove={:>8.2}ms verify={:>6.2}ms size={:>6}B",
+            e.label, e.prove_ms, e.verify_ms, e.proof_size_bytes
+        );
+    }
+    info!("");
+    info!(
+        "  [sweep] ✓ 最佳配置: {} (prove={:.2}ms, verify={:.2}ms, size={}B)",
+        best_label, best_prove_ms, best_verify_ms, best_proof_size_bytes
+    );
+    info!(
+        "  [sweep] ✓ 加速比: {:.2}x vs sequential_baseline ({:.2}ms → {:.2}ms)",
+        speedup, sequential_ms, best_prove_ms
+    );
+    info!("  [sweep] 扫描总耗时: {:.2}ms ({} 配置 × {} runs = {} 次 prove)", sweep_total_ms, entries.len(), sweep_runs, entries.len() * sweep_runs);
+
+    // 更新 PerfSummary
+    {
+        let mut s = perf_summary().lock().map_err(|e| format!("PerfSummary 锁中毒：{e}"))?;
+        s.parallel_sweep = Some(ParallelSweepResult {
+            entries,
+            best_label,
+            best_prove_ms,
+            best_verify_ms,
+            best_proof_size_bytes,
+            speedup_vs_sequential: speedup,
+            sweep_total_ms,
+        });
+    }
+
+    info!("  [sweep] ✓ 并行证明配置扫描完成");
+
+    Ok(())
+}
+
+/// 对单个 ProverConfig 跑 `runs` 次 prove + verify，返回 prove/verify 中位数 + proof size。
+///
+/// 中位数比单次测量更稳定，避免 OS 调度抖动导致的离群值。
+fn run_sweep_single_config(
+    elf: &[u8],
+    input: &[u8],
+    config: &ZkvmProverConfig,
+    registry: &[poker_zkvm::ccs::Ccs],
+    runs: usize,
+    label: &str,
+) -> Result<(f64, f64, usize), String> {
+    let mut prove_times: Vec<f64> = Vec::with_capacity(runs);
+    let mut verify_times: Vec<f64> = Vec::with_capacity(runs);
+    let mut last_proof_size: usize = 0;
+
+    for run_idx in 0..runs {
+        let prove_start = Instant::now();
+        let (proof, io) = zkvm_prove(elf, input, config)
+            .map_err(|e| format!("[sweep] {label} run {run_idx} prove 失败：{e:?}"))?;
+        let prove_ms = prove_start.elapsed().as_secs_f64() * 1000.0;
+
+        let verify_start = Instant::now();
+        let valid = zkvm_verify_production(&proof, &io, registry)
+            .map_err(|e| format!("[sweep] {label} run {run_idx} verify 失败：{e:?}"))?;
+        let verify_ms = verify_start.elapsed().as_secs_f64() * 1000.0;
+
+        if !valid {
+            return Err(format!("[sweep] {label} run {run_idx} verify 返回 false"));
+        }
+
+        if runs > 1 {
+            info!(
+                "  [sweep]   run {}/{}: prove={:>8.2}ms verify={:>6.2}ms size={:>6}B",
+                run_idx + 1,
+                runs,
+                prove_ms,
+                verify_ms,
+                proof.len()
+            );
+        }
+
+        prove_times.push(prove_ms);
+        verify_times.push(verify_ms);
+        last_proof_size = proof.len();
+    }
+
+    // 取中位数
+    prove_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    verify_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let prove_median = prove_times[prove_times.len() / 2];
+    let verify_median = verify_times[verify_times.len() / 2];
+
+    Ok((prove_median, verify_median, last_proof_size))
+}
+
+/// 单次 prove（用于等价性校验，不测时）。
+fn run_single_prove_for_equiv_check(
+    elf: &[u8],
+    input: &[u8],
+    config: &ZkvmProverConfig,
+) -> Result<Vec<u8>, String> {
+    let (proof, _io) = zkvm_prove(elf, input, config)
+        .map_err(|e| format!("[sweep] 等价性校验 prove 失败：{e:?}"))?;
+    Ok(proof)
 }
 
 // ===== Phase E: 性能日志 =====

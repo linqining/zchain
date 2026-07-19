@@ -32,6 +32,11 @@ use secp256k1::{Message, Secp256k1};
 use blstrs::G1Projective;
 use group::Group;
 
+use poker_l1::offline::state::{CheckinTx, PartialCheckinTx};
+use poker_l1::offline::zk_verifier::{
+    ProofKind, SCHEME_HYPERNOVA, ZkPublicIo as L1ZkPublicIo,
+};
+use poker_l1::object_model::ObjectID;
 use poker_l1::rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane};
@@ -40,6 +45,12 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{CreateTableArgs, JoinTableA
 use poker_l1::vm::precompile::reserved::texas_poker_contract_id;
 use poker_l1::{Address, Hash};
 use poker_protocol::crypto::types::ECPoint;
+use poker_zkvm::field::ZkvmField; // 提供 ZkvmFr::to_canonical_bytes() -> [u8; 32] trait 方法
+use poker_zkvm::prover::ZkPublicIo as ZkvmZkPublicIo;
+use poker_zkvm::prover::partial::{
+    PartialFoldProgress, PartialProveState, prove_final_fold, prove_partial_fold,
+    prove_partial_start,
+};
 
 /// 单次 RPC 请求超时（秒）。
 pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -58,6 +69,8 @@ pub(crate) const PLAYER2: Address = [0x22; 20];
 /// poker-rpc-demo 子命令入口。
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut rpc_listen = "127.0.0.1:8545".to_string();
+    let mut partial_checkin_demo = false;
+    let mut skip_rpc = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -65,15 +78,33 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 i += 1;
                 rpc_listen = args.get(i).ok_or("--rpc-listen 缺少参数")?.clone();
             }
+            "--partial-checkin-demo" => {
+                partial_checkin_demo = true;
+            }
+            "--skip-rpc" => {
+                skip_rpc = true;
+            }
             "--help" | "-h" => {
                 eprintln!("用法: zchain poker-rpc-demo [--rpc-listen 127.0.0.1:8545]");
-                eprintln!("  通过 RPC 调用运行中的 zchain 节点完成一个完整 Texas Poker 牌局。");
-                eprintln!("  流程: create_table → join_table×2 → start_hand → reset_for_next_hand");
+                eprintln!("       zchain poker-rpc-demo --partial-checkin-demo [--skip-rpc]");
+                eprintln!();
+                eprintln!("  默认模式：通过 RPC 调用运行中的 zchain 节点完成一个完整 Texas Poker 牌局。");
+                eprintln!("           流程: create_table → join_table×2 → start_hand → reset_for_next_hand");
+                eprintln!();
+                eprintln!("  --partial-checkin-demo：Phase 4.3 链上 LCCCS 分阶段提交演示。");
+                eprintln!("    本地运行 zkvm 三阶段证明（start → fold → final_fold），");
+                eprintln!("    构造 PartialCheckinTx + CheckinTx，并通过 zk_verify RPC 验证 proof。");
+                eprintln!("  --skip-rpc：跳过 zk_verify RPC 调用（节点未启动时仅做 in-process 构造演示）。");
                 return Ok(());
             }
             other => return Err(format!("未知参数：{other}")),
         }
         i += 1;
+    }
+
+    // Phase 4.3：分阶段提交演示模式
+    if partial_checkin_demo {
+        return run_rpc_partial_checkin_demo(&rpc_listen, skip_rpc);
     }
 
     println!();
@@ -525,6 +556,371 @@ pub(crate) fn rpc_call(
     }
     Ok(resp)
 }
+
+// ===== Phase 4.3 — RPC partial checkin helpers =====
+//
+// 严格遵循 .trae/documents/zkvm_e2e_phase2_5_execution_plan.md Phase 4.3：
+// 提供 submit/query 辅助函数，用于 Phase 4.4 端到端测试中构造 PartialCheckinTx / CheckinTx
+// 并通过 zk_verify RPC 端点验证 proof。
+//
+// 由于 poker_l1 无专用 checkin RPC 端点，本模块仅构造交易载荷供 in-process 验证使用，
+// 并通过现有 `zk_verify` RPC 端点验证 proof 字节。
+//
+// ## 类型转换说明
+//
+// poker_zkvm::prover::ZkPublicIo（6 字段，length-prefixed 格式）与
+// poker_l1::offline::zk_verifier::ZkPublicIo（7 字段，固定布局）格式不同：
+// - poker_zkvm 版本：input / output / randomness_seed / initial_commitment / final_commitment / event_hashes
+// - poker_l1 版本：initial_commitment / final_commitment / state_delta_hash / ack_chain_hash /
+//                  fold_step_count / skip_count / segment_continuity_proof
+//
+// 转换策略（demo 用，无 ack_chain / segment_continuity_proof）：
+// - initial_commitment: Hash ← zkvm_io.initial_commitment.to_canonical_bytes()
+// - final_commitment:   Hash ← zkvm_io.final_commitment.to_canonical_bytes()
+// - state_delta_hash:   blake2b_256(zkvm_io.output)
+// - ack_chain_hash:     [0u8; 32]（demo 用空 ack_chain）
+// - fold_step_count:    从参数传入（state.ccccs_queue 已 fold 步数）
+// - skip_count:         0
+// - segment_continuity_proof: vec![]
+
+/// 把 poker_zkvm 版本的 ZkPublicIo 转换为 poker_l1 版本（demo 用空 ack_chain / 无 segment_continuity_proof）。
+///
+/// `folded_step_count` 由调用方传入（对应 PartialFoldProgress.folded_step_count 或 0）。
+pub(crate) fn convert_zkvm_public_io_to_l1(
+    zkvm_io: &ZkvmZkPublicIo,
+    folded_step_count: u32,
+) -> Result<L1ZkPublicIo, String> {
+    // ZkvmField::to_canonical_bytes() 返回 [u8; 32]，直接作为 poker_l1 Hash
+    let initial_commitment = zkvm_io.initial_commitment.to_canonical_bytes();
+    let final_commitment = zkvm_io.final_commitment.to_canonical_bytes();
+
+    // state_delta_hash = blake2b_256(output)（demo 用 output 直接作为 state_delta）
+    let mut state_delta_hash = [0u8; 32];
+    let mut hasher = blake2::Blake2bVar::new(32).map_err(|e| format!("Blake2bVar init: {e}"))?;
+    use blake2::digest::{Update, VariableOutput};
+    hasher.update(&zkvm_io.output);
+    hasher
+        .finalize_variable(&mut state_delta_hash)
+        .map_err(|e| format!("Blake2bVar finalize: {e}"))?;
+
+    Ok(L1ZkPublicIo {
+        initial_commitment,
+        final_commitment,
+        state_delta_hash,
+        ack_chain_hash: [0u8; 32], // demo 用空 ack_chain
+        fold_step_count: folded_step_count,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
+    })
+}
+
+/// 构造 PartialCheckinTx（链上 LCCCS 分阶段提交 — 阶段 2 checkpoint 锚定）。
+///
+/// 参数语义对应 spec.md L713–717 + SubTask 28.7a：
+/// - `game_id`：Game 对象 ID（demo 使用 texas_poker_contract_id()）
+/// - `progress`：单次 prove_partial_fold 返回的进度快照
+/// - `proof_partial`：π_partial 字节（demo 用 progress.intermediate_commitment 的 32B 作为占位）
+/// - `scheme_id`：默认 SCHEME_HYPERNOVA=1
+/// - `proof_kind`：默认 ProofKind::Zkvm（对应 SCHEME_HYPERNOVA）
+pub(crate) fn build_partial_checkin_tx(
+    game_id: ObjectID,
+    progress: &PartialFoldProgress,
+    proof_partial: Vec<u8>,
+    scheme_id: u32,
+    proof_kind: ProofKind,
+) -> PartialCheckinTx {
+    PartialCheckinTx {
+        game_id,
+        proof_partial,
+        folded_step_count: progress.folded_step_count,
+        intermediate_commitment: progress.intermediate_commitment,
+        ack_chain_partial: Vec::new(), // demo 用空 ack_chain
+        scheme_id,
+        proof_kind,
+    }
+}
+
+/// 构造完整 CheckinTx（链上 LCCCS 最终 proof 提交 — 阶段 3 final_fold）。
+///
+/// 参数语义对应 spec.md L665–669：
+/// - `game_id`：Game 对象 ID
+/// - `proof`：完整 HypernovaProof 序列化字节
+/// - `state_delta`：状态增量（demo 用 zkvm_io.output）
+/// - `new_commitment`：结算后状态承诺（用 zkvm_io.final_commitment 转 Hash）
+/// - `folded_step_count`：已折叠步数（来自 PartialProveState.fold_steps.len()）
+/// - `has_partial_checkin`：是否基于 partial_checkin 衔接（SEC2-M8）
+pub(crate) fn build_final_checkin_tx(
+    game_id: ObjectID,
+    proof: Vec<u8>,
+    state_delta: Vec<u8>,
+    new_commitment: Hash,
+    folded_step_count: u32,
+    has_partial_checkin: bool,
+) -> CheckinTx {
+    CheckinTx {
+        game_id,
+        proof,
+        state_delta,
+        new_commitment,
+        ack_chain: Vec::new(), // demo 用空 ack_chain
+        scheme_id: SCHEME_HYPERNOVA,
+        proof_kind: ProofKind::Zkvm,
+        has_partial_checkin,
+        folded_step_count,
+        skip_count: 0,
+        segment_continuity_proof: Vec::new(),
+    }
+}
+
+/// 通过 `zk_verify` RPC 端点验证 proof 字节。
+///
+/// 调用 poker_l1 节点的 `zk_verify(scheme_id, proof, public_io_bytes, max_skip_segments, max_ack_chain_length)`。
+/// 节点会根据 chain_id 查询 verifier_status（Stub / Production），Production 状态下执行完整 ZK 验证。
+///
+/// # 返回
+/// `true` 当且仅当 RPC 返回 `verified=true`。
+pub(crate) fn verify_proof_via_rpc(
+    rpc_listen: &str,
+    scheme_id: u32,
+    proof: &[u8],
+    public_io: &L1ZkPublicIo,
+    max_skip_segments: u32,
+    max_ack_chain_length: u32,
+) -> Result<bool, String> {
+    let public_io_bytes = public_io.to_bytes();
+    let params = serde_json::json!({
+        "scheme_id": scheme_id,
+        "proof": proof,
+        "public_io_bytes": public_io_bytes,
+        "max_skip_segments": max_skip_segments,
+        "max_ack_chain_length": max_ack_chain_length,
+    });
+    let resp = rpc_call(rpc_listen, "zk_verify", &params)?;
+    if let Some(err) = &resp.error {
+        return Err(format!(
+            "zk_verify RPC 错误（code={}）：{}",
+            err.code, err.message
+        ));
+    }
+    let result = resp
+        .result
+        .ok_or_else(|| "zk_verify 返回空 result".to_string())?;
+    let verified = result
+        .get("verified")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| format!("zk_verify 返回缺 verified 字段：{result}"))?;
+    let verifier_status = result
+        .get("verifier_status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let returned_scheme = result
+        .get("scheme_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!(
+        "  ✓ zk_verify RPC 返回：verified={} verifier_status={} scheme_id={}",
+        verified, verifier_status, returned_scheme
+    );
+    Ok(verified)
+}
+
+/// Phase 4.3 演示：在本地运行 zkvm 三阶段证明，构造 PartialCheckinTx + CheckinTx，
+/// 并通过 RPC 调用 `zk_verify` 验证最终 proof。
+///
+/// # 流程
+/// 1. prove_partial_start — 构造 PartialProveState（持有 initial_lcccs）
+/// 2. prove_partial_fold — 推进 fold（若 ccccs_queue 非空）+ 构造 PartialCheckinTx（仅展示，无 submit）
+/// 3. prove_final_fold — 产出完整 proof + 构造 CheckinTx
+/// 4. zk_verify RPC — 通过 RPC 验证 proof（要求节点已启动且 scheme_id=1 verifier 已注册）
+///
+/// # 参数
+/// - `rpc_listen`：zchain 节点 RPC 监听地址（如 "127.0.0.1:8545"）
+/// - `skip_rpc`：true 时跳过 RPC 验证（节点未启动场景下仅做 in-process 构造演示）
+pub fn run_rpc_partial_checkin_demo(
+    rpc_listen: &str,
+    skip_rpc: bool,
+) -> Result<(), String> {
+    use poker_zkvm::prover::{MAX_PROOF_TOTAL_SIZE, default_ccs_registry};
+    use poker_zkvm::test_helpers::build_poker_hand_eval_v2_elf;
+    use poker_zkvm::verifier::verify_production as zkvm_verify_production;
+    use std::time::Instant;
+
+    println!();
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║   zchain rpc-partial-checkin-demo — 链上 LCCCS 分阶段   ║");
+    println!("║   提交 + zk_verify RPC 验证                              ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!();
+    println!("RPC endpoint: {rpc_listen}（skip_rpc={skip_rpc}）");
+    println!("目标合约:    texas_poker (ObjectID = {:?})", texas_poker_contract_id());
+    println!();
+
+    // 1. 构造 ELF + input + config（与 poker_zkvm_demo.rs::run_lcccs_partial_prove_demo 一致）
+    let elf = build_poker_hand_eval_v2_elf();
+    let input: Vec<u8> = vec![14, 13, 12, 11, 10]; // [A,K,Q,J,10] → straight A-high
+    let config = ZkvmProverConfigShared {
+        batch_size: 256,
+        proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+        ..Default::default()
+    };
+    let registry = default_ccs_registry();
+    println!("ELF: poker_hand_eval_v2 (~80 instrs, 5B input, 4B output)");
+    println!("输入: [A,K,Q,J,10] → 期望 straight (category=5, max=14)");
+    println!("batch_size={} → 单实例路径（0 fold 步）", config.batch_size);
+    println!();
+
+    // 2. 阶段 1: prove_partial_start
+    println!("━━━ 阶段 1: prove_partial_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    let start_t = Instant::now();
+    let mut state: PartialProveState = prove_partial_start(&elf, &input, &config)
+        .map_err(|e| format!("prove_partial_start 失败：{e:?}"))?;
+    let start_ms = start_t.elapsed().as_secs_f64() * 1000.0;
+    let initial_lcccs_anchor = state.ccs_commitment;
+    let total_fold_steps = state.ccccs_queue.len() as u32;
+    println!("  ✓ prove_partial_start: {:.2}ms", start_ms);
+    println!("    initial_lcccs_anchor (ccs_commitment) = {}", hex::encode(initial_lcccs_anchor));
+    println!("    ccccs_queue = {} 个 CCCCS（fold 步数上限）", state.ccccs_queue.len());
+    println!();
+
+    // 3. 阶段 2: prove_partial_fold（若有 CCCCS）+ 构造 PartialCheckinTx
+    println!("━━━ 阶段 2: prove_partial_fold + PartialCheckinTx ━━━━━━━━━");
+    let mut partial_checkin_txs: Vec<PartialCheckinTx> = Vec::new();
+    let game_id = texas_poker_contract_id();
+
+    while !state.ccccs_queue.is_empty() {
+        let step_t = Instant::now();
+        let progress = prove_partial_fold(&mut state, 1)
+            .map_err(|e| format!("prove_partial_fold 失败：{e:?}"))?;
+        let step_ms = step_t.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "  ✓ fold step {}/{}: {:.2}ms remaining={} intermediate_commitment={}",
+            progress.folded_step_count,
+            total_fold_steps,
+            step_ms,
+            progress.remaining_steps,
+            hex::encode(progress.intermediate_commitment)
+        );
+
+        // 构造 PartialCheckinTx（demo 用 intermediate_commitment 作为 π_partial 占位）
+        let proof_partial = progress.intermediate_commitment.to_vec();
+        let tx = build_partial_checkin_tx(
+            game_id,
+            &progress,
+            proof_partial,
+            SCHEME_HYPERNOVA,
+            ProofKind::Zkvm,
+        );
+        println!(
+            "    → PartialCheckinTx: game_id={} folded_step_count={} π_partial_hash={}",
+            tx.game_id,
+            tx.folded_step_count,
+            hex::encode(tx.proof_partial_hash())
+        );
+        partial_checkin_txs.push(tx);
+    }
+    if partial_checkin_txs.is_empty() {
+        println!("  （单实例路径，无 partial_fold 步骤，跳过 PartialCheckinTx 构造）");
+    } else {
+        println!(
+            "  ✓ 共构造 {} 笔 PartialCheckinTx（仅展示，无专用 submit 端点）",
+            partial_checkin_txs.len()
+        );
+    }
+    println!();
+
+    // 4. 阶段 3: prove_final_fold + 构造 CheckinTx
+    println!("━━━ 阶段 3: prove_final_fold + CheckinTx ━━━━━━━━━━━━━━━━━");
+    let final_t = Instant::now();
+    let (proof_bytes, public_io) = prove_final_fold(state)
+        .map_err(|e| format!("prove_final_fold 失败：{e:?}"))?;
+    let final_fold_ms = final_t.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "  ✓ prove_final_fold: {:.2}ms proof_size={}B",
+        final_fold_ms,
+        proof_bytes.len()
+    );
+
+    // 转换 ZkPublicIo（poker_zkvm → poker_l1）
+    let l1_public_io = convert_zkvm_public_io_to_l1(&public_io, total_fold_steps)?;
+    println!(
+        "  ✓ convert_zkvm_public_io_to_l1: initial_commitment={} final_commitment={}",
+        hex::encode(&l1_public_io.initial_commitment[..8]),
+        hex::encode(&l1_public_io.final_commitment[..8])
+    );
+
+    // 构造完整 CheckinTx
+    let has_partial = !partial_checkin_txs.is_empty();
+    let final_new_commitment = l1_public_io.final_commitment;
+    let checkin_tx = build_final_checkin_tx(
+        game_id,
+        proof_bytes.clone(),
+        public_io.output.clone(), // demo 用 output 作为 state_delta
+        final_new_commitment,
+        total_fold_steps,
+        has_partial,
+    );
+    println!(
+        "  → CheckinTx: game_id={} proof={}B folded_step_count={} has_partial_checkin={}",
+        checkin_tx.game_id,
+        checkin_tx.proof.len(),
+        checkin_tx.folded_step_count,
+        checkin_tx.has_partial_checkin
+    );
+    println!(
+        "    proof_hash={} state_delta_hash={}",
+        hex::encode(&checkin_tx.proof_hash()[..8]),
+        hex::encode(&checkin_tx.state_delta_hash()[..8])
+    );
+    println!();
+
+    // 5. 本地 verify_production 校验（确保 proof 字节合法）
+    println!("━━━ 本地 verify_production 校验 ━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    let verify_t = Instant::now();
+    let valid = zkvm_verify_production(&proof_bytes, &public_io, &registry)
+        .map_err(|e| format!("verify_production 失败：{e:?}"))?;
+    let verify_ms = verify_t.elapsed().as_secs_f64() * 1000.0;
+    println!("  ✓ verify_production: {:.2}ms valid={}", verify_ms, valid);
+    if !valid {
+        return Err("verify_production 验证失败".to_string());
+    }
+    println!();
+
+    // 6. zk_verify RPC 验证（要求节点已启动）
+    println!("━━━ zk_verify RPC 验证 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    if skip_rpc {
+        println!("  （skip_rpc=true，跳过 RPC 验证）");
+    } else {
+        let verified = verify_proof_via_rpc(
+            rpc_listen,
+            SCHEME_HYPERNOVA,
+            &proof_bytes,
+            &l1_public_io,
+            3,    // max_skip_segments 默认
+            1000, // max_ack_chain_length 默认
+        )?;
+        if verified {
+            println!("  ✓ zk_verify RPC 返回 verified=true（节点 verifier 接受 proof）");
+        } else {
+            println!("  ⚠ zk_verify RPC 返回 verified=false（节点 verifier 拒绝 proof）");
+            println!("    可能原因：节点未注册 SCHEME_HYPERNOVA verifier，或 verifier_status=Stub 仅校验格式");
+        }
+    }
+    println!();
+
+    // 7. 输出摘要
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║   ✓ rpc-partial-checkin-demo 完成                       ║");
+    println!("║     start {:.2}ms + fold ({}) + final {:.2}ms          ║",
+        start_ms, partial_checkin_txs.len(), final_fold_ms);
+    println!("║     proof={}B verify_ms={:.2}ms                          ║",
+        proof_bytes.len(), verify_ms);
+    println!("╚══════════════════════════════════════════════════════════╝");
+
+    Ok(())
+}
+
+/// ZkvmProverConfig 路径别名（保持代码简洁）。
+type ZkvmProverConfigShared = poker_zkvm::prover::ProverConfig;
 
 /// 本模块内部使用的 TexasPokerTable 路径别名（保持代码简洁）。
 mod poker_l1_table {

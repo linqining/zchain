@@ -64,3 +64,7 @@ pub mod recursion;
 // ===== 测试辅助（test-helpers feature 门控）=====
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
+
+// ===== Phase 3: zkvm 服务化（service feature 门控）=====
+#[cfg(feature = "service")]
+pub mod service;

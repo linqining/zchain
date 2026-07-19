@@ -12,6 +12,19 @@ path = "src/lib.rs"
 # 测试辅助功能：启用跨 crate 测试辅助函数（如 `generate_test_proof`）
 default = []
 test-helpers = []
+# Phase 3: zkvm 服务化（HTTP server + 客户端 SDK）
+# 注意：service 在生产环境需要 default_ccs_registry 等辅助函数，因此包含 test-helpers。
+service = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tower",
+    "dep:reqwest",
+    "test-helpers",
+    "tokio/signal",
+    "tokio/rt-multi-thread",
+    "tokio/macros",
+    "tokio/sync",
+]
 
 [dependencies]
 vm-common = { path = "../vm-common" }
@@ -34,14 +47,32 @@ blake2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 rayon = { workspace = true }
 goblin = { workspace = true }
 tracing = { workspace = true }
+# E2E Phase 1: BLS12-381 syscall 支持texas_poker 合约的 G1/Scalar/Pairing 操作
+blstrs = { workspace = true }
+pairing = { workspace = true }
+# Phase 3: zkvm 服务化（optional，启用 service feature 后激活）
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
 hex = { workspace = true }
+# 自引用以启用 `test-helpers` feature 供 integration tests (tests/*.rs) 使用。
+# integration tests 是独立 crate，`#[cfg(test)]` 不生效，须通过 feature 显式启用。
+poker_zkvm = { path = ".", features = ["test-helpers"] }
+
+# ===== Phase 3.6: service_e2e 集成测试（仅 service feature 启用时编译）=====
+[[test]]
+name = "service_e2e"
+path = "tests/service_e2e.rs"
+required-features = ["service"]
 
 # ===== Phase 12 性能基准（占位，Phase 12 填充）=====
 
@@ -49,4 +80,13 @@ hex = { workspace = true }
 name = "phase12_benchmarks"
 harness = false
 path = "benches/phase12_benchmarks.rs"
+required-features = ["test-helpers"]
+
+# ===== Phase 5.4: 并行证明配置性能基准 =====
+# 测量不同 rayon_threads (1/2/4/8) + parallel_ccs_compile (true/false) 下的
+# 实际最低证明延迟。详见 benches/prove_bench.rs 文档注释。
+[[bench]]
+name = "prove_bench"
+harness = false
+path = "benches/prove_bench.rs"
 required-features = ["test-helpers"]

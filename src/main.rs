@@ -51,6 +51,7 @@ use tracing_subscriber::EnvFilter;
 mod poker_demo;
 mod poker_rpc_demo;
 mod poker_zkvm_demo;
+mod zkvm_server;
 
 /// 程序版本。
 const VERSION: &str = "0.1.0";
@@ -117,6 +118,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "zkvm-server" => {
+            if let Err(e) = zkvm_server::run(rest) {
+                error!("zkvm-server 失败：{e}");
+                std::process::exit(1);
+            }
+        }
         "version" | "--version" | "-V" => {
             println!("zchain {VERSION}");
         }
@@ -145,6 +152,7 @@ fn print_usage() {
     eprintln!("  poker-demo  运行 Texas Poker 完整牌局演示（in-process，绕过 RPC）");
     eprintln!("  poker-rpc-demo  通过 RPC 调用运行中的节点完成 Texas Poker 牌局（create→join→start→reset）");
     eprintln!("  poker-zkvm-demo  在 zkvm 中完成完整一手牌并记录性能日志（sigma+RV32I）");
+    eprintln!("  zkvm-server  启动 zkvm HTTP 证明服务（prove/verify/health/stats 端点）");
     eprintln!("  version   打印版本号");
     eprintln!("  help      打印此帮助");
     eprintln!();

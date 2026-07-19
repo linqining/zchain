@@ -21,15 +21,17 @@
 //!   Phase 5 增强版将在 CCS 构造时自动 padding 到 2 的幂。
 
 pub mod groth16_compress;
+pub mod partial;
 pub mod spartan;
 
 use ark_serialize::CanonicalSerialize;
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use rayon::ThreadPoolBuilder;
 
 use crate::ccs::Fr as ZkvmFr;
 use crate::compiler::elf_validator::validate_elf;
-use crate::constraints::compile_trace_to_ccs;
+use crate::constraints::compile_trace_to_ccs_with_config;
 use crate::error::ZkvmError;
 use crate::field::ZkvmField;
 use crate::fold::fold_loop::{HypernovaProof, fold_loop};
@@ -74,6 +76,21 @@ pub struct ProverConfig {
     pub initial_commitment: ZkvmFr,
     /// host 终止承诺（spec L222）。
     pub final_commitment: ZkvmFr,
+    /// Phase 5.2 — 是否启用并行 CCS 编译（默认 `true`）。
+    ///
+    /// - `true`：`compile_trace_to_ccs_with_config` 使用 rayon `into_par_iter` 并行编译各 batch
+    /// - `false`：使用顺序 `for` 循环（调试 / 单线程环境 / 基准对照）
+    ///
+    /// 并行收益主要在 `num_batches >= 2` 时显现；`num_batches == 1` 时两条路径几乎等价。
+    pub parallel_ccs_compile: bool,
+    /// Phase 5.2 — rayon 线程池线程数（默认 `None` = 使用全局 `RAYON_NUM_THREADS`）。
+    ///
+    /// - `None`：使用 rayon 全局线程池（受 `RAYON_NUM_THREADS` 环境变量控制，默认 = CPU 核数）
+    /// - `Some(n)`：在 `prove()` 调用范围内构造临时线程池（`ThreadPoolBuilder::num_threads(n)`），
+    ///   通过 `pool.install()` 限定作用域，不影响全局状态
+    ///
+    /// 用于性能基准测试（如 `benches/prove_bench.rs` 扫描 1/2/4/8 线程）。
+    pub rayon_threads: Option<usize>,
 }
 
 impl Default for ProverConfig {
@@ -90,6 +107,9 @@ impl Default for ProverConfig {
             randomness_seed: ZkvmFr::zero(),
             initial_commitment: ZkvmFr::zero(),
             final_commitment: ZkvmFr::zero(),
+            // Phase 5.2 — 默认启用并行 CCS 编译；线程数交由全局 RAYON_NUM_THREADS 决定。
+            parallel_ccs_compile: true,
+            rayon_threads: None,
         }
     }
 }
@@ -101,6 +121,7 @@ impl ProverConfig {
     /// - `batch_size == 0`
     /// - `max_n_vars > MAX_N_VARS`（24）
     /// - `proof_size_limit == 0`
+    /// - `rayon_threads == Some(0)`（须 ≥ 1）
     pub fn validate(&self) -> Result<(), ZkvmError> {
         if self.batch_size == 0 {
             return Err(ZkvmError::Other(
@@ -116,6 +137,11 @@ impl ProverConfig {
         if self.proof_size_limit == 0 {
             return Err(ZkvmError::Other(
                 "ProverConfig: proof_size_limit 须 > 0".to_string(),
+            ));
+        }
+        if self.rayon_threads == Some(0) {
+            return Err(ZkvmError::Other(
+                "ProverConfig: rayon_threads 须 >= 1（或 None 使用全局池）".to_string(),
             ));
         }
         Ok(())
@@ -944,6 +970,32 @@ pub fn prove(
 ) -> Result<(Vec<u8>, ZkPublicIo), ZkvmError> {
     config.validate()?;
 
+    // Phase 5.2 — 若 config.rayon_threads = Some(n)，构造临时 rayon 线程池并通过
+    // `pool.install()` 限定作用域，使 prove() 内所有 rayon 并行计算（含 CCS 编译、
+    // sumcheck、IPA PCS）均使用该线程池，而不污染全局 rayon 状态。
+    //
+    // 若 rayon_threads = None，则直接执行 prove_inner（使用全局 RAYON_NUM_THREADS）。
+    if let Some(n) = config.rayon_threads {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .map_err(|e| ZkvmError::Other(format!("ProverConfig.rayon_threads({n}): {e}")))?;
+        pool.install(|| prove_inner(elf_bytes, input, config))
+    } else {
+        prove_inner(elf_bytes, input, config)
+    }
+}
+
+/// prove() 内部实现 — 由 [`prove`] 根据线程池配置分派进入。
+///
+/// 与历史 `prove()` 函数体等价，仅以下两点变化：
+/// 1. CCS 编译改用 `compile_trace_to_ccs_with_config(trace, batch_size, parallel_ccs_compile)`
+/// 2. 由调用方（`prove()`）决定是否在自定义 rayon 线程池中执行
+fn prove_inner(
+    elf_bytes: &[u8],
+    input: &[u8],
+    config: &ProverConfig,
+) -> Result<(Vec<u8>, ZkPublicIo), ZkvmError> {
     // 1. ELF 校验
     let _metadata = validate_elf(elf_bytes)?;
 
@@ -977,8 +1029,9 @@ pub fn prove(
     let mut trace = exec_result.trace;
     pad_trace(&mut trace, config.batch_size)?;
 
-    // 4. 编译 CCS 实例
-    let ccs_instances = compile_trace_to_ccs(&trace, config.batch_size)?;
+    // 4. 编译 CCS 实例（Phase 5.2 — 根据 config.parallel_ccs_compile 选择并行/顺序路径）
+    let ccs_instances =
+        compile_trace_to_ccs_with_config(&trace, config.batch_size, config.parallel_ccs_compile)?;
 
     if ccs_instances.is_empty() {
         return Err(ZkvmError::Other(
@@ -1266,7 +1319,8 @@ pub fn generate_ccs_for_config(config: ProverConfig) -> crate::ccs::Ccs {
     let mut trace = exec_result.trace;
     pad_trace(&mut trace, config.batch_size).expect("pad_trace 应成功");
 
-    let ccs_instances = compile_trace_to_ccs(&trace, config.batch_size).expect("compile 应成功");
+    let ccs_instances = compile_trace_to_ccs_with_config(&trace, config.batch_size, config.parallel_ccs_compile)
+        .expect("compile 应成功");
     ccs_instances[0].ccs.clone()
 }
 
@@ -1424,6 +1478,185 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ZkvmError::Other(ref m) if m.contains("proof_size_limit")));
+    }
+
+    // ===== Phase 5.2 — 并行配置测试 =====
+
+    #[test]
+    fn test_prover_config_parallel_defaults() {
+        let config = ProverConfig::default();
+        assert!(
+            config.parallel_ccs_compile,
+            "parallel_ccs_compile 默认应为 true"
+        );
+        assert!(
+            config.rayon_threads.is_none(),
+            "rayon_threads 默认应为 None（使用全局池）"
+        );
+    }
+
+    #[test]
+    fn test_prover_config_rayon_threads_zero_rejected() {
+        let config = ProverConfig {
+            rayon_threads: Some(0),
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(err, ZkvmError::Other(ref m) if m.contains("rayon_threads")),
+            "expected rayon_threads validation error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_prover_config_rayon_threads_one_ok() {
+        let config = ProverConfig {
+            rayon_threads: Some(1),
+            ..Default::default()
+        };
+        config.validate().expect("rayon_threads = Some(1) 应通过校验");
+    }
+
+    /// 验证 `compile_trace_to_ccs_with_config(parallel=true)` 与 `parallel=false`
+    /// 产出完全相同的 CCS 实例（顺序不变性 + 确定性）。
+    ///
+    /// 这是 Phase 5.1/5.2 的关键不变性：并行路径不得改变 CCS 结构或顺序。
+    #[test]
+    fn test_parallel_and_sequential_ccs_compile_equivalent() {
+        use crate::constraints::compile_trace_to_ccs_with_config;
+        use crate::trace::{Step, Trace};
+        use crate::isa::Instruction;
+
+        // 构造 25 步 trace，batch_size=10 → 3 batches（覆盖多 batch 并行场景）
+        let mut trace = Trace::new();
+        for i in 0..25 {
+            trace.push_step(Step {
+                step_index: i,
+                pc: (i as u32).wrapping_mul(4),
+                instruction: Instruction::Addi { rd: 1, rs1: 1, imm: 1 },
+                registers: [0u32; 32],
+                mem_access: vec![],
+            });
+        }
+
+        let parallel_instances =
+            compile_trace_to_ccs_with_config(&trace, 10, true).expect("parallel 应成功");
+        let sequential_instances =
+            compile_trace_to_ccs_with_config(&trace, 10, false).expect("sequential 应成功");
+
+        assert_eq!(
+            parallel_instances.len(),
+            sequential_instances.len(),
+            "两条路径实例数应一致"
+        );
+        assert_eq!(parallel_instances.len(), 3, "25 步 / batch=10 → 3 batches");
+
+        // 逐实例比对 witness + public_inputs + ccs_commitment
+        for (i, (p, s)) in parallel_instances
+            .iter()
+            .zip(sequential_instances.iter())
+            .enumerate()
+        {
+            assert_eq!(p.witness, s.witness, "batch {i} witness 应一致");
+            assert_eq!(
+                p.public_inputs, s.public_inputs,
+                "batch {i} public_inputs 应一致"
+            );
+            assert_eq!(
+                p.ccs.ccs_commitment(),
+                s.ccs.ccs_commitment(),
+                "batch {i} ccs_commitment 应一致"
+            );
+        }
+    }
+
+    /// 验证 `prove()` 在 `parallel_ccs_compile = false`（顺序路径）下仍能产出合法 proof。
+    #[test]
+    fn test_prove_with_sequential_ccs_compile() {
+        let text = encode_text(&[
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 17, 0, 2),
+            0x00000073,
+        ]);
+        let elf = build_test_elf(0x1000, 0x1000, &text);
+
+        let config = ProverConfig {
+            batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+            parallel_ccs_compile: false, // 顺序路径
+            ..Default::default()
+        };
+
+        let (proof_bytes, _public_io) =
+            prove(&elf, &[], &config).expect("顺序路径 prove 应成功");
+        assert!(!proof_bytes.is_empty());
+    }
+
+    /// 验证 `prove()` 在 `rayon_threads = Some(1)`（单线程池）下仍能产出合法 proof。
+    #[test]
+    fn test_prove_with_rayon_threads_one() {
+        let text = encode_text(&[
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 17, 0, 2),
+            0x00000073,
+        ]);
+        let elf = build_test_elf(0x1000, 0x1000, &text);
+
+        let config = ProverConfig {
+            batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+            rayon_threads: Some(1), // 单线程池
+            ..Default::default()
+        };
+
+        let (proof_bytes, _public_io) =
+            prove(&elf, &[], &config).expect("rayon_threads=Some(1) prove 应成功");
+        assert!(!proof_bytes.is_empty());
+    }
+
+    /// 验证 `prove()` 在 `rayon_threads = Some(2)`（双线程池）下产出与默认配置相同的 proof。
+    ///
+    /// 关键不变性：线程池配置只影响并行调度，不改变证明内容的确定性。
+    #[test]
+    fn test_prove_with_rayon_threads_two_equiv_default() {
+        let text = encode_text(&[
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 1, 0, 0),
+            encode_i(0x13, 0, 17, 0, 2),
+            0x00000073,
+        ]);
+        let elf = build_test_elf(0x1000, 0x1000, &text);
+
+        // 默认配置（全局 rayon 池）
+        let config_default = ProverConfig {
+            batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+            ..Default::default()
+        };
+        let (proof_default, io_default) =
+            prove(&elf, &[], &config_default).expect("default prove 应成功");
+
+        // 双线程池配置
+        let config_two = ProverConfig {
+            batch_size: 3,
+            proof_size_limit: MAX_PROOF_TOTAL_SIZE,
+            rayon_threads: Some(2),
+            ..Default::default()
+        };
+        let (proof_two, io_two) =
+            prove(&elf, &[], &config_two).expect("rayon_threads=Some(2) prove 应成功");
+
+        // 线程池配置不应改变 proof 内容（Fiat-Shamir transcript 是确定性的）
+        assert_eq!(
+            proof_default, proof_two,
+            "rayon_threads 不应改变 proof 字节内容"
+        );
+        assert_eq!(io_default, io_two, "public_io 应一致");
     }
 
     // ===== ZkPublicIo 序列化测试 =====

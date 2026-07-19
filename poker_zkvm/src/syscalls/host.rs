@@ -54,7 +54,7 @@ pub fn is_whitelisted_slot(slot: u32) -> bool {
 // ===== 辅助函数 =====
 
 /// 从 VM 内存读取字节序列 `[addr, addr+len)`。
-fn read_vm_bytes(state: &VmState, addr: u32, len: u32) -> Result<Vec<u8>, ZkvmError> {
+pub(crate) fn read_vm_bytes(state: &VmState, addr: u32, len: u32) -> Result<Vec<u8>, ZkvmError> {
     let mut bytes = Vec::with_capacity(len as usize);
     for i in 0..len {
         let byte_addr = addr.wrapping_add(i);
@@ -64,7 +64,7 @@ fn read_vm_bytes(state: &VmState, addr: u32, len: u32) -> Result<Vec<u8>, ZkvmEr
 }
 
 /// 将字节序列写入 VM 内存 `[addr, addr+bytes.len())`。
-fn write_vm_bytes(state: &mut VmState, addr: u32, bytes: &[u8]) -> Result<(), ZkvmError> {
+pub(crate) fn write_vm_bytes(state: &mut VmState, addr: u32, bytes: &[u8]) -> Result<(), ZkvmError> {
     for (i, &byte) in bytes.iter().enumerate() {
         let byte_addr = addr.wrapping_add(i as u32);
         state.write_memory_byte(byte_addr, byte)?;
@@ -530,14 +530,24 @@ impl Syscall for ReadStateSyscall {
     }
 }
 
-// ===== 注册全部 10 个 syscall 的辅助函数 =====
+// ===== 注册全部 21 个 host syscall 的辅助函数 =====
 
-/// 创建注册全部 10 个 syscall 的 [`SyscallRegistry`](crate::syscalls::SyscallRegistry)。
+/// 创建注册全部 21 个 host syscall 的 [`SyscallRegistry`](crate::syscalls::SyscallRegistry)。
+///
+/// 包含：
+/// - 基础 syscall（0x01-0x0A，10 个）
+/// - BLS12-381 syscall（0x10-0x15，6 个，E2E Phase 1）
+/// - GameState mock syscall（0x20-0x21，2 个，E2E Phase 1）
+/// - Game-specific syscall（0x30-0x32，3 个，E2E Phase 1）
+///
+/// 注：0x0B-0x0F（keccak256/modexp/merkle_verify/ed25519/bn254_pairing）暂无 host 实现，
+/// 注册表对应 slot 为 None，dispatch 时返回 `Unregistered` 错误。
 ///
 /// 供 executor 和测试使用。
 #[must_use]
 pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
     let mut registry = crate::syscalls::SyscallRegistry::new_empty();
+    // 基础 syscall（0x01-0x0A，10 个 host 实现）
     registry.register(Box::new(ReadInputSyscall)).unwrap();
     registry.register(Box::new(CommitOutputSyscall)).unwrap();
     registry.register(Box::new(PoseidonSyscall)).unwrap();
@@ -548,6 +558,50 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
     registry.register(Box::new(PanicSyscall)).unwrap();
     registry.register(Box::new(GetRandomnessSyscall)).unwrap();
     registry.register(Box::new(ReadStateSyscall)).unwrap();
+    // E2E Phase 1 — BLS12-381 syscall（0x10-0x15，6 个）
+    registry
+        .register(Box::new(crate::syscalls::bls12381::Bls12381HashToCurveSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381ScalarMulSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::bls12381::Bls12381G1AddSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::bls12381::Bls12381G1MulSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::bls12381::Bls12381PairingSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381HashToScalarSyscall,
+        ))
+        .unwrap();
+    // E2E Phase 1 — GameState mock syscall（0x20-0x21，2 个）
+    registry
+        .register(Box::new(
+            crate::syscalls::game_state::GameStateReadSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::game_state::GameStateWriteSyscall,
+        ))
+        .unwrap();
+    // E2E Phase 1 — Game-specific syscall（0x30-0x32，3 个）
+    registry
+        .register(Box::new(crate::syscalls::game::CardEncodeSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::game::CardDecodeSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::game::ShuffleVerifySyscall))
+        .unwrap();
     registry
 }
 
@@ -1266,7 +1320,8 @@ mod tests {
     #[test]
     fn test_full_registry_all_registered() {
         let registry = full_registry();
-        assert_eq!(registry.len(), 10, "应注册 10 个 syscall");
+        // 21 个 = 10 基础 + 6 BLS12-381 + 2 GameState + 3 Game-specific
+        assert_eq!(registry.len(), 21, "应注册 21 个 syscall");
         assert!(!registry.is_empty());
     }
 }
