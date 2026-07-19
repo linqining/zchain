@@ -330,28 +330,352 @@ impl TraceBuilder {
 }
 
 // ===========================================================================
-// 主入口：trace_to_native（骨架，Phase 2 完善 step_to_m31_row）
+// 主入口：trace_to_native（Phase 2 实现）
 // ===========================================================================
 
 /// 从 emulator `Trace` 生成 `NativeTrace`。
 ///
-/// # 当前状态（Phase 1）
-/// 仅提供骨架，`step_to_m31_row` 留待 Phase 2（CPU AIR 实现）完善。
-/// Phase 1 重点：验证 `NativeTrace` 结构 + `u32_to_m31_limbs` + `TraceBuilder`。
-///
-/// # Phase 2 将实现
+/// # 算法
 /// 1. 遍历 `trace.steps()`
-/// 2. 对每个 step 调用 `step_to_m31_row` 生成 97 个 M31 值
+/// 2. 对每个 step 调用 [`step_to_m31_row`] 生成 97 个 M31 值
 /// 3. 用 `TraceBuilder::fill_row` 填充
-/// 4. `fill_padding_to_full` 填充到 2^log_size 行
+/// 4. `fill_padding_to_full` 填充到 2^log_size 行（padding 行 IsPadding=1）
 /// 5. `finalize` 返回 `NativeTrace`
-pub fn trace_to_native_trace_placeholder(_num_steps: usize) -> NativeTrace {
-    // Phase 1 占位：返回全零 trace
-    let log_size = TraceBuilder::compute_log_size(_num_steps.max(1));
+///
+/// # 参数
+/// - `trace` — emulator 执行 trace
+///
+/// # 返回
+/// 列主序 `NativeTrace`，列数 = `NUM_COLUMNS` (97)，行数 = 2^log_size
+#[must_use]
+pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
+    let num_steps = trace.len();
+    let log_size = TraceBuilder::compute_log_size(num_steps.max(1));
+    let mut builder = TraceBuilder::new(log_size);
+
+    // 初始寄存器快照（全零，x0 永远为 0）
+    let mut prev_registers = [0u32; 32];
+
+    for step in trace.iter() {
+        let row = step_to_m31_row(step, &prev_registers);
+        builder.fill_row(&row);
+        // 更新 prev_registers 为本步结束后的寄存器快照
+        prev_registers.copy_from_slice(&step.registers);
+    }
+
+    // 填充 padding 行（IsPadding=1，其余列=0）
+    builder.fill_padding_to_full();
+    builder.finalize()
+}
+
+/// 将单个 emulator `Step` 转换为 97 列 M31 row。
+///
+/// # 参数
+/// - `step` — emulator 执行的单步记录
+/// - `prev_registers` — 前一步的寄存器快照（用于计算 ValueB = prev[rs1] 等）
+///
+/// # 返回
+/// 长度 = `NUM_COLUMNS` (97) 的 `Vec<M31>`
+///
+/// # Phase 2 实现范围
+/// - 所有 RV32I 指令的 indicator one-hot 设置
+/// - PC / OpA / OpB / OpC / ValueA / ValueAEff / ValueB / ValueC 填充
+/// - ADD/ADDI/SUB 的 CarryFlag / BorrowFlag 计算
+/// - 其他指令的 Helper / Branch / Shift 字段暂填 0（Phase 2.6 完善）
+#[must_use]
+pub fn step_to_m31_row(
+    step: &crate::trace::Step,
+    prev_registers: &[u32; 32],
+) -> Vec<M31> {
+    use crate::isa::Instruction;
+    use crate::stwo_backend::column_layout_v2::*;
+    use super::column_layout_v2::WORD_LIMB_COUNT;
+
+    let mut row = vec![M31::from(0u32); NUM_COLUMNS];
+
+    // ----- PC 相关 -----
+    let pc_limbs = u32_to_m31_limbs(step.pc);
+    for i in 0..WORD_LIMB_COUNT {
+        row[COL_PC_BASE + i] = pc_limbs[i];
+    }
+
+    // 计算 next_pc（默认 = pc + 4）
+    let (next_pc, taken, pc_next_aux) = compute_next_pc(step);
+    let pc_next_limbs = u32_to_m31_limbs(next_pc);
+    for i in 0..WORD_LIMB_COUNT {
+        row[COL_PC_NEXT_BASE + i] = pc_next_limbs[i];
+    }
+    let pc_next_aux_limbs = u32_to_m31_limbs(pc_next_aux);
+    for i in 0..WORD_LIMB_COUNT {
+        row[COL_PC_NEXT_AUX_BASE + i] = pc_next_aux_limbs[i];
+    }
+    row[COL_TAKEN] = M31::from(u32::from(taken));
+
+    // ----- 提取操作数索引和立即数 -----
+    let (op_a, op_b, op_c, imm_c_flag, imm_value) = extract_operands(&step.instruction);
+    row[COL_OP_A] = M31::from(u32::from(op_a));
+    row[COL_OP_B] = M31::from(u32::from(op_b));
+    row[COL_OP_C] = M31::from(u32::from(op_c));
+    row[COL_IMM_C] = M31::from(u32::from(imm_c_flag));
+
+    // ----- 指令编码（暂填 0，Phase 2.6 完善 encode）-----
+    // TODO: 实现 Instruction::encode() 后填充 InstrVal
+    // 当前：保留全零（AIR 约束不依赖 InstrVal，依赖 indicator 列）
+
+    // ----- 操作数值 -----
+    let value_a = prev_registers[op_a as usize];          // 写前值
+    let value_b = prev_registers[op_b as usize];          // rs1 读值
+    let value_c = if imm_c_flag == 1 {
+        imm_value
+    } else {
+        prev_registers[op_c as usize]                    // rs2 读值
+    };
+    let value_a_eff = if op_a == 0 { 0 } else { step.registers[op_a as usize] };
+
+    fill_word(&mut row, COL_VALUE_A_BASE, value_a);
+    fill_word(&mut row, COL_VALUE_A_EFF_BASE, value_a_eff);
+    fill_word(&mut row, COL_VALUE_B_BASE, value_b);
+    fill_word(&mut row, COL_VALUE_C_BASE, value_c);
+
+    // ----- 符号位 -----
+    row[COL_SGN_A] = M31::from((value_a >> 31) & 1);
+    row[COL_SGN_B] = M31::from((value_b >> 31) & 1);
+    row[COL_SGN_C] = M31::from((value_c >> 31) & 1);
+
+    // ----- Indicator one-hot -----
+    let indicator_col = instruction_to_indicator_col(&step.instruction);
+    row[indicator_col] = M31::from(1u32);
+
+    // ----- ADD/ADDI/SUB 的 carry/borrow 计算 -----
+    match &step.instruction {
+        Instruction::Add { .. } | Instruction::Addi { .. } => {
+            let (carry0, carry1) = compute_add_carries(value_b, value_c, value_a_eff);
+            row[COL_CARRY_FLAG_BASE] = M31::from(carry0);
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(carry1);
+        }
+        Instruction::Sub { .. } => {
+            let (borrow0, borrow1) = compute_sub_borrows(value_b, value_c, value_a_eff);
+            row[COL_BORROW_FLAG_BASE] = M31::from(borrow0);
+            row[COL_BORROW_FLAG_BASE + 1] = M31::from(borrow1);
+        }
+        _ => {}
+    }
+
+    row
+}
+
+/// 填充一个 4×8-bit limb word 到指定列起点。
+fn fill_word(row: &mut [M31], base: usize, value: u32) {
+    let limbs = u32_to_m31_limbs(value);
+    for i in 0..WORD_LIMB_COUNT {
+        row[base + i] = limbs[i];
+    }
+}
+
+/// 计算下一条 PC 地址。
+///
+/// # 返回
+/// (next_pc, taken, pc_next_aux)
+/// - `next_pc` — 下一 PC（分支跳转时为目标地址）
+/// - `taken` — 分支是否跳转（0/1）
+/// - `pc_next_aux` — JALR 目标地址（其他指令为 0）
+fn compute_next_pc(step: &crate::trace::Step) -> (u32, u8, u32) {
+    use crate::isa::Instruction::*;
+    let pc = step.pc;
+    match &step.instruction {
+        // 无条件跳转
+        Jal { imm, .. } => (pc.wrapping_add(*imm), 1, 0),
+        Jalr { rs1, imm, .. } => {
+            let target = step.registers[*rs1 as usize].wrapping_add(*imm) & !1;
+            (target, 1, target)
+        }
+        // 条件分支：根据 step.registers 判断是否跳转
+        // 注意：step.registers 是 post-state，无法直接判断分支是否跳转
+        // 简化处理：用 prev_registers 比较（但 step 不含 prev_registers）
+        // Phase 2.6 完善：在 step_to_m31_row 中传入 prev_registers 后重写
+        Beq { rs1, rs2, imm, .. }
+        | Bne { rs1, rs2, imm, .. }
+        | Blt { rs1, rs2, imm, .. }
+        | Bge { rs1, rs2, imm, .. }
+        | Bltu { rs1, rs2, imm, .. }
+        | Bgeu { rs1, rs2, imm, .. } => {
+            // 简化：默认 not taken（pc+4），Phase 2.6 完善
+            let _ = (rs1, rs2);
+            (pc.wrapping_add(4), 0, 0)
+        }
+        // 其他指令：PC + 4
+        _ => (pc.wrapping_add(4), 0, 0),
+    }
+}
+
+/// 从 Instruction 提取操作数索引和立即数。
+///
+/// # 返回
+/// (op_a (rd), op_b (rs1), op_c (rs2 或 0), imm_c_flag, imm_value)
+fn extract_operands(insn: &crate::isa::Instruction) -> (u8, u8, u8, u8, u32) {
+    use crate::isa::Instruction::*;
+    match insn {
+        // R-type：rd, rs1, rs2
+        Add { rd, rs1, rs2 }
+        | Sub { rd, rs1, rs2 }
+        | Sll { rd, rs1, rs2 }
+        | Slt { rd, rs1, rs2 }
+        | Sltu { rd, rs1, rs2 }
+        | Xor { rd, rs1, rs2 }
+        | Srl { rd, rs1, rs2 }
+        | Sra { rd, rs1, rs2 }
+        | Or { rd, rs1, rs2 }
+        | And { rd, rs1, rs2 }
+        | Mul { rd, rs1, rs2 }
+        | Mulh { rd, rs1, rs2 }
+        | Mulhsu { rd, rs1, rs2 }
+        | Mulhu { rd, rs1, rs2 }
+        | Div { rd, rs1, rs2 }
+        | Divu { rd, rs1, rs2 }
+        | Rem { rd, rs1, rs2 }
+        | Remu { rd, rs1, rs2 } => (*rd, *rs1, *rs2, 0, 0),
+
+        // I-type：rd, rs1, imm
+        Addi { rd, rs1, imm }
+        | Slti { rd, rs1, imm }
+        | Sltiu { rd, rs1, imm }
+        | Xori { rd, rs1, imm }
+        | Ori { rd, rs1, imm }
+        | Andi { rd, rs1, imm } => (*rd, *rs1, 0, 1, *imm),
+
+        // I-type 移位：rd, rs1, shamt
+        Slli { rd, rs1, shamt }
+        | Srli { rd, rs1, shamt }
+        | Srai { rd, rs1, shamt } => (*rd, *rs1, *shamt, 1, u32::from(*shamt)),
+
+        // I-type Load：rd, rs1, imm
+        Lb { rd, rs1, imm }
+        | Lh { rd, rs1, imm }
+        | Lw { rd, rs1, imm }
+        | Lbu { rd, rs1, imm }
+        | Lhu { rd, rs1, imm } => (*rd, *rs1, 0, 1, *imm),
+
+        // S-type：rs1, rs2, imm（无 rd）
+        Sb { rs1, rs2, imm }
+        | Sh { rs1, rs2, imm }
+        | Sw { rs1, rs2, imm } => (0, *rs1, *rs2, 1, *imm),
+
+        // B-type：rs1, rs2, imm（无 rd）
+        Beq { rs1, rs2, imm }
+        | Bne { rs1, rs2, imm }
+        | Blt { rs1, rs2, imm }
+        | Bge { rs1, rs2, imm }
+        | Bltu { rs1, rs2, imm }
+        | Bgeu { rs1, rs2, imm } => (0, *rs1, *rs2, 1, *imm),
+
+        // U-type：rd, imm
+        Lui { rd, imm } | Auipc { rd, imm } => (*rd, 0, 0, 1, *imm),
+
+        // J-type：rd, imm
+        Jal { rd, imm } => (*rd, 0, 0, 1, *imm),
+
+        // J-type I：rd, rs1, imm
+        Jalr { rd, rs1, imm } => (*rd, *rs1, 0, 1, *imm),
+
+        // 系统指令：无操作数
+        Ecall | Ebreak | Fence { .. } => (0, 0, 0, 0, 0),
+    }
+}
+
+/// 计算 ADD/ADDI 的 16-bit 边界进位。
+///
+/// 4×8-bit limb 加法：limb0 + limb1 = byte-level，进位到 16-bit 边界产生 carry0；
+/// limb2 + limb3 = byte-level，进位到 32-bit 边界产生 carry1。
+///
+/// # 返回
+/// (carry0, carry1) — 每个 ∈ {0, 1}
+fn compute_add_carries(rs1: u32, rs2: u32, _rd: u32) -> (u32, u32) {
+    let rs1_bytes = rs1.to_le_bytes();
+    let rs2_bytes = rs2.to_le_bytes();
+    // 低 16 位加法：byte0 + byte1 + carry
+    let low_sum = u32::from(rs1_bytes[0]) + u32::from(rs2_bytes[0])
+        + u32::from(rs1_bytes[1]) * 256 + u32::from(rs2_bytes[1]) * 256;
+    let carry0 = low_sum >> 16;
+    // 高 16 位加法：byte2 + byte3 + carry0
+    let high_sum = u32::from(rs1_bytes[2]) + u32::from(rs2_bytes[2])
+        + u32::from(rs1_bytes[3]) * 256 + u32::from(rs2_bytes[3]) * 256
+        + carry0;
+    let carry1 = high_sum >> 16;
+    (carry0 & 1, carry1 & 1)
+}
+
+/// 计算 SUB 的 16-bit 边界借位。
+///
+/// 4×8-bit limb 减法：limb0 - limb1，借位方向与 ADD 相反。
+///
+/// # 返回
+/// (borrow0, borrow1) — 每个 ∈ {0, 1}
+fn compute_sub_borrows(rs1: u32, rs2: u32, _rd: u32) -> (u32, u32) {
+    let rs1_bytes = rs1.to_le_bytes();
+    let rs2_bytes = rs2.to_le_bytes();
+    // 低 16 位减法
+    let low_diff = i64::from(rs1_bytes[0]) + i64::from(rs1_bytes[1]) * 256
+        - i64::from(rs2_bytes[0]) - i64::from(rs2_bytes[1]) * 256;
+    let borrow0 = if low_diff < 0 { 1 } else { 0 };
+    // 高 16 位减法
+    let high_diff = i64::from(rs1_bytes[2]) + i64::from(rs1_bytes[3]) * 256
+        - i64::from(rs2_bytes[2]) - i64::from(rs2_bytes[3]) * 256
+        - i64::from(borrow0);
+    let borrow1 = if high_diff < 0 { 1 } else { 0 };
+    (borrow0, borrow1)
+}
+
+/// 将 Instruction 映射到 indicator 列索引。
+fn instruction_to_indicator_col(insn: &crate::isa::Instruction) -> usize {
+    use crate::isa::Instruction::*;
+    use crate::stwo_backend::column_layout_v2::*;
+    match insn {
+        Lui { .. } => IS_LUI,
+        Auipc { .. } => IS_AUIPC,
+        Jal { .. } => IS_JAL,
+        Jalr { .. } => IS_JALR,
+        Beq { .. } => IS_BEQ,
+        Bne { .. } => IS_BNE,
+        Blt { .. } => IS_BLT,
+        Bge { .. } => IS_BGE,
+        Bltu { .. } => IS_BLTU,
+        Bgeu { .. } => IS_BGEU,
+        Lb { .. } | Lh { .. } | Lw { .. } | Lbu { .. } | Lhu { .. } => IS_LOAD,
+        Sb { .. } | Sh { .. } | Sw { .. } => IS_STORE,
+        Addi { .. } => IS_ADDI,
+        Slti { .. } => IS_SLTI,
+        Sltiu { .. } => IS_SLTIU,
+        Xori { .. } => IS_XORI,
+        Ori { .. } => IS_ORI,
+        Andi { .. } => IS_ANDI,
+        Slli { .. } => IS_SLLI,
+        Srli { .. } => IS_SRLI,
+        Srai { .. } => IS_SRAI,
+        Add { .. } => IS_ADD,
+        Sub { .. } => IS_SUB,
+        Sll { .. } => IS_SLL,
+        Slt { .. } => IS_SLT,
+        Sltu { .. } => IS_SLTU,
+        Xor { .. } => IS_XOR,
+        Srl { .. } => IS_SRL,
+        Sra { .. } => IS_SRA,
+        Or { .. } => IS_OR,
+        And { .. } => IS_AND,
+        Fence { .. } => IS_FENCE,
+        Ecall => IS_ECALL,
+        Ebreak => IS_EBREAK,
+        // M 扩展暂归类到对应 R-type indicator（Phase 2.6 单独处理）
+        Mul { .. } | Mulh { .. } | Mulhsu { .. } | Mulhu { .. } => IS_ADD,  // 占位
+        Div { .. } | Divu { .. } | Rem { .. } | Remu { .. } => IS_SUB,      // 占位
+    }
+}
+
+/// Phase 1 占位函数（保留以兼容现有测试，Phase 2 已由 `trace_to_native` 替代）。
+#[must_use]
+pub fn trace_to_native_trace_placeholder(num_steps: usize) -> NativeTrace {
+    let log_size = TraceBuilder::compute_log_size(num_steps.max(1));
     let builder = TraceBuilder::new(log_size);
-    // 注意：不调用 finalize（因为未 fill_padding），仅返回 trace 副本
     let mut trace = builder.trace.clone();
-    // 填充 padding 标记（所有行 IsPadding=1，因为无真实 step）
     use super::column_layout_v2::IS_PADDING;
     for row in 0..trace.num_rows() {
         trace.fill_scalar(row, IS_PADDING, M31::from(1u32));
