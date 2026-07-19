@@ -54,6 +54,20 @@ pub mod precompiles;
 pub mod prover;
 pub mod verifier;
 
+// ===== Stwo 迁移后端（Phase 1.5 POC 已完成）=====
+// 详见 .trae/documents/hypernova_to_stwo_migration_plan.md
+// 全量替换 Hypernova + CCS + IPA → Stwo Circle STARK + AIR + FRI on M31
+// Phase 5 完成后将替代 Layer 1/3/3.5/4/6 的 Hypernova 相关模块
+//
+// ## Phase 1.5 POC 状态（决策门报告见 stwo_poc_decision_report.md）
+//
+// - ✅ Stwo prove 端到端流程跑通（CpuAirEval 实现 FrameworkEval，47 列 mask 全注册）
+// - ✅ 序列化/反序列化往返一致（bincode + StwoProof 封装）
+// - ✅ proof 大小合理（1024 步 8.3KB / 1M 步 21.2KB，远小于 64KB 限制）
+// - ⚠️ 性能决策门未达标：1M 步 62014ms vs 目标 ≤86.7ms（仅 0.1x vs Hypernova 8670ms 基准）
+//   后续优化方向：减少 trace 列数（47→精简）、启用 parallel feature、GPU backend
+pub mod stwo_backend;
+
 // ===== 跨 VM 共享 — CryptoProvider 实现（Phase 3）=====
 pub mod crypto_arkworks;
 

@@ -803,6 +803,47 @@ pub fn make_full_hand_input(p1: [u8; 5], p2: [u8; 5]) -> Vec<u8> {
 }
 
 // ===========================================================================
+// Stwo POC 测试辅助 — trace 构造（Phase 1.5）
+// ===========================================================================
+
+/// 构造最小可执行 Step（Lui x0, 0 + 全零寄存器 + 无内存访问）。
+///
+/// `step_index` 由调用方指定，用于填充 idx 列。
+/// 用于 Stwo POC 测试，绕过 ELF 构造与 `execute_elf`。
+///
+/// **Phase 2.3.1**：`pc = step_index * 4`（模拟 RV32I 4 字节指令对齐的顺序执行），
+/// 使 Group B 约束（`pc[next] == next_pc[cur]`）在 step order 下成立：
+/// - `step[i].pc = i * 4`
+/// - `step[i].next_pc = compute_next_pc(i*4, Lui, 0, 0) = i*4 + 4 = (i+1)*4 = step[i+1].pc` ✓
+///
+/// 之前 `pc=0` 会导致所有步骤 pc 相同但 next_pc=4，违反 Group B。
+pub fn make_minimal_step(step_index: u64) -> crate::trace::Step {
+    use crate::isa::Instruction;
+    use crate::trace::{MemAccess, StepLog};
+    crate::trace::Step::from_log(
+        step_index,
+        StepLog {
+            pc: (step_index as u32).wrapping_mul(4),
+            instruction: Instruction::Lui { rd: 0, imm: 0 },
+            registers: [0u32; 32],
+            mem_access: Vec::<MemAccess>::new(),
+        },
+    )
+}
+
+/// 构造指定步数的 sequential trace（idx 列严格连续递增 `0..num_steps`）。
+///
+/// 用于 Stwo POC 测试。`num_steps` 应为 2 的幂且 ≥ 1024
+///（SimdBackend `MIN_LOG_SIZE=10` → 2^10=1024 行）。
+pub fn make_sequential_trace(num_steps: usize) -> crate::trace::Trace {
+    let mut trace = crate::trace::Trace::new();
+    for i in 0..num_steps {
+        trace.push_step(make_minimal_step(i as u64));
+    }
+    trace
+}
+
+// ===========================================================================
 // 测试
 // ===========================================================================
 

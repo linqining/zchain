@@ -2,7 +2,7 @@
 name = "poker_zkvm"
 version = "0.1.0"
 edition = "2024"
-description = "Hypernova + CCS zero-knowledge VM for zchain OffChain mode"
+description = "ZK VM for zchain OffChain mode — migrating from Hypernova+CCS+IPA (BN254) to Stwo Circle STARK+AIR+FRI (M31)"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -54,6 +54,15 @@ tracing = { workspace = true }
 # E2E Phase 1: BLS12-381 syscall 支持texas_poker 合约的 G1/Scalar/Pairing 操作
 blstrs = { workspace = true }
 pairing = { workspace = true }
+# ===== Stwo 迁移（Hypernova → Stwo）— Phase 1.1 骨架 =====
+# 详见 .trae/documents/hypernova_to_stwo_migration_plan.md
+# 全量替换 Hypernova + CCS + IPA → Stwo Circle STARK + AIR + FRI on M31
+stwo = { workspace = true }
+stwo-air-utils = { workspace = true }
+stwo-air-utils-derive = { workspace = true }
+stwo-constraint-framework = { workspace = true }
+# Phase 1.3: StwoProver::prove 输出 StarkProof<H> 序列化用
+bincode = { workspace = true }
 # Phase 3: zkvm 服务化（optional，启用 service feature 后激活）
 axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
@@ -73,6 +82,12 @@ poker_zkvm = { path = ".", features = ["test-helpers"] }
 name = "service_e2e"
 path = "tests/service_e2e.rs"
 required-features = ["service"]
+
+# ===== Stwo POC 端到端测试（Phase 1.5 决策门）=====
+[[test]]
+name = "stwo_poc_e2e"
+path = "tests/stwo_poc_e2e.rs"
+required-features = ["test-helpers"]
 
 # ===== Phase 12 性能基准（占位，Phase 12 填充）=====
 

@@ -115,7 +115,7 @@ const ARITH_CATEGORIES: [usize; 9] = [0, 1, 12, 13, 14, 21, 22, 24, 25];
 const NUM_ARITH: usize = 9;
 
 /// 返回指令的语义组 ID（0..33）。
-fn instruction_category(insn: &Instruction) -> usize {
+pub(crate) fn instruction_category(insn: &Instruction) -> usize {
     match insn {
         Instruction::Lui { .. } => 0,
         Instruction::Auipc { .. } => 1,
@@ -167,7 +167,7 @@ fn instruction_category(insn: &Instruction) -> usize {
 }
 
 /// 根据指令类型返回 one-hot selector 数组。
-fn assign_selectors(insn: &Instruction) -> [Fr; NUM_CATEGORIES] {
+pub(crate) fn assign_selectors(insn: &Instruction) -> [Fr; NUM_CATEGORIES] {
     let mut sels = [Fr::zero(); NUM_CATEGORIES];
     sels[instruction_category(insn)] = Fr::one();
     sels
@@ -176,7 +176,7 @@ fn assign_selectors(insn: &Instruction) -> [Fr; NUM_CATEGORIES] {
 /// 从指令中提取寄存器索引和立即数。
 ///
 /// 返回 `(rs1_idx, rs2_idx, rd_idx, imm, shamt)`，不适用的字段为 `None` / `0`。
-fn extract_insn_fields(insn: &Instruction) -> (Option<u8>, Option<u8>, Option<u8>, u32, u8) {
+pub(crate) fn extract_insn_fields(insn: &Instruction) -> (Option<u8>, Option<u8>, Option<u8>, u32, u8) {
     match insn {
         Instruction::Lui { rd, imm } => (None, None, Some(*rd), *imm, 0),
         Instruction::Auipc { rd, imm } => (None, None, Some(*rd), *imm, 0),
@@ -228,7 +228,7 @@ fn extract_insn_fields(insn: &Instruction) -> (Option<u8>, Option<u8>, Option<u8
 }
 
 /// 计算分支 taken flag。
-fn compute_taken(insn: &Instruction, rs1_val: u32, rs2_val: u32) -> bool {
+pub(crate) fn compute_taken(insn: &Instruction, rs1_val: u32, rs2_val: u32) -> bool {
     match insn {
         Instruction::Beq { .. } => rs1_val == rs2_val,
         Instruction::Bne { .. } => rs1_val != rs2_val,
@@ -241,7 +241,7 @@ fn compute_taken(insn: &Instruction, rs1_val: u32, rs2_val: u32) -> bool {
 }
 
 /// 从指令语义计算后继 PC。
-fn compute_next_pc(pc: u32, insn: &Instruction, rs1_val: u32, rs2_val: u32) -> u32 {
+pub(crate) fn compute_next_pc(pc: u32, insn: &Instruction, rs1_val: u32, rs2_val: u32) -> u32 {
     match insn {
         Instruction::Jal { imm, .. } => pc.wrapping_add(*imm),
         Instruction::Jalr { imm, .. } => (rs1_val.wrapping_add(*imm)) & !1,
@@ -268,7 +268,7 @@ fn compute_next_pc(pc: u32, insn: &Instruction, rs1_val: u32, rs2_val: u32) -> u
 /// - `prev_step` — 前一步（用于提取 rs1/rs2 值），首步为 `None`
 /// - `next_step_pc` — 下一步的 PC（用于 next_pc），末步为 `None` 时从指令计算
 #[allow(clippy::collapsible_match)]
-fn compile_step_witness(
+pub(crate) fn compile_step_witness(
     step: &Step,
     prev_step: Option<&Step>,
     next_step_pc: Option<u32>,
