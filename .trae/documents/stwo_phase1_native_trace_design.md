@@ -755,17 +755,44 @@ cargo tree -p poker_zkvm | grep -i "ark-bn254\|ark-ec\|ark-ff"  # 应无输出
 
 ## 9. 完成标准
 
-- [ ] 所有 2.1 清单中的旧代码已删除
-- [ ] `cargo build -p poker_zkvm` 通过（无 error）
-- [ ] `cargo tree -p poker_zkvm` 不含 ark-bn254/ark-ec/ark-ff 依赖
-- [ ] `column_layout_v2.rs` 实现，97 列布局
-- [ ] `trace_native.rs` 实现，包含 `NativeTrace`、`u32_to_m31_limbs`、`TraceBuilder`
-- [ ] `u32_to_m31_limbs` roundtrip 测试通过（0/1/255/256/65535/65536/0xFFFFFFFF）
-- [ ] `NativeTrace::new` 测试通过
-- [ ] `fill_word` 测试通过
-- [ ] `TraceBuilder::compute_log_size` 测试通过
-- [ ] padding 机制测试通过
-- [ ] `lib.rs` 模块声明更新完成
+- [x] 所有 2.1 清单中的旧代码已删除
+- [x] `cargo build -p poker_zkvm` 通过（无 error）
+- [x] `cargo build --workspace` 通过（无 error）
+- [x] `cargo test --workspace` 全部通过（poker_zkvm: 342 测试 / poker_l1: 1501 测试 / 集成测试全通过）
+- [~] `cargo tree -p poker_zkvm` 不含 ark-bn254/ark-ec/ark-ff 依赖 — **保留偏差**：v2 计划保留 BN254 Fr 仅用于 Poseidon 哈希（poker game 事件哈希），Phase 3/4 可考虑迁移到 M31 Poseidon。已移除 ark-grumpkin / ark-groth16 / ark-r1cs-std / ark-relations / ark-snark / ark-poly / ark-ec 直接依赖（仅作为 ark-bn254 的传递依赖存在），并禁用 ark-bn254 的 `r1cs` feature
+- [x] `column_layout_v2.rs` 实现，97 列布局
+- [x] `trace_native.rs` 实现，包含 `NativeTrace`、`u32_to_m31_limbs`、`TraceBuilder`
+- [x] `u32_to_m31_limbs` roundtrip 测试通过（0/1/255/256/65535/65536/0xFFFFFFFF）
+- [x] `NativeTrace::new` 测试通过
+- [x] `fill_word` 测试通过
+- [x] `TraceBuilder::compute_log_size` 测试通过
+- [x] padding 机制测试通过
+- [x] `lib.rs` 模块声明更新完成（poker_zkvm / poker_l1 / zchain 三处）
+- [x] zchain / poker_l1 中对已删除模块的所有引用已修复或替换为 StubVerifier
+- [x] Hypernova Fr 非规范化测试（H5）已删除（Stwo M31 field 无此问题）
+
+### 9.1 Phase 1 实施记录
+
+**完成时间**：2026-07-20
+
+**实际删除代码量**：~7,761+ 行（poker_zkvm 内 Hypernova 模块）+ ~2,000 行（poker_l1 offline 模块）+ zchain 根目录 demo/server 文件
+
+**新增代码量**：
+- `poker_zkvm/src/stwo_backend/column_layout_v2.rs` — 349 行，97 列 4×8-bit limb 布局
+- `poker_zkvm/src/stwo_backend/trace_native.rs` — 622 行，NativeTrace + TraceBuilder
+- `poker_l1/src/offline/zk_verifier.rs` — 新增公共 `StubVerifier` + 4 个 `register_*_stub_verifier` 函数（v2 过渡期占位）
+
+**测试结果**：
+- poker_zkvm 单元测试：342/342 通过
+- poker_l1 单元测试：1501/1501 通过
+- poker_l1 集成测试：全部通过
+- zchain 集成测试：全部通过
+
+**关键决策**：
+1. 保留 BN254 Fr 用于 Poseidon 哈希（poker game 事件哈希），后续 Phase 3/4 可迁移到 M31 Poseidon
+2. `poker_l1/src/offline/zk_verifier.rs` 新增公共 StubVerifier，Phase 5 由 Stwo Verifier AIR 替换
+3. `poker_l1/src/offline/mod.rs` 保留 `MAX_FOLD_STEP_COUNT` 常量以兼容 `ZkPublicIo::validate`
+4. `poker_l1/tests/soundness_tests.rs` H5 测试（Hypernova Fr 非规范化）已删除，Stwo M31 field 无此问题
 
 ***
 

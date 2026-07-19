@@ -336,6 +336,80 @@ pub struct ZkVerifierRegistry {
     statuses: BTreeMap<crate::ChainId, VerifierStatus>,
 }
 
+/// Stub verifier — v2 过渡期占位实现。
+///
+/// v2 Phase 1 删除了 Hypernova/Groth16/IPA verifier 模块。
+/// 在 Phase 5 实现 Stwo Verifier AIR 之前，使用此 stub verifier 占位：
+/// - `verify`：仅校验 proof 非空，返回 `true`
+/// - `validate_proof_format`：仅校验 proof 非空
+///
+/// 生产环境须替换为真实 Stwo 递归证明 Verifier AIR。
+#[derive(Debug)]
+pub struct StubVerifier {
+    /// 此 verifier 处理的 scheme_id。
+    scheme_id: SchemeId,
+}
+
+impl StubVerifier {
+    /// 创建指定 scheme_id 的 stub verifier。
+    #[must_use]
+    pub const fn new(scheme_id: SchemeId) -> Self {
+        Self { scheme_id }
+    }
+}
+
+impl ZkVerifier for StubVerifier {
+    fn scheme_id(&self) -> SchemeId {
+        self.scheme_id
+    }
+
+    fn verify(
+        &self,
+        proof: &[u8],
+        _public_io: &ZkPublicIo,
+        _status: VerifierStatus,
+    ) -> Result<bool, PokerL1Error> {
+        Ok(!proof.is_empty())
+    }
+
+    fn validate_proof_format(&self, proof: &[u8]) -> Result<(), PokerL1Error> {
+        if proof.is_empty() {
+            return Err(PokerL1Error::InvalidZkProofFormat(
+                "proof 不能为空".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 注册 Hypernova scheme（`SCHEME_HYPERNOVA = 1`）的 stub verifier。
+///
+/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+pub fn register_hypernova_stub_verifier(registry: &mut ZkVerifierRegistry) {
+    registry.register(Arc::new(StubVerifier::new(SCHEME_HYPERNOVA)));
+}
+
+/// 注册 ZkShuffle scheme（`SCHEME_ZKSHUFFLE = 4`）的 stub verifier。
+///
+/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+pub fn register_zkshuffle_stub_verifier(registry: &mut ZkVerifierRegistry) {
+    registry.register(Arc::new(StubVerifier::new(SCHEME_ZKSHUFFLE)));
+}
+
+/// 注册 Groth16 scheme（`SCHEME_GROTH16 = 2`）的 stub verifier。
+///
+/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+pub fn register_groth16_stub_verifier(registry: &mut ZkVerifierRegistry) {
+    registry.register(Arc::new(StubVerifier::new(SCHEME_GROTH16)));
+}
+
+/// 注册 IPA scheme（`SCHEME_IPA = 3`）的 stub verifier。
+///
+/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+pub fn register_ipa_stub_verifier(registry: &mut ZkVerifierRegistry) {
+    registry.register(Arc::new(StubVerifier::new(SCHEME_IPA)));
+}
+
 impl std::fmt::Debug for ZkVerifierRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZkVerifierRegistry")

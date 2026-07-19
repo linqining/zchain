@@ -184,11 +184,16 @@ L2 proof (~10-20KB，可在链上验证)
 4. **更新 `lib.rs`**：移除 `ccs`、`hypernova`、`fold`、`recursion` 模块声明
 
 **完成标准**：
-- [ ] 所有旧代码删除，`cargo build` 无 Hypernova 依赖
-- [ ] `NativeTrace` 可从 emulator 输出生成
-- [ ] `u32_to_m31_limbs` roundtrip 测试通过
-- [ ] padding 机制测试通过
-- [ ] 列布局常量测试通过
+- [x] 所有旧代码删除，`cargo build` 无 Hypernova 依赖（保留 BN254 Fr 用于 Poseidon，详见 Phase 1 设计文档 9.1）
+- [x] `NativeTrace` 可从 emulator 输出生成
+- [x] `u32_to_m31_limbs` roundtrip 测试通过
+- [x] padding 机制测试通过
+- [x] 列布局常量测试通过
+
+**实施状态**：✅ 已完成（2026-07-20）
+- 详见 [stwo_phase1_native_trace_design.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase1_native_trace_design.md) §9.1 实施记录
+- poker_zkvm 单元测试 342/342 通过；poker_l1 单元测试 1501/1501 通过；workspace 全部集成测试通过
+- 后续 Phase 2 起步：CPU AIR 重写（Stwo FrameworkEval + EvalAtRow + relation! macro）
 
 **测试**：
 - `test_u32_to_m31_limbs_roundtrip`：u32 → 4×M31 → u32

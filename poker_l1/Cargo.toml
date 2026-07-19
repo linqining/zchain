@@ -57,7 +57,3 @@ harness = false
 [[bench]]
 name = "task36_bls_syscall"
 harness = false
-
-[[bench]]
-name = "task36_zk_verifier"
-harness = false

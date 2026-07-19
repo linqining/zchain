@@ -2,44 +2,27 @@
 name = "poker_zkvm"
 version = "0.1.0"
 edition = "2024"
-description = "ZK VM for zchain OffChain mode — migrating from Hypernova+CCS+IPA (BN254) to Stwo Circle STARK+AIR+FRI (M31)"
+description = "ZK VM for zchain OffChain mode — Stwo Circle STARK+AIR+FRI (M31), native trace (4×8-bit limb)"
 license = "MIT OR Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
 
 [features]
-# 测试辅助功能：启用跨 crate 测试辅助函数（如 `generate_test_proof`）
+# 测试辅助功能：启用跨 crate 测试辅助函数（如 ELF 构造、指令编码）
 default = []
 test-helpers = []
-# Phase 3: zkvm 服务化（HTTP server + 客户端 SDK）
-# 注意：service 在生产环境需要 default_ccs_registry 等辅助函数，因此包含 test-helpers。
-service = [
-    "dep:axum",
-    "dep:tokio",
-    "dep:tower",
-    "dep:reqwest",
-    "test-helpers",
-    "tokio/signal",
-    "tokio/rt-multi-thread",
-    "tokio/macros",
-    "tokio/sync",
-]
 
 [dependencies]
 vm-common = { path = "../vm-common" }
+# ===== 应用层密码学（Poseidon 哈希，poker game 事件哈希用）=====
+# 注意：v2 已完全放弃 Hypernova 证明系统，但保留 BN254 Fr 仅用于 Poseidon 哈希。
+# 后续 Phase 3/4 可考虑迁移到 M31 Poseidon（Stwo 提供）。
 ark-ff = { workspace = true }
-ark-ec = { workspace = true }
-ark-poly = { workspace = true }
-ark-serialize = { workspace = true }
-ark-std = { workspace = true }
 ark-bn254 = { workspace = true }
-ark-grumpkin = { workspace = true }
 ark-crypto-primitives = { workspace = true }
-ark-groth16 = { workspace = true }
-ark-r1cs-std = { workspace = true }
-ark-relations = { workspace = true }
-ark-snark = { workspace = true }
+ark-std = { workspace = true }
+# ===== 通用依赖 =====
 sha2 = { workspace = true }
 sha3 = { workspace = true }
 secp256k1 = { workspace = true }
@@ -51,57 +34,21 @@ serde_json = { workspace = true }
 rayon = { workspace = true }
 goblin = { workspace = true }
 tracing = { workspace = true }
-# E2E Phase 1: BLS12-381 syscall 支持texas_poker 合约的 G1/Scalar/Pairing 操作
+# E2E Phase 1: BLS12-381 syscall 支持（poker 合约 G1/Scalar/Pairing 操作）
 blstrs = { workspace = true }
 pairing = { workspace = true }
-# ===== Stwo 迁移（Hypernova → Stwo）— Phase 1.1 骨架 =====
-# 详见 .trae/documents/hypernova_to_stwo_migration_plan.md
-# 全量替换 Hypernova + CCS + IPA → Stwo Circle STARK + AIR + FRI on M31
+# ===== Stwo 证明后端（v2 原生 M31 trace + AIR + FRI）=====
+# 详见 .trae/documents/hypernova_to_stwo_migration_plan_v2.md
 stwo = { workspace = true }
 stwo-air-utils = { workspace = true }
 stwo-air-utils-derive = { workspace = true }
 stwo-constraint-framework = { workspace = true }
-# Phase 1.3: StwoProver::prove 输出 StarkProof<H> 序列化用
+# StarkProof 序列化
 bincode = { workspace = true }
-# Phase 3: zkvm 服务化（optional，启用 service feature 后激活）
-axum = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
 hex = { workspace = true }
 # 自引用以启用 `test-helpers` feature 供 integration tests (tests/*.rs) 使用。
-# integration tests 是独立 crate，`#[cfg(test)]` 不生效，须通过 feature 显式启用。
 poker_zkvm = { path = ".", features = ["test-helpers"] }
-
-# ===== Phase 3.6: service_e2e 集成测试（仅 service feature 启用时编译）=====
-[[test]]
-name = "service_e2e"
-path = "tests/service_e2e.rs"
-required-features = ["service"]
-
-# ===== Stwo POC 端到端测试（Phase 1.5 决策门）=====
-[[test]]
-name = "stwo_poc_e2e"
-path = "tests/stwo_poc_e2e.rs"
-required-features = ["test-helpers"]
-
-# ===== Phase 12 性能基准（占位，Phase 12 填充）=====
-
-[[bench]]
-name = "phase12_benchmarks"
-harness = false
-path = "benches/phase12_benchmarks.rs"
-required-features = ["test-helpers"]
-
-# ===== Phase 5.4: 并行证明配置性能基准 =====
-# 测量不同 rayon_threads (1/2/4/8) + parallel_ccs_compile (true/false) 下的
-# 实际最低证明延迟。详见 benches/prove_bench.rs 文档注释。
-[[bench]]
-name = "prove_bench"
-harness = false
-path = "benches/prove_bench.rs"
-required-features = ["test-helpers"]

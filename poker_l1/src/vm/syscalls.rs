@@ -1864,9 +1864,9 @@ mod tests {
     /// 构造测试用 ZkVerifierRegistry（注册 Hypernova + Groth16 + IPA stub）。
     fn make_test_zk_registry() -> crate::offline::zk_verifier::ZkVerifierRegistry {
         let mut registry = crate::offline::zk_verifier::ZkVerifierRegistry::new();
-        crate::offline::hypernova::register_hypernova_verifier(&mut registry);
-        crate::offline::groth16::register_groth16_verifier(&mut registry);
-        crate::offline::ipa::register_ipa_verifier(&mut registry);
+        crate::offline::zk_verifier::register_hypernova_stub_verifier(&mut registry);
+        crate::offline::zk_verifier::register_groth16_stub_verifier(&mut registry);
+        crate::offline::zk_verifier::register_ipa_stub_verifier(&mut registry);
         registry
     }
 

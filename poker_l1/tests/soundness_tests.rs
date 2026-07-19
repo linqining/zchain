@@ -584,7 +584,7 @@ fn test_p0_ack_chain_partial_hash_mismatch_rejected() {
     use poker_l1::signature::TaggedPubkey;
 
     let mut registry = ZkVerifierRegistry::new();
-    registry.register(poker_l1::offline::hypernova::HypernovaVerifier::into_registry_verifier());
+    poker_l1::offline::zk_verifier::register_hypernova_stub_verifier(&mut registry);
 
     let make_ack = |seq: u64| AckEntry {
         chain_id: DEFAULT_CHAIN_ID,
@@ -649,39 +649,10 @@ fn test_p0_ack_chain_partial_hash_mismatch_rejected() {
     );
 }
 
-/// H5：Hypernova Fr 静默归零 — 非规范化 Fr 字节应被拒绝。
+/// H5：v2 已删除 Hypernova，原 Fr 非规范化字节检查不再适用。
 ///
-/// 攻击者研磨 new_commitment 使其 >= BLS12-381 标量域模数，
-/// 导致 from_canonical_bytes 失败时静默归零，提交平凡证明。
-#[test]
-fn test_p0_hypernova_fr_non_canonical_rejected() {
-    use poker_l1::offline::hypernova::HypernovaVerifier;
-    use poker_l1::offline::zk_verifier::{VerifierStatus, ZkPublicIo, ZkVerifier};
-
-    let verifier = HypernovaVerifier::new();
-
-    // BLS12-381 标量域模数:
-    // 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
-    // [0xFF; 32] 明显大于此模数
-    let non_canonical_commitment = [0xFFu8; 32];
-
-    let public_io = ZkPublicIo {
-        initial_commitment: [0u8; 32],
-        final_commitment: non_canonical_commitment,
-        state_delta_hash: [0u8; 32],
-        ack_chain_hash: [0u8; 32],
-        fold_step_count: 1,
-        skip_count: 0,
-        segment_continuity_proof: Vec::new(),
-    };
-
-    let result = verifier.verify(&[0xAA; 64], &public_io, VerifierStatus::Production);
-
-    assert!(
-        matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))),
-        "非规范化 Fr 字节应返回 InvalidZkProofFormat, got: {result:?}"
-    );
-}
+/// v2 改用 Stwo M31 field（原生 31-bit），由 StwoProver/Verifier AIR 自行保证字段范围。
+/// 此测试已废弃，相关 soundness 检查将由 Phase 5 Stwo Verifier AIR 测试覆盖。
 
 /// H7：tx_cache FIFO 淘汰 — 超限时最旧条目应被淘汰。
 ///

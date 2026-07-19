@@ -1,43 +1,32 @@
-//! # Stwo Backend — Circle STARK 证明后端（Phase 1.1 骨架）
+//! # Stwo Backend — Circle STARK 证明后端（v2 Phase 1）
 //!
-//! 严格遵循 `.trae/documents/hypernova_to_stwo_migration_plan.md`（v1 FROZEN）：
-//! - **目标**：将 poker_zkvm 证明系统从 Hypernova（CCS + IPA on BN254）全量替换为
-//!   Stwo（Circle STARK + AIR + FRI on M31），预期 ~1000× prove 加速
-//! - **总工期**：14-20 周（3.5-5 个月），分 5 个 Phase
-//! - **当前 Phase**：Phase 1.1（骨架搭建）
+//! 严格遵循 `.trae/documents/hypernova_to_stwo_migration_plan_v2.md`（v2 FROZEN）+
+//! `.trae/documents/stwo_phase1_native_trace_design.md`：
+//! - **目标**：将 poker_zkvm 证明系统完全切换到 Stwo（Circle STARK + AIR + FRI on M31）
+//! - **核心变更**：原生 M31 trace 生成（4×8-bit limb），无 BN254 Fr 域转换
+//! - **参考实现**：Nexus zkVM 0.3.6 `prover/src/trace/trace_builder.rs`
 //!
-//! ## 模块结构
+//! ## 模块结构（v2 Phase 1）
 //!
-//! - [`field`] — BN254 Fr ↔ M31 域转换工具
-//! - [`trace`] — poker_zkvm `Trace` → Stwo `TraceTable` 转换
-//! - [`prover`] — `StwoProver`（替代 HypernovaProver）+ `StwoProverConfig`
-//! - [`verifier`] — `StwoVerifier`（替代 Hypernova verifier）
-//! - [`air`] — Stwo AIR 组件（CPU / Memory / ControlFlow / Syscall）
+//! - [`column_layout_v2`] — 97 列布局（4×8-bit limb，参考 Nexus zkVM 0.3.6）
+//! - [`trace_native`] — 原生 M31 trace 生成（NativeTrace + TraceBuilder）
 //!
-//! ## 设计决策（来自迁移计划）
+//! ## 后续阶段（v2 计划）
 //!
-//! 1. **proof 序列化格式**：`b"STWO"` magic 替代 `b"HYPN"`，保留 `public_io_commitment` 绑定
-//! 2. **scheme_id 语义**：`SCHEME_HYPERNOVA = 1` 重命名为 `SCHEME_STWO`（数值不变，兼容已部署合约）
-//! 3. **precompile 双接口**：纯算术 precompile 走 `build_air()`，椭圆曲线 precompile 保持 `build_ccs()` 独立证明
-//! 4. **M31 field 转换**：32-bit 值用 2 limb M31 表示，9 limb × 32-bit 用于 254-bit 值
+//! - **Phase 2**：CPU AIR 重写（`air/cpu_v2.rs`，基于 Stwo `FrameworkEval`）
+//! - **Phase 3**：内存 & Syscall AIR
+//! - **Phase 4**：Precompile 迁移到 AIR
+//! - **Phase 5**：递归证明层（自建 Stwo Verifier AIR）
+//! - **Phase 6**：E2E + 性能基准
 //!
-//! ## 当前状态（Phase 1.1）
+//! ## v1 文件已删除（Phase 1 清理）
 //!
-//! 仅提供模块骨架与类型定义，AIR 组件实现留待 Phase 1.2-2.x。`StwoProver::prove()` 与
-//! `StwoVerifier::verify()` 当前返回 [`ZkvmError::Other`]，待 Phase 1.3 POC 接入真实 Stwo prover。
+//! 以下 v1 文件已在 Phase 1 删除（依赖 `crate::ccs`/`crate::constraints`/`crate::field`）：
+//! - `field.rs`（域转换工具 `fr_to_m31_single`，已被原生 M31 取代）
+//! - `column_layout.rs`（旧 2×30-bit limb 布局，已被 `column_layout_v2.rs` 取代）
+//! - `trace.rs`（旧 trace 转换，已被 `trace_native.rs` 取代）
+//! - `prover.rs` / `verifier.rs`（旧 Stwo POC，Phase 2/5 重写）
+//! - `air/`（整个目录，Phase 2 用 Stwo 原生 FrameworkEval 重写）
 
-pub mod air;
-pub mod column_layout;
 pub mod column_layout_v2;
-pub mod field;
-pub mod prover;
-pub mod trace;
 pub mod trace_native;
-pub mod verifier;
-
-// STWO magic 常量重导出，供 verifier.rs / poker_l1 集成使用
-pub use prover::{
-    deserialize_stwo_proof, serialize_stwo_proof, StwoProof, StwoProver, StwoProverConfig,
-    STWO_MAGIC,
-};
-pub use verifier::{verify_stwo, StwoVerifier};

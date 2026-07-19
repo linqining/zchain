@@ -528,11 +528,10 @@ pub fn check_offchain_allowed(
 mod tests {
     use super::*;
     use crate::offline::ack_chain::AckEntry;
-    use crate::offline::groth16::register_groth16_verifier;
-    use crate::offline::hypernova::{register_hypernova_verifier, register_zkshuffle_verifier};
-    use crate::offline::ipa::register_ipa_verifier;
     use crate::offline::zk_verifier::{
         ProofKind, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE, VerifierStatus, ZkVerifyContext,
+        register_groth16_stub_verifier, register_hypernova_stub_verifier,
+        register_ipa_stub_verifier, register_zkshuffle_stub_verifier,
     };
     use crate::offline::{DEFAULT_MAX_ACK_CHAIN_LENGTH, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT};
 
@@ -579,9 +578,9 @@ mod tests {
 
     fn make_registry_with_all_verifiers() -> ZkVerifierRegistry {
         let mut registry = ZkVerifierRegistry::new();
-        register_hypernova_verifier(&mut registry);
-        register_groth16_verifier(&mut registry);
-        register_ipa_verifier(&mut registry);
+        register_hypernova_stub_verifier(&mut registry);
+        register_groth16_stub_verifier(&mut registry);
+        register_ipa_stub_verifier(&mut registry);
         registry
     }
 
@@ -1032,7 +1031,7 @@ mod tests {
     #[test]
     fn test_execute_checkin_zkshuffle_proof_kind_consistency() {
         let mut registry = make_registry_with_all_verifiers();
-        register_zkshuffle_verifier(&mut registry);
+        register_zkshuffle_stub_verifier(&mut registry);
 
         let tx = CheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
