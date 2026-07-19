@@ -38,7 +38,6 @@ use stwo::core::verifier::{verify, VerificationError};
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::backend::BackendForChannel;
 use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::poly::BitReversedOrder;
@@ -221,9 +220,48 @@ pub fn verify_cpu_proof(proof: CpuProof, log_size: u32) -> Result<(), Verificati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::isa::Instruction;
     use crate::stwo_backend::column_layout_v2::NUM_COLUMNS;
-    use crate::stwo_backend::trace_native::{NativeTrace, TraceBuilder};
+    use crate::stwo_backend::trace_native::{step_to_m31_row, NativeTrace, TraceBuilder};
+    use crate::trace::Step;
     use stwo::core::fields::m31::M31;
+
+    /// 构造一个最小 Step（仅含 instruction + pc + post-registers，prev_registers 由参数传入）。
+    fn make_step(pc: u32, instruction: Instruction, post_registers: [u32; 32]) -> Step {
+        Step {
+            step_index: 0,
+            pc,
+            instruction,
+            registers: post_registers,
+            mem_access: Vec::new(),
+        }
+    }
+
+    /// 构造一个零初始化寄存器快照（x0 永远为 0）。
+    fn zero_registers() -> [u32; 32] {
+        [0u32; 32]
+    }
+
+    /// 单步 trace prove/verify roundtrip 通用辅助。
+    /// 输入：pc, instruction, prev_registers, post_registers。
+    fn prove_verify_single_step(
+        pc: u32,
+        instruction: Instruction,
+        prev_registers: &[u32; 32],
+        post_registers: [u32; 32],
+    ) {
+        let step = make_step(pc, instruction, post_registers);
+        let row = step_to_m31_row(&step, prev_registers);
+
+        let mut builder = TraceBuilder::new(10); // 1024 行
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let trace = builder.finalize();
+        let log_size = trace.log_size;
+
+        let proof = prove_cpu_trace(&trace).expect("prove 失败");
+        verify_cpu_proof(proof, log_size).expect("verify 失败");
+    }
 
     /// 辅助：构造一个全 padding 的最小 NativeTrace（log_size=10，1024 行）。
     fn make_padding_only_trace() -> NativeTrace {
@@ -340,6 +378,193 @@ mod tests {
         let proof = prove_cpu_trace(&trace).expect("prove 失败：ADD 约束应满足");
 
         // verify
+        verify_cpu_proof(proof, log_size).expect("verify 失败");
+    }
+
+    // =======================================================================
+    // Phase 2.7 测试：LUI / AUIPC / JAL / JALR / BEQ (taken & not-taken)
+    // =======================================================================
+    // 这些测试通过 step_to_m31_row 自动生成 row（含 Helper1/Helper2/Shamt），
+    // 验证 Phase 2.7 新增的 25 条约束（PC 递增 + JAL/JALR/Branch + LUI/AUIPC + Taken binality）
+    // 与现有 14 条约束协同工作。
+
+    #[test]
+    fn test_prove_verify_roundtrip_lui() {
+        // LUI x1, 0x1000（imm 已左移 12 位 = 0x1000000）
+        // rd_eff = imm = 0x00100000
+        let mut post = zero_registers();
+        post[1] = 0x0010_0000;
+        prove_verify_single_step(0, Instruction::Lui { rd: 1, imm: 0x0010_0000 }, &zero_registers(), post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_auipc() {
+        // AUIPC x1, 0x1000（imm 已左移 12 位 = 0x1000000）
+        // rd_eff = pc + imm = 0 + 0x0010_0000 = 0x0010_0000
+        let mut post = zero_registers();
+        post[1] = 0x0010_0000;
+        prove_verify_single_step(0, Instruction::Auipc { rd: 1, imm: 0x0010_0000 }, &zero_registers(), post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_jal() {
+        // JAL x1, 8（跳转到 pc+8=8，rd=x1 存返回地址 pc+4=4）
+        let mut post = zero_registers();
+        post[1] = 4; // rd = pc + 4
+        prove_verify_single_step(0, Instruction::Jal { rd: 1, imm: 8 }, &zero_registers(), post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_jalr() {
+        // JALR x1, x2, 4（跳转到 (x2 + 4) & !1 = 4，rd=x1 存返回地址 pc+4=4）
+        let mut prev = zero_registers();
+        prev[2] = 0; // x2 = 0
+        let mut post = prev;
+        post[1] = 4; // rd = pc + 4 = 4
+        prove_verify_single_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_beq_taken() {
+        // BEQ x2, x3, 16（x2 == x3，taken=1，next_pc = pc + 16 = 16）
+        let mut prev = zero_registers();
+        prev[2] = 42; // x2 = 42
+        prev[3] = 42; // x3 = 42
+        let post = prev; // BEQ 不写寄存器
+        prove_verify_single_step(0, Instruction::Beq { rs1: 2, rs2: 3, imm: 16 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_beq_not_taken() {
+        // BEQ x2, x3, 16（x2 != x3，taken=0，next_pc = pc + 4 = 4）
+        let mut prev = zero_registers();
+        prev[2] = 42; // x2 = 42
+        prev[3] = 7;  // x3 = 7
+        let post = prev;
+        prove_verify_single_step(0, Instruction::Beq { rs1: 2, rs2: 3, imm: 16 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_bne_taken() {
+        // BNE x2, x3, 8（x2 != x3，taken=1，next_pc = pc + 8 = 8）
+        let mut prev = zero_registers();
+        prev[2] = 42;
+        prev[3] = 7;
+        let post = prev;
+        prove_verify_single_step(0, Instruction::Bne { rs1: 2, rs2: 3, imm: 8 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_blt_taken() {
+        // BLT x2, x3, 8（有符号 x2 < x3，taken=1）
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 10;
+        let post = prev;
+        prove_verify_single_step(0, Instruction::Blt { rs1: 2, rs2: 3, imm: 8 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_bltu_taken() {
+        // BLTU x2, x3, 8（无符号 x2 < x3，taken=1）
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 10;
+        let post = prev;
+        prove_verify_single_step(0, Instruction::Bltu { rs1: 2, rs2: 3, imm: 8 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_sub() {
+        // SUB x1, x2, x3 → x1 = x2 - x3 = 100 - 30 = 70
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 30;
+        let mut post = prev;
+        post[1] = 70;
+        prove_verify_single_step(0, Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_sub_borrow() {
+        // SUB x1, x2, x3 → x1 = 30 - 100 = -70 mod 2^32 = 0xFFFFFFBA
+        // 测试借位场景
+        let mut prev = zero_registers();
+        prev[2] = 30;
+        prev[3] = 100;
+        let mut post = prev;
+        post[1] = 30u32.wrapping_sub(100);
+        prove_verify_single_step(0, Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_addi() {
+        // ADDI x1, x2, 50 → x1 = 100 + 50 = 150
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        let mut post = prev;
+        post[1] = 150;
+        prove_verify_single_step(0, Instruction::Addi { rd: 1, rs1: 2, imm: 50 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_add_with_carry() {
+        // ADD x1, x2, x3 → x1 = 0xFFFE + 0x0002 = 0x10000（产生 16-bit 进位）
+        let mut prev = zero_registers();
+        prev[2] = 0x0000_FFFE;
+        prev[3] = 0x0000_0002;
+        let mut post = prev;
+        post[1] = 0x0001_0000;
+        prove_verify_single_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_multi_instruction() {
+        // 多指令序列：ADD → ADDI → SUB → BEQ (taken)
+        // Step 0: ADD x1, x2, x3 → x1 = 100 + 200 = 300, pc 0→4
+        // Step 1: ADDI x4, x1, 50 → x4 = 300 + 50 = 350, pc 4→8
+        // Step 2: SUB x5, x4, x1 → x5 = 350 - 300 = 50, pc 8→12
+        // Step 3: BEQ x5, x5, 8（taken，next_pc = 12 + 8 = 20）
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 200;
+
+        // Step 0: ADD x1, x2, x3 → x1 = 300
+        let mut post0 = prev;
+        post0[1] = 300;
+        let step0 = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post0);
+        let row0 = step_to_m31_row(&step0, &prev);
+        prev = post0;
+
+        // Step 1: ADDI x4, x1, 50 → x4 = 350
+        let mut post1 = prev;
+        post1[4] = 350;
+        let step1 = make_step(4, Instruction::Addi { rd: 4, rs1: 1, imm: 50 }, post1);
+        let row1 = step_to_m31_row(&step1, &prev);
+        prev = post1;
+
+        // Step 2: SUB x5, x4, x1 → x5 = 50
+        let mut post2 = prev;
+        post2[5] = 50;
+        let step2 = make_step(8, Instruction::Sub { rd: 5, rs1: 4, rs2: 1 }, post2);
+        let row2 = step_to_m31_row(&step2, &prev);
+        prev = post2;
+
+        // Step 3: BEQ x5, x5, 8（taken，跳到 pc + 8 = 20）
+        let step3 = make_step(12, Instruction::Beq { rs1: 5, rs2: 5, imm: 8 }, prev);
+        let row3 = step_to_m31_row(&step3, &prev);
+
+        // 构建 trace
+        let mut builder = TraceBuilder::new(10); // 1024 行
+        builder.fill_row(&row0);
+        builder.fill_row(&row1);
+        builder.fill_row(&row2);
+        builder.fill_row(&row3);
+        builder.fill_padding_to_full();
+        let trace = builder.finalize();
+        let log_size = trace.log_size;
+
+        let proof = prove_cpu_trace(&trace).expect("prove 失败：多指令序列应满足所有约束");
         verify_cpu_proof(proof, log_size).expect("verify 失败");
     }
 }

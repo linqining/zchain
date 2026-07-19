@@ -399,8 +399,12 @@ pub fn step_to_m31_row(
         row[COL_PC_BASE + i] = pc_limbs[i];
     }
 
-    // 计算 next_pc（默认 = pc + 4）
-    let (next_pc, taken, pc_next_aux) = compute_next_pc(step);
+    // ----- 提取操作数索引和立即数 -----
+    let (op_a, op_b, op_c, imm_c_flag, imm_value) = extract_operands(&step.instruction);
+    row[COL_OP_A] = M31::from(u32::from(op_a));
+
+    // 计算 next_pc（默认 = pc + 4；分支指令根据 prev_registers 判断 taken）
+    let (next_pc, taken, pc_next_aux) = compute_next_pc(step, prev_registers);
     let pc_next_limbs = u32_to_m31_limbs(next_pc);
     for i in 0..WORD_LIMB_COUNT {
         row[COL_PC_NEXT_BASE + i] = pc_next_limbs[i];
@@ -411,9 +415,20 @@ pub fn step_to_m31_row(
     }
     row[COL_TAKEN] = M31::from(u32::from(taken));
 
-    // ----- 提取操作数索引和立即数 -----
-    let (op_a, op_b, op_c, imm_c_flag, imm_value) = extract_operands(&step.instruction);
-    row[COL_OP_A] = M31::from(u32::from(op_a));
+    // ----- Helper1: imm 值（4×8-bit limb）-----
+    // 用于 LUI 约束（rd_eff = imm，imm 字段已左移 12 位并符号扩展）
+    fill_word(&mut row, COL_HELPER1_BASE, imm_value);
+
+    // ----- Helper2: Pc + imm 预计算（4×8-bit limb）-----
+    // 用于 JAL 约束（PcNext = Pc + imm）、Branch taken 约束（PcNext = Pc + imm）、AUIPC 约束（rd_eff = Pc + imm）
+    // 非相关指令填 0（AIR 约束由 IsJal/IsBranch/IsAuipc gating 保证不强制约束）
+    let helper2_value = compute_pc_plus_imm(step, imm_value);
+    fill_word(&mut row, COL_HELPER2_BASE, helper2_value);
+
+    // ----- Shamt: 移位量 -----
+    // SLLI/SRLI/SRAI: shamt 字段；SLL/SRL/SRA: rs2 & 0x1F
+    let shamt = extract_shamt(&step.instruction, prev_registers);
+    row[COL_SHAMT] = M31::from(shamt);
     row[COL_OP_B] = M31::from(u32::from(op_b));
     row[COL_OP_C] = M31::from(u32::from(op_c));
     row[COL_IMM_C] = M31::from(u32::from(imm_c_flag));
@@ -474,37 +489,139 @@ fn fill_word(row: &mut [M31], base: usize, value: u32) {
 
 /// 计算下一条 PC 地址。
 ///
+/// # 参数
+/// - `step` — emulator 单步记录（含 `pc` 和 `instruction`）
+/// - `prev_registers` — 执行前的寄存器快照（用于读取 rs1/rs2 实际值）
+///
 /// # 返回
 /// (next_pc, taken, pc_next_aux)
 /// - `next_pc` — 下一 PC（分支跳转时为目标地址）
 /// - `taken` — 分支是否跳转（0/1）
 /// - `pc_next_aux` — JALR 目标地址（其他指令为 0）
-fn compute_next_pc(step: &crate::trace::Step) -> (u32, u8, u32) {
+///
+/// # Phase 2.7 修复
+/// - 旧版默认条件分支不跳转（bug：`compute_next_pc` 无 prev_registers 参数）
+/// - 新版正确读取 prev_registers 评估分支条件
+fn compute_next_pc(step: &crate::trace::Step, prev_registers: &[u32; 32]) -> (u32, u8, u32) {
     use crate::isa::Instruction::*;
     let pc = step.pc;
     match &step.instruction {
-        // 无条件跳转
+        // 无条件跳转 JAL：next_pc = pc + imm
         Jal { imm, .. } => (pc.wrapping_add(*imm), 1, 0),
+        // 无条件跳转 JALR：next_pc = (rs1 + imm) & !1
         Jalr { rs1, imm, .. } => {
-            let target = step.registers[*rs1 as usize].wrapping_add(*imm) & !1;
+            let target = prev_registers[*rs1 as usize].wrapping_add(*imm) & !1;
             (target, 1, target)
         }
-        // 条件分支：根据 step.registers 判断是否跳转
-        // 注意：step.registers 是 post-state，无法直接判断分支是否跳转
-        // 简化处理：用 prev_registers 比较（但 step 不含 prev_registers）
-        // Phase 2.6 完善：在 step_to_m31_row 中传入 prev_registers 后重写
-        Beq { rs1, rs2, imm, .. }
-        | Bne { rs1, rs2, imm, .. }
-        | Blt { rs1, rs2, imm, .. }
-        | Bge { rs1, rs2, imm, .. }
-        | Bltu { rs1, rs2, imm, .. }
-        | Bgeu { rs1, rs2, imm, .. } => {
-            // 简化：默认 not taken（pc+4），Phase 2.6 完善
-            let _ = (rs1, rs2);
-            (pc.wrapping_add(4), 0, 0)
+        // 条件分支：根据 prev_registers 评估
+        Beq { rs1, rs2, imm, .. } => {
+            let taken = prev_registers[*rs1 as usize] == prev_registers[*rs2 as usize];
+            let next_pc = if taken {
+                pc.wrapping_add(*imm)
+            } else {
+                pc.wrapping_add(4)
+            };
+            (next_pc, u8::from(taken), 0)
+        }
+        Bne { rs1, rs2, imm, .. } => {
+            let taken = prev_registers[*rs1 as usize] != prev_registers[*rs2 as usize];
+            let next_pc = if taken {
+                pc.wrapping_add(*imm)
+            } else {
+                pc.wrapping_add(4)
+            };
+            (next_pc, u8::from(taken), 0)
+        }
+        Blt { rs1, rs2, imm, .. } => {
+            // 有符号比较
+            let a = prev_registers[*rs1 as usize] as i32;
+            let b = prev_registers[*rs2 as usize] as i32;
+            let taken = a < b;
+            let next_pc = if taken {
+                pc.wrapping_add(*imm)
+            } else {
+                pc.wrapping_add(4)
+            };
+            (next_pc, u8::from(taken), 0)
+        }
+        Bge { rs1, rs2, imm, .. } => {
+            let a = prev_registers[*rs1 as usize] as i32;
+            let b = prev_registers[*rs2 as usize] as i32;
+            let taken = a >= b;
+            let next_pc = if taken {
+                pc.wrapping_add(*imm)
+            } else {
+                pc.wrapping_add(4)
+            };
+            (next_pc, u8::from(taken), 0)
+        }
+        Bltu { rs1, rs2, imm, .. } => {
+            // 无符号比较
+            let taken = prev_registers[*rs1 as usize] < prev_registers[*rs2 as usize];
+            let next_pc = if taken {
+                pc.wrapping_add(*imm)
+            } else {
+                pc.wrapping_add(4)
+            };
+            (next_pc, u8::from(taken), 0)
+        }
+        Bgeu { rs1, rs2, imm, .. } => {
+            let taken = prev_registers[*rs1 as usize] >= prev_registers[*rs2 as usize];
+            let next_pc = if taken {
+                pc.wrapping_add(*imm)
+            } else {
+                pc.wrapping_add(4)
+            };
+            (next_pc, u8::from(taken), 0)
         }
         // 其他指令：PC + 4
         _ => (pc.wrapping_add(4), 0, 0),
+    }
+}
+
+/// 预计算 (Pc + imm) 用于 JAL/Branch/AUIPC 的 PC 约束。
+///
+/// # 参数
+/// - `step` — emulator 单步记录
+/// - `imm_value` — 由 `extract_operands` 提取的立即数
+///
+/// # 返回
+/// - 对于 JAL/JALR/BEQ/BNE/BLT/BGE/BLTU/BGEU/AUIPC：`step.pc + imm_value`
+/// - 对于其他指令：0（无 PC+imm 语义）
+fn compute_pc_plus_imm(step: &crate::trace::Step, imm_value: u32) -> u32 {
+    use crate::isa::Instruction::*;
+    match &step.instruction {
+        Jal { .. }
+        | Jalr { .. }
+        | Beq { .. }
+        | Bne { .. }
+        | Blt { .. }
+        | Bge { .. }
+        | Bltu { .. }
+        | Bgeu { .. }
+        | Auipc { .. } => step.pc.wrapping_add(imm_value),
+        _ => 0,
+    }
+}
+
+/// 提取移位指令的 shamt（移位量）。
+///
+/// # 参数
+/// - `insn` — 当前指令
+/// - `prev_registers` — 执行前寄存器快照（用于 R-type 移位的 rs2 值）
+///
+/// # 返回
+/// - SLLI/SRLI/SRAI：返回 shamt 字段（0-31）
+/// - SLL/SRL/SRA：返回 `prev_registers[rs2] & 0x1F`（低 5 位）
+/// - 其他指令：0
+fn extract_shamt(insn: &crate::isa::Instruction, prev_registers: &[u32; 32]) -> u32 {
+    use crate::isa::Instruction::*;
+    match insn {
+        Slli { shamt, .. } | Srli { shamt, .. } | Srai { shamt, .. } => u32::from(*shamt),
+        Sll { rs2, .. } | Srl { rs2, .. } | Sra { rs2, .. } => {
+            prev_registers[*rs2 as usize] & 0x1F
+        }
+        _ => 0,
     }
 }
 

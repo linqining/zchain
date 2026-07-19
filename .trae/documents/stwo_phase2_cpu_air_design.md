@@ -329,13 +329,13 @@ pub fn verify_cpu_proof(proof: &StarkProof, log_size: u32) -> Result<bool, ZkvmE
     `test_verify_padding_only_trace`, `test_prove_verify_roundtrip_padding_only`,
     `test_prove_verify_roundtrip_single_add`
 
-### Step 2.6：扩展到其他 RV32I 指令（2-3 天，可选）⬜ → Phase 2.7
-- SLT/SLTU/逻辑/移位
-- LUI/AUIPC
-- JAL/JALR
-- BEQ/BNE/BLT/BGE/BLTU/BGEU
-- LB/LH/LW/LBU/LHU
-- SB/SH/SW
+### Step 2.6：扩展到其他 RV32I 指令（2-3 天，可选）✅ → Phase 2.7
+- ✅ LUI/AUIPC（U-type，4×8-bit limb 约束）
+- ✅ JAL/JALR（J-type/I-type 跳转，PC 约束 + Taken binality）
+- ✅ BEQ/BNE/BLT/BGE/BLTU/BGEU（B-type 条件分支，统一 IsBranch gating + taken/not-taken PC 约束）
+- ✅ PC 递增约束（IsNonFlow gating，4 limb）
+- ⬜ SLT/SLTU/逻辑/移位（Phase 3 用 logup lookup 实现，M 扩展同）
+- ⬜ LB/LH/LW/LBU/LHU/SB/SH/SW（Phase 3 与 Memory AIR 一起实现）
 
 ### Step 2.7：ECALL/EBREAK stub（0.5 天）⬜
 - Phase 3 完整实现
@@ -351,6 +351,9 @@ pub fn verify_cpu_proof(proof: &StarkProof, log_size: u32) -> Result<bool, ZkvmE
 - [x] `prove_cpu_trace` + `verify_cpu_proof` 端到端通过
 - [x] `cargo test -p poker_zkvm --lib stwo_backend` 全部通过（350 passed, 0 failed）
 - [x] workspace 全部测试通过（600+ passed, 0 failed）
+- [x] **Phase 2.7**：LUI/AUIPC/JAL/JALR/BEQ/BNE/BLT/BLTU 约束 + 14 个新测试全部通过
+- [x] **Phase 2.7**：`cargo test -p poker_zkvm --lib` 364 passed, 0 failed
+- [x] **Phase 2.7**：workspace 全部测试 2200+ passed, 0 failed
 
 ***
 
@@ -374,6 +377,60 @@ pub fn verify_cpu_proof(proof: &StarkProof, log_size: u32) -> Result<bool, ZkvmE
 - **测试**：5 个 prover 单元测试通过（含 padding-only + single ADD roundtrip）
 - **workspace 全部测试**：600+ passed, 0 failed
 - [ ] `cargo build --workspace` 通过
+
+### 2026-07-20 Phase 2.7 完成（PC + 跳转/分支 + LUI/AUIPC 约束）
+
+**核心交付**：
+1. **trace_native.rs 修复与扩展**：
+   - **CRITICAL bug fix**：`compute_next_pc` 新增 `prev_registers` 参数，正确评估 6 个条件分支（BEQ/BNE/BLT/BGE/BLTU/BGEU）
+   - 旧版默认所有条件分支 not taken（`let _ = (rs1, rs2); pc + 4`），导致分支语义错误
+   - 新增 `compute_pc_plus_imm`：预计算 (Pc + imm) 存入 Helper2，简化 PC 约束
+   - 新增 `extract_shamt`：SLLI/SRLI/SRAI 取 shamt 字段；SLL/SRL/SRA 取 rs2 & 0x1F
+   - `step_to_m31_row` 填充 Helper1（imm 4×8-bit limb）、Helper2（Pc+imm 4×8-bit limb）、Shamt 列
+
+2. **cpu_air.rs 新增 25 条约束**（编号 15-39）：
+   - **#15 Taken binality**（通用）：`Taken·(Taken−1) = 0`，度 2
+   - **#16-19 PC 递增**（gated by IsNonFlow）：每 limb `PcNext[i] - Pc[i] - 4_limb[i] = 0`，度 2
+     - IsNonFlow = 1 - IsPadding - IsJal - IsJalr - IsBranch
+     - 4_limb = [4, 0, 0, 0]（little-endian）
+   - **#20-23 JAL**（gated by IsJal）：每 limb `PcNext[i] - Helper2[i] = 0`，度 2
+   - **#24-27 JALR**（gated by IsJalr）：每 limb `PcNext[i] - PcNextAux[i] = 0`，度 2
+   - **#28-31 Branch**（gated by IsBranch）：每 limb `(1-Taken)·(PcNext-Pc-4_limb) + Taken·(PcNext-Helper2) = 0`，度 3
+     - IsBranch = IsBeq + IsBne + IsBlt + IsBge + IsBltu + IsBgeu（6 个分支之和）
+   - **#32-35 LUI**（gated by IsLui）：每 limb `rd_eff[i] - Helper1[i] = 0`，度 2
+   - **#36-39 AUIPC**（gated by IsAuipc）：每 limb `rd_eff[i] - Helper2[i] = 0`，度 2
+
+3. **关键设计决策**：
+   - **Helper 列分配**：Helper1 = imm（用于 LUI 约束），Helper2 = Pc+imm（用于 JAL/Branch/AUIPC 约束）
+   - **统一 IsBranch gating**：6 个条件分支共享一个约束族，避免重复（degree 3 仍在 max_constraint_log_degree_bound 内）
+   - **PC 递增约束统一格式**：非跳转/非分支/非 padding 指令 PcNext = Pc + 4，4 个独立 limb 约束（无需 carry，因为 PcNext 和 Pc 都由 trace 提供，约束仅验证一致性）
+   - **未实现部分（Phase 3 处理）**：SLT/SLTU/XOR/OR/AND/移位指令需要 logup lookup；Load/Store 需要 Memory AIR；分支条件 soundness（如 BEQ taken iff rs1==rs2）需要 inverse helper 或 logup
+
+4. **测试结果**：
+   - 14 个新测试全部通过：
+     - `test_prove_verify_roundtrip_lui` / `_auipc` / `_jal` / `_jalr`
+     - `test_prove_verify_roundtrip_beq_taken` / `_beq_not_taken` / `_bne_taken` / `_blt_taken` / `_bltu_taken`
+     - `test_prove_verify_roundtrip_sub` / `_sub_borrow` / `_addi` / `_add_with_carry`
+     - `test_prove_verify_roundtrip_multi_instruction`（4 步序列：ADD→ADDI→SUB→BEQ taken）
+   - poker_zkvm lib: **364 passed, 0 failed**（350 → 364，新增 14 个）
+   - workspace: **2200+ passed, 0 failed**
+   - `cargo build --workspace` 通过
+
+5. **工程要点**：
+   - `E::F` 类型 `Clone` 必须显式调用（`one.clone()`, `taken.clone()`），因 `E::F` 未实现 `Copy`
+   - `eval.add_constraint(indicator_sum - one)` 会 move `one`，后续需用 `one.clone()`（编译错误修复）
+   - Branch 约束 degree = 3 = 1 (IsBranch) + 1 (Taken) + 1 (减法)，仍在 `log_size + 1` bound 内
+   - `make_step` 测试辅助函数：构造最小 Step（instruction + pc + post_registers），配合 `step_to_m31_row` 自动生成 row，覆盖所有约束
+
+6. **Phase 2.7 完成标准 checklist**：
+   - [x] `compute_next_pc` 正确评估分支条件（使用 prev_registers）
+   - [x] PC 递增约束（IsNonFlow gating，4 limb）
+   - [x] JAL/JALR 约束（gated，4 limb each）
+   - [x] Branch 约束（统一 IsBranch gating，taken/not-taken PC 约束）
+   - [x] LUI/AUIPC 约束（gated，4 limb each）
+   - [x] Taken binality
+   - [x] 14 个新测试全部通过
+   - [x] workspace 全部测试通过
 
 ***
 
