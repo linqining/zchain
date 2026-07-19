@@ -25,7 +25,7 @@
 
 mod common;
 
-use poker_l1::offline::ack_chain::AckEntry;
+use poker_l1::offline::ack_chain::{AckEntry, compute_ack_chain_partial_hash};
 use poker_l1::offline::groth16::register_groth16_verifier;
 use poker_l1::offline::hypernova::register_hypernova_verifier;
 use poker_l1::offline::ipa::register_ipa_verifier;
@@ -249,12 +249,31 @@ fn test_e2e_single_instance_path() {
     assert_eq!(result.scheme_id, SCHEME_HYPERNOVA);
 }
 
-/// 测试 2：多 fold 步路径端到端（batch_size=10，7 fold 步）
+/// 测试 2：多 fold 步路径端到端（batch_size=41，1 fold 步）
 ///
 /// 验证：
 /// - prove_partial_start → prove_partial_fold × N → prove_final_fold 产出合法 proof
-/// - 每个 partial_fold 阶段构造 PartialCheckinTx
+/// - 每个 partial_fold 阶段构造 PartialCheckinTx（含正确 ack_chain_partial + ack_chain_partial_hash）
 /// - 最终 CheckinTx 在 Stub verifier 下验证通过（流程完整性）
+/// - execute_checkin 的 ack_chain[0..N] 长度校验 + ack_chain_partial_hash Merkle root 校验
+///
+/// ## batch_size 选择
+///
+/// - batch_size=41：80 步程序 → 2 batches → 1 fold step（最小多 fold 步路径）
+/// - 选择 41 而非 10（7 fold steps）的原因：每个 fold 步涉及 sumcheck + PCS opening，
+///   实测 ~5+ min/step；7 步 = 35+ min 不实用。1 步即可覆盖多 fold 路径逻辑。
+///
+/// ## ack_chain 一致性（关键修复）
+///
+/// execute_checkin 校验（state.rs:354-368）：
+/// 1. `tx.ack_chain.len() >= folded_step_count`（长度校验）
+/// 2. `last_partial_fold.ack_chain_partial_hash == compute_ack_chain_partial_hash(&tx.ack_chain[..N])`
+///    （Merkle root 校验）
+///
+/// 故测试须：
+/// - 每个 partial_fold 添加 1 个 AckEntry 到 ack_chain（长度 = folded_step_count）
+/// - `last_partial_fold.ack_chain_partial_hash` 必须用 `compute_ack_chain_partial_hash` 实际计算
+/// - CheckinTx.ack_chain 必须与累积的 ack_chain 一致
 ///
 /// ## 关于 Stub vs Production
 ///
@@ -268,24 +287,31 @@ fn test_e2e_multi_fold_partial_checkin() {
     // 1. 生成真实 ZK proof（多 fold 步路径）
     let elf = build_poker_hand_eval_v2_elf();
     let input: Vec<u8> = vec![14, 13, 12, 11, 10];
-    // batch_size=3：80 步程序 padding 到 81 步 → 27 batches → 26 fold steps
-    // 为减少测试耗时，使用 batch_size=10 → 80 步 padding 到 80 → 8 batches → 7 fold steps
-    let config = make_test_config(10);
+    // batch_size=41：80 步 → 2 batches → 1 fold step（最小多 fold 步路径）
+    let config = make_test_config(41);
 
     let mut state = prove_partial_start(&elf, &input, &config).expect("partial_start");
     let total_fold_steps = state.ccccs_queue.len() as u32;
     assert!(
         total_fold_steps > 0,
-        "多 fold 步路径应至少有 1 个 CCCCS（batch_size=10, 80 步 → 8 batches → 7 fold steps）"
+        "多 fold 步路径应至少有 1 个 CCCCS（batch_size=41, 80 步 → 2 batches → 1 fold step）"
     );
 
     // 2. 阶段 2：prove_partial_fold + 构造 PartialCheckinTx
+    // 关键：每个 partial_fold 添加 1 个 AckEntry，ack_chain 长度 = folded_step_count
     let game_id = ObjectID::new([0x01; 20], 1);
     let mut partial_checkin_txs: Vec<PartialCheckinTx> = Vec::new();
     let mut last_partial_fold: Option<LastPartialFold> = None;
+    let mut ack_chain: Vec<AckEntry> = Vec::new(); // 累积 ack_chain，长度 = folded_step_count
 
     while !state.ccccs_queue.is_empty() {
         let progress = prove_partial_fold(&mut state, 1).expect("partial_fold");
+
+        // 每个 partial_fold 添加 1 个 AckEntry（seq = folded_step_count）
+        ack_chain.push(make_ack_entry(progress.folded_step_count as u64));
+
+        // 计算 ack_chain_partial_hash（与 execute_checkin 校验逻辑一致）
+        let ack_chain_partial_hash = compute_ack_chain_partial_hash(&ack_chain);
 
         // 构造 PartialCheckinTx（demo 用 intermediate_commitment 作为 π_partial 占位）
         let proof_partial = progress.intermediate_commitment.to_vec();
@@ -294,18 +320,19 @@ fn test_e2e_multi_fold_partial_checkin() {
             proof_partial,
             folded_step_count: progress.folded_step_count,
             intermediate_commitment: progress.intermediate_commitment,
-            ack_chain_partial: Vec::new(),
+            ack_chain_partial: ack_chain.clone(),
             scheme_id: SCHEME_HYPERNOVA,
             proof_kind: ProofKind::Zkvm,
         };
         partial_checkin_txs.push(tx);
 
         // 更新 last_partial_fold（最后一个 partial_fold 的快照）
+        // 关键：ack_chain_partial_hash 必须用实际 Merkle root，不能用 [0u8; 32]
         last_partial_fold = Some(LastPartialFold {
             intermediate_commitment: progress.intermediate_commitment,
             folded_step_count: progress.folded_step_count,
             proof_partial_hash: <[u8; 32]>::from(progress.intermediate_commitment),
-            ack_chain_partial_hash: [0u8; 32], // demo 用空 ack_chain
+            ack_chain_partial_hash,
         });
     }
 
@@ -319,6 +346,13 @@ fn test_e2e_multi_fold_partial_checkin() {
         .expect("应至少有 1 个 partial_fold")
         .folded_step_count;
 
+    // 校验 ack_chain 长度 = folded_step_count（与 execute_checkin 校验一致）
+    assert_eq!(
+        ack_chain.len(),
+        folded_step_count as usize,
+        "ack_chain 长度应 = folded_step_count（execute_checkin 会校验 tx.ack_chain.len() >= folded_step_count）"
+    );
+
     // 3. 阶段 3：prove_final_fold
     let (proof_bytes, zkvm_public_io) =
         prove_final_fold(state).expect("final_fold");
@@ -331,13 +365,14 @@ fn test_e2e_multi_fold_partial_checkin() {
     );
 
     // 4. 转换 ZkPublicIo + 构造 CheckinTx
+    // 关键：ack_chain 必须与 last_partial_fold.ack_chain_partial_hash 一致
     let l1_public_io = convert_zkvm_public_io_to_l1(&zkvm_public_io, folded_step_count);
     let checkin_tx = CheckinTx {
         game_id,
         proof: proof_bytes.clone(),
         state_delta: zkvm_public_io.output.clone(),
         new_commitment: l1_public_io.final_commitment,
-        ack_chain: vec![make_ack_entry(1)],
+        ack_chain: ack_chain.clone(), // 长度 = folded_step_count
         scheme_id: SCHEME_HYPERNOVA,
         proof_kind: ProofKind::Zkvm,
         has_partial_checkin: true,
@@ -347,6 +382,9 @@ fn test_e2e_multi_fold_partial_checkin() {
     };
 
     // 5. execute_checkin 验证（带 last_partial_fold）
+    // 校验项：
+    // - ack_chain.len() >= folded_step_count（长度）
+    // - ack_chain_partial_hash == compute_ack_chain_partial_hash(&ack_chain[..N])（Merkle root）
     let checkout_commitment = [0xDD; 32];
     let ctx = make_default_ctx();
     let result = execute_checkin(
@@ -369,10 +407,11 @@ fn test_e2e_multi_fold_partial_checkin() {
 
     // 6. 输出摘要（测试日志可见）
     eprintln!(
-        "✓ 多 fold 步路径：partial_checkin_count={} folded_step_count={} proof_size={}B",
+        "✓ 多 fold 步路径：partial_checkin_count={} folded_step_count={} proof_size={}B ack_chain_len={}",
         partial_checkin_count,
         folded_step_count,
-        proof_bytes.len()
+        proof_bytes.len(),
+        ack_chain.len()
     );
 }
 
