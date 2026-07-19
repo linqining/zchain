@@ -42,18 +42,18 @@ use poker_l1::{Address, Hash};
 use poker_protocol::crypto::types::ECPoint;
 
 /// 单次 RPC 请求超时（秒）。
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 提交 tx 后等待 validator 出块的轮询间隔。
-const BLOCK_WAIT_INTERVAL: Duration = Duration::from_millis(500);
+pub(crate) const BLOCK_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 提交 tx 后等待 validator 出块的最大时长。
-const BLOCK_WAIT_MAX: Duration = Duration::from_secs(15);
+pub(crate) const BLOCK_WAIT_MAX: Duration = Duration::from_secs(15);
 
 /// 玩家 1 地址（seat 0）。
-const PLAYER1: Address = [0x11; 20];
+pub(crate) const PLAYER1: Address = [0x11; 20];
 /// 玩家 2 地址（seat 1）。
-const PLAYER2: Address = [0x22; 20];
+pub(crate) const PLAYER2: Address = [0x22; 20];
 
 /// poker-rpc-demo 子命令入口。
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -290,7 +290,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
 /// 构造并签名一笔调用 texas_poker 合约的 GameTurn 通道交易。
 #[allow(clippy::too_many_arguments)]
-fn build_signed_tx(
+pub(crate) fn build_signed_tx(
     secp: &Secp256k1<secp256k1::All>,
     secret_key: &secp256k1::SecretKey,
     tagged_pubkey: &TaggedPubkey,
@@ -333,7 +333,7 @@ fn build_signed_tx(
 }
 
 /// 通过 RPC 提交 tx。
-fn submit_tx_via_rpc(rpc_listen: &str, tx: &Transaction) -> Result<Hash, String> {
+pub(crate) fn submit_tx_via_rpc(rpc_listen: &str, tx: &Transaction) -> Result<Hash, String> {
     let tx_bytes = tx
         .to_bcs()
         .map_err(|e| format!("tx.to_bcs 失败：{e}"))?;
@@ -362,7 +362,10 @@ fn submit_tx_via_rpc(rpc_listen: &str, tx: &Transaction) -> Result<Hash, String>
 }
 
 /// 轮询查询 block，直到包含指定 tx_hash 或超时。
-fn wait_for_block_with_tx(rpc_listen: &str, expected_tx_hash: Hash) -> Result<u64, String> {
+pub(crate) fn wait_for_block_with_tx(
+    rpc_listen: &str,
+    expected_tx_hash: Hash,
+) -> Result<u64, String> {
     let start = std::time::Instant::now();
     let mut height: u64 = 1;
     while start.elapsed() < BLOCK_WAIT_MAX {
@@ -400,7 +403,7 @@ fn wait_for_block_with_tx(rpc_listen: &str, expected_tx_hash: Hash) -> Result<u6
 }
 
 /// 通过 RPC 查询指定高度的 block。
-fn query_block_by_height(
+pub(crate) fn query_block_by_height(
     rpc_listen: &str,
     height: u64,
 ) -> Result<Option<poker_l1::block::Block>, String> {
@@ -427,14 +430,16 @@ fn query_block_by_height(
 /// 由于 chain_id 不直接在 Block 中显式存在，这里使用 DEFAULT_CHAIN_ID 占位。
 /// 实际部署的节点 chain_id 由 NodeConfig::default_full/validator 决定，
 /// 默认就是 DEFAULT_CHAIN_ID。
-fn query_chain_id(rpc_listen: &str) -> Result<u64, String> {
+pub(crate) fn query_chain_id(rpc_listen: &str) -> Result<u64, String> {
     // 节点启动后默认 chain_id = DEFAULT_CHAIN_ID，这里直接返回
     let _ = rpc_listen;
     Ok(poker_l1::DEFAULT_CHAIN_ID)
 }
 
 /// 查询桌台状态（从 ObjectDb 读取 texas_poker_contract_id 对象并反序列化）。
-fn query_table_state(rpc_listen: &str) -> Result<Option<poker_l1_table::TexasPokerTable>, String> {
+pub(crate) fn query_table_state(
+    rpc_listen: &str,
+) -> Result<Option<poker_l1_table::TexasPokerTable>, String> {
     let params = serde_json::json!({ "id": texas_poker_contract_id() });
     let resp = rpc_call(rpc_listen, "get_object", &params)?;
     // 注意：服务端使用 `skip_serializing_if = "Option::is_none"`，
@@ -458,7 +463,7 @@ fn query_table_state(rpc_listen: &str) -> Result<Option<poker_l1_table::TexasPok
 }
 
 /// 验证桌台状态满足谓词，否则返回错误。
-fn verify_table_state<F: Fn(&poker_l1_table::TexasPokerTable) -> bool>(
+pub(crate) fn verify_table_state<F: Fn(&poker_l1_table::TexasPokerTable) -> bool>(
     rpc_listen: &str,
     label: &str,
     predicate: F,
@@ -474,7 +479,7 @@ fn verify_table_state<F: Fn(&poker_l1_table::TexasPokerTable) -> bool>(
 }
 
 /// 发送一次 JSON-RPC 请求并读取响应。
-fn rpc_call(
+pub(crate) fn rpc_call(
     rpc_listen: &str,
     method: &str,
     params: &serde_json::Value,

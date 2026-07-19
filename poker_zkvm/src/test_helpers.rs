@@ -250,6 +250,256 @@ pub fn build_nop_elf(steps: usize) -> Vec<u8> {
 }
 
 // ===========================================================================
+// 扑克牌型评估 v2 + 比较 ELF（Phase B — 5 张牌 rank → u32 评分 → 赢家）
+// ===========================================================================
+
+/// 构建扑克牌型评估 v2 电路的 ELF。
+///
+/// # 输入 / 输出
+///
+/// - 输入：5 字节，每字节为一张牌的 rank（2..=14）
+/// - 输出：4 字节 u32 小端序，格式 `[category:8][max_rank:8][0:8][0:8]`
+///   - category：5=straight, 4=trips（含 quads/fullhouse 简化）, 2=pair, 0=highcard
+///   - max_rank：5 张牌中最大的 rank
+///
+/// # RV32I 程序结构（86 条指令，~80 trace 步）
+///
+/// 1. `read_input(0x2000, 5)` + `LB x1..x5` 加载 5 张牌
+/// 2. 初始化 `pair_count=0, max=card[0], min=card[0]`
+/// 3. 对 x2..x5 展开 max/min 更新（每张 5 条 = 20 条）
+/// 4. 展开 C(5,2)=10 对 pair_count 比较（每对 3 条 = 30 条）
+/// 5. category 推断：
+///    - `pair_count > 2` → category=4
+///    - `pair_count > 0` → category=2
+///    - `pair_count == 0 && (max - min) == 4` → category=5
+///    - 否则 category=0
+/// 6. 输出 `category | (max << 8)` 到 addr 0，`commit_output(0, 4)`
+///
+/// # 寄存器分配
+///
+/// | 寄存器 | 用途 |
+/// |--------|------|
+/// | x20 | 0x2000 输入缓冲区基址 |
+/// | x1-x5 | 5 张牌 rank |
+/// | x6 | pair_count |
+/// | x7 | category |
+/// | x8 | max rank |
+/// | x9 | min rank |
+/// | x10/x11/x17 | syscall 参数 a0/a1/a7 |
+/// | x13/x14/x15 | 临时寄存器 |
+pub fn build_poker_hand_eval_v2_elf() -> Vec<u8> {
+    let text: Vec<u32> = vec![
+        // === Setup (5 条) ===
+        lui(20, 0x2),    // x20 = 0x2000
+        addi(10, 20, 0), // a0 = 0x2000
+        addi(11, 0, 5),  // a1 = 5
+        addi(17, 0, 1),  // a7 = 1 (read_input)
+        ecall(),         // read_input(0x2000, 5)
+        // === Load 5 cards (5 条) ===
+        lb(1, 20, 0), // x1 = card[0]
+        lb(2, 20, 1), // x2 = card[1]
+        lb(3, 20, 2), // x3 = card[2]
+        lb(4, 20, 3), // x4 = card[3]
+        lb(5, 20, 4), // x5 = card[4]
+        // === Init accumulators (3 条) ===
+        addi(6, 0, 0), // x6 = pair_count = 0
+        addi(8, 1, 0), // x8 = max = card[0]
+        addi(9, 1, 0), // x9 = min = card[0]
+        // === max/min update for x2 (5 条) ===
+        slt(14, 8, 2), // x14 = (max < x2) ? 1 : 0
+        beq(14, 0, 8), // if max >= x2, skip ADDI (→+8 = 下条 SLT)
+        addi(8, 2, 0), // max = x2
+        slt(15, 2, 9), // x15 = (x2 < min) ? 1 : 0
+        beq(15, 0, 8), // if x2 >= min, skip ADDI
+        addi(9, 2, 0), // min = x2
+        // === max/min update for x3 (5 条) ===
+        slt(14, 8, 3),
+        beq(14, 0, 8),
+        addi(8, 3, 0),
+        slt(15, 3, 9),
+        beq(15, 0, 8),
+        addi(9, 3, 0),
+        // === max/min update for x4 (5 条) ===
+        slt(14, 8, 4),
+        beq(14, 0, 8),
+        addi(8, 4, 0),
+        slt(15, 4, 9),
+        beq(15, 0, 8),
+        addi(9, 4, 0),
+        // === max/min update for x5 (5 条) ===
+        slt(14, 8, 5),
+        beq(14, 0, 8),
+        addi(8, 5, 0),
+        slt(15, 5, 9),
+        beq(15, 0, 8),
+        addi(9, 5, 0),
+        // === pair_count: 10 pairs (3 × 10 = 30 条) ===
+        // (0,1)
+        sub(13, 1, 2), // diff = x1 - x2
+        bne(13, 0, 8), // if diff != 0, skip
+        addi(6, 6, 1), // pair_count++
+        // (0,2)
+        sub(13, 1, 3),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (0,3)
+        sub(13, 1, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (0,4)
+        sub(13, 1, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (1,2)
+        sub(13, 2, 3),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (1,3)
+        sub(13, 2, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (1,4)
+        sub(13, 2, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (2,3)
+        sub(13, 3, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (2,4)
+        sub(13, 3, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // (3,4)
+        sub(13, 4, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        // === category inference (15 条) ===
+        // category = 0 (default)
+        addi(7, 0, 0),  // x7 = category = 0
+        // Block A: if pair_count > 2 (>=3), category = 4
+        addi(14, 0, 2), // x14 = 2
+        slt(15, 14, 6), // x15 = (2 < pair_count) ? 1 : 0
+        beq(15, 0, 12), // if not, skip to Block B (→+12)
+        addi(7, 0, 4),  // category = 4
+        jal(0, 20),     // skip to Block C (→+20)
+        // Block B: if pair_count > 0 (>=1), category = 2 (BEQ target +12)
+        addi(14, 0, 0), // x14 = 0
+        slt(15, 14, 6), // x15 = (0 < pair_count) ? 1 : 0
+        beq(15, 0, 8),  // if not, skip to Block C
+        addi(7, 0, 2),  // category = 2
+        // Block C: straight check (JAL target +20, BEQ target +8)
+        bne(6, 0, 20),  // if pair_count != 0, skip to output (→+20)
+        sub(13, 8, 9),  // diff = max - min
+        addi(14, 0, 4), // x14 = 4
+        bne(13, 14, 8), // if diff != 4, skip to output
+        addi(7, 0, 5),  // category = 5
+        // === Output (8 条) — BNE target +20 / BNE target +8 ===
+        sb(7, 0, 0),    // store category to addr 0
+        sb(8, 0, 1),    // store max to addr 1
+        sb(0, 0, 2),    // store 0 to addr 2
+        sb(0, 0, 3),    // store 0 to addr 3
+        addi(10, 0, 0), // a0 = 0
+        addi(11, 0, 4), // a1 = 4
+        addi(17, 0, 2), // a7 = 2 (commit_output)
+        ecall(),        // commit_output
+    ];
+
+    let text_bytes = encode_text(&text);
+    build_elf32(0x1000, 0x1000, &text_bytes)
+}
+
+/// 构建扑克牌型比较电路的 ELF。
+///
+/// # 输入 / 输出
+///
+/// - 输入：8 字节，两个 u32 小端序评分（P1 score, P2 score）
+/// - 输出：1 字节，赢家（1=P1 胜, 2=P2 胜, 0=平局）
+///
+/// # RV32I 程序（21 条指令，~20 trace 步）
+///
+/// 1. `read_input(0x2000, 8)` + `LW x1, x2` 加载两个评分
+/// 2. `SLT x3, x1, x2`（s1<s2?）+ `SLT x4, x2, x1`（s2<s1?）
+/// 3. 若 x4!=0（s1>s2）→ winner=1；若 x3!=0（s2>s1）→ winner=2；否则 winner=0
+/// 4. `SB x5, 0(x0)` + `commit_output(0, 1)`
+pub fn build_poker_hand_compare_elf() -> Vec<u8> {
+    let text: Vec<u32> = vec![
+        // === Setup (5 条) ===
+        lui(20, 0x2),    // x20 = 0x2000
+        addi(10, 20, 0), // a0 = 0x2000
+        addi(11, 0, 8),  // a1 = 8
+        addi(17, 0, 1),  // a7 = 1 (read_input)
+        ecall(),         // read_input(0x2000, 8)
+        // === Load scores (2 条) ===
+        lw(1, 20, 0), // x1 = score1
+        lw(2, 20, 4), // x2 = score2
+        // === Compare (4 条) ===
+        slt(3, 1, 2),  // x3 = (s1 < s2) ? 1 : 0
+        slt(4, 2, 1),  // x4 = (s2 < s1) ? 1 : 0
+        bne(4, 0, 16), // if x4 != 0 (s1 > s2), jump to winner=1 (→+16)
+        bne(3, 0, 20), // if x3 != 0 (s2 > s1), jump to winner=2 (→+20)
+        // === Default: winner = 0 (2 条) ===
+        addi(5, 0, 0), // winner = 0
+        jal(0, 16),    // skip to output (→+16)
+        // === winner = 1 (BNE target +16) ===
+        addi(5, 0, 1), // winner = 1
+        jal(0, 8),     // skip to output (→+8)
+        // === winner = 2 (BNE target +20) ===
+        addi(5, 0, 2), // winner = 2
+        // === Output (5 条) — JAL target +16 / JAL target +8 ===
+        sb(5, 0, 0),    // store winner to addr 0
+        addi(10, 0, 0), // a0 = 0
+        addi(11, 0, 1), // a1 = 1
+        addi(17, 0, 2), // a7 = 2 (commit_output)
+        ecall(),        // commit_output
+    ];
+
+    let text_bytes = encode_text(&text);
+    build_elf32(0x1000, 0x1000, &text_bytes)
+}
+
+/// host 端参考实现：计算 5 张牌的评分（与 `build_poker_hand_eval_v2_elf` RV32I 算法一致）。
+///
+/// 评分格式：`(category as u32) | ((max as u32) << 8)`
+/// - category：5=straight, 4=trips, 2=pair, 0=highcard
+/// - max：5 张牌中最大值
+pub fn poker_hand_eval_v2_expected(cards: &[u8; 5]) -> u32 {
+    let mut pair_count = 0u32;
+    for i in 0..5 {
+        for j in (i + 1)..5 {
+            if cards[i] == cards[j] {
+                pair_count += 1;
+            }
+        }
+    }
+    let mut category: u8 = 0;
+    if pair_count >= 3 {
+        category = 4;
+    } else if pair_count >= 1 {
+        category = 2;
+    }
+    let max = *cards.iter().max().unwrap();
+    let min = *cards.iter().min().unwrap();
+    if pair_count == 0 && (max - min) == 4 {
+        category = 5;
+    }
+    (category as u32) | ((max as u32) << 8)
+}
+
+/// host 端参考实现：比较两个评分，返回赢家（与 `build_poker_hand_compare_elf` RV32I 算法一致）。
+///
+/// 返回值：1=P1 胜, 2=P2 胜, 0=平局
+pub fn poker_hand_compare_expected(s1: u32, s2: u32) -> u8 {
+    if s1 > s2 {
+        1
+    } else if s2 > s1 {
+        2
+    } else {
+        0
+    }
+}
+
+// ===========================================================================
 // 测试
 // ===========================================================================
 

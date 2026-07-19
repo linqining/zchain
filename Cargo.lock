@@ -2681,6 +2681,10 @@ dependencies = [
 name = "zchain"
 version = "0.1.0"
 dependencies = [
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff",
+ "ark-std",
  "bcs",
  "blake2",
  "blstrs",
@@ -2689,6 +2693,7 @@ dependencies = [
  "hex",
  "poker_l1",
  "poker_protocol",
+ "poker_zkvm",
  "rand 0.8.6",
  "secp256k1",
  "serde",

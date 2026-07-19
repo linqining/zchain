@@ -8,7 +8,9 @@
 
 #![allow(dead_code)]
 
-use poker_zkvm::test_helpers::{add, addi, beq, build_elf32, ecall, encode_text, lb, lui, nop, sw};
+use poker_zkvm::test_helpers::{
+    add, addi, beq, bne, build_elf32, ecall, encode_text, jal, lb, lui, lw, nop, sb, slt, sub, sw,
+};
 
 // ===========================================================================
 // Fibonacci 电路
@@ -268,3 +270,12 @@ pub fn build_minimal_valid_elf_with_text_offset() -> (Vec<u8>, usize) {
     let elf = build_elf32(0x1000, 0x1000, &text);
     (elf, text_offset)
 }
+
+// ===========================================================================
+// Phase B — 扑克牌型评估 v2 + 比较 ELF（re-export 供 e2e_poker_hand_compare 使用）
+// ===========================================================================
+
+pub use poker_zkvm::test_helpers::{
+    build_poker_hand_compare_elf, build_poker_hand_eval_v2_elf, poker_hand_compare_expected,
+    poker_hand_eval_v2_expected,
+};
