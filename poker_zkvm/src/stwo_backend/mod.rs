@@ -40,4 +40,6 @@ pub mod poseidon_air;
 #[allow(missing_docs)] // SmallFpConfig derive 宏生成的 associated functions 无需文档
 pub mod poseidon_m31;
 pub mod prover;
+pub mod recursive;
+pub mod sha256_air;
 pub mod trace_native;

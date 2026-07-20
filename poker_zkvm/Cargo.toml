@@ -45,6 +45,9 @@ stwo-air-utils-derive = { workspace = true }
 stwo-constraint-framework = { workspace = true }
 # StarkProof 序列化
 bincode = { workspace = true }
+# Poseidon252 哈希（Merkle Path AIR 递归验证用）
+starknet-ff = "0.3"
+starknet-crypto = "0.8"
 
 [dev-dependencies]
 proptest = { workspace = true }

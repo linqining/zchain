@@ -143,6 +143,44 @@ relation!(EcallLookup, 25);
 #[allow(dead_code)]
 relation!(PoseidonLookup, 9);
 
+/// Sha256 hash lookup relation（9 元组）。
+///
+/// 用于 CPU AIR 与 Sha256 AIR 之间的 SHA-256 hash 计算一致性验证。
+///
+/// ## 值布局（9 元组，全部 M31）
+///
+/// ```text
+/// values[0]       = SyscallId      (1 列 M31，= 0x04 for Sha256)
+/// values[1..4]    = Input[0..3]    (3 列 M31，input hash 摘要前 3 个 M31)
+/// values[4..7]    = Output[0..3]   (3 列 M31，output hash 摘要前 3 个 M31)
+/// values[7]       = IsLastBlock    (1 列 M31，= 1 表示该 hash 的最后一块）
+/// values[8]       = IsPadding      (1 列 M31，= 1 表示 padding 行）
+/// ```
+///
+/// ## 交互
+///
+/// - **CPU AIR 发送 claim**（每条 Sha256 ECALL 指令，multiplicity = +1）：
+///   - values = (SHA256=0x04, Input[0..3], Output[0..3], 1, 0)
+///   - 非 Sha256 ECALL 行 multiplicity = 0
+///
+/// - **Sha256 AIR 发送 yield**（每 IsLastBlock=1 行，multiplicity = -1）：
+///   - values = (0x04, Input[0..3], Output[0..3], 1, 0)
+///   - padding 行 multiplicity = 0
+///
+/// - **一致性条件**：Σ(CPU claims) + Σ(Sha256 yields) == 0
+///
+/// ## Soundness 说明
+///
+/// - Sha256 AIR 的约束确保 compression function 计算正确（64 轮 state transition）
+/// - logup 确保 CPU 知道的 (Input, Output) 与 Sha256 AIR 计算的 (Input, Output) 一致
+/// - Input 来源（内存读取）由 Memory AIR 验证
+///
+/// ## 设计文档
+///
+/// 详见 `.trae/documents/stwo_phase4_tier2_sha256_air_design.md`
+#[allow(dead_code)]
+relation!(Sha256Lookup, 9);
+
 // ===========================================================================
 // 单元测试
 // ===========================================================================
@@ -212,6 +250,22 @@ mod tests {
         let lookup = PoseidonLookup::dummy();
         assert_eq!(
             <PoseidonLookup as Relation<BaseField, SecureField>>::get_size(&lookup),
+            9
+        );
+    }
+
+    #[test]
+    fn test_sha256_lookup_dummy() {
+        // 验证 Sha256Lookup 可以创建 dummy 实例
+        let _lookup = Sha256Lookup::dummy();
+    }
+
+    #[test]
+    fn test_sha256_lookup_size() {
+        // Sha256Lookup 是 9 元组（SyscallId + Input×3 + Output×3 + IsLastBlock + IsPadding）
+        let lookup = Sha256Lookup::dummy();
+        assert_eq!(
+            <Sha256Lookup as Relation<BaseField, SecureField>>::get_size(&lookup),
             9
         );
     }

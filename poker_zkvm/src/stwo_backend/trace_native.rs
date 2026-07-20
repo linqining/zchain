@@ -1373,6 +1373,116 @@ pub fn gen_poseidon_trace(hash_calls: &[PoseidonHashCall]) -> PoseidonTrace {
     trace
 }
 
+/// 从 `&[PoseidonHashCall]` 生成 Poseidon trace，支持指定最小 log_size。
+///
+/// 与 [`gen_poseidon_trace`] 相同，但使用 `max(compute_poseidon_log_size(...), min_log_size)`
+/// 作为最终 log_size。用于多组件集成（CPU + Memory + Poseidon）时对齐 log_size。
+///
+/// # 参数
+/// - `hash_calls` — Poseidon hash 调用列表
+/// - `min_log_size` — 最小 log_size（若 computed < min，则使用 min）
+///
+/// # 返回
+/// `PoseidonTrace`，log_size = `max(computed, min_log_size)`
+#[must_use]
+pub fn gen_poseidon_trace_with_min_log_size(
+    hash_calls: &[PoseidonHashCall],
+    min_log_size: u32,
+) -> PoseidonTrace {
+    let total_rounds_needed = hash_calls.len() * POSEIDON_AIR_TOTAL_ROUNDS;
+    let computed_log_size = compute_poseidon_log_size(total_rounds_needed);
+    let log_size = computed_log_size.max(min_log_size);
+
+    let mut trace = PoseidonTrace::new(log_size);
+
+    // 预计算 round constants
+    let rcs = poseidon_m31_round_constants();
+    let full_half = POSEIDON_M31_FULL_ROUNDS as usize / 2; // 4
+    let partial_end = full_half + POSEIDON_M31_PARTIAL_ROUNDS as usize; // 26
+
+    let mut row_idx: usize = 0;
+    for call in hash_calls {
+        let states = poseidon_permutation_m31_steps(call.input_state);
+        assert_eq!(
+            states.len(),
+            POSEIDON_AIR_TOTAL_ROUNDS + 1,
+            "poseidon_permutation_m31_steps 应返回 31 个 state（初始 + 30 轮）"
+        );
+
+        debug_assert_eq!(
+            states[POSEIDON_AIR_TOTAL_ROUNDS],
+            call.output_state,
+            "PoseidonHashCall output_state 与 permutation 计算结果不一致"
+        );
+
+        for round in 0..POSEIDON_AIR_TOTAL_ROUNDS {
+            trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_BASE, &states[round]);
+            trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_NEXT_BASE, &states[round + 1]);
+
+            let (is_full, is_partial) = if round < full_half {
+                (1u32, 0u32)
+            } else if round < partial_end {
+                (0u32, 1u32)
+            } else {
+                (1u32, 0u32)
+            };
+            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_FULL_ROUND, M31::from(is_full));
+            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_PARTIAL_ROUND, M31::from(is_partial));
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_IS_FIRST_ROUND,
+                M31::from(u32::from(round == 0)),
+            );
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_IS_LAST_ROUND,
+                M31::from(u32::from(round == POSEIDON_AIR_TOTAL_ROUNDS - 1)),
+            );
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_ROUND_COUNTER,
+                M31::from(round as u32),
+            );
+            trace.fill_state(row_idx, POSEIDON_AIR_COL_INPUT_BASE, &states[0]);
+            trace.fill_state(
+                row_idx,
+                POSEIDON_AIR_COL_OUTPUT_BASE,
+                &states[POSEIDON_AIR_TOTAL_ROUNDS],
+            );
+            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_PADDING, M31::from(0u32));
+
+            // Round constants
+            for j in 0..POSEIDON_M31_WIDTH {
+                trace.fill_base(
+                    row_idx,
+                    POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + j,
+                    rcs[round][j],
+                );
+            }
+
+            // v2.1 S-box 中间列
+            for j in 0..POSEIDON_M31_WIDTH {
+                let sbox_input = states[round][j] + rcs[round][j];
+                let sbox_sq1 = sbox_input * sbox_input;
+                let sbox_sq2 = sbox_sq1 * sbox_sq1;
+                let sbox_out = sbox_sq2 * sbox_input;
+                trace.fill_base(row_idx, POSEIDON_AIR_COL_SBOX_SQ1_BASE + j, sbox_sq1);
+                trace.fill_base(row_idx, POSEIDON_AIR_COL_SBOX_SQ2_BASE + j, sbox_sq2);
+                trace.fill_base(row_idx, POSEIDON_AIR_COL_SBOX_OUT_BASE + j, sbox_out);
+            }
+
+            row_idx += 1;
+        }
+    }
+
+    // Padding
+    for r in row_idx..trace.num_rows() {
+        trace.fill_scalar(r, POSEIDON_AIR_COL_IS_PADDING, M31::from(1u32));
+    }
+
+    trace
+}
+
 /// 将 [`PoseidonTrace`] 转换为 Stwo `CircleEvaluation` 列。
 ///
 /// # 参数

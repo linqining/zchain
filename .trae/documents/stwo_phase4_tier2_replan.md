@@ -19,8 +19,9 @@ Phase 4 Tier 2 Poseidon AIR 实施进度：
 | 4.2.1 M31 Poseidon 参数生成 | ✅ 完成 | MDS + round constants + `poseidon_permutation_m31` host 函数 |
 | 4.2.2 新建 poseidon_air.rs | ✅ 完成 | 21 列 + 18 约束（P1-P18），修复了 RC 位置 bug |
 | 4.2.3 扩展 trace_native.rs | ✅ 完成 | `PoseidonHashCall` + `gen_poseidon_trace` + 11 单元测试 |
-| 4.2.4 扩展 prover.rs | 🔄 **卡住** | 3 个基础设施 panic 已修复，AIR 约束手动检查通过，但 Stwo prover 仍报 `ConstraintsNotSatisfied` |
-| 4.2.5 测试 | ⬜ 待做 | 等 4.2.4 通过后执行 |
+| 4.2.4-rev1 Poseidon AIR 重设计（v2.1 中间列降度） | ✅ 完成 | 30 列 + 27 约束（P1-P27，degree ≤ 2），强制 SubDomain 评估模式 |
+| 4.2.5 Poseidon prover 测试 | ✅ 完成 | 7/7 测试通过（含空 trace / 单 hash / 多 hash / soundness） |
+| 4.2.6 3 组件集成测试（CPU + Memory + Poseidon） | ✅ 完成 | 4/4 测试通过；poker_zkvm 459/459 通过 |
 
 ### 1.2 卡点详细描述
 
@@ -311,11 +312,37 @@ let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
    - CPU/Memory soundness check `claimed_sum_cpu + claimed_sum_mem == 0` 仍成立，
      因为对应行的 denom 相同（lookup values 相同），num 互为相反数。
 
-### Step 4.2.6：3 组件集成测试（1-2 天）
+### Step 4.2.6：3 组件集成测试（1-2 天）✅ **已完成（2026-07-20）**
 
 `prove_cpu_memory_poseidon_trace`：CPU + Memory + Poseidon 3 组件 prover
 - Soundness check：`claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon == 0`
-- 注意：CPU 端 Poseidon ECALL claim 尚未实现（需 Tier 2 后续步骤），此处先验证 Poseidon 独立组件 + Memory + CPU 无 Poseidon claim 的组合
+- ✅ CPU 端 Poseidon ECALL claim **已实现**（在 `gen_cpu_poseidon_interaction_trace` 中，
+  从 CPU trace 读取 SyscallId/Input/Output，通过 2-batch logup 同时发送 Memory claim 和 Poseidon claim）
+- ✅ 4 个测试全部通过：
+  - `test_prove_verify_cpu_memory_poseidon_single_hash` — 1 hash, prove+verify roundtrip
+  - `test_prove_verify_cpu_memory_poseidon_empty` — 空 trace, 所有 claimed_sums==0
+  - `test_prove_verify_cpu_memory_poseidon_multiple_hashes` — 3 hashes
+  - `test_cpu_memory_poseidon_soundness_mismatched_output` — 篡改 Output → prove 返回 `Err(ProvingError::ConstraintsNotSatisfied)`
+- ✅ poker_zkvm 总测试数 455 → 459（+4），无回归
+
+#### 关键实现细节
+
+1. **多 batch logup 架构**（参考 Stwo `finalize_logup_batched`）：
+   - Tree 2 列布局：CPU interaction (8 cols, 2 batches) + Memory (4 cols) + Poseidon (4 cols) = 16 cols
+   - CPU 用 1 个 `LogupTraceGenerator` 生成 2 列（Memory batch + Poseidon batch）
+   - Soundness：`claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon == 0`
+
+2. **多 `finalize_logup()` panic bug 修复**（`cpu_air.rs`）：
+   - Stwo 的 `write_logup_frac` 只在 `fracs.is_empty()` 时重置 `is_finalized`，多次 `finalize_logup()` 会 panic
+   - 修复：移除 3 个中间 `finalize_logup()` 调用，改为 `has_logup = true` 标记，最后统一调用一次
+
+3. **Prover vs AIR 一致性**：
+   - Prover 必须从 trace 读取 SyscallId（`cpu_trace[COL_SYSCALL_ID]`），而非常量
+   - 确保 Prover 与 AIR 的 `col(COL_SYSCALL_ID)` 使用相同值
+
+4. **Soundness check 错误处理**：
+   - 原设计用 `assert_eq!` panic，与 `prove_cpu_trace` 返回 `ProvingError` 模式不一致
+   - 修复：改为 `if != zero { return Err(ProvingError::ConstraintsNotSatisfied); }`
 
 ***
 
@@ -368,13 +395,13 @@ let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
 
 ### 关键里程碑
 
-| 里程碑 | 目标日期 | 依赖 |
-|--------|---------|------|
-| Poseidon AIR Option D 诊断完成 | 2026-07-21 | AssertEvaluator 测试通过 |
-| Poseidon AIR Option B 重设计完成 | 2026-07-23 | Step 4.2.4-rev1 + 4.2.5 通过 |
-| 3 组件 prover 集成测试通过 | 2026-07-25 | Step 4.2.6 通过 |
-| Sha256 AIR 完成 | 2026-08-06 | Tier 2 后续 |
-| MerkleVerify AIR 完成 | 2026-08-13 | Tier 2 完成 |
+| 里程碑 | 目标日期 | 依赖 | 实际完成 |
+|--------|---------|------|---------|
+| Poseidon AIR Option D 诊断完成 | 2026-07-21 | AssertEvaluator 测试通过 | ⏭️ 跳过（Option B 已成功绕过） |
+| Poseidon AIR Option B 重设计完成 | 2026-07-23 | Step 4.2.4-rev1 + 4.2.5 通过 | ✅ 2026-07-20 |
+| 3 组件 prover 集成测试通过 | 2026-07-25 | Step 4.2.6 通过 | ✅ 2026-07-20 |
+| Sha256 AIR 完成 | 2026-08-06 | Tier 2 后续 | ⬜ |
+| MerkleVerify AIR 完成 | 2026-08-13 | Tier 2 完成 | ⬜ |
 
 ***
 
@@ -451,7 +478,7 @@ Stwo `StarkProof.commitments` 包含：
      - Step 4.2.4-rev1.4：手动检查测试 P13-P27 验证 ✅
    - Step 4：执行 Step 4.2.5 + 4.2.6 测试
      - Step 4.2.5：Poseidon prover 测试 ✅ **已完成（2026-07-20）**：7/7 测试通过
-     - Step 4.2.6：3 组件集成测试（CPU + Memory + Poseidon）⬜ 待执行
+     - Step 4.2.6：3 组件集成测试（CPU + Memory + Poseidon）✅ **已完成（2026-07-20）**：4/4 测试通过，poker_zkvm 459/459 通过
 3. **更新现有文档**：
    - `stwo_phase4_precompile_air_design.md` §4.1 标注为 "v1.0 设计，已被 §4.1.7 取代" ✅ 已完成（v1.4）
    - `hypernova_to_stwo_migration_plan_v2.md` Phase 4 Tier 2 工期更新 ✅ 已完成（v2.1）

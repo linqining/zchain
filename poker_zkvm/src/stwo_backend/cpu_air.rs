@@ -45,7 +45,7 @@ use super::column_layout_v2::{
     IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_ECALL, IS_JAL, IS_JALR, IS_LOAD, IS_LUI, IS_PADDING,
     IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
 };
-use super::lookups::{EcallLookup, MemoryLookup};
+use super::lookups::{EcallLookup, MemoryLookup, PoseidonLookup};
 
 /// 65536 = 2^16，16-bit 边界进位/借位的基数。
 const SIX5536: BaseField = BaseField::from_u32_unchecked(65536);
@@ -66,6 +66,9 @@ const FOUR: BaseField = BaseField::from_u32_unchecked(4);
 /// - `ecall_lookup` — 可选的 EcallLookup relation（Phase 4 Tier 1+）。
 ///   - `None`：不发送 ECALL logup claim
 ///   - `Some(lookup)`：为每行 ECALL 发送 25 元组 logup claim
+/// - `poseidon_lookup` — 可选的 PoseidonLookup relation（Phase 4 Tier 2+）。
+///   - `None`：不发送 Poseidon logup claim
+///   - `Some(lookup)`：为每行 Poseidon ECALL 发送 9 元组 logup claim
 ///
 /// # 用法
 /// ## 单组件模式（Phase 2 兼容）
@@ -91,6 +94,17 @@ const FOUR: BaseField = BaseField::from_u32_unchecked(4);
 ///     EcallLookup::dummy(),
 /// );
 /// ```
+///
+/// ## Phase 4 Tier 2+（配合 Memory AIR + Poseidon AIR）
+/// ```ignore
+/// use poker_zkvm::stwo_backend::cpu_air::CpuAir;
+/// use poker_zkvm::stwo_backend::lookups::{MemoryLookup, PoseidonLookup};
+/// let air = CpuAir::new_with_poseidon_lookup(
+///     log_size,
+///     MemoryLookup::dummy(),
+///     PoseidonLookup::dummy(),
+/// );
+/// ```
 #[derive(Debug, Clone)]
 pub struct CpuAir {
     /// log2(trace 行数)
@@ -100,6 +114,9 @@ pub struct CpuAir {
     /// 可选的 EcallLookup relation（None=不发送 ECALL logup claim）
     /// Phase 4 Tier 1 新增
     ecall_lookup: Option<EcallLookup>,
+    /// 可选的 PoseidonLookup relation（None=不发送 Poseidon logup claim）
+    /// Phase 4 Tier 2 新增
+    poseidon_lookup: Option<PoseidonLookup>,
 }
 
 impl CpuAir {
@@ -109,7 +126,7 @@ impl CpuAir {
     /// - `log_size` — log2(行数)，须 ≥ 10（Stwo SIMD 对齐要求）
     ///
     /// # 返回
-    /// `memory_lookup = None, ecall_lookup = None` 的 CpuAir，不发送任何 logup claim。
+    /// `memory_lookup = None, ecall_lookup = None, poseidon_lookup = None` 的 CpuAir。
     /// 适用于 Phase 2 单组件 prove/verify 测试。
     #[must_use]
     pub const fn new(log_size: u32) -> Self {
@@ -117,6 +134,7 @@ impl CpuAir {
             log_size,
             memory_lookup: None,
             ecall_lookup: None,
+            poseidon_lookup: None,
         }
     }
 
@@ -127,7 +145,7 @@ impl CpuAir {
     /// - `memory_lookup` — MemoryLookup relation 实例（从 channel draw 或 dummy）
     ///
     /// # 返回
-    /// `memory_lookup = Some(lookup), ecall_lookup = None` 的 CpuAir。
+    /// `memory_lookup = Some(lookup), ecall_lookup = None, poseidon_lookup = None` 的 CpuAir。
     /// 适用于 Phase 3.5+ 多组件 prove/verify（配合 Memory AIR）。
     #[must_use]
     pub const fn new_with_lookup(log_size: u32, memory_lookup: MemoryLookup) -> Self {
@@ -135,6 +153,7 @@ impl CpuAir {
             log_size,
             memory_lookup: Some(memory_lookup),
             ecall_lookup: None,
+            poseidon_lookup: None,
         }
     }
 
@@ -146,7 +165,7 @@ impl CpuAir {
     /// - `ecall_lookup` — EcallLookup relation 实例（从 channel draw 或 dummy）
     ///
     /// # 返回
-    /// `memory_lookup = Some, ecall_lookup = Some` 的 CpuAir。
+    /// `memory_lookup = Some, ecall_lookup = Some, poseidon_lookup = None` 的 CpuAir。
     /// 适用于 Phase 4 Tier 1+ 多组件 prove/verify（配合 Memory AIR + Precompile AIR）。
     ///
     /// # Phase 4 Tier 1 注意
@@ -163,6 +182,48 @@ impl CpuAir {
             log_size,
             memory_lookup: Some(memory_lookup),
             ecall_lookup: Some(ecall_lookup),
+            poseidon_lookup: None,
+        }
+    }
+
+    /// 创建指定 log_size 的 CPU AIR（Phase 4 Tier 2+，启用 Memory + Poseidon logup claim）。
+    ///
+    /// # 参数
+    /// - `log_size` — log2(行数)，须 ≥ 10
+    /// - `memory_lookup` — MemoryLookup relation 实例
+    /// - `poseidon_lookup` — PoseidonLookup relation 实例（从 channel draw 或 dummy）
+    ///
+    /// # 返回
+    /// `memory_lookup = Some, ecall_lookup = None, poseidon_lookup = Some` 的 CpuAir。
+    /// 适用于 Phase 4 Tier 2+ 3 组件 prove/verify（配合 Memory AIR + Poseidon AIR）。
+    ///
+    /// # Phase 4 Tier 2 设计
+    /// CPU 为每行 Poseidon ECALL（SyscallId=0x03）发送 9 元组 PoseidonLookup claim：
+    ///   values = (SyscallId=0x03, Input[0..3], Output[0..3], IsLastRound=1, IsPadding=0)
+    ///   multiplicity = IS_ECALL（假设测试中所有 ECALL 均为 Poseidon）
+    /// Poseidon AIR 在 IsLastRound=1 行发送 yield（multiplicity = -1）。
+    /// 一致性条件：Σ(CPU claims) + Σ(Poseidon yields) == 0。
+    ///
+    /// # 列映射（Poseidon ECALL 行，Phase 4 Tier 2）
+    /// ECALL dispatch 列在 Poseidon ECALL 行存储 M31 值（非 4×8-bit limb）：
+    /// - SyscallId = COL_SYSCALL_ID（1 col）
+    /// - Input[0] = COL_SYSCALL_ARG0_BASE（1 col，直接 M31）
+    /// - Input[1] = COL_SYSCALL_ARG1_BASE（1 col）
+    /// - Input[2] = COL_SYSCALL_ARG2_BASE（1 col）
+    /// - Output[0] = COL_SYSCALL_OUTPUT0_BASE（1 col）
+    /// - Output[1] = COL_SYSCALL_OUTPUT0_BASE + 1（1 col）
+    /// - Output[2] = COL_SYSCALL_OUTPUT1_BASE（1 col）
+    #[must_use]
+    pub const fn new_with_poseidon_lookup(
+        log_size: u32,
+        memory_lookup: MemoryLookup,
+        poseidon_lookup: PoseidonLookup,
+    ) -> Self {
+        Self {
+            log_size,
+            memory_lookup: Some(memory_lookup),
+            ecall_lookup: None,
+            poseidon_lookup: Some(poseidon_lookup),
         }
     }
 
@@ -182,6 +243,12 @@ impl CpuAir {
     #[must_use]
     pub const fn has_ecall_lookup(&self) -> bool {
         self.ecall_lookup.is_some()
+    }
+
+    /// 是否启用 Poseidon logup claim（Phase 4 Tier 2+）。
+    #[must_use]
+    pub const fn has_poseidon_lookup(&self) -> bool {
+        self.poseidon_lookup.is_some()
     }
 }
 
@@ -458,6 +525,13 @@ impl FrameworkEval for CpuAir {
         // 一致性条件：Σ(CPU claims) = Σ(Memory yields)（Phase 3.5 多组件 prover 验证）
         //
         // 当 memory_lookup = None 时（单组件模式），跳过 logup，保持 Phase 2 兼容。
+        //
+        // **多 batch logup 注意（Phase 4 Tier 2+）**：
+        // 当同时启用 memory_lookup + ecall_lookup + poseidon_lookup 时，所有 add_to_relation
+        // 调用必须先累积，最后统一调用一次 finalize_logup()。Stwo 的 finalize_logup 内部
+        // 调用 finalize_logup_batched，会根据 fracs 数量自动创建 N 个 batch（batches=[0..N]）。
+        // 多次调用 finalize_logup 会因 is_finalized assert 而 panic。
+        let mut has_logup = false;
         if let Some(ref lookup) = self.memory_lookup {
             // 构造 claim values（9 元组）：
             // values[0..4] = MemAddr（4×8-bit limb）
@@ -482,7 +556,7 @@ impl FrameworkEval for CpuAir {
             // RelationEntry 的 multiplicity 类型是 E::EF，需要从 E::F 转换
             let multiplicity_ef: E::EF = (is_load.clone() + is_store.clone()).into();
             eval.add_to_relation(RelationEntry::new(lookup, multiplicity_ef, &claim_values));
-            eval.finalize_logup();
+            has_logup = true;
         }
 
         // ===== Phase 4 Tier 1 约束 C57：IS_ECALL binality =====
@@ -545,6 +619,58 @@ impl FrameworkEval for CpuAir {
                 multiplicity_ef,
                 &ecall_claim_values,
             ));
+            has_logup = true;
+        }
+
+        // ===== Phase 4 Tier 2 约束：Poseidon logup claim（gated by Option<PoseidonLookup>）=====
+        // 当 poseidon_lookup = Some(lookup) 时，为每行 Poseidon ECALL 发送 9 元组 logup claim：
+        //   values = (SyscallId=0x03, Input[0..3], Output[0..3], IsLastRound=1, IsPadding=0)
+        //   multiplicity = IS_ECALL（假设测试中所有 ECALL 均为 Poseidon）
+        //
+        // 列映射（Poseidon ECALL 行，ECALL dispatch 列存储 M31 值而非 limb）：
+        //   ecall_claim_values[0]  = SyscallId (COL_SYSCALL_ID)
+        //   ecall_claim_values[1]  = Input[0]  (COL_SYSCALL_ARG0_BASE)
+        //   ecall_claim_values[5]  = Input[1]  (COL_SYSCALL_ARG1_BASE)
+        //   ecall_claim_values[9]  = Input[2]  (COL_SYSCALL_ARG2_BASE)
+        //   ecall_claim_values[17] = Output[0] (COL_SYSCALL_OUTPUT0_BASE)
+        //   ecall_claim_values[18] = Output[1] (COL_SYSCALL_OUTPUT0_BASE + 1)
+        //   ecall_claim_values[21] = Output[2] (COL_SYSCALL_OUTPUT1_BASE)
+        //
+        // 一致性条件：Σ(CPU Poseidon claims) + Σ(Poseidon AIR yields) == 0
+        // Poseidon AIR 在 IsLastRound=1 行发送 yield（multiplicity = -1 * (1 - IsPadding)）
+        if let Some(ref lookup) = self.poseidon_lookup {
+            // 构造 9 元组 claim values
+            let mut poseidon_claim_values: Vec<E::F> = Vec::with_capacity(9);
+            poseidon_claim_values.push(ecall_claim_values[0].clone());  // SyscallId
+            poseidon_claim_values.push(ecall_claim_values[1].clone());  // Input[0]
+            poseidon_claim_values.push(ecall_claim_values[5].clone());  // Input[1]
+            poseidon_claim_values.push(ecall_claim_values[9].clone());  // Input[2]
+            poseidon_claim_values.push(ecall_claim_values[17].clone()); // Output[0]
+            poseidon_claim_values.push(ecall_claim_values[18].clone()); // Output[1]
+            poseidon_claim_values.push(ecall_claim_values[21].clone()); // Output[2]
+            // IsLastRound = 1（CPU 的 Poseidon ECALL 代表完整 hash，等价于 Poseidon AIR 的最后一轮）
+            poseidon_claim_values.push(one.clone());
+            // IsPadding = 0（CPU 行永不为 padding）
+            poseidon_claim_values.push(BaseField::from(0u32).into());
+
+            // multiplicity = IS_ECALL（非 ECALL 行 multiplicity = 0）
+            let multiplicity_ef: E::EF = is_ecall.clone().into();
+            eval.add_to_relation(RelationEntry::new(
+                lookup,
+                multiplicity_ef,
+                &poseidon_claim_values,
+            ));
+            has_logup = true;
+        }
+
+        // ===== 统一 finalize_logup（多 batch 模式）=====
+        // 当启用任意 logup（Memory / ECALL / Poseidon）时，在所有 add_to_relation 之后
+        // 调用一次 finalize_logup()。Stwo 自动根据 fracs 数量创建 N 个 batch：
+        //   - 1 frac → 1 batch → 1 interaction column（4 base field cols）
+        //   - 2 fracs → 2 batches → 2 interaction columns（8 base field cols）
+        //   - 3 fracs → 3 batches → 3 interaction columns（12 base field cols）
+        // 多次调用 finalize_logup 会因 is_finalized assert 而 panic，因此必须只调一次。
+        if has_logup {
             eval.finalize_logup();
         }
 

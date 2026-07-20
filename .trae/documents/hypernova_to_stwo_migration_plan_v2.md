@@ -384,52 +384,68 @@ L2 proof (~10-20KB，可在链上验证)
 
 **背景**：Stwo 2.3 不提供原生递归 API。采用 StarkWare 官方 "circuit-based recursion" 路线（参考 stwo-cairo）。
 
+**详细设计**：详见 [stwo_phase5_verifier_air_design.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase5_verifier_air_design.md)
+
+**实施状态**：✅ Phase 5.1 模块脚手架完成（2026-07-20）
+- 创建 `poker_zkvm/src/stwo_backend/recursive/` 目录（8 个文件）
+- OODS Check AIR v5.0 完整实现（9 列 + 5 约束）
+- FRI Verifier AIR v5.0 骨架（19 列 + 6 约束，Horner step 待 v5.1）
+- Merkle Path AIR 骨架（52 列 + 3 binality 约束，Poseidon252 hash 待补）
+- Composition Eval AIR v5.0 stub
+- Recursion Prover/Verifier 骨架
+- 18/18 测试通过，poker_zkvm 485/485 通过
+- 关键决策：L1 VCS 使用 Poseidon252MerkleChannel（递归路径）以简化 Merkle Path Verifier AIR
+
 **任务**：
-1. **FRI Verifier AIR**（~1000 行）：
-   - 新建 `poker_zkvm/src/stwo_backend/air/recursive/fri_verifier.rs`
+1. **FRI Verifier AIR**（~1500 行）：
+   - 新建 `poker_zkvm/src/stwo_backend/recursive/fri_verifier_air.rs` ✅ 骨架
    - FRI 查询打开验证（Merkle path + leaf value）
-   - FRI 最后一层多项式检查
+   - FRI 最后一层多项式检查（Horner method）✅ v5.0 骨架
    - degree bound 验证
 
-2. **Merkle Path Verifier AIR**（~800 行）：
-   - Blake2s 哈希链验证
+2. **Merkle Path Verifier AIR**（~800 行，**改用 Poseidon252 hash**）：
+   - 新建 `poker_zkvm/src/stwo_backend/recursive/merkle_path_air.rs` ✅ 骨架
+   - **Poseidon252** 哈希链验证（避免 Blake2s 的 ~10000 约束/hash）
    - 多个 Merkle path 批量验证
 
 3. **OODS Check AIR**（~600 行）：
-   - Out-of-Domain Sample 评估对比
-   - composition polynomial 评估
+   - 新建 `poker_zkvm/src/stwo_backend/recursive/oods_check_air.rs` ✅ v5.0 完整
+   - Out-of-Domain Sample 评估对比 ✅ v5.0 简化版
+   - composition polynomial 评估（v5.1）
 
 4. **Composition Eval AIR**（~600 行）：
+   - 新建 `poker_zkvm/src/stwo_backend/recursive/composition_eval_air.rs` ✅ v5.0 stub
    - constraint quotient 评估
    - mask point 评估
 
 5. **Recursion Prover**：
-   - 新建 `poker_zkvm/src/stwo_backend/recursive_prover.rs`
+   - 新建 `poker_zkvm/src/stwo_backend/recursive/recursion_prover.rs` ✅ 骨架
    - 输入：L1 `StarkProof<Blake2sMerkleHasher>`
    - 输出：L2 `StarkProof<Blake2sMerkleHasher>`（更小）
    - L2 proof 可在链上验证
 
 6. **Recursion Verifier**：
-   - 新建 `poker_zkvm/src/stwo_backend/recursive_verifier.rs`
+   - 新建 `poker_zkvm/src/stwo_backend/recursive/recursion_verifier.rs` ✅ 骨架
    - 验证 L2 proof
 
 **完成标准**：
-- [ ] 4 个 Verifier AIR 实现并通过测试
+- [x] 4 个 Verifier AIR 模块创建（v5.0 骨架/stub）— 2026-07-20
+- [ ] 4 个 Verifier AIR 完整实现并通过测试（v5.1）
 - [ ] L1 → L2 递归证明测试通过
 - [ ] L2 proof size < 20KB（目标 10-15KB）
 - [ ] L2 verify 时间 < 100ms
 
 **测试**：
-- `test_fri_verifier_air`：FRI 验证逻辑
-- `test_merkle_path_verifier_air`：Merkle 路径验证
-- `test_oods_check_air`：OODS 检查
-- `test_recursive_prover_e2e`：L1 → L2 端到端
-- `test_recursive_proof_size`：proof size < 20KB
+- `test_fri_verifier_air`：FRI 验证逻辑 ✅ v5.0 骨架测试通过
+- `test_merkle_path_verifier_air`：Merkle 路径验证 ✅ v5.0 骨架测试通过
+- `test_oods_check_air`：OODS 检查 ✅ v5.0 完整测试通过
+- `test_recursive_prover_e2e`：L1 → L2 端到端（待 v5.1）
+- `test_recursive_proof_size`：proof size < 20KB（待 v5.1）
 
 **风险**：
 - 工作量大（3000-5000 行 AIR）
 - Stwo Verifier AIR 无现成参考（stwo-cairo 是 Cairo-specific）
-- 可能需要分多个子阶段（5.1/5.2/5.3/5.4）
+- 分多个子阶段：5.1 脚手架 ✅ / 5.2 OODS 完整 ✅ / 5.3 FRI 完整 / 5.4 Merkle 完整 / 5.5 Recursion Prover / 5.6 E2E
 
 ---
 
@@ -583,13 +599,23 @@ L2 proof (~10-20KB，可在链上验证)
 | 2026-07-20 | **v2.1**：Poseidon AIR 采用中间列降度方案（Option B） | S-box `x^5 = x * (x^2)^2` 分解为 3 个 degree ≤ 2 约束（SboxSq1/SboxSq2/SboxOut），新增 9 列（21→30 列），约束度 6→2，强制 SubDomain 模式。详见 [stwo_phase4_tier2_replan.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase4_tier2_replan.md) §3 |
 | 2026-07-20 | **v2.1**：所有 AIR 统一使用 `PcsConfig::default()` | 禁止 `set_store_polynomials_coefficients` 和 `lifting_log_size = Some(...)`，消除 ExtendToEvalDomain 配置复杂性 |
 | 2026-07-20 | **v2.1**：`StarkProof.commitments.len() == 4`（Hard Constraint） | Stwo 返回 4 个 commitments（Tree 0 + Tree 1 + Tree 2 + composition poly tree），即使 Tree 0 为空也有 commitment。原测试断言 `== 3` 错误 |
+| 2026-07-20 | **Phase 5 v5.0 MVP 完成**：Recursion Prover/Verifier roundtrip | `prove_recursive` + `verify_recursive` + `mix_public_inputs_into_channel`（PcsConfig::mix_into + max_log_degree_bound + composition_oods_eval + oods_point）。3 个 roundtrip 测试通过（prove_succeeds/roundtrip/mismatched_inputs），poker_zkvm 504/504。v5.0 简化：ComputedOodsEval = ClaimedOodsEval，v5.1 由 Composition Eval AIR 计算真值 |
+| 2026-07-20 | **无 logup AIR 不调用 `finalize_logup()`**（Hard Constraint） | `FormalLogupAtRow` 初始 `is_finalized=true`，只有 `write_logup_frac`（通过 `add_to_relation`）重置为 false。OodsCheckAir/FriVerifierAir/MerklePathAir/CompositionEvalAir 无 logup，调用 `finalize_logup()` 会 panic |
 
 ***
 
 ## 下一步
 
-1. **等待用户审查本计划**（用户偏好"先讨论方案再执行"）
-2. **审查通过后，编写 Phase 1 详细设计文档**（trace 重写 + 4×8-bit limb 布局）
-3. **更新 `project_memory.md`**：删除 Hypernova fallback 约束，新增递归证明约束
-4. **标记旧文档为 deprecated**：v1 计划、Phase 2.3.x 系列文档
-5. **启动 Phase 1 实施**：删除旧代码 + 重写 trace 生成
+### 已完成
+- ✅ Phase 1: BN254 Fr 保留用于 Poseidon 哈希
+- ✅ Phase 3.5: 多组件 prover + LogupTraceGenerator（CPU + Memory）
+- ✅ Phase 4 Tier 1: ECALL dispatch 约束（25 列 + C57-C82）
+- ✅ Phase 4 Tier 2: Poseidon AIR v2.1（中间列降度）+ Sha256 AIR Step 5.1（骨架）
+- ✅ Phase 5 v5.0 MVP: OODS Check AIR + FRI Verifier AIR（骨架）+ Merkle Path AIR（骨架）+ Recursion Prover/Verifier roundtrip
+
+### 待完成
+- ⏳ Phase 4 Tier 2: Sha256 AIR Step 5.2（完整 compression 约束）+ Step 5.3（多块+4组件集成）
+- ⏳ Phase 4 Tier 3: ECDSA verify AIR + Keccak256 AIR + Modexp AIR
+- ⏳ Phase 4 Tier 4: BLS12-381 Building-block AIRs（12 个 syscalls）
+- ⏳ Phase 5 v5.1: Composition Eval AIR（完整 L1 约束 evaluation）+ FRI commit/decommit + Merkle Poseidon hash
+- ⏳ Phase 6: E2E 测试 + 性能基准 + 链上集成

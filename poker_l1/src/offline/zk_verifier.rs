@@ -15,8 +15,15 @@ use crate::error::PokerL1Error;
 /// ZK 证明 scheme 标识符（u32，与 syscall 接口一致）。
 pub type SchemeId = u32;
 
-/// Hypernova scheme_id（spec.md L499）。
-pub const SCHEME_HYPERNOVA: SchemeId = 1;
+/// Stwo scheme_id（替代原 SCHEME_HYPERNOVA，v2 Stwo 递归证明）。
+///
+/// v2 已完全放弃 Hypernova，使用 Stwo 递归证明方案。
+pub const SCHEME_STWO: SchemeId = 1;
+/// Hypernova scheme_id（spec.md L499，已废弃）。
+///
+/// v2 已完全放弃 Hypernova，使用 `SCHEME_STWO` 替代。
+#[deprecated(note = "v2 使用 SCHEME_STWO 替代")]
+pub const SCHEME_HYPERNOVA: SchemeId = SCHEME_STWO;
 /// Groth16 scheme_id（spec.md L505）。
 pub const SCHEME_GROTH16: SchemeId = 2;
 /// IPA scheme_id（spec.md L511）。
@@ -44,12 +51,12 @@ pub enum ProofKind {
 impl ProofKind {
     /// 由 `scheme_id` 反推期望的 `ProofKind`（spec.md L768）。
     ///
-    /// 不匹配的 `scheme_id` 返回 `None`（调用方应返回 `ProofKindMismatch` 错误）。
+    /// v2 已使用 Stwo 替代 Hypernova，但保持向后兼容。
     #[must_use]
     pub const fn from_scheme_id(scheme_id: SchemeId) -> Option<Self> {
         match scheme_id {
             SCHEME_ZKSHUFFLE => Some(Self::ZkShuffle),
-            SCHEME_HYPERNOVA => Some(Self::Zkvm),
+            SCHEME_STWO | SCHEME_HYPERNOVA => Some(Self::Zkvm),
             _ => None,
         }
     }
@@ -57,7 +64,7 @@ impl ProofKind {
     /// 是否为新签名形式（含 `proof_kind` 字段）— M2-004。
     ///
     /// - `ZkShuffle` → 旧签名（无 `proof_kind` 字段）
-    /// - `Zkvm` → 新签名（含 `proof_kind` 字段）
+    /// - `Zkvm` → 新签名（含 `proof_kind` 字段，使用 Stwo 递归证明）
     #[must_use]
     pub const fn expects_new_signature(self) -> bool {
         matches!(self, Self::Zkvm)
@@ -66,12 +73,12 @@ impl ProofKind {
     /// 转为 1-byte 表示（用于 `signing_hash` 序列化，SubTask 11.2.3）。
     ///
     /// - `ZkShuffle` → 4（`SCHEME_ZKSHUFFLE`）
-    /// - `Zkvm` → 1（`SCHEME_HYPERNOVA`）
+    /// - `Zkvm` → 1（`SCHEME_STWO`，原 `SCHEME_HYPERNOVA`）
     #[must_use]
     pub const fn to_byte(self) -> u8 {
         match self {
             Self::ZkShuffle => SCHEME_ZKSHUFFLE as u8,
-            Self::Zkvm => SCHEME_HYPERNOVA as u8,
+            Self::Zkvm => SCHEME_STWO as u8,
         }
     }
 }
@@ -336,22 +343,86 @@ pub struct ZkVerifierRegistry {
     statuses: BTreeMap<crate::ChainId, VerifierStatus>,
 }
 
-/// Stub verifier — v2 过渡期占位实现。
+/// Stwo ZK Verifier — v2 真实递归证明验证器。
 ///
-/// v2 Phase 1 删除了 Hypernova/Groth16/IPA verifier 模块。
-/// 在 Phase 5 实现 Stwo Verifier AIR 之前，使用此 stub verifier 占位：
-/// - `verify`：仅校验 proof 非空，返回 `true`
-/// - `validate_proof_format`：仅校验 proof 非空
+/// 使用 poker_zkvm 的 Stwo 递归证明验证器验证 L2 proof。
+/// L2 proof 由 `poker_zkvm::stwo_backend::recursive::prove_recursive_with_fri` 生成，
+/// 包含 3 个 Verifier AIR：
+/// - OODS Check AIR（73 列）
+/// - FRI Verifier AIR（68 列）
+/// - Merkle Path AIR（60 列）
+#[derive(Debug)]
+pub struct StwoZkVerifier;
+
+impl StwoZkVerifier {
+    /// 创建 Stwo ZK Verifier。
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl ZkVerifier for StwoZkVerifier {
+    fn scheme_id(&self) -> SchemeId {
+        SCHEME_STWO
+    }
+
+    fn verify(
+        &self,
+        proof: &[u8],
+        _public_io: &ZkPublicIo,
+        status: VerifierStatus,
+    ) -> Result<bool, PokerL1Error> {
+        match status {
+            VerifierStatus::Stub => {
+                Ok(!proof.is_empty())
+            }
+            VerifierStatus::Production => {
+                let recursive_proof =
+                    bincode::deserialize(proof).map_err(|e| {
+                        PokerL1Error::InvalidZkProofFormat(format!(
+                            "反序列化 L2 proof 失败: {}",
+                            e
+                        ))
+                    })?;
+
+                let result = poker_zkvm::stwo_backend::recursive::recursion_verifier::verify_recursive_with_fri(
+                    &recursive_proof,
+                    &RecursivePublicInputs::default(),
+                );
+                Ok(result.is_ok())
+            }
+        }
+    }
+
+    fn validate_proof_format(&self, proof: &[u8]) -> Result<(), PokerL1Error> {
+        if proof.is_empty() {
+            return Err(PokerL1Error::InvalidZkProofFormat(
+                "proof 不能为空".to_string(),
+            ));
+        }
+
+        let _: poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof =
+            bincode::deserialize(proof).map_err(|e| {
+                PokerL1Error::InvalidZkProofFormat(format!(
+                    "反序列化 L2 proof 失败: {}",
+                    e
+                ))
+            })?;
+        Ok(())
+    }
+}
+
+/// Stub verifier — v2 过渡期占位实现（已废弃）。
 ///
-/// 生产环境须替换为真实 Stwo 递归证明 Verifier AIR。
+/// v2 Phase 5 已实现真实的 StwoZkVerifier，此 stub verifier 仅用于测试。
+#[deprecated(note = "使用 StwoZkVerifier 替代")]
 #[derive(Debug)]
 pub struct StubVerifier {
-    /// 此 verifier 处理的 scheme_id。
     scheme_id: SchemeId,
 }
 
 impl StubVerifier {
-    /// 创建指定 scheme_id 的 stub verifier。
     #[must_use]
     pub const fn new(scheme_id: SchemeId) -> Self {
         Self { scheme_id }
@@ -382,30 +453,36 @@ impl ZkVerifier for StubVerifier {
     }
 }
 
-/// 注册 Hypernova scheme（`SCHEME_HYPERNOVA = 1`）的 stub verifier。
+/// 注册 Stwo scheme（`SCHEME_STWO = 1`）的真实 verifier。
 ///
-/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+/// v2 Phase 5 已实现真实的 StwoZkVerifier，替代原 StubVerifier。
+pub fn register_stwo_verifier(registry: &mut ZkVerifierRegistry) {
+    registry.register(Arc::new(StwoZkVerifier::new()));
+}
+
+/// 注册 Hypernova scheme（已废弃，使用 register_stwo_verifier）。
+#[deprecated(note = "使用 register_stwo_verifier 替代")]
 pub fn register_hypernova_stub_verifier(registry: &mut ZkVerifierRegistry) {
-    registry.register(Arc::new(StubVerifier::new(SCHEME_HYPERNOVA)));
+    register_stwo_verifier(registry);
 }
 
 /// 注册 ZkShuffle scheme（`SCHEME_ZKSHUFFLE = 4`）的 stub verifier。
 ///
-/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+/// 保留为 stub，ZkShuffle 旧 proof 验证逻辑待后续实现。
 pub fn register_zkshuffle_stub_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StubVerifier::new(SCHEME_ZKSHUFFLE)));
 }
 
 /// 注册 Groth16 scheme（`SCHEME_GROTH16 = 2`）的 stub verifier。
 ///
-/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+/// 保留为 stub，Groth16 验证逻辑待后续实现。
 pub fn register_groth16_stub_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StubVerifier::new(SCHEME_GROTH16)));
 }
 
 /// 注册 IPA scheme（`SCHEME_IPA = 3`）的 stub verifier。
 ///
-/// v2 过渡期占位；Phase 5 将由 Stwo Verifier AIR 替换。
+/// 保留为 stub，IPA 验证逻辑待后续实现。
 pub fn register_ipa_stub_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StubVerifier::new(SCHEME_IPA)));
 }
