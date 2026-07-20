@@ -20,7 +20,13 @@ pub const MAX_TRACE_HOST_MEMORY: usize = 512 * 1024 * 1024;
 const TRACE_MAGIC: &[u8; 4] = b"TRCE";
 
 /// Trace 二进制格式版本号。
-const TRACE_VERSION: u32 = 1;
+///
+/// ## 版本历史
+/// - v1（已废弃）：`[4B magic][4B version=1][8B num_steps][steps...]`
+/// - v2（当前）：`[4B magic][4B version=2][8B num_steps][128B initial_registers][steps...]`
+///   新增 `initial_registers` 字段（32 × 4B = 128B）以支持 `trace_to_native` 正确重建
+///   第 0 步的 `prev_registers`，避免在 Load/Store 场景下 `compute_mem_addr` 误算地址。
+const TRACE_VERSION: u32 = 2;
 
 // ===========================================================================
 // MemOp
@@ -184,17 +190,55 @@ impl Step {
 /// 包含 `Vec<Step>`，支持序列化/反序列化与 host 内存估算。
 /// 步数上限 `MAX_ZKVM_TRACE_STEPS = 1_048_576`（spec L257）。
 /// host 内存上限 `MAX_TRACE_HOST_MEMORY = 512MB`（spec L258）。
+///
+/// # `initial_registers`
+///
+/// 第 0 步执行前的寄存器快照。`trace_to_native` 用它作为 step 0 的 `prev_registers`
+/// 来计算 `value_b = prev[rs1]`、`compute_mem_addr = prev[rs1] + imm` 等。
+/// 默认全零（与 `VmState::new()` 一致）；生产代码应在 `load_elf` 后调用
+/// [`Trace::set_initial_registers`] 注入 `state.registers`。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trace {
     /// 步记录列表
     steps: Vec<Step>,
+    /// 第 0 步执行前的寄存器快照（默认全零）
+    initial_registers: [u32; 32],
 }
 
 impl Trace {
-    /// 创建空 Trace。
+    /// 创建空 Trace，`initial_registers` 默认全零。
     #[must_use]
     pub fn new() -> Self {
-        Self { steps: Vec::new() }
+        Self {
+            steps: Vec::new(),
+            initial_registers: [0u32; 32],
+        }
+    }
+
+    /// 创建空 Trace 并设置 `initial_registers`。
+    ///
+    /// # 参数
+    /// - `initial_registers` — 第 0 步执行前的寄存器快照
+    #[must_use]
+    pub fn with_initial_registers(initial_registers: [u32; 32]) -> Self {
+        Self {
+            steps: Vec::new(),
+            initial_registers,
+        }
+    }
+
+    /// 设置 `initial_registers`（第 0 步执行前的寄存器快照）。
+    ///
+    /// 生产代码（如 `executor.rs`）应在 `load_elf` 完成后、循环开始前调用，
+    /// 注入 `state.registers`，使 `trace_to_native` 能正确重建 step 0 的 `prev_registers`。
+    pub fn set_initial_registers(&mut self, initial_registers: [u32; 32]) {
+        self.initial_registers = initial_registers;
+    }
+
+    /// 返回 `initial_registers` 的引用。
+    #[must_use]
+    pub fn initial_registers(&self) -> &[u32; 32] {
+        &self.initial_registers
     }
 
     /// 返回步数。
@@ -239,14 +283,18 @@ impl Trace {
 
     /// 序列化为二进制格式。
     ///
-    /// 格式：`[4B magic][4B version][8B num_steps][steps...]`
+    /// 格式（v2）：`[4B magic][4B version=2][8B num_steps][128B initial_registers][steps...]`
     /// 每 step：`[8B step_index][4B pc][1B insn_tag][insn fields][128B registers][4B mem_count][mem_access...]`
     #[must_use]
     pub fn serialize(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(16 + self.steps.len() * 160);
+        let mut out = Vec::with_capacity(16 + 128 + self.steps.len() * 160);
         out.extend_from_slice(TRACE_MAGIC);
         out.extend_from_slice(&TRACE_VERSION.to_le_bytes());
         out.extend_from_slice(&(self.steps.len() as u64).to_le_bytes());
+        // v2 新增：initial_registers（32 × 4B = 128B）
+        for &reg in &self.initial_registers {
+            out.extend_from_slice(&reg.to_le_bytes());
+        }
         for step in &self.steps {
             serialize_step(step, &mut out);
         }
@@ -257,18 +305,21 @@ impl Trace {
     ///
     /// 三步法：
     /// 1. 校验 magic + version
-    /// 2. 读 num_steps，`checked_mul` 估算总大小，超 `MAX_TRACE_HOST_MEMORY` 早夭
+    /// 2. 读 num_steps + initial_registers，`checked_mul` 估算总大小，超 `MAX_TRACE_HOST_MEMORY` 早夭
     /// 3. 逐 step 解析
     ///
     /// # Errors
     /// - `ZkvmError::InvalidZkProofFormat` — magic/version 错误或数据截断
     /// - `ZkvmError::TraceHostMemoryExceeded` — 估算总大小超 512MB
     pub fn deserialize(bytes: &[u8]) -> Result<Self, ZkvmError> {
-        // 第 0 步：magic + version
-        if bytes.len() < 16 {
-            return Err(ZkvmError::InvalidZkProofFormat(
-                "trace too short for header".to_string(),
-            ));
+        // 第 0 步：magic + version + num_steps + initial_registers
+        // header = 4(magic) + 4(version) + 8(num_steps) + 128(initial_registers) = 144
+        const HEADER_LEN: usize = 16 + 128;
+        if bytes.len() < HEADER_LEN {
+            return Err(ZkvmError::InvalidZkProofFormat(format!(
+                "trace too short for header: got {} bytes, need {HEADER_LEN}",
+                bytes.len()
+            )));
         }
         if &bytes[0..4] != TRACE_MAGIC {
             return Err(ZkvmError::InvalidZkProofFormat(
@@ -286,6 +337,18 @@ impl Trace {
             bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
         ]);
 
+        // v2 新增：initial_registers（32 × 4B）
+        let mut initial_registers = [0u32; 32];
+        for i in 0..32 {
+            let off = 16 + i * 4;
+            initial_registers[i] = u32::from_le_bytes([
+                bytes[off],
+                bytes[off + 1],
+                bytes[off + 2],
+                bytes[off + 3],
+            ]);
+        }
+
         // 第 1 步：总大小估算 + 早夭
         let step_estimate = 160usize; // 每步估算上限
         let total_estimate = (num_steps as usize).checked_mul(step_estimate).ok_or(
@@ -302,7 +365,7 @@ impl Trace {
         }
 
         // 第 2 步：逐 step 解析
-        let mut offset = 16usize;
+        let mut offset = HEADER_LEN;
         let mut steps = Vec::with_capacity(num_steps as usize);
         for i in 0..num_steps {
             let (step, consumed) = deserialize_step(&bytes[offset..])
@@ -311,7 +374,10 @@ impl Trace {
             offset += consumed;
         }
 
-        Ok(Self { steps })
+        Ok(Self {
+            steps,
+            initial_registers,
+        })
     }
 }
 
@@ -913,8 +979,9 @@ mod tests {
     #[test]
     fn test_trace_deserialize_bad_magic() {
         let mut bad = vec![0x00, 0x00, 0x00, 0x00]; // bad magic
-        bad.extend(&1u32.to_le_bytes());
-        bad.extend(&0u64.to_le_bytes());
+        bad.extend(&2u32.to_le_bytes()); // version
+        bad.extend(&0u64.to_le_bytes()); // num_steps
+        bad.extend(&[0u8; 128]); // initial_registers (v2)
         let err = Trace::deserialize(&bad).unwrap_err();
         assert!(matches!(err, ZkvmError::InvalidZkProofFormat(_)));
     }
@@ -923,7 +990,8 @@ mod tests {
     fn test_trace_deserialize_bad_version() {
         let mut bad = b"TRCE".to_vec();
         bad.extend(&999u32.to_le_bytes()); // bad version
-        bad.extend(&0u64.to_le_bytes());
+        bad.extend(&0u64.to_le_bytes()); // num_steps
+        bad.extend(&[0u8; 128]); // initial_registers (v2)
         let err = Trace::deserialize(&bad).unwrap_err();
         assert!(matches!(err, ZkvmError::InvalidZkProofFormat(_)));
     }
@@ -931,10 +999,64 @@ mod tests {
     #[test]
     fn test_trace_deserialize_step_overflow_rejected() {
         let mut bad = b"TRCE".to_vec();
-        bad.extend(&1u32.to_le_bytes());
+        bad.extend(&2u32.to_le_bytes()); // version (v2)
         bad.extend(&u64::MAX.to_le_bytes()); // num_steps = u64::MAX
+        bad.extend(&[0u8; 128]); // initial_registers (v2)
         let err = Trace::deserialize(&bad).unwrap_err();
         assert!(matches!(err, ZkvmError::TraceHostMemoryExceeded { .. }));
+    }
+
+    #[test]
+    fn test_trace_initial_registers_roundtrip() {
+        // 验证 initial_registers 在 serialize/deserialize 后保持一致
+        let initial = {
+            let mut r = [0u32; 32];
+            r[1] = 0x1000;
+            r[2] = 0xDEADBEEF;
+            r[10] = 0xCAFEBABE;
+            r[31] = 0x12345678;
+            r
+        };
+        let mut trace = Trace::with_initial_registers(initial);
+        trace.push_step(Step {
+            step_index: 0,
+            pc: 0x1000,
+            instruction: Instruction::Addi {
+                rd: 1,
+                rs1: 0,
+                imm: 42,
+            },
+            registers: [0u32; 32],
+            mem_access: vec![],
+        });
+        let bytes = trace.serialize();
+        let trace2 = Trace::deserialize(&bytes).expect("deserialize");
+        assert_eq!(trace, trace2);
+        assert_eq!(trace2.initial_registers(), &initial);
+    }
+
+    #[test]
+    fn test_trace_initial_registers_default_zero() {
+        // 默认 Trace::new() 的 initial_registers 应为全零
+        let trace = Trace::new();
+        assert_eq!(trace.initial_registers(), &[0u32; 32]);
+    }
+
+    #[test]
+    fn test_trace_set_initial_registers() {
+        let mut trace = Trace::new();
+        let initial = {
+            let mut r = [0u32; 32];
+            r[5] = 0xABCD;
+            r
+        };
+        trace.set_initial_registers(initial);
+        assert_eq!(trace.initial_registers(), &initial);
+
+        // 验证序列化后能恢复
+        let bytes = trace.serialize();
+        let trace2 = Trace::deserialize(&bytes).expect("deserialize");
+        assert_eq!(trace2.initial_registers(), &initial);
     }
 
     #[test]

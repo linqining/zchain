@@ -6,7 +6,7 @@
 //! - **核心变更**：32-bit 值用 4×8-bit limb（替代 v1 的 2×30-bit limb）
 //! - **优势**：每个 limb ∈ [0, 255] ⊂ [0, M31_MAX]，无域转换，无 soundness 隐患
 //!
-//! ## 列布局（Phase 1，97 列）
+//! ## 列布局（Phase 4 Tier 1，126 列）
 //!
 //! | 范围 | 列名 | 说明 |
 //! |------|------|------|
@@ -35,6 +35,9 @@
 //! | 94 | SgnA | 操作数 A 符号位 |
 //! | 95 | SgnB | 操作数 B 符号位 |
 //! | 96 | SgnC | 操作数 C 符号位 |
+//! | 97-100 | MemAddr (4×8-bit limb) | Phase 3 新增：Load/Store 地址 |
+//! | 101 | SyscallId | Phase 4 Tier 1 新增：ECALL syscall ID（1 列 M31） |
+//! | 102-125 | Syscall Args/Outputs (24 列) | Phase 4 Tier 1 新增：6×4-limb |
 //!
 //! ## 与 v1 的差异
 //!
@@ -199,11 +202,64 @@ pub const COL_SGN_B: usize = 95;
 /// col 96：操作数 C 符号位
 pub const COL_SGN_C: usize = 96;
 
-/// Phase 1 v2 列布局总列数。
+// ----- Phase 3 新增：Load/Store 内存地址（4×8-bit limb）-----
+/// col 97-100：Load/Store 指令的内存地址（4×8-bit limb，非 Load/Store 时为 0）
 ///
-/// 97 列 = PC(12) + OpIdx(3) + Flags(4) + ImmC(1) + InstrVal(4) +
-///         Values(16) + Indicators(35) + Helpers(16) + Branch(3) + Sgn(3)
-pub const NUM_COLUMNS: usize = 97;
+/// Phase 3 新增，用于 CPU AIR 发送 MemoryLookup logup claim。
+/// 地址 = rs1 + imm，由 trace_native.rs 预计算填充。
+pub const COL_MEM_ADDR_BASE: usize = 97;
+
+// ===========================================================================
+// Phase 4 Tier 1 新增：ECALL dispatch 列（25 列，col 101-125）
+// ===========================================================================
+//
+// 用于关闭 CPU AIR 的 ECALL soundness 缺口（CRITICAL）：
+// - 非 ECALL 行所有 ECALL 列必须为 0（zero gating 约束）
+// - ECALL 行发送 logup claim（Tier 2 启用，与 Precompile AIR yield 配对）
+//
+// 列布局（参考 stwo_phase4_precompile_air_design.md §3.1）：
+// | 范围    | 名称             | 说明                                  |
+// |---------|------------------|---------------------------------------|
+// | 101     | SyscallId        | 1 列 M31，直接表示 syscall_id (0-127) |
+// | 102-105 | SyscallArg0      | 4×8-bit limb（如 input_ptr）          |
+// | 106-109 | SyscallArg1      | 4×8-bit limb（如 input_len）          |
+// | 110-113 | SyscallArg2      | 4×8-bit limb（如 output_ptr）         |
+// | 114-117 | SyscallArg3      | 4×8-bit limb（reserved）              |
+// | 118-121 | SyscallOutput0   | 4×8-bit limb（output[0]）             |
+// | 122-125 | SyscallOutput1   | 4×8-bit limb（output[1]）             |
+
+/// col 101：SyscallId（1 列 M31，直接表示 syscall_id 0-127）。
+///
+/// Phase 4 Tier 1 新增。ECALL 行填 syscall_id（如 0x01=PoseidonHash），
+/// 非 ECALL 行填 0。SyscallId 用 1 列 M31 表示（而非 4×8-bit limb），
+/// 因为 syscall_id < 128 < M31_MAX，无需 limb 分解。
+pub const COL_SYSCALL_ID: usize = 101;
+
+/// col 102-105：SyscallArg0（4×8-bit limb）。
+pub const COL_SYSCALL_ARG0_BASE: usize = 102;
+
+/// col 106-109：SyscallArg1（4×8-bit limb）。
+pub const COL_SYSCALL_ARG1_BASE: usize = 106;
+
+/// col 110-113：SyscallArg2（4×8-bit limb）。
+pub const COL_SYSCALL_ARG2_BASE: usize = 110;
+
+/// col 114-117：SyscallArg3（4×8-bit limb）。
+pub const COL_SYSCALL_ARG3_BASE: usize = 114;
+
+/// col 118-121：SyscallOutput0（4×8-bit limb）。
+pub const COL_SYSCALL_OUTPUT0_BASE: usize = 118;
+
+/// col 122-125：SyscallOutput1（4×8-bit limb）。
+pub const COL_SYSCALL_OUTPUT1_BASE: usize = 122;
+
+/// Phase 4 Tier 1 ECALL dispatch 列数量。
+pub const ECALL_DISPATCH_NUM_COLUMNS: usize = 25;
+
+/// Phase 4 v2 列布局总列数。
+///
+/// 126 列 = Phase 3 的 101 列 + Phase 4 Tier 1 的 25 列（ECALL dispatch）
+pub const NUM_COLUMNS: usize = 126;
 
 /// 将指令类别 ID（0-34）映射为 indicator 列索引。
 ///
@@ -237,7 +293,11 @@ mod tests {
 
     #[test]
     fn test_num_columns() {
-        assert_eq!(NUM_COLUMNS, 97, "Phase 1 v2 列布局应为 97 列");
+        assert_eq!(
+            NUM_COLUMNS,
+            126,
+            "Phase 4 Tier 1 v2 列布局应为 126 列（97 + MemAddr 4 + ECALL dispatch 25）"
+        );
     }
 
     #[test]
@@ -343,7 +403,45 @@ mod tests {
         assert_eq!(COL_SGN_A, 94);
         assert_eq!(COL_SGN_B, 95);
         assert_eq!(COL_SGN_C, 96);
+        // Phase 3 新增 MemAddr 列（97-100）
+        assert_eq!(COL_MEM_ADDR_BASE, 97);
+        // Phase 4 Tier 1 新增 ECALL dispatch 列（101-125）
+        assert_eq!(COL_SYSCALL_ID, 101);
+        assert_eq!(COL_SYSCALL_ARG0_BASE, 102);
+        assert_eq!(COL_SYSCALL_ARG1_BASE, 106);
+        assert_eq!(COL_SYSCALL_ARG2_BASE, 110);
+        assert_eq!(COL_SYSCALL_ARG3_BASE, 114);
+        assert_eq!(COL_SYSCALL_OUTPUT0_BASE, 118);
+        assert_eq!(COL_SYSCALL_OUTPUT1_BASE, 122);
+        assert_eq!(ECALL_DISPATCH_NUM_COLUMNS, 25);
         // 最后一列 + 1 = NUM_COLUMNS
-        assert_eq!(COL_SGN_C + 1, NUM_COLUMNS);
+        assert_eq!(COL_SYSCALL_OUTPUT1_BASE + WORD_LIMB_COUNT, NUM_COLUMNS);
+    }
+
+    #[test]
+    fn test_ecall_dispatch_columns_no_overlap() {
+        // 验证 Phase 4 Tier 1 ECALL dispatch 列范围 [101, 126) 互不重叠且不与前面冲突
+        let ecall_ranges: [(usize, usize); 7] = [
+            (COL_SYSCALL_ID, 1),                // 101
+            (COL_SYSCALL_ARG0_BASE, 4),         // 102-105
+            (COL_SYSCALL_ARG1_BASE, 4),         // 106-109
+            (COL_SYSCALL_ARG2_BASE, 4),         // 110-113
+            (COL_SYSCALL_ARG3_BASE, 4),         // 114-117
+            (COL_SYSCALL_OUTPUT0_BASE, 4),      // 118-121
+            (COL_SYSCALL_OUTPUT1_BASE, 4),      // 122-125
+        ];
+        let mut ecall_cols = HashSet::new();
+        for (base, count) in &ecall_ranges {
+            for offset in 0..*count {
+                let col = base + offset;
+                assert!(col >= 101 && col < 126, "ECALL col {} 不在 [101, 126) 范围", col);
+                assert!(ecall_cols.insert(col), "ECALL 列 {} 重复分配", col);
+            }
+        }
+        assert_eq!(ecall_cols.len(), ECALL_DISPATCH_NUM_COLUMNS);
+        // 验证与 Phase 3 MemAddr 列（97-100）不重叠
+        for col in 97..101 {
+            assert!(!ecall_cols.contains(&col), "ECALL 列与 MemAddr 列 {} 重叠", col);
+        }
     }
 }

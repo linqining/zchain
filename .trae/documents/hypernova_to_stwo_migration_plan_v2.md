@@ -1,11 +1,13 @@
 # Hypernova → Stwo 迁移实施计划 v2（递归证明路线）
 
-> **版本**：v2.0（2026-07-20）
+> **版本**：v2.1（2026-07-20，Phase 4 Tier 2 重新计划）
 > **取代**：[hypernova_to_stwo_migration_plan.md](file:///Users/mac/projects/zchain/.trae/documents/hypernova_to_stwo_migration_plan.md)（v1，fold 改写路线，已 deprecated）
 > **目标**：将 poker_zkvm 证明系统**完全**替换为 Stwo（Circle STARK + AIR + FRI on M31），**放弃 Hypernova 兼容**，trace 原生在 M31 中生成，最终支持递归证明
 > **预期收益**：~1000× prove 加速（与 Nexus zkVM 3.0 对齐）
 > **总工期**：16-22 周（4-5.5 个月）
 > **决策依据**：用户明确要求切换到递归证明，完全不用考虑 Hypernova 兼容，全部改成 Stwo 实现
+>
+> **v2.1 修订（2026-07-20）**：Phase 4 Tier 2 Poseidon AIR 卡在 `ConstraintsNotSatisfied`，根因为 `ExtendToEvalDomain` 模式与 logup 集成存在边界 case。重新制定 Tier 2 计划：所有 AIR 约束度数 ≤ 2（强制 SubDomain 模式），Poseidon AIR 采用中间列降度方案。详见 [stwo_phase4_tier2_replan.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase4_tier2_replan.md)
 
 ***
 
@@ -271,57 +273,107 @@ L2 proof (~10-20KB，可在链上验证)
    - 自定义 syscall（poseidon/sha256/keccak/merkle）接口
 
 **完成标准**：
-- [ ] 内存一致性测试通过
-- [ ] 寄存器一致性测试通过
-- [ ] Syscall 约束测试通过
-- [ ] 多组件 AIR 联合 prove 测试通过
+- [x] 内存一致性测试通过（`test_prove_verify_multi_lw_sw_sequence` Store 后 Load 同地址）
+- [ ] 寄存器一致性测试通过（**Phase 3.6 待补**：`RegisterLookup` 已定义，`register_air.rs` 待实现）
+- [ ] Syscall 约束测试通过（**Phase 3.7 待补**：`syscall_air.rs` 骨架待实现）
+- [x] 多组件 AIR 联合 prove 测试通过（5 个 CPU+Memory 多组件测试全部通过）
+- [x] `cargo test -p poker_zkvm` 全绿（392 测试通过）
 
 **测试**：
 - `test_memory_consistency`：连续内存访问
 - `test_register_consistency`：寄存器读写一致
 - `test_syscall_ecall`：ECALL 约束
 
+**实施状态**：Phase 3.1-3.5 已完成（2026-07-20）
+- 详见 [stwo_phase3_memory_syscall_design.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase3_memory_syscall_design.md) §10 实施记录
+- 已完成：Memory AIR（25 列 + 33 条约束）+ CPU Load/Store 约束 + logup claim + 多组件 prover/verifier + 5 个多组件集成测试
+- 关键 bug 修复：`memory_air.rs` 中 `offset=-1` 改为 `offset=-2`（SubDomain 模式下 prev-row 读取）
+- 待完成：Phase 3.6（Register AIR + 边缘 case 测试）+ Phase 3.7（Syscall AIR 骨架）
+- poker_zkvm 测试 392/392 通过
+
 ---
 
-### Phase 4：Precompile 迁移到 AIR（3-4 周）
+### Phase 4：Precompile 迁移到 AIR（10-14 周，分 4 个 Tier）
 
-**目标**：将 precompile 从 Hypernova CCS 迁移到 Stwo AIR component，通过 LogUp 连接主 AIR。
+**目标**：填补 CPU AIR 的 ECALL soundness 缺口，实现 precompile AIR 组件，通过 LogUp 连接主 AIR。
+
+**详细设计**：详见 [stwo_phase4_precompile_air_design.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase4_precompile_air_design.md)
+
+**进度**：
+- ✅ **Tier 1 ECALL Dispatch 已完成**（2026-07-20）：25 列 + C57-C82 约束 + EcallLookup + 9 测试，poker_zkvm 401/401 通过
+- 🔄 **Tier 2 进行中**（v2.1 重新计划，2026-07-20）：
+  - Poseidon AIR（M31-native）：Step 4.2.1-4.2.3 已完成；Step 4.2.4 卡在 `ConstraintsNotSatisfied`，根因为 `ExtendToEvalDomain` 模式。**v2.1 重新计划**：采用中间列降度方案（21 → 30 列，约束度 6 → 2），强制 SubDomain 模式。详见 [stwo_phase4_tier2_replan.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase4_tier2_replan.md)
+  - Sha256 AIR：待做（同样采用中间列降度）
+  - MerkleVerify AIR：待做（依赖 Poseidon AIR）
+- ⬜ Tier 3：ECDSA/Keccak256/Modexp AIR（用户确认 in scope）
+- ⬜ Tier 4：BLS12-381 Building-block AIRs（选项 B 已确认）
 
 **任务**：
-1. **Poseidon AIR**：
-   - 新建 `poker_zkvm/src/stwo_backend/air/precompile/poseidon.rs`
-   - Poseidon permutation AIR（MDS matrix + round constants）
-   - LogUp 连接主 AIR（hash input/output 在主 trace，round-by-round 在 precompile trace）
+1. **Tier 1（必做）：ECALL dispatch 约束** ✅ **已完成 2026-07-20**
+   - 扩展 `column_layout_v2.rs`：新增 25 列（COL_SYSCALL_ID=101 等），NUM_COLUMNS 101→126
+   - 扩展 `cpu_air.rs`：C57 IS_ECALL binality + C58-C82 25 条 zero gating + EcallLookup claim（gated by Option<EcallLookup>）
+   - 扩展 `lookups.rs`：`relation!(EcallLookup, 25);`
+   - 扩展 `trace_native.rs`：自动适应 126 列（vec! 宏用 NUM_COLUMNS 常量）
+   - 4 个集成测试 + 5 个单元测试，全部通过
+   - **关闭"非 ECALL 行伪造 ECALL 数据"soundness 缺口**
 
-2. **Sha256 AIR**：
-   - SHA-256 compression function AIR
-   - message schedule AIR
-   - LogUp 连接
+2. **Tier 2（必做）：纯算术 precompile AIR**
+   - **Poseidon AIR**（**M31-native 已确认**）：
+     - 新建 `poker_zkvm/src/stwo_backend/air/precompile/poseidon.rs`
+     - 30 轮 permutation AIR（MDS matrix + round constants + S-box x^5）
+     - LogUp 连接主 AIR（hash input/output 在 ECALL 行，round-by-round 在 precompile trace）
+   - **Sha256 AIR**：compression function + message schedule（参考 Nexus zkVM）
+   - **MerkleVerify AIR**：依赖 Poseidon AIR，递归验证 Merkle path
 
-3. **Keccak AIR**：
-   - Keccak-f[1600] AIR（theta/rho/pi/chi/iota）
-   - LogUp 连接
+3. **Tier 3（**用户确认 in scope**）：非 native EC precompile**
+   - **ECDSA verify AIR**（secp256k1 over M31，资金路径安全核心）
+   - **Keccak256 AIR + host impl**（当前 host 未实现，需从零构建）
+   - **Modexp AIR + host impl**（当前 host 未实现）
 
-4. **Merkle Verify AIR**：
-   - Merkle path verification AIR
-   - 与 Sha256 AIR 共享 hash component
+4. **Tier 4（**选项 B 已确认：Building-block AIRs**）：BLS12-381**
+   - 实施 SP1 模式：12 个 BLS12-381 building-block AIRs
+     - Fp384 ADD/SUB/MUL（384-bit mod 算术，~12×32-bit limb）
+     - Fp2 ADD/SUB/MUL（Karatsuba）
+     - Weierstrass ADD/DOUBLE（与 ECDSA secp256k1 共享模块）
+     - G1/G2 DECOMPRESS（witnessed sqrt）
+   - pairing 由 guest 用 building blocks 组合（无单独 PAIRING syscall，参考 SP1 ~13M cycles/pairing）
+   - **soundness 完整**：所有 BLS12-381 ops 在 AIR 内验证
 
 5. **zk_shuffle 保持独立**（Hard Constraint）：
    - zk_shuffle 不进入 Stwo 主 AIR
    - `proof_kind` 双通道分派保持不变
    - 仅 scheme_id=1（Zkvm）走新 Stwo 证明
 
+**关键设计决策（✅ 用户已全部确认 2026-07-20）**：
+- Poseidon 字段：**M31-native**
+- BLS12-381 处理：**选项 B — Building-block AIRs（SP1 模式）**
+- Keccak/Modexp/ECDSA：**全部实现 in scope**
+- Ed25519/Bn254Pairing：Descope（不在 syscall 范围）
+- 事件哈希迁移：**接受 M31 迁移**（与 Poseidon 决策一致）
+
 **完成标准**：
-- [ ] 4 个 precompile AIR 实现并通过测试
-- [ ] LogUp 连接主 AIR 测试通过
-- [ ] precompile 正确性验证（对比 Hypernova 旧实现输出）
-- [ ] zk_shuffle 独立性验证
+- [x] Tier 1：4 个 ECALL 集成测试 + 5 单元测试通过（已完成 2026-07-20）
+- [ ] Tier 2：3 个 precompile AIR（Poseidon + Sha256 + MerkleVerify）实现并通过测试
+- [ ] Tier 2：3/4/5 组件 prover 测试通过
+- [ ] Tier 2：precompile 正确性验证（AIR 输出 vs host 函数一致）
+- [ ] Tier 2：zk_shuffle 独立性验证（无 Poseidon AIR 引用 zk_shuffle 代码）
+- [ ] Tier 3：ECDSA verify AIR + Keccak256 AIR + Modexp AIR 测试通过
+- [ ] Tier 4：12 个 BLS12-381 building-block AIRs 测试通过
+- [ ] workspace 全部测试通过
 
 **测试**：
-- `test_poseidon_air`：Poseidon hash 正确性
-- `test_sha256_air`：SHA-256 正确性
-- `test_keccak_air`：Keccak 正确性
-- `test_merkle_verify_air`：Merkle 验证正确性
+- `test_prove_verify_roundtrip_ecall` ✅（Tier 1 已实施）
+- `test_ecall_zero_gating_soundness` ✅（Tier 1 已实施）
+- `test_ecall_binality_soundness` ✅（Tier 1 已实施）
+- `test_ecall_zero_gating_padding_row_all_zeros` ✅（Tier 1 已实施）
+- `test_ecall_constraint_poseidon`：ECALL Poseidon syscall 通过（Tier 2）
+- `test_poseidon_air_correctness`：AIR 输出 vs host 一致（Tier 2）
+- `test_sha256_air_correctness`：SHA-256 正确性（Tier 2）
+- `test_merkle_verify_air_depth_8`：8 层 Merkle 树验证（Tier 2）
+- `test_ecdsa_verify_air`：ECDSA verify 正确性（Tier 3）
+- `test_keccak256_air`：Keccak-f[1600] permutation 正确性（Tier 3）
+- `test_modexp_air`：Modexp 正确性（Tier 3）
+- `test_bls12381_fp_mul_air` / `test_bls12381_fp2_mul_air` / `test_bls12381_weierstrass_add_air` / `test_bls12381_g1_decompress_air`：BLS12-381 building-block AIR 测试（Tier 4）
 - `test_zk_shuffle_independence`：zk_shuffle 仍走独立证明
 
 ---
@@ -479,6 +531,9 @@ L2 proof (~10-20KB，可在链上验证)
 - **scheme_id=1 → Stwo Verifier，scheme_id=4 → ZkShuffle**（不变）
 - **保守重构优先**：先完成 Phase 1-4（单层 Stwo proof），再做 Phase 5（递归证明）
 - **Phase 6 完成后才算迁移完成**：E2E + 性能基准 + 链上集成
+- **v2.1 新增（2026-07-20）**：所有 AIR 组件的 `max_constraint_log_degree_bound` 必须为 `log_size + 1`（约束度 ≤ 2），强制使用 SubDomain 评估模式。理由：ExtendToEvalDomain 模式在 Stwo 2.3 中与 logup interaction 集成存在边界 case（Poseidon AIR 卡点根因）。度数 > 2 的约束必须通过中间列分解。
+- **v2.1 新增（2026-07-20）**：所有 AIR 组件统一使用 `PcsConfig::default()`，禁止 `set_store_polynomials_coefficients` 和 `lifting_log_size = Some(...)`。
+- **v2.1 新增（2026-07-20）**：`StarkProof.commitments.len() == 4`（Tree 0/1/2 + composition poly tree），测试断言应为 4。
 
 ***
 
@@ -520,6 +575,14 @@ L2 proof (~10-20KB，可在链上验证)
 | 2026-07-20 | 递归证明作为 Phase 5（非必需） | 单层 Stwo proof 已可用，递归用于链上验证 |
 | 2026-07-20 | 完全删除 Hypernova 代码 | fallback 已无价值（19s/step 不可用），保留增加复杂性 |
 | 2026-07-20 | zk_shuffle 保持独立 | Hard Constraint，proof_kind 双通道不变 |
+| 2026-07-20 | Phase 4 Poseidon 字段：M31-native | Stwo 主 AIR 在 M31 上，BN254 Fr 需非 native 算术，性能损失 10× |
+| 2026-07-20 | Phase 4 Tier 3 范围：ECDSA + Keccak256 + Modexp 全部 in scope | 用户确认，资金路径安全核心 + 工期可控 |
+| 2026-07-20 | Phase 4 BLS12-381：选项 B（Building-block AIRs，SP1 模式） | soundness 完整，行业最佳实践，与 ECDSA 共享 Weierstrass 模块 |
+| 2026-07-20 | Phase 4 Tier 1 ECALL Dispatch 完成实施 | 25 列 + C57-C82 + EcallLookup + 9 测试，poker_zkvm 401/401 通过 |
+| 2026-07-20 | **v2.1**：所有 AIR 约束度数 ≤ 2（强制 SubDomain 模式） | 根因分析：PoseidonAir `constraint_log_degree = 3 > log_blowup_factor = 1` 触发 `ExtendToEvalDomain` 模式，与 logup interaction 集成存在边界 case。详见 [stwo_phase4_tier2_replan.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase4_tier2_replan.md) §2 |
+| 2026-07-20 | **v2.1**：Poseidon AIR 采用中间列降度方案（Option B） | S-box `x^5 = x * (x^2)^2` 分解为 3 个 degree ≤ 2 约束（SboxSq1/SboxSq2/SboxOut），新增 9 列（21→30 列），约束度 6→2，强制 SubDomain 模式。详见 [stwo_phase4_tier2_replan.md](file:///Users/mac/projects/zchain/.trae/documents/stwo_phase4_tier2_replan.md) §3 |
+| 2026-07-20 | **v2.1**：所有 AIR 统一使用 `PcsConfig::default()` | 禁止 `set_store_polynomials_coefficients` 和 `lifting_log_size = Some(...)`，消除 ExtendToEvalDomain 配置复杂性 |
+| 2026-07-20 | **v2.1**：`StarkProof.commitments.len() == 4`（Hard Constraint） | Stwo 返回 4 个 commitments（Tree 0 + Tree 1 + Tree 2 + composition poly tree），即使 Tree 0 为空也有 commitment。原测试断言 `== 3` 错误 |
 
 ***
 

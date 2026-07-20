@@ -191,6 +191,9 @@ pub fn execute_elf_with_limits_and_config(
         )
         .with_host_state(config.host_state);
     let mut trace = Trace::new();
+    // 注入 initial_registers（load_elf 后的寄存器快照），使 trace_to_native
+    // 在第 0 步能用正确的 prev_registers 计算 MemAddr = prev[rs1] + imm 等。
+    trace.set_initial_registers(state.registers);
 
     // 3. 执行循环
     loop {

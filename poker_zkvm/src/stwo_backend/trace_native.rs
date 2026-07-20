@@ -272,7 +272,7 @@ impl TraceBuilder {
         log_size
     }
 
-    /// 填充一行（直接提供 97 个 M31 值）。
+    /// 填充一行（直接提供 NUM_COLUMNS 个 M31 值，Phase 4 Tier 1 = 126）。
     ///
     /// # Panics
     /// 若 `next_row >= num_rows()`，panic（须先 fill_padding）
@@ -337,7 +337,7 @@ impl TraceBuilder {
 ///
 /// # 算法
 /// 1. 遍历 `trace.steps()`
-/// 2. 对每个 step 调用 [`step_to_m31_row`] 生成 97 个 M31 值
+/// 2. 对每个 step 调用 [`step_to_m31_row`] 生成 NUM_COLUMNS 个 M31 值（Phase 4 Tier 1 = 126）
 /// 3. 用 `TraceBuilder::fill_row` 填充
 /// 4. `fill_padding_to_full` 填充到 2^log_size 行（padding 行 IsPadding=1）
 /// 5. `finalize` 返回 `NativeTrace`
@@ -346,15 +346,17 @@ impl TraceBuilder {
 /// - `trace` — emulator 执行 trace
 ///
 /// # 返回
-/// 列主序 `NativeTrace`，列数 = `NUM_COLUMNS` (97)，行数 = 2^log_size
+/// 列主序 `NativeTrace`，列数 = `NUM_COLUMNS`（Phase 4 Tier 1 = 126），行数 = 2^log_size
 #[must_use]
 pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
     let num_steps = trace.len();
     let log_size = TraceBuilder::compute_log_size(num_steps.max(1));
     let mut builder = TraceBuilder::new(log_size);
 
-    // 初始寄存器快照（全零，x0 永远为 0）
-    let mut prev_registers = [0u32; 32];
+    // 初始寄存器快照（来自 Trace::initial_registers，默认全零）
+    // 用于第 0 步的 prev_registers，使 compute_mem_addr/extract_operands 能正确
+    // 读取 rs1/rs2 的初值（如 LW x1, x2, 8 时 prev[x2] 为基址）
+    let mut prev_registers = *trace.initial_registers();
 
     for step in trace.iter() {
         let row = step_to_m31_row(step, &prev_registers);
@@ -375,13 +377,18 @@ pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
 /// - `prev_registers` — 前一步的寄存器快照（用于计算 ValueB = prev[rs1] 等）
 ///
 /// # 返回
-/// 长度 = `NUM_COLUMNS` (97) 的 `Vec<M31>`
+/// 长度 = `NUM_COLUMNS`（Phase 4 Tier 1 = 126）的 `Vec<M31>`
 ///
 /// # Phase 2 实现范围
 /// - 所有 RV32I 指令的 indicator one-hot 设置
 /// - PC / OpA / OpB / OpC / ValueA / ValueAEff / ValueB / ValueC 填充
 /// - ADD/ADDI/SUB 的 CarryFlag / BorrowFlag 计算
 /// - 其他指令的 Helper / Branch / Shift 字段暂填 0（Phase 2.6 完善）
+///
+/// # Phase 4 Tier 1 实现
+/// - ECALL 行的 25 列 ECALL dispatch（SyscallId + Args + Outputs）暂填 0
+/// - 非 ECALL 行的 25 列 ECALL dispatch 默认为 0（由 `vec![0; NUM_COLUMNS]` 保证）
+/// - Tier 2 实施 Precompile AIR 时，ECALL 行将填充真实 syscall_id/args/output
 #[must_use]
 pub fn step_to_m31_row(
     step: &crate::trace::Step,
@@ -402,6 +409,11 @@ pub fn step_to_m31_row(
     // ----- 提取操作数索引和立即数 -----
     let (op_a, op_b, op_c, imm_c_flag, imm_value) = extract_operands(&step.instruction);
     row[COL_OP_A] = M31::from(u32::from(op_a));
+
+    // ----- Phase 3: MemAddr 填充（Load/Store 地址 = rs1 + imm）-----
+    // 非 Load/Store 指令填 0；Load/Store 填 rs1_value + imm
+    let mem_addr = compute_mem_addr(&step.instruction, prev_registers);
+    fill_word(&mut row, COL_MEM_ADDR_BASE, mem_addr);
 
     // 计算 next_pc（默认 = pc + 4；分支指令根据 prev_registers 判断 taken）
     let (next_pc, taken, pc_next_aux) = compute_next_pc(step, prev_registers);
@@ -424,6 +436,11 @@ pub fn step_to_m31_row(
     // 非相关指令填 0（AIR 约束由 IsJal/IsBranch/IsAuipc gating 保证不强制约束）
     let helper2_value = compute_pc_plus_imm(step, imm_value);
     fill_word(&mut row, COL_HELPER2_BASE, helper2_value);
+
+    // ----- Phase 3: Helper3 = MemAddr（Load/Store 地址，4×8-bit limb）-----
+    // 用于 Load/Store 地址约束：MemAddr[i] - Helper3[i] = 0
+    // Helper3 = rs1 + imm = MemAddr（由 compute_mem_addr 预计算）
+    fill_word(&mut row, COL_HELPER3_BASE, mem_addr);
 
     // ----- Shamt: 移位量 -----
     // SLLI/SRLI/SRAI: shamt 字段；SLL/SRL/SRA: rs2 & 0x1F
@@ -451,6 +468,13 @@ pub fn step_to_m31_row(
     fill_word(&mut row, COL_VALUE_A_EFF_BASE, value_a_eff);
     fill_word(&mut row, COL_VALUE_B_BASE, value_b);
     fill_word(&mut row, COL_VALUE_C_BASE, value_c);
+
+    // ----- Phase 3: Helper4 = mem_value（Load/Store 的内存值，4×8-bit limb）-----
+    // 用于 Load 值约束：rd_eff[i] - Helper4[i] = 0（Helper4 = 加载值）
+    // 用于 Store 值约束：rs2[i] - Helper4[i] = 0（Helper4 = 存储值 = rs2_value）
+    // 非 Load/Store 指令填 0
+    let helper4_value = extract_mem_value(&step.instruction, step.mem_access.as_slice(), value_c);
+    fill_word(&mut row, COL_HELPER4_BASE, helper4_value);
 
     // ----- 符号位 -----
     row[COL_SGN_A] = M31::from((value_a >> 31) & 1);
@@ -604,6 +628,66 @@ fn compute_pc_plus_imm(step: &crate::trace::Step, imm_value: u32) -> u32 {
     }
 }
 
+/// Phase 3: 计算 Load/Store 指令的内存地址（rs1 + imm）。
+///
+/// # 参数
+/// - `insn` — 当前指令
+/// - `prev_registers` — 执行前寄存器快照（用于读取 rs1 值）
+///
+/// # 返回
+/// - 对于 LB/LH/LW/LBU/LHU/SB/SH/SW：`prev_registers[rs1] + imm`
+/// - 对于其他指令：0
+fn compute_mem_addr(insn: &crate::isa::Instruction, prev_registers: &[u32; 32]) -> u32 {
+    use crate::isa::Instruction::*;
+    match insn {
+        Lb { rs1, imm, .. }
+        | Lh { rs1, imm, .. }
+        | Lw { rs1, imm, .. }
+        | Lbu { rs1, imm, .. }
+        | Lhu { rs1, imm, .. }
+        | Sb { rs1, imm, .. }
+        | Sh { rs1, imm, .. }
+        | Sw { rs1, imm, .. } => prev_registers[*rs1 as usize].wrapping_add(*imm),
+        _ => 0,
+    }
+}
+
+/// Phase 3: 提取 Load/Store 指令对应的内存值（用于 Helper4 填充）。
+///
+/// # 语义
+/// - **Load**：返回加载的值（= `mem_access[0].value` = 写入 rd 的值）
+///   - 用于约束 `rd_eff[i] - Helper4[i] = 0`（加载的值必须写入 rd）
+/// - **Store**：返回存储的值（= `mem_access[0].value` = rs2 的值）
+///   - 用于约束 `rs2[i] - Helper4[i] = 0`（存储的值必须来自 rs2）
+/// - **其他指令**：返回 0（AIR 约束由 IsLoad/IsStore gating 保证不强制约束）
+///
+/// # 参数
+/// - `insn` — 当前指令
+/// - `mem_access` — 本步内存访问记录（Load/Store 应有且仅有 1 条）
+/// - `_default_value` — 保留参数（兼容旧调用点），未使用
+///
+/// # 返回
+/// 内存值（u32），非 Load/Store 返回 0
+///
+/// # 注意
+/// 当前实现假设 Load/Store 每步仅有 1 条 mem_access（参考 `isa/mod.rs` L813-902，
+/// 每个 Load/Store 指令 push 且仅 push 一次 MemAccess）。Phase 3.2 Memory AIR
+/// 将独立处理多访问场景（如未来扩展的 LR/SC 指令）。
+fn extract_mem_value(
+    insn: &crate::isa::Instruction,
+    mem_access: &[crate::trace::MemAccess],
+    _default_value: u32,
+) -> u32 {
+    use crate::isa::Instruction::*;
+    match insn {
+        Lb { .. } | Lh { .. } | Lw { .. } | Lbu { .. } | Lhu { .. }
+        | Sb { .. } | Sh { .. } | Sw { .. } => {
+            mem_access.first().map(|ma| ma.value).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
 /// 提取移位指令的 shamt（移位量）。
 ///
 /// # 参数
@@ -673,9 +757,13 @@ fn extract_operands(insn: &crate::isa::Instruction) -> (u8, u8, u8, u8, u32) {
         | Lhu { rd, rs1, imm } => (*rd, *rs1, 0, 1, *imm),
 
         // S-type：rs1, rs2, imm（无 rd）
+        // 注：imm_c_flag = 0，因为 OpC = rs2 是寄存器索引（非立即数）。
+        // imm 值通过 Helper1 列传递（所有指令均填充 Helper1 = imm_value）。
+        // 这样 ValueC = prev_registers[rs2] = rs2 值，用于 Store 值约束
+        // （ValueC[i] - Helper4[i] = 0，即 rs2_value - mem_value = 0）。
         Sb { rs1, rs2, imm }
         | Sh { rs1, rs2, imm }
-        | Sw { rs1, rs2, imm } => (0, *rs1, *rs2, 1, *imm),
+        | Sw { rs1, rs2, imm } => (0, *rs1, *rs2, 0, *imm),
 
         // B-type：rs1, rs2, imm（无 rd）
         Beq { rs1, rs2, imm }
@@ -798,6 +886,520 @@ pub fn trace_to_native_trace_placeholder(num_steps: usize) -> NativeTrace {
         trace.fill_scalar(row, IS_PADDING, M31::from(1u32));
     }
     trace
+}
+
+// ===========================================================================
+// Phase 3: Memory Trace 生成（sorted memory log 模式）
+// ===========================================================================
+
+use super::memory_air::{
+    MEM_COL_ADDR_BASE, MEM_COL_IS_FIRST_ACCESS, MEM_COL_IS_LOAD, MEM_COL_IS_PADDING,
+    MEM_COL_IS_STORE, MEM_COL_SIZE, MEM_COL_TS_CUR_BASE, MEM_COL_TS_PREV_BASE, MEM_COL_VAL_CUR_BASE,
+    MEM_COL_VAL_PREV_BASE, MEM_NUM_COLUMNS,
+};
+use crate::trace::MemOp;
+use stwo::core::fields::m31::BaseField;
+use stwo::core::poly::circle::CanonicCoset;
+use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::poly::circle::CircleEvaluation;
+use stwo::prover::poly::BitReversedOrder;
+
+/// 原生 M31 Memory trace（列主序，25 列）。
+///
+/// 参考 Nexus zkVM 0.3.6 `memory_check` 模块的 sorted memory log 模式。
+///
+/// # 结构
+/// - `cols[col_idx][row_idx]` — 列主序存储
+/// - `log_size` — log2(行数)
+///
+/// # 设计
+/// - 行按 (addr, ts) 排序
+/// - 连续行同 addr 时 ValPrev=prev.ValCur、TsPrev=prev.TsCur
+/// - 首次访问时 ValPrev=0、TsPrev=0、IsFirstAccess=1
+#[derive(Debug, Clone)]
+pub struct MemoryTrace {
+    /// 列主序存储：`cols[col_idx][row_idx]`
+    pub cols: Vec<Vec<M31>>,
+    /// log2(行数)
+    pub log_size: u32,
+}
+
+impl MemoryTrace {
+    /// 创建指定 log_size 的空 Memory trace（所有列初始化为 0）。
+    #[must_use]
+    pub fn new(log_size: u32) -> Self {
+        let num_rows = 1usize << log_size;
+        Self {
+            cols: vec![vec![M31::from(0u32); num_rows]; MEM_NUM_COLUMNS],
+            log_size,
+        }
+    }
+
+    /// 获取行数。
+    #[must_use]
+    pub fn num_rows(&self) -> usize {
+        1usize << self.log_size
+    }
+
+    /// 填充 32-bit 值到 4×8-bit limb 列。
+    fn fill_word(&mut self, row: usize, col_base: usize, value: u32) {
+        let limbs = u32_to_m31_limbs(value);
+        for (offset, limb) in limbs.iter().enumerate() {
+            self.cols[col_base + offset][row] = *limb;
+        }
+    }
+
+    /// 填充单个 M31 值到指定列。
+    fn fill_scalar(&mut self, row: usize, col: usize, value: M31) {
+        self.cols[col][row] = value;
+    }
+}
+
+/// 单条内存访问记录（内部用于排序）。
+#[derive(Clone, Debug)]
+struct MemEntry {
+    addr: u32,
+    value: u32,
+    is_store: u8,  // 1=Store, 0=Load
+    size: u8,
+    ts: u32,       // step_index
+}
+
+/// 从 emulator `Trace` 生成 sorted Memory trace。
+///
+/// # 算法
+/// 1. 遍历 `trace.steps()`，收集所有 MemAccess，附加 step_index 作为 TsCur
+/// 2. 按 (addr, ts) 排序
+/// 3. 填充 trace：
+///    - 同 addr 连续行：ValPrev=prev.ValCur、TsPrev=prev.TsCur、IsFirstAccess=0
+///    - 首次访问 addr：ValPrev=0、TsPrev=0、IsFirstAccess=1
+/// 4. Padding 到 2^log_size 行（IsPadding=1）
+///
+/// # 参数
+/// - `trace` — emulator 执行 trace
+///
+/// # 返回
+/// 列主序 `MemoryTrace`，列数 = `MEM_NUM_COLUMNS` (25)，行数 = 2^log_size
+#[must_use]
+pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
+    // Step 1: 收集所有 MemAccess
+    let mut entries: Vec<MemEntry> = Vec::new();
+    for step in trace.iter() {
+        for ma in &step.mem_access {
+            entries.push(MemEntry {
+                addr: ma.addr,
+                value: ma.value,
+                is_store: if ma.op == MemOp::Write { 1 } else { 0 },
+                size: ma.size,
+                ts: u32::try_from(step.step_index).unwrap_or(u32::MAX),
+            });
+        }
+    }
+
+    // Step 2: 按 (addr, ts) 排序
+    entries.sort_by(|a, b| {
+        (a.addr, a.ts).cmp(&(b.addr, b.ts))
+    });
+
+    // Step 3: 计算 log_size 并填充 trace
+    let num_entries = entries.len();
+    let log_size = TraceBuilder::compute_log_size(num_entries.max(1));
+    let mut mem_trace = MemoryTrace::new(log_size);
+
+    let mut prev_addr: Option<u32> = None;
+    let mut prev_val_cur: u32 = 0;
+    let mut prev_ts_cur: u32 = 0;
+
+    for (row_idx, entry) in entries.iter().enumerate() {
+        // 判断是否首次访问该 addr
+        let is_first_access = prev_addr != Some(entry.addr);
+
+        // 填充 MemAddr
+        mem_trace.fill_word(row_idx, MEM_COL_ADDR_BASE, entry.addr);
+        // 填充 MemValCur
+        mem_trace.fill_word(row_idx, MEM_COL_VAL_CUR_BASE, entry.value);
+        // 填充 MemTsCur
+        mem_trace.fill_word(row_idx, MEM_COL_TS_CUR_BASE, entry.ts);
+
+        if is_first_access {
+            // 首次访问：ValPrev=0, TsPrev=0
+            mem_trace.fill_word(row_idx, MEM_COL_VAL_PREV_BASE, 0);
+            mem_trace.fill_word(row_idx, MEM_COL_TS_PREV_BASE, 0);
+            mem_trace.fill_scalar(row_idx, MEM_COL_IS_FIRST_ACCESS, M31::from(1u32));
+        } else {
+            // 连续访问：ValPrev=prev.ValCur, TsPrev=prev.TsCur
+            mem_trace.fill_word(row_idx, MEM_COL_VAL_PREV_BASE, prev_val_cur);
+            mem_trace.fill_word(row_idx, MEM_COL_TS_PREV_BASE, prev_ts_cur);
+            mem_trace.fill_scalar(row_idx, MEM_COL_IS_FIRST_ACCESS, M31::from(0u32));
+        }
+
+        // 填充 flags
+        mem_trace.fill_scalar(row_idx, MEM_COL_IS_LOAD, M31::from(u32::from(1 - entry.is_store)));
+        mem_trace.fill_scalar(row_idx, MEM_COL_IS_STORE, M31::from(u32::from(entry.is_store)));
+        mem_trace.fill_scalar(row_idx, MEM_COL_SIZE, M31::from(u32::from(entry.size)));
+        mem_trace.fill_scalar(row_idx, MEM_COL_IS_PADDING, M31::from(0u32));
+
+        // 更新 prev 状态
+        prev_addr = Some(entry.addr);
+        prev_val_cur = entry.value;
+        prev_ts_cur = entry.ts;
+    }
+
+    // Step 4: Padding 到 2^log_size 行
+    for row_idx in num_entries..mem_trace.num_rows() {
+        // Padding 行：IsPadding=1，其余=0（MemoryTrace::new 已初始化为 0）
+        mem_trace.fill_scalar(row_idx, MEM_COL_IS_PADDING, M31::from(1u32));
+        // 注：Padding 行 IsLoad=0, IsStore=0, IsFirstAccess=0
+    }
+
+    mem_trace
+}
+
+/// 将 `MemoryTrace` 转换为 Stwo `CircleEvaluation` 列。
+///
+/// # 参数
+/// - `trace` — 25 列 × 2^log_size 行的 Memory trace
+///
+/// # 返回
+/// 25 个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
+#[must_use]
+pub fn memory_trace_to_evaluations(
+    trace: &MemoryTrace,
+) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+    assert_eq!(
+        trace.cols.len(),
+        MEM_NUM_COLUMNS,
+        "memory_trace_to_evaluations: trace.cols.len()={} != MEM_NUM_COLUMNS={}",
+        trace.cols.len(),
+        MEM_NUM_COLUMNS
+    );
+    let domain = CanonicCoset::new(trace.log_size).circle_domain();
+    trace
+        .cols
+        .iter()
+        .map(|col| {
+            let base_col = BaseColumn::from_cpu(col.as_slice());
+            CircleEvaluation::<SimdBackend, BaseField>::new(domain, base_col).bit_reverse()
+        })
+        .collect()
+}
+
+// ===========================================================================
+// Phase 4 Tier 2: Poseidon Trace 生成（Step 4.2.3）
+// ===========================================================================
+
+use super::poseidon_air::{
+    POSEIDON_AIR_COL_INPUT_BASE, POSEIDON_AIR_COL_IS_FIRST_ROUND, POSEIDON_AIR_COL_IS_FULL_ROUND,
+    POSEIDON_AIR_COL_IS_LAST_ROUND, POSEIDON_AIR_COL_IS_PADDING, POSEIDON_AIR_COL_IS_PARTIAL_ROUND,
+    POSEIDON_AIR_COL_OUTPUT_BASE, POSEIDON_AIR_COL_ROUND_CONSTANT_BASE,
+    POSEIDON_AIR_COL_ROUND_COUNTER, POSEIDON_AIR_COL_SBOX_OUT_BASE, POSEIDON_AIR_COL_SBOX_SQ1_BASE,
+    POSEIDON_AIR_COL_SBOX_SQ2_BASE, POSEIDON_AIR_COL_STATE_BASE,
+    POSEIDON_AIR_COL_STATE_NEXT_BASE, POSEIDON_AIR_NUM_COLUMNS, POSEIDON_AIR_TOTAL_ROUNDS,
+};
+use super::poseidon_m31::{
+    poseidon_m31_round_constants, poseidon_permutation_m31, poseidon_permutation_m31_steps,
+    POSEIDON_M31_FULL_ROUNDS, POSEIDON_M31_PARTIAL_ROUNDS, POSEIDON_M31_WIDTH,
+};
+
+/// 单次 Poseidon hash 调用记录（用于生成 Poseidon trace）。
+///
+/// # 字段
+/// - `input_state` — hash 输入的 3 元素 state（sponge permutation 输入）
+/// - `output_state` — hash 输出的 3 元素 state（30 轮 permutation 后的最终 state）
+///
+/// # 一致性
+/// `output_state` 应等于 `poseidon_permutation_m31(input_state)`。
+/// [`gen_poseidon_trace`] 会通过 `poseidon_permutation_m31_steps` 重新计算中间 state，
+/// 不依赖 `output_state` 字段；该字段仅供调用方/测试用作一致性校验参考。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoseidonHashCall {
+    /// Hash 输入 state（3 M31）
+    pub input_state: [BaseField; 3],
+    /// Hash 输出 state（3 M31）
+    pub output_state: [BaseField; 3],
+}
+
+impl PoseidonHashCall {
+    /// 从 `input_state` 创建 [`PoseidonHashCall`]，自动计算 `output_state`。
+    ///
+    /// # 参数
+    /// - `input_state` — hash 输入的 3 元素 state
+    #[must_use]
+    pub fn from_input(input_state: [BaseField; 3]) -> Self {
+        let output_state = poseidon_permutation_m31(input_state);
+        Self { input_state, output_state }
+    }
+}
+
+/// 原生 M31 Poseidon trace（列主序，30 列，v2.1）。
+///
+/// 参考 [`MemoryTrace`] 的列主序存储模式。
+///
+/// # 结构
+/// - `cols[col_idx][row_idx]` — 列主序存储，30 列（v2.1：21 原列 + 9 S-box 中间列）
+/// - `log_size` — log2(行数)，行数 = `1 << log_size`
+///
+/// # 行布局
+/// - 每次 hash 调用占 30 行（每行一个 round）
+/// - Padding 行：`IsPadding=1`，其余列=0（包括 S-box 中间列，保证 unconditional 约束满足）
+#[derive(Debug, Clone)]
+pub struct PoseidonTrace {
+    /// 列主序存储：`cols[col_idx][row_idx]`
+    pub cols: Vec<Vec<M31>>,
+    /// log2(行数)
+    pub log_size: u32,
+}
+
+impl PoseidonTrace {
+    /// 创建指定 log_size 的空 Poseidon trace（所有列初始化为 0）。
+    ///
+    /// # 参数
+    /// - `log_size` — log2(行数)，行数 = `1 << log_size`
+    #[must_use]
+    pub fn new(log_size: u32) -> Self {
+        let num_rows = 1usize << log_size;
+        Self {
+            cols: vec![vec![M31::from(0u32); num_rows]; POSEIDON_AIR_NUM_COLUMNS],
+            log_size,
+        }
+    }
+
+    /// 获取行数（`1 << log_size`）。
+    #[must_use]
+    pub fn num_rows(&self) -> usize {
+        1usize << self.log_size
+    }
+
+    /// 获取列数（30，v2.1）。
+    #[must_use]
+    pub fn num_columns(&self) -> usize {
+        self.cols.len()
+    }
+
+    /// 填充单个 M31 值到指定列。
+    fn fill_scalar(&mut self, row: usize, col: usize, value: M31) {
+        self.cols[col][row] = value;
+    }
+
+    /// 填充单个 `BaseField` 值到指定列（`BaseField = M31`，同类型）。
+    fn fill_base(&mut self, row: usize, col: usize, value: BaseField) {
+        self.cols[col][row] = value;
+    }
+
+    /// 填充 3 元素 state 到连续 3 列。
+    fn fill_state(&mut self, row: usize, col_base: usize, state: &[BaseField; 3]) {
+        for j in 0..POSEIDON_M31_WIDTH {
+            self.cols[col_base + j][row] = state[j];
+        }
+    }
+}
+
+/// 计算 Poseidon trace 的 log_size。
+///
+/// # 参数
+/// - `total_rounds_needed` — 所需总行数（hash 数 × 30）
+///
+/// # 返回
+/// log_size ∈ [5, 24]
+/// - 最小 5（32 行，容纳 1 hash 30 行 + 2 padding）
+/// - 最大 24（16M 行）
+fn compute_poseidon_log_size(total_rounds_needed: usize) -> u32 {
+    let mut log_size: u32 = 5; // 最小 5（32 行）
+    while (1usize << log_size) < total_rounds_needed {
+        log_size += 1;
+    }
+    assert!(
+        log_size <= 24,
+        "compute_poseidon_log_size: total_rounds_needed={} 过大，log_size={} > 24",
+        total_rounds_needed,
+        log_size
+    );
+    log_size
+}
+
+/// 从 `&[PoseidonHashCall]` 生成 Poseidon trace。
+///
+/// # 算法
+/// 1. 计算 log_size：每次 hash 占 30 行，取 `≥ total_rounds` 的最小 2 的幂，最小 5（32 行）
+/// 2. 对每次 hash 调用 [`poseidon_permutation_m31_steps`] 获取 31 个中间 state
+/// 3. 填充 30 行 × 30 列（每行一个 round，v2.1 含 9 个 S-box 中间列）
+/// 4. Padding 到 2^log_size 行（`IsPadding=1`，其余列=0）
+///
+/// # 行布局（每次 hash 占 30 行，`round` ∈ 0..30）
+/// - `State[0..3]` = `states[round]`（第 `round` 轮的输入 state）
+/// - `StateNext[0..3]` = `states[round + 1]`（第 `round` 轮的输出 state）
+/// - `IsFullRound` / `IsPartialRound`：根据轮序号
+///   - 前 4 轮 (`round` ∈ 0..4)：full
+///   - 中 22 轮 (`round` ∈ 4..26)：partial
+///   - 后 4 轮 (`round` ∈ 26..30)：full
+/// - `IsFirstRound` = (`round` == 0)
+/// - `IsLastRound` = (`round` == 29)
+/// - `RoundCounter` = `round`
+/// - `Input[0..3]` = `states[0]`（首次输入，所有 round 都填，由 `IsFirstRound` gating）
+/// - `Output[0..3]` = `states[30]`（最终输出，所有 round 都填，由 `IsLastRound` gating）
+/// - `IsPadding` = 0
+/// - `RoundConstant[0..3]` = `rcs[round]`（当前轮的 round constants）
+/// - `SboxSq1[0..3]` = `(State[j] + RC[j])^2`（v2.1 新增，S-box 中间列）
+/// - `SboxSq2[0..3]` = `SboxSq1[j]^2 = SboxInput[j]^4`（v2.1 新增，S-box 中间列）
+/// - `SboxOut[0..3]` = `SboxSq2[j] * SboxInput[j] = SboxInput[j]^5`（v2.1 新增，S-box 输出列）
+///
+/// # Padding 行
+/// - `IsPadding` = 1
+/// - 其他列 = 0（包括 S-box 中间列，保证 unconditional 约束 P13-P21 满足）
+///
+/// # 参数
+/// - `hash_calls` — Poseidon hash 调用列表
+///
+/// # 返回
+/// 列主序 [`PoseidonTrace`]，列数 = `POSEIDON_AIR_NUM_COLUMNS` (30，v2.1)，行数 = `2^log_size`
+#[must_use]
+pub fn gen_poseidon_trace(hash_calls: &[PoseidonHashCall]) -> PoseidonTrace {
+    // Step 1: 计算 log_size
+    let total_rounds_needed = hash_calls.len() * POSEIDON_AIR_TOTAL_ROUNDS;
+    let log_size = compute_poseidon_log_size(total_rounds_needed);
+
+    let mut trace = PoseidonTrace::new(log_size);
+
+    // 预计算 round constants（一次即可，所有 hash 共用）
+    let rcs = poseidon_m31_round_constants();
+    let full_half = POSEIDON_M31_FULL_ROUNDS as usize / 2; // 4
+    let partial_end = full_half + POSEIDON_M31_PARTIAL_ROUNDS as usize; // 26
+
+    // Step 2 + 3: 对每次 hash 生成 30 行
+    let mut row_idx: usize = 0;
+    for call in hash_calls {
+        // 调用 poseidon_permutation_m31_steps 获取 31 个中间 state
+        // states[0] = input, states[30] = output（30 轮后）
+        let states = poseidon_permutation_m31_steps(call.input_state);
+        assert_eq!(
+            states.len(),
+            POSEIDON_AIR_TOTAL_ROUNDS + 1,
+            "poseidon_permutation_m31_steps 应返回 31 个 state（初始 + 30 轮）"
+        );
+
+        // 可选：验证 output_state 一致性（debug 模式）
+        debug_assert_eq!(
+            states[POSEIDON_AIR_TOTAL_ROUNDS],
+            call.output_state,
+            "PoseidonHashCall output_state 与 permutation 计算结果不一致"
+        );
+
+        // 填充 30 行（每行一个 round）
+        for round in 0..POSEIDON_AIR_TOTAL_ROUNDS {
+            // State[0..3] = states[round]
+            trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_BASE, &states[round]);
+            // StateNext[0..3] = states[round + 1]
+            trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_NEXT_BASE, &states[round + 1]);
+
+            // IsFullRound / IsPartialRound
+            let (is_full, is_partial) = if round < full_half {
+                (1u32, 0u32)
+            } else if round < partial_end {
+                (0u32, 1u32)
+            } else {
+                (1u32, 0u32)
+            };
+            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_FULL_ROUND, M31::from(is_full));
+            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_PARTIAL_ROUND, M31::from(is_partial));
+
+            // IsFirstRound / IsLastRound
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_IS_FIRST_ROUND,
+                M31::from(u32::from(round == 0)),
+            );
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_IS_LAST_ROUND,
+                M31::from(u32::from(round == POSEIDON_AIR_TOTAL_ROUNDS - 1)),
+            );
+
+            // RoundCounter
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_ROUND_COUNTER,
+                M31::from(round as u32),
+            );
+
+            // Input[0..3] = states[0]（首次输入，由 IsFirstRound gating）
+            trace.fill_state(row_idx, POSEIDON_AIR_COL_INPUT_BASE, &states[0]);
+
+            // Output[0..3] = states[30]（最终输出，由 IsLastRound gating）
+            trace.fill_state(
+                row_idx,
+                POSEIDON_AIR_COL_OUTPUT_BASE,
+                &states[POSEIDON_AIR_TOTAL_ROUNDS],
+            );
+
+            // IsPadding = 0
+            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_PADDING, M31::from(0u32));
+
+            // RoundConstant[0..3] = rcs[round]
+            for j in 0..POSEIDON_M31_WIDTH {
+                trace.fill_base(row_idx, POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + j, rcs[round][j]);
+            }
+
+            // ===== v2.1 新增：填充 S-box 中间列（SboxSq1/SboxSq2/SboxOut）=====
+            // S-box 分解：x^5 = x * (x^2)^2
+            //   SboxInput[j]  = State[j] + RC[j]                  (inline)
+            //   SboxSq1[j]    = SboxInput[j]^2                    (degree 2 约束 P13-P15)
+            //   SboxSq2[j]    = SboxSq1[j]^2 = SboxInput[j]^4     (degree 2 约束 P16-P18)
+            //   SboxOut[j]    = SboxSq2[j] * SboxInput[j] = SboxInput[j]^5  (degree 2 约束 P19-P21)
+            //
+            // 这些中间列是 unconditional 约束的 RHS，必须在每一行（包括 padding 行）正确填充。
+            // - 真实行：按上述公式计算
+            // - padding 行：State=0, RC=0 → SboxSq1=SboxSq2=SboxOut=0（PoseidonTrace::new 已初始化为 0）
+            for j in 0..POSEIDON_M31_WIDTH {
+                let sbox_input = states[round][j] + rcs[round][j];
+                let sbox_sq1 = sbox_input * sbox_input;
+                let sbox_sq2 = sbox_sq1 * sbox_sq1;
+                let sbox_out = sbox_sq2 * sbox_input;
+                trace.fill_base(row_idx, POSEIDON_AIR_COL_SBOX_SQ1_BASE + j, sbox_sq1);
+                trace.fill_base(row_idx, POSEIDON_AIR_COL_SBOX_SQ2_BASE + j, sbox_sq2);
+                trace.fill_base(row_idx, POSEIDON_AIR_COL_SBOX_OUT_BASE + j, sbox_out);
+            }
+
+            row_idx += 1;
+        }
+    }
+
+    // Step 4: Padding 到 2^log_size 行
+    // Padding 行：IsPadding=1，其余列=0（PoseidonTrace::new 已初始化为 0）
+    for r in row_idx..trace.num_rows() {
+        trace.fill_scalar(r, POSEIDON_AIR_COL_IS_PADDING, M31::from(1u32));
+    }
+
+    trace
+}
+
+/// 将 [`PoseidonTrace`] 转换为 Stwo `CircleEvaluation` 列。
+///
+/// # 参数
+/// - `trace` — 30 列 × 2^log_size 行的 Poseidon trace（v2.1）
+///
+/// # 返回
+/// 30 个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列（v2.1）
+#[must_use]
+pub fn poseidon_trace_to_evaluations(
+    trace: &PoseidonTrace,
+) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+    assert_eq!(
+        trace.cols.len(),
+        POSEIDON_AIR_NUM_COLUMNS,
+        "poseidon_trace_to_evaluations: trace.cols.len()={} != POSEIDON_AIR_NUM_COLUMNS={}",
+        trace.cols.len(),
+        POSEIDON_AIR_NUM_COLUMNS
+    );
+    let domain = CanonicCoset::new(trace.log_size).circle_domain();
+    trace
+        .cols
+        .iter()
+        .map(|col| {
+            let base_col = BaseColumn::from_cpu(col.as_slice());
+            CircleEvaluation::<SimdBackend, BaseField>::new(domain, base_col).bit_reverse()
+        })
+        .collect()
 }
 
 // ===========================================================================
@@ -1057,6 +1659,626 @@ mod tests {
                 trace2.cols[COL_VALUE_A_BASE + offset][0],
                 "fill_word 与 fill_scalar 不一致 (offset={})",
                 offset
+            );
+        }
+    }
+
+    // ----- Phase 3: Memory trace 生成测试 -----
+
+    /// 辅助：构造一个带内存访问的 Step。
+    fn make_mem_step(
+        step_index: u64,
+        pc: u32,
+        instruction: crate::isa::Instruction,
+        post_registers: [u32; 32],
+        mem_access: Vec<crate::trace::MemAccess>,
+    ) -> crate::trace::Step {
+        crate::trace::Step {
+            step_index,
+            pc,
+            instruction,
+            registers: post_registers,
+            mem_access,
+        }
+    }
+
+    #[test]
+    fn test_memory_trace_empty() {
+        // 空 trace（无内存访问）应生成全 padding 的 Memory trace
+        let trace = crate::trace::Trace::new();
+        let mem_trace = trace_to_memory_trace(&trace);
+        assert_eq!(mem_trace.cols.len(), MEM_NUM_COLUMNS);
+        // 所有行应为 padding
+        for row in 0..mem_trace.num_rows() {
+            assert_eq!(
+                mem_trace.cols[MEM_COL_IS_PADDING][row],
+                M31::from(1u32),
+                "row {} 应为 padding",
+                row
+            );
+        }
+    }
+
+    #[test]
+    fn test_memory_trace_single_store() {
+        // 单条 SW 指令：存储 0xDEADBEEF 到地址 0x1000
+        let mut trace = crate::trace::Trace::new();
+        let step = make_mem_step(
+            0,
+            0,
+            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            [0u32; 32],
+            vec![crate::trace::MemAccess {
+                addr: 0x1000,
+                op: crate::trace::MemOp::Write,
+                value: 0xDEADBEEF,
+                size: 4,
+            }],
+        );
+        trace.push_step(step);
+
+        let mem_trace = trace_to_memory_trace(&trace);
+
+        // 第 0 行应为 Store 访问
+        assert_eq!(mem_trace.cols[MEM_COL_IS_STORE][0], M31::from(1u32));
+        assert_eq!(mem_trace.cols[MEM_COL_IS_LOAD][0], M31::from(0u32));
+        assert_eq!(mem_trace.cols[MEM_COL_IS_PADDING][0], M31::from(0u32));
+        assert_eq!(mem_trace.cols[MEM_COL_IS_FIRST_ACCESS][0], M31::from(1u32));
+
+        // 验证地址
+        let addr_limbs = &mem_trace.cols[MEM_COL_ADDR_BASE..MEM_COL_ADDR_BASE + 4];
+        let addr = m31_limbs_to_u32(&[
+            addr_limbs[0][0],
+            addr_limbs[1][0],
+            addr_limbs[2][0],
+            addr_limbs[3][0],
+        ]);
+        assert_eq!(addr, 0x1000);
+
+        // 验证值
+        let val_limbs = &mem_trace.cols[MEM_COL_VAL_CUR_BASE..MEM_COL_VAL_CUR_BASE + 4];
+        let val = m31_limbs_to_u32(&[
+            val_limbs[0][0],
+            val_limbs[1][0],
+            val_limbs[2][0],
+            val_limbs[3][0],
+        ]);
+        assert_eq!(val, 0xDEADBEEF);
+
+        // 首次访问：ValPrev = 0, TsPrev = 0
+        for i in 0..4 {
+            assert_eq!(mem_trace.cols[MEM_COL_VAL_PREV_BASE + i][0], M31::from(0u32));
+            assert_eq!(mem_trace.cols[MEM_COL_TS_PREV_BASE + i][0], M31::from(0u32));
+        }
+
+        // 其余行应为 padding
+        for row in 1..mem_trace.num_rows() {
+            assert_eq!(mem_trace.cols[MEM_COL_IS_PADDING][row], M31::from(1u32));
+        }
+    }
+
+    #[test]
+    fn test_memory_trace_sorted_by_addr() {
+        // 两条 Store 指令，地址不同，验证按 addr 排序
+        // Step 0: SW 到 addr=0x2000
+        // Step 1: SW 到 addr=0x1000
+        // 排序后：0x1000 在前，0x2000 在后
+        let mut trace = crate::trace::Trace::new();
+        trace.push_step(make_mem_step(
+            0, 0,
+            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            [0u32; 32],
+            vec![crate::trace::MemAccess {
+                addr: 0x2000, op: crate::trace::MemOp::Write, value: 0x1111, size: 4,
+            }],
+        ));
+        trace.push_step(make_mem_step(
+            1, 4,
+            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            [0u32; 32],
+            vec![crate::trace::MemAccess {
+                addr: 0x1000, op: crate::trace::MemOp::Write, value: 0x2222, size: 4,
+            }],
+        ));
+
+        let mem_trace = trace_to_memory_trace(&trace);
+
+        // 第 0 行应为 addr=0x1000（排序后在前）
+        let addr0 = m31_limbs_to_u32(&[
+            mem_trace.cols[MEM_COL_ADDR_BASE][0],
+            mem_trace.cols[MEM_COL_ADDR_BASE + 1][0],
+            mem_trace.cols[MEM_COL_ADDR_BASE + 2][0],
+            mem_trace.cols[MEM_COL_ADDR_BASE + 3][0],
+        ]);
+        assert_eq!(addr0, 0x1000);
+
+        // 第 1 行应为 addr=0x2000
+        let addr1 = m31_limbs_to_u32(&[
+            mem_trace.cols[MEM_COL_ADDR_BASE][1],
+            mem_trace.cols[MEM_COL_ADDR_BASE + 1][1],
+            mem_trace.cols[MEM_COL_ADDR_BASE + 2][1],
+            mem_trace.cols[MEM_COL_ADDR_BASE + 3][1],
+        ]);
+        assert_eq!(addr1, 0x2000);
+    }
+
+    #[test]
+    fn test_memory_trace_continuity() {
+        // 同一地址的两次访问，验证 ValPrev/TsPrev 连续性
+        // Step 0: SW 0x1111 到 addr=0x1000
+        // Step 1: SW 0x2222 到 addr=0x1000（同地址）
+        let mut trace = crate::trace::Trace::new();
+        trace.push_step(make_mem_step(
+            0, 0,
+            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            [0u32; 32],
+            vec![crate::trace::MemAccess {
+                addr: 0x1000, op: crate::trace::MemOp::Write, value: 0x1111, size: 4,
+            }],
+        ));
+        trace.push_step(make_mem_step(
+            1, 4,
+            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            [0u32; 32],
+            vec![crate::trace::MemAccess {
+                addr: 0x1000, op: crate::trace::MemOp::Write, value: 0x2222, size: 4,
+            }],
+        ));
+
+        let mem_trace = trace_to_memory_trace(&trace);
+
+        // 第 0 行：首次访问，IsFirstAccess=1
+        assert_eq!(mem_trace.cols[MEM_COL_IS_FIRST_ACCESS][0], M31::from(1u32));
+
+        // 第 1 行：连续访问，IsFirstAccess=0
+        assert_eq!(mem_trace.cols[MEM_COL_IS_FIRST_ACCESS][1], M31::from(0u32));
+
+        // 第 1 行：ValPrev 应等于第 0 行的 ValCur = 0x1111
+        let val_prev_1 = m31_limbs_to_u32(&[
+            mem_trace.cols[MEM_COL_VAL_PREV_BASE][1],
+            mem_trace.cols[MEM_COL_VAL_PREV_BASE + 1][1],
+            mem_trace.cols[MEM_COL_VAL_PREV_BASE + 2][1],
+            mem_trace.cols[MEM_COL_VAL_PREV_BASE + 3][1],
+        ]);
+        assert_eq!(val_prev_1, 0x1111);
+
+        // 第 1 行：TsPrev 应等于第 0 行的 TsCur = 0
+        let ts_prev_1 = m31_limbs_to_u32(&[
+            mem_trace.cols[MEM_COL_TS_PREV_BASE][1],
+            mem_trace.cols[MEM_COL_TS_PREV_BASE + 1][1],
+            mem_trace.cols[MEM_COL_TS_PREV_BASE + 2][1],
+            mem_trace.cols[MEM_COL_TS_PREV_BASE + 3][1],
+        ]);
+        assert_eq!(ts_prev_1, 0);
+
+        // 第 1 行：TsCur 应等于 1
+        let ts_cur_1 = m31_limbs_to_u32(&[
+            mem_trace.cols[MEM_COL_TS_CUR_BASE][1],
+            mem_trace.cols[MEM_COL_TS_CUR_BASE + 1][1],
+            mem_trace.cols[MEM_COL_TS_CUR_BASE + 2][1],
+            mem_trace.cols[MEM_COL_TS_CUR_BASE + 3][1],
+        ]);
+        assert_eq!(ts_cur_1, 1);
+    }
+
+    #[test]
+    fn test_memory_trace_to_evaluations() {
+        // 验证 Memory trace 可转换为 CircleEvaluation 列
+        let mem_trace = MemoryTrace::new(10);
+        let evals = memory_trace_to_evaluations(&mem_trace);
+        assert_eq!(evals.len(), MEM_NUM_COLUMNS);
+    }
+
+    // ----- Phase 4 Tier 2: Poseidon trace 生成测试 -----
+
+    #[test]
+    fn test_poseidon_hash_call_from_input() {
+        // PoseidonHashCall::from_input 应自动计算 output_state
+        let input = [BaseField::from(1u32), BaseField::from(2u32), BaseField::from(3u32)];
+        let call = PoseidonHashCall::from_input(input);
+        assert_eq!(call.input_state, input);
+
+        // output_state 应等于 poseidon_permutation_m31(input)
+        let expected_output = poseidon_permutation_m31(input);
+        assert_eq!(
+            call.output_state, expected_output,
+            "PoseidonHashCall::from_input 自动计算的 output_state 应与 poseidon_permutation_m31 一致"
+        );
+
+        // input != output（permutation 是非平凡的）
+        assert_ne!(call.input_state, call.output_state, "permutation 应改变 state");
+    }
+
+    #[test]
+    fn test_compute_poseidon_log_size() {
+        // 最小 5（32 行），即使无 hash 调用
+        assert_eq!(compute_poseidon_log_size(0), 5);
+        // 1 hash = 30 行 → log_size = 5（32 行，30 + 2 padding）
+        assert_eq!(compute_poseidon_log_size(30), 5);
+        // 2 hash = 60 行 → log_size = 6（64 行）
+        assert_eq!(compute_poseidon_log_size(60), 6);
+        // 3 hash = 90 行 → log_size = 7（128 行）
+        assert_eq!(compute_poseidon_log_size(90), 7);
+        // 4 hash = 120 行 → log_size = 7（128 行）
+        assert_eq!(compute_poseidon_log_size(120), 7);
+        // 5 hash = 150 行 → log_size = 8（256 行）
+        assert_eq!(compute_poseidon_log_size(150), 8);
+    }
+
+    #[test]
+    fn test_poseidon_trace_empty() {
+        // 空 hash_calls 应生成全 padding 的 trace
+        let trace = gen_poseidon_trace(&[]);
+        assert_eq!(trace.num_columns(), POSEIDON_AIR_NUM_COLUMNS);
+        assert_eq!(trace.num_rows(), 32); // log_size = 5
+        assert_eq!(trace.log_size, 5);
+
+        // 所有行应为 padding（IsPadding=1，其余列=0）
+        for row in 0..trace.num_rows() {
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PADDING][row],
+                M31::from(1u32),
+                "row {} 应为 padding",
+                row
+            );
+            // 其余列应为 0（除 IsPadding 外）
+            for col in 0..POSEIDON_AIR_NUM_COLUMNS {
+                if col != POSEIDON_AIR_COL_IS_PADDING {
+                    assert_eq!(
+                        trace.cols[col][row],
+                        M31::from(0u32),
+                        "padding 行 {} 的 col {} 应为 0",
+                        row,
+                        col
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_poseidon_trace_single_hash_dimensions() {
+        // 单次 hash：30 行真实 + 2 行 padding = 32 行（log_size=5）
+        let call = PoseidonHashCall::from_input([
+            BaseField::from(10u32),
+            BaseField::from(20u32),
+            BaseField::from(30u32),
+        ]);
+        let trace = gen_poseidon_trace(&[call]);
+
+        // 列数 = 30（v2.1：21 原列 + 9 S-box 中间列）
+        assert_eq!(trace.num_columns(), POSEIDON_AIR_NUM_COLUMNS);
+        assert_eq!(trace.num_columns(), 30);
+
+        // 行数 = 32（log_size=5）
+        assert_eq!(trace.num_rows(), 32);
+        assert_eq!(trace.log_size, 5);
+    }
+
+    #[test]
+    fn test_poseidon_trace_single_hash_round_flags() {
+        // 验证 IsFullRound/IsPartialRound/IsFirstRound/IsLastRound/RoundCounter
+        let call = PoseidonHashCall::from_input([
+            BaseField::from(1u32),
+            BaseField::from(2u32),
+            BaseField::from(3u32),
+        ]);
+        let trace = gen_poseidon_trace(&[call]);
+
+        // 轮序号 → (is_full, is_partial, is_first, is_last)
+        // 0..4: full, 4..26: partial, 26..30: full
+        // round 0: first; round 29: last
+        let expected = |round: usize| -> (u32, u32, u32, u32) {
+            let is_full = if round < 4 || round >= 26 { 1 } else { 0 };
+            let is_partial = if (4..26).contains(&round) { 1 } else { 0 };
+            let is_first = if round == 0 { 1 } else { 0 };
+            let is_last = if round == 29 { 1 } else { 0 };
+            (is_full, is_partial, is_first, is_last)
+        };
+
+        for round in 0..30 {
+            let (is_full, is_partial, is_first, is_last) = expected(round);
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_FULL_ROUND][round],
+                M31::from(is_full),
+                "round {}: IsFullRound 应为 {}",
+                round,
+                is_full
+            );
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PARTIAL_ROUND][round],
+                M31::from(is_partial),
+                "round {}: IsPartialRound 应为 {}",
+                round,
+                is_partial
+            );
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_FIRST_ROUND][round],
+                M31::from(is_first),
+                "round {}: IsFirstRound 应为 {}",
+                round,
+                is_first
+            );
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_LAST_ROUND][round],
+                M31::from(is_last),
+                "round {}: IsLastRound 应为 {}",
+                round,
+                is_last
+            );
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_ROUND_COUNTER][round],
+                M31::from(round as u32),
+                "round {}: RoundCounter 应为 {}",
+                round,
+                round
+            );
+            // 真实行 IsPadding = 0
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PADDING][round],
+                M31::from(0u32),
+                "round {}: IsPadding 应为 0",
+                round
+            );
+        }
+
+        // one-hot 验证：每行 Full + Partial + Padding = 1
+        for round in 0..30 {
+            let sum = trace.cols[POSEIDON_AIR_COL_IS_FULL_ROUND][round].0
+                + trace.cols[POSEIDON_AIR_COL_IS_PARTIAL_ROUND][round].0
+                + trace.cols[POSEIDON_AIR_COL_IS_PADDING][round].0;
+            assert_eq!(sum, 1, "round {}: Full+Partial+Padding 应为 1", round);
+        }
+
+        // padding 行（30, 31）：IsPadding=1，Full=Partial=0
+        for row in 30..32 {
+            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(1u32));
+            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_FULL_ROUND][row], M31::from(0u32));
+            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PARTIAL_ROUND][row], M31::from(0u32));
+        }
+    }
+
+    #[test]
+    fn test_poseidon_trace_single_hash_state_transition() {
+        // 验证 State[i] → StateNext[i] 一致性：
+        // StateNext[i] 应等于 states[i+1]（即第 i 轮 permutation 后的 state）
+        let input = [
+            BaseField::from(42u32),
+            BaseField::from(100u32),
+            BaseField::from(200u32),
+        ];
+        let call = PoseidonHashCall::from_input(input);
+        let trace = gen_poseidon_trace(&[call]);
+
+        // 重新计算 states 用于对照
+        let states = poseidon_permutation_m31_steps(input);
+        assert_eq!(states.len(), 31);
+
+        for round in 0..30 {
+            // State[0..3] = states[round]
+            for j in 0..3 {
+                assert_eq!(
+                    trace.cols[POSEIDON_AIR_COL_STATE_BASE + j][round],
+                    states[round][j],
+                    "round {} State[{}] 不匹配",
+                    round,
+                    j
+                );
+            }
+            // StateNext[0..3] = states[round + 1]
+            for j in 0..3 {
+                assert_eq!(
+                    trace.cols[POSEIDON_AIR_COL_STATE_NEXT_BASE + j][round],
+                    states[round + 1][j],
+                    "round {} StateNext[{}] 不匹配",
+                    round,
+                    j
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_poseidon_trace_single_hash_input_output() {
+        // 验证 Input[0..3] = states[0]（首次输入），Output[0..3] = states[30]（最终输出）
+        // 所有 round 行都填这两个值（由 IsFirstRound/IsLastRound gating）
+        let input = [
+            BaseField::from(7u32),
+            BaseField::from(11u32),
+            BaseField::from(13u32),
+        ];
+        let call = PoseidonHashCall::from_input(input);
+        let trace = gen_poseidon_trace(&[call]);
+
+        let states = poseidon_permutation_m31_steps(input);
+        let initial_state = states[0];
+        let final_state = states[30];
+
+        for round in 0..30 {
+            // Input[0..3] = states[0]
+            for j in 0..3 {
+                assert_eq!(
+                    trace.cols[POSEIDON_AIR_COL_INPUT_BASE + j][round],
+                    initial_state[j],
+                    "round {} Input[{}] 应等于 initial state",
+                    round,
+                    j
+                );
+            }
+            // Output[0..3] = states[30]
+            for j in 0..3 {
+                assert_eq!(
+                    trace.cols[POSEIDON_AIR_COL_OUTPUT_BASE + j][round],
+                    final_state[j],
+                    "round {} Output[{}] 应等于 final state",
+                    round,
+                    j
+                );
+            }
+        }
+
+        // 额外验证：initial_state == input
+        assert_eq!(initial_state, input);
+        // final_state != input（permutation 是非平凡的）
+        assert_ne!(final_state, input);
+    }
+
+    #[test]
+    fn test_poseidon_trace_single_hash_round_constants() {
+        // 验证 RoundConstant[0..3] = rcs[round]
+        let call = PoseidonHashCall::from_input([
+            BaseField::from(0u32),
+            BaseField::from(0u32),
+            BaseField::from(0u32),
+        ]);
+        let trace = gen_poseidon_trace(&[call]);
+
+        let rcs = poseidon_m31_round_constants();
+        assert_eq!(rcs.len(), POSEIDON_AIR_TOTAL_ROUNDS);
+
+        for round in 0..POSEIDON_AIR_TOTAL_ROUNDS {
+            for j in 0..3 {
+                assert_eq!(
+                    trace.cols[POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + j][round],
+                    rcs[round][j],
+                    "round {} RoundConstant[{}] 不匹配 rcs",
+                    round,
+                    j
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_poseidon_trace_multiple_hashes() {
+        // 多次 hash：3 次 hash = 90 行 → log_size = 7（128 行）
+        let calls = vec![
+            PoseidonHashCall::from_input([
+                BaseField::from(1u32),
+                BaseField::from(2u32),
+                BaseField::from(3u32),
+            ]),
+            PoseidonHashCall::from_input([
+                BaseField::from(4u32),
+                BaseField::from(5u32),
+                BaseField::from(6u32),
+            ]),
+            PoseidonHashCall::from_input([
+                BaseField::from(7u32),
+                BaseField::from(8u32),
+                BaseField::from(9u32),
+            ]),
+        ];
+        let trace = gen_poseidon_trace(&calls);
+
+        // 3 hash × 30 rounds = 90 行 → log_size = 7（128 行）
+        assert_eq!(trace.log_size, 7);
+        assert_eq!(trace.num_rows(), 128);
+        // v2.1：30 列（21 原列 + 9 S-box 中间列）
+        assert_eq!(trace.num_columns(), 30);
+
+        // 验证第 2 次 hash 的第 0 轮（row=30）IsFirstRound=1
+        assert_eq!(
+            trace.cols[POSEIDON_AIR_COL_IS_FIRST_ROUND][30],
+            M31::from(1u32),
+            "第 2 次 hash 第 0 轮（row=30）IsFirstRound 应为 1"
+        );
+
+        // 验证第 3 次 hash 的最后一轮（row=89）IsLastRound=1
+        assert_eq!(
+            trace.cols[POSEIDON_AIR_COL_IS_LAST_ROUND][89],
+            M31::from(1u32),
+            "第 3 次 hash 最后一轮（row=89）IsLastRound 应为 1"
+        );
+
+        // 验证第 2 次 hash 的 input（row=30..60）== 第 2 个 call 的 input_state
+        for round in 0..30 {
+            for j in 0..3 {
+                assert_eq!(
+                    trace.cols[POSEIDON_AIR_COL_INPUT_BASE + j][30 + round],
+                    calls[1].input_state[j],
+                    "第 2 hash round {} Input[{}] 不匹配",
+                    round,
+                    j
+                );
+            }
+        }
+
+        // padding 行（90..128）IsPadding=1
+        for row in 90..128 {
+            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(1u32));
+        }
+
+        // 真实行（0..90）IsPadding=0
+        for row in 0..90 {
+            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(0u32));
+        }
+    }
+
+    #[test]
+    fn test_poseidon_trace_padding_correctness() {
+        // 验证 padding 行：IsPadding=1，其余列=0
+        let call = PoseidonHashCall::from_input([
+            BaseField::from(1u32),
+            BaseField::from(2u32),
+            BaseField::from(3u32),
+        ]);
+        let trace = gen_poseidon_trace(&[call]);
+
+        // padding 行：30..32
+        for row in 30..32 {
+            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(1u32));
+            // 其余列应为 0
+            for col in 0..POSEIDON_AIR_NUM_COLUMNS {
+                if col != POSEIDON_AIR_COL_IS_PADDING {
+                    assert_eq!(
+                        trace.cols[col][row],
+                        M31::from(0u32),
+                        "padding 行 {} 的 col {} 应为 0",
+                        row,
+                        col
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_poseidon_trace_to_evaluations() {
+        // 验证 Poseidon trace 可转换为 CircleEvaluation 列
+        let call = PoseidonHashCall::from_input([
+            BaseField::from(1u32),
+            BaseField::from(2u32),
+            BaseField::from(3u32),
+        ]);
+        let trace = gen_poseidon_trace(&[call]);
+        let evals = poseidon_trace_to_evaluations(&trace);
+        assert_eq!(evals.len(), POSEIDON_AIR_NUM_COLUMNS);
+        // v2.1：30 列（21 原列 + 9 S-box 中间列）
+        assert_eq!(evals.len(), 30);
+    }
+
+    #[test]
+    fn test_poseidon_trace_output_state_consistency() {
+        // 验证 gen_poseidon_trace 在 debug 模式下检查 output_state 一致性
+        // 构造一个 output_state 正确的 call
+        let input = [
+            BaseField::from(99u32),
+            BaseField::from(88u32),
+            BaseField::from(77u32),
+        ];
+        let correct_call = PoseidonHashCall::from_input(input);
+        // 不应 panic
+        let trace = gen_poseidon_trace(&[correct_call.clone()]);
+        assert_eq!(trace.num_rows(), 32);
+
+        // 验证最后一轮的 Output == correct_call.output_state
+        for j in 0..3 {
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_OUTPUT_BASE + j][29],
+                correct_call.output_state[j],
+                "最后一轮 Output[{}] 应等于 call.output_state",
+                j
             );
         }
     }
