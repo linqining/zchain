@@ -272,7 +272,7 @@ impl TraceBuilder {
         log_size
     }
 
-    /// 填充一行（直接提供 NUM_COLUMNS 个 M31 值，Phase 4 Tier 1 = 126）。
+    /// 填充一行（直接提供 NUM_COLUMNS 个 M31 值，v3 = 87）。
     ///
     /// # Panics
     /// 若 `next_row >= num_rows()`，panic（须先 fill_padding）
@@ -337,7 +337,7 @@ impl TraceBuilder {
 ///
 /// # 算法
 /// 1. 遍历 `trace.steps()`
-/// 2. 对每个 step 调用 [`step_to_m31_row`] 生成 NUM_COLUMNS 个 M31 值（Phase 4 Tier 1 = 126）
+/// 2. 对每个 step 调用 [`step_to_m31_row`] 生成 NUM_COLUMNS 个 M31 值（v3 = 87）
 /// 3. 用 `TraceBuilder::fill_row` 填充
 /// 4. `fill_padding_to_full` 填充到 2^log_size 行（padding 行 IsPadding=1）
 /// 5. `finalize` 返回 `NativeTrace`
@@ -346,7 +346,7 @@ impl TraceBuilder {
 /// - `trace` — emulator 执行 trace
 ///
 /// # 返回
-/// 列主序 `NativeTrace`，列数 = `NUM_COLUMNS`（Phase 4 Tier 1 = 126），行数 = 2^log_size
+/// 列主序 `NativeTrace`，列数 = `NUM_COLUMNS`（v3 = 87），行数 = 2^log_size
 #[must_use]
 pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
     let num_steps = trace.len();
@@ -370,25 +370,20 @@ pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
     builder.finalize()
 }
 
-/// 将单个 emulator `Step` 转换为 97 列 M31 row。
+/// 将单个 emulator `Step` 转换为 87 列 M31 row（v3 布局）。
 ///
 /// # 参数
 /// - `step` — emulator 执行的单步记录
 /// - `prev_registers` — 前一步的寄存器快照（用于计算 ValueB = prev[rs1] 等）
 ///
 /// # 返回
-/// 长度 = `NUM_COLUMNS`（Phase 4 Tier 1 = 126）的 `Vec<M31>`
+/// 长度 = `NUM_COLUMNS`（v3 = 87）的 `Vec<M31>`
 ///
-/// # Phase 2 实现范围
-/// - 所有 RV32I 指令的 indicator one-hot 设置
-/// - PC / OpA / OpB / OpC / ValueA / ValueAEff / ValueB / ValueC 填充
-/// - ADD/ADDI/SUB 的 CarryFlag / BorrowFlag 计算
-/// - 其他指令的 Helper / Branch / Shift 字段暂填 0（Phase 2.6 完善）
-///
-/// # Phase 4 Tier 1 实现
-/// - ECALL 行的 25 列 ECALL dispatch（SyscallId + Args + Outputs）暂填 0
-/// - 非 ECALL 行的 25 列 ECALL dispatch 默认为 0（由 `vec![0; NUM_COLUMNS]` 保证）
-/// - Tier 2 实施 Precompile AIR 时，ECALL 行将填充真实 syscall_id/args/output
+/// # v3 实现（方案 D）
+/// 移除死列：OpA/OpB/OpC/ImmC/InstrVal/ValueA/BranchCond/Shamt/SgnA/SgnB/SgnC（17 列）
+/// 移除 ECALL Args/Outputs（24 列，仅保留 SyscallId）
+/// 保留：PC/PcNext/PcNextAux (12) + Carry/Borrow (4) + ValueAEff/B/C (12) +
+///       Indicator (35) + Helper1-4 (16) + Taken (1) + MemAddr (4) + SyscallId (1) + PcCarry (2) = 87
 #[must_use]
 pub fn step_to_m31_row(
     step: &crate::trace::Step,
@@ -407,8 +402,8 @@ pub fn step_to_m31_row(
     }
 
     // ----- 提取操作数索引和立即数 -----
+    // v3：不再写入 OpA/OpB/OpC/ImmC 死列，仅用于本地计算 ValueB/ValueC
     let (op_a, op_b, op_c, imm_c_flag, imm_value) = extract_operands(&step.instruction);
-    row[COL_OP_A] = M31::from(u32::from(op_a));
 
     // ----- Phase 3: MemAddr 填充（Load/Store 地址 = rs1 + imm）-----
     // 非 Load/Store 指令填 0；Load/Store 填 rs1_value + imm
@@ -442,20 +437,7 @@ pub fn step_to_m31_row(
     // Helper3 = rs1 + imm = MemAddr（由 compute_mem_addr 预计算）
     fill_word(&mut row, COL_HELPER3_BASE, mem_addr);
 
-    // ----- Shamt: 移位量 -----
-    // SLLI/SRLI/SRAI: shamt 字段；SLL/SRL/SRA: rs2 & 0x1F
-    let shamt = extract_shamt(&step.instruction, prev_registers);
-    row[COL_SHAMT] = M31::from(shamt);
-    row[COL_OP_B] = M31::from(u32::from(op_b));
-    row[COL_OP_C] = M31::from(u32::from(op_c));
-    row[COL_IMM_C] = M31::from(u32::from(imm_c_flag));
-
-    // ----- 指令编码（暂填 0，Phase 2.6 完善 encode）-----
-    // TODO: 实现 Instruction::encode() 后填充 InstrVal
-    // 当前：保留全零（AIR 约束不依赖 InstrVal，依赖 indicator 列）
-
-    // ----- 操作数值 -----
-    let value_a = prev_registers[op_a as usize];          // 写前值
+    // ----- 操作数值（v3：移除 ValueA 死列，仅保留 ValueAEff/ValueB/ValueC）-----
     let value_b = prev_registers[op_b as usize];          // rs1 读值
     let value_c = if imm_c_flag == 1 {
         imm_value
@@ -464,7 +446,6 @@ pub fn step_to_m31_row(
     };
     let value_a_eff = if op_a == 0 { 0 } else { step.registers[op_a as usize] };
 
-    fill_word(&mut row, COL_VALUE_A_BASE, value_a);
     fill_word(&mut row, COL_VALUE_A_EFF_BASE, value_a_eff);
     fill_word(&mut row, COL_VALUE_B_BASE, value_b);
     fill_word(&mut row, COL_VALUE_C_BASE, value_c);
@@ -475,11 +456,6 @@ pub fn step_to_m31_row(
     // 非 Load/Store 指令填 0
     let helper4_value = extract_mem_value(&step.instruction, step.mem_access.as_slice(), value_c);
     fill_word(&mut row, COL_HELPER4_BASE, helper4_value);
-
-    // ----- 符号位 -----
-    row[COL_SGN_A] = M31::from((value_a >> 31) & 1);
-    row[COL_SGN_B] = M31::from((value_b >> 31) & 1);
-    row[COL_SGN_C] = M31::from((value_c >> 31) & 1);
 
     // ----- Indicator one-hot -----
     let indicator_col = instruction_to_indicator_col(&step.instruction);
@@ -498,6 +474,79 @@ pub fn step_to_m31_row(
             row[COL_BORROW_FLAG_BASE + 1] = M31::from(borrow1);
         }
         _ => {}
+    }
+
+    // ----- PC carry 计算（Phase 4 Tier 1.1）-----
+    // 用于修复 PC 递增约束的 limb 进位 bug
+    // 适用情形：
+    //   1. IsNonFlow=1 的指令（非 JAL/JALR/Branch/Padding）：PcNext = Pc + 4
+    //   2. Branch not-taken（Taken=0 但 IsBranch=1）：PcNext = Pc + 4
+    // 不适用：
+    //   - JAL/JALR：PcNext 由 Helper2/PcNextAux 直接 limb-wise 等式约束（无需 carry）
+    //   - Branch taken：PcNext = Helper2（limb-wise 等式）
+    //   - Padding：IsNonFlow=0，约束 gated off
+    //
+    // 注：分支指令在 not-taken 情形下 (Taken=0) 仍需 PcNext = Pc + 4，
+    // 此时 IsBranch=1 但 IsNonFlow=0，AIR 约束需用 (1-Taken)*IsBranch 路径
+    // 单独 gate PC carry 约束。
+    let needs_pc_carry = match &step.instruction {
+        // IsNonFlow=1 的指令：需要 PC carry
+        Instruction::Lui { .. }
+        | Instruction::Auipc { .. }
+        | Instruction::Lb { .. }
+        | Instruction::Lh { .. }
+        | Instruction::Lw { .. }
+        | Instruction::Lbu { .. }
+        | Instruction::Lhu { .. }
+        | Instruction::Sb { .. }
+        | Instruction::Sh { .. }
+        | Instruction::Sw { .. }
+        | Instruction::Addi { .. }
+        | Instruction::Slti { .. }
+        | Instruction::Sltiu { .. }
+        | Instruction::Xori { .. }
+        | Instruction::Ori { .. }
+        | Instruction::Andi { .. }
+        | Instruction::Slli { .. }
+        | Instruction::Srli { .. }
+        | Instruction::Srai { .. }
+        | Instruction::Add { .. }
+        | Instruction::Sub { .. }
+        | Instruction::Sll { .. }
+        | Instruction::Slt { .. }
+        | Instruction::Sltu { .. }
+        | Instruction::Xor { .. }
+        | Instruction::Srl { .. }
+        | Instruction::Sra { .. }
+        | Instruction::Or { .. }
+        | Instruction::And { .. }
+        | Instruction::Mul { .. }
+        | Instruction::Mulh { .. }
+        | Instruction::Mulhsu { .. }
+        | Instruction::Mulhu { .. }
+        | Instruction::Div { .. }
+        | Instruction::Divu { .. }
+        | Instruction::Rem { .. }
+        | Instruction::Remu { .. }
+        | Instruction::Fence
+        | Instruction::Ecall
+        | Instruction::Ebreak => true,
+        // Branch 指令：仅在 not-taken 情形下需要 PC carry
+        // 但 trace 生成时我们不知道 AIR 端的 Taken gating，
+        // 所以无条件填入 PC carry（AIR 端用 (1-Taken) gating 决定是否使用）
+        Instruction::Beq { .. }
+        | Instruction::Bne { .. }
+        | Instruction::Blt { .. }
+        | Instruction::Bge { .. }
+        | Instruction::Bltu { .. }
+        | Instruction::Bgeu { .. } => true,
+        // JAL/JALR/Padding：不需要 PC carry（保持 0）
+        Instruction::Jal { .. } | Instruction::Jalr { .. } => false,
+    };
+    if needs_pc_carry {
+        let (pc_carry0, pc_carry1) = compute_pc_carries(step.pc, next_pc);
+        row[COL_PC_CARRY_FLAG_BASE] = M31::from(pc_carry0);
+        row[COL_PC_CARRY_FLAG_BASE + 1] = M31::from(pc_carry1);
     }
 
     row
@@ -688,31 +737,14 @@ fn extract_mem_value(
     }
 }
 
-/// 提取移位指令的 shamt（移位量）。
-///
-/// # 参数
-/// - `insn` — 当前指令
-/// - `prev_registers` — 执行前寄存器快照（用于 R-type 移位的 rs2 值）
-///
-/// # 返回
-/// - SLLI/SRLI/SRAI：返回 shamt 字段（0-31）
-/// - SLL/SRL/SRA：返回 `prev_registers[rs2] & 0x1F`（低 5 位）
-/// - 其他指令：0
-fn extract_shamt(insn: &crate::isa::Instruction, prev_registers: &[u32; 32]) -> u32 {
-    use crate::isa::Instruction::*;
-    match insn {
-        Slli { shamt, .. } | Srli { shamt, .. } | Srai { shamt, .. } => u32::from(*shamt),
-        Sll { rs2, .. } | Srl { rs2, .. } | Sra { rs2, .. } => {
-            prev_registers[*rs2 as usize] & 0x1F
-        }
-        _ => 0,
-    }
-}
-
 /// 从 Instruction 提取操作数索引和立即数。
 ///
 /// # 返回
 /// (op_a (rd), op_b (rs1), op_c (rs2 或 0), imm_c_flag, imm_value)
+///
+/// # v3 注意
+/// 返回的操作数索引仅用于本地计算 ValueB/ValueC，不再写入 trace 死列。
+/// Shamt 列已在 v3 中移除，因此 `extract_shamt` 函数已删除。
 fn extract_operands(insn: &crate::isa::Instruction) -> (u8, u8, u8, u8, u32) {
     use crate::isa::Instruction::*;
     match insn {
@@ -828,6 +860,26 @@ fn compute_sub_borrows(rs1: u32, rs2: u32, _rd: u32) -> (u32, u32) {
         - i64::from(borrow0);
     let borrow1 = if high_diff < 0 { 1 } else { 0 };
     (borrow0, borrow1)
+}
+
+/// 计算 PC + 4 → PcNext 的 16-bit 边界进位。
+///
+/// 与 [`compute_add_carries`] 同结构，但加数为常量 4（imm=4）。
+/// 用于 IsNonFlow 和 Branch not-taken 情形下的 PC 递增约束。
+///
+/// # 算法
+/// - low16(PcNext) = low16(Pc) + 4 - 65536 * pc_carry0
+/// - high16(PcNext) = high16(Pc) + pc_carry0 - 65536 * pc_carry1
+///
+/// # 参数
+/// - `pc` — 当前 PC
+/// - `pc_next` — 下一 PC（应等于 `pc.wrapping_add(4)`）
+///
+/// # 返回
+/// (pc_carry0, pc_carry1) — 每个 ∈ {0, 1}
+fn compute_pc_carries(pc: u32, pc_next: u32) -> (u32, u32) {
+    // 等价于 compute_add_carries(pc, 4, pc_next)
+    compute_add_carries(pc, 4, pc_next)
 }
 
 /// 将 Instruction 映射到 indicator 列索引。
@@ -1520,7 +1572,7 @@ pub fn poseidon_trace_to_evaluations(
 mod tests {
     use super::*;
     use crate::stwo_backend::column_layout_v2::{
-        COL_PC_BASE, COL_VALUE_A_BASE, IS_ADD, IS_PADDING, NUM_COLUMNS,
+        COL_PC_BASE, COL_VALUE_A_EFF_BASE, IS_ADD, IS_PADDING, NUM_COLUMNS,
     };
 
     // ----- u32 ↔ M31 limb 转换测试 -----
@@ -1754,19 +1806,19 @@ mod tests {
         let mut trace2 = NativeTrace::new(10);
 
         let value = 0xDEADBEEFu32;
-        trace1.fill_word(0, COL_VALUE_A_BASE, value);
+        trace1.fill_word(0, COL_VALUE_A_EFF_BASE, value);
 
         // 用 fill_scalar 手动填充
         let limbs = u32_to_m31_limbs(value);
         for (offset, limb) in limbs.iter().enumerate() {
-            trace2.fill_scalar(0, COL_VALUE_A_BASE + offset, *limb);
+            trace2.fill_scalar(0, COL_VALUE_A_EFF_BASE + offset, *limb);
         }
 
         // 两者应一致
         for offset in 0..WORD_LIMB_COUNT {
             assert_eq!(
-                trace1.cols[COL_VALUE_A_BASE + offset][0],
-                trace2.cols[COL_VALUE_A_BASE + offset][0],
+                trace1.cols[COL_VALUE_A_EFF_BASE + offset][0],
+                trace2.cols[COL_VALUE_A_EFF_BASE + offset][0],
                 "fill_word 与 fill_scalar 不一致 (offset={})",
                 offset
             );

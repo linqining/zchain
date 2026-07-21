@@ -2,7 +2,7 @@
 //!
 //! 严格遵循 `.trae/documents/stwo_phase2_cpu_air_design.md` Step 2.5：
 //! - 集成 Stwo 原生 Prover/Verifier API
-//! - 输入 `NativeTrace`（97 列 × 2^log_size 行）→ 输出 `StarkProof`
+//! - 输入 `NativeTrace`（87 列（v3）× 2^log_size 行）→ 输出 `StarkProof`
 //! - prove/verify roundtrip 的主入口
 //!
 //! ## 工作流
@@ -11,7 +11,7 @@
 //! 1. `PcsConfig::default()` + `SimdBackend::precompute_twiddles(...)`
 //! 2. `Poseidon252Channel::default()` + `CommitmentSchemeProver::new(config, &twiddles)`
 //! 3. 提交空 preprocessed trace（tree 0）→ `tree_builder.extend_evals(vec![]); commit()`
-//! 4. 提交 original trace（tree 1，97 列）→ `tree_builder.extend_evals(columns); commit()`
+//! 4. 提交 original trace（tree 1，87 列（v3））→ `tree_builder.extend_evals(columns); commit()`
 //! 5. `FrameworkComponent::new(&mut allocator, CpuAir, SecureField::zero())`
 //! 6. `prove(&[&component], &mut channel, commitment_scheme)` → `StarkProof`
 //!
@@ -75,10 +75,10 @@ pub type CpuProof = StarkProof<Poseidon252MerkleHasher>;
 /// 3. `.bit_reverse()` — 转换为 `BitReversedOrder`（Stwo 提交要求）
 ///
 /// # 参数
-/// - `trace` — 97 列 × 2^log_size 行的原生 M31 trace
+/// - `trace` — 87 列（v3）× 2^log_size 行的原生 M31 trace
 ///
 /// # 返回
-/// 97 个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
+/// 87 个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
 fn native_trace_to_evaluations(
     trace: &NativeTrace,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
@@ -107,7 +107,7 @@ fn native_trace_to_evaluations(
 /// 生成 CPU trace 的 Stwo STARK 证明。
 ///
 /// # 参数
-/// - `trace` — 97 列 × 2^log_size 行的原生 M31 trace（由 `trace_to_native` 生成）
+/// - `trace` — 87 列（v3）× 2^log_size 行的原生 M31 trace（由 `trace_to_native` 生成）
 ///
 /// # 返回
 /// `StarkProof<Blake2sMerkleHasher>` — 可由 [`verify_cpu_proof`] 验证
@@ -145,7 +145,7 @@ pub fn prove_cpu_trace(trace: &NativeTrace) -> Result<CpuProof, ProvingError> {
         tree_builder.commit(&mut channel);
     }
 
-    // 4. 提交 original trace（tree 1，97 列）
+    // 4. 提交 original trace（tree 1，87 列（v3））
     {
         let columns = native_trace_to_evaluations(trace);
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -200,7 +200,7 @@ pub fn verify_cpu_proof(proof: CpuProof, log_size: u32) -> Result<(), Verificati
     })?;
     commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
 
-    // 3. 从 proof 读取 trace commitment（tree 1，97 列，每列 log_size）
+    // 3. 从 proof 读取 trace commitment（tree 1，87 列（v3），每列 log_size）
     let trace_commitment = *proof.commitments.get(1).ok_or_else(|| {
         VerificationError::InvalidStructure(format!(
             "proof.commitments 长度不足：期望 ≥2，实际 {}",
@@ -232,7 +232,7 @@ pub fn verify_cpu_proof(proof: CpuProof, log_size: u32) -> Result<(), Verificati
 //
 // ```text
 // Tree 0 (preprocessed): 空
-// Tree 1 (original):     CPU trace (101 cols) + Memory trace (25 cols) = 126 cols
+// Tree 1 (original):     CPU trace (87 cols) + Memory trace (25 cols) = 112 cols
 // Tree 2 (interaction):  CPU logup (4 cols) + Memory logup (4 cols) = 8 cols
 // ```
 //
@@ -305,7 +305,7 @@ pub struct CpuMemoryProof {
 /// 5. `finalize_col()` + `finalize_last()` 返回 (4 CircleEvaluations, claimed_sum)
 ///
 /// # 参数
-/// - `cpu_trace` — CPU original trace evaluations（101 列，bit-reversed order）
+/// - `cpu_trace` — CPU original trace evaluations（87 列（v3），bit-reversed order）
 /// - `log_size` — log2(行数)
 /// - `lookup` — MemoryLookup relation 实例（已从 channel draw）
 ///
@@ -412,7 +412,7 @@ fn gen_mem_interaction_trace(
 /// 多组件 prove 主入口：CPU + Memory 联合 STARK proof。
 ///
 /// # 参数
-/// - `cpu_trace` — CPU original trace（101 列 × 2^log_size 行）
+/// - `cpu_trace` — CPU original trace（87 列（v3）× 2^log_size 行）
 /// - `mem_trace` — Memory original trace（25 列 × 2^log_size 行）
 ///
 /// # 返回
@@ -460,7 +460,7 @@ pub fn prove_cpu_memory_trace(
         tree_builder.commit(&mut channel);
     }
 
-    // 4. Tree 1：CPU original trace (101 cols) + Memory original trace (25 cols) = 126 cols
+    // 4. Tree 1：CPU original trace (87 cols) + Memory original trace (25 cols) = 112 cols
     // 注：`extend_evals` 消费 Vec，需先 clone 一份用于后续 logup interaction trace 生成。
     let cpu_evals = native_trace_to_evaluations(cpu_trace);
     let mem_evals = memory_trace_to_evaluations(mem_trace);
@@ -563,7 +563,7 @@ pub fn verify_cpu_memory_proof(
     })?;
     commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
 
-    // 3. 从 proof 读取 Tree 1 commitment（CPU 101 cols + Memory 25 cols = 126 cols）
+    // 3. 从 proof 读取 Tree 1 commitment（CPU 87 cols + Memory 25 cols = 112 cols）
     let trace_commitment = *stark_proof.commitments.get(1).ok_or_else(|| {
         VerificationError::InvalidStructure(format!(
             "proof.commitments 长度不足：期望 ≥2，实际 {}",
@@ -909,419 +909,14 @@ pub fn verify_poseidon_proof(
 }
 
 // ===========================================================================
-// Phase 4 Tier 2 Step 4.2.6：3 组件 prover/verify（CPU + Memory + Poseidon）
+// v3：3 组件 Poseidon 集成已移除
 // ===========================================================================
-//
-// 3 组件 logup 架构（CPU 同时发送 Memory claim + Poseidon claim）：
-//
-// ```text
-// Tree 0 (preprocessed): 空
-// Tree 1 (original):     CPU trace (126 cols) + Memory trace (25 cols) + Poseidon trace (30 cols) = 181 cols
-// Tree 2 (interaction):  CPU logup (8 cols, 2 batches) + Memory logup (4 cols) + Poseidon logup (4 cols) = 16 cols
-// ```
-//
-// ## CPU 多 batch logup 机制
-//
-// CpuAir 在 evaluate 中同时添加 Memory 和 Poseidon 两个 RelationEntry，然后调用一次
-// `finalize_logup()`。Stwo 自动创建 2 个 batch（batches=[0,1]）：
-//   - Batch 0（Memory）：1 个 interaction column（cumsum_0）
-//   - Batch 1（Poseidon，last）：1 个 interaction column（cumsum_1，含 cumsum_shift）
-//
-// Prover 端 LogupTraceGenerator 生成 2 列：
-//   - Column 0：value = mem_frac（Memory batch 的 num/denom）
-//   - Column 1：value = mem_frac + poseidon_frac（累积和）
-//
-// `finalize_last()` 返回 `claimed_sum_cpu = sum(column_1) = sum(mem_frac + poseidon_frac)`。
-//
-// ## Soundness
-//
-// `claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon == 0`
-//
-// 其中：
-// - CPU Memory claim：multiplicity = is_load + is_store（正，claim）
-// - CPU Poseidon claim：multiplicity = is_ecall（正，claim）
-// - Memory yield：multiplicity = -1 * (1 - is_padding)（负，yield）
-// - Poseidon yield：multiplicity = -1 * is_last_round * (1 - is_padding)（负，yield）
-
-/// 3 组件 proof 结构：CPU + Memory + Poseidon 联合 STARK proof。
-///
-/// # 字段
-/// - `stark_proof` — Stwo StarkProof（4 commitments：Tree 0/1/2 + composition poly）
-/// - `claimed_sum_cpu` — CPU logup 总和（Memory batch + Poseidon batch）
-/// - `claimed_sum_mem` — Memory logup 总和
-/// - `claimed_sum_poseidon` — Poseidon logup 总和
-///
-/// # Soundness
-/// `claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon == 0`
-#[derive(Debug, Clone)]
-pub struct CpuMemoryPoseidonProof {
-    /// Stwo STARK proof
-    pub stark_proof: StarkProof<Poseidon252MerkleHasher>,
-    /// CPU logup 总和（Memory claim + Poseidon claim）
-    pub claimed_sum_cpu: SecureField,
-    /// Memory logup 总和（yield）
-    pub claimed_sum_mem: SecureField,
-    /// Poseidon logup 总和（yield）
-    pub claimed_sum_poseidon: SecureField,
-}
-
-/// 生成 CPU 端 2-batch logup interaction trace（Memory + Poseidon）。
-///
-/// # 算法
-/// 使用单个 LogupTraceGenerator 生成 2 列（对应 2 个 batch）：
-///
-/// ## Column 0（Memory batch）
-/// 对每个 vec_row：
-/// 1. 读取 is_load, is_store
-/// 2. 构造 9 元 MemoryLookup claim values = [MemAddr×4, mem_value×4, IsStore]
-/// 3. denom = memory_lookup.combine(&claim_values)
-/// 4. num = PackedSecureField::from(is_load + is_store)
-/// 5. col_gen_0.write_frac(vec_row, num, denom)
-/// 6. col_gen_0.finalize_col() → column 0 = mem_frac
-///
-/// ## Column 1（Poseidon batch，last）
-/// 对每个 vec_row：
-/// 1. 读取 is_ecall
-/// 2. 构造 9 元 PoseidonLookup claim values = [SyscallId, Input[0..3], Output[0..3], IsLastRound=1, IsPadding=0]
-/// 3. denom = poseidon_lookup.combine(&claim_values)
-/// 4. num = PackedSecureField::from(is_ecall)
-/// 5. col_gen_1.write_frac(vec_row, num, denom)
-/// 6. col_gen_1.finalize_col() → column 1 = mem_frac + poseidon_frac（累积和）
-///
-/// ## finalize_last
-/// claimed_sum_cpu = sum(column 1) = sum(mem_frac + poseidon_frac)
-///
-/// # 参数
-/// - `cpu_trace` — CPU original trace evaluations（126 列，bit-reversed order）
-/// - `log_size` — log2(行数)
-/// - `memory_lookup` — MemoryLookup relation 实例（已从 channel draw）
-/// - `poseidon_lookup` — PoseidonLookup relation 实例（已从 channel draw）
-///
-/// # 返回
-/// (8 个 CircleEvaluation, claimed_sum_cpu) — 2 列 × 4 coords = 8 base field evals
-fn gen_cpu_poseidon_interaction_trace(
-    cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
-    log_size: u32,
-    memory_lookup: &MemoryLookup,
-    poseidon_lookup: &PoseidonLookup,
-) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
-    use crate::stwo_backend::column_layout_v2::{
-        COL_SYSCALL_ARG0_BASE, COL_SYSCALL_ARG1_BASE, COL_SYSCALL_ARG2_BASE,
-        COL_SYSCALL_ID, COL_SYSCALL_OUTPUT0_BASE, COL_SYSCALL_OUTPUT1_BASE,
-        COL_MEM_ADDR_BASE, COL_VALUE_A_EFF_BASE, COL_VALUE_C_BASE,
-        IS_ECALL, IS_LOAD, IS_STORE,
-    };
-
-    let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
-    let mut log_gen = LogupTraceGenerator::new(log_size);
-
-    let one_packed: PackedBaseField = PackedBaseField::broadcast(BaseField::from(1u32));
-    let zero_packed: PackedBaseField = PackedBaseField::zero();
-
-    // ===== Column 0：Memory batch =====
-    {
-        let mut col_gen = log_gen.new_col();
-        for vec_row in 0..n_vec_rows {
-            let is_load_packed = cpu_trace[IS_LOAD].values.data[vec_row];
-            let is_store_packed = cpu_trace[IS_STORE].values.data[vec_row];
-
-            // 构造 9 元 MemoryLookup claim values
-            let mut claim_values: [PackedBaseField; 9] = [PackedBaseField::zero(); 9];
-            for i in 0..4 {
-                claim_values[i] = cpu_trace[COL_MEM_ADDR_BASE + i].values.data[vec_row];
-            }
-            for i in 0..4 {
-                let value_a_eff = cpu_trace[COL_VALUE_A_EFF_BASE + i].values.data[vec_row];
-                let value_c = cpu_trace[COL_VALUE_C_BASE + i].values.data[vec_row];
-                claim_values[4 + i] = is_load_packed * value_a_eff + is_store_packed * value_c;
-            }
-            claim_values[8] = is_store_packed;
-
-            let denom: PackedSecureField = memory_lookup.combine(&claim_values);
-            let multiplicity_packed = is_load_packed + is_store_packed;
-            let num: PackedSecureField = PackedSecureField::from(multiplicity_packed);
-
-            col_gen.write_frac(vec_row, num, denom);
-        }
-        col_gen.finalize_col();
-    }
-
-    // ===== Column 1：Poseidon batch（last）=====
-    {
-        let mut col_gen = log_gen.new_col();
-        for vec_row in 0..n_vec_rows {
-            let is_ecall_packed = cpu_trace[IS_ECALL].values.data[vec_row];
-
-            // 构造 9 元 PoseidonLookup claim values
-            // 列映射（与 CpuAir::evaluate 中的 Poseidon claim 完全一致）：
-            //   SyscallId   = COL_SYSCALL_ID（从 trace 读取，ECALL 行 = 0x03，非 ECALL 行 = 0）
-            //   Input[0]    = COL_SYSCALL_ARG0_BASE
-            //   Input[1]    = COL_SYSCALL_ARG1_BASE
-            //   Input[2]    = COL_SYSCALL_ARG2_BASE
-            //   Output[0]   = COL_SYSCALL_OUTPUT0_BASE
-            //   Output[1]   = COL_SYSCALL_OUTPUT0_BASE + 1
-            //   Output[2]   = COL_SYSCALL_OUTPUT1_BASE
-            //
-            // 注意：SyscallId 从 trace 读取（而非常量），确保 prover 与 AIR 使用相同值。
-            // 非 ECALL 行 multiplicity = 0，SyscallId = 0，claim 不贡献 sum。
-            // ECALL 行 multiplicity = 1，SyscallId = 0x03，与 Poseidon AIR yield 配对。
-            let mut claim_values: [PackedBaseField; 9] = [PackedBaseField::zero(); 9];
-            claim_values[0] = cpu_trace[COL_SYSCALL_ID].values.data[vec_row];
-            claim_values[1] = cpu_trace[COL_SYSCALL_ARG0_BASE].values.data[vec_row];
-            claim_values[2] = cpu_trace[COL_SYSCALL_ARG1_BASE].values.data[vec_row];
-            claim_values[3] = cpu_trace[COL_SYSCALL_ARG2_BASE].values.data[vec_row];
-            claim_values[4] = cpu_trace[COL_SYSCALL_OUTPUT0_BASE].values.data[vec_row];
-            claim_values[5] = cpu_trace[COL_SYSCALL_OUTPUT0_BASE + 1].values.data[vec_row];
-            claim_values[6] = cpu_trace[COL_SYSCALL_OUTPUT1_BASE].values.data[vec_row];
-            claim_values[7] = one_packed;   // IsLastRound = 1
-            claim_values[8] = zero_packed;  // IsPadding = 0
-
-            let denom: PackedSecureField = poseidon_lookup.combine(&claim_values);
-            let num: PackedSecureField = PackedSecureField::from(is_ecall_packed);
-
-            col_gen.write_frac(vec_row, num, denom);
-        }
-        col_gen.finalize_col();
-    }
-
-    log_gen.finalize_last()
-}
-
-/// 3 组件 prove 主入口：CPU + Memory + Poseidon 联合 STARK proof。
-///
-/// # 参数
-/// - `cpu_trace` — CPU original trace（126 列）
-/// - `mem_trace` — Memory original trace（25 列）
-/// - `poseidon_trace` — Poseidon original trace（30 列）
-///
-/// # 返回
-/// `CpuMemoryPoseidonProof` — 包含 StarkProof + 3 个 claimed_sums
-///
-/// # 错误
-/// - `ProvingError::ConstraintsNotSatisfied` — AIR 约束不满足
-/// - panic — `claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon != 0`（soundness 失败）
-///
-/// # 示例
-/// ```ignore
-/// use poker_zkvm::stwo_backend::prover::prove_cpu_memory_poseidon_trace;
-///
-/// let proof = prove_cpu_memory_poseidon_trace(&cpu_trace, &mem_trace, &poseidon_trace)
-///     .expect("prove failed");
-/// ```
-pub fn prove_cpu_memory_poseidon_trace(
-    cpu_trace: &NativeTrace,
-    mem_trace: &MemoryTrace,
-    poseidon_trace: &super::trace_native::PoseidonTrace,
-) -> Result<CpuMemoryPoseidonProof, ProvingError> {
-    let log_size = cpu_trace.log_size;
-    assert_eq!(
-        log_size, mem_trace.log_size,
-        "CPU and Memory trace log_size mismatch: {} vs {}",
-        log_size, mem_trace.log_size
-    );
-    assert_eq!(
-        log_size, poseidon_trace.log_size,
-        "CPU and Poseidon trace log_size mismatch: {} vs {}",
-        log_size, poseidon_trace.log_size
-    );
-
-    // 1. PCS 配置 + twiddles 预计算
-    let config = PcsConfig::default();
-    let blowup_log = config.fri_config.log_blowup_factor;
-    let big_domain = CanonicCoset::new(log_size + blowup_log);
-    let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
-
-    // 2. Channel + CommitmentSchemeProver
-    let mut channel = Poseidon252Channel::default();
-    let mut commitment_scheme =
-        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
-
-    // 3. Tree 0：空 preprocessed
-    {
-        let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(vec![]);
-        tree_builder.commit(&mut channel);
-    }
-
-    // 4. Tree 1：CPU (126) + Memory (25) + Poseidon (30) = 181 cols
-    let cpu_evals = native_trace_to_evaluations(cpu_trace);
-    let mem_evals = memory_trace_to_evaluations(mem_trace);
-    let poseidon_evals = poseidon_trace_to_evaluations(poseidon_trace);
-
-    {
-        let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(cpu_evals.clone());
-        tree_builder.extend_evals(mem_evals.clone());
-        tree_builder.extend_evals(poseidon_evals.clone());
-        tree_builder.commit(&mut channel);
-    }
-
-    // 5. 从 channel draw lookups（必须在 Tree 1 commit 之后，顺序重要：先 Memory 后 Poseidon）
-    let memory_lookup = MemoryLookup::draw(&mut channel);
-    let poseidon_lookup = PoseidonLookup::draw(&mut channel);
-
-    // 6. 生成 interaction traces（Tree 2）
-    let (cpu_interaction_evals, claimed_sum_cpu) = gen_cpu_poseidon_interaction_trace(
-        &cpu_evals,
-        log_size,
-        &memory_lookup,
-        &poseidon_lookup,
-    );
-    let (mem_interaction_evals, claimed_sum_mem) =
-        gen_mem_interaction_trace(&mem_evals, log_size, &memory_lookup);
-    let (poseidon_interaction_evals, claimed_sum_poseidon) =
-        gen_poseidon_interaction_trace(&poseidon_evals, log_size, &poseidon_lookup);
-
-    // 7. Soundness check：claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon == 0
-    //    失败时返回 ProvingError::ConstraintsNotSatisfied（与 prove_cpu_trace 一致）
-    let total_sum = claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon;
-    if total_sum != SecureField::zero() {
-        return Err(ProvingError::ConstraintsNotSatisfied);
-    }
-
-    // 8. 通信 claimed_sums 给 verifier
-    channel.mix_felts(&[
-        claimed_sum_cpu,
-        claimed_sum_mem,
-        claimed_sum_poseidon,
-    ]);
-
-    // 9. Tree 2：CPU (8) + Memory (4) + Poseidon (4) = 16 cols
-    {
-        let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(cpu_interaction_evals);
-        tree_builder.extend_evals(mem_interaction_evals);
-        tree_builder.extend_evals(poseidon_interaction_evals);
-        tree_builder.commit(&mut channel);
-    }
-
-    // 10. 构建 components（顺序与 Tree 1/2 列分配一致：CPU → Memory → Poseidon）
-    let cpu_air = CpuAir::new_with_poseidon_lookup(
-        log_size,
-        memory_lookup.clone(),
-        poseidon_lookup.clone(),
-    );
-    let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
-    let poseidon_air = PoseidonAir::new(log_size, poseidon_lookup.clone());
-    let mut allocator = TraceLocationAllocator::default();
-    let cpu_component = FrameworkComponent::new(&mut allocator, cpu_air, claimed_sum_cpu);
-    let mem_component = FrameworkComponent::new(&mut allocator, mem_air, claimed_sum_mem);
-    let poseidon_component =
-        FrameworkComponent::new(&mut allocator, poseidon_air, claimed_sum_poseidon);
-
-    // 11. 生成证明
-    let stark_proof = prove(
-        &[&cpu_component, &mem_component, &poseidon_component],
-        &mut channel,
-        commitment_scheme,
-    )?;
-
-    Ok(CpuMemoryPoseidonProof {
-        stark_proof,
-        claimed_sum_cpu,
-        claimed_sum_mem,
-        claimed_sum_poseidon,
-    })
-}
-
-/// 验证 CPU + Memory + Poseidon 联合 STARK proof。
-///
-/// # 参数
-/// - `proof` — 由 [`prove_cpu_memory_poseidon_trace`] 生成的 `CpuMemoryPoseidonProof`
-/// - `log_size` — log2(trace 行数)，须与 prover 一致
-///
-/// # 返回
-/// - `Ok(())` — 验证通过
-/// - `Err(VerificationError)` — 验证失败
-pub fn verify_cpu_memory_poseidon_proof(
-    proof: CpuMemoryPoseidonProof,
-    log_size: u32,
-) -> Result<(), VerificationError> {
-    let CpuMemoryPoseidonProof {
-        stark_proof,
-        claimed_sum_cpu,
-        claimed_sum_mem,
-        claimed_sum_poseidon,
-    } = proof;
-
-    let config = PcsConfig::default();
-
-    // 1. Channel + CommitmentSchemeVerifier
-    let mut channel = Poseidon252Channel::default();
-    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
-
-    // 2. Tree 0 commitment（空 preprocessed，0 列）
-    let preprocessed_commitment = *stark_proof.commitments.get(0).ok_or_else(|| {
-        VerificationError::InvalidStructure(format!(
-            "proof.commitments 长度不足：期望 ≥1，实际 {}",
-            stark_proof.commitments.len()
-        ))
-    })?;
-    commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
-
-    // 3. Tree 1 commitment（CPU 126 + Memory 25 + Poseidon 30 = 181 cols）
-    let trace_commitment = *stark_proof.commitments.get(1).ok_or_else(|| {
-        VerificationError::InvalidStructure(format!(
-            "proof.commitments 长度不足：期望 ≥2，实际 {}",
-            stark_proof.commitments.len()
-        ))
-    })?;
-    let total_trace_cols = NUM_COLUMNS + MEM_NUM_COLUMNS + POSEIDON_AIR_NUM_COLUMNS;
-    let trace_log_sizes = vec![log_size; total_trace_cols];
-    commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
-
-    // 4. 从 channel draw lookups（与 prover 镜像：先 Memory 后 Poseidon）
-    let memory_lookup = MemoryLookup::draw(&mut channel);
-    let poseidon_lookup = PoseidonLookup::draw(&mut channel);
-
-    // 5. Soundness check（verifier 端也验证）
-    let total_sum = claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon;
-    if total_sum != SecureField::zero() {
-        return Err(VerificationError::InvalidStructure(format!(
-            "Soundness check failed: claimed_sum_cpu ({:?}) + claimed_sum_mem ({:?}) + claimed_sum_poseidon ({:?}) != 0",
-            claimed_sum_cpu, claimed_sum_mem, claimed_sum_poseidon
-        )));
-    }
-
-    // 6. 通信 claimed_sums（与 prover 镜像）
-    channel.mix_felts(&[
-        claimed_sum_cpu,
-        claimed_sum_mem,
-        claimed_sum_poseidon,
-    ]);
-
-    // 7. Tree 2 commitment（CPU 8 + Memory 4 + Poseidon 4 = 16 cols）
-    let interaction_commitment = *stark_proof.commitments.get(2).ok_or_else(|| {
-        VerificationError::InvalidStructure(format!(
-            "proof.commitments 长度不足：期望 ≥3，实际 {}",
-            stark_proof.commitments.len()
-        ))
-    })?;
-    let interaction_log_sizes = vec![log_size; 16];
-    commitment_scheme.commit(interaction_commitment, &interaction_log_sizes, &mut channel);
-
-    // 8. 构建 components（与 prover 一致）
-    let cpu_air = CpuAir::new_with_poseidon_lookup(
-        log_size,
-        memory_lookup.clone(),
-        poseidon_lookup.clone(),
-    );
-    let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
-    let poseidon_air = PoseidonAir::new(log_size, poseidon_lookup.clone());
-    let mut allocator = TraceLocationAllocator::default();
-    let cpu_component = FrameworkComponent::new(&mut allocator, cpu_air, claimed_sum_cpu);
-    let mem_component = FrameworkComponent::new(&mut allocator, mem_air, claimed_sum_mem);
-    let poseidon_component =
-        FrameworkComponent::new(&mut allocator, poseidon_air, claimed_sum_poseidon);
-
-    // 9. 验证
-    verify(
-        &[&cpu_component, &mem_component, &poseidon_component],
-        &mut channel,
-        &mut commitment_scheme,
-        stark_proof,
-    )
-}
+// 原实现依赖 ECALL Args/Outputs 列（24 列），v3 列布局已移除这些列。
+// 如需恢复 3 组件集成，需先在 column_layout_v2.rs 中恢复 ECALL Args/Outputs 列。
+// 保留的路径：
+// - prove_cpu_trace / verify_cpu_proof（单组件 CPU）
+// - prove_cpu_memory_trace / verify_cpu_memory_proof（2 组件 CPU + Memory）
+// - prove_poseidon_trace / verify_poseidon_proof（单组件 Poseidon，独立运行）
 
 // ===========================================================================
 // 单元测试
@@ -1332,9 +927,7 @@ mod tests {
     use super::*;
     use crate::isa::Instruction;
     use crate::stwo_backend::column_layout_v2::{
-        COL_SYSCALL_ARG0_BASE, COL_SYSCALL_ARG1_BASE, COL_SYSCALL_ARG2_BASE, COL_SYSCALL_ARG3_BASE,
-        COL_SYSCALL_ID, COL_SYSCALL_OUTPUT0_BASE, COL_SYSCALL_OUTPUT1_BASE, IS_ECALL, IS_PADDING,
-        NUM_COLUMNS,
+        COL_SYSCALL_ID, IS_ECALL, IS_PADDING, NUM_COLUMNS,
     };
     use crate::stwo_backend::trace_native::{
         step_to_m31_row, trace_to_memory_trace, trace_to_native, NativeTrace, TraceBuilder,
@@ -1489,15 +1082,9 @@ mod tests {
         for i in 0..4 {
             row[COL_PC_NEXT_BASE + i] = next_pc_limbs[i];
         }
-        // OpA = 1 (rd), OpB = 2 (rs1), OpC = 3 (rs2)
-        row[COL_OP_A] = M31::from(1u32);
-        row[COL_OP_B] = M31::from(2u32);
-        row[COL_OP_C] = M31::from(3u32);
-        row[COL_IMM_C] = M31::from(0u32); // R-type, 无立即数
 
-        // ValueA (写前值) = 0, ValueAEff (写后值) = 300
+        // v3：ValueA 已移除（死列），仅填充 ValueAEff/ValueB/ValueC
         for (base, val) in [
-            (COL_VALUE_A_BASE, 0u32),
             (COL_VALUE_A_EFF_BASE, rd_val),
             (COL_VALUE_B_BASE, rs1_val),
             (COL_VALUE_C_BASE, rs2_val),
@@ -2361,34 +1948,19 @@ mod tests {
 
     #[test]
     fn test_ecall_zero_gating_padding_row_all_zeros() {
-        // Phase 4 Tier 1：验证 padding 行的 25 列 ECALL dispatch 全为 0
+        // v3：验证 padding 行的 ECALL dispatch 列（仅 SyscallId，1 列）全为 0
         // 这是 zero gating 约束的前提（trace 生成器正确填充）
         let trace = make_single_ecall_trace();
 
-        // 检查所有 padding 行（row 1 到 1023）的 25 列 ECALL dispatch 为 0
-        let ecall_cols: [usize; 7] = [
-            COL_SYSCALL_ID,
-            COL_SYSCALL_ARG0_BASE,
-            COL_SYSCALL_ARG1_BASE,
-            COL_SYSCALL_ARG2_BASE,
-            COL_SYSCALL_ARG3_BASE,
-            COL_SYSCALL_OUTPUT0_BASE,
-            COL_SYSCALL_OUTPUT1_BASE,
-        ];
-        let ecall_sizes: [usize; 7] = [1, 4, 4, 4, 4, 4, 4];
-
+        // 检查所有 padding 行（row 1 到 1023）的 SyscallId 列为 0
         for row in 1..1024 {
-            for (base, size) in ecall_cols.iter().zip(ecall_sizes.iter()) {
-                for i in 0..*size {
-                    assert_eq!(
-                        trace.cols[base + i][row].0,
-                        0,
-                        "padding row {} col {} 应为 0",
-                        row,
-                        base + i
-                    );
-                }
-            }
+            assert_eq!(
+                trace.cols[COL_SYSCALL_ID][row].0,
+                0,
+                "padding row {} col {} 应为 0",
+                row,
+                COL_SYSCALL_ID
+            );
         }
     }
 
@@ -2554,234 +2126,5 @@ mod tests {
 
         // verify roundtrip
         verify_poseidon_proof(proof, 8).expect("verify 失败");
-    }
-
-    // =======================================================================
-    // Phase 4 Tier 2 Step 4.2.6：3 组件集成测试（CPU + Memory + Poseidon）
-    // =======================================================================
-
-    /// 辅助：构造一个包含单条 Poseidon ECALL 指令的 CPU NativeTrace。
-    ///
-    /// ECALL 行布局（Phase 4 Tier 2）：
-    /// - IS_ECALL = 1（indicator one-hot）
-    /// - PC = 0, PcNext = 4
-    /// - COL_SYSCALL_ID = 0x03（Poseidon syscall）
-    /// - COL_SYSCALL_ARG0_BASE = Input[0]（M31 值，非 limb）
-    /// - COL_SYSCALL_ARG1_BASE = Input[1]
-    /// - COL_SYSCALL_ARG2_BASE = Input[2]
-    /// - COL_SYSCALL_OUTPUT0_BASE = Output[0]
-    /// - COL_SYSCALL_OUTPUT0_BASE + 1 = Output[1]
-    /// - COL_SYSCALL_OUTPUT1_BASE = Output[2]
-    /// - 其余 ECALL dispatch 列 = 0
-    fn make_poseidon_ecall_cpu_trace(call: &PoseidonHashCall) -> NativeTrace {
-        use crate::stwo_backend::column_layout_v2::*;
-        use crate::stwo_backend::trace_native::u32_to_m31_limbs;
-
-        let mut builder = TraceBuilder::new(10); // 1024 行
-
-        let mut row = vec![M31::from(0u32); NUM_COLUMNS];
-
-        // PC = 0, PcNext = 4
-        let pc_limbs = u32_to_m31_limbs(0);
-        let next_pc_limbs = u32_to_m31_limbs(4);
-        for i in 0..4 {
-            row[COL_PC_BASE + i] = pc_limbs[i];
-            row[COL_PC_NEXT_BASE + i] = next_pc_limbs[i];
-        }
-
-        // IS_ECALL = 1
-        row[IS_ECALL] = M31::from(1u32);
-
-        // Poseidon syscall data（ECALL dispatch 列存储 M31 值而非 limb）
-        row[COL_SYSCALL_ID] = M31::from(POSEIDON_SYSCALL_ID);
-        row[COL_SYSCALL_ARG0_BASE] = call.input_state[0];
-        row[COL_SYSCALL_ARG1_BASE] = call.input_state[1];
-        row[COL_SYSCALL_ARG2_BASE] = call.input_state[2];
-        row[COL_SYSCALL_OUTPUT0_BASE] = call.output_state[0];
-        row[COL_SYSCALL_OUTPUT0_BASE + 1] = call.output_state[1];
-        row[COL_SYSCALL_OUTPUT1_BASE] = call.output_state[2];
-
-        builder.fill_row(&row);
-        builder.fill_padding_to_full();
-        builder.finalize()
-    }
-
-    /// 辅助：构造一个全 padding 的 MemoryTrace（无 Load/Store）。
-    ///
-    /// 所有行 IsPadding=1，IsStore=0，Addr=0，ValCur=0。
-    /// Memory logup yield multiplicity = -1 * (1 - IsPadding) = 0（全 padding，不贡献 sum）。
-    fn make_all_padding_memory_trace(log_size: u32) -> MemoryTrace {
-        use crate::stwo_backend::memory_air::MEM_COL_IS_PADDING;
-
-        let mut trace = MemoryTrace::new(log_size);
-        for r in 0..trace.num_rows() {
-            trace.cols[MEM_COL_IS_PADDING][r] = M31::from(1u32);
-        }
-        trace
-    }
-
-    #[test]
-    fn test_prove_verify_cpu_memory_poseidon_single_hash() {
-        // Phase 4 Tier 2 Step 4.2.6：3 组件集成测试
-        //
-        // 验证 CPU + Memory + Poseidon 联合 STARK proof 的 prove/verify roundtrip。
-        //
-        // 架构：
-        // - CPU trace：1 行 Poseidon ECALL + 1023 行 padding（log_size=10）
-        // - Memory trace：全 padding（无 Load/Store，log_size=10）
-        // - Poseidon trace：1 次 hash（30 行）+ padding 到 log_size=10
-        //
-        // Soundness：
-        // - CPU Memory claim：multiplicity = is_load + is_store = 0（无 Load/Store）
-        // - CPU Poseidon claim：multiplicity = is_ecall = 1（1 行 ECALL）
-        // - Memory yield：multiplicity = -1 * (1 - is_padding) = 0（全 padding）
-        // - Poseidon yield：multiplicity = -1 * is_last_round * (1 - is_padding) = -1（1 行 last round）
-        // - 总和：0 + 1 + 0 + (-1) = 0 ✓（通过 denom 匹配实现）
-
-        let call = PoseidonHashCall::from_input([
-            BaseField::from(1u32),
-            BaseField::from(2u32),
-            BaseField::from(3u32),
-        ]);
-
-        let cpu_trace = make_poseidon_ecall_cpu_trace(&call);
-        let mem_trace = make_all_padding_memory_trace(10);
-        let poseidon_trace =
-            crate::stwo_backend::trace_native::gen_poseidon_trace_with_min_log_size(&[call], 10);
-
-        assert_eq!(cpu_trace.log_size, 10);
-        assert_eq!(mem_trace.log_size, 10);
-        assert_eq!(poseidon_trace.log_size, 10);
-
-        let proof = prove_cpu_memory_poseidon_trace(&cpu_trace, &mem_trace, &poseidon_trace)
-            .expect("3 组件 prove 失败");
-
-        // Soundness check 在 prover 内部已验证 claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon == 0
-
-        verify_cpu_memory_poseidon_proof(proof, 10).expect("3 组件 verify 失败");
-    }
-
-    #[test]
-    fn test_prove_verify_cpu_memory_poseidon_empty() {
-        // 边界 case：无 Poseidon ECALL（CPU 全 padding），无 Memory 操作，无 Poseidon hash
-        //
-        // 所有 claimed_sums 应为 0（无 claim/yield），soundness 自动满足。
-        let cpu_trace = {
-            let mut builder = TraceBuilder::new(10);
-            builder.fill_padding_to_full();
-            builder.finalize()
-        };
-        let mem_trace = make_all_padding_memory_trace(10);
-        let poseidon_trace =
-            crate::stwo_backend::trace_native::gen_poseidon_trace_with_min_log_size(&[], 10);
-
-        let proof = prove_cpu_memory_poseidon_trace(&cpu_trace, &mem_trace, &poseidon_trace)
-            .expect("3 组件 prove（空）失败");
-
-        // 空 trace 时所有 claimed_sums = 0
-        assert_eq!(
-            proof.claimed_sum_cpu,
-            SecureField::zero(),
-            "空 CPU trace 的 claimed_sum_cpu 应为 0"
-        );
-        assert_eq!(
-            proof.claimed_sum_mem,
-            SecureField::zero(),
-            "空 Memory trace 的 claimed_sum_mem 应为 0"
-        );
-        assert_eq!(
-            proof.claimed_sum_poseidon,
-            SecureField::zero(),
-            "空 Poseidon trace 的 claimed_sum_poseidon 应为 0"
-        );
-
-        verify_cpu_memory_poseidon_proof(proof, 10).expect("3 组件 verify（空）失败");
-    }
-
-    #[test]
-    fn test_prove_verify_cpu_memory_poseidon_multiple_hashes() {
-        // 多次 Poseidon hash 的 3 组件集成测试
-        //
-        // CPU trace：3 行 Poseidon ECALL（每次不同 input）+ 1021 行 padding
-        // Poseidon trace：3 次 hash（90 行）+ padding 到 log_size=10
-        let calls: Vec<PoseidonHashCall> = (0..3)
-            .map(|i| {
-                PoseidonHashCall::from_input([
-                    BaseField::from(i + 1),
-                    BaseField::from(i + 2),
-                    BaseField::from(i + 3),
-                ])
-            })
-            .collect();
-
-        // 构造 CPU trace：3 行 ECALL
-        let cpu_trace = {
-            use crate::stwo_backend::column_layout_v2::*;
-            use crate::stwo_backend::trace_native::u32_to_m31_limbs;
-
-            let mut builder = TraceBuilder::new(10);
-            for (i, call) in calls.iter().enumerate() {
-                let mut row = vec![M31::from(0u32); NUM_COLUMNS];
-                let pc = (i * 4) as u32;
-                let pc_limbs = u32_to_m31_limbs(pc);
-                let next_pc_limbs = u32_to_m31_limbs(pc + 4);
-                for j in 0..4 {
-                    row[COL_PC_BASE + j] = pc_limbs[j];
-                    row[COL_PC_NEXT_BASE + j] = next_pc_limbs[j];
-                }
-                row[IS_ECALL] = M31::from(1u32);
-                row[COL_SYSCALL_ID] = M31::from(POSEIDON_SYSCALL_ID);
-                row[COL_SYSCALL_ARG0_BASE] = call.input_state[0];
-                row[COL_SYSCALL_ARG1_BASE] = call.input_state[1];
-                row[COL_SYSCALL_ARG2_BASE] = call.input_state[2];
-                row[COL_SYSCALL_OUTPUT0_BASE] = call.output_state[0];
-                row[COL_SYSCALL_OUTPUT0_BASE + 1] = call.output_state[1];
-                row[COL_SYSCALL_OUTPUT1_BASE] = call.output_state[2];
-                builder.fill_row(&row);
-            }
-            builder.fill_padding_to_full();
-            builder.finalize()
-        };
-
-        let mem_trace = make_all_padding_memory_trace(10);
-        let poseidon_trace =
-            crate::stwo_backend::trace_native::gen_poseidon_trace_with_min_log_size(&calls, 10);
-
-        let proof = prove_cpu_memory_poseidon_trace(&cpu_trace, &mem_trace, &poseidon_trace)
-            .expect("3 组件 prove（多 hash）失败");
-
-        verify_cpu_memory_poseidon_proof(proof, 10).expect("3 组件 verify（多 hash）失败");
-    }
-
-    #[test]
-    fn test_cpu_memory_poseidon_soundness_mismatched_output() {
-        // Soundness 测试：CPU 声称的 Poseidon output 与 Poseidon AIR 计算的 output 不匹配
-        //
-        // 篡改：CPU trace 中 ECALL 行的 Output[0] 改为错误值
-        // 预期：prove 失败（CPU claim 的 (Input, Output) 与 Poseidon yield 的 (Input, Output) 不匹配，
-        //       导致 claimed_sum_cpu + claimed_sum_mem + claimed_sum_poseidon != 0）
-        let call = PoseidonHashCall::from_input([
-            BaseField::from(1u32),
-            BaseField::from(2u32),
-            BaseField::from(3u32),
-        ]);
-
-        let mut cpu_trace = make_poseidon_ecall_cpu_trace(&call);
-
-        // 篡改：ECALL 行（row 0）的 Output[0] 改为错误值
-        let wrong_output = call.output_state[0] + BaseField::from(1u32);
-        cpu_trace.cols[crate::stwo_backend::column_layout_v2::COL_SYSCALL_OUTPUT0_BASE][0] =
-            wrong_output;
-
-        let mem_trace = make_all_padding_memory_trace(10);
-        let poseidon_trace =
-            crate::stwo_backend::trace_native::gen_poseidon_trace_with_min_log_size(&[call], 10);
-
-        // 预期 prove 失败（soundness check：claimed_sums 不平衡）
-        let result = prove_cpu_memory_poseidon_trace(&cpu_trace, &mem_trace, &poseidon_trace);
-        assert!(
-            result.is_err(),
-            "篡改 CPU 的 Poseidon output 应导致 prove 失败（soundness）"
-        );
     }
 }

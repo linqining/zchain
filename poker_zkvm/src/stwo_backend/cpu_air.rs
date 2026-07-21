@@ -38,14 +38,13 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 use super::column_layout_v2::{
     COL_BORROW_FLAG_BASE, COL_CARRY_FLAG_BASE, COL_HELPER1_BASE, COL_HELPER2_BASE,
     COL_HELPER3_BASE, COL_HELPER4_BASE, COL_IS_BASE, COL_MEM_ADDR_BASE, COL_PC_BASE,
-    COL_PC_NEXT_AUX_BASE, COL_PC_NEXT_BASE, COL_SYSCALL_ARG0_BASE, COL_SYSCALL_ARG1_BASE,
-    COL_SYSCALL_ARG2_BASE, COL_SYSCALL_ARG3_BASE, COL_SYSCALL_ID, COL_SYSCALL_OUTPUT0_BASE,
-    COL_SYSCALL_OUTPUT1_BASE, COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
-    COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AUIPC, IS_BEQ, IS_BGE,
-    IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_ECALL, IS_JAL, IS_JALR, IS_LOAD, IS_LUI, IS_PADDING,
-    IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
+    COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_AUX_BASE, COL_PC_NEXT_BASE, COL_SYSCALL_ID,
+    COL_TAKEN, COL_VALUE_A_EFF_BASE,
+    COL_VALUE_B_BASE, COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AUIPC,
+    IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_ECALL, IS_JAL, IS_JALR, IS_LOAD,
+    IS_LUI, IS_PADDING, IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
 };
-use super::lookups::{EcallLookup, MemoryLookup, PoseidonLookup};
+use super::lookups::{EcallLookup, MemoryLookup};
 
 /// 65536 = 2^16，16-bit 边界进位/借位的基数。
 const SIX5536: BaseField = BaseField::from_u32_unchecked(65536);
@@ -56,7 +55,7 @@ const TWO56: BaseField = BaseField::from_u32_unchecked(256);
 /// 常量 4（PcNext = Pc + 4 中的立即数偏移）。
 const FOUR: BaseField = BaseField::from_u32_unchecked(4);
 
-/// CPU AIR 组件 — 封装 126 列 trace 的 FrameworkEval 实现。
+/// CPU AIR 组件 — 封装 87 列 trace 的 FrameworkEval 实现（v3）。
 ///
 /// # 结构
 /// - `log_size` — log2(trace 行数)，行数 = 2^log_size
@@ -65,10 +64,11 @@ const FOUR: BaseField = BaseField::from_u32_unchecked(4);
 ///   - `Some(lookup)`：为每行 Load/Store 发送 logup claim（Phase 3.4+）
 /// - `ecall_lookup` — 可选的 EcallLookup relation（Phase 4 Tier 1+）。
 ///   - `None`：不发送 ECALL logup claim
-///   - `Some(lookup)`：为每行 ECALL 发送 25 元组 logup claim
-/// - `poseidon_lookup` — 可选的 PoseidonLookup relation（Phase 4 Tier 2+）。
-///   - `None`：不发送 Poseidon logup claim
-///   - `Some(lookup)`：为每行 Poseidon ECALL 发送 9 元组 logup claim
+///   - `Some(lookup)`：为每行 ECALL 发送 1 元组 logup claim（仅 SyscallId）
+///
+/// # v3 变更
+/// 移除 `poseidon_lookup` 字段（依赖 ECALL Args/Outputs 列，v3 已移除）。
+/// 如需恢复 Poseidon 集成，需先恢复 ECALL Args/Outputs 列。
 ///
 /// # 用法
 /// ## 单组件模式（Phase 2 兼容）
@@ -94,17 +94,6 @@ const FOUR: BaseField = BaseField::from_u32_unchecked(4);
 ///     EcallLookup::dummy(),
 /// );
 /// ```
-///
-/// ## Phase 4 Tier 2+（配合 Memory AIR + Poseidon AIR）
-/// ```ignore
-/// use poker_zkvm::stwo_backend::cpu_air::CpuAir;
-/// use poker_zkvm::stwo_backend::lookups::{MemoryLookup, PoseidonLookup};
-/// let air = CpuAir::new_with_poseidon_lookup(
-///     log_size,
-///     MemoryLookup::dummy(),
-///     PoseidonLookup::dummy(),
-/// );
-/// ```
 #[derive(Debug, Clone)]
 pub struct CpuAir {
     /// log2(trace 行数)
@@ -112,11 +101,8 @@ pub struct CpuAir {
     /// 可选的 MemoryLookup relation（None=不发送 Memory logup claim）
     memory_lookup: Option<MemoryLookup>,
     /// 可选的 EcallLookup relation（None=不发送 ECALL logup claim）
-    /// Phase 4 Tier 1 新增
+    /// Phase 4 Tier 1 新增（v3：claim 缩减为 1 元组 SyscallId）
     ecall_lookup: Option<EcallLookup>,
-    /// 可选的 PoseidonLookup relation（None=不发送 Poseidon logup claim）
-    /// Phase 4 Tier 2 新增
-    poseidon_lookup: Option<PoseidonLookup>,
 }
 
 impl CpuAir {
@@ -126,7 +112,7 @@ impl CpuAir {
     /// - `log_size` — log2(行数)，须 ≥ 10（Stwo SIMD 对齐要求）
     ///
     /// # 返回
-    /// `memory_lookup = None, ecall_lookup = None, poseidon_lookup = None` 的 CpuAir。
+    /// `memory_lookup = None, ecall_lookup = None` 的 CpuAir。
     /// 适用于 Phase 2 单组件 prove/verify 测试。
     #[must_use]
     pub const fn new(log_size: u32) -> Self {
@@ -134,7 +120,6 @@ impl CpuAir {
             log_size,
             memory_lookup: None,
             ecall_lookup: None,
-            poseidon_lookup: None,
         }
     }
 
@@ -145,7 +130,7 @@ impl CpuAir {
     /// - `memory_lookup` — MemoryLookup relation 实例（从 channel draw 或 dummy）
     ///
     /// # 返回
-    /// `memory_lookup = Some(lookup), ecall_lookup = None, poseidon_lookup = None` 的 CpuAir。
+    /// `memory_lookup = Some(lookup), ecall_lookup = None` 的 CpuAir。
     /// 适用于 Phase 3.5+ 多组件 prove/verify（配合 Memory AIR）。
     #[must_use]
     pub const fn new_with_lookup(log_size: u32, memory_lookup: MemoryLookup) -> Self {
@@ -153,7 +138,6 @@ impl CpuAir {
             log_size,
             memory_lookup: Some(memory_lookup),
             ecall_lookup: None,
-            poseidon_lookup: None,
         }
     }
 
@@ -165,13 +149,17 @@ impl CpuAir {
     /// - `ecall_lookup` — EcallLookup relation 实例（从 channel draw 或 dummy）
     ///
     /// # 返回
-    /// `memory_lookup = Some, ecall_lookup = Some, poseidon_lookup = None` 的 CpuAir。
+    /// `memory_lookup = Some, ecall_lookup = Some` 的 CpuAir。
     /// 适用于 Phase 4 Tier 1+ 多组件 prove/verify（配合 Memory AIR + Precompile AIR）。
     ///
     /// # Phase 4 Tier 1 注意
     /// Tier 1 阶段尚无 Precompile AIR 发送 yield，因此 ECALL logup claim 的
     /// multiplicity 应为 0（trace 填充暂留 0）。Tier 2 实施 Precompile AIR 后
     /// 才能实现 claim + yield 平衡。
+    ///
+    /// # v3 变更
+    /// ECALL logup claim 从 25 元组（SyscallId + Args/Outputs）缩减为 1 元组（仅 SyscallId）。
+    /// 如需恢复 Args/Outputs，需在 column_layout_v2.rs 中恢复相关列。
     #[must_use]
     pub const fn new_with_ecall_lookup(
         log_size: u32,
@@ -182,48 +170,6 @@ impl CpuAir {
             log_size,
             memory_lookup: Some(memory_lookup),
             ecall_lookup: Some(ecall_lookup),
-            poseidon_lookup: None,
-        }
-    }
-
-    /// 创建指定 log_size 的 CPU AIR（Phase 4 Tier 2+，启用 Memory + Poseidon logup claim）。
-    ///
-    /// # 参数
-    /// - `log_size` — log2(行数)，须 ≥ 10
-    /// - `memory_lookup` — MemoryLookup relation 实例
-    /// - `poseidon_lookup` — PoseidonLookup relation 实例（从 channel draw 或 dummy）
-    ///
-    /// # 返回
-    /// `memory_lookup = Some, ecall_lookup = None, poseidon_lookup = Some` 的 CpuAir。
-    /// 适用于 Phase 4 Tier 2+ 3 组件 prove/verify（配合 Memory AIR + Poseidon AIR）。
-    ///
-    /// # Phase 4 Tier 2 设计
-    /// CPU 为每行 Poseidon ECALL（SyscallId=0x03）发送 9 元组 PoseidonLookup claim：
-    ///   values = (SyscallId=0x03, Input[0..3], Output[0..3], IsLastRound=1, IsPadding=0)
-    ///   multiplicity = IS_ECALL（假设测试中所有 ECALL 均为 Poseidon）
-    /// Poseidon AIR 在 IsLastRound=1 行发送 yield（multiplicity = -1）。
-    /// 一致性条件：Σ(CPU claims) + Σ(Poseidon yields) == 0。
-    ///
-    /// # 列映射（Poseidon ECALL 行，Phase 4 Tier 2）
-    /// ECALL dispatch 列在 Poseidon ECALL 行存储 M31 值（非 4×8-bit limb）：
-    /// - SyscallId = COL_SYSCALL_ID（1 col）
-    /// - Input[0] = COL_SYSCALL_ARG0_BASE（1 col，直接 M31）
-    /// - Input[1] = COL_SYSCALL_ARG1_BASE（1 col）
-    /// - Input[2] = COL_SYSCALL_ARG2_BASE（1 col）
-    /// - Output[0] = COL_SYSCALL_OUTPUT0_BASE（1 col）
-    /// - Output[1] = COL_SYSCALL_OUTPUT0_BASE + 1（1 col）
-    /// - Output[2] = COL_SYSCALL_OUTPUT1_BASE（1 col）
-    #[must_use]
-    pub const fn new_with_poseidon_lookup(
-        log_size: u32,
-        memory_lookup: MemoryLookup,
-        poseidon_lookup: PoseidonLookup,
-    ) -> Self {
-        Self {
-            log_size,
-            memory_lookup: Some(memory_lookup),
-            ecall_lookup: None,
-            poseidon_lookup: Some(poseidon_lookup),
         }
     }
 
@@ -243,12 +189,6 @@ impl CpuAir {
     #[must_use]
     pub const fn has_ecall_lookup(&self) -> bool {
         self.ecall_lookup.is_some()
-    }
-
-    /// 是否启用 Poseidon logup claim（Phase 4 Tier 2+）。
-    #[must_use]
-    pub const fn has_poseidon_lookup(&self) -> bool {
-        self.poseidon_lookup.is_some()
     }
 }
 
@@ -272,7 +212,7 @@ impl FrameworkEval for CpuAir {
         let one: E::F = BaseField::from(1u32).into();
         let four: E::F = FOUR.into();
 
-        // ----- 读取全部 97 列（顺序与 column_layout_v2 一致）-----
+        // ----- 读取全部 87 列（v3 顺序与 column_layout_v2 一致）-----
         let mut cols: Vec<E::F> = Vec::with_capacity(NUM_COLUMNS);
         for _ in 0..NUM_COLUMNS {
             cols.push(eval.next_trace_mask());
@@ -404,18 +344,39 @@ impl FrameworkEval for CpuAir {
         let taken_bin = taken.clone() * (taken.clone() - one.clone());
         eval.add_constraint(taken_bin);
 
-        // ===== 约束 16-19：PC 递增约束（gated by IsNonFlow）=====
+        // ===== 约束 16-19：PC 递增约束（gated by IsNonFlow，16-bit half 方案）=====
         // 非跳转/非分支/非 padding 指令：PcNext = Pc + 4
-        // 4_limb = [4, 0, 0, 0]（little-endian）
-        // 对每个 limb i：PcNext[i] - Pc[i] - 4_limb[i] = 0
-        // 4_limb[0] = 4, 4_limb[1..=3] = 0
-        let pc_limb0_diff = col(COL_PC_NEXT_BASE) - col(COL_PC_BASE) - four.clone();
-        eval.add_constraint(is_non_flow.clone() * pc_limb0_diff);
+        // 使用 16-bit half 分解（与 ADD/ADDI 同结构），用 PC carry 列处理 limb 间进位：
+        //   PcNext_low16 = Pc_low16 + 4 - 65536 * pc_carry0
+        //   PcNext_high16 = Pc_high16 + pc_carry0 - 65536 * pc_carry1
+        //   pc_carry0, pc_carry1 ∈ {0, 1}
+        //
+        // 旧实现 bug：原 limb-wise 约束 `PcNext[i] - Pc[i] - 4_limb[i] = 0` 未处理
+        // limb 间进位，当 Pc[0] + 4 >= 256（如 Pc=0x11FC, PcNext=0x1200）时失败。
+        let pc_low16 = word_low16(COL_PC_BASE);
+        let pc_high16 = word_high16(COL_PC_BASE);
+        let pc_next_low16 = word_low16(COL_PC_NEXT_BASE);
+        let pc_next_high16 = word_high16(COL_PC_NEXT_BASE);
+        let pc_carry0 = col(COL_PC_CARRY_FLAG_BASE);
+        let pc_carry1 = col(COL_PC_CARRY_FLAG_BASE + 1);
 
-        for i in 1..4 {
-            let pc_limb_diff = col(COL_PC_NEXT_BASE + i) - col(COL_PC_BASE + i);
-            eval.add_constraint(is_non_flow.clone() * pc_limb_diff);
-        }
+        // Constraint 16: PcNext_low16 - Pc_low16 - 4 + 65536 * pc_carry0 = 0
+        let pc_low_diff = pc_next_low16.clone() - pc_low16.clone() - four.clone()
+            + six5536.clone() * pc_carry0.clone();
+        eval.add_constraint(is_non_flow.clone() * pc_low_diff);
+
+        // Constraint 17: PcNext_high16 - Pc_high16 - pc_carry0 + 65536 * pc_carry1 = 0
+        let pc_high_diff = pc_next_high16.clone() - pc_high16.clone() - pc_carry0.clone()
+            + six5536.clone() * pc_carry1.clone();
+        eval.add_constraint(is_non_flow.clone() * pc_high_diff);
+
+        // Constraint 18: pc_carry0 binality
+        let pc_carry0_bin = pc_carry0.clone() * (pc_carry0.clone() - one.clone());
+        eval.add_constraint(is_non_flow.clone() * pc_carry0_bin);
+
+        // Constraint 19: pc_carry1 binality
+        let pc_carry1_bin = pc_carry1.clone() * (pc_carry1.clone() - one.clone());
+        eval.add_constraint(is_non_flow.clone() * pc_carry1_bin);
 
         // ===== 约束 20-23：JAL 约束（gated by IsJal）=====
         // JAL: PcNext = Pc + imm，Helper2 预存 (Pc + imm)
@@ -433,30 +394,61 @@ impl FrameworkEval for CpuAir {
             eval.add_constraint(is_jalr.clone() * jalr_diff);
         }
 
-        // ===== 约束 28-31：Branch 约束（gated by IsBranch）=====
+        // ===== 约束 28-31：Branch 约束（gated by IsBranch，16-bit half 方案）=====
         // 分支指令：taken ? PcNext = Pc + imm : PcNext = Pc + 4
-        // 对每个 limb i：
-        //   (1 - Taken) * (PcNext[i] - Pc[i] - 4_limb[i]) + Taken * (PcNext[i] - Helper2[i]) = 0
-        // 其中 4_limb[0] = 4, 4_limb[1..=3] = 0
-        // 注意：度 = 1 (IsBranch) + 1 (Taken) + 1 (减法) = 3
+        //
+        // not-taken 路径（PcNext = Pc + 4）：使用 PC carry（与约束 16-19 同结构）
+        //   PcNext_low16 = Pc_low16 + 4 - 65536 * pc_carry0
+        //   PcNext_high16 = Pc_high16 + pc_carry0 - 65536 * pc_carry1
+        //
+        // taken 路径（PcNext = Helper2 = Pc + imm）：limb-wise 等式
+        //   PcNext[i] - Helper2[i] = 0
+        //
+        // 组合：IsBranch * ((1-Taken) * not_taken_constraint + Taken * taken_constraint) = 0
+        //
+        // 旧实现 bug：not-taken 路径用 limb-wise `PcNext[i] - Pc[i] - 4_limb[i]`，
+        // 未处理 limb 间进位（同约束 16-19 的 bug）。
+        //
+        // 注意度数预算：
+        // - not-taken low16: IsBranch × (1-Taken) × (PcNext_low - Pc_low - 4 + 65536*pc_carry0)
+        //   = 1 + 1 + 1 = 3 ✓
+        // - not-taken high16: IsBranch × (1-Taken) × (PcNext_high - Pc_high - pc_carry0 + 65536*pc_carry1)
+        //   = 1 + 1 + 1 = 3 ✓
+        // - taken: IsBranch × Taken × (PcNext[i] - Helper2[i]) = 1 + 1 + 1 = 3 ✓
         let one_minus_taken = one.clone() - taken.clone();
+
+        // not-taken low16: (PcNext_low16 - Pc_low16 - 4 + 65536 * pc_carry0)
+        let branch_not_taken_low = pc_next_low16.clone() - pc_low16.clone() - four.clone()
+            + six5536.clone() * pc_carry0.clone();
+        // not-taken high16: (PcNext_high16 - Pc_high16 - pc_carry0 + 65536 * pc_carry1)
+        let branch_not_taken_high = pc_next_high16.clone() - pc_high16.clone() - pc_carry0.clone()
+            + six5536.clone() * pc_carry1.clone();
+
+        // 组合 not-taken low16 约束
+        let branch_low_constraint = one_minus_taken.clone() * branch_not_taken_low;
+        eval.add_constraint(is_branch.clone() * branch_low_constraint);
+
+        // 组合 not-taken high16 约束
+        let branch_high_constraint = one_minus_taken.clone() * branch_not_taken_high;
+        eval.add_constraint(is_branch.clone() * branch_high_constraint);
+
+        // taken 路径：PcNext[i] - Helper2[i] = 0（4 limb）
         for i in 0..4 {
             let pc_next_limb = col(COL_PC_NEXT_BASE + i);
-            let pc_limb = col(COL_PC_BASE + i);
             let helper2_limb = col(COL_HELPER2_BASE + i);
-            // not-taken 部分：PcNext[i] - Pc[i] - 4_limb[i]
-            let not_taken_diff = if i == 0 {
-                pc_next_limb.clone() - pc_limb.clone() - four.clone()
-            } else {
-                pc_next_limb.clone() - pc_limb.clone()
-            };
-            // taken 部分：PcNext[i] - Helper2[i]
             let taken_diff = pc_next_limb - helper2_limb;
-            // 组合：(1-Taken) * not_taken_diff + Taken * taken_diff = 0
-            let branch_constraint =
-                one_minus_taken.clone() * not_taken_diff + taken.clone() * taken_diff;
-            eval.add_constraint(is_branch.clone() * branch_constraint);
+            let branch_taken_constraint = taken.clone() * taken_diff;
+            eval.add_constraint(is_branch.clone() * branch_taken_constraint);
         }
+
+        // Branch 的 pc_carry0/pc_carry1 binality（gated by IsBranch）
+        // 因为 IsNonFlow=0 for branches，约束 18/19 不 gate branch 行，
+        // 需单独约束 binality。度 = 1 (IsBranch) + 2 (binality) = 3 ✓
+        let branch_pc_carry0_bin = pc_carry0.clone() * (pc_carry0.clone() - one.clone());
+        eval.add_constraint(is_branch.clone() * branch_pc_carry0_bin);
+
+        let branch_pc_carry1_bin = pc_carry1.clone() * (pc_carry1.clone() - one.clone());
+        eval.add_constraint(is_branch.clone() * branch_pc_carry1_bin);
 
         // ===== 约束 32-35：LUI 约束（gated by IsLui）=====
         // LUI: rd_eff = imm（imm 字段已左移 12 位并符号扩展）
@@ -567,30 +559,23 @@ impl FrameworkEval for CpuAir {
         let is_ecall_bin = is_ecall.clone() * (is_ecall.clone() - one.clone());
         eval.add_constraint(is_ecall_bin);
 
-        // ===== Phase 4 Tier 1 约束 C58-C82：ECALL 列 zero gating（25 条）=====
-        // 非 ECALL 行所有 25 列 ECALL dispatch 必须为 0
-        // 约束：(1 - IS_ECALL) * col[i] = 0，对 25 列每列一条
-        // - 非 ECALL 行（IS_ECALL=0）：(1-0) * col = col = 0，强制列为 0
-        // - ECALL 行（IS_ECALL=1）：(1-1) * col = 0，自动成立，不约束列值
+        // ===== v3 约束 C58：ECALL SyscallId zero gating（1 条）=====
+        // 非 ECALL 行的 SyscallId 列必须为 0
+        // 约束：(1 - IS_ECALL) * SyscallId = 0
+        // - 非 ECALL 行（IS_ECALL=0）：(1-0) * col = col = 0，强制 SyscallId 为 0
+        // - ECALL 行（IS_ECALL=1）：(1-1) * col = 0，自动成立，不约束 SyscallId 值
         // 度数 = 2（one_minus_is_ecall × col），符合预算
         //
-        // 该约束关闭"非 ECALL 行伪造 ECALL 数据"soundness 缺口：
-        // 恶意 prover 无法在非 ECALL 行注入伪造的 SyscallId/Args/Output。
-        // （"ECALL 行伪造 Output"缺口需 Tier 2 Precompile AIR yield 关闭）
+        // v3 变更：v2 有 25 条 zero gating（SyscallId + 24 Args/Outputs），
+        // v3 仅保留 1 条（SyscallId），Args/Outputs 列已移除。
         let one_minus_is_ecall = one.clone() - is_ecall.clone();
 
-        // 25 列 ECALL dispatch：(SyscallId 1) + (Arg0-3 各 4) + (Output0-1 各 4)
-        let ecall_dispatch_layout: [(usize, usize); 7] = [
-            (COL_SYSCALL_ID, 1),            // col 101
-            (COL_SYSCALL_ARG0_BASE, 4),     // col 102-105
-            (COL_SYSCALL_ARG1_BASE, 4),     // col 106-109
-            (COL_SYSCALL_ARG2_BASE, 4),     // col 110-113
-            (COL_SYSCALL_ARG3_BASE, 4),     // col 114-117
-            (COL_SYSCALL_OUTPUT0_BASE, 4),  // col 118-121
-            (COL_SYSCALL_OUTPUT1_BASE, 4),  // col 122-125
+        // v3：ECALL dispatch 仅 1 列 SyscallId
+        let ecall_dispatch_layout: [(usize, usize); 1] = [
+            (COL_SYSCALL_ID, 1),  // col 84
         ];
 
-        // 收集 25 列值，用于后续 logup claim
+        // 收集 1 列值，用于后续 logup claim
         let mut ecall_claim_values: Vec<E::F> = Vec::with_capacity(ECALL_DISPATCH_NUM_COLUMNS);
         for (base, size) in &ecall_dispatch_layout {
             for i in 0..*size {
@@ -602,16 +587,13 @@ impl FrameworkEval for CpuAir {
         }
 
         // ===== Phase 4 Tier 1 约束：ECALL logup claim（gated by Option<EcallLookup>）=====
-        // 当 ecall_lookup = Some(lookup) 时，为每行 ECALL 发送 25 元组 logup claim：
-        //   values = (SyscallId, Arg0, Arg1, Arg2, Arg3, Output0, Output1)
+        // 当 ecall_lookup = Some(lookup) 时，为每行 ECALL 发送 1 元组 logup claim：
+        //   values = (SyscallId,)
         //   multiplicity = IS_ECALL（非 ECALL 行 multiplicity = 0，不贡献 sum）
         //
-        // 一致性条件：Σ(CPU claims) + Σ(Precompile yields) == 0（Tier 2+ 验证）
+        // v3 变更：从 25 元组（SyscallId + Args/Outputs）缩减为 1 元组（仅 SyscallId）
         //
-        // Phase 4 Tier 1 状态：
-        // - Tier 1 无 Precompile AIR 发送 yield，因此启用 ecall_lookup 时 logup sum != 0
-        // - Tier 1 测试应使用 new_with_lookup（不启用 ecall_lookup）避免验证失败
-        // - Tier 2 实施 Precompile AIR 后，启用 ecall_lookup 测试完整 claim + yield 平衡
+        // 一致性条件：Σ(CPU claims) + Σ(Precompile yields) == 0（Tier 2+ 验证）
         if let Some(ref lookup) = self.ecall_lookup {
             let multiplicity_ef: E::EF = is_ecall.clone().into();
             eval.add_to_relation(RelationEntry::new(
@@ -622,49 +604,8 @@ impl FrameworkEval for CpuAir {
             has_logup = true;
         }
 
-        // ===== Phase 4 Tier 2 约束：Poseidon logup claim（gated by Option<PoseidonLookup>）=====
-        // 当 poseidon_lookup = Some(lookup) 时，为每行 Poseidon ECALL 发送 9 元组 logup claim：
-        //   values = (SyscallId=0x03, Input[0..3], Output[0..3], IsLastRound=1, IsPadding=0)
-        //   multiplicity = IS_ECALL（假设测试中所有 ECALL 均为 Poseidon）
-        //
-        // 列映射（Poseidon ECALL 行，ECALL dispatch 列存储 M31 值而非 limb）：
-        //   ecall_claim_values[0]  = SyscallId (COL_SYSCALL_ID)
-        //   ecall_claim_values[1]  = Input[0]  (COL_SYSCALL_ARG0_BASE)
-        //   ecall_claim_values[5]  = Input[1]  (COL_SYSCALL_ARG1_BASE)
-        //   ecall_claim_values[9]  = Input[2]  (COL_SYSCALL_ARG2_BASE)
-        //   ecall_claim_values[17] = Output[0] (COL_SYSCALL_OUTPUT0_BASE)
-        //   ecall_claim_values[18] = Output[1] (COL_SYSCALL_OUTPUT0_BASE + 1)
-        //   ecall_claim_values[21] = Output[2] (COL_SYSCALL_OUTPUT1_BASE)
-        //
-        // 一致性条件：Σ(CPU Poseidon claims) + Σ(Poseidon AIR yields) == 0
-        // Poseidon AIR 在 IsLastRound=1 行发送 yield（multiplicity = -1 * (1 - IsPadding)）
-        if let Some(ref lookup) = self.poseidon_lookup {
-            // 构造 9 元组 claim values
-            let mut poseidon_claim_values: Vec<E::F> = Vec::with_capacity(9);
-            poseidon_claim_values.push(ecall_claim_values[0].clone());  // SyscallId
-            poseidon_claim_values.push(ecall_claim_values[1].clone());  // Input[0]
-            poseidon_claim_values.push(ecall_claim_values[5].clone());  // Input[1]
-            poseidon_claim_values.push(ecall_claim_values[9].clone());  // Input[2]
-            poseidon_claim_values.push(ecall_claim_values[17].clone()); // Output[0]
-            poseidon_claim_values.push(ecall_claim_values[18].clone()); // Output[1]
-            poseidon_claim_values.push(ecall_claim_values[21].clone()); // Output[2]
-            // IsLastRound = 1（CPU 的 Poseidon ECALL 代表完整 hash，等价于 Poseidon AIR 的最后一轮）
-            poseidon_claim_values.push(one.clone());
-            // IsPadding = 0（CPU 行永不为 padding）
-            poseidon_claim_values.push(BaseField::from(0u32).into());
-
-            // multiplicity = IS_ECALL（非 ECALL 行 multiplicity = 0）
-            let multiplicity_ef: E::EF = is_ecall.clone().into();
-            eval.add_to_relation(RelationEntry::new(
-                lookup,
-                multiplicity_ef,
-                &poseidon_claim_values,
-            ));
-            has_logup = true;
-        }
-
         // ===== 统一 finalize_logup（多 batch 模式）=====
-        // 当启用任意 logup（Memory / ECALL / Poseidon）时，在所有 add_to_relation 之后
+        // 当启用任意 logup（Memory / ECALL）时，在所有 add_to_relation 之后
         // 调用一次 finalize_logup()。Stwo 自动根据 fracs 数量创建 N 个 batch：
         //   - 1 frac → 1 batch → 1 interaction column（4 base field cols）
         //   - 2 fracs → 2 batches → 2 interaction columns（8 base field cols）
@@ -722,21 +663,15 @@ mod tests {
 
     #[test]
     fn test_cpu_air_ecall_column_layout() {
-        // 验证 Phase 4 Tier 1 ECALL dispatch 列布局常量
-        assert_eq!(IS_ECALL, 72, "IS_ECALL 应在 indicator 范围 [40, 74] 内");
-        assert_eq!(COL_SYSCALL_ID, 101);
-        assert_eq!(COL_SYSCALL_ARG0_BASE, 102);
-        assert_eq!(COL_SYSCALL_ARG1_BASE, 106);
-        assert_eq!(COL_SYSCALL_ARG2_BASE, 110);
-        assert_eq!(COL_SYSCALL_ARG3_BASE, 114);
-        assert_eq!(COL_SYSCALL_OUTPUT0_BASE, 118);
-        assert_eq!(COL_SYSCALL_OUTPUT1_BASE, 122);
-        assert_eq!(ECALL_DISPATCH_NUM_COLUMNS, 25);
-        // 验证 25 列布局：1 + 4*6 = 25
+        // v3：ECALL dispatch 列布局常量（缩减为 1 列 SyscallId）
+        assert_eq!(IS_ECALL, 60, "IS_ECALL 应在 indicator 范围 [28, 62] 内");
+        assert_eq!(COL_SYSCALL_ID, 84);
+        assert_eq!(ECALL_DISPATCH_NUM_COLUMNS, 1);
+        // v3：1 列布局（仅 SyscallId）
         assert_eq!(
-            1 + 4 * 6,
+            1,
             ECALL_DISPATCH_NUM_COLUMNS,
-            "ECALL dispatch 应为 1 SyscallId + 6×4-limb = 25 列"
+            "v3 ECALL dispatch 应为 1 列 SyscallId"
         );
     }
 
@@ -754,34 +689,34 @@ mod tests {
 
     #[test]
     fn test_column_layout_consistency() {
-        // 验证 CpuAir 使用的列索引与 column_layout_v2 一致
+        // v3：验证 CpuAir 使用的列索引与 column_layout_v2 一致
         assert_eq!(COL_PC_BASE, 0);
         assert_eq!(COL_PC_NEXT_BASE, 4);
         assert_eq!(COL_PC_NEXT_AUX_BASE, 8);
-        assert_eq!(COL_CARRY_FLAG_BASE, 15);
-        assert_eq!(COL_BORROW_FLAG_BASE, 17);
-        assert_eq!(COL_VALUE_A_EFF_BASE, 28);
-        assert_eq!(COL_VALUE_B_BASE, 32);
-        assert_eq!(COL_VALUE_C_BASE, 36);
-        assert_eq!(COL_IS_BASE, 40);
-        assert_eq!(IS_LUI, 40);
-        assert_eq!(IS_AUIPC, 41);
-        assert_eq!(IS_JAL, 42);
-        assert_eq!(IS_JALR, 43);
-        assert_eq!(IS_BEQ, 44);
-        assert_eq!(IS_BNE, 45);
-        assert_eq!(IS_BLT, 46);
-        assert_eq!(IS_BGE, 47);
-        assert_eq!(IS_BLTU, 48);
-        assert_eq!(IS_BGEU, 49);
-        assert_eq!(IS_ADDI, 52);
-        assert_eq!(IS_ADD, 61);
-        assert_eq!(IS_SUB, 62);
-        assert_eq!(IS_PADDING, 74);
-        assert_eq!(COL_HELPER1_BASE, 75);
-        assert_eq!(COL_HELPER2_BASE, 79);
-        assert_eq!(COL_TAKEN, 91);
-        assert_eq!(NUM_COLUMNS, 126);
+        assert_eq!(COL_CARRY_FLAG_BASE, 12);
+        assert_eq!(COL_BORROW_FLAG_BASE, 14);
+        assert_eq!(COL_VALUE_A_EFF_BASE, 16);
+        assert_eq!(COL_VALUE_B_BASE, 20);
+        assert_eq!(COL_VALUE_C_BASE, 24);
+        assert_eq!(COL_IS_BASE, 28);
+        assert_eq!(IS_LUI, 28);
+        assert_eq!(IS_AUIPC, 29);
+        assert_eq!(IS_JAL, 30);
+        assert_eq!(IS_JALR, 31);
+        assert_eq!(IS_BEQ, 32);
+        assert_eq!(IS_BNE, 33);
+        assert_eq!(IS_BLT, 34);
+        assert_eq!(IS_BGE, 35);
+        assert_eq!(IS_BLTU, 36);
+        assert_eq!(IS_BGEU, 37);
+        assert_eq!(IS_ADDI, 40);
+        assert_eq!(IS_ADD, 49);
+        assert_eq!(IS_SUB, 50);
+        assert_eq!(IS_PADDING, 62);
+        assert_eq!(COL_HELPER1_BASE, 63);
+        assert_eq!(COL_HELPER2_BASE, 67);
+        assert_eq!(COL_TAKEN, 79);
+        assert_eq!(NUM_COLUMNS, 87);
         assert_eq!(NUM_INSTRUCTION_CATEGORIES, 35);
     }
 }

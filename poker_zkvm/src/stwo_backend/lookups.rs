@@ -72,31 +72,29 @@ relation!(MemoryLookup, 9);
 #[allow(dead_code)]
 relation!(RegisterLookup, 6);
 
-/// ECALL dispatch lookup relation（25 元组）。
+/// ECALL dispatch lookup relation（1 元组，v3）。
 ///
 /// 用于 CPU AIR 与 Precompile AIR（Tier 2+）之间的 syscall 一致性验证。
 ///
-/// ## 值布局（25 元组）
+/// ## v3 变更
+///
+/// 从 25 元组缩减为 1 元组（仅 SyscallId）。原 25 元组中的 Args/Outputs 6×4=24 列
+/// 已在 v3 列布局中移除（参见 column_layout_v2.rs）。
+///
+/// ## 值布局（1 元组）
 ///
 /// ```text
-/// values[0]       = SyscallId      (1 列 M31，直接表示 0-127)
-/// values[1..5]    = SyscallArg0    (4×8-bit limb, little-endian)
-/// values[5..9]    = SyscallArg1    (4×8-bit limb, little-endian)
-/// values[9..13]   = SyscallArg2    (4×8-bit limb, little-endian)
-/// values[13..17]  = SyscallArg3    (4×8-bit limb, little-endian)
-/// values[17..21]  = SyscallOutput0 (4×8-bit limb, little-endian)
-/// values[21..25]  = SyscallOutput1 (4×8-bit limb, little-endian)
+/// values[0] = SyscallId (1 列 M31，直接表示 0-127)
 /// ```
 ///
 /// ## 交互
 ///
 /// - **CPU AIR 发送 claim**（每条 ECALL 指令，multiplicity = +1）：
-///   - values = (syscall_id, arg0, arg1, arg2, arg3, output0, output1)
+///   - values = (syscall_id,)
 ///   - 非 ECALL 行 multiplicity = 0（不贡献 sum）
 ///
 /// - **Precompile AIR 发送 yield**（Tier 2+，multiplicity = -1）：
-///   - 例如 Poseidon AIR 在 IsLastRound=1 行发送：
-///     values = (POSEIDON, input[0..3], 0, 0, 0, 0, output[0..3])
+///   - 例如 Poseidon AIR 在 IsLastRound=1 行发送：values = (POSEIDON,)
 ///
 /// - **一致性条件**：Σ(CPU claims) + Σ(Precompile yields) == 0
 ///
@@ -105,8 +103,14 @@ relation!(RegisterLookup, 6);
 /// - Tier 1：定义 relation + CPU AIR 发送 claim 函数（gated by `Option<EcallLookup>`）
 /// - Tier 1 不启用 yield 方（无 Precompile AIR），测试时 multiplicity = 0
 /// - Tier 2+：实施 Precompile AIR（Poseidon/Sha256/MerkleVerify）后启用 yield
+///
+/// ## Soundness 影响
+///
+/// v3 仅保留 SyscallId 作为 lookup 关键字。这意味着 logup 只能证明"CPU 看到的
+/// SyscallId 集合 == Precompile AIR 看到的 SyscallId 集合"，无法保证 Args/Outputs
+/// 一致性。如需恢复 Args/Outputs 一致性，需恢复 ECALL Args/Outputs 列（24 列）。
 #[allow(dead_code)]
-relation!(EcallLookup, 25);
+relation!(EcallLookup, 1);
 
 /// Poseidon hash lookup relation（9 元组）。
 ///
@@ -230,11 +234,11 @@ mod tests {
 
     #[test]
     fn test_ecall_lookup_size() {
-        // EcallLookup 是 25 元组（SyscallId + 6×4-limb Args/Outputs）
+        // EcallLookup v3 是 1 元组（仅 SyscallId）
         let lookup = EcallLookup::dummy();
         assert_eq!(
             <EcallLookup as Relation<BaseField, SecureField>>::get_size(&lookup),
-            25
+            1
         );
     }
 
