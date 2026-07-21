@@ -378,7 +378,7 @@ fn test_texas_poker_bisect_prove_failure() {
                 + 256 * native.cols[COL_VALUE_B_BASE + 1][row].0 as u32;
             let rs2_low = native.cols[COL_VALUE_C_BASE][row].0 as u32
                 + 256 * native.cols[COL_VALUE_C_BASE + 1][row].0 as u32;
-            let borrow0 = native.cols[COL_BORROW_FLAG_BASE][row].0 as u32;
+            let borrow0 = native.cols[COL_CARRY_FLAG_BASE][row].0 as u32;
             let expected_low = (rs1_low as i64 - rs2_low as i64 + 65536 * borrow0 as i64) as u32;
             let low_ok = rd_eff_low == expected_low;
             println!("    SUB: rd_eff_low=0x{rd_eff_low:04X} rs1_low=0x{rs1_low:04X} rs2_low=0x{rs2_low:04X} borrow0={borrow0} {}",
@@ -387,20 +387,17 @@ fn test_texas_poker_bisect_prove_failure() {
         // 检查 Branch 约束
         let is_branch: u32 = (0..6).map(|i| native.cols[IS_BEQ + i][row].0 as u32).sum();
         if is_branch == 1 {
-            let helper2_low = native.cols[COL_HELPER2_BASE][row].0 as u32
-                + 256 * native.cols[COL_HELPER2_BASE + 1][row].0 as u32;
-            let helper2_high = native.cols[COL_HELPER2_BASE + 2][row].0 as u32
-                + 256 * native.cols[COL_HELPER2_BASE + 3][row].0 as u32;
-            let _pc_plus_imm = (pc.wrapping_add(native.cols[COL_HELPER1_BASE][row].0 as u32
-                | (native.cols[COL_HELPER1_BASE + 1][row].0 as u32) << 8
-                | (native.cols[COL_HELPER1_BASE + 2][row].0 as u32) << 16
-                | (native.cols[COL_HELPER1_BASE + 3][row].0 as u32) << 24)) as u32;
+            // v3.2: HelperA 在 Branch 行存 Pc+imm（合并自 Helper2）
+            let helper_a_low = native.cols[COL_HELPER_A_BASE][row].0 as u32
+                + 256 * native.cols[COL_HELPER_A_BASE + 1][row].0 as u32;
+            let helper_a_high = native.cols[COL_HELPER_A_BASE + 2][row].0 as u32
+                + 256 * native.cols[COL_HELPER_A_BASE + 3][row].0 as u32;
             let next_pc_low = next_pc & 0xFFFF;
             let next_pc_high = (next_pc >> 16) & 0xFFFF;
-            println!("    Branch: taken={taken} pc=0x{pc:08X} next_pc=0x{next_pc:08X} helper2=0x{:04X}{:04X} pc+4=0x{:08X}",
-                helper2_high, helper2_low, pc.wrapping_add(4));
+            println!("    Branch: taken={taken} pc=0x{pc:08X} next_pc=0x{next_pc:08X} helperA=0x{:04X}{:04X} pc+4=0x{:08X}",
+                helper_a_high, helper_a_low, pc.wrapping_add(4));
             if taken == 1 {
-                println!("      taken: next_pc should = helper2: {}", if next_pc_low == helper2_low && next_pc_high == helper2_high {"✓"} else {"✗"});
+                println!("      taken: next_pc should = helperA: {}", if next_pc_low == helper_a_low && next_pc_high == helper_a_high {"✓"} else {"✗"});
             } else {
                 println!("      not-taken: next_pc should = pc+4: {}", if next_pc == pc.wrapping_add(4) {"✓"} else {"✗"});
             }
@@ -420,10 +417,6 @@ fn column_name(idx: usize) -> Option<&'static str> {
         x if x == COL_PC_NEXT_BASE + 1 => "PCNext[1]",
         x if x == COL_PC_NEXT_BASE + 2 => "PCNext[2]",
         x if x == COL_PC_NEXT_BASE + 3 => "PCNext[3]",
-        x if x == COL_PC_NEXT_AUX_BASE => "PCNextAux[0]",
-        x if x == COL_PC_NEXT_AUX_BASE + 1 => "PCNextAux[1]",
-        x if x == COL_PC_NEXT_AUX_BASE + 2 => "PCNextAux[2]",
-        x if x == COL_PC_NEXT_AUX_BASE + 3 => "PCNextAux[3]",
         x if x == COL_VALUE_A_EFF_BASE => "ValueAEff[0]",
         x if x == COL_VALUE_A_EFF_BASE + 1 => "ValueAEff[1]",
         x if x == COL_VALUE_A_EFF_BASE + 2 => "ValueAEff[2]",
@@ -440,27 +433,17 @@ fn column_name(idx: usize) -> Option<&'static str> {
         x if x == COL_MEM_ADDR_BASE + 1 => "MemAddr[1]",
         x if x == COL_MEM_ADDR_BASE + 2 => "MemAddr[2]",
         x if x == COL_MEM_ADDR_BASE + 3 => "MemAddr[3]",
-        x if x == COL_HELPER1_BASE => "Helper1[0]",
-        x if x == COL_HELPER1_BASE + 1 => "Helper1[1]",
-        x if x == COL_HELPER1_BASE + 2 => "Helper1[2]",
-        x if x == COL_HELPER1_BASE + 3 => "Helper1[3]",
-        x if x == COL_HELPER2_BASE => "Helper2[0]",
-        x if x == COL_HELPER2_BASE + 1 => "Helper2[1]",
-        x if x == COL_HELPER2_BASE + 2 => "Helper2[2]",
-        x if x == COL_HELPER2_BASE + 3 => "Helper2[3]",
-        x if x == COL_HELPER3_BASE => "Helper3[0]",
-        x if x == COL_HELPER3_BASE + 1 => "Helper3[1]",
-        x if x == COL_HELPER3_BASE + 2 => "Helper3[2]",
-        x if x == COL_HELPER3_BASE + 3 => "Helper3[3]",
-        x if x == COL_HELPER4_BASE => "Helper4[0]",
-        x if x == COL_HELPER4_BASE + 1 => "Helper4[1]",
-        x if x == COL_HELPER4_BASE + 2 => "Helper4[2]",
-        x if x == COL_HELPER4_BASE + 3 => "Helper4[3]",
+        x if x == COL_HELPER_A_BASE => "HelperA[0]",
+        x if x == COL_HELPER_A_BASE + 1 => "HelperA[1]",
+        x if x == COL_HELPER_A_BASE + 2 => "HelperA[2]",
+        x if x == COL_HELPER_A_BASE + 3 => "HelperA[3]",
+        x if x == COL_HELPER_B_BASE => "HelperB[0]",
+        x if x == COL_HELPER_B_BASE + 1 => "HelperB[1]",
+        x if x == COL_HELPER_B_BASE + 2 => "HelperB[2]",
+        x if x == COL_HELPER_B_BASE + 3 => "HelperB[3]",
         x if x == COL_TAKEN => "Taken",
-        x if x == COL_CARRY_FLAG_BASE => "Carry0",
-        x if x == COL_CARRY_FLAG_BASE + 1 => "Carry1",
-        x if x == COL_BORROW_FLAG_BASE => "Borrow0",
-        x if x == COL_BORROW_FLAG_BASE + 1 => "Borrow1",
+        x if x == COL_CARRY_FLAG_BASE => "Arith0",
+        x if x == COL_CARRY_FLAG_BASE + 1 => "Arith1",
         x if x == COL_SYSCALL_ID => "SyscallId",
         // indicators
         x if x == IS_ADD => "IsAdd",

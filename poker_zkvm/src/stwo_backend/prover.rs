@@ -1718,7 +1718,7 @@ mod tests {
     fn test_diag_memory_trace_values() {
         use crate::stwo_backend::memory_air::{
             MEM_COL_ADDR_BASE, MEM_COL_IS_FIRST_ACCESS, MEM_COL_IS_PADDING, MEM_COL_IS_STORE,
-            MEM_COL_TS_CUR_BASE, MEM_COL_TS_PREV_BASE, MEM_COL_VAL_CUR_BASE, MEM_COL_VAL_PREV_BASE,
+            MEM_COL_TS_CUR, MEM_COL_TS_PREV, MEM_COL_VAL_CUR_BASE, MEM_COL_VAL_PREV_BASE,
         };
         use crate::stwo_backend::trace_native::{trace_to_memory_trace, MemoryTrace};
 
@@ -1777,12 +1777,13 @@ mod tests {
         println!("Memory trace num_rows = {}", mem_trace.num_rows());
 
         // 打印前 4 行
+        // v3.3 P1.4：TsCur/TsPrev 改为单 M31 标量
         for row in 0..4 {
             let addr = read_word(&mem_trace, row, MEM_COL_ADDR_BASE);
             let val_cur = read_word(&mem_trace, row, MEM_COL_VAL_CUR_BASE);
             let val_prev = read_word(&mem_trace, row, MEM_COL_VAL_PREV_BASE);
-            let ts_cur = read_word(&mem_trace, row, MEM_COL_TS_CUR_BASE);
-            let ts_prev = read_word(&mem_trace, row, MEM_COL_TS_PREV_BASE);
+            let ts_cur = mem_trace.cols[MEM_COL_TS_CUR][row].0;
+            let ts_prev = mem_trace.cols[MEM_COL_TS_PREV][row].0;
             let is_store = mem_trace.cols[MEM_COL_IS_STORE][row].0;
             let is_padding = mem_trace.cols[MEM_COL_IS_PADDING][row].0;
             let is_first = mem_trace.cols[MEM_COL_IS_FIRST_ACCESS][row].0;
@@ -1802,8 +1803,9 @@ mod tests {
         if row1_is_cont == 1 {
             let row0_val_cur = read_word(&mem_trace, 0, MEM_COL_VAL_CUR_BASE);
             let row1_val_prev = read_word(&mem_trace, 1, MEM_COL_VAL_PREV_BASE);
-            let row0_ts_cur = read_word(&mem_trace, 0, MEM_COL_TS_CUR_BASE);
-            let row1_ts_prev = read_word(&mem_trace, 1, MEM_COL_TS_PREV_BASE);
+            // v3.3 P1.4：TsCur/TsPrev 单 M31 标量
+            let row0_ts_cur = mem_trace.cols[MEM_COL_TS_CUR][0].0;
+            let row1_ts_prev = mem_trace.cols[MEM_COL_TS_PREV][1].0;
             println!(
                 "Continuity check: row1.ValPrev=0x{:08X} vs row0.ValCur=0x{:08X} → {}",
                 row1_val_prev,

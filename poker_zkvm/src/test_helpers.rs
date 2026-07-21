@@ -833,8 +833,8 @@ pub fn make_minimal_step(step_index: u64) -> crate::trace::Step {
 
 /// 构造指定步数的 sequential trace（idx 列严格连续递增 `0..num_steps`）。
 ///
-/// 用于 Stwo POC 测试。`num_steps` 应为 2 的幂且 ≥ 1024
-///（SimdBackend `MIN_LOG_SIZE=10` → 2^10=1024 行）。
+/// 用于 Stwo POC 测试。`num_steps` 应为 2 的幂且 ≥ 256
+///（Stwo FFT 最低要求 `log_size >= 5`；`compute_log_size` 最小 8 → 2^8=256 行）。
 pub fn make_sequential_trace(num_steps: usize) -> crate::trace::Trace {
     let mut trace = crate::trace::Trace::new();
     for i in 0..num_steps {

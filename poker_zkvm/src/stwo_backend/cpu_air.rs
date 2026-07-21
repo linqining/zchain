@@ -36,9 +36,9 @@ use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 
 use super::column_layout_v2::{
-    COL_BORROW_FLAG_BASE, COL_CARRY_FLAG_BASE, COL_HELPER1_BASE, COL_HELPER2_BASE,
-    COL_HELPER3_BASE, COL_HELPER4_BASE, COL_IS_BASE, COL_MEM_ADDR_BASE, COL_PC_BASE,
-    COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_AUX_BASE, COL_PC_NEXT_BASE, COL_SYSCALL_ID,
+    COL_CARRY_FLAG_BASE, COL_HELPER_A_BASE, COL_HELPER_B_BASE,
+    COL_IS_BASE, COL_MEM_ADDR_BASE, COL_PC_BASE,
+    COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SYSCALL_ID,
     COL_TAKEN, COL_VALUE_A_EFF_BASE,
     COL_VALUE_B_BASE, COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AUIPC,
     IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_ECALL, IS_JAL, IS_JALR, IS_LOAD,
@@ -256,11 +256,11 @@ impl FrameworkEval for CpuAir {
         let is_non_flow = one.clone() - is_padding.clone() - is_jal.clone() - is_jalr.clone()
             - is_branch.clone();
 
-        // ----- 读取 carry/borrow 标志 -----
+        // ----- 读取算术标志（合并 carry/borrow，ADD/ADDI 与 SUB 互斥）-----
+        // ADD/ADDI 行：此列为 carry0, carry1
+        // SUB 行：此列为 borrow0, borrow1
         let carry0 = col(COL_CARRY_FLAG_BASE);
         let carry1 = col(COL_CARRY_FLAG_BASE + 1);
-        let borrow0 = col(COL_BORROW_FLAG_BASE);
-        let borrow1 = col(COL_BORROW_FLAG_BASE + 1);
 
         // ----- 读取操作数值（4×8-bit limb word）-----
         let rd_eff_low = word_low16(COL_VALUE_A_EFF_BASE);
@@ -309,22 +309,23 @@ impl FrameworkEval for CpuAir {
         eval.add_constraint(is_addi.clone() * addi_carry1_bin);
 
         // ===== 约束 9-12：SUB 约束（gated by IsSub）=====
+        // SUB 复用 carry0, carry1 列作为 borrow0, borrow1（ADD/ADDI 与 SUB 互斥）
         // 低 16 位：rd_eff_low = rs1_low - rs2_low + 65536 * borrow0
         let sub_low = rd_eff_low.clone() - rs1_low.clone() + rs2_low.clone()
-            - six5536.clone() * borrow0.clone();
+            - six5536.clone() * carry0.clone();
         eval.add_constraint(is_sub.clone() * sub_low);
 
         // 高 16 位：rd_eff_high = rs1_high - rs2_high - borrow0 + 65536 * borrow1
         let sub_high = rd_eff_high.clone() - rs1_high.clone() + rs2_high.clone()
-            + borrow0.clone() - six5536.clone() * borrow1.clone();
+            + carry0.clone() - six5536.clone() * carry1.clone();
         eval.add_constraint(is_sub.clone() * sub_high);
 
-        // borrow0 binality
-        let borrow0_bin = borrow0.clone() * (borrow0.clone() - one.clone());
+        // borrow0 binality（复用 carry0 列）
+        let borrow0_bin = carry0.clone() * (carry0.clone() - one.clone());
         eval.add_constraint(is_sub.clone() * borrow0_bin);
 
-        // borrow1 binality
-        let borrow1_bin = borrow1.clone() * (borrow1.clone() - one.clone());
+        // borrow1 binality（复用 carry1 列）
+        let borrow1_bin = carry1.clone() * (carry1.clone() - one.clone());
         eval.add_constraint(is_sub.clone() * borrow1_bin);
 
         // ===== 约束 13：IsPadding binality（通用，无 gating）=====
@@ -382,15 +383,15 @@ impl FrameworkEval for CpuAir {
         // JAL: PcNext = Pc + imm，Helper2 预存 (Pc + imm)
         // 对每个 limb i：PcNext[i] - Helper2[i] = 0
         for i in 0..4 {
-            let jal_diff = col(COL_PC_NEXT_BASE + i) - col(COL_HELPER2_BASE + i);
+            let jal_diff = col(COL_PC_NEXT_BASE + i) - col(COL_HELPER_A_BASE + i);
             eval.add_constraint(is_jal.clone() * jal_diff);
         }
 
         // ===== 约束 24-27：JALR 约束（gated by IsJalr）=====
-        // JALR: PcNext = (rs1 + imm) & !1，PcNextAux 预存该值
-        // 对每个 limb i：PcNext[i] - PcNextAux[i] = 0
+        // JALR: PcNext = (rs1 + imm) & !1，HelperA 预存该值（v3.3：复用 HelperA）
+        // 对每个 limb i：PcNext[i] - HelperA[i] = 0
         for i in 0..4 {
-            let jalr_diff = col(COL_PC_NEXT_BASE + i) - col(COL_PC_NEXT_AUX_BASE + i);
+            let jalr_diff = col(COL_PC_NEXT_BASE + i) - col(COL_HELPER_A_BASE + i);
             eval.add_constraint(is_jalr.clone() * jalr_diff);
         }
 
@@ -435,7 +436,7 @@ impl FrameworkEval for CpuAir {
         // taken 路径：PcNext[i] - Helper2[i] = 0（4 limb）
         for i in 0..4 {
             let pc_next_limb = col(COL_PC_NEXT_BASE + i);
-            let helper2_limb = col(COL_HELPER2_BASE + i);
+            let helper2_limb = col(COL_HELPER_A_BASE + i);
             let taken_diff = pc_next_limb - helper2_limb;
             let branch_taken_constraint = taken.clone() * taken_diff;
             eval.add_constraint(is_branch.clone() * branch_taken_constraint);
@@ -455,7 +456,7 @@ impl FrameworkEval for CpuAir {
         // Helper1 预存 imm 值
         // 对每个 limb i：rd_eff[i] - Helper1[i] = 0
         for i in 0..4 {
-            let lui_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER1_BASE + i);
+            let lui_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER_A_BASE + i);
             eval.add_constraint(is_lui.clone() * lui_diff);
         }
 
@@ -464,7 +465,7 @@ impl FrameworkEval for CpuAir {
         // Helper2 预存 (Pc + imm) 值
         // 对每个 limb i：rd_eff[i] - Helper2[i] = 0
         for i in 0..4 {
-            let auipc_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER2_BASE + i);
+            let auipc_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER_A_BASE + i);
             eval.add_constraint(is_auipc.clone() * auipc_diff);
         }
 
@@ -476,7 +477,7 @@ impl FrameworkEval for CpuAir {
         // 实际地址计算（rs1+imm）的正确性由 Helper3 填充逻辑保证（Phase 3.2 Memory AIR 将强化）
         let is_load = col(IS_LOAD);
         for i in 0..4 {
-            let load_addr_diff = col(COL_MEM_ADDR_BASE + i) - col(COL_HELPER3_BASE + i);
+            let load_addr_diff = col(COL_MEM_ADDR_BASE + i) - col(COL_HELPER_A_BASE + i);
             eval.add_constraint(is_load.clone() * load_addr_diff);
         }
 
@@ -486,7 +487,7 @@ impl FrameworkEval for CpuAir {
         // 对每个 limb i：rd_eff[i] - Helper4[i] = 0
         let is_load_eff = is_load.clone();
         for i in 0..4 {
-            let load_val_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER4_BASE + i);
+            let load_val_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER_B_BASE + i);
             eval.add_constraint(is_load_eff.clone() * load_val_diff);
         }
 
@@ -494,7 +495,7 @@ impl FrameworkEval for CpuAir {
         // Store: MemAddr = rs1 + imm（同 Load 地址约束）
         let is_store = col(IS_STORE);
         for i in 0..4 {
-            let store_addr_diff = col(COL_MEM_ADDR_BASE + i) - col(COL_HELPER3_BASE + i);
+            let store_addr_diff = col(COL_MEM_ADDR_BASE + i) - col(COL_HELPER_A_BASE + i);
             eval.add_constraint(is_store.clone() * store_addr_diff);
         }
 
@@ -504,7 +505,7 @@ impl FrameworkEval for CpuAir {
         // 对每个 limb i：rs2[i] - Helper4[i] = 0
         let is_store_eff = is_store.clone();
         for i in 0..4 {
-            let store_val_diff = col(COL_VALUE_C_BASE + i) - col(COL_HELPER4_BASE + i);
+            let store_val_diff = col(COL_VALUE_C_BASE + i) - col(COL_HELPER_B_BASE + i);
             eval.add_constraint(is_store_eff.clone() * store_val_diff);
         }
 
@@ -663,9 +664,9 @@ mod tests {
 
     #[test]
     fn test_cpu_air_ecall_column_layout() {
-        // v3：ECALL dispatch 列布局常量（缩减为 1 列 SyscallId）
-        assert_eq!(IS_ECALL, 60, "IS_ECALL 应在 indicator 范围 [28, 62] 内");
-        assert_eq!(COL_SYSCALL_ID, 84);
+        // v3.3：ECALL dispatch 列布局常量（缩减为 1 列 SyscallId）
+        assert_eq!(IS_ECALL, 54, "IS_ECALL 应在 indicator 范围 [22, 56] 内");
+        assert_eq!(COL_SYSCALL_ID, 70);
         assert_eq!(ECALL_DISPATCH_NUM_COLUMNS, 1);
         // v3：1 列布局（仅 SyscallId）
         assert_eq!(
@@ -689,34 +690,33 @@ mod tests {
 
     #[test]
     fn test_column_layout_consistency() {
-        // v3：验证 CpuAir 使用的列索引与 column_layout_v2 一致
+        // v3.3：验证 CpuAir 使用的列索引与 column_layout_v2 一致
+        // 变更：移除 PcNextAux 列（P1.3），JALR 复用 HelperA
         assert_eq!(COL_PC_BASE, 0);
         assert_eq!(COL_PC_NEXT_BASE, 4);
-        assert_eq!(COL_PC_NEXT_AUX_BASE, 8);
-        assert_eq!(COL_CARRY_FLAG_BASE, 12);
-        assert_eq!(COL_BORROW_FLAG_BASE, 14);
-        assert_eq!(COL_VALUE_A_EFF_BASE, 16);
-        assert_eq!(COL_VALUE_B_BASE, 20);
-        assert_eq!(COL_VALUE_C_BASE, 24);
-        assert_eq!(COL_IS_BASE, 28);
-        assert_eq!(IS_LUI, 28);
-        assert_eq!(IS_AUIPC, 29);
-        assert_eq!(IS_JAL, 30);
-        assert_eq!(IS_JALR, 31);
-        assert_eq!(IS_BEQ, 32);
-        assert_eq!(IS_BNE, 33);
-        assert_eq!(IS_BLT, 34);
-        assert_eq!(IS_BGE, 35);
-        assert_eq!(IS_BLTU, 36);
-        assert_eq!(IS_BGEU, 37);
-        assert_eq!(IS_ADDI, 40);
-        assert_eq!(IS_ADD, 49);
-        assert_eq!(IS_SUB, 50);
-        assert_eq!(IS_PADDING, 62);
-        assert_eq!(COL_HELPER1_BASE, 63);
-        assert_eq!(COL_HELPER2_BASE, 67);
-        assert_eq!(COL_TAKEN, 79);
-        assert_eq!(NUM_COLUMNS, 87);
+        assert_eq!(COL_CARRY_FLAG_BASE, 8);
+        assert_eq!(COL_VALUE_A_EFF_BASE, 10);
+        assert_eq!(COL_VALUE_B_BASE, 14);
+        assert_eq!(COL_VALUE_C_BASE, 18);
+        assert_eq!(COL_IS_BASE, 22);
+        assert_eq!(IS_LUI, 22);
+        assert_eq!(IS_AUIPC, 23);
+        assert_eq!(IS_JAL, 24);
+        assert_eq!(IS_JALR, 25);
+        assert_eq!(IS_BEQ, 26);
+        assert_eq!(IS_BNE, 27);
+        assert_eq!(IS_BLT, 28);
+        assert_eq!(IS_BGE, 29);
+        assert_eq!(IS_BLTU, 30);
+        assert_eq!(IS_BGEU, 31);
+        assert_eq!(IS_ADDI, 34);
+        assert_eq!(IS_ADD, 43);
+        assert_eq!(IS_SUB, 44);
+        assert_eq!(IS_PADDING, 56);
+        assert_eq!(COL_HELPER_A_BASE, 57);
+        assert_eq!(COL_HELPER_B_BASE, 61);
+        assert_eq!(COL_TAKEN, 65);
+        assert_eq!(NUM_COLUMNS, 73);
         assert_eq!(NUM_INSTRUCTION_CATEGORIES, 35);
     }
 }

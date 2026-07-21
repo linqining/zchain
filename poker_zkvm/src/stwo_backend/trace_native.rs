@@ -118,7 +118,7 @@ impl NativeTrace {
     /// 创建指定 log_size 的空 trace（所有列初始化为 M31::zero()）。
     ///
     /// # 参数
-    /// - `log_size` — log2(行数)，行数 = `1 << log_size`，最小 10（1024 行，SIMD 对齐）
+    /// - `log_size` — log2(行数)，行数 = `1 << log_size`，最小 8（256 行，Stwo FFT 最低 5）
     #[must_use]
     pub fn new(log_size: u32) -> Self {
         let num_rows = 1usize << log_size;
@@ -249,16 +249,21 @@ impl TraceBuilder {
         self.trace.num_rows()
     }
 
-    /// 计算 log_size（取 ≥ num_steps 的最小 2 的幂，最小 10）。
+    /// 计算 log_size（取 ≥ num_steps 的最小 2 的幂，最小 8）。
     ///
     /// # 参数
     /// - `num_steps` — 真实 step 数量
     ///
     /// # 返回
-    /// log_size ∈ [10, 24]（最小 1024 行，最大 16M 行）
+    /// log_size ∈ [8, 24]（最小 256 行，最大 16M 行）
+    ///
+    /// # 最小 log_size 选择理由
+    /// - Stwo SimdBackend FFT 最低要求 log_size >= 5（VECWISE_FFT_BITS = LOG_N_LANES + 1 = 5）
+    /// - Stwo bit_reverse 对 log_size < 10 自动回退到 CPU 实现（功能正确，仅性能略低）
+    /// - 设为 8（256 行）兼顾实用性和性能：texas_poker 173 步仅需 83 padding 行
     #[must_use]
     pub fn compute_log_size(num_steps: usize) -> u32 {
-        let mut log_size: u32 = 10; // 最小 10（1024 行，SIMD 对齐）
+        let mut log_size: u32 = 8; // 最小 8（256 行，Stwo FFT 最低 5，bit_reverse 有 CPU 回退）
         while (1usize << log_size) < num_steps {
             log_size += 1;
         }
@@ -370,20 +375,21 @@ pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
     builder.finalize()
 }
 
-/// 将单个 emulator `Step` 转换为 87 列 M31 row（v3 布局）。
+/// 将单个 emulator `Step` 转换为 73 列 M31 row（v3.3 布局）。
 ///
 /// # 参数
 /// - `step` — emulator 执行的单步记录
 /// - `prev_registers` — 前一步的寄存器快照（用于计算 ValueB = prev[rs1] 等）
 ///
 /// # 返回
-/// 长度 = `NUM_COLUMNS`（v3 = 87）的 `Vec<M31>`
+/// 长度 = `NUM_COLUMNS`（v3.3 = 73）的 `Vec<M31>`
 ///
-/// # v3 实现（方案 D）
-/// 移除死列：OpA/OpB/OpC/ImmC/InstrVal/ValueA/BranchCond/Shamt/SgnA/SgnB/SgnC（17 列）
-/// 移除 ECALL Args/Outputs（24 列，仅保留 SyscallId）
-/// 保留：PC/PcNext/PcNextAux (12) + Carry/Borrow (4) + ValueAEff/B/C (12) +
-///       Indicator (35) + Helper1-4 (16) + Taken (1) + MemAddr (4) + SyscallId (1) + PcCarry (2) = 87
+/// # v3.3 实现（P1.3）
+/// 在 v3.2（77 列）基础上移除 PcNextAux 列：
+/// - PcNextAux 仅用于 JALR 约束，与 HelperA 使用互斥
+/// - JALR 行 HelperA 复用为 PcNextAux 值
+/// 保留：PC/PcNext (8) + ArithFlag (2) + ValueAEff/B/C (12) +
+///       Indicator (35) + HelperA/B (8) + Taken (1) + MemAddr (4) + SyscallId (1) + PcCarry (2) = 73
 #[must_use]
 pub fn step_to_m31_row(
     step: &crate::trace::Step,
@@ -416,26 +422,43 @@ pub fn step_to_m31_row(
     for i in 0..WORD_LIMB_COUNT {
         row[COL_PC_NEXT_BASE + i] = pc_next_limbs[i];
     }
-    let pc_next_aux_limbs = u32_to_m31_limbs(pc_next_aux);
-    for i in 0..WORD_LIMB_COUNT {
-        row[COL_PC_NEXT_AUX_BASE + i] = pc_next_aux_limbs[i];
-    }
+    // v3.3（P1.3）：PcNextAux 列已移除，JALR 目标地址复用 HelperA 列
+    // （PcNextAux 仅在 JALR 行被约束，与 HelperA 使用互斥）
     row[COL_TAKEN] = M31::from(u32::from(taken));
 
-    // ----- Helper1: imm 值（4×8-bit limb）-----
-    // 用于 LUI 约束（rd_eff = imm，imm 字段已左移 12 位并符号扩展）
-    fill_word(&mut row, COL_HELPER1_BASE, imm_value);
-
-    // ----- Helper2: Pc + imm 预计算（4×8-bit limb）-----
-    // 用于 JAL 约束（PcNext = Pc + imm）、Branch taken 约束（PcNext = Pc + imm）、AUIPC 约束（rd_eff = Pc + imm）
-    // 非相关指令填 0（AIR 约束由 IsJal/IsBranch/IsAuipc gating 保证不强制约束）
-    let helper2_value = compute_pc_plus_imm(step, imm_value);
-    fill_word(&mut row, COL_HELPER2_BASE, helper2_value);
-
-    // ----- Phase 3: Helper3 = MemAddr（Load/Store 地址，4×8-bit limb）-----
-    // 用于 Load/Store 地址约束：MemAddr[i] - Helper3[i] = 0
-    // Helper3 = rs1 + imm = MemAddr（由 compute_mem_addr 预计算）
-    fill_word(&mut row, COL_HELPER3_BASE, mem_addr);
+    // ----- HelperA: 复用列（4×8-bit limb）-----
+    // LUI 行：imm 值（用于 rd_eff = imm 约束）
+    // JAL/Branch taken/AUIPC 行：Pc + imm 预计算值
+    // Load/Store 行：MemAddr 值（rs1 + imm，与 MemAddr 列一致）
+    // JALR 行：PcNextAux 值（JALR 目标地址 = (rs1 + imm) & !1，用于 PcNext 约束）
+    // 其他行：0（不被约束）
+    //
+    // 互斥性：LUI/JAL/Branch/AUIPC/Load/Store/JALR 的 indicator one-hot 互斥，
+    // 可安全复用同一组 4 列。
+    let helper_a_value: u32 = match &step.instruction {
+        Instruction::Lui { .. } => imm_value,
+        Instruction::Jal { .. }
+        | Instruction::Beq { .. }
+        | Instruction::Bne { .. }
+        | Instruction::Blt { .. }
+        | Instruction::Bge { .. }
+        | Instruction::Bltu { .. }
+        | Instruction::Bgeu { .. }
+        | Instruction::Auipc { .. } => compute_pc_plus_imm(step, imm_value),
+        // Load/Store: HelperA = MemAddr（rs1 + imm）
+        Instruction::Lb { .. }
+        | Instruction::Lh { .. }
+        | Instruction::Lw { .. }
+        | Instruction::Lbu { .. }
+        | Instruction::Lhu { .. }
+        | Instruction::Sb { .. }
+        | Instruction::Sh { .. }
+        | Instruction::Sw { .. } => mem_addr,
+        // v3.3（P1.3）：JALR 行复用 HelperA 存 PcNextAux 值
+        Instruction::Jalr { .. } => pc_next_aux,
+        _ => 0,
+    };
+    fill_word(&mut row, COL_HELPER_A_BASE, helper_a_value);
 
     // ----- 操作数值（v3：移除 ValueA 死列，仅保留 ValueAEff/ValueB/ValueC）-----
     let value_b = prev_registers[op_b as usize];          // rs1 读值
@@ -450,18 +473,37 @@ pub fn step_to_m31_row(
     fill_word(&mut row, COL_VALUE_B_BASE, value_b);
     fill_word(&mut row, COL_VALUE_C_BASE, value_c);
 
-    // ----- Phase 3: Helper4 = mem_value（Load/Store 的内存值，4×8-bit limb）-----
-    // 用于 Load 值约束：rd_eff[i] - Helper4[i] = 0（Helper4 = 加载值）
-    // 用于 Store 值约束：rs2[i] - Helper4[i] = 0（Helper4 = 存储值 = rs2_value）
-    // 非 Load/Store 指令填 0
-    let helper4_value = extract_mem_value(&step.instruction, step.mem_access.as_slice(), value_c);
-    fill_word(&mut row, COL_HELPER4_BASE, helper4_value);
+    // ----- HelperB: 复用列（4×8-bit limb）-----
+    // Load 行：mem_value（加载值，用于 rd_eff = mem_value 约束）
+    // Store 行：rs2_value（存储值，用于 rs2 = mem_value 约束）
+    // 其他行：0（不被约束）
+    //
+    // 互斥性：Load/Store indicator one-hot 互斥。
+    // 注：Store 行的 mem_value = rs2_value = value_c，直接复用 value_c 即可。
+    //     Load 行的 mem_value 来自 step.mem_access[0].value（由 extract_mem_value 提取）。
+    let helper_b_value: u32 = match &step.instruction {
+        Instruction::Lb { .. }
+        | Instruction::Lh { .. }
+        | Instruction::Lw { .. }
+        | Instruction::Lbu { .. }
+        | Instruction::Lhu { .. } => {
+            extract_mem_value(&step.instruction, step.mem_access.as_slice(), value_c)
+        }
+        // Store: HelperB = rs2_value = value_c
+        Instruction::Sb { .. }
+        | Instruction::Sh { .. }
+        | Instruction::Sw { .. } => value_c,
+        _ => 0,
+    };
+    fill_word(&mut row, COL_HELPER_B_BASE, helper_b_value);
 
     // ----- Indicator one-hot -----
     let indicator_col = instruction_to_indicator_col(&step.instruction);
     row[indicator_col] = M31::from(1u32);
 
-    // ----- ADD/ADDI/SUB 的 carry/borrow 计算 -----
+    // ----- ADD/ADDI/SUB 的算术标志计算（合并 carry/borrow 到同一组列）-----
+    // ADD/ADDI 行：COL_CARRY_FLAG_BASE 写入 carry0, carry1
+    // SUB 行：COL_CARRY_FLAG_BASE 写入 borrow0, borrow1（ADD/ADDI 与 SUB 互斥，可复用）
     match &step.instruction {
         Instruction::Add { .. } | Instruction::Addi { .. } => {
             let (carry0, carry1) = compute_add_carries(value_b, value_c, value_a_eff);
@@ -470,8 +512,8 @@ pub fn step_to_m31_row(
         }
         Instruction::Sub { .. } => {
             let (borrow0, borrow1) = compute_sub_borrows(value_b, value_c, value_a_eff);
-            row[COL_BORROW_FLAG_BASE] = M31::from(borrow0);
-            row[COL_BORROW_FLAG_BASE + 1] = M31::from(borrow1);
+            row[COL_CARRY_FLAG_BASE] = M31::from(borrow0);
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(borrow1);
         }
         _ => {}
     }
@@ -482,8 +524,8 @@ pub fn step_to_m31_row(
     //   1. IsNonFlow=1 的指令（非 JAL/JALR/Branch/Padding）：PcNext = Pc + 4
     //   2. Branch not-taken（Taken=0 但 IsBranch=1）：PcNext = Pc + 4
     // 不适用：
-    //   - JAL/JALR：PcNext 由 Helper2/PcNextAux 直接 limb-wise 等式约束（无需 carry）
-    //   - Branch taken：PcNext = Helper2（limb-wise 等式）
+    //   - JAL/JALR：PcNext 由 HelperA 直接 limb-wise 等式约束（JALR 复用 HelperA 存 PcNextAux，无需 carry）
+    //   - Branch taken：PcNext = HelperA（limb-wise 等式）
     //   - Padding：IsNonFlow=0，约束 gated off
     //
     // 注：分支指令在 not-taken 情形下 (Taken=0) 仍需 PcNext = Pc + 4，
@@ -945,8 +987,8 @@ pub fn trace_to_native_trace_placeholder(num_steps: usize) -> NativeTrace {
 // ===========================================================================
 
 use super::memory_air::{
-    MEM_COL_ADDR_BASE, MEM_COL_IS_FIRST_ACCESS, MEM_COL_IS_LOAD, MEM_COL_IS_PADDING,
-    MEM_COL_IS_STORE, MEM_COL_SIZE, MEM_COL_TS_CUR_BASE, MEM_COL_TS_PREV_BASE, MEM_COL_VAL_CUR_BASE,
+    MEM_COL_ADDR_BASE, MEM_COL_IS_FIRST_ACCESS, MEM_COL_IS_PADDING,
+    MEM_COL_IS_STORE, MEM_COL_TS_CUR, MEM_COL_TS_PREV, MEM_COL_VAL_CUR_BASE,
     MEM_COL_VAL_PREV_BASE, MEM_NUM_COLUMNS,
 };
 use crate::trace::MemOp;
@@ -957,7 +999,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
 
-/// 原生 M31 Memory trace（列主序，25 列）。
+/// 原生 M31 Memory trace（列主序，17 列，v3.3 P1.4）。
 ///
 /// 参考 Nexus zkVM 0.3.6 `memory_check` 模块的 sorted memory log 模式。
 ///
@@ -1009,12 +1051,13 @@ impl MemoryTrace {
 }
 
 /// 单条内存访问记录（内部用于排序）。
+///
+/// v3.3 P1.4：移除 `size` 字段（原 MEM_COL_SIZE 列已移除，约束未使用）
 #[derive(Clone, Debug)]
 struct MemEntry {
     addr: u32,
     value: u32,
     is_store: u8,  // 1=Store, 0=Load
-    size: u8,
     ts: u32,       // step_index
 }
 
@@ -1032,7 +1075,7 @@ struct MemEntry {
 /// - `trace` — emulator 执行 trace
 ///
 /// # 返回
-/// 列主序 `MemoryTrace`，列数 = `MEM_NUM_COLUMNS` (25)，行数 = 2^log_size
+/// 列主序 `MemoryTrace`，列数 = `MEM_NUM_COLUMNS` (17, v3.3 P1.4)，行数 = 2^log_size
 #[must_use]
 pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
     // Step 1: 收集所有 MemAccess
@@ -1043,7 +1086,6 @@ pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
                 addr: ma.addr,
                 value: ma.value,
                 is_store: if ma.op == MemOp::Write { 1 } else { 0 },
-                size: ma.size,
                 ts: u32::try_from(step.step_index).unwrap_or(u32::MAX),
             });
         }
@@ -1071,25 +1113,23 @@ pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
         mem_trace.fill_word(row_idx, MEM_COL_ADDR_BASE, entry.addr);
         // 填充 MemValCur
         mem_trace.fill_word(row_idx, MEM_COL_VAL_CUR_BASE, entry.value);
-        // 填充 MemTsCur
-        mem_trace.fill_word(row_idx, MEM_COL_TS_CUR_BASE, entry.ts);
+        // 填充 MemTsCur（v3.3 P1.4：单 M31 标量，不再用 4×8-bit limb）
+        mem_trace.fill_scalar(row_idx, MEM_COL_TS_CUR, M31::from(entry.ts));
 
         if is_first_access {
             // 首次访问：ValPrev=0, TsPrev=0
             mem_trace.fill_word(row_idx, MEM_COL_VAL_PREV_BASE, 0);
-            mem_trace.fill_word(row_idx, MEM_COL_TS_PREV_BASE, 0);
+            mem_trace.fill_scalar(row_idx, MEM_COL_TS_PREV, M31::from(0u32));
             mem_trace.fill_scalar(row_idx, MEM_COL_IS_FIRST_ACCESS, M31::from(1u32));
         } else {
             // 连续访问：ValPrev=prev.ValCur, TsPrev=prev.TsCur
             mem_trace.fill_word(row_idx, MEM_COL_VAL_PREV_BASE, prev_val_cur);
-            mem_trace.fill_word(row_idx, MEM_COL_TS_PREV_BASE, prev_ts_cur);
+            mem_trace.fill_scalar(row_idx, MEM_COL_TS_PREV, M31::from(prev_ts_cur));
             mem_trace.fill_scalar(row_idx, MEM_COL_IS_FIRST_ACCESS, M31::from(0u32));
         }
 
-        // 填充 flags
-        mem_trace.fill_scalar(row_idx, MEM_COL_IS_LOAD, M31::from(u32::from(1 - entry.is_store)));
+        // 填充 flags（v3.3 P1.4：移除 IsLoad 和 Size）
         mem_trace.fill_scalar(row_idx, MEM_COL_IS_STORE, M31::from(u32::from(entry.is_store)));
-        mem_trace.fill_scalar(row_idx, MEM_COL_SIZE, M31::from(u32::from(entry.size)));
         mem_trace.fill_scalar(row_idx, MEM_COL_IS_PADDING, M31::from(0u32));
 
         // 更新 prev 状态
@@ -1102,7 +1142,7 @@ pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
     for row_idx in num_entries..mem_trace.num_rows() {
         // Padding 行：IsPadding=1，其余=0（MemoryTrace::new 已初始化为 0）
         mem_trace.fill_scalar(row_idx, MEM_COL_IS_PADDING, M31::from(1u32));
-        // 注：Padding 行 IsLoad=0, IsStore=0, IsFirstAccess=0
+        // 注：Padding 行 IsStore=0, IsFirstAccess=0（v3.3 P1.4：不再有 IsLoad/Size）
     }
 
     mem_trace
@@ -1111,10 +1151,10 @@ pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
 /// 将 `MemoryTrace` 转换为 Stwo `CircleEvaluation` 列。
 ///
 /// # 参数
-/// - `trace` — 25 列 × 2^log_size 行的 Memory trace
+/// - `trace` — 17 列 × 2^log_size 行的 Memory trace（v3.3 P1.4）
 ///
 /// # 返回
-/// 25 个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
+/// 17 个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
 #[must_use]
 pub fn memory_trace_to_evaluations(
     trace: &MemoryTrace,
@@ -1695,7 +1735,9 @@ mod tests {
 
     #[test]
     fn test_trace_builder_compute_log_size() {
-        assert_eq!(TraceBuilder::compute_log_size(1), 10); // 最小 10
+        assert_eq!(TraceBuilder::compute_log_size(1), 8); // 最小 8（256 行）
+        assert_eq!(TraceBuilder::compute_log_size(256), 8);
+        assert_eq!(TraceBuilder::compute_log_size(257), 9);
         assert_eq!(TraceBuilder::compute_log_size(1024), 10);
         assert_eq!(TraceBuilder::compute_log_size(1025), 11);
         assert_eq!(TraceBuilder::compute_log_size(1_000_000), 20);
@@ -1789,8 +1831,9 @@ mod tests {
     #[test]
     fn test_trace_to_native_placeholder() {
         // Phase 1 占位函数测试
+        // 100 步 → compute_log_size(100) = 8（256 行，最小 log_size=8）
         let trace = trace_to_native_trace_placeholder(100);
-        assert_eq!(trace.num_rows(), 1024); // log_size = 10
+        assert_eq!(trace.num_rows(), 256); // log_size = 8
         assert_eq!(trace.num_columns(), NUM_COLUMNS);
 
         // 所有行应为 padding（IsPadding=1）
@@ -1883,7 +1926,7 @@ mod tests {
 
         // 第 0 行应为 Store 访问
         assert_eq!(mem_trace.cols[MEM_COL_IS_STORE][0], M31::from(1u32));
-        assert_eq!(mem_trace.cols[MEM_COL_IS_LOAD][0], M31::from(0u32));
+        // v3.3 P1.4：已移除 IsLoad 列（由 1 - IsStore - IsPadding 推导）
         assert_eq!(mem_trace.cols[MEM_COL_IS_PADDING][0], M31::from(0u32));
         assert_eq!(mem_trace.cols[MEM_COL_IS_FIRST_ACCESS][0], M31::from(1u32));
 
@@ -1908,10 +1951,11 @@ mod tests {
         assert_eq!(val, 0xDEADBEEF);
 
         // 首次访问：ValPrev = 0, TsPrev = 0
+        // v3.3 P1.4：TsPrev 改为单 M31 标量
         for i in 0..4 {
             assert_eq!(mem_trace.cols[MEM_COL_VAL_PREV_BASE + i][0], M31::from(0u32));
-            assert_eq!(mem_trace.cols[MEM_COL_TS_PREV_BASE + i][0], M31::from(0u32));
         }
+        assert_eq!(mem_trace.cols[MEM_COL_TS_PREV][0], M31::from(0u32));
 
         // 其余行应为 padding
         for row in 1..mem_trace.num_rows() {
@@ -2005,21 +2049,13 @@ mod tests {
         assert_eq!(val_prev_1, 0x1111);
 
         // 第 1 行：TsPrev 应等于第 0 行的 TsCur = 0
-        let ts_prev_1 = m31_limbs_to_u32(&[
-            mem_trace.cols[MEM_COL_TS_PREV_BASE][1],
-            mem_trace.cols[MEM_COL_TS_PREV_BASE + 1][1],
-            mem_trace.cols[MEM_COL_TS_PREV_BASE + 2][1],
-            mem_trace.cols[MEM_COL_TS_PREV_BASE + 3][1],
-        ]);
+        // v3.3 P1.4：TsPrev 改为单 M31 标量
+        let ts_prev_1 = mem_trace.cols[MEM_COL_TS_PREV][1].0;
         assert_eq!(ts_prev_1, 0);
 
         // 第 1 行：TsCur 应等于 1
-        let ts_cur_1 = m31_limbs_to_u32(&[
-            mem_trace.cols[MEM_COL_TS_CUR_BASE][1],
-            mem_trace.cols[MEM_COL_TS_CUR_BASE + 1][1],
-            mem_trace.cols[MEM_COL_TS_CUR_BASE + 2][1],
-            mem_trace.cols[MEM_COL_TS_CUR_BASE + 3][1],
-        ]);
+        // v3.3 P1.4：TsCur 改为单 M31 标量
+        let ts_cur_1 = mem_trace.cols[MEM_COL_TS_CUR][1].0;
         assert_eq!(ts_cur_1, 1);
     }
 
