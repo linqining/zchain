@@ -1,0 +1,32 @@
+[package]
+name = "texas_poker_guest"
+version = "0.1.0"
+edition = "2021"
+description = "Texas Poker contract compiled to RV32I ELF for poker_zkvm"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "texas_poker_guest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "texas_poker_guest"
+path = "src/main.rs"
+
+[dependencies]
+zkvm_guest_sdk = { path = "../../guest_sdk" }
+borsh = { version = "1", default-features = false, features = ["derive"] }
+
+[features]
+default = []
+# std-test：用 host std 编译纯逻辑单元测试（避开 riscv32i 不支持 cargo test）
+std-test = []
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+overflow-checks = false
+debug = false
+strip = "symbols"

@@ -1,0 +1,10 @@
+[build]
+target = "riscv32i-unknown-none-elf"
+
+[target.riscv32i-unknown-none-elf]
+rustflags = [
+    "-C", "panic=abort",
+    "-C", "opt-level=3",
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=--no-merge-exidx-entries",
+]

@@ -70,6 +70,13 @@ pub mod game;
 /// 在 `SyscallContext.game_state` 中读写，模拟 ObjectDb。
 pub mod game_state;
 
+/// Mental Poker proof verify + Blake2b-256 Syscall 实现（Phase 4.1）。
+///
+/// 4 个 Phase 4 syscall (0x33-0x36)：
+/// blake2b_256 / verify_dleq_proof / verify_reconstruct_proof / verify_reveal_token_proof。
+/// Host 端调用 `poker_protocol` 的完整 proof verify 逻辑。
+pub mod proof_verify;
+
 /// Host 状态读取 trait 的 re-export（便利访问）。
 pub use host_state::{StubHostState, ZkvmHostState};
 
@@ -83,6 +90,8 @@ pub const REG_A2: u8 = 12;
 pub const REG_A3: u8 = 13;
 /// a7 寄存器索引（x17，syscall number）。
 pub const REG_A7: u8 = 17;
+/// sp 寄存器索引（x2，stack pointer）。
+pub const REG_SP: u8 = 2;
 
 /// ZKVM ABI 版本号（spec L210-215）。
 ///
@@ -158,6 +167,19 @@ pub enum SyscallId {
     ///
     /// 与 `texas_poker/utils.rs::hash_to_scalar` 一致，输出 32 字节 scalar。
     Bls12381HashToScalar = 0x15,
+    // ===== BLS12-381 扩展 syscall（Phase 3，0x16-0x1B）=====
+    /// `zkvm_bls_scalar_add(a_ptr, b_ptr, out_ptr)` — BLS12-381 标量加法 a+b mod p。
+    Bls12381ScalarAdd = 0x16,
+    /// `zkvm_bls_scalar_sub(a_ptr, b_ptr, out_ptr)` — BLS12-381 标量减法 a-b mod p。
+    Bls12381ScalarSub = 0x17,
+    /// `zkvm_bls_scalar_neg(a_ptr, out_ptr)` — BLS12-381 标量取负 -a mod p。
+    Bls12381ScalarNeg = 0x18,
+    /// `zkvm_bls_scalar_inv(a_ptr, out_ptr)` — BLS12-381 标量求逆 a^(-1) mod p（a=0 时返回 0）。
+    Bls12381ScalarInv = 0x19,
+    /// `zkvm_bls_g1_sub(a_ptr, b_ptr, out_ptr)` — BLS12-381 G1 点减 a-b。
+    Bls12381G1Sub = 0x1A,
+    /// `zkvm_bls_g1_generator(out_ptr)` — 返回 G1 生成元（48 字节 compressed）。
+    Bls12381G1Generator = 0x1B,
     // ===== GameState mock syscall（E2E Phase 1，0x20-0x21）=====
     /// `zkvm_game_state_read(slot, out_ptr, out_len)` — GameState mock 读取。
     ///
@@ -180,6 +202,28 @@ pub enum SyscallId {
     ///
     /// 复用 `poker_protocol::zk_shuffle::shuffle_proof::verify`。
     ShuffleVerify = 0x32,
+    // ===== Phase 4: Mental Poker proof verify + hash syscall（0x33-0x36）=====
+    /// `zkvm_blake2b_256(data_ptr, data_len, out_ptr)` — Blake2b-256 变长哈希。
+    ///
+    /// 输出 32 字节，与 `dispatch.rs::compute_method_selector` 算法一致。
+    Blake2b256 = 0x33,
+    /// `zkvm_verify_dleq_proof(kind, buf_ptr, buf_len) -> bool` — DLEq/ZKShuffle proof 验证。
+    ///
+    /// `kind`：0=remask, 1=leave, 2=shuffle。
+    /// buf 格式：`[proof_len:u32][proof][input_cts_len:u32][input_cts][output_cts_len:u32][output_cts][pk:48B]`。
+    /// 返回 a0=1 验证通过 / a0=0 验证失败或输入非法。
+    VerifyDleqProof = 0x34,
+    /// `zkvm_verify_reconstruct_proof(buf_ptr, buf_len) -> bool` — Reconstruct proof 验证。
+    ///
+    /// buf 格式：`[proof_len:u32][proof][cards_len:u32][cards][output_cts_len:u32][output_cts]
+    ///           [swap_cts_len:u32][swap_cts][readable_cts_len:u32][readable_cts][user_pk:48B]`。
+    /// 返回 a0=1 / a0=0。
+    VerifyReconstructProof = 0x35,
+    /// `zkvm_verify_reveal_token_proof(buf_ptr, buf_len) -> bool` — Reveal token proof 验证。
+    ///
+    /// buf 格式：`[proof_len:u32][proof][enc_card:96B][token:48B][expected_pk:48B]`。
+    /// 返回 a0=1 / a0=0。
+    VerifyRevealTokenProof = 0x36,
 }
 
 impl SyscallId {
@@ -211,6 +255,13 @@ impl SyscallId {
             0x13 => Ok(Self::Bls12381G1Mul),
             0x14 => Ok(Self::Bls12381Pairing),
             0x15 => Ok(Self::Bls12381HashToScalar),
+            // BLS12-381 扩展 syscall（Phase 3）
+            0x16 => Ok(Self::Bls12381ScalarAdd),
+            0x17 => Ok(Self::Bls12381ScalarSub),
+            0x18 => Ok(Self::Bls12381ScalarNeg),
+            0x19 => Ok(Self::Bls12381ScalarInv),
+            0x1A => Ok(Self::Bls12381G1Sub),
+            0x1B => Ok(Self::Bls12381G1Generator),
             // GameState mock syscall（E2E Phase 1）
             0x20 => Ok(Self::GameStateRead),
             0x21 => Ok(Self::GameStateWrite),
@@ -218,6 +269,11 @@ impl SyscallId {
             0x30 => Ok(Self::CardEncode),
             0x31 => Ok(Self::CardDecode),
             0x32 => Ok(Self::ShuffleVerify),
+            // Phase 4: Mental Poker proof verify + hash syscall
+            0x33 => Ok(Self::Blake2b256),
+            0x34 => Ok(Self::VerifyDleqProof),
+            0x35 => Ok(Self::VerifyReconstructProof),
+            0x36 => Ok(Self::VerifyRevealTokenProof),
             _ => Err(ZkvmError::Other(format!("unknown syscall id: 0x{id:02x}"))),
         }
     }
@@ -249,6 +305,13 @@ impl SyscallId {
             Self::Bls12381G1Mul,
             Self::Bls12381Pairing,
             Self::Bls12381HashToScalar,
+            // BLS12-381 扩展 syscall（Phase 3，0x16-0x1B）
+            Self::Bls12381ScalarAdd,
+            Self::Bls12381ScalarSub,
+            Self::Bls12381ScalarNeg,
+            Self::Bls12381ScalarInv,
+            Self::Bls12381G1Sub,
+            Self::Bls12381G1Generator,
             // GameState mock syscall（0x20-0x21）
             Self::GameStateRead,
             Self::GameStateWrite,
@@ -256,6 +319,11 @@ impl SyscallId {
             Self::CardEncode,
             Self::CardDecode,
             Self::ShuffleVerify,
+            // Phase 4: Mental Poker proof verify + hash syscall（0x33-0x36）
+            Self::Blake2b256,
+            Self::VerifyDleqProof,
+            Self::VerifyReconstructProof,
+            Self::VerifyRevealTokenProof,
         ]
     }
 
@@ -290,18 +358,30 @@ impl SyscallId {
             Self::Bls12381G1Mul => 18,
             Self::Bls12381Pairing => 19,
             Self::Bls12381HashToScalar => 20,
-            // GameState mock syscall（2 个，索引 21-22）
-            Self::GameStateRead => 21,
-            Self::GameStateWrite => 22,
-            // Game-specific syscall（3 个，索引 23-25）
-            Self::CardEncode => 23,
-            Self::CardDecode => 24,
-            Self::ShuffleVerify => 25,
+            // BLS12-381 扩展 syscall（Phase 3，6 个，索引 21-26）
+            Self::Bls12381ScalarAdd => 21,
+            Self::Bls12381ScalarSub => 22,
+            Self::Bls12381ScalarNeg => 23,
+            Self::Bls12381ScalarInv => 24,
+            Self::Bls12381G1Sub => 25,
+            Self::Bls12381G1Generator => 26,
+            // GameState mock syscall（2 个，索引 27-28）
+            Self::GameStateRead => 27,
+            Self::GameStateWrite => 28,
+            // Game-specific syscall（3 个，索引 29-31）
+            Self::CardEncode => 29,
+            Self::CardDecode => 30,
+            Self::ShuffleVerify => 31,
+            // Phase 4: Mental Poker proof verify + hash syscall（4 个，索引 32-35）
+            Self::Blake2b256 => 32,
+            Self::VerifyDleqProof => 33,
+            Self::VerifyReconstructProof => 34,
+            Self::VerifyRevealTokenProof => 35,
         }
     }
 
     /// 总 syscall 数量。
-    pub const TOTAL_COUNT: usize = 26;
+    pub const TOTAL_COUNT: usize = 36;
 }
 
 // ===========================================================================
@@ -506,11 +586,21 @@ impl std::fmt::Debug for SyscallRegistry {
                     18 => "Bls12381G1Mul",
                     19 => "Bls12381Pairing",
                     20 => "Bls12381HashToScalar",
-                    21 => "GameStateRead",
-                    22 => "GameStateWrite",
-                    23 => "CardEncode",
-                    24 => "CardDecode",
-                    25 => "ShuffleVerify",
+                    21 => "Bls12381ScalarAdd",
+                    22 => "Bls12381ScalarSub",
+                    23 => "Bls12381ScalarNeg",
+                    24 => "Bls12381ScalarInv",
+                    25 => "Bls12381G1Sub",
+                    26 => "Bls12381G1Generator",
+                    27 => "GameStateRead",
+                    28 => "GameStateWrite",
+                    29 => "CardEncode",
+                    30 => "CardDecode",
+                    31 => "ShuffleVerify",
+                    32 => "Blake2b256",
+                    33 => "VerifyDleqProof",
+                    34 => "VerifyReconstructProof",
+                    35 => "VerifyRevealTokenProof",
                     _ => "Unknown",
                 })
             })
@@ -523,10 +613,13 @@ impl std::fmt::Debug for SyscallRegistry {
 
 impl SyscallRegistry {
     /// 创建空注册表。
+    ///
+    /// 使用 `std::array::from_fn` 构造数组（Rust 的 `Default` 仅自动实现到 32 元素数组，
+    /// `TOTAL_COUNT=36` 超出此限制，故手写构造）。
     #[must_use]
     pub fn new_empty() -> Self {
         Self {
-            syscalls: Default::default(),
+            syscalls: std::array::from_fn(|_| None),
         }
     }
 
@@ -634,6 +727,13 @@ mod tests {
             (0x13, SyscallId::Bls12381G1Mul),
             (0x14, SyscallId::Bls12381Pairing),
             (0x15, SyscallId::Bls12381HashToScalar),
+            // BLS12-381 扩展 syscall（Phase 3，0x16-0x1B）
+            (0x16, SyscallId::Bls12381ScalarAdd),
+            (0x17, SyscallId::Bls12381ScalarSub),
+            (0x18, SyscallId::Bls12381ScalarNeg),
+            (0x19, SyscallId::Bls12381ScalarInv),
+            (0x1A, SyscallId::Bls12381G1Sub),
+            (0x1B, SyscallId::Bls12381G1Generator),
             // GameState mock syscall（0x20-0x21）
             (0x20, SyscallId::GameStateRead),
             (0x21, SyscallId::GameStateWrite),
@@ -641,6 +741,11 @@ mod tests {
             (0x30, SyscallId::CardEncode),
             (0x31, SyscallId::CardDecode),
             (0x32, SyscallId::ShuffleVerify),
+            // Phase 4: proof verify + hash syscall（0x33-0x36）
+            (0x33, SyscallId::Blake2b256),
+            (0x34, SyscallId::VerifyDleqProof),
+            (0x35, SyscallId::VerifyReconstructProof),
+            (0x36, SyscallId::VerifyRevealTokenProof),
         ];
         for (id, expected) in cases {
             let result = SyscallId::from_u32(id).unwrap();
@@ -652,8 +757,8 @@ mod tests {
 
     #[test]
     fn test_from_u32_invalid_ids() {
-        // 0x16-0x1F / 0x22-0x2F / 0x33+ 是无效 ID（命名空间之间的间隙）
-        let invalid_ids = [0x00u32, 0x16, 0x1F, 0x22, 0x2F, 0x33, 0xFF, 0x100, u32::MAX];
+        // 0x1C-0x1F / 0x22-0x2F / 0x37+ 是无效 ID（命名空间之间的间隙）
+        let invalid_ids = [0x00u32, 0x1C, 0x1F, 0x22, 0x2F, 0x37, 0xFF, 0x100, u32::MAX];
         for id in invalid_ids {
             let result = SyscallId::from_u32(id);
             assert!(result.is_err(), "from_u32(0x{id:02x}) 应返回错误");
@@ -691,6 +796,13 @@ mod tests {
         assert_eq!(SyscallId::Bls12381G1Mul as u32, 0x13);
         assert_eq!(SyscallId::Bls12381Pairing as u32, 0x14);
         assert_eq!(SyscallId::Bls12381HashToScalar as u32, 0x15);
+        // BLS12-381 扩展 syscall（Phase 3，0x16-0x1B）
+        assert_eq!(SyscallId::Bls12381ScalarAdd as u32, 0x16);
+        assert_eq!(SyscallId::Bls12381ScalarSub as u32, 0x17);
+        assert_eq!(SyscallId::Bls12381ScalarNeg as u32, 0x18);
+        assert_eq!(SyscallId::Bls12381ScalarInv as u32, 0x19);
+        assert_eq!(SyscallId::Bls12381G1Sub as u32, 0x1A);
+        assert_eq!(SyscallId::Bls12381G1Generator as u32, 0x1B);
         // GameState mock syscall（0x20-0x21）
         assert_eq!(SyscallId::GameStateRead as u32, 0x20);
         assert_eq!(SyscallId::GameStateWrite as u32, 0x21);
@@ -698,6 +810,11 @@ mod tests {
         assert_eq!(SyscallId::CardEncode as u32, 0x30);
         assert_eq!(SyscallId::CardDecode as u32, 0x31);
         assert_eq!(SyscallId::ShuffleVerify as u32, 0x32);
+        // Phase 4: proof verify + hash syscall（0x33-0x36）
+        assert_eq!(SyscallId::Blake2b256 as u32, 0x33);
+        assert_eq!(SyscallId::VerifyDleqProof as u32, 0x34);
+        assert_eq!(SyscallId::VerifyReconstructProof as u32, 0x35);
+        assert_eq!(SyscallId::VerifyRevealTokenProof as u32, 0x36);
     }
 
     // ===== SyscallId all() 测试 =====
@@ -705,8 +822,8 @@ mod tests {
     #[test]
     fn test_all_returns_twenty_six_syscalls() {
         let all = SyscallId::all();
-        assert_eq!(all.len(), 26, "应有 26 个 syscall");
-        // 验证 sparse_index 连续递增（0-25）
+        assert_eq!(all.len(), 36, "应有 36 个 syscall");
+        // 验证 sparse_index 连续递增（0-35）
         for (i, id) in all.iter().enumerate() {
             assert_eq!(
                 id.sparse_index(),
@@ -720,13 +837,13 @@ mod tests {
 
     #[test]
     fn test_sparse_index_round_trip() {
-        // 所有合法 ID 的 sparse_index 应在 0..26 范围内
+        // 所有合法 ID 的 sparse_index 应在 0..36 范围内
         for id in SyscallId::all() {
             let idx = id.sparse_index();
             assert!(idx < SyscallId::TOTAL_COUNT, "{id:?}.sparse_index() {idx} 超出范围");
         }
         // 验证 TOTAL_COUNT
-        assert_eq!(SyscallId::TOTAL_COUNT, 26);
+        assert_eq!(SyscallId::TOTAL_COUNT, 36);
     }
 
     // ===== derive trait 测试 =====
@@ -809,7 +926,7 @@ mod tests {
         // 非法 ID（命名空间间隙）
         let err = registry.dispatch(0x00, &mut ctx, &mut state).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(_)));
-        let err = registry.dispatch(0x16, &mut ctx, &mut state).unwrap_err();
+        let err = registry.dispatch(0x1C, &mut ctx, &mut state).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(_)));
         let err = registry.dispatch(0x22, &mut ctx, &mut state).unwrap_err();
         assert!(matches!(err, ZkvmError::Other(_)));
@@ -906,9 +1023,9 @@ mod tests {
     #[test]
     fn test_syscall_registry_default() {
         let registry = SyscallRegistry::default();
-        // default() = new() = 全部 21 个 host syscall 已注册
-        // (10 基础 + 6 BLS12-381 + 2 GameState + 3 Game-specific)
-        assert_eq!(registry.len(), 21);
+        // default() = new() = 全部 31 个 host syscall 已注册
+        // (10 基础 + 12 BLS12-381 + 2 GameState + 3 Game-specific + 4 Phase 4 proof verify)
+        assert_eq!(registry.len(), 31);
         assert!(!registry.is_empty());
     }
 }

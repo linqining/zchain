@@ -22,6 +22,7 @@
 //! - `BLS_G1_DST`：RFC 9380 domain separation tag（与 `poker_l1` 一致）
 
 use blstrs::{Bls12, G1Projective, G2Prepared, G2Projective, Scalar};
+use pairing::group::ff::Field;
 use pairing::group::{Curve, Group};
 use pairing::{MillerLoopResult as _, MultiMillerLoop as _};
 use sha3::{Digest, Sha3_256};
@@ -418,6 +419,253 @@ impl Syscall for Bls12381HashToScalarSyscall {
     }
 }
 
+// ===== 7. Bls12381ScalarAdd (0x16) =====
+
+/// `zkvm_bls_scalar_add(a_ptr, b_ptr, out_ptr)` — BLS12-381 标量加法 a+b mod p。
+///
+/// ABI：
+/// - a0 = a_ptr（32 字节标量地址）
+/// - a1 = b_ptr（32 字节标量地址）
+/// - a2 = out_ptr（32 字节输出标量地址）
+#[derive(Debug, Clone, Default)]
+pub struct Bls12381ScalarAddSyscall;
+
+impl Syscall for Bls12381ScalarAddSyscall {
+    fn id(&self) -> SyscallId {
+        SyscallId::Bls12381ScalarAdd
+    }
+
+    fn host_execute(
+        &self,
+        _ctx: &mut SyscallContext,
+        state: &mut VmState,
+    ) -> Result<(), ZkvmError> {
+        let a_ptr = state.read_register(REG_A0);
+        let b_ptr = state.read_register(REG_A1);
+        let out_ptr = state.read_register(REG_A2);
+
+        let a_bytes = read_vm_bytes(state, a_ptr, SCALAR_SIZE)?;
+        let b_bytes = read_vm_bytes(state, b_ptr, SCALAR_SIZE)?;
+        let a = parse_scalar(&a_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381ScalarAdd: 非法标量 a（不在域内）".to_string())
+        })?;
+        let b = parse_scalar(&b_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381ScalarAdd: 非法标量 b（不在域内）".to_string())
+        })?;
+        let result = a + b;
+        let bytes = serialize_scalar(&result);
+        write_vm_bytes(state, out_ptr, &bytes)?;
+        Ok(())
+    }
+
+    fn gas_cost(&self, _state: &VmState) -> u64 {
+        syscall_gas(SyscallId::Bls12381ScalarAdd, &SyscallGasArgs::default())
+    }
+}
+
+// ===== 8. Bls12381ScalarSub (0x17) =====
+
+/// `zkvm_bls_scalar_sub(a_ptr, b_ptr, out_ptr)` — BLS12-381 标量减法 a-b mod p。
+///
+/// ABI：
+/// - a0 = a_ptr（32 字节标量地址）
+/// - a1 = b_ptr（32 字节标量地址）
+/// - a2 = out_ptr（32 字节输出标量地址）
+#[derive(Debug, Clone, Default)]
+pub struct Bls12381ScalarSubSyscall;
+
+impl Syscall for Bls12381ScalarSubSyscall {
+    fn id(&self) -> SyscallId {
+        SyscallId::Bls12381ScalarSub
+    }
+
+    fn host_execute(
+        &self,
+        _ctx: &mut SyscallContext,
+        state: &mut VmState,
+    ) -> Result<(), ZkvmError> {
+        let a_ptr = state.read_register(REG_A0);
+        let b_ptr = state.read_register(REG_A1);
+        let out_ptr = state.read_register(REG_A2);
+
+        let a_bytes = read_vm_bytes(state, a_ptr, SCALAR_SIZE)?;
+        let b_bytes = read_vm_bytes(state, b_ptr, SCALAR_SIZE)?;
+        let a = parse_scalar(&a_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381ScalarSub: 非法标量 a（不在域内）".to_string())
+        })?;
+        let b = parse_scalar(&b_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381ScalarSub: 非法标量 b（不在域内）".to_string())
+        })?;
+        let result = a - b;
+        let bytes = serialize_scalar(&result);
+        write_vm_bytes(state, out_ptr, &bytes)?;
+        Ok(())
+    }
+
+    fn gas_cost(&self, _state: &VmState) -> u64 {
+        syscall_gas(SyscallId::Bls12381ScalarSub, &SyscallGasArgs::default())
+    }
+}
+
+// ===== 9. Bls12381ScalarNeg (0x18) =====
+
+/// `zkvm_bls_scalar_neg(a_ptr, out_ptr)` — BLS12-381 标量取负 -a mod p。
+///
+/// ABI：
+/// - a0 = a_ptr（32 字节标量地址）
+/// - a1 = out_ptr（32 字节输出标量地址）
+#[derive(Debug, Clone, Default)]
+pub struct Bls12381ScalarNegSyscall;
+
+impl Syscall for Bls12381ScalarNegSyscall {
+    fn id(&self) -> SyscallId {
+        SyscallId::Bls12381ScalarNeg
+    }
+
+    fn host_execute(
+        &self,
+        _ctx: &mut SyscallContext,
+        state: &mut VmState,
+    ) -> Result<(), ZkvmError> {
+        let a_ptr = state.read_register(REG_A0);
+        let out_ptr = state.read_register(REG_A1);
+
+        let a_bytes = read_vm_bytes(state, a_ptr, SCALAR_SIZE)?;
+        let a = parse_scalar(&a_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381ScalarNeg: 非法标量（不在域内）".to_string())
+        })?;
+        let result = -a;
+        let bytes = serialize_scalar(&result);
+        write_vm_bytes(state, out_ptr, &bytes)?;
+        Ok(())
+    }
+
+    fn gas_cost(&self, _state: &VmState) -> u64 {
+        syscall_gas(SyscallId::Bls12381ScalarNeg, &SyscallGasArgs::default())
+    }
+}
+
+// ===== 10. Bls12381ScalarInv (0x19) =====
+
+/// `zkvm_bls_scalar_inv(a_ptr, out_ptr)` — BLS12-381 标量求逆 a^(-1) mod p。
+///
+/// a=0 时返回 0（与 utils.rs::scalar_inv 行为一致）。
+///
+/// ABI：
+/// - a0 = a_ptr（32 字节标量地址）
+/// - a1 = out_ptr（32 字节输出标量地址）
+#[derive(Debug, Clone, Default)]
+pub struct Bls12381ScalarInvSyscall;
+
+impl Syscall for Bls12381ScalarInvSyscall {
+    fn id(&self) -> SyscallId {
+        SyscallId::Bls12381ScalarInv
+    }
+
+    fn host_execute(
+        &self,
+        _ctx: &mut SyscallContext,
+        state: &mut VmState,
+    ) -> Result<(), ZkvmError> {
+        let a_ptr = state.read_register(REG_A0);
+        let out_ptr = state.read_register(REG_A1);
+
+        let a_bytes = read_vm_bytes(state, a_ptr, SCALAR_SIZE)?;
+        let a = parse_scalar(&a_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381ScalarInv: 非法标量（不在域内）".to_string())
+        })?;
+        // 与 utils.rs::scalar_inv 一致：a=0 时返回 0
+        let ct = a.invert();
+        let result = if bool::from(ct.is_some()) {
+            ct.unwrap()
+        } else {
+            Scalar::ZERO
+        };
+        let bytes = serialize_scalar(&result);
+        write_vm_bytes(state, out_ptr, &bytes)?;
+        Ok(())
+    }
+
+    fn gas_cost(&self, _state: &VmState) -> u64 {
+        syscall_gas(SyscallId::Bls12381ScalarInv, &SyscallGasArgs::default())
+    }
+}
+
+// ===== 11. Bls12381G1Sub (0x1A) =====
+
+/// `zkvm_bls_g1_sub(a_ptr, b_ptr, out_ptr)` — BLS12-381 G1 点减 a-b。
+///
+/// ABI：
+/// - a0 = a_ptr（48 字节 G1 compressed 地址）
+/// - a1 = b_ptr（48 字节 G1 compressed 地址）
+/// - a2 = out_ptr（48 字节输出 G1 compressed 地址）
+#[derive(Debug, Clone, Default)]
+pub struct Bls12381G1SubSyscall;
+
+impl Syscall for Bls12381G1SubSyscall {
+    fn id(&self) -> SyscallId {
+        SyscallId::Bls12381G1Sub
+    }
+
+    fn host_execute(
+        &self,
+        _ctx: &mut SyscallContext,
+        state: &mut VmState,
+    ) -> Result<(), ZkvmError> {
+        let a_ptr = state.read_register(REG_A0);
+        let b_ptr = state.read_register(REG_A1);
+        let out_ptr = state.read_register(REG_A2);
+
+        let a_bytes = read_vm_bytes(state, a_ptr, G1_COMPRESSED_SIZE)?;
+        let b_bytes = read_vm_bytes(state, b_ptr, G1_COMPRESSED_SIZE)?;
+        let a = parse_g1(&a_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381G1Sub: 非法 G1 点 a（不在子群内）".to_string())
+        })?;
+        let b = parse_g1(&b_bytes).ok_or_else(|| {
+            ZkvmError::Other("Bls12381G1Sub: 非法 G1 点 b（不在子群内）".to_string())
+        })?;
+        let result = a - b;
+        let bytes = serialize_g1(&result);
+        write_vm_bytes(state, out_ptr, &bytes)?;
+        Ok(())
+    }
+
+    fn gas_cost(&self, _state: &VmState) -> u64 {
+        syscall_gas(SyscallId::Bls12381G1Sub, &SyscallGasArgs::default())
+    }
+}
+
+// ===== 12. Bls12381G1Generator (0x1B) =====
+
+/// `zkvm_bls_g1_generator(out_ptr)` — 返回 G1 生成元（48 字节 compressed）。
+///
+/// ABI：
+/// - a0 = out_ptr（48 字节输出 G1 compressed 地址）
+#[derive(Debug, Clone, Default)]
+pub struct Bls12381G1GeneratorSyscall;
+
+impl Syscall for Bls12381G1GeneratorSyscall {
+    fn id(&self) -> SyscallId {
+        SyscallId::Bls12381G1Generator
+    }
+
+    fn host_execute(
+        &self,
+        _ctx: &mut SyscallContext,
+        state: &mut VmState,
+    ) -> Result<(), ZkvmError> {
+        let out_ptr = state.read_register(REG_A0);
+        let generator = G1Projective::generator();
+        let bytes = serialize_g1(&generator);
+        write_vm_bytes(state, out_ptr, &bytes)?;
+        Ok(())
+    }
+
+    fn gas_cost(&self, _state: &VmState) -> u64 {
+        syscall_gas(SyscallId::Bls12381G1Generator, &SyscallGasArgs::default())
+    }
+}
+
 // ===== 单元测试 =====
 
 #[cfg(test)]
@@ -556,6 +804,16 @@ mod tests {
         assert_eq!(
             Bls12381HashToScalarSyscall.id(),
             SyscallId::Bls12381HashToScalar
+        );
+        // Phase 3.2 新增 6 个 syscall
+        assert_eq!(Bls12381ScalarAddSyscall.id(), SyscallId::Bls12381ScalarAdd);
+        assert_eq!(Bls12381ScalarSubSyscall.id(), SyscallId::Bls12381ScalarSub);
+        assert_eq!(Bls12381ScalarNegSyscall.id(), SyscallId::Bls12381ScalarNeg);
+        assert_eq!(Bls12381ScalarInvSyscall.id(), SyscallId::Bls12381ScalarInv);
+        assert_eq!(Bls12381G1SubSyscall.id(), SyscallId::Bls12381G1Sub);
+        assert_eq!(
+            Bls12381G1GeneratorSyscall.id(),
+            SyscallId::Bls12381G1Generator
         );
     }
 
@@ -811,5 +1069,190 @@ mod tests {
         assert!(Bls12381G1MulSyscall.gas_cost(&state) > 0);
         assert!(Bls12381PairingSyscall.gas_cost(&state) > 0);
         assert!(Bls12381HashToScalarSyscall.gas_cost(&state) > 0);
+        // Phase 3.2 新增 6 个 syscall gas
+        assert!(Bls12381ScalarAddSyscall.gas_cost(&state) > 0);
+        assert!(Bls12381ScalarSubSyscall.gas_cost(&state) > 0);
+        assert!(Bls12381ScalarNegSyscall.gas_cost(&state) > 0);
+        assert!(Bls12381ScalarInvSyscall.gas_cost(&state) > 0);
+        assert!(Bls12381G1SubSyscall.gas_cost(&state) > 0);
+        assert!(Bls12381G1GeneratorSyscall.gas_cost(&state) > 0);
+    }
+
+    // ===== Phase 3.2 新增 syscall 端到端测试 =====
+
+    #[test]
+    fn test_scalar_add_syscall_e2e() {
+        let mut state = VmState::new();
+        let syscall = Bls12381ScalarAddSyscall;
+        let mut ctx = SyscallContext::new(vec![]);
+
+        let a = Scalar::from(7u64);
+        let b = Scalar::from(11u64);
+        let expected = a + b;
+
+        let a_addr = 0x1000;
+        let b_addr = 0x1100;
+        let out_addr = 0x2000;
+        write_bytes(&mut state, a_addr, &serialize_scalar(&a));
+        write_bytes(&mut state, b_addr, &serialize_scalar(&b));
+        state.write_register(REG_A0, a_addr);
+        state.write_register(REG_A1, b_addr);
+        state.write_register(REG_A2, out_addr);
+
+        syscall.host_execute(&mut ctx, &mut state).unwrap();
+
+        let out = read_bytes(&state, out_addr, 32);
+        let result = parse_scalar(&out).expect("输出应为合法标量");
+        assert_eq!(result, expected, "7 + 11 应等于 18");
+    }
+
+    #[test]
+    fn test_scalar_sub_syscall_e2e() {
+        let mut state = VmState::new();
+        let syscall = Bls12381ScalarSubSyscall;
+        let mut ctx = SyscallContext::new(vec![]);
+
+        let a = Scalar::from(18u64);
+        let b = Scalar::from(11u64);
+        let expected = a - b;
+
+        let a_addr = 0x1000;
+        let b_addr = 0x1100;
+        let out_addr = 0x2000;
+        write_bytes(&mut state, a_addr, &serialize_scalar(&a));
+        write_bytes(&mut state, b_addr, &serialize_scalar(&b));
+        state.write_register(REG_A0, a_addr);
+        state.write_register(REG_A1, b_addr);
+        state.write_register(REG_A2, out_addr);
+
+        syscall.host_execute(&mut ctx, &mut state).unwrap();
+
+        let out = read_bytes(&state, out_addr, 32);
+        let result = parse_scalar(&out).expect("输出应为合法标量");
+        assert_eq!(result, expected, "18 - 11 应等于 7");
+    }
+
+    #[test]
+    fn test_scalar_neg_syscall_e2e() {
+        let mut state = VmState::new();
+        let syscall = Bls12381ScalarNegSyscall;
+        let mut ctx = SyscallContext::new(vec![]);
+
+        let a = Scalar::from(5u64);
+        let neg_a = -a;
+        // neg(a) + a 应等于 0
+        let zero = neg_a + a;
+
+        let a_addr = 0x1000;
+        let out_addr = 0x2000;
+        write_bytes(&mut state, a_addr, &serialize_scalar(&a));
+        state.write_register(REG_A0, a_addr);
+        state.write_register(REG_A1, out_addr);
+
+        syscall.host_execute(&mut ctx, &mut state).unwrap();
+
+        let out = read_bytes(&state, out_addr, 32);
+        let result = parse_scalar(&out).expect("输出应为合法标量");
+        assert_eq!(result, neg_a, "-5 应等于 neg(5)");
+        assert_eq!(result + a, zero, "neg(5) + 5 应等于 0");
+    }
+
+    #[test]
+    fn test_scalar_inv_syscall_e2e() {
+        let mut state = VmState::new();
+        let syscall = Bls12381ScalarInvSyscall;
+        let mut ctx = SyscallContext::new(vec![]);
+
+        let a = Scalar::from(7u64);
+        let inv_a = a.invert();
+        let ct = inv_a;
+        let inv_a = if bool::from(ct.is_some()) {
+            ct.unwrap()
+        } else {
+            Scalar::ZERO
+        };
+        // inv(a) * a 应等于 1
+        let one = inv_a * a;
+
+        let a_addr = 0x1000;
+        let out_addr = 0x2000;
+        write_bytes(&mut state, a_addr, &serialize_scalar(&a));
+        state.write_register(REG_A0, a_addr);
+        state.write_register(REG_A1, out_addr);
+
+        syscall.host_execute(&mut ctx, &mut state).unwrap();
+
+        let out = read_bytes(&state, out_addr, 32);
+        let result = parse_scalar(&out).expect("输出应为合法标量");
+        assert_eq!(result, inv_a, "inv(7) 应与直接求逆一致");
+        assert_eq!(result * a, one, "inv(7) * 7 应等于 1");
+    }
+
+    #[test]
+    fn test_scalar_inv_zero_syscall_e2e() {
+        let mut state = VmState::new();
+        let syscall = Bls12381ScalarInvSyscall;
+        let mut ctx = SyscallContext::new(vec![]);
+
+        // inv(0) 应返回 0（与 utils.rs::scalar_inv 一致）
+        let zero = Scalar::ZERO;
+
+        let a_addr = 0x1000;
+        let out_addr = 0x2000;
+        write_bytes(&mut state, a_addr, &serialize_scalar(&zero));
+        state.write_register(REG_A0, a_addr);
+        state.write_register(REG_A1, out_addr);
+
+        syscall.host_execute(&mut ctx, &mut state).unwrap();
+
+        let out = read_bytes(&state, out_addr, 32);
+        let result = parse_scalar(&out).expect("输出应为合法标量");
+        assert_eq!(result, Scalar::ZERO, "inv(0) 应返回 0");
+    }
+
+    #[test]
+    fn test_g1_sub_syscall_e2e() {
+        let mut state = VmState::new();
+        let syscall = Bls12381G1SubSyscall;
+        let mut ctx = SyscallContext::new(vec![]);
+
+        let g = G1Projective::generator();
+        let g_double = g + g;
+        // 2G - G 应等于 G
+        let expected = g_double - g;
+
+        let a_addr = 0x1000;
+        let b_addr = 0x1100;
+        let out_addr = 0x2000;
+        write_bytes(&mut state, a_addr, &serialize_g1(&g_double));
+        write_bytes(&mut state, b_addr, &serialize_g1(&g));
+        state.write_register(REG_A0, a_addr);
+        state.write_register(REG_A1, b_addr);
+        state.write_register(REG_A2, out_addr);
+
+        syscall.host_execute(&mut ctx, &mut state).unwrap();
+
+        let out = read_bytes(&state, out_addr, 48);
+        let result = parse_g1(&out).expect("输出应为合法 G1 点");
+        assert_eq!(result, expected, "2G - G 应等于 G");
+    }
+
+    #[test]
+    fn test_g1_generator_syscall_e2e() {
+        let mut state = VmState::new();
+        let syscall = Bls12381G1GeneratorSyscall;
+        let mut ctx = SyscallContext::new(vec![]);
+
+        let out_addr = 0x2000;
+        state.write_register(REG_A0, out_addr);
+
+        syscall.host_execute(&mut ctx, &mut state).unwrap();
+
+        let out = read_bytes(&state, out_addr, 48);
+        let result = parse_g1(&out).expect("输出应为合法 G1 点");
+
+        // 与直接调用 generator 一致
+        let expected = G1Projective::generator();
+        assert_eq!(result, expected, "syscall 生成元应与直接调用一致");
     }
 }

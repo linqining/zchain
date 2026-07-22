@@ -484,6 +484,15 @@ fn sign_extend_12(imm12: u32) -> u32 {
     }
 }
 
+/// 13-bit 立即数符号扩展到 u32（B-type：bit[12] 是符号位，bit[0]=0）。
+fn sign_extend_13(imm13: u32) -> u32 {
+    if imm13 & 0x1000 != 0 {
+        imm13 | 0xFFFFE000
+    } else {
+        imm13
+    }
+}
+
 /// 解码 I-type 立即数（bits[31:20]，12-bit 符号扩展）。
 fn decode_i_imm(word: u32) -> u32 {
     sign_extend_12((word >> 20) & 0xFFF)
@@ -495,13 +504,18 @@ fn decode_s_imm(word: u32) -> u32 {
     sign_extend_12(imm)
 }
 
-/// 解码 B-type 立即数（13-bit，bit[0]=0，12-bit 符号扩展）。
+/// 解码 B-type 立即数（13-bit，bit[0]=0，bit[12] 是符号位）。
+///
+/// B-type 立即数为 13 位有符号值（imm[12:0]，imm[0]=0）。
+/// 符号位是 imm[12]（bit 12），**不是** imm[11]（bit 11）。
+/// 使用 `sign_extend_13` 而非 `sign_extend_12`，否则正偏移 ≥ 2048
+/// （bit 11 set）会被错误地当作负数。
 fn decode_b_imm(word: u32) -> u32 {
     let imm = (((word >> 31) & 0x1) << 12)
         | (((word >> 7) & 0x1) << 11)
         | (((word >> 25) & 0x3F) << 5)
         | (((word >> 8) & 0xF) << 1);
-    sign_extend_12(imm)
+    sign_extend_13(imm)
 }
 
 /// 解码 U-type 立即数（bits[31:12]，已左移 12 位）。
@@ -1498,6 +1512,96 @@ mod tests {
             let insn = decode(word).unwrap();
             assert_eq!(insn, expected, "funct3={funct3}");
         }
+    }
+
+    #[test]
+    fn test_decode_b_imm_large_positive() {
+        // B-type 立即数为 13-bit 有符号值（imm[12:0]，imm[0]=0）。
+        // 符号位是 imm[12]（bit 12），**不是** imm[11]（bit 11）。
+        // 当正偏移 ≥ 2048（bit 11 set，bit 12 clear）时，sign_extend_12
+        // 会错误地将其当作负数。sign_extend_13 检查 bit 12 才正确。
+        //
+        // B-type 范围：-4096..=+4094（偶数）
+        //   正：imm[12]=0, 范围 0..=0xFFE（0..=4094）
+        //   负：imm[12]=1, 范围 0x1000..=0x1FFE（-4096..=-2）
+
+        // 0x8C8: bit12=0, bit11=1 → 正偏移 +2248（实际崩溃用例）
+        let word = encode_b(0x63, 0, 10, 0, 0x8C8);
+        let insn = decode(word).unwrap();
+        assert_eq!(
+            insn,
+            Instruction::Beq {
+                rs1: 10,
+                rs2: 0,
+                imm: 0x8C8,
+            },
+            "large positive B-type offset (bit11 set, bit12 clear) must be positive"
+        );
+
+        // 0x0FFE: 最大正偏移 +4094（bit12=0, all lower bits set）
+        let word2 = encode_b(0x63, 0, 10, 0, 0x0FFE);
+        let insn2 = decode(word2).unwrap();
+        assert_eq!(
+            insn2,
+            Instruction::Beq {
+                rs1: 10,
+                rs2: 0,
+                imm: 0x0FFE,
+            },
+            "max positive offset +0xFFE must be positive"
+        );
+
+        // 0x1000: 最小负偏移 -4096（bit12=1, rest=0）
+        let word3 = encode_b(0x63, 0, 10, 0, 0x1000);
+        let insn3 = decode(word3).unwrap();
+        assert_eq!(
+            insn3,
+            Instruction::Beq {
+                rs1: 10,
+                rs2: 0,
+                imm: (-4096i32 as u32),
+            },
+            "offset 0x1000 (bit12 set) must be -4096"
+        );
+
+        // 0x1FFE: 最大负偏移 -2（bit12=1, all lower bits set）
+        let word4 = encode_b(0x63, 0, 10, 0, 0x1FFE);
+        let insn4 = decode(word4).unwrap();
+        assert_eq!(
+            insn4,
+            Instruction::Beq {
+                rs1: 10,
+                rs2: 0,
+                imm: (-2i32 as u32),
+            },
+            "offset 0x1FFE must be -2"
+        );
+
+        // -2048: 常见负偏移
+        let word5 = encode_b(0x63, 0, 10, 0, (-2048i32 as u32) & 0x1FFF);
+        let insn5 = decode(word5).unwrap();
+        assert_eq!(
+            insn5,
+            Instruction::Beq {
+                rs1: 10,
+                rs2: 0,
+                imm: (-2048i32 as u32),
+            },
+            "offset -2048 must be negative"
+        );
+
+        // -4: 小负偏移
+        let word6 = encode_b(0x63, 0, 10, 0, (-4i32 as u32) & 0x1FFF);
+        let insn6 = decode(word6).unwrap();
+        assert_eq!(
+            insn6,
+            Instruction::Beq {
+                rs1: 10,
+                rs2: 0,
+                imm: (-4i32 as u32),
+            },
+            "offset -4 must be negative"
+        );
     }
 
     #[test]

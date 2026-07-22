@@ -530,15 +530,17 @@ impl Syscall for ReadStateSyscall {
     }
 }
 
-// ===== 注册全部 21 个 host syscall 的辅助函数 =====
+// ===== 注册全部 host syscall 的辅助函数 =====
 
-/// 创建注册全部 21 个 host syscall 的 [`SyscallRegistry`](crate::syscalls::SyscallRegistry)。
+/// 创建注册全部 host syscall 的 [`SyscallRegistry`](crate::syscalls::SyscallRegistry)。
 ///
 /// 包含：
 /// - 基础 syscall（0x01-0x0A，10 个）
 /// - BLS12-381 syscall（0x10-0x15，6 个，E2E Phase 1）
+/// - BLS12-381 扩展 syscall（0x16-0x1B，6 个，Phase 3）
 /// - GameState mock syscall（0x20-0x21，2 个，E2E Phase 1）
 /// - Game-specific syscall（0x30-0x32，3 个，E2E Phase 1）
+/// - Mental Poker proof verify + hash syscall（0x33-0x36，4 个，Phase 4）
 ///
 /// 注：0x0B-0x0F（keccak256/modexp/merkle_verify/ed25519/bn254_pairing）暂无 host 实现，
 /// 注册表对应 slot 为 None，dispatch 时返回 `Unregistered` 错误。
@@ -581,6 +583,35 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
             crate::syscalls::bls12381::Bls12381HashToScalarSyscall,
         ))
         .unwrap();
+    // Phase 3 — BLS12-381 扩展 syscall（0x16-0x1B，6 个）
+    registry
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381ScalarAddSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381ScalarSubSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381ScalarNegSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381ScalarInvSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::bls12381::Bls12381G1SubSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381G1GeneratorSyscall,
+        ))
+        .unwrap();
     // E2E Phase 1 — GameState mock syscall（0x20-0x21，2 个）
     registry
         .register(Box::new(
@@ -601,6 +632,27 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
         .unwrap();
     registry
         .register(Box::new(crate::syscalls::game::ShuffleVerifySyscall))
+        .unwrap();
+    // Phase 4 — Mental Poker proof verify + hash syscall（0x33-0x36，4 个）
+    registry
+        .register(Box::new(
+            crate::syscalls::proof_verify::Blake2b256Syscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::proof_verify::VerifyDleqProofSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::proof_verify::VerifyReconstructProofSyscall,
+        ))
+        .unwrap();
+    registry
+        .register(Box::new(
+            crate::syscalls::proof_verify::VerifyRevealTokenProofSyscall,
+        ))
         .unwrap();
     registry
 }
@@ -1320,8 +1372,8 @@ mod tests {
     #[test]
     fn test_full_registry_all_registered() {
         let registry = full_registry();
-        // 21 个 = 10 基础 + 6 BLS12-381 + 2 GameState + 3 Game-specific
-        assert_eq!(registry.len(), 21, "应注册 21 个 syscall");
+        // 31 个 = 10 基础 + 12 BLS12-381 + 2 GameState + 3 Game-specific + 4 Phase 4 proof verify
+        assert_eq!(registry.len(), 31, "应注册 31 个 syscall");
         assert!(!registry.is_empty());
     }
 }

@@ -293,6 +293,17 @@ fn check_text_size(text: &LoadedSegment) -> Result<(), ZkvmError> {
     Ok(())
 }
 
+/// `unimp` 指令编码（LLVM trap 标记）。
+///
+/// LLVM RISC-V 后端为 unreachable 代码路径和分支后填充生成 `0xC0001073`，
+/// 反汇编为 `unimp`（解码为 `csrrw x0, cycle, x0` — CSR 指令）。
+///
+/// 此指令**从不会在正常控制流中执行**（仅出现在无条件跳转之后或 `unreachable!()` 路径）。
+/// 若执行到此处，executor 的 `decode` 会返回 `UnsupportedInstruction`（正确行为 — 标记 bug）。
+///
+/// 允许此编码通过 validator 校验，拒绝其他所有 CSR 指令（funct3 ∈ {1,2,3}）。
+const UNIMP_INSTRUCTION: u32 = 0xC000_1073;
+
 /// RV32I opcode 白名单（bits[6:0]）。
 const RV32I_OPCODES: &[u32] = &[
     0x37, // LUI
@@ -347,7 +358,8 @@ fn check_rv32i(text: &[u8]) -> Result<(), ZkvmError> {
         }
 
         // SYSTEM 细查：funct3==0 允许（ECALL/EBREAK），funct3 ∈ {1,2,3} 拒绝（CSR）
-        if opcode == 0x73 && (1..=3).contains(&funct3) {
+        // 例外：`unimp`（0xC0001073）= LLVM unreachable trap 标记，允许通过
+        if opcode == 0x73 && (1..=3).contains(&funct3) && word != UNIMP_INSTRUCTION {
             return Err(ZkvmError::UnsupportedInstruction(format!(
                 "CSR instruction not allowed (Zicsr extension): funct3={funct3} (word=0x{word:08x})"
             )));
@@ -777,6 +789,28 @@ mod tests {
     fn test_reject_csr() {
         let mut bytes = build_minimal_elf();
         inject_word(&mut bytes, 0xc00010f3); // CSRRW — opcode 0x73, funct3=1
+        let err = validate_elf(&bytes).unwrap_err();
+        match err {
+            ZkvmError::UnsupportedInstruction(msg) => assert!(msg.contains("CSR")),
+            other => panic!("expected UnsupportedInstruction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_allow_unimp_trap_marker() {
+        // 0xC0001073 = LLVM `unimp`（unreachable trap 标记），允许通过 validator。
+        // LLVM RISC-V 后端为 unreachable!() 和分支后填充生成此编码。
+        let mut bytes = build_minimal_elf();
+        inject_word(&mut bytes, 0xc0001073); // unimp — 应通过校验
+        let meta = validate_elf(&bytes).expect("unimp 应通过 RV32I 校验");
+        assert!(meta.text.is_some());
+    }
+
+    #[test]
+    fn test_reject_other_csr_not_unimp() {
+        // 确认非 unimp 的 CSR 指令仍被拒绝
+        let mut bytes = build_minimal_elf();
+        inject_word(&mut bytes, 0xc0002073); // CSRRS — funct3=2, 非 unimp
         let err = validate_elf(&bytes).unwrap_err();
         match err {
             ZkvmError::UnsupportedInstruction(msg) => assert!(msg.contains("CSR")),

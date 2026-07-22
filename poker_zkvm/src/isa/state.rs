@@ -34,6 +34,17 @@ pub const STACK_TOP: u32 = 0x8000_0000;
 /// 堆起始地址（spec L264，向上生长）。
 pub const HEAP_START: u32 = 0x1000_0000;
 
+/// 堆大小（必须与 `guest_sdk::allocator::HEAP_SIZE` 保持一致）。
+///
+/// guest 的 bump allocator 返回**未初始化**内存（仅前进 HEAP_NEXT 指针，不清零）。
+/// `Vec::with_capacity(n)` 分配 n 字节未初始化内存；写入 `len < n` 字节后，
+/// Vec 增长时 `ptr::copy_nonoverlapping` 被编译为 LW（字级 4 字节加载），
+/// 可能读取超出 `len` 的未初始化字节，触发 VM 的严格初始化检查 `UninitializedRead`。
+///
+/// 与栈预清零同理，host 在加载 ELF 后预清零整个堆区域，
+/// 使这些读返回确定值 0，而非终止执行。
+pub const HEAP_SIZE: u32 = 8 * 1024 * 1024; // 8MB
+
 // ===========================================================================
 // Page
 // ===========================================================================
@@ -127,6 +138,38 @@ impl MemoryMap {
     /// 获取页的只读引用（若不存在返回 None）。
     fn get_page(&self, addr: u32) -> Option<&Page> {
         self.pages.get(&Self::page_base(addr)).map(|v| &**v)
+    }
+
+    /// 零初始化一段内存范围 `[start, start + len)`。
+    ///
+    /// 对范围内每个页：分配页（若不存在）→ 全部字节置 0 → 标记为已初始化。
+    /// 用于在执行开始前预清零栈区域，使编译器生成的代码读取栈填充/padding 字节时
+    /// 返回确定值 0 而非触发 `UninitializedRead`。
+    ///
+    /// # Errors
+    /// - `OutOfMemory` — 超 16MB 上限
+    /// - `Other` — start + len 溢出
+    pub(crate) fn zero_init_range(&mut self, start: u32, len: u32) -> Result<(), ZkvmError> {
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| ZkvmError::Other("zero_init_range: start + len overflow".to_string()))?;
+        let mut addr = start;
+        while addr < end {
+            let base = Self::page_base(addr);
+            let page = self.ensure_page(addr)?;
+            // 整页置零 + 标记为已初始化
+            for byte in page.data.iter_mut() {
+                *byte = 0;
+            }
+            for mask_byte in page.init_mask.iter_mut() {
+                *mask_byte = 0xFF; // 所有 8 位都标记为已初始化
+            }
+            // 跳到下一页
+            addr = base.checked_add(PAGE_SIZE as u32).ok_or_else(|| {
+                ZkvmError::Other("zero_init_range: page addr overflow".to_string())
+            })?;
+        }
+        Ok(())
     }
 
     /// 读取单字节（检查初始化状态）。
@@ -254,6 +297,19 @@ impl VmState {
     /// - `OutOfMemory` — 超 16MB 上限
     pub fn write_memory_byte(&mut self, addr: u32, val: u8) -> Result<(), ZkvmError> {
         self.memory.write_byte(addr, val)
+    }
+
+    /// 零初始化一段内存范围 `[start, start + len)`（页对齐批量写入）。
+    ///
+    /// 对范围内每个页：分配页（若不存在）→ 全部字节置 0 → 标记为已初始化。
+    /// 用于在执行开始前预清零栈区域，使编译器生成的代码读取栈填充/padding 字节时
+    /// 返回确定值 0 而非触发 `UninitializedRead`。
+    ///
+    /// # Errors
+    /// - `OutOfMemory` — 超 16MB 上限
+    /// - `Other` — start + len 溢出
+    pub fn zero_init_range(&mut self, start: u32, len: u32) -> Result<(), ZkvmError> {
+        self.memory.zero_init_range(start, len)
     }
 
     /// 读取半字（2 字节，需 2 字节对齐）。

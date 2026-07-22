@@ -1778,11 +1778,15 @@ dependencies = [
  "bincode",
  "blake2",
  "blstrs",
+ "borsh",
  "criterion",
  "ed25519-dalek",
+ "ff",
  "goblin",
+ "group",
  "hex",
  "pairing",
+ "poker_protocol",
  "poker_zkvm",
  "proptest",
  "rayon",
@@ -1797,6 +1801,8 @@ dependencies = [
  "stwo-air-utils",
  "stwo-air-utils-derive",
  "stwo-constraint-framework",
+ "subtle",
+ "texas_poker_guest",
  "thiserror 1.0.69",
  "tracing",
  "vm-common",
@@ -2613,6 +2619,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "texas_poker_guest"
+version = "0.1.0"
+dependencies = [
+ "borsh",
+ "zkvm_guest_sdk",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3171,6 +3185,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "zkvm_guest_sdk"
+version = "0.1.0"
+dependencies = [
+ "borsh",
 ]
 
 [[package]]

@@ -1099,6 +1099,58 @@ pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
     // Step 3: 计算 log_size 并填充 trace
     let num_entries = entries.len();
     let log_size = TraceBuilder::compute_log_size(num_entries.max(1));
+    trace_to_memory_trace_inner(&entries, log_size)
+}
+
+/// 将 emulator trace 转换为 Memory trace，使用指定的 `target_log_size`。
+///
+/// 与 [`trace_to_memory_trace`] 的区别：当 CPU trace 与 Memory trace 合并为单一 AIR
+/// 时（`prove_cpu_memory_trace`），两者 `log_size` 必须一致。对于步数远多于内存访问
+/// 数的 trace（如 guest ELF：算术密集、内存访问稀疏），`trace_to_memory_trace` 基于
+/// 内存访问数计算的 `log_size` 会小于 CPU trace 的 `log_size`，导致
+/// `prove_cpu_memory_trace` 的 `assert_eq!(log_size, mem_trace.log_size)` 失败。
+///
+/// 本函数强制 Memory trace padding 到 `target_log_size`（须 ≥ 基于内存访问数计算的
+/// 最小 log_size），使两者对齐。多余行填充为 IsPadding=1。
+///
+/// # 参数
+/// - `trace` — emulator trace
+/// - `target_log_size` — 目标 log2(行数)，应等于 CPU trace 的 `log_size`
+///
+/// # Panics
+/// 若 `target_log_size < compute_log_size(num_entries)`（内存访问放不下）则 panic。
+#[must_use]
+pub fn trace_to_memory_trace_with_log_size(
+    trace: &crate::trace::Trace,
+    target_log_size: u32,
+) -> MemoryTrace {
+    // Step 1: 收集所有 MemAccess（与 trace_to_memory_trace 一致）
+    let mut entries: Vec<MemEntry> = Vec::new();
+    for step in trace.iter() {
+        for ma in &step.mem_access {
+            entries.push(MemEntry {
+                addr: ma.addr,
+                value: ma.value,
+                is_store: if ma.op == MemOp::Write { 1 } else { 0 },
+                ts: u32::try_from(step.step_index).unwrap_or(u32::MAX),
+            });
+        }
+    }
+    // Step 2: 按 (addr, ts) 排序
+    entries.sort_by(|a, b| (a.addr, a.ts).cmp(&(b.addr, b.ts)));
+
+    trace_to_memory_trace_inner(&entries, target_log_size)
+}
+
+/// 内部：从已排序的 MemEntry 列表构建 MemoryTrace，padding 到 2^log_size 行。
+fn trace_to_memory_trace_inner(entries: &[MemEntry], log_size: u32) -> MemoryTrace {
+    let num_entries = entries.len();
+    let min_log_size = TraceBuilder::compute_log_size(num_entries.max(1));
+    assert!(
+        log_size >= min_log_size,
+        "trace_to_memory_trace_with_log_size: target_log_size={log_size} < min_log_size={min_log_size} \
+         (num_entries={num_entries} 放不下)"
+    );
     let mut mem_trace = MemoryTrace::new(log_size);
 
     let mut prev_addr: Option<u32> = None;

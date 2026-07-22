@@ -149,6 +149,16 @@ pub fn syscall_gas(id: SyscallId, args: &SyscallGasArgs) -> u64 {
         SyscallId::Bls12381HashToScalar => {
             GAS_ZKVM_BLS_HASH_TO_SCALAR + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
         }
+        // ===== BLS12-381 扩展 syscall gas（Phase 3.2 — D2 决策）=====
+        // 标量算术：381-bit field add/sub/neg 轻于乘法；inv 接近乘法（Fermat 小定理指数）。
+        SyscallId::Bls12381ScalarAdd => GAS_ZKVM_BLS_SCALAR_ADD,
+        SyscallId::Bls12381ScalarSub => GAS_ZKVM_BLS_SCALAR_SUB,
+        SyscallId::Bls12381ScalarNeg => GAS_ZKVM_BLS_SCALAR_NEG,
+        SyscallId::Bls12381ScalarInv => GAS_ZKVM_BLS_SCALAR_INV,
+        // G1 点减：同点加量级（一次 Jacobian→Affine 加法）。
+        SyscallId::Bls12381G1Sub => GAS_ZKVM_BLS_G1_SUB,
+        // G1 生成元：返回常量，极轻。
+        SyscallId::Bls12381G1Generator => GAS_ZKVM_BLS_G1_GENERATOR,
         // ===== GameState mock syscall gas（E2E Phase 1）=====
         SyscallId::GameStateRead => GAS_ZKVM_GAME_STATE_READ,
         SyscallId::GameStateWrite => {
@@ -159,6 +169,20 @@ pub fn syscall_gas(id: SyscallId, args: &SyscallGasArgs) -> u64 {
         SyscallId::CardDecode => GAS_ZKVM_CARD_DECODE,
         SyscallId::ShuffleVerify => {
             GAS_ZKVM_SHUFFLE_VERIFY + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
+        }
+        // ===== Phase 4: Mental Poker proof verify + hash syscall gas（0x33-0x36）=====
+        SyscallId::Blake2b256 => {
+            GAS_ZKVM_BLAKE2B_256_BASE + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
+        }
+        // DLEq/ZKShuffle proof 验证：基于 input_cts 长度（proof 通常 < 1KB，cts 占大头）。
+        SyscallId::VerifyDleqProof => {
+            GAS_ZKVM_VERIFY_DLEQ_PROOF_BASE + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
+        }
+        SyscallId::VerifyReconstructProof => {
+            GAS_ZKVM_VERIFY_RECONSTRUCT_PROOF_BASE + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
+        }
+        SyscallId::VerifyRevealTokenProof => {
+            GAS_ZKVM_VERIFY_REVEAL_TOKEN_PROOF_BASE + GAS_ZKVM_LOG_PER_BYTE * args.input_len as u64
         }
     }
 }
@@ -186,6 +210,29 @@ pub const GAS_ZKVM_BLS_PAIRING: u64 = 120_000;
 /// BLS12-381 hash-to-scalar 基础 gas（不含按字节计费）。
 pub const GAS_ZKVM_BLS_HASH_TO_SCALAR: u64 = 15_000;
 
+// ===== BLS12-381 扩展 syscall gas 常量（Phase 3.2 — D2 决策）=====
+//
+// 为 texas_poker crypto utils 移植新增的标量算术 + G1 辅助 syscall。
+// 标量算术（381-bit field）轻于标量乘法；G1 点减同点加量级。
+
+/// BLS12-381 标量加法 gas（381-bit field add，轻量）。
+pub const GAS_ZKVM_BLS_SCALAR_ADD: u64 = 5_000;
+
+/// BLS12-381 标量减法 gas（同 add 量级）。
+pub const GAS_ZKVM_BLS_SCALAR_SUB: u64 = 5_000;
+
+/// BLS12-381 标量取负 gas（同 add 量级）。
+pub const GAS_ZKVM_BLS_SCALAR_NEG: u64 = 5_000;
+
+/// BLS12-381 标量求逆 gas（Fermat 小定理 a^(p-2)，接近乘法量级）。
+pub const GAS_ZKVM_BLS_SCALAR_INV: u64 = 50_000;
+
+/// BLS12-381 G1 点减 gas（同点加量级）。
+pub const GAS_ZKVM_BLS_G1_SUB: u64 = 40_000;
+
+/// BLS12-381 G1 生成元 gas（返回常量，极轻）。
+pub const GAS_ZKVM_BLS_G1_GENERATOR: u64 = 100;
+
 /// GameState mock 读取 gas（类似 ReadState）。
 pub const GAS_ZKVM_GAME_STATE_READ: u64 = 50;
 
@@ -200,6 +247,30 @@ pub const GAS_ZKVM_CARD_DECODE: u64 = 10;
 
 /// ZKShuffle 验证基础 gas（不含按字节计费，shuffle proof 验证非常重）。
 pub const GAS_ZKVM_SHUFFLE_VERIFY: u64 = 500_000;
+
+// ===== Phase 4: Mental Poker proof verify + hash syscall gas 常量（0x33-0x36）=====
+//
+// 这些 syscall 在 host 端调用 poker_protocol 的完整 proof verify 逻辑，
+// 涉及大量 BLS12-381 G1/Scalar 运算 + transcript Fiat-Shamir 挑战派生，
+// gas 估算参考 BLS12-381 pairing (120K) + 多次标量乘/点加的量级。
+
+/// Blake2b-256 哈希基础 gas（变长输入，与 SHA-256 量级相当但稍轻）。
+pub const GAS_ZKVM_BLAKE2B_256_BASE: u64 = 5_000;
+
+/// DLEq/ZKShuffle proof 验证基础 gas。
+///
+/// 涉及 52 张密文的 batch DLEq 验证（n×MSM），gas 接近 shuffle verify。
+pub const GAS_ZKVM_VERIFY_DLEQ_PROOF_BASE: u64 = 500_000;
+
+/// Reconstruct proof 验证基础 gas。
+///
+/// 涉及 52 张 swap_out proofs + reconstruct batch 验证，gas 最重。
+pub const GAS_ZKVM_VERIFY_RECONSTRUCT_PROOF_BASE: u64 = 1_000_000;
+
+/// Reveal token proof 验证基础 gas。
+///
+/// 单个密文 + 单 token 的 Schnorr-like 验证，gas 较轻。
+pub const GAS_ZKVM_VERIFY_REVEAL_TOKEN_PROOF_BASE: u64 = 100_000;
 
 /// 计算单条指令的 gas 开销（不含 syscall gas）。
 ///

@@ -181,6 +181,33 @@ pub fn execute_elf_with_limits_and_config(
     let mut state = VmState::new();
     load_elf(&mut state, &metadata)?;
 
+    // 1b. 初始化栈指针 sp = STACK_TOP，并预清零栈区域。
+    //
+    // 编译器（Rust release opt-level=3）生成的函数序言/结构体拷贝会读取栈填充
+    // 字节（padding）。VM 的严格字节级初始化跟踪会把这些读取视为 UninitializedRead。
+    // 预清零 256KB 栈区域使这些读取返回确定值 0，而非终止执行。
+    //
+    // 此处 sp 必须在 trace.set_initial_registers 之前设置，使 trace 第 0 步
+    // 能用正确的 sp 计算 MemAddr = sp + imm。
+    state.write_register(crate::syscalls::REG_SP, crate::isa::state::STACK_TOP);
+    const STACK_INIT_SIZE: u32 = 256 * 1024; // 256KB = 64 页
+    state.zero_init_range(
+        crate::isa::state::STACK_TOP - STACK_INIT_SIZE,
+        STACK_INIT_SIZE,
+    )?;
+
+    // 1c. 预清零堆区域。
+    //
+    // guest 的 bump allocator（`guest_sdk::allocator::BumpAlloc`）只前进 HEAP_NEXT
+    // 指针、不清零返回的内存。Rust 标准库在 `Vec::with_capacity(n)` / `String::with_capacity`
+    // 后只写 `len < n` 字节；当 Vec 因 push/extend 触发增长时，`ptr::copy_nonoverlapping`
+    // 被编译为 LW（4 字节字级加载），可能读取超出 `len` 的未初始化字节。
+    //
+    // 这与栈填充字节未初始化读取是同一类问题（栈已通过 1b 预清零修复）。
+    // 预清零整个 8MB 堆区域使这些读返回确定值 0，避免 `UninitializedRead` panic。
+    // 必须使用与 `guest_sdk::allocator::HEAP_SIZE` 完全相同的尺寸。
+    state.zero_init_range(crate::isa::state::HEAP_START, crate::isa::state::HEAP_SIZE)?;
+
     // 2. 初始化 syscall registry + context
     let registry = SyscallRegistry::new();
     let mut ctx = SyscallContext::new(config.input)
@@ -191,11 +218,19 @@ pub fn execute_elf_with_limits_and_config(
         )
         .with_host_state(config.host_state);
     let mut trace = Trace::new();
-    // 注入 initial_registers（load_elf 后的寄存器快照），使 trace_to_native
+    // 注入 initial_registers（load_elf + sp 初始化后的寄存器快照），使 trace_to_native
     // 在第 0 步能用正确的 prev_registers 计算 MemAddr = prev[rs1] + imm 等。
     trace.set_initial_registers(state.registers);
 
     // 3. 执行循环
+    //
+    // 内存上限检查的频率权衡：`Trace::host_memory_usage` 遍历所有已记录的 Step
+    // 求和（O(n)），若每步都调用会导致 N 步总开销为 O(N²)。此处改为每
+    // `MEM_CHECK_INTERVAL` 步检查一次，将总开销降为 O(N² / INTERVAL)，
+    // 在保持内存上限保护的前提下避免性能退化。
+    // （更优的做法是让 Trace 增量维护 usage 计数器，但那会侵入 trace 数据
+    // 结构，留作后续优化。）
+    const MEM_CHECK_INTERVAL: usize = 4096;
     loop {
         // 检查 halt
         if ctx.is_halted() {
@@ -210,19 +245,22 @@ pub fn execute_elf_with_limits_and_config(
             });
         }
 
-        // 检查 host 内存上限
-        let usage = trace.host_memory_usage();
-        if usage > mem_limit {
-            return Err(ZkvmError::TraceHostMemoryExceeded {
-                actual: usage,
-                limit: mem_limit,
-            });
+        // 检查 host 内存上限（每 MEM_CHECK_INTERVAL 步一次，避免 O(n²) 开销）
+        if trace.len() % MEM_CHECK_INTERVAL == 0 {
+            let usage = trace.host_memory_usage();
+            if usage > mem_limit {
+                return Err(ZkvmError::TraceHostMemoryExceeded {
+                    actual: usage,
+                    limit: mem_limit,
+                });
+            }
         }
 
         // fetch + decode + execute
         let word = state.fetch_word()?;
         let insn = crate::isa::decode(word)?;
         ctx.step_index = trace.len() as u64;
+
         let log = crate::isa::execute(&mut state, insn.clone())?;
 
         // ECALL → syscall 分派
@@ -402,13 +440,13 @@ mod tests {
 
     #[test]
     fn test_execute_elf_unknown_syscall() {
-        // ADDI a7, x0, 0x16 (unknown，0x15 BLS 与 0x20 GameState 之间的间隙) + ECALL
-        let text = encode_text(&[encode_i(0x13, 0, 17, 0, 0x16), 0x00000073]);
+        // ADDI a7, x0, 0x1C (unknown，0x1B BLS 扩展与 0x20 GameState 之间的间隙) + ECALL
+        let text = encode_text(&[encode_i(0x13, 0, 17, 0, 0x1C), 0x00000073]);
         let elf = build_test_elf(0x1000, 0x1000, &text);
 
         let err = execute_elf(&elf, &[]).unwrap_err();
         assert!(
-            matches!(err, ZkvmError::Other(ref msg) if msg.contains("unknown syscall id: 0x16")),
+            matches!(err, ZkvmError::Other(ref msg) if msg.contains("unknown syscall id: 0x1c")),
             "expected unknown syscall id error, got {err:?}"
         );
     }
