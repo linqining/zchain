@@ -2504,7 +2504,8 @@ mod tests {
     fn test_prove_verify_roundtrip_lb() {
         // LB x1, x2, 0（从 x2 地址加载 1 字节，符号扩展到 32 位）
         // x2 = 0x2000，addr = 0x2000
-        // 加载值 = 0x80（符号扩展为 0xFFFFFF80）
+        // 原始字节 = 0x80（符号扩展为 0xFFFFFF80 写入 rd）
+        // V7：MemAccess.value 存原始值 0x80，扩展由 AIR 约束推导
         let mut prev = zero_registers();
         prev[2] = 0x2000;
         let mut post = prev;
@@ -2512,7 +2513,29 @@ mod tests {
         let mem_access = vec![crate::trace::MemAccess {
             addr: 0x2000,
             op: crate::trace::MemOp::Read,
-            value: 0xFFFFFF80,
+            value: 0x00000080, // V7：raw byte，非扩展值
+            size: 1,
+        }];
+        prove_verify_single_step_with_mem(
+            0,
+            Instruction::Lb { rd: 1, rs1: 2, imm: 0 },
+            &prev,
+            post,
+            mem_access,
+        );
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_lb_positive() {
+        // LB 正字节：0x7F → rd_eff = 0x0000007F（符号位=0，无扩展）
+        let mut prev = zero_registers();
+        prev[2] = 0x2000;
+        let mut post = prev;
+        post[1] = 0x0000007F;
+        let mem_access = vec![crate::trace::MemAccess {
+            addr: 0x2000,
+            op: crate::trace::MemOp::Read,
+            value: 0x0000007F, // raw byte
             size: 1,
         }];
         prove_verify_single_step_with_mem(
@@ -2528,7 +2551,7 @@ mod tests {
     fn test_prove_verify_roundtrip_lbu() {
         // LBU x1, x2, 4（从 x2+4 地址加载 1 字节，零扩展到 32 位）
         // x2 = 0x3000，addr = 0x3004
-        // 加载值 = 0x80（零扩展为 0x00000080）
+        // 原始字节 = 0x80（零扩展为 0x00000080）
         let mut prev = zero_registers();
         prev[2] = 0x3000;
         let mut post = prev;
@@ -2536,7 +2559,7 @@ mod tests {
         let mem_access = vec![crate::trace::MemAccess {
             addr: 0x3004,
             op: crate::trace::MemOp::Read,
-            value: 0x00000080,
+            value: 0x00000080, // raw byte
             size: 1,
         }];
         prove_verify_single_step_with_mem(
@@ -2545,6 +2568,202 @@ mod tests {
             &prev,
             post,
             mem_access,
+        );
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_lh_sign_ext() {
+        // LH x1, x2, 0（从 x2 地址加载 2 字节，符号扩展到 32 位）
+        // 原始半字 = 0xFF80（符号扩展为 0xFFFFFF80 写入 rd）
+        // V7：MemAccess.value 存原始半字 0xFF80，扩展由 AIR 约束推导
+        let mut prev = zero_registers();
+        prev[2] = 0x2000;
+        let mut post = prev;
+        post[1] = 0xFFFFFF80;
+        let mem_access = vec![crate::trace::MemAccess {
+            addr: 0x2000,
+            op: crate::trace::MemOp::Read,
+            value: 0x0000FF80, // V7：raw halfword
+            size: 2,
+        }];
+        prove_verify_single_step_with_mem(
+            0,
+            Instruction::Lh { rd: 1, rs1: 2, imm: 0 },
+            &prev,
+            post,
+            mem_access,
+        );
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_lhu() {
+        // LHU x1, x2, 0（从 x2 地址加载 2 字节，零扩展到 32 位）
+        // 原始半字 = 0xFFFF（零扩展为 0x0000FFFF）
+        let mut prev = zero_registers();
+        prev[2] = 0x3000;
+        let mut post = prev;
+        post[1] = 0x0000FFFF;
+        let mem_access = vec![crate::trace::MemAccess {
+            addr: 0x3000,
+            op: crate::trace::MemOp::Read,
+            value: 0x0000FFFF, // raw halfword
+            size: 2,
+        }];
+        prove_verify_single_step_with_mem(
+            0,
+            Instruction::Lhu { rd: 1, rs1: 2, imm: 0 },
+            &prev,
+            post,
+            mem_access,
+        );
+    }
+
+    // ----- V7 修复 soundness 测试（byte-level 内存模型）-----
+    // 验证 Load 扩展约束能检测篡改：prover 不能再自由选择扩展方式。
+    // 详见 `.trae/documents/poker_zkvm_v7v8_bytelevel_fix_plan.md` §7。
+
+    /// Soundness：LB 0x80（符号扩展应为 0xFFFFFF80），但篡改 rd_eff 为零扩展
+    /// （0x00000080），预期 prove 失败（约束 `is_lb·(rd_eff[1] - SIGN_BIT·0xFF) ≠ 0`）。
+    #[test]
+    fn test_load_soundness_tamper_extension() {
+        use crate::stwo_backend::column_layout_v2::{
+            COL_HELPER_B_BASE, COL_IS_LOAD_BYTE, COL_IS_LOAD_SIGN, COL_SIGN_BIT,
+        };
+        let mut prev = zero_registers();
+        prev[2] = 0x2000;
+        let mut post = prev;
+        post[1] = 0xFFFFFF80; // 正确符号扩展值
+        let mem_access = vec![crate::trace::MemAccess {
+            addr: 0x2000,
+            op: crate::trace::MemOp::Read,
+            value: 0x00000080, // raw byte
+            size: 1,
+        }];
+        let step =
+            make_step_with_mem(0, Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：rd_eff[1] 从 0xFF 改为 0x00（假装零扩展）
+        // 正确值：SIGN_BIT=1 → rd_eff[1] = 1·0xFF = 0xFF
+        // 篡改值：rd_eff[1] = 0x00（违反 is_lb·(rd_eff[1] - SIGN_BIT·0xFF) = 0）
+        trace.cols[COL_VALUE_A_EFF_BASE + 1][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 LB 扩展（零扩展代替符号扩展）应导致 prove 失败（V7 扩展约束 soundness）"
+        );
+        // 验证 witness 列已正确填充（sanity check）
+        assert_eq!(trace.cols[COL_IS_LOAD_BYTE][0], M31::from(1u32), "IS_LOAD_BYTE=1");
+        assert_eq!(trace.cols[COL_IS_LOAD_SIGN][0], M31::from(1u32), "IS_LOAD_SIGN=1");
+        assert_eq!(trace.cols[COL_SIGN_BIT][0], M31::from(1u32), "SIGN_BIT=1 (0x80 bit7=1)");
+        assert_eq!(trace.cols[COL_HELPER_B_BASE][0], M31::from(0x80u32), "HelperB[0]=raw byte");
+    }
+
+    /// Soundness：LB 0x80，但篡改 HelperB[0]（原始值）为 0x7F，预期 prove 失败
+    /// （位分解约束 `is_load_byte·(HelperB[0] - Σ LOAD_BITS·2^i) ≠ 0` 被违反）。
+    #[test]
+    fn test_load_soundness_tamper_raw_value() {
+        use crate::stwo_backend::column_layout_v2::COL_HELPER_B_BASE;
+        let mut prev = zero_registers();
+        prev[2] = 0x2000;
+        let mut post = prev;
+        post[1] = 0xFFFFFF80;
+        let mem_access = vec![crate::trace::MemAccess {
+            addr: 0x2000,
+            op: crate::trace::MemOp::Read,
+            value: 0x00000080, // raw byte = 0x80
+            size: 1,
+        }];
+        let step =
+            make_step_with_mem(0, Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：HelperB[0] 从 0x80 改为 0x7F（破坏位分解一致性）
+        // LOAD_BITS 仍分解 0x80，但 HelperB[0]=0x7F ≠ Σ LOAD_BITS·2^i
+        trace.cols[COL_HELPER_B_BASE][0] = M31::from(0x7Fu32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 HelperB 原始值应导致 prove 失败（V7 位分解约束 soundness）"
+        );
+    }
+
+    /// Soundness：LB 0x80，但篡改 SIGN_BIT 为 0（声称正数），预期 prove 失败
+    /// （SIGN_BIT 一致性约束 `is_load_byte·(SIGN_BIT - LOAD_BITS[7]) ≠ 0` 被违反）。
+    #[test]
+    fn test_load_soundness_tamper_sign_bit() {
+        use crate::stwo_backend::column_layout_v2::COL_SIGN_BIT;
+        let mut prev = zero_registers();
+        prev[2] = 0x2000;
+        let mut post = prev;
+        post[1] = 0xFFFFFF80;
+        let mem_access = vec![crate::trace::MemAccess {
+            addr: 0x2000,
+            op: crate::trace::MemOp::Read,
+            value: 0x00000080, // raw byte = 0x80
+            size: 1,
+        }];
+        let step =
+            make_step_with_mem(0, Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：SIGN_BIT 从 1 改为 0（LOAD_BITS[7] 仍为 1，因 0x80 bit7=1）
+        trace.cols[COL_SIGN_BIT][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 SIGN_BIT 应导致 prove 失败（V7 SIGN_BIT 一致性约束 soundness）"
+        );
+    }
+
+    /// Soundness：LH 0xFF80（符号扩展应为 0xFFFFFF80），但篡改 rd_eff[2] 为 0，
+    /// 预期 prove 失败（约束 `is_lh·(rd_eff[2] - SIGN_BIT·0xFF) ≠ 0`）。
+    #[test]
+    fn test_load_soundness_tamper_halfword_extension() {
+        let mut prev = zero_registers();
+        prev[2] = 0x2000;
+        let mut post = prev;
+        post[1] = 0xFFFFFF80;
+        let mem_access = vec![crate::trace::MemAccess {
+            addr: 0x2000,
+            op: crate::trace::MemOp::Read,
+            value: 0x0000FF80, // raw halfword
+            size: 2,
+        }];
+        let step =
+            make_step_with_mem(0, Instruction::Lh { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：rd_eff[2] 从 0xFF 改为 0x00（破坏符号扩展）
+        trace.cols[COL_VALUE_A_EFF_BASE + 2][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 LH 扩展应导致 prove 失败（V7 半字扩展约束 soundness）"
         );
     }
 

@@ -24,6 +24,22 @@
 //! - ⬜ **TODO**：Step 5.2 — 完整 compression function 约束
 //! - ⬜ **TODO**：Step 5.3 — 多块 hash + 4 组件 logup 集成
 //!
+//! ## V8 安全漏洞（MEDIUM，已文档化）
+//!
+//! **漏洞**：SHA-256 AIR 的 compression function / message schedule / round boundary
+//! 约束尚未实现（Step 5.2 TODO）。当前 `evaluate` 仅读取列、不添加约束，恶意 prover
+//! 可填充任意 trace 通过验证。
+//!
+//! **影响范围**：Sha256Air **未在任何 proof path 中使用**（无 prover/verifier 集成），
+//! 故当前无实际攻击面。但若未来直接启用将导致 unsoundness。
+//!
+//! **修复**（V8.1）：`Sha256Air::new()` 加 panic guard，禁止在任何 proof path 中
+//! 构造实例，直到 Step 5.2 约束完成。详见
+//! `.trae/documents/poker_zkvm_v7v8_bytelevel_fix_plan.md` §4。
+//!
+//! **完全修复所需**：实施 Step 5.2（compression function 约束）+ Step 5.3
+//!（多块 hash + logup 集成），移除 `new()` 的 panic guard。
+//!
 //! ## 参考
 //!
 //! - `poker_zkvm::stwo_backend::poseidon_air` — FrameworkEval 参考实现（v2.1 中间列降度）
@@ -175,6 +191,9 @@ pub const SHA256_AIR_TOTAL_ROUNDS: usize = 64;
 /// 完整约束（binality + 位分解 + ROTR/SHR + working variable update + message schedule）
 /// 将在 Step 5.2 实施。
 ///
+/// **V8 修复**：`Sha256Air::new()` 当前会 panic（约束未完成，防止误用）。
+/// 以下用法示例在 Step 5.2 完成后才可用。
+///
 /// # 用法
 /// ```ignore
 /// use poker_zkvm::stwo_backend::sha256_air::Sha256Air;
@@ -182,6 +201,7 @@ pub const SHA256_AIR_TOTAL_ROUNDS: usize = 64;
 /// use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 /// use stwo::core::fields::qm31::SecureField;
 ///
+/// // ⚠️ V8 guard：Step 5.2 完成前 Sha256Air::new() 会 panic
 /// let air = Sha256Air::new(log_size, Sha256Lookup::dummy());
 /// let component = FrameworkComponent::new(
 ///     &mut TraceLocationAllocator::default(),
@@ -200,15 +220,25 @@ pub struct Sha256Air {
 impl Sha256Air {
     /// 创建指定 log_size 的 Sha256 AIR。
     ///
+    /// # V8 修复：panic guard
+    ///
+    /// **当前会 panic**：SHA-256 AIR 的 compression function / message schedule /
+    /// round boundary 约束尚未实现（Step 5.2 TODO）。`evaluate` 仅读取列、不添加
+    /// 约束，恶意 prover 可填充任意 trace 通过验证。
+    ///
+    /// 为防止误用，`new()` 在约束完成前 panic。Sha256Air 当前未在任何 proof path
+    /// 中使用，故无实际攻击面。待 Step 5.2 约束完成后移除此 guard。
+    ///
     /// # 参数
     /// - `log_size` — log2(行数)，须 ≥ 6（至少 64 行 = 1 compression block）
     /// - `sha256_lookup` — Sha256Lookup relation 实例（从 channel draw 或 dummy）
+    ///
+    /// # Panics
+    /// 始终 panic（V8 guard），直到 Step 5.2 约束完成。
     #[must_use]
     pub const fn new(log_size: u32, sha256_lookup: Sha256Lookup) -> Self {
-        Self {
-            log_size,
-            sha256_lookup,
-        }
+        let _ = (log_size, sha256_lookup);
+        panic!("Sha256Air is INCOMPLETE (V8 known gap): compression function / message schedule / round boundary constraints not implemented. Do not use in any proof path until Step 5.2 constraints are complete.");
     }
 
     /// 获取 log_size。
@@ -518,16 +548,16 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_air_new() {
-        // 验证 Sha256Air 可以创建
-        let air = Sha256Air::new(10, Sha256Lookup::dummy());
-        assert_eq!(air.log_size(), 10);
+    #[should_panic(expected = "Sha256Air is INCOMPLETE")]
+    fn test_sha256_air_guard_panics() {
+        // V8 修复：Sha256Air::new() 必须在约束完成前 panic，防止误用
+        let _ = Sha256Air::new(10, Sha256Lookup::dummy());
     }
 
     #[test]
-    fn test_sha256_air_max_constraint_log_degree_bound() {
-        // 验证 max_constraint_log_degree_bound = log_size + 1（强制 SubDomain 模式）
-        let air = Sha256Air::new(10, Sha256Lookup::dummy());
-        assert_eq!(air.max_constraint_log_degree_bound(), 11);
+    #[should_panic(expected = "Sha256Air is INCOMPLETE")]
+    fn test_sha256_air_new_panics() {
+        // V8 修复：原 test_sha256_air_new 现应 panic（guard 激活）
+        let _ = Sha256Air::new(10, Sha256Lookup::dummy());
     }
 }

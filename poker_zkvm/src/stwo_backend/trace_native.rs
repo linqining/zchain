@@ -504,6 +504,47 @@ pub fn step_to_m31_row(
     };
     fill_word(&mut row, COL_HELPER_B_BASE, helper_b_value);
 
+    // ----- V7: Load subtype + bit 分解（复用 M 扩展列，仅 Load 行非 0）-----
+    // 详见 `.trae/documents/poker_zkvm_v7v8_bytelevel_fix_plan.md` §3.4。
+    // Load 与 MUL/DIV indicator one-hot 互斥，故 col 81-131 在 Load 行空闲，可安全复用。
+    // helper_b_value 在 V7.2 后已是原始值（raw byte/halfword/word），位分解基于原始值。
+    //   - byte load（LB/LBU）：分解 HelperB[0]（原始字节）
+    //   - halfword load（LH/LHU）：分解 HelperB[1]（原始半字高字节，含符号位 bit15）
+    //   - LW/非 Load：全 0（gating 约束保证非 Load 行为 0）
+    let (is_load_byte, is_load_half, is_load_sign, sign_bit, load_bits_byte) = match &step.instruction {
+        Instruction::Lb { .. } => {
+            let raw_byte = (helper_b_value & 0xFF) as u8;
+            (1, 0, 1, ((raw_byte >> 7) & 1) as u32, raw_byte)
+        }
+        Instruction::Lbu { .. } => {
+            let raw_byte = (helper_b_value & 0xFF) as u8;
+            (1, 0, 0, ((raw_byte >> 7) & 1) as u32, raw_byte)
+        }
+        Instruction::Lh { .. } => {
+            let raw_hi_byte = ((helper_b_value >> 8) & 0xFF) as u8;
+            (0, 1, 1, ((raw_hi_byte >> 7) & 1) as u32, raw_hi_byte)
+        }
+        Instruction::Lhu { .. } => {
+            let raw_hi_byte = ((helper_b_value >> 8) & 0xFF) as u8;
+            (0, 1, 0, ((raw_hi_byte >> 7) & 1) as u32, raw_hi_byte)
+        }
+        Instruction::Lw { .. } => (0, 0, 0, 0, 0),
+        _ => (0, 0, 0, 0, 0),
+    };
+    row[COL_IS_LOAD_BYTE] = M31::from(is_load_byte);
+    row[COL_IS_LOAD_HALF] = M31::from(is_load_half);
+    row[COL_IS_LOAD_SIGN] = M31::from(is_load_sign);
+    row[COL_SIGN_BIT] = M31::from(sign_bit);
+    for i in 0..COL_LOAD_BITS_COUNT {
+        row[COL_LOAD_BITS_BASE + i] = M31::from(u32::from((load_bits_byte >> i) & 1));
+    }
+    // V7：预计算扩展 gate（独立新列，非 M 扩展复用）
+    //   LOAD_BYTE_GATE = IS_LOAD · IS_LOAD_BYTE（byte load 行=1，其余=0）
+    //   LOAD_HALF_GATE = IS_LOAD · IS_LOAD_HALF（halfword load 行=1，其余=0）
+    // 非 Load 行（含 MUL/DIV 行）恒为 0，使扩展约束在非 Load 行自动 gating 为 0。
+    row[COL_LOAD_BYTE_GATE] = M31::from(is_load_byte);
+    row[COL_LOAD_HALF_GATE] = M31::from(is_load_half);
+
     // ----- Indicator one-hot -----
     let indicator_col = instruction_to_indicator_col(&step.instruction);
     row[indicator_col] = M31::from(1u32);

@@ -24,7 +24,7 @@
 //! | 32-35 | LUI（4 limb） | 2 | IsLui | rd_eff[i] = Helper1[i] = imm[i] |
 //! | 36-39 | AUIPC（4 limb） | 2 | IsAuipc | rd_eff[i] = Helper2[i] = (Pc+imm)[i] |
 //! | 40-43 | Load addr（4 limb） | 3 | IsLoad | MemAddr[i] = rs1[i] + imm[i]（带 carry） |
-//! | 44-47 | Load 值匹配（4 limb） | 2 | IsLoad | rd_eff[i] = MemValue[i]（暂用 Helper3） |
+//! | 44-47 | ~~Load 值匹配~~ → V7 扩展约束 | 2-3 | IsLoad | rd_eff = extend(HelperB, load_subtype)（详见 §V7） |
 //! | 48-51 | Store addr（4 limb） | 3 | IsStore | MemAddr[i] = rs1[i] + imm[i]（带 carry） |
 //! | 52-55 | Store 值匹配（4 limb） | 2 | IsStore | MemValue[i] = rs2[i]（暂用 Helper3） |
 //!
@@ -38,14 +38,15 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 use super::column_layout_v2::{
     COL_ABS_A_BASE, COL_ABS_B_BASE, COL_CARRY_FLAG_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE,
     COL_DIV_REM_BASE, COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_HELPER_A_BASE, COL_HELPER_B_BASE,
-    COL_IS_BASE, COL_LOW_NONZERO, COL_MEM_ADDR_BASE, COL_MUL_CARRY_HI0_BASE,
-    COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE, COL_MUL_LOW_BASE,
-    COL_PC_BASE, COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B, COL_SYSCALL_ID,
-    COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE, COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS,
-    IS_ADD, IS_ADDI, IS_AUIPC, IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU,
-    IS_ECALL, IS_JAL, IS_JALR, IS_LOAD, IS_LUI, IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU,
-    IS_PADDING, IS_REM, IS_REMU, IS_SLT, IS_SLTI, IS_SLTU, IS_SLTIU, IS_STORE, IS_SUB,
-    NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
+    COL_IS_BASE, COL_IS_LOAD_BYTE, COL_IS_LOAD_HALF, COL_IS_LOAD_SIGN, COL_LOAD_BITS_BASE,
+    COL_LOAD_BITS_COUNT, COL_LOAD_BYTE_GATE, COL_LOAD_HALF_GATE, COL_LOW_NONZERO, COL_MEM_ADDR_BASE,
+    COL_MUL_CARRY_HI0_BASE, COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE,
+    COL_MUL_LOW_BASE, COL_PC_BASE, COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B,
+    COL_SIGN_BIT, COL_SYSCALL_ID, COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
+    COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AUIPC, IS_BEQ, IS_BGE,
+    IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU, IS_ECALL, IS_JAL, IS_JALR, IS_LOAD, IS_LUI,
+    IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU, IS_PADDING, IS_REM, IS_REMU, IS_SLT, IS_SLTI, IS_SLTU,
+    IS_SLTIU, IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
 };
 use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
 
@@ -57,6 +58,9 @@ const TWO56: BaseField = BaseField::from_u32_unchecked(256);
 
 /// 常量 4（PcNext = Pc + 4 中的立即数偏移）。
 const FOUR: BaseField = BaseField::from_u32_unchecked(4);
+
+/// 255 = 0xFF，符号扩展 byte/halfword 上位填充用（V7 修复）。
+const TWO55: BaseField = BaseField::from_u32_unchecked(255);
 
 /// CPU AIR 组件 — 封装 132 列 trace 的 FrameworkEval 实现（v3.5）。
 ///
@@ -293,6 +297,8 @@ impl FrameworkEval for CpuAir {
         let four: E::F = FOUR.into();
         // 常量 2（M 扩展 carry 二元分解：carry_k = lo + 256·hi0 + 512·hi1，512 = 256·2）
         let two: E::F = BaseField::from(2u32).into();
+        // V7 修复：0xFF = 255，符号扩展 byte/halfword 的上位填充常量
+        let ff: E::F = TWO55.into();
 
         // ----- 读取全部 132 列（v3.5 顺序与 column_layout_v2 一致）-----
         let mut cols: Vec<E::F> = Vec::with_capacity(NUM_COLUMNS);
@@ -736,14 +742,115 @@ impl FrameworkEval for CpuAir {
             eval.add_constraint(is_load.clone() * load_addr_diff);
         }
 
-        // ===== Phase 3 约束 44-47：Load 值匹配约束（gated by IsLoad）=====
-        // Load: rd_eff = mem_value（加载的值必须写入 rd）
-        // Helper4 预存 mem_value（来自 step.mem_access[0].value）
-        // 对每个 limb i：rd_eff[i] - Helper4[i] = 0
-        let is_load_eff = is_load.clone();
+        // ===== V7 修复：Load 扩展约束（替换旧约束 44-47）=====
+        // 详见 `.trae/documents/poker_zkvm_v7v8_bytelevel_fix_plan.md` §3.5。
+        // HelperB 在 V7 后存储**原始值**（raw byte/halfword/word），rd_eff 由约束从
+        // 原始值 + load subtype 推导，而非信任 prover 提供的扩展值。
+        //
+        // witness 列：
+        //   IS_LOAD_BYTE/HALF/SIGN (col 81-83) — 复用 M 扩展 carry 列（仅 Load 行有效）
+        //   SIGN_BIT      (col 84) — 原始值符号位（byte=bit7，halfword=bit15）
+        //   LOAD_BITS[0..8] (col 85-92) — 符号承载字节的 8-bit 位分解
+        //   LOAD_BYTE_GATE (col 132) — 预计算 IS_LOAD·IS_LOAD_BYTE（独立列，非 Load 行恒 0）
+        //   LOAD_HALF_GATE (col 133) — 预计算 IS_LOAD·IS_LOAD_HALF（独立列，非 Load 行恒 0）
+        //
+        // 关键设计：IS_LOAD_BYTE/HALF/SIGN 复用 M 扩展 carry 列，在 MUL/DIV 行含非 0/1
+        // 的 carry 值。故所有涉及这些列的约束必须用 IS_LOAD 或预计算 gate 门控，
+        // 使其在 MUL/DIV 行自动为 0。预计算 gate 列（132-133）在非 Load 行恒 0，
+        // 是扩展约束的安全 gate。所有约束度 ≤ 3。
+        let is_load_byte = col(COL_IS_LOAD_BYTE);
+        let is_load_half = col(COL_IS_LOAD_HALF);
+        let is_load_sign = col(COL_IS_LOAD_SIGN);
+        let sign_bit = col(COL_SIGN_BIT);
+        let load_byte_gate = col(COL_LOAD_BYTE_GATE);
+        let load_half_gate = col(COL_LOAD_HALF_GATE);
+
+        // ----- (a) 预计算 gate binality + 正确性（度 2，共 6 条）-----
+        // gate ∈ {0,1}（独立列，非 Load 行恒 0，Load 行为 0/1）
+        eval.add_constraint(load_byte_gate.clone() * (load_byte_gate.clone() - one.clone()));
+        eval.add_constraint(load_half_gate.clone() * (load_half_gate.clone() - one.clone()));
+        // gate 互斥（byte/halfword 不可能同时）
+        eval.add_constraint(load_byte_gate.clone() * load_half_gate.clone());
+        // gate 正确性：Load 行 gate = subtype，非 Load 行 gate = 0（由 IS_LOAD 门控）
+        //   IS_LOAD · (LOAD_BYTE_GATE - IS_LOAD_BYTE) = 0
+        //   非 Load 行：IS_LOAD=0 → 0·(0-carry) = 0 ✓
+        //   Load 行：IS_LOAD=1 → 1·(IS_LOAD_BYTE - IS_LOAD_BYTE) = 0 ✓
+        eval.add_constraint(is_load.clone() * (load_byte_gate.clone() - is_load_byte.clone()));
+        eval.add_constraint(is_load.clone() * (load_half_gate.clone() - is_load_half.clone()));
+
+        // ----- (b) Load subtype binality（度 3，4 条，gated by IS_LOAD）-----
+        // IS_LOAD_BYTE/HALF/SIGN/SIGN_BIT ∈ {0,1}（仅 Load 行约束，MUL/DIV 行由 IS_LOAD=0 门控）
+        eval.add_constraint(is_load.clone() * is_load_byte.clone() * (is_load_byte.clone() - one.clone()));
+        eval.add_constraint(is_load.clone() * is_load_half.clone() * (is_load_half.clone() - one.clone()));
+        eval.add_constraint(is_load.clone() * is_load_sign.clone() * (is_load_sign.clone() - one.clone()));
+        eval.add_constraint(is_load.clone() * sign_bit.clone() * (sign_bit.clone() - one.clone()));
+
+        // ----- (c) LOAD_BITS binality（度 3，8 条，gated by IS_LOAD）-----
+        for i in 0..COL_LOAD_BITS_COUNT {
+            let bit = col(COL_LOAD_BITS_BASE + i);
+            eval.add_constraint(is_load.clone() * bit.clone() * (bit - one.clone()));
+        }
+
+        // ----- (d) 位分解正确性（度 2，2 条，gated by 预计算 gate）-----
+        // byte load: HelperB[0] = Σ LOAD_BITS[i]·2^i（原始字节 = 位分解之和）
+        // halfword load: HelperB[1] = Σ LOAD_BITS[i]·2^i（原始半字高字节 = 位分解之和）
+        let mut load_bits_sum: E::F = col(COL_LOAD_BITS_BASE);
+        let mut pow2: E::F = two.clone();
+        for i in 1..COL_LOAD_BITS_COUNT {
+            load_bits_sum = load_bits_sum + col(COL_LOAD_BITS_BASE + i) * pow2.clone();
+            pow2 = pow2 * two.clone();
+        }
+        eval.add_constraint(load_byte_gate.clone() * (col(COL_HELPER_B_BASE) - load_bits_sum.clone()));
+        eval.add_constraint(load_half_gate.clone() * (col(COL_HELPER_B_BASE + 1) - load_bits_sum.clone()));
+
+        // ----- (e) SIGN_BIT 一致性（度 2，2 条，gated by 预计算 gate）-----
+        // SIGN_BIT = LOAD_BITS[7]（符号位即位分解的最高位）
+        let load_bits_7 = col(COL_LOAD_BITS_BASE + 7);
+        eval.add_constraint(load_byte_gate.clone() * (sign_bit.clone() - load_bits_7.clone()));
+        eval.add_constraint(load_half_gate.clone() * (sign_bit.clone() - load_bits_7.clone()));
+
+        // ----- (f) 扩展结构约束（度 ≤ 3，共 20 条，gated by 预计算 gate）-----
+        // 使用预计算 gate（非 Load 行恒 0）作为主 gate，IS_LOAD_SIGN 区分符号/零扩展：
+        //   LB  = LOAD_BYTE_GATE · IS_LOAD_SIGN
+        //   LBU = LOAD_BYTE_GATE · (1 - IS_LOAD_SIGN)
+        //   LH  = LOAD_HALF_GATE · IS_LOAD_SIGN
+        //   LHU = LOAD_HALF_GATE · (1 - IS_LOAD_SIGN)
+        //   LW  = IS_LOAD - LOAD_BYTE_GATE - LOAD_HALF_GATE
+        let not_sign = one.clone() - is_load_sign.clone();
+        let is_lw = is_load.clone() - load_byte_gate.clone() - load_half_gate.clone();
+
+        // LB（符号扩展 byte）：rd_eff[0]=HelperB[0]，rd_eff[1..3]=SIGN_BIT·0xFF
+        let lb_gate = load_byte_gate.clone() * is_load_sign.clone();
+        eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
+        eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - sign_bit.clone() * ff.clone()));
+        eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 2) - sign_bit.clone() * ff.clone()));
+        eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 3) - sign_bit.clone() * ff.clone()));
+
+        // LBU（零扩展 byte）：rd_eff[0]=HelperB[0]，rd_eff[1..3]=0
+        let lbu_gate = load_byte_gate.clone() * not_sign.clone();
+        eval.add_constraint(lbu_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
+        eval.add_constraint(lbu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 1));
+        eval.add_constraint(lbu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 2));
+        eval.add_constraint(lbu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 3));
+
+        // LH（符号扩展 halfword）：rd_eff[0..1]=HelperB[0..1]，rd_eff[2..3]=SIGN_BIT·0xFF
+        let lh_gate = load_half_gate.clone() * is_load_sign.clone();
+        eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
+        eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - col(COL_HELPER_B_BASE + 1)));
+        eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 2) - sign_bit.clone() * ff.clone()));
+        eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 3) - sign_bit.clone() * ff.clone()));
+
+        // LHU（零扩展 halfword）：rd_eff[0..1]=HelperB[0..1]，rd_eff[2..3]=0
+        let lhu_gate = load_half_gate.clone() * not_sign.clone();
+        eval.add_constraint(lhu_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
+        eval.add_constraint(lhu_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - col(COL_HELPER_B_BASE + 1)));
+        eval.add_constraint(lhu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 2));
+        eval.add_constraint(lhu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 3));
+
+        // LW（identity）：rd_eff[i]=HelperB[i] for i in 0..4
         for i in 0..4 {
-            let load_val_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER_B_BASE + i);
-            eval.add_constraint(is_load_eff.clone() * load_val_diff);
+            let lw_diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_HELPER_B_BASE + i);
+            eval.add_constraint(is_lw.clone() * lw_diff);
         }
 
         // ===== Phase 3 约束 48-51：Store 地址约束（gated by IsStore）=====
@@ -1401,7 +1508,7 @@ mod tests {
         assert_eq!(COL_HELPER_A_BASE, 65);
         assert_eq!(COL_HELPER_B_BASE, 69);
         assert_eq!(COL_TAKEN, 73);
-        assert_eq!(NUM_COLUMNS, 132);
+        assert_eq!(NUM_COLUMNS, 134);
         assert_eq!(NUM_INSTRUCTION_CATEGORIES, 43);
     }
 }

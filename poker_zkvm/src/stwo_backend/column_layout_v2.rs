@@ -282,15 +282,90 @@ pub const COL_DIV_SIGN_R: usize = 127;
 /// - DIV：COL_MUL_LOW + COL_DIV_REM = COL_ABS_A（q·d+r=n），COL_MUL_HIGH = 0
 pub const COL_MUL_LOW_BASE: usize = 128;
 
-/// v3.5 列布局总列数（132 列）。
+// ===========================================================================
+// V7 修复：Load 扩展约束 witness 列（复用 M 扩展列，仅 Load 行非 0）
+// ===========================================================================
+// Load 指令与 MUL/DIV indicator one-hot 互斥（同一行不可能既是 Load 又是 MUL），
+// 故 M 扩展列（81-131）在 Load 行全部空闲，可安全复用存放 Load 扩展 witness。
+// 这些列仅在 IS_LOAD=1 的行被约束，非 Load 行必须为 0（由 gating 约束保证）。
+//
+// 设计参考 RISC Zero Zirgen：内存存原始值，扩展在指令电路内约束推导。
+// 详见 `.trae/documents/poker_zkvm_v7v8_bytelevel_fix_plan.md` §3。
+
+/// col 81：Load byte 标记（binary，复用 MulCarryLo[0]）。
 ///
-/// 132 列 = v3.4 基础(81) + M 扩展算术 witness(51)
+/// - 1 = LB/LBU（byte load，访问 1 字节）
+/// - 0 = 其他（LH/LHU/LW/非 Load）
+/// 仅 IS_LOAD=1 行可非 0（gating 约束 `(1-IS_LOAD)·IS_LOAD_BYTE=0`）。
+pub const COL_IS_LOAD_BYTE: usize = 81;
+
+/// col 82：Load halfword 标记（binary，复用 MulCarryLo[1]）。
+///
+/// - 1 = LH/LHU（halfword load，访问 2 字节）
+/// - 0 = 其他
+/// 与 IS_LOAD_BYTE 互斥（`IS_LOAD_BYTE·IS_LOAD_HALF=0`）。
+pub const COL_IS_LOAD_HALF: usize = 82;
+
+/// col 83：Load 符号扩展标记（binary，复用 MulCarryLo[2]）。
+///
+/// - 1 = LB/LH（sign-extend）
+/// - 0 = LBU/LHU/LW（zero-extend / identity）
+pub const COL_IS_LOAD_SIGN: usize = 83;
+
+/// col 84：原始值符号位（binary，复用 MulCarryLo[3]）。
+///
+/// - byte load（LB/LBU）：原始字节 bit 7
+/// - halfword load（LH/LHU）：原始半字 bit 15（= 高字节 bit 7）
+/// - LW/非 Load：0
+/// 由 LOAD_BITS[7] 约束推导（`SIGN_BIT = LOAD_BITS[7]`）。
+pub const COL_SIGN_BIT: usize = 84;
+
+/// col 85-92：符号承载字节的 8-bit 位分解（binary，复用 MulCarryLo[4..6] + MulCarryHi0[0..4]）。
+///
+/// - byte load：分解 HelperB[0]（原始字节）
+/// - halfword load：分解 HelperB[1]（原始半字高字节，含符号位 bit 15）
+/// - LW/非 Load：全 0
+/// LOAD_BITS[7] 即为符号位，与 COL_SIGN_BIT 一致。
+pub const COL_LOAD_BITS_BASE: usize = 85;
+
+/// LOAD_BITS 位分解的 bit 数量。
+pub const COL_LOAD_BITS_COUNT: usize = 8;
+
+// ===========================================================================
+// V7 修复：预计算 Load 扩展 gate 列（col 132-133，独立新列，非 M 扩展复用）
+// ===========================================================================
+// IS_LOAD_BYTE/HALF/SIGN（col 81-83）在 MUL/DIV 行复用为 carry 列（非 0/1），
+// 不能直接用作扩展约束的 gate（会在 MUL/DIV 行触发误报）。
+// 故新增 2 个预计算 gate 列，由 trace 填充在 Load 行设置、非 Load 行为 0：
+//   LOAD_BYTE_GATE = IS_LOAD · IS_LOAD_BYTE（Load-byte 行=1，其余=0）
+//   LOAD_HALF_GATE = IS_LOAD · IS_LOAD_HALF（Load-half 行=1，其余=0）
+// 扩展约束使用这些 gate（degree 1），使 `gate · IS_LOAD_SIGN · (expr)` = degree 3 ✓。
+
+/// col 132：预计算 Load byte gate = IS_LOAD · IS_LOAD_BYTE（binary，仅 Load-byte 行非 0）。
+///
+/// - LB/LBU 行：1（byte load）
+/// - LH/LHU/LW/非 Load 行：0
+/// 独立列（非 M 扩展复用），非 Load 行恒为 0（由 trace 填充保证）。
+pub const COL_LOAD_BYTE_GATE: usize = 132;
+
+/// col 133：预计算 Load halfword gate = IS_LOAD · IS_LOAD_HALF（binary，仅 Load-half 行非 0）。
+///
+/// - LH/LHU 行：1（halfword load）
+/// - LB/LBU/LW/非 Load 行：0
+/// 独立列（非 M 扩展复用），非 Load 行恒为 0（由 trace 填充保证）。
+pub const COL_LOAD_HALF_GATE: usize = 133;
+
+/// v3.6 列布局总列数（134 列）。
+///
+/// 134 列 = v3.5(132) + V7 预计算 gate(2)
+///   v3.5 132 = v3.4 基础(81) + M 扩展算术 witness(51)
 ///   基础 81 = PC(8) + ArithFlag(2) + ValueAEff/B/C(12) + Indicator(43)
 ///           + HelperA(4) + HelperB(4) + Taken(1) + MemAddr(4) + SyscallId(1) + PcCarry(2)
 ///   M 扩展 51 = CarryLo(7) + CarryHi0(7) + CarryHi1(7) + MulHigh(4) + MulLow(4)
 ///             + AbsA(4) + AbsB(4) + SignA(1) + SignB(1) + LowNonzero(1)
 ///             + DivQuot(4) + DivRem(4) + DivIsSpecial(1) + DivSignQ(1) + DivSignR(1)
-pub const NUM_COLUMNS: usize = 132;
+///   V7 gate 2 = LoadByteGate(1) + LoadHalfGate(1)
+pub const NUM_COLUMNS: usize = 134;
 
 /// Phase 4 ECALL dispatch 列数量（v3 仅 1 列 SyscallId）。
 pub const ECALL_DISPATCH_NUM_COLUMNS: usize = 1;
@@ -320,8 +395,8 @@ mod tests {
     fn test_num_columns() {
         assert_eq!(
             NUM_COLUMNS,
-            132,
-            "v3.5 列布局应为 132 列（v3.4 81 列 + M 扩展算术 witness 51 列）"
+            134,
+            "v3.6 列布局应为 134 列（v3.5 132 列 + V7 预计算 gate 2 列）"
         );
     }
 
@@ -333,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_column_ranges_no_overlap() {
-        let ranges: [(usize, usize); 21] = [
+        let ranges: [(usize, usize); 23] = [
             (COL_PC_BASE, 4),                     // 0-3
             (COL_PC_NEXT_BASE, 4),                // 4-7
             (COL_CARRY_FLAG_BASE, 2),             // 8-9（合并 carry/borrow）
@@ -355,6 +430,8 @@ mod tests {
             (COL_DIV_REM_BASE, 4),                 // 121-124
             (COL_DIV_IS_SPECIAL, 3),               // 125-127（IsSpecial + SignQ + SignR）
             (COL_MUL_LOW_BASE, 4),                 // 128-131（MulLow c₀..c₃）
+            (COL_LOAD_BYTE_GATE, 1),               // 132（V7 预计算 gate）
+            (COL_LOAD_HALF_GATE, 1),               // 133（V7 预计算 gate）
         ];
         let mut all_cols = HashSet::new();
         for (base, count) in &ranges {
@@ -456,7 +533,28 @@ mod tests {
         assert_eq!(COL_DIV_SIGN_Q, 126);
         assert_eq!(COL_DIV_SIGN_R, 127);
         assert_eq!(COL_MUL_LOW_BASE, 128);
-        // 最后一个 M 扩展列 + 1 = NUM_COLUMNS
-        assert_eq!(COL_MUL_LOW_BASE + WORD_LIMB_COUNT, NUM_COLUMNS, "最后一个列应为 131，NUM_COLUMNS=132");
+        // M 扩展列结束于 132（最后一个 M 列索引 = 131）
+        assert_eq!(COL_MUL_LOW_BASE + WORD_LIMB_COUNT, 132, "M 扩展列结束于 132");
+        // V7 预计算 gate 列（132-133，独立新列，非 M 扩展复用）
+        assert_eq!(COL_LOAD_BYTE_GATE, 132);
+        assert_eq!(COL_LOAD_HALF_GATE, 133);
+        // v3.6 总列数 = M 扩展(132) + V7 gate(2) = 134
+        assert_eq!(NUM_COLUMNS, 134, "v3.6 总列数 = 134");
+    }
+
+    #[test]
+    fn test_v7_load_extension_columns() {
+        // V7 修复：Load 扩展约束 witness 列（复用 M 扩展列，仅 Load 行非 0）
+        assert_eq!(COL_IS_LOAD_BYTE, 81, "复用 MulCarryLo[0]");
+        assert_eq!(COL_IS_LOAD_HALF, 82, "复用 MulCarryLo[1]");
+        assert_eq!(COL_IS_LOAD_SIGN, 83, "复用 MulCarryLo[2]");
+        assert_eq!(COL_SIGN_BIT, 84, "复用 MulCarryLo[3]");
+        assert_eq!(COL_LOAD_BITS_BASE, 85, "复用 MulCarryLo[4..6]+MulCarryHi0[0..4]");
+        assert_eq!(COL_LOAD_BITS_COUNT, 8, "8 个 binary bit");
+        // LOAD_BITS 范围 85-92，不超过 MulCarryHi0 范围（88-94）
+        assert_eq!(COL_LOAD_BITS_BASE + COL_LOAD_BITS_COUNT, 93);
+        // V7 列全部在 M 扩展列范围 [81, 132) 内（复用，不新增列）
+        assert!(COL_IS_LOAD_BYTE >= COL_MUL_CARRY_LO_BASE);
+        assert!(COL_LOAD_BITS_BASE + COL_LOAD_BITS_COUNT <= NUM_COLUMNS);
     }
 }

@@ -70,13 +70,22 @@ impl MemOp {
 ///
 /// `size` 字段必须存在，防 LB 1B vs LW 4B aliasing（Phase 5 byte-level
 /// permutation 的关键）。
+///
+/// # V7 修复：`value` 语义
+///
+/// `value` 存储**原始值**（raw），而非扩展后值：
+/// - **Load**（LB/LH）：`value` = 原始字节/半字（零扩展到 u32）。符号扩展由
+///   CPU AIR 约束从原始值 + load subtype 推导，不再由 emulator 预计算。
+///   这样 Memory AIR logup 验证的是原始值（不可伪造），扩展不可被 prover 自由替换。
+/// - **Load**（LBU/LHU/LW）：`value` = 原始值（与之前一致，本就是零扩展/原始 word）。
+/// - **Store**：`value` = rs2 的值（写入内存的值，不变）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemAccess {
     /// 访问地址
     pub addr: u32,
     /// 读 / 写
     pub op: MemOp,
-    /// 读 / 写的值
+    /// 读 / 写的值（V7：Load 存原始值，扩展由 AIR 约束推导）
     pub value: u32,
     /// 访问尺寸（1 / 2 / 4 字节）
     pub size: u8,

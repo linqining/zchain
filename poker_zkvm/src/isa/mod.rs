@@ -824,25 +824,30 @@ pub fn execute(
         }
 
         // ===== I-type Load =====
+        // V7 修复：MemAccess.value 存储**原始值**（raw byte/halfword），而非扩展后值。
+        // 扩展值仍写入寄存器；原始值经 Memory AIR logup 验证后，由 CPU AIR 约束推导扩展。
+        // 详见 `.trae/documents/poker_zkvm_v7v8_bytelevel_fix_plan.md` §3.2。
         Instruction::Lb { rd, rs1, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
-            let val = state.read_memory_byte(addr)? as i8 as i32 as u32;
+            let raw = state.read_memory_byte(addr)? as u32; // 原始字节（未扩展）
+            let val = raw as i8 as i32 as u32; // 符号扩展值（写入 rd）
             state.write_register(rd, val);
             mem_access.push(MemAccess {
                 addr,
                 op: MemOp::Read,
-                value: val,
+                value: raw, // V7：存原始值，扩展由 AIR 约束推导
                 size: 1,
             });
         }
         Instruction::Lh { rd, rs1, imm } => {
             let addr = state.read_register(rs1).wrapping_add(imm);
-            let val = state.read_memory_halfword(addr)? as i16 as i32 as u32;
+            let raw = state.read_memory_halfword(addr)? as u32; // 原始半字（未扩展）
+            let val = raw as i16 as i32 as u32; // 符号扩展值（写入 rd）
             state.write_register(rd, val);
             mem_access.push(MemAccess {
                 addr,
                 op: MemOp::Read,
-                value: val,
+                value: raw, // V7：存原始值，扩展由 AIR 约束推导
                 size: 2,
             });
         }
