@@ -1,7 +1,7 @@
 //! Texas Poker ZKVM Guest — binary entry point。
 //!
 //! 双模式编译：
-//! - 默认（riscv32i-unknown-none-elf）：no_std + no_main，编译为 RV32I ELF
+//! - 默认（riscv32im-unknown-none-elf）：no_std + no_main，编译为 RV32IM ELF
 //! - std-test feature：std + 有 main，跑 host 单元测试
 //!
 //! # Phase 4.4：dispatch 接入
@@ -22,13 +22,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-// 仅 riscv32i 模式注册 _start + panic_handler
+// 仅 riscv32im 模式注册 _start + panic_handler
 #[cfg(not(feature = "std-test"))]
 zkvm_guest_sdk::entry_point!();
 
 use texas_poker_guest::io::{zkvm_main_logic, ZkvmErrorKind};
 
-/// guest 主逻辑入口（riscv32i 模式由 entry_point 调用）。
+/// guest 主逻辑入口（riscv32im 模式由 entry_point 调用）。
 ///
 /// # 输入约定
 ///

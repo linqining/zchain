@@ -209,7 +209,7 @@ pub struct RevealAssignment {
 /// 注意：`BorshDeserialize` 为**手动实现**（非 derive），与 `TexasPokerTable` 同理。
 /// 派生宏生成的 `deserialize_reader` 会将 `u8` 和 `Vec<RevealAssignment>` 反序列化
 /// 深度内联（包括 `Vec<RevealAssignment>` 内部的 `Vec<RevealTokenData>` 等），在
-/// nightly-2026-04-15 riscv32i-unknown-none-elf target 上触发 panic。
+/// nightly-2026-04-15 riscv32im-unknown-none-elf target 上触发 panic。
 /// 手动覆盖 `deserialize(buf: &mut &[u8])` 避免泛型 `deserialize_reader<R>` 的
 /// sret codegen 问题，并保持每个字段反序列化为独立函数调用。
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
@@ -456,7 +456,7 @@ impl TableConfig {
 ///
 /// 注意：`BorshDeserialize` 为**手动实现**（非 derive），与 `RevealTokenState` 同理。
 /// 派生宏会将全部 22 个字段的 `deserialize_reader` 深度内联为单体函数，在
-/// nightly-2026-04-15 riscv32i-unknown-none-elf target 上触发 panic。
+/// nightly-2026-04-15 riscv32im-unknown-none-elf target 上触发 panic。
 /// 手动实现通过函数指针强制分离每个字段的反序列化调用边界。
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct TexasPokerTable {
@@ -607,7 +607,7 @@ impl TexasPokerTable {
     /// （1 字节 discriminant，无 sret），通过 `&mut self` 写入字段。
     ///
     /// `BorshDeserialize::deserialize` 返回 `Result<TexasPokerTable, Error>`
-    /// （~500 字节 sret），在 nightly-2026-04-15 riscv32i-unknown-none-elf 上触发
+    /// （~500 字节 sret），在 nightly-2026-04-15 riscv32im-unknown-none-elf 上触发
     /// `uninitialized read at 0x00000004`（sret 指针被错误设为 NULL）。
     ///
     /// **field 16 (reveal_token_state) 内联**：不调用 `<RevealTokenState>::deserialize`，

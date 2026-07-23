@@ -64,7 +64,7 @@ use texas_poker_guest::G1Point;
 /// 返回编译后的 guest ELF 路径。
 fn guest_elf_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("guests/texas_poker/target/riscv32i-unknown-none-elf/release/texas_poker_guest");
+    p.push("guests/texas_poker/target/riscv32im-unknown-none-elf/release/texas_poker_guest");
     p
 }
 

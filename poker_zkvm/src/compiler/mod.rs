@@ -1,8 +1,8 @@
-//! 前端编译流水线 — Rust → RV32I ELF 编译 + ELF 强化校验。
+//! 前端编译流水线 — Rust → RV32IM ELF 编译 + ELF 强化校验。
 //!
 //! 本模块提供：
 //! - [`CompilerConfig`] — 编译器配置（target / opt-level / panic 策略）
-//! - [`compile_crate`] — 调用 cargo + rustc 编译用户 crate 为 RV32I ELF
+//! - [`compile_crate`] — 调用 cargo + rustc 编译用户 crate 为 RV32IM ELF
 //! - [`elf_validator`] 子模块 — 强化 ELF 校验（TOCTOU 消除 + checked_add + PT_DYNAMIC 拒绝）
 //! - [`prelude`] 子模块 — `zkvm::prelude` re-export + `entry` / `test` 宏
 
@@ -19,11 +19,11 @@ pub mod prelude;
 
 /// 编译器配置（spec L143, L149）。
 ///
-/// 固定使用 `riscv32i-unknown-none-elf` target、opt-level=3、panic=abort，
+/// 固定使用 `riscv32im-unknown-none-elf` target、opt-level=3、panic=abort，
 /// 禁用浮点 / atomics / SIMD / inline asm。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerConfig {
-    /// 目标 triple（固定 `riscv32i-unknown-none-elf`）。
+    /// 目标 triple（固定 `riscv32im-unknown-none-elf`）。
     pub target: &'static str,
     /// 优化级别（固定 3）。
     pub opt_level: u32,
@@ -34,7 +34,7 @@ pub struct CompilerConfig {
 impl Default for CompilerConfig {
     fn default() -> Self {
         Self {
-            target: "riscv32i-unknown-none-elf",
+            target: "riscv32im-unknown-none-elf",
             opt_level: 3,
             panic: "abort",
         }
@@ -45,11 +45,11 @@ impl Default for CompilerConfig {
 // compile_crate
 // ===========================================================================
 
-/// 编译用户 crate 为 RV32I ELF（spec L145-150）。
+/// 编译用户 crate 为 RV32IM ELF（spec L145-150）。
 ///
-/// 调用 `cargo build --target riscv32i-unknown-none-elf --release`，
+/// 调用 `cargo build --target riscv32im-unknown-none-elf --release`，
 /// 通过 `RUSTFLAGS` 传递 `-C panic=abort -C opt-level=3`。
-/// 输出 ELF 文件到 `<crate_path>/target/riscv32i-unknown-none-elf/release/<crate_name>`。
+/// 输出 ELF 文件到 `<crate_path>/target/riscv32im-unknown-none-elf/release/<crate_name>`。
 ///
 /// # Errors
 /// - 路径不存在 → `ZkvmError::Other`
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn test_compiler_config_default() {
         let config = CompilerConfig::default();
-        assert_eq!(config.target, "riscv32i-unknown-none-elf");
+        assert_eq!(config.target, "riscv32im-unknown-none-elf");
         assert_eq!(config.opt_level, 3);
         assert_eq!(config.panic, "abort");
     }
@@ -224,7 +224,7 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(config, cloned);
         let debug_str = format!("{config:?}");
-        assert!(debug_str.contains("riscv32i-unknown-none-elf"));
+        assert!(debug_str.contains("riscv32im-unknown-none-elf"));
     }
 
     #[test]

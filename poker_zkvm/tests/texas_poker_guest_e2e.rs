@@ -1,6 +1,6 @@
 //! Texas Poker ZKVM Guest — Phase 5.1c E2E dispatch 测试。
 //!
-//! 通过 `execute_elf` 在真实 RV32I 模拟器中执行编译后的 guest ELF，
+//! 通过 `execute_elf` 在真实 RV32IM 模拟器中执行编译后的 guest ELF，
 //! 验证 `dispatch` 路径（18 个 method selector）端到端可用：
 //! - `create_table` → 初始化桌台
 //! - `join_table` × 2 → 玩家入座
@@ -10,7 +10,7 @@
 //!
 //! # 运行前置
 //!
-//! guest crate 必须先以 riscv32i-unknown-none-elf target 编译：
+//! guest crate 必须先以 riscv32im-unknown-none-elf target 编译：
 //! ```bash
 //! cd /Users/mac/projects/zchain/poker_zkvm/guests/texas_poker
 //! cargo +nightly-2026-04-15 build --release
@@ -57,7 +57,7 @@ use texas_poker_guest::G1Point;
 /// 返回编译后的 guest ELF 路径（与 phase1 测试共用同一 ELF）。
 fn guest_elf_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("guests/texas_poker/target/riscv32i-unknown-none-elf/release/texas_poker_guest");
+    p.push("guests/texas_poker/target/riscv32im-unknown-none-elf/release/texas_poker_guest");
     p
 }
 

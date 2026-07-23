@@ -1,7 +1,7 @@
 //! Texas Poker ZKVM Guest — library crate。
 //!
 //! 双模式编译：
-//! - 默认（riscv32i-unknown-none-elf）：`no_std`，编译为 RV32I ELF
+//! - 默认（riscv32im-unknown-none-elf）：`no_std`，编译为 RV32IM ELF
 //! - `std-test` feature：`std`，供 host 端测试作为 dev-dependency 引入，
 //!   直接构造 `ZkvmInput` / `ZkvmOutput` / `*Args` 等类型（不需手动拼 borsh bytes）。
 //!

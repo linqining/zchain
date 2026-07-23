@@ -1319,11 +1319,20 @@ mod tests {
             Instruction::Fence,
             Instruction::Ecall,
             Instruction::Ebreak,
+            // M 扩展（8）
+            Instruction::Mul { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Mulh { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Mulhsu { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Mulhu { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Div { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Divu { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Rem { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Remu { rd: 0, rs1: 0, rs2: 0 },
         ];
         assert_eq!(
             variants.len(),
-            40,
-            "RV32I + ECALL/EBREAK/FENCE = 40 variants"
+            48,
+            "RV32I + ECALL/EBREAK/FENCE + M 扩展 = 48 variants"
         );
     }
 

@@ -36,13 +36,15 @@ use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 
 use super::column_layout_v2::{
-    COL_CARRY_FLAG_BASE, COL_HELPER_A_BASE, COL_HELPER_B_BASE,
-    COL_IS_BASE, COL_MEM_ADDR_BASE, COL_PC_BASE,
-    COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SYSCALL_ID,
-    COL_TAKEN, COL_VALUE_A_EFF_BASE,
-    COL_VALUE_B_BASE, COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AUIPC,
-    IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_ECALL, IS_JAL, IS_JALR, IS_LOAD,
-    IS_LUI, IS_PADDING, IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
+    COL_ABS_A_BASE, COL_ABS_B_BASE, COL_CARRY_FLAG_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE,
+    COL_DIV_REM_BASE, COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_HELPER_A_BASE, COL_HELPER_B_BASE,
+    COL_IS_BASE, COL_LOW_NONZERO, COL_MEM_ADDR_BASE, COL_MUL_CARRY_HI0_BASE,
+    COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE, COL_MUL_LOW_BASE,
+    COL_PC_BASE, COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B, COL_SYSCALL_ID,
+    COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE, COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS,
+    IS_ADD, IS_ADDI, IS_AUIPC, IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU,
+    IS_ECALL, IS_JAL, IS_JALR, IS_LOAD, IS_LUI, IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU,
+    IS_PADDING, IS_REM, IS_REMU, IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
 };
 use super::lookups::{EcallLookup, MemoryLookup};
 
@@ -55,7 +57,7 @@ const TWO56: BaseField = BaseField::from_u32_unchecked(256);
 /// 常量 4（PcNext = Pc + 4 中的立即数偏移）。
 const FOUR: BaseField = BaseField::from_u32_unchecked(4);
 
-/// CPU AIR 组件 — 封装 87 列 trace 的 FrameworkEval 实现（v3）。
+/// CPU AIR 组件 — 封装 132 列 trace 的 FrameworkEval 实现（v3.5）。
 ///
 /// # 结构
 /// - `log_size` — log2(trace 行数)，行数 = 2^log_size
@@ -211,8 +213,10 @@ impl FrameworkEval for CpuAir {
         let two56: E::F = TWO56.into();
         let one: E::F = BaseField::from(1u32).into();
         let four: E::F = FOUR.into();
+        // 常量 2（M 扩展 carry 二元分解：carry_k = lo + 256·hi0 + 512·hi1，512 = 256·2）
+        let two: E::F = BaseField::from(2u32).into();
 
-        // ----- 读取全部 87 列（v3 顺序与 column_layout_v2 一致）-----
+        // ----- 读取全部 132 列（v3.5 顺序与 column_layout_v2 一致）-----
         let mut cols: Vec<E::F> = Vec::with_capacity(NUM_COLUMNS);
         for _ in 0..NUM_COLUMNS {
             cols.push(eval.next_trace_mask());
@@ -509,6 +513,346 @@ impl FrameworkEval for CpuAir {
             eval.add_constraint(is_store_eff.clone() * store_val_diff);
         }
 
+        // ===== M 扩展约束（v3.5 Step 3）：MUL carry chain =====
+        // 参考 RISC Zero / OpenVM：8-bit 部分积 + carry chain。
+        // 将 32-bit 操作数 a, b 分解为 4×8-bit limb：a = Σ aᵢ·256ⁱ，b = Σ bⱼ·256ʲ。
+        // 64-bit 乘积 P = a·b = Σ_{i,j} aᵢ·bⱼ·256^{i+j}，按数位分组为 7 个部分和 S₀..S₆：
+        //   S₀ = a₀·b₀                          (pos 0)
+        //   S₁ = a₀·b₁ + a₁·b₀                  (pos 1)
+        //   S₂ = a₀·b₂ + a₁·b₁ + a₂·b₀          (pos 2)
+        //   S₃ = a₀·b₃ + a₁·b₂ + a₂·b₁ + a₃·b₀  (pos 3, 最大 = 4·65025 = 260100 < p ✓)
+        //   S₄ = a₁·b₃ + a₂·b₂ + a₃·b₁          (pos 4)
+        //   S₅ = a₂·b₃ + a₃·b₂                  (pos 5)
+        //   S₆ = a₃·b₃                          (pos 6)
+        // Carry chain 产生 8 个结果数字 c₀..c₇ + 7 个 carry：
+        //   S₀            = c₀ + 256·carry₀
+        //   Sₖ + carryₖ₋₁ = cₖ + 256·carryₖ   (k=1..6)
+        //   carry₆        = c₇
+        // 结果 c₀..c₃ = COL_MUL_LOW_BASE（低 32 位），c₄..c₇ = COL_MUL_HIGH_BASE（高 32 位）。
+        // carryₖ = lo + 256·hi0 + 512·hi1（二元分解，Step 4 约束 hi0/hi1 ∈ {0,1}）。
+        //
+        // 分组（indicator one-hot 互斥，共享 carry 列）：
+        //   G1 = MUL + MULHU：操作数 (ValueB=rs1, ValueC=rs2)
+        //   G2 = MULH + MULHSU：操作数 (AbsA=|rs1|, AbsB=|rs2|或rs2)
+        //   G3 = DIV + DIVU + REM + REMU：操作数 (DivQuot=q, AbsB=|d|或d)
+        // 每组 8 条约束，度 = indicator(1) × Sₖ(2) = 3 ✓（k=7 为 carry₆−c₇，度 2）。
+        let is_mul = col(IS_MUL);
+        let is_mulh = col(IS_MULH);
+        let is_mulhsu = col(IS_MULHSU);
+        let is_mulhu = col(IS_MULHU);
+        let is_div = col(IS_DIV);
+        let is_divu = col(IS_DIVU);
+        let is_rem = col(IS_REM);
+        let is_remu = col(IS_REMU);
+
+        // 分组 indicator
+        let g1 = is_mul.clone() + is_mulhu.clone();
+        let g2 = is_mulh.clone() + is_mulhsu.clone();
+        let g3 = is_div.clone() + is_divu.clone() + is_rem.clone() + is_remu.clone();
+
+        // carryₖ = lo + 256·hi0 + 512·hi1（512 = 256·2）
+        let carry_k = |k: usize| -> E::F {
+            col(COL_MUL_CARRY_LO_BASE + k)
+                + two56.clone() * col(COL_MUL_CARRY_HI0_BASE + k)
+                + two56.clone() * two.clone() * col(COL_MUL_CARRY_HI1_BASE + k)
+        };
+
+        // cₖ：k=0..3 → MUL_LOW（低 32 位 limb），k=4..7 → MUL_HIGH（高 32 位 limb）
+        let c_k = |k: usize| -> E::F {
+            if k < 4 {
+                col(COL_MUL_LOW_BASE + k)
+            } else {
+                col(COL_MUL_HIGH_BASE + (k - 4))
+            }
+        };
+
+        // 部分和 Sₖ(a_base, b_base) = Σ_{i+j=k, i,j∈[0,3]} a_i · b_j
+        // i 范围：i_min = max(0, k−3)，i_max = min(k, 3)
+        let partial_sum = |k: usize, a_base: usize, b_base: usize| -> E::F {
+            let i_min = if k > 3 { k - 3 } else { 0 };
+            let i_max = k.min(3);
+            let mut sum = col(a_base + i_min) * col(b_base + (k - i_min));
+            for i in (i_min + 1)..=i_max {
+                sum = sum + col(a_base + i) * col(b_base + (k - i));
+            }
+            sum
+        };
+
+        // G1 = MUL + MULHU：操作数 (ValueB=rs1, ValueC=rs2)
+        {
+            let (a_base, b_base) = (COL_VALUE_B_BASE, COL_VALUE_C_BASE);
+            // k=0: S₀ − c₀ − 256·carry₀ = 0
+            let e0 = partial_sum(0, a_base, b_base) - c_k(0) - two56.clone() * carry_k(0);
+            eval.add_constraint(g1.clone() * e0);
+            // k=1..6: Sₖ + carryₖ₋₁ − cₖ − 256·carryₖ = 0
+            for k in 1..7usize {
+                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1) - c_k(k)
+                    - two56.clone() * carry_k(k);
+                eval.add_constraint(g1.clone() * ek);
+            }
+            // k=7: carry₆ − c₇ = 0
+            let e7 = carry_k(6) - c_k(7);
+            eval.add_constraint(g1.clone() * e7);
+        }
+
+        // G2 = MULH + MULHSU：操作数 (AbsA=|rs1|, AbsB=|rs2|/rs2)
+        {
+            let (a_base, b_base) = (COL_ABS_A_BASE, COL_ABS_B_BASE);
+            let e0 = partial_sum(0, a_base, b_base) - c_k(0) - two56.clone() * carry_k(0);
+            eval.add_constraint(g2.clone() * e0);
+            for k in 1..7usize {
+                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1) - c_k(k)
+                    - two56.clone() * carry_k(k);
+                eval.add_constraint(g2.clone() * ek);
+            }
+            let e7 = carry_k(6) - c_k(7);
+            eval.add_constraint(g2.clone() * e7);
+        }
+
+        // G3 = DIV + DIVU + REM + REMU：操作数 (DivQuot=q, AbsB=|d|/d)
+        {
+            let (a_base, b_base) = (COL_DIV_QUOT_BASE, COL_ABS_B_BASE);
+            let e0 = partial_sum(0, a_base, b_base) - c_k(0) - two56.clone() * carry_k(0);
+            eval.add_constraint(g3.clone() * e0);
+            for k in 1..7usize {
+                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1) - c_k(k)
+                    - two56.clone() * carry_k(k);
+                eval.add_constraint(g3.clone() * ek);
+            }
+            let e7 = carry_k(6) - c_k(7);
+            eval.add_constraint(g3.clone() * e7);
+        }
+
+        // ===== M 扩展约束（v3.5 Step 4）：Carry 二元分解 range check =====
+        // carryₖ = lo + 256·hi0 + 512·hi1，其中 lo ∈ [0,255]（信任，同 ADD/SUB limb），
+        // hi0, hi1 ∈ {0,1}（binality 强制）。限制 carry ∈ [0, 1023]，覆盖实际范围 ~1020。
+        //
+        // 注：无需独立的"carry 重建"约束——Step 3 的 carry chain 直接使用分解形式
+        // (lo + 256·hi0 + 512·hi1)，不存在独立的 carry 列需要重建。
+        // 非 M 行 carry 列为 0（满足 binality），故采用通用（无 gating）约束，度 2。
+        //
+        // hi0 binality (k=0..6)：hi0ₖ·(hi0ₖ−1) = 0
+        for k in 0..7usize {
+            let hi0_k = col(COL_MUL_CARRY_HI0_BASE + k);
+            eval.add_constraint(hi0_k.clone() * (hi0_k - one.clone()));
+        }
+        // hi1 binality (k=0..6)：hi1ₖ·(hi1ₖ−1) = 0
+        for k in 0..7usize {
+            let hi1_k = col(COL_MUL_CARRY_HI1_BASE + k);
+            eval.add_constraint(hi1_k.clone() * (hi1_k - one.clone()));
+        }
+
+        // ===== M 扩展约束（v3.5 Step 5）：符号处理 + MUL 结果 =====
+        // 符号模型（参考 OpenVM）：
+        // - sign_a/sign_b ∈ {0,1}：rs1/rs2 符号位（1=负数）
+        // - abs_a = sign_a ? (2³²−rs1) : rs1；abs_b 同理（MULHSU 的 abs_b=rs2，sign_b=0）
+        // - low_nonzero ∈ {0,1}：乘积低 32 位 ≠ 0（结果补码借位）
+        // - result_sign（COL_DIV_SIGN_Q，复用）：MULH=sign_a⊕sign_b，MULHSU=sign_a
+        // - result_carry（COL_DIV_SIGN_R，复用）：结果调整 low16→high16 进位
+        // - 结果调整：sign=0 → rd_eff=high32；sign=1 → rd_eff=2³²−high32−low_nonzero
+        //   （修正公式：2³²−high32−low_nonzero，已验证 a=−1,b=2 → 0xFFFFFFFF ✓）
+        //
+        // 列复用（one-hot 互斥）：carry0/carry1（COL_CARRY_FLAG_BASE）在 MULH/MULHSU
+        // 行存 abs 重建 borrow，与 ADD/SUB 互斥；DIV_SIGN_Q/R 存结果符号/进位，与 DIV 互斥。
+        let sign_a = col(COL_SIGN_A);
+        let sign_b = col(COL_SIGN_B);
+        let low_nonzero = col(COL_LOW_NONZERO);
+        let result_sign = col(COL_DIV_SIGN_Q);
+        let result_carry = col(COL_DIV_SIGN_R);
+
+        // 16-bit 半字辅助值（abs / mul_high）
+        let abs_a_low = word_low16(COL_ABS_A_BASE);
+        let abs_a_high = word_high16(COL_ABS_A_BASE);
+        let abs_b_low = word_low16(COL_ABS_B_BASE);
+        let abs_b_high = word_high16(COL_ABS_B_BASE);
+        let mul_high_low = word_low16(COL_MUL_HIGH_BASE);
+        let mul_high_high = word_high16(COL_MUL_HIGH_BASE);
+
+        // ===== MUL 结果匹配（gated by IsMul，度 2）=====
+        // MUL 取低 32 位：rd_eff = mul_low（逐 limb 相等）
+        for i in 0..4usize {
+            let diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_MUL_LOW_BASE + i);
+            eval.add_constraint(is_mul.clone() * diff);
+        }
+        // ===== MULHU 结果匹配（gated by IsMulhu，度 2）=====
+        // MULHU 取高 32 位：rd_eff = mul_high（逐 limb 相等）
+        for i in 0..4usize {
+            let diff = col(COL_VALUE_A_EFF_BASE + i) - col(COL_MUL_HIGH_BASE + i);
+            eval.add_constraint(is_mulhu.clone() * diff);
+        }
+
+        // ===== sign / low_nonzero binality（通用，度 2）=====
+        eval.add_constraint(sign_a.clone() * (sign_a.clone() - one.clone()));
+        eval.add_constraint(sign_b.clone() * (sign_b.clone() - one.clone()));
+        eval.add_constraint(low_nonzero.clone() * (low_nonzero.clone() - one.clone()));
+
+        // ===== abs_a 重建（gated by g2=MULH+MULHSU，度 3）=====
+        // sign_a=0: abs_a = rs1；sign_a=1: abs_a = 2³²−rs1（abs+rs1=2³²，16-bit borrow）
+        //   sign=1: abs_low + rs1_low = 65536·carry0；abs_high + rs1_high + carry0 = 65536
+        // 合并：g2·[(1−s)·(abs−rs1) + s·(abs+rs1±carry)] = 0
+        let abs_a_low_expr = (one.clone() - sign_a.clone()) * (abs_a_low.clone() - rs1_low.clone())
+            + sign_a.clone() * (abs_a_low.clone() + rs1_low.clone() - six5536.clone() * carry0.clone());
+        eval.add_constraint(g2.clone() * abs_a_low_expr);
+        let abs_a_high_expr = (one.clone() - sign_a.clone()) * (abs_a_high.clone() - rs1_high.clone())
+            + sign_a.clone() * (abs_a_high.clone() + rs1_high.clone() + carry0.clone() - six5536.clone());
+        eval.add_constraint(g2.clone() * abs_a_high_expr);
+        // carry0 binality（gated by g2，度 3）：复用 COL_CARRY_FLAG_BASE 作 abs_a borrow
+        eval.add_constraint(g2.clone() * carry0.clone() * (carry0.clone() - one.clone()));
+
+        // ===== abs_b 重建（gated by g2，度 3）=====
+        // MULHSU 的 abs_b = rs2（sign_b=0）；MULH 的 abs_b = |rs2|
+        let abs_b_low_expr = (one.clone() - sign_b.clone()) * (abs_b_low.clone() - rs2_low.clone())
+            + sign_b.clone() * (abs_b_low.clone() + rs2_low.clone() - six5536.clone() * carry1.clone());
+        eval.add_constraint(g2.clone() * abs_b_low_expr);
+        let abs_b_high_expr = (one.clone() - sign_b.clone()) * (abs_b_high.clone() - rs2_high.clone())
+            + sign_b.clone() * (abs_b_high.clone() + rs2_high.clone() + carry1.clone() - six5536.clone());
+        eval.add_constraint(g2.clone() * abs_b_high_expr);
+        // carry1 binality（gated by g2，度 3）：复用 COL_CARRY_FLAG_BASE+1 作 abs_b borrow
+        eval.add_constraint(g2.clone() * carry1.clone() * (carry1.clone() - one.clone()));
+
+        // ===== result_sign / result_carry binality（gated by g2，度 3）=====
+        eval.add_constraint(g2.clone() * result_sign.clone() * (result_sign.clone() - one.clone()));
+        eval.add_constraint(g2.clone() * result_carry.clone() * (result_carry.clone() - one.clone()));
+
+        // ===== 结果符号调整（gated by g2=MULH+MULHSU，度 3）=====
+        // sign=0: rd_eff = high32；sign=1: rd_eff = 2³²−high32−low_nonzero
+        //   sign=1: rd_low + high_low + low_nz = 65536·c；rd_high + high_high + c = 65536
+        let res_low = (one.clone() - result_sign.clone()) * (rd_eff_low.clone() - mul_high_low.clone())
+            + result_sign.clone() * (rd_eff_low.clone() + mul_high_low.clone() + low_nonzero.clone()
+                - six5536.clone() * result_carry.clone());
+        eval.add_constraint(g2.clone() * res_low);
+        let res_high = (one.clone() - result_sign.clone()) * (rd_eff_high.clone() - mul_high_high.clone())
+            + result_sign.clone() * (rd_eff_high.clone() + mul_high_high.clone() + result_carry.clone()
+                - six5536.clone());
+        eval.add_constraint(g2.clone() * res_high);
+
+        // ===== M 扩展约束（v3.5 Step 6）：DIV 约束 =====
+        // DIV 系列验证（参考 SP1 / OpenVM：q·d+r=n 恒等式 + 范围检查）：
+        // - G3 carry chain（Step 3）已约束 q_abs × abs_b = low32 + high32·2³²
+        // - high32 = 0（乘积 ≤ 32 位，因 q·d ≤ n < 2³²）
+        // - 恒等式：low32 + r_abs = abs_a（q·d + r = n 的绝对值形式）
+        // - 范围检查：r_abs < abs_b（当非 special 时，确保商唯一）
+        // - abs 重建：abs_a = |rs1|, abs_b = |rs2|（复用 Step 5 模式，gated by g3）
+        // - 结果匹配：rd_eff = sign_adjust(q_abs) (DIV/DIVU) 或 sign_adjust(r_abs) (REM/REMU)
+        // - 特殊情况：is_special → sign_q = 1（d=0 时 q=−1, overflow 时 q=INT_MIN）
+        //
+        // 列复用（one-hot 互斥，DIV 行与其他指令不冲突）：
+        // - carry0 (COL_CARRY_FLAG_BASE) → abs_a 重建 borrow（与 ADD/SUB/MULH 互斥）
+        // - carry1 (COL_CARRY_FLAG_BASE+1) → 恒等式 carry_id（与 ADD/SUB/MULH 互斥）
+        // - LOW_NONZERO → 范围检查 borrow0（universal binality 已约束）
+        // - HelperA[0] → abs_b 重建 borrow（与 Load/Store/JALR 互斥）
+        // - HelperA[1] → 范围检查 borrow1（正常 = 0）
+        // - HelperA[2] → 结果符号调整 carry
+        // - HelperB[0..3] → 范围检查 diff（abs_b − r_abs − 1，4×8-bit limb）
+
+        // 读取 DIV 专用 witness 列
+        let is_special = col(COL_DIV_IS_SPECIAL);
+        let sign_q = col(COL_DIV_SIGN_Q);
+        let sign_r = col(COL_DIV_SIGN_R);
+        let quot_low = word_low16(COL_DIV_QUOT_BASE);
+        let quot_high = word_high16(COL_DIV_QUOT_BASE);
+        let rem_low = word_low16(COL_DIV_REM_BASE);
+        let rem_high = word_high16(COL_DIV_REM_BASE);
+        let mul_low_low = word_low16(COL_MUL_LOW_BASE);
+        let mul_low_high = word_high16(COL_MUL_LOW_BASE);
+
+        // 复用列读取
+        let div_borrow_a = col(COL_CARRY_FLAG_BASE);       // abs_a 重建 borrow
+        let div_borrow_b = col(COL_HELPER_A_BASE);          // abs_b 重建 borrow
+        let div_carry_id = col(COL_CARRY_FLAG_BASE + 1);    // 恒等式 carry
+        let div_borrow0 = col(COL_LOW_NONZERO);             // 范围检查 borrow0
+        let div_borrow1 = col(COL_HELPER_A_BASE + 1);       // 范围检查 borrow1
+        let div_adj_carry = col(COL_HELPER_A_BASE + 2);     // 结果符号调整 carry
+        let diff_low = word_low16(COL_HELPER_B_BASE);
+        let diff_high = word_high16(COL_HELPER_B_BASE);
+
+        // ----- high32 = 0（gated by g3，度 2）-----
+        // q·d ≤ n < 2³²，故乘积高位 = 0（d=0 时乘积=0，overflow 时 2³¹×1=2³¹ < 2³²）
+        for i in 0..4usize {
+            eval.add_constraint(g3.clone() * col(COL_MUL_HIGH_BASE + i));
+        }
+
+        // ----- abs_a 重建（gated by g3，度 3）-----
+        // sign_a=0: abs_a = rs1；sign_a=1: abs_a = 2³²−rs1（16-bit borrow）
+        let div_abs_a_low = (one.clone() - sign_a.clone()) * (abs_a_low.clone() - rs1_low.clone())
+            + sign_a.clone() * (abs_a_low.clone() + rs1_low.clone() - six5536.clone() * div_borrow_a.clone());
+        eval.add_constraint(g3.clone() * div_abs_a_low);
+        let div_abs_a_high = (one.clone() - sign_a.clone()) * (abs_a_high.clone() - rs1_high.clone())
+            + sign_a.clone() * (abs_a_high.clone() + rs1_high.clone() + div_borrow_a.clone() - six5536.clone());
+        eval.add_constraint(g3.clone() * div_abs_a_high);
+        // div_borrow_a binality（gated by g3，度 3）
+        eval.add_constraint(g3.clone() * div_borrow_a.clone() * (div_borrow_a.clone() - one.clone()));
+
+        // ----- abs_b 重建（gated by g3，度 3）-----
+        let div_abs_b_low = (one.clone() - sign_b.clone()) * (abs_b_low.clone() - rs2_low.clone())
+            + sign_b.clone() * (abs_b_low.clone() + rs2_low.clone() - six5536.clone() * div_borrow_b.clone());
+        eval.add_constraint(g3.clone() * div_abs_b_low);
+        let div_abs_b_high = (one.clone() - sign_b.clone()) * (abs_b_high.clone() - rs2_high.clone())
+            + sign_b.clone() * (abs_b_high.clone() + rs2_high.clone() + div_borrow_b.clone() - six5536.clone());
+        eval.add_constraint(g3.clone() * div_abs_b_high);
+        // div_borrow_b binality（gated by g3，度 3）
+        eval.add_constraint(g3.clone() * div_borrow_b.clone() * (div_borrow_b.clone() - one.clone()));
+
+        // ----- 恒等式：low32 + r_abs = abs_a（gated by g3，度 2）-----
+        // low16: mul_low_low + rem_low − abs_a_low − 65536·carry_id = 0
+        let id_low = mul_low_low.clone() + rem_low.clone() - abs_a_low.clone()
+            - six5536.clone() * div_carry_id.clone();
+        eval.add_constraint(g3.clone() * id_low);
+        // high16: mul_low_high + rem_high + carry_id − abs_a_high = 0
+        let id_high = mul_low_high.clone() + rem_high.clone() + div_carry_id.clone() - abs_a_high.clone();
+        eval.add_constraint(g3.clone() * id_high);
+        // div_carry_id binality（gated by g3，度 3）
+        eval.add_constraint(g3.clone() * div_carry_id.clone() * (div_carry_id.clone() - one.clone()));
+
+        // ----- is_special / sign_q / sign_r binality（gated by g3，度 3）-----
+        eval.add_constraint(g3.clone() * is_special.clone() * (is_special.clone() - one.clone()));
+        eval.add_constraint(g3.clone() * sign_q.clone() * (sign_q.clone() - one.clone()));
+        eval.add_constraint(g3.clone() * sign_r.clone() * (sign_r.clone() - one.clone()));
+
+        // ----- 特殊情况：有符号 DIV 的 is_special → sign_q = 1（gated by is_div，度 3）-----
+        // d=0: q=−1 (sign_q=1); overflow: q=INT_MIN (sign_q=1)
+        // 注意：仅对有符号 DIV 约束，DIVU 的 d=0 时 sign_q=0（无符号商）
+        eval.add_constraint(is_div.clone() * is_special.clone() * (one.clone() - sign_q.clone()));
+
+        // ----- 范围检查：r_abs < abs_b（gated by g3·(1−is_special)，度 3）-----
+        // diff = abs_b − r_abs − 1 ≥ 0（borrow1 = 0）
+        // low16: abs_b_low − rem_low − 1 + 65536·borrow0 − diff_low = 0
+        // high16: abs_b_high − rem_high − borrow0 + 65536·borrow1 − diff_high = 0
+        // borrow1 = 0
+        let not_special = one.clone() - is_special.clone();
+        let range_gate = g3.clone() * not_special.clone();
+        let range_low = abs_b_low.clone() - rem_low.clone() - one.clone()
+            + six5536.clone() * div_borrow0.clone() - diff_low.clone();
+        eval.add_constraint(range_gate.clone() * range_low);
+        let range_high = abs_b_high.clone() - rem_high.clone() - div_borrow0.clone()
+            + six5536.clone() * div_borrow1.clone() - diff_high.clone();
+        eval.add_constraint(range_gate.clone() * range_high);
+        // borrow1 = 0（gated by range_gate，度 3）
+        eval.add_constraint(range_gate.clone() * div_borrow1.clone());
+
+        // ----- 结果匹配：DIV/DIVU → rd_eff = sign_adjust(q_abs)（度 3）-----
+        // sign_q=0: rd_eff = q_abs；sign_q=1: rd_eff = 2³²−q_abs
+        let is_div_q = is_div.clone() + is_divu.clone();
+        let div_res_low = (one.clone() - sign_q.clone()) * (rd_eff_low.clone() - quot_low.clone())
+            + sign_q.clone() * (rd_eff_low.clone() + quot_low.clone() - six5536.clone() * div_adj_carry.clone());
+        eval.add_constraint(is_div_q.clone() * div_res_low);
+        let div_res_high = (one.clone() - sign_q.clone()) * (rd_eff_high.clone() - quot_high.clone())
+            + sign_q.clone() * (rd_eff_high.clone() + quot_high.clone() + div_adj_carry.clone() - six5536.clone());
+        eval.add_constraint(is_div_q.clone() * div_res_high);
+
+        // ----- 结果匹配：REM/REMU → rd_eff = sign_adjust(r_abs)（度 3）-----
+        // sign_r=0: rd_eff = r_abs；sign_r=1: rd_eff = 2³²−r_abs
+        let is_rem_r = is_rem.clone() + is_remu.clone();
+        let rem_res_low = (one.clone() - sign_r.clone()) * (rd_eff_low.clone() - rem_low.clone())
+            + sign_r.clone() * (rd_eff_low.clone() + rem_low.clone() - six5536.clone() * div_adj_carry.clone());
+        eval.add_constraint(is_rem_r.clone() * rem_res_low);
+        let rem_res_high = (one.clone() - sign_r.clone()) * (rd_eff_high.clone() - rem_high.clone())
+            + sign_r.clone() * (rd_eff_high.clone() + rem_high.clone() + div_adj_carry.clone() - six5536.clone());
+        eval.add_constraint(is_rem_r.clone() * rem_res_high);
+
+        // div_adj_carry binality（gated by g3，度 3）—— DIV/REM one-hot 共享同一 carry 列
+        eval.add_constraint(g3.clone() * div_adj_carry.clone() * (div_adj_carry.clone() - one.clone()));
+
         // ===== Phase 3.4 约束 56：Memory logup claim（gated by Option<MemoryLookup>）=====
         // 当 memory_lookup = Some(lookup) 时，为每行 Load/Store 发送 logup claim：
         //   - Load 行：values = (MemAddr×4, rd_eff×4, 0)，multiplicity = +1
@@ -627,6 +971,7 @@ impl FrameworkEval for CpuAir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stwo_backend::column_layout_v2::{IS_MUL, IS_REMU};
     use stwo::core::fields::m31::M31;
 
     #[test]
@@ -664,9 +1009,9 @@ mod tests {
 
     #[test]
     fn test_cpu_air_ecall_column_layout() {
-        // v3.3：ECALL dispatch 列布局常量（缩减为 1 列 SyscallId）
-        assert_eq!(IS_ECALL, 54, "IS_ECALL 应在 indicator 范围 [22, 56] 内");
-        assert_eq!(COL_SYSCALL_ID, 70);
+        // v3.4：ECALL dispatch 列布局常量（缩减为 1 列 SyscallId）
+        assert_eq!(IS_ECALL, 54, "IS_ECALL 应在 indicator 范围 [22, 65) 内");
+        assert_eq!(COL_SYSCALL_ID, 78);
         assert_eq!(ECALL_DISPATCH_NUM_COLUMNS, 1);
         // v3：1 列布局（仅 SyscallId）
         assert_eq!(
@@ -690,8 +1035,8 @@ mod tests {
 
     #[test]
     fn test_column_layout_consistency() {
-        // v3.3：验证 CpuAir 使用的列索引与 column_layout_v2 一致
-        // 变更：移除 PcNextAux 列（P1.3），JALR 复用 HelperA
+        // v3.4：验证 CpuAir 使用的列索引与 column_layout_v2 一致
+        // 变更：新增 M 扩展 8 indicator，IS_PADDING 及后续列位移 +8
         assert_eq!(COL_PC_BASE, 0);
         assert_eq!(COL_PC_NEXT_BASE, 4);
         assert_eq!(COL_CARRY_FLAG_BASE, 8);
@@ -712,11 +1057,14 @@ mod tests {
         assert_eq!(IS_ADDI, 34);
         assert_eq!(IS_ADD, 43);
         assert_eq!(IS_SUB, 44);
-        assert_eq!(IS_PADDING, 56);
-        assert_eq!(COL_HELPER_A_BASE, 57);
-        assert_eq!(COL_HELPER_B_BASE, 61);
-        assert_eq!(COL_TAKEN, 65);
-        assert_eq!(NUM_COLUMNS, 73);
-        assert_eq!(NUM_INSTRUCTION_CATEGORIES, 35);
+        // M 扩展 indicator（56-63）
+        assert_eq!(IS_MUL, 56);
+        assert_eq!(IS_REMU, 63);
+        assert_eq!(IS_PADDING, 64);
+        assert_eq!(COL_HELPER_A_BASE, 65);
+        assert_eq!(COL_HELPER_B_BASE, 69);
+        assert_eq!(COL_TAKEN, 73);
+        assert_eq!(NUM_COLUMNS, 132);
+        assert_eq!(NUM_INSTRUCTION_CATEGORIES, 43);
     }
 }

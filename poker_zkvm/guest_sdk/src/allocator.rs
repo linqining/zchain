@@ -2,7 +2,7 @@
 //!
 //! # 并发说明
 //!
-//! riscv32i-unknown-none-elf target 默认不支持 atomic 指令（无 A 扩展），
+//! riscv32im-unknown-none-elf target 默认不支持 atomic 指令（无 A 扩展），
 //! 且 ZKVM guest 为单线程无抢占，因此使用 `static mut` + unsafe 直接读写
 //! 替代 `AtomicU32::compare_exchange`。这是 sound 的因为：
 //! 1. guest crate 是 `no_std + no_main`，无 OS 线程

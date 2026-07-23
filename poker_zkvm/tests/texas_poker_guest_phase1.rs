@@ -26,7 +26,7 @@ use poker_zkvm::isa::executor::execute_elf;
 /// release 编译产物位于其自己的 target 目录。
 fn guest_elf_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("guests/texas_poker/target/riscv32i-unknown-none-elf/release/texas_poker_guest");
+    p.push("guests/texas_poker/target/riscv32im-unknown-none-elf/release/texas_poker_guest");
     p
 }
 

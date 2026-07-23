@@ -2,7 +2,7 @@
 //!
 //! 严格遵循 `.trae/documents/stwo_phase2_cpu_air_design.md` Step 2.5：
 //! - 集成 Stwo 原生 Prover/Verifier API
-//! - 输入 `NativeTrace`（87 列（v3）× 2^log_size 行）→ 输出 `StarkProof`
+//! - 输入 `NativeTrace`（132 列（v3.5）× 2^log_size 行）→ 输出 `StarkProof`
 //! - prove/verify roundtrip 的主入口
 //!
 //! ## 工作流
@@ -11,7 +11,7 @@
 //! 1. `PcsConfig::default()` + `SimdBackend::precompute_twiddles(...)`
 //! 2. `Poseidon252Channel::default()` + `CommitmentSchemeProver::new(config, &twiddles)`
 //! 3. 提交空 preprocessed trace（tree 0）→ `tree_builder.extend_evals(vec![]); commit()`
-//! 4. 提交 original trace（tree 1，87 列（v3））→ `tree_builder.extend_evals(columns); commit()`
+//! 4. 提交 original trace（tree 1，132 列（v3.5））→ `tree_builder.extend_evals(columns); commit()`
 //! 5. `FrameworkComponent::new(&mut allocator, CpuAir, SecureField::zero())`
 //! 6. `prove(&[&component], &mut channel, commitment_scheme)` → `StarkProof`
 //!
@@ -75,10 +75,10 @@ pub type CpuProof = StarkProof<Poseidon252MerkleHasher>;
 /// 3. `.bit_reverse()` — 转换为 `BitReversedOrder`（Stwo 提交要求）
 ///
 /// # 参数
-/// - `trace` — 87 列（v3）× 2^log_size 行的原生 M31 trace
+/// - `trace` — 132 列（v3.5）× 2^log_size 行的原生 M31 trace
 ///
 /// # 返回
-/// 87 个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
+/// `NUM_COLUMNS`（v3.5 = 132）个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
 fn native_trace_to_evaluations(
     trace: &NativeTrace,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
@@ -107,7 +107,7 @@ fn native_trace_to_evaluations(
 /// 生成 CPU trace 的 Stwo STARK 证明。
 ///
 /// # 参数
-/// - `trace` — 87 列（v3）× 2^log_size 行的原生 M31 trace（由 `trace_to_native` 生成）
+/// - `trace` — 132 列（v3.5）× 2^log_size 行的原生 M31 trace（由 `trace_to_native` 生成）
 ///
 /// # 返回
 /// `StarkProof<Blake2sMerkleHasher>` — 可由 [`verify_cpu_proof`] 验证
@@ -145,7 +145,7 @@ pub fn prove_cpu_trace(trace: &NativeTrace) -> Result<CpuProof, ProvingError> {
         tree_builder.commit(&mut channel);
     }
 
-    // 4. 提交 original trace（tree 1，87 列（v3））
+    // 4. 提交 original trace（tree 1，132 列（v3.5））
     {
         let columns = native_trace_to_evaluations(trace);
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -200,7 +200,7 @@ pub fn verify_cpu_proof(proof: CpuProof, log_size: u32) -> Result<(), Verificati
     })?;
     commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
 
-    // 3. 从 proof 读取 trace commitment（tree 1，87 列（v3），每列 log_size）
+    // 3. 从 proof 读取 trace commitment（tree 1，132 列（v3.5），每列 log_size）
     let trace_commitment = *proof.commitments.get(1).ok_or_else(|| {
         VerificationError::InvalidStructure(format!(
             "proof.commitments 长度不足：期望 ≥2，实际 {}",
@@ -232,7 +232,7 @@ pub fn verify_cpu_proof(proof: CpuProof, log_size: u32) -> Result<(), Verificati
 //
 // ```text
 // Tree 0 (preprocessed): 空
-// Tree 1 (original):     CPU trace (87 cols) + Memory trace (25 cols) = 112 cols
+// Tree 1 (original):     CPU trace (NUM_COLUMNS=132 cols) + Memory trace (25 cols) = 157 cols
 // Tree 2 (interaction):  CPU logup (4 cols) + Memory logup (4 cols) = 8 cols
 // ```
 //
@@ -305,7 +305,7 @@ pub struct CpuMemoryProof {
 /// 5. `finalize_col()` + `finalize_last()` 返回 (4 CircleEvaluations, claimed_sum)
 ///
 /// # 参数
-/// - `cpu_trace` — CPU original trace evaluations（87 列（v3），bit-reversed order）
+/// - `cpu_trace` — CPU original trace evaluations（132 列（v3.5），bit-reversed order）
 /// - `log_size` — log2(行数)
 /// - `lookup` — MemoryLookup relation 实例（已从 channel draw）
 ///
@@ -412,7 +412,7 @@ fn gen_mem_interaction_trace(
 /// 多组件 prove 主入口：CPU + Memory 联合 STARK proof。
 ///
 /// # 参数
-/// - `cpu_trace` — CPU original trace（87 列（v3）× 2^log_size 行）
+/// - `cpu_trace` — CPU original trace（132 列（v3.5）× 2^log_size 行）
 /// - `mem_trace` — Memory original trace（25 列 × 2^log_size 行）
 ///
 /// # 返回
@@ -460,7 +460,7 @@ pub fn prove_cpu_memory_trace(
         tree_builder.commit(&mut channel);
     }
 
-    // 4. Tree 1：CPU original trace (87 cols) + Memory original trace (25 cols) = 112 cols
+    // 4. Tree 1：CPU original trace (NUM_COLUMNS=132 cols) + Memory original trace (25 cols) = 157 cols
     // 注：`extend_evals` 消费 Vec，需先 clone 一份用于后续 logup interaction trace 生成。
     let cpu_evals = native_trace_to_evaluations(cpu_trace);
     let mem_evals = memory_trace_to_evaluations(mem_trace);
@@ -563,7 +563,7 @@ pub fn verify_cpu_memory_proof(
     })?;
     commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
 
-    // 3. 从 proof 读取 Tree 1 commitment（CPU 87 cols + Memory 25 cols = 112 cols）
+    // 3. 从 proof 读取 Tree 1 commitment（CPU NUM_COLUMNS=132 cols + Memory 25 cols = 157 cols）
     let trace_commitment = *stark_proof.commitments.get(1).ok_or_else(|| {
         VerificationError::InvalidStructure(format!(
             "proof.commitments 长度不足：期望 ≥2，实际 {}",
@@ -927,7 +927,7 @@ mod tests {
     use super::*;
     use crate::isa::Instruction;
     use crate::stwo_backend::column_layout_v2::{
-        COL_SYSCALL_ID, IS_ECALL, IS_PADDING, NUM_COLUMNS,
+        COL_SYSCALL_ID, COL_VALUE_A_EFF_BASE, IS_ECALL, IS_PADDING, NUM_COLUMNS,
     };
     use crate::stwo_backend::trace_native::{
         step_to_m31_row, trace_to_memory_trace, trace_to_native, NativeTrace, TraceBuilder,
@@ -1306,6 +1306,354 @@ mod tests {
 
         let proof = prove_cpu_trace(&trace).expect("prove 失败：多指令序列应满足所有约束");
         verify_cpu_proof(proof, log_size).expect("verify 失败");
+    }
+
+    // =======================================================================
+    // M 扩展测试（v3.5）：MUL / MULHU / MULH / MULHSU
+    // =======================================================================
+    // 验证 Step 3-5 约束（carry chain + binality + abs 重建 + 结果符号调整）
+    // 通过 prove/verify roundtrip 验证正确 trace 通过，篡改 trace 被拒绝。
+
+    #[test]
+    fn test_prove_verify_roundtrip_mul() {
+        // MUL x1, x2, x3：6 × 7 = 42
+        let mut prev = zero_registers();
+        prev[2] = 6;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 42;
+        prove_verify_single_step(0, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_mul_large() {
+        // MUL x1, x2, x3：0x10000 × 0x10000 = 0x100000000 → 低 32 位 = 0（测试 low_nonzero=0 路径）
+        let mut prev = zero_registers();
+        prev[2] = 0x0001_0000;
+        prev[3] = 0x0001_0000;
+        let mut post = prev;
+        post[1] = 0; // 低 32 位 = 0
+        prove_verify_single_step(0, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_mulhu() {
+        // MULHU x1, x2, x3：0xFFFFFFFF × 0xFFFFFFFF = 0xFFFFFFFE00000001 → 高 32 位 = 0xFFFFFFFE
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFF;
+        prev[3] = 0xFFFF_FFFF;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFE;
+        prove_verify_single_step(0, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_mulh_signed_neg_pos() {
+        // MULH x1, x2, x3：-1 × 2 = -2 → 高 32 位 = 0xFFFFFFFF
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFF; // -1
+        prev[3] = 2;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF; // 高 32 位 of -2
+        prove_verify_single_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_mulh_signed_neg_neg() {
+        // MULH x1, x2, x3：-1 × -1 = 1 → 高 32 位 = 0
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFF; // -1
+        prev[3] = 0xFFFF_FFFF; // -1
+        let mut post = prev;
+        post[1] = 0; // 高 32 位 of 1
+        prove_verify_single_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_mulh_signed_neg_pos_large() {
+        // MULH x1, x2, x3：-2 × 3 = -6 → 高 32 位 = 0xFFFFFFFF
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFE; // -2
+        prev[3] = 3;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF; // 高 32 位 of -6
+        prove_verify_single_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_mulhsu() {
+        // MULHSU x1, x2, x3：-1 × 0xFFFFFFFF(unsigned) = -0xFFFFFFFF
+        // → 64-bit = 0xFFFFFFFF00000001，高 32 位 = 0xFFFFFFFF
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFF; // -1 (signed)
+        prev[3] = 0xFFFF_FFFF; // 4294967295 (unsigned)
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF;
+        prove_verify_single_step(0, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_mulhsu_pos_unsigned() {
+        // MULHSU x1, x2, x3：5 × 7 (unsigned) = 35 → 高 32 位 = 0
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 0;
+        prove_verify_single_step(0, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_mul_soundness_tamper_result() {
+        // Soundness：MUL 6×7=42，篡改 rd_eff 为 43，预期 prove 失败
+        // （MUL 结果匹配约束 is_mul·(rd_eff − mul_low) = 0 被违反）
+        let mut prev = zero_registers();
+        prev[2] = 6;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 42;
+        let step = make_step(0, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：rd_eff[0] = 43（正确值 42 的低字节）
+        trace.cols[COL_VALUE_A_EFF_BASE][0] = M31::from(43u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 MUL 结果应导致 prove 失败（结果匹配 soundness）"
+        );
+    }
+
+    #[test]
+    fn test_mulhu_soundness_tamper_high() {
+        // Soundness：MULHU 0xFFFFFFFF²，篡改 mul_high（carry chain 输出），预期 prove 失败
+        // （carry chain 约束 g1·(S_k + carry − c_k − 256·carry_k) = 0 被违反）
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFF;
+        prev[3] = 0xFFFF_FFFF;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFE;
+        let step = make_step(0, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：mul_high[0] += 1（破坏 carry chain 的高位结果）
+        use crate::stwo_backend::column_layout_v2::COL_MUL_HIGH_BASE;
+        trace.cols[COL_MUL_HIGH_BASE][0] =
+            M31::from((trace.cols[COL_MUL_HIGH_BASE][0].0 + 1) & 0xFF);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 MULHU 高位 carry chain 应导致 prove 失败（carry chain soundness）"
+        );
+    }
+
+    // ----- M 扩展 DIV/REM prove/verify roundtrip 测试（Step 6）-----
+
+    #[test]
+    fn test_prove_verify_roundtrip_div_normal() {
+        // DIV x1, x2, x3：100 / 7 = 14 r 2，result = 14
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 14;
+        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_divu() {
+        // DIVU x1, x2, x3：100 / 7 = 14 r 2（无符号），result = 14
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 14;
+        prove_verify_single_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_div_by_zero() {
+        // DIV x1, x2, x3：100 / 0 → q = -1 (0xFFFFFFFF), r = 100（RISC-V 特殊情况）
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 0;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF; // q = -1
+        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_divu_by_zero() {
+        // DIVU x1, x2, x3：100 / 0 → q = 0xFFFFFFFF, r = 100（RISC-V 特殊情况）
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 0;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF;
+        prove_verify_single_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_div_overflow() {
+        // DIV x1, x2, x3：INT_MIN / -1 → q = INT_MIN, r = 0（RISC-V 溢出特殊情况）
+        let mut prev = zero_registers();
+        prev[2] = 0x8000_0000; // INT_MIN
+        prev[3] = 0xFFFF_FFFF; // -1
+        let mut post = prev;
+        post[1] = 0x8000_0000; // q = INT_MIN
+        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_rem() {
+        // REM x1, x2, x3：100 % 7 = 2，result = 2
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 2;
+        prove_verify_single_step(0, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_remu() {
+        // REMU x1, x2, x3：100 % 7 = 2（无符号），result = 2
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 2;
+        prove_verify_single_step(0, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_div_signed_neg() {
+        // DIV x1, x2, x3：-100 / 7 = -14 r 2（有符号截断向零），result = -14
+        let mut prev = zero_registers();
+        prev[2] = (-100i32) as u32; // 0xFFFFFF9C
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = (-14i32) as u32; // 0xFFFFFFF2
+        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_rem_signed_neg() {
+        // REM x1, x2, x3：-100 % 7 = -2（余数符号同被除数），result = -2
+        let mut prev = zero_registers();
+        prev[2] = (-100i32) as u32;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = (-2i32) as u32; // 0xFFFFFFFE
+        prove_verify_single_step(0, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_divu_large() {
+        // DIVU x1, x2, x3：0xFFFFFFFF / 2 = 0x7FFFFFFF r 1
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFF;
+        prev[3] = 2;
+        let mut post = prev;
+        post[1] = 0x7FFF_FFFF;
+        prove_verify_single_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    // ----- M 扩展 DIV soundness 测试（Step 6）-----
+
+    #[test]
+    fn test_div_soundness_tamper_result() {
+        // Soundness：DIV 100/7=14，篡改 rd_eff 为 15，预期 prove 失败
+        // （结果匹配约束 is_div·(rd_eff − sign_adjust(q_abs)) = 0 被违反）
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 14;
+        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：rd_eff = 15（正确值 14）
+        trace.cols[COL_VALUE_A_EFF_BASE][0] = M31::from(15u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 DIV 结果应导致 prove 失败（结果匹配 soundness）"
+        );
+    }
+
+    #[test]
+    fn test_div_soundness_tamper_quotient() {
+        // Soundness：DIV 100/7=14r2，篡改 q_abs 为 15，预期 prove 失败
+        // （恒等式 low32 + r_abs = abs_a 被违反：15×7+2=107≠100）
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 14;
+        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：q_abs = 15（正确值 14）
+        use crate::stwo_backend::column_layout_v2::COL_DIV_QUOT_BASE;
+        trace.cols[COL_DIV_QUOT_BASE][0] = M31::from(15u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 DIV 商应导致 prove 失败（恒等式 soundness）"
+        );
+    }
+
+    #[test]
+    fn test_div_soundness_tamper_remainder() {
+        // Soundness：DIV 100/7=14r2，篡改 r_abs 使 r >= d，预期 prove 失败
+        // （恒等式 low32 + r_abs = abs_a 被违反：98+10=108≠100）
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 14;
+        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：r_abs = 10（正确值 2，10 >= 7 违反范围检查且破坏恒等式）
+        use crate::stwo_backend::column_layout_v2::COL_DIV_REM_BASE;
+        trace.cols[COL_DIV_REM_BASE][0] = M31::from(10u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 DIV 余数应导致 prove 失败（恒等式/范围检查 soundness）"
+        );
     }
 
     // ----- Phase 3 Load/Store prove/verify roundtrip 测试 -----

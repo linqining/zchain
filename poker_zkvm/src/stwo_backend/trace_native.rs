@@ -20,7 +20,12 @@
 
 use stwo::core::fields::m31::M31;
 
-use super::column_layout_v2::{NUM_COLUMNS, WORD_LIMB_COUNT};
+use super::column_layout_v2::{
+    COL_ABS_A_BASE, COL_ABS_B_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE, COL_DIV_REM_BASE,
+    COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_LOW_NONZERO, COL_MUL_CARRY_HI0_BASE,
+    COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE, COL_MUL_LOW_BASE,
+    COL_SIGN_A, COL_SIGN_B, NUM_COLUMNS, WORD_LIMB_COUNT,
+};
 
 // ===========================================================================
 // u32 ↔ M31 limb 转换
@@ -277,7 +282,7 @@ impl TraceBuilder {
         log_size
     }
 
-    /// 填充一行（直接提供 NUM_COLUMNS 个 M31 值，v3 = 87）。
+    /// 填充一行（直接提供 NUM_COLUMNS 个 M31 值，v3.5 = 132）。
     ///
     /// # Panics
     /// 若 `next_row >= num_rows()`，panic（须先 fill_padding）
@@ -342,7 +347,7 @@ impl TraceBuilder {
 ///
 /// # 算法
 /// 1. 遍历 `trace.steps()`
-/// 2. 对每个 step 调用 [`step_to_m31_row`] 生成 NUM_COLUMNS 个 M31 值（v3 = 87）
+/// 2. 对每个 step 调用 [`step_to_m31_row`] 生成 NUM_COLUMNS 个 M31 值（v3.5 = 132）
 /// 3. 用 `TraceBuilder::fill_row` 填充
 /// 4. `fill_padding_to_full` 填充到 2^log_size 行（padding 行 IsPadding=1）
 /// 5. `finalize` 返回 `NativeTrace`
@@ -351,7 +356,7 @@ impl TraceBuilder {
 /// - `trace` — emulator 执行 trace
 ///
 /// # 返回
-/// 列主序 `NativeTrace`，列数 = `NUM_COLUMNS`（v3 = 87），行数 = 2^log_size
+/// 列主序 `NativeTrace`，列数 = `NUM_COLUMNS`（v3.5 = 132），行数 = 2^log_size
 #[must_use]
 pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
     let num_steps = trace.len();
@@ -375,21 +380,22 @@ pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
     builder.finalize()
 }
 
-/// 将单个 emulator `Step` 转换为 73 列 M31 row（v3.3 布局）。
+/// 将单个 emulator `Step` 转换为 132 列 M31 row（v3.5 布局）。
 ///
 /// # 参数
 /// - `step` — emulator 执行的单步记录
 /// - `prev_registers` — 前一步的寄存器快照（用于计算 ValueB = prev[rs1] 等）
 ///
 /// # 返回
-/// 长度 = `NUM_COLUMNS`（v3.3 = 73）的 `Vec<M31>`
+/// 长度 = `NUM_COLUMNS`（v3.5 = 132）的 `Vec<M31>`
 ///
-/// # v3.3 实现（P1.3）
-/// 在 v3.2（77 列）基础上移除 PcNextAux 列：
-/// - PcNextAux 仅用于 JALR 约束，与 HelperA 使用互斥
-/// - JALR 行 HelperA 复用为 PcNextAux 值
-/// 保留：PC/PcNext (8) + ArithFlag (2) + ValueAEff/B/C (12) +
-///       Indicator (35) + HelperA/B (8) + Taken (1) + MemAddr (4) + SyscallId (1) + PcCarry (2) = 73
+/// # v3.5 实现（M 扩展算术约束）
+/// 在 v3.4（81 列）基础上追加 M 扩展算术约束 witness 列（+51 列 = 132 列）：
+/// - MUL carry chain（col 81-101）：7 carry × (lo8 + hi0 + hi1)
+/// - MUL 低位/高位结果（col 102-105, 128-131）+ abs/sign（col 106-116）
+/// - DIV witness（col 117-127）：quotient / remainder / special / sign
+/// 基础 81 列保留 v3.3 设计：PC/PcNext (8) + ArithFlag (2) + ValueAEff/B/C (12) +
+///       Indicator (43) + HelperA/B (8) + Taken (1) + MemAddr (4) + SyscallId (1) + PcCarry (2) = 81
 #[must_use]
 pub fn step_to_m31_row(
     step: &crate::trace::Step,
@@ -589,6 +595,157 @@ pub fn step_to_m31_row(
         let (pc_carry0, pc_carry1) = compute_pc_carries(step.pc, next_pc);
         row[COL_PC_CARRY_FLAG_BASE] = M31::from(pc_carry0);
         row[COL_PC_CARRY_FLAG_BASE + 1] = M31::from(pc_carry1);
+    }
+
+    // ----- M 扩展算术约束 witness 填充 -----
+    // 参考 RISC Zero / OpenVM：8-bit 部分积 carry chain + abs/sign 分解。
+    // MUL/DIV 共享 carry 列（81-101），one-hot indicator 互斥保证同一行只使用一组。
+    // c₀..c₃ → COL_MUL_LOW（乘积低 32 位），c₄..c₇ → COL_MUL_HIGH（乘积高 32 位）。
+    match &step.instruction {
+        Instruction::Mul { .. } | Instruction::Mulhu { .. } => {
+            // 无符号乘法：carry chain on (value_b, value_c)（原始无符号值）
+            let (carries, low32, high32) = compute_mul_carries(value_b, value_c);
+            fill_mul_carries(&mut row, &carries);
+            fill_word(&mut row, COL_MUL_LOW_BASE, low32);
+            fill_word(&mut row, COL_MUL_HIGH_BASE, high32);
+        }
+        Instruction::Mulh { .. } => {
+            // 有符号×有符号：先取绝对值，carry chain on (|rs1|, |rs2|)
+            let (abs_a, sign_a) = compute_abs_value(value_b);
+            let (abs_b, sign_b) = compute_abs_value(value_c);
+            let (carries, low32, high32) = compute_mul_carries(abs_a, abs_b);
+            fill_mul_carries(&mut row, &carries);
+            fill_word(&mut row, COL_MUL_LOW_BASE, low32);
+            fill_word(&mut row, COL_MUL_HIGH_BASE, high32);
+            fill_word(&mut row, COL_ABS_A_BASE, abs_a);
+            fill_word(&mut row, COL_ABS_B_BASE, abs_b);
+            row[COL_SIGN_A] = M31::from(sign_a);
+            row[COL_SIGN_B] = M31::from(sign_b);
+            let low_nonzero = u32::from(low32 != 0);
+            row[COL_LOW_NONZERO] = M31::from(low_nonzero);
+            // abs 重建 borrow（复用 COL_CARRY_FLAG_BASE，与 ADD/SUB 互斥）
+            // carry0 = abs_a borrow，carry1 = abs_b borrow（仅 sign=1 时有意义）
+            row[COL_CARRY_FLAG_BASE] = M31::from(if sign_a == 1 { compute_abs_borrow(value_b) } else { 0 });
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(if sign_b == 1 { compute_abs_borrow(value_c) } else { 0 });
+            // 结果符号 = sign_a ⊕ sign_b + 结果调整 carry（复用 COL_DIV_SIGN_Q/R，与 DIV 互斥）
+            let result_sign = sign_a ^ sign_b;
+            row[COL_DIV_SIGN_Q] = M31::from(result_sign);
+            row[COL_DIV_SIGN_R] = M31::from(if result_sign == 1 {
+                // rd_eff + high32 + low_nonzero = 2³²，carry = 低 16 位进位
+                u32::from(((value_a_eff & 0xFFFF) + (high32 & 0xFFFF) + low_nonzero) >= 65536)
+            } else {
+                0
+            });
+        }
+        Instruction::Mulhsu { .. } => {
+            // 有符号×无符号：abs_a + carry chain on (|rs1|, rs2)（rs2 无符号）
+            let (abs_a, sign_a) = compute_abs_value(value_b);
+            let (carries, low32, high32) = compute_mul_carries(abs_a, value_c);
+            fill_mul_carries(&mut row, &carries);
+            fill_word(&mut row, COL_MUL_LOW_BASE, low32);
+            fill_word(&mut row, COL_MUL_HIGH_BASE, high32);
+            fill_word(&mut row, COL_ABS_A_BASE, abs_a);
+            fill_word(&mut row, COL_ABS_B_BASE, value_c); // rs2 无符号，abs_b = value_c
+            row[COL_SIGN_A] = M31::from(sign_a);
+            row[COL_SIGN_B] = M31::from(0u32); // 无符号，sign_b 恒 0
+            let low_nonzero = u32::from(low32 != 0);
+            row[COL_LOW_NONZERO] = M31::from(low_nonzero);
+            // abs_a 重建 borrow（abs_b = rs2 无符号，sign_b=0 无需 borrow）
+            row[COL_CARRY_FLAG_BASE] = M31::from(if sign_a == 1 { compute_abs_borrow(value_b) } else { 0 });
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(0u32);
+            // 结果符号 = sign_a（有符号×无符号，结果符号 = 被乘数符号）
+            let result_sign = sign_a;
+            row[COL_DIV_SIGN_Q] = M31::from(result_sign);
+            row[COL_DIV_SIGN_R] = M31::from(if result_sign == 1 {
+                u32::from(((value_a_eff & 0xFFFF) + (high32 & 0xFFFF) + low_nonzero) >= 65536)
+            } else {
+                0
+            });
+        }
+        Instruction::Div { .. } | Instruction::Rem { .. } => {
+            // 有符号除法：q·d+r=n 恒等式，用 |q|·|d|+|r|=|n| 验证
+            let (q_abs, r_abs, is_special, sign_q, sign_r) =
+                compute_div_witness(value_b, value_c, true);
+            let (abs_a, sign_a) = compute_abs_value(value_b); // |被除数|
+            let (abs_b, sign_b) = compute_abs_value(value_c); // |除数|
+            // carry chain on (|q|, |d|)：乘积 = |q|·|d| = |n| − |r| < 2³²（高位 c₄..c₇ = 0）
+            let (carries, low32, high32) = compute_mul_carries(q_abs, abs_b);
+            fill_mul_carries(&mut row, &carries);
+            fill_word(&mut row, COL_MUL_LOW_BASE, low32);
+            fill_word(&mut row, COL_MUL_HIGH_BASE, high32);
+            fill_word(&mut row, COL_ABS_A_BASE, abs_a);
+            fill_word(&mut row, COL_ABS_B_BASE, abs_b);
+            fill_word(&mut row, COL_DIV_QUOT_BASE, q_abs);
+            fill_word(&mut row, COL_DIV_REM_BASE, r_abs);
+            row[COL_SIGN_A] = M31::from(sign_a);
+            row[COL_SIGN_B] = M31::from(sign_b);
+            row[COL_DIV_IS_SPECIAL] = M31::from(is_special);
+            row[COL_DIV_SIGN_Q] = M31::from(sign_q);
+            row[COL_DIV_SIGN_R] = M31::from(sign_r);
+
+            // ----- Step 6: DIV 约束 witness 填充 -----
+            // 列复用（one-hot 互斥：DIV 行 ADD/SUB/MULH 指标均为 0，可安全复用）：
+            // - carry0 (COL_CARRY_FLAG_BASE) → abs_a 重建 borrow
+            // - carry1 (COL_CARRY_FLAG_BASE+1) → 恒等式 carry_id
+            // - LOW_NONZERO → 范围检查 borrow0（universal binality 已约束）
+            // - HelperA[0] → abs_b 重建 borrow
+            // - HelperA[1] → 范围检查 borrow1（正常时 = 0）
+            // - HelperA[2] → 结果符号调整 carry
+            // - HelperB[0..3] → 范围检查 diff（abs_b − r_abs − 1）
+            row[COL_CARRY_FLAG_BASE] =
+                M31::from(if sign_a == 1 { compute_abs_borrow(value_b) } else { 0 });
+            row[COL_HELPER_A_BASE] =
+                M31::from(if sign_b == 1 { compute_abs_borrow(value_c) } else { 0 });
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(compute_identity_carry(low32, r_abs));
+            let (diff, borrow0, borrow1) = compute_range_check_witness(abs_b, r_abs);
+            row[COL_LOW_NONZERO] = M31::from(borrow0);
+            row[COL_HELPER_A_BASE + 1] = M31::from(borrow1);
+            fill_word(&mut row, COL_HELPER_B_BASE, diff);
+            // 结果符号调整 carry：DIV→(q_abs, sign_q), REM→(r_abs, sign_r)
+            let (result_val, result_sign) = match &step.instruction {
+                Instruction::Div { .. } => (q_abs, sign_q),
+                Instruction::Rem { .. } => (r_abs, sign_r),
+                _ => unreachable!(),
+            };
+            row[COL_HELPER_A_BASE + 2] =
+                M31::from(if result_sign == 1 { compute_abs_borrow(result_val) } else { 0 });
+        }
+        Instruction::Divu { .. } | Instruction::Remu { .. } => {
+            // 无符号除法：q·d+r=n，全部非负
+            // 填充 AbsA=value_b, AbsB=value_c（sign=0，abs=原值，满足 abs 重建约束）
+            // 使 carry chain 统一使用 (DivQuot, AbsB)，identity 统一使用 AbsA
+            let (q_abs, r_abs, is_special, _sign_q, _sign_r) =
+                compute_div_witness(value_b, value_c, false);
+            // carry chain on (q, d)：乘积 = q·d = n − r < 2³²（高位 = 0）
+            let (carries, low32, high32) = compute_mul_carries(q_abs, value_c);
+            fill_mul_carries(&mut row, &carries);
+            fill_word(&mut row, COL_MUL_LOW_BASE, low32);
+            fill_word(&mut row, COL_MUL_HIGH_BASE, high32);
+            fill_word(&mut row, COL_ABS_A_BASE, value_b); // sign_a=0 → abs_a = value_b
+            fill_word(&mut row, COL_ABS_B_BASE, value_c); // sign_b=0 → abs_b = value_c
+            fill_word(&mut row, COL_DIV_QUOT_BASE, q_abs);
+            fill_word(&mut row, COL_DIV_REM_BASE, r_abs);
+            row[COL_SIGN_A] = M31::from(0u32);
+            row[COL_SIGN_B] = M31::from(0u32);
+            row[COL_DIV_IS_SPECIAL] = M31::from(is_special);
+            row[COL_DIV_SIGN_Q] = M31::from(0u32);
+            row[COL_DIV_SIGN_R] = M31::from(0u32);
+
+            // ----- Step 6: DIV 约束 witness 填充（无符号版）-----
+            // sign_a=sign_b=0 → abs 重建 borrow = 0
+            row[COL_CARRY_FLAG_BASE] = M31::from(0u32);
+            row[COL_HELPER_A_BASE] = M31::from(0u32);
+            // 恒等式 carry_id
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(compute_identity_carry(low32, r_abs));
+            // 范围检查（abs_b = value_c）
+            let (diff, borrow0, borrow1) = compute_range_check_witness(value_c, r_abs);
+            row[COL_LOW_NONZERO] = M31::from(borrow0);
+            row[COL_HELPER_A_BASE + 1] = M31::from(borrow1);
+            fill_word(&mut row, COL_HELPER_B_BASE, diff);
+            // 结果符号调整 carry（sign=0, carry=0）
+            row[COL_HELPER_A_BASE + 2] = M31::from(0u32);
+        }
+        _ => {}
     }
 
     row
@@ -924,6 +1081,219 @@ fn compute_pc_carries(pc: u32, pc_next: u32) -> (u32, u32) {
     compute_add_carries(pc, 4, pc_next)
 }
 
+// ===========================================================================
+// M 扩展算术约束 witness 计算（参考 RISC Zero / SP1 / OpenVM）
+// ===========================================================================
+
+/// 一个 carry 的二元分解：carry = lo + hi0·256 + hi1·512。
+///
+/// - `lo` ∈ [0, 255]（信任，与 ADD limb 一致）
+/// - `hi0`, `hi1` ∈ {0, 1}（binary 约束强制）
+/// 限制 carry ∈ [0, 1023]（覆盖实际范围 ~1020）。
+#[derive(Debug, Clone, Copy, Default)]
+struct MulCarryDecomp {
+    lo: u32,
+    hi0: u32,
+    hi1: u32,
+}
+
+/// 计算 8-bit 部分积 carry chain 的 7 个 carry 及乘积低/高 32 位。
+///
+/// 参考 RISC Zero Zirgen / OpenVM 的 schoolbook 乘法：
+/// - 将 a, b 分解为 4×8-bit limb
+/// - 计算 7 个部分和 S₀..S₆（按数位分组）
+/// - carry chain：Sₖ + carry_{k-1} = cₖ + 256·carryₖ
+/// - 结果 c₀..c₇ 为 64-bit 乘积的 8 个字节
+///
+/// # 参数
+/// - `a`, `b` — 32-bit 操作数（无符号或已取绝对值）
+///
+/// # 返回
+/// `(carries, low32, high32)` — 7 个 carry 的二元分解 + 乘积低 32 位（c₀..c₃）+ 高 32 位（c₄..c₇）
+fn compute_mul_carries(a: u32, b: u32) -> ([MulCarryDecomp; 7], u32, u32) {
+    let product = (a as u64).wrapping_mul(b as u64);
+    let low32 = (product & 0xFFFF_FFFF) as u32;
+    let high32 = (product >> 32) as u32;
+
+    let a_bytes = a.to_le_bytes();
+    let b_bytes = b.to_le_bytes();
+
+    // 部分和 S_k = Σ a_i * b_j (where i+j == k)
+    let s: [u32; 7] = [
+        u32::from(a_bytes[0]) * u32::from(b_bytes[0]),
+        u32::from(a_bytes[0]) * u32::from(b_bytes[1]) + u32::from(a_bytes[1]) * u32::from(b_bytes[0]),
+        u32::from(a_bytes[0]) * u32::from(b_bytes[2]) + u32::from(a_bytes[1]) * u32::from(b_bytes[1]) + u32::from(a_bytes[2]) * u32::from(b_bytes[0]),
+        u32::from(a_bytes[0]) * u32::from(b_bytes[3]) + u32::from(a_bytes[1]) * u32::from(b_bytes[2]) + u32::from(a_bytes[2]) * u32::from(b_bytes[1]) + u32::from(a_bytes[3]) * u32::from(b_bytes[0]),
+        u32::from(a_bytes[1]) * u32::from(b_bytes[3]) + u32::from(a_bytes[2]) * u32::from(b_bytes[2]) + u32::from(a_bytes[3]) * u32::from(b_bytes[1]),
+        u32::from(a_bytes[2]) * u32::from(b_bytes[3]) + u32::from(a_bytes[3]) * u32::from(b_bytes[2]),
+        u32::from(a_bytes[3]) * u32::from(b_bytes[3]),
+    ];
+
+    // Carry chain: S_k + carry_{k-1} = c_k + 256 * carry_k
+    let mut carries = [MulCarryDecomp::default(); 7];
+    let mut prev_carry: u32 = 0;
+    for k in 0..7 {
+        let total = s[k] + prev_carry;
+        // c_k = total & 0xFF (result digit, should match product limb)
+        let carry_k = total >> 8;
+        // 二元分解：carry_k = lo + hi0*256 + hi1*512
+        carries[k] = MulCarryDecomp {
+            lo: carry_k & 0xFF,
+            hi0: (carry_k >> 8) & 1,
+            hi1: (carry_k >> 9) & 1,
+        };
+        prev_carry = carry_k;
+    }
+
+    (carries, low32, high32)
+}
+
+/// 将 7 个 carry 的二元分解填充到 M 扩展 carry 列（col 81-101）。
+///
+/// 每个 carryₖ = loₖ + hi0ₖ·256 + hi1ₖ·512，分别填入：
+/// - `COL_MUL_CARRY_LO_BASE + k`（lo，col 81-87）
+/// - `COL_MUL_CARRY_HI0_BASE + k`（hi0，col 88-94）
+/// - `COL_MUL_CARRY_HI1_BASE + k`（hi1，col 95-101）
+fn fill_mul_carries(row: &mut [M31], carries: &[MulCarryDecomp; 7]) {
+    for k in 0..7 {
+        row[COL_MUL_CARRY_LO_BASE + k] = M31::from(carries[k].lo);
+        row[COL_MUL_CARRY_HI0_BASE + k] = M31::from(carries[k].hi0);
+        row[COL_MUL_CARRY_HI1_BASE + k] = M31::from(carries[k].hi1);
+    }
+}
+
+/// 计算 32-bit 值的绝对值和符号位。
+///
+/// 参考 OpenVM 有符号处理：取绝对值后用无符号 carry chain 计算。
+///
+/// # 参数
+/// - `val` — 32-bit 值（解释为有符号 i32）
+///
+/// # 返回
+/// `(abs_val, sign)` — abs_val = |val|，sign = 1 if val < 0 else 0
+fn compute_abs_value(val: u32) -> (u32, u32) {
+    if val & 0x8000_0000 != 0 {
+        // 负数：abs = 2^32 - val（two's complement negation）
+        (val.wrapping_neg(), 1)
+    } else {
+        (val, 0)
+    }
+}
+
+/// 计算 abs = 2³² − val 的 16-bit borrow carry（当 sign=1 时）。
+///
+/// abs 重建约束（16-bit 半字）：
+///   abs_low16 + val_low16 = 65536·carry   （carry ∈ {0,1}）
+///   abs_high16 + val_high16 + carry = 65536
+///
+/// carry = 1 当 val 的低 16 位 > 0（abs_low16 = 65536 − val_low16 需要从高位借 1），
+/// carry = 0 当 val 的低 16 位 = 0（abs_low16 = 0，无借位）。
+///
+/// # 参数
+/// - `val` — 32-bit 值（解释为有符号 i32，须 sign=1 即负数时调用）
+fn compute_abs_borrow(val: u32) -> u32 {
+    u32::from((val & 0xFFFF) != 0)
+}
+
+/// 计算 DIV 恒等式 carry：`low32 + r_abs = abs_a`（16-bit 半字加法进位）。
+///
+/// 恒等式约束（16-bit 半字）：
+///   low32_low + r_low = abs_a_low + 65536·carry_id   （carry_id ∈ {0,1}）
+///   low32_high + r_high + carry_id = abs_a_high
+///
+/// carry_id = 1 当 low32_low16 + r_abs_low16 >= 65536（低位溢出）。
+///
+/// # 参数
+/// - `low32` — 乘积低位（q_abs × abs_b 的低 32 位）
+/// - `r_abs` — 余数绝对值
+fn compute_identity_carry(low32: u32, r_abs: u32) -> u32 {
+    let low32_low = low32 & 0xFFFF;
+    let r_low = r_abs & 0xFFFF;
+    u32::from(low32_low + r_low >= 65536)
+}
+
+/// 计算 DIV 范围检查 witness：`diff = abs_b − r_abs − 1`，borrow0, borrow1。
+///
+/// 范围检查约束（16-bit 半字减法，验证 r_abs < abs_b）：
+///   abs_b_low − r_low − 1 + 65536·borrow0 = diff_low   （borrow0 ∈ {0,1}）
+///   abs_b_high − r_high − borrow0 + 65536·borrow1 = diff_high
+///   borrow1 = 0（无最终借位 → diff ≥ 0 → r_abs < abs_b）
+///
+/// # 返回
+/// `(diff, borrow0, borrow1)` — diff 存为 witness（4×8-bit limb），
+/// borrow0/borrow1 存为 binary 标志。当 r_abs < abs_b 时 borrow1 = 0。
+///
+/// # 参数
+/// - `abs_b` — 除数绝对值
+/// - `r_abs` — 余数绝对值
+fn compute_range_check_witness(abs_b: u32, r_abs: u32) -> (u32, u32, u32) {
+    let abs_b_low = (abs_b & 0xFFFF) as i64;
+    let abs_b_high = ((abs_b >> 16) & 0xFFFF) as i64;
+    let r_low = (r_abs & 0xFFFF) as i64;
+    let r_high = ((r_abs >> 16) & 0xFFFF) as i64;
+
+    // 低 16 位：abs_b_low − r_low − 1
+    let diff_low_raw = abs_b_low - r_low - 1;
+    let (diff_low, borrow0) = if diff_low_raw >= 0 {
+        (diff_low_raw as u32, 0)
+    } else {
+        ((diff_low_raw + 65536) as u32, 1)
+    };
+
+    // 高 16 位：abs_b_high − r_high − borrow0
+    let diff_high_raw = abs_b_high - r_high - i64::from(borrow0);
+    let (diff_high, borrow1) = if diff_high_raw >= 0 {
+        (diff_high_raw as u32, 0)
+    } else {
+        ((diff_high_raw + 65536) as u32, 1)
+    };
+
+    let diff = diff_low | (diff_high << 16);
+    (diff, borrow0, borrow1)
+}
+
+/// 计算 DIV/REM 的 witness 值（绝对值形式）。
+///
+/// 参考 SP1 / OpenVM：用 q·d+r=n 恒等式验证。
+/// 有符号 DIV 的关键性质：|q|·|d| + |r| = |n|（当 sign(r) = sign(n) 时成立）
+///
+/// # RISC-V 特殊情况
+/// - d = 0：q = 0xFFFFFFFF, r = n（有符号和无符号）
+/// - DIV INT_MIN / −1：q = INT_MIN, r = 0（溢出）
+///
+/// # 参数
+/// - `n` — 被除数（dividend）
+/// - `d` — 除数（divisor）
+/// - `signed` — true=有符号(DIV/REM), false=无符号(DIVU/REMU)
+///
+/// # 返回
+/// `(q_abs, r_abs, is_special, sign_q, sign_r)`
+fn compute_div_witness(n: u32, d: u32, signed: bool) -> (u32, u32, u32, u32, u32) {
+    let (q, r, is_special) = if d == 0 {
+        // 除零：q = all ones, r = n
+        (0xFFFF_FFFF, n, 1)
+    } else if signed && n == 0x8000_0000 && d == 0xFFFF_FFFF {
+        // 有符号溢出：INT_MIN / -1
+        (0x8000_0000, 0, 1)
+    } else if signed {
+        let n_s = n as i32;
+        let d_s = d as i32;
+        (n_s.wrapping_div(d_s) as u32, n_s.wrapping_rem(d_s) as u32, 0)
+    } else {
+        (n / d, n % d, 0)
+    };
+
+    // 有符号：取绝对值（|q|·|d| + |r| = |n| 恒等式需要绝对值形式）
+    // 无符号：abs = 原值，sign = 0（compute_abs_value 会误将 bit31=1 的无符号值视为负数）
+    if signed {
+        let (q_abs, sign_q) = compute_abs_value(q);
+        let (r_abs, sign_r) = compute_abs_value(r);
+        (q_abs, r_abs, is_special, sign_q, sign_r)
+    } else {
+        (q, r, is_special, 0, 0)
+    }
+}
+
 /// 将 Instruction 映射到 indicator 列索引。
 fn instruction_to_indicator_col(insn: &crate::isa::Instruction) -> usize {
     use crate::isa::Instruction::*;
@@ -963,9 +1333,15 @@ fn instruction_to_indicator_col(insn: &crate::isa::Instruction) -> usize {
         Fence { .. } => IS_FENCE,
         Ecall => IS_ECALL,
         Ebreak => IS_EBREAK,
-        // M 扩展暂归类到对应 R-type indicator（Phase 2.6 单独处理）
-        Mul { .. } | Mulh { .. } | Mulhsu { .. } | Mulhu { .. } => IS_ADD,  // 占位
-        Div { .. } | Divu { .. } | Rem { .. } | Remu { .. } => IS_SUB,      // 占位
+        // M 扩展：独立 indicator（与 XOR/OR/AND 等一致，无算术约束）
+        Mul { .. } => IS_MUL,
+        Mulh { .. } => IS_MULH,
+        Mulhsu { .. } => IS_MULHSU,
+        Mulhu { .. } => IS_MULHU,
+        Div { .. } => IS_DIV,
+        Divu { .. } => IS_DIVU,
+        Rem { .. } => IS_REM,
+        Remu { .. } => IS_REMU,
     }
 }
 
@@ -1664,7 +2040,9 @@ pub fn poseidon_trace_to_evaluations(
 mod tests {
     use super::*;
     use crate::stwo_backend::column_layout_v2::{
-        COL_PC_BASE, COL_VALUE_A_EFF_BASE, IS_ADD, IS_PADDING, NUM_COLUMNS,
+        COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE, COL_DIV_REM_BASE, COL_MUL_HIGH_BASE,
+        COL_MUL_LOW_BASE, COL_PC_BASE, COL_VALUE_A_EFF_BASE, IS_ADD, IS_MUL, IS_MULH, IS_DIV,
+        IS_PADDING, NUM_COLUMNS,
     };
 
     // ----- u32 ↔ M31 limb 转换测试 -----
@@ -1892,6 +2270,189 @@ mod tests {
         for row in 0..trace.num_rows() {
             assert_eq!(trace.cols[IS_PADDING][row], M31::from(1u32));
         }
+    }
+
+    // ----- M 扩展算术约束 witness 填充测试 -----
+
+    /// 辅助：构造无内存访问的 M 扩展 Step。
+    fn make_m_step(
+        pc: u32,
+        instruction: crate::isa::Instruction,
+        post_registers: [u32; 32],
+    ) -> crate::trace::Step {
+        make_mem_step(0, pc, instruction, post_registers, vec![])
+    }
+
+    /// 验证 MUL witness：MUL x1, x2, x3，rs1=6, rs2=7 → rd=42。
+    #[test]
+    fn test_m_extension_mul_witness() {
+        let mut prev = [0u32; 32];
+        prev[2] = 6;
+        prev[3] = 7;
+        let mut post = prev;
+        post[1] = 42; // rd = 6*7 = 42
+        let step = make_m_step(0, crate::isa::Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        // IS_MUL indicator = 1
+        assert_eq!(row[IS_MUL].0, 1, "IS_MUL 应为 1");
+        // COL_MUL_LOW = 42（乘积低 32 位）
+        assert_eq!(row[COL_MUL_LOW_BASE].0, 42, "MUL_LOW[0] = 42");
+        assert_eq!(row[COL_MUL_LOW_BASE + 1].0, 0, "MUL_LOW[1] = 0");
+        // COL_MUL_HIGH = 0（无高位）
+        assert_eq!(row[COL_MUL_HIGH_BASE].0, 0, "MUL_HIGH[0] = 0");
+        // rd_eff = 42（结果匹配）
+        assert_eq!(row[COL_VALUE_A_EFF_BASE].0, 42, "rd_eff = 42");
+    }
+
+    /// 验证 MUL witness 大乘积进位：0xFFFE × 0x10002。
+    #[test]
+    fn test_m_extension_mul_large_witness() {
+        // 0xFFFE * 0x10002 = 0x0_FFFF_FFFC（32-bit 内）
+        let a: u32 = 0xFFFE;
+        let b: u32 = 0x10002;
+        let product = (a as u64) * (b as u64);
+        assert!(product < (1u64 << 32), "测试预期：乘积在 32-bit 内");
+        let mut prev = [0u32; 32];
+        prev[2] = a;
+        prev[3] = b;
+        let mut post = prev;
+        post[1] = product as u32;
+        let step = make_m_step(0, crate::isa::Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        assert_eq!(row[IS_MUL].0, 1);
+        // COL_MUL_LOW 应等于乘积低 32 位
+        let low0 = row[COL_MUL_LOW_BASE].0;
+        let low1 = row[COL_MUL_LOW_BASE + 1].0;
+        let low2 = row[COL_MUL_LOW_BASE + 2].0;
+        let low3 = row[COL_MUL_LOW_BASE + 3].0;
+        let reconstructed = low0 | (low1 << 8) | (low2 << 16) | (low3 << 24);
+        assert_eq!(reconstructed, product as u32, "COL_MUL_LOW 应匹配乘积");
+        assert_eq!(row[COL_MUL_HIGH_BASE].0, 0, "高位应为 0");
+    }
+
+    /// 验证 MULHU witness：高 32 位结果。0xFFFFFFFF × 0xFFFFFFFF = 0xFFFFFFFE_00000001。
+    #[test]
+    fn test_m_extension_mulhu_witness() {
+        let a: u32 = 0xFFFF_FFFF;
+        let b: u32 = 0xFFFF_FFFF;
+        let product = (a as u64) * (b as u64);
+        let high32 = (product >> 32) as u32; // 0xFFFFFFFE
+        let mut prev = [0u32; 32];
+        prev[2] = a;
+        prev[3] = b;
+        let mut post = prev;
+        post[1] = high32;
+        let step = make_m_step(0, crate::isa::Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        // COL_MUL_HIGH 应为 0xFFFFFFFE 的高位分解
+        let h0 = row[COL_MUL_HIGH_BASE].0;
+        let h1 = row[COL_MUL_HIGH_BASE + 1].0;
+        let h2 = row[COL_MUL_HIGH_BASE + 2].0;
+        let h3 = row[COL_MUL_HIGH_BASE + 3].0;
+        let reconstructed = h0 | (h1 << 8) | (h2 << 16) | (h3 << 24);
+        assert_eq!(reconstructed, high32, "COL_MUL_HIGH 应匹配乘积高 32 位");
+        // rd_eff = high32（MULHU 结果）
+        let rd0 = row[COL_VALUE_A_EFF_BASE].0;
+        let rd1 = row[COL_VALUE_A_EFF_BASE + 1].0;
+        let rd2 = row[COL_VALUE_A_EFF_BASE + 2].0;
+        let rd3 = row[COL_VALUE_A_EFF_BASE + 3].0;
+        let rd_reconstructed = rd0 | (rd1 << 8) | (rd2 << 16) | (rd3 << 24);
+        assert_eq!(rd_reconstructed, high32, "rd_eff 应等于 MULHU 高位结果");
+    }
+
+    /// 验证 DIV by zero 特殊情况：q=0xFFFFFFFF, r=n。
+    #[test]
+    fn test_m_extension_div_by_zero_witness() {
+        let n: u32 = 100;
+        let d: u32 = 0;
+        let mut prev = [0u32; 32];
+        prev[2] = n;
+        prev[3] = d;
+        // RISC-V：d=0 时 q=0xFFFFFFFF, r=n
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF;
+        let step = make_m_step(0, crate::isa::Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        assert_eq!(row[IS_DIV].0, 1, "IS_DIV 应为 1");
+        assert_eq!(row[COL_DIV_IS_SPECIAL].0, 1, "除零应标记 is_special=1");
+        // q_abs = |0xFFFFFFFF 作为有符号 -1| = 1
+        assert_eq!(row[COL_DIV_QUOT_BASE].0, 1, "q_abs[0]=1（|-1|=1）");
+        // r_abs = |n| = 100
+        assert_eq!(row[COL_DIV_REM_BASE].0, 100, "r_abs[0]=100（r=n）");
+    }
+
+    /// 验证 DIV 正常情况：100 / 7 = 14 r 2。
+    #[test]
+    fn test_m_extension_div_normal_witness() {
+        let n: u32 = 100;
+        let d: u32 = 7;
+        let mut prev = [0u32; 32];
+        prev[2] = n;
+        prev[3] = d;
+        let mut post = prev;
+        post[1] = 14; // q
+        let step = make_m_step(0, crate::isa::Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        assert_eq!(row[COL_DIV_IS_SPECIAL].0, 0, "正常除法 is_special=0");
+        assert_eq!(row[COL_DIV_QUOT_BASE].0, 14, "q_abs=14");
+        assert_eq!(row[COL_DIV_REM_BASE].0, 2, "r_abs=2");
+        // COL_MUL_HIGH = 0（q·d < 2^32）
+        assert_eq!(row[COL_MUL_HIGH_BASE].0, 0, "q·d 高位 = 0");
+    }
+
+    /// 验证 MULH 有符号：(-1) × (-1) = 1，结果高位 = 0。
+    #[test]
+    fn test_m_extension_mulh_signed_neg_neg() {
+        let a: u32 = 0xFFFF_FFFF; // -1
+        let b: u32 = 0xFFFF_FFFF; // -1
+        let mut prev = [0u32; 32];
+        prev[2] = a;
+        prev[3] = b;
+        let mut post = prev;
+        post[1] = 0; // MULH(-1,-1) = high32(1) = 0
+        let step = make_m_step(0, crate::isa::Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        assert_eq!(row[IS_MULH].0, 1, "IS_MULH 应为 1");
+        // |a| = |b| = 1
+        assert_eq!(row[COL_ABS_A_BASE].0, 1, "|a| = 1");
+        assert_eq!(row[COL_ABS_B_BASE].0, 1, "|b| = 1");
+        // sign_a = sign_b = 1
+        assert_eq!(row[COL_SIGN_A].0, 1);
+        assert_eq!(row[COL_SIGN_B].0, 1);
+        // 乘积 = 1*1 = 1，low32 = 1，high32 = 0
+        assert_eq!(row[COL_MUL_LOW_BASE].0, 1, "low32 = 1");
+        assert_eq!(row[COL_MUL_HIGH_BASE].0, 0, "high32 = 0");
+        // low_nonzero = 1（low32 ≠ 0）
+        assert_eq!(row[super::COL_LOW_NONZERO].0, 1, "low_nonzero = 1");
+    }
+
+    /// 验证 MULH 有符号：(-1) × 2 = -2，结果高位 = 0xFFFFFFFF。
+    #[test]
+    fn test_m_extension_mulh_signed_neg_pos() {
+        let a: u32 = 0xFFFF_FFFF; // -1
+        let b: u32 = 2;
+        let mut prev = [0u32; 32];
+        prev[2] = a;
+        prev[3] = b;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF; // MULH(-1, 2) = high32(-2) = 0xFFFFFFFF
+        let step = make_m_step(0, crate::isa::Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        // |a|=1, |b|=2，无符号乘积 = 2，high32=0, low32=2
+        assert_eq!(row[COL_ABS_A_BASE].0, 1);
+        assert_eq!(row[COL_ABS_B_BASE].0, 2);
+        assert_eq!(row[COL_MUL_HIGH_BASE].0, 0, "unsigned high32 = 0");
+        assert_eq!(row[COL_MUL_LOW_BASE].0, 2, "unsigned low32 = 2");
+        assert_eq!(row[super::COL_LOW_NONZERO].0, 1, "low_nonzero = 1");
+        // rd_eff = 0xFFFFFFFF（符号调整后）
+        assert_eq!(row[COL_VALUE_A_EFF_BASE].0, 0xFF, "rd_eff 低字节 = 0xFF");
     }
 
     /// 辅助测试：验证 fill_word 与 fill_scalar 一致性
