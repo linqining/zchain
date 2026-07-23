@@ -23,12 +23,18 @@ use super::oods_check_air::{
 };
 use super::public_inputs::RecursivePublicInputs;
 use ark_ff::Zero;
-use stwo::core::circle::CirclePoint;
+use stwo::core::channel::{Channel, MerkleChannel, Poseidon252Channel};
+use stwo::core::circle::{CirclePoint, Coset};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
-use stwo::core::poly::line::LinePoly;
+use stwo::core::fri::{CirclePolyDegreeBound, FriVerifier};
+use stwo::core::pcs::PcsConfig;
+use stwo::core::poly::line::{LineDomain, LinePoly};
 use stwo::core::proof::StarkProof;
-use stwo::core::vcs_lifted::poseidon252_merkle::{poseidon_finalize, Poseidon252MerkleHasher};
+use stwo::core::utils::bit_reverse_index;
+use stwo::core::vcs_lifted::poseidon252_merkle::{
+    poseidon_finalize, Poseidon252MerkleChannel, Poseidon252MerkleHasher,
+};
 use starknet_ff::FieldElement as FieldElement252;
 
 /// OODS Check AIR 使用的 log_size（4 行 = 1 real + 3 padding）。
@@ -330,6 +336,131 @@ pub fn extract_composition_oods_eval_from_l1(
     Some(left_eval + doubling_factor.x * right_eval)
 }
 
+/// 从 L1 proof 的 Fiat-Shamir transcript 提取 FRI query point（v5.2 soundness fix）。
+///
+/// 重放 L1 verifier 的 channel 操作序列，重新采样 FRI query positions，
+/// 然后折叠到 last layer，计算真实的 query point x 和 query_eval。
+///
+/// # 算法
+/// 1. 创建 fresh `Poseidon252Channel`（镜像 L1 verifier）
+/// 2. 重放 L1 commit phase：
+///    a. 对每个 commitment（除最后一个 composition commitment）调用 `mix_root`
+///    b. `draw_secure_felt()` — random_coeff（用于 composition polynomial）
+///    c. `mix_root(commitments.last())` — composition commitment
+/// 3. `CirclePoint::get_random_point(channel)` — OODS point（推进 channel 状态）
+/// 4. `channel.mix_felts(sampled_values.flatten_cols())`
+/// 5. `draw_secure_felt()` — random_coeff2（用于 FRI）
+/// 6. `FriVerifier::commit(channel, fri_config, fri_proof.clone(), bound)`
+/// 7. `verify_pow_nonce` + `mix_u64(proof_of_work)`
+/// 8. `sample_query_positions(channel)` → first-layer positions
+/// 9. 折叠到 last layer，计算 `x = last_layer_domain.at(bit_reverse_index(query, log_size))`
+/// 10. `query_eval = last_layer_poly.eval_at_point(x)`
+///
+/// # 参数
+/// - `l1_proof` — L1 Stwo proof
+/// - `config` — L1 proof 的 PcsConfig（须与 L1 verifier 一致）
+/// - `max_log_degree_bound` — composition polynomial 的 max log degree bound
+/// - `last_layer_poly` — L1 FRI last layer polynomial
+///
+/// # 返回
+/// - `Some((query_x, query_eval))` — 提取成功
+/// - `None` — L1 proof 结构不匹配或 FriVerifier 构造失败
+///
+/// # 限制
+/// 当前仅支持单组件 proof（无 interaction phase）。
+/// 多组件 proof 需在 step 2a 与 2b 之间插入 interaction element draws。
+#[allow(clippy::missing_errors_doc)]
+pub fn extract_fri_query_from_l1(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    config: PcsConfig,
+    max_log_degree_bound: u32,
+    last_layer_poly: &LinePoly,
+) -> Option<(SecureField, SecureField)> {
+    let commitments = &l1_proof.0.commitments;
+    let n_commitments = commitments.len();
+    // 至少需要 preprocessed + original + composition = 3 个 commitment
+    if n_commitments < 3 {
+        return None;
+    }
+
+    // 1. 创建 fresh channel（镜像 L1 verifier）
+    let mut channel = Poseidon252Channel::default();
+
+    // 2a. 重放 commit phase：mix 所有 commitment（除最后一个 composition commitment）
+    for i in 0..(n_commitments - 1) {
+        Poseidon252MerkleChannel::mix_root(&mut channel, commitments[i]);
+    }
+
+    // 2b. draw_secure_felt() — random_coeff（composition polynomial 的随机系数）
+    let _random_coeff = channel.draw_secure_felt();
+
+    // 2c. mix composition commitment（最后一个）
+    Poseidon252MerkleChannel::mix_root(&mut channel, commitments[n_commitments - 1]);
+
+    // 3. Draw OODS point（推进 channel 状态，值不需要）
+    let _oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
+
+    // 4. mix sampled_values
+    let sampled_values = &l1_proof.0.sampled_values;
+    let flattened: Vec<SecureField> = sampled_values.clone().flatten_cols();
+    channel.mix_felts(&flattened);
+
+    // 5. draw_secure_felt() — random_coeff2（FRI 的随机系数）
+    let _random_coeff2 = channel.draw_secure_felt();
+
+    // 6. Construct FriVerifier（clone fri_proof 因为 commit 消费它）
+    let fri_config = config.fri_config;
+    let bound = CirclePolyDegreeBound::new(max_log_degree_bound);
+    let fri_proof = l1_proof.0.fri_proof.clone();
+
+    let mut fri_verifier = FriVerifier::<Poseidon252MerkleChannel>::commit(
+        &mut channel,
+        fri_config,
+        fri_proof,
+        bound,
+    )
+    .ok()?;
+
+    // 7. Verify PoW + mix
+    if !channel.verify_pow_nonce(config.pow_bits, l1_proof.0.proof_of_work) {
+        return None;
+    }
+    channel.mix_u64(l1_proof.0.proof_of_work);
+
+    // 8. Sample query positions
+    let query_positions = fri_verifier.sample_query_positions(&mut channel);
+    if query_positions.is_empty() {
+        return None;
+    }
+
+    // 9. 折叠到 last layer 并计算 x
+    // first_layer_log_size = max_log_degree_bound + log_blowup_factor + 1（circle domain）
+    // last_layer_log_size = log_last_layer_degree_bound + log_blowup_factor（line domain）
+    // total_fold = first_layer_log_size - last_layer_log_size
+    let first_layer_log_size = max_log_degree_bound + fri_config.log_blowup_factor + 1;
+    let last_layer_log_size = fri_config.log_last_layer_degree_bound + fri_config.log_blowup_factor;
+    let total_fold = first_layer_log_size
+        .checked_sub(last_layer_log_size)
+        .filter(|&f| f <= 32)?;
+
+    // 取第一个 query position，折叠到 last layer
+    let first_query = query_positions[0];
+    let last_layer_query = first_query >> total_fold;
+
+    // 10. 计算 x = last_layer_domain.at(bit_reverse_index(query, log_size))
+    let last_layer_domain = LineDomain::new(Coset::half_odds(last_layer_log_size));
+    let x_base = last_layer_domain.at(bit_reverse_index(
+        last_layer_query,
+        last_layer_domain.log_size(),
+    ));
+    let query_x: SecureField = x_base.into();
+
+    // 11. 计算 query_eval = last_layer_poly.eval_at_point(query_x)
+    let query_eval = last_layer_poly.eval_at_point(query_x);
+
+    Some((query_x, query_eval))
+}
+
 /// 计算 QM31 乘法的 16 个 M31×M31 中间值。
 ///
 /// QM31 乘法 `product = df.x * right_eval` 分解为 16 个 M31 乘积（degree 2）。
@@ -573,23 +704,17 @@ pub fn gen_oods_check_trace(
 /// | Gating (19) | (1 - IsFirstRow) * (1 - IsPadding) |
 /// | M[1..16] (20-35) | partial_eval_prev * query_x 的 M31×M31 分解 |
 ///
-/// # v5.1 Query Point
+/// # v5.2 Query Point（soundness fix）
 ///
-/// v5.1 使用 placeholder query point `x = SecureField::from(1u32)`。
-/// trace 的 Horner 计算与 AIR 约束完全一致（partial_eval[n] == query_eval），
-/// 但 x 未绑定到 L1 proof 的实际 FRI query point。
-/// v5.2 将从 L1 proof 的 Fiat-Shamir transcript 提取真实 query point。
+/// v5.2 从 `public_inputs.fri_query_x` 提取真实 query point（由 `extract_fri_query_from_l1`
+/// 从 L1 proof 的 Fiat-Shamir transcript 重新推导）。`query_eval` 同样来自
+/// `public_inputs.fri_query_eval`，与 `query_x` 一起经 channel mix 绑定到 L2 proof。
 ///
-/// # v5.1 Soundness Gap
-///
-/// 当前 soundness gap：
-/// - x 是 placeholder（未绑定到 L1 FRI query）
-/// - query_eval 由 prover 计算并填入 trace（未由 verifier 独立验证）
-///
-/// v5.2 将通过以下方式修复：
-/// - 将 query_x 和 query_eval 添加到 `RecursivePublicInputs`
-/// - L2 verifier 从 L1 proof 的 Fiat-Shamir transcript 重新推导 query point
-/// - L2 AIR 约束 query_eval == public_inputs.fri_query_eval
+/// v5.1 的 soundness gap（硬编码 `x = 1`）已修复：
+/// - `query_x` 和 `query_eval` 是 `RecursivePublicInputs` 的公开输入
+/// - prover 端一致性检查验证它们与 L1 transcript 推导值一致
+/// - L2 channel mix 绑定它们到 L2 Fiat-Shamir
+/// - L2 FRI Verifier AIR 约束 Horner 累积值 == `query_eval`
 ///
 /// # Panics
 ///
@@ -611,15 +736,17 @@ pub fn gen_fri_verifier_trace(
         .clone()
         .into_ordered_coefficients();
 
-    // ----- 3. 选择 query point x（v5.1 placeholder） -----
-    // TODO(v5.2): 从 L1 proof 的 FRI Fiat-Shamir transcript 提取真实 query point
-    let query_x_qm31 = SecureField::from(1u32);
+    // ----- 3. 从 public_inputs 提取真实 query point x（v5.2 soundness fix） -----
+    // v5.2：query_x 和 query_eval 从 L1 proof 的 Fiat-Shamir transcript 提取（extract_fri_query_from_l1），
+    // 作为 RecursivePublicInputs 的公开输入绑定到 L2 channel。
+    // 此前 v5.1 硬编码 query_x = 1，允许恶意 prover 选择在 x=1 处通过但其他点失败的伪造多项式。
+    let query_x_qm31 = public_inputs.fri_query_x;
     let query_x: [BaseField; 4] = query_x_qm31.to_m31_array();
 
-    // ----- 4. 计算 query_eval = last_layer_poly.eval_at_point(query_x_qm31) -----
-    // 使用 Stwo 原生 eval_at_point（tree-fold with bit-reversed coefficients）
-    // 这等价于标准 Horner with natural-order coefficients
-    let query_eval_qm31 = last_layer_poly.eval_at_point(query_x_qm31);
+    // ----- 4. query_eval 来自 public_inputs（与 query_x 一起由 extract_fri_query_from_l1 计算） -----
+    // L2 FRI Verifier AIR 约束 Horner 累积值最终 == query_eval，确保 last_layer_poly 在 query_x 处的
+    // evaluation 与 L1 FRI verifier 验证的值一致。
+    let query_eval_qm31 = public_inputs.fri_query_eval;
     let query_eval: [BaseField; 4] = query_eval_qm31.to_m31_array();
 
     // ----- 5. 确定 trace 大小 -----
@@ -923,6 +1050,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            SecureField::zero(),
+            SecureField::zero(),
         )
     }
 
@@ -1082,6 +1211,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            SecureField::zero(),
+            SecureField::zero(),
         );
 
         // 生成 trace
@@ -1155,6 +1286,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            SecureField::zero(),
+            SecureField::zero(),
         );
 
         // 生成 trace（应该成功，但 trace 中 Claimed != Computed）
@@ -1178,7 +1311,12 @@ mod tests {
     // =====================================================================
 
     /// 创建带真实 `fri_last_layer_poly` 的测试 `RecursivePublicInputs`。
+    ///
+    /// 使用 `query_x = 1` 作为 FRI query point（与下游测试期望一致），
+    /// `fri_query_eval = last_layer_poly.eval_at_point(1)`。
     fn make_fri_test_public_inputs(last_layer_poly: LinePoly) -> RecursivePublicInputs {
+        let query_x = SecureField::from(1u32);
+        let query_eval = last_layer_poly.eval_at_point(query_x);
         RecursivePublicInputs::new(
             Vec::new(),
             CirclePoint::zero(),
@@ -1189,6 +1327,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            query_x,
+            query_eval,
         )
     }
 

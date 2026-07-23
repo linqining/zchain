@@ -203,6 +203,7 @@ pub fn verify_recursive_with_fri(
 /// 3. `composition_oods_eval`（SecureField）
 /// 4. `oods_point.x` + `oods_point.y`（2 × SecureField）
 /// 5. `fri_last_layer_poly` 系数（v5.1 soundness fix，bit-reversed 表示）
+/// 6. `fri_query_x` + `fri_query_eval`（v5.2 soundness fix）
 fn mix_public_inputs_into_channel(channel: &mut Blake2sChannel, inputs: &RecursivePublicInputs) {
     // 1. PcsConfig
     inputs.config.mix_into(channel);
@@ -222,6 +223,11 @@ fn mix_public_inputs_into_channel(channel: &mut Blake2sChannel, inputs: &Recursi
     // 注：LinePoly 内部存储为 bit-reversed 系数，prover 和 verifier 都用相同表示，
     // 所以 mix bit-reversed 系数是 soundness-preserving 的。
     channel.mix_felts(&inputs.fri_last_layer_poly[..]);
+
+    // 6. fri_query_x + fri_query_eval（v5.2 soundness fix）
+    // 将 FRI query point 和 evaluation mix 到 channel，绑定到 L2 Fiat-Shamir。
+    // 防止 prover 选择在特定 x 处通过但其他点失败的伪造多项式。
+    channel.mix_felts(&[inputs.fri_query_x, inputs.fri_query_eval]);
 }
 
 // ===========================================================================
@@ -252,6 +258,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            SecureField::zero(),
+            SecureField::zero(),
         )
     }
 
@@ -328,6 +336,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            SecureField::zero(),
+            SecureField::zero(),
         );
 
         let l2_proof = prove_recursive(&l1_proof, &inputs).expect("prove_recursive 应成功");
@@ -351,7 +361,7 @@ mod tests {
     #[test]
     fn test_verify_recursive_with_fri_succeeds() {
         use super::super::recursion_prover::prove_recursive_with_fri;
-        use super::super::trace_gen::extract_composition_oods_eval_from_l1;
+        use super::super::trace_gen::{extract_composition_oods_eval_from_l1, extract_fri_query_from_l1};
 
         // 1. 生成真实 L1 proof
         let mut builder = TraceBuilder::new(10);
@@ -359,7 +369,7 @@ mod tests {
         let trace = builder.finalize();
         let l1_proof = prove_cpu_trace(&trace).expect("L1 prove 应成功");
 
-        // 2. 构造 public_inputs（含真实 fri_last_layer_poly）
+        // 2. 构造 public_inputs（含真实 fri_last_layer_poly + fri_query）
         let oods_point = CirclePoint {
             x: SecureField::from_u32_unchecked(1, 0, 0, 0),
             y: SecureField::from_u32_unchecked(0, 1, 0, 0),
@@ -372,6 +382,13 @@ mod tests {
         )
         .expect("提取 composition_oods_eval 应成功");
         let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
+        let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
+            &l1_proof,
+            PcsConfig::default(),
+            max_log_degree_bound,
+            &last_layer_poly,
+        )
+        .expect("提取 fri_query 应成功");
         let inputs = RecursivePublicInputs::new(
             Vec::new(),
             oods_point,
@@ -382,6 +399,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            fri_query_x,
+            fri_query_eval,
         );
 
         // 3. prove + verify
@@ -399,7 +418,7 @@ mod tests {
     #[test]
     fn test_verify_recursive_with_fri_fails_on_tampered_composition_oods_eval() {
         use super::super::recursion_prover::prove_recursive_with_fri;
-        use super::super::trace_gen::extract_composition_oods_eval_from_l1;
+        use super::super::trace_gen::{extract_composition_oods_eval_from_l1, extract_fri_query_from_l1};
 
         let mut builder = TraceBuilder::new(10);
         builder.fill_padding_to_full();
@@ -418,6 +437,13 @@ mod tests {
         )
         .expect("提取 composition_oods_eval 应成功");
         let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
+        let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
+            &l1_proof,
+            PcsConfig::default(),
+            max_log_degree_bound,
+            &last_layer_poly,
+        )
+        .expect("提取 fri_query 应成功");
         let inputs = RecursivePublicInputs::new(
             Vec::new(),
             oods_point,
@@ -428,6 +454,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            fri_query_x,
+            fri_query_eval,
         );
 
         let l2_proof = prove_recursive_with_fri(&l1_proof, &inputs)

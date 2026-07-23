@@ -51,13 +51,22 @@ use stwo_constraint_framework::{
 };
 
 use super::cpu_air::CpuAir;
-use super::column_layout_v2::{COL_MEM_ADDR_BASE, COL_VALUE_A_EFF_BASE, COL_VALUE_C_BASE, IS_LOAD, IS_STORE, NUM_COLUMNS};
-use super::lookups::MemoryLookup;
+use super::column_layout_v2::{
+    COL_MEM_ADDR_BASE, COL_PC_BASE, COL_PC_NEXT_BASE, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
+    COL_VALUE_C_BASE, IS_LOAD, IS_PADDING, IS_STORE, NUM_COLUMNS,
+};
+use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
 use super::memory_air::{
     MEM_COL_ADDR_BASE, MEM_COL_IS_PADDING, MEM_COL_IS_STORE, MEM_COL_VAL_CUR_BASE, MEM_NUM_COLUMNS,
     MemoryAir,
 };
-use super::trace_native::{memory_trace_to_evaluations, MemoryTrace, NativeTrace};
+use super::range_check_air::{
+    RangeCheckAir, RC_COL_MULTIPLICITY, RC_COL_VALUE, RC_NUM_COLUMNS,
+};
+use super::trace_native::{
+    gen_range_check_air_trace, memory_trace_to_evaluations, range_check_trace_to_evaluations,
+    MemoryTrace, NativeTrace,
+};
 
 /// Poseidon252 Merkle Hasher 类型别名（递归路径）。
 pub type CpuProof = StarkProof<Poseidon252MerkleHasher>;
@@ -409,6 +418,169 @@ fn gen_mem_interaction_trace(
     log_gen.finalize_last()
 }
 
+/// 生成 CPU 完整 interaction trace（memory claim + range claims，共 25 列）。
+///
+/// **V4 关键修复**：CPU 组件在 `CpuAir::evaluate` 中对 25 个 frac（1 memory claim +
+/// 24 range claim）调用 `add_to_relation`，然后统一调用一次 `finalize_logup()`。
+/// Stwo 的 `finalize_logup` 默认将每个 frac 放入独立 batch，并要求交互列是**跨 frac
+/// 的累积和**（col_k = frac_0 + frac_1 + ... + frac_k，按行）。
+///
+/// `LogupTraceGenerator::finalize_col` 实现这一累积：每生成新列时读取 `trace.last()`
+///（即前一列）并加到当前 frac 上。**因此全部 25 个 frac 必须在同一个 generator 中
+/// 顺序生成**，才能让 col_0=memory_frac、col_1=memory_frac+range_0、...、
+/// col_24=Σ全部 25 frac 与 AIR 期望一致。
+///
+/// 早期实现把 memory claim 与 range claim 拆成两个独立 `LogupTraceGenerator`，
+/// 导致第二个 generator 的 col_0 重置为 0（缺少 memory_frac 偏移），中间列不满足
+/// `col_k - col_{k-1} = frac_k`，引发 `ConstraintsNotSatisfied`。本函数修复之。
+///
+/// # 列顺序（须与 `CpuAir::evaluate` 的 `add_to_relation` 调用顺序严格一致）
+/// - col 0：Memory claim `(MemAddr×4, mem_value×4, IsStore)`，multiplicity = IsLoad+IsStore
+/// - col 1..24：Range claim `(limb_value,)`，multiplicity = 1-IsPadding
+///   按 `RANGE_CHECK_COLS` 顺序：PC, PcNext, ValueAEff, ValueB, ValueC, MemAddr（各 4 limb）
+///
+/// # 返回
+/// (100 CircleEvaluations, claimed_sum) — 25 SecureField 列 × 4 base cols + 总 sum。
+/// `claimed_sum` = 最后一列（col_24 = 全部 25 frac 的逐行累积）跨所有行的总和，
+/// 即 CPU 组件全部 logup claim 的总 sum。
+fn gen_cpu_full_interaction_trace(
+    cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+    log_size: u32,
+    memory_lookup: &MemoryLookup,
+    range_lookup: &RangeCheckLookup,
+) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+    let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+    let mut log_gen = LogupTraceGenerator::new(log_size);
+    let one_packed = PackedBaseField::broadcast(BaseField::from(1u32));
+
+    // 24 个 limb 列索引（与 CpuAir::evaluate 的 RANGE_CHECK_COLS 完全一致）
+    const RANGE_CHECK_COLS: [usize; 24] = [
+        COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
+        COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
+        COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2,
+        COL_VALUE_A_EFF_BASE + 3,
+        COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
+        COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
+        COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
+    ];
+
+    // ===== col 0：Memory claim（frac_0）=====
+    // 与 CpuAir::evaluate 的 memory_lookup 分支一致：
+    //   values = (MemAddr×4, mem_value×4, IsStore)，multiplicity = IsLoad + IsStore
+    {
+        let mut col_gen = log_gen.new_col();
+        for vec_row in 0..n_vec_rows {
+            let is_load_packed = cpu_trace[IS_LOAD].values.data[vec_row];
+            let is_store_packed = cpu_trace[IS_STORE].values.data[vec_row];
+
+            // 构造 9 元 claim_values = [MemAddr×4, mem_value×4, IsStore×1]
+            let mut claim_values: [PackedBaseField; 9] = [PackedBaseField::zero(); 9];
+            for i in 0..4 {
+                claim_values[i] = cpu_trace[COL_MEM_ADDR_BASE + i].values.data[vec_row];
+            }
+            for i in 0..4 {
+                let value_a_eff = cpu_trace[COL_VALUE_A_EFF_BASE + i].values.data[vec_row];
+                let value_c = cpu_trace[COL_VALUE_C_BASE + i].values.data[vec_row];
+                // mem_value = is_load * rd_eff + is_store * rs2_value
+                claim_values[4 + i] = is_load_packed * value_a_eff + is_store_packed * value_c;
+            }
+            claim_values[8] = is_store_packed;
+
+            let denom: PackedSecureField = memory_lookup.combine(&claim_values);
+            let multiplicity_packed = is_load_packed + is_store_packed;
+            let num: PackedSecureField = PackedSecureField::from(multiplicity_packed);
+
+            col_gen.write_frac(vec_row, num, denom);
+        }
+        col_gen.finalize_col();
+    }
+
+    // ===== col 1..24：Range claims（frac_1..frac_24）=====
+    // 每个 new_col 由 finalize_col 自动累加前一列，形成跨 frac 的累积和。
+    for &col_idx in &RANGE_CHECK_COLS {
+        let mut col_gen = log_gen.new_col();
+        for vec_row in 0..n_vec_rows {
+            let is_padding_packed = cpu_trace[IS_PADDING].values.data[vec_row];
+            let is_non_padding = one_packed - is_padding_packed;
+            let num = PackedSecureField::from(is_non_padding);
+            let limb_val = cpu_trace[col_idx].values.data[vec_row];
+            let denom: PackedSecureField = range_lookup.combine(&[limb_val]);
+            col_gen.write_frac(vec_row, num, denom);
+        }
+        col_gen.finalize_col();
+    }
+
+    log_gen.finalize_last()
+}
+
+/// 生成 RangeCheckAir yield 交互 trace 列（1 列）。
+///
+/// 对每个行发送 yield `(value, multiplicity)`：
+/// - real row（v ∈ 0..255）：multiplicity = -count_v（已存入 trace）
+/// - padding row：multiplicity = 0
+///
+/// # 返回
+/// (4 CircleEvaluations, claimed_sum) — 1 SecureField 列 × 4 base cols + sum
+fn gen_range_check_air_interaction_trace(
+    rc_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+    log_size: u32,
+    range_lookup: &RangeCheckLookup,
+) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+    let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+    let mut log_gen = LogupTraceGenerator::new(log_size);
+    let mut col_gen = log_gen.new_col();
+
+    for vec_row in 0..n_vec_rows {
+        let value = rc_trace[RC_COL_VALUE].values.data[vec_row];
+        let multiplicity_packed = rc_trace[RC_COL_MULTIPLICITY].values.data[vec_row];
+        let denom: PackedSecureField = range_lookup.combine(&[value]);
+        let num: PackedSecureField = PackedSecureField::from(multiplicity_packed);
+        col_gen.write_frac(vec_row, num, denom);
+    }
+
+    col_gen.finalize_col();
+    log_gen.finalize_last()
+}
+
+/// 生成 CPU 仅 RangeCheck 的 interaction trace（无 Memory claim）。
+///
+/// 与 `gen_cpu_full_interaction_trace` 相同，但跳过 Memory claim（frac_0），
+/// 只发送 24 个 RangeCheckLookup frac。用于 2 组件隔离测试（CPU + RangeCheck）。
+fn gen_cpu_range_only_interaction_trace(
+    cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+    log_size: u32,
+    range_lookup: &RangeCheckLookup,
+) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+    let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+    let mut log_gen = LogupTraceGenerator::new(log_size);
+    let one_packed = PackedBaseField::broadcast(BaseField::from(1u32));
+
+    const RANGE_CHECK_COLS: [usize; 24] = [
+        COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
+        COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
+        COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2,
+        COL_VALUE_A_EFF_BASE + 3,
+        COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
+        COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
+        COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
+    ];
+
+    for &col_idx in &RANGE_CHECK_COLS {
+        let mut col_gen = log_gen.new_col();
+        for vec_row in 0..n_vec_rows {
+            let is_padding_packed = cpu_trace[IS_PADDING].values.data[vec_row];
+            let is_non_padding = one_packed - is_padding_packed;
+            let num = PackedSecureField::from(is_non_padding);
+            let limb_val = cpu_trace[col_idx].values.data[vec_row];
+            let denom: PackedSecureField = range_lookup.combine(&[limb_val]);
+            col_gen.write_frac(vec_row, num, denom);
+        }
+        col_gen.finalize_col();
+    }
+
+    log_gen.finalize_last()
+}
+
 /// 多组件 prove 主入口：CPU + Memory 联合 STARK proof。
 ///
 /// # 参数
@@ -609,6 +781,262 @@ pub fn verify_cpu_memory_proof(
     // 9. 验证
     verify(
         &[&cpu_component, &mem_component],
+        &mut channel,
+        &mut commitment_scheme,
+        stark_proof,
+    )
+}
+
+// ===========================================================================
+// V4 修复：3 组件 prover/verify（CPU + Memory + RangeCheck logup）
+// ===========================================================================
+
+/// 3 组件 proof 结构：CPU + Memory + RangeCheck 联合 STARK proof。
+///
+/// # 字段
+/// - `stark_proof` — Stwo StarkProof（Tree 0/1/2 commitments + composition + FRI）
+/// - `claimed_sum_cpu` — CPU logup 列总 sum（memory claim + range claim）
+/// - `claimed_sum_mem` — Memory logup 列总 sum（yield）
+/// - `claimed_sum_range` — RangeCheck logup 列总 sum（yield）
+///
+/// # Soundness
+/// `claimed_sum_cpu + claimed_sum_mem + claimed_sum_range == 0`
+#[derive(Debug, Clone)]
+pub struct CpuMemRangeProof {
+    /// Stwo STARK proof
+    pub stark_proof: StarkProof<Poseidon252MerkleHasher>,
+    /// CPU logup 列总 sum（memory claim + range claim）
+    pub claimed_sum_cpu: SecureField,
+    /// Memory logup 列总 sum（yield）
+    pub claimed_sum_mem: SecureField,
+    /// RangeCheck logup 列总 sum（yield）
+    pub claimed_sum_range: SecureField,
+}
+
+/// 3 组件 prove 主入口：CPU + Memory + RangeCheck 联合 STARK proof。
+///
+/// # 流程（扩展 [`prove_cpu_memory_trace`]）
+/// 1. PCS + twiddles + Channel + CommitmentSchemeProver
+/// 2. Tree 0：空 preprocessed
+/// 3. Tree 1：CPU(132) + Memory(17) + RangeCheck(12) = 161 cols
+/// 4. draw MemoryLookup + draw RangeCheckLookup（顺序：memory 先，range 后）
+/// 5. 生成 interaction traces：
+///    a. CPU 完整 interaction（gen_cpu_full_interaction_trace，25 列，单个 generator）
+///       → claimed_sum_cpu（memory claim + 24 range claim 的跨 frac 累积 sum）
+///    b. Memory yield（gen_mem_interaction_trace，1 列）→ claimed_sum_mem
+///    c. RangeCheck yield（gen_range_check_air_interaction_trace，1 列）→ claimed_sum_range
+/// 6. Soundness：claimed_sum_cpu + claimed_sum_mem + claimed_sum_range == 0
+/// 7. mix_felts
+/// 8. Tree 2：CPU(25×4=100) + Memory(4) + RangeCheck(4) = 108 base cols
+/// 9. prove(&[&cpu, &mem, &range], ...)
+///
+/// # 参数
+/// - `cpu_trace` — CPU original trace（132 列 × 2^log_size 行）
+/// - `mem_trace` — Memory original trace（17 列 × 2^log_size 行）
+///
+/// # 返回
+/// `CpuMemRangeProof`
+///
+/// # Panics
+/// 若 soundness check 失败（`claimed_sum_cpu + claimed_sum_mem + claimed_sum_range != 0`），
+/// panic（trace 生成有 bug 或 limb 值超出 [0, 255] 范围）。
+pub fn prove_cpu_mem_range_trace(
+    cpu_trace: &NativeTrace,
+    mem_trace: &MemoryTrace,
+) -> Result<CpuMemRangeProof, ProvingError> {
+    let log_size = cpu_trace.log_size;
+    assert_eq!(
+        log_size, mem_trace.log_size,
+        "CPU and Memory trace log_size mismatch: {} vs {}",
+        log_size, mem_trace.log_size
+    );
+
+    // 1. PCS 配置 + twiddles 预计算
+    let config = PcsConfig::default();
+    let blowup_log = config.fri_config.log_blowup_factor;
+    let big_domain = CanonicCoset::new(log_size + blowup_log);
+    let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
+
+    // 2. Channel + CommitmentSchemeProver
+    let mut channel = Poseidon252Channel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
+
+    // 3. 生成所有 original trace evaluations
+    let cpu_evals = native_trace_to_evaluations(cpu_trace);
+    let mem_evals = memory_trace_to_evaluations(mem_trace);
+    let rc_trace = gen_range_check_air_trace(cpu_trace);
+    let rc_evals = range_check_trace_to_evaluations(&rc_trace);
+
+    // 4. Tree 0：空 preprocessed
+    {
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![]);
+        tree_builder.commit(&mut channel);
+    }
+
+    // 5. Tree 1：CPU(132) + Memory(17) + RangeCheck(12) = 161 cols
+    {
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(cpu_evals.clone());
+        tree_builder.extend_evals(mem_evals.clone());
+        tree_builder.extend_evals(rc_evals.clone());
+        tree_builder.commit(&mut channel);
+    }
+
+    // 6. 从 channel draw lookups（顺序：memory 先，range 后）
+    let memory_lookup = MemoryLookup::draw(&mut channel);
+    let range_lookup = RangeCheckLookup::draw(&mut channel);
+
+    // 7. 生成 interaction traces（Tree 2）
+    // CPU 完整 interaction（memory claim + range claims，25 列，单个 LogupTraceGenerator）
+    // 必须在单个 generator 中顺序生成全部 25 列，确保 finalize_col 的跨 frac 累积
+    // （col_k = frac_0+...+frac_k）与 CpuAir::evaluate 的 finalize_logup 期望一致。
+    let (cpu_interaction_evals, claimed_sum_cpu) =
+        gen_cpu_full_interaction_trace(&cpu_evals, log_size, &memory_lookup, &range_lookup);
+
+    // Memory yield（1 列）
+    let (mem_interaction_evals, claimed_sum_mem) =
+        gen_mem_interaction_trace(&mem_evals, log_size, &memory_lookup);
+    // RangeCheck yield（1 列）
+    let (rc_interaction_evals, claimed_sum_range) =
+        gen_range_check_air_interaction_trace(&rc_evals, log_size, &range_lookup);
+
+    // 8. Soundness check：claimed_sum_cpu + claimed_sum_mem + claimed_sum_range == 0
+    let total_sum = claimed_sum_cpu + claimed_sum_mem + claimed_sum_range;
+    assert_eq!(
+        total_sum,
+        SecureField::zero(),
+        "V4 soundness check failed: cpu({:?}) + mem({:?}) + range({:?}) != 0 \
+        (可能有 limb 值超出 [0, 255] 范围)",
+        claimed_sum_cpu,
+        claimed_sum_mem,
+        claimed_sum_range
+    );
+
+    // 9. 通信 claimed_sums 给 verifier
+    channel.mix_felts(&[claimed_sum_cpu, claimed_sum_mem, claimed_sum_range]);
+
+    // 10. Tree 2：CPU(100) + Memory(4) + RangeCheck(4) = 108 base cols
+    //     顺序：cpu_interaction(100, 25 SecureField 列) + mem_yield(4) + rc_yield(4)
+    {
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(cpu_interaction_evals);
+        tree_builder.extend_evals(mem_interaction_evals);
+        tree_builder.extend_evals(rc_interaction_evals);
+        tree_builder.commit(&mut channel);
+    }
+
+    // 11. 构建 components（顺序与 Tree 1/2 列分配一致：CPU → Memory → RangeCheck）
+    let cpu_air = CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
+    let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
+    let rc_air = RangeCheckAir::new(log_size, range_lookup.clone());
+    let mut allocator = TraceLocationAllocator::default();
+    let cpu_component = FrameworkComponent::new(&mut allocator, cpu_air, claimed_sum_cpu);
+    let mem_component = FrameworkComponent::new(&mut allocator, mem_air, claimed_sum_mem);
+    let rc_component = FrameworkComponent::new(&mut allocator, rc_air, claimed_sum_range);
+
+    // 12. 生成证明
+    let stark_proof = prove(
+        &[&cpu_component, &mem_component, &rc_component],
+        &mut channel,
+        commitment_scheme,
+    )?;
+
+    Ok(CpuMemRangeProof {
+        stark_proof,
+        claimed_sum_cpu,
+        claimed_sum_mem,
+        claimed_sum_range,
+    })
+}
+
+/// 验证 CPU + Memory + RangeCheck 联合 STARK proof。
+///
+/// 镜像 [`prove_cpu_mem_range_trace`] 的流程。
+///
+/// # 参数
+/// - `proof` — 由 [`prove_cpu_mem_range_trace`] 生成的 `CpuMemRangeProof`
+/// - `log_size` — log2(trace 行数)，须与 prover 一致
+///
+/// # 返回
+/// - `Ok(())` — 验证通过
+/// - `Err(VerificationError)` — 验证失败
+pub fn verify_cpu_mem_range_proof(
+    proof: CpuMemRangeProof,
+    log_size: u32,
+) -> Result<(), VerificationError> {
+    let CpuMemRangeProof {
+        stark_proof,
+        claimed_sum_cpu,
+        claimed_sum_mem,
+        claimed_sum_range,
+    } = proof;
+
+    let config = PcsConfig::default();
+
+    // 1. Channel + CommitmentSchemeVerifier
+    let mut channel = Poseidon252Channel::default();
+    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
+
+    // 2. Tree 0：空 preprocessed（0 列）
+    let preprocessed_commitment = *stark_proof.commitments.get(0).ok_or_else(|| {
+        VerificationError::InvalidStructure(format!(
+            "proof.commitments 长度不足：期望 ≥1，实际 {}",
+            stark_proof.commitments.len()
+        ))
+    })?;
+    commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
+
+    // 3. Tree 1：CPU(132) + Memory(17) + RangeCheck(12) = 161 cols
+    let trace_commitment = *stark_proof.commitments.get(1).ok_or_else(|| {
+        VerificationError::InvalidStructure(format!(
+            "proof.commitments 长度不足：期望 ≥2，实际 {}",
+            stark_proof.commitments.len()
+        ))
+    })?;
+    let total_trace_cols = NUM_COLUMNS + MEM_NUM_COLUMNS + RC_NUM_COLUMNS;
+    let trace_log_sizes = vec![log_size; total_trace_cols];
+    commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
+
+    // 4. 从 channel draw lookups（与 prover 镜像：memory 先，range 后）
+    let memory_lookup = MemoryLookup::draw(&mut channel);
+    let range_lookup = RangeCheckLookup::draw(&mut channel);
+
+    // 5. Soundness check（verifier 端也验证）
+    let total_sum = claimed_sum_cpu + claimed_sum_mem + claimed_sum_range;
+    if total_sum != SecureField::zero() {
+        return Err(VerificationError::InvalidStructure(format!(
+            "V4 soundness check failed: cpu({:?}) + mem({:?}) + range({:?}) != 0",
+            claimed_sum_cpu, claimed_sum_mem, claimed_sum_range
+        )));
+    }
+
+    // 6. 通信 claimed_sums（与 prover 镜像）
+    channel.mix_felts(&[claimed_sum_cpu, claimed_sum_mem, claimed_sum_range]);
+
+    // 7. Tree 2：CPU(4+96=100) + Memory(4) + RangeCheck(4) = 108 base cols
+    let interaction_commitment = *stark_proof.commitments.get(2).ok_or_else(|| {
+        VerificationError::InvalidStructure(format!(
+            "proof.commitments 长度不足：期望 ≥3，实际 {}",
+            stark_proof.commitments.len()
+        ))
+    })?;
+    let interaction_log_sizes = vec![log_size; 108];
+    commitment_scheme.commit(interaction_commitment, &interaction_log_sizes, &mut channel);
+
+    // 8. 构建 components（与 prover 一致）
+    let cpu_air = CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
+    let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
+    let rc_air = RangeCheckAir::new(log_size, range_lookup.clone());
+    let mut allocator = TraceLocationAllocator::default();
+    let cpu_component = FrameworkComponent::new(&mut allocator, cpu_air, claimed_sum_cpu);
+    let mem_component = FrameworkComponent::new(&mut allocator, mem_air, claimed_sum_mem);
+    let rc_component = FrameworkComponent::new(&mut allocator, rc_air, claimed_sum_range);
+
+    // 9. 验证
+    verify(
+        &[&cpu_component, &mem_component, &rc_component],
         &mut channel,
         &mut commitment_scheme,
         stark_proof,
@@ -927,7 +1355,8 @@ mod tests {
     use super::*;
     use crate::isa::Instruction;
     use crate::stwo_backend::column_layout_v2::{
-        COL_SYSCALL_ID, COL_VALUE_A_EFF_BASE, IS_ECALL, IS_PADDING, NUM_COLUMNS,
+        COL_DIV_QUOT_BASE, COL_SYSCALL_ID, COL_TAKEN, COL_VALUE_A_EFF_BASE, IS_ECALL, IS_PADDING,
+        NUM_COLUMNS,
     };
     use crate::stwo_backend::trace_native::{
         step_to_m31_row, trace_to_memory_trace, trace_to_native, NativeTrace, TraceBuilder,
@@ -1459,6 +1888,339 @@ mod tests {
         );
     }
 
+    // ----- JAL/JALR 链接寄存器 soundness 测试（Step 4）-----
+
+    #[test]
+    fn test_jal_soundness_tamper_link() {
+        // Soundness：JAL rd_eff 应 = PC + 4 = 4，篡改为 99，预期 prove 失败
+        // （JAL 链接寄存器约束 is_jal·(rd_eff − (PC+4)) = 0 被违反）
+        let prev = zero_registers();
+        let mut post = prev;
+        post[1] = 4; // 正确值
+        let step = make_step(0, Instruction::Jal { rd: 1, imm: 0x100 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：rd_eff[0] = 99（正确值 4 的低字节应为 4）
+        trace.cols[COL_VALUE_A_EFF_BASE][0] = M31::from(99u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 JAL 链接寄存器应导致 prove 失败（rd_eff = PC+4 soundness）"
+        );
+    }
+
+    // ----- 比较指令 prove/verify roundtrip 测试（Step 2，v3.6 安全审计修复）-----
+    // 验证比较指令约束（cpu_air.rs:336-409）+ witness 填充（trace_native.rs）正确通过
+
+    #[test]
+    fn test_prove_verify_roundtrip_slt_unsigned_less() {
+        // SLT x1, x2, x3：5 < 10（有符号）→ rd_eff = 1
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 10;
+        let mut post = prev;
+        post[1] = 1;
+        prove_verify_single_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_slt_unsigned_greater() {
+        // SLT x1, x2, x3：10 < 5（有符号）→ rd_eff = 0
+        let mut prev = zero_registers();
+        prev[2] = 10;
+        prev[3] = 5;
+        let mut post = prev;
+        post[1] = 0;
+        prove_verify_single_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_slt_signed_negative() {
+        // SLT x1, x2, x3：-5 < 10（有符号）→ rd_eff = 1
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFB; // -5 as i32
+        prev[3] = 10;
+        let mut post = prev;
+        post[1] = 1;
+        prove_verify_single_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_sltu() {
+        // SLTU x1, x2, x3：5 < 10（无符号）→ rd_eff = 1
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 10;
+        let mut post = prev;
+        post[1] = 1;
+        prove_verify_single_step(0, Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_slti() {
+        // SLTI x1, x2, 10：5 < 10（有符号）→ rd_eff = 1
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        let mut post = prev;
+        post[1] = 1;
+        prove_verify_single_step(0, Instruction::Slti { rd: 1, rs1: 2, imm: 10 }, &prev, post);
+    }
+
+    #[test]
+    fn test_prove_verify_roundtrip_sltiu() {
+        // SLTIU x1, x2, 10：5 < 10（无符号）→ rd_eff = 1
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        let mut post = prev;
+        post[1] = 1;
+        prove_verify_single_step(0, Instruction::Sltiu { rd: 1, rs1: 2, imm: 10 }, &prev, post);
+    }
+
+    // ----- 比较指令 soundness 测试（Step 2，篡改 rd_eff → prove 失败）-----
+
+    #[test]
+    fn test_sltu_soundness_tamper_result() {
+        // SLTU x1, x2, x3：5 < 10 → rd_eff 应为 1，篡改为 0，预期 prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 10;
+        let mut post = prev;
+        post[1] = 1; // 正确值
+        let step = make_step(0, Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 rd_eff 低 limb 为 0（正确值 1）
+        trace.cols[COL_VALUE_A_EFF_BASE][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 SLTU 比较结果应导致 prove 失败（rd_eff = borrow1 soundness）"
+        );
+    }
+
+    #[test]
+    fn test_slt_soundness_tamper_result() {
+        // SLT x1, x2, x3：-5 < 10（有符号）→ rd_eff 应为 1，篡改为 0，预期 prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFB; // -5 as i32
+        prev[3] = 10;
+        let mut post = prev;
+        post[1] = 1; // 正确值（负数 < 正数）
+        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 rd_eff 低 limb 为 0（正确值 1）
+        trace.cols[COL_VALUE_A_EFF_BASE][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 SLT 有符号比较结果应导致 prove 失败（rd_eff = sign_a*(1-sign_b) + same_sign*borrow1 soundness）"
+        );
+    }
+
+    #[test]
+    fn test_slt_soundness_tamper_false_to_true() {
+        // SLT x1, x2, x3：10 < 5（有符号）→ rd_eff 应为 0，篡改为 1，预期 prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 10;
+        prev[3] = 5;
+        let mut post = prev;
+        post[1] = 0; // 正确值（10 < 5 为 false）
+        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 rd_eff 低 limb 为 1（正确值 0）
+        trace.cols[COL_VALUE_A_EFF_BASE][0] = M31::from(1u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 SLT 比较结果（false→true）应导致 prove 失败"
+        );
+    }
+
+    // ----- 分支条件验证 soundness 测试（V1 CRITICAL 修复）-----
+    // 篡改 Taken 标志，使分支条件不匹配 → prove 失败
+
+    #[test]
+    fn test_beq_soundness_tamper_taken_false() {
+        // BEQ x2, x3, 16：x2==x3（42==42），taken 应为 1
+        // 篡改 Taken=0 → diff*diff_inv=(1-taken) 变为 diff*diff_inv=1，但 diff=0 → 0≠1 → prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 42;
+        prev[3] = 42;
+        let post = prev; // BEQ 不写寄存器
+        let step = make_step(0, Instruction::Beq { rs1: 2, rs2: 3, imm: 16 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 Taken=0（正确值 1）
+        trace.cols[COL_TAKEN][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BEQ Taken=0（应 taken=1）应导致 prove 失败（V1: taken ⟺ diff==0 约束）"
+        );
+    }
+
+    #[test]
+    fn test_bne_soundness_tamper_taken_true() {
+        // BNE x2, x3, 8：x2==x3（42==42），taken 应为 0
+        // 篡改 Taken=1 → diff*diff_inv=taken 变为 0=1 → prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 42;
+        prev[3] = 42;
+        let post = prev;
+        let step = make_step(0, Instruction::Bne { rs1: 2, rs2: 3, imm: 8 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 Taken=1（正确值 0）
+        trace.cols[COL_TAKEN][0] = M31::from(1u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BNE Taken=1（应 taken=0）应导致 prove 失败（V1: taken ⟺ diff!=0 约束）"
+        );
+    }
+
+    #[test]
+    fn test_bltu_soundness_tamper_taken() {
+        // BLTU x2, x3, 8：42 > 7（无符号），taken 应为 0
+        // 篡改 Taken=1 → taken-borrow1 = 1-0 = 1 ≠ 0 → prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 42;
+        prev[3] = 7;
+        let post = prev;
+        let step = make_step(0, Instruction::Bltu { rs1: 2, rs2: 3, imm: 8 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 Taken=1（正确值 0）
+        trace.cols[COL_TAKEN][0] = M31::from(1u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BLTU Taken=1（应 taken=0）应导致 prove 失败（V1: taken=borrow1 约束）"
+        );
+    }
+
+    #[test]
+    fn test_bgeu_soundness_tamper_taken() {
+        // BGEU x2, x3, 8：5 < 10（无符号），taken 应为 0
+        // 篡改 Taken=1 → taken-1+borrow1 = 1-1+1 = 1 ≠ 0 → prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 10;
+        let post = prev;
+        let step = make_step(0, Instruction::Bgeu { rs1: 2, rs2: 3, imm: 8 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 Taken=1（正确值 0）
+        trace.cols[COL_TAKEN][0] = M31::from(1u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BGEU Taken=1（应 taken=0）应导致 prove 失败（V1: taken=1-borrow1 约束）"
+        );
+    }
+
+    #[test]
+    fn test_blt_soundness_tamper_taken() {
+        // BLT x2, x3, 8：42 > 7（正数有符号），taken 应为 0
+        // 篡改 Taken=1 → taken-slt_result = 1-0 = 1 ≠ 0 → prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 42;
+        prev[3] = 7;
+        let post = prev;
+        let step = make_step(0, Instruction::Blt { rs1: 2, rs2: 3, imm: 8 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 Taken=1（正确值 0）
+        trace.cols[COL_TAKEN][0] = M31::from(1u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BLT Taken=1（应 taken=0）应导致 prove 失败（V1: taken=slt_result 约束）"
+        );
+    }
+
+    #[test]
+    fn test_bge_soundness_tamper_taken() {
+        // BGE x2, x3, 8：5 < 10（正数有符号），taken 应为 0
+        // 篡改 Taken=1 → taken-1+slt_result = 1-1+1 = 1 ≠ 0 → prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 5;
+        prev[3] = 10;
+        let post = prev;
+        let step = make_step(0, Instruction::Bge { rs1: 2, rs2: 3, imm: 8 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 Taken=1（正确值 0）
+        trace.cols[COL_TAKEN][0] = M31::from(1u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BGE Taken=1（应 taken=0）应导致 prove 失败（V1: taken=1-slt_result 约束）"
+        );
+    }
+
     // ----- M 扩展 DIV/REM prove/verify roundtrip 测试（Step 6）-----
 
     #[test]
@@ -1514,6 +2276,62 @@ mod tests {
         let mut post = prev;
         post[1] = 0x8000_0000; // q = INT_MIN
         prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+    }
+
+    // ----- DIV 特殊情况 soundness 测试（V6 修复：d=0 时 q_abs 约束）-----
+
+    #[test]
+    fn test_div_soundness_tamper_q_abs_div_by_zero() {
+        // DIV x1, x2, x3：100 / 0 → q = -1, q_abs = 1, sign_q = 1
+        // 篡改 q_abs 为 42，保持 sign_q = 1 → rd_eff = 2³²−42 ≠ -1，预期 prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 0;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF; // q = -1（正确）
+        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 q_abs limb[0] 为 42（正确值 1）
+        trace.cols[COL_DIV_QUOT_BASE][0] = M31::from(42u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 DIV d=0 的 q_abs 应导致 prove 失败（V6: d=0 时 q_abs = 1 强制约束）"
+        );
+    }
+
+    #[test]
+    fn test_divu_soundness_tamper_q_abs_divu_by_zero() {
+        // DIVU x1, x2, x3：100 / 0 → q = 0xFFFFFFFF, q_abs = 0xFFFFFFFF, sign_q = 0
+        // 篡改 q_abs limb[0] 为 42，保持 sign_q = 0 → 预期 prove 失败
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 0;
+        let mut post = prev;
+        post[1] = 0xFFFF_FFFF; // q = all-ones（正确）
+        let step = make_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 q_abs limb[0] 为 42（正确值 255）
+        trace.cols[COL_DIV_QUOT_BASE][0] = M31::from(42u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 DIVU d=0 的 q_abs 应导致 prove 失败（V6: d=0 无符号时 q_abs = 0xFFFFFFFF 强制约束）"
+        );
     }
 
     #[test]
@@ -2476,5 +3294,498 @@ mod tests {
 
         // verify roundtrip
         verify_poseidon_proof(proof, 8).expect("verify 失败");
+    }
+
+    // ----- V4 RangeCheck soundness 测试（Phase B.6）-----
+    //
+    // 验证 8-bit limb 范围检查（V4 修复）的 soundness：
+    // - test_range_check_soundness_tamper_limb：篡改 limb 超出 [0,255]，prove 必失败
+    // - test_range_check_soundness_roundtrip：合法 trace 3 组件 prove/verify 正向 roundtrip
+
+    #[test]
+    fn test_range_check_soundness_tamper_limb() {
+        // V4 soundness：CPU trace 中所有 8-bit limb 必须 ∈ [0, 255]。
+        //
+        // 构造合法 ADD 单步 trace，篡改 PC limb[0]（row 0）为 256（超出范围）。
+        // 预期 prove_cpu_mem_range_trace 失败：
+        //   - CPU 侧对 value=256 发送 claim (+1)
+        //   - RangeCheckAir 只在 0..255 行发送 yield，value=256 无对应 yield
+        //   - → logup 不平衡 → prover 端 soundness assert（prover.rs:830）panic
+        //   - 亦可能因 PC 被篡改导致 PcNext=Pc+4 约束失败（Err）
+        //   两种情况均判定为失败。
+        let mut prev = zero_registers();
+        prev[2] = 3;
+        prev[3] = 2;
+        let initial_prev = prev;
+        let mut post = prev;
+        post[1] = 5; // 3 + 2
+        let step = make_step_indexed(
+            0,
+            0,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+            Vec::new(),
+        );
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step);
+
+        let mut cpu_trace = trace_to_native(&emulator_trace);
+        let mem_trace = trace_to_memory_trace(&emulator_trace);
+
+        // 篡改：PC limb[0]（row 0）= 256（超出 [0,255]）
+        use crate::stwo_backend::column_layout_v2::COL_PC_BASE;
+        cpu_trace.cols[COL_PC_BASE][0] = M31::from(256u32);
+
+        // 预期：prove 失败（soundness assert panic 或约束失败 Err）
+        // soundness assert 是 panic（非 Err），用 catch_unwind 捕获
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prove_cpu_mem_range_trace(&cpu_trace, &mem_trace)
+        }));
+        assert!(
+            result.is_err(),
+            "篡改 PC limb 为 256 应导致 prove_cpu_mem_range_trace 失败（V4 range check soundness）"
+        );
+    }
+
+    #[test]
+    fn test_range_check_soundness_roundtrip() {
+        // V4 正向 roundtrip：合法 LW 单步 trace，3 组件 prover（CPU + Memory + RangeCheck）
+        // 应 prove + verify 成功，保证 V4 修复不破坏合法 trace 的可证可验性。
+        //
+        // LW x1, x2, 8：x2=0x1000，addr=0x1008，加载值=0xDEADBEEF → x1=0xDEADBEEF
+        // 所有 limb 均在 [0,255]：0x1008→[8,16,0,0]，0xDEADBEEF→[239,190,173,222]
+        let mut prev = zero_registers();
+        prev[2] = 0x1000;
+        let initial_prev = prev;
+        let mut post = prev;
+        post[1] = 0xDEAD_BEEF;
+        let step = make_step_indexed(
+            0,
+            0,
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
+            post,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Read,
+                value: 0xDEAD_BEEF,
+                size: 4,
+            }],
+        );
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step);
+
+        let cpu_trace = trace_to_native(&emulator_trace);
+        let mem_trace = trace_to_memory_trace(&emulator_trace);
+        let log_size = cpu_trace.log_size;
+
+        let proof = prove_cpu_mem_range_trace(&cpu_trace, &mem_trace).expect("prove 失败");
+        verify_cpu_mem_range_proof(proof, log_size).expect("verify 失败");
+    }
+
+    /// 2 组件隔离测试：CPU + RangeCheck（无 Memory），排查 3 组件交互问题。
+    #[test]
+    fn test_cpu_range_only_roundtrip() {
+        use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
+
+        // 复用 roundtrip test 的 trace 构造（LW 指令）
+        let mut prev = zero_registers();
+        prev[2] = 0x1000;
+        let initial_prev = prev;
+        let mut post = prev;
+        post[1] = 0xDEAD_BEEF;
+        let step = make_step_indexed(
+            0, 0,
+            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            post,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Read,
+                value: 0xDEAD_BEEF,
+                size: 4,
+            }],
+        );
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step);
+
+        let cpu_trace = trace_to_native(&emulator_trace);
+        let log_size = cpu_trace.log_size;
+
+        // PCS 配置
+        let config = PcsConfig::default();
+        let blowup_log = config.fri_config.log_blowup_factor;
+        let big_domain = CanonicCoset::new(log_size + blowup_log);
+        let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
+
+        let mut channel = Poseidon252Channel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
+
+        // Tree 0: 空 preprocessed
+        {
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(vec![]);
+            tree_builder.commit(&mut channel);
+        }
+
+        // 生成 evaluations
+        let cpu_evals = native_trace_to_evaluations(&cpu_trace);
+        let rc_trace = gen_range_check_air_trace(&cpu_trace);
+        let rc_evals = range_check_trace_to_evaluations(&rc_trace);
+
+        // Tree 1: CPU(132) + RangeCheck(12) = 144 cols
+        {
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(cpu_evals.clone());
+            tree_builder.extend_evals(rc_evals.clone());
+            tree_builder.commit(&mut channel);
+        }
+
+        // Draw RangeCheckLookup
+        let range_lookup = RangeCheckLookup::draw(&mut channel);
+
+        // 生成 interaction traces
+        let (cpu_interaction, claimed_sum_cpu) =
+            gen_cpu_range_only_interaction_trace(&cpu_evals, log_size, &range_lookup);
+        let (rc_interaction, claimed_sum_rc) =
+            gen_range_check_air_interaction_trace(&rc_evals, log_size, &range_lookup);
+
+        // Soundness check
+        let total = claimed_sum_cpu + claimed_sum_rc;
+        assert_eq!(total, SecureField::zero(), "soundness: cpu({:?}) + rc({:?}) != 0",
+            claimed_sum_cpu, claimed_sum_rc);
+
+        channel.mix_felts(&[claimed_sum_cpu, claimed_sum_rc]);
+
+        // Tree 2: CPU(96) + RangeCheck(4) = 100 cols
+        {
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(cpu_interaction);
+            tree_builder.extend_evals(rc_interaction);
+            tree_builder.commit(&mut channel);
+        }
+
+        // Components
+        let cpu_air = CpuAir::new_with_range_only(log_size, range_lookup.clone());
+        let rc_air = RangeCheckAir::new(log_size, range_lookup.clone());
+        let mut allocator = TraceLocationAllocator::default();
+        let cpu_component = FrameworkComponent::new(&mut allocator, cpu_air, claimed_sum_cpu);
+        let rc_component = FrameworkComponent::new(&mut allocator, rc_air, claimed_sum_rc);
+
+        let stark_proof = prove(
+            &[&cpu_component, &rc_component],
+            &mut channel,
+            commitment_scheme,
+        );
+        match stark_proof {
+            Ok(_) => eprintln!("CPU+RangeCheck (no Memory): PASS"),
+            Err(ref e) => eprintln!("CPU+RangeCheck (no Memory): FAIL — {:?}", e),
+        }
+        stark_proof.expect("prove 失败");
+    }
+
+    /// 诊断测试：使用 assert_constraints_on_trace 直接在 trace 级别验证 CPU AIR 的约束。
+    /// 绕过 prover pipeline（OODS / FRI），直接检查约束是否满足。
+    /// 如果此测试也失败，说明约束本身有问题（不是 prover pipeline 问题）。
+    /// 如果此测试通过但 prove 失败，说明问题在 prover pipeline。
+    #[test]
+    fn test_diag_assert_cpu_range_constraints() {
+        use stwo::core::pcs::TreeVec;
+        use stwo::prover::backend::Column;
+        use stwo_constraint_framework::assert_constraints_on_trace;
+
+        // 复用 roundtrip test 的 trace 构造（LW 指令）
+        let mut prev = zero_registers();
+        prev[2] = 0x1000;
+        let initial_prev = prev;
+        let mut post = prev;
+        post[1] = 0xDEAD_BEEF;
+        let step = make_step_indexed(
+            0, 0,
+            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            post,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Read,
+                value: 0xDEAD_BEEF,
+                size: 4,
+            }],
+        );
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step);
+
+        let cpu_trace = trace_to_native(&emulator_trace);
+        let log_size = cpu_trace.log_size;
+
+        // 生成 evaluations
+        let cpu_evals = native_trace_to_evaluations(&cpu_trace);
+        let rc_trace = gen_range_check_air_trace(&cpu_trace);
+        let rc_evals = range_check_trace_to_evaluations(&rc_trace);
+
+        // 模拟 channel draw（与 prove 流程一致）
+        let config = PcsConfig::default();
+        let mut channel = Poseidon252Channel::default();
+        let blowup_log = config.fri_config.log_blowup_factor;
+        let big_domain = CanonicCoset::new(log_size + blowup_log);
+        let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
+
+        // Tree 0: 空 preprocessed
+        {
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(vec![]);
+            tree_builder.commit(&mut channel);
+        }
+
+        // Tree 1: CPU(132) + RangeCheck(12) = 144 cols
+        {
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(cpu_evals.clone());
+            tree_builder.extend_evals(rc_evals.clone());
+            tree_builder.commit(&mut channel);
+        }
+
+        // Draw RangeCheckLookup
+        let range_lookup = RangeCheckLookup::draw(&mut channel);
+
+        // 生成 interaction traces
+        let (cpu_interaction, claimed_sum_cpu) =
+            gen_cpu_range_only_interaction_trace(&cpu_evals, log_size, &range_lookup);
+        let (rc_interaction, claimed_sum_rc) =
+            gen_range_check_air_interaction_trace(&rc_evals, log_size, &range_lookup);
+
+        // Soundness check
+        let total = claimed_sum_cpu + claimed_sum_rc;
+        assert_eq!(total, SecureField::zero(), "soundness: cpu({:?}) + rc({:?}) != 0",
+            claimed_sum_cpu, claimed_sum_rc);
+
+        eprintln!("=== assert_constraints_on_trace: CPU AIR ===");
+        eprintln!("  log_size={}, claimed_sum_cpu={:?}", log_size, claimed_sum_cpu);
+        eprintln!("  cpu_evals: {} cols, cpu_interaction: {} cols",
+            cpu_evals.len(), cpu_interaction.len());
+
+        // 构建 TreeVec<Vec<&Vec<M31>>> 用于 assert_constraints_on_trace
+        // Tree 0: preprocessed (empty)
+        // Tree 1: CPU original trace (132 cols)
+        // Tree 2: CPU interaction trace (96 cols)
+        let cpu_orig_cols: Vec<Vec<M31>> = cpu_evals.iter()
+            .map(|e| e.values.to_cpu())
+            .collect();
+        let cpu_inter_cols: Vec<Vec<M31>> = cpu_interaction.iter()
+            .map(|e| e.values.to_cpu())
+            .collect();
+
+        let cpu_orig_refs: Vec<&Vec<M31>> = cpu_orig_cols.iter().collect();
+        let cpu_inter_refs: Vec<&Vec<M31>> = cpu_inter_cols.iter().collect();
+
+        let tree: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![
+            vec![],           // Tree 0: preprocessed (empty)
+            cpu_orig_refs,    // Tree 1: CPU original trace
+            cpu_inter_refs,   // Tree 2: CPU interaction trace
+        ]);
+
+        let cpu_air = CpuAir::new_with_range_only(log_size, range_lookup.clone());
+
+        // 这会 panic 并打印哪个 row / constraint 失败
+        assert_constraints_on_trace(
+            &tree,
+            log_size,
+            |eval| { cpu_air.evaluate(eval); },
+            claimed_sum_cpu,
+        );
+
+        eprintln!("=== CPU AIR constraints: PASS ===");
+
+        // 同样检查 RangeCheck AIR
+        eprintln!("=== assert_constraints_on_trace: RangeCheck AIR ===");
+        eprintln!("  rc_evals: {} cols, rc_interaction: {} cols",
+            rc_evals.len(), rc_interaction.len());
+        eprintln!("  claimed_sum_rc={:?}", claimed_sum_rc);
+
+        let rc_orig_cols: Vec<Vec<M31>> = rc_evals.iter()
+            .map(|e| e.values.to_cpu())
+            .collect();
+        let rc_inter_cols: Vec<Vec<M31>> = rc_interaction.iter()
+            .map(|e| e.values.to_cpu())
+            .collect();
+
+        let rc_orig_refs: Vec<&Vec<M31>> = rc_orig_cols.iter().collect();
+        let rc_inter_refs: Vec<&Vec<M31>> = rc_inter_cols.iter().collect();
+
+        let rc_tree: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![
+            vec![],           // Tree 0: preprocessed (empty)
+            rc_orig_refs,     // Tree 1: RangeCheck original trace
+            rc_inter_refs,    // Tree 2: RangeCheck interaction trace
+        ]);
+
+        let rc_air = crate::stwo_backend::range_check_air::RangeCheckAir::new(log_size, range_lookup.clone());
+
+        assert_constraints_on_trace(
+            &rc_tree,
+            log_size,
+            |eval| { rc_air.evaluate(eval); },
+            claimed_sum_rc,
+        );
+
+        eprintln!("=== RangeCheck AIR constraints: PASS ===");
+    }
+
+    /// 诊断测试：打印 3 组件的 trace_locations / n_constraints / max_log_degree_bound，
+    /// 并验证列分配与 prover 承诺的列数一致。同时直接验证 interaction trace 边界条件。
+    #[test]
+    fn test_diag_3comp_constraint_check() {
+        use stwo::core::air::Component;
+        use stwo::prover::backend::Column;
+        use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
+
+        // --- 复用 roundtrip test 的 trace 构造 ---
+        let mut prev = zero_registers();
+        prev[2] = 0x1000;
+        let initial_prev = prev;
+        let mut post = prev;
+        post[1] = 0xDEAD_BEEF;
+        let step = make_step_indexed(
+            0,
+            0,
+            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            post,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Read,
+                value: 0xDEAD_BEEF,
+                size: 4,
+            }],
+        );
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step);
+        let cpu_trace = trace_to_native(&emulator_trace);
+        let mem_trace = trace_to_memory_trace(&emulator_trace);
+        let log_size = cpu_trace.log_size;
+
+        // --- 构建 evaluations ---
+        let cpu_evals = native_trace_to_evaluations(&cpu_trace);
+        let mem_evals = memory_trace_to_evaluations(&mem_trace);
+        let rc_trace = gen_range_check_air_trace(&cpu_trace);
+        let rc_evals = range_check_trace_to_evaluations(&rc_trace);
+
+        // --- draw lookups ---
+        let mut channel = Poseidon252Channel::default();
+        let memory_lookup = MemoryLookup::draw(&mut channel);
+        let range_lookup = RangeCheckLookup::draw(&mut channel);
+
+        // --- 生成 interaction traces ---
+        let (cpu_interaction, claimed_sum_cpu) =
+            gen_cpu_full_interaction_trace(&cpu_evals, log_size, &memory_lookup, &range_lookup);
+        let (mem_interaction, claimed_sum_mem) =
+            gen_mem_interaction_trace(&mem_evals, log_size, &memory_lookup);
+        let (rc_interaction, claimed_sum_range) =
+            gen_range_check_air_interaction_trace(&rc_evals, log_size, &range_lookup);
+
+        // soundness sanity
+        let total = claimed_sum_cpu + claimed_sum_mem + claimed_sum_range;
+        assert_eq!(total, SecureField::zero(), "soundness mismatch in diag");
+
+        // --- 创建 components（与 prover 完全一致）---
+        let cpu_air =
+            CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
+        let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
+        let rc_air = RangeCheckAir::new(log_size, range_lookup.clone());
+        let mut allocator = TraceLocationAllocator::default();
+        let cpu_component = FrameworkComponent::new(&mut allocator, cpu_air, claimed_sum_cpu);
+        let mem_component = FrameworkComponent::new(&mut allocator, mem_air, claimed_sum_mem);
+        let rc_component = FrameworkComponent::new(&mut allocator, rc_air, claimed_sum_range);
+
+        // --- 打印组件信息 ---
+        macro_rules! print_component {
+            ($name:expr, $comp:expr) => {{
+                let locs = $comp.trace_locations();
+                eprintln!("=== {} ===", $name);
+                eprintln!("  n_constraints = {}", $comp.n_constraints());
+                eprintln!(
+                    "  max_constraint_log_degree_bound = {}",
+                    $comp.max_constraint_log_degree_bound()
+                );
+                for span in locs.iter() {
+                    eprintln!(
+                        "  Tree {}: [{}..{}) = {} cols",
+                        span.tree_index,
+                        span.col_start,
+                        span.col_end,
+                        span.col_end - span.col_start
+                    );
+                }
+                eprintln!("  logup_counts:");
+                for (rel_name, count) in $comp.logup_counts().iter() {
+                    eprintln!("    {} = {}", rel_name, count);
+                }
+            }};
+        }
+        print_component!("CPU", &cpu_component);
+        print_component!("Memory", &mem_component);
+        print_component!("RangeCheck", &rc_component);
+
+        // --- 验证列数匹配 ---
+        // Tree 1 (original): CPU(132) + Memory(MEM_NUM_COLUMNS) + RangeCheck(12)
+        // Tree 2 (interaction): CPU(?) + Memory(?) + RangeCheck(?)
+        let cpu_t1 = cpu_trace.cols.len();
+        let mem_t1 = mem_trace.cols.len();
+        let rc_t1 = rc_trace.cols.len();
+        let cpu_t2 = cpu_interaction.len();
+        let mem_t2 = mem_interaction.len();
+        let rc_t2 = rc_interaction.len();
+        eprintln!();
+        eprintln!("=== Prover committed column counts ===");
+        eprintln!("  Tree 1: CPU({}) + Memory({}) + RangeCheck({}) = {}", cpu_t1, mem_t1, rc_t1, cpu_t1 + mem_t1 + rc_t1);
+        eprintln!("  Tree 2: CPU({}) + Memory({}) + RangeCheck({}) = {}", cpu_t2, mem_t2, rc_t2, cpu_t2 + mem_t2 + rc_t2);
+
+        // --- 验证 interaction trace 边界条件 ---
+        // 对每个组件的最后一列（prefix-summed），最后一行应为 0
+        let check_boundary = |name: &str, inter: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>]| {
+            // 最后一组 4 个 base cols = 最后一个 SecureField column
+            let n_cols = inter.len();
+            if n_cols < 4 {
+                eprintln!("  {} interaction: only {} base cols (< 4), skip boundary check", name, n_cols);
+                return;
+            }
+            let last_4: Vec<Vec<M31>> = inter[n_cols - 4..].iter().map(|e| e.values.to_cpu()).collect();
+            let n_rows = last_4[0].len();
+            // 重建最后一行的 SecureField 值
+            let last_row_ef = SecureField::from_m31_array([
+                last_4[0][n_rows - 1],
+                last_4[1][n_rows - 1],
+                last_4[2][n_rows - 1],
+                last_4[3][n_rows - 1],
+            ]);
+            eprintln!("  {} interaction last_col[last_row] = {:?} (should be 0)", name, last_row_ef);
+        };
+        eprintln!();
+        eprintln!("=== Interaction trace boundary (last col last row = 0) ===");
+        check_boundary("CPU", &cpu_interaction);
+        check_boundary("Memory", &mem_interaction);
+        check_boundary("RangeCheck", &rc_interaction);
+
+        // --- 验证 cumsum_shift ---
+        let n_rows = 1u32 << log_size;
+        let cpu_cumsum_shift = claimed_sum_cpu / BaseField::from_u32_unchecked(n_rows);
+        let mem_cumsum_shift = claimed_sum_mem / BaseField::from_u32_unchecked(n_rows);
+        let rc_cumsum_shift = claimed_sum_range / BaseField::from_u32_unchecked(n_rows);
+        eprintln!();
+        eprintln!("=== cumsum_shift (claimed_sum / n_rows) ===");
+        eprintln!("  CPU: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_cpu, cpu_cumsum_shift);
+        eprintln!("  Memory: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_mem, mem_cumsum_shift);
+        eprintln!("  RangeCheck: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_range, rc_cumsum_shift);
     }
 }

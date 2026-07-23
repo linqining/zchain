@@ -185,6 +185,36 @@ relation!(PoseidonLookup, 9);
 #[allow(dead_code)]
 relation!(Sha256Lookup, 9);
 
+/// RangeCheck lookup relation（1 元组：limb 值 v ∈ [0, 255]）。
+///
+/// 用于 CPU AIR 与 RangeCheckAir 之间的 8-bit limb 范围检查（V4 修复）。
+///
+/// ## 值布局（1 元组）
+///
+/// ```text
+/// values[0] = LimbValue (1 列 M31，= 0..255)
+/// ```
+///
+/// ## 交互
+///
+/// - **CPU AIR 发送 claim**（每行每个 limb 列，multiplicity = +1）：
+///   - values = (limb_value,)
+///   - 非 padding 行的 24 个 limb 列各发送 1 个 claim
+///   - padding 行 multiplicity = 0
+///
+/// - **RangeCheckAir 发送 yield**（每行，multiplicity = -count_v）：
+///   - values = (v,)，v ∈ [0, 255]
+///   - count_v = 该值在 CPU limb 中出现的总次数
+///
+/// - **一致性条件**：Σ(CPU claims) + Σ(RangeCheck yields) == 0
+///
+/// ## Soundness 说明
+///
+/// 缺少 range check 时，恶意 prover 可将 limb 设为任意 M31 值（如 300），
+/// 破坏 4×8-bit limb 方案的正确性（carry chain 假设 limb ∈ [0, 255]）。
+/// logup 确保所有 limb 值 ∈ [0, 255]。
+relation!(RangeCheckLookup, 1);
+
 // ===========================================================================
 // 单元测试
 // ===========================================================================
@@ -271,6 +301,20 @@ mod tests {
         assert_eq!(
             <Sha256Lookup as Relation<BaseField, SecureField>>::get_size(&lookup),
             9
+        );
+    }
+
+    #[test]
+    fn test_range_check_lookup_dummy() {
+        let _lookup = RangeCheckLookup::dummy();
+    }
+
+    #[test]
+    fn test_range_check_lookup_size() {
+        let lookup = RangeCheckLookup::dummy();
+        assert_eq!(
+            <RangeCheckLookup as Relation<BaseField, SecureField>>::get_size(&lookup),
+            1
         );
     }
 }

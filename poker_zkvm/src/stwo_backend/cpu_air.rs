@@ -44,9 +44,10 @@ use super::column_layout_v2::{
     COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE, COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS,
     IS_ADD, IS_ADDI, IS_AUIPC, IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU,
     IS_ECALL, IS_JAL, IS_JALR, IS_LOAD, IS_LUI, IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU,
-    IS_PADDING, IS_REM, IS_REMU, IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
+    IS_PADDING, IS_REM, IS_REMU, IS_SLT, IS_SLTI, IS_SLTU, IS_SLTIU, IS_STORE, IS_SUB,
+    NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
 };
-use super::lookups::{EcallLookup, MemoryLookup};
+use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
 
 /// 65536 = 2^16，16-bit 边界进位/借位的基数。
 const SIX5536: BaseField = BaseField::from_u32_unchecked(65536);
@@ -105,6 +106,9 @@ pub struct CpuAir {
     /// 可选的 EcallLookup relation（None=不发送 ECALL logup claim）
     /// Phase 4 Tier 1 新增（v3：claim 缩减为 1 元组 SyscallId）
     ecall_lookup: Option<EcallLookup>,
+    /// 可选的 RangeCheckLookup relation（None=不发送 Range logup claim）
+    /// V4 修复：验证所有 8-bit limb ∈ [0, 255]
+    range_lookup: Option<RangeCheckLookup>,
 }
 
 impl CpuAir {
@@ -114,7 +118,7 @@ impl CpuAir {
     /// - `log_size` — log2(行数)，须 ≥ 10（Stwo SIMD 对齐要求）
     ///
     /// # 返回
-    /// `memory_lookup = None, ecall_lookup = None` 的 CpuAir。
+    /// `memory_lookup = None, ecall_lookup = None, range_lookup = None` 的 CpuAir。
     /// 适用于 Phase 2 单组件 prove/verify 测试。
     #[must_use]
     pub const fn new(log_size: u32) -> Self {
@@ -122,6 +126,7 @@ impl CpuAir {
             log_size,
             memory_lookup: None,
             ecall_lookup: None,
+            range_lookup: None,
         }
     }
 
@@ -132,7 +137,7 @@ impl CpuAir {
     /// - `memory_lookup` — MemoryLookup relation 实例（从 channel draw 或 dummy）
     ///
     /// # 返回
-    /// `memory_lookup = Some(lookup), ecall_lookup = None` 的 CpuAir。
+    /// `memory_lookup = Some(lookup), ecall_lookup = None, range_lookup = None` 的 CpuAir。
     /// 适用于 Phase 3.5+ 多组件 prove/verify（配合 Memory AIR）。
     #[must_use]
     pub const fn new_with_lookup(log_size: u32, memory_lookup: MemoryLookup) -> Self {
@@ -140,6 +145,7 @@ impl CpuAir {
             log_size,
             memory_lookup: Some(memory_lookup),
             ecall_lookup: None,
+            range_lookup: None,
         }
     }
 
@@ -151,7 +157,7 @@ impl CpuAir {
     /// - `ecall_lookup` — EcallLookup relation 实例（从 channel draw 或 dummy）
     ///
     /// # 返回
-    /// `memory_lookup = Some, ecall_lookup = Some` 的 CpuAir。
+    /// `memory_lookup = Some, ecall_lookup = Some, range_lookup = None` 的 CpuAir。
     /// 适用于 Phase 4 Tier 1+ 多组件 prove/verify（配合 Memory AIR + Precompile AIR）。
     ///
     /// # Phase 4 Tier 1 注意
@@ -172,6 +178,72 @@ impl CpuAir {
             log_size,
             memory_lookup: Some(memory_lookup),
             ecall_lookup: Some(ecall_lookup),
+            range_lookup: None,
+        }
+    }
+
+    /// 创建指定 log_size 的 CPU AIR（V4 修复，同时启用 Memory + ECALL + RangeCheck logup claim）。
+    ///
+    /// # 参数
+    /// - `log_size` — log2(行数)，须 ≥ 10
+    /// - `memory_lookup` — MemoryLookup relation 实例
+    /// - `ecall_lookup` — EcallLookup relation 实例
+    /// - `range_lookup` — RangeCheckLookup relation 实例（从 channel draw 或 dummy）
+    ///
+    /// # 返回
+    /// `memory_lookup = Some, ecall_lookup = Some, range_lookup = Some` 的 CpuAir。
+    /// 适用于 V4 修复多组件 prove/verify（配合 Memory AIR + RangeCheck AIR）。
+    #[must_use]
+    pub const fn new_with_range_check(
+        log_size: u32,
+        memory_lookup: MemoryLookup,
+        ecall_lookup: EcallLookup,
+        range_lookup: RangeCheckLookup,
+    ) -> Self {
+        Self {
+            log_size,
+            memory_lookup: Some(memory_lookup),
+            ecall_lookup: Some(ecall_lookup),
+            range_lookup: Some(range_lookup),
+        }
+    }
+
+    /// 创建指定 log_size 的 CPU AIR（V4 修复，启用 Memory + RangeCheck，无 ECALL）。
+    ///
+    /// 用于 3 组件 prover（CPU + Memory + RangeCheck），匹配现有 `prove_cpu_memory_trace`
+    /// 不含 ecall 的模式，避免引入无 yield 方的 ecall interaction 列。
+    ///
+    /// # 参数
+    /// - `log_size` — log2(行数)，须 ≥ 10
+    /// - `memory_lookup` — MemoryLookup relation 实例
+    /// - `range_lookup` — RangeCheckLookup relation 实例（从 channel draw 或 dummy）
+    ///
+    /// # 返回
+    /// `memory_lookup = Some, ecall_lookup = None, range_lookup = Some` 的 CpuAir。
+    #[must_use]
+    pub const fn new_with_memory_and_range(
+        log_size: u32,
+        memory_lookup: MemoryLookup,
+        range_lookup: RangeCheckLookup,
+    ) -> Self {
+        Self {
+            log_size,
+            memory_lookup: Some(memory_lookup),
+            ecall_lookup: None,
+            range_lookup: Some(range_lookup),
+        }
+    }
+
+    /// 创建指定 log_size 的 CPU AIR（仅启用 RangeCheck，无 Memory/ECALL）。
+    ///
+    /// 用于 2 组件隔离测试（CPU + RangeCheck），排查 3 组件交互问题。
+    #[must_use]
+    pub const fn new_with_range_only(log_size: u32, range_lookup: RangeCheckLookup) -> Self {
+        Self {
+            log_size,
+            memory_lookup: None,
+            ecall_lookup: None,
+            range_lookup: Some(range_lookup),
         }
     }
 
@@ -191,6 +263,12 @@ impl CpuAir {
     #[must_use]
     pub const fn has_ecall_lookup(&self) -> bool {
         self.ecall_lookup.is_some()
+    }
+
+    /// 是否启用 RangeCheck logup claim（V4 修复）。
+    #[must_use]
+    pub const fn has_range_lookup(&self) -> bool {
+        self.range_lookup.is_some()
     }
 }
 
@@ -332,6 +410,154 @@ impl FrameworkEval for CpuAir {
         let borrow1_bin = carry1.clone() * (carry1.clone() - one.clone());
         eval.add_constraint(is_sub.clone() * borrow1_bin);
 
+        // ===== 约束 12a-16a：SLTU/SLTIU 约束（gated by IsSltu + IsSltiu）=====
+        // SLTU/SLTIU: rd_eff = (rs1 < rs2 unsigned) ? 1 : 0
+        // 方法：计算 rs1 - rs2 的 borrow（与 SUB 同结构），rd_eff = borrow1
+        // diff 存入 COL_MUL_LOW_BASE（4 limb），borrow 复用 COL_CARRY_FLAG_BASE
+        // 度数：G_SLTU(1) × expr(1) = 2 ✓；binality = 1 + 2 = 3 ✓
+        let is_slt = col(IS_SLT);
+        let is_sltu = col(IS_SLTU);
+        let is_slti = col(IS_SLTI);
+        let is_sltiu = col(IS_SLTIU);
+        let is_slt_group = is_slt.clone() + is_slti.clone(); // 有符号比较
+        let is_sltu_group = is_sltu.clone() + is_sltiu.clone(); // 无符号比较
+        let is_cmp = is_slt_group.clone() + is_sltu_group.clone(); // 所有比较指令
+
+        // diff = rs1 - rs2（存入 COL_MUL_LOW_BASE，复用 MUL 列，one-hot 互斥）
+        let diff_low16 = word_low16(COL_MUL_LOW_BASE);
+        let diff_high16 = word_high16(COL_MUL_LOW_BASE);
+
+        // diff_low16 = rs1_low - rs2_low + 65536 * borrow0（有符号和无符号共用）
+        let cmp_diff_low = diff_low16.clone() - rs1_low.clone() + rs2_low.clone()
+            - six5536.clone() * carry0.clone();
+        eval.add_constraint(is_cmp.clone() * cmp_diff_low);
+
+        // diff_high16 = rs1_high - rs2_high - borrow0 + 65536 * borrow1
+        let cmp_diff_high = diff_high16.clone() - rs1_high.clone() + rs2_high.clone()
+            + carry0.clone() - six5536.clone() * carry1.clone();
+        eval.add_constraint(is_cmp.clone() * cmp_diff_high);
+
+        // borrow0/borrow1 binality（gated by is_cmp）
+        eval.add_constraint(is_cmp.clone() * carry0.clone() * (carry0.clone() - one.clone()));
+        eval.add_constraint(is_cmp.clone() * carry1.clone() * (carry1.clone() - one.clone()));
+
+        // SLTU/SLTIU: rd_eff = borrow1（无符号比较：rs1 < rs2 iff 高位借位）
+        eval.add_constraint(is_sltu_group.clone() * (rd_eff_low.clone() - carry1.clone()));
+        // rd_eff 高位 = 0（rd_eff 是 0 或 1）
+        eval.add_constraint(is_sltu_group.clone() * rd_eff_high.clone());
+        // rd_eff 低位 binality（rd_eff ∈ {0, 1}）
+        eval.add_constraint(
+            is_sltu_group.clone() * rd_eff_low.clone() * (rd_eff_low.clone() - one.clone()),
+        );
+
+        // ===== 约束 17a-22a：SLT/SLTI 约束（gated by IsSlt + IsSlti）=====
+        // SLT/SLTI: rd_eff = (rs1 < rs2 有符号) ? 1 : 0
+        // 有符号比较公式：
+        //   sign_a = rs1 符号位（bit 31），sign_b = rs2 符号位
+        //   same_sign = 1 - (sign_a XOR sign_b) = 1 - sign_a - sign_b + 2*sign_a*sign_b
+        //   rd_eff = sign_a * (1 - sign_b) + same_sign * borrow1
+        //   （符号不同→负数更小；符号相同→等同于无符号比较的 borrow1）
+        // sign_a/sign_b 复用 COL_SIGN_A/COL_SIGN_B（MULH 行互斥）
+        // same_sign 复用 COL_LOW_NONZERO（MUL 行互斥）
+        let sign_a = col(COL_SIGN_A);
+        let sign_b = col(COL_SIGN_B);
+        let same_sign = col(COL_LOW_NONZERO);
+
+        // sign_a/sign_b binality（gated by is_slt_group）
+        eval.add_constraint(is_slt_group.clone() * sign_a.clone() * (sign_a.clone() - one.clone()));
+        eval.add_constraint(is_slt_group.clone() * sign_b.clone() * (sign_b.clone() - one.clone()));
+
+        // same_sign = 1 - sign_a - sign_b + 2*sign_a*sign_b（gated by is_slt_group）
+        // 度数 = 1 × 2 = 3 ✓
+        let same_sign_expr = same_sign.clone() - one.clone() + sign_a.clone() + sign_b.clone()
+            - two.clone() * sign_a.clone() * sign_b.clone();
+        eval.add_constraint(is_slt_group.clone() * same_sign_expr);
+
+        // rd_eff = sign_a * (1 - sign_b) + same_sign * borrow1（gated by is_slt_group）
+        // = sign_a - sign_a*sign_b + same_sign*borrow1（度数 2，gated 度 1，总 3 ✓）
+        let slt_result = rd_eff_low.clone() - sign_a.clone() + sign_a.clone() * sign_b.clone()
+            - same_sign.clone() * carry1.clone();
+        eval.add_constraint(is_slt_group.clone() * slt_result);
+
+        // rd_eff 高位 = 0 + rd_eff 低位 binality（rd_eff ∈ {0, 1}）
+        eval.add_constraint(is_slt_group.clone() * rd_eff_high.clone());
+        eval.add_constraint(
+            is_slt_group.clone() * rd_eff_low.clone() * (rd_eff_low.clone() - one.clone()),
+        );
+
+        // ===== 约束 22b-34b：分支条件验证（V1 CRITICAL 修复）=====
+        // 漏洞：Taken 仅做 binality 约束（Taken*(Taken-1)=0），未验证 Taken 与
+        // rs1/rs2 比较结果一致。恶意 prover 可任意设 Taken=1 让分支跳转。
+        // 修复：约束 Taken = f(rs1, rs2) 的正确比较结果。
+        //
+        // 列复用（one-hot 互斥，分支行与 MUL/DIV/SLT/ADD/SUB/Load/Store 互斥）：
+        // - diff (4 limb) → COL_MUL_LOW_BASE(128-131)，复用比较/MUL 列
+        // - borrow0/borrow1 → COL_CARRY_FLAG_BASE(8-9)，复用 ADD/SUB/比较列
+        // - diff_inv (1 列) → COL_HELPER_B_BASE(69)，复用 Load/Store 列（HelperA 被分支目标占用）
+        // - sign_a/sign_b/same_sign → COL_SIGN_A(114)/COL_SIGN_B(115)/COL_LOW_NONZERO(116)
+
+        // diff = rs1 - rs2（复用比较约束已定义的 diff_low16/diff_high16，gated by is_branch）
+        let br_diff_low = diff_low16.clone() - rs1_low.clone() + rs2_low.clone()
+            - six5536.clone() * carry0.clone();
+        eval.add_constraint(is_branch.clone() * br_diff_low);
+        let br_diff_high = diff_high16.clone() - rs1_high.clone() + rs2_high.clone()
+            + carry0.clone() - six5536.clone() * carry1.clone();
+        eval.add_constraint(is_branch.clone() * br_diff_high);
+        // borrow0/borrow1 binality（gated by is_branch）
+        eval.add_constraint(is_branch.clone() * carry0.clone() * (carry0.clone() - one.clone()));
+        eval.add_constraint(is_branch.clone() * carry1.clone() * (carry1.clone() - one.clone()));
+
+        // diff_value = 完整 32-bit 值（度 1：4 列线性组合）
+        let diff_value = diff_low16.clone() + six5536.clone() * diff_high16.clone();
+        // diff_inv 存入 COL_HELPER_B_BASE（分支行与 Load/Store one-hot 互斥）
+        let diff_inv = col(COL_HELPER_B_BASE);
+
+        // ===== BEQ：taken ⟺ diff == 0 =====
+        // taken=1 → diff_value=0（度 3：is_beq × taken × diff_value）
+        eval.add_constraint(is_beq.clone() * taken.clone() * diff_value.clone());
+        // diff * diff_inv = (1 - taken)（度 3）
+        // taken=1: 0*0=0=(1-1) ✓；taken=0: diff*inv=1=(1-0) ✓
+        eval.add_constraint(
+            is_beq.clone() * (diff_value.clone() * diff_inv.clone() - (one.clone() - taken.clone())),
+        );
+
+        // ===== BNE：taken ⟺ diff != 0 =====
+        // not-taken → diff=0（度 3：is_bne × (1-taken) × diff_value）
+        eval.add_constraint(is_bne.clone() * (one.clone() - taken.clone()) * diff_value.clone());
+        // diff * diff_inv = taken（度 3）
+        // taken=1: diff*inv=1 ✓；taken=0: 0*0=0 ✓
+        eval.add_constraint(
+            is_bne.clone() * (diff_value.clone() * diff_inv.clone() - taken.clone()),
+        );
+
+        // ===== BLTU/BGEU：无符号比较 =====
+        // BLTU: taken = borrow1（rs1 < rs2 无符号 iff 高位借位，度 2）
+        eval.add_constraint(is_bltu.clone() * (taken.clone() - carry1.clone()));
+        // BGEU: taken = 1 - borrow1（度 2）
+        eval.add_constraint(is_bgeu.clone() * (taken.clone() - one.clone() + carry1.clone()));
+
+        // ===== BLT/BGE：有符号比较（复用 SLT 公式）=====
+        // same_sign/sign_a/sign_b 已在 SLT 约束中定义（复用 witness 列，one-hot 互斥）
+        let is_signed_branch = is_blt.clone() + is_bge.clone();
+        // sign_a/sign_b binality（gated by is_signed_branch）
+        eval.add_constraint(
+            is_signed_branch.clone() * sign_a.clone() * (sign_a.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            is_signed_branch.clone() * sign_b.clone() * (sign_b.clone() - one.clone()),
+        );
+        // same_sign = 1 - sign_a - sign_b + 2*sign_a*sign_b（gated by is_signed_branch，度 3）
+        let br_same_sign_expr = same_sign.clone() - one.clone() + sign_a.clone() + sign_b.clone()
+            - two.clone() * sign_a.clone() * sign_b.clone();
+        eval.add_constraint(is_signed_branch.clone() * br_same_sign_expr);
+        // slt_result = sign_a*(1-sign_b) + same_sign*borrow1（度 2）
+        let slt_result_br = sign_a.clone() * (one.clone() - sign_b.clone())
+            + same_sign.clone() * carry1.clone();
+        // BLT: taken = slt_result（度 3）
+        eval.add_constraint(is_blt.clone() * (taken.clone() - slt_result_br.clone()));
+        // BGE: taken = 1 - slt_result（度 3）
+        eval.add_constraint(is_bge.clone() * (taken.clone() - one.clone() + slt_result_br.clone()));
+
         // ===== 约束 13：IsPadding binality（通用，无 gating）=====
         let padding_bin = is_padding.clone() * (is_padding.clone() - one.clone());
         eval.add_constraint(padding_bin);
@@ -398,6 +624,31 @@ impl FrameworkEval for CpuAir {
             let jalr_diff = col(COL_PC_NEXT_BASE + i) - col(COL_HELPER_A_BASE + i);
             eval.add_constraint(is_jalr.clone() * jalr_diff);
         }
+
+        // ===== 约束 28a-31a：JAL/JALR 链接寄存器约束（rd_eff = PC + 4）=====
+        // JAL/JALR: rd_eff = PC + 4（返回地址写入链接寄存器）
+        // 使用 PcCarryFlag 列（JAL/JALR 行与 IsNonFlow/IsBranch 互斥，PcCarryFlag 空闲）
+        //   rd_eff_low16 = pc_low16 + 4 - 65536 * pc_carry0
+        //   rd_eff_high16 = pc_high16 + pc_carry0 - 65536 * pc_carry1
+        //   pc_carry0, pc_carry1 ∈ {0, 1}
+        // 度数 = is_jal_jalr(1) × expr(1) = 2 ✓；binality = 1 + 2 = 3 ✓
+        let is_jal_jalr = is_jal.clone() + is_jalr.clone();
+
+        let jal_rd_low = rd_eff_low.clone() - pc_low16.clone() - four.clone()
+            + six5536.clone() * pc_carry0.clone();
+        eval.add_constraint(is_jal_jalr.clone() * jal_rd_low);
+
+        let jal_rd_high = rd_eff_high.clone() - pc_high16.clone() - pc_carry0.clone()
+            + six5536.clone() * pc_carry1.clone();
+        eval.add_constraint(is_jal_jalr.clone() * jal_rd_high);
+
+        // pc_carry0/pc_carry1 binality（gated by is_jal + is_jalr）
+        eval.add_constraint(
+            is_jal_jalr.clone() * pc_carry0.clone() * (pc_carry0.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            is_jal_jalr.clone() * pc_carry1.clone() * (pc_carry1.clone() - one.clone()),
+        );
 
         // ===== 约束 28-31：Branch 约束（gated by IsBranch，16-bit half 方案）=====
         // 分支指令：taken ? PcNext = Pc + imm : PcNext = Pc + 4
@@ -814,6 +1065,53 @@ impl FrameworkEval for CpuAir {
         // 注意：仅对有符号 DIV 约束，DIVU 的 d=0 时 sign_q=0（无符号商）
         eval.add_constraint(is_div.clone() * is_special.clone() * (one.clone() - sign_q.clone()));
 
+        // ===== V6 修复：DIV 特殊情况 q_abs 约束（d=0 时 q_abs 无约束漏洞）=====
+        // 漏洞：d=0（abs_b=0）时 carry chain 乘积 = q_abs × 0 = 0，identity 退化为
+        // r_abs = abs_a，q_abs 完全无约束。prover 可任意设定 q_abs → rd_eff 任意。
+        // 修复：当 is_special=1 时约束 abs_b ∈ {0,1}（d=0→0, overflow→|-1|=1），
+        // 并在 d=0 时（abs_b=0，gate_d0=1）强制 q_abs 为 RISC-V 规范值：
+        // - 有符号 (sign_q=1): q_abs = 1（|−1| = 1，q = -1）
+        // - 无符号 (sign_q=0): q_abs = 0xFFFFFFFF（q = all-ones）
+        // overflow 时 abs_b=1，identity 已约束 q_abs（q_abs×1 + r_abs = abs_a），无需额外约束。
+        //
+        // 自保护分析（无 g3 gating 也安全）：
+        // - 非 DIV 行 is_special=0 → 所有约束 gated off（is_special=0 → 0×anything=0）
+        // - 恶意 is_special=1 非 DIV 行：q_abs_limb=0（未填），expected≠0 → 约束违反 → prove 失败
+        // - MULH 行 abs_b=|rs2|（可能>1），若恶意 is_special=1 → abs_b binality 约束违反 → prove 失败
+        let two55: E::F = BaseField::from(255u32).into();
+        let abs_b_limb0 = col(COL_ABS_B_BASE);
+        let abs_b_limb1 = col(COL_ABS_B_BASE + 1);
+        let abs_b_limb2 = col(COL_ABS_B_BASE + 2);
+        let abs_b_limb3 = col(COL_ABS_B_BASE + 3);
+
+        // is_special=1 时 abs_b_limb[0] ∈ {0,1}（度 3）
+        eval.add_constraint(
+            is_special.clone() * abs_b_limb0.clone() * (abs_b_limb0.clone() - one.clone()),
+        );
+        // is_special=1 时 abs_b_limb[1..3] = 0（度 2 each）
+        eval.add_constraint(is_special.clone() * abs_b_limb1.clone());
+        eval.add_constraint(is_special.clone() * abs_b_limb2.clone());
+        eval.add_constraint(is_special.clone() * abs_b_limb3.clone());
+
+        // gate_d0 = is_special · (1 − abs_b_limb[0])（度 2）
+        // is_special=1 且 abs_b=0（d=0）→ gate=1；abs_b=1（overflow）→ gate=0
+        let gate_d0 = is_special.clone() * (one.clone() - abs_b_limb0.clone());
+
+        // d=0 时 q_abs_limb[0] = sign_q + 255·(1−sign_q)（度 3）
+        // sign_q=1（有符号）→ 1；sign_q=0（无符号）→ 255
+        let q_abs_limb0_expected =
+            sign_q.clone() + two55.clone() * (one.clone() - sign_q.clone());
+        let q_abs_limb0 = col(COL_DIV_QUOT_BASE);
+        eval.add_constraint(gate_d0.clone() * (q_abs_limb0.clone() - q_abs_limb0_expected));
+
+        // d=0 时 q_abs_limb[1..3] = 255·(1−sign_q)（度 3 each）
+        // sign_q=1（有符号）→ 0；sign_q=0（无符号）→ 255
+        for i in 1..4usize {
+            let q_abs_limb_i = col(COL_DIV_QUOT_BASE + i);
+            let expected_i = two55.clone() * (one.clone() - sign_q.clone());
+            eval.add_constraint(gate_d0.clone() * (q_abs_limb_i - expected_i));
+        }
+
         // ----- 范围检查：r_abs < abs_b（gated by g3·(1−is_special)，度 3）-----
         // diff = abs_b − r_abs − 1 ≥ 0（borrow1 = 0）
         // low16: abs_b_low − rem_low − 1 + 65536·borrow0 − diff_low = 0
@@ -946,6 +1244,45 @@ impl FrameworkEval for CpuAir {
                 multiplicity_ef,
                 &ecall_claim_values,
             ));
+            has_logup = true;
+        }
+
+        // ===== V4 约束：RangeCheck logup claim（gated by Option<RangeCheckLookup>）=====
+        // 当 range_lookup = Some(lookup) 时，对每个非 padding 行的 24 个 limb 列发送 1 元组 claim：
+        //   values = (limb_value,)
+        //   multiplicity = (1 - IsPadding)（非 padding 行 = +1，padding 行 = 0）
+        //
+        // 需 range check 的 24 个 limb 列（6 word × 4 limb）：
+        //   PC(0-3) + PcNext(4-7) + ValueAEff(10-13) + ValueB(14-17) + ValueC(18-21) + MemAddr(74-77)
+        //
+        // 一致性条件：Σ(CPU claims) + Σ(RangeCheckAir yields) == 0
+        // RangeCheckAir 对 v ∈ [0, 255] 发送 yield (v, -count_v)。
+        if let Some(ref lookup) = self.range_lookup {
+            let is_non_padding: E::F = one.clone() - is_padding.clone();
+            let mult_ef: E::EF = is_non_padding.into();
+            // 24 个 limb 列索引
+            const RANGE_CHECK_COLS: [usize; 24] = [
+                // PC (0-3)
+                COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
+                // PcNext (4-7)
+                COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
+                // ValueAEff (10-13)
+                COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2, COL_VALUE_A_EFF_BASE + 3,
+                // ValueB (14-17)
+                COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
+                // ValueC (18-21)
+                COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
+                // MemAddr (74-77)
+                COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
+            ];
+            for &col_idx in &RANGE_CHECK_COLS {
+                let limb_val = col(col_idx);
+                eval.add_to_relation(RelationEntry::new(
+                    lookup,
+                    mult_ef.clone(),
+                    &[limb_val],
+                ));
+            }
             has_logup = true;
         }
 

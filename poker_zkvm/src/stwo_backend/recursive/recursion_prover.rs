@@ -29,9 +29,9 @@ use super::fri_verifier_air::{FriVerifierAir, FRI_AIR_NUM_COLUMNS};
 use super::merkle_path_air::{MerklePathAir, MERKLE_AIR_NUM_COLUMNS};
 use super::public_inputs::RecursivePublicInputs;
 use super::trace_gen::{
-    compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, gen_fri_verifier_trace,
-    gen_merkle_path_trace, gen_oods_check_trace, pad_fri_trace_to_log_size, pad_merkle_trace_to_log_size,
-    pad_oods_trace_to_log_size, OODS_TRACE_LOG_SIZE,
+    compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
+    gen_fri_verifier_trace, gen_merkle_path_trace, gen_oods_check_trace, pad_fri_trace_to_log_size,
+    pad_merkle_trace_to_log_size, pad_oods_trace_to_log_size, OODS_TRACE_LOG_SIZE,
 };
 use ark_ff::Zero;
 use starknet_ff::FieldElement as FieldElement252;
@@ -71,6 +71,19 @@ pub enum RecursionProvingError {
         claimed: SecureField,
         /// 从 L1 proof sampled_values 推导的 composition_oods_eval
         derived: SecureField,
+    },
+    /// Prover 端 consistency check 失败：`public_inputs.fri_query_x` / `fri_query_eval`
+    /// 与从 L1 proof Fiat-Shamir transcript 重新推导的值不一致。
+    #[error("fri_query mismatch: claimed_x={claimed_x}, derived_x={derived_x}, claimed_eval={claimed_eval}, derived_eval={derived_eval}")]
+    FriQueryMismatch {
+        /// public_inputs 中声称的 fri_query_x
+        claimed_x: SecureField,
+        /// 从 L1 transcript 推导的 fri_query_x
+        derived_x: SecureField,
+        /// public_inputs 中声称的 fri_query_eval
+        claimed_eval: SecureField,
+        /// 从 L1 transcript 推导的 fri_query_eval
+        derived_eval: SecureField,
     },
     /// L1 proof 结构不匹配（sampled_values 缺失或格式错误）。
     #[error("L1 proof structure invalid: {0}")]
@@ -259,6 +272,30 @@ pub fn prove_recursive_with_fri(
         });
     }
 
+    // 1b. Prover 端 FRI query consistency check（v5.2 soundness fix）
+    // 验证 public_inputs.fri_query_x / fri_query_eval 与从 L1 proof Fiat-Shamir transcript
+    // 重新推导的值一致。防止 prover 伪造 query point。
+    let (derived_x, derived_fri_eval) = extract_fri_query_from_l1(
+        l1_proof,
+        public_inputs.config,
+        public_inputs.max_log_degree_bound,
+        &public_inputs.fri_last_layer_poly,
+    )
+    .ok_or_else(|| {
+        RecursionProvingError::L1ProofStructureInvalid(
+            "无法从 L1 proof 提取 fri_query（commitment 数量不足或 FriVerifier 构造失败）".to_string(),
+        )
+    })?;
+
+    if derived_x != public_inputs.fri_query_x || derived_fri_eval != public_inputs.fri_query_eval {
+        return Err(RecursionProvingError::FriQueryMismatch {
+            claimed_x: public_inputs.fri_query_x,
+            derived_x,
+            claimed_eval: public_inputs.fri_query_eval,
+            derived_eval: derived_fri_eval,
+        });
+    }
+
     // 2. 计算 unified_log_size
     let fri_log_size = compute_fri_trace_log_size(&public_inputs.fri_last_layer_poly);
     let unified_log_size = OODS_TRACE_LOG_SIZE.max(fri_log_size);
@@ -388,6 +425,11 @@ fn mix_public_inputs_into_channel(channel: &mut Blake2sChannel, inputs: &Recursi
     // 注：LinePoly 内部存储为 bit-reversed 系数，prover 和 verifier 都用相同表示，
     // 所以 mix bit-reversed 系数是 soundness-preserving 的。
     channel.mix_felts(&inputs.fri_last_layer_poly[..]);
+
+    // 6. fri_query_x + fri_query_eval（v5.2 soundness fix）
+    // 将 FRI query point 和 evaluation mix 到 channel，绑定到 L2 Fiat-Shamir。
+    // 防止 prover 选择在特定 x 处通过但其他点失败的伪造多项式。
+    channel.mix_felts(&[inputs.fri_query_x, inputs.fri_query_eval]);
 }
 
 /// 将 `Vec<Vec<BaseField>>` trace 转换为 Stwo `CircleEvaluation` 列。
@@ -477,6 +519,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            SecureField::zero(),
+            SecureField::zero(),
         )
     }
 
@@ -647,7 +691,7 @@ mod tests {
     // =================================================================
 
     /// 创建带真实 `fri_last_layer_poly` 的测试 `RecursivePublicInputs`，
-    /// 同时使用从 L1 proof 提取的真实 `composition_oods_eval`。
+    /// 同时使用从 L1 proof 提取的真实 `composition_oods_eval` 和 `fri_query`。
     fn make_test_public_inputs_with_fri_from_l1(
         l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     ) -> RecursivePublicInputs {
@@ -658,6 +702,14 @@ mod tests {
         )
         .expect("提取 composition_oods_eval 应成功");
         let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
+        // v5.2：从 L1 proof 的 Fiat-Shamir transcript 提取真实 FRI query point
+        let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
+            l1_proof,
+            PcsConfig::default(),
+            TEST_MAX_LOG_DEGREE_BOUND,
+            &last_layer_poly,
+        )
+        .expect("提取 fri_query 应成功");
         RecursivePublicInputs::new(
             Vec::new(),
             TEST_OODS_POINT,
@@ -668,6 +720,8 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            fri_query_x,
+            fri_query_eval,
         )
     }
 
@@ -760,7 +814,7 @@ mod tests {
         );
     }
 
-    /// v5.1 多组件 soundness 测试 — 篡改 fri_last_layer_poly 后 prove 仍应成功
+    /// v5.2 多组件 soundness 测试 — 篡改 fri_last_layer_poly 后 prove 仍应成功
     /// （FRI AIR 约束只检查 trace 内部一致性，不检查 poly 与 L1 proof 的一致性）。
     ///
     /// prove 成功是因为 `gen_fri_verifier_trace` 使用 `public_inputs.fri_last_layer_poly`
@@ -768,6 +822,10 @@ mod tests {
     /// 篡改的 poly 通过 channel mix 绑定到 L2 proof（v5.1 soundness fix），
     /// 因此 verifier 用不同 poly 验证时会失败（见
     /// `test_verify_with_fri_fails_on_tampered_last_layer_poly`）。
+    ///
+    /// v5.2 注意：篡改 poly 后必须同步更新 `fri_query_eval`，否则 prover 端
+    /// FRI query consistency check 会因 `fri_query_eval` 与篡改后 poly 不一致而失败。
+    /// `fri_query_x` 不需要更新（只依赖 L1 transcript，不依赖 poly）。
     #[test]
     fn test_prove_with_fri_fails_on_tampered_last_layer_poly() {
         let l1_proof = make_l1_proof();
@@ -786,6 +844,10 @@ mod tests {
             .map(|c| c + SecureField::from(1u32))
             .collect();
         inputs.fri_last_layer_poly = LinePoly::from_ordered_coefficients(tampered_coeffs);
+
+        // v5.2：同步更新 fri_query_eval 以匹配篡改后的 poly
+        // （query_x 不变，因为 query_x 只依赖 L1 transcript，不依赖 poly）
+        inputs.fri_query_eval = inputs.fri_last_layer_poly.eval_at_point(inputs.fri_query_x);
 
         // prove 应该成功（trace 内部一致，不依赖 poly 与 L1 proof 的一致性）
         let prove_result = prove_recursive_with_fri(&l1_proof, &inputs);
@@ -827,6 +889,58 @@ mod tests {
         assert!(
             verify_result.is_err(),
             "verify_recursive_with_fri 应失败（last_layer_poly 篡改）"
+        );
+    }
+
+    /// v5.2 soundness 测试 — 篡改 `fri_query_x` 后 prove 应失败（prover 端 consistency check）。
+    ///
+    /// 验证 v5.2 soundness fix：`extract_fri_query_from_l1` 在 prover 端重新从 L1 proof
+    /// 的 Fiat-Shamir transcript 推导 query point，并与 `public_inputs.fri_query_x`
+    /// 对比。如果不一致，返回 `FriQueryMismatch` 错误。
+    ///
+    /// 这关闭了 v5.1 soundness gap：此前 `gen_fri_verifier_trace` 硬编码 `query_x = 1`，
+    /// 允许恶意 prover 选择在 x=1 处通过但其他点失败的伪造多项式。
+    #[test]
+    fn test_recursive_fri_soundness_tamper_query_x() {
+        let l1_proof = make_l1_proof();
+        let mut inputs = make_test_public_inputs_with_fri_from_l1(&l1_proof);
+
+        // 篡改 fri_query_x：加 1（确保与真实值不同）
+        inputs.fri_query_x = inputs.fri_query_x + SecureField::from(1u32);
+
+        // prove 应失败，返回 FriQueryMismatch
+        let prove_result = prove_recursive_with_fri(&l1_proof, &inputs);
+        assert!(
+            matches!(
+                prove_result,
+                Err(RecursionProvingError::FriQueryMismatch { .. })
+            ),
+            "prove_recursive_with_fri 应返回 FriQueryMismatch（篡改 query_x）: {:?}",
+            prove_result.err()
+        );
+    }
+
+    /// v5.2 soundness 测试 — 篡改 `fri_query_eval`（但不篡改 query_x）后 prove 应失败。
+    ///
+    /// 验证 prover 端 consistency check 不仅检查 query_x，还检查 query_eval。
+    /// 如果只篡改 eval 而不篡改 x，prover 会发现 `derived_eval != claimed_eval`。
+    #[test]
+    fn test_recursive_fri_soundness_tamper_query_eval() {
+        let l1_proof = make_l1_proof();
+        let mut inputs = make_test_public_inputs_with_fri_from_l1(&l1_proof);
+
+        // 篡改 fri_query_eval：加 1（确保与真实值不同）
+        inputs.fri_query_eval = inputs.fri_query_eval + SecureField::from(1u32);
+
+        // prove 应失败，返回 FriQueryMismatch
+        let prove_result = prove_recursive_with_fri(&l1_proof, &inputs);
+        assert!(
+            matches!(
+                prove_result,
+                Err(RecursionProvingError::FriQueryMismatch { .. })
+            ),
+            "prove_recursive_with_fri 应返回 FriQueryMismatch（篡改 query_eval）: {:?}",
+            prove_result.err()
         );
     }
 }

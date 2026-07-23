@@ -22,9 +22,10 @@ use stwo::core::fields::m31::M31;
 
 use super::column_layout_v2::{
     COL_ABS_A_BASE, COL_ABS_B_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE, COL_DIV_REM_BASE,
-    COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_LOW_NONZERO, COL_MUL_CARRY_HI0_BASE,
+    COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_LOW_NONZERO, COL_MEM_ADDR_BASE, COL_MUL_CARRY_HI0_BASE,
     COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE, COL_MUL_LOW_BASE,
-    COL_SIGN_A, COL_SIGN_B, NUM_COLUMNS, WORD_LIMB_COUNT,
+    COL_PC_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
+    COL_VALUE_C_BASE, IS_PADDING, NUM_COLUMNS, WORD_LIMB_COUNT,
 };
 
 // ===========================================================================
@@ -588,11 +589,16 @@ pub fn step_to_m31_row(
         | Instruction::Bge { .. }
         | Instruction::Bltu { .. }
         | Instruction::Bgeu { .. } => true,
-        // JAL/JALR/Padding：不需要 PC carry（保持 0）
-        Instruction::Jal { .. } | Instruction::Jalr { .. } => false,
+        // JAL/JALR：PC carry 用于 rd_eff = PC + 4 约束（链接寄存器）
+        Instruction::Jal { .. } | Instruction::Jalr { .. } => true,
     };
     if needs_pc_carry {
-        let (pc_carry0, pc_carry1) = compute_pc_carries(step.pc, next_pc);
+        // JAL/JALR 的 PC carry 用于 rd_eff = PC + 4（非 PcNext）
+        let pc_for_carry = match &step.instruction {
+            Instruction::Jal { .. } | Instruction::Jalr { .. } => step.pc.wrapping_add(4),
+            _ => next_pc,
+        };
+        let (pc_carry0, pc_carry1) = compute_pc_carries(step.pc, pc_for_carry);
         row[COL_PC_CARRY_FLAG_BASE] = M31::from(pc_carry0);
         row[COL_PC_CARRY_FLAG_BASE + 1] = M31::from(pc_carry1);
     }
@@ -744,6 +750,76 @@ pub fn step_to_m31_row(
             fill_word(&mut row, COL_HELPER_B_BASE, diff);
             // 结果符号调整 carry（sign=0, carry=0）
             row[COL_HELPER_A_BASE + 2] = M31::from(0u32);
+        }
+        // ===== 分支条件验证 witness 填充（BEQ/BNE/BLT/BGE/BLTU/BGEU，V1 CRITICAL 修复）=====
+        // 复用 SUB 的 borrow chain + SLT 的 sign witness 列（one-hot 互斥）。
+        // - COL_MUL_LOW_BASE（128-131）：diff = rs1 - rs2（4 limb，复用 MUL 列）
+        // - COL_CARRY_FLAG_BASE（8-9）：borrow0, borrow1（复用 ADD/SUB 列）
+        // - COL_HELPER_B_BASE（69）：diff_inv（域逆元，BEQ/BNE 用，复用 Load/Store 列）
+        // - COL_SIGN_A/COL_SIGN_B/COL_LOW_NONZERO（114-116）：BLT/BGE 有符号比较
+        // AIR 约束（cpu_air.rs:411-482）：
+        //   BEQ: taken ⟺ diff==0（taken*diff=0 + diff*diff_inv=1-taken）
+        //   BNE: taken ⟺ diff!=0（(1-taken)*diff=0 + diff*diff_inv=taken）
+        //   BLTU/BGEU: taken = borrow1 / 1-borrow1
+        //   BLT/BGE: taken = slt_result / 1-slt_result（有符号比较公式）
+        Instruction::Beq { .. } | Instruction::Bne { .. }
+        | Instruction::Blt { .. } | Instruction::Bge { .. }
+        | Instruction::Bltu { .. } | Instruction::Bgeu { .. } => {
+            // 分支的 value_c = imm（分支偏移），但比较需要 rs2 寄存器值。
+            // 覆盖 ValueC 为 rs2 值（分支行无约束使用 ValueC，安全覆盖）。
+            let rs2_value = prev_registers[op_c as usize];
+            fill_word(&mut row, COL_VALUE_C_BASE, rs2_value);
+            // diff = rs1 - rs2（存 COL_MUL_LOW_BASE，分支行与 MUL/DIV/SLT 互斥）
+            let diff = value_b.wrapping_sub(rs2_value);
+            fill_word(&mut row, COL_MUL_LOW_BASE, diff);
+            // borrow0/borrow1 复用 COL_CARRY_FLAG_BASE（与 ADD/SUB/比较 互斥）
+            let (borrow0, borrow1) = compute_sub_borrows(value_b, rs2_value, diff);
+            row[COL_CARRY_FLAG_BASE] = M31::from(borrow0);
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(borrow1);
+            // BEQ/BNE 需 diff_inv（域逆元，存 HelperB[0]，分支行与 Load/Store 互斥）
+            // diff=0 → diff_inv=0（prover 选择，约束 diff*diff_inv=1-taken 自动满足）
+            // diff!=0 → diff_inv = diff^(-1) mod p
+            if matches!(&step.instruction, Instruction::Beq { .. } | Instruction::Bne { .. }) {
+                let diff_inv = if diff == 0 { 0u32 } else { m31_inverse(diff) };
+                row[COL_HELPER_B_BASE] = M31::from(diff_inv);
+            }
+            // BLT/BGE 需符号 witness（BLTU/BGEU 不填，保持 0）
+            if matches!(&step.instruction, Instruction::Blt { .. } | Instruction::Bge { .. }) {
+                let sign_a = (value_b >> 31) & 1;
+                let sign_b = (rs2_value >> 31) & 1;
+                let same_sign = u32::from(sign_a == sign_b);
+                row[COL_SIGN_A] = M31::from(sign_a);
+                row[COL_SIGN_B] = M31::from(sign_b);
+                row[COL_LOW_NONZERO] = M31::from(same_sign);
+            }
+        }
+        // ===== 比较指令 witness 填充（SLT/SLTU/SLTI/SLTIU，v3.6 安全审计修复）=====
+        // 复用 SUB 的 borrow chain 结构 + MULH 的 sign witness 列（one-hot 互斥）。
+        // - COL_MUL_LOW_BASE（128-131）：diff = rs1 - rs2（4 limb，复用 MUL 列）
+        // - COL_CARRY_FLAG_BASE（8-9）：borrow0, borrow1（复用 ADD/SUB 列）
+        // - COL_SIGN_A/COL_SIGN_B/COL_LOW_NONZERO（114-116）：仅 SLT/SLTI 有符号比较
+        //   sign_a = bit31(rs1), sign_b = bit31(rs2), same_sign = (sign_a == sign_b)
+        // AIR 约束（cpu_air.rs:336-409）：
+        //   SLTU/SLTIU: rd_eff = borrow1（无符号：rs1 < rs2 iff 高位借位）
+        //   SLT/SLTI:   rd_eff = sign_a*(1-sign_b) + same_sign*borrow1（有符号比较公式）
+        Instruction::Slt { .. } | Instruction::Sltu { .. }
+        | Instruction::Slti { .. } | Instruction::Sltiu { .. } => {
+            // diff = rs1 - rs2（存入 COL_MUL_LOW_BASE，复用 MUL 列，one-hot 互斥）
+            let diff = value_b.wrapping_sub(value_c);
+            fill_word(&mut row, COL_MUL_LOW_BASE, diff);
+            // borrow0/borrow1 复用 COL_CARRY_FLAG_BASE（与 ADD/SUB/MULH 互斥）
+            let (borrow0, borrow1) = compute_sub_borrows(value_b, value_c, diff);
+            row[COL_CARRY_FLAG_BASE] = M31::from(borrow0);
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(borrow1);
+            // 有符号比较（SLT/SLTI）需符号 witness（SLTU/SLTIU 不填，保持 0）
+            if matches!(&step.instruction, Instruction::Slt { .. } | Instruction::Slti { .. }) {
+                let sign_a = (value_b >> 31) & 1;
+                let sign_b = (value_c >> 31) & 1;
+                let same_sign = u32::from(sign_a == sign_b);
+                row[COL_SIGN_A] = M31::from(sign_a);
+                row[COL_SIGN_B] = M31::from(sign_b);
+                row[COL_LOW_NONZERO] = M31::from(same_sign);
+            }
         }
         _ => {}
     }
@@ -1059,6 +1135,36 @@ fn compute_sub_borrows(rs1: u32, rs2: u32, _rd: u32) -> (u32, u32) {
         - i64::from(borrow0);
     let borrow1 = if high_diff < 0 { 1 } else { 0 };
     (borrow0, borrow1)
+}
+
+/// 计算 M31 域（p = 2^31 - 1）中 x 的乘法逆元。
+///
+/// 用费马小定理：x^(-1) = x^(p-2) mod p，通过快速幂计算。
+///
+/// # 参数
+/// - `x` — 待求逆的值（须 < p = 2^31 - 1，且 ≠ 0）
+///
+/// # 返回
+/// x 在 M31 域的逆元（< p）
+///
+/// # Panics
+/// 若 x == 0，panic（0 无逆元，调用方须先检查）
+fn m31_inverse(x: u32) -> u32 {
+    assert!(x != 0, "m31_inverse: x=0 无逆元");
+    const P: u64 = 2_147_483_647; // 2^31 - 1
+    // x^(p-2) mod p，快速幂
+    let mut result: u64 = 1;
+    let mut base: u64 = u64::from(x) % P;
+    let mut exp: u64 = P - 2;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = result * base % P;
+        }
+        base = base * base % P;
+        exp >>= 1;
+    }
+    // 结果 < p，可安全转 u32（p = 2^31 - 1 < 2^32）
+    result as u32
 }
 
 /// 计算 PC + 4 → PcNext 的 16-bit 边界进位。
@@ -1593,6 +1699,180 @@ pub fn memory_trace_to_evaluations(
         "memory_trace_to_evaluations: trace.cols.len()={} != MEM_NUM_COLUMNS={}",
         trace.cols.len(),
         MEM_NUM_COLUMNS
+    );
+    let domain = CanonicCoset::new(trace.log_size).circle_domain();
+    trace
+        .cols
+        .iter()
+        .map(|col| {
+            let base_col = BaseColumn::from_cpu(col.as_slice());
+            CircleEvaluation::<SimdBackend, BaseField>::new(domain, base_col).bit_reverse()
+        })
+        .collect()
+}
+
+// ===========================================================================
+// V4 修复：RangeCheck Trace 生成（8-bit limb 范围检查）
+// ===========================================================================
+
+use super::range_check_air::{
+    RC_COL_BIT0, RC_COL_IS_FIRST, RC_COL_IS_PADDING, RC_COL_MULTIPLICITY, RC_COL_VALUE,
+    RC_NUM_COLUMNS,
+};
+
+/// 原生 M31 RangeCheck trace（列主序，12 列）。
+///
+/// # 列布局（与 [`range_check_air::RangeCheckAir`] 一致）
+/// - col 0：value（real row = 0..255，padding row = 0）
+/// - col 1：multiplicity（= -(该值在 CPU limb 中出现次数)，padding row = 0）
+/// - col 2：is_padding（1=padding row）
+/// - col 3：is_first（1=row 0）
+/// - col 4-11：bit0-bit7（value 的 8-bit 分解）
+#[derive(Debug, Clone)]
+pub struct RangeCheckTrace {
+    /// 列主序存储：`cols[col_idx][row_idx]`
+    pub cols: Vec<Vec<M31>>,
+    /// log2(行数)
+    pub log_size: u32,
+}
+
+impl RangeCheckTrace {
+    /// 创建指定 log_size 的空 RangeCheck trace（12 列全 0）。
+    #[must_use]
+    pub fn new(log_size: u32) -> Self {
+        let num_rows = 1usize << log_size;
+        Self {
+            cols: vec![vec![M31::from(0u32); num_rows]; RC_NUM_COLUMNS],
+            log_size,
+        }
+    }
+
+    /// 获取行数（`1 << log_size`）。
+    #[must_use]
+    pub fn num_rows(&self) -> usize {
+        1usize << self.log_size
+    }
+}
+
+/// 需要范围检查的 24 个 limb 列索引（6 word × 4 limb）。
+///
+/// 与 `cpu_air.rs` 中 `RANGE_CHECK_COLS` 常量保持一致。
+const RANGE_CHECK_LIMB_COLS: [usize; 24] = [
+    // PC (0-3)
+    COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
+    // PcNext (4-7)
+    COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
+    // ValueAEff (10-13)
+    COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2,
+    COL_VALUE_A_EFF_BASE + 3,
+    // ValueB (14-17)
+    COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
+    // ValueC (18-21)
+    COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
+    // MemAddr (74-77)
+    COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
+];
+
+/// 从 CPU trace 生成 RangeCheck 原始 trace。
+///
+/// # 算法
+/// 1. 初始化 `count[0..256] = 0`
+/// 2. 遍历 CPU trace 的所有非 padding 行（`IS_PADDING` col=0），对 24 个 limb 列读值 v，
+///    若 v < 256 则 `count[v] += 1`（v ≥ 256 是 bug，合法 trace 不会出现；若出现则跳过，
+///    后续 logup soundness check 会因不平衡而失败）
+/// 3. 填充 12 列：
+///    - row 0..256（real）：value=row_idx, multiplicity=-count[row_idx],
+///      is_padding=0, is_first=(row_idx==0), bit0-bit7=row_idx 的二进制分解
+///    - row 256..2^log_size（padding）：value=0, multiplicity=0, is_padding=1,
+///      is_first=0, bit0-bit7=0
+///
+/// # 参数
+/// - `cpu_trace` — CPU 原始 trace（132 列 × 2^log_size 行）
+///
+/// # 返回
+/// `RangeCheckTrace`（12 列 × 2^log_size 行），log_size 与 CPU trace 相同
+///
+/// # Panics
+/// 若 `cpu_trace.log_size < 8`（不足以容纳 256 个 real row），panic
+#[must_use]
+pub fn gen_range_check_air_trace(cpu_trace: &NativeTrace) -> RangeCheckTrace {
+    let log_size = cpu_trace.log_size;
+    assert!(
+        log_size >= 8,
+        "gen_range_check_air_trace: log_size={} < 8（需 ≥256 行容纳 range table）",
+        log_size
+    );
+    let num_rows = 1usize << log_size;
+
+    // Step 1: 初始化 count[0..256] = 0
+    let mut count = vec![0u32; 256];
+
+    // Step 2: 遍历 CPU trace 非 padding 行，统计 limb 值出现次数
+    for row in 0..num_rows {
+        // IS_PADDING 列（col 64），值 0 = 非 padding
+        if cpu_trace.cols[IS_PADDING][row].0 != 0 {
+            continue;
+        }
+        // 对 24 个 limb 列读值
+        for &col_idx in &RANGE_CHECK_LIMB_COLS {
+            let val = cpu_trace.cols[col_idx][row].0;
+            if val < 256 {
+                count[val as usize] += 1;
+            }
+            // val >= 256：跳过（合法 trace 不应出现；logup 会因不平衡失败）
+        }
+    }
+
+    // Step 3: 填充 12 列
+    let mut trace = RangeCheckTrace::new(log_size);
+    for v in 0..256usize {
+        // value = v
+        trace.cols[RC_COL_VALUE][v] = M31::from(v as u32);
+        // multiplicity = -count[v]（field 元素：p - count，p = 2^31-1 = 0x7FFFFFFF）
+        let neg_count = if count[v] == 0 {
+            M31::from(0u32)
+        } else {
+            M31::from_u32_unchecked(0x7FFFFFFF - count[v])
+        };
+        trace.cols[RC_COL_MULTIPLICITY][v] = neg_count;
+        // is_padding = 0（real row，默认 0）
+        // is_first = (v == 0)
+        if v == 0 {
+            trace.cols[RC_COL_IS_FIRST][v] = M31::from(1u32);
+        }
+        // bit0-bit7 = v 的二进制分解
+        for bit_idx in 0..8usize {
+            let bit_val = if (v >> bit_idx) & 1 != 0 {
+                M31::from(1u32)
+            } else {
+                M31::from(0u32)
+            };
+            trace.cols[RC_COL_BIT0 + bit_idx][v] = bit_val;
+        }
+    }
+    // padding 行（256..num_rows）：value=0, multiplicity=0, is_padding=1, is_first=0, bits=0
+    // bits 默认为 0（RangeCheckTrace::new 已初始化）
+    for v in 256..num_rows {
+        trace.cols[RC_COL_IS_PADDING][v] = M31::from(1u32);
+    }
+
+    trace
+}
+
+/// 将 `RangeCheckTrace` 转换为 Stwo `CircleEvaluation` 列（12 列）。
+///
+/// 同 [`memory_trace_to_evaluations`] 模式：每列 `BaseColumn::from_cpu` →
+/// `CircleEvaluation::new` → `bit_reverse()`。
+#[must_use]
+pub fn range_check_trace_to_evaluations(
+    trace: &RangeCheckTrace,
+) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+    assert_eq!(
+        trace.cols.len(),
+        RC_NUM_COLUMNS,
+        "range_check_trace_to_evaluations: trace.cols.len()={} != RC_NUM_COLUMNS={}",
+        trace.cols.len(),
+        RC_NUM_COLUMNS
     );
     let domain = CanonicCoset::new(trace.log_size).circle_domain();
     trace

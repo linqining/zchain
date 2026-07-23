@@ -20,7 +20,9 @@
 use super::public_inputs::RecursivePublicInputs;
 use super::recursion_prover::{prove_recursive_with_fri, RecursiveProof};
 use super::recursion_verifier::verify_recursive_with_fri;
-use super::trace_gen::{extract_composition_oods_eval_from_l1, compute_fri_trace_log_size};
+use super::trace_gen::{
+    compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
+};
 use crate::stwo_backend::prover::prove_cpu_trace;
 use crate::stwo_backend::trace_native::TraceBuilder;
 use ark_ff::Zero;
@@ -36,8 +38,6 @@ const TEST_OODS_POINT: CirclePoint<SecureField> = CirclePoint {
     y: SecureField::from_u32_unchecked(0, 1, 0, 0),
 };
 
-const TEST_MAX_LOG_DEGREE_BOUND: u32 = 10;
-
 /// 生成真实 L1 proof。
 fn make_l1_proof(log_size: u32) -> StarkProof<Poseidon252MerkleHasher> {
     let mut builder = TraceBuilder::new(log_size);
@@ -47,27 +47,44 @@ fn make_l1_proof(log_size: u32) -> StarkProof<Poseidon252MerkleHasher> {
 }
 
 /// 从 L1 proof 创建测试用 RecursivePublicInputs。
+///
+/// 注意：`max_log_degree_bound` 必须等于 L1 proof 的 trace `log_size`。
+/// Stwo 的 `prove_ex` 计算 `max_log_degree_bound = lifting_log_size - log_blowup_factor`，
+/// 其中 `lifting_log_size = split_composition_log_size = log_size + blowup`（默认 config），
+/// 因此 `max_log_degree_bound = log_size`。
 fn make_recursive_public_inputs(
     l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     log_size: u32,
 ) -> RecursivePublicInputs {
+    // max_log_degree_bound 必须等于 trace log_size（Stwo 内部计算结果）
+    let max_log_degree_bound = log_size;
     let composition_oods_eval = extract_composition_oods_eval_from_l1(
         l1_proof,
         TEST_OODS_POINT,
-        TEST_MAX_LOG_DEGREE_BOUND,
+        max_log_degree_bound,
     )
     .expect("提取 composition_oods_eval 应成功");
     let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
+    // v5.2：从 L1 proof 的 Fiat-Shamir transcript 提取真实 FRI query point
+    let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
+        l1_proof,
+        PcsConfig::default(),
+        max_log_degree_bound,
+        &last_layer_poly,
+    )
+    .expect("提取 fri_query 应成功");
     RecursivePublicInputs::new(
         Vec::new(),
         TEST_OODS_POINT,
         composition_oods_eval,
         FieldElement252::ZERO,
         last_layer_poly,
-        TEST_MAX_LOG_DEGREE_BOUND,
+        max_log_degree_bound,
         PcsConfig::default(),
         Vec::new(),
         log_size,
+        fri_query_x,
+        fri_query_eval,
     )
 }
 

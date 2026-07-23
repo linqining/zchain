@@ -53,6 +53,19 @@ pub struct RecursivePublicInputs {
 
     /// L1 trace 的 log size（用于 Merkle Path 验证）。
     pub log_size: u32,
+
+    /// L1 FRI 的 query point x 坐标（从 L1 transcript 提取，非硬编码）。
+    ///
+    /// v5.2 soundness fix：此前 `gen_fri_verifier_trace` 硬编码 `query_x = 1`，
+    /// 允许恶意 prover 选择在 x=1 处通过但其他点失败的伪造多项式。
+    /// 此字段存储从 L1 proof 的 Fiat-Shamir transcript 重新推导的真实 query point。
+    pub fri_query_x: SecureField,
+
+    /// L1 FRI last layer 在 `fri_query_x` 处的 claimed evaluation。
+    ///
+    /// 与 `fri_query_x` 一起作为 L2 公开输入，经 channel mix 绑定到 L2 proof。
+    /// L2 FRI Verifier AIR 约束 `query_eval_in_trace == fri_query_eval`。
+    pub fri_query_eval: SecureField,
 }
 
 impl RecursivePublicInputs {
@@ -68,6 +81,8 @@ impl RecursivePublicInputs {
         config: PcsConfig,
         query_positions: Vec<usize>,
         log_size: u32,
+        fri_query_x: SecureField,
+        fri_query_eval: SecureField,
     ) -> Self {
         Self {
             l1_commitments,
@@ -79,6 +94,8 @@ impl RecursivePublicInputs {
             config,
             query_positions,
             log_size,
+            fri_query_x,
+            fri_query_eval,
         }
     }
 
@@ -101,6 +118,8 @@ impl Default for RecursivePublicInputs {
             PcsConfig::default(),
             Vec::new(),
             0,
+            SecureField::from(0u32),
+            SecureField::from(0u32),
         )
     }
 }
@@ -122,10 +141,14 @@ mod tests {
             PcsConfig::default(),
             Vec::new(),
             10,
+            SecureField::zero(),
+            SecureField::zero(),
         );
         assert_eq!(inputs.l1_commitments.len(), 0);
         assert_eq!(inputs.max_log_degree_bound, 10);
         assert_eq!(inputs.log_size, 10);
+        assert_eq!(inputs.fri_query_x, SecureField::zero());
+        assert_eq!(inputs.fri_query_eval, SecureField::zero());
         assert_eq!(
             inputs.fri_config().log_blowup_factor,
             PcsConfig::default().fri_config.log_blowup_factor
