@@ -211,7 +211,7 @@ fn test_texas_poker_bisect_prove_failure() {
     use poker_zkvm::trace::Trace;
 
     let elf = build_texas_poker_full_hand_elf();
-    let input = make_full_hand_input([14, 13, 12, 11, 10], [2, 2, 3, 4, 5]);
+    let input = make_full_hand_input([2, 2, 3, 4, 5], [14, 13, 12, 11, 10]);
 
     let result = execute_elf(&elf, &input).expect("execute 失败");
     let total_steps = result.trace.len();
@@ -703,4 +703,221 @@ fn test_texas_poker_full_hand_benchmark() {
         if reports.iter().all(|r| r.output_correct) { "✓ 全部正确" } else { "✗ 有错误" });
     println!("所有场景的 proof 验证: {}",
         if reports.iter().all(|r| r.proof_verified) { "✓ 全部通过" } else { "✗ 有失败" });
+}
+
+/// 诊断：检查 Memory AIR 约束是否满足，定位 prove_cpu_memory_trace 失败根因。
+#[test]
+#[ignore = "调试用：诊断 Memory AIR 约束违规"]
+fn test_diag_memory_air_constraints() {
+    use poker_zkvm::stwo_backend::memory_air::*;
+    use poker_zkvm::stwo_backend::column_layout_v2::{
+        IS_LOAD, IS_STORE, COL_MEM_ADDR_BASE, COL_VALUE_A_EFF_BASE, COL_VALUE_C_BASE,
+    };
+
+    let elf = build_texas_poker_full_hand_elf();
+    let input = make_full_hand_input([2, 2, 3, 4, 5], [14, 13, 12, 11, 10]);
+
+    let result = execute_elf(&elf, &input).expect("execute 失败");
+    println!("trace 步数: {}", result.trace.len());
+
+    let cpu_trace = trace_to_native(&result.trace);
+    let mem_trace = trace_to_memory_trace(&result.trace);
+    println!("CPU log_size: {}, Memory log_size: {}", cpu_trace.log_size, mem_trace.log_size);
+    println!("Memory rows: {}", mem_trace.num_rows());
+
+    let n_rows = mem_trace.num_rows();
+    let mut violations: Vec<String> = Vec::new();
+
+    for row in 0..n_rows {
+        let get = |col: usize| -> u32 { mem_trace.cols[col][row].0 as u32 };
+
+        let is_store = get(MEM_COL_IS_STORE);
+        let is_padding = get(MEM_COL_IS_PADDING);
+        let is_first = get(MEM_COL_IS_FIRST_ACCESS);
+
+        let addr = get(MEM_COL_ADDR_BASE)
+            | (get(MEM_COL_ADDR_BASE + 1) << 8)
+            | (get(MEM_COL_ADDR_BASE + 2) << 16)
+            | (get(MEM_COL_ADDR_BASE + 3) << 24);
+        let val_cur = get(MEM_COL_VAL_CUR_BASE)
+            | (get(MEM_COL_VAL_CUR_BASE + 1) << 8)
+            | (get(MEM_COL_VAL_CUR_BASE + 2) << 16)
+            | (get(MEM_COL_VAL_CUR_BASE + 3) << 24);
+        let val_prev = get(MEM_COL_VAL_PREV_BASE)
+            | (get(MEM_COL_VAL_PREV_BASE + 1) << 8)
+            | (get(MEM_COL_VAL_PREV_BASE + 2) << 16)
+            | (get(MEM_COL_VAL_PREV_BASE + 3) << 24);
+        let ts_cur = get(MEM_COL_TS_CUR);
+        let ts_prev = get(MEM_COL_TS_PREV);
+
+        if is_padding == 1 {
+            // Padding 行：只检查 binality + 互斥
+            if is_store != 0 {
+                violations.push(format!(
+                    "row {row} PADDING: IsStore={is_store} 应为 0"));
+            }
+            if is_first != 0 {
+                violations.push(format!(
+                    "row {row} PADDING: IsFirstAccess={is_first} 应为 0"));
+            }
+            continue;
+        }
+
+        // M5: IsStore binality
+        if is_store > 1 {
+            violations.push(format!("row {row}: IsStore={is_store} 不 ∈ {{0,1}}"));
+        }
+        // M6: IsPadding binality (已 skip)
+        // M7: IsFirstAccess binality
+        if is_first > 1 {
+            violations.push(format!("row {row}: IsFirstAccess={is_first} 不 ∈ {{0,1}}"));
+        }
+        // M8: (IsStore+IsPadding) binality → IsStore ∈ {0,1} (padding=0)
+        // M9: IsStore·IsPadding = 0 (padding=0, 自动满足)
+
+        let is_load_mem = (1 - is_store) * (1 - is_padding); // = 1 - is_store
+        let is_continuation = (1 - is_padding) * (1 - is_first);
+        let is_first_non_padding = (1 - is_padding) * is_first;
+
+        // M10-M13: ValPrev continuity (continuation rows)
+        if is_continuation == 1 && row > 0 {
+            let prev_val_cur = get_prev_word(&mem_trace, row - 1, MEM_COL_VAL_CUR_BASE);
+            if val_prev != prev_val_cur {
+                violations.push(format!(
+                    "row {row} CONTINUATION: ValPrev=0x{val_prev:08X} != prev.ValCur=0x{prev_val_cur:08X} (addr=0x{addr:08X})"));
+            }
+        }
+        // M14: TsPrev continuity
+        if is_continuation == 1 && row > 0 {
+            let prev_ts_cur = mem_trace.cols[MEM_COL_TS_CUR][row - 1].0 as u32;
+            if ts_prev != prev_ts_cur {
+                violations.push(format!(
+                    "row {row} CONTINUATION: TsPrev={ts_prev} != prev.TsCur={prev_ts_cur} (addr=0x{addr:08X})"));
+            }
+        }
+        // M15-M18: First access ValPrev=0
+        if is_first_non_padding == 1 {
+            if val_prev != 0 {
+                violations.push(format!(
+                    "row {row} FIRST-ACCESS: ValPrev=0x{val_prev:08X} != 0 (addr=0x{addr:08X}, is_store={is_store})"));
+            }
+        }
+        // M19: First access TsPrev=0
+        if is_first_non_padding == 1 {
+            if ts_prev != 0 {
+                violations.push(format!(
+                    "row {row} FIRST-ACCESS: TsPrev={ts_prev} != 0 (addr=0x{addr:08X})"));
+            }
+        }
+        // M20-M23: 连续 Load 行 ValCur = ValPrev (A2 修复, v3.11)
+        // v3.11: 首次访问 Load 行不约束（ECALL 输入未入 trace）
+        if is_load_mem == 1 && is_first == 0 {
+            if val_cur != val_prev {
+                violations.push(format!(
+                    "row {row} CONTINUATION-LOAD (A2/M20-M23): ValCur=0x{val_cur:08X} != ValPrev=0x{val_prev:08X} (addr=0x{addr:08X}) ★★★"));
+            }
+        }
+    }
+
+    println!("\n=== Memory AIR 约束违规检查 ===");
+    if violations.is_empty() {
+        println!("✓ 无违规");
+    } else {
+        println!("✗ 发现 {} 条违规：", violations.len());
+        for v in violations.iter().take(50) {
+            println!("  {v}");
+        }
+        if violations.len() > 50 {
+            println!("  ... 还有 {} 条", violations.len() - 50);
+        }
+    }
+
+    // 检查 logup 一致性：CPU claim vs Memory yield
+    println!("\n=== Logup 一致性检查 (CPU claim vs Memory yield) ===");
+    use std::collections::HashMap;
+    let mut cpu_claims: HashMap<(u32, u32, u32), i64> = HashMap::new();
+    let mut mem_yields: HashMap<(u32, u32, u32), i64> = HashMap::new();
+
+    let cpu_rows = cpu_trace.num_rows();
+    for row in 0..cpu_rows {
+        let is_load = cpu_trace.cols[IS_LOAD][row].0 as u32;
+        let is_store = cpu_trace.cols[IS_STORE][row].0 as u32;
+        if is_load == 0 && is_store == 0 {
+            continue;
+        }
+        let addr = read_word(&cpu_trace, row, COL_MEM_ADDR_BASE);
+        let val_aeff = read_word(&cpu_trace, row, COL_VALUE_A_EFF_BASE);
+        let val_c = read_word(&cpu_trace, row, COL_VALUE_C_BASE);
+        let mem_value = is_load.wrapping_mul(val_aeff).wrapping_add(is_store.wrapping_mul(val_c));
+        let key = (addr, mem_value, is_store);
+        *cpu_claims.entry(key).or_insert(0) += 1;
+    }
+
+    for row in 0..n_rows {
+        let is_padding = mem_trace.cols[MEM_COL_IS_PADDING][row].0 as u32;
+        if is_padding == 1 {
+            continue;
+        }
+        let addr = read_mem_word(&mem_trace, row, MEM_COL_ADDR_BASE);
+        let val_cur = read_mem_word(&mem_trace, row, MEM_COL_VAL_CUR_BASE);
+        let is_store = mem_trace.cols[MEM_COL_IS_STORE][row].0 as u32;
+        let key = (addr, val_cur, is_store);
+        *mem_yields.entry(key).or_insert(0) += 1;
+    }
+
+    let mut mismatches = Vec::new();
+    let all_keys: std::collections::HashSet<_> = cpu_claims.keys().chain(mem_yields.keys()).collect();
+    for key in all_keys {
+        let c = *cpu_claims.get(key).unwrap_or(&0);
+        let m = *mem_yields.get(key).unwrap_or(&0);
+        if c != m {
+            mismatches.push(format!(
+                "key=(addr=0x{:08X}, val=0x{:08X}, is_store={}) CPU={c} Memory={m} diff={}",
+                key.0, key.1, key.2, c as i64 - m as i64));
+        }
+    }
+    if mismatches.is_empty() {
+        println!("✓ CPU claims 与 Memory yields 完全一致");
+    } else {
+        println!("✗ 发现 {} 个不一致：", mismatches.len());
+        for m in mismatches.iter().take(30) {
+            println!("  {m}");
+        }
+    }
+
+    assert!(violations.is_empty(), "Memory AIR 有约束违规，见上方输出");
+
+    // 额外：检查 CPU-only prove 是否通过
+    println!("\n=== CPU-only prove 检查 ===");
+    match prove_cpu_trace(&cpu_trace) {
+        Ok(_) => println!("✓ prove_cpu_trace 通过"),
+        Err(e) => println!("✗ prove_cpu_trace 失败: {:?}", e),
+    }
+    // 额外：检查 CPU+Memory prove 是否通过
+    println!("\n=== CPU+Memory prove 检查 ===");
+    match prove_cpu_memory_trace(&cpu_trace, &mem_trace) {
+        Ok(_) => println!("✓ prove_cpu_memory_trace 通过"),
+        Err(e) => println!("✗ prove_cpu_memory_trace 失败: {:?}", e),
+    }
+}
+
+fn get_prev_word(mem_trace: &poker_zkvm::stwo_backend::trace_native::MemoryTrace, row: usize, base: usize) -> u32 {
+    (mem_trace.cols[base][row].0 as u32)
+        | ((mem_trace.cols[base + 1][row].0 as u32) << 8)
+        | ((mem_trace.cols[base + 2][row].0 as u32) << 16)
+        | ((mem_trace.cols[base + 3][row].0 as u32) << 24)
+}
+
+fn read_word(trace: &poker_zkvm::stwo_backend::trace_native::NativeTrace, row: usize, base: usize) -> u32 {
+    (trace.cols[base][row].0 as u32)
+        | ((trace.cols[base + 1][row].0 as u32) << 8)
+        | ((trace.cols[base + 2][row].0 as u32) << 16)
+        | ((trace.cols[base + 3][row].0 as u32) << 24)
+}
+
+fn read_mem_word(mem_trace: &poker_zkvm::stwo_backend::trace_native::MemoryTrace, row: usize, base: usize) -> u32 {
+    (mem_trace.cols[base][row].0 as u32)
+        | ((mem_trace.cols[base + 1][row].0 as u32) << 8)
+        | ((mem_trace.cols[base + 2][row].0 as u32) << 16)
+        | ((mem_trace.cols[base + 3][row].0 as u32) << 24)
 }

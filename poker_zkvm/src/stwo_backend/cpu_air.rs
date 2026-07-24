@@ -525,28 +525,63 @@ impl FrameworkEval for CpuAir {
         eval.add_constraint(is_branch.clone() * carry0.clone() * (carry0.clone() - one.clone()));
         eval.add_constraint(is_branch.clone() * carry1.clone() * (carry1.clone() - one.clone()));
 
-        // diff_value = 完整 32-bit 值（度 1：4 列线性组合）
-        let diff_value = diff_low16.clone() + six5536.clone() * diff_high16.clone();
-        // diff_inv 存入 COL_HELPER_B_BASE（分支行与 Load/Store one-hot 互斥）
-        let diff_inv = col(COL_HELPER_B_BASE);
+        // ===== BEQ/BNE limb-wise 零检查（M31 溢出修复，v3.10）=====
+        // 缺口：原方案用 32-bit diff_value = diff_low16 + 65536*diff_high16 在 M31 中
+        // 判断零。但 M31 特征 p=2^31-1，0xFFFFFFFE = 2p ≡ 0 (mod p)，导致 diff=-2
+        // 被误判为 0：BNE taken=1 时约束 diff_value*diff_inv=taken 失败（completeness），
+        // 且恶意 prover 可构造 diff=2p 伪造 BEQ taken / BNE not-taken（soundness）。
+        //
+        // 修复：改用 16-bit half limb-wise 零检查。half16 ∈ [0,65535] < p，M31 中唯一。
+        // 对每个 half 用双约束保证 is_zero = (half == 0)（M31 中 sound）：
+        //   约束 A: half × inv = 1 - is_zero（逆元存在性：half≠0 ⟹ is_zero=0）
+        //   约束 B: half × is_zero = 0（is_zero=1 ⟹ half=0）
+        // 两约束组合：
+        //   half=0  ⟹ A: 0=1-is_zero ⟹ is_zero=1；B: 0=0 ✓
+        //   half≠0  ⟹ B: half*is_zero=0 ⟹ is_zero=0；A: half*inv=1 ⟹ inv=1/half ✓
+        //   伪造 is_zero=1,half≠0 ⟹ B: half≠0 ✗（阻止）
+        //   伪造 is_zero=0,half=0  ⟹ A: 0=1 ✗（阻止）
+        // diff_is_zero = is_zero_low * is_zero_high（2 个 half 都 0 才整体 0）
+        // BEQ: taken = diff_is_zero；BNE: taken = 1 - diff_is_zero
+        //
+        // witness 复用 COL_HELPER_B_BASE(69-72)（分支行与 Load/Store one-hot 互斥）：
+        //   [0]=inv_low, [1]=inv_high, [2]=is_zero_low, [3]=is_zero_high
+        //
+        // 度数预算（全部 ≤ 3）：
+        // - 约束 A: is_beq_bne(1) × (half(1)×inv(1) - (1-is_zero)(1)) = 1+2 = 3 ✓
+        // - 约束 B: is_beq_bne(1) × half(1) × is_zero(1) = 1+2 = 3 ✓
+        // - binality: is_beq_bne(1) × is_zero(1)×(is_zero-1)(1) = 1+2 = 3 ✓
+        // - BEQ taken: is_beq(1) × (taken(1) - is_zero_low*is_zero_high(2)) = 1+2 = 3 ✓
+        // - BNE taken: is_bne(1) × (taken(1) - 1 + is_zero_low*is_zero_high(2)) = 1+2 = 3 ✓
+        let is_beq_bne = is_beq.clone() + is_bne.clone();
+        let diff_inv_low = col(COL_HELPER_B_BASE);
+        let diff_inv_high = col(COL_HELPER_B_BASE + 1);
+        let is_zero_low = col(COL_HELPER_B_BASE + 2);
+        let is_zero_high = col(COL_HELPER_B_BASE + 3);
 
-        // ===== BEQ：taken ⟺ diff == 0 =====
-        // taken=1 → diff_value=0（度 3：is_beq × taken × diff_value）
-        eval.add_constraint(is_beq.clone() * taken.clone() * diff_value.clone());
-        // diff * diff_inv = (1 - taken)（度 3）
-        // taken=1: 0*0=0=(1-1) ✓；taken=0: diff*inv=1=(1-0) ✓
+        // 约束 A：half × inv = 1 - is_zero（逆元存在性，度 2，gated 度 1，总 3）
+        eval.add_constraint(is_beq_bne.clone()
+            * (diff_low16.clone() * diff_inv_low.clone() - (one.clone() - is_zero_low.clone())));
+        eval.add_constraint(is_beq_bne.clone()
+            * (diff_high16.clone() * diff_inv_high.clone() - (one.clone() - is_zero_high.clone())));
+        // 约束 B：half × is_zero = 0（is_zero=1 ⟹ half=0，度 2，gated 度 1，总 3）
+        eval.add_constraint(is_beq_bne.clone() * diff_low16.clone() * is_zero_low.clone());
+        eval.add_constraint(is_beq_bne.clone() * diff_high16.clone() * is_zero_high.clone());
+        // is_zero binality（gated by is_beq_bne，度 3）
         eval.add_constraint(
-            is_beq.clone() * (diff_value.clone() * diff_inv.clone() - (one.clone() - taken.clone())),
+            is_beq_bne.clone() * is_zero_low.clone() * (is_zero_low.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            is_beq_bne.clone() * is_zero_high.clone() * (is_zero_high.clone() - one.clone()),
         );
 
-        // ===== BNE：taken ⟺ diff != 0 =====
-        // not-taken → diff=0（度 3：is_bne × (1-taken) × diff_value）
-        eval.add_constraint(is_bne.clone() * (one.clone() - taken.clone()) * diff_value.clone());
-        // diff * diff_inv = taken（度 3）
-        // taken=1: diff*inv=1 ✓；taken=0: 0*0=0 ✓
-        eval.add_constraint(
-            is_bne.clone() * (diff_value.clone() * diff_inv.clone() - taken.clone()),
-        );
+        // diff_is_zero = is_zero_low * is_zero_high
+        let diff_is_zero = is_zero_low.clone() * is_zero_high.clone();
+
+        // ===== BEQ：taken = diff_is_zero（度 3）=====
+        eval.add_constraint(is_beq.clone() * (taken.clone() - diff_is_zero.clone()));
+
+        // ===== BNE：taken = 1 - diff_is_zero（度 3）=====
+        eval.add_constraint(is_bne.clone() * (taken.clone() - one.clone() + diff_is_zero.clone()));
 
         // ===== BLTU/BGEU：无符号比较 =====
         // BLTU: taken = borrow1（rs1 < rs2 无符号 iff 高位借位，度 2）

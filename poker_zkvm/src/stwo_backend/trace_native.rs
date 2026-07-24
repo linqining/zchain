@@ -475,7 +475,17 @@ pub fn step_to_m31_row(
     } else {
         prev_registers[op_c as usize]                    // rs2 读值
     };
-    let value_a_eff = if op_a == 0 { 0 } else { step.registers[op_a as usize] };
+    // value_a_eff 计算：
+    //   - JAL/JALR：始终填 PC+4（链接寄存器值）。即使 rd=0（x0），也需填 PC+4 以满足
+    //     链接寄存器约束 rd_eff = PC+4。rd=0 时写入被执行器丢弃，rd_eff 值不影响后续
+    //     计算（下一步读 x0 始终从 prev_registers[0]=0 读取）。JAL x0, offset 是 RISC-V
+    //     常见的无条件跳转（等价于 J offset），必须处理此情况。
+    //   - 其他指令：rd=0 时填 0（x0 硬连线为 0），rd≠0 时填执行后寄存器值。
+    let value_a_eff = match &step.instruction {
+        Instruction::Jal { .. } | Instruction::Jalr { .. } => step.pc.wrapping_add(4),
+        _ if op_a == 0 => 0,
+        _ => step.registers[op_a as usize],
+    };
 
     fill_word(&mut row, COL_VALUE_A_EFF_BASE, value_a_eff);
     fill_word(&mut row, COL_VALUE_B_BASE, value_b);
@@ -818,12 +828,22 @@ pub fn step_to_m31_row(
             let (borrow0, borrow1) = compute_sub_borrows(value_b, rs2_value, diff);
             row[COL_CARRY_FLAG_BASE] = M31::from(borrow0);
             row[COL_CARRY_FLAG_BASE + 1] = M31::from(borrow1);
-            // BEQ/BNE 需 diff_inv（域逆元，存 HelperB[0]，分支行与 Load/Store 互斥）
-            // diff=0 → diff_inv=0（prover 选择，约束 diff*diff_inv=1-taken 自动满足）
-            // diff!=0 → diff_inv = diff^(-1) mod p
+            // BEQ/BNE 需 limb-wise 零检查 witness（存 HelperB[0..3]，M31 溢出修复 v3.10）
+            // 32-bit diff 在 M31 中可能溢出（0xFFFFFFFE = 2p ≡ 0），改用 16-bit half。
+            // half16 ∈ [0,65535] < p=2^31-1，M31 中唯一，无溢出。
+            // - HelperB[0]=inv_low, [1]=inv_high, [2]=is_zero_low, [3]=is_zero_high
+            // - half=0 → inv=0, is_zero=1；half≠0 → inv=half^(-1) mod p, is_zero=0
             if matches!(&step.instruction, Instruction::Beq { .. } | Instruction::Bne { .. }) {
-                let diff_inv = if diff == 0 { 0u32 } else { m31_inverse(diff) };
-                row[COL_HELPER_B_BASE] = M31::from(diff_inv);
+                let diff_low16 = diff & 0xFFFF;
+                let diff_high16 = diff >> 16;
+                let inv_low = if diff_low16 == 0 { 0u32 } else { m31_inverse(diff_low16) };
+                let inv_high = if diff_high16 == 0 { 0u32 } else { m31_inverse(diff_high16) };
+                let is_zero_low = u32::from(diff_low16 == 0);
+                let is_zero_high = u32::from(diff_high16 == 0);
+                row[COL_HELPER_B_BASE] = M31::from(inv_low);
+                row[COL_HELPER_B_BASE + 1] = M31::from(inv_high);
+                row[COL_HELPER_B_BASE + 2] = M31::from(is_zero_low);
+                row[COL_HELPER_B_BASE + 3] = M31::from(is_zero_high);
             }
             // BLT/BGE 需符号 witness（BLTU/BGEU 不填，保持 0）
             if matches!(&step.instruction, Instruction::Blt { .. } | Instruction::Bge { .. }) {

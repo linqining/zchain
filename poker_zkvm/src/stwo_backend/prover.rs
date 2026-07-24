@@ -4740,4 +4740,107 @@ mod tests {
         post[1] = 0x1000_0000;
         prove_verify_single_step(0, Instruction::Lui { rd: 1, imm: 0x1000_0000 }, &prev, post);
     }
+
+    // ===== BNE/BEQ M31 溢出修复测试（v3.10）=====
+    // 验证 diff=0xFFFFFFFE (=2p ≡ 0 mod p) 时 limb-wise 零检查正确工作。
+    // 原方案用 32-bit diff_value 判断零，0xFFFFFFFE≡0 导致 BNE taken=1 时 prove 失败。
+
+    /// BNE rs1=0xFFFFFFFE(-2), rs2=0 → taken=1（原 M31 溢出失败 case，修复后应通过）。
+    /// diff = -2 - 0 = 0xFFFFFFFE = 2p ≡ 0 (mod p)，但实际 ≠ 0，taken=1。
+    #[test]
+    fn test_bne_m31_overflow_taken_soundness() {
+        let mut prev = zero_registers();
+        prev[13] = 0xFFFF_FFFE; // -2，diff = 0xFFFFFFFE = 2p ≡ 0 (mod p)
+        let post = prev; // BNE 不写寄存器
+        prove_verify_single_step(0x1000, Instruction::Bne { rs1: 13, rs2: 0, imm: 8 }, &prev, post);
+    }
+
+    /// BEQ rs1=0xFFFFFFFE(-2), rs2=0 → taken=0（diff=2p≡0 但实际≠0，修复后正确 not-taken）。
+    #[test]
+    fn test_beq_m31_overflow_not_taken_soundness() {
+        let mut prev = zero_registers();
+        prev[13] = 0xFFFF_FFFE;
+        let post = prev;
+        prove_verify_single_step(0x1000, Instruction::Beq { rs1: 13, rs2: 0, imm: 8 }, &prev, post);
+    }
+
+    /// BNE rs1=5, rs2=5 → taken=0（相等，diff=0）。
+    #[test]
+    fn test_bne_equal_not_taken_soundness() {
+        let mut prev = zero_registers();
+        prev[13] = 5;
+        prev[14] = 5;
+        let post = prev;
+        prove_verify_single_step(0x1000, Instruction::Bne { rs1: 13, rs2: 14, imm: 8 }, &prev, post);
+    }
+
+    /// BEQ rs1=5, rs2=5 → taken=1（相等，diff=0）。
+    #[test]
+    fn test_beq_equal_taken_soundness() {
+        let mut prev = zero_registers();
+        prev[13] = 5;
+        prev[14] = 5;
+        let post = prev;
+        prove_verify_single_step(0x1000, Instruction::Beq { rs1: 13, rs2: 14, imm: 8 }, &prev, post);
+    }
+
+    /// 反例：篡改 is_zero_low（伪造 diff_low16=0）→ prove 失败。
+    /// BNE rs1=0xFFFFFFFE, rs2=0, taken=1, diff_low16=0xFFFE≠0, is_zero_low=0(正确)。
+    /// 篡改 is_zero_low=1 → 约束 B: diff_low16 * is_zero_low = 0xFFFE ≠ 0 → 失败。
+    #[test]
+    fn test_bne_is_zero_forgery_soundness() {
+        use crate::stwo_backend::column_layout_v2::COL_HELPER_B_BASE;
+
+        let mut prev = zero_registers();
+        prev[13] = 0xFFFF_FFFE;
+        let post = prev;
+        let step = make_step(0x1000, Instruction::Bne { rs1: 13, rs2: 0, imm: 8 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：is_zero_low (HelperB[2]) 0→1（伪造 diff_low16=0）
+        // 约束 B: diff_low16(0xFFFE) * is_zero_low(1) = 0xFFFE ≠ 0 → prove 失败
+        trace.cols[COL_HELPER_B_BASE + 2][0] = M31::from(1u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BNE is_zero_low（0→1，diff_low16=0xFFFE≠0）应导致 prove 失败 \
+             （约束 B：diff_low16 * is_zero_low = 0xFFFE * 1 ≠ 0）"
+        );
+    }
+
+    /// 反例：篡改 inv_low（破坏逆元约束）→ prove 失败。
+    /// BNE rs1=0xFFFFFFFE, diff_low16=0xFFFE≠0, inv_low=1/0xFFFE(正确), is_zero_low=0。
+    /// 篡改 inv_low=0 → 约束 A: diff_low16 * 0 = 0 ≠ 1 - is_zero_low(0) = 1 → 失败。
+    #[test]
+    fn test_bne_inv_forgery_soundness() {
+        use crate::stwo_backend::column_layout_v2::COL_HELPER_B_BASE;
+
+        let mut prev = zero_registers();
+        prev[13] = 0xFFFF_FFFE;
+        let post = prev;
+        let step = make_step(0x1000, Instruction::Bne { rs1: 13, rs2: 0, imm: 8 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：inv_low (HelperB[0]) → 0（破坏逆元约束）
+        // 约束 A: diff_low16(0xFFFE) * inv_low(0) = 0 ≠ 1 - is_zero_low(0) = 1 → 失败
+        trace.cols[COL_HELPER_B_BASE][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 BNE inv_low（→0，diff_low16≠0）应导致 prove 失败 \
+             （约束 A：diff_low16 * inv_low = 0 ≠ 1 - is_zero_low = 1）"
+        );
+    }
 }

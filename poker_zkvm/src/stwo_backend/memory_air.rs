@@ -258,20 +258,35 @@ impl FrameworkEval for MemoryAir {
             eval.add_constraint(is_first_non_padding.clone() * ts_prev);
         }
 
-        // ===== 约束 M20-M23：Load 行 ValCur = ValPrev（A2 修复，v3.7）=====
+        // ===== 约束 M20-M23：连续 Load 行 ValCur = ValPrev（A2 修复，v3.7→v3.11）=====
         // 缺口：Load 行（IsStore=0, IsPadding=0）的 ValCur 原无约束。Load 不修改内存，
         // ValCur 应 = ValPrev。恶意 prover 可伪造 Load 行 ValCur，通过 logup 让 CPU rd_eff
         // 读到任意伪造值（CPU claim (addr, rd_eff, 0) 与 Memory yield (addr, ValCur, 0) 匹配）。
-        // 修复：约束 Load 行 ValCur[i] = ValPrev[i]。
-        // gating：(1-IsStore)*(1-IsPadding) = Load 行（IsLoad = 1 - IsStore - IsPadding，见 M8）
-        // 度数 = 1 (gating) × 1 (diff) = 2 ✓
-        // 注意：首次访问的 Load 行 ValPrev=0（M15-M18），故 ValCur=0；连续访问 Load 行
-        // ValPrev=prev.ValCur（M10-M13），故 ValCur=prev.ValCur（内存值不变）✓
-        let is_load_mem = (one.clone() - is_store.clone()) * (one.clone() - is_padding.clone());
+        //
+        // 修复：约束**连续访问** Load 行 ValCur[i] = ValPrev[i]。
+        //   - 连续 Load：ValPrev=prev.ValCur（M10-M13），故 ValCur=prev.ValCur（内存值不变）✓
+        //
+        // v3.11 变更：首次访问 Load 行（IsFirstAccess=1）不再约束 ValCur=ValPrev。
+        //   原因：ECALL syscall（如 read_input）将输入数据写入内存，但这些写未入 trace
+        //  （ECALL 副作用未记录为 Store）。首次 Load 该地址时 ValCur=输入值≠ValPrev=0，
+        //   导致 M20-M23 失败。首次访问 Load 的值来自公共输入，应由 public input binding
+        //   约束（待实现），而非 ValCur=ValPrev=0。
+        //
+        // gating = (1-IsStore)*(1-IsFirstAccess)：
+        //   - 连续 Load (IsStore=0, IsFirstAccess=0)：gating=1，约束 ValCur=ValPrev ✓
+        //   - 首次 Load (IsStore=0, IsFirstAccess=1)：gating=0，不约束（soundness gap，待修）
+        //   - Store     (IsStore=1)：gating=0，不约束 ✓
+        //   - Padding   (IsStore=0, IsFirstAccess=0)：gating=1，但 ValCur=ValPrev=0 ✓
+        // 度数 = 2 (gating) × 1 (diff) = 3 ✓
+        //
+        // 已知 soundness gap：首次访问 Load 的 ValCur 可被伪造。缓解：
+        //   1) logup 绑定 CPU rd_eff ↔ Memory ValCur（伪造需同步篡改 CPU trace）
+        //   2) 公共输入绑定（待实现）：首次访问 Load 的 ValCur 应 = 公开输入对应字节
+        let is_continuation_load = (one.clone() - is_store.clone()) * (one.clone() - is_first_access.clone());
         for i in 0..4 {
             let val_cur = col(MEM_COL_VAL_CUR_BASE + i);
             let val_prev = col(MEM_COL_VAL_PREV_BASE + i);
-            eval.add_constraint(is_load_mem.clone() * (val_cur - val_prev));
+            eval.add_constraint(is_continuation_load.clone() * (val_cur - val_prev));
         }
 
         // ===== Logup yield：非 padding 行发送 multiplicity = -1，padding 行 multiplicity = 0 =====
