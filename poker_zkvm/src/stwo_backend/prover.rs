@@ -53,7 +53,8 @@ use stwo_constraint_framework::{
 use super::cpu_air::CpuAir;
 use super::column_layout_v2::{
     COL_MEM_ADDR_BASE, COL_PC_BASE, COL_PC_NEXT_BASE, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
-    COL_VALUE_C_BASE, IS_LOAD, IS_PADDING, IS_STORE, NUM_COLUMNS,
+    COL_VALUE_C_BASE, IS_LOAD, IS_PADDING, IS_STORE, NUM_COLUMNS, RANGE_CHECK_COL_INDICES,
+    WORD_LIMB_COUNT,
 };
 use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
 use super::memory_air::{
@@ -436,12 +437,13 @@ fn gen_mem_interaction_trace(
 ///
 /// # 列顺序（须与 `CpuAir::evaluate` 的 `add_to_relation` 调用顺序严格一致）
 /// - col 0：Memory claim `(MemAddr×4, mem_value×4, IsStore)`，multiplicity = IsLoad+IsStore
-/// - col 1..24：Range claim `(limb_value,)`，multiplicity = 1-IsPadding
-///   按 `RANGE_CHECK_COLS` 顺序：PC, PcNext, ValueAEff, ValueB, ValueC, MemAddr（各 4 limb）
+/// - col 1..55：Range claim `(limb_value,)`，multiplicity = 1-IsPadding
+///   按 `RANGE_CHECK_COL_INDICES` 顺序：PC, PcNext, ValueAEff, ValueB, ValueC, MemAddr（各 4 limb）
+///   + MulCarryLo(7), MulHigh(4), AbsA(4), AbsB(4), DivQuot(4), DivRem(4), MulLow(4)
 ///
 /// # 返回
-/// (100 CircleEvaluations, claimed_sum) — 25 SecureField 列 × 4 base cols + 总 sum。
-/// `claimed_sum` = 最后一列（col_24 = 全部 25 frac 的逐行累积）跨所有行的总和，
+/// (224 CircleEvaluations, claimed_sum) — 56 SecureField 列 × 4 base cols + 总 sum。
+/// `claimed_sum` = 最后一列（col_55 = 全部 56 frac 的逐行累积）跨所有行的总和，
 /// 即 CPU 组件全部 logup claim 的总 sum。
 fn gen_cpu_full_interaction_trace(
     cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -453,16 +455,8 @@ fn gen_cpu_full_interaction_trace(
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let one_packed = PackedBaseField::broadcast(BaseField::from(1u32));
 
-    // 24 个 limb 列索引（与 CpuAir::evaluate 的 RANGE_CHECK_COLS 完全一致）
-    const RANGE_CHECK_COLS: [usize; 24] = [
-        COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
-        COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
-        COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2,
-        COL_VALUE_A_EFF_BASE + 3,
-        COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
-        COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
-        COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
-    ];
+    // 64 个 limb 列索引（v3.9 A8+A6+A1/A4 修复，与 CpuAir::evaluate 的 RANGE_CHECK_COL_INDICES 完全一致）
+    const RANGE_CHECK_COLS: [usize; 64] = RANGE_CHECK_COL_INDICES;
 
     // ===== col 0：Memory claim（frac_0）=====
     // 与 CpuAir::evaluate 的 memory_lookup 分支一致：
@@ -495,7 +489,7 @@ fn gen_cpu_full_interaction_trace(
         col_gen.finalize_col();
     }
 
-    // ===== col 1..24：Range claims（frac_1..frac_24）=====
+    // ===== col 1..65：Range claims（frac_1..frac_64）=====
     // 每个 new_col 由 finalize_col 自动累加前一列，形成跨 frac 的累积和。
     for &col_idx in &RANGE_CHECK_COLS {
         let mut col_gen = log_gen.new_col();
@@ -545,7 +539,7 @@ fn gen_range_check_air_interaction_trace(
 /// 生成 CPU 仅 RangeCheck 的 interaction trace（无 Memory claim）。
 ///
 /// 与 `gen_cpu_full_interaction_trace` 相同，但跳过 Memory claim（frac_0），
-/// 只发送 24 个 RangeCheckLookup frac。用于 2 组件隔离测试（CPU + RangeCheck）。
+/// 只发送 64 个 RangeCheckLookup frac。用于 2 组件隔离测试（CPU + RangeCheck）。
 fn gen_cpu_range_only_interaction_trace(
     cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
@@ -555,15 +549,8 @@ fn gen_cpu_range_only_interaction_trace(
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let one_packed = PackedBaseField::broadcast(BaseField::from(1u32));
 
-    const RANGE_CHECK_COLS: [usize; 24] = [
-        COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
-        COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
-        COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2,
-        COL_VALUE_A_EFF_BASE + 3,
-        COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
-        COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
-        COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
-    ];
+    // 64 个 limb 列索引（v3.9 A8+A6+A1/A4 修复，与 gen_cpu_full_interaction_trace 一致）
+    const RANGE_CHECK_COLS: [usize; 64] = RANGE_CHECK_COL_INDICES;
 
     for &col_idx in &RANGE_CHECK_COLS {
         let mut col_gen = log_gen.new_col();
@@ -889,8 +876,8 @@ pub fn prove_cpu_mem_range_trace(
     let range_lookup = RangeCheckLookup::draw(&mut channel);
 
     // 7. 生成 interaction traces（Tree 2）
-    // CPU 完整 interaction（memory claim + range claims，25 列，单个 LogupTraceGenerator）
-    // 必须在单个 generator 中顺序生成全部 25 列，确保 finalize_col 的跨 frac 累积
+    // CPU 完整 interaction（memory claim + range claims，65 列 = 1 memory + 64 range，单个 LogupTraceGenerator）
+    // 必须在单个 generator 中顺序生成全部 65 列，确保 finalize_col 的跨 frac 累积
     // （col_k = frac_0+...+frac_k）与 CpuAir::evaluate 的 finalize_logup 期望一致。
     let (cpu_interaction_evals, claimed_sum_cpu) =
         gen_cpu_full_interaction_trace(&cpu_evals, log_size, &memory_lookup, &range_lookup);
@@ -917,8 +904,8 @@ pub fn prove_cpu_mem_range_trace(
     // 9. 通信 claimed_sums 给 verifier
     channel.mix_felts(&[claimed_sum_cpu, claimed_sum_mem, claimed_sum_range]);
 
-    // 10. Tree 2：CPU(100) + Memory(4) + RangeCheck(4) = 108 base cols
-    //     顺序：cpu_interaction(100, 25 SecureField 列) + mem_yield(4) + rc_yield(4)
+    // 10. Tree 2：CPU(260) + Memory(4) + RangeCheck(4) = 268 base cols
+    //     顺序：cpu_interaction(260, 65 SecureField 列) + mem_yield(4) + rc_yield(4)
     {
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(cpu_interaction_evals);
@@ -1015,14 +1002,18 @@ pub fn verify_cpu_mem_range_proof(
     // 6. 通信 claimed_sums（与 prover 镜像）
     channel.mix_felts(&[claimed_sum_cpu, claimed_sum_mem, claimed_sum_range]);
 
-    // 7. Tree 2：CPU(4+96=100) + Memory(4) + RangeCheck(4) = 108 base cols
+    // 7. Tree 2：CPU interaction + Memory yield + RangeCheck yield
+    // CPU claim: (1 memory + RANGE_CHECK_COL_INDICES.len() range) SecureField cols × 4 base cols
+    // Memory yield: 1 SecureField col × 4 base cols
+    // RangeCheck yield: 1 SecureField col × 4 base cols
     let interaction_commitment = *stark_proof.commitments.get(2).ok_or_else(|| {
         VerificationError::InvalidStructure(format!(
             "proof.commitments 长度不足：期望 ≥3，实际 {}",
             stark_proof.commitments.len()
         ))
     })?;
-    let interaction_log_sizes = vec![log_size; 108];
+    let cpu_claim_base_cols = (1 + RANGE_CHECK_COL_INDICES.len()) * WORD_LIMB_COUNT;
+    let interaction_log_sizes = vec![log_size; cpu_claim_base_cols + 4 + 4];
     commitment_scheme.commit(interaction_commitment, &interaction_log_sizes, &mut channel);
 
     // 8. 构建 components（与 prover 一致）
@@ -1532,6 +1523,12 @@ mod tests {
         // 高 16 位: 0 + 0 + 0 = 0, carry1 = 0
         row[COL_CARRY_FLAG_BASE] = M31::from(0u32);
         row[COL_CARRY_FLAG_BASE + 1] = M31::from(0u32);
+
+        // A6 修复：填充 InstrWord/InstrBits/ImmField（v3.8）
+        // ADD x1, x2, x3 → encode_r(0x33, 0, 0x00, 1, 2, 3) = 0x003100B3
+        use crate::isa::Instruction;
+        use crate::stwo_backend::trace_native::fill_a6_instr_columns;
+        fill_a6_instr_columns(&mut row, &Instruction::Add { rd: 1, rs1: 2, rs2: 3 });
 
         builder.fill_row(&row);
         builder.fill_padding_to_full();
@@ -2059,6 +2056,117 @@ mod tests {
         assert!(
             result.is_err(),
             "篡改 SLT 比较结果（false→true）应导致 prove 失败"
+        );
+    }
+
+    // ----- A3 修复 soundness 测试（v3.7，sign_a/sign_b 绑定操作数符号位）-----
+    //
+    // A3 缺口：sign_a/sign_b 原为无约束 witness，恶意 prover 可伪造符号位，
+    // 进而操纵 SLT/分支/MULH/DIV 等依赖符号的结果约束。
+    // A3 修复：新增 SignABits/SignBBits witness 列（8-bit 分解），约束：
+    //   (1) ValueB[3] = Σ SignABits[i]·2^i  （SignABits 是 rs1 高字节的真实位分解）
+    //   (2) sign_a = SignABits[7]            （sign_a 绑定 rs1 的 bit 31）
+    //   (3) ValueC[3] = Σ SignBBits[i]·2^i   （SignBBits 是 rs2 高字节的真实位分解）
+    //   (4) sign_b = SignBBits[7]            （sign_b 绑定 rs2 的 bit 31）
+    //
+    // 以下反例测试验证 A3 约束能阻止恶意 witness：
+    // - 篡改 SignABits 位分解 → A3 约束 (1) 失败
+    // - 翻转 sign_a → A3 约束 (2) 失败
+    // - 篡改 SignBBits 位分解 → A3 约束 (3) 失败
+
+    #[test]
+    fn test_a3_sign_a_bits_decomposition_soundness() {
+        // SLT x1, x2, x3：x2=-5 (0xFFFFFFFB)，x3=10
+        // rs1 高字节 = 0xFF，SignABits 应为 [1,1,1,1,1,1,1,1]
+        // 篡改 SignABits[0] = 0（翻转 bit 0），破坏位分解一致性
+        //
+        // A3 约束 (1)：ValueB[3] (0xFF) ≠ Σ SignABits (0xFE) → prove 失败
+        // sign_a=1=SignABits[7] 不变（约束 (2) 仍满足），rd_eff 不变（SLT 结果约束仍满足），
+        // 故仅 A3 约束 (1) 捕获此篡改。无 A3 时 SignABits 无约束，此篡改不会被检测。
+        use crate::stwo_backend::column_layout_v2::COL_SIGN_A_BITS_BASE;
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFB; // -5 as i32, 高字节 0xFF
+        prev[3] = 10;
+        let mut post = prev;
+        post[1] = 1; // -5 < 10 → rd_eff = 1
+        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 SignABits[0] = 0（正确值 1，因 0xFF 的 bit 0 = 1）
+        trace.cols[COL_SIGN_A_BITS_BASE][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 SignABits[0] 应导致 prove 失败（A3 约束 (1)：SignABits 须为 ValueB[3] 的真实位分解）"
+        );
+    }
+
+    #[test]
+    fn test_a3_sign_a_binding_soundness() {
+        // SLT x1, x2, x3：x2=-5 (0xFFFFFFFB，sign_a 应=1)，x3=10
+        // 翻转 sign_a = 0（伪造 rs1 为正数），保持 SignABits 不变
+        //
+        // A3 约束 (2)：sign_a (0) ≠ SignABits[7] (1) → prove 失败
+        // 无 A3 时 sign_a 无约束，恶意 prover 可自由翻转 sign_a 操纵 SLT 结果。
+        use crate::stwo_backend::column_layout_v2::COL_SIGN_A;
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFB; // -5 as i32, sign_a 应 = 1
+        prev[3] = 10;
+        let mut post = prev;
+        post[1] = 1; // -5 < 10 → rd_eff = 1
+        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 翻转 sign_a = 0（正确值 1）
+        trace.cols[COL_SIGN_A][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "翻转 sign_a 应导致 prove 失败（A3 约束 (2)：sign_a 须 = SignABits[7] = rs1 bit 31）"
+        );
+    }
+
+    #[test]
+    fn test_a3_sign_b_bits_decomposition_soundness() {
+        // MULH x1, x2, x3：x2=-5 (0xFFFFFFFB)，x3=-10 (0xFFFFFFF6)
+        // rs2 高字节 = 0xFF，SignBBits 应为 [1,1,1,1,1,1,1,1]
+        // 篡改 SignBBits[3] = 0（翻转 bit 3），破坏位分解一致性
+        //
+        // A3 约束 (3)：ValueC[3] (0xFF) ≠ Σ SignBBits (0xF7) → prove 失败
+        // sign_b=1=SignBBits[7] 不变（约束 (4) 仍满足），故仅 A3 约束 (3) 捕获此篡改。
+        use crate::stwo_backend::column_layout_v2::COL_SIGN_B_BITS_BASE;
+        let mut prev = zero_registers();
+        prev[2] = 0xFFFF_FFFB; // -5 as i32
+        prev[3] = 0xFFFF_FFF6; // -10 as i32, 高字节 0xFF
+        let mut post = prev;
+        post[1] = 0; // MULH(-5, -10) 高 32 位 = 0（乘积 50 < 2^32）
+        let step = make_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改 SignBBits[3] = 0（正确值 1，因 0xFF 的 bit 3 = 1）
+        trace.cols[COL_SIGN_B_BITS_BASE + 3][0] = M31::from(0u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 SignBBits[3] 应导致 prove 失败（A3 约束 (3)：SignBBits 须为 ValueC[3] 的真实位分解）"
         );
     }
 
@@ -2913,22 +3021,55 @@ mod tests {
 
     #[test]
     fn test_prove_verify_multi_lw() {
-        // LW x1, x2, 8（从 x2+8 地址加载 4 字节到 x1）
-        // x2 = 0x1000，addr = 0x1008，加载值 = 0xDEADBEEF
+        // SW + LW 同地址序列（A2 修复后，Load 须有前驱 Store 初始化内存）。
+        // 内存模型为零初始化：首次访问 ValPrev=0（M15-M18），Load 行 ValCur=ValPrev（A2），
+        // 故 Load 首次访问必须返回 0。要 Load 非零值，须先 Store 初始化该地址。
         //
-        // CPU claim：values=(0x1008, 0xDEADBEEF, IsStore=0)，multiplicity=+1
-        // Memory yield：values=(0x1008, 0xDEADBEEF, IsStore=0)，multiplicity=-1
-        // soundness：+1 + (-1) = 0 ✓
+        // Step 0: SW x2, x3, 8（x3=0xDEADBEEF 存到 x2+8=0x1008）
+        // Step 1: LW x1, x2, 8（从 x2+8=0x1008 加载到 x1，期望 x1=0xDEADBEEF）
+        //
+        // Memory trace（按 (addr, ts) 排序）：
+        //   Row 0: addr=0x1008, val=0xDEADBEEF, ts=0, IsStore=1, IsFirstAccess=1
+        //   Row 1: addr=0x1008, val=0xDEADBEEF, ts=1, IsStore=0, IsFirstAccess=0
+        //     (ValPrev=0xDEADBEEF=prev.ValCur, TsPrev=0=prev.TsCur)
+        //   A2 修复：Load 行 ValCur=ValPrev=0xDEADBEEF ✓
+        //
+        // CPU claims:
+        //   Row 0: (0x1008, 0xDEADBEEF, IsStore=1)，mult=+1
+        //   Row 1: (0x1008, 0xDEADBEEF, IsStore=0)，mult=+1
+        // Memory yields:
+        //   Row 0: (0x1008, 0xDEADBEEF, IsStore=1)，mult=-1
+        //   Row 1: (0x1008, 0xDEADBEEF, IsStore=0)，mult=-1
+        // soundness：(+1++1) + (-1+-1) = 0 ✓
         let mut prev = zero_registers();
         prev[2] = 0x1000;
+        prev[3] = 0xDEADBEEF;
         let initial_prev = prev; // 保存 step 0 的 prev_registers
-        let mut post = prev;
-        post[1] = 0xDEADBEEF;
-        let step = make_step_indexed(
+
+        // Step 0: SW x2, x3, 8（初始化 0x1008 = 0xDEADBEEF）
+        let post0 = prev; // SW 不写寄存器
+        let step0 = make_step_indexed(
             0,
             0,
+            Instruction::Sw { rs1: 2, rs2: 3, imm: 8 },
+            post0,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Write,
+                value: 0xDEADBEEF,
+                size: 4,
+            }],
+        );
+        prev = post0;
+
+        // Step 1: LW x1, x2, 8（加载 0x1008 → x1=0xDEADBEEF）
+        let mut post1 = prev;
+        post1[1] = 0xDEADBEEF;
+        let step1 = make_step_indexed(
+            1,
+            4,
             Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
-            post,
+            post1,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
                 op: crate::trace::MemOp::Read,
@@ -2936,9 +3077,11 @@ mod tests {
                 size: 4,
             }],
         );
+
         let mut emulator_trace = crate::trace::Trace::new();
         emulator_trace.set_initial_registers(initial_prev);
-        emulator_trace.push_step(step);
+        emulator_trace.push_step(step0);
+        emulator_trace.push_step(step1);
         prove_verify_multi_component(&emulator_trace);
     }
 
@@ -3037,29 +3180,37 @@ mod tests {
 
     #[test]
     fn test_prove_verify_multi_mixed_load_store_different_addrs() {
-        // 不同地址的 Load/Store 混合：
+        // 不同地址的 Load/Store 混合（A2 修复后，Load 须有前驱 Store 初始化内存）。
+        // 内存模型为零初始化：Load 首次访问必须返回 0，故 Load 非零值前须先 Store。
+        //
         // Step 0: SW x2, x3, 0（addr=0x7000, val=0xAABBCCDD）
-        // Step 1: LW x4, x5, 0（addr=0x8000, val=0x11223344）
+        // Step 1: SW x5, x6, 0（addr=0x8000, val=0x11223344）— 初始化 0x8000
+        // Step 2: LW x4, x5, 0（addr=0x8000, val=0x11223344）— continuation Load
         //
         // Memory trace（按 (addr, ts) 排序）：
         //   Row 0: addr=0x7000, val=0xAABBCCDD, ts=0, IsStore=1, IsFirstAccess=1
-        //   Row 1: addr=0x8000, val=0x11223344, ts=1, IsStore=0, IsFirstAccess=1
-        //     (不同 addr，IsFirstAccess=1, ValPrev=0, TsPrev=0)
+        //   Row 1: addr=0x8000, val=0x11223344, ts=1, IsStore=1, IsFirstAccess=1
+        //   Row 2: addr=0x8000, val=0x11223344, ts=2, IsStore=0, IsFirstAccess=0
+        //     (ValPrev=0x11223344=prev.ValCur, TsPrev=1=prev.TsCur)
+        //   A2 修复：Load 行 ValCur=ValPrev=0x11223344 ✓
         //
         // CPU claims:
         //   Row 0: (0x7000, 0xAABBCCDD, IsStore=1)，mult=+1
-        //   Row 1: (0x8000, 0x11223344, IsStore=0)，mult=+1
+        //   Row 1: (0x8000, 0x11223344, IsStore=1)，mult=+1
+        //   Row 2: (0x8000, 0x11223344, IsStore=0)，mult=+1
         // Memory yields:
         //   Row 0: (0x7000, 0xAABBCCDD, IsStore=1)，mult=-1
-        //   Row 1: (0x8000, 0x11223344, IsStore=0)，mult=-1
-        // soundness：(+1++1) + (-1+-1) = 0 ✓
+        //   Row 1: (0x8000, 0x11223344, IsStore=1)，mult=-1
+        //   Row 2: (0x8000, 0x11223344, IsStore=0)，mult=-1
+        // soundness：(+1++1++1) + (-1+-1+-1) = 0 ✓
         let mut prev = zero_registers();
         prev[2] = 0x7000;
         prev[3] = 0xAABBCCDD;
         prev[5] = 0x8000;
+        prev[6] = 0x11223344;
         let initial_prev = prev; // 保存 step 0 的 prev_registers
 
-        // Step 0: SW
+        // Step 0: SW x2, x3, 0（addr=0x7000）
         let post0 = prev;
         let step0 = make_step_indexed(
             0,
@@ -3075,14 +3226,30 @@ mod tests {
         );
         prev = post0;
 
-        // Step 1: LW
-        let mut post1 = prev;
-        post1[4] = 0x11223344;
+        // Step 1: SW x5, x6, 0（addr=0x8000，初始化 0x8000=0x11223344）
+        let post1 = prev;
         let step1 = make_step_indexed(
             1,
             4,
-            Instruction::Lw { rd: 4, rs1: 5, imm: 0 },
+            Instruction::Sw { rs1: 5, rs2: 6, imm: 0 },
             post1,
+            vec![crate::trace::MemAccess {
+                addr: 0x8000,
+                op: crate::trace::MemOp::Write,
+                value: 0x11223344,
+                size: 4,
+            }],
+        );
+        prev = post1;
+
+        // Step 2: LW x4, x5, 0（addr=0x8000，加载 0x11223344 → x4）
+        let mut post2 = prev;
+        post2[4] = 0x11223344;
+        let step2 = make_step_indexed(
+            2,
+            8,
+            Instruction::Lw { rd: 4, rs1: 5, imm: 0 },
+            post2,
             vec![crate::trace::MemAccess {
                 addr: 0x8000,
                 op: crate::trace::MemOp::Read,
@@ -3095,7 +3262,120 @@ mod tests {
         emulator_trace.set_initial_registers(initial_prev);
         emulator_trace.push_step(step0);
         emulator_trace.push_step(step1);
+        emulator_trace.push_step(step2);
         prove_verify_multi_component(&emulator_trace);
+    }
+
+    // ----- A2 修复 soundness 测试（v3.7，Memory Load ValCur=ValPrev）-----
+    //
+    // A2 缺口：Memory Load 行的 ValCur 原无约束。恶意 prover 可在 Load 行设置 ValCur=伪造值，
+    // 同时篡改 CPU rd_eff=伪造值使 logup 平衡，从而让 CPU 读取任意伪造的内存值。
+    // A2 修复：约束 Load 行 ValCur[i] = ValPrev[i]（Load 不修改内存）。
+    //
+    // 以下反例测试构造一个「logup 平衡但 ValCur≠ValPrev」的篡改场景，
+    // 验证仅 A2 约束能捕获此伪造（无 A2 时所有约束通过，伪造成功）。
+
+    #[test]
+    fn test_a2_load_valcur_valprev_soundness() {
+        // SW + LW 同地址序列：
+        // Step 0: SW x2, x3, 8（x3=0xDEADBEEF 存到 0x1008）
+        // Step 1: LW x1, x2, 8（从 0x1008 加载，正确值 0xDEADBEEF）
+        //
+        // 恶意篡改：将 Load 行的 Memory ValCur 和 CPU rd_eff/HelperB 同时改为 0x00000000，
+        // 使 logup 仍平衡（CPU claim (0x1008, 0, 0) + Memory yield (0x1008, 0, 0) = 0），
+        // 但 A2 约束 ValCur(0) ≠ ValPrev(0xDEADBEEF) → prove 失败。
+        //
+        // 无 A2 时：ValCur 无约束，logup 平衡 → 所有约束通过 → 伪造成功（CPU 读到 0 而非 0xDEADBEEF）。
+        // 有 A2 时：ValCur ≠ ValPrev → prove 失败 → 伪造被阻止。
+        use crate::stwo_backend::column_layout_v2::{COL_HELPER_B_BASE, COL_VALUE_A_EFF_BASE};
+        use crate::stwo_backend::memory_air::{MEM_COL_IS_STORE, MEM_COL_VAL_CUR_BASE};
+
+        // --- 构造合法 SW+LW trace ---
+        let mut prev = zero_registers();
+        prev[2] = 0x1000;
+        prev[3] = 0xDEADBEEF;
+        let initial_prev = prev;
+
+        let post0 = prev;
+        let step0 = make_step_indexed(
+            0,
+            0,
+            Instruction::Sw { rs1: 2, rs2: 3, imm: 8 },
+            post0,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Write,
+                value: 0xDEADBEEF,
+                size: 4,
+            }],
+        );
+        prev = post0;
+
+        let mut post1 = prev;
+        post1[1] = 0xDEADBEEF;
+        let step1 = make_step_indexed(
+            1,
+            4,
+            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            post1,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Read,
+                value: 0xDEADBEEF,
+                size: 4,
+            }],
+        );
+
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step0);
+        emulator_trace.push_step(step1);
+
+        let mut cpu_trace = trace_to_native(&emulator_trace);
+        let mut mem_trace = trace_to_memory_trace(&emulator_trace);
+
+        // --- 篡改 Memory Load 行 ValCur = 0（正确值 0xDEADBEEF）---
+        // Memory trace 排序后：Row 0 = Store(ts=0), Row 1 = Load(ts=1)
+        // 找到 Load 行（IsStore=0 的非 padding 行），篡改其 ValCur 4 个 limb 为 0
+        let num_rows = mem_trace.num_rows();
+        let mut load_row: Option<usize> = None;
+        for r in 0..num_rows {
+            let is_store = mem_trace.cols[MEM_COL_IS_STORE][r].0;
+            // IsPadding=0 时该列为 0 或 1；IsPadding=1 时该列为 0（padding 行 IsStore=0）
+            // 需区分 Load 行与 padding 行：Load 行的 ValPrev ≠ 0（=Store 的值），padding 行 ValPrev=0
+            if is_store == 0 {
+                let val_prev_0 = mem_trace.cols[MEM_COL_VAL_CUR_BASE][r].0;
+                if val_prev_0 != 0 {
+                    // 非零 ValCur 的非 Store 行 = Load 行
+                    load_row = Some(r);
+                    break;
+                }
+            }
+        }
+        let load_row = load_row.expect("须找到 Load 行");
+        for i in 0..4 {
+            mem_trace.cols[MEM_COL_VAL_CUR_BASE + i][load_row] = M31::from(0u32);
+        }
+
+        // --- 篡改 CPU Load 行 rd_eff 和 HelperB = 0（使 logup 平衡 + Load 扩展约束通过）---
+        // CPU trace：Row 0 = SW, Row 1 = LW
+        let cpu_load_row = 1;
+        for i in 0..4 {
+            cpu_trace.cols[COL_VALUE_A_EFF_BASE + i][cpu_load_row] = M31::from(0u32);
+            cpu_trace.cols[COL_HELPER_B_BASE + i][cpu_load_row] = M31::from(0u32);
+        }
+
+        // --- prove 须失败（A2: ValCur(0) ≠ ValPrev(0xDEADBEEF)）---
+        // prove_cpu_memory_trace 可能以 Err(ProvingError) 返回（约束不满足）或 panic（soundness assert）
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prove_cpu_memory_trace(&cpu_trace, &mem_trace)
+        }));
+        let prove_failed = result.is_err() || result.as_ref().map(|r| r.is_err()).unwrap_or(false);
+        assert!(
+            prove_failed,
+            "篡改 Load ValCur=0（同时篡改 CPU rd_eff/HelperB 使 logup 平衡）应导致 prove 失败\
+             （A2 约束：Load 行 ValCur 须 = ValPrev）"
+        );
     }
 
     /// 诊断测试：打印 Memory trace 的前几行值，手动验证连续性约束。
@@ -3250,6 +3530,12 @@ mod tests {
 
         // 25 列 ECALL dispatch 全为 0（Tier 1 trace 填充暂留 0）
         // row 已用 vec![M31::from(0u32); NUM_COLUMNS] 初始化，无需额外操作
+
+        // A6 修复：填充 InstrWord/InstrBits/ImmField（v3.8）
+        // ECALL → encode() = 0x73，immediate_value() = 0
+        use crate::isa::Instruction;
+        use crate::stwo_backend::trace_native::fill_a6_instr_columns;
+        fill_a6_instr_columns(&mut row, &Instruction::Ecall);
 
         builder.fill_row(&row);
         builder.fill_padding_to_full();
@@ -3573,31 +3859,91 @@ mod tests {
 
     #[test]
     fn test_range_check_soundness_roundtrip() {
-        // V4 正向 roundtrip：合法 LW 单步 trace，3 组件 prover（CPU + Memory + RangeCheck）
+        // V4 正向 roundtrip：合法 SW+LW trace，3 组件 prover（CPU + Memory + RangeCheck）
         // 应 prove + verify 成功，保证 V4 修复不破坏合法 trace 的可证可验性。
         //
-        // LW x1, x2, 8：x2=0x1000，addr=0x1008，加载值=0xDEADBEEF → x1=0xDEADBEEF
+        // A2 修复后，Load 须有前驱 Store 初始化内存（零初始化内存模型）。
+        // Step 0: SW x2, x3, 8（x3=0xDEADBEEF 存到 x2+8=0x1008）
+        // Step 1: LW x1, x2, 8（从 x2+8=0x1008 加载 → x1=0xDEADBEEF）
         // 所有 limb 均在 [0,255]：0x1008→[8,16,0,0]，0xDEADBEEF→[239,190,173,222]
         let mut prev = zero_registers();
         prev[2] = 0x1000;
+        prev[3] = 0xDEAD_BEEF;
         let initial_prev = prev;
-        let mut post = prev;
-        post[1] = 0xDEAD_BEEF;
-        let step = make_step_indexed(
+
+        // Step 0: SW x2, x3, 8（初始化 0x1008 = 0xDEADBEEF）
+        let post0 = prev; // SW 不写寄存器
+        let step0 = make_step_indexed(
             0,
             0,
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            post0,
+            vec![crate::trace::MemAccess {
+                addr: 0x1008,
+                op: crate::trace::MemOp::Write,
+                value: 0xDEAD_BEEF,
+                size: 4,
+            }],
+        );
+        prev = post0;
+
+        // Step 1: LW x1, x2, 8（加载 0x1008 → x1=0xDEADBEEF）
+        let mut post1 = prev;
+        post1[1] = 0xDEAD_BEEF;
+        let step1 = make_step_indexed(
+            1,
+            4,
             Instruction::Lw {
                 rd: 1,
                 rs1: 2,
                 imm: 8,
             },
-            post,
+            post1,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
                 op: crate::trace::MemOp::Read,
                 value: 0xDEAD_BEEF,
                 size: 4,
             }],
+        );
+
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step0);
+        emulator_trace.push_step(step1);
+
+        let cpu_trace = trace_to_native(&emulator_trace);
+        let mem_trace = trace_to_memory_trace(&emulator_trace);
+        let log_size = cpu_trace.log_size;
+
+        let proof = prove_cpu_mem_range_trace(&cpu_trace, &mem_trace).expect("prove 失败");
+        verify_cpu_mem_range_proof(proof, log_size).expect("verify 失败");
+    }
+
+    /// A8 修复正向 roundtrip：MUL 指令 3 组件 prove/verify（CPU + Memory + RangeCheck）。
+    ///
+    /// 验证 A8 扩展 RangeCheck 覆盖（55 列，含 M 扩展 carry/abs/quot/rem/low/high）
+    /// 对合法 MUL trace 的可证可验性。MUL 指令的 MulLow/MulCarryLo/MulHigh 等列
+    /// 均在 [0, 255] 范围内，RangeCheck logup 应平衡。
+    #[test]
+    fn test_a8_range_check_mul_roundtrip() {
+        // MUL x1, x2, x3：6 × 7 = 42
+        let mut prev = zero_registers();
+        prev[2] = 6;
+        prev[3] = 7;
+        let initial_prev = prev;
+        let mut post = prev;
+        post[1] = 42;
+        let step = make_step_indexed(
+            0,
+            0,
+            Instruction::Mul { rd: 1, rs1: 2, rs2: 3 },
+            post,
+            Vec::new(),
         );
         let mut emulator_trace = crate::trace::Trace::new();
         emulator_trace.set_initial_registers(initial_prev);
@@ -3609,6 +3955,49 @@ mod tests {
 
         let proof = prove_cpu_mem_range_trace(&cpu_trace, &mem_trace).expect("prove 失败");
         verify_cpu_mem_range_proof(proof, log_size).expect("verify 失败");
+    }
+
+    /// A8 修复 soundness 测试：篡改 M 扩展列（MulLow[0]）超出 [0, 255] → prove 必失败。
+    ///
+    /// 验证 A8 扩展的 RangeCheck 覆盖能捕获新增列的越界值。
+    /// 篡改 MUL 行的 MulLow[0]（col 128）= 256，该值不在 RangeCheck 表 [0, 255] 中，
+    /// 导致 CPU 侧 claim (+1) 无对应 yield → logup 不平衡 → prove 失败。
+    #[test]
+    fn test_a8_range_check_tamper_mul_low() {
+        // MUL x1, x2, x3：6 × 7 = 42（MulLow = [42, 0, 0, 0]）
+        let mut prev = zero_registers();
+        prev[2] = 6;
+        prev[3] = 7;
+        let initial_prev = prev;
+        let mut post = prev;
+        post[1] = 42;
+        let step = make_step_indexed(
+            0,
+            0,
+            Instruction::Mul { rd: 1, rs1: 2, rs2: 3 },
+            post,
+            Vec::new(),
+        );
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial_prev);
+        emulator_trace.push_step(step);
+
+        let mut cpu_trace = trace_to_native(&emulator_trace);
+        let mem_trace = trace_to_memory_trace(&emulator_trace);
+
+        // 篡改：MulLow[0]（col 128, row 0）= 256（超出 [0, 255]）
+        use crate::stwo_backend::column_layout_v2::COL_MUL_LOW_BASE;
+        cpu_trace.cols[COL_MUL_LOW_BASE][0] = M31::from(256u32);
+
+        // 预期：prove 失败（soundness assert panic 或约束失败 Err）
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prove_cpu_mem_range_trace(&cpu_trace, &mem_trace)
+        }));
+        assert!(
+            result.is_err(),
+            "篡改 MulLow[0] 为 256 应导致 prove_cpu_mem_range_trace 失败 \
+            （A8 RangeCheck 扩展覆盖 soundness）"
+        );
     }
 
     /// 2 组件隔离测试：CPU + RangeCheck（无 Memory），排查 3 组件交互问题。
@@ -4006,5 +4395,349 @@ mod tests {
         eprintln!("  CPU: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_cpu, cpu_cumsum_shift);
         eprintln!("  Memory: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_mem, mem_cumsum_shift);
         eprintln!("  RangeCheck: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_range, rc_cumsum_shift);
+    }
+
+    // =======================================================================
+    // A6 修复反例测试：指令字解码约束（v3.8）
+    // =======================================================================
+    // 验证 indicator 与 opcode/funct3/funct7 绑定的 soundness。
+    // 无 A6 时，恶意 prover 可伪造 indicator 与实际指令字不匹配（例如声称 ADD 但用 SUB 的编码），
+    // 从而绕过特定指令的约束。A6 解码约束捕获此类篡改。
+
+    /// A6 反例 (1)：opcode 与 indicator 不匹配 → prove 失败。
+    ///
+    /// ADD x1, x2, x3 的 opcode = 0x33（R-type）。
+    /// 篡改 InstrBitsByte0[5] 从 1→0（opcode bit 5 翻转），使 opcode 变为 0x13（OP-IMM），
+    /// 同时更新 InstrWord[0] 保持位分解一致性（仅解码约束失败，位分解约束不失败）。
+    ///
+    /// A6 解码约束：`is_r_type * (opcode - 0x33)` = 1 * (0x13 - 0x33) ≠ 0 → prove 失败。
+    /// 无 A6 时 InstrWord/InstrBits 无约束，此篡改不会被检测。
+    #[test]
+    fn test_a6_opcode_indicator_mismatch_soundness() {
+        use crate::stwo_backend::column_layout_v2::{
+            COL_INSTR_BITS_BYTE0_BASE, COL_INSTR_WORD_BASE,
+        };
+
+        // ADD x1, x2, x3：x2=100, x3=200, x1=300
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 200;
+        let mut post = prev;
+        post[1] = 300;
+        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // ADD encode = 0x003100B3 → InstrWord[0] = 0xB3 = 10110011
+        //   opcode = bits[0..6] = 0110011 = 0x33
+        // 篡改：翻转 bit 5（InstrBitsByte0[5]）从 1→0
+        //   新 bits = [1,1,0,0,1,0,0,1] → opcode = 0010011 = 0x13, InstrWord[0] = 0x93
+        trace.cols[COL_INSTR_BITS_BYTE0_BASE + 5][0] = M31::from(0u32);
+        trace.cols[COL_INSTR_WORD_BASE][0] = M31::from(0x93u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 opcode（0x33→0x13）但保持 IS_ADD=1 应导致 prove 失败 \
+            （A6 解码约束：is_r_type * (opcode - 0x33) ≠ 0）"
+        );
+    }
+
+    /// A6 反例 (2)：funct3 与 indicator 不匹配 → prove 失败。
+    ///
+    /// ADD x1, x2, x3 的 funct3 = 0。
+    /// 篡改 InstrBitsByte1[4] 从 0→1（funct3 bit 0 翻转），使 funct3 变为 1（SLL 的 funct3），
+    /// 同时更新 InstrWord[1] 保持位分解一致性。
+    ///
+    /// A6 解码约束：`(IS_ADD + IS_SUB + IS_MUL) * funct3` = 1 * 1 ≠ 0 → prove 失败。
+    /// 无 A6 时 funct3 无约束，恶意 prover 可伪造 funct3 绕过指令区分。
+    #[test]
+    fn test_a6_funct3_indicator_mismatch_soundness() {
+        use crate::stwo_backend::column_layout_v2::{
+            COL_INSTR_BITS_BYTE1_BASE, COL_INSTR_WORD_BASE,
+        };
+
+        // ADD x1, x2, x3：x2=100, x3=200, x1=300
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 200;
+        let mut post = prev;
+        post[1] = 300;
+        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // ADD encode = 0x003100B3 → InstrWord[1] = 0x00 = 00000000
+        //   funct3 = bits[4..6] = 000 = 0
+        // 篡改：翻转 bit 4（InstrBitsByte1[4]）从 0→1
+        //   新 bits = [0,0,0,0,1,0,0,0] → funct3 = 001 = 1, InstrWord[1] = 0x10
+        trace.cols[COL_INSTR_BITS_BYTE1_BASE + 4][0] = M31::from(1u32);
+        trace.cols[COL_INSTR_WORD_BASE + 1][0] = M31::from(0x10u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 funct3（0→1）但保持 IS_ADD=1 应导致 prove 失败 \
+            （A6 解码约束：(IS_ADD+IS_SUB+IS_MUL) * funct3 ≠ 0）"
+        );
+    }
+
+    /// A6 反例 (3)：funct7 与 indicator 不匹配 → prove 失败。
+    ///
+    /// ADD x1, x2, x3 的 funct7 = 0。
+    /// 篡改 InstrBitsByte3[1] 从 0→1（funct7 bit 0 翻转），使 funct7 变为 1（M 扩展），
+    /// 同时更新 InstrWord[3] 保持位分解一致性。
+    ///
+    /// A6 解码约束：`is_r_base * funct7` = 1 * 1 ≠ 0 → prove 失败
+    /// （ADD 在 is_r_base 中，funct7 应为 0，但被篡改为 1 = M 扩展标记）。
+    #[test]
+    fn test_a6_funct7_indicator_mismatch_soundness() {
+        use crate::stwo_backend::column_layout_v2::{
+            COL_INSTR_BITS_BYTE3_BASE, COL_INSTR_WORD_BASE,
+        };
+
+        // ADD x1, x2, x3：x2=100, x3=200, x1=300
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 200;
+        let mut post = prev;
+        post[1] = 300;
+        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // ADD encode = 0x003100B3 → InstrWord[3] = 0x00 = 00000000
+        //   funct7 = bits[1..7] = 0000000 = 0
+        // 篡改：翻转 bit 1（InstrBitsByte3[1]）从 0→1
+        //   新 bits = [0,1,0,0,0,0,0,0] → funct7 = 0000001 = 1, InstrWord[3] = 0x02
+        trace.cols[COL_INSTR_BITS_BYTE3_BASE + 1][0] = M31::from(1u32);
+        trace.cols[COL_INSTR_WORD_BASE + 3][0] = M31::from(0x02u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 funct7（0→1）但保持 IS_ADD=1 应导致 prove 失败 \
+            （A6 解码约束：is_r_base * funct7 ≠ 0，ADD 的 funct7 应为 0）"
+        );
+    }
+
+    /// A6 正例回归：InstrWord/InstrBits 与 indicator 一致 → prove 成功。
+    ///
+    /// 验证 A6 约束不会因正确的 trace 而误报。使用 step_to_m31_row 自动生成
+    /// 含正确 A6 列的 trace，prove 应成功。
+    #[test]
+    fn test_a6_decode_constraint_roundtrip() {
+        // ADD x1, x2, x3：x2=100, x3=200, x1=300
+        let mut prev = zero_registers();
+        prev[2] = 100;
+        prev[3] = 200;
+        let mut post = prev;
+        post[1] = 300;
+        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let trace = builder.finalize();
+
+        // A6 约束应满足（InstrWord/InstrBits 与 indicator 一致）
+        let proof = prove_cpu_trace(&trace).expect("prove 失败：A6 约束应满足（正例）");
+        verify_cpu_proof(proof, trace.log_size).expect("verify 失败");
+    }
+
+    // ===== A1/A4 修复反例测试（v3.9，Phase 4）=====
+
+    /// A1 反例 (1)：JALR 行 HelperA 伪造（≠ rs1 + imm）→ prove 失败。
+    ///
+    /// JALR x1, x2, 4（x2=0）：target = (0+4)&!1 = 4，HelperA = 4。
+    /// 篡改：HelperA[0] 4→6（同时更新 PcNext[0] 和 HelperA_half 保持其他约束成立）。
+    /// A4 通过（6 = 2×3），PcNext=HelperA 通过，但 A1 binality(x) 失败：
+    ///   x = 0 + 4 - 6 - 0 = -2，x*(x-1) = 6 ≠ 0
+    #[test]
+    fn test_a1_jalr_helper_a_forgery_soundness() {
+        use crate::stwo_backend::column_layout_v2::{
+            COL_HELPER_A_BASE, COL_HELPER_A_HALF, COL_PC_NEXT_BASE,
+        };
+
+        // JALR x1, x2, 4（x2=0，target=4，rd=pc+4=4）
+        let mut prev = zero_registers();
+        prev[2] = 0;
+        let mut post = prev;
+        post[1] = 4;
+        let step = make_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：HelperA[0] 4→6，PcNext[0] 4→6，HelperA_half 2→3
+        // A4 通过（6 = 2×3），PcNext=HelperA 通过，A1 失败（6 ≠ 0+4=4）
+        trace.cols[COL_HELPER_A_BASE][0] = M31::from(6u32);
+        trace.cols[COL_PC_NEXT_BASE][0] = M31::from(6u32);
+        trace.cols[COL_HELPER_A_HALF][0] = M31::from(3u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 JALR HelperA（4→6，保持 A4 和 PcNext=HelperA 一致）应导致 prove 失败 \
+            （A1 约束：x = ValueB_low + Imm_low - HelperA_low - 65536*carry = 0+4-6-0 = -2，\
+            x*(x-1) = 6 ≠ 0）"
+        );
+    }
+
+    /// A4 反例：JALR 行 HelperA_half 伪造（HelperA[0] ≠ 2×HelperA_half）→ prove 失败。
+    ///
+    /// JALR x1, x2, 4（x2=0）：target = 4，HelperA = 4，HelperA_half = 2。
+    /// 篡改：仅改 HelperA_half 2→3（HelperA 保持 4 不变）。
+    /// A1 通过（HelperA=4 正确），但 A4 失败：4 - 2×3 = -2 ≠ 0。
+    #[test]
+    fn test_a4_jalr_helper_a_half_forgery_soundness() {
+        use crate::stwo_backend::column_layout_v2::COL_HELPER_A_HALF;
+
+        // JALR x1, x2, 4（x2=0，target=4，rd=pc+4=4）
+        let mut prev = zero_registers();
+        prev[2] = 0;
+        let mut post = prev;
+        post[1] = 4;
+        let step = make_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：仅改 HelperA_half 2→3（HelperA 保持 4 不变）
+        // A1 通过（HelperA=4 正确，x=0），A4 失败（4 - 2×3 = -2 ≠ 0）
+        trace.cols[COL_HELPER_A_HALF][0] = M31::from(3u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 JALR HelperA_half（2→3，HelperA 保持 4）应导致 prove 失败 \
+            （A4 约束：HelperA[0] - 2×HelperA_half = 4 - 6 = -2 ≠ 0）"
+        );
+    }
+
+    /// A1 反例 (2)：JALR 行 HelperA 伪造为奇数（A4 同时失败）→ prove 失败。
+    ///
+    /// JALR x1, x2, 4（x2=0）：target = 4，HelperA = 4。
+    /// 篡改：HelperA[0] 4→5（奇数），PcNext[0] 4→5。
+    /// A4 失败（5 为奇数，无法 = 2×HelperA_half），A1 也失败。
+    /// 验证即使恶意 prover 试图绕过 & !1，A4 约束仍能捕获。
+    #[test]
+    fn test_a4_jalr_odd_helper_a_soundness() {
+        use crate::stwo_backend::column_layout_v2::{
+            COL_HELPER_A_BASE, COL_PC_NEXT_BASE,
+        };
+
+        // JALR x1, x2, 4（x2=0，target=4，rd=pc+4=4）
+        let mut prev = zero_registers();
+        prev[2] = 0;
+        let mut post = prev;
+        post[1] = 4;
+        let step = make_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：HelperA[0] 4→5（奇数），PcNext[0] 4→5
+        // A4 失败（5 为奇数，5 - 2×HelperA_half ≠ 0 对任意 HelperA_half）
+        trace.cols[COL_HELPER_A_BASE][0] = M31::from(5u32);
+        trace.cols[COL_PC_NEXT_BASE][0] = M31::from(5u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 JALR HelperA[0] 为奇数（4→5）应导致 prove 失败 \
+            （A4 约束：5 - 2×HelperA_half ≠ 0，奇数无法等于 2×整数）"
+        );
+    }
+
+    /// A1 反例 (3)：JAL 行 HelperA 伪造（≠ pc + imm）→ prove 失败。
+    ///
+    /// JAL x1, 16（target = pc + 16 = 16，HelperA = 16）。
+    /// 篡改：HelperA[0] 16→20，PcNext[0] 16→20。
+    /// A1 Group 2 约束失败：HelperA_low ≠ Pc_low + Imm_low。
+    #[test]
+    fn test_a1_jal_helper_a_forgery_soundness() {
+        use crate::stwo_backend::column_layout_v2::{
+            COL_HELPER_A_BASE, COL_PC_NEXT_BASE,
+        };
+
+        // JAL x1, 16（target = 0 + 16 = 16，rd = pc + 4 = 4）
+        let prev = zero_registers();
+        let mut post = prev;
+        post[1] = 4;
+        let step = make_step(0, Instruction::Jal { rd: 1, imm: 16 }, post);
+        let row = step_to_m31_row(&step, &prev);
+
+        let mut builder = TraceBuilder::new(10);
+        builder.fill_row(&row);
+        builder.fill_padding_to_full();
+        let mut trace = builder.finalize();
+
+        // 篡改：HelperA[0] 16→20，PcNext[0] 16→20
+        // PcNext=HelperA 通过，但 A1 Group 2 失败（20 ≠ 0 + 16 = 16）
+        trace.cols[COL_HELPER_A_BASE][0] = M31::from(20u32);
+        trace.cols[COL_PC_NEXT_BASE][0] = M31::from(20u32);
+
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "篡改 JAL HelperA（16→20，保持 PcNext=HelperA 一致）应导致 prove 失败 \
+            （A1 约束：HelperA_low - Pc_low - Imm_low + 65536*carry = 20-0-16+0 = 4 ≠ 0）"
+        );
+    }
+
+    /// A1/A4 正例：JALR 单步 prove/verify roundtrip（v3.9 约束满足）。
+    ///
+    /// 验证新增 A1/A4 约束不会破坏合法 JALR trace 的 prove/verify。
+    #[test]
+    fn test_a1_a4_jalr_roundtrip() {
+        // JALR x1, x2, 4（x2=0，target=4，rd=pc+4=4）
+        let mut prev = zero_registers();
+        prev[2] = 0;
+        let mut post = prev;
+        post[1] = 4;
+        prove_verify_single_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, &prev, post);
+    }
+
+    /// A1 正例：JAL 单步 prove/verify roundtrip（v3.9 约束满足）。
+    #[test]
+    fn test_a1_jal_roundtrip() {
+        // JAL x1, 16（target = 0 + 16 = 16，rd = pc + 4 = 4）
+        let prev = zero_registers();
+        let mut post = prev;
+        post[1] = 4;
+        prove_verify_single_step(0, Instruction::Jal { rd: 1, imm: 16 }, &prev, post);
+    }
+
+    /// A1 正例：LUI 单步 prove/verify roundtrip（v3.9 约束满足）。
+    #[test]
+    fn test_a1_lui_roundtrip() {
+        // LUI x1, 0x1000（imm 字段存已左移 12 位的完整值 0x1000_0000，rd = 0x1000_0000）
+        let prev = zero_registers();
+        let mut post = prev;
+        post[1] = 0x1000_0000;
+        prove_verify_single_step(0, Instruction::Lui { rd: 1, imm: 0x1000_0000 }, &prev, post);
     }
 }

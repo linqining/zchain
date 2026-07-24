@@ -355,17 +355,242 @@ pub const COL_LOAD_BYTE_GATE: usize = 132;
 /// 独立列（非 M 扩展复用），非 Load 行恒为 0（由 trace 填充保证）。
 pub const COL_LOAD_HALF_GATE: usize = 133;
 
-/// v3.6 列布局总列数（134 列）。
+// ===========================================================================
+// A3 修复：符号位绑定 witness 列（col 134-149，16 列，v3.7）
+// ===========================================================================
+// sign_a(col 114)/sign_b(col 115) 原仅约束 binality，未绑定到操作数符号位（bit 31）。
+// 新增 SignABits/SignBBits 对 ValueB[3]/ValueC[3] 做 8-bit 位分解，
+// 约束 sign_a = SignABits[7]、sign_b = SignBBits[7]。
+//
+// 互斥性：仅在使用 sign_a/sign_b 的指令行（SLT/SLTI/BLT/BGE/MULH/MULHSU/DIV/REM）非 0，
+// 这些指令与 Load 行 one-hot 互斥，与 MULHU/MUL（不使用 sign_a/sign_b）也互斥，安全。
+
+/// col 134-141：SignABits[0..8] — ValueB[3]（rs1 高字节）的 8-bit 位分解。
 ///
-/// 134 列 = v3.5(132) + V7 预计算 gate(2)
-///   v3.5 132 = v3.4 基础(81) + M 扩展算术 witness(51)
-///   基础 81 = PC(8) + ArithFlag(2) + ValueAEff/B/C(12) + Indicator(43)
-///           + HelperA(4) + HelperB(4) + Taken(1) + MemAddr(4) + SyscallId(1) + PcCarry(2)
-///   M 扩展 51 = CarryLo(7) + CarryHi0(7) + CarryHi1(7) + MulHigh(4) + MulLow(4)
-///             + AbsA(4) + AbsB(4) + SignA(1) + SignB(1) + LowNonzero(1)
-///             + DivQuot(4) + DivRem(4) + DivIsSpecial(1) + DivSignQ(1) + DivSignR(1)
-///   V7 gate 2 = LoadByteGate(1) + LoadHalfGate(1)
-pub const NUM_COLUMNS: usize = 134;
+/// - SignABits[7] = rs1 符号位（bit 31），与 sign_a 绑定
+/// - 仅使用 sign_a 的指令行非 0（SLT/SLTI/BLT/BGE/MULH/MULHSU/DIV/REM）
+/// - 其他行为 0
+pub const COL_SIGN_A_BITS_BASE: usize = 134;
+
+/// SignABits 的 bit 数量。
+pub const COL_SIGN_A_BITS_COUNT: usize = 8;
+
+/// col 142-149：SignBBits[0..8] — ValueC[3]（rs2 高字节）的 8-bit 位分解。
+///
+/// - SignBBits[7] = rs2 符号位（bit 31），与 sign_b 绑定
+/// - 仅使用 sign_b 的指令行非 0
+/// - 其他行为 0
+pub const COL_SIGN_B_BITS_BASE: usize = 142;
+
+/// SignBBits 的 bit 数量。
+pub const COL_SIGN_B_BITS_COUNT: usize = 8;
+
+// ===========================================================================
+// A6 修复：指令字列 + 解码约束 witness 列（col 150-181，32 列，v3.8）
+// ===========================================================================
+// 无指令字列时，indicator one-hot 完全信任 trace generator。
+// 恶意 prover 可伪造 indicator 与实际指令字不匹配。
+// 新增 InstrWord 存储原始 32-bit 指令字，InstrBits 做 byte 位分解，
+// 解码约束绑定 indicator 与 opcode/funct3/funct7。
+// ImmField 存储解码后立即数（供 Phase 4 A1 HelperA 约束使用）。
+
+/// col 150-153：InstrWord[0..3] — 原始 32-bit 指令字（4×8-bit limb，little-endian）。
+///
+/// - InstrWord[0] = bits 0-7（含 opcode bits 0-6 + rd[0] bit 7）
+/// - InstrWord[1] = bits 8-15（含 rd[1-4] + funct3 + rs1[0]）
+/// - InstrWord[2] = bits 16-23（含 rs1[1-4] + rs2[0-3]）
+/// - InstrWord[3] = bits 24-31（含 rs2[4] + funct7 bits 1-7）
+/// 所有行非 0（padding 行 = 0）。
+pub const COL_INSTR_WORD_BASE: usize = 150;
+
+/// col 154-161：InstrBitsByte0[0..8] — InstrWord[0] 的 8-bit 位分解。
+///
+/// - bits 0-6 = opcode，bits 7 = rd[0]
+/// - 用于提取 opcode 约束 indicator
+/// - binality 约束 + 位分解约束（InstrWord[0] = Σ bits[i]·2^i）
+pub const COL_INSTR_BITS_BYTE0_BASE: usize = 154;
+
+/// col 162-169：InstrBitsByte1[0..8] — InstrWord[1] 的 8-bit 位分解。
+///
+/// - bits 0-3 = rd[1-4]，bits 4-6 = funct3，bit 7 = rs1[0]
+/// - 用于提取 funct3 约束 indicator
+pub const COL_INSTR_BITS_BYTE1_BASE: usize = 162;
+
+/// col 170-177：InstrBitsByte3[0..8] — InstrWord[3] 的 8-bit 位分解。
+///
+/// - bit 0 = rs2[4]，bits 1-7 = funct7
+/// - 用于提取 funct7 约束 indicator（R-type 指令）
+pub const COL_INSTR_BITS_BYTE3_BASE: usize = 170;
+
+/// InstrBits 的 bit 数量（每 byte 8 bit）。
+pub const COL_INSTR_BITS_COUNT: usize = 8;
+
+/// col 178-181：ImmField[0..3] — 解码后立即数（4×8-bit limb）。
+///
+/// 存储 `Instruction::immediate_value()` 的结果：
+/// - LUI/AUIPC：imm（已左移 12 位）
+/// - JAL/JALR/Branch/Load/Store/OP-IMM：imm（已符号扩展）
+/// - SLLI/SRLI/SRAI：shamt
+/// - R-type/FENCE/ECALL/EBREAK：0
+/// Phase 4 A1 修复将约束 HelperA = rs1/pc + ImmField。
+pub const COL_IMM_FIELD_BASE: usize = 178;
+
+// ===========================================================================
+// A1/A4 修复：HelperA 加法 carry + JALR 最低位清零 witness 列（col 182-184，3 列，v3.9）
+// ===========================================================================
+// HelperA 在 LUI/JAL/JALR/Branch/AUIPC/Load/Store 行存预计算值，
+// AIR 仅约束 MemAddr/PcNext/rd_eff = HelperA，但 HelperA 本身（rs1+imm / pc+imm）无约束。
+// A1 修复：新增 HelperA carry 列，约束 HelperA = rs1/pc + ImmField（16-bit carry 加法）。
+// A4 修复：新增 HelperA_half 列，约束 JALR 行 HelperA[0] = 2*HelperA_half（最低位清零）。
+
+/// col 182-183：HelperA carry（2 列，16-bit 边界进位）。
+///
+/// 用于 A1 修复的 HelperA = rs1/pc + ImmField 加法约束：
+/// - carry0：低 16 位加法进位（∈ {0, 1}）
+/// - carry1：高 16 位加法进位（∈ {0, 1}）
+///
+/// 使用指令（one-hot 互斥，可共享 carry 列）：
+/// - Load/Store/JALR：HelperA = ValueB + ImmField（rs1 + imm）
+/// - JAL/AUIPC/Branch taken：HelperA = Pc + ImmField（pc + imm）
+/// - LUI：HelperA = ImmField（无 carry，直接等式）
+///
+/// 与 COL_CARRY_FLAG_BASE(8-9) 和 COL_PC_CARRY_FLAG_BASE(79-80) 互斥：
+/// - COL_CARRY_FLAG_BASE 用于 ADD/SUB/Branch diff/SLT（与 HelperA 指令 one-hot 互斥，但 Branch 同时使用两者）
+/// - COL_PC_CARRY_FLAG_BASE 用于 PcNext=Pc+4/rd_eff=Pc+4（JAL/JALR 同时使用两者）
+/// 故需独立 carry 列。
+///
+/// binality 约束无条件执行（不 gating），因非 HelperA 行 carry=0（binary）✓。
+pub const COL_HELPER_A_CARRY_BASE: usize = 182;
+
+/// col 184：HelperA_half — JALR 行 HelperA[0] / 2（A4 修复 witness）。
+///
+/// JALR 目标 = (rs1 + imm) & !1，最低位清零。HelperA[0] 必须为偶数。
+/// HelperA_half = HelperA[0] / 2，RangeCheck 确保 ∈ [0, 127]。
+///
+/// 约束（A4，degree 2）：
+/// - IS_JALR * (HelperA[0] - 2 * HelperA_half) = 0
+///
+/// A1 JALR 低 16 位约束（无需 bit0 witness，用 binality 隐式推导，degree 3）：
+/// - 令 x = ValueB_low16 + ImmField_low16 - HelperA_low16 - 65536*carry0
+/// - IS_JALR * x * (x - 1) = 0（x = bit0，由 HelperA[0] 偶数 + 约束唯一确定）
+///
+/// 设计理由：原 XOR 公式 bit0 = ValueB[0] + ImmField[0] - 2*ValueB[0]*ImmField[0]
+/// 仅对单 bit 成立，对 8-bit limb 错误。改用 binality(x) 隐式约束 bit0 ∈ {0,1}，
+/// 配合 A4（HelperA[0] 偶数）唯一确定 bit0 = (ValueB+ImmField) mod 2。
+///
+/// 仅 JALR 行非 0，其他行为 0。需 RangeCheck 确保 ∈ [0, 127] ⊂ [0, 255]。
+pub const COL_HELPER_A_HALF: usize = 184;
+
+/// v3.9 列布局总列数（185 列）。
+///
+/// 185 列 = v3.8(182) + A1/A4 HelperA carry(2) + HelperA_half(1)
+pub const NUM_COLUMNS: usize = 185;
+
+/// RangeCheck 覆盖的全部 8-bit limb 列索引（v3.9 A8+A6+A1/A4 修复，64 列）。
+///
+/// v3.6 原 24 列：PC(4) + PcNext(4) + ValueAEff(4) + ValueB(4) + ValueC(4) + MemAddr(4)
+/// v3.8 A8 新增 31 列：MulCarryLo(7) + MulHigh(4) + AbsA(4) + AbsB(4)
+///                     + DivQuot(4) + DivRem(4) + MulLow(4)
+/// v3.8 A6 新增 8 列：InstrWord(4) + ImmField(4)
+/// v3.9 A1/A4 新增 1 列：HelperA_half(1)
+///
+/// **注意**：
+/// - MulCarryLo(81-87) 在 Load 行复用为 IS_LOAD_BYTE/HALF/SIGN（binary），值 ∈ {0,1} ⊂ [0,255] ✓
+/// - carry_hi0(88-94)/carry_hi1(95-101) 已有通用 binality 约束（无 gating），无需 RangeCheck
+/// - SignABits(134-141)/SignBBits(142-149) 已有 A3 binality 约束（gated），无需 RangeCheck
+/// - InstrBits(154-177) 已有 A6 binality 约束（gated），无需 RangeCheck
+/// - HelperA_carry(182-183) 有无条件 binality 约束，无需 RangeCheck
+/// - HelperA_half(184) 需 RangeCheck 确保 ∈ [0, 127] ⊂ [0, 255]
+///
+/// 此常量须与以下位置的 RANGE_CHECK_COLS 保持一致：
+/// - `cpu_air.rs` CpuAir::evaluate（AIR 约束侧，发送 claim）
+/// - `prover.rs` gen_cpu_full_interaction_trace（3 组件 prover）
+/// - `prover.rs` gen_cpu_range_only_interaction_trace（2 组件 prover）
+/// - `trace_native.rs` RANGE_CHECK_LIMB_COLS（RangeCheck yield 计数）
+pub const RANGE_CHECK_COL_INDICES: [usize; 64] = {
+    let mut arr = [0usize; 64];
+    // PC (0-3)
+    arr[0] = COL_PC_BASE;
+    arr[1] = COL_PC_BASE + 1;
+    arr[2] = COL_PC_BASE + 2;
+    arr[3] = COL_PC_BASE + 3;
+    // PcNext (4-7)
+    arr[4] = COL_PC_NEXT_BASE;
+    arr[5] = COL_PC_NEXT_BASE + 1;
+    arr[6] = COL_PC_NEXT_BASE + 2;
+    arr[7] = COL_PC_NEXT_BASE + 3;
+    // ValueAEff (10-13)
+    arr[8] = COL_VALUE_A_EFF_BASE;
+    arr[9] = COL_VALUE_A_EFF_BASE + 1;
+    arr[10] = COL_VALUE_A_EFF_BASE + 2;
+    arr[11] = COL_VALUE_A_EFF_BASE + 3;
+    // ValueB (14-17)
+    arr[12] = COL_VALUE_B_BASE;
+    arr[13] = COL_VALUE_B_BASE + 1;
+    arr[14] = COL_VALUE_B_BASE + 2;
+    arr[15] = COL_VALUE_B_BASE + 3;
+    // ValueC (18-21)
+    arr[16] = COL_VALUE_C_BASE;
+    arr[17] = COL_VALUE_C_BASE + 1;
+    arr[18] = COL_VALUE_C_BASE + 2;
+    arr[19] = COL_VALUE_C_BASE + 3;
+    // MemAddr (74-77)
+    arr[20] = COL_MEM_ADDR_BASE;
+    arr[21] = COL_MEM_ADDR_BASE + 1;
+    arr[22] = COL_MEM_ADDR_BASE + 2;
+    arr[23] = COL_MEM_ADDR_BASE + 3;
+    // MulCarryLo (81-87, 7 列) — A8 新增（A5 修复：carry_lo ∈ [0,255] 不再信任）
+    arr[24] = COL_MUL_CARRY_LO_BASE;
+    arr[25] = COL_MUL_CARRY_LO_BASE + 1;
+    arr[26] = COL_MUL_CARRY_LO_BASE + 2;
+    arr[27] = COL_MUL_CARRY_LO_BASE + 3;
+    arr[28] = COL_MUL_CARRY_LO_BASE + 4;
+    arr[29] = COL_MUL_CARRY_LO_BASE + 5;
+    arr[30] = COL_MUL_CARRY_LO_BASE + 6;
+    // MulHigh (102-105, 4 列) — A8 新增
+    arr[31] = COL_MUL_HIGH_BASE;
+    arr[32] = COL_MUL_HIGH_BASE + 1;
+    arr[33] = COL_MUL_HIGH_BASE + 2;
+    arr[34] = COL_MUL_HIGH_BASE + 3;
+    // AbsA (106-109, 4 列) — A8 新增
+    arr[35] = COL_ABS_A_BASE;
+    arr[36] = COL_ABS_A_BASE + 1;
+    arr[37] = COL_ABS_A_BASE + 2;
+    arr[38] = COL_ABS_A_BASE + 3;
+    // AbsB (110-113, 4 列) — A8 新增
+    arr[39] = COL_ABS_B_BASE;
+    arr[40] = COL_ABS_B_BASE + 1;
+    arr[41] = COL_ABS_B_BASE + 2;
+    arr[42] = COL_ABS_B_BASE + 3;
+    // DivQuot (117-120, 4 列) — A8 新增
+    arr[43] = COL_DIV_QUOT_BASE;
+    arr[44] = COL_DIV_QUOT_BASE + 1;
+    arr[45] = COL_DIV_QUOT_BASE + 2;
+    arr[46] = COL_DIV_QUOT_BASE + 3;
+    // DivRem (121-124, 4 列) — A8 新增
+    arr[47] = COL_DIV_REM_BASE;
+    arr[48] = COL_DIV_REM_BASE + 1;
+    arr[49] = COL_DIV_REM_BASE + 2;
+    arr[50] = COL_DIV_REM_BASE + 3;
+    // MulLow (128-131, 4 列) — A8 新增
+    arr[51] = COL_MUL_LOW_BASE;
+    arr[52] = COL_MUL_LOW_BASE + 1;
+    arr[53] = COL_MUL_LOW_BASE + 2;
+    arr[54] = COL_MUL_LOW_BASE + 3;
+    // InstrWord (150-153, 4 列) — A6 新增
+    arr[55] = COL_INSTR_WORD_BASE;
+    arr[56] = COL_INSTR_WORD_BASE + 1;
+    arr[57] = COL_INSTR_WORD_BASE + 2;
+    arr[58] = COL_INSTR_WORD_BASE + 3;
+    // ImmField (178-181, 4 列) — A6 新增
+    arr[59] = COL_IMM_FIELD_BASE;
+    arr[60] = COL_IMM_FIELD_BASE + 1;
+    arr[61] = COL_IMM_FIELD_BASE + 2;
+    arr[62] = COL_IMM_FIELD_BASE + 3;
+    // HelperA_half (184, 1 列) — A4 新增（JALR 最低位清零 witness ∈ [0, 127]）
+    arr[63] = COL_HELPER_A_HALF;
+    arr
+};
 
 /// Phase 4 ECALL dispatch 列数量（v3 仅 1 列 SyscallId）。
 pub const ECALL_DISPATCH_NUM_COLUMNS: usize = 1;
@@ -395,8 +620,8 @@ mod tests {
     fn test_num_columns() {
         assert_eq!(
             NUM_COLUMNS,
-            134,
-            "v3.6 列布局应为 134 列（v3.5 132 列 + V7 预计算 gate 2 列）"
+            185,
+            "v3.9 列布局应为 185 列（v3.8 182 列 + A1/A4 HelperA carry 2 + HelperA_half 1）"
         );
     }
 
@@ -408,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_column_ranges_no_overlap() {
-        let ranges: [(usize, usize); 23] = [
+        let ranges: [(usize, usize); 32] = [
             (COL_PC_BASE, 4),                     // 0-3
             (COL_PC_NEXT_BASE, 4),                // 4-7
             (COL_CARRY_FLAG_BASE, 2),             // 8-9（合并 carry/borrow）
@@ -432,6 +657,15 @@ mod tests {
             (COL_MUL_LOW_BASE, 4),                 // 128-131（MulLow c₀..c₃）
             (COL_LOAD_BYTE_GATE, 1),               // 132（V7 预计算 gate）
             (COL_LOAD_HALF_GATE, 1),               // 133（V7 预计算 gate）
+            (COL_SIGN_A_BITS_BASE, COL_SIGN_A_BITS_COUNT), // 134-141（A3 符号位绑定）
+            (COL_SIGN_B_BITS_BASE, COL_SIGN_B_BITS_COUNT), // 142-149（A3 符号位绑定）
+            (COL_INSTR_WORD_BASE, WORD_LIMB_COUNT),             // 150-153（A6 指令字）
+            (COL_INSTR_BITS_BYTE0_BASE, COL_INSTR_BITS_COUNT),  // 154-161（A6 位分解 byte0）
+            (COL_INSTR_BITS_BYTE1_BASE, COL_INSTR_BITS_COUNT),  // 162-169（A6 位分解 byte1）
+            (COL_INSTR_BITS_BYTE3_BASE, COL_INSTR_BITS_COUNT),  // 170-177（A6 位分解 byte3）
+            (COL_IMM_FIELD_BASE, WORD_LIMB_COUNT),              // 178-181（A6 立即数）
+            (COL_HELPER_A_CARRY_BASE, 2),                        // 182-183（A1 HelperA carry）
+            (COL_HELPER_A_HALF, 1),                              // 184（A4 HelperA_half）
         ];
         let mut all_cols = HashSet::new();
         for (base, count) in &ranges {
@@ -538,8 +772,25 @@ mod tests {
         // V7 预计算 gate 列（132-133，独立新列，非 M 扩展复用）
         assert_eq!(COL_LOAD_BYTE_GATE, 132);
         assert_eq!(COL_LOAD_HALF_GATE, 133);
-        // v3.6 总列数 = M 扩展(132) + V7 gate(2) = 134
-        assert_eq!(NUM_COLUMNS, 134, "v3.6 总列数 = 134");
+        // A3 符号位绑定列（134-149，v3.7 新增）
+        assert_eq!(COL_SIGN_A_BITS_BASE, 134);
+        assert_eq!(COL_SIGN_B_BITS_BASE, 142);
+        assert_eq!(COL_SIGN_A_BITS_COUNT, 8);
+        assert_eq!(COL_SIGN_B_BITS_COUNT, 8);
+        // A6 指令字解码列（150-181，v3.8 新增）
+        assert_eq!(COL_INSTR_WORD_BASE, 150, "A6 InstrWord 起始 col 150");
+        assert_eq!(COL_INSTR_BITS_BYTE0_BASE, 154, "A6 InstrBitsByte0 起始 col 154");
+        assert_eq!(COL_INSTR_BITS_BYTE1_BASE, 162, "A6 InstrBitsByte1 起始 col 162");
+        assert_eq!(COL_INSTR_BITS_BYTE3_BASE, 170, "A6 InstrBitsByte3 起始 col 170");
+        assert_eq!(COL_INSTR_BITS_COUNT, 8, "A6 每 byte 8 bit");
+        assert_eq!(COL_IMM_FIELD_BASE, 178, "A6 ImmField 起始 col 178");
+        // A1/A4 HelperA carry + half 列（182-184，v3.9 新增）
+        assert_eq!(COL_HELPER_A_CARRY_BASE, 182, "A1 HelperA carry 起始 col 182");
+        assert_eq!(COL_HELPER_A_HALF, 184, "A4 HelperA_half col 184");
+        // v3.9 总列数 = v3.8(182) + A1/A4(3) = 185
+        assert_eq!(NUM_COLUMNS, 185, "v3.9 总列数 = 185");
+        // A1/A4 列结束于 185（最后一个列索引 = 184）
+        assert_eq!(COL_HELPER_A_HALF + 1, NUM_COLUMNS, "A1/A4 列结束于 185");
     }
 
     #[test]

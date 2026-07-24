@@ -24,8 +24,9 @@ use super::column_layout_v2::{
     COL_ABS_A_BASE, COL_ABS_B_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE, COL_DIV_REM_BASE,
     COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_LOW_NONZERO, COL_MEM_ADDR_BASE, COL_MUL_CARRY_HI0_BASE,
     COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE, COL_MUL_LOW_BASE,
-    COL_PC_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
-    COL_VALUE_C_BASE, IS_PADDING, NUM_COLUMNS, WORD_LIMB_COUNT,
+    COL_PC_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B,
+    COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE, COL_VALUE_C_BASE, IS_PADDING, NUM_COLUMNS,
+    RANGE_CHECK_COL_INDICES, WORD_LIMB_COUNT,
 };
 
 // ===========================================================================
@@ -865,6 +866,62 @@ pub fn step_to_m31_row(
         _ => {}
     }
 
+    // ===== A3 修复：填充 SignABits/SignBBits（v3.7）=====
+    // 仅在使用 sign_a/sign_b 的指令行（g_sign 指令）填充，其他行保持 0（row 预初始化为 0）。
+    // SignABits = ValueB[3]（rs1 高字节）的 8-bit 分解，SignABits[7] = sign_a（bit 31）
+    // SignBBits = ValueC[3]（rs2 高字节）的 8-bit 分解，SignBBits[7] = sign_b（bit 31）
+    // 与 cpu_air.rs A3 约束配合：g_sign = is_slt_group + is_signed_branch + g2 + g3
+    let uses_sign = matches!(
+        &step.instruction,
+        Instruction::Slt { .. } | Instruction::Slti { .. }
+        | Instruction::Blt { .. } | Instruction::Bge { .. }
+        | Instruction::Mulh { .. } | Instruction::Mulhsu { .. }
+        | Instruction::Div { .. } | Instruction::Divu { .. }
+        | Instruction::Rem { .. } | Instruction::Remu { .. }
+    );
+    if uses_sign {
+        fill_sign_bits(&mut row, COL_SIGN_A_BITS_BASE, value_b >> 24);
+        fill_sign_bits(&mut row, COL_SIGN_B_BITS_BASE, value_c >> 24);
+    }
+
+    // ===== A6 修复：填充 InstrWord/InstrBits/ImmField（v3.8）=====
+    // 绑定 indicator 与 opcode/funct3/funct7，防止恶意 prover 伪造 indicator。
+    // - InstrWord（col 150-153）：原始 32-bit 指令字的 4×8-bit limb（little-endian）
+    // - InstrBitsByte0（col 154-161）：InstrWord[0] 的 8-bit 位分解（含 opcode bits 0-6）
+    // - InstrBitsByte1（col 162-169）：InstrWord[1] 的 8-bit 位分解（含 funct3 bits 4-6）
+    // - InstrBitsByte3（col 170-177）：InstrWord[3] 的 8-bit 位分解（含 funct7 bits 1-7）
+    // - ImmField（col 178-181）：解码后立即数的 4×8-bit limb（供 Phase 4 A1 使用）
+    //
+    // 与 cpu_air.rs A6 约束配合：
+    //   - 位分解约束：InstrWord[k] = Σ InstrBitsByteK[i]·2^i（gated by is_non_padding）
+    //   - binality 约束：InstrBitsByteK[i]·(InstrBitsByteK[i]−1) = 0
+    //   - 解码约束：indicator × (opcode/funct3/funct7 − target) = 0
+    //
+    // padding 行（step.instruction 不存在）不会被调用本函数（trace 生成时仅对 real step 调用），
+    // 但若 padding 行通过其他路径填充，应保持全 0（row 已预初始化为 0）。
+    fill_a6_instr_columns(&mut row, &step.instruction);
+
+    // ----- A1/A4 修复：填充 HelperA carry + HelperA_half（v3.9）-----
+    // operand：Load/Store/JALR = ValueB（rs1），JAL/AUIPC/Branch = Pc，其他不影响（carry=0）
+    let operand_value: u32 = match &step.instruction {
+        Instruction::Lb { .. } | Instruction::Lh { .. } | Instruction::Lw { .. }
+        | Instruction::Lbu { .. } | Instruction::Lhu { .. }
+        | Instruction::Sb { .. } | Instruction::Sh { .. } | Instruction::Sw { .. }
+        | Instruction::Jalr { .. } => value_b,
+        Instruction::Jal { .. } | Instruction::Auipc { .. }
+        | Instruction::Beq { .. } | Instruction::Bne { .. }
+        | Instruction::Blt { .. } | Instruction::Bge { .. }
+        | Instruction::Bltu { .. } | Instruction::Bgeu { .. } => step.pc,
+        _ => 0,
+    };
+    fill_a1_a4_helper_columns(
+        &mut row,
+        &step.instruction,
+        helper_a_value,
+        operand_value,
+        imm_value,
+    );
+
     row
 }
 
@@ -874,6 +931,124 @@ fn fill_word(row: &mut [M31], base: usize, value: u32) {
     for i in 0..WORD_LIMB_COUNT {
         row[base + i] = limbs[i];
     }
+}
+
+/// 填充 8-bit 位分解到指定列起点（A3 修复，v3.7）。
+///
+/// 将 `byte` 的 8 个 bit 填入 `row[base..base+8]`，bit i 在 `base+i`。
+/// 用于 SignABits/SignBBits witness 填充，约束 sign_a = SignABits[7]（rs1 符号位）。
+fn fill_sign_bits(row: &mut [M31], base: usize, byte: u32) {
+    let b = byte & 0xFF;
+    for i in 0..8usize {
+        row[base + i] = M31::from((b >> i) & 1);
+    }
+}
+
+/// 填充 A6 指令字解码 witness 列（v3.8，公共接口供测试手动构造 trace 时调用）。
+///
+/// 将 `instruction` 编码为 32-bit 指令字，分解为 4×8-bit limb 存入 InstrWord，
+/// 对 byte0/byte1/byte3 做 8-bit 位分解存入 InstrBits，并将立即数存入 ImmField。
+///
+/// 手动构造 trace 行的测试须调用此函数，否则 A6 解码约束会因 InstrWord=0 而 fail。
+///
+/// # 参数
+/// - `row` — NUM_COLUMNS 长度的行缓冲（将被原地修改 col 150-181）
+/// - `instruction` — 当前行指令
+pub fn fill_a6_instr_columns(row: &mut [M31], instruction: &crate::isa::Instruction) {
+    use crate::stwo_backend::column_layout_v2::*;
+
+    let instr_word = instruction.encode();
+    let instr_bytes = instr_word.to_le_bytes();
+    // InstrWord[0..3]（4×8-bit limb）
+    for i in 0..WORD_LIMB_COUNT {
+        row[COL_INSTR_WORD_BASE + i] = M31::from(u32::from(instr_bytes[i]));
+    }
+    // InstrBits 位分解（仅 byte0/byte1/byte3，byte2 不被约束故不填充）
+    fill_sign_bits(row, COL_INSTR_BITS_BYTE0_BASE, u32::from(instr_bytes[0]));
+    fill_sign_bits(row, COL_INSTR_BITS_BYTE1_BASE, u32::from(instr_bytes[1]));
+    fill_sign_bits(row, COL_INSTR_BITS_BYTE3_BASE, u32::from(instr_bytes[3]));
+    // ImmField：解码后立即数（4×8-bit limb）
+    fill_word(row, COL_IMM_FIELD_BASE, instruction.immediate_value());
+}
+
+/// 填充 A1/A4 修复 witness 列（v3.9，公共接口供测试手动构造 trace 时调用）。
+///
+/// 填充 HelperA carry（col 182-183）和 HelperA_half（col 184）：
+/// - HelperA carry：16-bit 边界进位，用于 A1 约束 HelperA = operand + ImmField
+/// - HelperA_half：JALR 行 HelperA[0] / 2，用于 A4 约束 HelperA[0] 为偶数
+///
+/// # 参数
+/// - `row` — NUM_COLUMNS 长度的行缓冲（将被原地修改 col 182-184）
+/// - `instruction` — 当前行指令（决定 operand 类型和是否需 carry）
+/// - `helper_a_value` — HelperA 列已填充的值（用于推导 JALR 的 HelperA_half）
+/// - `operand_value` — 加法操作数（Load/Store/JALR=rs1 值，JAL/AUIPC/Branch=Pc）
+/// - `imm_value` — ImmField 列已填充的立即数
+///
+/// # 填充规则
+/// - Load/Store/JALR：carry = compute_carry(ValueB, ImmField)，JALR 额外填 HelperA_half
+/// - JAL/AUIPC/Branch：carry = compute_carry(Pc, ImmField)
+/// - LUI：carry = 0（HelperA = ImmField 直接等式，无加法）
+/// - 其他：carry = 0
+pub fn fill_a1_a4_helper_columns(
+    row: &mut [M31],
+    instruction: &crate::isa::Instruction,
+    helper_a_value: u32,
+    operand_value: u32,
+    imm_value: u32,
+) {
+    use crate::stwo_backend::column_layout_v2::*;
+    use crate::isa::Instruction;
+
+    let (carry0, carry1) = match instruction {
+        // Load/Store/JALR：HelperA = ValueB + ImmField（JALR 有 & !1 但不影响 carry）
+        Instruction::Lb { .. }
+        | Instruction::Lh { .. }
+        | Instruction::Lw { .. }
+        | Instruction::Lbu { .. }
+        | Instruction::Lhu { .. }
+        | Instruction::Sb { .. }
+        | Instruction::Sh { .. }
+        | Instruction::Sw { .. }
+        | Instruction::Jalr { .. } => compute_carry_16bit(operand_value, imm_value),
+        // JAL/AUIPC/Branch：HelperA = Pc + ImmField
+        Instruction::Jal { .. }
+        | Instruction::Auipc { .. }
+        | Instruction::Beq { .. }
+        | Instruction::Bne { .. }
+        | Instruction::Blt { .. }
+        | Instruction::Bge { .. }
+        | Instruction::Bltu { .. }
+        | Instruction::Bgeu { .. } => compute_carry_16bit(operand_value, imm_value),
+        // LUI/其他：无加法，carry = 0
+        _ => (0, 0),
+    };
+
+    row[COL_HELPER_A_CARRY_BASE] = M31::from(carry0);
+    row[COL_HELPER_A_CARRY_BASE + 1] = M31::from(carry1);
+
+    // A4：JALR 行填 HelperA_half = HelperA[0] / 2（HelperA[0] 必须为偶数）
+    let helper_a_half = match instruction {
+        Instruction::Jalr { .. } => (helper_a_value & 0xFF) / 2,
+        _ => 0,
+    };
+    row[COL_HELPER_A_HALF] = M31::from(helper_a_half);
+}
+
+/// 计算 32-bit 加法的 16-bit 边界 carry（a + b）。
+///
+/// 返回 (carry0, carry1)：
+/// - carry0：低 16 位进位（a_low16 + b_low16 >= 65536 ? 1 : 0）
+/// - carry1：高 16 位进位（a_high16 + b_high16 + carry0 >= 65536 ? 1 : 0）
+fn compute_carry_16bit(a: u32, b: u32) -> (u32, u32) {
+    let a_low = a & 0xFFFF;
+    let b_low = b & 0xFFFF;
+    let carry0 = if a_low + b_low >= 65536 { 1 } else { 0 };
+
+    let a_high = a >> 16;
+    let b_high = b >> 16;
+    let carry1 = if a_high + b_high + carry0 >= 65536 { 1 } else { 0 };
+
+    (carry0, carry1)
 }
 
 /// 计算下一条 PC 地址。
@@ -1795,30 +1970,20 @@ impl RangeCheckTrace {
     }
 }
 
-/// 需要范围检查的 24 个 limb 列索引（6 word × 4 limb）。
+/// 需要范围检查的 64 个 limb 列索引（v3.9 A8+A6+A1/A4 修复）。
 ///
-/// 与 `cpu_air.rs` 中 `RANGE_CHECK_COLS` 常量保持一致。
-const RANGE_CHECK_LIMB_COLS: [usize; 24] = [
-    // PC (0-3)
-    COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
-    // PcNext (4-7)
-    COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
-    // ValueAEff (10-13)
-    COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2,
-    COL_VALUE_A_EFF_BASE + 3,
-    // ValueB (14-17)
-    COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
-    // ValueC (18-21)
-    COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
-    // MemAddr (74-77)
-    COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
-];
+/// 与 `column_layout_v2.rs` 中 `RANGE_CHECK_COL_INDICES` 常量保持一致。
+/// 覆盖：PC/PcNext/ValueAEff/ValueB/ValueC/MemAddr（24 列）+
+/// MulCarryLo(7)/MulHigh(4)/AbsA(4)/AbsB(4)/DivQuot(4)/DivRem(4)/MulLow(4)（31 列）+
+/// InstrWord(4)/ImmField(4)（8 列，A6 新增）+
+/// HelperA_half(1)（1 列，A4 新增）。
+const RANGE_CHECK_LIMB_COLS: [usize; 64] = RANGE_CHECK_COL_INDICES;
 
 /// 从 CPU trace 生成 RangeCheck 原始 trace。
 ///
 /// # 算法
 /// 1. 初始化 `count[0..256] = 0`
-/// 2. 遍历 CPU trace 的所有非 padding 行（`IS_PADDING` col=0），对 24 个 limb 列读值 v，
+/// 2. 遍历 CPU trace 的所有非 padding 行（`IS_PADDING` col=0），对 64 个 limb 列读值 v，
 ///    若 v < 256 则 `count[v] += 1`（v ≥ 256 是 bug，合法 trace 不会出现；若出现则跳过，
 ///    后续 logup soundness check 会因不平衡而失败）
 /// 3. 填充 12 列：
@@ -1828,7 +1993,7 @@ const RANGE_CHECK_LIMB_COLS: [usize; 24] = [
 ///      is_first=0, bit0-bit7=0
 ///
 /// # 参数
-/// - `cpu_trace` — CPU 原始 trace（132 列 × 2^log_size 行）
+/// - `cpu_trace` — CPU 原始 trace（185 列 × 2^log_size 行）
 ///
 /// # 返回
 /// `RangeCheckTrace`（12 列 × 2^log_size 行），log_size 与 CPU trace 相同
@@ -1854,7 +2019,7 @@ pub fn gen_range_check_air_trace(cpu_trace: &NativeTrace) -> RangeCheckTrace {
         if cpu_trace.cols[IS_PADDING][row].0 != 0 {
             continue;
         }
-        // 对 24 个 limb 列读值
+        // 对 63 个 limb 列读值
         for &col_idx in &RANGE_CHECK_LIMB_COLS {
             let val = cpu_trace.cols[col_idx][row].0;
             if val < 256 {

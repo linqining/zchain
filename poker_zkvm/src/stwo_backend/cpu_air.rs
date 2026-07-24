@@ -6,6 +6,12 @@
 //! - Phase 2.4：ADD/ADDI/SUB 约束 + 通用 binality/one-hot 约束
 //! - Phase 2.7：PC 递增 + JAL/JALR/Branch + LUI/AUIPC 约束
 //! - Phase 3：Load/Store 地址 + 值匹配约束
+//! - Soundness 修复（A1-A8）：
+//!   - A2（Phase 1）：Memory AIR Load 行 ValCur = ValPrev
+//!   - A3（Phase 1）：sign_a/sign_b 绑定操作数符号位
+//!   - A7+A8（Phase 2）：RangeCheck 全覆盖 64 列
+//!   - A6（Phase 3）：指令字解码约束 opcode/funct3/funct7 → indicator
+//!   - A1+A4（Phase 4）：HelperA = rs1/pc + ImmField 加法约束 + JALR & !1
 //!
 //! ## 约束清单（Phase 3）
 //!
@@ -38,15 +44,21 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 use super::column_layout_v2::{
     COL_ABS_A_BASE, COL_ABS_B_BASE, COL_CARRY_FLAG_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE,
     COL_DIV_REM_BASE, COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_HELPER_A_BASE, COL_HELPER_B_BASE,
+    COL_HELPER_A_CARRY_BASE, COL_HELPER_A_HALF, COL_IMM_FIELD_BASE,
+    COL_INSTR_BITS_BYTE0_BASE, COL_INSTR_BITS_BYTE1_BASE,
+    COL_INSTR_BITS_BYTE3_BASE, COL_INSTR_BITS_COUNT, COL_INSTR_WORD_BASE,
     COL_IS_BASE, COL_IS_LOAD_BYTE, COL_IS_LOAD_HALF, COL_IS_LOAD_SIGN, COL_LOAD_BITS_BASE,
     COL_LOAD_BITS_COUNT, COL_LOAD_BYTE_GATE, COL_LOAD_HALF_GATE, COL_LOW_NONZERO, COL_MEM_ADDR_BASE,
     COL_MUL_CARRY_HI0_BASE, COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE,
-    COL_MUL_LOW_BASE, COL_PC_BASE, COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B,
-    COL_SIGN_BIT, COL_SYSCALL_ID, COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
-    COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AUIPC, IS_BEQ, IS_BGE,
-    IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU, IS_ECALL, IS_JAL, IS_JALR, IS_LOAD, IS_LUI,
-    IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU, IS_PADDING, IS_REM, IS_REMU, IS_SLT, IS_SLTI, IS_SLTU,
-    IS_SLTIU, IS_STORE, IS_SUB, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
+    COL_MUL_LOW_BASE, COL_PC_BASE, COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_A_BITS_BASE,
+    COL_SIGN_A_BITS_COUNT, COL_SIGN_B, COL_SIGN_B_BITS_BASE, COL_SIGN_B_BITS_COUNT, COL_SIGN_BIT,
+    COL_SYSCALL_ID, COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
+    COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AND, IS_ANDI, IS_AUIPC,
+    IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU, IS_EBREAK, IS_ECALL,
+    IS_FENCE, IS_JAL, IS_JALR, IS_LOAD, IS_LUI, IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU,
+    IS_OR, IS_ORI, IS_PADDING, IS_REM, IS_REMU, IS_SLL, IS_SLLI, IS_SLT, IS_SLTI, IS_SLTIU,
+    IS_SLTU, IS_SRA, IS_SRAI, IS_SRL, IS_SRLI, IS_STORE, IS_SUB, IS_XOR, IS_XORI,
+    NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES, RANGE_CHECK_COL_INDICES,
 };
 use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
 
@@ -1044,6 +1056,66 @@ impl FrameworkEval for CpuAir {
         eval.add_constraint(sign_b.clone() * (sign_b.clone() - one.clone()));
         eval.add_constraint(low_nonzero.clone() * (low_nonzero.clone() - one.clone()));
 
+        // ===== A3 修复：sign_a/sign_b 绑定操作数符号位（v3.7）=====
+        // 缺口：sign_a(col 114)/sign_b(col 115) 原仅约束 binality，未绑定到 ValueB[3]/ValueC[3]
+        // 的 bit 31。SLT/SLTI/BLT/BGE/MULH/MULHSU/DIV/REM 符号判断可被伪造（恶意 prover 可任意
+        // 设置 sign_a 让 SLT/BLT 判定翻转、MULH/DIV 符号调整错误）。
+        // 修复：对 ValueB[3]/ValueC[3] 做 8-bit 位分解，约束 sign_a=SignABits[7]、sign_b=SignBBits[7]。
+        //
+        // gating 分离（关键：sign_a/sign_b 绑定范围不同）：
+        //   g_sign_a_bind = 有符号比较/分支 + MULH + MULHSU + DIV + REM
+        //     - MULHSU 的 sign_a = rs1 符号位（有符号被乘数）→ 绑定 ✓
+        //     - DIVU/REMU 的 sign_a = 0（无符号）→ 不绑定（否则 0=bit31 失败）
+        //   g_sign_b_bind = 有符号比较/分支 + MULH + DIV + REM
+        //     - MULHSU 的 sign_b = 0（rs2 无符号）→ 不绑定（否则 0=bit31 失败）
+        //     - DIVU/REMU 的 sign_b = 0（无符号）→ 不绑定
+        // 互斥性：使用 sign 的指令与 Load/MULHU/MUL one-hot 互斥，SignABits/SignBBits 列安全。
+        // 度数预算：位分解=2，binality=3，绑定=2，全部 ≤ 3 ✓
+        let g_sign_a_bind = is_slt_group.clone() + is_signed_branch.clone()
+            + is_mulh.clone() + is_mulhsu.clone() + is_div.clone() + is_rem.clone();
+        let g_sign_b_bind = is_slt_group.clone() + is_signed_branch.clone()
+            + is_mulh.clone() + is_div.clone() + is_rem.clone();
+
+        // ValueB[3] = Σ SignABits[i]·2^i（位分解，gated by g_sign_a_bind，度 2）
+        let mut sign_a_bits_sum: E::F = col(COL_SIGN_A_BITS_BASE);
+        let mut pow2_a: E::F = two.clone();
+        for i in 1..COL_SIGN_A_BITS_COUNT {
+            sign_a_bits_sum = sign_a_bits_sum + col(COL_SIGN_A_BITS_BASE + i) * pow2_a.clone();
+            pow2_a = pow2_a * two.clone();
+        }
+        let value_b_high_limb = col(COL_VALUE_B_BASE + 3);
+        eval.add_constraint(g_sign_a_bind.clone() * (value_b_high_limb - sign_a_bits_sum));
+
+        // SignABits binality（gated by g_sign_a_bind，度 3）
+        for i in 0..COL_SIGN_A_BITS_COUNT {
+            let bit = col(COL_SIGN_A_BITS_BASE + i);
+            eval.add_constraint(g_sign_a_bind.clone() * bit.clone() * (bit - one.clone()));
+        }
+
+        // sign_a = SignABits[7]（gated by g_sign_a_bind，度 2）
+        let sign_a_bit7 = col(COL_SIGN_A_BITS_BASE + 7);
+        eval.add_constraint(g_sign_a_bind.clone() * (sign_a.clone() - sign_a_bit7));
+
+        // ValueC[3] = Σ SignBBits[i]·2^i（位分解，gated by g_sign_b_bind，度 2）
+        let mut sign_b_bits_sum: E::F = col(COL_SIGN_B_BITS_BASE);
+        let mut pow2_b: E::F = two.clone();
+        for i in 1..COL_SIGN_B_BITS_COUNT {
+            sign_b_bits_sum = sign_b_bits_sum + col(COL_SIGN_B_BITS_BASE + i) * pow2_b.clone();
+            pow2_b = pow2_b * two.clone();
+        }
+        let value_c_high_limb = col(COL_VALUE_C_BASE + 3);
+        eval.add_constraint(g_sign_b_bind.clone() * (value_c_high_limb - sign_b_bits_sum));
+
+        // SignBBits binality（gated by g_sign_b_bind，度 3）
+        for i in 0..COL_SIGN_B_BITS_COUNT {
+            let bit = col(COL_SIGN_B_BITS_BASE + i);
+            eval.add_constraint(g_sign_b_bind.clone() * bit.clone() * (bit - one.clone()));
+        }
+
+        // sign_b = SignBBits[7]（gated by g_sign_b_bind，度 2）
+        let sign_b_bit7 = col(COL_SIGN_B_BITS_BASE + 7);
+        eval.add_constraint(g_sign_b_bind.clone() * (sign_b.clone() - sign_b_bit7));
+
         // ===== abs_a 重建（gated by g2=MULH+MULHSU，度 3）=====
         // sign_a=0: abs_a = rs1；sign_a=1: abs_a = 2³²−rs1（abs+rs1=2³²，16-bit borrow）
         //   sign=1: abs_low + rs1_low = 65536·carry0；abs_high + rs1_high + carry0 = 65536
@@ -1359,30 +1431,19 @@ impl FrameworkEval for CpuAir {
         //   values = (limb_value,)
         //   multiplicity = (1 - IsPadding)（非 padding 行 = +1，padding 行 = 0）
         //
-        // 需 range check 的 24 个 limb 列（6 word × 4 limb）：
+        // 需 range check 的 63 个 limb 列（v3.8 A8+A6 修复）：
         //   PC(0-3) + PcNext(4-7) + ValueAEff(10-13) + ValueB(14-17) + ValueC(18-21) + MemAddr(74-77)
+        //   + MulCarryLo(7) + MulHigh(4) + AbsA(4) + AbsB(4) + DivQuot(4) + DivRem(4) + MulLow(4)
+        //   + InstrWord(4) + ImmField(4)
         //
         // 一致性条件：Σ(CPU claims) + Σ(RangeCheckAir yields) == 0
         // RangeCheckAir 对 v ∈ [0, 255] 发送 yield (v, -count_v)。
         if let Some(ref lookup) = self.range_lookup {
             let is_non_padding: E::F = one.clone() - is_padding.clone();
             let mult_ef: E::EF = is_non_padding.into();
-            // 24 个 limb 列索引
-            const RANGE_CHECK_COLS: [usize; 24] = [
-                // PC (0-3)
-                COL_PC_BASE, COL_PC_BASE + 1, COL_PC_BASE + 2, COL_PC_BASE + 3,
-                // PcNext (4-7)
-                COL_PC_NEXT_BASE, COL_PC_NEXT_BASE + 1, COL_PC_NEXT_BASE + 2, COL_PC_NEXT_BASE + 3,
-                // ValueAEff (10-13)
-                COL_VALUE_A_EFF_BASE, COL_VALUE_A_EFF_BASE + 1, COL_VALUE_A_EFF_BASE + 2, COL_VALUE_A_EFF_BASE + 3,
-                // ValueB (14-17)
-                COL_VALUE_B_BASE, COL_VALUE_B_BASE + 1, COL_VALUE_B_BASE + 2, COL_VALUE_B_BASE + 3,
-                // ValueC (18-21)
-                COL_VALUE_C_BASE, COL_VALUE_C_BASE + 1, COL_VALUE_C_BASE + 2, COL_VALUE_C_BASE + 3,
-                // MemAddr (74-77)
-                COL_MEM_ADDR_BASE, COL_MEM_ADDR_BASE + 1, COL_MEM_ADDR_BASE + 2, COL_MEM_ADDR_BASE + 3,
-            ];
-            for &col_idx in &RANGE_CHECK_COLS {
+            // 63 个 limb 列索引（v3.8 A8+A6 修复：覆盖全部 8-bit limb 列）
+            // 使用 column_layout_v2::RANGE_CHECK_COL_INDICES 统一常量，避免多处重复定义不同步
+            for &col_idx in &RANGE_CHECK_COL_INDICES {
                 let limb_val = col(col_idx);
                 eval.add_to_relation(RelationEntry::new(
                     lookup,
@@ -1391,6 +1452,243 @@ impl FrameworkEval for CpuAir {
                 ));
             }
             has_logup = true;
+        }
+
+        // ===== A6 修复：指令字解码约束（v3.8）=====
+        // 缺口：无指令字列，indicator one-hot 完全信任 trace generator。
+        // 恶意 prover 可伪造 indicator 与实际指令字不匹配。
+        // 修复：新增 InstrWord 列 + InstrBits 位分解，约束 indicator 与 opcode/funct3/funct7 绑定。
+        //
+        // 度数预算：位分解=2，binality=3，解码=2，全部 ≤ 3 ✓
+        {
+            let is_non_padding: E::F = one.clone() - is_padding.clone();
+
+            // ----- 位分解约束 -----
+            // InstrWord[0] = Σ InstrBitsByte0[i]·2^i（gated by is_non_padding，度 2）
+            let mut byte0_sum: E::F = col(COL_INSTR_BITS_BYTE0_BASE);
+            let mut pow2: E::F = two.clone();
+            for i in 1..COL_INSTR_BITS_COUNT {
+                byte0_sum = byte0_sum + col(COL_INSTR_BITS_BYTE0_BASE + i) * pow2.clone();
+                pow2 = pow2 * two.clone();
+            }
+            eval.add_constraint(is_non_padding.clone() * (col(COL_INSTR_WORD_BASE) - byte0_sum));
+
+            // InstrWord[1] = Σ InstrBitsByte1[i]·2^i
+            let mut byte1_sum: E::F = col(COL_INSTR_BITS_BYTE1_BASE);
+            let mut pow2: E::F = two.clone();
+            for i in 1..COL_INSTR_BITS_COUNT {
+                byte1_sum = byte1_sum + col(COL_INSTR_BITS_BYTE1_BASE + i) * pow2.clone();
+                pow2 = pow2 * two.clone();
+            }
+            eval.add_constraint(is_non_padding.clone() * (col(COL_INSTR_WORD_BASE + 1) - byte1_sum));
+
+            // InstrWord[3] = Σ InstrBitsByte3[i]·2^i
+            let mut byte3_sum: E::F = col(COL_INSTR_BITS_BYTE3_BASE);
+            let mut pow2: E::F = two.clone();
+            for i in 1..COL_INSTR_BITS_COUNT {
+                byte3_sum = byte3_sum + col(COL_INSTR_BITS_BYTE3_BASE + i) * pow2.clone();
+                pow2 = pow2 * two.clone();
+            }
+            eval.add_constraint(is_non_padding.clone() * (col(COL_INSTR_WORD_BASE + 3) - byte3_sum));
+
+            // ----- binality 约束（gated by is_non_padding，度 3）-----
+            for i in 0..COL_INSTR_BITS_COUNT {
+                let bit = col(COL_INSTR_BITS_BYTE0_BASE + i);
+                eval.add_constraint(is_non_padding.clone() * bit.clone() * (bit - one.clone()));
+            }
+            for i in 0..COL_INSTR_BITS_COUNT {
+                let bit = col(COL_INSTR_BITS_BYTE1_BASE + i);
+                eval.add_constraint(is_non_padding.clone() * bit.clone() * (bit - one.clone()));
+            }
+            for i in 0..COL_INSTR_BITS_COUNT {
+                let bit = col(COL_INSTR_BITS_BYTE3_BASE + i);
+                eval.add_constraint(is_non_padding.clone() * bit.clone() * (bit - one.clone()));
+            }
+
+            // ----- 从 InstrBits 提取 opcode/funct3/funct7 -----
+            // opcode = bits 0-6 of InstrWord[0] = Σ InstrBitsByte0[i]·2^i, i=0..6
+            let mut opcode: E::F = col(COL_INSTR_BITS_BYTE0_BASE);
+            let mut pow2: E::F = two.clone();
+            for i in 1..7 {
+                opcode = opcode + col(COL_INSTR_BITS_BYTE0_BASE + i) * pow2.clone();
+                pow2 = pow2 * two.clone();
+            }
+
+            // funct3 = bits 4-6 of InstrWord[1] = InstrBitsByte1[4] + [5]·2 + [6]·4
+            let funct3: E::F = col(COL_INSTR_BITS_BYTE1_BASE + 4)
+                + col(COL_INSTR_BITS_BYTE1_BASE + 5) * two.clone()
+                + col(COL_INSTR_BITS_BYTE1_BASE + 6) * four.clone();
+
+            // funct7 = bits 1-7 of InstrWord[3] = Σ InstrBitsByte3[1+i]·2^i, i=0..6
+            let mut funct7: E::F = col(COL_INSTR_BITS_BYTE3_BASE + 1);
+            let mut pow2: E::F = two.clone();
+            for i in 1..7 {
+                funct7 = funct7 + col(COL_INSTR_BITS_BYTE3_BASE + 1 + i) * pow2.clone();
+                pow2 = pow2 * two.clone();
+            }
+
+            // ----- 解码约束：indicator × (field - target) = 0，度 2 -----
+            // 辅助闭包：将 u32 常量转为 E::F
+            let bf = |v: u32| -> E::F { BaseField::from(v).into() };
+
+            // opcode 约束（按 opcode 组分组）
+            let is_r_type = col(IS_ADD) + col(IS_SUB) + col(IS_SLL) + col(IS_SLT) + col(IS_SLTU)
+                + col(IS_XOR) + col(IS_SRL) + col(IS_SRA) + col(IS_OR) + col(IS_AND)
+                + col(IS_MUL) + col(IS_MULH) + col(IS_MULHSU) + col(IS_MULHU)
+                + col(IS_DIV) + col(IS_DIVU) + col(IS_REM) + col(IS_REMU);
+            eval.add_constraint(is_r_type.clone() * (opcode.clone() - bf(0x33)));
+
+            let is_i_op_imm = col(IS_ADDI) + col(IS_SLTI) + col(IS_SLTIU) + col(IS_XORI)
+                + col(IS_ORI) + col(IS_ANDI) + col(IS_SLLI) + col(IS_SRLI) + col(IS_SRAI);
+            eval.add_constraint(is_i_op_imm.clone() * (opcode.clone() - bf(0x13)));
+
+            eval.add_constraint(is_branch.clone() * (opcode.clone() - bf(0x63)));
+            eval.add_constraint(col(IS_LOAD) * (opcode.clone() - bf(0x03)));
+            eval.add_constraint(col(IS_STORE) * (opcode.clone() - bf(0x23)));
+            eval.add_constraint(col(IS_LUI) * (opcode.clone() - bf(0x37)));
+            eval.add_constraint(col(IS_AUIPC) * (opcode.clone() - bf(0x17)));
+            eval.add_constraint(col(IS_JAL) * (opcode.clone() - bf(0x6F)));
+            eval.add_constraint(col(IS_JALR) * (opcode.clone() - bf(0x67)));
+            eval.add_constraint(col(IS_FENCE) * (opcode.clone() - bf(0x0F)));
+            eval.add_constraint((col(IS_ECALL) + col(IS_EBREAK)) * (opcode - bf(0x73)));
+
+            // funct3 约束
+            eval.add_constraint(col(IS_JALR) * funct3.clone()); // funct3=0
+            eval.add_constraint(col(IS_BEQ) * funct3.clone());
+            eval.add_constraint(col(IS_BNE) * (funct3.clone() - bf(1)));
+            eval.add_constraint(col(IS_BLT) * (funct3.clone() - bf(4)));
+            eval.add_constraint(col(IS_BGE) * (funct3.clone() - bf(5)));
+            eval.add_constraint(col(IS_BLTU) * (funct3.clone() - bf(6)));
+            eval.add_constraint(col(IS_BGEU) * (funct3.clone() - bf(7)));
+            eval.add_constraint(col(IS_ADDI) * funct3.clone());
+            eval.add_constraint(col(IS_SLTI) * (funct3.clone() - bf(2)));
+            eval.add_constraint(col(IS_SLTIU) * (funct3.clone() - bf(3)));
+            eval.add_constraint(col(IS_XORI) * (funct3.clone() - bf(4)));
+            eval.add_constraint(col(IS_ORI) * (funct3.clone() - bf(6)));
+            eval.add_constraint(col(IS_ANDI) * (funct3.clone() - bf(7)));
+            eval.add_constraint(col(IS_SLLI) * (funct3.clone() - bf(1)));
+            eval.add_constraint((col(IS_SRLI) + col(IS_SRAI)) * (funct3.clone() - bf(5)));
+            eval.add_constraint(col(IS_FENCE) * funct3.clone());
+            eval.add_constraint((col(IS_ECALL) + col(IS_EBREAK)) * funct3.clone());
+            eval.add_constraint((col(IS_ADD) + col(IS_SUB) + col(IS_MUL)) * funct3.clone());
+            eval.add_constraint((col(IS_SLL) + col(IS_MULH)) * (funct3.clone() - bf(1)));
+            eval.add_constraint((col(IS_SLT) + col(IS_MULHSU)) * (funct3.clone() - bf(2)));
+            eval.add_constraint((col(IS_SLTU) + col(IS_MULHU)) * (funct3.clone() - bf(3)));
+            eval.add_constraint((col(IS_XOR) + col(IS_DIV)) * (funct3.clone() - bf(4)));
+            eval.add_constraint((col(IS_SRL) + col(IS_SRA) + col(IS_DIVU)) * (funct3.clone() - bf(5)));
+            eval.add_constraint((col(IS_OR) + col(IS_REM)) * (funct3.clone() - bf(6)));
+            eval.add_constraint((col(IS_AND) + col(IS_REMU)) * (funct3 - bf(7)));
+
+            // funct7 约束（R-type + shift）
+            let is_r_base = col(IS_ADD) + col(IS_SLL) + col(IS_SLT) + col(IS_SLTU) + col(IS_XOR)
+                + col(IS_SRL) + col(IS_OR) + col(IS_AND) + col(IS_SLLI) + col(IS_SRLI);
+            eval.add_constraint(is_r_base.clone() * funct7.clone()); // funct7=0
+            eval.add_constraint((col(IS_SUB) + col(IS_SRA) + col(IS_SRAI)) * (funct7.clone() - bf(0x20)));
+            let is_r_m_ext = col(IS_MUL) + col(IS_MULH) + col(IS_MULHSU) + col(IS_MULHU)
+                + col(IS_DIV) + col(IS_DIVU) + col(IS_REM) + col(IS_REMU);
+            eval.add_constraint(is_r_m_ext * (funct7 - bf(0x01)));
+        }
+
+        // ===== A1 修复：HelperA = rs1/pc + ImmField 加法约束（v3.9，Phase 4）=====
+        // 缺口：HelperA 在 LUI/JAL/JALR/Branch/AUIPC/Load/Store 行存预计算值，
+        // AIR 仅约束 MemAddr/PcNext/rd_eff = HelperA，但 HelperA 本身无约束。
+        // 恶意 prover 可伪造 HelperA 使 Load 读错误地址、JALR 跳到任意目标。
+        //
+        // 修复：使用 16-bit carry 加法约束 HelperA = operand + ImmField：
+        //   - Load/Store/JALR：operand = ValueB（rs1）
+        //   - JAL/AUIPC/Branch taken：operand = Pc
+        //   - LUI：HelperA = ImmField（无加法，直接 limb 等式）
+        //   - JALR 额外约束 HelperA[0] 为偶数（A4，最低位清零）
+        //
+        // carry 列（COL_HELPER_A_CARRY_BASE = 182-183）：
+        //   - carry0：低 16 位进位（∈ {0,1}）
+        //   - carry1：高 16 位进位（∈ {0,1}）
+        //   - 无条件 binality（非 HelperA 行 carry=0，binary ✓）
+        //
+        // 度数预算：
+        //   - Load/Store 加法：g(1) × expr(1) = 2 ✓
+        //   - JAL/AUIPC/Branch 加法：g(2) × expr(1) = 3 ✓（is_branch*taken 度 2）
+        //   - JALR 低 16 位 binality(x)：g(1) × x(1) × (x-1)(1) = 3 ✓
+        //   - JALR 高 16 位加法：g(1) × expr(1) = 2 ✓
+        //   - A4 偶数约束：g(1) × expr(1) = 2 ✓
+        //   - LUI 等式：g(1) × expr(1) = 2 ✓
+        //   - carry binality（无条件）：2 ✓
+        {
+            // ----- 读取 HelperA carry witness -----
+            let ha_carry0 = col(COL_HELPER_A_CARRY_BASE);
+            let ha_carry1 = col(COL_HELPER_A_CARRY_BASE + 1);
+
+            // ----- carry binality（无条件，度 2）-----
+            // 非 HelperA 行 carry=0（binary），非 HelperA 行 carry 也满足 binality。
+            eval.add_constraint(ha_carry0.clone() * (ha_carry0.clone() - one.clone()));
+            eval.add_constraint(ha_carry1.clone() * (ha_carry1.clone() - one.clone()));
+
+            // ----- 读取 ImmField / HelperA / Pc / ValueB 的 16-bit 半字 -----
+            let imm_low16 = word_low16(COL_IMM_FIELD_BASE);
+            let imm_high16 = word_high16(COL_IMM_FIELD_BASE);
+            let helper_a_low16 = word_low16(COL_HELPER_A_BASE);
+            let helper_a_high16 = word_high16(COL_HELPER_A_BASE);
+            let pc_low16_v = word_low16(COL_PC_BASE);
+            let pc_high16_v = word_high16(COL_PC_BASE);
+            let value_b_low16 = word_low16(COL_VALUE_B_BASE);
+            let value_b_high16 = word_high16(COL_VALUE_B_BASE);
+
+            // ----- A1 Group 1: Load/Store/JALR — HelperA = ValueB + ImmField -----
+            // JALR 的 bit0 清零通过 binality(x) 隐式处理（见下方 JALR 专项约束）
+            let g_rs1_imm = is_load.clone() + col(IS_STORE) + is_jalr.clone();
+
+            // 非 JALR 行（Load/Store）：HelperA_low = ValueB_low + Imm_low - 65536*carry0
+            // JALR 行：由下方专项约束处理（含 bit0 清零）
+            let g_load_store = is_load.clone() + col(IS_STORE);
+            let rs1_imm_low = helper_a_low16.clone() - value_b_low16.clone()
+                - imm_low16.clone() + six5536.clone() * ha_carry0.clone();
+            eval.add_constraint(g_load_store.clone() * rs1_imm_low);
+
+            let rs1_imm_high = helper_a_high16.clone() - value_b_high16.clone()
+                - imm_high16.clone() - ha_carry0.clone() + six5536.clone() * ha_carry1.clone();
+            // Load/Store/JALR 共享高 16 位约束（JALR 高位不受 bit0 影响）
+            eval.add_constraint(g_rs1_imm.clone() * rs1_imm_high);
+
+            // ----- A1 Group 2: JAL/AUIPC/Branch taken — HelperA = Pc + ImmField -----
+            let g_pc_imm = is_jal.clone() + is_auipc.clone() + is_branch.clone() * taken.clone();
+
+            let pc_imm_low = helper_a_low16.clone() - pc_low16_v.clone()
+                - imm_low16.clone() + six5536.clone() * ha_carry0.clone();
+            eval.add_constraint(g_pc_imm.clone() * pc_imm_low);
+
+            let pc_imm_high = helper_a_high16.clone() - pc_high16_v.clone()
+                - imm_high16.clone() - ha_carry0.clone() + six5536.clone() * ha_carry1.clone();
+            eval.add_constraint(g_pc_imm.clone() * pc_imm_high);
+
+            // ----- A1 Group 3: LUI — HelperA = ImmField（直接 limb 等式）-----
+            for i in 0..4 {
+                let lui_eq = col(COL_HELPER_A_BASE + i) - col(COL_IMM_FIELD_BASE + i);
+                eval.add_constraint(is_lui.clone() * lui_eq);
+            }
+
+            // ----- A4 修复：JALR 最低位清零 + A1 JALR 低 16 位（v3.9）-----
+            // JALR: HelperA = (ValueB + ImmField) & !1
+            //
+            // A4 约束（度 2）：HelperA[0] = 2 * HelperA_half（HelperA[0] 为偶数）
+            //   HelperA_half ∈ [0, 127]（RangeCheck 覆盖，col 184）
+            //
+            // A1 JALR 低 16 位（度 3，binality 隐式推导 bit0）：
+            //   令 x = ValueB_low16 + ImmField_low16 - HelperA_low16 - 65536*carry0
+            //   x = bit0（被清除的最低位）
+            //   IS_JALR * x * (x - 1) = 0 确保 x ∈ {0,1}
+            //   配合 A4（HelperA[0] 偶数 → HelperA_low16 偶数）+ 65536*carry0 偶数：
+            //     bit0 = (ValueB_low16 + ImmField_low16) mod 2 唯一确定 ✓
+            let helper_a_half = col(COL_HELPER_A_HALF);
+
+            // A4: HelperA[0] = 2 * HelperA_half（度 2）
+            let a4_even = col(COL_HELPER_A_BASE) - two.clone() * helper_a_half.clone();
+            eval.add_constraint(is_jalr.clone() * a4_even);
+
+            // A1 JALR 低 16 位：binality(x) 隐式推导 bit0（度 3）
+            // x = ValueB_low16 + ImmField_low16 - HelperA_low16 - 65536*carry0
+            let jalr_bit0 = value_b_low16.clone() + imm_low16.clone()
+                - helper_a_low16.clone() - six5536.clone() * ha_carry0.clone();
+            eval.add_constraint(is_jalr.clone() * jalr_bit0.clone() * (jalr_bit0 - one.clone()));
         }
 
         // ===== 统一 finalize_logup（多 batch 模式）=====
@@ -1508,7 +1806,7 @@ mod tests {
         assert_eq!(COL_HELPER_A_BASE, 65);
         assert_eq!(COL_HELPER_B_BASE, 69);
         assert_eq!(COL_TAKEN, 73);
-        assert_eq!(NUM_COLUMNS, 134);
+        assert_eq!(NUM_COLUMNS, 185, "v3.9 列布局 = 185 列（v3.8 182 + A1/A4 3）");
         assert_eq!(NUM_INSTRUCTION_CATEGORIES, 43);
     }
 }

@@ -258,6 +258,22 @@ impl FrameworkEval for MemoryAir {
             eval.add_constraint(is_first_non_padding.clone() * ts_prev);
         }
 
+        // ===== 约束 M20-M23：Load 行 ValCur = ValPrev（A2 修复，v3.7）=====
+        // 缺口：Load 行（IsStore=0, IsPadding=0）的 ValCur 原无约束。Load 不修改内存，
+        // ValCur 应 = ValPrev。恶意 prover 可伪造 Load 行 ValCur，通过 logup 让 CPU rd_eff
+        // 读到任意伪造值（CPU claim (addr, rd_eff, 0) 与 Memory yield (addr, ValCur, 0) 匹配）。
+        // 修复：约束 Load 行 ValCur[i] = ValPrev[i]。
+        // gating：(1-IsStore)*(1-IsPadding) = Load 行（IsLoad = 1 - IsStore - IsPadding，见 M8）
+        // 度数 = 1 (gating) × 1 (diff) = 2 ✓
+        // 注意：首次访问的 Load 行 ValPrev=0（M15-M18），故 ValCur=0；连续访问 Load 行
+        // ValPrev=prev.ValCur（M10-M13），故 ValCur=prev.ValCur（内存值不变）✓
+        let is_load_mem = (one.clone() - is_store.clone()) * (one.clone() - is_padding.clone());
+        for i in 0..4 {
+            let val_cur = col(MEM_COL_VAL_CUR_BASE + i);
+            let val_prev = col(MEM_COL_VAL_PREV_BASE + i);
+            eval.add_constraint(is_load_mem.clone() * (val_cur - val_prev));
+        }
+
         // ===== Logup yield：非 padding 行发送 multiplicity = -1，padding 行 multiplicity = 0 =====
         // values = [MemAddr×4, MemValCur×4, MemIsStore×1]
         // multiplicity = -1 * (1 - IsPadding) — padding 行不贡献 sum

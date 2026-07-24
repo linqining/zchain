@@ -471,6 +471,197 @@ pub enum Instruction {
     Ebreak,
 }
 
+impl Instruction {
+    /// 将 `Instruction` 编码回 32-bit RISC-V 指令字（`decode` 的逆函数）。
+    ///
+    /// 用于 A6 修复：将指令字存入 trace 的 `InstrWord` 列，使 AIR 解码约束
+    /// 能绑定 indicator 与实际 opcode/funct3/funct7。
+    ///
+    /// # 返回
+    /// 32-bit RISC-V 指令字（little-endian 编码，bits[1:0]=0b11）。
+    #[must_use]
+    pub fn encode(&self) -> u32 {
+        use Instruction::*;
+        match *self {
+            // ===== U-type =====
+            Lui { rd, imm } => 0x37 | ((rd as u32) << 7) | (imm & 0xFFFFF000),
+            Auipc { rd, imm } => 0x17 | ((rd as u32) << 7) | (imm & 0xFFFFF000),
+
+            // ===== J-type =====
+            Jal { rd, imm } => {
+                let imm = imm & 0x1FFFFF; // 21-bit
+                0x6F
+                    | ((rd as u32) << 7)
+                    | (((imm >> 20) & 0x1) << 31)
+                    | (((imm >> 1) & 0x3FF) << 21)
+                    | (((imm >> 11) & 0x1) << 20)
+                    | (((imm >> 12) & 0xFF) << 12)
+            }
+
+            // ===== I-type 跳转 =====
+            Jalr { rd, rs1, imm } => {
+                0x67 | ((rd as u32) << 7) | ((rs1 as u32) << 15) | ((imm & 0xFFF) << 20)
+            }
+
+            // ===== B-type =====
+            Beq { rs1, rs2, imm } => encode_b(0x63, 0, rs1, rs2, imm),
+            Bne { rs1, rs2, imm } => encode_b(0x63, 1, rs1, rs2, imm),
+            Blt { rs1, rs2, imm } => encode_b(0x63, 4, rs1, rs2, imm),
+            Bge { rs1, rs2, imm } => encode_b(0x63, 5, rs1, rs2, imm),
+            Bltu { rs1, rs2, imm } => encode_b(0x63, 6, rs1, rs2, imm),
+            Bgeu { rs1, rs2, imm } => encode_b(0x63, 7, rs1, rs2, imm),
+
+            // ===== I-type Load =====
+            Lb { rd, rs1, imm } => encode_i(0x03, 0, rd, rs1, imm),
+            Lh { rd, rs1, imm } => encode_i(0x03, 1, rd, rs1, imm),
+            Lw { rd, rs1, imm } => encode_i(0x03, 2, rd, rs1, imm),
+            Lbu { rd, rs1, imm } => encode_i(0x03, 4, rd, rs1, imm),
+            Lhu { rd, rs1, imm } => encode_i(0x03, 5, rd, rs1, imm),
+
+            // ===== S-type Store =====
+            Sb { rs1, rs2, imm } => encode_s(0x23, 0, rs1, rs2, imm),
+            Sh { rs1, rs2, imm } => encode_s(0x23, 1, rs1, rs2, imm),
+            Sw { rs1, rs2, imm } => encode_s(0x23, 2, rs1, rs2, imm),
+
+            // ===== I-type OP-IMM =====
+            Addi { rd, rs1, imm } => encode_i(0x13, 0, rd, rs1, imm),
+            Slti { rd, rs1, imm } => encode_i(0x13, 2, rd, rs1, imm),
+            Sltiu { rd, rs1, imm } => encode_i(0x13, 3, rd, rs1, imm),
+            Xori { rd, rs1, imm } => encode_i(0x13, 4, rd, rs1, imm),
+            Ori { rd, rs1, imm } => encode_i(0x13, 6, rd, rs1, imm),
+            Andi { rd, rs1, imm } => encode_i(0x13, 7, rd, rs1, imm),
+            Slli { rd, rs1, shamt } => encode_i_shift(0x13, 1, 0x00, rd, rs1, shamt),
+            Srli { rd, rs1, shamt } => encode_i_shift(0x13, 5, 0x00, rd, rs1, shamt),
+            Srai { rd, rs1, shamt } => encode_i_shift(0x13, 5, 0x20, rd, rs1, shamt),
+
+            // ===== R-type OP =====
+            Add { rd, rs1, rs2 } => encode_r(0x33, 0, 0x00, rd, rs1, rs2),
+            Sub { rd, rs1, rs2 } => encode_r(0x33, 0, 0x20, rd, rs1, rs2),
+            Sll { rd, rs1, rs2 } => encode_r(0x33, 1, 0x00, rd, rs1, rs2),
+            Slt { rd, rs1, rs2 } => encode_r(0x33, 2, 0x00, rd, rs1, rs2),
+            Sltu { rd, rs1, rs2 } => encode_r(0x33, 3, 0x00, rd, rs1, rs2),
+            Xor { rd, rs1, rs2 } => encode_r(0x33, 4, 0x00, rd, rs1, rs2),
+            Srl { rd, rs1, rs2 } => encode_r(0x33, 5, 0x00, rd, rs1, rs2),
+            Sra { rd, rs1, rs2 } => encode_r(0x33, 5, 0x20, rd, rs1, rs2),
+            Or { rd, rs1, rs2 } => encode_r(0x33, 6, 0x00, rd, rs1, rs2),
+            And { rd, rs1, rs2 } => encode_r(0x33, 7, 0x00, rd, rs1, rs2),
+
+            // ===== M 扩展（R-type, funct7=0x01）=====
+            Mul { rd, rs1, rs2 } => encode_r(0x33, 0, 0x01, rd, rs1, rs2),
+            Mulh { rd, rs1, rs2 } => encode_r(0x33, 1, 0x01, rd, rs1, rs2),
+            Mulhsu { rd, rs1, rs2 } => encode_r(0x33, 2, 0x01, rd, rs1, rs2),
+            Mulhu { rd, rs1, rs2 } => encode_r(0x33, 3, 0x01, rd, rs1, rs2),
+            Div { rd, rs1, rs2 } => encode_r(0x33, 4, 0x01, rd, rs1, rs2),
+            Divu { rd, rs1, rs2 } => encode_r(0x33, 5, 0x01, rd, rs1, rs2),
+            Rem { rd, rs1, rs2 } => encode_r(0x33, 6, 0x01, rd, rs1, rs2),
+            Remu { rd, rs1, rs2 } => encode_r(0x33, 7, 0x01, rd, rs1, rs2),
+
+            // ===== 杂项 =====
+            Fence => 0x0F,
+            Ecall => 0x73,
+            Ebreak => 0x73 | (0x001 << 20),
+        }
+    }
+
+    /// 提取指令的立即数值（已符号扩展/移位），用于填充 ImmField 列。
+    ///
+    /// 返回值与 AIR 约束中 HelperA 使用的立即数一致：
+    /// - LUI/AUIPC：imm（已左移 12 位）
+    /// - JAL/JALR/Branch/Load/Store/OP-IMM：imm（已符号扩展）
+    /// - SLLI/SRLI/SRAI：shamt
+    /// - FENCE/ECALL/EBREAK：0
+    #[must_use]
+    pub fn immediate_value(&self) -> u32 {
+        use Instruction::*;
+        match *self {
+            Lui { imm, .. }
+            | Auipc { imm, .. }
+            | Jal { imm, .. }
+            | Jalr { imm, .. }
+            | Beq { imm, .. }
+            | Bne { imm, .. }
+            | Blt { imm, .. }
+            | Bge { imm, .. }
+            | Bltu { imm, .. }
+            | Bgeu { imm, .. }
+            | Lb { imm, .. }
+            | Lh { imm, .. }
+            | Lw { imm, .. }
+            | Lbu { imm, .. }
+            | Lhu { imm, .. }
+            | Sb { imm, .. }
+            | Sh { imm, .. }
+            | Sw { imm, .. }
+            | Addi { imm, .. }
+            | Slti { imm, .. }
+            | Sltiu { imm, .. }
+            | Xori { imm, .. }
+            | Ori { imm, .. }
+            | Andi { imm, .. } => imm,
+            Slli { shamt, .. } | Srli { shamt, .. } | Srai { shamt, .. } => shamt as u32,
+            Add { .. } | Sub { .. } | Sll { .. } | Slt { .. } | Sltu { .. } | Xor { .. }
+            | Srl { .. } | Sra { .. } | Or { .. } | And { .. } | Mul { .. } | Mulh { .. }
+            | Mulhsu { .. } | Mulhu { .. } | Div { .. } | Divu { .. } | Rem { .. }
+            | Remu { .. } | Fence | Ecall | Ebreak => 0,
+        }
+    }
+}
+
+// ----- encode 辅助函数 -----
+
+#[inline]
+fn encode_r(opcode: u32, funct3: u8, funct7: u8, rd: u8, rs1: u8, rs2: u8) -> u32 {
+    opcode
+        | ((rd as u32) << 7)
+        | ((funct3 as u32) << 12)
+        | ((rs1 as u32) << 15)
+        | ((rs2 as u32) << 20)
+        | ((funct7 as u32) << 25)
+}
+
+#[inline]
+fn encode_i(opcode: u32, funct3: u8, rd: u8, rs1: u8, imm: u32) -> u32 {
+    opcode
+        | ((rd as u32) << 7)
+        | ((funct3 as u32) << 12)
+        | ((rs1 as u32) << 15)
+        | ((imm & 0xFFF) << 20)
+}
+
+#[inline]
+fn encode_i_shift(opcode: u32, funct3: u8, funct7: u8, rd: u8, rs1: u8, shamt: u8) -> u32 {
+    opcode
+        | ((rd as u32) << 7)
+        | ((funct3 as u32) << 12)
+        | ((rs1 as u32) << 15)
+        | ((shamt as u32) << 20)
+        | ((funct7 as u32) << 25)
+}
+
+#[inline]
+fn encode_s(opcode: u32, funct3: u8, rs1: u8, rs2: u8, imm: u32) -> u32 {
+    let imm = imm & 0xFFF;
+    opcode
+        | ((funct3 as u32) << 12)
+        | ((rs1 as u32) << 15)
+        | ((rs2 as u32) << 20)
+        | ((imm & 0xFE0) << 20)
+        | ((imm & 0x1F) << 7)
+}
+
+#[inline]
+fn encode_b(opcode: u32, funct3: u8, rs1: u8, rs2: u8, imm: u32) -> u32 {
+    let imm = imm & 0x1FFF; // 13-bit
+    opcode
+        | ((funct3 as u32) << 12)
+        | ((rs1 as u32) << 15)
+        | ((rs2 as u32) << 20)
+        | (((imm >> 12) & 0x1) << 31)
+        | (((imm >> 5) & 0x3F) << 25)
+        | (((imm >> 1) & 0xF) << 8)
+        | (((imm >> 11) & 0x1) << 7)
+}
+
 // ===========================================================================
 // decode / execute（SubTask 3.1.2-3.1.4 — Step D 实现）
 // ===========================================================================
