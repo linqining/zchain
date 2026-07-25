@@ -572,7 +572,14 @@ fn dispatch_join_table(
     seat.total_bet = 0;
     seat.hand.clear();
 
-    let active_count_after = (state_machine::count_active_occupied(&table.seats) as u64) + 1;
+    // P0 修复：与 apply_join_shuffle 保持一致的资金记账——buy_in 必须进入 chip_pool，
+    // 否则离座退款时 chip_pool 会出现负差额（资金凭空多退）。
+    table.chip_pool = table.chip_pool.checked_add(input.buy_in).ok_or_else(|| {
+        PokerL1Error::Serialization("chip_pool overflow on join_table".into())
+    })?;
+
+    // 座位已设置完毕后再统计活跃人数（与 apply_join_shuffle 一致，不再 +1）。
+    let active_count_after = state_machine::count_active_occupied(&table.seats) as u64;
     events.push(TexasPokerEvent::PlayerJoined {
         table_id: table.id,
         seat_index: seat_idx,
@@ -611,10 +618,15 @@ fn dispatch_leave_table(
     }
     // 退还 stack + pending_addon（玩家离开时未入账的 addon 也必须退还）
     let refund_amt = seat.stack.saturating_add(seat.pending_addon);
+    let pending = seat.pending_addon;
     let player = seat.player;
     if refund_amt > 0 {
         // 同步扣减 addon_pool（资金流出）
-        table.addon_pool = table.addon_pool.saturating_sub(seat.pending_addon);
+        table.addon_pool = table.addon_pool.saturating_sub(pending);
+        // P0 修复：对偶地扣减 chip_pool（join 时 buy_in 已计入 chip_pool，
+        // 离开时退出的 stack 必须从 chip_pool 扣除，保持资金账平衡）。
+        // 注意：pending_addon 已计入 addon_pool（不计入 chip_pool），此处只扣 stack 部分。
+        table.chip_pool = table.chip_pool.saturating_sub(seat.stack);
     }
     *seat = super::types::Seat::empty();
 

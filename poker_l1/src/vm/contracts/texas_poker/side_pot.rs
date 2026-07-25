@@ -271,8 +271,13 @@ pub fn distribute_pots(
 
     let mut distributed: u64 = 0;
 
-    // 主池分配（平局时均分，截断取整，余数归第一个赢家）
-    if !main_winners.is_empty() && main_pot > 0 {
+    // 主池分配（平局时均分，截断取整，余数归第一个赢家）。
+    // P2-6 修复：与边池对称地校验 winner 是否都在 main_eligible 内，
+    // 防御性避免调用方误传不在 eligible 列表中的 seat 导致主池被错误分配。
+    let main_all_eligible = main_winners
+        .iter()
+        .all(|w| main_eligible.contains(w));
+    if !main_winners.is_empty() && main_pot > 0 && main_all_eligible {
         let share = main_pot / main_winners.len() as u64;
         let remainder = main_pot % main_winners.len() as u64;
         for (idx, &winner) in main_winners.iter().enumerate() {
@@ -285,6 +290,9 @@ pub fn distribute_pots(
             distributed += amount;
         }
     }
+
+    // 标记 main_eligible 已被使用（校验逻辑已消费），避免未使用变量警告。
+    let _ = main_eligible;
 
     // 边池分配
     for (pot_idx, pot) in side_pots.iter().enumerate() {
@@ -312,8 +320,6 @@ pub fn distribute_pots(
         }
     }
 
-    // main_eligible 用于调用方上下文（如校验），此处不直接使用
-    let _ = main_eligible;
     distributed
 }
 

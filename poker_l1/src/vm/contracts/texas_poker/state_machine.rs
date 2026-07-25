@@ -362,7 +362,22 @@ fn start_betting_round(
 ) {
     let bb = table.big_blind;
     let round = if is_preflop {
-        BettingRound::new_preflop(bb)
+        // P0-4 修复：ante 已计入 seat.bet（见 collect_ante），preflop 的 current_bet
+        // 必须对齐到当前最大 bet（= big_blind + ante，若有 ante），否则 BB 的
+        // bet > current_bet 会导致 can_check / is_betting_complete 误判。
+        let max_bet = table
+            .seats
+            .iter()
+            .map(|s| s.bet)
+            .max()
+            .unwrap_or(bb)
+            .max(bb);
+        let mut r = BettingRound::new_preflop(bb);
+        // 若 ante 让最大 bet 超过 bb，抬高 current_bet 以对齐（min_raise 保持 bb）。
+        if max_bet > bb {
+            r.current_bet = max_bet;
+        }
+        r
     } else {
         // postflop 清零 seat.bet
         for s in &mut table.seats {
@@ -603,26 +618,31 @@ fn advance_shuffle(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
 }
 
 /// reconstruct 后根据当前 round_state 重启对应 reveal phase。
+///
+/// P1-7 修复：reconstruct 会重建整个 deck（`rebuild_deck_from_reconstruct_deck`
+/// 清空 `decrypted_cards` 并重置 `cards_dealt=0`），意味着之前发出的公共牌/手牌
+/// 作废、需全部重发。因此重启时必须先清空 `community_cards`，并按当前轮次的
+/// 完整发牌数重启 reveal phase（而非用 `count_pending_community_cards` 增量补发，
+/// 因为后者在 deck 重建后恒为 0，会漏掉已存在于 community_cards 的旧牌）。
 fn restart_reveal_after_reconstruct(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+    // 重建 deck 后，历史 community_cards / 手牌均失效，清空以避免新旧牌共存。
+    table.community_cards.clear();
+    for s in &mut table.seats {
+        s.hand.clear();
+    }
     match table.round_state {
         ROUND_PREFLOP => start_preflop_reveal_phase(table, events),
         ROUND_FLOP => {
-            let pending = count_pending_community_cards(table);
-            if pending < 3 {
-                start_community_reveal_phase(table, 3 - pending, REVEAL_PHASE_FLOP, events);
-            }
+            // 重建后从该轮起始重发 flop 的 3 张。
+            start_community_reveal_phase(table, 3, REVEAL_PHASE_FLOP, events);
         }
         ROUND_TURN => {
-            let pending = count_pending_community_cards(table);
-            if pending < 4 {
-                start_community_reveal_phase(table, 4 - pending, REVEAL_PHASE_TURN, events);
-            }
+            // turn 轮重建：需重发 flop 3 + turn 1。这里 reveal phase 一次性发到当前轮所需总数。
+            start_community_reveal_phase(table, 4, REVEAL_PHASE_TURN, events);
         }
         ROUND_RIVER => {
-            let pending = count_pending_community_cards(table);
-            if pending < 5 {
-                start_community_reveal_phase(table, 5 - pending, REVEAL_PHASE_RIVER, events);
-            }
+            // river 轮重建：需重发 flop 3 + turn 1 + river 1 = 5 张。
+            start_community_reveal_phase(table, 5, REVEAL_PHASE_RIVER, events);
         }
         ROUND_SHOWDOWN => start_showdown_reveal_phase(table, events),
         _ => {}
@@ -768,6 +788,7 @@ fn start_showdown_reveal_phase(table: &mut TexasPokerTable, events: &mut Vec<Tex
 }
 
 /// 统计已解密但未写入 community 的公共牌数。
+#[allow(dead_code)] // P1-7 重构后重启逻辑改为完整重发，此函数暂无调用方，保留供未来增量补发使用。
 fn count_pending_community_cards(table: &TexasPokerTable) -> u8 {
     table
         .deck_state
@@ -1577,9 +1598,16 @@ pub fn apply_leave_with_proof(
     remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
     remove_from_pending(&mut table.shuffle_state.completed_players, seat_index);
 
-    let refund = table.seats[seat_index as usize].stack;
+    // P1-9 修复：退还 stack + 未入账的 pending_addon（与 dispatch_leave_table 一致），
+    // 并同步扣减 chip_pool（join 时 buy_in 计入）与 addon_pool（addon 时计入）。
+    let stack_refund = table.seats[seat_index as usize].stack;
+    let pending_refund = table.seats[seat_index as usize].pending_addon;
+    let refund = stack_refund.saturating_add(pending_refund);
     if refund > 0 {
         table.seats[seat_index as usize].stack = 0;
+        table.seats[seat_index as usize].pending_addon = 0;
+        table.chip_pool = table.chip_pool.saturating_sub(stack_refund);
+        table.addon_pool = table.addon_pool.saturating_sub(pending_refund);
         events::emit_event(
             events,
             TexasPokerEvent::PlayerRefund {
@@ -2233,6 +2261,13 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
 }
 
 /// 在指定 eligible seats 中找最佳手牌持有者。
+///
+/// 评估规则：
+/// - 手牌 + 公共牌 >= 7 张时走标准 `best_hand`（7 选 5 最佳）。
+/// - 牌数 < 7（异常路径，如 showdown 提前触发或某玩家 hand 不全）时，
+///   该玩家仍参与比较，但用现有牌集合能组成的"最大牌型"做保守评估：
+///   取现有牌中最大的 5 张（不足 5 张则全部），按 `evaluate_partial` 评分。
+///   这样避免原先"牌不足即默认当赢家"的误判（P0-3 修复）。
 fn find_winners_in_seats(table: &TexasPokerTable, eligible: &[u8]) -> Vec<u8> {
     if eligible.is_empty() {
         return vec![];
@@ -2247,13 +2282,9 @@ fn find_winners_in_seats(table: &TexasPokerTable, eligible: &[u8]) -> Vec<u8> {
         }
         let mut cards = s.hand.clone();
         cards.extend_from_slice(&table.community_cards);
-        if cards.len() < 7 {
-            if winners.is_empty() {
-                winners.push(seat);
-            }
-            continue;
-        }
-        let rank = super::hand_evaluator::best_hand(&cards);
+
+        // P0-3 修复：统一用"可评估的最大牌组合"，不再因牌不足而默认当赢家。
+        let rank = super::hand_evaluator::evaluate_best_or_partial(&cards);
         match &best_rank {
             None => {
                 best_rank = Some(rank.clone());
@@ -2367,6 +2398,17 @@ pub fn reset_for_next_hand(
         }
     }
 
+    // P2-11 修复：每手开始时补充 Time Bank（按 TIME_BANK_REFILL_PER_HAND_MS，
+    // 上限 DEFAULT_TIME_BANK_MS）。此前 constants 定义了 refill 常量但 reset
+    // 未实现补充逻辑，导致 time_bank 仅会单调下降，无法跨手恢复。
+    let refill = super::constants::TIME_BANK_REFILL_PER_HAND_MS;
+    let cap = super::constants::DEFAULT_TIME_BANK_MS;
+    for s in &mut table.seats {
+        if s.is_occupied() {
+            s.time_bank_ms = s.time_bank_ms.saturating_add(refill).min(cap);
+        }
+    }
+
     // 第二阶段：重置 seat 字段；waiting 玩家 pk 加入 aggregated_pk
     for s in &mut table.seats {
         s.hand.clear();
@@ -2475,6 +2517,12 @@ pub fn kick_player_internal(
     }
 
     if refund_amt > 0 {
+        // P1-9 修复：被踢玩家退还的 stack 来自 buy_in（已计入 chip_pool），
+        // 必须同步扣减以保持资金账平衡。pending_addon 也一并退回并扣 addon_pool。
+        let pending = table.seats[seat_index as usize].pending_addon;
+        table.chip_pool = table.chip_pool.saturating_sub(refund_amt);
+        table.addon_pool = table.addon_pool.saturating_sub(pending);
+        table.seats[seat_index as usize].pending_addon = 0;
         events::emit_event(
             events,
             TexasPokerEvent::PlayerRefund {
@@ -2805,6 +2853,12 @@ pub fn collect_ante(
         let seat = &mut table.seats[seat_idx as usize];
         let actual = amount.min(seat.stack);
         seat.stack -= actual;
+        // P0-4 修复：ante 同时计入 bet 与 total_bet，保持二者一致。
+        // 这样 side_pot 分层（用 total_bet）与下注轮跟注计算（用 bet）基准统一，
+        // 避免 ante 让 total_bet > bet 导致的分层/跟注脱节。
+        // 注意：ante 计入 bet 后，preflop 的 current_bet 会在 start_betting_round
+        // 中据此对齐（见 check_reveal_phase_complete 的 ante 调整逻辑）。
+        seat.bet = seat.bet.saturating_add(actual);
         seat.total_bet = seat.total_bet.saturating_add(actual);
         table.ante_collected = table.ante_collected.saturating_add(actual);
         table.pot = table.pot.saturating_add(actual);

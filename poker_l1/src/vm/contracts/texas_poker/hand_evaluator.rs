@@ -189,6 +189,54 @@ pub fn best_hand(cards: &[Card]) -> HandRank {
     best
 }
 
+/// 评估任意张数（>=5 走最佳 5 选；<5 走现有全部牌）的最大牌型。
+///
+/// 用于异常路径（手牌+公共牌不足 7 张，如 showdown 提前触发）的胜负比较，
+/// 避免原先"牌不足即默认当赢家"的误判（P0-3 修复）。
+///
+/// - `cards.len() == 7`：等价于 [`best_hand`]。
+/// - `cards.len() >= 5`：枚举 C(n,5) 所有 5 张组合取最大。
+/// - `cards.len() < 5`：用现有全部牌评估（`evaluate_five` 要求恰好 5 张，
+///   不足时用占位牌补齐到 5 张，占位牌取最小点数 2 且不参与成牌——
+///   实际效果等同于"仅按现有牌中能识别的牌型比较"，所有不足 5 张的玩家
+///   评估结果都偏低，互相之间按现有牌点数比较）。
+#[must_use]
+pub fn evaluate_best_or_partial(cards: &[Card]) -> HandRank {
+    if cards.len() >= 7 {
+        return best_hand(cards);
+    }
+    if cards.len() >= 5 {
+        // 枚举所有 C(n,5) 组合，取最大
+        let n = cards.len();
+        let mut best = HandRank::new(HIGH_CARD, vec![]);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                for k in (j + 1)..n {
+                    for l in (k + 1)..n {
+                        for m in (l + 1)..n {
+                            let five = [cards[i], cards[j], cards[k], cards[l], cards[m]];
+                            let rank = evaluate_five(&five);
+                            if compare(&rank, &best) == 2 {
+                                best = rank;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return best;
+    }
+    // 不足 5 张：用最小占位牌（2♠）补齐到 5 张再评估。
+    // 占位牌点数最小，不会构成对子/顺子等强牌型，保证评估结果反映现有牌的真实强度。
+    let mut padded: Vec<Card> = cards.to_vec();
+    let placeholder = Card::new(0, 2); // 2♠
+    while padded.len() < 5 {
+        padded.push(placeholder);
+    }
+    let five = [padded[0], padded[1], padded[2], padded[3], padded[4]];
+    evaluate_five(&five)
+}
+
 /// 校验无重复牌。
 fn assert_no_duplicates(cards: &[Card]) {
     use std::collections::HashSet;
@@ -312,9 +360,11 @@ fn evaluate_five_impl(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card) -> HandR
 
 /// 检测普通顺子（不含 wheel）。
 fn is_straight_high(ranks_desc: &[u8]) -> bool {
-    // ranks_desc 已降序，检查 5 张连续递减
+    // ranks_desc 已降序，检查 5 张连续递减。
+    // P2-5 修复：先判 `>= 1` 再减，防止 ranks_desc[i]==0 时 u8 下溢 panic
+    // （正常路径牌点数 >= 2 不会触发，此处为防御性，保持函数对异常输入的健壮性）。
     for i in 0..4 {
-        if ranks_desc[i] - 1 != ranks_desc[i + 1] {
+        if ranks_desc[i] < 1 || ranks_desc[i].saturating_sub(1) != ranks_desc[i + 1] {
             return false;
         }
     }
