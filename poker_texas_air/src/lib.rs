@@ -35,6 +35,12 @@ pub mod method_kind;
 pub mod public_inputs;
 pub mod state_root;
 
+// ===== Post-commit Prover =====
+// 证明任务（数据契约）+ Orchestrator（异步消费任务生成/聚合 proof）。
+// 详见 orchestrator.rs 的架构说明。
+pub mod prove_task;
+pub mod orchestrator;
+
 // ===== Layer 2: Aggregator AIR =====
 // 阶段 4 PoC：Aggregator AIR 不再 feature-gated（不依赖 poker_zkvm recursive）
 // 完整版（阶段 5）会引入 poker_zkvm::stwo_backend::recursive 的 Verifier AIR

@@ -1,0 +1,237 @@
+//! 证明任务（Prove Task）— Post-commit Prover 的数据契约。
+//!
+//! ## 角色
+//!
+//! 合约执行层（`poker_l1` dispatch）每次成功执行一个 method 后，产出一个
+//! [`ProveTask`]，序列化进 `DispatchResult.return_value`（与 events 一起）。
+//! 链下 Orchestrator（[`crate::orchestrator`]）消费任务队列，为每个任务
+//! 生成 method proof，并聚合为单个 final proof。
+//!
+//! ## 设计原则
+//!
+//! - **不阻塞执行**：合约层只记录任务，不生成 proof（prove 是重计算，异步做）
+//! - **依赖方向保持 air → l1**：本模块只定义数据结构，由 Orchestrator 消费；
+//!   合约层填充任务时依赖此结构（通过 `poker_texas_air` crate），但这只在
+//!   测试/PoC 场景；生产中合约层用一个等价的纯数据结构，Orchestrator 反序列化
+//! - **pre/post table 快照**：Orchestrator 从两个快照算 pre/post state_root，
+//!   无需合约层暴露 state_root 计算逻辑
+//!
+//! ## 与 DispatchResult.return_value 的关系
+//!
+//! `return_value` = borsh([`DispatchOutput`])，其中 `DispatchOutput` 含
+//! `events` + `prove_task`。旧格式（仅 events）通过版本前缀区分。
+
+use borsh::{BorshSerialize, BorshDeserialize};
+
+use crate::method_kind::MethodKind;
+
+/// 方法业务输入的枚举封装。
+///
+/// 每个 variant 对应一组方法参数（与 `poker_l1` 的 `*Args` 结构对齐）。
+/// Orchestrator 据此为对应 method AIR 构造 trace。
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub enum MethodInput {
+    /// 仅含 seat_index 的方法（fold/check/call/auto_fold/force_fold/leave_table/
+    /// leave_with_proof/submit_shuffle_v2/submit_player_reveal_tokens/
+    /// submit_reconstruct_deck/kick_player）。
+    SeatOnly {
+        /// 座位索引。
+        seat_index: u8,
+    },
+    /// `raise`（seat_index + total_bet）。
+    Raise {
+        /// 座位索引。
+        seat_index: u8,
+        /// 加注后本轮总下注额。
+        total_bet: u64,
+    },
+    /// `bet`（seat_index + amount 增量）。
+    Bet {
+        /// 座位索引。
+        seat_index: u8,
+        /// 下注增量。
+        amount: u64,
+    },
+    /// `addon` / `rebuy`（seat_index + amount）。
+    Funds {
+        /// 座位索引。
+        seat_index: u8,
+        /// 金额。
+        amount: u64,
+    },
+    /// `kick_player`（seat_index + reason）。
+    Kick {
+        /// 座位索引。
+        seat_index: u8,
+        /// 踢出原因。
+        reason: u8,
+    },
+    /// `join_table` / `join_and_shuffle`（player + buy_in）。
+    Join {
+        /// 玩家地址。
+        player: [u8; 20],
+        /// 买入金额。
+        buy_in: u64,
+    },
+    /// `create_table`（name + max_players + small_blind + big_blind）。
+    CreateTable {
+        /// 桌台名称。
+        name: String,
+        /// 最大玩家数。
+        max_players: u8,
+        /// 小盲注。
+        small_blind: u64,
+        /// 大盲注。
+        big_blind: u64,
+    },
+    /// 无业务参数的方法（start_hand / tick / reset_for_next_hand）。
+    Empty,
+}
+
+/// 单次 method 调用的证明任务。
+///
+/// 合约执行成功后产出，Orchestrator 据此生成一个 method proof。
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct ProveTask {
+    /// 方法种类（选 AIR）。
+    pub method_kind: MethodKind,
+    /// 方法业务输入。
+    pub method_input: MethodInput,
+    /// 调用前表台快照（算 pre_state_root + 派生 pre 字段）。
+    pub pre_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    /// 调用后表台快照（算 post_state_root + 派生 post 字段）。
+    pub post_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    /// 表台 ID（公开输入，防跨表台聚合攻击）。
+    pub table_id: u64,
+    /// 手牌序号（同一 table 内递增）。
+    pub hand_id: u32,
+    /// 方法调用序号（同一 hand 内递增，Aggregator 据此排序）。
+    pub call_seq: u32,
+}
+
+impl ProveTask {
+    /// 构造新的证明任务。
+    #[must_use]
+    pub fn new(
+        method_kind: MethodKind,
+        method_input: MethodInput,
+        pre_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        post_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+    ) -> Self {
+        Self {
+            method_kind,
+            method_input,
+            pre_table,
+            post_table,
+            table_id,
+            hand_id,
+            call_seq,
+        }
+    }
+}
+
+/// dispatch 输出结构（return_value 的新格式）。
+///
+/// 包含 state_machine 产生的 events + 证明任务。
+/// Orchestrator 从链层取回 return_value 后反序列化此结构。
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct DispatchOutput {
+    /// 事件日志（40 种 TexasPokerEvent）。
+    pub events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
+    /// 证明任务（None 表示此次 dispatch 无需证明，如 tick 无状态变更时）。
+    pub prove_task: Option<ProveTask>,
+}
+
+impl DispatchOutput {
+    /// 仅含 events（无证明任务）的便捷构造。
+    #[must_use]
+    pub fn events_only(events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>) -> Self {
+        Self {
+            events,
+            prove_task: None,
+        }
+    }
+
+    /// 含 events + 证明任务的构造。
+    #[must_use]
+    pub fn with_task(
+        events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
+        prove_task: ProveTask,
+    ) -> Self {
+        Self {
+            events,
+            prove_task: Some(prove_task),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_table(name: &str) -> poker_l1::vm::contracts::texas_poker::types::TexasPokerTable {
+        use poker_l1::object_model::ObjectID;
+        poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+            ObjectID::new([0xFF; 20], 0),
+            name.into(),
+            [0u8; 20],
+            6,
+            50,
+            100,
+        )
+    }
+
+    #[test]
+    fn prove_task_borsh_roundtrip() {
+        let task = ProveTask::new(
+            MethodKind::Fold,
+            MethodInput::SeatOnly { seat_index: 2 },
+            dummy_table("pre"),
+            dummy_table("post"),
+            42,
+            1,
+            3,
+        );
+        let bytes = borsh::to_vec(&task).unwrap();
+        let recovered: ProveTask = borsh::from_slice(&bytes).unwrap();
+        assert_eq!(recovered.method_kind, MethodKind::Fold);
+        assert_eq!(recovered.table_id, 42);
+        assert_eq!(recovered.hand_id, 1);
+        assert_eq!(recovered.call_seq, 3);
+        match recovered.method_input {
+            MethodInput::SeatOnly { seat_index } => assert_eq!(seat_index, 2),
+            other => panic!("expected SeatOnly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_output_borsh_roundtrip() {
+        let out = DispatchOutput::events_only(vec![]);
+        let bytes = borsh::to_vec(&out).unwrap();
+        let recovered: DispatchOutput = borsh::from_slice(&bytes).unwrap();
+        assert!(recovered.events.is_empty());
+        assert!(recovered.prove_task.is_none());
+
+        let task = ProveTask::new(
+            MethodKind::CreateTable,
+            MethodInput::CreateTable {
+                name: "t".into(),
+                max_players: 6,
+                small_blind: 50,
+                big_blind: 100,
+            },
+            dummy_table("pre"),
+            dummy_table("post"),
+            1,
+            0,
+            0,
+        );
+        let out2 = DispatchOutput::with_task(vec![], task);
+        let bytes2 = borsh::to_vec(&out2).unwrap();
+        let recovered2: DispatchOutput = borsh::from_slice(&bytes2).unwrap();
+        assert!(recovered2.prove_task.is_some());
+    }
+}

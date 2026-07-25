@@ -77,36 +77,37 @@ pub fn bool_to_field(b: bool) -> FieldElement {
 
 /// TexasPokerTable 的状态根预计算输入。
 ///
-/// 把 22 字段按固定顺序编码为 `Vec<FieldElement>`，作为 Poseidon252 输入。
+/// 把字段按固定顺序编码为 `Vec<FieldElement>`，作为 Poseidon252 输入。
 /// 顺序固定且不可变更——这是 AIR 约束侧的「契约」。
 ///
 /// # 字段顺序
 ///
 /// 1. `table_id_hash`（ObjectID 的 Blake2b → u256 → FieldElement）
 /// 2. `name_hash`（变长字符串的 Poseidon）
-/// 3. `max_players`（u8）
-/// 4. `small_blind`（u64）
-/// 5. `big_blind`（u64）
-/// 6. `button`（u8）
-/// 7. `pot`（u64）
-/// 8. `side_pots_root`（Merkle root）
-/// 9. `community_cards_root`（Merkle root）
-/// 10. `round_state`（u8）
-/// 11. `betting_round_root`（嵌套 Poseidon）
-/// 12. `current_turn_flag`（bool，标记 Option<u8> 是 Some 还是 None）
-/// 13. `current_turn_seat`（u8，None 时为 0）
-/// 14. `deck_state_root`
-/// 15. `shuffle_state_root`
-/// 16. `reveal_token_state_root`
-/// 17. `reconstruct_state_root`
-/// 18. `timeout_config_root`
-/// 19. `timestamps_root`
-/// 20. `chip_pool`（u64）
-/// 21. `config_root`
-/// 22. `version`（u64）
-/// 23. `seats_root`（Merkle root，最后一项便于叶子局部更新证明）
+/// 3. `creator`（Address 20 字节右对齐 → FieldElement）
+/// 4. `max_players`（u8）
+/// 5. `small_blind`（u64）
+/// 6. `big_blind`（u64）
+/// 7. `button`（u8）
+/// 8. `pot`（u64）
+/// 9. `side_pots_root`（Merkle root）
+/// 10. `community_cards_root`（Merkle root）
+/// 11. `round_state`（u8）
+/// 12. `betting_round_root`（嵌套 Poseidon）
+/// 13. `current_turn_flag`（bool，标记 Option<u8> 是 Some 还是 None）
+/// 14. `current_turn_seat`（u8，None 时为 0）
+/// 15. `deck_state_root`
+/// 16. `shuffle_state_root`
+/// 17. `reveal_token_state_root`
+/// 18. `reconstruct_state_root`
+/// 19. `timeout_config_root`
+/// 20. `timestamps_root`
+/// 21. `chip_pool`（u64）
+/// 22. `config_root`
+/// 23. `version`（u64）
+/// 24. `seats_root`（Merkle root，最后一项便于叶子局部更新证明）
 pub fn table_state_preimage(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable) -> TexasAirResult<Vec<FieldElement>> {
-    let mut preimage = Vec::with_capacity(23);
+    let mut preimage = Vec::with_capacity(24);
 
     // 1. table_id_hash：ObjectID 通常为 32 字节，用 Blake2b 压缩到 32 字节后转 FieldElement
     let id_bytes = borsh::to_vec(&table.id)
@@ -120,14 +121,19 @@ pub fn table_state_preimage(table: &poker_l1::vm::contracts::texas_poker::types:
     let name_field = poseidon_string(&table.name);
     preimage.push(name_field);
 
-    // 3-7. 标量字段
+    // 3. creator：Address (20 字节) 右对齐到 32 字节 BE → FieldElement。
+    //    必须进入 state_root，否则 creator 改动不被 state_root 捕获（P0-2 权限校验
+    //    要求 creator 的变更可被证明系统约束）。
+    preimage.push(address_to_field(&table.creator));
+
+    // 4-8. 标量字段
     preimage.push(u8_to_field(table.max_players));
     preimage.push(u64_to_field(table.small_blind));
     preimage.push(u64_to_field(table.big_blind));
     preimage.push(u8_to_field(table.button));
     preimage.push(u64_to_field(table.pot));
 
-    // 8. side_pots_root：空列表哈希为 0，非空用 MerkleTree
+    // 9. side_pots_root：空列表哈希为 0，非空用 MerkleTree
     let side_pots_root = if table.side_pots.is_empty() {
         FieldElement::ZERO
     } else {
@@ -137,21 +143,21 @@ pub fn table_state_preimage(table: &poker_l1::vm::contracts::texas_poker::types:
     };
     preimage.push(side_pots_root);
 
-    // 9. community_cards_root：0..=5 张牌的 Poseidon
+    // 10. community_cards_root：0..=5 张牌的 Poseidon
     let community_cards_root = poseidon_cards(&table.community_cards);
     preimage.push(community_cards_root);
 
-    // 10. round_state
+    // 11. round_state
     preimage.push(u8_to_field(table.round_state));
 
-    // 11. betting_round_root
+    // 12. betting_round_root
     let betting_round_root = match &table.betting_round {
         Some(br) => poseidon_betting_round(br),
         None => FieldElement::ZERO,
     };
     preimage.push(betting_round_root);
 
-    // 12-13. current_turn: Option<u8>
+    // 13-14. current_turn: Option<u8>
     let (ct_flag, ct_seat) = match table.current_turn {
         Some(seat) => (bool_to_field(true), u8_to_field(seat)),
         None => (bool_to_field(false), FieldElement::ZERO),
@@ -159,26 +165,26 @@ pub fn table_state_preimage(table: &poker_l1::vm::contracts::texas_poker::types:
     preimage.push(ct_flag);
     preimage.push(ct_seat);
 
-    // 14-17. 协议状态根
+    // 15-18. 协议状态根
     preimage.push(poseidon_deck_state(&table.deck_state));
     preimage.push(poseidon_shuffle_state(&table.shuffle_state));
     preimage.push(poseidon_reveal_token_state(&table.reveal_token_state));
     preimage.push(poseidon_reconstruct_state(&table.reconstruct_state));
 
-    // 18-19. 配置
+    // 19-20. 配置
     preimage.push(poseidon_timeout_config(&table.timeout_config));
     preimage.push(poseidon_timestamps(&table.timestamps));
 
-    // 20. chip_pool
+    // 21. chip_pool
     preimage.push(u64_to_field(table.chip_pool));
 
-    // 21. config_root
+    // 22. config_root
     preimage.push(poseidon_table_config(&table.config));
 
-    // 22. version
+    // 23. version
     preimage.push(u64_to_field(table.version));
 
-    // 23. seats_root：6/9 个 seats 的 Merkle root
+    // 24. seats_root：6/9 个 seats 的 Merkle root
     let seats_root = compute_seats_root(&table.seats)?;
     preimage.push(seats_root);
 
@@ -239,6 +245,17 @@ fn bytes_to_field(bytes: &[u8; 32]) -> Option<FieldElement> {
     let mut masked = *bytes;
     masked[0] &= 0x07;
     FieldElement::from_bytes_be(&masked).ok()
+}
+
+/// 把 Address（20 字节）编码为 Starknet FieldElement。
+///
+/// 20 字节 < 32 字节，不会溢出 Fr 模数，因此无需像 32 字节那样做 `& 0x07` 截断。
+/// 右对齐到 32 字节 BE buffer 后复用 [`bytes_to_field`]。
+#[must_use]
+pub fn address_to_field(addr: &poker_l1::Address) -> FieldElement {
+    let mut buf = [0u8; 32];
+    buf[12..].copy_from_slice(addr); // 右对齐（前 12 字节为 0）
+    bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
 }
 
 fn poseidon_hash_many(inputs: &[FieldElement]) -> FieldElement {

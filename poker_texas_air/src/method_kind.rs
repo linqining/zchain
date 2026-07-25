@@ -12,6 +12,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshSerialize, BorshDeserialize};
 
 /// 方法选择器长度（32 字节 = blake2b_256 输出）。
 pub const METHOD_SELECTOR_LEN: usize = 32;
@@ -34,7 +35,8 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
 /// 18 个方法种类的枚举。
 ///
 /// 每个 variant 对应 `poker_l1` 的一个 `apply_*` 函数，并拥有自己的专用 AIR。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
 #[repr(u8)]
 pub enum MethodKind {
     // ===== A 档：表台生命周期（6 个）=====
