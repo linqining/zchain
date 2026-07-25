@@ -430,7 +430,7 @@ fn start_betting_round(
             .max()
             .unwrap_or(bb)
             .max(bb);
-        let mut r = BettingRound::new_preflop(bb);
+        let mut r = BettingRound::new(bb, bb);
         // 若 ante 让最大 bet 超过 bb，抬高 current_bet 以对齐（min_raise 保持 bb）。
         if max_bet > bb {
             r.current_bet = max_bet;
@@ -441,7 +441,7 @@ fn start_betting_round(
         for s in &mut table.seats {
             s.bet = 0;
         }
-        BettingRound::new_postflop(bb)
+        BettingRound::new(bb, 0)
     };
     table.betting_round = Some(round);
 
@@ -1924,7 +1924,7 @@ pub fn apply_raise(
     let seat_bet = table.seats[seat_index as usize].bet;
     let seat_stack = table.seats[seat_index as usize].stack;
     let round = table.betting_round.as_mut().expect("checked above");
-    let needed = round.process_raise(total_bet, seat_index, seat_bet, seat_stack)?;
+    let needed = round.process_raise(total_bet, seat_bet, seat_stack)?;
 
     let seat = &mut table.seats[seat_index as usize];
     seat.stack = seat
@@ -2348,10 +2348,7 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
         return;
     }
 
-    // P1-9 修复：先 side pot 分层，再基于分层总额算 rake，按比例从各 pot 扣除。
-    // 原实现先从 table.pot 扣 rake，再用 total_bet 重算分层，导致 result.total()
-    // （基于 total_bet）> table.pot（已扣 rake），分配总额超发。
-    let n = table.seats.len();
+    // 先 side pot 分层，再基于分层总额算 rake，按比例从各 pot 扣除（守恒）。
     let bets: Vec<u64> = table.seats.iter().map(|s| s.total_bet).collect();
     let folded: Vec<bool> = table.seats.iter().map(|s| s.folded || s.left_during_hand).collect();
     let all_in: Vec<bool> = table.seats.iter().map(|s| s.all_in).collect();
@@ -2366,9 +2363,8 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
         }
     };
 
-    // 基于分层总额计算 rake，并按各 pot 占比从 main/side pot 扣除（守恒）。
+    // 基于分层总额计算 rake，按各 pot 占比扣除（余数归 pots[0]，守恒）。
     let total_before_rake = result.total();
-    let pot_before = total_before_rake;
     let rake = compute_rake_amount(table, total_before_rake);
     if rake > 0 {
         apply_rake_to_pots(&mut result, rake);
@@ -2377,7 +2373,7 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
             events,
             TexasPokerEvent::RakeCollected {
                 table_id: table.id,
-                pot_before,
+                pot_before: total_before_rake,
                 rake_amount: rake,
                 pot_after: result.total(),
                 rake_mode: table.rake_mode,
@@ -2385,14 +2381,12 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
         );
     }
 
-    // P1-4 修复：main_eligible 直接取分层算法结果（同源），不再重新计算。
-    let main_winners = find_winners_in_seats(table, &result.main_eligible);
-    distribute_pot_to_winners(table, result.main_pot, &main_winners, POT_TYPE_MAIN, events);
-
-    let mut all_winners: Vec<u8> = main_winners.clone();
-    for sp in &result.side_pots {
-        let winners = find_winners_in_seats(table, &sp.eligible_seats);
-        distribute_pot_to_winners(table, sp.amount, &winners, POT_TYPE_SIDE, events);
+    // 逐层分配：pots[0] 是主池，pots[1..] 是边池。eligible 取分层算法结果（同源）。
+    let mut all_winners: Vec<u8> = Vec::new();
+    for (idx, sp) in result.pots.iter().enumerate() {
+        let pot_type = if idx == 0 { POT_TYPE_MAIN } else { POT_TYPE_SIDE };
+        let winners = find_winners_in_seats(table, sp.eligible_seats);
+        distribute_pot_to_winners(table, sp.amount, &winners, pot_type, events);
         all_winners.extend(&winners);
     }
 
@@ -2411,8 +2405,6 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
 }
 
 /// 计算 rake 金额（不修改状态），供 settle_hand 在分层后使用。
-///
-/// 规则与 [`collect_rake`] 一致，但不直接改 table.pot（因为分层已基于 total_bet）。
 fn compute_rake_amount(table: &TexasPokerTable, pot: u64) -> u64 {
     if table.rake_mode == super::constants::RAKE_MODE_NONE {
         return 0;
@@ -2421,63 +2413,39 @@ fn compute_rake_amount(table: &TexasPokerTable, pot: u64) -> u64 {
     raw_rake.min(table.rake_cap).min(pot)
 }
 
-/// 按 main/side pot 占比从各 pot 扣除 rake，余数归 main pot（守恒）。
+/// 按各 pot 占比扣除 rake，余数归 pots[0]（守恒）。
 ///
 /// 扣除后 `result.total()` 恰好减少 `rake`。
 fn apply_rake_to_pots(result: &mut side_pot::SidePotResult, rake: u64) {
     let total = result.total();
-    if total == 0 {
+    if total == 0 || rake == 0 || result.pots.is_empty() {
         return;
     }
-    // main pot 承担的 rake（余数归 main，保证总和守恒）
-    let main_rake = if result.side_pots.is_empty() {
-        rake
-    } else {
-        // 按 main_pot / total 比例，余数归 main
-        let side_total: u64 = result.side_pots.iter().map(|p| p.amount).sum();
-        let side_rake_total = side_total
-            .checked_mul(rake)
-            .map(|v| v / total)
-            .unwrap_or(0);
-        rake.saturating_sub(side_rake_total)
-    };
-    result.main_pot = result.main_pot.saturating_sub(main_rake);
-
-    let side_total_before: u64 = result.side_pots.iter().map(|p| p.amount).sum();
-    let side_rake_budget = rake.saturating_sub(main_rake);
-    let mut side_rake_used = 0u64;
-    for sp in &mut result.side_pots {
-        let this_rake = if side_total_before == 0 {
-            0
-        } else {
-            sp.amount.checked_mul(side_rake_budget).map(|v| v / total).unwrap_or(0)
-        };
-        sp.amount = sp.amount.saturating_sub(this_rake);
-        side_rake_used = side_rake_used.saturating_add(this_rake);
+    let mut rake_used = 0u64;
+    // 除第一个 pot 外，按占比扣除；余数（尾差）归 pots[0]。
+    for sp in result.pots.iter_mut().skip(1) {
+        let this_rake = sp.amount * rake / total;
+        sp.amount -= this_rake;
+        rake_used += this_rake;
     }
-    // 若 side pot 按比例扣除后有尾差（因整数除法），补扣到 main pot
-    let leftover = side_rake_budget.saturating_sub(side_rake_used);
-    if leftover > 0 {
-        result.main_pot = result.main_pot.saturating_sub(leftover);
-    }
+    result.pots[0].amount -= rake - rake_used;
 }
 
-/// 在指定 eligible seats 中找最佳手牌持有者。
+/// 在指定 eligible seats（位掩码）中找最佳手牌持有者。
 ///
-/// 评估规则：
-/// - 手牌 + 公共牌 >= 7 张时走标准 `best_hand`（7 选 5 最佳）。
-/// - 牌数 < 7（异常路径，如 showdown 提前触发或某玩家 hand 不全）时，
-///   该玩家仍参与比较，但用现有牌集合能组成的"最大牌型"做保守评估：
-///   取现有牌中最大的 5 张（不足 5 张则全部），按 `evaluate_partial` 评分。
-///   这样避免原先"牌不足即默认当赢家"的误判（P0-3 修复）。
-fn find_winners_in_seats(table: &TexasPokerTable, eligible: &[u8]) -> Vec<u8> {
-    if eligible.is_empty() {
+/// 用 `evaluate_best` 评估手牌+公共牌（统一处理 5..=7 张及不足 5 张的 0 填充），
+/// 取最大 HandRank 的玩家；平局返回多人。
+fn find_winners_in_seats(table: &TexasPokerTable, eligible_mask: u16) -> Vec<u8> {
+    if eligible_mask == 0 {
         return vec![];
     }
     let mut best_rank: Option<super::hand_evaluator::HandRank> = None;
     let mut winners: Vec<u8> = vec![];
 
-    for &seat in eligible {
+    for seat in 0..table.seats.len() as u8 {
+        if !side_pot::is_eligible(eligible_mask, seat) {
+            continue;
+        }
         let s = &table.seats[seat as usize];
         if s.hand.is_empty() {
             continue;
@@ -2485,26 +2453,30 @@ fn find_winners_in_seats(table: &TexasPokerTable, eligible: &[u8]) -> Vec<u8> {
         let mut cards = s.hand.clone();
         cards.extend_from_slice(&table.community_cards);
 
-        // P0-3 修复：统一用"可评估的最大牌组合"，不再因牌不足而默认当赢家。
-        let rank = super::hand_evaluator::evaluate_best_or_partial(&cards);
+        let rank = super::hand_evaluator::evaluate_best(&cards);
         match &best_rank {
             None => {
-                best_rank = Some(rank.clone());
+                best_rank = Some(rank);
                 winners = vec![seat];
             }
             Some(b) => {
-                let cmp = super::hand_evaluator::compare(&rank, b);
-                if cmp == 2 {
-                    best_rank = Some(rank);
-                    winners = vec![seat];
-                } else if cmp == 1 {
-                    winners.push(seat);
+                use std::cmp::Ordering;
+                match rank.cmp(b) {
+                    Ordering::Greater => {
+                        best_rank = Some(rank);
+                        winners = vec![seat];
+                    }
+                    Ordering::Equal => {
+                        winners.push(seat);
+                    }
+                    Ordering::Less => {}
                 }
             }
         }
     }
     if winners.is_empty() {
-        winners.push(eligible[0]);
+        // 所有 eligible 玩家都无手牌（异常），回退到最低位 eligible 座位。
+        winners.push(eligible_mask.trailing_zeros() as u8);
     }
     winners
 }
@@ -3363,7 +3335,7 @@ mod tests {
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
         table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new_preflop(100));
+        table.betting_round = Some(BettingRound::new(100, 100));
         table.current_turn = Some(0);
         table.pot = 200;
         let mut events = vec![];
@@ -3390,7 +3362,7 @@ mod tests {
         table.seats[1].stack = 1000;
         table.seats[1].bet = 100;
         table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new_preflop(100));
+        table.betting_round = Some(BettingRound::new(100, 100));
         table.current_turn = Some(0);
         let mut events = vec![];
 
@@ -3413,7 +3385,7 @@ mod tests {
         table.seats[1].bet = 100;
         table.seats[1].acted_this_round = true;
         table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new_preflop(100));
+        table.betting_round = Some(BettingRound::new(100, 100));
         table.current_turn = Some(0);
         let mut events = vec![];
 
@@ -3508,7 +3480,7 @@ mod tests {
     fn test_is_betting_complete() {
         let mut table = make_table();
         table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new_preflop(100));
+        table.betting_round = Some(BettingRound::new(100, 100));
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 1000;
         table.seats[0].bet = 100;
@@ -3651,7 +3623,7 @@ mod tests {
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
         table.round_state = ROUND_FLOP;
-        table.betting_round = Some(BettingRound::new_postflop(100));
+        table.betting_round = Some(BettingRound::new(100, 0));
         table.current_turn = Some(0);
         let mut events = vec![];
 
@@ -3672,7 +3644,7 @@ mod tests {
         table.seats[0].stack = 1000;
         table.seats[0].bet = 50;
         table.round_state = ROUND_FLOP;
-        table.betting_round = Some(BettingRound::new_postflop(100));
+        table.betting_round = Some(BettingRound::new(100, 0));
         // 模拟已有下注：current_bet = 100 > seat.bet = 50
         table.betting_round.as_mut().unwrap().current_bet = 100;
         table.current_turn = Some(0);
@@ -3687,7 +3659,7 @@ mod tests {
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 1000;
         table.round_state = ROUND_FLOP;
-        table.betting_round = Some(BettingRound::new_postflop(100));
+        table.betting_round = Some(BettingRound::new(100, 0));
         table.current_turn = Some(0);
 
         let err = apply_bet(&mut table, 0, 0, &mut vec![]).unwrap_err();

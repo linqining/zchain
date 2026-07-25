@@ -1,9 +1,12 @@
-//! Texas Poker 下注规则（移植自 `texas_poker_move/sources/betting.move`）。
+//! Texas Poker 下注轮状态与规则。
 //!
-//! 包含下注轮状态、跟注/加注/检查的校验与处理逻辑。
-//! 关键修复点（与 Move 端一致）：
-//! - M-D7: `can_raise` 用 `stack > to_call` 允许短 all-in
-//! - M-D8: 减法前 assert 防 u64 下溢
+//! # 电路友好设计
+//!
+//! - `BettingRound` 仅保留两个状态字段：`current_bet`（当前轮最高下注）与
+//!   `min_raise`（最小加注增量）。删除了 `actions_taken`/`last_raiser_seat`/
+//!   `big_blind` 等死字段（生产代码从未读取）。
+//! - 下注轮完成判定由 state_machine 的 `acted_this_round` + `bet == current_bet`
+//!   完成，BettingRound 只负责金额校验。
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -11,59 +14,29 @@ use serde::{Deserialize, Serialize};
 use super::constants::{ACTION_CALL, ACTION_CHECK, ACTION_FOLD, ACTION_RAISE};
 
 /// 下注轮状态。
-///
-/// 对应 Move `BettingRound` struct（betting.move:24-30）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BettingRound {
     /// 当前轮最高下注。
     pub current_bet: u64,
-    /// 最小加注增量。
+    /// 最小加注增量（初始 = big_blind）。
     pub min_raise: u64,
-    /// 大盲注（= min_raise 初始值）。
-    pub big_blind: u64,
-    /// 最后一个加注者的 seat_index。
-    pub last_raiser_seat: Option<u8>,
-    /// 已处理动作数（含 fold）。
-    pub actions_taken: u64,
 }
 
 impl BettingRound {
-    /// 创建 preflop 下注轮（current_bet = big_blind, min_raise = big_blind）。
+    /// 创建下注轮（preflop current_bet=big_blind，postflop current_bet=0）。
     #[must_use]
-    pub fn new_preflop(big_blind: u64) -> Self {
+    pub fn new(big_blind: u64, current_bet: u64) -> Self {
         assert!(big_blind > 0, "big_blind 必须 > 0");
         Self {
-            current_bet: big_blind,
+            current_bet,
             min_raise: big_blind,
-            big_blind,
-            last_raiser_seat: None,
-            actions_taken: 0,
         }
     }
 
-    /// 创建 postflop 下注轮（current_bet = 0, min_raise = big_blind）。
-    #[must_use]
-    pub fn new_postflop(big_blind: u64) -> Self {
-        assert!(big_blind > 0, "big_blind 必须 > 0");
-        Self {
-            current_bet: 0,
-            min_raise: big_blind,
-            big_blind,
-            last_raiser_seat: None,
-            actions_taken: 0,
-        }
-    }
-
-    /// 计算跟注所需筹码。
-    ///
-    /// `chips_to_call = max(current_bet - seat_bet, 0)`。
+    /// 计算跟注所需筹码：`max(current_bet - seat_bet, 0)`。
     #[must_use]
     pub fn chips_to_call(&self, seat_bet: u64) -> u64 {
-        if self.current_bet > seat_bet {
-            self.current_bet - seat_bet
-        } else {
-            0
-        }
+        self.current_bet.saturating_sub(seat_bet)
     }
 
     /// 是否可以 check（chips_to_call == 0）。
@@ -78,18 +51,16 @@ impl BettingRound {
         self.chips_to_call(seat_bet) > 0 && stack > 0
     }
 
-    /// 是否可以 raise（stack > chips_to_call，M-D7：允许短 all-in）。
+    /// 是否可以 raise（stack > chips_to_call，允许短 all-in）。
     #[must_use]
     pub fn can_raise(&self, seat_bet: u64, stack: u64) -> bool {
-        let to_call = self.chips_to_call(seat_bet);
-        stack > to_call
+        stack > self.chips_to_call(seat_bet)
     }
 
     /// 获取可用动作位掩码。
     #[must_use]
     pub fn available_actions(&self, seat_bet: u64, stack: u64) -> u8 {
-        let mut mask = 0u8;
-        mask |= ACTION_FOLD; // fold 永远可用
+        let mut mask = ACTION_FOLD; // fold 永远可用
         if self.can_check(seat_bet) {
             mask |= ACTION_CHECK;
         }
@@ -102,77 +73,56 @@ impl BettingRound {
         mask
     }
 
-    /// 处理 call，返回实际跟注金额（处理 all-in 时 call < chips_to_call）。
-    ///
-    /// 镜像 `betting.move` 中 call 处理逻辑：
-    /// `call_amount = min(chips_to_call, stack)`
+    /// 处理 call，返回实际跟注金额（all-in 时可能 < chips_to_call）。
     #[must_use]
     pub fn process_call(&self, seat_bet: u64, stack: u64) -> u64 {
-        let to_call = self.chips_to_call(seat_bet);
-        to_call.min(stack)
+        self.chips_to_call(seat_bet).min(stack)
     }
 
     /// 处理 raise，返回玩家需补的筹码（needed = total_bet - seat_bet）。
     ///
-    /// 镜像 `betting.move:102-136`（process_raise）：
-    /// - 校验 total_bet > current_bet
-    /// - 校验 total_bet > seat_bet
-    /// - 计算 raise_amount = total_bet - current_bet
-    /// - all-in 情况：仅当 raise_amount >= min_raise 时更新状态
-    /// - 非 all-in：强制 min_raise 检查并更新状态
+    /// # 规则
+    /// - 校验 `total_bet > current_bet` 且 `total_bet > seat_bet`。
+    /// - all-in（needed == stack）且 `raise_amount < min_raise`：允许但不更新 min_raise
+    ///   （短 all-in 不重新打开行动权）。
+    /// - 非 all-in 且 `raise_amount < min_raise`：拒绝。
     ///
     /// # Errors
-    /// - `total_bet <= current_bet`
-    /// - `total_bet <= seat_bet`
-    /// - `needed > stack`
-    /// - 非 all-in 且 `raise_amount < min_raise`
+    /// - `total_bet <= current_bet` 或 `total_bet <= seat_bet`：`InvalidRaiseAmount`
+    /// - `needed > stack`：`CannotRaise`
+    /// - 非 all-in 且 `raise_amount < min_raise`：`InvalidRaiseAmount`
     pub fn process_raise(
         &mut self,
         total_bet: u64,
-        seat_id: u8,
         seat_bet: u64,
         stack: u64,
     ) -> Result<u64, BettingError> {
-        if total_bet <= self.current_bet {
+        if total_bet <= self.current_bet || total_bet <= seat_bet {
             return Err(BettingError::InvalidRaiseAmount);
         }
-        if total_bet <= seat_bet {
-            return Err(BettingError::InvalidRaiseAmount);
-        }
-        // M-D8: 减法前 assert 防止 u64 下溢
-        assert!(total_bet > self.current_bet);
         let raise_amount = total_bet - self.current_bet;
-        assert!(total_bet > seat_bet);
         let needed = total_bet - seat_bet;
-
         if needed > stack {
             return Err(BettingError::CannotRaise);
         }
 
-        if needed == stack {
-            // all-in 情况：仅当 raise_amount >= min_raise 时才更新状态
-            if raise_amount >= self.min_raise {
-                self.min_raise = raise_amount;
-                self.last_raiser_seat = Some(seat_id);
-            }
-            // 短 all-in（raise_amount < min_raise）：不更新，不重新打开行动权
-        } else {
-            // 非 all-in：强制 min_raise 检查并更新状态
-            if raise_amount < self.min_raise {
-                return Err(BettingError::InvalidRaiseAmount);
-            }
+        let is_all_in = needed == stack;
+        if raise_amount >= self.min_raise {
+            // 合法加注：更新 min_raise（all-in 达到 min_raise 也更新）。
             self.min_raise = raise_amount;
-            self.last_raiser_seat = Some(seat_id);
+        } else if !is_all_in {
+            // 非 all-in 且低于 min_raise：拒绝。
+            return Err(BettingError::InvalidRaiseAmount);
         }
+        // 短 all-in（raise_amount < min_raise）：允许但不更新 min_raise。
 
         self.current_bet = total_bet;
-        self.actions_taken += 1;
         Ok(needed)
     }
 }
 
 /// 下注错误类型。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BettingError {
     #[error("invalid raise amount")]
     InvalidRaiseAmount,
@@ -190,97 +140,91 @@ mod tests {
 
     #[test]
     fn test_new_preflop() {
-        let round = BettingRound::new_preflop(100);
+        let round = BettingRound::new(100, 100);
         assert_eq!(round.current_bet, 100);
         assert_eq!(round.min_raise, 100);
-        assert_eq!(round.big_blind, 100);
-        assert!(round.last_raiser_seat.is_none());
     }
 
     #[test]
     fn test_new_postflop() {
-        let round = BettingRound::new_postflop(100);
+        let round = BettingRound::new(100, 0);
         assert_eq!(round.current_bet, 0);
         assert_eq!(round.min_raise, 100);
     }
 
     #[test]
     fn test_chips_to_call() {
-        let round = BettingRound::new_preflop(100);
-        assert_eq!(round.chips_to_call(0), 100); // SB 需补 100
-        assert_eq!(round.chips_to_call(50), 50); // SB 已下 50，需补 50
-        assert_eq!(round.chips_to_call(100), 0); // BB 已下 100，无需补
-        assert_eq!(round.chips_to_call(200), 0); // 超过 current_bet，无需补
+        let round = BettingRound::new(100, 100);
+        assert_eq!(round.chips_to_call(0), 100);
+        assert_eq!(round.chips_to_call(50), 50);
+        assert_eq!(round.chips_to_call(100), 0);
+        assert_eq!(round.chips_to_call(200), 0);
     }
 
     #[test]
     fn test_can_check() {
-        let round = BettingRound::new_preflop(100);
-        assert!(!round.can_check(0)); // SB 不能 check
-        assert!(round.can_check(100)); // BB 能 check
+        let round = BettingRound::new(100, 100);
+        assert!(!round.can_check(0));
+        assert!(round.can_check(100));
     }
 
     #[test]
     fn test_process_call() {
-        let round = BettingRound::new_preflop(100);
-        assert_eq!(round.process_call(0, 1000), 100); // 正常 call
-        assert_eq!(round.process_call(0, 50), 50); // all-in call（< to_call）
-        assert_eq!(round.process_call(100, 1000), 0); // 已满，无需 call
+        let round = BettingRound::new(100, 100);
+        assert_eq!(round.process_call(0, 1000), 100);
+        assert_eq!(round.process_call(0, 50), 50); // all-in call
+        assert_eq!(round.process_call(100, 1000), 0);
     }
 
     #[test]
     fn test_process_raise_normal() {
-        let mut round = BettingRound::new_preflop(100);
-        // 正常加注：current_bet=100, raise to 300, raise_amount=200 >= min_raise=100
-        let needed = round.process_raise(300, 0, 0, 1000).unwrap();
+        let mut round = BettingRound::new(100, 100);
+        let needed = round.process_raise(300, 0, 1000).unwrap();
         assert_eq!(needed, 300);
         assert_eq!(round.current_bet, 300);
         assert_eq!(round.min_raise, 200);
-        assert_eq!(round.last_raiser_seat, Some(0));
     }
 
     #[test]
     fn test_process_raise_all_in_sufficient() {
-        let mut round = BettingRound::new_preflop(100);
-        // all-in 加注：stack=300, total_bet=300, needed=300=stack, raise_amount=200 >= min_raise
-        let needed = round.process_raise(300, 0, 0, 300).unwrap();
+        let mut round = BettingRound::new(100, 100);
+        let needed = round.process_raise(300, 0, 300).unwrap();
         assert_eq!(needed, 300);
-        assert_eq!(round.min_raise, 200); // 更新
-        assert_eq!(round.last_raiser_seat, Some(0));
+        assert_eq!(round.min_raise, 200);
     }
 
     #[test]
     fn test_process_raise_all_in_short() {
-        let mut round = BettingRound::new_preflop(100);
-        round.process_raise(300, 0, 0, 1000).unwrap(); // min_raise 现在是 200
-        // 短 all-in：total_bet=400, raise_amount=100 < min_raise=200, needed=400=stack
-        let needed = round.process_raise(400, 1, 0, 400).unwrap();
+        let mut round = BettingRound::new(100, 100);
+        round.process_raise(300, 0, 1000).unwrap(); // min_raise = 200
+        // 短 all-in：raise_amount=100 < min_raise=200
+        let needed = round.process_raise(400, 0, 400).unwrap();
         assert_eq!(needed, 400);
-        // min_raise 不更新（短 all-in）
-        assert_eq!(round.min_raise, 200);
-        assert_eq!(round.last_raiser_seat, Some(0)); // 不更新 last_raiser
-        assert_eq!(round.current_bet, 400); // 但 current_bet 更新
+        assert_eq!(round.min_raise, 200); // 不更新
+        assert_eq!(round.current_bet, 400);
     }
 
     #[test]
     fn test_process_raise_below_min_rejected() {
-        let mut round = BettingRound::new_preflop(100);
-        // 非 all-in，raise_amount < min_raise
-        let result = round.process_raise(150, 0, 0, 1000);
-        assert_eq!(result, Err(BettingError::InvalidRaiseAmount));
+        let mut round = BettingRound::new(100, 100);
+        assert_eq!(
+            round.process_raise(150, 0, 1000),
+            Err(BettingError::InvalidRaiseAmount)
+        );
     }
 
     #[test]
     fn test_process_raise_insufficient_stack() {
-        let mut round = BettingRound::new_preflop(100);
-        // needed > stack
-        let result = round.process_raise(500, 0, 0, 400);
-        assert_eq!(result, Err(BettingError::CannotRaise));
+        let mut round = BettingRound::new(100, 100);
+        assert_eq!(
+            round.process_raise(500, 0, 400),
+            Err(BettingError::CannotRaise)
+        );
     }
 
     #[test]
     fn test_available_actions() {
-        let round = BettingRound::new_preflop(100);
+        let round = BettingRound::new(100, 100);
         // SB: bet=0, stack=1000 → fold + call + raise
         let actions = round.available_actions(0, 1000);
         assert!(actions & ACTION_FOLD != 0);

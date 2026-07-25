@@ -1,11 +1,12 @@
-//! Texas Poker 手牌评估（移植自 `texas_poker_move/sources/hand_evaluator.move`）。
+//! Texas Poker 手牌评估（7 选 5 最佳手牌）。
 //!
-//! 实现 7 选 5 最佳手牌评估：枚举 C(7,5)=21 种组合，取最大 HandRank。
+//! # 电路友好设计
 //!
-//! # 牌型常量
-//!
-//! 0=HIGH_CARD, 1=ONE_PAIR, 2=TWO_PAIR, 3=THREE_OF_A_KIND, 4=STRAIGHT,
-//! 5=FLUSH, 6=FULL_HOUSE, 7=FOUR_OF_A_KIND, 8=STRAIGHT_FLUSH, 9=ROYAL_FLUSH
+//! - [`HandRank`] 用定长 `kickers: [u8; 5]`（非 Vec），电路里是固定 5 字节。
+//! - 直接实现 `Ord`（category 优先，kickers 字典序），删除 Move 风格的
+//!   `compare`/`compare_kickers` 三态转换。
+//! - `evaluate_best` 统一处理 5..=7 张牌（C(n,5) 组合枚举），<5 张用 0 填充。
+//!   删除占位牌补齐路径（避免重复牌污染评估）。
 
 use serde::{Deserialize, Serialize};
 
@@ -27,28 +28,22 @@ pub const ROYAL_FLUSH: u8 = 9;
 /// 手牌评估结果。
 ///
 /// - `category`: 牌型（0-9）
-/// - `kickers`: tiebreaker 点数列表（长度 1-5，降序）
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// - `kickers`: tiebreaker 点数列表（定长 5，降序，不足位补 0）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HandRank {
     pub category: u8,
-    pub kickers: Vec<u8>,
+    pub kickers: [u8; 5],
 }
 
 impl HandRank {
-    /// 构造新 HandRank。
+    /// 构造新 HandRank，kickers 不足 5 位用 0 填充。
     #[must_use]
-    pub fn new(category: u8, kickers: Vec<u8>) -> Self {
-        Self { category, kickers }
-    }
-
-    /// 序列化为 u64（category 占 bits 0-7，kickers[i] 占 bits 8*(i+1)~+8）。
-    #[must_use]
-    pub fn to_u64(&self) -> u64 {
-        let mut result = u64::from(self.category);
-        for (i, &k) in self.kickers.iter().enumerate().take(5) {
-            result |= u64::from(k) << (8 * (i + 1));
+    pub fn new(category: u8, kickers: &[u8]) -> Self {
+        let mut k = [0u8; 5];
+        for (i, &val) in kickers.iter().take(5).enumerate() {
+            k[i] = val;
         }
-        result
+        Self { category, kickers: k }
     }
 
     /// 牌型名称。
@@ -76,9 +71,15 @@ impl std::fmt::Display for HandRank {
     }
 }
 
+/// 直接字典序比较：category 优先，其次 kickers 降序逐位比较。
+///
+/// kickers 已保证降序排列（由 evaluate_five 保证），故 `[u8;5]` 的自然 Ord
+/// 恰好对应"降序逐位比较"，无需自定义 compare_kickers。
 impl Ord for HandRank {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        compare(self, other).cmp(&1)
+        self.category
+            .cmp(&other.category)
+            .then_with(|| self.kickers.cmp(&other.kickers))
     }
 }
 
@@ -88,320 +89,188 @@ impl PartialOrd for HandRank {
     }
 }
 
-/// 比较两个 HandRank。
+/// 从 n 张牌（5..=7）中选出最佳 5 张组合；<5 张时先 0 填充到 5 张再评估。
 ///
-/// 返回值（与 Move `compare` 一致）：
-/// - 0: a < b
-/// - 1: a == b
-/// - 2: a > b
+/// - 7 张：枚举 C(7,5)=21 种组合。
+/// - 5/6 张：枚举 C(n,5) 组合。
+/// - <5 张：用点数 0 填充（0 < 任何合法点数 2..14，不影响牌型判定）。
 #[must_use]
-pub fn compare(a: &HandRank, b: &HandRank) -> u8 {
-    if a.category != b.category {
-        return if a.category > b.category { 2 } else { 0 };
-    }
-    compare_kickers(&a.kickers, &b.kickers)
-}
-
-/// 比较 kickers（按位降序比较）。
-///
-/// 当长度不同时（如初始 `best_rank` kickers 为空）：
-/// - 空侧视为"最低"（初始哨兵）
-/// - 同长度时按位比较
-fn compare_kickers(a: &[u8], b: &[u8]) -> u8 {
-    // 处理空 kickers（初始哨兵场景）
-    if a.is_empty() && b.is_empty() {
-        return 1; // 相等
-    }
-    if a.is_empty() {
-        return 0; // a 为初始哨兵，b 更大
-    }
-    if b.is_empty() {
-        return 2; // b 为初始哨兵，a 更大
-    }
-    // 同长度：按位降序比较
-    debug_assert_eq!(
-        a.len(),
-        b.len(),
-        "kickers 长度必须相同（同一 category，非初始哨兵）"
-    );
-    for i in 0..a.len() {
-        if a[i] != b[i] {
-            return if a[i] > b[i] { 2 } else { 0 };
+pub fn evaluate_best(cards: &[Card]) -> HandRank {
+    if cards.len() < 5 {
+        // 不足 5 张：用 rank=0（不计入 counts）、花色递增的占位牌填充到 5 张。
+        // rank=0 保证不构成对子/顺子；花色递增保证不构成同花。
+        let mut padded = cards.to_vec();
+        let mut next_suit = 0u8;
+        while padded.len() < 5 {
+            padded.push(Card::new(next_suit, 0));
+            next_suit = next_suit.wrapping_add(1);
         }
+        return evaluate_five(&[padded[0], padded[1], padded[2], padded[3], padded[4]]);
     }
-    1 // 相等
-}
-
-/// 从 7 张牌中选出最佳 5 张组合。
-///
-/// 镜像 `hand_evaluator.move:92-120`：
-/// 1. 断言 cards 长度为 7 且无重复
-/// 2. 枚举 C(7,5)=21 种组合
-/// 3. 对每种组合调用 `evaluate_five`，取最大
-#[must_use]
-pub fn best_hand(cards: &[Card]) -> HandRank {
-    assert_eq!(
-        cards.len(),
-        7,
-        "best_hand 要求 7 张牌，得到 {}",
-        cards.len()
-    );
-    assert_no_duplicates(cards);
-
-    let mut best = HandRank::new(HIGH_CARD, vec![]);
-    // 枚举 C(7,5)=21 种组合
-    let indices = [
-        [0, 1, 2, 3, 4],
-        [0, 1, 2, 3, 5],
-        [0, 1, 2, 3, 6],
-        [0, 1, 2, 4, 5],
-        [0, 1, 2, 4, 6],
-        [0, 1, 2, 5, 6],
-        [0, 1, 3, 4, 5],
-        [0, 1, 3, 4, 6],
-        [0, 1, 3, 5, 6],
-        [0, 1, 4, 5, 6],
-        [0, 2, 3, 4, 5],
-        [0, 2, 3, 4, 6],
-        [0, 2, 3, 5, 6],
-        [0, 2, 4, 5, 6],
-        [0, 3, 4, 5, 6],
-        [1, 2, 3, 4, 5],
-        [1, 2, 3, 4, 6],
-        [1, 2, 3, 5, 6],
-        [1, 2, 4, 5, 6],
-        [1, 3, 4, 5, 6],
-        [2, 3, 4, 5, 6],
-    ];
-    for idx in &indices {
-        let five = [
-            cards[idx[0]],
-            cards[idx[1]],
-            cards[idx[2]],
-            cards[idx[3]],
-            cards[idx[4]],
-        ];
-        let rank = evaluate_five(&five);
-        if compare(&rank, &best) == 2 {
-            best = rank;
-        }
-    }
-    best
-}
-
-/// 评估任意张数（>=5 走最佳 5 选；<5 走现有全部牌）的最大牌型。
-///
-/// 用于异常路径（手牌+公共牌不足 7 张，如 showdown 提前触发）的胜负比较，
-/// 避免原先"牌不足即默认当赢家"的误判（P0-3 修复）。
-///
-/// - `cards.len() == 7`：等价于 [`best_hand`]。
-/// - `cards.len() >= 5`：枚举 C(n,5) 所有 5 张组合取最大。
-/// - `cards.len() < 5`：用现有全部牌评估（`evaluate_five` 要求恰好 5 张，
-///   不足时用占位牌补齐到 5 张，占位牌取最小点数 2 且不参与成牌——
-///   实际效果等同于"仅按现有牌中能识别的牌型比较"，所有不足 5 张的玩家
-///   评估结果都偏低，互相之间按现有牌点数比较）。
-#[must_use]
-pub fn evaluate_best_or_partial(cards: &[Card]) -> HandRank {
-    if cards.len() >= 7 {
-        return best_hand(cards);
-    }
-    if cards.len() >= 5 {
-        // 枚举所有 C(n,5) 组合，取最大
-        let n = cards.len();
-        let mut best = HandRank::new(HIGH_CARD, vec![]);
-        for i in 0..n {
-            for j in (i + 1)..n {
-                for k in (j + 1)..n {
-                    for l in (k + 1)..n {
-                        for m in (l + 1)..n {
-                            let five = [cards[i], cards[j], cards[k], cards[l], cards[m]];
-                            let rank = evaluate_five(&five);
-                            if compare(&rank, &best) == 2 {
-                                best = rank;
-                            }
+    let n = cards.len();
+    let mut best = HandRank::new(HIGH_CARD, &[0; 5]);
+    // 枚举所有 C(n,5) 组合。n==7 时为 21 组（电路里硬编码展开）。
+    for i in 0..n {
+        for j in (i + 1)..n {
+            for k in (j + 1)..n {
+                for l in (k + 1)..n {
+                    for m in (l + 1)..n {
+                        let five = [cards[i], cards[j], cards[k], cards[l], cards[m]];
+                        let rank = evaluate_five(&five);
+                        if rank > best {
+                            best = rank;
                         }
                     }
                 }
             }
         }
-        return best;
     }
-    // 不足 5 张：用最小占位牌（2♠）补齐到 5 张再评估。
-    // 占位牌点数最小，不会构成对子/顺子等强牌型，保证评估结果反映现有牌的真实强度。
-    let mut padded: Vec<Card> = cards.to_vec();
-    let placeholder = Card::new(0, 2); // 2♠
-    while padded.len() < 5 {
-        padded.push(placeholder);
-    }
-    let five = [padded[0], padded[1], padded[2], padded[3], padded[4]];
-    evaluate_five(&five)
+    best
 }
 
-/// 校验无重复牌。
+/// 校验无重复牌（调试用）。
 fn assert_no_duplicates(cards: &[Card]) {
     use std::collections::HashSet;
     let set: HashSet<_> = cards.iter().map(|c| (c.suit, c.rank)).collect();
-    assert_eq!(set.len(), cards.len(), "牌组中存在重复牌");
+    debug_assert_eq!(set.len(), cards.len(), "牌组中存在重复牌");
 }
 
-/// 评估 5 张牌。
+/// 评估 5 张牌（核心算法）。
 fn evaluate_five(cards: &[Card; 5]) -> HandRank {
-    evaluate_five_impl(cards[0], cards[1], cards[2], cards[3], cards[4])
-}
+    let c0 = cards[0];
+    let c1 = cards[1];
+    let c2 = cards[2];
+    let c3 = cards[3];
+    let c4 = cards[4];
+    let all = [c0, c1, c2, c3, c4];
 
-/// 评估 5 张牌（核心算法，镜像 `hand_evaluator.move:159-238`）。
-fn evaluate_five_impl(c0: Card, c1: Card, c2: Card, c3: Card, c4: Card) -> HandRank {
-    let cards = [c0, c1, c2, c3, c4];
-
-    // 1. 构建 13 长度的 counts 数组（索引 0=点数2, 12=点数14）
+    // 1. counts[13]（索引 0=点数2, 12=点数14）
     let mut counts = [0u8; 13];
-    for c in &cards {
-        counts[(c.rank - 2) as usize] += 1;
+    for c in &all {
+        if c.rank >= 2 && c.rank <= 14 {
+            counts[(c.rank - 2) as usize] += 1;
+        }
     }
 
-    // 2. 同花检测：5 张花色全相同
+    // 2. 同花检测
     let is_flush = c0.suit == c1.suit
         && c1.suit == c2.suit
         && c2.suit == c3.suit
         && c3.suit == c4.suit;
 
-    // 3. 排序点数降序
-    let mut ranks: Vec<u8> = cards.iter().map(|c| c.rank).collect();
-    ranks.sort_unstable_by(|a, b| b.cmp(a)); // 降序
+    // 3. 点数降序排序
+    let mut ranks = [c0.rank, c1.rank, c2.rank, c3.rank, c4.rank];
+    ranks.sort_unstable_by(|a, b| b.cmp(a));
 
-    // 4. 检测顺子（含 A-2-3-4-5 wheel）
-    let is_straight = is_straight_high(&ranks) || is_straight_wheel(&ranks);
-    let straight_high = if is_straight_wheel(&ranks) {
-        5 // A-2-3-4-5 的 high 是 5
-    } else {
-        ranks[0]
-    };
+    // 4. 顺子检测（返回顺子最高点数）
+    let straight = straight_high(&ranks);
 
-    // 5. 收集相同点数的组（按 count 降序、rank 降序）
+    // 5. 相同点数组（按 count 降序、rank 降序）。
+    // 末尾用 (0,0) 填充到至少 5 个元素，保证后续 groups[1..4] 访问安全
+    //（0 值的 count=0，不会匹配任何牌型条件，仅占位）。
     let mut groups: Vec<(u8, u8)> = (0..13u8)
         .map(|i| (counts[i as usize], i + 2))
         .filter(|(c, _)| *c > 0)
         .collect();
-    groups.sort_unstable_by(|a, b| b.cmp(a)); // (count, rank) 降序
+    groups.sort_unstable_by(|a, b| b.cmp(a));
+    while groups.len() < 5 {
+        groups.push((0, 0));
+    }
 
     // 6. 优先级判断（从高到低）
 
     // 同花顺 / 皇家同花顺
-    if is_flush && is_straight {
-        if straight_high == 14 {
-            return HandRank::new(ROYAL_FLUSH, vec![14]);
+    if is_flush {
+        if let Some(high) = straight {
+            if high == 14 {
+                return HandRank::new(ROYAL_FLUSH, &[14]);
+            }
+            return HandRank::new(STRAIGHT_FLUSH, &[high]);
         }
-        return HandRank::new(STRAIGHT_FLUSH, vec![straight_high]);
     }
 
     // 四条
     if groups[0].0 == 4 {
-        let four_rank = groups[0].1;
-        let kicker = groups[1].1;
-        return HandRank::new(FOUR_OF_A_KIND, vec![four_rank, kicker]);
+        return HandRank::new(FOUR_OF_A_KIND, &[groups[0].1, groups[1].1]);
     }
 
     // 葫芦
     if groups[0].0 == 3 && groups[1].0 >= 2 {
-        let three_rank = groups[0].1;
-        let pair_rank = groups[1].1;
-        return HandRank::new(FULL_HOUSE, vec![three_rank, pair_rank]);
+        return HandRank::new(FULL_HOUSE, &[groups[0].1, groups[1].1]);
     }
 
     // 同花
     if is_flush {
-        return HandRank::new(FLUSH, ranks.clone());
+        return HandRank::new(FLUSH, &ranks);
     }
 
     // 顺子
-    if is_straight {
-        return HandRank::new(STRAIGHT, vec![straight_high]);
+    if let Some(high) = straight {
+        return HandRank::new(STRAIGHT, &[high]);
     }
 
     // 三条
     if groups[0].0 == 3 {
-        let three_rank = groups[0].1;
-        let mut kickers: Vec<u8> = groups[1..].iter().map(|(_, r)| *r).collect();
-        kickers.sort_unstable_by(|a, b| b.cmp(a));
-        return HandRank::new(THREE_OF_A_KIND, {
-            let mut k = vec![three_rank];
-            k.extend(kickers.into_iter().take(2));
-            k
-        });
+        // groups[1..] 已按 (count,rank) 降序，rank 天然降序，直接取前 2
+        let k = [groups[0].1, groups[1].1, groups[2].1];
+        return HandRank::new(THREE_OF_A_KIND, &k);
     }
 
     // 两对
     if groups[0].0 == 2 && groups[1].0 == 2 {
-        let mut pairs: Vec<u8> = vec![groups[0].1, groups[1].1];
-        pairs.sort_unstable_by(|a, b| b.cmp(a));
-        let kicker = groups[2].1;
-        return HandRank::new(TWO_PAIR, {
-            let mut k = pairs;
-            k.push(kicker);
-            k
-        });
+        let (hi, lo) = if groups[0].1 > groups[1].1 {
+            (groups[0].1, groups[1].1)
+        } else {
+            (groups[1].1, groups[0].1)
+        };
+        return HandRank::new(TWO_PAIR, &[hi, lo, groups[2].1]);
     }
 
     // 一对
     if groups[0].0 == 2 {
-        let pair_rank = groups[0].1;
-        let mut kickers: Vec<u8> = groups[1..].iter().map(|(_, r)| *r).collect();
-        kickers.sort_unstable_by(|a, b| b.cmp(a));
-        return HandRank::new(ONE_PAIR, {
-            let mut k = vec![pair_rank];
-            k.extend(kickers.into_iter().take(3));
-            k
-        });
+        // groups[1..] rank 已降序，取前 3 作为 kicker
+        let k = [groups[0].1, groups[1].1, groups[2].1, groups[3].1];
+        return HandRank::new(ONE_PAIR, &k);
     }
 
     // 高牌
-    HandRank::new(HIGH_CARD, ranks.clone())
+    HandRank::new(HIGH_CARD, &ranks)
 }
 
-/// 检测普通顺子（不含 wheel）。
-fn is_straight_high(ranks_desc: &[u8]) -> bool {
-    // ranks_desc 已降序，检查 5 张连续递减。
-    // P2-5 修复：先判 `>= 1` 再减，防止 ranks_desc[i]==0 时 u8 下溢 panic
-    // （正常路径牌点数 >= 2 不会触发，此处为防御性，保持函数对异常输入的健壮性）。
-    for i in 0..4 {
-        if ranks_desc[i] < 1 || ranks_desc[i].saturating_sub(1) != ranks_desc[i + 1] {
-            return false;
-        }
+/// 检测顺子，返回最高点数（A-2-3-4-5 wheel 返回 5）。非顺子返回 None。
+fn straight_high(ranks_desc: &[u8; 5]) -> Option<u8> {
+    // wheel: A-2-3-4-5（排序后 [14,5,4,3,2]）
+    if *ranks_desc == [14, 5, 4, 3, 2] {
+        return Some(5);
     }
-    true
-}
-
-/// 检测 A-2-3-4-5 wheel 顺子。
-///
-/// 排序后为 [14, 5, 4, 3, 2]。
-fn is_straight_wheel(ranks_desc: &[u8]) -> bool {
-    ranks_desc == [14, 5, 4, 3, 2]
+    // 普通顺子：5 张连续递减
+    let consecutive = (0..4).all(|i| ranks_desc[i] == ranks_desc[i + 1] + 1);
+    if consecutive {
+        Some(ranks_desc[0])
+    } else {
+        None
+    }
 }
 
 /// 从多个玩家中找出赢家（返回 seat_index 列表，平局多人）。
-///
-/// `hands`: 每个 (seat_index, 7张牌) 对。
 #[must_use]
 pub fn find_winners(hands: &[(u8, Vec<Card>)]) -> Vec<u8> {
-    assert!(!hands.is_empty(), "find_winagers 要求至少 1 个玩家");
-    let mut best_rank = HandRank::new(HIGH_CARD, vec![]);
+    assert!(!hands.is_empty(), "find_winners 要求至少 1 个玩家");
+    let mut best_rank = HandRank::new(HIGH_CARD, &[0; 5]);
     let mut best_seats: Vec<u8> = Vec::new();
 
     for (seat, cards) in hands {
-        let rank = best_hand(cards);
-        match compare(&rank, &best_rank) {
-            2 => {
-                // 新的最大
+        let rank = evaluate_best(cards);
+        match rank.cmp(&best_rank) {
+            std::cmp::Ordering::Greater => {
                 best_rank = rank;
                 best_seats.clear();
                 best_seats.push(*seat);
             }
-            1 => {
-                // 平局
+            std::cmp::Ordering::Equal => {
                 best_seats.push(*seat);
             }
-            // 0 = 更小，忽略；其他值（防御性）也忽略
-            _ => {}
+            std::cmp::Ordering::Less => {}
         }
     }
     best_seats
@@ -422,7 +291,6 @@ mod tests {
 
     #[test]
     fn test_royal_flush() {
-        // A♠ K♠ Q♠ J♠ 10♠ + 2 张杂牌
         let seven = make_seven([
             card(SPADES, ACE),
             card(SPADES, KING),
@@ -432,14 +300,13 @@ mod tests {
             card(HEARTS, TWO),
             card(CLUBS, THREE),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, ROYAL_FLUSH);
-        assert_eq!(rank.kickers, vec![14]);
+        assert_eq!(rank.kickers, [14, 0, 0, 0, 0]);
     }
 
     #[test]
     fn test_straight_flush_wheel() {
-        // A-2-3-4-5 同花
         let seven = make_seven([
             card(SPADES, ACE),
             card(SPADES, TWO),
@@ -449,9 +316,9 @@ mod tests {
             card(HEARTS, KING),
             card(CLUBS, QUEEN),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, STRAIGHT_FLUSH);
-        assert_eq!(rank.kickers, vec![5]); // wheel high = 5
+        assert_eq!(rank.kickers, [5, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -465,9 +332,9 @@ mod tests {
             card(HEARTS, THREE),
             card(CLUBS, FOUR),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, FOUR_OF_A_KIND);
-        assert_eq!(rank.kickers, vec![13, 4]);
+        assert_eq!(rank.kickers, [13, 4, 0, 0, 0]);
     }
 
     #[test]
@@ -481,9 +348,9 @@ mod tests {
             card(HEARTS, TWO),
             card(CLUBS, THREE),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, FULL_HOUSE);
-        assert_eq!(rank.kickers, vec![12, 11]);
+        assert_eq!(rank.kickers, [12, 11, 0, 0, 0]);
     }
 
     #[test]
@@ -497,7 +364,7 @@ mod tests {
             card(HEARTS, TWO),
             card(CLUBS, THREE),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, FLUSH);
     }
 
@@ -512,9 +379,9 @@ mod tests {
             card(HEARTS, TWO),
             card(CLUBS, THREE),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, STRAIGHT);
-        assert_eq!(rank.kickers, vec![10]);
+        assert_eq!(rank.kickers, [10, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -528,9 +395,9 @@ mod tests {
             card(HEARTS, KING),
             card(CLUBS, QUEEN),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, STRAIGHT);
-        assert_eq!(rank.kickers, vec![5]);
+        assert_eq!(rank.kickers, [5, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -544,9 +411,9 @@ mod tests {
             card(HEARTS, TWO),
             card(CLUBS, THREE),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, THREE_OF_A_KIND);
-        assert_eq!(rank.kickers, vec![7, 13, 12]);
+        assert_eq!(rank.kickers, [7, 13, 12, 0, 0]);
     }
 
     #[test]
@@ -560,9 +427,9 @@ mod tests {
             card(HEARTS, TWO),
             card(CLUBS, THREE),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, TWO_PAIR);
-        assert_eq!(rank.kickers, vec![11, 4, 14]);
+        assert_eq!(rank.kickers, [11, 4, 14, 0, 0]);
     }
 
     #[test]
@@ -576,9 +443,9 @@ mod tests {
             card(HEARTS, TWO),
             card(CLUBS, THREE),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, ONE_PAIR);
-        assert_eq!(rank.kickers, vec![14, 13, 12, 11]);
+        assert_eq!(rank.kickers, [14, 13, 12, 11, 0]);
     }
 
     #[test]
@@ -592,23 +459,23 @@ mod tests {
             card(HEARTS, THREE),
             card(CLUBS, TWO),
         ]);
-        let rank = best_hand(&seven);
+        let rank = evaluate_best(&seven);
         assert_eq!(rank.category, HIGH_CARD);
     }
 
     #[test]
     fn test_compare() {
-        let pair = HandRank::new(ONE_PAIR, vec![14, 13, 12, 11]);
-        let two_pair = HandRank::new(TWO_PAIR, vec![11, 4, 14]);
+        let pair = HandRank::new(ONE_PAIR, &[14, 13, 12, 11]);
+        let two_pair = HandRank::new(TWO_PAIR, &[11, 4, 14]);
 
-        assert_eq!(compare(&two_pair, &pair), 2); // two_pair > pair
-        assert_eq!(compare(&pair, &two_pair), 0); // pair < two_pair
-        assert_eq!(compare(&pair, &pair), 1); // 相等
+        assert!(two_pair > pair);
+        assert!(pair < two_pair);
+        assert_eq!(pair, HandRank::new(ONE_PAIR, &[14, 13, 12, 11]));
 
         // 同 category 比较 kickers
-        let pair_high = HandRank::new(ONE_PAIR, vec![14, 13, 12, 11]);
-        let pair_low = HandRank::new(ONE_PAIR, vec![13, 12, 11, 10]);
-        assert_eq!(compare(&pair_high, &pair_low), 2);
+        let pair_high = HandRank::new(ONE_PAIR, &[14, 13, 12, 11]);
+        let pair_low = HandRank::new(ONE_PAIR, &[13, 12, 11, 10]);
+        assert!(pair_high > pair_low);
     }
 
     #[test]
@@ -638,12 +505,11 @@ mod tests {
             ]),
         );
         let winners = find_winners(&[p1, p2]);
-        assert_eq!(winners, vec![0]); // 皇家同花顺 > 同花顺
+        assert_eq!(winners, vec![0]);
     }
 
     #[test]
     fn test_find_winners_tie() {
-        // 两个玩家都用公共牌组成相同牌型
         let p1 = (
             0u8,
             make_seven([
@@ -669,17 +535,22 @@ mod tests {
             ]),
         );
         let winners = find_winners(&[p1, p2]);
-        assert_eq!(winners.len(), 2); // 平局
+        assert_eq!(winners.len(), 2);
         assert!(winners.contains(&0));
         assert!(winners.contains(&1));
     }
 
     #[test]
-    fn test_to_u64() {
-        let rank = HandRank::new(ONE_PAIR, vec![14, 13, 12, 11]);
-        let u = rank.to_u64();
-        assert_eq!(u & 0xFF, 1); // category
-        assert_eq!((u >> 8) & 0xFF, 14); // kicker[0]
-        assert_eq!((u >> 16) & 0xFF, 13); // kicker[1]
+    fn test_evaluate_best_partial_fewer_cards() {
+        // 2 张牌：HIGH_CARD
+        let two = vec![card(SPADES, ACE), card(HEARTS, KING)];
+        let rank = evaluate_best(&two);
+        assert_eq!(rank.category, HIGH_CARD);
+        assert_eq!(rank.kickers[0], 14);
+
+        // 0 张牌：HIGH_CARD，kickers 全 0
+        let none: Vec<Card> = vec![];
+        let rank = evaluate_best(&none);
+        assert_eq!(rank.category, HIGH_CARD);
     }
 }
