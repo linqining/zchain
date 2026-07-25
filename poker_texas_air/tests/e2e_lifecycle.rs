@@ -193,7 +193,7 @@ fn test_soundness_leave_table_tampered_seat() {
 /// E2E: start_hand → trace → prove → verify（happy path）。
 #[test]
 fn test_e2e_start_hand_prove_verify() {
-    let input = StartHandInput { active_count: 4 };
+    let input = StartHandInput { active_count: 4, ante_mode: 0, ante_amount: 0, ante_collected: 0 };
     let row = StartHandRow::active(&input, zero_root(), one_root(), 42, 0, 3, 0, 1);
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
@@ -221,7 +221,7 @@ fn test_e2e_start_hand_prove_verify() {
 /// Soundness: 篡改 start_hand 的 `active_count` 公开输入后，verify 应失败。
 #[test]
 fn test_soundness_start_hand_tampered_count() {
-    let input = StartHandInput { active_count: 4 };
+    let input = StartHandInput { active_count: 4, ante_mode: 0, ante_amount: 0, ante_collected: 0 };
     let row = StartHandRow::active(&input, zero_root(), one_root(), 42, 0, 3, 0, 1);
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
@@ -245,7 +245,7 @@ fn test_soundness_start_hand_tampered_count() {
 
     // 篡改 active_count：trace 中是 4，AIR 声明 9
     proof.air = StartHandAir {
-        input: StartHandInput { active_count: 9 }, // 篡改！
+        input: StartHandInput { active_count: 9, ..proof.air.input.clone() }, // 篡改！
         ..proof.air.clone()
     };
 
@@ -253,6 +253,44 @@ fn test_soundness_start_hand_tampered_count() {
     assert!(
         result.is_err(),
         "篡改 active_count 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
+/// Soundness: 篡改 start_hand 的 `ante_mode` 公开输入后，verify 应失败。
+#[test]
+fn test_soundness_start_hand_tampered_ante_mode() {
+    let input = StartHandInput { active_count: 4, ante_mode: 1, ante_amount: 10, ante_collected: 40 };
+    let row = StartHandRow::active(&input, zero_root(), one_root(), 42, 0, 3, 0, 1);
+    let trace = gen_method_trace(
+        StartHandAir::num_columns(),
+        &row.to_vec(),
+        &StartHandRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+
+    let air = StartHandAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 3,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(&trace, air, StartHandAir::num_columns()).expect("prove 失败");
+
+    // 篡改 ante_mode：trace 中是 1 (NORMAL)，AIR 声明 2 (BBA)
+    proof.air = StartHandAir {
+        input: StartHandInput { ante_mode: 2, ..proof.air.input.clone() },
+        ..proof.air.clone()
+    };
+
+    let result = verify_method(proof);
+    assert!(
+        result.is_err(),
+        "篡改 ante_mode 后 verify 应失败，但成功了 — soundness 漏洞！"
     );
 }
 
@@ -264,6 +302,10 @@ fn test_e2e_tick_prove_verify() {
     let input = TickInput {
         current_time: 1_700_000_000,
         timeout_kind: 0, // shuffle timeout
+        time_bank_consumed: 0,
+        time_bank_post: 30_000,
+        rake_mode: 0,
+        rake_amount: 0,
     };
     let row = TickRow::active(
         &input,
@@ -302,6 +344,10 @@ fn test_soundness_tick_tampered_kind() {
     let input = TickInput {
         current_time: 1_700_000_000,
         timeout_kind: 0,
+        time_bank_consumed: 0,
+        time_bank_post: 30_000,
+        rake_mode: 0,
+        rake_amount: 0,
     };
     let row = TickRow::active(
         &input,
@@ -347,6 +393,94 @@ fn test_soundness_tick_tampered_kind() {
     );
 }
 
+/// Soundness: 篡改 tick 的 `time_bank_consumed` 公开输入后，verify 应失败。
+#[test]
+fn test_soundness_tick_tampered_time_bank() {
+    let input = TickInput {
+        current_time: 1_700_000_000,
+        timeout_kind: 3, // betting timeout
+        time_bank_consumed: 10_000,
+        time_bank_post: 20_000,
+        rake_mode: 0,
+        rake_amount: 0,
+    };
+    let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 5, 5);
+    let trace = gen_method_trace(TickAir::num_columns(), &row.to_vec(), &TickRow::padding().to_vec())
+        .expect("trace 生成失败");
+
+    let air = TickAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 4,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(&trace, air, TickAir::num_columns()).expect("prove 失败");
+
+    // 篡改 time_bank_consumed：trace 中是 10_000，AIR 声明 99_999
+    proof.air = TickAir {
+        input: TickInput {
+            time_bank_consumed: 99_999, // 篡改！
+            ..proof.air.input.clone()
+        },
+        ..proof.air.clone()
+    };
+
+    let result = verify_method(proof);
+    assert!(
+        result.is_err(),
+        "篡改 time_bank_consumed 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
+/// Soundness: 篡改 tick 的 `rake_amount` 公开输入后，verify 应失败。
+#[test]
+fn test_soundness_tick_tampered_rake() {
+    let input = TickInput {
+        current_time: 1_700_000_000,
+        timeout_kind: 1, // reveal timeout (triggers settlement)
+        time_bank_consumed: 0,
+        time_bank_post: 30_000,
+        rake_mode: 1, // PERCENTAGE
+        rake_amount: 50, // 5% of 1000
+    };
+    let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 8, 8);
+    let trace = gen_method_trace(TickAir::num_columns(), &row.to_vec(), &TickRow::padding().to_vec())
+        .expect("trace 生成失败");
+
+    let air = TickAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 4,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(&trace, air, TickAir::num_columns()).expect("prove 失败");
+
+    // 篡改 rake_amount：trace 中是 50，AIR 声明 999
+    proof.air = TickAir {
+        input: TickInput {
+            rake_amount: 999, // 篡改！
+            ..proof.air.input.clone()
+        },
+        ..proof.air.clone()
+    };
+
+    let result = verify_method(proof);
+    assert!(
+        result.is_err(),
+        "篡改 rake_amount 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
 // ========== reset_for_next_hand AIR ==========
 
 /// E2E: reset_for_next_hand → trace → prove → verify（happy path）。
@@ -355,6 +489,7 @@ fn test_e2e_reset_for_next_hand_prove_verify() {
     let input = ResetForNextHandInput;
     let row = ResetForNextHandRow::active(
         &input,
+        0, // pre_pending_addon
         zero_root(),
         one_root(),
         42,
@@ -394,7 +529,7 @@ fn test_e2e_reset_for_next_hand_prove_verify() {
 #[test]
 fn test_soundness_reset_for_next_hand_via_happy_path() {
     let input = ResetForNextHandInput;
-    let row = ResetForNextHandRow::active(&input, zero_root(), one_root(), 42, 0, 5, 0, 1, 8);
+    let row = ResetForNextHandRow::active(&input, 0, zero_root(), one_root(), 42, 0, 5, 0, 1, 8);
     let trace = gen_method_trace(
         ResetForNextHandAir::num_columns(),
         &row.to_vec(),
@@ -436,18 +571,18 @@ fn test_lifecycle_air_column_consistency() {
     assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
     assert_eq!(LeaveTableAir::num_columns(), leave_table::cols::NUM_COLUMNS);
 
-    // start_hand: 通用 + 3 业务 = 40
-    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 3);
+    // start_hand: 通用 + 6 业务（含 ante 3 列）= 43
+    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
     assert_eq!(StartHandAir::num_columns(), start_hand::cols::NUM_COLUMNS);
 
-    // tick: 通用 + 6 业务 = 43
-    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
+    // tick: 通用 + 10 业务（含 time_bank 2 列 + rake 2 列）= 47
+    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 10);
     assert_eq!(TickAir::num_columns(), tick::cols::NUM_COLUMNS);
 
-    // reset_for_next_hand: 通用 + 1 业务 = 38
+    // reset_for_next_hand: 通用 + 5 业务（含 POST_PENDING_ADDON 4 limb）= 42
     assert_eq!(
         reset_for_next_hand::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 1
+        COMMON_NUM_COLUMNS + 5
     );
     assert_eq!(
         ResetForNextHandAir::num_columns(),

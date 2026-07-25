@@ -115,6 +115,19 @@ pub struct Seat {
     pub pk: ECPoint,
     /// total_bet 是否已退款（避免重复退款）。
     pub refunded: bool,
+    /// 待入账的 addon 金额（下一手 `reset_for_next_hand` 时合并到 `stack`）。
+    ///
+    /// 业务语义：玩家可在任意时刻调用 `addon(amount)` 追加筹码，但**不影响当前手牌**：
+    /// - 调用时只累加 `pending_addon`，不动 `stack`（避免破坏当前 pot/side_pot）
+    /// - 在 `reset_for_next_hand` 第一阶段合并：`stack += pending_addon; pending_addon = 0`
+    /// - 合并发生在清理 stack==0 的 seat 之前（确保 addon 后玩家不会被误踢）
+    pub pending_addon: u64,
+    /// 玩家 Time Bank 剩余额度（毫秒）。
+    ///
+    /// 业务语义：玩家在 betting 阶段超时后，若 time_bank_ms > 0，
+    /// 系统自动消耗 time_bank 续命（而非直接 auto_fold）。
+    /// 每手开始时按 `TIME_BANK_REFILL_PER_HAND_MS` 补充（上限 DEFAULT_TIME_BANK_MS）。
+    pub time_bank_ms: u64,
 }
 
 impl Seat {
@@ -134,6 +147,8 @@ impl Seat {
             left_during_hand: false,
             pk: ECPoint(G1Projective::identity()),
             refunded: false,
+            pending_addon: 0,
+            time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
         }
     }
 
@@ -486,6 +501,42 @@ pub struct TexasPokerTable {
     /// 对应 Move 的 `sui_balance: Balance<SUI>`，zchain 无原生 SUI，用 u64。
     pub chip_pool: u64,
 
+    /// Addon 资金池（与 `chip_pool` 平行，记录所有 addon 入金总额）。
+    ///
+    /// 业务语义：玩家调用 `addon(amount)` 时，`addon_pool += amount`，
+    /// 同时 `seats[i].pending_addon += amount`（下一手合并到 stack）。
+    /// 离开桌台时，`pending_addon` 与 `stack` 一起退还。
+    pub addon_pool: u64,
+
+    /// Ante 模式（`ANTE_MODE_NONE/NORMAL/BBA`）。
+    ///
+    /// 默认 NONE。设置后在 `start_hand` 时按模式投 ante：
+    /// - NORMAL：每个玩家投 `ante_amount`
+    /// - BBA：仅大盲位投 `ante_amount`（简化投注流程）
+    pub ante_mode: u8,
+    /// Ante 金额（每手投注的 ante 数额）。
+    pub ante_amount: u64,
+    /// 本手已累积的 ante 总额（settle 时统一分配，或计入 pot）。
+    pub ante_collected: u64,
+
+    /// Rake 模式（`RAKE_MODE_NONE/PERCENTAGE`）。
+    ///
+    /// 默认 NONE。设置为 PERCENTAGE 后，`settle_hand` 时按 `rake_bps` 比例抽水：
+    /// `rake = min(pot * rake_bps / 10000, rake_cap)`
+    pub rake_mode: u8,
+    /// Rake 比例（基点 bps，500 = 5%）。
+    pub rake_bps: u64,
+    /// Rake 上限（单手最多抽水金额）。
+    pub rake_cap: u64,
+    /// 本手已抽水金额（settle 时计算并扣除）。
+    pub rake_collected: u64,
+
+    /// Run It Twice 模式（`RIT_MODE_DISABLED/TWICE`）。
+    ///
+    /// 默认 DISABLED。设置为 TWICE 后，all-in 时发两次 board，降低方差。
+    /// v2 PoC：仅作为配置标记，完整双 board 流程留待后续。
+    pub rit_mode: u8,
+
     /// 桌台配置（ZK skip 等）。
     pub config: TableConfig,
 
@@ -533,6 +584,15 @@ impl TexasPokerTable {
             timeout_config: TimeoutConfig::default(),
             timestamps: Timestamps::default(),
             chip_pool: 0,
+            addon_pool: 0,
+            ante_mode: super::constants::ANTE_MODE_NONE,
+            ante_amount: 0,
+            ante_collected: 0,
+            rake_mode: super::constants::RAKE_MODE_NONE,
+            rake_bps: super::constants::DEFAULT_RAKE_BPS,
+            rake_cap: super::constants::DEFAULT_RAKE_CAP,
+            rake_collected: 0,
+            rit_mode: super::constants::RIT_MODE_DISABLED,
             config: TableConfig::default(),
             version: 0,
         }
@@ -786,6 +846,8 @@ mod tests {
             left_during_hand: false,
             pk: ECPoint(G1Projective::identity()),
             refunded: false,
+            pending_addon: 0,
+            time_bank_ms: super::super::constants::DEFAULT_TIME_BANK_MS,
         };
         let bytes = borsh::to_vec(&seat).unwrap();
         let recovered: Seat = borsh::from_slice(&bytes).unwrap();

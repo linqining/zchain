@@ -313,6 +313,77 @@ pub enum TexasPokerEvent {
         new_turn: Option<u8>,
         round_state: u8,
     },
+
+    // ========== 9. Addon / Rebuy ==========
+    /// 玩家发起 addon（下一手生效）。
+    AddonRequested {
+        table_id: ObjectID,
+        seat_index: u8,
+        player: Address,
+        amount: u64,
+        pending_after: u64,
+    },
+    /// addon 在 `reset_for_next_hand` 合并到 stack 时触发。
+    AddonCredited {
+        table_id: ObjectID,
+        seat_index: u8,
+        player: Address,
+        amount: u64,
+        stack_after: u64,
+    },
+    /// 玩家 rebuy（立即生效，仅 MTT 早期/特殊规则）。
+    RebuyProcessed {
+        table_id: ObjectID,
+        seat_index: u8,
+        player: Address,
+        amount: u64,
+        stack_after: u64,
+    },
+
+    // ========== 10. Bet 动作 ==========
+    /// 玩家主动下注（postflop 第一个下注者）。
+    PlayerBet {
+        table_id: ObjectID,
+        seat_index: u8,
+        amount: u64,
+        round_state: u8,
+    },
+
+    // ========== 11. Time Bank ==========
+    /// 玩家 Time Bank 被消耗（超时续命）。
+    TimeBankConsumed {
+        table_id: ObjectID,
+        seat_index: u8,
+        consumed_ms: u64,
+        remaining_ms: u64,
+    },
+
+    // ========== 12. Ante ==========
+    /// Ante 被投注（start_hand 时）。
+    AntePosted {
+        table_id: ObjectID,
+        seat_index: u8,
+        amount: u64,
+        ante_mode: u8,
+    },
+
+    // ========== 13. Rake ==========
+    /// Rake 被抽水（settle 时）。
+    RakeCollected {
+        table_id: ObjectID,
+        pot_before: u64,
+        rake_amount: u64,
+        pot_after: u64,
+        rake_mode: u8,
+    },
+
+    // ========== 14. Run It Twice ==========
+    /// Run It Twice 被触发（all-in 后）。
+    RunItTwiceTriggered {
+        table_id: ObjectID,
+        board1_cards: u8, // 牌数
+        board2_cards: u8,
+    },
 }
 
 /// 将事件追加到事件日志（链下索引友好）。
@@ -697,6 +768,57 @@ mod tests {
                 new_turn: None,
                 round_state: 0,
             },
+            TexasPokerEvent::AddonRequested {
+                table_id,
+                seat_index: 0,
+                player: [0; 20],
+                amount: 0,
+                pending_after: 0,
+            },
+            TexasPokerEvent::AddonCredited {
+                table_id,
+                seat_index: 0,
+                player: [0; 20],
+                amount: 0,
+                stack_after: 0,
+            },
+            TexasPokerEvent::RebuyProcessed {
+                table_id,
+                seat_index: 0,
+                player: [0; 20],
+                amount: 0,
+                stack_after: 0,
+            },
+            TexasPokerEvent::PlayerBet {
+                table_id,
+                seat_index: 0,
+                amount: 0,
+                round_state: 0,
+            },
+            TexasPokerEvent::TimeBankConsumed {
+                table_id,
+                seat_index: 0,
+                consumed_ms: 0,
+                remaining_ms: 0,
+            },
+            TexasPokerEvent::AntePosted {
+                table_id,
+                seat_index: 0,
+                amount: 0,
+                ante_mode: 0,
+            },
+            TexasPokerEvent::RakeCollected {
+                table_id,
+                pot_before: 0,
+                rake_amount: 0,
+                pot_after: 0,
+                rake_mode: 0,
+            },
+            TexasPokerEvent::RunItTwiceTriggered {
+                table_id,
+                board1_cards: 0,
+                board2_cards: 0,
+            },
         ];
 
         for evt in &samples {
@@ -704,7 +826,7 @@ mod tests {
             let _recovered: TexasPokerEvent =
                 borsh::from_slice(&bytes).expect("Borsh deserialize 失败");
         }
-        // 验证样本数量（39 个变体）
-        assert_eq!(samples.len(), 39, "事件变体数应为 39");
+        // 验证样本数量（47 个变体）
+        assert_eq!(samples.len(), 47, "事件变体数应为 47");
     }
 }

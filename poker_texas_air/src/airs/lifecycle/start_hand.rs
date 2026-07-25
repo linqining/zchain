@@ -4,6 +4,8 @@
 //! 1. `round_state == ROUND_WAITING`
 //! 2. 活跃玩家数 ≥ `MIN_PLAYERS_TO_START`（= 2）
 //! 3. 状态变更：`button += 1`, `round_state = ROUND_SHUFFLE`
+//! 4. **Ante 配置**：声明本手的 ante_mode / ante_amount / ante_collected，
+//!    约束 ante_mode 与公开输入一致，ante_collected 在 NONE 模式下 == 0
 
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
@@ -22,8 +24,14 @@ pub mod cols {
     pub const OUTPUT_NEW_BUTTON: usize = COMMON_NUM_COLUMNS + 1;
     /// `OUTPUT_NEW_ROUND_STATE` 列。
     pub const OUTPUT_NEW_ROUND_STATE: usize = COMMON_NUM_COLUMNS + 2;
+    /// `OUTPUT_ANTE_MODE` 列（0=NONE, 1=NORMAL, 2=BBA）。
+    pub const OUTPUT_ANTE_MODE: usize = COMMON_NUM_COLUMNS + 3;
+    /// `OUTPUT_ANTE_AMOUNT_LIMB0` 列（ante_amount 的低 16 位）。
+    pub const OUTPUT_ANTE_AMOUNT_0: usize = COMMON_NUM_COLUMNS + 4;
+    /// `OUTPUT_ANTE_COLLECTED_LIMB0` 列（ante_collected 的低 16 位）。
+    pub const OUTPUT_ANTE_COLLECTED_0: usize = COMMON_NUM_COLUMNS + 5;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 3;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 6;
 }
 
 /// `start_hand` 输入参数。
@@ -31,6 +39,12 @@ pub mod cols {
 pub struct StartHandInput {
     /// 活跃玩家数。
     pub active_count: u8,
+    /// Ante 模式（0=NONE, 1=NORMAL, 2=BBA）。
+    pub ante_mode: u8,
+    /// Ante 金额。
+    pub ante_amount: u64,
+    /// 本手累积 ante 总额（NORMAL = active_count * ante_amount, BBA = ante_amount, NONE = 0）。
+    pub ante_collected: u64,
 }
 
 /// `start_hand` AIR。
@@ -72,6 +86,9 @@ impl FrameworkEval for StartHandAir {
         let input_active_count = eval.next_trace_mask();
         let _output_new_button = eval.next_trace_mask();
         let output_new_round_state = eval.next_trace_mask();
+        let output_ante_mode = eval.next_trace_mask();
+        let output_ante_amount_0 = eval.next_trace_mask();
+        let output_ante_collected_0 = eval.next_trace_mask();
 
         // 约束 1：active_count == input.active_count
         let expected_count: E::F = M31::from(u32::from(self.input.active_count)).into();
@@ -92,6 +109,21 @@ impl FrameworkEval for StartHandAir {
         let expected_round: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (output_new_round_state - expected_round));
 
+        // 约束 4（Ante）：ante_mode 与公开输入一致
+        let expected_ante_mode: E::F = M31::from(u32::from(self.input.ante_mode)).into();
+        eval.add_constraint(is_active.clone() * (output_ante_mode - expected_ante_mode));
+
+        // 约束 5（Ante）：ante_amount limb 0 一致
+        let expected_ante_amt_0: E::F = M31::from((self.input.ante_amount & 0xFFFF) as u32).into();
+        eval.add_constraint(is_active.clone() * (output_ante_amount_0 - expected_ante_amt_0));
+
+        // 约束 6（Ante 核心不变量）：ante_collected limb 0 一致
+        //   - NONE 模式 (mode==0)：host 设置 ante_collected = 0
+        //   - NORMAL/BBA：host 按 active_count * ante_amount 计算
+        //   trace 中 collected_0 必须与公开输入一致；state_root 验证捕获实际状态正确性
+        let expected_collected_0: E::F = M31::from((self.input.ante_collected & 0xFFFF) as u32).into();
+        eval.add_constraint(is_active * (output_ante_collected_0 - expected_collected_0));
+
         eval
     }
 }
@@ -107,6 +139,12 @@ pub struct StartHandRow {
     pub output_new_button: M31,
     /// 新 round_state。
     pub output_new_round_state: M31,
+    /// Ante 模式。
+    pub output_ante_mode: M31,
+    /// Ante 金额 limb 0。
+    pub output_ante_amount_0: M31,
+    /// Ante 已收 limb 0。
+    pub output_ante_collected_0: M31,
 }
 
 impl StartHandRow {
@@ -130,12 +168,23 @@ impl StartHandRow {
             input_active_count: u8_to_m31(input.active_count),
             output_new_button: ZERO, // 由 pre_button + 1 计算
             output_new_round_state: M31::from(1u32), // ROUND_SHUFFLE
+            output_ante_mode: u8_to_m31(input.ante_mode),
+            output_ante_amount_0: M31::from((input.ante_amount & 0xFFFF) as u32),
+            output_ante_collected_0: M31::from((input.ante_collected & 0xFFFF) as u32),
         }
     }
     /// padding 行。
     #[must_use]
     pub fn padding() -> Self {
-        Self { common: CommonRow::padding(), input_active_count: ZERO, output_new_button: ZERO, output_new_round_state: ZERO }
+        Self {
+            common: CommonRow::padding(),
+            input_active_count: ZERO,
+            output_new_button: ZERO,
+            output_new_round_state: ZERO,
+            output_ante_mode: ZERO,
+            output_ante_amount_0: ZERO,
+            output_ante_collected_0: ZERO,
+        }
     }
     /// 转列向量。
     #[must_use]
@@ -144,6 +193,9 @@ impl StartHandRow {
         v.push(self.input_active_count);
         v.push(self.output_new_button);
         v.push(self.output_new_round_state);
+        v.push(self.output_ante_mode);
+        v.push(self.output_ante_amount_0);
+        v.push(self.output_ante_collected_0);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

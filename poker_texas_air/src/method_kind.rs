@@ -1,12 +1,13 @@
-//! 18 个方法的枚举与 selector 计算。
+//! 21 个方法的枚举与 selector 计算。
 //!
-//! 严格对齐 [`poker_l1::vm::contracts::texas_poker::dispatch`] 的 18 个方法选择器，
+//! 严格对齐 [`poker_l1::vm::contracts::texas_poker::dispatch`] 的 21 个方法选择器，
 //! 用 `blake2b_256(method_name)[0..32]` 计算（与 L1 dispatch 算法一致）。
 //!
 //! # 分类
 //!
 //! - **A 档（生命周期，6 个）**：表台创建/入座/离座/开局/超时/重置
 //! - **B 档（玩家动作，7 个）**：fold/check/call/raise/auto_fold/force_fold/kick_player
+//! - **B+ 档（资金动作，2 个）**：addon（下一手生效）/rebuy（立即生效）
 //! - **C 档（密码学协议，5 个）**：Mental Poker 协议（shuffle/reveal/reconstruct/leave_with_proof）
 
 use blake2::Blake2bVar;
@@ -66,22 +67,32 @@ pub enum MethodKind {
     /// `kick_player` — 踢出玩家（管理员操作）。
     KickPlayer = 12,
 
+    // ===== B+ 档：资金动作（2 个）=====
+    /// `addon` — 玩家追加筹码（下一手生效，不影响当前 pot）。
+    Addon = 13,
+    /// `rebuy` — 玩家重购（立即生效，MTT 早期用）。
+    Rebuy = 14,
+
     // ===== C 档：Mental Poker 协议（5 个）=====
     /// `join_and_shuffle` — 玩家加入并完成首洗牌。
-    JoinAndShuffle = 13,
+    JoinAndShuffle = 15,
     /// `leave_with_proof` — 玩家带 proof 离场。
-    LeaveWithProof = 14,
+    LeaveWithProof = 16,
     /// `submit_shuffle_v2` — 玩家提交洗牌结果（V2）。
-    SubmitShuffleV2 = 15,
+    SubmitShuffleV2 = 17,
     /// `submit_player_reveal_tokens` — 提交揭牌令牌。
-    SubmitPlayerRevealTokens = 16,
+    SubmitPlayerRevealTokens = 18,
     /// `submit_reconstruct_deck` — 提交重构牌组。
-    SubmitReconstructDeck = 17,
+    SubmitReconstructDeck = 19,
+
+    // ===== B 档扩展：bet 动作（1 个）=====
+    /// `bet` — 玩家主动下注（postflop 第一个下注者，语义等同 raise 但更清晰）。
+    Bet = 20,
 }
 
 impl MethodKind {
-    /// 方法总数（18）。
-    pub const COUNT: usize = 18;
+    /// 方法总数（21）。
+    pub const COUNT: usize = 21;
 
     /// 返回方法名字符串（snake_case，与 Move 端 entry function 名一一对应）。
     #[must_use]
@@ -100,11 +111,14 @@ impl MethodKind {
             Self::AutoFold => "auto_fold",
             Self::ForceFold => "force_fold",
             Self::KickPlayer => "kick_player",
+            Self::Addon => "addon",
+            Self::Rebuy => "rebuy",
             Self::JoinAndShuffle => "join_and_shuffle",
             Self::LeaveWithProof => "leave_with_proof",
             Self::SubmitShuffleV2 => "submit_shuffle_v2",
             Self::SubmitPlayerRevealTokens => "submit_player_reveal_tokens",
             Self::SubmitReconstructDeck => "submit_reconstruct_deck",
+            Self::Bet => "bet",
         }
     }
 
@@ -130,7 +144,9 @@ impl MethodKind {
             | Self::Raise
             | Self::AutoFold
             | Self::ForceFold
-            | Self::KickPlayer => MethodTier::Action,
+            | Self::KickPlayer
+            | Self::Bet => MethodTier::Action,
+            Self::Addon | Self::Rebuy => MethodTier::Funds,
             Self::JoinAndShuffle
             | Self::LeaveWithProof
             | Self::SubmitShuffleV2
@@ -143,7 +159,7 @@ impl MethodKind {
     ///
     /// # Errors
     ///
-    /// 当 `value >= 18` 时返回 `None`。
+    /// 当 `value >= 21` 时返回 `None`。
     #[must_use]
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -160,16 +176,19 @@ impl MethodKind {
             10 => Some(Self::AutoFold),
             11 => Some(Self::ForceFold),
             12 => Some(Self::KickPlayer),
-            13 => Some(Self::JoinAndShuffle),
-            14 => Some(Self::LeaveWithProof),
-            15 => Some(Self::SubmitShuffleV2),
-            16 => Some(Self::SubmitPlayerRevealTokens),
-            17 => Some(Self::SubmitReconstructDeck),
+            13 => Some(Self::Addon),
+            14 => Some(Self::Rebuy),
+            15 => Some(Self::JoinAndShuffle),
+            16 => Some(Self::LeaveWithProof),
+            17 => Some(Self::SubmitShuffleV2),
+            18 => Some(Self::SubmitPlayerRevealTokens),
+            19 => Some(Self::SubmitReconstructDeck),
+            20 => Some(Self::Bet),
             _ => None,
         }
     }
 
-    /// 返回所有 18 个方法（用于迭代）。
+    /// 返回所有 21 个方法（用于迭代）。
     #[must_use]
     pub const fn all() -> [Self; Self::COUNT] {
         [
@@ -186,11 +205,14 @@ impl MethodKind {
             Self::AutoFold,
             Self::ForceFold,
             Self::KickPlayer,
+            Self::Addon,
+            Self::Rebuy,
             Self::JoinAndShuffle,
             Self::LeaveWithProof,
             Self::SubmitShuffleV2,
             Self::SubmitPlayerRevealTokens,
             Self::SubmitReconstructDeck,
+            Self::Bet,
         ]
     }
 }
@@ -202,6 +224,8 @@ pub enum MethodTier {
     Lifecycle,
     /// B 档：玩家动作（7 个，阶段 3 实现）。
     Action,
+    /// B+ 档：资金动作（2 个：addon/rebuy）。
+    Funds,
     /// C 档：Mental Poker 协议（5 个，阶段 4 实现）。
     Crypto,
 }
@@ -213,6 +237,7 @@ impl MethodTier {
         match self {
             Self::Lifecycle => 800,
             Self::Action => 1_000,
+            Self::Funds => 600,
             Self::Crypto => 3_000,
         }
     }
@@ -224,8 +249,8 @@ mod tests {
 
     #[test]
     fn test_method_count() {
-        assert_eq!(MethodKind::COUNT, 18);
-        assert_eq!(MethodKind::all().len(), 18);
+        assert_eq!(MethodKind::COUNT, 21);
+        assert_eq!(MethodKind::all().len(), 21);
     }
 
     #[test]
@@ -250,7 +275,7 @@ mod tests {
             let v = kind as u8;
             assert_eq!(MethodKind::from_u8(v), Some(kind));
         }
-        assert_eq!(MethodKind::from_u8(18), None);
+        assert_eq!(MethodKind::from_u8(21), None);
         assert_eq!(MethodKind::from_u8(255), None);
     }
 

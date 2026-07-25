@@ -1,4 +1,4 @@
-//! Texas Poker 合约 dispatch 路由（17 method selector）。
+//! Texas Poker 合约 dispatch 路由（21 method selector）。
 //!
 //! 严格对齐 `texas_poker_move/sources/table.move` 的 public entry function 清单：
 //! - 表台生命周期：create_table / join_table / leave_table / start_hand / tick
@@ -150,6 +150,11 @@ pub mod selectors {
         compute_method_selector("raise")
     }
 
+    /// `bet` — 玩家主动下注（postflop 第一个下注者，语义等同于 raise 但更清晰）。
+    pub fn bet() -> [u8; 32] {
+        compute_method_selector("bet")
+    }
+
     /// `reset_for_next_hand` — 显式重置桌台到 WAITING（管理员/测试场景）。
     ///
     /// 正常对局流程中由 `settle_hand` / `end_without_showdown` / 超时路径内部调用；
@@ -158,7 +163,17 @@ pub mod selectors {
         compute_method_selector("reset_for_next_hand")
     }
 
-    /// 返回所有 18 个 selector，供 `supports_selector` 等使用。
+    /// `addon` — 玩家追加筹码（下一手生效）。
+    pub fn addon() -> [u8; 32] {
+        compute_method_selector("addon")
+    }
+
+    /// `rebuy` — 玩家重购（立即生效，MTT 早期用）。
+    pub fn rebuy() -> [u8; 32] {
+        compute_method_selector("rebuy")
+    }
+
+    /// 返回所有 21 个 selector，供 `supports_selector` 等使用。
     #[must_use]
     pub fn all() -> Vec<[u8; 32]> {
         vec![
@@ -179,7 +194,10 @@ pub mod selectors {
             check(),
             call(),
             raise(),
+            bet(),
             reset_for_next_hand(),
+            addon(),
+            rebuy(),
         ]
     }
 }
@@ -322,6 +340,33 @@ pub struct RaiseArgs {
     pub total_bet: u64,
 }
 
+/// `bet` 参数（postflop 主动下注，amount 是下注增量，不是总下注）。
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct BetArgs {
+    /// 座位索引。
+    pub seat_index: u8,
+    /// 下注金额（增量，必须 > 0）。
+    pub amount: u64,
+}
+
+/// `addon` 参数（追加筹码，下一手生效）。
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct AddonArgs {
+    /// 座位索引。
+    pub seat_index: u8,
+    /// 追加金额（必须 > 0）。
+    pub amount: u64,
+}
+
+/// `rebuy` 参数（重购，立即生效）。
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct RebuyArgs {
+    /// 座位索引。
+    pub seat_index: u8,
+    /// 重购金额（必须 > 0）。
+    pub amount: u64,
+}
+
 // ========== Dispatch 路由入口 ==========
 
 /// Dispatch 路由入口。
@@ -372,9 +417,12 @@ pub fn dispatch(
         s if s == &selectors::check() => dispatch_check(table, args, &mut events),
         s if s == &selectors::call() => dispatch_call(table, args, &mut events),
         s if s == &selectors::raise() => dispatch_raise(table, args, &mut events),
+        s if s == &selectors::bet() => dispatch_bet(table, args, &mut events),
         s if s == &selectors::reset_for_next_hand() => {
             dispatch_reset_for_next_hand(table, args, &mut events)
         }
+        s if s == &selectors::addon() => dispatch_addon(table, args, &mut events),
+        s if s == &selectors::rebuy() => dispatch_rebuy(table, args, &mut events),
         _ => {
             return Err(PokerL1Error::UnknownContractMethod {
                 selector: *selector,
@@ -404,7 +452,7 @@ fn decode_args<T: BorshDeserialize>(args: &[u8], method: &str) -> PokerL1Result<
         .map_err(|e| PokerL1Error::Serialization(format!("{method} args borsh: {e}")))
 }
 
-// ========== 17 个 dispatch_* 子函数 ==========
+// ========== dispatch_* 子函数 ==========
 
 /// `create_table` — 初始化桌台（覆写默认空桌台）。
 fn dispatch_create_table(
@@ -561,8 +609,13 @@ fn dispatch_leave_table(
             "seat not occupied, cannot leave".into(),
         ));
     }
-    let refund_amt = seat.stack;
+    // 退还 stack + pending_addon（玩家离开时未入账的 addon 也必须退还）
+    let refund_amt = seat.stack.saturating_add(seat.pending_addon);
     let player = seat.player;
+    if refund_amt > 0 {
+        // 同步扣减 addon_pool（资金流出）
+        table.addon_pool = table.addon_pool.saturating_sub(seat.pending_addon);
+    }
     *seat = super::types::Seat::empty();
 
     if refund_amt > 0 {
@@ -739,6 +792,18 @@ fn dispatch_raise(
     state_machine::apply_raise(table, input.seat_index, input.total_bet, events)
 }
 
+/// `bet` — 玩家主动下注（postflop 第一个下注者）。
+///
+/// 调用 `state_machine::apply_bet`：内部复用 `apply_raise(total_bet = seat.bet + amount)`。
+fn dispatch_bet(
+    table: &mut TexasPokerTable,
+    args: &[u8],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let input: BetArgs = decode_args(args, "bet")?;
+    state_machine::apply_bet(table, input.seat_index, input.amount, events)
+}
+
 /// `reset_for_next_hand` — 显式重置桌台到 WAITING 状态。
 ///
 /// 不接受 args（空 slice），直接调用 `state_machine::reset_for_next_hand`。
@@ -750,6 +815,31 @@ fn dispatch_reset_for_next_hand(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     state_machine::reset_for_next_hand(table, events)
+}
+
+/// `addon` — 玩家追加筹码（下一手生效）。
+///
+/// 调用 `state_machine::apply_addon`：累加 `pending_addon`，不动 `stack`。
+/// 在下一手 `reset_for_next_hand` 第一阶段合并到 `stack`。
+fn dispatch_addon(
+    table: &mut TexasPokerTable,
+    args: &[u8],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let input: AddonArgs = decode_args(args, "addon")?;
+    state_machine::apply_addon(table, input.seat_index, input.amount, events)
+}
+
+/// `rebuy` — 玩家重购（立即生效）。
+///
+/// 调用 `state_machine::apply_rebuy`：直接改 `stack`（影响下一动作可用筹码）。
+fn dispatch_rebuy(
+    table: &mut TexasPokerTable,
+    args: &[u8],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let input: RebuyArgs = decode_args(args, "rebuy")?;
+    state_machine::apply_rebuy(table, input.seat_index, input.amount, events)
 }
 
 // ========== 单元测试 ==========
@@ -793,7 +883,7 @@ mod tests {
     #[test]
     fn all_selectors_unique() {
         let sels = selectors::all();
-        assert_eq!(sels.len(), 18, "应有 18 个 selector");
+        assert_eq!(sels.len(), 21, "应有 21 个 selector");
         for i in 0..sels.len() {
             for j in (i + 1)..sels.len() {
                 assert_ne!(sels[i], sels[j], "selector[{i}] == selector[{j}] 不应相等");

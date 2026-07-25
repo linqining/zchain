@@ -734,7 +734,7 @@ fn test_soundness_kick_player_tampered_refund() {
 fn test_action_air_column_consistency() {
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
     use poker_texas_air::airs::actions::{
-        auto_fold, call, check, fold, force_fold, kick_player, raise,
+        auto_fold, bet, call, check, fold, force_fold, kick_player, raise,
     };
 
     // fold: 通用 + 2 业务 = 39
@@ -751,6 +751,9 @@ fn test_action_air_column_consistency() {
 
     // raise: 通用 + 19 业务 = 56
     assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 19);
+
+    // bet: 通用 + 10 业务 = 47
+    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 10);
 
     // auto_fold: 通用 + 6 业务 = 43
     assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
@@ -771,7 +774,167 @@ fn test_action_method_kinds() {
     assert_eq!(MethodKind::Check.tier(), MethodTier::Action);
     assert_eq!(MethodKind::Call.tier(), MethodTier::Action);
     assert_eq!(MethodKind::Raise.tier(), MethodTier::Action);
+    assert_eq!(MethodKind::Bet.tier(), MethodTier::Action);
     assert_eq!(MethodKind::AutoFold.tier(), MethodTier::Action);
     assert_eq!(MethodKind::ForceFold.tier(), MethodTier::Action);
     assert_eq!(MethodKind::KickPlayer.tier(), MethodTier::Action);
+}
+
+// ========== bet AIR ==========
+
+/// E2E: bet → trace → prove → verify（happy path）。
+///
+/// 场景：postflop 玩家 bet 50，原 seat.bet = 0，结果 seat.bet = 50。
+#[test]
+fn test_e2e_bet_prove_verify() {
+    use poker_texas_air::airs::actions::bet::{BetAir, BetInput, BetRow};
+
+    let input = BetInput {
+        seat_index: 1,
+        amount: 50,
+    };
+    let row = BetRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42, // table_id
+        0,  // hand_id
+        8,  // call_seq
+        0,  // pre_version
+        1,  // post_version
+        5,  // pre = FLOP（postflop bet）
+        5,  // post = FLOP
+        0,  // pre_pot
+        50, // post_pot（pot += amount）
+        50, // post_seat_bet
+    );
+    let trace = gen_method_trace(BetAir::num_columns(), &row.to_vec(), &BetRow::padding().to_vec())
+        .expect("trace 生成失败");
+
+    let air = BetAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 8,
+        pre_version: 0,
+        post_version: 1,
+    };
+
+    let proof = prove_method(&trace, air, BetAir::num_columns()).expect("prove 失败");
+    verify_method(proof).expect("verify 失败");
+}
+
+/// Soundness: 篡改 bet 的 `amount` 公开输入后，verify 应失败。
+#[test]
+fn test_soundness_bet_tampered_amount() {
+    use poker_texas_air::airs::actions::bet::{BetAir, BetInput, BetRow};
+
+    let input = BetInput {
+        seat_index: 1,
+        amount: 50,
+    };
+    let row = BetRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        8,
+        0,
+        1,
+        5,
+        5,
+        0,
+        50,
+        50,
+    );
+    let trace = gen_method_trace(BetAir::num_columns(), &row.to_vec(), &BetRow::padding().to_vec())
+        .expect("trace 生成失败");
+
+    let air = BetAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 8,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(&trace, air, BetAir::num_columns()).expect("prove 失败");
+
+    // 篡改 amount：trace 中是 50，但 AIR 声明 999
+    proof.air = BetAir {
+        input: BetInput {
+            amount: 999, // 篡改！
+            ..proof.air.input.clone()
+        },
+        ..proof.air.clone()
+    };
+
+    let result = verify_method(proof);
+    assert!(
+        result.is_err(),
+        "篡改 amount 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
+/// Soundness: 篡改 bet 的 `seat_index` 公开输入后，verify 应失败。
+#[test]
+fn test_soundness_bet_tampered_seat() {
+    use poker_texas_air::airs::actions::bet::{BetAir, BetInput, BetRow};
+
+    let input = BetInput {
+        seat_index: 1,
+        amount: 50,
+    };
+    let row = BetRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        8,
+        0,
+        1,
+        5,
+        5,
+        0,
+        50,
+        50,
+    );
+    let trace = gen_method_trace(BetAir::num_columns(), &row.to_vec(), &BetRow::padding().to_vec())
+        .expect("trace 生成失败");
+
+    let air = BetAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 8,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(&trace, air, BetAir::num_columns()).expect("prove 失败");
+
+    // 篡改 seat_index：trace 中是 1，但 AIR 声明 6
+    proof.air = BetAir {
+        input: BetInput {
+            seat_index: 6, // 篡改！
+            ..proof.air.input.clone()
+        },
+        ..proof.air.clone()
+    };
+
+    let result = verify_method(proof);
+    assert!(
+        result.is_err(),
+        "篡改 seat_index 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
 }

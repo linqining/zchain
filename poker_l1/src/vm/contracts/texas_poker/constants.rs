@@ -115,6 +115,43 @@ pub const DEFAULT_READY_WAIT_MS: u64 = 5_000;
 /// 边池总下注上限（防溢出）。
 pub const MAX_TOTAL_BET: u64 = 1_000_000_000_000_000_000;
 
+// ===== Ante 模式（start_hand 投盲注时使用）=====
+
+/// 无 ante（默认）。
+pub const ANTE_MODE_NONE: u8 = 0;
+/// 普通 ante（每个玩家投 ante_amount）。
+pub const ANTE_MODE_NORMAL: u8 = 1;
+/// Big Blind Ante（BBA，仅大盲位投 ante_amount，简化投注）。
+pub const ANTE_MODE_BBA: u8 = 2;
+
+// ===== Time Bank（玩家思考时间银行）=====
+
+/// 默认 Time Bank 初始额度（毫秒，30 秒）。
+pub const DEFAULT_TIME_BANK_MS: u64 = 30_000;
+
+/// Time Bank 每手补充额度（毫秒，每手开始时 +10 秒，最多到初始额度）。
+pub const TIME_BANK_REFILL_PER_HAND_MS: u64 = 10_000;
+
+// ===== Rake 模式（settle 时抽水）=====
+
+/// 无 rake。
+pub const RAKE_MODE_NONE: u8 = 0;
+/// 按比例抽水（pot * rake_bps / 10000，受 rake_cap 上限）。
+pub const RAKE_MODE_PERCENTAGE: u8 = 1;
+
+/// 默认 rake 比例（500 = 5%）。
+pub const DEFAULT_RAKE_BPS: u64 = 500;
+
+/// 默认 rake 上限（按 BB 倍数，通常 1-3 BB；此处用绝对值）。
+pub const DEFAULT_RAKE_CAP: u64 = 1_000;
+
+// ===== Run It Twice 模式（all-in 后发两次）=====
+
+/// 不发两次（默认）。
+pub const RIT_MODE_DISABLED: u8 = 0;
+/// Run It Twice（all-in 后发两次 turn+river，降低方差）。
+pub const RIT_MODE_TWICE: u8 = 1;
+
 #[cfg(test)]
 mod tests {
     use super::*;
