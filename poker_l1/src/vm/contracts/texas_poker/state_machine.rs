@@ -172,6 +172,28 @@ pub fn find_next_active_seat(seats: &[Seat], from: u8, max: u8) -> Option<u8> {
     None
 }
 
+/// 环形查找下一个参与本局的座位（occupied && !is_waiting）。
+///
+/// 与 [`find_next_active_seat`] 的区别：**不过滤 folded / all_in**。
+/// 用于盲注定位（SB/BB）——盲注阶段所有参与本局的玩家都要投盲注，
+/// 即使某玩家理论上已 all-in（实际盲注是第一步，不会有 folded/all_in，
+/// 但保持语义清晰：只要参与本局就应被考虑为盲注候选）。
+///
+/// 这是 P0 修复的核心辅助：传统德州扑克的 SB/BB/UTG 必须顺时针跳过空座位
+/// 找下一个参与本局的玩家，不能简单 `(button+k) % n` 取模。
+#[must_use]
+pub fn find_next_participating_seat(seats: &[Seat], from: u8, max: u8) -> Option<u8> {
+    let n = seats.len() as u8;
+    for offset in 1..=n {
+        let idx = (from + offset) % max.min(n);
+        let s = &seats[idx as usize];
+        if s.is_occupied() && !s.is_waiting {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 /// 是否存在可行动玩家（occupied && !folded && !all_in && !waiting）。
 #[must_use]
 pub fn has_actionable_player(seats: &[Seat]) -> bool {
@@ -310,23 +332,35 @@ fn move_button(table: &mut TexasPokerTable) {
 
 /// 投盲注，返回 (sb_seat, bb_seat, first_to_act)。
 ///
-/// 镜像 `table.move::post_blinds`（line 2672-2710）：
-/// - heads-up（2 人）：SB=button, BB=button+1, first_to_act=BB
-/// - 否则：SB=button+1, BB=SB+1, first_to_act=BB+1
+/// 镜像 `table.move::post_blinds`（line 2672-2710），并修正座位定位（P0-1）：
+/// - **heads-up（2 人）**：SB=button，BB=顺时针下一个参与本局的座位，
+///   first_to_act=BB（heads-up preflop BB 先行动）。
+/// - **非 heads-up**：SB=顺时针下一个参与本局的座位，BB=SB 之后的下一个，
+///   first_to_act 返回 BB 之后的参考座位（实际 first-to-act 由
+///   `start_betting_round` 用 `find_next_active_seat(seats, bb, n)` 精确定位）。
+///
+/// # P0-1 修复
+///
+/// 原实现用 `(button+k) % n` 直接取模定位 SB/BB，不跳过空座位。
+/// 当 button 与 BB 之间存在空座位时，盲注会落到空座位（stack=0，盲注失效）。
+/// 现统一用 `find_next_participating_seat` 顺时针跳过空座位定位。
 fn post_blinds(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) -> (u8, u8, u8) {
     let n = table.max_players;
     let active = count_active_occupied(&table.seats);
-    let (sb_seat, bb_seat, first_to_act) = if active == 2 {
-        // heads-up: SB=button, BB=next
+    let (sb_seat, bb_seat) = if active == 2 {
+        // heads-up: SB=button, BB=顺时针下一个参与本局的座位
         let sb = table.button;
-        let bb = (sb + 1) % n;
-        (sb, bb, bb) // BB 先行动
+        let bb = find_next_participating_seat(&table.seats, sb, n).unwrap_or(sb);
+        (sb, bb)
     } else {
-        let sb = (table.button + 1) % n;
-        let bb = (sb + 1) % n;
-        let first = (bb + 1) % n;
-        (sb, bb, first)
+        // 非 heads-up: SB=button 之后第一个参与本局的座位，BB=SB 之后下一个
+        let sb = find_next_participating_seat(&table.seats, table.button, n)
+            .unwrap_or(table.button);
+        let bb = find_next_participating_seat(&table.seats, sb, n).unwrap_or(sb);
+        (sb, bb)
     };
+    // first_to_act 仅作事件参考，实际由 start_betting_round 基于 BB 精确定位。
+    let first_to_act = bb_seat;
 
     let sb_amt = table.small_blind.min(table.seats[sb_seat as usize].stack);
     let bb_amt = table.big_blind.min(table.seats[bb_seat as usize].stack);
@@ -363,10 +397,25 @@ fn post_blinds(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) -
 
 /// 启动下注轮。
 ///
-/// 镜像 `table.move::start_betting_round`（line 2715-2762）。
+/// 镜像 `table.move::start_betting_round`（line 2715-2762），并修正 first-to-act 定位（P0-2/P0-3）。
+///
+/// # 参数
+/// - `is_preflop`: 是否 preflop（决定 current_bet 初始化与 first-to-act 规则）。
+/// - `bb_seat`: preflop 时传入大盲位座位（用于定位 UTG = BB 之后第一个可行动玩家）；
+///   postflop 传 `None`。
+///
+/// # first-to-act 规则（P0-2/P0-3 修复）
+/// - **preflop 非 heads-up**：UTG = BB 之后第一个可行动座位
+///   （`find_next_active_seat(seats, bb_seat, n)`），跳过空/folded/all_in 座位。
+///   原实现硬编码 `button+3`，不跳过空座位。
+/// - **preflop heads-up**：SB(button) 先行动。
+/// - **postflop 非 heads-up**：button 之后第一个可行动座位。
+/// - **postflop heads-up**：SB(button) 先行动（heads-up postflop 由 button 先行动）。
+///   原实现未区分 heads-up，导致 heads-up postflop 行动权反转。
 fn start_betting_round(
     table: &mut TexasPokerTable,
     is_preflop: bool,
+    bb_seat: Option<u8>,
     events: &mut Vec<TexasPokerEvent>,
 ) {
     let bb = table.big_blind;
@@ -405,20 +454,25 @@ fn start_betting_round(
         s.acted_this_round = false;
     }
 
-    // 选第一个可行动玩家作为 current_turn（preflop=first_to_act 即 button 后第三个位置）
+    let is_heads_up = count_active_occupied(&table.seats) == 2;
+    let n = table.max_players;
+    // 选第一个可行动玩家作为 current_turn。
     let start_seat = if is_preflop {
-        // first_to_act 已在 post_blinds 中确定，用 button+2 后第一个可行动
-        let n = table.max_players;
-        let candidate = if count_active_occupied(&table.seats) == 2 {
-            // heads-up preflop: button(SB) 先行动
-            table.button
+        if is_heads_up {
+            // heads-up preflop: SB(button) 先行动
+            Some(table.button)
         } else {
-            (table.button + 3) % n
-        };
-        Some(candidate)
+            // 非 heads-up preflop: UTG = BB 之后第一个可行动座位
+            bb_seat
+                .filter(|_| !is_heads_up)
+                .and_then(|bb| find_next_active_seat(&table.seats, bb, n))
+        }
+    } else if is_heads_up {
+        // heads-up postflop: button(SB) 先行动
+        Some(table.button)
     } else {
-        // postflop: button 后第一个可行动玩家
-        find_next_active_seat(&table.seats, table.button, table.max_players)
+        // 非 heads-up postflop: button 之后第一个可行动座位
+        find_next_active_seat(&table.seats, table.button, n)
     };
 
     set_current_turn(table, start_seat, events);
@@ -522,6 +576,13 @@ fn collect_bets_to_pot(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerE
 ///
 /// 镜像 `table.move::advance_round`（line 2855-2886）。
 fn advance_round(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+    // P1-8 修复：若只剩一名未 fold 玩家（其他人全 fold），无需继续发牌到 showdown，
+    // 直接 end_without_showdown 结算。覆盖 advance_round 路径上的"剩一人"场景
+    // （fold 路径已在 apply_fold_internal 处理，此处兜底 all-in/advance 后的情形）。
+    if count_active_players(&table.seats) <= 1 {
+        end_without_showdown(table, events);
+        return;
+    }
     let from = table.round_state;
     let to = match from {
         ROUND_PREFLOP => {
@@ -862,11 +923,11 @@ fn check_reveal_phase_complete(table: &mut TexasPokerTable, events: &mut Vec<Tex
             let (_, bb_seat, _) = post_blinds(table, events);
             // 投 ante（若配置）— 在盲注之后、下注轮启动之前
             collect_ante(table, bb_seat, events);
-            start_betting_round(table, true, events);
+            start_betting_round(table, true, Some(bb_seat), events);
         }
         REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
             write_decrypted_cards_to_community(table, events);
-            start_betting_round(table, false, events);
+            start_betting_round(table, false, None, events);
         }
         REVEAL_PHASE_SHOWDOWN => {
             write_decrypted_cards_to_hands(table, events);
@@ -2287,28 +2348,15 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
         return;
     }
 
-    // 抽水（在计算 side pot 之前，与 end_without_showdown 保持一致）
-    let pot_before = table.pot;
-    let rake = collect_rake(table);
-    if rake > 0 {
-        events::emit_event(
-            events,
-            TexasPokerEvent::RakeCollected {
-                table_id: table.id,
-                pot_before,
-                rake_amount: rake,
-                pot_after: table.pot,
-                rake_mode: table.rake_mode,
-            },
-        );
-    }
-
+    // P1-9 修复：先 side pot 分层，再基于分层总额算 rake，按比例从各 pot 扣除。
+    // 原实现先从 table.pot 扣 rake，再用 total_bet 重算分层，导致 result.total()
+    // （基于 total_bet）> table.pot（已扣 rake），分配总额超发。
     let n = table.seats.len();
     let bets: Vec<u64> = table.seats.iter().map(|s| s.total_bet).collect();
     let folded: Vec<bool> = table.seats.iter().map(|s| s.folded || s.left_during_hand).collect();
     let all_in: Vec<bool> = table.seats.iter().map(|s| s.all_in).collect();
 
-    let result = match side_pot::calculate_side_pots(&bets, &folded, &all_in) {
+    let mut result = match side_pot::calculate_side_pots(&bets, &folded, &all_in) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("settle_hand: side_pot 计算失败: {e:?}");
@@ -2318,14 +2366,27 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
         }
     };
 
-    let main_eligible: Vec<u8> = (0..n as u8)
-        .filter(|&i| {
-            table.seats[i as usize].is_occupied()
-                && !table.seats[i as usize].folded
-                && !table.seats[i as usize].is_waiting
-        })
-        .collect();
-    let main_winners = find_winners_in_seats(table, &main_eligible);
+    // 基于分层总额计算 rake，并按各 pot 占比从 main/side pot 扣除（守恒）。
+    let total_before_rake = result.total();
+    let pot_before = total_before_rake;
+    let rake = compute_rake_amount(table, total_before_rake);
+    if rake > 0 {
+        apply_rake_to_pots(&mut result, rake);
+        table.rake_collected = table.rake_collected.saturating_add(rake);
+        events::emit_event(
+            events,
+            TexasPokerEvent::RakeCollected {
+                table_id: table.id,
+                pot_before,
+                rake_amount: rake,
+                pot_after: result.total(),
+                rake_mode: table.rake_mode,
+            },
+        );
+    }
+
+    // P1-4 修复：main_eligible 直接取分层算法结果（同源），不再重新计算。
+    let main_winners = find_winners_in_seats(table, &result.main_eligible);
     distribute_pot_to_winners(table, result.main_pot, &main_winners, POT_TYPE_MAIN, events);
 
     let mut all_winners: Vec<u8> = main_winners.clone();
@@ -2339,12 +2400,66 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
         events,
         TexasPokerEvent::HandSettled {
             table_id: table.id,
-            pot: result.total(),
+            pot: result.total() + rake,
             winners: all_winners,
         },
     );
 
+    // pot 已全部分配给赢家（含 rake 扣除），清零。
+    table.pot = 0;
     let _ = reset_for_next_hand(table, events);
+}
+
+/// 计算 rake 金额（不修改状态），供 settle_hand 在分层后使用。
+///
+/// 规则与 [`collect_rake`] 一致，但不直接改 table.pot（因为分层已基于 total_bet）。
+fn compute_rake_amount(table: &TexasPokerTable, pot: u64) -> u64 {
+    if table.rake_mode == super::constants::RAKE_MODE_NONE {
+        return 0;
+    }
+    let raw_rake = pot.checked_mul(table.rake_bps).unwrap_or(0) / 10_000;
+    raw_rake.min(table.rake_cap).min(pot)
+}
+
+/// 按 main/side pot 占比从各 pot 扣除 rake，余数归 main pot（守恒）。
+///
+/// 扣除后 `result.total()` 恰好减少 `rake`。
+fn apply_rake_to_pots(result: &mut side_pot::SidePotResult, rake: u64) {
+    let total = result.total();
+    if total == 0 {
+        return;
+    }
+    // main pot 承担的 rake（余数归 main，保证总和守恒）
+    let main_rake = if result.side_pots.is_empty() {
+        rake
+    } else {
+        // 按 main_pot / total 比例，余数归 main
+        let side_total: u64 = result.side_pots.iter().map(|p| p.amount).sum();
+        let side_rake_total = side_total
+            .checked_mul(rake)
+            .map(|v| v / total)
+            .unwrap_or(0);
+        rake.saturating_sub(side_rake_total)
+    };
+    result.main_pot = result.main_pot.saturating_sub(main_rake);
+
+    let side_total_before: u64 = result.side_pots.iter().map(|p| p.amount).sum();
+    let side_rake_budget = rake.saturating_sub(main_rake);
+    let mut side_rake_used = 0u64;
+    for sp in &mut result.side_pots {
+        let this_rake = if side_total_before == 0 {
+            0
+        } else {
+            sp.amount.checked_mul(side_rake_budget).map(|v| v / total).unwrap_or(0)
+        };
+        sp.amount = sp.amount.saturating_sub(this_rake);
+        side_rake_used = side_rake_used.saturating_add(this_rake);
+    }
+    // 若 side pot 按比例扣除后有尾差（因整数除法），补扣到 main pot
+    let leftover = side_rake_budget.saturating_sub(side_rake_used);
+    if leftover > 0 {
+        result.main_pot = result.main_pot.saturating_sub(leftover);
+    }
 }
 
 /// 在指定 eligible seats 中找最佳手牌持有者。
@@ -2832,6 +2947,13 @@ pub fn apply_bet(
     }
     if amount == 0 {
         return Err(PokerL1Error::Serialization("bet: amount must > 0".into()));
+    }
+    // P2-5 修复：preflop 已有强制下注（盲注+ante 构成 current_bet），不应使用 bet
+    // （开注动作应叫 raise）。bet 仅用于 postflop 当前轮无下注时主动开注。
+    if table.round_state == ROUND_PREFLOP {
+        return Err(PokerL1Error::Serialization(
+            "bet: not allowed in preflop, use raise instead".into(),
+        ));
     }
     // 验证当前轮无已有下注（bet 只能在 current_bet == seat.bet 时使用）
     let round = table.betting_round.as_ref().expect("checked above");

@@ -53,6 +53,8 @@ pub enum SidePotError {
 pub struct SidePotResult {
     /// 主池金额（= side_pots[0].amount，单独返回便于调用方直接使用）。
     pub main_pot: u64,
+    /// 主池有资格的座位列表（与分层算法同源，P1-4 修复：避免调用方重新计算导致不一致）。
+    pub main_eligible: Vec<u8>,
     /// 边池列表（不含主池；若全员未 all-in 则为空）。
     pub side_pots: Vec<SidePot>,
 }
@@ -104,9 +106,15 @@ pub fn calculate_side_pots(
     let mut all_in_bets = collect_all_in_bets(bets, all_in);
 
     if all_in_bets.is_empty() {
-        // 无人 all-in：全部筹码归入主池，无 side pot
+        // 无人 all-in：全部筹码归入主池，无 side pot。
+        // main_eligible = 所有未 fold 的座位（与分层算法同源）。
+        let main_eligible: Vec<u8> = (0..n)
+            .filter(|&j| !folded[j])
+            .map(|j| u8::try_from(j).expect("座位数 <= 255"))
+            .collect();
         return Ok(SidePotResult {
             main_pot: total_pot,
+            main_eligible,
             side_pots: vec![],
         });
     }
@@ -201,15 +209,24 @@ pub fn calculate_side_pots(
 
     // 主池 = 第一个 side_pot；其余为 side_pots
     if side_pots.is_empty() {
+        // M-A3 合并后仅剩一个 pot 但 eligible 为空（所有超额贡献者都 fold），
+        // 此时 main_eligible 也为空，由调用方处理。
+        let main_eligible: Vec<u8> = (0..n)
+            .filter(|&j| !folded[j])
+            .map(|j| u8::try_from(j).expect("座位数 <= 255"))
+            .collect();
         Ok(SidePotResult {
             main_pot: total_pot,
+            main_eligible,
             side_pots: vec![],
         })
     } else {
         let main_pot = side_pots[0].amount;
+        let main_eligible = side_pots[0].eligible_seats.clone();
         let rest = side_pots[1..].to_vec();
         Ok(SidePotResult {
             main_pot,
+            main_eligible,
             side_pots: rest,
         })
     }
