@@ -280,13 +280,17 @@ fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Res
     }
 
     table.deck_state.encrypted = new_cts;
-    // P1-7 修复：重建后保留 cards_dealt 偏移，避免新 deck 从 index 0 开始发牌时
-    // 与历史已发牌（已写入 community_cards / seat.hand）的 index 重用。
-    // decrypted_cards 同样保留——其中部分解密的手牌记录（ciphertext.is_some()）
-    // 仍供后续 showdown reveal 使用；完全解出的公共牌记录（plaintext.is_some()）
-    // 已被 write_decrypted_cards_to_community 清为 None，不会重复写入。
-    // 注意：重建改变了 deck 内容，旧 encrypted_card_index 对新 deck 不再对应同一张牌，
-    // 但已解出的明文牌已落地（community_cards/seat.hand），不依赖 index 反查。
+    // reconstruct 重建的是一副全新牌组，与旧 deck 的 index 空间无关。
+    // 新 deck 必须从 index=0 开始顺序发牌（见 restart_reveal_after_reconstruct
+    // 的注释），因此重置 cards_dealt=0。
+    //
+    // 已发出的旧牌不依赖新 deck 的 index：
+    // - 已解出的公共牌明文存于 community_cards（不依赖 index）
+    // - 已部分解密的手牌记录（decrypted_cards 中 ciphertext.is_some() 者）
+    //   自包含 partial c2，showdown 解密时不访问 deck_state.encrypted（见
+    //   apply_submit_player_reveal_tokens 的 showdown 分支）
+    // 因此保留 decrypted_cards（不清空），仅重置 cards_dealt。
+    table.deck_state.cards_dealt = 0;
     Ok(())
 }
 
@@ -624,32 +628,45 @@ fn advance_shuffle(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
 
 /// reconstruct 后根据当前 round_state 重启对应 reveal phase。
 ///
-/// P1-7 修复（语义校正）：reconstruct 的目的是在玩家离开导致牌组无法继续解密时，
-/// 由剩余玩家重新构建牌组（`rebuild_deck_from_reconstruct_deck` 重新加密整副牌）
-/// 让牌局继续。**已经发出且已解出的牌（写入 `community_cards` 的公共牌、
-/// 写入 `seat.hand` 的手牌）不应清空**——它们已是明文，与重建后的加密牌组独立。
+/// # 设计要点
 ///
-/// 重建后只需重发"本应发出但因超时未能解出"的牌。`restart_reveal_after_reconstruct`
-/// 据当前轮次补发缺失的牌：以 `community_cards` 已有数量为基准，补齐到该轮所需张数。
+/// reconstruct 在某轮 reveal 超时（玩家未提交 reveal token）后触发，由剩余玩家
+/// 重新构建牌组（`rebuild_deck_from_reconstruct_deck` 生成全新加密 deck，`cards_dealt`
+/// 重置为 0）让牌局继续。重启 reveal phase 的原则：
+///
+/// 1. **已解出的牌不动**：已写入 `community_cards` 的公共牌、已部分解密存于
+///    `decrypted_cards`（`ciphertext.is_some()`）的手牌，都不依赖新 deck 的 index，
+///    原样保留。手牌的 partial 记录自包含 c2，showdown 时牌主公开 token 即可解开。
+/// 2. **补发缺失的牌**：以 `community_cards.len()` 为基准补齐到当前轮次所需张数，
+///    新发的牌从新 deck 的 index=0 开始顺序发出（`cards_dealt` 已被 rebuild 重置）。
+///
+/// # 各轮次处理
+///
+/// - PREFLOP：正常流程下 preflop 超时走 refund+reset（见 `on_reveal_timeout`），
+///   不会进 reconstruct；此分支为防御性兜底。若走到这里，说明手牌从未成功发出，
+///   需清空 `decrypted_cards` 中残留的旧 partial 手牌记录后从新 deck 重发。
+/// - FLOP/TURN/RIVER：按 `community_cards.len()` 补发缺失的公共牌。
+/// - SHOWDOWN：不补发新牌，直接让各牌主从 `decrypted_cards` 的 partial 记录解手牌。
 fn restart_reveal_after_reconstruct(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
     match table.round_state {
-        ROUND_PREFLOP => start_preflop_reveal_phase(table, events),
+        ROUND_PREFLOP => {
+            // 防御性：清空残留的旧 partial 手牌记录，避免 showdown 时新旧记录并存。
+            table.deck_state.decrypted_cards.clear();
+            start_preflop_reveal_phase(table, events);
+        }
         ROUND_FLOP => {
-            // flop 需 3 张公共牌；已解出的（已在 community_cards 中）跳过，补发剩余。
             let have = table.community_cards.len() as u8;
             if have < 3 {
                 start_community_reveal_phase(table, 3 - have, REVEAL_PHASE_FLOP, events);
             }
         }
         ROUND_TURN => {
-            // turn 需 4 张公共牌（flop 3 + turn 1）。
             let have = table.community_cards.len() as u8;
             if have < 4 {
                 start_community_reveal_phase(table, 4 - have, REVEAL_PHASE_TURN, events);
             }
         }
         ROUND_RIVER => {
-            // river 需 5 张公共牌（flop 3 + turn 1 + river 1）。
             let have = table.community_cards.len() as u8;
             if have < 5 {
                 start_community_reveal_phase(table, 5 - have, REVEAL_PHASE_RIVER, events);
@@ -1365,13 +1382,29 @@ pub fn apply_submit_player_reveal_tokens(
         }
 
         let card_index = table.reveal_token_state.assignments[ai].encrypted_card_index;
-        if card_index as usize >= table.deck_state.encrypted.len() {
-            return Err(PokerL1Error::Serialization(format!(
-                "card_index {card_index} out of range"
-            )));
-        }
 
-        let encrypted_card = table.deck_state.encrypted[card_index as usize];
+        // 取用于 proof 验证的密文。
+        // - showdown：手牌已部分解密，密文存于 decrypted_cards 的 ciphertext 字段
+        //   （自包含，与 deck_state.encrypted 解耦）。这点对 reconstruct 后的场景
+        //   至关重要：rebuild 后 deck_state.encrypted 是全新 deck，旧 card_index 在
+        //   其中指向不同密文，但 partial 记录自包含，proof 验证仍基于原 partial 密文。
+        // - 其他阶段（preflop/公共牌）：直接用当前 deck 的密文。
+        let encrypted_card = if phase == REVEAL_PHASE_SHOWDOWN {
+            table
+                .deck_state
+                .decrypted_cards
+                .iter()
+                .find(|dc| dc.encrypted_card_index == card_index && dc.ciphertext.is_some())
+                .map(|dc| dc.ciphertext.clone().unwrap())
+                .unwrap_or_else(|| table.deck_state.encrypted[card_index as usize])
+        } else {
+            if card_index as usize >= table.deck_state.encrypted.len() {
+                return Err(PokerL1Error::Serialization(format!(
+                    "card_index {card_index} out of range"
+                )));
+            }
+            table.deck_state.encrypted[card_index as usize]
+        };
         let token = reveal_tokens[k];
         let proof = &proofs[k];
 
