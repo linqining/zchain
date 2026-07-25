@@ -1,9 +1,13 @@
 //! `start_hand` AIR — 开始新一局（投盲注 + 进入 shuffle 阶段）。
 //!
-//! ## 业务规约
+//! ## 业务规约（对齐 `state_machine::start_hand`）
 //! 1. `round_state == ROUND_WAITING`
 //! 2. 活跃玩家数 ≥ `MIN_PLAYERS_TO_START`（= 2）
-//! 3. 状态变更：`button += 1`, `round_state = ROUND_SHUFFLE`
+//! 3. 状态变更：`button` 旋转到下一个占用座；**`round_state` 保持 `ROUND_WAITING`**
+//!    （合约在 `start_hand` 后并不改 `round_state`，只有当 preflop reveal phase
+//!    完成时才转为 `ROUND_PREFLOP`，见 `check_reveal_phase_complete`）。
+//!    真正进入 shuffle 的语义由独立的 `shuffle_state.phase = SHUFFLE_PHASE_BEFORE_PREFLOP`
+//!    表达，**不属于 `round_state`**（合约 `constants.rs` 无 `ROUND_SHUFFLE` 常量）。
 //! 4. **Ante 配置**：声明本手的 ante_mode / ante_amount / ante_collected，
 //!    约束 ante_mode 与公开输入一致，ante_collected 在 NONE 模式下 == 0
 
@@ -104,9 +108,10 @@ impl FrameworkEval for StartHandAir {
         // 简化实现：直接约束 active_count >= 2 via range check（阶段 2 用 lookup）
         let _ = (one, two);
 
-        // 约束 3：output_new_round_state == ROUND_SHUFFLE (常量)
-        // ROUND_SHUFFLE 的值从 constants 模块获取，简化为 1
-        let expected_round: E::F = M31::from(1u32).into();
+        // 约束 3：output_new_round_state == ROUND_WAITING (常量)
+        // 合约 start_hand 后 round_state 仍为 ROUND_WAITING=0；真正进入 shuffle 由
+        // shuffle_state.phase 表达（SHUFFLE_PHASE_BEFORE_PREFLOP=3），不属于 round_state。
+        let expected_round: E::F = M31::from(0u32).into();
         eval.add_constraint(is_active.clone() * (output_new_round_state - expected_round));
 
         // 约束 4（Ante）：ante_mode 与公开输入一致
@@ -161,13 +166,13 @@ impl StartHandRow {
             common: CommonRow::active(
                 MethodKind::StartHand, pre_state_root, post_state_root,
                 table_id, hand_id, call_seq, pre_version, post_version,
-                0, // pre = WAITING
-                1, // post = SHUFFLE
+                0, // pre = ROUND_WAITING
+                0, // post = ROUND_WAITING（合约 start_hand 后 round_state 不变）
                 0, 0, 0, 0,
             ),
             input_active_count: u8_to_m31(input.active_count),
             output_new_button: ZERO, // 由 pre_button + 1 计算
-            output_new_round_state: M31::from(1u32), // ROUND_SHUFFLE
+            output_new_round_state: M31::from(0u32), // ROUND_WAITING
             output_ante_mode: u8_to_m31(input.ante_mode),
             output_ante_amount_0: M31::from((input.ante_amount & 0xFFFF) as u32),
             output_ante_collected_0: M31::from((input.ante_collected & 0xFFFF) as u32),

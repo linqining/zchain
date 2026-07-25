@@ -5,7 +5,10 @@
 //!
 //! ## 业务规约
 //!
-//! 1. `round_state` 在 reveal 阶段（`reveal_token_state.reveal_phase != NONE`）
+//! 1. 阶段守卫在 `reveal_token_state.reveal_phase != NONE`（**不是** `round_state`）；
+//!    `round_state` 在 reveal 期间可为 WAITING（preflop reveal）或 PREFLOP..SHOWDOWN，
+//!    且单次 submit 不改变 `round_state`（pre == post）。真正的相位约束由
+//!    `INPUT_REVEAL_PHASE` 列承载（见 evaluate）。
 //! 2. `seat_index` 在 `reveal_assignments` 中
 //! 3. 提交 RevealTokenProof（DLEq 证明 reveal token 正确性）
 //! 4. 状态变更：
@@ -146,8 +149,9 @@ impl SubmitPlayerRevealTokensRow {
                 call_seq,
                 pre_version,
                 post_version,
-                2, // pre = ROUND_REVEAL（简化值）
-                2, // post = ROUND_REVEAL
+                0, // pre round_state（reveal 期间可为 0/2..6；真实值由调用方传入，
+                   //    此处默认 0=ROUND_WAITING。相位守卫在 INPUT_REVEAL_PHASE）
+                0, // post round_state（单次 submit 不改 round_state）
                 0,
                 0,
                 0,

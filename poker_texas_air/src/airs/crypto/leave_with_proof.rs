@@ -147,8 +147,8 @@ impl LeaveWithProofRow {
                 call_seq,
                 pre_version,
                 post_version,
-                1, // pre = ROUND_SHUFFLE
-                1, // post = ROUND_SHUFFLE
+                0, // pre = ROUND_WAITING（leave_with_proof 仅在 WAITING 态）
+                0, // post = ROUND_WAITING
                 0,
                 0,
                 0,

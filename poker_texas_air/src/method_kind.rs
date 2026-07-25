@@ -32,7 +32,7 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
     out
 }
 
-/// 18 个方法种类的枚举。
+/// 21 个方法种类的枚举。
 ///
 /// 每个 variant 对应 `poker_l1` 的一个 `apply_*` 函数，并拥有自己的专用 AIR。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]

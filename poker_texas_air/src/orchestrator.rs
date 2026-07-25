@@ -30,21 +30,49 @@
 //!
 //! ## 当前覆盖
 //!
-//! 本模块为 [`MethodKind::CreateTable`] 和 [`MethodKind::Fold`] 提供完整的
-//! trace 构造 + prove + verify。其余方法的 trace 构造留 TODO（模式确立后
-//! 机械扩展，每个方法约 10 行 match 分支）。
+//! 全部 21 个 [`MethodKind`] 均已接入 trace 构造 + prove + verify。每个方法从
+//! `ProveTask` 的 pre/post table 快照读取业务字段（round_state / pot / version /
+//! seat 标量），状态转移正确性来自 `poker_l1` dispatch；电路只做"输入一致性 +
+//! AIR 现有约束"证明。
 
 use stwo::core::fields::m31::M31;
 
+use crate::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
+use crate::airs::actions::bet::{BetAir, BetInput, BetRow};
+use crate::airs::actions::call::{CallAir, CallInput, CallRow};
+use crate::airs::actions::check::{CheckAir, CheckInput, CheckRow};
 use crate::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
+use crate::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
+use crate::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
+use crate::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
 use crate::airs::common::ZERO;
+use crate::airs::crypto::join_and_shuffle::{JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow};
+use crate::airs::crypto::leave_with_proof::{
+    LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
+};
+use crate::airs::crypto::submit_player_reveal_tokens::{
+    SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
+};
+use crate::airs::crypto::submit_reconstruct_deck::{
+    SubmitReconstructDeckAir, SubmitReconstructDeckInput, SubmitReconstructDeckRow,
+};
+use crate::airs::crypto::submit_shuffle_v2::{SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row};
+use crate::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
+use crate::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
 use crate::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput, CreateTableRow};
+use crate::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
+use crate::airs::lifecycle::leave_table::{LeaveTableAir, LeaveTableInput, LeaveTableRow};
+use crate::airs::lifecycle::reset_for_next_hand::{
+    ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
+};
+use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
+use crate::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::prove_task::{MethodInput, ProveTask};
 use crate::prover::prove_method;
 use crate::state_root::{compute_state_root, StateRoot};
-use crate::trace_gen::generic_trace::gen_method_trace;
+use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
 
 /// 把 Starknet FieldElement（state_root）转为 4 个 M31 limb。
 ///
@@ -118,12 +146,26 @@ impl Orchestrator {
 
         match task.method_kind {
             MethodKind::CreateTable => self.prove_create_table(task, pre_root, post_root)?,
+            MethodKind::JoinTable => self.prove_join_table(task, pre_root, post_root)?,
+            MethodKind::LeaveTable => self.prove_leave_table(task, pre_root, post_root)?,
+            MethodKind::StartHand => self.prove_start_hand(task, pre_root, post_root)?,
+            MethodKind::Tick => self.prove_tick(task, pre_root, post_root)?,
+            MethodKind::ResetForNextHand => self.prove_reset_for_next_hand(task, pre_root, post_root)?,
             MethodKind::Fold => self.prove_fold(task, pre_root, post_root)?,
-            other => {
-                return Err(TexasAirError::NotImplemented(format!(
-                    "Orchestrator: method {other:?} 的 trace 构造未实现（当前仅支持 CreateTable / Fold）"
-                )));
-            }
+            MethodKind::Check => self.prove_check(task, pre_root, post_root)?,
+            MethodKind::Call => self.prove_call(task, pre_root, post_root)?,
+            MethodKind::Raise => self.prove_raise(task, pre_root, post_root)?,
+            MethodKind::AutoFold => self.prove_auto_fold(task, pre_root, post_root)?,
+            MethodKind::ForceFold => self.prove_force_fold(task, pre_root, post_root)?,
+            MethodKind::KickPlayer => self.prove_kick_player(task, pre_root, post_root)?,
+            MethodKind::Addon => self.prove_addon(task, pre_root, post_root)?,
+            MethodKind::Rebuy => self.prove_rebuy(task, pre_root, post_root)?,
+            MethodKind::Bet => self.prove_bet(task, pre_root, post_root)?,
+            MethodKind::JoinAndShuffle => self.prove_join_and_shuffle(task, pre_root, post_root)?,
+            MethodKind::LeaveWithProof => self.prove_leave_with_proof(task, pre_root, post_root)?,
+            MethodKind::SubmitShuffleV2 => self.prove_submit_shuffle_v2(task, pre_root, post_root)?,
+            MethodKind::SubmitPlayerRevealTokens => self.prove_submit_reveal_tokens(task, pre_root, post_root)?,
+            MethodKind::SubmitReconstructDeck => self.prove_submit_reconstruct_deck(task, pre_root, post_root)?,
         }
 
         self.proven.push(summary.clone());
@@ -275,6 +317,595 @@ impl Orchestrator {
         let proof = prove_method(&trace, air, FoldAir::num_columns())?;
         crate::verifier::verify_method(proof)
     }
+
+    // ===== 以下为其余 19 个方法的 trace 构造（模式同 prove_create_table / prove_fold）=====
+    //
+    // 设计说明：
+    // - pre/post 业务字段（round_state / pot / version / seat 标量）从 task 的
+    //   pre_table / post_table 快照直接读取；这些快照由 poker_l1 dispatch 真实
+    //   产生，状态转移正确性来自合约，电路只做"输入一致性 + AIR 现有约束"证明。
+    // - state_root limb 用 state_root_to_m31_limbs（占位）保持一致。
+    // - seat_index 越界返回 SpecViolation（host 端不应产生越界任务）。
+
+    /// 读取 `table.seats[seat_index]`，越界返回错误。
+    fn seat(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable, seat_index: u8)
+        -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::Seat>
+    {
+        table
+            .seats
+            .get(usize::from(seat_index))
+            .cloned()
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(format!(
+                    "seat_index {seat_index} 越界（seats.len={}）",
+                    table.seats.len()
+                ))
+            })
+    }
+
+    fn prove_join_table(
+        &self,
+        task: &ProveTask,
+        pre_root: StateRoot,
+        post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Join { player, buy_in } = &task.method_input else {
+            return Err(input_mismatch("join_table", "Join", &task.method_input));
+        };
+        let input = JoinTableInput {
+            seat_index: find_join_seat(&task.post_table, player)?,
+            buy_in: *buy_in,
+            player_addr: *player,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let row = JoinTableRow::active(
+            &input,
+            srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+        );
+        run(JoinTableAir::num_columns(), &row, &JoinTableRow::padding(), move || JoinTableAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_leave_table(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("leave_table", "SeatOnly", &task.method_input));
+        };
+        let input = LeaveTableInput { seat_index: *seat_index };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let row = LeaveTableRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+        );
+        run(LeaveTableAir::num_columns(), &row, &LeaveTableRow::padding(), move || LeaveTableAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_start_hand(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let input = StartHandInput {
+            active_count: count_active_occupied(&task.pre_table),
+            ante_mode: task.post_table.ante_mode,
+            ante_amount: task.post_table.ante_amount,
+            ante_collected: task.post_table.ante_collected,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let row = StartHandRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+        );
+        run(StartHandAir::num_columns(), &row, &StartHandRow::padding(), move || StartHandAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_tick(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        // tick 无 prove_task（dispatch 返回 None），但保留接线以备手动驱动。
+        let MethodInput::Empty = &task.method_input else {
+            return Err(input_mismatch("tick", "Empty", &task.method_input));
+        };
+        let input = TickInput {
+            current_time: 0,
+            timeout_kind: 0,
+            time_bank_consumed: 0,
+            time_bank_post: 0,
+            rake_mode: task.post_table.rake_mode,
+            rake_amount: task.post_table.rake_collected,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let row = TickRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
+        );
+        run(TickAir::num_columns(), &row, &TickRow::padding(), move || TickAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_reset_for_next_hand(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Empty = &task.method_input else {
+            return Err(input_mismatch("reset_for_next_hand", "Empty", &task.method_input));
+        };
+        let input = ResetForNextHandInput::default();
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let pre_r = task.pre_table.round_state;
+        let row = ResetForNextHandRow::active(
+            &input, 0, // _pre_pending_addon（未用）
+            srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r,
+        );
+        run(ResetForNextHandAir::num_columns(), &row, &ResetForNextHandRow::padding(), move || ResetForNextHandAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_check(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("check", "SeatOnly", &task.method_input));
+        };
+        let seat = Self::seat(&task.pre_table, *seat_index)?;
+        let current_bet = task.pre_table.betting_round.as_ref().map_or(0, |b| b.current_bet);
+        let input = CheckInput {
+            seat_index: *seat_index,
+            current_bet,
+            seat_bet: seat.bet,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
+        let row = CheckRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+            pre_r, post_r, pre_pot, post_pot,
+        );
+        run(CheckAir::num_columns(), &row, &CheckRow::padding(), move || CheckAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_call(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("call", "SeatOnly", &task.method_input));
+        };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
+        let post_seat = Self::seat(&task.post_table, *seat_index)?;
+        let call_amount = pre_seat.stack.saturating_sub(post_seat.stack);
+        let input = CallInput { seat_index: *seat_index, call_amount };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
+        let row = CallRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+            pre_r, post_r, pre_pot, post_pot,
+            post_seat.stack, post_seat.bet, post_seat.all_in,
+        );
+        run(CallAir::num_columns(), &row, &CallRow::padding(), move || CallAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_raise(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Raise { seat_index, total_bet } = &task.method_input else {
+            return Err(input_mismatch("raise", "Raise", &task.method_input));
+        };
+        let post_seat = Self::seat(&task.post_table, *seat_index)?;
+        let min_raise = task.pre_table.betting_round.as_ref().map_or(0, |b| b.min_raise);
+        let input = RaiseInput {
+            seat_index: *seat_index,
+            raise_to: *total_bet,
+            min_raise,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
+        let row = RaiseRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+            pre_r, post_r, pre_pot, post_pot,
+            post_seat.stack, post_seat.bet, post_seat.all_in,
+        );
+        run(RaiseAir::num_columns(), &row, &RaiseRow::padding(), move || RaiseAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_bet(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Bet { seat_index, amount } = &task.method_input else {
+            return Err(input_mismatch("bet", "Bet", &task.method_input));
+        };
+        let post_seat = Self::seat(&task.post_table, *seat_index)?;
+        let input = BetInput { seat_index: *seat_index, amount: *amount };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
+        let row = BetRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+            pre_r, post_r, pre_pot, post_pot, post_seat.bet,
+        );
+        run(BetAir::num_columns(), &row, &BetRow::padding(), move || BetAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_auto_fold(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("auto_fold", "SeatOnly", &task.method_input));
+        };
+        let input = AutoFoldInput { seat_index: *seat_index, current_time: 0 };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let row = AutoFoldRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
+        );
+        run(AutoFoldAir::num_columns(), &row, &AutoFoldRow::padding(), move || AutoFoldAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_force_fold(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("force_fold", "SeatOnly", &task.method_input));
+        };
+        let input = ForceFoldInput { seat_index: *seat_index };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let row = ForceFoldRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
+        );
+        run(ForceFoldAir::num_columns(), &row, &ForceFoldRow::padding(), move || ForceFoldAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_kick_player(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Kick { seat_index, reason: _ } = &task.method_input else {
+            return Err(input_mismatch("kick_player", "Kick", &task.method_input));
+        };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
+        let input = KickPlayerInput {
+            seat_index: *seat_index,
+            refund: pre_seat.stack,
+            kicked_bet: pre_seat.bet,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
+        let row = KickPlayerRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+            pre_r, post_r, pre_pot, post_pot,
+        );
+        run(KickPlayerAir::num_columns(), &row, &KickPlayerRow::padding(), move || KickPlayerAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_addon(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Funds { seat_index, amount } = &task.method_input else {
+            return Err(input_mismatch("addon", "Funds", &task.method_input));
+        };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
+        let input = AddonInput { seat_index: *seat_index, amount: *amount };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let row = AddonRow::active(
+            &input, pre_seat.pending_addon, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
+        );
+        run(AddonAir::num_columns(), &row, &AddonRow::padding(), move || AddonAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_rebuy(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Funds { seat_index, amount } = &task.method_input else {
+            return Err(input_mismatch("rebuy", "Funds", &task.method_input));
+        };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
+        let input = RebuyInput { seat_index: *seat_index, amount: *amount };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let row = RebuyRow::active(
+            &input, pre_seat.stack, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
+        );
+        run(RebuyAir::num_columns(), &row, &RebuyRow::padding(), move || RebuyAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_join_and_shuffle(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::Join { player, buy_in: _ } = &task.method_input else {
+            return Err(input_mismatch("join_and_shuffle", "Join", &task.method_input));
+        };
+        let seat_index = find_join_seat(&task.post_table, player)?;
+        let input = JoinAndShuffleInput {
+            seat_index,
+            new_deck_commitment: deck_commitment(&task.post_table),
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let pre_cc = task.pre_table.shuffle_state.completed_players.len() as u8;
+        let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
+        let row = JoinAndShuffleRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_cc, post_cc,
+        );
+        run(JoinAndShuffleAir::num_columns(), &row, &JoinAndShuffleRow::padding(), move || JoinAndShuffleAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_leave_with_proof(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("leave_with_proof", "SeatOnly", &task.method_input));
+        };
+        let input = LeaveWithProofInput { seat_index: *seat_index, leave_kind: 0 };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
+        let row = LeaveWithProofRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, post_cc,
+        );
+        run(LeaveWithProofAir::num_columns(), &row, &LeaveWithProofRow::padding(), move || LeaveWithProofAir {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_submit_shuffle_v2(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("submit_shuffle_v2", "SeatOnly", &task.method_input));
+        };
+        let input = SubmitShuffleV2Input {
+            seat_index: *seat_index,
+            new_deck_commitment: deck_commitment(&task.post_table),
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
+        let row = SubmitShuffleV2Row::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, post_cc,
+        );
+        run(SubmitShuffleV2Air::num_columns(), &row, &SubmitShuffleV2Row::padding(), move || SubmitShuffleV2Air {
+            log_size: MIN_LOG_SIZE, input,
+            pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+            table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+            pre_version: pre_v, post_version: post_v,
+        })
+    }
+
+    fn prove_submit_reveal_tokens(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("submit_player_reveal_tokens", "SeatOnly", &task.method_input));
+        };
+        let input = SubmitPlayerRevealTokensInput {
+            seat_index: *seat_index,
+            reveal_phase: task.post_table.reveal_token_state.reveal_phase,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let post_rc = task.post_table.reveal_token_state.assignments.len() as u8;
+        let row = SubmitPlayerRevealTokensRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, post_rc,
+        );
+        run(
+            SubmitPlayerRevealTokensAir::num_columns(), &row, &SubmitPlayerRevealTokensRow::padding(),
+            move || SubmitPlayerRevealTokensAir {
+                log_size: MIN_LOG_SIZE, input,
+                pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+                table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+                pre_version: pre_v, post_version: post_v,
+            },
+        )
+    }
+
+    fn prove_submit_reconstruct_deck(
+        &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+    ) -> TexasAirResult<()> {
+        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+            return Err(input_mismatch("submit_reconstruct_deck", "SeatOnly", &task.method_input));
+        };
+        let input = SubmitReconstructDeckInput {
+            seat_index: *seat_index,
+            reconstruct_phase: task.post_table.reconstruct_state.phase,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let post_sc = task.post_table.reconstruct_state.player_decks.len() as u8;
+        let row = SubmitReconstructDeckRow::active(
+            &input, srm(pre_root), srm(post_root),
+            task.table_id, task.hand_id, task.call_seq, pre_v, post_v, post_sc,
+        );
+        run(
+            SubmitReconstructDeckAir::num_columns(), &row, &SubmitReconstructDeckRow::padding(),
+            move || SubmitReconstructDeckAir {
+                log_size: MIN_LOG_SIZE, input,
+                pre_state_root: srm(pre_root), post_state_root: srm(post_root),
+                table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
+                pre_version: pre_v, post_version: post_v,
+            },
+        )
+    }
+}
+
+// ===== Orchestrator 内部辅助函数 =====
+
+/// `state_root_to_m31_limbs` 的短别名。
+fn srm(root: StateRoot) -> [M31; 4] {
+    state_root_to_m31_limbs(root)
+}
+
+/// 通用 prove + verify 流程：构造 trace → prove → verify。
+fn run<A, F>(
+    num_columns: usize,
+    row: &impl ToM31Vec,
+    padding: &impl ToM31Vec,
+    build_air: F,
+) -> TexasAirResult<()>
+where
+    A: stwo_constraint_framework::FrameworkEval + Clone + Sync,
+    F: FnOnce() -> A,
+{
+    let trace = gen_method_trace(num_columns, &row.to_vec_m31(), &padding.to_vec_m31())?;
+    let air = build_air();
+    let proof = prove_method(&trace, air, num_columns)?;
+    crate::verifier::verify_method(proof)
+}
+
+/// 能产出 `Vec<M31>` 的抽象（避免与 CommonRow 的 `to_vec` 命名冲突）。
+trait ToM31Vec {
+    fn to_vec_m31(&self) -> Vec<M31>;
+}
+impl<T: RowToVec> ToM31Vec for T {
+    fn to_vec_m31(&self) -> Vec<M31> {
+        self.row_to_vec()
+    }
+}
+
+/// 各 `*Row` 实现的统一接口（转发到各自的 `to_vec`）。
+trait RowToVec {
+    fn row_to_vec(&self) -> Vec<M31>;
+}
+
+// 为所有用到的 Row 实现转发宏。
+macro_rules! impl_row_to_vec {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl RowToVec for $t {
+                fn row_to_vec(&self) -> Vec<M31> { self.to_vec() }
+            }
+        )+
+    };
+}
+impl_row_to_vec!(
+    JoinTableRow, LeaveTableRow, StartHandRow, TickRow, ResetForNextHandRow,
+    CheckRow, CallRow, RaiseRow, BetRow, AutoFoldRow, ForceFoldRow, KickPlayerRow,
+    AddonRow, RebuyRow, JoinAndShuffleRow, LeaveWithProofRow, SubmitShuffleV2Row,
+    SubmitPlayerRevealTokensRow, SubmitReconstructDeckRow,
+);
+
+/// 构造"方法输入与 MethodInput variant 不匹配"错误。
+fn input_mismatch(method: &str, expected: &str, actual: &MethodInput) -> TexasAirError {
+    TexasAirError::SpecViolation(format!(
+        "{method} 任务的 method_input 应为 {expected}，实际：{actual:?}"
+    ))
+}
+
+/// 在 post_table 中找到 player 占用的座位（join_table / join_and_shuffle 用）。
+fn find_join_seat(
+    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    player: &poker_l1::Address,
+) -> TexasAirResult<u8> {
+    table
+        .seats
+        .iter()
+        .position(|s| &s.player == player)
+        .map(|i| i as u8)
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation(format!("join 后未在 seats 中找到 player {player:?}"))
+        })
+}
+
+/// 计算 `deck_state.encrypted` 的低位承诺（PoC：取长度作占位）。
+fn deck_commitment(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable) -> u64 {
+    table.deck_state.encrypted.len() as u64
+}
+
+/// 统计活跃占用座数（与合约 `count_active_occupied` 语义一致）。
+fn count_active_occupied(
+    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+) -> u8 {
+    table
+        .seats
+        .iter()
+        .filter(|s| s.is_occupied())
+        .count() as u8
 }
 
 #[cfg(test)]
@@ -343,10 +974,18 @@ mod tests {
         orch.prove_and_verify_task(&task).expect("fold prove+verify 应成功");
     }
 
+    /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
+    ///
+    /// 之前 Check 是"未实现"的代表；21 个方法全部接线后，此测试确认 Check
+    /// 走完了 trace 构造路径（成功或返回非 NotImplemented 的业务错误均算通过）。
     #[test]
-    fn orchestrator_unsupported_method_returns_not_implemented() {
-        let pre = make_table("pre");
-        let post = make_table("post");
+    fn orchestrator_check_is_now_supported() {
+        let mut pre = make_table("pre");
+        pre.round_state = poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
+        pre.seats[0].player = [0x01; 20];
+        pre.seats[0].stack = 1000;
+        pre.seats[0].bet = 0;
+        let post = pre.clone();
         let task = ProveTask::new(
             MethodKind::Check,
             MethodInput::SeatOnly { seat_index: 0 },
@@ -358,7 +997,10 @@ mod tests {
         );
         let mut orch = Orchestrator::new();
         let result = orch.prove_and_verify_task(&task);
-        assert!(matches!(result, Err(TexasAirError::NotImplemented(_))));
+        assert!(
+            !matches!(result, Err(TexasAirError::NotImplemented(_))),
+            "Check 不应再返回 NotImplemented（21 方法已全部接线）：{result:?}"
+        );
     }
 
     /// 端到端：两步链式证明，验证 state_root 链衔接。

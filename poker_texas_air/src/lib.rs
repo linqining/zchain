@@ -1,11 +1,11 @@
 //! # poker_texas_air — Texas Poker 自定义电路 + Aggregator AIR
 //!
-//! 把 `poker_l1/src/vm/contracts/texas_poker` 的 18 个方法各自实现为专用 AIR
+//! 把 `poker_l1/src/vm/contracts/texas_poker` 的 21 个方法各自实现为专用 AIR
 //! （业务语义直接电路化），通过 Aggregator AIR 二叉树递归聚合到单证明。
 //!
 //! ## 架构分层
 //!
-//! - **Layer 0**: Method AIRs（18 个，每方法一个专用 AIR）
+//! - **Layer 0**: Method AIRs（21 个，每方法一个专用 AIR）
 //! - **Layer 1**: Leaf Recursion（复用 `poker_zkvm::stwo_backend::recursive` 的 4 个 Verifier AIR）
 //! - **Layer 2**: Aggregator AIR（二叉树递归聚合 N 个 L2 leaf → 1 个 L2 root）
 //! - **Layer 3**: Final Recursion（最终单 proof 提交链上）

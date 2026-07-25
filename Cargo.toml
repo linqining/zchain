@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["poker_l1", "poker_texas_air", "vm-common"]
+members = ["poker_l1", "poker_texas_air", "vm-common", "proving_service"]
 
 # zchain root package 本身作为 workspace 的 bin 入口保留
 [package]

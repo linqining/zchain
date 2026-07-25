@@ -7,7 +7,9 @@
 //! 1. 调用者是管理员（admin）
 //! 2. 目标座位存在且 occupied
 //! 3. 退还玩家剩余 stack 到其地址
-//! 4. 状态变更：
+//! 4. 状态变更（与 fold **不同**的资金流向）：
+//!    - **`table.pot += seat.bet; seat.bet = 0`**（被踢者当前下注立即入底池，
+//!      见 `state_machine::kick_player_internal` state_machine.rs:2689）
 //!    - `seat.player = EMPTY_PLAYER`
 //!    - `seat.stack = 0`, `seat.folded = false`, `seat.all_in = false`
 //!    - `seat.is_waiting = true`
@@ -19,7 +21,9 @@
 //! - 业务列 6 个：`INPUT_SEAT_INDEX`, `OUTPUT_REFUND_BASE[4]`,
 //!   `OUTPUT_KICKED`
 //!
-//! 简化版只验证 seat_index 一致性 + output_kicked == 1。
+//! 低悬挂约束（limb 0 级，对齐 addon/rebuy 风格）：除 seat_index / refund / kicked
+//! 一致性外，强制 **`post_pot_0 - pre_pot_0 - kicked_bet_0 == 0`**（底池增量 ==
+//! 被踢者下注）。完整多 limb 进位与 admin 签名约束留待阶段 3/5。
 
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
@@ -49,6 +53,8 @@ pub struct KickPlayerInput {
     pub seat_index: u8,
     /// 退还金额（= seat.stack）。
     pub refund: u64,
+    /// 被踢者当前下注（kick 时立即并入底池：`pot += kicked_bet`）。
+    pub kicked_bet: u64,
 }
 
 /// `kick_player` AIR 公开输入。
@@ -110,9 +116,17 @@ impl FrameworkEval for KickPlayerAir {
 
         // 约束 3：output_kicked == 1
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active * (output_kicked - one));
+        eval.add_constraint(is_active.clone() * (output_kicked - one));
 
-        // TODO 阶段 3 完整版：约束 admin 签名
+        // 约束 4（资金流向不变量，limb 0）：kick 时被踢者当前下注立即并入底池
+        //   `table.pot += seat.bet; seat.bet = 0`（state_machine.rs:2689）
+        //   即 post_pot_0 - pre_pot_0 - kicked_bet_0 == 0
+        let expected_kicked_bet_0: E::F =
+            M31::from((self.input.kicked_bet & 0xFFFF) as u32).into();
+        let pot_delta = common.post_pot_0.clone() - common.pre_pot_0.clone() - expected_kicked_bet_0;
+        eval.add_constraint(is_active * pot_delta);
+
+        // TODO 阶段 3 完整版：约束 admin 签名；多 limb 进位（limb 1..3）
 
         eval
     }
@@ -145,6 +159,8 @@ impl KickPlayerRow {
         post_version: u64,
         pre_round_state: u8,
         post_round_state: u8,
+        pre_pot: u64,
+        post_pot: u64,
     ) -> Self {
         Self {
             common: CommonRow::active(
@@ -158,8 +174,8 @@ impl KickPlayerRow {
                 post_version,
                 pre_round_state,
                 post_round_state,
-                0,
-                0,
+                pre_pot,
+                post_pot,
                 0,
                 0,
             ),

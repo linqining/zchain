@@ -1,6 +1,6 @@
 //! Method AIR 通用列布局与约束宏。
 //!
-//! 所有 18 个 method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
+//! 所有 21 个 method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
 //! 业务特定列在每个 AIR 的 `*Air` 结构里定义。
 //!
 //! ## 列布局策略
@@ -109,6 +109,14 @@ pub struct CommonConstraints<E: stwo_constraint_framework::EvalAtRow> {
     pub is_padding: E::F,
     /// 方法 kind 列。
     pub method_kind: E::F,
+    /// `PRE_ROUND_STATE` 列（业务守卫用，如 bet 的 postflop 校验）。
+    pub pre_round_state: E::F,
+    /// `POST_ROUND_STATE` 列。
+    pub post_round_state: E::F,
+    /// `PRE_POT` limb 0（资金流向约束用，如 kick 的 pot+=bet）。
+    pub pre_pot_0: E::F,
+    /// `POST_POT` limb 0。
+    pub post_pot_0: E::F,
     /// 是否已经写入通用约束到 eval。
     pub _written: bool,
 }
@@ -167,7 +175,8 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let post_button = eval.next_trace_mask();
         let is_padding = eval.next_trace_mask();
 
-        // 保留 limbs 引用（业务约束需要）
+        // 保留 limbs 引用（业务约束需要）。
+        // round_state / pot_0 暴露到返回结构体供业务守卫引用；其余仅占位读取顺序。
         let _ = (
             pre_state_root_0, pre_state_root_1, pre_state_root_2, pre_state_root_3,
             post_state_root_0, post_state_root_1, post_state_root_2, post_state_root_3,
@@ -175,9 +184,8 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
             hand_id, call_seq,
             pre_version_0, pre_version_1, pre_version_2, pre_version_3,
             post_version_0, post_version_1, post_version_2, post_version_3,
-            pre_round_state, post_round_state,
-            pre_pot_0, pre_pot_1, pre_pot_2, pre_pot_3,
-            post_pot_0, post_pot_1, post_pot_2, post_pot_3,
+            pre_pot_1, pre_pot_2, pre_pot_3,
+            post_pot_1, post_pot_2, post_pot_3,
             pre_button, post_button,
         );
 
@@ -203,6 +211,10 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
             is_active,
             is_padding,
             method_kind,
+            pre_round_state,
+            post_round_state,
+            pre_pot_0,
+            post_pot_0,
             _written: true,
         }
     }

@@ -2,7 +2,7 @@
 //!
 //! ## 架构定位
 //!
-//! - **Layer 0**：Method AIRs（18 个，每方法一个专用 AIR，已实现）
+//! - **Layer 0**：Method AIRs（21 个，每方法一个专用 AIR，已实现）
 //! - **Layer 1**：Leaf Recursion（复用 `poker_zkvm::stwo_backend::recursive` 的 Verifier AIR
 //!   递归验证单个 method proof — 阶段 5 接入）
 //! - **Layer 2**：**Aggregator AIR（本模块）** — 二叉树递归聚合 N 个 L2 leaf → 1 个 L2 root

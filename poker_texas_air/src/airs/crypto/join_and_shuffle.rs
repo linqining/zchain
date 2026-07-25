@@ -4,7 +4,9 @@
 //!
 //! ## 业务规约
 //!
-//! 1. `round_state == ROUND_SHUFFLE`
+//! 1. `round_state == ROUND_WAITING`（join_and_shuffle 只能在 WAITING 态发生；
+//!    shuffle 阶段语义由独立的 `shuffle_state.phase` 表达，合约 `constants.rs`
+//!    无 `ROUND_SHUFFLE` 常量）
 //! 2. `seat_index` 玩家已注册公钥
 //! 3. 提交 52 张加密牌的新密文 + 52 个 DLEq proof
 //! 4. 状态变更：
@@ -180,8 +182,8 @@ impl JoinAndShuffleRow {
                 call_seq,
                 pre_version,
                 post_version,
-                1, // pre = ROUND_SHUFFLE
-                1, // post = ROUND_SHUFFLE
+                0, // pre = ROUND_WAITING（join_and_shuffle 仅在 WAITING 态）
+                0, // post = ROUND_WAITING（shuffle 语义在 shuffle_state.phase）
                 0,
                 0,
                 0,

@@ -1,0 +1,30 @@
+[package]
+name = "proving_service"
+version = "0.1.0"
+edition = "2024"
+description = "链下证明服务：以插件形式加载不同合约（如 poker_texas_air），复用合约 dispatch 产生状态快照并跑通完整流程证明。"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "proving_service"
+path = "src/main.rs"
+
+[dependencies]
+poker_l1 = { path = "../poker_l1" }
+poker_texas_air = { path = "../poker_texas_air" }
+vm-common = { path = "../vm-common" }
+poker_protocol = { workspace = true }
+blstrs = { workspace = true }
+borsh = { workspace = true }
+group = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# HTTP 服务（axum 框架已在 workspace 层声明）
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+serde = { workspace = true }
+serde_json = { workspace = true }

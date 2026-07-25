@@ -43,6 +43,10 @@ pub struct CheckInput {
     pub seat_index: u8,
     /// 当前下注额（必须 == seat.bet）。
     pub current_bet: u64,
+    /// 该座位已下注额（合约守卫：`seat.bet >= current_bet` 才允许 check；
+    /// 实际等价于 `seat.bet == current_bet`，因为若 `seat.bet > current_bet`
+    /// 玩家本应被退还差额而非 check —— 这里约束两者 limb 0 相等）。
+    pub seat_bet: u64,
 }
 
 /// `check` AIR 公开输入。
@@ -100,7 +104,14 @@ impl FrameworkEval for CheckAir {
 
         // 约束 2：current_bet 一致性（验证 limb 0）
         let expected_bet_0: E::F = M31::from((self.input.current_bet & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_current_bet_0 - expected_bet_0));
+        eval.add_constraint(is_active.clone() * (input_current_bet_0.clone() - expected_bet_0));
+
+        // 约束 2b（合约守卫，limb 0）：check 仅在 `seat.bet == current_bet` 时合法
+        //   （`apply_check` 要求 `seat.bet >= current_bet`；等价于两者相等）。
+        let expected_seat_bet_0: E::F = M31::from((self.input.seat_bet & 0xFFFF) as u32).into();
+        eval.add_constraint(
+            is_active.clone() * (input_current_bet_0.clone() - expected_seat_bet_0),
+        );
 
         // 约束 3：output_acted == 1
         let one: E::F = M31::from(1u32).into();

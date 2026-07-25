@@ -5,7 +5,9 @@
 //!
 //! ## 业务规约
 //!
-//! 1. `round_state` 在 reconstruct 阶段（`reconstruct_state.phase != NONE`）
+//! 1. 阶段守卫在 `reconstruct_state.phase == RECONSTRUCT_PHASE_COLLECTING`（**不是**
+//!    `round_state`）；reconstruct 期间 `round_state` 保持不变（pre == post）。真正的
+//!    相位约束由 `INPUT_RECONSTRUCT_PHASE` 列承载（见 evaluate）。
 //! 2. `seat_index` 在 `reconstruct_assignments` 中
 //! 3. 提交 ReconstructProof（证明重构密文正确性）
 //! 4. 状态变更：
@@ -147,8 +149,9 @@ impl SubmitReconstructDeckRow {
                 call_seq,
                 pre_version,
                 post_version,
-                3, // pre = ROUND_RECONSTRUCT（简化值）
-                3, // post = ROUND_RECONSTRUCT
+                0, // pre round_state（reconstruct 期间保持不变；相位守卫在
+                   //    INPUT_RECONSTRUCT_PHASE）
+                0, // post round_state
                 0,
                 0,
                 0,

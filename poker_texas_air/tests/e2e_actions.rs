@@ -121,6 +121,7 @@ fn test_e2e_check_prove_verify() {
     let input = CheckInput {
         seat_index: 1,
         current_bet: 20,
+        seat_bet: 20, // 守卫：seat.bet == current_bet
     };
     let row = CheckRow::active(
         &input,
@@ -163,6 +164,7 @@ fn test_soundness_check_tampered_bet() {
     let input = CheckInput {
         seat_index: 1,
         current_bet: 20,
+        seat_bet: 20,
     };
     let row = CheckRow::active(
         &input,
@@ -632,6 +634,7 @@ fn test_e2e_kick_player_prove_verify() {
     let input = KickPlayerInput {
         seat_index: 2,
         refund: 500,
+        kicked_bet: 50,
     };
     let row = KickPlayerRow::active(
         &input,
@@ -644,6 +647,8 @@ fn test_e2e_kick_player_prove_verify() {
         1,
         4, // PREFLOP
         4,
+        100, // pre_pot
+        150, // post_pot = pre_pot + kicked_bet (100 + 50)
     );
     let trace = gen_method_trace(
         KickPlayerAir::num_columns(),
@@ -678,6 +683,7 @@ fn test_soundness_kick_player_tampered_refund() {
     let input = KickPlayerInput {
         seat_index: 2,
         refund: 500,
+        kicked_bet: 50,
     };
     let row = KickPlayerRow::active(
         &input,
@@ -690,6 +696,8 @@ fn test_soundness_kick_player_tampered_refund() {
         1,
         4,
         4,
+        100, // pre_pot
+        150, // post_pot = pre_pot + kicked_bet
     );
     let trace = gen_method_trace(
         KickPlayerAir::num_columns(),
