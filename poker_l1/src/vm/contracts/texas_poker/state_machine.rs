@@ -280,8 +280,13 @@ fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Res
     }
 
     table.deck_state.encrypted = new_cts;
-    table.deck_state.cards_dealt = 0;
-    table.deck_state.decrypted_cards.clear();
+    // P1-7 修复：重建后保留 cards_dealt 偏移，避免新 deck 从 index 0 开始发牌时
+    // 与历史已发牌（已写入 community_cards / seat.hand）的 index 重用。
+    // decrypted_cards 同样保留——其中部分解密的手牌记录（ciphertext.is_some()）
+    // 仍供后续 showdown reveal 使用；完全解出的公共牌记录（plaintext.is_some()）
+    // 已被 write_decrypted_cards_to_community 清为 None，不会重复写入。
+    // 注意：重建改变了 deck 内容，旧 encrypted_card_index 对新 deck 不再对应同一张牌，
+    // 但已解出的明文牌已落地（community_cards/seat.hand），不依赖 index 反查。
     Ok(())
 }
 
@@ -619,30 +624,36 @@ fn advance_shuffle(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
 
 /// reconstruct 后根据当前 round_state 重启对应 reveal phase。
 ///
-/// P1-7 修复：reconstruct 会重建整个 deck（`rebuild_deck_from_reconstruct_deck`
-/// 清空 `decrypted_cards` 并重置 `cards_dealt=0`），意味着之前发出的公共牌/手牌
-/// 作废、需全部重发。因此重启时必须先清空 `community_cards`，并按当前轮次的
-/// 完整发牌数重启 reveal phase（而非用 `count_pending_community_cards` 增量补发，
-/// 因为后者在 deck 重建后恒为 0，会漏掉已存在于 community_cards 的旧牌）。
+/// P1-7 修复（语义校正）：reconstruct 的目的是在玩家离开导致牌组无法继续解密时，
+/// 由剩余玩家重新构建牌组（`rebuild_deck_from_reconstruct_deck` 重新加密整副牌）
+/// 让牌局继续。**已经发出且已解出的牌（写入 `community_cards` 的公共牌、
+/// 写入 `seat.hand` 的手牌）不应清空**——它们已是明文，与重建后的加密牌组独立。
+///
+/// 重建后只需重发"本应发出但因超时未能解出"的牌。`restart_reveal_after_reconstruct`
+/// 据当前轮次补发缺失的牌：以 `community_cards` 已有数量为基准，补齐到该轮所需张数。
 fn restart_reveal_after_reconstruct(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
-    // 重建 deck 后，历史 community_cards / 手牌均失效，清空以避免新旧牌共存。
-    table.community_cards.clear();
-    for s in &mut table.seats {
-        s.hand.clear();
-    }
     match table.round_state {
         ROUND_PREFLOP => start_preflop_reveal_phase(table, events),
         ROUND_FLOP => {
-            // 重建后从该轮起始重发 flop 的 3 张。
-            start_community_reveal_phase(table, 3, REVEAL_PHASE_FLOP, events);
+            // flop 需 3 张公共牌；已解出的（已在 community_cards 中）跳过，补发剩余。
+            let have = table.community_cards.len() as u8;
+            if have < 3 {
+                start_community_reveal_phase(table, 3 - have, REVEAL_PHASE_FLOP, events);
+            }
         }
         ROUND_TURN => {
-            // turn 轮重建：需重发 flop 3 + turn 1。这里 reveal phase 一次性发到当前轮所需总数。
-            start_community_reveal_phase(table, 4, REVEAL_PHASE_TURN, events);
+            // turn 需 4 张公共牌（flop 3 + turn 1）。
+            let have = table.community_cards.len() as u8;
+            if have < 4 {
+                start_community_reveal_phase(table, 4 - have, REVEAL_PHASE_TURN, events);
+            }
         }
         ROUND_RIVER => {
-            // river 轮重建：需重发 flop 3 + turn 1 + river 1 = 5 张。
-            start_community_reveal_phase(table, 5, REVEAL_PHASE_RIVER, events);
+            // river 需 5 张公共牌（flop 3 + turn 1 + river 1）。
+            let have = table.community_cards.len() as u8;
+            if have < 5 {
+                start_community_reveal_phase(table, 5 - have, REVEAL_PHASE_RIVER, events);
+            }
         }
         ROUND_SHOWDOWN => start_showdown_reveal_phase(table, events),
         _ => {}
@@ -1406,21 +1417,33 @@ pub fn apply_submit_player_reveal_tokens(
                 .iter()
                 .map(|d| d.token.0)
                 .collect();
-            let c2 = table.deck_state.encrypted[card_index as usize].c2;
-            let decrypted_c2 = partial_decrypt_c2(&c2, &tokens);
 
             if phase == REVEAL_PHASE_SHOWDOWN {
-                // 升级已存在的 partial decrypted_card 为 plaintext
+                // 升级已存在的 partial decrypted_card 为 plaintext。
+                //
+                // 关键（P1-7 续）：partial 手牌记录自包含 `ciphertext.c2`（preflop 时已扣除
+                // 其他玩家的 reveal token），showdown 只需在此基础上减去本轮 token
+                // （牌主自己的 token）即可得明文：
+                //   plaintext = partial_c2 - Σ(本轮 token)
+                //             = (原始c2 - Σ(他人 preflop token)) - 牌主 token
+                // 因此**不依赖** `deck_state.encrypted[card_index]`。这点对 reconstruct
+                // 后的场景至关重要：reconstruct 重建了整个 deck，旧 card_index 在新 deck
+                // 中指向不同的 c2，但 partial 记录自包含，旧手牌依然能由牌主自己解开。
                 for dc in &mut table.deck_state.decrypted_cards {
                     if dc.encrypted_card_index == card_index && dc.ciphertext.is_some() {
-                        let existing_c2 = dc.ciphertext.as_ref().unwrap().c2;
-                        let p = g1_sub(&existing_c2, &decrypted_c2);
+                        let partial_c2 = dc.ciphertext.as_ref().unwrap().c2;
+                        let p = partial_decrypt_c2(&partial_c2, &tokens);
                         dc.plaintext = Some(ECPoint::from(p));
                         dc.ciphertext = None;
                         break;
                     }
                 }
-            } else if phase == REVEAL_PHASE_PREFLOP {
+            } else {
+                // preflop / 公共牌：从当前 deck_state.encrypted 取 c2 做部分/完全解密。
+                let c2 = table.deck_state.encrypted[card_index as usize].c2;
+                let decrypted_c2 = partial_decrypt_c2(&c2, &tokens);
+
+            if phase == REVEAL_PHASE_PREFLOP {
                 // 部分解密：ciphertext = Some(ElGamalCiphertext { c1, c2: partial })，plaintext = None
                 let c1 = table.deck_state.encrypted[card_index as usize].c1;
                 let owner = find_hand_card_owner(table, card_index).unwrap_or(OWNER_SEAT_PUBLIC);
@@ -1442,6 +1465,7 @@ pub fn apply_submit_player_reveal_tokens(
                     plaintext: Some(ECPoint::from(decrypted_c2)),
                 });
             }
+            } // 闭合非 showdown 的 else 块
 
             table.reveal_token_state.assignments[ai].decrypted = true;
         }
