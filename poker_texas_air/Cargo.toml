@@ -18,7 +18,7 @@ test-helpers = []
 [dependencies]
 # ===== 工作区内复用 =====
 poker_l1 = { path = "../poker_l1" }
-poker_zkvm = { workspace = true }
+poker_zkvm = { path = "../../poker_zkvm" }
 poker_protocol = { workspace = true }
 vm-common = { path = "../vm-common" }
 # ===== Stwo 证明后端（与 poker_zkvm 同版本）=====

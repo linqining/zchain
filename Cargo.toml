@@ -1,13 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["poker_l1", "poker_zkvm", "poker_texas_air", "vm-common"]
-# guest_sdk 和 guests/texas_poker 是独立 crate（no_std + riscv32im target），
-# 不加入 workspace.members 以避免 target/feature 污染。
-# 用 exclude 而非 [workspace] 表，使它们可被 poker_zkvm 作为 path dev-dependency 引用。
-exclude = [
-    "poker_zkvm/guest_sdk",
-    "poker_zkvm/guests/texas_poker",
-]
+members = ["poker_l1", "poker_texas_air", "vm-common"]
 
 # zchain root package 本身作为 workspace 的 bin 入口保留
 [package]
@@ -18,7 +11,7 @@ edition = "2024"
 [dependencies]
 poker_l1 = { path = "poker_l1" }
 poker_protocol = { workspace = true }
-poker_zkvm = { workspace = true, features = ["test-helpers"] }
+poker_zkvm = { path = "../poker_zkvm", features = ["test-helpers"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
@@ -36,7 +29,6 @@ group = { workspace = true }
 [workspace.dependencies]
 # 共享依赖集中管理，便于版本一致与升级
 poker_protocol = { path = "../zgame/poker_protocol", features = ["borsh"] }
-poker_zkvm = { path = "poker_zkvm" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcs = "0.1.6"
