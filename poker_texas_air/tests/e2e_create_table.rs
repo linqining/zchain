@@ -8,7 +8,7 @@
 //! 5. Soundness：篡改 AIR 公开输入后验证应失败
 
 use poker_l1::object_model::ObjectID;
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::vm::contracts::texas_poker::types::{TexasPokerTable, EMPTY_PLAYER};
 use stwo::core::fields::m31::M31;
 
 use poker_texas_air::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput};
@@ -22,6 +22,7 @@ fn make_pre_table() -> TexasPokerTable {
     TexasPokerTable::new(
         ObjectID::new([0u8; 20], 0),
         "pre_placeholder".to_string(),
+        EMPTY_PLAYER,
         2,
         1,
         2,
@@ -33,6 +34,7 @@ fn make_post_table() -> TexasPokerTable {
     TexasPokerTable::new(
         ObjectID::new([0xAA; 20], 1),
         "test_table".to_string(),
+        EMPTY_PLAYER,
         6,
         10,
         20,

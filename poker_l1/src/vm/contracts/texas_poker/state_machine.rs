@@ -45,7 +45,7 @@ use super::events::{
 use super::side_pot;
 use super::types::{
     DecryptedCard, ReconstructPlayerDeck, RevealAssignment, RevealTokenData, Seat,
-    TexasPokerTable, OWNER_SEAT_PUBLIC,
+    TexasPokerTable, EMPTY_PLAYER, OWNER_SEAT_PUBLIC,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -1120,7 +1120,7 @@ fn on_reconstruct_timeout(
     );
 
     for &seat in &pending {
-        kick_player_internal(table, seat, KICK_REASON_RECONSTRUCT_TIMEOUT, events);
+        kick_player_internal(table, seat, KICK_REASON_RECONSTRUCT_TIMEOUT, events)?;
     }
 
     let active = count_active_players(&table.seats);
@@ -2183,7 +2183,7 @@ fn on_shuffle_timeout(
         },
     );
 
-    kick_player_internal(table, seat, KICK_REASON_TIMEOUT, events);
+    kick_player_internal(table, seat, KICK_REASON_TIMEOUT, events)?;
 
     let active = count_active_players(&table.seats);
     if active == 0 {
@@ -2243,7 +2243,7 @@ fn on_reveal_timeout(
     );
 
     for &seat in &pending {
-        kick_player_internal(table, seat, KICK_REASON_TIMEOUT, events);
+        kick_player_internal(table, seat, KICK_REASON_TIMEOUT, events)?;
     }
 
     let active = count_active_players(&table.seats);
@@ -2661,10 +2661,18 @@ pub fn kick_player_internal(
     seat_index: u8,
     reason: u8,
     events: &mut Vec<TexasPokerEvent>,
-) {
+) -> PokerL1Result<()> {
+    // P0-1 修复：seat_index 越界校验（原先直接索引会 panic）。
+    if seat_index >= table.max_players {
+        return Err(PokerL1Error::Serialization(format!(
+            "kick_player: seat_index {seat_index} out of range (max_players={})",
+            table.max_players
+        )));
+    }
     let seat = &mut table.seats[seat_index as usize];
     if !seat.is_occupied() {
-        return;
+        // 座位空闲视为无操作成功（幂等），但区分于越界错误。
+        return Ok(());
     }
 
     let refund_amt = seat.stack;
@@ -2673,6 +2681,11 @@ pub fn kick_player_internal(
     let pk = seat.pk;
     let player = seat.player;
 
+    // P1-2 语义说明：被踢玩家的 bet 立即并入 pot（区别于 fold/auto_fold/force_fold，
+    // 后者保留 seat.bet，等下注轮结束由 collect_bets_to_pot 统一收集）。
+    // 这是 kick 的特殊路径：被踢玩家立即离开，其本轮已下注金额不参与后续轮次，
+    // 故提前单独收集。资金账安全：collect_bets_to_pot 后续不会再收（seat.bet 已为 0）；
+    // side_pot 分层依据 total_bet（不受 bet 清零影响）。
     table.pot += seat.bet;
     seat.bet = 0;
     seat.stack = 0;
@@ -2745,6 +2758,7 @@ pub fn kick_player_internal(
     if count_active_players(&table.seats) < MIN_PLAYERS_TO_START {
         let _ = reset_for_next_hand(table, events);
     }
+    Ok(())
 }
 
 // ========== Addon / Rebuy ==========
@@ -3146,7 +3160,7 @@ mod tests {
     }
 
     fn make_table() -> TexasPokerTable {
-        TexasPokerTable::new(dummy_id(), "test".into(), 4, 50, 100)
+        TexasPokerTable::new(dummy_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100)
     }
 
     #[test]
@@ -3442,7 +3456,7 @@ mod tests {
         table.round_state = ROUND_PREFLOP;
         let mut events = vec![];
 
-        kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events);
+        kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events).unwrap();
         // kick 后 active=2（seat1+seat2），不会触发 reset_for_next_hand。
         assert!(table.seats[0].left_during_hand);
         assert!(table.seats[0].folded);

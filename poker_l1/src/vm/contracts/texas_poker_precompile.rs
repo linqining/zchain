@@ -97,10 +97,11 @@ impl Precompile for TexasPokerPrecompile {
                 if method_selector != &selectors::create_table() {
                     return Err(PokerL1Error::ContractNotFound(table_id));
                 }
-                // 构造占位空表（dispatch_create_table 会用 args 覆写）
+                // 构造占位空表（dispatch_create_table 会用 args 覆写，含 creator 字段）
                 let placeholder = TexasPokerTable::new(
                     table_id,
                     String::new(),
+                    crate::vm::contracts::texas_poker::types::EMPTY_PLAYER,
                     2,
                     1,
                     1,

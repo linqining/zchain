@@ -34,7 +34,7 @@ use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
 
-use super::constants::{FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
+use super::constants::{FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN};
 use super::events::TexasPokerEvent;
 use super::state_machine;
 use super::types::TexasPokerTable;
@@ -390,39 +390,51 @@ pub fn dispatch(
 ) -> PokerL1Result<DispatchResult> {
     let mut events: Vec<TexasPokerEvent> = Vec::new();
     let result = match selector {
-        s if s == &selectors::create_table() => dispatch_create_table(table, args, &mut events),
+        s if s == &selectors::create_table() => {
+            dispatch_create_table(context, table, args, &mut events)
+        }
         s if s == &selectors::join_and_shuffle() => {
             dispatch_join_and_shuffle(context, table, args, &mut events)
         }
         s if s == &selectors::leave_with_proof() => {
-            dispatch_leave_with_proof(table, args, &mut events)
+            dispatch_leave_with_proof(context, table, args, &mut events)
         }
         s if s == &selectors::join_table() => dispatch_join_table(context, table, args, &mut events),
-        s if s == &selectors::leave_table() => dispatch_leave_table(table, args, &mut events),
-        s if s == &selectors::start_hand() => dispatch_start_hand(table, args, &mut events),
+        s if s == &selectors::leave_table() => {
+            dispatch_leave_table(context, table, args, &mut events)
+        }
+        s if s == &selectors::start_hand() => {
+            dispatch_start_hand(context, table, args, &mut events)
+        }
         s if s == &selectors::tick() => dispatch_tick(table, args, &mut events),
-        s if s == &selectors::auto_fold() => dispatch_auto_fold(table, args, &mut events),
-        s if s == &selectors::force_fold() => dispatch_force_fold(table, args, &mut events),
-        s if s == &selectors::kick_player() => dispatch_kick_player(table, args, &mut events),
+        s if s == &selectors::auto_fold() => {
+            dispatch_auto_fold(context, table, args, &mut events)
+        }
+        s if s == &selectors::force_fold() => {
+            dispatch_force_fold(context, table, args, &mut events)
+        }
+        s if s == &selectors::kick_player() => {
+            dispatch_kick_player(context, table, args, &mut events)
+        }
         s if s == &selectors::submit_shuffle_v2() => {
-            dispatch_submit_shuffle_v2(table, args, &mut events)
+            dispatch_submit_shuffle_v2(context, table, args, &mut events)
         }
         s if s == &selectors::submit_player_reveal_tokens() => {
-            dispatch_submit_player_reveal_tokens(table, args, &mut events)
+            dispatch_submit_player_reveal_tokens(context, table, args, &mut events)
         }
         s if s == &selectors::submit_reconstruct_deck() => {
-            dispatch_submit_reconstruct_deck(table, args, &mut events)
+            dispatch_submit_reconstruct_deck(context, table, args, &mut events)
         }
-        s if s == &selectors::fold() => dispatch_fold(table, args, &mut events),
-        s if s == &selectors::check() => dispatch_check(table, args, &mut events),
-        s if s == &selectors::call() => dispatch_call(table, args, &mut events),
-        s if s == &selectors::raise() => dispatch_raise(table, args, &mut events),
-        s if s == &selectors::bet() => dispatch_bet(table, args, &mut events),
+        s if s == &selectors::fold() => dispatch_fold(context, table, args, &mut events),
+        s if s == &selectors::check() => dispatch_check(context, table, args, &mut events),
+        s if s == &selectors::call() => dispatch_call(context, table, args, &mut events),
+        s if s == &selectors::raise() => dispatch_raise(context, table, args, &mut events),
+        s if s == &selectors::bet() => dispatch_bet(context, table, args, &mut events),
         s if s == &selectors::reset_for_next_hand() => {
-            dispatch_reset_for_next_hand(table, args, &mut events)
+            dispatch_reset_for_next_hand(context, table, args, &mut events)
         }
-        s if s == &selectors::addon() => dispatch_addon(table, args, &mut events),
-        s if s == &selectors::rebuy() => dispatch_rebuy(table, args, &mut events),
+        s if s == &selectors::addon() => dispatch_addon(context, table, args, &mut events),
+        s if s == &selectors::rebuy() => dispatch_rebuy(context, table, args, &mut events),
         _ => {
             return Err(PokerL1Error::UnknownContractMethod {
                 selector: *selector,
@@ -431,10 +443,16 @@ pub fn dispatch(
     };
     result?;
     log_events(&events);
+    // P2-3 修复：把 state_machine 产生的 events 序列化进 return_value，
+    // 供链层 event log / 链下索引器（Hand History Service）消费。
+    // 此前 events 在 dispatch 层被丢弃，阻塞 HH 外部化方案。
+    let return_value = borsh::to_vec(&events).map_err(|e| {
+        PokerL1Error::Serialization(format!("texas_poker events borsh: {e}"))
+    })?;
     Ok(DispatchResult {
         created_objects: vec![],
         modified_objects: vec![table.id],
-        return_value: vec![],
+        return_value,
     })
 }
 
@@ -452,10 +470,71 @@ fn decode_args<T: BorshDeserialize>(args: &[u8], method: &str) -> PokerL1Result<
         .map_err(|e| PokerL1Error::Serialization(format!("{method} args borsh: {e}")))
 }
 
+// ========== P0-2 权限校验辅助 ==========
+//
+// TexasPokerTable 此前在 dispatch 层与 precompile 层都没有任何调用方权限校验
+// （routing 层的 validate_game_turn_tx 只覆盖 GameStatus，未覆盖 TexasPokerTable）。
+// 这意味着任意地址都能对任意座位执行 fold/raise/kick/rebuy 等方法。
+//
+// 本模块在 dispatch 层补齐 caller 权限校验：
+// - 动作类（fold/check/call/raise/bet/auto_fold/addon/rebuy/leave_table）：
+//   caller == seats[seat_index].player
+// - 管理类（kick_player/force_fold/reset_for_next_hand）：
+//   caller == table.creator（create_table 时记录）
+// - 协议类（join_and_shuffle/submit_*/leave_with_proof）：
+//   caller == seats[seat_index].player（与动作类一致）
+//
+// 选择 dispatch 层（而非 routing 层）的原因：caller 校验可被 poker_texas_air
+// 电路直接约束，与同步电路目标契合；且合约自包含，不引入跨对象同步负担。
+
+/// 校验 caller 是指定座位的玩家。
+fn require_caller_is_seat_player(
+    context: &DispatchContext,
+    table: &TexasPokerTable,
+    seat_index: u8,
+    method: &str,
+) -> PokerL1Result<()> {
+    if seat_index >= table.max_players {
+        return Err(PokerL1Error::Serialization(format!(
+            "{method}: seat_index {seat_index} out of range (max_players={})",
+            table.max_players
+        )));
+    }
+    let seat = &table.seats[seat_index as usize];
+    if !seat.is_occupied() {
+        return Err(PokerL1Error::Serialization(format!(
+            "{method}: seat {seat_index} not occupied"
+        )));
+    }
+    if seat.player != context.caller {
+        return Err(PokerL1Error::Serialization(format!(
+            "{method}: caller {:?} is not seat {seat_index} player",
+            context.caller
+        )));
+    }
+    Ok(())
+}
+
+/// 校验 caller 是桌台创建者（管理类方法）。
+fn require_caller_is_creator(
+    context: &DispatchContext,
+    table: &TexasPokerTable,
+    method: &str,
+) -> PokerL1Result<()> {
+    if table.creator != context.caller {
+        return Err(PokerL1Error::Serialization(format!(
+            "{method}: caller {:?} is not table creator",
+            context.caller
+        )));
+    }
+    Ok(())
+}
+
 // ========== dispatch_* 子函数 ==========
 
 /// `create_table` — 初始化桌台（覆写默认空桌台）。
 fn dispatch_create_table(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     _events: &mut Vec<TexasPokerEvent>,
@@ -476,9 +555,11 @@ fn dispatch_create_table(
         ));
     }
     let id = table.id;
+    // P0-2：记录 creator 为调用方，作为后续管理类方法的权限基准。
     *table = TexasPokerTable::new(
         id,
         input.name,
+        context.caller,
         input.max_players,
         input.small_blind,
         input.big_blind,
@@ -489,12 +570,19 @@ fn dispatch_create_table(
 
 /// `join_and_shuffle` — 玩家加入并完成首洗牌。
 fn dispatch_join_and_shuffle(
-    _context: &DispatchContext,
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: JoinAndShuffleArgs = decode_args(args, "join_and_shuffle")?;
+    // 入座方法：校验 caller == input.player（此时座位尚空，无法用 seat.player 校验）
+    if input.player != context.caller {
+        return Err(PokerL1Error::Serialization(format!(
+            "join_and_shuffle: caller {:?} != player {:?}",
+            context.caller, input.player
+        )));
+    }
     // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
     let pk: G1Projective = input.pk.into();
     state_machine::apply_join_and_shuffle(
@@ -514,11 +602,13 @@ fn dispatch_join_and_shuffle(
 
 /// `leave_with_proof` — 带 proof 离场。
 fn dispatch_leave_with_proof(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: LeaveWithProofArgs = decode_args(args, "leave_with_proof")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "leave_with_proof")?;
     state_machine::apply_leave_with_proof(
         table,
         input.seat_index,
@@ -532,12 +622,19 @@ fn dispatch_leave_with_proof(
 ///
 /// 仅在 WAITING 状态允许；占第一个空座位；玩家不能已在桌台。
 fn dispatch_join_table(
-    _context: &DispatchContext,
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: JoinTableArgs = decode_args(args, "join_table")?;
+    // 入座方法：校验 caller == input.player（座位尚空，无法用 seat.player 校验）
+    if input.player != context.caller {
+        return Err(PokerL1Error::Serialization(format!(
+            "join_table: caller {:?} != player {:?}",
+            context.caller, input.player
+        )));
+    }
     if !state_machine::can_join_state(table) {
         return Err(PokerL1Error::Serialization(
             "not in WAITING state, cannot join_table".into(),
@@ -594,11 +691,13 @@ fn dispatch_join_table(
 
 /// `leave_table` — 简单离座（仅 WAITING 状态）。
 fn dispatch_leave_table(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: LeaveTableArgs = decode_args(args, "leave_table")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "leave_table")?;
     if !state_machine::can_leave_state(table) {
         return Err(PokerL1Error::Serialization(
             "not in WAITING state, cannot leave_table".into(),
@@ -649,11 +748,15 @@ fn dispatch_leave_table(
 }
 
 /// `start_hand` — 开始新一局。
+///
+/// 权限：仅 creator 可发起对局（管理员动作）。
 fn dispatch_start_hand(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     _args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    require_caller_is_creator(context, table, "start_hand")?;
     state_machine::start_hand(table, events)
 }
 
@@ -674,49 +777,66 @@ fn dispatch_tick(
 }
 
 /// `auto_fold` — 玩家超时自动 fold。
+///
+/// 权限：仅 creator 可触发（超时处理属管理动作）。
+/// TODO(P1)：当前不校验是否真已超时（依赖 timestamps），完整超时校验留待后续。
 fn dispatch_auto_fold(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "auto_fold")?;
+    require_caller_is_creator(context, table, "auto_fold")?;
     state_machine::apply_fold_internal(table, input.seat_index, FOLD_REASON_AUTO_TIMEOUT, events)
 }
 
 /// `force_fold` — 管理员强制 fold。
 fn dispatch_force_fold(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "force_fold")?;
+    require_caller_is_creator(context, table, "force_fold")?;
     state_machine::apply_fold_internal(table, input.seat_index, FOLD_REASON_FORCE_ADMIN, events)
 }
 
 /// `kick_player` — 踢出玩家。
+///
+/// P2-1 修复：reason 透传，不再把 `0`（KICK_REASON_TIMEOUT）改写为 KICK_REASON_ADMIN。
+/// 调用方应显式传入正确的 reason 常量。
 fn dispatch_kick_player(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: KickPlayerArgs = decode_args(args, "kick_player")?;
-    let reason = if input.reason == 0 {
-        KICK_REASON_ADMIN
-    } else {
-        input.reason
-    };
-    state_machine::kick_player_internal(table, input.seat_index, reason, events);
+    // P0-2 权限校验：仅 creator 可执行管理类操作。
+    // 注意：reason==0 是合法的 KICK_REASON_TIMEOUT，但在非超时路径由 creator 主动踢人时，
+    // 调用方应传 KICK_REASON_ADMIN。此处不再做 0→ADMIN 的隐式改写。
+    if context.caller != table.creator {
+        return Err(PokerL1Error::Serialization(format!(
+            "kick_player: caller {:?} is not table creator",
+            context.caller
+        )));
+    }
+    state_machine::kick_player_internal(table, input.seat_index, input.reason, events)?;
     table.bump_version();
     Ok(())
 }
 
 /// `submit_shuffle_v2` — 提交洗牌结果。
 fn dispatch_submit_shuffle_v2(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitShuffleV2Args = decode_args(args, "submit_shuffle_v2")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "submit_shuffle_v2")?;
     state_machine::apply_submit_shuffle_v2(
         table,
         input.seat_index,
@@ -728,11 +848,13 @@ fn dispatch_submit_shuffle_v2(
 
 /// `submit_player_reveal_tokens` — 提交揭牌令牌。
 fn dispatch_submit_player_reveal_tokens(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitRevealTokensArgs = decode_args(args, "submit_player_reveal_tokens")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "submit_player_reveal_tokens")?;
     // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
     let reveal_tokens: Vec<G1Projective> =
         input.reveal_tokens.into_iter().map(Into::into).collect();
@@ -748,11 +870,13 @@ fn dispatch_submit_player_reveal_tokens(
 
 /// `submit_reconstruct_deck` — 提交重构牌组。
 fn dispatch_submit_reconstruct_deck(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitReconstructDeckArgs = decode_args(args, "submit_reconstruct_deck")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "submit_reconstruct_deck")?;
     state_machine::apply_submit_reconstruct_deck(
         table,
         input.seat_index,
@@ -766,41 +890,49 @@ fn dispatch_submit_reconstruct_deck(
 
 /// `fold` — 玩家主动 fold。
 fn dispatch_fold(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "fold")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "fold")?;
     state_machine::apply_fold(table, input.seat_index, events)
 }
 
 /// `check` — 玩家过牌。
 fn dispatch_check(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "check")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "check")?;
     state_machine::apply_check(table, input.seat_index, events)
 }
 
 /// `call` — 玩家跟注。
 fn dispatch_call(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "call")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "call")?;
     state_machine::apply_call(table, input.seat_index, events)
 }
 
 /// `raise` — 玩家加注。
 fn dispatch_raise(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: RaiseArgs = decode_args(args, "raise")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "raise")?;
     state_machine::apply_raise(table, input.seat_index, input.total_bet, events)
 }
 
@@ -808,11 +940,13 @@ fn dispatch_raise(
 ///
 /// 调用 `state_machine::apply_bet`：内部复用 `apply_raise(total_bet = seat.bet + amount)`。
 fn dispatch_bet(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: BetArgs = decode_args(args, "bet")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "bet")?;
     state_machine::apply_bet(table, input.seat_index, input.amount, events)
 }
 
@@ -822,10 +956,12 @@ fn dispatch_bet(
 /// 用于端到端测试验证完整对局生命周期：create_table → join_table → start_hand
 /// → reset_for_next_hand。生产环境正常流程中由 settle/end_without_showdown 内部触发。
 fn dispatch_reset_for_next_hand(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     _args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    require_caller_is_creator(context, table, "reset_for_next_hand")?;
     state_machine::reset_for_next_hand(table, events)
 }
 
@@ -833,24 +969,37 @@ fn dispatch_reset_for_next_hand(
 ///
 /// 调用 `state_machine::apply_addon`：累加 `pending_addon`，不动 `stack`。
 /// 在下一手 `reset_for_next_hand` 第一阶段合并到 `stack`。
+///
+/// TODO(P1-1 资金来源)：当前 addon 只改 `pending_addon` + `addon_pool` 记账，
+/// **未校验真实资金到账**（无 Treasury 锁仓 / PaymentProof）。完整资金方案
+/// 待独立 Treasury 合约统一处理（deposit → lock → addon/rebuy → settle）。
+/// 在此之前，caller 权限校验（caller == seat 玩家）是唯一的滥用防线。
 fn dispatch_addon(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: AddonArgs = decode_args(args, "addon")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "addon")?;
     state_machine::apply_addon(table, input.seat_index, input.amount, events)
 }
 
 /// `rebuy` — 玩家重购（立即生效）。
 ///
 /// 调用 `state_machine::apply_rebuy`：直接改 `stack`（影响下一动作可用筹码）。
+///
+/// TODO(P1-1 资金来源)：同 `addon`，rebuy 立即增加 stack 但未校验资金来源。
+/// **这是已知的资金凭空增发风险**，必须在接入 Treasury 前限制 rebuy 仅在
+/// 测试/dev 链使用，mainnet 启用前由 governance 强制禁用或接入 Treasury。
 fn dispatch_rebuy(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: RebuyArgs = decode_args(args, "rebuy")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "rebuy")?;
     state_machine::apply_rebuy(table, input.seat_index, input.amount, events)
 }
 
@@ -863,9 +1012,12 @@ mod tests {
     use crate::signature::TaggedPubkey;
 
     fn make_table() -> TexasPokerTable {
+        // creator 设为 [0xAA;20]，与 make_context().caller 一致，
+        // 使需要 creator 权限的测试（kick/start_hand/reset）天然通过。
         TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
             "test".to_string(),
+            [0xAA; 20],
             6,
             50,
             100,
@@ -883,6 +1035,13 @@ mod tests {
             block_height: 100,
             block_timestamp: 1_000_000,
         }
+    }
+
+    /// 构造指定 caller 的 context（用于多玩家权限校验测试）。
+    fn make_context_as(caller: Address) -> DispatchContext {
+        let mut ctx = make_context();
+        ctx.caller = caller;
+        ctx
     }
 
     #[test]
@@ -953,23 +1112,25 @@ mod tests {
 
     #[test]
     fn dispatch_join_table_then_leave_table() {
-        let ctx = make_context();
         let mut table = make_table();
+        // P0-2：join_table 校验 caller == player，故 player 须用自己的 context 调用。
+        let player_addr: Address = [0x11; 20];
+        let ctx_p1 = make_context_as(player_addr);
         // WAITING 状态允许 join_table
         let join_args = JoinTableArgs {
-            player: [0x11; 20],
+            player: player_addr,
             buy_in: 1000,
             pk: ECPoint(G1Projective::identity()),
         };
         let join_bytes = borsh::to_vec(&join_args).unwrap();
-        dispatch(&ctx, &mut table, &selectors::join_table(), &join_bytes).unwrap();
+        dispatch(&ctx_p1, &mut table, &selectors::join_table(), &join_bytes).unwrap();
         assert_eq!(table.occupied_count(), 1);
         assert_eq!(table.seats[0].stack, 1000);
 
-        // leave_table
+        // leave_table（seat 0 的玩家本人调用）
         let leave_args = LeaveTableArgs { seat_index: 0 };
         let leave_bytes = borsh::to_vec(&leave_args).unwrap();
-        dispatch(&ctx, &mut table, &selectors::leave_table(), &leave_bytes).unwrap();
+        dispatch(&ctx_p1, &mut table, &selectors::leave_table(), &leave_bytes).unwrap();
         assert_eq!(table.occupied_count(), 0);
     }
 
@@ -982,7 +1143,8 @@ mod tests {
     /// 4. `reset_for_next_hand` 清理状态回到 WAITING（模拟一局结束后的重置）
     #[test]
     fn e2e_full_hand_lifecycle_create_join_start_reset() {
-        let ctx = make_context();
+        // P0-2：create_table/start_hand/reset 需 creator 权限；join 需 player 本人。
+        let ctx_creator = make_context(); // caller = [0xAA;20] = make_table 的 creator
         let mut table = make_table();
 
         // ========== Step 1: create_table ==========
@@ -993,7 +1155,7 @@ mod tests {
             big_blind: 20,
         };
         let create_bytes = borsh::to_vec(&create_args).unwrap();
-        dispatch(&ctx, &mut table, &selectors::create_table(), &create_bytes).unwrap();
+        dispatch(&ctx_creator, &mut table, &selectors::create_table(), &create_bytes).unwrap();
 
         // 验证 WAITING 状态 + 参数已设置
         assert_eq!(table.name, "e2e_table");
@@ -1005,13 +1167,14 @@ mod tests {
         assert_eq!(table.pot, 0);
 
         // ========== Step 2a: join_table player 1 ==========
+        let p1: Address = [0x11; 20];
         let join1 = JoinTableArgs {
-            player: [0x11; 20],
+            player: p1,
             buy_in: 1000,
             pk: ECPoint(G1Projective::identity()),
         };
         dispatch(
-            &ctx,
+            &make_context_as(p1),
             &mut table,
             &selectors::join_table(),
             &borsh::to_vec(&join1).unwrap(),
@@ -1022,13 +1185,14 @@ mod tests {
         assert_eq!(table.seats[0].stack, 1000);
 
         // ========== Step 2b: join_table player 2（pk 必须不同）==========
+        let p2: Address = [0x22; 20];
         let join2 = JoinTableArgs {
-            player: [0x22; 20],
+            player: p2,
             buy_in: 2000,
             pk: ECPoint(G1Projective::generator()),
         };
         dispatch(
-            &ctx,
+            &make_context_as(p2),
             &mut table,
             &selectors::join_table(),
             &borsh::to_vec(&join2).unwrap(),
@@ -1038,8 +1202,8 @@ mod tests {
         assert_eq!(table.seats[1].player, [0x22; 20]);
         assert_eq!(table.seats[1].stack, 2000);
 
-        // ========== Step 3: start_hand ==========
-        dispatch(&ctx, &mut table, &selectors::start_hand(), &[]).unwrap();
+        // ========== Step 3: start_hand（creator 发起）==========
+        dispatch(&ctx_creator, &mut table, &selectors::start_hand(), &[]).unwrap();
 
         // 验证：进入 SHUFFLE 阶段，加密牌组已初始化（52 张）。
         //
@@ -1058,8 +1222,8 @@ mod tests {
             "start_hand 应设置 52 张加密牌"
         );
 
-        // ========== Step 4: reset_for_next_hand ==========
-        dispatch(&ctx, &mut table, &selectors::reset_for_next_hand(), &[]).unwrap();
+        // ========== Step 4: reset_for_next_hand（creator 发起）==========
+        dispatch(&ctx_creator, &mut table, &selectors::reset_for_next_hand(), &[]).unwrap();
 
         // 验证：回到 WAITING 状态，所有对局状态清理
         assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
@@ -1144,5 +1308,68 @@ mod tests {
         let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &args_bytes);
         assert!(result.is_ok());
+    }
+
+    // ========== P0-1 / P0-2 回归测试 ==========
+
+    /// P0-2：非座位玩家调用 fold 应被拒绝。
+    #[test]
+    fn dispatch_fold_rejects_non_seat_player() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = 1000;
+        table.seats[1].player = [0x02; 20];
+        table.seats[1].stack = 1000;
+        table.round_state = super::super::constants::ROUND_PREFLOP;
+        table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+
+        // seat 0 的玩家是 [0x01;20]，用 [0x99;20] 冒充调用应失败
+        let ctx_impersonator = make_context_as([0x99; 20]);
+        let args = SeatIndexArgs { seat_index: 0 };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(&ctx_impersonator, &mut table, &selectors::fold(), &args_bytes);
+        assert!(result.is_err(), "非座位玩家不应能 fold 别人的牌");
+    }
+
+    /// P0-2：非 creator 调用 kick_player 应被拒绝。
+    #[test]
+    fn dispatch_kick_rejects_non_creator() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = 500;
+
+        // make_table 的 creator = [0xAA;20]，用 [0x99;20] 调用应失败
+        let ctx_non_creator = make_context_as([0x99; 20]);
+        let args = KickPlayerArgs {
+            seat_index: 0,
+            reason: super::super::constants::KICK_REASON_ADMIN,
+        };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(
+            &ctx_non_creator,
+            &mut table,
+            &selectors::kick_player(),
+            &args_bytes,
+        );
+        assert!(result.is_err(), "非 creator 不应能 kick 玩家");
+    }
+
+    /// P0-1：kick_player 越界 seat_index 应返回错误而非 panic。
+    #[test]
+    fn dispatch_kick_rejects_out_of_range_seat() {
+        let ctx = make_context(); // caller = [0xAA;20] = creator
+        let mut table = make_table(); // max_players = 6
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = 500;
+
+        // seat_index=200 远超 max_players=6，应返回 Err 而非 panic
+        let args = KickPlayerArgs {
+            seat_index: 200,
+            reason: super::super::constants::KICK_REASON_ADMIN,
+        };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(&ctx, &mut table, &selectors::kick_player(), &args_bytes);
+        assert!(result.is_err(), "越界 seat_index 应返回错误而非 panic");
     }
 }

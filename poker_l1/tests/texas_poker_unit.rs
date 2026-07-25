@@ -1,6 +1,7 @@
 //! Texas Poker 模块单元测试 — 覆盖核心游戏逻辑。
 
 use poker_l1::signature::TaggedPubkey;
+use poker_l1::Address;
 use poker_l1::vm::contracts::texas_poker::{
     betting::{BettingRound, BettingError},
     card::{
@@ -1308,7 +1309,9 @@ use poker_l1::vm::contracts::texas_poker::{
 
 fn dummy_table(name: &str, max_players: u8) -> TexasPokerTable {
     let id = poker_l1::object_model::ObjectID::new([0xFF; 20], 0);
-    TexasPokerTable::new(id, name.into(), max_players, 50, 100)
+    // creator 设为 [0x01;20]，与 make_dispatch_context().caller 一致，
+    // 使需要 creator 权限的管理类测试天然通过。
+    TexasPokerTable::new(id, name.into(), [0x01; 20], max_players, 50, 100)
 }
 
 fn occupy_seat(table: &mut TexasPokerTable, seat_idx: u8, player: [u8; 20], stack: u64) {
@@ -2514,7 +2517,10 @@ use poker_l1::vm::contracts::dispatch::{DispatchContext, DispatchResult};
 
 fn make_dispatch_context() -> DispatchContext {
     DispatchContext {
-        caller: [0xAA; 20],
+        // caller = [0x01;20]，与多数 addon/rebuy/下注测试里 occupy_seat 的 player 一致，
+        // 使 P0-2 权限校验（caller == seat.player）天然通过。
+        // join_table 测试（player=[0x11]/[0x22]）用 make_dispatch_context_as 显式传 caller。
+        caller: [0x01; 20],
         caller_pubkey: TaggedPubkey {
             tag: 0,
             raw: vec![0xBB; 32],
@@ -2523,6 +2529,14 @@ fn make_dispatch_context() -> DispatchContext {
         block_height: 100,
         block_timestamp: 1_000_000,
     }
+}
+
+/// 构造指定 caller 的 dispatch context（P0-2 权限校验后，join/leave 等动作类
+/// 方法要求 caller == seat.player，测试需用对应玩家的 context）。
+fn make_dispatch_context_as(caller: Address) -> DispatchContext {
+    let mut ctx = make_dispatch_context();
+    ctx.caller = caller;
+    ctx
 }
 
 // ========== selector 测试 ==========
@@ -2596,7 +2610,7 @@ fn test_dispatch_create_table_rejects_max_players_too_small() {
 
 #[test]
 fn test_dispatch_join_table_rejects_non_waiting_state() {
-    let ctx = make_dispatch_context();
+    let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     table.round_state = ROUND_PREFLOP;
     
@@ -2612,7 +2626,7 @@ fn test_dispatch_join_table_rejects_non_waiting_state() {
 
 #[test]
 fn test_dispatch_join_table_rejects_buy_in_less_than_big_blind() {
-    let ctx = make_dispatch_context();
+    let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     table.big_blind = 100;
     
@@ -2628,7 +2642,7 @@ fn test_dispatch_join_table_rejects_buy_in_less_than_big_blind() {
 
 #[test]
 fn test_dispatch_join_table_rejects_duplicate_pk() {
-    let ctx = make_dispatch_context();
+    let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     
     let args1 = JoinTableArgs {
@@ -2643,7 +2657,9 @@ fn test_dispatch_join_table_rejects_duplicate_pk() {
         buy_in: 1000,
         pk: ECPoint(G1Projective::identity()),
     };
-    let result = dispatch::dispatch(&ctx, &mut table, &selectors::join_table(), &borsh::to_vec(&args2).unwrap());
+    // P0-2：args2 用 player=[0x22] 自己的 ctx，确保测的是 duplicate pk 而非权限错。
+    let ctx_p2 = make_dispatch_context_as([0x22; 20]);
+    let result = dispatch::dispatch(&ctx_p2, &mut table, &selectors::join_table(), &borsh::to_vec(&args2).unwrap());
     assert!(result.is_err());
 }
 
@@ -2651,7 +2667,7 @@ fn test_dispatch_join_table_rejects_duplicate_pk() {
 
 #[test]
 fn test_dispatch_leave_table_rejects_non_waiting_state() {
-    let ctx = make_dispatch_context();
+    let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     table.round_state = ROUND_PREFLOP;
     table.seats[0].player = [0x11; 20];
@@ -2665,7 +2681,7 @@ fn test_dispatch_leave_table_rejects_non_waiting_state() {
 
 #[test]
 fn test_dispatch_leave_table_rejects_empty_seat() {
-    let ctx = make_dispatch_context();
+    let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     
     let args = LeaveTableArgs { seat_index: 0 };
@@ -2676,7 +2692,7 @@ fn test_dispatch_leave_table_rejects_empty_seat() {
 
 #[test]
 fn test_dispatch_leave_table_rejects_invalid_seat_index() {
-    let ctx = make_dispatch_context();
+    let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     
     let args = LeaveTableArgs { seat_index: 10 };
@@ -2900,9 +2916,9 @@ fn test_dispatch_tick_increments_timestamp() {
 
 #[test]
 fn test_dispatch_join_table_rejects_seat_full() {
-    let ctx = make_dispatch_context();
+    let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 2); // 只有2个座位
-    
+
     // 加入第一个玩家
     let args1 = JoinTableArgs {
         player: [0x11; 20],
@@ -2910,16 +2926,17 @@ fn test_dispatch_join_table_rejects_seat_full() {
         pk: ECPoint(G1Projective::generator()),
     };
     dispatch::dispatch(&ctx, &mut table, &selectors::join_table(), &borsh::to_vec(&args1).unwrap()).unwrap();
-    
-    // 加入第二个玩家
+
+    // 加入第二个玩家（P0-2：须用 player=[0x22] 自己的 ctx）
     let pk2 = G1Projective::generator().double();
     let args2 = JoinTableArgs {
         player: [0x22; 20],
         buy_in: 1000,
         pk: ECPoint(pk2),
     };
-    dispatch::dispatch(&ctx, &mut table, &selectors::join_table(), &borsh::to_vec(&args2).unwrap()).unwrap();
-    
+    let ctx_p2 = make_dispatch_context_as([0x22; 20]);
+    dispatch::dispatch(&ctx_p2, &mut table, &selectors::join_table(), &borsh::to_vec(&args2).unwrap()).unwrap();
+
     // 加入第三个玩家（满员）
     let pk3 = G1Projective::generator() + G1Projective::generator().double();
     let args3 = JoinTableArgs {
@@ -2927,7 +2944,8 @@ fn test_dispatch_join_table_rejects_seat_full() {
         buy_in: 1000,
         pk: ECPoint(pk3),
     };
-    let result = dispatch::dispatch(&ctx, &mut table, &selectors::join_table(), &borsh::to_vec(&args3).unwrap());
+    let ctx_p3 = make_dispatch_context_as([0x33; 20]);
+    let result = dispatch::dispatch(&ctx_p3, &mut table, &selectors::join_table(), &borsh::to_vec(&args3).unwrap());
     assert!(result.is_err());
 }
 

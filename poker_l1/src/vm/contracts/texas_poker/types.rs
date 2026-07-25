@@ -456,6 +456,13 @@ pub struct TexasPokerTable {
     pub id: ObjectID,
     /// 桌台名称。
     pub name: String,
+    /// 桌台创建者（管理类方法权限基准：kick_player/force_fold/reset_for_next_hand）。
+    ///
+    /// P0-2：在 `dispatch_create_table` 时记录为 `context.caller`。
+    /// 管理类方法在 dispatch 层校验 `caller == creator`，使权限可被
+    /// `poker_texas_air` 电路约束（与同步电路目标契合）。
+    /// 旧对象反序列化时若为 `EMPTY_PLAYER`，管理类校验会失败，需 governance 重设。
+    pub creator: Address,
     /// 最大玩家数（2..=9）。
     pub max_players: u8,
     /// 小盲注金额。
@@ -550,6 +557,7 @@ impl TexasPokerTable {
     pub fn new(
         id: ObjectID,
         name: String,
+        creator: Address,
         max_players: u8,
         small_blind: u64,
         big_blind: u64,
@@ -566,6 +574,7 @@ impl TexasPokerTable {
         Self {
             id,
             name,
+            creator,
             max_players,
             small_blind,
             big_blind,
@@ -650,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_table_new() {
-        let table = TexasPokerTable::new(dummy_table_id(), "test".into(), 6, 50, 100);
+        let table = TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
         assert_eq!(table.max_players, 6);
         assert_eq!(table.seats.len(), 6);
         assert_eq!(table.small_blind, 50);
@@ -664,25 +673,25 @@ mod tests {
     fn test_table_new_invalid_params() {
         // max_players < 2
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), 1, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 1, 50, 100);
         });
         assert!(result.is_err());
 
         // max_players > 9
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), 10, 50, 100);
+            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 10, 50, 100);
         });
         assert!(result.is_err());
 
         // big_blind = 0
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), 6, 50, 0);
+            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 50, 0);
         });
         assert!(result.is_err());
 
         // small_blind > big_blind
         let result = std::panic::catch_unwind(|| {
-            TexasPokerTable::new(dummy_table_id(), "x".into(), 6, 200, 100);
+            TexasPokerTable::new(dummy_table_id(), "x".into(), EMPTY_PLAYER, 6, 200, 100);
         });
         assert!(result.is_err());
     }
@@ -721,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_table_find_seat() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), 4, 50, 100);
+        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].player = [0x01; 20];
         table.seats[2].player = [0x02; 20];
 
@@ -732,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_table_find_empty_seat() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), 4, 50, 100);
+        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].player = [0x01; 20];
         table.seats[1].player = [0x02; 20];
 
@@ -741,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_table_active_count() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), 4, 50, 100);
+        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].player = [0x01; 20];
         table.seats[1].player = [0x02; 20];
         table.seats[2].player = [0x03; 20];
@@ -753,7 +762,7 @@ mod tests {
 
     #[test]
     fn test_table_borsh_roundtrip() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "test-table".into(), 4, 50, 100);
+        let mut table = TexasPokerTable::new(dummy_table_id(), "test-table".into(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].player = [0xAB; 20];
         table.seats[0].stack = 1_000_000;
         table.pot = 200;
@@ -786,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_table_bump_version() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), 4, 50, 100);
+        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         assert_eq!(table.version, 0);
         table.bump_version();
         assert_eq!(table.version, 1);
