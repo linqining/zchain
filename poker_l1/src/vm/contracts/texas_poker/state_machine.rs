@@ -2144,7 +2144,20 @@ fn on_shuffle_timeout(
     Ok(())
 }
 
-/// reveal 超时处理：preflop 退款重置；其他阶段启动 reconstruct。
+/// reveal 超时处理：移除超时玩家，按轮次选择 reset 或 reconstruct。
+///
+/// # 流程
+/// 1. 收集所有未提交 reveal token 的 pending 玩家，逐个踢出（`kick_player_internal`）。
+/// 2. 若踢出后无人活跃（active==0）→ refund + reset（异常收场）。
+/// 3. 若仅剩 1 人 → `end_without_showdown`（该玩家独得 pot）。
+/// 4. 否则按轮次分支：
+///    - **preflop**：直接 reset。此时一张牌都未解出（preflop reveal 完成才会
+///      post_blinds 进入下注），reset 后桌台回到 WAITING，下次 tick 会自动
+///      `start_hand`（重新 shuffle + 发牌）。比 reconstruct（重建牌组）简单得多——
+///      reconstruct 的语义是"已有牌解出、剩余牌无法继续解密时重建牌组继续"，
+///      preflop 没有已解出的牌，无需重建。
+///    - **其他轮次**（flop/turn/river/showdown）：已有牌解出，走 `start_reconstruct`
+///      重建牌组让剩余玩家补发缺失的牌继续。
 fn on_reveal_timeout(
     table: &mut TexasPokerTable,
     now_ms: u64,
@@ -2173,7 +2186,7 @@ fn on_reveal_timeout(
     }
 
     let active = count_active_players(&table.seats);
-    if phase == REVEAL_PHASE_PREFLOP {
+    if active == 0 {
         refund_all_bets(table, events);
         reset_for_next_hand(table, events)?;
         events::emit_event(
@@ -2186,10 +2199,27 @@ fn on_reveal_timeout(
         );
         return Ok(());
     }
-    if active <= 1 {
+    if active == 1 {
         end_without_showdown(table, events);
         return Ok(());
     }
+
+    if phase == REVEAL_PHASE_PREFLOP {
+        // preflop 未解出任何牌，直接 reset 回 WAITING；
+        // 下次 tick 检测到 active >= MIN_PLAYERS_TO_START 会自动 start_hand 重新洗牌发牌。
+        reset_for_next_hand(table, events)?;
+        events::emit_event(
+            events,
+            TexasPokerEvent::HandReset {
+                table_id: table.id,
+                reason: RESET_REASON_TIMEOUT,
+                round_state: table.round_state,
+            },
+        );
+        return Ok(());
+    }
+
+    // flop/turn/river/showdown：已有牌解出，走 reconstruct 重建牌组继续。
     start_reconstruct(table, now_ms, events);
     Ok(())
 }
