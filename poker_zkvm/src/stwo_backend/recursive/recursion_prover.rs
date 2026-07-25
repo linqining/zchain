@@ -52,7 +52,7 @@ use stwo::prover::{prove, ProvingError};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 /// L2 recursive proof（封装 StarkProof）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecursiveProof(pub StarkProof<Blake2sMerkleHasher>);
 
 /// Recursion prover 错误类型。

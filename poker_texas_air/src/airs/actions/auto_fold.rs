@@ -1,0 +1,192 @@
+//! `auto_fold` AIR — 玩家超时自动 fold（permissionless）。
+//!
+//! 移植自 `dispatch::dispatch_auto_fold` 与 `state_machine::apply_auto_fold`。
+//!
+//! ## 业务规约
+//!
+//! 1. 当前处于下注轮
+//! 2. `seat_index == current_turn`
+//! 3. 玩家未 fold、未 all_in
+//! 4. 触发条件：`current_time - turn_started_at >= turn_timeout`
+//! 5. 状态变更：`seat.folded = true`, `version += 1`
+//!
+//! 与 [`crate::airs::actions::fold`] 的区别：
+//! - `fold`：玩家主动操作
+//! - `auto_fold`：超时驱动（任何人都可以发起）
+//!
+//! ## AIR 列布局
+//!
+//! - 通用列 37 个
+//! - 业务列 7 个：`INPUT_SEAT_INDEX`, `INPUT_CURRENT_TIME_BASE[4]`,
+//!   `OUTPUT_FOLDED`
+
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
+use stwo::core::fields::m31::M31;
+
+use crate::airs::common::{
+    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+};
+use crate::method_kind::MethodKind;
+
+/// `auto_fold` 业务特定列布局。
+pub mod cols {
+    use super::COMMON_NUM_COLUMNS;
+    /// `INPUT_SEAT_INDEX` 列。
+    pub const INPUT_SEAT_INDEX: usize = COMMON_NUM_COLUMNS + 0;
+    /// `INPUT_CURRENT_TIME` 起始列（4 limb）。
+    pub const INPUT_CURRENT_TIME_BASE: usize = COMMON_NUM_COLUMNS + 1;
+    /// `OUTPUT_FOLDED` 列。
+    pub const OUTPUT_FOLDED: usize = COMMON_NUM_COLUMNS + 5;
+    /// `auto_fold` AIR 总列数。
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 6;
+}
+
+/// `auto_fold` 输入参数。
+#[derive(Debug, Clone)]
+pub struct AutoFoldInput {
+    /// 超时被自动 fold 的座位索引。
+    pub seat_index: u8,
+    /// 触发时的当前时间戳。
+    pub current_time: u64,
+}
+
+/// `auto_fold` AIR 公开输入。
+#[derive(Debug, Clone)]
+pub struct AutoFoldAir {
+    /// log2(trace 行数)。
+    pub log_size: u32,
+    /// 输入参数。
+    pub input: AutoFoldInput,
+    /// 调用前 state_root。
+    pub pre_state_root: [M31; 4],
+    /// 调用后 state_root。
+    pub post_state_root: [M31; 4],
+    /// 表台 ID。
+    pub table_id: u64,
+    /// 手牌序号。
+    pub hand_id: u32,
+    /// 调用序号。
+    pub call_seq: u32,
+    /// 调用前 version。
+    pub pre_version: u64,
+    /// 调用后 version。
+    pub post_version: u64,
+}
+
+impl AutoFoldAir {
+    /// 列数。
+    #[must_use]
+    pub const fn num_columns() -> usize {
+        cols::NUM_COLUMNS
+    }
+}
+
+impl FrameworkEval for AutoFoldAir {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let common = CommonConstraints::write(&mut eval, MethodKind::AutoFold);
+        let is_active = common.is_active.clone();
+
+        let input_seat_index = eval.next_trace_mask();
+        let input_current_time_0 = eval.next_trace_mask();
+        let _input_current_time_1 = eval.next_trace_mask();
+        let _input_current_time_2 = eval.next_trace_mask();
+        let _input_current_time_3 = eval.next_trace_mask();
+        let output_folded = eval.next_trace_mask();
+
+        // 约束 1：seat_index == input.seat_index
+        let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
+        eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat));
+
+        // 约束 2：current_time 一致性（limb 0）
+        let expected_time_0: E::F = M31::from((self.input.current_time & 0xFFFF) as u32).into();
+        eval.add_constraint(is_active.clone() * (input_current_time_0 - expected_time_0));
+
+        // 约束 3：output_folded == 1
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(is_active * (output_folded - one));
+
+        // TODO 阶段 3 完整版：约束 current_time - turn_started_at >= turn_timeout
+
+        eval
+    }
+}
+
+/// `auto_fold` AIR 的 trace 行。
+#[derive(Debug, Clone)]
+pub struct AutoFoldRow {
+    /// 通用列。
+    pub common: CommonRow,
+    /// `INPUT_SEAT_INDEX`。
+    pub input_seat_index: M31,
+    /// `INPUT_CURRENT_TIME`（4 limb）。
+    pub input_current_time: [M31; 4],
+    /// `OUTPUT_FOLDED`。
+    pub output_folded: M31,
+}
+
+impl AutoFoldRow {
+    /// 构造 active 行。
+    #[must_use]
+    pub fn active(
+        input: &AutoFoldInput,
+        pre_state_root: [M31; 4],
+        post_state_root: [M31; 4],
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+        pre_version: u64,
+        post_version: u64,
+        pre_round_state: u8,
+        post_round_state: u8,
+    ) -> Self {
+        Self {
+            common: CommonRow::active(
+                MethodKind::AutoFold,
+                pre_state_root,
+                post_state_root,
+                table_id,
+                hand_id,
+                call_seq,
+                pre_version,
+                post_version,
+                pre_round_state,
+                post_round_state,
+                0,
+                0,
+                0,
+                0,
+            ),
+            input_seat_index: u8_to_m31(input.seat_index),
+            input_current_time: u64_to_m31_limbs(input.current_time),
+            output_folded: M31::from(1u32),
+        }
+    }
+
+    /// 构造 padding 行。
+    #[must_use]
+    pub fn padding() -> Self {
+        Self {
+            common: CommonRow::padding(),
+            input_seat_index: ZERO,
+            input_current_time: [ZERO; 4],
+            output_folded: ZERO,
+        }
+    }
+
+    /// 转为列向量。
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<M31> {
+        let mut v = self.common.to_vec();
+        v.push(self.input_seat_index);
+        v.extend_from_slice(&self.input_current_time);
+        v.push(self.output_folded);
+        debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
+        v
+    }
+}

@@ -1768,6 +1768,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "poker_texas_air"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "blstrs",
+ "borsh",
+ "ff",
+ "group",
+ "pairing",
+ "poker_l1",
+ "poker_protocol",
+ "poker_texas_air",
+ "poker_zkvm",
+ "proptest",
+ "rayon",
+ "serde",
+ "starknet-crypto 0.6.2",
+ "starknet-ff",
+ "stwo",
+ "stwo-air-utils",
+ "stwo-air-utils-derive",
+ "stwo-constraint-framework",
+ "thiserror 1.0.69",
+ "tracing",
+ "vm-common",
+]
+
+[[package]]
 name = "poker_zkvm"
 version = "0.1.0"
 dependencies = [

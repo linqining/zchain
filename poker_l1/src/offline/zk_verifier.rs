@@ -12,6 +12,9 @@ use std::sync::Arc;
 use crate::Hash;
 use crate::error::PokerL1Error;
 
+// Re-export for bincode deserialization in this module.
+use poker_zkvm::stwo_backend::recursive::RecursivePublicInputs;
+
 /// ZK 证明 scheme 标识符（u32，与 syscall 接口一致）。
 pub type SchemeId = u32;
 

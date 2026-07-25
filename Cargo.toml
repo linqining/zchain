@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["poker_l1", "poker_zkvm", "vm-common"]
+members = ["poker_l1", "poker_zkvm", "poker_texas_air", "vm-common"]
 # guest_sdk 和 guests/texas_poker 是独立 crate（no_std + riscv32im target），
 # 不加入 workspace.members 以避免 target/feature 污染。
 # 用 exclude 而非 [workspace] 表，使它们可被 poker_zkvm 作为 path dev-dependency 引用。
@@ -80,5 +80,10 @@ stwo = { version = "2.3", features = ["parallel", "prover"] }
 stwo-air-utils = "2.3"
 stwo-air-utils-derive = "2.3"
 stwo-constraint-framework = { version = "2.3", features = ["prover"] }
+# Starknet Poseidon252 哈希 — 必须与 Stwo 同版本（0.6.x），否则
+# starknet_crypto::poseidon_hash_many 的 Felt 类型与
+# starknet_ff::FieldElement 不兼容（0.8.x 改用 starknet_types_core::Felt）。
+starknet-ff = { version = "0.3", features = ["serde"] }
+starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
 # Stwo StarkProof<H> 序列化用（Phase 1.3：StwoProver::prove 输出 bincode 字节流）
 bincode = "1"
