@@ -388,6 +388,9 @@ pub fn dispatch(
     selector: &[u8; 32],
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
+    // Post-commit Prover：执行前捕获 pre_table 快照（用于构造证明任务）。
+    // clone 成本可接受（TexasPokerTable ~KB 级，且 prove_task 是异步消费的离线数据）。
+    let pre_table = table.clone();
     let mut events: Vec<TexasPokerEvent> = Vec::new();
     let result = match selector {
         s if s == &selectors::create_table() => {
@@ -443,17 +446,170 @@ pub fn dispatch(
     };
     result?;
     log_events(&events);
-    // P2-3 修复：把 state_machine 产生的 events 序列化进 return_value，
-    // 供链层 event log / 链下索引器（Hand History Service）消费。
-    // 此前 events 在 dispatch 层被丢弃，阻塞 HH 外部化方案。
-    let return_value = borsh::to_vec(&events).map_err(|e| {
-        PokerL1Error::Serialization(format!("texas_poker events borsh: {e}"))
-    })?;
+
+    // Post-commit Prover：构造证明任务（pre/post table + method 元数据）。
+    // return_value = borsh(L1DispatchOutput { events, prove_task })，
+    // Orchestrator 从链层取回后反序列化生成 proof。
+    let return_value = build_dispatch_output(
+        &events,
+        selector,
+        args,
+        pre_table,
+        table,
+    )?;
+
     Ok(DispatchResult {
         created_objects: vec![],
         modified_objects: vec![table.id],
         return_value,
     })
+}
+
+/// 构造 `L1DispatchOutput` 并序列化为 return_value 字节。
+///
+/// 根据 selector 推导 method_kind discriminant + 构造 MethodInput，
+/// 封装为 `L1DispatchOutput { events, prove_task }`。
+/// 无法识别的 selector（理论不会到达，因 dispatch 已校验）→ prove_task = None。
+fn build_dispatch_output(
+    events: &[TexasPokerEvent],
+    selector: &[u8; 32],
+    args: &[u8],
+    pre_table: TexasPokerTable,
+    post_table: &TexasPokerTable,
+) -> PokerL1Result<Vec<u8>> {
+    use super::prove_task::{L1DispatchOutput, L1ProveTask, MethodInput};
+
+    let (kind, method_input) = match build_method_input(selector, args) {
+        Some(v) => v,
+        None => {
+            // tick 等无需证明的方法，或未知 selector → 仅返回 events。
+            let out = L1DispatchOutput::events_only(events.to_vec());
+            return borsh::to_vec(&out)
+                .map_err(|e| PokerL1Error::Serialization(format!("dispatch output borsh: {e}")));
+        }
+    };
+
+    // TODO：table_id / hand_id / call_seq 完整方案需给 TexasPokerTable 加字段
+    // （hand_id 在 start_hand/reset 时维护，call_seq 每次 dispatch 递增）。
+    // 本轮先用占位值打通 return_value 通道；Orchestrator 当前不依赖这些值
+    // （verify_chain 只校验 state_root 链）。后续补字段后此处改为读取真实值。
+    let table_id = pre_table.id.creation_nonce;
+    let hand_id = 0u32;
+    let call_seq = 0u32;
+    let task = L1ProveTask::new(
+        kind,
+        method_input,
+        pre_table,
+        post_table.clone(),
+        table_id,
+        hand_id,
+        call_seq,
+    );
+    let out = L1DispatchOutput::with_task(events.to_vec(), task);
+    borsh::to_vec(&out)
+        .map_err(|e| PokerL1Error::Serialization(format!("dispatch output borsh: {e}")))
+}
+
+/// 根据 selector + args 构造 `(method_kind_discriminant, MethodInput)`。
+///
+/// method_kind discriminant 与 `poker_texas_air::MethodKind` 对齐
+/// （`#[repr(u8)]` + `use_discriminant=true`）。
+///
+/// 返回 `None` 表示该方法无需证明（如 tick）或 selector 未匹配。
+fn build_method_input(selector: &[u8; 32], args: &[u8]) -> Option<(u8, super::prove_task::MethodInput)> {
+    use super::prove_task::MethodInput;
+    // method_kind discriminant（与 poker_texas_air::MethodKind 对齐）
+    const K_CREATE_TABLE: u8 = 0;
+    const K_JOIN_TABLE: u8 = 1;
+    const K_LEAVE_TABLE: u8 = 2;
+    const K_START_HAND: u8 = 3;
+    const K_TICK: u8 = 4;
+    const K_RESET: u8 = 5;
+    const K_FOLD: u8 = 6;
+    const K_CHECK: u8 = 7;
+    const K_CALL: u8 = 8;
+    const K_RAISE: u8 = 9;
+    const K_AUTO_FOLD: u8 = 10;
+    const K_FORCE_FOLD: u8 = 11;
+    const K_KICK: u8 = 12;
+    const K_ADDON: u8 = 13;
+    const K_REBUY: u8 = 14;
+    const K_JOIN_SHUFFLE: u8 = 15;
+    const K_LEAVE_PROOF: u8 = 16;
+    const K_SUBMIT_SHUFFLE: u8 = 17;
+    const K_SUBMIT_REVEAL: u8 = 18;
+    const K_SUBMIT_RECONSTRUCT: u8 = 19;
+    const K_BET: u8 = 20;
+
+    // 仅含 seat_index 的方法：先尝试解码为 SeatIndexArgs，再按 selector 分类
+    if let Ok(a) = borsh::from_slice::<SeatIndexArgs>(args) {
+        let mi = MethodInput::SeatOnly { seat_index: a.seat_index };
+        if selector == &selectors::fold() { return Some((K_FOLD, mi)); }
+        if selector == &selectors::check() { return Some((K_CHECK, mi)); }
+        if selector == &selectors::call() { return Some((K_CALL, mi)); }
+        if selector == &selectors::auto_fold() { return Some((K_AUTO_FOLD, mi)); }
+        if selector == &selectors::force_fold() { return Some((K_FORCE_FOLD, mi)); }
+        if selector == &selectors::leave_table() { return Some((K_LEAVE_TABLE, mi)); }
+        if selector == &selectors::leave_with_proof() { return Some((K_LEAVE_PROOF, mi)); }
+        if selector == &selectors::submit_shuffle_v2() { return Some((K_SUBMIT_SHUFFLE, mi)); }
+        if selector == &selectors::submit_player_reveal_tokens() { return Some((K_SUBMIT_REVEAL, mi)); }
+        if selector == &selectors::submit_reconstruct_deck() { return Some((K_SUBMIT_RECONSTRUCT, mi)); }
+    }
+    // raise
+    if selector == &selectors::raise() {
+        if let Ok(a) = borsh::from_slice::<RaiseArgs>(args) {
+            return Some((K_RAISE, MethodInput::Raise { seat_index: a.seat_index, total_bet: a.total_bet }));
+        }
+    }
+    // bet
+    if selector == &selectors::bet() {
+        if let Ok(a) = borsh::from_slice::<BetArgs>(args) {
+            return Some((K_BET, MethodInput::Bet { seat_index: a.seat_index, amount: a.amount }));
+        }
+    }
+    // addon / rebuy（共用 AddonArgs 布局：seat_index + amount）
+    if selector == &selectors::addon() {
+        if let Ok(a) = borsh::from_slice::<AddonArgs>(args) {
+            return Some((K_ADDON, MethodInput::Funds { seat_index: a.seat_index, amount: a.amount }));
+        }
+    }
+    if selector == &selectors::rebuy() {
+        if let Ok(a) = borsh::from_slice::<RebuyArgs>(args) {
+            return Some((K_REBUY, MethodInput::Funds { seat_index: a.seat_index, amount: a.amount }));
+        }
+    }
+    // kick_player
+    if selector == &selectors::kick_player() {
+        if let Ok(a) = borsh::from_slice::<KickPlayerArgs>(args) {
+            return Some((K_KICK, MethodInput::Kick { seat_index: a.seat_index, reason: a.reason }));
+        }
+    }
+    // join_table / join_and_shuffle（共用 player + buy_in）
+    if selector == &selectors::join_table() {
+        if let Ok(a) = borsh::from_slice::<JoinTableArgs>(args) {
+            return Some((K_JOIN_TABLE, MethodInput::Join { player: a.player, buy_in: a.buy_in }));
+        }
+    }
+    if selector == &selectors::join_and_shuffle() {
+        if let Ok(a) = borsh::from_slice::<JoinAndShuffleArgs>(args) {
+            return Some((K_JOIN_SHUFFLE, MethodInput::Join { player: a.player, buy_in: a.buy_in }));
+        }
+    }
+    // create_table
+    if selector == &selectors::create_table() {
+        if let Ok(a) = borsh::from_slice::<CreateTableArgs>(args) {
+            return Some((K_CREATE_TABLE, MethodInput::CreateTable {
+                name: a.name, max_players: a.max_players,
+                small_blind: a.small_blind, big_blind: a.big_blind,
+            }));
+        }
+    }
+    // start_hand / reset_for_next_hand（无参数）
+    if selector == &selectors::start_hand() { return Some((K_START_HAND, MethodInput::Empty)); }
+    if selector == &selectors::reset_for_next_hand() { return Some((K_RESET, MethodInput::Empty)); }
+    // tick：permissionless，当前不证明（后续若需证明改为 Empty）
+    if selector == &selectors::tick() { return None; }
+    None
 }
 
 /// 将 events 列表以 debug 级别记录到 tracing。

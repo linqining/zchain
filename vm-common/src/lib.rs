@@ -23,4 +23,5 @@ pub mod crypto;
 pub mod gas;
 pub mod gas_strategy;
 pub mod precompile;
+pub mod prove_task;
 pub mod syscall_id;

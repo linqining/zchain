@@ -23,70 +23,10 @@
 
 use borsh::{BorshSerialize, BorshDeserialize};
 
-use crate::method_kind::MethodKind;
+// MethodInput 复用 vm-common 的定义（poker_l1 与 poker_texas_air 共享的 borsh 契约）。
+pub use vm_common::prove_task::MethodInput;
 
-/// 方法业务输入的枚举封装。
-///
-/// 每个 variant 对应一组方法参数（与 `poker_l1` 的 `*Args` 结构对齐）。
-/// Orchestrator 据此为对应 method AIR 构造 trace。
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub enum MethodInput {
-    /// 仅含 seat_index 的方法（fold/check/call/auto_fold/force_fold/leave_table/
-    /// leave_with_proof/submit_shuffle_v2/submit_player_reveal_tokens/
-    /// submit_reconstruct_deck/kick_player）。
-    SeatOnly {
-        /// 座位索引。
-        seat_index: u8,
-    },
-    /// `raise`（seat_index + total_bet）。
-    Raise {
-        /// 座位索引。
-        seat_index: u8,
-        /// 加注后本轮总下注额。
-        total_bet: u64,
-    },
-    /// `bet`（seat_index + amount 增量）。
-    Bet {
-        /// 座位索引。
-        seat_index: u8,
-        /// 下注增量。
-        amount: u64,
-    },
-    /// `addon` / `rebuy`（seat_index + amount）。
-    Funds {
-        /// 座位索引。
-        seat_index: u8,
-        /// 金额。
-        amount: u64,
-    },
-    /// `kick_player`（seat_index + reason）。
-    Kick {
-        /// 座位索引。
-        seat_index: u8,
-        /// 踢出原因。
-        reason: u8,
-    },
-    /// `join_table` / `join_and_shuffle`（player + buy_in）。
-    Join {
-        /// 玩家地址。
-        player: [u8; 20],
-        /// 买入金额。
-        buy_in: u64,
-    },
-    /// `create_table`（name + max_players + small_blind + big_blind）。
-    CreateTable {
-        /// 桌台名称。
-        name: String,
-        /// 最大玩家数。
-        max_players: u8,
-        /// 小盲注。
-        small_blind: u64,
-        /// 大盲注。
-        big_blind: u64,
-    },
-    /// 无业务参数的方法（start_hand / tick / reset_for_next_hand）。
-    Empty,
-}
+use crate::method_kind::MethodKind;
 
 /// 单次 method 调用的证明任务。
 ///
