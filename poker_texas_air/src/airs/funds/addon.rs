@@ -102,7 +102,7 @@ impl FrameworkEval for AddonAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Addon);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Addon, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         // 读取业务列
@@ -132,7 +132,12 @@ impl FrameworkEval for AddonAir {
         // 约束 3（核心）：post_pending_addon == pre_pending_addon + input_amount
         //    关键不变量：addon 精确累加到 pending_addon，不动 stack
         //    只约束 limb 0（M31 域内 + 16 bit 内不会溢出）
-        eval.add_constraint(is_active * (post_pending_0 - pre_pending_0 - input_amount_0));
+        eval.add_constraint(is_active.clone() * (post_pending_0 - pre_pending_0 - input_amount_0));
+
+        // 约束 4（审计共性，degree-2）：round_state 不变（addon 不改变 round_state）。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 3：amount > 0（需 invertibility witness 列，degree-2）；
+        //              addon_pool += amount 守恒（需新增 addon_pool 列）。
 
         eval
     }

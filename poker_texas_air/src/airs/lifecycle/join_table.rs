@@ -88,7 +88,7 @@ impl FrameworkEval for JoinTableAir {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::JoinTable);
+        let common = CommonConstraints::write(&mut eval, MethodKind::JoinTable, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         // 业务列
@@ -113,6 +113,15 @@ impl FrameworkEval for JoinTableAir {
 
         // 约束 2：seat_index < max_players（简化为 < 9，完整实现需要读取 max_players 列）
         // 已在通用约束中通过 round_state 隐含约束
+
+        // 约束 3（审计 join_table 前置，degree-2）：pre_round_state == WAITING(0)。
+        // join_table 仅在 WAITING 状态合法（Lean 反例：PREFLOP 下 join）。
+        // 完整 ∈{0} 单值判定在 degree-2 下即为等式约束。
+        eval.add_constraint(common.round_state_eq(0));
+        // 约束 4（degree-2）：round_state 不变（join 不改变 round_state）。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 2：seat 为空、buy_in >= big_blind、player 唯一性、chip_pool += buy_in 守恒
+        //              （需新增业务列 + invertibility/range witness）。
         eval
     }
 }

@@ -18,27 +18,33 @@ use poker_texas_air::verifier::verify_create_table;
 
 /// 构造测试用 `TexasPokerTable`（pre-state，placeholder）。
 fn make_pre_table() -> TexasPokerTable {
-    // pre-state 用 placeholder 值（create_table 之前不存在真实桌台）
-    TexasPokerTable::new(
+    // pre-state 用 placeholder 值（create_table 之前不存在真实桌台）。
+    // create_table 语义：pre_version=0 → post_version=1，这里手动置 0。
+    let mut t = TexasPokerTable::new(
         ObjectID::new([0u8; 20], 0),
         "pre_placeholder".to_string(),
         EMPTY_PLAYER,
         2,
         1,
         2,
-    )
+    );
+    t.version = 0;
+    t
 }
 
 /// 构造测试用 `TexasPokerTable`（post-state，真实新建桌台）。
 fn make_post_table() -> TexasPokerTable {
-    TexasPokerTable::new(
+    let mut t = TexasPokerTable::new(
         ObjectID::new([0xAA; 20], 1),
         "test_table".to_string(),
         EMPTY_PLAYER,
         6,
         10,
         20,
-    )
+    );
+    // create_table 语义：post_version = pre_version(0) + 1 = 1。
+    t.version = 1;
+    t
 }
 
 /// E2E: create_table → trace → prove → verify（happy path）。

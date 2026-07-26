@@ -93,7 +93,7 @@ impl FrameworkEval for BetAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Bet);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Bet, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -117,10 +117,14 @@ impl FrameworkEval for BetAir {
 
         // 约束 3：output_acted == 1（玩家已行动）
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active * (output_acted - one));
+        eval.add_constraint(is_active.clone() * (output_acted - one));
+
+        // 约束 4（审计共性，degree-2）：round_state 不变（bet 不改变下注阶段）。
+        eval.add_constraint(common.round_state_unchanged());
 
         // 注：post_seat_bet == pre_seat_bet + amount 的约束需要 pre_seat_bet 列，
         // 在 PoC 中省略（host 端保证）；与 raise AIR 保持一致的简化策略。
+        // TODO 阶段 3 完整版：amount > 0（需 invertibility witness 列）；current_bet==0 前置。
 
         eval
     }

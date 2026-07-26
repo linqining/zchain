@@ -71,7 +71,7 @@ impl FrameworkEval for LeaveTableAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::LeaveTable);
+        let common = CommonConstraints::write(&mut eval, MethodKind::LeaveTable, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -82,7 +82,14 @@ impl FrameworkEval for LeaveTableAir {
 
         // 约束：seat_index == input.seat_index
         let expected: E::F = M31::from(u32::from(self.input.seat_index)).into();
-        eval.add_constraint(is_active * (input_seat_index - expected));
+        eval.add_constraint(is_active.clone() * (input_seat_index - expected));
+
+        // 约束 2（审计 leave_table 前置，degree-2）：pre_round_state == WAITING(0)。
+        // leave_table 仅在 WAITING 状态合法（Lean 反例：PREFLOP 下 leave）。
+        eval.add_constraint(common.round_state_eq(0));
+        // 约束 3（degree-2）：round_state 不变。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 2：seat 非空、refund 守恒、chip_pool/addon_pool 守恒（需新增业务列）。
         eval
     }
 }

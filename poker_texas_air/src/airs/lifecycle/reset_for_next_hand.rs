@@ -74,7 +74,7 @@ impl FrameworkEval for ResetForNextHandAir {
     fn log_size(&self) -> u32 { self.log_size }
     fn max_constraint_log_degree_bound(&self) -> u32 { self.log_size + 1 }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::ResetForNextHand);
+        let common = CommonConstraints::write(&mut eval, MethodKind::ResetForNextHand, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let output_new_round_state = eval.next_trace_mask();

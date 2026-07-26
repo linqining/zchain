@@ -97,7 +97,7 @@ impl FrameworkEval for CallAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Call);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Call, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -122,11 +122,19 @@ impl FrameworkEval for CallAir {
 
         // 约束 2：call_amount 一致性（limb 0）
         let expected_amt_0: E::F = M31::from((self.input.call_amount & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_call_amount_0 - expected_amt_0));
+        eval.add_constraint(is_active.clone() * (input_call_amount_0.clone() - expected_amt_0));
 
         // 约束 3：output_acted == 1
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active * (output_acted - one));
+        eval.add_constraint(is_active.clone() * (output_acted - one));
+
+        // 约束 4（审计共性，degree-2）：round_state 不变（call 不改变下注阶段）。
+        eval.add_constraint(common.round_state_unchanged());
+
+        // 约束 5（审计 call 资金守恒，degree-2 limb0）：
+        // `pot += call_amount` → post_pot_0 - pre_pot_0 - call_amount_0 == 0。
+        let pot_delta = common.post_pot_0.clone() - common.pre_pot_0.clone() - input_call_amount_0;
+        eval.add_constraint(is_active.clone() * pot_delta);
 
         eval
     }

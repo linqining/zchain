@@ -96,7 +96,7 @@ impl FrameworkEval for KickPlayerAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::KickPlayer);
+        let common = CommonConstraints::write(&mut eval, MethodKind::KickPlayer, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -124,7 +124,10 @@ impl FrameworkEval for KickPlayerAir {
         let expected_kicked_bet_0: E::F =
             M31::from((self.input.kicked_bet & 0xFFFF) as u32).into();
         let pot_delta = common.post_pot_0.clone() - common.pre_pot_0.clone() - expected_kicked_bet_0;
-        eval.add_constraint(is_active * pot_delta);
+        eval.add_constraint(is_active.clone() * pot_delta);
+
+        // 约束 5（审计共性，degree-2）：round_state 不变（kick_player 不改变 round_state）。
+        eval.add_constraint(common.round_state_unchanged());
 
         // TODO 阶段 3 完整版：约束 admin 签名；多 limb 进位（limb 1..3）
 

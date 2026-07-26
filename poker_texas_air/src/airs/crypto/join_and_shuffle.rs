@@ -103,7 +103,7 @@ impl FrameworkEval for JoinAndShuffleAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::JoinAndShuffle);
+        let common = CommonConstraints::write(&mut eval, MethodKind::JoinAndShuffle, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -131,10 +131,13 @@ impl FrameworkEval for JoinAndShuffleAir {
         eval.add_constraint(is_active.clone() * (input_new_deck_commitment_0.clone() - expected_commit_0));
 
         // 约束 3：output_deck_commitment == input_new_deck_commitment（洗牌后牌组已更新）
-        eval.add_constraint(is_active * (output_deck_commitment_0 - input_new_deck_commitment_0));
+        eval.add_constraint(is_active.clone() * (output_deck_commitment_0 - input_new_deck_commitment_0));
 
-        // TODO 阶段 5：嵌入 DLEq Verifier AIR 验证 52 个 DLEq proof
-        // TODO 阶段 5：约束 deck_state.encrypted 新密文与 DLEq 一致
+        // 约束 4（审计共性，degree-2）：round_state 不变（shuffle 阶段 round_state 恒为 WAITING=0）。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 5：shuffle_state.phase > 0 前置（需 invertibility witness 或 logup）；
+        //              嵌入 DLEq Verifier AIR 验证 52 个 DLEq proof；
+        //              约束 deck_state.encrypted 新密文与 DLEq 一致。
 
         eval
     }

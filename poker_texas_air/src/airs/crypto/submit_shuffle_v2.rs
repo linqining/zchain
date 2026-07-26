@@ -92,7 +92,7 @@ impl FrameworkEval for SubmitShuffleV2Air {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::SubmitShuffleV2);
+        let common = CommonConstraints::write(&mut eval, MethodKind::SubmitShuffleV2, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -109,10 +109,13 @@ impl FrameworkEval for SubmitShuffleV2Air {
         // 约束 2：new_deck_commitment 一致性（limb 0）
         let expected_commit_0: E::F =
             M31::from((self.input.new_deck_commitment & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active * (input_new_deck_commitment_0 - expected_commit_0));
+        eval.add_constraint(is_active.clone() * (input_new_deck_commitment_0 - expected_commit_0));
 
-        // TODO 阶段 5：嵌入 ZKShuffleProof Verifier AIR
-        // TODO 阶段 5：约束 52 个 DLEq proof
+        // 约束 3（审计共性，degree-2）：round_state 不变（submit_shuffle_v2 阶段 round_state 恒为 WAITING=0）。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 5：shuffle_state.phase > 0 前置（需 invertibility witness 或 logup）；
+        //              嵌入 ZKShuffleProof Verifier AIR；
+        //              约束 52 个 DLEq proof。
 
         eval
     }

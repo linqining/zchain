@@ -77,7 +77,7 @@ impl FrameworkEval for FoldAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Fold);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Fold, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -89,7 +89,17 @@ impl FrameworkEval for FoldAir {
 
         // 约束 2：output_folded == 1（fold 后座位标记为 folded）
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active * (output_folded - one));
+        eval.add_constraint(is_active.clone() * (output_folded - one));
+
+        // 约束 3（审计 B 档共性，degree-2）：round_state 不变。
+        // fold 不应改变下注阶段。完整的「∈ {PREFLOP,FLOP,TURN,RIVER}」归属判定
+        // （Lean 反例「WAITING 下 fold」）需要 logup lookup table（degree>2），
+        // 当前 PoC 以 round_state 不变 + orchestrator 注入真实合约 round_state 保证；
+        // trace 中 round_state 列由 host 从 task.pre_table.round_state 填充。
+        eval.add_constraint(common.round_state_unchanged());
+
+        // 约束 4（审计 fold：pot 不变，degree-2 limb0）：fold 不改变 pot。
+        eval.add_constraint(common.pot_unchanged_limb0());
 
         eval
     }

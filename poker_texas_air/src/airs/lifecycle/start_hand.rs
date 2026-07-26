@@ -84,7 +84,7 @@ impl FrameworkEval for StartHandAir {
     fn log_size(&self) -> u32 { self.log_size }
     fn max_constraint_log_degree_bound(&self) -> u32 { self.log_size + 1 }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::StartHand);
+        let common = CommonConstraints::write(&mut eval, MethodKind::StartHand, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_active_count = eval.next_trace_mask();
@@ -113,6 +113,10 @@ impl FrameworkEval for StartHandAir {
         // shuffle_state.phase 表达（SHUFFLE_PHASE_BEFORE_PREFLOP=3），不属于 round_state。
         let expected_round: E::F = M31::from(0u32).into();
         eval.add_constraint(is_active.clone() * (output_new_round_state - expected_round));
+
+        // 约束 3b（审计 start_hand 前置，degree-2）：pre_round_state == WAITING(0)。
+        // start_hand 仅在 WAITING 状态合法（Lean 反例：PREFLOP 下 start_hand）。
+        eval.add_constraint(common.round_state_eq(0));
 
         // 约束 4（Ante）：ante_mode 与公开输入一致
         let expected_ante_mode: E::F = M31::from(u32::from(self.input.ante_mode)).into();

@@ -148,7 +148,7 @@ impl FrameworkEval for CreateTableAir {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // 1. 读取并约束通用列
-        let common = CommonConstraints::write(&mut eval, MethodKind::CreateTable);
+        let common = CommonConstraints::write(&mut eval, MethodKind::CreateTable, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         // 2. 读取业务列

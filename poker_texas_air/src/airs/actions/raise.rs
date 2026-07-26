@@ -101,7 +101,7 @@ impl FrameworkEval for RaiseAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Raise);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Raise, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -134,10 +134,14 @@ impl FrameworkEval for RaiseAir {
 
         // 约束 3：output_acted == 1
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active * (output_acted - one));
+        eval.add_constraint(is_active.clone() * (output_acted - one));
+
+        // 约束 4（审计共性，degree-2）：round_state 不变（raise 不改变下注阶段）。
+        eval.add_constraint(common.round_state_unchanged());
 
         // TODO 阶段 3 完整版：约束 raise_to > current_bet + min_raise（需要引入 carry witness）
         // TODO 阶段 3 完整版：约束 raise_to <= seat.stack + seat.bet
+        // TODO 阶段 3 完整版：pot += (raise_to - pre_seat_bet) 守恒（需新增 pre_seat_bet 列）
 
         eval
     }

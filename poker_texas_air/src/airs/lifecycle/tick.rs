@@ -83,7 +83,7 @@ impl FrameworkEval for TickAir {
     fn log_size(&self) -> u32 { self.log_size }
     fn max_constraint_log_degree_bound(&self) -> u32 { self.log_size + 1 }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Tick);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Tick, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let _input_time_0 = eval.next_trace_mask();
@@ -115,7 +115,13 @@ impl FrameworkEval for TickAir {
 
         // 约束 5（Rake）：rake_amount_0 == input.rake_amount (limb 0)
         let expected_rake_amt: E::F = M31::from((self.input.rake_amount & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active * (rake_amount_0 - expected_rake_amt));
+        eval.add_constraint(is_active.clone() * (rake_amount_0 - expected_rake_amt));
+
+        // 注：tick 会驱动状态机阶段转换（SHUFFLE→DEAL→BETTING 等），
+        // round_state 可合法变化，故不施加 round_state 不变约束。
+        // tick 的 Lean 反例「version 不递增」已由通用层 version+=1 约束消除；
+        // 「timeout_kind=0 无真实超时」需 invertibility witness（TODO 阶段 2）。
+        // TODO 阶段 2：timeout_kind > 0（需 invertibility witness 列）；真实超时校验。
 
         eval
     }

@@ -91,7 +91,7 @@ impl FrameworkEval for SubmitReconstructDeckAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::SubmitReconstructDeck);
+        let common = CommonConstraints::write(&mut eval, MethodKind::SubmitReconstructDeck, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -104,9 +104,12 @@ impl FrameworkEval for SubmitReconstructDeckAir {
 
         // 约束 2：reconstruct_phase == input.reconstruct_phase
         let expected_phase: E::F = M31::from(u32::from(self.input.reconstruct_phase)).into();
-        eval.add_constraint(is_active * (input_reconstruct_phase - expected_phase));
+        eval.add_constraint(is_active.clone() * (input_reconstruct_phase - expected_phase));
 
-        // TODO 阶段 5：嵌入 ReconstructProof Verifier AIR
+        // 约束 3（审计共性，degree-2）：round_state 不变（reconstruct 阶段 round_state 恒为 WAITING=0）。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 5：reconstruct_state ≠ ReconstructIdle 前置（需 invertibility witness 或 logup）；
+        //              嵌入 ReconstructProof Verifier AIR。
 
         eval
     }

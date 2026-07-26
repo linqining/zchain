@@ -127,12 +127,16 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// # 参数
     /// - `eval`: Stwo EvalAtRow
     /// - `expected_kind`: AIR 声明的 method kind
+    /// - `pre_version`/`post_version`: host 端已知的调用前后 version（u64），
+    ///   用于约束 `post_version = pre_version + 1`（消除 Lean 审计 C2 反例）。
     ///
     /// # 返回
     /// `CommonConstraints` 实例，业务约束可用 `is_active` 做 gating。
     pub fn write(
         eval: &mut E,
         expected_kind: crate::method_kind::MethodKind,
+        pre_version: u64,
+        post_version: u64,
     ) -> Self {
         let one: E::F = M31::from(1u32).into();
 
@@ -161,6 +165,9 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let post_version_1 = eval.next_trace_mask();
         let post_version_2 = eval.next_trace_mask();
         let post_version_3 = eval.next_trace_mask();
+        // pre_version limbs 仅占位（列指针推进），version+=1 约束以 host 的
+        // pre_version 参数计算期望 post，不直接引用 trace 的 pre_version 列。
+        let _ = (pre_version_0, pre_version_1, pre_version_2, pre_version_3);
         let pre_round_state = eval.next_trace_mask();
         let post_round_state = eval.next_trace_mask();
         let pre_pot_0 = eval.next_trace_mask();
@@ -176,14 +183,13 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let is_padding = eval.next_trace_mask();
 
         // 保留 limbs 引用（业务约束需要）。
-        // round_state / pot_0 暴露到返回结构体供业务守卫引用；其余仅占位读取顺序。
+        // round_state / pot_0 暴露到返回结构体供业务守卫引用；
+        // version limbs 用于通用「version += 1」约束。
         let _ = (
             pre_state_root_0, pre_state_root_1, pre_state_root_2, pre_state_root_3,
             post_state_root_0, post_state_root_1, post_state_root_2, post_state_root_3,
             table_id_0, table_id_1, table_id_2, table_id_3,
             hand_id, call_seq,
-            pre_version_0, pre_version_1, pre_version_2, pre_version_3,
-            post_version_0, post_version_1, post_version_2, post_version_3,
             pre_pot_1, pre_pot_2, pre_pot_3,
             post_pot_1, post_pot_2, post_pot_3,
             pre_button, post_button,
@@ -207,6 +213,29 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let kind_diff = method_kind.clone() - expected;
         eval.add_constraint(is_active.clone() * kind_diff);
 
+        // 通用约束 3（审计 C2）：version += 1
+        // `post_version = pre_version + 1`（u64）。
+        // 期望的 post 各 limb 由 host 已知的 pre_version 在「编译期/host 端」算出，
+        // 作为常量注入；AIR 逐 limb 约束 trace 列等于期望值。
+        // 这等价于完整的 4-limb ripple-carry 加 1，无需额外 witness 列，且对 u64
+        // 任意值（含 limb0 = 0xFFFF 进位情形）均 sound —— 彻底消除「version 不递增」反例。
+        let expected_post = pre_version.wrapping_add(1);
+        let expected_post_limbs = u64_to_m31_limbs(expected_post);
+        // 注：post_version 与 expected_post 应一致（host 保证）；此处约束的是 trace 列。
+        let _ = post_version; // host post_version 仅作 sanity，约束以 pre_version+1 为准
+        eval.add_constraint(
+            is_active.clone() * (post_version_0.clone() - expected_post_limbs[0].into()),
+        );
+        eval.add_constraint(
+            is_active.clone() * (post_version_1.clone() - expected_post_limbs[1].into()),
+        );
+        eval.add_constraint(
+            is_active.clone() * (post_version_2.clone() - expected_post_limbs[2].into()),
+        );
+        eval.add_constraint(
+            is_active.clone() * (post_version_3.clone() - expected_post_limbs[3].into()),
+        );
+
         Self {
             is_active,
             is_padding,
@@ -222,6 +251,27 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// 业务约束的 gating 辅助：`is_active * constraint`。
     pub fn gate(&self, constraint: E::F) -> E::F {
         self.is_active.clone() * constraint
+    }
+
+    /// 约束 `pre_round_state == expected`（如 join/leave/start_hand 要求 WAITING=0）。
+    ///
+    /// degree-2 等式约束。完整的 `round_state ∈ {PREFLOP,FLOP,TURN,RIVER}` 集合归属
+    /// 判定需要 degree>2 的 vanishing 多项式或 logup lookup table（当前 PoC 未实现）。
+    pub fn round_state_eq(&self, expected: u8) -> E::F {
+        let exp: E::F = M31::from(u32::from(expected)).into();
+        self.is_active.clone() * (self.pre_round_state.clone() - exp)
+    }
+
+    /// 约束 `post_round_state == pre_round_state`（round_state 不变）。
+    pub fn round_state_unchanged(&self) -> E::F {
+        self.is_active.clone()
+            * (self.post_round_state.clone() - self.pre_round_state.clone())
+    }
+
+    /// 约束 pot limb0 不变（`post_pot_0 == pre_pot_0`，degree-2）。
+    /// 用于不改变 pot 的方法（fold/check 等）。完整 4-limb 守恒见 `pot_delta_limb0`。
+    pub fn pot_unchanged_limb0(&self) -> E::F {
+        self.is_active.clone() * (self.post_pot_0.clone() - self.pre_pot_0.clone())
     }
 }
 

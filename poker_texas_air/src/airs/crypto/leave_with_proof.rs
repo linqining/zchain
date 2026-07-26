@@ -88,7 +88,7 @@ impl FrameworkEval for LeaveWithProofAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::LeaveWithProof);
+        let common = CommonConstraints::write(&mut eval, MethodKind::LeaveWithProof, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -101,10 +101,13 @@ impl FrameworkEval for LeaveWithProofAir {
 
         // 约束 2：leave_kind == input.leave_kind
         let expected_kind: E::F = M31::from(u32::from(self.input.leave_kind)).into();
-        eval.add_constraint(is_active * (input_leave_kind - expected_kind));
+        eval.add_constraint(is_active.clone() * (input_leave_kind - expected_kind));
 
-        // TODO 阶段 5：嵌入 DLEq Verifier AIR 验证 LeaveKind proof
-        // TODO 阶段 5：约束牌组重加密正确性
+        // 约束 3（审计共性，degree-2）：round_state 不变（leave_with_proof 阶段 round_state 恒为 WAITING=0）。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 5：shuffle_state.phase > 0 前置（需 invertibility witness 或 logup）；
+        //              嵌入 DLEq Verifier AIR 验证 LeaveKind proof；
+        //              约束牌组重加密正确性。
 
         eval
     }

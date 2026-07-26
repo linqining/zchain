@@ -84,7 +84,7 @@ impl FrameworkEval for ForceFoldAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::ForceFold);
+        let common = CommonConstraints::write(&mut eval, MethodKind::ForceFold, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -96,7 +96,12 @@ impl FrameworkEval for ForceFoldAir {
 
         // 约束 2：output_folded == 1
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active * (output_folded - one));
+        eval.add_constraint(is_active.clone() * (output_folded - one));
+
+        // 约束 3（审计共性，degree-2）：round_state 不变（force_fold 不改变下注阶段）。
+        eval.add_constraint(common.round_state_unchanged());
+        // 约束 4（审计共性，degree-2 limb0）：pot 不变（force_fold 不改变 pot）。
+        eval.add_constraint(common.pot_unchanged_limb0());
 
         // TODO 阶段 3 完整版：约束 admin 签名（需引入 ECDSA AIR 子组件）
 

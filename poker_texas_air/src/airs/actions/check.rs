@@ -88,7 +88,7 @@ impl FrameworkEval for CheckAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Check);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Check, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -115,7 +115,12 @@ impl FrameworkEval for CheckAir {
 
         // 约束 3：output_acted == 1
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active * (output_acted - one));
+        eval.add_constraint(is_active.clone() * (output_acted - one));
+
+        // 约束 4（审计共性，degree-2）：round_state 不变（check 不改变下注阶段）。
+        eval.add_constraint(common.round_state_unchanged());
+        // 约束 5（审计共性，degree-2 limb0）：pot 不变（check 不改变 pot）。
+        eval.add_constraint(common.pot_unchanged_limb0());
 
         eval
     }

@@ -113,6 +113,75 @@ fn test_soundness_fold_tampered_seat() {
     );
 }
 
+/// Soundness 回归：version 不递增（Lean 审计 C2 反例）。
+///
+/// 构造 `pre_version=0, post_version=0`（未递增）的 fold trace，prove 应失败。
+/// 验证通用层 `post_version = pre_version + 1` 约束有效。
+#[test]
+fn test_soundness_fold_version_not_incremented() {
+    let input = FoldInput { seat_index: 3 };
+    let row = FoldRow::active(
+        &input, zero_root(), one_root(), 42, 0, 1,
+        0, // pre_version
+        0, // post_version（未递增！应为 1）
+        4, 4, // round_state 不变
+    );
+    let trace = gen_method_trace(FoldAir::num_columns(), &row.to_vec(), &FoldRow::padding().to_vec())
+        .expect("trace 生成失败");
+    let air = FoldAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 1,
+        pre_version: 0,
+        post_version: 0, // 与 trace 一致地未递增
+    };
+    let result = prove_method(&trace, air, FoldAir::num_columns());
+    assert!(
+        result.is_err(),
+        "version 未递增时 prove 应失败（version+=1 约束应捕获）"
+    );
+}
+
+/// Soundness 回归：fold 改变 pot（Lean 审计 fold「pot 不变」缺失）。
+///
+/// 构造合法 fold trace，再篡改 POST_POT limb0 → prove 应失败。
+#[test]
+fn test_soundness_fold_pot_changed() {
+    use poker_texas_air::airs::common::{COL_POST_POT_BASE, COL_PRE_POT_BASE};
+    let input = FoldInput { seat_index: 3 };
+    let row = FoldRow::active(
+        &input, zero_root(), one_root(), 42, 0, 1,
+        0, 1, // version 正确递增
+        4, 4, // round_state 不变
+    );
+    let mut trace_vec = row.to_vec();
+    // 篡改：post_pot limb0 = 100（fold 不应改变 pot，pre=0）。
+    trace_vec[COL_PRE_POT_BASE] = ZERO;
+    trace_vec[COL_POST_POT_BASE] = M31::from(100u32);
+    let trace = gen_method_trace(FoldAir::num_columns(), &trace_vec, &FoldRow::padding().to_vec())
+        .expect("trace 生成失败");
+    let air = FoldAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 1,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let result = prove_method(&trace, air, FoldAir::num_columns());
+    assert!(
+        result.is_err(),
+        "fold 改变 pot 时 prove 应失败（pot 不变约束应捕获）"
+    );
+}
+
 // ========== check AIR ==========
 
 /// E2E: check → trace → prove → verify（happy path）。

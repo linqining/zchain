@@ -100,7 +100,7 @@ impl FrameworkEval for RebuyAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Rebuy);
+        let common = CommonConstraints::write(&mut eval, MethodKind::Rebuy, self.pre_version, self.post_version);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -127,7 +127,12 @@ impl FrameworkEval for RebuyAir {
 
         // 约束 3（核心）：post_stack == pre_stack + input_amount
         //    立即生效：直接改 stack
-        eval.add_constraint(is_active * (post_stack_0 - pre_stack_0 - input_amount_0));
+        eval.add_constraint(is_active.clone() * (post_stack_0 - pre_stack_0 - input_amount_0));
+
+        // 约束 4（审计共性，degree-2）：round_state 不变（rebuy 不改变 round_state）。
+        eval.add_constraint(common.round_state_unchanged());
+        // TODO 阶段 3：amount > 0（需 invertibility witness 列，degree-2）；
+        //              addon_pool += amount 守恒（需新增 addon_pool 列）。
 
         eval
     }
