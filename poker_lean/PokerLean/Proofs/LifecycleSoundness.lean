@@ -46,9 +46,8 @@ theorem start_hand_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    -- 关键：pre_round_state = 1 表示 ROUND_PREFLOP（非 WAITING）
-    pre_round_state := M31.one
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
+    pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
     post_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -79,21 +78,25 @@ theorem start_hand_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold StartHandMethodConstraints
       intro _
-      refine ⟨by simp [ext, nat_to_m31], by simp [ext]⟩
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · -- VersionIncrementConstraint
+        unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · -- RoundStateEq
+        unfold RoundStateEq; simp [row]; unfold M31.zero; simp
+      · -- input_active_count
+        simp [ext, nat_to_m31]
+      · -- output_new_round_state = 0
+        simp [ext]
     · simp [row]
     · rfl
-  · -- ¬ ContractStartHand：pre.round_state ≠ ROUND_WAITING
+  · -- ¬ ContractStartHand：active_count = 0 < MIN_PLAYERS_TO_START = 2
     intro h
-    have h_rs :
-      (extractPreTableFromLifecycleAir row 2).round_state = RoundState.ROUND_WAITING := by
-      rcases h with ⟨h_rs_pre, _⟩
-      exact h_rs_pre
-    have h_actual :
-      (extractPreTableFromLifecycleAir row 2).round_state = RoundState.ROUND_PREFLOP := by
-      simp [extractPreTableFromLifecycleAir, row]
-      exact RoundState.fromNat_one
-    rw [h_actual] at h_rs
-    exact absurd h_rs (by decide)
+    rcases h with ⟨_, h_count, _⟩
+    have h_ac : (extractStartHandParamsFromAir ext).active_count = 0 := by
+      simp [extractStartHandParamsFromAir, ext, nat_to_m31]
+    rw [h_ac] at h_count
+    unfold MIN_PLAYERS_TO_START at h_count
+    exact absurd h_count (by norm_num)
 
 /-! ## tick 反例：timeout_kind = 0（无真实超时） -/
 
@@ -119,7 +122,7 @@ theorem tick_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -152,7 +155,11 @@ theorem tick_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold TickMethodConstraints
       intro _
-      simp [ext, nat_to_m31]
+      refine ⟨?_, ?_⟩
+      · -- VersionIncrementConstraint
+        unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · -- ext.input_timeout_kind = ...
+        simp [ext, nat_to_m31]
     · simp [row]
     · rfl
   · -- ¬ ContractTick：timeout_kind = 0，不满足 > 0
@@ -186,7 +193,7 @@ theorem reset_for_next_hand_air_not_sound :
     call_seq := M31.zero
     -- 关键：pre_version = post_version = 0（不递增）
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -213,26 +220,14 @@ theorem reset_for_next_hand_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold ResetForNextHandMethodConstraints
       intro _
-      refine ⟨by simp [ext], by simp [ext], by simp [ext], by simp [ext], by simp [ext]⟩
+      refine ⟨?_, by simp [ext], by simp [ext], by simp [ext], by simp [ext], by simp [ext]⟩
+      · -- VersionIncrementConstraint
+        unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
     · simp [row]
     · rfl
-  · -- ¬ ContractResetForNextHand：version 不递增
+  · -- ¬ ContractResetForNextHand：pre.shuffle_state.phase = 0 ≠ > 0
     intro h
-    -- ContractResetForNextHand 要求 post.version = pre.version + 1
-    -- 但 extractPre 和 extractPost 的 version 都是 decodeU64(0,0,0,0) = 0
-    -- 所以 0 = 0 + 1 = 1 是矛盾的
-    rcases h with ⟨_, _, _, h_ver, _⟩
-    -- h_ver : post.version = pre.version + 1
-    -- pre.version = decodeU64(M31.zero, ...) = 0 + 0 + 0 + 0 = 0
-    -- post.version = decodeU64(M31.zero, ...) = 0
-    -- So h_ver : 0 = 0 + 1, which is False
-    have h_pre_ver : (extractPreTableFromLifecycleAir row 2).version = 0 := by
-      unfold extractPreTableFromLifecycleAir
-      simp [row, decodeU64, M31.zero]
-    have h_post_ver : (extractPostTableFromLifecycleAir row 2).version = 0 := by
-      unfold extractPostTableFromLifecycleAir
-      simp [row, decodeU64, M31.zero]
-    rw [h_post_ver, h_pre_ver] at h_ver
-    exact absurd h_ver (by norm_num)
+    rcases h with ⟨h_phase, _⟩
+    simp [extractPreTableFromLifecycleAir] at h_phase
 
 end PokerLean

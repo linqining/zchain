@@ -43,7 +43,7 @@ theorem addon_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -75,15 +75,14 @@ theorem addon_air_not_sound :
     · -- AddonMethodConstraints
       unfold AddonMethodConstraints
       intro _
-      refine ⟨?_, ?_, ?_⟩
-      · -- ext.input_seat_index = nat_to_m31 0 hlt0
-        simp [ext, nat_to_m31]
-      · -- ext.input_amount.1 = ⟨0 % 65536, ...⟩
-        show ext.input_amount.1 = ⟨0 % 65536, by unfold M31_P; omega⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_⟩
+      · unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · unfold RoundStateUnchanged; simp [row]
+      · simp [ext, nat_to_m31]
+      · show ext.input_amount.1 = ⟨0 % 65536, by unfold M31_P; omega⟩
         simp [ext]
         exact Subtype.ext rfl
-      · -- ext.post_pending_addon.1 = M31.add ext.pre_pending_addon.1 ext.input_amount.1
-        show ext.post_pending_addon.1 = M31.add ext.pre_pending_addon.1 ext.input_amount.1
+      · show ext.post_pending_addon.1 = M31.add ext.pre_pending_addon.1 ext.input_amount.1
         simp [ext, M31.add]
         exact Subtype.ext rfl
     · simp [row]
@@ -120,7 +119,7 @@ theorem rebuy_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -150,7 +149,9 @@ theorem rebuy_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold RebuyMethodConstraints
       intro _
-      refine ⟨?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_⟩
+      · unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · unfold RoundStateUnchanged; simp [row]
       · simp [ext, nat_to_m31]
       · show ext.input_amount.1 = ⟨0 % 65536, by unfold M31_P; omega⟩
         simp [ext]

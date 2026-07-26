@@ -46,6 +46,7 @@ def LeaveTableMethodConstraints
     (hlt : expected_seat_index < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt
 
 /-- leave_table AIR 接受谓词 -/

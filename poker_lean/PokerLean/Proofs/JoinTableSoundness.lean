@@ -50,10 +50,9 @@ theorem join_table_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    -- 关键：pre_round_state = 1 表示 ROUND_PREFLOP（非 WAITING）
-    pre_round_state := M31.one
-    post_round_state := M31.one
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
+    pre_round_state := M31.zero
+    post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
     post_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
     pre_button := M31.zero
@@ -83,26 +82,23 @@ theorem join_table_air_not_sound :
     · -- JoinTableMethodConstraints
       unfold JoinTableMethodConstraints
       intro _
-      simp [ext, nat_to_m31]
+      refine ⟨?_, ?_, ?_⟩
+      · -- VersionIncrementConstraint
+        unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · -- RoundStateEq
+        unfold RoundStateEq; simp [row]; unfold M31.zero; simp
+      · -- ext.input_seat_index = ...
+        simp [ext, nat_to_m31]
     · -- row.method_kind = ...
       simp [row]
     · -- row.is_active = 1
       rfl
-  · -- ¬ ContractJoinTable：pre.round_state ≠ ROUND_WAITING
+  · -- ¬ ContractJoinTable：post.seat[0].player = EMPTY_PLAYER ≠ params.player
     intro h
-    -- 从合约语义中提取 pre.round_state = ROUND_WAITING
-    have h_rs :
-      (extractPreTableFromJoinTableAir row 2).round_state = RoundState.ROUND_WAITING := by
-      rcases h with ⟨h_rs_pre, _⟩
-      exact h_rs_pre
-    -- 但 extractPreTableFromJoinTableAir 的 round_state = fromNat 1 = ROUND_PREFLOP
-    -- （row.pre_round_state = M31.one，其 .val = 1）
-    have h_actual :
-      (extractPreTableFromJoinTableAir row 2).round_state = RoundState.ROUND_PREFLOP := by
-      simp [extractPreTableFromJoinTableAir, row]
-      exact RoundState.fromNat_one
-    -- ROUND_PREFLOP ≠ ROUND_WAITING
-    rw [h_actual] at h_rs
-    exact absurd h_rs (by decide)
+    rcases h with ⟨_, _, _, _, _, h_player, _⟩
+    simp [extractPostTableFromJoinTableAir, extractJoinTableParamsFromAir,
+          TexasPokerTable.get_seat, Seat.empty, EMPTY_PLAYER, PlayerId.ofNat,
+          extractPreTableFromJoinTableAir] at h_player
+    exact absurd h_player (by decide)
 
 end PokerLean

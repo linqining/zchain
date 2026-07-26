@@ -42,6 +42,7 @@ def AddonMethodConstraints
     (hlt : expected_seat_index < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateUnchanged row ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_amount.1 = ⟨expected_amount % 65536, by unfold M31_P; omega⟩ ∧
   ext.post_pending_addon.1 = M31.add ext.pre_pending_addon.1 ext.input_amount.1
@@ -88,6 +89,7 @@ def RebuyMethodConstraints
     (hlt : expected_seat_index < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateUnchanged row ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_amount.1 = ⟨expected_amount % 65536, by unfold M31_P; omega⟩ ∧
   ext.post_stack.1 = M31.add ext.pre_stack.1 ext.input_amount.1

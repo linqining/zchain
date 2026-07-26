@@ -25,7 +25,10 @@ def FoldMethodConstraints
     : Prop :=
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.output_folded = M31.one
+  ext.output_folded = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  PotUnchangedLimb0 row
 
 def FoldAirAcceptable
     (row : CommonRow)

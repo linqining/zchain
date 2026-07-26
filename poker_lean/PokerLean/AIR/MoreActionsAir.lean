@@ -26,7 +26,10 @@ def AutoFoldMethodConstraints
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_current_time.1 = ⟨expected_current_time % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_folded = M31.one
+  ext.output_folded = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  PotUnchangedLimb0 row
 
 def AutoFoldAirAcceptable
     (row : CommonRow)
@@ -54,7 +57,10 @@ def ForceFoldMethodConstraints
     : Prop :=
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.output_folded = M31.one
+  ext.output_folded = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  PotUnchangedLimb0 row
 
 def ForceFoldAirAcceptable
     (row : CommonRow)
@@ -84,7 +90,9 @@ def KickPlayerMethodConstraints
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.output_refund.1 = ⟨expected_refund % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_kicked = M31.one
+  ext.output_kicked = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row
 
 def KickPlayerAirAcceptable
     (row : CommonRow)

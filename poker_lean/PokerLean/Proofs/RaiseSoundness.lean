@@ -28,7 +28,7 @@ theorem raise_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -64,10 +64,18 @@ theorem raise_air_not_sound :
     · -- RaiseMethodConstraints
       unfold RaiseMethodConstraints
       intro _h_active
-      refine ⟨?_, ?_, ?_⟩
-      · simp [ext, nat_to_m31]
-      · simp [ext]; rfl
-      · simp [ext]
+      have h_seat : ext.input_seat_index = nat_to_m31 0 hlt0 := by simp [ext, nat_to_m31]
+      have h_amt : ext.input_raise_to.1 = ⟨0 % 65536, by unfold M31_P; omega⟩ := by simp [ext]; rfl
+      have h_acted : ext.output_acted = M31.one := by simp [ext]
+      have h_ver : VersionIncrementConstraint row := by
+        unfold VersionIncrementConstraint
+        simp [row]
+        unfold decodeU64
+        simp [M31.one, M31.zero]
+      have h_rs : RoundStateUnchanged row := by
+        unfold RoundStateUnchanged
+        simp [row]
+      exact ⟨h_seat, h_amt, h_acted, h_ver, h_rs⟩
     · -- row.method_kind = ...
       simp [row]
     · -- row.is_active = M31.one

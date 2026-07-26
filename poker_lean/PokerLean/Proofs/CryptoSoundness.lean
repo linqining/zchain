@@ -58,7 +58,7 @@ theorem join_and_shuffle_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -89,7 +89,9 @@ theorem join_and_shuffle_air_not_sound :
     · -- JoinAndShuffleMethodConstraints
       unfold JoinAndShuffleMethodConstraints
       intro _
-      refine ⟨?_, ?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_, ?_⟩
+      · unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · unfold RoundStateUnchanged; simp [row]
       · simp [ext, nat_to_m31]
       · show ext.input_new_deck_commitment_0 = ⟨0 % 65536, by unfold M31_P; omega⟩
         simp [ext]
@@ -100,17 +102,14 @@ theorem join_and_shuffle_air_not_sound :
       simp [row]
     · show row.is_active = M31.one
       rfl
-  · -- ¬ ContractJoinAndShuffle：version 不递增（0 = 0 + 1 矛盾）
+  · -- ¬ ContractJoinAndShuffle：shuffle_state.phase = 0，违反 > 0
     intro h
-    rcases h with ⟨_, _, h_ver, _⟩
-    have h_pre_ver : (extractPreTableFromCryptoAir row 2).version = 0 := by
+    rcases h with ⟨_, h_phase, _, _⟩
+    have h_phase_zero : (extractPreTableFromCryptoAir row 2).shuffle_state.phase = 0 := by
       unfold extractPreTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    have h_post_ver : (extractPostTableFromCryptoAir row 2).version = 0 := by
-      unfold extractPostTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    rw [h_post_ver, h_pre_ver] at h_ver
-    exact absurd h_ver (by norm_num)
+      simp [row]
+    rw [h_phase_zero] at h_phase
+    exact absurd h_phase (by norm_num)
 
 /-! ## leave_with_proof 反例：version 不递增 -/
 
@@ -134,7 +133,7 @@ theorem leave_with_proof_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -162,23 +161,22 @@ theorem leave_with_proof_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold LeaveWithProofMethodConstraints
       intro _
-      refine ⟨?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · unfold RoundStateUnchanged; simp [row]
       · simp [ext, nat_to_m31]
       · simp [ext, nat_to_m31]
     · show row.method_kind = ⟨MethodKind.LeaveWithProof.toNat, MethodKind.toNat_lt_M31P MethodKind.LeaveWithProof⟩
       simp [row]
     · rfl
-  · -- ¬ ContractLeaveWithProof：version 不递增
+  · -- ¬ ContractLeaveWithProof：shuffle_state.phase = 0，违反 > 0
     intro h
-    rcases h with ⟨_, _, h_ver, _⟩
-    have h_pre_ver : (extractPreTableFromCryptoAir row 2).version = 0 := by
+    rcases h with ⟨_, h_phase, _, _⟩
+    have h_phase_zero : (extractPreTableFromCryptoAir row 2).shuffle_state.phase = 0 := by
       unfold extractPreTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    have h_post_ver : (extractPostTableFromCryptoAir row 2).version = 0 := by
-      unfold extractPostTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    rw [h_post_ver, h_pre_ver] at h_ver
-    exact absurd h_ver (by norm_num)
+      simp [row]
+    rw [h_phase_zero] at h_phase
+    exact absurd h_phase (by norm_num)
 
 /-! ## submit_shuffle_v2 反例：version 不递增 -/
 
@@ -200,7 +198,7 @@ theorem submit_shuffle_v2_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -228,7 +226,9 @@ theorem submit_shuffle_v2_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold SubmitShuffleV2MethodConstraints
       intro _
-      refine ⟨?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · unfold RoundStateUnchanged; simp [row]
       · simp [ext, nat_to_m31]
       · show ext.input_new_deck_commitment_0 = ⟨0 % 65536, by unfold M31_P; omega⟩
         simp [ext]
@@ -236,17 +236,14 @@ theorem submit_shuffle_v2_air_not_sound :
     · show row.method_kind = ⟨MethodKind.SubmitShuffleV2.toNat, MethodKind.toNat_lt_M31P MethodKind.SubmitShuffleV2⟩
       simp [row]
     · rfl
-  · -- ¬ ContractSubmitShuffleV2：version 不递增
+  · -- ¬ ContractSubmitShuffleV2：shuffle_state.phase = 0，违反 > 0
     intro h
-    rcases h with ⟨_, _, h_ver, _⟩
-    have h_pre_ver : (extractPreTableFromCryptoAir row 2).version = 0 := by
+    rcases h with ⟨_, h_phase, _, _⟩
+    have h_phase_zero : (extractPreTableFromCryptoAir row 2).shuffle_state.phase = 0 := by
       unfold extractPreTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    have h_post_ver : (extractPostTableFromCryptoAir row 2).version = 0 := by
-      unfold extractPostTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    rw [h_post_ver, h_pre_ver] at h_ver
-    exact absurd h_ver (by norm_num)
+      simp [row]
+    rw [h_phase_zero] at h_phase
+    exact absurd h_phase (by norm_num)
 
 /-! ## submit_player_reveal_tokens 反例：version 不递增 -/
 
@@ -269,7 +266,7 @@ theorem submit_player_reveal_tokens_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -297,23 +294,22 @@ theorem submit_player_reveal_tokens_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold SubmitRevealTokensMethodConstraints
       intro _
-      refine ⟨?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · unfold RoundStateUnchanged; simp [row]
       · simp [ext, nat_to_m31]
       · simp [ext, nat_to_m31]
     · show row.method_kind = ⟨MethodKind.SubmitPlayerRevealTokens.toNat, MethodKind.toNat_lt_M31P MethodKind.SubmitPlayerRevealTokens⟩
       simp [row]
     · rfl
-  · -- ¬ ContractSubmitRevealTokens：version 不递增
+  · -- ¬ ContractSubmitRevealTokens：reveal_phase = 0，违反 > 0
     intro h
-    rcases h with ⟨_, _, h_ver, _⟩
-    have h_pre_ver : (extractPreTableFromCryptoAir row 2).version = 0 := by
+    rcases h with ⟨_, h_phase, _, _⟩
+    have h_phase_zero : (extractPreTableFromCryptoAir row 2).reveal_state.reveal_phase = 0 := by
       unfold extractPreTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    have h_post_ver : (extractPostTableFromCryptoAir row 2).version = 0 := by
-      unfold extractPostTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    rw [h_post_ver, h_pre_ver] at h_ver
-    exact absurd h_ver (by norm_num)
+      simp [row]
+    rw [h_phase_zero] at h_phase
+    exact absurd h_phase (by norm_num)
 
 /-! ## submit_reconstruct_deck 反例：version 不递增
     （且 reconstruct_state = ReconstructIdle，违反合约要求 ≠ ReconstructIdle） -/
@@ -337,7 +333,7 @@ theorem submit_reconstruct_deck_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -365,22 +361,22 @@ theorem submit_reconstruct_deck_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold SubmitReconstructDeckMethodConstraints
       intro _
-      refine ⟨?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · unfold RoundStateUnchanged; simp [row]
       · simp [ext, nat_to_m31]
       · simp [ext, nat_to_m31]
     · show row.method_kind = ⟨MethodKind.SubmitReconstructDeck.toNat, MethodKind.toNat_lt_M31P MethodKind.SubmitReconstructDeck⟩
       simp [row]
     · rfl
-  · -- ¬ ContractSubmitReconstructDeck：version 不递增
+  · -- ¬ ContractSubmitReconstructDeck：reconstruct_state = ReconstructIdle，违反 ≠ ReconstructIdle
     intro h
-    rcases h with ⟨_, _, h_ver, _⟩
-    have h_pre_ver : (extractPreTableFromCryptoAir row 2).version = 0 := by
+    rcases h with ⟨_, h_recon, _, _⟩
+    have h_idle : (extractPreTableFromCryptoAir row 2).reconstruct_state = ReconstructState.ReconstructIdle := by
       unfold extractPreTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    have h_post_ver : (extractPostTableFromCryptoAir row 2).version = 0 := by
-      unfold extractPostTableFromCryptoAir
-      simp [row, decodeU64, M31.zero]
-    rw [h_post_ver, h_pre_ver] at h_ver
-    exact absurd h_ver (by norm_num)
+      simp [row]
+    rw [h_idle] at h_recon
+    have h_eq : ReconstructState.ReconstructIdle = ReconstructState.ReconstructIdle := by rfl
+    exact h_recon h_eq
 
 end PokerLean

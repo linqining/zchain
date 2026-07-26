@@ -11,11 +11,13 @@ namespace PokerLean
 
 对齐 `poker_texas_air/src/airs/crypto/`。
 
-所有 5 个密码学方法的 AIR 都仅约束 seat_index 和某个输入参数与公开输入一致，
+所有 5 个密码学方法的 AIR 约束：
+- seat_index 和某个输入参数与公开输入一致
+- version 递增（post_version = pre_version + 1）
+- round_state 不变（post_round_state = pre_round_state）
 **不验证**：
 - 密码学证明（DLEq, ZKShuffle, RevealToken, Reconstruct）— 假设由外部验证
-- round_state / shuffle_state / reveal_state 阶段
-- version 递增
+- shuffle_state / reveal_state / reconstruct_state 阶段 gating
 - state root 一致性
 -/
 
@@ -35,6 +37,7 @@ def JoinAndShuffleMethodConstraints
     (hlt : expected_seat_index < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateUnchanged row ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_new_deck_commitment_0 = ⟨expected_commit_0 % 65536, by unfold M31_P; omega⟩ ∧
   ext.output_deck_commitment_0 = ext.input_new_deck_commitment_0
@@ -67,6 +70,7 @@ def LeaveWithProofMethodConstraints
     (hltk : expected_leave_kind < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateUnchanged row ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_leave_kind = nat_to_m31 expected_leave_kind hltk
 
@@ -98,6 +102,7 @@ def SubmitShuffleV2MethodConstraints
     (hlt : expected_seat_index < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateUnchanged row ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_new_deck_commitment_0 = ⟨expected_commit_0 % 65536, by unfold M31_P; omega⟩
 
@@ -129,6 +134,7 @@ def SubmitRevealTokensMethodConstraints
     (hltp : expected_reveal_phase < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateUnchanged row ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_reveal_phase = nat_to_m31 expected_reveal_phase hltp
 
@@ -161,6 +167,7 @@ def SubmitReconstructDeckMethodConstraints
     (hltp : expected_reconstruct_phase < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateUnchanged row ∧
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_reconstruct_phase = nat_to_m31 expected_reconstruct_phase hltp
 

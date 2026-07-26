@@ -47,10 +47,9 @@ theorem leave_table_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    -- 关键：pre_round_state = 1 表示 ROUND_PREFLOP（非 WAITING）
-    pre_round_state := M31.one
-    post_round_state := M31.one
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
+    pre_round_state := M31.zero
+    post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
     post_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
     pre_button := M31.zero
@@ -76,20 +75,20 @@ theorem leave_table_air_not_sound :
       rw [hsub]; apply M31.mul_zero_right
     · unfold LeaveTableMethodConstraints
       intro _
-      simp [ext, nat_to_m31]
+      refine ⟨?_, ?_, ?_⟩
+      · -- VersionIncrementConstraint
+        unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · -- RoundStateEq
+        unfold RoundStateEq; simp [row]; unfold M31.zero; simp
+      · -- ext.input_seat_index = ...
+        simp [ext, nat_to_m31]
     · simp [row]
     · rfl
-  · -- ¬ ContractLeaveTable：pre.round_state ≠ ROUND_WAITING
+  · -- ¬ ContractLeaveTable：pre.seat[0].is_occupied = false ≠ true
     intro h
-    have h_rs :
-      (extractPreTableFromLeaveTableAir row 2).round_state = RoundState.ROUND_WAITING := by
-      rcases h with ⟨h_rs_pre, _⟩
-      exact h_rs_pre
-    have h_actual :
-      (extractPreTableFromLeaveTableAir row 2).round_state = RoundState.ROUND_PREFLOP := by
-      simp [extractPreTableFromLeaveTableAir, row]
-      exact RoundState.fromNat_one
-    rw [h_actual] at h_rs
-    exact absurd h_rs (by decide)
+    rcases h with ⟨_, _, h_occ, _⟩
+    simp [extractPreTableFromLeaveTableAir, TexasPokerTable.get_seat,
+          Seat.empty, EMPTY_PLAYER, Seat.is_occupied] at h_occ
+    exact absurd h_occ (by decide)
 
 end PokerLean

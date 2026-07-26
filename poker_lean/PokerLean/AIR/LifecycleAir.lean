@@ -43,6 +43,7 @@ def StartHandMethodConstraints
     (hlt : expected_active_count < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
   ext.input_active_count = nat_to_m31 expected_active_count hlt ∧
   ext.output_new_round_state = M31.zero
 
@@ -87,6 +88,7 @@ def TickMethodConstraints
     (hlt : expected_timeout_kind < M31_P)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧
   ext.input_timeout_kind = nat_to_m31 expected_timeout_kind hlt
 
 def TickAirAcceptable
@@ -122,6 +124,7 @@ def ResetForNextHandMethodConstraints
     (ext : ResetForNextHandMethodColumns)
     : Prop :=
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧
   ext.output_new_round_state = M31.zero ∧
   ext.post_pending_addon.1 = M31.zero ∧
   ext.post_pending_addon.2.1 = M31.zero ∧

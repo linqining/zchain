@@ -26,7 +26,10 @@ def CheckMethodConstraints
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_current_bet.1 = ⟨expected_current_bet % 65536, by unfold M31_P; omega⟩ ∧
   ext.input_current_bet.1 = ⟨expected_seat_bet % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_acted = M31.one
+  ext.output_acted = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  PotUnchangedLimb0 row
 
 def CheckAirAcceptable
     (row : CommonRow)

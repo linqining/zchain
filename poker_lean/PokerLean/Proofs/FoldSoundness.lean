@@ -28,7 +28,7 @@ theorem fold_air_not_sound :
     hand_id := M31.zero
     call_seq := M31.zero
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
-    post_version := (M31.zero, M31.zero, M31.zero, M31.zero)
+    post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
     post_round_state := M31.zero
     pre_pot := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -62,7 +62,20 @@ theorem fold_air_not_sound :
     · -- FoldMethodConstraints
       unfold FoldMethodConstraints
       intro h_active
-      simp [ext, nat_to_m31]
+      have h_seat : ext.input_seat_index = nat_to_m31 0 hlt0 := by simp [ext, nat_to_m31]
+      have h_folded : ext.output_folded = M31.one := by simp [ext]
+      have h_ver : VersionIncrementConstraint row := by
+        unfold VersionIncrementConstraint
+        simp [row]
+        unfold decodeU64
+        simp [M31.one, M31.zero]
+      have h_rs : RoundStateUnchanged row := by
+        unfold RoundStateUnchanged
+        simp [row]
+      have h_pot : PotUnchangedLimb0 row := by
+        unfold PotUnchangedLimb0
+        simp [row]
+      exact ⟨h_seat, h_folded, h_ver, h_rs, h_pot⟩
     · -- row.method_kind = ...
       simp [row]
     · -- row.is_active = M31.one

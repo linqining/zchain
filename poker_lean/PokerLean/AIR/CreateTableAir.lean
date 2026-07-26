@@ -41,7 +41,8 @@ def CreateTableMethodConstraints (row : CommonRow) (ext : CreateTableRow) : Prop
   row.post_button = M31.zero ∧
   row.post_round_state = M31.zero ∧
   row.post_version = (M31.one, M31.zero, M31.zero, M31.zero) ∧
-  row.post_round_state = row.pre_round_state
+  row.post_round_state = row.pre_round_state ∧
+  VersionIncrementConstraint row
 
 def CreateTableAirAcceptable (row : CommonRow) (ext : CreateTableRow) : Prop :=
   CommonConstraints row MethodKind.CreateTable ∧

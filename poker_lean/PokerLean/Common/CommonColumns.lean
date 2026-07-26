@@ -166,6 +166,25 @@ def PaddingRowConstraints (row : CommonRow) : Prop :=
   row.is_active = M31.zero ∧
   row.is_padding = M31.one
 
+/-- 版本递增约束：active 行要求 post_version = pre_version + 1（整数意义下）。 -/
+def VersionIncrementConstraint (row : CommonRow) : Prop :=
+  row.is_active = M31.one →
+  decodeU64 row.post_version.1 row.post_version.2.1 row.post_version.2.2.1 row.post_version.2.2.2
+  =
+  decodeU64 row.pre_version.1 row.pre_version.2.1 row.pre_version.2.2.1 row.pre_version.2.2.2 + 1
+
+/-- round_state 不变约束：active 行要求 post_round_state = pre_round_state。 -/
+def RoundStateUnchanged (row : CommonRow) : Prop :=
+  row.is_active = M31.one → row.post_round_state = row.pre_round_state
+
+/-- round_state 前置约束：active 行要求 pre_round_state = expected。 -/
+def RoundStateEq (row : CommonRow) (expected : Nat) (hlt : expected < M31_P) : Prop :=
+  row.is_active = M31.one → row.pre_round_state = ⟨expected, hlt⟩
+
+/-- pot limb0 不变约束：active 行要求 post_pot limb0 = pre_pot limb0。 -/
+def PotUnchangedLimb0 (row : CommonRow) : Prop :=
+  row.is_active = M31.one → row.post_pot.1 = row.pre_pot.1
+
 lemma mul_zero_y (y : M31) :
   M31.mul M31.zero y = M31.zero := by
   simp [M31.mul, M31.zero, Nat.mul_zero, Nat.zero_mod]

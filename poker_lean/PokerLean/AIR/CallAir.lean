@@ -27,7 +27,9 @@ def CallMethodConstraints
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_call_amount.1 = ⟨expected_call_amount % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_acted = M31.one
+  ext.output_acted = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row
 
 def CallAirAcceptable
     (row : CommonRow)

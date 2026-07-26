@@ -55,6 +55,7 @@ def JoinTableMethodConstraints
     : Prop :=
   -- 当 is_active = 1 时：
   row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
   -- 约束 1：seat_index == input.seat_index
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt
 
