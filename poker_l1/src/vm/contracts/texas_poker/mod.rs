@@ -15,7 +15,7 @@
 //! - `events`：40 种事件类型枚举
 //! - `types`：核心数据结构（TexasPokerTable/Seat/DeckState/ShuffleState/...）
 //! - `state_machine`：状态机推进 + tick + reveal/reconstruct 编排
-//! - `dispatch`：22 个 method selector 路由
+//! - `dispatch`：23 个 method selector 路由
 //! - `utils`：Mental Poker 密码学适配层（包 `poker_protocol` crate，提供 G1/Scalar 自由函数 + verify_or_skip）
 //!
 //! # Mental Poker 协议

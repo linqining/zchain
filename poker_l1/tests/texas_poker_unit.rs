@@ -2552,7 +2552,7 @@ fn test_dispatch_selectors_deterministic() {
 #[test]
 fn test_dispatch_selectors_all_unique() {
     let sels = selectors::all();
-    assert_eq!(sels.len(), 22);
+    assert_eq!(sels.len(), 23);
     for i in 0..sels.len() {
         for j in (i + 1)..sels.len() {
             assert_ne!(sels[i], sels[j]);

@@ -1753,6 +1753,142 @@ pub fn apply_leave_with_proof(
     Ok(())
 }
 
+/// 玩家 fold 并提交 fold proof（剥离自己的加密层 + 退出后续 reveal 协议）。
+///
+/// `apply_leave_with_proof` 的「对局中」版本：
+/// - `leave_with_proof` 仅在 WAITING 状态可用（局间离场）；
+/// - `fold_with_proof` 在**下注轮**可用（局中弃牌 + 退出协议）。
+///
+/// 业务语义（结合 fold 与 leave）：
+/// 1. 验证 DLEqProof<LeaveKind>（与 leave 同 transcript `b"zk_leave_proof_v1"`）：
+///    证明玩家剥离了自己对整个牌组的加密层（`output.c2 = input.c2 - c1*sk`）。
+/// 2. 从 `aggregated_pk` 移除玩家 pk，把 `deck_state.encrypted` 替换为 output_cards。
+///    c1 不变（DLEq verify 强制）→ 已收集的 reveal tokens 仍然有效。
+/// 3. Scrub 玩家在所有协议 pending 列表中的痕迹（shuffle / reconstruct /
+///    reveal assignments），让**后续解牌不需要该玩家参加**。
+/// 4. 标记 `seat.folded = true`（保留 seat.pk / total_bet / bet，不设
+///    left_during_hand）—— 玩家仍参与 side-pot 记账，只是已弃牌 + 退出协议。
+///
+/// # 与普通 fold 的区别
+///
+/// - 普通 `apply_fold`：仅置 `folded=true`，玩家 pk 仍在 aggregated_pk 中，
+///   仍需为后续公共牌提交 reveal token（或被超时踢出）。
+/// - `apply_fold_with_proof`：玩家立即从协议中「物理退出」，剥离加密层，
+///   后续 reveal 不再需要他（也不会被超时罚）。
+///
+/// # Errors
+///
+/// - 非下注轮（WAITING / reveal phase / showdown）
+/// - 非该玩家行动轮
+/// - `seat_index` 越界 / 座位未占用 / 已 folded
+/// - fold proof 验证失败（skip_remask=false 时）
+pub fn apply_fold_with_proof(
+    table: &mut TexasPokerTable,
+    seat_index: u8,
+    output_cards: Vec<ElGamalCiphertext>,
+    fold_proof: DLEqProof<DefaultCurve, LeaveKind>,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    // 1. Guards（对齐 apply_fold_internal）
+    if !is_betting_round(table) {
+        return Err(PokerL1Error::Serialization(
+            "fold_with_proof: not in betting round".into(),
+        ));
+    }
+    if !is_player_turn(table, seat_index) {
+        return Err(PokerL1Error::Serialization(format!(
+            "fold_with_proof: not seat {seat_index}'s turn (current_turn={:?})",
+            table.current_turn
+        )));
+    }
+    if seat_index >= table.max_players {
+        return Err(PokerL1Error::Serialization(format!(
+            "fold_with_proof: seat_index {seat_index} out of range (max_players={})",
+            table.max_players
+        )));
+    }
+    let seat = &mut table.seats[seat_index as usize];
+    if !seat.is_occupied() {
+        return Err(PokerL1Error::Serialization(format!(
+            "fold_with_proof: seat {seat_index} not occupied"
+        )));
+    }
+    if seat.folded {
+        return Err(PokerL1Error::Serialization(format!(
+            "fold_with_proof: seat {seat_index} already folded"
+        )));
+    }
+
+    // 2. 验证 DLEq proof（复制 apply_leave_with_proof 1696-1710）
+    // typed 化后无需反序列化。
+    let output_cts = output_cards;
+    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.clone();
+    let player_pk = table.seats[seat_index as usize].pk;
+    let _ = utils::verify_or_skip(table.config.skip_remask(), || {
+        let mut t = utils::new_leave_transcript();
+        let ok = DLEqProof::<DefaultCurve, LeaveKind>::verify(
+            &fold_proof,
+            &input_cts,
+            &output_cts,
+            &player_pk,
+            &mut t,
+        );
+        if ok {
+            Ok(true)
+        } else {
+            Err(PokerL1Error::Serialization(
+                "fold_with_proof: proof verify failed".into(),
+            ))
+        }
+    })?;
+
+    // 3. 剥离 pk + 替换 deck（复制 apply_leave_with_proof 1712-1715）
+    // remove_pk_from_aggregated 返回 Option<G1Projective>（None 表示结果为单位元/空）。
+    let new_agg = remove_pk_from_aggregated(
+        table.deck_state.aggregated_pk.as_ref().map(|p| &p.0),
+        &player_pk,
+    );
+    table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
+    table.deck_state.encrypted = output_cts;
+
+    // 4. Scrub 协议 pending 列表（复制 kick_player_internal 2785-2790）
+    //    关键：让玩家退出后续 reveal 协议，后续解牌不需要该玩家参加。
+    //    下注轮调用时 reveal_token_state.assignments 为空（reveal phase 在
+    //    check_reveal_phase_complete 后已重置），循环无操作；保留以备防御性。
+    remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
+    remove_from_pending(&mut table.shuffle_state.completed_players, seat_index);
+    remove_from_pending(&mut table.reconstruct_state.pending_players, seat_index);
+    for a in &mut table.reveal_token_state.assignments {
+        remove_from_pending(&mut a.pending_players, seat_index);
+    }
+
+    // 5. 标记 fold（对齐 apply_fold_internal 1787-1788）
+    //    保留 seat.pk / total_bet / bet / stack；不设 left_during_hand。
+    let seat = &mut table.seats[seat_index as usize];
+    seat.folded = true;
+    seat.acted_this_round = true;
+    table.timestamps.betting_started_at = 0;
+
+    events::emit_event(
+        events,
+        TexasPokerEvent::PlayerFolded {
+            table_id: table.id,
+            seat_index,
+            reason: FOLD_REASON_MANUAL,
+            round_state: table.round_state,
+        },
+    );
+
+    // 6. 推进轮次（复制 apply_fold_internal 1800-1807）
+    if count_active_players(&table.seats) <= 1 {
+        end_without_showdown(table, events);
+        return Ok(());
+    }
+    advance_turn(table, events);
+    table.bump_version();
+    Ok(())
+}
+
 // ========== 下注动作 ==========
 
 /// 玩家弃牌。

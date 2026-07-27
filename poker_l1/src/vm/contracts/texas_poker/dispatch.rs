@@ -1,11 +1,11 @@
-//! Texas Poker 合约 dispatch 路由（22 method selector）。
+//! Texas Poker 合约 dispatch 路由（23 method selector）。
 //!
 //! 严格对齐 `texas_poker_move/sources/table.move` 的 public entry function 清单：
 //! - 表台生命周期：create_table / join_table / leave_table / start_hand / tick
 //! - 玩家动作：fold / check / call / raise / auto_fold / force_fold / kick_player
 //! - 离场预约：request_leave_after_hand（sit out next hand，toggle，任意时刻可调用）
-//! - Mental Poker 协议：join_and_shuffle / leave_with_proof / submit_shuffle_v2
-//!   / submit_player_reveal_tokens / submit_reconstruct_deck
+//! - Mental Poker 协议：join_and_shuffle / leave_with_proof / fold_with_proof
+//!   / submit_shuffle_v2 / submit_player_reveal_tokens / submit_reconstruct_deck
 //!
 //! # Selector 计算
 //!
@@ -188,7 +188,22 @@ pub mod selectors {
         compute_method_selector("request_leave_after_hand")
     }
 
-    /// 返回所有 22 个 selector，供 `supports_selector` 等使用。
+    /// `fold_with_proof` — 玩家 fold 并提交 fold proof（剥离加密层 + 退出后续 reveal）。
+    ///
+    /// `leave_with_proof` 的「对局中」版本：在**下注轮**调用，玩家 fold 时通过
+    /// DLEqProof（LeaveKind）剥离自己的加密层（remove pk from aggregated_pk +
+    /// remask deck），并从所有 reveal pending 列表中移除——后续解牌不需要该玩家
+    /// 参加。区别于普通 fold：普通 fold 玩家仍需为后续公共牌提交 reveal token
+    /// （或被超时踢出）；fold_with_proof 让玩家立即从协议中「物理退出」。
+    ///
+    /// 该方法不进入 AIR prove 流程（`build_method_input` 返回 None）：实际状态
+    /// 转换（fold + pk 移除）通过 end_without_showdown / settle_hand /
+    /// reset_for_next_hand 的现有 AIR 覆盖。
+    pub fn fold_with_proof() -> [u8; 32] {
+        compute_method_selector("fold_with_proof")
+    }
+
+    /// 返回所有 23 个 selector，供 `supports_selector` 等使用。
     #[must_use]
     pub fn all() -> Vec<[u8; 32]> {
         vec![
@@ -214,6 +229,7 @@ pub mod selectors {
             addon(),
             rebuy(),
             request_leave_after_hand(),
+            fold_with_proof(),
         ]
     }
 }
@@ -265,6 +281,21 @@ pub struct LeaveWithProofArgs {
     pub output_cards: Vec<ElGamalCiphertext>,
     /// leave proof（typed DLEqProof<LeaveKind>）。
     pub leave_proof: DLEqProof<DefaultCurve, LeaveKind>,
+}
+
+/// `fold_with_proof` 参数（局中 fold + 剥离加密层）。
+///
+/// 与 `LeaveWithProofArgs` 字段布局完全一致，仅方法语义不同：
+/// leave 在 WAITING 状态调用（局间离场），fold_with_proof 在下注轮调用
+/// （局中弃牌 + 退出后续 reveal 协议）。proof 复用 `LeaveKind`。
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct FoldWithProofArgs {
+    /// 座位索引。
+    pub seat_index: u8,
+    /// fold 时的牌组输出（typed ElGamalCiphertext 列表，剥离玩家加密层后的新牌组）。
+    pub output_cards: Vec<ElGamalCiphertext>,
+    /// fold proof（typed DLEqProof<LeaveKind>，与 leave proof 同型）。
+    pub fold_proof: DLEqProof<DefaultCurve, LeaveKind>,
 }
 
 /// `join_table` 参数。
@@ -457,6 +488,9 @@ pub fn dispatch(
         s if s == &selectors::request_leave_after_hand() => {
             dispatch_request_leave_after_hand(context, table, args, &mut events)
         }
+        s if s == &selectors::fold_with_proof() => {
+            dispatch_fold_with_proof(context, table, args, &mut events)
+        }
         _ => {
             return Err(PokerL1Error::UnknownContractMethod {
                 selector: *selector,
@@ -632,6 +666,10 @@ fn build_method_input(selector: &[u8; 32], args: &[u8]) -> Option<(u8, super::pr
     // 实际离场在 reset_for_next_hand 内完成（已有 ResetForNextHand AIR），
     // 故本方法不产出 prove_task（同 tick 模式）。
     if selector == &selectors::request_leave_after_hand() { return None; }
+    // fold_with_proof：fold + 剥离 pk + remask deck。实际状态转换（fold 标记、
+    // pk 移除、轮次推进 / end_without_showdown）通过现有 Fold / ResetForNextHand
+    // 等 AIR 覆盖；本方法不产出 prove_task（同 tick 模式）。
+    if selector == &selectors::fold_with_proof() { return None; }
     None
 }
 
@@ -793,6 +831,31 @@ fn dispatch_leave_with_proof(
         input.seat_index,
         input.output_cards,
         input.leave_proof,
+        events,
+    )
+}
+
+/// `fold_with_proof` — 带 proof 的局中 fold（剥离加密层 + 退出后续 reveal）。
+///
+/// 权限：`caller == seat.player`（与 leave_with_proof / fold 一致）。
+/// 仅在下注轮可用（`is_betting_round`）；与 `leave_with_proof`（仅 WAITING）互补。
+///
+/// 调用 `state_machine::apply_fold_with_proof`：验证 DLEqProof（LeaveKind）→
+/// 从 aggregated_pk 移除玩家 pk → remask encrypted deck → scrub 所有 reveal
+/// pending → 标记 folded → 推进轮次。
+fn dispatch_fold_with_proof(
+    context: &DispatchContext,
+    table: &mut TexasPokerTable,
+    args: &[u8],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let input: FoldWithProofArgs = decode_args(args, "fold_with_proof")?;
+    require_caller_is_seat_player(context, table, input.seat_index, "fold_with_proof")?;
+    state_machine::apply_fold_with_proof(
+        table,
+        input.seat_index,
+        input.output_cards,
+        input.fold_proof,
         events,
     )
 }
@@ -1256,7 +1319,7 @@ mod tests {
     #[test]
     fn all_selectors_unique() {
         let sels = selectors::all();
-        assert_eq!(sels.len(), 22, "应有 22 个 selector");
+        assert_eq!(sels.len(), 23, "应有 23 个 selector");
         for i in 0..sels.len() {
             for j in (i + 1)..sels.len() {
                 assert_ne!(sels[i], sels[j], "selector[{i}] == selector[{j}] 不应相等");
@@ -1826,5 +1889,284 @@ mod tests {
         assert_eq!(table.occupied_count(), 2);
         assert_eq!(table.seats[0].player, [0x11; 20]);
         assert_eq!(table.seats[1].player, [0x22; 20]);
+    }
+
+    // ========== fold_with_proof 单元测试 ==========
+
+    /// 辅助：构造一个处于下注轮、3 名玩家的桌台。
+    /// - seat 0/1/2 各有 stack 与已下注 total_bet
+    /// - round_state = PREFLOP，betting_round 已设置，current_turn = turn
+    /// - aggregated_pk = generator（= seat.pk，方便验证「移除后变为 None」）
+    fn make_betting_table_with_players(
+        turn: u8,
+        set_aggregated_pk: bool,
+    ) -> TexasPokerTable {
+        let mut table = make_table();
+        table.round_state = super::super::constants::ROUND_PREFLOP;
+        table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
+        table.current_turn = Some(turn);
+
+        // 3 名玩家，pk 都用 generator（aggregated_pk = generator 时移除任一 pk → None）
+        let g = G1Projective::generator();
+        for i in 0..3u8 {
+            table.seats[i as usize].player = [0x11 + i; 20];
+            table.seats[i as usize].stack = 1000;
+            table.seats[i as usize].total_bet = 100;
+            table.seats[i as usize].pk = ECPoint(g);
+        }
+        if set_aggregated_pk {
+            table.deck_state.aggregated_pk = Some(ECPoint(g));
+        }
+        // 模拟已发牌（52 张加密牌），c1 = generator（DLEq verify 强制 c1 不变）
+        table.deck_state.encrypted = (0..52)
+            .map(|_| ElGamalCiphertext {
+                c1: g,
+                c2: g, // 占位，skip_remask=true 不验证
+            })
+            .collect();
+        table
+    }
+
+    /// 辅助：构造一个空的 DLEqProof<LeaveKind>（skip_remask=true 时不会真正验证）。
+    fn empty_fold_proof() -> DLEqProof<DefaultCurve, LeaveKind> {
+        // _kind 字段私有，必须用 from_parts 构造（DLEqProof 不 derive Default）。
+        // skip_remask=true（默认 dev config）时 verify 不执行，字段值不影响测试。
+        // 零标量复用 utils::scalar_zero()（封装了 ff::Field trait 的 ZERO 常量）。
+        let zero = super::super::utils::scalar_zero();
+        DLEqProof::from_parts(
+            vec![],                       // per_card_commitments
+            G1Projective::identity(),     // commitment_pk（C::Point）
+            zero,                         // response（C::Scalar = BlsScalar）
+            zero,                         // nonce（C::Scalar = BlsScalar）
+        )
+    }
+
+    /// 基本流程：下注中 → p1 fold_with_proof → folded=true + pk 已从 aggregated_pk 移除
+    /// + deck 已替换 + reveal assignments 中无 p1（下注轮本就为空）+ total_bet 保留。
+    #[test]
+    fn fold_with_proof_basic_flow() {
+        let mut table = make_betting_table_with_players(0, true);
+        let agg_pk_before = table.deck_state.aggregated_pk;
+        let deck_before = table.deck_state.encrypted.clone();
+
+        let ctx_p1 = make_context_as([0x11; 20]);
+        // output_cards 用一个新的占位牌组（与 deck_before 不同，验证替换生效）
+        let g = G1Projective::generator();
+        let output_cards: Vec<ElGamalCiphertext> = (0..52)
+            .map(|_| ElGamalCiphertext {
+                c1: g,
+                c2: g + g, // 不同于 deck_before 的 c2=g
+            })
+            .collect();
+        let args = FoldWithProofArgs {
+            seat_index: 0,
+            output_cards: output_cards.clone(),
+            fold_proof: empty_fold_proof(),
+        };
+        dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::fold_with_proof(),
+            &borsh::to_vec(&args).unwrap(),
+        )
+        .unwrap();
+
+        // folded 标记
+        assert!(table.seats[0].folded, "folded 应为 true");
+        assert!(table.seats[0].acted_this_round);
+        // 关键：total_bet / bet / stack / pk 保留（side-pot 记账）
+        assert_eq!(table.seats[0].total_bet, 100, "total_bet 应保留");
+        assert_eq!(table.seats[0].stack, 1000, "stack 应保留");
+        assert_eq!(
+            table.seats[0].pk,
+            ECPoint(G1Projective::generator()),
+            "seat.pk 应保留（不置 identity）"
+        );
+        assert!(!table.seats[0].left_during_hand, "left_during_hand 不应设置");
+
+        // aggregated_pk 已移除 p1.pk（移除后可能为 None 或不同点）
+        assert_ne!(
+            table.deck_state.aggregated_pk, agg_pk_before,
+            "aggregated_pk 应已移除 p1 的 pk"
+        );
+
+        // encrypted deck 已替换为 output_cards
+        assert_eq!(
+            table.deck_state.encrypted.len(),
+            52,
+            "deck 大小不变（52 张）"
+        );
+        assert_ne!(
+            table.deck_state.encrypted[0].c2,
+            deck_before[0].c2,
+            "deck 应已被 output_cards 替换"
+        );
+        // c1 不变（DLEq 不变量）
+        assert_eq!(table.deck_state.encrypted[0].c1, deck_before[0].c1);
+
+        // reveal_token_state.assignments 中无 p1（下注轮本就为空）
+        for a in &table.reveal_token_state.assignments {
+            assert!(
+                !super::super::state_machine::is_in_list(&a.pending_players, 0),
+                "p1 不应在任何 reveal pending_players 中"
+            );
+        }
+    }
+
+    /// 权限校验：非 seat player 调用应失败。
+    #[test]
+    fn fold_with_proof_rejects_non_seat_player() {
+        let mut table = make_betting_table_with_players(0, true);
+        let ctx_impersonator = make_context_as([0x99; 20]);
+        let args = FoldWithProofArgs {
+            seat_index: 0,
+            output_cards: vec![],
+            fold_proof: empty_fold_proof(),
+        };
+        let result = dispatch(
+            &ctx_impersonator,
+            &mut table,
+            &selectors::fold_with_proof(),
+            &borsh::to_vec(&args).unwrap(),
+        );
+        assert!(result.is_err(), "非座位玩家不应能 fold_with_proof");
+        assert!(!table.seats[0].folded, "失败调用不应改变 folded 标志");
+    }
+
+    /// 非下注轮拒绝：在 WAITING 状态调用应失败。
+    #[test]
+    fn fold_with_proof_rejects_waiting_state() {
+        let mut table = make_table_with_two_players();
+        // round_state = WAITING（make_table 默认），betting_round = None
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = FoldWithProofArgs {
+            seat_index: 0,
+            output_cards: vec![],
+            fold_proof: empty_fold_proof(),
+        };
+        let result = dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::fold_with_proof(),
+            &borsh::to_vec(&args).unwrap(),
+        );
+        assert!(
+            result.is_err(),
+            "WAITING 状态不应能 fold_with_proof（应在下注轮）"
+        );
+    }
+
+    /// 非该玩家行动轮拒绝：current_turn != seat_index 应失败。
+    #[test]
+    fn fold_with_proof_rejects_not_turn() {
+        // current_turn = 1，但调用 seat 0
+        let mut table = make_betting_table_with_players(1, true);
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = FoldWithProofArgs {
+            seat_index: 0,
+            output_cards: vec![],
+            fold_proof: empty_fold_proof(),
+        };
+        let result = dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::fold_with_proof(),
+            &borsh::to_vec(&args).unwrap(),
+        );
+        assert!(result.is_err(), "非该玩家行动轮不应能 fold_with_proof");
+    }
+
+    /// 越界 seat_index 应返回错误而非 panic。
+    #[test]
+    fn fold_with_proof_rejects_out_of_range_seat() {
+        // current_turn 设为远超 max_players 的值，使 is_player_turn 为 false 不会先触发
+        let mut table = make_betting_table_with_players(200, false);
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = FoldWithProofArgs {
+            seat_index: 200,
+            output_cards: vec![],
+            fold_proof: empty_fold_proof(),
+        };
+        let result = dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::fold_with_proof(),
+            &borsh::to_vec(&args).unwrap(),
+        );
+        assert!(result.is_err(), "越界 seat_index 应返回错误而非 panic");
+    }
+
+    /// 重复 fold 拒绝：已 folded 的 seat 再次调用应失败。
+    #[test]
+    fn fold_with_proof_rejects_already_folded() {
+        let mut table = make_betting_table_with_players(0, true);
+        table.seats[0].folded = true; // 预设已 folded
+
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = FoldWithProofArgs {
+            seat_index: 0,
+            output_cards: vec![],
+            fold_proof: empty_fold_proof(),
+        };
+        let result = dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::fold_with_proof(),
+            &borsh::to_vec(&args).unwrap(),
+        );
+        assert!(result.is_err(), "已 folded 的座位不应再次 fold_with_proof");
+    }
+
+    /// last-player-standing：fold 后只剩 1 活跃玩家 → 触发 end_without_showdown（pot 分配）。
+    #[test]
+    fn fold_with_proof_last_player_standing_ends_hand() {
+        // 2 名玩家（只有 seat 0 和 1 入座），p1 fold_with_proof 后只剩 p2 → 结算
+        let mut table = make_table();
+        table.round_state = super::super::constants::ROUND_PREFLOP;
+        table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+        table.seats[0].player = [0x11; 20];
+        table.seats[0].stack = 1000;
+        table.seats[0].total_bet = 100;
+        table.seats[0].pk = ECPoint(G1Projective::generator());
+        table.seats[1].player = [0x22; 20];
+        table.seats[1].stack = 1000;
+        table.seats[1].total_bet = 100;
+        table.seats[1].pk = ECPoint(G1Projective::generator());
+        table.deck_state.aggregated_pk = Some(table.seats[0].pk);
+        let g = G1Projective::generator();
+        table.deck_state.encrypted = (0..52)
+            .map(|_| ElGamalCiphertext { c1: g, c2: g })
+            .collect();
+        // 设 pot（已收集的下注）
+        table.pot = 200;
+
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = FoldWithProofArgs {
+            seat_index: 0,
+            output_cards: vec![],
+            fold_proof: empty_fold_proof(),
+        };
+        dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::fold_with_proof(),
+            &borsh::to_vec(&args).unwrap(),
+        )
+        .unwrap();
+
+        // end_without_showdown：p2（seat 1）独得 pot，随后 reset_for_next_hand 清理 folded 标志。
+        // （reset 第二阶段会把所有 seat.folded 重置为 false，故此处不能断言 folded=true）
+        assert_eq!(
+            table.seats[1].stack,
+            1000 + 200,
+            "p2 应独得 pot 200（end_without_showdown）"
+        );
+        assert_eq!(table.pot, 0, "pot 应清零");
+        // reset 后回到 WAITING
+        assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
+        // p1 仍在座位上（reset 不踢有筹码的玩家），stack 不变（未参与底池分配）
+        assert_eq!(table.seats[0].player, [0x11; 20]);
+        assert_eq!(table.seats[0].stack, 1000);
     }
 }
