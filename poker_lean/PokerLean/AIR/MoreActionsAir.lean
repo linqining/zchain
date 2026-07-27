@@ -9,108 +9,12 @@ namespace PokerLean
 
 /-! # 更多动作方法的 AIR 形式化 -/
 
-/-- AutoFold 业务列 -/
-structure AutoFoldMethodColumns where
-  input_seat_index : M31
-  input_current_time : M31 × M31 × M31 × M31
-  output_folded : M31
-deriving Repr
+/-! ## 通用提取函数（三种方法共享） -/
 
-def AutoFoldMethodConstraints
-    (row : CommonRow)
-    (ext : AutoFoldMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_current_time : Nat)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.input_current_time.1 = ⟨expected_current_time % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_folded = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row ∧
-  PotUnchangedLimb0 row
-
-def AutoFoldAirAcceptable
-    (row : CommonRow)
-    (ext : AutoFoldMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_current_time : Nat)
-    : Prop :=
-  CommonConstraints row MethodKind.AutoFold ∧
-  AutoFoldMethodConstraints row ext expected_seat_index hlt expected_current_time ∧
-  row.method_kind = ⟨MethodKind.AutoFold.toNat, MethodKind.toNat_lt_M31P MethodKind.AutoFold⟩ ∧
-  row.is_active = M31.one
-
-/-- ForceFold 业务列 -/
-structure ForceFoldMethodColumns where
-  input_seat_index : M31
-  output_folded : M31
-deriving Repr
-
-def ForceFoldMethodConstraints
-    (row : CommonRow)
-    (ext : ForceFoldMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.output_folded = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row ∧
-  PotUnchangedLimb0 row
-
-def ForceFoldAirAcceptable
-    (row : CommonRow)
-    (ext : ForceFoldMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  CommonConstraints row MethodKind.ForceFold ∧
-  ForceFoldMethodConstraints row ext expected_seat_index hlt ∧
-  row.method_kind = ⟨MethodKind.ForceFold.toNat, MethodKind.toNat_lt_M31P MethodKind.ForceFold⟩ ∧
-  row.is_active = M31.one
-
-/-- KickPlayer 业务列 -/
-structure KickPlayerMethodColumns where
-  input_seat_index : M31
-  output_refund : M31 × M31 × M31 × M31
-  output_kicked : M31
-deriving Repr
-
-def KickPlayerMethodConstraints
-    (row : CommonRow)
-    (ext : KickPlayerMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_refund : Nat)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.output_refund.1 = ⟨expected_refund % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_kicked = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row
-
-def KickPlayerAirAcceptable
-    (row : CommonRow)
-    (ext : KickPlayerMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_refund : Nat)
-    : Prop :=
-  CommonConstraints row MethodKind.KickPlayer ∧
-  KickPlayerMethodConstraints row ext expected_seat_index hlt expected_refund ∧
-  row.method_kind = ⟨MethodKind.KickPlayer.toNat, MethodKind.toNat_lt_M31P MethodKind.KickPlayer⟩ ∧
-  row.is_active = M31.one
-
-/-- 通用提取函数（三种方法共享） -/
 def extractPreTableFromActionAir
     (row : CommonRow)
     (max_players : Nat)
-    (mk : MethodKind)
+    (_mk : MethodKind)
     : TexasPokerTable := {
   table_id := 0
   name_hash := 0
@@ -154,9 +58,9 @@ def extractPreTableFromActionAir
 def extractPostTableFromActionAir
     (row : CommonRow)
     (max_players : Nat)
-    (mk : MethodKind)
+    (_mk : MethodKind)
     : TexasPokerTable :=
-  let pre := extractPreTableFromActionAir row max_players mk
+  let pre := extractPreTableFromActionAir row max_players _mk
   { pre with
     version := decodeU64 row.post_version.1 row.post_version.2.1
         row.post_version.2.2.1 row.post_version.2.2.2
@@ -168,6 +72,153 @@ def extractPostTableFromActionAir
       dealer_seat := row.post_button.val
     }
   }
+
+/-- AutoFold 业务列 -/
+structure AutoFoldMethodColumns where
+  input_seat_index : M31
+  input_current_time : M31 × M31 × M31 × M31
+  output_folded : M31
+deriving Repr
+
+def AutoFoldMethodConstraints
+    (row : CommonRow)
+    (ext : AutoFoldMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_current_time : Nat)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_current_time.1 = ⟨expected_current_time % 65536, by unfold M31_P; omega⟩ ∧
+  ext.output_folded = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  RoundStateIsBetting row ∧
+  PotUnchangedLimb0 row ∧
+  let pre_table := extractPreTableFromActionAir row max_players MethodKind.AutoFold
+  let post_table := extractPostTableFromActionAir row max_players MethodKind.AutoFold
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def AutoFoldAirAcceptable
+    (row : CommonRow)
+    (ext : AutoFoldMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_current_time : Nat)
+    : Prop :=
+  CommonConstraints row MethodKind.AutoFold ∧
+  AutoFoldMethodConstraints row ext expected_seat_index max_players hlt expected_current_time ∧
+  row.method_kind = ⟨MethodKind.AutoFold.toNat, MethodKind.toNat_lt_M31P MethodKind.AutoFold⟩ ∧
+  row.is_active = M31.one
+
+/-- ForceFold 业务列 -/
+structure ForceFoldMethodColumns where
+  input_seat_index : M31
+  output_folded : M31
+deriving Repr
+
+def ForceFoldMethodConstraints
+    (row : CommonRow)
+    (ext : ForceFoldMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.output_folded = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  RoundStateIsBetting row ∧
+  PotUnchangedLimb0 row ∧
+  let pre_table := extractPreTableFromActionAir row max_players MethodKind.ForceFold
+  let post_table := extractPostTableFromActionAir row max_players MethodKind.ForceFold
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def ForceFoldAirAcceptable
+    (row : CommonRow)
+    (ext : ForceFoldMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  CommonConstraints row MethodKind.ForceFold ∧
+  ForceFoldMethodConstraints row ext expected_seat_index max_players hlt ∧
+  row.method_kind = ⟨MethodKind.ForceFold.toNat, MethodKind.toNat_lt_M31P MethodKind.ForceFold⟩ ∧
+  row.is_active = M31.one
+
+/-- KickPlayer 业务列 -/
+structure KickPlayerMethodColumns where
+  input_seat_index : M31
+  input_seat_is_occupied : M31
+  output_refund : M31 × M31 × M31 × M31
+  output_kicked : M31
+deriving Repr
+
+/-- kick_player 专用前状态提取（设置目标座位为已占用） -/
+def extractPreTableFromKickPlayerAir
+    (row : CommonRow)
+    (max_players : Nat)
+    (seat_index : Nat)
+    : TexasPokerTable :=
+  let base := extractPreTableFromActionAir row max_players MethodKind.KickPlayer
+  base.update_seat seat_index (fun _ => { Seat.empty with player := PlayerId.ofNat 1 })
+
+/-- kick_player 专用后状态提取（目标座位清空） -/
+def extractPostTableFromKickPlayerAir
+    (row : CommonRow)
+    (_ext : KickPlayerMethodColumns)
+    (max_players : Nat)
+    (seat_index : Nat)
+    : TexasPokerTable :=
+  let pre := extractPreTableFromKickPlayerAir row max_players seat_index
+  { pre with
+    version := decodeU64 row.post_version.1 row.post_version.2.1
+        row.post_version.2.2.1 row.post_version.2.2.2
+    round_state := RoundState.fromNat row.post_round_state.val
+    seats := List.modify (fun _ => Seat.empty) seat_index pre.seats
+  }
+
+def KickPlayerMethodConstraints
+    (row : CommonRow)
+    (ext : KickPlayerMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_refund : Nat)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.output_refund.1 = ⟨expected_refund % 65536, by unfold M31_P; omega⟩ ∧
+  ext.output_kicked = M31.one ∧
+  -- 目标座位必须被占用（kick_player 前置条件）
+  SeatOccupied ext.input_seat_is_occupied ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  let pre_table := extractPreTableFromKickPlayerAir row max_players expected_seat_index
+  let post_table := extractPostTableFromKickPlayerAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def KickPlayerAirAcceptable
+    (row : CommonRow)
+    (ext : KickPlayerMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_refund : Nat)
+    : Prop :=
+  CommonConstraints row MethodKind.KickPlayer ∧
+  KickPlayerMethodConstraints row ext expected_seat_index max_players hlt expected_refund ∧
+  row.method_kind = ⟨MethodKind.KickPlayer.toNat, MethodKind.toNat_lt_M31P MethodKind.KickPlayer⟩ ∧
+  row.is_active = M31.one
 
 def extractAutoFoldParamsFromAir (ext : AutoFoldMethodColumns) : AutoFoldParams := {
   seat_index := ext.input_seat_index.val

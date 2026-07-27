@@ -16,33 +16,6 @@ structure CallMethodColumns where
   output_acted : M31
 deriving Repr
 
-/-- call AIR 的方法约束 -/
-def CallMethodConstraints
-    (row : CommonRow)
-    (ext : CallMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_call_amount : Nat)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.input_call_amount.1 = ⟨expected_call_amount % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_acted = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row
-
-def CallAirAcceptable
-    (row : CommonRow)
-    (ext : CallMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_call_amount : Nat)
-    : Prop :=
-  CommonConstraints row MethodKind.Call ∧
-  CallMethodConstraints row ext expected_seat_index hlt expected_call_amount ∧
-  row.method_kind = ⟨MethodKind.Call.toNat, MethodKind.toNat_lt_M31P MethodKind.Call⟩ ∧
-  row.is_active = M31.one
-
 /-- 从 AIR 行提取 pre 状态 -/
 def extractPreTableFromCallAir
     (row : CommonRow)
@@ -98,9 +71,9 @@ def extractPreTableFromCallAir
 /-- 从 AIR 行提取 post 状态 -/
 def extractPostTableFromCallAir
     (row : CommonRow)
-    (ext : CallMethodColumns)
+    (_ext : CallMethodColumns)
     (max_players : Nat)
-    (seat_index : Nat)
+    (_seat_index : Nat)
     : TexasPokerTable :=
   let pre := extractPreTableFromCallAir row max_players
   { pre with
@@ -114,6 +87,41 @@ def extractPostTableFromCallAir
       dealer_seat := row.post_button.val
     }
   }
+
+/-- call AIR 的方法约束 -/
+def CallMethodConstraints
+    (row : CommonRow)
+    (ext : CallMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_call_amount : Nat)
+    (max_players : Nat)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_call_amount.1 = ⟨expected_call_amount % 65536, by unfold M31_P; omega⟩ ∧
+  ext.output_acted = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  RoundStateIsBetting row ∧
+  let pre_table := extractPreTableFromCallAir row max_players
+  let post_table := extractPostTableFromCallAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def CallAirAcceptable
+    (row : CommonRow)
+    (ext : CallMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_call_amount : Nat)
+    (max_players : Nat)
+    : Prop :=
+  CommonConstraints row MethodKind.Call ∧
+  CallMethodConstraints row ext expected_seat_index hlt expected_call_amount max_players ∧
+  row.method_kind = ⟨MethodKind.Call.toNat, MethodKind.toNat_lt_M31P MethodKind.Call⟩ ∧
+  row.is_active = M31.one
 
 /-- 从 AIR 提取 call 参数 -/
 def extractCallParamsFromAir

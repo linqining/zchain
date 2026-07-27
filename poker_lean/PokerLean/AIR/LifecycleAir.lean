@@ -12,6 +12,72 @@ namespace PokerLean
 对齐 `poker_texas_air/src/airs/lifecycle/`。
 -/
 
+/-! ## 通用提取函数（三种方法共享） -/
+
+def extractPreTableFromLifecycleAir
+    (row : CommonRow)
+    (max_players : Nat)
+    (shuffle_phase : Nat)
+    : TexasPokerTable := {
+  table_id := 0
+  name_hash := 0
+  seats := List.replicate max_players Seat.empty
+  max_players := max_players
+  small_blind := 0
+  big_blind := 0
+  ante := 0
+  version := decodeU64 row.pre_version.1 row.pre_version.2.1
+      row.pre_version.2.2.1 row.pre_version.2.2.2
+  round_state := RoundState.fromNat row.pre_round_state.val
+  betting := {
+    current_bet := 0
+    current_turn := 0
+    dealer_seat := row.pre_button.val
+    pot := decodeU64 row.pre_pot.1 row.pre_pot.2.1
+        row.pre_pot.2.2.1 row.pre_pot.2.2.2
+    side_pots := []
+    min_raise := 0
+    last_aggressor := 0
+    num_raises := 0
+  }
+  shuffle_state := {
+    phase := shuffle_phase
+    current_shuffler := none
+    pending_players := []
+    completed_players := []
+  }
+  reveal_state := {
+    reveal_phase := 0
+    num_assignments := 0
+  }
+  deck_state := DeckState.DeckIdle
+  reconstruct_state := ReconstructState.ReconstructIdle
+  hand_id := row.hand_id.val
+  call_seq := row.call_seq.val
+  chip_pool := 0
+  addon_pool := 0
+  pending_addon_total := 0
+  pending_rebuy_total := 0
+  rake := 0
+  table_fee := 0
+  is_private := false
+  started_at := 0
+  timeout := 0
+  last_action_time := 0
+}
+
+def extractPostTableFromLifecycleAir
+    (row : CommonRow)
+    (max_players : Nat)
+    (shuffle_phase : Nat)
+    : TexasPokerTable :=
+  let pre := extractPreTableFromLifecycleAir row max_players shuffle_phase
+  { pre with
+    version := decodeU64 row.post_version.1 row.post_version.2.1
+        row.post_version.2.2.1 row.post_version.2.2.2
+    round_state := RoundState.fromNat row.post_round_state.val
+  }
+
 /-! ## start_hand AIR
 
 AIR 约束（start_hand.rs:86-133）：
@@ -40,21 +106,29 @@ def StartHandMethodConstraints
     (row : CommonRow)
     (ext : StartHandMethodColumns)
     (expected_active_count : Nat)
+    (max_players : Nat)
     (hlt : expected_active_count < M31_P)
     : Prop :=
   row.is_active = M31.one →
   VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
   ext.input_active_count = nat_to_m31 expected_active_count hlt ∧
-  ext.output_new_round_state = M31.zero
+  ActiveCountAtLeastTwo ext.input_active_count ∧
+  ext.output_new_round_state = M31.zero ∧
+  let pre_table := extractPreTableFromLifecycleAir row max_players 0
+  let post_table := extractPostTableFromLifecycleAir row max_players 0
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
 
 def StartHandAirAcceptable
     (row : CommonRow)
     (ext : StartHandMethodColumns)
     (expected_active_count : Nat)
+    (max_players : Nat)
     (hlt : expected_active_count < M31_P)
     : Prop :=
   CommonConstraints row MethodKind.StartHand ∧
-  StartHandMethodConstraints row ext expected_active_count hlt ∧
+  StartHandMethodConstraints row ext expected_active_count max_players hlt ∧
   row.method_kind = ⟨MethodKind.StartHand.toNat, MethodKind.toNat_lt_M31P MethodKind.StartHand⟩ ∧
   row.is_active = M31.one
 
@@ -85,20 +159,28 @@ def TickMethodConstraints
     (row : CommonRow)
     (ext : TickMethodColumns)
     (expected_timeout_kind : Nat)
+    (max_players : Nat)
     (hlt : expected_timeout_kind < M31_P)
     : Prop :=
   row.is_active = M31.one →
   VersionIncrementConstraint row ∧
-  ext.input_timeout_kind = nat_to_m31 expected_timeout_kind hlt
+  ext.input_timeout_kind = nat_to_m31 expected_timeout_kind hlt ∧
+  TimeoutKindPositive ext.input_timeout_kind ∧
+  let pre_table := extractPreTableFromLifecycleAir row max_players 0
+  let post_table := extractPostTableFromLifecycleAir row max_players 0
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
 
 def TickAirAcceptable
     (row : CommonRow)
     (ext : TickMethodColumns)
     (expected_timeout_kind : Nat)
+    (max_players : Nat)
     (hlt : expected_timeout_kind < M31_P)
     : Prop :=
   CommonConstraints row MethodKind.Tick ∧
-  TickMethodConstraints row ext expected_timeout_kind hlt ∧
+  TickMethodConstraints row ext expected_timeout_kind max_players hlt ∧
   row.method_kind = ⟨MethodKind.Tick.toNat, MethodKind.toNat_lt_M31P MethodKind.Tick⟩ ∧
   row.is_active = M31.one
 
@@ -115,6 +197,7 @@ AIR 约束（reset_for_next_hand.rs:76-98）：
 -/
 
 structure ResetForNextHandMethodColumns where
+  input_shuffle_phase : M31
   output_new_round_state : M31
   post_pending_addon : M31 × M31 × M31 × M31
 deriving Repr
@@ -122,87 +205,31 @@ deriving Repr
 def ResetForNextHandMethodConstraints
     (row : CommonRow)
     (ext : ResetForNextHandMethodColumns)
+    (max_players : Nat)
     : Prop :=
   row.is_active = M31.one →
   VersionIncrementConstraint row ∧
+  ShufflePhasePositive ext.input_shuffle_phase ∧
   ext.output_new_round_state = M31.zero ∧
   ext.post_pending_addon.1 = M31.zero ∧
   ext.post_pending_addon.2.1 = M31.zero ∧
   ext.post_pending_addon.2.2.1 = M31.zero ∧
-  ext.post_pending_addon.2.2.2 = M31.zero
+  ext.post_pending_addon.2.2.2 = M31.zero ∧
+  let pre_table := extractPreTableFromLifecycleAir row max_players ext.input_shuffle_phase.val
+  let post_table := extractPostTableFromLifecycleAir row max_players ext.input_shuffle_phase.val
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
 
 def ResetForNextHandAirAcceptable
     (row : CommonRow)
     (ext : ResetForNextHandMethodColumns)
+    (max_players : Nat)
     : Prop :=
   CommonConstraints row MethodKind.ResetForNextHand ∧
-  ResetForNextHandMethodConstraints row ext ∧
+  ResetForNextHandMethodConstraints row ext max_players ∧
   row.method_kind = ⟨MethodKind.ResetForNextHand.toNat, MethodKind.toNat_lt_M31P MethodKind.ResetForNextHand⟩ ∧
   row.is_active = M31.one
-
-/-! ## 通用提取函数（三种方法共享） -/
-
-def extractPreTableFromLifecycleAir
-    (row : CommonRow)
-    (max_players : Nat)
-    : TexasPokerTable := {
-  table_id := 0
-  name_hash := 0
-  seats := List.replicate max_players Seat.empty
-  max_players := max_players
-  small_blind := 0
-  big_blind := 0
-  ante := 0
-  version := decodeU64 row.pre_version.1 row.pre_version.2.1
-      row.pre_version.2.2.1 row.pre_version.2.2.2
-  round_state := RoundState.fromNat row.pre_round_state.val
-  betting := {
-    current_bet := 0
-    current_turn := 0
-    dealer_seat := row.pre_button.val
-    pot := decodeU64 row.pre_pot.1 row.pre_pot.2.1
-        row.pre_pot.2.2.1 row.pre_pot.2.2.2
-    side_pots := []
-    min_raise := 0
-    last_aggressor := 0
-    num_raises := 0
-  }
-  shuffle_state := {
-    phase := 0
-    current_shuffler := none
-    pending_players := []
-    completed_players := []
-  }
-  reveal_state := {
-    reveal_phase := 0
-    num_assignments := 0
-  }
-  deck_state := DeckState.DeckIdle
-  reconstruct_state := ReconstructState.ReconstructIdle
-  hand_id := row.hand_id.val
-  call_seq := row.call_seq.val
-  chip_pool := 0
-  addon_pool := 0
-  pending_addon_total := 0
-  pending_rebuy_total := 0
-  rake := 0
-  table_fee := 0
-  is_private := false
-  started_at := 0
-  timeout := 0
-  last_action_time := 0
-}
-
-def extractPostTableFromLifecycleAir
-    (row : CommonRow)
-    (max_players : Nat)
-    : TexasPokerTable :=
-  let pre := extractPreTableFromLifecycleAir row max_players
-  { pre with
-    version := decodeU64 row.post_version.1 row.post_version.2.1
-        row.post_version.2.2.1 row.post_version.2.2.2
-    round_state := RoundState.fromNat row.post_round_state.val
-  }
 
 def extractStartHandParamsFromAir (ext : StartHandMethodColumns) : StartHandParams := {
   active_count := ext.input_active_count.val
@@ -212,7 +239,7 @@ def extractStartHandParamsFromAir (ext : StartHandMethodColumns) : StartHandPara
 }
 
 def extractTickParamsFromAir
-    (ext : TickMethodColumns)
+    (_ext : TickMethodColumns)
     (timeout_kind : Nat)
     (time_bank_consumed : Nat)
     (time_bank_post : Nat)

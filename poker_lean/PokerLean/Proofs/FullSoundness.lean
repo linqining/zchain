@@ -19,17 +19,17 @@ def FullCreateTableConstraints
     (row : CommonRow)
     (ext : CreateTableRow)
     : Prop :=
-  CreateTableMethodConstraints row ext ∧
-  sr_valid_simple (extractPreTableFromAir row) row.pre_state_root ∧
-  sr_valid_simple (extractPostTableFromAir row ext) row.post_state_root ∧
-  (extractPreTableFromAir row).version = 0 ∧
-  (extractPreTableFromAir row).round_state = RoundState.ROUND_WAITING ∧
-  List.isEmpty (extractPreTableFromAir row).seats ∧
-  (extractPostTableFromAir row ext).seats.length = ext.maxPlayers ∧
-  (extractPostTableFromAir row ext).all_seats_empty ∧
-  (extractPostTableFromAir row ext).max_players = ext.maxPlayers ∧
-  (extractPostTableFromAir row ext).big_blind = ext.bigBlind ∧
-  (extractPostTableFromAir row ext).small_blind = ext.smallBlind
+  CreateTableMethodConstraints row ext ext.maxPlayers ∧
+  sr_valid_simple (extractPreTableFromCreateTableAir row ext.maxPlayers) row.pre_state_root ∧
+  sr_valid_simple (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0) row.post_state_root ∧
+  (extractPreTableFromCreateTableAir row ext.maxPlayers).version = 0 ∧
+  (extractPreTableFromCreateTableAir row ext.maxPlayers).round_state = RoundState.ROUND_WAITING ∧
+  List.isEmpty (extractPreTableFromCreateTableAir row ext.maxPlayers).seats ∧
+  (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0).seats.length = ext.maxPlayers ∧
+  (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0).all_seats_empty ∧
+  (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0).max_players = ext.maxPlayers ∧
+  (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0).big_blind = ext.bigBlind ∧
+  (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0).small_blind = ext.smallBlind
 
 def FullCreateTableAirAcceptable
     (row : CommonRow)
@@ -45,10 +45,10 @@ theorem full_create_table_soundness
     (ext : CreateTableRow)
     (h_air : FullCreateTableAirAcceptable row ext) :
   ContractCreateTable
-    (extractPreTableFromAir row)
+    (extractPreTableFromCreateTableAir row ext.maxPlayers)
     (extractParamsFromAir ext)
-    (extractPostTableFromAir row ext) := by
-  have hbase : CreateTableAirAcceptable row ext := by
+    (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0) := by
+  have hbase : CreateTableAirAcceptable row ext ext.maxPlayers := by
     unfold CreateTableAirAcceptable
     rcases h_air with ⟨hc, hfull, hactive, hpadding⟩
     exact ⟨hc, hfull.1, hactive, hpadding⟩
@@ -64,7 +64,7 @@ def FullFoldConstraints
     (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
     : Prop :=
-  FoldMethodConstraints row ext expected_seat_index hlt ∧
+  FoldMethodConstraints row ext expected_seat_index max_players hlt ∧
   (row.pre_round_state.val = 1 ∨ row.pre_round_state.val = 2 ∨
    row.pre_round_state.val = 3 ∨ row.pre_round_state.val = 4) ∧
   expected_seat_index < max_players ∧

@@ -1,4 +1,5 @@
 import Mathlib
+import PokerLean.Common.PoseidonHash
 
 namespace PokerLean
 
@@ -132,6 +133,18 @@ inductive ReconstructState where
   | ReconstructIdle | Reconstructing | Reconstructed
 deriving Repr, DecidableEq
 
+namespace ReconstructState
+
+def toNat : ReconstructState → Nat
+  | ReconstructIdle => 0 | Reconstructing => 1 | Reconstructed => 2
+
+def fromNat (n : Nat) : ReconstructState :=
+  if n = 1 then Reconstructing
+  else if n = 2 then Reconstructed
+  else ReconstructIdle
+
+end ReconstructState
+
 structure TexasPokerTable where
   table_id : Nat
   name_hash : Nat
@@ -236,5 +249,26 @@ def empty_table : TexasPokerTable := by
   }
 
 end TexasPokerTable
+
+/-! ## State Preimage Bridge
+
+将 `TexasPokerTable` 映射到 `StatePreimage`，用于 Poseidon252 哈希。
+该映射抽象化了 Rust 端 `table_state_preimage` 的实现细节。
+-/
+
+/-- 从 TexasPokerTable 生成 StatePreimage（抽象编码）。 -/
+axiom texasPokerTableToPreimage (t : TexasPokerTable) : StatePreimage
+
+/-- texasPokerTableToPreimage 的单射性（不同状态产生不同 preimage）。 -/
+axiom texasPokerTableToPreimage_injective :
+  ∀ (t1 t2 : TexasPokerTable),
+    texasPokerTableToPreimage t1 = texasPokerTableToPreimage t2 →
+    t1 = t2
+
+/-- 版本 0 的空状态 preimage 哈希为零。
+   这与 Rust 实现中 `StateRoot::default()` 一致。 -/
+axiom empty_state_root :
+  poseidon_hash (texasPokerTableToPreimage TexasPokerTable.empty_table)
+  = (M31.zero, M31.zero, M31.zero, M31.zero)
 
 end PokerLean

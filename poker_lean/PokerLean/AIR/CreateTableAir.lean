@@ -3,6 +3,7 @@ import PokerLean.Common.U64Encoding
 import PokerLean.Common.CommonColumns
 import PokerLean.Contract.Types
 import PokerLean.Contract.CreateTable
+import PokerLean.AIR.AirBase
 
 namespace PokerLean
 
@@ -32,24 +33,6 @@ def timeout_val (r : CreateTableRow) : Nat := r.output_timeout.val
 
 end CreateTableRow
 
-def CreateTableMethodConstraints (row : CommonRow) (ext : CreateTableRow) : Prop :=
-  2 ≤ ext.maxPlayers ∧ ext.maxPlayers ≤ 9 ∧
-  ext.bigBlind > 0 ∧
-  ext.smallBlind ≤ ext.bigBlind ∧
-  row.pre_version = (M31.zero, M31.zero, M31.zero, M31.zero) ∧
-  row.post_pot = (M31.zero, M31.zero, M31.zero, M31.zero) ∧
-  row.post_button = M31.zero ∧
-  row.post_round_state = M31.zero ∧
-  row.post_version = (M31.one, M31.zero, M31.zero, M31.zero) ∧
-  row.post_round_state = row.pre_round_state ∧
-  VersionIncrementConstraint row
-
-def CreateTableAirAcceptable (row : CommonRow) (ext : CreateTableRow) : Prop :=
-  CommonConstraints row MethodKind.CreateTable ∧
-  CreateTableMethodConstraints row ext ∧
-  row.is_active = M31.one ∧
-  row.is_padding = M31.zero
-
 def extractParamsFromAir (ext : CreateTableRow) : CreateTableParams := {
   table_id := 0
   name_hash := 0
@@ -60,10 +43,10 @@ def extractParamsFromAir (ext : CreateTableRow) : CreateTableParams := {
   timeout := ext.timeout_val
 }
 
-def extractPreTableFromAir (row : CommonRow) : TexasPokerTable :=
+def extractPreTableFromCreateTableAir (_row : CommonRow) (_max_players : Nat) : TexasPokerTable :=
   TexasPokerTable.empty_table
 
-def extractPostTableFromAir (row : CommonRow) (ext : CreateTableRow) : TexasPokerTable :=
+def extractPostTableFromCreateTableAir (row : CommonRow) (ext : CreateTableRow) (_max_players : Nat) (_seat_index : Nat) : TexasPokerTable :=
   let params := extractParamsFromAir ext
   let ⟨p0, p1, p2, p3⟩ := row.post_pot
   let pot_val : Nat := p0.val + p1.val * 65536 + p2.val * (65536 * 65536) + p3.val * (65536 * 65536 * 65536)
@@ -115,5 +98,28 @@ def extractPostTableFromAir (row : CommonRow) (ext : CreateTableRow) : TexasPoke
     timeout := params.timeout
     last_action_time := 0
   }
+
+def CreateTableMethodConstraints (row : CommonRow) (ext : CreateTableRow) (max_players : Nat) : Prop :=
+  2 ≤ ext.maxPlayers ∧ ext.maxPlayers ≤ 9 ∧
+  ext.bigBlind > 0 ∧
+  ext.smallBlind ≤ ext.bigBlind ∧
+  row.pre_version = (M31.zero, M31.zero, M31.zero, M31.zero) ∧
+  row.post_pot = (M31.zero, M31.zero, M31.zero, M31.zero) ∧
+  row.post_button = M31.zero ∧
+  row.post_round_state = M31.zero ∧
+  row.post_version = (M31.one, M31.zero, M31.zero, M31.zero) ∧
+  row.post_round_state = row.pre_round_state ∧
+  VersionIncrementConstraint row ∧
+  let pre_table := extractPreTableFromCreateTableAir row max_players
+  let post_table := extractPostTableFromCreateTableAir row ext max_players 0
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def CreateTableAirAcceptable (row : CommonRow) (ext : CreateTableRow) (max_players : Nat) : Prop :=
+  CommonConstraints row MethodKind.CreateTable ∧
+  CreateTableMethodConstraints row ext max_players ∧
+  row.is_active = M31.one ∧
+  row.is_padding = M31.zero
 
 end PokerLean

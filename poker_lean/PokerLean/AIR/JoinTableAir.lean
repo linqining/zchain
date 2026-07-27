@@ -42,34 +42,11 @@ structure JoinTableMethodColumns where
   input_buy_in : M31 × M31 × M31 × M31
   /-- 输入：玩家地址（4 limb） -/
   input_player_addr : M31 × M31 × M31 × M31
+  /-- 输入：座位占用状态（0 = 空，1 = 占用）- 必须为空 -/
+  input_seat_is_occupied : M31
   /-- 输出：座位 stack（4 limb） -/
   output_seat_stack : M31 × M31 × M31 × M31
 deriving Repr
-
-/-- join_table 方法特定约束（对齐 join_table.rs 的 evaluate） -/
-def JoinTableMethodConstraints
-    (row : CommonRow)
-    (ext : JoinTableMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  -- 当 is_active = 1 时：
-  row.is_active = M31.one →
-  VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
-  -- 约束 1：seat_index == input.seat_index
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt
-
-/-- join_table AIR 接受谓词（完整） -/
-def JoinTableAirAcceptable
-    (row : CommonRow)
-    (ext : JoinTableMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  CommonConstraints row MethodKind.JoinTable ∧
-  JoinTableMethodConstraints row ext expected_seat_index hlt ∧
-  row.method_kind = ⟨MethodKind.JoinTable.toNat, MethodKind.toNat_lt_M31P MethodKind.JoinTable⟩ ∧
-  row.is_active = M31.one
 
 /-- 从 AIR 行提取前状态表 -/
 def extractPreTableFromJoinTableAir
@@ -126,9 +103,9 @@ def extractPreTableFromJoinTableAir
 /-- 从 AIR 行提取后状态表 -/
 def extractPostTableFromJoinTableAir
     (row : CommonRow)
-    (ext : JoinTableMethodColumns)
+    (_ext : JoinTableMethodColumns)
     (max_players : Nat)
-    (seat_index : Nat)
+    (_seat_index : Nat)
     : TexasPokerTable :=
   let pre := extractPreTableFromJoinTableAir row max_players
   { pre with
@@ -147,5 +124,39 @@ def extractJoinTableParamsFromAir
       ext.input_buy_in.2.2.1 ext.input_buy_in.2.2.2
   player := player
 }
+
+/-- join_table 方法特定约束（对齐 join_table.rs 的 evaluate） -/
+def JoinTableMethodConstraints
+    (row : CommonRow)
+    (ext : JoinTableMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  -- 当 is_active = 1 时：
+  row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
+  -- 约束 1：seat_index == input.seat_index
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  -- 约束 2：目标座位必须为空（join_table 前置条件）
+  SeatEmpty ext.input_seat_is_occupied ∧
+  let pre_table := extractPreTableFromJoinTableAir row max_players
+  let post_table := extractPostTableFromJoinTableAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+/-- join_table AIR 接受谓词（完整） -/
+def JoinTableAirAcceptable
+    (row : CommonRow)
+    (ext : JoinTableMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  CommonConstraints row MethodKind.JoinTable ∧
+  JoinTableMethodConstraints row ext expected_seat_index max_players hlt ∧
+  row.method_kind = ⟨MethodKind.JoinTable.toNat, MethodKind.toNat_lt_M31P MethodKind.JoinTable⟩ ∧
+  row.is_active = M31.one
 
 end PokerLean

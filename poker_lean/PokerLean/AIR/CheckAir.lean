@@ -13,37 +13,6 @@ structure CheckMethodColumns where
   output_acted : M31
 deriving Repr
 
-/-- check AIR 的方法约束（对应 Rust 的 evaluate 函数） -/
-def CheckMethodConstraints
-    (row : CommonRow)
-    (ext : CheckMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_current_bet : Nat)
-    (expected_seat_bet : Nat)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.input_current_bet.1 = ⟨expected_current_bet % 65536, by unfold M31_P; omega⟩ ∧
-  ext.input_current_bet.1 = ⟨expected_seat_bet % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_acted = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row ∧
-  PotUnchangedLimb0 row
-
-def CheckAirAcceptable
-    (row : CommonRow)
-    (ext : CheckMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_current_bet : Nat)
-    (expected_seat_bet : Nat)
-    : Prop :=
-  CommonConstraints row MethodKind.Check ∧
-  CheckMethodConstraints row ext expected_seat_index hlt expected_current_bet expected_seat_bet ∧
-  row.method_kind = ⟨MethodKind.Check.toNat, MethodKind.toNat_lt_M31P MethodKind.Check⟩ ∧
-  row.is_active = M31.one
-
 /-- 从 AIR 行提取 pre 状态 -/
 def extractPreTableFromCheckAir
     (row : CommonRow)
@@ -99,9 +68,9 @@ def extractPreTableFromCheckAir
 /-- 从 AIR 行提取 post 状态 -/
 def extractPostTableFromCheckAir
     (row : CommonRow)
-    (ext : CheckMethodColumns)
+    (_ext : CheckMethodColumns)
     (max_players : Nat)
-    (seat_index : Nat)
+    (_seat_index : Nat)
     : TexasPokerTable :=
   let pre := extractPreTableFromCheckAir row max_players
   { pre with
@@ -115,6 +84,45 @@ def extractPostTableFromCheckAir
       dealer_seat := row.post_button.val
     }
   }
+
+/-- check AIR 的方法约束（对应 Rust 的 evaluate 函数） -/
+def CheckMethodConstraints
+    (row : CommonRow)
+    (ext : CheckMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_current_bet : Nat)
+    (expected_seat_bet : Nat)
+    (max_players : Nat)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_current_bet.1 = ⟨expected_current_bet % 65536, by unfold M31_P; omega⟩ ∧
+  ext.input_current_bet.1 = ⟨expected_seat_bet % 65536, by unfold M31_P; omega⟩ ∧
+  ext.output_acted = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  RoundStateIsBetting row ∧
+  PotUnchangedLimb0 row ∧
+  let pre_table := extractPreTableFromCheckAir row max_players
+  let post_table := extractPostTableFromCheckAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def CheckAirAcceptable
+    (row : CommonRow)
+    (ext : CheckMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_current_bet : Nat)
+    (expected_seat_bet : Nat)
+    (max_players : Nat)
+    : Prop :=
+  CommonConstraints row MethodKind.Check ∧
+  CheckMethodConstraints row ext expected_seat_index hlt expected_current_bet expected_seat_bet max_players ∧
+  row.method_kind = ⟨MethodKind.Check.toNat, MethodKind.toNat_lt_M31P MethodKind.Check⟩ ∧
+  row.is_active = M31.one
 
 /-- 从 AIR 提取 check 参数 -/
 def extractCheckParamsFromAir

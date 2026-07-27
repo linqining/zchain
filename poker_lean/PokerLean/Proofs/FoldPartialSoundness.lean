@@ -134,8 +134,8 @@ lemma fold_pre_mp
 /-- 辅助引理：FoldMethodConstraints 蕴含 input_seat_index = expected_seat_index -/
 lemma fold_input_seat_eq
     (row : CommonRow) (ext : FoldMethodColumns)
-    (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
-    (h : FoldMethodConstraints row ext expected_seat_index hlt)
+    (expected_seat_index max_players : Nat) (hlt : expected_seat_index < M31_P)
+    (h : FoldMethodConstraints row ext expected_seat_index max_players hlt)
     (hactive : row.is_active = M31.one) :
     ext.input_seat_index = nat_to_m31 expected_seat_index hlt := by
   have h_conj := h hactive
@@ -159,7 +159,7 @@ theorem full_fold_partial_soundness
   rcases hfull with ⟨hmethod, h_round, h_seat_bound, h_ver, h_pot, h_rs, h_btn⟩
   -- 从 hmethod 提取 input_seat_index = expected_seat_index
   have h_input_seat : ext.input_seat_index = nat_to_m31 expected_seat_index hlt :=
-    fold_input_seat_eq row ext expected_seat_index hlt hmethod hactive
+    fold_input_seat_eq row ext expected_seat_index max_players hlt hmethod hactive
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
     rw [h_input_seat]; unfold nat_to_m31; simp
   unfold ContractFoldPartial

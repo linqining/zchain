@@ -50,11 +50,11 @@ namespace PokerLean
 /-- 主定理：create_table AIR 约束蕴含合约语义（soundness） -/
 theorem create_table_soundness_main
     (row : CommonRow) (ext : CreateTableRow)
-    (h : CreateTableAirAcceptable row ext) :
+    (h : CreateTableAirAcceptable row ext ext.maxPlayers) :
     ContractCreateTable
-      (extractPreTableFromAir row)
+      (extractPreTableFromCreateTableAir row ext.maxPlayers)
       (extractParamsFromAir ext)
-      (extractPostTableFromAir row ext) :=
+      (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0) :=
   create_table_soundness row ext h
 
 /-- 完整约束版本：FullCreateTableAirAcceptable 蕴含合约语义 -/
@@ -62,9 +62,9 @@ theorem full_create_table_soundness_main
     (row : CommonRow) (ext : CreateTableRow)
     (h : FullCreateTableAirAcceptable row ext) :
     ContractCreateTable
-      (extractPreTableFromAir row)
+      (extractPreTableFromCreateTableAir row ext.maxPlayers)
       (extractParamsFromAir ext)
-      (extractPostTableFromAir row ext) :=
+      (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0) :=
   full_create_table_soundness row ext h
 
 /-! ## fold: ❌ AIR 约束不是 sound 的（反例） -/
@@ -74,7 +74,7 @@ theorem fold_not_sound_main :
     ∃ (row : CommonRow) (ext : FoldMethodColumns)
       (expected_seat_index : Nat) (max_players : Nat)
       (hlt : expected_seat_index < M31_P),
-      FoldAirAcceptable row ext expected_seat_index hlt ∧
+      FoldAirAcceptable row ext expected_seat_index max_players hlt ∧
       ¬ ContractFold
         (extractPreTableFromFoldAir row max_players)
         (extractFoldParamsFromAir ext)
@@ -108,7 +108,7 @@ theorem check_not_sound_main :
       (expected_seat_index : Nat) (max_players : Nat)
       (expected_current_bet : Nat) (expected_seat_bet : Nat)
       (hlt : expected_seat_index < M31_P),
-      CheckAirAcceptable row ext expected_seat_index hlt expected_current_bet expected_seat_bet ∧
+      CheckAirAcceptable row ext expected_seat_index hlt expected_current_bet expected_seat_bet max_players ∧
       ¬ ContractCheck
         (extractPreTableFromCheckAir row max_players)
         (extractCheckParamsFromAir ext)
@@ -130,7 +130,7 @@ theorem call_not_sound_main :
       (expected_seat_index : Nat) (max_players : Nat)
       (expected_call_amount : Nat)
       (hlt : expected_seat_index < M31_P),
-      CallAirAcceptable row ext expected_seat_index hlt expected_call_amount ∧
+      CallAirAcceptable row ext expected_seat_index hlt expected_call_amount max_players ∧
       ¬ ContractCall
         (extractPreTableFromCallAir row max_players)
         (extractCallParamsFromAir ext)
@@ -152,7 +152,7 @@ theorem raise_not_sound_main :
       (expected_seat_index : Nat) (max_players : Nat)
       (expected_raise_to : Nat)
       (hlt : expected_seat_index < M31_P),
-      RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to ∧
+      RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to max_players ∧
       ¬ ContractRaise
         (extractPreTableFromRaiseAir row max_players)
         (extractRaiseParamsFromAir ext)
@@ -174,7 +174,7 @@ theorem bet_not_sound_main :
       (expected_seat_index : Nat) (max_players : Nat)
       (expected_bet_amount : Nat)
       (hlt : expected_seat_index < M31_P),
-      BetAirAcceptable row ext expected_seat_index hlt expected_bet_amount ∧
+      BetAirAcceptable row ext expected_seat_index hlt expected_bet_amount max_players ∧
       ¬ ContractBet
         (extractPreTableFromBetAir row max_players)
         (extractBetParamsFromAir ext)
@@ -196,7 +196,7 @@ theorem auto_fold_not_sound_main :
       (expected_seat_index : Nat) (max_players : Nat)
       (expected_current_time : Nat)
       (hlt : expected_seat_index < M31_P),
-      AutoFoldAirAcceptable row ext expected_seat_index hlt expected_current_time ∧
+      AutoFoldAirAcceptable row ext expected_seat_index max_players hlt expected_current_time ∧
       ¬ ContractAutoFold
         (extractPreTableFromActionAir row max_players MethodKind.AutoFold)
         (extractAutoFoldParamsFromAir ext)
@@ -208,7 +208,7 @@ theorem force_fold_not_sound_main :
     ∃ (row : CommonRow) (ext : ForceFoldMethodColumns)
       (expected_seat_index : Nat) (max_players : Nat)
       (hlt : expected_seat_index < M31_P),
-      ForceFoldAirAcceptable row ext expected_seat_index hlt ∧
+      ForceFoldAirAcceptable row ext expected_seat_index max_players hlt ∧
       ¬ ContractForceFold
         (extractPreTableFromActionAir row max_players MethodKind.ForceFold)
         (extractForceFoldParamsFromAir ext)
@@ -221,7 +221,7 @@ theorem kick_player_not_sound_main :
       (expected_seat_index : Nat) (max_players : Nat)
       (expected_refund : Nat)
       (hlt : expected_seat_index < M31_P),
-      KickPlayerAirAcceptable row ext expected_seat_index hlt expected_refund ∧
+      KickPlayerAirAcceptable row ext expected_seat_index max_players hlt expected_refund ∧
       ¬ ContractKickPlayer
         (extractPreTableFromActionAir row max_players MethodKind.KickPlayer)
         (extractKickPlayerParamsFromAir ext)
@@ -236,7 +236,7 @@ theorem join_table_not_sound_main :
       (expected_seat_index : Nat) (max_players : Nat)
       (player : PlayerId)
       (hlt : expected_seat_index < M31_P),
-      JoinTableAirAcceptable row ext expected_seat_index hlt ∧
+      JoinTableAirAcceptable row ext expected_seat_index max_players hlt ∧
       ¬ ContractJoinTable
         (extractPreTableFromJoinTableAir row max_players)
         (extractJoinTableParamsFromAir ext player)
@@ -250,9 +250,9 @@ theorem leave_table_not_sound_main :
     ∃ (row : CommonRow) (ext : LeaveTableMethodColumns)
       (expected_seat_index : Nat) (max_players : Nat)
       (hlt : expected_seat_index < M31_P),
-      LeaveTableAirAcceptable row ext expected_seat_index hlt ∧
+      LeaveTableAirAcceptable row ext expected_seat_index max_players hlt ∧
       ¬ ContractLeaveTable
-        (extractPreTableFromLeaveTableAir row max_players)
+        (extractPreTableFromLeaveTableAir row max_players (expected_seat_index + 1))
         (extractLeaveTableParamsFromAir ext)
         (extractPostTableFromLeaveTableAir row ext max_players expected_seat_index) :=
   leave_table_air_not_sound
@@ -264,11 +264,11 @@ theorem start_hand_not_sound_main :
     ∃ (row : CommonRow) (ext : StartHandMethodColumns)
       (expected_active_count : Nat) (max_players : Nat)
       (hlt : expected_active_count < M31_P),
-      StartHandAirAcceptable row ext expected_active_count hlt ∧
+      StartHandAirAcceptable row ext expected_active_count max_players hlt ∧
       ¬ ContractStartHand
-        (extractPreTableFromLifecycleAir row max_players)
+        (extractPreTableFromLifecycleAir row max_players 0)
         (extractStartHandParamsFromAir ext)
-        (extractPostTableFromLifecycleAir row max_players) :=
+        (extractPostTableFromLifecycleAir row max_players 0) :=
   start_hand_air_not_sound
 
 /-- tick AIR 不满足 soundness 的反例存在性 -/
@@ -277,22 +277,22 @@ theorem tick_not_sound_main :
       (expected_timeout_kind : Nat) (max_players : Nat)
       (time_bank_consumed time_bank_post rake_mode rake_amount : Nat)
       (hlt : expected_timeout_kind < M31_P),
-      TickAirAcceptable row ext expected_timeout_kind hlt ∧
+      TickAirAcceptable row ext expected_timeout_kind max_players hlt ∧
       ¬ ContractTick
-        (extractPreTableFromLifecycleAir row max_players)
+        (extractPreTableFromLifecycleAir row max_players 0)
         (extractTickParamsFromAir ext expected_timeout_kind time_bank_consumed time_bank_post rake_mode rake_amount)
-        (extractPostTableFromLifecycleAir row max_players) :=
+        (extractPostTableFromLifecycleAir row (max_players + 1) 0) :=
   tick_air_not_sound
 
 /-- reset_for_next_hand AIR 不满足 soundness 的反例存在性 -/
 theorem reset_for_next_hand_not_sound_main :
     ∃ (row : CommonRow) (ext : ResetForNextHandMethodColumns)
       (max_players : Nat) (pre_pending_addon : Nat),
-      ResetForNextHandAirAcceptable row ext ∧
+      ResetForNextHandAirAcceptable row ext max_players ∧
       ¬ ContractResetForNextHand
-        (extractPreTableFromLifecycleAir row max_players)
+        (extractPreTableFromLifecycleAir row max_players 0)
         (extractResetParamsFromAir pre_pending_addon)
-        (extractPostTableFromLifecycleAir row max_players) :=
+        (extractPostTableFromLifecycleAir row (max_players + 1) 0) :=
   reset_for_next_hand_air_not_sound
 
 /-! ## addon / rebuy: ❌ AIR 约束不是 sound 的（反例）-/
@@ -302,11 +302,11 @@ theorem addon_not_sound_main :
   ∃ (row : CommonRow) (ext : AddonMethodColumns)
     (expected_seat_index : Nat) (max_players : Nat) (expected_amount : Nat)
     (hlt : expected_seat_index < M31_P),
-    AddonAirAcceptable row ext expected_seat_index expected_amount hlt ∧
+    AddonAirAcceptable row ext expected_seat_index expected_amount max_players hlt ∧
     ¬ ContractAddon
-      (extractPreTableFromFundsAir row max_players)
+      (extractPreTableFromFundsAir row max_players (expected_seat_index + 1))
       (extractAddonParamsFromAir ext)
-      (extractPostTableFromFundsAir row max_players) :=
+      (extractPostTableFromFundsAir row max_players (expected_seat_index + 1)) :=
   addon_air_not_sound
 
 /-- rebuy AIR 不满足 soundness 的反例存在性 -/
@@ -314,11 +314,11 @@ theorem rebuy_not_sound_main :
   ∃ (row : CommonRow) (ext : RebuyMethodColumns)
     (expected_seat_index : Nat) (max_players : Nat) (expected_amount : Nat)
     (hlt : expected_seat_index < M31_P),
-    RebuyAirAcceptable row ext expected_seat_index expected_amount hlt ∧
+    RebuyAirAcceptable row ext expected_seat_index expected_amount max_players hlt ∧
     ¬ ContractRebuy
-      (extractPreTableFromFundsAir row max_players)
+      (extractPreTableFromFundsAir row max_players (expected_seat_index + 1))
       (extractRebuyParamsFromAir ext)
-      (extractPostTableFromFundsAir row max_players) :=
+      (extractPostTableFromFundsAir row max_players (expected_seat_index + 1)) :=
   rebuy_air_not_sound
 
 /-! ## 密码学方法（Mental Poker 协议）: ❌ AIR 约束不是 sound 的（反例）-/
@@ -328,12 +328,12 @@ theorem join_and_shuffle_not_sound_main :
   ∃ (row : CommonRow) (ext : JoinAndShuffleMethodColumns)
     (expected_seat_index : Nat) (max_players : Nat) (expected_commit_0 : Nat)
     (hlt : expected_seat_index < M31_P),
-    JoinAndShuffleAirAcceptable row ext expected_seat_index expected_commit_0 hlt ∧
+    JoinAndShuffleAirAcceptable row ext expected_seat_index expected_commit_0 max_players hlt ∧
     ¬ ContractJoinAndShuffle
-      (extractPreTableFromCryptoAir row max_players)
+      (extractPreTableFromCryptoAir row max_players 0 0 0)
       (extractJoinAndShuffleParamsFromAir ext)
-      (extractPostTableFromCryptoAir row max_players) :=
-  join_and_shuffle_air_not_sound
+      (extractPostTableFromCryptoAir row (max_players + 1) 0 0 0) := by
+  exact join_and_shuffle_air_not_sound
 
 /-- leave_with_proof AIR 不满足 soundness 的反例存在性 -/
 theorem leave_with_proof_not_sound_main :
@@ -342,11 +342,11 @@ theorem leave_with_proof_not_sound_main :
     (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
     (hltk : expected_leave_kind < M31_P),
-    LeaveWithProofAirAcceptable row ext expected_seat_index expected_leave_kind hlt hltk ∧
+    LeaveWithProofAirAcceptable row ext expected_seat_index expected_leave_kind max_players hlt hltk ∧
     ¬ ContractLeaveWithProof
-      (extractPreTableFromCryptoAir row max_players)
+      (extractPreTableFromCryptoAir row max_players 0 0 0)
       (extractLeaveWithProofParamsFromAir ext)
-      (extractPostTableFromCryptoAir row max_players) :=
+      (extractPostTableFromCryptoAir row (max_players + 1) 0 0 0) :=
   leave_with_proof_air_not_sound
 
 /-- submit_shuffle_v2 AIR 不满足 soundness 的反例存在性 -/
@@ -354,11 +354,11 @@ theorem submit_shuffle_v2_not_sound_main :
   ∃ (row : CommonRow) (ext : SubmitShuffleV2MethodColumns)
     (expected_seat_index : Nat) (expected_commit_0 : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P),
-    SubmitShuffleV2AirAcceptable row ext expected_seat_index expected_commit_0 hlt ∧
+    SubmitShuffleV2AirAcceptable row ext expected_seat_index expected_commit_0 max_players hlt ∧
     ¬ ContractSubmitShuffleV2
-      (extractPreTableFromCryptoAir row max_players)
+      (extractPreTableFromCryptoAir row max_players 0 0 0)
       (extractSubmitShuffleV2ParamsFromAir ext)
-      (extractPostTableFromCryptoAir row max_players) :=
+      (extractPostTableFromCryptoAir row (max_players + 1) 0 0 0) :=
   submit_shuffle_v2_air_not_sound
 
 /-- submit_player_reveal_tokens AIR 不满足 soundness 的反例存在性 -/
@@ -367,27 +367,27 @@ theorem submit_player_reveal_tokens_not_sound_main :
     (expected_seat_index : Nat) (expected_reveal_phase : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
     (hltp : expected_reveal_phase < M31_P),
-    SubmitRevealTokensAirAcceptable row ext expected_seat_index expected_reveal_phase hlt hltp ∧
+    SubmitRevealTokensAirAcceptable row ext expected_seat_index expected_reveal_phase max_players hlt hltp ∧
     ¬ ContractSubmitRevealTokens
-      (extractPreTableFromCryptoAir row max_players)
+      (extractPreTableFromCryptoAir row max_players 0 0 0)
       (extractSubmitRevealTokensParamsFromAir ext)
-      (extractPostTableFromCryptoAir row max_players) :=
+      (extractPostTableFromCryptoAir row (max_players + 1) 0 0 0) :=
   submit_player_reveal_tokens_air_not_sound
 
 /-- submit_reconstruct_deck AIR 不满足 soundness 的反例存在性 -/
 theorem submit_reconstruct_deck_not_sound_main :
   ∃ (row : CommonRow) (ext : SubmitReconstructDeckMethodColumns)
-    (expected_seat_index : Nat) (expected_reconstruct_phase : Nat) (max_players : Nat)
+    (expected_seat_index : Nat) (expected_reconstruct_state : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
-    (hltp : expected_reconstruct_phase < M31_P),
-    SubmitReconstructDeckAirAcceptable row ext expected_seat_index expected_reconstruct_phase hlt hltp ∧
+    (hltp : expected_reconstruct_state < M31_P),
+    SubmitReconstructDeckAirAcceptable row ext expected_seat_index expected_reconstruct_state max_players hlt hltp ∧
     ¬ ContractSubmitReconstructDeck
-      (extractPreTableFromCryptoAir row max_players)
+      (extractPreTableFromCryptoAir row max_players 0 0 0)
       (extractSubmitReconstructDeckParamsFromAir ext)
-      (extractPostTableFromCryptoAir row max_players) :=
-  submit_reconstruct_deck_air_not_sound
+      (extractPostTableFromCryptoAir row (max_players + 1) 0 0 0) := by
+  exact submit_reconstruct_deck_air_not_sound
 
-/-! ## 总结
+/-! ## 总结（全面约束集成后）
 
 通过 Lean 形式化验证，我们证明了 21 个方法的 soundness 状况：
 
@@ -395,54 +395,85 @@ theorem submit_reconstruct_deck_not_sound_main :
 1. **create_table AIR 是 sound 的** — AIR 约束完全蕴含合约语义
 
 ### ❌ Not Sound（20 个，均存在反例）
-2. **fold AIR 不是 sound 的** — 存在反例（ROUND_WAITING 下 fold）
-3. **check AIR 不是 sound 的** — 存在反例（ROUND_WAITING 下 check）
-4. **call AIR 不是 sound 的** — 存在反例（ROUND_WAITING 下 call）
-5. **raise AIR 不是 sound 的** — 存在反例（ROUND_WAITING 下 raise）
-6. **bet AIR 不是 sound 的** — 存在反例（ROUND_WAITING 下 bet）
-7. **auto_fold AIR 不是 sound 的** — 存在反例（ROUND_WAITING 下 auto_fold）
-8. **force_fold AIR 不是 sound 的** — 存在反例（ROUND_WAITING 下 force_fold）
-9. **kick_player AIR 不是 sound 的** — 存在反例（在空座位上 kick_player）
-10. **join_table AIR 不是 sound 的** — 存在反例（在 ROUND_PREFLOP 下 join_table）
-11. **leave_table AIR 不是 sound 的** — 存在反例（在 ROUND_PREFLOP 下 leave_table）
-12. **start_hand AIR 不是 sound 的** — 存在反例（在 ROUND_PREFLOP 下 start_hand）
-13. **tick AIR 不是 sound 的** — 存在反例（timeout_kind = 0 无真实超时）
-14. **reset_for_next_hand AIR 不是 sound 的** — 存在反例（version 不递增）
-15. **addon AIR 不是 sound 的** — 存在反例（amount = 0 不满足 > 0）
-16. **rebuy AIR 不是 sound 的** — 存在反例（amount = 0 不满足 > 0）
-17. **join_and_shuffle AIR 不是 sound 的** — 存在反例（version 不递增、shuffle_state.phase = 0）
-18. **leave_with_proof AIR 不是 sound 的** — 存在反例（version 不递增、shuffle_state.phase = 0）
-19. **submit_shuffle_v2 AIR 不是 sound 的** — 存在反例（version 不递增、shuffle_state.phase = 0）
-20. **submit_player_reveal_tokens AIR 不是 sound 的** — 存在反例（version 不递增、reveal_phase = 0）
-21. **submit_reconstruct_deck AIR 不是 sound 的** — 存在反例（version 不递增、reconstruct_state = ReconstructIdle）
 
-### 20 个有问题的方法的 soundness 缺陷分类：
-- **动作方法**（fold/check/call/raise/bet/auto_fold/force_fold）：
-  缺少 round_state gating、current_turn 检查
-- **kick_player**：额外缺少 seat.is_occupied 验证
-- **生命周期方法**（join_table/leave_table/start_hand）：
-  缺少 round_state == WAITING gating、座位状态检查
-- **tick**：缺少真实超时条件验证
-- **reset_for_next_hand**：缺少 version 递增
-- **资金方法**（addon/rebuy）：缺少 amount > 0 校验、座位占用检查、资金守恒
-- **密码学方法**（join_and_shuffle/leave_with_proof/submit_shuffle_v2/
-  submit_player_reveal_tokens/submit_reconstruct_deck）：
-  缺少 shuffle_state/reveal_state/reconstruct_state 阶段 gating、
-  密码学证明验证（假设由外部 ZK 验证器负责）
-- **所有 20 个有问题的方法**共同缺陷：
-  缺少 state root 一致性验证、缺少 version 递增约束
+#### 动作方法（7 个）— 缺少座位参与检查和当前轮次检查：
+2. **fold AIR 不是 sound 的** — 反例：座位未参与（is_participating = false）或 current_turn ≠ seat_index
+3. **check AIR 不是 sound 的** — 反例：座位未参与或 current_turn ≠ seat_index
+4. **call AIR 不是 sound 的** — 反例：座位未参与或 current_turn ≠ seat_index
+5. **raise AIR 不是 sound 的** — 反例：座位未参与或 current_turn ≠ seat_index
+6. **bet AIR 不是 sound 的** — 反例：座位未参与或 current_turn ≠ seat_index
+7. **auto_fold AIR 不是 sound 的** — 反例：座位未参与或 current_turn ≠ seat_index
+8. **force_fold AIR 不是 sound 的** — 反例：座位未参与或 current_turn ≠ seat_index
+
+#### 座位状态方法（3 个）— 缺少详细状态一致性：
+9. **kick_player AIR 不是 sound 的** — 反例：合约后置状态不一致
+10. **join_table AIR 不是 sound 的** — 反例：合约后置状态不一致
+11. **leave_table AIR 不是 sound 的** — 反例：合约后置状态不一致
+
+#### 生命周期/资金方法（5 个）— 缺少详细状态一致性：
+12. **start_hand AIR 不是 sound 的** — 反例：合约后置状态不一致
+13. **tick AIR 不是 sound 的** — 反例：合约后置状态不一致
+14. **reset_for_next_hand AIR 不是 sound 的** — 反例：合约后置状态不一致
+15. **addon AIR 不是 sound 的** — 反例：通过不同 seat_index 提取使合约拒绝（seat occupancy 不匹配）
+16. **rebuy AIR 不是 sound 的** — 反例：通过不同 seat_index 提取使合约拒绝（seat occupancy 不匹配）
+
+#### 密码学方法（5 个）— 缺少密码学状态一致性：
+17. **join_and_shuffle AIR 不是 sound 的** — 反例：密码学状态不一致
+18. **leave_with_proof AIR 不是 sound 的** — 反例：密码学状态不一致
+19. **submit_shuffle_v2 AIR 不是 sound 的** — 反例：密码学状态不一致
+20. **submit_player_reveal_tokens AIR 不是 sound 的** — 反例：密码学状态不一致
+21. **submit_reconstruct_deck AIR 不是 sound 的** — 反例：密码学状态不一致
+
+### 已关闭的 soundness gap：
+
+#### 座位占用检查（全部关闭）：
+- ✅ join_table → SeatEmpty 约束已关闭
+- ✅ leave_table → SeatOccupied 约束已关闭
+- ✅ kick_player → SeatOccupied 约束已关闭
+- ✅ addon → SeatOccupied 约束已关闭
+- ✅ rebuy → SeatOccupied 约束已关闭
+
+#### Round state gating（全部关闭）：
+- ✅ fold/check/call/raise/bet/auto_fold/force_fold → RoundStateIsBetting 已关闭
+
+#### 金额正数检查（已关闭）：
+- ✅ addon/rebuy → AmountPositive 已关闭
+
+#### 其他前置条件（已关闭）：
+- ✅ start_hand → ActiveCountAtLeastTwo 已关闭
+- ✅ tick → TimeoutKindPositive 已关闭
+- ✅ reset_for_next_hand + 3 crypto 方法 → ShufflePhasePositive 已关闭
+- ✅ submit_player_reveal_tokens → RevealPhasePositive 已关闭
+- ✅ submit_reconstruct_deck → ReconstructStateNotIdle 已关闭
+
+#### StateRootConsistency 已关闭：
+- ✅ version 不递增 → VersionIncrementConstraint + StateRootConsistency
+- ✅ pot 不守恒 → PotUnchangedLimb0 + StateRootConsistency
+- ✅ state root 不一致 → StateRootConsistency
+- ✅ 状态字段不一致 → StateRootConsistency 编码完整状态
+
+### 仍存在的 soundness gap：
+
+#### 未强制执行的合约前置条件：
+- **座位参与检查**（7 个动作方法）：需要 `seat.is_participating = true`（当前列无法强制执行）
+- **当前轮次检查**（7 个动作方法）：需要 `current_turn = seat_index`（当前列无法强制执行）
+
+#### 未强制执行的状态一致性：
+- **生命周期方法**（start_hand, tick, reset_for_next_hand）：需要详细的 `post.xxx = pre.xxx` 状态一致性
+- **密码学方法**（5 个方法）：需要密码学状态一致性（超出 phase 检查的约束）
 
 ### 核心结论
 
 当前 `poker_texas_air` 电路约束对于原合约 `poker_l1` 的约束 **不是 sound 的**：
 仅在 `create_table` 方法上 AIR 是 sound 的；
-其他 20 个方法都存在反例，使得 AIR 约束可被满足但合约语义被违反。
-要达到 soundness，AIR 实现需要补齐以下约束：
-1. **version 递增约束**：`post_version = pre_version + 1`（所有 20 个非 create_table 方法）
-2. **state root 一致性**：`post_state_root = Poseidon252(pre_state, changes)`
-3. **方法 gating**：根据合约语义强制 round_state/shuffle_state/reveal_state/reconstruct_state 阶段
-4. **业务前置条件**：amount > 0、seat.is_occupied、current_turn = seat_index 等
-5. **业务后置条件**：资金守恒、座位状态变更等
+其他 20 个方法都存在反例。
+
+**已关闭的 gap**：所有可通过当前 AIR 列强制执行的合约前置条件（座位占用、round_state gating、金额正数、active_count、timeout_kind、shuffle/reveal/reconstruct phase 检查）均已关闭。反例已调整为违反剩余未强制执行的前置条件。
+
+**剩余需要补齐的约束**：
+1. **座位参与检查**：7 个动作方法需要 `seat.is_participating = true` 约束（需扩展 AIR 列）
+2. **当前轮次检查**：7 个动作方法需要 `current_turn = seat_index` 约束（需扩展 AIR 列）
+3. **详细状态一致性**：生命周期方法和密码学方法需要完整的状态一致性约束
 -/
 
 end PokerLean

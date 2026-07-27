@@ -16,33 +16,6 @@ structure RaiseMethodColumns where
   output_acted : M31
 deriving Repr
 
-/-- raise AIR 的方法约束 -/
-def RaiseMethodConstraints
-    (row : CommonRow)
-    (ext : RaiseMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_raise_to : Nat)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.input_raise_to.1 = ⟨expected_raise_to % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_acted = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row
-
-def RaiseAirAcceptable
-    (row : CommonRow)
-    (ext : RaiseMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_raise_to : Nat)
-    : Prop :=
-  CommonConstraints row MethodKind.Raise ∧
-  RaiseMethodConstraints row ext expected_seat_index hlt expected_raise_to ∧
-  row.method_kind = ⟨MethodKind.Raise.toNat, MethodKind.toNat_lt_M31P MethodKind.Raise⟩ ∧
-  row.is_active = M31.one
-
 /-- 从 AIR 行提取 pre 状态 -/
 def extractPreTableFromRaiseAir
     (row : CommonRow)
@@ -98,9 +71,9 @@ def extractPreTableFromRaiseAir
 /-- 从 AIR 行提取 post 状态 -/
 def extractPostTableFromRaiseAir
     (row : CommonRow)
-    (ext : RaiseMethodColumns)
+    (_ext : RaiseMethodColumns)
     (max_players : Nat)
-    (seat_index : Nat)
+    (_seat_index : Nat)
     : TexasPokerTable :=
   let pre := extractPreTableFromRaiseAir row max_players
   { pre with
@@ -114,6 +87,41 @@ def extractPostTableFromRaiseAir
       dealer_seat := row.post_button.val
     }
   }
+
+/-- raise AIR 的方法约束 -/
+def RaiseMethodConstraints
+    (row : CommonRow)
+    (ext : RaiseMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_raise_to : Nat)
+    (max_players : Nat)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_raise_to.1 = ⟨expected_raise_to % 65536, by unfold M31_P; omega⟩ ∧
+  ext.output_acted = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  RoundStateIsBetting row ∧
+  let pre_table := extractPreTableFromRaiseAir row max_players
+  let post_table := extractPostTableFromRaiseAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def RaiseAirAcceptable
+    (row : CommonRow)
+    (ext : RaiseMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_raise_to : Nat)
+    (max_players : Nat)
+    : Prop :=
+  CommonConstraints row MethodKind.Raise ∧
+  RaiseMethodConstraints row ext expected_seat_index hlt expected_raise_to max_players ∧
+  row.method_kind = ⟨MethodKind.Raise.toNat, MethodKind.toNat_lt_M31P MethodKind.Raise⟩ ∧
+  row.is_active = M31.one
 
 /-- 从 AIR 提取 raise 参数 -/
 def extractRaiseParamsFromAir

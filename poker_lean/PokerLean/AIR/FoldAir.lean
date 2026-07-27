@@ -17,30 +17,6 @@ structure FoldRow where
   method : FoldMethodColumns
 deriving Repr
 
-def FoldMethodConstraints
-    (row : CommonRow)
-    (ext : FoldMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.output_folded = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row ∧
-  PotUnchangedLimb0 row
-
-def FoldAirAcceptable
-    (row : CommonRow)
-    (ext : FoldMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  CommonConstraints row MethodKind.Fold ∧
-  FoldMethodConstraints row ext expected_seat_index hlt ∧
-  row.method_kind = ⟨MethodKind.Fold.toNat, MethodKind.toNat_lt_M31P MethodKind.Fold⟩ ∧
-  row.is_active = M31.one
-
 def extractPreTableFromFoldAir
     (row : CommonRow)
     (max_players : Nat)
@@ -94,9 +70,9 @@ def extractPreTableFromFoldAir
 
 def extractPostTableFromFoldAir
     (row : CommonRow)
-    (ext : FoldMethodColumns)
+    (_ext : FoldMethodColumns)
     (max_players : Nat)
-    (seat_index : Nat)
+    (_seat_index : Nat)
     : TexasPokerTable :=
   let pre := extractPreTableFromFoldAir row max_players
   { pre with
@@ -110,6 +86,38 @@ def extractPostTableFromFoldAir
       dealer_seat := row.post_button.val
     }
   }
+
+def FoldMethodConstraints
+    (row : CommonRow)
+    (ext : FoldMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.output_folded = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  RoundStateIsBetting row ∧
+  PotUnchangedLimb0 row ∧
+  let pre_table := extractPreTableFromFoldAir row max_players
+  let post_table := extractPostTableFromFoldAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def FoldAirAcceptable
+    (row : CommonRow)
+    (ext : FoldMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  CommonConstraints row MethodKind.Fold ∧
+  FoldMethodConstraints row ext expected_seat_index max_players hlt ∧
+  row.method_kind = ⟨MethodKind.Fold.toNat, MethodKind.toNat_lt_M31P MethodKind.Fold⟩ ∧
+  row.is_active = M31.one
 
 def extractFoldParamsFromAir
     (ext : FoldMethodColumns)

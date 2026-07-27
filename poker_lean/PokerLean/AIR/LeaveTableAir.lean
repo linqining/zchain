@@ -34,38 +34,19 @@ namespace PokerLean
 structure LeaveTableMethodColumns where
   /-- 输入：座位索引 -/
   input_seat_index : M31
+  /-- 输入：座位占用状态（0 = 空，1 = 占用）- 必须为占用 -/
+  input_seat_is_occupied : M31
   /-- 输出：退款金额（4 limb） -/
   output_refund : M31 × M31 × M31 × M31
 deriving Repr
-
-/-- leave_table 方法特定约束 -/
-def LeaveTableMethodConstraints
-    (row : CommonRow)
-    (ext : LeaveTableMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  row.is_active = M31.one →
-  VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt
-
-/-- leave_table AIR 接受谓词 -/
-def LeaveTableAirAcceptable
-    (row : CommonRow)
-    (ext : LeaveTableMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    : Prop :=
-  CommonConstraints row MethodKind.LeaveTable ∧
-  LeaveTableMethodConstraints row ext expected_seat_index hlt ∧
-  row.method_kind = ⟨MethodKind.LeaveTable.toNat, MethodKind.toNat_lt_M31P MethodKind.LeaveTable⟩ ∧
-  row.is_active = M31.one
 
 /-- 从 AIR 行提取前状态表 -/
 def extractPreTableFromLeaveTableAir
     (row : CommonRow)
     (max_players : Nat)
-    : TexasPokerTable := {
+    (seat_index : Nat)
+    : TexasPokerTable :=
+  let base : TexasPokerTable := {
   table_id := 0
   name_hash := 0
   seats := List.replicate max_players Seat.empty
@@ -111,20 +92,24 @@ def extractPreTableFromLeaveTableAir
   started_at := 0
   timeout := 0
   last_action_time := 0
-}
+  }
+  -- 设置目标座位为已占用
+  base.update_seat seat_index (fun _ => { Seat.empty with player := PlayerId.ofNat 1 })
 
 /-- 从 AIR 行提取后状态表 -/
 def extractPostTableFromLeaveTableAir
     (row : CommonRow)
-    (ext : LeaveTableMethodColumns)
+    (_ext : LeaveTableMethodColumns)
     (max_players : Nat)
     (seat_index : Nat)
     : TexasPokerTable :=
-  let pre := extractPreTableFromLeaveTableAir row max_players
+  let pre := extractPreTableFromLeaveTableAir row max_players seat_index
   { pre with
     version := decodeU64 row.post_version.1 row.post_version.2.1
         row.post_version.2.2.1 row.post_version.2.2.2
     round_state := RoundState.fromNat row.post_round_state.val
+    -- 离开后目标座位清空
+    seats := List.modify (fun _ => Seat.empty) seat_index pre.seats
   }
 
 /-- 从 AIR 提取 leave_table 参数 -/
@@ -133,5 +118,37 @@ def extractLeaveTableParamsFromAir
     : LeaveTableParams := {
   seat_index := ext.input_seat_index.val
 }
+
+/-- leave_table 方法特定约束 -/
+def LeaveTableMethodConstraints
+    (row : CommonRow)
+    (ext : LeaveTableMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  row.is_active = M31.one →
+  VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  -- 目标座位必须被占用（leave_table 前置条件）
+  SeatOccupied ext.input_seat_is_occupied ∧
+  let pre_table := extractPreTableFromLeaveTableAir row max_players expected_seat_index
+  let post_table := extractPostTableFromLeaveTableAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+/-- leave_table AIR 接受谓词 -/
+def LeaveTableAirAcceptable
+    (row : CommonRow)
+    (ext : LeaveTableMethodColumns)
+    (expected_seat_index : Nat)
+    (max_players : Nat)
+    (hlt : expected_seat_index < M31_P)
+    : Prop :=
+  CommonConstraints row MethodKind.LeaveTable ∧
+  LeaveTableMethodConstraints row ext expected_seat_index max_players hlt ∧
+  row.method_kind = ⟨MethodKind.LeaveTable.toNat, MethodKind.toNat_lt_M31P MethodKind.LeaveTable⟩ ∧
+  row.is_active = M31.one
 
 end PokerLean

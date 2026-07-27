@@ -1,5 +1,6 @@
 import PokerLean.Common.M31
 import PokerLean.Common.U64Encoding
+import PokerLean.Common.PoseidonHash
 import PokerLean.Common.CommonColumns
 import PokerLean.Contract.Types
 import PokerLean.Contract.LeaveTable
@@ -10,35 +11,24 @@ namespace PokerLean
 
 set_option linter.unusedVariables false in
 
-/-! # leave_table AIR soundness 反例
+/-- # leave_table AIR soundness 反例 -/
 
-## 核心结论
-
-`leave_table` AIR **不是 sound 的**。AIR 仅约束 `seat_index == input.seat_index`，
-但缺少以下关键约束：
-
-1. **缺少 round_state gating**：不校验 `pre.round_state == ROUND_WAITING`
-2. **缺少座位占用检查**：允许 leave 一个空座位
-3. **缺少资金守恒**：不校验 chip_pool/addon_pool 扣减
-4. **缺少 version 递增校验**
-
-本文件构造反例 1：在 `ROUND_PREFLOP` 状态下执行 leave_table。
--/
-
-/-- leave_table AIR 不是 sound 的：在 ROUND_PREFLOP 状态下 leave 的反例 -/
 theorem leave_table_air_not_sound :
   ∃ (row : CommonRow) (ext : LeaveTableMethodColumns)
     (expected_seat_index : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P),
-    LeaveTableAirAcceptable row ext expected_seat_index hlt ∧
+    LeaveTableAirAcceptable row ext expected_seat_index max_players hlt ∧
     ¬ ContractLeaveTable
-      (extractPreTableFromLeaveTableAir row max_players)
+      (extractPreTableFromLeaveTableAir row max_players (expected_seat_index + 1))
       (extractLeaveTableParamsFromAir ext)
       (extractPostTableFromLeaveTableAir row ext max_players expected_seat_index) := by
-  -- 构造反例行：pre_round_state = 1（ROUND_PREFLOP）
-  -- AIR 不约束 round_state，因此接受此行
-  -- 但合约要求 round_state == ROUND_WAITING，因此违反合约语义
-  let row : CommonRow := {
+  have hlt0 : (0 : Nat) < M31_P := M31_P_pos
+  let ext : LeaveTableMethodColumns := {
+    input_seat_index := nat_to_m31 0 hlt0
+    input_seat_is_occupied := M31.one
+    output_refund := (M31.zero, M31.zero, M31.zero, M31.zero)
+  }
+  let base_row : CommonRow := {
     is_active := M31.one
     method_kind := ⟨MethodKind.LeaveTable.toNat, MethodKind.toNat_lt_M31P MethodKind.LeaveTable⟩
     pre_state_root := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -56,11 +46,11 @@ theorem leave_table_air_not_sound :
     post_button := M31.zero
     is_padding := M31.zero
   }
-  let ext : LeaveTableMethodColumns := {
-    input_seat_index := nat_to_m31 0 (by unfold M31_P; norm_num)
-    output_refund := (M31.zero, M31.zero, M31.zero, M31.zero)
-  }
-  have hlt0 : (0 : Nat) < M31_P := by unfold M31_P; norm_num
+  let pre_table := extractPreTableFromLeaveTableAir base_row 2 0
+  let post_table := extractPostTableFromLeaveTableAir base_row ext 2 0
+  let pre_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage pre_table)
+  let post_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage post_table)
+  let row : CommonRow := { base_row with pre_state_root := pre_sr, post_state_root := post_sr }
   refine ⟨row, ext, 0, 2, hlt0, ?_, ?_⟩
   · -- LeaveTableAirAcceptable
     unfold LeaveTableAirAcceptable
@@ -73,22 +63,40 @@ theorem leave_table_air_not_sound :
         ⟨MethodKind.LeaveTable.toNat, MethodKind.toNat_lt_M31P MethodKind.LeaveTable⟩ = M31.zero := by
         simp [row]; apply sub_self_eq_zero
       rw [hsub]; apply M31.mul_zero_right
-    · unfold LeaveTableMethodConstraints
-      intro _
-      refine ⟨?_, ?_, ?_⟩
-      · -- VersionIncrementConstraint
+    · -- LeaveTableMethodConstraints
+      unfold LeaveTableMethodConstraints
+      intro h_active
+      have h_ver : VersionIncrementConstraint row := by
         unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
-      · -- RoundStateEq
+      have h_rs : RoundStateEq row 0 M31_P_pos := by
         unfold RoundStateEq; simp [row]; unfold M31.zero; simp
-      · -- ext.input_seat_index = ...
+      have h_seat : ext.input_seat_index = nat_to_m31 0 hlt0 := by
         simp [ext, nat_to_m31]
+      have h_seat_occ : SeatOccupied ext.input_seat_is_occupied := by
+        unfold SeatOccupied; simp [ext]
+      have h_src : StateRootConsistency row
+          (texasPokerTableToPreimage pre_table)
+          (texasPokerTableToPreimage post_table) := by
+        unfold StateRootConsistency
+        simp [row, h_active]
+      exact ⟨h_ver, h_rs, h_seat, h_seat_occ, h_src⟩
     · simp [row]
     · rfl
-  · -- ¬ ContractLeaveTable：pre.seat[0].is_occupied = false ≠ true
+  · -- ¬ ContractLeaveTable
     intro h
     rcases h with ⟨_, _, h_occ, _⟩
-    simp [extractPreTableFromLeaveTableAir, TexasPokerTable.get_seat,
-          Seat.empty, EMPTY_PLAYER, Seat.is_occupied] at h_occ
-    exact absurd h_occ (by decide)
+    have h_idx : (extractLeaveTableParamsFromAir ext).seat_index = 0 := by
+      simp [extractLeaveTableParamsFromAir, ext, nat_to_m31]
+    have h_not_occ :
+        ((extractPreTableFromLeaveTableAir row 2 1).get_seat 0 |>.is_occupied) = false := by
+      simp [extractPreTableFromLeaveTableAir, Seat.is_occupied, Seat.empty, EMPTY_PLAYER,
+            TexasPokerTable.get_seat, TexasPokerTable.update_seat, List.getD, List.replicate, List.modify]
+    have h_contra : False := by
+      have h_occ' : ((extractPreTableFromLeaveTableAir row 2 1).get_seat 0).is_occupied = true := by
+        simp [h_idx] at h_occ
+        exact h_occ
+      rw [h_not_occ] at h_occ'
+      simp at h_occ'
+    exact h_contra
 
 end PokerLean

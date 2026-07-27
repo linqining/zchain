@@ -16,32 +16,6 @@ structure BetMethodColumns where
   output_acted : M31
 deriving Repr
 
-def BetMethodConstraints
-    (row : CommonRow)
-    (ext : BetMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_bet_amount : Nat)
-    : Prop :=
-  row.is_active = M31.one →
-  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
-  ext.input_bet_amount.1 = ⟨expected_bet_amount % 65536, by unfold M31_P; omega⟩ ∧
-  ext.output_acted = M31.one ∧
-  VersionIncrementConstraint row ∧
-  RoundStateUnchanged row
-
-def BetAirAcceptable
-    (row : CommonRow)
-    (ext : BetMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_bet_amount : Nat)
-    : Prop :=
-  CommonConstraints row MethodKind.Bet ∧
-  BetMethodConstraints row ext expected_seat_index hlt expected_bet_amount ∧
-  row.method_kind = ⟨MethodKind.Bet.toNat, MethodKind.toNat_lt_M31P MethodKind.Bet⟩ ∧
-  row.is_active = M31.one
-
 def extractPreTableFromBetAir
     (row : CommonRow)
     (max_players : Nat)
@@ -95,9 +69,9 @@ def extractPreTableFromBetAir
 
 def extractPostTableFromBetAir
     (row : CommonRow)
-    (ext : BetMethodColumns)
+    (_ext : BetMethodColumns)
     (max_players : Nat)
-    (seat_index : Nat)
+    (_seat_index : Nat)
     : TexasPokerTable :=
   let pre := extractPreTableFromBetAir row max_players
   { pre with
@@ -111,6 +85,40 @@ def extractPostTableFromBetAir
       dealer_seat := row.post_button.val
     }
   }
+
+def BetMethodConstraints
+    (row : CommonRow)
+    (ext : BetMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_bet_amount : Nat)
+    (max_players : Nat)
+    : Prop :=
+  row.is_active = M31.one →
+  ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_bet_amount.1 = ⟨expected_bet_amount % 65536, by unfold M31_P; omega⟩ ∧
+  ext.output_acted = M31.one ∧
+  VersionIncrementConstraint row ∧
+  RoundStateUnchanged row ∧
+  RoundStateIsBetting row ∧
+  let pre_table := extractPreTableFromBetAir row max_players
+  let post_table := extractPostTableFromBetAir row ext max_players expected_seat_index
+  StateRootConsistency row
+    (texasPokerTableToPreimage pre_table)
+    (texasPokerTableToPreimage post_table)
+
+def BetAirAcceptable
+    (row : CommonRow)
+    (ext : BetMethodColumns)
+    (expected_seat_index : Nat)
+    (hlt : expected_seat_index < M31_P)
+    (expected_bet_amount : Nat)
+    (max_players : Nat)
+    : Prop :=
+  CommonConstraints row MethodKind.Bet ∧
+  BetMethodConstraints row ext expected_seat_index hlt expected_bet_amount max_players ∧
+  row.method_kind = ⟨MethodKind.Bet.toNat, MethodKind.toNat_lt_M31P MethodKind.Bet⟩ ∧
+  row.is_active = M31.one
 
 def extractBetParamsFromAir
     (ext : BetMethodColumns)

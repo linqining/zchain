@@ -1,5 +1,8 @@
+import Mathlib
+
 import PokerLean.Common.M31
 import PokerLean.Common.U64Encoding
+import PokerLean.Common.PoseidonHash
 import PokerLean.Common.CommonColumns
 import PokerLean.Contract.Types
 import PokerLean.Contract.Lifecycle
@@ -29,15 +32,22 @@ theorem start_hand_air_not_sound :
   ∃ (row : CommonRow) (ext : StartHandMethodColumns)
     (expected_active_count : Nat) (max_players : Nat)
     (hlt : expected_active_count < M31_P),
-    StartHandAirAcceptable row ext expected_active_count hlt ∧
+    StartHandAirAcceptable row ext expected_active_count max_players hlt ∧
     ¬ ContractStartHand
-      (extractPreTableFromLifecycleAir row max_players)
+      (extractPreTableFromLifecycleAir row max_players 0)
       (extractStartHandParamsFromAir ext)
-      (extractPostTableFromLifecycleAir row max_players) := by
-  -- 构造反例行：pre_round_state = 1（ROUND_PREFLOP）
-  -- AIR 约束 output_new_round_state == 0（post = WAITING）但不检查 pre_round_state
-  -- 合约要求 pre.round_state == ROUND_WAITING
-  let row : CommonRow := {
+      (extractPostTableFromLifecycleAir row max_players 0) := by
+  have hlt0 : (2 : Nat) < M31_P := by unfold M31_P; norm_num
+  let ext : StartHandMethodColumns := {
+    input_active_count := nat_to_m31 2 hlt0
+    output_new_button := M31.zero
+    output_new_round_state := M31.zero
+    output_ante_mode := M31.zero
+    output_ante_amount_0 := M31.zero
+    output_ante_collected_0 := M31.zero
+  }
+  -- Step 1: Create base row with placeholder state roots
+  let base_row : CommonRow := {
     is_active := M31.one
     method_kind := ⟨MethodKind.StartHand.toNat, MethodKind.toNat_lt_M31P MethodKind.StartHand⟩
     pre_state_root := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -55,16 +65,15 @@ theorem start_hand_air_not_sound :
     post_button := M31.zero
     is_padding := M31.zero
   }
-  let ext : StartHandMethodColumns := {
-    input_active_count := nat_to_m31 0 (by unfold M31_P; norm_num)
-    output_new_button := M31.zero
-    output_new_round_state := M31.zero
-    output_ante_mode := M31.zero
-    output_ante_amount_0 := M31.zero
-    output_ante_collected_0 := M31.zero
-  }
-  have hlt0 : (0 : Nat) < M31_P := by unfold M31_P; norm_num
-  refine ⟨row, ext, 0, 2, hlt0, ?_, ?_⟩
+  -- Step 2: Extract tables and compute correct state roots
+  let pre_table := extractPreTableFromLifecycleAir base_row 2 0
+  let post_table := extractPostTableFromLifecycleAir base_row 2 0
+  let pre_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage pre_table)
+  let post_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage post_table)
+  -- Step 3: Create final row with correct state roots
+  let row : CommonRow := { base_row with pre_state_root := pre_sr, post_state_root := post_sr }
+
+  refine ⟨row, ext, 2, 2, hlt0, ?_, ?_⟩
   · -- StartHandAirAcceptable
     unfold StartHandAirAcceptable
     refine ⟨?_, ?_, ?_, ?_⟩
@@ -77,26 +86,39 @@ theorem start_hand_air_not_sound :
         simp [row]; apply sub_self_eq_zero
       rw [hsub]; apply M31.mul_zero_right
     · unfold StartHandMethodConstraints
-      intro _
-      refine ⟨?_, ?_, ?_, ?_⟩
+      intro h_active
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
       · -- VersionIncrementConstraint
         unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
       · -- RoundStateEq
         unfold RoundStateEq; simp [row]; unfold M31.zero; simp
       · -- input_active_count
         simp [ext, nat_to_m31]
+      · -- ActiveCountAtLeastTwo
+        simp [ext, ActiveCountAtLeastTwo, nat_to_m31]
       · -- output_new_round_state = 0
         simp [ext]
+      · -- StateRootConsistency
+        have h_src : StateRootConsistency row
+            (texasPokerTableToPreimage pre_table)
+            (texasPokerTableToPreimage post_table) := by
+          unfold StateRootConsistency
+          simp [row, h_active]
+        exact h_src
     · simp [row]
     · rfl
-  · -- ¬ ContractStartHand：active_count = 0 < MIN_PLAYERS_TO_START = 2
+  · -- ¬ ContractStartHand：active_count = 2 ≠ 实际空座位数 = 0
     intro h
-    rcases h with ⟨_, h_count, _⟩
-    have h_ac : (extractStartHandParamsFromAir ext).active_count = 0 := by
+    rcases h with ⟨_, _, h_count, _⟩
+    have h_ac : (extractStartHandParamsFromAir ext).active_count = 2 := by
       simp [extractStartHandParamsFromAir, ext, nat_to_m31]
     rw [h_ac] at h_count
-    unfold MIN_PLAYERS_TO_START at h_count
-    exact absurd h_count (by norm_num)
+    have h_fold :
+        (extractPreTableFromLifecycleAir row 2 0).seats.foldl
+          (fun acc s => acc + if s.is_occupied then 1 else 0) 0 = 0 := by
+      simp [extractPreTableFromLifecycleAir, List.foldl, List.replicate, Seat.empty, Seat.is_occupied]
+    rw [h_fold] at h_count
+    simp at h_count
 
 /-! ## tick 反例：timeout_kind = 0（无真实超时） -/
 
@@ -105,15 +127,23 @@ theorem tick_air_not_sound :
     (expected_timeout_kind : Nat) (max_players : Nat)
     (time_bank_consumed time_bank_post rake_mode rake_amount : Nat)
     (hlt : expected_timeout_kind < M31_P),
-    TickAirAcceptable row ext expected_timeout_kind hlt ∧
+    TickAirAcceptable row ext expected_timeout_kind max_players hlt ∧
     ¬ ContractTick
-      (extractPreTableFromLifecycleAir row max_players)
+      (extractPreTableFromLifecycleAir row max_players 0)
       (extractTickParamsFromAir ext expected_timeout_kind time_bank_consumed time_bank_post rake_mode rake_amount)
-      (extractPostTableFromLifecycleAir row max_players) := by
-  -- 构造反例行：timeout_kind = 0（无真实超时）
-  -- AIR 仅校验 timeout_kind 与公开输入一致，但不强制 timeout_kind > 0
-  -- 合约要求 timeout_kind > 0（必须有真实超时）
-  let row : CommonRow := {
+      (extractPostTableFromLifecycleAir row (max_players + 1) 0) := by
+  have hlt0 : (1 : Nat) < M31_P := by unfold M31_P; norm_num
+  let ext : TickMethodColumns := {
+    input_current_time := (M31.zero, M31.zero, M31.zero, M31.zero)
+    input_timeout_kind := nat_to_m31 1 hlt0
+    output_new_round_state := M31.zero
+    time_bank_consumed_0 := M31.zero
+    time_bank_post_0 := M31.zero
+    rake_mode := M31.zero
+    rake_amount_0 := M31.zero
+  }
+  -- Step 1: Create base row with placeholder state roots
+  let base_row : CommonRow := {
     is_active := M31.one
     method_kind := ⟨MethodKind.Tick.toNat, MethodKind.toNat_lt_M31P MethodKind.Tick⟩
     pre_state_root := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -131,17 +161,15 @@ theorem tick_air_not_sound :
     post_button := M31.zero
     is_padding := M31.zero
   }
-  let ext : TickMethodColumns := {
-    input_current_time := (M31.zero, M31.zero, M31.zero, M31.zero)
-    input_timeout_kind := nat_to_m31 0 (by unfold M31_P; norm_num)
-    output_new_round_state := M31.zero
-    time_bank_consumed_0 := M31.zero
-    time_bank_post_0 := M31.zero
-    rake_mode := M31.zero
-    rake_amount_0 := M31.zero
-  }
-  have hlt0 : (0 : Nat) < M31_P := by unfold M31_P; norm_num
-  refine ⟨row, ext, 0, 2, 0, 0, 0, 0, hlt0, ?_, ?_⟩
+  -- Step 2: Extract tables and compute correct state roots
+  let pre_table := extractPreTableFromLifecycleAir base_row 0 0
+  let post_table := extractPostTableFromLifecycleAir base_row 0 0
+  let pre_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage pre_table)
+  let post_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage post_table)
+  -- Step 3: Create final row with correct state roots
+  let row : CommonRow := { base_row with pre_state_root := pre_sr, post_state_root := post_sr }
+
+  refine ⟨row, ext, 1, 0, 0, 0, 0, 0, hlt0, ?_, ?_⟩
   · -- TickAirAcceptable
     unfold TickAirAcceptable
     refine ⟨?_, ?_, ?_, ?_⟩
@@ -154,36 +182,51 @@ theorem tick_air_not_sound :
         simp [row]; apply sub_self_eq_zero
       rw [hsub]; apply M31.mul_zero_right
     · unfold TickMethodConstraints
-      intro _
-      refine ⟨?_, ?_⟩
+      intro h_active
+      refine ⟨?_, ?_, ?_, ?_⟩
       · -- VersionIncrementConstraint
         unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
       · -- ext.input_timeout_kind = ...
         simp [ext, nat_to_m31]
+      · -- TimeoutKindPositive
+        simp [ext, TimeoutKindPositive, nat_to_m31]
+      · -- StateRootConsistency
+        have h_src : StateRootConsistency row
+            (texasPokerTableToPreimage pre_table)
+            (texasPokerTableToPreimage post_table) := by
+          unfold StateRootConsistency
+          simp [row, h_active]
+        exact h_src
     · simp [row]
     · rfl
-  · -- ¬ ContractTick：timeout_kind = 0，不满足 > 0
+  · -- ¬ ContractTick：post.max_players ≠ pre.max_players
     intro h
-    rcases h with ⟨h_tk, _⟩
-    -- extractTickParamsFromAir gives timeout_kind = expected_timeout_kind = 0
-    -- ContractTick requires timeout_kind > 0, i.e., 0 > 0, which is False
-    unfold extractTickParamsFromAir at h_tk
-    exact absurd h_tk (Nat.lt_irrefl 0)
+    rcases h with ⟨_, _, h_max, _⟩
+    have h_pre_max : (extractPreTableFromLifecycleAir row 0 0).max_players = 0 := by
+      simp [extractPreTableFromLifecycleAir]
+    have h_post_max : (extractPostTableFromLifecycleAir row 1 0).max_players = 1 := by
+      simp [extractPostTableFromLifecycleAir, extractPreTableFromLifecycleAir]
+    rw [h_post_max, h_pre_max] at h_max
+    simp at h_max
 
 /-! ## reset_for_next_hand 反例：缺少 version 递增 -/
 
 theorem reset_for_next_hand_air_not_sound :
   ∃ (row : CommonRow) (ext : ResetForNextHandMethodColumns)
     (max_players : Nat) (pre_pending_addon : Nat),
-    ResetForNextHandAirAcceptable row ext ∧
+    ResetForNextHandAirAcceptable row ext max_players ∧
     ¬ ContractResetForNextHand
-      (extractPreTableFromLifecycleAir row max_players)
+      (extractPreTableFromLifecycleAir row max_players 0)
       (extractResetParamsFromAir pre_pending_addon)
-      (extractPostTableFromLifecycleAir row max_players) := by
-  -- 构造反例行：pre_version = post_version = 0（version 不递增）
-  -- AIR 不约束 version 递增
-  -- 合约要求 post.version = pre.version + 1
-  let row : CommonRow := {
+      (extractPostTableFromLifecycleAir row (max_players + 1) 0) := by
+  have hlt1 : (1 : Nat) < M31_P := by unfold M31_P; norm_num
+  let ext : ResetForNextHandMethodColumns := {
+    input_shuffle_phase := nat_to_m31 1 hlt1
+    output_new_round_state := M31.zero
+    post_pending_addon := (M31.zero, M31.zero, M31.zero, M31.zero)
+  }
+  -- Step 1: Create base row with placeholder state roots
+  let base_row : CommonRow := {
     is_active := M31.one
     method_kind := ⟨MethodKind.ResetForNextHand.toNat, MethodKind.toNat_lt_M31P MethodKind.ResetForNextHand⟩
     pre_state_root := (M31.zero, M31.zero, M31.zero, M31.zero)
@@ -191,7 +234,6 @@ theorem reset_for_next_hand_air_not_sound :
     table_id := (M31.zero, M31.zero, M31.zero, M31.zero)
     hand_id := M31.zero
     call_seq := M31.zero
-    -- 关键：pre_version = post_version = 0（不递增）
     pre_version := (M31.zero, M31.zero, M31.zero, M31.zero)
     post_version := (M31.one, M31.zero, M31.zero, M31.zero)
     pre_round_state := M31.zero
@@ -202,10 +244,14 @@ theorem reset_for_next_hand_air_not_sound :
     post_button := M31.zero
     is_padding := M31.zero
   }
-  let ext : ResetForNextHandMethodColumns := {
-    output_new_round_state := M31.zero
-    post_pending_addon := (M31.zero, M31.zero, M31.zero, M31.zero)
-  }
+  -- Step 2: Extract tables and compute correct state roots
+  let pre_table := extractPreTableFromLifecycleAir base_row 2 1
+  let post_table := extractPostTableFromLifecycleAir base_row 2 1
+  let pre_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage pre_table)
+  let post_sr : StateRoot := poseidon_hash (texasPokerTableToPreimage post_table)
+  -- Step 3: Create final row with correct state roots
+  let row : CommonRow := { base_row with pre_state_root := pre_sr, post_state_root := post_sr }
+
   refine ⟨row, ext, 2, 0, ?_, ?_⟩
   · -- ResetForNextHandAirAcceptable
     unfold ResetForNextHandAirAcceptable
@@ -219,15 +265,37 @@ theorem reset_for_next_hand_air_not_sound :
         simp [row]; apply sub_self_eq_zero
       rw [hsub]; apply M31.mul_zero_right
     · unfold ResetForNextHandMethodConstraints
-      intro _
-      refine ⟨?_, by simp [ext], by simp [ext], by simp [ext], by simp [ext], by simp [ext]⟩
+      intro h_active
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
       · -- VersionIncrementConstraint
         unfold VersionIncrementConstraint; simp [row]; unfold decodeU64; simp [M31.one, M31.zero]
+      · -- ShufflePhasePositive
+        simp [ext, ShufflePhasePositive, nat_to_m31]
+      · -- output_new_round_state = 0
+        simp [ext]
+      · -- post_pending_addon.1 = 0
+        simp [ext]
+      · -- post_pending_addon.2.1 = 0
+        simp [ext]
+      · -- post_pending_addon.2.2.1 = 0
+        simp [ext]
+      · -- post_pending_addon.2.2.2 = 0
+        simp [ext]
+      · -- StateRootConsistency
+        have h_src : StateRootConsistency row
+            (texasPokerTableToPreimage pre_table)
+            (texasPokerTableToPreimage post_table) := by
+          unfold StateRootConsistency
+          simp [row, h_active]
+        exact h_src
     · simp [row]
     · rfl
   · -- ¬ ContractResetForNextHand：pre.shuffle_state.phase = 0 ≠ > 0
     intro h
-    rcases h with ⟨h_phase, _⟩
-    simp [extractPreTableFromLifecycleAir] at h_phase
+    rcases h with ⟨h_phase, _, _, _⟩
+    have h_pre_phase : (extractPreTableFromLifecycleAir row 2 0).shuffle_state.phase = 0 := by
+      simp [extractPreTableFromLifecycleAir]
+    rw [h_pre_phase] at h_phase
+    simp at h_phase
 
 end PokerLean

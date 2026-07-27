@@ -1,5 +1,6 @@
 import PokerLean.Common.M31
 import PokerLean.Common.U64Encoding
+import PokerLean.Common.PoseidonHash
 
 namespace PokerLean
 
@@ -185,6 +186,32 @@ def RoundStateEq (row : CommonRow) (expected : Nat) (hlt : expected < M31_P) : P
 def PotUnchangedLimb0 (row : CommonRow) : Prop :=
   row.is_active = M31.one → row.post_pot.1 = row.pre_pot.1
 
+/-! ## State Root 一致性约束
+
+Poseidon252 将状态（preimage）哈希为 state_root。
+StateRootConsistency 要求 AIR 行中的 pre_state_root 和 post_state_root
+与对应的 preimage 哈希值匹配。
+
+这将 soundness 证明分解为两个层次：
+1. **哈希正确性**（由公理保证）：state_root = hash(preimage) ⟹ preimage 正确
+2. **业务语义正确性**（通过约束证明）：preimage 正确 ⟹ 合约语义满足
+-/
+
+/-- State root 一致性约束。
+   给定 pre/post 的 StatePreimage，要求 state_root 字段匹配 Poseidon 哈希。 -/
+def StateRootConsistency (row : CommonRow)
+    (pre_pre post_pre : StatePreimage) : Prop :=
+  row.is_active = M31.one →
+  row.pre_state_root = poseidon_hash pre_pre ∧
+  row.post_state_root = poseidon_hash post_pre
+
+/-- State root 一致性（等价 formulation：直接使用 StateRoot 类型）。 -/
+def StateRootConsistency' (row : CommonRow)
+    (pre_sr post_sr : StateRoot) : Prop :=
+  row.is_active = M31.one →
+  row.pre_state_root = pre_sr ∧
+  row.post_state_root = post_sr
+
 lemma mul_zero_y (y : M31) :
   M31.mul M31.zero y = M31.zero := by
   simp [M31.mul, M31.zero, Nat.mul_zero, Nat.zero_mod]
@@ -220,6 +247,91 @@ lemma mul_sub_one_self_eq_zero (x : M31) (h : x = M31.one) :
 
 lemma mul_sub_zero_self_eq_zero (x : M31) (h : x = M31.zero) :
   M31.mul x (M31.sub x M31.one) = M31.zero := mul_sub_zero_eq_zero x h
+
+/-! ## 阶段 Gating 约束 -/
+
+/-- round_state 是 betting 轮（PREFLOP=1/FLOP=2/TURN=3/RIVER=4）约束。 -/
+def RoundStateIsBetting (row : CommonRow) : Prop :=
+  row.is_active = M31.one →
+  row.pre_round_state.val = 1 ∨ row.pre_round_state.val = 2 ∨
+  row.pre_round_state.val = 3 ∨ row.pre_round_state.val = 4
+
+/-- round_state 不是 betting 轮（即 ROUND_WAITING=0）约束。 -/
+def RoundStateIsWaiting (row : CommonRow) : Prop :=
+  row.is_active = M31.one → row.pre_round_state.val = 0
+
+/-! ## 业务前置条件约束 -/
+
+/-- u64 金额 > 0 约束（4 limb 解码后 > 0）。 -/
+def AmountPositive (l0 l1 l2 l3 : M31) : Prop :=
+  decodeU64 l0 l1 l2 l3 > 0
+
+/-- timeout_kind > 0 约束。 -/
+def TimeoutKindPositive (timeout_kind : M31) : Prop :=
+  timeout_kind.val > 0
+
+/-- active_count ≥ 2 约束。 -/
+def ActiveCountAtLeastTwo (active_count : M31) : Prop :=
+  active_count.val ≥ 2
+
+/-! ## 密码学阶段 Gating 约束 -/
+
+/-- shuffle phase > 0 约束（shuffle 已开始）。 -/
+def ShufflePhasePositive (shuffle_phase : M31) : Prop :=
+  shuffle_phase.val > 0
+
+/-- reveal phase > 0 约束（揭牌已开始）。 -/
+def RevealPhasePositive (reveal_phase : M31) : Prop :=
+  reveal_phase.val > 0
+
+/-- reconstruct_state ≠ Idle 约束（重构已开始）。
+   0 = ReconstructIdle, 1 = Reconstructing, 2 = Reconstructed。 -/
+def ReconstructStateNotIdle (reconstruct_state : M31) : Prop :=
+  reconstruct_state.val ≠ 0
+
+/-! ## 座位状态约束 -/
+
+/-- 座位必须被占用（is_occupied = true）。 -/
+def SeatOccupied (seat_is_occupied : M31) : Prop :=
+  seat_is_occupied = M31.one
+
+/-- 座位必须为空（is_occupied = false）。 -/
+def SeatEmpty (seat_is_occupied : M31) : Prop :=
+  seat_is_occupied = M31.zero
+
+/-! ## 辅助引理 -/
+
+/-- M31 val = 1 满足 RoundStateIsBetting。 -/
+lemma round_state_1_is_betting (row : CommonRow)
+    (h : row.is_active = M31.one)
+    (hrs : row.pre_round_state.val = 1) :
+    RoundStateIsBetting row := by
+  unfold RoundStateIsBetting
+  simp [h, hrs]
+
+/-- M31 val = 2 满足 RoundStateIsBetting。 -/
+lemma round_state_2_is_betting (row : CommonRow)
+    (h : row.is_active = M31.one)
+    (hrs : row.pre_round_state.val = 2) :
+    RoundStateIsBetting row := by
+  unfold RoundStateIsBetting
+  simp [h, hrs]
+
+/-- M31 val = 3 满足 RoundStateIsBetting。 -/
+lemma round_state_3_is_betting (row : CommonRow)
+    (h : row.is_active = M31.one)
+    (hrs : row.pre_round_state.val = 3) :
+    RoundStateIsBetting row := by
+  unfold RoundStateIsBetting
+  simp [h, hrs]
+
+/-- M31 val = 4 满足 RoundStateIsBetting。 -/
+lemma round_state_4_is_betting (row : CommonRow)
+    (h : row.is_active = M31.one)
+    (hrs : row.pre_round_state.val = 4) :
+    RoundStateIsBetting row := by
+  unfold RoundStateIsBetting
+  simp [h, hrs]
 
 theorem active_row_satisfies_common (row : CommonRow) (kind : MethodKind)
     (h : ActiveRowConstraints row kind) :
