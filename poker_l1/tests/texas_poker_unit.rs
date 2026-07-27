@@ -1330,6 +1330,7 @@ fn occupy_seat(table: &mut TexasPokerTable, seat_idx: u8, player: [u8; 20], stac
         refunded: false,
         pending_addon: 0,
         time_bank_ms: 300_000,
+        want_leave: false,
     };
 }
 
@@ -2551,7 +2552,7 @@ fn test_dispatch_selectors_deterministic() {
 #[test]
 fn test_dispatch_selectors_all_unique() {
     let sels = selectors::all();
-    assert_eq!(sels.len(), 21);
+    assert_eq!(sels.len(), 22);
     for i in 0..sels.len() {
         for j in (i + 1)..sels.len() {
             assert_ne!(sels[i], sels[j]);

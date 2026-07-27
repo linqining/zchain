@@ -4,7 +4,7 @@
 //! 通过 `emit_event` syscall 写入事件日志（链下索引）。
 //!
 //! 事件分类（与 Move 端一致）：
-//! 1. 牌桌生命周期：TableCreated / PlayerJoined / PlayerLeft
+//! 1. 牌桌生命周期：TableCreated / PlayerJoined / PlayerLeft / LeaveRequested
 //! 2. 手牌生命周期：HandStarted / BlindsPosted / BettingRoundStarted / RoundAdvanced /
 //!    PotCollected / WinnerAwarded / HandSettled / HandEndedWithoutShowdown / HandReset
 //! 3. 下注操作：PlayerFolded / PlayerChecked / PlayerCalled / PlayerRaised / PlayerAllIn
@@ -80,6 +80,18 @@ pub enum TexasPokerEvent {
         table_id: ObjectID,
         seat_index: u8,
         player: Address,
+    },
+    /// 玩家请求「下局开始前离场」（sit out next hand，toggle）。
+    ///
+    /// 由 `request_leave_after_hand` 方法发出，`want_leave` 标志切换前后值。
+    /// 实际离场（退款 + 座位清空）在下一手 `reset_for_next_hand` 时触发，
+    /// 届时另发 `PlayerRefund` + `PlayerLeft`。
+    LeaveRequested {
+        table_id: ObjectID,
+        seat_index: u8,
+        player: Address,
+        /// 切换后的标志值（true=已预约下局离场，false=取消预约）。
+        want_leave: bool,
     },
 
     // ========== 2. 手牌生命周期 ==========
@@ -562,6 +574,12 @@ mod tests {
                 seat_index: 0,
                 player: [0; 20],
             },
+            TexasPokerEvent::LeaveRequested {
+                table_id,
+                seat_index: 0,
+                player: [0; 20],
+                want_leave: true,
+            },
             TexasPokerEvent::HandStarted {
                 table_id,
                 button: 0,
@@ -826,7 +844,7 @@ mod tests {
             let _recovered: TexasPokerEvent =
                 borsh::from_slice(&bytes).expect("Borsh deserialize 失败");
         }
-        // 验证样本数量（47 个变体）
-        assert_eq!(samples.len(), 47, "事件变体数应为 47");
+        // 验证样本数量（48 个变体）
+        assert_eq!(samples.len(), 48, "事件变体数应为 48");
     }
 }

@@ -1,8 +1,9 @@
-//! Texas Poker 合约 dispatch 路由（21 method selector）。
+//! Texas Poker 合约 dispatch 路由（22 method selector）。
 //!
 //! 严格对齐 `texas_poker_move/sources/table.move` 的 public entry function 清单：
 //! - 表台生命周期：create_table / join_table / leave_table / start_hand / tick
 //! - 玩家动作：fold / check / call / raise / auto_fold / force_fold / kick_player
+//! - 离场预约：request_leave_after_hand（sit out next hand，toggle，任意时刻可调用）
 //! - Mental Poker 协议：join_and_shuffle / leave_with_proof / submit_shuffle_v2
 //!   / submit_player_reveal_tokens / submit_reconstruct_deck
 //!
@@ -173,7 +174,21 @@ pub mod selectors {
         compute_method_selector("rebuy")
     }
 
-    /// 返回所有 21 个 selector，供 `supports_selector` 等使用。
+    /// `request_leave_after_hand` — 玩家请求「下局开始前离场」（toggle）。
+    ///
+    /// 在线扑克 "sit out next hand / stand up next hand" 模式：玩家可在任意
+    /// round_state 调用切换 `seat.want_leave` 标志，下一手 `reset_for_next_hand`
+    /// 时强制踢出并退款。解决 `leave_table` 仅 WAITING 可用、creator/tick 可能
+    /// 立即 start_hand 导致玩家来不及离场的问题。
+    ///
+    /// 该方法不进入 AIR prove 流程（`build_method_input` 返回 None，同 tick）：
+    /// 实际状态转换（座位清空 + 退款）在 `reset_for_next_hand` 内完成，
+    /// 由已有的 `MethodKind::ResetForNextHand` AIR 覆盖。
+    pub fn request_leave_after_hand() -> [u8; 32] {
+        compute_method_selector("request_leave_after_hand")
+    }
+
+    /// 返回所有 22 个 selector，供 `supports_selector` 等使用。
     #[must_use]
     pub fn all() -> Vec<[u8; 32]> {
         vec![
@@ -198,6 +213,7 @@ pub mod selectors {
             reset_for_next_hand(),
             addon(),
             rebuy(),
+            request_leave_after_hand(),
         ]
     }
 }
@@ -438,6 +454,9 @@ pub fn dispatch(
         }
         s if s == &selectors::addon() => dispatch_addon(context, table, args, &mut events),
         s if s == &selectors::rebuy() => dispatch_rebuy(context, table, args, &mut events),
+        s if s == &selectors::request_leave_after_hand() => {
+            dispatch_request_leave_after_hand(context, table, args, &mut events)
+        }
         _ => {
             return Err(PokerL1Error::UnknownContractMethod {
                 selector: *selector,
@@ -609,6 +628,10 @@ fn build_method_input(selector: &[u8; 32], args: &[u8]) -> Option<(u8, super::pr
     if selector == &selectors::reset_for_next_hand() { return Some((K_RESET, MethodInput::Empty)); }
     // tick：permissionless，当前不证明（后续若需证明改为 Empty）
     if selector == &selectors::tick() { return None; }
+    // request_leave_after_hand：仅 toggle want_leave 标志，无 pot/资金状态变更。
+    // 实际离场在 reset_for_next_hand 内完成（已有 ResetForNextHand AIR），
+    // 故本方法不产出 prove_task（同 tick 模式）。
+    if selector == &selectors::request_leave_after_hand() { return None; }
     None
 }
 
@@ -1159,6 +1182,29 @@ fn dispatch_rebuy(
     state_machine::apply_rebuy(table, input.seat_index, input.amount, events)
 }
 
+/// `request_leave_after_hand` — 玩家请求「下局开始前离场」（toggle）。
+///
+/// 权限：`caller == seat.player`（与 leave_table / addon 一致）。
+/// 允许在任意 round_state 调用（玩家可在对局进行中预约离场）。
+///
+/// 实际离场（座位清空 + 退款）在下一手 `reset_for_next_hand` 内强制执行，
+/// 故本方法不进入 AIR prove 流程（`build_method_input` 返回 None）。
+fn dispatch_request_leave_after_hand(
+    context: &DispatchContext,
+    table: &mut TexasPokerTable,
+    args: &[u8],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let input: SeatIndexArgs = decode_args(args, "request_leave_after_hand")?;
+    require_caller_is_seat_player(
+        context,
+        table,
+        input.seat_index,
+        "request_leave_after_hand",
+    )?;
+    state_machine::apply_request_leave(table, input.seat_index, events)
+}
+
 // ========== 单元测试 ==========
 
 #[cfg(test)]
@@ -1210,7 +1256,7 @@ mod tests {
     #[test]
     fn all_selectors_unique() {
         let sels = selectors::all();
-        assert_eq!(sels.len(), 21, "应有 21 个 selector");
+        assert_eq!(sels.len(), 22, "应有 22 个 selector");
         for i in 0..sels.len() {
             for j in (i + 1)..sels.len() {
                 assert_ne!(sels[i], sels[j], "selector[{i}] == selector[{j}] 不应相等");
@@ -1527,5 +1573,258 @@ mod tests {
         let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::kick_player(), &args_bytes);
         assert!(result.is_err(), "越界 seat_index 应返回错误而非 panic");
+    }
+
+    // ========== request_leave_after_hand 单元测试 ==========
+
+    /// 辅助：构造一个已入座的 table（seat 0 = p1，seat 1 = p2）。
+    fn make_table_with_two_players() -> TexasPokerTable {
+        let mut table = make_table();
+        table.seats[0].player = [0x11; 20];
+        table.seats[0].stack = 1000;
+        table.seats[1].player = [0x22; 20];
+        table.seats[1].stack = 2000;
+        // 同步 chip_pool（join 时 buy_in 计入），便于后续资金账断言
+        table.chip_pool = 3000;
+        table
+    }
+
+    /// toggle 测试：连续两次调用 request_leave_after_hand，第二次 want_leave 应回到 false。
+    #[test]
+    fn request_leave_toggles_flag() {
+        let mut table = make_table_with_two_players();
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = SeatIndexArgs { seat_index: 0 };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+
+        // 第一次：false → true（预约离场）
+        dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::request_leave_after_hand(),
+            &args_bytes,
+        )
+        .unwrap();
+        assert!(table.seats[0].want_leave, "第一次调用后 want_leave 应为 true");
+
+        // 第二次：true → false（取消预约）
+        dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::request_leave_after_hand(),
+            &args_bytes,
+        )
+        .unwrap();
+        assert!(
+            !table.seats[0].want_leave,
+            "第二次调用后 want_leave 应回到 false（toggle）"
+        );
+
+        // 其余座位不受影响
+        assert!(!table.seats[1].want_leave);
+    }
+
+    /// 权限校验：非 seat player 调用应失败。
+    #[test]
+    fn request_leave_rejects_non_seat_player() {
+        let mut table = make_table_with_two_players();
+        // seat 0 玩家是 [0x11;20]，用 [0x99;20] 冒充调用应失败
+        let ctx_impersonator = make_context_as([0x99; 20]);
+        let args = SeatIndexArgs { seat_index: 0 };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(
+            &ctx_impersonator,
+            &mut table,
+            &selectors::request_leave_after_hand(),
+            &args_bytes,
+        );
+        assert!(
+            result.is_err(),
+            "非座位玩家不应能为他人的座位预约离场"
+        );
+        assert!(
+            !table.seats[0].want_leave,
+            "失败调用不应改变 want_leave 标志"
+        );
+    }
+
+    /// 对局中调用：在 ROUND_PREFLOP 状态调用应成功（验证「任意时刻可预约」）。
+    #[test]
+    fn request_leave_works_mid_hand() {
+        let mut table = make_table_with_two_players();
+        // 模拟对局进行中
+        table.round_state = super::super::constants::ROUND_PREFLOP;
+        table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = SeatIndexArgs { seat_index: 0 };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::request_leave_after_hand(),
+            &args_bytes,
+        );
+        assert!(result.is_ok(), "对局中应可预约离场: {result:?}");
+        assert!(table.seats[0].want_leave);
+        // 对局状态不被破坏
+        assert_eq!(table.round_state, super::super::constants::ROUND_PREFLOP);
+    }
+
+    /// 越界 seat_index 应返回错误而非 panic。
+    #[test]
+    fn request_leave_rejects_out_of_range_seat() {
+        let mut table = make_table_with_two_players();
+        let ctx_p1 = make_context_as([0x11; 20]);
+        let args = SeatIndexArgs { seat_index: 200 };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(
+            &ctx_p1,
+            &mut table,
+            &selectors::request_leave_after_hand(),
+            &args_bytes,
+        );
+        assert!(result.is_err(), "越界 seat_index 应返回错误而非 panic");
+    }
+
+    /// reset_for_next_hand 强制执行：设置 want_leave → reset → seat 清空 + chip_pool 扣减。
+    #[test]
+    fn reset_for_next_hand_enforces_want_leave() {
+        let mut table = make_table_with_two_players();
+        // p1 预约离场
+        table.seats[0].want_leave = true;
+
+        // reset 前：2 名玩家，chip_pool = 3000
+        assert_eq!(table.occupied_count(), 2);
+        assert_eq!(table.chip_pool, 3000);
+
+        state_machine::reset_for_next_hand(&mut table, &mut Vec::new()).unwrap();
+
+        // reset 后：seat 0 被清空（退款 1000），seat 1 保留
+        assert_eq!(table.occupied_count(), 1, "want_leave 玩家应被踢出");
+        assert_eq!(table.seats[0].player, super::super::types::EMPTY_PLAYER);
+        assert_eq!(table.seats[0].stack, 0);
+        assert_eq!(table.seats[1].player, [0x22; 20], "未预约的玩家应保留");
+        assert_eq!(table.seats[1].stack, 2000);
+        // chip_pool 扣减退款（3000 - 1000 = 2000）
+        assert_eq!(
+            table.chip_pool, 2000,
+            "chip_pool 应扣减已退款的 stack"
+        );
+    }
+
+    /// 资金账平衡 + 事件：join (buy_in=X) → request_leave → reset
+    /// → 退款 X 后 chip_pool 回到 join 前，并发出 PlayerRefund + PlayerLeft。
+    #[test]
+    fn request_leave_full_lifecycle_refund_and_events() {
+        let ctx_creator = make_context(); // caller = [0xAA;20] = creator
+        let mut table = make_table();
+
+        // create_table（creator 发起）
+        let create_args = CreateTableArgs {
+            name: "leave-test".into(),
+            max_players: 4,
+            small_blind: 10,
+            big_blind: 20,
+        };
+        dispatch(
+            &ctx_creator,
+            &mut table,
+            &selectors::create_table(),
+            &borsh::to_vec(&create_args).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(table.chip_pool, 0, "create_table 后 chip_pool 应为 0");
+
+        // p1 join_table（buy_in = 1500）
+        let p1: Address = [0x11; 20];
+        dispatch(
+            &make_context_as(p1),
+            &mut table,
+            &selectors::join_table(),
+            &borsh::to_vec(&JoinTableArgs {
+                player: p1,
+                buy_in: 1500,
+                pk: ECPoint(G1Projective::identity()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(table.chip_pool, 1500);
+
+        // p2 join_table（buy_in = 2500）
+        let p2: Address = [0x22; 20];
+        dispatch(
+            &make_context_as(p2),
+            &mut table,
+            &selectors::join_table(),
+            &borsh::to_vec(&JoinTableArgs {
+                player: p2,
+                buy_in: 2500,
+                pk: ECPoint(G1Projective::generator()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(table.chip_pool, 4000);
+
+        // p1 预约离场（任意时刻，此处 WAITING 状态）
+        dispatch(
+            &make_context_as(p1),
+            &mut table,
+            &selectors::request_leave_after_hand(),
+            &borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap(),
+        )
+        .unwrap();
+        assert!(table.seats[0].want_leave);
+
+        // reset：强制执行 p1 离场
+        let mut events = Vec::new();
+        state_machine::reset_for_next_hand(&mut table, &mut events).unwrap();
+
+        // 资金账：chip_pool 扣减退款 1500 → 4000 - 1500 = 2500
+        assert_eq!(table.chip_pool, 2500);
+        assert_eq!(table.seats[0].player, super::super::types::EMPTY_PLAYER);
+        assert_eq!(table.seats[1].player, p2);
+
+        // 事件：应包含 PlayerRefund(seat 0, 1500) + PlayerLeft(seat 0)
+        let has_refund = events.iter().any(|e| {
+            matches!(
+                e,
+                super::super::events::TexasPokerEvent::PlayerRefund {
+                    seat_index: 0,
+                    amount: 1500,
+                    ..
+                }
+            )
+        });
+        let has_left = events.iter().any(|e| {
+            matches!(
+                e,
+                super::super::events::TexasPokerEvent::PlayerLeft {
+                    seat_index: 0,
+                    ..
+                }
+            )
+        });
+        assert!(has_refund, "应发出 seat 0 的 PlayerRefund(1500) 事件");
+        assert!(has_left, "应发出 seat 0 的 PlayerLeft 事件");
+    }
+
+    /// want_leave=false 的玩家在 reset 后不应被踢出（回归：不应误清）。
+    #[test]
+    fn reset_does_not_remove_players_without_leave_request() {
+        let mut table = make_table_with_two_players();
+        // 无人预约离场
+        assert!(!table.seats[0].want_leave);
+        assert!(!table.seats[1].want_leave);
+
+        state_machine::reset_for_next_hand(&mut table, &mut Vec::new()).unwrap();
+
+        // 两名玩家都应保留（stack > 0）
+        assert_eq!(table.occupied_count(), 2);
+        assert_eq!(table.seats[0].player, [0x11; 20]);
+        assert_eq!(table.seats[1].player, [0x22; 20]);
     }
 }

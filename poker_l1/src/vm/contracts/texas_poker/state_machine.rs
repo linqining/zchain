@@ -1288,6 +1288,7 @@ pub fn apply_join_and_shuffle(
         refunded: false,
         pending_addon: 0,
         time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
+        want_leave: false,
     };
     table.chip_pool = table.chip_pool.checked_add(buy_in).ok_or_else(|| {
         PokerL1Error::Serialization("chip_pool overflow on join".into())
@@ -2601,6 +2602,65 @@ pub fn reset_for_next_hand(
         s.left_during_hand = false;
     }
 
+    // 第二阶段（b）：强制踢出 `want_leave=true` 的 occupied seat。
+    //
+    // 这是 `request_leave_after_hand`（sit out next hand）的执行点：玩家在
+    // 对局中预约离场后，下一手 reset 时强制踢出并退款。资金账对齐
+    // `kick_player_internal` / `dispatch_leave_table`：
+    // - 退 stack + pending_addon（refund_amt）
+    // - 同步扣 chip_pool（join 时 buy_in 计入）与 addon_pool（addon 时计入）
+    // - 从 aggregated_pk 移除该 pk（若非 identity）
+    // - 清空座位 + 发 PlayerRefund + PlayerLeft 事件
+    //
+    // 时机说明：必须在第二阶段（重置 seat 字段）之后、第三阶段（清理 stack==0）
+    // 之前。理由：第二阶段已把 pending_addon 合并到 stack（退款金额正确），
+    // 第三阶段的 stack==0 判定不会误清已退款的座位。
+    let mut to_remove_leave: Vec<u8> = vec![];
+    for (i, s) in table.seats.iter().enumerate() {
+        if s.is_occupied() && s.want_leave {
+            to_remove_leave.push(i as u8);
+        }
+    }
+    for &i in &to_remove_leave {
+        let stack_refund = table.seats[i as usize].stack;
+        let pending_refund = table.seats[i as usize].pending_addon;
+        let refund = stack_refund.saturating_add(pending_refund);
+        let pk = table.seats[i as usize].pk;
+        let player = table.seats[i as usize].player;
+        if refund > 0 {
+            table.seats[i as usize].stack = 0;
+            table.seats[i as usize].pending_addon = 0;
+            table.chip_pool = table.chip_pool.saturating_sub(stack_refund);
+            table.addon_pool = table.addon_pool.saturating_sub(pending_refund);
+            events::emit_event(
+                events,
+                TexasPokerEvent::PlayerRefund {
+                    table_id: table.id,
+                    seat_index: i,
+                    player,
+                    amount: refund,
+                    refund_type: REFUND_TYPE_STACK_ONLY,
+                },
+            );
+        }
+        if !g1_is_identity(&pk) {
+            let new_agg = remove_pk_from_aggregated(
+                table.deck_state.aggregated_pk.as_ref().map(|p| &p.0),
+                &pk,
+            );
+            table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
+        }
+        table.seats[i as usize] = Seat::empty();
+        events::emit_event(
+            events,
+            TexasPokerEvent::PlayerLeft {
+                table_id: table.id,
+                seat_index: i,
+                player,
+            },
+        );
+    }
+
     // 第三阶段：清理 stack==0 的 occupied seat
     let mut to_remove: Vec<u8> = vec![];
     for (i, s) in table.seats.iter().enumerate() {
@@ -2903,6 +2963,68 @@ pub fn apply_rebuy(
             player,
             amount,
             stack_after,
+        },
+    );
+    table.bump_version();
+    Ok(())
+}
+
+// ========== Request Leave After Hand（sit out next hand） ==========
+
+/// `request_leave_after_hand` — 玩家请求「下局开始前离场」（toggle）。
+///
+/// 业务语义（在线扑克 "sit out next hand / stand up next hand" 标准模式）：
+/// 玩家可在**任意时刻**（含对局进行中的 shuffle / reveal / betting / showdown）
+/// 调用此方法切换 `seat.want_leave` 标志。下一手在 [`reset_for_next_hand`]（由
+/// settle_hand / end_without_showdown / 超时路径触发）时，所有 `want_leave=true`
+/// 的 occupied seat 会被强制踢出并退还 stack + pending_addon。
+///
+/// 解决的问题：`leave_table` 仅在 WAITING 状态可用，而 creator / `tick`
+/// 可能在 settle 后立即 `start_hand`，玩家来不及离场。此方法让玩家在对局中
+/// 即可预约离场，由 reset 强制执行。
+///
+/// # Toggle 语义
+///
+/// 每次调用翻转 `want_leave` 标志：false→true（预约离场）/ true→false（取消）。
+/// `LeaveRequested` 事件携带切换后的新值，便于链下索引。
+///
+/// # 权限
+///
+/// dispatch 层校验 `caller == seat.player`（与 leave_table / addon 一致）。
+///
+/// # Errors
+///
+/// - `seat_index` 越界
+/// - 座位未被占用
+pub fn apply_request_leave(
+    table: &mut TexasPokerTable,
+    seat_index: u8,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    if seat_index >= table.max_players {
+        return Err(PokerL1Error::Serialization(format!(
+            "request_leave_after_hand: seat_index {seat_index} out of range (max_players={})",
+            table.max_players
+        )));
+    }
+    let seat = &mut table.seats[seat_index as usize];
+    if !seat.is_occupied() {
+        return Err(PokerL1Error::Serialization(format!(
+            "request_leave_after_hand: seat {seat_index} not occupied"
+        )));
+    }
+
+    seat.want_leave = !seat.want_leave;
+    let player = seat.player;
+    let want_leave = seat.want_leave;
+
+    events::emit_event(
+        events,
+        TexasPokerEvent::LeaveRequested {
+            table_id: table.id,
+            seat_index,
+            player,
+            want_leave,
         },
     );
     table.bump_version();

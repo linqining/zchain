@@ -128,6 +128,18 @@ pub struct Seat {
     /// 系统自动消耗 time_bank 续命（而非直接 auto_fold）。
     /// 每手开始时按 `TIME_BANK_REFILL_PER_HAND_MS` 补充（上限 DEFAULT_TIME_BANK_MS）。
     pub time_bank_ms: u64,
+    /// 玩家请求「下局开始前离场」（sit out next hand / stand up next hand）。
+    ///
+    /// 业务语义：玩家可在**任意时刻**（含对局进行中）通过
+    /// `request_leave_after_hand` 方法切换此标志（toggle，再次调用取消）。
+    /// 当下一手在 `reset_for_next_hand`（由 settle_hand / end_without_showdown /
+    /// 超时路径触发）时，所有 `want_leave=true` 的 occupied seat 会被强制
+    /// 踢出并退还 stack + pending_addon。
+    ///
+    /// 解决的问题：`leave_table` 仅在 WAITING 状态可用，而 creator / `tick`
+    /// 可能在 settle 后立即 `start_hand`，玩家来不及离场。此标志让玩家
+    /// 在对局中即可预约离场，由 reset 强制执行（在线扑克标准模式）。
+    pub want_leave: bool,
 }
 
 impl Seat {
@@ -149,6 +161,7 @@ impl Seat {
             refunded: false,
             pending_addon: 0,
             time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
+            want_leave: false,
         }
     }
 
@@ -857,6 +870,7 @@ mod tests {
             refunded: false,
             pending_addon: 0,
             time_bank_ms: super::super::constants::DEFAULT_TIME_BANK_MS,
+            want_leave: false,
         };
         let bytes = borsh::to_vec(&seat).unwrap();
         let recovered: Seat = borsh::from_slice(&bytes).unwrap();
