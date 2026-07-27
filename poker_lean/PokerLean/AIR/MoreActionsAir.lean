@@ -9,8 +9,10 @@ namespace PokerLean
 
 /-! # 更多动作方法的 AIR 形式化 -/
 
-/-! ## 通用提取函数（三种方法共享） -/
+/-! ## 通用提取函数（内部辅助） -/
 
+/-- 通用 pre 表提取（不带 ext，作为内部辅助函数）。
+    注意：current_turn 设为 0，由调用方覆盖。 -/
 def extractPreTableFromActionAir
     (row : CommonRow)
     (max_players : Nat)
@@ -55,6 +57,7 @@ def extractPreTableFromActionAir
   last_action_time := 0
 }
 
+/-- 通用 post 表提取（不带 ext，作为内部辅助函数）。 -/
 def extractPostTableFromActionAir
     (row : CommonRow)
     (max_players : Nat)
@@ -76,9 +79,45 @@ def extractPostTableFromActionAir
 /-- AutoFold 业务列 -/
 structure AutoFoldMethodColumns where
   input_seat_index : M31
+  input_current_turn : M31
+  input_seat_occupied : M31
   input_current_time : M31 × M31 × M31 × M31
   output_folded : M31
 deriving Repr
+
+/-- auto_fold 专用 pre 状态提取：使用 ext.input_current_turn.val 作为 current_turn，
+    并将 acting seat 标记为已占用。 -/
+def extractPreTableFromAutoFoldAir
+    (row : CommonRow)
+    (ext : AutoFoldMethodColumns)
+    (max_players : Nat)
+    : TexasPokerTable :=
+  let base := extractPreTableFromActionAir row max_players MethodKind.AutoFold
+  let with_turn := { base with betting := { base.betting with
+    current_turn := ext.input_current_turn.val } }
+  with_turn.update_seat ext.input_seat_index.val
+    (fun s => { s with player := PlayerId.ofNat 1 })
+
+/-- auto_fold 专用 post 状态提取：将 acting seat 标记为 folded。 -/
+def extractPostTableFromAutoFoldAir
+    (row : CommonRow)
+    (ext : AutoFoldMethodColumns)
+    (max_players : Nat)
+    (seat_index : Nat)
+    : TexasPokerTable :=
+  let pre := extractPreTableFromAutoFoldAir row ext max_players
+  let post := { pre with
+    version := decodeU64 row.post_version.1 row.post_version.2.1
+        row.post_version.2.2.1 row.post_version.2.2.2
+    round_state := RoundState.fromNat row.post_round_state.val
+    betting := {
+      pre.betting with
+      pot := decodeU64 row.post_pot.1 row.post_pot.2.1
+          row.post_pot.2.2.1 row.post_pot.2.2.2
+      dealer_seat := row.post_button.val
+    }
+  }
+  post.update_seat seat_index Seat.mark_folded
 
 def AutoFoldMethodConstraints
     (row : CommonRow)
@@ -90,14 +129,17 @@ def AutoFoldMethodConstraints
     : Prop :=
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_current_turn = ext.input_seat_index ∧
+  ext.input_seat_occupied = M31.one ∧
   ext.input_current_time.1 = ⟨expected_current_time % 65536, by unfold M31_P; omega⟩ ∧
   ext.output_folded = M31.one ∧
   VersionIncrementConstraint row ∧
   RoundStateUnchanged row ∧
   RoundStateIsBetting row ∧
-  PotUnchangedLimb0 row ∧
-  let pre_table := extractPreTableFromActionAir row max_players MethodKind.AutoFold
-  let post_table := extractPostTableFromActionAir row max_players MethodKind.AutoFold
+  PotUnchanged row ∧
+  ButtonUnchanged row ∧
+  let pre_table := extractPreTableFromAutoFoldAir row ext max_players
+  let post_table := extractPostTableFromAutoFoldAir row ext max_players expected_seat_index
   StateRootConsistency row
     (texasPokerTableToPreimage pre_table)
     (texasPokerTableToPreimage post_table)
@@ -118,8 +160,43 @@ def AutoFoldAirAcceptable
 /-- ForceFold 业务列 -/
 structure ForceFoldMethodColumns where
   input_seat_index : M31
+  input_current_turn : M31
+  input_seat_occupied : M31
   output_folded : M31
 deriving Repr
+
+/-- force_fold 专用 pre 状态提取。 -/
+def extractPreTableFromForceFoldAir
+    (row : CommonRow)
+    (ext : ForceFoldMethodColumns)
+    (max_players : Nat)
+    : TexasPokerTable :=
+  let base := extractPreTableFromActionAir row max_players MethodKind.ForceFold
+  let with_turn := { base with betting := { base.betting with
+    current_turn := ext.input_current_turn.val } }
+  with_turn.update_seat ext.input_seat_index.val
+    (fun s => { s with player := PlayerId.ofNat 1 })
+
+/-- force_fold 专用 post 状态提取：将 acting seat 标记为 folded。 -/
+def extractPostTableFromForceFoldAir
+    (row : CommonRow)
+    (ext : ForceFoldMethodColumns)
+    (max_players : Nat)
+    (seat_index : Nat)
+    : TexasPokerTable :=
+  let pre := extractPreTableFromForceFoldAir row ext max_players
+  let post := { pre with
+    version := decodeU64 row.post_version.1 row.post_version.2.1
+        row.post_version.2.2.1 row.post_version.2.2.2
+    round_state := RoundState.fromNat row.post_round_state.val
+    betting := {
+      pre.betting with
+      pot := decodeU64 row.post_pot.1 row.post_pot.2.1
+          row.post_pot.2.2.1 row.post_pot.2.2.2
+      dealer_seat := row.post_button.val
+    }
+  }
+  post.update_seat seat_index Seat.mark_folded
 
 def ForceFoldMethodConstraints
     (row : CommonRow)
@@ -130,13 +207,16 @@ def ForceFoldMethodConstraints
     : Prop :=
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_current_turn = ext.input_seat_index ∧
+  ext.input_seat_occupied = M31.one ∧
   ext.output_folded = M31.one ∧
   VersionIncrementConstraint row ∧
   RoundStateUnchanged row ∧
   RoundStateIsBetting row ∧
-  PotUnchangedLimb0 row ∧
-  let pre_table := extractPreTableFromActionAir row max_players MethodKind.ForceFold
-  let post_table := extractPostTableFromActionAir row max_players MethodKind.ForceFold
+  PotUnchanged row ∧
+  ButtonUnchanged row ∧
+  let pre_table := extractPreTableFromForceFoldAir row ext max_players
+  let post_table := extractPostTableFromForceFoldAir row ext max_players expected_seat_index
   StateRootConsistency row
     (texasPokerTableToPreimage pre_table)
     (texasPokerTableToPreimage post_table)
@@ -156,33 +236,38 @@ def ForceFoldAirAcceptable
 /-- KickPlayer 业务列 -/
 structure KickPlayerMethodColumns where
   input_seat_index : M31
-  input_seat_is_occupied : M31
+  input_current_turn : M31
+  input_seat_occupied : M31
   output_refund : M31 × M31 × M31 × M31
   output_kicked : M31
 deriving Repr
 
-/-- kick_player 专用前状态提取（设置目标座位为已占用） -/
+/-- kick_player 专用前状态提取（设置目标座位为已占用，current_turn 来自 ext） -/
 def extractPreTableFromKickPlayerAir
     (row : CommonRow)
+    (ext : KickPlayerMethodColumns)
     (max_players : Nat)
-    (seat_index : Nat)
     : TexasPokerTable :=
   let base := extractPreTableFromActionAir row max_players MethodKind.KickPlayer
-  base.update_seat seat_index (fun _ => { Seat.empty with player := PlayerId.ofNat 1 })
+  let with_turn := { base with betting := { base.betting with
+    current_turn := ext.input_current_turn.val } }
+  with_turn.update_seat ext.input_seat_index.val
+    (fun s => { s with player := PlayerId.ofNat 1 })
 
-/-- kick_player 专用后状态提取（目标座位清空） -/
+/-- kick_player 专用后状态提取（目标座位标记为 kicked：保留 player，
+    folded/left_during_hand = true，stack/bet 清零） -/
 def extractPostTableFromKickPlayerAir
     (row : CommonRow)
-    (_ext : KickPlayerMethodColumns)
+    (ext : KickPlayerMethodColumns)
     (max_players : Nat)
     (seat_index : Nat)
     : TexasPokerTable :=
-  let pre := extractPreTableFromKickPlayerAir row max_players seat_index
+  let pre := extractPreTableFromKickPlayerAir row ext max_players
   { pre with
     version := decodeU64 row.post_version.1 row.post_version.2.1
         row.post_version.2.2.1 row.post_version.2.2.2
     round_state := RoundState.fromNat row.post_round_state.val
-    seats := List.modify (fun _ => Seat.empty) seat_index pre.seats
+    seats := List.modify Seat.kicked seat_index pre.seats
   }
 
 def KickPlayerMethodConstraints
@@ -195,13 +280,15 @@ def KickPlayerMethodConstraints
     : Prop :=
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
+  ext.input_seat_occupied = M31.one ∧
   ext.output_refund.1 = ⟨expected_refund % 65536, by unfold M31_P; omega⟩ ∧
   ext.output_kicked = M31.one ∧
   -- 目标座位必须被占用（kick_player 前置条件）
-  SeatOccupied ext.input_seat_is_occupied ∧
+  SeatOccupied ext.input_seat_occupied ∧
   VersionIncrementConstraint row ∧
   RoundStateUnchanged row ∧
-  let pre_table := extractPreTableFromKickPlayerAir row max_players expected_seat_index
+  ButtonUnchanged row ∧
+  let pre_table := extractPreTableFromKickPlayerAir row ext max_players
   let post_table := extractPostTableFromKickPlayerAir row ext max_players expected_seat_index
   StateRootConsistency row
     (texasPokerTableToPreimage pre_table)

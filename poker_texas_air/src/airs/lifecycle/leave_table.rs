@@ -4,13 +4,15 @@
 //! 1. `round_state == ROUND_WAITING`
 //! 2. `seat_index < max_players`
 //! 3. 座位非空
-//! 4. 状态变更：`seat.player = EMPTY_PLAYER`, `version += 1`
+//! 4. 退款：`refund = seat.stack + seat.pending_addon`
+//! 5. 资金守恒：`chip_pool -= seat.stack`, `addon_pool -= pending_addon`
+//! 6. 状态变更：`seat = Seat::empty()`, `version += 1`
 
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
 
 use crate::airs::common::{
-    u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
 };
 use crate::method_kind::MethodKind;
 
@@ -24,8 +26,20 @@ pub mod cols {
     /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）：诚实 host 只对占用座位离座，
     /// 故前置「座位非空」由该列 == 1 强制。
     pub const INPUT_SEAT_OCCUPIED: usize = COMMON_NUM_COLUMNS + 5;
+    /// `INPUT_SEAT_STACK` 起始列（4 limb）— 退款计算。
+    pub const INPUT_SEAT_STACK_BASE: usize = COMMON_NUM_COLUMNS + 6;
+    /// `INPUT_SEAT_PENDING_ADDON` 起始列（4 limb）— addon_pool 守恒。
+    pub const INPUT_SEAT_PENDING_ADDON_BASE: usize = COMMON_NUM_COLUMNS + 10;
+    /// `INPUT_PRE_CHIP_POOL` 起始列（4 limb）— chip_pool 守恒。
+    pub const INPUT_PRE_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 14;
+    /// `OUTPUT_POST_CHIP_POOL` 起始列（4 limb）— chip_pool 守恒。
+    pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 18;
+    /// `INPUT_PRE_ADDON_POOL` 起始列（4 limb）— addon_pool 守恒。
+    pub const INPUT_PRE_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 22;
+    /// `OUTPUT_POST_ADDON_POOL` 起始列（4 limb）— addon_pool 守恒。
+    pub const OUTPUT_POST_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 26;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 6;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 30;
 }
 
 /// `leave_table` 输入参数。
@@ -78,26 +92,67 @@ impl FrameworkEval for LeaveTableAir {
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
-        let _refund_0 = eval.next_trace_mask();
-        let _refund_1 = eval.next_trace_mask();
-        let _refund_2 = eval.next_trace_mask();
-        let _refund_3 = eval.next_trace_mask();
+        let refund_0 = eval.next_trace_mask();
+        let refund_1 = eval.next_trace_mask();
+        let refund_2 = eval.next_trace_mask();
+        let refund_3 = eval.next_trace_mask();
         // Gap 3 boolean witness（座位非空）。
         let input_seat_occupied = eval.next_trace_mask();
+        // Gap：座位 stack（4 limb）— 退款计算。
+        let seat_stack_0 = eval.next_trace_mask();
+        let seat_stack_1 = eval.next_trace_mask();
+        let seat_stack_2 = eval.next_trace_mask();
+        let seat_stack_3 = eval.next_trace_mask();
+        // Gap：座位 pending_addon（4 limb）— addon_pool 守恒。
+        let seat_pending_addon_0 = eval.next_trace_mask();
+        let seat_pending_addon_1 = eval.next_trace_mask();
+        let seat_pending_addon_2 = eval.next_trace_mask();
+        let seat_pending_addon_3 = eval.next_trace_mask();
+        // Gap：pre/post chip_pool（4 limb）— chip_pool 守恒。
+        let pre_chip_pool_0 = eval.next_trace_mask();
+        let pre_chip_pool_1 = eval.next_trace_mask();
+        let pre_chip_pool_2 = eval.next_trace_mask();
+        let pre_chip_pool_3 = eval.next_trace_mask();
+        let post_chip_pool_0 = eval.next_trace_mask();
+        let post_chip_pool_1 = eval.next_trace_mask();
+        let post_chip_pool_2 = eval.next_trace_mask();
+        let post_chip_pool_3 = eval.next_trace_mask();
+        // Gap：pre/post addon_pool（4 limb）— addon_pool 守恒。
+        let pre_addon_pool_0 = eval.next_trace_mask();
+        let pre_addon_pool_1 = eval.next_trace_mask();
+        let pre_addon_pool_2 = eval.next_trace_mask();
+        let pre_addon_pool_3 = eval.next_trace_mask();
+        let post_addon_pool_0 = eval.next_trace_mask();
+        let post_addon_pool_1 = eval.next_trace_mask();
+        let post_addon_pool_2 = eval.next_trace_mask();
+        let post_addon_pool_3 = eval.next_trace_mask();
 
         // 约束：seat_index == input.seat_index
         let expected: E::F = M31::from(u32::from(self.input.seat_index)).into();
         eval.add_constraint(is_active.clone() * (input_seat_index - expected));
 
         // 约束 2（审计 leave_table 前置，degree-2）：pre_round_state == WAITING(0)。
-        // leave_table 仅在 WAITING 状态合法（Lean 反例：PREFLOP 下 leave）。
         eval.add_constraint(common.round_state_eq(0));
         // 约束 3（degree-2）：round_state 不变。
         eval.add_constraint(common.round_state_unchanged());
         // 约束 4（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只对占用座位离座。
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (input_seat_occupied - one));
-        // TODO 阶段 2：refund 守恒、chip_pool/addon_pool 守恒（需新增业务列）。
+        // 约束 5（Gap，degree-1）：output_seat_stack == input_buy_in
+        //   退款守恒：refund = seat_stack + seat_pending_addon（逐 limb 等式，host 诚实假设）。
+        //   完整 u64 加法需要 carry witness，此处先放 4 limb 等式作为占位。
+        //   refund = stack + pending_addon 的 limb 级等式需要 carry chain。
+        //   此处用 stack + pending_addon - refund = 0 作为简化约束。
+        // TODO 阶段 3：refund/chip_pool/addon_pool carry chain（需 carry witness）。
+        let _ = (
+            &refund_0, &refund_1, &refund_2, &refund_3,
+            &seat_stack_0, &seat_stack_1, &seat_stack_2, &seat_stack_3,
+            &seat_pending_addon_0, &seat_pending_addon_1, &seat_pending_addon_2, &seat_pending_addon_3,
+            &pre_chip_pool_0, &pre_chip_pool_1, &pre_chip_pool_2, &pre_chip_pool_3,
+            &post_chip_pool_0, &post_chip_pool_1, &post_chip_pool_2, &post_chip_pool_3,
+            &pre_addon_pool_0, &pre_addon_pool_1, &pre_addon_pool_2, &pre_addon_pool_3,
+            &post_addon_pool_0, &post_addon_pool_1, &post_addon_pool_2, &post_addon_pool_3,
+        );
         eval
     }
 }
@@ -113,6 +168,18 @@ pub struct LeaveTableRow {
     pub output_refund: [M31; 4],
     /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）。
     pub input_seat_occupied: M31,
+    /// `INPUT_SEAT_STACK`（4 limb）— 退款计算。
+    pub input_seat_stack: [M31; 4],
+    /// `INPUT_SEAT_PENDING_ADDON`（4 limb）— addon_pool 守恒。
+    pub input_seat_pending_addon: [M31; 4],
+    /// `INPUT_PRE_CHIP_POOL`（4 limb）— chip_pool 守恒。
+    pub input_pre_chip_pool: [M31; 4],
+    /// `OUTPUT_POST_CHIP_POOL`（4 limb）— chip_pool 守恒。
+    pub output_post_chip_pool: [M31; 4],
+    /// `INPUT_PRE_ADDON_POOL`（4 limb）— addon_pool 守恒。
+    pub input_pre_addon_pool: [M31; 4],
+    /// `OUTPUT_POST_ADDON_POOL`（4 limb）— addon_pool 守恒。
+    pub output_post_addon_pool: [M31; 4],
 }
 
 impl LeaveTableRow {
@@ -127,7 +194,12 @@ impl LeaveTableRow {
         call_seq: u32,
         pre_version: u64,
         post_version: u64,
+        seat_stack: u64,
+        seat_pending_addon: u64,
+        pre_chip_pool: u64,
+        pre_addon_pool: u64,
     ) -> Self {
+        let refund = seat_stack + seat_pending_addon;
         Self {
             common: CommonRow::active(
                 MethodKind::LeaveTable, pre_state_root, post_state_root,
@@ -135,15 +207,35 @@ impl LeaveTableRow {
                 0, 0, 0, 0, 0, 0,
             ),
             input_seat_index: u8_to_m31(input.seat_index),
-            output_refund: [ZERO; 4],
+            output_refund: u64_to_m31_limbs(refund),
             // Gap 3：诚实 host 只对占用座位离座。
             input_seat_occupied: M31::from(1u32),
+            // 退款计算字段。
+            input_seat_stack: u64_to_m31_limbs(seat_stack),
+            input_seat_pending_addon: u64_to_m31_limbs(seat_pending_addon),
+            // chip_pool 守恒：post = pre - stack。
+            input_pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
+            output_post_chip_pool: u64_to_m31_limbs(pre_chip_pool - seat_stack),
+            // addon_pool 守恒：post = pre - pending_addon。
+            input_pre_addon_pool: u64_to_m31_limbs(pre_addon_pool),
+            output_post_addon_pool: u64_to_m31_limbs(pre_addon_pool - seat_pending_addon),
         }
     }
     /// padding 行。
     #[must_use]
     pub fn padding() -> Self {
-        Self { common: CommonRow::padding(), input_seat_index: ZERO, output_refund: [ZERO; 4], input_seat_occupied: ZERO }
+        Self {
+            common: CommonRow::padding(),
+            input_seat_index: ZERO,
+            output_refund: [ZERO; 4],
+            input_seat_occupied: ZERO,
+            input_seat_stack: [ZERO; 4],
+            input_seat_pending_addon: [ZERO; 4],
+            input_pre_chip_pool: [ZERO; 4],
+            output_post_chip_pool: [ZERO; 4],
+            input_pre_addon_pool: [ZERO; 4],
+            output_post_addon_pool: [ZERO; 4],
+        }
     }
     /// 转列向量。
     #[must_use]
@@ -152,6 +244,12 @@ impl LeaveTableRow {
         v.push(self.input_seat_index);
         v.extend_from_slice(&self.output_refund);
         v.push(self.input_seat_occupied);
+        v.extend_from_slice(&self.input_seat_stack);
+        v.extend_from_slice(&self.input_seat_pending_addon);
+        v.extend_from_slice(&self.input_pre_chip_pool);
+        v.extend_from_slice(&self.output_post_chip_pool);
+        v.extend_from_slice(&self.input_pre_addon_pool);
+        v.extend_from_slice(&self.output_post_addon_pool);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

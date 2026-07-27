@@ -1,6 +1,7 @@
 import PokerLean.Common.M31
 import PokerLean.Common.U64Encoding
 import PokerLean.Common.PoseidonHash
+import PokerLean.Contract.Types
 
 namespace PokerLean
 
@@ -186,6 +187,92 @@ def RoundStateEq (row : CommonRow) (expected : Nat) (hlt : expected < M31_P) : P
 def PotUnchangedLimb0 (row : CommonRow) : Prop :=
   row.is_active = M31.one → row.post_pot.1 = row.pre_pot.1
 
+/-- pot 全 limb 不变约束：active 行要求 post_pot 全 4 limb = pre_pot 全 4 limb。
+    对齐 Rust `pot_unchanged` 的完整实现（4×8-bit limb 逐 limb 比较）。 -/
+def PotUnchanged (row : CommonRow) : Prop :=
+  row.is_active = M31.one →
+  row.post_pot.1 = row.pre_pot.1 ∧
+  row.post_pot.2.1 = row.pre_pot.2.1 ∧
+  row.post_pot.2.2.1 = row.pre_pot.2.2.1 ∧
+  row.post_pot.2.2.2 = row.pre_pot.2.2.2
+
+/-- pot limb0 delta 约束：active 行要求 post_pot limb0 = pre_pot limb0 + amt limb0（M31 域内）。
+    对齐 Rust `call`/`raise`/`bet` AIR 的 `post_pot_0 - pre_pot_0 - amt_0 == 0` 约束。 -/
+def PotDeltaLimb0 (row : CommonRow) (amt0 : M31) : Prop :=
+  row.is_active = M31.one →
+  row.post_pot.1.val = (row.pre_pot.1.val + amt0.val) % M31_P
+
+/-- pot 全 4 limb delta 约束：active 行要求逐 limb post_pot = M31.add pre_pot amt。
+    配合 `m31_add_no_overflow` 公理与 `decodeU64_limb_add` 引理，
+    可推出 `decodeU64 post_pot = decodeU64 pre_pot + decodeU64 amt`。 -/
+def PotDelta (row : CommonRow) (amt : M31 × M31 × M31 × M31) : Prop :=
+  row.is_active = M31.one →
+  row.post_pot.1 = M31.add row.pre_pot.1 amt.1 ∧
+  row.post_pot.2.1 = M31.add row.pre_pot.2.1 amt.2.1 ∧
+  row.post_pot.2.2.1 = M31.add row.pre_pot.2.2.1 amt.2.2.1 ∧
+  row.post_pot.2.2.2 = M31.add row.pre_pot.2.2.2 amt.2.2.2
+
+/-- 4-limb 相等约束。 -/
+def Limb4Eq (a b : M31 × M31 × M31 × M31) : Prop :=
+  a.1 = b.1 ∧ a.2.1 = b.2.1 ∧ a.2.2.1 = b.2.2.1 ∧ a.2.2.2 = b.2.2.2
+
+/-- 4-limb delta 约束：post = M31.add pre amt（逐 limb）。 -/
+def Limb4Delta (pre post amt : M31 × M31 × M31 × M31) : Prop :=
+  post.1 = M31.add pre.1 amt.1 ∧
+  post.2.1 = M31.add pre.2.1 amt.2.1 ∧
+  post.2.2.1 = M31.add pre.2.2.1 amt.2.2.1 ∧
+  post.2.2.2 = M31.add pre.2.2.2 amt.2.2.2
+
+/-- 4-limb 反向 delta 约束：pre = M31.add post amt（逐 limb），用于 stack 减少。 -/
+def Limb4DeltaRev (pre post amt : M31 × M31 × M31 × M31) : Prop :=
+  pre.1 = M31.add post.1 amt.1 ∧
+  pre.2.1 = M31.add post.2.1 amt.2.1 ∧
+  pre.2.2.1 = M31.add post.2.2.1 amt.2.2.1 ∧
+  pre.2.2.2 = M31.add post.2.2.2 amt.2.2.2
+
+lemma limb4_eq_implies_decode_eq (a b : M31 × M31 × M31 × M31)
+    (h : Limb4Eq a b) :
+    decodeU64 a.1 a.2.1 a.2.2.1 a.2.2.2 = decodeU64 b.1 b.2.1 b.2.2.1 b.2.2.2 := by
+  rcases h with ⟨h0, h1, h2, h3⟩
+  rw [h0, h1, h2, h3]
+
+lemma limb4_delta_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
+    (h : Limb4Delta pre post amt) :
+    decodeU64 post.1 post.2.1 post.2.2.1 post.2.2.2 =
+    decodeU64 pre.1 pre.2.1 pre.2.2.1 pre.2.2.2 +
+    decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
+  rcases h with ⟨h0, h1, h2, h3⟩
+  rw [h0, h1, h2, h3]
+  exact decodeU64_limb_add pre.1 pre.2.1 pre.2.2.1 pre.2.2.2
+           amt.1 amt.2.1 amt.2.2.1 amt.2.2.2
+
+lemma limb4_delta_rev_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
+    (h : Limb4DeltaRev pre post amt) :
+    decodeU64 pre.1 pre.2.1 pre.2.2.1 pre.2.2.2 =
+    decodeU64 post.1 post.2.1 post.2.2.1 post.2.2.2 +
+    decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
+  rcases h with ⟨h0, h1, h2, h3⟩
+  rw [h0, h1, h2, h3]
+  exact decodeU64_limb_add post.1 post.2.1 post.2.2.1 post.2.2.2
+           amt.1 amt.2.1 amt.2.2.1 amt.2.2.2
+
+lemma pot_delta_implies_decode_eq (row : CommonRow) (amt : M31 × M31 × M31 × M31)
+    (h_active : row.is_active = M31.one)
+    (h : PotDelta row amt) :
+    decodeU64 row.post_pot.1 row.post_pot.2.1 row.post_pot.2.2.1 row.post_pot.2.2.2 =
+    decodeU64 row.pre_pot.1 row.pre_pot.2.1 row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
+    decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
+  have h' := h h_active
+  rcases h' with ⟨h0, h1, h2, h3⟩
+  rw [h0, h1, h2, h3]
+  exact decodeU64_limb_add row.pre_pot.1 row.pre_pot.2.1 row.pre_pot.2.2.1 row.pre_pot.2.2.2
+           amt.1 amt.2.1 amt.2.2.1 amt.2.2.2
+
+/-- button 不变约束：active 行要求 post_button = pre_button。
+    fold/check 等动作不改变 dealer_seat（button）。 -/
+def ButtonUnchanged (row : CommonRow) : Prop :=
+  row.is_active = M31.one → row.post_button = row.pre_button
+
 /-! ## State Root 一致性约束
 
 Poseidon252 将状态（preimage）哈希为 state_root。
@@ -250,11 +337,12 @@ lemma mul_sub_zero_self_eq_zero (x : M31) (h : x = M31.zero) :
 
 /-! ## 阶段 Gating 约束 -/
 
-/-- round_state 是 betting 轮（PREFLOP=1/FLOP=2/TURN=3/RIVER=4）约束。 -/
+/-- round_state 是 betting 轮（PREFLOP=2/FLOP=3/TURN=4/RIVER=5）约束。
+    与 Rust `round_state_is_betting` 的 vanishing (rs-2)(rs-3)(rs-4)(rs-5)==0 语义一致。 -/
 def RoundStateIsBetting (row : CommonRow) : Prop :=
   row.is_active = M31.one →
-  row.pre_round_state.val = 1 ∨ row.pre_round_state.val = 2 ∨
-  row.pre_round_state.val = 3 ∨ row.pre_round_state.val = 4
+  row.pre_round_state.val = 2 ∨ row.pre_round_state.val = 3 ∨
+  row.pre_round_state.val = 4 ∨ row.pre_round_state.val = 5
 
 /-- round_state 不是 betting 轮（即 ROUND_WAITING=0）约束。 -/
 def RoundStateIsWaiting (row : CommonRow) : Prop :=
@@ -285,9 +373,18 @@ def RevealPhasePositive (reveal_phase : M31) : Prop :=
   reveal_phase.val > 0
 
 /-- reconstruct_state ≠ Idle 约束（重构已开始）。
-   0 = ReconstructIdle, 1 = Reconstructing, 2 = Reconstructed。 -/
+   0 = ReconstructIdle, 1 = Reconstructing, 2 = Reconstructed。
+   对齐 `ReconstructState.fromNat`：`fromNat n ≠ ReconstructIdle ↔ n = 1 ∨ n = 2`。 -/
 def ReconstructStateNotIdle (reconstruct_state : M31) : Prop :=
-  reconstruct_state.val ≠ 0
+  reconstruct_state.val = 1 ∨ reconstruct_state.val = 2
+
+/-- `ReconstructStateNotIdle` 蕴含 `fromNat val ≠ ReconstructIdle`。 -/
+lemma reconstruct_state_not_idle_implies_fromNat
+    (reconstruct_state : M31) (h : ReconstructStateNotIdle reconstruct_state) :
+    ReconstructState.fromNat reconstruct_state.val ≠ ReconstructState.ReconstructIdle := by
+  rcases h with h1 | h2
+  · rw [h1]; simp [ReconstructState.fromNat]
+  · rw [h2]; simp [ReconstructState.fromNat]
 
 /-! ## 座位状态约束 -/
 
@@ -301,15 +398,7 @@ def SeatEmpty (seat_is_occupied : M31) : Prop :=
 
 /-! ## 辅助引理 -/
 
-/-- M31 val = 1 满足 RoundStateIsBetting。 -/
-lemma round_state_1_is_betting (row : CommonRow)
-    (h : row.is_active = M31.one)
-    (hrs : row.pre_round_state.val = 1) :
-    RoundStateIsBetting row := by
-  unfold RoundStateIsBetting
-  simp [h, hrs]
-
-/-- M31 val = 2 满足 RoundStateIsBetting。 -/
+/-- M31 val = 2 满足 RoundStateIsBetting（PREFLOP）。 -/
 lemma round_state_2_is_betting (row : CommonRow)
     (h : row.is_active = M31.one)
     (hrs : row.pre_round_state.val = 2) :
@@ -317,7 +406,7 @@ lemma round_state_2_is_betting (row : CommonRow)
   unfold RoundStateIsBetting
   simp [h, hrs]
 
-/-- M31 val = 3 满足 RoundStateIsBetting。 -/
+/-- M31 val = 3 满足 RoundStateIsBetting（FLOP）。 -/
 lemma round_state_3_is_betting (row : CommonRow)
     (h : row.is_active = M31.one)
     (hrs : row.pre_round_state.val = 3) :
@@ -325,10 +414,18 @@ lemma round_state_3_is_betting (row : CommonRow)
   unfold RoundStateIsBetting
   simp [h, hrs]
 
-/-- M31 val = 4 满足 RoundStateIsBetting。 -/
+/-- M31 val = 4 满足 RoundStateIsBetting（TURN）。 -/
 lemma round_state_4_is_betting (row : CommonRow)
     (h : row.is_active = M31.one)
     (hrs : row.pre_round_state.val = 4) :
+    RoundStateIsBetting row := by
+  unfold RoundStateIsBetting
+  simp [h, hrs]
+
+/-- M31 val = 5 满足 RoundStateIsBetting（RIVER）。 -/
+lemma round_state_5_is_betting (row : CommonRow)
+    (h : row.is_active = M31.one)
+    (hrs : row.pre_round_state.val = 5) :
     RoundStateIsBetting row := by
   unfold RoundStateIsBetting
   simp [h, hrs]

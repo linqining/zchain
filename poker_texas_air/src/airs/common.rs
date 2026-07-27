@@ -117,6 +117,14 @@ pub struct CommonConstraints<E: stwo_constraint_framework::EvalAtRow> {
     pub pre_pot_0: E::F,
     /// `POST_POT` limb 0。
     pub post_pot_0: E::F,
+    /// `PRE_POT` 全 4 limb（全 limb 资金守恒约束用，如 call/bet/raise 的 PotDelta）。
+    pub pre_pot: [E::F; 4],
+    /// `POST_POT` 全 4 limb。
+    pub post_pot: [E::F; 4],
+    /// `PRE_BUTTON` 列（button 不变约束用）。
+    pub pre_button: E::F,
+    /// `POST_BUTTON` 列。
+    pub post_button: E::F,
     /// 是否已经写入通用约束到 eval。
     pub _written: bool,
 }
@@ -183,16 +191,13 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let is_padding = eval.next_trace_mask();
 
         // 保留 limbs 引用（业务约束需要）。
-        // round_state / pot_0 暴露到返回结构体供业务守卫引用；
+        // round_state / pot limbs / button 暴露到返回结构体供业务守卫引用；
         // version limbs 用于通用「version += 1」约束。
         let _ = (
             pre_state_root_0, pre_state_root_1, pre_state_root_2, pre_state_root_3,
             post_state_root_0, post_state_root_1, post_state_root_2, post_state_root_3,
             table_id_0, table_id_1, table_id_2, table_id_3,
             hand_id, call_seq,
-            pre_pot_1, pre_pot_2, pre_pot_3,
-            post_pot_1, post_pot_2, post_pot_3,
-            pre_button, post_button,
         );
 
         // 通用约束 1：IS_ACTIVE 与 IS_PADDING 互斥且为 boolean
@@ -242,8 +247,12 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
             method_kind,
             pre_round_state,
             post_round_state,
-            pre_pot_0,
-            post_pot_0,
+            pre_pot_0: pre_pot_0.clone(),
+            post_pot_0: post_pot_0.clone(),
+            pre_pot: [pre_pot_0, pre_pot_1, pre_pot_2, pre_pot_3],
+            post_pot: [post_pot_0, post_pot_1, post_pot_2, post_pot_3],
+            pre_button,
+            post_button,
             _written: true,
         }
     }
@@ -307,9 +316,58 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     }
 
     /// 约束 pot limb0 不变（`post_pot_0 == pre_pot_0`，degree-2）。
-    /// 用于不改变 pot 的方法（fold/check 等）。完整 4-limb 守恒见 `pot_delta_limb0`。
+    /// 用于不改变 pot 的方法（fold/check 等）。完整 4-limb 守恒见 `pot_delta_4limb`。
     pub fn pot_unchanged_limb0(&self) -> E::F {
         self.is_active.clone() * (self.post_pot_0.clone() - self.pre_pot_0.clone())
+    }
+
+    /// 约束 `post_button == pre_button`（button 不变，degree-2）。
+    /// 用于 fold/check/call/bet/raise 等 button 不变的方法。
+    pub fn button_unchanged(&self) -> E::F {
+        self.is_active.clone() * (self.post_button.clone() - self.pre_button.clone())
+    }
+
+    /// 约束 `post_pot[i] = pre_pot[i] + amt[i]`（全 4 limb，每 limb degree-2）。
+    /// 对齐 Lean `PotDelta`：配合 `m31_add_no_overflow` 公理可推出
+    /// `decodeU64(post_pot) = decodeU64(pre_pot) + decodeU64(amt)`。
+    pub fn pot_delta_4limb(&self, amt: &[E::F; 4]) -> E::F {
+        let mut c = self.is_active.clone()
+            * (self.post_pot[0].clone() - self.pre_pot[0].clone() - amt[0].clone());
+        for i in 1..4 {
+            c = c + self.is_active.clone()
+                * (self.post_pot[i].clone() - self.pre_pot[i].clone() - amt[i].clone());
+        }
+        c
+    }
+
+    /// 约束 `post[i] = pre[i] + amt[i]`（全 4 limb delta，每 limb degree-2）。
+    /// 对齐 Lean `Limb4Delta`。
+    pub fn limb4_delta(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> E::F {
+        let mut c = self.is_active.clone() * (post[0].clone() - pre[0].clone() - amt[0].clone());
+        for i in 1..4 {
+            c = c + self.is_active.clone() * (post[i].clone() - pre[i].clone() - amt[i].clone());
+        }
+        c
+    }
+
+    /// 约束 `pre[i] = post[i] + amt[i]`（全 4 limb 反向 delta，每 limb degree-2）。
+    /// 对齐 Lean `Limb4DeltaRev`（用于 stack 减少场景）。
+    pub fn limb4_delta_rev(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> E::F {
+        let mut c = self.is_active.clone() * (pre[0].clone() - post[0].clone() - amt[0].clone());
+        for i in 1..4 {
+            c = c + self.is_active.clone() * (pre[i].clone() - post[i].clone() - amt[i].clone());
+        }
+        c
+    }
+
+    /// 约束 `a[i] = b[i]`（全 4 limb 相等，每 limb degree-2）。
+    /// 对齐 Lean `Limb4Eq`。
+    pub fn limb4_eq(&self, a: &[E::F; 4], b: &[E::F; 4]) -> E::F {
+        let mut c = self.is_active.clone() * (a[0].clone() - b[0].clone());
+        for i in 1..4 {
+            c = c + self.is_active.clone() * (a[i].clone() - b[i].clone());
+        }
+        c
     }
 }
 

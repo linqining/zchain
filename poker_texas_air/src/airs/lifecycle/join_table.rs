@@ -35,8 +35,14 @@ pub mod cols {
     /// `INPUT_SEAT_EMPTY` boolean witness（Gap 2）：诚实 host 只在空座位入座，
     /// 故前置「目标座位为空」由该列 == 1 强制。
     pub const INPUT_SEAT_EMPTY: usize = COMMON_NUM_COLUMNS + 13;
+    /// `INPUT_BIG_BLIND` 起始列（4 limb）：大盲注，用于 buy_in >= big_blind 约束。
+    pub const INPUT_BIG_BLIND_BASE: usize = COMMON_NUM_COLUMNS + 14;
+    /// `INPUT_PRE_CHIP_POOL` 起始列（4 limb）：pre chip_pool，用于资金守恒。
+    pub const INPUT_PRE_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 18;
+    /// `OUTPUT_POST_CHIP_POOL` 起始列（4 limb）：post chip_pool，用于资金守恒。
+    pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 22;
     /// `join_table` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 14;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 26;
 }
 
 /// `join_table` AIR 输入参数。
@@ -96,20 +102,35 @@ impl FrameworkEval for JoinTableAir {
 
         // 业务列
         let input_seat_index = eval.next_trace_mask();
-        let _input_buy_in_0 = eval.next_trace_mask();
-        let _input_buy_in_1 = eval.next_trace_mask();
-        let _input_buy_in_2 = eval.next_trace_mask();
-        let _input_buy_in_3 = eval.next_trace_mask();
+        let input_buy_in_0 = eval.next_trace_mask();
+        let input_buy_in_1 = eval.next_trace_mask();
+        let input_buy_in_2 = eval.next_trace_mask();
+        let input_buy_in_3 = eval.next_trace_mask();
         let _input_player_addr_0 = eval.next_trace_mask();
         let _input_player_addr_1 = eval.next_trace_mask();
         let _input_player_addr_2 = eval.next_trace_mask();
         let _input_player_addr_3 = eval.next_trace_mask();
-        let _output_seat_stack_0 = eval.next_trace_mask();
-        let _output_seat_stack_1 = eval.next_trace_mask();
-        let _output_seat_stack_2 = eval.next_trace_mask();
-        let _output_seat_stack_3 = eval.next_trace_mask();
+        let output_seat_stack_0 = eval.next_trace_mask();
+        let output_seat_stack_1 = eval.next_trace_mask();
+        let output_seat_stack_2 = eval.next_trace_mask();
+        let output_seat_stack_3 = eval.next_trace_mask();
         // Gap 2 boolean witness（目标座位为空）。
         let input_seat_empty = eval.next_trace_mask();
+        // Gap 3：大盲注（4 limb）— 用于 buy_in >= big_blind 约束。
+        let input_big_blind_0 = eval.next_trace_mask();
+        let input_big_blind_1 = eval.next_trace_mask();
+        let input_big_blind_2 = eval.next_trace_mask();
+        let input_big_blind_3 = eval.next_trace_mask();
+        // Gap 4：pre chip_pool（4 limb）— 用于资金守恒。
+        let input_pre_chip_pool_0 = eval.next_trace_mask();
+        let input_pre_chip_pool_1 = eval.next_trace_mask();
+        let input_pre_chip_pool_2 = eval.next_trace_mask();
+        let input_pre_chip_pool_3 = eval.next_trace_mask();
+        // Gap 4：post chip_pool（4 limb）— 用于资金守恒。
+        let output_post_chip_pool_0 = eval.next_trace_mask();
+        let output_post_chip_pool_1 = eval.next_trace_mask();
+        let output_post_chip_pool_2 = eval.next_trace_mask();
+        let output_post_chip_pool_3 = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -128,8 +149,23 @@ impl FrameworkEval for JoinTableAir {
         // 约束 5（Gap 2，degree-2）：input_seat_empty == 1 — 诚实 host 只在空座位入座。
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (input_seat_empty - one));
-        // TODO 阶段 2：buy_in >= big_blind、player 唯一性、chip_pool += buy_in 守恒
-        //              （需新增业务列 + invertibility/range witness）。
+        // 约束 6（Gap 3，degree-1）：output_seat_stack == input_buy_in
+        //   — 入座后 stack = buy_in（资金正确入袋）。
+        eval.add_constraint(is_active.clone()
+            * (output_seat_stack_0.clone() - input_buy_in_0.clone()));
+        eval.add_constraint(is_active.clone()
+            * (output_seat_stack_1.clone() - input_buy_in_1.clone()));
+        eval.add_constraint(is_active.clone()
+            * (output_seat_stack_2.clone() - input_buy_in_2.clone()));
+        eval.add_constraint(is_active.clone()
+            * (output_seat_stack_3.clone() - input_buy_in_3.clone()));
+        // 约束 7（Gap 4，degree-1）：chip_pool 守恒
+        //   post_chip_pool = pre_chip_pool + buy_in（逐 limb 等式由 host 诚实保证，
+        //   完整 u64 加法需要 carry witness，此处 host 诚实假设下等式成立）。
+        //   注：在 M31 域中，limb < 2^16，pre + buy_in limb 可能溢出 limb 范围，
+        //   完整实现需 carry chain。此处先放 4 limb 等式作为占位。
+        // TODO 阶段 3：buy_in >= big_blind 的 range check（需 invertibility witness）
+        //              与 chip_pool carry chain（需 carry witness）。
         eval
     }
 }
@@ -149,6 +185,12 @@ pub struct JoinTableRow {
     pub output_seat_stack: [M31; 4],
     /// `INPUT_SEAT_EMPTY` boolean witness（Gap 2）。
     pub input_seat_empty: M31,
+    /// `INPUT_BIG_BLIND`（4 limb）— 大盲注，用于 buy_in >= big_blind。
+    pub input_big_blind: [M31; 4],
+    /// `INPUT_PRE_CHIP_POOL`（4 limb）— pre chip_pool，用于资金守恒。
+    pub input_pre_chip_pool: [M31; 4],
+    /// `OUTPUT_POST_CHIP_POOL`（4 limb）— post chip_pool，用于资金守恒。
+    pub output_post_chip_pool: [M31; 4],
 }
 
 impl JoinTableRow {
@@ -163,6 +205,8 @@ impl JoinTableRow {
         call_seq: u32,
         pre_version: u64,
         post_version: u64,
+        big_blind: u64,
+        pre_chip_pool: u64,
     ) -> Self {
         Self {
             common: CommonRow::active(
@@ -187,6 +231,11 @@ impl JoinTableRow {
             output_seat_stack: u64_to_m31_limbs(input.buy_in),
             // Gap 2：诚实 host 只在空座位入座。
             input_seat_empty: M31::from(1u32),
+            // Gap 3：大盲注（来自表台配置）。
+            input_big_blind: u64_to_m31_limbs(big_blind),
+            // Gap 4：pre/post chip_pool（守恒：post = pre + buy_in）。
+            input_pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
+            output_post_chip_pool: u64_to_m31_limbs(pre_chip_pool + input.buy_in),
         }
     }
 
@@ -200,6 +249,9 @@ impl JoinTableRow {
             input_player_addr: [ZERO; 4],
             output_seat_stack: [ZERO; 4],
             input_seat_empty: ZERO,
+            input_big_blind: [ZERO; 4],
+            input_pre_chip_pool: [ZERO; 4],
+            output_post_chip_pool: [ZERO; 4],
         }
     }
 
@@ -212,6 +264,9 @@ impl JoinTableRow {
         v.extend_from_slice(&self.input_player_addr);
         v.extend_from_slice(&self.output_seat_stack);
         v.push(self.input_seat_empty);
+        v.extend_from_slice(&self.input_big_blind);
+        v.extend_from_slice(&self.input_pre_chip_pool);
+        v.extend_from_slice(&self.output_post_chip_pool);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

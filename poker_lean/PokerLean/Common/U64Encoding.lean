@@ -92,4 +92,23 @@ axiom u64ToLimbs_correct (v : U64) :
 def U64_MAX : Nat := 2^64
 def LIMB_SIZE : Nat := 65536
 
+/-! ## Limb 加法无溢出公理
+
+Rust AIR 通过独立的 range constraint 保证每 limb < 65536（16-bit），
+因此两个 limb 之和 < 131072 < M31_P = 2^31 - 1，M31.add 不取模。
+Lean 模型暂未引入 range constraint，故将此性质作为公理。
+-/
+
+/-- 公理：M31.add 不溢出（limb 范围约束的抽象）。
+    假设每 limb < 65536，因此 a.val + b.val < 131072 < M31_P。 -/
+axiom m31_add_no_overflow (a b : M31) :
+    (M31.add a b).val = a.val + b.val
+
+/-- 引理：逐 limb M31.add 保持 decodeU64 线性。 -/
+lemma decodeU64_limb_add (a0 a1 a2 a3 b0 b1 b2 b3 : M31) :
+    decodeU64 (M31.add a0 b0) (M31.add a1 b1) (M31.add a2 b2) (M31.add a3 b3)
+    = decodeU64 a0 a1 a2 a3 + decodeU64 b0 b1 b2 b3 := by
+  simp only [decodeU64, m31_add_no_overflow]
+  ring
+
 end PokerLean

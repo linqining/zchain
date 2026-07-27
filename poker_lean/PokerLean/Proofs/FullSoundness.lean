@@ -65,8 +65,8 @@ def FullFoldConstraints
     (hlt : expected_seat_index < M31_P)
     : Prop :=
   FoldMethodConstraints row ext expected_seat_index max_players hlt ∧
-  (row.pre_round_state.val = 1 ∨ row.pre_round_state.val = 2 ∨
-   row.pre_round_state.val = 3 ∨ row.pre_round_state.val = 4) ∧
+  (row.pre_round_state.val = 2 ∨ row.pre_round_state.val = 3 ∨
+   row.pre_round_state.val = 4 ∨ row.pre_round_state.val = 5) ∧
   expected_seat_index < max_players ∧
   decodeU64' row.post_version.1 row.post_version.2.1
       row.post_version.2.2.1 row.post_version.2.2.2 =

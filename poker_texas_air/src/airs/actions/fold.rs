@@ -29,8 +29,10 @@ pub mod cols {
     pub const OUTPUT_FOLDED: usize = COMMON_NUM_COLUMNS + 1;
     /// `INPUT_PRE_ROUND_STATE_Q` 列（Gap 1 witness：pre_round_state²，拆 4 次 vanishing）。
     pub const INPUT_PRE_ROUND_STATE_Q: usize = COMMON_NUM_COLUMNS + 2;
+    /// `INPUT_CURRENT_TURN` witness（Gap: current_turn == seat_index）。
+    pub const INPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 3;
     /// `fold` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 3;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 4;
 }
 
 /// `fold` 输入参数。
@@ -86,10 +88,14 @@ impl FrameworkEval for FoldAir {
         let output_folded = eval.next_trace_mask();
         // Gap 1 witness：pre_round_state²
         let input_pre_round_state_q = eval.next_trace_mask();
+        // Gap: current_turn == seat_index witness
+        let input_current_turn = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
-        eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat));
+        eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat.clone()));
+        // 约束: current_turn == seat_index（Gap: 阻止为非当前行动座位构造动作）
+        eval.add_constraint(is_active.clone() * (input_current_turn - expected_seat));
 
         // 约束 2：output_folded == 1（fold 后座位标记为 folded）
         let one: E::F = M31::from(1u32).into();
@@ -121,6 +127,8 @@ pub struct FoldRow {
     pub output_folded: M31,
     /// Gap 1 witness：pre_round_state²。
     pub input_pre_round_state_q: M31,
+    /// `INPUT_CURRENT_TURN` witness（Gap: current_turn == seat_index）。
+    pub input_current_turn: M31,
 }
 
 impl FoldRow {
@@ -160,6 +168,7 @@ impl FoldRow {
             output_folded: M31::from(1u32),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
+            input_current_turn: u8_to_m31(input.seat_index),  // current_turn == seat_index
         }
     }
 
@@ -171,6 +180,7 @@ impl FoldRow {
             input_seat_index: ZERO,
             output_folded: ZERO,
             input_pre_round_state_q: ZERO,
+            input_current_turn: ZERO,
         }
     }
 
@@ -181,6 +191,7 @@ impl FoldRow {
         v.push(self.input_seat_index);
         v.push(self.output_folded);
         v.push(self.input_pre_round_state_q);
+        v.push(self.input_current_turn);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

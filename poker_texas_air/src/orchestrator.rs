@@ -362,6 +362,8 @@ impl Orchestrator {
             &input,
             srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+            task.pre_table.big_blind,
+            task.pre_table.chip_pool,
         );
         run(JoinTableAir::num_columns(), &row, &JoinTableRow::padding(), move || JoinTableAir {
             log_size: MIN_LOG_SIZE, input,
@@ -379,9 +381,14 @@ impl Orchestrator {
         };
         let input = LeaveTableInput { seat_index: *seat_index };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let row = LeaveTableRow::active(
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
+            pre_seat.stack,
+            pre_seat.pending_addon,
+            task.pre_table.chip_pool,
+            task.pre_table.addon_pool,
         );
         run(LeaveTableAir::num_columns(), &row, &LeaveTableRow::padding(), move || LeaveTableAir {
             log_size: MIN_LOG_SIZE, input,
@@ -537,8 +544,11 @@ impl Orchestrator {
         let MethodInput::Raise { seat_index, total_bet } = &task.method_input else {
             return Err(input_mismatch("raise", "Raise", &task.method_input));
         };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
         let min_raise = task.pre_table.betting_round.as_ref().map_or(0, |b| b.min_raise);
+        let post_current_bet = task.post_table.betting_round.as_ref().map_or(0, |b| b.current_bet);
+        let post_min_raise = task.post_table.betting_round.as_ref().map_or(0, |b| b.min_raise);
         let input = RaiseInput {
             seat_index: *seat_index,
             raise_to: *total_bet,
@@ -551,7 +561,10 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
             pre_r, post_r, pre_pot, post_pot,
-            post_seat.stack, post_seat.bet, post_seat.all_in,
+            pre_seat.stack, pre_seat.bet, pre_seat.total_bet,
+            post_seat.stack, post_seat.bet, post_seat.total_bet,
+            post_current_bet, post_min_raise,
+            post_seat.all_in,
         );
         run(RaiseAir::num_columns(), &row, &RaiseRow::padding(), move || RaiseAir {
             log_size: MIN_LOG_SIZE, input,

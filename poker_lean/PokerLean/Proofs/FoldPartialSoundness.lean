@@ -13,6 +13,18 @@ namespace PokerLean
 lemma decodeU64_eq_decodeU64' (l0 l1 l2 l3 : M31) :
     decodeU64 l0 l1 l2 l3 = decodeU64' l0 l1 l2 l3 := rfl
 
+/-- update_seat 不改变 round_state 字段 -/
+@[simp] lemma update_seat_round_state (t : TexasPokerTable) (idx : Nat) (f : Seat → Seat) :
+    (t.update_seat idx f).round_state = t.round_state := rfl
+
+/-- update_seat 不改变 version 字段 -/
+@[simp] lemma update_seat_version (t : TexasPokerTable) (idx : Nat) (f : Seat → Seat) :
+    (t.update_seat idx f).version = t.version := rfl
+
+/-- update_seat 不改变 betting 字段 -/
+@[simp] lemma update_seat_betting (t : TexasPokerTable) (idx : Nat) (f : Seat → Seat) :
+    (t.update_seat idx f).betting = t.betting := rfl
+
 /-- `ContractFoldPartial`: AIR 能验证的 ContractFold 子集。
 
     这是 `ContractFold` 的一个弱化版本，只检查 AIR 实际追踪的字段。
@@ -34,12 +46,12 @@ def ContractFoldPartial
   post.chip_pool = pre.chip_pool ∧
   post.hand_id = pre.hand_id
 
-/-- 辅助引理：如果 pre_round_state.val ∈ {1,2,3,4}，则 is_betting_round 为 true -/
+/-- 辅助引理：如果 pre_round_state.val ∈ {2,3,4,5}，则 is_betting_round 为 true -/
 lemma fold_pre_round_betting
-    (row : CommonRow) (max_players : Nat)
-    (h : row.pre_round_state.val = 1 ∨ row.pre_round_state.val = 2 ∨
-         row.pre_round_state.val = 3 ∨ row.pre_round_state.val = 4) :
-    (extractPreTableFromFoldAir row max_players).round_state.is_betting_round := by
+    (row : CommonRow) (ext : FoldMethodColumns) (max_players : Nat)
+    (h : row.pre_round_state.val = 2 ∨ row.pre_round_state.val = 3 ∨
+         row.pre_round_state.val = 4 ∨ row.pre_round_state.val = 5) :
+    (extractPreTableFromFoldAir row ext max_players).round_state.is_betting_round := by
   unfold extractPreTableFromFoldAir
   rcases h with h1 | h2 | h3 | h4
   · rw [h1]; simp [RoundState.fromNat, RoundState.is_betting_round]
@@ -56,9 +68,9 @@ lemma fold_ver_inc
       decodeU64' row.pre_version.1 row.pre_version.2.1
         row.pre_version.2.2.1 row.pre_version.2.2.2 + 1) :
     (extractPostTableFromFoldAir row ext max_players seat_index).version =
-    (extractPreTableFromFoldAir row max_players).version + 1 := by
+    (extractPreTableFromFoldAir row ext max_players).version + 1 := by
   unfold extractPostTableFromFoldAir extractPreTableFromFoldAir
-  simp only [decodeU64_eq_decodeU64']
+  simp only [decodeU64_eq_decodeU64', update_seat_version, update_seat_betting]
   rw [h]
 
 /-- 辅助引理：round_state 不变 -/
@@ -67,8 +79,9 @@ lemma fold_rs_same
     (max_players : Nat) (seat_index : Nat)
     (h : row.post_round_state = row.pre_round_state) :
     (extractPostTableFromFoldAir row ext max_players seat_index).round_state =
-    (extractPreTableFromFoldAir row max_players).round_state := by
+    (extractPreTableFromFoldAir row ext max_players).round_state := by
   unfold extractPostTableFromFoldAir extractPreTableFromFoldAir
+  simp only [update_seat_round_state]
   rw [h]
 
 /-- 辅助引理：pot 不变 -/
@@ -80,9 +93,9 @@ lemma fold_pot_same
       decodeU64' row.pre_pot.1 row.pre_pot.2.1
         row.pre_pot.2.2.1 row.pre_pot.2.2.2) :
     (extractPostTableFromFoldAir row ext max_players seat_index).betting.pot =
-    (extractPreTableFromFoldAir row max_players).betting.pot := by
+    (extractPreTableFromFoldAir row ext max_players).betting.pot := by
   unfold extractPostTableFromFoldAir extractPreTableFromFoldAir
-  simp only [decodeU64_eq_decodeU64']
+  simp only [decodeU64_eq_decodeU64', update_seat_version, update_seat_betting]
   rw [h]
 
 /-- 辅助引理：dealer_seat 不变 -/
@@ -91,8 +104,9 @@ lemma fold_dealer_same
     (max_players : Nat) (seat_index : Nat)
     (h : row.post_button = row.pre_button) :
     (extractPostTableFromFoldAir row ext max_players seat_index).betting.dealer_seat =
-    (extractPreTableFromFoldAir row max_players).betting.dealer_seat := by
+    (extractPreTableFromFoldAir row ext max_players).betting.dealer_seat := by
   unfold extractPostTableFromFoldAir extractPreTableFromFoldAir
+  simp only [update_seat_betting]
   rw [h]
 
 /-- 辅助引理：max_players 不变（由提取函数保证） -/
@@ -100,7 +114,7 @@ lemma fold_mp_same
     (row : CommonRow) (ext : FoldMethodColumns)
     (max_players : Nat) (seat_index : Nat) :
     (extractPostTableFromFoldAir row ext max_players seat_index).max_players =
-    (extractPreTableFromFoldAir row max_players).max_players := by
+    (extractPreTableFromFoldAir row ext max_players).max_players := by
   unfold extractPostTableFromFoldAir extractPreTableFromFoldAir
   rfl
 
@@ -109,13 +123,13 @@ lemma fold_other_same
     (row : CommonRow) (ext : FoldMethodColumns)
     (max_players : Nat) (seat_index : Nat) :
     (extractPostTableFromFoldAir row ext max_players seat_index).big_blind =
-      (extractPreTableFromFoldAir row max_players).big_blind ∧
+      (extractPreTableFromFoldAir row ext max_players).big_blind ∧
     (extractPostTableFromFoldAir row ext max_players seat_index).small_blind =
-      (extractPreTableFromFoldAir row max_players).small_blind ∧
+      (extractPreTableFromFoldAir row ext max_players).small_blind ∧
     (extractPostTableFromFoldAir row ext max_players seat_index).chip_pool =
-      (extractPreTableFromFoldAir row max_players).chip_pool ∧
+      (extractPreTableFromFoldAir row ext max_players).chip_pool ∧
     (extractPostTableFromFoldAir row ext max_players seat_index).hand_id =
-      (extractPreTableFromFoldAir row max_players).hand_id := by
+      (extractPreTableFromFoldAir row ext max_players).hand_id := by
   unfold extractPostTableFromFoldAir extractPreTableFromFoldAir
   exact ⟨rfl, rfl, rfl, rfl⟩
 
@@ -127,8 +141,8 @@ lemma fold_params_seat
 
 /-- 辅助引理：pre.max_players = max_players -/
 lemma fold_pre_mp
-    (row : CommonRow) (max_players : Nat) :
-    (extractPreTableFromFoldAir row max_players).max_players = max_players := by
+    (row : CommonRow) (ext : FoldMethodColumns) (max_players : Nat) :
+    (extractPreTableFromFoldAir row ext max_players).max_players = max_players := by
   unfold extractPreTableFromFoldAir; rfl
 
 /-- 辅助引理：FoldMethodConstraints 蕴含 input_seat_index = expected_seat_index -/
@@ -152,7 +166,7 @@ theorem full_fold_partial_soundness
     (hlt : expected_seat_index < M31_P)
     (h_air : FullFoldAirAcceptable row ext expected_seat_index max_players hlt) :
     ContractFoldPartial
-      (extractPreTableFromFoldAir row max_players)
+      (extractPreTableFromFoldAir row ext max_players)
       (extractFoldParamsFromAir ext)
       (extractPostTableFromFoldAir row ext max_players expected_seat_index) := by
   rcases h_air with ⟨_hc, hfull, hactive, _hpadding⟩
@@ -164,7 +178,7 @@ theorem full_fold_partial_soundness
     rw [h_input_seat]; unfold nat_to_m31; simp
   unfold ContractFoldPartial
   constructor
-  · exact fold_pre_round_betting row max_players h_round
+  · exact fold_pre_round_betting row ext max_players h_round
   constructor
   · rw [fold_params_seat, fold_pre_mp, h_seat_val]
     exact h_seat_bound

@@ -17,6 +17,7 @@ def toNat (x : M31) : Nat := x.val
 
 def zero : M31 := ⟨0, by unfold M31_P; norm_num⟩
 def one : M31 := ⟨1, by unfold M31_P; norm_num⟩
+def two : M31 := ⟨2, by unfold M31_P; norm_num⟩
 
 def add (a b : M31) : M31 :=
   if h : a.val + b.val < M31_P then

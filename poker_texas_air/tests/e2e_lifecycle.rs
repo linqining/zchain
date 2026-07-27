@@ -51,6 +51,8 @@ fn test_e2e_join_table_prove_verify() {
         1,  // call_seq
         0,  // pre_version
         1,  // post_version
+        10, // big_blind
+        0,  // pre_chip_pool
     );
     let trace = gen_method_trace(
         JoinTableAir::num_columns(),
@@ -83,7 +85,7 @@ fn test_soundness_join_table_tampered_seat() {
         buy_in: 1_000,
         player_addr: [0u8; 20],
     };
-    let row = JoinTableRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1);
+    let row = JoinTableRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1, 10, 0);
     let trace = gen_method_trace(
         JoinTableAir::num_columns(),
         &row.to_vec(),
@@ -126,7 +128,7 @@ fn test_soundness_join_table_tampered_seat() {
 #[test]
 fn test_e2e_leave_table_prove_verify() {
     let input = LeaveTableInput { seat_index: 3 };
-    let row = LeaveTableRow::active(&input, zero_root(), one_root(), 42, 0, 2, 0, 1);
+    let row = LeaveTableRow::active(&input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 0);
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
         &row.to_vec(),
@@ -154,7 +156,7 @@ fn test_e2e_leave_table_prove_verify() {
 #[test]
 fn test_soundness_leave_table_tampered_seat() {
     let input = LeaveTableInput { seat_index: 3 };
-    let row = LeaveTableRow::active(&input, zero_root(), one_root(), 42, 0, 2, 0, 1);
+    let row = LeaveTableRow::active(&input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 0);
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
         &row.to_vec(),
@@ -575,12 +577,17 @@ fn test_lifecycle_air_column_consistency() {
         join_table, leave_table, reset_for_next_hand, start_hand, tick,
     };
 
-    // join_table: 通用 + 14 业务（含 Gap 2 INPUT_SEAT_EMPTY boolean witness）= 51
-    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 14);
+    // join_table: 通用 + 26 业务
+    //   原始 14 列（seat_index + buy_in 4 + player_addr 4 + seat_stack 4 + seat_empty 1）
+    //   + 12 新列（big_blind 4 + pre_chip_pool 4 + post_chip_pool 4）用于 buy_in >= big_blind 和 chip_pool 守恒
+    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 26);
     assert_eq!(JoinTableAir::num_columns(), join_table::cols::NUM_COLUMNS);
 
-    // leave_table: 通用 + 6 业务（含 Gap 3 INPUT_SEAT_OCCUPIED boolean witness）= 43
-    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
+    // leave_table: 通用 + 30 业务
+    //   原始 6 列（seat_index + refund 4 + seat_occupied 1）
+    //   + 24 新列（seat_stack 4 + pending_addon 4 + pre_chip_pool 4 + post_chip_pool 4
+    //              + pre_addon_pool 4 + post_addon_pool 4）用于退款和资金守恒
+    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 30);
     assert_eq!(LeaveTableAir::num_columns(), leave_table::cols::NUM_COLUMNS);
 
     // start_hand: 通用 + 8 业务（含 ante 3 列 + active_count_inv/prod witness）= 45

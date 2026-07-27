@@ -65,30 +65,42 @@ theorem empty_seat_not_occupied :
 def mark_folded (s : Seat) : Seat :=
   { s with folded := true, acted_this_round := true }
 
+/-- 被踢出玩家的座位状态（对齐 Rust `kick_player_internal`）：
+    保留 player 不变，但 folded/left_during_hand = true，
+    stack/bet 清零，all_in/acted_this_round/is_waiting 复位。 -/
+def kicked (s : Seat) : Seat :=
+  { s with
+    stack := 0, bet := 0,
+    folded := true, left_during_hand := true,
+    all_in := false, acted_this_round := false, is_waiting := false }
+
 end Seat
 
 inductive RoundState where
-  | ROUND_WAITING | ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
+  | ROUND_WAITING | ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER | ROUND_SHOWDOWN
 deriving Repr, DecidableEq
 
 namespace RoundState
 
+/-- 与 Rust `constants.rs` 逐字节对齐：
+    WAITING=0, PREFLOP=2, FLOP=3, TURN=4, RIVER=5, SHOWDOWN=6（值 1 未使用） -/
 def toNat : RoundState → Nat
-  | ROUND_WAITING => 0 | ROUND_PREFLOP => 1 | ROUND_FLOP => 2
-  | ROUND_TURN => 3 | ROUND_RIVER => 4
+  | ROUND_WAITING => 0 | ROUND_PREFLOP => 2 | ROUND_FLOP => 3
+  | ROUND_TURN => 4 | ROUND_RIVER => 5 | ROUND_SHOWDOWN => 6
 
 def fromNat (n : Nat) : RoundState :=
-  if n = 1 then ROUND_PREFLOP
-  else if n = 2 then ROUND_FLOP
-  else if n = 3 then ROUND_TURN
-  else if n = 4 then ROUND_RIVER
+  if n = 2 then ROUND_PREFLOP
+  else if n = 3 then ROUND_FLOP
+  else if n = 4 then ROUND_TURN
+  else if n = 5 then ROUND_RIVER
+  else if n = 6 then ROUND_SHOWDOWN
   else ROUND_WAITING
 
 theorem fromNat_zero : fromNat 0 = ROUND_WAITING := rfl
 
 theorem round_state_ofNat_zero : fromNat 0 = ROUND_WAITING := rfl
 
-theorem fromNat_one : fromNat 1 = ROUND_PREFLOP := rfl
+theorem fromNat_two : fromNat 2 = ROUND_PREFLOP := rfl
 
 def is_betting_round : RoundState → Bool
   | ROUND_PREFLOP => true | ROUND_FLOP => true

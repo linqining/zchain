@@ -71,7 +71,13 @@ structure KickPlayerParams where
   reason : Nat
 deriving Repr
 
-/-- kick_player 合约语义 -/
+/-- kick_player 合约语义（对齐 Rust `kick_player_internal`）：
+    - 被踢者 player 保留不清空（区别于 leave_table 的 Seat::empty()）
+    - folded / left_during_hand = true
+    - stack / bet 清零
+    - all_in / acted_this_round / is_waiting 复位
+    - pot += 被踢者当前下注
+    - version += 1 -/
 def ContractKickPlayer
     (pre : TexasPokerTable)
     (params : KickPlayerParams)
@@ -79,10 +85,13 @@ def ContractKickPlayer
     : Prop :=
   params.seat_index < pre.max_players ∧
   (pre.get_seat params.seat_index).is_occupied ∧
-  (post.get_seat params.seat_index).player = EMPTY_PLAYER ∧
   (post.get_seat params.seat_index).stack = 0 ∧
+  (post.get_seat params.seat_index).bet = 0 ∧
   (post.get_seat params.seat_index).folded = true ∧
   (post.get_seat params.seat_index).left_during_hand = true ∧
+  (post.get_seat params.seat_index).all_in = false ∧
+  (post.get_seat params.seat_index).acted_this_round = false ∧
+  (post.get_seat params.seat_index).is_waiting = false ∧
   post.betting.pot = pre.betting.pot + (pre.get_seat params.seat_index).bet ∧
   (∀ i : Nat, i ≠ params.seat_index →
     i < pre.max_players →

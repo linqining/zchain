@@ -12,6 +12,7 @@ use stwo::core::fields::m31::M31;
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
 use poker_texas_air::airs::actions::check::{CheckAir, CheckInput, CheckRow};
 use poker_texas_air::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
+use poker_texas_air::airs::actions::raise::RaiseAir;
 use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::prover::prove_method;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
@@ -411,9 +412,15 @@ fn test_e2e_raise_prove_verify() {
         4, // PREFLOP
         4,
         100,
-        160, // pot += 60（raise_to - pre_bet）
+        160, // pot += 60（raise_to - pre_bet = 80 - 20）
+        80,  // pre_seat_stack
+        20,  // pre_seat_bet
+        20,  // pre_seat_total_bet
         20,  // post_seat_stack（原 80 - 60）
         80,  // post_seat_bet = raise_to
+        80,  // post_seat_total_bet = 20 + 60
+        80,  // post_current_bet = raise_to
+        80,  // post_min_raise = raise_to（pre.current_bet = 0）
         false,
     );
     let trace = gen_method_trace(RaiseAir::num_columns(), &row.to_vec(), &RaiseRow::padding().to_vec())
@@ -458,8 +465,14 @@ fn test_soundness_raise_tampered_raise_to() {
         4,
         100,
         160,
-        20,
-        80,
+        80,  // pre_seat_stack
+        20,  // pre_seat_bet
+        20,  // pre_seat_total_bet
+        20,  // post_seat_stack
+        80,  // post_seat_bet = raise_to
+        80,  // post_seat_total_bet
+        80,  // post_current_bet
+        80,  // post_min_raise
         false,
     );
     let trace = gen_method_trace(RaiseAir::num_columns(), &row.to_vec(), &RaiseRow::padding().to_vec())
@@ -814,31 +827,36 @@ fn test_action_air_column_consistency() {
         auto_fold, bet, call, check, fold, force_fold, kick_player, raise,
     };
 
-    // fold: 通用 + 3 业务 = 40（含 Gap 1 witness INPUT_PRE_ROUND_STATE_Q）
-    assert_eq!(fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 3);
+    // fold: 通用 + 4 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    assert_eq!(fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 4);
     assert_eq!(FoldAir::num_columns(), fold::cols::NUM_COLUMNS);
 
-    // check: 通用 + 7 业务 = 44（含 Gap 1 witness）
-    assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 7);
+    // check: 通用 + 8 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
     assert_eq!(CheckAir::num_columns(), check::cols::NUM_COLUMNS);
 
-    // call: 通用 + 16 业务 = 53（含 Gap 1 witness）
-    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 16);
+    // call: 通用 + 17 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 17);
     assert_eq!(CallAir::num_columns(), call::cols::NUM_COLUMNS);
 
-    // raise: 通用 + 20 业务 = 57（含 Gap 1 witness）
-    assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 20);
+    // raise: 通用 + 46 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    // 业务列：seat_index/current_turn/seat_occupied(3) + raise_to(4)
+    // + pre_seat_stack/bet/total_bet(12) + call_delta(4)
+    // + post_seat_stack/bet/total_bet(12) + post_current_bet/min_raise(8)
+    // + output_all_in/acted(2) + pre_round_state_q(1) = 46
+    assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 46);
+    assert_eq!(RaiseAir::num_columns(), raise::cols::NUM_COLUMNS);
 
-    // bet: 通用 + 11 业务 = 48（含 Gap 1 witness）
-    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 11);
+    // bet: 通用 + 12 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 12);
 
-    // auto_fold: 通用 + 7 业务 = 44（含 Gap 1 witness）
-    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 7);
+    // auto_fold: 通用 + 8 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
 
-    // force_fold: 通用 + 3 业务 = 40（含 Gap 1 witness）
-    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 3);
+    // force_fold: 通用 + 4 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 4);
 
-    // kick_player: 通用 + 7 业务（含 Gap 3 INPUT_SEAT_OCCUPIED boolean witness）= 44
+    // kick_player: 通用 + 7 业务（含 Gap 3 INPUT_SEAT_OCCUPIED boolean witness）
     assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 7);
 }
 

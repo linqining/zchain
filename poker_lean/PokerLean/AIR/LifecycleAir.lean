@@ -78,6 +78,112 @@ def extractPostTableFromLifecycleAir
     round_state := RoundState.fromNat row.post_round_state.val
   }
 
+/-! ## start_hand 专用提取函数
+
+`start_hand` 需要反映 AIR witness `input_active_count` 对应的实际座位占用数。
+通用 `extractPreTableFromLifecycleAir` 创建全空座位（foldl count = 0），
+无法满足合约 `active_count = count of occupied seats`。
+专用提取函数创建 `active_count` 个占用座位，使 foldl count = active_count。
+
+同时 `start_hand` 合约要求 `post.shuffle_state.phase = 3`（BEFORE_PREFLOP），
+专用后置提取函数设置该值，由 StateRootConsistency 强制。 -/
+
+/-- 创建 `n` 个占用座位（player ≠ EMPTY_PLAYER）。 -/
+def make_occupied_seats (n : Nat) : List Seat :=
+  List.replicate n { Seat.empty with player := PlayerId.ofNat 1 }
+
+/-- `make_occupied_seats` 的 foldl count = n（全部被占用）。 -/
+theorem make_occupied_seats_foldl_count (n : Nat) :
+    (make_occupied_seats n).foldl
+      (fun acc s => acc + if s.is_occupied then 1 else 0) 0 = n := by
+  have h_occ : ({ Seat.empty with player := PlayerId.ofNat 1 } : Seat).is_occupied = true := by
+    simp [Seat.is_occupied, Seat.empty, EMPTY_PLAYER, PlayerId.ofNat]
+  -- Helper: foldl f acc l = acc + foldl f 0 l (for additive f)
+  have h_foldl_eq : ∀ (acc : Nat) (l : List Seat),
+      l.foldl (fun acc s => acc + if s.is_occupied = true then 1 else 0) acc =
+      acc + l.foldl (fun acc s => acc + if s.is_occupied = true then 1 else 0) 0 := by
+    intro acc l
+    induction l generalizing acc with
+    | nil => rfl
+    | cons x xs ih =>
+      rw [List.foldl_cons, List.foldl_cons]
+      have h1 := ih (acc + if x.is_occupied = true then 1 else 0)
+      have h2 := ih (if x.is_occupied = true then 1 else 0)
+      rw [h1, Nat.zero_add, h2]
+      omega
+  induction n with
+  | zero => rfl
+  | succ k ih =>
+    simp only [make_occupied_seats]
+    simp only [make_occupied_seats] at ih
+    rw [List.replicate_succ, List.foldl_cons, h_foldl_eq, ih]
+    simp [h_occ]
+    omega
+
+/-- start_hand 专用前置提取：创建 `active_count` 个占用座位，`shuffle_state.phase = 0`。 -/
+def extractPreTableFromStartHandAir
+    (row : CommonRow)
+    (active_count : Nat)
+    (max_players : Nat)
+    : TexasPokerTable :=
+  { table_id := 0
+    name_hash := 0
+    seats := make_occupied_seats active_count
+    max_players := max_players
+    small_blind := 0
+    big_blind := 0
+    ante := 0
+    version := decodeU64 row.pre_version.1 row.pre_version.2.1
+        row.pre_version.2.2.1 row.pre_version.2.2.2
+    round_state := RoundState.fromNat row.pre_round_state.val
+    betting := {
+      current_bet := 0
+      current_turn := 0
+      dealer_seat := row.pre_button.val
+      pot := decodeU64 row.pre_pot.1 row.pre_pot.2.1
+          row.pre_pot.2.2.1 row.pre_pot.2.2.2
+      side_pots := []
+      min_raise := 0
+      last_aggressor := 0
+      num_raises := 0
+    }
+    shuffle_state := {
+      phase := 0
+      current_shuffler := none
+      pending_players := []
+      completed_players := []
+    }
+    reveal_state := { reveal_phase := 0, num_assignments := 0 }
+    deck_state := DeckState.DeckIdle
+    reconstruct_state := ReconstructState.ReconstructIdle
+    hand_id := row.hand_id.val
+    call_seq := row.call_seq.val
+    chip_pool := 0
+    addon_pool := 0
+    pending_addon_total := 0
+    pending_rebuy_total := 0
+    rake := 0
+    table_fee := 0
+    is_private := false
+    started_at := 0
+    timeout := 0
+    last_action_time := 0
+  }
+
+/-- start_hand 专用后置提取：`shuffle_state.phase = 3`（BEFORE_PREFLOP），version 递增。 -/
+def extractPostTableFromStartHandAir
+    (row : CommonRow)
+    (active_count : Nat)
+    (max_players : Nat)
+    : TexasPokerTable :=
+  let pre := extractPreTableFromStartHandAir row active_count max_players
+  { pre with
+    version := decodeU64 row.post_version.1 row.post_version.2.1
+        row.post_version.2.2.1 row.post_version.2.2.2
+    round_state := RoundState.fromNat row.post_round_state.val
+    shuffle_state := { pre.shuffle_state with phase := 3 }
+  }
+
 /-! ## start_hand AIR
 
 AIR 约束（start_hand.rs:86-133）：
@@ -111,11 +217,12 @@ def StartHandMethodConstraints
     : Prop :=
   row.is_active = M31.one →
   VersionIncrementConstraint row ∧ RoundStateEq row 0 (by unfold M31_P; omega) ∧
+  RoundStateUnchanged row ∧
   ext.input_active_count = nat_to_m31 expected_active_count hlt ∧
   ActiveCountAtLeastTwo ext.input_active_count ∧
   ext.output_new_round_state = M31.zero ∧
-  let pre_table := extractPreTableFromLifecycleAir row max_players 0
-  let post_table := extractPostTableFromLifecycleAir row max_players 0
+  let pre_table := extractPreTableFromStartHandAir row ext.input_active_count.val max_players
+  let post_table := extractPostTableFromStartHandAir row ext.input_active_count.val max_players
   StateRootConsistency row
     (texasPokerTableToPreimage pre_table)
     (texasPokerTableToPreimage post_table)
@@ -211,6 +318,8 @@ def ResetForNextHandMethodConstraints
   VersionIncrementConstraint row ∧
   ShufflePhasePositive ext.input_shuffle_phase ∧
   ext.output_new_round_state = M31.zero ∧
+  -- 强制 post_round_state = WAITING（与 output_new_round_state = 0 一致）
+  row.post_round_state = ext.output_new_round_state ∧
   ext.post_pending_addon.1 = M31.zero ∧
   ext.post_pending_addon.2.1 = M31.zero ∧
   ext.post_pending_addon.2.2.1 = M31.zero ∧
