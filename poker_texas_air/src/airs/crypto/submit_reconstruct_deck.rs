@@ -102,14 +102,22 @@ impl FrameworkEval for SubmitReconstructDeckAir {
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
         eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat));
 
-        // 约束 2：reconstruct_phase == input.reconstruct_phase
+        // 约束 2：reconstruct_phase == input.reconstruct_phase（clone 保留原值供约束 4 使用）
         let expected_phase: E::F = M31::from(u32::from(self.input.reconstruct_phase)).into();
-        eval.add_constraint(is_active.clone() * (input_reconstruct_phase - expected_phase));
+        eval.add_constraint(is_active.clone() * (input_reconstruct_phase.clone() - expected_phase));
 
         // 约束 3（审计共性，degree-2）：round_state 不变（reconstruct 阶段 round_state 恒为 WAITING=0）。
         eval.add_constraint(common.round_state_unchanged());
-        // TODO 阶段 5：reconstruct_state ≠ ReconstructIdle 前置（需 invertibility witness 或 logup）；
-        //              嵌入 ReconstructProof Verifier AIR。
+
+        // 约束 4（Gap 8：ReconstructStateNotIdle）：reconstruct_phase ∈ {1,2}（非 NONE=0）。
+        // 用 degree-2 vanishing 多项式 (p-1)(p-2)==0（COLLECTING=1, COMPLETE=2），
+        // gated 后 degree 3。阻止恶意 prover 在 reconstruct_phase=0 下构造 trace。
+        let one: E::F = M31::from(1u32).into();
+        let two: E::F = M31::from(2u32).into();
+        let p = input_reconstruct_phase.clone();
+        let vp = (p.clone() - one) * (p - two);
+        eval.add_constraint(is_active.clone() * vp);
+        // TODO 阶段 5：嵌入 ReconstructProof Verifier AIR。
 
         eval
     }

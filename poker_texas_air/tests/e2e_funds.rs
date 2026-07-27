@@ -396,12 +396,14 @@ fn test_funds_air_column_consistency() {
     use poker_texas_air::airs::funds::addon;
     use poker_texas_air::airs::funds::rebuy;
 
-    // addon: 通用 + 13 业务（1 seat + 4 amount + 4 pre_pending + 4 post_pending）= 50
-    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 13);
+    // addon: 通用 + 15 业务（1 seat + 4 amount + 4 pre_pending + 4 post_pending
+    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV）= 52
+    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 15);
     assert_eq!(AddonAir::num_columns(), addon::cols::NUM_COLUMNS);
 
-    // rebuy: 通用 + 13 业务（1 seat + 4 amount + 4 pre_stack + 4 post_stack）= 50
-    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 13);
+    // rebuy: 通用 + 15 业务（1 seat + 4 amount + 4 pre_stack + 4 post_stack
+    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV）= 52
+    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 15);
     assert_eq!(RebuyAir::num_columns(), rebuy::cols::NUM_COLUMNS);
 }
 

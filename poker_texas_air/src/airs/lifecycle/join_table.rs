@@ -32,8 +32,11 @@ pub mod cols {
     pub const INPUT_PLAYER_ADDR_BASE: usize = COMMON_NUM_COLUMNS + 5;
     /// `OUTPUT_SEAT_STACK` 起始列（4 limb）。
     pub const OUTPUT_SEAT_STACK_BASE: usize = COMMON_NUM_COLUMNS + 9;
+    /// `INPUT_SEAT_EMPTY` boolean witness（Gap 2）：诚实 host 只在空座位入座，
+    /// 故前置「目标座位为空」由该列 == 1 强制。
+    pub const INPUT_SEAT_EMPTY: usize = COMMON_NUM_COLUMNS + 13;
     /// `join_table` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 13;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 14;
 }
 
 /// `join_table` AIR 输入参数。
@@ -105,6 +108,8 @@ impl FrameworkEval for JoinTableAir {
         let _output_seat_stack_1 = eval.next_trace_mask();
         let _output_seat_stack_2 = eval.next_trace_mask();
         let _output_seat_stack_3 = eval.next_trace_mask();
+        // Gap 2 boolean witness（目标座位为空）。
+        let input_seat_empty = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -120,7 +125,10 @@ impl FrameworkEval for JoinTableAir {
         eval.add_constraint(common.round_state_eq(0));
         // 约束 4（degree-2）：round_state 不变（join 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
-        // TODO 阶段 2：seat 为空、buy_in >= big_blind、player 唯一性、chip_pool += buy_in 守恒
+        // 约束 5（Gap 2，degree-2）：input_seat_empty == 1 — 诚实 host 只在空座位入座。
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(is_active.clone() * (input_seat_empty - one));
+        // TODO 阶段 2：buy_in >= big_blind、player 唯一性、chip_pool += buy_in 守恒
         //              （需新增业务列 + invertibility/range witness）。
         eval
     }
@@ -139,6 +147,8 @@ pub struct JoinTableRow {
     pub input_player_addr: [M31; 4],
     /// `OUTPUT_SEAT_STACK`（4 limb）。
     pub output_seat_stack: [M31; 4],
+    /// `INPUT_SEAT_EMPTY` boolean witness（Gap 2）。
+    pub input_seat_empty: M31,
 }
 
 impl JoinTableRow {
@@ -175,6 +185,8 @@ impl JoinTableRow {
             input_buy_in: u64_to_m31_limbs(input.buy_in),
             input_player_addr: u64_to_m31_limbs(0), // 简化
             output_seat_stack: u64_to_m31_limbs(input.buy_in),
+            // Gap 2：诚实 host 只在空座位入座。
+            input_seat_empty: M31::from(1u32),
         }
     }
 
@@ -187,6 +199,7 @@ impl JoinTableRow {
             input_buy_in: [ZERO; 4],
             input_player_addr: [ZERO; 4],
             output_seat_stack: [ZERO; 4],
+            input_seat_empty: ZERO,
         }
     }
 
@@ -198,6 +211,7 @@ impl JoinTableRow {
         v.extend_from_slice(&self.input_buy_in);
         v.extend_from_slice(&self.input_player_addr);
         v.extend_from_slice(&self.output_seat_stack);
+        v.push(self.input_seat_empty);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

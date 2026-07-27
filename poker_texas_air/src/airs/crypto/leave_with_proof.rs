@@ -36,8 +36,12 @@ pub mod cols {
     pub const INPUT_LEAVE_KIND: usize = COMMON_NUM_COLUMNS + 1;
     /// `OUTPUT_COMPLETED_COUNT` 列。
     pub const OUTPUT_COMPLETED_COUNT: usize = COMMON_NUM_COLUMNS + 2;
+    /// `INPUT_SHUFFLE_PHASE` 列（Gap 6：调用时的 shuffle_state.phase）。
+    pub const INPUT_SHUFFLE_PHASE: usize = COMMON_NUM_COLUMNS + 3;
+    /// `INPUT_SHUFFLE_PHASE_Q` 列（Gap 6 witness：shuffle_phase²，拆 3 次 vanishing）。
+    pub const INPUT_SHUFFLE_PHASE_Q: usize = COMMON_NUM_COLUMNS + 4;
     /// `leave_with_proof` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 3;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 5;
 }
 
 /// `leave_with_proof` 输入参数。
@@ -47,6 +51,8 @@ pub struct LeaveWithProofInput {
     pub seat_index: u8,
     /// 离场类型（LeaveKind 枚举）。
     pub leave_kind: u8,
+    /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {1,2,3}）。
+    pub shuffle_phase: u8,
 }
 
 /// `leave_with_proof` AIR 公开输入。
@@ -94,6 +100,9 @@ impl FrameworkEval for LeaveWithProofAir {
         let input_seat_index = eval.next_trace_mask();
         let input_leave_kind = eval.next_trace_mask();
         let _output_completed_count = eval.next_trace_mask();
+        // Gap 6：shuffle_phase 与 witness q
+        let input_shuffle_phase = eval.next_trace_mask();
+        let input_shuffle_phase_q = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -102,6 +111,22 @@ impl FrameworkEval for LeaveWithProofAir {
         // 约束 2：leave_kind == input.leave_kind
         let expected_kind: E::F = M31::from(u32::from(self.input.leave_kind)).into();
         eval.add_constraint(is_active.clone() * (input_leave_kind - expected_kind));
+
+        // 约束（Gap 6 part 1）：shuffle_phase == input.shuffle_phase
+        let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();
+        eval.add_constraint(is_active.clone() * (input_shuffle_phase.clone() - expected_phase));
+        // 约束（Gap 6 part 2）：q == shuffle_phase²（witness 一致性，degree-2）
+        eval.add_constraint(is_active.clone() * (input_shuffle_phase_q.clone() - input_shuffle_phase.clone() * input_shuffle_phase.clone()));
+        // 约束（Gap 6 part 3）：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
+        // vanishing (phase-1)(phase-2)(phase-3) = phase³-6phase²+11phase-6
+        // 经 q=phase² 展开为 degree ≤ 2：(phase·q) - 6·q + 11·phase - 6 == 0
+        let six: E::F = M31::from(6u32).into();
+        let eleven: E::F = M31::from(11u32).into();
+        let vp = (input_shuffle_phase.clone() * input_shuffle_phase_q.clone())
+            - six.clone() * input_shuffle_phase_q.clone()
+            + eleven * input_shuffle_phase.clone()
+            - six;
+        eval.add_constraint(is_active.clone() * vp);
 
         // 约束 3（审计共性，degree-2）：round_state 不变（leave_with_proof 阶段 round_state 恒为 WAITING=0）。
         eval.add_constraint(common.round_state_unchanged());
@@ -124,6 +149,10 @@ pub struct LeaveWithProofRow {
     pub input_leave_kind: M31,
     /// `OUTPUT_COMPLETED_COUNT`。
     pub output_completed_count: M31,
+    /// Gap 6：调用时的 shuffle_state.phase。
+    pub input_shuffle_phase: M31,
+    /// Gap 6 witness：shuffle_phase²。
+    pub input_shuffle_phase_q: M31,
 }
 
 impl LeaveWithProofRow {
@@ -140,6 +169,8 @@ impl LeaveWithProofRow {
         post_version: u64,
         post_completed_count: u8,
     ) -> Self {
+        let sp = u8_to_m31(input.shuffle_phase);
+        let q = sp * sp;
         Self {
             common: CommonRow::active(
                 MethodKind::LeaveWithProof,
@@ -160,6 +191,8 @@ impl LeaveWithProofRow {
             input_seat_index: u8_to_m31(input.seat_index),
             input_leave_kind: u8_to_m31(input.leave_kind),
             output_completed_count: u8_to_m31(post_completed_count),
+            input_shuffle_phase: sp,
+            input_shuffle_phase_q: q,
         }
     }
 
@@ -171,6 +204,8 @@ impl LeaveWithProofRow {
             input_seat_index: ZERO,
             input_leave_kind: ZERO,
             output_completed_count: ZERO,
+            input_shuffle_phase: ZERO,
+            input_shuffle_phase_q: ZERO,
         }
     }
 
@@ -181,6 +216,8 @@ impl LeaveWithProofRow {
         v.push(self.input_seat_index);
         v.push(self.input_leave_kind);
         v.push(self.output_completed_count);
+        v.push(self.input_shuffle_phase);
+        v.push(self.input_shuffle_phase_q);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

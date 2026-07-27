@@ -32,8 +32,10 @@ pub mod cols {
     pub const INPUT_CURRENT_BET_BASE: usize = COMMON_NUM_COLUMNS + 1;
     /// `OUTPUT_ACTED` 列（1 = 已行动）。
     pub const OUTPUT_ACTED: usize = COMMON_NUM_COLUMNS + 5;
+    /// `INPUT_PRE_ROUND_STATE_Q` 列（Gap 1 witness：pre_round_state²，拆 4 次 vanishing）。
+    pub const INPUT_PRE_ROUND_STATE_Q: usize = COMMON_NUM_COLUMNS + 6;
     /// `check` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 6;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 7;
 }
 
 /// `check` 输入参数。
@@ -97,6 +99,8 @@ impl FrameworkEval for CheckAir {
         let _input_current_bet_2 = eval.next_trace_mask();
         let _input_current_bet_3 = eval.next_trace_mask();
         let output_acted = eval.next_trace_mask();
+        // Gap 1 witness：pre_round_state²
+        let input_pre_round_state_q = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -117,8 +121,12 @@ impl FrameworkEval for CheckAir {
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (output_acted - one));
 
-        // 约束 4（审计共性，degree-2）：round_state 不变（check 不改变下注阶段）。
+        // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
+        // round_state_is_betting 用 degree-4 vanishing (rs-2)(rs-3)(rs-4)(rs-5)==0
+        // 经 q=rs² witness 展开为 degree-2 项，强制 rs ∈ {PREFLOP,FLOP,TURN,RIVER}。
         eval.add_constraint(common.round_state_unchanged());
+        eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
+        eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
         // 约束 5（审计共性，degree-2 limb0）：pot 不变（check 不改变 pot）。
         eval.add_constraint(common.pot_unchanged_limb0());
 
@@ -137,6 +145,8 @@ pub struct CheckRow {
     pub input_current_bet: [M31; 4],
     /// `OUTPUT_ACTED`。
     pub output_acted: M31,
+    /// Gap 1 witness：pre_round_state²。
+    pub input_pre_round_state_q: M31,
 }
 
 impl CheckRow {
@@ -156,6 +166,7 @@ impl CheckRow {
         pre_pot: u64,
         post_pot: u64,
     ) -> Self {
+        let rs_m31 = u8_to_m31(pre_round_state);
         Self {
             common: CommonRow::active(
                 MethodKind::Check,
@@ -176,6 +187,8 @@ impl CheckRow {
             input_seat_index: u8_to_m31(input.seat_index),
             input_current_bet: u64_to_m31_limbs(input.current_bet),
             output_acted: M31::from(1u32),
+            // Gap 1 witness：pre_round_state²（M31 域内）
+            input_pre_round_state_q: rs_m31 * rs_m31,
         }
     }
 
@@ -187,6 +200,7 @@ impl CheckRow {
             input_seat_index: ZERO,
             input_current_bet: [ZERO; 4],
             output_acted: ZERO,
+            input_pre_round_state_q: ZERO,
         }
     }
 
@@ -197,6 +211,7 @@ impl CheckRow {
         v.push(self.input_seat_index);
         v.extend_from_slice(&self.input_current_bet);
         v.push(self.output_acted);
+        v.push(self.input_pre_round_state_q);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

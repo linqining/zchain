@@ -29,8 +29,11 @@ pub mod cols {
     pub const RAKE_MODE: usize = COMMON_NUM_COLUMNS + 8;
     /// `RAKE_AMOUNT_0` 列（抽水金额 limb 0）。
     pub const RAKE_AMOUNT_0: usize = COMMON_NUM_COLUMNS + 9;
+    /// `INPUT_TIMEOUT_KIND_INV` invertibility witness（Gap 5）：timeout_kind 的乘法逆元，
+    /// 约束 `timeout_kind * inv == 1` 证明 timeout_kind ≠ 0（即存在真实超时）。
+    pub const INPUT_TIMEOUT_KIND_INV: usize = COMMON_NUM_COLUMNS + 10;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 10;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 11;
 }
 
 /// `tick` 输入参数。
@@ -96,10 +99,12 @@ impl FrameworkEval for TickAir {
         let time_bank_post_0 = eval.next_trace_mask();
         let rake_mode = eval.next_trace_mask();
         let rake_amount_0 = eval.next_trace_mask();
+        // Gap 5 invertibility witness（timeout_kind ≠ 0）。
+        let input_timeout_kind_inv = eval.next_trace_mask();
 
         // 约束 1：timeout_kind == input.timeout_kind
         let expected: E::F = M31::from(u32::from(self.input.timeout_kind)).into();
-        eval.add_constraint(is_active.clone() * (input_timeout_kind - expected));
+        eval.add_constraint(is_active.clone() * (input_timeout_kind.clone() - expected));
 
         // 约束 2（Time Bank）：consumed_0 == input.time_bank_consumed (limb 0)
         let expected_tb_consumed: E::F = M31::from((self.input.time_bank_consumed & 0xFFFF) as u32).into();
@@ -119,9 +124,12 @@ impl FrameworkEval for TickAir {
 
         // 注：tick 会驱动状态机阶段转换（SHUFFLE→DEAL→BETTING 等），
         // round_state 可合法变化，故不施加 round_state 不变约束。
-        // tick 的 Lean 反例「version 不递增」已由通用层 version+=1 约束消除；
-        // 「timeout_kind=0 无真实超时」需 invertibility witness（TODO 阶段 2）。
-        // TODO 阶段 2：timeout_kind > 0（需 invertibility witness 列）；真实超时校验。
+        // tick 的 Lean 反例「version 不递增」已由通用层 version+=1 约束消除。
+        // 约束 6（Gap 5，degree-2）：timeout_kind * inv == 1 — 证明 timeout_kind ≠ 0
+        // （即存在真实超时）。诚实 host 必须 timeout_kind > 0 才存在逆元。
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(is_active.clone() * (input_timeout_kind * input_timeout_kind_inv - one));
+        // TODO 阶段 2：真实超时校验。
 
         eval
     }
@@ -146,6 +154,8 @@ pub struct TickRow {
     pub rake_mode: M31,
     /// Rake 金额 limb 0。
     pub rake_amount_0: M31,
+    /// `INPUT_TIMEOUT_KIND_INV` invertibility witness（Gap 5）。
+    pub input_timeout_kind_inv: M31,
 }
 
 impl TickRow {
@@ -159,6 +169,10 @@ impl TickRow {
         pre_round_state: u8, post_round_state: u8,
     ) -> Self {
         use crate::airs::common::u64_to_m31_limbs;
+        // Gap 5：timeout_kind 的乘法逆元。诚实 host 必须 timeout_kind > 0
+        // 才存在逆元（orchestrator prove_tick 现固定为 1）。
+        let kind_m31 = M31::from(u32::from(input.timeout_kind));
+        let input_timeout_kind_inv = kind_m31.inverse();
         Self {
             common: CommonRow::active(
                 MethodKind::Tick, pre_state_root, post_state_root,
@@ -166,12 +180,14 @@ impl TickRow {
                 pre_round_state, post_round_state, 0, 0, 0, 0,
             ),
             input_current_time: u64_to_m31_limbs(input.current_time),
-            input_timeout_kind: M31::from(u32::from(input.timeout_kind)),
+            input_timeout_kind: kind_m31,
             output_new_round_state: M31::from(u32::from(post_round_state)),
             time_bank_consumed_0: M31::from((input.time_bank_consumed & 0xFFFF) as u32),
             time_bank_post_0: M31::from((input.time_bank_post & 0xFFFF) as u32),
             rake_mode: M31::from(u32::from(input.rake_mode)),
             rake_amount_0: M31::from((input.rake_amount & 0xFFFF) as u32),
+            // Gap 5：timeout_kind 的乘法逆元。
+            input_timeout_kind_inv,
         }
     }
     /// padding 行。
@@ -186,6 +202,7 @@ impl TickRow {
             time_bank_post_0: ZERO,
             rake_mode: ZERO,
             rake_amount_0: ZERO,
+            input_timeout_kind_inv: ZERO,
         }
     }
     /// 转列向量。
@@ -199,6 +216,7 @@ impl TickRow {
         v.push(self.time_bank_post_0);
         v.push(self.rake_mode);
         v.push(self.rake_amount_0);
+        v.push(self.input_timeout_kind_inv);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

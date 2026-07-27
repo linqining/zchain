@@ -255,11 +255,49 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
 
     /// 约束 `pre_round_state == expected`（如 join/leave/start_hand 要求 WAITING=0）。
     ///
-    /// degree-2 等式约束。完整的 `round_state ∈ {PREFLOP,FLOP,TURN,RIVER}` 集合归属
-    /// 判定需要 degree>2 的 vanishing 多项式或 logup lookup table（当前 PoC 未实现）。
+    /// degree-2 等式约束。
     pub fn round_state_eq(&self, expected: u8) -> E::F {
         let exp: E::F = M31::from(u32::from(expected)).into();
         self.is_active.clone() * (self.pre_round_state.clone() - exp)
+    }
+
+    /// 约束 `pre_round_state ∈ {PREFLOP, FLOP, TURN, RIVER}`（下注轮门控）。
+    ///
+    /// 用 degree-4 vanishing 多项式 `(rs-2)(rs-3)(rs-4)(rs-5) == 0` 表达
+    /// `rs ∈ {2,3,4,5}`。但 4 次多项式（同一列自乘 4 次）总 degree = 4·(2^log_size)
+    /// 超过 Stwo 上界 `2^(log_size+1)`，故需调用方提供 witness 列 `q = rs²`，
+    /// 把多项式展开为 degree ≤ 2 的项：
+    ///   rs⁴ - 14·rs³ + 71·rs² - 154·rs + 120
+    ///   = q·q - 14·(rs·q) + 71·q - 154·rs + 120
+    /// 其中 `rs·q`、`q·q` 均为两列乘积（degree ~2·2^log_size，在上界内）。
+    ///
+    /// 调用方需：
+    /// 1. 新增 witness 列 `INPUT_PRE_ROUND_STATE_Q`（host 端填 `pre_round_state²`）
+    /// 2. 先约束 `q == pre_round_state * pre_round_state`（用 `round_state_q_constraint`）
+    /// 3. 再调用本函数传入 `q` 的 trace 值
+    ///
+    /// 闭合 Lean 审计 Gap 1（RoundStateIsBetting）：阻止恶意 prover 在 `ROUND_WAITING=0`
+    /// 状态下构造 fold/check/call/raise/bet/auto_fold/force_fold 的 trace。
+    pub fn round_state_is_betting(&self, q: E::F) -> E::F {
+        let rs = self.pre_round_state.clone();
+        let two: E::F = M31::from(2u32).into();
+        let fourteen: E::F = M31::from(14u32).into();
+        let seventy_one: E::F = M31::from(71u32).into();
+        let one_hundred_fifty_four: E::F = M31::from(154u32).into();
+        let one_hundred_twenty: E::F = M31::from(120u32).into();
+        // q² - 14·(rs·q) + 71·q - 154·rs + 120（每项 degree ≤ 2）
+        let vp = q.clone() * q.clone()
+            - fourteen * (rs.clone() * q.clone())
+            + seventy_one * q
+            - one_hundred_fifty_four * rs
+            + one_hundred_twenty;
+        self.is_active.clone() * vp
+    }
+
+    /// 约束 `q == pre_round_state²`（Gap 1 witness 一致性，degree-2 两列乘积）。
+    /// 配合 `round_state_is_betting(q)` 使用。
+    pub fn round_state_q_constraint(&self, q: E::F) -> E::F {
+        self.is_active.clone() * (q - self.pre_round_state.clone() * self.pre_round_state.clone())
     }
 
     /// 约束 `post_round_state == pre_round_state`（round_state 不变）。

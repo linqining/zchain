@@ -58,6 +58,7 @@ fn test_e2e_join_and_shuffle_prove_verify() {
     let input = JoinAndShuffleInput {
         seat_index: 0,
         new_deck_commitment: 0xABCD_1234,
+        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = JoinAndShuffleRow::active(
         &input,
@@ -100,6 +101,7 @@ fn test_soundness_join_and_shuffle_tampered_seat() {
     let input = JoinAndShuffleInput {
         seat_index: 0,
         new_deck_commitment: 0xABCD_1234,
+        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
     let trace = gen_method_trace(
@@ -144,6 +146,7 @@ fn test_soundness_join_and_shuffle_tampered_commitment() {
     let input = JoinAndShuffleInput {
         seat_index: 0,
         new_deck_commitment: 0xABCD_1234,
+        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
     let trace = gen_method_trace(
@@ -190,6 +193,7 @@ fn test_e2e_leave_with_proof_prove_verify() {
     let input = LeaveWithProofInput {
         seat_index: 1,
         leave_kind: 0, // LeaveKind::Normal
+        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = LeaveWithProofRow::active(
         &input,
@@ -231,6 +235,7 @@ fn test_soundness_leave_with_proof_tampered_kind() {
     let input = LeaveWithProofInput {
         seat_index: 1,
         leave_kind: 0,
+        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = LeaveWithProofRow::active(&input, zero_root(), one_root(), 42, 1, 2, 0, 1, 0);
     let trace = gen_method_trace(
@@ -277,6 +282,7 @@ fn test_e2e_submit_shuffle_v2_prove_verify() {
     let input = SubmitShuffleV2Input {
         seat_index: 2,
         new_deck_commitment: 0xDEAD_BEEF,
+        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = SubmitShuffleV2Row::active(
         &input,
@@ -318,6 +324,7 @@ fn test_soundness_submit_shuffle_v2_tampered_commitment() {
     let input = SubmitShuffleV2Input {
         seat_index: 2,
         new_deck_commitment: 0xDEAD_BEEF,
+        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = SubmitShuffleV2Row::active(&input, zero_root(), one_root(), 42, 1, 3, 0, 1, 2);
     let trace = gen_method_trace(
@@ -547,40 +554,40 @@ fn test_crypto_air_column_consistency() {
         submit_shuffle_v2,
     };
 
-    // join_and_shuffle: 通用 + 14 业务 = 51
+    // join_and_shuffle: 通用 + 16 业务（含 Gap 6 shuffle_phase + q witness）= 53
     assert_eq!(
         join_and_shuffle::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 14
+        COMMON_NUM_COLUMNS + 16
     );
     assert_eq!(
         JoinAndShuffleAir::num_columns(),
         join_and_shuffle::cols::NUM_COLUMNS
     );
 
-    // leave_with_proof: 通用 + 3 业务 = 40
+    // leave_with_proof: 通用 + 5 业务（含 Gap 6 shuffle_phase + q witness）= 42
     assert_eq!(
         leave_with_proof::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 3
+        COMMON_NUM_COLUMNS + 5
     );
     assert_eq!(
         LeaveWithProofAir::num_columns(),
         leave_with_proof::cols::NUM_COLUMNS
     );
 
-    // submit_shuffle_v2: 通用 + 6 业务 = 43
+    // submit_shuffle_v2: 通用 + 8 业务（含 Gap 6 shuffle_phase + q witness）= 45
     assert_eq!(
         submit_shuffle_v2::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 6
+        COMMON_NUM_COLUMNS + 8
     );
     assert_eq!(
         SubmitShuffleV2Air::num_columns(),
         submit_shuffle_v2::cols::NUM_COLUMNS
     );
 
-    // submit_player_reveal_tokens: 通用 + 3 业务 = 40
+    // submit_player_reveal_tokens: 通用 + 5 业务 = 42（含 Gap 7 witness q1/q2）
     assert_eq!(
         submit_player_reveal_tokens::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 3
+        COMMON_NUM_COLUMNS + 5
     );
     assert_eq!(
         SubmitPlayerRevealTokensAir::num_columns(),

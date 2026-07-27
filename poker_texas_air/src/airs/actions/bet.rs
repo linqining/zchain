@@ -41,8 +41,10 @@ pub mod cols {
     pub const OUTPUT_SEAT_BET_BASE: usize = COMMON_NUM_COLUMNS + 5;
     /// `OUTPUT_ACTED` 列（acted_this_round 标记）。
     pub const OUTPUT_ACTED: usize = COMMON_NUM_COLUMNS + 9;
+    /// `INPUT_PRE_ROUND_STATE_Q` 列（Gap 1 witness：pre_round_state²，拆 4 次 vanishing）。
+    pub const INPUT_PRE_ROUND_STATE_Q: usize = COMMON_NUM_COLUMNS + 10;
     /// `bet` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 10;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 11;
 }
 
 /// `bet` 输入参数。
@@ -106,6 +108,8 @@ impl FrameworkEval for BetAir {
         let _output_seat_bet_2 = eval.next_trace_mask();
         let _output_seat_bet_3 = eval.next_trace_mask();
         let output_acted = eval.next_trace_mask();
+        // Gap 1 witness：pre_round_state²
+        let input_pre_round_state_q = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -119,8 +123,18 @@ impl FrameworkEval for BetAir {
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (output_acted - one));
 
-        // 约束 4（审计共性，degree-2）：round_state 不变（bet 不改变下注阶段）。
+        // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
+        // round_state_is_betting 用 degree-4 vanishing (rs-2)(rs-3)(rs-4)(rs-5)==0
+        // 经 q=rs² witness 展开为 degree-2 项，强制 rs ∈ {PREFLOP,FLOP,TURN,RIVER}。
         eval.add_constraint(common.round_state_unchanged());
+        eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
+        eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
+
+        // 约束 5（Gap 10：bet 资金守恒，degree-2 limb0）：
+        // `pot += amount` → post_pot_0 - pre_pot_0 - input_amount_0 == 0。
+        // （与 call AIR 的 pot-delta 模式一致；bet 的 pot 增量即下注金额。）
+        let pot_delta = common.post_pot_0.clone() - common.pre_pot_0.clone() - input_amount_0.clone();
+        eval.add_constraint(is_active.clone() * pot_delta);
 
         // 注：post_seat_bet == pre_seat_bet + amount 的约束需要 pre_seat_bet 列，
         // 在 PoC 中省略（host 端保证）；与 raise AIR 保持一致的简化策略。
@@ -143,6 +157,8 @@ pub struct BetRow {
     pub output_seat_bet: [M31; 4],
     /// `OUTPUT_ACTED`。
     pub output_acted: M31,
+    /// Gap 1 witness：pre_round_state²。
+    pub input_pre_round_state_q: M31,
 }
 
 impl BetRow {
@@ -164,6 +180,7 @@ impl BetRow {
         post_pot: u64,
         post_seat_bet: u64,
     ) -> Self {
+        let rs_m31 = u8_to_m31(pre_round_state);
         Self {
             common: CommonRow::active(
                 MethodKind::Bet,
@@ -185,6 +202,8 @@ impl BetRow {
             input_amount: u64_to_m31_limbs(input.amount),
             output_seat_bet: u64_to_m31_limbs(post_seat_bet),
             output_acted: M31::from(1u32),
+            // Gap 1 witness：pre_round_state²（M31 域内）
+            input_pre_round_state_q: rs_m31 * rs_m31,
         }
     }
 
@@ -197,6 +216,7 @@ impl BetRow {
             input_amount: [ZERO; 4],
             output_seat_bet: [ZERO; 4],
             output_acted: ZERO,
+            input_pre_round_state_q: ZERO,
         }
     }
 
@@ -208,6 +228,7 @@ impl BetRow {
         v.extend_from_slice(&self.input_amount);
         v.extend_from_slice(&self.output_seat_bet);
         v.push(self.output_acted);
+        v.push(self.input_pre_round_state_q);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

@@ -814,32 +814,32 @@ fn test_action_air_column_consistency() {
         auto_fold, bet, call, check, fold, force_fold, kick_player, raise,
     };
 
-    // fold: 通用 + 2 业务 = 39
-    assert_eq!(fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 2);
+    // fold: 通用 + 3 业务 = 40（含 Gap 1 witness INPUT_PRE_ROUND_STATE_Q）
+    assert_eq!(fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 3);
     assert_eq!(FoldAir::num_columns(), fold::cols::NUM_COLUMNS);
 
-    // check: 通用 + 6 业务 = 43
-    assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
+    // check: 通用 + 7 业务 = 44（含 Gap 1 witness）
+    assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 7);
     assert_eq!(CheckAir::num_columns(), check::cols::NUM_COLUMNS);
 
-    // call: 通用 + 15 业务 = 52
-    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 15);
+    // call: 通用 + 16 业务 = 53（含 Gap 1 witness）
+    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 16);
     assert_eq!(CallAir::num_columns(), call::cols::NUM_COLUMNS);
 
-    // raise: 通用 + 19 业务 = 56
-    assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 19);
+    // raise: 通用 + 20 业务 = 57（含 Gap 1 witness）
+    assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 20);
 
-    // bet: 通用 + 10 业务 = 47
-    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 10);
+    // bet: 通用 + 11 业务 = 48（含 Gap 1 witness）
+    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 11);
 
-    // auto_fold: 通用 + 6 业务 = 43
-    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
+    // auto_fold: 通用 + 7 业务 = 44（含 Gap 1 witness）
+    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 7);
 
-    // force_fold: 通用 + 2 业务 = 39
-    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 2);
+    // force_fold: 通用 + 3 业务 = 40（含 Gap 1 witness）
+    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 3);
 
-    // kick_player: 通用 + 6 业务 = 43
-    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
+    // kick_player: 通用 + 7 业务（含 Gap 3 INPUT_SEAT_OCCUPIED boolean witness）= 44
+    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 7);
 }
 
 /// 单元测试：MethodKind 的 actions 档位分类正确。

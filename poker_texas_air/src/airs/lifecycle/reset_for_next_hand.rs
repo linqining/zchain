@@ -20,7 +20,7 @@
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
 
-use crate::airs::common::{CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
+use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
 use crate::method_kind::MethodKind;
 
 /// `reset_for_next_hand` 业务特定列布局。
@@ -33,13 +33,20 @@ pub mod cols {
     /// 业务含义：reset 第一阶段合并 `pending_addon` 到 `stack` 后必须清零。
     /// 这是 addon「下一手生效」机制的核心不变量。
     pub const POST_PENDING_ADDON_BASE: usize = COMMON_NUM_COLUMNS + 1;
+    /// `INPUT_SHUFFLE_PHASE` 列（Gap 6：调用时的 shuffle_state.phase）。
+    pub const INPUT_SHUFFLE_PHASE: usize = COMMON_NUM_COLUMNS + 5;
+    /// `INPUT_SHUFFLE_PHASE_Q` 列（Gap 6 witness：shuffle_phase²，拆 3 次 vanishing）。
+    pub const INPUT_SHUFFLE_PHASE_Q: usize = COMMON_NUM_COLUMNS + 6;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 5;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 7;
 }
 
-/// `reset_for_next_hand` 输入参数（无额外参数）。
+/// `reset_for_next_hand` 输入参数。
 #[derive(Debug, Clone, Default)]
-pub struct ResetForNextHandInput;
+pub struct ResetForNextHandInput {
+    /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {1,2,3}）。
+    pub shuffle_phase: u8,
+}
 
 /// `reset_for_next_hand` AIR。
 #[derive(Debug, Clone)]
@@ -84,6 +91,10 @@ impl FrameworkEval for ResetForNextHandAir {
         let post_pending_2 = eval.next_trace_mask();
         let post_pending_3 = eval.next_trace_mask();
 
+        // Gap 6：shuffle_phase 与 witness q
+        let input_shuffle_phase = eval.next_trace_mask();
+        let input_shuffle_phase_q = eval.next_trace_mask();
+
         // 约束 1：output_new_round_state == ROUND_WAITING (== 0)
         eval.add_constraint(is_active.clone() * output_new_round_state);
 
@@ -92,7 +103,23 @@ impl FrameworkEval for ResetForNextHandAir {
         eval.add_constraint(is_active.clone() * post_pending_0);
         eval.add_constraint(is_active.clone() * post_pending_1);
         eval.add_constraint(is_active.clone() * post_pending_2);
-        eval.add_constraint(is_active * post_pending_3);
+        eval.add_constraint(is_active.clone() * post_pending_3);
+
+        // 约束（Gap 6 part 1）：shuffle_phase == input.shuffle_phase
+        let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();
+        eval.add_constraint(is_active.clone() * (input_shuffle_phase.clone() - expected_phase));
+        // 约束（Gap 6 part 2）：q == shuffle_phase²（witness 一致性，degree-2）
+        eval.add_constraint(is_active.clone() * (input_shuffle_phase_q.clone() - input_shuffle_phase.clone() * input_shuffle_phase.clone()));
+        // 约束（Gap 6 part 3）：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
+        // vanishing (phase-1)(phase-2)(phase-3) = phase³-6phase²+11phase-6
+        // 经 q=phase² 展开为 degree ≤ 2：(phase·q) - 6·q + 11·phase - 6 == 0
+        let six: E::F = M31::from(6u32).into();
+        let eleven: E::F = M31::from(11u32).into();
+        let vp = (input_shuffle_phase.clone() * input_shuffle_phase_q.clone())
+            - six.clone() * input_shuffle_phase_q.clone()
+            + eleven * input_shuffle_phase.clone()
+            - six;
+        eval.add_constraint(is_active.clone() * vp);
 
         eval
     }
@@ -107,6 +134,10 @@ pub struct ResetForNextHandRow {
     pub output_new_round_state: M31,
     /// reset 后的 pending_addon（必须全 0，addon 已合并）。
     pub post_pending_addon: [M31; 4],
+    /// Gap 6：调用时的 shuffle_state.phase。
+    pub input_shuffle_phase: M31,
+    /// Gap 6 witness：shuffle_phase²。
+    pub input_shuffle_phase_q: M31,
 }
 
 impl ResetForNextHandRow {
@@ -119,13 +150,15 @@ impl ResetForNextHandRow {
     /// 此处 `post_pending_addon` 固定为 0。
     #[must_use]
     pub fn active(
-        _input: &ResetForNextHandInput,
+        input: &ResetForNextHandInput,
         _pre_pending_addon: u64,
         pre_state_root: [M31; 4], post_state_root: [M31; 4],
         table_id: u64, hand_id: u32, call_seq: u32,
         pre_version: u64, post_version: u64,
         pre_round_state: u8,
     ) -> Self {
+        let sp = u8_to_m31(input.shuffle_phase);
+        let q = sp * sp;
         Self {
             common: CommonRow::active(
                 MethodKind::ResetForNextHand, pre_state_root, post_state_root,
@@ -136,6 +169,8 @@ impl ResetForNextHandRow {
             output_new_round_state: ZERO, // ROUND_WAITING = 0
             // 关键：reset 后 pending_addon 必须清零（addon 已合并到 stack）
             post_pending_addon: [ZERO; 4],
+            input_shuffle_phase: sp,
+            input_shuffle_phase_q: q,
         }
     }
     /// padding 行。
@@ -145,6 +180,8 @@ impl ResetForNextHandRow {
             common: CommonRow::padding(),
             output_new_round_state: ZERO,
             post_pending_addon: [ZERO; 4],
+            input_shuffle_phase: ZERO,
+            input_shuffle_phase_q: ZERO,
         }
     }
     /// 转列向量。
@@ -153,6 +190,8 @@ impl ResetForNextHandRow {
         let mut v = self.common.to_vec();
         v.push(self.output_new_round_state);
         v.extend_from_slice(&self.post_pending_addon);
+        v.push(self.input_shuffle_phase);
+        v.push(self.input_shuffle_phase_q);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

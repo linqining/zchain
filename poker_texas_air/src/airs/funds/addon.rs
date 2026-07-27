@@ -50,8 +50,13 @@ pub mod cols {
     pub const PRE_PENDING_ADDON_BASE: usize = COMMON_NUM_COLUMNS + 5;
     /// `POST_PENDING_ADDON` 起始列（4 limb，调用后 pending_addon）。
     pub const POST_PENDING_ADDON_BASE: usize = COMMON_NUM_COLUMNS + 9;
+    /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）：诚实 host 只对占用座位 addon。
+    pub const INPUT_SEAT_OCCUPIED: usize = COMMON_NUM_COLUMNS + 13;
+    /// `INPUT_AMOUNT_INV` invertibility witness（Gap 9）：amount_limb0 的乘法逆元，
+    /// 约束 `amount_0 * inv == 1` 证明 amount_0 ≠ 0，即 amount > 0（amount < 2^16 时）。
+    pub const INPUT_AMOUNT_INV: usize = COMMON_NUM_COLUMNS + 14;
     /// `addon` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 13;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 15;
 }
 
 /// `addon` 输入参数。
@@ -119,6 +124,9 @@ impl FrameworkEval for AddonAir {
         let _post_pending_1 = eval.next_trace_mask();
         let _post_pending_2 = eval.next_trace_mask();
         let _post_pending_3 = eval.next_trace_mask();
+        // Gap 3 boolean witness（座位非空）+ Gap 9 invertibility witness（amount > 0）。
+        let input_seat_occupied = eval.next_trace_mask();
+        let input_amount_inv = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -132,12 +140,17 @@ impl FrameworkEval for AddonAir {
         // 约束 3（核心）：post_pending_addon == pre_pending_addon + input_amount
         //    关键不变量：addon 精确累加到 pending_addon，不动 stack
         //    只约束 limb 0（M31 域内 + 16 bit 内不会溢出）
-        eval.add_constraint(is_active.clone() * (post_pending_0 - pre_pending_0 - input_amount_0));
+        eval.add_constraint(is_active.clone() * (post_pending_0 - pre_pending_0 - input_amount_0.clone()));
 
         // 约束 4（审计共性，degree-2）：round_state 不变（addon 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
-        // TODO 阶段 3：amount > 0（需 invertibility witness 列，degree-2）；
-        //              addon_pool += amount 守恒（需新增 addon_pool 列）。
+
+        // 约束 5（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只对占用座位 addon。
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(is_active.clone() * (input_seat_occupied - one.clone()));
+        // 约束 6（Gap 9，degree-2）：amount_0 * inv == 1 — 证明 amount limb0 ≠ 0（amount > 0）。
+        eval.add_constraint(is_active.clone() * (input_amount_0 * input_amount_inv - one.clone()));
+        // TODO 阶段 3：addon_pool += amount 守恒（需新增 addon_pool 列）。
 
         eval
     }
@@ -156,6 +169,10 @@ pub struct AddonRow {
     pub pre_pending_addon: [M31; 4],
     /// `POST_PENDING_ADDON`（4 limb）。
     pub post_pending_addon: [M31; 4],
+    /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）。
+    pub input_seat_occupied: M31,
+    /// `INPUT_AMOUNT_INV` invertibility witness（Gap 9）。
+    pub input_amount_inv: M31,
 }
 
 impl AddonRow {
@@ -181,6 +198,10 @@ impl AddonRow {
     ) -> Self {
         // post_pending = pre_pending + amount（host 端预计算，AIR 端约束一致性）
         let post_pending = pre_pending_addon + input.amount;
+        // Gap 9：amount limb0 的乘法逆元。诚实 host 只以 amount > 0 调用 addon
+        // （合约 dispatch 拒绝 amount==0），故 amount & 0xFFFF ≠ 0，逆元存在。
+        let amt0 = M31::from((input.amount & 0xFFFF) as u32);
+        let input_amount_inv = amt0.inverse();
         Self {
             common: CommonRow::active(
                 MethodKind::Addon,
@@ -202,6 +223,10 @@ impl AddonRow {
             input_amount: u64_to_m31_limbs(input.amount),
             pre_pending_addon: u64_to_m31_limbs(pre_pending_addon),
             post_pending_addon: u64_to_m31_limbs(post_pending),
+            // Gap 3：诚实 host 只对占用座位 addon。
+            input_seat_occupied: M31::from(1u32),
+            // Gap 9：amount limb0 的乘法逆元。
+            input_amount_inv,
         }
     }
 
@@ -214,6 +239,8 @@ impl AddonRow {
             input_amount: [ZERO; 4],
             pre_pending_addon: [ZERO; 4],
             post_pending_addon: [ZERO; 4],
+            input_seat_occupied: ZERO,
+            input_amount_inv: ZERO,
         }
     }
 
@@ -225,6 +252,8 @@ impl AddonRow {
         v.extend_from_slice(&self.input_amount);
         v.extend_from_slice(&self.pre_pending_addon);
         v.extend_from_slice(&self.post_pending_addon);
+        v.push(self.input_seat_occupied);
+        v.push(self.input_amount_inv);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

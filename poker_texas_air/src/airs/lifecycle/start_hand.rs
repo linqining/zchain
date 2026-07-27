@@ -34,8 +34,14 @@ pub mod cols {
     pub const OUTPUT_ANTE_AMOUNT_0: usize = COMMON_NUM_COLUMNS + 4;
     /// `OUTPUT_ANTE_COLLECTED_LIMB0` 列（ante_collected 的低 16 位）。
     pub const OUTPUT_ANTE_COLLECTED_0: usize = COMMON_NUM_COLUMNS + 5;
+    /// `INPUT_ACTIVE_COUNT_INV` 列（Gap 4 witness：active_count*(active_count-1) 的乘法逆元）。
+    pub const INPUT_ACTIVE_COUNT_INV: usize = COMMON_NUM_COLUMNS + 6;
+    /// `INPUT_ACTIVE_COUNT_PROD` 列（Gap 4 witness：active_count*(active_count-1)）。
+    /// 引入此中间列把 `prod * inv == 1` 约束降到 degree-2（两列乘积），
+    /// 否则 `active_count*(active_count-1)*inv` 是三列乘积，degree 超过 Stwo 上界。
+    pub const INPUT_ACTIVE_COUNT_PROD: usize = COMMON_NUM_COLUMNS + 7;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 6;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 8;
 }
 
 /// `start_hand` 输入参数。
@@ -93,21 +99,23 @@ impl FrameworkEval for StartHandAir {
         let output_ante_mode = eval.next_trace_mask();
         let output_ante_amount_0 = eval.next_trace_mask();
         let output_ante_collected_0 = eval.next_trace_mask();
+        // Gap 4 witnesses：active_count*(active_count-1) 及其乘法逆元
+        let input_active_count_inv = eval.next_trace_mask();
+        let input_active_count_prod = eval.next_trace_mask();
 
         // 约束 1：active_count == input.active_count
         let expected_count: E::F = M31::from(u32::from(self.input.active_count)).into();
-        eval.add_constraint(is_active.clone() * (input_active_count - expected_count));
+        eval.add_constraint(is_active.clone() * (input_active_count.clone() - expected_count));
 
-        // 约束 2：active_count >= 2（MIN_PLAYERS_TO_START）
-        // 用 range check：active_count - 2 的差值必须 >= 0
-        // 简化：约束 active_count != 0 且 active_count != 1
+        // 约束 2a（Gap 4 part 1）：prod == active_count*(active_count-1)（degree-2 两列乘积）。
+        // 用中间列 prod 把三列乘积拆成两个两列乘积约束，避免 degree 超过 Stwo 上界。
         let one: E::F = M31::from(1u32).into();
-        let two: E::F = M31::from(2u32).into();
-        // active_count * (active_count - 1) = 0 当且仅当 active_count ∈ {0, 1}
-        // 约束 active_count * (active_count - 1) = 0 的反例 → 这里约束 ≠ 0
-        // 简化实现：直接约束 active_count >= 2 via range check（阶段 2 用 lookup）
-        let _ = (one, two);
+        let count_minus_one = input_active_count.clone() - one.clone();
+        eval.add_constraint(is_active.clone() * (input_active_count_prod.clone() - input_active_count.clone() * count_minus_one));
 
+        // 约束 2b（Gap 4 part 2）：prod * inv == 1（degree-2 两列乘积）。
+        // 强制 active_count*(active_count-1) ≠ 0，即 active_count ∉ {0,1} → active_count ≥ 2。
+        eval.add_constraint(is_active.clone() * (input_active_count_prod.clone() * input_active_count_inv.clone() - one));
         // 约束 3：output_new_round_state == ROUND_WAITING (常量)
         // 合约 start_hand 后 round_state 仍为 ROUND_WAITING=0；真正进入 shuffle 由
         // shuffle_state.phase 表达（SHUFFLE_PHASE_BEFORE_PREFLOP=3），不属于 round_state。
@@ -154,13 +162,25 @@ pub struct StartHandRow {
     pub output_ante_amount_0: M31,
     /// Ante 已收 limb 0。
     pub output_ante_collected_0: M31,
+    /// Gap 4 witness：active_count*(active_count-1) 的乘法逆元（M31 域内）。
+    pub input_active_count_inv: M31,
+    /// Gap 4 witness：active_count*(active_count-1)（中间列，拆三列乘积为两个两列乘积）。
+    pub input_active_count_prod: M31,
 }
 
 impl StartHandRow {
     /// active 行。
+    ///
+    /// # 参数
+    /// - `active_count_inv`: `active_count*(active_count-1)` 在 M31 域内的乘法逆元。
+    ///   host 端由 `(active_count as u64 * (active_count-1) as u64)` 求 inverse 得到。
+    ///   active_count ≥ 2 时该值非零，满足 Gap 4 约束。
+    /// - `active_count_prod`: `active_count*(active_count-1)`（host 计算）。
     #[must_use]
     pub fn active(
         input: &StartHandInput,
+        active_count_inv: M31,
+        active_count_prod: M31,
         pre_state_root: [M31; 4],
         post_state_root: [M31; 4],
         table_id: u64, hand_id: u32, call_seq: u32,
@@ -180,6 +200,8 @@ impl StartHandRow {
             output_ante_mode: u8_to_m31(input.ante_mode),
             output_ante_amount_0: M31::from((input.ante_amount & 0xFFFF) as u32),
             output_ante_collected_0: M31::from((input.ante_collected & 0xFFFF) as u32),
+            input_active_count_inv: active_count_inv,
+            input_active_count_prod: active_count_prod,
         }
     }
     /// padding 行。
@@ -193,6 +215,9 @@ impl StartHandRow {
             output_ante_mode: ZERO,
             output_ante_amount_0: ZERO,
             output_ante_collected_0: ZERO,
+            // padding 行 is_active=0，约束自动满足（gated），witness 值任意；用 ZERO。
+            input_active_count_inv: ZERO,
+            input_active_count_prod: ZERO,
         }
     }
     /// 转列向量。
@@ -205,7 +230,13 @@ impl StartHandRow {
         v.push(self.output_ante_mode);
         v.push(self.output_ante_amount_0);
         v.push(self.output_ante_collected_0);
+        v.push(self.input_active_count_inv);
+        v.push(self.input_active_count_prod);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }
 }
+
+
+
+

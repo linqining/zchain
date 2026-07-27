@@ -188,13 +188,25 @@ fn test_soundness_leave_table_tampered_seat() {
     );
 }
 
+/// 计算 active_count*(active_count-1) 在 M31 域内的乘法逆元（Gap 4 witness）。
+fn active_count_inv(active_count: u8) -> M31 {
+    let c = M31::from(u32::from(active_count));
+    (c * (c - M31::from(1u32))).inverse()
+}
+
+/// 计算 active_count*(active_count-1)（Gap 4 witness 中间列）。
+fn active_count_prod(active_count: u8) -> M31 {
+    let c = M31::from(u32::from(active_count));
+    c * (c - M31::from(1u32))
+}
+
 // ========== start_hand AIR ==========
 
 /// E2E: start_hand → trace → prove → verify（happy path）。
 #[test]
 fn test_e2e_start_hand_prove_verify() {
     let input = StartHandInput { active_count: 4, ante_mode: 0, ante_amount: 0, ante_collected: 0 };
-    let row = StartHandRow::active(&input, zero_root(), one_root(), 42, 0, 3, 0, 1);
+    let row = StartHandRow::active(&input, active_count_inv(4), active_count_prod(4), zero_root(), one_root(), 42, 0, 3, 0, 1);
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
         &row.to_vec(),
@@ -222,7 +234,7 @@ fn test_e2e_start_hand_prove_verify() {
 #[test]
 fn test_soundness_start_hand_tampered_count() {
     let input = StartHandInput { active_count: 4, ante_mode: 0, ante_amount: 0, ante_collected: 0 };
-    let row = StartHandRow::active(&input, zero_root(), one_root(), 42, 0, 3, 0, 1);
+    let row = StartHandRow::active(&input, active_count_inv(4), active_count_prod(4), zero_root(), one_root(), 42, 0, 3, 0, 1);
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
         &row.to_vec(),
@@ -260,7 +272,7 @@ fn test_soundness_start_hand_tampered_count() {
 #[test]
 fn test_soundness_start_hand_tampered_ante_mode() {
     let input = StartHandInput { active_count: 4, ante_mode: 1, ante_amount: 10, ante_collected: 40 };
-    let row = StartHandRow::active(&input, zero_root(), one_root(), 42, 0, 3, 0, 1);
+    let row = StartHandRow::active(&input, active_count_inv(4), active_count_prod(4), zero_root(), one_root(), 42, 0, 3, 0, 1);
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
         &row.to_vec(),
@@ -301,7 +313,7 @@ fn test_soundness_start_hand_tampered_ante_mode() {
 fn test_e2e_tick_prove_verify() {
     let input = TickInput {
         current_time: 1_700_000_000,
-        timeout_kind: 0, // shuffle timeout
+        timeout_kind: 1, // Gap 5：tick 需 timeout_kind > 0（reveal timeout，inverse 存在）
         time_bank_consumed: 0,
         time_bank_post: 30_000,
         rake_mode: 0,
@@ -343,7 +355,7 @@ fn test_e2e_tick_prove_verify() {
 fn test_soundness_tick_tampered_kind() {
     let input = TickInput {
         current_time: 1_700_000_000,
-        timeout_kind: 0,
+        timeout_kind: 1, // Gap 5：tick 需 timeout_kind > 0（reveal timeout）
         time_bank_consumed: 0,
         time_bank_post: 30_000,
         rake_mode: 0,
@@ -377,7 +389,7 @@ fn test_soundness_tick_tampered_kind() {
     };
     let mut proof = prove_method(&trace, air, TickAir::num_columns()).expect("prove 失败");
 
-    // 篡改 timeout_kind：trace 中是 0，AIR 声明 3
+    // 篡改 timeout_kind：trace 中是 1，AIR 声明 3
     proof.air = TickAir {
         input: TickInput {
             timeout_kind: 3, // 篡改！
@@ -486,7 +498,7 @@ fn test_soundness_tick_tampered_rake() {
 /// E2E: reset_for_next_hand → trace → prove → verify（happy path）。
 #[test]
 fn test_e2e_reset_for_next_hand_prove_verify() {
-    let input = ResetForNextHandInput;
+    let input = ResetForNextHandInput { shuffle_phase: 1 }; // Gap 6：∈ {1,2,3}（非 NONE）
     let row = ResetForNextHandRow::active(
         &input,
         0, // pre_pending_addon
@@ -528,7 +540,7 @@ fn test_e2e_reset_for_next_hand_prove_verify() {
 /// 由于 reset 的公开输入为空，soundness 通过 happy-path 间接覆盖。
 #[test]
 fn test_soundness_reset_for_next_hand_via_happy_path() {
-    let input = ResetForNextHandInput;
+    let input = ResetForNextHandInput { shuffle_phase: 1 }; // Gap 6：∈ {1,2,3}（非 NONE）
     let row = ResetForNextHandRow::active(&input, 0, zero_root(), one_root(), 42, 0, 5, 0, 1, 8);
     let trace = gen_method_trace(
         ResetForNextHandAir::num_columns(),
@@ -563,26 +575,26 @@ fn test_lifecycle_air_column_consistency() {
         join_table, leave_table, reset_for_next_hand, start_hand, tick,
     };
 
-    // join_table: 通用 + 13 业务 = 50
-    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 13);
+    // join_table: 通用 + 14 业务（含 Gap 2 INPUT_SEAT_EMPTY boolean witness）= 51
+    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 14);
     assert_eq!(JoinTableAir::num_columns(), join_table::cols::NUM_COLUMNS);
 
-    // leave_table: 通用 + 5 业务 = 42
-    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
+    // leave_table: 通用 + 6 业务（含 Gap 3 INPUT_SEAT_OCCUPIED boolean witness）= 43
+    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
     assert_eq!(LeaveTableAir::num_columns(), leave_table::cols::NUM_COLUMNS);
 
-    // start_hand: 通用 + 6 业务（含 ante 3 列）= 43
-    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 6);
+    // start_hand: 通用 + 8 业务（含 ante 3 列 + active_count_inv/prod witness）= 45
+    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
     assert_eq!(StartHandAir::num_columns(), start_hand::cols::NUM_COLUMNS);
 
-    // tick: 通用 + 10 业务（含 time_bank 2 列 + rake 2 列）= 47
-    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 10);
+    // tick: 通用 + 11 业务（含 time_bank 2 列 + rake 2 列 + Gap 5 INPUT_TIMEOUT_KIND_INV）= 48
+    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 11);
     assert_eq!(TickAir::num_columns(), tick::cols::NUM_COLUMNS);
 
-    // reset_for_next_hand: 通用 + 5 业务（含 POST_PENDING_ADDON 4 limb）= 42
+    // reset_for_next_hand: 通用 + 7 业务（含 POST_PENDING_ADDON 4 limb + Gap 6 shuffle_phase + q witness）= 44
     assert_eq!(
         reset_for_next_hand::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 5
+        COMMON_NUM_COLUMNS + 7
     );
     assert_eq!(
         ResetForNextHandAir::num_columns(),

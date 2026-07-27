@@ -42,8 +42,10 @@ pub mod cols {
     pub const OUTPUT_REFUND_BASE: usize = COMMON_NUM_COLUMNS + 1;
     /// `OUTPUT_KICKED` 列（1 = 已踢出）。
     pub const OUTPUT_KICKED: usize = COMMON_NUM_COLUMNS + 5;
+    /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）：诚实 host 只踢占用座位。
+    pub const INPUT_SEAT_OCCUPIED: usize = COMMON_NUM_COLUMNS + 6;
     /// `kick_player` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 6;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 7;
 }
 
 /// `kick_player` 输入参数。
@@ -105,6 +107,8 @@ impl FrameworkEval for KickPlayerAir {
         let _output_refund_2 = eval.next_trace_mask();
         let _output_refund_3 = eval.next_trace_mask();
         let output_kicked = eval.next_trace_mask();
+        // Gap 3 boolean witness（座位非空）。
+        let input_seat_occupied = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -116,7 +120,7 @@ impl FrameworkEval for KickPlayerAir {
 
         // 约束 3：output_kicked == 1
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active.clone() * (output_kicked - one));
+        eval.add_constraint(is_active.clone() * (output_kicked - one.clone()));
 
         // 约束 4（资金流向不变量，limb 0）：kick 时被踢者当前下注立即并入底池
         //   `table.pot += seat.bet; seat.bet = 0`（state_machine.rs:2689）
@@ -128,6 +132,9 @@ impl FrameworkEval for KickPlayerAir {
 
         // 约束 5（审计共性，degree-2）：round_state 不变（kick_player 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
+
+        // 约束 6（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只踢占用座位。
+        eval.add_constraint(is_active.clone() * (input_seat_occupied - one.clone()));
 
         // TODO 阶段 3 完整版：约束 admin 签名；多 limb 进位（limb 1..3）
 
@@ -146,6 +153,8 @@ pub struct KickPlayerRow {
     pub output_refund: [M31; 4],
     /// `OUTPUT_KICKED`。
     pub output_kicked: M31,
+    /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）。
+    pub input_seat_occupied: M31,
 }
 
 impl KickPlayerRow {
@@ -185,6 +194,8 @@ impl KickPlayerRow {
             input_seat_index: u8_to_m31(input.seat_index),
             output_refund: u64_to_m31_limbs(input.refund),
             output_kicked: M31::from(1u32),
+            // Gap 3：诚实 host 只踢占用座位。
+            input_seat_occupied: M31::from(1u32),
         }
     }
 
@@ -196,6 +207,7 @@ impl KickPlayerRow {
             input_seat_index: ZERO,
             output_refund: [ZERO; 4],
             output_kicked: ZERO,
+            input_seat_occupied: ZERO,
         }
     }
 
@@ -206,6 +218,7 @@ impl KickPlayerRow {
         v.push(self.input_seat_index);
         v.extend_from_slice(&self.output_refund);
         v.push(self.output_kicked);
+        v.push(self.input_seat_occupied);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

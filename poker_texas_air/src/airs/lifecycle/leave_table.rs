@@ -21,8 +21,11 @@ pub mod cols {
     pub const INPUT_SEAT_INDEX: usize = COMMON_NUM_COLUMNS + 0;
     /// `OUTPUT_REFUND_AMOUNT` 起始列（4 limb）。
     pub const OUTPUT_REFUND_BASE: usize = COMMON_NUM_COLUMNS + 1;
+    /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）：诚实 host 只对占用座位离座，
+    /// 故前置「座位非空」由该列 == 1 强制。
+    pub const INPUT_SEAT_OCCUPIED: usize = COMMON_NUM_COLUMNS + 5;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 5;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 6;
 }
 
 /// `leave_table` 输入参数。
@@ -79,6 +82,8 @@ impl FrameworkEval for LeaveTableAir {
         let _refund_1 = eval.next_trace_mask();
         let _refund_2 = eval.next_trace_mask();
         let _refund_3 = eval.next_trace_mask();
+        // Gap 3 boolean witness（座位非空）。
+        let input_seat_occupied = eval.next_trace_mask();
 
         // 约束：seat_index == input.seat_index
         let expected: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -89,7 +94,10 @@ impl FrameworkEval for LeaveTableAir {
         eval.add_constraint(common.round_state_eq(0));
         // 约束 3（degree-2）：round_state 不变。
         eval.add_constraint(common.round_state_unchanged());
-        // TODO 阶段 2：seat 非空、refund 守恒、chip_pool/addon_pool 守恒（需新增业务列）。
+        // 约束 4（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只对占用座位离座。
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(is_active.clone() * (input_seat_occupied - one));
+        // TODO 阶段 2：refund 守恒、chip_pool/addon_pool 守恒（需新增业务列）。
         eval
     }
 }
@@ -103,6 +111,8 @@ pub struct LeaveTableRow {
     pub input_seat_index: M31,
     /// 退款金额。
     pub output_refund: [M31; 4],
+    /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）。
+    pub input_seat_occupied: M31,
 }
 
 impl LeaveTableRow {
@@ -126,12 +136,14 @@ impl LeaveTableRow {
             ),
             input_seat_index: u8_to_m31(input.seat_index),
             output_refund: [ZERO; 4],
+            // Gap 3：诚实 host 只对占用座位离座。
+            input_seat_occupied: M31::from(1u32),
         }
     }
     /// padding 行。
     #[must_use]
     pub fn padding() -> Self {
-        Self { common: CommonRow::padding(), input_seat_index: ZERO, output_refund: [ZERO; 4] }
+        Self { common: CommonRow::padding(), input_seat_index: ZERO, output_refund: [ZERO; 4], input_seat_occupied: ZERO }
     }
     /// 转列向量。
     #[must_use]
@@ -139,6 +151,7 @@ impl LeaveTableRow {
         let mut v = self.common.to_vec();
         v.push(self.input_seat_index);
         v.extend_from_slice(&self.output_refund);
+        v.push(self.input_seat_occupied);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

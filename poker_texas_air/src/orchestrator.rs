@@ -400,9 +400,15 @@ impl Orchestrator {
             ante_amount: task.post_table.ante_amount,
             ante_collected: task.post_table.ante_collected,
         };
+        // Gap 4 witness：active_count*(active_count-1) 在 M31 域内的乘法逆元 + 乘积。
+        // active_count ≥ 2（合约 start_hand 前置）时该乘积非零，inverse 存在。
+        let count_m31 = M31::from(u32::from(input.active_count));
+        let count_minus_one = count_m31 - M31::from(1u32);
+        let active_count_prod = count_m31 * count_minus_one;
+        let active_count_inv = active_count_prod.inverse();
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let row = StartHandRow::active(
-            &input, srm(pre_root), srm(post_root),
+            &input, active_count_inv, active_count_prod, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
         );
         run(StartHandAir::num_columns(), &row, &StartHandRow::padding(), move || StartHandAir {
@@ -416,13 +422,16 @@ impl Orchestrator {
     fn prove_tick(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
     ) -> TexasAirResult<()> {
-        // tick 无 prove_task（dispatch 返回 None），但保留接线以备手动驱动。
+        // tick 无 prove_task（dispatch 返回 None），但保留接线以备手动/集成驱动。
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("tick", "Empty", &task.method_input));
         };
         let input = TickInput {
             current_time: 0,
-            timeout_kind: 0,
+            // Gap 5：tick AIR 现要求 timeout_kind > 0（invertibility witness 约束
+            // `timeout_kind * inv == 1`）。tick 暂无 prove_task，此处固定为 1 以使
+            // inverse(1) = 1 存在、约束可满足。真实驱动时由调用方按超时类型传入。
+            timeout_kind: 1,
             time_bank_consumed: 0,
             time_bank_post: 0,
             rake_mode: task.post_table.rake_mode,
@@ -448,7 +457,9 @@ impl Orchestrator {
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("reset_for_next_hand", "Empty", &task.method_input));
         };
-        let input = ResetForNextHandInput::default();
+        let input = ResetForNextHandInput {
+            shuffle_phase: task.post_table.shuffle_state.phase,
+        };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_r = task.pre_table.round_state;
         let row = ResetForNextHandRow::active(
@@ -698,6 +709,7 @@ impl Orchestrator {
         let input = JoinAndShuffleInput {
             seat_index,
             new_deck_commitment: deck_commitment(&task.post_table),
+            shuffle_phase: task.post_table.shuffle_state.phase,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_cc = task.pre_table.shuffle_state.completed_players.len() as u8;
@@ -720,7 +732,11 @@ impl Orchestrator {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("leave_with_proof", "SeatOnly", &task.method_input));
         };
-        let input = LeaveWithProofInput { seat_index: *seat_index, leave_kind: 0 };
+        let input = LeaveWithProofInput {
+            seat_index: *seat_index,
+            leave_kind: 0,
+            shuffle_phase: task.post_table.shuffle_state.phase,
+        };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
         let row = LeaveWithProofRow::active(
@@ -744,6 +760,7 @@ impl Orchestrator {
         let input = SubmitShuffleV2Input {
             seat_index: *seat_index,
             new_deck_commitment: deck_commitment(&task.post_table),
+            shuffle_phase: task.post_table.shuffle_state.phase,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
