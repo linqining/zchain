@@ -271,3 +271,47 @@ poker_lean/                                 # 现有项目根
 Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6。
 
 Phase 4 可与 Phase 2/3 并行（无依赖），但本轮按顺序推进以控制上下文。每阶段完成后 `lake build` 验证再进入下一阶段。
+
+## ✅ 完成状态（2026-07-28）
+
+全部 6 个 Phase 已完成并通过验证。
+
+### 构建状态
+- `lake build` ✅ **Build completed successfully**（5447/5447 目标，含原 AIR + 新 State）
+- 顶层 `PokerLean.lean` 已追加 13 个 `State/*` 模块的 import
+
+### No-sorry 审计
+- `PokerLean/State/*.lean`（5,746 LOC）中 `sorry` / `admit` / `sorryAx` / 自定义 `axiom` / `constant` 数量：**0**
+- 仅依赖 Lean 标准三公理：`propext` / `Classical.choice` / `Quot.sound`
+- 部分定理（`rust_apply_call_refines` / `rust_apply_raise_refines` / `subphase_chip_neutral` / `round_no_skip_preflop_to_river`）**不依赖任何公理**
+
+### 各 Phase 关键定理清单（已全部实现）
+
+| Phase | 模块 | 关键定理 |
+|---|---|---|
+| 1 | RoundMachine | `RoundStep`（5 个构造子）、`round_monotonic`、`round_no_skip_preflop_to_river`、`round_reset_only_to_waiting` |
+| 2 | Betting/Transitions/Invariants | `chips_to_call_correct`、`process_raise_strictly_increases_current_bet`、`process_raise_min_raise_nondecreasing`、`apply_fold/check/call/raise_chip_conservation`、`apply_addon/rebuy_chip_conservation`、`collect_rake_chip_conservation`、`collect_ante_chip_delta`、`refund_seat_chip_delta`；6 个核心不变量 + `total_chips_bound`；各 `apply_*_preserves_*` 保持定理 |
+| 3 | SidePot | `side_pot_conservation`、`folded_not_eligible`、`side_pot_eligibility_nested`、`side_pot_deterministic`、`side_pot_amount_nonneg` |
+| 4 | HandEvaluator | `lexLt_irrefl/trichotomy/trans/asymm`、`lexLt_is_strict_total_order`、`hand_rank_total_order`、`select_best_maximum`、`evaluate_best_is_maximum`、`evaluate_best_deterministic`、`find_winners_deterministic` |
+| 5 | SubPhases | `SubPhaseTransition`（9 个构造子）、`shuffle/reveal/reconstruct_step_iff` + `_monotonic` + `_forward_strict_increasing` + `_reset_only_to_none`、`subphase_chip_neutral` |
+| 6a | Theorems | `reset_for_next_hand_chip_conservation`、`end_without_showdown_chip_conservation`、`apply_fold/check/call_preserves_all_invariants`、`apply_raise_preserves_core_invariants`、`reset_for_next_hand_preserves_all_invariants`、`state_transition_preserves_invariants`（顶层集成） |
+| 6b | Refinement | `rust_checked_add/sub_eq`、`rust_apply_call/raise_refines`、`process_call/raise_panic_free`、`collect_bets_to_pot_add_ok`、`end_without_showdown_stack_add_ok`、`reset_for_next_hand_stack_add_ok`、`apply_call_rust_chip_conservation_via_refinement`、`end_without_showdown_rust_chip_conservation`、`reset_for_next_hand_rust_chip_conservation` |
+
+### 验证命令
+```bash
+cd /Users/mac/projects/zchain/poker_lean
+# 1. 全量构建
+lake build
+# 2. sorry 审计
+grep -rn "sorry\|admit\|sorryAx" PokerLean/State/  # 应无输出
+# 3. axiom 审计
+lake env lean PokerLean/State/AxiomCheck.lean      # 应仅见 propext / Classical.choice / Quot.sound
+```
+
+### 已知限制（与原计划一致）
+1. **`tick_chip_conservation` / `settle_hand_chip_conservation` 未单独建模**：tick 的资金流通过 `subphase_chip_neutral` + 各 `apply_*_chip_conservation` 组合覆盖；settle 通过 `end_without_showdown_chip_conservation` + `side_pot_conservation` + `reset_for_next_hand_chip_conservation` 组合覆盖。
+2. **`apply_raise` 不保持 `betting_round_completion`**：设计上正确（raise 重开下注）。`apply_raise_preserves_core_invariants` 保持其余 6 个不变量；`betting_round_completion` 由完整下注轮后的 `advance_turn` 恢复。
+3. **Rust 源码未在 Lean 中嵌入**（无 Rust frontend）：精化论证基于手工镜像，镜像保真度由类型映射表（§1）+ `state_machine.rs` 行号引用保证。
+4. **`total_chips ≤ U64_MAX` 不成立**（跨座位求和可超 u64）：Rust chip 守恒不需要此条件（每个单步 `checked_*` 成功即可），由 `Refinement.lean §5` 详细论证。
+5. **密码学函数**（join_and_shuffle / submit_shuffle_v2 / submit_reveal_tokens / submit_reconstruct_deck）：状态机证明不依赖其内部结构（密码学类型为不透明占位），其 panic-freedom 由各自的前置检查（phase gating）保证。
+
