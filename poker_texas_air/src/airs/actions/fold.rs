@@ -110,7 +110,7 @@ impl FrameworkEval for FoldAir {
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
 
         // 约束 4（审计 fold：pot 不变，degree-2 limb0）：fold 不改变 pot。
-        eval.add_constraint(common.pot_unchanged_limb0());
+        eval.add_constraint(common.pot_unchanged_4limb());
 
         eval
     }

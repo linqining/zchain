@@ -19,6 +19,8 @@ use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
 use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use poker_texas_air::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use poker_texas_air::prover::prove_method;
+use poker_texas_air::public_inputs::TexasPublicInputs;
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method;
 
@@ -74,7 +76,7 @@ fn test_e2e_join_table_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, JoinTableAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, JoinTableAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::JoinTable)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -105,7 +107,7 @@ fn test_soundness_join_table_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, JoinTableAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, JoinTableAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::JoinTable)).expect("prove 失败");
 
     // 篡改 seat_index：trace 中是 2，AIR 声明 7
     proof.air = JoinTableAir {
@@ -149,7 +151,7 @@ fn test_e2e_leave_table_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, LeaveTableAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, LeaveTableAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::LeaveTable)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -176,7 +178,7 @@ fn test_soundness_leave_table_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, LeaveTableAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, LeaveTableAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::LeaveTable)).expect("prove 失败");
 
     // 篡改 seat_index：trace 中是 3，AIR 声明 8
     proof.air = LeaveTableAir {
@@ -229,7 +231,7 @@ fn test_e2e_start_hand_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, StartHandAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, StartHandAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::StartHand)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -256,7 +258,7 @@ fn test_soundness_start_hand_tampered_count() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, StartHandAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, StartHandAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::StartHand)).expect("prove 失败");
 
     // 篡改 active_count：trace 中是 4，AIR 声明 9
     proof.air = StartHandAir {
@@ -294,7 +296,7 @@ fn test_soundness_start_hand_tampered_ante_mode() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, StartHandAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, StartHandAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::StartHand)).expect("prove 失败");
 
     // 篡改 ante_mode：trace 中是 1 (NORMAL)，AIR 声明 2 (BBA)
     proof.air = StartHandAir {
@@ -349,7 +351,7 @@ fn test_e2e_tick_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, TickAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Tick)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -390,7 +392,7 @@ fn test_soundness_tick_tampered_kind() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, TickAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Tick)).expect("prove 失败");
 
     // 篡改 timeout_kind：trace 中是 1，AIR 声明 3
     proof.air = TickAir {
@@ -434,7 +436,7 @@ fn test_soundness_tick_tampered_time_bank() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, TickAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Tick)).expect("prove 失败");
 
     // 篡改 time_bank_consumed：trace 中是 10_000，AIR 声明 99_999
     proof.air = TickAir {
@@ -478,7 +480,7 @@ fn test_soundness_tick_tampered_rake() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, TickAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Tick)).expect("prove 失败");
 
     // 篡改 rake_amount：trace 中是 50，AIR 声明 999
     proof.air = TickAir {
@@ -533,7 +535,7 @@ fn test_e2e_reset_for_next_hand_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, ResetForNextHandAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, ResetForNextHandAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::ResetForNextHand)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -563,7 +565,7 @@ fn test_soundness_reset_for_next_hand_via_happy_path() {
         pre_version: 0,
         post_version: 1,
     };
-    let proof = prove_method(&trace, air, ResetForNextHandAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, ResetForNextHandAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::ResetForNextHand)).expect("prove 失败");
     // happy path 验证通过即表明约束系统正常工作
     verify_method(proof).expect("verify 失败");
 }
@@ -582,7 +584,8 @@ fn test_lifecycle_air_column_consistency() {
     //   原始 14 列（seat_index + buy_in 4 + player_addr 4 + seat_stack 4 + seat_empty 1）
     //   + 12 列（big_blind 4 + pre_chip_pool 4 + post_chip_pool 4）用于 buy_in >= big_blind 和 chip_pool 守恒
     //   + 14 列（pre_addon_pool 4 + bound_diff 4 + carry_lo 3 + carry_hi 3）用于全局上界 range check
-    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 40);
+    //   + 7 列（阶段 3 新增：ge_diff 4 + ge_borrow 3）用于 buy_in >= big_blind
+    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 47);
     assert_eq!(JoinTableAir::num_columns(), join_table::cols::NUM_COLUMNS);
 
     // leave_table: 通用 + 30 业务

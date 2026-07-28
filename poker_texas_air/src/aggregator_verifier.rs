@@ -43,6 +43,8 @@ pub fn verify_aggregator(proof: AggregatorProof) -> TexasAirResult<()> {
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Poseidon252Channel::default();
+    // soundness 关键：与 prover 对称地 mix 子节点描述符（state_root 链）。
+    crate::aggregator_air::mix_children_into_channel(&mut channel, &proof.children);
     let mut commitment_scheme =
         CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
 

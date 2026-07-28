@@ -13,6 +13,8 @@ use stwo::core::fields::m31::M31;
 
 use poker_texas_air::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput};
 use poker_texas_air::prover::prove_create_table;
+use poker_texas_air::public_inputs::TexasPublicInputs;
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::trace_gen::create_table_trace::gen_create_table_trace;
 use poker_texas_air::verifier::verify_create_table;
 
@@ -74,7 +76,7 @@ fn test_e2e_create_table_prove_verify() {
     .expect("trace 生成失败");
 
     // 4. 生成 proof
-    let proof = prove_create_table(&trace).expect("prove 失败");
+    let proof = prove_create_table(&trace, TexasPublicInputs::from_tables(&pre_table, &post_table, MethodKind::CreateTable, 42, 0, 1).expect("PI 构造失败")).expect("prove 失败");
 
     // 5. 验证 proof
     verify_create_table(proof).expect("verify 失败");
@@ -107,7 +109,7 @@ fn test_soundness_tampered_max_players() {
     .expect("trace 生成失败");
 
     // 用正确的 trace 生成 proof
-    let mut proof = prove_create_table(&trace).expect("prove 失败");
+    let mut proof = prove_create_table(&trace, TexasPublicInputs::from_tables(&pre_table, &post_table, MethodKind::CreateTable, 42, 0, 1).expect("PI 构造失败")).expect("prove 失败");
 
     // 篡改 AIR 的 max_players（6 → 9）
     proof.air = CreateTableAir {
@@ -151,7 +153,7 @@ fn test_soundness_zero_big_blind() {
     )
     .expect("trace 生成失败");
 
-    let mut proof = prove_create_table(&trace).expect("prove 失败");
+    let mut proof = prove_create_table(&trace, TexasPublicInputs::from_tables(&pre_table, &post_table, MethodKind::CreateTable, 42, 0, 1).expect("PI 构造失败")).expect("prove 失败");
 
     // 篡改 big_blind（20 → 0），违反 `big_blind > 0` 约束
     proof.air = CreateTableAir {

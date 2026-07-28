@@ -12,10 +12,11 @@
 //! 在其基础上扩展业务字段（state_root / method_kind / table_id / hand_id）。
 
 use starknet_ff::FieldElement;
+use stwo::core::channel::Channel;
 
 use crate::error::TexasAirResult;
 use crate::method_kind::MethodKind;
-use crate::state_root::StateRoot;
+use crate::state_root::{field_element_to_u32_words, StateRoot};
 
 /// L1 proof 的 Stwo 内部公开输入（直接复用 `poker_zkvm`）。
 pub use poker_zkvm::stwo_backend::recursive::RecursivePublicInputs;
@@ -138,10 +139,199 @@ impl TexasRecursivePublicInputs {
     }
 }
 
+/// 单方法 proof 的**完整公开输入**——用于把证明绑定到 state_root（soundness 关键）。
+///
+/// 背景（soundness 修复）：此前 `proof.air` 结构体里的 `pre_state_root`/`post_state_root`
+/// 从未被 mix 进 Fiat-Shamir channel，导致证明与这些值之间无密码学绑定（攻击者可替换
+/// state_root 而证明仍验证通过）。
+///
+/// 修复（路径 A）：把 pre/post table 的完整 **preimage**（24 个 FieldElement）+
+/// 重算的 `pre_state_root`/`post_state_root` + 元数据，按**固定顺序** mix 进 channel。
+/// 验证方（链下/L1）随后用被审计的 `starknet_crypto::poseidon_hash_many` 重算
+/// `Poseidon252(pre_image)` 并与 `pre_state_root` 比对——密码学绑定由 Fiat-Shamir +
+/// 审计过的哈希共同保证，state_root 哈希本身是唯一信任根（非电路内自造）。
+///
+/// `pre_image` / `post_image` 必须与 `table_state_preimage(table)` 的输出逐字段一致
+/// （阶段 1 已补全所有 9 个 stub，preimage 含完整状态）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TexasPublicInputs {
+    /// 调用前表台的完整 state_root preimage（24 个 FieldElement）。
+    pub pre_image: Vec<FieldElement>,
+    /// 调用后表台的完整 state_root preimage（24 个 FieldElement）。
+    pub post_image: Vec<FieldElement>,
+    /// 调用前 state_root = `Poseidon252(pre_image)`（验证方重算并比对）。
+    pub pre_state_root: StateRoot,
+    /// 调用后 state_root = `Poseidon252(post_image)`（验证方重算并比对）。
+    pub post_state_root: StateRoot,
+    /// 方法种类。
+    pub kind: MethodKind,
+    /// 表台 ID（防跨表台聚合攻击）。
+    pub table_id: u64,
+    /// 手牌序号。
+    pub hand_id: u32,
+    /// 方法调用序号。
+    pub call_seq: u32,
+}
+
+impl TexasPublicInputs {
+    /// 从 pre/post table 与元数据构造完整公开输入。
+    ///
+    /// 计算 `table_state_preimage`（24 字段）并重算 state_root，确保 image 与 root 自洽。
+    /// 供 orchestrator 与 e2e 测试使用。
+    ///
+    /// # Errors
+    ///
+    /// 当 preimage 编码失败（字段序列化异常）时返回错误。
+    pub fn from_tables(
+        pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        post_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        kind: MethodKind,
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+    ) -> TexasAirResult<Self> {
+        use crate::state_root::{compute_state_root, table_state_preimage};
+        let pre_image = table_state_preimage(pre_table)?;
+        let post_image = table_state_preimage(post_table)?;
+        let pre_state_root = compute_state_root(pre_table)?;
+        let post_state_root = compute_state_root(post_table)?;
+        Ok(Self {
+            pre_image,
+            post_image,
+            pre_state_root,
+            post_state_root,
+            kind,
+            table_id,
+            hand_id,
+            call_seq,
+        })
+    }
+
+    /// 用显式 preimage 构造，并**自动重算** state_root 使其与 image 一致。
+    ///
+    /// 适用于机制测试（构造合成 trace 但无真实 table）：传入任意 24 元素 image，
+    /// root 由 `Poseidon252(image)` 重算，确保 `verify_roots()` 通过。
+    #[must_use]
+    pub fn with_consistent_roots(
+        pre_image: Vec<FieldElement>,
+        post_image: Vec<FieldElement>,
+        kind: MethodKind,
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+    ) -> Self {
+        let pre_state_root = StateRoot(starknet_crypto::poseidon_hash_many(&pre_image));
+        let post_state_root = StateRoot(starknet_crypto::poseidon_hash_many(&post_image));
+        Self {
+            pre_image,
+            post_image,
+            pre_state_root,
+            post_state_root,
+            kind,
+            table_id,
+            hand_id,
+            call_seq,
+        }
+    }
+
+    /// 构造一个固定的、自洽的「占位」公开输入（机制测试用）。
+    ///
+    /// image 为 24 个 `FieldElement::ONE`，root 为其真实 Poseidon 哈希（自洽）。
+    /// 用于不需要真实 table 的 AIR 机制测试（仅验证 prove/verify 流程，不验证 state 绑定语义）。
+    #[must_use]
+    pub fn synthetic_placeholder(kind: MethodKind) -> Self {
+        let image = vec![FieldElement::ONE; 24];
+        Self::with_consistent_roots(
+            image.clone(),
+            image,
+            kind,
+            0,
+            0,
+            0,
+        )
+    }
+
+    /// 把公开输入 mix 进 Fiat-Shamir channel（prover 与 verifier 共用，顺序固定）。
+    ///
+    /// # 顺序契约（不可变更）
+    ///
+    /// 1. `pre_image` 的 24 个 FieldElement（每个分解为 8 个大端 u32 word）
+    /// 2. `post_image` 的 24 个 FieldElement（同上）
+    /// 3. `pre_state_root`（8 个 u32 word）
+    /// 4. `post_state_root`（8 个 u32 word）
+    /// 5. `kind`（u32）、`table_id`（u64）、`hand_id`（u32）、`call_seq`（u32）
+    ///
+    /// `FieldElement` → u32 word 用 [`field_element_to_u32_words`]（无损 8-word 大端分解）。
+    /// 用 `mix_u32s`/`mix_u64`，而非 `mix_felts`，因为 Fr 是非原生域元素，按原始字节 mix
+    /// 是标准做法（与 Starknet 把 252-bit 元素序列化为字节一致）。
+    pub fn mix_into<C: Channel>(&self, channel: &mut C) {
+        // 1-2. pre/post image：每个 FieldElement → 8 u32 word，扁平拼接后一次性 mix。
+        let mut felts_u32: Vec<u32> = Vec::with_capacity((self.pre_image.len() + self.post_image.len()) * 8);
+        for f in &self.pre_image {
+            felts_u32.extend_from_slice(&field_element_to_u32_words(*f));
+        }
+        for f in &self.post_image {
+            felts_u32.extend_from_slice(&field_element_to_u32_words(*f));
+        }
+        channel.mix_u32s(&felts_u32);
+
+        // 3-4. pre/post state_root（各 8 u32 word）。
+        let mut roots_u32: Vec<u32> = Vec::with_capacity(16);
+        roots_u32.extend_from_slice(&field_element_to_u32_words(self.pre_state_root.field()));
+        roots_u32.extend_from_slice(&field_element_to_u32_words(self.post_state_root.field()));
+        channel.mix_u32s(&roots_u32);
+
+        // 5. 元数据。
+        channel.mix_u32s(&[u32::from(self.kind as u8), self.hand_id, self.call_seq]);
+        channel.mix_u64(self.table_id);
+    }
+
+    /// 验证方重算并比对：`pre_state_root == Poseidon252(pre_image)` 且
+    /// `post_state_root == Poseidon252(post_image)`。
+    ///
+    /// 这是 state_root 绑定的「验证」半边（mix_into 是「承诺」半边）。
+    /// 验证方拿到公开输入后，用被审计的 Starknet Poseidon252 重算哈希，确保公开输入
+    /// 与承诺的 root 自洽。pre_image 长度必须为 24（否则编码契约被违反）。
+    ///
+    /// # Errors
+    ///
+    /// 当 pre/post_image 长度 ≠ 24，或重算的 root 与公开的 root 不符时返回错误。
+    pub fn verify_roots(&self) -> TexasAirResult<()> {
+        use crate::error::TexasAirError;
+        const PREIMAGE_LEN: usize = 24;
+        if self.pre_image.len() != PREIMAGE_LEN {
+            return Err(TexasAirError::StateRootError(format!(
+                "pre_image 长度 = {}，期望 {PREIMAGE_LEN}",
+                self.pre_image.len()
+            )));
+        }
+        if self.post_image.len() != PREIMAGE_LEN {
+            return Err(TexasAirError::StateRootError(format!(
+                "post_image 长度 = {}，期望 {PREIMAGE_LEN}",
+                self.post_image.len()
+            )));
+        }
+        let pre_recomputed = StateRoot(starknet_crypto::poseidon_hash_many(&self.pre_image));
+        let post_recomputed = StateRoot(starknet_crypto::poseidon_hash_many(&self.post_image));
+        if pre_recomputed != self.pre_state_root {
+            return Err(TexasAirError::StateRootError(
+                "pre_state_root 与 pre_image 重算不符（state_root 绑定失败）".into(),
+            ));
+        }
+        if post_recomputed != self.post_state_root {
+            return Err(TexasAirError::StateRootError(
+                "post_state_root 与 post_image 重算不符（state_root 绑定失败）".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use poker_zkvm::stwo_backend::recursive::public_inputs::RecursivePublicInputs;
+    use stwo::core::channel::Poseidon252Channel;
 
     fn dummy_recursive_inputs() -> RecursivePublicInputs {
         RecursivePublicInputs::default()
@@ -183,5 +373,75 @@ mod tests {
             1,
         );
         assert!(proof.validate().is_err());
+    }
+
+    // ===== 阶段 2：state_root 绑定测试（soundness 关键）=====
+
+    #[test]
+    fn test_verify_roots_accepts_consistent() {
+        // with_consistent_roots 自动重算 root，verify_roots 必通过。
+        let pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        assert!(pi.verify_roots().is_ok(), "自洽 PI 的 verify_roots 应通过");
+    }
+
+    #[test]
+    fn test_verify_roots_rejects_tampered_root() {
+        // 篡改 pre_state_root（不改 image）→ 重算不符 → verify_roots 失败。
+        // 这验证了「验证方重算 Poseidon252(image) 并比对 root」这条绑定生效。
+        let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        pi.pre_state_root = StateRoot::from_field(FieldElement::ONE);
+        assert!(pi.verify_roots().is_err(), "篡改 root 后 verify_roots 应失败");
+    }
+
+    #[test]
+    fn test_verify_roots_rejects_tampered_image() {
+        // 篡改 image（不改 root）→ 重算不符 → verify_roots 失败。
+        let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        pi.pre_image[0] = FieldElement::from(12345u64);
+        assert!(pi.verify_roots().is_err(), "篡改 image 后 verify_roots 应失败");
+    }
+
+    #[test]
+    fn test_verify_roots_rejects_wrong_length() {
+        // image 长度 ≠ 24 → 编码契约违反 → 失败。
+        let pi = TexasPublicInputs {
+            pre_image: vec![FieldElement::ONE; 5],
+            post_image: vec![FieldElement::ONE; 24],
+            pre_state_root: StateRoot::zero(),
+            post_state_root: StateRoot::zero(),
+            kind: MethodKind::Call,
+            table_id: 0,
+            hand_id: 0,
+            call_seq: 0,
+        };
+        assert!(pi.verify_roots().is_err(), "image 长度错误应失败");
+    }
+
+    #[test]
+    fn test_mix_into_is_deterministic() {
+        // 同样的 PI mix 进两个相同 channel，结果应相同（prover/verifier 对称性契约）。
+        let pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        let mut c1 = Poseidon252Channel::default();
+        let mut c2 = Poseidon252Channel::default();
+        pi.mix_into(&mut c1);
+        pi.mix_into(&mut c2);
+        // mix 后从两个 channel draw 相同数量的 random felt，应一致
+        let r1 = c1.draw_secure_felts(4);
+        let r2 = c2.draw_secure_felts(4);
+        assert_eq!(r1, r2, "相同 PI 的 mix 应确定性（prover/verifier 对称）");
+    }
+
+    #[test]
+    fn test_mix_into_distinguishes_different_pi() {
+        // 不同 PI mix 后 channel 状态不同（draw 出不同值）。
+        let pi_a = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        let pi_b = TexasPublicInputs::synthetic_placeholder(MethodKind::Raise);
+        let mut c1 = Poseidon252Channel::default();
+        let mut c2 = Poseidon252Channel::default();
+        pi_a.mix_into(&mut c1);
+        pi_b.mix_into(&mut c2);
+        let r1 = c1.draw_secure_felts(4);
+        let r2 = c2.draw_secure_felts(4);
+        assert_ne!(r1, r2, "不同 PI 的 mix 应区分（绑定生效）");
     }
 }

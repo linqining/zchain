@@ -36,6 +36,11 @@ pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Poseidon252Channel::default();
+    // soundness 关键：与 prover 对称地 mix 公开输入 + 重算验证 state_root 绑定。
+    if let Some(pi) = &proof.public_inputs {
+        pi.verify_roots()?; // 重算 Poseidon252(image) 并比对公开 root
+        pi.mix_into(&mut channel); // 与 prover 相同顺序 mix 进 transcript
+    }
     let mut commitment_scheme =
         CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
 
@@ -107,6 +112,11 @@ where
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Poseidon252Channel::default();
+    // soundness 关键：与 prover 对称地 mix 公开输入 + 重算验证 state_root 绑定。
+    if let Some(pi) = &proof.public_inputs {
+        pi.verify_roots()?; // 重算 Poseidon252(image) 并比对公开 root
+        pi.mix_into(&mut channel); // 与 prover 相同顺序 mix 进 transcript
+    }
     let mut commitment_scheme =
         CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
 

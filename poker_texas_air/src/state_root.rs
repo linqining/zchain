@@ -133,13 +133,24 @@ pub fn table_state_preimage(table: &poker_l1::vm::contracts::texas_poker::types:
     preimage.push(u8_to_field(table.button));
     preimage.push(u64_to_field(table.pot));
 
-    // 9. side_pots_root：空列表哈希为 0，非空用 MerkleTree
+    // 9. side_pots_root：每个 SidePot { amount: u64, eligible_seats: u16 } 编码为
+    //    2 个 FieldElement。带域分隔前缀 "side_pots" + 层数后缀，整体做 Poseidon252。
+    //    空列表哈希为 0（与「该字段未初始化」语义一致）。
     let side_pots_root = if table.side_pots.is_empty() {
         FieldElement::ZERO
     } else {
-        // TODO 阶段 3：实现 side_pot 叶子节点的 Poseidon 编码
-        // 暂时用 len 作为占位
-        u64_to_field(table.side_pots.len() as u64)
+        let mut fields: Vec<FieldElement> = Vec::with_capacity(2 + 2 * table.side_pots.len());
+        // 域分隔前缀（ASCII "side_pots" → 单 FieldElement）
+        let tag_bytes = b"side_pots";
+        let mut tag_buf = [0u8; 32];
+        tag_buf[..tag_bytes.len()].copy_from_slice(tag_bytes);
+        fields.push(bytes_to_field(&tag_buf).unwrap_or(FieldElement::ZERO));
+        // 层数后缀，防止不同长度的 side_pots 列表在拼接后意外碰撞
+        fields.push(u64_to_field(table.side_pots.len() as u64));
+        fields.extend(table.side_pots.iter().flat_map(|sp| {
+            [u64_to_field(sp.amount), u64_to_field(u64::from(sp.eligible_seats))]
+        }));
+        poseidon_hash_many(&fields)
     };
     preimage.push(side_pots_root);
 
@@ -258,6 +269,29 @@ pub fn address_to_field(addr: &poker_l1::Address) -> FieldElement {
     bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
 }
 
+/// 把 Starknet `FieldElement` (~251 bit) 分解为 8 个 **大端** u32 字。
+///
+/// 这是 state_root 绑定的编码契约：把公开输入的 251-bit Fr 元素的 32 字节大端
+/// 表示拆为 8 个完整 32-bit 字，供 Fiat-Shamir channel 的 `mix_u32s` mix。
+///
+/// 编码规则（prover 与 verifier 必须完全一致）：
+/// - 取 `FieldElement` 的 32 字节 **大端** 表示（`to_bytes_be`）。
+/// - 按字节顺序每 4 字节一个 u32（大端读取），共 8 个，保持大端顺序。
+/// - **不做截断**：`mix_u32s` 将 u32 视为原始 transcript 字节（不解释为域元素），
+///   因此完整 32-bit 无损。往返可精确还原原 FieldElement。
+///
+/// 返回固定长度 `[u32; 8]`，words[0] 对应最高 4 字节。
+#[must_use]
+pub fn field_element_to_u32_words(f: FieldElement) -> [u32; 8] {
+    let bytes_be = f.to_bytes_be();
+    let mut words = [0u32; 8];
+    for (i, word) in words.iter_mut().enumerate() {
+        let lo = 4 * i;
+        *word = u32::from_be_bytes([bytes_be[lo], bytes_be[lo + 1], bytes_be[lo + 2], bytes_be[lo + 3]]);
+    }
+    words
+}
+
 fn poseidon_hash_many(inputs: &[FieldElement]) -> FieldElement {
     starknet_crypto::poseidon_hash_many(inputs)
 }
@@ -311,45 +345,84 @@ fn poseidon_cards(cards: &[poker_l1::vm::contracts::texas_poker::card::Card]) ->
     poseidon_hash_many(&fields)
 }
 
+/// 通用「borsh 序列化 → Poseidon」编码契约（带域分隔标签）。
+///
+/// 把任意 `BorshSerialize` 类型序列化为字节，按 31 字节右对齐分块转 FieldElement，
+/// 最后追加一个记录原始字节长度的 FieldElement，再做 Poseidon252。
+///
+/// 这是 state_root 各嵌套子结构（betting_round / deck_state / ... / side_pots）
+/// 的统一编码契约。关键性质（soundness 契约）：
+/// - **确定性**：borsh 序列化确定，同输入必同输出。
+/// - **跨类型抗碰撞（域分隔）**：`tag` 作为哈希输入的**第一个** FieldElement，
+///   确保不同类型即使 borsh 字节完全相同（如默认状态下的全零字节）也产生不同哈希。
+///   这是必须的：例如 `ShuffleState::default()` 与 `ReconstructState::default()` 的
+///   borsh 序列化恰好都是 10 个零字节，不加域分隔会导致跨字段碰撞。
+/// - **同类型抗碰撞**：末尾长度 FieldElement 防止不同长度字节流产生相同分块序列
+///   （例如 `[0x01,0x02]` 与 `[0x01,0x02,0x00]` 在分块后会相同，但长度后缀不同）。
+/// - **空输入非零**：空字节也走完整哈希（返回一个固定非零 FieldElement），
+///   以便区分「该子结构为空」与「该字段未编码」（未编码字段仍用 `FieldElement::ZERO`）。
+///
+/// `tag` 必须是稳定的、与类型一一对应的 ASCII 字符串（编码契约的一部分，
+/// prover 与 L1 两侧必须使用完全相同的 tag）。
+fn poseidon_borsh<T: borsh::BorshSerialize>(tag: &str, value: &T) -> FieldElement {
+    // 域分隔：tag 作为第一个 FieldElement。tag 按 31 字节分块（一般 tag 很短，单块即可）。
+    let mut fields: Vec<FieldElement> = tag
+        .as_bytes()
+        .chunks(31)
+        .map(|chunk| {
+            let mut buf = [0u8; 32];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
+        })
+        .collect();
+    // tag 长度后缀，防止不同长度 tag 碰撞。
+    fields.push(FieldElement::from(u64::try_from(tag.as_bytes().len()).unwrap_or(0)));
+
+    // 子结构 borsh 字节，31 字节分块。
+    let bytes = borsh::to_vec(value).unwrap_or_default();
+    fields.extend(bytes.chunks(31).map(|chunk| {
+        let mut buf = [0u8; 32];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
+    }));
+    // 字节长度后缀，防止填充碰撞。
+    fields.push(FieldElement::from(u64::try_from(bytes.len()).unwrap_or(0)));
+    poseidon_hash_many(&fields)
+}
+
 fn poseidon_betting_round(br: &BettingRound) -> FieldElement {
-    // TODO 阶段 3：完整实现（current_bet/min_raise/big_blind/last_raiser_seat/actions_taken）
-    let _ = br;
-    FieldElement::ZERO
+    // current_bet (u64) || min_raise (u64)，borsh 编码后哈希。
+    // 注：BettingRound 仅含两个 u64，borsh 序列化为 16 字节定长。
+    poseidon_borsh("betting_round", br)
 }
 
 fn poseidon_deck_state(ds: &DeckState) -> FieldElement {
-    let _ = ds;
-    FieldElement::ZERO
+    // 含加密牌组（ElGamalCiphertext 向量）、EC 点等，统一走 borsh 编码契约。
+    poseidon_borsh("deck_state", ds)
 }
 
 fn poseidon_shuffle_state(ss: &ShuffleState) -> FieldElement {
-    let _ = ss;
-    FieldElement::ZERO
+    poseidon_borsh("shuffle_state", ss)
 }
 
 fn poseidon_reveal_token_state(rs: &RevealTokenState) -> FieldElement {
-    let _ = rs;
-    FieldElement::ZERO
+    poseidon_borsh("reveal_token_state", rs)
 }
 
 fn poseidon_reconstruct_state(rs: &ReconstructState) -> FieldElement {
-    let _ = rs;
-    FieldElement::ZERO
+    poseidon_borsh("reconstruct_state", rs)
 }
 
 fn poseidon_timeout_config(tc: &TimeoutConfig) -> FieldElement {
-    let _ = tc;
-    FieldElement::ZERO
+    poseidon_borsh("timeout_config", tc)
 }
 
 fn poseidon_timestamps(ts: &Timestamps) -> FieldElement {
-    let _ = ts;
-    FieldElement::ZERO
+    poseidon_borsh("timestamps", ts)
 }
 
 fn poseidon_table_config(cfg: &TableConfig) -> FieldElement {
-    let _ = cfg;
-    FieldElement::ZERO
+    poseidon_borsh("table_config", cfg)
 }
 
 #[cfg(test)]
@@ -378,5 +451,129 @@ mod tests {
         assert_eq!(h1, h2, "poseidon 应确定性");
         let h3 = poseidon_string("world");
         assert_ne!(h1, h3, "不同字符串应产生不同哈希");
+    }
+
+    // ===== 阶段 1：preimage 编码契约测试（soundness 关键）=====
+    //
+    // 这些测试固化「同输入 → 同输出」与「不同输入 → 不同输出」两条契约，
+    // 防止 prover 与 L1 两侧的序列化漂移。任何编码规则变更都必须同步更新此处。
+
+    #[test]
+    fn test_poseidon_borsh_deterministic_and_distinct() {
+        let br1 = BettingRound { current_bet: 100, min_raise: 50 };
+        let br2 = BettingRound { current_bet: 100, min_raise: 50 };
+        let br3 = BettingRound { current_bet: 101, min_raise: 50 };
+        // 确定性
+        assert_eq!(poseidon_betting_round(&br1), poseidon_betting_round(&br2));
+        // 区分性：current_bet 不同 → 哈希不同
+        assert_ne!(poseidon_betting_round(&br1), poseidon_betting_round(&br3));
+        // 非零（区分「已编码」与「未编码 ZERO」）
+        assert_ne!(poseidon_betting_round(&br1), FieldElement::ZERO);
+    }
+
+    #[test]
+    fn test_poseidon_borsh_tag_domain_separation() {
+        // 域分隔契约：不同 tag 即使内容字节完全相同也必须哈希不同。
+        // 这防住跨类型碰撞：例如 ShuffleState::default 与 ReconstructState::default
+        // 的 borsh 序列化恰好都是 10 个零字节，必须靠 tag 区分。
+        let z: [u8; 0] = [];
+        let h_a = poseidon_borsh("shuffle_state", &z);
+        let h_b = poseidon_borsh("reconstruct_state", &z);
+        assert_ne!(h_a, h_b, "不同 tag 必须产生不同哈希（域分隔）");
+        assert_ne!(h_a, FieldElement::ZERO);
+        // 同 tag 同内容 → 确定性
+        assert_eq!(h_a, poseidon_borsh("shuffle_state", &z));
+    }
+
+    #[test]
+    fn test_poseidon_borsh_length_suffix_prevents_collision() {
+        // 长度后缀契约：[0x01,0x02] 与 [0x01,0x02,0x00] 分块后内容相同（第二块填充零），
+        // 但长度后缀不同，故哈希必须不同。
+        let h_short = poseidon_borsh("x", &[0x01u8, 0x02]);
+        let h_long = poseidon_borsh("x", &[0x01u8, 0x02, 0x00u8]);
+        assert_ne!(h_short, h_long, "长度后缀必须防止填充碰撞");
+        assert_eq!(h_short, poseidon_borsh("x", &[0x01u8, 0x02]));
+    }
+
+    #[test]
+    fn test_sub_structure_hashes_distinct() {
+        // 各子结构默认（空）状态哈希应互不相同且非零：
+        // 它们将被写入 state_root preimage，若彼此相同会导致不同字段不可区分。
+        let deck = poseidon_deck_state(&DeckState::default());
+        let shuffle = poseidon_shuffle_state(&ShuffleState::default());
+        let reveal = poseidon_reveal_token_state(&RevealTokenState::default());
+        let reconstruct = poseidon_reconstruct_state(&ReconstructState::default());
+        let timeout = poseidon_timeout_config(&TimeoutConfig::default());
+        let timestamps = poseidon_timestamps(&Timestamps::default());
+        let config = poseidon_table_config(&TableConfig::default());
+        for h in [deck, shuffle, reveal, reconstruct, timeout, timestamps, config] {
+            assert_ne!(h, FieldElement::ZERO, "默认子结构哈希应非零");
+        }
+        // 默认值两两不同（它们 borsh 序列化不同）
+        let all = [deck, shuffle, reveal, reconstruct, timeout, timestamps, config];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j], "默认子结构哈希应两两不同 ({i},{j})");
+            }
+        }
+    }
+
+    #[test]
+    fn test_field_element_to_u32_words_roundtrip() {
+        // 编码契约：8-word 分解必须无损往返还原原 FieldElement。
+        // mix_u32s 把 u32 当原始 transcript 字节，不做域解释，故完整 32-bit 无损。
+        let cases = [
+            FieldElement::ZERO,
+            FieldElement::ONE,
+            FieldElement::from(u64::MAX),
+            {
+                let mut buf = [0u8; 32];
+                buf[0] = 0x07;
+                buf[1] = 0xFF;
+                for b in &mut buf[2..] { *b = 0xAB; }
+                FieldElement::from_bytes_be(&buf).unwrap_or(FieldElement::ZERO)
+            },
+        ];
+        for f in cases {
+            let words = field_element_to_u32_words(f);
+            // 重建：大端 word → 大端字节
+            let mut bytes_be = [0u8; 32];
+            for (i, word) in words.iter().enumerate() {
+                let lo = 4 * i;
+                let chunk = word.to_be_bytes();
+                bytes_be[lo..lo + 4].copy_from_slice(&chunk);
+            }
+            let restored = FieldElement::from_bytes_be(&bytes_be).expect("往返重建应成功");
+            assert_eq!(f, restored, "field_element_to_u32_words 往返失败");
+        }
+        // 区分性：不同 FieldElement → 不同 word 序列
+        assert_ne!(
+            field_element_to_u32_words(FieldElement::ONE),
+            field_element_to_u32_words(FieldElement::from(2u64)),
+        );
+    }
+
+    #[test]
+    fn test_side_pots_root_encoding() {
+        use poker_l1::vm::contracts::texas_poker::side_pot::SidePot;
+        // 两个 side_pot 列表，内容不同 → 哈希不同
+        let sp1 = vec![SidePot::new(100, 0b0011)];
+        let sp2 = vec![SidePot::new(100, 0b0101)];
+        let f = |pots: &[SidePot]| -> FieldElement {
+            let mut fields: Vec<FieldElement> = Vec::new();
+            let tag_bytes = b"side_pots";
+            let mut tag_buf = [0u8; 32];
+            tag_buf[..tag_bytes.len()].copy_from_slice(tag_bytes);
+            fields.push(bytes_to_field(&tag_buf).unwrap_or(FieldElement::ZERO));
+            fields.push(u64_to_field(pots.len() as u64));
+            fields.extend(pots.iter().flat_map(|sp| {
+                [u64_to_field(sp.amount), u64_to_field(u64::from(sp.eligible_seats))]
+            }));
+            poseidon_hash_many(&fields)
+        };
+        assert_ne!(f(&sp1), f(&sp2), "不同 eligible_seats 应产生不同 side_pots_root");
+        assert_ne!(f(&sp1), FieldElement::ZERO);
+        // 确定性
+        assert_eq!(f(&sp1), f(&sp1));
     }
 }

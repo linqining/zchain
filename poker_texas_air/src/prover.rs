@@ -19,6 +19,7 @@ use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocation
 
 use crate::airs::lifecycle::create_table::CreateTableAir;
 use crate::error::{TexasAirError, TexasAirResult};
+use crate::public_inputs::TexasPublicInputs;
 use crate::trace_gen::create_table_trace::CreateTableTrace;
 use crate::trace_gen::MethodTrace;
 
@@ -31,6 +32,9 @@ pub struct CreateTableProof {
     pub air: CreateTableAir,
     /// trace log_size。
     pub log_size: u32,
+    /// 完整公开输入（state_root 绑定用；阶段 2 soundness 修复）。
+    /// `None` 表示该 proof 未携带 preimage（向后兼容；verify 时跳过 mix/重算）。
+    pub public_inputs: Option<TexasPublicInputs>,
 }
 
 /// 泛型 method proof（适用于任意 method AIR）。
@@ -46,6 +50,9 @@ pub struct MethodProof<A: FrameworkEval + Clone + Sync> {
     pub log_size: u32,
     /// trace 列数（用于 verifier 重建 commitment）。
     pub num_columns: usize,
+    /// 完整公开输入（state_root 绑定用；阶段 2 soundness 修复）。
+    /// `None` 表示该 proof 未携带 preimage（向后兼容；verify 时跳过 mix/重算）。
+    pub public_inputs: Option<TexasPublicInputs>,
 }
 
 /// 生成 `create_table` 方法的 L1 proof。
@@ -59,7 +66,10 @@ pub struct MethodProof<A: FrameworkEval + Clone + Sync> {
 /// # Errors
 ///
 /// - `TexasAirError::StwoProverError` — Stwo prover 内部错误（如约束不满足）
-pub fn prove_create_table(trace: &CreateTableTrace) -> TexasAirResult<CreateTableProof> {
+pub fn prove_create_table(
+    trace: &CreateTableTrace,
+    public_inputs: TexasPublicInputs,
+) -> TexasAirResult<CreateTableProof> {
     let log_size = trace.trace.log_size;
 
     // 1. PCS 配置 + twiddles 预计算
@@ -70,6 +80,9 @@ pub fn prove_create_table(trace: &CreateTableTrace) -> TexasAirResult<CreateTabl
 
     // 2. Channel + CommitmentSchemeProver
     let mut channel = Poseidon252Channel::default();
+    // soundness 关键：在任何 commit/draw 之前，把完整公开输入 mix 进 Fiat-Shamir channel，
+    // 把证明绑定到 state_root（preimage + 重算 root）。详见 TexasPublicInputs。
+    public_inputs.mix_into(&mut channel);
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
 
@@ -102,6 +115,7 @@ pub fn prove_create_table(trace: &CreateTableTrace) -> TexasAirResult<CreateTabl
         stark_proof,
         air: trace.air.clone(),
         log_size,
+        public_inputs: Some(public_inputs),
     })
 }
 
@@ -121,7 +135,12 @@ pub fn prove_create_table(trace: &CreateTableTrace) -> TexasAirResult<CreateTabl
 /// # Errors
 ///
 /// - `TexasAirError::StwoProverError` — Stwo prover 内部错误（约束不满足）
-pub fn prove_method<A>(trace: &MethodTrace, air: A, num_columns: usize) -> TexasAirResult<MethodProof<A>>
+pub fn prove_method<A>(
+    trace: &MethodTrace,
+    air: A,
+    num_columns: usize,
+    public_inputs: TexasPublicInputs,
+) -> TexasAirResult<MethodProof<A>>
 where
     A: FrameworkEval + Clone + Sync,
 {
@@ -135,6 +154,9 @@ where
 
     // 2. Channel + CommitmentSchemeProver
     let mut channel = Poseidon252Channel::default();
+    // soundness 关键：在任何 commit/draw 之前，把完整公开输入 mix 进 Fiat-Shamir channel，
+    // 把证明绑定到 state_root（preimage + 重算 root）。详见 TexasPublicInputs。
+    public_inputs.mix_into(&mut channel);
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
 
@@ -170,6 +192,7 @@ where
         air,
         log_size,
         num_columns,
+        public_inputs: Some(public_inputs),
     })
 }
 

@@ -50,8 +50,12 @@ pub mod cols {
     pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 34;
     /// BOUND_CARRY_HI 起始列（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
     pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 37;
+    /// GE_DIFF 起始列（4 limb）— buy_in - big_blind 差值（阶段 3 新增：buy_in >= big_blind）。
+    pub const GE_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 40;
+    /// GE_BORROW 起始列（3 个 boolean）— 减法借位 witness（阶段 3 新增）。
+    pub const GE_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 44;
     /// `join_table` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 40;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 47;
 }
 
 /// `join_table` AIR 输入参数。
@@ -209,8 +213,21 @@ impl FrameworkEval for JoinTableAir {
         eval.add_constraint(common.bound_check_4limb(
             &chip_pool, &addon_pool, &buy_in_limbs, &diff, &carry_lo, &carry_hi,
         ));
-        // TODO 阶段 3：buy_in >= big_blind 的 range check（需 invertibility witness）
-        let _ = (input_big_blind_0, input_big_blind_1, input_big_blind_2, input_big_blind_3);
+        // 约束 9（阶段 3 soundness 新增）：buy_in >= big_blind（全 4-limb ≥ 检查）。
+        // 通过减法借位链约束 buy_in - big_blind = ge_diff，且无下溢（borrow_out[3]=0），
+        // 在 Limb4Range16 假设下保证 decode(buy_in) >= decode(big_blind)。
+        let big_blind_limbs = [input_big_blind_0, input_big_blind_1,
+                               input_big_blind_2, input_big_blind_3];
+        let ge_diff_0 = eval.next_trace_mask();
+        let ge_diff_1 = eval.next_trace_mask();
+        let ge_diff_2 = eval.next_trace_mask();
+        let ge_diff_3 = eval.next_trace_mask();
+        let ge_borrow_0 = eval.next_trace_mask();
+        let ge_borrow_1 = eval.next_trace_mask();
+        let ge_borrow_2 = eval.next_trace_mask();
+        let ge_diff = [ge_diff_0, ge_diff_1, ge_diff_2, ge_diff_3];
+        let ge_borrow = [ge_borrow_0, ge_borrow_1, ge_borrow_2];
+        eval.add_constraint(common.ge_4limb(&buy_in_limbs, &big_blind_limbs, &ge_diff, &ge_borrow));
         let _ = MAX_TOTAL_BET;
         eval
     }
@@ -245,6 +262,10 @@ pub struct JoinTableRow {
     pub bound_carry_lo: [M31; 3],
     /// BOUND_CARRY_HI（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
     pub bound_carry_hi: [M31; 3],
+    /// GE_DIFF（4 limb）— buy_in - big_blind 差值（阶段 3 新增：buy_in >= big_blind）。
+    pub ge_diff: [M31; 4],
+    /// GE_BORROW（3 个 boolean）— 减法借位 witness（阶段 3 新增）。
+    pub ge_borrow: [M31; 3],
 }
 
 impl JoinTableRow {
@@ -284,6 +305,31 @@ impl JoinTableRow {
                + (input.buy_in / (65536 * 65536)) % 65536 + (bound_diff / (65536 * 65536)) % 65536 + c1;
         let c2 = s2 / 65536;
         let _ = (cp, ap, am, df, mx);
+
+        // 阶段 3：buy_in >= big_blind 的减法借位分解。
+        // 约束：buy[i] + 65536·b_in[i] - bi[i] - diff[i] = 65536·b_out[i]
+        //   若 buy[i] + 65536·b_in[i] >= bi[i]：无借位，diff[i] = 那个差，b_out[i]=0
+        //   否则：借位，diff[i] = buy[i] + 65536·b_in[i] + 65536 - bi[i]，b_out[i]=1
+        // b_in[0]=0，b_out[i]=b_in[i+1]，b_out[3]=0（无下溢 ⇒ buy_in >= big_blind）。
+        debug_assert!(input.buy_in >= big_blind, "join_table: buy_in < big_blind");
+        let mut borrow_in: u64 = 0;
+        let mut ge_diff_limbs: [M31; 4] = [ZERO; 4];
+        let mut ge_borrow_limbs: [M31; 3] = [ZERO; 3];
+        for i in 0..4 {
+            let buy_l = (input.buy_in >> (16 * i)) & 0xFFFF;
+            let bi_l = (big_blind >> (16 * i)) & 0xFFFF;
+            let avail = buy_l + 65536 * borrow_in; // < 2*65536
+            let borrow_out = if avail >= bi_l { 0u64 } else { 1u64 };
+            let diff_l = avail + borrow_out * 65536 - bi_l;
+            ge_diff_limbs[i] = M31::from((diff_l & 0xFFFF) as u32);
+            if i < 3 {
+                ge_borrow_limbs[i] = M31::from(borrow_out as u32);
+            }
+            borrow_in = borrow_out;
+        }
+        // i=3 的 borrow_out 必须 = 0（无下溢）。约束侧 b_out[3] 硬编码为 0，
+        // host 端此处 borrow_in 即为 b_out[3]，buy_in >= big_blind 保证其为 0。
+        debug_assert_eq!(borrow_in, 0, "join_table: buy_in >= big_blind 下溢");
         Self {
             common: CommonRow::active(
                 MethodKind::JoinTable,
@@ -324,6 +370,9 @@ impl JoinTableRow {
                 M31::from((c1 / 2) as u32),
                 M31::from((c2 / 2) as u32),
             ],
+            // 阶段 3：buy_in >= big_blind 的差值与借位 witness
+            ge_diff: ge_diff_limbs,
+            ge_borrow: ge_borrow_limbs,
         }
     }
 
@@ -344,6 +393,8 @@ impl JoinTableRow {
             bound_diff: [ZERO; 4],
             bound_carry_lo: [ZERO; 3],
             bound_carry_hi: [ZERO; 3],
+            ge_diff: [ZERO; 4],
+            ge_borrow: [ZERO; 3],
         }
     }
 
@@ -363,6 +414,8 @@ impl JoinTableRow {
         v.extend_from_slice(&self.bound_diff);
         v.extend_from_slice(&self.bound_carry_lo);
         v.extend_from_slice(&self.bound_carry_hi);
+        v.extend_from_slice(&self.ge_diff);
+        v.extend_from_slice(&self.ge_borrow);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

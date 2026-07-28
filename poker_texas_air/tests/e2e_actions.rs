@@ -15,6 +15,8 @@ use poker_texas_air::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use poker_texas_air::airs::actions::raise::RaiseAir;
 use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::prover::prove_method;
+use poker_texas_air::public_inputs::TexasPublicInputs;
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method;
 
@@ -61,7 +63,7 @@ fn test_e2e_fold_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, FoldAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, FoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Fold)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -98,7 +100,7 @@ fn test_soundness_fold_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, FoldAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, FoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Fold)).expect("prove 失败");
 
     // 篡改 proof.air.input.seat_index：trace 中是 3，但 AIR 声明 5
     proof.air = FoldAir {
@@ -140,7 +142,7 @@ fn test_soundness_fold_version_not_incremented() {
         pre_version: 0,
         post_version: 0, // 与 trace 一致地未递增
     };
-    let result = prove_method(&trace, air, FoldAir::num_columns());
+    let result = prove_method(&trace, air, FoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Fold));
     assert!(
         result.is_err(),
         "version 未递增时 prove 应失败（version+=1 约束应捕获）"
@@ -176,7 +178,7 @@ fn test_soundness_fold_pot_changed() {
         pre_version: 0,
         post_version: 1,
     };
-    let result = prove_method(&trace, air, FoldAir::num_columns());
+    let result = prove_method(&trace, air, FoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Fold));
     assert!(
         result.is_err(),
         "fold 改变 pot 时 prove 应失败（pot 不变约束应捕获）"
@@ -222,7 +224,7 @@ fn test_e2e_check_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, CheckAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, CheckAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Check)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -265,7 +267,7 @@ fn test_soundness_check_tampered_bet() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, CheckAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, CheckAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Check)).expect("prove 失败");
 
     // 篡改 proof.air.input.current_bet：trace 中是 20，但 AIR 声明 99
     proof.air = CheckAir {
@@ -309,6 +311,9 @@ fn test_e2e_call_prove_verify() {
         20,   // post_seat_bet
         false, // is_all_in
         0,    // pre_seat_bet（post_seat_bet - call_amount = 20 - 20）
+        100,  // pre_seat_stack（阶段3：原 100，call 后 stack=80）
+        20,   // post_seat_total_bet（= post_seat_bet，首次下注）
+        0,    // pre_seat_total_bet（原 0）
     );
     let trace = gen_method_trace(CallAir::num_columns(), &row.to_vec(), &CallRow::padding().to_vec())
         .expect("trace 生成失败");
@@ -325,7 +330,7 @@ fn test_e2e_call_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, CallAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, CallAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Call)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -355,6 +360,9 @@ fn test_soundness_call_tampered_amount() {
         20,
         false,
         0,    // pre_seat_bet（post_seat_bet - call_amount = 20 - 20）
+        100,  // pre_seat_stack（阶段3：原 100，call 后 stack=80）
+        20,   // post_seat_total_bet（= post_seat_bet，首次下注）
+        0,    // pre_seat_total_bet（原 0）
     );
     let trace = gen_method_trace(CallAir::num_columns(), &row.to_vec(), &CallRow::padding().to_vec())
         .expect("trace 生成失败");
@@ -371,7 +379,7 @@ fn test_soundness_call_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, CallAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, CallAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Call)).expect("prove 失败");
 
     // 篡改 proof.air.input.call_amount：trace 中是 20，但 AIR 声明 999
     proof.air = CallAir {
@@ -440,7 +448,7 @@ fn test_e2e_raise_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, RaiseAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, RaiseAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Raise)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -491,7 +499,7 @@ fn test_soundness_raise_tampered_raise_to() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, RaiseAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, RaiseAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Raise)).expect("prove 失败");
 
     // 篡改 raise_to：trace 中是 80，但 AIR 声明 200
     proof.air = RaiseAir {
@@ -551,7 +559,7 @@ fn test_e2e_auto_fold_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, AutoFoldAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, AutoFoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::AutoFold)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -594,7 +602,7 @@ fn test_soundness_auto_fold_tampered_time() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, AutoFoldAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, AutoFoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::AutoFold)).expect("prove 失败");
 
     // 篡改 current_time：trace 中是 1_700_000_000，AIR 声明 0
     proof.air = AutoFoldAir {
@@ -651,7 +659,7 @@ fn test_e2e_force_fold_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, ForceFoldAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, ForceFoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::ForceFold)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -691,7 +699,7 @@ fn test_soundness_force_fold_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, ForceFoldAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, ForceFoldAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::ForceFold)).expect("prove 失败");
 
     // 篡改 seat_index：trace 中是 5，AIR 声明 0
     proof.air = ForceFoldAir {
@@ -753,7 +761,7 @@ fn test_e2e_kick_player_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, KickPlayerAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, KickPlayerAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::KickPlayer)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -801,7 +809,7 @@ fn test_soundness_kick_player_tampered_refund() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, KickPlayerAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, KickPlayerAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::KickPlayer)).expect("prove 失败");
 
     // 篡改 refund：trace 中是 500，AIR 声明 9999
     proof.air = KickPlayerAir {
@@ -837,8 +845,10 @@ fn test_action_air_column_consistency() {
     assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
     assert_eq!(CheckAir::num_columns(), check::cols::NUM_COLUMNS);
 
-    // call: 通用 + 21 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness + PRE_SEAT_BET 4 limb）
-    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 21);
+    // call: 通用 + 33 业务（阶段 3 soundness 升级：全 4-limb delta）
+    // 业务列：seat_index/current_turn(2) + call_amount/stack/bet(12) + all_in/acted(2)
+    // + pre_round_state_q(1) + pre_seat_bet/stack(8) + pre/post_total_bet(8) = 33
+    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
     assert_eq!(CallAir::num_columns(), call::cols::NUM_COLUMNS);
 
     // raise: 通用 + 46 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
@@ -850,7 +860,7 @@ fn test_action_air_column_consistency() {
     assert_eq!(RaiseAir::num_columns(), raise::cols::NUM_COLUMNS);
 
     // bet: 通用 + 12 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
-    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 12);
+    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
 
     // auto_fold: 通用 + 8 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
     assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
@@ -904,6 +914,11 @@ fn test_e2e_bet_prove_verify() {
         0,  // pre_pot
         50, // post_pot（pot += amount）
         50, // post_seat_bet
+        0,   // pre_seat_bet（阶段3）
+        100, // pre_seat_stack
+        50,  // post_seat_stack（stack -= amount）
+        0,   // pre_seat_total_bet
+        50,  // post_seat_total_bet
     );
     let trace = gen_method_trace(BetAir::num_columns(), &row.to_vec(), &BetRow::padding().to_vec())
         .expect("trace 生成失败");
@@ -920,7 +935,7 @@ fn test_e2e_bet_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, BetAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, BetAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Bet)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -947,6 +962,11 @@ fn test_soundness_bet_tampered_amount() {
         0,
         50,
         50,
+        0,   // pre_seat_bet
+        100, // pre_seat_stack
+        50,  // post_seat_stack
+        0,   // pre_seat_total_bet
+        50,  // post_seat_total_bet
     );
     let trace = gen_method_trace(BetAir::num_columns(), &row.to_vec(), &BetRow::padding().to_vec())
         .expect("trace 生成失败");
@@ -962,7 +982,7 @@ fn test_soundness_bet_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, BetAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, BetAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Bet)).expect("prove 失败");
 
     // 篡改 amount：trace 中是 50，但 AIR 声明 999
     proof.air = BetAir {
@@ -1003,6 +1023,11 @@ fn test_soundness_bet_tampered_seat() {
         0,
         50,
         50,
+        0,   // pre_seat_bet
+        100, // pre_seat_stack
+        50,  // post_seat_stack
+        0,   // pre_seat_total_bet
+        50,  // post_seat_total_bet
     );
     let trace = gen_method_trace(BetAir::num_columns(), &row.to_vec(), &BetRow::padding().to_vec())
         .expect("trace 生成失败");
@@ -1018,7 +1043,7 @@ fn test_soundness_bet_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, BetAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, BetAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Bet)).expect("prove 失败");
 
     // 篡改 seat_index：trace 中是 1，但 AIR 声明 6
     proof.air = BetAir {

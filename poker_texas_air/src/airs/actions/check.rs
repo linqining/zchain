@@ -134,7 +134,7 @@ impl FrameworkEval for CheckAir {
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
         // 约束 5（审计共性，degree-2 limb0）：pot 不变（check 不改变 pot）。
-        eval.add_constraint(common.pot_unchanged_limb0());
+        eval.add_constraint(common.pot_unchanged_4limb());
 
         eval
     }

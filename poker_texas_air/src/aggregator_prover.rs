@@ -27,6 +27,7 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::aggregator_air::{
     build_binary_tree, AggregatorAir, AggregatorRow, ChildDescriptor, cols,
+    mix_children_into_channel,
 };
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::trace_gen::MethodTrace;
@@ -44,6 +45,9 @@ pub struct AggregatorProof {
     pub num_children: usize,
     /// 聚合层级数。
     pub num_levels: usize,
+    /// 聚合的子节点描述符（state_root 链式绑定用；阶段 2 soundness 修复）。
+    /// verifier 用相同的 children 重新 mix 进 channel，确保聚合 proof 绑定到声明的链。
+    pub children: Vec<crate::aggregator_air::ChildDescriptor>,
 }
 
 /// 把多个 method proof 摘要（`ChildDescriptor`）聚合到单 proof。
@@ -61,6 +65,7 @@ pub struct AggregatorProof {
 pub fn prove_aggregator(children: Vec<ChildDescriptor>) -> TexasAirResult<AggregatorProof> {
     // 1. 构造二叉树聚合
     let num_children = children.len();
+    let children_for_mix = children.clone();
     let (root, levels) = build_binary_tree(children)?;
 
     if levels.is_empty() {
@@ -133,6 +138,9 @@ pub fn prove_aggregator(children: Vec<ChildDescriptor>) -> TexasAirResult<Aggreg
 
     // 7. Channel + CommitmentSchemeProver
     let mut channel = Poseidon252Channel::default();
+    // soundness 关键：把所有子节点描述符（state_root 链）mix 进 channel，
+    // 使聚合 proof 绑定到声明的链（否则 AIR struct 的 left/right 可被替换）。
+    mix_children_into_channel(&mut channel, &children_for_mix);
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
 
@@ -169,5 +177,6 @@ pub fn prove_aggregator(children: Vec<ChildDescriptor>) -> TexasAirResult<Aggreg
         log_size,
         num_children,
         num_levels: levels.len(),
+        children: children_for_mix,
     })
 }

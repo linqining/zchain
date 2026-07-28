@@ -71,7 +71,7 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::prove_task::{MethodInput, ProveTask};
 use crate::prover::prove_method;
-use crate::state_root::{compute_state_root, StateRoot};
+use crate::state_root::{compute_state_root, table_state_preimage, StateRoot};
 use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
 
 /// 把 Starknet FieldElement（state_root）转为 4 个 M31 limb。
@@ -135,8 +135,21 @@ impl Orchestrator {
     /// - Stwo prover 错误（约束不满足）
     /// - verify 失败（proof 无效）
     pub fn prove_and_verify_task(&mut self, task: &ProveTask) -> TexasAirResult<ProvenTask> {
-        let pre_root = compute_state_root(&task.pre_table)?;
-        let post_root = compute_state_root(&task.post_table)?;
+        let pre_image = table_state_preimage(&task.pre_table)?;
+        let post_image = table_state_preimage(&task.post_table)?;
+        let pre_root = StateRoot(starknet_crypto::poseidon_hash_many(&pre_image));
+        let post_root = StateRoot(starknet_crypto::poseidon_hash_many(&post_image));
+        // 完整公开输入（preimage + 重算 root + 元数据），用于 state_root 绑定。
+        let pi = crate::public_inputs::TexasPublicInputs {
+            pre_image,
+            post_image,
+            pre_state_root: pre_root,
+            post_state_root: post_root,
+            kind: task.method_kind,
+            table_id: task.table_id,
+            hand_id: task.hand_id,
+            call_seq: task.call_seq,
+        };
         let summary = ProvenTask {
             method_kind: task.method_kind,
             pre_state_root: pre_root,
@@ -145,27 +158,27 @@ impl Orchestrator {
         };
 
         match task.method_kind {
-            MethodKind::CreateTable => self.prove_create_table(task, pre_root, post_root)?,
-            MethodKind::JoinTable => self.prove_join_table(task, pre_root, post_root)?,
-            MethodKind::LeaveTable => self.prove_leave_table(task, pre_root, post_root)?,
-            MethodKind::StartHand => self.prove_start_hand(task, pre_root, post_root)?,
-            MethodKind::Tick => self.prove_tick(task, pre_root, post_root)?,
-            MethodKind::ResetForNextHand => self.prove_reset_for_next_hand(task, pre_root, post_root)?,
-            MethodKind::Fold => self.prove_fold(task, pre_root, post_root)?,
-            MethodKind::Check => self.prove_check(task, pre_root, post_root)?,
-            MethodKind::Call => self.prove_call(task, pre_root, post_root)?,
-            MethodKind::Raise => self.prove_raise(task, pre_root, post_root)?,
-            MethodKind::AutoFold => self.prove_auto_fold(task, pre_root, post_root)?,
-            MethodKind::ForceFold => self.prove_force_fold(task, pre_root, post_root)?,
-            MethodKind::KickPlayer => self.prove_kick_player(task, pre_root, post_root)?,
-            MethodKind::Addon => self.prove_addon(task, pre_root, post_root)?,
-            MethodKind::Rebuy => self.prove_rebuy(task, pre_root, post_root)?,
-            MethodKind::Bet => self.prove_bet(task, pre_root, post_root)?,
-            MethodKind::JoinAndShuffle => self.prove_join_and_shuffle(task, pre_root, post_root)?,
-            MethodKind::LeaveWithProof => self.prove_leave_with_proof(task, pre_root, post_root)?,
-            MethodKind::SubmitShuffleV2 => self.prove_submit_shuffle_v2(task, pre_root, post_root)?,
-            MethodKind::SubmitPlayerRevealTokens => self.prove_submit_reveal_tokens(task, pre_root, post_root)?,
-            MethodKind::SubmitReconstructDeck => self.prove_submit_reconstruct_deck(task, pre_root, post_root)?,
+            MethodKind::CreateTable => self.prove_create_table(task, pre_root, post_root, &pi)?,
+            MethodKind::JoinTable => self.prove_join_table(task, pre_root, post_root, &pi)?,
+            MethodKind::LeaveTable => self.prove_leave_table(task, pre_root, post_root, &pi)?,
+            MethodKind::StartHand => self.prove_start_hand(task, pre_root, post_root, &pi)?,
+            MethodKind::Tick => self.prove_tick(task, pre_root, post_root, &pi)?,
+            MethodKind::ResetForNextHand => self.prove_reset_for_next_hand(task, pre_root, post_root, &pi)?,
+            MethodKind::Fold => self.prove_fold(task, pre_root, post_root, &pi)?,
+            MethodKind::Check => self.prove_check(task, pre_root, post_root, &pi)?,
+            MethodKind::Call => self.prove_call(task, pre_root, post_root, &pi)?,
+            MethodKind::Raise => self.prove_raise(task, pre_root, post_root, &pi)?,
+            MethodKind::AutoFold => self.prove_auto_fold(task, pre_root, post_root, &pi)?,
+            MethodKind::ForceFold => self.prove_force_fold(task, pre_root, post_root, &pi)?,
+            MethodKind::KickPlayer => self.prove_kick_player(task, pre_root, post_root, &pi)?,
+            MethodKind::Addon => self.prove_addon(task, pre_root, post_root, &pi)?,
+            MethodKind::Rebuy => self.prove_rebuy(task, pre_root, post_root, &pi)?,
+            MethodKind::Bet => self.prove_bet(task, pre_root, post_root, &pi)?,
+            MethodKind::JoinAndShuffle => self.prove_join_and_shuffle(task, pre_root, post_root, &pi)?,
+            MethodKind::LeaveWithProof => self.prove_leave_with_proof(task, pre_root, post_root, &pi)?,
+            MethodKind::SubmitShuffleV2 => self.prove_submit_shuffle_v2(task, pre_root, post_root, &pi)?,
+            MethodKind::SubmitPlayerRevealTokens => self.prove_submit_reveal_tokens(task, pre_root, post_root, &pi)?,
+            MethodKind::SubmitReconstructDeck => self.prove_submit_reconstruct_deck(task, pre_root, post_root, &pi)?,
         }
 
         self.proven.push(summary.clone());
@@ -219,6 +232,7 @@ impl Orchestrator {
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::CreateTable {
             name,
@@ -265,7 +279,7 @@ impl Orchestrator {
             pre_version,
             post_version,
         );
-        let proof = prove_method(&trace, air, CreateTableAir::num_columns())?;
+        let proof = prove_method(&trace, air, CreateTableAir::num_columns(), pi.clone())?;
         crate::verifier::verify_method(proof)
     }
 
@@ -274,6 +288,7 @@ impl Orchestrator {
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(TexasAirError::SpecViolation(format!(
@@ -314,7 +329,7 @@ impl Orchestrator {
             pre_version,
             post_version,
         };
-        let proof = prove_method(&trace, air, FoldAir::num_columns())?;
+        let proof = prove_method(&trace, air, FoldAir::num_columns(), pi.clone())?;
         crate::verifier::verify_method(proof)
     }
 
@@ -348,6 +363,7 @@ impl Orchestrator {
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Join { player, buy_in } = &task.method_input else {
             return Err(input_mismatch("join_table", "Join", &task.method_input));
@@ -366,7 +382,7 @@ impl Orchestrator {
             task.pre_table.chip_pool,
             task.pre_table.addon_pool,
         );
-        run(JoinTableAir::num_columns(), &row, &JoinTableRow::padding(), move || JoinTableAir {
+        run(JoinTableAir::num_columns(), &row, &JoinTableRow::padding(), pi, move || JoinTableAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -376,6 +392,7 @@ impl Orchestrator {
 
     fn prove_leave_table(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("leave_table", "SeatOnly", &task.method_input));
@@ -391,7 +408,7 @@ impl Orchestrator {
             task.pre_table.chip_pool,
             task.pre_table.addon_pool,
         );
-        run(LeaveTableAir::num_columns(), &row, &LeaveTableRow::padding(), move || LeaveTableAir {
+        run(LeaveTableAir::num_columns(), &row, &LeaveTableRow::padding(), pi, move || LeaveTableAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -401,6 +418,7 @@ impl Orchestrator {
 
     fn prove_start_hand(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let input = StartHandInput {
             active_count: count_active_occupied(&task.pre_table),
@@ -419,7 +437,7 @@ impl Orchestrator {
             &input, active_count_inv, active_count_prod, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
         );
-        run(StartHandAir::num_columns(), &row, &StartHandRow::padding(), move || StartHandAir {
+        run(StartHandAir::num_columns(), &row, &StartHandRow::padding(), pi, move || StartHandAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -429,6 +447,7 @@ impl Orchestrator {
 
     fn prove_tick(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         // tick 无 prove_task（dispatch 返回 None），但保留接线以备手动/集成驱动。
         let MethodInput::Empty = &task.method_input else {
@@ -451,7 +470,7 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
         );
-        run(TickAir::num_columns(), &row, &TickRow::padding(), move || TickAir {
+        run(TickAir::num_columns(), &row, &TickRow::padding(), pi, move || TickAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -461,6 +480,7 @@ impl Orchestrator {
 
     fn prove_reset_for_next_hand(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("reset_for_next_hand", "Empty", &task.method_input));
@@ -475,7 +495,7 @@ impl Orchestrator {
             srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r,
         );
-        run(ResetForNextHandAir::num_columns(), &row, &ResetForNextHandRow::padding(), move || ResetForNextHandAir {
+        run(ResetForNextHandAir::num_columns(), &row, &ResetForNextHandRow::padding(), pi, move || ResetForNextHandAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -485,6 +505,7 @@ impl Orchestrator {
 
     fn prove_check(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("check", "SeatOnly", &task.method_input));
@@ -504,7 +525,7 @@ impl Orchestrator {
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
             pre_r, post_r, pre_pot, post_pot,
         );
-        run(CheckAir::num_columns(), &row, &CheckRow::padding(), move || CheckAir {
+        run(CheckAir::num_columns(), &row, &CheckRow::padding(), pi, move || CheckAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -514,6 +535,7 @@ impl Orchestrator {
 
     fn prove_call(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("call", "SeatOnly", &task.method_input));
@@ -531,8 +553,9 @@ impl Orchestrator {
             pre_r, post_r, pre_pot, post_pot,
             post_seat.stack, post_seat.bet, post_seat.all_in,
             pre_seat.bet,
+            pre_seat.stack, post_seat.total_bet, pre_seat.total_bet,
         );
-        run(CallAir::num_columns(), &row, &CallRow::padding(), move || CallAir {
+        run(CallAir::num_columns(), &row, &CallRow::padding(), pi, move || CallAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -542,6 +565,7 @@ impl Orchestrator {
 
     fn prove_raise(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Raise { seat_index, total_bet } = &task.method_input else {
             return Err(input_mismatch("raise", "Raise", &task.method_input));
@@ -568,7 +592,7 @@ impl Orchestrator {
             post_current_bet, post_min_raise,
             post_seat.all_in,
         );
-        run(RaiseAir::num_columns(), &row, &RaiseRow::padding(), move || RaiseAir {
+        run(RaiseAir::num_columns(), &row, &RaiseRow::padding(), pi, move || RaiseAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -578,10 +602,12 @@ impl Orchestrator {
 
     fn prove_bet(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Bet { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("bet", "Bet", &task.method_input));
         };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
         let input = BetInput { seat_index: *seat_index, amount: *amount };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
@@ -591,8 +617,10 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
             pre_r, post_r, pre_pot, post_pot, post_seat.bet,
+            pre_seat.bet, pre_seat.stack, post_seat.stack,
+            pre_seat.total_bet, post_seat.total_bet,
         );
-        run(BetAir::num_columns(), &row, &BetRow::padding(), move || BetAir {
+        run(BetAir::num_columns(), &row, &BetRow::padding(), pi, move || BetAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -602,6 +630,7 @@ impl Orchestrator {
 
     fn prove_auto_fold(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("auto_fold", "SeatOnly", &task.method_input));
@@ -613,7 +642,7 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
         );
-        run(AutoFoldAir::num_columns(), &row, &AutoFoldRow::padding(), move || AutoFoldAir {
+        run(AutoFoldAir::num_columns(), &row, &AutoFoldRow::padding(), pi, move || AutoFoldAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -623,6 +652,7 @@ impl Orchestrator {
 
     fn prove_force_fold(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("force_fold", "SeatOnly", &task.method_input));
@@ -634,7 +664,7 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
         );
-        run(ForceFoldAir::num_columns(), &row, &ForceFoldRow::padding(), move || ForceFoldAir {
+        run(ForceFoldAir::num_columns(), &row, &ForceFoldRow::padding(), pi, move || ForceFoldAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -644,6 +674,7 @@ impl Orchestrator {
 
     fn prove_kick_player(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Kick { seat_index, reason: _ } = &task.method_input else {
             return Err(input_mismatch("kick_player", "Kick", &task.method_input));
@@ -662,7 +693,7 @@ impl Orchestrator {
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
             pre_r, post_r, pre_pot, post_pot,
         );
-        run(KickPlayerAir::num_columns(), &row, &KickPlayerRow::padding(), move || KickPlayerAir {
+        run(KickPlayerAir::num_columns(), &row, &KickPlayerRow::padding(), pi, move || KickPlayerAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -672,6 +703,7 @@ impl Orchestrator {
 
     fn prove_addon(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Funds { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("addon", "Funds", &task.method_input));
@@ -686,7 +718,7 @@ impl Orchestrator {
             srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
         );
-        run(AddonAir::num_columns(), &row, &AddonRow::padding(), move || AddonAir {
+        run(AddonAir::num_columns(), &row, &AddonRow::padding(), pi, move || AddonAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -696,6 +728,7 @@ impl Orchestrator {
 
     fn prove_rebuy(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Funds { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("rebuy", "Funds", &task.method_input));
@@ -710,7 +743,7 @@ impl Orchestrator {
             srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
         );
-        run(RebuyAir::num_columns(), &row, &RebuyRow::padding(), move || RebuyAir {
+        run(RebuyAir::num_columns(), &row, &RebuyRow::padding(), pi, move || RebuyAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -720,6 +753,7 @@ impl Orchestrator {
 
     fn prove_join_and_shuffle(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::Join { player, buy_in: _ } = &task.method_input else {
             return Err(input_mismatch("join_and_shuffle", "Join", &task.method_input));
@@ -737,7 +771,7 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_cc, post_cc,
         );
-        run(JoinAndShuffleAir::num_columns(), &row, &JoinAndShuffleRow::padding(), move || JoinAndShuffleAir {
+        run(JoinAndShuffleAir::num_columns(), &row, &JoinAndShuffleRow::padding(), pi, move || JoinAndShuffleAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -747,6 +781,7 @@ impl Orchestrator {
 
     fn prove_leave_with_proof(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("leave_with_proof", "SeatOnly", &task.method_input));
@@ -762,7 +797,7 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, post_cc,
         );
-        run(LeaveWithProofAir::num_columns(), &row, &LeaveWithProofRow::padding(), move || LeaveWithProofAir {
+        run(LeaveWithProofAir::num_columns(), &row, &LeaveWithProofRow::padding(), pi, move || LeaveWithProofAir {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -772,6 +807,7 @@ impl Orchestrator {
 
     fn prove_submit_shuffle_v2(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("submit_shuffle_v2", "SeatOnly", &task.method_input));
@@ -787,7 +823,7 @@ impl Orchestrator {
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, post_cc,
         );
-        run(SubmitShuffleV2Air::num_columns(), &row, &SubmitShuffleV2Row::padding(), move || SubmitShuffleV2Air {
+        run(SubmitShuffleV2Air::num_columns(), &row, &SubmitShuffleV2Row::padding(), pi, move || SubmitShuffleV2Air {
             log_size: MIN_LOG_SIZE, input,
             pre_state_root: srm(pre_root), post_state_root: srm(post_root),
             table_id: task.table_id, hand_id: task.hand_id, call_seq: task.call_seq,
@@ -797,6 +833,7 @@ impl Orchestrator {
 
     fn prove_submit_reveal_tokens(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("submit_player_reveal_tokens", "SeatOnly", &task.method_input));
@@ -813,6 +850,7 @@ impl Orchestrator {
         );
         run(
             SubmitPlayerRevealTokensAir::num_columns(), &row, &SubmitPlayerRevealTokensRow::padding(),
+            pi,
             move || SubmitPlayerRevealTokensAir {
                 log_size: MIN_LOG_SIZE, input,
                 pre_state_root: srm(pre_root), post_state_root: srm(post_root),
@@ -824,6 +862,7 @@ impl Orchestrator {
 
     fn prove_submit_reconstruct_deck(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<()> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("submit_reconstruct_deck", "SeatOnly", &task.method_input));
@@ -840,6 +879,7 @@ impl Orchestrator {
         );
         run(
             SubmitReconstructDeckAir::num_columns(), &row, &SubmitReconstructDeckRow::padding(),
+            pi,
             move || SubmitReconstructDeckAir {
                 log_size: MIN_LOG_SIZE, input,
                 pre_state_root: srm(pre_root), post_state_root: srm(post_root),
@@ -862,6 +902,7 @@ fn run<A, F>(
     num_columns: usize,
     row: &impl ToM31Vec,
     padding: &impl ToM31Vec,
+    public_inputs: &crate::public_inputs::TexasPublicInputs,
     build_air: F,
 ) -> TexasAirResult<()>
 where
@@ -870,7 +911,7 @@ where
 {
     let trace = gen_method_trace(num_columns, &row.to_vec_m31(), &padding.to_vec_m31())?;
     let air = build_air();
-    let proof = prove_method(&trace, air, num_columns)?;
+    let proof = prove_method(&trace, air, num_columns, public_inputs.clone())?;
     crate::verifier::verify_method(proof)
 }
 

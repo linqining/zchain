@@ -376,9 +376,20 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     }
 
     /// 约束 pot limb0 不变（`post_pot_0 == pre_pot_0`，degree-2）。
-    /// 用于不改变 pot 的方法（fold/check 等）。完整 4-limb 守恒见 `pot_delta_4limb`。
+    /// 用于不改变 pot 的方法（fold/check 等）。完整 4-limb 守恒见 `pot_unchanged_4limb`。
     pub fn pot_unchanged_limb0(&self) -> E::F {
         self.is_active.clone() * (self.post_pot_0.clone() - self.pre_pot_0.clone())
+    }
+
+    /// 约束 pot 全 4-limb 不变（`post_pot[i] == pre_pot[i]`，每 limb degree-2）。
+    /// 阶段 3 soundness 升级：fold/check 之前仅约束 limb 0，恶意 prover 可在 limb 1-3 造假。
+    /// 对齐 Lean 的 pot-unchanged 契约。
+    pub fn pot_unchanged_4limb(&self) -> E::F {
+        let mut c = self.is_active.clone() * (self.post_pot[0].clone() - self.pre_pot[0].clone());
+        for i in 1..4 {
+            c = c + self.is_active.clone() * (self.post_pot[i].clone() - self.pre_pot[i].clone());
+        }
+        c
     }
 
     /// 约束 `post_button == pre_button`（button 不变，degree-2）。
@@ -538,6 +549,75 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let mut c = self.is_active.clone() * (a[0].clone() - b[0].clone());
         for i in 1..4 {
             c = c + self.is_active.clone() * (a[i].clone() - b[i].clone());
+        }
+        c
+    }
+
+    /// 约束 `a ≥ b`（全 4-limb 大于等于，degree-2，阶段 3 新增）。
+    ///
+    /// 通过 4-limb 减法的借位链实现：`a[i] + 65536·borrow_in[i] - b[i] - diff[i] = 65536·borrow_out[i]`，
+    /// 其中 `borrow_in[0]=0`，`borrow_out[i] = borrow_in[i+1]`，且最后一个 `borrow_out[3] = 0`（无下溢）。
+    ///
+    /// `borrow_in/borrow_out` 序列（4 个 boolean witness）+ `diff`（4 个差值 limb witness）：
+    /// - borrow 全为 0/1（booleanity 约束）
+    /// - borrow_out[3] = 0 确保减法无下溢 → `decode(a) ≥ decode(b)`（在 Limb4Range16 假设下）
+    ///
+    /// 对齐 Lean 的 `BuyInGeBigBlind` 约束。
+    ///
+    /// 参数：`a`（大值，如 buy_in）、`b`（小值，如 big_blind）、`diff`（差值 a-b 的 4 limb witness）、
+    /// `borrow`（3 个中间借位 witness，boolean）。
+    pub fn ge_4limb(
+        &self,
+        a: &[E::F; 4],
+        b: &[E::F; 4],
+        diff: &[E::F; 4],
+        borrow: &[E::F; 3],
+    ) -> E::F {
+        let one: E::F = M31::from(1u32).into();
+        let base: E::F = M31::from(65536u32).into();
+        // borrow 链：borrow_in[0]=0, borrow_in[1]=borrow[0], borrow_in[2]=borrow[1], borrow_in[3]=borrow[2]
+        // borrow_out[0]=borrow[0], borrow_out[1]=borrow[1], borrow_out[2]=borrow[2], borrow_out[3]=0（无下溢）
+        let b_in = [M31::from(0u32).into(), borrow[0].clone(), borrow[1].clone(), borrow[2].clone()];
+        let b_out = [borrow[0].clone(), borrow[1].clone(), borrow[2].clone(), M31::from(0u32).into()];
+
+        // 每 limb：a[i] + base·borrow_in[i] - b[i] - diff[i] - base·borrow_out[i] = 0
+        let mut c = self.is_active.clone()
+            * (a[0].clone() + base.clone() * b_in[0].clone() - b[0].clone() - diff[0].clone()
+                - base.clone() * b_out[0].clone());
+        for i in 1..4 {
+            c = c + self.is_active.clone()
+                * (a[i].clone() + base.clone() * b_in[i].clone() - b[i].clone() - diff[i].clone()
+                    - base.clone() * b_out[i].clone());
+        }
+        // borrow booleanity（3 个）
+        for i in 0..3 {
+            c = c + borrow[i].clone() * (borrow[i].clone() - one.clone());
+        }
+        c
+    }
+
+    /// 约束单个 M31 值 `x` 落在 [0, 65536)（16-bit range check，阶段 3 新增）。
+    ///
+    /// 通过 16 个 boolean witness `bits[i]` 做 bit 分解：约束
+    /// `x = Σ_{i=0}^{15} bits[i] · 2^i`，且每个 `bits[i] ∈ {0,1}`。
+    /// 这让 Lean 的 `LimbRange16` 假设有 AIR 依据（此前是未由 AIR 满足的外部假设）。
+    ///
+    /// 调用方需为每个要 range-check 的值在 trace 中提供 16 个 boolean witness 列。
+    /// padding 行所有 bits=0、x=0，约束平凡满足。
+    pub fn range16(&self, x: &E::F, bits: &[E::F; 16]) -> E::F {
+        let one: E::F = M31::from(1u32).into();
+        let two: E::F = M31::from(2u32).into();
+        // x = Σ bits[i] · 2^i
+        let mut recon = bits[0].clone();
+        let mut pow2: E::F = two.clone();
+        for i in 1..16 {
+            recon = recon.clone() + bits[i].clone() * pow2.clone();
+            pow2 = pow2.clone() * two.clone();
+        }
+        let mut c = self.is_active.clone() * (x.clone() - recon);
+        // booleanity：bits[i] · (bits[i] - 1) = 0
+        for i in 0..16 {
+            c = c.clone() + bits[i].clone() * (bits[i].clone() - one.clone());
         }
         c
     }

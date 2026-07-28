@@ -112,6 +112,30 @@ pub struct ChildDescriptor {
     pub method_kind: MethodKind,
 }
 
+/// 把子节点描述符列表 mix 进 Fiat-Shamir channel（prover/verifier 共用，顺序固定）。
+///
+/// Aggregator proof 的 soundness 修复：把所有 `ChildDescriptor`（pre/post_state_root
+/// 4-limb、call_seq、method_kind）按固定顺序 mix 进 channel，使聚合 proof 绑定到
+/// 声明的 state_root 链。否则 AIR struct 里的 left/right 描述符可被替换而 proof 仍验证通过。
+///
+/// 顺序契约：对每个 child，依次 mix pre_state_root(4 u32) → post_state_root(4 u32)
+/// → call_seq → method_kind。
+pub fn mix_children_into_channel<C: stwo::core::channel::Channel>(
+    channel: &mut C,
+    children: &[ChildDescriptor],
+) {
+    // 子节点数先 mix，固定长度边界
+    channel.mix_u32s(&[children.len() as u32]);
+    for child in children {
+        // pre/post_state_root 各 4 个 M31（u32）
+        let mut roots_u32: Vec<u32> = Vec::with_capacity(8);
+        roots_u32.extend(child.pre_state_root.iter().map(|m| m.0));
+        roots_u32.extend(child.post_state_root.iter().map(|m| m.0));
+        channel.mix_u32s(&roots_u32);
+        channel.mix_u32s(&[child.call_seq, u32::from(child.method_kind as u8)]);
+    }
+}
+
 /// Aggregator AIR 公开输入。
 #[derive(Debug, Clone)]
 pub struct AggregatorAir {

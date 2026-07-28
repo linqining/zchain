@@ -47,6 +47,27 @@ use crate::airs::common::{
 };
 use crate::method_kind::MethodKind;
 
+/// 把 u16 值分解为 16 个 M31 bit（阶段 3 range-check witness 填充用）。
+#[must_use]
+fn u16_to_bits(v: u16) -> [M31; 16] {
+    let mut bits = [ZERO; 16];
+    for i in 0..16 {
+        bits[i] = M31::from(u32::from((v >> i) & 1));
+    }
+    bits
+}
+
+/// 把 u64 的 4 个 16-bit limb 各自分解为 16 个 bit，返回 [[M31;16];4]。
+#[must_use]
+fn u64_to_bits4x16(v: u64) -> [[M31; 16]; 4] {
+    [
+        u16_to_bits((v & 0xFFFF) as u16),
+        u16_to_bits(((v >> 16) & 0xFFFF) as u16),
+        u16_to_bits(((v >> 32) & 0xFFFF) as u16),
+        u16_to_bits(((v >> 48) & 0xFFFF) as u16),
+    ]
+}
+
 /// `rebuy` 业务特定列布局。
 pub mod cols {
     use super::COMMON_NUM_COLUMNS;
@@ -73,8 +94,12 @@ pub mod cols {
     pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 27;
     /// BOUND_CARRY_HI 起始列（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
     pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 30;
+    /// OUTPUT_POST_ADDON_POOL 起始列（4 limb）— 调用后 addon_pool（阶段 3 新增：addon_pool 守恒）。
+    pub const OUTPUT_POST_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 33;
+    /// RANGE_AMOUNT_BITS 起始列（4×16=64 个 boolean witness）— input_amount 各 limb 的 16-bit 分解（阶段 3 range-check 接线）。
+    pub const RANGE_AMOUNT_BITS_BASE: usize = COMMON_NUM_COLUMNS + 37;
     /// `rebuy` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 33;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 101;
 }
 
 /// `rebuy` 输入参数。
@@ -129,18 +154,26 @@ impl FrameworkEval for RebuyAir {
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
-        let input_amount_0 = eval.next_trace_mask();
-        let input_amount_1 = eval.next_trace_mask();
-        let input_amount_2 = eval.next_trace_mask();
-        let input_amount_3 = eval.next_trace_mask();
-        let pre_stack_0 = eval.next_trace_mask();
-        let _pre_stack_1 = eval.next_trace_mask();
-        let _pre_stack_2 = eval.next_trace_mask();
-        let _pre_stack_3 = eval.next_trace_mask();
-        let post_stack_0 = eval.next_trace_mask();
-        let _post_stack_1 = eval.next_trace_mask();
-        let _post_stack_2 = eval.next_trace_mask();
-        let _post_stack_3 = eval.next_trace_mask();
+        let input_amount: [E::F; 4] = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        // pre_stack：完整 4 limb（阶段 3 升级）
+        let pre_stack: [E::F; 4] = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        // post_stack：完整 4 limb
+        let post_stack: [E::F; 4] = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         // Gap 3 boolean witness（座位非空）+ Gap 9 invertibility witness（amount > 0）。
         let input_seat_occupied = eval.next_trace_mask();
         let input_amount_inv = eval.next_trace_mask();
@@ -151,11 +184,10 @@ impl FrameworkEval for RebuyAir {
 
         // 约束 2：amount 一致性（limb 0）
         let expected_amount_0: E::F = M31::from((self.input.amount & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_amount_0.clone() - expected_amount_0));
+        eval.add_constraint(is_active.clone() * (input_amount[0].clone() - expected_amount_0));
 
-        // 约束 3（核心）：post_stack == pre_stack + input_amount
-        //    立即生效：直接改 stack
-        eval.add_constraint(is_active.clone() * (post_stack_0 - pre_stack_0 - input_amount_0.clone()));
+        // 约束 3（核心，阶段 3 升级：全 4-limb）：post_stack == pre_stack + input_amount
+        eval.add_constraint(common.limb4_delta(&pre_stack, &post_stack, &input_amount));
 
         // 约束 4（审计共性，degree-2）：round_state 不变（rebuy 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
@@ -164,7 +196,7 @@ impl FrameworkEval for RebuyAir {
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (input_seat_occupied - one.clone()));
         // 约束 6（Gap 9，degree-2）：amount_0 * inv == 1 — 证明 amount limb0 ≠ 0（amount > 0）。
-        eval.add_constraint(is_active.clone() * (input_amount_0.clone() * input_amount_inv - one.clone()));
+        eval.add_constraint(is_active.clone() * (input_amount[0].clone() * input_amount_inv - one.clone()));
 
         // 全局上界检查（对齐合约 apply_rebuy 的 chip_pool + addon_pool + amount <= MAX_TOTAL_BET）
         let pre_chip_pool_0 = eval.next_trace_mask();
@@ -189,14 +221,41 @@ impl FrameworkEval for RebuyAir {
 
         // 约束 7（溢出防护，degree-2）：全局上界 range check
         let chip_pool = [pre_chip_pool_0, pre_chip_pool_1, pre_chip_pool_2, pre_chip_pool_3];
-        let addon_pool = [pre_addon_pool_0, pre_addon_pool_1, pre_addon_pool_2, pre_addon_pool_3];
-        let amount = [input_amount_0, input_amount_1, input_amount_2, input_amount_3];
+        let pre_addon_pool = [pre_addon_pool_0, pre_addon_pool_1, pre_addon_pool_2, pre_addon_pool_3];
+        let amount = input_amount.clone();
         let diff = [bound_diff_0, bound_diff_1, bound_diff_2, bound_diff_3];
         let carry_lo = [carry_lo_0, carry_lo_1, carry_lo_2];
         let carry_hi = [carry_hi_0, carry_hi_1, carry_hi_2];
         eval.add_constraint(common.bound_check_4limb(
-            &chip_pool, &addon_pool, &amount, &diff, &carry_lo, &carry_hi,
+            &chip_pool, &pre_addon_pool, &amount, &diff, &carry_lo, &carry_hi,
         ));
+
+        // 约束 8（阶段 3 新增，soundness 关键）：addon_pool 守恒。
+        // post_addon_pool = pre_addon_pool + amount（全 4-limb，对齐合约 `table.addon_pool += amount`）。
+        let post_addon_pool: [E::F; 4] = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        eval.add_constraint(common.limb4_delta(&pre_addon_pool, &post_addon_pool, &amount));
+
+        // 约束 9（阶段 3 range-check 接线样例）：input_amount 各 limb ∈ [0, 65536)。
+        // 通过 16-bit bit 分解约束，让 Lean 的 `Limb4Range16 ext.input_amount` 假设有 AIR 依据。
+        // 这是全方法 range-check 接线的首个样例（其余 money limb / logup 迁移为后续工作）。
+        for limb_idx in 0..4 {
+            let bits: [E::F; 16] = [
+                eval.next_trace_mask(), eval.next_trace_mask(),
+                eval.next_trace_mask(), eval.next_trace_mask(),
+                eval.next_trace_mask(), eval.next_trace_mask(),
+                eval.next_trace_mask(), eval.next_trace_mask(),
+                eval.next_trace_mask(), eval.next_trace_mask(),
+                eval.next_trace_mask(), eval.next_trace_mask(),
+                eval.next_trace_mask(), eval.next_trace_mask(),
+                eval.next_trace_mask(), eval.next_trace_mask(),
+            ];
+            eval.add_constraint(common.range16(&amount[limb_idx], &bits));
+        }
 
         eval
     }
@@ -221,7 +280,7 @@ pub struct RebuyRow {
     pub input_amount_inv: M31,
     /// PRE_CHIP_POOL（4 limb）— 全局上界检查用。
     pub pre_chip_pool: [M31; 4],
-    /// PRE_ADDON_POOL（4 limb）— 全局上界检查用。
+    /// PRE_ADDON_POOL（4 limb）— 全局上界检查用 + addon_pool 守恒用。
     pub pre_addon_pool: [M31; 4],
     /// BOUND_DIFF（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + addon_pool + amount)。
     pub bound_diff: [M31; 4],
@@ -229,6 +288,10 @@ pub struct RebuyRow {
     pub bound_carry_lo: [M31; 3],
     /// BOUND_CARRY_HI（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
     pub bound_carry_hi: [M31; 3],
+    /// OUTPUT_POST_ADDON_POOL（4 limb）— 调用后 addon_pool（阶段 3 新增：守恒）。
+    pub post_addon_pool: [M31; 4],
+    /// RANGE_AMOUNT_BITS（4×16 个 boolean）— input_amount 各 limb 的 16-bit 分解（阶段 3 range-check 接线）。
+    pub range_amount_bits: [[M31; 16]; 4],
 }
 
 impl RebuyRow {
@@ -299,6 +362,10 @@ impl RebuyRow {
             bound_diff: u64_to_m31_limbs(diff),
             bound_carry_lo,
             bound_carry_hi,
+            // 阶段 3 新增：addon_pool 守恒（post = pre + amount）
+            post_addon_pool: u64_to_m31_limbs(pre_addon_pool + input.amount),
+            // 阶段 3 range-check 接线：input_amount 的 16-bit 分解
+            range_amount_bits: u64_to_bits4x16(input.amount),
         }
     }
 
@@ -318,6 +385,8 @@ impl RebuyRow {
             bound_diff: [ZERO; 4],
             bound_carry_lo: [ZERO; 3],
             bound_carry_hi: [ZERO; 3],
+            post_addon_pool: [ZERO; 4],
+            range_amount_bits: [[ZERO; 16]; 4],
         }
     }
 
@@ -336,6 +405,11 @@ impl RebuyRow {
         v.extend_from_slice(&self.bound_diff);
         v.extend_from_slice(&self.bound_carry_lo);
         v.extend_from_slice(&self.bound_carry_hi);
+        v.extend_from_slice(&self.post_addon_pool);
+        // 阶段 3 range-check：4×16 = 64 个 bit witness
+        for limb_bits in &self.range_amount_bits {
+            v.extend_from_slice(limb_bits);
+        }
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

@@ -22,6 +22,8 @@ use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use poker_texas_air::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
 use poker_texas_air::prover::prove_method;
+use poker_texas_air::public_inputs::TexasPublicInputs;
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method;
 
@@ -78,7 +80,7 @@ fn test_e2e_addon_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, AddonAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -120,7 +122,7 @@ fn test_e2e_addon_from_zero_pending() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, AddonAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -167,7 +169,7 @@ fn test_soundness_addon_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, AddonAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
 
     // 篡改 proof.air.input.amount：trace 中是 200，但 AIR 声明 999
     proof.air = AddonAir {
@@ -223,7 +225,7 @@ fn test_soundness_addon_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, AddonAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
 
     // 篡改 seat_index
     proof.air = AddonAir {
@@ -284,7 +286,7 @@ fn test_e2e_rebuy_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, RebuyAir::num_columns()).expect("prove 失败");
+    let proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -329,7 +331,7 @@ fn test_soundness_rebuy_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, RebuyAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy)).expect("prove 失败");
 
     // 篡改 amount：trace 中是 500，但 AIR 声明 777
     proof.air = RebuyAir {
@@ -344,6 +346,65 @@ fn test_soundness_rebuy_tampered_amount() {
     assert!(
         result.is_err(),
         "篡改 amount 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
+/// Soundness（阶段 3 range-check）：rebuy 的 input_amount limb 若 ≥ 2^16，
+/// range16 约束应使 prove 失败（验证 range-check 真实生效，非摆设）。
+#[test]
+fn test_soundness_rebuy_range_violation() {
+    use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
+    let input = RebuyInput {
+        seat_index: 2,
+        amount: 500,
+    };
+    let row = RebuyRow::active(
+        &input,
+        1000, // pre_stack
+        0,    // pre_chip_pool
+        0,    // pre_addon_pool
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+        0,
+        0,
+    );
+    let mut trace_vec = row.to_vec();
+    // 篡改 input_amount limb 0：设为 70000（≥ 65536，超出 16-bit 范围）。
+    // input_amount 起始列 = COMMON_NUM_COLUMNS + 1（见 rebuy::cols::INPUT_AMOUNT_BASE）。
+    trace_vec[COMMON_NUM_COLUMNS + 1] = M31::from(70000u32);
+    let trace = gen_method_trace(
+        RebuyAir::num_columns(),
+        &trace_vec,
+        &RebuyRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+
+    let air = RebuyAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 3,
+        pre_version: 0,
+        post_version: 1,
+    };
+    // prove 应失败：range16 约束（amount_limb0 = 70000，bit 分解无法重建）不满足。
+    let result = prove_method(
+        &trace,
+        air,
+        RebuyAir::num_columns(),
+        TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy),
+    );
+    assert!(
+        result.is_err(),
+        "amount limb ≥ 2^16 时 prove 应失败（range16 约束生效），但成功了 — range-check 漏洞！"
     );
 }
 
@@ -384,7 +445,7 @@ fn test_soundness_rebuy_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, RebuyAir::num_columns()).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy)).expect("prove 失败");
 
     proof.air = RebuyAir {
         input: RebuyInput {
@@ -410,18 +471,12 @@ fn test_funds_air_column_consistency() {
     use poker_texas_air::airs::funds::addon;
     use poker_texas_air::airs::funds::rebuy;
 
-    // addon: 通用 + 33 业务（1 seat + 4 amount + 4 pre_pending + 4 post_pending
-    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV
-    //   + 4 pre_chip_pool + 4 pre_addon_pool
-    //   + 4 bound_diff + 3 carry_lo + 3 carry_hi）= 70
-    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
+    // addon: 通用 + 37 业务（阶段 3 新增 post_addon_pool 4 limb 用于 addon_pool 守恒）
+    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 37);
     assert_eq!(AddonAir::num_columns(), addon::cols::NUM_COLUMNS);
 
-    // rebuy: 通用 + 33 业务（1 seat + 4 amount + 4 pre_stack + 4 post_stack
-    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV
-    //   + 4 pre_chip_pool + 4 pre_addon_pool
-    //   + 4 bound_diff + 3 carry_lo + 3 carry_hi）= 70
-    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
+    // rebuy: 通用 + 37 业务（阶段 3 新增 post_addon_pool 4 limb 用于 addon_pool 守恒）
+    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 101);
     assert_eq!(RebuyAir::num_columns(), rebuy::cols::NUM_COLUMNS);
 }
 
