@@ -237,27 +237,28 @@ lemma limb4_eq_implies_decode_eq (a b : M31 × M31 × M31 × M31)
   rw [h0, h1, h2, h3]
 
 lemma limb4_delta_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
+    (hpre : Limb4Range16 pre) (hamt : Limb4Range16 amt)
     (h : Limb4Delta pre post amt) :
     decodeU64 post.1 post.2.1 post.2.2.1 post.2.2.2 =
     decodeU64 pre.1 pre.2.1 pre.2.2.1 pre.2.2.2 +
     decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
   rcases h with ⟨h0, h1, h2, h3⟩
   rw [h0, h1, h2, h3]
-  exact decodeU64_limb_add pre.1 pre.2.1 pre.2.2.1 pre.2.2.2
-           amt.1 amt.2.1 amt.2.2.1 amt.2.2.2
+  exact decodeU64_limb_add pre amt hpre hamt
 
 lemma limb4_delta_rev_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
+    (hpost : Limb4Range16 post) (hamt : Limb4Range16 amt)
     (h : Limb4DeltaRev pre post amt) :
     decodeU64 pre.1 pre.2.1 pre.2.2.1 pre.2.2.2 =
     decodeU64 post.1 post.2.1 post.2.2.1 post.2.2.2 +
     decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
   rcases h with ⟨h0, h1, h2, h3⟩
   rw [h0, h1, h2, h3]
-  exact decodeU64_limb_add post.1 post.2.1 post.2.2.1 post.2.2.2
-           amt.1 amt.2.1 amt.2.2.1 amt.2.2.2
+  exact decodeU64_limb_add post amt hpost hamt
 
 lemma pot_delta_implies_decode_eq (row : CommonRow) (amt : M31 × M31 × M31 × M31)
     (h_active : row.is_active = M31.one)
+    (hpre : Limb4Range16 row.pre_pot) (hamt : Limb4Range16 amt)
     (h : PotDelta row amt) :
     decodeU64 row.post_pot.1 row.post_pot.2.1 row.post_pot.2.2.1 row.post_pot.2.2.2 =
     decodeU64 row.pre_pot.1 row.pre_pot.2.1 row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
@@ -265,8 +266,7 @@ lemma pot_delta_implies_decode_eq (row : CommonRow) (amt : M31 × M31 × M31 × 
   have h' := h h_active
   rcases h' with ⟨h0, h1, h2, h3⟩
   rw [h0, h1, h2, h3]
-  exact decodeU64_limb_add row.pre_pot.1 row.pre_pot.2.1 row.pre_pot.2.2.1 row.pre_pot.2.2.2
-           amt.1 amt.2.1 amt.2.2.1 amt.2.2.2
+  exact decodeU64_limb_add row.pre_pot amt hpre hamt
 
 /-- button 不变约束：active 行要求 post_button = pre_button。
     fold/check 等动作不改变 dealer_seat（button）。 -/

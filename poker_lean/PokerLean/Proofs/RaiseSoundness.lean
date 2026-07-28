@@ -254,11 +254,18 @@ theorem raise_air_sound :
     (expected_raise_to : Nat) (max_players : Nat)
     (hseat : expected_seat_index < max_players),
     RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to max_players →
+    -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
+    Limb4Range16 ext.input_call_delta →
+    Limb4Range16 row.pre_pot →
+    Limb4Range16 ext.output_seat_stack →
+    Limb4Range16 ext.input_pre_seat_bet →
+    Limb4Range16 ext.input_pre_seat_total_bet →
     ContractRaise
       (extractPreTableFromRaiseAir row ext max_players)
       (extractRaiseParamsFromAir ext)
       (extractPostTableFromRaiseAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index hlt expected_raise_to max_players hseat h_air
+    h_range_amt h_range_pre_pot h_range_post_stack h_range_pre_bet h_range_pre_total
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : RaiseMethodConstraints row ext expected_seat_index hlt
                     expected_raise_to max_players := h_air.2.1
@@ -291,7 +298,8 @@ theorem raise_air_sound :
                     row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
                   decodeU64 ext.input_call_delta.1 ext.input_call_delta.2.1
                     ext.input_call_delta.2.2.1 ext.input_call_delta.2.2.2 :=
-    pot_delta_implies_decode_eq row ext.input_call_delta h_active h_pot_delta_c
+    pot_delta_implies_decode_eq row ext.input_call_delta h_active
+      h_range_pre_pot h_range_amt h_pot_delta_c
   have h_pre_stack : decodeU64 ext.input_pre_seat_stack.1 ext.input_pre_seat_stack.2.1
                        ext.input_pre_seat_stack.2.2.1 ext.input_pre_seat_stack.2.2.2 =
                      decodeU64 ext.output_seat_stack.1 ext.output_seat_stack.2.1
@@ -299,7 +307,7 @@ theorem raise_air_sound :
                      decodeU64 ext.input_call_delta.1 ext.input_call_delta.2.1
                        ext.input_call_delta.2.2.1 ext.input_call_delta.2.2.2 :=
     limb4_delta_rev_implies_decode_eq ext.input_pre_seat_stack ext.output_seat_stack
-      ext.input_call_delta h_stack_delta_c
+      ext.input_call_delta h_range_post_stack h_range_amt h_stack_delta_c
   have h_bet_delta : decodeU64 ext.output_seat_bet.1 ext.output_seat_bet.2.1
                        ext.output_seat_bet.2.2.1 ext.output_seat_bet.2.2.2 =
                      decodeU64 ext.input_pre_seat_bet.1 ext.input_pre_seat_bet.2.1
@@ -307,7 +315,7 @@ theorem raise_air_sound :
                      decodeU64 ext.input_call_delta.1 ext.input_call_delta.2.1
                        ext.input_call_delta.2.2.1 ext.input_call_delta.2.2.2 :=
     limb4_delta_implies_decode_eq ext.input_pre_seat_bet ext.output_seat_bet
-      ext.input_call_delta h_bet_delta_c
+      ext.input_call_delta h_range_pre_bet h_range_amt h_bet_delta_c
   have h_post_total_eq : decodeU64 ext.output_seat_total_bet.1 ext.output_seat_total_bet.2.1
                            ext.output_seat_total_bet.2.2.1 ext.output_seat_total_bet.2.2.2 =
                          decodeU64 ext.input_pre_seat_total_bet.1 ext.input_pre_seat_total_bet.2.1
@@ -315,7 +323,7 @@ theorem raise_air_sound :
                          decodeU64 ext.input_call_delta.1 ext.input_call_delta.2.1
                            ext.input_call_delta.2.2.1 ext.input_call_delta.2.2.2 :=
     limb4_delta_implies_decode_eq ext.input_pre_seat_total_bet ext.output_seat_total_bet
-      ext.input_call_delta h_total_delta_c
+      ext.input_call_delta h_range_pre_total h_range_amt h_total_delta_c
   have h_post_bet_eq : decodeU64 ext.output_seat_bet.1 ext.output_seat_bet.2.1
                          ext.output_seat_bet.2.2.1 ext.output_seat_bet.2.2.2 =
                        decodeU64 ext.input_raise_to.1 ext.input_raise_to.2.1

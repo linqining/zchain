@@ -199,11 +199,15 @@ theorem addon_air_sound :
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     AddonAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
+    -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
+    Limb4Range16 ext.pre_pending_addon →
+    Limb4Range16 ext.input_amount →
     ContractAddon
       (extractPreTableFromAddonAir row ext max_players expected_seat_index)
       (extractAddonParamsFromAir ext)
       (extractPostTableFromAddonAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index expected_amount max_players hlt hseat h_air
+    h_range_pre h_range_amt
   -- 1. 解构 AIR 假设
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : AddonMethodConstraints row ext expected_seat_index expected_amount
@@ -235,10 +239,8 @@ theorem addon_air_sound :
       decodeU64 ext.input_amount.1 ext.input_amount.2.1
         ext.input_amount.2.2.1 ext.input_amount.2.2.2 := by
     rw [h_pa0, h_pa1, h_pa2, h_pa3]
-    exact decodeU64_limb_add ext.pre_pending_addon.1 ext.pre_pending_addon.2.1
-      ext.pre_pending_addon.2.2.1 ext.pre_pending_addon.2.2.2
-      ext.input_amount.1 ext.input_amount.2.1
-      ext.input_amount.2.2.1 ext.input_amount.2.2.2
+    exact decodeU64_limb_add ext.pre_pending_addon ext.input_amount
+      h_range_pre h_range_amt
   -- 6. addon_pool 守恒
   have h_addon_pool' :
       decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
@@ -458,11 +460,15 @@ theorem rebuy_air_sound :
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     RebuyAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
+    -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
+    Limb4Range16 ext.pre_stack →
+    Limb4Range16 ext.input_amount →
     ContractRebuy
       (extractPreTableFromRebuyAir row ext max_players expected_seat_index)
       (extractRebuyParamsFromAir ext)
       (extractPostTableFromRebuyAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index expected_amount max_players hlt hseat h_air
+    h_range_pre h_range_amt
   -- 1. 解构 AIR 假设
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : RebuyMethodConstraints row ext expected_seat_index expected_amount
@@ -494,10 +500,8 @@ theorem rebuy_air_sound :
       decodeU64 ext.input_amount.1 ext.input_amount.2.1
         ext.input_amount.2.2.1 ext.input_amount.2.2.2 := by
     rw [h_st0, h_st1, h_st2, h_st3]
-    exact decodeU64_limb_add ext.pre_stack.1 ext.pre_stack.2.1
-      ext.pre_stack.2.2.1 ext.pre_stack.2.2.2
-      ext.input_amount.1 ext.input_amount.2.1
-      ext.input_amount.2.2.1 ext.input_amount.2.2.2
+    exact decodeU64_limb_add ext.pre_stack ext.input_amount
+      h_range_pre h_range_amt
   -- 6. addon_pool 守恒
   have h_addon_pool' :
       decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1

@@ -133,6 +133,11 @@ theorem call_sound_main :
     (expected_call_amount : Nat) (max_players : Nat)
     (hseat : expected_seat_index < max_players),
     CallAirAcceptable row ext expected_seat_index hlt expected_call_amount max_players →
+    Limb4Range16 ext.input_call_amount →
+    Limb4Range16 row.pre_pot →
+    Limb4Range16 ext.output_seat_stack →
+    Limb4Range16 ext.input_pre_seat_bet →
+    Limb4Range16 ext.input_pre_seat_total_bet →
     ContractCall
       (extractPreTableFromCallAir row ext max_players)
       (extractCallParamsFromAir ext)
@@ -155,6 +160,11 @@ theorem raise_sound_main :
     (expected_raise_to : Nat) (max_players : Nat)
     (hseat : expected_seat_index < max_players),
     RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to max_players →
+    Limb4Range16 ext.input_call_delta →
+    Limb4Range16 row.pre_pot →
+    Limb4Range16 ext.output_seat_stack →
+    Limb4Range16 ext.input_pre_seat_bet →
+    Limb4Range16 ext.input_pre_seat_total_bet →
     ContractRaise
       (extractPreTableFromRaiseAir row ext max_players)
       (extractRaiseParamsFromAir ext)
@@ -177,6 +187,10 @@ theorem bet_sound_main :
     (expected_bet_amount : Nat) (max_players : Nat)
     (hseat : expected_seat_index < max_players),
     BetAirAcceptable row ext expected_seat_index hlt expected_bet_amount max_players →
+    Limb4Range16 ext.input_bet_amount →
+    Limb4Range16 row.pre_pot →
+    Limb4Range16 ext.output_seat_stack →
+    Limb4Range16 ext.input_pre_seat_total_bet →
     ContractBet
       (extractPreTableFromBetAir row ext max_players)
       (extractBetParamsFromAir ext)
@@ -301,28 +315,32 @@ theorem reset_for_next_hand_sound_main :
       (extractPostTableFromLifecycleAir row max_players ext.input_shuffle_phase.val) :=
   reset_for_next_hand_air_sound
 
-/-! ## addon / rebuy: ⚠️ AIR soundness（正确提取下成立，limb 范围待补）-/
+/-! ## addon / rebuy: ✅ AIR soundness（正确提取下成立，需 limb 范围约束）-/
 
-/-- addon AIR soundness 主定理（正确提取下成立；limb 范围约束待补全后可去除 sorry） -/
+/-- addon AIR soundness 主定理（正确提取下成立；需 limb 范围约束由独立 range constraint 保证） -/
 theorem addon_sound_main :
   ∀ (row : CommonRow) (ext : AddonMethodColumns)
     (expected_seat_index : Nat) (expected_amount : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     AddonAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
+    Limb4Range16 ext.pre_pending_addon →
+    Limb4Range16 ext.input_amount →
     ContractAddon
       (extractPreTableFromAddonAir row ext max_players expected_seat_index)
       (extractAddonParamsFromAir ext)
       (extractPostTableFromAddonAir row ext max_players expected_seat_index) :=
   addon_air_sound
 
-/-- rebuy AIR soundness 主定理（正确提取下成立；limb 范围约束待补全后可去除 sorry） -/
+/-- rebuy AIR soundness 主定理（正确提取下成立；需 limb 范围约束由独立 range constraint 保证） -/
 theorem rebuy_sound_main :
   ∀ (row : CommonRow) (ext : RebuyMethodColumns)
     (expected_seat_index : Nat) (expected_amount : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     RebuyAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
+    Limb4Range16 ext.pre_stack →
+    Limb4Range16 ext.input_amount →
     ContractRebuy
       (extractPreTableFromRebuyAir row ext max_players expected_seat_index)
       (extractRebuyParamsFromAir ext)

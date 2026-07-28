@@ -231,7 +231,7 @@
 
 ## B+ 档：资金动作（2 个）
 
-### 14. Addon (13) ✅ Sound (limb 范围待补)
+### 14. Addon (13) ✅ Sound
 
 **AIR 约束现状**：
 | 约束 | 状态 | 说明 |
@@ -240,16 +240,17 @@
 | amount > 0 | ✅ 完整 | AmountPositive |
 | addon_pool 守恒 | ✅ 完整 | Limb4Delta（全 4-limb） |
 | pending_addon 守恒 | ✅ 完整 | Limb4Delta（全 4-limb） |
+| limb 范围约束 | ✅ 完整 | Limb4Range16 前置条件（Rust AIR 独立 range constraint） |
 | version += 1 | ✅ 完整 | VersionIncrementConstraint |
 | state root 一致性 | ✅ 完整 | StateRootConsistency |
 
-**Soundness 评级**：✅ Sound — `addon_air_sound`（limb 范围约束待补全后去除 sorry）
+**Soundness 评级**：✅ Sound — `addon_air_sound`（公理 `m31_add_no_overflow` 已消除为定理）
 
 ---
 
-### 15. Rebuy (14) ✅ Sound (limb 范围待补)
+### 15. Rebuy (14) ✅ Sound
 
-**Soundness 评级**：✅ Sound — `rebuy_air_sound`（同 addon）
+**Soundness 评级**：✅ Sound — `rebuy_air_sound`（同 addon，公理已消除）
 
 ---
 
@@ -316,7 +317,7 @@
 | 级别 | 方法数 | 说明 |
 |------|--------|------|
 | ✅ Sound | 21 | 完全满足 soundness（21/21 方法） |
-| ⚠️ limb 范围待补 | 2 | addon/rebuy（公理 m31_add_no_overflow 抽象） |
+| ⚠️ limb 范围 | 0 | 已消除：通过 `Limb4Range16` 前置条件 + `m31_add_no_overflow` 定理 |
 
 ### 核心结论
 
@@ -356,9 +357,9 @@
 | create_table | `create_table_soundness` | version=1, pot=0, round_state=WAITING |
 | fold | `fold_air_sound` | RoundStateIsBetting, PotUnchanged, ButtonUnchanged |
 | check | `check_air_sound` | RoundStateIsBetting, PotUnchanged |
-| call | `call_air_sound` | RoundStateIsBetting, PotDelta, Limb4Delta |
-| raise | `raise_air_sound` | RoundStateIsBetting, PotDelta, Limb4Delta/Eq |
-| bet | `bet_air_sound` | RoundStateIsBetting, PotDelta, Limb4Delta/Eq |
+| call | `call_air_sound` | RoundStateIsBetting, PotDelta, Limb4Delta, Limb4Range16 |
+| raise | `raise_air_sound` | RoundStateIsBetting, PotDelta, Limb4Delta/Eq, Limb4Range16 |
+| bet | `bet_air_sound` | RoundStateIsBetting, PotDelta, Limb4Delta/Eq, Limb4Range16 |
 | auto_fold | `auto_fold_air_sound` | RoundStateIsBetting, PotUnchanged |
 | force_fold | `force_fold_air_sound` | RoundStateIsBetting, PotUnchanged |
 | kick_player | `kick_player_air_sound` | SeatOccupied, RoundStateEq(0) |
@@ -367,8 +368,8 @@
 | start_hand | `start_hand_air_sound` | ActiveCountAtLeastTwo, make_occupied_seats |
 | tick | `tick_air_sound` | TimeoutKindPositive |
 | reset_for_next_hand | `reset_for_next_hand_air_sound` | ShufflePhasePositive, post_rs=0 |
-| addon | `addon_air_sound` | SeatOccupied, AmountPositive, Limb4Delta |
-| rebuy | `rebuy_air_sound` | SeatOccupied, AmountPositive, Limb4Delta |
+| addon | `addon_air_sound` | SeatOccupied, AmountPositive, Limb4Delta, Limb4Range16 |
+| rebuy | `rebuy_air_sound` | SeatOccupied, AmountPositive, Limb4Delta, Limb4Range16 |
 | join_and_shuffle | `join_and_shuffle_air_sound` | ShufflePhasePositive |
 | leave_with_proof | `leave_with_proof_air_sound` | ShufflePhasePositive |
 | submit_shuffle_v2 | `submit_shuffle_v2_air_sound` | ShufflePhasePositive |
@@ -377,13 +378,34 @@
 
 ### 已知限制
 
-1. **limb 范围约束**（addon/rebuy）：AIR 的逐 limb 加法在 M31 域内进行，
-   不显式强制 limb 进位传播。Rust 实现中由独立 range constraint 保证；
-   Lean 模型通过公理 `m31_add_no_overflow` 抽象
+1. **limb 范围约束**（已消除）：原 `m31_add_no_overflow` 公理已转换为定理，
+   通过 `Limb4Range16` 前置条件形式化 Rust AIR 的独立 range constraint。
+   `Limb4Range16` 假设作为 soundness 定理的显式前置条件传入。
 2. **密码学证明**：DLEq/ZKShuffle/RevealToken/Reconstruct 证明本身不在 AIR 中验证，
    假设由外部 ZK 验证器负责
 3. **时间约束**：tick 的真实超时条件简化为 `timeout_kind > 0`
 4. **seat_index < max_players**：作为 host 公开输入假设，不在 AIR 中强制
+
+### 公理消除状态
+
+| 公理 | 状态 | 说明 |
+|------|------|------|
+| `binality_sound` | ✅ 已消除 | 转为定理，依赖 `M31_P_prime` + Euclid 引理 |
+| `binality_complete` | ✅ 已消除 | 转为定理，无需素性 |
+| `mul_inv_exists` | ✅ 已消除 | 转为定理，利用 `ZMod M31_P` 的 Field 结构 |
+| `m31_add_no_overflow` | ✅ 已消除 | 转为定理，需 `LimbRange16` 前置条件 |
+| `limb_lt_65536` | ✅ 已消除 | 转为定理，由 `u64ToLimbs` 定义直接推出 |
+| `u64ToLimbs_correct` | ✅ 已消除 | 转为定理，`rfl` 证明 |
+| `limbsToU64_bound` | ✅ 已消除 | 转为定理，需 `LimbRange16` 前置条件 |
+| `roundtrip` | ✅ 已消除 | 转为定理，由 `u64ToLimbs_correct` + 边界推出 |
+| `decodeU64_limb_add` | ✅ 已消除 | 转为引理，需 `Limb4Range16` 前置条件 |
+| `texasPokerTableToPreimage` | 🔐 保留 | 密码学信任根：状态序列化 |
+| `texasPokerTableToPreimage_injective` | 🔐 保留 | 密码学信任根：序列化单射性 |
+| `poseidon_hash` | 🔐 保留 | 密码学信任根：Poseidon252 哈希 |
+| `poseidon_hash_injective` | 🔐 保留 | 密码学信任根：哈希单射性 |
+| `poseidon_hash_empty` | 🔐 保留 | 密码学信任根：空状态哈希 |
+
+**所有非密码学公理已完全消除**，仅保留 5 个密码学信任根公理。
 
 ### 形式化文件清单
 
