@@ -803,7 +803,7 @@ theorem slice_eligible_irrel_level (seats : List SeatBet) (j prev level : Nat) :
     slice_eligible seats j prev level = slice_eligible seats j prev 0 := by
   induction seats generalizing j with
   | nil => rfl
-  | cons _ _ _ => rfl
+  | cons _ _ _ => simp only [slice_eligible]
 
 /-- `mask_subset` 传递性：`a ⊆ b ∧ b ⊆ c → a ⊆ c`。 -/
 theorem mask_subset_trans (a b c : Nat) (h_ab : mask_subset a b) (h_bc : mask_subset b c) :
@@ -826,7 +826,7 @@ theorem modify_last_eligible_eq (pots : List SidePot) (amount : Nat) (p : SidePo
     | cons y ys =>
       simp only [modify_last, List.mem_cons] at hp
       rcases hp with rfl | hp'
-      · exact ⟨x, List.mem_cons_self x (y :: ys), rfl⟩
+      · exact ⟨p, List.mem_cons_self p (y :: ys), rfl⟩
       · obtain ⟨q, hq, hq'⟩ := ih hp'
         exact ⟨q, List.mem_cons_of_mem x hq, hq'⟩
 
@@ -844,7 +844,7 @@ theorem modify_last_preserves_nested (pots : List SidePot) (amount : Nat) (h : p
       refine ⟨?_, ?_⟩
       · intro q hq
         obtain ⟨q', hq', hq_eq⟩ := modify_last_eligible_eq (y :: ys) amount q hq
-        rw [← hq_eq]
+        rw [hq_eq]
         exact h_first q' hq'
       · exact ih h_rest
 
@@ -880,7 +880,7 @@ theorem push_or_merge_preserves_nested (pots : List SidePot) (amount eligible : 
   by_cases h_elig : eligible = 0
   · by_cases h_empty : pots = []
     · -- pots = []: 条件 False → else → [] ++ [SidePot.new amount 0]
-      have h_cond : ¬(eligible = 0 ∧ pots ≠ []) := fun h => h_empty h.2
+      have h_cond : ¬(eligible = 0 ∧ pots ≠ []) := fun h => h.2 h_empty
       have h_eq : push_or_merge pots amount eligible = pots ++ [SidePot.new amount eligible] := by
         unfold push_or_merge; rw [if_neg h_amt, if_neg h_cond]
       rw [h_eq, h_empty, h_elig]
@@ -913,7 +913,7 @@ theorem push_or_merge_preserves_above (pots : List SidePot) (amount eligible bas
     exact h_above p hp
   by_cases h_elig : eligible = 0
   · by_cases h_empty : pots = []
-    · have h_cond : ¬(eligible = 0 ∧ pots ≠ []) := fun h => h_empty h.2
+    · have h_cond : ¬(eligible = 0 ∧ pots ≠ []) := fun h => h.2 h_empty
       have h_eq : push_or_merge pots amount eligible = pots ++ [SidePot.new amount eligible] := by
         unfold push_or_merge; rw [if_neg h_amt, if_neg h_cond]
       rw [h_eq] at hp
@@ -927,7 +927,7 @@ theorem push_or_merge_preserves_above (pots : List SidePot) (amount eligible bas
         unfold push_or_merge; rw [if_neg h_amt, if_pos h_cond]
       rw [h_eq] at hp
       obtain ⟨q, hq, h_eq⟩ := modify_last_eligible_eq pots amount p hp
-      rw [← h_eq]
+      rw [h_eq]
       exact h_above q hq
   · have h_cond : ¬(eligible = 0 ∧ pots ≠ []) := fun h => h_elig h.1
     have h_eq : push_or_merge pots amount eligible = pots ++ [SidePot.new amount eligible] := by
@@ -983,8 +983,11 @@ theorem fold_preserves_nested (seats : List SeatBet) (levels : List Nat)
         mask_subset (slice_eligible seats 0 l 0) p.eligible_seats := by
         intro p hp
         rw [h_elig_eq] at hp
+        have h_above_base : ∀ q ∈ pots, mask_subset (slice_eligible seats 0 l 0) q.eligible_seats := by
+          intro q hq
+          exact mask_subset_trans _ _ _ h_mono (h_above q hq)
         exact push_or_merge_preserves_above pots (slice_amount seats prev l)
-          (slice_eligible seats 0 prev 0) (slice_eligible seats 0 l 0) p hp h_above h_mono
+          (slice_eligible seats 0 prev 0) (slice_eligible seats 0 l 0) h_above_base h_mono p hp
       exact ih _ _ h_nested' h_above'
 
 /-- **资格嵌套定理**：`∀ i < j, eligible(pots[j]) ⊆ eligible(pots[i])`。

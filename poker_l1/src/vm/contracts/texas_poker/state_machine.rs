@@ -344,7 +344,10 @@ fn move_button(table: &mut TexasPokerTable) {
 /// 原实现用 `(button+k) % n` 直接取模定位 SB/BB，不跳过空座位。
 /// 当 button 与 BB 之间存在空座位时，盲注会落到空座位（stack=0，盲注失效）。
 /// 现统一用 `find_next_participating_seat` 顺时针跳过空座位定位。
-fn post_blinds(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) -> (u8, u8, u8) {
+fn post_blinds(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<(u8, u8, u8)> {
     let n = table.max_players;
     let active = count_active_occupied(&table.seats);
     let (sb_seat, bb_seat) = if active == 2 {
@@ -367,16 +370,28 @@ fn post_blinds(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) -
 
     let sb_seat_idx = sb_seat as usize;
     let bb_seat_idx = bb_seat as usize;
-    table.seats[sb_seat_idx].stack -= sb_amt;
+    table.seats[sb_seat_idx].stack = table.seats[sb_seat_idx]
+        .stack
+        .checked_sub(sb_amt)
+        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: sb stack -= sb_amt underflow".into()))?;
     table.seats[sb_seat_idx].bet = sb_amt;
-    table.seats[sb_seat_idx].total_bet += sb_amt;
+    table.seats[sb_seat_idx].total_bet = table.seats[sb_seat_idx]
+        .total_bet
+        .checked_add(sb_amt)
+        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: sb total_bet += sb_amt overflow".into()))?;
     if table.seats[sb_seat_idx].stack == 0 {
         table.seats[sb_seat_idx].all_in = true;
     }
 
-    table.seats[bb_seat_idx].stack -= bb_amt;
+    table.seats[bb_seat_idx].stack = table.seats[bb_seat_idx]
+        .stack
+        .checked_sub(bb_amt)
+        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: bb stack -= bb_amt underflow".into()))?;
     table.seats[bb_seat_idx].bet = bb_amt;
-    table.seats[bb_seat_idx].total_bet += bb_amt;
+    table.seats[bb_seat_idx].total_bet = table.seats[bb_seat_idx]
+        .total_bet
+        .checked_add(bb_amt)
+        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: bb total_bet += bb_amt overflow".into()))?;
     if table.seats[bb_seat_idx].stack == 0 {
         table.seats[bb_seat_idx].all_in = true;
     }
@@ -392,7 +407,7 @@ fn post_blinds(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) -
             first_to_act: first_to_act,
         },
     );
-    (sb_seat, bb_seat, first_to_act)
+    Ok((sb_seat, bb_seat, first_to_act))
 }
 
 /// 启动下注轮。
@@ -417,7 +432,7 @@ fn start_betting_round(
     is_preflop: bool,
     bb_seat: Option<u8>,
     events: &mut Vec<TexasPokerEvent>,
-) {
+) -> PokerL1Result<()> {
     let bb = table.big_blind;
     let round = if is_preflop {
         // P0-4 修复：ante 已计入 seat.bet（见 collect_ante），preflop 的 current_bet
@@ -479,9 +494,9 @@ fn start_betting_round(
 
     // 检查全员 all-in 死锁（无可行动玩家）
     if !has_actionable_player(&table.seats) {
-        collect_bets_to_pot(table, events);
-        advance_round(table, events);
-        return;
+        collect_bets_to_pot(table, events)?;
+        advance_round(table, events)?;
+        return Ok(());
     }
 
     events::emit_event(
@@ -495,6 +510,7 @@ fn start_betting_round(
             pot_before: table.pot,
         },
     );
+    Ok(())
 }
 
 // ========== 行动轮换 ==========
@@ -538,23 +554,32 @@ fn is_betting_complete(table: &TexasPokerTable) -> bool {
 }
 
 /// 推进到下一行动玩家，若下注完成则 collect + advance_round。
-fn advance_turn(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn advance_turn(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     if is_betting_complete(table) {
-        collect_bets_to_pot(table, events);
-        advance_round(table, events);
-        return;
+        collect_bets_to_pot(table, events)?;
+        advance_round(table, events)?;
+        return Ok(());
     }
     let cur = table.current_turn.unwrap_or(0);
     let next = find_next_active_seat(&table.seats, cur, table.max_players);
     set_current_turn(table, next, events);
+    Ok(())
 }
 
 /// 收集本轮 bet 到 pot。
-fn collect_bets_to_pot(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn collect_bets_to_pot(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     let mut collected_seats = Vec::new();
     for (i, s) in table.seats.iter_mut().enumerate() {
         if s.bet > 0 {
-            table.pot += s.bet;
+            table.pot = table.pot.checked_add(s.bet).ok_or_else(|| {
+                PokerL1Error::Serialization("collect_bets_to_pot: pot += bet overflow".into())
+            })?;
             s.bet = 0;
             collected_seats.push(i as u8);
         }
@@ -570,46 +595,50 @@ fn collect_bets_to_pot(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerE
             },
         );
     }
+    Ok(())
 }
 
 /// 推进到下一轮（preflop→flop→turn→river→showdown）。
 ///
 /// 镜像 `table.move::advance_round`（line 2855-2886）。
-fn advance_round(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn advance_round(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     // P1-8 修复：若只剩一名未 fold 玩家（其他人全 fold），无需继续发牌到 showdown，
     // 直接 end_without_showdown 结算。覆盖 advance_round 路径上的"剩一人"场景
     // （fold 路径已在 apply_fold_internal 处理，此处兜底 all-in/advance 后的情形）。
     if count_active_players(&table.seats) <= 1 {
-        end_without_showdown(table, events);
-        return;
+        end_without_showdown(table, events)?;
+        return Ok(());
     }
     let from = table.round_state;
     let to = match from {
         ROUND_PREFLOP => {
             table.round_state = ROUND_FLOP;
             table.timestamps.reveal_started_at = 0;
-            start_community_reveal_phase(table, 3, REVEAL_PHASE_FLOP, events);
+            start_community_reveal_phase(table, 3, REVEAL_PHASE_FLOP, events)?;
             ROUND_FLOP
         }
         ROUND_FLOP => {
             table.round_state = ROUND_TURN;
             table.timestamps.reveal_started_at = 0;
-            start_community_reveal_phase(table, 1, REVEAL_PHASE_TURN, events);
+            start_community_reveal_phase(table, 1, REVEAL_PHASE_TURN, events)?;
             ROUND_TURN
         }
         ROUND_TURN => {
             table.round_state = ROUND_RIVER;
             table.timestamps.reveal_started_at = 0;
-            start_community_reveal_phase(table, 1, REVEAL_PHASE_RIVER, events);
+            start_community_reveal_phase(table, 1, REVEAL_PHASE_RIVER, events)?;
             ROUND_RIVER
         }
         ROUND_RIVER => {
             table.round_state = ROUND_SHOWDOWN;
             table.timestamps.showdown_at = 0;
-            start_showdown_reveal_phase(table, events);
+            start_showdown_reveal_phase(table, events)?;
             ROUND_SHOWDOWN
         }
-        _ => return, // 不该到达
+        _ => return Ok(()), // 不该到达
     };
 
     // 清空 betting_round
@@ -626,6 +655,7 @@ fn advance_round(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>)
             community_cards_count: table.community_cards.len() as u64,
         },
     );
+    Ok(())
 }
 
 // ========== 洗牌协议 ==========
@@ -633,10 +663,13 @@ fn advance_round(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>)
 /// 推进洗牌流程：选下一洗牌者，或完成洗牌进入下一阶段。
 ///
 /// 镜像 `table.move::advance_shuffle`（line 2920-2970）。
-fn advance_shuffle(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn advance_shuffle(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     let phase = table.shuffle_state.phase;
     if phase != SHUFFLE_PHASE_RECONSTRUCT && phase != SHUFFLE_PHASE_BEFORE_PREFLOP {
-        return;
+        return Ok(());
     }
 
     if table.shuffle_state.pending_players.is_empty() {
@@ -659,17 +692,17 @@ fn advance_shuffle(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
             SHUFFLE_PHASE_BEFORE_PREFLOP => {
                 table.timestamps.reveal_started_at = 0;
                 table.round_state = ROUND_PREFLOP;
-                start_preflop_reveal_phase(table, events);
+                start_preflop_reveal_phase(table, events)?;
             }
             SHUFFLE_PHASE_RECONSTRUCT => {
                 // reconstruct 后按当前 round_state 重启对应 reveal phase
                 table.reconstruct_state = super::types::ReconstructState::default();
                 table.reveal_token_state = super::types::RevealTokenState::default();
-                restart_reveal_after_reconstruct(table, events);
+                restart_reveal_after_reconstruct(table, events)?;
             }
             _ => {}
         }
-        return;
+        return Ok(());
     }
 
     // 选下一洗牌者
@@ -685,6 +718,7 @@ fn advance_shuffle(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
             completed_count: table.shuffle_state.completed_players.len() as u64,
         },
     );
+    Ok(())
 }
 
 /// reconstruct 后根据当前 round_state 重启对应 reveal phase。
@@ -708,34 +742,38 @@ fn advance_shuffle(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
 ///   需清空 `decrypted_cards` 中残留的旧 partial 手牌记录后从新 deck 重发。
 /// - FLOP/TURN/RIVER：按 `community_cards.len()` 补发缺失的公共牌。
 /// - SHOWDOWN：不补发新牌，直接让各牌主从 `decrypted_cards` 的 partial 记录解手牌。
-fn restart_reveal_after_reconstruct(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn restart_reveal_after_reconstruct(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     match table.round_state {
         ROUND_PREFLOP => {
             // 防御性：清空残留的旧 partial 手牌记录，避免 showdown 时新旧记录并存。
             table.deck_state.decrypted_cards.clear();
-            start_preflop_reveal_phase(table, events);
+            start_preflop_reveal_phase(table, events)?;
         }
         ROUND_FLOP => {
             let have = table.community_cards.len() as u8;
             if have < 3 {
-                start_community_reveal_phase(table, 3 - have, REVEAL_PHASE_FLOP, events);
+                start_community_reveal_phase(table, 3 - have, REVEAL_PHASE_FLOP, events)?;
             }
         }
         ROUND_TURN => {
             let have = table.community_cards.len() as u8;
             if have < 4 {
-                start_community_reveal_phase(table, 4 - have, REVEAL_PHASE_TURN, events);
+                start_community_reveal_phase(table, 4 - have, REVEAL_PHASE_TURN, events)?;
             }
         }
         ROUND_RIVER => {
             let have = table.community_cards.len() as u8;
             if have < 5 {
-                start_community_reveal_phase(table, 5 - have, REVEAL_PHASE_RIVER, events);
+                start_community_reveal_phase(table, 5 - have, REVEAL_PHASE_RIVER, events)?;
             }
         }
-        ROUND_SHOWDOWN => start_showdown_reveal_phase(table, events),
+        ROUND_SHOWDOWN => start_showdown_reveal_phase(table, events)?,
         _ => {}
     }
+    Ok(())
 }
 
 /// 超时后重建牌组并重启洗牌。
@@ -768,7 +806,10 @@ fn rebuild_deck_and_shuffle_on_timeout(
 /// 启动 preflop reveal phase：给每个活跃玩家发 2 张手牌。
 ///
 /// 镜像 `table.move::start_preflop_reveal_phase`（line 2974-3017）。
-fn start_preflop_reveal_phase(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn start_preflop_reveal_phase(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     let active_seats = get_active_seat_indices(&table.seats);
     let mut assignments = Vec::new();
     let mut card_idx = table.deck_state.cards_dealt;
@@ -799,6 +840,7 @@ fn start_preflop_reveal_phase(table: &mut TexasPokerTable, events: &mut Vec<Texa
             phase: REVEAL_PHASE_PREFLOP,
         },
     );
+    Ok(())
 }
 
 /// 启动公共牌 reveal phase（flop=3, turn=1, river=1）。
@@ -809,7 +851,7 @@ fn start_community_reveal_phase(
     count: u8,
     phase: u8,
     events: &mut Vec<TexasPokerEvent>,
-) {
+) -> PokerL1Result<()> {
     let active_seats = get_active_seat_indices(&table.seats);
     let mut assignments = Vec::new();
     let mut card_idx = table.deck_state.cards_dealt;
@@ -838,12 +880,16 @@ fn start_community_reveal_phase(
             phase,
         },
     );
+    Ok(())
 }
 
 /// 启动 showdown reveal phase：每个未 fold 玩家提交自己手牌的 reveal token。
 ///
 /// 镜像 `table.move::start_showdown_reveal_phase`（line 3046-3080）。
-fn start_showdown_reveal_phase(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn start_showdown_reveal_phase(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     let mut assignments = Vec::new();
     let active_seats = get_active_seat_indices(&table.seats);
 
@@ -874,6 +920,7 @@ fn start_showdown_reveal_phase(table: &mut TexasPokerTable, events: &mut Vec<Tex
             phase: REVEAL_PHASE_SHOWDOWN,
         },
     );
+    Ok(())
 }
 
 /// 统计已解密但未写入 community 的公共牌数。
@@ -893,7 +940,10 @@ fn count_pending_community_cards(table: &TexasPokerTable) -> u8 {
 /// 检查 reveal phase 是否完成，并推进状态。
 ///
 /// 镜像 `table.move::check_reveal_phase_complete`（line 3106-3156）。
-fn check_reveal_phase_complete(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn check_reveal_phase_complete(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     // 检查所有 assignments 是否已解密
     let all_decrypted = table
         .reveal_token_state
@@ -901,7 +951,7 @@ fn check_reveal_phase_complete(table: &mut TexasPokerTable, events: &mut Vec<Tex
         .iter()
         .all(|a| a.decrypted);
     if !all_decrypted {
-        return;
+        return Ok(());
     }
 
     let phase = table.reveal_token_state.reveal_phase;
@@ -920,22 +970,23 @@ fn check_reveal_phase_complete(table: &mut TexasPokerTable, events: &mut Vec<Tex
         REVEAL_PHASE_PREFLOP => {
             table.timestamps.betting_started_at = 0;
             // 投盲注并启动 preflop 下注轮
-            let (_, bb_seat, _) = post_blinds(table, events);
+            let (_, bb_seat, _) = post_blinds(table, events)?;
             // 投 ante（若配置）— 在盲注之后、下注轮启动之前
-            collect_ante(table, bb_seat, events);
-            start_betting_round(table, true, Some(bb_seat), events);
+            collect_ante(table, bb_seat, events)?;
+            start_betting_round(table, true, Some(bb_seat), events)?;
         }
         REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
             write_decrypted_cards_to_community(table, events);
-            start_betting_round(table, false, None, events);
+            start_betting_round(table, false, None, events)?;
         }
         REVEAL_PHASE_SHOWDOWN => {
             write_decrypted_cards_to_hands(table, events);
             table.timestamps.showdown_at = 0;
-            settle_hand(table, events);
+            settle_hand(table, events)?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// 将解密的公共牌写入 community_cards。
@@ -1100,7 +1151,7 @@ fn on_complete_reconstruct(
         pending_players: active,
         completed_players: vec![],
     };
-    advance_shuffle(table, events);
+    advance_shuffle(table, events)?;
     Ok(())
 }
 
@@ -1125,18 +1176,18 @@ fn on_reconstruct_timeout(
 
     let active = count_active_players(&table.seats);
     if active == 0 {
-        refund_all_bets(table, events);
+        refund_all_bets(table, events)?;
         reset_for_next_hand(table, events)?;
         return Ok(());
     }
     if active == 1 {
-        end_without_showdown(table, events);
+        end_without_showdown(table, events)?;
         return Ok(());
     }
     if !table.reconstruct_state.player_decks.is_empty() {
         on_complete_reconstruct(table, events)?;
     } else {
-        refund_all_bets(table, events);
+        refund_all_bets(table, events)?;
         reset_for_next_hand(table, events)?;
         events::emit_event(
             events,
@@ -1290,6 +1341,19 @@ pub fn apply_join_and_shuffle(
         time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
         want_leave: false,
     };
+    // 全局上界检查：与 addon/rebuy 一致，确保系统总筹码不超过 MAX_TOTAL_BET。
+    // 在累加之前检查，避免检查失败后状态已被修改。
+    let total_chips = table
+        .chip_pool
+        .checked_add(table.addon_pool)
+        .and_then(|v| v.checked_add(buy_in))
+        .ok_or_else(|| PokerL1Error::Serialization("join: total chips overflow".into()))?;
+    if total_chips > super::constants::MAX_TOTAL_BET {
+        return Err(PokerL1Error::Serialization(format!(
+            "join: total chips {total_chips} exceeds MAX_TOTAL_BET {}",
+            super::constants::MAX_TOTAL_BET
+        )));
+    }
     table.chip_pool = table.chip_pool.checked_add(buy_in).ok_or_else(|| {
         PokerL1Error::Serialization("chip_pool overflow on join".into())
     })?;
@@ -1386,7 +1450,7 @@ pub fn apply_submit_shuffle_v2(
         },
     );
 
-    advance_shuffle(table, events);
+    advance_shuffle(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -1566,7 +1630,7 @@ pub fn apply_submit_player_reveal_tokens(
         }
     }
 
-    check_reveal_phase_complete(table, events);
+    check_reveal_phase_complete(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -1881,10 +1945,10 @@ pub fn apply_fold_with_proof(
 
     // 6. 推进轮次（复制 apply_fold_internal 1800-1807）
     if count_active_players(&table.seats) <= 1 {
-        end_without_showdown(table, events);
+        end_without_showdown(table, events)?;
         return Ok(());
     }
-    advance_turn(table, events);
+    advance_turn(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -1935,10 +1999,10 @@ pub fn apply_fold_internal(
     );
 
     if count_active_players(&table.seats) <= 1 {
-        end_without_showdown(table, events);
+        end_without_showdown(table, events)?;
         return Ok(());
     }
-    advance_turn(table, events);
+    advance_turn(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -1978,7 +2042,7 @@ pub fn apply_check(
         },
     );
 
-    advance_turn(table, events);
+    advance_turn(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -2006,7 +2070,10 @@ pub fn apply_call(
         .stack
         .checked_sub(call_amt)
         .ok_or_else(|| PokerL1Error::Serialization("stack underflow on call".into()))?;
-    seat.bet += call_amt;
+    seat.bet = seat
+        .bet
+        .checked_add(call_amt)
+        .ok_or_else(|| PokerL1Error::Serialization("bet overflow on call".into()))?;
     seat.total_bet = seat
         .total_bet
         .checked_add(call_amt)
@@ -2040,7 +2107,7 @@ pub fn apply_call(
         );
     }
 
-    advance_turn(table, events);
+    advance_turn(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -2115,7 +2182,7 @@ pub fn apply_raise(
         );
     }
 
-    advance_turn(table, events);
+    advance_turn(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -2167,7 +2234,7 @@ pub fn start_hand(
         },
     );
 
-    advance_shuffle(table, events);
+    advance_shuffle(table, events)?;
     table.bump_version();
     Ok(())
 }
@@ -2184,7 +2251,9 @@ pub fn tick(
     // 1. Reconstruct 优先
     if table.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE {
         let started = table.timestamps.reconstruct_started_at;
-        if started > 0 && now_ms >= started + table.timeout_config.reconstruct_timeout_ms {
+        if started > 0
+            && now_ms >= started.saturating_add(table.timeout_config.reconstruct_timeout_ms)
+        {
             on_reconstruct_timeout(table, now_ms, events)?;
         }
         return Ok(());
@@ -2194,11 +2263,11 @@ pub fn tick(
     let sp = table.shuffle_state.phase;
     if sp == SHUFFLE_PHASE_RECONSTRUCT || sp == SHUFFLE_PHASE_BEFORE_PREFLOP {
         if table.shuffle_state.pending_players.is_empty() {
-            advance_shuffle(table, events);
+            advance_shuffle(table, events)?;
             return Ok(());
         }
         if table.shuffle_state.current_shuffler.is_none() {
-            advance_shuffle(table, events);
+            advance_shuffle(table, events)?;
             return Ok(());
         }
         let started = table.timestamps.shuffle_started_at;
@@ -2206,7 +2275,7 @@ pub fn tick(
             table.timestamps.shuffle_started_at = now_ms;
             return Ok(());
         }
-        if now_ms >= started + table.timeout_config.shuffle_timeout_ms {
+        if now_ms >= started.saturating_add(table.timeout_config.shuffle_timeout_ms) {
             on_shuffle_timeout(table, now_ms, events)?;
         }
         return Ok(());
@@ -2220,7 +2289,7 @@ pub fn tick(
             .iter()
             .all(|a| a.pending_players.is_empty());
         if all_complete {
-            check_reveal_phase_complete(table, events);
+            check_reveal_phase_complete(table, events)?;
             return Ok(());
         }
         let started = table.timestamps.reveal_started_at;
@@ -2228,7 +2297,7 @@ pub fn tick(
             table.timestamps.reveal_started_at = now_ms;
             return Ok(());
         }
-        if now_ms >= started + table.timeout_config.reveal_timeout_ms {
+        if now_ms >= started.saturating_add(table.timeout_config.reveal_timeout_ms) {
             on_reveal_timeout(table, now_ms, events)?;
         }
         return Ok(());
@@ -2244,8 +2313,8 @@ pub fn tick(
 
     if is_betting_round(table) {
         if table.current_turn.is_none() {
-            collect_bets_to_pot(table, events);
-            advance_round(table, events);
+            collect_bets_to_pot(table, events)?;
+            advance_round(table, events)?;
             return Ok(());
         }
         let started = table.timestamps.betting_started_at;
@@ -2253,7 +2322,7 @@ pub fn tick(
             table.timestamps.betting_started_at = now_ms;
             return Ok(());
         }
-        if now_ms >= started + table.timeout_config.betting_timeout_ms {
+        if now_ms >= started.saturating_add(table.timeout_config.betting_timeout_ms) {
             // Time Bank：超时前检查当前玩家是否还有 time_bank 额度。
             // 若有，则消耗等量时间延长 betting_started_at，而非立即 auto_fold。
             let seat = table.current_turn.unwrap_or(0);
@@ -2274,9 +2343,10 @@ pub fn tick(
 
     if table.round_state == ROUND_SHOWDOWN {
         if table.timestamps.showdown_at == 0 {
-            table.timestamps.showdown_at = now_ms + table.timeout_config.showdown_display_ms;
+            table.timestamps.showdown_at =
+                now_ms.saturating_add(table.timeout_config.showdown_display_ms);
         } else if now_ms >= table.timestamps.showdown_at {
-            settle_hand(table, events);
+            settle_hand(table, events)?;
         }
         return Ok(());
     }
@@ -2287,7 +2357,7 @@ pub fn tick(
         ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
     ) && !is_betting_round(table)
     {
-        refund_all_bets(table, events);
+        refund_all_bets(table, events)?;
         reset_for_next_hand(table, events)?;
         events::emit_event(
             events,
@@ -2324,12 +2394,12 @@ fn on_shuffle_timeout(
 
     let active = count_active_players(&table.seats);
     if active == 0 {
-        refund_all_bets(table, events);
+        refund_all_bets(table, events)?;
         reset_for_next_hand(table, events)?;
         return Ok(());
     }
     if active == 1 {
-        end_without_showdown(table, events);
+        end_without_showdown(table, events)?;
         return Ok(());
     }
     if table.shuffle_state.phase == SHUFFLE_PHASE_NONE {
@@ -2337,7 +2407,7 @@ fn on_shuffle_timeout(
     }
 
     rebuild_deck_and_shuffle_on_timeout(table, phase, events)?;
-    advance_shuffle(table, events);
+    advance_shuffle(table, events)?;
     let _ = now_ms;
     Ok(())
 }
@@ -2385,7 +2455,7 @@ fn on_reveal_timeout(
 
     let active = count_active_players(&table.seats);
     if active == 0 {
-        refund_all_bets(table, events);
+        refund_all_bets(table, events)?;
         reset_for_next_hand(table, events)?;
         events::emit_event(
             events,
@@ -2398,7 +2468,7 @@ fn on_reveal_timeout(
         return Ok(());
     }
     if active == 1 {
-        end_without_showdown(table, events);
+        end_without_showdown(table, events)?;
         return Ok(());
     }
 
@@ -2432,7 +2502,10 @@ fn on_betting_timeout(
 }
 
 /// 单人获胜（无摊牌）。
-fn end_without_showdown(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn end_without_showdown(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     let winner = table
         .seats
         .iter()
@@ -2443,7 +2516,7 @@ fn end_without_showdown(table: &mut TexasPokerTable, events: &mut Vec<TexasPoker
     if let Some(winner_seat) = winner {
         // 抽水（在分配奖金之前）
         let pot_before = table.pot;
-        let rake = collect_rake(table);
+        let rake = collect_rake(table)?;
         if rake > 0 {
             events::emit_event(
                 events,
@@ -2457,7 +2530,14 @@ fn end_without_showdown(table: &mut TexasPokerTable, events: &mut Vec<TexasPoker
             );
         }
         let pot = table.pot;
-        table.seats[winner_seat as usize].stack += pot;
+        table.seats[winner_seat as usize].stack = table.seats[winner_seat as usize]
+            .stack
+            .checked_add(pot)
+            .ok_or_else(|| {
+                PokerL1Error::Serialization(
+                    "end_without_showdown: winner stack += pot overflow".into(),
+                )
+            })?;
         table.pot = 0;
 
         events::emit_event(
@@ -2471,18 +2551,22 @@ fn end_without_showdown(table: &mut TexasPokerTable, events: &mut Vec<TexasPoker
         );
     }
 
-    let _ = reset_for_next_hand(table, events);
+    reset_for_next_hand(table, events)?;
+    Ok(())
 }
 
 /// 摊牌结算。
 ///
 /// 镜像 `table.move::settle_hand`（line 2440-2510）。
-fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn settle_hand(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     if table.round_state != ROUND_SHOWDOWN {
-        return;
+        return Ok(());
     }
     if table.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE {
-        return;
+        return Ok(());
     }
 
     // 先 side pot 分层，再基于分层总额算 rake，按比例从各 pot 扣除（守恒）。
@@ -2494,9 +2578,9 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("settle_hand: side_pot 计算失败: {e:?}");
-            refund_all_bets(table, events);
-            let _ = reset_for_next_hand(table, events);
-            return;
+            refund_all_bets(table, events)?;
+            reset_for_next_hand(table, events)?;
+            return Ok(());
         }
     };
 
@@ -2523,7 +2607,7 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
     for (idx, sp) in result.pots.iter().enumerate() {
         let pot_type = if idx == 0 { POT_TYPE_MAIN } else { POT_TYPE_SIDE };
         let winners = find_winners_in_seats(table, sp.eligible_seats);
-        distribute_pot_to_winners(table, sp.amount, &winners, pot_type, events);
+        distribute_pot_to_winners(table, sp.amount, &winners, pot_type, events)?;
         all_winners.extend(&winners);
     }
 
@@ -2538,7 +2622,8 @@ fn settle_hand(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
 
     // pot 已全部分配给赢家（含 rake 扣除），清零。
     table.pot = 0;
-    let _ = reset_for_next_hand(table, events);
+    reset_for_next_hand(table, events)?;
+    Ok(())
 }
 
 /// 计算 rake 金额（不修改状态），供 settle_hand 在分层后使用。
@@ -2560,10 +2645,12 @@ fn apply_rake_to_pots(result: &mut side_pot::SidePotResult, rake: u64) {
     }
     let mut rake_used = 0u64;
     // 除第一个 pot 外，按占比扣除；余数（尾差）归 pots[0]。
+    // 用 u128 中间值避免 sp.amount * rake 乘法溢出（二者均可达 ~10^18，
+    // 乘积远超 u64::MAX）。最终 as u64 安全：结果 ≤ sp.amount ≤ total ≤ u64。
     for sp in result.pots.iter_mut().skip(1) {
-        let this_rake = sp.amount * rake / total;
+        let this_rake = (sp.amount as u128 * rake as u128 / total as u128) as u64;
         sp.amount -= this_rake;
-        rake_used += this_rake;
+        rake_used = rake_used.checked_add(this_rake).unwrap_or(rake_used);
     }
     result.pots[0].amount -= rake - rake_used;
 }
@@ -2625,15 +2712,22 @@ fn distribute_pot_to_winners(
     winners: &[u8],
     pot_type: u8,
     events: &mut Vec<TexasPokerEvent>,
-) {
+) -> PokerL1Result<()> {
     if winners.is_empty() || pot == 0 {
-        return;
+        return Ok(());
     }
     let share = pot / winners.len() as u64;
     let remainder = pot % winners.len() as u64;
     for (idx, &winner) in winners.iter().enumerate() {
         let amount = if idx == 0 { share + remainder } else { share };
-        table.seats[winner as usize].stack += amount;
+        table.seats[winner as usize].stack = table.seats[winner as usize]
+            .stack
+            .checked_add(amount)
+            .ok_or_else(|| {
+                PokerL1Error::Serialization(
+                    "distribute_pot_to_winners: winner stack += amount overflow".into(),
+                )
+            })?;
         events::emit_event(
             events,
             TexasPokerEvent::WinnerAwarded {
@@ -2646,13 +2740,24 @@ fn distribute_pot_to_winners(
             },
         );
     }
+    Ok(())
 }
 
 /// 退还所有下注（异常路径）。
-fn refund_all_bets(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn refund_all_bets(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     for (i, s) in table.seats.iter_mut().enumerate() {
         if s.is_occupied() && !s.folded && !s.left_during_hand && s.total_bet > 0 && !s.refunded {
-            s.stack += s.total_bet;
+            s.stack = s
+                .stack
+                .checked_add(s.total_bet)
+                .ok_or_else(|| {
+                    PokerL1Error::Serialization(
+                        "refund_all_bets: stack += total_bet overflow".into(),
+                    )
+                })?;
             s.refunded = true;
             events::emit_event(
                 events,
@@ -2670,6 +2775,7 @@ fn refund_all_bets(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent
     }
     table.pot = 0;
     table.side_pots.clear();
+    Ok(())
 }
 
 /// 重置进入下一局。
@@ -2694,7 +2800,11 @@ pub fn reset_for_next_hand(
             s.stack = s
                 .stack
                 .checked_add(amount)
-                .expect("reset_for_next_hand: stack += pending_addon 溢出（u64）");
+                .ok_or_else(|| {
+                    PokerL1Error::Serialization(
+                        "reset_for_next_hand: stack += pending_addon overflow".into(),
+                    )
+                })?;
             s.pending_addon = 0;
             events::emit_event(
                 events,
@@ -2882,7 +2992,10 @@ pub fn kick_player_internal(
     // 这是 kick 的特殊路径：被踢玩家立即离开，其本轮已下注金额不参与后续轮次，
     // 故提前单独收集。资金账安全：collect_bets_to_pot 后续不会再收（seat.bet 已为 0）；
     // side_pot 分层依据 total_bet（不受 bet 清零影响）。
-    table.pot += seat.bet;
+    table.pot = table
+        .pot
+        .checked_add(seat.bet)
+        .ok_or_else(|| PokerL1Error::Serialization("kick_player: pot overflow".into()))?;
     seat.bet = 0;
     seat.stack = 0;
     seat.hand.clear();
@@ -2939,15 +3052,15 @@ pub fn kick_player_internal(
     if table.shuffle_state.current_shuffler == Some(seat_index) {
         table.shuffle_state.current_shuffler = None;
         let mut tmp_events = Vec::new();
-        advance_shuffle(table, &mut tmp_events);
+        advance_shuffle(table, &mut tmp_events)?;
         events.extend(tmp_events);
     }
     if table.current_turn == Some(seat_index) && is_betting_round(table) {
         let active = count_active_players(&table.seats);
         if active <= 1 {
-            end_without_showdown(table, events);
+            end_without_showdown(table, events)?;
         } else {
-            advance_turn(table, events);
+            advance_turn(table, events)?;
         }
     }
 
@@ -3003,6 +3116,21 @@ pub fn apply_addon(
     if !seat.is_occupied() {
         return Err(PokerL1Error::Serialization(format!(
             "addon: seat {seat_index} not occupied"
+        )));
+    }
+
+    // 全局上界检查：确保系统总筹码（chip_pool + addon_pool + amount）不超过
+    // MAX_TOTAL_BET。这样即使所有筹码都进入 pot，也不会溢出 u64 或 side_pot 上界。
+    // addon_pool 已含历史 addon/rebuy 入金，chip_pool 含 buy_in 入金。
+    let total_chips = table
+        .chip_pool
+        .checked_add(table.addon_pool)
+        .and_then(|v| v.checked_add(amount))
+        .ok_or_else(|| PokerL1Error::Serialization("addon: total chips overflow".into()))?;
+    if total_chips > super::constants::MAX_TOTAL_BET {
+        return Err(PokerL1Error::Serialization(format!(
+            "addon: total chips {total_chips} exceeds MAX_TOTAL_BET {}",
+            super::constants::MAX_TOTAL_BET
         )));
     }
 
@@ -3076,6 +3204,20 @@ pub fn apply_rebuy(
     if !seat.is_occupied() {
         return Err(PokerL1Error::Serialization(format!(
             "rebuy: seat {seat_index} not occupied"
+        )));
+    }
+
+    // 全局上界检查：确保系统总筹码（chip_pool + addon_pool + amount）不超过
+    // MAX_TOTAL_BET。与 apply_addon 一致，从源头防止后续 pot/stack 累加溢出。
+    let total_chips = table
+        .chip_pool
+        .checked_add(table.addon_pool)
+        .and_then(|v| v.checked_add(amount))
+        .ok_or_else(|| PokerL1Error::Serialization("rebuy: total chips overflow".into()))?;
+    if total_chips > super::constants::MAX_TOTAL_BET {
+        return Err(PokerL1Error::Serialization(format!(
+            "rebuy: total chips {total_chips} exceeds MAX_TOTAL_BET {}",
+            super::constants::MAX_TOTAL_BET
         )));
     }
 
@@ -3282,9 +3424,9 @@ pub fn collect_ante(
     table: &mut TexasPokerTable,
     bb_seat: u8,
     events: &mut Vec<TexasPokerEvent>,
-) {
+) -> PokerL1Result<()> {
     if table.ante_mode == super::constants::ANTE_MODE_NONE || table.ante_amount == 0 {
-        return;
+        return Ok(());
     }
     let amount = table.ante_amount;
     let mode = table.ante_mode;
@@ -3305,7 +3447,10 @@ pub fn collect_ante(
     for &seat_idx in &seats_to_ante {
         let seat = &mut table.seats[seat_idx as usize];
         let actual = amount.min(seat.stack);
-        seat.stack -= actual;
+        seat.stack = seat
+            .stack
+            .checked_sub(actual)
+            .ok_or_else(|| PokerL1Error::Serialization("collect_ante: stack -= actual underflow".into()))?;
         // P0-4 修复：ante 同时计入 bet 与 total_bet，保持二者一致。
         // 这样 side_pot 分层（用 total_bet）与下注轮跟注计算（用 bet）基准统一，
         // 避免 ante 让 total_bet > bet 导致的分层/跟注脱节。
@@ -3328,6 +3473,7 @@ pub fn collect_ante(
             },
         );
     }
+    Ok(())
 }
 
 /// `collect_rake` — 在 `settle_hand` 中按 `rake_mode` 抽水。
@@ -3342,9 +3488,9 @@ pub fn collect_ante(
 /// - `table.pot -= rake`（从奖池中扣除）
 ///
 /// 返回实际抽水金额（调用方用于 emit RakeCollected 事件）。
-pub fn collect_rake(table: &mut TexasPokerTable) -> u64 {
+pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
     if table.rake_mode == super::constants::RAKE_MODE_NONE {
-        return 0;
+        return Ok(0);
     }
     let pot = table.pot;
     let raw_rake = pot
@@ -3352,8 +3498,11 @@ pub fn collect_rake(table: &mut TexasPokerTable) -> u64 {
         .unwrap_or(0) / 10_000;
     let rake = raw_rake.min(table.rake_cap).min(pot);
     table.rake_collected = table.rake_collected.saturating_add(rake);
-    table.pot -= rake;
-    rake
+    table.pot = table
+        .pot
+        .checked_sub(rake)
+        .ok_or_else(|| PokerL1Error::Serialization("collect_rake: pot -= rake underflow".into()))?;
+    Ok(rake)
 }
 
 /// `trigger_run_it_twice` — 标记本手将执行 Run It Twice（all-in 后）。
@@ -3586,7 +3735,7 @@ mod tests {
         table.seats[1].stack = 1000;
         table.button = 0;
         let mut events = vec![];
-        let (sb, bb, first) = post_blinds(&mut table, &mut events);
+        let (sb, bb, first) = post_blinds(&mut table, &mut events).unwrap();
         assert_eq!(sb, 0);
         assert_eq!(bb, 1);
         assert_eq!(first, 1);
@@ -3977,7 +4126,7 @@ mod tests {
         table.seats[1].stack = 1000;
         let mut events = vec![];
 
-        collect_ante(&mut table, 1, &mut events);
+        collect_ante(&mut table, 1, &mut events).unwrap();
         assert_eq!(table.ante_collected, 20); // 2 个玩家各投 10
         assert_eq!(table.pot, 20);
         assert_eq!(table.seats[0].stack, 990);
@@ -4000,7 +4149,7 @@ mod tests {
         let mut events = vec![];
 
         // BBA 模式：仅 bb_seat=1 投 ante
-        collect_ante(&mut table, 1, &mut events);
+        collect_ante(&mut table, 1, &mut events).unwrap();
         assert_eq!(table.ante_collected, 20);
         assert_eq!(table.seats[0].stack, 1000); // SB 不投 ante
         assert_eq!(table.seats[1].stack, 980); // BB 投 ante
@@ -4018,7 +4167,7 @@ mod tests {
         table.seats[0].stack = 1000;
         let mut events = vec![];
 
-        collect_ante(&mut table, 0, &mut events);
+        collect_ante(&mut table, 0, &mut events).unwrap();
         assert_eq!(table.ante_collected, 0);
         assert!(events.is_empty());
     }
@@ -4034,7 +4183,7 @@ mod tests {
         table.pot = 1000;
 
         let pot_before = table.pot;
-        let rake = collect_rake(&mut table);
+        let rake = collect_rake(&mut table).unwrap();
         assert_eq!(rake, 50); // 1000 * 5% = 50
         assert_eq!(table.pot, 950);
         assert_eq!(table.rake_collected, 50);
@@ -4049,7 +4198,7 @@ mod tests {
         table.rake_cap = 30;
         table.pot = 1000;
 
-        let rake = collect_rake(&mut table);
+        let rake = collect_rake(&mut table).unwrap();
         // raw_rake = 50，但 cap = 30
         assert_eq!(rake, 30);
         assert_eq!(table.pot, 970);
@@ -4061,7 +4210,7 @@ mod tests {
         table.rake_mode = RAKE_MODE_NONE;
         table.pot = 1000;
 
-        let rake = collect_rake(&mut table);
+        let rake = collect_rake(&mut table).unwrap();
         assert_eq!(rake, 0);
         assert_eq!(table.pot, 1000);
     }

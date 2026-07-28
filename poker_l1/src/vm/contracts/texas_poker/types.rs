@@ -655,10 +655,9 @@ impl TexasPokerTable {
 
     /// 状态版本号自增（每次 mutation 后调用）。
     pub fn bump_version(&mut self) {
-        self.version = self
-            .version
-            .checked_add(1)
-            .expect("version 溢出（u64 最大值）");
+        // 用 saturating_add 避免 version 达到 u64::MAX 时 panic（DoS）。
+        // version 仅用于乐观锁，溢出后仍单调，语义不受影响。
+        self.version = self.version.saturating_add(1);
     }
 }
 
