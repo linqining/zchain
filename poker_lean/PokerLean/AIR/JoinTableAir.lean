@@ -4,6 +4,7 @@ import PokerLean.Common.CommonColumns
 import PokerLean.Contract.Types
 import PokerLean.Contract.JoinTable
 import PokerLean.AIR.AirBase
+import PokerLean.AIR.FundsAir
 
 namespace PokerLean
 
@@ -51,6 +52,14 @@ structure JoinTableMethodColumns where
   output_post_chip_pool : M31 × M31 × M31 × M31
   /-- 输出：座位 stack（4 limb） -/
   output_seat_stack : M31 × M31 × M31 × M31
+  /-- 输入：pre addon_pool（4 limb）- 用于全局上界检查 -/
+  input_pre_addon_pool : M31 × M31 × M31 × M31
+  /-- 输入：bound_diff（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + addon_pool + buy_in） -/
+  input_bound_diff : M31 × M31 × M31 × M31
+  /-- 输入：bound carry_lo（3 个低位 bit）— 2-bit carry 分解的 lo 部分 -/
+  input_bound_carry_lo : M31 × M31 × M31
+  /-- 输入：bound carry_hi（3 个高位 bit）— 2-bit carry 分解的 hi 部分 -/
+  input_bound_carry_hi : M31 × M31 × M31
 deriving Repr
 
 /-- 从 AIR 行提取前状态表 -/
@@ -97,7 +106,8 @@ def extractPreTableFromJoinTableAir
   call_seq := row.call_seq.val
   chip_pool := decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
       ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2
-  addon_pool := 0
+  addon_pool := decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
+      ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2
   pending_addon_total := 0
   pending_rebuy_total := 0
   rake := 0
@@ -217,6 +227,12 @@ def JoinTableMethodConstraints
   ChipPoolConservation ext ∧
   -- 约束 5：player_addr 非空（防止以 EMPTY_PLAYER 入座）
   PlayerAddrNonEmpty ext ∧
+  -- 约束 6（溢出防护，degree-2）：全局上界 range check
+  -- 验证 chip_pool + addon_pool + buy_in + diff = MAX_TOTAL_BET（逐 limb + 2-bit carry）
+  -- 对齐 Rust AIR join_table.rs 的 bound_check_4limb 与合约 apply_join 的上界检查。
+  BoundCheck4Limb ext.input_pre_chip_pool ext.input_pre_addon_pool
+    ext.input_buy_in ext.input_bound_diff
+    ext.input_bound_carry_lo ext.input_bound_carry_hi ∧
   -- 状态根一致性
   let pre_table := extractPreTableFromJoinTableAir row ext max_players
   let post_table := extractPostTableFromJoinTableAir row ext max_players expected_seat_index

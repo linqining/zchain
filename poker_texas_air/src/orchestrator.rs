@@ -364,6 +364,7 @@ impl Orchestrator {
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
             task.pre_table.big_blind,
             task.pre_table.chip_pool,
+            task.pre_table.addon_pool,
         );
         run(JoinTableAir::num_columns(), &row, &JoinTableRow::padding(), move || JoinTableAir {
             log_size: MIN_LOG_SIZE, input,
@@ -529,6 +530,7 @@ impl Orchestrator {
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
             pre_r, post_r, pre_pot, post_pot,
             post_seat.stack, post_seat.bet, post_seat.all_in,
+            pre_seat.bet,
         );
         run(CallAir::num_columns(), &row, &CallRow::padding(), move || CallAir {
             log_size: MIN_LOG_SIZE, input,
@@ -679,7 +681,9 @@ impl Orchestrator {
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
         let row = AddonRow::active(
-            &input, pre_seat.pending_addon, srm(pre_root), srm(post_root),
+            &input, pre_seat.pending_addon,
+            task.pre_table.chip_pool, task.pre_table.addon_pool,
+            srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
         );
         run(AddonAir::num_columns(), &row, &AddonRow::padding(), move || AddonAir {
@@ -701,7 +705,9 @@ impl Orchestrator {
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
         let row = RebuyRow::active(
-            &input, pre_seat.stack, srm(pre_root), srm(post_root),
+            &input, pre_seat.stack,
+            task.pre_table.chip_pool, task.pre_table.addon_pool,
+            srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v, pre_r, post_r,
         );
         run(RebuyAir::num_columns(), &row, &RebuyRow::padding(), move || RebuyAir {

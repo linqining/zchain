@@ -58,6 +58,17 @@ pub const COMMON_NUM_COLUMNS: usize = 37;
 
 // ===== 常量辅助 =====
 
+/// MAX_TOTAL_BET = 10^18，全局筹码上界。
+/// 对齐 `poker_l1/src/vm/contracts/texas_poker/constants.rs:MAX_TOTAL_BET`。
+/// 用于 addon/rebuy/join 的全局上界检查：`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`。
+pub const MAX_TOTAL_BET: u64 = 1_000_000_000_000_000_000;
+
+/// MAX_TOTAL_BET 的 4-limb M31 表示（host 端 / AIR 约束用）。
+#[must_use]
+pub fn max_total_bet_limbs() -> [M31; 4] {
+    u64_to_m31_limbs(MAX_TOTAL_BET)
+}
+
 /// 把 u64 编码为 4 个 M31（每 limb 16 位）。
 #[must_use]
 pub fn u64_to_m31_limbs(v: u64) -> [M31; 4] {
@@ -90,6 +101,54 @@ pub fn m31_limbs_to_u64(limbs: [M31; 4]) -> u64 {
     let l2 = u64::from(limbs[2].0);
     let l3 = u64::from(limbs[3].0);
     l0 | (l1 << 16) | (l2 << 32) | (l3 << 48)
+}
+
+/// 计算 4-limb 加法 `cp + ap + am + df = mx` 的进位（host 端用）。
+///
+/// 返回 `(carry_lo: [M31; 3], carry_hi: [M31; 3])`，其中
+/// `carry = lo + 2*hi`（2-bit 分解，carry ∈ {0,1,2,3}）。
+///
+/// 调用方需保证 `cp + ap + am + df = mx`（u64 意义下成立，无 5th limb 溢出）。
+#[must_use]
+pub fn compute_bound_carries(
+    chip_pool: u64,
+    addon_pool: u64,
+    amount: u64,
+    diff: u64,
+) -> ([M31; 3], [M31; 3]) {
+    let cp = u64_to_m31_limbs(chip_pool);
+    let ap = u64_to_m31_limbs(addon_pool);
+    let am = u64_to_m31_limbs(amount);
+    let df = u64_to_m31_limbs(diff);
+    let mx = u64_to_m31_limbs(MAX_TOTAL_BET);
+
+    // Limb 0: cp0 + ap0 + am0 + df0 = mx0 + c0 * 65536
+    let sum0 = u64::from(cp[0].0) + u64::from(ap[0].0) + u64::from(am[0].0) + u64::from(df[0].0);
+    let c0 = (sum0 - u64::from(mx[0].0)) / 65536;
+
+    // Limb 1: cp1 + ap1 + am1 + df1 + c0 = mx1 + c1 * 65536
+    let sum1 = u64::from(cp[1].0) + u64::from(ap[1].0) + u64::from(am[1].0) + u64::from(df[1].0) + c0;
+    let c1 = (sum1 - u64::from(mx[1].0)) / 65536;
+
+    // Limb 2: cp2 + ap2 + am2 + df2 + c1 = mx2 + c2 * 65536
+    let sum2 = u64::from(cp[2].0) + u64::from(ap[2].0) + u64::from(am[2].0) + u64::from(df[2].0) + c1;
+    let c2 = (sum2 - u64::from(mx[2].0)) / 65536;
+
+    // Limb 3: cp3 + ap3 + am3 + df3 + c2 = mx3 (c3 = 0, no overflow)
+    let sum3 = u64::from(cp[3].0) + u64::from(ap[3].0) + u64::from(am[3].0) + u64::from(df[3].0) + c2;
+    debug_assert_eq!(sum3, u64::from(mx[3].0), "bound check carry overflow: limb3 mismatch");
+
+    let carry_lo = [
+        M31::from((c0 % 2) as u32),
+        M31::from((c1 % 2) as u32),
+        M31::from((c2 % 2) as u32),
+    ];
+    let carry_hi = [
+        M31::from((c0 / 2) as u32),
+        M31::from((c1 / 2) as u32),
+        M31::from((c2 / 2) as u32),
+    ];
+    (carry_lo, carry_hi)
 }
 
 // ===== 通用约束（AIR evaluate 内调用）=====
@@ -224,7 +283,8 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         // 作为常量注入；AIR 逐 limb 约束 trace 列等于期望值。
         // 这等价于完整的 4-limb ripple-carry 加 1，无需额外 witness 列，且对 u64
         // 任意值（含 limb0 = 0xFFFF 进位情形）均 sound —— 彻底消除「version 不递增」反例。
-        let expected_post = pre_version.wrapping_add(1);
+        // 对齐合约 bump_version 的 saturating_add：u64::MAX 时保持不变（不 wrap 回 0）。
+        let expected_post = pre_version.saturating_add(1);
         let expected_post_limbs = u64_to_m31_limbs(expected_post);
         // 注：post_version 与 expected_post 应一致（host 保证）；此处约束的是 trace 列。
         let _ = post_version; // host post_version 仅作 sanity，约束以 pre_version+1 为准
@@ -325,6 +385,118 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// 用于 fold/check/call/bet/raise 等 button 不变的方法。
     pub fn button_unchanged(&self) -> E::F {
         self.is_active.clone() * (self.post_button.clone() - self.pre_button.clone())
+    }
+
+    /// 约束 `is_within_bound == 1`（全局上界检查 witness，degree-2）。
+    ///
+    /// 对齐合约 `apply_addon`/`apply_rebuy`/`apply_join` 中的全局上界检查：
+    /// `if chip_pool + addon_pool + amount > MAX_TOTAL_BET { return Err(...) }`
+    ///
+    /// 诚实 host 在上界检查通过时设 witness = 1。完整 range check
+    /// （分解 `MAX_TOTAL_BET - total_chips` 并逐 limb 验证非负）留待阶段 3，
+    /// 当前与 `INPUT_SEAT_OCCUPIED` / `INPUT_SEAT_EMPTY` 同属 boolean witness 模式。
+    pub fn within_bound_check(&self, is_within_bound: E::F) -> E::F {
+        let one: E::F = M31::from(1u32).into();
+        self.is_active.clone() * (is_within_bound - one)
+    }
+
+    /// 约束全局上界 `chip_pool + addon_pool + amount + diff = MAX_TOTAL_BET`，
+    /// 其中 `diff = MAX_TOTAL_BET - (chip_pool + addon_pool + amount) ≥ 0`。
+    ///
+    /// 使用 2-bit carry 分解处理 4 数 limb 加法的进位（carry ∈ {0,1,2,3}）。
+    /// 每个 carry 分解为 `lo + 2*hi`，lo/hi 为 boolean（独立 degree-2 约束）。
+    ///
+    /// # 参数
+    /// - `chip_pool`/`addon_pool`/`amount`/`diff`: 4-limb 输入（每 limb 16-bit）
+    /// - `carry_lo`/`carry_hi`: 3 个进位的 2-bit 分解（limb 0→1, 1→2, 2→3 的进位）
+    ///
+    /// # 约束
+    /// 1. 逐 limb: `cp[i] + ap[i] + am[i] + df[i] + carry_in = mx[i] + carry_out * 65536`
+    /// 2. 进位 boolean: `lo*(lo-1)=0`, `hi*(hi-1)=0`（6 个 degree-2 约束）
+    /// 3. 最终 carry_out = 0（limb 3 方程中 carry_out 项为 0）
+    ///
+    /// # degree
+    /// limb 方程 `is_active * (linear) = degree 2`; boolean `b*(b-1) = degree 2`。
+    ///
+    /// # Soundness
+    /// 由于每 limb < 65536 且 carry ∈ {0,1,2,3}，4 数 limb 之和 < 4×65536 = 262144
+    /// < M31_P = 2^31−1，M31 运算无取模，limb 方程等价于 Nat 方程。
+    /// 配合 `Limb4Range16` range constraint（diff 全 limb < 65536）可推出
+    /// `decodeU64(cp) + decodeU64(ap) + decodeU64(am) ≤ MAX_TOTAL_BET`。
+    pub fn bound_check_4limb(
+        &self,
+        chip_pool: &[E::F; 4],
+        addon_pool: &[E::F; 4],
+        amount: &[E::F; 4],
+        diff: &[E::F; 4],
+        carry_lo: &[E::F; 3],
+        carry_hi: &[E::F; 3],
+    ) -> E::F {
+        let one: E::F = M31::from(1u32).into();
+        let two: E::F = M31::from(2u32).into();
+        let base: E::F = M31::from(65536u32).into();
+        let mx = max_total_bet_limbs();
+        let mx_f: [E::F; 4] = [
+            mx[0].into(),
+            mx[1].into(),
+            mx[2].into(),
+            mx[3].into(),
+        ];
+
+        // carry values: c_i = lo_i + 2 * hi_i
+        let c0 = carry_lo[0].clone() + two.clone() * carry_hi[0].clone();
+        let c1 = carry_lo[1].clone() + two.clone() * carry_hi[1].clone();
+        let c2 = carry_lo[2].clone() + two.clone() * carry_hi[2].clone();
+
+        // Limb 0: cp0 + ap0 + am0 + df0 - mx0 - c0 * 65536 = 0 (carry_in = 0)
+        let mut result = self.is_active.clone()
+            * (chip_pool[0].clone()
+                + addon_pool[0].clone()
+                + amount[0].clone()
+                + diff[0].clone()
+                - mx_f[0].clone()
+                - c0.clone() * base.clone());
+
+        // Limb 1: cp1 + ap1 + am1 + df1 + c0 - mx1 - c1 * 65536 = 0
+        result = result
+            + self.is_active.clone()
+                * (chip_pool[1].clone()
+                    + addon_pool[1].clone()
+                    + amount[1].clone()
+                    + diff[1].clone()
+                    + c0.clone()
+                    - mx_f[1].clone()
+                    - c1.clone() * base.clone());
+
+        // Limb 2: cp2 + ap2 + am2 + df2 + c1 - mx2 - c2 * 65536 = 0
+        result = result
+            + self.is_active.clone()
+                * (chip_pool[2].clone()
+                    + addon_pool[2].clone()
+                    + amount[2].clone()
+                    + diff[2].clone()
+                    + c1.clone()
+                    - mx_f[2].clone()
+                    - c2.clone() * base.clone());
+
+        // Limb 3: cp3 + ap3 + am3 + df3 + c2 - mx3 = 0 (carry_out = 0)
+        result = result
+            + self.is_active.clone()
+                * (chip_pool[3].clone()
+                    + addon_pool[3].clone()
+                    + amount[3].clone()
+                    + diff[3].clone()
+                    + c2.clone()
+                    - mx_f[3].clone());
+
+        // Boolean constraints for carry bits (degree 2, no gating needed:
+        // padding rows have all witness = 0, so 0*(0-1) = 0)
+        for i in 0..3 {
+            result = result + carry_lo[i].clone() * (carry_lo[i].clone() - one.clone());
+            result = result + carry_hi[i].clone() * (carry_hi[i].clone() - one.clone());
+        }
+
+        result
     }
 
     /// 约束 `post_pot[i] = pre_pot[i] + amt[i]`（全 4 limb，每 limb degree-2）。

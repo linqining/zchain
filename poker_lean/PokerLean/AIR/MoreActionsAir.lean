@@ -239,10 +239,17 @@ structure KickPlayerMethodColumns where
   input_current_turn : M31
   input_seat_occupied : M31
   output_refund : M31 × M31 × M31 × M31
+  /-- 被踢者当前下注（4 limb）— pot += kicked_bet（对齐 Rust AIR kick_player.rs 的 kicked_bet witness） -/
+  kicked_bet : M31 × M31 × M31 × M31
   output_kicked : M31
 deriving Repr
 
-/-- kick_player 专用前状态提取（设置目标座位为已占用，current_turn 来自 ext） -/
+/-- kick_player 专用前状态提取（设置目标座位为已占用，current_turn 来自 ext）。
+
+    关键：被踢者的 `bet` 设为 `decodeU64 ext.kicked_bet`，对齐 AIR 的
+    `KICKED_BET` witness（`post_pot = pre_pot + kicked_bet`）。这使得 soundness
+    约束 #10 `post.pot = pre.pot + pre.get_seat(seat_index).bet` 可由
+    `PotDelta` + range constraint 直接推出。 -/
 def extractPreTableFromKickPlayerAir
     (row : CommonRow)
     (ext : KickPlayerMethodColumns)
@@ -252,10 +259,16 @@ def extractPreTableFromKickPlayerAir
   let with_turn := { base with betting := { base.betting with
     current_turn := ext.input_current_turn.val } }
   with_turn.update_seat ext.input_seat_index.val
-    (fun s => { s with player := PlayerId.ofNat 1 })
+    (fun s => { s with
+      player := PlayerId.ofNat 1
+      bet := decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
+               ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 })
 
 /-- kick_player 专用后状态提取（目标座位标记为 kicked：保留 player，
-    folded/left_during_hand = true，stack/bet 清零） -/
+    folded/left_during_hand = true，stack/bet 清零）。
+
+    注：post 状态的 pot 来自 row.post_pot（由 PotDelta 约束绑定到 pre_pot + kicked_bet），
+    对齐 Rust AIR `pot_delta_4limb`（4-limb pot delta 约束）。 -/
 def extractPostTableFromKickPlayerAir
     (row : CommonRow)
     (ext : KickPlayerMethodColumns)
@@ -267,6 +280,9 @@ def extractPostTableFromKickPlayerAir
     version := decodeU64 row.post_version.1 row.post_version.2.1
         row.post_version.2.2.1 row.post_version.2.2.2
     round_state := RoundState.fromNat row.post_round_state.val
+    betting := { pre.betting with
+      pot := decodeU64 row.post_pot.1 row.post_pot.2.1
+          row.post_pot.2.2.1 row.post_pot.2.2.2 }
     seats := List.modify Seat.kicked seat_index pre.seats
   }
 
@@ -288,6 +304,8 @@ def KickPlayerMethodConstraints
   VersionIncrementConstraint row ∧
   RoundStateUnchanged row ∧
   ButtonUnchanged row ∧
+  -- pot 守恒：post_pot = pre_pot + kicked_bet（全 4 limb，对齐合约 checked_add 修复 + Rust AIR pot_delta_4limb）
+  PotDelta row ext.kicked_bet ∧
   let pre_table := extractPreTableFromKickPlayerAir row ext max_players
   let post_table := extractPostTableFromKickPlayerAir row ext max_players expected_seat_index
   StateRootConsistency row

@@ -1,6 +1,9 @@
 import PokerLean.Contract.Types
+import PokerLean.State.Constants
 
 namespace PokerLean
+
+open TexasPoker.Constants
 
 /-! # join_table 合约语义
 
@@ -13,8 +16,9 @@ namespace PokerLean
 2. `can_join_state(table)` — `round_state == ROUND_WAITING`
 3. `is_pk_registered(&table.seats, &pk)` 为 false（pk 未注册）
 4. `input.buy_in >= table.big_blind`
-5. `find_empty_seat()` 自动分配座位（合约不接收 seat_index 参数）
-6. 座位字段更新：
+5. **全局上界**：`chip_pool + addon_pool + buy_in <= MAX_TOTAL_BET`（溢出修复）
+6. `find_empty_seat()` 自动分配座位（合约不接收 seat_index 参数）
+7. 座位字段更新：
    - `seat.player = input.player`
    - `seat.stack = input.buy_in`
    - `seat.is_waiting = false`
@@ -24,8 +28,8 @@ namespace PokerLean
    - `seat.acted_this_round = false`
    - `seat.bet = 0`
    - `seat.total_bet = 0`
-7. `table.chip_pool += input.buy_in`（资金守恒）
-8. `table.bump_version()`（version += 1）
+8. `table.chip_pool += input.buy_in`（资金守恒）
+9. `table.bump_version()`（version saturating_add(1)）
 -/
 
 /-- join_table 参数 -/
@@ -51,6 +55,8 @@ def ContractJoinTable
   (pre.get_seat params.seat_index).player = EMPTY_PLAYER ∧
   -- 买入金额必须 >= 大盲注
   params.buy_in ≥ pre.big_blind ∧
+  -- 全局上界检查（对齐合约 apply_join 溢出修复）
+  pre.chip_pool + pre.addon_pool + params.buy_in ≤ MAX_TOTAL_BET ∧
   -- pk 不能已注册（简化：玩家不能已在其他座位）
   (∀ i : Nat, i < pre.max_players →
     (pre.get_seat i).player ≠ params.player) ∧
@@ -83,7 +89,7 @@ theorem join_table_post_occupied (pre : TexasPokerTable)
     (params : JoinTableParams) (post : TexasPokerTable)
     (h : ContractJoinTable pre params post) :
   (post.get_seat params.seat_index).player = params.player := by
-  rcases h with ⟨_, _, _, _, _, h_player, _⟩
+  rcases h with ⟨_, _, _, _, _, _, h_player, _⟩
   exact h_player
 
 /-- 推论：join_table 要求 round_state == WAITING -/
@@ -102,6 +108,14 @@ theorem join_table_buy_in_ge_big_blind (pre : TexasPokerTable)
   rcases h with ⟨_, _, _, h_bi, _⟩
   exact h_bi
 
+/-- 推论：join_table 满足全局上界 -/
+theorem join_table_within_bound (pre : TexasPokerTable)
+    (params : JoinTableParams) (post : TexasPokerTable)
+    (h : ContractJoinTable pre params post) :
+  pre.chip_pool + pre.addon_pool + params.buy_in ≤ MAX_TOTAL_BET := by
+  rcases h with ⟨_, _, _, _, h_bound, _⟩
+  exact h_bound
+
 /-- 推论：join_table 要求目标座位为空 -/
 theorem join_table_pre_seat_empty (pre : TexasPokerTable)
     (params : JoinTableParams) (post : TexasPokerTable)
@@ -115,7 +129,7 @@ theorem join_table_chip_pool_inc (pre : TexasPokerTable)
     (params : JoinTableParams) (post : TexasPokerTable)
     (h : ContractJoinTable pre params post) :
   post.chip_pool = pre.chip_pool + params.buy_in := by
-  rcases h with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, h_chip, _⟩
+  rcases h with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, h_chip, _⟩
   exact h_chip
 
 end PokerLean

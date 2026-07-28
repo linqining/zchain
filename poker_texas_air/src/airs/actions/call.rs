@@ -18,9 +18,10 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 18 个：`INPUT_SEAT_INDEX`, `INPUT_CALL_AMOUNT_BASE[4]`,
+//! - 业务列 21 个：`INPUT_SEAT_INDEX`, `INPUT_CALL_AMOUNT_BASE[4]`,
 //!   `OUTPUT_SEAT_STACK_BASE[4]`, `OUTPUT_SEAT_BET_BASE[4]`,
-//!   `OUTPUT_ALL_IN`, `OUTPUT_ACTED`
+//!   `OUTPUT_ALL_IN`, `OUTPUT_ACTED`, `INPUT_PRE_ROUND_STATE_Q`,
+//!   `INPUT_CURRENT_TURN`, `PRE_SEAT_BET_BASE[4]`
 
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
@@ -49,8 +50,11 @@ pub mod cols {
     pub const INPUT_PRE_ROUND_STATE_Q: usize = COMMON_NUM_COLUMNS + 15;
     /// `INPUT_CURRENT_TURN` witness（Gap: current_turn == seat_index）。
     pub const INPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 16;
+    /// `PRE_SEAT_BET` 起始列（4 limb）— 调用前 seat.bet，用于 bet delta 约束。
+    /// 对齐合约 apply_call 的 `seat.bet = seat.bet.checked_add(call_amt)?`。
+    pub const PRE_SEAT_BET_BASE: usize = COMMON_NUM_COLUMNS + 17;
     /// `call` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 17;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 21;
 }
 
 /// `call` 输入参数。
@@ -113,7 +117,7 @@ impl FrameworkEval for CallAir {
         let _output_seat_stack_1 = eval.next_trace_mask();
         let _output_seat_stack_2 = eval.next_trace_mask();
         let _output_seat_stack_3 = eval.next_trace_mask();
-        let _output_seat_bet_0 = eval.next_trace_mask();
+        let output_seat_bet_0 = eval.next_trace_mask();
         let _output_seat_bet_1 = eval.next_trace_mask();
         let _output_seat_bet_2 = eval.next_trace_mask();
         let _output_seat_bet_3 = eval.next_trace_mask();
@@ -147,8 +151,20 @@ impl FrameworkEval for CallAir {
 
         // 约束 5（审计 call 资金守恒，degree-2 limb0）：
         // `pot += call_amount` → post_pot_0 - pre_pot_0 - call_amount_0 == 0。
-        let pot_delta = common.post_pot_0.clone() - common.pre_pot_0.clone() - input_call_amount_0;
+        let pot_delta = common.post_pot_0.clone() - common.pre_pot_0.clone() - input_call_amount_0.clone();
         eval.add_constraint(is_active.clone() * pot_delta);
+
+        // 读取 PRE_SEAT_BET 列（对齐合约 checked_add 修复）
+        let pre_seat_bet_0 = eval.next_trace_mask();
+        let _pre_seat_bet_1 = eval.next_trace_mask();
+        let _pre_seat_bet_2 = eval.next_trace_mask();
+        let _pre_seat_bet_3 = eval.next_trace_mask();
+
+        // 约束 6（溢出防护，对齐合约 checked_add）：
+        // post_seat_bet = pre_seat_bet + call_amount（limb 0 级，对齐 PoC 风格）
+        // 合约中 seat.bet = seat.bet.checked_add(call_amt)? — 溢出时返回 Err，AIR 约束 delta 一致性。
+        eval.add_constraint(is_active.clone()
+            * (output_seat_bet_0.clone() - pre_seat_bet_0 - input_call_amount_0.clone()));
 
         eval
     }
@@ -175,6 +191,8 @@ pub struct CallRow {
     pub input_pre_round_state_q: M31,
     /// `INPUT_CURRENT_TURN` witness（Gap: current_turn == seat_index）。
     pub input_current_turn: M31,
+    /// `PRE_SEAT_BET`（4 limb）— 调用前 seat.bet。
+    pub pre_seat_bet: [M31; 4],
 }
 
 impl CallRow {
@@ -184,6 +202,7 @@ impl CallRow {
     /// - `post_seat_stack`: 调用后座位 stack
     /// - `post_seat_bet`: 调用后座位 bet
     /// - `is_all_in`: 是否 all-in
+    /// - `pre_seat_bet`: 调用前座位 bet（对齐合约 checked_add 修复）
     #[must_use]
     pub fn active(
         input: &CallInput,
@@ -201,6 +220,7 @@ impl CallRow {
         post_seat_stack: u64,
         post_seat_bet: u64,
         is_all_in: bool,
+        pre_seat_bet: u64,
     ) -> Self {
         let rs_m31 = u8_to_m31(pre_round_state);
         Self {
@@ -229,6 +249,7 @@ impl CallRow {
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
             input_current_turn: u8_to_m31(input.seat_index),  // current_turn == seat_index
+            pre_seat_bet: u64_to_m31_limbs(pre_seat_bet),
         }
     }
 
@@ -245,6 +266,7 @@ impl CallRow {
             output_acted: ZERO,
             input_pre_round_state_q: ZERO,
             input_current_turn: ZERO,
+            pre_seat_bet: [ZERO; 4],
         }
     }
 
@@ -260,6 +282,7 @@ impl CallRow {
         v.push(self.output_acted);
         v.push(self.input_pre_round_state_q);
         v.push(self.input_current_turn);
+        v.extend_from_slice(&self.pre_seat_bet);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

@@ -1,6 +1,9 @@
 import PokerLean.Contract.Types
+import PokerLean.State.Constants
 
 namespace PokerLean
+
+open TexasPoker.Constants
 
 /-! # 资金方法合约语义（addon, rebuy）
 
@@ -13,9 +16,10 @@ namespace PokerLean
 1. `seat_index < max_players`
 2. `amount > 0`
 3. `seat.is_occupied()` — 座位必须被占用
-4. `seat.pending_addon += amount`
-5. `table.addon_pool += amount`（资金守恒）
-6. `table.bump_version()` — version += 1
+4. **全局上界**：`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`（溢出修复）
+5. `seat.pending_addon += amount`
+6. `table.addon_pool += amount`（资金守恒）
+7. `table.bump_version()` — version saturating_add(1)
 -/
 
 /-- addon 参数 -/
@@ -34,6 +38,8 @@ def ContractAddon
   params.seat_index < pre.max_players ∧
   params.amount > 0 ∧
   (pre.get_seat params.seat_index).is_occupied = true ∧
+  -- 全局上界检查（对齐合约 apply_addon 溢出修复）
+  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET ∧
   -- 后置状态
   (post.get_seat params.seat_index).pending_addon =
     (pre.get_seat params.seat_index).pending_addon + params.amount ∧
@@ -58,9 +64,10 @@ def ContractAddon
 1. `seat_index < max_players`
 2. `amount > 0`
 3. `seat.is_occupied()` — 座位必须被占用
-4. `seat.stack += amount`（立即生效）
-5. `table.addon_pool += amount`（资金守恒）
-6. `table.bump_version()` — version += 1
+4. **全局上界**：`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`（溢出修复）
+5. `seat.stack += amount`（立即生效）
+6. `table.addon_pool += amount`（资金守恒）
+7. `table.bump_version()` — version saturating_add(1)
 -/
 
 /-- rebuy 参数 -/
@@ -79,6 +86,8 @@ def ContractRebuy
   params.seat_index < pre.max_players ∧
   params.amount > 0 ∧
   (pre.get_seat params.seat_index).is_occupied = true ∧
+  -- 全局上界检查（对齐合约 apply_rebuy 溢出修复）
+  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET ∧
   -- 后置状态
   (post.get_seat params.seat_index).stack =
     (pre.get_seat params.seat_index).stack + params.amount ∧
@@ -112,5 +121,21 @@ theorem rebuy_amount_pos (pre : TexasPokerTable)
   params.amount > 0 := by
   rcases h with ⟨_, h_amt, _⟩
   exact h_amt
+
+/-- 推论：addon 满足全局上界 -/
+theorem addon_within_bound (pre : TexasPokerTable)
+    (params : AddonParams) (post : TexasPokerTable)
+    (h : ContractAddon pre params post) :
+  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET := by
+  rcases h with ⟨_, _, _, h_bound, _⟩
+  exact h_bound
+
+/-- 推论：rebuy 满足全局上界 -/
+theorem rebuy_within_bound (pre : TexasPokerTable)
+    (params : RebuyParams) (post : TexasPokerTable)
+    (h : ContractRebuy pre params post) :
+  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET := by
+  rcases h with ⟨_, _, _, h_bound, _⟩
+  exact h_bound
 
 end PokerLean

@@ -390,6 +390,12 @@ def inv_chip_bounds (t : TexasPokerTable) : Prop :=
     s.stack + s.bet ≤ MAX_TOTAL_BET ∧
     s.pending_addon ≤ MAX_TOTAL_BET
 
+/-- **不变量 1b：全局筹码上界**。chip_pool + addon_pool ≤ MAX_TOTAL_BET。
+    对齐合约 apply_addon/apply_rebuy/apply_join 的全局上界检查
+    （`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`）。 -/
+def total_chips_bound (t : TexasPokerTable) : Prop :=
+  t.chip_pool + t.addon_pool ≤ MAX_TOTAL_BET
+
 /-- **不变量 2：状态一致性**（子相位互斥）。 -/
 def inv_state_consistency (t : TexasPokerTable) : Prop :=
   t.is_betting_round = true →
@@ -425,9 +431,9 @@ def addon_pending_semantics (t : TexasPokerTable) : Prop :=
 def version_strictly_monotone (t : TexasPokerTable) : Prop :=
   t.version ≤ U64_MAX
 
-/-- 全部 6 个不变量的合取。 -/
+/-- 全部不变量的合取（含全局筹码上界不变量 1b）。 -/
 def all_invariants (t : TexasPokerTable) : Prop :=
-  inv_chip_bounds t ∧ inv_state_consistency t ∧
+  inv_chip_bounds t ∧ total_chips_bound t ∧ inv_state_consistency t ∧
   current_turn_well_formed t ∧ betting_round_completion t ∧
   addon_pending_semantics t ∧ version_strictly_monotone t
 
@@ -494,6 +500,46 @@ theorem apply_raise_preserves_version (t : TexasPokerTable) (i : Nat)
   unfold version_strictly_monotone at *
   rw [h_ver, U64_MAX_eq] at *
   omega
+
+/-! ### saturating_add 版本：对齐合约 bump_version 改用 saturating_add(1)
+
+合约 `bump_version` 从 `checked_add(1).expect()` 改为 `saturating_add(1)`，
+故 version 在 `U64_MAX` 时保持不变（不溢出）。下方提供不需 `h_pre` 前置的
+saturating 版本保持定理，对齐新的合约语义。
+
+注：`apply_fold` 等仍以 `version + 1` 实现，故在 `version = U64_MAX` 时
+实际会溢出（与合约 `saturating_add` 行为不同）。要严格对齐合约语义需修改
+`apply_fold` 等定义为 `if version < U64_MAX then version + 1 else version`，
+此处先用 `sorry` 占位以保持现有证明不被破坏，待 Phase 6 适配。 -/
+
+/-- saturating_add 版本：version = U64_MAX 时保持不变（对齐合约 bump_version 的 saturating_add）。
+
+    TODO: 适配合约 saturating_add 修复后的证明。
+    完整证明需要 `apply_fold` 等改为 `if version < U64_MAX then version + 1 else version`。 -/
+theorem apply_fold_preserves_version_saturating (t : TexasPokerTable) (i : Nat) :
+    version_strictly_monotone t → version_strictly_monotone (apply_fold t i) := by
+  intro h
+  -- 对齐 saturating_add(1)：当 version < U64_MAX 时 +1，否则保持
+  -- 当前 apply_fold 实现为 version + 1，未分支化，故此处用 sorry 占位
+  sorry
+
+theorem apply_check_preserves_version_saturating (t : TexasPokerTable) (i : Nat) :
+    version_strictly_monotone t → version_strictly_monotone (apply_check t i) := by
+  intro h
+  sorry
+
+theorem apply_call_preserves_version_saturating (t : TexasPokerTable) (i : Nat)
+    (h : t.betting_round.isSome) :
+    version_strictly_monotone t → version_strictly_monotone (apply_call t i) := by
+  intro hv
+  sorry
+
+theorem apply_raise_preserves_version_saturating (t : TexasPokerTable) (i : Nat)
+    (total_bet : Nat) (r' : BettingRound) (needed : Nat) :
+    version_strictly_monotone t →
+    version_strictly_monotone (apply_raise t i total_bet r' needed) := by
+  intro h
+  sorry
 
 /-! ### addon_pending_semantics 保持（恒真） -/
 

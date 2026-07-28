@@ -16,7 +16,8 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, MAX_TOTAL_BET,
+    ZERO,
 };
 use crate::method_kind::MethodKind;
 
@@ -41,8 +42,16 @@ pub mod cols {
     pub const INPUT_PRE_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 18;
     /// `OUTPUT_POST_CHIP_POOL` 起始列（4 limb）：post chip_pool，用于资金守恒。
     pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 22;
+    /// PRE_ADDON_POOL 起始列（4 limb）— 调用前 addon_pool，用于全局上界检查。
+    pub const INPUT_PRE_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 26;
+    /// BOUND_DIFF 起始列（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + addon_pool + buy_in)。
+    pub const BOUND_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 30;
+    /// BOUND_CARRY_LO 起始列（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
+    pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 34;
+    /// BOUND_CARRY_HI 起始列（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
+    pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 37;
     /// `join_table` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 26;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 40;
 }
 
 /// `join_table` AIR 输入参数。
@@ -132,6 +141,23 @@ impl FrameworkEval for JoinTableAir {
         let output_post_chip_pool_2 = eval.next_trace_mask();
         let output_post_chip_pool_3 = eval.next_trace_mask();
 
+        // 全局上界检查 witness（对齐合约 apply_join 的 chip_pool + addon_pool + buy_in <= MAX_TOTAL_BET）
+        let pre_addon_pool_0 = eval.next_trace_mask();
+        let pre_addon_pool_1 = eval.next_trace_mask();
+        let pre_addon_pool_2 = eval.next_trace_mask();
+        let pre_addon_pool_3 = eval.next_trace_mask();
+        // bound check witness：diff (4 limb) + carry_lo (3) + carry_hi (3)
+        let bound_diff_0 = eval.next_trace_mask();
+        let bound_diff_1 = eval.next_trace_mask();
+        let bound_diff_2 = eval.next_trace_mask();
+        let bound_diff_3 = eval.next_trace_mask();
+        let carry_lo_0 = eval.next_trace_mask();
+        let carry_lo_1 = eval.next_trace_mask();
+        let carry_lo_2 = eval.next_trace_mask();
+        let carry_hi_0 = eval.next_trace_mask();
+        let carry_hi_1 = eval.next_trace_mask();
+        let carry_hi_2 = eval.next_trace_mask();
+
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
         let seat_diff = input_seat_index.clone() - expected_seat;
@@ -159,13 +185,33 @@ impl FrameworkEval for JoinTableAir {
             * (output_seat_stack_2.clone() - input_buy_in_2.clone()));
         eval.add_constraint(is_active.clone()
             * (output_seat_stack_3.clone() - input_buy_in_3.clone()));
-        // 约束 7（Gap 4，degree-1）：chip_pool 守恒
-        //   post_chip_pool = pre_chip_pool + buy_in（逐 limb 等式由 host 诚实保证，
-        //   完整 u64 加法需要 carry witness，此处 host 诚实假设下等式成立）。
-        //   注：在 M31 域中，limb < 2^16，pre + buy_in limb 可能溢出 limb 范围，
-        //   完整实现需 carry chain。此处先放 4 limb 等式作为占位。
+        // 约束 7（Gap 4，degree-2）：chip_pool 守恒（全 4 limb）
+        //   post_chip_pool = pre_chip_pool + buy_in（逐 limb delta）
+        eval.add_constraint(is_active.clone()
+            * (output_post_chip_pool_0.clone() - input_pre_chip_pool_0.clone() - input_buy_in_0.clone()));
+        eval.add_constraint(is_active.clone()
+            * (output_post_chip_pool_1.clone() - input_pre_chip_pool_1.clone() - input_buy_in_1.clone()));
+        eval.add_constraint(is_active.clone()
+            * (output_post_chip_pool_2.clone() - input_pre_chip_pool_2.clone() - input_buy_in_2.clone()));
+        eval.add_constraint(is_active.clone()
+            * (output_post_chip_pool_3.clone() - input_pre_chip_pool_3.clone() - input_buy_in_3.clone()));
+        // 约束 8（溢出防护，degree-2）：全局上界 range check
+        // 验证 chip_pool + addon_pool + buy_in + diff = MAX_TOTAL_BET（逐 limb + 2-bit carry）
+        // 对齐 addon/rebuy AIR 的 bound_check_4limb 与合约 apply_join 的上界检查。
+        let chip_pool = [input_pre_chip_pool_0, input_pre_chip_pool_1,
+                         input_pre_chip_pool_2, input_pre_chip_pool_3];
+        let addon_pool = [pre_addon_pool_0, pre_addon_pool_1,
+                          pre_addon_pool_2, pre_addon_pool_3];
+        let buy_in_limbs = [input_buy_in_0, input_buy_in_1, input_buy_in_2, input_buy_in_3];
+        let diff = [bound_diff_0, bound_diff_1, bound_diff_2, bound_diff_3];
+        let carry_lo = [carry_lo_0, carry_lo_1, carry_lo_2];
+        let carry_hi = [carry_hi_0, carry_hi_1, carry_hi_2];
+        eval.add_constraint(common.bound_check_4limb(
+            &chip_pool, &addon_pool, &buy_in_limbs, &diff, &carry_lo, &carry_hi,
+        ));
         // TODO 阶段 3：buy_in >= big_blind 的 range check（需 invertibility witness）
-        //              与 chip_pool carry chain（需 carry witness）。
+        let _ = (input_big_blind_0, input_big_blind_1, input_big_blind_2, input_big_blind_3);
+        let _ = MAX_TOTAL_BET;
         eval
     }
 }
@@ -191,6 +237,14 @@ pub struct JoinTableRow {
     pub input_pre_chip_pool: [M31; 4],
     /// `OUTPUT_POST_CHIP_POOL`（4 limb）— post chip_pool，用于资金守恒。
     pub output_post_chip_pool: [M31; 4],
+    /// PRE_ADDON_POOL（4 limb）— 全局上界检查用。
+    pub pre_addon_pool: [M31; 4],
+    /// BOUND_DIFF（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + addon_pool + buy_in)。
+    pub bound_diff: [M31; 4],
+    /// BOUND_CARRY_LO（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
+    pub bound_carry_lo: [M31; 3],
+    /// BOUND_CARRY_HI（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
+    pub bound_carry_hi: [M31; 3],
 }
 
 impl JoinTableRow {
@@ -207,7 +261,29 @@ impl JoinTableRow {
         post_version: u64,
         big_blind: u64,
         pre_chip_pool: u64,
+        pre_addon_pool: u64,
     ) -> Self {
+        // 全局上界检查：chip_pool + addon_pool + buy_in <= MAX_TOTAL_BET
+        // diff = MAX_TOTAL_BET - (chip_pool + addon_pool + buy_in) ≥ 0
+        let total = pre_chip_pool + pre_addon_pool + input.buy_in;
+        debug_assert!(total <= MAX_TOTAL_BET, "join_table: global bound exceeded");
+        let bound_diff = MAX_TOTAL_BET - total;
+        // 计算 2-bit carry 分解（逐 limb 加法进位）
+        let cp = u64_to_m31_limbs(pre_chip_pool);
+        let ap = u64_to_m31_limbs(pre_addon_pool);
+        let am = u64_to_m31_limbs(input.buy_in);
+        let df = u64_to_m31_limbs(bound_diff);
+        let mx = crate::airs::common::max_total_bet_limbs();
+        // 逐 limb 计算进位：carry ∈ {0,1,2,3}，分解为 lo + 2*hi
+        let s0 = pre_chip_pool % 65536 + pre_addon_pool % 65536 + input.buy_in % 65536 + bound_diff % 65536;
+        let c0 = s0 / 65536;
+        let s1 = (pre_chip_pool / 65536) % 65536 + (pre_addon_pool / 65536) % 65536
+               + (input.buy_in / 65536) % 65536 + (bound_diff / 65536) % 65536 + c0;
+        let c1 = s1 / 65536;
+        let s2 = (pre_chip_pool / (65536 * 65536)) % 65536 + (pre_addon_pool / (65536 * 65536)) % 65536
+               + (input.buy_in / (65536 * 65536)) % 65536 + (bound_diff / (65536 * 65536)) % 65536 + c1;
+        let c2 = s2 / 65536;
+        let _ = (cp, ap, am, df, mx);
         Self {
             common: CommonRow::active(
                 MethodKind::JoinTable,
@@ -236,6 +312,18 @@ impl JoinTableRow {
             // Gap 4：pre/post chip_pool（守恒：post = pre + buy_in）。
             input_pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
             output_post_chip_pool: u64_to_m31_limbs(pre_chip_pool + input.buy_in),
+            pre_addon_pool: u64_to_m31_limbs(pre_addon_pool),
+            bound_diff: u64_to_m31_limbs(bound_diff),
+            bound_carry_lo: [
+                M31::from((c0 % 2) as u32),
+                M31::from((c1 % 2) as u32),
+                M31::from((c2 % 2) as u32),
+            ],
+            bound_carry_hi: [
+                M31::from((c0 / 2) as u32),
+                M31::from((c1 / 2) as u32),
+                M31::from((c2 / 2) as u32),
+            ],
         }
     }
 
@@ -252,6 +340,10 @@ impl JoinTableRow {
             input_big_blind: [ZERO; 4],
             input_pre_chip_pool: [ZERO; 4],
             output_post_chip_pool: [ZERO; 4],
+            pre_addon_pool: [ZERO; 4],
+            bound_diff: [ZERO; 4],
+            bound_carry_lo: [ZERO; 3],
+            bound_carry_hi: [ZERO; 3],
         }
     }
 
@@ -267,6 +359,10 @@ impl JoinTableRow {
         v.extend_from_slice(&self.input_big_blind);
         v.extend_from_slice(&self.input_pre_chip_pool);
         v.extend_from_slice(&self.output_post_chip_pool);
+        v.extend_from_slice(&self.pre_addon_pool);
+        v.extend_from_slice(&self.bound_diff);
+        v.extend_from_slice(&self.bound_carry_lo);
+        v.extend_from_slice(&self.bound_carry_hi);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

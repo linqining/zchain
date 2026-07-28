@@ -50,6 +50,8 @@ fn test_e2e_addon_prove_verify() {
     let row = AddonRow::active(
         &input,
         pre_pending,
+        0, // pre_chip_pool
+        0, // pre_addon_pool
         zero_root(),
         one_root(),
         42,   // table_id
@@ -90,6 +92,8 @@ fn test_e2e_addon_from_zero_pending() {
     let row = AddonRow::active(
         &input,
         0, // pre_pending = 0
+        0, // pre_chip_pool
+        0, // pre_addon_pool
         zero_root(),
         one_root(),
         1,
@@ -135,6 +139,8 @@ fn test_soundness_addon_tampered_amount() {
     let row = AddonRow::active(
         &input,
         pre_pending,
+        0, // pre_chip_pool
+        0, // pre_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -190,6 +196,8 @@ fn test_soundness_addon_tampered_seat() {
     let row = AddonRow::active(
         &input,
         100,
+        0, // pre_chip_pool
+        0, // pre_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -248,6 +256,8 @@ fn test_e2e_rebuy_prove_verify() {
     let row = RebuyRow::active(
         &input,
         pre_stack,
+        0, // pre_chip_pool
+        0, // pre_addon_pool
         zero_root(),
         one_root(),
         42, // table_id
@@ -292,6 +302,8 @@ fn test_soundness_rebuy_tampered_amount() {
     let row = RebuyRow::active(
         &input,
         pre_stack,
+        0, // pre_chip_pool
+        0, // pre_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -345,6 +357,8 @@ fn test_soundness_rebuy_tampered_seat() {
     let row = RebuyRow::active(
         &input,
         1000,
+        0, // pre_chip_pool
+        0, // pre_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -396,14 +410,18 @@ fn test_funds_air_column_consistency() {
     use poker_texas_air::airs::funds::addon;
     use poker_texas_air::airs::funds::rebuy;
 
-    // addon: 通用 + 15 业务（1 seat + 4 amount + 4 pre_pending + 4 post_pending
-    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV）= 52
-    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 15);
+    // addon: 通用 + 33 业务（1 seat + 4 amount + 4 pre_pending + 4 post_pending
+    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV
+    //   + 4 pre_chip_pool + 4 pre_addon_pool
+    //   + 4 bound_diff + 3 carry_lo + 3 carry_hi）= 70
+    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
     assert_eq!(AddonAir::num_columns(), addon::cols::NUM_COLUMNS);
 
-    // rebuy: 通用 + 15 业务（1 seat + 4 amount + 4 pre_stack + 4 post_stack
-    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV）= 52
-    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 15);
+    // rebuy: 通用 + 33 业务（1 seat + 4 amount + 4 pre_stack + 4 post_stack
+    //   + Gap 3 INPUT_SEAT_OCCUPIED + Gap 9 INPUT_AMOUNT_INV
+    //   + 4 pre_chip_pool + 4 pre_addon_pool
+    //   + 4 bound_diff + 3 carry_lo + 3 carry_hi）= 70
+    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
     assert_eq!(RebuyAir::num_columns(), rebuy::cols::NUM_COLUMNS);
 }
 

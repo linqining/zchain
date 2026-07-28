@@ -47,28 +47,40 @@ prove 失败）。
 
 ### 3. 资金守恒（审计「资金守恒未验证」）
 
-degree-2 limb0 约束：
+全 4-limb delta 约束（`pot_delta_4limb`，配合 Lean `decodeU64_limb_add` 推出 u64 级守恒）：
 
 | 方法 | 约束 |
 |------|------|
-| fold / check / auto_fold / force_fold | `post_pot == pre_pot`（pot 不变） |
-| call | `post_pot - pre_pot == call_amount`（limb0） |
-| kick_player | `post_pot - pre_pot == kicked_bet`（limb0，已有） |
+| fold / check / auto_fold / force_fold | `post_pot == pre_pot`（pot 不变，全 4 limb） |
+| call / raise / bet | `post_pot == pre_pot + amount`（全 4 limb delta） |
+| kick_player | `post_pot == pre_pot + kicked_bet`（全 4 limb delta，kicked_bet witness 对齐 seat.bet） |
+| leave_table | `post_chip_pool == pre_chip_pool - refund`、`post_addon_pool == pre_addon_pool - pending`（全 4 limb delta） |
 
 回归测试：`test_soundness_fold_pot_changed`（构造 fold 改 pot 的 trace，prove 失败）。
 
 > **残余缺口**：call/raise/bet 的完整 `stack -= delta`、`bet += delta`、
 > `pot += delta` 三联守恒，以及 amount > 0、seat 状态检查，需要新增业务列
 > （pre_seat_bet / pre_seat_stack）与 invertibility witness（degree-2 表达 `x ≠ 0`
-> 需 `x * inv - 1 = 0`）。本轮以 call 的 pot 守恒 + 各方法 round 不变为增量；
+> 需 `x * inv - 1 = 0`）。本轮以全 limb pot 守恒 + 各方法 round 不变为增量；
 > 完整资金守恒列为后续工作。
 
-### 4. addon / rebuy
+### 4. addon / rebuy / join_table — 全局上界 range check
 
-已有 `post_pending_addon == pre + amount`（addon）、`post_stack == pre_stack + amount`
-（rebuy）的 limb0 守恒。本轮追加 round_state 不变约束。
+合约使用 `checked_add` 修复溢出，并增加全局上界检查：
+`chip_pool + addon_pool + amount <= MAX_TOTAL_BET (10^18)`。
 
-> 残余：amount > 0、addon_pool 守恒需新增列（TODO 已标注）。
+AIR 使用 `bound_check_4limb`（2-bit carry 分解的 4-limb range check）：
+- 验证 `chip_pool + addon_pool + amount + diff = MAX_TOTAL_BET`（逐 limb + carry）
+- `BOUND_DIFF`（4 limb）= `MAX_TOTAL_BET - total_chips` ≥ 0
+- `BOUND_CARRY_LO`（3 bit）+ `BOUND_CARRY_HI`（3 bit）= 2-bit carry 分解
+
+| 方法 | 全局上界检查 |
+|------|-------------|
+| join_table | `chip_pool + addon_pool + buy_in <= MAX_TOTAL_BET`（`bound_check_4limb`） |
+| addon | `chip_pool + addon_pool + amount <= MAX_TOTAL_BET`（`bound_check_4limb`） |
+| rebuy | `chip_pool + addon_pool + amount <= MAX_TOTAL_BET`（`bound_check_4limb`） |
+
+Lean 证明使用 `bound_check_4limb_le` 引理直接推出 `decodeU64` 级上界不等式。
 
 ## 不覆盖项（明确声明，与 Lean 审计一致）
 
@@ -82,5 +94,6 @@ degree-2 limb0 约束：
 ## 验证
 
 - `cargo build -p poker_texas_air` 通过。
-- `cargo test -p poker_texas_air` 全绿（122 通过，含 2 个新增 soundness 回归测试）。
-- 新增回归测试覆盖 Lean 反例核心场景（version 不递增、fold 改 pot）。
+- `cargo test -p poker_texas_air` 全绿（122 通过，含 soundness 回归测试）。
+- `lake build`（PokerLean）通过，`Proofs/` 目录 0 个 `sorry`。
+- 三层一致性：合约 `checked_add` 修复 → AIR `bound_check_4limb` / `pot_delta_4limb` 约束 → Lean `bound_check_4limb_le` / `pot_delta_implies_decode_eq` 证明。

@@ -53,6 +53,7 @@ fn test_e2e_join_table_prove_verify() {
         1,  // post_version
         10, // big_blind
         0,  // pre_chip_pool
+        0,  // pre_addon_pool
     );
     let trace = gen_method_trace(
         JoinTableAir::num_columns(),
@@ -85,7 +86,7 @@ fn test_soundness_join_table_tampered_seat() {
         buy_in: 1_000,
         player_addr: [0u8; 20],
     };
-    let row = JoinTableRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1, 10, 0);
+    let row = JoinTableRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1, 10, 0, 0);
     let trace = gen_method_trace(
         JoinTableAir::num_columns(),
         &row.to_vec(),
@@ -577,10 +578,11 @@ fn test_lifecycle_air_column_consistency() {
         join_table, leave_table, reset_for_next_hand, start_hand, tick,
     };
 
-    // join_table: 通用 + 26 业务
+    // join_table: 通用 + 40 业务
     //   原始 14 列（seat_index + buy_in 4 + player_addr 4 + seat_stack 4 + seat_empty 1）
-    //   + 12 新列（big_blind 4 + pre_chip_pool 4 + post_chip_pool 4）用于 buy_in >= big_blind 和 chip_pool 守恒
-    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 26);
+    //   + 12 列（big_blind 4 + pre_chip_pool 4 + post_chip_pool 4）用于 buy_in >= big_blind 和 chip_pool 守恒
+    //   + 14 列（pre_addon_pool 4 + bound_diff 4 + carry_lo 3 + carry_hi 3）用于全局上界 range check
+    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 40);
     assert_eq!(JoinTableAir::num_columns(), join_table::cols::NUM_COLUMNS);
 
     // leave_table: 通用 + 30 业务

@@ -650,7 +650,8 @@ private lemma kick_post_round_state
 private lemma kick_post_pot
     (row : CommonRow) (ext : KickPlayerMethodColumns) (max_players : Nat) (seat_index : Nat) :
     (extractPostTableFromKickPlayerAir row ext max_players seat_index).betting.pot =
-      (extractPreTableFromKickPlayerAir row ext max_players).betting.pot := by
+      decodeU64 row.post_pot.1 row.post_pot.2.1
+        row.post_pot.2.2.1 row.post_pot.2.2.2 := by
   simp [extractPostTableFromKickPlayerAir, extractPreTableFromKickPlayerAir,
          extractPreTableFromActionAir, TexasPokerTable.update_seat]
 
@@ -680,12 +681,15 @@ private lemma kick_post_hand_id
 
 /-! ### kick_player 座位访问引理 -/
 
-/-- kick_player 的 pre 座位在 input_seat_index 处是 occupied（player := 1）。 -/
+/-- kick_player 的 pre 座位在 input_seat_index 处是 occupied（player := 1，bet = kicked_bet）。 -/
 private lemma kick_pre_get_seat_at_input
     (row : CommonRow) (ext : KickPlayerMethodColumns) (max_players : Nat)
     (h_seat_val : ext.input_seat_index.val < max_players) :
     (extractPreTableFromKickPlayerAir row ext max_players).get_seat ext.input_seat_index.val =
-      { Seat.empty with player := PlayerId.ofNat 1 } := by
+      { Seat.empty with
+        player := PlayerId.ofNat 1
+        bet := decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
+                 ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 } := by
   simp only [extractPreTableFromKickPlayerAir, extractPreTableFromActionAir,
              TexasPokerTable.get_seat, TexasPokerTable.update_seat,
              List.getD_eq_getD_get?, List.get?_eq_getElem?,
@@ -704,13 +708,17 @@ private lemma kick_pre_get_seat_other
              List.getElem?_modify_ne _ _ h_ne', List.getElem?_replicate, h_lt, if_true,
              Option.getD_some]
 
-/-- kick_player 的 post 座位在 seat_index 处被标记为 kicked（保留 player，folded/left_during_hand = true）。 -/
+/-- kick_player 的 post 座位在 seat_index 处被标记为 kicked（保留 player，folded/left_during_hand = true，
+    stack/bet 清零 — `Seat.kicked` 覆盖 bet 为 0，与 pre seat 的 bet 值无关）。 -/
 private lemma kick_post_get_seat_at_index
     (row : CommonRow) (ext : KickPlayerMethodColumns) (max_players : Nat) (seat_index : Nat)
     (h_seat_eq : ext.input_seat_index.val = seat_index)
     (h_lt : seat_index < max_players) :
     (extractPostTableFromKickPlayerAir row ext max_players seat_index).get_seat seat_index =
-      Seat.kicked { Seat.empty with player := PlayerId.ofNat 1 } := by
+      Seat.kicked { Seat.empty with
+        player := PlayerId.ofNat 1
+        bet := decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
+                 ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 } := by
   subst h_seat_eq
   simp only [extractPostTableFromKickPlayerAir, extractPreTableFromKickPlayerAir,
              extractPreTableFromActionAir, TexasPokerTable.get_seat,
@@ -745,11 +753,15 @@ theorem kick_player_air_sound :
     (expected_refund : Nat)
     (hseat : expected_seat_index < max_players),
     KickPlayerAirAcceptable row ext expected_seat_index max_players hlt expected_refund →
+    -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
+    Limb4Range16 ext.kicked_bet →
+    Limb4Range16 row.pre_pot →
     ContractKickPlayer
       (extractPreTableFromKickPlayerAir row ext max_players)
       (extractKickPlayerParamsFromAir ext)
       (extractPostTableFromKickPlayerAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index max_players hlt expected_refund hseat h_air
+    h_range_kicked_bet h_range_pre_pot
   -- 1. 解构 AIR 假设
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : KickPlayerMethodConstraints row ext expected_seat_index max_players hlt
@@ -757,7 +769,7 @@ theorem kick_player_air_sound :
   -- 2. 应用 active 前提得到约束合取
   have h_c := h_method h_active
   rcases h_c with ⟨h_seat_eq, _h_occ, _h_refund, _h_kicked, _h_seat_occ,
-                    h_ver, h_rs_unch, h_btn_unch, _h_src⟩
+                    h_ver, h_rs_unch, h_btn_unch, h_pot_delta, _h_src⟩
   -- 3. 关键派生：seat_index 一致性
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
     rw [h_seat_eq]; simp [nat_to_m31]
@@ -773,12 +785,26 @@ theorem kick_player_air_sound :
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
   -- 5. 座位级引理
   have h_pre_seat : (extractPreTableFromKickPlayerAir row ext max_players).get_seat expected_seat_index =
-      { Seat.empty with player := PlayerId.ofNat 1 } := by
+      { Seat.empty with
+        player := PlayerId.ofNat 1
+        bet := decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
+                 ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 } := by
     rw [← h_seat_val]
     exact kick_pre_get_seat_at_input row ext max_players h_seat_lt
   have h_post_seat : (extractPostTableFromKickPlayerAir row ext max_players expected_seat_index).get_seat expected_seat_index =
-      Seat.kicked { Seat.empty with player := PlayerId.ofNat 1 } :=
+      Seat.kicked { Seat.empty with
+        player := PlayerId.ofNat 1
+        bet := decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
+                 ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 } :=
     kick_post_get_seat_at_index row ext max_players expected_seat_index h_seat_val hseat
+  -- 5b. 资金守恒派生：从 PotDelta + range constraint 得到 decodeU64 级等式
+  have h_pot_eq : decodeU64 row.post_pot.1 row.post_pot.2.1
+                    row.post_pot.2.2.1 row.post_pot.2.2.2 =
+                  decodeU64 row.pre_pot.1 row.pre_pot.2.1
+                    row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
+                  decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
+                    ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 :=
+    pot_delta_implies_decode_eq row ext.kicked_bet h_active h_range_pre_pot h_range_kicked_bet h_pot_delta
   -- 6. 证明 ContractKickPlayer 的 17 个合取
   unfold ContractKickPlayer
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
@@ -809,9 +835,12 @@ theorem kick_player_air_sound :
     rw [h_params_seat, h_post_seat]
     simp [Seat.kicked, Seat.empty]
   · -- 10. post.betting.pot = pre.betting.pot + (pre.get_seat params.seat_index).bet
-    rw [kick_post_pot, kick_pre_pot]
-    rw [h_params_seat, h_pre_seat]
+    -- 由 PotDelta + range constraint 推出 decodeU64 级守恒：
+    --   decodeU64 post_pot = decodeU64 pre_pot + decodeU64 kicked_bet
+    -- 且 pre 座位 bet = decodeU64 kicked_bet（extraction 对齐 witness）。
+    rw [kick_post_pot, kick_pre_pot, h_params_seat, h_pre_seat]
     simp [Seat.empty]
+    exact h_pot_eq
   · -- 11. ∀ i, i ≠ params.seat_index → i < pre.max_players → post.get_seat i = pre.get_seat i
     intro i h_ne h_lt
     rw [h_params_seat] at h_ne

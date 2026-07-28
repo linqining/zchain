@@ -308,6 +308,7 @@ fn test_e2e_call_prove_verify() {
         80,   // post_seat_stack（原 100 - 20）
         20,   // post_seat_bet
         false, // is_all_in
+        0,    // pre_seat_bet（post_seat_bet - call_amount = 20 - 20）
     );
     let trace = gen_method_trace(CallAir::num_columns(), &row.to_vec(), &CallRow::padding().to_vec())
         .expect("trace 生成失败");
@@ -353,6 +354,7 @@ fn test_soundness_call_tampered_amount() {
         80,
         20,
         false,
+        0,    // pre_seat_bet（post_seat_bet - call_amount = 20 - 20）
     );
     let trace = gen_method_trace(CallAir::num_columns(), &row.to_vec(), &CallRow::padding().to_vec())
         .expect("trace 生成失败");
@@ -835,8 +837,8 @@ fn test_action_air_column_consistency() {
     assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
     assert_eq!(CheckAir::num_columns(), check::cols::NUM_COLUMNS);
 
-    // call: 通用 + 17 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
-    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 17);
+    // call: 通用 + 21 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness + PRE_SEAT_BET 4 limb）
+    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 21);
     assert_eq!(CallAir::num_columns(), call::cols::NUM_COLUMNS);
 
     // raise: 通用 + 46 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
@@ -856,8 +858,8 @@ fn test_action_air_column_consistency() {
     // force_fold: 通用 + 4 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
     assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 4);
 
-    // kick_player: 通用 + 7 业务（含 Gap 3 INPUT_SEAT_OCCUPIED boolean witness）
-    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 7);
+    // kick_player: 通用 + 11 业务（含 KICKED_BET 4 limb + Gap 3 INPUT_SEAT_OCCUPIED boolean witness）
+    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 11);
 }
 
 /// 单元测试：MethodKind 的 actions 档位分类正确。

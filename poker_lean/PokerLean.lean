@@ -241,6 +241,8 @@ theorem kick_player_sound_main :
     (expected_refund : Nat)
     (hseat : expected_seat_index < max_players),
     KickPlayerAirAcceptable row ext expected_seat_index max_players hlt expected_refund →
+    Limb4Range16 ext.kicked_bet →
+    Limb4Range16 row.pre_pot →
     ContractKickPlayer
       (extractPreTableFromKickPlayerAir row ext max_players)
       (extractKickPlayerParamsFromAir ext)

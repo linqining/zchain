@@ -62,6 +62,13 @@ private lemma join_pre_chip_pool
         ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2 := by
   simp [extractPreTableFromJoinTableAir]
 
+private lemma join_pre_addon_pool
+    (row : CommonRow) (ext : JoinTableMethodColumns) (max_players : Nat) :
+    (extractPreTableFromJoinTableAir row ext max_players).addon_pool =
+      decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
+        ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2 := by
+  simp [extractPreTableFromJoinTableAir]
+
 private lemma join_pre_hand_id
     (row : CommonRow) (ext : JoinTableMethodColumns) (max_players : Nat) :
     (extractPreTableFromJoinTableAir row ext max_players).hand_id = row.hand_id.val := by
@@ -214,7 +221,7 @@ theorem join_table_air_sound :
   -- 2. 应用 active 前提得到约束合取
   have h_c := h_method h_active
   rcases h_c with ⟨h_ver, h_rs_eq, h_rs_unch, h_seat_eq, _h_seat_empty,
-                    h_buy_in, h_chip_pool, h_player_nonempty, _h_src⟩
+                    h_buy_in, h_chip_pool, h_player_nonempty, h_bound_check, _h_src⟩
   -- 3. 关键派生：seat_index 一致性
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
     rw [h_seat_eq]; simp [nat_to_m31]
@@ -255,9 +262,9 @@ theorem join_table_air_sound :
         is_waiting := false, left_during_hand := false,
         pending_addon := 0, time_bank_ms := 0 } :=
     join_post_get_seat_at_index row ext max_players expected_seat_index h_seat_lt
-  -- 6. 证明 ContractJoinTable 的 21 个合取
+  -- 6. 证明 ContractJoinTable 的 22 个合取
   unfold ContractJoinTable
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · -- 1. pre.round_state = ROUND_WAITING
     rw [join_pre_round_state, h_rs_val]; rfl
   · -- 2. params.seat_index < pre.max_players
@@ -267,45 +274,51 @@ theorem join_table_air_sound :
     rfl
   · -- 4. params.buy_in ≥ pre.big_blind
     rw [join_params_buy_in, join_pre_big_blind]; exact h_buy_in'
-  · -- 5. ∀ i, (pre.get_seat i).player ≠ params.player
+  · -- 5. pre.chip_pool + pre.addon_pool + params.buy_in ≤ MAX_TOTAL_BET
+    -- 由 BoundCheck4Limb + bound_check_4limb_le 推出全局上界
+    rw [join_pre_chip_pool, join_pre_addon_pool, join_params_buy_in]
+    exact bound_check_4limb_le ext.input_pre_chip_pool ext.input_pre_addon_pool
+      ext.input_buy_in ext.input_bound_diff
+      ext.input_bound_carry_lo ext.input_bound_carry_hi h_bound_check
+  · -- 6. ∀ i, (pre.get_seat i).player ≠ params.player
     intro i h_lt
     rw [join_pre_get_seat, join_params_player]
     simp [Seat.empty, EMPTY_PLAYER, PlayerId.ofNat]
     exact ne_comm.mp h_player_ne
-  · -- 6. (post.get_seat params.seat_index).player = params.player
+  · -- 7. (post.get_seat params.seat_index).player = params.player
     rw [h_params_seat, h_post_seat, join_params_player]
-  · -- 7. (post.get_seat params.seat_index).stack = params.buy_in
+  · -- 8. (post.get_seat params.seat_index).stack = params.buy_in
     rw [h_params_seat, h_post_seat, join_params_buy_in]
-  · -- 8. (post.get_seat ...).folded = false
+  · -- 9. (post.get_seat ...).folded = false
     rw [h_params_seat, h_post_seat]
-  · -- 9. (post.get_seat ...).left_during_hand = false
+  · -- 10. (post.get_seat ...).left_during_hand = false
     rw [h_params_seat, h_post_seat]
-  · -- 10. (post.get_seat ...).all_in = false
+  · -- 11. (post.get_seat ...).all_in = false
     rw [h_params_seat, h_post_seat]
-  · -- 11. (post.get_seat ...).acted_this_round = false
+  · -- 12. (post.get_seat ...).acted_this_round = false
     rw [h_params_seat, h_post_seat]
-  · -- 12. (post.get_seat ...).bet = 0
+  · -- 13. (post.get_seat ...).bet = 0
     rw [h_params_seat, h_post_seat]
-  · -- 13. (post.get_seat ...).total_bet = 0
+  · -- 14. (post.get_seat ...).total_bet = 0
     rw [h_params_seat, h_post_seat]
-  · -- 14. ∀ i, i ≠ seat_index → i < max_players → post.get_seat i = pre.get_seat i
+  · -- 15. ∀ i, i ≠ seat_index → i < max_players → post.get_seat i = pre.get_seat i
     intro i h_ne h_lt
     rw [h_params_seat] at h_ne
     rw [join_pre_max_players] at h_lt
     exact join_post_get_seat_other row ext max_players expected_seat_index i h_ne h_lt
-  · -- 15. post.chip_pool = pre.chip_pool + params.buy_in
+  · -- 16. post.chip_pool = pre.chip_pool + params.buy_in
     rw [join_post_chip_pool, join_pre_chip_pool, join_params_buy_in]; exact h_chip_pool'
-  · -- 16. post.version = pre.version + 1
+  · -- 17. post.version = pre.version + 1
     rw [join_post_version, join_pre_version]; exact h_ver'
-  · -- 17. post.round_state = pre.round_state
+  · -- 18. post.round_state = pre.round_state
     rw [join_post_round_state, join_pre_round_state, h_rs']
-  · -- 18. post.max_players = pre.max_players
+  · -- 19. post.max_players = pre.max_players
     rw [join_post_max_players, join_pre_max_players]
-  · -- 19. post.big_blind = pre.big_blind
+  · -- 20. post.big_blind = pre.big_blind
     rw [join_post_big_blind, join_pre_big_blind]
-  · -- 20. post.small_blind = pre.small_blind
+  · -- 21. post.small_blind = pre.small_blind
     rw [join_post_small_blind, join_pre_small_blind]
-  · -- 21. post.hand_id = pre.hand_id
+  · -- 22. post.hand_id = pre.hand_id
     rw [join_post_hand_id, join_pre_hand_id]
 
 end PokerLean
