@@ -13,8 +13,9 @@
 //! 3. `amount > 0`
 //! 4. `current_bet == seat.bet`（无已有下注，否则应使用 call/raise）
 //! 5. 状态变更（复用 raise）：`seat.stack -= amount`, `seat.bet += amount`,
-//!    `seat.total_bet += amount`, `pot += amount`, `current_bet = seat.bet + amount`
+//!    `seat.total_bet += amount`；mid-round 时 `pot` 不变
 //! 6. 玩家标记 `acted_this_round = true`
+//! 7. `post.current_turn = Some(next_seat)`；收池/推进/结算分支不属于本 AIR
 //!
 //! ## AIR 列布局
 //!
@@ -55,10 +56,12 @@ pub mod cols {
     pub const PRE_SEAT_TOTAL_BET_BASE: usize = COMMON_NUM_COLUMNS + 24;
     /// `OUTPUT_SEAT_TOTAL_BET` 起始列（4 limb）— 阶段 3 新增（total_bet delta）。
     pub const OUTPUT_SEAT_TOTAL_BET_BASE: usize = COMMON_NUM_COLUMNS + 28;
-    /// `INPUT_AMOUNT_INV` witness（amount_0 的逆，用于 amount > 0 约束，阶段 3 新增）。
+    /// 保留列（旧 amount limb0 inverse witness，现强制为 0）。
     pub const INPUT_AMOUNT_INV: usize = COMMON_NUM_COLUMNS + 32;
+    /// `OUTPUT_CURRENT_TURN` — mid-round 推进后的下一行动座位。
+    pub const OUTPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 33;
     /// `bet` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 33;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 34;
 }
 
 /// `bet` 输入参数。
@@ -68,6 +71,18 @@ pub struct BetInput {
     pub seat_index: u8,
     /// 下注金额（增量，必须 > 0）。
     pub amount: u64,
+    /// 调用前 betting_round.current_bet（verifier-trusted）。
+    pub pre_current_bet: u64,
+    /// 调用前 betting_round.min_raise（verifier-trusted）。
+    pub pre_min_raise: u64,
+    /// 调用前 seat.bet（verifier-trusted）。
+    pub pre_seat_bet: u64,
+    /// 调用前 seat.stack（verifier-trusted）。
+    pub pre_seat_stack: u64,
+    /// 调用前 seat.total_bet（verifier-trusted）。
+    pub pre_seat_total_bet: u64,
+    /// mid-round 推进后的下一行动座位。
+    pub post_current_turn: u8,
 }
 
 /// `bet` AIR 公开输入。
@@ -164,8 +179,9 @@ impl FrameworkEval for BetAir {
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
-        // amount_0 的逆（amount > 0 约束）
+        // 旧 amount limb0 inverse witness；完整 u64 判零改由 trusted 常量完成。
         let input_amount_inv = eval.next_trace_mask();
+        let output_current_turn = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -173,15 +189,69 @@ impl FrameworkEval for BetAir {
         // 约束: current_turn == seat_index（Gap: 阻止为非当前行动座位构造动作）
         eval.add_constraint(is_active.clone() * (input_current_turn - expected_seat));
 
-        // 约束 2：amount 一致性（limb 0 sanity，4-limb delta 见下）
-        let expected_amount_0: E::F = M31::from((self.input.amount & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_amount[0].clone() - expected_amount_0));
-
-        // 约束 2b（阶段 3 新增）：amount > 0 —— amount_0 * inv == 1（invertibility，limb 0）
+        // 约束 2：资金 witness 绑定 verifier-trusted AIR 常量，并复现 apply_bet →
+        // process_raise 的静态金额规则。
+        let total_bet = self.input.pre_seat_bet.checked_add(self.input.amount);
+        let total_bet_value = total_bet.unwrap_or(0);
+        let raise_amount = total_bet_value.saturating_sub(self.input.pre_current_bet);
+        let is_all_in = self.input.amount == self.input.pre_seat_stack;
+        let post_stack_u64 = self.input.pre_seat_stack.checked_sub(self.input.amount);
+        let post_bet_u64 = self.input.pre_seat_bet.checked_add(self.input.amount);
+        let post_total_u64 = self
+            .input
+            .pre_seat_total_bet
+            .checked_add(self.input.amount);
+        let bet_is_valid = self.input.amount > 0
+            && total_bet.is_some()
+            && self.input.pre_current_bet <= self.input.pre_seat_bet
+            && total_bet_value > self.input.pre_current_bet
+            && self.input.amount <= self.input.pre_seat_stack
+            && (raise_amount >= self.input.pre_min_raise || is_all_in)
+            && post_stack_u64.is_some()
+            && post_bet_u64.is_some()
+            && post_total_u64.is_some();
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(
-            is_active.clone() * (input_amount[0].clone() * input_amount_inv - one.clone()),
-        );
+        let valid: E::F = M31::from(u32::from(bet_is_valid)).into();
+        eval.add_constraint(is_active.clone() * (valid - one.clone()));
+
+        let expected_amount = u64_to_m31_limbs(self.input.amount);
+        let expected_pre_bet = u64_to_m31_limbs(self.input.pre_seat_bet);
+        let expected_pre_stack = u64_to_m31_limbs(self.input.pre_seat_stack);
+        let expected_pre_total = u64_to_m31_limbs(self.input.pre_seat_total_bet);
+        let expected_post_stack = u64_to_m31_limbs(post_stack_u64.unwrap_or(0));
+        let expected_post_bet = u64_to_m31_limbs(post_bet_u64.unwrap_or(0));
+        let expected_post_total = u64_to_m31_limbs(post_total_u64.unwrap_or(0));
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone() * (input_amount[i].clone() - expected_amount[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (pre_seat_bet[i].clone() - expected_pre_bet[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (pre_seat_stack[i].clone() - expected_pre_stack[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (pre_seat_total_bet[i].clone() - expected_pre_total[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_seat_stack[i].clone() - expected_post_stack[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_seat_bet[i].clone() - expected_post_bet[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_seat_total_bet[i].clone() - expected_post_total[i].into()),
+            );
+        }
+
+        // 不能用 amount limb0 判零：合法 amount=65536 的低 limb 也是 0。
+        // 旧 witness 强制为 0，避免留下自由列。
+        eval.add_constraint(is_active.clone() * input_amount_inv);
 
         // 约束 3：output_acted == 1（玩家已行动）
         eval.add_constraint(is_active.clone() * (output_acted - one));
@@ -189,25 +259,17 @@ impl FrameworkEval for BetAir {
         // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
         eval.add_constraint(common.round_state_unchanged());
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
-        eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
+        eval.add_constraint(common.round_state_is_postflop_betting(input_pre_round_state_q));
 
         // 约束 5（阶段 3 soundness 升级：全 4-limb 资金守恒，对齐 raise/call）：
-        // pot += amount（4 limb）
-        for __c in common.pot_delta_4limb(&input_amount) { eval.add_constraint(__c); }
-        // seat.stack -= amount（4 limb 反向 delta）
-        for __c in common.limb4_delta_rev(
-            &pre_seat_stack,
-            &output_seat_stack,
-            &input_amount,
-        ) { eval.add_constraint(__c); }
-        // seat.bet += amount（4 limb）
-        for __c in common.limb4_delta(&pre_seat_bet, &output_seat_bet, &input_amount) { eval.add_constraint(__c); }
-        // seat.total_bet += amount（4 limb）
-        for __c in common.limb4_delta(
-            &pre_seat_total_bet,
-            &output_seat_total_bet,
-            &input_amount,
-        ) { eval.add_constraint(__c); }
+        // VM 在 mid-round 不收池；筹码保留在 seat.bet。
+        for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
+        // stack/bet/total_bet 已绑定到 verifier 端 checked u64 运算的逐 limb常量；
+        // 不使用无 carry 的逐 limb delta。
+
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.post_current_turn)).into();
+        eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
 
         eval
     }
@@ -240,8 +302,10 @@ pub struct BetRow {
     pub pre_seat_total_bet: [M31; 4],
     /// `OUTPUT_SEAT_TOTAL_BET`（4 limb）— 阶段 3 新增。
     pub output_seat_total_bet: [M31; 4],
-    /// `INPUT_AMOUNT_INV`（amount_0 的逆）— 阶段 3 新增（amount > 0）。
+    /// 保留列（旧 amount limb0 inverse witness，固定为 0）。
     pub input_amount_inv: M31,
+    /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
+    pub output_current_turn: M31,
 }
 
 impl BetRow {
@@ -269,14 +333,6 @@ impl BetRow {
         post_seat_total_bet: u64,
     ) -> Self {
         let rs_m31 = u8_to_m31(pre_round_state);
-        // amount_0 的逆（amount > 0）：若 amount_0 == 0 则逆不存在，下注非法。
-        // host 端 amount > 0 已由 apply_bet 保证；这里在 amount_0 != 0 时求逆。
-        let amount_limb0 = (input.amount & 0xFFFF) as u32;
-        let input_amount_inv = if amount_limb0 == 0 {
-            ZERO // 非法情况，约束 amount_0 * inv == 1 会失败
-        } else {
-            M31::from(amount_limb0).inverse()
-        };
         Self {
             common: CommonRow::active(
                 MethodKind::Bet,
@@ -306,7 +362,8 @@ impl BetRow {
             output_seat_stack: u64_to_m31_limbs(post_seat_stack),
             pre_seat_total_bet: u64_to_m31_limbs(pre_seat_total_bet),
             output_seat_total_bet: u64_to_m31_limbs(post_seat_total_bet),
-            input_amount_inv,
+            input_amount_inv: ZERO,
+            output_current_turn: u8_to_m31(input.post_current_turn),
         }
     }
 
@@ -327,6 +384,7 @@ impl BetRow {
             pre_seat_total_bet: [ZERO; 4],
             output_seat_total_bet: [ZERO; 4],
             input_amount_inv: ZERO,
+            output_current_turn: ZERO,
         }
     }
 
@@ -346,6 +404,7 @@ impl BetRow {
         v.extend_from_slice(&self.pre_seat_total_bet);
         v.extend_from_slice(&self.output_seat_total_bet);
         v.push(self.input_amount_inv);
+        v.push(self.output_current_turn);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

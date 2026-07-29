@@ -222,18 +222,21 @@ private lemma call_params_amount
         ext.input_call_amount.2.2.1 ext.input_call_amount.2.2.2 := by
   unfold extractCallParamsFromAir; rfl
 
-/-! ## call AIR soundness 主定理
+/-! ## call AIR 的 mid-round 模型内 soundness 定理
 
-    所有 Gap 均已闭合：
+    该定理只在手写 Lean mid-round 局部模型内成立：
     - RoundStateIsBetting：阻止非下注轮 call
     - CurrentTurnMatches：阻止非当前行动座位 call
     - SeatOccupied：阻止空座位 call
     - ButtonUnchanged：dealer_seat 不变
-    - PotDelta（全 4 limb）：post_pot = pre_pot + call_amount
+    - PotUnchanged（全 4 limb）：post_pot = pre_pot
     - Limb4DeltaRev（stack）：pre_stack = post_stack + call_amount → call_amount ≤ pre_stack
     - Limb4Delta（bet）：post_bet = pre_bet + call_amount
     - Limb4Delta（total_bet）：post_total_bet = pre_total_bet + call_amount
-    - StateRootConsistency：witness 绑定到 committed state root -/
+    - StateRootConsistency：witness 绑定到抽象 committed state root
+
+    它不涵盖 VM 的 end-of-round/settlement 分支，也未证明新 Rust
+    `post_current_turn`/trusted-amount 列与本 Lean 列结构等价。 -/
 theorem call_air_sound :
   ∀ (row : CommonRow) (ext : CallMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
@@ -242,7 +245,6 @@ theorem call_air_sound :
     CallAirAcceptable row ext expected_seat_index hlt expected_call_amount max_players →
     -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
     Limb4Range16 ext.input_call_amount →
-    Limb4Range16 row.pre_pot →
     Limb4Range16 ext.output_seat_stack →
     Limb4Range16 ext.input_pre_seat_bet →
     Limb4Range16 ext.input_pre_seat_total_bet →
@@ -251,7 +253,7 @@ theorem call_air_sound :
       (extractCallParamsFromAir ext)
       (extractPostTableFromCallAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index hlt expected_call_amount max_players hseat h_air
-    h_range_amt h_range_pre_pot h_range_post_stack h_range_pre_bet h_range_pre_total
+    h_range_amt h_range_post_stack h_range_pre_bet h_range_pre_total
   -- 1. 解构 AIR 假设
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : CallMethodConstraints row ext expected_seat_index hlt
@@ -259,7 +261,7 @@ theorem call_air_sound :
   -- 2. 应用 active 前提得到约束合取
   have h_c := h_method h_active
   rcases h_c with ⟨h_seat_eq, h_turn_eq, _h_occ, _h_amt, _h_acted,
-                    h_ver, h_rs_unch, h_rsb, _h_btn_unch, h_pot_delta,
+                    h_ver, h_rs_unch, h_rsb, _h_btn_unch, h_pot_unch,
                     h_stack_delta, h_bet_delta, h_total_delta, _h_src⟩
   -- 3. 关键派生：seat_index 一致性
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
@@ -280,14 +282,12 @@ theorem call_air_sound :
                   row.pre_version.2.2.1 row.pre_version.2.2.2 + 1 := h_ver h_active
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
   have h_btn' : row.post_button = row.pre_button := _h_btn_unch h_active
-  -- 5. 资金守恒派生（从 limb delta 约束得到 decodeU64 级等式）
+  -- 5. 资金守恒派生（mid-round pot 不变，座位筹码仅在 stack/bet 间移动）
   have h_pot_eq : decodeU64 row.post_pot.1 row.post_pot.2.1
                     row.post_pot.2.2.1 row.post_pot.2.2.2 =
                   decodeU64 row.pre_pot.1 row.pre_pot.2.1
-                    row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
-                  decodeU64 ext.input_call_amount.1 ext.input_call_amount.2.1
-                    ext.input_call_amount.2.2.1 ext.input_call_amount.2.2.2 :=
-    pot_delta_implies_decode_eq row ext.input_call_amount h_active h_range_pre_pot h_range_amt h_pot_delta
+                    row.pre_pot.2.2.1 row.pre_pot.2.2.2 :=
+    pot_unchanged_implies_decode_eq row h_active h_pot_unch
   have h_pre_stack : decodeU64 ext.input_pre_seat_stack.1 ext.input_pre_seat_stack.2.1
                        ext.input_pre_seat_stack.2.2.1 ext.input_pre_seat_stack.2.2.2 =
                      decodeU64 ext.output_seat_stack.1 ext.output_seat_stack.2.1
@@ -384,8 +384,8 @@ theorem call_air_sound :
     rw [call_post_version, call_pre_version]; exact h_ver'
   · -- 16. post.round_state = pre.round_state
     rw [call_post_round_state, call_pre_round_state, h_rs']
-  · -- 17. post.betting.pot = pre.betting.pot + params.call_amount
-    rw [call_post_pot, call_pre_pot, h_params_amount]; exact h_pot_eq
+  · -- 17. mid-round: post.betting.pot = pre.betting.pot
+    rw [call_post_pot, call_pre_pot]; exact h_pot_eq
   · -- 18. post.betting.current_bet = pre.betting.current_bet
     rw [call_post_current_bet, call_pre_current_bet]
   · -- 19. post.betting.dealer_seat = pre.betting.dealer_seat

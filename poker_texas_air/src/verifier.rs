@@ -12,8 +12,9 @@ use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
 use stwo::core::verifier::{VerificationError, verify};
 use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 
-use crate::airs::lifecycle::create_table::{CreateTableAir, cols};
 use crate::airs::TexasAir;
+use crate::airs::bound::BoundAir;
+use crate::airs::lifecycle::create_table::{CreateTableAir, cols};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::prover::{CreateTableProof, MethodProof};
 use crate::public_inputs::TexasPublicInputs;
@@ -40,6 +41,8 @@ pub fn verify_create_table_against(
     expected_public_inputs.verify_roots()?;
     expected_public_inputs.verify_air_statement(&expected_air.statement())?;
     let log_size = expected_air.log_size();
+    let expected_trace_row =
+        expected_public_inputs.require_expected_trace_row(cols::NUM_COLUMNS)?;
     let stark_proof = &proof.stark_proof;
 
     // 1. Channel + CommitmentSchemeVerifier
@@ -72,7 +75,7 @@ pub fn verify_create_table_against(
     let mut allocator = TraceLocationAllocator::default();
     let component = FrameworkComponent::new(
         &mut allocator,
-        expected_air,
+        BoundAir::new(expected_air, expected_trace_row),
         stwo::core::fields::qm31::SecureField::from(0u32),
     );
 
@@ -121,11 +124,27 @@ pub fn verify_method_against<A>(
 where
     A: TexasAir,
 {
+    verify_method_inner(proof, expected_air, expected_public_inputs, true)
+}
+
+fn verify_method_inner<A>(
+    proof: MethodProof<A>,
+    expected_air: A,
+    expected_public_inputs: &TexasPublicInputs,
+    validate_canonical_state: bool,
+) -> TexasAirResult<()>
+where
+    A: TexasAir,
+{
     let config = PcsConfig::default();
     expected_public_inputs.verify_roots()?;
     expected_public_inputs.verify_air_statement(&expected_air.statement())?;
+    if validate_canonical_state {
+        expected_air.validate_public_inputs(expected_public_inputs)?;
+    }
     let log_size = expected_air.log_size();
     let num_columns = expected_air.trace_num_columns();
+    let expected_trace_row = expected_public_inputs.require_expected_trace_row(num_columns)?;
     let stark_proof = proof.stark_proof.clone();
 
     // 1. Channel + CommitmentSchemeVerifier
@@ -156,7 +175,7 @@ where
     let mut allocator = TraceLocationAllocator::default();
     let component = FrameworkComponent::new(
         &mut allocator,
-        expected_air,
+        BoundAir::new(expected_air, expected_trace_row),
         stwo::core::fields::qm31::SecureField::from(0u32),
     );
 
@@ -181,7 +200,10 @@ where
 {
     let expected_air = proof.air.clone();
     let expected_public_inputs = proof.public_inputs.clone();
-    verify_method_against(proof, expected_air, &expected_public_inputs)
+    // Historical mechanism tests use synthetic, non-table preimages. This
+    // compatibility entry point already trusts proof-carried metadata, so it
+    // deliberately skips the production canonical-table validation hook.
+    verify_method_inner(proof, expected_air, &expected_public_inputs, false)
 }
 
 /// 验证 Aggregator proof。

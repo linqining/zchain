@@ -372,6 +372,20 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         self.is_active.clone() * vp
     }
 
+    /// 约束 `pre_round_state ∈ {FLOP, TURN, RIVER}`，用于只允许 postflop 的 `bet`。
+    ///
+    /// 三次 vanishing polynomial `(rs-3)(rs-4)(rs-5)` 展开为
+    /// `rs³ - 12rs² + 47rs - 60`。复用调用方提供的 `q = rs²` witness 后，
+    /// 写成 `rs*q - 12q + 47rs - 60`，约束次数不超过 2。
+    pub fn round_state_is_postflop_betting(&self, q: E::F) -> E::F {
+        let rs = self.pre_round_state.clone();
+        let twelve: E::F = M31::from(12u32).into();
+        let forty_seven: E::F = M31::from(47u32).into();
+        let sixty: E::F = M31::from(60u32).into();
+        self.is_active.clone()
+            * (rs.clone() * q.clone() - twelve * q + forty_seven * rs - sixty)
+    }
+
     /// 约束 `q == pre_round_state²`（Gap 1 witness 一致性，degree-2 两列乘积）。
     /// 配合 `round_state_is_betting(q)` 使用。
     pub fn round_state_q_constraint(&self, q: E::F) -> E::F {

@@ -39,6 +39,13 @@ pub enum TexasAirError {
     )]
     UntrustedAggregationDisabled,
 
+    /// 下注动作触发了当前 AIR 尚未建模的收池、轮次推进或结算分支。
+    ///
+    /// 生产 prover 必须 fail-closed；不能拿只描述 mid-round seat update 的 AIR
+    /// 去证明完整的 end-of-round VM transition。
+    #[error("下注转移未覆盖（fail-closed）: {0}")]
+    UnsupportedBettingTransition(String),
+
     /// 序列化/反序列化失败。
     #[error("序列化错误: {0}")]
     SerializationError(String),

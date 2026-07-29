@@ -38,8 +38,10 @@ pub mod cols {
     pub const INPUT_PRE_ROUND_STATE_Q: usize = COMMON_NUM_COLUMNS + 2;
     /// `INPUT_CURRENT_TURN` witness（Gap: current_turn == seat_index）。
     pub const INPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 3;
+    /// `OUTPUT_CURRENT_TURN` — mid-round 推进后的下一行动座位。
+    pub const OUTPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 4;
     /// `force_fold` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 4;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 5;
 }
 
 /// `force_fold` 输入参数。
@@ -47,6 +49,8 @@ pub mod cols {
 pub struct ForceFoldInput {
     /// 被强制 fold 的座位索引。
     pub seat_index: u8,
+    /// mid-round 推进后的下一行动座位。
+    pub post_current_turn: u8,
 }
 
 /// `force_fold` AIR 公开输入。
@@ -98,6 +102,7 @@ impl FrameworkEval for ForceFoldAir {
         let input_pre_round_state_q = eval.next_trace_mask();
         // Gap: current_turn == seat_index witness
         let input_current_turn = eval.next_trace_mask();
+        let output_current_turn = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -118,6 +123,10 @@ impl FrameworkEval for ForceFoldAir {
         // 约束 4（审计共性，degree-2 limb0）：pot 不变（force_fold 不改变 pot）。
         for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
 
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.post_current_turn)).into();
+        eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
+
         // TODO 阶段 3 完整版：约束 admin 签名（需引入 ECDSA AIR 子组件）
 
         eval
@@ -137,6 +146,8 @@ pub struct ForceFoldRow {
     pub input_pre_round_state_q: M31,
     /// `INPUT_CURRENT_TURN` witness（Gap: current_turn == seat_index）。
     pub input_current_turn: M31,
+    /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
+    pub output_current_turn: M31,
 }
 
 impl ForceFoldRow {
@@ -177,6 +188,7 @@ impl ForceFoldRow {
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
             input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
+            output_current_turn: u8_to_m31(input.post_current_turn),
         }
     }
 
@@ -189,6 +201,7 @@ impl ForceFoldRow {
             output_folded: ZERO,
             input_pre_round_state_q: ZERO,
             input_current_turn: ZERO,
+            output_current_turn: ZERO,
         }
     }
 
@@ -200,6 +213,7 @@ impl ForceFoldRow {
         v.push(self.output_folded);
         v.push(self.input_pre_round_state_q);
         v.push(self.input_current_turn);
+        v.push(self.output_current_turn);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

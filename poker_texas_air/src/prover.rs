@@ -9,19 +9,23 @@
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
+use stwo::core::proof::StarkProof;
+use stwo::core::vcs_lifted::poseidon252_merkle::{
+    Poseidon252MerkleChannel, Poseidon252MerkleHasher,
+};
+use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{prove, ProvingError};
-use stwo::prover::backend::simd::SimdBackend;
-use stwo::core::vcs_lifted::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
-use stwo::core::proof::StarkProof;
-use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
+use stwo::prover::{ProvingError, prove};
+use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
+use crate::airs::TexasAir;
+use crate::airs::bound::BoundAir;
 use crate::airs::lifecycle::create_table::CreateTableAir;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::public_inputs::TexasPublicInputs;
-use crate::trace_gen::create_table_trace::CreateTableTrace;
 use crate::trace_gen::MethodTrace;
+use crate::trace_gen::create_table_trace::CreateTableTrace;
 
 /// `create_table` 方法的 L1 proof 类型。
 #[derive(Debug, Clone)]
@@ -41,7 +45,7 @@ pub struct CreateTableProof {
 ///
 /// 阶段 2-4 引入：替代为每个方法定义专用 Proof 类型。
 #[derive(Debug, Clone)]
-pub struct MethodProof<A: FrameworkEval + Clone + Sync> {
+pub struct MethodProof<A: TexasAir> {
     /// Stwo 内部 proof。
     pub stark_proof: StarkProof<Poseidon252MerkleHasher>,
     /// AIR 公开输入（用于 verify）。
@@ -71,6 +75,15 @@ pub fn prove_create_table(
     public_inputs: TexasPublicInputs,
 ) -> TexasAirResult<CreateTableProof> {
     let log_size = trace.trace.log_size;
+    let public_inputs = prepare_public_inputs_for_trace(
+        public_inputs,
+        &trace.trace,
+        CreateTableAir::num_columns(),
+    )?;
+    public_inputs.verify_roots()?;
+    public_inputs.verify_air_statement(&trace.air.statement())?;
+    let expected_trace_row =
+        public_inputs.require_expected_trace_row(CreateTableAir::num_columns())?;
 
     // 1. PCS 配置 + twiddles 预计算
     let config = PcsConfig::default();
@@ -102,10 +115,13 @@ pub fn prove_create_table(
     }
 
     // 5. 构建 AIR component
-    let air = trace.air.clone();
+    let air = BoundAir::new(trace.air.clone(), expected_trace_row);
     let mut allocator = TraceLocationAllocator::default();
-    let component =
-        FrameworkComponent::new(&mut allocator, air, stwo::core::fields::qm31::SecureField::from(0u32));
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        air,
+        stwo::core::fields::qm31::SecureField::from(0u32),
+    );
 
     // 6. 生成证明
     let stark_proof = prove(&[&component], &mut channel, commitment_scheme)
@@ -142,9 +158,20 @@ pub fn prove_method<A>(
     public_inputs: TexasPublicInputs,
 ) -> TexasAirResult<MethodProof<A>>
 where
-    A: FrameworkEval + Clone + Sync,
+    A: TexasAir,
 {
     let log_size = trace.log_size;
+    if num_columns != trace.num_columns || num_columns != air.trace_num_columns() {
+        return Err(TexasAirError::SpecViolation(format!(
+            "trace/AIR column mismatch: argument={num_columns}, trace={}, AIR={}",
+            trace.num_columns,
+            air.trace_num_columns()
+        )));
+    }
+    let public_inputs = prepare_public_inputs_for_trace(public_inputs, trace, num_columns)?;
+    public_inputs.verify_roots()?;
+    public_inputs.verify_air_statement(&air.statement())?;
+    let expected_trace_row = public_inputs.require_expected_trace_row(num_columns)?;
 
     // 1. PCS 配置 + twiddles
     let config = PcsConfig::default();
@@ -179,7 +206,7 @@ where
     let mut allocator = TraceLocationAllocator::default();
     let component = FrameworkComponent::new(
         &mut allocator,
-        air.clone(),
+        BoundAir::new(air.clone(), expected_trace_row),
         stwo::core::fields::qm31::SecureField::from(0u32),
     );
 
@@ -194,6 +221,41 @@ where
         num_columns,
         public_inputs,
     })
+}
+
+/// Require a trusted row in production and validate it against the supplied
+/// trace. Test-only compatibility builds may derive it from row zero so the
+/// historical mechanism tests keep exercising Stwo.
+fn prepare_public_inputs_for_trace(
+    mut public_inputs: TexasPublicInputs,
+    trace: &MethodTrace,
+    num_columns: usize,
+) -> TexasAirResult<TexasPublicInputs> {
+    let trace_row = trace.first_row()?;
+    if trace_row.len() != num_columns {
+        return Err(TexasAirError::SpecViolation(format!(
+            "trace row width {} does not match declared width {num_columns}",
+            trace_row.len()
+        )));
+    }
+
+    if public_inputs.expected_trace_row.is_none() {
+        #[cfg(any(test, feature = "test-helpers"))]
+        public_inputs.bind_expected_trace_row(&trace_row)?;
+
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        return Err(TexasAirError::SpecViolation(
+            "production proving requires a verifier-reconstructed expected trace row".into(),
+        ));
+    }
+
+    let expected = public_inputs.require_expected_trace_row(num_columns)?;
+    if expected != trace_row {
+        return Err(TexasAirError::SpecViolation(
+            "prover trace row does not match trusted expected trace row".into(),
+        ));
+    }
+    Ok(public_inputs)
 }
 
 /// 请求聚合多个 proof descriptor；当前默认拒绝。

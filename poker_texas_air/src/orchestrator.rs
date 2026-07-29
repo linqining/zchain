@@ -14,9 +14,9 @@
 //! ┌─────────────────────▼─────────────────────────────┐
 //! │ Orchestrator（本模块，链下/独立进程）              │
 //! │  for task in tasks:                               │
-//! │   child = prove_and_verify_task(task)?            │
-//! │   children.push(child)                            │
-//! │  verify_chain(&children)?  // left.post==right.pre│
+//! │   prove = prove_method(task)?                     │
+//! │   receipt = native_verify(proof, trusted_pi)?     │
+//! │   verified_chain.push(receipt)?                   │
 //! │  // 当前停在 VerifiedChain；无可信 final recursion │
 //! └───────────────────────────────────────────────────┘
 //! ```
@@ -24,8 +24,10 @@
 //! ## 职责边界
 //!
 //! - **生成**：为每个 [`ProveTask`] 构造 trace + AIR，调 [`prove_method`]
-//! - **自验**：prove 后立即 [`verify_method`]，确保每个 proof 有效
-//! - **链式一致性**：验证相邻任务的 `post_state_root == next.pre_state_root`
+//! - **自验**：prove 后立即用 verifier 独立提供的 AIR/PI 原生验证，并签发 receipt
+//! - **链式一致性**：只聚合 verifier receipt，检查 table/hand/call_seq/
+//!   full state root/version 连续性
+//! - **信任边界**：该路径是 O(N) 宿主验证，不是 recursive/succinct proof
 //! - **不负责**：proof 序列化/传输/L1 提交（留后续 L1 submit 层）
 //!
 //! ## 当前覆盖
@@ -45,6 +47,12 @@ use crate::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use crate::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 use crate::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use crate::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
+use crate::airs::actions::request_leave_after_hand::{
+    RequestLeaveAfterHandAir, RequestLeaveAfterHandInput, RequestLeaveAfterHandRow,
+};
+use crate::airs::crypto::fold_with_proof::{
+    FoldWithProofAir, FoldWithProofInput, FoldWithProofRow,
+};
 use crate::airs::crypto::join_and_shuffle::{JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow};
 use crate::airs::crypto::leave_with_proof::{
     LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
@@ -68,16 +76,24 @@ use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHand
 use crate::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::prove_task::{MethodInput, ProveTask};
+use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
 use crate::prover::prove_method;
 use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
 use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
+use crate::verified_chain::{
+    VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
+    verify_method_against_and_issue_receipt,
+};
 
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {
     state_root_to_air_limbs(root)
 }
 
-/// 已证明任务的摘要（用于链式一致性验证 + 后续聚合）。
+/// 已处理任务的 descriptor 摘要。
+///
+/// 该类型便于日志和实验性 Aggregator AIR，但它不是 proof 验证回执，
+/// 不能用来构造 [`VerifiedChain`]。可信链只由原生 verifier 签发的
+/// [`VerificationReceipt`] 构造。
 #[derive(Debug, Clone)]
 pub struct ProvenTask {
     /// 任务原始 method kind。
@@ -91,7 +107,10 @@ pub struct ProvenTask {
 }
 
 impl ProvenTask {
-    /// 转为 Aggregator 的子节点描述符。
+    /// 转为实验性 descriptor-only Aggregator 的子节点描述符。
+    ///
+    /// 返回值不能证明任何子 proof 已被验证，生产 Aggregator 入口会
+    /// fail closed。
     #[must_use]
     pub fn to_child_descriptor(&self) -> crate::aggregator_air::ChildDescriptor {
         crate::aggregator_air::ChildDescriptor {
@@ -108,6 +127,8 @@ impl ProvenTask {
 pub struct Orchestrator {
     /// 已证明的任务摘要（按 prove 顺序）。
     proven: Vec<ProvenTask>,
+    /// 只有原生 verifier 成功后才会签发的验证回执。
+    verified_chain_builder: VerifiedChainBuilder,
 }
 
 impl Orchestrator {
@@ -125,6 +146,7 @@ impl Orchestrator {
     /// - Stwo prover 错误（约束不满足）
     /// - verify 失败（proof 无效）
     pub fn prove_and_verify_task(&mut self, task: &ProveTask) -> TexasAirResult<ProvenTask> {
+        validate_full_dispatch_task(task)?;
         let pre_image = table_state_preimage(&task.pre_table)?;
         let post_image = table_state_preimage(&task.post_table)?;
         let pre_root = StateRoot(starknet_crypto::poseidon_hash_many(&pre_image));
@@ -141,6 +163,12 @@ impl Orchestrator {
             call_seq: task.call_seq,
             pre_version: task.pre_table.version,
             post_version: task.post_table.version,
+            dispatch_call_digest: dispatch_call_digest(
+                &task.context,
+                &task.selector,
+                &task.raw_args,
+            )?,
+            expected_trace_row: None,
         };
         let summary = ProvenTask {
             method_kind: task.method_kind,
@@ -149,7 +177,7 @@ impl Orchestrator {
             call_seq: task.call_seq,
         };
 
-        match task.method_kind {
+        let receipt = match task.method_kind {
             MethodKind::CreateTable => self.prove_create_table(task, pre_root, post_root, &pi)?,
             MethodKind::JoinTable => self.prove_join_table(task, pre_root, post_root, &pi)?,
             MethodKind::LeaveTable => self.prove_leave_table(task, pre_root, post_root, &pi)?,
@@ -171,8 +199,15 @@ impl Orchestrator {
             MethodKind::SubmitShuffleV2 => self.prove_submit_shuffle_v2(task, pre_root, post_root, &pi)?,
             MethodKind::SubmitPlayerRevealTokens => self.prove_submit_reveal_tokens(task, pre_root, post_root, &pi)?,
             MethodKind::SubmitReconstructDeck => self.prove_submit_reconstruct_deck(task, pre_root, post_root, &pi)?,
-        }
+            MethodKind::RequestLeaveAfterHand => {
+                self.prove_request_leave_after_hand(task, pre_root, post_root, &pi)?
+            }
+            MethodKind::FoldWithProof => {
+                self.prove_fold_with_proof(task, pre_root, post_root, &pi)?
+            }
+        };
 
+        self.verified_chain_builder.push_receipt(receipt)?;
         self.proven.push(summary.clone());
         Ok(summary)
     }
@@ -190,25 +225,45 @@ impl Orchestrator {
         Ok(out)
     }
 
-    /// 验证已证明任务的链式一致性：相邻任务的 post/pre state_root 衔接。
+    /// Prove and natively verify a complete task batch, returning its trusted
+    /// host-side chain artifact.
     ///
-    /// 约束：`proven[i].post_state_root == proven[i+1].pre_state_root`。
+    /// This convenience entry point always starts from a fresh orchestrator so
+    /// a previous batch cannot be spliced into the result accidentally. Runtime
+    /// and verification cost are O(N) in the number of method proofs.
     ///
     /// # Errors
     ///
-    /// 链断裂时返回 [`TexasAirError::SpecViolation`]。
+    /// Returns an error if any proof fails native verification, the batch is
+    /// empty, or receipt metadata/state continuity is broken.
+    pub fn prove_and_verify_chain(tasks: &[ProveTask]) -> TexasAirResult<VerifiedChain> {
+        let mut orchestrator = Self::new();
+        orchestrator.prove_tasks(tasks)?;
+        orchestrator.verified_chain()
+    }
+
+    /// 验证已证明任务的完整链式一致性。
+    ///
+    /// 只使用原生 verifier 签发的 receipt，同时检查 table/hand、
+    /// call_seq、完整 state root 与 state version 的连续性。
+    ///
+    /// # Errors
+    ///
+    /// 链断裂时返回 [`TexasAirError::RecursionError`]。
     pub fn verify_chain(&self) -> TexasAirResult<()> {
-        for w in self.proven.windows(2) {
-            let left = &w[0];
-            let right = &w[1];
-            if left.post_state_root != right.pre_state_root {
-                return Err(TexasAirError::SpecViolation(format!(
-                    "state_root 链断裂 @ call_seq {}→{}: left.post={:?} != right.pre={:?}",
-                    left.call_seq, right.call_seq, left.post_state_root, right.pre_state_root
-                )));
-            }
-        }
-        Ok(())
+        self.verified_chain().map(|_| ())
+    }
+
+    /// 生成宿主侧已验证链。
+    ///
+    /// 这是 O(N) 原生 proof 验证的接受产物，不是 succinct recursive proof，
+    /// 也不能作为脱离当前可信宿主进程的可转移证据。
+    ///
+    /// # Errors
+    ///
+    /// 空链，或 table/hand/call_seq/state-root/version 不连续时返回错误。
+    pub fn verified_chain(&self) -> TexasAirResult<VerifiedChain> {
+        self.verified_chain_builder.snapshot()
     }
 
     /// 返回已证明任务摘要的切片。
@@ -225,7 +280,7 @@ impl Orchestrator {
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::CreateTable {
             name,
             max_players,
@@ -271,8 +326,10 @@ impl Orchestrator {
             pre_version,
             post_version,
         );
-        let proof = prove_method(&trace, air.clone(), CreateTableAir::num_columns(), pi.clone())?;
-        crate::verifier::verify_method_against(proof, air, pi)
+        let mut bound_pi = pi.clone();
+        bound_pi.bind_expected_trace_row(&row.to_vec())?;
+        let proof = prove_method(&trace, air.clone(), CreateTableAir::num_columns(), bound_pi.clone())?;
+        verify_method_against_and_issue_receipt(proof, air, &bound_pi)
     }
 
     fn prove_fold(
@@ -281,15 +338,20 @@ impl Orchestrator {
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(TexasAirError::SpecViolation(format!(
                 "fold 任务的 method_input 应为 SeatOnly，实际：{:?}",
                 task.method_input
             )));
         };
+        let post_current_turn = validate_native_mid_round_action(
+            task,
+            NativeMidRoundAction::Fold { seat_index: *seat_index },
+        )?;
         let input = FoldInput {
             seat_index: *seat_index,
+            post_current_turn,
         };
         let pre_version = task.pre_table.version;
         let post_version = task.post_table.version;
@@ -321,8 +383,10 @@ impl Orchestrator {
             pre_version,
             post_version,
         };
-        let proof = prove_method(&trace, air.clone(), FoldAir::num_columns(), pi.clone())?;
-        crate::verifier::verify_method_against(proof, air, pi)
+        let mut bound_pi = pi.clone();
+        bound_pi.bind_expected_trace_row(&row.to_vec())?;
+        let proof = prove_method(&trace, air.clone(), FoldAir::num_columns(), bound_pi.clone())?;
+        verify_method_against_and_issue_receipt(proof, air, &bound_pi)
     }
 
     // ===== 以下为其余 19 个方法的 trace 构造（模式同 prove_create_table / prove_fold）=====
@@ -356,7 +420,7 @@ impl Orchestrator {
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::Join { player, buy_in } = &task.method_input else {
             return Err(input_mismatch("join_table", "Join", &task.method_input));
         };
@@ -385,7 +449,7 @@ impl Orchestrator {
     fn prove_leave_table(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("leave_table", "SeatOnly", &task.method_input));
         };
@@ -411,7 +475,7 @@ impl Orchestrator {
     fn prove_start_hand(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let input = StartHandInput {
             active_count: count_active_occupied(&task.pre_table),
             ante_mode: task.post_table.ante_mode,
@@ -440,7 +504,7 @@ impl Orchestrator {
     fn prove_tick(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         // tick 无 prove_task（dispatch 返回 None），但保留接线以备手动/集成驱动。
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("tick", "Empty", &task.method_input));
@@ -473,7 +537,7 @@ impl Orchestrator {
     fn prove_reset_for_next_hand(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("reset_for_next_hand", "Empty", &task.method_input));
         };
@@ -498,16 +562,21 @@ impl Orchestrator {
     fn prove_check(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("check", "SeatOnly", &task.method_input));
         };
+        let post_current_turn = validate_native_mid_round_action(
+            task,
+            NativeMidRoundAction::Check { seat_index: *seat_index },
+        )?;
         let seat = Self::seat(&task.pre_table, *seat_index)?;
         let current_bet = task.pre_table.betting_round.as_ref().map_or(0, |b| b.current_bet);
         let input = CheckInput {
             seat_index: *seat_index,
             current_bet,
             seat_bet: seat.bet,
+            post_current_turn,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -528,14 +597,32 @@ impl Orchestrator {
     fn prove_call(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("call", "SeatOnly", &task.method_input));
         };
+        let post_current_turn = validate_native_mid_round_action(
+            task,
+            NativeMidRoundAction::Call { seat_index: *seat_index },
+        )?;
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
         let call_amount = pre_seat.stack.saturating_sub(post_seat.stack);
-        let input = CallInput { seat_index: *seat_index, call_amount };
+        let pre_current_bet = task
+            .pre_table
+            .betting_round
+            .as_ref()
+            .expect("mid-round validator requires betting_round")
+            .current_bet;
+        let input = CallInput {
+            seat_index: *seat_index,
+            call_amount,
+            pre_current_bet,
+            pre_seat_bet: pre_seat.bet,
+            pre_seat_stack: pre_seat.stack,
+            pre_seat_total_bet: pre_seat.total_bet,
+            post_current_turn,
+        };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
@@ -558,19 +645,36 @@ impl Orchestrator {
     fn prove_raise(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::Raise { seat_index, total_bet } = &task.method_input else {
             return Err(input_mismatch("raise", "Raise", &task.method_input));
         };
+        let post_current_turn = validate_native_mid_round_action(
+            task,
+            NativeMidRoundAction::Raise {
+                seat_index: *seat_index,
+                total_bet: *total_bet,
+            },
+        )?;
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
-        let min_raise = task.pre_table.betting_round.as_ref().map_or(0, |b| b.min_raise);
+        let pre_round = task
+            .pre_table
+            .betting_round
+            .as_ref()
+            .expect("mid-round validator requires betting_round");
+        let min_raise = pre_round.min_raise;
         let post_current_bet = task.post_table.betting_round.as_ref().map_or(0, |b| b.current_bet);
         let post_min_raise = task.post_table.betting_round.as_ref().map_or(0, |b| b.min_raise);
         let input = RaiseInput {
             seat_index: *seat_index,
             raise_to: *total_bet,
             min_raise,
+            pre_current_bet: pre_round.current_bet,
+            pre_seat_stack: pre_seat.stack,
+            pre_seat_bet: pre_seat.bet,
+            pre_seat_total_bet: pre_seat.total_bet,
+            post_current_turn,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -595,13 +699,34 @@ impl Orchestrator {
     fn prove_bet(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::Bet { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("bet", "Bet", &task.method_input));
         };
+        let post_current_turn = validate_native_mid_round_action(
+            task,
+            NativeMidRoundAction::Bet {
+                seat_index: *seat_index,
+                amount: *amount,
+            },
+        )?;
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
-        let input = BetInput { seat_index: *seat_index, amount: *amount };
+        let pre_round = task
+            .pre_table
+            .betting_round
+            .as_ref()
+            .expect("mid-round validator requires betting_round");
+        let input = BetInput {
+            seat_index: *seat_index,
+            amount: *amount,
+            pre_current_bet: pre_round.current_bet,
+            pre_min_raise: pre_round.min_raise,
+            pre_seat_bet: pre_seat.bet,
+            pre_seat_stack: pre_seat.stack,
+            pre_seat_total_bet: pre_seat.total_bet,
+            post_current_turn,
+        };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
@@ -623,11 +748,19 @@ impl Orchestrator {
     fn prove_auto_fold(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("auto_fold", "SeatOnly", &task.method_input));
         };
-        let input = AutoFoldInput { seat_index: *seat_index, current_time: 0 };
+        let post_current_turn = validate_native_mid_round_action(
+            task,
+            NativeMidRoundAction::AutoFold { seat_index: *seat_index },
+        )?;
+        let input = AutoFoldInput {
+            seat_index: *seat_index,
+            current_time: 0,
+            post_current_turn,
+        };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
         let row = AutoFoldRow::active(
@@ -645,11 +778,18 @@ impl Orchestrator {
     fn prove_force_fold(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("force_fold", "SeatOnly", &task.method_input));
         };
-        let input = ForceFoldInput { seat_index: *seat_index };
+        let post_current_turn = validate_native_mid_round_action(
+            task,
+            NativeMidRoundAction::ForceFold { seat_index: *seat_index },
+        )?;
+        let input = ForceFoldInput {
+            seat_index: *seat_index,
+            post_current_turn,
+        };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
         let row = ForceFoldRow::active(
@@ -667,7 +807,7 @@ impl Orchestrator {
     fn prove_kick_player(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::Kick { seat_index, reason: _ } = &task.method_input else {
             return Err(input_mismatch("kick_player", "Kick", &task.method_input));
         };
@@ -696,7 +836,7 @@ impl Orchestrator {
     fn prove_addon(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::Funds { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("addon", "Funds", &task.method_input));
         };
@@ -721,7 +861,7 @@ impl Orchestrator {
     fn prove_rebuy(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
+    ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::Funds { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("rebuy", "Funds", &task.method_input));
         };
@@ -743,16 +883,81 @@ impl Orchestrator {
         })
     }
 
+    fn prove_request_leave_after_hand(
+        &self,
+        task: &ProveTask,
+        pre_root: StateRoot,
+        post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
+    ) -> TexasAirResult<VerificationReceipt> {
+        let MethodInput::RequestLeaveAfterHand { seat_index } = &task.method_input else {
+            return Err(input_mismatch(
+                "request_leave_after_hand",
+                "RequestLeaveAfterHand",
+                &task.method_input,
+            ));
+        };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
+        let post_seat = Self::seat(&task.post_table, *seat_index)?;
+        let input = RequestLeaveAfterHandInput {
+            seat_index: *seat_index,
+            pre_want_leave: pre_seat.want_leave,
+            post_want_leave: post_seat.want_leave,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let row = RequestLeaveAfterHandRow::active(
+            &input,
+            srm(pre_root),
+            srm(post_root),
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            pre_v,
+            post_v,
+            task.pre_table.round_state,
+            task.post_table.round_state,
+            task.pre_table.pot,
+            task.post_table.pot,
+            task.pre_table.button,
+            task.post_table.button,
+        );
+        run(
+            RequestLeaveAfterHandAir::num_columns(),
+            &row,
+            &RequestLeaveAfterHandRow::padding(),
+            pi,
+            move || RequestLeaveAfterHandAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: srm(pre_root),
+                post_state_root: srm(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version: pre_v,
+                post_version: post_v,
+            },
+        )
+    }
+
     fn prove_join_and_shuffle(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
-        let MethodInput::Join { player, buy_in: _ } = &task.method_input else {
-            return Err(input_mismatch("join_and_shuffle", "Join", &task.method_input));
-        };
-        let seat_index = find_join_seat(&task.post_table, player)?;
-        let input = JoinAndShuffleInput {
+    ) -> TexasAirResult<VerificationReceipt> {
+        let MethodInput::JoinAndShuffle {
             seat_index,
+            player: _,
+            buy_in: _,
+            raw_args: _,
+        } = &task.method_input else {
+            return Err(input_mismatch(
+                "join_and_shuffle",
+                "JoinAndShuffle",
+                &task.method_input,
+            ));
+        };
+        let input = JoinAndShuffleInput {
+            seat_index: *seat_index,
             new_deck_commitment: deck_commitment(&task.post_table),
             shuffle_phase: task.post_table.shuffle_state.phase,
         };
@@ -771,12 +976,71 @@ impl Orchestrator {
         })
     }
 
+    fn prove_fold_with_proof(
+        &self,
+        task: &ProveTask,
+        pre_root: StateRoot,
+        post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
+    ) -> TexasAirResult<VerificationReceipt> {
+        let MethodInput::FoldWithProof { seat_index, raw_args: _ } = &task.method_input else {
+            return Err(input_mismatch(
+                "fold_with_proof",
+                "FoldWithProof",
+                &task.method_input,
+            ));
+        };
+        let post_current_turn = require_supported_mid_round_post(task, "fold_with_proof")?;
+        let input = FoldWithProofInput {
+            seat_index: *seat_index,
+            post_current_turn,
+        };
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let row = FoldWithProofRow::active(
+            &input,
+            srm(pre_root),
+            srm(post_root),
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            pre_v,
+            post_v,
+            task.pre_table.round_state,
+            task.post_table.round_state,
+            task.pre_table.pot,
+            task.post_table.pot,
+            task.pre_table.button,
+            task.post_table.button,
+        );
+        run(
+            FoldWithProofAir::num_columns(),
+            &row,
+            &FoldWithProofRow::padding(),
+            pi,
+            move || FoldWithProofAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: srm(pre_root),
+                post_state_root: srm(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version: pre_v,
+                post_version: post_v,
+            },
+        )
+    }
+
     fn prove_leave_with_proof(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("leave_with_proof", "SeatOnly", &task.method_input));
+    ) -> TexasAirResult<VerificationReceipt> {
+        let MethodInput::LeaveWithProof { seat_index, raw_args: _ } = &task.method_input else {
+            return Err(input_mismatch(
+                "leave_with_proof",
+                "LeaveWithProof",
+                &task.method_input,
+            ));
         };
         let input = LeaveWithProofInput {
             seat_index: *seat_index,
@@ -800,9 +1064,13 @@ impl Orchestrator {
     fn prove_submit_shuffle_v2(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("submit_shuffle_v2", "SeatOnly", &task.method_input));
+    ) -> TexasAirResult<VerificationReceipt> {
+        let MethodInput::SubmitShuffleV2 { seat_index, raw_args: _ } = &task.method_input else {
+            return Err(input_mismatch(
+                "submit_shuffle_v2",
+                "SubmitShuffleV2",
+                &task.method_input,
+            ));
         };
         let input = SubmitShuffleV2Input {
             seat_index: *seat_index,
@@ -826,9 +1094,13 @@ impl Orchestrator {
     fn prove_submit_reveal_tokens(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("submit_player_reveal_tokens", "SeatOnly", &task.method_input));
+    ) -> TexasAirResult<VerificationReceipt> {
+        let MethodInput::SubmitPlayerRevealTokens { seat_index, raw_args: _ } = &task.method_input else {
+            return Err(input_mismatch(
+                "submit_player_reveal_tokens",
+                "SubmitPlayerRevealTokens",
+                &task.method_input,
+            ));
         };
         let input = SubmitPlayerRevealTokensInput {
             seat_index: *seat_index,
@@ -855,9 +1127,13 @@ impl Orchestrator {
     fn prove_submit_reconstruct_deck(
         &self, task: &ProveTask, pre_root: StateRoot, post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<()> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("submit_reconstruct_deck", "SeatOnly", &task.method_input));
+    ) -> TexasAirResult<VerificationReceipt> {
+        let MethodInput::SubmitReconstructDeck { seat_index, raw_args: _ } = &task.method_input else {
+            return Err(input_mismatch(
+                "submit_reconstruct_deck",
+                "SubmitReconstructDeck",
+                &task.method_input,
+            ));
         };
         let input = SubmitReconstructDeckInput {
             seat_index: *seat_index,
@@ -884,6 +1160,230 @@ impl Orchestrator {
 
 // ===== Orchestrator 内部辅助函数 =====
 
+/// Replay the exact public VM dispatch carried by a proof task.
+///
+/// This is the host trust boundary for P05-H: the verifier does not accept a
+/// prover-selected `(pre, post, method_input)` tuple. It reruns the same public
+/// dispatch with the authenticated caller/context, selector, and raw Borsh
+/// arguments, then requires the complete post table and task metadata to match.
+fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()> {
+    if task.selector != task.method_kind.selector() {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{}: task selector does not match MethodKind",
+            task.method_kind.method_name()
+        )));
+    }
+
+    let mut replayed_post = task.pre_table.clone();
+    let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+        &task.context,
+        &mut replayed_post,
+        &task.selector,
+        &task.raw_args,
+    )
+    .map_err(|e| {
+        TexasAirError::SpecViolation(format!(
+            "{}: full VM dispatch replay failed: {e}",
+            task.method_kind.method_name()
+        ))
+    })?;
+
+    if replayed_post != task.post_table {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{}: task post_table does not equal full VM dispatch replay",
+            task.method_kind.method_name()
+        )));
+    }
+
+    let output: DispatchOutput = borsh::from_slice(&result.return_value).map_err(|e| {
+        TexasAirError::SerializationError(format!(
+            "{}: replayed dispatch output borsh: {e}",
+            task.method_kind.method_name()
+        ))
+    })?;
+    let replayed_task = output.prove_task.ok_or_else(|| {
+        TexasAirError::SpecViolation(format!(
+            "{}: state-changing dispatch replay produced no prove task",
+            task.method_kind.method_name()
+        ))
+    })?;
+
+    let task_matches = replayed_task.method_kind == task.method_kind
+        && replayed_task.method_input == task.method_input
+        && replayed_task.context == task.context
+        && replayed_task.selector == task.selector
+        && replayed_task.raw_args == task.raw_args
+        && replayed_task.pre_table == task.pre_table
+        && replayed_task.post_table == task.post_table
+        && replayed_task.table_id == task.table_id
+        && replayed_task.hand_id == task.hand_id
+        && replayed_task.call_seq == task.call_seq;
+    if !task_matches {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{}: task fields do not match the task regenerated by VM dispatch",
+            task.method_kind.method_name()
+        )));
+    }
+
+    Ok(())
+}
+
+/// 当前 action AIR 只覆盖 `advance_turn` 的 mid-round 分支。
+#[derive(Debug, Clone, Copy)]
+enum NativeMidRoundAction {
+    Fold { seat_index: u8 },
+    Check { seat_index: u8 },
+    Call { seat_index: u8 },
+    Raise { seat_index: u8, total_bet: u64 },
+    Bet { seat_index: u8, amount: u64 },
+    AutoFold { seat_index: u8 },
+    ForceFold { seat_index: u8 },
+}
+
+impl NativeMidRoundAction {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Fold { .. } => "fold",
+            Self::Check { .. } => "check",
+            Self::Call { .. } => "call",
+            Self::Raise { .. } => "raise",
+            Self::Bet { .. } => "bet",
+            Self::AutoFold { .. } => "auto_fold",
+            Self::ForceFold { .. } => "force_fold",
+        }
+    }
+}
+
+/// 先重放真实 VM action 并逐字段比对 post table，再收窄到 AIR 已覆盖的
+/// mid-round 分支。这样诚实 prover 不会把 end-of-round/settlement transition
+/// 塞进简化 AIR；生产 verifier 侧还会由 trusted-row 绑定再次检查 witness。
+fn validate_native_mid_round_action(
+    task: &ProveTask,
+    action: NativeMidRoundAction,
+) -> TexasAirResult<u8> {
+    let method = action.name();
+    let pre = &task.pre_table;
+    let post = &task.post_table;
+
+    if pre.betting_round.is_none() {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{method}: pre-state is not a betting round"
+        )));
+    }
+    if post.round_state != pre.round_state
+        || post.betting_round.is_none()
+        || post.current_turn.is_none()
+        || post.pot != pre.pot
+    {
+        return Err(TexasAirError::UnsupportedBettingTransition(format!(
+            "{method} triggered collect_bets_to_pot / advance_round / settlement; \
+             current AIR proves only same-round transitions with unchanged pot and Some(current_turn)"
+        )));
+    }
+
+    let mut expected = pre.clone();
+    let mut events = Vec::new();
+    let vm_result = match action {
+        NativeMidRoundAction::Fold { seat_index } => {
+            poker_l1::vm::contracts::texas_poker::state_machine::apply_fold(
+                &mut expected,
+                seat_index,
+                &mut events,
+            )
+        }
+        NativeMidRoundAction::Check { seat_index } => {
+            poker_l1::vm::contracts::texas_poker::state_machine::apply_check(
+                &mut expected,
+                seat_index,
+                &mut events,
+            )
+        }
+        NativeMidRoundAction::Call { seat_index } => {
+            poker_l1::vm::contracts::texas_poker::state_machine::apply_call(
+                &mut expected,
+                seat_index,
+                &mut events,
+            )
+        }
+        NativeMidRoundAction::Raise {
+            seat_index,
+            total_bet,
+        } => poker_l1::vm::contracts::texas_poker::state_machine::apply_raise(
+            &mut expected,
+            seat_index,
+            total_bet,
+            &mut events,
+        ),
+        NativeMidRoundAction::Bet { seat_index, amount } => {
+            poker_l1::vm::contracts::texas_poker::state_machine::apply_bet(
+                &mut expected,
+                seat_index,
+                amount,
+                &mut events,
+            )
+        }
+        NativeMidRoundAction::AutoFold { seat_index } => {
+            poker_l1::vm::contracts::texas_poker::state_machine::apply_fold_internal(
+                &mut expected,
+                seat_index,
+                poker_l1::vm::contracts::texas_poker::constants::FOLD_REASON_AUTO_TIMEOUT,
+                &mut events,
+            )
+        }
+        NativeMidRoundAction::ForceFold { seat_index } => {
+            poker_l1::vm::contracts::texas_poker::state_machine::apply_fold_internal(
+                &mut expected,
+                seat_index,
+                poker_l1::vm::contracts::texas_poker::constants::FOLD_REASON_FORCE_ADMIN,
+                &mut events,
+            )
+        }
+    };
+    vm_result.map_err(|e| {
+        TexasAirError::SpecViolation(format!("{method}: native VM replay failed: {e}"))
+    })?;
+
+    // dispatch() advances consensus sequence metadata after a successful state-machine call.
+    expected.call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation(format!("{method}: call_seq overflow during replay"))
+    })?;
+    expected.hand_id = pre.hand_id;
+
+    if expected != *post {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{method}: ProveTask post_table does not equal native VM replay result"
+        )));
+    }
+    if task.call_seq != post.call_seq || task.hand_id != post.hand_id {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{method}: task metadata does not match post-table sequence metadata"
+        )));
+    }
+
+    Ok(post.current_turn.expect("checked Some above"))
+}
+
+/// Accept only the already-replayed `advance_turn` mid-round shape.
+///
+/// This helper is used for compound actions such as `fold_with_proof`, whose
+/// cryptographic mutation is validated by full dispatch replay but whose AIR
+/// still cannot represent collection/round advancement/settlement.
+fn require_supported_mid_round_post(task: &ProveTask, method: &str) -> TexasAirResult<u8> {
+    let pre = &task.pre_table;
+    let post = &task.post_table;
+    if pre.betting_round.is_none()
+        || post.betting_round.is_none()
+        || post.round_state != pre.round_state
+        || post.pot != pre.pot
+        || post.current_turn.is_none()
+    {
+        return Err(TexasAirError::UnsupportedBettingTransition(format!(
+            "{method}: full VM replay is valid, but this AIR only supports same-round, pot-unchanged transitions with current_turn=Some"
+        )));
+    }
+    Ok(post.current_turn.expect("checked Some above"))
+}
+
 /// `state_root_to_m31_limbs` 的短别名。
 fn srm(root: StateRoot) -> [M31; 4] {
     state_root_to_m31_limbs(root)
@@ -896,15 +1396,23 @@ fn run<A, F>(
     padding: &impl ToM31Vec,
     public_inputs: &crate::public_inputs::TexasPublicInputs,
     build_air: F,
-) -> TexasAirResult<()>
+) -> TexasAirResult<VerificationReceipt>
 where
     A: crate::airs::TexasAir,
     F: FnOnce() -> A,
 {
-    let trace = gen_method_trace(num_columns, &row.to_vec_m31(), &padding.to_vec_m31())?;
+    let row_values = row.to_vec_m31();
+    let trace = gen_method_trace(num_columns, &row_values, &padding.to_vec_m31())?;
     let air = build_air();
-    let proof = prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
-    crate::verifier::verify_method_against(proof, air, public_inputs)
+    let mut bound_public_inputs = public_inputs.clone();
+    bound_public_inputs.bind_expected_trace_row(&row_values)?;
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        num_columns,
+        bound_public_inputs.clone(),
+    )?;
+    verify_method_against_and_issue_receipt(proof, air, &bound_public_inputs)
 }
 
 /// 能产出 `Vec<M31>` 的抽象（避免与 CommonRow 的 `to_vec` 命名冲突）。
@@ -936,7 +1444,8 @@ impl_row_to_vec!(
     JoinTableRow, LeaveTableRow, StartHandRow, TickRow, ResetForNextHandRow,
     CheckRow, CallRow, RaiseRow, BetRow, AutoFoldRow, ForceFoldRow, KickPlayerRow,
     AddonRow, RebuyRow, JoinAndShuffleRow, LeaveWithProofRow, SubmitShuffleV2Row,
-    SubmitPlayerRevealTokensRow, SubmitReconstructDeckRow,
+    SubmitPlayerRevealTokensRow, SubmitReconstructDeckRow, RequestLeaveAfterHandRow,
+    FoldWithProofRow,
 );
 
 /// 构造"方法输入与 MethodInput variant 不匹配"错误。
@@ -981,6 +1490,14 @@ fn count_active_occupied(
 mod tests {
     use super::*;
     use poker_l1::object_model::ObjectID;
+    use poker_l1::signature::TaggedPubkey;
+    use poker_l1::vm::contracts::dispatch::DispatchContext;
+    use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
+    use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
+    use poker_l1::vm::contracts::texas_poker::dispatch::{
+        self as texas_dispatch, BetArgs, CreateTableArgs, RaiseArgs, SeatIndexArgs,
+    };
+    use poker_l1::vm::contracts::texas_poker::state_machine;
     use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
     fn make_table(name: &str) -> TexasPokerTable {
@@ -994,12 +1511,106 @@ mod tests {
         )
     }
 
+    fn test_task(
+        method_kind: MethodKind,
+        method_input: MethodInput,
+        pre_table: TexasPokerTable,
+        post_table: TexasPokerTable,
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+    ) -> ProveTask {
+        let (selector, raw_args, caller) = match &method_input {
+            MethodInput::CreateTable {
+                name,
+                max_players,
+                small_blind,
+                big_blind,
+            } => (
+                texas_dispatch::selectors::create_table(),
+                borsh::to_vec(&CreateTableArgs {
+                    name: name.clone(),
+                    max_players: *max_players,
+                    small_blind: *small_blind,
+                    big_blind: *big_blind,
+                })
+                .expect("create_table args should serialize"),
+                pre_table.creator,
+            ),
+            MethodInput::SeatOnly { seat_index } => {
+                let selector = match method_kind {
+                    MethodKind::Fold => texas_dispatch::selectors::fold(),
+                    MethodKind::Check => texas_dispatch::selectors::check(),
+                    MethodKind::Call => texas_dispatch::selectors::call(),
+                    MethodKind::AutoFold => texas_dispatch::selectors::auto_fold(),
+                    MethodKind::ForceFold => texas_dispatch::selectors::force_fold(),
+                    other => panic!("unsupported SeatOnly test method: {other:?}"),
+                };
+                let caller = pre_table
+                    .seats
+                    .get(usize::from(*seat_index))
+                    .map_or(pre_table.creator, |seat| seat.player);
+                (
+                    selector,
+                    borsh::to_vec(&SeatIndexArgs {
+                        seat_index: *seat_index,
+                    })
+                    .expect("seat args should serialize"),
+                    caller,
+                )
+            }
+            MethodInput::Raise {
+                seat_index,
+                total_bet,
+            } => (
+                texas_dispatch::selectors::raise(),
+                borsh::to_vec(&RaiseArgs {
+                    seat_index: *seat_index,
+                    total_bet: *total_bet,
+                })
+                .expect("raise args should serialize"),
+                pre_table.seats[usize::from(*seat_index)].player,
+            ),
+            MethodInput::Bet { seat_index, amount } => (
+                texas_dispatch::selectors::bet(),
+                borsh::to_vec(&BetArgs {
+                    seat_index: *seat_index,
+                    amount: *amount,
+                })
+                .expect("bet args should serialize"),
+                pre_table.seats[usize::from(*seat_index)].player,
+            ),
+            other => panic!("unsupported orchestrator test input: {other:?}"),
+        };
+        ProveTask::new(
+            method_kind,
+            method_input,
+            DispatchContext {
+                caller,
+                caller_pubkey: TaggedPubkey {
+                    tag: 0,
+                    raw: vec![0xBB; 32],
+                },
+                chain_id: 1,
+                block_height: 100,
+                block_timestamp: 1_000_000,
+            },
+            selector,
+            raw_args,
+            pre_table,
+            post_table,
+            table_id,
+            hand_id,
+            call_seq,
+        )
+    }
+
     #[test]
     fn orchestrator_prove_create_table() {
         let pre = make_table("pre");
         let mut post = make_table("post");
         post.version = 1; // create_table 后 version+1
-        let task = ProveTask::new(
+        let task = test_task(
             MethodKind::CreateTable,
             MethodInput::CreateTable {
                 name: "post".into(),
@@ -1023,24 +1634,281 @@ mod tests {
     fn orchestrator_prove_fold() {
         let mut pre = make_table("pre");
         pre.version = 1;
-        pre.round_state = poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
-        pre.seats[0].player = [0x01; 20];
-        pre.seats[0].stack = 1000;
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1000;
+        }
         let mut post = pre.clone();
-        post.seats[0].folded = true;
-        post.version = 2;
+        state_machine::apply_fold(&mut post, 0, &mut vec![]).unwrap();
+        post.call_seq = pre.call_seq + 1;
+        let hand_id = pre.hand_id;
+        let call_seq = post.call_seq;
 
-        let task = ProveTask::new(
+        let task = test_task(
             MethodKind::Fold,
             MethodInput::SeatOnly { seat_index: 0 },
             pre,
             post,
             1,
-            1,
-            1,
+            hand_id,
+            call_seq,
         );
         let mut orch = Orchestrator::new();
         orch.prove_and_verify_task(&task).expect("fold prove+verify 应成功");
+    }
+
+    /// P06 回归：真实 VM 的非零 mid-round call 不收池，且可完成 prove+verify。
+    #[test]
+    fn orchestrator_accepts_nonzero_mid_round_call() {
+        let mut pre = make_table("mid-round-call");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        pre.pot = 25;
+        pre.hand_id = 7;
+        pre.call_seq = 11;
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+        }
+        pre.seats[0].bet = 50;
+        pre.seats[1].bet = 100;
+        pre.seats[2].bet = 100;
+
+        let mut post = pre.clone();
+        state_machine::apply_call(&mut post, 0, &mut vec![]).unwrap();
+        post.call_seq = pre.call_seq + 1;
+        assert_eq!(post.pot, pre.pot, "mid-round call must not collect bets");
+        assert_eq!(post.current_turn, Some(1));
+
+        let task = test_task(
+            MethodKind::Call,
+            MethodInput::SeatOnly { seat_index: 0 },
+            pre,
+            post.clone(),
+            9,
+            post.hand_id,
+            post.call_seq,
+        );
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("nonzero mid-round call should prove and verify");
+    }
+
+    /// P06 回归：完整加注更新 current_bet/min_raise，但 mid-round 不收池。
+    #[test]
+    fn orchestrator_accepts_normal_mid_round_raise() {
+        let mut pre = make_table("normal-mid-round-raise");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        pre.pot = 55;
+        pre.hand_id = 8;
+        pre.call_seq = 20;
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+        }
+        pre.seats[1].bet = 100;
+        pre.seats[2].bet = 100;
+
+        let mut post = pre.clone();
+        state_machine::apply_raise(&mut post, 0, 300, &mut vec![]).unwrap();
+        post.call_seq = pre.call_seq + 1;
+        let post_round = post.betting_round.expect("raise remains in betting round");
+        assert_eq!(post_round.current_bet, 300);
+        assert_eq!(post_round.min_raise, 200);
+        assert_eq!(post.pot, pre.pot);
+        assert_eq!(post.current_turn, Some(1));
+
+        let task = test_task(
+            MethodKind::Raise,
+            MethodInput::Raise {
+                seat_index: 0,
+                total_bet: 300,
+            },
+            pre,
+            post.clone(),
+            9,
+            post.hand_id,
+            post.call_seq,
+        );
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("normal mid-round raise should prove and verify");
+    }
+
+    /// P06 回归：短 all-in 合法，但不能降低/重设既有 min_raise。
+    #[test]
+    fn orchestrator_accepts_short_all_in_raise_without_reopening() {
+        let mut pre = make_table("short-all-in-raise");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound {
+            current_bet: 300,
+            min_raise: 200,
+        });
+        pre.current_turn = Some(0);
+        pre.pot = 77;
+        pre.hand_id = 9;
+        pre.call_seq = 30;
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+        }
+        pre.seats[0].stack = 400;
+        pre.seats[1].bet = 300;
+        pre.seats[2].bet = 300;
+
+        let mut post = pre.clone();
+        state_machine::apply_raise(&mut post, 0, 400, &mut vec![]).unwrap();
+        post.call_seq = pre.call_seq + 1;
+        let post_round = post.betting_round.expect("raise remains in betting round");
+        assert_eq!(post_round.current_bet, 400);
+        assert_eq!(post_round.min_raise, 200, "short all-in must not reopen action");
+        assert!(post.seats[0].all_in);
+        assert_eq!(post.pot, pre.pot);
+
+        let task = test_task(
+            MethodKind::Raise,
+            MethodInput::Raise {
+                seat_index: 0,
+                total_bet: 400,
+            },
+            pre,
+            post.clone(),
+            9,
+            post.hand_id,
+            post.call_seq,
+        );
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("short all-in mid-round raise should prove and verify");
+    }
+
+    /// P06 回归：bet 只覆盖 postflop 无既有下注的 mid-round 开注。
+    #[test]
+    fn orchestrator_accepts_postflop_mid_round_bet() {
+        let mut pre = make_table("postflop-bet");
+        pre.round_state = ROUND_FLOP;
+        pre.betting_round = Some(BettingRound::new(100, 0));
+        pre.current_turn = Some(0);
+        pre.pot = 300;
+        pre.hand_id = 10;
+        pre.call_seq = 40;
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+        }
+
+        let mut post = pre.clone();
+        state_machine::apply_bet(&mut post, 0, 200, &mut vec![]).unwrap();
+        post.call_seq = pre.call_seq + 1;
+        let post_round = post.betting_round.expect("bet remains in betting round");
+        assert_eq!(post_round.current_bet, 200);
+        assert_eq!(post_round.min_raise, 200);
+        assert_eq!(post.seats[0].bet, 200);
+        assert_eq!(post.pot, pre.pot);
+        assert_eq!(post.current_turn, Some(1));
+
+        let task = test_task(
+            MethodKind::Bet,
+            MethodInput::Bet {
+                seat_index: 0,
+                amount: 200,
+            },
+            pre,
+            post.clone(),
+            9,
+            post.hand_id,
+            post.call_seq,
+        );
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("postflop mid-round bet should prove and verify");
+    }
+
+    /// P06 回归：最后一个对手 fold 会直接结算/重置，当前 action AIR 必须拒绝。
+    #[test]
+    fn orchestrator_rejects_last_opponent_fold_settlement() {
+        let mut pre = make_table("fold-settlement");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        pre.pot = 250;
+        pre.hand_id = 11;
+        pre.call_seq = 50;
+        for i in 0..2 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+            pre.seats[i].bet = 100;
+            pre.seats[i].total_bet = 100;
+        }
+
+        let mut post = pre.clone();
+        state_machine::apply_fold(&mut post, 0, &mut vec![]).unwrap();
+        post.call_seq = pre.call_seq + 1;
+        assert_ne!(post.round_state, pre.round_state);
+        assert!(post.current_turn.is_none());
+        assert!(post.betting_round.is_none());
+
+        let task = test_task(
+            MethodKind::Fold,
+            MethodInput::SeatOnly { seat_index: 0 },
+            pre,
+            post.clone(),
+            9,
+            post.hand_id,
+            post.call_seq,
+        );
+        assert!(matches!(
+            Orchestrator::new().prove_and_verify_task(&task),
+            Err(TexasAirError::UnsupportedBettingTransition(_))
+        ));
+    }
+
+    /// P06 回归：heads-up 最后一个 check 会收池并推进轮次，简化 action AIR
+    /// 必须在生产 prover 入口显式 fail-closed。
+    #[test]
+    fn orchestrator_rejects_heads_up_end_round_check() {
+        let mut pre = make_table("end-round-check");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(1);
+        pre.hand_id = 3;
+        pre.call_seq = 4;
+        for i in 0..2 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 900;
+            pre.seats[i].bet = 100;
+            pre.seats[i].total_bet = 100;
+        }
+        pre.seats[0].acted_this_round = true;
+        state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
+
+        let mut post = pre.clone();
+        state_machine::apply_check(&mut post, 1, &mut vec![]).unwrap();
+        post.call_seq = pre.call_seq + 1;
+        assert_ne!(post.round_state, pre.round_state);
+        assert!(post.current_turn.is_none());
+        assert!(post.pot > pre.pot);
+
+        let task = test_task(
+            MethodKind::Check,
+            MethodInput::SeatOnly { seat_index: 1 },
+            pre,
+            post.clone(),
+            9,
+            post.hand_id,
+            post.call_seq,
+        );
+        let result = Orchestrator::new().prove_and_verify_task(&task);
+        assert!(matches!(
+            result,
+            Err(TexasAirError::UnsupportedBettingTransition(_))
+        ));
     }
 
     /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
@@ -1055,7 +1923,7 @@ mod tests {
         pre.seats[0].stack = 1000;
         pre.seats[0].bet = 0;
         let post = pre.clone();
-        let task = ProveTask::new(
+        let task = test_task(
             MethodKind::Check,
             MethodInput::SeatOnly { seat_index: 0 },
             pre,
@@ -1086,7 +1954,7 @@ mod tests {
         let pre1 = make_table("pre_placeholder");
         let mut post1 = make_table("table_v1");
         post1.version = 1;
-        let task1 = ProveTask::new(
+        let task1 = test_task(
             MethodKind::CreateTable,
             MethodInput::CreateTable {
                 name: "table_v1".into(),
@@ -1104,7 +1972,7 @@ mod tests {
         // Task 2: 再次 create_table（version 1→2，pre = Task1 的 post）
         let mut post2 = post1; // 注意：post1 已 move，此处 post2 == Task1.post
         post2.version = 2;
-        let task2 = ProveTask::new(
+        let task2 = test_task(
             MethodKind::CreateTable,
             MethodInput::CreateTable {
                 name: "table_v1".into(),
@@ -1139,11 +2007,12 @@ mod tests {
         orch.verify_chain().expect("state_root 链应衔接");
     }
 
-    /// 链断裂检测：两个任务 post≠pre 时 verify_chain 应失败。
+    /// Descriptor-only 摘要不能进入可信链。
     #[test]
-    fn orchestrator_detects_broken_chain() {
+    fn descriptor_only_summaries_cannot_enter_trusted_chain() {
         let mut orch = Orchestrator::new();
-        // 手动注入两个 state_root 不衔接的摘要（绕过 prove，直接测 verify_chain）
+        // 手动注入 descriptor 摘要，绕过 native verifier。即使摘要形式上
+        // 包含 roots/seq，也不会产生 VerificationReceipt。
         orch.proven.push(ProvenTask {
             method_kind: MethodKind::CreateTable,
             pre_state_root: StateRoot::from_field(FieldElement::from(1u64)),
@@ -1157,7 +2026,10 @@ mod tests {
             post_state_root: StateRoot::from_field(FieldElement::from(4u64)),
             call_seq: 1,
         });
-        assert!(orch.verify_chain().is_err(), "链断裂应被检测到");
+        assert!(
+            matches!(orch.verify_chain(), Err(TexasAirError::RecursionError(_))),
+            "descriptor-only 摘要不得构成可信链"
+        );
     }
 }
 

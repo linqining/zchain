@@ -155,6 +155,10 @@ theorem roundtrip (v : U64) :
 def decodeU64 (l0 l1 l2 l3 : M31) : Nat :=
   l0.val + l1.val * 65536 + l2.val * (65536 * 65536) + l3.val * (65536 * 65536 * 65536)
 
+/-- 解码 4-limb tuple 的便捷形式。 -/
+def decodeLimb4 (x : M31 × M31 × M31 × M31) : Nat :=
+  decodeU64 x.1 x.2.1 x.2.2.1 x.2.2.2
+
 /-! Nat 到 M31 的简单转换（需要证明 n < M31_P） -/
 def natToM31 (n : Nat) (h : n < M31_P) : M31 := ⟨n, h⟩
 

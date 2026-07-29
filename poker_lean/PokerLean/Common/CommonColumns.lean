@@ -196,8 +196,18 @@ def PotUnchanged (row : CommonRow) : Prop :=
   row.post_pot.2.2.1 = row.pre_pot.2.2.1 ∧
   row.post_pot.2.2.2 = row.pre_pot.2.2.2
 
+/-- `PotUnchanged` 在整数解码层面也保持 pot。该引理不需要 range
+    假设，因为四个 limb 是逐项相等，而非通过域内加法推导。 -/
+lemma pot_unchanged_implies_decode_eq (row : CommonRow)
+    (h_active : row.is_active = M31.one) (h : PotUnchanged row) :
+    decodeU64 row.post_pot.1 row.post_pot.2.1 row.post_pot.2.2.1 row.post_pot.2.2.2 =
+    decodeU64 row.pre_pot.1 row.pre_pot.2.1 row.pre_pot.2.2.1 row.pre_pot.2.2.2 := by
+  rcases h h_active with ⟨h0, h1, h2, h3⟩
+  rw [h0, h1, h2, h3]
+
 /-- pot limb0 delta 约束：active 行要求 post_pot limb0 = pre_pot limb0 + amt limb0（M31 域内）。
-    对齐 Rust `call`/`raise`/`bet` AIR 的 `post_pot_0 - pre_pot_0 - amt_0 == 0` 约束。 -/
+    保留给真正将某笔已有 bet 收入 pot 的动作；mid-round call/raise/bet
+    现使用 `PotUnchanged`。 -/
 def PotDeltaLimb0 (row : CommonRow) (amt0 : M31) : Prop :=
   row.is_active = M31.one →
   row.post_pot.1.val = (row.pre_pot.1.val + amt0.val) % M31_P

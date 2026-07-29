@@ -138,9 +138,9 @@ theorem contract_check_implies_partial_main
     ContractCheckPartial pre params post :=
   contract_check_implies_partial pre params post h
 
-/-! ## call: ✅ AIR 约束是 sound 的 -/
+/-! ## call: ✅ 手写 mid-round 模型内的 AIR 约束是 sound 的 -/
 
-/-- call AIR soundness：AIR 约束蕴含合约语义 -/
+/-- call AIR soundness：手写 AIR 约束蕴含 mid-round 局部合约语义。 -/
 theorem call_sound_main :
   ∀ (row : CommonRow) (ext : CallMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
@@ -148,7 +148,6 @@ theorem call_sound_main :
     (hseat : expected_seat_index < max_players),
     CallAirAcceptable row ext expected_seat_index hlt expected_call_amount max_players →
     Limb4Range16 ext.input_call_amount →
-    Limb4Range16 row.pre_pot →
     Limb4Range16 ext.output_seat_stack →
     Limb4Range16 ext.input_pre_seat_bet →
     Limb4Range16 ext.input_pre_seat_total_bet →
@@ -165,9 +164,9 @@ theorem contract_call_implies_partial_main
     ContractCallPartial pre params post :=
   contract_call_implies_partial pre params post h
 
-/-! ## raise: ✅ AIR 约束是 sound 的 -/
+/-! ## raise: ✅ 手写 mid-round 模型内的 AIR 约束是 sound 的 -/
 
-/-- raise AIR soundness：AIR 约束蕴含合约语义 -/
+/-- raise AIR soundness：手写 AIR 约束蕴含 mid-round 局部合约语义。 -/
 theorem raise_sound_main :
   ∀ (row : CommonRow) (ext : RaiseMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
@@ -175,7 +174,6 @@ theorem raise_sound_main :
     (hseat : expected_seat_index < max_players),
     RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to max_players →
     Limb4Range16 ext.input_call_delta →
-    Limb4Range16 row.pre_pot →
     Limb4Range16 ext.output_seat_stack →
     Limb4Range16 ext.input_pre_seat_bet →
     Limb4Range16 ext.input_pre_seat_total_bet →
@@ -192,9 +190,9 @@ theorem contract_raise_implies_partial_main
     ContractRaisePartial pre params post :=
   contract_raise_implies_partial pre params post h
 
-/-! ## bet: ✅ AIR 约束是 sound 的 -/
+/-! ## bet: ✅ 手写 mid-round 模型内的 AIR 约束是 sound 的 -/
 
-/-- bet AIR soundness：AIR 约束蕴含合约语义 -/
+/-- bet AIR soundness：手写 AIR 约束蕴含 mid-round 局部合约语义。 -/
 theorem bet_sound_main :
   ∀ (row : CommonRow) (ext : BetMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
@@ -202,7 +200,6 @@ theorem bet_sound_main :
     (hseat : expected_seat_index < max_players),
     BetAirAcceptable row ext expected_seat_index hlt expected_bet_amount max_players →
     Limb4Range16 ext.input_bet_amount →
-    Limb4Range16 row.pre_pot →
     Limb4Range16 ext.output_seat_stack →
     Limb4Range16 ext.input_pre_seat_total_bet →
     ContractBet

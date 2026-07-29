@@ -4,19 +4,23 @@ import PokerLean.State.Types
 import PokerLean.State.Betting
 
 /-!
-# 下注动作状态转移（镜像 `state_machine.rs:1895-2121`）
+# 下注动作的座位更新前缀（非完整 VM transition）
 
-镜像 Rust 的 `apply_fold` / `apply_check` / `apply_call` / `apply_raise` 四个纯下注动作，
-并证明 **chip 守恒**（筹码不增不减）。
+本文件建模 Rust `apply_fold` / `apply_check` / `apply_call` / `apply_raise`
+在调用 `advance_turn` 之前的座位级更新，并证明该局部前缀的
+**chip 守恒**（筹码不增不减）。VM 公开方法并非“纯下注动作”：
+它们会无条件进入 `advance_turn`，可能收池、推进 round 或结算。
 
 ## 建模说明
 
 - **座位级操作**（`Seat.apply_*`）是纯函数，直接镜像 Rust 对单个 `Seat` 的修改。
-- **桌台级操作**（`TexasPokerTable.apply_*`）用 `update_nth` 更新第 i 个座位 + `version + 1`。
+- **桌台级前缀抽象**（`TexasPokerTable.apply_*`）用 `update_nth` 更新第 i 个座位 + `version + 1`。
 - **chip 守恒公式**：`total_chips = Σ(stack + bet) + pot + rake_collected + addon_pool + Σ pending_addon`。
   - **不含 `total_bet`**：它是记录字段（= bet + 已入 pot 部分），非独立筹码池；包含会双重计数。
-- **省略项**（Phase 6 处理）：`advance_turn` / `collect_bets_to_pot` / `end_without_showdown` /
-  `timestamps` 更新 / `raise` 重置其他玩家 `acted_this_round`。这些不影响 chip 守恒。
+- **未建模的完整 post-state**：`advance_turn` / `collect_bets_to_pot` /
+  `advance_round` / `end_without_showdown` / settlement / `timestamps` 更新 /
+  `raise` 重置其他玩家 `acted_this_round`。它们可能改变 pot、round、
+  多个 seat 和 `current_turn`；因此本文件的 post-state 不能当作完整 VM post-state。
 - Rust `checked_sub` / `checked_add` 的溢出检查 ⟷ Lean `Nat` 无溢出 + `inv_chip_bounds` 不变量（Phase 2c）。
 -/
 
@@ -101,7 +105,7 @@ def total_chips (t : TexasPokerTable) : Nat :=
   (t.seats.map seat_chips).sum + t.pot + t.rake_collected +
   (t.seats.map Seat.pending_addon).sum
 
-/-! ## 座位级操作（镜像 Rust `state_machine.rs:1895-2121`） -/
+/-! ## 座位级操作（手工镜像 Rust 的局部 seat mutation） -/
 
 namespace Seat
 
@@ -223,23 +227,24 @@ theorem apply_fold_folded (s : Seat) : s.apply_fold.folded = true := rfl
 
 end Seat
 
-/-! ## 桌台级操作 -/
+/-! ## 桌台级局部前缀抽象 -/
 
-/-- 桌台级 fold：更新第 i 个座位 + version + 1。对应 `state_machine.rs:1894-1943`。 -/
+/-- 桌台级 fold 的座位更新前缀：更新第 i 个座位 + version + 1。 -/
 def apply_fold (t : TexasPokerTable) (i : Nat) : TexasPokerTable :=
   { t with
     seats := update_nth t.seats i Seat.apply_fold,
     version := t.version + 1 }
 
-/-- 桌台级 check：更新第 i 个座位 + version + 1。对应 `state_machine.rs:1946-1983`。 -/
+/-- 桌台级 check 的座位更新前缀：更新第 i 个座位 + version + 1。 -/
 def apply_check (t : TexasPokerTable) (i : Nat) : TexasPokerTable :=
   { t with
     seats := update_nth t.seats i Seat.apply_check,
     version := t.version + 1 }
 
-/-- 桌台级 call：更新第 i 个座位 + version + 1。对应 `state_machine.rs:1986-2045`。
+/-- 桌台级 call 的座位更新前缀：更新第 i 个座位 + version + 1。
 
-`betting_round = none` 时返回原桌台（Rust 中会返回 Err，此处简化）。 -/
+`betting_round = none` 时返回原桌台（Rust 中会返回 Err，此处简化）。
+该定义不包含后续 `advance_turn`。 -/
 def apply_call (t : TexasPokerTable) (i : Nat) : TexasPokerTable :=
   match t.betting_round with
   | none => t
@@ -248,9 +253,9 @@ def apply_call (t : TexasPokerTable) (i : Nat) : TexasPokerTable :=
       seats := update_nth t.seats i (fun s => s.apply_call r),
       version := t.version + 1 }
 
-/-- 桌台级 raise（原始版）：给定 `process_raise` 成功结果，更新桌台。
+/-- 桌台级 raise 的座位更新前缀：给定 `process_raise` 成功结果，更新桌台。
 
-对应 `state_machine.rs:2048-2121`。`Option` 包装在 `apply_raise_opt` 中。 -/
+该定义不包含后续 `advance_turn`。`Option` 包装在 `apply_raise_opt` 中。 -/
 def apply_raise (t : TexasPokerTable) (i : Nat) (total_bet : Nat)
     (r' : BettingRound) (needed : Nat) : TexasPokerTable :=
   { t with
@@ -369,7 +374,7 @@ theorem apply_raise_version (t : TexasPokerTable) (i : Nat) (total_bet : Nat)
     (r' : BettingRound) (needed : Nat) :
     (apply_raise t i total_bet r' needed).version = t.version + 1 := rfl
 
-/-! ## round_state 不变（apply_* 不改变 round_state） -/
+/-! ## 局部前缀中 round_state 不变（不是完整 VM transition 的结论） -/
 
 theorem apply_fold_round_state (t : TexasPokerTable) (i : Nat) :
     (apply_fold t i).round_state = t.round_state := rfl
@@ -387,7 +392,7 @@ theorem apply_raise_round_state (t : TexasPokerTable) (i : Nat) (total_bet : Nat
     (r' : BettingRound) (needed : Nat) :
     (apply_raise t i total_bet r' needed).round_state = t.round_state := rfl
 
-/-! ## pot 不变（apply_* 不改变 pot；pot 在 collect_bets_to_pot 中才改变） -/
+/-! ## 局部前缀中 pot 不变（pot 在后续 `collect_bets_to_pot` 中才改变） -/
 
 theorem apply_fold_pot (t : TexasPokerTable) (i : Nat) :
     (apply_fold t i).pot = t.pot := rfl

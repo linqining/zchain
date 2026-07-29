@@ -5,9 +5,15 @@ namespace PokerLean
 structure CallParams where
   seat_index : Nat
   call_amount : Nat
+  /-- mid-round 推进后的下一行动座位。 -/
+  post_current_turn : Nat
 deriving Repr
 
-/-- call 方法的合约语义：`apply_call` 的前置条件和状态变更 -/
+/-- call 的 **mid-round 局部语义**。
+
+该谓词只描述座位筹码更新以及 `advance_turn` 未结束当前下注轮时的
+post-state：筹码仍留在 `seat.bet`，pot 不变，round 不变。它不是 VM
+`apply_call` 的完整语义；收池、推进 round 和 settlement 分支未在此建模。 -/
 def ContractCall
     (pre : TexasPokerTable)
     (params : CallParams)
@@ -19,6 +25,9 @@ def ContractCall
   (pre.get_seat params.seat_index).is_participating ∧
   ¬ (pre.get_seat params.seat_index).folded ∧
   ¬ (pre.get_seat params.seat_index).all_in ∧
+  params.call_amount =
+    min (pre.betting.current_bet - (pre.get_seat params.seat_index).bet)
+      (pre.get_seat params.seat_index).stack ∧
   params.call_amount ≤ (pre.get_seat params.seat_index).stack ∧
   (post.get_seat params.seat_index).stack = (pre.get_seat params.seat_index).stack - params.call_amount ∧
   (post.get_seat params.seat_index).bet = (pre.get_seat params.seat_index).bet + params.call_amount ∧
@@ -31,7 +40,8 @@ def ContractCall
     post.get_seat i = pre.get_seat i) ∧
   post.version = pre.version + 1 ∧
   post.round_state = pre.round_state ∧
-  post.betting.pot = pre.betting.pot + params.call_amount ∧
+  post.betting.pot = pre.betting.pot ∧
+  post.betting.current_turn = params.post_current_turn ∧
   post.betting.current_bet = pre.betting.current_bet ∧
   post.betting.dealer_seat = pre.betting.dealer_seat ∧
   post.max_players = pre.max_players ∧
@@ -40,7 +50,7 @@ def ContractCall
   post.chip_pool = pre.chip_pool ∧
   post.hand_id = pre.hand_id
 
-/-- call 合约语义的部分版本（AIR 能验证的子集） -/
+/-- call mid-round 局部语义的部分版本（手写 Lean AIR 能验证的子集）。 -/
 def ContractCallPartial
     (pre : TexasPokerTable)
     (params : CallParams)
@@ -62,10 +72,7 @@ theorem contract_call_implies_partial
     (pre : TexasPokerTable) (params : CallParams) (post : TexasPokerTable)
     (h : ContractCall pre params post) :
     ContractCallPartial pre params post := by
-  rcases h with ⟨h_round, h_seat, _h_turn, _h_part, _h_folded, _h_allin, _h_amt_le,
-                  _h_stack, _h_bet, _h_total, _h_acted, _h_fold2, _h_player, _h_others,
-                  h_ver, h_rs, _h_pot, _h_cb, h_dealer,
-                  h_mp, h_bb, h_sb, h_cp, h_hi⟩
+  unfold ContractCall at h
   unfold ContractCallPartial
   tauto
 

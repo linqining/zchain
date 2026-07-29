@@ -13,7 +13,10 @@
 //!    - `delta = raise_to - seat.bet`
 //!    - `seat.stack -= delta`, `seat.bet = raise_to`, `seat.total_bet += delta`
 //!    - 若 `seat.stack == 0` 则 `seat.all_in = true`
-//!    - `pot += delta`, `current_bet = raise_to`, `version += 1`
+//!    - mid-round 时 `pot` 不变（下注暂存在 `seat.bet`）
+//!    - `current_bet = raise_to`；完整加注更新 `min_raise = raise_to - pre.current_bet`，
+//!      短 all-in 保留原 `min_raise`
+//!    - `post.current_turn = Some(next_seat)`；收池/推进/结算分支不属于本 AIR
 //!
 //! ## AIR 列布局
 //!
@@ -70,8 +73,10 @@ pub mod cols {
     pub const OUTPUT_ACTED: usize = COMMON_NUM_COLUMNS + 44;
     /// `INPUT_PRE_ROUND_STATE_Q` 列（Gap 1 witness：pre_round_state²，拆 4 次 vanishing）。
     pub const INPUT_PRE_ROUND_STATE_Q: usize = COMMON_NUM_COLUMNS + 45;
+    /// `OUTPUT_CURRENT_TURN` — mid-round 推进后的下一行动座位。
+    pub const OUTPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 46;
     /// `raise` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 46;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 47;
 }
 
 /// `raise` 输入参数。
@@ -83,6 +88,16 @@ pub struct RaiseInput {
     pub raise_to: u64,
     /// 最小加注增量（通常 = 大盲注）。
     pub min_raise: u64,
+    /// 调用前 betting_round.current_bet（verifier-trusted）。
+    pub pre_current_bet: u64,
+    /// 调用前 seat.stack（verifier-trusted）。
+    pub pre_seat_stack: u64,
+    /// 调用前 seat.bet（verifier-trusted）。
+    pub pre_seat_bet: u64,
+    /// 调用前 seat.total_bet（verifier-trusted）。
+    pub pre_seat_total_bet: u64,
+    /// mid-round 推进后的下一行动座位。
+    pub post_current_turn: u8,
 }
 
 /// `raise` AIR 公开输入。
@@ -172,10 +187,11 @@ impl FrameworkEval for RaiseAir {
         let output_min_raise_1 = eval.next_trace_mask();
         let output_min_raise_2 = eval.next_trace_mask();
         let output_min_raise_3 = eval.next_trace_mask();
-        let _output_all_in = eval.next_trace_mask();
+        let output_all_in = eval.next_trace_mask();
         let output_acted = eval.next_trace_mask();
         // Gap 1 witness：pre_round_state²
         let input_pre_round_state_q = eval.next_trace_mask();
+        let output_current_turn = eval.next_trace_mask();
 
         // 组装 4-limb 数组（方便调用 limb4_* 辅助）
         let input_raise_to = [
@@ -249,9 +265,67 @@ impl FrameworkEval for RaiseAir {
         // 约束 3：seat_occupied == 1
         eval.add_constraint(is_active.clone() * (input_seat_occupied.clone() - one.clone()));
 
-        // 约束 4：raise_to 一致性（limb 0）
-        let expected_raise_0: E::F = M31::from((self.input.raise_to & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_raise_to_0.clone() - expected_raise_0));
+        // 约束 4：所有资金 witness 绑定 verifier-trusted AIR 常量，并验证 VM
+        // process_raise 的金额规则（含短 all-in）。
+        let needed = self.input.raise_to.saturating_sub(self.input.pre_seat_bet);
+        let raise_amount = self
+            .input
+            .raise_to
+            .saturating_sub(self.input.pre_current_bet);
+        let is_all_in = needed == self.input.pre_seat_stack;
+        let post_stack_u64 = self.input.pre_seat_stack.checked_sub(needed);
+        let post_total_u64 = self.input.pre_seat_total_bet.checked_add(needed);
+        let raise_is_valid = self.input.raise_to > self.input.pre_current_bet
+            && self.input.raise_to > self.input.pre_seat_bet
+            && needed <= self.input.pre_seat_stack
+            && (raise_amount >= self.input.min_raise || is_all_in)
+            && post_stack_u64.is_some()
+            && post_total_u64.is_some();
+        let valid: E::F = M31::from(u32::from(raise_is_valid)).into();
+        eval.add_constraint(is_active.clone() * (valid - one.clone()));
+
+        let expected_raise = u64_to_m31_limbs(self.input.raise_to);
+        let expected_pre_stack = u64_to_m31_limbs(self.input.pre_seat_stack);
+        let expected_pre_bet = u64_to_m31_limbs(self.input.pre_seat_bet);
+        let expected_pre_total = u64_to_m31_limbs(self.input.pre_seat_total_bet);
+        let expected_needed = u64_to_m31_limbs(needed);
+        let expected_post_stack = u64_to_m31_limbs(post_stack_u64.unwrap_or(0));
+        let expected_post_total = u64_to_m31_limbs(post_total_u64.unwrap_or(0));
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone() * (input_raise_to[i].clone() - expected_raise[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (input_pre_seat_stack[i].clone() - expected_pre_stack[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (input_pre_seat_bet[i].clone() - expected_pre_bet[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (input_pre_seat_total_bet[i].clone() - expected_pre_total[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (input_call_delta[i].clone() - expected_needed[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_seat_stack[i].clone() - expected_post_stack[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (output_seat_bet[i].clone() - expected_raise[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_seat_total_bet[i].clone() - expected_post_total[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_current_bet[i].clone() - expected_raise[i].into()),
+            );
+        }
 
         // 约束 5：output_acted == 1
         eval.add_constraint(is_active.clone() * (output_acted - one));
@@ -266,42 +340,32 @@ impl FrameworkEval for RaiseAir {
 
         // ===== 资金守恒约束（对齐 Lean PotDelta / Limb4Delta / Limb4DeltaRev / Limb4Eq）=====
 
-        // 约束 8：pot += call_delta（全 4 limb）— post_pot[i] = pre_pot[i] + call_delta[i]
-        for __c in common.pot_delta_4limb(&input_call_delta) { eval.add_constraint(__c); }
+        // 约束 8：VM 在 mid-round 不收池；筹码保留在 seat.bet。
+        for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
 
-        // 约束 9：stack 守恒（反向 delta）— pre_stack[i] = post_stack[i] + call_delta[i]
-        // ⟹ post_stack = pre_stack - call_delta ⟹ call_delta ≤ pre_stack
-        // ⟹ raise_to - pre_bet ≤ pre_stack ⟹ raise_to ≤ pre_stack + pre_bet
-        for __c in common.limb4_delta_rev(
-            &input_pre_seat_stack,
-            &output_seat_stack,
-            &input_call_delta,
-        ) { eval.add_constraint(__c); }
+        // stack/bet/total_bet/current_bet 已绑定到 verifier 端 checked u64 运算的
+        // 逐 limb 常量；不使用无 carry 的逐 limb delta。
 
-        // 约束 10：bet 守恒（delta）— post_bet[i] = pre_bet[i] + call_delta[i]
-        // 与约束 12（post_bet = raise_to）联立得 call_delta = raise_to - pre_bet
-        for __c in common.limb4_delta(
-            &input_pre_seat_bet,
-            &output_seat_bet,
-            &input_call_delta,
-        ) { eval.add_constraint(__c); }
+        // 约束 14：完整加注把 min_raise 更新为 raise_amount；短 all-in 不重开行动权，
+        // min_raise 保持原值。
+        let expected_post_min_raise = if raise_amount >= self.input.min_raise {
+            raise_amount
+        } else {
+            self.input.min_raise
+        };
+        let expected_post_min_raise_limbs = u64_to_m31_limbs(expected_post_min_raise);
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_min_raise[i].clone() - expected_post_min_raise_limbs[i].into()),
+            );
+        }
 
-        // 约束 11：total_bet 守恒（delta）— post_total_bet[i] = pre_total_bet[i] + call_delta[i]
-        for __c in common.limb4_delta(
-            &input_pre_seat_total_bet,
-            &output_seat_total_bet,
-            &input_call_delta,
-        ) { eval.add_constraint(__c); }
-
-        // 约束 12：bet 设值 — post_bet[i] = raise_to[i]
-        for __c in common.limb4_eq(&output_seat_bet, &input_raise_to) { eval.add_constraint(__c); }
-
-        // 约束 13：current_bet 设值 — post_current_bet[i] = raise_to[i]
-        for __c in common.limb4_eq(&output_current_bet, &input_raise_to) { eval.add_constraint(__c); }
-
-        // 约束 14：min_raise 设值 — post_min_raise[i] = raise_to[i]
-        // （pre.current_bet = 0 ⟹ raise_to - 0 = raise_to）
-        for __c in common.limb4_eq(&output_min_raise, &input_raise_to) { eval.add_constraint(__c); }
+        let expected_all_in: E::F = M31::from(u32::from(is_all_in)).into();
+        eval.add_constraint(is_active.clone() * (output_all_in - expected_all_in));
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.post_current_turn)).into();
+        eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
 
         eval
     }
@@ -344,6 +408,8 @@ pub struct RaiseRow {
     pub output_acted: M31,
     /// Gap 1 witness：pre_round_state²。
     pub input_pre_round_state_q: M31,
+    /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
+    pub output_current_turn: M31,
 }
 
 impl RaiseRow {
@@ -419,6 +485,7 @@ impl RaiseRow {
             output_acted: M31::from(1u32),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
+            output_current_turn: u8_to_m31(input.post_current_turn),
         }
     }
 
@@ -443,6 +510,7 @@ impl RaiseRow {
             output_all_in: ZERO,
             output_acted: ZERO,
             input_pre_round_state_q: ZERO,
+            output_current_turn: ZERO,
         }
     }
 
@@ -466,6 +534,7 @@ impl RaiseRow {
         v.push(self.output_all_in);
         v.push(self.output_acted);
         v.push(self.input_pre_round_state_q);
+        v.push(self.output_current_turn);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

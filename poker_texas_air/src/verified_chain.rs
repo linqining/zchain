@@ -21,8 +21,8 @@ use crate::state_root::StateRoot;
 /// Receipt issued only after the native method-proof verifier succeeds.
 ///
 /// The fields are intentionally private so downstream code cannot construct a
-/// receipt from descriptor data alone.  Receipts are issued by
-/// [`verify_method_against_and_issue_receipt`] or [`VerifiedChainBuilder::push`].
+/// receipt from descriptor data alone. Receipt issuance is crate-private and
+/// reachable in production only from the Orchestrator after full VM replay.
 #[derive(Debug, Clone)]
 pub struct VerificationReceipt {
     kind: MethodKind,
@@ -33,6 +33,7 @@ pub struct VerificationReceipt {
     call_seq: u32,
     pre_version: u64,
     post_version: u64,
+    dispatch_call_digest: [u8; 32],
     proof_commitments: Vec<FieldElement>,
     log_size: u32,
     num_columns: usize,
@@ -87,6 +88,12 @@ impl VerificationReceipt {
         self.post_version
     }
 
+    /// Digest of the exact authenticated VM dispatch call accepted by the host.
+    #[must_use]
+    pub const fn dispatch_call_digest(&self) -> [u8; 32] {
+        self.dispatch_call_digest
+    }
+
     /// Commitment roots of the method proof accepted by the native verifier.
     #[must_use]
     pub fn proof_commitments(&self) -> &[FieldElement] {
@@ -115,7 +122,7 @@ impl VerificationReceipt {
 /// # Errors
 ///
 /// Returns an error when the native Stwo verifier rejects the proof.
-pub fn verify_method_against_and_issue_receipt<A>(
+pub(crate) fn verify_method_against_and_issue_receipt<A>(
     proof: MethodProof<A>,
     expected_air: A,
     expected_public_inputs: &TexasPublicInputs,
@@ -138,6 +145,7 @@ where
         call_seq: expected_public_inputs.call_seq,
         pre_version: expected_public_inputs.pre_version,
         post_version: expected_public_inputs.post_version,
+        dispatch_call_digest: expected_public_inputs.dispatch_call_digest,
         proof_commitments,
         log_size,
         num_columns,
@@ -149,6 +157,16 @@ where
 /// Construction validates that all receipts belong to the same table and hand,
 /// call sequences are consecutive, and every previous post-state root equals
 /// the next pre-state root.
+///
+/// Descriptor-only summaries are intentionally not accepted by this API:
+///
+/// ```compile_fail
+/// use poker_texas_air::aggregator_air::ChildDescriptor;
+/// use poker_texas_air::verified_chain::VerifiedChain;
+///
+/// let descriptor: ChildDescriptor = todo!();
+/// let _ = VerifiedChain::try_from_receipts(vec![descriptor]);
+/// ```
 #[derive(Debug, Clone)]
 pub struct VerifiedChain {
     receipts: Vec<VerificationReceipt>,
@@ -161,7 +179,7 @@ impl VerifiedChain {
     ///
     /// Returns an error for an empty chain, mixed table/hand identifiers,
     /// non-consecutive call sequences, or a broken state-root link.
-    pub fn try_from_receipts(receipts: Vec<VerificationReceipt>) -> TexasAirResult<Self> {
+    pub(crate) fn try_from_receipts(receipts: Vec<VerificationReceipt>) -> TexasAirResult<Self> {
         validate_receipt_chain(&receipts)?;
         Ok(Self { receipts })
     }
@@ -204,37 +222,32 @@ impl VerifiedChain {
 ///
 /// Each call to [`push`](Self::push) is generic, so one builder can accept the
 /// different concrete AIR types used by successive poker methods.
-#[derive(Debug, Default)]
-pub struct VerifiedChainBuilder {
+#[derive(Debug, Default, Clone)]
+pub(crate) struct VerifiedChainBuilder {
     receipts: Vec<VerificationReceipt>,
 }
 
 impl VerifiedChainBuilder {
     /// Create an empty host-side chain verifier.
     #[must_use]
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             receipts: Vec::new(),
         }
     }
 
-    /// Verify a method proof and append its receipt after continuity checks.
+    /// Append a receipt previously issued by the native verifier.
+    ///
+    /// This accepts only [`VerificationReceipt`], whose fields are private and
+    /// which safe external code can obtain only from a successful native
+    /// verification. Descriptor-only summaries therefore cannot enter the
+    /// trusted chain through this path.
     ///
     /// # Errors
     ///
-    /// Returns an error if native proof verification fails or if the new
-    /// receipt does not continue the table/hand/state/sequence chain.
-    pub fn push<A>(
-        &mut self,
-        proof: MethodProof<A>,
-        expected_air: A,
-        expected_public_inputs: &TexasPublicInputs,
-    ) -> TexasAirResult<()>
-    where
-        A: TexasAir,
-    {
-        let receipt =
-            verify_method_against_and_issue_receipt(proof, expected_air, expected_public_inputs)?;
+    /// Returns an error if the receipt does not continue the existing
+    /// table/hand/state/sequence/version chain.
+    pub(crate) fn push_receipt(&mut self, receipt: VerificationReceipt) -> TexasAirResult<()> {
         if let Some(previous) = self.receipts.last() {
             validate_adjacent_receipts(previous, &receipt)?;
         }
@@ -242,12 +255,21 @@ impl VerifiedChainBuilder {
         Ok(())
     }
 
+    /// Snapshot the currently accumulated host-verified chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no verified receipts have been added.
+    pub(crate) fn snapshot(&self) -> TexasAirResult<VerifiedChain> {
+        VerifiedChain::try_from_receipts(self.receipts.clone())
+    }
+
     /// Finish the host-side batch and return a checked chain.
     ///
     /// # Errors
     ///
     /// Returns an error if no verified proofs were added.
-    pub fn finish(self) -> TexasAirResult<VerifiedChain> {
+    pub(crate) fn finish(self) -> TexasAirResult<VerifiedChain> {
         VerifiedChain::try_from_receipts(self.receipts)
     }
 }
@@ -325,6 +347,7 @@ mod tests {
             call_seq,
             pre_version: u64::from(call_seq),
             post_version: u64::from(call_seq) + 1,
+            dispatch_call_digest: [call_seq as u8; 32],
             proof_commitments: vec![FieldElement::from(call_seq as u64 + 1)],
             log_size: 10,
             num_columns: 1,
@@ -353,6 +376,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_cross_hand_receipts() {
+        let result = VerifiedChain::try_from_receipts(vec![
+            receipt(7, 3, 10, 100, 101),
+            receipt(7, 4, 11, 101, 102),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn rejects_non_consecutive_or_broken_state_chain() {
         let bad_seq = VerifiedChain::try_from_receipts(vec![
             receipt(7, 3, 10, 100, 101),
@@ -365,5 +397,13 @@ mod tests {
             receipt(7, 3, 11, 999, 102),
         ]);
         assert!(bad_root.is_err());
+    }
+
+    #[test]
+    fn rejects_broken_version_chain() {
+        let mut second = receipt(7, 3, 11, 101, 102);
+        second.pre_version = 99;
+        let result = VerifiedChain::try_from_receipts(vec![receipt(7, 3, 10, 100, 101), second]);
+        assert!(result.is_err());
     }
 }

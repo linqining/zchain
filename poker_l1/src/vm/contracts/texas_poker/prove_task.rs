@@ -30,6 +30,7 @@ pub use vm_common::prove_task::MethodInput;
 
 use super::events::TexasPokerEvent;
 use super::types::TexasPokerTable;
+use crate::vm::contracts::dispatch::DispatchContext;
 
 /// 单次 method 调用的证明任务（L1 侧定义）。
 ///
@@ -40,6 +41,12 @@ pub struct L1ProveTask {
     pub method_kind: u8,
     /// 方法业务输入（共享自 vm-common）。
     pub method_input: MethodInput,
+    /// 执行该调用时经过交易层认证的完整 dispatch 上下文。
+    pub context: DispatchContext,
+    /// VM 实际路由的原始 selector。
+    pub selector: [u8; 32],
+    /// VM 实际解码和执行的原始 Borsh 参数。
+    pub raw_args: Vec<u8>,
     /// 调用前表台快照。
     pub pre_table: TexasPokerTable,
     /// 调用后表台快照。
@@ -58,6 +65,9 @@ impl L1ProveTask {
     pub fn new(
         method_kind: u8,
         method_input: MethodInput,
+        context: DispatchContext,
+        selector: [u8; 32],
+        raw_args: Vec<u8>,
         pre_table: TexasPokerTable,
         post_table: TexasPokerTable,
         table_id: u64,
@@ -67,6 +77,9 @@ impl L1ProveTask {
         Self {
             method_kind,
             method_input,
+            context,
+            selector,
+            raw_args,
             pre_table,
             post_table,
             table_id,
@@ -111,6 +124,7 @@ impl L1DispatchOutput {
 mod tests {
     use super::*;
     use crate::object_model::ObjectID;
+    use crate::signature::TaggedPubkey;
 
     fn dummy_table(name: &str) -> TexasPokerTable {
         TexasPokerTable::new(
@@ -123,11 +137,27 @@ mod tests {
         )
     }
 
+    fn dummy_context() -> DispatchContext {
+        DispatchContext {
+            caller: [0xAA; 20],
+            caller_pubkey: TaggedPubkey {
+                tag: 0x11,
+                raw: vec![0xBB; 32],
+            },
+            chain_id: 7,
+            block_height: 11,
+            block_timestamp: 13,
+        }
+    }
+
     #[test]
     fn l1_prove_task_borsh_roundtrip() {
         let task = L1ProveTask::new(
             6, // MethodKind::Fold = 6
             MethodInput::SeatOnly { seat_index: 2 },
+            dummy_context(),
+            [0xCC; 32],
+            vec![2],
             dummy_table("pre"),
             dummy_table("post"),
             42,
@@ -139,5 +169,8 @@ mod tests {
         assert_eq!(recovered.method_kind, 6);
         assert_eq!(recovered.table_id, 42);
         assert_eq!(recovered.method_input, MethodInput::SeatOnly { seat_index: 2 });
+        assert_eq!(recovered.context, dummy_context());
+        assert_eq!(recovered.selector, [0xCC; 32]);
+        assert_eq!(recovered.raw_args, vec![2]);
     }
 }

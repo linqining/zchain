@@ -13,14 +13,12 @@
 
 use starknet_ff::FieldElement;
 use stwo::core::channel::Channel;
-use stwo::core::fields::m31::M31;
+use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 
 use crate::airs::AirStatement;
 use crate::error::TexasAirResult;
 use crate::method_kind::MethodKind;
-use crate::state_root::{
-    field_element_to_u32_words, state_root_to_air_limbs, StateRoot,
-};
+use crate::state_root::{StateRoot, field_element_to_u32_words, state_root_to_air_limbs};
 
 /// L1 proof 的 Stwo 内部公开输入（直接复用 `poker_zkvm`）。
 pub use poker_zkvm::stwo_backend::recursive::RecursivePublicInputs;
@@ -179,6 +177,17 @@ pub struct TexasPublicInputs {
     pub pre_version: u64,
     /// State version after execution.
     pub post_version: u64,
+    /// Digest of the authenticated VM dispatch context + selector + raw args.
+    pub dispatch_call_digest: [u8; 32],
+    /// Verifier-reconstructed values of every original trace column in the
+    /// replicated business row.
+    ///
+    /// This is deliberately optional at the data-construction boundary so a
+    /// caller can build roots before it has reconstructed the method row.  The
+    /// production prover and verifier both reject `None`; only test-helper
+    /// compatibility code may populate it from a locally supplied trace.
+    /// Values are canonical M31 representatives (`0 <= value < 2^31 - 1`).
+    pub expected_trace_row: Option<Vec<u32>>,
 }
 
 impl TexasPublicInputs {
@@ -214,6 +223,8 @@ impl TexasPublicInputs {
             call_seq,
             pre_version: pre_table.version,
             post_version: post_table.version,
+            dispatch_call_digest: [0u8; 32],
+            expected_trace_row: None,
         })
     }
 
@@ -243,7 +254,78 @@ impl TexasPublicInputs {
             call_seq,
             pre_version: 0,
             post_version: 1,
+            dispatch_call_digest: [0u8; 32],
+            expected_trace_row: None,
         }
+    }
+
+    /// Bind this statement to a complete, verifier-reconstructed trace row.
+    ///
+    /// Rebinding to a different row is rejected, which catches accidental use
+    /// of a prover witness after a trusted row has already been installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::TexasAirError::SpecViolation`] when `row` is
+    /// empty or conflicts with an existing binding.
+    pub fn bind_expected_trace_row(&mut self, row: &[M31]) -> TexasAirResult<()> {
+        use crate::error::TexasAirError;
+
+        if row.is_empty() {
+            return Err(TexasAirError::SpecViolation(
+                "expected trace row must not be empty".into(),
+            ));
+        }
+        let words: Vec<u32> = row.iter().map(|value| value.0).collect();
+        if let Some(existing) = &self.expected_trace_row {
+            if existing != &words {
+                return Err(TexasAirError::SpecViolation(
+                    "attempted to replace an existing trusted trace-row binding".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.expected_trace_row = Some(words);
+        Ok(())
+    }
+
+    /// Return the complete trusted row as canonical M31 values.
+    ///
+    /// Production verification calls this before constructing the AIR, so a
+    /// missing, malformed, or wrong-width row fails closed before Stwo parses
+    /// the proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::TexasAirError::SpecViolation`] if no trusted row
+    /// is present, its width differs from `num_columns`, or any word is not a
+    /// canonical M31 representative.
+    pub fn require_expected_trace_row(&self, num_columns: usize) -> TexasAirResult<Vec<M31>> {
+        use crate::error::TexasAirError;
+
+        let row = self.expected_trace_row.as_ref().ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "missing verifier-trusted expected trace row (fail-closed)".into(),
+            )
+        })?;
+        if row.len() != num_columns {
+            return Err(TexasAirError::SpecViolation(format!(
+                "expected trace row width {} does not match AIR width {num_columns}",
+                row.len()
+            )));
+        }
+        row.iter()
+            .enumerate()
+            .map(|(column, &value)| {
+                if value >= M31_MODULUS {
+                    Err(TexasAirError::SpecViolation(format!(
+                        "expected trace row column {column} is not canonical M31: {value}"
+                    )))
+                } else {
+                    Ok(M31::from_u32_unchecked(value))
+                }
+            })
+            .collect()
     }
 
     /// 构造一个固定的、自洽的「占位」公开输入（机制测试用）。
@@ -315,7 +397,25 @@ impl TexasPublicInputs {
         roots_u32.extend_from_slice(&field_element_to_u32_words(self.post_state_root.field()));
         channel.mix_u32s(&roots_u32);
 
-        // 5. 元数据。
+        // 5. 完整业务 trace 行。长度与 presence tag 都进入 transcript，
+        // 防止不同列布局或缺失绑定产生相同编码。
+        match &self.expected_trace_row {
+            Some(row) => {
+                channel.mix_u32s(&[1, row.len() as u32]);
+                channel.mix_u32s(row);
+            }
+            None => channel.mix_u32s(&[0, 0]),
+        }
+
+        // 6. 精确 VM dispatch 调用摘要。
+        let dispatch_words: Vec<u32> = self
+            .dispatch_call_digest
+            .chunks_exact(4)
+            .map(|chunk| u32::from_be_bytes(chunk.try_into().expect("4-byte digest word")))
+            .collect();
+        channel.mix_u32s(&dispatch_words);
+
+        // 7. 元数据。
         channel.mix_u32s(&[u32::from(self.kind as u8), self.hand_id, self.call_seq]);
         channel.mix_u64(self.table_id);
         channel.mix_u64(self.pre_version);
@@ -468,6 +568,8 @@ mod tests {
             call_seq: 0,
             pre_version: 0,
             post_version: 1,
+            dispatch_call_digest: [0u8; 32],
+            expected_trace_row: None,
         };
         assert!(pi.verify_roots().is_err(), "empty image must fail");
     }
@@ -498,5 +600,35 @@ mod tests {
         let r1 = c1.draw_secure_felts(4);
         let r2 = c2.draw_secure_felts(4);
         assert_ne!(r1, r2, "不同 PI 的 mix 应区分（绑定生效）");
+    }
+
+    #[test]
+    fn trusted_trace_row_is_required_and_width_checked() {
+        let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        assert!(pi.require_expected_trace_row(2).is_err());
+
+        pi.bind_expected_trace_row(&[M31::from(7u32), M31::from(9u32)])
+            .unwrap();
+        assert_eq!(
+            pi.require_expected_trace_row(2).unwrap(),
+            vec![M31::from(7u32), M31::from(9u32)]
+        );
+        assert!(pi.require_expected_trace_row(1).is_err());
+    }
+
+    #[test]
+    fn trusted_trace_row_rejects_noncanonical_words_and_rebinding() {
+        let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
+        pi.bind_expected_trace_row(&[M31::from(7u32)]).unwrap();
+        assert!(
+            pi.bind_expected_trace_row(&[M31::from(8u32)]).is_err(),
+            "a trusted binding must not be replaceable"
+        );
+
+        pi.expected_trace_row = Some(vec![M31_MODULUS]);
+        assert!(
+            pi.require_expected_trace_row(1).is_err(),
+            "noncanonical M31 words must be rejected instead of reduced"
+        );
     }
 }

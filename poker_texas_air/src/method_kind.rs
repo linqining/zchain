@@ -1,6 +1,6 @@
-//! 21 个方法的枚举与 selector 计算。
+//! 23 个方法的枚举与 selector 计算。
 //!
-//! 严格对齐 [`poker_l1::vm::contracts::texas_poker::dispatch`] 的 21 个方法选择器，
+//! 严格对齐 [`poker_l1::vm::contracts::texas_poker::dispatch`] 的 23 个方法选择器，
 //! 用 `blake2b_256(method_name)[0..32]` 计算（与 L1 dispatch 算法一致）。
 //!
 //! # 分类
@@ -32,7 +32,7 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
     out
 }
 
-/// 21 个方法种类的枚举。
+/// 23 个方法种类的枚举。
 ///
 /// 每个 variant 对应 `poker_l1` 的一个 `apply_*` 函数，并拥有自己的专用 AIR。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
@@ -90,11 +90,15 @@ pub enum MethodKind {
     // ===== B 档扩展：bet 动作（1 个）=====
     /// `bet` — 玩家主动下注（postflop 第一个下注者，语义等同 raise 但更清晰）。
     Bet = 20,
+    /// `request_leave_after_hand` — 切换下一手前离场标记。
+    RequestLeaveAfterHand = 21,
+    /// `fold_with_proof` — 局中 fold 并剥离自己的加密层。
+    FoldWithProof = 22,
 }
 
 impl MethodKind {
-    /// 方法总数（21）。
-    pub const COUNT: usize = 21;
+    /// 方法总数（23）。
+    pub const COUNT: usize = 23;
 
     /// 返回方法名字符串（snake_case，与 Move 端 entry function 名一一对应）。
     #[must_use]
@@ -121,6 +125,8 @@ impl MethodKind {
             Self::SubmitPlayerRevealTokens => "submit_player_reveal_tokens",
             Self::SubmitReconstructDeck => "submit_reconstruct_deck",
             Self::Bet => "bet",
+            Self::RequestLeaveAfterHand => "request_leave_after_hand",
+            Self::FoldWithProof => "fold_with_proof",
         }
     }
 
@@ -147,13 +153,15 @@ impl MethodKind {
             | Self::AutoFold
             | Self::ForceFold
             | Self::KickPlayer
-            | Self::Bet => MethodTier::Action,
+            | Self::Bet
+            | Self::RequestLeaveAfterHand => MethodTier::Action,
             Self::Addon | Self::Rebuy => MethodTier::Funds,
             Self::JoinAndShuffle
             | Self::LeaveWithProof
             | Self::SubmitShuffleV2
             | Self::SubmitPlayerRevealTokens
-            | Self::SubmitReconstructDeck => MethodTier::Crypto,
+            | Self::SubmitReconstructDeck
+            | Self::FoldWithProof => MethodTier::Crypto,
         }
     }
 
@@ -161,7 +169,7 @@ impl MethodKind {
     ///
     /// # Errors
     ///
-    /// 当 `value >= 21` 时返回 `None`。
+    /// 当 `value >= 23` 时返回 `None`。
     #[must_use]
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -186,11 +194,13 @@ impl MethodKind {
             18 => Some(Self::SubmitPlayerRevealTokens),
             19 => Some(Self::SubmitReconstructDeck),
             20 => Some(Self::Bet),
+            21 => Some(Self::RequestLeaveAfterHand),
+            22 => Some(Self::FoldWithProof),
             _ => None,
         }
     }
 
-    /// 返回所有 21 个方法（用于迭代）。
+    /// 返回所有 23 个方法（用于迭代）。
     #[must_use]
     pub const fn all() -> [Self; Self::COUNT] {
         [
@@ -215,6 +225,8 @@ impl MethodKind {
             Self::SubmitPlayerRevealTokens,
             Self::SubmitReconstructDeck,
             Self::Bet,
+            Self::RequestLeaveAfterHand,
+            Self::FoldWithProof,
         ]
     }
 }
@@ -251,8 +263,8 @@ mod tests {
 
     #[test]
     fn test_method_count() {
-        assert_eq!(MethodKind::COUNT, 21);
-        assert_eq!(MethodKind::all().len(), 21);
+        assert_eq!(MethodKind::COUNT, 23);
+        assert_eq!(MethodKind::all().len(), 23);
     }
 
     #[test]
@@ -277,7 +289,9 @@ mod tests {
             let v = kind as u8;
             assert_eq!(MethodKind::from_u8(v), Some(kind));
         }
-        assert_eq!(MethodKind::from_u8(21), None);
+        assert_eq!(MethodKind::from_u8(21), Some(MethodKind::RequestLeaveAfterHand));
+        assert_eq!(MethodKind::from_u8(22), Some(MethodKind::FoldWithProof));
+        assert_eq!(MethodKind::from_u8(23), None);
         assert_eq!(MethodKind::from_u8(255), None);
     }
 

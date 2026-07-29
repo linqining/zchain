@@ -230,21 +230,24 @@ private lemma bet_params_amount
         ext.input_bet_amount.2.2.1 ext.input_bet_amount.2.2.2 := by
   unfold extractBetParamsFromAir; rfl
 
-/-! ## bet AIR soundness 主定理
+/-! ## bet AIR 的 mid-round 模型内 soundness 定理
 
-    所有 Gap 均已闭合：
+    该定理只在手写 Lean mid-round 局部模型内成立：
     - RoundStateIsBetting：阻止非下注轮 bet
     - CurrentTurnMatches：阻止非当前行动座位 bet
     - SeatOccupied：阻止空座位 bet
     - ButtonUnchanged：dealer_seat 不变
     - AmountPositive：bet_amount > 0
-    - PotDelta（全 4 limb）：post_pot = pre_pot + bet_amount
+    - PotUnchanged（全 4 limb）：post_pot = pre_pot
     - Limb4DeltaRev（stack）：pre_stack = post_stack + bet_amount → bet_amount ≤ pre_stack
     - Limb4Eq（bet）：post_bet = bet_amount
     - Limb4Delta（total_bet）：post_total_bet = pre_total_bet + bet_amount
     - Limb4Eq（current_bet）：post_current_bet = bet_amount
     - Limb4Eq（min_raise）：post_min_raise = bet_amount
-    - StateRootConsistency：witness 绑定到 committed state root -/
+    - StateRootConsistency：witness 绑定到抽象 committed state root
+
+    它不涵盖 VM 的 end-of-round/settlement 分支，也未证明新 Rust
+    trusted pre-amount/`post_current_turn` 列与本 Lean 列结构等价。 -/
 theorem bet_air_sound :
   ∀ (row : CommonRow) (ext : BetMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
@@ -253,7 +256,6 @@ theorem bet_air_sound :
     BetAirAcceptable row ext expected_seat_index hlt expected_bet_amount max_players →
     -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
     Limb4Range16 ext.input_bet_amount →
-    Limb4Range16 row.pre_pot →
     Limb4Range16 ext.output_seat_stack →
     Limb4Range16 ext.input_pre_seat_total_bet →
     ContractBet
@@ -261,14 +263,14 @@ theorem bet_air_sound :
       (extractBetParamsFromAir ext)
       (extractPostTableFromBetAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index hlt expected_bet_amount max_players hseat h_air
-    h_range_amt h_range_pre_pot h_range_post_stack h_range_pre_total
+    h_range_amt h_range_post_stack h_range_pre_total
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : BetMethodConstraints row ext expected_seat_index hlt
                     expected_bet_amount max_players := h_air.2.1
   have h_c := h_method h_active
   rcases h_c with ⟨h_seat_eq, h_turn_eq, _h_occ, _h_amt, _h_acted,
                     h_amt_pos, h_ver, h_rs_unch, h_rsb, _h_btn_unch,
-                    h_pot_delta, h_stack_delta, h_bet_eq, h_total_delta,
+                    h_pot_unch, h_stack_delta, h_bet_eq, h_total_delta,
                     h_cb_eq, h_mr_eq, _h_src⟩
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
     rw [h_seat_eq]; simp [nat_to_m31]
@@ -287,15 +289,12 @@ theorem bet_air_sound :
                   row.pre_version.2.2.1 row.pre_version.2.2.2 + 1 := h_ver h_active
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
   have h_btn' : row.post_button = row.pre_button := _h_btn_unch h_active
-  -- 资金守恒派生
+  -- 资金守恒派生（mid-round pot 不变，座位筹码仅在 stack/bet 间移动）
   have h_pot_eq : decodeU64 row.post_pot.1 row.post_pot.2.1
                     row.post_pot.2.2.1 row.post_pot.2.2.2 =
                   decodeU64 row.pre_pot.1 row.pre_pot.2.1
-                    row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
-                  decodeU64 ext.input_bet_amount.1 ext.input_bet_amount.2.1
-                    ext.input_bet_amount.2.2.1 ext.input_bet_amount.2.2.2 :=
-    pot_delta_implies_decode_eq row ext.input_bet_amount h_active
-      h_range_pre_pot h_range_amt h_pot_delta
+                    row.pre_pot.2.2.1 row.pre_pot.2.2.2 :=
+    pot_unchanged_implies_decode_eq row h_active h_pot_unch
   have h_pre_stack : decodeU64 ext.input_pre_seat_stack.1 ext.input_pre_seat_stack.2.1
                        ext.input_pre_seat_stack.2.2.1 ext.input_pre_seat_stack.2.2.2 =
                      decodeU64 ext.output_seat_stack.1 ext.output_seat_stack.2.1
@@ -405,8 +404,8 @@ theorem bet_air_sound :
     rw [bet_post_version, bet_pre_version]; exact h_ver'
   · -- 19. post.round_state = pre.round_state
     rw [bet_post_round_state, bet_pre_round_state, h_rs']
-  · -- 20. post.betting.pot = pre.betting.pot + params.bet_amount
-    rw [bet_post_pot, bet_pre_pot, h_params_amount]; exact h_pot_eq
+  · -- 20. mid-round: post.betting.pot = pre.betting.pot
+    rw [bet_post_pot, bet_pre_pot]; exact h_pot_eq
   · -- 21. post.betting.current_bet = params.bet_amount
     rw [bet_post_current_bet, h_params_amount]; exact h_post_cb_eq
   · -- 22. post.betting.min_raise = params.bet_amount

@@ -12,6 +12,7 @@
 //! 所有 AIR 共享 [`common`] 模块的通用列布局与约束工具。
 
 pub mod actions;
+pub mod bound;
 pub mod common;
 pub mod crypto;
 pub mod funds;
@@ -20,7 +21,9 @@ pub mod lifecycle;
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::FrameworkEval;
 
+use crate::error::TexasAirResult;
 use crate::method_kind::MethodKind;
+use crate::public_inputs::TexasPublicInputs;
 
 /// Verifier-trusted statement shared by every Texas Poker AIR.
 ///
@@ -58,6 +61,16 @@ pub trait TexasAir: FrameworkEval + Clone + Sync {
 
     /// Number of original trace columns expected by this AIR.
     fn trace_num_columns(&self) -> usize;
+
+    /// Validate method-specific AIR constants and the complete trusted row
+    /// against canonical pre/post table images supplied by the verifier.
+    ///
+    /// Most legacy AIRs still use the default no-op. Production betting AIRs
+    /// override this hook so a prover cannot pair valid state roots with an
+    /// unrelated, self-consistent business row.
+    fn validate_public_inputs(&self, _public_inputs: &TexasPublicInputs) -> TexasAirResult<()> {
+        Ok(())
+    }
 }
 
 macro_rules! impl_texas_air {
@@ -83,6 +96,36 @@ macro_rules! impl_texas_air {
     };
 }
 
+macro_rules! impl_validated_texas_air {
+    ($ty:path, $kind:expr, $validator:path) => {
+        impl TexasAir for $ty {
+            fn statement(&self) -> AirStatement {
+                AirStatement {
+                    kind: $kind,
+                    pre_state_root: self.pre_state_root,
+                    post_state_root: self.post_state_root,
+                    table_id: self.table_id,
+                    hand_id: self.hand_id,
+                    call_seq: self.call_seq,
+                    pre_version: self.pre_version,
+                    post_version: self.post_version,
+                }
+            }
+
+            fn trace_num_columns(&self) -> usize {
+                Self::num_columns()
+            }
+
+            fn validate_public_inputs(
+                &self,
+                public_inputs: &TexasPublicInputs,
+            ) -> TexasAirResult<()> {
+                $validator(self, public_inputs)
+            }
+        }
+    };
+}
+
 impl_texas_air!(
     lifecycle::create_table::CreateTableAir,
     MethodKind::CreateTable
@@ -98,16 +141,52 @@ impl_texas_air!(
     lifecycle::reset_for_next_hand::ResetForNextHandAir,
     MethodKind::ResetForNextHand
 );
-impl_texas_air!(actions::fold::FoldAir, MethodKind::Fold);
-impl_texas_air!(actions::check::CheckAir, MethodKind::Check);
-impl_texas_air!(actions::call::CallAir, MethodKind::Call);
-impl_texas_air!(actions::raise::RaiseAir, MethodKind::Raise);
-impl_texas_air!(actions::bet::BetAir, MethodKind::Bet);
-impl_texas_air!(actions::auto_fold::AutoFoldAir, MethodKind::AutoFold);
-impl_texas_air!(actions::force_fold::ForceFoldAir, MethodKind::ForceFold);
+impl_validated_texas_air!(
+    actions::fold::FoldAir,
+    MethodKind::Fold,
+    actions::validation::validate_fold
+);
+impl_validated_texas_air!(
+    actions::check::CheckAir,
+    MethodKind::Check,
+    actions::validation::validate_check
+);
+impl_validated_texas_air!(
+    actions::call::CallAir,
+    MethodKind::Call,
+    actions::validation::validate_call
+);
+impl_validated_texas_air!(
+    actions::raise::RaiseAir,
+    MethodKind::Raise,
+    actions::validation::validate_raise
+);
+impl_validated_texas_air!(
+    actions::bet::BetAir,
+    MethodKind::Bet,
+    actions::validation::validate_bet
+);
+impl_validated_texas_air!(
+    actions::auto_fold::AutoFoldAir,
+    MethodKind::AutoFold,
+    actions::validation::validate_auto_fold
+);
+impl_validated_texas_air!(
+    actions::force_fold::ForceFoldAir,
+    MethodKind::ForceFold,
+    actions::validation::validate_force_fold
+);
 impl_texas_air!(actions::kick_player::KickPlayerAir, MethodKind::KickPlayer);
+impl_texas_air!(
+    actions::request_leave_after_hand::RequestLeaveAfterHandAir,
+    MethodKind::RequestLeaveAfterHand
+);
 impl_texas_air!(funds::addon::AddonAir, MethodKind::Addon);
 impl_texas_air!(funds::rebuy::RebuyAir, MethodKind::Rebuy);
+impl_texas_air!(
+    crypto::fold_with_proof::FoldWithProofAir,
+    MethodKind::FoldWithProof
+);
 impl_texas_air!(
     crypto::join_and_shuffle::JoinAndShuffleAir,
     MethodKind::JoinAndShuffle

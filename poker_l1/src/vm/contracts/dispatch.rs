@@ -27,6 +27,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
@@ -125,7 +126,7 @@ pub mod selectors {
 }
 
 /// 合约调用上下文（传递给 dispatch 的执行环境）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DispatchContext {
     /// 调用者地址。
     pub caller: Address,

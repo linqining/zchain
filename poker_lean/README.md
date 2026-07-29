@@ -23,6 +23,12 @@
 > `ContractSemantics` 谓词建立上述蕴含；尚未证明这些谓词与真实 Rust 实现等价。
 > 机器可检查的范围声明与公理审计见 `PokerLean/Audit/TrustBoundary.lean`。
 
+call/raise/bet 的当前 `Contract*` 谓词是 **mid-round 局部语义**：
+筹码从 stack 移入 `seat.bet`，pot 不变，round 不变。VM 后续的
+`advance_turn` 可能收池、推进 round 或 settlement；这些 end-of-round 分支
+尚未形式化为 Rust↔Lean 完整精化。即使在 mid-round，raise/bet 对其他玩家
+`acted_this_round` 的重置等字段也仍未在这些 Contract 中完整建模。
+
 ## 快速开始
 
 ### 前置要求

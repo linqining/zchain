@@ -11,7 +11,10 @@ namespace PokerLean
 
     含 pre-state 座位 witness（stack/bet/total_bet）和 post-state betting witness
     （current_bet/min_raise），用于通过 `StateRootConsistency` 绑定到 committed state root，
-    并通过逐 limb delta/equality 约束保证资金守恒。 -/
+    并通过逐 limb delta/equality 约束保证资金守恒。
+
+    这是手写的 mid-round 抽象列。Rust P06 的 trusted pre-amount 字段与
+    `post_current_turn` 守卫尚未在此列布局中镜像。 -/
 structure BetMethodColumns where
   input_seat_index : M31
   input_current_turn : M31
@@ -140,11 +143,11 @@ def extractPostTableFromBetAir
       total_bet := new_total_bet
       acted_this_round := true })
 
-/-- bet AIR 的方法约束。
+/-- bet AIR 的 mid-round 方法约束。
 
-    闭合的 Gap：
+    在该手写局部模型中约束：
     - AmountPositive：bet_amount > 0
-    - PotDelta（全 4 limb）：post_pot = pre_pot + bet_amount
+    - PotUnchanged（全 4 limb）：mid-round 时 post_pot = pre_pot
     - Limb4DeltaRev（stack）：pre_stack = post_stack + bet_amount → bet_amount ≤ pre_stack
     - Limb4Eq（bet）：post_bet = bet_amount
     - Limb4Delta（total_bet）：post_total_bet = pre_total_bet + bet_amount
@@ -169,8 +172,8 @@ def BetMethodConstraints
   RoundStateUnchanged row ∧
   RoundStateIsBetting row ∧
   ButtonUnchanged row ∧
-  -- 资金守恒：pot += bet_amount（全 4 limb）
-  PotDelta row ext.input_bet_amount ∧
+  -- mid-round 不收池：筹码仍在 seat.bet，pot 全 4 limb 不变
+  PotUnchanged row ∧
   -- stack 守恒：pre_stack = post_stack + bet_amount → post_stack = pre_stack - bet_amount
   Limb4DeltaRev ext.input_pre_seat_stack ext.output_seat_stack ext.input_bet_amount ∧
   -- bet 守恒：post_bet = bet_amount（bet 是设值，不是累加）

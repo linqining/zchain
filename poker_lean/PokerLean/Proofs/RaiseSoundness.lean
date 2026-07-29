@@ -232,22 +232,25 @@ private lemma raise_params_amount
         ext.input_raise_to.2.2.1 ext.input_raise_to.2.2.2 := by
   unfold extractRaiseParamsFromAir; rfl
 
-/-! ## raise AIR soundness 主定理
+/-! ## raise AIR 的 mid-round 模型内 soundness 定理
 
-    所有 Gap 均已闭合：
+    该定理只在手写 Lean mid-round 局部模型内成立：
     - RoundStateIsBetting：阻止非下注轮 raise
     - CurrentTurnMatches：阻止非当前行动座位 raise
     - SeatOccupied：阻止空座位 raise
     - ButtonUnchanged：dealer_seat 不变
     - AmountPositive：raise_to > 0（pre.current_bet = 0 ⟹ raise_to > current_bet）
-    - PotDelta（全 4 limb，对 call_delta）：post_pot = pre_pot + (raise_to - pre_bet)
+    - PotUnchanged（全 4 limb）：post_pot = pre_pot
     - Limb4DeltaRev（stack，对 call_delta）：pre_stack = post_stack + delta ⟹ raise_to ≤ pre_stack + pre_bet
     - Limb4Delta（pre_bet → post_bet，对 call_delta）+ Limb4Eq（post_bet = raise_to）：
       post_bet = raise_to（且 delta = raise_to - pre_bet）
     - Limb4Delta（total_bet，对 call_delta）：post_total_bet = pre_total_bet + delta
     - Limb4Eq（current_bet）：post_current_bet = raise_to
     - Limb4Eq（min_raise）：post_min_raise = raise_to（pre.current_bet = 0）
-    - StateRootConsistency：witness 绑定到 committed state root -/
+    - StateRootConsistency：witness 绑定到抽象 committed state root
+
+    它不涵盖 VM 的 end-of-round/settlement 分支，也未证明新 Rust
+    trusted pre-amount/`post_current_turn` 列与本 Lean 列结构等价。 -/
 theorem raise_air_sound :
   ∀ (row : CommonRow) (ext : RaiseMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
@@ -256,7 +259,6 @@ theorem raise_air_sound :
     RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to max_players →
     -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
     Limb4Range16 ext.input_call_delta →
-    Limb4Range16 row.pre_pot →
     Limb4Range16 ext.output_seat_stack →
     Limb4Range16 ext.input_pre_seat_bet →
     Limb4Range16 ext.input_pre_seat_total_bet →
@@ -265,14 +267,14 @@ theorem raise_air_sound :
       (extractRaiseParamsFromAir ext)
       (extractPostTableFromRaiseAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index hlt expected_raise_to max_players hseat h_air
-    h_range_amt h_range_pre_pot h_range_post_stack h_range_pre_bet h_range_pre_total
+    h_range_amt h_range_post_stack h_range_pre_bet h_range_pre_total
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : RaiseMethodConstraints row ext expected_seat_index hlt
                     expected_raise_to max_players := h_air.2.1
   have h_c := h_method h_active
   rcases h_c with ⟨h_seat_eq, h_turn_eq, _h_occ, _h_amt, _h_acted, h_amt_pos,
                     h_ver, h_rs_unch, h_rsb, _h_btn_unch,
-                    h_pot_delta_c, h_stack_delta_c, h_bet_delta_c, h_total_delta_c,
+                    h_pot_unch_c, h_stack_delta_c, h_bet_delta_c, h_total_delta_c,
                     h_bet_eq_c, h_cb_eq_c, h_mr_eq_c, _h_src⟩
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
     rw [h_seat_eq]; simp [nat_to_m31]
@@ -291,15 +293,12 @@ theorem raise_air_sound :
                   row.pre_version.2.2.1 row.pre_version.2.2.2 + 1 := h_ver h_active
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
   have h_btn' : row.post_button = row.pre_button := _h_btn_unch h_active
-  -- 资金守恒派生（从 limb delta/equality 约束得到 decodeU64 级等式）
+  -- 资金守恒派生（mid-round pot 不变，座位筹码仅在 stack/bet 间移动）
   have h_pot_eq : decodeU64 row.post_pot.1 row.post_pot.2.1
                     row.post_pot.2.2.1 row.post_pot.2.2.2 =
                   decodeU64 row.pre_pot.1 row.pre_pot.2.1
-                    row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
-                  decodeU64 ext.input_call_delta.1 ext.input_call_delta.2.1
-                    ext.input_call_delta.2.2.1 ext.input_call_delta.2.2.2 :=
-    pot_delta_implies_decode_eq row ext.input_call_delta h_active
-      h_range_pre_pot h_range_amt h_pot_delta_c
+                    row.pre_pot.2.2.1 row.pre_pot.2.2.2 :=
+    pot_unchanged_implies_decode_eq row h_active h_pot_unch_c
   have h_pre_stack : decodeU64 ext.input_pre_seat_stack.1 ext.input_pre_seat_stack.2.1
                        ext.input_pre_seat_stack.2.2.1 ext.input_pre_seat_stack.2.2.2 =
                      decodeU64 ext.output_seat_stack.1 ext.output_seat_stack.2.1
@@ -427,11 +426,8 @@ theorem raise_air_sound :
     rw [raise_post_version, raise_pre_version]; exact h_ver'
   · -- 18. post.round_state = pre.round_state
     rw [raise_post_round_state, raise_pre_round_state, h_rs']
-  · -- 19. post.betting.pot = pre.betting.pot + (raise_to - pre.bet)
-    rw [raise_post_pot, raise_pre_pot, h_params_amount]
-    rw [h_params_seat, h_pre_seat]
-    simp only [Seat.empty]
-    omega
+  · -- 19. mid-round: post.betting.pot = pre.betting.pot
+    rw [raise_post_pot, raise_pre_pot]; exact h_pot_eq
   · -- 20. post.betting.current_bet = params.raise_to
     rw [raise_post_current_bet, h_params_amount]; exact h_post_cb_eq
   · -- 21. post.betting.min_raise = params.raise_to - pre.betting.current_bet

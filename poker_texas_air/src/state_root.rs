@@ -18,6 +18,7 @@
 
 use starknet_ff::FieldElement;
 use stwo::core::fields::m31::M31;
+use borsh::BorshDeserialize;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::merkle_tree::{MerkleTree, SeatLeaf};
@@ -113,6 +114,23 @@ pub fn table_state_preimage(
     canonical_borsh_preimage("zchain.texas_poker.table.v2", table)
 }
 
+/// 从 canonical table preimage 反解完整 `TexasPokerTable`。
+///
+/// 生产 verifier 用它把已经混入 Fiat–Shamir transcript、且 root 校验通过的
+/// `pre_image` / `post_image` 还原为业务状态，从而把 action witness 与真实状态绑定。
+/// 这不是从 proof-carried witness 取值；输入必须满足 [`table_state_preimage`] 的
+/// version/tag/length/chunk 编码契约，任何非 canonical 编码都会被拒绝。
+pub fn table_from_state_preimage(
+    image: &[FieldElement],
+) -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::TexasPokerTable> {
+    const TAG: &str = "zchain.texas_poker.table.v2";
+    let payload = decode_canonical_borsh_preimage(image, TAG)?;
+    poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
+        .map_err(|e| TexasAirError::SerializationError(format!(
+            "TexasPokerTable canonical Borsh decode failed: {e}"
+        )))
+}
+
 /// 计算 `TexasPokerTable` 的 state_root = Poseidon252(preimage)。
 ///
 /// # Errors
@@ -200,6 +218,95 @@ fn canonical_borsh_preimage<T: borsh::BorshSerialize>(
         fields.push(byte_chunk_to_field(chunk)?);
     }
     Ok(fields)
+}
+
+/// Decode the injective canonical Borsh field encoding used above.
+fn decode_canonical_borsh_preimage(
+    fields: &[FieldElement],
+    expected_tag: &str,
+) -> TexasAirResult<Vec<u8>> {
+    if fields.len() < 4 {
+        return Err(TexasAirError::SerializationError(
+            "canonical preimage too short".into(),
+        ));
+    }
+    if fields[0] != FieldElement::from(2u64) {
+        return Err(TexasAirError::SerializationError(
+            "unsupported canonical preimage version".into(),
+        ));
+    }
+
+    let tag_len = field_to_usize(fields[1], "domain tag length")?;
+    let tag_chunks = tag_len.div_ceil(31);
+    let payload_len_index = 2usize
+        .checked_add(tag_chunks)
+        .ok_or_else(|| TexasAirError::SerializationError("tag chunk count overflow".into()))?;
+    if payload_len_index >= fields.len() {
+        return Err(TexasAirError::SerializationError(
+            "canonical preimage missing payload length".into(),
+        ));
+    }
+
+    let tag = decode_field_chunks(&fields[2..payload_len_index], tag_len, "domain tag")?;
+    if tag.as_slice() != expected_tag.as_bytes() {
+        return Err(TexasAirError::SerializationError(
+            "canonical preimage domain tag mismatch".into(),
+        ));
+    }
+
+    let payload_len = field_to_usize(fields[payload_len_index], "payload length")?;
+    let payload_chunks = payload_len.div_ceil(31);
+    let payload_start = payload_len_index + 1;
+    let expected_len = payload_start
+        .checked_add(payload_chunks)
+        .ok_or_else(|| TexasAirError::SerializationError("payload chunk count overflow".into()))?;
+    if fields.len() != expected_len {
+        return Err(TexasAirError::SerializationError(format!(
+            "canonical preimage field count mismatch: expected {expected_len}, got {}",
+            fields.len()
+        )));
+    }
+    decode_field_chunks(&fields[payload_start..], payload_len, "payload")
+}
+
+fn field_to_usize(field: FieldElement, label: &str) -> TexasAirResult<usize> {
+    let bytes = field.to_bytes_be();
+    if bytes[..24].iter().any(|&b| b != 0) {
+        return Err(TexasAirError::SerializationError(format!(
+            "canonical {label} does not fit u64"
+        )));
+    }
+    let value = u64::from_be_bytes(bytes[24..].try_into().expect("8-byte suffix"));
+    usize::try_from(value).map_err(|_| {
+        TexasAirError::SerializationError(format!("canonical {label} does not fit usize"))
+    })
+}
+
+fn decode_field_chunks(
+    fields: &[FieldElement],
+    byte_len: usize,
+    label: &str,
+) -> TexasAirResult<Vec<u8>> {
+    if fields.len() != byte_len.div_ceil(31) {
+        return Err(TexasAirError::SerializationError(format!(
+            "canonical {label} chunk count mismatch"
+        )));
+    }
+    let mut out = Vec::with_capacity(byte_len);
+    for (i, field) in fields.iter().enumerate() {
+        let remaining = byte_len - out.len();
+        let chunk_len = remaining.min(31);
+        let bytes = field.to_bytes_be();
+        // `byte_chunk_to_field` right-aligns each chunk. Canonicality also requires
+        // every byte outside the declared chunk to remain zero.
+        if bytes[..32 - chunk_len].iter().any(|&b| b != 0) {
+            return Err(TexasAirError::SerializationError(format!(
+                "canonical {label} chunk {i} has non-zero prefix"
+            )));
+        }
+        out.extend_from_slice(&bytes[32 - chunk_len..]);
+    }
+    Ok(out)
 }
 
 /// Interpret a canonical 32-byte big-endian integer as a field element.
@@ -336,6 +443,56 @@ mod tests {
     #[test]
     fn test_state_root_zero() {
         assert_eq!(StateRoot::zero().field(), FieldElement::ZERO);
+    }
+
+    #[test]
+    fn test_table_state_preimage_roundtrip() {
+        let mut table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+            poker_l1::object_model::ObjectID::new([0xAB; 20], 7),
+            "canonical-roundtrip".into(),
+            [0xCD; 20],
+            6,
+            50,
+            100,
+        );
+        table.hand_id = 9;
+        table.call_seq = 17;
+        table.version = 23;
+        table.pot = 65_537;
+        table.seats[2].player = [0x22; 20];
+        table.seats[2].stack = 1_000_000;
+        table.seats[2].bet = 65_536;
+
+        let image = table_state_preimage(&table).expect("canonical table should encode");
+        let decoded = table_from_state_preimage(&image).expect("canonical table should decode");
+        assert_eq!(decoded, table);
+    }
+
+    #[test]
+    fn test_table_state_preimage_rejects_noncanonical_chunk_prefix() {
+        const TAG: &str = "zchain.texas_poker.table.v2";
+        let table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+            poker_l1::object_model::ObjectID::new([0x11; 20], 3),
+            "noncanonical-prefix".into(),
+            [0x33; 20],
+            2,
+            1,
+            2,
+        );
+        let mut image = table_state_preimage(&table).expect("canonical table should encode");
+
+        // The one-chunk tag is right-aligned. Setting a byte immediately before
+        // the declared tag bytes creates a numerically valid field element but
+        // a noncanonical chunk encoding, which the decoder must reject.
+        assert!(TAG.len() < 31);
+        let mut bytes = image[2].to_bytes_be();
+        bytes[32 - TAG.len() - 1] = 1;
+        image[2] = FieldElement::from_bytes_be(&bytes).expect("value remains inside field");
+
+        assert!(
+            table_from_state_preimage(&image).is_err(),
+            "non-zero bytes outside the declared chunk must be rejected"
+        );
     }
 
     #[test]

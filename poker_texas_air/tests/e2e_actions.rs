@@ -39,7 +39,7 @@ fn one_root() -> [M31; 4] {
 /// E2E: fold → trace → prove → verify（happy path）。
 #[test]
 fn test_e2e_fold_prove_verify() {
-    let input = FoldInput { seat_index: 3 };
+    let input = FoldInput { seat_index: 3, post_current_turn: 4 };
     let row = FoldRow::active(
         &input,
         zero_root(),
@@ -76,7 +76,7 @@ fn test_e2e_fold_prove_verify() {
 /// 流程：用正确 AIR 生成 proof → 篡改 proof.air.input.seat_index → verify 应失败。
 #[test]
 fn test_soundness_fold_tampered_seat() {
-    let input = FoldInput { seat_index: 3 };
+    let input = FoldInput { seat_index: 3, post_current_turn: 4 };
     let row = FoldRow::active(
         &input,
         zero_root(),
@@ -108,7 +108,7 @@ fn test_soundness_fold_tampered_seat() {
 
     // 篡改 proof.air.input.seat_index：trace 中是 3，但 AIR 声明 5
     proof.air = FoldAir {
-        input: FoldInput { seat_index: 5 }, // 篡改！
+        input: FoldInput { seat_index: 5, post_current_turn: 4 }, // 篡改！
         ..proof.air.clone()
     };
 
@@ -126,7 +126,7 @@ fn test_soundness_fold_tampered_seat() {
 /// 验证通用层 `post_version = pre_version + 1` 约束有效。
 #[test]
 fn test_soundness_fold_version_not_incremented() {
-    let input = FoldInput { seat_index: 3 };
+    let input = FoldInput { seat_index: 3, post_current_turn: 4 };
     let row = FoldRow::active(
         &input, zero_root(), one_root(), 42, 0, 1,
         0, // pre_version
@@ -159,7 +159,7 @@ fn test_soundness_fold_version_not_incremented() {
 #[test]
 fn test_soundness_fold_pot_changed() {
     use poker_texas_air::airs::common::{COL_POST_POT_BASE, COL_PRE_POT_BASE};
-    let input = FoldInput { seat_index: 3 };
+    let input = FoldInput { seat_index: 3, post_current_turn: 4 };
     let row = FoldRow::active(
         &input, zero_root(), one_root(), 42, 0, 1,
         0, 1, // version 正确递增
@@ -198,6 +198,7 @@ fn test_e2e_check_prove_verify() {
         seat_index: 1,
         current_bet: 20,
         seat_bet: 20, // 守卫：seat.bet == current_bet
+        post_current_turn: 2,
     };
     let row = CheckRow::active(
         &input,
@@ -241,6 +242,7 @@ fn test_soundness_check_tampered_bet() {
         seat_index: 1,
         current_bet: 20,
         seat_bet: 20,
+        post_current_turn: 2,
     };
     let row = CheckRow::active(
         &input,
@@ -297,6 +299,11 @@ fn test_e2e_call_prove_verify() {
     let input = CallInput {
         seat_index: 2,
         call_amount: 20,
+        pre_current_bet: 20,
+        pre_seat_bet: 0,
+        pre_seat_stack: 100,
+        pre_seat_total_bet: 0,
+        post_current_turn: 3,
     };
     let row = CallRow::active(
         &input,
@@ -310,7 +317,7 @@ fn test_e2e_call_prove_verify() {
         4,    // pre = PREFLOP
         4,    // post = PREFLOP
         100,  // pre_pot
-        120,  // post_pot（pot += call_amount）
+        100,  // post_pot（mid-round 不收池）
         80,   // post_seat_stack（原 100 - 20）
         20,   // post_seat_bet
         false, // is_all_in
@@ -346,6 +353,11 @@ fn test_soundness_call_tampered_amount() {
     let input = CallInput {
         seat_index: 2,
         call_amount: 20,
+        pre_current_bet: 20,
+        pre_seat_bet: 0,
+        pre_seat_stack: 100,
+        pre_seat_total_bet: 0,
+        post_current_turn: 3,
     };
     let row = CallRow::active(
         &input,
@@ -359,7 +371,7 @@ fn test_soundness_call_tampered_amount() {
         4,
         4,
         100,
-        120,
+        100,
         80,
         20,
         false,
@@ -413,6 +425,11 @@ fn test_e2e_raise_prove_verify() {
         seat_index: 4,
         raise_to: 80,
         min_raise: 20,
+        pre_current_bet: 20,
+        pre_seat_stack: 80,
+        pre_seat_bet: 20,
+        pre_seat_total_bet: 20,
+        post_current_turn: 5,
     };
     let row = RaiseRow::active(
         &input,
@@ -426,7 +443,7 @@ fn test_e2e_raise_prove_verify() {
         4, // PREFLOP
         4,
         100,
-        160, // pot += 60（raise_to - pre_bet = 80 - 20）
+        100, // mid-round 不收池
         80,  // pre_seat_stack
         20,  // pre_seat_bet
         20,  // pre_seat_total_bet
@@ -434,7 +451,7 @@ fn test_e2e_raise_prove_verify() {
         80,  // post_seat_bet = raise_to
         80,  // post_seat_total_bet = 20 + 60
         80,  // post_current_bet = raise_to
-        80,  // post_min_raise = raise_to（pre.current_bet = 0）
+        60,  // post_min_raise = raise_to - pre.current_bet
         false,
     );
     let trace = gen_method_trace(RaiseAir::num_columns(), &row.to_vec(), &RaiseRow::padding().to_vec())
@@ -465,6 +482,11 @@ fn test_soundness_raise_tampered_raise_to() {
         seat_index: 4,
         raise_to: 80,
         min_raise: 20,
+        pre_current_bet: 20,
+        pre_seat_stack: 80,
+        pre_seat_bet: 20,
+        pre_seat_total_bet: 20,
+        post_current_turn: 5,
     };
     let row = RaiseRow::active(
         &input,
@@ -478,7 +500,7 @@ fn test_soundness_raise_tampered_raise_to() {
         4,
         4,
         100,
-        160,
+        100,
         80,  // pre_seat_stack
         20,  // pre_seat_bet
         20,  // pre_seat_total_bet
@@ -486,7 +508,7 @@ fn test_soundness_raise_tampered_raise_to() {
         80,  // post_seat_bet = raise_to
         80,  // post_seat_total_bet
         80,  // post_current_bet
-        80,  // post_min_raise
+        60,  // post_min_raise
         false,
     );
     let trace = gen_method_trace(RaiseAir::num_columns(), &row.to_vec(), &RaiseRow::padding().to_vec())
@@ -531,6 +553,7 @@ fn test_e2e_auto_fold_prove_verify() {
     let input = AutoFoldInput {
         seat_index: 1,
         current_time: 1_700_000_000,
+        post_current_turn: 2,
     };
     let row = AutoFoldRow::active(
         &input,
@@ -575,6 +598,7 @@ fn test_soundness_auto_fold_tampered_time() {
     let input = AutoFoldInput {
         seat_index: 1,
         current_time: 1_700_000_000,
+        post_current_turn: 2,
     };
     let row = AutoFoldRow::active(
         &input,
@@ -631,7 +655,7 @@ fn test_soundness_auto_fold_tampered_time() {
 fn test_e2e_force_fold_prove_verify() {
     use poker_texas_air::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 
-    let input = ForceFoldInput { seat_index: 5 };
+    let input = ForceFoldInput { seat_index: 5, post_current_turn: 0 };
     let row = ForceFoldRow::active(
         &input,
         zero_root(),
@@ -672,7 +696,7 @@ fn test_e2e_force_fold_prove_verify() {
 fn test_soundness_force_fold_tampered_seat() {
     use poker_texas_air::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 
-    let input = ForceFoldInput { seat_index: 5 };
+    let input = ForceFoldInput { seat_index: 5, post_current_turn: 0 };
     let row = ForceFoldRow::active(
         &input,
         zero_root(),
@@ -707,7 +731,7 @@ fn test_soundness_force_fold_tampered_seat() {
 
     // 篡改 seat_index：trace 中是 5，AIR 声明 0
     proof.air = ForceFoldAir {
-        input: ForceFoldInput { seat_index: 0 }, // 篡改！
+        input: ForceFoldInput { seat_index: 0, post_current_turn: 0 }, // 篡改！
         ..proof.air.clone()
     };
 
@@ -841,36 +865,37 @@ fn test_action_air_column_consistency() {
         auto_fold, bet, call, check, fold, force_fold, kick_player, raise,
     };
 
-    // fold: 通用 + 4 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
-    assert_eq!(fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 4);
+    // fold: 通用 + 5 业务（含 Gap 1、pre/post current_turn）
+    assert_eq!(fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
     assert_eq!(FoldAir::num_columns(), fold::cols::NUM_COLUMNS);
 
-    // check: 通用 + 8 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
-    assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
+    // check: 通用 + 9 业务（含 Gap 1、pre/post current_turn）
+    assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 9);
     assert_eq!(CheckAir::num_columns(), check::cols::NUM_COLUMNS);
 
-    // call: 通用 + 33 业务（阶段 3 soundness 升级：全 4-limb delta）
+    // call: 通用 + 34 业务（阶段 3 soundness 升级：全 4-limb delta）
     // 业务列：seat_index/current_turn(2) + call_amount/stack/bet(12) + all_in/acted(2)
-    // + pre_round_state_q(1) + pre_seat_bet/stack(8) + pre/post_total_bet(8) = 33
-    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
+    // + pre_round_state_q(1) + pre_seat_bet/stack(8) + pre/post_total_bet(8)
+    // + post_current_turn(1) = 34
+    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 34);
     assert_eq!(CallAir::num_columns(), call::cols::NUM_COLUMNS);
 
-    // raise: 通用 + 46 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
+    // raise: 通用 + 47 业务（含 Gap 1、pre/post current_turn）
     // 业务列：seat_index/current_turn/seat_occupied(3) + raise_to(4)
     // + pre_seat_stack/bet/total_bet(12) + call_delta(4)
     // + post_seat_stack/bet/total_bet(12) + post_current_bet/min_raise(8)
-    // + output_all_in/acted(2) + pre_round_state_q(1) = 46
-    assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 46);
+    // + output_all_in/acted(2) + pre_round_state_q/post_current_turn(2) = 47
+    assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 47);
     assert_eq!(RaiseAir::num_columns(), raise::cols::NUM_COLUMNS);
 
-    // bet: 通用 + 12 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
-    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 33);
+    // bet: 通用 + 34 业务（含 Gap 1、pre/post current_turn）
+    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 34);
 
-    // auto_fold: 通用 + 8 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
-    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
+    // auto_fold: 通用 + 9 业务（含 Gap 1、pre/post current_turn）
+    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 9);
 
-    // force_fold: 通用 + 4 业务（含 Gap 1 witness + INPUT_CURRENT_TURN witness）
-    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 4);
+    // force_fold: 通用 + 5 业务（含 Gap 1、pre/post current_turn）
+    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
 
     // kick_player: 通用 + 11 业务（含 KICKED_BET 4 limb + Gap 3 INPUT_SEAT_OCCUPIED boolean witness）
     assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 11);
@@ -903,6 +928,12 @@ fn test_e2e_bet_prove_verify() {
     let input = BetInput {
         seat_index: 1,
         amount: 50,
+        pre_current_bet: 0,
+        pre_min_raise: 20,
+        pre_seat_bet: 0,
+        pre_seat_stack: 100,
+        pre_seat_total_bet: 0,
+        post_current_turn: 2,
     };
     let row = BetRow::active(
         &input,
@@ -916,7 +947,7 @@ fn test_e2e_bet_prove_verify() {
         5,  // pre = FLOP（postflop bet）
         5,  // post = FLOP
         0,  // pre_pot
-        50, // post_pot（pot += amount）
+        0,  // post_pot（mid-round 不收池）
         50, // post_seat_bet
         0,   // pre_seat_bet（阶段3）
         100, // pre_seat_stack
@@ -951,6 +982,12 @@ fn test_soundness_bet_tampered_amount() {
     let input = BetInput {
         seat_index: 1,
         amount: 50,
+        pre_current_bet: 0,
+        pre_min_raise: 20,
+        pre_seat_bet: 0,
+        pre_seat_stack: 100,
+        pre_seat_total_bet: 0,
+        post_current_turn: 2,
     };
     let row = BetRow::active(
         &input,
@@ -964,7 +1001,7 @@ fn test_soundness_bet_tampered_amount() {
         5,
         5,
         0,
-        50,
+        0,
         50,
         0,   // pre_seat_bet
         100, // pre_seat_stack
@@ -1012,6 +1049,12 @@ fn test_soundness_bet_tampered_seat() {
     let input = BetInput {
         seat_index: 1,
         amount: 50,
+        pre_current_bet: 0,
+        pre_min_raise: 20,
+        pre_seat_bet: 0,
+        pre_seat_stack: 100,
+        pre_seat_total_bet: 0,
+        post_current_turn: 2,
     };
     let row = BetRow::active(
         &input,
@@ -1025,7 +1068,7 @@ fn test_soundness_bet_tampered_seat() {
         5,
         5,
         0,
-        50,
+        0,
         50,
         0,   // pre_seat_bet
         100, // pre_seat_stack

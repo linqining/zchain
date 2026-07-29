@@ -43,11 +43,17 @@ soundness gap”等表述。机器可检查的范围声明和公理输出见
   现有 `poker_zkvm` 递归层被项目自身审计测试标记为 unsound（L1 commitment 未 mix 进 channel、
   Merkle 组件 no-op、无 N-proof 聚合）。修复需 ~(1)月专家工作。详见
   `poker_texas_air/docs/PO5_PO6_DESIGN_NOTES.md`。生产入口已 fail-closed。
-- ❌ **P0-6：不可机械修复（最难，根本性建模缺口）**。VM 的 call/raise/bet 在 seat 更新后
-  无条件调用 `advance_turn`，可能收注（pot 跳变、清零所有 seat bet）、推进 round、结算；
-  而 AIR/Lean 固定要求 round 不变、pot 只增本次金额。单个 VM-legal 收尾动作常规性违反 AIR。
-  正确修复 = 多 AIR 分解（seat-update + bet-collection + round-advance + settlement）；务实过渡
-  = 收窄 AIR 范围 + `current_turn ≠ None` 守卫（覆盖部分）。详见同上文档。
+- ⚠️ **P0-6：mid-round 生产路径已收窄，完整 transition 仍未完成**。VM 的
+  call/raise/bet 在 seat 更新后无条件调用 `advance_turn`，收尾分支会收注
+  （pot 跳变、清零多个 seat bet）、推进 round 或结算。Rust P06 改动现将
+  生产证明限定为 same-round + pot unchanged + `current_turn = Some(next)` 的
+  mid-round 分支，对 end-of-round/settlement fail-closed。Lean call/raise/bet 也已改为
+  pot/round 不变的 mid-round 局部谓词。这只修正了 pot 这一语义轴；
+  Lean raise/bet 仍未建模重置其他玩家 `acted_this_round` 等实际 VM 字段。
+
+  这仍不是 P0-6 完整修复：Lean 尚未镜像 Rust 新增的 verifier-trusted
+  pre-amount/`post_current_turn` 列，Rust AIR↔Lean AIR 逐约束等价也未建立；
+  bet-collection、round-advance 与 settlement AIR/精化仍缺失。详见同上文档。
 - Lean 侧桥接：Rust `evaluate` ↔ Lean AIR 谓词的逐约束等价、VM 完整精化、密码学子证明验证均未建立。
 - 生产接线：tick + 4 crypto 方法未接线；2 个 VM 入口无 MethodKind；4 crypto 入口 Borsh 解码 bug。
 -/

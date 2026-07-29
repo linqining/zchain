@@ -524,7 +524,7 @@ pub fn dispatch(
     // Post-commit Prover：构造证明任务（pre/post table + method 元数据）。
     // return_value = borsh(L1DispatchOutput { events, prove_task })，
     // Orchestrator 从链层取回后反序列化生成 proof。
-    let return_value = build_dispatch_output(&events, selector, args, pre_table, table)?;
+    let return_value = build_dispatch_output(context, &events, selector, args, pre_table, table)?;
 
     Ok(DispatchResult {
         created_objects: vec![],
@@ -540,6 +540,7 @@ pub fn dispatch(
 /// 没有状态变化（例如 no-op tick）时仅返回 events；所有 23 个已注册 selector
 /// 一旦改变状态都必须产生 task。未知 selector 返回错误，不能静默丢 task。
 fn build_dispatch_output(
+    context: &DispatchContext,
     events: &[TexasPokerEvent],
     selector: &[u8; 32],
     args: &[u8],
@@ -561,6 +562,9 @@ fn build_dispatch_output(
     let task = L1ProveTask::new(
         kind,
         method_input,
+        context.clone(),
+        *selector,
+        args.to_vec(),
         pre_table,
         post_table.clone(),
         table_id,

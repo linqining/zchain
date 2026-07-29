@@ -17,12 +17,15 @@ namespace PokerLean
     核心关系（`delta := raise_to - pre.bet`）：
     - `Limb4Delta pre_bet post_bet delta` + `Limb4Eq post_bet raise_to`
       ⟹ `decodeU64 delta = raise_to - pre.bet`（且 `raise_to ≥ pre.bet` 自动成立）
-    - `PotDelta delta`：`post_pot = pre_pot + delta`
+    - `PotUnchanged`：mid-round 时 `post_pot = pre_pot`
     - `Limb4DeltaRev pre_stack post_stack delta`：`post_stack = pre_stack - delta`
     - `Limb4Delta pre_total_bet post_total_bet delta`：
       `post_total_bet = pre_total_bet + delta`
     - `Limb4Eq post_current_bet raise_to`（`pre.current_bet = 0` ⟹ `delta` 即新 min_raise）
-    - `Limb4Eq post_min_raise raise_to`（`pre.current_bet = 0` ⟹ `min_raise = raise_to`） -/
+    - `Limb4Eq post_min_raise raise_to`（`pre.current_bet = 0` ⟹ `min_raise = raise_to`）
+
+    这是手写的 mid-round 抽象列。Rust P06 新增的 trusted pre-current-bet/
+    min-raise/seat 金额与 `post_current_turn` 守卫尚未在本结构中镜像。 -/
 structure RaiseMethodColumns where
   input_seat_index : M31
   input_current_turn : M31
@@ -157,7 +160,7 @@ def extractPostTableFromRaiseAir
 
     闭合的 Gap：
     - AmountPositive：raise_to > 0（因 pre.current_bet = 0 ⟹ raise_to > current_bet）
-    - PotDelta（全 4 limb，对 call_delta）：post_pot = pre_pot + (raise_to - pre_bet)
+    - PotUnchanged（全 4 limb）：mid-round 时 post_pot = pre_pot
     - Limb4DeltaRev（stack，对 call_delta）：
       pre_stack = post_stack + delta ⟹ raise_to ≤ pre_stack + pre_bet
     - Limb4Delta（pre_bet → post_bet，对 call_delta）+ Limb4Eq（post_bet = raise_to）：
@@ -185,8 +188,8 @@ def RaiseMethodConstraints
   RoundStateUnchanged row ∧
   RoundStateIsBetting row ∧
   ButtonUnchanged row ∧
-  -- 资金守恒：pot += call_delta（全 4 limb）
-  PotDelta row ext.input_call_delta ∧
+  -- mid-round 不收池：筹码仍在 seat.bet，pot 全 4 limb 不变
+  PotUnchanged row ∧
   -- stack 守恒：pre_stack = post_stack + call_delta
   --   ⟹ post_stack = pre_stack - delta ⟹ delta ≤ pre_stack
   --   ⟹ raise_to - pre_bet ≤ pre_stack ⟹ raise_to ≤ pre_stack + pre_bet

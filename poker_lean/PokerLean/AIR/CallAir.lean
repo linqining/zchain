@@ -10,7 +10,10 @@ namespace PokerLean
 /-- call 业务列。
 
     含 pre-state 座位 witness（stack/bet/total_bet），用于通过 `StateRootConsistency`
-    绑定到 committed pre_state_root，并通过逐 limb delta 约束保证资金守恒。 -/
+    绑定到 committed pre_state_root，并通过逐 limb delta 约束保证资金守恒。
+
+    这是手写的 mid-round 抽象列。Rust P06 还新增了 verifier-trusted 金额字段与
+    `post_current_turn` 守卫；本结构尚未与该 Rust 列布局建立精化等价。 -/
 structure CallMethodColumns where
   input_seat_index : M31
   input_current_turn : M31
@@ -131,14 +134,14 @@ def extractPostTableFromCallAir
       total_bet := new_total_bet
       acted_this_round := true })
 
-/-- call AIR 的方法约束。
+/-- call AIR 的 mid-round 方法约束。
 
-    闭合的 Gap：
+    在该手写局部模型中约束：
     - RoundStateIsBetting：阻止非下注轮 call
     - CurrentTurnMatches：阻止非当前行动座位 call
     - SeatOccupied：阻止空座位 call
     - ButtonUnchanged：dealer_seat 不变
-    - PotDelta（全 4 limb）：post_pot = pre_pot + call_amount
+    - PotUnchanged（全 4 limb）：mid-round 时 post_pot = pre_pot
     - StackDelta（反向）：pre_stack = post_stack + call_amount → post_stack = pre_stack - call_amount
     - BetDelta：post_bet = pre_bet + call_amount
     - TotalBetDelta：post_total_bet = pre_total_bet + call_amount
@@ -161,8 +164,8 @@ def CallMethodConstraints
   RoundStateUnchanged row ∧
   RoundStateIsBetting row ∧
   ButtonUnchanged row ∧
-  -- 资金守恒：pot += call_amount（全 4 limb）
-  PotDelta row ext.input_call_amount ∧
+  -- mid-round 不收池：筹码仍在 seat.bet，pot 全 4 limb 不变
+  PotUnchanged row ∧
   -- stack 守恒：pre_stack = post_stack + call_amount → post_stack = pre_stack - call_amount
   Limb4DeltaRev ext.input_pre_seat_stack ext.output_seat_stack ext.input_call_amount ∧
   -- bet 守恒：post_bet = pre_bet + call_amount

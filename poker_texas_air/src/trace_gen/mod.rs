@@ -79,6 +79,35 @@ impl MethodTrace {
         Ok(())
     }
 
+    /// Return row zero in column order.
+    ///
+    /// Single-step Texas AIRs replicate this business row over the complete
+    /// trace domain. Verifier-side task reconstruction binds exactly this
+    /// column vector through [`crate::public_inputs::TexasPublicInputs`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TexasAirError::TraceGenError`] if the trace has no columns or
+    /// a malformed empty column.
+    pub fn first_row(&self) -> TexasAirResult<Vec<M31>> {
+        if self.cols.is_empty() {
+            return Err(TexasAirError::TraceGenError(
+                "cannot bind an empty method trace".into(),
+            ));
+        }
+        self.cols
+            .iter()
+            .enumerate()
+            .map(|(column, values)| {
+                values.first().copied().ok_or_else(|| {
+                    TexasAirError::TraceGenError(format!(
+                        "method trace column {column} has no rows"
+                    ))
+                })
+            })
+            .collect()
+    }
+
     /// Padding 所有剩余行为 0。
     pub fn pad_zero(&mut self, from_row: usize) {
         let rows = 1usize << self.log_size;

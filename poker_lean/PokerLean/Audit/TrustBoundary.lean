@@ -21,6 +21,14 @@ import PokerLean.Proofs.CryptoSoundness
 * 未建立：真实 VM 完整状态转移精化到 Lean Contract/State 模型；
 * 未建立：公开输入、state-root、聚合器和密码学子证明的端到端验证。
 
+其中 call/raise/bet 的 `Contract*` 与 `*AirAcceptable` 现只表达
+mid-round 局部片段（pot/round 不变）。end-of-round 收池、round 推进与
+settlement 不在这些定理的结论中。
+
+Rust 生产路径的 `expected_trace_row → BoundAir → transcript`
+绑定，以及原生验证后签发 `VerificationReceipt` 并构造
+`VerifiedChain` 的 host-side 流程，也尚无对应 Lean 模型/定理。
+
 文件末尾的 `#print axioms` 会在 Lean 编译本模块时检查并打印 21 个模型内
 soundness 定理的实际公理依赖。当前预期的自定义信任根只有：
 `PokerLean.poseidon_hash` 与 `PokerLean.texasPokerTableToPreimage`。

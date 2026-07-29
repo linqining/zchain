@@ -22,11 +22,36 @@
 //! `events` + `prove_task`。旧格式（仅 events）通过版本前缀区分。
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 
 // MethodInput 复用 vm-common 的定义（poker_l1 与 poker_texas_air 共享的 borsh 契约）。
 pub use vm_common::prove_task::MethodInput;
 
 use crate::method_kind::MethodKind;
+
+/// Domain-separated digest of the exact VM dispatch call carried by a task.
+///
+/// The digest commits to the authenticated dispatch context, selector, and raw
+/// Borsh arguments.  Method proofs mix it into Fiat-Shamir public inputs so a
+/// receipt cannot be detached from the VM call that was replayed by the host.
+pub fn dispatch_call_digest(
+    context: &poker_l1::vm::contracts::dispatch::DispatchContext,
+    selector: &[u8; 32],
+    raw_args: &[u8],
+) -> crate::error::TexasAirResult<[u8; 32]> {
+    let encoded = borsh::to_vec(&(context.clone(), *selector, raw_args.to_vec())).map_err(|e| {
+        crate::error::TexasAirError::SerializationError(format!(
+            "dispatch call context borsh: {e}"
+        ))
+    })?;
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(b"zchain.texas_poker.dispatch_call.v1");
+    hasher.update(&encoded);
+    let mut digest = [0u8; 32];
+    hasher.finalize_variable(&mut digest).expect("32 <= 64");
+    Ok(digest)
+}
 
 /// 单次 method 调用的证明任务。
 ///
@@ -37,6 +62,12 @@ pub struct ProveTask {
     pub method_kind: MethodKind,
     /// 方法业务输入。
     pub method_input: MethodInput,
+    /// 执行该调用时经过交易层认证的完整 dispatch 上下文。
+    pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
+    /// VM 实际路由的原始 selector。
+    pub selector: [u8; 32],
+    /// VM 实际解码和执行的原始 Borsh 参数。
+    pub raw_args: Vec<u8>,
     /// 调用前表台快照（算 pre_state_root + 派生 pre 字段）。
     pub pre_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
     /// 调用后表台快照（算 post_state_root + 派生 post 字段）。
@@ -55,6 +86,9 @@ impl ProveTask {
     pub fn new(
         method_kind: MethodKind,
         method_input: MethodInput,
+        context: poker_l1::vm::contracts::dispatch::DispatchContext,
+        selector: [u8; 32],
+        raw_args: Vec<u8>,
         pre_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
         post_table: poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
         table_id: u64,
@@ -64,6 +98,9 @@ impl ProveTask {
         Self {
             method_kind,
             method_input,
+            context,
+            selector,
+            raw_args,
             pre_table,
             post_table,
             table_id,
@@ -113,6 +150,11 @@ impl DispatchOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poker_l1::signature::TaggedPubkey;
+    use poker_l1::vm::contracts::dispatch::DispatchContext;
+    use poker_l1::vm::contracts::texas_poker::dispatch::{
+        self as texas_dispatch, CreateTableArgs, SeatIndexArgs,
+    };
 
     fn dummy_table(name: &str) -> poker_l1::vm::contracts::texas_poker::types::TexasPokerTable {
         use poker_l1::object_model::ObjectID;
@@ -126,11 +168,27 @@ mod tests {
         )
     }
 
+    fn dummy_context() -> DispatchContext {
+        DispatchContext {
+            caller: [0xAA; 20],
+            caller_pubkey: TaggedPubkey {
+                tag: 0,
+                raw: vec![0xBB; 32],
+            },
+            chain_id: 1,
+            block_height: 100,
+            block_timestamp: 1_000_000,
+        }
+    }
+
     #[test]
     fn prove_task_borsh_roundtrip() {
         let task = ProveTask::new(
             MethodKind::Fold,
             MethodInput::SeatOnly { seat_index: 2 },
+            dummy_context(),
+            texas_dispatch::selectors::fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap(),
             dummy_table("pre"),
             dummy_table("post"),
             42,
@@ -165,6 +223,15 @@ mod tests {
                 small_blind: 50,
                 big_blind: 100,
             },
+            dummy_context(),
+            texas_dispatch::selectors::create_table(),
+            borsh::to_vec(&CreateTableArgs {
+                name: "t".into(),
+                max_players: 6,
+                small_blind: 50,
+                big_blind: 100,
+            })
+            .unwrap(),
             dummy_table("pre"),
             dummy_table("post"),
             1,
