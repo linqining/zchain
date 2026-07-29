@@ -36,11 +36,18 @@ soundness gap”等表述。机器可检查的范围声明和公理输出见
   （`synthetic_for_test` + `synthetic_air_roots`），通过加强后的 `verify_air_statement`。
 
 **仍未建立（端到端闭环的剩余阻断项，按优先级）**：
-- P0-4：状态承诺 preimage 遗漏 `addon_pool`/`ante`/`rake`/RIT 等字段；seat leaf 仅哈希
-  `status`+`stack`（遗漏 bet/total_bet/folded/all_in 等）。需补全字段。
-- P0-5：Aggregator 仍是 descriptor-only PoC，**不验证任何子 proof**。需改为接收并递归验证 method proofs。
-- P0-6：下注语义与 VM 不等价——AIR/Lean 固定要求 round 不变、pot 只增本次金额，但 VM 的
-  call/raise/bet 调用 `advance_turn`，可能推进 round、结算。需建模完整 transition 或明确限定为单步切片。
+- ✅ **P0-4：已修复**。`table_state_preimage` 与 `SeatLeaf::from_seat` 现用 canonical Borsh
+  序列化整个 `TexasPokerTable`/`Seat`（域分隔 tag `*.v2`），全字段自动覆盖，手工字段列表
+  已移除。addon_pool/ante/rake/RIT/bet/total_bet/folded/all_in 等均包含。仅余死代码清理（cosmetic）。
+- ❌ **P0-5：不可机械修复（需密码学专家）**。Aggregator 仍 descriptor-only，不验证子 proof。
+  现有 `poker_zkvm` 递归层被项目自身审计测试标记为 unsound（L1 commitment 未 mix 进 channel、
+  Merkle 组件 no-op、无 N-proof 聚合）。修复需 ~(1)月专家工作。详见
+  `poker_texas_air/docs/PO5_PO6_DESIGN_NOTES.md`。生产入口已 fail-closed。
+- ❌ **P0-6：不可机械修复（最难，根本性建模缺口）**。VM 的 call/raise/bet 在 seat 更新后
+  无条件调用 `advance_turn`，可能收注（pot 跳变、清零所有 seat bet）、推进 round、结算；
+  而 AIR/Lean 固定要求 round 不变、pot 只增本次金额。单个 VM-legal 收尾动作常规性违反 AIR。
+  正确修复 = 多 AIR 分解（seat-update + bet-collection + round-advance + settlement）；务实过渡
+  = 收窄 AIR 范围 + `current_turn ≠ None` 守卫（覆盖部分）。详见同上文档。
 - Lean 侧桥接：Rust `evaluate` ↔ Lean AIR 谓词的逐约束等价、VM 完整精化、密码学子证明验证均未建立。
 - 生产接线：tick + 4 crypto 方法未接线；2 个 VM 入口无 MethodKind；4 crypto 入口 Borsh 解码 bug。
 -/
