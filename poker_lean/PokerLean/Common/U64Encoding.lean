@@ -15,8 +15,9 @@ import PokerLean.Common.M31
 - `limbsToU64_bound`：定理，需 limb 范围前置条件
 - `roundtrip`：定理，由上述定理组合推出
 
-唯一保留的"公理"是密码学信任根（Poseidon 哈希、preimage 单射性），
-位于 `PoseidonHash.lean` 和 `Types.lean`，不属于本文件。
+剩余的 state-root 信任边界是两个未解释函数：Poseidon 哈希与表状态编码，
+位于 `PoseidonHash.lean` 和 `Types.lean`，不属于本文件。项目不再假设
+Poseidon 在任意长度输入上的精确单射性。
 -/
 
 namespace PokerLean

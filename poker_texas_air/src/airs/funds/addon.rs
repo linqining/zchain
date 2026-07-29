@@ -38,12 +38,12 @@
 //!
 //! 简化版（PoC）：只约束 limb 0 一致性，高 limb 由 host 端保证（M31 域内 16 bit）。
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    compute_bound_carries, u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow,
-    COMMON_NUM_COLUMNS, MAX_TOTAL_BET, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, MAX_TOTAL_BET, ZERO, compute_bound_carries,
+    u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -127,7 +127,8 @@ impl FrameworkEval for AddonAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Addon, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         // 读取业务列
@@ -165,7 +166,7 @@ impl FrameworkEval for AddonAir {
 
         // 约束 3（核心，阶段 3 升级：全 4-limb）：post_pending == pre_pending + amount
         //    关键不变量：addon 精确累加到 pending_addon，不动 stack
-        eval.add_constraint(common.limb4_delta(&pre_pending, &post_pending, &input_amount));
+        for __c in common.limb4_delta(&pre_pending, &post_pending, &input_amount) { eval.add_constraint(__c); }
 
         // 约束 4（审计共性，degree-2）：round_state 不变（addon 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
@@ -174,7 +175,9 @@ impl FrameworkEval for AddonAir {
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (input_seat_occupied - one.clone()));
         // 约束 6（Gap 9，degree-2）：amount_0 * inv == 1 — 证明 amount limb0 ≠ 0（amount > 0）。
-        eval.add_constraint(is_active.clone() * (input_amount[0].clone() * input_amount_inv - one.clone()));
+        eval.add_constraint(
+            is_active.clone() * (input_amount[0].clone() * input_amount_inv - one.clone()),
+        );
 
         // 全局上界检查（对齐合约 apply_addon 的 chip_pool + addon_pool + amount <= MAX_TOTAL_BET）
         // 读取 pre_chip_pool / pre_addon_pool 全 4 limb
@@ -200,15 +203,30 @@ impl FrameworkEval for AddonAir {
 
         // 约束 7（溢出防护，degree-2）：全局上界 range check
         // 验证 chip_pool + addon_pool + amount + diff = MAX_TOTAL_BET（逐 limb + 2-bit carry）
-        let chip_pool = [pre_chip_pool_0, pre_chip_pool_1, pre_chip_pool_2, pre_chip_pool_3];
-        let pre_addon_pool = [pre_addon_pool_0, pre_addon_pool_1, pre_addon_pool_2, pre_addon_pool_3];
+        let chip_pool = [
+            pre_chip_pool_0,
+            pre_chip_pool_1,
+            pre_chip_pool_2,
+            pre_chip_pool_3,
+        ];
+        let pre_addon_pool = [
+            pre_addon_pool_0,
+            pre_addon_pool_1,
+            pre_addon_pool_2,
+            pre_addon_pool_3,
+        ];
         let amount = input_amount.clone();
         let diff = [bound_diff_0, bound_diff_1, bound_diff_2, bound_diff_3];
         let carry_lo = [carry_lo_0, carry_lo_1, carry_lo_2];
         let carry_hi = [carry_hi_0, carry_hi_1, carry_hi_2];
-        eval.add_constraint(common.bound_check_4limb(
-            &chip_pool, &pre_addon_pool, &amount, &diff, &carry_lo, &carry_hi,
-        ));
+        for __c in common.bound_check_4limb(
+            &chip_pool,
+            &pre_addon_pool,
+            &amount,
+            &diff,
+            &carry_lo,
+            &carry_hi,
+        ) { eval.add_constraint(__c); }
 
         // 约束 8（阶段 3 新增，soundness 关键）：addon_pool 守恒。
         // post_addon_pool = pre_addon_pool + amount（全 4-limb，对齐合约 `table.addon_pool += amount`）。
@@ -218,7 +236,7 @@ impl FrameworkEval for AddonAir {
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
-        eval.add_constraint(common.limb4_delta(&pre_addon_pool, &post_addon_pool, &amount));
+        for __c in common.limb4_delta(&pre_addon_pool, &post_addon_pool, &amount) { eval.add_constraint(__c); }
 
         eval
     }

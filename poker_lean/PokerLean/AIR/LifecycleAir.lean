@@ -192,11 +192,13 @@ AIR 约束（start_hand.rs:86-133）：
 3. `output_new_round_state == 0` (ROUND_WAITING)
 4-6. Ante consistency
 
-**缺失的关键约束**：
+**真实 Rust AIR 中缺失、但下方 Lean 模型作为额外假设加入的约束**：
 - 无 `pre_round_state == WAITING` 检查
 - 无 `active_count >= 2` 强制（约束 2 被注释为"简化"）
 - 无 version 递增检查
 - 无 state root 验证
+
+因此 `start_hand_air_sound` 只对加强后的 Lean 谓词成立，不能直接推出该 Rust AIR sound。
 -/
 
 structure StartHandMethodColumns where
@@ -246,10 +248,12 @@ AIR 约束（tick.rs:85-121）：
 2-3. Time bank consistency
 4-5. Rake consistency
 
-**缺失的关键约束**：
+**真实 Rust AIR 中缺失、但下方 Lean 模型部分作为额外假设加入的约束**：
 - 无 round_state gating
 - 无真实超时条件验证（不校验 timeout_kind > 0）
 - 无 version 递增检查
+
+Lean 仅加入 `timeout_kind > 0` 与版本递增，仍未建模真实超时判定。
 -/
 
 structure TickMethodColumns where
@@ -297,10 +301,12 @@ AIR 约束（reset_for_next_hand.rs:76-98）：
 1. `output_new_round_state == 0` (ROUND_WAITING)
 2. `post_pending_addon == 0` (all 4 limbs)
 
-**缺失的关键约束**：
+**真实 Rust AIR 中缺失、但下方 Lean 模型部分作为额外假设加入的约束**：
 - 无 `pre_round_state` 检查（不验证是否在结算后状态）
 - 无 version 递增检查
 - 无 state root 验证
+
+Lean 加入版本递增、粗粒度 shuffle phase 与抽象 root 一致性，仍未覆盖真实 reset 前置条件。
 -/
 
 structure ResetForNextHandMethodColumns where

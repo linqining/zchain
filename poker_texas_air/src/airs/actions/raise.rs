@@ -27,11 +27,11 @@
 //!   `OUTPUT_CURRENT_BET_BASE[4]`, `OUTPUT_MIN_RAISE_BASE[4]`,
 //!   `OUTPUT_ALL_IN`, `OUTPUT_ACTED`, `INPUT_PRE_ROUND_STATE_Q`
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -124,7 +124,8 @@ impl FrameworkEval for RaiseAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Raise, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         // 读取业务列（顺序与 cols 常量定义一致）
@@ -266,35 +267,41 @@ impl FrameworkEval for RaiseAir {
         // ===== 资金守恒约束（对齐 Lean PotDelta / Limb4Delta / Limb4DeltaRev / Limb4Eq）=====
 
         // 约束 8：pot += call_delta（全 4 limb）— post_pot[i] = pre_pot[i] + call_delta[i]
-        eval.add_constraint(common.pot_delta_4limb(&input_call_delta));
+        for __c in common.pot_delta_4limb(&input_call_delta) { eval.add_constraint(__c); }
 
         // 约束 9：stack 守恒（反向 delta）— pre_stack[i] = post_stack[i] + call_delta[i]
         // ⟹ post_stack = pre_stack - call_delta ⟹ call_delta ≤ pre_stack
         // ⟹ raise_to - pre_bet ≤ pre_stack ⟹ raise_to ≤ pre_stack + pre_bet
-        eval.add_constraint(common.limb4_delta_rev(
-            &input_pre_seat_stack, &output_seat_stack, &input_call_delta,
-        ));
+        for __c in common.limb4_delta_rev(
+            &input_pre_seat_stack,
+            &output_seat_stack,
+            &input_call_delta,
+        ) { eval.add_constraint(__c); }
 
         // 约束 10：bet 守恒（delta）— post_bet[i] = pre_bet[i] + call_delta[i]
         // 与约束 12（post_bet = raise_to）联立得 call_delta = raise_to - pre_bet
-        eval.add_constraint(common.limb4_delta(
-            &input_pre_seat_bet, &output_seat_bet, &input_call_delta,
-        ));
+        for __c in common.limb4_delta(
+            &input_pre_seat_bet,
+            &output_seat_bet,
+            &input_call_delta,
+        ) { eval.add_constraint(__c); }
 
         // 约束 11：total_bet 守恒（delta）— post_total_bet[i] = pre_total_bet[i] + call_delta[i]
-        eval.add_constraint(common.limb4_delta(
-            &input_pre_seat_total_bet, &output_seat_total_bet, &input_call_delta,
-        ));
+        for __c in common.limb4_delta(
+            &input_pre_seat_total_bet,
+            &output_seat_total_bet,
+            &input_call_delta,
+        ) { eval.add_constraint(__c); }
 
         // 约束 12：bet 设值 — post_bet[i] = raise_to[i]
-        eval.add_constraint(common.limb4_eq(&output_seat_bet, &input_raise_to));
+        for __c in common.limb4_eq(&output_seat_bet, &input_raise_to) { eval.add_constraint(__c); }
 
         // 约束 13：current_bet 设值 — post_current_bet[i] = raise_to[i]
-        eval.add_constraint(common.limb4_eq(&output_current_bet, &input_raise_to));
+        for __c in common.limb4_eq(&output_current_bet, &input_raise_to) { eval.add_constraint(__c); }
 
         // 约束 14：min_raise 设值 — post_min_raise[i] = raise_to[i]
         // （pre.current_bet = 0 ⟹ raise_to - 0 = raise_to）
-        eval.add_constraint(common.limb4_eq(&output_min_raise, &input_raise_to));
+        for __c in common.limb4_eq(&output_min_raise, &input_raise_to) { eval.add_constraint(__c); }
 
         eval
     }
@@ -396,8 +403,8 @@ impl RaiseRow {
                 0,
             ),
             input_seat_index: u8_to_m31(input.seat_index),
-            input_current_turn: u8_to_m31(input.seat_index),  // current_turn == seat_index
-            input_seat_occupied: M31::from(1u32),             // 座位被占用
+            input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
+            input_seat_occupied: M31::from(1u32),            // 座位被占用
             input_raise_to: u64_to_m31_limbs(input.raise_to),
             input_pre_seat_stack: u64_to_m31_limbs(pre_seat_stack),
             input_pre_seat_bet: u64_to_m31_limbs(pre_seat_bet),

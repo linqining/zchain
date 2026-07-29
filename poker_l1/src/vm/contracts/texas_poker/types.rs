@@ -560,6 +560,18 @@ pub struct TexasPokerTable {
     /// 桌台配置（ZK skip 等）。
     pub config: TableConfig,
 
+    /// 当前手牌序号。
+    ///
+    /// 初始为 0；每当一次成功 dispatch 产生 `HandStarted` 事件时递增。
+    /// 该值随桌台状态持久化，并写入 ProveTask 公开输入，避免跨手牌任务混淆。
+    pub hand_id: u32,
+
+    /// 成功改变桌台状态的 dispatch 序号。
+    ///
+    /// 初始为 0；每次成功且 `pre_table != post_table` 的 dispatch 严格递增一次。
+    /// 无状态变化的 permissionless `tick` 不消耗序号，保证证明任务连续。
+    pub call_seq: u32,
+
     /// 状态版本号（每次更新 +1，用于乐观锁）。
     pub version: u64,
 }
@@ -616,6 +628,8 @@ impl TexasPokerTable {
             rake_collected: 0,
             rit_mode: super::constants::RIT_MODE_DISABLED,
             config: TableConfig::default(),
+            hand_id: 0,
+            call_seq: 0,
             version: 0,
         }
     }

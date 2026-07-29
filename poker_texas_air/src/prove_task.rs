@@ -21,7 +21,7 @@
 //! `return_value` = borsh([`DispatchOutput`])，其中 `DispatchOutput` 含
 //! `events` + `prove_task`。旧格式（仅 events）通过版本前缀区分。
 
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 // MethodInput 复用 vm-common 的定义（poker_l1 与 poker_texas_air 共享的 borsh 契约）。
 pub use vm_common::prove_task::MethodInput;
@@ -88,7 +88,9 @@ pub struct DispatchOutput {
 impl DispatchOutput {
     /// 仅含 events（无证明任务）的便捷构造。
     #[must_use]
-    pub fn events_only(events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>) -> Self {
+    pub fn events_only(
+        events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
+    ) -> Self {
         Self {
             events,
             prove_task: None,

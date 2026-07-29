@@ -17,10 +17,10 @@
 //! 完整 stack += pending_addon 约束留待 state_root 完整字段化后。
 //! 当前通过 state_root pre/post 完整承诺（host 端保证计算正确）。
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
+use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 
 /// `reset_for_next_hand` 业务特定列布局。
@@ -74,14 +74,21 @@ pub struct ResetForNextHandAir {
 impl ResetForNextHandAir {
     /// 列数。
     #[must_use]
-    pub const fn num_columns() -> usize { cols::NUM_COLUMNS }
+    pub const fn num_columns() -> usize {
+        cols::NUM_COLUMNS
+    }
 }
 
 impl FrameworkEval for ResetForNextHandAir {
-    fn log_size(&self) -> u32 { self.log_size }
-    fn max_constraint_log_degree_bound(&self) -> u32 { self.log_size + 1 }
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::ResetForNextHand, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let output_new_round_state = eval.next_trace_mask();
@@ -109,7 +116,11 @@ impl FrameworkEval for ResetForNextHandAir {
         let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();
         eval.add_constraint(is_active.clone() * (input_shuffle_phase.clone() - expected_phase));
         // 约束（Gap 6 part 2）：q == shuffle_phase²（witness 一致性，degree-2）
-        eval.add_constraint(is_active.clone() * (input_shuffle_phase_q.clone() - input_shuffle_phase.clone() * input_shuffle_phase.clone()));
+        eval.add_constraint(
+            is_active.clone()
+                * (input_shuffle_phase_q.clone()
+                    - input_shuffle_phase.clone() * input_shuffle_phase.clone()),
+        );
         // 约束（Gap 6 part 3）：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
         // vanishing (phase-1)(phase-2)(phase-3) = phase³-6phase²+11phase-6
         // 经 q=phase² 展开为 degree ≤ 2：(phase·q) - 6·q + 11·phase - 6 == 0
@@ -152,19 +163,33 @@ impl ResetForNextHandRow {
     pub fn active(
         input: &ResetForNextHandInput,
         _pre_pending_addon: u64,
-        pre_state_root: [M31; 4], post_state_root: [M31; 4],
-        table_id: u64, hand_id: u32, call_seq: u32,
-        pre_version: u64, post_version: u64,
+        pre_state_root: [M31; 4],
+        post_state_root: [M31; 4],
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+        pre_version: u64,
+        post_version: u64,
         pre_round_state: u8,
     ) -> Self {
         let sp = u8_to_m31(input.shuffle_phase);
         let q = sp * sp;
         Self {
             common: CommonRow::active(
-                MethodKind::ResetForNextHand, pre_state_root, post_state_root,
-                table_id, hand_id, call_seq, pre_version, post_version,
-                pre_round_state, 0, // post = WAITING
-                0, 0, 0, 0,
+                MethodKind::ResetForNextHand,
+                pre_state_root,
+                post_state_root,
+                table_id,
+                hand_id,
+                call_seq,
+                pre_version,
+                post_version,
+                pre_round_state,
+                0, // post = WAITING
+                0,
+                0,
+                0,
+                0,
             ),
             output_new_round_state: ZERO, // ROUND_WAITING = 0
             // 关键：reset 后 pending_addon 必须清零（addon 已合并到 stack）

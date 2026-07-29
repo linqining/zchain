@@ -16,11 +16,11 @@
 //! 2. `seat_index == input.seat_index`（输入一致性）
 //! 3. 业务约束（如 `fold` 约束 `output_folded == 1`，`call` 约束 `output_call_amount == input.amount`）
 
-pub mod fold;
-pub mod check;
-pub mod call;
-pub mod raise;
-pub mod bet;
 pub mod auto_fold;
+pub mod bet;
+pub mod call;
+pub mod check;
+pub mod fold;
 pub mod force_fold;
 pub mod kick_player;
+pub mod raise;

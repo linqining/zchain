@@ -181,9 +181,8 @@ pub mod selectors {
     /// 时强制踢出并退款。解决 `leave_table` 仅 WAITING 可用、creator/tick 可能
     /// 立即 start_hand 导致玩家来不及离场的问题。
     ///
-    /// 该方法不进入 AIR prove 流程（`build_method_input` 返回 None，同 tick）：
-    /// 实际状态转换（座位清空 + 退款）在 `reset_for_next_hand` 内完成，
-    /// 由已有的 `MethodKind::ResetForNextHand` AIR 覆盖。
+    /// 该方法使用稳定的独立 MethodKind discriminant 21 产生 ProveTask，
+    /// 不能借用 Tick/ResetForNextHand，否则会把 toggle 状态变化伪装成其他语义。
     pub fn request_leave_after_hand() -> [u8; 32] {
         compute_method_selector("request_leave_after_hand")
     }
@@ -196,9 +195,8 @@ pub mod selectors {
     /// 参加。区别于普通 fold：普通 fold 玩家仍需为后续公共牌提交 reveal token
     /// （或被超时踢出）；fold_with_proof 让玩家立即从协议中「物理退出」。
     ///
-    /// 该方法不进入 AIR prove 流程（`build_method_input` 返回 None）：实际状态
-    /// 转换（fold + pk 移除）通过 end_without_showdown / settle_hand /
-    /// reset_for_next_hand 的现有 AIR 覆盖。
+    /// 该方法使用稳定的独立 MethodKind discriminant 22 产生 ProveTask，并保留
+    /// 完整原始 proof 参数，供证明消费侧重验复合状态转换。
     pub fn fold_with_proof() -> [u8; 32] {
         compute_method_selector("fold_with_proof")
     }
@@ -449,7 +447,9 @@ pub fn dispatch(
         s if s == &selectors::leave_with_proof() => {
             dispatch_leave_with_proof(context, table, args, &mut events)
         }
-        s if s == &selectors::join_table() => dispatch_join_table(context, table, args, &mut events),
+        s if s == &selectors::join_table() => {
+            dispatch_join_table(context, table, args, &mut events)
+        }
         s if s == &selectors::leave_table() => {
             dispatch_leave_table(context, table, args, &mut events)
         }
@@ -457,9 +457,7 @@ pub fn dispatch(
             dispatch_start_hand(context, table, args, &mut events)
         }
         s if s == &selectors::tick() => dispatch_tick(table, args, &mut events),
-        s if s == &selectors::auto_fold() => {
-            dispatch_auto_fold(context, table, args, &mut events)
-        }
+        s if s == &selectors::auto_fold() => dispatch_auto_fold(context, table, args, &mut events),
         s if s == &selectors::force_fold() => {
             dispatch_force_fold(context, table, args, &mut events)
         }
@@ -494,22 +492,39 @@ pub fn dispatch(
         _ => {
             return Err(PokerL1Error::UnknownContractMethod {
                 selector: *selector,
-            })
+            });
         }
     };
     result?;
+
+    // 证明任务元数据只在成功且真正改变状态的 dispatch 上推进。
+    // 使用 pre_table 作为计数基准，防止 create_table 覆写结构时把序号重置为 0。
+    let state_changed = *table != pre_table;
+    if state_changed {
+        let next_call_seq = pre_table
+            .call_seq
+            .checked_add(1)
+            .ok_or_else(|| PokerL1Error::Serialization("texas_poker call_seq overflow".into()))?;
+        let hand_started = events
+            .iter()
+            .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }));
+        let next_hand_id = if hand_started {
+            pre_table
+                .hand_id
+                .checked_add(1)
+                .ok_or_else(|| PokerL1Error::Serialization("texas_poker hand_id overflow".into()))?
+        } else {
+            pre_table.hand_id
+        };
+        table.call_seq = next_call_seq;
+        table.hand_id = next_hand_id;
+    }
     log_events(&events);
 
     // Post-commit Prover：构造证明任务（pre/post table + method 元数据）。
     // return_value = borsh(L1DispatchOutput { events, prove_task })，
     // Orchestrator 从链层取回后反序列化生成 proof。
-    let return_value = build_dispatch_output(
-        &events,
-        selector,
-        args,
-        pre_table,
-        table,
-    )?;
+    let return_value = build_dispatch_output(&events, selector, args, pre_table, table)?;
 
     Ok(DispatchResult {
         created_objects: vec![],
@@ -522,7 +537,8 @@ pub fn dispatch(
 ///
 /// 根据 selector 推导 method_kind discriminant + 构造 MethodInput，
 /// 封装为 `L1DispatchOutput { events, prove_task }`。
-/// 无法识别的 selector（理论不会到达，因 dispatch 已校验）→ prove_task = None。
+/// 没有状态变化（例如 no-op tick）时仅返回 events；所有 23 个已注册 selector
+/// 一旦改变状态都必须产生 task。未知 selector 返回错误，不能静默丢 task。
 fn build_dispatch_output(
     events: &[TexasPokerEvent],
     selector: &[u8; 32],
@@ -530,25 +546,18 @@ fn build_dispatch_output(
     pre_table: TexasPokerTable,
     post_table: &TexasPokerTable,
 ) -> PokerL1Result<Vec<u8>> {
-    use super::prove_task::{L1DispatchOutput, L1ProveTask, MethodInput};
+    use super::prove_task::{L1DispatchOutput, L1ProveTask};
 
-    let (kind, method_input) = match build_method_input(selector, args) {
-        Some(v) => v,
-        None => {
-            // tick 等无需证明的方法，或未知 selector → 仅返回 events。
-            let out = L1DispatchOutput::events_only(events.to_vec());
-            return borsh::to_vec(&out)
-                .map_err(|e| PokerL1Error::Serialization(format!("dispatch output borsh: {e}")));
-        }
-    };
+    if pre_table == *post_table {
+        let out = L1DispatchOutput::events_only(events.to_vec());
+        return borsh::to_vec(&out)
+            .map_err(|e| PokerL1Error::Serialization(format!("dispatch output borsh: {e}")));
+    }
 
-    // TODO：table_id / hand_id / call_seq 完整方案需给 TexasPokerTable 加字段
-    // （hand_id 在 start_hand/reset 时维护，call_seq 每次 dispatch 递增）。
-    // 本轮先用占位值打通 return_value 通道；Orchestrator 当前不依赖这些值
-    // （verify_chain 只校验 state_root 链）。后续补字段后此处改为读取真实值。
-    let table_id = pre_table.id.creation_nonce;
-    let hand_id = 0u32;
-    let call_seq = 0u32;
+    let (kind, method_input) = build_method_input(selector, args)?;
+    let table_id = post_table.id.creation_nonce;
+    let hand_id = post_table.hand_id;
+    let call_seq = post_table.call_seq;
     let task = L1ProveTask::new(
         kind,
         method_input,
@@ -568,8 +577,12 @@ fn build_dispatch_output(
 /// method_kind discriminant 与 `poker_texas_air::MethodKind` 对齐
 /// （`#[repr(u8)]` + `use_discriminant=true`）。
 ///
-/// 返回 `None` 表示该方法无需证明（如 tick）或 selector 未匹配。
-fn build_method_input(selector: &[u8; 32], args: &[u8]) -> Option<(u8, super::prove_task::MethodInput)> {
+/// 六个密码学方法先按各自真实 Args 类型完整解码，再把原始 borsh 字节写入
+/// 专用 MethodInput variant。这样证明端能重新验证完整 proof，而不是只拿 seat_index。
+fn build_method_input(
+    selector: &[u8; 32],
+    args: &[u8],
+) -> PokerL1Result<(u8, super::prove_task::MethodInput)> {
     use super::prove_task::MethodInput;
     // method_kind discriminant（与 poker_texas_air::MethodKind 对齐）
     const K_CREATE_TABLE: u8 = 0;
@@ -593,84 +606,223 @@ fn build_method_input(selector: &[u8; 32], args: &[u8]) -> Option<(u8, super::pr
     const K_SUBMIT_REVEAL: u8 = 18;
     const K_SUBMIT_RECONSTRUCT: u8 = 19;
     const K_BET: u8 = 20;
+    const K_REQUEST_LEAVE_AFTER_HAND: u8 = 21;
+    const K_FOLD_WITH_PROOF: u8 = 22;
 
-    // 仅含 seat_index 的方法：先尝试解码为 SeatIndexArgs，再按 selector 分类
-    if let Ok(a) = borsh::from_slice::<SeatIndexArgs>(args) {
-        let mi = MethodInput::SeatOnly { seat_index: a.seat_index };
-        if selector == &selectors::fold() { return Some((K_FOLD, mi)); }
-        if selector == &selectors::check() { return Some((K_CHECK, mi)); }
-        if selector == &selectors::call() { return Some((K_CALL, mi)); }
-        if selector == &selectors::auto_fold() { return Some((K_AUTO_FOLD, mi)); }
-        if selector == &selectors::force_fold() { return Some((K_FORCE_FOLD, mi)); }
-        if selector == &selectors::leave_table() { return Some((K_LEAVE_TABLE, mi)); }
-        if selector == &selectors::leave_with_proof() { return Some((K_LEAVE_PROOF, mi)); }
-        if selector == &selectors::submit_shuffle_v2() { return Some((K_SUBMIT_SHUFFLE, mi)); }
-        if selector == &selectors::submit_player_reveal_tokens() { return Some((K_SUBMIT_REVEAL, mi)); }
-        if selector == &selectors::submit_reconstruct_deck() { return Some((K_SUBMIT_RECONSTRUCT, mi)); }
-    }
-    // raise
-    if selector == &selectors::raise() {
-        if let Ok(a) = borsh::from_slice::<RaiseArgs>(args) {
-            return Some((K_RAISE, MethodInput::Raise { seat_index: a.seat_index, total_bet: a.total_bet }));
-        }
-    }
-    // bet
-    if selector == &selectors::bet() {
-        if let Ok(a) = borsh::from_slice::<BetArgs>(args) {
-            return Some((K_BET, MethodInput::Bet { seat_index: a.seat_index, amount: a.amount }));
-        }
-    }
-    // addon / rebuy（共用 AddonArgs 布局：seat_index + amount）
-    if selector == &selectors::addon() {
-        if let Ok(a) = borsh::from_slice::<AddonArgs>(args) {
-            return Some((K_ADDON, MethodInput::Funds { seat_index: a.seat_index, amount: a.amount }));
-        }
-    }
-    if selector == &selectors::rebuy() {
-        if let Ok(a) = borsh::from_slice::<RebuyArgs>(args) {
-            return Some((K_REBUY, MethodInput::Funds { seat_index: a.seat_index, amount: a.amount }));
-        }
-    }
-    // kick_player
-    if selector == &selectors::kick_player() {
-        if let Ok(a) = borsh::from_slice::<KickPlayerArgs>(args) {
-            return Some((K_KICK, MethodInput::Kick { seat_index: a.seat_index, reason: a.reason }));
-        }
-    }
-    // join_table / join_and_shuffle（共用 player + buy_in）
-    if selector == &selectors::join_table() {
-        if let Ok(a) = borsh::from_slice::<JoinTableArgs>(args) {
-            return Some((K_JOIN_TABLE, MethodInput::Join { player: a.player, buy_in: a.buy_in }));
-        }
+    if selector == &selectors::create_table() {
+        let a: CreateTableArgs = decode_args(args, "create_table prove task")?;
+        return Ok((
+            K_CREATE_TABLE,
+            MethodInput::CreateTable {
+                name: a.name,
+                max_players: a.max_players,
+                small_blind: a.small_blind,
+                big_blind: a.big_blind,
+            },
+        ));
     }
     if selector == &selectors::join_and_shuffle() {
-        if let Ok(a) = borsh::from_slice::<JoinAndShuffleArgs>(args) {
-            return Some((K_JOIN_SHUFFLE, MethodInput::Join { player: a.player, buy_in: a.buy_in }));
-        }
+        let a: JoinAndShuffleArgs = decode_args(args, "join_and_shuffle prove task")?;
+        return Ok((
+            K_JOIN_SHUFFLE,
+            MethodInput::JoinAndShuffle {
+                seat_index: a.seat_index,
+                player: a.player,
+                buy_in: a.buy_in,
+                raw_args: args.to_vec(),
+            },
+        ));
     }
-    // create_table
-    if selector == &selectors::create_table() {
-        if let Ok(a) = borsh::from_slice::<CreateTableArgs>(args) {
-            return Some((K_CREATE_TABLE, MethodInput::CreateTable {
-                name: a.name, max_players: a.max_players,
-                small_blind: a.small_blind, big_blind: a.big_blind,
-            }));
-        }
+    if selector == &selectors::leave_with_proof() {
+        let a: LeaveWithProofArgs = decode_args(args, "leave_with_proof prove task")?;
+        return Ok((
+            K_LEAVE_PROOF,
+            MethodInput::LeaveWithProof {
+                seat_index: a.seat_index,
+                raw_args: args.to_vec(),
+            },
+        ));
     }
-    // start_hand / reset_for_next_hand（无参数）
-    if selector == &selectors::start_hand() { return Some((K_START_HAND, MethodInput::Empty)); }
-    if selector == &selectors::reset_for_next_hand() { return Some((K_RESET, MethodInput::Empty)); }
-    // tick：permissionless，当前不证明（后续若需证明改为 Empty）
-    if selector == &selectors::tick() { return None; }
-    // request_leave_after_hand：仅 toggle want_leave 标志，无 pot/资金状态变更。
-    // 实际离场在 reset_for_next_hand 内完成（已有 ResetForNextHand AIR），
-    // 故本方法不产出 prove_task（同 tick 模式）。
-    if selector == &selectors::request_leave_after_hand() { return None; }
-    // fold_with_proof：fold + 剥离 pk + remask deck。实际状态转换（fold 标记、
-    // pk 移除、轮次推进 / end_without_showdown）通过现有 Fold / ResetForNextHand
-    // 等 AIR 覆盖；本方法不产出 prove_task（同 tick 模式）。
-    if selector == &selectors::fold_with_proof() { return None; }
-    None
+    if selector == &selectors::join_table() {
+        let a: JoinTableArgs = decode_args(args, "join_table prove task")?;
+        return Ok((
+            K_JOIN_TABLE,
+            MethodInput::Join {
+                player: a.player,
+                buy_in: a.buy_in,
+            },
+        ));
+    }
+    if selector == &selectors::leave_table() {
+        let a: LeaveTableArgs = decode_args(args, "leave_table prove task")?;
+        return Ok((
+            K_LEAVE_TABLE,
+            MethodInput::SeatOnly {
+                seat_index: a.seat_index,
+            },
+        ));
+    }
+    if selector == &selectors::start_hand() {
+        return Ok((K_START_HAND, MethodInput::Empty));
+    }
+    if selector == &selectors::tick() {
+        if !args.is_empty() {
+            let _: TickArgs = decode_args(args, "tick prove task")?;
+        }
+        return Ok((K_TICK, MethodInput::Empty));
+    }
+    if selector == &selectors::auto_fold() {
+        let a: SeatIndexArgs = decode_args(args, "auto_fold prove task")?;
+        return Ok((
+            K_AUTO_FOLD,
+            MethodInput::SeatOnly {
+                seat_index: a.seat_index,
+            },
+        ));
+    }
+    if selector == &selectors::force_fold() {
+        let a: SeatIndexArgs = decode_args(args, "force_fold prove task")?;
+        return Ok((
+            K_FORCE_FOLD,
+            MethodInput::SeatOnly {
+                seat_index: a.seat_index,
+            },
+        ));
+    }
+    if selector == &selectors::kick_player() {
+        let a: KickPlayerArgs = decode_args(args, "kick_player prove task")?;
+        return Ok((
+            K_KICK,
+            MethodInput::Kick {
+                seat_index: a.seat_index,
+                reason: a.reason,
+            },
+        ));
+    }
+    if selector == &selectors::submit_shuffle_v2() {
+        let a: SubmitShuffleV2Args = decode_args(args, "submit_shuffle_v2 prove task")?;
+        return Ok((
+            K_SUBMIT_SHUFFLE,
+            MethodInput::SubmitShuffleV2 {
+                seat_index: a.seat_index,
+                raw_args: args.to_vec(),
+            },
+        ));
+    }
+    if selector == &selectors::submit_player_reveal_tokens() {
+        let a: SubmitRevealTokensArgs =
+            decode_args(args, "submit_player_reveal_tokens prove task")?;
+        return Ok((
+            K_SUBMIT_REVEAL,
+            MethodInput::SubmitPlayerRevealTokens {
+                seat_index: a.seat_index,
+                raw_args: args.to_vec(),
+            },
+        ));
+    }
+    if selector == &selectors::submit_reconstruct_deck() {
+        let a: SubmitReconstructDeckArgs = decode_args(args, "submit_reconstruct_deck prove task")?;
+        return Ok((
+            K_SUBMIT_RECONSTRUCT,
+            MethodInput::SubmitReconstructDeck {
+                seat_index: a.seat_index,
+                raw_args: args.to_vec(),
+            },
+        ));
+    }
+    if selector == &selectors::fold() {
+        let a: SeatIndexArgs = decode_args(args, "fold prove task")?;
+        return Ok((
+            K_FOLD,
+            MethodInput::SeatOnly {
+                seat_index: a.seat_index,
+            },
+        ));
+    }
+    if selector == &selectors::check() {
+        let a: SeatIndexArgs = decode_args(args, "check prove task")?;
+        return Ok((
+            K_CHECK,
+            MethodInput::SeatOnly {
+                seat_index: a.seat_index,
+            },
+        ));
+    }
+    if selector == &selectors::call() {
+        let a: SeatIndexArgs = decode_args(args, "call prove task")?;
+        return Ok((
+            K_CALL,
+            MethodInput::SeatOnly {
+                seat_index: a.seat_index,
+            },
+        ));
+    }
+    if selector == &selectors::raise() {
+        let a: RaiseArgs = decode_args(args, "raise prove task")?;
+        return Ok((
+            K_RAISE,
+            MethodInput::Raise {
+                seat_index: a.seat_index,
+                total_bet: a.total_bet,
+            },
+        ));
+    }
+    if selector == &selectors::bet() {
+        let a: BetArgs = decode_args(args, "bet prove task")?;
+        return Ok((
+            K_BET,
+            MethodInput::Bet {
+                seat_index: a.seat_index,
+                amount: a.amount,
+            },
+        ));
+    }
+    if selector == &selectors::reset_for_next_hand() {
+        return Ok((K_RESET, MethodInput::Empty));
+    }
+    if selector == &selectors::addon() {
+        let a: AddonArgs = decode_args(args, "addon prove task")?;
+        return Ok((
+            K_ADDON,
+            MethodInput::Funds {
+                seat_index: a.seat_index,
+                amount: a.amount,
+            },
+        ));
+    }
+    if selector == &selectors::rebuy() {
+        let a: RebuyArgs = decode_args(args, "rebuy prove task")?;
+        return Ok((
+            K_REBUY,
+            MethodInput::Funds {
+                seat_index: a.seat_index,
+                amount: a.amount,
+            },
+        ));
+    }
+    if selector == &selectors::request_leave_after_hand() {
+        let a: SeatIndexArgs = decode_args(args, "request_leave_after_hand prove task")?;
+        return Ok((
+            K_REQUEST_LEAVE_AFTER_HAND,
+            MethodInput::RequestLeaveAfterHand {
+                seat_index: a.seat_index,
+            },
+        ));
+    }
+    if selector == &selectors::fold_with_proof() {
+        let a: FoldWithProofArgs = decode_args(args, "fold_with_proof prove task")?;
+        return Ok((
+            K_FOLD_WITH_PROOF,
+            MethodInput::FoldWithProof {
+                seat_index: a.seat_index,
+                raw_args: args.to_vec(),
+            },
+        ));
+    }
+
+    Err(PokerL1Error::UnknownContractMethod {
+        selector: *selector,
+    })
 }
 
 /// 将 events 列表以 debug 级别记录到 tracing。
@@ -895,9 +1047,9 @@ fn dispatch_join_table(
             input.buy_in, table.big_blind
         )));
     }
-    let seat_idx = table.find_empty_seat().ok_or_else(|| {
-        PokerL1Error::Serialization("no empty seat available".into())
-    })?;
+    let seat_idx = table
+        .find_empty_seat()
+        .ok_or_else(|| PokerL1Error::Serialization("no empty seat available".into()))?;
     let seat = &mut table.seats[seat_idx as usize];
     seat.player = input.player;
     seat.stack = input.buy_in;
@@ -913,9 +1065,10 @@ fn dispatch_join_table(
 
     // P0 修复：与 apply_join_shuffle 保持一致的资金记账——buy_in 必须进入 chip_pool，
     // 否则离座退款时 chip_pool 会出现负差额（资金凭空多退）。
-    table.chip_pool = table.chip_pool.checked_add(input.buy_in).ok_or_else(|| {
-        PokerL1Error::Serialization("chip_pool overflow on join_table".into())
-    })?;
+    table.chip_pool = table
+        .chip_pool
+        .checked_add(input.buy_in)
+        .ok_or_else(|| PokerL1Error::Serialization("chip_pool overflow on join_table".into()))?;
 
     // 座位已设置完毕后再统计活跃人数（与 apply_join_shuffle 一致，不再 +1）。
     let active_count_after = state_machine::count_active_occupied(&table.seats) as u64;
@@ -1096,7 +1249,12 @@ fn dispatch_submit_player_reveal_tokens(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitRevealTokensArgs = decode_args(args, "submit_player_reveal_tokens")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "submit_player_reveal_tokens")?;
+    require_caller_is_seat_player(
+        context,
+        table,
+        input.seat_index,
+        "submit_player_reveal_tokens",
+    )?;
     // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
     let reveal_tokens: Vec<G1Projective> =
         input.reveal_tokens.into_iter().map(Into::into).collect();
@@ -1250,8 +1408,8 @@ fn dispatch_rebuy(
 /// 权限：`caller == seat.player`（与 leave_table / addon 一致）。
 /// 允许在任意 round_state 调用（玩家可在对局进行中预约离场）。
 ///
-/// 实际离场（座位清空 + 退款）在下一手 `reset_for_next_hand` 内强制执行，
-/// 故本方法不进入 AIR prove 流程（`build_method_input` 返回 None）。
+/// 实际离场（座位清空 + 退款）在下一手 `reset_for_next_hand` 内强制执行；
+/// 本次 toggle 本身仍是独立状态转换，会产出 MethodKind=21 的 ProveTask。
 fn dispatch_request_leave_after_hand(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
@@ -1259,12 +1417,7 @@ fn dispatch_request_leave_after_hand(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "request_leave_after_hand")?;
-    require_caller_is_seat_player(
-        context,
-        table,
-        input.seat_index,
-        "request_leave_after_hand",
-    )?;
+    require_caller_is_seat_player(context, table, input.seat_index, "request_leave_after_hand")?;
     state_machine::apply_request_leave(table, input.seat_index, events)
 }
 
@@ -1309,6 +1462,10 @@ mod tests {
         ctx
     }
 
+    fn decode_output(result: &DispatchResult) -> super::super::prove_task::L1DispatchOutput {
+        borsh::from_slice(&result.return_value).expect("dispatch output 应是有效 borsh")
+    }
+
     #[test]
     fn selector_deterministic() {
         let h1 = selectors::create_table();
@@ -1333,7 +1490,10 @@ mod tests {
         let mut table = make_table();
         let unknown = [0xFE; 32];
         let result = dispatch(&ctx, &mut table, &unknown, &[]);
-        assert!(matches!(result, Err(PokerL1Error::UnknownContractMethod { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::UnknownContractMethod { .. })
+        ));
     }
 
     #[test]
@@ -1420,7 +1580,15 @@ mod tests {
             big_blind: 20,
         };
         let create_bytes = borsh::to_vec(&create_args).unwrap();
-        dispatch(&ctx_creator, &mut table, &selectors::create_table(), &create_bytes).unwrap();
+        dispatch(
+            &ctx_creator,
+            &mut table,
+            &selectors::create_table(),
+            &create_bytes,
+        )
+        .unwrap();
+        assert_eq!(table.hand_id, 0);
+        assert_eq!(table.call_seq, 1);
 
         // 验证 WAITING 状态 + 参数已设置
         assert_eq!(table.name, "e2e_table");
@@ -1445,6 +1613,8 @@ mod tests {
             &borsh::to_vec(&join1).unwrap(),
         )
         .unwrap();
+        assert_eq!(table.hand_id, 0);
+        assert_eq!(table.call_seq, 2);
         assert_eq!(table.occupied_count(), 1);
         assert_eq!(table.seats[0].player, [0x11; 20]);
         assert_eq!(table.seats[0].stack, 1000);
@@ -1463,12 +1633,16 @@ mod tests {
             &borsh::to_vec(&join2).unwrap(),
         )
         .unwrap();
+        assert_eq!(table.hand_id, 0);
+        assert_eq!(table.call_seq, 3);
         assert_eq!(table.occupied_count(), 2);
         assert_eq!(table.seats[1].player, [0x22; 20]);
         assert_eq!(table.seats[1].stack, 2000);
 
         // ========== Step 3: start_hand（creator 发起）==========
         dispatch(&ctx_creator, &mut table, &selectors::start_hand(), &[]).unwrap();
+        assert_eq!(table.hand_id, 1, "HandStarted 后 hand_id 应递增");
+        assert_eq!(table.call_seq, 4);
 
         // 验证：进入 SHUFFLE 阶段，加密牌组已初始化（52 张）。
         //
@@ -1488,14 +1662,26 @@ mod tests {
         );
 
         // ========== Step 4: reset_for_next_hand（creator 发起）==========
-        dispatch(&ctx_creator, &mut table, &selectors::reset_for_next_hand(), &[]).unwrap();
+        dispatch(
+            &ctx_creator,
+            &mut table,
+            &selectors::reset_for_next_hand(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(table.hand_id, 1, "局内后续调用不应改变 hand_id");
+        assert_eq!(table.call_seq, 5);
 
         // 验证：回到 WAITING 状态，所有对局状态清理
         assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
         assert_eq!(table.pot, 0, "reset 后 pot 应清零");
         assert_eq!(table.community_cards.len(), 0);
         assert!(table.side_pots.is_empty());
-        assert_eq!(table.deck_state.encrypted.len(), 52, "reset 后重新初始化 52 张牌");
+        assert_eq!(
+            table.deck_state.encrypted.len(),
+            52,
+            "reset 后重新初始化 52 张牌"
+        );
         assert_eq!(
             table.shuffle_state.phase,
             super::super::constants::SHUFFLE_PHASE_NONE,
@@ -1553,12 +1739,54 @@ mod tests {
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
         // 空 args 调用 tick：等价于 now_ms=0，触发 start_hand
-        let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]);
-        assert!(result.is_ok());
+        let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
+        let output = decode_output(&result);
+        let task = output
+            .prove_task
+            .expect("自动 start_hand 的 tick 必须产生 task");
+        assert_eq!(task.method_kind, 4);
+        assert_eq!(
+            task.method_input,
+            super::super::prove_task::MethodInput::Empty
+        );
+        assert_eq!(task.hand_id, 1);
+        assert_eq!(task.call_seq, 1);
+        assert_eq!(table.hand_id, 1);
+        assert_eq!(table.call_seq, 1);
         assert_eq!(
             table.shuffle_state.phase,
             super::super::constants::SHUFFLE_PHASE_BEFORE_PREFLOP
         );
+    }
+
+    #[test]
+    fn dispatch_tick_without_state_change_has_no_task_or_sequence_increment() {
+        let ctx = make_context();
+        let mut table = make_table();
+        let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
+        let output = decode_output(&result);
+        assert!(output.prove_task.is_none());
+        assert_eq!(table.hand_id, 0);
+        assert_eq!(table.call_seq, 0);
+    }
+
+    #[test]
+    fn dispatch_tick_timestamp_change_produces_task() {
+        let ctx = make_context();
+        let mut table = make_table();
+        table.shuffle_state.phase = super::super::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
+        table.shuffle_state.pending_players = vec![0];
+        table.shuffle_state.current_shuffler = Some(0);
+        let args = borsh::to_vec(&TickArgs { now_ms: 777 }).unwrap();
+        let result = dispatch(&ctx, &mut table, &selectors::tick(), &args).unwrap();
+        let task = decode_output(&result)
+            .prove_task
+            .expect("tick 修改超时起点后必须产生 task");
+        assert_eq!(table.timestamps.shuffle_started_at, 777);
+        assert_eq!(table.version, 1);
+        assert_eq!(table.call_seq, 1);
+        assert_eq!(task.method_kind, 4);
+        assert_eq!(task.call_seq, 1);
     }
 
     #[test]
@@ -1593,7 +1821,12 @@ mod tests {
         let ctx_impersonator = make_context_as([0x99; 20]);
         let args = SeatIndexArgs { seat_index: 0 };
         let args_bytes = borsh::to_vec(&args).unwrap();
-        let result = dispatch(&ctx_impersonator, &mut table, &selectors::fold(), &args_bytes);
+        let result = dispatch(
+            &ctx_impersonator,
+            &mut table,
+            &selectors::fold(),
+            &args_bytes,
+        );
         assert!(result.is_err(), "非座位玩家不应能 fold 别人的牌");
     }
 
@@ -1661,14 +1894,26 @@ mod tests {
         let args_bytes = borsh::to_vec(&args).unwrap();
 
         // 第一次：false → true（预约离场）
-        dispatch(
+        let first = dispatch(
             &ctx_p1,
             &mut table,
             &selectors::request_leave_after_hand(),
             &args_bytes,
         )
         .unwrap();
-        assert!(table.seats[0].want_leave, "第一次调用后 want_leave 应为 true");
+        let first_task = decode_output(&first)
+            .prove_task
+            .expect("request_leave_after_hand 状态变化必须产生 task");
+        assert_eq!(first_task.method_kind, 21);
+        assert_eq!(
+            first_task.method_input,
+            super::super::prove_task::MethodInput::RequestLeaveAfterHand { seat_index: 0 }
+        );
+        assert_eq!(first_task.call_seq, 1);
+        assert!(
+            table.seats[0].want_leave,
+            "第一次调用后 want_leave 应为 true"
+        );
 
         // 第二次：true → false（取消预约）
         dispatch(
@@ -1678,6 +1923,7 @@ mod tests {
             &args_bytes,
         )
         .unwrap();
+        assert_eq!(table.call_seq, 2);
         assert!(
             !table.seats[0].want_leave,
             "第二次调用后 want_leave 应回到 false（toggle）"
@@ -1701,10 +1947,7 @@ mod tests {
             &selectors::request_leave_after_hand(),
             &args_bytes,
         );
-        assert!(
-            result.is_err(),
-            "非座位玩家不应能为他人的座位预约离场"
-        );
+        assert!(result.is_err(), "非座位玩家不应能为他人的座位预约离场");
         assert!(
             !table.seats[0].want_leave,
             "失败调用不应改变 want_leave 标志"
@@ -1771,10 +2014,7 @@ mod tests {
         assert_eq!(table.seats[1].player, [0x22; 20], "未预约的玩家应保留");
         assert_eq!(table.seats[1].stack, 2000);
         // chip_pool 扣减退款（3000 - 1000 = 2000）
-        assert_eq!(
-            table.chip_pool, 2000,
-            "chip_pool 应扣减已退款的 stack"
-        );
+        assert_eq!(table.chip_pool, 2000, "chip_pool 应扣减已退款的 stack");
     }
 
     /// 资金账平衡 + 事件：join (buy_in=X) → request_leave → reset
@@ -1865,10 +2105,7 @@ mod tests {
         let has_left = events.iter().any(|e| {
             matches!(
                 e,
-                super::super::events::TexasPokerEvent::PlayerLeft {
-                    seat_index: 0,
-                    ..
-                }
+                super::super::events::TexasPokerEvent::PlayerLeft { seat_index: 0, .. }
             )
         });
         assert!(has_refund, "应发出 seat 0 的 PlayerRefund(1500) 事件");
@@ -1897,10 +2134,7 @@ mod tests {
     /// - seat 0/1/2 各有 stack 与已下注 total_bet
     /// - round_state = PREFLOP，betting_round 已设置，current_turn = turn
     /// - aggregated_pk = generator（= seat.pk，方便验证「移除后变为 None」）
-    fn make_betting_table_with_players(
-        turn: u8,
-        set_aggregated_pk: bool,
-    ) -> TexasPokerTable {
+    fn make_betting_table_with_players(turn: u8, set_aggregated_pk: bool) -> TexasPokerTable {
         let mut table = make_table();
         table.round_state = super::super::constants::ROUND_PREFLOP;
         table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
@@ -1934,11 +2168,311 @@ mod tests {
         // 零标量复用 utils::scalar_zero()（封装了 ff::Field trait 的 ZERO 常量）。
         let zero = super::super::utils::scalar_zero();
         DLEqProof::from_parts(
-            vec![],                       // per_card_commitments
-            G1Projective::identity(),     // commitment_pk（C::Point）
-            zero,                         // response（C::Scalar = BlsScalar）
-            zero,                         // nonce（C::Scalar = BlsScalar）
+            vec![],                   // per_card_commitments
+            G1Projective::identity(), // commitment_pk（C::Point）
+            zero,                     // response（C::Scalar = BlsScalar）
+            zero,                     // nonce（C::Scalar = BlsScalar）
         )
+    }
+
+    fn empty_remask_proof() -> DLEqProof<DefaultCurve, RemaskKind> {
+        let zero = super::super::utils::scalar_zero();
+        DLEqProof::from_parts(vec![], G1Projective::identity(), zero, zero)
+    }
+
+    fn empty_schnorr_proof()
+    -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
+    {
+        poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
+            commitment: G1Projective::identity(),
+            responses: vec![],
+        }
+    }
+
+    fn empty_shuffle_proof() -> ZKShuffleProof<DefaultCurve> {
+        let schnorr = empty_schnorr_proof();
+        ZKShuffleProof {
+            sum_c1_commit: G1Projective::identity(),
+            sum_c2_commit: G1Projective::identity(),
+            combined_schnorr_proof: schnorr.clone(),
+            sum_c1_schnorr_proof: schnorr.clone(),
+            sum_c2_schnorr_proof: schnorr,
+            nonce: super::super::utils::scalar_zero(),
+        }
+    }
+
+    fn empty_reconstruct_proof() -> ReconstructProof<DefaultCurve> {
+        use poker_protocol::zk_shuffle::reconstruction::{
+            ChaumPedersenDLEQProof, ReconstructionDLEQProof,
+        };
+
+        let zero = super::super::utils::scalar_zero();
+        let identity = G1Projective::identity();
+        let schnorr = empty_schnorr_proof();
+        ReconstructProof {
+            swap_out_cards_proofs: vec![],
+            sum_c1_r_commit: identity,
+            sum_c2_r_commit: identity,
+            swap_sum_c1_commit: identity,
+            swap_sum_c2_commit: identity,
+            nonce: zero,
+            blind_dleq_proof: ReconstructionDLEQProof {
+                commitment: identity,
+                response: zero,
+                nonce: zero,
+            },
+            total_dleq_proof: ChaumPedersenDLEQProof {
+                commitment_a: identity,
+                commitment_b: identity,
+                response: zero,
+            },
+            swap_combined_schnorr_proof: schnorr.clone(),
+            sum_swap_out_c1_schnorr_proof: schnorr.clone(),
+            sum_swap_out_c2_schnorr_proof: schnorr,
+        }
+    }
+
+    fn crypto_args() -> Vec<([u8; 32], Vec<u8>, u8)> {
+        let join = JoinAndShuffleArgs {
+            seat_index: 1,
+            player: [0x31; 20],
+            buy_in: 1_000,
+            pk: ECPoint(G1Projective::identity()),
+            pk_ownership_proof: vec![1, 2],
+            mask_cards: vec![],
+            output_cards: vec![],
+            remask_proof: empty_remask_proof(),
+            shuffle_proof: empty_shuffle_proof(),
+        };
+        let leave = LeaveWithProofArgs {
+            seat_index: 2,
+            output_cards: vec![],
+            leave_proof: empty_fold_proof(),
+        };
+        let shuffle = SubmitShuffleV2Args {
+            seat_index: 3,
+            output_cards: vec![],
+            shuffle_proof: empty_shuffle_proof(),
+        };
+        let reveal = SubmitRevealTokensArgs {
+            seat_index: 4,
+            assignment_indices: vec![],
+            reveal_tokens: vec![],
+            proofs: vec![],
+        };
+        let reconstruct = SubmitReconstructDeckArgs {
+            seat_index: 5,
+            output_cards: vec![],
+            swap_cards: vec![],
+            user_readable_cards: vec![],
+            proof: empty_reconstruct_proof(),
+        };
+        let fold = FoldWithProofArgs {
+            seat_index: 0,
+            output_cards: vec![],
+            fold_proof: empty_fold_proof(),
+        };
+        vec![
+            (
+                selectors::join_and_shuffle(),
+                borsh::to_vec(&join).unwrap(),
+                15,
+            ),
+            (
+                selectors::leave_with_proof(),
+                borsh::to_vec(&leave).unwrap(),
+                16,
+            ),
+            (
+                selectors::submit_shuffle_v2(),
+                borsh::to_vec(&shuffle).unwrap(),
+                17,
+            ),
+            (
+                selectors::submit_player_reveal_tokens(),
+                borsh::to_vec(&reveal).unwrap(),
+                18,
+            ),
+            (
+                selectors::submit_reconstruct_deck(),
+                borsh::to_vec(&reconstruct).unwrap(),
+                19,
+            ),
+            (
+                selectors::fold_with_proof(),
+                borsh::to_vec(&fold).unwrap(),
+                22,
+            ),
+        ]
+    }
+
+    #[test]
+    fn build_method_input_covers_all_23_selectors() {
+        let mut cases = vec![
+            (
+                selectors::create_table(),
+                borsh::to_vec(&CreateTableArgs {
+                    name: "coverage".into(),
+                    max_players: 6,
+                    small_blind: 50,
+                    big_blind: 100,
+                })
+                .unwrap(),
+                0,
+            ),
+            (
+                selectors::join_table(),
+                borsh::to_vec(&JoinTableArgs {
+                    player: [0x41; 20],
+                    buy_in: 1_000,
+                    pk: ECPoint(G1Projective::identity()),
+                })
+                .unwrap(),
+                1,
+            ),
+            (
+                selectors::leave_table(),
+                borsh::to_vec(&LeaveTableArgs { seat_index: 1 }).unwrap(),
+                2,
+            ),
+            (selectors::start_hand(), vec![], 3),
+            (
+                selectors::tick(),
+                borsh::to_vec(&TickArgs { now_ms: 123 }).unwrap(),
+                4,
+            ),
+            (selectors::reset_for_next_hand(), vec![], 5),
+            (
+                selectors::fold(),
+                borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap(),
+                6,
+            ),
+            (
+                selectors::check(),
+                borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap(),
+                7,
+            ),
+            (
+                selectors::call(),
+                borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap(),
+                8,
+            ),
+            (
+                selectors::raise(),
+                borsh::to_vec(&RaiseArgs {
+                    seat_index: 1,
+                    total_bet: 200,
+                })
+                .unwrap(),
+                9,
+            ),
+            (
+                selectors::auto_fold(),
+                borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap(),
+                10,
+            ),
+            (
+                selectors::force_fold(),
+                borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap(),
+                11,
+            ),
+            (
+                selectors::kick_player(),
+                borsh::to_vec(&KickPlayerArgs {
+                    seat_index: 1,
+                    reason: 2,
+                })
+                .unwrap(),
+                12,
+            ),
+            (
+                selectors::addon(),
+                borsh::to_vec(&AddonArgs {
+                    seat_index: 1,
+                    amount: 500,
+                })
+                .unwrap(),
+                13,
+            ),
+            (
+                selectors::rebuy(),
+                borsh::to_vec(&RebuyArgs {
+                    seat_index: 1,
+                    amount: 500,
+                })
+                .unwrap(),
+                14,
+            ),
+            (
+                selectors::bet(),
+                borsh::to_vec(&BetArgs {
+                    seat_index: 1,
+                    amount: 100,
+                })
+                .unwrap(),
+                20,
+            ),
+            (
+                selectors::request_leave_after_hand(),
+                borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap(),
+                21,
+            ),
+        ];
+        cases.extend(crypto_args());
+        assert_eq!(cases.len(), 23);
+        for (selector, args, expected_kind) in cases {
+            let (kind, _) = build_method_input(&selector, &args).unwrap();
+            assert_eq!(kind, expected_kind);
+        }
+    }
+
+    #[test]
+    fn crypto_method_inputs_preserve_validated_raw_args() {
+        for (selector, raw_args, expected_kind) in crypto_args() {
+            let (kind, input) = build_method_input(&selector, &raw_args).unwrap();
+            assert_eq!(kind, expected_kind);
+            let (seat_index, preserved) = match input {
+                super::super::prove_task::MethodInput::JoinAndShuffle {
+                    seat_index,
+                    raw_args,
+                    ..
+                }
+                | super::super::prove_task::MethodInput::LeaveWithProof {
+                    seat_index,
+                    raw_args,
+                }
+                | super::super::prove_task::MethodInput::SubmitShuffleV2 {
+                    seat_index,
+                    raw_args,
+                }
+                | super::super::prove_task::MethodInput::SubmitPlayerRevealTokens {
+                    seat_index,
+                    raw_args,
+                }
+                | super::super::prove_task::MethodInput::SubmitReconstructDeck {
+                    seat_index,
+                    raw_args,
+                }
+                | super::super::prove_task::MethodInput::FoldWithProof {
+                    seat_index,
+                    raw_args,
+                } => (seat_index, raw_args),
+                other => panic!("crypto selector 映射到了错误 variant: {other:?}"),
+            };
+            assert!(seat_index < 6);
+            assert_eq!(preserved, raw_args);
+        }
+    }
+
+    #[test]
+    fn crypto_selectors_reject_seat_only_substitution() {
+        let seat_only = borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap();
+        for (selector, _, _) in crypto_args() {
+            assert!(
+                build_method_input(&selector, &seat_only).is_err(),
+                "crypto selector 不得把 SeatIndexArgs 当作完整参数"
+            );
+        }
     }
 
     /// 基本流程：下注中 → p1 fold_with_proof → folded=true + pk 已从 aggregated_pk 移除
@@ -1963,13 +2497,26 @@ mod tests {
             output_cards: output_cards.clone(),
             fold_proof: empty_fold_proof(),
         };
-        dispatch(
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(
             &ctx_p1,
             &mut table,
             &selectors::fold_with_proof(),
-            &borsh::to_vec(&args).unwrap(),
+            &args_bytes,
         )
         .unwrap();
+        let task = decode_output(&result)
+            .prove_task
+            .expect("fold_with_proof 状态变化必须产生 task");
+        assert_eq!(task.method_kind, 22);
+        assert_eq!(task.call_seq, 1);
+        assert_eq!(
+            task.method_input,
+            super::super::prove_task::MethodInput::FoldWithProof {
+                seat_index: 0,
+                raw_args: args_bytes,
+            }
+        );
 
         // folded 标记
         assert!(table.seats[0].folded, "folded 应为 true");
@@ -1982,7 +2529,10 @@ mod tests {
             ECPoint(G1Projective::generator()),
             "seat.pk 应保留（不置 identity）"
         );
-        assert!(!table.seats[0].left_during_hand, "left_during_hand 不应设置");
+        assert!(
+            !table.seats[0].left_during_hand,
+            "left_during_hand 不应设置"
+        );
 
         // aggregated_pk 已移除 p1.pk（移除后可能为 None 或不同点）
         assert_ne!(
@@ -1997,8 +2547,7 @@ mod tests {
             "deck 大小不变（52 张）"
         );
         assert_ne!(
-            table.deck_state.encrypted[0].c2,
-            deck_before[0].c2,
+            table.deck_state.encrypted[0].c2, deck_before[0].c2,
             "deck 应已被 output_cards 替换"
         );
         // c1 不变（DLEq 不变量）

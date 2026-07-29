@@ -36,11 +36,11 @@
 //! 8. `button = 0`：post_button == 0
 //! 9. `round_state = ROUND_WAITING`：post_round_state == 0
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -148,7 +148,8 @@ impl FrameworkEval for CreateTableAir {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // 1. 读取并约束通用列
-        let common = CommonConstraints::write(&mut eval, MethodKind::CreateTable, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         // 2. 读取业务列
@@ -227,10 +228,19 @@ impl FrameworkEval for CreateTableAir {
 
         // Suppress unused warnings
         let _ = (
-            input_small_blind_1, input_small_blind_2, input_small_blind_3,
-            input_big_blind_1, input_big_blind_2, input_big_blind_3,
-            input_name_hash_0, input_name_hash_1, input_name_hash_2, input_name_hash_3,
-            one, two, nine,
+            input_small_blind_1,
+            input_small_blind_2,
+            input_small_blind_3,
+            input_big_blind_1,
+            input_big_blind_2,
+            input_big_blind_3,
+            input_name_hash_0,
+            input_name_hash_1,
+            input_name_hash_2,
+            input_name_hash_3,
+            one,
+            two,
+            nine,
         );
 
         eval

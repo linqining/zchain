@@ -1,12 +1,12 @@
-//! Aggregator AIR — 二叉树递归聚合 N 个 method proof 到单 proof。
+//! Aggregator AIR PoC — 聚合 N 个 method descriptor，不验证 method proof。
 //!
 //! ## 架构定位
 //!
 //! - **Layer 0**：Method AIRs（21 个，每方法一个专用 AIR，已实现）
-//! - **Layer 1**：Leaf Recursion（复用 `poker_zkvm::stwo_backend::recursive` 的 Verifier AIR
-//!   递归验证单个 method proof — 阶段 5 接入）
-//! - **Layer 2**：**Aggregator AIR（本模块）** — 二叉树递归聚合 N 个 L2 leaf → 1 个 L2 root
-//! - **Layer 3**：Final Recursion（最终单 proof 提交链上 — 阶段 5 接入）
+//! - **Layer 1**：当前仅有宿主逐 proof 验证；`poker_zkvm::stwo_backend::recursive`
+//!   尚不是完整、可信的 Stwo verifier 电路
+//! - **Layer 2**：**Aggregator AIR（本模块）** — 二叉树聚合 N 个 descriptor 摘要
+//! - **Layer 3**：Final Recursion — 尚未实现可信闭环
 //!
 //! ## 聚合模型
 //!
@@ -54,6 +54,10 @@
 //! - 不验证子 proof 的 Stwo verification（留待阶段 5）
 //! - `agg.pre_state_root` / `agg.post_state_root` 作为 AIR 公开输入
 //!
+//! 因为 descriptor 可由调用者自行构造，本 AIR 证明不能作为“子 proof 已验证”的证据。
+//! `prove_aggregator` / `verify_aggregator` 的生产入口因此默认拒绝，只有名称中明确带
+//! `unchecked_for_tests` 的入口会运行此 PoC。
+//!
 //! ## 约束清单（degree ≤ 2）
 //!
 //! 1. `IS_ACTIVE`, `IS_PADDING` boolean + 互斥
@@ -65,7 +69,7 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{u64_to_m31_limbs, ZERO};
+use crate::airs::common::{ZERO, u64_to_m31_limbs};
 use crate::method_kind::MethodKind;
 
 /// Aggregator AIR 列布局。
@@ -238,8 +242,14 @@ impl FrameworkEval for AggregatorAir {
 
         // 抑制未使用警告（agg_pre/post_state_root 在 verifier 端验证，AIR 内已通过 left_pre/right_post 间接约束）
         let _ = (
-            left_pre_0, left_pre_1, left_pre_2, left_pre_3,
-            right_post_0, right_post_1, right_post_2, right_post_3,
+            left_pre_0,
+            left_pre_1,
+            left_pre_2,
+            left_pre_3,
+            right_post_0,
+            right_post_1,
+            right_post_2,
+            right_post_3,
         );
 
         eval

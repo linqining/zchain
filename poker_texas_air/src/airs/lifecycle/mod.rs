@@ -10,6 +10,6 @@
 pub mod create_table;
 pub mod join_table;
 pub mod leave_table;
+pub mod reset_for_next_hand;
 pub mod start_hand;
 pub mod tick;
-pub mod reset_for_next_hand;

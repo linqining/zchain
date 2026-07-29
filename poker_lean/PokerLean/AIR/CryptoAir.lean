@@ -15,10 +15,11 @@ namespace PokerLean
 - seat_index 和某个输入参数与公开输入一致
 - version 递增（post_version = pre_version + 1）
 - round_state 不变（post_round_state = pre_round_state）
-**不验证**：
-- 密码学证明（DLEq, ZKShuffle, RevealToken, Reconstruct）— 假设由外部验证
-- shuffle_state / reveal_state / reconstruct_state 阶段 gating
-- state root 一致性
+- 对阶段只建模粗粒度 gating（正数或非 Idle）
+- 对抽象提取状态加入 `StateRootConsistency`
+
+本模型**不验证** DLEq、ZKShuffle、RevealToken、Reconstruct 等密码学证明，
+也没有证明上述抽象阶段/root 谓词与真实 Rust trace、公开输入及外部验证器等价。
 -/
 
 /-! ## 通用提取函数 -/

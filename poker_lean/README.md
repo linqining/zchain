@@ -2,8 +2,9 @@
 
 ## 项目目标
 
-使用 Lean 4 定理证明器，形式化验证 `poker_texas_air` 的 AIR 电路约束
-对于 `poker_l1` 合约语义是 **sound**（充分的、可靠的）。
+使用 Lean 4 定理证明器分析 `poker_texas_air` 的 AIR 电路约束，并以最终建立
+“真实 Rust AIR 接受 ⇒ `poker_l1` 合约语义成立”的实现级 soundness 为目标。
+当前版本尚未闭合 Rust AIR、公开输入接线与 VM 实现之间的精化桥。
 
 ### Soundness 的形式化定义
 
@@ -17,6 +18,10 @@
 
 **含义**：任何满足 AIR 电路约束的 trace 行，其对应的状态转换
 也一定满足合约的业务语义约束。
+
+> **当前边界**：仓库中的 theorem 只对手写 Lean `AirAcceptable` 与
+> `ContractSemantics` 谓词建立上述蕴含；尚未证明这些谓词与真实 Rust 实现等价。
+> 机器可检查的范围声明与公理审计见 `PokerLean/Audit/TrustBoundary.lean`。
 
 ## 快速开始
 
@@ -82,8 +87,9 @@ poker_lean/
 ├── Proofs/                    # Soundness 证明层
 │   ├── CreateTableSoundness.lean  # create_table 证明
 │   └── FoldSoundness.lean    # fold 证明（含反例）
-└── Audit/                     # 审计报告
-    └── SoundnessAudit.lean   # 21 方法整体审计
+└── Audit/                     # 审计与信任边界
+    ├── TrustBoundary.lean    # 可执行范围声明 + 21 theorem 公理审计
+    └── SoundnessAudit.lean   # 当前审计结论（模型内，不夸大为实现级）
 ```
 
 ## 架构设计
@@ -118,87 +124,34 @@ extractParamsFromAir    : MethodColumns → MethodParams
 - 证明它不满足合约语义的某个条件
 - 得出存在性结论
 
-## 已完成的工作
+## 当前已完成
 
-### 1. 基础类型形式化
-- ✅ M31 有限域（加法、乘法、binality）
-- ✅ u64 ↔ 4×M31 limb 编解码
-- ✅ 37 通用列布局与约束
-- ✅ MethodKind 枚举（21 个方法）
+- M31、u64 limb 编解码、Contract/AIR/State 的手写 Lean 模型。
+- 21 个方法的模型内 theorem wrapper；它们均能通过 Lean 类型检查。
+- State 层若干不变量、筹码守恒和座位级 Rust 算术镜像证明。
+- `TrustBoundary.lean` 中的机器可检查范围声明与 `#print axioms` 审计。
+- 删除了数学上不可能的“任意长度 Poseidon 输入精确单射”公理。
 
-### 2. 合约数据结构
-- ✅ Seat（含 folded, all_in, is_waiting 等布尔字段）
-- ✅ SeatStatus 派生枚举
-- ✅ RoundState 枚举
-- ✅ BettingRoundState
-- ✅ TexasPokerTable 完整结构
+## 当前覆盖评级
 
-### 3. create_table 方法
-- ✅ 合约语义谓词 `ContractCreateTable`
-- ✅ AIR 约束 `CreateTableAirAcceptable`
-- ✅ Soundness 定理（弱版本，含额外假设）
-- ✅ 存在性定理
+| 层次 | 状态 | 可声称内容 |
+|------|------|------------|
+| Lean 模型内蕴含 | ✅ 已建立 | `Lean AirAcceptable → Lean Contract` |
+| Lean theorem 的公理依赖 | ✅ 已审计 | 剩余自定义信任根为哈希函数与状态编码函数 |
+| Rust AIR ↔ Lean AIR | ❌ 未建立 | 不能把 theorem 直接套到 `FrameworkEval::evaluate` |
+| VM 完整转移 ↔ Lean Contract | ❌ 未建立 | caller、轮次推进、结算等未完成精化 |
+| public input / state-root / trace | ❌ 未建立 | 不能声称 witness 已绑定到公开状态 |
+| Aggregator / 密码学子证明 | ❌ 未建立 | 不能声称端到端证明系统已验证 |
 
-### 4. fold 方法
-- ✅ 合约语义谓词 `ContractFold`
-- ✅ AIR 约束 `FoldAirAcceptable`
-- ✅ **Not-soundness 反例**（证明当前 AIR 不 sound）
-- ✅ 弱 soundness 定理模板
-
-### 5. 全方法审计
-- ✅ 21 个方法的约束缺口清单
-- ✅ 4 个共性问题（state root, version, table_id, limb 验证）
-- ✅ 分方法风险评级
-- ✅ 完善路径建议
-
-## 关键发现
-
-### 当前 AIR 实现的 Soundness 评级：❌ 严重不足
-
-| 级别 | 方法数 | 说明 |
-|------|--------|------|
-| ✅ 良好 | 0 | 完全满足 soundness |
-| ⚠️ 中等 | 1 | create_table（结构约束较完善） |
-| ❌ 严重 | 20 | 约束严重缺失 |
-
-### 四大核心风险
-
-1. **State Root 未验证**（极高风险）
-   - 所有方法都没有 Poseidon252 哈希验证
-   - pre/post state 的内容完全不受约束
-
-2. **前置守卫缺失**（高风险）
-   - 大多数动作没有 round_state gating
-   - 没有 current_turn 检查
-   - 没有 seat 状态检查
-
-3. **资金守恒未验证**（高风险）
-   - bet/call/raise 没有 stack-bet-pot 算术关系
-   - 攻击者可以凭空创造筹码
-
-4. **输入一致性模型**（中风险）
-   - 大量 `input == expected` 模式
-   - 将验证责任推给 host
-   - 与 ZK 信任模型冲突
-
-详细审计见 `Audit/SoundnessAudit.lean`。
+详细结论见 `PokerLean/Audit/SoundnessAudit.lean`。
 
 ## 后续工作
 
-### 短期（高优先级）
-1. 为 create_table 补齐 state root 验证的形式化
-2. 为 fold/raise/check/call 补齐合约语义和 AIR 约束
-3. 实现通用的 state root Poseidon252 验证框架
-
-### 中期
-4. 完成所有 8 个动作类方法的 soundness 分析
-5. 完成生命周期类方法的 soundness 分析
-6. 实现资金守恒的通用证明框架
-
-### 长期
-7. 密码学协议类方法的形式化（Mental Poker）
-8. 完整的 21 个方法 soundness 证明
-9. 与实际 Rust AIR 实现的一致性验证
+1. 把真实 Rust AIR 的每个 `add_constraint` 机械化或生成到 Lean，并证明逐项等价。
+2. 建立 trace 列、公开输入、state-root preimage 与 Lean 状态提取之间的编码定理。
+3. 修正 Contract，使其覆盖 VM 的 caller/creator 授权、`advance_turn`、收池和结算。
+4. 将 State 层的座位级镜像扩展为完整桌台级 refinement。
+5. 单独形式化 Aggregator 与外部密码学 proof verifier；完成后再升级实现级结论。
 
 ## 相关代码库
 

@@ -18,12 +18,12 @@
 //! - [`gen_method_trace`] — 从单行 active + padding 构造完整 trace
 
 use stwo::core::fields::m31::M31;
-use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::NaturalOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
-use stwo::core::poly::circle::CanonicCoset;
 
 use crate::airs::common::ZERO;
 use crate::error::{TexasAirError, TexasAirResult};
@@ -89,11 +89,11 @@ impl MethodTrace {
         }
     }
 
-    /// 写入 active 行 + 用 padding 行填充剩余行（单步方法的通用模板）。
+    /// 把单步 active 行复制到整个 SIMD trace。
     ///
     /// # 参数
-    /// - `active_row`: 业务行（行 0）
-    /// - `padding_row`: padding 行（行 1..2^log_size）
+    /// - `active_row`: 业务行（复制到所有行）
+    /// - `padding_row`: 仅用于兼容旧调用方并校验列宽；不会写入 trace
     ///
     /// # Errors
     ///
@@ -103,10 +103,16 @@ impl MethodTrace {
         active_row: &[M31],
         padding_row: &[M31],
     ) -> TexasAirResult<()> {
+        if padding_row.len() != self.num_columns {
+            return Err(TexasAirError::TraceGenError(format!(
+                "padding_row.len() = {} != num_columns = {}",
+                padding_row.len(),
+                self.num_columns
+            )));
+        }
         let rows = 1usize << self.log_size;
-        self.write_row(0, active_row)?;
-        for i in 1..rows {
-            self.write_row(i, padding_row)?;
+        for i in 0..rows {
+            self.write_row(i, active_row)?;
         }
         Ok(())
     }
@@ -116,9 +122,7 @@ impl MethodTrace {
     /// 每列独立构造 evaluation，先以 `NaturalOrder` 创建，
     /// 再通过 `.bit_reverse()` 转换为 `BitReversedOrder`（Stwo commitment 要求）。
     #[must_use]
-    pub fn to_evaluations(
-        &self,
-    ) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>> {
+    pub fn to_evaluations(&self) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>> {
         let domain = CanonicCoset::new(self.log_size).circle_domain();
         self.cols
             .iter()
@@ -131,4 +135,3 @@ impl MethodTrace {
             .collect()
     }
 }
-

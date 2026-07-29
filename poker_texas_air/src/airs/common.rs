@@ -127,16 +127,23 @@ pub fn compute_bound_carries(
     let c0 = (sum0 - u64::from(mx[0].0)) / 65536;
 
     // Limb 1: cp1 + ap1 + am1 + df1 + c0 = mx1 + c1 * 65536
-    let sum1 = u64::from(cp[1].0) + u64::from(ap[1].0) + u64::from(am[1].0) + u64::from(df[1].0) + c0;
+    let sum1 =
+        u64::from(cp[1].0) + u64::from(ap[1].0) + u64::from(am[1].0) + u64::from(df[1].0) + c0;
     let c1 = (sum1 - u64::from(mx[1].0)) / 65536;
 
     // Limb 2: cp2 + ap2 + am2 + df2 + c1 = mx2 + c2 * 65536
-    let sum2 = u64::from(cp[2].0) + u64::from(ap[2].0) + u64::from(am[2].0) + u64::from(df[2].0) + c1;
+    let sum2 =
+        u64::from(cp[2].0) + u64::from(ap[2].0) + u64::from(am[2].0) + u64::from(df[2].0) + c1;
     let c2 = (sum2 - u64::from(mx[2].0)) / 65536;
 
     // Limb 3: cp3 + ap3 + am3 + df3 + c2 = mx3 (c3 = 0, no overflow)
-    let sum3 = u64::from(cp[3].0) + u64::from(ap[3].0) + u64::from(am[3].0) + u64::from(df[3].0) + c2;
-    debug_assert_eq!(sum3, u64::from(mx[3].0), "bound check carry overflow: limb3 mismatch");
+    let sum3 =
+        u64::from(cp[3].0) + u64::from(ap[3].0) + u64::from(am[3].0) + u64::from(df[3].0) + c2;
+    debug_assert_eq!(
+        sum3,
+        u64::from(mx[3].0),
+        "bound check carry overflow: limb3 mismatch"
+    );
 
     let carry_lo = [
         M31::from((c0 % 2) as u32),
@@ -193,18 +200,11 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     ///
     /// # 参数
     /// - `eval`: Stwo EvalAtRow
-    /// - `expected_kind`: AIR 声明的 method kind
-    /// - `pre_version`/`post_version`: host 端已知的调用前后 version（u64），
-    ///   用于约束 `post_version = pre_version + 1`（消除 Lean 审计 C2 反例）。
+    /// - `statement`: verifier independently reconstructed public statement.
     ///
     /// # 返回
     /// `CommonConstraints` 实例，业务约束可用 `is_active` 做 gating。
-    pub fn write(
-        eval: &mut E,
-        expected_kind: crate::method_kind::MethodKind,
-        pre_version: u64,
-        post_version: u64,
-    ) -> Self {
+    pub fn write(eval: &mut E, statement: &crate::airs::AirStatement) -> Self {
         let one: E::F = M31::from(1u32).into();
 
         // 读取通用列（顺序必须与 COL_* 常量定义一致）
@@ -232,9 +232,6 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let post_version_1 = eval.next_trace_mask();
         let post_version_2 = eval.next_trace_mask();
         let post_version_3 = eval.next_trace_mask();
-        // pre_version limbs 仅占位（列指针推进），version+=1 约束以 host 的
-        // pre_version 参数计算期望 post，不直接引用 trace 的 pre_version 列。
-        let _ = (pre_version_0, pre_version_1, pre_version_2, pre_version_3);
         let pre_round_state = eval.next_trace_mask();
         let post_round_state = eval.next_trace_mask();
         let pre_pot_0 = eval.next_trace_mask();
@@ -249,33 +246,59 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let post_button = eval.next_trace_mask();
         let is_padding = eval.next_trace_mask();
 
-        // 保留 limbs 引用（业务约束需要）。
-        // round_state / pot limbs / button 暴露到返回结构体供业务守卫引用；
-        // version limbs 用于通用「version += 1」约束。
-        let _ = (
-            pre_state_root_0, pre_state_root_1, pre_state_root_2, pre_state_root_3,
-            post_state_root_0, post_state_root_1, post_state_root_2, post_state_root_3,
-            table_id_0, table_id_1, table_id_2, table_id_3,
-            hand_id, call_seq,
-        );
-
-        // 通用约束 1：IS_ACTIVE 与 IS_PADDING 互斥且为 boolean
-        // is_active * (is_active - 1) = 0
-        // is_padding * (is_padding - 1) = 0
-        // is_active * is_padding = 0  (互斥)
-        // is_active + is_padding ≤ 1 (等价于 is_active * is_padding = 0 当两者 boolean)
+        // 通用约束 1：单步 AIR 的每一行都是同一条 active statement 的复制。
+        //
+        // Stwo 的最低 SIMD trace 有 1024 行。此前只把 row 0 标成 active，其余
+        // 行 padding，但 AIR 没有可信 first-row selector，导致全 padding trace 可绕过
+        // 所有业务约束。这里直接要求每行 active=1、padding=0；重复 1024 次虽有
+        // 冗余，却不依赖未绑定的边界 witness，彻底关闭 all-padding 绕过。
         let active_minus_one = is_active.clone() - one.clone();
-        let padding_minus_one = is_padding.clone() - one.clone();
-        eval.add_constraint(is_active.clone() * active_minus_one);
-        eval.add_constraint(is_padding.clone() * padding_minus_one);
-        eval.add_constraint(is_active.clone() * is_padding.clone());
+        eval.add_constraint(active_minus_one);
+        eval.add_constraint(is_padding.clone());
 
-        // 通用约束 2：METHOD_KIND == expected_kind
-        // (method_kind - expected) * is_active = 0  (active 行强制 kind)
-        // padding 行：method_kind = 0（约束自动满足）
-        let expected: E::F = M31::from(expected_kind as u32).into();
+        // 通用约束 2：所有公共 statement 列逐项绑定到 verifier-trusted AIR。
+        let expected: E::F = M31::from(statement.kind as u32).into();
         let kind_diff = method_kind.clone() - expected;
-        eval.add_constraint(is_active.clone() * kind_diff);
+        eval.add_constraint(kind_diff);
+
+        let pre_roots = [
+            pre_state_root_0,
+            pre_state_root_1,
+            pre_state_root_2,
+            pre_state_root_3,
+        ];
+        let post_roots = [
+            post_state_root_0,
+            post_state_root_1,
+            post_state_root_2,
+            post_state_root_3,
+        ];
+        for i in 0..4 {
+            eval.add_constraint(pre_roots[i].clone() - statement.pre_state_root[i].into());
+            eval.add_constraint(post_roots[i].clone() - statement.post_state_root[i].into());
+        }
+
+        let table_cols = [table_id_0, table_id_1, table_id_2, table_id_3];
+        let expected_table = u64_to_m31_limbs(statement.table_id);
+        for i in 0..4 {
+            eval.add_constraint(table_cols[i].clone() - expected_table[i].into());
+        }
+        eval.add_constraint(hand_id - M31::from(statement.hand_id).into());
+        eval.add_constraint(call_seq - M31::from(statement.call_seq).into());
+
+        let pre_version_cols = [pre_version_0, pre_version_1, pre_version_2, pre_version_3];
+        let post_version_cols = [
+            post_version_0,
+            post_version_1,
+            post_version_2,
+            post_version_3,
+        ];
+        let expected_pre_version = u64_to_m31_limbs(statement.pre_version);
+        let expected_statement_post = u64_to_m31_limbs(statement.post_version);
+        for i in 0..4 {
+            eval.add_constraint(pre_version_cols[i].clone() - expected_pre_version[i].into());
+            eval.add_constraint(post_version_cols[i].clone() - expected_statement_post[i].into());
+        }
 
         // 通用约束 3（审计 C2）：version += 1
         // `post_version = pre_version + 1`（u64）。
@@ -284,22 +307,11 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         // 这等价于完整的 4-limb ripple-carry 加 1，无需额外 witness 列，且对 u64
         // 任意值（含 limb0 = 0xFFFF 进位情形）均 sound —— 彻底消除「version 不递增」反例。
         // 对齐合约 bump_version 的 saturating_add：u64::MAX 时保持不变（不 wrap 回 0）。
-        let expected_post = pre_version.saturating_add(1);
+        let expected_post = statement.pre_version.saturating_add(1);
         let expected_post_limbs = u64_to_m31_limbs(expected_post);
-        // 注：post_version 与 expected_post 应一致（host 保证）；此处约束的是 trace 列。
-        let _ = post_version; // host post_version 仅作 sanity，约束以 pre_version+1 为准
-        eval.add_constraint(
-            is_active.clone() * (post_version_0.clone() - expected_post_limbs[0].into()),
-        );
-        eval.add_constraint(
-            is_active.clone() * (post_version_1.clone() - expected_post_limbs[1].into()),
-        );
-        eval.add_constraint(
-            is_active.clone() * (post_version_2.clone() - expected_post_limbs[2].into()),
-        );
-        eval.add_constraint(
-            is_active.clone() * (post_version_3.clone() - expected_post_limbs[3].into()),
-        );
+        for i in 0..4 {
+            eval.add_constraint(post_version_cols[i].clone() - expected_post_limbs[i].into());
+        }
 
         Self {
             is_active,
@@ -349,15 +361,12 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// 状态下构造 fold/check/call/raise/bet/auto_fold/force_fold 的 trace。
     pub fn round_state_is_betting(&self, q: E::F) -> E::F {
         let rs = self.pre_round_state.clone();
-        let two: E::F = M31::from(2u32).into();
         let fourteen: E::F = M31::from(14u32).into();
         let seventy_one: E::F = M31::from(71u32).into();
         let one_hundred_fifty_four: E::F = M31::from(154u32).into();
         let one_hundred_twenty: E::F = M31::from(120u32).into();
         // q² - 14·(rs·q) + 71·q - 154·rs + 120（每项 degree ≤ 2）
-        let vp = q.clone() * q.clone()
-            - fourteen * (rs.clone() * q.clone())
-            + seventy_one * q
+        let vp = q.clone() * q.clone() - fourteen * (rs.clone() * q.clone()) + seventy_one * q
             - one_hundred_fifty_four * rs
             + one_hundred_twenty;
         self.is_active.clone() * vp
@@ -371,8 +380,7 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
 
     /// 约束 `post_round_state == pre_round_state`（round_state 不变）。
     pub fn round_state_unchanged(&self) -> E::F {
-        self.is_active.clone()
-            * (self.post_round_state.clone() - self.pre_round_state.clone())
+        self.is_active.clone() * (self.post_round_state.clone() - self.pre_round_state.clone())
     }
 
     /// 约束 pot limb0 不变（`post_pot_0 == pre_pot_0`，degree-2）。
@@ -384,12 +392,13 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// 约束 pot 全 4-limb 不变（`post_pot[i] == pre_pot[i]`，每 limb degree-2）。
     /// 阶段 3 soundness 升级：fold/check 之前仅约束 limb 0，恶意 prover 可在 limb 1-3 造假。
     /// 对齐 Lean 的 pot-unchanged 契约。
-    pub fn pot_unchanged_4limb(&self) -> E::F {
-        let mut c = self.is_active.clone() * (self.post_pot[0].clone() - self.pre_pot[0].clone());
-        for i in 1..4 {
-            c = c + self.is_active.clone() * (self.post_pot[i].clone() - self.pre_pot[i].clone());
+    pub fn pot_unchanged_4limb(&self) -> Vec<E::F> {
+        // P0-2 修复：逐 limb 独立约束（此前相加成单项可抵消）。
+        let mut out = Vec::with_capacity(4);
+        for i in 0..4 {
+            out.push(self.is_active.clone() * (self.post_pot[i].clone() - self.pre_pot[i].clone()));
         }
-        c
+        out
     }
 
     /// 约束 `post_button == pre_button`（button 不变，degree-2）。
@@ -442,115 +451,89 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         diff: &[E::F; 4],
         carry_lo: &[E::F; 3],
         carry_hi: &[E::F; 3],
-    ) -> E::F {
+    ) -> Vec<E::F> {
+        // P0-2 修复：逐 limb 进位关系 + carry booleanity 各自独立约束（此前相加可抵消）。
         let one: E::F = M31::from(1u32).into();
         let two: E::F = M31::from(2u32).into();
         let base: E::F = M31::from(65536u32).into();
         let mx = max_total_bet_limbs();
-        let mx_f: [E::F; 4] = [
-            mx[0].into(),
-            mx[1].into(),
-            mx[2].into(),
-            mx[3].into(),
-        ];
+        let mx_f: [E::F; 4] = [mx[0].into(), mx[1].into(), mx[2].into(), mx[3].into()];
 
         // carry values: c_i = lo_i + 2 * hi_i
         let c0 = carry_lo[0].clone() + two.clone() * carry_hi[0].clone();
         let c1 = carry_lo[1].clone() + two.clone() * carry_hi[1].clone();
         let c2 = carry_lo[2].clone() + two.clone() * carry_hi[2].clone();
 
-        // Limb 0: cp0 + ap0 + am0 + df0 - mx0 - c0 * 65536 = 0 (carry_in = 0)
-        let mut result = self.is_active.clone()
-            * (chip_pool[0].clone()
-                + addon_pool[0].clone()
-                + amount[0].clone()
-                + diff[0].clone()
+        let mut out = Vec::with_capacity(10);
+        // Limb 0: cp0 + ap0 + am0 + df0 - mx0 - c0*65536 = 0 (carry_in = 0)
+        out.push(self.is_active.clone()
+            * (chip_pool[0].clone() + addon_pool[0].clone() + amount[0].clone() + diff[0].clone()
                 - mx_f[0].clone()
-                - c0.clone() * base.clone());
-
-        // Limb 1: cp1 + ap1 + am1 + df1 + c0 - mx1 - c1 * 65536 = 0
-        result = result
-            + self.is_active.clone()
-                * (chip_pool[1].clone()
-                    + addon_pool[1].clone()
-                    + amount[1].clone()
-                    + diff[1].clone()
-                    + c0.clone()
-                    - mx_f[1].clone()
-                    - c1.clone() * base.clone());
-
-        // Limb 2: cp2 + ap2 + am2 + df2 + c1 - mx2 - c2 * 65536 = 0
-        result = result
-            + self.is_active.clone()
-                * (chip_pool[2].clone()
-                    + addon_pool[2].clone()
-                    + amount[2].clone()
-                    + diff[2].clone()
-                    + c1.clone()
-                    - mx_f[2].clone()
-                    - c2.clone() * base.clone());
-
+                - c0.clone() * base.clone()));
+        // Limb 1: cp1 + ap1 + am1 + df1 + c0 - mx1 - c1*65536 = 0
+        out.push(self.is_active.clone()
+            * (chip_pool[1].clone() + addon_pool[1].clone() + amount[1].clone() + diff[1].clone()
+                + c0.clone() - mx_f[1].clone() - c1.clone() * base.clone()));
+        // Limb 2: cp2 + ap2 + am2 + df2 + c1 - mx2 - c2*65536 = 0
+        out.push(self.is_active.clone()
+            * (chip_pool[2].clone() + addon_pool[2].clone() + amount[2].clone() + diff[2].clone()
+                + c1.clone() - mx_f[2].clone() - c2.clone() * base.clone()));
         // Limb 3: cp3 + ap3 + am3 + df3 + c2 - mx3 = 0 (carry_out = 0)
-        result = result
-            + self.is_active.clone()
-                * (chip_pool[3].clone()
-                    + addon_pool[3].clone()
-                    + amount[3].clone()
-                    + diff[3].clone()
-                    + c2.clone()
-                    - mx_f[3].clone());
-
-        // Boolean constraints for carry bits (degree 2, no gating needed:
-        // padding rows have all witness = 0, so 0*(0-1) = 0)
+        out.push(self.is_active.clone()
+            * (chip_pool[3].clone() + addon_pool[3].clone() + amount[3].clone() + diff[3].clone()
+                + c2.clone() - mx_f[3].clone()));
+        // carry bit booleanity（6 条独立）
         for i in 0..3 {
-            result = result + carry_lo[i].clone() * (carry_lo[i].clone() - one.clone());
-            result = result + carry_hi[i].clone() * (carry_hi[i].clone() - one.clone());
+            out.push(carry_lo[i].clone() * (carry_lo[i].clone() - one.clone()));
+            out.push(carry_hi[i].clone() * (carry_hi[i].clone() - one.clone()));
         }
-
-        result
+        out
     }
 
     /// 约束 `post_pot[i] = pre_pot[i] + amt[i]`（全 4 limb，每 limb degree-2）。
     /// 对齐 Lean `PotDelta`：配合 `m31_add_no_overflow` 公理可推出
     /// `decodeU64(post_pot) = decodeU64(pre_pot) + decodeU64(amt)`。
-    pub fn pot_delta_4limb(&self, amt: &[E::F; 4]) -> E::F {
-        let mut c = self.is_active.clone()
-            * (self.post_pot[0].clone() - self.pre_pot[0].clone() - amt[0].clone());
-        for i in 1..4 {
-            c = c + self.is_active.clone()
-                * (self.post_pot[i].clone() - self.pre_pot[i].clone() - amt[i].clone());
+    pub fn pot_delta_4limb(&self, amt: &[E::F; 4]) -> Vec<E::F> {
+        // P0-2 修复：逐 limb 独立约束。
+        let mut out = Vec::with_capacity(4);
+        for i in 0..4 {
+            out.push(self.is_active.clone()
+                * (self.post_pot[i].clone() - self.pre_pot[i].clone() - amt[i].clone()));
         }
-        c
+        out
     }
 
     /// 约束 `post[i] = pre[i] + amt[i]`（全 4 limb delta，每 limb degree-2）。
     /// 对齐 Lean `Limb4Delta`。
-    pub fn limb4_delta(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> E::F {
-        let mut c = self.is_active.clone() * (post[0].clone() - pre[0].clone() - amt[0].clone());
-        for i in 1..4 {
-            c = c + self.is_active.clone() * (post[i].clone() - pre[i].clone() - amt[i].clone());
+    pub fn limb4_delta(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> Vec<E::F> {
+        // P0-2 修复：逐 limb 独立约束。
+        let mut out = Vec::with_capacity(4);
+        for i in 0..4 {
+            out.push(self.is_active.clone() * (post[i].clone() - pre[i].clone() - amt[i].clone()));
         }
-        c
+        out
     }
 
     /// 约束 `pre[i] = post[i] + amt[i]`（全 4 limb 反向 delta，每 limb degree-2）。
     /// 对齐 Lean `Limb4DeltaRev`（用于 stack 减少场景）。
-    pub fn limb4_delta_rev(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> E::F {
-        let mut c = self.is_active.clone() * (pre[0].clone() - post[0].clone() - amt[0].clone());
-        for i in 1..4 {
-            c = c + self.is_active.clone() * (pre[i].clone() - post[i].clone() - amt[i].clone());
+    pub fn limb4_delta_rev(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> Vec<E::F> {
+        // P0-2 修复：逐 limb 独立约束。
+        let mut out = Vec::with_capacity(4);
+        for i in 0..4 {
+            out.push(self.is_active.clone() * (pre[i].clone() - post[i].clone() - amt[i].clone()));
         }
-        c
+        out
     }
 
     /// 约束 `a[i] = b[i]`（全 4 limb 相等，每 limb degree-2）。
     /// 对齐 Lean `Limb4Eq`。
-    pub fn limb4_eq(&self, a: &[E::F; 4], b: &[E::F; 4]) -> E::F {
-        let mut c = self.is_active.clone() * (a[0].clone() - b[0].clone());
-        for i in 1..4 {
-            c = c + self.is_active.clone() * (a[i].clone() - b[i].clone());
+    pub fn limb4_eq(&self, a: &[E::F; 4], b: &[E::F; 4]) -> Vec<E::F> {
+        // P0-2 修复：逐 limb 独立约束。
+        let mut out = Vec::with_capacity(4);
+        for i in 0..4 {
+            out.push(self.is_active.clone() * (a[i].clone() - b[i].clone()));
         }
-        c
+        out
     }
 
     /// 约束 `a ≥ b`（全 4-limb 大于等于，degree-2，阶段 3 新增）。
@@ -572,28 +555,36 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         b: &[E::F; 4],
         diff: &[E::F; 4],
         borrow: &[E::F; 3],
-    ) -> E::F {
+    ) -> Vec<E::F> {
+        // P0-2 修复：逐 limb 借位关系 + 借位 booleanity 各自独立约束（此前相加可抵消）。
         let one: E::F = M31::from(1u32).into();
         let base: E::F = M31::from(65536u32).into();
-        // borrow 链：borrow_in[0]=0, borrow_in[1]=borrow[0], borrow_in[2]=borrow[1], borrow_in[3]=borrow[2]
-        // borrow_out[0]=borrow[0], borrow_out[1]=borrow[1], borrow_out[2]=borrow[2], borrow_out[3]=0（无下溢）
-        let b_in = [M31::from(0u32).into(), borrow[0].clone(), borrow[1].clone(), borrow[2].clone()];
-        let b_out = [borrow[0].clone(), borrow[1].clone(), borrow[2].clone(), M31::from(0u32).into()];
-
-        // 每 limb：a[i] + base·borrow_in[i] - b[i] - diff[i] - base·borrow_out[i] = 0
-        let mut c = self.is_active.clone()
-            * (a[0].clone() + base.clone() * b_in[0].clone() - b[0].clone() - diff[0].clone()
-                - base.clone() * b_out[0].clone());
-        for i in 1..4 {
-            c = c + self.is_active.clone()
-                * (a[i].clone() + base.clone() * b_in[i].clone() - b[i].clone() - diff[i].clone()
-                    - base.clone() * b_out[i].clone());
+        let b_in = [
+            M31::from(0u32).into(),
+            borrow[0].clone(),
+            borrow[1].clone(),
+            borrow[2].clone(),
+        ];
+        let b_out = [
+            borrow[0].clone(),
+            borrow[1].clone(),
+            borrow[2].clone(),
+            M31::from(0u32).into(),
+        ];
+        let mut out = Vec::with_capacity(7);
+        // 每 limb 借位关系（4 条独立）
+        for i in 0..4 {
+            out.push(self.is_active.clone()
+                * (a[i].clone() + base.clone() * b_in[i].clone()
+                    - b[i].clone()
+                    - diff[i].clone()
+                    - base.clone() * b_out[i].clone()));
         }
-        // borrow booleanity（3 个）
+        // borrow booleanity（3 条独立）
         for i in 0..3 {
-            c = c + borrow[i].clone() * (borrow[i].clone() - one.clone());
+            out.push(borrow[i].clone() * (borrow[i].clone() - one.clone()));
         }
-        c
+        out
     }
 
     /// 约束单个 M31 值 `x` 落在 [0, 65536)（16-bit range check，阶段 3 新增）。
@@ -604,22 +595,24 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     ///
     /// 调用方需为每个要 range-check 的值在 trace 中提供 16 个 boolean witness 列。
     /// padding 行所有 bits=0、x=0，约束平凡满足。
-    pub fn range16(&self, x: &E::F, bits: &[E::F; 16]) -> E::F {
+    pub fn range16(&self, x: &E::F, bits: &[E::F; 16]) -> Vec<E::F> {
+        // P0-2 修复：重构约束与各 bit booleanity 独立（此前相加可让 bit 翻转抵消）。
         let one: E::F = M31::from(1u32).into();
         let two: E::F = M31::from(2u32).into();
-        // x = Σ bits[i] · 2^i
+        // x = Σ bits[i] · 2^i（一条独立重构约束）
         let mut recon = bits[0].clone();
         let mut pow2: E::F = two.clone();
         for i in 1..16 {
             recon = recon.clone() + bits[i].clone() * pow2.clone();
             pow2 = pow2.clone() * two.clone();
         }
-        let mut c = self.is_active.clone() * (x.clone() - recon);
-        // booleanity：bits[i] · (bits[i] - 1) = 0
+        let mut out = Vec::with_capacity(17);
+        out.push(self.is_active.clone() * (x.clone() - recon));
+        // 各 bit booleanity（16 条独立）
         for i in 0..16 {
-            c = c.clone() + bits[i].clone() * (bits[i].clone() - one.clone());
+            out.push(bits[i].clone() * (bits[i].clone() - one.clone()));
         }
-        c
+        out
     }
 }
 

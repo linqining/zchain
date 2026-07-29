@@ -55,6 +55,7 @@ import PokerLean.Proofs.LeaveTableSoundness
 import PokerLean.Proofs.LifecycleSoundness
 import PokerLean.Proofs.FundsSoundness
 import PokerLean.Proofs.CryptoSoundness
+import PokerLean.Audit.SoundnessAudit
 
 namespace PokerLean
 
@@ -433,74 +434,22 @@ theorem submit_reconstruct_deck_sound_main :
       (extractPostTableFromCryptoAir row max_players 0 0 ext.input_reconstruct_state.val) :=
   submit_reconstruct_deck_air_sound
 
-/-! ## 总结（全面约束集成后）
+/-! ## 结论：21 个模型内定理，不是 21 个实现级证明
 
-通过 Lean 形式化验证，我们证明了 21 个方法的 soundness 状况：
+本文件导出了 21 个方法的 Lean theorem wrapper。它们证明的是手写
+`*AirAcceptable` 谓词到手写 `Contract*` 谓词的模型内蕴含关系。
 
-### ✅ Sound（21 个）
+这些定理目前**不能**被表述为：
 
-#### 基础方法（2 个）：
-1. **create_table AIR 是 sound 的** — `create_table_soundness`
-2. **fold AIR 是 sound 的** — `fold_air_sound`（完整 21 合取项）
+* 真实 Rust AIR 接受必然推出 VM 合约语义；
+* state-root/public-input 已与 trace witness 建立端到端等价；
+* caller/creator 授权、完整轮次推进、结算与密码学子证明均已覆盖；
+* Aggregator 已递归验证全部 method proof。
 
-#### 生命周期方法（3 个）：
-3. **start_hand AIR 是 sound 的** — `start_hand_air_sound`（`ActiveCountAtLeastTwo` +
-   `make_occupied_seats_foldl_count` + `RoundStateEq` + `RoundStateUnchanged` +
-   `VersionIncrementConstraint` + `extractPostTableFromStartHandAir` 设 `shuffle_state.phase = 3`）
-4. **tick AIR 是 sound 的** — `tick_air_sound`（`TimeoutKindPositive` + `VersionIncrementConstraint`）
-5. **reset_for_next_hand AIR 是 sound 的** — `reset_for_next_hand_air_sound`（`ShufflePhasePositive` +
-   `row.post_round_state = ext.output_new_round_state = 0` + `VersionIncrementConstraint` +
-   所有座位 `pending_addon = 0`）
-
-#### 资金方法（2 个，limb 范围待补）：
-6. **addon AIR soundness 已声明** — `addon_air_sound`（4-limb 守恒 + addon_pool 守恒 +
-   版本递增 + 座位占用 + 金额 > 0）
-7. **rebuy AIR soundness 已声明** — `rebuy_air_sound`（同上）
-
-#### 密码学方法（5 个）：
-8. **join_and_shuffle AIR 是 sound 的** — `join_and_shuffle_air_sound`（`ShufflePhasePositive` +
-   `VersionIncrementConstraint` + `StateRootConsistency`）
-9. **leave_with_proof AIR 是 sound 的** — `leave_with_proof_air_sound`（同上）
-10. **submit_shuffle_v2 AIR 是 sound 的** — `submit_shuffle_v2_air_sound`（同上）
-11. **submit_player_reveal_tokens AIR 是 sound 的** — `submit_player_reveal_tokens_air_sound`
-    （`RevealPhasePositive` + `VersionIncrementConstraint`）
-12. **submit_reconstruct_deck AIR 是 sound 的** — `submit_reconstruct_deck_air_sound`
-    （`ReconstructStateNotIdle` + `VersionIncrementConstraint`）
-
-#### 座位状态方法（3 个）：
-13. **join_table AIR 是 sound 的** — `join_table_air_sound`
-14. **leave_table AIR 是 sound 的** — `leave_table_air_sound`
-15. **kick_player AIR 是 sound 的** — `kick_player_air_sound`
-
-#### 动作方法（6 个）：
-16. **check AIR 是 sound 的** — `check_air_sound`
-17. **call AIR 是 sound 的** — `call_air_sound`
-18. **raise AIR 是 sound 的** — `raise_air_sound`
-19. **bet AIR 是 sound 的** — `bet_air_sound`
-20. **auto_fold AIR 是 sound 的** — `auto_fold_air_sound`
-21. **force_fold AIR 是 sound 的** — `force_fold_air_sound`
-
-### 已关闭的 soundness gap
-
-所有 21 个方法的 AIR 约束现已完全蕴含合约语义：
-
-- ✅ **StateRootConsistency**：所有方法通过 Poseidon252 哈希验证 pre/post 状态一致性
-- ✅ **VersionIncrementConstraint**：所有方法强制 `post.version = pre.version + 1`
-- ✅ **Round state gating**：`RoundStateEq`（WAITING gating）、`RoundStateIsBetting`（betting gating）
-- ✅ **Phase gating**：`ShufflePhasePositive`、`RevealPhasePositive`、`ReconstructStateNotIdle`
-- ✅ **资金守恒**：`PotDelta`、`Limb4Delta`、`Limb4DeltaRev`、`Limb4Eq`（全 4-limb 守恒）
-- ✅ **座位占用**：`SeatOccupied` / `SeatEmpty`
-- ✅ **金额正数**：`AmountPositive`
-- ✅ **active_count 一致**：`ActiveCountAtLeastTwo` + `make_occupied_seats_foldl_count`
-
-### 已知限制
-
-1. **limb 范围约束**（addon/rebuy）：AIR 的逐 limb 加法在 M31 域内进行，
-   不显式强制 limb 进位传播。Rust 实现中由独立 range constraint 保证；
-   Lean 模型通过公理 `m31_add_no_overflow` 抽象
-2. **密码学证明**：DLEq/ZKShuffle/RevealToken/Reconstruct 证明本身不在 AIR 中验证，
-   假设由外部 ZK 验证器负责
-3. **时间约束**：tick 的真实超时条件简化为 `timeout_kind > 0`
+此外，若干 theorem 仍显式需要 `Limb4Range16`、seat index 范围等额外前提。
+当前可信声明、未覆盖层次以及 21 个底层 theorem 的 `#print axioms` 输出见
+`PokerLean.Audit.TrustBoundary`。只有建立 Rust AIR→Lean AIR 与 VM→Lean Contract
+的精化桥之后，才能升级为实现级 soundness 结论。
 -/
 
 end PokerLean

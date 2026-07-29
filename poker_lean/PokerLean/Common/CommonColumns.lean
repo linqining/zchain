@@ -203,7 +203,7 @@ def PotDeltaLimb0 (row : CommonRow) (amt0 : M31) : Prop :=
   row.post_pot.1.val = (row.pre_pot.1.val + amt0.val) % M31_P
 
 /-- pot 全 4 limb delta 约束：active 行要求逐 limb post_pot = M31.add pre_pot amt。
-    配合 `m31_add_no_overflow` 公理与 `decodeU64_limb_add` 引理，
+    配合 `m31_add_no_overflow` 定理与 `decodeU64_limb_add` 引理，
     可推出 `decodeU64 post_pot = decodeU64 pre_pot + decodeU64 amt`。 -/
 def PotDelta (row : CommonRow) (amt : M31 × M31 × M31 × M31) : Prop :=
   row.is_active = M31.one →
@@ -279,9 +279,9 @@ Poseidon252 将状态（preimage）哈希为 state_root。
 StateRootConsistency 要求 AIR 行中的 pre_state_root 和 post_state_root
 与对应的 preimage 哈希值匹配。
 
-这将 soundness 证明分解为两个层次：
-1. **哈希正确性**（由公理保证）：state_root = hash(preimage) ⟹ preimage 正确
-2. **业务语义正确性**（通过约束证明）：preimage 正确 ⟹ 合约语义满足
+该谓词只表达“给定的 preimage 经抽象哈希后等于行内 root”。它不会从 root
+反推出唯一 preimage，也不会证明该 preimage 就是真实 Rust trace/public input
+所编码的状态；这些性质需要另行建立编码精化与密码学绑定。
 -/
 
 /-- State root 一致性约束。

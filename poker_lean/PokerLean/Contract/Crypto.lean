@@ -13,11 +13,9 @@ namespace PokerLean
 - `submit_player_reveal_tokens` — 提交揭牌令牌
 - `submit_reconstruct_deck` — 提交重构牌组
 
-所有方法的关键合约要求：
-1. 特定的 shuffle_state / reveal_state / reconstruct_state 阶段
-2. 密码学证明有效性（DLEq, ZKShuffle, RevealToken, Reconstruct）
-3. version += 1
-4. state root 一致性
+真实合约还要求精确的阶段、调用者/座位权限、密码学证明有效性以及相应状态更新。
+本文件当前只保留粗粒度阶段条件、`version += 1` 和少量字段不变式；
+DLEq、ZKShuffle、RevealToken、Reconstruct 验证及完整状态转移不在这些谓词中。
 -/
 
 /-! ## join_and_shuffle 合约语义 -/

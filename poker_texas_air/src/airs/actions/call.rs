@@ -23,11 +23,11 @@
 //!   `OUTPUT_ALL_IN`, `OUTPUT_ACTED`, `INPUT_PRE_ROUND_STATE_Q`,
 //!   `INPUT_CURRENT_TURN`, `PRE_SEAT_BET_BASE[4]`
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -111,7 +111,8 @@ impl FrameworkEval for CallAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Call, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -190,13 +191,25 @@ impl FrameworkEval for CallAir {
 
         // 约束 5（阶段 3 soundness 升级：全 4-limb 资金守恒，对齐 raise.rs）：
         // pot += call_amount（4 limb）
-        eval.add_constraint(common.pot_delta_4limb(&input_call_amount));
+        for __c in common.pot_delta_4limb(&input_call_amount) { eval.add_constraint(__c); }
         // seat.stack -= call_amount（4 limb 反向 delta）
-        eval.add_constraint(common.limb4_delta_rev(&pre_seat_stack, &output_seat_stack, &input_call_amount));
+        for __c in common.limb4_delta_rev(
+            &pre_seat_stack,
+            &output_seat_stack,
+            &input_call_amount,
+        ) { eval.add_constraint(__c); }
         // seat.bet += call_amount（4 limb）
-        eval.add_constraint(common.limb4_delta(&pre_seat_bet, &output_seat_bet, &input_call_amount));
+        for __c in common.limb4_delta(
+            &pre_seat_bet,
+            &output_seat_bet,
+            &input_call_amount,
+        ) { eval.add_constraint(__c); }
         // seat.total_bet += call_amount（4 limb）
-        eval.add_constraint(common.limb4_delta(&pre_seat_total_bet, &output_seat_total_bet, &input_call_amount));
+        for __c in common.limb4_delta(
+            &pre_seat_total_bet,
+            &output_seat_total_bet,
+            &input_call_amount,
+        ) { eval.add_constraint(__c); }
 
         eval
     }
@@ -292,7 +305,7 @@ impl CallRow {
             output_acted: M31::from(1u32),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
-            input_current_turn: u8_to_m31(input.seat_index),  // current_turn == seat_index
+            input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
             pre_seat_bet: u64_to_m31_limbs(pre_seat_bet),
             pre_seat_stack: u64_to_m31_limbs(pre_seat_stack),
             output_seat_total_bet: u64_to_m31_limbs(post_seat_total_bet),

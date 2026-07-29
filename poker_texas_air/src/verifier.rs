@@ -8,13 +8,15 @@
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
-use stwo::core::verifier::{verify, VerificationError};
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
+use stwo::core::verifier::{VerificationError, verify};
 use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 
-use crate::airs::lifecycle::create_table::{cols, CreateTableAir};
+use crate::airs::lifecycle::create_table::{CreateTableAir, cols};
+use crate::airs::TexasAir;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::prover::{CreateTableProof, MethodProof};
+use crate::public_inputs::TexasPublicInputs;
 
 /// 验证 `create_table` 方法的 L1 proof。
 ///
@@ -29,20 +31,22 @@ use crate::prover::{CreateTableProof, MethodProof};
 ///
 /// - `TexasAirError::ConstraintUnsatisfied` — AIR 约束不满足
 /// - `TexasAirError::StwoProverError` — Stwo verifier 内部错误
-pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
+pub fn verify_create_table_against(
+    proof: CreateTableProof,
+    expected_air: CreateTableAir,
+    expected_public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
     let config = PcsConfig::default();
-    let log_size = proof.log_size;
+    expected_public_inputs.verify_roots()?;
+    expected_public_inputs.verify_air_statement(&expected_air.statement())?;
+    let log_size = expected_air.log_size();
     let stark_proof = &proof.stark_proof;
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Poseidon252Channel::default();
-    // soundness 关键：与 prover 对称地 mix 公开输入 + 重算验证 state_root 绑定。
-    if let Some(pi) = &proof.public_inputs {
-        pi.verify_roots()?; // 重算 Poseidon252(image) 并比对公开 root
-        pi.mix_into(&mut channel); // 与 prover 相同顺序 mix 进 transcript
-    }
-    let mut commitment_scheme =
-        CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
+    // Only verifier-supplied public inputs define the statement/transcript.
+    expected_public_inputs.mix_into(&mut channel);
+    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
 
     // 2. 从 proof 读取 preprocessed commitment（tree 0，0 列）
     //    prover 提交了空 preprocessed trace，所以 column_log_sizes 为空
@@ -64,12 +68,11 @@ pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
     let trace_log_sizes = vec![log_size; cols::NUM_COLUMNS];
     commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
 
-    // 4. 构建 AIR component（与 prover 端使用相同的 AIR 实例）
-    let air: CreateTableAir = proof.air.clone();
+    // 4. Build from the independently reconstructed AIR, never proof.air.
     let mut allocator = TraceLocationAllocator::default();
     let component = FrameworkComponent::new(
         &mut allocator,
-        air,
+        expected_air,
         stwo::core::fields::qm31::SecureField::from(0u32),
     );
 
@@ -83,6 +86,15 @@ pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
     .map_err(|e: VerificationError| TexasAirError::ConstraintUnsatisfied(e.to_string()))?;
 
     Ok(())
+}
+
+/// Test-only compatibility entry point. It deliberately trusts proof-carried
+/// metadata and is omitted from production builds.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
+    let expected_air = proof.air.clone();
+    let expected_public_inputs = proof.public_inputs.clone();
+    verify_create_table_against(proof, expected_air, &expected_public_inputs)
 }
 
 /// 泛型 method verify — 验证任意 method AIR 的 L1 proof。
@@ -101,24 +113,25 @@ pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
 ///
 /// - `TexasAirError::ConstraintUnsatisfied` — AIR 约束不满足
 /// - `TexasAirError::StwoProverError` — Stwo verifier 内部错误
-pub fn verify_method<A>(proof: MethodProof<A>) -> TexasAirResult<()>
+pub fn verify_method_against<A>(
+    proof: MethodProof<A>,
+    expected_air: A,
+    expected_public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()>
 where
-    A: FrameworkEval + Clone + Sync,
+    A: TexasAir,
 {
     let config = PcsConfig::default();
-    let log_size = proof.log_size;
-    let num_columns = proof.num_columns;
+    expected_public_inputs.verify_roots()?;
+    expected_public_inputs.verify_air_statement(&expected_air.statement())?;
+    let log_size = expected_air.log_size();
+    let num_columns = expected_air.trace_num_columns();
     let stark_proof = proof.stark_proof.clone();
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Poseidon252Channel::default();
-    // soundness 关键：与 prover 对称地 mix 公开输入 + 重算验证 state_root 绑定。
-    if let Some(pi) = &proof.public_inputs {
-        pi.verify_roots()?; // 重算 Poseidon252(image) 并比对公开 root
-        pi.mix_into(&mut channel); // 与 prover 相同顺序 mix 进 transcript
-    }
-    let mut commitment_scheme =
-        CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
+    expected_public_inputs.mix_into(&mut channel);
+    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
 
     // 2. 从 proof 读取 preprocessed commitment（tree 0，空 trace）
     let preprocessed_commitment = *stark_proof.commitments.get(0).ok_or_else(|| {
@@ -139,12 +152,11 @@ where
     let trace_log_sizes = vec![log_size; num_columns];
     commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
 
-    // 4. 构建 AIR component（与 prover 端使用相同 AIR 实例）
-    let air = proof.air.clone();
+    // 4. Build the component from verifier-trusted AIR data.
     let mut allocator = TraceLocationAllocator::default();
     let component = FrameworkComponent::new(
         &mut allocator,
-        air,
+        expected_air,
         stwo::core::fields::qm31::SecureField::from(0u32),
     );
 
@@ -158,6 +170,18 @@ where
     .map_err(|e: VerificationError| TexasAirError::ConstraintUnsatisfied(e.to_string()))?;
 
     Ok(())
+}
+
+/// Test-only compatibility entry point. Production callers must provide an
+/// independently trusted statement through [`verify_method_against`].
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn verify_method<A>(proof: MethodProof<A>) -> TexasAirResult<()>
+where
+    A: TexasAir,
+{
+    let expected_air = proof.air.clone();
+    let expected_public_inputs = proof.public_inputs.clone();
+    verify_method_against(proof, expected_air, &expected_public_inputs)
 }
 
 /// 验证 Aggregator proof。

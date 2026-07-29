@@ -17,8 +17,12 @@
 use stwo::core::fields::m31::M31;
 
 use poker_texas_air::aggregator_air::{build_binary_tree, ChildDescriptor};
-use poker_texas_air::aggregator_prover::prove_aggregator;
-use poker_texas_air::aggregator_verifier::verify_aggregator;
+use poker_texas_air::aggregator_prover::{
+    prove_aggregator, prove_aggregator_unchecked_for_tests,
+};
+use poker_texas_air::aggregator_verifier::{
+    verify_aggregator, verify_aggregator_unchecked_for_tests,
+};
 use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::error::TexasAirError;
 use poker_texas_air::method_kind::MethodKind;
@@ -63,6 +67,28 @@ fn make_chain(seqs: &[u32], kinds: &[MethodKind], roots: &[u32]) -> Vec<ChildDes
 
 // ========== E2E happy path ==========
 
+/// Production entry points fail closed because descriptor-only aggregation does not verify children.
+#[test]
+fn test_production_aggregator_entry_points_reject_untrusted_poc() {
+    let children = make_chain(
+        &[0, 1],
+        &[MethodKind::CreateTable, MethodKind::JoinTable],
+        &[10, 20],
+    );
+
+    assert!(matches!(
+        prove_aggregator(children.clone()),
+        Err(TexasAirError::UntrustedAggregationDisabled)
+    ));
+
+    let poc_proof =
+        prove_aggregator_unchecked_for_tests(children).expect("test-only PoC prove should work");
+    assert!(matches!(
+        verify_aggregator(poc_proof),
+        Err(TexasAirError::UntrustedAggregationDisabled)
+    ));
+}
+
 /// E2E: 聚合 2 个 method proof → prove → verify（happy path，单层聚合）。
 #[test]
 fn test_e2e_aggregate_two_children() {
@@ -72,10 +98,10 @@ fn test_e2e_aggregate_two_children() {
         &[10, 20],
     );
 
-    let proof = prove_aggregator(children).expect("prove 失败");
+    let proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
     assert_eq!(proof.num_children, 2);
     assert_eq!(proof.num_levels, 1);
-    verify_aggregator(proof).expect("verify 失败");
+    verify_aggregator_unchecked_for_tests(proof).expect("verify 失败");
 }
 
 /// E2E: 聚合 4 个 method proof → prove → verify（双层聚合）。
@@ -92,10 +118,10 @@ fn test_e2e_aggregate_four_children() {
         &[10, 20, 30, 40],
     );
 
-    let proof = prove_aggregator(children).expect("prove 失败");
+    let proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
     assert_eq!(proof.num_children, 4);
     assert_eq!(proof.num_levels, 2);
-    verify_aggregator(proof).expect("verify 失败");
+    verify_aggregator_unchecked_for_tests(proof).expect("verify 失败");
 }
 
 /// E2E: 聚合 8 个 method proof → prove → verify（三层聚合）。
@@ -115,10 +141,10 @@ fn test_e2e_aggregate_eight_children() {
     let seqs: Vec<u32> = (0..8).collect();
     let children = make_chain(&seqs, &kinds, &roots);
 
-    let proof = prove_aggregator(children).expect("prove 失败");
+    let proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
     assert_eq!(proof.num_children, 8);
     assert_eq!(proof.num_levels, 3);
-    verify_aggregator(proof).expect("verify 失败");
+    verify_aggregator_unchecked_for_tests(proof).expect("verify 失败");
 }
 
 /// E2E: 聚合 3 个 method proof（奇数节点，含晋升）→ prove → verify。
@@ -134,11 +160,11 @@ fn test_e2e_aggregate_three_children_odd() {
         &[10, 20, 30],
     );
 
-    let proof = prove_aggregator(children).expect("prove 失败");
+    let proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
     assert_eq!(proof.num_children, 3);
     // 3 节点：底层 1 个聚合行（pair 0+1），顶层 1 个聚合行（pair 上层结果 + 2）
     assert_eq!(proof.num_levels, 2);
-    verify_aggregator(proof).expect("verify 失败");
+    verify_aggregator_unchecked_for_tests(proof).expect("verify 失败");
 }
 
 // ========== Soundness: build_binary_tree 错误检测 ==========
@@ -152,7 +178,7 @@ fn test_soundness_aggregator_chain_break() {
         make_child(1, MethodKind::JoinTable, 99, 30), // pre ≠ 上一个 post
     ];
 
-    let result = prove_aggregator(children);
+    let result = prove_aggregator_unchecked_for_tests(children);
     assert!(
         matches!(result, Err(TexasAirError::RecursionError(_))),
         "链式连续性破坏应返回 RecursionError，实际：{result:?}"
@@ -168,7 +194,7 @@ fn test_soundness_aggregator_seq_reversed() {
         make_child(0, MethodKind::JoinTable, 20, 30), // seq 反向
     ];
 
-    let result = prove_aggregator(children);
+    let result = prove_aggregator_unchecked_for_tests(children);
     assert!(
         matches!(result, Err(TexasAirError::RecursionError(_))),
         "call_seq 反向应返回 RecursionError，实际：{result:?}"
@@ -180,7 +206,7 @@ fn test_soundness_aggregator_seq_reversed() {
 fn test_soundness_aggregator_single_child_no_agg() {
     let children = vec![make_child(0, MethodKind::CreateTable, 10, 20)];
 
-    let result = prove_aggregator(children);
+    let result = prove_aggregator_unchecked_for_tests(children);
     assert!(
         matches!(result, Err(TexasAirError::RecursionError(_))),
         "单子节点应返回 RecursionError（levels 为空），实际：{result:?}"
@@ -190,7 +216,7 @@ fn test_soundness_aggregator_single_child_no_agg() {
 /// Soundness: 空子节点列表 → prove_aggregator 应返回 RecursionError。
 #[test]
 fn test_soundness_aggregator_empty_children() {
-    let result = prove_aggregator(vec![]);
+    let result = prove_aggregator_unchecked_for_tests(vec![]);
     assert!(
         matches!(result, Err(TexasAirError::RecursionError(_))),
         "空子节点列表应返回 RecursionError，实际：{result:?}"
@@ -210,12 +236,12 @@ fn test_soundness_aggregator_tampered_left_seq() {
         &[10, 20],
     );
 
-    let mut proof = prove_aggregator(children).expect("prove 失败");
+    let mut proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
 
     // 篡改 left.call_seq：trace 中是 0，AIR 声明 99
     proof.air.left.call_seq = 99;
 
-    let result = verify_aggregator(proof);
+    let result = verify_aggregator_unchecked_for_tests(proof);
     assert!(
         result.is_err(),
         "篡改 left.call_seq 后 verify 应失败，但成功了 — soundness 漏洞！"
@@ -231,12 +257,12 @@ fn test_soundness_aggregator_tampered_right_kind() {
         &[10, 20],
     );
 
-    let mut proof = prove_aggregator(children).expect("prove 失败");
+    let mut proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
 
     // 篡改 right.method_kind：trace 中是 JoinTable (1)，AIR 声明 Fold (6)
     proof.air.right.method_kind = MethodKind::Fold;
 
-    let result = verify_aggregator(proof);
+    let result = verify_aggregator_unchecked_for_tests(proof);
     assert!(
         result.is_err(),
         "篡改 right.method_kind 后 verify 应失败，但成功了 — soundness 漏洞！"
@@ -252,12 +278,12 @@ fn test_soundness_aggregator_tampered_left_kind() {
         &[10, 20],
     );
 
-    let mut proof = prove_aggregator(children).expect("prove 失败");
+    let mut proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
 
     // 篡改 left.method_kind：trace 中是 CreateTable (0)，AIR 声明 Tick (4)
     proof.air.left.method_kind = MethodKind::Tick;
 
-    let result = verify_aggregator(proof);
+    let result = verify_aggregator_unchecked_for_tests(proof);
     assert!(
         result.is_err(),
         "篡改 left.method_kind 后 verify 应失败，但成功了 — soundness 漏洞！"
@@ -273,12 +299,12 @@ fn test_soundness_aggregator_tampered_right_seq() {
         &[10, 20],
     );
 
-    let mut proof = prove_aggregator(children).expect("prove 失败");
+    let mut proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
 
     // 篡改 right.call_seq：trace 中是 1，AIR 声明 99
     proof.air.right.call_seq = 99;
 
-    let result = verify_aggregator(proof);
+    let result = verify_aggregator_unchecked_for_tests(proof);
     assert!(
         result.is_err(),
         "篡改 right.call_seq 后 verify 应失败，但成功了 — soundness 漏洞！"

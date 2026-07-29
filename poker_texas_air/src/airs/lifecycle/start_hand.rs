@@ -11,12 +11,10 @@
 //! 4. **Ante 配置**：声明本手的 ante_mode / ante_amount / ante_collected，
 //!    约束 ante_mode 与公开输入一致，ante_collected 在 NONE 模式下 == 0
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{
-    u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
-};
+use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 
 /// `start_hand` 业务特定列布局。
@@ -83,14 +81,21 @@ pub struct StartHandAir {
 impl StartHandAir {
     /// 列数。
     #[must_use]
-    pub const fn num_columns() -> usize { cols::NUM_COLUMNS }
+    pub const fn num_columns() -> usize {
+        cols::NUM_COLUMNS
+    }
 }
 
 impl FrameworkEval for StartHandAir {
-    fn log_size(&self) -> u32 { self.log_size }
-    fn max_constraint_log_degree_bound(&self) -> u32 { self.log_size + 1 }
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::StartHand, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_active_count = eval.next_trace_mask();
@@ -111,11 +116,17 @@ impl FrameworkEval for StartHandAir {
         // 用中间列 prod 把三列乘积拆成两个两列乘积约束，避免 degree 超过 Stwo 上界。
         let one: E::F = M31::from(1u32).into();
         let count_minus_one = input_active_count.clone() - one.clone();
-        eval.add_constraint(is_active.clone() * (input_active_count_prod.clone() - input_active_count.clone() * count_minus_one));
+        eval.add_constraint(
+            is_active.clone()
+                * (input_active_count_prod.clone() - input_active_count.clone() * count_minus_one),
+        );
 
         // 约束 2b（Gap 4 part 2）：prod * inv == 1（degree-2 两列乘积）。
         // 强制 active_count*(active_count-1) ≠ 0，即 active_count ∉ {0,1} → active_count ≥ 2。
-        eval.add_constraint(is_active.clone() * (input_active_count_prod.clone() * input_active_count_inv.clone() - one));
+        eval.add_constraint(
+            is_active.clone()
+                * (input_active_count_prod.clone() * input_active_count_inv.clone() - one),
+        );
         // 约束 3：output_new_round_state == ROUND_WAITING (常量)
         // 合约 start_hand 后 round_state 仍为 ROUND_WAITING=0；真正进入 shuffle 由
         // shuffle_state.phase 表达（SHUFFLE_PHASE_BEFORE_PREFLOP=3），不属于 round_state。
@@ -138,7 +149,8 @@ impl FrameworkEval for StartHandAir {
         //   - NONE 模式 (mode==0)：host 设置 ante_collected = 0
         //   - NORMAL/BBA：host 按 active_count * ante_amount 计算
         //   trace 中 collected_0 必须与公开输入一致；state_root 验证捕获实际状态正确性
-        let expected_collected_0: E::F = M31::from((self.input.ante_collected & 0xFFFF) as u32).into();
+        let expected_collected_0: E::F =
+            M31::from((self.input.ante_collected & 0xFFFF) as u32).into();
         eval.add_constraint(is_active * (output_ante_collected_0 - expected_collected_0));
 
         eval
@@ -183,19 +195,31 @@ impl StartHandRow {
         active_count_prod: M31,
         pre_state_root: [M31; 4],
         post_state_root: [M31; 4],
-        table_id: u64, hand_id: u32, call_seq: u32,
-        pre_version: u64, post_version: u64,
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+        pre_version: u64,
+        post_version: u64,
     ) -> Self {
         Self {
             common: CommonRow::active(
-                MethodKind::StartHand, pre_state_root, post_state_root,
-                table_id, hand_id, call_seq, pre_version, post_version,
+                MethodKind::StartHand,
+                pre_state_root,
+                post_state_root,
+                table_id,
+                hand_id,
+                call_seq,
+                pre_version,
+                post_version,
                 0, // pre = ROUND_WAITING
                 0, // post = ROUND_WAITING（合约 start_hand 后 round_state 不变）
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
             ),
             input_active_count: u8_to_m31(input.active_count),
-            output_new_button: ZERO, // 由 pre_button + 1 计算
+            output_new_button: ZERO,                 // 由 pre_button + 1 计算
             output_new_round_state: M31::from(0u32), // ROUND_WAITING
             output_ante_mode: u8_to_m31(input.ante_mode),
             output_ante_amount_0: M31::from((input.ante_amount & 0xFFFF) as u32),
@@ -236,7 +260,3 @@ impl StartHandRow {
         v
     }
 }
-
-
-
-

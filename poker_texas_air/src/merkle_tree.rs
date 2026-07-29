@@ -11,7 +11,6 @@
 use starknet_ff::FieldElement;
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::state_root::{u64_to_field, u8_to_field};
 
 /// Merkle 树叶子节点 — `Seat` 字段的 Poseidon252 编码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -20,33 +19,13 @@ pub struct SeatLeaf(pub FieldElement);
 impl SeatLeaf {
     /// 从 `poker_l1` 的 `Seat` 构造叶子哈希。
     ///
-    /// # 字段顺序
-    ///
-    /// 1. `seat_index`（u8）
-    /// 2. `player_addr`（Address 的 Blake2b → FieldElement）
-    /// 3. `pubkey_commitment`（BLS G1 的 Poseidon）
-    /// 4. `stack`（u64）
-    /// 5. `total_bet`（u64）
-    /// 6. `status`（u8）
-    /// 7. `hand_cards_commitment`（Option，标志位 + hash）
+    /// The leaf commits to the complete canonical Borsh encoding of `Seat`.
     #[must_use]
     pub fn from_seat(seat: &poker_l1::vm::contracts::texas_poker::types::Seat) -> Self {
-        // TODO 阶段 2：完整实现 SeatLeaf 编码
-        // 当前用简化版：stack + status + seat_index
-        use poker_l1::vm::contracts::texas_poker::types::SeatStatus;
-        let status_byte: u8 = match seat.status() {
-            SeatStatus::Empty => 0,
-            SeatStatus::Waiting => 1,
-            SeatStatus::Active => 2,
-            SeatStatus::Folded => 3,
-            SeatStatus::AllIn => 4,
-            SeatStatus::Out => 5,
-        };
-        let mut fields = Vec::with_capacity(8);
-        fields.push(u8_to_field(status_byte));
-        fields.push(u64_to_field(seat.stack));
-        // TODO 加入其他字段
-        Self(starknet_crypto::poseidon_hash_many(&fields))
+        Self(crate::state_root::poseidon_borsh(
+            "zchain.texas_poker.seat.v2",
+            seat,
+        ))
     }
 
     /// 返回内部字段。
@@ -94,10 +73,7 @@ impl MerkleTree {
             layers.push(next.clone());
             layer = next;
         }
-        Self {
-            layers,
-            leaf_count,
-        }
+        Self { layers, leaf_count }
     }
 
     /// 返回 root（空树返回 0）。
@@ -163,7 +139,12 @@ impl MerkleTree {
     ///
     /// 给定 `leaf`、`path`、`root`，验证 path 验证成立。
     #[must_use]
-    pub fn verify_path(leaf: FieldElement, path: &[FieldElement], leaf_index: usize, root: FieldElement) -> bool {
+    pub fn verify_path(
+        leaf: FieldElement,
+        path: &[FieldElement],
+        leaf_index: usize,
+        root: FieldElement,
+    ) -> bool {
         let mut acc = leaf;
         let mut idx = leaf_index;
         for &sibling in path {
@@ -206,7 +187,8 @@ mod tests {
         let leaves = [FieldElement::from(42u64)];
         let tree = MerkleTree::from_leaves(&leaves);
         // 单叶子 + 1 padding(0) → root = Poseidon(42, 0)
-        let expected = starknet_crypto::poseidon_hash(FieldElement::from(42u64), FieldElement::ZERO);
+        let expected =
+            starknet_crypto::poseidon_hash(FieldElement::from(42u64), FieldElement::ZERO);
         assert_eq!(tree.root(), expected);
         assert_eq!(tree.depth(), 1);
     }

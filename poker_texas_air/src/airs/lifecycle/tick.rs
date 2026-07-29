@@ -6,10 +6,10 @@
 //! 3. **Time Bank**：下注超时时若 `time_bank_ms > 0`，消耗等量时间延长截止
 //! 4. **Rake**：reveal 阶段完成触发 settle_hand 时抽水（`pot_after = pot_before - rake`）
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
+use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO};
 use crate::method_kind::MethodKind;
 
 /// `tick` 业务特定列布局。
@@ -79,14 +79,21 @@ pub struct TickAir {
 impl TickAir {
     /// 列数。
     #[must_use]
-    pub const fn num_columns() -> usize { cols::NUM_COLUMNS }
+    pub const fn num_columns() -> usize {
+        cols::NUM_COLUMNS
+    }
 }
 
 impl FrameworkEval for TickAir {
-    fn log_size(&self) -> u32 { self.log_size }
-    fn max_constraint_log_degree_bound(&self) -> u32 { self.log_size + 1 }
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Tick, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let _input_time_0 = eval.next_trace_mask();
@@ -107,8 +114,11 @@ impl FrameworkEval for TickAir {
         eval.add_constraint(is_active.clone() * (input_timeout_kind.clone() - expected));
 
         // 约束 2（Time Bank）：consumed_0 == input.time_bank_consumed (limb 0)
-        let expected_tb_consumed: E::F = M31::from((self.input.time_bank_consumed & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (time_bank_consumed_0.clone() - expected_tb_consumed));
+        let expected_tb_consumed: E::F =
+            M31::from((self.input.time_bank_consumed & 0xFFFF) as u32).into();
+        eval.add_constraint(
+            is_active.clone() * (time_bank_consumed_0.clone() - expected_tb_consumed),
+        );
 
         // 约束 3（Time Bank）：post_0 == input.time_bank_post (limb 0)
         let expected_tb_post: E::F = M31::from((self.input.time_bank_post & 0xFFFF) as u32).into();
@@ -128,7 +138,9 @@ impl FrameworkEval for TickAir {
         // 约束 6（Gap 5，degree-2）：timeout_kind * inv == 1 — 证明 timeout_kind ≠ 0
         // （即存在真实超时）。诚实 host 必须 timeout_kind > 0 才存在逆元。
         let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active.clone() * (input_timeout_kind * input_timeout_kind_inv - one));
+        eval.add_constraint(
+            is_active.clone() * (input_timeout_kind * input_timeout_kind_inv - one),
+        );
         // TODO 阶段 2：真实超时校验。
 
         eval
@@ -163,10 +175,15 @@ impl TickRow {
     #[must_use]
     pub fn active(
         input: &TickInput,
-        pre_state_root: [M31; 4], post_state_root: [M31; 4],
-        table_id: u64, hand_id: u32, call_seq: u32,
-        pre_version: u64, post_version: u64,
-        pre_round_state: u8, post_round_state: u8,
+        pre_state_root: [M31; 4],
+        post_state_root: [M31; 4],
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+        pre_version: u64,
+        post_version: u64,
+        pre_round_state: u8,
+        post_round_state: u8,
     ) -> Self {
         use crate::airs::common::u64_to_m31_limbs;
         // Gap 5：timeout_kind 的乘法逆元。诚实 host 必须 timeout_kind > 0
@@ -175,9 +192,20 @@ impl TickRow {
         let input_timeout_kind_inv = kind_m31.inverse();
         Self {
             common: CommonRow::active(
-                MethodKind::Tick, pre_state_root, post_state_root,
-                table_id, hand_id, call_seq, pre_version, post_version,
-                pre_round_state, post_round_state, 0, 0, 0, 0,
+                MethodKind::Tick,
+                pre_state_root,
+                post_state_root,
+                table_id,
+                hand_id,
+                call_seq,
+                pre_version,
+                post_version,
+                pre_round_state,
+                post_round_state,
+                0,
+                0,
+                0,
+                0,
             ),
             input_current_time: u64_to_m31_limbs(input.current_time),
             input_timeout_kind: kind_m31,

@@ -17,7 +17,7 @@
 //! │   child = prove_and_verify_task(task)?            │
 //! │   children.push(child)                            │
 //! │  verify_chain(&children)?  // left.post==right.pre│
-//! │  // TODO: aggregate_proofs(children) → final proof│
+//! │  // 当前停在 VerifiedChain；无可信 final recursion │
 //! └───────────────────────────────────────────────────┘
 //! ```
 //!
@@ -45,7 +45,6 @@ use crate::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use crate::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 use crate::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use crate::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
-use crate::airs::common::ZERO;
 use crate::airs::crypto::join_and_shuffle::{JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow};
 use crate::airs::crypto::leave_with_proof::{
     LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
@@ -71,20 +70,11 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::prove_task::{MethodInput, ProveTask};
 use crate::prover::prove_method;
-use crate::state_root::{compute_state_root, table_state_preimage, StateRoot};
+use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
 use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
 
-/// 把 Starknet FieldElement（state_root）转为 4 个 M31 limb。
-///
-/// 复用 create_table_trace 的占位实现（返回 [ZERO;4]），因为当前
-/// Starknet Fr → M31 4-limb 的完整转换尚未接入（依赖 Poseidon252 AIR）。
-/// Orchestrator 内部用此函数保持 pre/post state_root 的 limb 一致性，
-/// 不影响 proof 正确性（约束侧同样用占位）。
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {
-    // 占位：完整实现见 create_table_trace.rs::starknet_field_to_m31_limbs 的 TODO。
-    // 当前所有 AIR 的 state_root limb 都用占位，保持一致即可通过约束。
-    let _ = root;
-    [ZERO; 4]
+    state_root_to_air_limbs(root)
 }
 
 /// 已证明任务的摘要（用于链式一致性验证 + 后续聚合）。
@@ -149,6 +139,8 @@ impl Orchestrator {
             table_id: task.table_id,
             hand_id: task.hand_id,
             call_seq: task.call_seq,
+            pre_version: task.pre_table.version,
+            post_version: task.post_table.version,
         };
         let summary = ProvenTask {
             method_kind: task.method_kind,
@@ -279,8 +271,8 @@ impl Orchestrator {
             pre_version,
             post_version,
         );
-        let proof = prove_method(&trace, air, CreateTableAir::num_columns(), pi.clone())?;
-        crate::verifier::verify_method(proof)
+        let proof = prove_method(&trace, air.clone(), CreateTableAir::num_columns(), pi.clone())?;
+        crate::verifier::verify_method_against(proof, air, pi)
     }
 
     fn prove_fold(
@@ -329,8 +321,8 @@ impl Orchestrator {
             pre_version,
             post_version,
         };
-        let proof = prove_method(&trace, air, FoldAir::num_columns(), pi.clone())?;
-        crate::verifier::verify_method(proof)
+        let proof = prove_method(&trace, air.clone(), FoldAir::num_columns(), pi.clone())?;
+        crate::verifier::verify_method_against(proof, air, pi)
     }
 
     // ===== 以下为其余 19 个方法的 trace 构造（模式同 prove_create_table / prove_fold）=====
@@ -906,13 +898,13 @@ fn run<A, F>(
     build_air: F,
 ) -> TexasAirResult<()>
 where
-    A: stwo_constraint_framework::FrameworkEval + Clone + Sync,
+    A: crate::airs::TexasAir,
     F: FnOnce() -> A,
 {
     let trace = gen_method_trace(num_columns, &row.to_vec_m31(), &padding.to_vec_m31())?;
     let air = build_air();
-    let proof = prove_method(&trace, air, num_columns, public_inputs.clone())?;
-    crate::verifier::verify_method(proof)
+    let proof = prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
+    crate::verifier::verify_method_against(proof, air, public_inputs)
 }
 
 /// 能产出 `Vec<M31>` 的抽象（避免与 CommonRow 的 `to_vec` 命名冲突）。

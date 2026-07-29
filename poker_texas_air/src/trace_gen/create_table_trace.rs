@@ -2,14 +2,9 @@
 //!
 //! 从 [`CreateTableInput`] + pre/post state 直接构造 trace（不经 RV32IM 执行）。
 
-use stwo::core::fields::m31::M31;
-
-use crate::airs::common::ZERO;
-use crate::airs::lifecycle::create_table::{
-    CreateTableAir, CreateTableInput, CreateTableRow,
-};
+use crate::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput, CreateTableRow};
 use crate::error::TexasAirResult;
-use crate::state_root::{compute_state_root, StateRoot};
+use crate::state_root::{compute_state_root, state_root_to_air_limbs, StateRoot};
 use crate::trace_gen::MethodTrace;
 
 /// `create_table` trace 生成器输出。
@@ -50,15 +45,15 @@ pub fn gen_create_table_trace(
     let post_root: StateRoot = compute_state_root(post_table)?;
 
     // 2. 选择 log_size
-    // create_table 是单步操作，trace 行数 = 1 + padding。
-    // Stwo 要求 log_size >= 10 (1024 行)，所以 padding 到 log_size=10。
+    // create_table 是单步操作。Stwo 要求 log_size >= 10 (1024 行)，
+    // 因此把同一 active statement 复制到全部行，避免未绑定 first-row selector。
     let log_size: u32 = 10;
 
     // 3. 构造 active 行
     let active_row = CreateTableRow::active(
         &input,
-        starknet_field_to_m31_limbs(pre_root.field()),
-        starknet_field_to_m31_limbs(post_root.field()),
+        state_root_to_air_limbs(pre_root),
+        state_root_to_air_limbs(post_root),
         table_id,
         hand_id,
         call_seq,
@@ -68,19 +63,15 @@ pub fn gen_create_table_trace(
 
     // 4. 构造 trace
     let mut trace = MethodTrace::new(log_size, CreateTableAir::num_columns());
-    trace.write_row(0, &active_row.to_vec())?;
-    // 行 1..1024 为 padding
     let padding_row = CreateTableRow::padding();
-    for i in 1..(1usize << log_size) {
-        trace.write_row(i, &padding_row.to_vec())?;
-    }
+    trace.write_active_with_padding(&active_row.to_vec(), &padding_row.to_vec())?;
 
     // 5. 构造 AIR
     let air = CreateTableAir::new(
         log_size,
         input,
-        starknet_field_to_m31_limbs(pre_root.field()),
-        starknet_field_to_m31_limbs(post_root.field()),
+        state_root_to_air_limbs(pre_root),
+        state_root_to_air_limbs(post_root),
         table_id,
         hand_id,
         call_seq,
@@ -89,15 +80,4 @@ pub fn gen_create_table_trace(
     );
 
     Ok(CreateTableTrace { trace, air })
-}
-
-/// 把 Starknet FieldElement 转为 4 个 M31 limb（简化版）。
-///
-/// 完整实现需要 8 limb（Starknet Fr 模数 ~2^252），
-/// 阶段 1 PoC 用 4 limb 简化（覆盖 ~124 bit 范围）。
-/// TODO 阶段 2：扩展为 8 limb 完整表示。
-fn starknet_field_to_m31_limbs(f: starknet_ff::FieldElement) -> [M31; 4] {
-    // 暂时用 0 占位（阶段 2 接入完整 Poseidon252 AIR 时实现）
-    let _ = f;
-    [ZERO; 4]
 }

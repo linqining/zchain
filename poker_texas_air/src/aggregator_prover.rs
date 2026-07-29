@@ -9,8 +9,8 @@
 //!
 //! ## 简化策略
 //!
-//! 阶段 4 PoC：把所有聚合层展平为单 trace（一行 = 一个聚合节点）。
-//! 完整版（阶段 5）每层独立 prove，递归聚合到单 proof。
+//! 阶段 4 PoC：把所有聚合层展平为单 trace（一行 = 一个聚合节点），且不验证
+//! 任何子 proof。生产入口默认拒绝；显式测试入口仅用于机制测试。
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::pcs::PcsConfig;
@@ -22,11 +22,11 @@ use stwo::core::vcs_lifted::poseidon252_merkle::{
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{prove, ProvingError};
+use stwo::prover::{ProvingError, prove};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::aggregator_air::{
-    build_binary_tree, AggregatorAir, AggregatorRow, ChildDescriptor, cols,
+    AggregatorAir, AggregatorRow, ChildDescriptor, build_binary_tree, cols,
     mix_children_into_channel,
 };
 use crate::error::{TexasAirError, TexasAirResult};
@@ -50,19 +50,36 @@ pub struct AggregatorProof {
     pub children: Vec<crate::aggregator_air::ChildDescriptor>,
 }
 
-/// 把多个 method proof 摘要（`ChildDescriptor`）聚合到单 proof。
+/// 拒绝 descriptor-only 聚合的生产调用。
 ///
-/// # 参数
-/// - `children`: 已按 `call_seq` 升序排列的子节点描述符
+/// `ChildDescriptor` 不携带、也不验证 method proof；允许该入口生成 proof 会让调用方
+/// 误把“摘要链满足约束”当成“所有子 proof 均有效”。在完整递归 verifier 接入前，
+/// 此函数始终 fail closed。
 ///
-/// # 返回
-/// `AggregatorProof`，可由 [`crate::aggregator_verifier::verify_aggregator`] 验证。
+/// # Errors
+///
+/// 始终返回 [`TexasAirError::UntrustedAggregationDisabled`]。
+pub fn prove_aggregator(_children: Vec<ChildDescriptor>) -> TexasAirResult<AggregatorProof> {
+    Err(TexasAirError::UntrustedAggregationDisabled)
+}
+
+/// 运行不验证子 proof 的 Aggregator PoC，仅供测试与审计复现。
+///
+/// 调用者必须明确接受：返回的 STARK 只证明 descriptor trace 的局部约束，不能证明
+/// descriptor 来自任何有效 method proof，也不是递归压缩证明。
 ///
 /// # Errors
 ///
 /// - `TexasAirError::RecursionError` — 子节点链式连续性破坏 / call_seq 不连续
 /// - `TexasAirError::StwoProverError` — Stwo prover 内部错误（约束不满足）
-pub fn prove_aggregator(children: Vec<ChildDescriptor>) -> TexasAirResult<AggregatorProof> {
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn prove_aggregator_unchecked_for_tests(
+    children: Vec<ChildDescriptor>,
+) -> TexasAirResult<AggregatorProof> {
+    prove_aggregator_unchecked(children)
+}
+
+fn prove_aggregator_unchecked(children: Vec<ChildDescriptor>) -> TexasAirResult<AggregatorProof> {
     // 1. 构造二叉树聚合
     let num_children = children.len();
     let children_for_mix = children.clone();

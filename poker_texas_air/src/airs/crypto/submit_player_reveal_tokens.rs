@@ -24,10 +24,10 @@
 //!
 //! RevealTokenProof 验证留待阶段 5。
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
+use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 
 /// `submit_player_reveal_tokens` 业务特定列布局。
@@ -95,7 +95,8 @@ impl FrameworkEval for SubmitPlayerRevealTokensAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::SubmitPlayerRevealTokens, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -135,7 +136,9 @@ impl FrameworkEval for SubmitPlayerRevealTokensAir {
         let c175: E::F = M31::from(175u32).into();
         let c21: E::F = M31::from(21u32).into();
         let vp = c720 - c1764 * rp.clone() + c1624 * q1.clone() - c735 * (rp.clone() * q1.clone())
-            + c175 * q2.clone() - c21 * (rp.clone() * q2.clone()) + (q1 * q2);
+            + c175 * q2.clone()
+            - c21 * (rp.clone() * q2.clone())
+            + (q1 * q2);
         eval.add_constraint(is_active.clone() * vp);
         // TODO 阶段 5：嵌入 RevealTokenProof Verifier AIR。
 
@@ -188,7 +191,7 @@ impl SubmitPlayerRevealTokensRow {
                 pre_version,
                 post_version,
                 0, // pre round_state（reveal 期间可为 0/2..6；真实值由调用方传入，
-                   //    此处默认 0=ROUND_WAITING。相位守卫在 INPUT_REVEAL_PHASE）
+                //    此处默认 0=ROUND_WAITING。相位守卫在 INPUT_REVEAL_PHASE）
                 0, // post round_state（单次 submit 不改 round_state）
                 0,
                 0,

@@ -12,7 +12,7 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// 方法选择器长度（32 字节 = blake2b_256 输出）。
 pub const METHOD_SELECTOR_LEN: usize = 32;

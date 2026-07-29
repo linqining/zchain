@@ -21,10 +21,10 @@
 //!
 //! DLEq proof 验证留待阶段 5 嵌入 Verifier AIR。
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
+use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 
 /// `leave_with_proof` 业务特定列布局。
@@ -94,7 +94,8 @@ impl FrameworkEval for LeaveWithProofAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::LeaveWithProof, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -116,7 +117,11 @@ impl FrameworkEval for LeaveWithProofAir {
         let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();
         eval.add_constraint(is_active.clone() * (input_shuffle_phase.clone() - expected_phase));
         // 约束（Gap 6 part 2）：q == shuffle_phase²（witness 一致性，degree-2）
-        eval.add_constraint(is_active.clone() * (input_shuffle_phase_q.clone() - input_shuffle_phase.clone() * input_shuffle_phase.clone()));
+        eval.add_constraint(
+            is_active.clone()
+                * (input_shuffle_phase_q.clone()
+                    - input_shuffle_phase.clone() * input_shuffle_phase.clone()),
+        );
         // 约束（Gap 6 part 3）：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
         // vanishing (phase-1)(phase-2)(phase-3) = phase³-6phase²+11phase-6
         // 经 q=phase² 展开为 degree ≤ 2：(phase·q) - 6·q + 11·phase - 6 == 0

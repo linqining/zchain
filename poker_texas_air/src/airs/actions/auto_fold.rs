@@ -20,11 +20,11 @@
 //! - 业务列 7 个：`INPUT_SEAT_INDEX`, `INPUT_CURRENT_TIME_BASE[4]`,
 //!   `OUTPUT_FOLDED`
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -93,7 +93,8 @@ impl FrameworkEval for AutoFoldAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::AutoFold, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -128,7 +129,7 @@ impl FrameworkEval for AutoFoldAir {
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
         // 约束 5（审计共性，degree-2 limb0）：pot 不变（auto_fold 不改变 pot）。
-        eval.add_constraint(common.pot_unchanged_4limb());
+        for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
 
         // TODO 阶段 3 完整版：约束 current_time - turn_started_at >= turn_timeout
 
@@ -191,7 +192,7 @@ impl AutoFoldRow {
             output_folded: M31::from(1u32),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
-            input_current_turn: u8_to_m31(input.seat_index),  // current_turn == seat_index
+            input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
         }
     }
 

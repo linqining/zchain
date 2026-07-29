@@ -14,10 +14,10 @@
 //! - 通用列 37 个
 //! - 业务列 2 个：`INPUT_SEAT_INDEX`, `OUTPUT_FOLDED`
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
+use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 
 /// `fold` 业务特定列布局。
@@ -81,7 +81,8 @@ impl FrameworkEval for FoldAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::Fold, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -110,7 +111,7 @@ impl FrameworkEval for FoldAir {
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
 
         // 约束 4（审计 fold：pot 不变，degree-2 limb0）：fold 不改变 pot。
-        eval.add_constraint(common.pot_unchanged_4limb());
+        for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
 
         eval
     }
@@ -168,7 +169,7 @@ impl FoldRow {
             output_folded: M31::from(1u32),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
-            input_current_turn: u8_to_m31(input.seat_index),  // current_turn == seat_index
+            input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
         }
     }
 

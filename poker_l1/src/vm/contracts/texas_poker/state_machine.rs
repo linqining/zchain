@@ -2272,7 +2272,10 @@ pub fn tick(
         }
         let started = table.timestamps.shuffle_started_at;
         if started == 0 {
-            table.timestamps.shuffle_started_at = now_ms;
+            if now_ms != 0 {
+                table.timestamps.shuffle_started_at = now_ms;
+                table.bump_version();
+            }
             return Ok(());
         }
         if now_ms >= started.saturating_add(table.timeout_config.shuffle_timeout_ms) {
@@ -2294,7 +2297,10 @@ pub fn tick(
         }
         let started = table.timestamps.reveal_started_at;
         if started == 0 {
-            table.timestamps.reveal_started_at = now_ms;
+            if now_ms != 0 {
+                table.timestamps.reveal_started_at = now_ms;
+                table.bump_version();
+            }
             return Ok(());
         }
         if now_ms >= started.saturating_add(table.timeout_config.reveal_timeout_ms) {
@@ -2319,7 +2325,10 @@ pub fn tick(
         }
         let started = table.timestamps.betting_started_at;
         if started == 0 {
-            table.timestamps.betting_started_at = now_ms;
+            if now_ms != 0 {
+                table.timestamps.betting_started_at = now_ms;
+                table.bump_version();
+            }
             return Ok(());
         }
         if now_ms >= started.saturating_add(table.timeout_config.betting_timeout_ms) {

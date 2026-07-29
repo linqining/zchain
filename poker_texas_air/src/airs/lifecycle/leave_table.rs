@@ -8,11 +8,11 @@
 //! 5. 资金守恒：`chip_pool -= seat.stack`, `addon_pool -= pending_addon`
 //! 6. 状态变更：`seat = Seat::empty()`, `version += 1`
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -88,7 +88,8 @@ impl FrameworkEval for LeaveTableAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::LeaveTable, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -145,13 +146,34 @@ impl FrameworkEval for LeaveTableAir {
         //   此处用 stack + pending_addon - refund = 0 作为简化约束。
         // TODO 阶段 3：refund/chip_pool/addon_pool carry chain（需 carry witness）。
         let _ = (
-            &refund_0, &refund_1, &refund_2, &refund_3,
-            &seat_stack_0, &seat_stack_1, &seat_stack_2, &seat_stack_3,
-            &seat_pending_addon_0, &seat_pending_addon_1, &seat_pending_addon_2, &seat_pending_addon_3,
-            &pre_chip_pool_0, &pre_chip_pool_1, &pre_chip_pool_2, &pre_chip_pool_3,
-            &post_chip_pool_0, &post_chip_pool_1, &post_chip_pool_2, &post_chip_pool_3,
-            &pre_addon_pool_0, &pre_addon_pool_1, &pre_addon_pool_2, &pre_addon_pool_3,
-            &post_addon_pool_0, &post_addon_pool_1, &post_addon_pool_2, &post_addon_pool_3,
+            &refund_0,
+            &refund_1,
+            &refund_2,
+            &refund_3,
+            &seat_stack_0,
+            &seat_stack_1,
+            &seat_stack_2,
+            &seat_stack_3,
+            &seat_pending_addon_0,
+            &seat_pending_addon_1,
+            &seat_pending_addon_2,
+            &seat_pending_addon_3,
+            &pre_chip_pool_0,
+            &pre_chip_pool_1,
+            &pre_chip_pool_2,
+            &pre_chip_pool_3,
+            &post_chip_pool_0,
+            &post_chip_pool_1,
+            &post_chip_pool_2,
+            &post_chip_pool_3,
+            &pre_addon_pool_0,
+            &pre_addon_pool_1,
+            &pre_addon_pool_2,
+            &pre_addon_pool_3,
+            &post_addon_pool_0,
+            &post_addon_pool_1,
+            &post_addon_pool_2,
+            &post_addon_pool_3,
         );
         eval
     }
@@ -202,9 +224,20 @@ impl LeaveTableRow {
         let refund = seat_stack + seat_pending_addon;
         Self {
             common: CommonRow::active(
-                MethodKind::LeaveTable, pre_state_root, post_state_root,
-                table_id, hand_id, call_seq, pre_version, post_version,
-                0, 0, 0, 0, 0, 0,
+                MethodKind::LeaveTable,
+                pre_state_root,
+                post_state_root,
+                table_id,
+                hand_id,
+                call_seq,
+                pre_version,
+                post_version,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
             ),
             input_seat_index: u8_to_m31(input.seat_index),
             output_refund: u64_to_m31_limbs(refund),

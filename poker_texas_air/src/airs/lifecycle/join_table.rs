@@ -12,12 +12,12 @@
 //!
 //! 状态变更：`seat.player = player_addr`, `seat.stack = buy_in`, `version += 1`
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, MAX_TOTAL_BET,
-    ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, MAX_TOTAL_BET, ZERO, u8_to_m31,
+    u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -110,7 +110,8 @@ impl FrameworkEval for JoinTableAir {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::JoinTable, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         // 业务列
@@ -181,43 +182,85 @@ impl FrameworkEval for JoinTableAir {
         eval.add_constraint(is_active.clone() * (input_seat_empty - one));
         // 约束 6（Gap 3，degree-1）：output_seat_stack == input_buy_in
         //   — 入座后 stack = buy_in（资金正确入袋）。
-        eval.add_constraint(is_active.clone()
-            * (output_seat_stack_0.clone() - input_buy_in_0.clone()));
-        eval.add_constraint(is_active.clone()
-            * (output_seat_stack_1.clone() - input_buy_in_1.clone()));
-        eval.add_constraint(is_active.clone()
-            * (output_seat_stack_2.clone() - input_buy_in_2.clone()));
-        eval.add_constraint(is_active.clone()
-            * (output_seat_stack_3.clone() - input_buy_in_3.clone()));
+        eval.add_constraint(
+            is_active.clone() * (output_seat_stack_0.clone() - input_buy_in_0.clone()),
+        );
+        eval.add_constraint(
+            is_active.clone() * (output_seat_stack_1.clone() - input_buy_in_1.clone()),
+        );
+        eval.add_constraint(
+            is_active.clone() * (output_seat_stack_2.clone() - input_buy_in_2.clone()),
+        );
+        eval.add_constraint(
+            is_active.clone() * (output_seat_stack_3.clone() - input_buy_in_3.clone()),
+        );
         // 约束 7（Gap 4，degree-2）：chip_pool 守恒（全 4 limb）
         //   post_chip_pool = pre_chip_pool + buy_in（逐 limb delta）
-        eval.add_constraint(is_active.clone()
-            * (output_post_chip_pool_0.clone() - input_pre_chip_pool_0.clone() - input_buy_in_0.clone()));
-        eval.add_constraint(is_active.clone()
-            * (output_post_chip_pool_1.clone() - input_pre_chip_pool_1.clone() - input_buy_in_1.clone()));
-        eval.add_constraint(is_active.clone()
-            * (output_post_chip_pool_2.clone() - input_pre_chip_pool_2.clone() - input_buy_in_2.clone()));
-        eval.add_constraint(is_active.clone()
-            * (output_post_chip_pool_3.clone() - input_pre_chip_pool_3.clone() - input_buy_in_3.clone()));
+        eval.add_constraint(
+            is_active.clone()
+                * (output_post_chip_pool_0.clone()
+                    - input_pre_chip_pool_0.clone()
+                    - input_buy_in_0.clone()),
+        );
+        eval.add_constraint(
+            is_active.clone()
+                * (output_post_chip_pool_1.clone()
+                    - input_pre_chip_pool_1.clone()
+                    - input_buy_in_1.clone()),
+        );
+        eval.add_constraint(
+            is_active.clone()
+                * (output_post_chip_pool_2.clone()
+                    - input_pre_chip_pool_2.clone()
+                    - input_buy_in_2.clone()),
+        );
+        eval.add_constraint(
+            is_active.clone()
+                * (output_post_chip_pool_3.clone()
+                    - input_pre_chip_pool_3.clone()
+                    - input_buy_in_3.clone()),
+        );
         // 约束 8（溢出防护，degree-2）：全局上界 range check
         // 验证 chip_pool + addon_pool + buy_in + diff = MAX_TOTAL_BET（逐 limb + 2-bit carry）
         // 对齐 addon/rebuy AIR 的 bound_check_4limb 与合约 apply_join 的上界检查。
-        let chip_pool = [input_pre_chip_pool_0, input_pre_chip_pool_1,
-                         input_pre_chip_pool_2, input_pre_chip_pool_3];
-        let addon_pool = [pre_addon_pool_0, pre_addon_pool_1,
-                          pre_addon_pool_2, pre_addon_pool_3];
-        let buy_in_limbs = [input_buy_in_0, input_buy_in_1, input_buy_in_2, input_buy_in_3];
+        let chip_pool = [
+            input_pre_chip_pool_0,
+            input_pre_chip_pool_1,
+            input_pre_chip_pool_2,
+            input_pre_chip_pool_3,
+        ];
+        let addon_pool = [
+            pre_addon_pool_0,
+            pre_addon_pool_1,
+            pre_addon_pool_2,
+            pre_addon_pool_3,
+        ];
+        let buy_in_limbs = [
+            input_buy_in_0,
+            input_buy_in_1,
+            input_buy_in_2,
+            input_buy_in_3,
+        ];
         let diff = [bound_diff_0, bound_diff_1, bound_diff_2, bound_diff_3];
         let carry_lo = [carry_lo_0, carry_lo_1, carry_lo_2];
         let carry_hi = [carry_hi_0, carry_hi_1, carry_hi_2];
-        eval.add_constraint(common.bound_check_4limb(
-            &chip_pool, &addon_pool, &buy_in_limbs, &diff, &carry_lo, &carry_hi,
-        ));
+        for __c in common.bound_check_4limb(
+            &chip_pool,
+            &addon_pool,
+            &buy_in_limbs,
+            &diff,
+            &carry_lo,
+            &carry_hi,
+        ) { eval.add_constraint(__c); }
         // 约束 9（阶段 3 soundness 新增）：buy_in >= big_blind（全 4-limb ≥ 检查）。
         // 通过减法借位链约束 buy_in - big_blind = ge_diff，且无下溢（borrow_out[3]=0），
         // 在 Limb4Range16 假设下保证 decode(buy_in) >= decode(big_blind)。
-        let big_blind_limbs = [input_big_blind_0, input_big_blind_1,
-                               input_big_blind_2, input_big_blind_3];
+        let big_blind_limbs = [
+            input_big_blind_0,
+            input_big_blind_1,
+            input_big_blind_2,
+            input_big_blind_3,
+        ];
         let ge_diff_0 = eval.next_trace_mask();
         let ge_diff_1 = eval.next_trace_mask();
         let ge_diff_2 = eval.next_trace_mask();
@@ -227,7 +270,7 @@ impl FrameworkEval for JoinTableAir {
         let ge_borrow_2 = eval.next_trace_mask();
         let ge_diff = [ge_diff_0, ge_diff_1, ge_diff_2, ge_diff_3];
         let ge_borrow = [ge_borrow_0, ge_borrow_1, ge_borrow_2];
-        eval.add_constraint(common.ge_4limb(&buy_in_limbs, &big_blind_limbs, &ge_diff, &ge_borrow));
+        for __c in common.ge_4limb(&buy_in_limbs, &big_blind_limbs, &ge_diff, &ge_borrow) { eval.add_constraint(__c); }
         let _ = MAX_TOTAL_BET;
         eval
     }
@@ -296,13 +339,22 @@ impl JoinTableRow {
         let df = u64_to_m31_limbs(bound_diff);
         let mx = crate::airs::common::max_total_bet_limbs();
         // 逐 limb 计算进位：carry ∈ {0,1,2,3}，分解为 lo + 2*hi
-        let s0 = pre_chip_pool % 65536 + pre_addon_pool % 65536 + input.buy_in % 65536 + bound_diff % 65536;
+        let s0 = pre_chip_pool % 65536
+            + pre_addon_pool % 65536
+            + input.buy_in % 65536
+            + bound_diff % 65536;
         let c0 = s0 / 65536;
-        let s1 = (pre_chip_pool / 65536) % 65536 + (pre_addon_pool / 65536) % 65536
-               + (input.buy_in / 65536) % 65536 + (bound_diff / 65536) % 65536 + c0;
+        let s1 = (pre_chip_pool / 65536) % 65536
+            + (pre_addon_pool / 65536) % 65536
+            + (input.buy_in / 65536) % 65536
+            + (bound_diff / 65536) % 65536
+            + c0;
         let c1 = s1 / 65536;
-        let s2 = (pre_chip_pool / (65536 * 65536)) % 65536 + (pre_addon_pool / (65536 * 65536)) % 65536
-               + (input.buy_in / (65536 * 65536)) % 65536 + (bound_diff / (65536 * 65536)) % 65536 + c1;
+        let s2 = (pre_chip_pool / (65536 * 65536)) % 65536
+            + (pre_addon_pool / (65536 * 65536)) % 65536
+            + (input.buy_in / (65536 * 65536)) % 65536
+            + (bound_diff / (65536 * 65536)) % 65536
+            + c1;
         let c2 = s2 / 65536;
         let _ = (cp, ap, am, df, mx);
 

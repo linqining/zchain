@@ -1,4 +1,4 @@
-//! Aggregator Verifier — 验证二叉树聚合的 Stwo proof。
+//! Aggregator Verifier — descriptor-only Aggregator PoC 的保护性入口。
 //!
 //! ## 流程
 //!
@@ -10,33 +10,48 @@
 //!
 //! ## 简化策略
 //!
-//! 阶段 4 PoC：只验证顶层聚合的 Stwo proof。
-//! 完整版（阶段 5）应递归验证每层 proof + 验证子 proof 的 Stwo verification。
+//! 当前实现不验证子 proof；生产入口默认拒绝，显式测试入口只检查 PoC STARK。
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
-use stwo::core::verifier::{verify, VerificationError};
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
+use stwo::core::verifier::{VerificationError, verify};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::aggregator_air::cols;
 use crate::aggregator_prover::AggregatorProof;
 use crate::error::{TexasAirError, TexasAirResult};
 
-/// 验证 Aggregator proof。
+/// 拒绝 descriptor-only Aggregator proof 的生产验证。
 ///
 /// # 参数
 /// - `proof`: 由 [`crate::aggregator_prover::prove_aggregator`] 生成的 proof
 ///
 /// # 返回
-/// - `Ok(())` — 验证通过
-/// - `Err(TexasAirError)` — 验证失败
+/// 当前 Aggregator AIR 没有验证子 proof，因此即使内部 STARK 有效，也不能把它解释为
+/// 一条已验证的 method-proof 链。该入口在可信递归 verifier 接入前始终 fail closed。
+///
+/// # Errors
+///
+/// 始终返回 [`TexasAirError::UntrustedAggregationDisabled`]。
+pub fn verify_aggregator(_proof: AggregatorProof) -> TexasAirResult<()> {
+    Err(TexasAirError::UntrustedAggregationDisabled)
+}
+
+/// 验证 descriptor-only Aggregator PoC，仅供测试与审计复现。
+///
+/// 成功只说明摘要 trace 满足当前 Aggregator AIR，不说明任何子 proof 有效。
 ///
 /// # Errors
 ///
 /// - `TexasAirError::ConstraintUnsatisfied` — AIR 约束不满足
 /// - `TexasAirError::StwoProverError` — Stwo verifier 内部错误
-pub fn verify_aggregator(proof: AggregatorProof) -> TexasAirResult<()> {
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn verify_aggregator_unchecked_for_tests(proof: AggregatorProof) -> TexasAirResult<()> {
+    verify_aggregator_unchecked(proof)
+}
+
+fn verify_aggregator_unchecked(proof: AggregatorProof) -> TexasAirResult<()> {
     let config = PcsConfig::default();
     let log_size = proof.log_size;
     let stark_proof = proof.stark_proof.clone();
@@ -45,8 +60,7 @@ pub fn verify_aggregator(proof: AggregatorProof) -> TexasAirResult<()> {
     let mut channel = Poseidon252Channel::default();
     // soundness 关键：与 prover 对称地 mix 子节点描述符（state_root 链）。
     crate::aggregator_air::mix_children_into_channel(&mut channel, &proof.children);
-    let mut commitment_scheme =
-        CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
+    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
 
     // 2. 从 proof 读取 preprocessed commitment（tree 0）
     let preprocessed_commitment = *stark_proof.commitments.get(0).ok_or_else(|| {

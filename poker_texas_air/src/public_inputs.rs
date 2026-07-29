@@ -13,10 +13,14 @@
 
 use starknet_ff::FieldElement;
 use stwo::core::channel::Channel;
+use stwo::core::fields::m31::M31;
 
+use crate::airs::AirStatement;
 use crate::error::TexasAirResult;
 use crate::method_kind::MethodKind;
-use crate::state_root::{field_element_to_u32_words, StateRoot};
+use crate::state_root::{
+    field_element_to_u32_words, state_root_to_air_limbs, StateRoot,
+};
 
 /// L1 proof 的 Stwo 内部公开输入（直接复用 `poker_zkvm`）。
 pub use poker_zkvm::stwo_backend::recursive::RecursivePublicInputs;
@@ -171,6 +175,10 @@ pub struct TexasPublicInputs {
     pub hand_id: u32,
     /// 方法调用序号。
     pub call_seq: u32,
+    /// State version before execution.
+    pub pre_version: u64,
+    /// State version after execution.
+    pub post_version: u64,
 }
 
 impl TexasPublicInputs {
@@ -204,6 +212,8 @@ impl TexasPublicInputs {
             table_id,
             hand_id,
             call_seq,
+            pre_version: pre_table.version,
+            post_version: post_table.version,
         })
     }
 
@@ -231,6 +241,8 @@ impl TexasPublicInputs {
             table_id,
             hand_id,
             call_seq,
+            pre_version: 0,
+            post_version: 1,
         }
     }
 
@@ -241,13 +253,34 @@ impl TexasPublicInputs {
     #[must_use]
     pub fn synthetic_placeholder(kind: MethodKind) -> Self {
         let image = vec![FieldElement::ONE; 24];
-        Self::with_consistent_roots(
-            image.clone(),
-            image,
-            kind,
-            0,
-            0,
-            0,
+        Self::with_consistent_roots(image.clone(), image, kind, 0, 0, 0)
+    }
+
+    /// 构造自洽占位 PI 并指定元数据（机制测试用，使 PI 与 AIR struct 的
+    /// table_id/hand_id/call_seq/version 一致，通过 `verify_air_statement`）。
+    #[must_use]
+    pub fn synthetic_for_test(
+        kind: MethodKind,
+        table_id: u64,
+        hand_id: u32,
+        call_seq: u32,
+    ) -> Self {
+        let image = vec![FieldElement::ONE; 24];
+        Self::with_consistent_roots(image.clone(), image, kind, table_id, hand_id, call_seq)
+    }
+
+    /// 返回 synthetic_placeholder 对应的 AIR 端 state_root limb（pre/post）。
+    ///
+    /// 机制测试需让 AIR struct 与 trace 的 state_root 列 == PI 的 root 经
+    /// `state_root_to_air_limbs` 转换后的值，否则 `verify_air_statement` 失败。
+    /// 此 helper 暴露这些 limb，供测试填入 AIR/trace。
+    #[must_use]
+    pub fn synthetic_air_roots(kind: MethodKind) -> ([M31; 4], [M31; 4]) {
+        use crate::state_root::state_root_to_air_limbs;
+        let pi = Self::synthetic_placeholder(kind);
+        (
+            state_root_to_air_limbs(pi.pre_state_root),
+            state_root_to_air_limbs(pi.post_state_root),
         )
     }
 
@@ -266,7 +299,8 @@ impl TexasPublicInputs {
     /// 是标准做法（与 Starknet 把 252-bit 元素序列化为字节一致）。
     pub fn mix_into<C: Channel>(&self, channel: &mut C) {
         // 1-2. pre/post image：每个 FieldElement → 8 u32 word，扁平拼接后一次性 mix。
-        let mut felts_u32: Vec<u32> = Vec::with_capacity((self.pre_image.len() + self.post_image.len()) * 8);
+        let mut felts_u32: Vec<u32> =
+            Vec::with_capacity((self.pre_image.len() + self.post_image.len()) * 8);
         for f in &self.pre_image {
             felts_u32.extend_from_slice(&field_element_to_u32_words(*f));
         }
@@ -284,6 +318,8 @@ impl TexasPublicInputs {
         // 5. 元数据。
         channel.mix_u32s(&[u32::from(self.kind as u8), self.hand_id, self.call_seq]);
         channel.mix_u64(self.table_id);
+        channel.mix_u64(self.pre_version);
+        channel.mix_u64(self.post_version);
     }
 
     /// 验证方重算并比对：`pre_state_root == Poseidon252(pre_image)` 且
@@ -298,18 +334,10 @@ impl TexasPublicInputs {
     /// 当 pre/post_image 长度 ≠ 24，或重算的 root 与公开的 root 不符时返回错误。
     pub fn verify_roots(&self) -> TexasAirResult<()> {
         use crate::error::TexasAirError;
-        const PREIMAGE_LEN: usize = 24;
-        if self.pre_image.len() != PREIMAGE_LEN {
-            return Err(TexasAirError::StateRootError(format!(
-                "pre_image 长度 = {}，期望 {PREIMAGE_LEN}",
-                self.pre_image.len()
-            )));
-        }
-        if self.post_image.len() != PREIMAGE_LEN {
-            return Err(TexasAirError::StateRootError(format!(
-                "post_image 长度 = {}，期望 {PREIMAGE_LEN}",
-                self.post_image.len()
-            )));
+        if self.pre_image.is_empty() || self.post_image.is_empty() {
+            return Err(TexasAirError::StateRootError(
+                "state-root preimage must not be empty".into(),
+            ));
         }
         let pre_recomputed = StateRoot(starknet_crypto::poseidon_hash_many(&self.pre_image));
         let post_recomputed = StateRoot(starknet_crypto::poseidon_hash_many(&self.post_image));
@@ -321,6 +349,26 @@ impl TexasPublicInputs {
         if post_recomputed != self.post_state_root {
             return Err(TexasAirError::StateRootError(
                 "post_state_root 与 post_image 重算不符（state_root 绑定失败）".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check that an independently reconstructed AIR compiles exactly this
+    /// verifier-trusted statement.
+    pub fn verify_air_statement(&self, statement: &AirStatement) -> TexasAirResult<()> {
+        use crate::error::TexasAirError;
+        let matches = statement.kind == self.kind
+            && statement.pre_state_root == state_root_to_air_limbs(self.pre_state_root)
+            && statement.post_state_root == state_root_to_air_limbs(self.post_state_root)
+            && statement.table_id == self.table_id
+            && statement.hand_id == self.hand_id
+            && statement.call_seq == self.call_seq
+            && statement.pre_version == self.pre_version
+            && statement.post_version == self.post_version;
+        if !matches {
+            return Err(TexasAirError::SpecViolation(
+                "AIR statement does not match verifier-trusted Texas public inputs".into(),
             ));
         }
         Ok(())
@@ -390,7 +438,10 @@ mod tests {
         // 这验证了「验证方重算 Poseidon252(image) 并比对 root」这条绑定生效。
         let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
         pi.pre_state_root = StateRoot::from_field(FieldElement::ONE);
-        assert!(pi.verify_roots().is_err(), "篡改 root 后 verify_roots 应失败");
+        assert!(
+            pi.verify_roots().is_err(),
+            "篡改 root 后 verify_roots 应失败"
+        );
     }
 
     #[test]
@@ -398,14 +449,16 @@ mod tests {
         // 篡改 image（不改 root）→ 重算不符 → verify_roots 失败。
         let mut pi = TexasPublicInputs::synthetic_placeholder(MethodKind::Call);
         pi.pre_image[0] = FieldElement::from(12345u64);
-        assert!(pi.verify_roots().is_err(), "篡改 image 后 verify_roots 应失败");
+        assert!(
+            pi.verify_roots().is_err(),
+            "篡改 image 后 verify_roots 应失败"
+        );
     }
 
     #[test]
-    fn test_verify_roots_rejects_wrong_length() {
-        // image 长度 ≠ 24 → 编码契约违反 → 失败。
+    fn test_verify_roots_rejects_empty_preimage() {
         let pi = TexasPublicInputs {
-            pre_image: vec![FieldElement::ONE; 5],
+            pre_image: vec![],
             post_image: vec![FieldElement::ONE; 24],
             pre_state_root: StateRoot::zero(),
             post_state_root: StateRoot::zero(),
@@ -413,8 +466,10 @@ mod tests {
             table_id: 0,
             hand_id: 0,
             call_seq: 0,
+            pre_version: 0,
+            post_version: 1,
         };
-        assert!(pi.verify_roots().is_err(), "image 长度错误应失败");
+        assert!(pi.verify_roots().is_err(), "empty image must fail");
     }
 
     #[test]

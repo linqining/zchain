@@ -6,7 +6,7 @@
 //!
 //! 所有单步方法 AIR 的 trace 生成流程一致：
 //! 1. 选择 `log_size = 10`（Stwo SIMD 对齐最小值）
-//! 2. 构造 1 行 active row + 1023 行 padding
+//! 2. 把同一条 active statement 复制到 1024 行（关闭 all-padding 绕过）
 //! 3. 返回 `MethodTrace`
 //!
 //! 调用方负责构造 active row 与 AIR 实例，本模块只提供 trace 装配辅助。
@@ -31,12 +31,12 @@ use crate::trace_gen::MethodTrace;
 /// Stwo SIMD 对齐要求的最小 log_size（1024 行）。
 pub const MIN_LOG_SIZE: u32 = 10;
 
-/// 通用 trace 生成器：从 active row + padding row 构造完整 `MethodTrace`。
+/// 通用 trace 生成器：把 active row 复制成完整 `MethodTrace`。
 ///
 /// # 参数
 /// - `num_columns`: trace 列数
-/// - `active_row`: active 行（行 0）的列向量
-/// - `padding_row`: padding 行（行 1..2^log_size）的列向量
+/// - `active_row`: verifier-bound active 行
+/// - `padding_row`: 兼容旧调用方，仅校验列宽
 ///
 /// # 返回
 /// `MethodTrace`，含 `log_size = 10`、1024 行。
@@ -97,8 +97,8 @@ mod tests {
         assert_eq!(trace.cols[0].len(), 1usize << MIN_LOG_SIZE);
         // 行 0 是 active
         assert_eq!(trace.cols[0][0], M31::from(1u32));
-        // 行 1 是 padding
-        assert_eq!(trace.cols[0][1], ZERO);
+        // 所有行都复制 active statement，AIR 无需信任 first-row witness。
+        assert_eq!(trace.cols[0][1], M31::from(1u32));
     }
 
     #[test]

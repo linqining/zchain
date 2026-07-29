@@ -2,7 +2,7 @@
 name = "poker_texas_air"
 version = "0.1.0"
 edition = "2024"
-description = "Texas Poker 自定义电路 + Aggregator AIR — 业务语义直接电路化，二叉树递归聚合到单证明"
+description = "Texas Poker 自定义 AIR + descriptor-only Aggregator PoC（可信递归闭环尚未实现）"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# 启用 Aggregator 二叉树聚合（依赖 poker_zkvm recursive 模块）
+# 保留 Aggregator PoC 配置；生产 prove/verify 默认拒绝 descriptor-only 聚合
 aggregator = []
 # 测试辅助：暴露 soundness 负向测试工具
 test-helpers = []

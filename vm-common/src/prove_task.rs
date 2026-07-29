@@ -20,7 +20,7 @@
 //! `method_kind` 在 poker_l1 用 `u8`，在 poker_texas_air 用 `MethodKind`
 //! （`#[borsh(use_discriminant=true)]` + `#[repr(u8)]`），borsh 单字节布局一致。
 
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 /// 方法业务输入的枚举封装（与具体业务类型解耦）。
 ///
@@ -28,9 +28,8 @@ use borsh::{BorshSerialize, BorshDeserialize};
 /// 两侧完全一致，是 return_value 字节流的核心契约。
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub enum MethodInput {
-    /// 仅含 seat_index 的方法（fold/check/call/auto_fold/force_fold/leave_table/
-    /// leave_with_proof/submit_shuffle_v2/submit_player_reveal_tokens/
-    /// submit_reconstruct_deck/kick_player）。
+    /// 仅含 seat_index 的非密码学方法（fold/check/call/auto_fold/force_fold/
+    /// leave_table）。
     SeatOnly {
         /// 座位索引。
         seat_index: u8,
@@ -63,7 +62,7 @@ pub enum MethodInput {
         /// 踢出原因。
         reason: u8,
     },
-    /// `join_table` / `join_and_shuffle`（player + buy_in）。
+    /// `join_table`（player + buy_in）。
     Join {
         /// 玩家地址。
         player: [u8; 20],
@@ -81,6 +80,61 @@ pub enum MethodInput {
         /// 大盲注。
         big_blind: u64,
     },
+    /// `join_and_shuffle` 的完整调用输入。
+    ///
+    /// `raw_args` 是经过 L1 按真实 `JoinAndShuffleArgs` 完整反序列化校验后的
+    /// 原始 borsh 字节。共享层不依赖 `poker_protocol`，消费侧可据此重新解码并
+    /// 验证 pk ownership / remask / shuffle proof，而不是只信任派生字段。
+    JoinAndShuffle {
+        /// 请求中指定的座位索引。
+        seat_index: u8,
+        /// 加入桌台的玩家地址。
+        player: [u8; 20],
+        /// 买入金额。
+        buy_in: u64,
+        /// 完整原始 `JoinAndShuffleArgs` borsh 字节。
+        raw_args: Vec<u8>,
+    },
+    /// `leave_with_proof` 的完整调用输入。
+    LeaveWithProof {
+        /// 离场玩家座位索引。
+        seat_index: u8,
+        /// 完整原始 `LeaveWithProofArgs` borsh 字节。
+        raw_args: Vec<u8>,
+    },
+    /// `submit_shuffle_v2` 的完整调用输入。
+    SubmitShuffleV2 {
+        /// 提交洗牌的座位索引。
+        seat_index: u8,
+        /// 完整原始 `SubmitShuffleV2Args` borsh 字节。
+        raw_args: Vec<u8>,
+    },
+    /// `submit_player_reveal_tokens` 的完整调用输入。
+    SubmitPlayerRevealTokens {
+        /// 提交 reveal token 的座位索引。
+        seat_index: u8,
+        /// 完整原始 `SubmitRevealTokensArgs` borsh 字节。
+        raw_args: Vec<u8>,
+    },
+    /// `submit_reconstruct_deck` 的完整调用输入。
+    SubmitReconstructDeck {
+        /// 提交重构牌组的座位索引。
+        seat_index: u8,
+        /// 完整原始 `SubmitReconstructDeckArgs` borsh 字节。
+        raw_args: Vec<u8>,
+    },
+    /// `request_leave_after_hand`（切换下一手前离场标记）。
+    RequestLeaveAfterHand {
+        /// 玩家座位索引。
+        seat_index: u8,
+    },
+    /// `fold_with_proof` 的完整调用输入。
+    FoldWithProof {
+        /// fold 玩家座位索引。
+        seat_index: u8,
+        /// 完整原始 `FoldWithProofArgs` borsh 字节。
+        raw_args: Vec<u8>,
+    },
     /// 无业务参数的方法（start_hand / tick / reset_for_next_hand）。
     Empty,
 }
@@ -93,16 +147,58 @@ mod tests {
     fn method_input_borsh_roundtrip() {
         let inputs = vec![
             MethodInput::SeatOnly { seat_index: 3 },
-            MethodInput::Raise { seat_index: 1, total_bet: 500 },
-            MethodInput::Bet { seat_index: 2, amount: 100 },
-            MethodInput::Funds { seat_index: 0, amount: 1000 },
-            MethodInput::Kick { seat_index: 4, reason: 1 },
-            MethodInput::Join { player: [0xAB; 20], buy_in: 2000 },
+            MethodInput::Raise {
+                seat_index: 1,
+                total_bet: 500,
+            },
+            MethodInput::Bet {
+                seat_index: 2,
+                amount: 100,
+            },
+            MethodInput::Funds {
+                seat_index: 0,
+                amount: 1000,
+            },
+            MethodInput::Kick {
+                seat_index: 4,
+                reason: 1,
+            },
+            MethodInput::Join {
+                player: [0xAB; 20],
+                buy_in: 2000,
+            },
             MethodInput::CreateTable {
                 name: "t".into(),
                 max_players: 6,
                 small_blind: 50,
                 big_blind: 100,
+            },
+            MethodInput::JoinAndShuffle {
+                seat_index: 1,
+                player: [0xCD; 20],
+                buy_in: 3000,
+                raw_args: vec![1, 2, 3],
+            },
+            MethodInput::LeaveWithProof {
+                seat_index: 1,
+                raw_args: vec![4, 5],
+            },
+            MethodInput::SubmitShuffleV2 {
+                seat_index: 2,
+                raw_args: vec![6],
+            },
+            MethodInput::SubmitPlayerRevealTokens {
+                seat_index: 3,
+                raw_args: vec![7, 8],
+            },
+            MethodInput::SubmitReconstructDeck {
+                seat_index: 4,
+                raw_args: vec![9],
+            },
+            MethodInput::RequestLeaveAfterHand { seat_index: 5 },
+            MethodInput::FoldWithProof {
+                seat_index: 0,
+                raw_args: vec![10, 11],
             },
             MethodInput::Empty,
         ];

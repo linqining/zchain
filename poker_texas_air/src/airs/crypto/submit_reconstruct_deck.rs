@@ -24,10 +24,10 @@
 //!
 //! ReconstructProof 验证留待阶段 5。
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
+use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 
 /// `submit_reconstruct_deck` 业务特定列布局。
@@ -91,7 +91,8 @@ impl FrameworkEval for SubmitReconstructDeckAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::SubmitReconstructDeck, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -161,7 +162,7 @@ impl SubmitReconstructDeckRow {
                 pre_version,
                 post_version,
                 0, // pre round_state（reconstruct 期间保持不变；相位守卫在
-                   //    INPUT_RECONSTRUCT_PHASE）
+                //    INPUT_RECONSTRUCT_PHASE）
                 0, // post round_state
                 0,
                 0,

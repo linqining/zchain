@@ -29,12 +29,16 @@ use poker_texas_air::verifier::verify_method;
 
 /// 构造 4 个 state_root limb（测试用，全 0）。
 fn zero_root() -> [M31; 4] {
-    [ZERO; 4]
+    // 与 synthetic_placeholder 的 pre_state_root 一致（AIR statement 绑定）
+    poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
+        poker_texas_air::method_kind::MethodKind::Fold).0
 }
 
 /// 构造 4 个 state_root limb（测试用，全 1）。
 fn one_root() -> [M31; 4] {
-    [M31::from(1u32); 4]
+    // 与 synthetic_placeholder 的 post_state_root 一致（AIR statement 绑定）
+    poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
+        poker_texas_air::method_kind::MethodKind::Fold).1
 }
 
 // ========== addon AIR ==========
@@ -80,7 +84,7 @@ fn test_e2e_addon_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
+    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -122,7 +126,7 @@ fn test_e2e_addon_from_zero_pending() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
+    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 1, 0, 0)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -169,7 +173,7 @@ fn test_soundness_addon_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1)).expect("prove 失败");
 
     // 篡改 proof.air.input.amount：trace 中是 200，但 AIR 声明 999
     proof.air = AddonAir {
@@ -225,7 +229,7 @@ fn test_soundness_addon_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Addon)).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1)).expect("prove 失败");
 
     // 篡改 seat_index
     proof.air = AddonAir {
@@ -286,7 +290,7 @@ fn test_e2e_rebuy_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy)).expect("prove 失败");
+    let proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -331,7 +335,7 @@ fn test_soundness_rebuy_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy)).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3)).expect("prove 失败");
 
     // 篡改 amount：trace 中是 500，但 AIR 声明 777
     proof.air = RebuyAir {
@@ -400,7 +404,7 @@ fn test_soundness_rebuy_range_violation() {
         &trace,
         air,
         RebuyAir::num_columns(),
-        TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3),
     );
     assert!(
         result.is_err(),
@@ -445,7 +449,7 @@ fn test_soundness_rebuy_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_placeholder(MethodKind::Rebuy)).expect("prove 失败");
+    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3)).expect("prove 失败");
 
     proof.air = RebuyAir {
         input: RebuyInput {

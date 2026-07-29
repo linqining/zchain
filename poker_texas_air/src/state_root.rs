@@ -17,6 +17,7 @@
 //! Aggregator AIR 的核心约束为 `left.post_state_root == right.pre_state_root`。
 
 use starknet_ff::FieldElement;
+use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::merkle_tree::{MerkleTree, SeatLeaf};
@@ -27,8 +28,8 @@ use blake2::digest::{Update, VariableOutput};
 // 从 poker_l1 引入业务类型（用于 state_root 编码）
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 use poker_l1::vm::contracts::texas_poker::types::{
-    DeckState, ReconstructState, RevealTokenState, ShuffleState, TimeoutConfig, Timestamps,
-    TableConfig,
+    DeckState, ReconstructState, RevealTokenState, ShuffleState, TableConfig, TimeoutConfig,
+    Timestamps,
 };
 
 /// 表台状态根（Starknet Fr 元素）。
@@ -57,6 +58,29 @@ impl StateRoot {
     }
 }
 
+/// Project the full Poseidon252 root into the four M31 limbs used by the current
+/// method AIR schema. Full-width roots remain verifier public inputs and are
+/// used for chain aggregation; this domain-separated projection binds them into
+/// the M31 trace instead of the former all-zero placeholder.
+#[must_use]
+pub fn state_root_to_air_limbs(root: StateRoot) -> [M31; 4] {
+    let mut material = b"zchain.texas_poker.air_state_root.v1".to_vec();
+    material.extend_from_slice(&root.field().to_bytes_be());
+    let digest = blake2b_256(&material);
+    let mut limbs = [M31::from(0u32); 4];
+    for (i, limb) in limbs.iter_mut().enumerate() {
+        let offset = i * 4;
+        let word = u32::from_be_bytes([
+            digest[offset],
+            digest[offset + 1],
+            digest[offset + 2],
+            digest[offset + 3],
+        ]);
+        *limb = M31::from(word & 0x7fff_ffff);
+    }
+    limbs
+}
+
 /// 把 u64 编码为 Starknet `FieldElement`。
 #[must_use]
 pub fn u64_to_field(v: u64) -> FieldElement {
@@ -75,131 +99,18 @@ pub fn bool_to_field(b: bool) -> FieldElement {
     FieldElement::from(u64::from(b))
 }
 
-/// TexasPokerTable 的状态根预计算输入。
+/// Canonical, complete `TexasPokerTable` state-root preimage.
 ///
-/// 把字段按固定顺序编码为 `Vec<FieldElement>`，作为 Poseidon252 输入。
-/// 顺序固定且不可变更——这是 AIR 约束侧的「契约」。
-///
-/// # 字段顺序
-///
-/// 1. `table_id_hash`（ObjectID 的 Blake2b → u256 → FieldElement）
-/// 2. `name_hash`（变长字符串的 Poseidon）
-/// 3. `creator`（Address 20 字节右对齐 → FieldElement）
-/// 4. `max_players`（u8）
-/// 5. `small_blind`（u64）
-/// 6. `big_blind`（u64）
-/// 7. `button`（u8）
-/// 8. `pot`（u64）
-/// 9. `side_pots_root`（Merkle root）
-/// 10. `community_cards_root`（Merkle root）
-/// 11. `round_state`（u8）
-/// 12. `betting_round_root`（嵌套 Poseidon）
-/// 13. `current_turn_flag`（bool，标记 Option<u8> 是 Some 还是 None）
-/// 14. `current_turn_seat`（u8，None 时为 0）
-/// 15. `deck_state_root`
-/// 16. `shuffle_state_root`
-/// 17. `reveal_token_state_root`
-/// 18. `reconstruct_state_root`
-/// 19. `timeout_config_root`
-/// 20. `timestamps_root`
-/// 21. `chip_pool`（u64）
-/// 22. `config_root`
-/// 23. `version`（u64）
-/// 24. `seats_root`（Merkle root，最后一项便于叶子局部更新证明）
-pub fn table_state_preimage(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable) -> TexasAirResult<Vec<FieldElement>> {
-    let mut preimage = Vec::with_capacity(24);
-
-    // 1. table_id_hash：ObjectID 通常为 32 字节，用 Blake2b 压缩到 32 字节后转 FieldElement
-    let id_bytes = borsh::to_vec(&table.id)
-        .map_err(|e| TexasAirError::StateRootError(format!("borsh ser id: {e}")))?;
-    let id_hash = blake2b_256(&id_bytes);
-    let id_field = bytes_to_field(&id_hash)
-        .ok_or_else(|| TexasAirError::StateRootError("table_id > Fr modulus".into()))?;
-    preimage.push(id_field);
-
-    // 2. name_hash：变长字符串先 Poseidon
-    let name_field = poseidon_string(&table.name);
-    preimage.push(name_field);
-
-    // 3. creator：Address (20 字节) 右对齐到 32 字节 BE → FieldElement。
-    //    必须进入 state_root，否则 creator 改动不被 state_root 捕获（P0-2 权限校验
-    //    要求 creator 的变更可被证明系统约束）。
-    preimage.push(address_to_field(&table.creator));
-
-    // 4-8. 标量字段
-    preimage.push(u8_to_field(table.max_players));
-    preimage.push(u64_to_field(table.small_blind));
-    preimage.push(u64_to_field(table.big_blind));
-    preimage.push(u8_to_field(table.button));
-    preimage.push(u64_to_field(table.pot));
-
-    // 9. side_pots_root：每个 SidePot { amount: u64, eligible_seats: u16 } 编码为
-    //    2 个 FieldElement。带域分隔前缀 "side_pots" + 层数后缀，整体做 Poseidon252。
-    //    空列表哈希为 0（与「该字段未初始化」语义一致）。
-    let side_pots_root = if table.side_pots.is_empty() {
-        FieldElement::ZERO
-    } else {
-        let mut fields: Vec<FieldElement> = Vec::with_capacity(2 + 2 * table.side_pots.len());
-        // 域分隔前缀（ASCII "side_pots" → 单 FieldElement）
-        let tag_bytes = b"side_pots";
-        let mut tag_buf = [0u8; 32];
-        tag_buf[..tag_bytes.len()].copy_from_slice(tag_bytes);
-        fields.push(bytes_to_field(&tag_buf).unwrap_or(FieldElement::ZERO));
-        // 层数后缀，防止不同长度的 side_pots 列表在拼接后意外碰撞
-        fields.push(u64_to_field(table.side_pots.len() as u64));
-        fields.extend(table.side_pots.iter().flat_map(|sp| {
-            [u64_to_field(sp.amount), u64_to_field(u64::from(sp.eligible_seats))]
-        }));
-        poseidon_hash_many(&fields)
-    };
-    preimage.push(side_pots_root);
-
-    // 10. community_cards_root：0..=5 张牌的 Poseidon
-    let community_cards_root = poseidon_cards(&table.community_cards);
-    preimage.push(community_cards_root);
-
-    // 11. round_state
-    preimage.push(u8_to_field(table.round_state));
-
-    // 12. betting_round_root
-    let betting_round_root = match &table.betting_round {
-        Some(br) => poseidon_betting_round(br),
-        None => FieldElement::ZERO,
-    };
-    preimage.push(betting_round_root);
-
-    // 13-14. current_turn: Option<u8>
-    let (ct_flag, ct_seat) = match table.current_turn {
-        Some(seat) => (bool_to_field(true), u8_to_field(seat)),
-        None => (bool_to_field(false), FieldElement::ZERO),
-    };
-    preimage.push(ct_flag);
-    preimage.push(ct_seat);
-
-    // 15-18. 协议状态根
-    preimage.push(poseidon_deck_state(&table.deck_state));
-    preimage.push(poseidon_shuffle_state(&table.shuffle_state));
-    preimage.push(poseidon_reveal_token_state(&table.reveal_token_state));
-    preimage.push(poseidon_reconstruct_state(&table.reconstruct_state));
-
-    // 19-20. 配置
-    preimage.push(poseidon_timeout_config(&table.timeout_config));
-    preimage.push(poseidon_timestamps(&table.timestamps));
-
-    // 21. chip_pool
-    preimage.push(u64_to_field(table.chip_pool));
-
-    // 22. config_root
-    preimage.push(poseidon_table_config(&table.config));
-
-    // 23. version
-    preimage.push(u64_to_field(table.version));
-
-    // 24. seats_root：6/9 个 seats 的 Merkle root
-    let seats_root = compute_seats_root(&table.seats)?;
-    preimage.push(seats_root);
-
-    Ok(preimage)
+/// The old hand-maintained 24-field list omitted consensus fields whenever the
+/// VM table grew (addon/ante/rake/RIT and sequence metadata were all missed).
+/// This encoding commits to the exact Borsh serialization of the *entire* table,
+/// with an explicit schema/domain tag, injective 31-byte field chunks, and byte
+/// lengths.  Adding or changing any serialized VM field therefore changes the
+/// state root without requiring a second manual field list to be kept in sync.
+pub fn table_state_preimage(
+    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+) -> TexasAirResult<Vec<FieldElement>> {
+    canonical_borsh_preimage("zchain.texas_poker.table.v2", table)
 }
 
 /// 计算 `TexasPokerTable` 的 state_root = Poseidon252(preimage)。
@@ -207,7 +118,9 @@ pub fn table_state_preimage(table: &poker_l1::vm::contracts::texas_poker::types:
 /// # Errors
 ///
 /// 当字段编码失败（如 ObjectID 序列化异常）时返回错误。
-pub fn compute_state_root(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable) -> TexasAirResult<StateRoot> {
+pub fn compute_state_root(
+    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+) -> TexasAirResult<StateRoot> {
     let preimage = table_state_preimage(table)?;
     Ok(StateRoot(poseidon_hash_many(&preimage)))
 }
@@ -220,7 +133,9 @@ pub fn compute_state_root(table: &poker_l1::vm::contracts::texas_poker::types::T
 /// # Errors
 ///
 /// 当 seats 长度 > 16 时返回错误（max_players=9 时叶子数 ≤ 9，padding 到 16 即可）。
-pub fn compute_seats_root(seats: &[poker_l1::vm::contracts::texas_poker::types::Seat]) -> TexasAirResult<FieldElement> {
+pub fn compute_seats_root(
+    seats: &[poker_l1::vm::contracts::texas_poker::types::Seat],
+) -> TexasAirResult<FieldElement> {
     if seats.is_empty() {
         return Ok(FieldElement::ZERO);
     }
@@ -245,17 +160,52 @@ fn blake2b_256(input: &[u8]) -> [u8; 32] {
     out
 }
 
-/// 把 32 字节（小端）解释为 Starknet FieldElement。
-///
-/// Starknet Fr 模数 `p = 2^251 + 17 * 2^192 + 1`，32 字节可能溢出。
-/// 溢出时返回 `None`，由上层决定如何处理（取模或报错）。
+/// Encode at most 31 bytes injectively into a Starknet field element.
+fn byte_chunk_to_field(chunk: &[u8]) -> TexasAirResult<FieldElement> {
+    if chunk.len() > 31 {
+        return Err(TexasAirError::StateRootError(format!(
+            "canonical chunk length {} exceeds 31 bytes",
+            chunk.len()
+        )));
+    }
+    let mut buf = [0u8; 32];
+    let start = 32 - chunk.len();
+    buf[start..].copy_from_slice(chunk);
+    FieldElement::from_bytes_be(&buf).map_err(|_| {
+        TexasAirError::StateRootError("canonical byte chunk is not a field element".into())
+    })
+}
+
+/// Build a domain-separated, injective field preimage for a Borsh value.
+fn canonical_borsh_preimage<T: borsh::BorshSerialize>(
+    tag: &str,
+    value: &T,
+) -> TexasAirResult<Vec<FieldElement>> {
+    let bytes = borsh::to_vec(value)
+        .map_err(|e| TexasAirError::StateRootError(format!("borsh serialization: {e}")))?;
+    let tag_bytes = tag.as_bytes();
+    let mut fields =
+        Vec::with_capacity(3 + tag_bytes.len().div_ceil(31) + bytes.len().div_ceil(31));
+    fields.push(FieldElement::from(2u64)); // encoding version
+    fields.push(FieldElement::from(u64::try_from(tag_bytes.len()).map_err(
+        |_| TexasAirError::StateRootError("domain tag too long".into()),
+    )?));
+    for chunk in tag_bytes.chunks(31) {
+        fields.push(byte_chunk_to_field(chunk)?);
+    }
+    fields.push(FieldElement::from(u64::try_from(bytes.len()).map_err(
+        |_| TexasAirError::StateRootError("borsh payload too long".into()),
+    )?));
+    for chunk in bytes.chunks(31) {
+        fields.push(byte_chunk_to_field(chunk)?);
+    }
+    Ok(fields)
+}
+
+/// Interpret a canonical 32-byte big-endian integer as a field element.
+/// Out-of-field values are rejected; bytes are never masked or truncated.
 fn bytes_to_field(bytes: &[u8; 32]) -> Option<FieldElement> {
-    // Starknet Fr 模数 `p = 2^251 + 17*2^192 + 1` ≈ 2^251.00003。
-    // 首字节 = 0x08，所以 mask & 0x07 确保 value < 2^251 < P。
-    // 丢失 5 bit 熵（hash 空间 2^256 → 2^251），对安全性影响可忽略。
-    let mut masked = *bytes;
-    masked[0] &= 0x07;
-    FieldElement::from_bytes_be(&masked).ok()
+    FieldElement::from_bytes_be(bytes).ok()
 }
 
 /// 把 Address（20 字节）编码为 Starknet FieldElement。
@@ -287,7 +237,12 @@ pub fn field_element_to_u32_words(f: FieldElement) -> [u32; 8] {
     let mut words = [0u32; 8];
     for (i, word) in words.iter_mut().enumerate() {
         let lo = 4 * i;
-        *word = u32::from_be_bytes([bytes_be[lo], bytes_be[lo + 1], bytes_be[lo + 2], bytes_be[lo + 3]]);
+        *word = u32::from_be_bytes([
+            bytes_be[lo],
+            bytes_be[lo + 1],
+            bytes_be[lo + 2],
+            bytes_be[lo + 3],
+        ]);
     }
     words
 }
@@ -297,52 +252,11 @@ fn poseidon_hash_many(inputs: &[FieldElement]) -> FieldElement {
 }
 
 fn poseidon_string(s: &str) -> FieldElement {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return FieldElement::ZERO;
-    }
-    // 把字符串按 31 字节分块（Fr 单元素最多 31 字节安全），每块转 FieldElement。
-    // 关键：必须在 BE 缓冲区中右对齐（左侧补 0），否则左侧高位字节会使值超过 Fr 模数。
-    // 同时在每个 chunk 前面加 1 字节长度前缀，避免 "ab" 与 "a\x00b" 产生相同 FieldElement。
-    let chunks: Vec<FieldElement> = bytes
-        .chunks(31)
-        .map(|chunk| {
-            let mut buf = [0u8; 32];
-            // 长度前缀（1 字节，放在 chunk 的第 0 字节）
-            buf[0] = u8::try_from(chunk.len()).unwrap_or(0);
-            // chunk 内容从第 1 字节开始（最多 30 字节 + 1 字节长度 = 31 字节有效）
-            buf[1..=chunk.len()].copy_from_slice(chunk);
-            bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
-        })
-        .collect();
-    // 最后追加一个 chunk 记录原始字符串长度，避免不同长度字符串哈希碰撞
-    let mut all_chunks = chunks;
-    all_chunks.push(FieldElement::from(u64::try_from(bytes.len()).unwrap_or(0)));
-    poseidon_hash_many(&all_chunks)
+    poseidon_borsh("zchain.string.v2", &s.as_bytes().to_vec())
 }
 
 fn poseidon_cards(cards: &[poker_l1::vm::contracts::texas_poker::card::Card]) -> FieldElement {
-    if cards.is_empty() {
-        return FieldElement::ZERO;
-    }
-    // Card 编码为 (rank:u8, suit:u8) → FieldElement
-    let fields: Vec<FieldElement> = cards
-        .iter()
-        .flat_map(|c| {
-            // Card 字段访问 — poker_l1 的 Card 类型可能有 rank/suit 字段
-            // 暂用 borsh 序列化为字节，再按 31 字节分块
-            let bytes = borsh::to_vec(c).unwrap_or_default();
-            bytes
-                .chunks(31)
-                .map(|chunk| {
-                    let mut buf = [0u8; 32];
-                    buf[..chunk.len()].copy_from_slice(chunk);
-                    bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    poseidon_hash_many(&fields)
+    poseidon_borsh("zchain.texas_poker.cards.v2", &cards.to_vec())
 }
 
 /// 通用「borsh 序列化 → Poseidon」编码契约（带域分隔标签）。
@@ -364,29 +278,9 @@ fn poseidon_cards(cards: &[poker_l1::vm::contracts::texas_poker::card::Card]) ->
 ///
 /// `tag` 必须是稳定的、与类型一一对应的 ASCII 字符串（编码契约的一部分，
 /// prover 与 L1 两侧必须使用完全相同的 tag）。
-fn poseidon_borsh<T: borsh::BorshSerialize>(tag: &str, value: &T) -> FieldElement {
-    // 域分隔：tag 作为第一个 FieldElement。tag 按 31 字节分块（一般 tag 很短，单块即可）。
-    let mut fields: Vec<FieldElement> = tag
-        .as_bytes()
-        .chunks(31)
-        .map(|chunk| {
-            let mut buf = [0u8; 32];
-            buf[..chunk.len()].copy_from_slice(chunk);
-            bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
-        })
-        .collect();
-    // tag 长度后缀，防止不同长度 tag 碰撞。
-    fields.push(FieldElement::from(u64::try_from(tag.as_bytes().len()).unwrap_or(0)));
-
-    // 子结构 borsh 字节，31 字节分块。
-    let bytes = borsh::to_vec(value).unwrap_or_default();
-    fields.extend(bytes.chunks(31).map(|chunk| {
-        let mut buf = [0u8; 32];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        bytes_to_field(&buf).unwrap_or(FieldElement::ZERO)
-    }));
-    // 字节长度后缀，防止填充碰撞。
-    fields.push(FieldElement::from(u64::try_from(bytes.len()).unwrap_or(0)));
+pub(crate) fn poseidon_borsh<T: borsh::BorshSerialize>(tag: &str, value: &T) -> FieldElement {
+    let fields = canonical_borsh_preimage(tag, value)
+        .expect("Borsh serialization into an in-memory Vec must succeed");
     poseidon_hash_many(&fields)
 }
 
@@ -460,9 +354,18 @@ mod tests {
 
     #[test]
     fn test_poseidon_borsh_deterministic_and_distinct() {
-        let br1 = BettingRound { current_bet: 100, min_raise: 50 };
-        let br2 = BettingRound { current_bet: 100, min_raise: 50 };
-        let br3 = BettingRound { current_bet: 101, min_raise: 50 };
+        let br1 = BettingRound {
+            current_bet: 100,
+            min_raise: 50,
+        };
+        let br2 = BettingRound {
+            current_bet: 100,
+            min_raise: 50,
+        };
+        let br3 = BettingRound {
+            current_bet: 101,
+            min_raise: 50,
+        };
         // 确定性
         assert_eq!(poseidon_betting_round(&br1), poseidon_betting_round(&br2));
         // 区分性：current_bet 不同 → 哈希不同
@@ -506,11 +409,27 @@ mod tests {
         let timeout = poseidon_timeout_config(&TimeoutConfig::default());
         let timestamps = poseidon_timestamps(&Timestamps::default());
         let config = poseidon_table_config(&TableConfig::default());
-        for h in [deck, shuffle, reveal, reconstruct, timeout, timestamps, config] {
+        for h in [
+            deck,
+            shuffle,
+            reveal,
+            reconstruct,
+            timeout,
+            timestamps,
+            config,
+        ] {
             assert_ne!(h, FieldElement::ZERO, "默认子结构哈希应非零");
         }
         // 默认值两两不同（它们 borsh 序列化不同）
-        let all = [deck, shuffle, reveal, reconstruct, timeout, timestamps, config];
+        let all = [
+            deck,
+            shuffle,
+            reveal,
+            reconstruct,
+            timeout,
+            timestamps,
+            config,
+        ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
                 assert_ne!(all[i], all[j], "默认子结构哈希应两两不同 ({i},{j})");
@@ -530,7 +449,9 @@ mod tests {
                 let mut buf = [0u8; 32];
                 buf[0] = 0x07;
                 buf[1] = 0xFF;
-                for b in &mut buf[2..] { *b = 0xAB; }
+                for b in &mut buf[2..] {
+                    *b = 0xAB;
+                }
                 FieldElement::from_bytes_be(&buf).unwrap_or(FieldElement::ZERO)
             },
         ];
@@ -567,11 +488,18 @@ mod tests {
             fields.push(bytes_to_field(&tag_buf).unwrap_or(FieldElement::ZERO));
             fields.push(u64_to_field(pots.len() as u64));
             fields.extend(pots.iter().flat_map(|sp| {
-                [u64_to_field(sp.amount), u64_to_field(u64::from(sp.eligible_seats))]
+                [
+                    u64_to_field(sp.amount),
+                    u64_to_field(u64::from(sp.eligible_seats)),
+                ]
             }));
             poseidon_hash_many(&fields)
         };
-        assert_ne!(f(&sp1), f(&sp2), "不同 eligible_seats 应产生不同 side_pots_root");
+        assert_ne!(
+            f(&sp1),
+            f(&sp2),
+            "不同 eligible_seats 应产生不同 side_pots_root"
+        );
         assert_ne!(f(&sp1), FieldElement::ZERO);
         // 确定性
         assert_eq!(f(&sp1), f(&sp1));

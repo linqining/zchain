@@ -25,11 +25,11 @@
 //! kicked 一致性外，强制 **`post_pot = pre_pot + kicked_bet`**（全 4 limb delta，
 //! 底池增量 == 被踢者下注）。admin 签名约束留待阶段 3/5。
 
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -101,7 +101,8 @@ impl FrameworkEval for KickPlayerAir {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let common = CommonConstraints::write(&mut eval, MethodKind::KickPlayer, self.pre_version, self.post_version);
+        let statement = crate::airs::TexasAir::statement(self);
+        let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
@@ -115,7 +116,12 @@ impl FrameworkEval for KickPlayerAir {
         let kicked_bet_1 = eval.next_trace_mask();
         let kicked_bet_2 = eval.next_trace_mask();
         let kicked_bet_3 = eval.next_trace_mask();
-        let kicked_bet_limbs = [kicked_bet_0.clone(), kicked_bet_1.clone(), kicked_bet_2.clone(), kicked_bet_3.clone()];
+        let kicked_bet_limbs = [
+            kicked_bet_0.clone(),
+            kicked_bet_1.clone(),
+            kicked_bet_2.clone(),
+            kicked_bet_3.clone(),
+        ];
         // Gap 3 boolean witness（座位非空）。
         let input_seat_occupied = eval.next_trace_mask();
 
@@ -139,7 +145,7 @@ impl FrameworkEval for KickPlayerAir {
         let expected_kicked_bet_0: E::F = M31::from((self.input.kicked_bet & 0xFFFF) as u32).into();
         eval.add_constraint(is_active.clone() * (kicked_bet_0.clone() - expected_kicked_bet_0));
         // 全 4 limb pot delta
-        eval.add_constraint(common.pot_delta_4limb(&kicked_bet_limbs));
+        for __c in common.pot_delta_4limb(&kicked_bet_limbs) { eval.add_constraint(__c); }
 
         // 约束 5（审计共性，degree-2）：round_state 不变（kick_player 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());

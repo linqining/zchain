@@ -33,6 +33,12 @@ pub enum TexasAirError {
     #[error("递归证明错误: {0}")]
     RecursionError(String),
 
+    /// Descriptor-only Aggregator 未验证子 proof，生产入口默认禁用。
+    #[error(
+        "不可信聚合已禁用: descriptor-only Aggregator 未在电路内验证子 proof；只能使用显式测试入口"
+    )]
+    UntrustedAggregationDisabled,
+
     /// 序列化/反序列化失败。
     #[error("序列化错误: {0}")]
     SerializationError(String),

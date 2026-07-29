@@ -271,16 +271,4 @@ end TexasPokerTable
 /-- 从 TexasPokerTable 生成 StatePreimage（抽象编码）。 -/
 axiom texasPokerTableToPreimage (t : TexasPokerTable) : StatePreimage
 
-/-- texasPokerTableToPreimage 的单射性（不同状态产生不同 preimage）。 -/
-axiom texasPokerTableToPreimage_injective :
-  ∀ (t1 t2 : TexasPokerTable),
-    texasPokerTableToPreimage t1 = texasPokerTableToPreimage t2 →
-    t1 = t2
-
-/-- 版本 0 的空状态 preimage 哈希为零。
-   这与 Rust 实现中 `StateRoot::default()` 一致。 -/
-axiom empty_state_root :
-  poseidon_hash (texasPokerTableToPreimage TexasPokerTable.empty_table)
-  = (M31.zero, M31.zero, M31.zero, M31.zero)
-
 end PokerLean

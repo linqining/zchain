@@ -4,7 +4,7 @@
 //!
 //! - [`prove_create_table`] — 生成 `create_table` 方法的 L1 Stwo proof
 //! - [`prove_method`] — 泛型 prove，支持任意 method AIR（阶段 2-4）
-//! - [`aggregate_proofs`] — 二叉树聚合多个 L1 proof 到单 proof（阶段 2 实现）
+//! - [`aggregate_proofs`] — 保护性聚合入口；可信递归闭环完成前默认拒绝
 
 use stwo::core::channel::Poseidon252Channel;
 use stwo::core::pcs::PcsConfig;
@@ -32,9 +32,9 @@ pub struct CreateTableProof {
     pub air: CreateTableAir,
     /// trace log_size。
     pub log_size: u32,
-    /// 完整公开输入（state_root 绑定用；阶段 2 soundness 修复）。
-    /// `None` 表示该 proof 未携带 preimage（向后兼容；verify 时跳过 mix/重算）。
-    pub public_inputs: Option<TexasPublicInputs>,
+    /// Prover-declared public inputs (diagnostic/test transport only).
+    /// Production verification must supply an independent expected value.
+    pub public_inputs: TexasPublicInputs,
 }
 
 /// 泛型 method proof（适用于任意 method AIR）。
@@ -50,9 +50,9 @@ pub struct MethodProof<A: FrameworkEval + Clone + Sync> {
     pub log_size: u32,
     /// trace 列数（用于 verifier 重建 commitment）。
     pub num_columns: usize,
-    /// 完整公开输入（state_root 绑定用；阶段 2 soundness 修复）。
-    /// `None` 表示该 proof 未携带 preimage（向后兼容；verify 时跳过 mix/重算）。
-    pub public_inputs: Option<TexasPublicInputs>,
+    /// Prover-declared public inputs (diagnostic/test transport only).
+    /// Production verification must supply an independent expected value.
+    pub public_inputs: TexasPublicInputs,
 }
 
 /// 生成 `create_table` 方法的 L1 proof。
@@ -115,7 +115,7 @@ pub fn prove_create_table(
         stark_proof,
         air: trace.air.clone(),
         log_size,
-        public_inputs: Some(public_inputs),
+        public_inputs,
     })
 }
 
@@ -192,21 +192,20 @@ where
         air,
         log_size,
         num_columns,
-        public_inputs: Some(public_inputs),
+        public_inputs,
     })
 }
 
-/// 聚合多个 L1 proof 到单 proof。
+/// 请求聚合多个 proof descriptor；当前默认拒绝。
 ///
-/// 委托给 [`crate::aggregator_prover::prove_aggregator`]。
+/// 委托给 [`crate::aggregator_prover::prove_aggregator`]。当前 descriptor-only
+/// Aggregator 不验证子 proof，因此该调用 fail closed。
 ///
 /// # Errors
 ///
-/// - `TexasAirError::RecursionError` — 子节点链式连续性破坏
-/// - `TexasAirError::StwoProverError` — Stwo prover 内部错误
+/// - `TexasAirError::UntrustedAggregationDisabled` — 可信递归 verifier 尚未接入
 pub fn aggregate_proofs(
     children: Vec<crate::aggregator_air::ChildDescriptor>,
 ) -> TexasAirResult<crate::aggregator_prover::AggregatorProof> {
     crate::aggregator_prover::prove_aggregator(children)
 }
-
