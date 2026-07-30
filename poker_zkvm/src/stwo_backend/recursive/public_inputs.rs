@@ -14,6 +14,46 @@ use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::line::LinePoly;
 
+/// 单棵 L1 commitment tree 的 verifier 元数据。
+///
+/// `column_log_sizes` 使用提交前的多项式 log degree；Stwo verifier 会为每列加上
+/// `config.fri_config.log_blowup_factor`，再结合 `config.lifting_log_size` 得到 Merkle
+/// tree height。列顺序必须与 prover 调用 `tree_builder.extend_evals` 的顺序一致。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecursiveTreeMetadata {
+    /// 该 commitment tree 中各列的多项式 log degree。
+    pub column_log_sizes: Vec<u32>,
+}
+
+impl RecursiveTreeMetadata {
+    /// 创建一棵 commitment tree 的元数据。
+    #[must_use]
+    pub const fn new(column_log_sizes: Vec<u32>) -> Self {
+        Self { column_log_sizes }
+    }
+
+    /// 返回 Stwo Merkle verifier 实际使用的扩展列 log sizes。
+    #[must_use]
+    pub fn extended_column_log_sizes(&self, config: PcsConfig) -> Option<Vec<u32>> {
+        self.column_log_sizes
+            .iter()
+            .map(|log_size| log_size.checked_add(config.fri_config.log_blowup_factor))
+            .collect()
+    }
+
+    /// 返回 Stwo Merkle verifier 实际使用的 tree height。
+    #[must_use]
+    pub fn tree_height(&self, config: PcsConfig) -> Option<u32> {
+        let max_column_log_size = self
+            .extended_column_log_sizes(config)?
+            .into_iter()
+            .max()
+            .unwrap_or_default();
+        let height = config.lifting_log_size.unwrap_or(max_column_log_size);
+        (max_column_log_size <= height).then_some(height)
+    }
+}
+
 /// L2 proof 的公开输入。
 ///
 /// 包含 L1 proof 的所有公开承诺，作为 L2 verifier 的输入。
@@ -25,6 +65,12 @@ pub struct RecursivePublicInputs {
     /// 包括 preprocessed trace root（通常为空）、original trace root、
     /// interaction trace root、composition commitment root。
     pub l1_commitments: Vec<FieldElement252>,
+
+    /// 每棵 L1 commitment tree 的列 log-size 元数据。
+    ///
+    /// 必须与 `l1_commitments`、L1 proof 的 `decommitments` 和 `queried_values` 一一对应。
+    /// tree 0 是 preprocessed tree；最后一棵通常是 split composition tree。
+    pub l1_tree_metadata: Vec<RecursiveTreeMetadata>,
 
     /// L1 proof 的 OODS（Out-Of-Domain Sampling）point。
     ///
@@ -38,6 +84,9 @@ pub struct RecursivePublicInputs {
 
     /// L1 FRI first layer 的 Merkle root。
     pub fri_first_layer_commitment: FieldElement252,
+
+    /// L1 FRI inner layers 的全部 Merkle roots，按 transcript mix 顺序排列。
+    pub fri_inner_layer_commitments: Vec<FieldElement252>,
 
     /// L1 FRI last layer polynomial。
     ///
@@ -91,9 +140,11 @@ impl RecursivePublicInputs {
     ) -> Self {
         Self {
             l1_commitments,
+            l1_tree_metadata: Vec::new(),
             oods_point,
             composition_oods_eval,
             fri_first_layer_commitment,
+            fri_inner_layer_commitments: Vec::new(),
             fri_last_layer_poly,
             max_log_degree_bound,
             config,
@@ -102,6 +153,18 @@ impl RecursivePublicInputs {
             fri_query_x,
             fri_query_eval,
         }
+    }
+
+    /// 附加完整的 L1 tree 与 FRI layer 元数据。
+    #[must_use]
+    pub fn with_verifier_metadata(
+        mut self,
+        l1_tree_metadata: Vec<RecursiveTreeMetadata>,
+        fri_inner_layer_commitments: Vec<FieldElement252>,
+    ) -> Self {
+        self.l1_tree_metadata = l1_tree_metadata;
+        self.fri_inner_layer_commitments = fri_inner_layer_commitments;
+        self
     }
 
     /// 获取 L1 FRI config。
@@ -126,7 +189,17 @@ impl RecursivePublicInputs {
         for commitment in &self.l1_commitments {
             mix_felt252(channel, commitment);
         }
+
+        mix_len(channel, self.l1_tree_metadata.len());
+        for tree in &self.l1_tree_metadata {
+            mix_len(channel, tree.column_log_sizes.len());
+            channel.mix_u32s(&tree.column_log_sizes);
+        }
         mix_felt252(channel, &self.fri_first_layer_commitment);
+        mix_len(channel, self.fri_inner_layer_commitments.len());
+        for commitment in &self.fri_inner_layer_commitments {
+            mix_felt252(channel, commitment);
+        }
 
         mix_len(channel, self.fri_last_layer_poly.len());
         channel.mix_felts(&self.fri_last_layer_poly[..]);
@@ -229,6 +302,14 @@ mod tests {
         let mut changed_fri_commitment = baseline.clone();
         changed_fri_commitment.fri_first_layer_commitment = FieldElement252::ONE;
         assert_ne!(expected, transcript_challenge(&changed_fri_commitment));
+
+        let mut changed_tree_metadata = baseline.clone();
+        changed_tree_metadata.l1_tree_metadata = vec![RecursiveTreeMetadata::new(vec![7, 8])];
+        assert_ne!(expected, transcript_challenge(&changed_tree_metadata));
+
+        let mut changed_inner_commitments = baseline.clone();
+        changed_inner_commitments.fri_inner_layer_commitments = vec![FieldElement252::ONE];
+        assert_ne!(expected, transcript_challenge(&changed_inner_commitments));
 
         let mut changed_queries = baseline.clone();
         changed_queries.query_positions = vec![0];

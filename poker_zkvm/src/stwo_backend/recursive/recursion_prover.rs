@@ -27,16 +27,16 @@
 //! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
 //! [`RecursionProvingError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
 
-use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
-use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
-use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
+use super::fri_verifier_air::{FriVerifierAir, FRI_AIR_NUM_COLUMNS};
+use super::merkle_path_air::{MerklePathAir, MERKLE_AIR_NUM_COLUMNS};
+use super::oods_check_air::{OodsCheckAir, OODS_AIR_NUM_COLUMNS};
 use super::public_inputs::RecursivePublicInputs;
 #[cfg(test)]
 use super::trace_gen::extract_query_positions_from_l1;
 use super::trace_gen::{
-    OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size, extract_composition_oods_eval_from_l1,
-    extract_fri_query_from_l1, gen_fri_verifier_trace, gen_merkle_path_trace, gen_oods_check_trace,
-    pad_fri_trace_to_log_size, pad_merkle_trace_to_log_size, pad_oods_trace_to_log_size,
+    compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
+    gen_fri_verifier_trace, gen_merkle_path_trace, gen_oods_check_trace, pad_fri_trace_to_log_size,
+    pad_merkle_trace_to_log_size, pad_oods_trace_to_log_size, OODS_TRACE_LOG_SIZE,
 };
 use ark_ff::Zero;
 use stwo::core::channel::Blake2sChannel;
@@ -47,12 +47,12 @@ use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
-use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::pcs::CommitmentSchemeProver;
-use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
-use stwo::prover::{ProvingError, prove};
+use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::{prove, ProvingError};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 /// L2 recursive proof（封装 StarkProof）。
@@ -125,10 +125,10 @@ pub enum RecursionProvingError {
     /// final-root 检查退化为 trivial。入口显式拒绝。
     #[error("public_inputs.log_size must be > 0 so the Merkle tree has a non-trivial height")]
     InvalidLogSize,
-    /// Merkle verifier AIR 尚未实现 Stwo 的压缩多 query decommitment 与真实
-    /// Poseidon252 约束，不能生成可被误认为 sound recursion 的 L2 proof。
+    /// Merkle/FRI canonical replay 已实现，但尚未被真实 Poseidon252 non-native AIR、
+    /// transcript AIR 与 composition verifier AIR 完整约束，不能生成 sound L2 proof。
     #[error(
-        "recursive prover is disabled: the Merkle verifier AIR does not yet constrain Stwo's compressed multi-query decommitment and Poseidon252 hash"
+        "recursive prover is disabled: canonical Merkle/FRI replay is not yet constrained by the Poseidon252 and transcript verifier AIR"
     )]
     IncompleteMerkleVerifierAir,
 }
@@ -381,10 +381,9 @@ pub fn prove_recursive_with_fri(
         });
     }
 
-    // P05-R gap #3-B：不要再依赖当前伪 Merkle AIR 在真实数据上“碰巧”返回
-    // ConstraintsNotSatisfied。该 AIR 尚未实现 Stwo 的压缩多 query witness 消费，
-    // 也没有约束真实 Poseidon252；即使某组输入能满足现有局部多项式，也不构成
-    // L1 Merkle opening 的递归验证。保持显式 fail-closed，直到两部分都实现并审计。
+    // P05-R gap #3-B：`stwo_replay` / `fri_replay` 已提供与 Stwo 2.3 一致的 canonical
+    // witness 重放，但当前 MerklePathAir 仍未约束该重放，也没有真实 Poseidon252、
+    // method-specific transcript 或 composition verifier AIR。保持显式 fail-closed。
     if !super::MERKLE_VERIFIER_AIR_COMPLETE {
         return Err(RecursionProvingError::IncompleteMerkleVerifierAir);
     }

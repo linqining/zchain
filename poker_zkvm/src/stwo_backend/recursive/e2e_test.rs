@@ -18,8 +18,8 @@
 //! ```
 
 use super::public_inputs::RecursivePublicInputs;
-use super::recursion_prover::{RecursionProvingError, prove_recursive_with_fri};
-use super::recursion_verifier::{RecursionVerificationError, verify_recursive_with_fri};
+use super::recursion_prover::{prove_recursive_with_fri, RecursionProvingError};
+use super::recursion_verifier::{verify_recursive_with_fri, RecursionVerificationError};
 use super::trace_gen::{
     compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
     extract_query_positions_from_l1,

@@ -95,6 +95,23 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
      `#[ignore]`，直到压缩 multi-query replay、所有 tree commitment、column metadata 和真实 Poseidon252
      AIR 全部实现并经过密码学审计。未完成的 verifier AIR 模块与 Merkle trace 生成器也已收窄为
      crate-private，外部调用方不能绕过高层 gate 直接复用占位组件。
+   - **gap #3-B replay 子层（2026-07-31 进展）**：新增 `RecursiveTreeMetadata`，把每棵
+     commitment tree 的原始 column log sizes 加入递归 statement 并纳入 transcript；同时绑定
+     全部 FRI inner-layer commitments。`stwo_replay.rs` 已逐步复现 Stwo 2.3 的列按 log-size
+     排序、重复 query 检查、Poseidon leaf hashing、兄弟 query 合并、压缩 `hash_witness` 顺序消费、
+     preprocessed query lifting 与全部 PCS tree root 检查。真实 CPU L1 proof 的 tree 0/original/
+     composition 三棵树均可重放，篡改 queried value、压缩 sibling 或 column metadata 会失败。
+   - **完整 FRI replay 子层（2026-07-31 进展）**：新增 `fri_replay.rs`，复现 first/inner layer
+     `fri_witness` 补齐、packed leaf Merkle opening、circle→line/line folding、末层多 query polynomial
+     evaluation，并对真实 L1 proof 与篡改 witness/last polynomial 做回归。该模块目前只提供 verifier
+     AIR 的 canonical witness 生成与主机侧交叉检查，**不等于递归约束已经完成**。
+   - **新确认的组合 soundness 前置条件**：generic `StarkProof` 本身不携带 verifier components、
+     interaction challenge/claimed-sum 的 method-specific transcript schema，也不能仅凭 tree metadata
+     重建 `Components::mask_points` 与 composition constraint evaluation。故真实闭合不仅需要
+     Poseidon252 non-native AIR，还必须把固定 method verifier（component layout、interaction 消息、
+     OODS composition evaluation）作为递归 verifier program 的一部分；不能让 prover 自报 transcript
+     schedule。当前 simple transcript replay 仅用于 padding-only 单 CPU proof 回归，禁止泛化到 Texas
+     多组件 proof。
 2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**（未变）。
 3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR
    （未变；且 `poker_zkvm` 的 guest crate `guests/texas_poker` 本轮尚未迁入 zchain
@@ -133,8 +150,10 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   release 依赖图不再暴露测试 ELF/证明构造器；
 - **P05-R gap #1**（空-input Merkle no-op）已收窄闭合 + 回归（守卫拒绝空 commitments/query/log_size）；
   **gap #3-A**（felt252→M31 非法/有损编码）已修复为 9-limb radix-(2^31-1) 无损编码；
-  **gap #3-B**（压缩 multi-query witness / 全 tree commitment / column metadata / 真实 Poseidon252 AIR）
-  尚未实现，但 `_with_fri` 已改为显式 `IncompleteMerkleVerifierAir` fail-closed，不再依赖偶然的
+  **gap #3-B** 中 host canonical replay 部分（压缩 multi-query witness、全 tree commitment、column
+  metadata、完整 FRI layer folding/decommitment）已实现并有真实 proof/篡改回归；但这些 replay 尚未
+  进入 AIR，真实 Poseidon252 non-native AIR、method-specific transcript 与 composition verifier 仍未实现。
+  `_with_fri` 继续显式 `IncompleteMerkleVerifierAir` fail-closed，不再依赖偶然的
   `Constraints not satisfied`（回归测试 `gap3b_incomplete_merkle_air_is_explicitly_disabled`）；
   gap #2（N-proof 聚合）、gap #3 主体（leaf/sibling 真实绑定 + verifier AIR 组合 sound + 真实 method proof 端到端）未闭合；
   `poker_zkvm` 当前定向回归：OODS-only 路径、空输入守卫、9-limb 无损往返/高位保留、gap#3-B 显式关闭均通过；

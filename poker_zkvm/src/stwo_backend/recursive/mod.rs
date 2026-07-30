@@ -36,19 +36,24 @@
 //! - `stwo-2.3.0/src/core/fri.rs` — `FriVerifier` + `FriProof`
 //! - `stwo-2.3.0/src/core/vcs_lifted/verifier.rs` — `MerkleVerifierLifted`
 
-/// 仅当 Stwo 压缩 multi-query decommitment、全部 tree commitment/column metadata 与
-/// 真实 Poseidon252 AIR 均实现并完成审计后才能改为 `true`。
+/// 仅当 canonical Merkle/FRI replay 已被完整约束进 AIR、真实 Poseidon252 non-native
+/// 算术和 method-specific transcript/composition verifier 均完成审计后才能改为 `true`。
+///
+/// `stwo_replay` / `fri_replay` 已完成 host 侧精确重放，但 host witness 生成正确不等于
+/// AIR 已约束该 witness，因此当前值必须保持 `false`。
 pub(crate) const MERKLE_VERIFIER_AIR_COMPLETE: bool = false;
 
 pub(crate) mod composition_eval_air;
 #[cfg(test)]
 mod e2e_test;
+pub(crate) mod fri_replay;
 pub(crate) mod fri_verifier_air;
 pub(crate) mod merkle_path_air;
 pub(crate) mod oods_check_air;
 pub mod public_inputs;
 pub mod recursion_prover;
 pub mod recursion_verifier;
+pub(crate) mod stwo_replay;
 pub mod trace_gen;
 
-pub use public_inputs::RecursivePublicInputs;
+pub use public_inputs::{RecursivePublicInputs, RecursiveTreeMetadata};
