@@ -530,8 +530,8 @@ mod tests {
     use crate::offline::ack_chain::AckEntry;
     use crate::offline::zk_verifier::{
         ProofKind, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE, VerifierStatus, ZkVerifyContext,
-        register_groth16_stub_verifier, register_hypernova_stub_verifier,
-        register_ipa_stub_verifier, register_zkshuffle_stub_verifier,
+        register_groth16_stub_verifier, register_ipa_stub_verifier,
+        register_test_only_stwo_stub_verifier, register_zkshuffle_stub_verifier,
     };
     use crate::offline::{DEFAULT_MAX_ACK_CHAIN_LENGTH, DEFAULT_MAX_PARTIAL_CHECKIN_COUNT};
 
@@ -578,7 +578,7 @@ mod tests {
 
     fn make_registry_with_all_verifiers() -> ZkVerifierRegistry {
         let mut registry = ZkVerifierRegistry::new();
-        register_hypernova_stub_verifier(&mut registry);
+        register_test_only_stwo_stub_verifier(&mut registry);
         register_groth16_stub_verifier(&mut registry);
         register_ipa_stub_verifier(&mut registry);
         registry

@@ -106,11 +106,20 @@ def is_betting_round : RoundState → Bool
   | ROUND_PREFLOP => true | ROUND_FLOP => true
   | ROUND_TURN => true | ROUND_RIVER => true | _ => false
 
+/-- `bet` 入口允许的 postflop 下注轮。Rust `BetAir` 明确排除 PREFLOP，
+    因为盲注后应使用 call/raise，而不是首个 postflop bet。 -/
+def is_postflop_betting : RoundState → Bool
+  | ROUND_FLOP => true | ROUND_TURN => true | ROUND_RIVER => true | _ => false
+
 theorem round_state_waiting_is_not_betting :
   ¬ROUND_WAITING.is_betting_round := by simp [is_betting_round]
 
 theorem round_state_preflop_is_betting :
   ROUND_PREFLOP.is_betting_round := by simp [is_betting_round]
+
+theorem postflop_betting_implies_betting (r : RoundState)
+    (h : r.is_postflop_betting) : r.is_betting_round := by
+  cases r <;> simp_all [is_postflop_betting, is_betting_round]
 
 end RoundState
 

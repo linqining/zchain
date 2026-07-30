@@ -1861,10 +1861,10 @@ mod tests {
 
     // ===== SubTask 22.2: zk_verify 测试 =====
 
-    /// 构造测试用 ZkVerifierRegistry（注册 Hypernova + Groth16 + IPA stub）。
+    /// 构造测试用 ZkVerifierRegistry（注册 Stwo + Groth16 + IPA test stub）。
     fn make_test_zk_registry() -> crate::offline::zk_verifier::ZkVerifierRegistry {
         let mut registry = crate::offline::zk_verifier::ZkVerifierRegistry::new();
-        crate::offline::zk_verifier::register_hypernova_stub_verifier(&mut registry);
+        crate::offline::zk_verifier::register_test_only_stwo_stub_verifier(&mut registry);
         crate::offline::zk_verifier::register_groth16_stub_verifier(&mut registry);
         crate::offline::zk_verifier::register_ipa_stub_verifier(&mut registry);
         registry
@@ -1886,13 +1886,12 @@ mod tests {
     }
 
     #[test]
-    fn test_zk_verify_success_stub_hypernova() {
-        // Stub 状态下，非空 proof → 验证通过（返回 0）
+    fn test_zk_verify_success_test_only_stwo_stub() {
+        // 此用例只验证 syscall 成功路径；真实 Stwo 格式拒绝由 zk_verifier 单测覆盖。
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx =
-            PokerL1Context::new(make_tx_context(), 500_000).with_zk_verifier(registry);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 500_000).with_zk_verifier(registry);
 
         let proof = vec![0xAAu8; 64];
         let pio_bytes = make_valid_public_io_bytes();
@@ -1903,7 +1902,7 @@ mod tests {
 
         let result = SyscallZkVerify::rust(
             &mut ctx,
-            1, // SCHEME_HYPERNOVA
+            1, // SCHEME_STWO
             HEAP_BASE,
             proof.len() as u64,
             HEAP_BASE + 512,

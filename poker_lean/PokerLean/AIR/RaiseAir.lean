@@ -7,62 +7,82 @@ import PokerLean.AIR.AirBase
 
 namespace PokerLean
 
-/-- raise 业务列。
+/-- verifier 从 canonical table 重建的 raise AIR 常量。 -/
+structure RaiseTrustedInputs where
+  min_raise : Nat
+  pre_current_bet : Nat
+  pre_seat_stack : Nat
+  pre_seat_bet : Nat
+  pre_seat_total_bet : Nat
+  post_current_turn : M31
+deriving Repr
 
-    含 pre-state 座位 witness（stack/bet/total_bet）、raise 专用的"跟注增量"
-    witness（`input_call_delta` = `raise_to - pre.bet`，4 limb）以及 post-state
-    betting witness（current_bet/min_raise），用于通过 `StateRootConsistency`
-    绑定到 committed state root，并通过逐 limb delta/equality 约束保证资金守恒。
-
-    核心关系（`delta := raise_to - pre.bet`）：
-    - `Limb4Delta pre_bet post_bet delta` + `Limb4Eq post_bet raise_to`
-      ⟹ `decodeU64 delta = raise_to - pre.bet`（且 `raise_to ≥ pre.bet` 自动成立）
-    - `PotUnchanged`：mid-round 时 `post_pot = pre_pot`
-    - `Limb4DeltaRev pre_stack post_stack delta`：`post_stack = pre_stack - delta`
-    - `Limb4Delta pre_total_bet post_total_bet delta`：
-      `post_total_bet = pre_total_bet + delta`
-    - `Limb4Eq post_current_bet raise_to`（`pre.current_bet = 0` ⟹ `delta` 即新 min_raise）
-    - `Limb4Eq post_min_raise raise_to`（`pre.current_bet = 0` ⟹ `min_raise = raise_to`）
-
-    这是手写的 mid-round 抽象列。Rust P06 新增的 trusted pre-current-bet/
-    min-raise/seat 金额与 `post_current_turn` 守卫尚未在本结构中镜像。 -/
+/-- raise 的逻辑列模型。`trusted` 不是 trace column。 -/
 structure RaiseMethodColumns where
+  trusted : RaiseTrustedInputs
   input_seat_index : M31
   input_current_turn : M31
   input_seat_occupied : M31
   input_raise_to : M31 × M31 × M31 × M31
-  /-- pre-state 座位 stack（4 limb witness） -/
   input_pre_seat_stack : M31 × M31 × M31 × M31
-  /-- pre-state 座位 bet（4 limb witness） -/
   input_pre_seat_bet : M31 × M31 × M31 × M31
-  /-- pre-state 座位 total_bet（4 limb witness） -/
   input_pre_seat_total_bet : M31 × M31 × M31 × M31
-  /-- raise 的"跟注增量" witness = `raise_to - pre.bet`（4 limb） -/
   input_call_delta : M31 × M31 × M31 × M31
   output_seat_stack : M31 × M31 × M31 × M31
   output_seat_bet : M31 × M31 × M31 × M31
-  /-- post-state 座位 total_bet（4 limb witness） -/
   output_seat_total_bet : M31 × M31 × M31 × M31
-  /-- post-state betting.current_bet（4 limb witness） -/
   output_current_bet : M31 × M31 × M31 × M31
-  /-- post-state betting.min_raise（4 limb witness） -/
   output_min_raise : M31 × M31 × M31 × M31
   output_all_in : M31
   output_acted : M31
+  output_current_turn : M31
 deriving Repr
 
-/-- 从 AIR 行提取 pre 状态。 -/
+/-- Rust `RaiseAir::evaluate` 中 trusted-u64 / checked arithmetic 的 Nat 级模型。 -/
+structure RaiseTrustedFacts
+    (ext : RaiseMethodColumns) (expected_raise_to : Nat) : Prop where
+  raise_witness : decodeLimb4 ext.input_raise_to = expected_raise_to
+  pre_stack_witness : decodeLimb4 ext.input_pre_seat_stack = ext.trusted.pre_seat_stack
+  pre_bet_witness : decodeLimb4 ext.input_pre_seat_bet = ext.trusted.pre_seat_bet
+  pre_total_witness :
+    decodeLimb4 ext.input_pre_seat_total_bet = ext.trusted.pre_seat_total_bet
+  delta_witness : decodeLimb4 ext.input_call_delta =
+    expected_raise_to - ext.trusted.pre_seat_bet
+  raise_u64 : expected_raise_to < U64_MAX
+  min_raise_u64 : ext.trusted.min_raise < U64_MAX
+  pre_current_bet_u64 : ext.trusted.pre_current_bet < U64_MAX
+  pre_stack_u64 : ext.trusted.pre_seat_stack < U64_MAX
+  pre_bet_u64 : ext.trusted.pre_seat_bet < U64_MAX
+  pre_total_u64 : ext.trusted.pre_seat_total_bet < U64_MAX
+  above_current : expected_raise_to > ext.trusted.pre_current_bet
+  above_seat_bet : expected_raise_to > ext.trusted.pre_seat_bet
+  needed_le_stack :
+    expected_raise_to - ext.trusted.pre_seat_bet ≤ ext.trusted.pre_seat_stack
+  min_or_short_all_in :
+    expected_raise_to - ext.trusted.pre_current_bet ≥ ext.trusted.min_raise ∨
+    expected_raise_to - ext.trusted.pre_seat_bet = ext.trusted.pre_seat_stack
+  post_total_u64 :
+    ext.trusted.pre_seat_total_bet +
+      (expected_raise_to - ext.trusted.pre_seat_bet) < U64_MAX
+  output_stack : decodeLimb4 ext.output_seat_stack =
+    ext.trusted.pre_seat_stack -
+      (expected_raise_to - ext.trusted.pre_seat_bet)
+  output_bet : decodeLimb4 ext.output_seat_bet = expected_raise_to
+  output_total : decodeLimb4 ext.output_seat_total_bet =
+    ext.trusted.pre_seat_total_bet +
+      (expected_raise_to - ext.trusted.pre_seat_bet)
+  output_current_bet : decodeLimb4 ext.output_current_bet = expected_raise_to
+  output_min_raise : decodeLimb4 ext.output_min_raise =
+    if expected_raise_to - ext.trusted.pre_current_bet ≥ ext.trusted.min_raise then
+      expected_raise_to - ext.trusted.pre_current_bet
+    else ext.trusted.min_raise
+  output_all_in : ext.output_all_in =
+    if expected_raise_to - ext.trusted.pre_seat_bet = ext.trusted.pre_seat_stack then
+      M31.one else M31.zero
+  output_turn : ext.output_current_turn = ext.trusted.post_current_turn
+
 def extractPreTableFromRaiseAir
-    (row : CommonRow)
-    (ext : RaiseMethodColumns)
-    (max_players : Nat)
-    : TexasPokerTable :=
-  let pre_stack := decodeU64 ext.input_pre_seat_stack.1 ext.input_pre_seat_stack.2.1
-      ext.input_pre_seat_stack.2.2.1 ext.input_pre_seat_stack.2.2.2
-  let pre_bet := decodeU64 ext.input_pre_seat_bet.1 ext.input_pre_seat_bet.2.1
-      ext.input_pre_seat_bet.2.2.1 ext.input_pre_seat_bet.2.2.2
-  let pre_total_bet := decodeU64 ext.input_pre_seat_total_bet.1 ext.input_pre_seat_total_bet.2.1
-      ext.input_pre_seat_total_bet.2.2.1 ext.input_pre_seat_total_bet.2.2.2
+    (row : CommonRow) (ext : RaiseMethodColumns) (max_players : Nat) : TexasPokerTable :=
   let tbl : TexasPokerTable := {
     table_id := 0
     name_hash := 0
@@ -71,17 +91,15 @@ def extractPreTableFromRaiseAir
     small_blind := 0
     big_blind := 0
     ante := 0
-    version := decodeU64 row.pre_version.1 row.pre_version.2.1
-        row.pre_version.2.2.1 row.pre_version.2.2.2
+    version := decodeLimb4 row.pre_version
     round_state := RoundState.fromNat row.pre_round_state.val
     betting := {
-      current_bet := 0
+      current_bet := ext.trusted.pre_current_bet
       current_turn := ext.input_current_turn.val
       dealer_seat := row.pre_button.val
-      pot := decodeU64 row.pre_pot.1 row.pre_pot.2.1
-          row.pre_pot.2.2.1 row.pre_pot.2.2.2
+      pot := decodeLimb4 row.pre_pot
       side_pots := []
-      min_raise := 0
+      min_raise := ext.trusted.min_raise
       last_aggressor := 0
       num_raises := 0
     }
@@ -110,101 +128,49 @@ def extractPreTableFromRaiseAir
     timeout := 0
     last_action_time := 0
   }
-  tbl.update_seat ext.input_seat_index.val
-    (fun _ => { Seat.empty with
-      player := PlayerId.ofNat 1
-      stack := pre_stack
-      bet := pre_bet
-      total_bet := pre_total_bet })
+  tbl.update_seat ext.input_seat_index.val (fun _ => { Seat.empty with
+    player := PlayerId.ofNat 1
+    stack := ext.trusted.pre_seat_stack
+    bet := ext.trusted.pre_seat_bet
+    total_bet := ext.trusted.pre_seat_total_bet })
 
-/-- 从 AIR 行提取 post 状态。 -/
 def extractPostTableFromRaiseAir
-    (row : CommonRow)
-    (ext : RaiseMethodColumns)
-    (max_players : Nat)
-    (seat_index : Nat)
-    : TexasPokerTable :=
+    (row : CommonRow) (ext : RaiseMethodColumns) (max_players seat_index : Nat) :
+    TexasPokerTable :=
   let pre := extractPreTableFromRaiseAir row ext max_players
-  let post_current_bet := decodeU64 ext.output_current_bet.1 ext.output_current_bet.2.1
-      ext.output_current_bet.2.2.1 ext.output_current_bet.2.2.2
-  let post_min_raise := decodeU64 ext.output_min_raise.1 ext.output_min_raise.2.1
-      ext.output_min_raise.2.2.1 ext.output_min_raise.2.2.2
   let post := { pre with
-    version := decodeU64 row.post_version.1 row.post_version.2.1
-        row.post_version.2.2.1 row.post_version.2.2.2
+    version := decodeLimb4 row.post_version
     round_state := RoundState.fromNat row.post_round_state.val
-    betting := {
-      pre.betting with
-      pot := decodeU64 row.post_pot.1 row.post_pot.2.1
-          row.post_pot.2.2.1 row.post_pot.2.2.2
+    betting := { pre.betting with
+      pot := decodeLimb4 row.post_pot
       dealer_seat := row.post_button.val
-      current_bet := post_current_bet
-      min_raise := post_min_raise
-    }
+      current_bet := decodeLimb4 ext.output_current_bet
+      min_raise := decodeLimb4 ext.output_min_raise
+      current_turn := ext.output_current_turn.val }
   }
-  let new_stack := decodeU64 ext.output_seat_stack.1 ext.output_seat_stack.2.1
-      ext.output_seat_stack.2.2.1 ext.output_seat_stack.2.2.2
-  let new_bet := decodeU64 ext.output_seat_bet.1 ext.output_seat_bet.2.1
-      ext.output_seat_bet.2.2.1 ext.output_seat_bet.2.2.2
-  let new_total_bet := decodeU64 ext.output_seat_total_bet.1 ext.output_seat_total_bet.2.1
-      ext.output_seat_total_bet.2.2.1 ext.output_seat_total_bet.2.2.2
-  post.update_seat seat_index
-    (fun _ => { Seat.empty with
-      player := PlayerId.ofNat 1
-      stack := new_stack
-      bet := new_bet
-      total_bet := new_total_bet
-      acted_this_round := true })
+  post.update_seat seat_index (fun _ => { Seat.empty with
+    player := PlayerId.ofNat 1
+    stack := decodeLimb4 ext.output_seat_stack
+    bet := decodeLimb4 ext.output_seat_bet
+    total_bet := decodeLimb4 ext.output_seat_total_bet
+    all_in := decide (ext.output_all_in.val = M31.one.val)
+    acted_this_round := true })
 
-/-- raise AIR 的方法约束。
-
-    闭合的 Gap：
-    - AmountPositive：raise_to > 0（因 pre.current_bet = 0 ⟹ raise_to > current_bet）
-    - PotUnchanged（全 4 limb）：mid-round 时 post_pot = pre_pot
-    - Limb4DeltaRev（stack，对 call_delta）：
-      pre_stack = post_stack + delta ⟹ raise_to ≤ pre_stack + pre_bet
-    - Limb4Delta（pre_bet → post_bet，对 call_delta）+ Limb4Eq（post_bet = raise_to）：
-      post_bet = raise_to（且 delta = raise_to - pre_bet）
-    - Limb4Delta（total_bet，对 call_delta）：post_total_bet = pre_total_bet + delta
-    - Limb4Eq（current_bet）：post_current_bet = raise_to
-    - Limb4Eq（min_raise）：post_min_raise = raise_to（pre.current_bet = 0） -/
 def RaiseMethodConstraints
-    (row : CommonRow)
-    (ext : RaiseMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_raise_to : Nat)
-    (max_players : Nat)
-    : Prop :=
+    (row : CommonRow) (ext : RaiseMethodColumns)
+    (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
+    (expected_raise_to max_players : Nat) : Prop :=
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_current_turn = ext.input_seat_index ∧
   ext.input_seat_occupied = M31.one ∧
-  ext.input_raise_to.1 = ⟨expected_raise_to % 65536, by unfold M31_P; omega⟩ ∧
   ext.output_acted = M31.one ∧
-  AmountPositive ext.input_raise_to.1 ext.input_raise_to.2.1
-    ext.input_raise_to.2.2.1 ext.input_raise_to.2.2.2 ∧
+  RaiseTrustedFacts ext expected_raise_to ∧
   VersionIncrementConstraint row ∧
   RoundStateUnchanged row ∧
   RoundStateIsBetting row ∧
   ButtonUnchanged row ∧
-  -- mid-round 不收池：筹码仍在 seat.bet，pot 全 4 limb 不变
   PotUnchanged row ∧
-  -- stack 守恒：pre_stack = post_stack + call_delta
-  --   ⟹ post_stack = pre_stack - delta ⟹ delta ≤ pre_stack
-  --   ⟹ raise_to - pre_bet ≤ pre_stack ⟹ raise_to ≤ pre_stack + pre_bet
-  Limb4DeltaRev ext.input_pre_seat_stack ext.output_seat_stack ext.input_call_delta ∧
-  -- bet 守恒：post_bet = pre_bet + call_delta（与下方 post_bet = raise_to 联立
-  --   得 call_delta = raise_to - pre_bet，且 raise_to ≥ pre_bet 自动成立）
-  Limb4Delta ext.input_pre_seat_bet ext.output_seat_bet ext.input_call_delta ∧
-  -- total_bet 守恒：post_total_bet = pre_total_bet + call_delta
-  Limb4Delta ext.input_pre_seat_total_bet ext.output_seat_total_bet ext.input_call_delta ∧
-  -- bet 设值：post_bet = raise_to
-  Limb4Eq ext.output_seat_bet ext.input_raise_to ∧
-  -- current_bet 守恒：post_current_bet = raise_to
-  Limb4Eq ext.output_current_bet ext.input_raise_to ∧
-  -- min_raise 守恒：post_min_raise = raise_to（pre.current_bet = 0 ⟹ raise_to - 0 = raise_to）
-  Limb4Eq ext.output_min_raise ext.input_raise_to ∧
   let pre_table := extractPreTableFromRaiseAir row ext max_players
   let post_table := extractPostTableFromRaiseAir row ext max_players expected_seat_index
   StateRootConsistency row
@@ -212,25 +178,20 @@ def RaiseMethodConstraints
     (texasPokerTableToPreimage post_table)
 
 def RaiseAirAcceptable
-    (row : CommonRow)
-    (ext : RaiseMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_raise_to : Nat)
-    (max_players : Nat)
-    : Prop :=
+    (row : CommonRow) (ext : RaiseMethodColumns)
+    (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
+    (expected_raise_to : Nat) (expected_trusted : RaiseTrustedInputs)
+    (max_players : Nat) : Prop :=
   CommonConstraints row MethodKind.Raise ∧
+  ext.trusted = expected_trusted ∧
   RaiseMethodConstraints row ext expected_seat_index hlt expected_raise_to max_players ∧
   row.method_kind = ⟨MethodKind.Raise.toNat, MethodKind.toNat_lt_M31P MethodKind.Raise⟩ ∧
   row.is_active = M31.one
 
-/-- 从 AIR 提取 raise 参数 -/
-def extractRaiseParamsFromAir
-    (ext : RaiseMethodColumns)
-    : RaiseParams := {
+def extractRaiseParamsFromAir (ext : RaiseMethodColumns) : RaiseParams := {
   seat_index := ext.input_seat_index.val
-  raise_to := decodeU64 ext.input_raise_to.1 ext.input_raise_to.2.1
-      ext.input_raise_to.2.2.1 ext.input_raise_to.2.2.2
+  raise_to := decodeLimb4 ext.input_raise_to
+  post_current_turn := ext.output_current_turn.val
 }
 
 end PokerLean

@@ -29,6 +29,13 @@ call/raise/bet 的当前 `Contract*` 谓词是 **mid-round 局部语义**：
 尚未形式化为 Rust↔Lean 完整精化。即使在 mid-round，raise/bet 对其他玩家
 `acted_this_round` 的重置等字段也仍未在这些 Contract 中完整建模。
 
+对应的手写 Lean AIR 已同步 verifier-trusted pre-state 金额、Nat 级 checked-u64
+规则、actor `all_in` 更新、short all-in/conditional min-raise 和 `post_current_turn`；bet 仅允许
+FLOP/TURN/RIVER。但这只是 logical spec 同步：Rust physical column layout 及
+`expected_trace_row → BoundAir → transcript` 的 refinement 尚未证明。Lean bet 的
+post `current_bet`/`min_raise` 目前是 canonical post table 的逻辑重建字段，不是 Rust
+`BetRow` 的独立 physical columns。
+
 ## 快速开始
 
 ### 前置要求
@@ -133,7 +140,11 @@ extractParamsFromAir    : MethodColumns → MethodParams
 ## 当前已完成
 
 - M31、u64 limb 编解码、Contract/AIR/State 的手写 Lean 模型。
-- 21 个方法的模型内 theorem wrapper；它们均能通过 Lean 类型检查。
+- selector 0--20 的 21 个模型内 theorem wrapper；它们均能通过 Lean 类型检查。
+  当前 Rust/VM selector 21 `request_leave_after_hand` 与 22 `fold_with_proof`
+  没有 Lean 模型或定理，生产证明路径也对二者 fail-closed。
+- call/raise/bet 的 verifier-trusted 金额、checked-u64 局部规则、下一行动座位与
+  actor `all_in`、same-round pot/round 不变语义已在手写 Lean 模型中同步；bet 排除 PREFLOP。
 - State 层若干不变量、筹码守恒和座位级 Rust 算术镜像证明。
 - `TrustBoundary.lean` 中的机器可检查范围声明与 `#print axioms` 审计。
 - 删除了数学上不可能的“任意长度 Poseidon 输入精确单射”公理。
@@ -143,11 +154,12 @@ extractParamsFromAir    : MethodColumns → MethodParams
 | 层次 | 状态 | 可声称内容 |
 |------|------|------------|
 | Lean 模型内蕴含 | ✅ 已建立 | `Lean AirAcceptable → Lean Contract` |
+| 当前全部 VM selector | ❌ 未覆盖 | Lean 仅有 0--20；21/22 无模型内定理 |
 | Lean theorem 的公理依赖 | ✅ 已审计 | 剩余自定义信任根为哈希函数与状态编码函数 |
 | Rust AIR ↔ Lean AIR | ❌ 未建立 | 不能把 theorem 直接套到 `FrameworkEval::evaluate` |
 | VM 完整转移 ↔ Lean Contract | ❌ 未建立 | caller、轮次推进、结算等未完成精化 |
 | public input / state-root / trace | ❌ 未建立 | 不能声称 witness 已绑定到公开状态 |
-| Aggregator / 密码学子证明 | ❌ 未建立 | 不能声称端到端证明系统已验证 |
+| Host receipt / Aggregator / 密码学子证明的 Lean 模型 | ❌ 未建立 | Rust P05-H-core 已有 O(N) host 验证与 anchor 校验；H-source 尚未接共识来源，P05-R 仍 fail-closed；均未在 Lean 精化 |
 
 详细结论见 `PokerLean/Audit/SoundnessAudit.lean`。
 

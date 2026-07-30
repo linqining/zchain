@@ -20,7 +20,7 @@ def ContractBet
     (params : BetParams)
     (post : TexasPokerTable)
     : Prop :=
-  pre.round_state.is_betting_round ∧
+  pre.round_state.is_postflop_betting ∧
   params.seat_index < pre.max_players ∧
   pre.betting.current_turn = params.seat_index ∧
   (pre.get_seat params.seat_index).is_participating ∧
@@ -38,6 +38,8 @@ def ContractBet
   (post.get_seat params.seat_index).stack = (pre.get_seat params.seat_index).stack - params.bet_amount ∧
   (post.get_seat params.seat_index).total_bet = (pre.get_seat params.seat_index).total_bet + params.bet_amount ∧
   (post.get_seat params.seat_index).acted_this_round = true ∧
+  (post.get_seat params.seat_index).all_in = decide
+    (params.bet_amount = (pre.get_seat params.seat_index).stack) ∧
   (post.get_seat params.seat_index).folded = (pre.get_seat params.seat_index).folded ∧
   (post.get_seat params.seat_index).player = (pre.get_seat params.seat_index).player ∧
   post.version = pre.version + 1 ∧
@@ -65,7 +67,7 @@ def ContractBetPartial
     (params : BetParams)
     (post : TexasPokerTable)
     : Prop :=
-  pre.round_state.is_betting_round ∧
+  pre.round_state.is_postflop_betting ∧
   params.seat_index < pre.max_players ∧
   post.version = pre.version + 1 ∧
   post.round_state = pre.round_state ∧

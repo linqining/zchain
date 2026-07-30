@@ -3,7 +3,8 @@
 //! This module deliberately does **not** claim recursive proof compression.  It
 //! records that the native verifier accepted each method proof, then checks the
 //! business metadata and state-root continuity before a caller treats the
-//! sequence as a verified host-side chain.
+//! sequence as a locally verified host-side chain. [`ExpectedChainAnchor`] is
+//! required to bind that local result to an authenticated complete call range.
 //!
 //! A [`VerifiedChain`] is therefore an acceptance artifact for a trusted host
 //! process.  It is not transferable evidence that an Aggregator STARK verified
@@ -18,11 +19,81 @@ use crate::prover::MethodProof;
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::StateRoot;
 
+/// Consensus-derived expectation for one complete host-verified chain range.
+///
+/// This value is only a *trust anchor* when its fields come from authenticated
+/// block/transaction data (or another consensus commitment). Constructing it
+/// from the same untrusted [`crate::prove_task::ProveTask`] values being proved
+/// does not establish inclusion or batch completeness.
+#[derive(Debug, Clone)]
+pub struct ExpectedChainAnchor {
+    table_id: u64,
+    hand_id: u32,
+    first_call_seq: u32,
+    pre_state_root: StateRoot,
+    post_state_root: StateRoot,
+    pre_version: u64,
+    post_version: u64,
+    dispatch_call_digests: Vec<[u8; 32]>,
+}
+
+impl ExpectedChainAnchor {
+    /// Construct an expected complete chain range.
+    ///
+    /// The number of dispatch digests defines the exact receipt count and the
+    /// inclusive call-sequence range beginning at `first_call_seq`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty range or a call-sequence overflow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        table_id: u64,
+        hand_id: u32,
+        first_call_seq: u32,
+        pre_state_root: StateRoot,
+        post_state_root: StateRoot,
+        pre_version: u64,
+        post_version: u64,
+        dispatch_call_digests: Vec<[u8; 32]>,
+    ) -> TexasAirResult<Self> {
+        if dispatch_call_digests.is_empty() {
+            return Err(TexasAirError::RecursionError(
+                "expected chain anchor must contain at least one dispatch digest".into(),
+            ));
+        }
+        let offset = u32::try_from(dispatch_call_digests.len() - 1).map_err(|_| {
+            TexasAirError::RecursionError("expected chain range does not fit u32".into())
+        })?;
+        first_call_seq.checked_add(offset).ok_or_else(|| {
+            TexasAirError::RecursionError("expected chain call_seq range overflow".into())
+        })?;
+        Ok(Self {
+            table_id,
+            hand_id,
+            first_call_seq,
+            pre_state_root,
+            post_state_root,
+            pre_version,
+            post_version,
+            dispatch_call_digests,
+        })
+    }
+
+    fn last_call_seq(&self) -> u32 {
+        self.first_call_seq
+            + u32::try_from(self.dispatch_call_digests.len() - 1)
+                .expect("constructor checked digest count")
+    }
+}
+
 /// Receipt issued only after the native method-proof verifier succeeds.
 ///
 /// The fields are intentionally private so downstream code cannot construct a
 /// receipt from descriptor data alone. Receipt issuance is crate-private and
 /// reachable in production only from the Orchestrator after full VM replay.
+/// The caller must still anchor the task source or the chain endpoints in data
+/// authenticated by the surrounding consensus system.
 #[derive(Debug, Clone)]
 pub struct VerificationReceipt {
     kind: MethodKind,
@@ -88,7 +159,8 @@ impl VerificationReceipt {
         self.post_version
     }
 
-    /// Digest of the exact authenticated VM dispatch call accepted by the host.
+    /// Digest of the exact VM dispatch call replayed and accepted by the host.
+    /// Authentication of the task source is an external consensus responsibility.
     #[must_use]
     pub const fn dispatch_call_digest(&self) -> [u8; 32] {
         self.dispatch_call_digest
@@ -113,11 +185,13 @@ impl VerificationReceipt {
     }
 }
 
-/// Verify one method proof natively and issue a non-forgeable-in-safe-Rust receipt.
+/// Verify one method proof natively and issue an opaque safe-Rust receipt.
 ///
 /// The expected AIR and public inputs must be reconstructed independently by
-/// the verifier. This host step does not turn the result into a recursively
-/// verifiable proof.
+/// the verifier. Private fields prevent descriptor-only fabrication, but a
+/// caller can still ask the public Orchestrator to prove an arbitrary valid
+/// offline transition. Consensus provenance comes only from an external anchor.
+/// This host step does not turn the result into a recursively verifiable proof.
 ///
 /// # Errors
 ///
@@ -215,6 +289,70 @@ impl VerifiedChain {
     #[must_use]
     pub fn hand_id(&self) -> u32 {
         self.receipts[0].hand_id
+    }
+
+    /// Verify this local receipt chain against an externally authenticated range.
+    ///
+    /// Besides adjacent continuity, this binds the exact receipt count, table,
+    /// hand, inclusive call-sequence range, full-width endpoint roots/versions,
+    /// and every replayed dispatch digest. It remains an O(N) host acceptance
+    /// artifact, not a transferable recursive proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any anchored field or dispatch digest differs.
+    pub fn verify_against_anchor(&self, expected: &ExpectedChainAnchor) -> TexasAirResult<()> {
+        validate_receipt_chain(&self.receipts)?;
+        if self.receipts.len() != expected.dispatch_call_digests.len() {
+            return Err(anchor_mismatch(format!(
+                "receipt count {} does not match expected {}",
+                self.receipts.len(),
+                expected.dispatch_call_digests.len()
+            )));
+        }
+
+        let first = &self.receipts[0];
+        let last = self.receipts.last().expect("non-empty chain validated");
+        if first.table_id != expected.table_id || last.table_id != expected.table_id {
+            return Err(anchor_mismatch("table_id differs from expected anchor"));
+        }
+        if first.hand_id != expected.hand_id || last.hand_id != expected.hand_id {
+            return Err(anchor_mismatch("hand_id differs from expected anchor"));
+        }
+        if first.call_seq != expected.first_call_seq || last.call_seq != expected.last_call_seq() {
+            return Err(anchor_mismatch(format!(
+                "call_seq range {}..={} does not match expected {}..={}",
+                first.call_seq,
+                last.call_seq,
+                expected.first_call_seq,
+                expected.last_call_seq()
+            )));
+        }
+        if first.pre_state_root != expected.pre_state_root
+            || last.post_state_root != expected.post_state_root
+        {
+            return Err(anchor_mismatch(
+                "full-width state-root endpoints differ from expected anchor",
+            ));
+        }
+        if first.pre_version != expected.pre_version || last.post_version != expected.post_version {
+            return Err(anchor_mismatch(
+                "state-version endpoints differ from expected anchor",
+            ));
+        }
+        for (index, (receipt, digest)) in self
+            .receipts
+            .iter()
+            .zip(&expected.dispatch_call_digests)
+            .enumerate()
+        {
+            if receipt.dispatch_call_digest != *digest {
+                return Err(anchor_mismatch(format!(
+                    "dispatch digest differs at receipt index {index}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -327,6 +465,10 @@ fn validate_adjacent_receipts(
     Ok(())
 }
 
+fn anchor_mismatch(message: impl Into<String>) -> TexasAirError {
+    TexasAirError::RecursionError(format!("verified chain anchor mismatch: {}", message.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +506,80 @@ mod tests {
         assert_eq!(chain.len(), 2);
         assert_eq!(chain.table_id(), 7);
         assert_eq!(chain.hand_id(), 3);
+    }
+
+    #[test]
+    fn verifies_exact_consensus_anchored_range() {
+        let chain = VerifiedChain::try_from_receipts(vec![
+            receipt(7, 3, 10, 100, 101),
+            receipt(7, 3, 11, 101, 102),
+        ])
+        .unwrap();
+        let anchor = ExpectedChainAnchor::new(
+            7,
+            3,
+            10,
+            StateRoot::from_field(FieldElement::from(100u64)),
+            StateRoot::from_field(FieldElement::from(102u64)),
+            10,
+            12,
+            vec![[10; 32], [11; 32]],
+        )
+        .unwrap();
+        chain.verify_against_anchor(&anchor).unwrap();
+    }
+
+    #[test]
+    fn rejects_incomplete_or_wrong_dispatch_anchor() {
+        let chain = VerifiedChain::try_from_receipts(vec![
+            receipt(7, 3, 10, 100, 101),
+            receipt(7, 3, 11, 101, 102),
+        ])
+        .unwrap();
+        let incomplete = ExpectedChainAnchor::new(
+            7,
+            3,
+            10,
+            StateRoot::from_field(FieldElement::from(100u64)),
+            StateRoot::from_field(FieldElement::from(101u64)),
+            10,
+            11,
+            vec![[10; 32]],
+        )
+        .unwrap();
+        assert!(chain.verify_against_anchor(&incomplete).is_err());
+
+        let wrong_digest = ExpectedChainAnchor::new(
+            7,
+            3,
+            10,
+            StateRoot::from_field(FieldElement::from(100u64)),
+            StateRoot::from_field(FieldElement::from(102u64)),
+            10,
+            12,
+            vec![[10; 32], [99; 32]],
+        )
+        .unwrap();
+        assert!(chain.verify_against_anchor(&wrong_digest).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_or_overflowing_anchor_ranges() {
+        let root = StateRoot::from_field(FieldElement::ONE);
+        assert!(ExpectedChainAnchor::new(7, 3, 0, root, root, 0, 0, vec![]).is_err());
+        assert!(
+            ExpectedChainAnchor::new(
+                7,
+                3,
+                u32::MAX,
+                root,
+                root,
+                0,
+                0,
+                vec![[1; 32], [2; 32]],
+            )
+            .is_err()
+        );
     }
 
     #[test]

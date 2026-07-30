@@ -4,8 +4,8 @@
 //!
 //! - 内部持有可变的 `TexasPokerTable` 状态。
 //! - `dispatch` 委托 `poker_l1::vm::contracts::texas_poker::dispatch::dispatch`，
-//!   从 `return_value` 反序列化出 `DispatchOutput`，并覆盖 `call_seq`（合约当前
-//!   硬编码 0，这里递增以支持 state_root 链排序）。
+//!   从 `return_value` 原样反序列化出 `DispatchOutput`。VM dispatch 自己推进并写入
+//!   `call_seq`/`hand_id`；服务层不得覆盖 VM 任务字段。
 //! - `prove_task` 委托 `Orchestrator::prove_and_verify_task`（prove + 立即 verify）。
 
 use borsh::BorshDeserialize;
@@ -26,8 +26,6 @@ pub struct TexasPokerPlugin {
     table: TexasPokerTable,
     /// 证明编排器（累积已证明任务）。
     orchestrator: Orchestrator,
-    /// dispatch 调用序号（每次 dispatch 递增，用于 state_root 链排序）。
-    call_seq: u32,
     /// 累计 dispatch 次数（统计用）。
     dispatch_count: u64,
     /// 累计 prove 次数（统计用）。
@@ -41,7 +39,6 @@ impl TexasPokerPlugin {
         Self {
             table,
             orchestrator: Orchestrator::new(),
-            call_seq: 0,
             dispatch_count: 0,
             prove_count: 0,
         }
@@ -57,7 +54,10 @@ impl TexasPokerPlugin {
         self.orchestrator.proven()
     }
 
-    /// 聚合所有已证明任务为单证明（委托 Orchestrator → aggregator）。
+    /// 尝试 descriptor-only Aggregator 入口。
+    ///
+    /// 当前生产入口应返回 `UntrustedAggregationDisabled`；此方法存在是为了让服务
+    /// 明确观测 fail-closed，而不是宣称已经生成可信单聚合证明。
     ///
     /// # Errors
     ///
@@ -75,8 +75,16 @@ impl TexasPokerPlugin {
                 children.len()
             )));
         }
-        let proof = poker_texas_air::prover::aggregate_proofs(children)
-            .map_err(|e| PluginError::Prover(e.to_string()))?;
+        let proof = poker_texas_air::prover::aggregate_proofs(children).map_err(|error| {
+            if matches!(
+                error,
+                poker_texas_air::error::TexasAirError::UntrustedAggregationDisabled
+            ) {
+                PluginError::UntrustedAggregationDisabled
+            } else {
+                PluginError::Prover(error.to_string())
+            }
+        })?;
         poker_texas_air::verifier::verify_aggregator(proof)
             .map_err(|e| PluginError::Prover(e.to_string()))
     }
@@ -112,13 +120,9 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
         let output: DispatchOutput = BorshDeserialize::try_from_slice(&result.return_value)
             .map_err(|e| PluginError::Decode(format!("{e}")))?;
 
-        // 覆盖 call_seq（合约硬编码 0；这里递增以支持 state_root 链排序）
-        let prove_task = output.prove_task.as_ref().map(|t| {
-            let mut t = t.clone();
-            t.call_seq = self.call_seq;
-            t
-        });
-        self.call_seq = self.call_seq.wrapping_add(1);
+        // 任务元数据由 VM dispatch 写入。原样消费，确保 Orchestrator 的完整
+        // dispatch replay 能逐字段匹配 regenerated task；本地服务不声称 block inclusion。
+        let prove_task = output.prove_task.clone();
         self.dispatch_count += 1;
 
         Ok(DispatchOutcome { output, prove_task })
@@ -134,6 +138,8 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
     }
 
     fn verify_chain(&self) -> PluginResult<()> {
+        // 这里只检查本地 receipt 的相邻连续性。服务尚未接入共识来源的
+        // ExpectedChainAnchor，因此不能据此声称 block inclusion 或完整 batch。
         self.orchestrator
             .verify_chain()
             .map_err(|e| PluginError::Prover(e.to_string()))

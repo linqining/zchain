@@ -1,4 +1,4 @@
-//! B 档 — 玩家动作方法 AIRs（8 个）。
+//! B 档 — 已启用的玩家动作 AIRs（8 个）。
 //!
 //! - [`fold`] — 玩家主动 fold（弃牌）
 //! - [`check`] — 玩家过牌（不下注且无需跟注）
@@ -24,5 +24,4 @@ pub mod fold;
 pub mod force_fold;
 pub mod kick_player;
 pub mod raise;
-pub mod request_leave_after_hand;
 pub(crate) mod validation;

@@ -218,13 +218,10 @@ impl FrameworkEval for CreateTableAir {
         // 8. 业务约束 6：output_round_state == ROUND_WAITING (== 0)
         eval.add_constraint(is_active.clone() * output_round_state.clone());
 
-        // 9. 业务约束 7：post_version == pre_version + 1
-        //    （post_version 已在通用列 COL_POST_VERSION_BASE 读取，这里通过 common 间接约束）
-        //    TODO 阶段 2：显式约束 version += 1（需读取 pre/post version limbs）
+        // 9. post_version == pre_version + 1 已由 CommonConstraints 完整约束。
 
-        // 10. 业务约束 8：state_root 一致性
-        //     TODO 阶段 2：完整实现 Poseidon252(pre/post preimage) == pre/post_state_root
-        //     这需要嵌入 PoseidonAir 子组件，作为阶段 2 的工作
+        // 10. state_root 的 full-width preimage/hash 自洽目前由生产 host verifier
+        //     检查并混入 transcript；本 AIR 只约束域分隔 M31 投影，未嵌入 Poseidon AIR。
 
         // Suppress unused warnings
         let _ = (
@@ -283,8 +280,9 @@ impl CreateTableRow {
         pre_version: u64,
         post_version: u64,
     ) -> Self {
-        // 计算 name 的 Poseidon252 哈希（host 端，AIR 内由 PoseidonAir 子组件验证）
-        // 暂时用 0 占位（阶段 2 接入 PoseidonAir 后填入真实哈希）
+        // 保留的 name-hash 列尚未承载 Poseidon 子证明，固定为 0 以避免自由 witness。
+        // 生产 Orchestrator 通过完整 VM replay、canonical table root 和 trusted-row
+        // 绑定名称语义；不能把此占位列解释为 AIR 内 name hash 验证。
         let name_hash_field = crate::state_root::StateRoot::from_field(
             starknet_ff::FieldElement::ZERO, // TODO 阶段 2: poseidon_string(&input.name)
         );

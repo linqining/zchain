@@ -21,6 +21,9 @@ use crate::public_inputs::TexasPublicInputs;
 
 /// 验证 `create_table` 方法的 L1 proof。
 ///
+/// 调用方必须独立重建 `expected_air` 与完整 trusted row。本函数不认证任务来自
+/// 共识区块，也不替代 Orchestrator 的完整 VM dispatch replay。
+///
 /// # 参数
 /// - `proof`: 由 [`crate::prover::prove_create_table`] 生成的 proof
 ///
@@ -102,8 +105,10 @@ pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
 
 /// 泛型 method verify — 验证任意 method AIR 的 L1 proof。
 ///
-/// 阶段 2-4 通用 verify 入口。所有 17 个新方法（lifecycle/actions/crypto）
-/// 通过此函数验证 proof，无需为每个方法定义专用 verify 函数。
+/// 这是低层 proof verifier，不等同于完整 VM 语义或共识来源验证。下注 action AIR
+/// 会通过 [`TexasAir::validate_public_inputs`] 重建 canonical table/action；多数 legacy
+/// AIR 仍使用默认 no-op hook。需要 verifier-issued receipt 的生产调用方应走
+/// [`crate::orchestrator::Orchestrator`]，由其先完整 replay VM dispatch。
 ///
 /// # 参数
 /// - `proof`: 由 [`crate::prover::prove_method`] 生成的 `MethodProof<A>`
@@ -137,8 +142,15 @@ where
     A: TexasAir,
 {
     let config = PcsConfig::default();
+    let statement = expected_air.statement();
+    if !statement.kind.is_production_air_enabled() {
+        return Err(TexasAirError::NotImplemented(format!(
+            "{} is a registered selector without an enabled production AIR",
+            statement.kind.method_name()
+        )));
+    }
     expected_public_inputs.verify_roots()?;
-    expected_public_inputs.verify_air_statement(&expected_air.statement())?;
+    expected_public_inputs.verify_air_statement(&statement)?;
     if validate_canonical_state {
         expected_air.validate_public_inputs(expected_public_inputs)?;
     }

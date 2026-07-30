@@ -26,14 +26,19 @@ def ContractRaise
   ¬ (pre.get_seat params.seat_index).folded ∧
   ¬ (pre.get_seat params.seat_index).all_in ∧
   params.raise_to > pre.betting.current_bet ∧
+  params.raise_to > (pre.get_seat params.seat_index).bet ∧
   (params.raise_to - pre.betting.current_bet ≥ pre.betting.min_raise ∨
     params.raise_to - (pre.get_seat params.seat_index).bet =
       (pre.get_seat params.seat_index).stack) ∧
-  params.raise_to ≤ (pre.get_seat params.seat_index).stack + (pre.get_seat params.seat_index).bet ∧
+  params.raise_to - (pre.get_seat params.seat_index).bet ≤
+    (pre.get_seat params.seat_index).stack ∧
   (post.get_seat params.seat_index).bet = params.raise_to ∧
   (post.get_seat params.seat_index).stack = (pre.get_seat params.seat_index).stack - (params.raise_to - (pre.get_seat params.seat_index).bet) ∧
   (post.get_seat params.seat_index).total_bet = (pre.get_seat params.seat_index).total_bet + (params.raise_to - (pre.get_seat params.seat_index).bet) ∧
   (post.get_seat params.seat_index).acted_this_round = true ∧
+  (post.get_seat params.seat_index).all_in = decide
+    (params.raise_to - (pre.get_seat params.seat_index).bet =
+      (pre.get_seat params.seat_index).stack) ∧
   (post.get_seat params.seat_index).folded = (pre.get_seat params.seat_index).folded ∧
   (post.get_seat params.seat_index).player = (pre.get_seat params.seat_index).player ∧
   post.version = pre.version + 1 ∧

@@ -1,8 +1,8 @@
-//! `HandRunner` —— 按真实牌局阶段顺序驱动合约 dispatch + 证明，跑通完整流程。
+//! `HandRunner` —— 驱动真实合约 dispatch + host proof verification 的覆盖片段。
 //!
 //! 复用 `poker_l1` 的 dispatch 产生 pre/post 快照（状态转移正确性来自合约），
 //! 每步把 `ProveTask` 喂给 `Orchestrator`（prove + 立即 verify），最后校验整条
-//! state_root 链并可选聚合。
+//! 未外部锚定的本地 state_root 连续性，并确认 descriptor-only 聚合保持 fail-closed。
 //!
 //! ## 当前编排的序列
 //!
@@ -15,10 +15,12 @@
 //!   → addon（某玩家）
 //!   → rebuy（某玩家）
 //!   → leave_table（某玩家）
-//!   → reset_for_next_hand
 //! ```
 //!
-//! 覆盖 lifecycle + funds 共 7 个方法，每步产出真实 ProveTask 并证明。
+//! 覆盖 lifecycle + funds 的 6 步方法片段，每步产出真实 ProveTask 并证明。
+//! 这不是完整一手牌：没有 start_hand、下注轮结束、settlement 或可信递归聚合。
+//! `kick_player` 在 WAITING 下可能内部触发 reset/version 多步变化，也不纳入此单步
+//! AIR 成功路径。
 //!
 //! ## 关于完整 shuffle/reveal/reconstruct 牌局
 //!
@@ -33,33 +35,32 @@ use blstrs::G1Projective;
 use borsh::BorshSerialize;
 use group::Group;
 
+use poker_l1::Address;
 use poker_l1::object_model::ObjectID;
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    AddonArgs, CreateTableArgs, JoinTableArgs, KickPlayerArgs, LeaveTableArgs, RebuyArgs,
-    selectors,
+    AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs, selectors,
 };
 use poker_l1::vm::contracts::texas_poker::types::{TableConfig, TexasPokerTable};
 use poker_protocol::crypto::types::ECPoint;
-use poker_l1::Address;
 
 use crate::contracts::TexasPokerPlugin;
-use crate::plugin::ContractPlugin;
+use crate::plugin::{ContractPlugin, PluginError};
 use crate::{ServiceError, ServiceResult};
 
-/// 一手牌跑通后的产出摘要。
+/// Runner 覆盖片段的产出摘要。
 #[derive(Debug, Clone)]
 pub struct HandReport {
     /// 每步的方法名 + 是否 prove 成功。
     pub steps: Vec<(&'static str, bool)>,
     /// state_root 链校验是否通过。
     pub chain_ok: bool,
-    /// 聚合证明是否成功（若尝试）。
+    /// descriptor-only 聚合入口是否意外成功（当前预期为 `Some(false)`）。
     pub aggregate_ok: Option<bool>,
     /// 最终统计。
     pub stats: crate::PluginStats,
 }
 
-/// HandRunner：驱动 texas_poker 插件跑通一手牌的完整证明流程。
+/// HandRunner：驱动 texas_poker 插件跑通预设 VM→host-verifier 覆盖片段。
 pub struct HandRunner {
     /// 玩家地址（2 个）。
     players: [Address; 2],
@@ -83,9 +84,9 @@ impl HandRunner {
         }
     }
 
-    /// 跑通一手牌：返回 (plugin, report)。
+    /// 跑通预设 VM→host-verifier 覆盖片段：返回 (plugin, report)。
     ///
-    /// plugin 保留最终状态，可供进一步观察 / 聚合。
+    /// plugin 保留最终状态，可供进一步观察；生产聚合入口当前应保持 fail-closed。
     ///
     /// # Errors
     ///
@@ -129,7 +130,10 @@ impl HandRunner {
         }
 
         // ===== Step 3: addon（玩家 0 加 200 到 pending）=====
-        let addon_args = AddonArgs { seat_index: 0, amount: 200 };
+        let addon_args = AddonArgs {
+            seat_index: 0,
+            amount: 200,
+        };
         dispatch_and_prove(
             &mut plugin,
             self.players[0],
@@ -140,7 +144,10 @@ impl HandRunner {
         )?;
 
         // ===== Step 4: rebuy（玩家 1 立即加 300 到 stack）=====
-        let rebuy_args = RebuyArgs { seat_index: 1, amount: 300 };
+        let rebuy_args = RebuyArgs {
+            seat_index: 1,
+            amount: 300,
+        };
         dispatch_and_prove(
             &mut plugin,
             self.players[1],
@@ -161,37 +168,36 @@ impl HandRunner {
             &mut steps,
         )?;
 
-        // ===== Step 6: reset_for_next_hand（创建者重置）=====
-        // 重置前先 kick 玩家 1（reset 要求活跃占用座数满足，演示 kick 路径）。
-        // 注：kick 是 admin 操作，且 reset 会清理桌台。
-        let kick_args = KickPlayerArgs { seat_index: 1, reason: 1 };
-        dispatch_and_prove(
-            &mut plugin,
-            self.creator,
-            &selectors::kick_player(),
-            &kick_args,
-            "kick_player",
-            &mut steps,
-        )?;
-
-        dispatch_and_prove_empty(
-            &mut plugin,
-            self.creator,
-            &selectors::reset_for_next_hand(),
-            "reset_for_next_hand",
-            &mut steps,
-        )?;
-
         // ===== 校验 state_root 链 + 尝试聚合 =====
         let chain_ok = plugin.verify_chain().is_ok();
         let aggregate_ok = if plugin.proven().len() >= 2 {
-            Some(plugin.aggregate().is_ok())
+            match plugin.aggregate() {
+                Ok(()) => {
+                    return Err(ServiceError::Runner(
+                        "untrusted descriptor aggregator unexpectedly succeeded".into(),
+                    ));
+                }
+                Err(PluginError::UntrustedAggregationDisabled) => Some(false),
+                Err(error) => {
+                    return Err(ServiceError::Runner(format!(
+                        "descriptor aggregator returned an unexpected error: {error}"
+                    )));
+                }
+            }
         } else {
             None
         };
 
         let stats = plugin.stats();
-        Ok((plugin, HandReport { steps, chain_ok, aggregate_ok, stats }))
+        Ok((
+            plugin,
+            HandReport {
+                steps,
+                chain_ok,
+                aggregate_ok,
+                stats,
+            },
+        ))
     }
 }
 
@@ -210,33 +216,16 @@ fn dispatch_and_prove<A: BorshSerialize>(
         .map_err(|e| ServiceError::Runner(format!("borsh encode {name}: {e}")))?;
     let outcome = plugin
         .dispatch(caller, selector, &args_bytes)
-        .map_err(ServiceError::Plugin)?;
+        .map_err(|error| ServiceError::Runner(format!("{name} dispatch: {error}")))?;
     if let Some(task) = &outcome.prove_task {
-        plugin.prove_task(task).map_err(ServiceError::Plugin)?;
+        plugin
+            .prove_task(task)
+            .map_err(|error| ServiceError::Runner(format!("{name} prove/verify: {error}")))?;
         steps.push((name, true));
     } else {
         // 无 prove_task（如 tick）—— 记录为成功但不计 prove
         steps.push((name, true));
     }
-    Ok(())
-}
-
-/// 同上，但用于无参数方法（start_hand / reset_for_next_hand）。
-fn dispatch_and_prove_empty(
-    plugin: &mut TexasPokerPlugin,
-    caller: Address,
-    selector: &[u8; 32],
-    name: &'static str,
-    steps: &mut Vec<(&'static str, bool)>,
-) -> ServiceResult<()> {
-    // 空 args：dispatch 内部对无参方法用 borsh 空切片解码，多数能接受。
-    let outcome = plugin
-        .dispatch(caller, selector, &[])
-        .map_err(ServiceError::Plugin)?;
-    if let Some(task) = &outcome.prove_task {
-        plugin.prove_task(task).map_err(ServiceError::Plugin)?;
-    }
-    steps.push((name, true));
     Ok(())
 }
 

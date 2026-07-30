@@ -21,6 +21,9 @@ pub enum PluginError {
     /// 状态前置条件不满足（如阶段顺序错误）。
     #[error("precondition: {0}")]
     Precondition(String),
+    /// descriptor-only 聚合被生产安全边界按预期拒绝。
+    #[error("untrusted descriptor-only aggregation is disabled")]
+    UntrustedAggregationDisabled,
 }
 
 /// 插件结果别名。
@@ -54,7 +57,8 @@ pub struct PluginStats {
 /// - `dispatch` 委托合约自身的 dispatch 函数，并从 `return_value` 反序列化出
 ///   `DispatchOutput`（borsh 跨 crate 兼容）。
 /// - `prove` 把 `ProveTask` 交给 `poker_texas_air::Orchestrator`（prove + 立即 verify）。
-/// - `verify_chain` 校验已证明任务的 state_root 链式一致性。
+/// - `verify_chain` 校验已证明任务的本地 state_root 相邻连续性；是否外部锚定由具体
+///   实现另行声明。
 pub trait ContractPlugin: Send + Sync {
     /// 插件名（如 `"texas_poker"`）。
     fn name(&self) -> &str;
@@ -75,7 +79,7 @@ pub trait ContractPlugin: Send + Sync {
         task: &poker_texas_air::prove_task::ProveTask,
     ) -> PluginResult<ProvenTask>;
 
-    /// 校验已证明任务的 state_root 链式一致性。
+    /// 校验已证明任务的本地 state_root 链式一致性。
     fn verify_chain(&self) -> PluginResult<()>;
 
     /// 聚合所有已证明任务为单证明（可选；默认未实现）。

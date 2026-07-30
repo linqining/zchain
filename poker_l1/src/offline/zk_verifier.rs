@@ -628,6 +628,15 @@ impl ZkVerifierRegistry {
     }
 }
 
+/// 为不关注 Stwo proof 格式的上层单元测试注册 scheme 1 stub。
+///
+/// 生产注册路径仍使用 [`register_stwo_verifier`]；此 helper 不会进入生产构建。
+#[cfg(test)]
+pub(crate) fn register_test_only_stwo_stub_verifier(registry: &mut ZkVerifierRegistry) {
+    #[allow(deprecated)]
+    registry.register(Arc::new(StubVerifier::new(SCHEME_STWO)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,6 +738,24 @@ mod tests {
         registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
         let public_io = make_public_io(1, 0);
         let result = registry.zk_verify(crate::DEFAULT_CHAIN_ID, 99, &[], &public_io, 3, 1000);
+        assert!(matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))));
+    }
+
+    #[test]
+    fn test_stwo_registry_rejects_malformed_proof_in_stub_status() {
+        let mut registry = ZkVerifierRegistry::new();
+        register_stwo_verifier(&mut registry);
+        let public_io = make_public_io(1, 0);
+
+        let result = registry.zk_verify(
+            crate::DEFAULT_CHAIN_ID,
+            SCHEME_STWO,
+            &[0xAA; 64],
+            &public_io,
+            3,
+            1000,
+        );
+
         assert!(matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))));
     }
 

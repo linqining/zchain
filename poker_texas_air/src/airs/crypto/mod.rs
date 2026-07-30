@@ -25,7 +25,6 @@
 //! 所有 crypto AIR 共享通用 37 列 + 业务列（每个方法自定义）。
 
 pub mod join_and_shuffle;
-pub mod fold_with_proof;
 pub mod leave_with_proof;
 pub mod submit_player_reveal_tokens;
 pub mod submit_reconstruct_deck;

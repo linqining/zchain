@@ -354,6 +354,12 @@ def RoundStateIsBetting (row : CommonRow) : Prop :=
   row.pre_round_state.val = 2 ∨ row.pre_round_state.val = 3 ∨
   row.pre_round_state.val = 4 ∨ row.pre_round_state.val = 5
 
+/-- bet 专用轮次约束：只允许 FLOP/TURN/RIVER，排除 PREFLOP。 -/
+def RoundStateIsPostflopBetting (row : CommonRow) : Prop :=
+  row.is_active = M31.one →
+  row.pre_round_state.val = 3 ∨ row.pre_round_state.val = 4 ∨
+  row.pre_round_state.val = 5
+
 /-- round_state 不是 betting 轮（即 ROUND_WAITING=0）约束。 -/
 def RoundStateIsWaiting (row : CommonRow) : Prop :=
   row.is_active = M31.one → row.pre_round_state.val = 0

@@ -59,7 +59,7 @@ import PokerLean.Audit.SoundnessAudit
 
 namespace PokerLean
 
-/-! ## create_table: ✅ AIR 约束是 sound 的 -/
+/-! ## create_table: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- 主定理：create_table AIR 约束蕴含合约语义（soundness） -/
 theorem create_table_soundness_main
@@ -81,7 +81,7 @@ theorem full_create_table_soundness_main
       (extractPostTableFromCreateTableAir row ext ext.maxPlayers 0) :=
   full_create_table_soundness row ext h
 
-/-! ## fold: ✅ AIR 约束是 sound 的 -/
+/-! ## fold: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- fold AIR soundness：AIR 约束蕴含合约语义 -/
 theorem fold_sound_main :
@@ -115,7 +115,7 @@ theorem contract_fold_implies_partial_main
     ContractFoldPartial pre params post :=
   contract_fold_implies_partial pre params post h
 
-/-! ## check: ✅ AIR 约束是 sound 的 -/
+/-! ## check: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- check AIR soundness：AIR 约束蕴含合约语义 -/
 theorem check_sound_main :
@@ -144,13 +144,11 @@ theorem contract_check_implies_partial_main
 theorem call_sound_main :
   ∀ (row : CommonRow) (ext : CallMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
-    (expected_call_amount : Nat) (max_players : Nat)
+    (expected_call_amount : Nat) (expected_trusted : CallTrustedInputs)
+    (max_players : Nat)
     (hseat : expected_seat_index < max_players),
-    CallAirAcceptable row ext expected_seat_index hlt expected_call_amount max_players →
-    Limb4Range16 ext.input_call_amount →
-    Limb4Range16 ext.output_seat_stack →
-    Limb4Range16 ext.input_pre_seat_bet →
-    Limb4Range16 ext.input_pre_seat_total_bet →
+    CallAirAcceptable row ext expected_seat_index hlt expected_call_amount
+      expected_trusted max_players →
     ContractCall
       (extractPreTableFromCallAir row ext max_players)
       (extractCallParamsFromAir ext)
@@ -170,13 +168,11 @@ theorem contract_call_implies_partial_main
 theorem raise_sound_main :
   ∀ (row : CommonRow) (ext : RaiseMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
-    (expected_raise_to : Nat) (max_players : Nat)
+    (expected_raise_to : Nat) (expected_trusted : RaiseTrustedInputs)
+    (max_players : Nat)
     (hseat : expected_seat_index < max_players),
-    RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to max_players →
-    Limb4Range16 ext.input_call_delta →
-    Limb4Range16 ext.output_seat_stack →
-    Limb4Range16 ext.input_pre_seat_bet →
-    Limb4Range16 ext.input_pre_seat_total_bet →
+    RaiseAirAcceptable row ext expected_seat_index hlt expected_raise_to
+      expected_trusted max_players →
     ContractRaise
       (extractPreTableFromRaiseAir row ext max_players)
       (extractRaiseParamsFromAir ext)
@@ -196,12 +192,11 @@ theorem contract_raise_implies_partial_main
 theorem bet_sound_main :
   ∀ (row : CommonRow) (ext : BetMethodColumns)
     (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
-    (expected_bet_amount : Nat) (max_players : Nat)
+    (expected_bet_amount : Nat) (expected_trusted : BetTrustedInputs)
+    (max_players : Nat)
     (hseat : expected_seat_index < max_players),
-    BetAirAcceptable row ext expected_seat_index hlt expected_bet_amount max_players →
-    Limb4Range16 ext.input_bet_amount →
-    Limb4Range16 ext.output_seat_stack →
-    Limb4Range16 ext.input_pre_seat_total_bet →
+    BetAirAcceptable row ext expected_seat_index hlt expected_bet_amount
+      expected_trusted max_players →
     ContractBet
       (extractPreTableFromBetAir row ext max_players)
       (extractBetParamsFromAir ext)
@@ -215,7 +210,7 @@ theorem contract_bet_implies_partial_main
     ContractBetPartial pre params post :=
   contract_bet_implies_partial pre params post h
 
-/-! ## auto_fold / force_fold / kick_player: ✅ AIR 约束是 sound 的 -/
+/-! ## auto_fold / force_fold / kick_player: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- auto_fold AIR soundness：AIR 约束蕴含合约语义 -/
 theorem auto_fold_sound_main :
@@ -260,7 +255,7 @@ theorem kick_player_sound_main :
       (extractPostTableFromKickPlayerAir row ext max_players expected_seat_index) :=
   kick_player_air_sound
 
-/-! ## join_table: ✅ AIR 约束是 sound 的 -/
+/-! ## join_table: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- join_table AIR soundness：AIR 约束蕴含合约语义 -/
 theorem join_table_sound_main :
@@ -275,7 +270,7 @@ theorem join_table_sound_main :
       (extractPostTableFromJoinTableAir row ext max_players expected_seat_index) :=
   join_table_air_sound
 
-/-! ## leave_table: ✅ AIR 约束是 sound 的 -/
+/-! ## leave_table: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- leave_table AIR soundness：AIR 约束蕴含合约语义 -/
 theorem leave_table_sound_main :
@@ -290,7 +285,7 @@ theorem leave_table_sound_main :
       (extractPostTableFromLeaveTableAir row ext max_players expected_seat_index) :=
   leave_table_air_sound
 
-/-! ## start_hand / tick / reset_for_next_hand: ✅ AIR 约束是 sound 的 -/
+/-! ## start_hand / tick / reset_for_next_hand: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- start_hand AIR soundness：AIR 约束蕴含合约语义 -/
 theorem start_hand_sound_main :
@@ -360,7 +355,7 @@ theorem rebuy_sound_main :
       (extractPostTableFromRebuyAir row ext max_players expected_seat_index) :=
   rebuy_air_sound
 
-/-! ## 密码学方法（Mental Poker 协议）: ✅ AIR 约束是 sound 的 -/
+/-! ## 密码学方法（Mental Poker 协议）: ✅ 手写 Lean 模型内 AIR 约束是 sound 的 -/
 
 /-- join_and_shuffle AIR soundness：AIR 约束蕴含合约语义 -/
 theorem join_and_shuffle_sound_main :
@@ -431,9 +426,11 @@ theorem submit_reconstruct_deck_sound_main :
       (extractPostTableFromCryptoAir row max_players 0 0 ext.input_reconstruct_state.val) :=
   submit_reconstruct_deck_air_sound
 
-/-! ## 结论：21 个模型内定理，不是 21 个实现级证明
+/-! ## 结论：selector 0--20 的 21 个模型内定理，不是实现级证明
 
-本文件导出了 21 个方法的 Lean theorem wrapper。它们证明的是手写
+本文件导出了 selector 0--20 的 21 个 Lean theorem wrapper。Rust/VM 当前还有
+selector 21 `request_leave_after_hand` 与 22 `fold_with_proof`，本文件未覆盖。
+已有 wrapper 证明的是手写
 `*AirAcceptable` 谓词到手写 `Contract*` 谓词的模型内蕴含关系。
 
 这些定理目前**不能**被表述为：
@@ -444,7 +441,7 @@ theorem submit_reconstruct_deck_sound_main :
 * Aggregator 已递归验证全部 method proof。
 
 此外，若干 theorem 仍显式需要 `Limb4Range16`、seat index 范围等额外前提。
-当前可信声明、未覆盖层次以及 21 个底层 theorem 的 `#print axioms` 输出见
+当前可信声明、未覆盖 selector/层次以及 21 个底层 theorem 的 `#print axioms` 输出见
 `PokerLean.Audit.TrustBoundary`。只有建立 Rust AIR→Lean AIR 与 VM→Lean Contract
 的精化桥之后，才能升级为实现级 soundness 结论。
 -/

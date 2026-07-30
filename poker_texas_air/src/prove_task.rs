@@ -5,7 +5,8 @@
 //! 合约执行层（`poker_l1` dispatch）每次成功执行一个 method 后，产出一个
 //! [`ProveTask`]，序列化进 `DispatchResult.return_value`（与 events 一起）。
 //! 链下 Orchestrator（[`crate::orchestrator`]）消费任务队列，为每个任务
-//! 生成 method proof，并聚合为单个 final proof。
+//! 生成 method proof，并在 host 端逐个原生验证后形成 [`crate::verified_chain::VerifiedChain`]。
+//! 当前不存在可信的单个 recursive/final aggregate proof。
 //!
 //! ## 设计原则
 //!
@@ -32,9 +33,10 @@ use crate::method_kind::MethodKind;
 
 /// Domain-separated digest of the exact VM dispatch call carried by a task.
 ///
-/// The digest commits to the authenticated dispatch context, selector, and raw
-/// Borsh arguments.  Method proofs mix it into Fiat-Shamir public inputs so a
-/// receipt cannot be detached from the VM call that was replayed by the host.
+/// The digest commits to the task-carried dispatch context, selector, and raw
+/// Borsh arguments. Method proofs mix it into Fiat-Shamir public inputs so a
+/// receipt cannot be detached from the VM call replayed by the host. The digest
+/// does not by itself authenticate that the task came from a consensus block.
 pub fn dispatch_call_digest(
     context: &poker_l1::vm::contracts::dispatch::DispatchContext,
     selector: &[u8; 32],
@@ -62,7 +64,10 @@ pub struct ProveTask {
     pub method_kind: MethodKind,
     /// 方法业务输入。
     pub method_input: MethodInput,
-    /// 执行该调用时经过交易层认证的完整 dispatch 上下文。
+    /// VM dispatch 记录的完整调用上下文。
+    ///
+    /// Orchestrator 会据此重放权限和业务逻辑，但不会独立证明该上下文已被交易层或
+    /// 共识层认证；生产调用方必须通过外部 block/receipt 锚提供来源保证。
     pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
     /// VM 实际路由的原始 selector。
     pub selector: [u8; 32],

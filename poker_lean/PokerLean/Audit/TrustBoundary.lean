@@ -21,15 +21,25 @@ import PokerLean.Proofs.CryptoSoundness
 * 未建立：真实 VM 完整状态转移精化到 Lean Contract/State 模型；
 * 未建立：公开输入、state-root、聚合器和密码学子证明的端到端验证。
 
+Lean `MethodKind` 当前只登记 selector 0--20 的 21 个手写模型。Rust/VM 已扩展到
+23 个 selector；21 `request_leave_after_hand` 与 22 `fold_with_proof` 没有 Lean
+`AirAcceptable → Contract` 定理，且 Rust 生产证明路径目前对二者 fail-closed。
+
 其中 call/raise/bet 的 `Contract*` 与 `*AirAcceptable` 现只表达
 mid-round 局部片段（pot/round 不变）。end-of-round 收池、round 推进与
 settlement 不在这些定理的结论中。
 
-Rust 生产路径的 `expected_trace_row → BoundAir → transcript`
-绑定，以及原生验证后签发 `VerificationReceipt` 并构造
-`VerifiedChain` 的 host-side 流程，也尚无对应 Lean 模型/定理。
+这三个手写逻辑 AIR 已包含 verifier-trusted pre-state 金额、Nat 级 checked-u64
+算术事实、actor `all_in` 更新和 `post_current_turn` 绑定；bet 只允许
+FLOP/TURN/RIVER。它们仍不是 Rust
+physical row layout 的形式化镜像。尤其 bet 的 post `current_bet`/`min_raise` 是
+canonical post table 的逻辑重建字段，不是当前 Rust `BetRow` 的独立物理列。
 
-文件末尾的 `#print axioms` 会在 Lean 编译本模块时检查并打印 21 个模型内
+Rust 生产路径的 `expected_trace_row → BoundAir → transcript`
+绑定，以及已实现的“原生验证后签发 `VerificationReceipt` 并构造
+`VerifiedChain`”host-side 流程，尚无对应 Lean 模型/定理。
+
+文件末尾的 `#print axioms` 会在 Lean 编译本模块时检查并打印上述 21 个模型内
 soundness 定理的实际公理依赖。当前预期的自定义信任根只有：
 `PokerLean.poseidon_hash` 与 `PokerLean.texasPokerTableToPreimage`。
 -/
@@ -39,6 +49,7 @@ namespace PokerLean.Audit
 /-- 对当前证明覆盖范围的可执行声明。 -/
 structure ClaimScope where
   leanModelImplications : Bool
+  allVmSelectorsCovered : Bool
   rustAirEquivalence : Bool
   vmEndToEndRefinement : Bool
   publicInputAndRootBinding : Bool
@@ -49,6 +60,7 @@ deriving Repr, DecidableEq
 /-- 当前仓库能够诚实声称的覆盖范围。 -/
 def currentClaimScope : ClaimScope where
   leanModelImplications := true
+  allVmSelectorsCovered := false
   rustAirEquivalence := false
   vmEndToEndRefinement := false
   publicInputAndRootBinding := false
@@ -61,6 +73,7 @@ theorem lean_model_implications_are_in_scope :
 
 /-- 当前结果不能被解释为 Rust AIR 到 VM 的端到端形式化验证。 -/
 theorem end_to_end_claim_is_out_of_scope :
+    currentClaimScope.allVmSelectorsCovered = false ∧
     currentClaimScope.rustAirEquivalence = false ∧
     currentClaimScope.vmEndToEndRefinement = false ∧
     currentClaimScope.publicInputAndRootBinding = false ∧
@@ -74,7 +87,7 @@ def remainingCustomTrustRoots : List String :=
 
 end PokerLean.Audit
 
-/-! ## 21 个模型内 soundness 定理的机器审计 -/
+/-! ## selector 0--20 的 21 个模型内 soundness 定理机器审计 -/
 
 #print axioms PokerLean.create_table_soundness
 #print axioms PokerLean.fold_air_sound

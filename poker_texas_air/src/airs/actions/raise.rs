@@ -21,7 +21,7 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 46 个（对齐 Lean `RaiseMethodColumns`）：
+//! - 业务列 47 个（对齐 Lean `RaiseMethodColumns`）：
 //!   `INPUT_SEAT_INDEX`, `INPUT_CURRENT_TURN`, `INPUT_SEAT_OCCUPIED`,
 //!   `INPUT_RAISE_TO_BASE[4]`, `INPUT_PRE_SEAT_STACK_BASE[4]`,
 //!   `INPUT_PRE_SEAT_BET_BASE[4]`, `INPUT_PRE_SEAT_TOTAL_BET_BASE[4]`,

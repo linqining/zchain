@@ -147,7 +147,7 @@ impl TexasRecursivePublicInputs {
 /// 从未被 mix 进 Fiat-Shamir channel，导致证明与这些值之间无密码学绑定（攻击者可替换
 /// state_root 而证明仍验证通过）。
 ///
-/// 修复（路径 A）：把 pre/post table 的完整 **preimage**（24 个 FieldElement）+
+/// 修复（路径 A）：把 pre/post table 的完整、变长 canonical Borsh **preimage** +
 /// 重算的 `pre_state_root`/`post_state_root` + 元数据，按**固定顺序** mix 进 channel。
 /// 验证方（链下/L1）随后用被审计的 `starknet_crypto::poseidon_hash_many` 重算
 /// `Poseidon252(pre_image)` 并与 `pre_state_root` 比对——密码学绑定由 Fiat-Shamir +
@@ -157,9 +157,9 @@ impl TexasRecursivePublicInputs {
 /// （阶段 1 已补全所有 9 个 stub，preimage 含完整状态）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TexasPublicInputs {
-    /// 调用前表台的完整 state_root preimage（24 个 FieldElement）。
+    /// 调用前表台的完整 canonical state-root preimage（变长）。
     pub pre_image: Vec<FieldElement>,
-    /// 调用后表台的完整 state_root preimage（24 个 FieldElement）。
+    /// 调用后表台的完整 canonical state-root preimage（变长）。
     pub post_image: Vec<FieldElement>,
     /// 调用前 state_root = `Poseidon252(pre_image)`（验证方重算并比对）。
     pub pre_state_root: StateRoot,
@@ -177,7 +177,8 @@ pub struct TexasPublicInputs {
     pub pre_version: u64,
     /// State version after execution.
     pub post_version: u64,
-    /// Digest of the authenticated VM dispatch context + selector + raw args.
+    /// Digest of the replayed VM dispatch context + selector + raw args.
+    /// Task provenance is authenticated only by an external consensus anchor.
     pub dispatch_call_digest: [u8; 32],
     /// Verifier-reconstructed values of every original trace column in the
     /// replicated business row.
@@ -193,7 +194,7 @@ pub struct TexasPublicInputs {
 impl TexasPublicInputs {
     /// 从 pre/post table 与元数据构造完整公开输入。
     ///
-    /// 计算 `table_state_preimage`（24 字段）并重算 state_root，确保 image 与 root 自洽。
+    /// 计算变长 canonical `table_state_preimage` 并重算 state_root，确保 image 与 root 自洽。
     /// 供 orchestrator 与 e2e 测试使用。
     ///
     /// # Errors
@@ -330,7 +331,7 @@ impl TexasPublicInputs {
 
     /// 构造一个固定的、自洽的「占位」公开输入（机制测试用）。
     ///
-    /// image 为 24 个 `FieldElement::ONE`，root 为其真实 Poseidon 哈希（自洽）。
+    /// image 为测试专用的 24 个 `FieldElement::ONE`，root 为其真实 Poseidon 哈希（自洽）。
     /// 用于不需要真实 table 的 AIR 机制测试（仅验证 prove/verify 流程，不验证 state 绑定语义）。
     #[must_use]
     pub fn synthetic_placeholder(kind: MethodKind) -> Self {
@@ -370,8 +371,8 @@ impl TexasPublicInputs {
     ///
     /// # 顺序契约（不可变更）
     ///
-    /// 1. `pre_image` 的 24 个 FieldElement（每个分解为 8 个大端 u32 word）
-    /// 2. `post_image` 的 24 个 FieldElement（同上）
+    /// 1. `pre_image` 的全部变长 FieldElement（每个分解为 8 个大端 u32 word）
+    /// 2. `post_image` 的全部变长 FieldElement（同上）
     /// 3. `pre_state_root`（8 个 u32 word）
     /// 4. `post_state_root`（8 个 u32 word）
     /// 5. `kind`（u32）、`table_id`（u64）、`hand_id`（u32）、`call_seq`（u32）
@@ -427,11 +428,12 @@ impl TexasPublicInputs {
     ///
     /// 这是 state_root 绑定的「验证」半边（mix_into 是「承诺」半边）。
     /// 验证方拿到公开输入后，用被审计的 Starknet Poseidon252 重算哈希，确保公开输入
-    /// 与承诺的 root 自洽。pre_image 长度必须为 24（否则编码契约被违反）。
+    /// 与承诺的 root 自洽。canonical table 解码由需要业务语义绑定的 verifier hook
+    /// 或 Orchestrator 完整 dispatch replay 完成；本函数只验证非空 image/root 自洽。
     ///
     /// # Errors
     ///
-    /// 当 pre/post_image 长度 ≠ 24，或重算的 root 与公开的 root 不符时返回错误。
+    /// 当 pre/post_image 为空，或重算的 root 与公开的 root 不符时返回错误。
     pub fn verify_roots(&self) -> TexasAirResult<()> {
         use crate::error::TexasAirError;
         if self.pre_image.is_empty() || self.post_image.is_empty() {

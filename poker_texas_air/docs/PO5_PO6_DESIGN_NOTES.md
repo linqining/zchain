@@ -1,15 +1,18 @@
-# P0-5 / P0-6 设计备注(待处理)
+# P0-5 / P0-6 实现与剩余可信边界
 
-> 这两个 P0 **不可机械修复**,需要密码学设计决策或 AIR 层重设计。
-> 本文档记录根因、评估结论、可选修复路径,供后续专家处理。
+> 本文区分已落地的 fail-closed/host 机制和仍需密码学或 AIR 重设计的部分。
+> “测试通过”不等于递归聚合、Rust↔Lean 精化或完整下注状态机已经证明。
 
 ---
 
 ## P0-5:Aggregator 不验证任何子证明
 
 本项拆分为两个不同的交付边界：
-- **P05-H（Host O(N) batch verification）：✅ 已完成。** 逐个原生验证子 proof，
-  只从 verifier-issued receipt 构造可信链。
+- **P05-H-core（Host O(N) verification）：✅ 已完成。** 完整 VM dispatch replay、
+  逐 proof 原生验证、opaque receipt、连续性和显式 `ExpectedChainAnchor` 首尾/范围/
+  调用 digest 校验均已实现。
+- **P05-H-source（共识来源接入）：🟡 未在本 crate 闭合。** 调用方必须从已认证
+  block/receipt 构造 anchor；当前 proving service 只是本地 dispatch demo，不是 inclusion proof。
 - **P05-R（Recursive/succinct aggregation）：❌ 未完成。** 当前递归后端不 sound，
   不存在可转移的单聚合 proof。
 
@@ -21,11 +24,28 @@
 
 ### 数据流问题
 `ProvenTask` 仍只是 root/call_seq descriptor，不能作为子证明已验证的证据。
-当前可信过渡路径已改为：Orchestrator 对每个 `MethodProof` 调用原生
+当前可信过渡路径已改为：Orchestrator 先用任务携带的完整
+`DispatchContext + selector + raw_args` 重放公开 VM dispatch，要求完整 post table、
+method input 与任务元数据逐字段一致；随后对每个 `MethodProof` 调用原生
 Stwo verifier，成功后才签发字段私有的 `VerificationReceipt`，然后由
 `VerifiedChainBuilder` 检查 table/hand/call_seq/完整 Poseidon252 root/version 连续性。
+dispatch 调用摘要也被混入 method proof transcript。receipt 字段和链构造 API 已收窄为
+crate-private，因此 descriptor 不能伪造 receipt；但外部仍可向 public Orchestrator 提交
+任意自洽的离线 task，并获得“该转移经 VM replay + native verify”的 opaque receipt。
 proof 在当次原生验证后仍不会被压缩成可转移的 recursive proof；因此这只是
 可信宿主进程内的 O(N) 接受产物。
+
+这里的“可信”依赖外部锚：`ExpectedChainAnchor` 校验 table/hand、精确 receipt 数量与
+call_seq 范围、链首/链尾 full-width state root/version，以及每个
+`dispatch_call_digest`。这些 anchor 字段必须来自已认证 block/receipt；若从同一批
+待证 task 反推 anchor，不会增加信任。Orchestrator 能证明“给定 pre-state 上的完整
+dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带的 `DispatchContext`
+证明调用真实被区块收录。
+
+当前 wire metadata 的 `table_id` 是 `ObjectID.creation_nonce`，本身不是跨 creator
+全局唯一。action 泛型 verifier 已把它绑定到 canonical pre/post table；可信链还依赖
+包含完整 `ObjectID` 的 full-width state roots。后续若升级公开 schema，宜直接锚定完整
+`ObjectID`（或其共识 key），而不是只把 nonce 当作全局桌号。
 
 ### 现有递归基础设施(存在但不 sound)
 `poker_zkvm::stwo_backend::recursive` 有递归层,但:
@@ -48,7 +68,9 @@ proof 在当次原生验证后仍不会被压缩成可转移的 recursive proof�
 
 **当前状态**：
 - descriptor-only prove/verify 生产入口继续 fail-closed；
-- **P05-H** 可信 O(N) 宿主批量验证已闭合；
+- `test-helpers` 仅用于集成测试，release 构建若误启用该 feature 会在编译期拒绝；
+- **P05-H-core** O(N) 宿主验证与完整范围 anchor 校验已闭合；
+- **P05-H-source** 仍需上层把 anchor 接到已认证 block/receipt；
 - **P05-R** 单个可转移的 recursive aggregate proof 仍是已知未完成特性。
 
 ---
@@ -65,6 +87,20 @@ VM 的 `apply_call`/`apply_raise`/`apply_bet` **不是单步 seat 更新**——
 当前 Rust P06 改动选择了诚实的收窄边界：生产任务只在 post-state 仍是
 same round、pot 不变、`betting_round/current_turn = Some(next)` 时构造动作 AIR；
 收池、推进和结算分支返回 `UnsupportedBettingTransition`，不伪装成已证明。
+该守卫覆盖 fold/check/call/raise/bet/auto_fold/force_fold 七个会推进 turn 的动作。
+
+`kick_player` 还有一条独立的复合转移边界：在 `WAITING` 状态踢掉最后一个活跃玩家时，
+VM 可能在 `kick_player_internal` 内触发 `reset_for_next_hand`，随后 dispatch 再次
+`bump_version`，因此一个 selector 会产生 reset/清理和多次 version bump。生产
+Orchestrator 只接受 round 不变、`post_pot = pre_pot + kicked_bet` 且恰好单次 version
+推进的 kick；触发嵌套 reset、settlement 或其他多步变化时同样返回
+`UnsupportedBettingTransition`，不签发 proof/receipt。
+
+VM 新注册的 `request_leave_after_hand` 与 `fold_with_proof` 仍可进入统一
+ProveTask wire format，但生产 Orchestrator 在 dispatch replay/prove 之前显式
+`NotImplemented` fail-closed，不生成 proof/receipt；泛型 `prove_method` /
+`verify_method_against` 也通过 production AIR allowlist 拒绝二者。尤其 `fold_with_proof` 的
+DLEq layer removal 及其可能触发的 advance/settlement 尚未进入可信 AIR。
 
 ### 具体反例(heads-up preflop)
 SB=BB=10。SB call(amt=0)→ mid-round。BB check 使 `is_betting_complete==true`，则
@@ -79,12 +115,17 @@ SB=BB=10。SB call(amt=0)→ mid-round。BB check 使 `is_betting_complete==true
 
 ### 当前是 mid-round 局部模型
 Rust AIR 现约束 actor 的 stack/bet/total_bet 更新、pot/round 不变，并绑定
-verifier-trusted pre 金额与 `post_current_turn`。Lean Contract/AIR 的 pot 语义也已
-改为 mid-round pot 不变。
+verifier-trusted pre 金额与 `post_current_turn`。Lean Contract/AIR 的手写逻辑模型也已
+同步为 mid-round pot/round 不变，加入 trusted pre-amount、Nat 级 checked-u64
+算术、short all-in/conditional min-raise 和下一行动座位绑定；bet 只接受
+FLOP/TURN/RIVER。
 
-但 Lean 列布局尚未镜像 Rust 新增的 trusted pre-amount/`post_current_turn`，
-且 raise/bet 仍未建模对其他玩家 `acted_this_round` 的重置，也无模型承载
-多 seat bet sweep、`current_turn→None`、round 推进和 settlement。
+但尚未证明 Rust physical row layout 与这些 Lean logical records 的逐列/逐约束
+refinement，也未建立 `expected_trace_row → BoundAir → transcript → Lean` 桥。
+特别地，Lean bet 的 post `current_bet`/`min_raise` 是从 canonical post table 重建的
+逻辑字段，当前 Rust `BetRow` 没有对应独立 physical columns。raise/bet 仍未建模
+对其他玩家 `acted_this_round` 的重置，也无模型承载多 seat bet sweep、
+`current_turn→None`、round 推进和 settlement。
 因此只能声称“mid-round 局部路径 fail-closed”，不能声称完整 VM transition
 或 Rust↔Lean 精化已证明。
 
@@ -109,7 +150,8 @@ verifier-trusted pre 金额与 `post_current_turn`。Lean Contract/AIR 的 pot �
 
 - 正确修复 = **(b) 多 AIR 分解**(大重设计,非补丁)
 - 务实过渡 = **(c)** 生产 fail-closed 到 mid-round（已实现的收窄方向）
-- Lean 仍需补齐新 Rust 列/spec 并证明逐约束等价
+- Lean logical spec 已同步 trusted amounts/next-turn；仍需证明 Rust physical
+  row/约束到 Lean 的实现级 refinement
 - (a) 不现实；(d) 只能作为边界记录
 
 ---
@@ -119,5 +161,5 @@ verifier-trusted pre 金额与 `post_current_turn`。Lean Contract/AIR 的 pot �
 | P0 | 状态 | 处理建议 |
 |---|---|---|
 | P0-4 | ✅ **已修复**(`f38bc51` canonical Borsh 全字段) | 可选清理死代码 |
-| P0-5 | P05-H ✅；P05-R ❌ | 生产使用 `VerifiedChain`；succinct 聚合需密码学专家(~1 月) |
+| P0-5 | H-core ✅；H-source 🟡；R ❌ | 生产使用 consensus-derived `ExpectedChainAnchor` + `VerifiedChain`；succinct 聚合需密码学专家 |
 | P0-6 | mid-round 生产路径已收窄；full transition ❌ | 继续 fail-closed；收池/推进/结算需多 AIR 重设计 |

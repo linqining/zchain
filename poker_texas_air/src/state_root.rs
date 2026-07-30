@@ -2,14 +2,16 @@
 //!
 //! ## 设计
 //!
-//! `state_root = Poseidon252(TABLE_PREIMAGE)`，其中 `TABLE_PREIMAGE` 是把 `TexasPokerTable`
-//! 的 22 个字段编码为 `Vec<FieldElement>`（Starknet Fr = BN254 Fr）后做 Poseidon 哈希。
+//! `state_root = Poseidon252(TABLE_PREIMAGE)`，其中 `TABLE_PREIMAGE` 是带版本和域分隔的
+//! canonical Borsh 编码。其长度随完整 `TexasPokerTable` 序列化内容变化，不维护易漂移的
+//! 手写字段列表。
 //!
 //! ## AIR 内验证
 //!
-//! Host 端用 `starknet_crypto::poseidon_hash_many` 计算；
-//! AIR 端用 `poker_zkvm::stwo_backend::poseidon_air::PoseidonAir` 验证（M31 域 4-limb）。
-//! 两者使用相同的 Starknet 标准 Poseidon252 参数。
+//! 当前由可信 host 使用 `starknet_crypto::poseidon_hash_many` 重算，并把完整 preimage、
+//! full-width root 与 AIR trace-row 绑定一起混入 Fiat–Shamir transcript。method AIR 只承载
+//! root 的域分隔 M31 投影，尚未嵌入 Poseidon AIR；因此这是 host trust boundary，不能
+//! 表述为“电路内证明了 Borsh preimage 的 Poseidon 哈希”。
 //!
 //! ## 递归证明中的角色
 //!

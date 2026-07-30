@@ -33,6 +33,9 @@ def ContractCall
   (post.get_seat params.seat_index).bet = (pre.get_seat params.seat_index).bet + params.call_amount ∧
   (post.get_seat params.seat_index).total_bet = (pre.get_seat params.seat_index).total_bet + params.call_amount ∧
   (post.get_seat params.seat_index).acted_this_round = true ∧
+  (post.get_seat params.seat_index).all_in = decide
+    (params.call_amount > 0 ∧
+      params.call_amount = (pre.get_seat params.seat_index).stack) ∧
   (post.get_seat params.seat_index).folded = (pre.get_seat params.seat_index).folded ∧
   (post.get_seat params.seat_index).player = (pre.get_seat params.seat_index).player ∧
   (∀ i : Nat, i ≠ params.seat_index →

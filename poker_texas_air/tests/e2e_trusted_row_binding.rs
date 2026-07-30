@@ -182,8 +182,7 @@ fn create_table_verifier_requires_and_binds_the_complete_row() {
     );
 }
 
-#[test]
-fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_tables() {
+fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
     let mut pre = TexasPokerTable::new(
         ObjectID::new([0xCC; 20], 7),
         "canonical-call".to_owned(),
@@ -214,6 +213,12 @@ fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_table
     post.call_seq = pre.call_seq + 1;
     assert_eq!(post.seats[0].bet, 100);
     assert_eq!(post.current_turn, Some(1));
+    (pre, post)
+}
+
+#[test]
+fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_tables() {
+    let (pre, post) = make_canonical_call_tables();
 
     // This row is internally valid for a fictitious current_bet=70/call=20,
     // but the canonical pre/post tables commit to current_bet=100/call=50.
@@ -232,7 +237,7 @@ fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_table
         &pre,
         &post,
         MethodKind::Call,
-        42,
+        pre.id.creation_nonce,
         post.hand_id,
         post.call_seq,
     )
@@ -289,5 +294,85 @@ fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_table
     assert!(
         verify_method_against(proof, air, &public_inputs).is_err(),
         "production verifier must derive action semantics from canonical table images"
+    );
+}
+
+#[test]
+fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
+    let (pre, post) = make_canonical_call_tables();
+    let input = CallInput {
+        seat_index: 0,
+        call_amount: 50,
+        pre_current_bet: 100,
+        pre_seat_bet: 50,
+        pre_seat_stack: 1_000,
+        pre_seat_total_bet: 50,
+        post_current_turn: 1,
+    };
+
+    // The canonical table id nonce is 7. Build a self-consistent proof statement
+    // labelled as table 42; transcript binding alone cannot relate that label to
+    // the canonical table image, so the action validation hook must reject it.
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &post,
+        MethodKind::Call,
+        42,
+        post.hand_id,
+        post.call_seq,
+    )
+    .expect("canonical public inputs should be generated");
+    let row = CallRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        post.version,
+        pre.round_state,
+        post.round_state,
+        pre.pot,
+        post.pot,
+        post.seats[0].stack,
+        post.seats[0].bet,
+        post.seats[0].all_in,
+        pre.seats[0].bet,
+        pre.seats[0].stack,
+        post.seats[0].total_bet,
+        pre.seats[0].total_bet,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .expect("trusted row should bind");
+    let trace = gen_method_trace(
+        CallAir::num_columns(),
+        &row.to_vec(),
+        &CallRow::padding().to_vec(),
+    )
+    .expect("valid call trace should be generated");
+    let air = CallAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        CallAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("AIR-consistent proof should be generated before canonical id validation");
+
+    assert!(
+        verify_method_against(proof, air, &public_inputs).is_err(),
+        "production verifier must bind table_id to the canonical table image"
     );
 }

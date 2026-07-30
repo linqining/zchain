@@ -2,7 +2,7 @@
 //!
 //! ## 架构定位
 //!
-//! - **Layer 0**：Method AIRs（21 个，每方法一个专用 AIR，已实现）
+//! - **Layer 0**：Method AIRs（21 个启用；另有 2 个 selector fail-closed）
 //! - **Layer 1**：当前仅有宿主逐 proof 验证；`poker_zkvm::stwo_backend::recursive`
 //!   尚不是完整、可信的 Stwo verifier 电路
 //! - **Layer 2**：**Aggregator AIR（本模块）** — 二叉树聚合 N 个 descriptor 摘要
@@ -10,7 +10,7 @@
 //!
 //! ## 聚合模型
 //!
-//! 给定 N 个 method proof（按 `call_seq` 排序），构造完全二叉树：
+//! 给定 N 个 method descriptor（按 `call_seq` 排序），构造完全二叉树：
 //!
 //! ```text
 //!                   [root]

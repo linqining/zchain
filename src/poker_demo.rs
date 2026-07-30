@@ -70,6 +70,7 @@ fn run_showdown_hand() -> Result<(), String> {
     let mut table = TexasPokerTable::new(
         table_id,
         "Demo Table".to_string(),
+        ALICE, // creator
         2,  // max_players
         5,  // small_blind
         10, // big_blind
@@ -282,8 +283,8 @@ fn print_table_state(label: &str, table: &TexasPokerTable) {
     let community: Vec<String> = table.community_cards.iter().map(|c| c.display()).collect();
     println!("│ Community cards: {}", if community.is_empty() { "(none)".to_string() } else { community.join(" ") });
     if let Some(br) = &table.betting_round {
-        println!("│ Betting round: current_bet={}, min_raise={}, last_raiser={:?}",
-            br.current_bet, br.min_raise, br.last_raiser_seat);
+        println!("│ Betting round: current_bet={}, min_raise={}",
+            br.current_bet, br.min_raise);
     } else {
         println!("│ Betting round: (none)");
     }

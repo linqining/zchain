@@ -17,7 +17,7 @@ set_option linter.unusedVariables false in
 
 ## 核心结论
 
-5 个密码学方法的 AIR **都是 sound 的**：
+5 个密码学方法在手写 Lean AIR/Contract 模型内 **都是 sound 的**：
 
 1. **join_and_shuffle AIR 是 sound 的** — `ShufflePhasePositive` + `VersionIncrementConstraint` +
    `StateRootConsistency` + 提取函数一致性覆盖合约全部合取
@@ -42,7 +42,8 @@ set_option linter.unusedVariables false in
 ## 已知限制
 
 密码学证明本身（DLEq, ZKShuffle, RevealToken, Reconstruct）不在 AIR 中验证，
-假设由外部 ZK 验证器负责。soundness 证明仅覆盖状态转换语义。 -/
+假设由外部 ZK 验证器负责。soundness 证明仅覆盖手写模型中的状态转换语义，
+尚未建立真实 Rust AIR/VM 到这些谓词的精化。 -/
 
 /-! ## 通用辅助引理 -/
 

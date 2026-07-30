@@ -1,4 +1,4 @@
-//! E2E 测试 — Aggregator AIR（二叉树递归聚合）prove + verify + soundness。
+//! 机制测试 — descriptor-only Aggregator AIR；不验证子 proof，生产入口 fail-closed。
 //!
 //! 验证流程：
 //! 1. 构造 N 个 `ChildDescriptor`（按 `call_seq` 升序、state_root 链式衔接）

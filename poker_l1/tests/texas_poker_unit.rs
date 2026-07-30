@@ -1828,7 +1828,8 @@ fn test_collect_rake_none_mode() {
     table.rake_mode = RAKE_MODE_NONE;
     table.pot = 1000;
     
-    let rake = state_machine::collect_rake(&mut table);
+    let rake = state_machine::collect_rake(&mut table)
+        .expect("none-mode rake collection should succeed");
     assert_eq!(rake, 0);
     assert_eq!(table.pot, 1000);
 }
@@ -1841,7 +1842,8 @@ fn test_collect_rake_percentage_below_cap() {
     table.rake_cap = 100;
     table.pot = 1000;
     
-    let rake = state_machine::collect_rake(&mut table);
+    let rake = state_machine::collect_rake(&mut table)
+        .expect("percentage rake collection below cap should succeed");
     assert_eq!(rake, 50); // 1000 * 5% = 50
     assert_eq!(table.pot, 950);
     assert_eq!(table.rake_collected, 50);
@@ -1855,7 +1857,8 @@ fn test_collect_rake_percentage_at_cap() {
     table.rake_cap = 30;
     table.pot = 1000;
     
-    let rake = state_machine::collect_rake(&mut table);
+    let rake = state_machine::collect_rake(&mut table)
+        .expect("percentage rake collection at cap should succeed");
     assert_eq!(rake, 30); // capped at 30
     assert_eq!(table.pot, 970);
 }
@@ -1868,7 +1871,8 @@ fn test_collect_rake_zero_pot() {
     table.rake_cap = 100;
     table.pot = 0;
     
-    let rake = state_machine::collect_rake(&mut table);
+    let rake = state_machine::collect_rake(&mut table)
+        .expect("zero-pot rake collection should succeed");
     assert_eq!(rake, 0);
     assert_eq!(table.pot, 0);
 }

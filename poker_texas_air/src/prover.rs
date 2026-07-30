@@ -137,8 +137,9 @@ pub fn prove_create_table(
 
 /// 泛型 method prove — 生成任意 method AIR 的 L1 proof。
 ///
-/// 阶段 2-4 通用 prove 入口。所有 17 个新方法（lifecycle/actions/crypto）
-/// 通过此函数生成 proof，无需为每个方法定义专用 prove 函数。
+/// 这是低层 AIR prover：它要求完整 trusted-row 绑定，但不会自行认证任务来源或
+/// replay 整个 VM dispatch。生产 receipt 路径应由 [`crate::orchestrator::Orchestrator`]
+/// 先完成这些检查后再调用。
 ///
 /// # 参数
 /// - `trace`: 已构造的 `MethodTrace`（trace 数据）
@@ -161,6 +162,13 @@ where
     A: TexasAir,
 {
     let log_size = trace.log_size;
+    let statement = air.statement();
+    if !statement.kind.is_production_air_enabled() {
+        return Err(TexasAirError::NotImplemented(format!(
+            "{} is a registered selector without an enabled production AIR",
+            statement.kind.method_name()
+        )));
+    }
     if num_columns != trace.num_columns || num_columns != air.trace_num_columns() {
         return Err(TexasAirError::SpecViolation(format!(
             "trace/AIR column mismatch: argument={num_columns}, trace={}, AIR={}",
@@ -170,7 +178,7 @@ where
     }
     let public_inputs = prepare_public_inputs_for_trace(public_inputs, trace, num_columns)?;
     public_inputs.verify_roots()?;
-    public_inputs.verify_air_statement(&air.statement())?;
+    public_inputs.verify_air_statement(&statement)?;
     let expected_trace_row = public_inputs.require_expected_trace_row(num_columns)?;
 
     // 1. PCS 配置 + twiddles

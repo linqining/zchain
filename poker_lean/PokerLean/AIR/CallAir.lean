@@ -7,45 +7,73 @@ import PokerLean.AIR.AirBase
 
 namespace PokerLean
 
-/-- call 业务列。
+/-- verifier 从 canonical pre/post table 重建的 call 逻辑输入。
 
-    含 pre-state 座位 witness（stack/bet/total_bet），用于通过 `StateRootConsistency`
-    绑定到 committed pre_state_root，并通过逐 limb delta 约束保证资金守恒。
+这些值对应 Rust `CallInput` 中不属于 trace column 的 AIR 常量。把它们显式
+放进 Lean 模型，并在 `CallAirAcceptable` 中与 `expected_trusted` 相等，避免把
+prover 自选常量误当成可信状态。 -/
+structure CallTrustedInputs where
+  pre_current_bet : Nat
+  pre_seat_bet : Nat
+  pre_seat_stack : Nat
+  pre_seat_total_bet : Nat
+  post_current_turn : M31
+deriving Repr
 
-    这是手写的 mid-round 抽象列。Rust P06 还新增了 verifier-trusted 金额字段与
-    `post_current_turn` 守卫；本结构尚未与该 Rust 列布局建立精化等价。 -/
+/-- call 的逻辑列模型。`trusted` 是 verifier logical input，不是 trace column。 -/
 structure CallMethodColumns where
+  trusted : CallTrustedInputs
   input_seat_index : M31
   input_current_turn : M31
   input_seat_occupied : M31
   input_call_amount : M31 × M31 × M31 × M31
-  /-- pre-state 座位 stack（4 limb witness） -/
   input_pre_seat_stack : M31 × M31 × M31 × M31
-  /-- pre-state 座位 bet（4 limb witness） -/
   input_pre_seat_bet : M31 × M31 × M31 × M31
-  /-- pre-state 座位 total_bet（4 limb witness） -/
   input_pre_seat_total_bet : M31 × M31 × M31 × M31
   output_seat_stack : M31 × M31 × M31 × M31
   output_seat_bet : M31 × M31 × M31 × M31
-  /-- post-state 座位 total_bet（4 limb witness） -/
   output_seat_total_bet : M31 × M31 × M31 × M31
   output_all_in : M31
   output_acted : M31
+  /-- Rust trace 中真实存在的 `OUTPUT_CURRENT_TURN`。 -/
+  output_current_turn : M31
 deriving Repr
 
-/-- 从 AIR 行提取 pre 状态。
-    座位 stack/bet/total_bet 来自 witness 列，由 `StateRootConsistency` 绑定到 pre_state_root。 -/
+/-- Rust call AIR 中由 verifier-trusted u64 常量决定的金额事实。
+
+这里直接在 Nat/u64 解码层表达 checked arithmetic，不再把无 carry 的逐 limb
+`Limb4Delta` 当成 Rust `checked_add`/`checked_sub` 的等价模型。 -/
+structure CallTrustedFacts
+    (ext : CallMethodColumns) (expected_call_amount : Nat) : Prop where
+  amount_witness : decodeLimb4 ext.input_call_amount = expected_call_amount
+  pre_stack_witness : decodeLimb4 ext.input_pre_seat_stack = ext.trusted.pre_seat_stack
+  pre_bet_witness : decodeLimb4 ext.input_pre_seat_bet = ext.trusted.pre_seat_bet
+  pre_total_witness :
+    decodeLimb4 ext.input_pre_seat_total_bet = ext.trusted.pre_seat_total_bet
+  amount_u64 : expected_call_amount < U64_MAX
+  pre_current_bet_u64 : ext.trusted.pre_current_bet < U64_MAX
+  pre_stack_u64 : ext.trusted.pre_seat_stack < U64_MAX
+  pre_bet_u64 : ext.trusted.pre_seat_bet < U64_MAX
+  pre_total_u64 : ext.trusted.pre_seat_total_bet < U64_MAX
+  exact_amount : expected_call_amount =
+    min (ext.trusted.pre_current_bet - ext.trusted.pre_seat_bet)
+      ext.trusted.pre_seat_stack
+  post_bet_u64 : ext.trusted.pre_seat_bet + expected_call_amount < U64_MAX
+  post_total_u64 : ext.trusted.pre_seat_total_bet + expected_call_amount < U64_MAX
+  output_stack : decodeLimb4 ext.output_seat_stack =
+    ext.trusted.pre_seat_stack - expected_call_amount
+  output_bet : decodeLimb4 ext.output_seat_bet =
+    ext.trusted.pre_seat_bet + expected_call_amount
+  output_total : decodeLimb4 ext.output_seat_total_bet =
+    ext.trusted.pre_seat_total_bet + expected_call_amount
+  output_all_in : ext.output_all_in =
+    if expected_call_amount > 0 ∧ expected_call_amount = ext.trusted.pre_seat_stack then
+      M31.one else M31.zero
+  output_turn : ext.output_current_turn = ext.trusted.post_current_turn
+
+/-- 从可信逻辑输入与 trace witness 提取 call pre-state。 -/
 def extractPreTableFromCallAir
-    (row : CommonRow)
-    (ext : CallMethodColumns)
-    (max_players : Nat)
-    : TexasPokerTable :=
-  let pre_stack := decodeU64 ext.input_pre_seat_stack.1 ext.input_pre_seat_stack.2.1
-      ext.input_pre_seat_stack.2.2.1 ext.input_pre_seat_stack.2.2.2
-  let pre_bet := decodeU64 ext.input_pre_seat_bet.1 ext.input_pre_seat_bet.2.1
-      ext.input_pre_seat_bet.2.2.1 ext.input_pre_seat_bet.2.2.2
-  let pre_total_bet := decodeU64 ext.input_pre_seat_total_bet.1 ext.input_pre_seat_total_bet.2.1
-      ext.input_pre_seat_total_bet.2.2.1 ext.input_pre_seat_total_bet.2.2.2
+    (row : CommonRow) (ext : CallMethodColumns) (max_players : Nat) : TexasPokerTable :=
   let tbl : TexasPokerTable := {
     table_id := 0
     name_hash := 0
@@ -54,15 +82,13 @@ def extractPreTableFromCallAir
     small_blind := 0
     big_blind := 0
     ante := 0
-    version := decodeU64 row.pre_version.1 row.pre_version.2.1
-        row.pre_version.2.2.1 row.pre_version.2.2.2
+    version := decodeLimb4 row.pre_version
     round_state := RoundState.fromNat row.pre_round_state.val
     betting := {
-      current_bet := 0
+      current_bet := ext.trusted.pre_current_bet
       current_turn := ext.input_current_turn.val
       dealer_seat := row.pre_button.val
-      pot := decodeU64 row.pre_pot.1 row.pre_pot.2.1
-          row.pre_pot.2.2.1 row.pre_pot.2.2.2
+      pot := decodeLimb4 row.pre_pot
       side_pots := []
       min_raise := 0
       last_aggressor := 0
@@ -93,85 +119,49 @@ def extractPreTableFromCallAir
     timeout := 0
     last_action_time := 0
   }
-  tbl.update_seat ext.input_seat_index.val
-    (fun _ => { Seat.empty with
-      player := PlayerId.ofNat 1
-      stack := pre_stack
-      bet := pre_bet
-      total_bet := pre_total_bet })
+  tbl.update_seat ext.input_seat_index.val (fun _ => { Seat.empty with
+    player := PlayerId.ofNat 1
+    stack := ext.trusted.pre_seat_stack
+    bet := ext.trusted.pre_seat_bet
+    total_bet := ext.trusted.pre_seat_total_bet })
 
-/-- 从 AIR 行提取 post 状态。
-    座位 stack/bet/total_bet 来自 witness 列，由 delta 约束绑定到 pre-state。 -/
+/-- 提取 Rust P06 所接受的 same-round call post-state。 -/
 def extractPostTableFromCallAir
-    (row : CommonRow)
-    (ext : CallMethodColumns)
-    (max_players : Nat)
-    (seat_index : Nat)
-    : TexasPokerTable :=
+    (row : CommonRow) (ext : CallMethodColumns) (max_players seat_index : Nat) :
+    TexasPokerTable :=
   let pre := extractPreTableFromCallAir row ext max_players
   let post := { pre with
-    version := decodeU64 row.post_version.1 row.post_version.2.1
-        row.post_version.2.2.1 row.post_version.2.2.2
+    version := decodeLimb4 row.post_version
     round_state := RoundState.fromNat row.post_round_state.val
-    betting := {
-      pre.betting with
-      pot := decodeU64 row.post_pot.1 row.post_pot.2.1
-          row.post_pot.2.2.1 row.post_pot.2.2.2
+    betting := { pre.betting with
+      pot := decodeLimb4 row.post_pot
       dealer_seat := row.post_button.val
-    }
+      current_turn := ext.output_current_turn.val }
   }
-  let new_stack := decodeU64 ext.output_seat_stack.1 ext.output_seat_stack.2.1
-      ext.output_seat_stack.2.2.1 ext.output_seat_stack.2.2.2
-  let new_bet := decodeU64 ext.output_seat_bet.1 ext.output_seat_bet.2.1
-      ext.output_seat_bet.2.2.1 ext.output_seat_bet.2.2.2
-  let new_total_bet := decodeU64 ext.output_seat_total_bet.1 ext.output_seat_total_bet.2.1
-      ext.output_seat_total_bet.2.2.1 ext.output_seat_total_bet.2.2.2
-  post.update_seat seat_index
-    (fun _ => { Seat.empty with
-      player := PlayerId.ofNat 1
-      stack := new_stack
-      bet := new_bet
-      total_bet := new_total_bet
-      acted_this_round := true })
+  post.update_seat seat_index (fun _ => { Seat.empty with
+    player := PlayerId.ofNat 1
+    stack := decodeLimb4 ext.output_seat_stack
+    bet := decodeLimb4 ext.output_seat_bet
+    total_bet := decodeLimb4 ext.output_seat_total_bet
+    all_in := decide (ext.output_all_in.val = M31.one.val)
+    acted_this_round := true })
 
-/-- call AIR 的 mid-round 方法约束。
-
-    在该手写局部模型中约束：
-    - RoundStateIsBetting：阻止非下注轮 call
-    - CurrentTurnMatches：阻止非当前行动座位 call
-    - SeatOccupied：阻止空座位 call
-    - ButtonUnchanged：dealer_seat 不变
-    - PotUnchanged（全 4 limb）：mid-round 时 post_pot = pre_pot
-    - StackDelta（反向）：pre_stack = post_stack + call_amount → post_stack = pre_stack - call_amount
-    - BetDelta：post_bet = pre_bet + call_amount
-    - TotalBetDelta：post_total_bet = pre_total_bet + call_amount
-    - StateRootConsistency：witness 绑定到 committed state root -/
+/-- call 的手写 Lean mid-round 约束模型。 -/
 def CallMethodConstraints
-    (row : CommonRow)
-    (ext : CallMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_call_amount : Nat)
-    (max_players : Nat)
-    : Prop :=
+    (row : CommonRow) (ext : CallMethodColumns)
+    (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
+    (expected_call_amount max_players : Nat) : Prop :=
   row.is_active = M31.one →
   ext.input_seat_index = nat_to_m31 expected_seat_index hlt ∧
   ext.input_current_turn = ext.input_seat_index ∧
   ext.input_seat_occupied = M31.one ∧
-  ext.input_call_amount.1 = ⟨expected_call_amount % 65536, by unfold M31_P; omega⟩ ∧
   ext.output_acted = M31.one ∧
+  CallTrustedFacts ext expected_call_amount ∧
   VersionIncrementConstraint row ∧
   RoundStateUnchanged row ∧
   RoundStateIsBetting row ∧
   ButtonUnchanged row ∧
-  -- mid-round 不收池：筹码仍在 seat.bet，pot 全 4 limb 不变
   PotUnchanged row ∧
-  -- stack 守恒：pre_stack = post_stack + call_amount → post_stack = pre_stack - call_amount
-  Limb4DeltaRev ext.input_pre_seat_stack ext.output_seat_stack ext.input_call_amount ∧
-  -- bet 守恒：post_bet = pre_bet + call_amount
-  Limb4Delta ext.input_pre_seat_bet ext.output_seat_bet ext.input_call_amount ∧
-  -- total_bet 守恒：post_total_bet = pre_total_bet + call_amount
-  Limb4Delta ext.input_pre_seat_total_bet ext.output_seat_total_bet ext.input_call_amount ∧
   let pre_table := extractPreTableFromCallAir row ext max_players
   let post_table := extractPostTableFromCallAir row ext max_players expected_seat_index
   StateRootConsistency row
@@ -179,25 +169,21 @@ def CallMethodConstraints
     (texasPokerTableToPreimage post_table)
 
 def CallAirAcceptable
-    (row : CommonRow)
-    (ext : CallMethodColumns)
-    (expected_seat_index : Nat)
-    (hlt : expected_seat_index < M31_P)
-    (expected_call_amount : Nat)
-    (max_players : Nat)
-    : Prop :=
+    (row : CommonRow) (ext : CallMethodColumns)
+    (expected_seat_index : Nat) (hlt : expected_seat_index < M31_P)
+    (expected_call_amount : Nat) (expected_trusted : CallTrustedInputs)
+    (max_players : Nat) : Prop :=
   CommonConstraints row MethodKind.Call ∧
+  ext.trusted = expected_trusted ∧
   CallMethodConstraints row ext expected_seat_index hlt expected_call_amount max_players ∧
   row.method_kind = ⟨MethodKind.Call.toNat, MethodKind.toNat_lt_M31P MethodKind.Call⟩ ∧
   row.is_active = M31.one
 
-/-- 从 AIR 提取 call 参数 -/
-def extractCallParamsFromAir
-    (ext : CallMethodColumns)
-    : CallParams := {
+/-- 从 AIR 提取 call 参数，包括 verifier 绑定的下一行动座位。 -/
+def extractCallParamsFromAir (ext : CallMethodColumns) : CallParams := {
   seat_index := ext.input_seat_index.val
-  call_amount := decodeU64 ext.input_call_amount.1 ext.input_call_amount.2.1
-      ext.input_call_amount.2.2.1 ext.input_call_amount.2.2.2
+  call_amount := decodeLimb4 ext.input_call_amount
+  post_current_turn := ext.output_current_turn.val
 }
 
 end PokerLean

@@ -1,11 +1,14 @@
-//! Method AIRs — 21 个方法各自专用 AIR。
+//! Method AIRs — 21 个已启用的专用 AIR。
 //!
 //! ## 分类
 //!
 //! - [`lifecycle`] — A 档：6 个表台生命周期方法
-//! - [`actions`] — B 档：7 个玩家动作方法
+//! - [`actions`] — B 档：8 个已启用玩家动作方法
 //! - [`funds`] — B+ 档：2 个资金动作方法（addon/rebuy）
 //! - [`crypto`] — C 档：5 个密码学协议方法
+//!
+//! VM 另注册 `request_leave_after_hand` 与 `fold_with_proof`，但二者尚无可信
+//! AIR statement，生产 Orchestrator 会在 proof 构造前拒绝。
 //!
 //! ## 通用模板
 //!
@@ -52,9 +55,11 @@ pub struct AirStatement {
 
 /// AIRs that expose a verifier-trusted Texas Poker statement.
 ///
-/// `verify_method` uses this trait to bind the trace to public inputs supplied
-/// independently by the verifier.  The proof-carried AIR value is never used as
-/// the source of truth.
+/// `verify_method_against` uses this trait to bind the trace to public inputs
+/// supplied independently by the verifier. The proof-carried AIR value is never
+/// used as the source of truth. This trait alone does not authenticate task
+/// provenance or replay full VM dispatch; the receipt path adds those checks in
+/// the Orchestrator (with provenance still supplied by an external anchor).
 pub trait TexasAir: FrameworkEval + Clone + Sync {
     /// Return the common statement compiled into this AIR instance.
     fn statement(&self) -> AirStatement;
@@ -67,7 +72,8 @@ pub trait TexasAir: FrameworkEval + Clone + Sync {
     ///
     /// Most legacy AIRs still use the default no-op. Production betting AIRs
     /// override this hook so a prover cannot pair valid state roots with an
-    /// unrelated, self-consistent business row.
+    /// unrelated, self-consistent business row. The Orchestrator additionally
+    /// replays full VM dispatch for every enabled method before issuing a receipt.
     fn validate_public_inputs(&self, _public_inputs: &TexasPublicInputs) -> TexasAirResult<()> {
         Ok(())
     }
@@ -177,16 +183,8 @@ impl_validated_texas_air!(
     actions::validation::validate_force_fold
 );
 impl_texas_air!(actions::kick_player::KickPlayerAir, MethodKind::KickPlayer);
-impl_texas_air!(
-    actions::request_leave_after_hand::RequestLeaveAfterHandAir,
-    MethodKind::RequestLeaveAfterHand
-);
 impl_texas_air!(funds::addon::AddonAir, MethodKind::Addon);
 impl_texas_air!(funds::rebuy::RebuyAir, MethodKind::Rebuy);
-impl_texas_air!(
-    crypto::fold_with_proof::FoldWithProofAir,
-    MethodKind::FoldWithProof
-);
 impl_texas_air!(
     crypto::join_and_shuffle::JoinAndShuffleAir,
     MethodKind::JoinAndShuffle

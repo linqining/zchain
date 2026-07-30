@@ -3,7 +3,7 @@ import PokerLean.Audit.TrustBoundary
 /-!
 # AIR Soundness 审计结论
 
-当前 21 个 `*_air_sound` 定理都是有效的 Lean 定理，但结论必须限定为：
+当前 selector 0--20 的 21 个 `*_air_sound` 定理都是有效的 Lean 定理，但结论必须限定为：
 
 > 手写 Lean `*AirAcceptable` 谓词蕴含手写 Lean `Contract*` 谓词。
 
@@ -19,9 +19,13 @@ import PokerLean.Audit.TrustBoundary
 soundness gap”等表述。机器可检查的范围声明和公理输出见
 `PokerLean.Audit.TrustBoundary`。
 
+Rust/VM 当前已有 23 个 selector；21 `request_leave_after_hand` 与 22
+`fold_with_proof` 不在 Lean `MethodKind` 中，也没有对应模型内定理。
+
 ## Rust AIR 结构缺陷修复进展（不影响上述 Lean 结论，但记录 AIR 侧改进）
 
-经端到端复审发现的若干 P0 级 Rust AIR 结构缺陷已修复（全量 `cargo test` 140/140 通过）：
+经端到端复审发现的若干 P0 级 Rust AIR 结构缺陷已修复；Rust 测试结果应以当前
+工作树重新执行的输出为准：
 
 - **P0-1（全 padding trace 绕过）已修复**：`common.rs` 增加无条件约束 `is_active = 1`，
   彻底关闭 all-padding trace 绕过所有 `is_active`-门控业务约束的攻击。
@@ -39,23 +43,32 @@ soundness gap”等表述。机器可检查的范围声明和公理输出见
 - ✅ **P0-4：已修复**。`table_state_preimage` 与 `SeatLeaf::from_seat` 现用 canonical Borsh
   序列化整个 `TexasPokerTable`/`Seat`（域分隔 tag `*.v2`），全字段自动覆盖，手工字段列表
   已移除。addon_pool/ante/rake/RIT/bet/total_bet/folded/all_in 等均包含。仅余死代码清理（cosmetic）。
-- ❌ **P0-5：不可机械修复（需密码学专家）**。Aggregator 仍 descriptor-only，不验证子 proof。
-  现有 `poker_zkvm` 递归层被项目自身审计测试标记为 unsound（L1 commitment 未 mix 进 channel、
-  Merkle 组件 no-op、无 N-proof 聚合）。修复需 ~(1)月专家工作。详见
-  `poker_texas_air/docs/PO5_PO6_DESIGN_NOTES.md`。生产入口已 fail-closed。
+- ⚠️ **P0-5 已拆分可信边界**。P05-H-core 的 Rust host O(N) 路径已实现：公开 VM
+  dispatch 重放成功后逐个调用原生 verifier，只由 verifier-issued receipt 构造
+  `VerifiedChain`，并可对精确范围执行 `ExpectedChainAnchor` 校验。P05-H-source 仍需
+  上层从已认证 block/receipt 提供 anchor；当前本地 proving service 未接入共识来源。
+  P05-R 的 recursive/succinct aggregator 仍 descriptor-only；现有递归层
+  被项目自身审计测试标记为 unsound，因此其生产入口继续 fail-closed。两条 Rust 路径
+  均尚无对应 Lean 实现级模型/定理。详见
+  `poker_texas_air/docs/PO5_PO6_DESIGN_NOTES.md`。
 - ⚠️ **P0-6：mid-round 生产路径已收窄，完整 transition 仍未完成**。VM 的
   call/raise/bet 在 seat 更新后无条件调用 `advance_turn`，收尾分支会收注
   （pot 跳变、清零多个 seat bet）、推进 round 或结算。Rust P06 改动现将
   生产证明限定为 same-round + pot unchanged + `current_turn = Some(next)` 的
-  mid-round 分支，对 end-of-round/settlement fail-closed。Lean call/raise/bet 也已改为
-  pot/round 不变的 mid-round 局部谓词。这只修正了 pot 这一语义轴；
-  Lean raise/bet 仍未建模重置其他玩家 `acted_this_round` 等实际 VM 字段。
+  mid-round 分支，对 end-of-round/settlement fail-closed。Lean call/raise/bet 已同步为
+  pot/round 不变的 mid-round 局部谓词，并在手写逻辑 AIR 中加入 verifier-trusted
+  pre-amount、checked-u64 的 Nat 级规则、actor `all_in`、short all-in/conditional
+  min-raise 与 `post_current_turn`；bet 只允许 FLOP/TURN/RIVER。
 
-  这仍不是 P0-6 完整修复：Lean 尚未镜像 Rust 新增的 verifier-trusted
-  pre-amount/`post_current_turn` 列，Rust AIR↔Lean AIR 逐约束等价也未建立；
-  bet-collection、round-advance 与 settlement AIR/精化仍缺失。详见同上文档。
+  这仍不是 P0-6 完整修复：尚未建立 Rust physical row、
+  `expected_trace_row → BoundAir → transcript` 与这些 Lean logical records 的逐列/逐约束
+  refinement。特别地，Lean bet 的 post `current_bet`/`min_raise` 是从 canonical post table
+  重建的逻辑字段，并非当前 Rust `BetRow` 的独立 physical columns。Lean raise/bet 仍未
+  建模重置其他玩家 `acted_this_round`；bet-collection、round-advance 与 settlement
+  AIR/精化也仍缺失。详见同上文档。
 - Lean 侧桥接：Rust `evaluate` ↔ Lean AIR 谓词的逐约束等价、VM 完整精化、密码学子证明验证均未建立。
-- 生产接线：tick + 4 crypto 方法未接线；2 个 VM 入口无 MethodKind；4 crypto 入口 Borsh 解码 bug。
+- selector 21/22：Rust 统一 wire format 已登记，但生产 proof/receipt 路径显式
+  fail-closed；Lean 侧也尚无 MethodKind、AIR/Contract 或 soundness theorem。
 -/
 
 namespace PokerLean.Audit

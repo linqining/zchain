@@ -1,8 +1,10 @@
-//! axum HTTP 服务：暴露 dispatch / 一手牌编排 / 插件查询端点。
+//! axum HTTP 服务：暴露 dispatch / 覆盖片段编排 / 插件查询端点。
 //!
 //! 端点：
-//! - `POST /hands/run`：触发一次完整牌局编排（HandRunner），返回 HandReport。
-//! - `POST /dispatch`：单步 dispatch（手动驱动），body = `{ caller, selector, args_hex }`。
+//! - `POST /hands/run`：历史路径名；触发 6 步 WAITING 覆盖片段（HandRunner），
+//!   返回 HandReport，不代表完整牌局或共识锚定。
+//! - `POST /dispatch`：当前显式返回 501；持久化插件状态与单步证明尚未接线，不能返回
+//!   看似成功的占位结果。
 //! - `GET /plugins`：列出已加载合约插件统计。
 //!
 //! 注：当前为单插件（texas_poker）演示；每次 `/hands/run` 构造新插件实例。
@@ -10,10 +12,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -31,6 +33,8 @@ struct ServerState {
 pub struct HandReportJson {
     pub steps: Vec<(String, bool)>,
     pub chain_ok: bool,
+    /// `false` means the descriptor-only production Aggregator was attempted and
+    /// rejected as expected; it is not a failed recursive proof verification.
     pub aggregate_ok: Option<bool>,
     pub dispatch_count: u64,
     pub prove_count: u64,
@@ -40,7 +44,11 @@ pub struct HandReportJson {
 impl HandReportJson {
     fn from_report(r: &crate::runner::HandReport) -> Self {
         Self {
-            steps: r.steps.iter().map(|(n, ok)| ((*n).to_string(), *ok)).collect(),
+            steps: r
+                .steps
+                .iter()
+                .map(|(n, ok)| ((*n).to_string(), *ok))
+                .collect(),
             chain_ok: r.chain_ok,
             aggregate_ok: r.aggregate_ok,
             dispatch_count: r.stats.dispatch_count,
@@ -105,16 +113,12 @@ async fn run_hand(
 
 async fn dispatch(
     State(_state): State<ServerState>,
-    Json(req): Json<DispatchRequest>,
-) -> Json<DispatchResponse> {
-    // 单步 dispatch 需要持久的插件实例状态（seat/table 跨请求）。
-    // 当前为演示骨架：仅校验请求可解码，返回占位响应。
-    let _ = (
-        hex::decode(&req.caller_hex).ok(),
-        hex::decode(&req.selector_hex).ok(),
-        hex::decode(&req.args_hex).ok(),
-    );
-    Json(DispatchResponse { had_prove_task: false, events_count: 0 })
+    Json(_req): Json<DispatchRequest>,
+) -> Result<Json<DispatchResponse>, (axum::http::StatusCode, String)> {
+    Err((
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        "stateful POST /dispatch is disabled until persistent plugin state and prove/verify are wired; use POST /hands/run for the documented coverage fragment".into(),
+    ))
 }
 
 async fn list_plugins(State(state): State<ServerState>) -> impl IntoResponse {
@@ -129,4 +133,26 @@ async fn list_plugins(State(state): State<ServerState>) -> impl IntoResponse {
             "chain_length": r.chain_length,
         })),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_endpoint_fails_closed_until_stateful_execution_is_wired() {
+        let result = dispatch(
+            State(ServerState::default()),
+            Json(DispatchRequest {
+                caller_hex: "00".repeat(20),
+                selector_hex: "00".repeat(32),
+                args_hex: String::new(),
+            }),
+        )
+        .await;
+
+        let (status, message) = result.expect_err("placeholder dispatch must not return success");
+        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert!(message.contains("disabled"));
+    }
 }

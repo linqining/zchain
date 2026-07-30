@@ -17,7 +17,7 @@ set_option linter.unusedVariables false in
 
 ## 核心结论
 
-三个生命周期方法的 AIR **都是 sound 的**：
+三个生命周期方法在手写 Lean AIR/Contract 模型内 **都是 sound 的**：
 
 1. **start_hand AIR 是 sound 的** — `RoundStateEq row 0` + `RoundStateUnchanged` +
    `ActiveCountAtLeastTwo` + `make_occupied_seats_foldl_count` + `VersionIncrementConstraint` +
@@ -38,6 +38,7 @@ set_option linter.unusedVariables false in
 
 ## 已知限制
 
+- 尚未证明这些谓词与真实 Rust `FrameworkEval`/VM dispatch 等价
 - 时间相关约束（tick 的真实超时条件）简化为 `timeout_kind > 0`
 - `start_hand` 的 button 旋转简化为不变（合约中不验证 button 旋转）
 - 密码学相关操作（shuffle/reveal/reconstruct）不在 AIR 中验证 -/

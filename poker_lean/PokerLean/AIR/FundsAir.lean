@@ -125,9 +125,8 @@ def AddonPoolFundsConservation (ext : AddonMethodColumns) : Prop :=
     对齐合约 `if chip_pool + addon_pool + amount > MAX_TOTAL_BET { return Err }`。
     对齐 Rust AIR `CommonConstraints::within_bound_check`。
 
-    注：完整的上界验证需要链接 within_bound witness 与 chip_pool/addon_pool/amount 数值，
-    由 Rust AIR 的 `within_bound_check` 方法通过额外约束实现。Lean 模型此处仅约束
-    witness == 1，将链接 soundness 留给后续 Phase（见 FundsSoundness.lean 中的 sorry）。 -/
+    注：这是保留的旧弱谓词。完整版本见下方 `BoundCheck4Limb` 及
+    `FundsSoundness.lean` 的模型内证明；这里不应被单独解释为完整上界验证。 -/
 def WithinBoundConstraint (within_bound : M31) : Prop :=
   within_bound = M31.one
 
