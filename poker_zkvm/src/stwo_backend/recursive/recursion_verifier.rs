@@ -13,6 +13,7 @@
 //! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
 //! [`RecursionVerificationError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
 
+use super::composition_eval_air::{CompositionEvalAir, COMP_EVAL_AIR_NUM_COLUMNS};
 use super::fri_verifier_air::{FriVerifierAir, FRI_AIR_NUM_COLUMNS};
 use super::merkle_path_air::{MerklePathAir, MERKLE_AIR_NUM_COLUMNS};
 use super::oods_check_air::{OodsCheckAir, OODS_AIR_NUM_COLUMNS};
@@ -239,7 +240,10 @@ pub fn verify_recursive_with_fri(
             stark_proof.commitments.len()
         ))
     })?;
-    let total_trace_cols = OODS_AIR_NUM_COLUMNS + FRI_AIR_NUM_COLUMNS + MERKLE_AIR_NUM_COLUMNS;
+    let total_trace_cols = OODS_AIR_NUM_COLUMNS
+        + FRI_AIR_NUM_COLUMNS
+        + MERKLE_AIR_NUM_COLUMNS
+        + COMP_EVAL_AIR_NUM_COLUMNS;
     let trace_log_sizes = vec![unified_log_size; total_trace_cols];
     commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
 
@@ -247,14 +251,28 @@ pub fn verify_recursive_with_fri(
     let oods_air = OodsCheckAir::new(unified_log_size);
     let fri_air = FriVerifierAir::new(unified_log_size);
     let merkle_air = MerklePathAir::new(unified_log_size);
+    let composition_air = CompositionEvalAir::new(
+        unified_log_size,
+        public_inputs.log_size,
+        public_inputs.oods_point,
+        public_inputs.composition_random_coeff,
+        public_inputs.composition_oods_eval,
+    );
     let mut allocator = TraceLocationAllocator::default();
     let oods_component = FrameworkComponent::new(&mut allocator, oods_air, SecureField::zero());
     let fri_component = FrameworkComponent::new(&mut allocator, fri_air, SecureField::zero());
     let merkle_component = FrameworkComponent::new(&mut allocator, merkle_air, SecureField::zero());
+    let composition_component =
+        FrameworkComponent::new(&mut allocator, composition_air, SecureField::zero());
 
     // 6. 验证（verify 内部处理 composition poly commitment = proof.commitments.last()）
     verify(
-        &[&oods_component, &fri_component, &merkle_component],
+        &[
+            &oods_component,
+            &fri_component,
+            &merkle_component,
+            &composition_component,
+        ],
         &mut channel,
         &mut commitment_scheme,
         stark_proof.clone(),

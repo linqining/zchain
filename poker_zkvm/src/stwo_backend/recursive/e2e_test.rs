@@ -20,23 +20,15 @@
 use super::public_inputs::RecursivePublicInputs;
 use super::recursion_prover::{prove_recursive_with_fri, RecursionProvingError};
 use super::recursion_verifier::{verify_recursive_with_fri, RecursionVerificationError};
-use super::trace_gen::{
-    compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
-    extract_query_positions_from_l1,
-};
+use super::trace_gen::compute_fri_trace_log_size;
+use super::verifier_program::build_cpu_recursive_public_inputs;
 use crate::stwo_backend::prover::prove_cpu_trace;
 use crate::stwo_backend::trace_native::TraceBuilder;
 use starknet_ff::FieldElement as FieldElement252;
 use stwo::core::circle::CirclePoint;
 use stwo::core::fields::qm31::SecureField;
-use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
-
-const TEST_OODS_POINT: CirclePoint<SecureField> = CirclePoint {
-    x: SecureField::from_u32_unchecked(1, 0, 0, 0),
-    y: SecureField::from_u32_unchecked(0, 1, 0, 0),
-};
 
 /// 生成真实 L1 proof。
 fn make_l1_proof(log_size: u32) -> StarkProof<Poseidon252MerkleHasher> {
@@ -56,57 +48,8 @@ fn make_recursive_public_inputs(
     l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     log_size: u32,
 ) -> RecursivePublicInputs {
-    // max_log_degree_bound 必须等于 trace log_size（Stwo 内部计算结果）
-    let max_log_degree_bound = log_size;
-    let composition_oods_eval =
-        extract_composition_oods_eval_from_l1(l1_proof, TEST_OODS_POINT, max_log_degree_bound)
-            .expect("提取 composition_oods_eval 应成功");
-    let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
-    // v5.2：从 L1 proof 的 Fiat-Shamir transcript 提取真实 FRI query point
-    let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
-        l1_proof,
-        PcsConfig::default(),
-        max_log_degree_bound,
-        &last_layer_poly,
-    )
-    .expect("提取 fri_query 应成功");
-    // P05-R gap #1：从 L1 proof 提取真实 commitments 与 transcript-sampled query_positions，
-    // 使 Merkle Path AIR 不再走空-input no-op 分支。felt252 使用 9-limb base-M31
-    // 无损编码，避免非法 M31 值与高位截断碰撞。
-    let l1_commitments: Vec<FieldElement252> = l1_proof.0.commitments.iter().copied().collect();
-    assert!(
-        !l1_commitments.is_empty(),
-        "真实 L1 proof 必须携带至少一个 commitment"
-    );
-    let query_positions = extract_query_positions_from_l1(
-        l1_proof,
-        PcsConfig::default(),
-        max_log_degree_bound,
-        &last_layer_poly,
-    )
-    .expect("提取 query_positions 应成功");
-    assert!(
-        !query_positions.is_empty(),
-        "真实 L1 proof 必须采样出非空 query positions"
-    );
-    RecursivePublicInputs::new(
-        l1_commitments,
-        TEST_OODS_POINT,
-        composition_oods_eval,
-        l1_proof
-            .0
-            .commitments
-            .first()
-            .copied()
-            .unwrap_or(FieldElement252::ZERO),
-        last_layer_poly,
-        max_log_degree_bound,
-        PcsConfig::default(),
-        query_positions,
-        log_size,
-        fri_query_x,
-        fri_query_eval,
-    )
+    build_cpu_recursive_public_inputs(l1_proof, log_size)
+        .expect("固定 CpuV1 verifier statement 构造应成功")
 }
 
 #[test]

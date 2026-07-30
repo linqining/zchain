@@ -14,6 +14,25 @@ use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::line::LinePoly;
 
+/// 递归证明内固定执行的 L1 verifier 程序。
+///
+/// 递归 verifier 不能接受 prover 自报的 component layout 或 transcript schedule；每个
+/// 变体必须在代码中固定 commitments、interaction 消息、mask points 和 composition AIR。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RecursiveVerifierProgram {
+    /// `prove_cpu_trace` / `verify_cpu_proof` 的单组件、无 interaction CPU verifier。
+    #[default]
+    CpuV1,
+}
+
+impl RecursiveVerifierProgram {
+    const fn transcript_id(self) -> u32 {
+        match self {
+            Self::CpuV1 => 1,
+        }
+    }
+}
+
 /// 单棵 L1 commitment tree 的 verifier 元数据。
 ///
 /// `column_log_sizes` 使用提交前的多项式 log degree；Stwo verifier 会为每列加上
@@ -60,6 +79,9 @@ impl RecursiveTreeMetadata {
 /// 任何字段被篡改都会导致 L2 proof 验证失败（因为 channel mix）。
 #[derive(Debug, Clone)]
 pub struct RecursivePublicInputs {
+    /// 固定的 L1 verifier 程序；禁止 prover 自报 transcript/component schema。
+    pub verifier_program: RecursiveVerifierProgram,
+
     /// L1 proof 的 Merkle roots（所有 trees 的 commitments）。
     ///
     /// 包括 preprocessed trace root（通常为空）、original trace root、
@@ -77,10 +99,21 @@ pub struct RecursivePublicInputs {
     /// 由 L1 verifier 在 commit phase 通过 `CirclePoint::get_random_point(channel)` 抽取。
     pub oods_point: CirclePoint<SecureField>,
 
+    /// L1 composition constraints 的 transcript 随机线性组合系数。
+    ///
+    /// `CpuV1` verifier 在 original trace commitment 后从 Poseidon252 channel 抽取该值；
+    /// Composition Eval AIR 使用它按 Stwo 的顺序累计全部 `CpuAir` constraint quotients。
+    pub composition_random_coeff: SecureField,
+
     /// L1 proof 的 composition polynomial 在 OODS point 处的 claimed evaluation。
     ///
     /// 来自 L1 proof 的 `sampled_values`，由 L1 prover 提供并经 L1 verifier 验证。
     pub composition_oods_eval: SecureField,
+
+    /// L1 PCS quotient batching 的 transcript 随机系数。
+    ///
+    /// 该值在 sampled values 混入 channel 后抽取，并用于构造 FRI first-layer answers。
+    pub fri_quotient_random_coeff: SecureField,
 
     /// L1 FRI first layer 的 Merkle root。
     pub fri_first_layer_commitment: FieldElement252,
@@ -139,10 +172,13 @@ impl RecursivePublicInputs {
         fri_query_eval: SecureField,
     ) -> Self {
         Self {
+            verifier_program: RecursiveVerifierProgram::CpuV1,
             l1_commitments,
             l1_tree_metadata: Vec::new(),
             oods_point,
+            composition_random_coeff: SecureField::from_u32_unchecked(0, 0, 0, 0),
             composition_oods_eval,
+            fri_quotient_random_coeff: SecureField::from_u32_unchecked(0, 0, 0, 0),
             fri_first_layer_commitment,
             fri_inner_layer_commitments: Vec::new(),
             fri_last_layer_poly,
@@ -167,6 +203,18 @@ impl RecursivePublicInputs {
         self
     }
 
+    /// 附加由固定 verifier transcript 派生的随机挑战。
+    #[must_use]
+    pub const fn with_verifier_challenges(
+        mut self,
+        composition_random_coeff: SecureField,
+        fri_quotient_random_coeff: SecureField,
+    ) -> Self {
+        self.composition_random_coeff = composition_random_coeff;
+        self.fri_quotient_random_coeff = fri_quotient_random_coeff;
+        self
+    }
+
     /// 获取 L1 FRI config。
     #[must_use]
     pub const fn fri_config(&self) -> FriConfig {
@@ -180,9 +228,14 @@ impl RecursivePublicInputs {
     /// Prover and verifier must call this method before committing/verifying the L2 trace.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u32s(&Self::TRANSCRIPT_DOMAIN);
+        channel.mix_u32s(&[self.verifier_program.transcript_id()]);
         self.config.mix_into(channel);
         channel.mix_u32s(&[self.max_log_degree_bound]);
-        channel.mix_felts(&[self.composition_oods_eval]);
+        channel.mix_felts(&[
+            self.composition_random_coeff,
+            self.composition_oods_eval,
+            self.fri_quotient_random_coeff,
+        ]);
         channel.mix_felts(&[self.oods_point.x, self.oods_point.y]);
 
         mix_len(channel, self.l1_commitments.len());
@@ -314,6 +367,14 @@ mod tests {
         let mut changed_queries = baseline.clone();
         changed_queries.query_positions = vec![0];
         assert_ne!(expected, transcript_challenge(&changed_queries));
+
+        let mut changed_composition_coeff = baseline.clone();
+        changed_composition_coeff.composition_random_coeff = SecureField::from(1u32);
+        assert_ne!(expected, transcript_challenge(&changed_composition_coeff));
+
+        let mut changed_fri_coeff = baseline.clone();
+        changed_fri_coeff.fri_quotient_random_coeff = SecureField::from(1u32);
+        assert_ne!(expected, transcript_challenge(&changed_fri_coeff));
 
         let mut changed_log_size = baseline;
         changed_log_size.log_size = 1;

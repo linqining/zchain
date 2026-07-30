@@ -7,8 +7,9 @@
 //! - ✅ `gen_oods_check_trace` — OODS Check AIR trace 生成器（v5.1：从 L1 proof 提取 sampled_values + QM31 乘法分解）
 //! - ✅ `gen_fri_verifier_trace` — FRI Verifier AIR trace 生成器（v5.1：Horner method + 完整 QM31 乘法分解）
 //! - ⬜ `gen_merkle_path_trace` — Merkle Path AIR trace 生成器（v5.2）
-//! - ⬜ `gen_composition_eval_trace` — Composition Eval AIR trace 生成器（已合并到 OODS Check AIR v5.1）
+//! - ✅ `gen_composition_eval_trace` — fixed `CpuV1` composition AIR 的全部 OODS samples
 
+use super::composition_eval_air::COMP_EVAL_AIR_NUM_COLUMNS;
 use super::fri_verifier_air::{
     FRI_AIR_COL_COEFF_BASE, FRI_AIR_COL_GATING, FRI_AIR_COL_IS_FIRST_ROW, FRI_AIR_COL_IS_LAST_ROW,
     FRI_AIR_COL_IS_PADDING, FRI_AIR_COL_M_BASE, FRI_AIR_COL_PARTIAL_EVAL_BASE,
@@ -22,6 +23,7 @@ use super::oods_check_air::{
     OODS_AIR_NUM_COLUMNS, OODS_AIR_NUM_M_INTERMEDIATES, OODS_AIR_NUM_SAMPLED_VALUES,
 };
 use super::public_inputs::RecursivePublicInputs;
+use crate::stwo_backend::column_layout_v2::NUM_COLUMNS;
 use ark_ff::Zero;
 use starknet_ff::FieldElement as FieldElement252;
 use stwo::core::channel::{Channel, MerkleChannel, Poseidon252Channel};
@@ -1162,16 +1164,37 @@ fn construct_felt252_from_m31s(limbs: &[BaseField; FELT252_M31_LIMBS]) -> FieldE
         .expect("base-M31 limbs produced from a canonical felt252 must decode canonically")
 }
 
-/// Composition Eval AIR 的 trace 生成器（已合并到 OODS Check AIR v5.1）。
+/// 生成 fixed `CpuV1` composition AIR trace。
 ///
-/// v5.1 已将 Composition Eval 逻辑合并到 `gen_oods_check_trace`。
-/// 此函数保留为占位符，未来可能用于独立的 Composition Eval AIR。
-#[allow(clippy::missing_errors_doc)]
+/// 每个 original-trace column 在 OODS point 只有一个 QM31 sample；这里将其拆成四个
+/// M31 columns，并在整个递归 trace domain 上重复。Composition Eval AIR 对每一行执行同一
+/// 个固定 CPU constraint quotient evaluation，因此不存在 “all-padding” 绕过。
+#[must_use]
 pub fn gen_composition_eval_trace(
-    _l1_proof: &StarkProof<Poseidon252MerkleHasher>,
-    _public_inputs: &RecursivePublicInputs,
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    trace_log_size: u32,
 ) -> Vec<Vec<BaseField>> {
-    Vec::new()
+    let samples = l1_proof
+        .0
+        .sampled_values
+        .get(1)
+        .expect("CpuV1 proof must contain original-trace sampled values");
+    assert_eq!(samples.len(), NUM_COLUMNS, "CpuV1 sampled column count");
+
+    let n_rows = 1usize << trace_log_size;
+    let mut trace = Vec::with_capacity(COMP_EVAL_AIR_NUM_COLUMNS);
+    for column in samples {
+        assert_eq!(
+            column.len(),
+            1,
+            "CpuV1 original columns must each have one OODS mask sample"
+        );
+        for limb in column[0].to_m31_array() {
+            trace.push(vec![limb; n_rows]);
+        }
+    }
+    assert_eq!(trace.len(), COMP_EVAL_AIR_NUM_COLUMNS);
+    trace
 }
 
 #[cfg(test)]
@@ -1204,15 +1227,16 @@ mod tests {
     #[test]
     fn test_trace_gen_signatures() {
         // 确保函数签名编译通过
-        let _fns: [fn(
+        let _proof_and_inputs_fns: [fn(
             &StarkProof<Poseidon252MerkleHasher>,
             &RecursivePublicInputs,
-        ) -> Vec<Vec<BaseField>>; 4] = [
+        ) -> Vec<Vec<BaseField>>; 3] = [
             gen_oods_check_trace,
             gen_fri_verifier_trace,
             gen_merkle_path_trace,
-            gen_composition_eval_trace,
         ];
+        let _composition_fn: fn(&StarkProof<Poseidon252MerkleHasher>, u32) -> Vec<Vec<BaseField>> =
+            gen_composition_eval_trace;
     }
 
     #[test]

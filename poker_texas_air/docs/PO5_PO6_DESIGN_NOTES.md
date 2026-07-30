@@ -112,6 +112,28 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
      OODS composition evaluation）作为递归 verifier program 的一部分；不能让 prover 自报 transcript
      schedule。当前 simple transcript replay 仅用于 padding-only 单 CPU proof 回归，禁止泛化到 Texas
      多组件 proof。
+   - **fixed `CpuV1` verifier program（2026-07-31 进展）**：递归 statement 新增代码内固定的
+     `RecursiveVerifierProgram::CpuV1`，并把 program id、composition random coefficient、FRI quotient
+     random coefficient 纳入公开输入 transcript。`build_cpu_recursive_public_inputs` 只从真实
+     `prove_cpu_trace` proof 构造 statement；`replay_cpu_verifier` 精确重建 `CpuAir` component、
+     `Components::column_log_sizes()` / `mask_points()`、Poseidon252 transcript 派生的 composition/OODS/FRI
+     challenges、真实 `CpuAir` composition OODS evaluation、`fri_answers`、全部 PCS Merkle trees 和完整
+     FRI replay。`_with_fri` 在 fail-closed gate 前先执行该固定 replay，因此 prover 不能再提供通用的
+     component layout 或 transcript schedule。
+   - **fixed CPU composition AIR 子层（2026-07-31 进展）**：原 10 列 no-op
+     `CompositionEvalAir` 已替换。新 AIR 读取 `CpuV1` original tree 的 185 个 QM31 OODS samples
+     （740 个 M31 columns），通过 nested `EvalAtRow` 直接复用 `CpuAir::evaluate`，按 Stwo
+     `PointEvaluationAccumulator` 顺序、transcript-derived random coefficient 和 CPU trace-domain
+     vanishing denominator 累计全部 constraint quotients，并约束结果等于 claimed composition OODS
+     evaluation。真实 proof、篡改 sample、篡改 claim 回归均已添加；prover/verifier 的四组件装配也已
+     加入该 AIR。此子层避免手工复制 CPU 约束导致 verifier drift，但 samples 尚未通过 AIR 连接到
+     Merkle queried values，random coefficient/OODS point 也尚未由 Poseidon252 transcript AIR 从
+     commitments 内生推导，因此生产 gate 仍必须保持关闭。
+   - **官方实现调研（GitHub）**：对照 `stwo-cairo` commit `68b4af6d`（其 Stwo 基线
+     `5ea05973`，接近 crates.io Stwo 2.3）确认 `cairo-air` 的 Poseidon components 可通过 Cargo patch
+     在当前 Stwo 2.3 上编译；但完整 witness 依赖闭包约 9.5k generated lines，且 Cairo verifier 的
+     recursive PCS/FRI schema 与本项目 fixed CPU proof layout 不同。后续应抽取/审计最小 Poseidon252
+     permutation component 与 call relation，而不是盲目 vendoring 整个 Cairo prover。
 2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**（未变）。
 3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR
    （未变；且 `poker_zkvm` 的 guest crate `guests/texas_poker` 本轮尚未迁入 zchain
@@ -126,10 +148,11 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 
 ### 修复路径(均需密码学专家)
 - **(a) 让单 proof 递归 sound**：公开输入 transcript binding 已完成；gap #1 的
-  空-input no-op 守卫与 felt252 无损编码已闭合（见上）；**仍需**把 verifier 的 per-tree
-  column log sizes/lifting metadata 加入递归 statement，按 Stwo 算法消费压缩 multi-query
-  decommitment、覆盖全部 commitments，并实现真实的 non-native Poseidon252 AIR（或经过证明的等价 lookup），
-  再证明 OODS/FRI/Merkle verifier AIR 的组合 sound。（密码学/AIR 大改 + review）
+  空-input no-op 守卫与 felt252 无损编码已闭合（见上）；per-tree column metadata、压缩
+  multi-query、全部 commitments、完整 FRI host replay、fixed `CpuV1` transcript schema 及 CPU
+  composition AIR 子层也已落地。**仍需**把 sampled values/queried values/canonical replay witness
+  通过 AIR 连接起来，实现真实 non-native Poseidon252 AIR（或经过证明的等价 lookup）与 transcript AIR，
+  并替换 Merkle/FRI 占位约束后证明整体组合 sound。（密码学/AIR 大改 + review）
 - **(b) 构建 N-proof 聚合**:在 sound 的单 proof 递归之上,设计二叉树折叠或专用多验证器 AIR。(~1-2 周 + 设计决策)
 - **(c) host-side 逐子验证**(已实现的过渡路径):host 对每个子 proof 跑
   `stwo::verify()`，只允许 verifier-issued receipt 进入 `VerifiedChain`。该路径失去
@@ -152,7 +175,10 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   **gap #3-A**（felt252→M31 非法/有损编码）已修复为 9-limb radix-(2^31-1) 无损编码；
   **gap #3-B** 中 host canonical replay 部分（压缩 multi-query witness、全 tree commitment、column
   metadata、完整 FRI layer folding/decommitment）已实现并有真实 proof/篡改回归；但这些 replay 尚未
-  进入 AIR，真实 Poseidon252 non-native AIR、method-specific transcript 与 composition verifier 仍未实现。
+  完整进入 AIR。fixed `CpuV1` method schema 与 host verifier replay 已完成；CPU composition evaluator
+  已作为真实 AIR 子层实现并复用 `CpuAir::evaluate`，但它的 sampled values 和 transcript challenges
+  尚未由 Merkle/Poseidon252 AIR 绑定。真实 Poseidon252 non-native AIR、transcript AIR 及 canonical
+  Merkle/FRI replay 约束仍未实现。
   `_with_fri` 继续显式 `IncompleteMerkleVerifierAir` fail-closed，不再依赖偶然的
   `Constraints not satisfied`（回归测试 `gap3b_incomplete_merkle_air_is_explicitly_disabled`）；
   gap #2（N-proof 聚合）、gap #3 主体（leaf/sibling 真实绑定 + verifier AIR 组合 sound + 真实 method proof 端到端）未闭合；

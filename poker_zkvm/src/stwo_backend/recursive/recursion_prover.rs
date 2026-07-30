@@ -27,17 +27,18 @@
 //! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
 //! [`RecursionProvingError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
 
+use super::composition_eval_air::{CompositionEvalAir, COMP_EVAL_AIR_NUM_COLUMNS};
 use super::fri_verifier_air::{FriVerifierAir, FRI_AIR_NUM_COLUMNS};
 use super::merkle_path_air::{MerklePathAir, MERKLE_AIR_NUM_COLUMNS};
 use super::oods_check_air::{OodsCheckAir, OODS_AIR_NUM_COLUMNS};
 use super::public_inputs::RecursivePublicInputs;
-#[cfg(test)]
-use super::trace_gen::extract_query_positions_from_l1;
 use super::trace_gen::{
     compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
-    gen_fri_verifier_trace, gen_merkle_path_trace, gen_oods_check_trace, pad_fri_trace_to_log_size,
-    pad_merkle_trace_to_log_size, pad_oods_trace_to_log_size, OODS_TRACE_LOG_SIZE,
+    gen_composition_eval_trace, gen_fri_verifier_trace, gen_merkle_path_trace,
+    gen_oods_check_trace, pad_fri_trace_to_log_size, pad_merkle_trace_to_log_size,
+    pad_oods_trace_to_log_size, OODS_TRACE_LOG_SIZE,
 };
+use super::verifier_program::replay_cpu_verifier;
 use ark_ff::Zero;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::m31::BaseField;
@@ -131,6 +132,9 @@ pub enum RecursionProvingError {
         "recursive prover is disabled: canonical Merkle/FRI replay is not yet constrained by the Poseidon252 and transcript verifier AIR"
     )]
     IncompleteMerkleVerifierAir,
+    /// 固定 `CpuV1` verifier 的完整 host replay 失败。
+    #[error("fixed CpuV1 verifier replay failed: {0}")]
+    FixedVerifierReplayFailed(String),
 }
 
 impl From<ProvingError> for RecursionProvingError {
@@ -381,6 +385,12 @@ pub fn prove_recursive_with_fri(
         });
     }
 
+    // 固定 method verifier：重建 CpuAir component、mask points、composition OODS、全部
+    // tree commitments 与完整 FRI。该检查禁止 prover 自报 transcript/component schema。
+    // 它仍是 host replay；下方 gate 继续关闭，直到同一计算被 AIR 约束。
+    replay_cpu_verifier(l1_proof, public_inputs)
+        .map_err(|error| RecursionProvingError::FixedVerifierReplayFailed(error.to_string()))?;
+
     // P05-R gap #3-B：`stwo_replay` / `fri_replay` 已提供与 Stwo 2.3 一致的 canonical
     // witness 重放，但当前 MerklePathAir 仍未约束该重放，也没有真实 Poseidon252、
     // method-specific transcript 或 composition verifier AIR。保持显式 fail-closed。
@@ -429,6 +439,14 @@ pub fn prove_recursive_with_fri(
         pad_merkle_trace_to_log_size(merkle_trace_cols, unified_log_size)
     };
 
+    // 5b. 固定 CpuAir composition evaluation：185 个 QM31 samples = 740 个 M31 columns。
+    let composition_trace = gen_composition_eval_trace(l1_proof, unified_log_size);
+    assert_eq!(
+        composition_trace.len(),
+        COMP_EVAL_AIR_NUM_COLUMNS,
+        "Composition trace 列数不匹配"
+    );
+
     // 6. PCS 配置 + twiddles 预计算
     let config = PcsConfig::default();
     let blowup_log = config.fri_config.log_blowup_factor;
@@ -456,10 +474,12 @@ pub fn prove_recursive_with_fri(
         let oods_evals = trace_cols_to_evaluations(&oods_trace_padded, unified_log_size);
         let fri_evals = trace_cols_to_evaluations(&fri_trace_padded, unified_log_size);
         let merkle_evals = trace_cols_to_evaluations(&merkle_trace_padded, unified_log_size);
+        let composition_evals = trace_cols_to_evaluations(&composition_trace, unified_log_size);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(oods_evals);
         tree_builder.extend_evals(fri_evals);
         tree_builder.extend_evals(merkle_evals);
+        tree_builder.extend_evals(composition_evals);
         tree_builder.commit(&mut channel);
     }
 
@@ -467,14 +487,28 @@ pub fn prove_recursive_with_fri(
     let oods_air = OodsCheckAir::new(unified_log_size);
     let fri_air = FriVerifierAir::new(unified_log_size);
     let merkle_air = MerklePathAir::new(unified_log_size);
+    let composition_air = CompositionEvalAir::new(
+        unified_log_size,
+        public_inputs.log_size,
+        public_inputs.oods_point,
+        public_inputs.composition_random_coeff,
+        public_inputs.composition_oods_eval,
+    );
     let mut allocator = TraceLocationAllocator::default();
     let oods_component = FrameworkComponent::new(&mut allocator, oods_air, SecureField::zero());
     let fri_component = FrameworkComponent::new(&mut allocator, fri_air, SecureField::zero());
     let merkle_component = FrameworkComponent::new(&mut allocator, merkle_air, SecureField::zero());
+    let composition_component =
+        FrameworkComponent::new(&mut allocator, composition_air, SecureField::zero());
 
     // 12. 生成多组件证明（3 个 AIR）
     let stark_proof = prove(
-        &[&oods_component, &fri_component, &merkle_component],
+        &[
+            &oods_component,
+            &fri_component,
+            &merkle_component,
+            &composition_component,
+        ],
         &mut channel,
         commitment_scheme,
     )?;
@@ -531,22 +565,9 @@ mod tests {
     use super::*;
     use crate::stwo_backend::prover::prove_cpu_trace;
     use crate::stwo_backend::trace_native::TraceBuilder;
-    use ark_ff::Zero;
-    use starknet_ff::FieldElement as FieldElement252;
     use stwo::core::channel::Channel;
     use stwo::core::circle::CirclePoint;
     use stwo::core::poly::line::LinePoly;
-    use stwo::core::vcs::blake2_hash::Blake2sHash;
-
-    /// 测试用 OODS point（任意非零值，确保 `repeated_double` 不退化为零）。
-    ///
-    /// **注意**：v5.1 中 `composition_oods_eval` 必须从 L1 proof 提取，且与 `oods_point` +
-    /// `max_log_degree_bound` 严格绑定。修改 `oods_point` 会改变 `doubling_factor.x`，
-    /// 从而改变 `composition_oods_eval` 的推导值。
-    const TEST_OODS_POINT: CirclePoint<SecureField> = CirclePoint {
-        x: SecureField::from_u32_unchecked(1, 0, 0, 0),
-        y: SecureField::from_u32_unchecked(0, 1, 0, 0),
-    };
 
     /// 测试用 max_log_degree_bound。
     const TEST_MAX_LOG_DEGREE_BOUND: u32 = 10;
@@ -568,42 +589,11 @@ mod tests {
     fn make_test_public_inputs_from_l1(
         l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     ) -> RecursivePublicInputs {
-        let composition_oods_eval = extract_composition_oods_eval_from_l1(
+        super::super::verifier_program::build_cpu_recursive_public_inputs(
             l1_proof,
-            TEST_OODS_POINT,
             TEST_MAX_LOG_DEGREE_BOUND,
         )
-        .expect("提取 composition_oods_eval 应成功");
-        // P05-R gap #1：从 L1 proof 提取真实 commitments 与 query_positions，满足
-        // ensure_nonempty_public_inputs。gap #3 的 limb panic 已由 field_element_252_to_m31_limbs
-        // 的 radix-2^31 修复闭合（仍有损，见该函数文档）。
-        let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
-        let l1_commitments: Vec<FieldElement252> = l1_proof.0.commitments.iter().copied().collect();
-        let query_positions = extract_query_positions_from_l1(
-            l1_proof,
-            PcsConfig::default(),
-            TEST_MAX_LOG_DEGREE_BOUND,
-            &last_layer_poly,
-        )
-        .expect("提取 query_positions 应成功");
-        RecursivePublicInputs::new(
-            l1_commitments,
-            TEST_OODS_POINT,
-            composition_oods_eval,
-            l1_proof
-                .0
-                .commitments
-                .first()
-                .copied()
-                .unwrap_or(FieldElement252::ZERO),
-            LinePoly::new(vec![SecureField::zero()]),
-            TEST_MAX_LOG_DEGREE_BOUND,
-            PcsConfig::default(),
-            query_positions,
-            10,
-            SecureField::zero(),
-            SecureField::zero(),
-        )
+        .expect("固定 CpuV1 verifier statement 构造应成功")
     }
 
     #[test]
@@ -778,48 +768,11 @@ mod tests {
     fn make_test_public_inputs_with_fri_from_l1(
         l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     ) -> RecursivePublicInputs {
-        let composition_oods_eval = extract_composition_oods_eval_from_l1(
+        super::super::verifier_program::build_cpu_recursive_public_inputs(
             l1_proof,
-            TEST_OODS_POINT,
             TEST_MAX_LOG_DEGREE_BOUND,
         )
-        .expect("提取 composition_oods_eval 应成功");
-        let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
-        // v5.2：从 L1 proof 的 Fiat-Shamir transcript 提取真实 FRI query point
-        let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
-            l1_proof,
-            PcsConfig::default(),
-            TEST_MAX_LOG_DEGREE_BOUND,
-            &last_layer_poly,
-        )
-        .expect("提取 fri_query 应成功");
-        // P05-R gap #1：从 L1 proof 提取真实 commitments 与 query_positions（见 make_test_public_inputs_from_l1）。
-        let l1_commitments: Vec<FieldElement252> = l1_proof.0.commitments.iter().copied().collect();
-        let query_positions = extract_query_positions_from_l1(
-            l1_proof,
-            PcsConfig::default(),
-            TEST_MAX_LOG_DEGREE_BOUND,
-            &last_layer_poly,
-        )
-        .expect("提取 query_positions 应成功");
-        RecursivePublicInputs::new(
-            l1_commitments,
-            TEST_OODS_POINT,
-            composition_oods_eval,
-            l1_proof
-                .0
-                .commitments
-                .first()
-                .copied()
-                .unwrap_or(FieldElement252::ZERO),
-            last_layer_poly,
-            TEST_MAX_LOG_DEGREE_BOUND,
-            PcsConfig::default(),
-            query_positions,
-            10,
-            fri_query_x,
-            fri_query_eval,
-        )
+        .expect("固定 CpuV1 verifier statement 构造应成功")
     }
 
     /// v5.1 多组件 prove 应成功：OODS + FRI Verifier AIR 联合 proof。

@@ -55,5 +55,7 @@ pub mod recursion_prover;
 pub mod recursion_verifier;
 pub(crate) mod stwo_replay;
 pub mod trace_gen;
+pub(crate) mod verifier_program;
 
-pub use public_inputs::{RecursivePublicInputs, RecursiveTreeMetadata};
+pub use public_inputs::{RecursivePublicInputs, RecursiveTreeMetadata, RecursiveVerifierProgram};
+pub use verifier_program::{build_cpu_recursive_public_inputs, VerifierProgramError};
