@@ -32,6 +32,17 @@ Stwo verifier，成功后才签发字段私有的 `VerificationReceipt`，然后
 dispatch 调用摘要也被混入 method proof transcript。receipt 字段和链构造 API 已收窄为
 crate-private，因此 descriptor 不能伪造 receipt；但外部仍可向 public Orchestrator 提交
 任意自洽的离线 task，并获得“该转移经 VM replay + native verify”的 opaque receipt。
+
+Mental Poker 方法的 AIR 仍未嵌入 DLEq/shuffle/reveal/reconstruct verifier AIR；
+当前 host 路径依赖上述完整 VM replay 执行原生密码学验证。原有
+`TableConfig.zk_skip_*` 运行时开关曾使默认桌台可跳过这一步；现已收窄为
+`poker_l1` crate 自身 `cfg(test)` 单元测试专用。普通库、集成测试与生产
+构建即使解析到旧的 skip 字段，`skip_*()` 也始终返回 false。这闭合了
+host replay 的默认绕过，但不代替 recursive crypto verifier AIR。
+此外，`leave_with_proof` 的退款已与 `leave_table` 对齐为 checked-u64：
+refund 溢出或 chip_pool/addon_pool 下溢会在修改牌组、聚合公钥、座位或事件前
+fail-closed，不再用 saturating arithmetic 静默截断坏状态。
+
 proof 在当次原生验证后仍不会被压缩成可转移的 recursive proof；因此这只是
 可信宿主进程内的 O(N) 接受产物。
 
@@ -61,6 +72,12 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**。
 3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR。
 
+由于这些缺口允许恶意 prover 针对任意声明重新生成一个满足当前局部 AIR 的 L2 proof，
+`poker_zkvm` 的递归 prove/verify API 现仅在 crate 自身 `cfg(test)` 中执行；跨 crate 调用
+统一返回 `UnsoundBackendDisabled`。L1 的 `StwoZkVerifier` 即使治理状态为 Production 也
+返回 `verified = false`，不再使用 `RecursivePublicInputs::default()` 接受未绑定
+`ZkPublicIo` 的 proof。
+
 ### 修复路径(均需密码学专家)
 - **(a) 让单 proof 递归 sound**：公开输入 transcript binding 已完成；仍需强制从真实
   L1 proof 构造非空 commitments/query positions，让 `gen_merkle_path_trace` 非空并绑定
@@ -77,6 +94,7 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 
 **当前状态**：
 - descriptor-only prove/verify 生产入口继续 fail-closed；
+- `poker_zkvm` recursive PoC 与 L1 `StwoZkVerifier` 生产路径均 fail-closed；
 - `test-helpers` 仅用于集成测试，release 构建若误启用该 feature 会在编译期拒绝；
 - **P05-H-core** O(N) 宿主验证与完整范围 anchor 校验已闭合；
 - **P05-H-source** 仍需上层把 anchor 接到已认证 block/receipt；

@@ -27,10 +27,11 @@
 //!
 //! 链上仅做 verify，链下做 prove（`#[cfg(feature = "client")]` 门控）。
 //!
-//! # ZK 跳过回退（dev chain）
+//! # ZK 跳过回退（仅 crate 内单元测试）
 //!
-//! `TableConfig.zk_skip_enabled = true` 时，所有 ZK verify 直接返回 true，
-//! 便于首版跑通流程。mainnet 启动时由 governance 强制 false。
+//! 为了兼容已有状态，`TableConfig` 仍保留 `zk_skip_*` 字段；但它们只在
+//! `poker_l1` crate 自身的 `cfg(test)` 单元测试构建中生效。生产、普通库和
+//! 集成测试构建始终执行真实密码学验证，不依赖尚未实现的 governance 强制。
 
 pub mod betting;
 pub mod card;

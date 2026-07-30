@@ -39,6 +39,15 @@ Rust/VM 当前已有 23 个 selector；21 `request_leave_after_hand` 与 22
 - **leave_table 资金 carry-chain 已修复**：refund 使用规范 `Limb4Delta`；chip_pool/addon_pool
   减法使用 `Limb4DeltaRev`（即 `pre = post + amount`）表达跨 limb 借位并禁止下溢；Rust
   trace、宿主 fail-closed 校验、真实 VM replay 回归与 Lean refinement 已同步。
+- **离座退款的 VM checked arithmetic 已补齐**：`leave_table` 与
+  `leave_with_proof` 均不再使用 `saturating_add/sub`。refund 溢出、chip_pool/addon_pool
+  下溢会在任何座位/牌组/公钥变更前拒绝，失败路径保持原子性。
+  `leave_with_proof` AIR 本身仍未内建退款列约束，当前由严格 VM replay 绑定。
+- **生产 Mental Poker 密码学 skip 已关闭**：`TableConfig` 保留旧 `zk_skip_*`
+  字段以兼容序列化状态，但它们只在 `poker_l1` crate 自身 `cfg(test)`
+  单元测试中生效。普通库、集成测试和生产构建的 VM replay 对
+  shuffle/reveal/reconstruct/remask 始终执行真实 verifier，不再依赖
+  尚未实现的 governance 强制。
 - **P0-3（state_root 与 trace 无连接）已修复**：`state_root_to_air_limbs` 做真实
   Blake2b→4×M31 转换（不再是全零占位）；`CommonConstraints::write` 强制 trace 的
   state_root/table_id/hand_id/call_seq/version 列 == AIR statement 的对应值。
@@ -55,8 +64,9 @@ Rust/VM 当前已有 23 个 selector；21 `request_leave_after_hand` 与 22
   上层从已认证 block/receipt 提供 anchor；当前本地 proving service 未接入共识来源。
   P05-R 的 public-input transcript 重标记漏洞已修复：commitments、FRI root/poly、queries、
   log_size 与 OODS/FRI 字段现统一绑定，篡改单字段会使 L2 verify 失败。但 recursive/succinct
-  aggregator 仍 descriptor-only，Merkle/query 完整验证及 N-proof aggregation 尚未闭合，
-  因此生产入口继续 fail-closed。两条 Rust 路径均尚无对应 Lean 实现级模型/定理。详见
+  aggregator 仍 descriptor-only，Merkle/query 完整验证、`ZkPublicIo` refinement 及
+  N-proof aggregation 尚未闭合。因此 `poker_zkvm` recursive API、L1 `StwoZkVerifier`
+  与 aggregator 生产入口均继续 fail-closed。两条 Rust 路径均尚无对应 Lean 实现级模型/定理。详见
   `poker_texas_air/docs/PO5_PO6_DESIGN_NOTES.md`。
 - ⚠️ **P0-6：mid-round 生产路径已收窄，完整 transition 仍未完成**。VM 的
   call/raise/bet 在 seat 更新后无条件调用 `advance_turn`，收尾分支会收注
@@ -74,6 +84,8 @@ Rust/VM 当前已有 23 个 selector；21 `request_leave_after_hand` 与 22
   建模重置其他玩家 `acted_this_round`；bet-collection、round-advance 与 settlement
   AIR/精化也仍缺失。详见同上文档。
 - Lean 侧桥接：Rust `evaluate` ↔ Lean AIR 谓词的逐约束等价、VM 完整精化、密码学子证明验证均未建立。
+  Crypto method AIR 本身仍只描述协议状态变更；当前安全性来自生产
+  Orchestrator 的严格原生 VM replay，不是可转移的 recursive crypto proof。
 - selector 21/22：Rust 统一 wire format 已登记，但生产 proof/receipt 路径显式
   fail-closed；Lean 侧也尚无 MethodKind、AIR/Contract 或 soundness theorem。
 -/

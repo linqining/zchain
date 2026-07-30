@@ -12,9 +12,6 @@ use std::sync::Arc;
 use crate::Hash;
 use crate::error::PokerL1Error;
 
-// Re-export for bincode deserialization in this module.
-use poker_zkvm::stwo_backend::recursive::RecursivePublicInputs;
-
 /// ZK 证明 scheme 标识符（u32，与 syscall 接口一致）。
 pub type SchemeId = u32;
 
@@ -346,14 +343,11 @@ pub struct ZkVerifierRegistry {
     statuses: BTreeMap<crate::ChainId, VerifierStatus>,
 }
 
-/// Stwo ZK Verifier — v2 真实递归证明验证器。
+/// Stwo ZK Verifier — 实验性递归 proof 的保护性入口。
 ///
-/// 使用 poker_zkvm 的 Stwo 递归证明验证器验证 L2 proof。
-/// L2 proof 由 `poker_zkvm::stwo_backend::recursive::prove_recursive_with_fri` 生成，
-/// 包含 3 个 Verifier AIR：
-/// - OODS Check AIR（73 列）
-/// - FRI Verifier AIR（68 列）
-/// - Merkle Path AIR（60 列）
+/// 当前 verifier AIR 尚未完整约束 L1 Merkle/FRI decommitment，也没有把链上
+/// [`ZkPublicIo`] refinement 到递归 statement。Production 状态必须 fail closed；
+/// proof 只做格式解析，不能解锁 OffChain checkout。
 #[derive(Debug)]
 pub struct StwoZkVerifier;
 
@@ -380,21 +374,7 @@ impl ZkVerifier for StwoZkVerifier {
             VerifierStatus::Stub => {
                 Ok(!proof.is_empty())
             }
-            VerifierStatus::Production => {
-                let recursive_proof =
-                    bincode::deserialize(proof).map_err(|e| {
-                        PokerL1Error::InvalidZkProofFormat(format!(
-                            "反序列化 L2 proof 失败: {}",
-                            e
-                        ))
-                    })?;
-
-                let result = poker_zkvm::stwo_backend::recursive::recursion_verifier::verify_recursive_with_fri(
-                    &recursive_proof,
-                    &RecursivePublicInputs::default(),
-                );
-                Ok(result.is_ok())
-            }
+            VerifierStatus::Production => Ok(false),
         }
     }
 
@@ -456,9 +436,9 @@ impl ZkVerifier for StubVerifier {
     }
 }
 
-/// 注册 Stwo scheme（`SCHEME_STWO = 1`）的真实 verifier。
+/// 注册 Stwo scheme（`SCHEME_STWO = 1`）的保护性 verifier。
 ///
-/// v2 Phase 5 已实现真实的 StwoZkVerifier，替代原 StubVerifier。
+/// 在递归 AIR 与 [`ZkPublicIo`] 完整绑定前，Production 验证始终返回 `false`。
 pub fn register_stwo_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StwoZkVerifier::new()));
 }
@@ -757,6 +737,18 @@ mod tests {
         );
 
         assert!(matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))));
+    }
+
+    #[test]
+    fn test_stwo_production_verifier_fails_closed() {
+        let verifier = StwoZkVerifier::new();
+        let public_io = make_public_io(1, 0);
+
+        let verified = verifier
+            .verify(&[0x01], &public_io, VerifierStatus::Production)
+            .expect("fail-closed verifier should return a boolean result");
+
+        assert!(!verified);
     }
 
     #[test]

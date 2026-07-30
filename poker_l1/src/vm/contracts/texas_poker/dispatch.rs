@@ -1108,25 +1108,35 @@ fn dispatch_leave_table(
             input.seat_index
         )));
     }
-    let seat = &mut table.seats[input.seat_index as usize];
+    let seat = &table.seats[input.seat_index as usize];
     if !seat.is_occupied() {
         return Err(PokerL1Error::Serialization(
             "seat not occupied, cannot leave".into(),
         ));
     }
     // 退还 stack + pending_addon（玩家离开时未入账的 addon 也必须退还）
-    let refund_amt = seat.stack.saturating_add(seat.pending_addon);
-    let pending = seat.pending_addon;
+    let refund_amt = seat
+        .stack
+        .checked_add(seat.pending_addon)
+        .ok_or_else(|| PokerL1Error::Serialization("leave_table refund overflow".into()))?;
+    let post_chip_pool = table
+        .chip_pool
+        .checked_sub(seat.stack)
+        .ok_or_else(|| PokerL1Error::Serialization("leave_table chip_pool underflow".into()))?;
+    let post_addon_pool = table
+        .addon_pool
+        .checked_sub(seat.pending_addon)
+        .ok_or_else(|| PokerL1Error::Serialization("leave_table addon_pool underflow".into()))?;
     let player = seat.player;
     if refund_amt > 0 {
         // 同步扣减 addon_pool（资金流出）
-        table.addon_pool = table.addon_pool.saturating_sub(pending);
+        table.addon_pool = post_addon_pool;
         // P0 修复：对偶地扣减 chip_pool（join 时 buy_in 已计入 chip_pool，
         // 离开时退出的 stack 必须从 chip_pool 扣除，保持资金账平衡）。
         // 注意：pending_addon 已计入 addon_pool（不计入 chip_pool），此处只扣 stack 部分。
-        table.chip_pool = table.chip_pool.saturating_sub(seat.stack);
+        table.chip_pool = post_chip_pool;
     }
-    *seat = super::types::Seat::empty();
+    table.seats[input.seat_index as usize] = super::types::Seat::empty();
 
     if refund_amt > 0 {
         events.push(TexasPokerEvent::PlayerRefund {
@@ -1561,6 +1571,27 @@ mod tests {
         let leave_bytes = borsh::to_vec(&leave_args).unwrap();
         dispatch(&ctx_p1, &mut table, &selectors::leave_table(), &leave_bytes).unwrap();
         assert_eq!(table.occupied_count(), 0);
+    }
+
+    #[test]
+    fn dispatch_leave_table_rejects_pool_underflow_without_mutation() {
+        let player: Address = [0x11; 20];
+        let context = make_context_as(player);
+        let mut table = make_table();
+        table.seats[0].player = player;
+        table.seats[0].stack = 10;
+        table.seats[0].pending_addon = 5;
+        table.chip_pool = 9;
+        table.addon_pool = 5;
+        let before = table.clone();
+        let mut events = vec![];
+        let args = borsh::to_vec(&LeaveTableArgs { seat_index: 0 }).unwrap();
+
+        let error = dispatch_leave_table(&context, &mut table, &args, &mut events).unwrap_err();
+
+        assert!(error.to_string().contains("chip_pool underflow"));
+        assert_eq!(table, before, "failed refund must be atomic");
+        assert!(events.is_empty());
     }
 
     /// 端到端：完整一局生命周期 create_table → join_table ×2 → start_hand → reset_for_next_hand。

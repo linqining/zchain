@@ -1,13 +1,14 @@
-//! Audit regression for recursive public-input Fiat–Shamir binding.
+//! Audit regression for the experimental recursive backend production gate.
 //!
-//! Every field advertised as part of the L1 recursive statement must affect the
-//! L2 transcript. A proof created for one statement must not verify after any
-//! commitment, query position, or trace-size field is replaced.
+//! Transcript binding prevents an existing proof from being relabelled, but the
+//! current verifier AIR still does not fully constrain the L1 Merkle/FRI proof.
+//! Cross-crate callers must therefore fail closed instead of accepting the PoC.
 
 use poker_zkvm::stwo_backend::prover::prove_cpu_trace;
 use poker_zkvm::stwo_backend::recursive::public_inputs::RecursivePublicInputs;
-use poker_zkvm::stwo_backend::recursive::recursion_prover::prove_recursive_with_fri;
-use poker_zkvm::stwo_backend::recursive::recursion_verifier::verify_recursive_with_fri;
+use poker_zkvm::stwo_backend::recursive::recursion_prover::{
+    prove_recursive_with_fri, RecursionProvingError,
+};
 use poker_zkvm::stwo_backend::recursive::trace_gen::{
     extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
 };
@@ -23,7 +24,7 @@ const TEST_OODS_POINT: CirclePoint<SecureField> = CirclePoint {
 };
 
 #[test]
-fn recursive_verifier_rejects_tampered_commitments_and_queries() {
+fn recursive_backend_is_disabled_for_cross_crate_callers() {
     let log_size = 8;
     let mut builder = TraceBuilder::new(log_size);
     builder.fill_padding_to_full();
@@ -54,29 +55,9 @@ fn recursive_verifier_rejects_tampered_commitments_and_queries() {
         fri_query_eval,
     );
 
-    let l2_proof = prove_recursive_with_fri(&l1_proof, &public_inputs)
-        .expect("recursive PoC prove should succeed");
-    verify_recursive_with_fri(&l2_proof, &public_inputs)
-        .expect("baseline recursive PoC proof should verify");
-
-    let mut changed_l1_commitments = public_inputs.clone();
-    changed_l1_commitments.l1_commitments = vec![FieldElement252::ONE];
-    let mut changed_fri_commitment = public_inputs.clone();
-    changed_fri_commitment.fri_first_layer_commitment = FieldElement252::ONE;
-    let mut changed_queries = public_inputs.clone();
-    changed_queries.query_positions = vec![1, 3, 7, 15];
-    let mut changed_log_size = public_inputs.clone();
-    changed_log_size.log_size = log_size + 7;
-
-    for (name, tampered) in [
-        ("l1_commitments", changed_l1_commitments),
-        ("fri_first_layer_commitment", changed_fri_commitment),
-        ("query_positions", changed_queries),
-        ("log_size", changed_log_size),
-    ] {
-        assert!(
-            verify_recursive_with_fri(&l2_proof, &tampered).is_err(),
-            "recursive verifier accepted proof after tampering {name}"
-        );
-    }
+    let result = prove_recursive_with_fri(&l1_proof, &public_inputs);
+    assert!(matches!(
+        result,
+        Err(RecursionProvingError::UnsoundBackendDisabled)
+    ));
 }

@@ -1752,6 +1752,21 @@ pub fn apply_leave_with_proof(
         ));
     }
 
+    // 先计算完整资金转移，再修改牌组/公钥/座位状态。
+    // 这与 leave_table 的 checked-u64 语义一致，避免 saturating
+    // arithmetic 在账户池不足时静默造币，也避免报错时留下部分状态变更。
+    let stack_refund = table.seats[seat_index as usize].stack;
+    let pending_refund = table.seats[seat_index as usize].pending_addon;
+    let refund = stack_refund.checked_add(pending_refund).ok_or_else(|| {
+        PokerL1Error::Serialization("leave_with_proof: refund overflow".into())
+    })?;
+    let post_chip_pool = table.chip_pool.checked_sub(stack_refund).ok_or_else(|| {
+        PokerL1Error::Serialization("leave_with_proof: chip_pool underflow".into())
+    })?;
+    let post_addon_pool = table.addon_pool.checked_sub(pending_refund).ok_or_else(|| {
+        PokerL1Error::Serialization("leave_with_proof: addon_pool underflow".into())
+    })?;
+
     // typed 化后无需反序列化。
     let output_cts = output_cards;
     // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）。
@@ -1783,14 +1798,11 @@ pub fn apply_leave_with_proof(
 
     // P1-9 修复：退还 stack + 未入账的 pending_addon（与 dispatch_leave_table 一致），
     // 并同步扣减 chip_pool（join 时 buy_in 计入）与 addon_pool（addon 时计入）。
-    let stack_refund = table.seats[seat_index as usize].stack;
-    let pending_refund = table.seats[seat_index as usize].pending_addon;
-    let refund = stack_refund.saturating_add(pending_refund);
     if refund > 0 {
         table.seats[seat_index as usize].stack = 0;
         table.seats[seat_index as usize].pending_addon = 0;
-        table.chip_pool = table.chip_pool.saturating_sub(stack_refund);
-        table.addon_pool = table.addon_pool.saturating_sub(pending_refund);
+        table.chip_pool = post_chip_pool;
+        table.addon_pool = post_addon_pool;
         events::emit_event(
             events,
             TexasPokerEvent::PlayerRefund {
@@ -4040,6 +4052,64 @@ mod tests {
         // 未占用
         let err = apply_rebuy(&mut table, 1, 100, &mut vec![]).unwrap_err();
         assert!(err.to_string().contains("seat 1 not occupied"));
+    }
+
+    fn empty_leave_proof() -> DLEqProof<DefaultCurve, LeaveKind> {
+        let zero = utils::scalar_zero();
+        DLEqProof::from_parts(vec![], G1Projective::identity(), zero, zero)
+    }
+
+    fn make_leave_with_proof_table(stack: u64, pending_addon: u64) -> TexasPokerTable {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = stack;
+        table.seats[0].pending_addon = pending_addon;
+        table.shuffle_state.completed_players = vec![0];
+        table
+    }
+
+    #[test]
+    fn test_leave_with_proof_rejects_refund_overflow_without_mutation() {
+        let mut table = make_leave_with_proof_table(u64::MAX, 1);
+        table.chip_pool = u64::MAX;
+        table.addon_pool = 1;
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = apply_leave_with_proof(
+            &mut table,
+            0,
+            vec![],
+            empty_leave_proof(),
+            &mut events,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("refund overflow"));
+        assert_eq!(table, before, "failed refund must be atomic");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_leave_with_proof_rejects_pool_underflow_without_mutation() {
+        let mut table = make_leave_with_proof_table(10, 5);
+        table.chip_pool = 10;
+        table.addon_pool = 4;
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = apply_leave_with_proof(
+            &mut table,
+            0,
+            vec![],
+            empty_leave_proof(),
+            &mut events,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("addon_pool underflow"));
+        assert_eq!(table, before, "failed refund must be atomic");
+        assert!(events.is_empty());
     }
 
     // ========== Bet 动作测试 ==========

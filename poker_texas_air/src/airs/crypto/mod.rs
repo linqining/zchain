@@ -20,6 +20,13 @@
 //! - 验证 proof 引用（commitment hash）一致性
 //! - 完整密码学约束留待阶段 5（嵌入 Verifier AIR）
 //!
+//! 这些 AIR 因此不能单独作为 DLEq / shuffle / reveal / reconstruct
+//! proof 已验证的可转移证据。当前生产 receipt 路径的信任边界是
+//! [`crate::orchestrator::Orchestrator`]：它先重放完整原生 VM dispatch，再验证
+//! method AIR。`poker_l1` 在非 crate 内单元测试构建中已禁止运行时
+//! `zk_skip_*` 绕过，所以该 host replay 会执行真实密码学验证。
+//! 完整的 recursive AIR 子证明仍未实现。
+//!
 //! ## AIR 列布局
 //!
 //! 所有 crypto AIR 共享通用 37 列 + 业务列（每个方法自定义）。

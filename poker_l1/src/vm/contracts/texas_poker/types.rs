@@ -401,11 +401,16 @@ impl Default for DeckState {
 
 // ========== 桌台配置 ==========
 
-/// 桌台配置（控制 ZK skip 等行为，dev chain 友好）。
+/// 桌台配置（保留 ZK skip 字段以兼容已有序列化状态）。
+///
+/// `zk_skip_*` 只能在 `poker_l1` crate 自身的单元测试构建中生效。
+/// 普通库、集成测试和生产二进制中的 `skip_*()` 始终返回 `false`，
+/// 避免一个可被 state/preimage 携带的运行时开关绕过共识执行的
+/// shuffle / reveal / reconstruct / remask 密码学验证。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TableConfig {
-    /// 是否启用 ZK skip 模式（dev chain 友好；mainnet 强制 false）。
-    /// true 时所有 ZK verify 调用直接返回 true。
+    /// 是否在 crate 内单元测试中启用 ZK skip 模式。
+    /// 非 `cfg(test)` 构建会忽略此字段。
     pub zk_skip_enabled: bool,
     /// 是否跳过 shuffle proof 验证。
     pub zk_skip_shuffle: bool,
@@ -419,8 +424,8 @@ pub struct TableConfig {
 
 impl Default for TableConfig {
     fn default() -> Self {
-        // dev chain 默认全部 skip，便于首版跑通流程
-        // mainnet 启动时由 governance 强制设为 false
+        // 保留旧的序列化默认值，供 crate 内单元测试跑通协议流程。
+        // 非 cfg(test) 构建的 skip_*() 无条件返回 false。
         Self {
             zk_skip_enabled: true,
             zk_skip_shuffle: true,
@@ -432,28 +437,37 @@ impl Default for TableConfig {
 }
 
 impl TableConfig {
+    /// 测试构建中是否请求跳过某项密码学验证。
+    ///
+    /// `cfg!(test)` 在 crate 内单元测试时为 true；当 `poker_l1` 被生产
+    /// 二进制或其他 crate（包括集成测试）链接时为 false。
+    #[must_use]
+    const fn test_only_skip(&self, requested: bool) -> bool {
+        cfg!(test) && self.zk_skip_enabled && requested
+    }
+
     /// 是否跳过 shuffle proof 验证。
     #[must_use]
-    pub fn skip_shuffle(&self) -> bool {
-        self.zk_skip_enabled && self.zk_skip_shuffle
+    pub const fn skip_shuffle(&self) -> bool {
+        self.test_only_skip(self.zk_skip_shuffle)
     }
 
     /// 是否跳过 reveal token proof 验证。
     #[must_use]
-    pub fn skip_reveal(&self) -> bool {
-        self.zk_skip_enabled && self.zk_skip_reveal
+    pub const fn skip_reveal(&self) -> bool {
+        self.test_only_skip(self.zk_skip_reveal)
     }
 
     /// 是否跳过 reconstruct proof 验证。
     #[must_use]
-    pub fn skip_reconstruct(&self) -> bool {
-        self.zk_skip_enabled && self.zk_skip_reconstruct
+    pub const fn skip_reconstruct(&self) -> bool {
+        self.test_only_skip(self.zk_skip_reconstruct)
     }
 
     /// 是否跳过 remask proof 验证。
     #[must_use]
-    pub fn skip_remask(&self) -> bool {
-        self.zk_skip_enabled && self.zk_skip_remask
+    pub const fn skip_remask(&self) -> bool {
+        self.test_only_skip(self.zk_skip_remask)
     }
 }
 
