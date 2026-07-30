@@ -53,9 +53,10 @@ Rust/VM 当前已有 23 个 selector；21 `request_leave_after_hand` 与 22
   dispatch 重放成功后逐个调用原生 verifier，只由 verifier-issued receipt 构造
   `VerifiedChain`，并可对精确范围执行 `ExpectedChainAnchor` 校验。P05-H-source 仍需
   上层从已认证 block/receipt 提供 anchor；当前本地 proving service 未接入共识来源。
-  P05-R 的 recursive/succinct aggregator 仍 descriptor-only；现有递归层
-  被项目自身审计测试标记为 unsound，因此其生产入口继续 fail-closed。两条 Rust 路径
-  均尚无对应 Lean 实现级模型/定理。详见
+  P05-R 的 public-input transcript 重标记漏洞已修复：commitments、FRI root/poly、queries、
+  log_size 与 OODS/FRI 字段现统一绑定，篡改单字段会使 L2 verify 失败。但 recursive/succinct
+  aggregator 仍 descriptor-only，Merkle/query 完整验证及 N-proof aggregation 尚未闭合，
+  因此生产入口继续 fail-closed。两条 Rust 路径均尚无对应 Lean 实现级模型/定理。详见
   `poker_texas_air/docs/PO5_PO6_DESIGN_NOTES.md`。
 - ⚠️ **P0-6：mid-round 生产路径已收窄，完整 transition 仍未完成**。VM 的
   call/raise/bet 在 seat 更新后无条件调用 `advance_turn`，收尾分支会收注

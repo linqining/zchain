@@ -47,15 +47,24 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 包含完整 `ObjectID` 的 full-width state roots。后续若升级公开 schema，宜直接锚定完整
 `ObjectID`（或其共识 key），而不是只把 nonce 当作全局桌号。
 
-### 现有递归基础设施(存在但不 sound)
-`poker_zkvm::stwo_backend::recursive` 有递归层,但:
-1. **被项目自己的审计测试标记为 unsound**:`tests/recursive_backend_unsoundness.rs:26-72` 实证——篡改 L1 的 `l1_commitments`/`fri_first_layer_commitment`/`query_positions`/`log_size` 后,L2 proof 仍验证通过。
-2. 根因:`l1_commitments` 从未 mix 进 Fiat-Shamir channel(`recursion_prover.rs:409-433`);Merkle 组件在 `query_positions` 为空时是 no-op(`trace_gen.rs:881-885`),而所有生产调用方都传空。
-3. 递归只包裹**单个** L1 proof,**无 N-proof 聚合机制**。
-4. 递归只测试过 trivial padding CPU trace,从未跑过真实 Texas method AIR。
+### 现有递归基础设施（公开输入重标记漏洞已修复，完整递归仍不 sound）
+`poker_zkvm::stwo_backend::recursive` 的 P05-R public-input binding 已加固：统一的
+`RecursivePublicInputs::mix_into` 现在以域分隔、长度前缀、完整 felt252/u64 编码绑定
+`l1_commitments`、`fri_first_layer_commitment`、`fri_last_layer_poly`、
+`query_positions`、`log_size` 以及其余 OODS/FRI 字段。审计回归验证同一个 L2 proof
+在任一字段被替换后均失败。
+
+但完整递归仍有以下缺口：
+1. Merkle 组件在 `query_positions` 为空时仍是 no-op(`trace_gen.rs:881-885`)，而现有
+   PoC 调用方仍可传空；transcript 绑定只能防止 proof 被事后重标记，不能证明任意声明的
+   commitment/query 就来自被递归验证的 L1 proof。
+2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**。
+3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR。
 
 ### 修复路径(均需密码学专家)
-- **(a) 让单 proof 递归 sound**:wire 真实 `l1_commitments`+`query_positions` 进 `RecursivePublicInputs` + `mix_public_inputs_into_channel`;让 `gen_merkle_path_trace` 非空并绑定 root;证明结果 AIR sound。(~1-2 周 + 密码学 review)
+- **(a) 让单 proof 递归 sound**：公开输入 transcript binding 已完成；仍需强制从真实
+  L1 proof 构造非空 commitments/query positions，让 `gen_merkle_path_trace` 非空并绑定
+  所有 root/decommitment，再证明各 verifier AIR 的组合 sound。（~1-2 周 + 密码学 review）
 - **(b) 构建 N-proof 聚合**:在 sound 的单 proof 递归之上,设计二叉树折叠或专用多验证器 AIR。(~1-2 周 + 设计决策)
 - **(c) host-side 逐子验证**(已实现的过渡路径):host 对每个子 proof 跑
   `stwo::verify()`，只允许 verifier-issued receipt 进入 `VerifiedChain`。该路径失去

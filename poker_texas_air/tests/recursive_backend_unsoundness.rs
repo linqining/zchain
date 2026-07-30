@@ -1,8 +1,8 @@
-//! Permanent audit regression for the current `poker_zkvm` recursive backend.
+//! Audit regression for recursive public-input Fiat–Shamir binding.
 //!
-//! The test intentionally documents an unsound behavior: fields advertised as
-//! L1 public inputs are not mixed into, or constrained by, the L2 verifier.  A
-//! single L2 proof therefore remains valid after those fields are replaced.
+//! Every field advertised as part of the L1 recursive statement must affect the
+//! L2 transcript. A proof created for one statement must not verify after any
+//! commitment, query position, or trace-size field is replaced.
 
 use poker_zkvm::stwo_backend::prover::prove_cpu_trace;
 use poker_zkvm::stwo_backend::recursive::public_inputs::RecursivePublicInputs;
@@ -23,7 +23,7 @@ const TEST_OODS_POINT: CirclePoint<SecureField> = CirclePoint {
 };
 
 #[test]
-fn documents_unsoundness_recursive_verifier_accepts_tampered_commitments_and_queries() {
+fn recursive_verifier_rejects_tampered_commitments_and_queries() {
     let log_size = 8;
     let mut builder = TraceBuilder::new(log_size);
     builder.fill_padding_to_full();
@@ -59,14 +59,24 @@ fn documents_unsoundness_recursive_verifier_accepts_tampered_commitments_and_que
     verify_recursive_with_fri(&l2_proof, &public_inputs)
         .expect("baseline recursive PoC proof should verify");
 
-    let mut tampered = public_inputs.clone();
-    tampered.l1_commitments = vec![FieldElement252::ONE];
-    tampered.fri_first_layer_commitment = FieldElement252::ONE;
-    tampered.query_positions = vec![1, 3, 7, 15];
-    tampered.log_size = log_size + 7;
+    let mut changed_l1_commitments = public_inputs.clone();
+    changed_l1_commitments.l1_commitments = vec![FieldElement252::ONE];
+    let mut changed_fri_commitment = public_inputs.clone();
+    changed_fri_commitment.fri_first_layer_commitment = FieldElement252::ONE;
+    let mut changed_queries = public_inputs.clone();
+    changed_queries.query_positions = vec![1, 3, 7, 15];
+    let mut changed_log_size = public_inputs.clone();
+    changed_log_size.log_size = log_size + 7;
 
-    assert!(
-        verify_recursive_with_fri(&l2_proof, &tampered).is_ok(),
-        "audit fact changed: once fixed, invert this assertion and remove the production Aggregator gate"
-    );
+    for (name, tampered) in [
+        ("l1_commitments", changed_l1_commitments),
+        ("fri_first_layer_commitment", changed_fri_commitment),
+        ("query_positions", changed_queries),
+        ("log_size", changed_log_size),
+    ] {
+        assert!(
+            verify_recursive_with_fri(&l2_proof, &tampered).is_err(),
+            "recursive verifier accepted proof after tampering {name}"
+        );
+    }
 }
