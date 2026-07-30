@@ -23,6 +23,9 @@ namespace PokerLean
 - `OUTPUT_POST_CHIP_POOL`（4 limb）— Gap 闭合：chip_pool 守恒
 - `INPUT_PRE_ADDON_POOL`（4 limb）— Gap 闭合：addon_pool 守恒
 - `OUTPUT_POST_ADDON_POOL`（4 limb）— Gap 闭合：addon_pool 守恒
+- `REFUND_ADD_CARRY`（3 bit）— refund 加法 ripple carry
+- `CHIP_POOL_SUB_CARRY`（3 bit）— chip_pool 减法的反向加法 carry
+- `ADDON_POOL_SUB_CARRY`（3 bit）— addon_pool 减法的反向加法 carry
 
 ## 闭合的 Gap
 
@@ -55,6 +58,12 @@ structure LeaveTableMethodColumns where
   output_post_addon_pool : M31 × M31 × M31 × M31
   /-- 输出：退款金额（4 limb） -/
   output_refund : M31 × M31 × M31 × M31
+  /-- `refund = stack + pending_addon` 的 3 个 ripple-carry bit。 -/
+  refund_add_carry : M31 × M31 × M31
+  /-- `pre_chip_pool = post_chip_pool + stack` 的 3 个 ripple-carry bit。 -/
+  chip_pool_sub_carry : M31 × M31 × M31
+  /-- `pre_addon_pool = post_addon_pool + pending_addon` 的 3 个 ripple-carry bit。 -/
+  addon_pool_sub_carry : M31 × M31 × M31
 deriving Repr
 
 /-- 从 AIR 行提取前状态表 -/
@@ -161,41 +170,20 @@ def extractLeaveTableParamsFromAir
   seat_index := ext.input_seat_index.val
 }
 
-/-- 退款守恒约束：refund = seat.stack + seat.pending_addon。
-    对齐 Rust 合约 `dispatch_leave_table` 的 `refund = seat.stack + seat.pending_addon`。 -/
+/-- 退款守恒约束：使用与 Rust AIR 相同的 ripple-carry chain。 -/
 def RefundConservation (ext : LeaveTableMethodColumns) : Prop :=
-  decodeU64 ext.output_refund.1 ext.output_refund.2.1
-      ext.output_refund.2.2.1 ext.output_refund.2.2.2
-  =
-  decodeU64 ext.input_seat_stack.1 ext.input_seat_stack.2.1
-      ext.input_seat_stack.2.2.1 ext.input_seat_stack.2.2.2
-  +
-  decodeU64 ext.input_seat_pending_addon.1 ext.input_seat_pending_addon.2.1
-      ext.input_seat_pending_addon.2.2.1 ext.input_seat_pending_addon.2.2.2
+  Limb4Delta ext.input_seat_stack ext.output_refund ext.input_seat_pending_addon
+    ext.refund_add_carry
 
-/-- chip_pool 守恒约束：post_chip_pool = pre_chip_pool - seat.stack。
-    对齐 Rust 合约 `dispatch_leave_table` 的 `chip_pool -= seat.stack`。 -/
+/-- chip_pool 守恒约束：`pre = post + stack`，对应无下溢减法。 -/
 def ChipPoolLeaveConservation (ext : LeaveTableMethodColumns) : Prop :=
-  decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
-      ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2
-  =
-  decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
-      ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2
-  -
-  decodeU64 ext.input_seat_stack.1 ext.input_seat_stack.2.1
-      ext.input_seat_stack.2.2.1 ext.input_seat_stack.2.2.2
+  Limb4DeltaRev ext.input_pre_chip_pool ext.output_post_chip_pool ext.input_seat_stack
+    ext.chip_pool_sub_carry
 
-/-- addon_pool 守恒约束：post_addon_pool = pre_addon_pool - seat.pending_addon。
-    对齐 Rust 合约 `dispatch_leave_table` 的 `addon_pool -= pending_addon`。 -/
+/-- addon_pool 守恒约束：`pre = post + pending_addon`，对应无下溢减法。 -/
 def AddonPoolLeaveConservation (ext : LeaveTableMethodColumns) : Prop :=
-  decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
-      ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2
-  =
-  decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
-      ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2
-  -
-  decodeU64 ext.input_seat_pending_addon.1 ext.input_seat_pending_addon.2.1
-      ext.input_seat_pending_addon.2.2.1 ext.input_seat_pending_addon.2.2.2
+  Limb4DeltaRev ext.input_pre_addon_pool ext.output_post_addon_pool
+    ext.input_seat_pending_addon ext.addon_pool_sub_carry
 
 /-- leave_table 方法特定约束 -/
 def LeaveTableMethodConstraints

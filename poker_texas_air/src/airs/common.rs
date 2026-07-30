@@ -560,15 +560,18 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         out
     }
 
-    /// 约束 `pre[i] = post[i] + amt[i]`（全 4 limb 反向 delta，每 limb degree-2）。
-    /// 对齐 Lean `Limb4DeltaRev`（用于 stack 减少场景）。
-    pub fn limb4_delta_rev(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> Vec<E::F> {
-        // P0-2 修复：逐 limb 独立约束。
-        let mut out = Vec::with_capacity(4);
-        for i in 0..4 {
-            out.push(self.is_active.clone() * (pre[i].clone() - post[i].clone() - amt[i].clone()));
-        }
-        out
+    /// 约束规范 u64 减法 `post = pre - amt`，等价写成 `pre = post + amt`。
+    ///
+    /// 反向使用同一条 ripple-carry 加法链；最高 limb 不允许 carry-out，因此还会
+    /// 拒绝下溢后伪造的环绕结果。对齐 Lean `Limb4DeltaRev`。
+    pub fn limb4_delta_rev(
+        &self,
+        pre: &[E::F; 4],
+        post: &[E::F; 4],
+        amt: &[E::F; 4],
+        carry: &[E::F; 3],
+    ) -> Vec<E::F> {
+        self.limb4_delta(post, pre, amt, carry)
     }
 
     /// 约束 `a[i] = b[i]`（全 4 limb 相等，每 limb degree-2）。

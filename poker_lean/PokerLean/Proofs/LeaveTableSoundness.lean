@@ -236,19 +236,26 @@ theorem leave_table_air_sound :
                 decodeU64 row.pre_version.1 row.pre_version.2.1
                   row.pre_version.2.2.1 row.pre_version.2.2.2 + 1 := h_ver h_active
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
+  have h_chip_pool_add := limb4_delta_rev_implies_decode_eq
+    ext.input_pre_chip_pool ext.output_post_chip_pool ext.input_seat_stack
+    ext.chip_pool_sub_carry h_chip_pool
   have h_chip_pool' : decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
                         ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2 =
                       decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
                         ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2 -
                       decodeU64 ext.input_seat_stack.1 ext.input_seat_stack.2.1
-                        ext.input_seat_stack.2.2.1 ext.input_seat_stack.2.2.2 := h_chip_pool
+                        ext.input_seat_stack.2.2.1 ext.input_seat_stack.2.2.2 := by
+    omega
+  have h_addon_pool_add := limb4_delta_rev_implies_decode_eq
+    ext.input_pre_addon_pool ext.output_post_addon_pool ext.input_seat_pending_addon
+    ext.addon_pool_sub_carry h_addon_pool
   have h_addon_pool' : decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
                          ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2 =
                        decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
                          ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2 -
                        decodeU64 ext.input_seat_pending_addon.1 ext.input_seat_pending_addon.2.1
                          ext.input_seat_pending_addon.2.2.1 ext.input_seat_pending_addon.2.2.2 :=
-    h_addon_pool
+    by omega
   -- 5. 座位级引理
   have h_pre_seat : (extractPreTableFromLeaveTableAir row ext max_players expected_seat_index).get_seat expected_seat_index =
       { player := PlayerId.ofNat 1,

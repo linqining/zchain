@@ -135,7 +135,9 @@ fn test_soundness_join_table_tampered_seat() {
 #[test]
 fn test_e2e_leave_table_prove_verify() {
     let input = LeaveTableInput { seat_index: 3 };
-    let row = LeaveTableRow::active(&input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 0);
+    let row = LeaveTableRow::active(
+        &input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 4000, 0, 0,
+    );
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
         &row.to_vec(),
@@ -163,7 +165,9 @@ fn test_e2e_leave_table_prove_verify() {
 #[test]
 fn test_soundness_leave_table_tampered_seat() {
     let input = LeaveTableInput { seat_index: 3 };
-    let row = LeaveTableRow::active(&input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 0);
+    let row = LeaveTableRow::active(
+        &input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 4000, 0, 0,
+    );
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
         &row.to_vec(),
@@ -195,6 +199,109 @@ fn test_soundness_leave_table_tampered_seat() {
         result.is_err(),
         "篡改 seat_index 后 verify 应失败，但成功了 — soundness 漏洞！"
     );
+}
+
+/// E2E: 退款加法和两条资金池减法均接受跨 16-bit limb carry/borrow。
+#[test]
+fn test_e2e_leave_table_funds_ripple_carry() {
+    let input = LeaveTableInput { seat_index: 0 };
+    let row = LeaveTableRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        2,
+        0,
+        1,
+        65_535,
+        1,
+        65_536,
+        1,
+        65_536,
+        65_535,
+    );
+    let trace = gen_method_trace(
+        LeaveTableAir::num_columns(),
+        &row.to_vec(),
+        &LeaveTableRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+    let air = LeaveTableAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 2,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let proof = prove_method(
+        &trace,
+        air,
+        LeaveTableAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::LeaveTable, 42, 0, 2),
+    )
+    .expect("跨 limb leave_table prove 失败");
+    verify_method(proof).expect("跨 limb leave_table verify 失败");
+}
+
+/// Soundness: refund/chip_pool/addon_pool 任一资金 witness 被篡改时 prove 必须失败。
+#[test]
+fn test_soundness_leave_table_tampered_funds_rejected() {
+    use poker_texas_air::airs::lifecycle::leave_table::cols;
+
+    let input = LeaveTableInput { seat_index: 0 };
+    let row = LeaveTableRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        2,
+        0,
+        1,
+        65_535,
+        1,
+        65_536,
+        1,
+        65_536,
+        65_535,
+    );
+    for (name, column) in [
+        ("refund", cols::OUTPUT_REFUND_BASE),
+        ("chip_pool", cols::OUTPUT_POST_CHIP_POOL_BASE),
+        ("addon_pool", cols::OUTPUT_POST_ADDON_POOL_BASE),
+    ] {
+        let mut trace_row = row.to_vec();
+        trace_row[column] += M31::from(1u32);
+        let trace = gen_method_trace(
+            LeaveTableAir::num_columns(),
+            &trace_row,
+            &LeaveTableRow::padding().to_vec(),
+        )
+        .expect("trace 生成失败");
+        let air = LeaveTableAir {
+            log_size: trace.log_size,
+            input: input.clone(),
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 2,
+            pre_version: 0,
+            post_version: 1,
+        };
+        let result = prove_method(
+            &trace,
+            air,
+            LeaveTableAir::num_columns(),
+            TexasPublicInputs::synthetic_for_test(MethodKind::LeaveTable, 42, 0, 2),
+        );
+        assert!(result.is_err(), "篡改 {name} witness 时 prove 应失败");
+    }
 }
 
 /// 计算 active_count*(active_count-1) 在 M31 域内的乘法逆元（Gap 4 witness）。
@@ -592,11 +699,12 @@ fn test_lifecycle_air_column_consistency() {
     assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 47);
     assert_eq!(JoinTableAir::num_columns(), join_table::cols::NUM_COLUMNS);
 
-    // leave_table: 通用 + 30 业务
+    // leave_table: 通用 + 39 业务
     //   原始 6 列（seat_index + refund 4 + seat_occupied 1）
     //   + 24 新列（seat_stack 4 + pending_addon 4 + pre_chip_pool 4 + post_chip_pool 4
     //              + pre_addon_pool 4 + post_addon_pool 4）用于退款和资金守恒
-    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 30);
+    //   + 9 carry bit（退款加法、chip_pool 减法、addon_pool 减法各 3）
+    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 39);
     assert_eq!(LeaveTableAir::num_columns(), leave_table::cols::NUM_COLUMNS);
 
     // start_hand: 通用 + 8 业务（含 ante 3 列 + active_count_inv/prod witness）= 45

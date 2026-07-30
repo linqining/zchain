@@ -241,12 +241,11 @@ def PotDelta (row : CommonRow) (amt : M31 × M31 × M31 × M31)
 def Limb4Eq (a b : M31 × M31 × M31 × M31) : Prop :=
   a.1 = b.1 ∧ a.2.1 = b.2.1 ∧ a.2.2.1 = b.2.2.1 ∧ a.2.2.2 = b.2.2.2
 
-/-- 4-limb 反向 delta 约束：pre = M31.add post amt（逐 limb），用于 stack 减少。 -/
-def Limb4DeltaRev (pre post amt : M31 × M31 × M31 × M31) : Prop :=
-  pre.1 = M31.add post.1 amt.1 ∧
-  pre.2.1 = M31.add post.2.1 amt.2.1 ∧
-  pre.2.2.1 = M31.add post.2.2.1 amt.2.2.1 ∧
-  pre.2.2.2 = M31.add post.2.2.2 amt.2.2.2
+/-- 规范 4-limb 减法 `post = pre - amt`，反向写成 `pre = post + amt`。
+    使用与 Rust AIR 相同的 ripple-carry chain，因此允许跨 limb 借位并禁止下溢。 -/
+def Limb4DeltaRev (pre post amt : M31 × M31 × M31 × M31)
+    (carry : M31 × M31 × M31) : Prop :=
+  Limb4Delta post pre amt carry
 
 lemma limb4_eq_implies_decode_eq (a b : M31 × M31 × M31 × M31)
     (h : Limb4Eq a b) :
@@ -267,14 +266,12 @@ lemma limb4_delta_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
   omega
 
 lemma limb4_delta_rev_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
-    (hpost : Limb4Range16 post) (hamt : Limb4Range16 amt)
-    (h : Limb4DeltaRev pre post amt) :
+    (carry : M31 × M31 × M31)
+    (h : Limb4DeltaRev pre post amt carry) :
     decodeU64 pre.1 pre.2.1 pre.2.2.1 pre.2.2.2 =
     decodeU64 post.1 post.2.1 post.2.2.1 post.2.2.2 +
     decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
-  rcases h with ⟨h0, h1, h2, h3⟩
-  rw [h0, h1, h2, h3]
-  exact decodeU64_limb_add post amt hpost hamt
+  exact limb4_delta_implies_decode_eq post pre amt carry h
 
 lemma pot_delta_implies_decode_eq (row : CommonRow) (amt : M31 × M31 × M31 × M31)
     (carry : M31 × M31 × M31)

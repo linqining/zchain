@@ -12,7 +12,8 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
+    u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -38,8 +39,14 @@ pub mod cols {
     pub const INPUT_PRE_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 22;
     /// `OUTPUT_POST_ADDON_POOL` 起始列（4 limb）— addon_pool 守恒。
     pub const OUTPUT_POST_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 26;
+    /// `refund = stack + pending_addon` 的 3 个 ripple-carry bit。
+    pub const REFUND_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 30;
+    /// `pre_chip_pool = post_chip_pool + stack` 的 3 个 ripple-carry bit。
+    pub const CHIP_POOL_SUB_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 33;
+    /// `pre_addon_pool = post_addon_pool + pending_addon` 的 3 个 ripple-carry bit。
+    pub const ADDON_POOL_SUB_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 36;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 30;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 39;
 }
 
 /// `leave_table` 输入参数。
@@ -127,6 +134,15 @@ impl FrameworkEval for LeaveTableAir {
         let post_addon_pool_1 = eval.next_trace_mask();
         let post_addon_pool_2 = eval.next_trace_mask();
         let post_addon_pool_3 = eval.next_trace_mask();
+        let refund_add_carry_0 = eval.next_trace_mask();
+        let refund_add_carry_1 = eval.next_trace_mask();
+        let refund_add_carry_2 = eval.next_trace_mask();
+        let chip_pool_sub_carry_0 = eval.next_trace_mask();
+        let chip_pool_sub_carry_1 = eval.next_trace_mask();
+        let chip_pool_sub_carry_2 = eval.next_trace_mask();
+        let addon_pool_sub_carry_0 = eval.next_trace_mask();
+        let addon_pool_sub_carry_1 = eval.next_trace_mask();
+        let addon_pool_sub_carry_2 = eval.next_trace_mask();
 
         // 约束：seat_index == input.seat_index
         let expected: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -139,42 +155,71 @@ impl FrameworkEval for LeaveTableAir {
         // 约束 4（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只对占用座位离座。
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (input_seat_occupied - one));
-        // 约束 5（Gap，degree-1）：output_seat_stack == input_buy_in
-        //   退款守恒：refund = seat_stack + seat_pending_addon（逐 limb 等式，host 诚实假设）。
-        //   完整 u64 加法需要 carry witness，此处先放 4 limb 等式作为占位。
-        //   refund = stack + pending_addon 的 limb 级等式需要 carry chain。
-        //   此处用 stack + pending_addon - refund = 0 作为简化约束。
-        // TODO 阶段 3：refund/chip_pool/addon_pool carry chain（需 carry witness）。
-        let _ = (
-            &refund_0,
-            &refund_1,
-            &refund_2,
-            &refund_3,
-            &seat_stack_0,
-            &seat_stack_1,
-            &seat_stack_2,
-            &seat_stack_3,
-            &seat_pending_addon_0,
-            &seat_pending_addon_1,
-            &seat_pending_addon_2,
-            &seat_pending_addon_3,
-            &pre_chip_pool_0,
-            &pre_chip_pool_1,
-            &pre_chip_pool_2,
-            &pre_chip_pool_3,
-            &post_chip_pool_0,
-            &post_chip_pool_1,
-            &post_chip_pool_2,
-            &post_chip_pool_3,
-            &pre_addon_pool_0,
-            &pre_addon_pool_1,
-            &pre_addon_pool_2,
-            &pre_addon_pool_3,
-            &post_addon_pool_0,
-            &post_addon_pool_1,
-            &post_addon_pool_2,
-            &post_addon_pool_3,
-        );
+        let refund = [refund_0, refund_1, refund_2, refund_3];
+        let seat_stack = [seat_stack_0, seat_stack_1, seat_stack_2, seat_stack_3];
+        let seat_pending_addon = [
+            seat_pending_addon_0,
+            seat_pending_addon_1,
+            seat_pending_addon_2,
+            seat_pending_addon_3,
+        ];
+        let pre_chip_pool = [pre_chip_pool_0, pre_chip_pool_1, pre_chip_pool_2, pre_chip_pool_3];
+        let post_chip_pool = [
+            post_chip_pool_0,
+            post_chip_pool_1,
+            post_chip_pool_2,
+            post_chip_pool_3,
+        ];
+        let pre_addon_pool = [
+            pre_addon_pool_0,
+            pre_addon_pool_1,
+            pre_addon_pool_2,
+            pre_addon_pool_3,
+        ];
+        let post_addon_pool = [
+            post_addon_pool_0,
+            post_addon_pool_1,
+            post_addon_pool_2,
+            post_addon_pool_3,
+        ];
+        let refund_add_carry = [refund_add_carry_0, refund_add_carry_1, refund_add_carry_2];
+        let chip_pool_sub_carry = [
+            chip_pool_sub_carry_0,
+            chip_pool_sub_carry_1,
+            chip_pool_sub_carry_2,
+        ];
+        let addon_pool_sub_carry = [
+            addon_pool_sub_carry_0,
+            addon_pool_sub_carry_1,
+            addon_pool_sub_carry_2,
+        ];
+
+        // 退款：refund = stack + pending_addon。
+        for constraint in common.limb4_delta(
+            &seat_stack,
+            &refund,
+            &seat_pending_addon,
+            &refund_add_carry,
+        ) {
+            eval.add_constraint(constraint);
+        }
+        // 资金池减法用反向加法表达，从而显式约束跨 limb 借位且禁止下溢。
+        for constraint in common.limb4_delta_rev(
+            &pre_chip_pool,
+            &post_chip_pool,
+            &seat_stack,
+            &chip_pool_sub_carry,
+        ) {
+            eval.add_constraint(constraint);
+        }
+        for constraint in common.limb4_delta_rev(
+            &pre_addon_pool,
+            &post_addon_pool,
+            &seat_pending_addon,
+            &addon_pool_sub_carry,
+        ) {
+            eval.add_constraint(constraint);
+        }
         eval
     }
 }
@@ -202,6 +247,12 @@ pub struct LeaveTableRow {
     pub input_pre_addon_pool: [M31; 4],
     /// `OUTPUT_POST_ADDON_POOL`（4 limb）— addon_pool 守恒。
     pub output_post_addon_pool: [M31; 4],
+    /// `refund = stack + pending_addon` 的 ripple-carry bit。
+    pub refund_add_carry: [M31; 3],
+    /// `pre_chip_pool = post_chip_pool + stack` 的 ripple-carry bit。
+    pub chip_pool_sub_carry: [M31; 3],
+    /// `pre_addon_pool = post_addon_pool + pending_addon` 的 ripple-carry bit。
+    pub addon_pool_sub_carry: [M31; 3],
 }
 
 impl LeaveTableRow {
@@ -219,9 +270,23 @@ impl LeaveTableRow {
         seat_stack: u64,
         seat_pending_addon: u64,
         pre_chip_pool: u64,
+        post_chip_pool: u64,
         pre_addon_pool: u64,
+        post_addon_pool: u64,
     ) -> Self {
-        let refund = seat_stack + seat_pending_addon;
+        let refund = seat_stack
+            .checked_add(seat_pending_addon)
+            .expect("leave_table refund must not overflow");
+        assert_eq!(
+            post_chip_pool.checked_add(seat_stack),
+            Some(pre_chip_pool),
+            "leave_table chip_pool subtraction must not underflow"
+        );
+        assert_eq!(
+            post_addon_pool.checked_add(seat_pending_addon),
+            Some(pre_addon_pool),
+            "leave_table addon_pool subtraction must not underflow"
+        );
         Self {
             common: CommonRow::active(
                 MethodKind::LeaveTable,
@@ -248,10 +313,13 @@ impl LeaveTableRow {
             input_seat_pending_addon: u64_to_m31_limbs(seat_pending_addon),
             // chip_pool 守恒：post = pre - stack。
             input_pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
-            output_post_chip_pool: u64_to_m31_limbs(pre_chip_pool - seat_stack),
+            output_post_chip_pool: u64_to_m31_limbs(post_chip_pool),
             // addon_pool 守恒：post = pre - pending_addon。
             input_pre_addon_pool: u64_to_m31_limbs(pre_addon_pool),
-            output_post_addon_pool: u64_to_m31_limbs(pre_addon_pool - seat_pending_addon),
+            output_post_addon_pool: u64_to_m31_limbs(post_addon_pool),
+            refund_add_carry: compute_add_carries(seat_stack, seat_pending_addon),
+            chip_pool_sub_carry: compute_add_carries(post_chip_pool, seat_stack),
+            addon_pool_sub_carry: compute_add_carries(post_addon_pool, seat_pending_addon),
         }
     }
     /// padding 行。
@@ -268,6 +336,9 @@ impl LeaveTableRow {
             output_post_chip_pool: [ZERO; 4],
             input_pre_addon_pool: [ZERO; 4],
             output_post_addon_pool: [ZERO; 4],
+            refund_add_carry: [ZERO; 3],
+            chip_pool_sub_carry: [ZERO; 3],
+            addon_pool_sub_carry: [ZERO; 3],
         }
     }
     /// 转列向量。
@@ -283,6 +354,9 @@ impl LeaveTableRow {
         v.extend_from_slice(&self.output_post_chip_pool);
         v.extend_from_slice(&self.input_pre_addon_pool);
         v.extend_from_slice(&self.output_post_addon_pool);
+        v.extend_from_slice(&self.refund_add_carry);
+        v.extend_from_slice(&self.chip_pool_sub_carry);
+        v.extend_from_slice(&self.addon_pool_sub_carry);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

@@ -36,6 +36,9 @@ Rust/VM 当前已有 23 个 selector；21 `request_leave_after_hand` 与 22
 - **资金加法 carry-chain 已修复**：addon 的 pending/addon_pool、rebuy 的 stack/addon_pool、
   kick_player 的 pot 均加入 3 个 boolean ripple-carry witness；Rust AIR、真实 VM replay 回归
   与 Lean `Limb4Delta`/`PotDelta` 现一致覆盖跨 16-bit limb 的合法 `checked_add` 转移。
+- **leave_table 资金 carry-chain 已修复**：refund 使用规范 `Limb4Delta`；chip_pool/addon_pool
+  减法使用 `Limb4DeltaRev`（即 `pre = post + amount`）表达跨 limb 借位并禁止下溢；Rust
+  trace、宿主 fail-closed 校验、真实 VM replay 回归与 Lean refinement 已同步。
 - **P0-3（state_root 与 trace 无连接）已修复**：`state_root_to_air_limbs` 做真实
   Blake2b→4×M31 转换（不再是全零占位）；`CommonConstraints::write` 强制 trace 的
   state_root/table_id/hand_id/call_seq/version 列 == AIR statement 的对应值。

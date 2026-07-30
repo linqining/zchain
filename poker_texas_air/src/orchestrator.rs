@@ -484,13 +484,36 @@ impl Orchestrator {
         let input = LeaveTableInput { seat_index: *seat_index };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
+        pre_seat
+            .stack
+            .checked_add(pre_seat.pending_addon)
+            .ok_or_else(|| TexasAirError::SpecViolation("leave_table refund overflow".into()))?;
+        let expected_post_chip_pool = task
+            .pre_table
+            .chip_pool
+            .checked_sub(pre_seat.stack)
+            .ok_or_else(|| TexasAirError::SpecViolation("leave_table chip_pool underflow".into()))?;
+        let expected_post_addon_pool = task
+            .pre_table
+            .addon_pool
+            .checked_sub(pre_seat.pending_addon)
+            .ok_or_else(|| TexasAirError::SpecViolation("leave_table addon_pool underflow".into()))?;
+        if task.post_table.chip_pool != expected_post_chip_pool
+            || task.post_table.addon_pool != expected_post_addon_pool
+        {
+            return Err(TexasAirError::SpecViolation(
+                "leave_table post funds do not match non-underflowing pool subtraction".into(),
+            ));
+        }
         let row = LeaveTableRow::active(
             &input, srm(pre_root), srm(post_root),
             task.table_id, task.hand_id, task.call_seq, pre_v, post_v,
             pre_seat.stack,
             pre_seat.pending_addon,
             task.pre_table.chip_pool,
+            task.post_table.chip_pool,
             task.pre_table.addon_pool,
+            task.post_table.addon_pool,
         );
         run(LeaveTableAir::num_columns(), &row, &LeaveTableRow::padding(), pi, move || LeaveTableAir {
             log_size: MIN_LOG_SIZE, input,
@@ -1689,6 +1712,29 @@ mod tests {
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept kick pot carry");
+    }
+
+    #[test]
+    fn orchestrator_accepts_leave_table_funds_ripple_carry() {
+        let mut pre = make_table("leave-ripple-carry");
+        pre.seats[0].player = [0x43; 20];
+        pre.seats[0].stack = 65_535;
+        pre.seats[0].pending_addon = 1;
+        pre.chip_pool = 65_536;
+        pre.addon_pool = 65_536;
+        let caller = pre.seats[0].player;
+        let (task, post) = dispatch_task(
+            pre,
+            caller,
+            texas_dispatch::selectors::leave_table(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("leave args should serialize"),
+        );
+        assert_eq!(post.chip_pool, 1);
+        assert_eq!(post.addon_pool, 65_535);
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("native replay and AIR must accept leave_table refund/subtraction carry");
     }
 
     /// P06 回归：真实 VM 的非零 mid-round call 不收池，且可完成 prove+verify。
