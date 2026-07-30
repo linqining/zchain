@@ -753,15 +753,11 @@ theorem kick_player_air_sound :
     (expected_refund : Nat)
     (hseat : expected_seat_index < max_players),
     KickPlayerAirAcceptable row ext expected_seat_index max_players hlt expected_refund →
-    -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
-    Limb4Range16 ext.kicked_bet →
-    Limb4Range16 row.pre_pot →
     ContractKickPlayer
       (extractPreTableFromKickPlayerAir row ext max_players)
       (extractKickPlayerParamsFromAir ext)
       (extractPostTableFromKickPlayerAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index max_players hlt expected_refund hseat h_air
-    h_range_kicked_bet h_range_pre_pot
   -- 1. 解构 AIR 假设
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : KickPlayerMethodConstraints row ext expected_seat_index max_players hlt
@@ -797,14 +793,14 @@ theorem kick_player_air_sound :
         bet := decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
                  ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 } :=
     kick_post_get_seat_at_index row ext max_players expected_seat_index h_seat_val hseat
-  -- 5b. 资金守恒派生：从 PotDelta + range constraint 得到 decodeU64 级等式
+  -- 5b. 资金守恒派生：从 PotDelta ripple-carry 得到 decodeU64 级等式
   have h_pot_eq : decodeU64 row.post_pot.1 row.post_pot.2.1
                     row.post_pot.2.2.1 row.post_pot.2.2.2 =
                   decodeU64 row.pre_pot.1 row.pre_pot.2.1
                     row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
                   decodeU64 ext.kicked_bet.1 ext.kicked_bet.2.1
                     ext.kicked_bet.2.2.1 ext.kicked_bet.2.2.2 :=
-    pot_delta_implies_decode_eq row ext.kicked_bet h_active h_range_pre_pot h_range_kicked_bet h_pot_delta
+    pot_delta_implies_decode_eq row ext.kicked_bet ext.pot_add_carry h_active h_pot_delta
   -- 6. 证明 ContractKickPlayer 的 17 个合取
   unfold ContractKickPlayer
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
@@ -835,7 +831,7 @@ theorem kick_player_air_sound :
     rw [h_params_seat, h_post_seat]
     simp [Seat.kicked, Seat.empty]
   · -- 10. post.betting.pot = pre.betting.pot + (pre.get_seat params.seat_index).bet
-    -- 由 PotDelta + range constraint 推出 decodeU64 级守恒：
+    -- 由 PotDelta ripple-carry 推出 decodeU64 级守恒：
     --   decodeU64 post_pot = decodeU64 pre_pot + decodeU64 kicked_bet
     -- 且 pre 座位 bet = decodeU64 kicked_bet（extraction 对齐 witness）。
     rw [kick_post_pot, kick_pre_pot, h_params_seat, h_pre_seat]

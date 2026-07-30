@@ -18,8 +18,9 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 11 个：`INPUT_SEAT_INDEX`, `OUTPUT_REFUND_BASE[4]`,
-//!   `OUTPUT_KICKED`, `KICKED_BET_BASE[4]`, `INPUT_SEAT_OCCUPIED`
+//! - 业务列 14 个：`INPUT_SEAT_INDEX`, `OUTPUT_REFUND_BASE[4]`,
+//!   `OUTPUT_KICKED`, `KICKED_BET_BASE[4]`, `INPUT_SEAT_OCCUPIED`,
+//!   `POT_ADD_CARRY_BASE[3]`
 //!
 //! 资金流向约束（全 4 limb，对齐合约 checked_add 修复）：除 seat_index / refund /
 //! kicked 一致性外，强制 **`post_pot = pre_pot + kicked_bet`**（全 4 limb delta，
@@ -29,7 +30,8 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
+    u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -47,8 +49,10 @@ pub mod cols {
     pub const KICKED_BET_BASE: usize = COMMON_NUM_COLUMNS + 6;
     /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）。
     pub const INPUT_SEAT_OCCUPIED: usize = COMMON_NUM_COLUMNS + 10;
+    /// pot 加法的 3 个 ripple-carry bit。
+    pub const POT_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 11;
     /// `kick_player` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 11;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 14;
 }
 
 /// `kick_player` 输入参数。
@@ -124,6 +128,9 @@ impl FrameworkEval for KickPlayerAir {
         ];
         // Gap 3 boolean witness（座位非空）。
         let input_seat_occupied = eval.next_trace_mask();
+        let pot_add_carry: [E::F; 3] = [
+            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+        ];
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -145,7 +152,7 @@ impl FrameworkEval for KickPlayerAir {
         let expected_kicked_bet_0: E::F = M31::from((self.input.kicked_bet & 0xFFFF) as u32).into();
         eval.add_constraint(is_active.clone() * (kicked_bet_0.clone() - expected_kicked_bet_0));
         // 全 4 limb pot delta
-        for __c in common.pot_delta_4limb(&kicked_bet_limbs) { eval.add_constraint(__c); }
+        for __c in common.pot_delta_4limb(&kicked_bet_limbs, &pot_add_carry) { eval.add_constraint(__c); }
 
         // 约束 5（审计共性，degree-2）：round_state 不变（kick_player 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
@@ -153,7 +160,7 @@ impl FrameworkEval for KickPlayerAir {
         // 约束 6（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只踢占用座位。
         eval.add_constraint(is_active.clone() * (input_seat_occupied - one.clone()));
 
-        // TODO 阶段 3 完整版：约束 admin 签名；多 limb 进位（limb 1..3）
+        // TODO 阶段 3 完整版：约束 admin 签名。
 
         eval
     }
@@ -174,6 +181,8 @@ pub struct KickPlayerRow {
     pub kicked_bet: [M31; 4],
     /// `INPUT_SEAT_OCCUPIED` boolean witness（Gap 3）。
     pub input_seat_occupied: M31,
+    /// pot 加法的 3 个 ripple-carry bit。
+    pub pot_add_carry: [M31; 3],
 }
 
 impl KickPlayerRow {
@@ -216,6 +225,7 @@ impl KickPlayerRow {
             kicked_bet: u64_to_m31_limbs(input.kicked_bet),
             // Gap 3：诚实 host 只踢占用座位。
             input_seat_occupied: M31::from(1u32),
+            pot_add_carry: compute_add_carries(pre_pot, input.kicked_bet),
         }
     }
 
@@ -229,6 +239,7 @@ impl KickPlayerRow {
             output_kicked: ZERO,
             kicked_bet: [ZERO; 4],
             input_seat_occupied: ZERO,
+            pot_add_carry: [ZERO; 3],
         }
     }
 
@@ -241,6 +252,7 @@ impl KickPlayerRow {
         v.push(self.output_kicked);
         v.extend_from_slice(&self.kicked_bet);
         v.push(self.input_seat_occupied);
+        v.extend_from_slice(&self.pot_add_carry);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

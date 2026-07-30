@@ -23,7 +23,7 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 33 个：
+//! - 业务列 107 个：
 //!   - `INPUT_SEAT_INDEX`
 //!   - `INPUT_AMOUNT_BASE[4]`
 //!   - `PRE_STACK_BASE[4]`（调用前 stack）
@@ -35,15 +35,19 @@
 //!   - `BOUND_DIFF_BASE[4]`（4 limb，diff = MAX_TOTAL_BET - total，用于全局上界 range check）
 //!   - `BOUND_CARRY_LO_BASE[3]`（3 个进位低位 bit，2-bit carry 分解）
 //!   - `BOUND_CARRY_HI_BASE[3]`（3 个进位高位 bit，2-bit carry 分解）
+//!   - `OUTPUT_POST_ADDON_POOL_BASE[4]`
+//!   - `STACK_ADD_CARRY_BASE[3]`（stack 的 ripple carry）
+//!   - `ADDON_POOL_ADD_CARRY_BASE[3]`（addon_pool 的 ripple carry）
+//!   - `RANGE_AMOUNT_BITS_BASE[64]`
 //!
-//! 共 37 + 33 = 70 列。
+//! 共 37 + 107 = 144 列。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, MAX_TOTAL_BET, ZERO, compute_bound_carries,
-    u8_to_m31, u64_to_m31_limbs,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, MAX_TOTAL_BET, ZERO, compute_add_carries,
+    compute_bound_carries, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 
@@ -96,10 +100,14 @@ pub mod cols {
     pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 30;
     /// OUTPUT_POST_ADDON_POOL 起始列（4 limb）— 调用后 addon_pool（阶段 3 新增：addon_pool 守恒）。
     pub const OUTPUT_POST_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 33;
+    /// stack 加法的 3 个 ripple-carry bit。
+    pub const STACK_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 37;
+    /// addon_pool 加法的 3 个 ripple-carry bit。
+    pub const ADDON_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 40;
     /// RANGE_AMOUNT_BITS 起始列（4×16=64 个 boolean witness）— input_amount 各 limb 的 16-bit 分解（阶段 3 range-check 接线）。
-    pub const RANGE_AMOUNT_BITS_BASE: usize = COMMON_NUM_COLUMNS + 37;
+    pub const RANGE_AMOUNT_BITS_BASE: usize = COMMON_NUM_COLUMNS + 43;
     /// `rebuy` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 101;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 107;
 }
 
 /// `rebuy` 输入参数。
@@ -187,9 +195,6 @@ impl FrameworkEval for RebuyAir {
         let expected_amount_0: E::F = M31::from((self.input.amount & 0xFFFF) as u32).into();
         eval.add_constraint(is_active.clone() * (input_amount[0].clone() - expected_amount_0));
 
-        // 约束 3（核心，阶段 3 升级：全 4-limb）：post_stack == pre_stack + input_amount
-        for __c in common.limb4_delta(&pre_stack, &post_stack, &input_amount) { eval.add_constraint(__c); }
-
         // 约束 4（审计共性，degree-2）：round_state 不变（rebuy 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
 
@@ -256,7 +261,18 @@ impl FrameworkEval for RebuyAir {
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
-        for __c in common.limb4_delta(&pre_addon_pool, &post_addon_pool, &amount) { eval.add_constraint(__c); }
+        let stack_add_carry: [E::F; 3] = [
+            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+        ];
+        let addon_pool_add_carry: [E::F; 3] = [
+            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+        ];
+        for __c in common.limb4_delta(
+            &pre_stack, &post_stack, &input_amount, &stack_add_carry,
+        ) { eval.add_constraint(__c); }
+        for __c in common.limb4_delta(
+            &pre_addon_pool, &post_addon_pool, &amount, &addon_pool_add_carry,
+        ) { eval.add_constraint(__c); }
 
         // 约束 9（阶段 3 range-check 接线样例）：input_amount 各 limb ∈ [0, 65536)。
         // 通过 16-bit bit 分解约束，让 Lean 的 `Limb4Range16 ext.input_amount` 假设有 AIR 依据。
@@ -316,6 +332,10 @@ pub struct RebuyRow {
     pub bound_carry_hi: [M31; 3],
     /// OUTPUT_POST_ADDON_POOL（4 limb）— 调用后 addon_pool（阶段 3 新增：守恒）。
     pub post_addon_pool: [M31; 4],
+    /// stack 加法的 3 个 ripple-carry bit。
+    pub stack_add_carry: [M31; 3],
+    /// addon_pool 加法的 3 个 ripple-carry bit。
+    pub addon_pool_add_carry: [M31; 3],
     /// RANGE_AMOUNT_BITS（4×16 个 boolean）— input_amount 各 limb 的 16-bit 分解（阶段 3 range-check 接线）。
     pub range_amount_bits: [[M31; 16]; 4],
 }
@@ -390,6 +410,8 @@ impl RebuyRow {
             bound_carry_hi,
             // 阶段 3 新增：addon_pool 守恒（post = pre + amount）
             post_addon_pool: u64_to_m31_limbs(pre_addon_pool + input.amount),
+            stack_add_carry: compute_add_carries(pre_stack, input.amount),
+            addon_pool_add_carry: compute_add_carries(pre_addon_pool, input.amount),
             // 阶段 3 range-check 接线：input_amount 的 16-bit 分解
             range_amount_bits: u64_to_bits4x16(input.amount),
         }
@@ -412,6 +434,8 @@ impl RebuyRow {
             bound_carry_lo: [ZERO; 3],
             bound_carry_hi: [ZERO; 3],
             post_addon_pool: [ZERO; 4],
+            stack_add_carry: [ZERO; 3],
+            addon_pool_add_carry: [ZERO; 3],
             range_amount_bits: [[ZERO; 16]; 4],
         }
     }
@@ -432,6 +456,8 @@ impl RebuyRow {
         v.extend_from_slice(&self.bound_carry_lo);
         v.extend_from_slice(&self.bound_carry_hi);
         v.extend_from_slice(&self.post_addon_pool);
+        v.extend_from_slice(&self.stack_add_carry);
+        v.extend_from_slice(&self.addon_pool_add_carry);
         // 阶段 3 range-check：4×16 = 64 个 bit witness
         for limb_bits in &self.range_amount_bits {
             v.extend_from_slice(limb_bits);

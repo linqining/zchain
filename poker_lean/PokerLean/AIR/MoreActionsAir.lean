@@ -241,6 +241,8 @@ structure KickPlayerMethodColumns where
   output_refund : M31 × M31 × M31 × M31
   /-- 被踢者当前下注（4 limb）— pot += kicked_bet（对齐 Rust AIR kick_player.rs 的 kicked_bet witness） -/
   kicked_bet : M31 × M31 × M31 × M31
+  /-- pot += kicked_bet 的 3 个 ripple-carry bit。 -/
+  pot_add_carry : M31 × M31 × M31
   output_kicked : M31
 deriving Repr
 
@@ -249,7 +251,7 @@ deriving Repr
     关键：被踢者的 `bet` 设为 `decodeU64 ext.kicked_bet`，对齐 AIR 的
     `KICKED_BET` witness（`post_pot = pre_pot + kicked_bet`）。这使得 soundness
     约束 #10 `post.pot = pre.pot + pre.get_seat(seat_index).bet` 可由
-    `PotDelta` + range constraint 直接推出。 -/
+    `PotDelta` ripple-carry 约束直接推出。 -/
 def extractPreTableFromKickPlayerAir
     (row : CommonRow)
     (ext : KickPlayerMethodColumns)
@@ -267,8 +269,8 @@ def extractPreTableFromKickPlayerAir
 /-- kick_player 专用后状态提取（目标座位标记为 kicked：保留 player，
     folded/left_during_hand = true，stack/bet 清零）。
 
-    注：post 状态的 pot 来自 row.post_pot（由 PotDelta 约束绑定到 pre_pot + kicked_bet），
-    对齐 Rust AIR `pot_delta_4limb`（4-limb pot delta 约束）。 -/
+    注：post 状态的 pot 来自 row.post_pot（由 PotDelta ripple-carry 约束绑定到
+    pre_pot + kicked_bet），对齐 Rust AIR `pot_delta_4limb`。 -/
 def extractPostTableFromKickPlayerAir
     (row : CommonRow)
     (ext : KickPlayerMethodColumns)
@@ -304,8 +306,8 @@ def KickPlayerMethodConstraints
   VersionIncrementConstraint row ∧
   RoundStateUnchanged row ∧
   ButtonUnchanged row ∧
-  -- pot 守恒：post_pot = pre_pot + kicked_bet（全 4 limb，对齐合约 checked_add 修复 + Rust AIR pot_delta_4limb）
-  PotDelta row ext.kicked_bet ∧
+  -- pot 守恒：post_pot = pre_pot + kicked_bet（规范 ripple-carry 加法）
+  PotDelta row ext.kicked_bet ext.pot_add_carry ∧
   let pre_table := extractPreTableFromKickPlayerAir row ext max_players
   let post_table := extractPostTableFromKickPlayerAir row ext max_players expected_seat_index
   StateRootConsistency row

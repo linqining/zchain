@@ -32,13 +32,11 @@ set_option linter.unusedVariables false in
 - `rebuy_air_sound`：rebuy AIR 在正确提取下满足 `ContractRebuy`（4-limb 守恒 +
   addon_pool 守恒 + 版本递增 + 座位占用 + 金额 > 0）。
 
-## 已知限制
+## carry-chain 对齐
 
-AIR 的逐 limb 加法约束（`post = M31.add pre amount`）在 M31 域内进行，
-不显式强制 limb 进位传播。在 Rust 实现中，limb 范围约束（每 limb < 65536）
-由独立的 range constraint 保证；Lean 模型暂未引入 range constraint，
-因此下列证明假设 limb 不溢出（等价于 `decodeU64` 语义，
-通过公理 `m31_add_no_overflow` 抽象）。 -/
+Rust AIR 与本 Lean 模型现在都使用 3 个 boolean ripple-carry witness 表达
+4×16-bit `checked_add`。因此跨 limb 进位（例如 `65535 + 1 = 65536`）直接落在
+约束和证明覆盖内，不再依赖“每个 limb 单独相加且不进位”的外部假设。 -/
 
 /-! ## addon 辅助引理 -/
 
@@ -209,15 +207,11 @@ theorem addon_air_sound :
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     AddonAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
-    -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
-    Limb4Range16 ext.pre_pending_addon →
-    Limb4Range16 ext.input_amount →
     ContractAddon
       (extractPreTableFromAddonAir row ext max_players expected_seat_index)
       (extractAddonParamsFromAir ext)
       (extractPostTableFromAddonAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index expected_amount max_players hlt hseat h_air
-    h_range_pre h_range_amt
   -- 1. 解构 AIR 假设
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : AddonMethodConstraints row ext expected_seat_index expected_amount
@@ -225,7 +219,7 @@ theorem addon_air_sound :
   -- 2. 应用 active 前提得到约束合取
   have h_c := h_method h_active
   rcases h_c with ⟨h_ver, h_rs_unch, h_seat_eq, _h_amt_eq, h_amt_pos,
-                    _h_occ, h_pa0, h_pa1, h_pa2, h_pa3, h_addon_pool,
+                    _h_occ, h_pending_add, h_addon_pool,
                     h_bound_check, _h_src⟩
   -- 3. 关键派生：seat_index 一致性
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
@@ -241,17 +235,16 @@ theorem addon_air_sound :
                 decodeU64 row.pre_version.1 row.pre_version.2.1
                   row.pre_version.2.2.1 row.pre_version.2.2.2 + 1 := h_ver h_active
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
-  -- 5. pending_addon 守恒（逐 limb → decodeU64 线性）
+  -- 5. pending_addon 守恒（ripple-carry → decodeU64 线性）
   have h_pending_addon_eq :
       decodeU64 ext.post_pending_addon.1 ext.post_pending_addon.2.1
         ext.post_pending_addon.2.2.1 ext.post_pending_addon.2.2.2 =
       decodeU64 ext.pre_pending_addon.1 ext.pre_pending_addon.2.1
         ext.pre_pending_addon.2.2.1 ext.pre_pending_addon.2.2.2 +
       decodeU64 ext.input_amount.1 ext.input_amount.2.1
-        ext.input_amount.2.2.1 ext.input_amount.2.2.2 := by
-    rw [h_pa0, h_pa1, h_pa2, h_pa3]
-    exact decodeU64_limb_add ext.pre_pending_addon ext.input_amount
-      h_range_pre h_range_amt
+        ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
+    limb4_delta_implies_decode_eq ext.pre_pending_addon ext.post_pending_addon
+      ext.input_amount ext.pending_add_carry h_pending_add
   -- 6. addon_pool 守恒
   have h_addon_pool' :
       decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
@@ -259,7 +252,9 @@ theorem addon_air_sound :
       decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
         ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2 +
       decodeU64 ext.input_amount.1 ext.input_amount.2.1
-        ext.input_amount.2.2.1 ext.input_amount.2.2.2 := h_addon_pool
+        ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
+    limb4_delta_implies_decode_eq ext.input_pre_addon_pool ext.output_post_addon_pool
+      ext.input_amount ext.addon_pool_add_carry h_addon_pool
   -- 7. 座位级引理
   have h_pre_seat : (extractPreTableFromAddonAir row ext max_players expected_seat_index).get_seat
       expected_seat_index =
@@ -484,15 +479,11 @@ theorem rebuy_air_sound :
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     RebuyAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
-    -- Limb range constraints（由 Rust AIR 的独立 range constraint 保证）
-    Limb4Range16 ext.pre_stack →
-    Limb4Range16 ext.input_amount →
     ContractRebuy
       (extractPreTableFromRebuyAir row ext max_players expected_seat_index)
       (extractRebuyParamsFromAir ext)
       (extractPostTableFromRebuyAir row ext max_players expected_seat_index) := by
   intro row ext expected_seat_index expected_amount max_players hlt hseat h_air
-    h_range_pre h_range_amt
   -- 1. 解构 AIR 假设
   have h_active : row.is_active = M31.one := h_air.2.2.2
   have h_method : RebuyMethodConstraints row ext expected_seat_index expected_amount
@@ -500,7 +491,7 @@ theorem rebuy_air_sound :
   -- 2. 应用 active 前提得到约束合取
   have h_c := h_method h_active
   rcases h_c with ⟨h_ver, h_rs_unch, h_seat_eq, _h_amt_eq, h_amt_pos,
-                    _h_occ, h_st0, h_st1, h_st2, h_st3, h_addon_pool,
+                    _h_occ, h_stack_add, h_addon_pool,
                     h_bound_check, _h_src⟩
   -- 3. 关键派生：seat_index 一致性
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
@@ -516,17 +507,16 @@ theorem rebuy_air_sound :
                 decodeU64 row.pre_version.1 row.pre_version.2.1
                   row.pre_version.2.2.1 row.pre_version.2.2.2 + 1 := h_ver h_active
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
-  -- 5. stack 守恒（逐 limb → decodeU64 线性）
+  -- 5. stack 守恒（ripple-carry → decodeU64 线性）
   have h_stack_eq :
       decodeU64 ext.post_stack.1 ext.post_stack.2.1
         ext.post_stack.2.2.1 ext.post_stack.2.2.2 =
       decodeU64 ext.pre_stack.1 ext.pre_stack.2.1
         ext.pre_stack.2.2.1 ext.pre_stack.2.2.2 +
       decodeU64 ext.input_amount.1 ext.input_amount.2.1
-        ext.input_amount.2.2.1 ext.input_amount.2.2.2 := by
-    rw [h_st0, h_st1, h_st2, h_st3]
-    exact decodeU64_limb_add ext.pre_stack ext.input_amount
-      h_range_pre h_range_amt
+        ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
+    limb4_delta_implies_decode_eq ext.pre_stack ext.post_stack ext.input_amount
+      ext.stack_add_carry h_stack_add
   -- 6. addon_pool 守恒
   have h_addon_pool' :
       decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
@@ -534,7 +524,9 @@ theorem rebuy_air_sound :
       decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
         ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2 +
       decodeU64 ext.input_amount.1 ext.input_amount.2.1
-        ext.input_amount.2.2.1 ext.input_amount.2.2.2 := h_addon_pool
+        ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
+    limb4_delta_implies_decode_eq ext.input_pre_addon_pool ext.output_post_addon_pool
+      ext.input_amount ext.addon_pool_add_carry h_addon_pool
   -- 7. 座位级引理
   have h_pre_seat : (extractPreTableFromRebuyAir row ext max_players expected_seat_index).get_seat
       expected_seat_index =

@@ -130,6 +130,27 @@ fn test_e2e_addon_from_zero_pending() {
     verify_method(proof).expect("verify 失败");
 }
 
+/// 回归：pending_addon 与 addon_pool 都跨过 16-bit limb 边界时仍可证明。
+#[test]
+fn test_e2e_addon_ripple_carry() {
+    let input = AddonInput { seat_index: 0, amount: 1 };
+    let row = AddonRow::active(
+        &input, 65_535, 0, 65_535, zero_root(), one_root(), 1, 0, 0, 0, 1, 0, 0,
+    );
+    let trace = gen_method_trace(
+        AddonAir::num_columns(), &row.to_vec(), &AddonRow::padding().to_vec(),
+    ).expect("trace 生成失败");
+    let air = AddonAir {
+        log_size: trace.log_size, input, pre_state_root: zero_root(), post_state_root: one_root(),
+        table_id: 1, hand_id: 0, call_seq: 0, pre_version: 0, post_version: 1,
+    };
+    let proof = prove_method(
+        &trace, air, AddonAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 1, 0, 0),
+    ).expect("跨 limb addon 应可证明");
+    verify_method(proof).expect("跨 limb addon 应可验证");
+}
+
 /// Soundness: 篡改 addon 的 `amount` 公开输入后，verify 应失败。
 ///
 /// 流程：用正确 AIR 生成 proof → 篡改 proof.air.input.amount → verify 应失败。
@@ -292,6 +313,27 @@ fn test_e2e_rebuy_prove_verify() {
 
     let proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3)).expect("prove 失败");
     verify_method(proof).expect("verify 失败");
+}
+
+/// 回归：stack 与 addon_pool 都跨过 16-bit limb 边界时仍可证明。
+#[test]
+fn test_e2e_rebuy_ripple_carry() {
+    let input = RebuyInput { seat_index: 0, amount: 1 };
+    let row = RebuyRow::active(
+        &input, 65_535, 0, 65_535, zero_root(), one_root(), 1, 0, 0, 0, 1, 0, 0,
+    );
+    let trace = gen_method_trace(
+        RebuyAir::num_columns(), &row.to_vec(), &RebuyRow::padding().to_vec(),
+    ).expect("trace 生成失败");
+    let air = RebuyAir {
+        log_size: trace.log_size, input, pre_state_root: zero_root(), post_state_root: one_root(),
+        table_id: 1, hand_id: 0, call_seq: 0, pre_version: 0, post_version: 1,
+    };
+    let proof = prove_method(
+        &trace, air, RebuyAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 1, 0, 0),
+    ).expect("跨 limb rebuy 应可证明");
+    verify_method(proof).expect("跨 limb rebuy 应可验证");
 }
 
 /// Soundness: 篡改 rebuy 的 `amount` 公开输入后，verify 应失败。
@@ -475,12 +517,12 @@ fn test_funds_air_column_consistency() {
     use poker_texas_air::airs::funds::addon;
     use poker_texas_air::airs::funds::rebuy;
 
-    // addon: 通用 + 37 业务（阶段 3 新增 post_addon_pool 4 limb 用于 addon_pool 守恒）
-    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 37);
+    // addon: 通用 + 43 业务（两条 u64 加法各增加 3 个 carry bit）
+    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 43);
     assert_eq!(AddonAir::num_columns(), addon::cols::NUM_COLUMNS);
 
-    // rebuy: 通用 + 37 业务（阶段 3 新增 post_addon_pool 4 limb 用于 addon_pool 守恒）
-    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 101);
+    // rebuy: 通用 + 107 业务（两条 u64 加法各增加 3 个 carry bit）
+    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 107);
     assert_eq!(RebuyAir::num_columns(), rebuy::cols::NUM_COLUMNS);
 }
 

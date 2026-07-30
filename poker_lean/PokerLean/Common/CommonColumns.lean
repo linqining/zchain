@@ -212,26 +212,34 @@ def PotDeltaLimb0 (row : CommonRow) (amt0 : M31) : Prop :=
   row.is_active = M31.one →
   row.post_pot.1.val = (row.pre_pot.1.val + amt0.val) % M31_P
 
-/-- pot 全 4 limb delta 约束：active 行要求逐 limb post_pot = M31.add pre_pot amt。
-    配合 `m31_add_no_overflow` 定理与 `decodeU64_limb_add` 引理，
-    可推出 `decodeU64 post_pot = decodeU64 pre_pot + decodeU64 amt`。 -/
-def PotDelta (row : CommonRow) (amt : M31 × M31 × M31 × M31) : Prop :=
-  row.is_active = M31.one →
-  row.post_pot.1 = M31.add row.pre_pot.1 amt.1 ∧
-  row.post_pot.2.1 = M31.add row.pre_pot.2.1 amt.2.1 ∧
-  row.post_pot.2.2.1 = M31.add row.pre_pot.2.2.1 amt.2.2.1 ∧
-  row.post_pot.2.2.2 = M31.add row.pre_pot.2.2.2 amt.2.2.2
+/-- 三个 ripple-carry witness 均为 boolean。 -/
+def Carry3Boolean (carry : M31 × M31 × M31) : Prop :=
+  match carry with
+  | (c0, c1, c2) =>
+    (c0 = M31.zero ∨ c0 = M31.one) ∧
+    (c1 = M31.zero ∨ c1 = M31.one) ∧
+    (c2 = M31.zero ∨ c2 = M31.one)
+
+/-- 规范 4×16-bit u64 加法：`post = pre + amt`，带 3 级 ripple carry。
+    最高 limb 无 carry-out，因此同时表达 Rust `checked_add` 成功。 -/
+def Limb4Delta (pre post amt : M31 × M31 × M31 × M31)
+    (carry : M31 × M31 × M31) : Prop :=
+  match carry with
+  | (c0, c1, c2) =>
+    Carry3Boolean carry ∧
+    pre.1.val + amt.1.val = post.1.val + c0.val * 65536 ∧
+    pre.2.1.val + amt.2.1.val + c0.val = post.2.1.val + c1.val * 65536 ∧
+    pre.2.2.1.val + amt.2.2.1.val + c1.val = post.2.2.1.val + c2.val * 65536 ∧
+    pre.2.2.2.val + amt.2.2.2.val + c2.val = post.2.2.2.val
+
+/-- pot 全 4 limb delta 约束，使用与 Rust AIR 相同的 ripple-carry witness。 -/
+def PotDelta (row : CommonRow) (amt : M31 × M31 × M31 × M31)
+    (carry : M31 × M31 × M31) : Prop :=
+  row.is_active = M31.one → Limb4Delta row.pre_pot row.post_pot amt carry
 
 /-- 4-limb 相等约束。 -/
 def Limb4Eq (a b : M31 × M31 × M31 × M31) : Prop :=
   a.1 = b.1 ∧ a.2.1 = b.2.1 ∧ a.2.2.1 = b.2.2.1 ∧ a.2.2.2 = b.2.2.2
-
-/-- 4-limb delta 约束：post = M31.add pre amt（逐 limb）。 -/
-def Limb4Delta (pre post amt : M31 × M31 × M31 × M31) : Prop :=
-  post.1 = M31.add pre.1 amt.1 ∧
-  post.2.1 = M31.add pre.2.1 amt.2.1 ∧
-  post.2.2.1 = M31.add pre.2.2.1 amt.2.2.1 ∧
-  post.2.2.2 = M31.add pre.2.2.2 amt.2.2.2
 
 /-- 4-limb 反向 delta 约束：pre = M31.add post amt（逐 limb），用于 stack 减少。 -/
 def Limb4DeltaRev (pre post amt : M31 × M31 × M31 × M31) : Prop :=
@@ -247,14 +255,16 @@ lemma limb4_eq_implies_decode_eq (a b : M31 × M31 × M31 × M31)
   rw [h0, h1, h2, h3]
 
 lemma limb4_delta_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
-    (hpre : Limb4Range16 pre) (hamt : Limb4Range16 amt)
-    (h : Limb4Delta pre post amt) :
+    (carry : M31 × M31 × M31)
+    (h : Limb4Delta pre post amt carry) :
     decodeU64 post.1 post.2.1 post.2.2.1 post.2.2.2 =
     decodeU64 pre.1 pre.2.1 pre.2.2.1 pre.2.2.2 +
     decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
-  rcases h with ⟨h0, h1, h2, h3⟩
-  rw [h0, h1, h2, h3]
-  exact decodeU64_limb_add pre amt hpre hamt
+  rcases carry with ⟨c0, c1, c2⟩
+  unfold Limb4Delta at h
+  rcases h with ⟨_, h0, h1, h2, h3⟩
+  unfold decodeU64
+  omega
 
 lemma limb4_delta_rev_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31)
     (hpost : Limb4Range16 post) (hamt : Limb4Range16 amt)
@@ -267,16 +277,14 @@ lemma limb4_delta_rev_implies_decode_eq (pre post amt : M31 × M31 × M31 × M31
   exact decodeU64_limb_add post amt hpost hamt
 
 lemma pot_delta_implies_decode_eq (row : CommonRow) (amt : M31 × M31 × M31 × M31)
+    (carry : M31 × M31 × M31)
     (h_active : row.is_active = M31.one)
-    (hpre : Limb4Range16 row.pre_pot) (hamt : Limb4Range16 amt)
-    (h : PotDelta row amt) :
+    (h : PotDelta row amt carry) :
     decodeU64 row.post_pot.1 row.post_pot.2.1 row.post_pot.2.2.1 row.post_pot.2.2.2 =
     decodeU64 row.pre_pot.1 row.pre_pot.2.1 row.pre_pot.2.2.1 row.pre_pot.2.2.2 +
     decodeU64 amt.1 amt.2.1 amt.2.2.1 amt.2.2.2 := by
   have h' := h h_active
-  rcases h' with ⟨h0, h1, h2, h3⟩
-  rw [h0, h1, h2, h3]
-  exact decodeU64_limb_add row.pre_pot amt hpre hamt
+  exact limb4_delta_implies_decode_eq row.pre_pot row.post_pot amt carry h'
 
 /-- button 不变约束：active 行要求 post_button = pre_button。
     fold/check 等动作不改变 dealer_seat（button）。 -/

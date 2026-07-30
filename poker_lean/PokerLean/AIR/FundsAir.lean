@@ -107,19 +107,16 @@ structure AddonMethodColumns where
   input_bound_carry_lo : M31 × M31 × M31
   /-- BOUND_CARRY_HI（3 个高位 bit）- 2-bit carry 分解的 hi 部分 -/
   input_bound_carry_hi : M31 × M31 × M31
+  /-- pending_addon += amount 的 3 个 ripple-carry bit。 -/
+  pending_add_carry : M31 × M31 × M31
+  /-- addon_pool += amount 的 3 个 ripple-carry bit。 -/
+  addon_pool_add_carry : M31 × M31 × M31
 deriving Repr
 
-/-- addon_pool 守恒约束：post_addon_pool = pre_addon_pool + amount。
-    对齐 Rust 合约 `dispatch_addon` 的 `addon_pool += amount`。 -/
+/-- addon_pool 守恒约束，使用与 Rust AIR 相同的 ripple-carry chain。 -/
 def AddonPoolFundsConservation (ext : AddonMethodColumns) : Prop :=
-  decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
-      ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2
-  =
-  decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
-      ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2
-  +
-  decodeU64 ext.input_amount.1 ext.input_amount.2.1
-      ext.input_amount.2.2.1 ext.input_amount.2.2.2
+  Limb4Delta ext.input_pre_addon_pool ext.output_post_addon_pool ext.input_amount
+    ext.addon_pool_add_carry
 
 /-- 全局上界检查约束：within_bound == 1。
     对齐合约 `if chip_pool + addon_pool + amount > MAX_TOTAL_BET { return Err }`。
@@ -233,11 +230,9 @@ def AddonMethodConstraints
   ext.input_amount.1 = ⟨expected_amount % 65536, by unfold M31_P; omega⟩ ∧
   AmountPositive ext.input_amount.1 ext.input_amount.2.1 ext.input_amount.2.2.1 ext.input_amount.2.2.2 ∧
   SeatOccupied ext.input_seat_is_occupied ∧
-  -- pending_addon 守恒：post = pre + amount（逐 limb）
-  ext.post_pending_addon.1 = M31.add ext.pre_pending_addon.1 ext.input_amount.1 ∧
-  ext.post_pending_addon.2.1 = M31.add ext.pre_pending_addon.2.1 ext.input_amount.2.1 ∧
-  ext.post_pending_addon.2.2.1 = M31.add ext.pre_pending_addon.2.2.1 ext.input_amount.2.2.1 ∧
-  ext.post_pending_addon.2.2.2 = M31.add ext.pre_pending_addon.2.2.2 ext.input_amount.2.2.2 ∧
+  -- pending_addon 守恒：规范 u64 ripple-carry 加法
+  Limb4Delta ext.pre_pending_addon ext.post_pending_addon ext.input_amount
+    ext.pending_add_carry ∧
   -- addon_pool 守恒：post = pre + amount
   AddonPoolFundsConservation ext ∧
   -- 全局上界 range check（对齐合约溢出修复 + Rust AIR bound_check_4limb）
@@ -284,18 +279,16 @@ structure RebuyMethodColumns where
   input_bound_carry_lo : M31 × M31 × M31
   /-- BOUND_CARRY_HI（3 个高位 bit）- 2-bit carry 分解的 hi 部分 -/
   input_bound_carry_hi : M31 × M31 × M31
+  /-- stack += amount 的 3 个 ripple-carry bit。 -/
+  stack_add_carry : M31 × M31 × M31
+  /-- addon_pool += amount 的 3 个 ripple-carry bit。 -/
+  addon_pool_add_carry : M31 × M31 × M31
 deriving Repr
 
-/-- rebuy 的 addon_pool 守恒约束：post_addon_pool = pre_addon_pool + amount。 -/
+/-- rebuy 的 addon_pool 守恒约束，使用规范 ripple-carry 加法。 -/
 def RebuyAddonPoolConservation (ext : RebuyMethodColumns) : Prop :=
-  decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
-      ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2
-  =
-  decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
-      ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2
-  +
-  decodeU64 ext.input_amount.1 ext.input_amount.2.1
-      ext.input_amount.2.2.1 ext.input_amount.2.2.2
+  Limb4Delta ext.input_pre_addon_pool ext.output_post_addon_pool ext.input_amount
+    ext.addon_pool_add_carry
 
 /-- 从 AIR 行提取 rebuy pre 状态表 -/
 def extractPreTableFromRebuyAir
@@ -352,11 +345,8 @@ def RebuyMethodConstraints
   ext.input_amount.1 = ⟨expected_amount % 65536, by unfold M31_P; omega⟩ ∧
   AmountPositive ext.input_amount.1 ext.input_amount.2.1 ext.input_amount.2.2.1 ext.input_amount.2.2.2 ∧
   SeatOccupied ext.input_seat_is_occupied ∧
-  -- stack 守恒：post = pre + amount（逐 limb）
-  ext.post_stack.1 = M31.add ext.pre_stack.1 ext.input_amount.1 ∧
-  ext.post_stack.2.1 = M31.add ext.pre_stack.2.1 ext.input_amount.2.1 ∧
-  ext.post_stack.2.2.1 = M31.add ext.pre_stack.2.2.1 ext.input_amount.2.2.1 ∧
-  ext.post_stack.2.2.2 = M31.add ext.pre_stack.2.2.2 ext.input_amount.2.2.2 ∧
+  -- stack 守恒：规范 u64 ripple-carry 加法
+  Limb4Delta ext.pre_stack ext.post_stack ext.input_amount ext.stack_add_carry ∧
   -- addon_pool 守恒：post = pre + amount
   RebuyAddonPoolConservation ext ∧
   -- 全局上界 range check（对齐合约溢出修复 + Rust AIR bound_check_4limb）

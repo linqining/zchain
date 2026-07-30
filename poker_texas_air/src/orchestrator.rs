@@ -1423,7 +1423,8 @@ mod tests {
     use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
     use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
     use poker_l1::vm::contracts::texas_poker::dispatch::{
-        self as texas_dispatch, BetArgs, CreateTableArgs, KickPlayerArgs, RaiseArgs, SeatIndexArgs,
+        self as texas_dispatch, AddonArgs, BetArgs, CreateTableArgs, KickPlayerArgs, RaiseArgs,
+        RebuyArgs, SeatIndexArgs,
     };
     use poker_l1::vm::contracts::texas_poker::state_machine;
     use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
@@ -1615,6 +1616,79 @@ mod tests {
         );
         let mut orch = Orchestrator::new();
         orch.prove_and_verify_task(&task).expect("fold prove+verify 应成功");
+    }
+
+    #[test]
+    fn orchestrator_accepts_addon_ripple_carry() {
+        let mut pre = make_table("addon-ripple-carry");
+        pre.seats[0].player = [0x41; 20];
+        pre.seats[0].stack = 100;
+        pre.seats[0].pending_addon = 65_535;
+        pre.chip_pool = 100;
+        pre.addon_pool = 65_535;
+        let caller = pre.seats[0].player;
+        let (task, post) = dispatch_task(
+            pre,
+            caller,
+            texas_dispatch::selectors::addon(),
+            borsh::to_vec(&AddonArgs { seat_index: 0, amount: 1 })
+                .expect("addon args should serialize"),
+        );
+        assert_eq!(post.seats[0].pending_addon, 65_536);
+        assert_eq!(post.addon_pool, 65_536);
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("native replay and AIR must accept addon carry");
+    }
+
+    #[test]
+    fn orchestrator_accepts_rebuy_ripple_carry() {
+        let mut pre = make_table("rebuy-ripple-carry");
+        pre.seats[0].player = [0x42; 20];
+        pre.seats[0].stack = 65_535;
+        pre.chip_pool = 65_535;
+        pre.addon_pool = 65_535;
+        let caller = pre.seats[0].player;
+        let (task, post) = dispatch_task(
+            pre,
+            caller,
+            texas_dispatch::selectors::rebuy(),
+            borsh::to_vec(&RebuyArgs { seat_index: 0, amount: 1 })
+                .expect("rebuy args should serialize"),
+        );
+        assert_eq!(post.seats[0].stack, 65_536);
+        assert_eq!(post.addon_pool, 65_536);
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("native replay and AIR must accept rebuy carry");
+    }
+
+    #[test]
+    fn orchestrator_accepts_kick_player_pot_ripple_carry() {
+        let mut pre = make_table("kick-ripple-carry");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        pre.pot = 65_535;
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+        }
+        pre.seats[2].bet = 1;
+        pre.seats[2].total_bet = 1;
+        pre.chip_pool = 3_000;
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::kick_player(),
+            borsh::to_vec(&KickPlayerArgs { seat_index: 2, reason: 1 })
+                .expect("kick args should serialize"),
+        );
+        assert_eq!(post.pot, 65_536);
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("native replay and AIR must accept kick pot carry");
     }
 
     /// P06 回归：真实 VM 的非零 mid-round call 不收池，且可完成 prove+verify。

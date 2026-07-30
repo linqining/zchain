@@ -103,6 +103,27 @@ pub fn m31_limbs_to_u64(limbs: [M31; 4]) -> u64 {
     l0 | (l1 << 16) | (l2 << 32) | (l3 << 48)
 }
 
+/// 计算规范 4-limb u64 加法 `lhs + rhs = sum` 的 3 个 ripple-carry witness。
+///
+/// 每个输入/输出 limb 都是 16 bit，因此每级 carry 只能是 0 或 1。调用方需
+/// 保证 `lhs.checked_add(rhs)` 成功；u64 溢出不属于可证明的合法状态转换。
+#[must_use]
+pub fn compute_add_carries(lhs: u64, rhs: u64) -> [M31; 3] {
+    let lhs = u64_to_m31_limbs(lhs);
+    let rhs = u64_to_m31_limbs(rhs);
+    let mut carry = 0u64;
+    let mut out = [ZERO; 3];
+    for i in 0..3 {
+        let limb_sum = u64::from(lhs[i].0) + u64::from(rhs[i].0) + carry;
+        carry = limb_sum >> 16;
+        debug_assert!(carry <= 1, "two-limb addition carry must be boolean");
+        out[i] = M31::from(carry as u32);
+    }
+    let top_sum = u64::from(lhs[3].0) + u64::from(rhs[3].0) + carry;
+    debug_assert!(top_sum < 65536, "u64 addition overflow");
+    out
+}
+
 /// 计算 4-limb 加法 `cp + ap + am + df = mx` 的进位（host 端用）。
 ///
 /// 返回 `(carry_lo: [M31; 3], carry_hi: [M31; 3])`，其中
@@ -504,26 +525,37 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         out
     }
 
-    /// 约束 `post_pot[i] = pre_pot[i] + amt[i]`（全 4 limb，每 limb degree-2）。
-    /// 对齐 Lean `PotDelta`：配合 `m31_add_no_overflow` 公理可推出
-    /// `decodeU64(post_pot) = decodeU64(pre_pot) + decodeU64(amt)`。
-    pub fn pot_delta_4limb(&self, amt: &[E::F; 4]) -> Vec<E::F> {
-        // P0-2 修复：逐 limb 独立约束。
-        let mut out = Vec::with_capacity(4);
-        for i in 0..4 {
-            out.push(self.is_active.clone()
-                * (self.post_pot[i].clone() - self.pre_pot[i].clone() - amt[i].clone()));
-        }
-        out
+    /// 约束规范 u64 加法 `post_pot = pre_pot + amt`（4×16-bit limb + ripple carry）。
+    pub fn pot_delta_4limb(&self, amt: &[E::F; 4], carry: &[E::F; 3]) -> Vec<E::F> {
+        self.limb4_delta(&self.pre_pot, &self.post_pot, amt, carry)
     }
 
-    /// 约束 `post[i] = pre[i] + amt[i]`（全 4 limb delta，每 limb degree-2）。
-    /// 对齐 Lean `Limb4Delta`。
-    pub fn limb4_delta(&self, pre: &[E::F; 4], post: &[E::F; 4], amt: &[E::F; 4]) -> Vec<E::F> {
-        // P0-2 修复：逐 limb 独立约束。
-        let mut out = Vec::with_capacity(4);
+    /// 约束规范 u64 加法 `post = pre + amt`。
+    ///
+    /// 三个 boolean carry 分别连接 limb 0→1、1→2、2→3；最高 limb 不允许
+    /// carry-out，因此该谓词同时表达 Rust `checked_add` 成功。与旧的逐 limb
+    /// 无 carry 等式不同，它接受 `0xFFFF + 1 = 0x1_0000` 这类合法转移。
+    pub fn limb4_delta(
+        &self,
+        pre: &[E::F; 4],
+        post: &[E::F; 4],
+        amt: &[E::F; 4],
+        carry: &[E::F; 3],
+    ) -> Vec<E::F> {
+        let one: E::F = M31::from(1u32).into();
+        let base: E::F = M31::from(65536u32).into();
+        let zero: E::F = M31::from(0u32).into();
+        let carry_in = [zero.clone(), carry[0].clone(), carry[1].clone(), carry[2].clone()];
+        let carry_out = [carry[0].clone(), carry[1].clone(), carry[2].clone(), zero];
+        let mut out = Vec::with_capacity(7);
         for i in 0..4 {
-            out.push(self.is_active.clone() * (post[i].clone() - pre[i].clone() - amt[i].clone()));
+            out.push(self.is_active.clone()
+                * (pre[i].clone() + amt[i].clone() + carry_in[i].clone()
+                    - post[i].clone()
+                    - base.clone() * carry_out[i].clone()));
+        }
+        for bit in carry {
+            out.push(bit.clone() * (bit.clone() - one.clone()));
         }
         out
     }

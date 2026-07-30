@@ -247,8 +247,6 @@ theorem kick_player_sound_main :
     (expected_refund : Nat)
     (hseat : expected_seat_index < max_players),
     KickPlayerAirAcceptable row ext expected_seat_index max_players hlt expected_refund →
-    Limb4Range16 ext.kicked_bet →
-    Limb4Range16 row.pre_pot →
     ContractKickPlayer
       (extractPreTableFromKickPlayerAir row ext max_players)
       (extractKickPlayerParamsFromAir ext)
@@ -323,32 +321,28 @@ theorem reset_for_next_hand_sound_main :
       (extractPostTableFromLifecycleAir row max_players ext.input_shuffle_phase.val) :=
   reset_for_next_hand_air_sound
 
-/-! ## addon / rebuy: ✅ AIR soundness（正确提取下成立，需 limb 范围约束）-/
+/-! ## addon / rebuy: ✅ AIR soundness（正确提取 + ripple-carry）-/
 
-/-- addon AIR soundness 主定理（正确提取下成立；需 limb 范围约束由独立 range constraint 保证） -/
+/-- addon AIR soundness 主定理（正确提取下成立；u64 加法由 ripple-carry 约束保证） -/
 theorem addon_sound_main :
   ∀ (row : CommonRow) (ext : AddonMethodColumns)
     (expected_seat_index : Nat) (expected_amount : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     AddonAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
-    Limb4Range16 ext.pre_pending_addon →
-    Limb4Range16 ext.input_amount →
     ContractAddon
       (extractPreTableFromAddonAir row ext max_players expected_seat_index)
       (extractAddonParamsFromAir ext)
       (extractPostTableFromAddonAir row ext max_players expected_seat_index) :=
   addon_air_sound
 
-/-- rebuy AIR soundness 主定理（正确提取下成立；需 limb 范围约束由独立 range constraint 保证） -/
+/-- rebuy AIR soundness 主定理（正确提取下成立；u64 加法由 ripple-carry 约束保证） -/
 theorem rebuy_sound_main :
   ∀ (row : CommonRow) (ext : RebuyMethodColumns)
     (expected_seat_index : Nat) (expected_amount : Nat) (max_players : Nat)
     (hlt : expected_seat_index < M31_P)
     (hseat : expected_seat_index < max_players),
     RebuyAirAcceptable row ext expected_seat_index expected_amount max_players hlt →
-    Limb4Range16 ext.pre_stack →
-    Limb4Range16 ext.input_amount →
     ContractRebuy
       (extractPreTableFromRebuyAir row ext max_players expected_seat_index)
       (extractRebuyParamsFromAir ext)

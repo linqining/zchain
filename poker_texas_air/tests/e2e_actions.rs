@@ -793,6 +793,30 @@ fn test_e2e_kick_player_prove_verify() {
     verify_method(proof).expect("verify 失败");
 }
 
+/// 回归：pot += kicked_bet 跨过 16-bit limb 边界时仍可证明。
+#[test]
+fn test_e2e_kick_player_ripple_carry() {
+    use poker_texas_air::airs::actions::kick_player::{
+        KickPlayerAir, KickPlayerInput, KickPlayerRow,
+    };
+    let input = KickPlayerInput { seat_index: 2, refund: 500, kicked_bet: 1 };
+    let row = KickPlayerRow::active(
+        &input, zero_root(), one_root(), 42, 0, 7, 0, 1, 4, 4, 65_535, 65_536,
+    );
+    let trace = gen_method_trace(
+        KickPlayerAir::num_columns(), &row.to_vec(), &KickPlayerRow::padding().to_vec(),
+    ).expect("trace 生成失败");
+    let air = KickPlayerAir {
+        log_size: trace.log_size, input, pre_state_root: zero_root(), post_state_root: one_root(),
+        table_id: 42, hand_id: 0, call_seq: 7, pre_version: 0, post_version: 1,
+    };
+    let proof = prove_method(
+        &trace, air, KickPlayerAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::KickPlayer, 42, 0, 7),
+    ).expect("跨 limb kick_player 应可证明");
+    verify_method(proof).expect("跨 limb kick_player 应可验证");
+}
+
 /// Soundness: 篡改 kick_player 的 `refund` 公开输入后，verify 应失败。
 #[test]
 fn test_soundness_kick_player_tampered_refund() {
@@ -897,8 +921,8 @@ fn test_action_air_column_consistency() {
     // force_fold: 通用 + 5 业务（含 Gap 1、pre/post current_turn）
     assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
 
-    // kick_player: 通用 + 11 业务（含 KICKED_BET 4 limb + Gap 3 INPUT_SEAT_OCCUPIED boolean witness）
-    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 11);
+    // kick_player: 通用 + 14 业务（pot u64 加法增加 3 个 carry bit）
+    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 14);
 }
 
 /// 单元测试：MethodKind 的 actions 档位分类正确。
