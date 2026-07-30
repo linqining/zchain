@@ -66,36 +66,79 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 在任一字段被替换后均失败。
 
 但完整递归仍有以下缺口：
-1. Merkle 组件在 `query_positions` 为空时仍是 no-op(`trace_gen.rs:881-885`)，而现有
-   PoC 调用方仍可传空；transcript 绑定只能防止 proof 被事后重标记，不能证明任意声明的
-   commitment/query 就来自被递归验证的 L1 proof。
-2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**。
-3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR。
+1. ~~Merkle 组件在 `query_positions` 为空时仍是 no-op(`trace_gen.rs:881-885`)~~
+   **已收窄闭合（P05-R gap #1）**：`prove_recursive[_with_fri]` 与
+   `verify_recursive[_with_fri]` 入口现新增 `ensure_nonempty_public_inputs` 守卫，
+   空的 `l1_commitments` / `query_positions` / `log_size==0` 一律返回
+   `L1CommitmentsMissing` / `QueryPositionsMissing` / `InvalidLogSize`；
+   `gen_merkle_path_trace` 的空-query 早退分支已删除。审计 e2e 已改为从真实 L1 proof
+   提取 `commitments`（`l1_proof.0.commitments`）与 transcript-sampled
+   `query_positions`（新增 `extract_query_positions_from_l1`），使 Merkle Path AIR
+   不再走 no-op 路径。
+   - **gap #3-A（felt252→M31 编码非法/有损，已闭合）**：深入后发现 `field_element_252_to_m31_limbs`
+     原把 felt252 大端字节切成 8×32-bit chunk 直接 `from_u32_unchecked` 装入 M31，但 32-bit chunk
+     可达 `2^32-1` 远超 M31 的 `2^31-1`，debug profile 下 `partial_reduce` add-with-overflow panic
+     （release 下静默产生非法 M31）。上一版改成 8×31-bit 后虽然不 panic，却又截断 felt252 高 4 bit，
+     且 radix `2^31` 的 digit `2^31-1` 本身等于 M31 模数、仍不是合法 canonical field element。
+     现改为 **9-limb radix-(2^31-1)** 小端分解，每个 limb 严格小于 M31 模数，编码/解码完整可逆；
+     新增高于 bit 248 的碰撞回归和 `FieldElement252::MAX` 往返回归。
+   - **gap #3-B（真实 Merkle verifier AIR 未实现，未闭合但已显式 fail-closed）**：对照 Stwo 2.3 后确认，
+     `MerkleDecommitmentLifted.hash_witness` 是跨 query 合并、仅在 sibling 未由其他 query 推导时才消费的
+     压缩序列；当前 `query_idx * tree_height + layer_idx` 的 dense-path 索引模型错误，且只触及
+     `decommitments[0]`/`l1_commitments[0]`。leaf 构造也没有携带 verifier 侧的 per-tree column log sizes，
+     无法复现 Stwo 对列排序和 row hashing。更关键的是 `MerklePathAir` 的所谓 Poseidon 约束仍只是
+     `parent_limb = left_limb * right_limb`，并未约束 Starknet Poseidon252。故真实数据上的
+     `Constraints not satisfied` 只是偶然失败，不是安全边界；恶意输入仍可能满足这些错误多项式。
+     现在 `prove_recursive_with_fri` / `verify_recursive_with_fri` 在 crate 内测试路径也显式返回
+     `IncompleteMerkleVerifierAir`，不再执行该组件；回归测试
+     `gap3b_incomplete_merkle_air_is_explicitly_disabled` 固化这一 fail-closed 行为。相关成功往返测试继续
+     `#[ignore]`，直到压缩 multi-query replay、所有 tree commitment、column metadata 和真实 Poseidon252
+     AIR 全部实现并经过密码学审计。未完成的 verifier AIR 模块与 Merkle trace 生成器也已收窄为
+     crate-private，外部调用方不能绕过高层 gate 直接复用占位组件。
+2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**（未变）。
+3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR
+   （未变；且 `poker_zkvm` 的 guest crate `guests/texas_poker` 本轮尚未迁入 zchain
+   workspace，真实 method proof 端到端路径暂不可用）。
 
 由于这些缺口允许恶意 prover 针对任意声明重新生成一个满足当前局部 AIR 的 L2 proof，
-`poker_zkvm` 的递归 prove/verify API 现仅在 crate 自身 `cfg(test)` 中执行；跨 crate 调用
+`poker_zkvm` 的 OODS-only 实验路径仅在 crate 自身 `cfg(test)` 中执行；含 FRI/Merkle 的
+`*_with_fri` 路径在 crate 内也因 `IncompleteMerkleVerifierAir` fail-closed。跨 crate 调用
 统一返回 `UnsoundBackendDisabled`。L1 的 `StwoZkVerifier` 即使治理状态为 Production 也
 返回 `verified = false`，不再使用 `RecursivePublicInputs::default()` 接受未绑定
 `ZkPublicIo` 的 proof。
 
 ### 修复路径(均需密码学专家)
-- **(a) 让单 proof 递归 sound**：公开输入 transcript binding 已完成；仍需强制从真实
-  L1 proof 构造非空 commitments/query positions，让 `gen_merkle_path_trace` 非空并绑定
-  所有 root/decommitment，再证明各 verifier AIR 的组合 sound。（~1-2 周 + 密码学 review）
+- **(a) 让单 proof 递归 sound**：公开输入 transcript binding 已完成；gap #1 的
+  空-input no-op 守卫与 felt252 无损编码已闭合（见上）；**仍需**把 verifier 的 per-tree
+  column log sizes/lifting metadata 加入递归 statement，按 Stwo 算法消费压缩 multi-query
+  decommitment、覆盖全部 commitments，并实现真实的 non-native Poseidon252 AIR（或经过证明的等价 lookup），
+  再证明 OODS/FRI/Merkle verifier AIR 的组合 sound。（密码学/AIR 大改 + review）
 - **(b) 构建 N-proof 聚合**:在 sound 的单 proof 递归之上,设计二叉树折叠或专用多验证器 AIR。(~1-2 周 + 设计决策)
 - **(c) host-side 逐子验证**(已实现的过渡路径):host 对每个子 proof 跑
   `stwo::verify()`，只允许 verifier-issued receipt 进入 `VerifiedChain`。该路径失去
   succinctness，验证方仍需 O(N) 全验证；仅作过渡姿态。
 
 ### 结论
-**真正的 recursive/succinct 聚合仍不可机械修复。** 需 ~(1-2)周让单 proof
-递归 sound + ~(1)周集成到真实 method AIR + ~(1-2)周设计 N-proof 聚合 +
-密码学 sign-off。总量约一个月专家工作。
+**真正的 recursive/succinct 聚合仍不可机械修复。** 需剩余 ~1 周让单 proof
+递归 sound（leaf/sibling 真实绑定 + 组合 sound 证明）+ ~(1)周集成到真实 method AIR +
+~(1-2)周设计 N-proof 聚合 + 密码学 sign-off。
 
 **当前状态**：
 - descriptor-only prove/verify 生产入口继续 fail-closed；
 - `poker_zkvm` recursive PoC 与 L1 `StwoZkVerifier` 生产路径均 fail-closed；
-- `test-helpers` 仅用于集成测试，release 构建若误启用该 feature 会在编译期拒绝；
+- `poker_zkvm` 主 crate 已迁入 zchain workspace（`members` 含 `poker_zkvm`）；其
+  guest 子 crate（`guest_sdk` / `guests/texas_poker`）暂未迁入，依赖它们的 E2E
+  测试与 bench 暂留外部目录；
+- `test-helpers` 已从 root / `poker_l1` 普通依赖移除，仅保留在 `poker_l1` dev-dependency；
+  release 依赖图不再暴露测试 ELF/证明构造器；
+- **P05-R gap #1**（空-input Merkle no-op）已收窄闭合 + 回归（守卫拒绝空 commitments/query/log_size）；
+  **gap #3-A**（felt252→M31 非法/有损编码）已修复为 9-limb radix-(2^31-1) 无损编码；
+  **gap #3-B**（压缩 multi-query witness / 全 tree commitment / column metadata / 真实 Poseidon252 AIR）
+  尚未实现，但 `_with_fri` 已改为显式 `IncompleteMerkleVerifierAir` fail-closed，不再依赖偶然的
+  `Constraints not satisfied`（回归测试 `gap3b_incomplete_merkle_air_is_explicitly_disabled`）；
+  gap #2（N-proof 聚合）、gap #3 主体（leaf/sibling 真实绑定 + verifier AIR 组合 sound + 真实 method proof 端到端）未闭合；
+  `poker_zkvm` 当前定向回归：OODS-only 路径、空输入守卫、9-limb 无损往返/高位保留、gap#3-B 显式关闭均通过；
+  `_with_fri` 成功往返测试因 gap #3-B 暂时 `#[ignore]`（修复后应解除）；
 - **P05-H-core** O(N) 宿主验证与完整范围 anchor 校验已闭合；
 - **P05-H-source** 仍需上层把 anchor 接到已认证 block/receipt；
 - **P05-R** 单个可转移的 recursive aggregate proof 仍是已知未完成特性。

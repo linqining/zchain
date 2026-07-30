@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 poker_protocol = { workspace = true }
-poker_zkvm = { path = "../../poker_zkvm", features = ["test-helpers"] }
+poker_zkvm = { workspace = true }
 vm-common = { path = "../vm-common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -47,7 +47,7 @@ tempfile = "3.10"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 proptest = { workspace = true }
 # 启用 poker_zkvm 的 test-helpers feature 以访问 generate_test_proof 等测试辅助函数
-poker_zkvm = { path = "../../poker_zkvm", features = ["test-helpers"] }
+poker_zkvm = { workspace = true, features = ["test-helpers"] }
 
 # ===== Task 36 性能基准（criterion harness = false）=====
 

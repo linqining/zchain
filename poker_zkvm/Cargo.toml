@@ -1,0 +1,72 @@
+# ===========================================================================
+# poker_zkvm — Stwo Circle STARK 零知识虚拟机（v2）
+# 已从外部独立 workspace 迁入 zchain workspace，作为普通 path 成员。
+# guest_sdk / guests/texas_poker（no_std / RV32IM）暂未迁入，相关集成测试与
+# 基准（依赖 texas_poker_guest crate）仍保留在外部目录；本 crate 的递归 soundness
+# 单测全部走 src 内 `#[cfg(test)]` 模块（trivial CPU padding trace），不依赖 guest。
+# ===========================================================================
+
+[package]
+name = "poker_zkvm"
+version = "0.1.0"
+edition = "2024"
+description = "ZK VM for zchain OffChain mode — Stwo Circle STARK+AIR+FRI (M31), native trace (4×8-bit limb)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# 测试辅助功能：启用跨 crate 测试辅助函数（如 ELF 构造、指令编码）
+default = []
+test-helpers = []
+
+[dependencies]
+vm-common = { workspace = true }
+poker_protocol = { workspace = true }
+# ===== 应用层密码学（Poseidon 哈希，poker game 事件哈希用）=====
+ark-ff = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-crypto-primitives = { workspace = true }
+ark-std = { workspace = true }
+# ===== 通用依赖 =====
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+secp256k1 = { workspace = true }
+blake2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+goblin = { workspace = true }
+tracing = { workspace = true }
+blstrs = { workspace = true }
+pairing = { workspace = true }
+ff = { workspace = true }
+group = { workspace = true }
+subtle = { workspace = true }
+borsh = { workspace = true }
+# ===== Stwo 证明后端（v2 原生 M31 trace + AIR + FRI）=====
+stwo = { workspace = true }
+stwo-air-utils = { workspace = true }
+stwo-air-utils-derive = { workspace = true }
+stwo-constraint-framework = { workspace = true }
+# StarkProof 序列化
+bincode = { workspace = true }
+# Poseidon252 哈希（Merkle Path AIR 递归验证用）
+starknet-ff = { workspace = true }
+starknet-crypto = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+hex = { workspace = true }
+# Phase 5.1: E2E 测试用 blstrs 生成有效 BLS12-381 G1 点作为玩家 pk。
+blstrs = { workspace = true }
+pairing = { workspace = true }
+ff = { workspace = true }
+group = { workspace = true }
+# 注意：原外部 crate 的 `texas_poker_guest` 与自引用 `poker_zkvm`(path=".")
+# dev-dep 在迁入 zchain 后移除——依赖它们的 tests/ 与 benches/ 暂留外部目录，
+# 待 guest crate 迁移决策后再统一处理。本 crate 的 `#[cfg(test)]` 单测
+# 不依赖 guest。
