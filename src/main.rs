@@ -1109,6 +1109,12 @@ fn build_block_from_vertex(
     // 故此处仅在底层错误（锁中毒 / RocksDB 写失败）时返回 Err。
     let env = ExecutionEnvironment::new(chain_id, height, timestamp_ms)
         .with_precompile_registry_arc(node.precompile_registry());
+    // 缺口 #9：注入 Bridge registry store，使出块时 bridge contract_call 能铸币。
+    let env = if let Some(bridge_store) = node.bridge_registry_store() {
+        env.with_bridge_registry_store(bridge_store)
+    } else {
+        env
+    };
     let outcome = node
         .execute_block_on_state(&env, &sorted_txs)
         .map_err(|e| format!("execute_block failed: {e}"))?;

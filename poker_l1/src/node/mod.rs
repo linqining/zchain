@@ -35,7 +35,7 @@ use crate::object_model::{Object, ObjectID};
 use crate::signature::TaggedPubkey;
 use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
 use crate::signature::unified::verify_signature;
-use crate::storage::{BlockStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb};
+use crate::storage::{BlockStore, BridgeRegistryStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb};
 use crate::transaction::{Transaction, validate_tx_limits};
 use crate::vm::PrecompileRegistry;
 use crate::vm::contracts::{GamePrecompile, TexasPokerPrecompile};
@@ -328,6 +328,11 @@ pub struct Node {
     /// 治理升级（版本号 + timelock）经 `propose_upgrade` / `activate_upgrade`，
     /// 不在此处直接重建。
     precompile_registry: Arc<PrecompileRegistry>,
+    /// Bridge registry store（缺口 #9：bridge_verify 铸币路径 + nonce 持久化）。
+    ///
+    /// 生产节点持久化（重启不丢 nonce，防重放铸币）。`None` 表示节点未启用桥
+    /// （bridge contract_call 会被 executor 拒绝）。
+    bridge_registry_store: Option<Arc<BridgeRegistryStore>>,
 }
 
 /// 构造默认预编译合约注册表并注册内置预编译合约。
@@ -366,11 +371,14 @@ impl Node {
         let object_path = config.data_dir.join("objects");
         let vertex_path = config.data_dir.join("vertices");
         let account_path = config.data_dir.join("accounts");
+        let bridge_path = config.data_dir.join("bridge_registry");
         let block_store = BlockStore::open(&block_path)?;
         let object_db = ObjectDb::open(&object_path)?;
         let vertex_store = DagVertexStore::open(&vertex_path)?;
         // 缺口 #8：AccountStore 落 RocksDB，重启后账户余额 / nonce 不丢失。
         let account_store = AccountStore::open(&account_path)?;
+        // 缺口 #9：BridgeRegistryStore 落 RocksDB，重启后 deposit/burn nonce 不丢失（防重放铸币）。
+        let bridge_registry_store = BridgeRegistryStore::open(&bridge_path)?;
         let validator_set = build_genesis_validator_set(config.genesis_validators.clone());
         let precompile_registry = build_default_precompile_registry();
         Ok(Self {
@@ -384,6 +392,7 @@ impl Node {
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
             precompile_registry,
+            bridge_registry_store: Some(Arc::new(bridge_registry_store)),
         })
     }
 
@@ -419,6 +428,9 @@ impl Node {
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
             precompile_registry,
+            // 缺口 #9：内存节点默认不启用桥（bridge contract_call 会拒绝）；
+            // 需桥的测试可用 [`Node::with_bridge`] 显式注入。
+            bridge_registry_store: None,
         })
     }
 
@@ -706,9 +718,13 @@ impl Node {
         }
 
         // 5. 状态根重放比对（P0-2 接入）
-        let env =
+        let mut env =
             ExecutionEnvironment::new(self.config.chain_id, header.height, header.timestamp_ms)
                 .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
+        // 缺口 #9：注入 Bridge registry store，使重放时 bridge 铸币路径可执行。
+        if let Some(bridge_store) = &self.bridge_registry_store {
+            env = env.with_bridge_registry_store(Arc::clone(bridge_store));
+        }
         let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
         let outcome = execute_block(&env, &block.public_txs, &mut *object_db, &mut account_store);
@@ -736,6 +752,25 @@ impl Node {
     #[must_use]
     pub fn precompile_registry(&self) -> Arc<PrecompileRegistry> {
         Arc::clone(&self.precompile_registry)
+    }
+
+    /// 获取 Bridge registry store 引用（共享 Arc；缺口 #9）。
+    ///
+    /// 供 `build_block_from_vertex` / `validate_block` 构造 [`ExecutionEnvironment`] 时注入，
+    /// 使 bridge contract_call 能访问持久化的 nonce registry。`None` 表示节点未启用桥。
+    #[must_use]
+    pub fn bridge_registry_store(&self) -> Option<Arc<BridgeRegistryStore>> {
+        self.bridge_registry_store.clone()
+    }
+
+    /// 注入 Bridge registry store（builder 模式；缺口 #9）。
+    ///
+    /// 内存节点（`open_inmemory*`）默认不启用桥；需桥的测试可链式调用：
+    /// `Node::open_inmemory(..)?.with_bridge(Arc::new(BridgeRegistryStore::open_inmemory()?))`。
+    #[must_use]
+    pub fn with_bridge(mut self, store: Arc<BridgeRegistryStore>) -> Self {
+        self.bridge_registry_store = Some(store);
+        self
     }
 
     /// 在当前链状态上执行 txs，返回执行结果（含新 state_root）。

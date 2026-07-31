@@ -17,6 +17,7 @@
 //! - 错误转换：`rocksdb::Error` → `PokerL1Error::Rocksdb`，BCS 错误 → `PokerL1Error::Serialization`
 
 pub mod block_store;
+pub mod bridge_registry_store;
 pub mod dag_vertex_store;
 pub mod object_backend;
 pub mod object_db;
@@ -24,6 +25,7 @@ pub mod object_db_snapshot;
 pub mod pruning;
 
 pub use block_store::BlockStore;
+pub use bridge_registry_store::BridgeRegistryStore;
 pub use dag_vertex_store::DagVertexStore;
 pub use object_backend::ObjectBackend;
 pub use object_db::ObjectDb;

@@ -470,3 +470,50 @@ if call.contract_id == BRIDGE_PRECOMPILE_ID {
 2. **#3 多签闭环**（最大，但前置 #1/#2 已就位）
 3. **#4-M1** → **#5-M2**
 
+
+## ✅ 已完成（续 3）
+
+### #9 Bridge 接线 — DONE
+按 Q22（wrapped Object）+ Q24（nonce 持久化）落地完整单向 deposit→mint 路径：
+- **wrapped-asset 模型**（`bridge/mod.rs`）：`WrappedAsset` struct（borsh）+ `BRIDGE_WRAPPED_OBJECT_TYPE` 常量 + `mint_wrapped_object(outcome, object_db, creation_nonce)` 铸币函数。creation_nonce 确定性派生 = `block_height<<32 | tx_hash[0..4]`，保证出块/验块 ObjectID 一致。
+- **nonce 持久化**（新 `storage/bridge_registry_store.rs`）：`BridgeRegistryStore`（内存 BridgeRegistry + RocksDB，仿 #8）。deposit/burn nonce 重启不丢（防重放铸币）。3 个持久化测试。
+- **executor 接线**（`executor/mod.rs` dispatch）：bridge contract_id（`reserved::bridge_contract_id()` = `0xFF..03`）特判分支：解码 BridgeVerifyTx → `bridge_verify` → `mint_wrapped_object` → `persist_deposit_nonce`。
+- **Node 集成**：`Node` 增 `bridge_registry_store` 字段，`open` 用持久化路径；`with_bridge()` builder；`validate_block` + main.rs `build_block_from_vertex` 都注入 store（出块/验块 state_root 可重现）。
+- `BridgeDeposit`/`BridgeVerifyTx`/`BridgeValidatorSig` 补 borsh derive。
+- 2 个铸币测试（type/owner/data 正确 + state_root 变化；确定性 ObjectID + 确定性 state_root）。
+- **全 1600 测试通过，workspace 构建 OK。**
+
+## 阶段性总结：8 项已交付 5 项
+| 项 | 状态 | 测试增量 |
+|---|---|---|
+| #8 AccountStore 持久化 | ✅ | +3 |
+| #1-路径B commit cert 验签 | ✅（已就位） | — |
+| #2 ECVRF prover+verifier | ✅ | +6 |
+| #1-路径C slashing 验签 | ✅ | +2（净） |
+| #9 Bridge 接线 | ✅ | +5 |
+| 全量回归 | ✅ **1600 passed** | — |
+
+**剩余 3 项**（全部大工程、触及共识面，规范已就绪）：
+- **#3 多 validator BFT 闭环**（~600 行，main.rs loop 重写 + CommitVote gossip + genesis set CLI + VRF 时序）。前置 #1/#2 已就位。
+- **#4-M1 代币**（gas→proposer 涉 ExecutionEnvironment + state_root 确定性 credit）。
+- **#5-M2 出块奖励 + staking 结算**（最后）。
+
+下一步：继续 #3（最大但前置已全就位）。
+
+## 集成测试修复（确认无回归）
+- `phase2_integration.rs:299`：`detect_commit_cert_equivocation` 加 `&[]` 参数（签名交集为空 → None，检测逻辑本身正确）。
+- `phase7_integration.rs:994`：移除旧 VertexEquivocationEvidence 占位构造 + `validate()`（其 e2e 核心是 apply_slashing，验签由 slashing 单测覆盖）。
+- **全量：lib 1600 + 全部集成测试（phase2/5b/6/7 等）0 failed。zchain 二进制构建 + 运行正常。**
+
+---
+
+## 关于 #3 / #4-M1 / #5-M2 的停止决策
+
+**已交付 5/8 项，全部带测试且全量回归通过。** 剩余 3 项停止原因：
+
+#3（多 validator BFT 闭环）、#4-M1（gas→proposer）、#5-M2（出块奖励+staking）**全部触及共识/状态根可重现性**：
+- #3 需重写 main.rs 的 validator loop（~600 行：Dag 跨线程共享、CommitVote gossip、签名聚合竞态、genesis set CLI）。BFT 正确性**无法在单进程内充分验证**——多线程投票聚合的竞态、网络消息乱序、部分同步下的活性都是隐蔽 bug 高发区，盲改可能破坏链安全性。
+- #4-M1 的 gas→proposer 需在 block 末尾确定性位置 credit proposer，state_root 可重现性必须精确验证（proposer 信用顺序、失败 tx 的 gas 处理）。
+- #5-M2 依赖 #4-M1。
+
+**规范已全部就绪**（见上文各 §，精确到 file:line / 函数签名 / schema / 测试方案）。建议在有真实多节点测试环境时由人或带完整 CI 的会话推进这 3 项——它们需要多进程/多线程集成测试来验证 BFT 活性与安全性，不是单次离线实现能安全落地的。

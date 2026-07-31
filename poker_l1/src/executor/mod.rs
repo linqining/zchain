@@ -66,6 +66,10 @@ pub struct ExecutionEnvironment {
     pub zk_verifier: Option<ZkVerifierRegistry>,
     /// 预编译合约注册表（用于路由预编译合约调用）。
     pub precompile_registry: Option<Arc<PrecompileRegistry>>,
+    /// Bridge registry store（缺口 #9：bridge_verify 铸币路径用）。
+    ///
+    /// `None` 时 bridge contract_call 被拒绝（节点未配置桥）。生产节点注入持久化 store。
+    pub bridge_registry_store: Option<Arc<crate::storage::BridgeRegistryStore>>,
 }
 
 impl ExecutionEnvironment {
@@ -79,6 +83,7 @@ impl ExecutionEnvironment {
             block_gas_limit: BLOCK_GAS_LIMIT,
             zk_verifier: None,
             precompile_registry: None,
+            bridge_registry_store: None,
         }
     }
 
@@ -103,6 +108,16 @@ impl ExecutionEnvironment {
     #[must_use]
     pub fn with_precompile_registry_arc(mut self, registry: Arc<PrecompileRegistry>) -> Self {
         self.precompile_registry = Some(registry);
+        self
+    }
+
+    /// 注入 Bridge registry store（缺口 #9：bridge 铸币路径）。
+    #[must_use]
+    pub fn with_bridge_registry_store(
+        mut self,
+        store: Arc<crate::storage::BridgeRegistryStore>,
+    ) -> Self {
+        self.bridge_registry_store = Some(store);
         self
     }
 
@@ -284,8 +299,41 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
     let mut gas_used: u64 = 0;
 
     if let Some(call) = &tx.contract_call {
-        // 优先检查预编译合约注册表（参考以太坊预编译合约设计）
-        if let Some(registry) = &env.precompile_registry {
+        // 缺口 #9：Bridge 铸币路径特判（在预编译/rBPF 之前）。
+        //
+        // bridge contract_id 的调用不走 Precompile trait（因 bridge 需访问有状态的
+        // BridgeRegistry + 铸币 + nonce 持久化，超出 trait 的 ObjectBackend 签名）。
+        // executor 直接：解码 BridgeVerifyTx → bridge_verify → 铸 wrapped Object → 落 nonce。
+        if call.contract_id == crate::vm::precompile::reserved::bridge_contract_id() {
+            let bridge_tx: crate::bridge::BridgeVerifyTx = borsh::from_slice(&call.args)
+                .map_err(|e| {
+                    PokerL1Error::Other(format!("bridge_verify: invalid args encoding: {e}"))
+                })?;
+            let bridge_store = env.bridge_registry_store.clone().ok_or_else(|| {
+                PokerL1Error::BridgeVerifyNotAuthorized
+            })?;
+            // bridge_verify 需 &mut BridgeRegistry（mutex 保护）。
+            let outcome = {
+                let mut registry = bridge_store.registry();
+                    crate::bridge::bridge_verify(&mut registry, &bridge_tx, env.chain_id, true)?
+            };
+            // 铸造 wrapped Object（creation_nonce 确定性：block_height 高 32 位 | tx_hash 低 32 位，
+            // 保证出块/验块双方 ObjectID 一致 → state_root 可重现）。
+            let creation_nonce = {
+                let hi = env.block_height << 32;
+                let lo = u32::from_le_bytes(tx.tx_hash()[0..4].try_into().unwrap()) as u64;
+                hi | lo
+            };
+            let wrapped_id = crate::bridge::mint_wrapped_object(&outcome, object_db, creation_nonce)?;
+            all_created.push(wrapped_id);
+            // 持久化 deposit nonce（Q24：防重启重放铸币）。
+            bridge_store.persist_deposit_nonce(
+                outcome.deposit.source_chain_id,
+                outcome.deposit.nonce,
+            )?;
+            // bridge 调用不经 rBPF，gas_used 保持 0；步骤 6 仍按 Public lane 扣费 + 推进 nonce。
+        } else if let Some(registry) = &env.precompile_registry {
+            // 优先检查预编译合约注册表（参考以太坊预编译合约设计）
             if registry.is_precompile(call.contract_id) {
                 let precompile_env = crate::vm::precompile::ExecutionEnvironment {
                     chain_id: env.chain_id,

@@ -990,18 +990,9 @@ mod subtask_35_22_27 {
         let offender = valset.validators[0].pubkey.clone();
         let config = SlashingConfig::default();
 
-        // vertex equivocation: 双签证据
-        let evidence = VertexEquivocationEvidence {
-            epoch: 1,
-            round: 5,
-            author: offender.clone(),
-            vertex_hash_1: [0xAA; 32],
-            vertex_hash_2: [0xBB; 32],
-            signature_1: vec![0u8; 65],
-            signature_2: vec![0u8; 65],
-        };
-        evidence.validate().expect("证据结构应有效");
-
+        // vertex equivocation: 双签证据（缺口 #1-路径C：schema 改为携带完整 vertex +
+        // 真实验签；此 e2e 测试核心是 apply_slashing，证据构造/验签由 slashing 单元
+        // 测试覆盖，此处直接以 reason 触发 slashing）。
         // apply_slashing: 100% 罚没
         let result = apply_slashing(
             &mut valset,

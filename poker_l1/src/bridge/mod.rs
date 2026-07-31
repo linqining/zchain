@@ -23,11 +23,14 @@ use std::collections::BTreeSet;
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
 use crate::signature::unified::verify_signature;
+use crate::storage::ObjectBackend;
 use crate::{Address, ChainId, Hash};
 
 // ===== 常量 =====
@@ -37,6 +40,12 @@ const BRIDGE_SIG_DOMAIN: u8 = 0x42; // 'B' for Bridge
 
 /// Burn proof 域分隔前缀。
 const BURN_PROOF_DOMAIN: u8 = 0x62; // 'b' for burn
+
+/// wrapped-asset 对象的类型标签（缺口 #9：bridge deposit 验证通过后铸造的 wrapped Object）。
+///
+/// 该类型对象由 bridge 铸币创建，`data` 字段为 [`WrappedAsset`] 的 borsh 编码。
+/// owner 为 `AddressOwned { recipient }`，可被 recipient 正常转移 / 消费。
+pub const BRIDGE_WRAPPED_OBJECT_TYPE: &str = "bridge-wrapped-asset";
 
 // ===== BridgeDeposit（跨链存款凭证） =====
 
@@ -53,7 +62,7 @@ const BURN_PROOF_DOMAIN: u8 = 0x62; // 'b' for burn
 /// - `amount`：存款金额
 /// - `recipient`：poker_l1 上的接收地址（tagged pubkey 派生地址，SEC-H3）
 /// - `source_tx_hash`：源链上的交易哈希（跨链追踪，SEC-H3）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BridgeDeposit {
     /// 源链上的唯一 nonce（防重放）。
     pub nonce: u64,
@@ -102,7 +111,7 @@ impl BridgeDeposit {
 /// SEC2-M1 修复：
 /// - `recipient_sig`：须由 recipient 本人签名提交（防第三方抢跑）
 /// - `preferred_relayer`：recipient 可指定优先 relayer 获额外奖励
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BridgeVerifyTx {
     /// 存款凭证。
     pub deposit: BridgeDeposit,
@@ -119,7 +128,7 @@ pub struct BridgeVerifyTx {
 }
 
 /// 桥验证器签名。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BridgeValidatorSig {
     /// 验证器 tagged pubkey。
     pub validator: TaggedPubkey,
@@ -429,6 +438,77 @@ pub struct BridgeVerifyOutcome {
     pub recipient: Address,
     /// 优先 relayer（如有）。
     pub preferred_relayer: Option<TaggedPubkey>,
+}
+
+// ===== wrapped-asset 铸造（缺口 #9：deposit 验证通过后铸造 wrapped Object） =====
+
+/// wrapped-asset 的 typed 数据（存于 [`Object::data`]）。
+///
+/// 记录跨链来源信息，使 wrapped 对象可被追溯与反向 burn。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct WrappedAsset {
+    /// 源链 chain_id（资产原始来源）。
+    pub source_chain_id: ChainId,
+    /// 资产标识（源链上的合约地址 / token id，32 字节）。
+    pub asset: Hash,
+    /// 包装金额。
+    pub amount: u64,
+}
+
+impl WrappedAsset {
+    /// 从已验证的存款凭证构造 wrapped-asset 数据。
+    #[must_use]
+    pub fn from_deposit(deposit: &BridgeDeposit) -> Self {
+        Self {
+            source_chain_id: deposit.source_chain_id,
+            asset: deposit.asset,
+            amount: deposit.amount,
+        }
+    }
+}
+
+/// 铸造 wrapped-asset Object 给 recipient（缺口 #9）。
+///
+/// 在 [`bridge_verify`] 验证通过后调用：用 `outcome` 构造一个
+/// [`BRIDGE_WRAPPED_OBJECT_TYPE`] 类型的对象，owner 为 recipient，
+/// 通过 `object_db.create()` 落库（影响 state_root）。
+///
+/// # ObjectID 确定性（state_root 可重现性）
+///
+/// `ObjectID::new(creator_address, creation_nonce)` 中 `creator_address = recipient`
+/// （SEC2-M1：recipient 是 caller）。`creation_nonce` 由调用方传入，须在
+/// **确定性位置**分配——出块方与验块方对同一笔 bridge_verify tx 必须用相同的
+/// `creation_nonce`，使两者铸造出相同的 ObjectID → 相同 state_root。
+/// 推荐方案：`creation_nonce` = (block_height << 32) | tx_index_in_block（块内确定序）。
+///
+/// # 参数
+///
+/// - `outcome`：[`bridge_verify`] 的返回值（含 deposit + recipient）
+/// - `object_db`：对象后端（`ObjectDb` / `ObjectDbSnapshot`）
+/// - `creation_nonce`：确定性创建序号（见上）
+///
+/// # 返回
+///
+/// 新铸造 wrapped 对象的 `ObjectID`。
+pub fn mint_wrapped_object<B: ObjectBackend>(
+    outcome: &BridgeVerifyOutcome,
+    object_db: &mut B,
+    creation_nonce: u64,
+) -> PokerL1Result<ObjectID> {
+    let wrapped = WrappedAsset::from_deposit(&outcome.deposit);
+    let data = borsh::to_vec(&wrapped)?;
+    let obj = Object::new(
+        ObjectID::new(outcome.recipient, creation_nonce),
+        Ownership::AddressOwned {
+            owner: outcome.recipient,
+        },
+        BRIDGE_WRAPPED_OBJECT_TYPE,
+        data,
+        None,
+    );
+    let object_id = obj.id;
+    object_db.create(obj)?;
+    Ok(object_id)
 }
 
 // ===== burn_on_source（SubTask 34.4） =====
@@ -974,5 +1054,64 @@ mod tests {
         let pk2 = make_tagged_pubkey(0x02);
         let addr3 = derive_address(&pk2);
         assert_ne!(addr1, addr3);
+    }
+
+    // ===== 缺口 #9：mint_wrapped_object 铸币测试 =====
+
+    #[test]
+    fn mint_wrapped_object_creates_correct_object_and_changes_state_root() {
+        // 端到端：构造 outcome → mint → wrapped Object 落库（type/owner/data 正确，
+        // state_root 变化）。
+        let mut db = crate::storage::ObjectDb::open_inmemory().expect("open ObjectDb");
+        let root_before = db.state_root();
+
+        let recipient = [0x99u8; 20];
+        let deposit = make_deposit(1, 5000, recipient);
+        let outcome = BridgeVerifyOutcome {
+            deposit: deposit.clone(),
+            recipient,
+            preferred_relayer: None,
+        };
+        let creation_nonce = 0x0100_0000_0000_0001u64;
+        let obj_id = mint_wrapped_object(&outcome, &mut db, creation_nonce)
+            .expect("mint wrapped object");
+
+        // state_root 应变化（新对象入 SMT）。
+        let root_after = db.state_root();
+        assert_ne!(root_before, root_after, "铸币后 state_root 应变化");
+
+        // 读回对象校验。
+        let obj = db.read(&obj_id).expect("read minted object");
+        assert_eq!(obj.owner, crate::object_model::Ownership::AddressOwned { owner: recipient });
+        assert_eq!(
+            obj.object_type.as_str(),
+            BRIDGE_WRAPPED_OBJECT_TYPE,
+            "对象类型应为 bridge-wrapped-asset"
+        );
+        // data 解码为 WrappedAsset，字段与 deposit 一致。
+        let wrapped: WrappedAsset = borsh::from_slice(&obj.data).expect("decode WrappedAsset");
+        assert_eq!(wrapped.source_chain_id, deposit.source_chain_id);
+        assert_eq!(wrapped.asset, deposit.asset);
+        assert_eq!(wrapped.amount, deposit.amount);
+    }
+
+    #[test]
+    fn mint_wrapped_object_is_deterministic() {
+        // 出块/验块双方用相同 (recipient, creation_nonce) → 相同 ObjectID → 相同 state_root。
+        let recipient = [0x77u8; 20];
+        let deposit = make_deposit(2, 300, recipient);
+        let outcome = BridgeVerifyOutcome {
+            deposit,
+            recipient,
+            preferred_relayer: None,
+        };
+        let creation_nonce = 42u64;
+
+        let mut db1 = crate::storage::ObjectDb::open_inmemory().expect("db1");
+        let mut db2 = crate::storage::ObjectDb::open_inmemory().expect("db2");
+        let id1 = mint_wrapped_object(&outcome, &mut db1, creation_nonce).expect("mint1");
+        let id2 = mint_wrapped_object(&outcome, &mut db2, creation_nonce).expect("mint2");
+        assert_eq!(id1, id2, "确定性 ObjectID");
+        assert_eq!(db1.state_root(), db2.state_root(), "确定性 state_root");
     }
 }
