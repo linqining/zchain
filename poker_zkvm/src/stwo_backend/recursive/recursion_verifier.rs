@@ -17,11 +17,18 @@ use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir}
 use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
 use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
 use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
+use super::poseidon252_air::{
+    POSEIDON252_CALL_AIR_NUM_COLUMNS, POSEIDON252_CALL_INTERACTION_COLUMNS,
+    Poseidon252ClosureComponents, poseidon_preprocessed_columns_for_claim,
+    poseidon_preprocessed_commitment_root,
+};
 use super::public_inputs::RecursivePublicInputs;
 use super::recursion_prover::RecursiveProof;
 use super::trace_gen::{OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size};
 use ark_ff::Zero;
-use stwo::core::channel::Blake2sChannel;
+use cairo_air::relations::CommonLookupElements;
+use stwo::core::air::Component;
+use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
@@ -215,6 +222,13 @@ pub fn verify_recursive_with_fri(
     let fri_log_size = compute_fri_trace_log_size(&public_inputs.fri_last_layer_poly);
     let unified_log_size = OODS_TRACE_LOG_SIZE.max(fri_log_size);
     let config = PcsConfig::default();
+    let poseidon_claim = l2_proof.1.as_ref().ok_or_else(|| {
+        RecursionVerificationError::VerificationFailed(
+            "recursive proof is missing Poseidon252 closure claims".to_string(),
+        )
+    })?;
+    let (poseidon_preprocessed_ids, poseidon_preprocessed_trace) =
+        poseidon_preprocessed_columns_for_claim(&poseidon_claim.cairo_claim);
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Blake2sChannel::default();
@@ -223,7 +237,7 @@ pub fn verify_recursive_with_fri(
     // 2. mix RecursivePublicInputs 到 channel（与 prover 完全相同顺序）
     mix_public_inputs_into_channel(&mut channel, public_inputs);
 
-    // 3. 从 proof 读取 preprocessed commitment（tree 0，0 列）
+    // 3. 校验并提交固定 Poseidon closure preprocessed commitment（tree 0）。
     let stark_proof = &l2_proof.0;
     let preprocessed_commitment = *stark_proof.commitments.get(0).ok_or_else(|| {
         RecursionVerificationError::VerificationFailed(format!(
@@ -231,7 +245,33 @@ pub fn verify_recursive_with_fri(
             stark_proof.commitments.len()
         ))
     })?;
-    commitment_scheme.commit(preprocessed_commitment, &[], &mut channel);
+    let expected_preprocessed_commitment =
+        poseidon_preprocessed_commitment_root(config, &poseidon_claim.cairo_claim);
+    if preprocessed_commitment != expected_preprocessed_commitment {
+        return Err(RecursionVerificationError::VerificationFailed(
+            "Poseidon252 closure preprocessed commitment does not match the fixed trace"
+                .to_string(),
+        ));
+    }
+    let preprocessed_log_sizes = poseidon_preprocessed_trace
+        .iter()
+        .map(|evaluation| evaluation.domain.log_size())
+        .collect::<Vec<_>>();
+    commitment_scheme.commit(
+        expected_preprocessed_commitment,
+        &preprocessed_log_sizes,
+        &mut channel,
+    );
+
+    poseidon_claim
+        .cairo_claim
+        .mix_into::<Blake2sMerkleChannel>(&mut channel);
+    channel.mix_u64(u64::from(poseidon_claim.caller_log_size));
+    channel.mix_u64(u64::try_from(poseidon_claim.n_calls).map_err(|_| {
+        RecursionVerificationError::VerificationFailed(
+            "Poseidon252 call count exceeds u64".to_string(),
+        )
+    })?);
 
     // 4. 从 proof 读取 trace commitment（tree 1，OODS 73 cols + FRI 68 cols + Merkle 67 cols = 208 cols）
     let trace_commitment = *stark_proof.commitments.get(1).ok_or_else(|| {
@@ -240,12 +280,39 @@ pub fn verify_recursive_with_fri(
             stark_proof.commitments.len()
         ))
     })?;
+    let mut trace_log_sizes = poseidon_claim.cairo_claim.log_sizes()[1].clone();
+    trace_log_sizes.extend(vec![
+        poseidon_claim.caller_log_size;
+        2 * POSEIDON252_CALL_AIR_NUM_COLUMNS
+    ]);
     let total_trace_cols = OODS_AIR_NUM_COLUMNS
         + FRI_AIR_NUM_COLUMNS
         + MERKLE_AIR_NUM_COLUMNS
         + COMP_EVAL_AIR_NUM_COLUMNS;
-    let trace_log_sizes = vec![unified_log_size; total_trace_cols];
+    trace_log_sizes.extend(vec![unified_log_size; total_trace_cols]);
     commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
+
+    let common_lookup_elements = CommonLookupElements::draw(&mut channel);
+    poseidon_claim
+        .cairo_interaction_claim
+        .mix_into(&mut channel);
+    channel.mix_felts(&[
+        poseidon_claim.caller_claimed_sum,
+        poseidon_claim.semantic_claimed_sum,
+    ]);
+
+    let interaction_commitment = *stark_proof.commitments.get(2).ok_or_else(|| {
+        RecursionVerificationError::VerificationFailed(format!(
+            "proof.commitments 长度不足：期望 ≥3，实际 {}",
+            stark_proof.commitments.len()
+        ))
+    })?;
+    let mut interaction_log_sizes = poseidon_claim.cairo_claim.log_sizes()[2].clone();
+    interaction_log_sizes.extend(vec![
+        poseidon_claim.caller_log_size;
+        2 * POSEIDON252_CALL_INTERACTION_COLUMNS
+    ]);
+    commitment_scheme.commit(interaction_commitment, &interaction_log_sizes, &mut channel);
 
     // 5. 构建 OODS + FRI + Merkle components（与 prover 相同顺序，共享 TraceLocationAllocator）
     let oods_air = OodsCheckAir::new(unified_log_size);
@@ -258,7 +325,18 @@ pub fn verify_recursive_with_fri(
         public_inputs.composition_random_coeff,
         public_inputs.composition_oods_eval,
     );
-    let mut allocator = TraceLocationAllocator::default();
+    let mut allocator =
+        TraceLocationAllocator::new_with_preprocessed_columns(&poseidon_preprocessed_ids);
+    let poseidon_components = Poseidon252ClosureComponents::new(
+        &poseidon_claim.cairo_claim,
+        &common_lookup_elements,
+        &poseidon_claim.cairo_interaction_claim,
+        poseidon_claim.caller_log_size,
+        poseidon_claim.caller_claimed_sum,
+        poseidon_claim.semantic_claimed_sum,
+        &poseidon_preprocessed_ids,
+        &mut allocator,
+    );
     let oods_component = FrameworkComponent::new(&mut allocator, oods_air, SecureField::zero());
     let fri_component = FrameworkComponent::new(&mut allocator, fri_air, SecureField::zero());
     let merkle_component = FrameworkComponent::new(&mut allocator, merkle_air, SecureField::zero());
@@ -266,13 +344,15 @@ pub fn verify_recursive_with_fri(
         FrameworkComponent::new(&mut allocator, composition_air, SecureField::zero());
 
     // 6. 验证（verify 内部处理 composition poly commitment = proof.commitments.last()）
+    let mut components = poseidon_components.verifier_components();
+    components.extend([
+        &oods_component as &dyn Component,
+        &fri_component,
+        &merkle_component,
+        &composition_component,
+    ]);
     verify(
-        &[
-            &oods_component,
-            &fri_component,
-            &merkle_component,
-            &composition_component,
-        ],
+        &components,
         &mut channel,
         &mut commitment_scheme,
         stark_proof.clone(),

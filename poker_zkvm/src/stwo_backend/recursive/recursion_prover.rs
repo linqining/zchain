@@ -31,7 +31,9 @@ use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir}
 use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
 use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
 use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
-use super::poseidon252_air::audit_canonical_poseidon_closure;
+use super::poseidon252_air::{
+    Poseidon252ClosureComponents, Poseidon252ClosureWitness, audit_canonical_poseidon_closure,
+};
 use super::public_inputs::RecursivePublicInputs;
 use super::replay_witness::CanonicalVerifierWitness;
 use super::trace_gen::{
@@ -42,7 +44,8 @@ use super::trace_gen::{
 };
 use super::verifier_program::replay_cpu_verifier;
 use ark_ff::Zero;
-use stwo::core::channel::Blake2sChannel;
+use cairo_air::relations::CommonLookupElements;
+use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::PcsConfig;
@@ -55,12 +58,35 @@ use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
-use stwo::prover::{ProvingError, prove};
+use stwo::prover::{ComponentProver, ProvingError, prove};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 /// L2 recursive proof（封装 StarkProof）。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RecursiveProof(pub StarkProof<Blake2sMerkleHasher>);
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecursiveProof(
+    pub StarkProof<Blake2sMerkleHasher>,
+    pub(crate) Option<RecursivePoseidonClaim>,
+);
+
+impl core::fmt::Debug for RecursiveProof {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RecursiveProof")
+            .field("stark_proof", &self.0)
+            .field("has_poseidon_claim", &self.1.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RecursivePoseidonClaim {
+    pub cairo_claim: cairo_air::claims::CairoClaim,
+    pub cairo_interaction_claim: cairo_air::claims::CairoInteractionClaim,
+    pub caller_log_size: u32,
+    pub n_calls: usize,
+    pub caller_claimed_sum: SecureField,
+    pub semantic_claimed_sum: SecureField,
+}
 
 /// Recursion prover 错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -291,7 +317,7 @@ pub fn prove_recursive(
 
     // 9. 生成证明
     let stark_proof = prove(&[&component], &mut channel, commitment_scheme)?;
-    Ok(RecursiveProof(stark_proof))
+    Ok(RecursiveProof(stark_proof, None))
 }
 
 /// 聚合 OODS Check AIR + FRI Verifier AIR 的多组件 L2 prover（v5.1 多组件）。
@@ -411,6 +437,22 @@ pub fn prove_recursive_with_fri(
         return Err(RecursionProvingError::IncompleteMerkleVerifierAir);
     }
 
+    let poseidon_witness =
+        Poseidon252ClosureWitness::from_canonical_calls(&canonical_witness.poseidon_calls)
+            .map_err(|error| {
+                RecursionProvingError::FixedVerifierReplayFailed(format!(
+                    "canonical Poseidon252 witness generation failed: {error}"
+                ))
+            })?;
+    let poseidon_cairo_claim = poseidon_witness.cairo_claim.clone();
+    let poseidon_caller_log_size = poseidon_witness.caller_log_size;
+    let poseidon_n_calls = poseidon_witness.n_calls;
+    let (poseidon_preprocessed_ids, poseidon_preprocessed_trace) =
+        poseidon_witness.preprocessed_columns();
+    let mut poseidon_base_trace = poseidon_witness.cairo_base_trace.clone();
+    poseidon_base_trace.extend(poseidon_witness.caller_base_trace());
+    poseidon_base_trace.extend(poseidon_witness.semantic_base_trace());
+
     // 2. 计算 unified_log_size
     let fri_log_size = compute_fri_trace_log_size(&public_inputs.fri_last_layer_poly);
     let unified_log_size = OODS_TRACE_LOG_SIZE.max(fri_log_size);
@@ -463,7 +505,14 @@ pub fn prove_recursive_with_fri(
     // 6. PCS 配置 + twiddles 预计算
     let config = PcsConfig::default();
     let blowup_log = config.fri_config.log_blowup_factor;
-    let big_domain = CanonicCoset::new(unified_log_size + blowup_log);
+    let max_log_size = poseidon_preprocessed_trace
+        .iter()
+        .chain(&poseidon_base_trace)
+        .map(|evaluation| evaluation.domain.log_size())
+        .max()
+        .unwrap_or(unified_log_size)
+        .max(unified_log_size);
+    let big_domain = CanonicCoset::new(max_log_size + blowup_log);
     let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
 
     // 7. Channel + CommitmentSchemeProver
@@ -475,24 +524,57 @@ pub fn prove_recursive_with_fri(
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
-    // 9. 提交空 preprocessed trace（tree 0）
+    // 9. 提交固定 Poseidon closure preprocessed trace（tree 0）
     {
         let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(vec![]);
+        tree_builder.extend_evals(poseidon_preprocessed_trace);
         tree_builder.commit(&mut channel);
     }
 
-    // 10. 提交 original trace（tree 1，OODS 73 cols + FRI 68 cols + Merkle 67 cols = 208 cols）
+    poseidon_cairo_claim.mix_into::<Blake2sMerkleChannel>(&mut channel);
+    channel.mix_u64(u64::from(poseidon_caller_log_size));
+    channel.mix_u64(u64::try_from(poseidon_n_calls).map_err(|_| {
+        RecursionProvingError::L1ProofStructureInvalid(
+            "canonical Poseidon252 call count exceeds u64".to_string(),
+        )
+    })?);
+
+    // 10. 提交 original trace：官方 Poseidon closure + canonical caller/semantic + verifier AIRs。
     {
         let oods_evals = trace_cols_to_evaluations(&oods_trace_padded, unified_log_size);
         let fri_evals = trace_cols_to_evaluations(&fri_trace_padded, unified_log_size);
         let merkle_evals = trace_cols_to_evaluations(&merkle_trace_padded, unified_log_size);
         let composition_evals = trace_cols_to_evaluations(&composition_trace, unified_log_size);
         let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(poseidon_base_trace);
         tree_builder.extend_evals(oods_evals);
         tree_builder.extend_evals(fri_evals);
         tree_builder.extend_evals(merkle_evals);
         tree_builder.extend_evals(composition_evals);
+        tree_builder.commit(&mut channel);
+    }
+
+    let common_lookup_elements = CommonLookupElements::draw(&mut channel);
+    let poseidon_interaction = poseidon_witness
+        .write_interaction_trace(&common_lookup_elements)
+        .map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical Poseidon252 interaction generation failed: {error}"
+            ))
+        })?;
+    poseidon_interaction
+        .cairo_interaction_claim
+        .mix_into(&mut channel);
+    channel.mix_felts(&[
+        poseidon_interaction.caller_claimed_sum,
+        poseidon_interaction.semantic_claimed_sum,
+    ]);
+    {
+        let mut interaction_trace = poseidon_interaction.cairo_interaction_trace;
+        interaction_trace.extend(poseidon_interaction.caller_interaction_trace);
+        interaction_trace.extend(poseidon_interaction.semantic_interaction_trace);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction_trace);
         tree_builder.commit(&mut channel);
     }
 
@@ -507,25 +589,44 @@ pub fn prove_recursive_with_fri(
         public_inputs.composition_random_coeff,
         public_inputs.composition_oods_eval,
     );
-    let mut allocator = TraceLocationAllocator::default();
+    let mut allocator =
+        TraceLocationAllocator::new_with_preprocessed_columns(&poseidon_preprocessed_ids);
+    let poseidon_components = Poseidon252ClosureComponents::new(
+        &poseidon_cairo_claim,
+        &common_lookup_elements,
+        &poseidon_interaction.cairo_interaction_claim,
+        poseidon_caller_log_size,
+        poseidon_interaction.caller_claimed_sum,
+        poseidon_interaction.semantic_claimed_sum,
+        &poseidon_preprocessed_ids,
+        &mut allocator,
+    );
     let oods_component = FrameworkComponent::new(&mut allocator, oods_air, SecureField::zero());
     let fri_component = FrameworkComponent::new(&mut allocator, fri_air, SecureField::zero());
     let merkle_component = FrameworkComponent::new(&mut allocator, merkle_air, SecureField::zero());
     let composition_component =
         FrameworkComponent::new(&mut allocator, composition_air, SecureField::zero());
 
-    // 12. 生成多组件证明（3 个 AIR）
-    let stark_proof = prove(
-        &[
-            &oods_component,
-            &fri_component,
-            &merkle_component,
-            &composition_component,
-        ],
-        &mut channel,
-        commitment_scheme,
-    )?;
-    Ok(RecursiveProof(stark_proof))
+    // 12. 生成完整 closure + verifier AIR 多组件证明。
+    let mut components = poseidon_components.prover_components();
+    components.extend([
+        &oods_component as &dyn ComponentProver<SimdBackend>,
+        &fri_component,
+        &merkle_component,
+        &composition_component,
+    ]);
+    let stark_proof = prove(&components, &mut channel, commitment_scheme)?;
+    Ok(RecursiveProof(
+        stark_proof,
+        Some(RecursivePoseidonClaim {
+            cairo_claim: poseidon_cairo_claim,
+            cairo_interaction_claim: poseidon_interaction.cairo_interaction_claim,
+            caller_log_size: poseidon_caller_log_size,
+            n_calls: poseidon_n_calls,
+            caller_claimed_sum: poseidon_interaction.caller_claimed_sum,
+            semantic_claimed_sum: poseidon_interaction.semantic_claimed_sum,
+        }),
+    ))
 }
 
 // ===========================================================================

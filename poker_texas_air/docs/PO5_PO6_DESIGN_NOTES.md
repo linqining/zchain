@@ -200,8 +200,22 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   metadata、完整 FRI layer folding/decommitment）已实现并有真实 proof/篡改回归；transcript、PCS
   Merkle 与 FRI Merkle 的每次 Poseidon252 permutation 现也已按 canonical 执行顺序记录；transcript
   event 状态、Merkle leaf row/call range/parent 全局索引和 FRI 每层 pre-fold coset witness 已固定展平。
-  官方 Cairo Poseidon252 non-native 算术闭包与 committed canonical caller AIR 已落地，但 transcript
-  payload、Merkle node multiset、FRI fold semantic tables 尚未通过最终 lookup 连接。fixed `CpuV1` method schema 与 host verifier replay 已完成；CPU composition evaluator
+  官方 Cairo Poseidon252 non-native 算术闭包与 committed canonical caller AIR 已落地；caller 现通过
+  22 元组（global/source/kind metadata + 6 synthetic memory IDs）负向导出 canonical call，独立
+  semantic mirror 正向消费，并再次用 6 条 `MemoryIdToBig` lookup 绑定相同 committed 28×9-bit
+  limbs，官方 closure + caller + semantic 的全局 claimed sum 已审计为零。canonical witness 还显式
+  展开 transcript event→call 键、Merkle leaf/witness/parent/child/root node 多重集，以及 FRI Merkle
+  leaf→opened coset、folded layer→next layer/last layer 的稳定连接；对应 host tamper 回归已加入。
+  L2 scaffold 已能按固定 preprocessed / heterogeneous base / interaction 三棵 tree 的顺序装配全部
+  Cairo Poseidon closure、caller、semantic mirror 与现有 OODS/FRI/Merkle/composition components；
+  closure claims/claimed sums 会进入 proof envelope 和 Fiat–Shamir channel，verifier 重算并强制固定
+  preprocessed commitment root，而不是接受 prover 任意 root。
+
+  但上述 semantic mirror 目前只证明“协议位置 metadata/ID/limbs 与官方 permutation call 是同一
+  multiset”，尚未把 transcript event state/hash-many felt252 addition、Merkle node multiset、FRI
+  circle/line fold 变成 AIR 内 lookup/transition 约束；active call cardinality 也仍需由这些 protocol
+  tables 强制覆盖。因此完整三-tree L2 装配代码仍位于 `MERKLE_VERIFIER_AIR_COMPLETE=false` gate
+  之后，不可达且不能视为 sound recursion。fixed `CpuV1` method schema 与 host verifier replay 已完成；CPU composition evaluator
   已作为真实 AIR 子层实现并复用 `CpuAir::evaluate`，但它的 sampled values 和 transcript challenges
   尚未由完整 Merkle/transcript AIR 绑定。完整 transcript AIR 及 canonical Merkle/FRI replay 组合约束仍未实现。
   `_with_fri` 继续显式 `IncompleteMerkleVerifierAir` fail-closed，不再依赖偶然的
