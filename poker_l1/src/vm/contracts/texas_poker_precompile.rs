@@ -132,6 +132,9 @@ impl Precompile for TexasPokerPrecompile {
         let mut final_result = DispatchResult {
             created_objects: result.created_objects,
             modified_objects: result.modified_objects,
+            // 报告读集：仅当读到既有 table（is_new == false）时才存在真实读。
+            // 首次 create_table（is_new == true）走 placeholder 分支，无真实读。
+            read_objects: if is_new { vec![] } else { vec![table_id] },
             return_value: result.return_value,
         };
         if is_new && !final_result.created_objects.contains(&table_id) {

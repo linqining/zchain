@@ -46,4 +46,5 @@ pairing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+secp256k1 = { workspace = true }
 poker_texas_air = { path = ".", features = ["test-helpers"] }

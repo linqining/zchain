@@ -80,6 +80,9 @@ impl Precompile for GamePrecompile {
         Ok(DispatchResult {
             created_objects: result.created_objects,
             modified_objects: result.modified_objects,
+            // 本预编译读取 game_id（用于反序列化 GameContract），
+            // 必须报告给并行执行器以免漏掉读-写冲突。
+            read_objects: vec![game_id],
             return_value: result.return_value,
         })
     }

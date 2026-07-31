@@ -57,6 +57,9 @@ pub mod aggregator_air;
 pub mod aggregator_prover;
 pub mod aggregator_verifier;
 
+// P05-H-source：从已认证共识材料构造 ExpectedChainAnchor。
+pub mod consensus_anchor;
+
 // ===== Prover / Verifier 入口 =====
 pub mod prover;
 pub mod verifier;

@@ -230,6 +230,23 @@ pub enum PokerL1Error {
     /// commit certificate 签名验证失败（SubTask 10.7）。
     #[error("commit certificate signature verification failed for signer index {signer_idx}")]
     InvalidCommitCertificateSignature { signer_idx: usize },
+    /// commit certificate 的 signer_bitmap 置位数与 signature_list 长度不一致
+    /// （P05-H-source：bitmap 紧凑对应约定被破坏）。
+    #[error(
+        "commit certificate signer_bitmap set-bits {bitmap_count} != signature_list len {sig_count}"
+    )]
+    CommitCertSignatureBitmapMismatch {
+        /// signer_bitmap 中置位数。
+        bitmap_count: usize,
+        /// signature_list 长度。
+        sig_count: usize,
+    },
+    /// commit certificate 同一 validator 被多次签名（P05-H-source：去重防刷 quorum）。
+    #[error("duplicate commit certificate signer index {signer_idx}")]
+    DuplicateCommitCertificateSigner {
+        /// 重复的 validator 索引。
+        signer_idx: usize,
+    },
     /// commit certificate 的 epoch / prev_commit_hash / state_root 字段与本地不匹配（SEC2-C1）。
     #[error("commit certificate field mismatch: {0}")]
     CommitCertificateMismatch(String),

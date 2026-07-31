@@ -11,8 +11,20 @@
 - **P05-H-core（Host O(N) verification）：✅ 已完成。** 完整 VM dispatch replay、
   逐 proof 原生验证、opaque receipt、连续性和显式 `ExpectedChainAnchor` 首尾/范围/
   调用 digest 校验均已实现。
-- **P05-H-source（共识来源接入）：🟡 未在本 crate 闭合。** 调用方必须从已认证
-  block/receipt 构造 anchor；当前 proving service 只是本地 dispatch demo，不是 inclusion proof。
+- **P05-H-source（共识来源接入）：✅ 已闭合（inclusion-proof）。**
+  `poker_texas_air::consensus_anchor::build_anchor_from_consensus` 把「已认证 `BlockHeader` +
+  `DagCommitCertificate` + 每调用 SMT 包含证明」转换成 `ExpectedChainAnchor`，每步都做
+  密码学校验：(1) cert 字段一致性（`validate_commit_certificate_fields`）+ 新增的
+  `poker_l1::consensus::cert_verification::verify_commit_certificate_signatures`（≥ 2/3
+  secp256k1 quorum 签名，镜像 `verify_light_client_header`）；(2) 单桌 `Object` snapshot
+  用 `SparseMerkleTree::verify` 证明属于块的全局 `state_root`，从而锚定端点
+  `pre/post_state_root = compute_state_root(table)`；(3) 每个 dispatch tx 用 SMT 包含证明
+  认证属于 `public_tx_root`/`gameturn_tx_root`，digest 从 `{tx, header}` 独立重算。
+  `proving_service::TexasPokerPlugin::verify_chain_against_consensus` 调
+  `VerifiedChain::verify_against_anchor` 走该路径。
+  **固有边界（文档化）**：共识层签名的 tx root 是 order-independent 的 SMT，**不**签名
+  「某 table+hand 的有序调用序列」；调用顺序由 `hand_id`/`call_seq` 重建，线性顺序信任
+  Bullshark projection 一致性。这不削弱每个 tx 都被 quorum 签名认证这一事实。
 - **P05-R（Recursive/succinct aggregation）：❌ 未完成。** 当前递归后端不 sound，
   不存在可转移的单聚合 proof。
 
@@ -282,7 +294,9 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   semantic/leaf、PCS quotient、FRI fold、全局 lookup 归零、空输入守卫、9-limb 无损往返、完整 scaffold
   往返、statement/envelope tamper 与显式关闭；
 - **P05-H-core** O(N) 宿主验证与完整范围 anchor 校验已闭合；
-- **P05-H-source** 仍需上层把 anchor 接到已认证 block/receipt；
+- **P05-H-source** 已闭合：`build_anchor_from_consensus` 从已认证 block/cert + SMT 包含证明
+  构造 `ExpectedChainAnchor`，`verify_chain_against_consensus` 走锚定路径；剩余边界是
+  调用顺序依赖 Bullshark projection（共识层不签名有序序列）；
 - **P05-R** 单个可转移的 recursive aggregate proof 仍是已知未完成特性。
 
 ---
@@ -373,5 +387,5 @@ refinement，也未建立 `expected_trace_row → BoundAir → transcript → Le
 | P0 | 状态 | 处理建议 |
 |---|---|---|
 | P0-4 | ✅ **已修复**(`f38bc51` canonical Borsh 全字段) | 可选清理死代码 |
-| P0-5 | H-core ✅；H-source 🟡；R ❌ | 生产使用 consensus-derived `ExpectedChainAnchor` + `VerifiedChain`；succinct 聚合需密码学专家 |
+| P0-5 | H-core ✅；H-source ✅；R ❌ | 生产使用 `build_anchor_from_consensus` 构造 consensus-derived `ExpectedChainAnchor` + `verify_chain_against_consensus`；succinct 聚合仍需密码学专家 |
 | P0-6 | mid-round 生产路径已收窄；full transition ❌ | 继续 fail-closed；收池/推进/结算需多 AIR 重设计 |

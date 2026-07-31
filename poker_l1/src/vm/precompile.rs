@@ -103,6 +103,13 @@ pub struct DispatchResult {
     pub created_objects: Vec<ObjectID>,
     /// 修改的对象 ID 列表。
     pub modified_objects: Vec<ObjectID>,
+    /// 读取的对象 ID 列表（并行执行器读写集来源）。
+    ///
+    /// 并行执行器据此做冲突检测：若两笔 tx 的 read/write 集相交则串行化。
+    /// precompile 实现必须把所有通过 `object_db.read(id)` 读到的 id 报告于此，
+    /// 否则并行 soundness 会漏掉读-写冲突。未报告读集的 precompile 在调度器中
+    /// 默认降级为串行执行（保守策略）。
+    pub read_objects: Vec<ObjectID>,
     /// 返回值（BCS 编码）。
     pub return_value: Vec<u8>,
 }
@@ -114,6 +121,7 @@ impl DispatchResult {
         Self {
             created_objects: vec![],
             modified_objects: vec![],
+            read_objects: vec![],
             return_value: vec![],
         }
     }
@@ -124,6 +132,20 @@ impl DispatchResult {
         Self {
             created_objects: vec![],
             modified_objects: vec![id],
+            read_objects: vec![],
+            return_value: vec![],
+        }
+    }
+
+    /// 创建"读并写同一对象"的结果（最常见的 game-only 模式）。
+    ///
+    /// precompile 通常先读 game 对象、再写回同一对象，故 read == write == {id}。
+    #[must_use]
+    pub fn read_write_only(id: ObjectID) -> Self {
+        Self {
+            created_objects: vec![],
+            modified_objects: vec![id],
+            read_objects: vec![id],
             return_value: vec![],
         }
     }

@@ -53,6 +53,11 @@ pub enum TexasAirError {
     /// 未实现（C 档密码学方法 AIR 在阶段 4 实现）。
     #[error("未实现: {0}")]
     NotImplemented(String),
+
+    /// 共识来源锚定失败（P05-H-source）：cert 校验、SMT 包含证明或单桌 snapshot
+    /// 绑定未通过。
+    #[error("consensus anchor: {0}")]
+    ConsensusAnchor(String),
 }
 
 /// 主 Result 类型别名。

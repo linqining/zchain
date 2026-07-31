@@ -17,6 +17,7 @@ use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
 use poker_texas_air::orchestrator::{Orchestrator, ProvenTask};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
+use poker_texas_air::verified_chain::ExpectedChainAnchor;
 
 use crate::plugin::{DispatchOutcome, PluginError, PluginResult, PluginStats};
 
@@ -102,6 +103,28 @@ impl TexasPokerPlugin {
             block_timestamp: 1_000_000,
         }
     }
+
+    /// 用共识来源的 [`ExpectedChainAnchor`] 锚定当前已证明 receipt 链（P05-H-source）。
+    ///
+    /// 与 [`ContractPlugin::verify_chain`](crate::plugin::ContractPlugin::verify_chain)
+    /// 的区别：后者只做未外部锚定的相邻连续性检查；本方法额外校验链端点
+    /// （table/hand/call_seq 范围、full-width state root/version）和每个 dispatch
+    /// digest 都与共识来源 anchor 一致。anchor 本身应由
+    /// [`poker_texas_air::consensus_anchor::build_anchor_from_consensus`] 从已认证
+    /// block/receipt 构造，而不是从正在被证明的 task 自推。
+    ///
+    /// # Errors
+    ///
+    /// 链不连续或任一 anchored 字段/digest 不匹配时返回错误。
+    pub fn verify_chain_against_consensus(&self, anchor: &ExpectedChainAnchor) -> PluginResult<()> {
+        let chain = self
+            .orchestrator
+            .verified_chain()
+            .map_err(|e| PluginError::Prover(e.to_string()))?;
+        chain
+            .verify_against_anchor(anchor)
+            .map_err(|e| PluginError::Prover(e.to_string()))
+    }
 }
 
 impl crate::plugin::ContractPlugin for TexasPokerPlugin {
@@ -141,8 +164,10 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
     }
 
     fn verify_chain(&self) -> PluginResult<()> {
-        // 这里只检查本地 receipt 的相邻连续性。服务尚未接入共识来源的
-        // ExpectedChainAnchor，因此不能据此声称 block inclusion 或完整 batch。
+        // 只检查本地 receipt 的相邻连续性（O(N) host 接受产物）。
+        // 生产路径应改用 [`TexasPokerPlugin::verify_chain_against_consensus`]，
+        // 传入由 `build_anchor_from_consensus` 从已认证 block/receipt 构造的 anchor，
+        // 才能声称 block inclusion / 完整 batch。
         self.orchestrator
             .verify_chain()
             .map_err(|e| PluginError::Prover(e.to_string()))

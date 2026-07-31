@@ -85,6 +85,60 @@ impl ExpectedChainAnchor {
             + u32::try_from(self.dispatch_call_digests.len() - 1)
                 .expect("constructor checked digest count")
     }
+
+    /// Table identifier authenticated by the anchor.
+    #[must_use]
+    pub const fn table_id(&self) -> u64 {
+        self.table_id
+    }
+
+    /// Hand identifier authenticated by the anchor.
+    #[must_use]
+    pub const fn hand_id(&self) -> u32 {
+        self.hand_id
+    }
+
+    /// Inclusive first call sequence of the anchored range.
+    #[must_use]
+    pub const fn first_call_seq(&self) -> u32 {
+        self.first_call_seq
+    }
+
+    /// Inclusive last call sequence of the anchored range.
+    #[must_use]
+    pub fn last_call_seq_public(&self) -> u32 {
+        self.last_call_seq()
+    }
+
+    /// Pre-state root (single-table Poseidon252) at the range start.
+    #[must_use]
+    pub const fn pre_state_root(&self) -> StateRoot {
+        self.pre_state_root
+    }
+
+    /// Post-state root (single-table Poseidon252) at the range end.
+    #[must_use]
+    pub const fn post_state_root(&self) -> StateRoot {
+        self.post_state_root
+    }
+
+    /// Pre state version at the range start.
+    #[must_use]
+    pub const fn pre_version(&self) -> u64 {
+        self.pre_version
+    }
+
+    /// Post state version at the range end.
+    #[must_use]
+    pub const fn post_version(&self) -> u64 {
+        self.post_version
+    }
+
+    /// Per-call dispatch digests defining the exact receipt count and order.
+    #[must_use]
+    pub fn dispatch_call_digests(&self) -> &[[u8; 32]] {
+        &self.dispatch_call_digests
+    }
 }
 
 /// Receipt issued only after the native method-proof verifier succeeds.

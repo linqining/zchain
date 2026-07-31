@@ -33,7 +33,7 @@ use poker_l1::account::derive_address;
 use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, validate_tx_signature};
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
 use poker_l1::consensus::{
-    Dag, DagCommitCertificate, DagVertex, VertexBuilder, detect_commit_leader,
+    Dag, DagCommitCertificate, DagVertex, MAX_VERTEX_SIZE, VertexBuilder, detect_commit_leader,
 };
 use poker_l1::error::PokerL1Result;
 use poker_l1::executor::ExecutionEnvironment;
@@ -1006,6 +1006,60 @@ fn secp256k1_sign_hash(secret_key: &secp256k1::SecretKey, msg_hash: &Hash) -> Ve
     full_sig
 }
 
+/// 把待出 vertex 的 tx 列表切分为多个不超 `max_size` 的 batch。
+///
+/// 修复一个活性/数据丢失 bug：原先 `drain_pending_tx()` 取出的 tx 一次性塞进单个
+/// `VertexBuilder`，若累计体积超过 `MAX_VERTEX_SIZE`，`validate_size()` 失败后直接
+/// `continue` —— 由于 tx 已从 `pending_tx` 中 `drain(..)` 移除，整批 tx 被静默丢弃，
+/// 既不打包也不回绝客户端。对照 Narwhal（Sui）"超限即切多个 batch、不丢 tx" 的做法，
+/// 这里改为按精确 BCS 体积累计切片。
+///
+/// 切片规则（贪心，保持 arrival 顺序）：
+/// - 逐笔累加 `tx.to_bcs()` 体积；加入后若超过 `max_size`，封包当前 batch，该 tx 开启新 batch。
+/// - 单笔 tx 自身序列化体积 > `max_size`（异常：`submit_tx` 的 `validate_tx_limits`
+///   本应早已拦截）→ 单独成 batch，返回时由调用方 `validate_size`/`put_vertex` 再次拒绝，
+///   记日志后跳过该笔，**不影响其余 tx**。
+///
+/// `max_size` 取 `MAX_VERTEX_SIZE`，已包含 vertex 头部与 parent_hashes 的余量预算
+/// （`VertexBuilder::estimate_size` 中 epoch+round+pubkey+parents 约 100B 量级，
+/// 相对 256KB 上限可忽略；切片仅按 tx 体积累加，留出头部空间由 `validate_size` 兜底）。
+///
+/// 参数：
+/// - `txs`：drain 出的待出 tx（按 arrival 顺序）
+/// - `max_size`：单 vertex 字节上限（应等于 `MAX_VERTEX_SIZE`）
+///
+/// 返回非空 batch 列表；输入为空时返回空 `Vec`（由调用方决定是否产出空 vertex）。
+fn split_txs_into_batches(txs: Vec<Transaction>, max_size: usize) -> Vec<Vec<Transaction>> {
+    // 为 vertex 头部（epoch+round+pubkey+parent_hashes len+author_sig）预留预算，
+    // 使切片结果更贴近实际 vertex 序列化体积，减少 put_vertex 处的二次拒绝。
+    // 取一个保守常量：≈ 1 + 1 + (1+33) + 8 + (8+65) ≈ 120B 量级，向上取 256B。
+    const VERTEX_HEADER_BUDGET: usize = 256;
+
+    let limit = max_size.saturating_sub(VERTEX_HEADER_BUDGET);
+    let mut batches: Vec<Vec<Transaction>> = Vec::new();
+    let mut current: Vec<Transaction> = Vec::new();
+    let mut current_size: usize = 0;
+
+    for tx in txs {
+        let tx_size = tx.to_bcs().map(|b| b.len()).unwrap_or(usize::MAX);
+
+        if !current.is_empty() && current_size.saturating_add(tx_size) > limit {
+            // 当前 batch 装不下这笔 tx → 封包
+            batches.push(std::mem::take(&mut current));
+            current_size = 0;
+        }
+
+        // 单笔超限（tx_size > limit）：单独成 batch，后续 validate_size/put_vertex 拒绝并记日志。
+        current.push(tx);
+        current_size = current_size.saturating_add(tx_size);
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
 /// 从单个 vertex 构造 block（单 validator 简化模式）。
 ///
 /// 单 validator 自闭环模式下，每轮 vertex 直接对应一个 block。
@@ -1184,149 +1238,178 @@ fn run_validator_loop(
             continue;
         }
 
-        // 构造 vertex
-        let parent_hashes = last_vertex
-            .as_ref()
-            .map(|v| vec![v.vertex_hash()])
-            .unwrap_or_default();
-        let mut builder = VertexBuilder::new(epoch, round, author_pubkey.clone());
-        for tx in txs {
-            builder.push_tx(tx);
-        }
-        let builder = builder.with_parents(parent_hashes);
-
-        // 创世轮（round 1）跳过 validate_parents（无 parent）
-        if round > 1 {
-            if let Err(e) = builder.validate_parents(1) {
-                warn!("vertex parent 校验失败：{e}");
+        // 切片为多个不超 MAX_VERTEX_SIZE 的 batch（修复溢出整批丢弃的活性 bug）。
+        // 每来一笔 tx 累计其精确 BCS 体积，超限即封包进入下一个 vertex。
+        // 单笔 tx 自身超限（异常，submit_tx 本应拦截）→ 单独记日志丢弃，不影响其他 tx。
+        // 无 tx 但需推进 commit（last_has_txs）→ 一个空 batch，产出空 vertex。
+        let batches = if txs.is_empty() {
+            vec![Vec::new()]
+        } else {
+            let batches = split_txs_into_batches(txs, MAX_VERTEX_SIZE);
+            if batches.is_empty() {
+                vec![Vec::new()]
+            } else {
+                batches
             }
-        }
-        if let Err(e) = builder.validate_size() {
-            warn!("vertex 大小校验失败：{e}");
-            continue;
-        }
-
-        // 签名 vertex
-        let unsigned = builder.build(vec![]);
-        let vertex_signing_hash = unsigned.signing_hash(chain_id);
-        let vertex_sig = secp256k1_sign_hash(&secret_key, &vertex_signing_hash);
-        let vertex = DagVertex {
-            author_sig: vertex_sig,
-            ..unsigned
         };
+        let batch_count = batches.len();
 
-        // 插入 Dag + 持久化 + 广播
-        let vertex_hash = {
-            let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-            dag_guard.insert(vertex.clone())
-        };
-        if let Err(e) = node.put_vertex(&vertex) {
-            // put_vertex 持久化失败：跳过本轮 commit 与广播，避免基于未持久化 vertex 出块。
-            warn!("put_vertex 失败，跳过本轮 commit：{e}");
-            last_vertex = Some(vertex);
-            round += 1;
-            continue;
-        }
-        let _ = transport.gossip_broadcast(
-            GossipTopic::DagVertex,
-            &NetworkMessage::DagVertex(vertex.clone()),
-        );
+        for (batch_idx, batch) in batches.into_iter().enumerate() {
+            let batch_tx_count = batch.len();
 
-        info!(
-            "vertex 已产出 round={} tx_count={} hash={}",
-            round,
-            vertex.tx_list.len(),
-            hex::encode(vertex_hash)
-        );
+            // 构造 vertex
+            let parent_hashes = last_vertex
+                .as_ref()
+                .map(|v| vec![v.vertex_hash()])
+                .unwrap_or_default();
+            let mut builder = VertexBuilder::new(epoch, round, author_pubkey.clone());
+            for tx in batch {
+                builder.push_tx(tx);
+            }
+            let builder = builder.with_parents(parent_hashes);
 
-        // 从第 2 轮起，检测 commit 并产出 block
-        if let Some(prev_vertex) = &last_vertex {
-            let prev_hash = prev_vertex.vertex_hash();
-            // 注意：必须将 dag.lock() 限制在独立作用域内，否则临时 MutexGuard
-            // 会存活到 match 结束，导致下方 "清空 Dag" 处的 dag.lock() 自死锁
-            // （Rust std::sync::Mutex 不可重入）。
-            let commit_result = {
-                let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                detect_commit_leader(&dag_guard, &prev_hash, 1)
+            // 创世轮（round 1）跳过 validate_parents（无 parent）
+            if round > 1 {
+                if let Err(e) = builder.validate_parents(1) {
+                    warn!("vertex parent 校验失败：{e}");
+                }
+            }
+            // validate_size 为粗估；put_vertex 内部用精确 BCS 再校验一次，此处仅作提前拒绝。
+            if let Err(e) = builder.validate_size() {
+                warn!("vertex 大小校验失败（batch_idx={}）：{e}", batch_idx);
+                round += 1;
+                continue;
+            }
+
+            // 签名 vertex
+            let unsigned = builder.build(vec![]);
+            let vertex_signing_hash = unsigned.signing_hash(chain_id);
+            let vertex_sig = secp256k1_sign_hash(&secret_key, &vertex_signing_hash);
+            let vertex = DagVertex {
+                author_sig: vertex_sig,
+                ..unsigned
             };
-            match commit_result {
-                Ok(Some(_leader)) => {
-                    // 从上一个 vertex（被 commit 的）构造 block
-                    // 这样 block 包含的是被 commit 的 tx，而非当前 vertex 的 tx
-                    match build_block_from_vertex(
-                        prev_vertex,
-                        chain_id,
-                        commit_round,
-                        prev_commit_hash,
-                        prev_block_hash,
-                        node.block_store()
-                            .get_tip_height()
-                            .ok()
-                            .flatten()
-                            .map(|h| h + 1)
-                            .unwrap_or(1),
-                        &node,
-                        node.state_root(),
-                        &secret_key,
-                    ) {
-                        Ok(block) => {
-                            let block_hash = block.header.block_hash(chain_id);
-                            match node.put_block(&block) {
-                                Ok(_) => {
-                                    info!(
-                                        "✅ 出块成功 height={} hash={} public_txs={} gameturn_txs={} commit_round={}",
-                                        block.header.height,
-                                        hex::encode(block_hash),
-                                        block.public_txs.len(),
-                                        block.gameturn_txs.len(),
-                                        commit_round
-                                    );
 
-                                    let _ = transport.gossip_broadcast(
-                                        GossipTopic::DagVertex,
-                                        &NetworkMessage::ResponseBlocks(vec![block.clone()]),
-                                    );
+            // 插入 Dag + 持久化 + 广播
+            let vertex_hash = {
+                let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                dag_guard.insert(vertex.clone())
+            };
+            if let Err(e) = node.put_vertex(&vertex) {
+                // put_vertex 持久化失败：跳过本 vertex 的 commit 与广播，避免基于未持久化 vertex 出块。
+                warn!(
+                    "put_vertex 失败（batch_idx={}），跳过 commit：{e}",
+                    batch_idx
+                );
+                last_vertex = Some(vertex);
+                round += 1;
+                continue;
+            }
+            let _ = transport.gossip_broadcast(
+                GossipTopic::DagVertex,
+                &NetworkMessage::DagVertex(vertex.clone()),
+            );
 
-                                    commit_round += 1;
-                                    prev_commit_hash =
-                                        block.header.dag_commit_certificate.cert_hash(chain_id);
-                                    prev_block_hash = block_hash;
+            info!(
+                "vertex 已产出 round={} batch_idx={}/{} tx_count={} hash={}",
+                round,
+                batch_idx,
+                batch_count,
+                vertex.tx_list.len(),
+                hex::encode(vertex_hash)
+            );
 
-                                    // 清空 Dag，只保留当前 vertex
-                                    info!(
-                                        "[validator-loop] block#{} 提交完成，准备清空 Dag",
-                                        block.header.height
-                                    );
-                                    let mut dag_guard =
-                                        dag.lock().unwrap_or_else(|e| e.into_inner());
-                                    *dag_guard = Dag::new();
-                                    dag_guard.insert(vertex.clone());
-                                    info!(
-                                        "[validator-loop] Dag 已清空，last_vertex 设为 round={} vertex",
-                                        round
-                                    );
-                                }
-                                Err(e) => {
-                                    error!("put_block 失败：{e}");
+            // 从第 2 轮起，检测 commit 并产出 block
+            if let Some(prev_vertex) = &last_vertex {
+                let prev_hash = prev_vertex.vertex_hash();
+                // 注意：必须将 dag.lock() 限制在独立作用域内，否则临时 MutexGuard
+                // 会存活到 match 结束，导致下方 "清空 Dag" 处的 dag.lock() 自死锁
+                // （Rust std::sync::Mutex 不可重入）。
+                let commit_result = {
+                    let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                    detect_commit_leader(&dag_guard, &prev_hash, 1)
+                };
+                match commit_result {
+                    Ok(Some(_leader)) => {
+                        // 从上一个 vertex（被 commit 的）构造 block
+                        // 这样 block 包含的是被 commit 的 tx，而非当前 vertex 的 tx
+                        match build_block_from_vertex(
+                            prev_vertex,
+                            chain_id,
+                            commit_round,
+                            prev_commit_hash,
+                            prev_block_hash,
+                            node.block_store()
+                                .get_tip_height()
+                                .ok()
+                                .flatten()
+                                .map(|h| h + 1)
+                                .unwrap_or(1),
+                            &node,
+                            node.state_root(),
+                            &secret_key,
+                        ) {
+                            Ok(block) => {
+                                let block_hash = block.header.block_hash(chain_id);
+                                match node.put_block(&block) {
+                                    Ok(_) => {
+                                        info!(
+                                            "✅ 出块成功 height={} hash={} public_txs={} gameturn_txs={} commit_round={}",
+                                            block.header.height,
+                                            hex::encode(block_hash),
+                                            block.public_txs.len(),
+                                            block.gameturn_txs.len(),
+                                            commit_round
+                                        );
+
+                                        let _ = transport.gossip_broadcast(
+                                            GossipTopic::DagVertex,
+                                            &NetworkMessage::ResponseBlocks(vec![block.clone()]),
+                                        );
+
+                                        commit_round += 1;
+                                        prev_commit_hash =
+                                            block.header.dag_commit_certificate.cert_hash(chain_id);
+                                        prev_block_hash = block_hash;
+
+                                        // 清空 Dag，只保留当前 vertex
+                                        info!(
+                                            "[validator-loop] block#{} 提交完成，准备清空 Dag",
+                                            block.header.height
+                                        );
+                                        let mut dag_guard =
+                                            dag.lock().unwrap_or_else(|e| e.into_inner());
+                                        *dag_guard = Dag::new();
+                                        dag_guard.insert(vertex.clone());
+                                        info!(
+                                            "[validator-loop] Dag 已清空，last_vertex 设为 round={} vertex",
+                                            round
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!("put_block 失败：{e}");
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            error!("build_block_from_vertex 失败：{e}");
+                            Err(e) => {
+                                error!("build_block_from_vertex 失败：{e}");
+                            }
                         }
                     }
-                }
-                Ok(None) => {
-                    warn!("detect_commit_leader 返回 None（不应发生）");
-                }
-                Err(e) => {
-                    warn!("detect_commit_leader 错误：{e}");
+                    Ok(None) => {
+                        warn!("detect_commit_leader 返回 None（不应发生）");
+                    }
+                    Err(e) => {
+                        warn!("detect_commit_leader 错误：{e}");
+                    }
                 }
             }
-        }
 
-        last_vertex = Some(vertex);
-        round += 1;
+            last_vertex = Some(vertex);
+            round += 1;
+            // batch_tx_count 仅供本作用域日志/调试上下文，显式标记避免未使用告警。
+            let _ = batch_tx_count;
+        }
     }
 
     info!("validator 产块循环已停止（共产出 {} 轮 vertex）", round - 1);
@@ -1638,4 +1721,94 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
         hex::encode(tx_hash)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poker_l1::signature::tagged_pubkey::encode_tag;
+
+    /// 构造一条可控大小的 Transaction：用 `signature` 字段填充指定字节数来调控 BCS 体积。
+    fn make_sized_tx(sig_bytes: usize) -> Transaction {
+        let scheme = SignatureScheme::Secp256k1;
+        Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            contract_call: None,
+            tagged_pubkey: TaggedPubkey {
+                tag: encode_tag(scheme, 1),
+                raw: vec![0u8; scheme.raw_pubkey_len()],
+            },
+            signature: vec![0u8; sig_bytes],
+            gas: Gas::new(1_000_000, 1),
+            lane_hint: TxLane::Public,
+            route_hint: RouteHint::AnyValidator,
+            chain_id: 1,
+            nonce: 0,
+            gameturn_nonce: None,
+            is_fallback: false,
+        }
+    }
+
+    #[test]
+    fn split_batches_empty_input_returns_empty() {
+        let batches = split_txs_into_batches(Vec::new(), MAX_VERTEX_SIZE);
+        assert!(batches.is_empty(), "空输入应返回空 Vec");
+    }
+
+    #[test]
+    fn split_batches_all_small_fit_single_batch() {
+        // 10 笔小 tx（每笔 ~1KB）应全部装入一个 batch
+        let txs: Vec<Transaction> = (0..10).map(|_| make_sized_tx(1000)).collect();
+        let batches = split_txs_into_batches(txs, MAX_VERTEX_SIZE);
+        assert_eq!(batches.len(), 1, "10 笔 1KB tx 应装入 1 个 batch");
+        assert_eq!(batches[0].len(), 10, "batch 内应有 10 笔 tx");
+    }
+
+    #[test]
+    fn split_batches_overflow_splits_into_multiple() {
+        // 关键回归测试：超 MAX_VERTEX_SIZE 时切片为多 batch，而非整批丢弃。
+        // 每笔 ~100KB，3 笔 ≈ 300KB > 256KB（含头部预算）→ 至少 2 个 batch。
+        let txs: Vec<Transaction> = (0..3).map(|_| make_sized_tx(100_000)).collect();
+        let batches = split_txs_into_batches(txs, MAX_VERTEX_SIZE);
+        assert!(
+            batches.len() >= 2,
+            "3 笔 100KB tx 应切分为 ≥2 个 batch，实际 {}",
+            batches.len()
+        );
+        // 所有 tx 都被保留（不丢失）
+        let total: usize = batches.iter().map(|b| b.len()).sum();
+        assert_eq!(total, 3, "所有 tx 必须被保留，不得丢失");
+    }
+
+    #[test]
+    fn split_batches_single_oversized_tx_alone() {
+        // 单笔 tx 自身超限：应单独成 batch（交由 validate_size/put_vertex 拒绝），
+        // 不影响后续 tx。
+        let big = make_sized_tx(MAX_VERTEX_SIZE + 1000);
+        let small = make_sized_tx(100);
+        let batches = split_txs_into_batches(vec![big, small], MAX_VERTEX_SIZE);
+        // 第一笔单独一个 batch，第二笔另一个 batch
+        assert_eq!(batches.len(), 2, "超大 tx 单独成 batch，其余 tx 不受影响");
+        assert_eq!(batches[1].len(), 1, "第二笔小 tx 应在第二个 batch");
+    }
+
+    #[test]
+    fn split_batches_each_batch_within_size_limit() {
+        // 每个 batch 的累计 tx BCS 体积（加头部预算）应 ≤ MAX_VERTEX_SIZE
+        let txs: Vec<Transaction> = (0..20).map(|_| make_sized_tx(40_000)).collect();
+        let batches = split_txs_into_batches(txs, MAX_VERTEX_SIZE);
+        const HEADER_BUDGET: usize = 256;
+        for (i, batch) in batches.iter().enumerate() {
+            let size: usize = batch.iter().map(|tx| tx.to_bcs().unwrap().len()).sum();
+            assert!(
+                size + HEADER_BUDGET <= MAX_VERTEX_SIZE || batch.len() == 1,
+                "batch#{} 体积 {} + 头部 {} 超过 {} 且非单笔超大 tx",
+                i,
+                size,
+                HEADER_BUDGET,
+                MAX_VERTEX_SIZE
+            );
+        }
+    }
 }

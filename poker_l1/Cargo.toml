@@ -40,6 +40,8 @@ group = { workspace = true }
 pairing = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# 并行执行器（execute_block 波次化并发）：波次内无冲突 tx 经 rayon 线程池并发执行。
+rayon = { workspace = true }
 
 [dev-dependencies]
 # 测试专用，避免影响生产二进制大小

@@ -15,6 +15,8 @@
 
 /// Bullshark 共识与 block 投影（Task 9）。
 pub mod bullshark;
+/// Commit certificate 签名验证（P05-H-source）。
+pub mod cert_verification;
 /// 游戏分配与 epoch 重分配（Task 12）。
 pub mod game_assignment;
 /// 多玩家阶段超时惩罚执行（Phase 4 Task 8）。

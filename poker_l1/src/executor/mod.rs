@@ -32,7 +32,7 @@
 //! 同一组有序 tx + 同一初始状态 → 同一 `state_root`。出块方与验证方
 //! 均通过 [`execute_block`] 得出 `state_root` 并比对（P0-2 接入）。
 
-use crate::account::{AccountStore, apply_public_tx, derive_address, validate_public_tx};
+use crate::account::{Account, AccountStore, apply_public_tx, derive_address, validate_public_tx};
 use crate::block::validator::{validate_tx_chain_id, validate_tx_signature};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
@@ -43,7 +43,13 @@ use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
 use crate::vm::{ContractObject, PrecompileRegistry, execute_contract, load_contract_bytecode};
 use crate::{BlockHeight, ChainId, Hash, TimestampMs};
+use std::collections::HashMap;
 use std::sync::Arc;
+
+#[cfg(test)]
+mod parallel_tests;
+pub mod schedule;
+pub mod write_capture;
 
 /// 执行环境（block 级上下文）。
 #[derive(Debug, Clone)]
@@ -187,6 +193,34 @@ fn execute_tx_inner<B: ObjectBackend>(
     object_db: &mut B,
     account_store: &mut AccountStore,
 ) -> PokerL1Result<TxReceipt> {
+    let caller = derive_address(&tx.tagged_pubkey);
+    let is_gas_free_lane = matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
+    // 非 gas-free lane 需要账户视图（nonce/余额预检 + 结算）。
+    // gas-free lane 不触碰账户，account_view = None。
+    let account_view: Option<&mut crate::account::Account> = if is_gas_free_lane {
+        None
+    } else {
+        Some(account_store.get_mut(&caller).ok_or_else(|| {
+            PokerL1Error::Other(format!("account not found for caller {caller:?}"))
+        })?)
+    };
+    execute_tx_on_view_inner(env, tx, object_db, account_view)
+}
+
+/// 在单个账户视图上执行 tx 的内部实现（供串行与并行执行器共用）。
+///
+/// 与 [`execute_tx_inner`] 的区别：账户以 `Option<&mut Account>` 传入，而非整个
+/// [`AccountStore`]。这使并行执行器可为每个 worker 提供独立的账户快照副本，
+/// 波次结束后按序 merge 回主 [`AccountStore`]。
+///
+/// - `account_view = Some(acc)`：非 gas-free lane，需 nonce/余额预检 + 结算。
+/// - `account_view = None`：gas-free lane（GameTurn / CheckpointAnchor），不触碰账户。
+fn execute_tx_on_view_inner<B: ObjectBackend>(
+    env: &ExecutionEnvironment,
+    tx: &Transaction,
+    object_db: &mut B,
+    account_view: Option<&mut crate::account::Account>,
+) -> PokerL1Result<TxReceipt> {
     // ===== 1. 防御性重校验（limits / chain_id / 签名）=====
     validate_tx_limits(tx)?;
     validate_tx_chain_id(tx, env.chain_id)?;
@@ -231,7 +265,7 @@ fn execute_tx_inner<B: ObjectBackend>(
     // - 非 gas-free lane（Public/ForceSync）+ 任意合约 → 需预检
     //   （包括调 gas-free precompile 的情况：按 Public 计费、推进 nonce）
     if !is_gas_free_lane {
-        let account = account_store.get(&caller).ok_or_else(|| {
+        let account = account_view.as_ref().ok_or_else(|| {
             PokerL1Error::Other(format!("account not found for caller {caller:?}"))
         })?;
         validate_public_tx(account, tx, env.chain_id)?;
@@ -302,8 +336,7 @@ fn execute_tx_inner<B: ObjectBackend>(
     // gas 策略跟随 lane：非 gas-free lane 的 tx（含调 gas-free precompile 的情况）
     // 都需扣费 + 推进 nonce。gas-free lane 的 tx 不扣费不推进 nonce。
     let fee_charged = if !is_gas_free_lane {
-        let account = account_store
-            .get_mut(&caller)
+        let account = account_view
             .ok_or_else(|| PokerL1Error::Other("account disappeared mid-execution".into()))?;
         apply_public_tx(account, tx, gas_used)?;
         gas_used
@@ -489,7 +522,207 @@ fn apply_tx_outputs<B: ObjectBackend>(
 /// 而非查询 `Precompile::is_gas_free()`。理由：`execute_tx_inner` 步骤 3 已强制
 /// lane-contract 一致性（gas-free lane 必须配 gas-free precompile），故到达 `execute_block`
 /// 时 lane 已是合约 gas 属性的可靠代理。两套判定保持一致。
-pub fn execute_block<B: ObjectBackend>(
+pub fn execute_block(
+    env: &ExecutionEnvironment,
+    txs: &[Transaction],
+    object_db: &mut ObjectDb,
+    account_store: &mut AccountStore,
+) -> BlockExecutionOutcome {
+    execute_block_parallel(env, txs, object_db, account_store)
+}
+
+/// 波次化并行执行（核心实现）。
+///
+/// 流程：
+/// 1. **prepare（可并发）**：估计每笔 tx 的读写集（`schedule::estimate_rwset`）。
+/// 2. **wave 划分**：`schedule::plan_waves` 按读写集把 tx 分为若干波次，
+///    波次内 tx 两两读写集不相交（可安全并发）。
+/// 3. **波次内并发执行**：每个 worker 拿共享 `&ObjectDb` 构造私有
+///    [`write_capture::WriteCaptureBackend`]，并在该 caller 的账户快照副本上执行
+///    （`execute_tx_on_view_inner`）。读走共享 `&ObjectDb`，写进私有 log。
+/// 4. **波次间串行 merge**：按 tx_index 升序把写日志回放主 ObjectDb + 应用账户增量。
+/// 5. **block gas 限**：与串行版同一逻辑，在 merge 阶段按序累计，超限 tx 标记 OutOfGas。
+///
+/// # 确定性
+///
+/// 波次划分仅依赖 (rwset, tx_index)；波次内结果按 tx_index 升序 merge；
+/// 故与 [`execute_block_serial`] 产生相同 state_root。
+///
+/// # Soundness
+///
+/// 波次内 tx 读写集两两不相交（由 `plan_waves` 保证），故 worker 间无共享可变状态：
+/// 读走共享 `&ObjectDb`（`&self`，可并发），写进各自私有 log。波次间串行 merge，
+/// 下一波次基于已 merge 的状态执行——与串行语义等价。
+fn execute_block_parallel(
+    env: &ExecutionEnvironment,
+    txs: &[Transaction],
+    object_db: &mut ObjectDb,
+    account_store: &mut AccountStore,
+) -> BlockExecutionOutcome {
+    use crate::executor::write_capture::{ObjectWriteLog, WriteCaptureBackend};
+    use rayon::prelude::*;
+
+    // 空 block 快路径
+    if txs.is_empty() {
+        return BlockExecutionOutcome {
+            receipts: Vec::new(),
+            state_root: object_db.state_root(),
+            total_gas_used: 0,
+        };
+    }
+
+    // ----- 1. prepare：估计读写集 -----
+    let registry_ref = env.precompile_registry.as_ref();
+    let rwsets: Vec<_> = (0..txs.len())
+        .map(|i| {
+            crate::executor::schedule::estimate_rwset(&txs[i], registry_ref.map(|r| r.as_ref()))
+        })
+        .collect();
+
+    // ----- 2. 波次划分 -----
+    let waves = crate::executor::schedule::plan_waves(&rwsets);
+
+    let mut receipts: Vec<Option<TxReceipt>> = (0..txs.len()).map(|_| None).collect();
+    let mut total_gas: u64 = 0;
+
+    for wave in waves {
+        // ---- 3a. 预取本波次所有 caller 的账户快照 ----
+        // 主线程串行读 account_store（&mut 不可跨线程），各 worker 用快照副本。
+        let snapshots: HashMap<crate::Address, Account> = wave
+            .iter()
+            .filter_map(|&idx| {
+                let tx = &txs[idx];
+                if matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor) {
+                    None
+                } else {
+                    let caller = derive_address(&tx.tagged_pubkey);
+                    account_store.get(&caller).map(|a| (caller, a.clone()))
+                }
+            })
+            .collect();
+
+        // ---- 3b. 波次内并发执行 ----
+        // shared_db: &ObjectDb（&self，可被多 worker 共享引用）。
+        let shared_db: &ObjectDb = &*object_db;
+        let wave_outcomes: Vec<(usize, PokerL1Result<(TxReceipt, ObjectWriteLog)>)> = wave
+            .par_iter()
+            .map(|&idx| {
+                let tx = &txs[idx];
+                let result = run_one_tx(env, tx, shared_db, &snapshots);
+                (idx, result)
+            })
+            .collect();
+
+        // ---- 4. 波次间串行 merge（按 tx_index 升序）----
+        let mut ordered = wave_outcomes;
+        ordered.sort_by_key(|(idx, _)| *idx);
+
+        for (idx, result) in ordered {
+            let tx = &txs[idx];
+            let needs_gas = !matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
+
+            // block gas 限判定（与串行版一致）
+            if needs_gas
+                && total_gas.saturating_add(tx.gas.budget.min(TX_GAS_LIMIT)) > env.block_gas_limit
+            {
+                receipts[idx] = Some(TxReceipt::failure(
+                    tx,
+                    &PokerL1Error::OutOfGas {
+                        used: total_gas,
+                        limit: env.block_gas_limit,
+                    },
+                ));
+                continue;
+            }
+
+            // 执行结果：成功则 merge，失败则失败回执（不写状态、不推进 nonce、不扣费）
+            let (receipt, log) = match result {
+                Ok(v) => v,
+                Err(e) => {
+                    receipts[idx] = Some(TxReceipt::failure(tx, &e));
+                    continue;
+                }
+            };
+
+            // 回放写日志到主 ObjectDb（capture 阶段已校验，主库再校验一次）
+            if let Err(e) = log.apply_to(object_db) {
+                receipts[idx] = Some(TxReceipt::failure(tx, &e));
+                continue;
+            }
+
+            // 应用账户增量（扣费 + nonce 推进）到主 account_store
+            if needs_gas {
+                let caller = derive_address(&tx.tagged_pubkey);
+                if let Some(acc) = account_store.get_mut(&caller) {
+                    // 快照已成功通过 apply_public_tx，此处重放相同增量，必然成功；
+                    // 失败则视为内部不一致（记失败回执，状态已 merge 不可回滚）。
+                    if let Err(e) = apply_public_tx(acc, tx, receipt.gas_used) {
+                        receipts[idx] = Some(TxReceipt::failure(tx, &e));
+                        continue;
+                    }
+                }
+            }
+
+            // block gas 累计（仅成功且需 gas 的 tx）
+            if receipt.success && needs_gas {
+                total_gas = total_gas.saturating_add(receipt.gas_used);
+            }
+
+            receipts[idx] = Some(receipt);
+        }
+    }
+
+    let receipts: Vec<TxReceipt> = receipts
+        .into_iter()
+        .map(|o| o.expect("所有 idx 已填充"))
+        .collect();
+
+    BlockExecutionOutcome {
+        receipts,
+        state_root: object_db.state_root(),
+        total_gas_used: total_gas,
+    }
+}
+
+/// 在共享 ObjectDb + 账户快照上执行单笔 tx（波次内 worker 调用）。
+///
+/// - 读走 [`WriteCaptureBackend`]（先查私有 log，再委托共享 `&ObjectDb`）。
+/// - 写进私有 [`ObjectWriteLog`]（返回给主线程 merge）。
+/// - 账户操作在快照副本上做（成功后由主线程在主 account_store 重放相同增量）。
+fn run_one_tx(
+    env: &ExecutionEnvironment,
+    tx: &Transaction,
+    shared_db: &ObjectDb,
+    snapshots: &HashMap<crate::Address, Account>,
+) -> PokerL1Result<(TxReceipt, crate::executor::write_capture::ObjectWriteLog)> {
+    use crate::executor::write_capture::WriteCaptureBackend;
+    let caller = derive_address(&tx.tagged_pubkey);
+    let is_gas_free_lane = matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
+
+    // capture 后端：读委托 shared_db，写进私有 log
+    let mut cap = WriteCaptureBackend::new(shared_db);
+    // 账户快照副本（非 gas-free lane 需要：nonce/余额校验 + 结算）
+    let mut account_view: Option<Account> = if is_gas_free_lane {
+        None
+    } else {
+        snapshots.get(&caller).cloned()
+    };
+
+    let receipt = execute_tx_on_view_inner(env, tx, &mut cap, account_view.as_mut())?;
+    let log = cap.into_log();
+    Ok((receipt, log))
+}
+
+/// 串行执行（回归基准 / 降级 fallback）。
+///
+/// 这是并行执行器改造前的原 `execute_block` 实现，逐笔执行、单一 state_root。
+/// 保留用于：
+/// - 并行执行器的等价性回归测试（`execute_block_parallel` 必须产生相同 state_root）；
+/// - 并行路径运行时复核失败时的 tx 降级重跑；
+/// - Snapshot（`ObjectDbSnapshot`）等非 `ObjectDb` 后端的执行。
+///
+/// 语义与并行版完全等价：同一组有序 tx + 同一初始状态 → 同一 state_root。
+pub fn execute_block_serial<B: ObjectBackend>(
     env: &ExecutionEnvironment,
     txs: &[Transaction],
     object_db: &mut B,
