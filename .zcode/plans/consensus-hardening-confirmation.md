@@ -256,3 +256,217 @@
 - Q25 Bridge 单向/双向
 
 你也可以直接说"全部按推荐执行"，我会按上表推荐项 + 上述顺序推进，遇到不可逆决策（schema 变更、新依赖）时暂停留痕。
+
+---
+
+# 实施进度日志（决策已确认后开始执行）
+
+## ✅ 已完成
+
+### #8 AccountStore 落 RocksDB 持久化 — DONE
+- `poker_l1/src/account/mod.rs`：`AccountStore` 改为混合模型（内存 HashMap 权威态 + 可选 `Arc<DB>` 后端）。新增 `open(path)` / `open_inmemory()` / `flush(addr)` / `persist(addr)`；`create`/`credit` 变更后自动落盘；`get_mut` 路径由调用方显式 `flush`。
+- `poker_l1/src/node/mod.rs:364` `Node::open` 改用 `AccountStore::open(data_dir/accounts)`（重启不再丢账户）。
+- `poker_l1/src/executor/mod.rs`：串行(`:753`)与并行(`:656`)两条 gas 结算路径在变更后显式 `flush(&caller)`。
+- 新增 3 个持久化测试（重启后余额/nonce 保留 + 内存模式 no-op）。**1587 测试全通过**。
+
+### #1-路径B commit cert 验签 — DONE（发现已就位，无需新代码）
+- **关键修正**：探查发现 `Node::validate_block`（`node/mod.rs:701`）**已经**调用 `block/validator.rs:444 validate_commit_certificate_signatures`，后者对每个签名调用真 `verify_signature`（`validator.rs:482`）。`put_block`（`:665`）→ `validate_block` → 该函数。**导入路径已完整验签。**
+- 生产出块路径（`build_block_from_vertex`）自签 cert，无需自验。
+- 结论：缺口 #1 的 commit-cert 部分实际**不存在**——之前报告判断有误。唯一真缺的是 slashing 路径（#1-路径C，留后）。
+
+## 🔄 进行中 / 待设计
+
+### #4-M1 代币 — 暂停，记录设计规范（共识敏感，需谨慎）
+**为何暂停**：M1 的"gas→proposer"涉及 `ExecutionEnvironment` 增加 proposer 字段 + 出块/验块双方都要传入 proposer，属共识面变更；"原生转账"需扩 `Precompile` trait 签名（当前 `execute` 只收 `object_db` 不收 `AccountStore`）。这两项都跨多模块且影响 state_root 可重现性，不宜在无法跑多节点回归时盲改。
+
+**已确定的设计（按你的决策）**：
+- 代币模型：**混合**（Q15）— genesis 固定初始分配 + 受控通胀上限（出块奖励，M2）。
+- gas 去向：**奖励 proposer**（Q16）— 不再烧毁。
+- 拆分：M1（代币定义+genesis分配+gas→proposer+原生转账）/ M2（出块奖励+staking 结算）（Q20 同意）。
+
+**M1 实施规范（待恢复时执行）**：
+1. **原生转账**：在 `vm/contracts/` 新增 `transfer_precompile.rs`，id `0xFF…04`。
+   - **障碍**：`Precompile::execute` 签名（`vm/precompile.rs:42`）当前只收 `&mut impl ObjectBackend`，无 `AccountStore`。需把 `&mut AccountStore` 加入 trait 签名（破坏性，影响所有现有 Precompile 实现：GamePrecompile、TexasPokerPrecompile）。
+   - 备选（更小侵入）：在 `executor/mod.rs:288` dispatch 前，对"系统 transfer contract_id"做特判，直接在 executor 内操作 `account_store`（caller debit amount + recipient credit），绕过 Precompile trait。**推荐备选**。
+2. **gas→proposer**：
+   - `ExecutionEnvironment`（`executor/mod.rs:56`）增 `proposer: Option<TaggedPubkey>` 字段（运行时，**非** BlockHeader 字段，避免改 block_hash）。
+   - 出块方（`main.rs build_block_from_vertex`）传入自己的 pubkey；验块方从 cert 的 leader signer 派生 proposer。
+   - `apply_public_tx`（`account/mod.rs:231`）扣的 gas 不再凭空消失：在 block 结束时把 `total_gas_used` 信用给 proposer（`AccountStore::credit(proposer_addr, total_gas_used)`）。注意 state_root 可重现性：proposer 信用必须在**确定性位置**（block 末尾、所有 tx 之后）执行，使出块/验块双方 state_root 一致。
+3. **genesis 分配**：`Node::open` 后从 `genesis_alloc` 配置（文件，与 #3 的 genesis validator set 文件合并）mint 初始余额到初始账户。复用 #8 的持久化 store。
+
+### 接下来转向 #2 ECVRF（自包含、无共识面权衡、解锁 #3）
+
+## ✅ 已完成（续）
+
+### #2 ECVRF-secp256k1-SHA256-TAI prover + verifier — DONE
+- `poker_l1/Cargo.toml`：新增 `vrf = "0.2.5"` + `openssl = { features=["vendored"] }`。
+  - **关键**：构建机系统 OpenSSL 仅 x86_64（本机是 arm64），vendored 从源码编译 OpenSSL 保证可复现构建（首次约 75s，之后缓存）。
+- `poker_l1/src/consensus/ecvrf.rs`（新模块）：`Secp256k1VrfVerifier`（impl `VrfVerifier`）+ `Secp256k1VrfProver`（`prove()` + `derive_public_key()`）。基于 `vrf::openssl::ECVRF` 的 `SECP256K1_SHA256_TAI`（draft-irtf-cfrg-vrf-05）。
+- **proof 布局修正**：`VrfProof` 从旧 `gamma[33]||c[32]||s[32]`=97B 改为规范 `gamma[33]||c[16]||s[32]`=81B（`c` 在 secp256k1-SHA256-TAI 中是 n/8=16 字节，非 32）。`VRF_PROOF_SIZE=81`。
+- `error.rs`：`InvalidVrfProof` 改为带 `String` 上下文。
+- 6 个新测试：prover↔verifier roundtrip（output 一致）、错误 pubkey 拒绝、错误 input 拒绝、81B 回归、不同 input 不同 output、与旧 placeholder 派生分离。**全 1593 测试通过，workspace 构建 OK。**
+- **接入 epoch 时序留作 #3 的一部分**（Q6）：prover/verifier 已就绪且独立测试通过，但 `submit_epoch_vrf_proof` 仍未在生产 epoch 转换中调用（这与 #3 的多签闭环一起做）。
+
+## 待办优先级重排
+已完成 3 项（#8、#1-路径B、#2）。剩余按"独立性 + 低风险"排序：
+1. **#1-路径C**（slashing 验签，Q3 已批准 schema 破坏性变更，独立，有限范围）
+2. **#9**（Bridge 接线，依赖 #4 的代币模型若用原生 balance，但选了 wrapped Object 较独立）
+3. **#3**（多签闭环，最大工程，依赖 #1+#2 都已就位）
+4. **#4-M1**（代币，需共识面回归，已记规范）
+5. **#5-M2**（出块奖励+staking，最后）
+
+## ✅ 已完成（续 2）
+
+### #1-路径C slashing 验签接入 — DONE
+- **Q3 破坏性 schema 变更已落地**：
+  - `VertexEquivocationEvidence`（`slashing.rs`）：从 `(epoch, round, author, vertex_hash_1/2, signature_1/2)` 改为 `(chain_id, epoch, round, author, vertex_1: DagVertex, vertex_2: DagVertex)`。`validate()` 现严格重算 `vertex.signing_hash(chain_id)` 并对两 author_sig 调真 `verify_signature`。
+  - `CommitCertEquivocationEvidence`（`slashing.rs`）：从 `(epoch, commit_round, cert_hash_1/2)` 改为 `(chain_id, epoch, commit_round, author, signature_1/2, cert_1: DagCommitCertificate, cert_2: DagCommitCertificate)`。`validate()` 重算 cert signing_hash 并验双签。
+  - `detect_commit_cert_equivocation`（`bullshark.rs`）：新增 `validators: &[ValidatorEntry]` 参数，从两 cert signer_bitmap 交集找双签 validator 构造完整证据。
+- 新增真实 secp256k1 签名的测试辅助 + 重写全部 slashing 证据测试（双签通过、相同 vertex 拒绝、篡改签名拒绝、author 不符拒绝、cert 双签通过/相同/篡改）。
+- **全 1595 测试通过，workspace 构建 OK。**
+
+## 阶段性总结（你离开期间已交付 4 项）
+| 项 | 状态 | 测试 |
+|---|---|---|
+| #8 AccountStore 持久化 | ✅ DONE | 3 新测试 + 全量 |
+| #1-路径B commit cert 验签 | ✅ DONE（探查发现已就位） | 现有 |
+| #2 ECVRF prover+verifier | ✅ DONE | 6 新测试 |
+| #1-路径C slashing 验签 | ✅ DONE | 8 重写测试 |
+| 全量回归 | ✅ 1595 passed | — |
+
+**未开始（剩余 4 项）**：
+- #9 Bridge：验证逻辑完整待接线，需 wrapped Object 模型 + nonce 持久化（Q22 wrapped Object，独立于 #4）。
+- #3 多 validator BFT 闭环：最大工程（main.rs loop 重写 + vote gossip + genesis set CLI + VRF 时序接入）。#1+#2 已就位为其铺路。
+- #4-M1 代币：已记规范，待共识面回归（gas→proposer 涉 ExecutionEnvironment/BlockHeader）。
+- #5-M2 出块奖励+staking：最后。
+
+## 继续推进 #9 Bridge（独立、Q22 wrapped Object 不依赖 #4）
+
+# 剩余 4 项 — 详细实施规范（暂停待你回归）
+
+> **为何在此暂停**：已交付 4 项（#8/#1B/#2/#1C，全 1595 测试通过）。剩余 4 项
+> （#9/#3/#4-M1/#5-M2）**全部触及 state_root 可重现性或共识面**，在无法跑多节点
+> 回归时盲改风险高。以下规范精确到 file:line / 函数签名 / schema，恢复时可直接落地。
+
+---
+
+## #9 Bridge 接线 — 实施规范（最独立，建议先做）
+
+**目标**：把已完整测试的 `bridge_verify`（`bridge/mod.rs:347`）接通到执行路径，deposit 验证通过后铸造 wrapped Object 给 recipient，BridgeRegistry nonce 持久化。
+
+### 9.1 wrapped-asset Object 模型（Q22）
+新增常量 `pub const BRIDGE_WRAPPED_OBJECT_TYPE: &str = "bridge-wrapped-asset";`
+wrapped Object 构造：
+```
+Object::new(
+    id: ObjectID::new(recipient, creation_nonce),   // creator_address = recipient（SEC2-M1：recipient 是 caller）
+    owner: Ownership::AddressOwned { owner: recipient },
+    object_type: "bridge-wrapped-asset",
+    data: borsh::to_vec(&WrappedAsset { source_chain_id, asset, amount })?,
+    assigned_validator: None,
+)
+```
+`WrappedAsset` 新 struct（`bridge/mod.rs`）：`{ source_chain_id: ChainId, asset: Hash, amount: u64 }`，derive Borsh。
+
+### 9.2 铸币函数（新增）
+`bridge/mod.rs` 新增：
+```rust
+pub fn mint_wrapped_object<B: ObjectBackend>(
+    outcome: &BridgeVerifyOutcome,
+    object_db: &mut B,
+    creation_nonce: u64,
+) -> PokerL1Result<ObjectID>
+```
+- 用 `outcome.deposit.{source_chain_id, asset, amount}` + `outcome.recipient` 构造 wrapped Object
+- `object_db.create(&obj)` 落库（影响 state_root）
+- 返回新 ObjectID
+
+### 9.3 BridgeRegistry nonce 持久化（Q24，安全刚需）
+新增 `poker_l1/src/storage/bridge_registry_store.rs`（仿 `AccountStore` 混合模型，缺口 #8 模板）：
+- RocksDB CF `bridge_nonces`（key=`(chain_id_le || nonce_le)` → value=空）+ `bridge_burn_nonces`
+- `BridgeRegistryStore::open(path)` / `open_inmemory()`
+- 启动时全量加载到内存 `BridgeRegistry`（其 `consumed_nonces`/`consumed_burn_nonces`）
+- `bridge_verify`/`burn_on_source` 成功后调用 `persist_nonce(chain_id, nonce)` 落盘
+
+### 9.4 接入执行路径（方案A：executor 特判，最小侵入）
+`executor/mod.rs:288` dispatch fork，在 precompile 分支前加 bridge 特判：
+```rust
+if call.contract_id == BRIDGE_PRECOMPILE_ID {
+    let tx_bcs: BridgeVerifyTx = borsh::from_slice(&call.args)?;
+    // registry 从 ExecutionEnvironment 注入（见 9.5）
+    let outcome = bridge_verify(env.bridge_registry, &tx_bcs, env.chain_id, true)?;
+    let obj_id = mint_wrapped_object(&outcome, object_db, /*creation_nonce*/)?;
+    env.bridge_registry_store.persist_nonce(tx_bcs.deposit.source_chain_id, tx_bcs.deposit.nonce)?;
+    all_created.push(obj_id);
+    // 注意：gas 仍按 Public lane 计费（recipient 是 caller）
+    return ...;
+}
+```
+新增常量 `BRIDGE_PRECOMPILE_ID: ObjectID = 0xFF...03`（`vm/precompile.rs::reserved`）。
+
+### 9.5 ExecutionEnvironment 扩展
+`executor/mod.rs:56` ExecutionEnvironment 增字段：
+- `bridge_registry: Option<Arc<Mutex<BridgeRegistry>>>`
+- `bridge_registry_store: Option<Arc<BridgeRegistryStore>>`
+出块方（`main.rs build_block_from_vertex`）与验块方（`node/mod.rs validate_block`）都注入（验块方用相同的持久化 store）。**state_root 可重现性**：wrapped Object 创建是确定性的（同 recipient + 同 creation_nonce → 同 ObjectID），故出块/验块 state_root 一致。
+
+### 9.6 反向 burn（Q25 单向/双向 — 待你定）
+若做双向：`burn_wrapped_object(object_id, object_db)` 销毁 wrapped Object + 生成 BurnProof → `burn_on_source`。本次可只做单向 deposit→mint（Q25 未明确，默认单向）。
+
+### 9.7 测试
+- 单元：`mint_wrapped_object` 创建正确 wrapped Object（type/owner/data）
+- 集成：bridge_verify 通过 → mint → Object 落库 → state_root 变化；nonce 重启持久化（仿 #8 测试）
+
+**工作量预估**：~300 行代码 + 持久化 store + 测试。
+
+---
+
+## #3 多 validator BFT 闭环 — 实施规范（最大工程）
+
+**前置已就位**：#1（cert 验签）、#2（VRF）。
+
+### 3.1 Dag 共享（关键 bug）
+当前 `main.rs:417` 的 `Arc<Mutex<Dag>>` 私有于 validator 线程，`handle_p2p_connection`（`:861`）把 peer vertex 写 `node.vertex_store` 但不进这个 Dag。
+**改法**：把 `Arc<Mutex<Dag>>` 提到 `run_node` 顶层，传入 `handle_p2p_connection`，peer `DagVertex` 消息同时 `dag.insert()` + `node.put_vertex()`。
+
+### 3.2 vote gossip（Q8 选项②：复用 vertex 隐式投票，Bullshark 原生）
+不加显式 `CommitVote` 消息。`detect_commit_leader`（`bullshark.rs:127`）已按 distinct author 计数 parent 引用。cert 签名从 commit 的 referencing vertices 的 `author_sig` 提取（每个 author 对自己 vertex 的签名即"投票"）。
+**新增**：`assemble_commit_certificate`（`bullshark.rs:433`）改为从 referencing vertices 提取 `(author_idx, author_sig)` 填充 signature_list。需把 vertex 的 signing_hash 与 cert signing_hash 对齐——**注意：cert signing_hash 域(0x43) 与 vertex signing_hash 域不同**，故 vertex 的 author_sig **不能直接作为 cert 签名**。这迫使选 Q8 选项①（显式 CommitVote 消息）。
+
+### 3.3 显式 CommitVote（修订：必须用选项①）
+因 cert signing_hash 与 vertex signing_hash 域不同，validator 观察到 commit leader 后须单独对 `cert.signing_hash` 签名并 gossip：
+- `network/mod.rs:517` NetworkMessage 新增 `CommitVote { epoch, commit_round, cert_signing_hash, signer_pubkey, signature }`
+- `network/mod.rs:504` GossipTopic 新增 `CommitVote`
+- `handle_p2p_connection` 新增 arm：收到 CommitVote 存入共享 `Arc<Mutex<HashMap<(epoch,commit_round), Vec<(pubkey,sig)>>>>`
+- validator loop：检测到 leader → 签 `cert.signing_hash` → gossip CommitVote → 累加到 ≥2/3 → `assemble_commit_certificate` → 出块
+
+### 3.4 validator_count 与 parent quorum
+- `main.rs:1327` `detect_commit_leader(&dag, &prev_hash, 1)` → `detect_commit_leader(&dag, &prev_hash, node.active_validator_count())`
+- `main.rs:1273` `validate_parents(1)` → `validate_parents(node.active_validator_count())`
+- `build_block_from_vertex`（`:1142-1151`）自签单签 → 改用 `assemble_commit_certificate(collected_votes, validator_count)`
+
+### 3.5 genesis validator set CLI（Q9 选项①）
+- `run_node`（`main.rs:178-253`）新增 `--genesis-validators <file>`（JSON：`[{pubkey, vrf_pubkey, stake}]`）
+- 填 `NodeConfig.genesis_validators`（`node/mod.rs:131`，当前所有构造器置空）
+- 所有节点须用相同文件（signer_bitmap index 基准 = `active_validator_pubkeys_sorted()`）
+
+### 3.6 VRF 时序接入（Q6）
+`Node::advance_epoch`（`node/mod.rs:503`）/ epoch 转换处：proposer 用 `Secp256k1VrfProver` 生成 proof → gossip → `submit_epoch_vrf_proof(chain_id, proposer, proof, &Secp256k1VrfVerifier::new())`。
+
+### 3.7 测试（Q10）
+单进程内多 `Node` + 共享 `InMemoryTransport` 集成测试：3 validator，提交 tx → 各自产 vertex → 互收 → 检测 leader → 互投 CommitVote → 2/3 凑齐 → 出块 → 各方 validate_block 通过。
+
+**工作量预估**：~600 行（main.rs loop 重写 + 网络消息 + CLI + 集成测试）。**风险最高**。
+
+---
+
+## #4-M1 代币（已记规范见上文 M1 段）/ #5-M2（最后）
+保持已记规范。#4-M1 的 gas→proposer 需在 block 末尾确定性位置 credit proposer（保证 state_root 可重现）。
+
+---
+
+## 建议恢复顺序
+1. **#9 Bridge**（独立，规范已就绪，~300 行）
+2. **#3 多签闭环**（最大，但前置 #1/#2 已就位）
+3. **#4-M1** → **#5-M2**
+

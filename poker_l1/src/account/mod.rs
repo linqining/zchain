@@ -21,8 +21,11 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
+use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
@@ -250,27 +253,122 @@ pub const fn apply_gameturn_tx(game_player_nonce: &mut u64) {
     *game_player_nonce = game_player_nonce.saturating_add(1);
 }
 
-// ===== AccountStore（内存版） =====
+// ===== AccountStore（RocksDB 持久化 + 内存工作集） =====
 
-/// 内存版 AccountStore（Phase 4 接入 rocksdb 持久化）。
+/// `accounts` 列族名。
+const ACCOUNTS_CF: &str = "accounts";
+
+/// 账户存储（RocksDB 持久化 + 内存工作集）。
 ///
-/// 按 `address` 索引账户。提供创建 / 查询 / 余额管理接口。
-#[derive(Debug, Default)]
+/// 按 `address` 索引账户。内存 `HashMap` 作为权威工作集（保证 `get`/`get_mut` 返回引用，
+/// 与 executor 的 `&mut AccountStore` 签名兼容）；可选的 RocksDB 后端在每次变更后
+/// 落盘，重启时 `open` 全量加载，防止账户余额与 nonce 丢失（缺口 #8）。
+///
+/// 设计权衡（Q11 选项①）：纯 RocksDB 会破坏 `get`/`get_mut` 返回 `&Account`/`&mut Account`
+/// 的现有 API（BTreeMap 式借用），需重写 executor 全部账户访问点。此处采用混合模型：
+/// 内存 HashMap 为权威态 + 同步写 DB，与 `ObjectDb`（内存 SMT + RocksDB）一致。
+/// 因账户无 Merkle 承诺需求，无需像 ObjectDb 那样维护树，仅 HashMap 足够。
 pub struct AccountStore {
+    /// 内存工作集（权威态）。
     accounts: HashMap<Address, Account>,
+    /// 可选 RocksDB 后端（`None` = 纯内存，用于测试；`Some` = 持久化）。
+    db: Option<Arc<DB>>,
+}
+
+impl std::fmt::Debug for AccountStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountStore")
+            .field("count", &self.accounts.len())
+            .field("persisted", &self.db.is_some())
+            .finish()
+    }
+}
+
+impl Default for AccountStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AccountStore {
-    /// 创建空 store。
+    /// 创建空 store（纯内存，无持久化）。
+    ///
+    /// 生产节点应使用 [`AccountStore::open`] 获取带 RocksDB 后端的实例。
     pub fn new() -> Self {
         Self {
             accounts: HashMap::new(),
+            db: None,
         }
     }
 
-    /// 注册新账户。若地址已存在返回 `ObjectIDCollision`（语义：地址碰撞）。
+    /// 打开（或创建）指定路径下的持久化 AccountStore。
+    ///
+    /// 启动时全量加载已有账户到内存工作集；后续 `create` / `credit` /
+    /// 通过 `get_mut` 的变更都会同步落盘。
+    /// 若目录不存在会自动创建（`create_if_missing` + `create_missing_column_families`）。
+    pub fn open(path: impl AsRef<Path>) -> PokerL1Result<Self> {
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+
+        let accounts_cf = ColumnFamilyDescriptor::new(ACCOUNTS_CF, Options::default());
+        let db = DB::open_cf_descriptors(&db_opts, path, vec![accounts_cf])
+            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+        let db = Arc::new(db);
+
+        // 全量加载已有账户到内存工作集（按 address 升序，确定性）。
+        let cf = db
+            .cf_handle(ACCOUNTS_CF)
+            .expect("accounts CF 必须存在（由 open 创建）");
+        let mut accounts = HashMap::new();
+        let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (_key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+            let account: Account = borsh::from_slice(&value)?;
+            accounts.insert(account.address, account);
+        }
+
+        Ok(Self {
+            accounts,
+            db: Some(db),
+        })
+    }
+
+    /// 打开一个临时目录下的持久化 AccountStore（用于测试 / 开发）。
+    ///
+    /// 使用 `std::env::temp_dir()` + 随机后缀，进程退出后由 OS 清理。
+    pub fn open_inmemory() -> PokerL1Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "poker_l1_accountstore_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        Self::open(path)
+    }
+
+    /// 把单个账户落盘（持久化模式下；内存模式为 no-op）。
+    ///
+    /// 在任何账户变更后调用，保证内存态与 DB 一致。
+    fn persist(&self, address: &Address) -> PokerL1Result<()> {
+        let Some(db) = &self.db else {
+            return Ok(()); // 纯内存模式，不持久化
+        };
+        let Some(cf) = db.cf_handle(ACCOUNTS_CF) else {
+            return Ok(());
+        };
+        let Some(account) = self.accounts.get(address) else {
+            return Ok(()); // 账户不存在，无可落盘
+        };
+        let value = borsh::to_vec(account)?;
+        db.put_cf(cf, address, value)
+            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 注册新账户。若地址已存在返回错误（语义：地址碰撞）。
     ///
     /// 注意：地址碰撞理论上不可能（blake2b_256 抗碰撞），此校验为防御性编程。
+    /// 持久化模式下，创建后立即落盘。
     pub fn create(&mut self, account: Account) -> PokerL1Result<()> {
         if self.accounts.contains_key(&account.address) {
             return Err(PokerL1Error::Other(format!(
@@ -278,7 +376,9 @@ impl AccountStore {
                 account.address
             )));
         }
-        self.accounts.insert(account.address, account);
+        let address = account.address;
+        self.accounts.insert(address, account);
+        self.persist(&address)?;
         Ok(())
     }
 
@@ -288,8 +388,19 @@ impl AccountStore {
     }
 
     /// 可变查询账户。
+    ///
+    /// **持久化约定**：调用方通过返回的 `&mut Account` 修改后，必须调用
+    /// [`persist`]（或经 [`credit`] / store 级 mutator）以落盘。executor 的
+    /// `apply_public_tx` 路径在变更后由 executor 显式调用 `persist`。
     pub fn get_mut(&mut self, address: &Address) -> Option<&mut Account> {
         self.accounts.get_mut(address)
+    }
+
+    /// 把指定地址的账户当前内存态落盘（持久化模式下）。
+    ///
+    /// 供 executor 在 `get_mut` + `apply_public_tx` 变更后调用，保证 DB 一致。
+    pub fn flush(&self, address: &Address) -> PokerL1Result<()> {
+        self.persist(address)
     }
 
     /// 从 tagged pubkey 查询账户（先派生地址再查）。
@@ -300,13 +411,16 @@ impl AccountStore {
 
     /// 充值（faucet / 收款）。
     ///
-    /// SEC-FIX-3：传播 `Account::credit` 的溢出错误。
+    /// SEC-FIX-3：传播 `Account::credit` 的溢出错误。持久化模式下变更后落盘。
     pub fn credit(&mut self, address: &Address, amount: Balance) -> PokerL1Result<()> {
         let account = self
             .accounts
             .get_mut(address)
             .ok_or_else(|| PokerL1Error::Other(format!("account not found: {:?}", address)))?;
-        account.credit(amount)
+        account.credit(amount)?;
+        drop(account); // 释放 &mut 借用，以便调用 persist(&self)
+        self.persist(address)?;
+        Ok(())
     }
 
     /// 当前账户数量。
@@ -739,5 +853,85 @@ mod tests {
     fn account_store_is_empty() {
         let store = AccountStore::new();
         assert!(store.is_empty());
+    }
+
+    // ===== 缺口 #8：AccountStore RocksDB 持久化测试 =====
+
+    #[test]
+    fn persisted_store_survives_reopen_create_and_credit() {
+        // 创建带持久化的 store → 写账户 + 充值 → 重启（重新 open 同路径）→ 状态仍在。
+        let path = std::env::temp_dir().join(format!(
+            "poker_l1_account_test_persist_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let tp = make_tagged_pubkey(0xAB, SignatureScheme::Secp256k1);
+        let account = Account::new(tp, 1_000_000);
+        let addr = account.address;
+
+        {
+            let mut store = AccountStore::open(&path).expect("open 持久化 store");
+            store.create(account).unwrap();
+            store.credit(&addr, 500_000).unwrap();
+            assert_eq!(store.get(&addr).unwrap().balance, 1_500_000);
+            // drop store（关闭 DB 句柄）
+        }
+
+        // 重启：重新 open 同路径，账户应仍在（持久化生效）
+        {
+            let store = AccountStore::open(&path).expect("reopen 持久化 store");
+            let recovered = store.get(&addr).expect("账户应持久化保留");
+            assert_eq!(recovered.balance, 1_500_000, "余额应在重启后保留");
+            assert_eq!(recovered.nonce, 0, "nonce 应在重启后保留");
+        }
+
+        // 清理临时目录
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn persisted_store_survives_reopen_nonce_mutation() {
+        // 验证 nonce 变更（经 get_mut + increment_nonce + flush）也能持久化。
+        let path = std::env::temp_dir().join(format!(
+            "poker_l1_account_test_nonce_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let tp = make_tagged_pubkey(0xCD, SignatureScheme::Secp256k1);
+        let account = Account::new(tp, 1_000);
+        let addr = account.address;
+
+        {
+            let mut store = AccountStore::open(&path).unwrap();
+            store.create(account).unwrap();
+            // 模拟 executor 路径：get_mut 变更 + 显式 flush
+            if let Some(acc) = store.get_mut(&addr) {
+                acc.increment_nonce();
+                acc.increment_nonce();
+                acc.debit(300).unwrap();
+            }
+            store.flush(&addr).unwrap();
+        }
+
+        {
+            let store = AccountStore::open(&path).unwrap();
+            let recovered = store.get(&addr).unwrap();
+            assert_eq!(recovered.nonce, 2, "nonce 变更应持久化");
+            assert_eq!(recovered.balance, 700, "debit 变更应持久化");
+        }
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn inmemory_store_new_has_no_db() {
+        // 纯内存 store（new / Default）不应有 DB 后端，flush 为 no-op 不报错。
+        let mut store = AccountStore::new();
+        let tp = make_tagged_pubkey(0xEF, SignatureScheme::Secp256k1);
+        let account = Account::new(tp, 100);
+        let addr = account.address;
+        store.create(account).unwrap();
+        // flush 在内存模式下应为 no-op（Ok(())）
+        store.flush(&addr).unwrap();
     }
 }

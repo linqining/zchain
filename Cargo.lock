@@ -1574,6 +1574,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1833,6 +1848,12 @@ checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "hmac-sha256"
+version = "1.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
 
 [[package]]
 name = "http"
@@ -2428,6 +2449,53 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "openssl"
+version = "0.10.81"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "foreign-types",
+ "libc",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "openssl-src"
+version = "300.6.1+3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.117"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
+dependencies = [
+ "cc",
+ "libc",
+ "openssl-src",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "pairing"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2556,6 +2624,7 @@ dependencies = [
  "ff",
  "group",
  "hex",
+ "openssl",
  "pairing",
  "poker_protocol",
  "poker_zkvm",
@@ -2575,6 +2644,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vm-common",
+ "vrf",
 ]
 
 [[package]]
@@ -4293,6 +4363,17 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
+
+[[package]]
+name = "vrf"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c61e8e7db1dafc0ffb6d1579befee4f0e8be3ffe467a8928045c8c032c59b607"
+dependencies = [
+ "hmac-sha256",
+ "openssl",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "wait-timeout"

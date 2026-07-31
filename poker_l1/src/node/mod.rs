@@ -365,9 +365,12 @@ impl Node {
         let block_path = config.data_dir.join("blocks");
         let object_path = config.data_dir.join("objects");
         let vertex_path = config.data_dir.join("vertices");
+        let account_path = config.data_dir.join("accounts");
         let block_store = BlockStore::open(&block_path)?;
         let object_db = ObjectDb::open(&object_path)?;
         let vertex_store = DagVertexStore::open(&vertex_path)?;
+        // 缺口 #8：AccountStore 落 RocksDB，重启后账户余额 / nonce 不丢失。
+        let account_store = AccountStore::open(&account_path)?;
         let validator_set = build_genesis_validator_set(config.genesis_validators.clone());
         let precompile_registry = build_default_precompile_registry();
         Ok(Self {
@@ -375,7 +378,7 @@ impl Node {
             block_store,
             object_db: std::sync::Mutex::new(object_db),
             vertex_store,
-            account_store: std::sync::Mutex::new(AccountStore::new()),
+            account_store: std::sync::Mutex::new(account_store),
             tx_cache: std::sync::Mutex::new(TxCacheState::new()),
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
             pending_tx_condvar: std::sync::Condvar::new(),

@@ -328,9 +328,9 @@ pub enum PokerL1Error {
     /// 同一 (epoch, commit_round) 出现两个冲突 commit certificate（commit cert equivocation slashing）。
     #[error("commit certificate equivocation: epoch={epoch}, commit_round={commit_round}")]
     CommitCertEquivocation { epoch: u64, commit_round: u64 },
-    /// VRF proof 验证失败（IMPL-SEC-2：ECVRF-secp256k1，97B proof）。
-    #[error("vrf proof verification failed")]
-    InvalidVrfProof,
+    /// VRF proof 验证失败（IMPL-SEC-2：ECVRF-secp256k1，81B proof）。
+    #[error("vrf proof verification failed: {0}")]
+    InvalidVrfProof(String),
     /// VRF input 与链上 epoch 不匹配（SEC2-C2：VRF input = hash(chain_id || epoch || prev_epoch_randomness)）。
     #[error("vrf input mismatch: expected epoch={expected}, got={got}")]
     VrfInputMismatch { expected: u64, got: u64 },

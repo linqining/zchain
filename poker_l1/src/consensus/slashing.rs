@@ -25,9 +25,11 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::BlockHeight;
-use crate::consensus::{Epoch, ValidatorSet};
+use crate::consensus::{DagCommitCertificate, DagVertex, Epoch, ValidatorSet};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
+use crate::signature::unified::verify_signature;
+use crate::ChainId;
 
 /// 默认 slashing 百分比（NEW-M15：equivocation 全额罚没，可治理）。
 pub const DEFAULT_SLASH_PERCENTAGE: u32 = 100;
@@ -372,42 +374,98 @@ pub fn apply_multi_slashing(
     Ok(results)
 }
 
-/// vertex equivocation 证据（SubTask 13.2）。
+/// vertex equivocation 证据（SubTask 13.2 + 缺口 #1-路径C：接通签名验证）。
 ///
 /// spec：提交两个冲突 vertex + 两个签名证据 → 踢出 + 罚没保证金。
+///
+/// 缺口 #1-路径C（Q3 同意破坏性 schema 变更）：此前只存 `vertex_hash_1/2` 与原始签名，
+/// 无法重算签名对象（vertex `signing_hash` 还需 chain_id + parent_hashes）。
+/// 现改为携带两个完整 [`DagVertex`]，使 [`validate`] 能严格重算 `signing_hash(chain_id)`
+/// 并调用 [`verify_signature`] 校验两个签名确由 `author` 对两个不同 vertex 签出。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct VertexEquivocationEvidence {
+    /// 链 ID（SEC-L4：进入 vertex `signing_hash`，重算签名对象所必需）。
+    pub chain_id: ChainId,
     /// epoch（SEC-C1：绑定 epoch 防 equivocation 证据歧义）。
     pub epoch: Epoch,
     /// DAG round（同一 round 双签构成 equivocation）。
     pub round: u64,
-    /// validator pubkey（author）。
+    /// validator pubkey（author，签名验证的公钥）。
     pub author: TaggedPubkey,
-    /// 第一个 vertex hash。
-    pub vertex_hash_1: crate::Hash,
-    /// 第二个 vertex hash（必须不同于 vertex_hash_1）。
-    pub vertex_hash_2: crate::Hash,
-    /// 第一个 vertex 的签名。
-    pub signature_1: Vec<u8>,
-    /// 第二个 vertex 的签名。
-    pub signature_2: Vec<u8>,
+    /// 第一个完整 vertex（含 parent_hashes，供严格重算 signing_hash）。
+    pub vertex_1: DagVertex,
+    /// 第二个完整 vertex（必须与 vertex_1 同 epoch+round+author 但 vertex_hash 不同）。
+    pub vertex_2: DagVertex,
 }
 
 impl VertexEquivocationEvidence {
-    /// 校验证据有效性（同一 epoch + round + author 但 vertex_hash 不同）。
+    /// 校验证据有效性（缺口 #1-路径C：接通真实验签）。
+    ///
+    /// 校验项：
+    /// 1. 两个 vertex 同 epoch + round + author
+    /// 2. 两个 vertex_hash 不同（构成 equivocation）
+    /// 3. **签名验证**：`vertex_1.author_sig` 与 `vertex_2.author_sig` 各自是对
+    ///    `vertex.signing_hash(chain_id)` 的有效签名，且公钥为 `self.author`
+    ///    （调用 [`crate::signature::unified::verify_signature`]）
     pub fn validate(&self) -> PokerL1Result<()> {
-        if self.vertex_hash_1 == self.vertex_hash_2 {
+        // 1. 同 epoch + round + author
+        if self.vertex_1.epoch != self.epoch
+            || self.vertex_2.epoch != self.epoch
+            || self.vertex_1.round != self.round
+            || self.vertex_2.round != self.round
+        {
+            return Err(PokerL1Error::Other(
+                "vertex equivocation: epoch/round mismatch".to_string(),
+            ));
+        }
+        if self.vertex_1.author_pubkey != self.author || self.vertex_2.author_pubkey != self.author
+        {
+            return Err(PokerL1Error::Other(
+                "vertex equivocation: author_pubkey mismatch".to_string(),
+            ));
+        }
+        // 2. vertex_hash 不同
+        let h1 = self.vertex_1.vertex_hash();
+        let h2 = self.vertex_2.vertex_hash();
+        if h1 == h2 {
             return Err(PokerL1Error::Other(
                 "vertex equivocation: vertex_hash_1 == vertex_hash_2 (not equivocation)"
                     .to_string(),
             ));
         }
-        if self.signature_1.is_empty() || self.signature_2.is_empty() {
+        // 3. 签名验证：两个 author_sig 必须各自对 signing_hash(chain_id) 有效
+        if self.vertex_1.author_sig.is_empty() || self.vertex_2.author_sig.is_empty() {
             return Err(PokerL1Error::Other(
                 "vertex equivocation: signatures must not be empty".to_string(),
             ));
         }
+        let signing_hash_1 = self.vertex_1.signing_hash(self.chain_id);
+        let signing_hash_2 = self.vertex_2.signing_hash(self.chain_id);
+        verify_signature(&self.author, &self.vertex_1.author_sig, &signing_hash_1).map_err(
+            |_| {
+                PokerL1Error::Other(
+                    "vertex equivocation: signature_1 verification failed".to_string(),
+                )
+            },
+        )?;
+        verify_signature(&self.author, &self.vertex_2.author_sig, &signing_hash_2).map_err(
+            |_| {
+                PokerL1Error::Other(
+                    "vertex equivocation: signature_2 verification failed".to_string(),
+                )
+            },
+        )?;
         Ok(())
+    }
+
+    /// 第一个 vertex hash（便捷访问）。
+    pub fn vertex_hash_1(&self) -> crate::Hash {
+        self.vertex_1.vertex_hash()
+    }
+
+    /// 第二个 vertex hash（便捷访问）。
+    pub fn vertex_hash_2(&self) -> crate::Hash {
+        self.vertex_2.vertex_hash()
     }
 
     /// 构造 slashing 原因。
@@ -416,29 +474,91 @@ impl VertexEquivocationEvidence {
     }
 }
 
-/// commit certificate equivocation 证据（SEC2-C1）。
+/// commit certificate equivocation 证据（SEC2-C1 + 缺口 #1-路径C：接通签名验证）。
+///
+/// spec：同 (epoch, commit_round) 双签 commit certificate → 踢出 + 罚没。
+///
+/// 缺口 #1-路径C（Q3 同意破坏性 schema 变更）：此前只存 `cert_hash_1/2`，**连 author 与
+/// 签名字段都没有**。现改为携带两个完整 [`DagCommitCertificate`] + 矛盾 validator 的
+/// pubkey（双签者）+ 其在两个 cert 中各自的签名，使 [`validate`] 能严格重算
+/// `cert.signing_hash(chain_id)` 并验证该 validator 在两个不同 cert 上都签了名。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct CommitCertEquivocationEvidence {
+    /// 链 ID（进入 cert `signing_hash`，重算签名对象所必需）。
+    pub chain_id: ChainId,
     /// epoch。
     pub epoch: Epoch,
     /// commit round（同一 commit_round 双签构成 equivocation）。
     pub commit_round: u64,
-    /// 第一个 commit certificate hash。
-    pub cert_hash_1: crate::Hash,
-    /// 第二个 commit certificate hash。
-    pub cert_hash_2: crate::Hash,
+    /// 矛盾 validator（双签者）的 pubkey（签名验证的公钥）。
+    pub author: TaggedPubkey,
+    /// 该 validator 在 `cert_1` 中的签名（从 cert_1.signature_list 提取）。
+    pub signature_1: Vec<u8>,
+    /// 该 validator 在 `cert_2` 中的签名（从 cert_2.signature_list 提取）。
+    pub signature_2: Vec<u8>,
+    /// 第一个完整 commit certificate（供严格重算 signing_hash）。
+    pub cert_1: DagCommitCertificate,
+    /// 第二个完整 commit certificate（同 epoch+commit_round 但内容不同）。
+    pub cert_2: DagCommitCertificate,
 }
 
 impl CommitCertEquivocationEvidence {
-    /// 校验证据有效性。
+    /// 校验证据有效性（缺口 #1-路径C：接通真实验签）。
+    ///
+    /// 校验项：
+    /// 1. 两个 cert 同 epoch + commit_round
+    /// 2. 两个 cert_hash 不同（构成 equivocation）
+    /// 3. `signature_1/2` 非空
+    /// 4. **签名验证**：`signature_1` 是 author 对 `cert_1.signing_hash(chain_id)` 的
+    ///    有效签名；`signature_2` 同理对 cert_2。
     pub fn validate(&self) -> PokerL1Result<()> {
-        if self.cert_hash_1 == self.cert_hash_2 {
+        // 1. 同 epoch + commit_round
+        if self.cert_1.epoch != self.epoch
+            || self.cert_2.epoch != self.epoch
+            || self.cert_1.commit_round != self.commit_round
+            || self.cert_2.commit_round != self.commit_round
+        {
+            return Err(PokerL1Error::Other(
+                "commit cert equivocation: epoch/commit_round mismatch".to_string(),
+            ));
+        }
+        // 2. cert_hash 不同
+        if self.cert_1.cert_hash(self.chain_id) == self.cert_2.cert_hash(self.chain_id) {
             return Err(PokerL1Error::Other(
                 "commit cert equivocation: cert_hash_1 == cert_hash_2 (not equivocation)"
                     .to_string(),
             ));
         }
+        // 3. 签名非空
+        if self.signature_1.is_empty() || self.signature_2.is_empty() {
+            return Err(PokerL1Error::Other(
+                "commit cert equivocation: signatures must not be empty".to_string(),
+            ));
+        }
+        // 4. 签名验证
+        let signing_hash_1 = self.cert_1.signing_hash(self.chain_id);
+        let signing_hash_2 = self.cert_2.signing_hash(self.chain_id);
+        verify_signature(&self.author, &self.signature_1, &signing_hash_1).map_err(|_| {
+            PokerL1Error::Other(
+                "commit cert equivocation: signature_1 verification failed".to_string(),
+            )
+        })?;
+        verify_signature(&self.author, &self.signature_2, &signing_hash_2).map_err(|_| {
+            PokerL1Error::Other(
+                "commit cert equivocation: signature_2 verification failed".to_string(),
+            )
+        })?;
         Ok(())
+    }
+
+    /// 第一个 cert hash（便捷访问）。
+    pub fn cert_hash_1(&self) -> crate::Hash {
+        self.cert_1.cert_hash(self.chain_id)
+    }
+
+    /// 第二个 cert hash（便捷访问）。
+    pub fn cert_hash_2(&self) -> crate::Hash {
+        self.cert_2.cert_hash(self.chain_id)
     }
 
     /// 构造 slashing 原因。
@@ -813,75 +933,255 @@ mod tests {
         assert_eq!(results[1].stake_after, 0);
     }
 
-    // ===== VertexEquivocationEvidence 测试 =====
+    // ===== VertexEquivocationEvidence 测试（缺口 #1-路径C：真实签名） =====
 
-    #[test]
-    fn vertex_equivocation_evidence_validate_ok() {
-        let evidence = VertexEquivocationEvidence {
-            epoch: 1,
-            round: 10,
-            author: make_tagged_pubkey(0x10),
-            vertex_hash_1: [1u8; 32],
-            vertex_hash_2: [2u8; 32],
-            signature_1: vec![0u8; 65],
-            signature_2: vec![0u8; 65],
+    /// 构造一个 secp256k1 (secret, tagged_pubkey) 对。
+    fn make_real_keypair(seed: u8) -> (secp256k1::SecretKey, TaggedPubkey) {
+        use rand::rngs::OsRng;
+        let secp = secp256k1::Secp256k1::new();
+        let mut secret_bytes = [0u8; 32];
+        for (i, b) in secret_bytes.iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        // 确保标量合法（极低概率溢出，循环扰动直到合法）
+        let secret = loop {
+            match secp256k1::SecretKey::from_slice(&secret_bytes) {
+                Ok(s) => break s,
+                Err(_) => {
+                    secret_bytes[31] = secret_bytes[31].wrapping_add(1);
+                }
+            }
         };
-        evidence.validate().expect("有效证据应通过");
+        let public = secp256k1::PublicKey::from_secret_key(&secp, &secret);
+        let tagged = TaggedPubkey::new(
+            SignatureScheme::Secp256k1,
+            crate::signature::tagged_pubkey::CURRENT_VERSION,
+            public.serialize().to_vec(),
+        )
+        .expect("tagged pubkey");
+        (secret, tagged)
+    }
+
+    /// 用 secret 对 32B hash 做 recoverable ECDSA，返回 r||s||v（65B）。
+    fn sign_hash(secret: &secp256k1::SecretKey, msg_hash: &[u8; 32]) -> Vec<u8> {
+        let secp = secp256k1::Secp256k1::new();
+        let msg = secp256k1::Message::from_digest(*msg_hash);
+        let sig = secp.sign_ecdsa_recoverable(&msg, secret);
+        let (recovery_id, compact) = sig.serialize_compact();
+        let mut full = compact.to_vec();
+        full.push(recovery_id.to_i32() as u8);
+        full
+    }
+
+    /// 构造一个 DagVertex（author 用给定 tagged pubkey，含给定 parent_hashes），
+    /// 用 secret 对 vertex.signing_hash(chain_id) 签名填入 author_sig。
+    fn make_signed_vertex(
+        secret: &secp256k1::SecretKey,
+        author: TaggedPubkey,
+        epoch: Epoch,
+        round: u64,
+        parent_hashes: Vec<crate::Hash>,
+        chain_id: ChainId,
+    ) -> DagVertex {
+        let unsigned = DagVertex {
+            epoch,
+            round,
+            author_pubkey: author,
+            tx_list: vec![],
+            parent_hashes: parent_hashes.clone(),
+            author_sig: vec![],
+        };
+        let signing_hash = unsigned.signing_hash(chain_id);
+        let sig = sign_hash(secret, &signing_hash);
+        DagVertex {
+            author_sig: sig,
+            ..unsigned
+        }
     }
 
     #[test]
-    fn vertex_equivocation_evidence_rejects_same_hash() {
+    fn vertex_equivocation_evidence_validate_ok_with_real_sigs() {
+        // 缺口 #1-路径C：两 vertex 同 epoch+round+author 但 parent_hashes 不同 → 不同
+        // vertex_hash → 用同一 author 的 secret 分别签名 → 证据验签通过。
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret, author) = make_real_keypair(0x10);
+        let v1 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xAA; 32]], chain_id);
+        let v2 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xBB; 32]], chain_id);
+        assert_ne!(v1.vertex_hash(), v2.vertex_hash(), "parent 不同 → hash 不同");
         let evidence = VertexEquivocationEvidence {
+            chain_id,
             epoch: 1,
             round: 10,
-            author: make_tagged_pubkey(0x10),
-            vertex_hash_1: [1u8; 32],
-            vertex_hash_2: [1u8; 32], // 相同
-            signature_1: vec![0u8; 65],
-            signature_2: vec![0u8; 65],
+            author,
+            vertex_1: v1,
+            vertex_2: v2,
+        };
+        evidence.validate().expect("真实双签证据应验签通过");
+    }
+
+    #[test]
+    fn vertex_equivocation_evidence_rejects_same_vertex() {
+        // 两个相同 vertex（vertex_hash 相同）→ 非 equivocation。
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret, author) = make_real_keypair(0x11);
+        let v1 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xAA; 32]], chain_id);
+        let v2 = v1.clone();
+        let evidence = VertexEquivocationEvidence {
+            chain_id,
+            epoch: 1,
+            round: 10,
+            author,
+            vertex_1: v1,
+            vertex_2: v2,
         };
         let err = evidence.validate().unwrap_err();
         assert!(matches!(err, PokerL1Error::Other(_)));
     }
 
     #[test]
-    fn vertex_equivocation_evidence_rejects_empty_signature() {
+    fn vertex_equivocation_evidence_rejects_bad_signature() {
+        // 第二个 vertex 的 author_sig 被篡改 → 验签失败。
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret, author) = make_real_keypair(0x12);
+        let v1 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xAA; 32]], chain_id);
+        let mut v2 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xBB; 32]], chain_id);
+        v2.author_sig[0] ^= 0xFF; // 篡改签名
         let evidence = VertexEquivocationEvidence {
+            chain_id,
             epoch: 1,
             round: 10,
-            author: make_tagged_pubkey(0x10),
-            vertex_hash_1: [1u8; 32],
-            vertex_hash_2: [2u8; 32],
-            signature_1: vec![], // 空
-            signature_2: vec![0u8; 65],
+            author,
+            vertex_1: v1,
+            vertex_2: v2,
         };
         let err = evidence.validate().unwrap_err();
-        assert!(matches!(err, PokerL1Error::Other(_)));
+        assert!(matches!(err, PokerL1Error::Other(_)), "篡改签名应拒绝");
     }
 
-    // ===== CommitCertEquivocationEvidence 测试 =====
-
     #[test]
-    fn commit_cert_equivocation_evidence_validate_ok() {
-        let evidence = CommitCertEquivocationEvidence {
+    fn vertex_equivocation_evidence_rejects_wrong_author() {
+        // vertex_2 的 author 与证据 author 不一致（不同 validator 的 vertex）→ 拒绝。
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret_a, author_a) = make_real_keypair(0x13);
+        let (secret_b, author_b) = make_real_keypair(0x14);
+        let v1 = make_signed_vertex(&secret_a, author_a.clone(), 1, 10, vec![[0xAA; 32]], chain_id);
+        // v2 用 author_b 签名，但证据 author 填 author_a
+        let v2 = make_signed_vertex(&secret_b, author_b, 1, 10, vec![[0xBB; 32]], chain_id);
+        let evidence = VertexEquivocationEvidence {
+            chain_id,
+            epoch: 1,
+            round: 10,
+            author: author_a,
+            vertex_1: v1,
+            vertex_2: v2,
+        };
+        let err = evidence.validate().unwrap_err();
+        assert!(matches!(err, PokerL1Error::Other(_)), "author 不一致应拒绝");
+    }
+
+    // ===== CommitCertEquivocationEvidence 测试（缺口 #1-路径C：真实签名） =====
+
+    /// 构造一个 cert，由给定 (validator_idx, secret) 对 cert.signing_hash(chain_id) 签名。
+    fn make_signed_cert(
+        validator_idx: usize,
+        validator_count: usize,
+        secret: &secp256k1::SecretKey,
+        vertex_hash_list: Vec<crate::Hash>,
+        chain_id: ChainId,
+    ) -> DagCommitCertificate {
+        let cert = DagCommitCertificate {
             epoch: 1,
             commit_round: 5,
-            cert_hash_1: [1u8; 32],
-            cert_hash_2: [2u8; 32],
+            prev_commit_hash: [0u8; 32],
+            vertex_hash_list,
+            round_attendance_bitmap: vec![0xFF],
+            state_root: [0x11; 32],
+            public_tx_root: [0x22; 32],
+            gameturn_tx_root: [0x33; 32],
+            signature_list: vec![],
+            signer_bitmap: vec![0u8; (validator_count + 7) / 8],
         };
-        evidence.validate().expect("有效证据应通过");
+        let signing_hash = cert.signing_hash(chain_id);
+        let sig = sign_hash(secret, &signing_hash);
+        crate::consensus::assemble_commit_certificate(
+            1,
+            5,
+            [0u8; 32],
+            cert.vertex_hash_list.clone(),
+            cert.round_attendance_bitmap.clone(),
+            cert.state_root,
+            cert.public_tx_root,
+            cert.gameturn_tx_root,
+            &[(validator_idx, sig)],
+            validator_count,
+        )
+        .expect("assemble cert")
     }
 
     #[test]
-    fn commit_cert_equivocation_evidence_rejects_same_hash() {
+    fn commit_cert_equivocation_evidence_validate_ok_with_real_sigs() {
+        // 同一 validator 对两个不同 cert（不同 vertex_hash_list）签名 → equivocation。
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret, tagged) = make_real_keypair(0x20);
+        let cert1 = make_signed_cert(0, 3, &secret, vec![[0xAA; 32]], chain_id);
+        let cert2 = make_signed_cert(0, 3, &secret, vec![[0xBB; 32]], chain_id);
+        assert_ne!(
+            cert1.cert_hash(chain_id),
+            cert2.cert_hash(chain_id),
+            "不同 vertex_hash_list → cert_hash 不同"
+        );
         let evidence = CommitCertEquivocationEvidence {
+            chain_id,
             epoch: 1,
             commit_round: 5,
-            cert_hash_1: [1u8; 32],
-            cert_hash_2: [1u8; 32],
+            author: tagged,
+            signature_1: cert1.signature_list[0].clone(),
+            signature_2: cert2.signature_list[0].clone(),
+            cert_1: cert1,
+            cert_2: cert2,
+        };
+        evidence.validate().expect("真实双签 cert 证据应验签通过");
+    }
+
+    #[test]
+    fn commit_cert_equivocation_evidence_rejects_identical_cert() {
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret, tagged) = make_real_keypair(0x21);
+        let cert1 = make_signed_cert(0, 3, &secret, vec![[0xAA; 32]], chain_id);
+        let cert2 = cert1.clone();
+        let evidence = CommitCertEquivocationEvidence {
+            chain_id,
+            epoch: 1,
+            commit_round: 5,
+            author: tagged,
+            signature_1: cert1.signature_list[0].clone(),
+            signature_2: cert2.signature_list[0].clone(),
+            cert_1: cert1,
+            cert_2: cert2,
         };
         let err = evidence.validate().unwrap_err();
-        assert!(matches!(err, PokerL1Error::Other(_)));
+        assert!(matches!(err, PokerL1Error::Other(_)), "相同 cert 非 equivocation");
+    }
+
+    #[test]
+    fn commit_cert_equivocation_evidence_rejects_bad_signature() {
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret, tagged) = make_real_keypair(0x22);
+        let cert1 = make_signed_cert(0, 3, &secret, vec![[0xAA; 32]], chain_id);
+        let mut cert2 = make_signed_cert(0, 3, &secret, vec![[0xBB; 32]], chain_id);
+        cert2.signature_list[0][0] ^= 0xFF; // 篡改第二签名
+        let evidence = CommitCertEquivocationEvidence {
+            chain_id,
+            epoch: 1,
+            commit_round: 5,
+            author: tagged,
+            signature_1: cert1.signature_list[0].clone(),
+            signature_2: cert2.signature_list[0].clone(),
+            cert_1: cert1,
+            cert_2: cert2,
+        };
+        let err = evidence.validate().unwrap_err();
+        assert!(matches!(err, PokerL1Error::Other(_)), "篡改签名应拒绝");
     }
 
     // ===== check_downtime_slashing 测试 =====
@@ -1033,14 +1333,18 @@ mod tests {
 
     #[test]
     fn vertex_equivocation_evidence_bcs_roundtrip() {
+        // 缺口 #1-路径C：新 schema 携带两个完整 vertex 的 BCS 往返。
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let (secret, author) = make_real_keypair(0x30);
+        let v1 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xAA; 32]], chain_id);
+        let v2 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xBB; 32]], chain_id);
         let evidence = VertexEquivocationEvidence {
+            chain_id,
             epoch: 1,
             round: 10,
-            author: make_tagged_pubkey(0x10),
-            vertex_hash_1: [1u8; 32],
-            vertex_hash_2: [2u8; 32],
-            signature_1: vec![0u8; 65],
-            signature_2: vec![0u8; 65],
+            author,
+            vertex_1: v1,
+            vertex_2: v2,
         };
         let bytes = borsh::to_vec(&evidence).unwrap();
         let recovered: VertexEquivocationEvidence = borsh::from_slice(&bytes).unwrap();

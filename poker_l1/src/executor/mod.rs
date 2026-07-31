@@ -661,6 +661,11 @@ fn execute_block_parallel(
                         continue;
                     }
                 }
+                // 缺口 #8：get_mut 变更后显式落盘（持久化模式下；内存模式 no-op）。
+                if let Err(e) = account_store.flush(&caller) {
+                    receipts[idx] = Some(TxReceipt::failure(tx, &e));
+                    continue;
+                }
             }
 
             // block gas 累计（仅成功且需 gas 的 tx）
@@ -746,6 +751,14 @@ pub fn execute_block_serial<B: ObjectBackend>(
             continue;
         }
         let receipt = execute_tx(env, tx, object_db, account_store);
+        // 缺口 #8：串行执行路径下，gas-lane tx 的账户变更（扣费 + nonce）需显式落盘。
+        if needs_gas {
+            let caller = derive_address(&tx.tagged_pubkey);
+            if let Err(e) = account_store.flush(&caller) {
+                receipts.push(TxReceipt::failure(tx, &e));
+                continue;
+            }
+        }
         // 仅 gas 计费通道的成功 tx 累计 block gas（gas-free lane 不计入）
         if receipt.success && needs_gas {
             total_gas = total_gas.saturating_add(receipt.gas_used);

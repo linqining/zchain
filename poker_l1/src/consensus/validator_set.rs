@@ -7,7 +7,7 @@
 //!   - **SEC-C2**：主网 |V| >= 5（OffChain 模式强制约束）
 //!   - **SEC-M2**：单次缩减比例 <= 20%
 //!   - **SEC-M11 + SEC2-C2**：VRF 随机源，`VRF input = hash(chain_id || epoch || prev_epoch_randomness)`
-//!   - **IMPL-SEC-2**：ECVRF-secp256k1 + SHA-256，proof = `(gamma_33B || c_32B || s_32B)` = 97 字节
+//!   - **IMPL-SEC-2**：ECVRF-secp256k1 + SHA-256，proof = `(gamma_33B || c_16B || s_32B)` = 81 字节（缺口 #2 修正）
 //!   - **SEC2-M10**：VRF 私钥销毁与 retired 标记
 //!   - **SEC2-M12**：epoch_randomness fallback 不可预测性
 //!   - **SEC2-H4**：rotate_validator_key timelock 密钥约束
@@ -16,7 +16,7 @@
 //! ## VRF 实现说明
 //!
 //! IMPL-SEC-2 要求 ECVRF-secp256k1 + SHA-256。本模块定义：
-//! - `VrfProof` 结构（97 字节：gamma_33 || c_32 || s_32）
+//! - `VrfProof` 结构（81 字节规范布局：gamma_33 || c_16 || s_32，缺口 #2 修正）
 //! - `compute_vrf_input` / `compute_vrf_output` 函数（hash-based，可立即实现）
 //! - `VrfVerifier` trait（实际 ECVRF 验证算法为密码学实现，本模块提供 trait 与 stub 验证器，
 //!   生产环境需引入 `vrf` crate 或自行实现 ECVRF-secp256k1）
@@ -34,14 +34,29 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
 use crate::{BlockHeight, ChainId, Hash};
 
-/// VRF proof 字节长度（IMPL-SEC-2：gamma_33B || c_32B || s_32B = 97 字节）。
-pub const VRF_PROOF_SIZE: usize = 97;
+/// VRF proof 字节长度（IMPL-SEC-2 / ECVRF-secp256k1-SHA256-TAI）。
+///
+/// 规范 proof 布局：`gamma_33B || c_16B || s_32B` = 81 字节。
+/// - `gamma`：ECVRF gamma（compressed secp256k1 point，33 字节 = qlen/8 + 1）
+/// - `c`：挑战值（16 字节 = n/8，n = 128 bit）
+/// - `s`：响应值（32 字节 = 2 * c_oct）
+///
+/// 注意：此前版本误将 `c` 定为 32 字节（97B 总长），与 ECVRF-secp256k1-SHA256-TAI
+/// 不符（draft-irtf-cfrg-vrf-05 中 c 长度为 2n 位即 16 字节）。缺口 #2 修正为规范布局。
+pub const VRF_PROOF_SIZE: usize = 81;
 
 /// VRF pubkey 长度（compressed secp256k1 = 33 字节）。
 pub const VRF_PUBKEY_SIZE: usize = 33;
 
 /// VRF random output 长度（SHA-256 = 32 字节）。
 pub const VRF_OUTPUT_SIZE: usize = 32;
+
+/// ECVRF gamma 字节长度（compressed secp256k1 point）。
+const VRF_GAMMA_SIZE: usize = 33;
+/// ECVRF 挑战值 c 字节长度（n/8 = 16）。
+const VRF_C_SIZE: usize = 16;
+/// ECVRF 响应值 s 字节长度（2 * c_oct = 32）。
+const VRF_S_SIZE: usize = 32;
 
 /// VRF 签名域分隔前缀。
 const VRF_INPUT_DOMAIN: u8 = 0x56; // 'V' for VRF
@@ -74,12 +89,15 @@ mod big_array_33 {
     }
 }
 
-/// VRF proof 结构（IMPL-SEC-2：ECVRF-secp256k1 + SHA-256）。
+/// VRF proof 结构（IMPL-SEC-2 / ECVRF-secp256k1-SHA256-TAI，缺口 #2 修正布局）。
 ///
-/// proof 格式：`gamma_33B || c_32B || s_32B` = 97 字节。
+/// 规范 proof 格式：`gamma_33B || c_16B || s_32B` = 81 字节。
 /// - `gamma`：ECVRF 的 gamma 值（compressed secp256k1 point，33 字节）
-/// - `c`：挑战值（32 字节）
-/// - `s`：响应值（32 字节）
+/// - `c`：挑战值（16 字节，n/8 = 128bit / 8）
+/// - `s`：响应值（32 字节，2 * c_oct）
+///
+/// `to_bytes()` / `from_bytes()` 产出与 `vrf` crate 原生 proof 编码完全一致的 81 字节，
+/// 供 [`crate::consensus::ecvrf`] 的真实 prover/verifier 直接消费。
 #[derive(
     Debug,
     Clone,
@@ -95,15 +113,15 @@ mod big_array_33 {
 pub struct VrfProof {
     /// ECVRF gamma 值（compressed secp256k1 point）。
     #[serde(with = "big_array_33")]
-    pub gamma: [u8; 33],
-    /// 挑战值 c。
-    pub c: [u8; 32],
-    /// 响应值 s。
-    pub s: [u8; 32],
+    pub gamma: [u8; VRF_GAMMA_SIZE],
+    /// 挑战值 c（16 字节）。
+    pub c: [u8; VRF_C_SIZE],
+    /// 响应值 s（32 字节）。
+    pub s: [u8; VRF_S_SIZE],
 }
 
 impl VrfProof {
-    /// 从 97 字节切片构造 VrfProof。
+    /// 从 81 字节切片构造 VrfProof（规范 ECVRF-secp256k1-SHA256-TAI 布局）。
     pub fn from_bytes(bytes: &[u8]) -> PokerL1Result<Self> {
         if bytes.len() != VRF_PROOF_SIZE {
             return Err(PokerL1Error::InvalidSignatureLength {
@@ -111,21 +129,24 @@ impl VrfProof {
                 expected: VRF_PROOF_SIZE,
             });
         }
-        let mut gamma = [0u8; 33];
-        let mut c = [0u8; 32];
-        let mut s = [0u8; 32];
-        gamma.copy_from_slice(&bytes[0..33]);
-        c.copy_from_slice(&bytes[33..65]);
-        s.copy_from_slice(&bytes[65..97]);
+        let mut gamma = [0u8; VRF_GAMMA_SIZE];
+        let mut c = [0u8; VRF_C_SIZE];
+        let mut s = [0u8; VRF_S_SIZE];
+        gamma.copy_from_slice(&bytes[0..VRF_GAMMA_SIZE]);
+        c.copy_from_slice(&bytes[VRF_GAMMA_SIZE..VRF_GAMMA_SIZE + VRF_C_SIZE]);
+        s.copy_from_slice(
+            &bytes[VRF_GAMMA_SIZE + VRF_C_SIZE..VRF_GAMMA_SIZE + VRF_C_SIZE + VRF_S_SIZE],
+        );
         Ok(Self { gamma, c, s })
     }
 
-    /// 序列化为 97 字节。
+    /// 序列化为 81 字节（规范 ECVRF-secp256k1-SHA256-TAI 布局，与 `vrf` crate 原生编码一致）。
     pub fn to_bytes(&self) -> [u8; VRF_PROOF_SIZE] {
         let mut out = [0u8; VRF_PROOF_SIZE];
-        out[0..33].copy_from_slice(&self.gamma);
-        out[33..65].copy_from_slice(&self.c);
-        out[65..97].copy_from_slice(&self.s);
+        out[0..VRF_GAMMA_SIZE].copy_from_slice(&self.gamma);
+        out[VRF_GAMMA_SIZE..VRF_GAMMA_SIZE + VRF_C_SIZE].copy_from_slice(&self.c);
+        out[VRF_GAMMA_SIZE + VRF_C_SIZE..VRF_GAMMA_SIZE + VRF_C_SIZE + VRF_S_SIZE]
+            .copy_from_slice(&self.s);
         out
     }
 }
@@ -142,7 +163,7 @@ pub trait VrfVerifier: Send + Sync {
     /// 参数：
     /// - `vrf_pubkey`：validator 的 VRF pubkey（compressed 33B）
     /// - `input`：VRF input（32 字节，由 [`compute_vrf_input`] 计算）
-    /// - `proof`：VRF proof（97 字节）
+    /// - `proof`：VRF proof（81 字节，规范 ECVRF-secp256k1-SHA256-TAI 布局）
     ///
     /// 返回 `Ok(output)` 表示验证通过，output 为 32 字节 random output；
     /// 返回 `Err` 表示验证失败。
@@ -644,9 +665,9 @@ mod tests {
     #[test]
     fn vrf_proof_from_bytes_ok() {
         let bytes = [0xABu8; VRF_PROOF_SIZE];
-        let proof = VrfProof::from_bytes(&bytes).expect("97 字节应解析成功");
+        let proof = VrfProof::from_bytes(&bytes).expect("81 字节应解析成功");
         assert_eq!(proof.gamma, [0xAB; 33]);
-        assert_eq!(proof.c, [0xAB; 32]);
+        assert_eq!(proof.c, [0xAB; 16]);
         assert_eq!(proof.s, [0xAB; 32]);
     }
 
@@ -661,7 +682,7 @@ mod tests {
     fn vrf_proof_roundtrip() {
         let proof = VrfProof {
             gamma: [1u8; 33],
-            c: [2u8; 32],
+            c: [2u8; 16],
             s: [3u8; 32],
         };
         let bytes = proof.to_bytes();
@@ -716,7 +737,7 @@ mod tests {
         let input = [0x20; VRF_OUTPUT_SIZE];
         let proof = VrfProof {
             gamma: [0; 33],
-            c: [0; 32],
+            c: [0; 16],
             s: [0; 32],
         };
         let output = verifier.verify(&pubkey, &input, &proof).expect("stub 验证");
@@ -927,7 +948,7 @@ mod tests {
         let proposer = set.validators[0].pubkey.clone();
         let proof = VrfProof {
             gamma: [1; 33],
-            c: [2; 32],
+            c: [2; 16],
             s: [3; 32],
         };
         let verifier = StubVrfVerifier;
@@ -944,7 +965,7 @@ mod tests {
         let proposer = set.validators[0].pubkey.clone();
         let proof = VrfProof {
             gamma: [0; 33],
-            c: [0; 32],
+            c: [0; 16],
             s: [0; 32],
         };
         let verifier = StubVrfVerifier;
@@ -1025,7 +1046,7 @@ mod tests {
     fn vrf_proof_bcs_roundtrip() {
         let proof = VrfProof {
             gamma: [1; 33],
-            c: [2; 32],
+            c: [2; 16],
             s: [3; 32],
         };
         let bytes = borsh::to_vec(&proof).unwrap();

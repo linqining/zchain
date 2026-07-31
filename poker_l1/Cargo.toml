@@ -42,6 +42,12 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 # 并行执行器（execute_block 波次化并发）：波次内无冲突 tx 经 rayon 线程池并发执行。
 rayon = { workspace = true }
+# ECVRF-secp256k1-SHA256-TAI（缺口 #2：替换 StubVrfVerifier）。
+# `vrf` crate 提供 SECP256K1_SHA256_TAI 实现（基于 OpenSSL 后端）。
+# 启用 openssl 的 vendored 特性：从源码编译 OpenSSL，避免依赖系统 OpenSSL
+# （本机构建机仅 x86_64 系统 OpenSSL，vendored 保证 arm64 / CI 可复现构建）。
+vrf = "0.2.5"
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 # 测试专用，避免影响生产二进制大小
