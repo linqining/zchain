@@ -123,6 +123,8 @@ pub(crate) struct CanonicalVerifierWitness {
     pub merkle_leaves: Vec<CanonicalMerkleLeaf>,
     pub merkle_steps: Vec<CanonicalMerkleStep>,
     pub merkle_node_uses: Vec<CanonicalMerkleNodeUse>,
+    pub first_layer_query_positions: Vec<usize>,
+    pub first_layer_answers: Vec<SecureField>,
     pub fri_fold_layers: Vec<CanonicalFriFoldLayer>,
     pub last_layer_query_positions: Vec<usize>,
     pub last_layer_query_evaluations: Vec<SecureField>,
@@ -228,6 +230,8 @@ impl CanonicalVerifierWitness {
             merkle_leaves,
             merkle_steps,
             merkle_node_uses,
+            first_layer_query_positions: replay.fri_challenges.query_positions.clone(),
+            first_layer_answers: replay.first_layer_answers.clone(),
             fri_fold_layers,
             last_layer_query_positions: replay.fri.last_layer_query_positions.clone(),
             last_layer_query_evaluations: replay.fri.last_layer_query_evaluations.clone(),
@@ -322,6 +326,11 @@ impl CanonicalVerifierWitness {
                 .fri_fold_layers
                 .iter()
                 .all(|layer| fri_layer_is_consistent(layer, &self.merkle_leaves))
+            && first_layer_answers_feed_fri(
+                &self.first_layer_query_positions,
+                &self.first_layer_answers,
+                self.fri_fold_layers.first(),
+            )
             && self
                 .fri_fold_layers
                 .windows(2)
@@ -332,6 +341,36 @@ impl CanonicalVerifierWitness {
             })
             && self.last_layer_query_positions.len() == self.last_layer_query_evaluations.len()
     }
+}
+
+fn first_layer_answers_feed_fri(
+    query_positions: &[usize],
+    answers: &[SecureField],
+    first_layer: Option<&CanonicalFriFoldLayer>,
+) -> bool {
+    let Some(first_layer) = first_layer else {
+        return false;
+    };
+    if query_positions.len() != answers.len() {
+        return false;
+    }
+    let opened = first_layer
+        .decommitment_positions
+        .iter()
+        .copied()
+        .zip(
+            first_layer
+                .opened_coset_evaluations
+                .iter()
+                .flatten()
+                .copied(),
+        )
+        .collect::<HashMap<_, _>>();
+    query_positions
+        .iter()
+        .copied()
+        .zip(answers.iter().copied())
+        .all(|(position, answer)| opened.get(&position) == Some(&answer))
 }
 
 fn push_merkle_tree(

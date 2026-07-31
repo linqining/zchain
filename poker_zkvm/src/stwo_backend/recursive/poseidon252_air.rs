@@ -18,7 +18,7 @@ use starknet_ff::FieldElement as FieldElement252;
 use stwo::core::air::Component;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
-use stwo::core::pcs::{PcsConfig, TreeSubspan, TreeVec};
+use stwo::core::pcs::{PcsConfig, TreeSubspan};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs::blake2_hash::Blake2sHash;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
@@ -52,14 +52,17 @@ use super::replay_witness::{CanonicalPoseidonCall, PoseidonCallSource};
 
 const POSEIDON_AGGREGATOR_RELATION_ID: u32 = 1_551_892_206;
 const CANONICAL_POSEIDON_CALL_RELATION_ID: u32 = 1_261_438_649;
-const N_CALL_IDS: usize = 6;
+pub(crate) const TRANSCRIPT_POSEIDON_CALL_RELATION_ID: u32 = 1_834_672_531;
+pub(crate) const MERKLE_POSEIDON_CALL_RELATION_ID: u32 = 1_834_672_533;
+pub(crate) const N_CALL_IDS: usize = 6;
 const N_CALL_VALUE_COLUMNS: usize = N_CALL_IDS * FELT252_N_WORDS;
 const N_SOURCE_SELECTORS: usize = 3;
-const N_KIND_SELECTORS: usize = 10;
+pub(crate) const N_KIND_SELECTORS: usize = 10;
 const N_CALL_METADATA_COLUMNS: usize = 4 + N_SOURCE_SELECTORS + N_KIND_SELECTORS;
 pub(crate) const POSEIDON252_CALL_AIR_NUM_COLUMNS: usize =
     N_CALL_METADATA_COLUMNS + N_CALL_IDS + N_CALL_VALUE_COLUMNS;
 pub(crate) const POSEIDON252_CALL_INTERACTION_COLUMNS: usize = 16;
+pub(crate) const POSEIDON252_SEMANTIC_INTERACTION_COLUMNS: usize = 20;
 
 const POSEIDON_CLOSURE_COMPONENTS: [&str; 13] = [
     "range_check_9_9",
@@ -83,8 +86,6 @@ pub(crate) enum Poseidon252AirError {
     EmptyCalls,
     #[error("canonical Poseidon252 call {index} has an invalid native input/output pair")]
     InvalidCall { index: usize },
-    #[error("official Poseidon252 lookup closure is unbalanced: {0:?}")]
-    UnbalancedLookup(SecureField),
     #[error("canonical Poseidon252 call metadata does not fit M31")]
     MetadataOverflow,
 }
@@ -177,7 +178,7 @@ impl CanonicalCallMetadata {
     }
 }
 
-const fn kind_index(kind: Poseidon252CallKind) -> usize {
+pub(crate) const fn kind_index(kind: Poseidon252CallKind) -> usize {
     match kind {
         Poseidon252CallKind::MerkleLeafAbsorb => 0,
         Poseidon252CallKind::MerkleLeafFinalize => 1,
@@ -200,7 +201,7 @@ pub(crate) struct SyntheticPoseidonCallIds {
 }
 
 impl SyntheticPoseidonCallIds {
-    fn flat(self) -> [BaseField; N_CALL_IDS] {
+    pub(crate) fn flat(self) -> [BaseField; N_CALL_IDS] {
         [
             self.input[0],
             self.input[1],
@@ -217,10 +218,11 @@ impl SyntheticPoseidonCallIds {
 pub(crate) struct SyntheticPoseidonMemory {
     pub memory: Arc<Memory>,
     pub call_ids: Vec<SyntheticPoseidonCallIds>,
+    pub extra_ids: Vec<BaseField>,
 }
 
 impl SyntheticPoseidonMemory {
-    fn new(calls: &[Poseidon252PermutationCall]) -> Self {
+    fn new(calls: &[Poseidon252PermutationCall], extra_values: &[FieldElement252]) -> Self {
         let mut builder = MemoryBuilder::new(MemoryConfig::default());
         // Keep the official small-memory component non-empty. This value has zero multiplicity.
         builder.set(0, MemoryValue::Small(0));
@@ -239,6 +241,15 @@ impl SyntheticPoseidonMemory {
             }
             call_addresses.push(addresses);
         }
+        let mut extra_addresses = Vec::with_capacity(extra_values.len());
+        for value in extra_values {
+            extra_addresses.push(next_address);
+            builder.set(
+                next_address,
+                MemoryValue::F252(field_element_to_u32_words(*value)),
+            );
+            next_address += 1;
+        }
 
         let (memory, _) = builder.build();
         let call_ids = call_addresses
@@ -252,10 +263,15 @@ impl SyntheticPoseidonMemory {
                 }
             })
             .collect();
+        let extra_ids = extra_addresses
+            .into_iter()
+            .map(|address| BaseField::from_u32_unchecked(memory.get_raw_id(address)))
+            .collect();
 
         Self {
             memory: Arc::new(memory),
             call_ids,
+            extra_ids,
         }
     }
 }
@@ -268,8 +284,32 @@ fn field_element_to_u32_words(value: FieldElement252) -> [u32; 8] {
     })
 }
 
-fn field_element_to_9_bit_limbs(value: FieldElement252) -> [BaseField; FELT252_N_WORDS] {
+pub(crate) fn field_element_to_9_bit_limbs(value: FieldElement252) -> [BaseField; FELT252_N_WORDS] {
     split_f252(field_element_to_u32_words(value))
+}
+
+pub(crate) fn poseidon_active_column_id(log_size: u32, n_calls: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("recursive_poseidon_active_{log_size}_{n_calls}"),
+    }
+}
+
+fn gen_prefix_active_column(
+    id: PreProcessedColumnId,
+    log_size: u32,
+    n_active: usize,
+) -> (
+    PreProcessedColumnId,
+    CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>,
+) {
+    let size = 1usize << log_size;
+    assert!(n_active <= size, "active prefix exceeds trace size");
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let evaluation = CircleEvaluation::new(
+        domain,
+        BaseColumn::from_iter((0..size).map(|row| BaseField::from((row < n_active) as u32))),
+    );
+    (id, evaluation)
 }
 
 fn read_call_trace<E: EvalAtRow>(eval: &mut E) -> CanonicalCallTrace<E::F> {
@@ -401,13 +441,19 @@ fn add_memory_relations<E: EvalAtRow>(
 #[derive(Debug, Clone)]
 pub(crate) struct CanonicalPoseidonCallAir {
     log_size: u32,
+    n_calls: usize,
     common_lookup_elements: CommonLookupElements,
 }
 
 impl CanonicalPoseidonCallAir {
-    pub(crate) const fn new(log_size: u32, common_lookup_elements: CommonLookupElements) -> Self {
+    pub(crate) const fn new(
+        log_size: u32,
+        n_calls: usize,
+        common_lookup_elements: CommonLookupElements,
+    ) -> Self {
         Self {
             log_size,
+            n_calls,
             common_lookup_elements,
         }
     }
@@ -424,6 +470,9 @@ impl FrameworkEval for CanonicalPoseidonCallAir {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let trace = read_call_trace(&mut eval);
+        let expected_active =
+            eval.get_preprocessed_column(poseidon_active_column_id(self.log_size, self.n_calls));
+        eval.add_constraint(trace.active.clone() - expected_active);
         constrain_call_metadata(&mut eval, &trace);
 
         let mut poseidon_values = Vec::with_capacity(1 + N_CALL_IDS);
@@ -466,13 +515,19 @@ impl FrameworkEval for CanonicalPoseidonCallAir {
 #[derive(Debug, Clone)]
 pub(crate) struct CanonicalPoseidonSemanticAir {
     log_size: u32,
+    n_calls: usize,
     common_lookup_elements: CommonLookupElements,
 }
 
 impl CanonicalPoseidonSemanticAir {
-    pub(crate) const fn new(log_size: u32, common_lookup_elements: CommonLookupElements) -> Self {
+    pub(crate) const fn new(
+        log_size: u32,
+        n_calls: usize,
+        common_lookup_elements: CommonLookupElements,
+    ) -> Self {
         Self {
             log_size,
+            n_calls,
             common_lookup_elements,
         }
     }
@@ -489,6 +544,9 @@ impl FrameworkEval for CanonicalPoseidonSemanticAir {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let trace = read_call_trace(&mut eval);
+        let expected_active =
+            eval.get_preprocessed_column(poseidon_active_column_id(self.log_size, self.n_calls));
+        eval.add_constraint(trace.active.clone() - expected_active);
         constrain_call_metadata(&mut eval, &trace);
 
         let active = E::EF::from(trace.active.clone());
@@ -503,6 +561,39 @@ impl FrameworkEval for CanonicalPoseidonSemanticAir {
             &canonical_values,
         ));
         add_memory_relations(&mut eval, &trace, &self.common_lookup_elements, active);
+
+        let mut transcript_values = Vec::with_capacity(1 + 2 + N_KIND_SELECTORS + N_CALL_IDS);
+        transcript_values.push(E::F::from(M31::from_u32_unchecked(
+            TRANSCRIPT_POSEIDON_CALL_RELATION_ID,
+        )));
+        transcript_values.push(trace.global_index.clone());
+        transcript_values.push(trace.source_index.clone());
+        transcript_values.extend(trace.kind_selectors.iter().cloned());
+        transcript_values.extend(trace.ids.iter().cloned());
+        eval.add_to_relation(RelationEntry::new(
+            &self.common_lookup_elements,
+            -E::EF::from(trace.active.clone() * trace.source_selectors[0].clone()),
+            &transcript_values,
+        ));
+
+        let mut merkle_values = Vec::with_capacity(1 + 2 + 2 + 3 + N_CALL_IDS);
+        merkle_values.push(E::F::from(M31::from_u32_unchecked(
+            MERKLE_POSEIDON_CALL_RELATION_ID,
+        )));
+        merkle_values.push(trace.source_index.clone());
+        merkle_values.push(trace.source_arg.clone());
+        merkle_values.push(trace.source_selectors[1].clone());
+        merkle_values.push(trace.source_selectors[2].clone());
+        merkle_values.extend(trace.kind_selectors[..3].iter().cloned());
+        merkle_values.extend(trace.ids.iter().cloned());
+        eval.add_to_relation(RelationEntry::new(
+            &self.common_lookup_elements,
+            -E::EF::from(
+                trace.active
+                    * (trace.source_selectors[1].clone() + trace.source_selectors[2].clone()),
+            ),
+            &merkle_values,
+        ));
 
         eval.finalize_logup_in_pairs();
         eval
@@ -551,7 +642,7 @@ impl Poseidon252ClosureWitness {
             .enumerate()
             .map(|(index, call)| CanonicalCallMetadata::synthetic(index, call))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new_with_metadata(calls, metadata)
+        Self::new_with_metadata(calls, metadata, &[])
     }
 
     pub(crate) fn from_canonical_calls(
@@ -565,12 +656,28 @@ impl Poseidon252ClosureWitness {
             .iter()
             .map(|call| call.call.clone())
             .collect::<Vec<_>>();
-        Self::new_with_metadata(&calls, metadata)
+        Self::new_with_metadata(&calls, metadata, &[])
+    }
+
+    pub(crate) fn from_canonical_calls_and_values(
+        calls: &[CanonicalPoseidonCall],
+        extra_values: &[FieldElement252],
+    ) -> Result<Self, Poseidon252AirError> {
+        let metadata = calls
+            .iter()
+            .map(CanonicalCallMetadata::from_canonical)
+            .collect::<Result<Vec<_>, _>>()?;
+        let calls = calls
+            .iter()
+            .map(|call| call.call.clone())
+            .collect::<Vec<_>>();
+        Self::new_with_metadata(&calls, metadata, extra_values)
     }
 
     fn new_with_metadata(
         calls: &[Poseidon252PermutationCall],
         mut metadata: Vec<CanonicalCallMetadata>,
+        extra_values: &[FieldElement252],
     ) -> Result<Self, Poseidon252AirError> {
         if calls.is_empty() {
             return Err(Poseidon252AirError::EmptyCalls);
@@ -580,13 +687,38 @@ impl Poseidon252ClosureWitness {
         }
 
         let active_call_count = calls.len();
+        let transcript_call_indices = metadata
+            .iter()
+            .enumerate()
+            .filter_map(|(index, metadata)| {
+                (metadata.source_selectors[0] == BaseField::from(1u32)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let merkle_call_indices = metadata
+            .iter()
+            .enumerate()
+            .filter_map(|(index, metadata)| {
+                (metadata.source_selectors[1] == BaseField::from(1u32)
+                    || metadata.source_selectors[2] == BaseField::from(1u32))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let merkle_leaf_call_indices = metadata
+            .iter()
+            .enumerate()
+            .filter_map(|(index, metadata)| {
+                (metadata.kind_selectors[0] == BaseField::from(1u32)
+                    || metadata.kind_selectors[1] == BaseField::from(1u32))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
         let padded_size = active_call_count.next_power_of_two().max(N_LANES);
         let mut padded_calls = calls.to_vec();
         padded_calls.resize(padded_size, calls.last().unwrap().clone());
         metadata.resize_with(padded_size, CanonicalCallMetadata::padding);
         let caller_log_size = padded_size.ilog2();
 
-        let synthetic_memory = SyntheticPoseidonMemory::new(&padded_calls);
+        let synthetic_memory = SyntheticPoseidonMemory::new(&padded_calls, extra_values);
         let preprocessed_trace = Arc::new(PreProcessedTrace::canonical_without_pedersen());
         let component_names: IndexSet<&str> = POSEIDON_CLOSURE_COMPONENTS.into_iter().collect();
         let mut cairo_generator = CairoClaimGenerator::default();
@@ -608,8 +740,10 @@ impl Poseidon252ClosureWitness {
         }
 
         // The aggregator itself adds one MemoryIdToBig use per ID while writing its trace. Add a
-        // second use for the caller AIR's explicit value binding on every padded row, then a third
-        // use for the semantic consumer on active rows only.
+        // second use for the caller AIR's explicit value binding on every padded row, a third use
+        // for the semantic consumer on active rows, and a fourth use for the transcript/Merkle
+        // semantic call tables, and a fifth use for Merkle leaf packing rows. Extra transcript
+        // payload values each add one further explicit semantic use below.
         let memory_id_to_big = cairo_generator.memory_id_to_big.as_ref().unwrap();
         for id in synthetic_memory.call_ids.iter().flat_map(|ids| ids.flat()) {
             memory_id_to_big.add_input(&id);
@@ -619,6 +753,27 @@ impl Poseidon252ClosureWitness {
             .flat_map(|ids| ids.flat())
         {
             memory_id_to_big.add_input(&id);
+        }
+        for id in transcript_call_indices
+            .into_iter()
+            .flat_map(|index| synthetic_memory.call_ids[index].flat())
+        {
+            memory_id_to_big.add_input(&id);
+        }
+        for id in merkle_call_indices
+            .into_iter()
+            .flat_map(|index| synthetic_memory.call_ids[index].flat())
+        {
+            memory_id_to_big.add_input(&id);
+        }
+        for id in merkle_leaf_call_indices
+            .into_iter()
+            .flat_map(|index| synthetic_memory.call_ids[index].flat())
+        {
+            memory_id_to_big.add_input(&id);
+        }
+        for id in &synthetic_memory.extra_ids {
+            memory_id_to_big.add_input(id);
         }
 
         let mut cairo_collector = EvalCollector::default();
@@ -665,15 +820,12 @@ impl Poseidon252ClosureWitness {
             self.caller_log_size,
             common_lookup_elements,
         );
-        let total_claimed_sum = cairo_interaction_claim
+        let lookup_residual = cairo_interaction_claim
             .flatten_interaction_claim()
             .into_iter()
             .sum::<SecureField>()
             + caller_claimed_sum
             + semantic_claimed_sum;
-        if total_claimed_sum != SecureField::from(0u32) {
-            return Err(Poseidon252AirError::UnbalancedLookup(total_claimed_sum));
-        }
 
         Ok(Poseidon252ClosureInteraction {
             cairo_interaction_trace: cairo_collector.columns,
@@ -682,6 +834,7 @@ impl Poseidon252ClosureWitness {
             cairo_interaction_claim,
             caller_claimed_sum,
             semantic_claimed_sum,
+            lookup_residual,
         })
     }
 
@@ -693,7 +846,16 @@ impl Poseidon252ClosureWitness {
         Vec<PreProcessedColumnId>,
         Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     ) {
-        select_preprocessed_columns(&self.cairo_claim, &self.preprocessed_trace)
+        let (mut ids, mut evaluations) =
+            select_preprocessed_columns(&self.cairo_claim, &self.preprocessed_trace);
+        let (active_id, active_evaluation) = gen_prefix_active_column(
+            poseidon_active_column_id(self.caller_log_size, self.n_calls),
+            self.caller_log_size,
+            self.n_calls,
+        );
+        ids.push(active_id);
+        evaluations.push(active_evaluation);
+        (ids, evaluations)
     }
 
     pub(crate) fn caller_base_trace(
@@ -712,27 +874,32 @@ impl Poseidon252ClosureWitness {
     ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
         self.caller_base_trace()
     }
-
-    pub(crate) fn cairo_log_sizes(&self) -> TreeVec<Vec<u32>> {
-        self.cairo_claim.log_sizes()
-    }
 }
 
 pub(crate) fn poseidon_preprocessed_columns_for_claim(
     cairo_claim: &CairoClaim,
+    caller_log_size: u32,
+    n_calls: usize,
 ) -> (
     Vec<PreProcessedColumnId>,
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
 ) {
     let trace = PreProcessedTrace::canonical_without_pedersen();
-    select_preprocessed_columns(cairo_claim, &trace)
+    let (mut ids, mut evaluations) = select_preprocessed_columns(cairo_claim, &trace);
+    let (active_id, active_evaluation) = gen_prefix_active_column(
+        poseidon_active_column_id(caller_log_size, n_calls),
+        caller_log_size,
+        n_calls,
+    );
+    ids.push(active_id);
+    evaluations.push(active_evaluation);
+    (ids, evaluations)
 }
 
-pub(crate) fn poseidon_preprocessed_commitment_root(
+pub(crate) fn recursive_preprocessed_commitment_root(
     config: PcsConfig,
-    cairo_claim: &CairoClaim,
+    evaluations: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
 ) -> Blake2sHash {
-    let (_, evaluations) = poseidon_preprocessed_columns_for_claim(cairo_claim);
     let max_log_size = evaluations
         .iter()
         .map(|evaluation| evaluation.domain.log_size())
@@ -814,6 +981,7 @@ pub(crate) struct Poseidon252ClosureInteraction {
     pub cairo_interaction_claim: CairoInteractionClaim,
     pub caller_claimed_sum: SecureField,
     pub semantic_claimed_sum: SecureField,
+    pub lookup_residual: SecureField,
 }
 
 /// Verifier/prover component bundle for the official Cairo Poseidon closure and both canonical
@@ -832,6 +1000,7 @@ impl Poseidon252ClosureComponents {
         common_lookup_elements: &CommonLookupElements,
         cairo_interaction_claim: &CairoInteractionClaim,
         caller_log_size: u32,
+        n_calls: usize,
         caller_claimed_sum: SecureField,
         semantic_claimed_sum: SecureField,
         preprocessed_ids: &[PreProcessedColumnId],
@@ -846,12 +1015,16 @@ impl Poseidon252ClosureComponents {
         following_allocator.next_for_structure(&cairo_claim.log_sizes());
         let caller = FrameworkComponent::new(
             following_allocator,
-            CanonicalPoseidonCallAir::new(caller_log_size, common_lookup_elements.clone()),
+            CanonicalPoseidonCallAir::new(caller_log_size, n_calls, common_lookup_elements.clone()),
             caller_claimed_sum,
         );
         let semantic = FrameworkComponent::new(
             following_allocator,
-            CanonicalPoseidonSemanticAir::new(caller_log_size, common_lookup_elements.clone()),
+            CanonicalPoseidonSemanticAir::new(
+                caller_log_size,
+                n_calls,
+                common_lookup_elements.clone(),
+            ),
             semantic_claimed_sum,
         );
         Self {
@@ -874,19 +1047,6 @@ impl Poseidon252ClosureComponents {
         components.push(&self.semantic);
         components
     }
-}
-
-pub(crate) fn audit_canonical_poseidon_closure(
-    calls: &[CanonicalPoseidonCall],
-) -> Result<(), Poseidon252AirError> {
-    let witness = Poseidon252ClosureWitness::from_canonical_calls(calls)?;
-    let common_lookup_elements = CommonLookupElements::dummy();
-    let _ = witness.synthetic_memory.call_ids.len();
-    let _ = witness.preprocessed_columns();
-    let _ = witness.caller_base_trace();
-    let _ = witness.cairo_log_sizes();
-    witness.write_interaction_trace(&common_lookup_elements)?;
-    Ok(())
 }
 
 fn gen_caller_trace(
@@ -1057,7 +1217,7 @@ fn gen_semantic_interaction_trace(
                         .map(|column| column.values.data[vec_row]),
                 );
                 (active, common_lookup_elements.combine(&values))
-            } else {
+            } else if relation_index <= N_CALL_IDS {
                 let slot = relation_index - 1;
                 let mut values = Vec::with_capacity(2 + FELT252_N_WORDS);
                 values.push(memory_relation_id);
@@ -1068,10 +1228,57 @@ fn gen_semantic_interaction_trace(
                         .data[vec_row]
                 }));
                 (active, common_lookup_elements.combine(&values))
+            } else if relation_index == 1 + N_CALL_IDS {
+                let mut values = Vec::with_capacity(1 + 2 + N_KIND_SELECTORS + N_CALL_IDS);
+                values.push(PackedBaseField::broadcast(BaseField::from_u32_unchecked(
+                    TRANSCRIPT_POSEIDON_CALL_RELATION_ID,
+                )));
+                values.push(metadata_trace[1].values.data[vec_row]);
+                values.push(metadata_trace[2].values.data[vec_row]);
+                values.extend(
+                    metadata_trace[4 + N_SOURCE_SELECTORS..]
+                        .iter()
+                        .map(|column| column.values.data[vec_row]),
+                );
+                values.extend(
+                    caller_trace
+                        .iter()
+                        .map(|column| column.values.data[vec_row]),
+                );
+                let transcript_source = metadata_trace[4].values.data[vec_row];
+                (
+                    -(active * PackedSecureField::from(transcript_source)),
+                    common_lookup_elements.combine(&values),
+                )
+            } else {
+                let mut values = Vec::with_capacity(1 + 2 + 2 + 3 + N_CALL_IDS);
+                values.push(PackedBaseField::broadcast(BaseField::from_u32_unchecked(
+                    MERKLE_POSEIDON_CALL_RELATION_ID,
+                )));
+                values.push(metadata_trace[2].values.data[vec_row]);
+                values.push(metadata_trace[3].values.data[vec_row]);
+                values.push(metadata_trace[5].values.data[vec_row]);
+                values.push(metadata_trace[6].values.data[vec_row]);
+                values.extend(
+                    metadata_trace[4 + N_SOURCE_SELECTORS..4 + N_SOURCE_SELECTORS + 3]
+                        .iter()
+                        .map(|column| column.values.data[vec_row]),
+                );
+                values.extend(
+                    caller_trace
+                        .iter()
+                        .map(|column| column.values.data[vec_row]),
+                );
+                let merkle_source =
+                    metadata_trace[5].values.data[vec_row] + metadata_trace[6].values.data[vec_row];
+                (
+                    -(active * PackedSecureField::from(merkle_source)),
+                    common_lookup_elements.combine(&values),
+                )
             }
         };
 
-    const N_RELATIONS: usize = 1 + N_CALL_IDS;
+    const N_RELATIONS: usize = 3 + N_CALL_IDS;
     for pair_start in (0..N_RELATIONS).step_by(2) {
         let mut column = logup.new_col();
         for vec_row in 0..n_vec_rows {
@@ -1097,6 +1304,7 @@ mod tests {
     use std::ops::Deref;
 
     use starknet_crypto::poseidon_permute_comp;
+    use stwo::core::pcs::TreeVec;
     use stwo::prover::backend::Column;
     use stwo_constraint_framework::{
         FrameworkComponent, PREPROCESSED_TRACE_IDX, TraceLocationAllocator,
@@ -1145,7 +1353,7 @@ mod tests {
     #[test]
     fn synthetic_memory_reuses_equal_felt_values() {
         let call = sample_call(7);
-        let memory = SyntheticPoseidonMemory::new(&[call.clone(), call]);
+        let memory = SyntheticPoseidonMemory::new(&[call.clone(), call], &[]);
         assert_eq!(memory.call_ids[0], memory.call_ids[1]);
         assert_eq!(memory.memory.f252_values.len(), 6);
     }
@@ -1172,7 +1380,8 @@ mod tests {
             .unwrap();
         assert!(!interaction.cairo_interaction_trace.is_empty());
         assert_eq!(interaction.caller_interaction_trace.len(), 16);
-        assert_eq!(interaction.semantic_interaction_trace.len(), 16);
+        assert_eq!(interaction.semantic_interaction_trace.len(), 20);
+        assert_ne!(interaction.lookup_residual, SecureField::from(0u32));
     }
 
     #[test]
@@ -1190,6 +1399,7 @@ mod tests {
                     .unwrap();
                 let common_lookup_elements = CommonLookupElements::dummy();
                 let caller_log_size = witness.caller_log_size;
+                let n_calls = witness.n_calls;
                 let cairo_claim = witness.cairo_claim.clone();
                 let (preprocessed_ids, preprocessed_trace) = witness.preprocessed_columns();
                 let mut base_trace = witness.cairo_base_trace.clone();
@@ -1209,6 +1419,7 @@ mod tests {
                     &common_lookup_elements,
                     &interaction.cairo_interaction_claim,
                     caller_log_size,
+                    n_calls,
                     interaction.caller_claimed_sum,
                     interaction.semantic_claimed_sum,
                     &preprocessed_ids,

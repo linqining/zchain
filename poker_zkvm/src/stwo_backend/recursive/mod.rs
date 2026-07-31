@@ -44,20 +44,25 @@
 pub(crate) const MERKLE_VERIFIER_AIR_COMPLETE: bool = false;
 
 pub(crate) mod composition_eval_air;
+pub(crate) mod cpu_transcript_binding_air;
 #[cfg(test)]
 mod e2e_test;
 pub(crate) mod fri_replay;
+pub(crate) mod fri_semantic_air;
 pub(crate) mod fri_verifier_air;
+pub(crate) mod merkle_leaf_air;
 pub(crate) mod merkle_path_air;
+pub(crate) mod merkle_semantic_air;
 pub(crate) mod oods_check_air;
-pub(crate) mod poseidon252_replay;
 pub(crate) mod poseidon252_air;
+pub(crate) mod poseidon252_replay;
 pub mod public_inputs;
 pub mod recursion_prover;
 pub mod recursion_verifier;
 pub(crate) mod replay_witness;
 pub(crate) mod stwo_replay;
 pub mod trace_gen;
+pub(crate) mod transcript_air;
 pub(crate) mod verifier_program;
 
 pub use public_inputs::{RecursivePublicInputs, RecursiveTreeMetadata, RecursiveVerifierProgram};

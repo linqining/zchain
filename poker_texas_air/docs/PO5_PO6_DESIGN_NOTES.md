@@ -82,19 +82,19 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
      且 radix `2^31` 的 digit `2^31-1` 本身等于 M31 模数、仍不是合法 canonical field element。
      现改为 **9-limb radix-(2^31-1)** 小端分解，每个 limb 严格小于 M31 模数，编码/解码完整可逆；
      新增高于 bit 248 的碰撞回归和 `FieldElement252::MAX` 往返回归。
-   - **gap #3-B（真实 Merkle verifier AIR 未实现，未闭合但已显式 fail-closed）**：对照 Stwo 2.3 后确认，
+   - **gap #3-B（旧 Merkle verifier AIR 已确认错误并退役）**：对照 Stwo 2.3 后确认，
      `MerkleDecommitmentLifted.hash_witness` 是跨 query 合并、仅在 sibling 未由其他 query 推导时才消费的
      压缩序列；当前 `query_idx * tree_height + layer_idx` 的 dense-path 索引模型错误，且只触及
      `decommitments[0]`/`l1_commitments[0]`。leaf 构造也没有携带 verifier 侧的 per-tree column log sizes，
      无法复现 Stwo 对列排序和 row hashing。更关键的是 `MerklePathAir` 的所谓 Poseidon 约束仍只是
      `parent_limb = left_limb * right_limb`，并未约束 Starknet Poseidon252。故真实数据上的
      `Constraints not satisfied` 只是偶然失败，不是安全边界；恶意输入仍可能满足这些错误多项式。
-     现在 `prove_recursive_with_fri` / `verify_recursive_with_fri` 在 crate 内测试路径也显式返回
-     `IncompleteMerkleVerifierAir`，不再执行该组件；回归测试
+     `prove_recursive_with_fri` / `verify_recursive_with_fri` 在 crate 内测试路径显式返回
+     `IncompleteMerkleVerifierAir`；回归测试
      `gap3b_incomplete_merkle_air_is_explicitly_disabled` 固化这一 fail-closed 行为。相关成功往返测试继续
-     `#[ignore]`，直到压缩 multi-query replay、所有 tree commitment、column metadata 和真实 Poseidon252
-     AIR 全部实现并经过密码学审计。未完成的 verifier AIR 模块与 Merkle trace 生成器也已收窄为
-     crate-private，外部调用方不能绕过高层 gate 直接复用占位组件。
+     `#[ignore]`，直到新 semantic AIR 完成密码学审计。旧 `MerklePathAir` / `FriVerifierAir` 及对应
+     trace/padding 已从完整 scaffold 移除，模块仅作为 crate-private 历史 PoC 保留，外部调用方不能绕过
+     高层 gate 直接复用。
    - **gap #3-B replay 子层（2026-07-31 进展）**：新增 `RecursiveTreeMetadata`，把每棵
      commitment tree 的原始 column log sizes 加入递归 statement 并纳入 transcript；同时绑定
      全部 FRI inner-layer commitments。`stwo_replay.rs` 已逐步复现 Stwo 2.3 的列按 log-size
@@ -103,8 +103,8 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
      composition 三棵树均可重放，篡改 queried value、压缩 sibling 或 column metadata 会失败。
    - **完整 FRI replay 子层（2026-07-31 进展）**：新增 `fri_replay.rs`，复现 first/inner layer
      `fri_witness` 补齐、packed leaf Merkle opening、circle→line/line folding、末层多 query polynomial
-     evaluation，并对真实 L1 proof 与篡改 witness/last polynomial 做回归。该模块目前只提供 verifier
-     AIR 的 canonical witness 生成与主机侧交叉检查，**不等于递归约束已经完成**。
+     evaluation，并对真实 L1 proof 与篡改 witness/last polynomial 做回归。该模块提供 canonical witness
+     生成与主机侧交叉检查；后续 `fri_semantic_air.rs` 已消费这些 witness，但仍需整体组合审计。
    - **新确认的组合 soundness 前置条件**：generic `StarkProof` 本身不携带 verifier components、
      interaction challenge/claimed-sum 的 method-specific transcript schema，也不能仅凭 tree metadata
      重建 `Components::mask_points` 与 composition constraint evaluation。故真实闭合不仅需要
@@ -125,10 +125,12 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
      （740 个 M31 columns），通过 nested `EvalAtRow` 直接复用 `CpuAir::evaluate`，按 Stwo
      `PointEvaluationAccumulator` 顺序、transcript-derived random coefficient 和 CPU trace-domain
      vanishing denominator 累计全部 constraint quotients，并约束结果等于 claimed composition OODS
-     evaluation。真实 proof、篡改 sample、篡改 claim 回归均已添加；prover/verifier 的四组件装配也已
-     加入该 AIR。此子层避免手工复制 CPU 约束导致 verifier drift，但 samples 尚未通过 AIR 连接到
-     Merkle queried values，random coefficient/OODS point 也尚未由 Poseidon252 transcript AIR 从
-     commitments 内生推导，因此生产 gate 仍必须保持关闭。
+     evaluation。真实 proof、篡改 sample、篡改 claim 回归均已添加；`new_bound` 还把 185 个 samples
+     固定到 verifier-known claim。后续 PCS quotient AIR 已把同一组 samples 接到 canonical Merkle queried
+     values，`CpuTranscriptBindingAir` 也把 composition random coefficient、OODS point 和 FRI quotient
+     coefficient 接到 transcript draw result。`OodsCheckAir::new_bound` 现额外绑定公开 composition claim、
+     `oods_point.repeated_double(...).x` 与 8 个 composition-tree samples，并强制四行均为 active 重复检查，
+     消除 all-padding 绕过。
    - **官方 Poseidon252 AIR 闭包（2026-07-31）**：已接入 `cairo-air = 1.2.2`，并仅 vendor
      `stwo-cairo-common/prover = 1.2.2` 的 witness 侧代码；对当前 nightly 的 patch 仅包含
      `Mask::to_int`、已删除 `array_chunks` feature 与 slice `array_chunks` 三类机械兼容修改。
@@ -155,14 +157,13 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
      domain separator `2` 和 draw 的 separator `3`。真实 canonical witness 已可直接生成该官方闭包 trace。
      `_with_fri` 的 crate 内 fail-closed 路径现会在关闭 gate 前完成该 canonical closure 的 base/
      interaction witness 装配与 lookup balance 审计，避免后续打开 gate 时才发现真实 proof 布局不兼容。
-     仍缺少 event/leaf/fold semantic tables 与 caller rows 之间的最终 logup，以及 transcript payload packing、
-     Merkle node multiset 和 FRI folding 算术约束；因此 production gate 继续关闭。
 2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**（未变）。
 3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR
    （未变；且 `poker_zkvm` 的 guest crate `guests/texas_poker` 本轮尚未迁入 zchain
    workspace，真实 method proof 端到端路径暂不可用）。
 
-由于这些缺口允许恶意 prover 针对任意声明重新生成一个满足当前局部 AIR 的 L2 proof，
+由于整体 relation/multiplicity/transcript 顺序尚未完成独立密码学审计，当前不能排除恶意 prover
+针对边界条件构造满足局部 AIR 的错误 L2 proof；因此
 `poker_zkvm` 的 OODS-only 实验路径仅在 crate 自身 `cfg(test)` 中执行；含 FRI/Merkle 的
 `*_with_fri` 路径在 crate 内也因 `IncompleteMerkleVerifierAir` fail-closed。跨 crate 调用
 统一返回 `UnsoundBackendDisabled`。L1 的 `StwoZkVerifier` 即使治理状态为 Production 也
@@ -170,20 +171,19 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 `ZkPublicIo` 的 proof。
 
 ### 修复路径(均需密码学专家)
-- **(a) 让单 proof 递归 sound**：公开输入 transcript binding 已完成；gap #1 的
-  空-input no-op 守卫与 felt252 无损编码已闭合（见上）；per-tree column metadata、压缩
-  multi-query、全部 commitments、完整 FRI host replay、fixed `CpuV1` transcript schema 及 CPU
-  composition AIR 子层也已落地。**仍需**把 sampled values/queried values/canonical replay witness
-  通过 AIR 连接起来，实现真实 non-native Poseidon252 AIR（或经过证明的等价 lookup）与 transcript AIR，
-  并替换 Merkle/FRI 占位约束后证明整体组合 sound。（密码学/AIR 大改 + review）
+- **(a) 让单 proof 递归 sound**：公开输入/transcript binding、官方 Cairo Poseidon252 closure、
+  compressed multi-query Merkle semantic/leaf AIR、PCS quotient、完整默认 FRI fold、fixed `CpuV1`
+  composition/OODS AIR 及三棵 commitment scaffold 已实现。**仍需**独立密码学审计全部 relation 的符号、
+  multiplicity、selector 与 transcript 顺序，打开 gate 后完成真实 L2 prove/verify roundtrip 和 adversarial
+  proof-envelope 篡改测试，并把 fixed program 扩展/集成到真实 Texas method AIR；审计前不得打开 gate。
 - **(b) 构建 N-proof 聚合**:在 sound 的单 proof 递归之上,设计二叉树折叠或专用多验证器 AIR。(~1-2 周 + 设计决策)
 - **(c) host-side 逐子验证**(已实现的过渡路径):host 对每个子 proof 跑
   `stwo::verify()`，只允许 verifier-issued receipt 进入 `VerifiedChain`。该路径失去
   succinctness，验证方仍需 O(N) 全验证；仅作过渡姿态。
 
 ### 结论
-**真正的 recursive/succinct 聚合仍不可机械修复。** 需剩余 ~1 周让单 proof
-递归 sound（leaf/sibling 真实绑定 + 组合 sound 证明）+ ~(1)周集成到真实 method AIR +
+**真正的 recursive/succinct 聚合仍不可机械修复。** 需完成单 proof 的密码学审计与 gate 后 E2E，
+再用约 ~(1)周集成到真实 method AIR +
 ~(1-2)周设计 N-proof 聚合 + 密码学 sign-off。
 
 **当前状态**：
@@ -211,17 +211,58 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   closure claims/claimed sums 会进入 proof envelope 和 Fiat–Shamir channel，verifier 重算并强制固定
   preprocessed commitment root，而不是接受 prover 任意 root。
 
-  但上述 semantic mirror 目前只证明“协议位置 metadata/ID/limbs 与官方 permutation call 是同一
-  multiset”，尚未把 transcript event state/hash-many felt252 addition、Merkle node multiset、FRI
-  circle/line fold 变成 AIR 内 lookup/transition 约束；active call cardinality 也仍需由这些 protocol
-  tables 强制覆盖。因此完整三-tree L2 装配代码仍位于 `MERKLE_VERIFIER_AIR_COMPLETE=false` gate
-  之后，不可达且不能视为 sound recursion。fixed `CpuV1` method schema 与 host verifier replay 已完成；CPU composition evaluator
-  已作为真实 AIR 子层实现并复用 `CpuAir::evaluate`，但它的 sampled values 和 transcript challenges
-  尚未由完整 Merkle/transcript AIR 绑定。完整 transcript AIR 及 canonical Merkle/FRI replay 组合约束仍未实现。
+  **transcript semantic AIR（2026-07-31 下一阶段）** 已新增：generic semantic mirror 现在对 transcript
+  source 额外负向导出 `TranscriptPoseidonCall` 18 元组（global/source index、10 个 kind selector、6 个
+  synthetic memory ID），逐调用 transcript table 正向消费；六条额外 `MemoryIdToBig` lookup 把 table
+  中的 28×9-bit limbs 重新绑定到同一官方 Cairo memory。AIR 按 Stwo circle-domain coset 顺序约束
+  call/event index、first/last/call-count、event 间 digest 与 draw-counter 链、mix 后 counter reset、draw
+  counter `+1` 及其三 limb 精确编码、single-call kind、首 digest 为零、mix/draw/pow 的 digest
+  before/after/result 与 Poseidon input/output limb 等值，以及多调用 sponge 的 state[2] 连续性。Poseidon
+  caller active 与 transcript active/first/last 都改为 verifier 由 `(log_size, n_calls)` 重建的固定
+  preprocessed columns；对应 commitment root、claim/channel、base/interaction tree 列数和第 17 个
+  transcript component 已同时装配到 `_with_fri` prover/verifier scaffold。篡改 active/event chain 回归和
+  caller+semantic+transcript+官方 closure 全局 LogUp 归零回归已加入。
+
+  **felt252 transcript addition closure（2026-07-31 后续阶段）** 已继续闭合：每个非-draw absorbed felt
+  现在拥有 synthetic Cairo memory ID，并通过新增 `MemoryIdToBig` lookup 绑定精确 28×9-bit limbs；pair
+  hash 的两个 payload 直接等于 permutation input，`hash_many` 则逐调用约束前一 state、两个 payload、
+  odd/even 末块 `+1` padding 与当前 permutation input。模加使用 `P_FELTS`、单个 subtract-prime bit 和
+  每 limb 互斥正/负 carry bit，证明
+  `state + payload + padding = input + q·p`，且 AIR degree 仍为 2。payload lookup 使 transcript interaction
+  列由 16 增至 20；官方 memory multiplicity、caller/semantic/transcript 全局 LogUp 再次归零。新增回归
+  覆盖 payload limb 篡改、carry 篡改与 `p-1+1=0 mod p`，真实 CpuV1 canonical replay audit 也通过。
+
+  **Merkle semantic / leaf AIR（2026-07-31 后续阶段）** 已新增：public binding table 固定全部 PCS/FRI
+  roots、tree/layer/source metadata 与 query schedule；semantic table 用 child/parent/root node multiset
+  重放 compressed multi-query，并通过 caller relation 消费每次 canonical Poseidon252 leaf/parent call。
+  leaf packing AIR 约束 Stwo lifted leaf 的 M31→felt252 packing、模加 carry/padding 和 memory lookup；每个
+  active leaf value 还正向导出 keyed `MerkleQueriedValue(relation_id, pcs_source, fri_source, source_arg,
+  node_index, leaf_value_index, value)`。leaf interaction columns 因 23 条 relation 增至 **48**。
+
+  **PCS quotient / complete default FRI fold AIR（2026-07-31 后续阶段）** 已新增：PCS quotient table 按
+  Stwo 官方 `ColumnSampleBatch` / `quotient_constants` / `accumulate_row_quotients` 的 column order，把每个
+  `fri_answer` 表示为 `baseline + Σ queried_value_i * coefficient_i`，逐项消费上述 Merkle queried-value
+  relation，并导出 keyed QM31 query value；其 base/interaction columns 为 **9 / 4**。FRI fold table 每行
+  消费 committed FRI leaf 的左右 QM31（8 个 M31 lookup），约束 circle→line/line fold
+  `f0=left+right`、`f1=(left-right)*inverse_twiddle`、`output=f0+alpha*f1`，逐层 keyed 传递并在末层绑定
+  degree-zero last-layer coefficient；其 base/interaction columns 为 **12 / 24**。当前实现明确只接受
+  `CpuV1 + PcsConfig::default()`、`fold_step=1`、`log_last_layer_degree_bound=0`。
+
+  **完整 L2 三树装配与旧占位清理（2026-07-31）**：上述 transcript/Merkle/leaf/quotient/fold tables
+  已按完全相同顺序装入 prover/verifier 的 fixed preprocessed tree、heterogeneous committed base tree 与
+  interaction tree；全部 claimed sums 进入 Fiat–Shamir channel，canonical 全局 lookup sum 必须精确归零。
+  旧 `FriVerifierAir` / `MerklePathAir`、对应 trace/padding 与 log-size entries 已从完整 `_with_fri`
+  scaffold 移除，避免未来打开 gate 时被错误占位多项式拒绝真实 proof。`OodsCheckAir` 同时补上公开 claim、
+  doubling factor、sample exact binding 与 all-padding 回归。
+
+  完整三-tree L2 装配代码继续位于 `MERKLE_VERIFIER_AIR_COMPLETE=false` gate 之后，不可达且不能视为
+  已完成 sound recursion。剩余工作是独立审计 relation/multiplicity/transcript 顺序、打开 gate 后执行真实
+  L2 roundtrip 与 envelope/adversarial 篡改测试，并集成真实 Texas method program；在此之前生产 gate 不变。
   `_with_fri` 继续显式 `IncompleteMerkleVerifierAir` fail-closed，不再依赖偶然的
   `Constraints not satisfied`（回归测试 `gap3b_incomplete_merkle_air_is_explicitly_disabled`）；
-  gap #2（N-proof 聚合）、gap #3 主体（leaf/sibling 真实绑定 + verifier AIR 组合 sound + 真实 method proof 端到端）未闭合；
-  `poker_zkvm` 当前定向回归：OODS-only 路径、空输入守卫、9-limb 无损往返/高位保留、gap#3-B 显式关闭均通过；
+  gap #2（N-proof 聚合）、gap #3 的组合审计/真实 method proof 端到端仍未闭合；
+  `poker_zkvm` 当前定向回归覆盖 OODS/public binding、composition bound、transcript/Poseidon、Merkle
+  semantic/leaf、PCS quotient、FRI fold、全局 lookup 归零、空输入守卫、9-limb 无损往返与显式关闭；
   `_with_fri` 成功往返测试因 gap #3-B 暂时 `#[ignore]`（修复后应解除）；
 - **P05-H-core** O(N) 宿主验证与完整范围 anchor 校验已闭合；
 - **P05-H-source** 仍需上层把 anchor 接到已认证 block/receipt；

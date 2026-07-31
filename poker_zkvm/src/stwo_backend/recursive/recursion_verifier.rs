@@ -14,17 +14,37 @@
 //! [`RecursionVerificationError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
 
 use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir};
-use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
-use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
+use super::cpu_transcript_binding_air::{
+    CPU_TRANSCRIPT_BINDING_INTERACTION_COLUMNS, CpuTranscriptBindingAir,
+    CpuTranscriptBindingWitness, mix_cpu_transcript_claim,
+};
+use super::fri_semantic_air::{
+    FRI_FOLD_AIR_NUM_COLUMNS, FRI_FOLD_INTERACTION_COLUMNS, FriFoldAir, FriFoldPublicWitness,
+    PCS_QUOTIENT_AIR_NUM_COLUMNS, PCS_QUOTIENT_INTERACTION_COLUMNS, PcsQuotientAir,
+    PcsQuotientPublicWitness,
+};
+use super::merkle_leaf_air::{
+    MERKLE_LEAF_AIR_NUM_COLUMNS, MERKLE_LEAF_INTERACTION_COLUMNS, MerkleLeafPackingAir,
+    MerkleLeafPublicWitness,
+};
+use super::merkle_semantic_air::{
+    MERKLE_BINDING_INTERACTION_COLUMNS, MERKLE_SEMANTIC_AIR_NUM_COLUMNS,
+    MERKLE_SEMANTIC_INTERACTION_COLUMNS, MerklePublicBindingAir, MerklePublicBindingWitness,
+    MerkleSemanticAir,
+};
 use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
 use super::poseidon252_air::{
     POSEIDON252_CALL_AIR_NUM_COLUMNS, POSEIDON252_CALL_INTERACTION_COLUMNS,
-    Poseidon252ClosureComponents, poseidon_preprocessed_columns_for_claim,
-    poseidon_preprocessed_commitment_root,
+    POSEIDON252_SEMANTIC_INTERACTION_COLUMNS, Poseidon252ClosureComponents,
+    poseidon_preprocessed_columns_for_claim, recursive_preprocessed_commitment_root,
 };
 use super::public_inputs::RecursivePublicInputs;
 use super::recursion_prover::RecursiveProof;
-use super::trace_gen::{OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size};
+use super::trace_gen::OODS_TRACE_LOG_SIZE;
+use super::transcript_air::{
+    TRANSCRIPT_AIR_NUM_COLUMNS, TRANSCRIPT_INTERACTION_COLUMNS, TranscriptSemanticAir,
+    transcript_preprocessed_columns,
+};
 use ark_ff::Zero;
 use cairo_air::relations::CommonLookupElements;
 use stwo::core::air::Component;
@@ -33,6 +53,7 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::core::verifier::{VerificationError, verify};
+use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 /// Recursion verifier 错误类型。
@@ -182,14 +203,14 @@ pub fn verify_recursive(
     Ok(())
 }
 
-/// L2 proof 验证器（v5.1 多组件：OODS Check AIR + FRI Verifier AIR）。
+/// L2 proof 验证器（fixed `CpuV1` canonical replay 多组件）。
 ///
 /// 镜像 [`super::recursion_prover::prove_recursive_with_fri`]：
 /// 1. `PcsConfig::default()` + `Blake2sChannel` + `CommitmentSchemeVerifier`
 /// 2. mix `RecursivePublicInputs` 到 channel（与 prover 相同顺序）
-/// 3. 从 proof 读取 preprocessed commitment (tree 0) + trace commitment (tree 1, 109 列)
-/// 4. 构建 `OodsCheckAir` + `FriVerifierAir` components（共享 `TraceLocationAllocator`）
-/// 5. `verify(&[&oods_component, &fri_component], ...)`
+/// 3. 重建固定 preprocessed commitment 与 heterogeneous trace log sizes
+/// 4. 对称构建 transcript/Merkle/PCS/FRI/OODS/composition components
+/// 5. `verify(...)`
 ///
 /// # 参数
 /// - `l2_proof` — 由 [`super::recursion_prover::prove_recursive_with_fri`] 生成的 `RecursiveProof`
@@ -211,24 +232,108 @@ pub fn verify_recursive_with_fri(
     // P05-R gap #1：拒绝空-input L2 proof（镜像 prover 侧守卫）。
     ensure_nonempty_public_inputs(public_inputs)?;
 
-    // P05-R gap #3-B：canonical Merkle/FRI replay 尚未由 Poseidon252/transcript AIR
-    // 完整约束。生产构建更早由 UnsoundBackendDisabled 拒绝；此分支覆盖 crate 内测试。
+    // P05-R gap #3-B：canonical semantic AIR 已装配，但整体组合 soundness 尚未完成
+    // 密码学审计。生产构建更早由 UnsoundBackendDisabled 拒绝；此分支覆盖 crate 内测试。
     if !super::MERKLE_VERIFIER_AIR_COMPLETE {
         let _ = l2_proof;
         return Err(RecursionVerificationError::IncompleteMerkleVerifierAir);
     }
 
-    // 计算 unified_log_size（与 prover 完全一致）
-    let fri_log_size = compute_fri_trace_log_size(&public_inputs.fri_last_layer_poly);
-    let unified_log_size = OODS_TRACE_LOG_SIZE.max(fri_log_size);
+    let verifier_log_size = OODS_TRACE_LOG_SIZE;
     let config = PcsConfig::default();
     let poseidon_claim = l2_proof.1.as_ref().ok_or_else(|| {
         RecursionVerificationError::VerificationFailed(
             "recursive proof is missing Poseidon252 closure claims".to_string(),
         )
     })?;
-    let (poseidon_preprocessed_ids, poseidon_preprocessed_trace) =
-        poseidon_preprocessed_columns_for_claim(&poseidon_claim.cairo_claim);
+    let binding_witness = CpuTranscriptBindingWitness::new(
+        public_inputs,
+        &poseidon_claim.sampled_values,
+        &poseidon_claim.transcript_draw_results,
+        poseidon_claim.proof_of_work,
+        poseidon_claim.pow_hash,
+    )
+    .map_err(|error| {
+        RecursionVerificationError::VerificationFailed(format!(
+            "fixed CpuV1 transcript usage binding is invalid: {error}"
+        ))
+    })?;
+    let merkle_binding_witness =
+        MerklePublicBindingWitness::new(public_inputs).map_err(|error| {
+            RecursionVerificationError::VerificationFailed(format!(
+                "canonical Merkle public binding is invalid: {error}"
+            ))
+        })?;
+    let merkle_leaf_public =
+        MerkleLeafPublicWitness::new(&merkle_binding_witness).map_err(|error| {
+            RecursionVerificationError::VerificationFailed(format!(
+                "canonical Merkle leaf public schedule is invalid: {error}"
+            ))
+        })?;
+    let quotient_public =
+        PcsQuotientPublicWitness::new(public_inputs, &poseidon_claim.sampled_values).map_err(
+            |error| {
+                RecursionVerificationError::VerificationFailed(format!(
+                    "PCS quotient public schedule is invalid: {error}"
+                ))
+            },
+        )?;
+    let fri_fold_public =
+        FriFoldPublicWitness::new(public_inputs, &poseidon_claim.transcript_draw_results).map_err(
+            |error| {
+                RecursionVerificationError::VerificationFailed(format!(
+                    "FRI fold public schedule is invalid: {error}"
+                ))
+            },
+        )?;
+    if !active_prefix_claim_is_valid(poseidon_claim.caller_log_size, poseidon_claim.n_calls)
+        || !active_prefix_claim_is_valid(
+            poseidon_claim.transcript_log_size,
+            poseidon_claim.n_transcript_calls,
+        )
+        || poseidon_claim.transcript_log_size >= 27
+    {
+        return Err(RecursionVerificationError::VerificationFailed(
+            "recursive Poseidon/transcript active-prefix claim is invalid".to_string(),
+        ));
+    }
+    let (mut poseidon_preprocessed_ids, mut poseidon_preprocessed_trace) =
+        poseidon_preprocessed_columns_for_claim(
+            &poseidon_claim.cairo_claim,
+            poseidon_claim.caller_log_size,
+            poseidon_claim.n_calls,
+        );
+    let (transcript_preprocessed_ids, transcript_preprocessed_trace) =
+        transcript_preprocessed_columns(
+            poseidon_claim.transcript_log_size,
+            poseidon_claim.n_transcript_calls,
+        );
+    poseidon_preprocessed_ids.extend(transcript_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(transcript_preprocessed_trace);
+    let (binding_preprocessed_ids, binding_preprocessed_trace) =
+        binding_witness.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(binding_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(binding_preprocessed_trace);
+    let (merkle_semantic_preprocessed_ids, merkle_semantic_preprocessed_trace) =
+        merkle_binding_witness.semantic_preprocessed_columns();
+    poseidon_preprocessed_ids.extend(merkle_semantic_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(merkle_semantic_preprocessed_trace);
+    let (merkle_binding_preprocessed_ids, merkle_binding_preprocessed_trace) =
+        merkle_binding_witness.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(merkle_binding_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(merkle_binding_preprocessed_trace);
+    let (merkle_leaf_preprocessed_ids, merkle_leaf_preprocessed_trace) =
+        merkle_leaf_public.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(merkle_leaf_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(merkle_leaf_preprocessed_trace);
+    let (quotient_preprocessed_ids, quotient_preprocessed_trace) =
+        quotient_public.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(quotient_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(quotient_preprocessed_trace);
+    let (fri_fold_preprocessed_ids, fri_fold_preprocessed_trace) =
+        fri_fold_public.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(fri_fold_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(fri_fold_preprocessed_trace);
 
     // 1. Channel + CommitmentSchemeVerifier
     let mut channel = Blake2sChannel::default();
@@ -236,6 +341,13 @@ pub fn verify_recursive_with_fri(
 
     // 2. mix RecursivePublicInputs 到 channel（与 prover 完全相同顺序）
     mix_public_inputs_into_channel(&mut channel, public_inputs);
+    mix_cpu_transcript_claim(
+        &mut channel,
+        &poseidon_claim.sampled_values,
+        &poseidon_claim.transcript_draw_results,
+        poseidon_claim.proof_of_work,
+        poseidon_claim.pow_hash,
+    );
 
     // 3. 校验并提交固定 Poseidon closure preprocessed commitment（tree 0）。
     let stark_proof = &l2_proof.0;
@@ -246,10 +358,10 @@ pub fn verify_recursive_with_fri(
         ))
     })?;
     let expected_preprocessed_commitment =
-        poseidon_preprocessed_commitment_root(config, &poseidon_claim.cairo_claim);
+        recursive_preprocessed_commitment_root(config, poseidon_preprocessed_trace.clone());
     if preprocessed_commitment != expected_preprocessed_commitment {
         return Err(RecursionVerificationError::VerificationFailed(
-            "Poseidon252 closure preprocessed commitment does not match the fixed trace"
+            "recursive Poseidon/transcript preprocessed commitment does not match the fixed trace"
                 .to_string(),
         ));
     }
@@ -272,8 +384,16 @@ pub fn verify_recursive_with_fri(
             "Poseidon252 call count exceeds u64".to_string(),
         )
     })?);
+    channel.mix_u64(u64::from(poseidon_claim.transcript_log_size));
+    channel.mix_u64(
+        u64::try_from(poseidon_claim.n_transcript_calls).map_err(|_| {
+            RecursionVerificationError::VerificationFailed(
+                "transcript call count exceeds u64".to_string(),
+            )
+        })?,
+    );
 
-    // 4. 从 proof 读取 trace commitment（tree 1，OODS 73 cols + FRI 68 cols + Merkle 67 cols = 208 cols）
+    // 4. 从 proof 读取 heterogeneous base-trace commitment（tree 1）。
     let trace_commitment = *stark_proof.commitments.get(1).ok_or_else(|| {
         RecursionVerificationError::VerificationFailed(format!(
             "proof.commitments 长度不足：期望 ≥2，实际 {}",
@@ -285,11 +405,22 @@ pub fn verify_recursive_with_fri(
         poseidon_claim.caller_log_size;
         2 * POSEIDON252_CALL_AIR_NUM_COLUMNS
     ]);
-    let total_trace_cols = OODS_AIR_NUM_COLUMNS
-        + FRI_AIR_NUM_COLUMNS
-        + MERKLE_AIR_NUM_COLUMNS
-        + COMP_EVAL_AIR_NUM_COLUMNS;
-    trace_log_sizes.extend(vec![unified_log_size; total_trace_cols]);
+    trace_log_sizes.extend(vec![
+        poseidon_claim.transcript_log_size;
+        TRANSCRIPT_AIR_NUM_COLUMNS
+    ]);
+    trace_log_sizes.extend(vec![
+        merkle_binding_witness.semantic_log_size;
+        MERKLE_SEMANTIC_AIR_NUM_COLUMNS
+    ]);
+    trace_log_sizes.extend(vec![
+        merkle_leaf_public.log_size;
+        MERKLE_LEAF_AIR_NUM_COLUMNS
+    ]);
+    trace_log_sizes.extend(vec![quotient_public.log_size; PCS_QUOTIENT_AIR_NUM_COLUMNS]);
+    trace_log_sizes.extend(vec![fri_fold_public.log_size; FRI_FOLD_AIR_NUM_COLUMNS]);
+    let verifier_trace_cols = OODS_AIR_NUM_COLUMNS + COMP_EVAL_AIR_NUM_COLUMNS;
+    trace_log_sizes.extend(vec![verifier_log_size; verifier_trace_cols]);
     commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
 
     let common_lookup_elements = CommonLookupElements::draw(&mut channel);
@@ -299,6 +430,13 @@ pub fn verify_recursive_with_fri(
     channel.mix_felts(&[
         poseidon_claim.caller_claimed_sum,
         poseidon_claim.semantic_claimed_sum,
+        poseidon_claim.transcript_claimed_sum,
+        poseidon_claim.binding_claimed_sum,
+        poseidon_claim.merkle_claimed_sum,
+        poseidon_claim.merkle_binding_claimed_sum,
+        poseidon_claim.merkle_leaf_claimed_sum,
+        poseidon_claim.pcs_quotient_claimed_sum,
+        poseidon_claim.fri_fold_claimed_sum,
     ]);
 
     let interaction_commitment = *stark_proof.commitments.get(2).ok_or_else(|| {
@@ -310,20 +448,68 @@ pub fn verify_recursive_with_fri(
     let mut interaction_log_sizes = poseidon_claim.cairo_claim.log_sizes()[2].clone();
     interaction_log_sizes.extend(vec![
         poseidon_claim.caller_log_size;
-        2 * POSEIDON252_CALL_INTERACTION_COLUMNS
+        POSEIDON252_CALL_INTERACTION_COLUMNS
     ]);
+    interaction_log_sizes.extend(vec![
+        poseidon_claim.caller_log_size;
+        POSEIDON252_SEMANTIC_INTERACTION_COLUMNS
+    ]);
+    interaction_log_sizes.extend(vec![
+        poseidon_claim.transcript_log_size;
+        TRANSCRIPT_INTERACTION_COLUMNS
+    ]);
+    interaction_log_sizes.extend(vec![
+        binding_witness.log_size;
+        CPU_TRANSCRIPT_BINDING_INTERACTION_COLUMNS
+    ]);
+    interaction_log_sizes.extend(vec![
+        merkle_binding_witness.semantic_log_size;
+        MERKLE_SEMANTIC_INTERACTION_COLUMNS
+    ]);
+    interaction_log_sizes.extend(vec![
+        merkle_binding_witness.log_size;
+        MERKLE_BINDING_INTERACTION_COLUMNS
+    ]);
+    interaction_log_sizes.extend(vec![
+        merkle_leaf_public.log_size;
+        MERKLE_LEAF_INTERACTION_COLUMNS
+    ]);
+    interaction_log_sizes.extend(vec![
+        quotient_public.log_size;
+        PCS_QUOTIENT_INTERACTION_COLUMNS
+    ]);
+    interaction_log_sizes.extend(vec![fri_fold_public.log_size; FRI_FOLD_INTERACTION_COLUMNS]);
     commitment_scheme.commit(interaction_commitment, &interaction_log_sizes, &mut channel);
 
-    // 5. 构建 OODS + FRI + Merkle components（与 prover 相同顺序，共享 TraceLocationAllocator）
-    let oods_air = OodsCheckAir::new(unified_log_size);
-    let fri_air = FriVerifierAir::new(unified_log_size);
-    let merkle_air = MerklePathAir::new(unified_log_size);
-    let composition_air = CompositionEvalAir::new(
-        unified_log_size,
+    // 5. 构建 canonical semantic + OODS/composition components（与 prover 顺序一致）。
+    let composition_samples = poseidon_claim.sampled_values
+        [..crate::stwo_backend::column_layout_v2::NUM_COLUMNS]
+        .to_vec();
+    let oods_samples = poseidon_claim.sampled_values
+        [crate::stwo_backend::column_layout_v2::NUM_COLUMNS..]
+        .try_into()
+        .map_err(|_| {
+            RecursionVerificationError::VerificationFailed(
+                "fixed CpuV1 composition sampled-value tail has the wrong length".to_string(),
+            )
+        })?;
+    let oods_doubling_factor_x = public_inputs
+        .oods_point
+        .repeated_double(public_inputs.max_log_degree_bound - 1)
+        .x;
+    let oods_air = OodsCheckAir::new_bound(
+        verifier_log_size,
+        oods_samples,
+        public_inputs.composition_oods_eval,
+        oods_doubling_factor_x,
+    );
+    let composition_air = CompositionEvalAir::new_bound(
+        verifier_log_size,
         public_inputs.log_size,
         public_inputs.oods_point,
         public_inputs.composition_random_coeff,
         public_inputs.composition_oods_eval,
+        composition_samples,
     );
     let mut allocator =
         TraceLocationAllocator::new_with_preprocessed_columns(&poseidon_preprocessed_ids);
@@ -332,23 +518,90 @@ pub fn verify_recursive_with_fri(
         &common_lookup_elements,
         &poseidon_claim.cairo_interaction_claim,
         poseidon_claim.caller_log_size,
+        poseidon_claim.n_calls,
         poseidon_claim.caller_claimed_sum,
         poseidon_claim.semantic_claimed_sum,
         &poseidon_preprocessed_ids,
         &mut allocator,
     );
+    let transcript_component = FrameworkComponent::new(
+        &mut allocator,
+        TranscriptSemanticAir::new(
+            poseidon_claim.transcript_log_size,
+            poseidon_claim.n_transcript_calls,
+            common_lookup_elements.clone(),
+        ),
+        poseidon_claim.transcript_claimed_sum,
+    );
+    let binding_component = FrameworkComponent::new(
+        &mut allocator,
+        CpuTranscriptBindingAir::new(
+            binding_witness.log_size,
+            binding_witness.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        poseidon_claim.binding_claimed_sum,
+    );
+    let merkle_semantic_component = FrameworkComponent::new(
+        &mut allocator,
+        MerkleSemanticAir::new(
+            merkle_binding_witness.semantic_log_size,
+            merkle_binding_witness.semantic_n_rows,
+            common_lookup_elements.clone(),
+        ),
+        poseidon_claim.merkle_claimed_sum,
+    );
+    let merkle_binding_component = FrameworkComponent::new(
+        &mut allocator,
+        MerklePublicBindingAir::new(
+            merkle_binding_witness.log_size,
+            merkle_binding_witness.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        poseidon_claim.merkle_binding_claimed_sum,
+    );
+    let merkle_leaf_component = FrameworkComponent::new(
+        &mut allocator,
+        MerkleLeafPackingAir::new(
+            merkle_leaf_public.log_size,
+            merkle_leaf_public.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        poseidon_claim.merkle_leaf_claimed_sum,
+    );
+    let quotient_component = FrameworkComponent::new(
+        &mut allocator,
+        PcsQuotientAir::new(
+            quotient_public.log_size,
+            quotient_public.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        poseidon_claim.pcs_quotient_claimed_sum,
+    );
+    let fri_fold_component = FrameworkComponent::new(
+        &mut allocator,
+        FriFoldAir::new(
+            fri_fold_public.log_size,
+            fri_fold_public.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        poseidon_claim.fri_fold_claimed_sum,
+    );
     let oods_component = FrameworkComponent::new(&mut allocator, oods_air, SecureField::zero());
-    let fri_component = FrameworkComponent::new(&mut allocator, fri_air, SecureField::zero());
-    let merkle_component = FrameworkComponent::new(&mut allocator, merkle_air, SecureField::zero());
     let composition_component =
         FrameworkComponent::new(&mut allocator, composition_air, SecureField::zero());
 
     // 6. 验证（verify 内部处理 composition poly commitment = proof.commitments.last()）
     let mut components = poseidon_components.verifier_components();
     components.extend([
-        &oods_component as &dyn Component,
-        &fri_component,
-        &merkle_component,
+        &transcript_component as &dyn Component,
+        &binding_component,
+        &merkle_semantic_component,
+        &merkle_binding_component,
+        &merkle_leaf_component,
+        &quotient_component,
+        &fri_fold_component,
+        &oods_component,
         &composition_component,
     ]);
     verify(
@@ -372,6 +625,13 @@ pub fn verify_recursive_with_fri(
 /// cannot silently diverge when a statement field is added.
 fn mix_public_inputs_into_channel(channel: &mut Blake2sChannel, inputs: &RecursivePublicInputs) {
     inputs.mix_into(channel);
+}
+
+fn active_prefix_claim_is_valid(log_size: u32, n_active: usize) -> bool {
+    log_size >= LOG_N_LANES
+        && log_size < usize::BITS
+        && n_active > 0
+        && n_active <= (1usize << log_size)
 }
 
 // ===========================================================================

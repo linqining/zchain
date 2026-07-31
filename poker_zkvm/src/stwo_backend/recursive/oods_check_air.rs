@@ -69,6 +69,7 @@
 //! - `stwo-2.3.0/src/core/fields/qm31.rs:78-88` — QM31 Mul impl
 
 use stwo::core::fields::m31::BaseField;
+use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 // ===========================================================================
@@ -136,6 +137,9 @@ pub const OODS_AIR_NUM_M_INTERMEDIATES: usize = 16;
 pub struct OodsCheckAir {
     /// log2(trace 行数)
     log_size: u32,
+    expected_sampled_values: Option<[SecureField; OODS_AIR_NUM_SAMPLED_VALUES]>,
+    expected_claimed_oods_eval: Option<SecureField>,
+    expected_doubling_factor_x: Option<SecureField>,
 }
 
 impl OodsCheckAir {
@@ -145,7 +149,26 @@ impl OodsCheckAir {
     /// - `log_size` — log2(行数)，v5.1 通常为 2（4 行 = 1 OODS check + 3 padding）
     #[must_use]
     pub const fn new(log_size: u32) -> Self {
-        Self { log_size }
+        Self {
+            log_size,
+            expected_sampled_values: None,
+            expected_claimed_oods_eval: None,
+            expected_doubling_factor_x: None,
+        }
+    }
+
+    pub(crate) const fn new_bound(
+        log_size: u32,
+        expected_sampled_values: [SecureField; OODS_AIR_NUM_SAMPLED_VALUES],
+        expected_claimed_oods_eval: SecureField,
+        expected_doubling_factor_x: SecureField,
+    ) -> Self {
+        Self {
+            log_size,
+            expected_sampled_values: Some(expected_sampled_values),
+            expected_claimed_oods_eval: Some(expected_claimed_oods_eval),
+            expected_doubling_factor_x: Some(expected_doubling_factor_x),
+        }
     }
 
     /// 获取 log_size。
@@ -186,12 +209,23 @@ impl FrameworkEval for OodsCheckAir {
         // 约束: is_padding * (is_padding - 1) == 0  (degree 2)
         let padding_bin = is_padding.clone() * (is_padding.clone() - one.clone());
         eval.add_constraint(padding_bin);
+        if self.expected_sampled_values.is_some() {
+            eval.add_constraint(is_padding.clone());
+        }
 
         // ===== O2-O5: OODS 等式 =====
         // 约束: (1 - is_padding) * (claimed_i - computed_i) == 0  (degree 2)
         //   - 非 padding 行：claimed_i == computed_i
         //   - padding 行：约束自动满足（multiplicity = 0）
         let non_padding = one.clone() - is_padding.clone();
+        if let Some(expected) = self.expected_claimed_oods_eval {
+            for (limb_index, limb) in expected.to_m31_array().into_iter().enumerate() {
+                eval.add_constraint(
+                    non_padding.clone()
+                        * (col(OODS_AIR_COL_CLAIMED_BASE + limb_index) - E::F::from(limb)),
+                );
+            }
+        }
         for i in 0..4 {
             let claimed_i = col(OODS_AIR_COL_CLAIMED_BASE + i);
             let computed_i = col(OODS_AIR_COL_COMPUTED_BASE + i);
@@ -208,6 +242,15 @@ impl FrameworkEval for OodsCheckAir {
         //   LeftEval[3] = SV[0][3] + SV[1][2] + SV[2][1] + SV[3][0]
         // 所有约束 degree = 1（线性组合）
         let sv = |i: usize, j: usize| -> E::F { col(OODS_AIR_COL_SV_BASE + 4 * i + j) };
+        if let Some(expected) = self.expected_sampled_values {
+            for (sample_index, expected) in expected.iter().enumerate() {
+                for (limb_index, limb) in expected.to_m31_array().into_iter().enumerate() {
+                    eval.add_constraint(
+                        non_padding.clone() * (sv(sample_index, limb_index) - E::F::from(limb)),
+                    );
+                }
+            }
+        }
         let left_eval = |i: usize| -> E::F { col(OODS_AIR_COL_LEFT_EVAL_BASE + i) };
 
         // O6: LeftEval[0] = SV[0][0] - SV[1][1] + 2*SV[2][2] - SV[2][3] - SV[3][2] - 2*SV[3][3]
@@ -276,6 +319,11 @@ impl FrameworkEval for OodsCheckAir {
         //   m13 = x0*r3, m14 = x1*r2, m15 = x2*r1, m16 = x3*r0
         // 每个约束 degree = 2（M31 × M31）
         let df_x = |i: usize| -> E::F { col(OODS_AIR_COL_DF_X_BASE + i) };
+        if let Some(expected) = self.expected_doubling_factor_x {
+            for (limb_index, limb) in expected.to_m31_array().into_iter().enumerate() {
+                eval.add_constraint(non_padding.clone() * (df_x(limb_index) - E::F::from(limb)));
+            }
+        }
         let m = |i: usize| -> E::F {
             // i 是 1-based 索引（m1..m16），转换为 0-based 列索引
             col(OODS_AIR_COL_M_BASE + i - 1)
@@ -387,6 +435,101 @@ impl FrameworkEval for OodsCheckAir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stwo::core::pcs::TreeVec;
+    use stwo_constraint_framework::assert_constraints_on_trace;
+
+    fn simple_oods_trace(sample: SecureField) -> Vec<Vec<BaseField>> {
+        let n_rows = 1usize << 2;
+        let mut trace = vec![vec![BaseField::from(0u32); n_rows]; OODS_AIR_NUM_COLUMNS];
+        for (limb_index, limb) in sample.to_m31_array().into_iter().enumerate() {
+            trace[OODS_AIR_COL_CLAIMED_BASE + limb_index].fill(limb);
+            trace[OODS_AIR_COL_COMPUTED_BASE + limb_index].fill(limb);
+            trace[OODS_AIR_COL_SV_BASE + limb_index].fill(limb);
+            trace[OODS_AIR_COL_LEFT_EVAL_BASE + limb_index].fill(limb);
+        }
+        trace
+    }
+
+    fn expected_samples(first: SecureField) -> [SecureField; OODS_AIR_NUM_SAMPLED_VALUES] {
+        let mut samples = [SecureField::from(0u32); OODS_AIR_NUM_SAMPLED_VALUES];
+        samples[0] = first;
+        samples
+    }
+
+    fn assert_oods_constraints(trace: &[Vec<BaseField>], air: &OodsCheckAir) {
+        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+        assert_constraints_on_trace(
+            &trees,
+            air.log_size(),
+            |eval| {
+                air.evaluate(eval);
+            },
+            SecureField::from(0u32),
+        );
+    }
+
+    #[test]
+    fn bound_oods_air_accepts_public_values() {
+        let sample = SecureField::from_m31_array([
+            BaseField::from(7u32),
+            BaseField::from(11u32),
+            BaseField::from(13u32),
+            BaseField::from(17u32),
+        ]);
+        let trace = simple_oods_trace(sample);
+        let air =
+            OodsCheckAir::new_bound(2, expected_samples(sample), sample, SecureField::from(0u32));
+        assert_oods_constraints(&trace, &air);
+    }
+
+    #[test]
+    #[should_panic]
+    fn bound_oods_air_rejects_wrong_public_claim() {
+        let sample = SecureField::from(7u32);
+        let trace = simple_oods_trace(sample);
+        let air = OodsCheckAir::new_bound(
+            2,
+            expected_samples(sample),
+            sample + SecureField::from(1u32),
+            SecureField::from(0u32),
+        );
+        assert_oods_constraints(&trace, &air);
+    }
+
+    #[test]
+    #[should_panic]
+    fn bound_oods_air_rejects_wrong_public_doubling_factor() {
+        let sample = SecureField::from(7u32);
+        let trace = simple_oods_trace(sample);
+        let air =
+            OodsCheckAir::new_bound(2, expected_samples(sample), sample, SecureField::from(1u32));
+        assert_oods_constraints(&trace, &air);
+    }
+
+    #[test]
+    #[should_panic]
+    fn bound_oods_air_rejects_self_consistent_sample_tampering() {
+        let expected = SecureField::from(7u32);
+        let trace = simple_oods_trace(expected + SecureField::from(1u32));
+        let air = OodsCheckAir::new_bound(
+            2,
+            expected_samples(expected),
+            expected,
+            SecureField::from(0u32),
+        );
+        assert_oods_constraints(&trace, &air);
+    }
+
+    #[test]
+    #[should_panic]
+    fn bound_oods_air_rejects_all_padding_bypass() {
+        let sample = SecureField::from(7u32);
+        let mut trace = simple_oods_trace(sample);
+        trace[OODS_AIR_COL_IS_PADDING].fill(BaseField::from(1u32));
+        let air =
+            OodsCheckAir::new_bound(2, expected_samples(sample), sample, SecureField::from(0u32));
+        assert_oods_constraints(&trace, &air);
+    }
 
     #[test]
     fn test_oods_check_air_num_columns() {

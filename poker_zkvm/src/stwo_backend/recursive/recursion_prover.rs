@@ -12,39 +12,46 @@
 //! 4. 提交空 preprocessed trace (tree 0) + original trace (tree 1, 73 列)
 //! 5. 构建 `OodsCheckAir` component + `prove`
 //!
-//! ## v5.1 多组件 prove（OODS + FRI）
+//! ## 多组件 prove（canonical verifier replay）
 //!
-//! `prove_recursive_with_fri` 在单组件基础上新增 FRI Verifier AIR 作为第二个 component：
-//! 1. 计算 `unified_log_size = max(OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size(...))`
-//! 2. 生成 OODS trace，用 `pad_oods_trace_to_log_size` pad 到 `unified_log_size`
-//! 3. 生成 FRI trace（自然 `unified_log_size`）
-//! 4. Tree 1: OODS (73 cols) + FRI (36 cols) = 109 cols，统一 `unified_log_size`
-//! 5. 构建 OODS component + FRI component（共享 `TraceLocationAllocator`）
-//! 6. `prove(&[&oods_component, &fri_component], ...)`
-//!
-//! v5.2 将扩展为 4 个 Verifier AIR 的多组件聚合 proof。
+//! `prove_recursive_with_fri` 将固定 `CpuV1` transcript、Poseidon252、canonical Merkle
+//! replay、PCS quotient、FRI fold、OODS 和 composition evaluation 对称装配进
+//! preprocessed/base/interaction commitments。旧的 `FriVerifierAir` 与 `MerklePathAir`
+//! 占位组件不再进入该证明路径。
 //!
 //! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
 //! [`RecursionProvingError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
 
 use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir};
-use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
-use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
-use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
-use super::poseidon252_air::{
-    Poseidon252ClosureComponents, Poseidon252ClosureWitness, audit_canonical_poseidon_closure,
+use super::cpu_transcript_binding_air::{
+    CpuTranscriptBindingAir, CpuTranscriptBindingWitness, mix_cpu_transcript_claim,
 };
+use super::fri_semantic_air::{
+    FriFoldAir, FriFoldPublicWitness, FriFoldWitness, PcsQuotientAir, PcsQuotientPublicWitness,
+    PcsQuotientWitness,
+};
+use super::merkle_leaf_air::{
+    MerkleLeafPackingAir, MerkleLeafPackingWitness, MerkleLeafPublicWitness,
+};
+use super::merkle_semantic_air::{
+    MerklePublicBindingAir, MerklePublicBindingWitness, MerkleSemanticAir, MerkleSemanticWitness,
+};
+use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
+use super::poseidon252_air::{Poseidon252ClosureComponents, Poseidon252ClosureWitness};
 use super::public_inputs::RecursivePublicInputs;
 use super::replay_witness::CanonicalVerifierWitness;
 use super::trace_gen::{
-    OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size, extract_composition_oods_eval_from_l1,
-    extract_fri_query_from_l1, gen_composition_eval_trace, gen_fri_verifier_trace,
-    gen_merkle_path_trace, gen_oods_check_trace, pad_fri_trace_to_log_size,
-    pad_merkle_trace_to_log_size, pad_oods_trace_to_log_size,
+    OODS_TRACE_LOG_SIZE, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
+    gen_composition_eval_trace, gen_oods_check_trace, pad_oods_trace_to_log_size,
+};
+use super::transcript_air::{
+    TranscriptSemanticAir, TranscriptSemanticWitness, ensure_lookup_balanced,
+    transcript_payload_values,
 };
 use super::verifier_program::replay_cpu_verifier;
 use ark_ff::Zero;
 use cairo_air::relations::CommonLookupElements;
+use starknet_ff::FieldElement as FieldElement252;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
@@ -84,8 +91,21 @@ pub(crate) struct RecursivePoseidonClaim {
     pub cairo_interaction_claim: cairo_air::claims::CairoInteractionClaim,
     pub caller_log_size: u32,
     pub n_calls: usize,
+    pub transcript_log_size: u32,
+    pub n_transcript_calls: usize,
     pub caller_claimed_sum: SecureField,
     pub semantic_claimed_sum: SecureField,
+    pub transcript_claimed_sum: SecureField,
+    pub binding_claimed_sum: SecureField,
+    pub merkle_claimed_sum: SecureField,
+    pub merkle_binding_claimed_sum: SecureField,
+    pub merkle_leaf_claimed_sum: SecureField,
+    pub pcs_quotient_claimed_sum: SecureField,
+    pub fri_fold_claimed_sum: SecureField,
+    pub sampled_values: Vec<SecureField>,
+    pub transcript_draw_results: Vec<FieldElement252>,
+    pub proof_of_work: u64,
+    pub pow_hash: FieldElement252,
 }
 
 /// Recursion prover 错误类型。
@@ -320,31 +340,18 @@ pub fn prove_recursive(
     Ok(RecursiveProof(stark_proof, None))
 }
 
-/// 聚合 OODS Check AIR + FRI Verifier AIR 的多组件 L2 prover（v5.1 多组件）。
+/// 聚合 fixed `CpuV1` canonical verifier AIR 的多组件 L2 prover。
 ///
-/// 在 [`prove_recursive`] 的基础上，新增 FRI Verifier AIR 作为第二个 component，
-/// 验证 L1 proof 的 FRI last_layer check：`query_eval == last_layer_poly.eval_at_point(x)`。
-///
-/// # v5.1 多组件流程
+/// # 多组件流程
 ///
 /// 1. **Prover 端 consistency check**（同 `prove_recursive`）
-/// 2. 计算 `unified_log_size = max(OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size(last_layer_poly))`
-/// 3. 生成 OODS trace（73 cols × 4 rows），用 `pad_oods_trace_to_log_size` pad到 `unified_log_size`
-/// 4. 生成 FRI trace（36 cols × `2^unified_log_size` rows）
-/// 5. `PcsConfig::default()` + `SimdBackend::precompute_twiddles`（domain = `unified_log_size + blowup`）
-/// 6. `Blake2sChannel::default()` + `CommitmentSchemeProver`
-/// 7. mix `RecursivePublicInputs` 到 channel（Fiat-Shamir soundness）
-/// 8. 提交 Tree 0（空 preprocessed）+ Tree 1（OODS 73 cols + FRI 36 cols = 109 cols）
-/// 9. 构建 `OodsCheckAir` component + `FriVerifierAir` component（共享 `TraceLocationAllocator`）
-/// 10. `prove(&[&oods_component, &fri_component], ...) → StarkProof`
+/// 2. 构造 transcript/Poseidon/Merkle/PCS/FRI semantic witnesses
+/// 3. 生成 OODS 与 composition traces
+/// 4. 提交固定 preprocessed、heterogeneous base 与 interaction trees
+/// 5. 构建全部 semantic components（共享 `TraceLocationAllocator`）
+/// 6. `prove(...) → StarkProof`
 ///
-/// # 多组件 log_size 统一
-///
-/// Stwo 要求同一 committed tree 中所有列必须有相同 log_size。
-/// OODS trace 自然 log_size=2（4 rows），FRI trace 自然 log_size 取决于 `last_layer_poly.len()`。
-/// 此函数用 `pad_oods_trace_to_log_size` 将 OODS trace pad 到 `unified_log_size`，
-/// 同时将 `FriVerifierAir::new(unified_log_size)` 和 `OodsCheckAir::new(unified_log_size)`
-/// 都用统一 log_size 构造。
+/// 旧 `FriVerifierAir` / `MerklePathAir` 仅保留为历史 PoC，不再装配进完整路径。
 ///
 /// # 参数
 /// - `l1_proof` — L1 Stwo proof
@@ -424,40 +431,285 @@ pub fn prove_recursive_with_fri(
             "canonical verifier witness is internally inconsistent".to_string(),
         ));
     }
-    audit_canonical_poseidon_closure(&canonical_witness.poseidon_calls).map_err(|error| {
+    let transcript_payloads = transcript_payload_values(&canonical_witness.transcript_events);
+    let sampled_values = l1_proof.0.sampled_values.clone().flatten_cols();
+    let transcript_draw_results = canonical_witness
+        .transcript_events
+        .iter()
+        .filter(|event| {
+            event.kind == super::poseidon252_replay::Poseidon252CallKind::TranscriptDraw
+        })
+        .map(|event| event.result)
+        .collect::<Vec<_>>();
+    let pow_hash = canonical_witness
+        .transcript_events
+        .iter()
+        .find(|event| {
+            event.kind == super::poseidon252_replay::Poseidon252CallKind::TranscriptPowNonce
+        })
+        .map(|event| event.result)
+        .ok_or_else(|| {
+            RecursionProvingError::FixedVerifierReplayFailed(
+                "canonical transcript is missing the PoW nonce result".to_string(),
+            )
+        })?;
+    let binding_witness = CpuTranscriptBindingWitness::new(
+        public_inputs,
+        &sampled_values,
+        &transcript_draw_results,
+        l1_proof.0.proof_of_work,
+        pow_hash,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "fixed CpuV1 transcript usage binding failed: {error}"
+        ))
+    })?;
+    let audit_poseidon = Poseidon252ClosureWitness::from_canonical_calls_and_values(
+        &canonical_witness.poseidon_calls,
+        &transcript_payloads,
+    )
+    .map_err(|error| {
         RecursionProvingError::FixedVerifierReplayFailed(format!(
             "canonical Poseidon252 AIR closure audit failed: {error}"
         ))
     })?;
+    let audit_transcript = TranscriptSemanticWitness::new(
+        &canonical_witness.transcript_events,
+        &canonical_witness.transcript_calls,
+        &canonical_witness.poseidon_calls,
+        &audit_poseidon.synthetic_memory.call_ids,
+        &audit_poseidon.synthetic_memory.extra_ids,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical transcript AIR witness audit failed: {error}"
+        ))
+    })?;
+    let audit_merkle_binding = MerklePublicBindingWitness::new(public_inputs).map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical Merkle public binding audit failed: {error}"
+        ))
+    })?;
+    let audit_merkle = MerkleSemanticWitness::new(
+        &canonical_witness,
+        &audit_merkle_binding,
+        &audit_poseidon.synthetic_memory.call_ids,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical Merkle semantic witness audit failed: {error}"
+        ))
+    })?;
+    let audit_merkle_leaf_public =
+        MerkleLeafPublicWitness::new(&audit_merkle_binding).map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical Merkle leaf public schedule audit failed: {error}"
+            ))
+        })?;
+    let audit_merkle_leaf = MerkleLeafPackingWitness::new(
+        &canonical_witness,
+        &audit_merkle_leaf_public,
+        &audit_poseidon.synthetic_memory.call_ids,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical Merkle leaf packing audit failed: {error}"
+        ))
+    })?;
+    let audit_quotient_public = PcsQuotientPublicWitness::new(public_inputs, &sampled_values)
+        .map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical PCS quotient public schedule audit failed: {error}"
+            ))
+        })?;
+    let audit_quotient = PcsQuotientWitness::new(&canonical_witness, &audit_quotient_public)
+        .map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical PCS quotient witness audit failed: {error}"
+            ))
+        })?;
+    let audit_fri_fold_public = FriFoldPublicWitness::new(public_inputs, &transcript_draw_results)
+        .map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical FRI fold public schedule audit failed: {error}"
+            ))
+        })?;
+    let audit_fri_fold =
+        FriFoldWitness::new(&canonical_witness, &audit_fri_fold_public).map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical FRI fold witness audit failed: {error}"
+            ))
+        })?;
+    let audit_lookup_elements = CommonLookupElements::dummy();
+    let (_, audit_transcript_sum) =
+        audit_transcript.write_interaction_trace(&audit_lookup_elements);
+    let (_, audit_binding_sum) = binding_witness.write_interaction_trace(&audit_lookup_elements);
+    let (_, audit_merkle_sum) = audit_merkle.write_interaction_trace(&audit_lookup_elements);
+    let (_, audit_merkle_binding_sum) =
+        audit_merkle_binding.write_interaction_trace(&audit_lookup_elements);
+    let (_, audit_merkle_leaf_sum) = audit_merkle_leaf
+        .write_interaction_trace(&audit_merkle_leaf_public, &audit_lookup_elements);
+    let (_, audit_quotient_sum) =
+        audit_quotient.write_interaction_trace(&audit_quotient_public, &audit_lookup_elements);
+    let (_, audit_fri_fold_sum) =
+        audit_fri_fold.write_interaction_trace(&audit_fri_fold_public, &audit_lookup_elements);
+    let audit_poseidon_interaction = audit_poseidon
+        .write_interaction_trace(&audit_lookup_elements)
+        .map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical Poseidon252 interaction audit failed: {error}"
+            ))
+        })?;
+    ensure_lookup_balanced(
+        audit_poseidon_interaction.lookup_residual,
+        &[
+            audit_transcript_sum,
+            audit_binding_sum,
+            audit_merkle_sum,
+            audit_merkle_binding_sum,
+            audit_merkle_leaf_sum,
+            audit_quotient_sum,
+            audit_fri_fold_sum,
+        ],
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical transcript/Poseidon lookup audit failed: {error}"
+        ))
+    })?;
 
-    // P05-R gap #3-B：`stwo_replay` / `fri_replay` 已提供与 Stwo 2.3 一致的 canonical
-    // witness 重放，但当前 MerklePathAir 仍未约束该重放，也没有真实 Poseidon252、
-    // method-specific transcript 或 composition verifier AIR。保持显式 fail-closed。
+    // P05-R gap #3-B：canonical replay 已有 transcript/Merkle/PCS/FRI semantic AIR，
+    // 但整体 challenge/use-point 组合 soundness 尚未完成密码学审计。保持显式 fail-closed。
     if !super::MERKLE_VERIFIER_AIR_COMPLETE {
         return Err(RecursionProvingError::IncompleteMerkleVerifierAir);
     }
 
-    let poseidon_witness =
-        Poseidon252ClosureWitness::from_canonical_calls(&canonical_witness.poseidon_calls)
-            .map_err(|error| {
-                RecursionProvingError::FixedVerifierReplayFailed(format!(
-                    "canonical Poseidon252 witness generation failed: {error}"
-                ))
-            })?;
+    let poseidon_witness = Poseidon252ClosureWitness::from_canonical_calls_and_values(
+        &canonical_witness.poseidon_calls,
+        &transcript_payloads,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical Poseidon252 witness generation failed: {error}"
+        ))
+    })?;
     let poseidon_cairo_claim = poseidon_witness.cairo_claim.clone();
     let poseidon_caller_log_size = poseidon_witness.caller_log_size;
     let poseidon_n_calls = poseidon_witness.n_calls;
-    let (poseidon_preprocessed_ids, poseidon_preprocessed_trace) =
+    let transcript_witness = TranscriptSemanticWitness::new(
+        &canonical_witness.transcript_events,
+        &canonical_witness.transcript_calls,
+        &canonical_witness.poseidon_calls,
+        &poseidon_witness.synthetic_memory.call_ids,
+        &poseidon_witness.synthetic_memory.extra_ids,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical transcript witness generation failed: {error}"
+        ))
+    })?;
+    let transcript_log_size = transcript_witness.log_size;
+    let n_transcript_calls = transcript_witness.n_calls;
+    let merkle_binding_witness =
+        MerklePublicBindingWitness::new(public_inputs).map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical Merkle public binding generation failed: {error}"
+            ))
+        })?;
+    let merkle_witness = MerkleSemanticWitness::new(
+        &canonical_witness,
+        &merkle_binding_witness,
+        &poseidon_witness.synthetic_memory.call_ids,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical Merkle semantic witness generation failed: {error}"
+        ))
+    })?;
+    let merkle_leaf_public =
+        MerkleLeafPublicWitness::new(&merkle_binding_witness).map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "canonical Merkle leaf public schedule generation failed: {error}"
+            ))
+        })?;
+    let merkle_leaf_witness = MerkleLeafPackingWitness::new(
+        &canonical_witness,
+        &merkle_leaf_public,
+        &poseidon_witness.synthetic_memory.call_ids,
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical Merkle leaf packing generation failed: {error}"
+        ))
+    })?;
+    let quotient_public =
+        PcsQuotientPublicWitness::new(public_inputs, &sampled_values).map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "PCS quotient public schedule generation failed: {error}"
+            ))
+        })?;
+    let quotient_witness =
+        PcsQuotientWitness::new(&canonical_witness, &quotient_public).map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "PCS quotient witness generation failed: {error}"
+            ))
+        })?;
+    let fri_fold_public = FriFoldPublicWitness::new(public_inputs, &transcript_draw_results)
+        .map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "FRI fold public schedule generation failed: {error}"
+            ))
+        })?;
+    let fri_fold_witness =
+        FriFoldWitness::new(&canonical_witness, &fri_fold_public).map_err(|error| {
+            RecursionProvingError::FixedVerifierReplayFailed(format!(
+                "FRI fold witness generation failed: {error}"
+            ))
+        })?;
+    let (mut poseidon_preprocessed_ids, mut poseidon_preprocessed_trace) =
         poseidon_witness.preprocessed_columns();
+    let (transcript_preprocessed_ids, transcript_preprocessed_trace) =
+        transcript_witness.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(transcript_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(transcript_preprocessed_trace);
+    let (binding_preprocessed_ids, binding_preprocessed_trace) =
+        binding_witness.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(binding_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(binding_preprocessed_trace);
+    let (merkle_semantic_preprocessed_ids, merkle_semantic_preprocessed_trace) =
+        merkle_binding_witness.semantic_preprocessed_columns();
+    poseidon_preprocessed_ids.extend(merkle_semantic_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(merkle_semantic_preprocessed_trace);
+    let (merkle_binding_preprocessed_ids, merkle_binding_preprocessed_trace) =
+        merkle_binding_witness.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(merkle_binding_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(merkle_binding_preprocessed_trace);
+    let (merkle_leaf_preprocessed_ids, merkle_leaf_preprocessed_trace) =
+        merkle_leaf_public.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(merkle_leaf_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(merkle_leaf_preprocessed_trace);
+    let (quotient_preprocessed_ids, quotient_preprocessed_trace) =
+        quotient_public.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(quotient_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(quotient_preprocessed_trace);
+    let (fri_fold_preprocessed_ids, fri_fold_preprocessed_trace) =
+        fri_fold_public.preprocessed_columns();
+    poseidon_preprocessed_ids.extend(fri_fold_preprocessed_ids);
+    poseidon_preprocessed_trace.extend(fri_fold_preprocessed_trace);
     let mut poseidon_base_trace = poseidon_witness.cairo_base_trace.clone();
     poseidon_base_trace.extend(poseidon_witness.caller_base_trace());
     poseidon_base_trace.extend(poseidon_witness.semantic_base_trace());
+    poseidon_base_trace.extend(transcript_witness.base_trace.clone());
+    poseidon_base_trace.extend(merkle_witness.base_trace.clone());
+    poseidon_base_trace.extend(merkle_leaf_witness.base_trace.clone());
+    poseidon_base_trace.extend(quotient_witness.base_trace.clone());
+    poseidon_base_trace.extend(fri_fold_witness.base_trace.clone());
 
-    // 2. 计算 unified_log_size
-    let fri_log_size = compute_fri_trace_log_size(&public_inputs.fri_last_layer_poly);
-    let unified_log_size = OODS_TRACE_LOG_SIZE.max(fri_log_size);
+    // 2. OODS 与 fixed CpuV1 composition evaluator 共用最小 4-row verifier domain。
+    let verifier_log_size = OODS_TRACE_LOG_SIZE;
 
-    // 3. 生成 OODS trace 并 pad 到 unified_log_size
+    // 3. 生成 OODS trace。
     let oods_trace_cols = gen_oods_check_trace(l1_proof, public_inputs);
     assert_eq!(
         oods_trace_cols.len(),
@@ -465,37 +717,14 @@ pub fn prove_recursive_with_fri(
         "OODS trace 列数={}，期望={OODS_AIR_NUM_COLUMNS}",
         oods_trace_cols.len()
     );
-    let oods_trace_padded = pad_oods_trace_to_log_size(oods_trace_cols, unified_log_size);
+    let mut oods_trace_padded = pad_oods_trace_to_log_size(oods_trace_cols, verifier_log_size);
+    for column in &mut oods_trace_padded {
+        let bound_value = column[0];
+        column.fill(bound_value);
+    }
 
-    // 4. 生成 FRI trace（自然 unified_log_size，因为 unified_log_size >= fri_log_size）
-    // 注：gen_fri_verifier_trace 使用 public_inputs.fri_last_layer_poly 计算 num_rows，
-    // 当 unified_log_size > fri_log_size 时，FRI trace 的行数 < 2^unified_log_size，
-    // 需要额外 pad 到 unified_log_size。
-    let fri_trace_cols = gen_fri_verifier_trace(l1_proof, public_inputs);
-    assert_eq!(
-        fri_trace_cols.len(),
-        FRI_AIR_NUM_COLUMNS,
-        "FRI trace 列数={}，期望={FRI_AIR_NUM_COLUMNS}",
-        fri_trace_cols.len()
-    );
-    let fri_trace_padded = pad_fri_trace_to_log_size(fri_trace_cols, unified_log_size);
-
-    // 5. 生成 Merkle Path trace（v5.1 新增）
-    let merkle_trace_cols = gen_merkle_path_trace(l1_proof, public_inputs);
-    let merkle_trace_padded = if merkle_trace_cols.is_empty() {
-        vec![vec![BaseField::zero(); 1usize << unified_log_size]; MERKLE_AIR_NUM_COLUMNS]
-    } else {
-        assert_eq!(
-            merkle_trace_cols.len(),
-            MERKLE_AIR_NUM_COLUMNS,
-            "Merkle trace 列数={}，期望={MERKLE_AIR_NUM_COLUMNS}",
-            merkle_trace_cols.len()
-        );
-        pad_merkle_trace_to_log_size(merkle_trace_cols, unified_log_size)
-    };
-
-    // 5b. 固定 CpuAir composition evaluation：185 个 QM31 samples = 740 个 M31 columns。
-    let composition_trace = gen_composition_eval_trace(l1_proof, unified_log_size);
+    // 4. 固定 CpuAir composition evaluation：185 个 QM31 samples = 740 个 M31 columns。
+    let composition_trace = gen_composition_eval_trace(l1_proof, verifier_log_size);
     assert_eq!(
         composition_trace.len(),
         COMP_EVAL_AIR_NUM_COLUMNS,
@@ -510,8 +739,8 @@ pub fn prove_recursive_with_fri(
         .chain(&poseidon_base_trace)
         .map(|evaluation| evaluation.domain.log_size())
         .max()
-        .unwrap_or(unified_log_size)
-        .max(unified_log_size);
+        .unwrap_or(verifier_log_size)
+        .max(verifier_log_size);
     let big_domain = CanonicCoset::new(max_log_size + blowup_log);
     let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
 
@@ -520,6 +749,13 @@ pub fn prove_recursive_with_fri(
 
     // 8. mix RecursivePublicInputs 到 channel（与 prove_recursive 相同顺序）
     mix_public_inputs_into_channel(&mut channel, public_inputs);
+    mix_cpu_transcript_claim(
+        &mut channel,
+        &sampled_values,
+        &transcript_draw_results,
+        l1_proof.0.proof_of_work,
+        pow_hash,
+    );
 
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
@@ -538,18 +774,20 @@ pub fn prove_recursive_with_fri(
             "canonical Poseidon252 call count exceeds u64".to_string(),
         )
     })?);
+    channel.mix_u64(u64::from(transcript_log_size));
+    channel.mix_u64(u64::try_from(n_transcript_calls).map_err(|_| {
+        RecursionProvingError::L1ProofStructureInvalid(
+            "canonical transcript call count exceeds u64".to_string(),
+        )
+    })?);
 
     // 10. 提交 original trace：官方 Poseidon closure + canonical caller/semantic + verifier AIRs。
     {
-        let oods_evals = trace_cols_to_evaluations(&oods_trace_padded, unified_log_size);
-        let fri_evals = trace_cols_to_evaluations(&fri_trace_padded, unified_log_size);
-        let merkle_evals = trace_cols_to_evaluations(&merkle_trace_padded, unified_log_size);
-        let composition_evals = trace_cols_to_evaluations(&composition_trace, unified_log_size);
+        let oods_evals = trace_cols_to_evaluations(&oods_trace_padded, verifier_log_size);
+        let composition_evals = trace_cols_to_evaluations(&composition_trace, verifier_log_size);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(poseidon_base_trace);
         tree_builder.extend_evals(oods_evals);
-        tree_builder.extend_evals(fri_evals);
-        tree_builder.extend_evals(merkle_evals);
         tree_builder.extend_evals(composition_evals);
         tree_builder.commit(&mut channel);
     }
@@ -562,32 +800,94 @@ pub fn prove_recursive_with_fri(
                 "canonical Poseidon252 interaction generation failed: {error}"
             ))
         })?;
+    let (transcript_interaction_trace, transcript_claimed_sum) =
+        transcript_witness.write_interaction_trace(&common_lookup_elements);
+    let (binding_interaction_trace, binding_claimed_sum) =
+        binding_witness.write_interaction_trace(&common_lookup_elements);
+    let (merkle_interaction_trace, merkle_claimed_sum) =
+        merkle_witness.write_interaction_trace(&common_lookup_elements);
+    let (merkle_binding_interaction_trace, merkle_binding_claimed_sum) =
+        merkle_binding_witness.write_interaction_trace(&common_lookup_elements);
+    let (merkle_leaf_interaction_trace, merkle_leaf_claimed_sum) =
+        merkle_leaf_witness.write_interaction_trace(&merkle_leaf_public, &common_lookup_elements);
+    let (quotient_interaction_trace, pcs_quotient_claimed_sum) =
+        quotient_witness.write_interaction_trace(&quotient_public, &common_lookup_elements);
+    let (fri_fold_interaction_trace, fri_fold_claimed_sum) =
+        fri_fold_witness.write_interaction_trace(&fri_fold_public, &common_lookup_elements);
+    ensure_lookup_balanced(
+        poseidon_interaction.lookup_residual,
+        &[
+            transcript_claimed_sum,
+            binding_claimed_sum,
+            merkle_claimed_sum,
+            merkle_binding_claimed_sum,
+            merkle_leaf_claimed_sum,
+            pcs_quotient_claimed_sum,
+            fri_fold_claimed_sum,
+        ],
+    )
+    .map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical transcript/Poseidon lookup is unbalanced: {error}"
+        ))
+    })?;
     poseidon_interaction
         .cairo_interaction_claim
         .mix_into(&mut channel);
     channel.mix_felts(&[
         poseidon_interaction.caller_claimed_sum,
         poseidon_interaction.semantic_claimed_sum,
+        transcript_claimed_sum,
+        binding_claimed_sum,
+        merkle_claimed_sum,
+        merkle_binding_claimed_sum,
+        merkle_leaf_claimed_sum,
+        pcs_quotient_claimed_sum,
+        fri_fold_claimed_sum,
     ]);
     {
         let mut interaction_trace = poseidon_interaction.cairo_interaction_trace;
         interaction_trace.extend(poseidon_interaction.caller_interaction_trace);
         interaction_trace.extend(poseidon_interaction.semantic_interaction_trace);
+        interaction_trace.extend(transcript_interaction_trace);
+        interaction_trace.extend(binding_interaction_trace);
+        interaction_trace.extend(merkle_interaction_trace);
+        interaction_trace.extend(merkle_binding_interaction_trace);
+        interaction_trace.extend(merkle_leaf_interaction_trace);
+        interaction_trace.extend(quotient_interaction_trace);
+        interaction_trace.extend(fri_fold_interaction_trace);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction_trace);
         tree_builder.commit(&mut channel);
     }
 
-    // 11. 构建 OODS + FRI + Merkle components（共享 TraceLocationAllocator）
-    let oods_air = OodsCheckAir::new(unified_log_size);
-    let fri_air = FriVerifierAir::new(unified_log_size);
-    let merkle_air = MerklePathAir::new(unified_log_size);
-    let composition_air = CompositionEvalAir::new(
-        unified_log_size,
+    // 11. 构建 canonical semantic + OODS/composition components。
+    let composition_samples =
+        sampled_values[..crate::stwo_backend::column_layout_v2::NUM_COLUMNS].to_vec();
+    let oods_samples = sampled_values[crate::stwo_backend::column_layout_v2::NUM_COLUMNS..]
+        .try_into()
+        .map_err(|_| {
+            RecursionProvingError::FixedVerifierReplayFailed(
+                "fixed CpuV1 composition sampled-value tail has the wrong length".to_string(),
+            )
+        })?;
+    let oods_doubling_factor_x = public_inputs
+        .oods_point
+        .repeated_double(public_inputs.max_log_degree_bound - 1)
+        .x;
+    let oods_air = OodsCheckAir::new_bound(
+        verifier_log_size,
+        oods_samples,
+        public_inputs.composition_oods_eval,
+        oods_doubling_factor_x,
+    );
+    let composition_air = CompositionEvalAir::new_bound(
+        verifier_log_size,
         public_inputs.log_size,
         public_inputs.oods_point,
         public_inputs.composition_random_coeff,
         public_inputs.composition_oods_eval,
+        composition_samples,
     );
     let mut allocator =
         TraceLocationAllocator::new_with_preprocessed_columns(&poseidon_preprocessed_ids);
@@ -596,23 +896,90 @@ pub fn prove_recursive_with_fri(
         &common_lookup_elements,
         &poseidon_interaction.cairo_interaction_claim,
         poseidon_caller_log_size,
+        poseidon_n_calls,
         poseidon_interaction.caller_claimed_sum,
         poseidon_interaction.semantic_claimed_sum,
         &poseidon_preprocessed_ids,
         &mut allocator,
     );
+    let transcript_component = FrameworkComponent::new(
+        &mut allocator,
+        TranscriptSemanticAir::new(
+            transcript_log_size,
+            n_transcript_calls,
+            common_lookup_elements.clone(),
+        ),
+        transcript_claimed_sum,
+    );
+    let binding_component = FrameworkComponent::new(
+        &mut allocator,
+        CpuTranscriptBindingAir::new(
+            binding_witness.log_size,
+            binding_witness.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        binding_claimed_sum,
+    );
+    let merkle_semantic_component = FrameworkComponent::new(
+        &mut allocator,
+        MerkleSemanticAir::new(
+            merkle_witness.log_size,
+            merkle_witness.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        merkle_claimed_sum,
+    );
+    let merkle_binding_component = FrameworkComponent::new(
+        &mut allocator,
+        MerklePublicBindingAir::new(
+            merkle_binding_witness.log_size,
+            merkle_binding_witness.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        merkle_binding_claimed_sum,
+    );
+    let merkle_leaf_component = FrameworkComponent::new(
+        &mut allocator,
+        MerkleLeafPackingAir::new(
+            merkle_leaf_witness.log_size,
+            merkle_leaf_witness.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        merkle_leaf_claimed_sum,
+    );
+    let quotient_component = FrameworkComponent::new(
+        &mut allocator,
+        PcsQuotientAir::new(
+            quotient_public.log_size,
+            quotient_public.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        pcs_quotient_claimed_sum,
+    );
+    let fri_fold_component = FrameworkComponent::new(
+        &mut allocator,
+        FriFoldAir::new(
+            fri_fold_public.log_size,
+            fri_fold_public.n_rows,
+            common_lookup_elements.clone(),
+        ),
+        fri_fold_claimed_sum,
+    );
     let oods_component = FrameworkComponent::new(&mut allocator, oods_air, SecureField::zero());
-    let fri_component = FrameworkComponent::new(&mut allocator, fri_air, SecureField::zero());
-    let merkle_component = FrameworkComponent::new(&mut allocator, merkle_air, SecureField::zero());
     let composition_component =
         FrameworkComponent::new(&mut allocator, composition_air, SecureField::zero());
 
     // 12. 生成完整 closure + verifier AIR 多组件证明。
     let mut components = poseidon_components.prover_components();
     components.extend([
-        &oods_component as &dyn ComponentProver<SimdBackend>,
-        &fri_component,
-        &merkle_component,
+        &transcript_component as &dyn ComponentProver<SimdBackend>,
+        &binding_component,
+        &merkle_semantic_component,
+        &merkle_binding_component,
+        &merkle_leaf_component,
+        &quotient_component,
+        &fri_fold_component,
+        &oods_component,
         &composition_component,
     ]);
     let stark_proof = prove(&components, &mut channel, commitment_scheme)?;
@@ -623,8 +990,21 @@ pub fn prove_recursive_with_fri(
             cairo_interaction_claim: poseidon_interaction.cairo_interaction_claim,
             caller_log_size: poseidon_caller_log_size,
             n_calls: poseidon_n_calls,
+            transcript_log_size,
+            n_transcript_calls,
             caller_claimed_sum: poseidon_interaction.caller_claimed_sum,
             semantic_claimed_sum: poseidon_interaction.semantic_claimed_sum,
+            transcript_claimed_sum,
+            binding_claimed_sum,
+            merkle_claimed_sum,
+            merkle_binding_claimed_sum,
+            merkle_leaf_claimed_sum,
+            pcs_quotient_claimed_sum,
+            fri_fold_claimed_sum,
+            sampled_values,
+            transcript_draw_results,
+            proof_of_work: l1_proof.0.proof_of_work,
+            pow_hash,
         }),
     ))
 }

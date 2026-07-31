@@ -36,6 +36,7 @@ pub struct CompositionEvalAir {
     oods_point: stwo::core::circle::CirclePoint<SecureField>,
     composition_random_coeff: SecureField,
     claimed_composition_eval: SecureField,
+    expected_sampled_values: Option<Vec<SecureField>>,
 }
 
 impl CompositionEvalAir {
@@ -54,6 +55,26 @@ impl CompositionEvalAir {
             oods_point,
             composition_random_coeff,
             claimed_composition_eval,
+            expected_sampled_values: None,
+        }
+    }
+
+    pub(crate) fn new_bound(
+        trace_log_size: u32,
+        cpu_log_size: u32,
+        oods_point: stwo::core::circle::CirclePoint<SecureField>,
+        composition_random_coeff: SecureField,
+        claimed_composition_eval: SecureField,
+        expected_sampled_values: Vec<SecureField>,
+    ) -> Self {
+        assert_eq!(expected_sampled_values.len(), NUM_COLUMNS);
+        Self {
+            trace_log_size,
+            cpu_log_size,
+            oods_point,
+            composition_random_coeff,
+            claimed_composition_eval,
+            expected_sampled_values: Some(expected_sampled_values),
         }
     }
 
@@ -79,7 +100,12 @@ impl FrameworkEval for CompositionEvalAir {
                 let limbs = array::from_fn(|_| eval.next_trace_mask());
                 RecursiveExpression(E::combine_ef(limbs))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(expected) = &self.expected_sampled_values {
+            for (sample, expected) in sampled_values.iter().zip(expected) {
+                eval.add_constraint(sample.0.clone() - E::EF::from(*expected));
+            }
+        }
 
         let denominator_inverse =
             coset_vanishing(CanonicCoset::new(self.cpu_log_size).coset, self.oods_point).inverse();
@@ -344,7 +370,12 @@ mod tests {
     use crate::stwo_backend::prover::prove_cpu_trace;
     use crate::stwo_backend::trace_native::TraceBuilder;
 
-    fn fixed_cpu_composition_fixture() -> (Vec<Vec<BaseField>>, CompositionEvalAir, SecureField) {
+    fn fixed_cpu_composition_fixture() -> (
+        Vec<Vec<BaseField>>,
+        CompositionEvalAir,
+        SecureField,
+        Vec<SecureField>,
+    ) {
         let cpu_log_size = 10;
         let trace_log_size = 2;
         let mut builder = TraceBuilder::new(cpu_log_size);
@@ -379,6 +410,7 @@ mod tests {
 
         let samples = &proof.0.sampled_values[1];
         assert_eq!(samples.len(), NUM_COLUMNS);
+        let expected_samples = samples.iter().map(|column| column[0]).collect();
         let n_rows = 1usize << trace_log_size;
         let mut trace = Vec::with_capacity(COMP_EVAL_AIR_NUM_COLUMNS);
         for column in samples {
@@ -398,12 +430,13 @@ mod tests {
                 expected,
             ),
             expected,
+            expected_samples,
         )
     }
 
     #[test]
     fn fixed_cpu_composition_air_accepts_real_samples() {
-        let (trace, air, _) = fixed_cpu_composition_fixture();
+        let (trace, air, _, _) = fixed_cpu_composition_fixture();
         let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
         assert_constraints_on_trace(
             &trees,
@@ -418,7 +451,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "constraint #0")]
     fn fixed_cpu_composition_air_rejects_wrong_claim() {
-        let (trace, air, expected) = fixed_cpu_composition_fixture();
+        let (trace, air, expected, _) = fixed_cpu_composition_fixture();
         let bad_air = CompositionEvalAir::new(
             air.trace_log_size,
             air.cpu_log_size,
@@ -440,7 +473,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "constraint #0")]
     fn fixed_cpu_composition_air_rejects_tampered_sample() {
-        let (mut trace, air, _) = fixed_cpu_composition_fixture();
+        let (mut trace, air, _, _) = fixed_cpu_composition_fixture();
         trace[crate::stwo_backend::column_layout_v2::IS_PADDING * SECURE_EXTENSION_DEGREE][0] +=
             BaseField::from(1u32);
         let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
@@ -449,6 +482,52 @@ mod tests {
             air.log_size(),
             |eval| {
                 air.evaluate(eval);
+            },
+            SecureField::zero(),
+        );
+    }
+
+    #[test]
+    fn fixed_cpu_composition_bound_air_accepts_expected_samples() {
+        let (trace, air, _, expected_samples) = fixed_cpu_composition_fixture();
+        let bound_air = CompositionEvalAir::new_bound(
+            air.trace_log_size,
+            air.cpu_log_size,
+            air.oods_point,
+            air.composition_random_coeff,
+            air.claimed_composition_eval,
+            expected_samples,
+        );
+        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+        assert_constraints_on_trace(
+            &trees,
+            bound_air.log_size(),
+            |eval| {
+                bound_air.evaluate(eval);
+            },
+            SecureField::zero(),
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn fixed_cpu_composition_bound_air_rejects_wrong_expected_sample() {
+        let (trace, air, _, mut expected_samples) = fixed_cpu_composition_fixture();
+        expected_samples[0] += SecureField::from(1u32);
+        let bound_air = CompositionEvalAir::new_bound(
+            air.trace_log_size,
+            air.cpu_log_size,
+            air.oods_point,
+            air.composition_random_coeff,
+            air.claimed_composition_eval,
+            expected_samples,
+        );
+        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+        assert_constraints_on_trace(
+            &trees,
+            bound_air.log_size(),
+            |eval| {
+                bound_air.evaluate(eval);
             },
             SecureField::zero(),
         );
