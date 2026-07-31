@@ -228,9 +228,9 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   hash 的两个 payload 直接等于 permutation input，`hash_many` 则逐调用约束前一 state、两个 payload、
   odd/even 末块 `+1` padding 与当前 permutation input。模加使用 `P_FELTS`、单个 subtract-prime bit 和
   每 limb 互斥正/负 carry bit，证明
-  `state + payload + padding = input + q·p`，且 AIR degree 仍为 2。payload lookup 使 transcript interaction
-  列由 16 增至 20；官方 memory multiplicity、caller/semantic/transcript 全局 LogUp 再次归零。新增回归
-  覆盖 payload limb 篡改、carry 篡改与 `p-1+1=0 mod p`，真实 CpuV1 canonical replay audit 也通过。
+  `state + payload + padding = input + q·p`，且 AIR degree 仍为 2。payload lookup 增加后，transcript 共导出
+  12 条 semantic relation；官方 memory multiplicity、caller/semantic/transcript 全局 LogUp 再次归零。新增
+  回归覆盖 payload limb 篡改、carry 篡改与 `p-1+1=0 mod p`，真实 CpuV1 canonical replay audit 也通过。
 
   **Merkle semantic / leaf AIR（2026-07-31 后续阶段）** 已新增：public binding table 固定全部 PCS/FRI
   roots、tree/layer/source metadata 与 query schedule；semantic table 用 child/parent/root node multiset
@@ -255,15 +255,32 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   scaffold 移除，避免未来打开 gate 时被错误占位多项式拒绝真实 proof。`OodsCheckAir` 同时补上公开 claim、
   doubling factor、sample exact binding 与 all-padding 回归。
 
+  **LogUp 与 tree metadata soundness 修复（2026-07-31）**：transcript 的 12 条 relation 已从
+  `finalize_logup_in_pairs` 拆为 12 个独立 QM31 interaction 列（即 **48 个 M31 物理列**），避免不同 relation
+  的分子/分母在同一 LogUp 列内相互抵消。拆分后暴露出 witness writer 与 AIR 的 payload relation 顺序错位：
+  writer 原先先写两个 memory relation、再写两个 semantic relation，而 AIR 按 slot 交错消费；现已统一为
+  `poseidon -> 6×call-memory -> slot0 memory/semantic -> slot1 memory/semantic -> result`。Merkle interaction
+  metadata 也已改为实际提交的 M31 物理列数：semantic **28** 列、public binding **4** 列；此前把逻辑
+  relation/半列数误当物理列数，导致 verifier 期望 624 列而 proof 提交 640 列。
+
+  **完整 scaffold gate 后回归（2026-07-31）**：test-only gate bypass 已完成全部 9 个 verifier 组件与
+  Cairo Poseidon closure 的真实 L2 prove/verify roundtrip。回归复用同一 proof 验证了篡改
+  `RecursivePublicInputs`、篡改 proof envelope 中 `RecursivePoseidonClaim` 的 transcript call-count metadata
+  均被拒绝，同时未 bypass 的 verifier 仍返回 `IncompleteMerkleVerifierAir`。进一步审计发现全局 lookup
+  归零原先只由诚实 prover 调用 `ensure_lookup_balanced`，verifier 会分别接受 envelope 自报的 claimed sums；
+  现 verifier 按 Cairo interaction claim 的固定 flatten 顺序，加上 caller/transcript/Merkle/PCS/FRI 全部
+  claimed sums，强制总和严格为零，并有 claimed-sum 篡改回归。定位问题时使用的组件限流、trace clone 与
+  逐组件 degree audit 代码已删除，prover 恢复固定、无条件装配完整 base/interaction traces。
+
   完整三-tree L2 装配代码继续位于 `MERKLE_VERIFIER_AIR_COMPLETE=false` gate 之后，不可达且不能视为
-  已完成 sound recursion。剩余工作是独立审计 relation/multiplicity/transcript 顺序、打开 gate 后执行真实
-  L2 roundtrip 与 envelope/adversarial 篡改测试，并集成真实 Texas method program；在此之前生产 gate 不变。
+  已完成 sound recursion。剩余工作是独立审计全部 relation/multiplicity/selector/transcript 顺序，并集成
+  真实 Texas method program；在此之前生产 gate 必须保持 `false`，test-only bypass 的成功不能作为启用依据。
   `_with_fri` 继续显式 `IncompleteMerkleVerifierAir` fail-closed，不再依赖偶然的
   `Constraints not satisfied`（回归测试 `gap3b_incomplete_merkle_air_is_explicitly_disabled`）；
   gap #2（N-proof 聚合）、gap #3 的组合审计/真实 method proof 端到端仍未闭合；
   `poker_zkvm` 当前定向回归覆盖 OODS/public binding、composition bound、transcript/Poseidon、Merkle
-  semantic/leaf、PCS quotient、FRI fold、全局 lookup 归零、空输入守卫、9-limb 无损往返与显式关闭；
-  `_with_fri` 成功往返测试因 gap #3-B 暂时 `#[ignore]`（修复后应解除）；
+  semantic/leaf、PCS quotient、FRI fold、全局 lookup 归零、空输入守卫、9-limb 无损往返、完整 scaffold
+  往返、statement/envelope tamper 与显式关闭；
 - **P05-H-core** O(N) 宿主验证与完整范围 anchor 校验已闭合；
 - **P05-H-source** 仍需上层把 anchor 接到已认证 block/receipt；
 - **P05-R** 单个可转移的 recursive aggregate proof 仍是已知未完成特性。

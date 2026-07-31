@@ -43,7 +43,7 @@ use super::recursion_prover::RecursiveProof;
 use super::trace_gen::OODS_TRACE_LOG_SIZE;
 use super::transcript_air::{
     TRANSCRIPT_AIR_NUM_COLUMNS, TRANSCRIPT_INTERACTION_COLUMNS, TranscriptSemanticAir,
-    transcript_preprocessed_columns,
+    ensure_lookup_balanced, transcript_preprocessed_columns,
 };
 use ark_ff::Zero;
 use cairo_air::relations::CommonLookupElements;
@@ -224,6 +224,22 @@ pub fn verify_recursive_with_fri(
     l2_proof: &RecursiveProof,
     public_inputs: &RecursivePublicInputs,
 ) -> Result<(), RecursionVerificationError> {
+    verify_recursive_with_fri_impl(l2_proof, public_inputs, false)
+}
+
+#[cfg(test)]
+pub(crate) fn verify_recursive_with_fri_scaffold_for_test(
+    l2_proof: &RecursiveProof,
+    public_inputs: &RecursivePublicInputs,
+) -> Result<(), RecursionVerificationError> {
+    verify_recursive_with_fri_impl(l2_proof, public_inputs, true)
+}
+
+fn verify_recursive_with_fri_impl(
+    l2_proof: &RecursiveProof,
+    public_inputs: &RecursivePublicInputs,
+    bypass_incomplete_air_gate: bool,
+) -> Result<(), RecursionVerificationError> {
     if !cfg!(test) {
         let _ = (l2_proof, public_inputs);
         return Err(RecursionVerificationError::UnsoundBackendDisabled);
@@ -234,7 +250,7 @@ pub fn verify_recursive_with_fri(
 
     // P05-R gap #3-B：canonical semantic AIR 已装配，但整体组合 soundness 尚未完成
     // 密码学审计。生产构建更早由 UnsoundBackendDisabled 拒绝；此分支覆盖 crate 内测试。
-    if !super::MERKLE_VERIFIER_AIR_COMPLETE {
+    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate {
         let _ = l2_proof;
         return Err(RecursionVerificationError::IncompleteMerkleVerifierAir);
     }
@@ -424,6 +440,29 @@ pub fn verify_recursive_with_fri(
     commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
 
     let common_lookup_elements = CommonLookupElements::draw(&mut channel);
+    ensure_lookup_balanced(
+        poseidon_claim
+            .cairo_interaction_claim
+            .flatten_interaction_claim()
+            .into_iter()
+            .sum::<SecureField>()
+            + poseidon_claim.caller_claimed_sum
+            + poseidon_claim.semantic_claimed_sum,
+        &[
+            poseidon_claim.transcript_claimed_sum,
+            poseidon_claim.binding_claimed_sum,
+            poseidon_claim.merkle_claimed_sum,
+            poseidon_claim.merkle_binding_claimed_sum,
+            poseidon_claim.merkle_leaf_claimed_sum,
+            poseidon_claim.pcs_quotient_claimed_sum,
+            poseidon_claim.fri_fold_claimed_sum,
+        ],
+    )
+    .map_err(|error| {
+        RecursionVerificationError::VerificationFailed(format!(
+            "recursive global lookup claimed sums are unbalanced: {error}"
+        ))
+    })?;
     poseidon_claim
         .cairo_interaction_claim
         .mix_into(&mut channel);

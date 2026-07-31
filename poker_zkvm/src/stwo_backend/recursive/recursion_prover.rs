@@ -367,6 +367,22 @@ pub fn prove_recursive_with_fri(
     l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     public_inputs: &RecursivePublicInputs,
 ) -> Result<RecursiveProof, RecursionProvingError> {
+    prove_recursive_with_fri_impl(l1_proof, public_inputs, false)
+}
+
+#[cfg(test)]
+pub(crate) fn prove_recursive_with_fri_scaffold_for_test(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    public_inputs: &RecursivePublicInputs,
+) -> Result<RecursiveProof, RecursionProvingError> {
+    prove_recursive_with_fri_impl(l1_proof, public_inputs, true)
+}
+
+fn prove_recursive_with_fri_impl(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    public_inputs: &RecursivePublicInputs,
+    bypass_incomplete_air_gate: bool,
+) -> Result<RecursiveProof, RecursionProvingError> {
     if !cfg!(test) {
         let _ = (l1_proof, public_inputs);
         return Err(RecursionProvingError::UnsoundBackendDisabled);
@@ -581,7 +597,7 @@ pub fn prove_recursive_with_fri(
 
     // P05-R gap #3-B：canonical replay 已有 transcript/Merkle/PCS/FRI semantic AIR，
     // 但整体 challenge/use-point 组合 soundness 尚未完成密码学审计。保持显式 fail-closed。
-    if !super::MERKLE_VERIFIER_AIR_COMPLETE {
+    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate {
         return Err(RecursionProvingError::IncompleteMerkleVerifierAir);
     }
 
@@ -730,6 +746,14 @@ pub fn prove_recursive_with_fri(
         COMP_EVAL_AIR_NUM_COLUMNS,
         "Composition trace 列数不匹配"
     );
+    poseidon_base_trace.extend(trace_cols_to_evaluations(
+        &oods_trace_padded,
+        verifier_log_size,
+    ));
+    poseidon_base_trace.extend(trace_cols_to_evaluations(
+        &composition_trace,
+        verifier_log_size,
+    ));
 
     // 6. PCS 配置 + twiddles 预计算
     let config = PcsConfig::default();
@@ -759,7 +783,6 @@ pub fn prove_recursive_with_fri(
 
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
-
     // 9. 提交固定 Poseidon closure preprocessed trace（tree 0）
     {
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -783,12 +806,8 @@ pub fn prove_recursive_with_fri(
 
     // 10. 提交 original trace：官方 Poseidon closure + canonical caller/semantic + verifier AIRs。
     {
-        let oods_evals = trace_cols_to_evaluations(&oods_trace_padded, verifier_log_size);
-        let composition_evals = trace_cols_to_evaluations(&composition_trace, verifier_log_size);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(poseidon_base_trace);
-        tree_builder.extend_evals(oods_evals);
-        tree_builder.extend_evals(composition_evals);
         tree_builder.commit(&mut channel);
     }
 
@@ -845,17 +864,17 @@ pub fn prove_recursive_with_fri(
         pcs_quotient_claimed_sum,
         fri_fold_claimed_sum,
     ]);
+    let mut interaction_trace = poseidon_interaction.cairo_interaction_trace;
+    interaction_trace.extend(poseidon_interaction.caller_interaction_trace);
+    interaction_trace.extend(poseidon_interaction.semantic_interaction_trace);
+    interaction_trace.extend(transcript_interaction_trace);
+    interaction_trace.extend(binding_interaction_trace);
+    interaction_trace.extend(merkle_interaction_trace);
+    interaction_trace.extend(merkle_binding_interaction_trace);
+    interaction_trace.extend(merkle_leaf_interaction_trace);
+    interaction_trace.extend(quotient_interaction_trace);
+    interaction_trace.extend(fri_fold_interaction_trace);
     {
-        let mut interaction_trace = poseidon_interaction.cairo_interaction_trace;
-        interaction_trace.extend(poseidon_interaction.caller_interaction_trace);
-        interaction_trace.extend(poseidon_interaction.semantic_interaction_trace);
-        interaction_trace.extend(transcript_interaction_trace);
-        interaction_trace.extend(binding_interaction_trace);
-        interaction_trace.extend(merkle_interaction_trace);
-        interaction_trace.extend(merkle_binding_interaction_trace);
-        interaction_trace.extend(merkle_leaf_interaction_trace);
-        interaction_trace.extend(quotient_interaction_trace);
-        interaction_trace.extend(fri_fold_interaction_trace);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction_trace);
         tree_builder.commit(&mut channel);
@@ -971,7 +990,7 @@ pub fn prove_recursive_with_fri(
 
     // 12. 生成完整 closure + verifier AIR 多组件证明。
     let mut components = poseidon_components.prover_components();
-    components.extend([
+    let verifier_components: [&dyn ComponentProver<SimdBackend>; 9] = [
         &transcript_component as &dyn ComponentProver<SimdBackend>,
         &binding_component,
         &merkle_semantic_component,
@@ -981,7 +1000,8 @@ pub fn prove_recursive_with_fri(
         &fri_fold_component,
         &oods_component,
         &composition_component,
-    ]);
+    ];
+    components.extend(verifier_components);
     let stark_proof = prove(&components, &mut channel, commitment_scheme)?;
     Ok(RecursiveProof(
         stark_proof,
@@ -1291,24 +1311,81 @@ mod tests {
         );
     }
 
-    /// v5.1 多组件 prove/verify roundtrip 应成功。
+    /// Gate 后完整 semantic scaffold 应 roundtrip，并拒绝 statement/envelope 篡改。
     #[test]
-    #[ignore = "P05-R gap #3-B: _with_fri 显式 fail-closed"]
-    fn test_prove_verify_roundtrip_recursive_with_fri() {
+    fn test_semantic_scaffold_roundtrip_recursive_with_fri() {
         let l1_proof = make_l1_proof();
         let inputs = make_test_public_inputs_with_fri_from_l1(&l1_proof);
 
-        // prove
-        let l2_proof =
-            prove_recursive_with_fri(&l1_proof, &inputs).expect("prove_recursive_with_fri 失败");
+        let l2_proof = prove_recursive_with_fri_scaffold_for_test(&l1_proof, &inputs)
+            .expect("gate 后完整 semantic scaffold prove 失败");
 
-        // verify（相同 public_inputs）
         let verify_result =
-            super::super::recursion_verifier::verify_recursive_with_fri(&l2_proof, &inputs);
+            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                &l2_proof, &inputs,
+            );
         assert!(
             verify_result.is_ok(),
-            "verify_recursive_with_fri 应成功: {:?}",
+            "gate 后完整 semantic scaffold verify 应成功: {:?}",
             verify_result.err()
+        );
+
+        let mut tampered_inputs = inputs.clone();
+        tampered_inputs.l1_commitments[0] += FieldElement252::from(1u32);
+        let verify_result =
+            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                &l2_proof,
+                &tampered_inputs,
+            );
+        assert!(
+            verify_result.is_err(),
+            "gate 后 scaffold 必须拒绝篡改的 RecursivePublicInputs"
+        );
+
+        let mut tampered_envelope = l2_proof.clone();
+        tampered_envelope
+            .1
+            .as_mut()
+            .expect("scaffold proof 必须携带 Poseidon252 claim")
+            .n_transcript_calls += 1;
+        let verify_result =
+            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                &tampered_envelope,
+                &inputs,
+            );
+        assert!(
+            verify_result.is_err(),
+            "gate 后 scaffold 必须拒绝篡改的 RecursivePoseidonClaim 元数据"
+        );
+
+        let mut tampered_lookup_claim = l2_proof.clone();
+        tampered_lookup_claim
+            .1
+            .as_mut()
+            .expect("scaffold proof 必须携带 Poseidon252 claim")
+            .transcript_claimed_sum += SecureField::from(1u32);
+        let verify_result =
+            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                &tampered_lookup_claim,
+                &inputs,
+            );
+        assert!(
+            matches!(
+                &verify_result,
+                Err(super::super::recursion_verifier::RecursionVerificationError::VerificationFailed(message))
+                    if message.contains("global lookup claimed sums are unbalanced")
+            ),
+            "verifier 必须独立拒绝不平衡的全局 lookup claims: {verify_result:?}"
+        );
+
+        let production_verify_result =
+            super::super::recursion_verifier::verify_recursive_with_fri(&l2_proof, &inputs);
+        assert!(
+            matches!(
+                production_verify_result,
+                Err(super::super::recursion_verifier::RecursionVerificationError::IncompleteMerkleVerifierAir)
+            ),
+            "未完成密码学审计前，生产 verifier gate 必须保持 fail-closed: {production_verify_result:?}"
         );
     }
 

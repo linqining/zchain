@@ -56,7 +56,7 @@ const DIGEST_AFTER_COLUMNS_START: usize = DIGEST_BEFORE_COLUMNS_START + FELT252_
 const RESULT_COLUMNS_START: usize = DIGEST_AFTER_COLUMNS_START + FELT252_N_WORDS;
 
 pub(crate) const TRANSCRIPT_AIR_NUM_COLUMNS: usize = RESULT_COLUMNS_START + FELT252_N_WORDS;
-pub(crate) const TRANSCRIPT_INTERACTION_COLUMNS: usize = 24;
+pub(crate) const TRANSCRIPT_INTERACTION_COLUMNS: usize = 48;
 pub(crate) const TRANSCRIPT_PAYLOAD_RELATION_ID: u32 = 1_972_100_151;
 pub(crate) const TRANSCRIPT_DRAW_RESULT_RELATION_ID: u32 = 1_972_100_153;
 
@@ -723,89 +723,89 @@ impl TranscriptSemanticWitness {
                         .data[vec_row]
                 }));
                 (active, common_lookup_elements.combine(&values))
-            } else if relation_index <= N_CALL_IDS + N_PAYLOAD_SLOTS {
-                let slot = relation_index - 1 - N_CALL_IDS;
+            } else if relation_index < 1 + N_CALL_IDS + 2 * N_PAYLOAD_SLOTS {
+                let payload_relation = relation_index - 1 - N_CALL_IDS;
+                let slot = payload_relation / 2;
                 let payload_active = PackedSecureField::from(
                     self.base_trace[PAYLOAD_ACTIVE_COLUMNS_START + slot]
                         .values
                         .data[vec_row],
                 );
-                let mut values = Vec::with_capacity(2 + FELT252_N_WORDS);
-                values.push(memory_relation_id);
-                values.push(self.base_trace[PAYLOAD_ID_COLUMNS_START + slot].values.data[vec_row]);
-                values.extend((0..FELT252_N_WORDS).map(|limb| {
-                    self.base_trace[PAYLOAD_VALUE_COLUMNS_START + slot * FELT252_N_WORDS + limb]
-                        .values
-                        .data[vec_row]
-                }));
-                (payload_active, common_lookup_elements.combine(&values))
-            } else if relation_index <= N_CALL_IDS + 2 * N_PAYLOAD_SLOTS {
-                let slot = relation_index - 1 - N_CALL_IDS - N_PAYLOAD_SLOTS;
-                let payload_active = PackedSecureField::from(
-                    self.base_trace[PAYLOAD_ACTIVE_COLUMNS_START + slot]
-                        .values
-                        .data[vec_row],
-                );
-                let first_in_event =
-                    PackedSecureField::from(self.base_trace[6].values.data[vec_row]);
-                let mix_root = PackedSecureField::from(
-                    self.base_trace[KIND_COLUMNS_START + 3].values.data[vec_row],
-                );
-                let mix_felts = PackedSecureField::from(
-                    self.base_trace[KIND_COLUMNS_START + 4].values.data[vec_row],
-                );
-                let mix_u32s = PackedSecureField::from(
-                    self.base_trace[KIND_COLUMNS_START + 5].values.data[vec_row],
-                );
-                let mix_u64 = PackedSecureField::from(
-                    self.base_trace[KIND_COLUMNS_START + 6].values.data[vec_row],
-                );
-                let pow_prefix = PackedSecureField::from(
-                    self.base_trace[KIND_COLUMNS_START + 8].values.data[vec_row],
-                );
-                let pow_nonce = PackedSecureField::from(
-                    self.base_trace[KIND_COLUMNS_START + 9].values.data[vec_row],
-                );
-                let slot_is_zero = PackedSecureField::from(PackedBaseField::broadcast(
-                    BaseField::from((slot == 0) as u32),
-                ));
-                let slot_is_one = PackedSecureField::from(PackedBaseField::broadcast(
-                    BaseField::from((slot == 1) as u32),
-                ));
-                let pair_external = (mix_root + mix_u64 + pow_nonce) * slot_is_one;
-                let hash_many_kind = mix_felts + mix_u32s;
-                let hash_many_external = hash_many_kind * payload_active
-                    - hash_many_kind * first_in_event * slot_is_zero;
-                let pow_external =
-                    pow_prefix * payload_active - pow_prefix * first_in_event * slot_is_one;
-                let semantic_active = pair_external + hash_many_external + pow_external;
-                let call_index = self.base_trace[4].values.data[vec_row];
-                let hash_many_kind = self.base_trace[KIND_COLUMNS_START + 4].values.data[vec_row]
-                    + self.base_trace[KIND_COLUMNS_START + 5].values.data[vec_row]
-                    + self.base_trace[KIND_COLUMNS_START + 8].values.data[vec_row];
-                let pair_kind = self.base_trace[KIND_COLUMNS_START + 3].values.data[vec_row]
-                    + self.base_trace[KIND_COLUMNS_START + 6].values.data[vec_row]
-                    + self.base_trace[KIND_COLUMNS_START + 9].values.data[vec_row];
-                let payload_index = hash_many_kind
-                    * (call_index
-                        + call_index
-                        + PackedBaseField::broadcast(BaseField::from(slot as u32)))
-                    + pair_kind * PackedBaseField::broadcast(BaseField::from(slot as u32));
-                let mut values = Vec::with_capacity(3 + N_KIND_SELECTORS + FELT252_N_WORDS);
-                values.push(payload_relation_id);
-                values.push(self.base_trace[3].values.data[vec_row]);
-                values.push(payload_index);
-                values.extend(
-                    self.base_trace[KIND_COLUMNS_START..ID_COLUMNS_START]
-                        .iter()
-                        .map(|column| column.values.data[vec_row]),
-                );
-                values.extend((0..FELT252_N_WORDS).map(|limb| {
-                    self.base_trace[PAYLOAD_VALUE_COLUMNS_START + slot * FELT252_N_WORDS + limb]
-                        .values
-                        .data[vec_row]
-                }));
-                (semantic_active, common_lookup_elements.combine(&values))
+                if payload_relation.is_multiple_of(2) {
+                    let mut values = Vec::with_capacity(2 + FELT252_N_WORDS);
+                    values.push(memory_relation_id);
+                    values.push(
+                        self.base_trace[PAYLOAD_ID_COLUMNS_START + slot].values.data[vec_row],
+                    );
+                    values.extend((0..FELT252_N_WORDS).map(|limb| {
+                        self.base_trace[PAYLOAD_VALUE_COLUMNS_START + slot * FELT252_N_WORDS + limb]
+                            .values
+                            .data[vec_row]
+                    }));
+                    (payload_active, common_lookup_elements.combine(&values))
+                } else {
+                    let first_in_event =
+                        PackedSecureField::from(self.base_trace[6].values.data[vec_row]);
+                    let mix_root = PackedSecureField::from(
+                        self.base_trace[KIND_COLUMNS_START + 3].values.data[vec_row],
+                    );
+                    let mix_felts = PackedSecureField::from(
+                        self.base_trace[KIND_COLUMNS_START + 4].values.data[vec_row],
+                    );
+                    let mix_u32s = PackedSecureField::from(
+                        self.base_trace[KIND_COLUMNS_START + 5].values.data[vec_row],
+                    );
+                    let mix_u64 = PackedSecureField::from(
+                        self.base_trace[KIND_COLUMNS_START + 6].values.data[vec_row],
+                    );
+                    let pow_prefix = PackedSecureField::from(
+                        self.base_trace[KIND_COLUMNS_START + 8].values.data[vec_row],
+                    );
+                    let pow_nonce = PackedSecureField::from(
+                        self.base_trace[KIND_COLUMNS_START + 9].values.data[vec_row],
+                    );
+                    let slot_is_zero = PackedSecureField::from(PackedBaseField::broadcast(
+                        BaseField::from((slot == 0) as u32),
+                    ));
+                    let slot_is_one = PackedSecureField::from(PackedBaseField::broadcast(
+                        BaseField::from((slot == 1) as u32),
+                    ));
+                    let pair_external = (mix_root + mix_u64 + pow_nonce) * slot_is_one;
+                    let hash_many_kind = mix_felts + mix_u32s;
+                    let hash_many_external = hash_many_kind * payload_active
+                        - hash_many_kind * first_in_event * slot_is_zero;
+                    let pow_external =
+                        pow_prefix * payload_active - pow_prefix * first_in_event * slot_is_one;
+                    let semantic_active = pair_external + hash_many_external + pow_external;
+                    let call_index = self.base_trace[4].values.data[vec_row];
+                    let hash_many_kind = self.base_trace[KIND_COLUMNS_START + 4].values.data
+                        [vec_row]
+                        + self.base_trace[KIND_COLUMNS_START + 5].values.data[vec_row]
+                        + self.base_trace[KIND_COLUMNS_START + 8].values.data[vec_row];
+                    let pair_kind = self.base_trace[KIND_COLUMNS_START + 3].values.data[vec_row]
+                        + self.base_trace[KIND_COLUMNS_START + 6].values.data[vec_row]
+                        + self.base_trace[KIND_COLUMNS_START + 9].values.data[vec_row];
+                    let payload_index = hash_many_kind
+                        * (call_index
+                            + call_index
+                            + PackedBaseField::broadcast(BaseField::from(slot as u32)))
+                        + pair_kind * PackedBaseField::broadcast(BaseField::from(slot as u32));
+                    let mut values = Vec::with_capacity(3 + N_KIND_SELECTORS + FELT252_N_WORDS);
+                    values.push(payload_relation_id);
+                    values.push(self.base_trace[3].values.data[vec_row]);
+                    values.push(payload_index);
+                    values.extend(
+                        self.base_trace[KIND_COLUMNS_START..ID_COLUMNS_START]
+                            .iter()
+                            .map(|column| column.values.data[vec_row]),
+                    );
+                    values.extend((0..FELT252_N_WORDS).map(|limb| {
+                        self.base_trace[PAYLOAD_VALUE_COLUMNS_START + slot * FELT252_N_WORDS + limb]
+                            .values
+                            .data[vec_row]
+                    }));
+                    (semantic_active, common_lookup_elements.combine(&values))
+                }
             } else {
                 let last_in_event =
                     PackedSecureField::from(self.base_trace[7].values.data[vec_row]);
@@ -833,20 +833,11 @@ impl TranscriptSemanticWitness {
             }
         };
         const N_RELATIONS: usize = 2 + N_CALL_IDS + 2 * N_PAYLOAD_SLOTS;
-        for pair_start in (0..N_RELATIONS).step_by(2) {
+        for relation in 0..N_RELATIONS {
             let mut column = logup.new_col();
             for vec_row in 0..n_vec_rows {
-                let (numerator0, denominator0) = fraction(pair_start, vec_row);
-                if pair_start + 1 < N_RELATIONS {
-                    let (numerator1, denominator1) = fraction(pair_start + 1, vec_row);
-                    column.write_frac(
-                        vec_row,
-                        numerator0 * denominator1 + numerator1 * denominator0,
-                        denominator0 * denominator1,
-                    );
-                } else {
-                    column.write_frac(vec_row, numerator0, denominator0);
-                }
+                let (numerator, denominator) = fraction(relation, vec_row);
+                column.write_frac(vec_row, numerator, denominator);
             }
             column.finalize_col();
         }
@@ -1492,7 +1483,7 @@ impl FrameworkEval for TranscriptSemanticAir {
             E::EF::from(result_active),
             &result_values,
         ));
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup();
         eval
     }
 }
@@ -1622,6 +1613,10 @@ mod tests {
                     .unwrap();
                 let (transcript_interaction_trace, transcript_claimed_sum) =
                     transcript.write_interaction_trace(&common_lookup_elements);
+                assert_eq!(
+                    transcript_interaction_trace.len(),
+                    TRANSCRIPT_INTERACTION_COLUMNS
+                );
                 assert!(
                     ensure_lookup_balanced(
                         poseidon_interaction.lookup_residual,
@@ -1652,11 +1647,31 @@ mod tests {
                     TranscriptSemanticAir::new(
                         transcript.log_size,
                         transcript.n_calls,
-                        common_lookup_elements,
+                        common_lookup_elements.clone(),
                     ),
                     transcript_claimed_sum,
                 );
-                let mut trace = TreeVec::new(vec![
+                let transcript_interaction = transcript_component
+                    .trace_locations()
+                    .iter()
+                    .find(|span| span.tree_index == 2)
+                    .unwrap();
+                let poseidon_interaction_columns =
+                    interaction_trace.len() - TRANSCRIPT_INTERACTION_COLUMNS;
+                assert_eq!(
+                    transcript_interaction.col_start,
+                    poseidon_interaction_columns
+                );
+                assert_eq!(
+                    transcript_interaction.col_end - transcript_interaction.col_start,
+                    TRANSCRIPT_INTERACTION_COLUMNS
+                );
+                let transcript_original = transcript_component
+                    .trace_locations()
+                    .iter()
+                    .find(|span| span.tree_index == 1)
+                    .unwrap();
+                let mut trace: TreeVec<Vec<Vec<BaseField>>> = TreeVec::new(vec![
                     preprocessed
                         .1
                         .into_iter()
@@ -1677,12 +1692,6 @@ mod tests {
                     assert_component(&poseidon_components.semantic, &trace_ref);
                     assert_component(&transcript_component, &trace_ref);
                 }
-
-                let transcript_original = transcript_component
-                    .trace_locations()
-                    .iter()
-                    .find(|span| span.tree_index == 1)
-                    .unwrap();
                 let first_row = bit_reverse_index(
                     coset_index_to_circle_domain_index(0, transcript.log_size),
                     transcript.log_size,

@@ -68,7 +68,7 @@ const N_CALL_VALUES: usize = 6 * FELT252_N_WORDS;
 const NODE_HASH_COLUMNS_START: usize = CALL_VALUE_COLUMNS_START + N_CALL_VALUES;
 
 pub(crate) const MERKLE_SEMANTIC_AIR_NUM_COLUMNS: usize = NODE_HASH_COLUMNS_START + FELT252_N_WORDS;
-pub(crate) const MERKLE_SEMANTIC_INTERACTION_COLUMNS: usize = 14;
+pub(crate) const MERKLE_SEMANTIC_INTERACTION_COLUMNS: usize = 14usize.div_ceil(2) * 4;
 
 const BINDING_ACTIVE_COLUMN: usize = 0;
 const BINDING_SCHEDULE_COLUMN: usize = 1;
@@ -78,7 +78,7 @@ const N_SCHEDULE_COLUMNS: usize = 14;
 const BINDING_HASH_START: usize = BINDING_SCHEDULE_START + N_SCHEDULE_COLUMNS;
 
 pub(crate) const MERKLE_BINDING_NUM_COLUMNS: usize = BINDING_HASH_START + FELT252_N_WORDS;
-pub(crate) const MERKLE_BINDING_INTERACTION_COLUMNS: usize = 2;
+pub(crate) const MERKLE_BINDING_INTERACTION_COLUMNS: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MerkleSemanticAirError {
