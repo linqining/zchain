@@ -21,7 +21,9 @@ use stwo::core::vcs_lifted::poseidon252_merkle::{
 };
 use stwo::core::vcs_lifted::verifier::{LOG_PACKED_LEAF_SIZE, PACKED_LEAF_SIZE};
 
-use super::poseidon252_replay::{Poseidon252PermutationCall, RecordingPoseidon252Channel};
+use super::poseidon252_replay::{
+    Poseidon252PermutationCall, RecordingPoseidon252Channel, TranscriptPoseidonEvent,
+};
 use super::stwo_replay::{MerkleReplayError, MerkleTreeReplay, replay_merkle_tree_with_sizes};
 
 /// 从 L1 transcript 重放得到的 FRI challenges。
@@ -35,6 +37,8 @@ pub(crate) struct FriReplayChallenges {
     pub query_positions: Vec<usize>,
     /// Full fixed-verifier transcript permutation schedule, including PoW and query draws.
     pub transcript_poseidon_calls: Vec<Poseidon252PermutationCall>,
+    /// Transcript operation boundaries and state transitions for the permutation schedule.
+    pub transcript_poseidon_events: Vec<TranscriptPoseidonEvent>,
 }
 
 /// 单个 FRI committed layer 的重放结果。
@@ -158,6 +162,7 @@ pub(crate) fn extract_simple_fri_replay_challenges(
         inner_layer_alphas,
         query_positions,
         transcript_poseidon_calls: channel.calls(),
+        transcript_poseidon_events: channel.events(),
     })
 }
 

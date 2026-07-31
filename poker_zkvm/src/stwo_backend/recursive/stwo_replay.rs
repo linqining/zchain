@@ -39,6 +39,16 @@ pub(crate) struct MerkleReplayStep {
     pub witness_index: Option<usize>,
 }
 
+/// One queried leaf together with the exact row values and local Poseidon call interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MerkleLeafReplay {
+    pub position: usize,
+    pub values: Vec<BaseField>,
+    pub hash: FieldElement252,
+    pub poseidon_call_start: usize,
+    pub poseidon_call_end: usize,
+}
+
 /// 单棵 commitment tree 的完整重放结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MerkleTreeReplay {
@@ -48,6 +58,8 @@ pub(crate) struct MerkleTreeReplay {
     pub query_positions: Vec<usize>,
     /// 去重 query 对应的 leaf hashes。
     pub leaves: Vec<(usize, FieldElement252)>,
+    /// Exact leaf rows and their absorb/finalize call ranges.
+    pub leaf_replays: Vec<MerkleLeafReplay>,
     /// 按 Stwo verifier 执行顺序排列的 parent hash 步骤。
     pub steps: Vec<MerkleReplayStep>,
     /// Leaf absorb/finalize and parent permutations in exact verifier execution order.
@@ -245,6 +257,7 @@ pub(crate) fn replay_merkle_tree_with_sizes(
             tree_index,
             query_positions: query_positions.to_vec(),
             leaves: Vec::new(),
+            leaf_replays: Vec::new(),
             steps: Vec::new(),
             poseidon_calls: Vec::new(),
             consumed_witness: 0,
@@ -288,15 +301,25 @@ pub(crate) fn replay_merkle_tree_with_sizes(
     }
 
     let mut leaves = Vec::with_capacity(unique_query_indices.len());
+    let mut leaf_replays = Vec::with_capacity(unique_query_indices.len());
     let mut poseidon_calls = Vec::new();
     for query_index in unique_query_indices {
         let row: Vec<BaseField> = column_order
             .iter()
             .map(|column_index| queried_values[*column_index][query_index])
             .collect();
+        let poseidon_call_start = poseidon_calls.len();
         let (leaf, calls) = hash_m31_leaf_with_calls(&row);
         poseidon_calls.extend(calls);
-        leaves.push((query_positions[query_index], leaf));
+        let position = query_positions[query_index];
+        leaves.push((position, leaf));
+        leaf_replays.push(MerkleLeafReplay {
+            position,
+            values: row,
+            hash: leaf,
+            poseidon_call_start,
+            poseidon_call_end: poseidon_calls.len(),
+        });
     }
 
     let mut previous_layer = leaves.clone();
@@ -365,6 +388,7 @@ pub(crate) fn replay_merkle_tree_with_sizes(
         tree_index,
         query_positions: query_positions.to_vec(),
         leaves,
+        leaf_replays,
         steps,
         poseidon_calls,
         consumed_witness: witness_index,

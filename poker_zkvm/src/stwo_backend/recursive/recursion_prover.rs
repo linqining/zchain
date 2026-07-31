@@ -31,6 +31,7 @@ use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir}
 use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
 use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
 use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
+use super::poseidon252_air::audit_canonical_poseidon_closure;
 use super::public_inputs::RecursivePublicInputs;
 use super::replay_witness::CanonicalVerifierWitness;
 use super::trace_gen::{
@@ -397,6 +398,11 @@ pub fn prove_recursive_with_fri(
             "canonical verifier witness is internally inconsistent".to_string(),
         ));
     }
+    audit_canonical_poseidon_closure(&canonical_witness.poseidon_calls).map_err(|error| {
+        RecursionProvingError::FixedVerifierReplayFailed(format!(
+            "canonical Poseidon252 AIR closure audit failed: {error}"
+        ))
+    })?;
 
     // P05-R gap #3-B：`stwo_replay` / `fri_replay` 已提供与 Stwo 2.3 一致的 canonical
     // witness 重放，但当前 MerklePathAir 仍未约束该重放，也没有真实 Poseidon252、
