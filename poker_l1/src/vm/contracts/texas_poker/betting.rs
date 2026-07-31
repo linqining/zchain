@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use super::constants::{ACTION_CALL, ACTION_CHECK, ACTION_FOLD, ACTION_RAISE};
 
 /// 下注轮状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct BettingRound {
     /// 当前轮最高下注。
     pub current_bet: u64,

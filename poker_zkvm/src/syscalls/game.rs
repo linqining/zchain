@@ -21,7 +21,7 @@ use crate::error::ZkvmError;
 use crate::isa::state::VmState;
 use crate::syscalls::gas::{SyscallGasArgs, syscall_gas};
 use crate::syscalls::host::read_vm_bytes;
-use crate::syscalls::{Syscall, SyscallContext, SyscallId, REG_A0, REG_A1, REG_A2, REG_A3};
+use crate::syscalls::{REG_A0, REG_A1, REG_A2, REG_A3, Syscall, SyscallContext, SyscallId};
 
 // ===== 卡牌常量（与 `texas_poker/card.rs` 保持一致）=====
 
@@ -266,7 +266,9 @@ mod tests {
         state.write_register(REG_A1, 0); // suit
         state.write_register(REG_A2, out_ptr);
 
-        CardEncodeSyscall.host_execute(&mut ctx, &mut state).unwrap();
+        CardEncodeSyscall
+            .host_execute(&mut ctx, &mut state)
+            .unwrap();
 
         assert_eq!(state.read_register(REG_A0), 1, "应成功");
         assert_eq!(state.read_memory_byte(out_ptr).unwrap(), 12);
@@ -284,7 +286,9 @@ mod tests {
             state.write_register(REG_A1, suit as u32);
             state.write_register(REG_A2, 0x1000);
 
-            CardEncodeSyscall.host_execute(&mut ctx, &mut state).unwrap();
+            CardEncodeSyscall
+                .host_execute(&mut ctx, &mut state)
+                .unwrap();
 
             assert_eq!(state.read_register(REG_A0), 1);
             assert_eq!(
@@ -305,7 +309,9 @@ mod tests {
         state.write_register(REG_A1, 0);
         state.write_register(REG_A2, 0x1000);
 
-        CardEncodeSyscall.host_execute(&mut ctx, &mut state).unwrap();
+        CardEncodeSyscall
+            .host_execute(&mut ctx, &mut state)
+            .unwrap();
 
         assert_eq!(state.read_register(REG_A0), 0, "非法 rank 应返回 0");
     }
@@ -320,7 +326,9 @@ mod tests {
         state.write_register(REG_A1, 4);
         state.write_register(REG_A2, 0x1000);
 
-        CardEncodeSyscall.host_execute(&mut ctx, &mut state).unwrap();
+        CardEncodeSyscall
+            .host_execute(&mut ctx, &mut state)
+            .unwrap();
 
         assert_eq!(state.read_register(REG_A0), 0, "非法 suit 应返回 0");
     }
@@ -337,7 +345,9 @@ mod tests {
         state.write_register(REG_A1, 0x1000); // out_rank_ptr
         state.write_register(REG_A2, 0x1001); // out_suit_ptr
 
-        CardDecodeSyscall.host_execute(&mut ctx, &mut state).unwrap();
+        CardDecodeSyscall
+            .host_execute(&mut ctx, &mut state)
+            .unwrap();
 
         assert_eq!(state.read_register(REG_A0), 1);
         assert_eq!(state.read_memory_byte(0x1000).unwrap(), 14); // rank
@@ -354,7 +364,9 @@ mod tests {
             state.write_register(REG_A1, 0x1000);
             state.write_register(REG_A2, 0x1001);
 
-            CardDecodeSyscall.host_execute(&mut ctx, &mut state).unwrap();
+            CardDecodeSyscall
+                .host_execute(&mut ctx, &mut state)
+                .unwrap();
 
             assert_eq!(state.read_register(REG_A0), 1, "idx={idx} 应成功");
             let rank = state.read_memory_byte(0x1000).unwrap();
@@ -377,7 +389,9 @@ mod tests {
         state.write_register(REG_A1, 0x1000);
         state.write_register(REG_A2, 0x1001);
 
-        CardDecodeSyscall.host_execute(&mut ctx, &mut state).unwrap();
+        CardDecodeSyscall
+            .host_execute(&mut ctx, &mut state)
+            .unwrap();
 
         assert_eq!(state.read_register(REG_A0), 0, "非法 byte 应返回 0");
     }
@@ -539,4 +553,3 @@ mod tests {
         );
     }
 }
-

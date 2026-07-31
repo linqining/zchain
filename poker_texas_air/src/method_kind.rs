@@ -300,7 +300,10 @@ mod tests {
             let v = kind as u8;
             assert_eq!(MethodKind::from_u8(v), Some(kind));
         }
-        assert_eq!(MethodKind::from_u8(21), Some(MethodKind::RequestLeaveAfterHand));
+        assert_eq!(
+            MethodKind::from_u8(21),
+            Some(MethodKind::RequestLeaveAfterHand)
+        );
         assert_eq!(MethodKind::from_u8(22), Some(MethodKind::FoldWithProof));
         assert_eq!(MethodKind::from_u8(23), None);
         assert_eq!(MethodKind::from_u8(255), None);

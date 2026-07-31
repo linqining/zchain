@@ -43,22 +43,22 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 
 use super::column_layout_v2::{
     COL_ABS_A_BASE, COL_ABS_B_BASE, COL_CARRY_FLAG_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE,
-    COL_DIV_REM_BASE, COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_HELPER_A_BASE, COL_HELPER_B_BASE,
-    COL_HELPER_A_CARRY_BASE, COL_HELPER_A_HALF, COL_IMM_FIELD_BASE,
-    COL_INSTR_BITS_BYTE0_BASE, COL_INSTR_BITS_BYTE1_BASE,
-    COL_INSTR_BITS_BYTE3_BASE, COL_INSTR_BITS_COUNT, COL_INSTR_WORD_BASE,
-    COL_IS_BASE, COL_IS_LOAD_BYTE, COL_IS_LOAD_HALF, COL_IS_LOAD_SIGN, COL_LOAD_BITS_BASE,
-    COL_LOAD_BITS_COUNT, COL_LOAD_BYTE_GATE, COL_LOAD_HALF_GATE, COL_LOW_NONZERO, COL_MEM_ADDR_BASE,
-    COL_MUL_CARRY_HI0_BASE, COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE,
-    COL_MUL_LOW_BASE, COL_PC_BASE, COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_A_BITS_BASE,
+    COL_DIV_REM_BASE, COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_HELPER_A_BASE, COL_HELPER_A_CARRY_BASE,
+    COL_HELPER_A_HALF, COL_HELPER_B_BASE, COL_IMM_FIELD_BASE, COL_INSTR_BITS_BYTE0_BASE,
+    COL_INSTR_BITS_BYTE1_BASE, COL_INSTR_BITS_BYTE3_BASE, COL_INSTR_BITS_COUNT,
+    COL_INSTR_WORD_BASE, COL_IS_BASE, COL_IS_LOAD_BYTE, COL_IS_LOAD_HALF, COL_IS_LOAD_SIGN,
+    COL_LOAD_BITS_BASE, COL_LOAD_BITS_COUNT, COL_LOAD_BYTE_GATE, COL_LOAD_HALF_GATE,
+    COL_LOW_NONZERO, COL_MEM_ADDR_BASE, COL_MUL_CARRY_HI0_BASE, COL_MUL_CARRY_HI1_BASE,
+    COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE, COL_MUL_LOW_BASE, COL_PC_BASE,
+    COL_PC_CARRY_FLAG_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_A_BITS_BASE,
     COL_SIGN_A_BITS_COUNT, COL_SIGN_B, COL_SIGN_B_BITS_BASE, COL_SIGN_B_BITS_COUNT, COL_SIGN_BIT,
-    COL_SYSCALL_ID, COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
-    COL_VALUE_C_BASE, ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AND, IS_ANDI, IS_AUIPC,
-    IS_BEQ, IS_BGE, IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU, IS_EBREAK, IS_ECALL,
-    IS_FENCE, IS_JAL, IS_JALR, IS_LOAD, IS_LUI, IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU,
-    IS_OR, IS_ORI, IS_PADDING, IS_REM, IS_REMU, IS_SLL, IS_SLLI, IS_SLT, IS_SLTI, IS_SLTIU,
-    IS_SLTU, IS_SRA, IS_SRAI, IS_SRL, IS_SRLI, IS_STORE, IS_SUB, IS_XOR, IS_XORI,
-    NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES, RANGE_CHECK_COL_INDICES,
+    COL_SYSCALL_ID, COL_TAKEN, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE, COL_VALUE_C_BASE,
+    ECALL_DISPATCH_NUM_COLUMNS, IS_ADD, IS_ADDI, IS_AND, IS_ANDI, IS_AUIPC, IS_BEQ, IS_BGE,
+    IS_BGEU, IS_BLT, IS_BLTU, IS_BNE, IS_DIV, IS_DIVU, IS_EBREAK, IS_ECALL, IS_FENCE, IS_JAL,
+    IS_JALR, IS_LOAD, IS_LUI, IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU, IS_OR, IS_ORI, IS_PADDING,
+    IS_REM, IS_REMU, IS_SLL, IS_SLLI, IS_SLT, IS_SLTI, IS_SLTIU, IS_SLTU, IS_SRA, IS_SRAI, IS_SRL,
+    IS_SRLI, IS_STORE, IS_SUB, IS_XOR, IS_XORI, NUM_COLUMNS, NUM_INSTRUCTION_CATEGORIES,
+    RANGE_CHECK_COL_INDICES,
 };
 use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
 
@@ -353,8 +353,8 @@ impl FrameworkEval for CpuAir {
 
         // IsNonFlow = 1 - IsPadding - IsJal - IsJalr - IsBranch
         // 用于 PC 递增约束 gating（非跳转/非分支/非 padding 的指令 PcNext = Pc + 4）
-        let is_non_flow = one.clone() - is_padding.clone() - is_jal.clone() - is_jalr.clone()
-            - is_branch.clone();
+        let is_non_flow =
+            one.clone() - is_padding.clone() - is_jal.clone() - is_jalr.clone() - is_branch.clone();
 
         // ----- 读取算术标志（合并 carry/borrow，ADD/ADDI 与 SUB 互斥）-----
         // ADD/ADDI 行：此列为 carry0, carry1
@@ -380,8 +380,8 @@ impl FrameworkEval for CpuAir {
         eval.add_constraint(is_add.clone() * add_low);
 
         // 高 16 位：rd_eff_high = rs1_high + rs2_high + carry0 - 65536 * carry1
-        let add_high = rd_eff_high.clone() - rs1_high.clone() - rs2_high.clone()
-            - carry0.clone() + six5536.clone() * carry1.clone();
+        let add_high = rd_eff_high.clone() - rs1_high.clone() - rs2_high.clone() - carry0.clone()
+            + six5536.clone() * carry1.clone();
         eval.add_constraint(is_add.clone() * add_high);
 
         // carry0 binality: carry0 * (carry0 - 1) = 0
@@ -398,8 +398,8 @@ impl FrameworkEval for CpuAir {
             + six5536.clone() * carry0.clone();
         eval.add_constraint(is_addi.clone() * addi_low);
 
-        let addi_high = rd_eff_high.clone() - rs1_high.clone() - rs2_high.clone()
-            - carry0.clone() + six5536.clone() * carry1.clone();
+        let addi_high = rd_eff_high.clone() - rs1_high.clone() - rs2_high.clone() - carry0.clone()
+            + six5536.clone() * carry1.clone();
         eval.add_constraint(is_addi.clone() * addi_high);
 
         let addi_carry0_bin = carry0.clone() * (carry0.clone() - one.clone());
@@ -416,8 +416,8 @@ impl FrameworkEval for CpuAir {
         eval.add_constraint(is_sub.clone() * sub_low);
 
         // 高 16 位：rd_eff_high = rs1_high - rs2_high - borrow0 + 65536 * borrow1
-        let sub_high = rd_eff_high.clone() - rs1_high.clone() + rs2_high.clone()
-            + carry0.clone() - six5536.clone() * carry1.clone();
+        let sub_high = rd_eff_high.clone() - rs1_high.clone() + rs2_high.clone() + carry0.clone()
+            - six5536.clone() * carry1.clone();
         eval.add_constraint(is_sub.clone() * sub_high);
 
         // borrow0 binality（复用 carry0 列）
@@ -451,8 +451,9 @@ impl FrameworkEval for CpuAir {
         eval.add_constraint(is_cmp.clone() * cmp_diff_low);
 
         // diff_high16 = rs1_high - rs2_high - borrow0 + 65536 * borrow1
-        let cmp_diff_high = diff_high16.clone() - rs1_high.clone() + rs2_high.clone()
-            + carry0.clone() - six5536.clone() * carry1.clone();
+        let cmp_diff_high =
+            diff_high16.clone() - rs1_high.clone() + rs2_high.clone() + carry0.clone()
+                - six5536.clone() * carry1.clone();
         eval.add_constraint(is_cmp.clone() * cmp_diff_high);
 
         // borrow0/borrow1 binality（gated by is_cmp）
@@ -518,8 +519,9 @@ impl FrameworkEval for CpuAir {
         let br_diff_low = diff_low16.clone() - rs1_low.clone() + rs2_low.clone()
             - six5536.clone() * carry0.clone();
         eval.add_constraint(is_branch.clone() * br_diff_low);
-        let br_diff_high = diff_high16.clone() - rs1_high.clone() + rs2_high.clone()
-            + carry0.clone() - six5536.clone() * carry1.clone();
+        let br_diff_high =
+            diff_high16.clone() - rs1_high.clone() + rs2_high.clone() + carry0.clone()
+                - six5536.clone() * carry1.clone();
         eval.add_constraint(is_branch.clone() * br_diff_high);
         // borrow0/borrow1 binality（gated by is_branch）
         eval.add_constraint(is_branch.clone() * carry0.clone() * (carry0.clone() - one.clone()));
@@ -559,10 +561,15 @@ impl FrameworkEval for CpuAir {
         let is_zero_high = col(COL_HELPER_B_BASE + 3);
 
         // 约束 A：half × inv = 1 - is_zero（逆元存在性，度 2，gated 度 1，总 3）
-        eval.add_constraint(is_beq_bne.clone()
-            * (diff_low16.clone() * diff_inv_low.clone() - (one.clone() - is_zero_low.clone())));
-        eval.add_constraint(is_beq_bne.clone()
-            * (diff_high16.clone() * diff_inv_high.clone() - (one.clone() - is_zero_high.clone())));
+        eval.add_constraint(
+            is_beq_bne.clone()
+                * (diff_low16.clone() * diff_inv_low.clone() - (one.clone() - is_zero_low.clone())),
+        );
+        eval.add_constraint(
+            is_beq_bne.clone()
+                * (diff_high16.clone() * diff_inv_high.clone()
+                    - (one.clone() - is_zero_high.clone())),
+        );
         // 约束 B：half × is_zero = 0（is_zero=1 ⟹ half=0，度 2，gated 度 1，总 3）
         eval.add_constraint(is_beq_bne.clone() * diff_low16.clone() * is_zero_low.clone());
         eval.add_constraint(is_beq_bne.clone() * diff_high16.clone() * is_zero_high.clone());
@@ -604,8 +611,8 @@ impl FrameworkEval for CpuAir {
             - two.clone() * sign_a.clone() * sign_b.clone();
         eval.add_constraint(is_signed_branch.clone() * br_same_sign_expr);
         // slt_result = sign_a*(1-sign_b) + same_sign*borrow1（度 2）
-        let slt_result_br = sign_a.clone() * (one.clone() - sign_b.clone())
-            + same_sign.clone() * carry1.clone();
+        let slt_result_br =
+            sign_a.clone() * (one.clone() - sign_b.clone()) + same_sign.clone() * carry1.clone();
         // BLT: taken = slt_result（度 3）
         eval.add_constraint(is_blt.clone() * (taken.clone() - slt_result_br.clone()));
         // BGE: taken = 1 - slt_result（度 3）
@@ -827,9 +834,15 @@ impl FrameworkEval for CpuAir {
 
         // ----- (b) Load subtype binality（度 3，4 条，gated by IS_LOAD）-----
         // IS_LOAD_BYTE/HALF/SIGN/SIGN_BIT ∈ {0,1}（仅 Load 行约束，MUL/DIV 行由 IS_LOAD=0 门控）
-        eval.add_constraint(is_load.clone() * is_load_byte.clone() * (is_load_byte.clone() - one.clone()));
-        eval.add_constraint(is_load.clone() * is_load_half.clone() * (is_load_half.clone() - one.clone()));
-        eval.add_constraint(is_load.clone() * is_load_sign.clone() * (is_load_sign.clone() - one.clone()));
+        eval.add_constraint(
+            is_load.clone() * is_load_byte.clone() * (is_load_byte.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            is_load.clone() * is_load_half.clone() * (is_load_half.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            is_load.clone() * is_load_sign.clone() * (is_load_sign.clone() - one.clone()),
+        );
         eval.add_constraint(is_load.clone() * sign_bit.clone() * (sign_bit.clone() - one.clone()));
 
         // ----- (c) LOAD_BITS binality（度 3，8 条，gated by IS_LOAD）-----
@@ -847,8 +860,12 @@ impl FrameworkEval for CpuAir {
             load_bits_sum = load_bits_sum + col(COL_LOAD_BITS_BASE + i) * pow2.clone();
             pow2 = pow2 * two.clone();
         }
-        eval.add_constraint(load_byte_gate.clone() * (col(COL_HELPER_B_BASE) - load_bits_sum.clone()));
-        eval.add_constraint(load_half_gate.clone() * (col(COL_HELPER_B_BASE + 1) - load_bits_sum.clone()));
+        eval.add_constraint(
+            load_byte_gate.clone() * (col(COL_HELPER_B_BASE) - load_bits_sum.clone()),
+        );
+        eval.add_constraint(
+            load_half_gate.clone() * (col(COL_HELPER_B_BASE + 1) - load_bits_sum.clone()),
+        );
 
         // ----- (e) SIGN_BIT 一致性（度 2，2 条，gated by 预计算 gate）-----
         // SIGN_BIT = LOAD_BITS[7]（符号位即位分解的最高位）
@@ -869,13 +886,21 @@ impl FrameworkEval for CpuAir {
         // LB（符号扩展 byte）：rd_eff[0]=HelperB[0]，rd_eff[1..3]=SIGN_BIT·0xFF
         let lb_gate = load_byte_gate.clone() * is_load_sign.clone();
         eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
-        eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - sign_bit.clone() * ff.clone()));
-        eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 2) - sign_bit.clone() * ff.clone()));
-        eval.add_constraint(lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 3) - sign_bit.clone() * ff.clone()));
+        eval.add_constraint(
+            lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - sign_bit.clone() * ff.clone()),
+        );
+        eval.add_constraint(
+            lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 2) - sign_bit.clone() * ff.clone()),
+        );
+        eval.add_constraint(
+            lb_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 3) - sign_bit.clone() * ff.clone()),
+        );
 
         // LBU（零扩展 byte）：rd_eff[0]=HelperB[0]，rd_eff[1..3]=0
         let lbu_gate = load_byte_gate.clone() * not_sign.clone();
-        eval.add_constraint(lbu_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
+        eval.add_constraint(
+            lbu_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)),
+        );
         eval.add_constraint(lbu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 1));
         eval.add_constraint(lbu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 2));
         eval.add_constraint(lbu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 3));
@@ -883,14 +908,24 @@ impl FrameworkEval for CpuAir {
         // LH（符号扩展 halfword）：rd_eff[0..1]=HelperB[0..1]，rd_eff[2..3]=SIGN_BIT·0xFF
         let lh_gate = load_half_gate.clone() * is_load_sign.clone();
         eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
-        eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - col(COL_HELPER_B_BASE + 1)));
-        eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 2) - sign_bit.clone() * ff.clone()));
-        eval.add_constraint(lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 3) - sign_bit.clone() * ff.clone()));
+        eval.add_constraint(
+            lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - col(COL_HELPER_B_BASE + 1)),
+        );
+        eval.add_constraint(
+            lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 2) - sign_bit.clone() * ff.clone()),
+        );
+        eval.add_constraint(
+            lh_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 3) - sign_bit.clone() * ff.clone()),
+        );
 
         // LHU（零扩展 halfword）：rd_eff[0..1]=HelperB[0..1]，rd_eff[2..3]=0
         let lhu_gate = load_half_gate.clone() * not_sign.clone();
-        eval.add_constraint(lhu_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)));
-        eval.add_constraint(lhu_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - col(COL_HELPER_B_BASE + 1)));
+        eval.add_constraint(
+            lhu_gate.clone() * (col(COL_VALUE_A_EFF_BASE) - col(COL_HELPER_B_BASE)),
+        );
+        eval.add_constraint(
+            lhu_gate.clone() * (col(COL_VALUE_A_EFF_BASE + 1) - col(COL_HELPER_B_BASE + 1)),
+        );
         eval.add_constraint(lhu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 2));
         eval.add_constraint(lhu_gate.clone() * col(COL_VALUE_A_EFF_BASE + 3));
 
@@ -991,7 +1026,8 @@ impl FrameworkEval for CpuAir {
             eval.add_constraint(g1.clone() * e0);
             // k=1..6: Sₖ + carryₖ₋₁ − cₖ − 256·carryₖ = 0
             for k in 1..7usize {
-                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1) - c_k(k)
+                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1)
+                    - c_k(k)
                     - two56.clone() * carry_k(k);
                 eval.add_constraint(g1.clone() * ek);
             }
@@ -1006,7 +1042,8 @@ impl FrameworkEval for CpuAir {
             let e0 = partial_sum(0, a_base, b_base) - c_k(0) - two56.clone() * carry_k(0);
             eval.add_constraint(g2.clone() * e0);
             for k in 1..7usize {
-                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1) - c_k(k)
+                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1)
+                    - c_k(k)
                     - two56.clone() * carry_k(k);
                 eval.add_constraint(g2.clone() * ek);
             }
@@ -1020,7 +1057,8 @@ impl FrameworkEval for CpuAir {
             let e0 = partial_sum(0, a_base, b_base) - c_k(0) - two56.clone() * carry_k(0);
             eval.add_constraint(g3.clone() * e0);
             for k in 1..7usize {
-                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1) - c_k(k)
+                let ek = partial_sum(k, a_base, b_base) + carry_k(k - 1)
+                    - c_k(k)
                     - two56.clone() * carry_k(k);
                 eval.add_constraint(g3.clone() * ek);
             }
@@ -1106,10 +1144,17 @@ impl FrameworkEval for CpuAir {
         //     - DIVU/REMU 的 sign_b = 0（无符号）→ 不绑定
         // 互斥性：使用 sign 的指令与 Load/MULHU/MUL one-hot 互斥，SignABits/SignBBits 列安全。
         // 度数预算：位分解=2，binality=3，绑定=2，全部 ≤ 3 ✓
-        let g_sign_a_bind = is_slt_group.clone() + is_signed_branch.clone()
-            + is_mulh.clone() + is_mulhsu.clone() + is_div.clone() + is_rem.clone();
-        let g_sign_b_bind = is_slt_group.clone() + is_signed_branch.clone()
-            + is_mulh.clone() + is_div.clone() + is_rem.clone();
+        let g_sign_a_bind = is_slt_group.clone()
+            + is_signed_branch.clone()
+            + is_mulh.clone()
+            + is_mulhsu.clone()
+            + is_div.clone()
+            + is_rem.clone();
+        let g_sign_b_bind = is_slt_group.clone()
+            + is_signed_branch.clone()
+            + is_mulh.clone()
+            + is_div.clone()
+            + is_rem.clone();
 
         // ValueB[3] = Σ SignABits[i]·2^i（位分解，gated by g_sign_a_bind，度 2）
         let mut sign_a_bits_sum: E::F = col(COL_SIGN_A_BITS_BASE);
@@ -1156,10 +1201,13 @@ impl FrameworkEval for CpuAir {
         //   sign=1: abs_low + rs1_low = 65536·carry0；abs_high + rs1_high + carry0 = 65536
         // 合并：g2·[(1−s)·(abs−rs1) + s·(abs+rs1±carry)] = 0
         let abs_a_low_expr = (one.clone() - sign_a.clone()) * (abs_a_low.clone() - rs1_low.clone())
-            + sign_a.clone() * (abs_a_low.clone() + rs1_low.clone() - six5536.clone() * carry0.clone());
+            + sign_a.clone()
+                * (abs_a_low.clone() + rs1_low.clone() - six5536.clone() * carry0.clone());
         eval.add_constraint(g2.clone() * abs_a_low_expr);
-        let abs_a_high_expr = (one.clone() - sign_a.clone()) * (abs_a_high.clone() - rs1_high.clone())
-            + sign_a.clone() * (abs_a_high.clone() + rs1_high.clone() + carry0.clone() - six5536.clone());
+        let abs_a_high_expr = (one.clone() - sign_a.clone())
+            * (abs_a_high.clone() - rs1_high.clone())
+            + sign_a.clone()
+                * (abs_a_high.clone() + rs1_high.clone() + carry0.clone() - six5536.clone());
         eval.add_constraint(g2.clone() * abs_a_high_expr);
         // carry0 binality（gated by g2，度 3）：复用 COL_CARRY_FLAG_BASE 作 abs_a borrow
         eval.add_constraint(g2.clone() * carry0.clone() * (carry0.clone() - one.clone()));
@@ -1167,28 +1215,37 @@ impl FrameworkEval for CpuAir {
         // ===== abs_b 重建（gated by g2，度 3）=====
         // MULHSU 的 abs_b = rs2（sign_b=0）；MULH 的 abs_b = |rs2|
         let abs_b_low_expr = (one.clone() - sign_b.clone()) * (abs_b_low.clone() - rs2_low.clone())
-            + sign_b.clone() * (abs_b_low.clone() + rs2_low.clone() - six5536.clone() * carry1.clone());
+            + sign_b.clone()
+                * (abs_b_low.clone() + rs2_low.clone() - six5536.clone() * carry1.clone());
         eval.add_constraint(g2.clone() * abs_b_low_expr);
-        let abs_b_high_expr = (one.clone() - sign_b.clone()) * (abs_b_high.clone() - rs2_high.clone())
-            + sign_b.clone() * (abs_b_high.clone() + rs2_high.clone() + carry1.clone() - six5536.clone());
+        let abs_b_high_expr = (one.clone() - sign_b.clone())
+            * (abs_b_high.clone() - rs2_high.clone())
+            + sign_b.clone()
+                * (abs_b_high.clone() + rs2_high.clone() + carry1.clone() - six5536.clone());
         eval.add_constraint(g2.clone() * abs_b_high_expr);
         // carry1 binality（gated by g2，度 3）：复用 COL_CARRY_FLAG_BASE+1 作 abs_b borrow
         eval.add_constraint(g2.clone() * carry1.clone() * (carry1.clone() - one.clone()));
 
         // ===== result_sign / result_carry binality（gated by g2，度 3）=====
         eval.add_constraint(g2.clone() * result_sign.clone() * (result_sign.clone() - one.clone()));
-        eval.add_constraint(g2.clone() * result_carry.clone() * (result_carry.clone() - one.clone()));
+        eval.add_constraint(
+            g2.clone() * result_carry.clone() * (result_carry.clone() - one.clone()),
+        );
 
         // ===== 结果符号调整（gated by g2=MULH+MULHSU，度 3）=====
         // sign=0: rd_eff = high32；sign=1: rd_eff = 2³²−high32−low_nonzero
         //   sign=1: rd_low + high_low + low_nz = 65536·c；rd_high + high_high + c = 65536
-        let res_low = (one.clone() - result_sign.clone()) * (rd_eff_low.clone() - mul_high_low.clone())
-            + result_sign.clone() * (rd_eff_low.clone() + mul_high_low.clone() + low_nonzero.clone()
-                - six5536.clone() * result_carry.clone());
+        let res_low = (one.clone() - result_sign.clone())
+            * (rd_eff_low.clone() - mul_high_low.clone())
+            + result_sign.clone()
+                * (rd_eff_low.clone() + mul_high_low.clone() + low_nonzero.clone()
+                    - six5536.clone() * result_carry.clone());
         eval.add_constraint(g2.clone() * res_low);
-        let res_high = (one.clone() - result_sign.clone()) * (rd_eff_high.clone() - mul_high_high.clone())
-            + result_sign.clone() * (rd_eff_high.clone() + mul_high_high.clone() + result_carry.clone()
-                - six5536.clone());
+        let res_high = (one.clone() - result_sign.clone())
+            * (rd_eff_high.clone() - mul_high_high.clone())
+            + result_sign.clone()
+                * (rd_eff_high.clone() + mul_high_high.clone() + result_carry.clone()
+                    - six5536.clone());
         eval.add_constraint(g2.clone() * res_high);
 
         // ===== M 扩展约束（v3.5 Step 6）：DIV 约束 =====
@@ -1222,12 +1279,12 @@ impl FrameworkEval for CpuAir {
         let mul_low_high = word_high16(COL_MUL_LOW_BASE);
 
         // 复用列读取
-        let div_borrow_a = col(COL_CARRY_FLAG_BASE);       // abs_a 重建 borrow
-        let div_borrow_b = col(COL_HELPER_A_BASE);          // abs_b 重建 borrow
-        let div_carry_id = col(COL_CARRY_FLAG_BASE + 1);    // 恒等式 carry
-        let div_borrow0 = col(COL_LOW_NONZERO);             // 范围检查 borrow0
-        let div_borrow1 = col(COL_HELPER_A_BASE + 1);       // 范围检查 borrow1
-        let div_adj_carry = col(COL_HELPER_A_BASE + 2);     // 结果符号调整 carry
+        let div_borrow_a = col(COL_CARRY_FLAG_BASE); // abs_a 重建 borrow
+        let div_borrow_b = col(COL_HELPER_A_BASE); // abs_b 重建 borrow
+        let div_carry_id = col(COL_CARRY_FLAG_BASE + 1); // 恒等式 carry
+        let div_borrow0 = col(COL_LOW_NONZERO); // 范围检查 borrow0
+        let div_borrow1 = col(COL_HELPER_A_BASE + 1); // 范围检查 borrow1
+        let div_adj_carry = col(COL_HELPER_A_BASE + 2); // 结果符号调整 carry
         let diff_low = word_low16(COL_HELPER_B_BASE);
         let diff_high = word_high16(COL_HELPER_B_BASE);
 
@@ -1240,34 +1297,48 @@ impl FrameworkEval for CpuAir {
         // ----- abs_a 重建（gated by g3，度 3）-----
         // sign_a=0: abs_a = rs1；sign_a=1: abs_a = 2³²−rs1（16-bit borrow）
         let div_abs_a_low = (one.clone() - sign_a.clone()) * (abs_a_low.clone() - rs1_low.clone())
-            + sign_a.clone() * (abs_a_low.clone() + rs1_low.clone() - six5536.clone() * div_borrow_a.clone());
+            + sign_a.clone()
+                * (abs_a_low.clone() + rs1_low.clone() - six5536.clone() * div_borrow_a.clone());
         eval.add_constraint(g3.clone() * div_abs_a_low);
-        let div_abs_a_high = (one.clone() - sign_a.clone()) * (abs_a_high.clone() - rs1_high.clone())
-            + sign_a.clone() * (abs_a_high.clone() + rs1_high.clone() + div_borrow_a.clone() - six5536.clone());
+        let div_abs_a_high = (one.clone() - sign_a.clone())
+            * (abs_a_high.clone() - rs1_high.clone())
+            + sign_a.clone()
+                * (abs_a_high.clone() + rs1_high.clone() + div_borrow_a.clone() - six5536.clone());
         eval.add_constraint(g3.clone() * div_abs_a_high);
         // div_borrow_a binality（gated by g3，度 3）
-        eval.add_constraint(g3.clone() * div_borrow_a.clone() * (div_borrow_a.clone() - one.clone()));
+        eval.add_constraint(
+            g3.clone() * div_borrow_a.clone() * (div_borrow_a.clone() - one.clone()),
+        );
 
         // ----- abs_b 重建（gated by g3，度 3）-----
         let div_abs_b_low = (one.clone() - sign_b.clone()) * (abs_b_low.clone() - rs2_low.clone())
-            + sign_b.clone() * (abs_b_low.clone() + rs2_low.clone() - six5536.clone() * div_borrow_b.clone());
+            + sign_b.clone()
+                * (abs_b_low.clone() + rs2_low.clone() - six5536.clone() * div_borrow_b.clone());
         eval.add_constraint(g3.clone() * div_abs_b_low);
-        let div_abs_b_high = (one.clone() - sign_b.clone()) * (abs_b_high.clone() - rs2_high.clone())
-            + sign_b.clone() * (abs_b_high.clone() + rs2_high.clone() + div_borrow_b.clone() - six5536.clone());
+        let div_abs_b_high = (one.clone() - sign_b.clone())
+            * (abs_b_high.clone() - rs2_high.clone())
+            + sign_b.clone()
+                * (abs_b_high.clone() + rs2_high.clone() + div_borrow_b.clone() - six5536.clone());
         eval.add_constraint(g3.clone() * div_abs_b_high);
         // div_borrow_b binality（gated by g3，度 3）
-        eval.add_constraint(g3.clone() * div_borrow_b.clone() * (div_borrow_b.clone() - one.clone()));
+        eval.add_constraint(
+            g3.clone() * div_borrow_b.clone() * (div_borrow_b.clone() - one.clone()),
+        );
 
         // ----- 恒等式：low32 + r_abs = abs_a（gated by g3，度 2）-----
         // low16: mul_low_low + rem_low − abs_a_low − 65536·carry_id = 0
-        let id_low = mul_low_low.clone() + rem_low.clone() - abs_a_low.clone()
+        let id_low = mul_low_low.clone() + rem_low.clone()
+            - abs_a_low.clone()
             - six5536.clone() * div_carry_id.clone();
         eval.add_constraint(g3.clone() * id_low);
         // high16: mul_low_high + rem_high + carry_id − abs_a_high = 0
-        let id_high = mul_low_high.clone() + rem_high.clone() + div_carry_id.clone() - abs_a_high.clone();
+        let id_high =
+            mul_low_high.clone() + rem_high.clone() + div_carry_id.clone() - abs_a_high.clone();
         eval.add_constraint(g3.clone() * id_high);
         // div_carry_id binality（gated by g3，度 3）
-        eval.add_constraint(g3.clone() * div_carry_id.clone() * (div_carry_id.clone() - one.clone()));
+        eval.add_constraint(
+            g3.clone() * div_carry_id.clone() * (div_carry_id.clone() - one.clone()),
+        );
 
         // ----- is_special / sign_q / sign_r binality（gated by g3，度 3）-----
         eval.add_constraint(g3.clone() * is_special.clone() * (is_special.clone() - one.clone()));
@@ -1313,8 +1384,7 @@ impl FrameworkEval for CpuAir {
 
         // d=0 时 q_abs_limb[0] = sign_q + 255·(1−sign_q)（度 3）
         // sign_q=1（有符号）→ 1；sign_q=0（无符号）→ 255
-        let q_abs_limb0_expected =
-            sign_q.clone() + two55.clone() * (one.clone() - sign_q.clone());
+        let q_abs_limb0_expected = sign_q.clone() + two55.clone() * (one.clone() - sign_q.clone());
         let q_abs_limb0 = col(COL_DIV_QUOT_BASE);
         eval.add_constraint(gate_d0.clone() * (q_abs_limb0.clone() - q_abs_limb0_expected));
 
@@ -1334,10 +1404,12 @@ impl FrameworkEval for CpuAir {
         let not_special = one.clone() - is_special.clone();
         let range_gate = g3.clone() * not_special.clone();
         let range_low = abs_b_low.clone() - rem_low.clone() - one.clone()
-            + six5536.clone() * div_borrow0.clone() - diff_low.clone();
+            + six5536.clone() * div_borrow0.clone()
+            - diff_low.clone();
         eval.add_constraint(range_gate.clone() * range_low);
         let range_high = abs_b_high.clone() - rem_high.clone() - div_borrow0.clone()
-            + six5536.clone() * div_borrow1.clone() - diff_high.clone();
+            + six5536.clone() * div_borrow1.clone()
+            - diff_high.clone();
         eval.add_constraint(range_gate.clone() * range_high);
         // borrow1 = 0（gated by range_gate，度 3）
         eval.add_constraint(range_gate.clone() * div_borrow1.clone());
@@ -1346,24 +1418,34 @@ impl FrameworkEval for CpuAir {
         // sign_q=0: rd_eff = q_abs；sign_q=1: rd_eff = 2³²−q_abs
         let is_div_q = is_div.clone() + is_divu.clone();
         let div_res_low = (one.clone() - sign_q.clone()) * (rd_eff_low.clone() - quot_low.clone())
-            + sign_q.clone() * (rd_eff_low.clone() + quot_low.clone() - six5536.clone() * div_adj_carry.clone());
+            + sign_q.clone()
+                * (rd_eff_low.clone() + quot_low.clone() - six5536.clone() * div_adj_carry.clone());
         eval.add_constraint(is_div_q.clone() * div_res_low);
-        let div_res_high = (one.clone() - sign_q.clone()) * (rd_eff_high.clone() - quot_high.clone())
-            + sign_q.clone() * (rd_eff_high.clone() + quot_high.clone() + div_adj_carry.clone() - six5536.clone());
+        let div_res_high = (one.clone() - sign_q.clone())
+            * (rd_eff_high.clone() - quot_high.clone())
+            + sign_q.clone()
+                * (rd_eff_high.clone() + quot_high.clone() + div_adj_carry.clone()
+                    - six5536.clone());
         eval.add_constraint(is_div_q.clone() * div_res_high);
 
         // ----- 结果匹配：REM/REMU → rd_eff = sign_adjust(r_abs)（度 3）-----
         // sign_r=0: rd_eff = r_abs；sign_r=1: rd_eff = 2³²−r_abs
         let is_rem_r = is_rem.clone() + is_remu.clone();
         let rem_res_low = (one.clone() - sign_r.clone()) * (rd_eff_low.clone() - rem_low.clone())
-            + sign_r.clone() * (rd_eff_low.clone() + rem_low.clone() - six5536.clone() * div_adj_carry.clone());
+            + sign_r.clone()
+                * (rd_eff_low.clone() + rem_low.clone() - six5536.clone() * div_adj_carry.clone());
         eval.add_constraint(is_rem_r.clone() * rem_res_low);
-        let rem_res_high = (one.clone() - sign_r.clone()) * (rd_eff_high.clone() - rem_high.clone())
-            + sign_r.clone() * (rd_eff_high.clone() + rem_high.clone() + div_adj_carry.clone() - six5536.clone());
+        let rem_res_high = (one.clone() - sign_r.clone())
+            * (rd_eff_high.clone() - rem_high.clone())
+            + sign_r.clone()
+                * (rd_eff_high.clone() + rem_high.clone() + div_adj_carry.clone()
+                    - six5536.clone());
         eval.add_constraint(is_rem_r.clone() * rem_res_high);
 
         // div_adj_carry binality（gated by g3，度 3）—— DIV/REM one-hot 共享同一 carry 列
-        eval.add_constraint(g3.clone() * div_adj_carry.clone() * (div_adj_carry.clone() - one.clone()));
+        eval.add_constraint(
+            g3.clone() * div_adj_carry.clone() * (div_adj_carry.clone() - one.clone()),
+        );
 
         // ===== Phase 3.4 约束 56：Memory logup claim（gated by Option<MemoryLookup>）=====
         // 当 memory_lookup = Some(lookup) 时，为每行 Load/Store 发送 logup claim：
@@ -1429,7 +1511,7 @@ impl FrameworkEval for CpuAir {
 
         // v3：ECALL dispatch 仅 1 列 SyscallId
         let ecall_dispatch_layout: [(usize, usize); 1] = [
-            (COL_SYSCALL_ID, 1),  // col 84
+            (COL_SYSCALL_ID, 1), // col 84
         ];
 
         // 收集 1 列值，用于后续 logup claim
@@ -1480,11 +1562,7 @@ impl FrameworkEval for CpuAir {
             // 使用 column_layout_v2::RANGE_CHECK_COL_INDICES 统一常量，避免多处重复定义不同步
             for &col_idx in &RANGE_CHECK_COL_INDICES {
                 let limb_val = col(col_idx);
-                eval.add_to_relation(RelationEntry::new(
-                    lookup,
-                    mult_ef.clone(),
-                    &[limb_val],
-                ));
+                eval.add_to_relation(RelationEntry::new(lookup, mult_ef.clone(), &[limb_val]));
             }
             has_logup = true;
         }
@@ -1515,7 +1593,9 @@ impl FrameworkEval for CpuAir {
                 byte1_sum = byte1_sum + col(COL_INSTR_BITS_BYTE1_BASE + i) * pow2.clone();
                 pow2 = pow2 * two.clone();
             }
-            eval.add_constraint(is_non_padding.clone() * (col(COL_INSTR_WORD_BASE + 1) - byte1_sum));
+            eval.add_constraint(
+                is_non_padding.clone() * (col(COL_INSTR_WORD_BASE + 1) - byte1_sum),
+            );
 
             // InstrWord[3] = Σ InstrBitsByte3[i]·2^i
             let mut byte3_sum: E::F = col(COL_INSTR_BITS_BYTE3_BASE);
@@ -1524,7 +1604,9 @@ impl FrameworkEval for CpuAir {
                 byte3_sum = byte3_sum + col(COL_INSTR_BITS_BYTE3_BASE + i) * pow2.clone();
                 pow2 = pow2 * two.clone();
             }
-            eval.add_constraint(is_non_padding.clone() * (col(COL_INSTR_WORD_BASE + 3) - byte3_sum));
+            eval.add_constraint(
+                is_non_padding.clone() * (col(COL_INSTR_WORD_BASE + 3) - byte3_sum),
+            );
 
             // ----- binality 约束（gated by is_non_padding，度 3）-----
             for i in 0..COL_INSTR_BITS_COUNT {
@@ -1567,14 +1649,35 @@ impl FrameworkEval for CpuAir {
             let bf = |v: u32| -> E::F { BaseField::from(v).into() };
 
             // opcode 约束（按 opcode 组分组）
-            let is_r_type = col(IS_ADD) + col(IS_SUB) + col(IS_SLL) + col(IS_SLT) + col(IS_SLTU)
-                + col(IS_XOR) + col(IS_SRL) + col(IS_SRA) + col(IS_OR) + col(IS_AND)
-                + col(IS_MUL) + col(IS_MULH) + col(IS_MULHSU) + col(IS_MULHU)
-                + col(IS_DIV) + col(IS_DIVU) + col(IS_REM) + col(IS_REMU);
+            let is_r_type = col(IS_ADD)
+                + col(IS_SUB)
+                + col(IS_SLL)
+                + col(IS_SLT)
+                + col(IS_SLTU)
+                + col(IS_XOR)
+                + col(IS_SRL)
+                + col(IS_SRA)
+                + col(IS_OR)
+                + col(IS_AND)
+                + col(IS_MUL)
+                + col(IS_MULH)
+                + col(IS_MULHSU)
+                + col(IS_MULHU)
+                + col(IS_DIV)
+                + col(IS_DIVU)
+                + col(IS_REM)
+                + col(IS_REMU);
             eval.add_constraint(is_r_type.clone() * (opcode.clone() - bf(0x33)));
 
-            let is_i_op_imm = col(IS_ADDI) + col(IS_SLTI) + col(IS_SLTIU) + col(IS_XORI)
-                + col(IS_ORI) + col(IS_ANDI) + col(IS_SLLI) + col(IS_SRLI) + col(IS_SRAI);
+            let is_i_op_imm = col(IS_ADDI)
+                + col(IS_SLTI)
+                + col(IS_SLTIU)
+                + col(IS_XORI)
+                + col(IS_ORI)
+                + col(IS_ANDI)
+                + col(IS_SLLI)
+                + col(IS_SRLI)
+                + col(IS_SRAI);
             eval.add_constraint(is_i_op_imm.clone() * (opcode.clone() - bf(0x13)));
 
             eval.add_constraint(is_branch.clone() * (opcode.clone() - bf(0x63)));
@@ -1610,17 +1713,35 @@ impl FrameworkEval for CpuAir {
             eval.add_constraint((col(IS_SLT) + col(IS_MULHSU)) * (funct3.clone() - bf(2)));
             eval.add_constraint((col(IS_SLTU) + col(IS_MULHU)) * (funct3.clone() - bf(3)));
             eval.add_constraint((col(IS_XOR) + col(IS_DIV)) * (funct3.clone() - bf(4)));
-            eval.add_constraint((col(IS_SRL) + col(IS_SRA) + col(IS_DIVU)) * (funct3.clone() - bf(5)));
+            eval.add_constraint(
+                (col(IS_SRL) + col(IS_SRA) + col(IS_DIVU)) * (funct3.clone() - bf(5)),
+            );
             eval.add_constraint((col(IS_OR) + col(IS_REM)) * (funct3.clone() - bf(6)));
             eval.add_constraint((col(IS_AND) + col(IS_REMU)) * (funct3 - bf(7)));
 
             // funct7 约束（R-type + shift）
-            let is_r_base = col(IS_ADD) + col(IS_SLL) + col(IS_SLT) + col(IS_SLTU) + col(IS_XOR)
-                + col(IS_SRL) + col(IS_OR) + col(IS_AND) + col(IS_SLLI) + col(IS_SRLI);
+            let is_r_base = col(IS_ADD)
+                + col(IS_SLL)
+                + col(IS_SLT)
+                + col(IS_SLTU)
+                + col(IS_XOR)
+                + col(IS_SRL)
+                + col(IS_OR)
+                + col(IS_AND)
+                + col(IS_SLLI)
+                + col(IS_SRLI);
             eval.add_constraint(is_r_base.clone() * funct7.clone()); // funct7=0
-            eval.add_constraint((col(IS_SUB) + col(IS_SRA) + col(IS_SRAI)) * (funct7.clone() - bf(0x20)));
-            let is_r_m_ext = col(IS_MUL) + col(IS_MULH) + col(IS_MULHSU) + col(IS_MULHU)
-                + col(IS_DIV) + col(IS_DIVU) + col(IS_REM) + col(IS_REMU);
+            eval.add_constraint(
+                (col(IS_SUB) + col(IS_SRA) + col(IS_SRAI)) * (funct7.clone() - bf(0x20)),
+            );
+            let is_r_m_ext = col(IS_MUL)
+                + col(IS_MULH)
+                + col(IS_MULHSU)
+                + col(IS_MULHU)
+                + col(IS_DIV)
+                + col(IS_DIVU)
+                + col(IS_REM)
+                + col(IS_REMU);
             eval.add_constraint(is_r_m_ext * (funct7 - bf(0x01)));
         }
 
@@ -1675,24 +1796,30 @@ impl FrameworkEval for CpuAir {
             // 非 JALR 行（Load/Store）：HelperA_low = ValueB_low + Imm_low - 65536*carry0
             // JALR 行：由下方专项约束处理（含 bit0 清零）
             let g_load_store = is_load.clone() + col(IS_STORE);
-            let rs1_imm_low = helper_a_low16.clone() - value_b_low16.clone()
-                - imm_low16.clone() + six5536.clone() * ha_carry0.clone();
+            let rs1_imm_low = helper_a_low16.clone() - value_b_low16.clone() - imm_low16.clone()
+                + six5536.clone() * ha_carry0.clone();
             eval.add_constraint(g_load_store.clone() * rs1_imm_low);
 
-            let rs1_imm_high = helper_a_high16.clone() - value_b_high16.clone()
-                - imm_high16.clone() - ha_carry0.clone() + six5536.clone() * ha_carry1.clone();
+            let rs1_imm_high = helper_a_high16.clone()
+                - value_b_high16.clone()
+                - imm_high16.clone()
+                - ha_carry0.clone()
+                + six5536.clone() * ha_carry1.clone();
             // Load/Store/JALR 共享高 16 位约束（JALR 高位不受 bit0 影响）
             eval.add_constraint(g_rs1_imm.clone() * rs1_imm_high);
 
             // ----- A1 Group 2: JAL/AUIPC/Branch taken — HelperA = Pc + ImmField -----
             let g_pc_imm = is_jal.clone() + is_auipc.clone() + is_branch.clone() * taken.clone();
 
-            let pc_imm_low = helper_a_low16.clone() - pc_low16_v.clone()
-                - imm_low16.clone() + six5536.clone() * ha_carry0.clone();
+            let pc_imm_low = helper_a_low16.clone() - pc_low16_v.clone() - imm_low16.clone()
+                + six5536.clone() * ha_carry0.clone();
             eval.add_constraint(g_pc_imm.clone() * pc_imm_low);
 
-            let pc_imm_high = helper_a_high16.clone() - pc_high16_v.clone()
-                - imm_high16.clone() - ha_carry0.clone() + six5536.clone() * ha_carry1.clone();
+            let pc_imm_high = helper_a_high16.clone()
+                - pc_high16_v.clone()
+                - imm_high16.clone()
+                - ha_carry0.clone()
+                + six5536.clone() * ha_carry1.clone();
             eval.add_constraint(g_pc_imm.clone() * pc_imm_high);
 
             // ----- A1 Group 3: LUI — HelperA = ImmField（直接 limb 等式）-----
@@ -1722,7 +1849,8 @@ impl FrameworkEval for CpuAir {
             // A1 JALR 低 16 位：binality(x) 隐式推导 bit0（度 3）
             // x = ValueB_low16 + ImmField_low16 - HelperA_low16 - 65536*carry0
             let jalr_bit0 = value_b_low16.clone() + imm_low16.clone()
-                - helper_a_low16.clone() - six5536.clone() * ha_carry0.clone();
+                - helper_a_low16.clone()
+                - six5536.clone() * ha_carry0.clone();
             eval.add_constraint(is_jalr.clone() * jalr_bit0.clone() * (jalr_bit0 - one.clone()));
         }
 
@@ -1765,7 +1893,10 @@ mod tests {
         let air = CpuAir::new_with_lookup(10, lookup);
         assert_eq!(air.log_size(), 10);
         assert_eq!(air.max_constraint_log_degree_bound(), 11);
-        assert!(air.has_memory_lookup(), "CpuAir::new_with_lookup 应启用 logup");
+        assert!(
+            air.has_memory_lookup(),
+            "CpuAir::new_with_lookup 应启用 logup"
+        );
         assert!(
             !air.has_ecall_lookup(),
             "CpuAir::new_with_lookup 不应启用 ECALL logup"
@@ -1792,8 +1923,7 @@ mod tests {
         assert_eq!(ECALL_DISPATCH_NUM_COLUMNS, 1);
         // v3：1 列布局（仅 SyscallId）
         assert_eq!(
-            1,
-            ECALL_DISPATCH_NUM_COLUMNS,
+            1, ECALL_DISPATCH_NUM_COLUMNS,
             "v3 ECALL dispatch 应为 1 列 SyscallId"
         );
     }
@@ -1841,7 +1971,10 @@ mod tests {
         assert_eq!(COL_HELPER_A_BASE, 65);
         assert_eq!(COL_HELPER_B_BASE, 69);
         assert_eq!(COL_TAKEN, 73);
-        assert_eq!(NUM_COLUMNS, 185, "v3.9 列布局 = 185 列（v3.8 182 + A1/A4 3）");
+        assert_eq!(
+            NUM_COLUMNS, 185,
+            "v3.9 列布局 = 185 列（v3.8 182 + A1/A4 3）"
+        );
         assert_eq!(NUM_INSTRUCTION_CATEGORIES, 43);
     }
 }

@@ -73,6 +73,7 @@ pub use delegated_escape::{
     DelegatedEscapeAuthorization, RevokeDelegatedEscapeTx, apply_revoke_delegated_escape,
     compute_next_credential_nonce, consume_delegated_escape_authorization,
 };
+pub use dispatch::{DispatchContext, DispatchResult, compute_method_selector, dispatch, selectors};
 pub use force_advance::{
     ForceAdvanceError, ForceAdvanceInput, apply_force_advance, force_advance_action,
 };
@@ -98,7 +99,6 @@ pub use forfeit::{
     validate_designated_operator_bond, validate_forfeit_deposit_ratio,
 };
 pub use game_precompile::GamePrecompile;
-pub use texas_poker_precompile::TexasPokerPrecompile;
 pub use hand_started::{HandStartedError, HandStartedInput, hand_started_branch};
 pub use request_da::{RequestDaOutcome, RequestDaTx, apply_request_da, is_request_da_appropriate};
 pub use revert::{
@@ -106,7 +106,5 @@ pub use revert::{
     apply_request_revert,
 };
 pub use settle::{RakeConfig, SettleError, SettleResult, compute_rake, settle_hand};
+pub use texas_poker_precompile::TexasPokerPrecompile;
 pub use types::{BettingRound, GameAction, GameContract, GamePhase, HandState, PlayerStack};
-pub use dispatch::{
-    DispatchContext, DispatchResult, compute_method_selector, dispatch, selectors,
-};

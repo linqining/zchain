@@ -126,7 +126,7 @@ use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 
 use super::lookups::PoseidonLookup;
-use super::poseidon_m31::{poseidon_m31_mds, POSEIDON_M31_ALPHA, POSEIDON_M31_WIDTH};
+use super::poseidon_m31::{POSEIDON_M31_ALPHA, POSEIDON_M31_WIDTH, poseidon_m31_mds};
 
 // ===========================================================================
 // Poseidon AIR 列布局常量（30 列，v2.1）
@@ -217,7 +217,10 @@ impl PoseidonAir {
     /// - `poseidon_lookup` — PoseidonLookup relation 实例（从 channel draw 或 dummy）
     #[must_use]
     pub const fn new(log_size: u32, poseidon_lookup: PoseidonLookup) -> Self {
-        Self { log_size, poseidon_lookup }
+        Self {
+            log_size,
+            poseidon_lookup,
+        }
     }
 
     /// 获取 log_size。
@@ -476,35 +479,85 @@ mod tests {
         use std::collections::HashSet;
         let mut all_cols = HashSet::new();
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_STATE_BASE + i), "State col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_STATE_BASE + i),
+                "State col {} 重复",
+                i
+            );
         }
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_STATE_NEXT_BASE + i), "StateNext col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_STATE_NEXT_BASE + i),
+                "StateNext col {} 重复",
+                i
+            );
         }
-        assert!(all_cols.insert(POSEIDON_AIR_COL_IS_FULL_ROUND), "IsFullRound 重复");
-        assert!(all_cols.insert(POSEIDON_AIR_COL_IS_PARTIAL_ROUND), "IsPartialRound 重复");
-        assert!(all_cols.insert(POSEIDON_AIR_COL_IS_FIRST_ROUND), "IsFirstRound 重复");
-        assert!(all_cols.insert(POSEIDON_AIR_COL_IS_LAST_ROUND), "IsLastRound 重复");
-        assert!(all_cols.insert(POSEIDON_AIR_COL_ROUND_COUNTER), "RoundCounter 重复");
+        assert!(
+            all_cols.insert(POSEIDON_AIR_COL_IS_FULL_ROUND),
+            "IsFullRound 重复"
+        );
+        assert!(
+            all_cols.insert(POSEIDON_AIR_COL_IS_PARTIAL_ROUND),
+            "IsPartialRound 重复"
+        );
+        assert!(
+            all_cols.insert(POSEIDON_AIR_COL_IS_FIRST_ROUND),
+            "IsFirstRound 重复"
+        );
+        assert!(
+            all_cols.insert(POSEIDON_AIR_COL_IS_LAST_ROUND),
+            "IsLastRound 重复"
+        );
+        assert!(
+            all_cols.insert(POSEIDON_AIR_COL_ROUND_COUNTER),
+            "RoundCounter 重复"
+        );
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_INPUT_BASE + i), "Input col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_INPUT_BASE + i),
+                "Input col {} 重复",
+                i
+            );
         }
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_OUTPUT_BASE + i), "Output col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_OUTPUT_BASE + i),
+                "Output col {} 重复",
+                i
+            );
         }
-        assert!(all_cols.insert(POSEIDON_AIR_COL_IS_PADDING), "IsPadding 重复");
+        assert!(
+            all_cols.insert(POSEIDON_AIR_COL_IS_PADDING),
+            "IsPadding 重复"
+        );
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + i), "RoundConstant col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + i),
+                "RoundConstant col {} 重复",
+                i
+            );
         }
         // v2.1 新增 S-box 中间列
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_SBOX_SQ1_BASE + i), "SboxSq1 col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_SBOX_SQ1_BASE + i),
+                "SboxSq1 col {} 重复",
+                i
+            );
         }
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_SBOX_SQ2_BASE + i), "SboxSq2 col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_SBOX_SQ2_BASE + i),
+                "SboxSq2 col {} 重复",
+                i
+            );
         }
         for i in 0..3 {
-            assert!(all_cols.insert(POSEIDON_AIR_COL_SBOX_OUT_BASE + i), "SboxOut col {} 重复", i);
+            assert!(
+                all_cols.insert(POSEIDON_AIR_COL_SBOX_OUT_BASE + i),
+                "SboxOut col {} 重复",
+                i
+            );
         }
         // 总列数应为 30
         assert_eq!(all_cols.len(), POSEIDON_AIR_NUM_COLUMNS);
@@ -587,10 +640,10 @@ mod tests {
     #[test]
     fn test_debug_air_constraints_manual_check() {
         use super::super::poseidon_m31::{
-            poseidon_m31_mds, poseidon_m31_round_constants, poseidon_permutation_m31_steps,
-            POSEIDON_M31_FULL_ROUNDS, POSEIDON_M31_PARTIAL_ROUNDS,
+            POSEIDON_M31_FULL_ROUNDS, POSEIDON_M31_PARTIAL_ROUNDS, poseidon_m31_mds,
+            poseidon_m31_round_constants, poseidon_permutation_m31_steps,
         };
-        use super::super::trace_native::{gen_poseidon_trace, PoseidonHashCall};
+        use super::super::trace_native::{PoseidonHashCall, gen_poseidon_trace};
 
         let call = PoseidonHashCall::from_input([
             BaseField::from(1u32),
@@ -618,8 +671,16 @@ mod tests {
 
         for round in 0..POSEIDON_AIR_TOTAL_ROUNDS {
             let row = round; // 单 hash，row = round
-            let is_full = if round < full_half || round >= partial_end { 1u32 } else { 0u32 };
-            let is_partial = if round >= full_half && round < partial_end { 1u32 } else { 0u32 };
+            let is_full = if round < full_half || round >= partial_end {
+                1u32
+            } else {
+                0u32
+            };
+            let is_partial = if round >= full_half && round < partial_end {
+                1u32
+            } else {
+                0u32
+            };
 
             // 读取 trace 列
             let state: [BaseField; 3] = [
@@ -639,8 +700,18 @@ mod tests {
             ];
 
             // 验证 trace 中的 state 与 steps 一致
-            assert_eq!(state, states[round], "round {}: State != states[{}]", round, round);
-            assert_eq!(state_next, states[round + 1], "round {}: StateNext != states[{}]", round, round + 1);
+            assert_eq!(
+                state, states[round],
+                "round {}: State != states[{}]",
+                round, round
+            );
+            assert_eq!(
+                state_next,
+                states[round + 1],
+                "round {}: StateNext != states[{}]",
+                round,
+                round + 1
+            );
 
             // 验证 trace 中的 rc 与 rcs 一致
             assert_eq!(rc, rcs[round], "round {}: RC != rcs[{}]", round, round);
@@ -690,9 +761,11 @@ mod tests {
                 let expected = sbox_sq2[j] * sbox_input;
                 // 等价验证：expected == sbox(sbox_input)
                 assert_eq!(
-                    expected, sbox(sbox_input),
+                    expected,
+                    sbox(sbox_input),
                     "round {} j={}: SboxSq2 * SboxInput != SboxInput^5",
-                    round, j
+                    round,
+                    j
                 );
                 assert_eq!(
                     sbox_out[j], expected,
@@ -753,27 +826,42 @@ mod tests {
             // v2.1: 验证 padding 行的 S-box 中间列全为 0（保证 unconditional 约束满足）
             for j in 0..3 {
                 assert_eq!(
-                    trace.cols[POSEIDON_AIR_COL_SBOX_SQ1_BASE + j][row], zero,
-                    "padding row {} SboxSq1[{}] 应为 0", row, j
+                    trace.cols[POSEIDON_AIR_COL_SBOX_SQ1_BASE + j][row],
+                    zero,
+                    "padding row {} SboxSq1[{}] 应为 0",
+                    row,
+                    j
                 );
                 assert_eq!(
-                    trace.cols[POSEIDON_AIR_COL_SBOX_SQ2_BASE + j][row], zero,
-                    "padding row {} SboxSq2[{}] 应为 0", row, j
+                    trace.cols[POSEIDON_AIR_COL_SBOX_SQ2_BASE + j][row],
+                    zero,
+                    "padding row {} SboxSq2[{}] 应为 0",
+                    row,
+                    j
                 );
                 assert_eq!(
-                    trace.cols[POSEIDON_AIR_COL_SBOX_OUT_BASE + j][row], zero,
-                    "padding row {} SboxOut[{}] 应为 0", row, j
+                    trace.cols[POSEIDON_AIR_COL_SBOX_OUT_BASE + j][row],
+                    zero,
+                    "padding row {} SboxOut[{}] 应为 0",
+                    row,
+                    j
                 );
             }
             // 验证 State/RC 也为 0
             for j in 0..3 {
                 assert_eq!(
-                    trace.cols[POSEIDON_AIR_COL_STATE_BASE + j][row], zero,
-                    "padding row {} State[{}] 应为 0", row, j
+                    trace.cols[POSEIDON_AIR_COL_STATE_BASE + j][row],
+                    zero,
+                    "padding row {} State[{}] 应为 0",
+                    row,
+                    j
                 );
                 assert_eq!(
-                    trace.cols[POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + j][row], zero,
-                    "padding row {} RC[{}] 应为 0", row, j
+                    trace.cols[POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + j][row],
+                    zero,
+                    "padding row {} RC[{}] 应为 0",
+                    row,
+                    j
                 );
             }
         }

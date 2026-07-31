@@ -23,7 +23,9 @@ use crate::signature::TaggedPubkey;
 ///
 /// 复用 `consensus::routing::ExecutionMode`，此处重新定义以避免合约层
 /// 反向依赖共识模块（合约对象应自包含）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum ExecutionMode {
     /// 全链上执行（默认 trustless 模式）。
     OnChain,
@@ -32,7 +34,9 @@ pub enum ExecutionMode {
 }
 
 /// 游戏阶段（spec.md 第 683-693 行 force_advance 规则需要区分 preflop / postflop）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum GamePhase {
     /// 翻牌前（preflop）— 盲注已下，发牌完成。
     Preflop,
@@ -53,7 +57,9 @@ pub enum GamePhase {
 /// spec.md 第 689-693 行 SEC2-L5 修复：
 /// - preflop：盲注阶段，current_bet == big_blind_amount 表示无人 raise
 /// - postflop：flop / turn / river 阶段，current_bet == 0 表示无人下注
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum BettingRound {
     /// 翻牌前（preflop）。
     Preflop,
@@ -82,7 +88,9 @@ impl GamePhase {
 }
 
 /// 玩家动作（spec.md 第 311-315 行 GameTurn 通道操作）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum GameAction {
     /// 弃牌（失去本轮已投入筹码）。
     Fold,
@@ -369,7 +377,9 @@ impl GameContract {
 /// 玩家活跃 Game 索引（spec.md 第 317-321 行，per-player active Game limit）。
 ///
 /// 用于校验玩家活跃 Game 数量是否超限（默认 10）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct PlayerActiveGames {
     /// player address → 活跃 Game ID 列表。
     pub games: BTreeMap<Address, Vec<ObjectID>>,

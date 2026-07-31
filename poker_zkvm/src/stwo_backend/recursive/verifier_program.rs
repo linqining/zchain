@@ -9,9 +9,9 @@ use std::iter::zip;
 use stwo::core::air::{Component, Components};
 use stwo::core::channel::{Channel, MerkleChannel, Poseidon252Channel};
 use stwo::core::circle::CirclePoint;
-use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
-use stwo::core::pcs::quotients::{fri_answers, PointSample};
+use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::pcs::PcsConfig;
+use stwo::core::pcs::quotients::{PointSample, fri_answers};
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::{
     Poseidon252MerkleChannel, Poseidon252MerkleHasher,
@@ -22,13 +22,14 @@ use crate::stwo_backend::column_layout_v2::NUM_COLUMNS;
 use crate::stwo_backend::cpu_air::CpuAir;
 
 use super::fri_replay::{
-    extract_simple_fri_replay_challenges, replay_fri_decommitment, FriReplay, FriReplayChallenges,
-    FriReplayError,
+    FriReplay, FriReplayChallenges, FriReplayError, extract_simple_fri_replay_challenges,
+    replay_fri_decommitment,
 };
+use super::poseidon252_replay::Poseidon252PermutationCall;
 use super::public_inputs::{
     RecursivePublicInputs, RecursiveTreeMetadata, RecursiveVerifierProgram,
 };
-use super::stwo_replay::{replay_all_l1_merkle_trees, MerkleReplayError, MerkleTreeReplay};
+use super::stwo_replay::{MerkleReplayError, MerkleTreeReplay, replay_all_l1_merkle_trees};
 use super::trace_gen::extract_composition_oods_eval_from_l1;
 
 /// 固定 CPU verifier 的完整 canonical replay 产物。
@@ -40,9 +41,31 @@ pub(crate) struct CpuVerifierReplay {
     pub fri_quotient_random_coeff: SecureField,
     pub tree_metadata: Vec<RecursiveTreeMetadata>,
     pub fri_challenges: FriReplayChallenges,
+    pub transcript_poseidon_calls: Vec<Poseidon252PermutationCall>,
     pub first_layer_answers: Vec<SecureField>,
     pub merkle_trees: Vec<MerkleTreeReplay>,
     pub fri: FriReplay,
+}
+
+impl CpuVerifierReplay {
+    /// Returns every Poseidon252 permutation required by the fixed verifier, in protocol order:
+    /// transcript first, then PCS Merkle trees, then committed FRI layer Merkle trees.
+    pub fn all_poseidon_calls(&self) -> Vec<&Poseidon252PermutationCall> {
+        self.transcript_poseidon_calls
+            .iter()
+            .chain(
+                self.merkle_trees
+                    .iter()
+                    .flat_map(|tree| tree.poseidon_calls.iter()),
+            )
+            .chain(
+                self.fri
+                    .layers
+                    .iter()
+                    .flat_map(|layer| layer.merkle.poseidon_calls.iter()),
+            )
+            .collect()
+    }
 }
 
 /// 固定 verifier replay 失败。
@@ -194,6 +217,7 @@ pub(crate) fn replay_cpu_verifier(
         derived.first_layer_answers.clone(),
     )?;
 
+    let transcript_poseidon_calls = derived.fri_challenges.transcript_poseidon_calls.clone();
     Ok(CpuVerifierReplay {
         composition_random_coeff: derived.composition_random_coeff,
         oods_point: derived.oods_point,
@@ -201,6 +225,7 @@ pub(crate) fn replay_cpu_verifier(
         fri_quotient_random_coeff: derived.fri_quotient_random_coeff,
         tree_metadata: derived.tree_metadata,
         fri_challenges: derived.fri_challenges,
+        transcript_poseidon_calls,
         first_layer_answers: derived.first_layer_answers,
         merkle_trees,
         fri,
@@ -372,6 +397,7 @@ fn first_last_layer_query_x(
 mod tests {
     use super::*;
     use crate::stwo_backend::prover::prove_cpu_trace;
+    use crate::stwo_backend::recursive::poseidon252_replay::Poseidon252CallKind;
     use crate::stwo_backend::trace_native::TraceBuilder;
 
     const TEST_LOG_SIZE: u32 = 10;
@@ -394,6 +420,26 @@ mod tests {
             1 + proof.0.fri_proof.inner_layers.len()
         );
         assert_eq!(replay.oods_point, inputs.oods_point);
+        let calls = replay.all_poseidon_calls();
+        assert!(!calls.is_empty());
+        assert!(calls.iter().all(|call| call.is_valid()));
+        for required_kind in [
+            Poseidon252CallKind::TranscriptMixRoot,
+            Poseidon252CallKind::TranscriptDraw,
+            Poseidon252CallKind::TranscriptPowPrefix,
+            Poseidon252CallKind::TranscriptPowNonce,
+            Poseidon252CallKind::MerkleLeafFinalize,
+            Poseidon252CallKind::MerkleParent,
+        ] {
+            assert!(calls.iter().any(|call| call.kind == required_kind));
+        }
+        assert!(
+            replay
+                .fri
+                .layers
+                .iter()
+                .all(|layer| !layer.opened_coset_evaluations.is_empty())
+        );
     }
 
     #[test]

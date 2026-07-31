@@ -33,7 +33,9 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage:\n  proving_service --once       跑 6 步 WAITING 覆盖片段到 stdout\n  proving_service serve [addr]  启动 HTTP 服务（默认 127.0.0.1:7878）");
+            eprintln!(
+                "usage:\n  proving_service --once       跑 6 步 WAITING 覆盖片段到 stdout\n  proving_service serve [addr]  启动 HTTP 服务（默认 127.0.0.1:7878）"
+            );
             ExitCode::FAILURE
         }
     }
@@ -45,14 +47,32 @@ fn run_once() -> ExitCode {
         Ok((_plugin, report)) => {
             println!("===== VM→AIR→host verifier 覆盖片段报告 =====");
             for (name, ok) in &report.steps {
-                println!("  {name:<22} {}", if *ok { "✓ proved+verified" } else { "✗ failed" });
+                println!(
+                    "  {name:<22} {}",
+                    if *ok {
+                        "✓ proved+verified"
+                    } else {
+                        "✗ failed"
+                    }
+                );
             }
             println!("-----");
-            println!("  state_root 链校验: {}", if report.chain_ok { "✓ 通过" } else { "✗ 失败" });
+            println!(
+                "  state_root 链校验: {}",
+                if report.chain_ok {
+                    "✓ 通过"
+                } else {
+                    "✗ 失败"
+                }
+            );
             if let Some(agg) = report.aggregate_ok {
                 println!(
                     "  descriptor 聚合入口: {}",
-                    if agg { "✗ 意外成功（不可信）" } else { "✓ 已按预期拒绝" }
+                    if agg {
+                        "✗ 意外成功（不可信）"
+                    } else {
+                        "✓ 已按预期拒绝"
+                    }
                 );
             }
             println!(

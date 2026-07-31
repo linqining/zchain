@@ -17,7 +17,18 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 /// 签名方案枚举（与 tag 低 4 位的 scheme_id 对应）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub enum SignatureScheme {
     /// secp256k1 ECDSA recoverable（tag scheme_id = 0）
     Secp256k1,
@@ -66,7 +77,19 @@ pub const CURRENT_VERSION: u8 = 1;
 /// Tagged Pubkey：1B tag || raw pubkey bytes。
 ///
 /// tag = `(scheme_id: 4 bits high) || (version_id: 4 bits low)`
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct TaggedPubkey {
     /// 1 字节 tag（scheme_id << 4 | version_id）。
     pub tag: u8,

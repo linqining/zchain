@@ -43,7 +43,10 @@ impl HandRank {
         for (i, &val) in kickers.iter().take(5).enumerate() {
             k[i] = val;
         }
-        Self { category, kickers: k }
+        Self {
+            category,
+            kickers: k,
+        }
     }
 
     /// 牌型名称。
@@ -153,10 +156,8 @@ fn evaluate_five(cards: &[Card; 5]) -> HandRank {
     }
 
     // 2. 同花检测
-    let is_flush = c0.suit == c1.suit
-        && c1.suit == c2.suit
-        && c2.suit == c3.suit
-        && c3.suit == c4.suit;
+    let is_flush =
+        c0.suit == c1.suit && c1.suit == c2.suit && c2.suit == c3.suit && c3.suit == c4.suit;
 
     // 3. 点数降序排序
     let mut ranks = [c0.rank, c1.rank, c2.rank, c3.rank, c4.rank];

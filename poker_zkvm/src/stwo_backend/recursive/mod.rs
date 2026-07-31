@@ -50,12 +50,15 @@ pub(crate) mod fri_replay;
 pub(crate) mod fri_verifier_air;
 pub(crate) mod merkle_path_air;
 pub(crate) mod oods_check_air;
+pub(crate) mod poseidon252_replay;
+pub(crate) mod poseidon252_air;
 pub mod public_inputs;
 pub mod recursion_prover;
 pub mod recursion_verifier;
+pub(crate) mod replay_witness;
 pub(crate) mod stwo_replay;
 pub mod trace_gen;
 pub(crate) mod verifier_program;
 
 pub use public_inputs::{RecursivePublicInputs, RecursiveTreeMetadata, RecursiveVerifierProgram};
-pub use verifier_program::{build_cpu_recursive_public_inputs, VerifierProgramError};
+pub use verifier_program::{VerifierProgramError, build_cpu_recursive_public_inputs};

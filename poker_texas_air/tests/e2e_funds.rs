@@ -21,9 +21,9 @@ use stwo::core::fields::m31::M31;
 use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use poker_texas_air::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::prove_method;
 use poker_texas_air::public_inputs::TexasPublicInputs;
-use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method;
 
@@ -31,14 +31,18 @@ use poker_texas_air::verifier::verify_method;
 fn zero_root() -> [M31; 4] {
     // 与 synthetic_placeholder 的 pre_state_root 一致（AIR statement 绑定）
     poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
-        poker_texas_air::method_kind::MethodKind::Fold).0
+        poker_texas_air::method_kind::MethodKind::Fold,
+    )
+    .0
 }
 
 /// 构造 4 个 state_root limb（测试用，全 1）。
 fn one_root() -> [M31; 4] {
     // 与 synthetic_placeholder 的 post_state_root 一致（AIR statement 绑定）
     poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
-        poker_texas_air::method_kind::MethodKind::Fold).1
+        poker_texas_air::method_kind::MethodKind::Fold,
+    )
+    .1
 }
 
 // ========== addon AIR ==========
@@ -60,17 +64,20 @@ fn test_e2e_addon_prove_verify() {
         0, // pre_addon_pool
         zero_root(),
         one_root(),
-        42,   // table_id
-        0,    // hand_id
-        1,    // call_seq
-        0,    // pre_version
-        1,    // post_version
-        0,    // pre_round_state (WAITING)
-        0,    // post_round_state (WAITING)
+        42, // table_id
+        0,  // hand_id
+        1,  // call_seq
+        0,  // pre_version
+        1,  // post_version
+        0,  // pre_round_state (WAITING)
+        0,  // post_round_state (WAITING)
     );
-    let trace =
-        gen_method_trace(AddonAir::num_columns(), &row.to_vec(), &AddonRow::padding().to_vec())
-            .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        AddonAir::num_columns(),
+        &row.to_vec(),
+        &AddonRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = AddonAir {
         log_size: trace.log_size,
@@ -84,7 +91,13 @@ fn test_e2e_addon_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        AddonAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -110,9 +123,12 @@ fn test_e2e_addon_from_zero_pending() {
         0,
         0,
     );
-    let trace =
-        gen_method_trace(AddonAir::num_columns(), &row.to_vec(), &AddonRow::padding().to_vec())
-            .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        AddonAir::num_columns(),
+        &row.to_vec(),
+        &AddonRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = AddonAir {
         log_size: trace.log_size,
@@ -126,28 +142,62 @@ fn test_e2e_addon_from_zero_pending() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 1, 0, 0)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        AddonAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 1, 0, 0),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
 /// 回归：pending_addon 与 addon_pool 都跨过 16-bit limb 边界时仍可证明。
 #[test]
 fn test_e2e_addon_ripple_carry() {
-    let input = AddonInput { seat_index: 0, amount: 1 };
+    let input = AddonInput {
+        seat_index: 0,
+        amount: 1,
+    };
     let row = AddonRow::active(
-        &input, 65_535, 0, 65_535, zero_root(), one_root(), 1, 0, 0, 0, 1, 0, 0,
+        &input,
+        65_535,
+        0,
+        65_535,
+        zero_root(),
+        one_root(),
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
     );
     let trace = gen_method_trace(
-        AddonAir::num_columns(), &row.to_vec(), &AddonRow::padding().to_vec(),
-    ).expect("trace 生成失败");
+        AddonAir::num_columns(),
+        &row.to_vec(),
+        &AddonRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
     let air = AddonAir {
-        log_size: trace.log_size, input, pre_state_root: zero_root(), post_state_root: one_root(),
-        table_id: 1, hand_id: 0, call_seq: 0, pre_version: 0, post_version: 1,
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 1,
+        hand_id: 0,
+        call_seq: 0,
+        pre_version: 0,
+        post_version: 1,
     };
     let proof = prove_method(
-        &trace, air, AddonAir::num_columns(),
+        &trace,
+        air,
+        AddonAir::num_columns(),
         TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 1, 0, 0),
-    ).expect("跨 limb addon 应可证明");
+    )
+    .expect("跨 limb addon 应可证明");
     verify_method(proof).expect("跨 limb addon 应可验证");
 }
 
@@ -178,9 +228,12 @@ fn test_soundness_addon_tampered_amount() {
         0,
         0,
     );
-    let trace =
-        gen_method_trace(AddonAir::num_columns(), &row.to_vec(), &AddonRow::padding().to_vec())
-            .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        AddonAir::num_columns(),
+        &row.to_vec(),
+        &AddonRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     // 用正确的 AIR 生成 proof（trace 与 AIR 一致）
     let air = AddonAir {
@@ -194,7 +247,13 @@ fn test_soundness_addon_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        AddonAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1),
+    )
+    .expect("prove 失败");
 
     // 篡改 proof.air.input.amount：trace 中是 200，但 AIR 声明 999
     proof.air = AddonAir {
@@ -235,9 +294,12 @@ fn test_soundness_addon_tampered_seat() {
         0,
         0,
     );
-    let trace =
-        gen_method_trace(AddonAir::num_columns(), &row.to_vec(), &AddonRow::padding().to_vec())
-            .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        AddonAir::num_columns(),
+        &row.to_vec(),
+        &AddonRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = AddonAir {
         log_size: trace.log_size,
@@ -250,7 +312,13 @@ fn test_soundness_addon_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, AddonAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        AddonAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Addon, 42, 0, 1),
+    )
+    .expect("prove 失败");
 
     // 篡改 seat_index
     proof.air = AddonAir {
@@ -295,9 +363,12 @@ fn test_e2e_rebuy_prove_verify() {
         0,  // pre_round_state
         0,  // post_round_state
     );
-    let trace =
-        gen_method_trace(RebuyAir::num_columns(), &row.to_vec(), &RebuyRow::padding().to_vec())
-            .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        RebuyAir::num_columns(),
+        &row.to_vec(),
+        &RebuyRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = RebuyAir {
         log_size: trace.log_size,
@@ -311,28 +382,62 @@ fn test_e2e_rebuy_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        RebuyAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
 /// 回归：stack 与 addon_pool 都跨过 16-bit limb 边界时仍可证明。
 #[test]
 fn test_e2e_rebuy_ripple_carry() {
-    let input = RebuyInput { seat_index: 0, amount: 1 };
+    let input = RebuyInput {
+        seat_index: 0,
+        amount: 1,
+    };
     let row = RebuyRow::active(
-        &input, 65_535, 0, 65_535, zero_root(), one_root(), 1, 0, 0, 0, 1, 0, 0,
+        &input,
+        65_535,
+        0,
+        65_535,
+        zero_root(),
+        one_root(),
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
     );
     let trace = gen_method_trace(
-        RebuyAir::num_columns(), &row.to_vec(), &RebuyRow::padding().to_vec(),
-    ).expect("trace 生成失败");
+        RebuyAir::num_columns(),
+        &row.to_vec(),
+        &RebuyRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
     let air = RebuyAir {
-        log_size: trace.log_size, input, pre_state_root: zero_root(), post_state_root: one_root(),
-        table_id: 1, hand_id: 0, call_seq: 0, pre_version: 0, post_version: 1,
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 1,
+        hand_id: 0,
+        call_seq: 0,
+        pre_version: 0,
+        post_version: 1,
     };
     let proof = prove_method(
-        &trace, air, RebuyAir::num_columns(),
+        &trace,
+        air,
+        RebuyAir::num_columns(),
         TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 1, 0, 0),
-    ).expect("跨 limb rebuy 应可证明");
+    )
+    .expect("跨 limb rebuy 应可证明");
     verify_method(proof).expect("跨 limb rebuy 应可验证");
 }
 
@@ -362,9 +467,12 @@ fn test_soundness_rebuy_tampered_amount() {
         0,
         0,
     );
-    let trace =
-        gen_method_trace(RebuyAir::num_columns(), &row.to_vec(), &RebuyRow::padding().to_vec())
-            .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        RebuyAir::num_columns(),
+        &row.to_vec(),
+        &RebuyRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = RebuyAir {
         log_size: trace.log_size,
@@ -377,7 +485,13 @@ fn test_soundness_rebuy_tampered_amount() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        RebuyAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3),
+    )
+    .expect("prove 失败");
 
     // 篡改 amount：trace 中是 500，但 AIR 声明 777
     proof.air = RebuyAir {
@@ -476,9 +590,12 @@ fn test_soundness_rebuy_tampered_seat() {
         0,
         0,
     );
-    let trace =
-        gen_method_trace(RebuyAir::num_columns(), &row.to_vec(), &RebuyRow::padding().to_vec())
-            .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        RebuyAir::num_columns(),
+        &row.to_vec(),
+        &RebuyRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = RebuyAir {
         log_size: trace.log_size,
@@ -491,7 +608,13 @@ fn test_soundness_rebuy_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, RebuyAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        RebuyAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Rebuy, 42, 0, 3),
+    )
+    .expect("prove 失败");
 
     proof.air = RebuyAir {
         input: RebuyInput {

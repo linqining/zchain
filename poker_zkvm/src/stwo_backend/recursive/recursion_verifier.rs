@@ -13,19 +13,19 @@
 //! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
 //! [`RecursionVerificationError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
 
-use super::composition_eval_air::{CompositionEvalAir, COMP_EVAL_AIR_NUM_COLUMNS};
-use super::fri_verifier_air::{FriVerifierAir, FRI_AIR_NUM_COLUMNS};
-use super::merkle_path_air::{MerklePathAir, MERKLE_AIR_NUM_COLUMNS};
-use super::oods_check_air::{OodsCheckAir, OODS_AIR_NUM_COLUMNS};
+use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir};
+use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
+use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
+use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
 use super::public_inputs::RecursivePublicInputs;
 use super::recursion_prover::RecursiveProof;
-use super::trace_gen::{compute_fri_trace_log_size, OODS_TRACE_LOG_SIZE};
+use super::trace_gen::{OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size};
 use ark_ff::Zero;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
-use stwo::core::verifier::{verify, VerificationError};
+use stwo::core::verifier::{VerificationError, verify};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 /// Recursion verifier 错误类型。
@@ -372,7 +372,7 @@ mod tests {
     /// 完整的 prover/verifier 交互测试在 recursion_prover.rs 中。
     #[test]
     fn test_verify_fails_with_tampered_composition_oods_eval() {
-        use super::super::recursion_prover::{prove_recursive, RecursionProvingError};
+        use super::super::recursion_prover::{RecursionProvingError, prove_recursive};
         use super::super::trace_gen::extract_composition_oods_eval_from_l1;
 
         // 1. 生成真实 L1 proof

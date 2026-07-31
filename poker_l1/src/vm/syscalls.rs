@@ -1495,7 +1495,11 @@ mod tests {
         assert!(result.is_err(), "gas 不足以 prepaid 应在 lookup 前失败");
         // SEC-FIX-1：charge_gas 失败时 consume_gas 返回 false，不递减 remaining
         // 关键点是 lookup/clone 未执行（DoS 防护），而非 gas 是否被消耗
-        assert_eq!(ctx.gas_used(), 0, "gas 不足时 charge_gas 不递减 remaining，但 lookup 未执行");
+        assert_eq!(
+            ctx.gas_used(),
+            0,
+            "gas 不足时 charge_gas 不递减 remaining，但 lookup 未执行"
+        );
     }
 
     #[test]
@@ -1958,8 +1962,7 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx =
-            PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
 
         let pio_bytes = make_valid_public_io_bytes();
         heap[..pio_bytes.len()].copy_from_slice(&pio_bytes);
@@ -2009,8 +2012,7 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx =
-            PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
 
         let proof = vec![0xDDu8; 32];
         let short_pio = vec![0u8; 10]; // 远小于 MIN_BYTES=136
@@ -2065,8 +2067,7 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx =
-            PokerL1Context::new(make_tx_context(), 500_000).with_zk_verifier(registry);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 500_000).with_zk_verifier(registry);
 
         let proof = vec![0xFFu8; 32];
         let pio_bytes = make_valid_public_io_bytes();
@@ -2094,8 +2095,7 @@ mod tests {
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
-        let mut ctx =
-            PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
+        let mut ctx = PokerL1Context::new(make_tx_context(), 100_000).with_zk_verifier(registry);
 
         // proof_ptr 指向 stack 区域（非法）
         let result = SyscallZkVerify::rust(

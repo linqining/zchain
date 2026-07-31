@@ -31,7 +31,7 @@ use crate::error::ZkvmError;
 use crate::isa::state::VmState;
 use crate::syscalls::gas::{SyscallGasArgs, syscall_gas};
 use crate::syscalls::host::{read_vm_bytes, write_vm_bytes};
-use crate::syscalls::{Syscall, SyscallContext, SyscallId, REG_A0, REG_A1, REG_A2, REG_A3};
+use crate::syscalls::{REG_A0, REG_A1, REG_A2, REG_A3, Syscall, SyscallContext, SyscallId};
 
 /// G1 compressed point 字节数（BLS12-381 G1 over 48-byte field）。
 pub const G1_COMPRESSED_SIZE: u32 = 48;
@@ -269,9 +269,8 @@ impl Syscall for Bls12381G1MulSyscall {
         let point = parse_g1(&point_bytes).ok_or_else(|| {
             ZkvmError::Other("Bls12381G1Mul: 非法 G1 点（不在子群内）".to_string())
         })?;
-        let scalar = parse_scalar(&scalar_bytes).ok_or_else(|| {
-            ZkvmError::Other("Bls12381G1Mul: 非法标量（不在域内）".to_string())
-        })?;
+        let scalar = parse_scalar(&scalar_bytes)
+            .ok_or_else(|| ZkvmError::Other("Bls12381G1Mul: 非法标量（不在域内）".to_string()))?;
         let result = point * scalar;
         let bytes = serialize_g1(&result);
         write_vm_bytes(state, out_ptr, &bytes)?;
@@ -360,7 +359,8 @@ impl Syscall for Bls12381PairingSyscall {
         let neg_c_affine = (-c).to_affine();
         let b_prepared = G2Prepared::from(b.to_affine());
         let d_prepared = G2Prepared::from(d.to_affine());
-        let ml = Bls12::multi_miller_loop(&[(&a_affine, &b_prepared), (&neg_c_affine, &d_prepared)]);
+        let ml =
+            Bls12::multi_miller_loop(&[(&a_affine, &b_prepared), (&neg_c_affine, &d_prepared)]);
         let gt = ml.final_exponentiation();
         let valid = bool::from(gt.is_identity());
 
@@ -401,9 +401,8 @@ impl Syscall for Bls12381HashToScalarSyscall {
         let out_ptr = state.read_register(REG_A2);
 
         let msg = read_vm_bytes(state, msg_ptr, msg_len)?;
-        let scalar = hash_to_scalar(&msg).ok_or_else(|| {
-            ZkvmError::Other("Bls12381HashToScalar: 标量归约失败".to_string())
-        })?;
+        let scalar = hash_to_scalar(&msg)
+            .ok_or_else(|| ZkvmError::Other("Bls12381HashToScalar: 标量归约失败".to_string()))?;
         let bytes = serialize_scalar(&scalar);
         write_vm_bytes(state, out_ptr, &bytes)?;
         Ok(())
@@ -695,10 +694,7 @@ mod tests {
         assert_eq!(G2_COMPRESSED_SIZE, 96);
         assert_eq!(SCALAR_SIZE, 32);
         // BLS_G1_DST 与 poker_l1 一致
-        assert_eq!(
-            BLS_G1_DST,
-            b"POKER_L1_BLS12381G1_XMD:SHA-256_SSWU_RO_"
-        );
+        assert_eq!(BLS_G1_DST, b"POKER_L1_BLS12381G1_XMD:SHA-256_SSWU_RO_");
     }
 
     // ===== hash_to_scalar 算法一致性测试 =====
@@ -794,10 +790,7 @@ mod tests {
             Bls12381HashToCurveSyscall.id(),
             SyscallId::Bls12381HashToCurve
         );
-        assert_eq!(
-            Bls12381ScalarMulSyscall.id(),
-            SyscallId::Bls12381ScalarMul
-        );
+        assert_eq!(Bls12381ScalarMulSyscall.id(), SyscallId::Bls12381ScalarMul);
         assert_eq!(Bls12381G1AddSyscall.id(), SyscallId::Bls12381G1Add);
         assert_eq!(Bls12381G1MulSyscall.id(), SyscallId::Bls12381G1Mul);
         assert_eq!(Bls12381PairingSyscall.id(), SyscallId::Bls12381Pairing);

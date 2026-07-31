@@ -227,7 +227,9 @@ impl FrameworkEval for AddonAir {
             &diff,
             &carry_lo,
             &carry_hi,
-        ) { eval.add_constraint(__c); }
+        ) {
+            eval.add_constraint(__c);
+        }
 
         // 约束 8（阶段 3 新增，soundness 关键）：addon_pool 守恒。
         // post_addon_pool = pre_addon_pool + amount（全 4-limb，对齐合约 `table.addon_pool += amount`）。
@@ -238,17 +240,31 @@ impl FrameworkEval for AddonAir {
             eval.next_trace_mask(),
         ];
         let pending_add_carry: [E::F; 3] = [
-            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
         ];
         let addon_pool_add_carry: [E::F; 3] = [
-            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
         ];
         for __c in common.limb4_delta(
-            &pre_pending, &post_pending, &input_amount, &pending_add_carry,
-        ) { eval.add_constraint(__c); }
+            &pre_pending,
+            &post_pending,
+            &input_amount,
+            &pending_add_carry,
+        ) {
+            eval.add_constraint(__c);
+        }
         for __c in common.limb4_delta(
-            &pre_addon_pool, &post_addon_pool, &amount, &addon_pool_add_carry,
-        ) { eval.add_constraint(__c); }
+            &pre_addon_pool,
+            &post_addon_pool,
+            &amount,
+            &addon_pool_add_carry,
+        ) {
+            eval.add_constraint(__c);
+        }
 
         eval
     }

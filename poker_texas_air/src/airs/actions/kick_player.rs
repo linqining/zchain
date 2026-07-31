@@ -129,7 +129,9 @@ impl FrameworkEval for KickPlayerAir {
         // Gap 3 boolean witness（座位非空）。
         let input_seat_occupied = eval.next_trace_mask();
         let pot_add_carry: [E::F; 3] = [
-            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
         ];
 
         // 约束 1：seat_index == input.seat_index
@@ -152,7 +154,9 @@ impl FrameworkEval for KickPlayerAir {
         let expected_kicked_bet_0: E::F = M31::from((self.input.kicked_bet & 0xFFFF) as u32).into();
         eval.add_constraint(is_active.clone() * (kicked_bet_0.clone() - expected_kicked_bet_0));
         // 全 4 limb pot delta
-        for __c in common.pot_delta_4limb(&kicked_bet_limbs, &pot_add_carry) { eval.add_constraint(__c); }
+        for __c in common.pot_delta_4limb(&kicked_bet_limbs, &pot_add_carry) {
+            eval.add_constraint(__c);
+        }
 
         // 约束 5（审计共性，degree-2）：round_state 不变（kick_player 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());

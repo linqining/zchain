@@ -93,7 +93,10 @@ impl TexasPokerPlugin {
     fn make_ctx(&self, caller: poker_l1::Address) -> DispatchContext {
         DispatchContext {
             caller,
-            caller_pubkey: TaggedPubkey { tag: 0, raw: vec![0xBB; 32] },
+            caller_pubkey: TaggedPubkey {
+                tag: 0,
+                raw: vec![0xBB; 32],
+            },
             chain_id: 1,
             block_height: 100,
             block_timestamp: 1_000_000,

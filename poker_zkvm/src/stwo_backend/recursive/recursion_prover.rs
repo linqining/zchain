@@ -27,16 +27,17 @@
 //! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
 //! [`RecursionProvingError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
 
-use super::composition_eval_air::{CompositionEvalAir, COMP_EVAL_AIR_NUM_COLUMNS};
-use super::fri_verifier_air::{FriVerifierAir, FRI_AIR_NUM_COLUMNS};
-use super::merkle_path_air::{MerklePathAir, MERKLE_AIR_NUM_COLUMNS};
-use super::oods_check_air::{OodsCheckAir, OODS_AIR_NUM_COLUMNS};
+use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir};
+use super::fri_verifier_air::{FRI_AIR_NUM_COLUMNS, FriVerifierAir};
+use super::merkle_path_air::{MERKLE_AIR_NUM_COLUMNS, MerklePathAir};
+use super::oods_check_air::{OODS_AIR_NUM_COLUMNS, OodsCheckAir};
 use super::public_inputs::RecursivePublicInputs;
+use super::replay_witness::CanonicalVerifierWitness;
 use super::trace_gen::{
-    compute_fri_trace_log_size, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
-    gen_composition_eval_trace, gen_fri_verifier_trace, gen_merkle_path_trace,
-    gen_oods_check_trace, pad_fri_trace_to_log_size, pad_merkle_trace_to_log_size,
-    pad_oods_trace_to_log_size, OODS_TRACE_LOG_SIZE,
+    OODS_TRACE_LOG_SIZE, compute_fri_trace_log_size, extract_composition_oods_eval_from_l1,
+    extract_fri_query_from_l1, gen_composition_eval_trace, gen_fri_verifier_trace,
+    gen_merkle_path_trace, gen_oods_check_trace, pad_fri_trace_to_log_size,
+    pad_merkle_trace_to_log_size, pad_oods_trace_to_log_size,
 };
 use super::verifier_program::replay_cpu_verifier;
 use ark_ff::Zero;
@@ -48,12 +49,12 @@ use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
-use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::pcs::CommitmentSchemeProver;
-use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::poly::BitReversedOrder;
-use stwo::prover::{prove, ProvingError};
+use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
+use stwo::prover::{ProvingError, prove};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 /// L2 recursive proof（封装 StarkProof）。
@@ -388,8 +389,14 @@ pub fn prove_recursive_with_fri(
     // 固定 method verifier：重建 CpuAir component、mask points、composition OODS、全部
     // tree commitments 与完整 FRI。该检查禁止 prover 自报 transcript/component schema。
     // 它仍是 host replay；下方 gate 继续关闭，直到同一计算被 AIR 约束。
-    replay_cpu_verifier(l1_proof, public_inputs)
+    let replay = replay_cpu_verifier(l1_proof, public_inputs)
         .map_err(|error| RecursionProvingError::FixedVerifierReplayFailed(error.to_string()))?;
+    let canonical_witness = CanonicalVerifierWitness::from_cpu_replay(&replay);
+    if !canonical_witness.is_host_consistent() {
+        return Err(RecursionProvingError::FixedVerifierReplayFailed(
+            "canonical verifier witness is internally inconsistent".to_string(),
+        ));
+    }
 
     // P05-R gap #3-B：`stwo_replay` / `fri_replay` 已提供与 Stwo 2.3 一致的 canonical
     // witness 重放，但当前 MerklePathAir 仍未约束该重放，也没有真实 Poseidon252、

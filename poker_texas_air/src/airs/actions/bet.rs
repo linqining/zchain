@@ -197,10 +197,7 @@ impl FrameworkEval for BetAir {
         let is_all_in = self.input.amount == self.input.pre_seat_stack;
         let post_stack_u64 = self.input.pre_seat_stack.checked_sub(self.input.amount);
         let post_bet_u64 = self.input.pre_seat_bet.checked_add(self.input.amount);
-        let post_total_u64 = self
-            .input
-            .pre_seat_total_bet
-            .checked_add(self.input.amount);
+        let post_total_u64 = self.input.pre_seat_total_bet.checked_add(self.input.amount);
         let bet_is_valid = self.input.amount > 0
             && total_bet.is_some()
             && self.input.pre_current_bet <= self.input.pre_seat_bet
@@ -232,16 +229,13 @@ impl FrameworkEval for BetAir {
                 is_active.clone() * (pre_seat_stack[i].clone() - expected_pre_stack[i].into()),
             );
             eval.add_constraint(
-                is_active.clone()
-                    * (pre_seat_total_bet[i].clone() - expected_pre_total[i].into()),
+                is_active.clone() * (pre_seat_total_bet[i].clone() - expected_pre_total[i].into()),
             );
             eval.add_constraint(
-                is_active.clone()
-                    * (output_seat_stack[i].clone() - expected_post_stack[i].into()),
+                is_active.clone() * (output_seat_stack[i].clone() - expected_post_stack[i].into()),
             );
             eval.add_constraint(
-                is_active.clone()
-                    * (output_seat_bet[i].clone() - expected_post_bet[i].into()),
+                is_active.clone() * (output_seat_bet[i].clone() - expected_post_bet[i].into()),
             );
             eval.add_constraint(
                 is_active.clone()
@@ -263,12 +257,13 @@ impl FrameworkEval for BetAir {
 
         // 约束 5（阶段 3 soundness 升级：全 4-limb 资金守恒，对齐 raise/call）：
         // VM 在 mid-round 不收池；筹码保留在 seat.bet。
-        for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
+        for __c in common.pot_unchanged_4limb() {
+            eval.add_constraint(__c);
+        }
         // stack/bet/total_bet 已绑定到 verifier 端 checked u64 运算的逐 limb常量；
         // 不使用无 carry 的逐 limb delta。
 
-        let expected_post_turn: E::F =
-            M31::from(u32::from(self.input.post_current_turn)).into();
+        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
         eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
 
         eval

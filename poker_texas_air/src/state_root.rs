@@ -18,9 +18,9 @@
 //! 每个 method AIR 的公开输入包含 `pre_state_root` 和 `post_state_root`；
 //! Aggregator AIR 的核心约束为 `left.post_state_root == right.pre_state_root`。
 
+use borsh::BorshDeserialize;
 use starknet_ff::FieldElement;
 use stwo::core::fields::m31::M31;
-use borsh::BorshDeserialize;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::merkle_tree::{MerkleTree, SeatLeaf};
@@ -127,10 +127,13 @@ pub fn table_from_state_preimage(
 ) -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::TexasPokerTable> {
     const TAG: &str = "zchain.texas_poker.table.v2";
     let payload = decode_canonical_borsh_preimage(image, TAG)?;
-    poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
-        .map_err(|e| TexasAirError::SerializationError(format!(
-            "TexasPokerTable canonical Borsh decode failed: {e}"
-        )))
+    poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload).map_err(
+        |e| {
+            TexasAirError::SerializationError(format!(
+                "TexasPokerTable canonical Borsh decode failed: {e}"
+            ))
+        },
+    )
 }
 
 /// 计算 `TexasPokerTable` 的 state_root = Poseidon252(preimage)。

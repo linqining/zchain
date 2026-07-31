@@ -54,7 +54,9 @@ pub const DEFAULT_DESIGNATED_OPERATOR_CHECK_EXEMPTION_LIMIT: u32 = 2;
 // ===== ForfeitReason / ForfeitDecision =====
 
 /// forfeit 边界判定原因（H4 修复）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum ForfeitReason {
     /// 恶意扣留：`last_checkpoint_age <= boundary`（H4：操作方有能力提交但拒绝）。
     MaliciousWithholding,
@@ -63,7 +65,9 @@ pub enum ForfeitReason {
 }
 
 /// forfeit 边界判定结果（H4 修复 + NEW-M4）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct ForfeitDecision {
     /// 是否应触发 forfeit。
     pub should_forfeit: bool,
@@ -139,7 +143,9 @@ impl ForfeitDecision {
 ///   recovery_window_blocks` 内，request_da + 参与者重折叠 force_checkin，无 forfeit
 /// - [`RecoveryStage::Stage3`]：阶段 2 窗口过期 + 无 force_checkin + 操作方未恢复 →
 ///   forfeit 保证金 + force_revert
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum RecoveryStage {
     /// 阶段 1：操作方可恢复（`elapsed <= turn_timeout_blocks`）。
     Stage1 {
@@ -309,7 +315,9 @@ pub const fn is_designated_operator_exemption_exhausted(
 ///
 /// 两种场景下其他参与者均可基于已广播 checkpoint state 自行计算 (π', Δ')。
 /// 纯扣留（无 checkpoint 广播）走 `request_revert`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum ForceCheckinScenario {
     /// 场景 1：操作方已广播 checkpoint state 但拒绝 checkin（恶意扣留）。
     /// `last_checkpoint_state_hash` 存在 + forfeit 边界判定为 MaliciousWithholding。
@@ -422,7 +430,9 @@ impl ForceCheckinInput {
 /// force_checkin 应用结果（SubTask 28.3）。
 ///
 /// 调用方据 `should_forfeit` 决定是否触发 forfeit 保证金扣除流程。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct ForceCheckinOutcome {
     /// 判定的场景（MaliciousWithholding / MachineFailure）。
     pub scenario: ForceCheckinScenario,

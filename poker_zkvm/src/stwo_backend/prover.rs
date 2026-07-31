@@ -35,38 +35,38 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
-use stwo::core::verifier::{verify, VerificationError};
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
-use stwo::core::vcs_lifted::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
-use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::{PackedBaseField, LOG_N_LANES};
-use stwo::prover::backend::simd::qm31::PackedSecureField;
+use stwo::core::vcs_lifted::poseidon252_merkle::{
+    Poseidon252MerkleChannel, Poseidon252MerkleHasher,
+};
+use stwo::core::verifier::{VerificationError, verify};
 use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::simd::m31::{LOG_N_LANES, PackedBaseField};
+use stwo::prover::backend::simd::qm31::PackedSecureField;
 use stwo::prover::pcs::CommitmentSchemeProver;
-use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::poly::BitReversedOrder;
-use stwo::prover::{prove, ProvingError};
+use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
+use stwo::prover::{ProvingError, prove};
 use stwo_constraint_framework::{
     FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, TraceLocationAllocator,
 };
 
-use super::cpu_air::CpuAir;
 use super::column_layout_v2::{
     COL_MEM_ADDR_BASE, COL_PC_BASE, COL_PC_NEXT_BASE, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
     COL_VALUE_C_BASE, IS_LOAD, IS_PADDING, IS_STORE, NUM_COLUMNS, RANGE_CHECK_COL_INDICES,
     WORD_LIMB_COUNT,
 };
+use super::cpu_air::CpuAir;
 use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
 use super::memory_air::{
     MEM_COL_ADDR_BASE, MEM_COL_IS_PADDING, MEM_COL_IS_STORE, MEM_COL_VAL_CUR_BASE, MEM_NUM_COLUMNS,
     MemoryAir,
 };
-use super::range_check_air::{
-    RangeCheckAir, RC_COL_MULTIPLICITY, RC_COL_VALUE, RC_NUM_COLUMNS,
-};
+use super::range_check_air::{RC_COL_MULTIPLICITY, RC_COL_VALUE, RC_NUM_COLUMNS, RangeCheckAir};
 use super::trace_native::{
-    gen_range_check_air_trace, memory_trace_to_evaluations, range_check_trace_to_evaluations,
-    MemoryTrace, NativeTrace,
+    MemoryTrace, NativeTrace, gen_range_check_air_trace, memory_trace_to_evaluations,
+    range_check_trace_to_evaluations,
 };
 
 /// Poseidon252 Merkle Hasher 类型别名（递归路径）。
@@ -226,12 +226,7 @@ pub fn verify_cpu_proof(proof: CpuProof, log_size: u32) -> Result<(), Verificati
     let component = FrameworkComponent::new(&mut allocator, air, SecureField::from(0u32));
 
     // 5. 验证（verify 内部处理 composition poly commitment = proof.commitments.last()）
-    verify(
-        &[&component],
-        &mut channel,
-        &mut commitment_scheme,
-        proof,
-    )
+    verify(&[&component], &mut channel, &mut commitment_scheme, proof)
 }
 
 // ===========================================================================
@@ -325,7 +320,10 @@ fn gen_cpu_interaction_trace(
     cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
     lookup: &MemoryLookup,
-) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let mut col_gen = log_gen.new_col();
@@ -383,7 +381,10 @@ fn gen_mem_interaction_trace(
     mem_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
     lookup: &MemoryLookup,
-) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let mut col_gen = log_gen.new_col();
@@ -450,7 +451,10 @@ fn gen_cpu_full_interaction_trace(
     log_size: u32,
     memory_lookup: &MemoryLookup,
     range_lookup: &RangeCheckLookup,
-) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let one_packed = PackedBaseField::broadcast(BaseField::from(1u32));
@@ -519,7 +523,10 @@ fn gen_range_check_air_interaction_trace(
     rc_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
     range_lookup: &RangeCheckLookup,
-) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let mut col_gen = log_gen.new_col();
@@ -544,7 +551,10 @@ fn gen_cpu_range_only_interaction_trace(
     cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
     range_lookup: &RangeCheckLookup,
-) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let one_packed = PackedBaseField::broadcast(BaseField::from(1u32));
@@ -671,7 +681,11 @@ pub fn prove_cpu_memory_trace(
     let mem_component = FrameworkComponent::new(&mut allocator, mem_air, claimed_sum_mem);
 
     // 11. 生成证明
-    let stark_proof = prove(&[&cpu_component, &mem_component], &mut channel, commitment_scheme)?;
+    let stark_proof = prove(
+        &[&cpu_component, &mem_component],
+        &mut channel,
+        commitment_scheme,
+    )?;
 
     Ok(CpuMemoryProof {
         stark_proof,
@@ -915,7 +929,8 @@ pub fn prove_cpu_mem_range_trace(
     }
 
     // 11. 构建 components（顺序与 Tree 1/2 列分配一致：CPU → Memory → RangeCheck）
-    let cpu_air = CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
+    let cpu_air =
+        CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
     let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
     let rc_air = RangeCheckAir::new(log_size, range_lookup.clone());
     let mut allocator = TraceLocationAllocator::default();
@@ -1017,7 +1032,8 @@ pub fn verify_cpu_mem_range_proof(
     commitment_scheme.commit(interaction_commitment, &interaction_log_sizes, &mut channel);
 
     // 8. 构建 components（与 prover 一致）
-    let cpu_air = CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
+    let cpu_air =
+        CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
     let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
     let rc_air = RangeCheckAir::new(log_size, range_lookup.clone());
     let mut allocator = TraceLocationAllocator::default();
@@ -1040,11 +1056,10 @@ pub fn verify_cpu_mem_range_proof(
 
 use super::lookups::PoseidonLookup;
 use super::poseidon_air::{
-    PoseidonAir, POSEIDON_AIR_COL_INPUT_BASE, POSEIDON_AIR_COL_IS_LAST_ROUND,
-    POSEIDON_AIR_COL_IS_PADDING, POSEIDON_AIR_COL_OUTPUT_BASE, POSEIDON_AIR_NUM_COLUMNS,
-    POSEIDON_SYSCALL_ID,
+    POSEIDON_AIR_COL_INPUT_BASE, POSEIDON_AIR_COL_IS_LAST_ROUND, POSEIDON_AIR_COL_IS_PADDING,
+    POSEIDON_AIR_COL_OUTPUT_BASE, POSEIDON_AIR_NUM_COLUMNS, POSEIDON_SYSCALL_ID, PoseidonAir,
 };
-use super::trace_native::{gen_poseidon_trace, poseidon_trace_to_evaluations, PoseidonHashCall};
+use super::trace_native::{PoseidonHashCall, gen_poseidon_trace, poseidon_trace_to_evaluations};
 
 /// Poseidon 单组件 STARK proof 结构。
 ///
@@ -1092,7 +1107,10 @@ fn gen_poseidon_interaction_trace(
     poseidon_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
     lookup: &PoseidonLookup,
-) -> (Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut log_gen = LogupTraceGenerator::new(log_size);
     let mut col_gen = log_gen.new_col();
@@ -1259,10 +1277,7 @@ pub fn prove_poseidon_trace(
 /// let proof = prove_poseidon_trace(&[call])?;
 /// verify_poseidon_proof(proof, 5)?; // log_size = 5（32 行）
 /// ```
-pub fn verify_poseidon_proof(
-    proof: PoseidonProof,
-    log_size: u32,
-) -> Result<(), VerificationError> {
+pub fn verify_poseidon_proof(proof: PoseidonProof, log_size: u32) -> Result<(), VerificationError> {
     let PoseidonProof {
         stark_proof,
         claimed_sum,
@@ -1350,7 +1365,7 @@ mod tests {
         NUM_COLUMNS,
     };
     use crate::stwo_backend::trace_native::{
-        step_to_m31_row, trace_to_memory_trace, trace_to_native, NativeTrace, TraceBuilder,
+        NativeTrace, TraceBuilder, step_to_m31_row, trace_to_memory_trace, trace_to_native,
     };
     use crate::trace::Step;
     use stwo::core::fields::m31::M31;
@@ -1452,7 +1467,10 @@ mod tests {
         // 因此应 prove 成功
         let trace = make_padding_only_trace();
         let proof = prove_cpu_trace(&trace).expect("prove 应成功（全 padding trace 满足所有约束）");
-        assert!(proof.commitments.len() >= 3, "proof 应包含 ≥3 个 commitments");
+        assert!(
+            proof.commitments.len() >= 3,
+            "proof 应包含 ≥3 个 commitments"
+        );
     }
 
     #[test]
@@ -1528,7 +1546,14 @@ mod tests {
         // ADD x1, x2, x3 → encode_r(0x33, 0, 0x00, 1, 2, 3) = 0x003100B3
         use crate::isa::Instruction;
         use crate::stwo_backend::trace_native::fill_a6_instr_columns;
-        fill_a6_instr_columns(&mut row, &Instruction::Add { rd: 1, rs1: 2, rs2: 3 });
+        fill_a6_instr_columns(
+            &mut row,
+            &Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+        );
 
         builder.fill_row(&row);
         builder.fill_padding_to_full();
@@ -1560,7 +1585,15 @@ mod tests {
         // rd_eff = imm = 0x00100000
         let mut post = zero_registers();
         post[1] = 0x0010_0000;
-        prove_verify_single_step(0, Instruction::Lui { rd: 1, imm: 0x0010_0000 }, &zero_registers(), post);
+        prove_verify_single_step(
+            0,
+            Instruction::Lui {
+                rd: 1,
+                imm: 0x0010_0000,
+            },
+            &zero_registers(),
+            post,
+        );
     }
 
     #[test]
@@ -1569,7 +1602,15 @@ mod tests {
         // rd_eff = pc + imm = 0 + 0x0010_0000 = 0x0010_0000
         let mut post = zero_registers();
         post[1] = 0x0010_0000;
-        prove_verify_single_step(0, Instruction::Auipc { rd: 1, imm: 0x0010_0000 }, &zero_registers(), post);
+        prove_verify_single_step(
+            0,
+            Instruction::Auipc {
+                rd: 1,
+                imm: 0x0010_0000,
+            },
+            &zero_registers(),
+            post,
+        );
     }
 
     #[test]
@@ -1577,7 +1618,12 @@ mod tests {
         // JAL x1, 8（跳转到 pc+8=8，rd=x1 存返回地址 pc+4=4）
         let mut post = zero_registers();
         post[1] = 4; // rd = pc + 4
-        prove_verify_single_step(0, Instruction::Jal { rd: 1, imm: 8 }, &zero_registers(), post);
+        prove_verify_single_step(
+            0,
+            Instruction::Jal { rd: 1, imm: 8 },
+            &zero_registers(),
+            post,
+        );
     }
 
     #[test]
@@ -1587,7 +1633,16 @@ mod tests {
         prev[2] = 0; // x2 = 0
         let mut post = prev;
         post[1] = 4; // rd = pc + 4 = 4
-        prove_verify_single_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 4,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1597,7 +1652,16 @@ mod tests {
         prev[2] = 42; // x2 = 42
         prev[3] = 42; // x3 = 42
         let post = prev; // BEQ 不写寄存器
-        prove_verify_single_step(0, Instruction::Beq { rs1: 2, rs2: 3, imm: 16 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Beq {
+                rs1: 2,
+                rs2: 3,
+                imm: 16,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1605,9 +1669,18 @@ mod tests {
         // BEQ x2, x3, 16（x2 != x3，taken=0，next_pc = pc + 4 = 4）
         let mut prev = zero_registers();
         prev[2] = 42; // x2 = 42
-        prev[3] = 7;  // x3 = 7
+        prev[3] = 7; // x3 = 7
         let post = prev;
-        prove_verify_single_step(0, Instruction::Beq { rs1: 2, rs2: 3, imm: 16 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Beq {
+                rs1: 2,
+                rs2: 3,
+                imm: 16,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1617,7 +1690,16 @@ mod tests {
         prev[2] = 42;
         prev[3] = 7;
         let post = prev;
-        prove_verify_single_step(0, Instruction::Bne { rs1: 2, rs2: 3, imm: 8 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Bne {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1627,7 +1709,16 @@ mod tests {
         prev[2] = 5;
         prev[3] = 10;
         let post = prev;
-        prove_verify_single_step(0, Instruction::Blt { rs1: 2, rs2: 3, imm: 8 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Blt {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1637,7 +1728,16 @@ mod tests {
         prev[2] = 5;
         prev[3] = 10;
         let post = prev;
-        prove_verify_single_step(0, Instruction::Bltu { rs1: 2, rs2: 3, imm: 8 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Bltu {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1648,7 +1748,16 @@ mod tests {
         prev[3] = 30;
         let mut post = prev;
         post[1] = 70;
-        prove_verify_single_step(0, Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Sub {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1660,7 +1769,16 @@ mod tests {
         prev[3] = 100;
         let mut post = prev;
         post[1] = 30u32.wrapping_sub(100);
-        prove_verify_single_step(0, Instruction::Sub { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Sub {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1670,7 +1788,16 @@ mod tests {
         prev[2] = 100;
         let mut post = prev;
         post[1] = 150;
-        prove_verify_single_step(0, Instruction::Addi { rd: 1, rs1: 2, imm: 50 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Addi {
+                rd: 1,
+                rs1: 2,
+                imm: 50,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1681,7 +1808,16 @@ mod tests {
         prev[3] = 0x0000_0002;
         let mut post = prev;
         post[1] = 0x0001_0000;
-        prove_verify_single_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1698,26 +1834,58 @@ mod tests {
         // Step 0: ADD x1, x2, x3 → x1 = 300
         let mut post0 = prev;
         post0[1] = 300;
-        let step0 = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post0);
+        let step0 = make_step(
+            0,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post0,
+        );
         let row0 = step_to_m31_row(&step0, &prev);
         prev = post0;
 
         // Step 1: ADDI x4, x1, 50 → x4 = 350
         let mut post1 = prev;
         post1[4] = 350;
-        let step1 = make_step(4, Instruction::Addi { rd: 4, rs1: 1, imm: 50 }, post1);
+        let step1 = make_step(
+            4,
+            Instruction::Addi {
+                rd: 4,
+                rs1: 1,
+                imm: 50,
+            },
+            post1,
+        );
         let row1 = step_to_m31_row(&step1, &prev);
         prev = post1;
 
         // Step 2: SUB x5, x4, x1 → x5 = 50
         let mut post2 = prev;
         post2[5] = 50;
-        let step2 = make_step(8, Instruction::Sub { rd: 5, rs1: 4, rs2: 1 }, post2);
+        let step2 = make_step(
+            8,
+            Instruction::Sub {
+                rd: 5,
+                rs1: 4,
+                rs2: 1,
+            },
+            post2,
+        );
         let row2 = step_to_m31_row(&step2, &prev);
         prev = post2;
 
         // Step 3: BEQ x5, x5, 8（taken，跳到 pc + 8 = 20）
-        let step3 = make_step(12, Instruction::Beq { rs1: 5, rs2: 5, imm: 8 }, prev);
+        let step3 = make_step(
+            12,
+            Instruction::Beq {
+                rs1: 5,
+                rs2: 5,
+                imm: 8,
+            },
+            prev,
+        );
         let row3 = step_to_m31_row(&step3, &prev);
 
         // 构建 trace
@@ -1748,7 +1916,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 42;
-        prove_verify_single_step(0, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1759,7 +1936,16 @@ mod tests {
         prev[3] = 0x0001_0000;
         let mut post = prev;
         post[1] = 0; // 低 32 位 = 0
-        prove_verify_single_step(0, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1770,7 +1956,16 @@ mod tests {
         prev[3] = 0xFFFF_FFFF;
         let mut post = prev;
         post[1] = 0xFFFF_FFFE;
-        prove_verify_single_step(0, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mulhu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1781,7 +1976,16 @@ mod tests {
         prev[3] = 2;
         let mut post = prev;
         post[1] = 0xFFFF_FFFF; // 高 32 位 of -2
-        prove_verify_single_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1792,7 +1996,16 @@ mod tests {
         prev[3] = 0xFFFF_FFFF; // -1
         let mut post = prev;
         post[1] = 0; // 高 32 位 of 1
-        prove_verify_single_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1803,7 +2016,16 @@ mod tests {
         prev[3] = 3;
         let mut post = prev;
         post[1] = 0xFFFF_FFFF; // 高 32 位 of -6
-        prove_verify_single_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1815,7 +2037,16 @@ mod tests {
         prev[3] = 0xFFFF_FFFF; // 4294967295 (unsigned)
         let mut post = prev;
         post[1] = 0xFFFF_FFFF;
-        prove_verify_single_step(0, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mulhsu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1826,7 +2057,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 0;
-        prove_verify_single_step(0, Instruction::Mulhsu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Mulhsu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1838,7 +2078,15 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 42;
-        let step = make_step(0, Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -1865,7 +2113,15 @@ mod tests {
         prev[3] = 0xFFFF_FFFF;
         let mut post = prev;
         post[1] = 0xFFFF_FFFE;
-        let step = make_step(0, Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Mulhu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -1923,7 +2179,16 @@ mod tests {
         prev[3] = 10;
         let mut post = prev;
         post[1] = 1;
-        prove_verify_single_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1934,7 +2199,16 @@ mod tests {
         prev[3] = 5;
         let mut post = prev;
         post[1] = 0;
-        prove_verify_single_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1945,7 +2219,16 @@ mod tests {
         prev[3] = 10;
         let mut post = prev;
         post[1] = 1;
-        prove_verify_single_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1956,7 +2239,16 @@ mod tests {
         prev[3] = 10;
         let mut post = prev;
         post[1] = 1;
-        prove_verify_single_step(0, Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Sltu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1966,7 +2258,16 @@ mod tests {
         prev[2] = 5;
         let mut post = prev;
         post[1] = 1;
-        prove_verify_single_step(0, Instruction::Slti { rd: 1, rs1: 2, imm: 10 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Slti {
+                rd: 1,
+                rs1: 2,
+                imm: 10,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -1976,7 +2277,16 @@ mod tests {
         prev[2] = 5;
         let mut post = prev;
         post[1] = 1;
-        prove_verify_single_step(0, Instruction::Sltiu { rd: 1, rs1: 2, imm: 10 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Sltiu {
+                rd: 1,
+                rs1: 2,
+                imm: 10,
+            },
+            &prev,
+            post,
+        );
     }
 
     // ----- 比较指令 soundness 测试（Step 2，篡改 rd_eff → prove 失败）-----
@@ -1989,7 +2299,15 @@ mod tests {
         prev[3] = 10;
         let mut post = prev;
         post[1] = 1; // 正确值
-        let step = make_step(0, Instruction::Sltu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Sltu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2015,7 +2333,15 @@ mod tests {
         prev[3] = 10;
         let mut post = prev;
         post[1] = 1; // 正确值（负数 < 正数）
-        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2041,7 +2367,15 @@ mod tests {
         prev[3] = 5;
         let mut post = prev;
         post[1] = 0; // 正确值（10 < 5 为 false）
-        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2089,7 +2423,15 @@ mod tests {
         prev[3] = 10;
         let mut post = prev;
         post[1] = 1; // -5 < 10 → rd_eff = 1
-        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2120,7 +2462,15 @@ mod tests {
         prev[3] = 10;
         let mut post = prev;
         post[1] = 1; // -5 < 10 → rd_eff = 1
-        let step = make_step(0, Instruction::Slt { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Slt {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2152,7 +2502,15 @@ mod tests {
         prev[3] = 0xFFFF_FFF6; // -10 as i32, 高字节 0xFF
         let mut post = prev;
         post[1] = 0; // MULH(-5, -10) 高 32 位 = 0（乘积 50 < 2^32）
-        let step = make_step(0, Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2181,7 +2539,15 @@ mod tests {
         prev[2] = 42;
         prev[3] = 42;
         let post = prev; // BEQ 不写寄存器
-        let step = make_step(0, Instruction::Beq { rs1: 2, rs2: 3, imm: 16 }, post);
+        let step = make_step(
+            0,
+            Instruction::Beq {
+                rs1: 2,
+                rs2: 3,
+                imm: 16,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2207,7 +2573,15 @@ mod tests {
         prev[2] = 42;
         prev[3] = 42;
         let post = prev;
-        let step = make_step(0, Instruction::Bne { rs1: 2, rs2: 3, imm: 8 }, post);
+        let step = make_step(
+            0,
+            Instruction::Bne {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2233,7 +2607,15 @@ mod tests {
         prev[2] = 42;
         prev[3] = 7;
         let post = prev;
-        let step = make_step(0, Instruction::Bltu { rs1: 2, rs2: 3, imm: 8 }, post);
+        let step = make_step(
+            0,
+            Instruction::Bltu {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2259,7 +2641,15 @@ mod tests {
         prev[2] = 5;
         prev[3] = 10;
         let post = prev;
-        let step = make_step(0, Instruction::Bgeu { rs1: 2, rs2: 3, imm: 8 }, post);
+        let step = make_step(
+            0,
+            Instruction::Bgeu {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2285,7 +2675,15 @@ mod tests {
         prev[2] = 42;
         prev[3] = 7;
         let post = prev;
-        let step = make_step(0, Instruction::Blt { rs1: 2, rs2: 3, imm: 8 }, post);
+        let step = make_step(
+            0,
+            Instruction::Blt {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2311,7 +2709,15 @@ mod tests {
         prev[2] = 5;
         prev[3] = 10;
         let post = prev;
-        let step = make_step(0, Instruction::Bge { rs1: 2, rs2: 3, imm: 8 }, post);
+        let step = make_step(
+            0,
+            Instruction::Bge {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2339,7 +2745,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 14;
-        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2350,7 +2765,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 14;
-        prove_verify_single_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Divu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2361,7 +2785,16 @@ mod tests {
         prev[3] = 0;
         let mut post = prev;
         post[1] = 0xFFFF_FFFF; // q = -1
-        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2372,7 +2805,16 @@ mod tests {
         prev[3] = 0;
         let mut post = prev;
         post[1] = 0xFFFF_FFFF;
-        prove_verify_single_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Divu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2383,7 +2825,16 @@ mod tests {
         prev[3] = 0xFFFF_FFFF; // -1
         let mut post = prev;
         post[1] = 0x8000_0000; // q = INT_MIN
-        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     // ----- DIV 特殊情况 soundness 测试（V6 修复：d=0 时 q_abs 约束）-----
@@ -2397,7 +2848,15 @@ mod tests {
         prev[3] = 0;
         let mut post = prev;
         post[1] = 0xFFFF_FFFF; // q = -1（正确）
-        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2424,7 +2883,15 @@ mod tests {
         prev[3] = 0;
         let mut post = prev;
         post[1] = 0xFFFF_FFFF; // q = all-ones（正确）
-        let step = make_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Divu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2450,7 +2917,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 2;
-        prove_verify_single_step(0, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Rem {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2461,7 +2937,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 2;
-        prove_verify_single_step(0, Instruction::Remu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Remu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2472,7 +2957,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = (-14i32) as u32; // 0xFFFFFFF2
-        prove_verify_single_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2483,7 +2977,16 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = (-2i32) as u32; // 0xFFFFFFFE
-        prove_verify_single_step(0, Instruction::Rem { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Rem {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     #[test]
@@ -2494,7 +2997,16 @@ mod tests {
         prev[3] = 2;
         let mut post = prev;
         post[1] = 0x7FFF_FFFF;
-        prove_verify_single_step(0, Instruction::Divu { rd: 1, rs1: 2, rs2: 3 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Divu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            &prev,
+            post,
+        );
     }
 
     // ----- M 扩展 DIV soundness 测试（Step 6）-----
@@ -2508,7 +3020,15 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 14;
-        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2535,7 +3055,15 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 14;
-        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2563,7 +3091,15 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 14;
-        let step = make_step(0, Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2601,7 +3137,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
             &prev,
             post,
             mem_access,
@@ -2626,7 +3166,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Lb { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
             &prev,
             post,
             mem_access,
@@ -2648,7 +3192,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Lb { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
             &prev,
             post,
             mem_access,
@@ -2672,7 +3220,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Lbu { rd: 1, rs1: 2, imm: 4 },
+            Instruction::Lbu {
+                rd: 1,
+                rs1: 2,
+                imm: 4,
+            },
             &prev,
             post,
             mem_access,
@@ -2696,7 +3248,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Lh { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lh {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
             &prev,
             post,
             mem_access,
@@ -2719,7 +3275,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Lhu { rd: 1, rs1: 2, imm: 0 },
+            Instruction::Lhu {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
             &prev,
             post,
             mem_access,
@@ -2747,8 +3307,16 @@ mod tests {
             value: 0x00000080, // raw byte
             size: 1,
         }];
-        let step =
-            make_step_with_mem(0, Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let step = make_step_with_mem(
+            0,
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            post,
+            mem_access,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2767,10 +3335,26 @@ mod tests {
             "篡改 LB 扩展（零扩展代替符号扩展）应导致 prove 失败（V7 扩展约束 soundness）"
         );
         // 验证 witness 列已正确填充（sanity check）
-        assert_eq!(trace.cols[COL_IS_LOAD_BYTE][0], M31::from(1u32), "IS_LOAD_BYTE=1");
-        assert_eq!(trace.cols[COL_IS_LOAD_SIGN][0], M31::from(1u32), "IS_LOAD_SIGN=1");
-        assert_eq!(trace.cols[COL_SIGN_BIT][0], M31::from(1u32), "SIGN_BIT=1 (0x80 bit7=1)");
-        assert_eq!(trace.cols[COL_HELPER_B_BASE][0], M31::from(0x80u32), "HelperB[0]=raw byte");
+        assert_eq!(
+            trace.cols[COL_IS_LOAD_BYTE][0],
+            M31::from(1u32),
+            "IS_LOAD_BYTE=1"
+        );
+        assert_eq!(
+            trace.cols[COL_IS_LOAD_SIGN][0],
+            M31::from(1u32),
+            "IS_LOAD_SIGN=1"
+        );
+        assert_eq!(
+            trace.cols[COL_SIGN_BIT][0],
+            M31::from(1u32),
+            "SIGN_BIT=1 (0x80 bit7=1)"
+        );
+        assert_eq!(
+            trace.cols[COL_HELPER_B_BASE][0],
+            M31::from(0x80u32),
+            "HelperB[0]=raw byte"
+        );
     }
 
     /// Soundness：LB 0x80，但篡改 HelperB[0]（原始值）为 0x7F，预期 prove 失败
@@ -2788,8 +3372,16 @@ mod tests {
             value: 0x00000080, // raw byte = 0x80
             size: 1,
         }];
-        let step =
-            make_step_with_mem(0, Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let step = make_step_with_mem(
+            0,
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            post,
+            mem_access,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2823,8 +3415,16 @@ mod tests {
             value: 0x00000080, // raw byte = 0x80
             size: 1,
         }];
-        let step =
-            make_step_with_mem(0, Instruction::Lb { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let step = make_step_with_mem(
+            0,
+            Instruction::Lb {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            post,
+            mem_access,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2856,8 +3456,16 @@ mod tests {
             value: 0x0000FF80, // raw halfword
             size: 2,
         }];
-        let step =
-            make_step_with_mem(0, Instruction::Lh { rd: 1, rs1: 2, imm: 0 }, post, mem_access);
+        let step = make_step_with_mem(
+            0,
+            Instruction::Lh {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            post,
+            mem_access,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -2892,7 +3500,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 16 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 16,
+            },
             &prev,
             post,
             mem_access,
@@ -2916,7 +3528,11 @@ mod tests {
         }];
         prove_verify_single_step_with_mem(
             0,
-            Instruction::Sb { rs1: 2, rs2: 3, imm: 0 },
+            Instruction::Sb {
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            },
             &prev,
             post,
             mem_access,
@@ -2936,7 +3552,11 @@ mod tests {
         let post0 = prev;
         let step0 = make_step_with_mem(
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 0 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            },
             post0,
             vec![crate::trace::MemAccess {
                 addr: 0x6000,
@@ -2953,7 +3573,11 @@ mod tests {
         post1[4] = 0x12345678;
         let step1 = make_step_with_mem(
             4,
-            Instruction::Lw { rd: 4, rs1: 2, imm: 0 },
+            Instruction::Lw {
+                rd: 4,
+                rs1: 2,
+                imm: 0,
+            },
             post1,
             vec![crate::trace::MemAccess {
                 addr: 0x6000,
@@ -3051,7 +3675,11 @@ mod tests {
         let step0 = make_step_indexed(
             0,
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 8 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
             post0,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
@@ -3068,7 +3696,11 @@ mod tests {
         let step1 = make_step_indexed(
             1,
             4,
-            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
             post1,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
@@ -3101,7 +3733,11 @@ mod tests {
         let step = make_step_indexed(
             0,
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 16 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 16,
+            },
             post,
             vec![crate::trace::MemAccess {
                 addr: 0x4010,
@@ -3144,7 +3780,11 @@ mod tests {
         let step0 = make_step_indexed(
             0,
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 0 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            },
             post0,
             vec![crate::trace::MemAccess {
                 addr: 0x6000,
@@ -3161,7 +3801,11 @@ mod tests {
         let step1 = make_step_indexed(
             1,
             4,
-            Instruction::Lw { rd: 4, rs1: 2, imm: 0 },
+            Instruction::Lw {
+                rd: 4,
+                rs1: 2,
+                imm: 0,
+            },
             post1,
             vec![crate::trace::MemAccess {
                 addr: 0x6000,
@@ -3215,7 +3859,11 @@ mod tests {
         let step0 = make_step_indexed(
             0,
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 0 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            },
             post0,
             vec![crate::trace::MemAccess {
                 addr: 0x7000,
@@ -3231,7 +3879,11 @@ mod tests {
         let step1 = make_step_indexed(
             1,
             4,
-            Instruction::Sw { rs1: 5, rs2: 6, imm: 0 },
+            Instruction::Sw {
+                rs1: 5,
+                rs2: 6,
+                imm: 0,
+            },
             post1,
             vec![crate::trace::MemAccess {
                 addr: 0x8000,
@@ -3248,7 +3900,11 @@ mod tests {
         let step2 = make_step_indexed(
             2,
             8,
-            Instruction::Lw { rd: 4, rs1: 5, imm: 0 },
+            Instruction::Lw {
+                rd: 4,
+                rs1: 5,
+                imm: 0,
+            },
             post2,
             vec![crate::trace::MemAccess {
                 addr: 0x8000,
@@ -3300,7 +3956,11 @@ mod tests {
         let step0 = make_step_indexed(
             0,
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 8 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 8,
+            },
             post0,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
@@ -3316,7 +3976,11 @@ mod tests {
         let step1 = make_step_indexed(
             1,
             4,
-            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
             post1,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
@@ -3385,7 +4049,7 @@ mod tests {
             MEM_COL_ADDR_BASE, MEM_COL_IS_FIRST_ACCESS, MEM_COL_IS_PADDING, MEM_COL_IS_STORE,
             MEM_COL_TS_CUR, MEM_COL_TS_PREV, MEM_COL_VAL_CUR_BASE, MEM_COL_VAL_PREV_BASE,
         };
-        use crate::stwo_backend::trace_native::{trace_to_memory_trace, MemoryTrace};
+        use crate::stwo_backend::trace_native::{MemoryTrace, trace_to_memory_trace};
 
         fn read_word(trace: &MemoryTrace, row: usize, base: usize) -> u32 {
             let mut val = 0u32;
@@ -3406,7 +4070,11 @@ mod tests {
         let step0 = make_step_indexed(
             0,
             0,
-            Instruction::Sw { rs1: 2, rs2: 3, imm: 0 },
+            Instruction::Sw {
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            },
             post0,
             vec![crate::trace::MemAccess {
                 addr: 0x6000,
@@ -3422,7 +4090,11 @@ mod tests {
         let step1 = make_step_indexed(
             1,
             4,
-            Instruction::Lw { rd: 4, rs1: 2, imm: 0 },
+            Instruction::Lw {
+                rd: 4,
+                rs1: 2,
+                imm: 0,
+            },
             post1,
             vec![crate::trace::MemAccess {
                 addr: 0x6000,
@@ -3475,13 +4147,21 @@ mod tests {
                 "Continuity check: row1.ValPrev=0x{:08X} vs row0.ValCur=0x{:08X} → {}",
                 row1_val_prev,
                 row0_val_cur,
-                if row1_val_prev == row0_val_cur { "OK" } else { "MISMATCH" }
+                if row1_val_prev == row0_val_cur {
+                    "OK"
+                } else {
+                    "MISMATCH"
+                }
             );
             println!(
                 "Continuity check: row1.TsPrev={} vs row0.TsCur={} → {}",
                 row1_ts_prev,
                 row0_ts_cur,
-                if row1_ts_prev == row0_ts_cur { "OK" } else { "MISMATCH" }
+                if row1_ts_prev == row0_ts_cur {
+                    "OK"
+                } else {
+                    "MISMATCH"
+                }
             );
         }
     }
@@ -3567,14 +4247,12 @@ mod tests {
         // 找到第一个 padding 行（row 1，因为 row 0 是 ECALL 行）
         let padding_row = 1;
         assert_eq!(
-            trace.cols[IS_PADDING][padding_row].0,
-            1,
+            trace.cols[IS_PADDING][padding_row].0, 1,
             "row {} 应为 padding 行",
             padding_row
         );
         assert_eq!(
-            trace.cols[IS_ECALL][padding_row].0,
-            0,
+            trace.cols[IS_ECALL][padding_row].0, 0,
             "padding 行 IS_ECALL 应为 0"
         );
 
@@ -3589,8 +4267,7 @@ mod tests {
         );
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(
-            err_msg.contains("ConstraintsNotSatisfied")
-                || err_msg.contains("Constraint"),
+            err_msg.contains("ConstraintsNotSatisfied") || err_msg.contains("Constraint"),
             "错误应为 ConstraintsNotSatisfied，实际：{}",
             err_msg
         );
@@ -3628,11 +4305,9 @@ mod tests {
         // 检查所有 padding 行（row 1 到 1023）的 SyscallId 列为 0
         for row in 1..1024 {
             assert_eq!(
-                trace.cols[COL_SYSCALL_ID][row].0,
-                0,
+                trace.cols[COL_SYSCALL_ID][row].0, 0,
                 "padding row {} col {} 应为 0",
-                row,
-                COL_SYSCALL_ID
+                row, COL_SYSCALL_ID
             );
         }
     }
@@ -3941,7 +4616,11 @@ mod tests {
         let step = make_step_indexed(
             0,
             0,
-            Instruction::Mul { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
             post,
             Vec::new(),
         );
@@ -3974,7 +4653,11 @@ mod tests {
         let step = make_step_indexed(
             0,
             0,
-            Instruction::Mul { rd: 1, rs1: 2, rs2: 3 },
+            Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
             post,
             Vec::new(),
         );
@@ -4012,8 +4695,13 @@ mod tests {
         let mut post = prev;
         post[1] = 0xDEAD_BEEF;
         let step = make_step_indexed(
-            0, 0,
-            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            0,
+            0,
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
             post,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
@@ -4070,8 +4758,13 @@ mod tests {
 
         // Soundness check
         let total = claimed_sum_cpu + claimed_sum_rc;
-        assert_eq!(total, SecureField::zero(), "soundness: cpu({:?}) + rc({:?}) != 0",
-            claimed_sum_cpu, claimed_sum_rc);
+        assert_eq!(
+            total,
+            SecureField::zero(),
+            "soundness: cpu({:?}) + rc({:?}) != 0",
+            claimed_sum_cpu,
+            claimed_sum_rc
+        );
 
         channel.mix_felts(&[claimed_sum_cpu, claimed_sum_rc]);
 
@@ -4119,8 +4812,13 @@ mod tests {
         let mut post = prev;
         post[1] = 0xDEAD_BEEF;
         let step = make_step_indexed(
-            0, 0,
-            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            0,
+            0,
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
             post,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
@@ -4176,32 +4874,40 @@ mod tests {
 
         // Soundness check
         let total = claimed_sum_cpu + claimed_sum_rc;
-        assert_eq!(total, SecureField::zero(), "soundness: cpu({:?}) + rc({:?}) != 0",
-            claimed_sum_cpu, claimed_sum_rc);
+        assert_eq!(
+            total,
+            SecureField::zero(),
+            "soundness: cpu({:?}) + rc({:?}) != 0",
+            claimed_sum_cpu,
+            claimed_sum_rc
+        );
 
         eprintln!("=== assert_constraints_on_trace: CPU AIR ===");
-        eprintln!("  log_size={}, claimed_sum_cpu={:?}", log_size, claimed_sum_cpu);
-        eprintln!("  cpu_evals: {} cols, cpu_interaction: {} cols",
-            cpu_evals.len(), cpu_interaction.len());
+        eprintln!(
+            "  log_size={}, claimed_sum_cpu={:?}",
+            log_size, claimed_sum_cpu
+        );
+        eprintln!(
+            "  cpu_evals: {} cols, cpu_interaction: {} cols",
+            cpu_evals.len(),
+            cpu_interaction.len()
+        );
 
         // 构建 TreeVec<Vec<&Vec<M31>>> 用于 assert_constraints_on_trace
         // Tree 0: preprocessed (empty)
         // Tree 1: CPU original trace (132 cols)
         // Tree 2: CPU interaction trace (96 cols)
-        let cpu_orig_cols: Vec<Vec<M31>> = cpu_evals.iter()
-            .map(|e| e.values.to_cpu())
-            .collect();
-        let cpu_inter_cols: Vec<Vec<M31>> = cpu_interaction.iter()
-            .map(|e| e.values.to_cpu())
-            .collect();
+        let cpu_orig_cols: Vec<Vec<M31>> = cpu_evals.iter().map(|e| e.values.to_cpu()).collect();
+        let cpu_inter_cols: Vec<Vec<M31>> =
+            cpu_interaction.iter().map(|e| e.values.to_cpu()).collect();
 
         let cpu_orig_refs: Vec<&Vec<M31>> = cpu_orig_cols.iter().collect();
         let cpu_inter_refs: Vec<&Vec<M31>> = cpu_inter_cols.iter().collect();
 
         let tree: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![
-            vec![],           // Tree 0: preprocessed (empty)
-            cpu_orig_refs,    // Tree 1: CPU original trace
-            cpu_inter_refs,   // Tree 2: CPU interaction trace
+            vec![],         // Tree 0: preprocessed (empty)
+            cpu_orig_refs,  // Tree 1: CPU original trace
+            cpu_inter_refs, // Tree 2: CPU interaction trace
         ]);
 
         let cpu_air = CpuAir::new_with_range_only(log_size, range_lookup.clone());
@@ -4210,7 +4916,9 @@ mod tests {
         assert_constraints_on_trace(
             &tree,
             log_size,
-            |eval| { cpu_air.evaluate(eval); },
+            |eval| {
+                cpu_air.evaluate(eval);
+            },
             claimed_sum_cpu,
         );
 
@@ -4218,32 +4926,37 @@ mod tests {
 
         // 同样检查 RangeCheck AIR
         eprintln!("=== assert_constraints_on_trace: RangeCheck AIR ===");
-        eprintln!("  rc_evals: {} cols, rc_interaction: {} cols",
-            rc_evals.len(), rc_interaction.len());
+        eprintln!(
+            "  rc_evals: {} cols, rc_interaction: {} cols",
+            rc_evals.len(),
+            rc_interaction.len()
+        );
         eprintln!("  claimed_sum_rc={:?}", claimed_sum_rc);
 
-        let rc_orig_cols: Vec<Vec<M31>> = rc_evals.iter()
-            .map(|e| e.values.to_cpu())
-            .collect();
-        let rc_inter_cols: Vec<Vec<M31>> = rc_interaction.iter()
-            .map(|e| e.values.to_cpu())
-            .collect();
+        let rc_orig_cols: Vec<Vec<M31>> = rc_evals.iter().map(|e| e.values.to_cpu()).collect();
+        let rc_inter_cols: Vec<Vec<M31>> =
+            rc_interaction.iter().map(|e| e.values.to_cpu()).collect();
 
         let rc_orig_refs: Vec<&Vec<M31>> = rc_orig_cols.iter().collect();
         let rc_inter_refs: Vec<&Vec<M31>> = rc_inter_cols.iter().collect();
 
         let rc_tree: TreeVec<Vec<&Vec<M31>>> = TreeVec::new(vec![
-            vec![],           // Tree 0: preprocessed (empty)
-            rc_orig_refs,     // Tree 1: RangeCheck original trace
-            rc_inter_refs,    // Tree 2: RangeCheck interaction trace
+            vec![],        // Tree 0: preprocessed (empty)
+            rc_orig_refs,  // Tree 1: RangeCheck original trace
+            rc_inter_refs, // Tree 2: RangeCheck interaction trace
         ]);
 
-        let rc_air = crate::stwo_backend::range_check_air::RangeCheckAir::new(log_size, range_lookup.clone());
+        let rc_air = crate::stwo_backend::range_check_air::RangeCheckAir::new(
+            log_size,
+            range_lookup.clone(),
+        );
 
         assert_constraints_on_trace(
             &rc_tree,
             log_size,
-            |eval| { rc_air.evaluate(eval); },
+            |eval| {
+                rc_air.evaluate(eval);
+            },
             claimed_sum_rc,
         );
 
@@ -4267,7 +4980,11 @@ mod tests {
         let step = make_step_indexed(
             0,
             0,
-            Instruction::Lw { rd: 1, rs1: 2, imm: 8 },
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 8,
+            },
             post,
             vec![crate::trace::MemAccess {
                 addr: 0x1008,
@@ -4307,8 +5024,11 @@ mod tests {
         assert_eq!(total, SecureField::zero(), "soundness mismatch in diag");
 
         // --- 创建 components（与 prover 完全一致）---
-        let cpu_air =
-            CpuAir::new_with_memory_and_range(log_size, memory_lookup.clone(), range_lookup.clone());
+        let cpu_air = CpuAir::new_with_memory_and_range(
+            log_size,
+            memory_lookup.clone(),
+            range_lookup.clone(),
+        );
         let mem_air = MemoryAir::new(log_size, memory_lookup.clone());
         let rc_air = RangeCheckAir::new(log_size, range_lookup.clone());
         let mut allocator = TraceLocationAllocator::default();
@@ -4356,29 +5076,51 @@ mod tests {
         let rc_t2 = rc_interaction.len();
         eprintln!();
         eprintln!("=== Prover committed column counts ===");
-        eprintln!("  Tree 1: CPU({}) + Memory({}) + RangeCheck({}) = {}", cpu_t1, mem_t1, rc_t1, cpu_t1 + mem_t1 + rc_t1);
-        eprintln!("  Tree 2: CPU({}) + Memory({}) + RangeCheck({}) = {}", cpu_t2, mem_t2, rc_t2, cpu_t2 + mem_t2 + rc_t2);
+        eprintln!(
+            "  Tree 1: CPU({}) + Memory({}) + RangeCheck({}) = {}",
+            cpu_t1,
+            mem_t1,
+            rc_t1,
+            cpu_t1 + mem_t1 + rc_t1
+        );
+        eprintln!(
+            "  Tree 2: CPU({}) + Memory({}) + RangeCheck({}) = {}",
+            cpu_t2,
+            mem_t2,
+            rc_t2,
+            cpu_t2 + mem_t2 + rc_t2
+        );
 
         // --- 验证 interaction trace 边界条件 ---
         // 对每个组件的最后一列（prefix-summed），最后一行应为 0
-        let check_boundary = |name: &str, inter: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>]| {
-            // 最后一组 4 个 base cols = 最后一个 SecureField column
-            let n_cols = inter.len();
-            if n_cols < 4 {
-                eprintln!("  {} interaction: only {} base cols (< 4), skip boundary check", name, n_cols);
-                return;
-            }
-            let last_4: Vec<Vec<M31>> = inter[n_cols - 4..].iter().map(|e| e.values.to_cpu()).collect();
-            let n_rows = last_4[0].len();
-            // 重建最后一行的 SecureField 值
-            let last_row_ef = SecureField::from_m31_array([
-                last_4[0][n_rows - 1],
-                last_4[1][n_rows - 1],
-                last_4[2][n_rows - 1],
-                last_4[3][n_rows - 1],
-            ]);
-            eprintln!("  {} interaction last_col[last_row] = {:?} (should be 0)", name, last_row_ef);
-        };
+        let check_boundary =
+            |name: &str, inter: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>]| {
+                // 最后一组 4 个 base cols = 最后一个 SecureField column
+                let n_cols = inter.len();
+                if n_cols < 4 {
+                    eprintln!(
+                        "  {} interaction: only {} base cols (< 4), skip boundary check",
+                        name, n_cols
+                    );
+                    return;
+                }
+                let last_4: Vec<Vec<M31>> = inter[n_cols - 4..]
+                    .iter()
+                    .map(|e| e.values.to_cpu())
+                    .collect();
+                let n_rows = last_4[0].len();
+                // 重建最后一行的 SecureField 值
+                let last_row_ef = SecureField::from_m31_array([
+                    last_4[0][n_rows - 1],
+                    last_4[1][n_rows - 1],
+                    last_4[2][n_rows - 1],
+                    last_4[3][n_rows - 1],
+                ]);
+                eprintln!(
+                    "  {} interaction last_col[last_row] = {:?} (should be 0)",
+                    name, last_row_ef
+                );
+            };
         eprintln!();
         eprintln!("=== Interaction trace boundary (last col last row = 0) ===");
         check_boundary("CPU", &cpu_interaction);
@@ -4392,9 +5134,18 @@ mod tests {
         let rc_cumsum_shift = claimed_sum_range / BaseField::from_u32_unchecked(n_rows);
         eprintln!();
         eprintln!("=== cumsum_shift (claimed_sum / n_rows) ===");
-        eprintln!("  CPU: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_cpu, cpu_cumsum_shift);
-        eprintln!("  Memory: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_mem, mem_cumsum_shift);
-        eprintln!("  RangeCheck: claimed_sum={:?}, cumsum_shift={:?}", claimed_sum_range, rc_cumsum_shift);
+        eprintln!(
+            "  CPU: claimed_sum={:?}, cumsum_shift={:?}",
+            claimed_sum_cpu, cpu_cumsum_shift
+        );
+        eprintln!(
+            "  Memory: claimed_sum={:?}, cumsum_shift={:?}",
+            claimed_sum_mem, mem_cumsum_shift
+        );
+        eprintln!(
+            "  RangeCheck: claimed_sum={:?}, cumsum_shift={:?}",
+            claimed_sum_range, rc_cumsum_shift
+        );
     }
 
     // =======================================================================
@@ -4424,7 +5175,15 @@ mod tests {
         prev[3] = 200;
         let mut post = prev;
         post[1] = 300;
-        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4467,7 +5226,15 @@ mod tests {
         prev[3] = 200;
         let mut post = prev;
         post[1] = 300;
-        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4510,7 +5277,15 @@ mod tests {
         prev[3] = 200;
         let mut post = prev;
         post[1] = 300;
-        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4545,7 +5320,15 @@ mod tests {
         prev[3] = 200;
         let mut post = prev;
         post[1] = 300;
-        let step = make_step(0, Instruction::Add { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_step(
+            0,
+            Instruction::Add {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4577,7 +5360,15 @@ mod tests {
         prev[2] = 0;
         let mut post = prev;
         post[1] = 4;
-        let step = make_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, post);
+        let step = make_step(
+            0,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 4,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4614,7 +5405,15 @@ mod tests {
         prev[2] = 0;
         let mut post = prev;
         post[1] = 4;
-        let step = make_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, post);
+        let step = make_step(
+            0,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 4,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4642,16 +5441,22 @@ mod tests {
     /// 验证即使恶意 prover 试图绕过 & !1，A4 约束仍能捕获。
     #[test]
     fn test_a4_jalr_odd_helper_a_soundness() {
-        use crate::stwo_backend::column_layout_v2::{
-            COL_HELPER_A_BASE, COL_PC_NEXT_BASE,
-        };
+        use crate::stwo_backend::column_layout_v2::{COL_HELPER_A_BASE, COL_PC_NEXT_BASE};
 
         // JALR x1, x2, 4（x2=0，target=4，rd=pc+4=4）
         let mut prev = zero_registers();
         prev[2] = 0;
         let mut post = prev;
         post[1] = 4;
-        let step = make_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, post);
+        let step = make_step(
+            0,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 4,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4679,9 +5484,7 @@ mod tests {
     /// A1 Group 2 约束失败：HelperA_low ≠ Pc_low + Imm_low。
     #[test]
     fn test_a1_jal_helper_a_forgery_soundness() {
-        use crate::stwo_backend::column_layout_v2::{
-            COL_HELPER_A_BASE, COL_PC_NEXT_BASE,
-        };
+        use crate::stwo_backend::column_layout_v2::{COL_HELPER_A_BASE, COL_PC_NEXT_BASE};
 
         // JAL x1, 16（target = 0 + 16 = 16，rd = pc + 4 = 4）
         let prev = zero_registers();
@@ -4718,7 +5521,16 @@ mod tests {
         prev[2] = 0;
         let mut post = prev;
         post[1] = 4;
-        prove_verify_single_step(0, Instruction::Jalr { rd: 1, rs1: 2, imm: 4 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: 4,
+            },
+            &prev,
+            post,
+        );
     }
 
     /// A1 正例：JAL 单步 prove/verify roundtrip（v3.9 约束满足）。
@@ -4738,7 +5550,15 @@ mod tests {
         let prev = zero_registers();
         let mut post = prev;
         post[1] = 0x1000_0000;
-        prove_verify_single_step(0, Instruction::Lui { rd: 1, imm: 0x1000_0000 }, &prev, post);
+        prove_verify_single_step(
+            0,
+            Instruction::Lui {
+                rd: 1,
+                imm: 0x1000_0000,
+            },
+            &prev,
+            post,
+        );
     }
 
     // ===== BNE/BEQ M31 溢出修复测试（v3.10）=====
@@ -4752,7 +5572,16 @@ mod tests {
         let mut prev = zero_registers();
         prev[13] = 0xFFFF_FFFE; // -2，diff = 0xFFFFFFFE = 2p ≡ 0 (mod p)
         let post = prev; // BNE 不写寄存器
-        prove_verify_single_step(0x1000, Instruction::Bne { rs1: 13, rs2: 0, imm: 8 }, &prev, post);
+        prove_verify_single_step(
+            0x1000,
+            Instruction::Bne {
+                rs1: 13,
+                rs2: 0,
+                imm: 8,
+            },
+            &prev,
+            post,
+        );
     }
 
     /// BEQ rs1=0xFFFFFFFE(-2), rs2=0 → taken=0（diff=2p≡0 但实际≠0，修复后正确 not-taken）。
@@ -4761,7 +5590,16 @@ mod tests {
         let mut prev = zero_registers();
         prev[13] = 0xFFFF_FFFE;
         let post = prev;
-        prove_verify_single_step(0x1000, Instruction::Beq { rs1: 13, rs2: 0, imm: 8 }, &prev, post);
+        prove_verify_single_step(
+            0x1000,
+            Instruction::Beq {
+                rs1: 13,
+                rs2: 0,
+                imm: 8,
+            },
+            &prev,
+            post,
+        );
     }
 
     /// BNE rs1=5, rs2=5 → taken=0（相等，diff=0）。
@@ -4771,7 +5609,16 @@ mod tests {
         prev[13] = 5;
         prev[14] = 5;
         let post = prev;
-        prove_verify_single_step(0x1000, Instruction::Bne { rs1: 13, rs2: 14, imm: 8 }, &prev, post);
+        prove_verify_single_step(
+            0x1000,
+            Instruction::Bne {
+                rs1: 13,
+                rs2: 14,
+                imm: 8,
+            },
+            &prev,
+            post,
+        );
     }
 
     /// BEQ rs1=5, rs2=5 → taken=1（相等，diff=0）。
@@ -4781,7 +5628,16 @@ mod tests {
         prev[13] = 5;
         prev[14] = 5;
         let post = prev;
-        prove_verify_single_step(0x1000, Instruction::Beq { rs1: 13, rs2: 14, imm: 8 }, &prev, post);
+        prove_verify_single_step(
+            0x1000,
+            Instruction::Beq {
+                rs1: 13,
+                rs2: 14,
+                imm: 8,
+            },
+            &prev,
+            post,
+        );
     }
 
     /// 反例：篡改 is_zero_low（伪造 diff_low16=0）→ prove 失败。
@@ -4794,7 +5650,15 @@ mod tests {
         let mut prev = zero_registers();
         prev[13] = 0xFFFF_FFFE;
         let post = prev;
-        let step = make_step(0x1000, Instruction::Bne { rs1: 13, rs2: 0, imm: 8 }, post);
+        let step = make_step(
+            0x1000,
+            Instruction::Bne {
+                rs1: 13,
+                rs2: 0,
+                imm: 8,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);
@@ -4824,7 +5688,15 @@ mod tests {
         let mut prev = zero_registers();
         prev[13] = 0xFFFF_FFFE;
         let post = prev;
-        let step = make_step(0x1000, Instruction::Bne { rs1: 13, rs2: 0, imm: 8 }, post);
+        let step = make_step(
+            0x1000,
+            Instruction::Bne {
+                rs1: 13,
+                rs2: 0,
+                imm: 8,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         let mut builder = TraceBuilder::new(10);

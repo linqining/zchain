@@ -11,7 +11,18 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 /// 对象所有权语义。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub enum Ownership {
     /// 单一地址拥有，可转移。
     AddressOwned {

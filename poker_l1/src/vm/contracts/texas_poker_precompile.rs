@@ -24,13 +24,13 @@ use std::sync::Arc;
 use super::texas_poker::dispatch as tp_dispatch;
 use super::texas_poker::dispatch::selectors;
 use super::texas_poker::types::TexasPokerTable;
+use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
 use crate::storage::{ObjectBackend, ObjectDb};
 use crate::vm::contracts::dispatch::DispatchContext;
 use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile, reserved};
-use crate::Address;
 
 /// Texas Poker 合约预编译实现。
 ///
@@ -86,10 +86,9 @@ impl Precompile for TexasPokerPrecompile {
         // 读已有 table；不存在则按 create_table 首次调用处理
         let (mut table, is_new) = match object_db.read(&table_id) {
             Ok(obj) => {
-                let table: TexasPokerTable =
-                    borsh::from_slice(&obj.data).map_err(|e| {
-                        PokerL1Error::Serialization(format!("TexasPokerTable borsh: {e}"))
-                    })?;
+                let table: TexasPokerTable = borsh::from_slice(&obj.data).map_err(|e| {
+                    PokerL1Error::Serialization(format!("TexasPokerTable borsh: {e}"))
+                })?;
                 (table, false)
             }
             Err(PokerL1Error::ObjectNotFound(_)) => {
@@ -111,12 +110,7 @@ impl Precompile for TexasPokerPrecompile {
             Err(e) => return Err(e),
         };
 
-        let result = tp_dispatch::dispatch(
-            &dispatch_context,
-            &mut table,
-            method_selector,
-            args,
-        )?;
+        let result = tp_dispatch::dispatch(&dispatch_context, &mut table, method_selector, args)?;
 
         // 持久化
         let table_data = borsh::to_vec(&table).map_err(|e| {

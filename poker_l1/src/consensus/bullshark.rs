@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
+use crate::account::AccountStore;
 use crate::block::{Block, BlockHeader};
 use crate::consensus::{
     CommitRound, DagCommitCertificate, DagVertex, Epoch, Round, required_quorum,
@@ -30,7 +31,6 @@ use crate::consensus::{
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::executor::{ExecutionEnvironment, execute_block};
 use crate::storage::ObjectDb;
-use crate::account::AccountStore;
 use crate::transaction::Transaction;
 use crate::{ChainId, Hash};
 
@@ -738,9 +738,18 @@ mod tests {
         let mut object_db = ObjectDb::open_inmemory().expect("打开内存 ObjectDb");
         let mut account_store = AccountStore::new();
 
-        let projection =
-            project_block_from_commit(&dag, &leader, cert, &env, &mut object_db, &mut account_store, [0u8; 32], 1, 1000)
-                .expect("投影应成功");
+        let projection = project_block_from_commit(
+            &dag,
+            &leader,
+            cert,
+            &env,
+            &mut object_db,
+            &mut account_store,
+            [0u8; 32],
+            1,
+            1000,
+        )
+        .expect("投影应成功");
 
         // GameTurn tx 应在 gameturn_txs，ForceSync tx 应在 public_txs
         assert_eq!(projection.gameturn_txs.len(), 1);

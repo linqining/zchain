@@ -23,7 +23,6 @@
 #[repr(u32)]
 pub enum SyscallId {
     // ===== 0x01-0x0F：原有 zkvm 15 个（值不变，向后兼容） =====
-
     /// `zkvm_read_input(ptr, len)` — 从 host input buffer 读取。
     ReadInput = 0x01,
     /// `zkvm_commit_output(ptr, len)` — 写入 host output buffer。
@@ -56,7 +55,6 @@ pub enum SyscallId {
     Bn254Pairing = 0x0F,
 
     // ===== 0x40-0x5F：poker_l1 专属 =====
-
     /// `object_read(obj_id, key, out_ptr, out_len)` — 读取对象字段。
     ObjectRead = 0x40,
     /// `object_write(obj_id, key, value_ptr, value_len)` — 写入对象字段。
@@ -75,7 +73,6 @@ pub enum SyscallId {
     ZkVerify = 0x47,
 
     // ===== 0x80-0x8F：BLS12-381 系列（poker_l1） =====
-
     /// `bls12_381_g1_add(a_ptr, b_ptr, out_ptr)` — G1 点加法。
     Bls12_381G1Add = 0x80,
     /// `bls12_381_g1_mul(p_ptr, s_ptr, out_ptr)` — G1 标量乘法。
@@ -248,7 +245,10 @@ mod tests {
     #[test]
     fn test_from_u32_bls_range() {
         assert_eq!(SyscallId::from_u32(0x80), Some(SyscallId::Bls12_381G1Add));
-        assert_eq!(SyscallId::from_u32(0x8B), Some(SyscallId::Bls12_381Aggregate));
+        assert_eq!(
+            SyscallId::from_u32(0x8B),
+            Some(SyscallId::Bls12_381Aggregate)
+        );
         assert_eq!(SyscallId::from_u32(0x8C), None);
         assert_eq!(SyscallId::from_u32(0xFF), None);
     }
@@ -257,7 +257,11 @@ mod tests {
     fn test_as_u32_roundtrip() {
         for id in SyscallId::all() {
             let u = id.as_u32();
-            assert_eq!(SyscallId::from_u32(u), Some(id), "往返失败: {id:?} -> 0x{u:02X}");
+            assert_eq!(
+                SyscallId::from_u32(u),
+                Some(id),
+                "往返失败: {id:?} -> 0x{u:02X}"
+            );
         }
     }
 

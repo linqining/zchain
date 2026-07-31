@@ -26,7 +26,7 @@
 //! 用法：`zchain poker-demo`
 
 use poker_l1::vm::contracts::texas_poker::{
-    card::{Card, ACE, CLUBS, DIAMONDS, HEARTS, JACK, KING, NINE, SEVEN, SPADES, THREE, TWO},
+    card::{ACE, CLUBS, Card, DIAMONDS, HEARTS, JACK, KING, NINE, SEVEN, SPADES, THREE, TWO},
     events::TexasPokerEvent,
     state_machine,
     types::TexasPokerTable,
@@ -71,9 +71,9 @@ fn run_showdown_hand() -> Result<(), String> {
         table_id,
         "Demo Table".to_string(),
         ALICE, // creator
-        2,  // max_players
-        5,  // small_blind
-        10, // big_blind
+        2,     // max_players
+        5,     // small_blind
+        10,    // big_blind
     );
 
     // ===== 2. 设置两个座位 =====
@@ -115,7 +115,11 @@ fn run_showdown_hand() -> Result<(), String> {
 
     // 验证: heads-up preflop, button=SB 先行动 → current_turn=Some(0)=Alice
     // Alice.bet=5 (SB), Bob.bet=10 (BB), pot=0
-    assert_eq!(table.current_turn, Some(0), "preflop heads-up: button/SB 应先行动");
+    assert_eq!(
+        table.current_turn,
+        Some(0),
+        "preflop heads-up: button/SB 应先行动"
+    );
     assert_eq!(table.seats[0].bet, 5, "Alice SB bet");
     assert_eq!(table.seats[1].bet, 10, "Bob BB bet");
 
@@ -136,7 +140,10 @@ fn run_showdown_hand() -> Result<(), String> {
     events.clear();
     // apply_call 内部 advance_turn 检测 is_betting_complete=true
     // → collect_bets_to_pot (pot=60) + advance_round → ROUND_FLOP + start_community_reveal_phase
-    assert_eq!(table.round_state, 3 /* ROUND_FLOP */, "Bob call 后应进入 flop");
+    assert_eq!(
+        table.round_state, 3, /* ROUND_FLOP */
+        "Bob call 后应进入 flop"
+    );
     assert_eq!(table.pot, 60, "preflop 下注 30+30=60 应入 pot");
     assert_eq!(table.seats[0].bet, 0, "collect_bets_to_pot 清零 Alice bet");
     assert_eq!(table.seats[1].bet, 0, "collect_bets_to_pot 清零 Bob bet");
@@ -167,7 +174,10 @@ fn run_showdown_hand() -> Result<(), String> {
     state_machine::apply_check(&mut table, 0, &mut events)
         .map_err(|e| format!("apply_check(Alice): {e:?}"))?;
     events.clear();
-    assert_eq!(table.round_state, 4 /* ROUND_TURN */, "check/check 后进入 turn");
+    assert_eq!(
+        table.round_state, 4, /* ROUND_TURN */
+        "check/check 后进入 turn"
+    );
     print_table_state("Turn round 开始", &table);
 
     // ===== 9. Turn: 跳过 reveal + 填充第 4 张公共牌 =====
@@ -194,7 +204,10 @@ fn run_showdown_hand() -> Result<(), String> {
         .map_err(|e| format!("apply_call(Bob): {e:?}"))?;
     events.clear();
     // apply_call 内部 advance_turn 检测 complete → collect + advance_round → ROUND_RIVER
-    assert_eq!(table.round_state, 5 /* ROUND_RIVER */, "Bob call 后进入 river");
+    assert_eq!(
+        table.round_state, 5, /* ROUND_RIVER */
+        "Bob call 后进入 river"
+    );
     assert_eq!(table.pot, 60 + 100, "pot: preflop 60 + turn 100 = 160");
     assert_eq!(table.seats[0].stack, 920, "Alice stack: 970-50=920");
     assert_eq!(table.seats[1].stack, 920, "Bob stack: 970-50=920");
@@ -219,7 +232,10 @@ fn run_showdown_hand() -> Result<(), String> {
     state_machine::apply_check(&mut table, 0, &mut events)
         .map_err(|e| format!("apply_check(Alice): {e:?}"))?;
     events.clear();
-    assert_eq!(table.round_state, 6 /* ROUND_SHOWDOWN */, "check/check 后进入 showdown");
+    assert_eq!(
+        table.round_state, 6, /* ROUND_SHOWDOWN */
+        "check/check 后进入 showdown"
+    );
     print_table_state("Showdown 阶段开始", &table);
 
     // ===== 13. Showdown: 跳过 reveal + 填充双方手牌 =====
@@ -245,16 +261,28 @@ fn run_showdown_hand() -> Result<(), String> {
     // 注意: settle_hand → reset_for_next_hand 会清空 hand/community/pot，stack 保留分配结果
     assert_eq!(table.pot, 0, "settle_hand 后 pot 应清零");
     assert_eq!(
-        table.seats[0].stack, 920 + 160,
+        table.seats[0].stack,
+        920 + 160,
         "Alice 赢得 pot=160: 920+160=1080"
     );
     assert_eq!(table.seats[1].stack, 920, "Bob 输掉本局: 920");
-    assert_eq!(table.round_state, 0 /* ROUND_WAITING */, "reset 后回到 WAITING");
+    assert_eq!(
+        table.round_state, 0, /* ROUND_WAITING */
+        "reset 后回到 WAITING"
+    );
 
     println!();
     println!("✓ Alice (A♠ A♥) 以「对 A + J-9-7 kicker」击败 Bob (K♠ K♥)");
-    println!("  Alice 筹码: 1000 → {} (净 +{})", table.seats[0].stack, table.seats[0].stack as i64 - 1000);
-    println!("  Bob   筹码: 1000 → {} (净 {})", table.seats[1].stack, table.seats[1].stack as i64 - 1000);
+    println!(
+        "  Alice 筹码: 1000 → {} (净 +{})",
+        table.seats[0].stack,
+        table.seats[0].stack as i64 - 1000
+    );
+    println!(
+        "  Bob   筹码: 1000 → {} (净 {})",
+        table.seats[1].stack,
+        table.seats[1].stack as i64 - 1000
+    );
     println!();
 
     Ok(())
@@ -276,31 +304,56 @@ fn skip_reveal_phase(table: &mut TexasPokerTable) {
 fn print_table_state(label: &str, table: &TexasPokerTable) {
     println!();
     println!("┌─── {} ───", label);
-    println!("│ Round: {} | Pot: {} | Current turn: {:?}",
+    println!(
+        "│ Round: {} | Pot: {} | Current turn: {:?}",
         round_name(table.round_state),
         table.pot,
-        table.current_turn);
+        table.current_turn
+    );
     let community: Vec<String> = table.community_cards.iter().map(|c| c.display()).collect();
-    println!("│ Community cards: {}", if community.is_empty() { "(none)".to_string() } else { community.join(" ") });
+    println!(
+        "│ Community cards: {}",
+        if community.is_empty() {
+            "(none)".to_string()
+        } else {
+            community.join(" ")
+        }
+    );
     if let Some(br) = &table.betting_round {
-        println!("│ Betting round: current_bet={}, min_raise={}",
-            br.current_bet, br.min_raise);
+        println!(
+            "│ Betting round: current_bet={}, min_raise={}",
+            br.current_bet, br.min_raise
+        );
     } else {
         println!("│ Betting round: (none)");
     }
     for (i, s) in table.seats.iter().enumerate() {
         if s.is_occupied() {
-            let name = if s.player == ALICE { "Alice" }
-                else if s.player == BOB { "Bob" }
-                else { "?" };
+            let name = if s.player == ALICE {
+                "Alice"
+            } else if s.player == BOB {
+                "Bob"
+            } else {
+                "?"
+            };
             let hand_str = if s.hand.is_empty() {
                 "[hidden]".to_string()
             } else {
-                s.hand.iter().map(|c| c.display()).collect::<Vec<_>>().join(" ")
+                s.hand
+                    .iter()
+                    .map(|c| c.display())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             };
-            let button_mark = if table.button == i as u8 { " (button)" } else { "" };
-            println!("│ Seat {}: {}{}  stack={} bet={} total_bet={} folded={} all_in={} hand={}",
-                i, name, button_mark, s.stack, s.bet, s.total_bet, s.folded, s.all_in, hand_str);
+            let button_mark = if table.button == i as u8 {
+                " (button)"
+            } else {
+                ""
+            };
+            println!(
+                "│ Seat {}: {}{}  stack={} bet={} total_bet={} folded={} all_in={} hand={}",
+                i, name, button_mark, s.stack, s.bet, s.total_bet, s.folded, s.all_in, hand_str
+            );
         }
     }
     println!("└─────────────────────────────────────────────────────────────");
@@ -331,61 +384,181 @@ fn print_events(events: &[TexasPokerEvent]) {
 fn event_summary(e: &TexasPokerEvent) -> String {
     use TexasPokerEvent::*;
     match e {
-        HandStarted { button, small_blind, big_blind, participants, .. } => {
-            format!("HandStarted: button={button} SB={small_blind} BB={big_blind} participants={participants:?}")
+        HandStarted {
+            button,
+            small_blind,
+            big_blind,
+            participants,
+            ..
+        } => {
+            format!(
+                "HandStarted: button={button} SB={small_blind} BB={big_blind} participants={participants:?}"
+            )
         }
-        ShuffleComplete { phase, participant_count, deck_size, .. } => {
-            format!("ShuffleComplete: phase={phase} participants={participant_count} deck={deck_size}")
+        ShuffleComplete {
+            phase,
+            participant_count,
+            deck_size,
+            ..
+        } => {
+            format!(
+                "ShuffleComplete: phase={phase} participants={participant_count} deck={deck_size}"
+            )
         }
-        BlindsPosted { sb_seat, bb_seat, sb_amount, bb_amount, first_to_act, .. } => {
-            format!("BlindsPosted: SB=seat{sb_seat}({sb_amount}) BB=seat{bb_seat}({bb_amount}) first_to_act={first_to_act}")
+        BlindsPosted {
+            sb_seat,
+            bb_seat,
+            sb_amount,
+            bb_amount,
+            first_to_act,
+            ..
+        } => {
+            format!(
+                "BlindsPosted: SB=seat{sb_seat}({sb_amount}) BB=seat{bb_seat}({bb_amount}) first_to_act={first_to_act}"
+            )
         }
-        BettingRoundStarted { round_state, current_bet, min_raise, first_to_act, pot_before, .. } => {
-            format!("BettingRoundStarted: round={} current_bet={} min_raise={} first={first_to_act} pot_before={pot_before}",
-                round_name(*round_state), current_bet, min_raise)
+        BettingRoundStarted {
+            round_state,
+            current_bet,
+            min_raise,
+            first_to_act,
+            pot_before,
+            ..
+        } => {
+            format!(
+                "BettingRoundStarted: round={} current_bet={} min_raise={} first={first_to_act} pot_before={pot_before}",
+                round_name(*round_state),
+                current_bet,
+                min_raise
+            )
         }
-        CurrentTurnChanged { old_turn, new_turn, round_state, .. } => {
-            format!("CurrentTurnChanged: {old_turn:?} → {new_turn:?} (round={})", round_name(*round_state))
+        CurrentTurnChanged {
+            old_turn,
+            new_turn,
+            round_state,
+            ..
+        } => {
+            format!(
+                "CurrentTurnChanged: {old_turn:?} → {new_turn:?} (round={})",
+                round_name(*round_state)
+            )
         }
-        PlayerRaised { seat_index, raise_delta, total_bet, round_state, .. } => {
-            format!("PlayerRaised: seat{seat_index} delta={raise_delta} total_bet={total_bet} round={}", round_name(*round_state))
+        PlayerRaised {
+            seat_index,
+            raise_delta,
+            total_bet,
+            round_state,
+            ..
+        } => {
+            format!(
+                "PlayerRaised: seat{seat_index} delta={raise_delta} total_bet={total_bet} round={}",
+                round_name(*round_state)
+            )
         }
-        PlayerCalled { seat_index, call_delta, round_state, .. } => {
-            format!("PlayerCalled: seat{seat_index} delta={call_delta} round={}", round_name(*round_state))
+        PlayerCalled {
+            seat_index,
+            call_delta,
+            round_state,
+            ..
+        } => {
+            format!(
+                "PlayerCalled: seat{seat_index} delta={call_delta} round={}",
+                round_name(*round_state)
+            )
         }
-        PlayerChecked { seat_index, round_state, .. } => {
-            format!("PlayerChecked: seat{seat_index} round={}", round_name(*round_state))
+        PlayerChecked {
+            seat_index,
+            round_state,
+            ..
+        } => {
+            format!(
+                "PlayerChecked: seat{seat_index} round={}",
+                round_name(*round_state)
+            )
         }
-        PlayerFolded { seat_index, reason, round_state, .. } => {
-            format!("PlayerFolded: seat{seat_index} reason={reason} round={}", round_name(*round_state))
+        PlayerFolded {
+            seat_index,
+            reason,
+            round_state,
+            ..
+        } => {
+            format!(
+                "PlayerFolded: seat{seat_index} reason={reason} round={}",
+                round_name(*round_state)
+            )
         }
-        PotCollected { round_state, pot_after, collected_from_seats, .. } => {
-            format!("PotCollected: round={} pot_after={pot_after} from={collected_from_seats:?}", round_name(*round_state))
+        PotCollected {
+            round_state,
+            pot_after,
+            collected_from_seats,
+            ..
+        } => {
+            format!(
+                "PotCollected: round={} pot_after={pot_after} from={collected_from_seats:?}",
+                round_name(*round_state)
+            )
         }
-        RoundAdvanced { from_round, to_round, pot, community_cards_count, .. } => {
-            format!("RoundAdvanced: {} → {} pot={pot} community={community_cards_count}",
-                round_name(*from_round), round_name(*to_round))
+        RoundAdvanced {
+            from_round,
+            to_round,
+            pot,
+            community_cards_count,
+            ..
+        } => {
+            format!(
+                "RoundAdvanced: {} → {} pot={pot} community={community_cards_count}",
+                round_name(*from_round),
+                round_name(*to_round)
+            )
         }
         RevealPhaseComplete { phase, .. } => {
             format!("RevealPhaseComplete: phase={phase}")
         }
-        CommunityCardRevealed { card_ranks, card_suits, .. } => {
+        CommunityCardRevealed {
+            card_ranks,
+            card_suits,
+            ..
+        } => {
             format!("CommunityCardRevealed: ranks={card_ranks:?} suits={card_suits:?}")
         }
-        ShowdownHoleCardsRevealed { seat_index, card_ranks, card_suits, .. } => {
-            format!("ShowdownHoleCardsRevealed: seat{seat_index} ranks={card_ranks:?} suits={card_suits:?}")
+        ShowdownHoleCardsRevealed {
+            seat_index,
+            card_ranks,
+            card_suits,
+            ..
+        } => {
+            format!(
+                "ShowdownHoleCardsRevealed: seat{seat_index} ranks={card_ranks:?} suits={card_suits:?}"
+            )
         }
         HandSettled { pot, winners, .. } => {
             format!("HandSettled: pot={pot} winners={winners:?}")
         }
-        WinnerAwarded { seat_index, amount, pot_type, .. } => {
+        WinnerAwarded {
+            seat_index,
+            amount,
+            pot_type,
+            ..
+        } => {
             format!("WinnerAwarded: seat{seat_index} amount={amount} pot_type={pot_type}")
         }
-        PlayerAllIn { seat_index, trigger_action, amount, .. } => {
+        PlayerAllIn {
+            seat_index,
+            trigger_action,
+            amount,
+            ..
+        } => {
             format!("PlayerAllIn: seat{seat_index} trigger={trigger_action} amount={amount}")
         }
-        ShuffleTurn { seat_index, pending_count, completed_count, .. } => {
-            format!("ShuffleTurn: seat{seat_index} pending={pending_count} completed={completed_count}")
+        ShuffleTurn {
+            seat_index,
+            pending_count,
+            completed_count,
+            ..
+        } => {
+            format!(
+                "ShuffleTurn: seat{seat_index} pending={pending_count} completed={completed_count}"
+            )
         }
         other => format!("{other:?}"),
     }

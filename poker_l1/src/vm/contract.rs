@@ -105,7 +105,9 @@ impl UpgradeCap {
 }
 
 /// 升级状态（SEC-L7 timelock）。
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum UpgradeState {
     /// 无待生效升级。
     #[default]

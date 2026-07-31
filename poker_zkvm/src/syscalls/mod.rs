@@ -825,11 +825,7 @@ mod tests {
         assert_eq!(all.len(), 36, "应有 36 个 syscall");
         // 验证 sparse_index 连续递增（0-35）
         for (i, id) in all.iter().enumerate() {
-            assert_eq!(
-                id.sparse_index(),
-                i,
-                "all()[{i}].sparse_index() 应为 {i}"
-            );
+            assert_eq!(id.sparse_index(), i, "all()[{i}].sparse_index() 应为 {i}");
         }
     }
 
@@ -840,7 +836,10 @@ mod tests {
         // 所有合法 ID 的 sparse_index 应在 0..36 范围内
         for id in SyscallId::all() {
             let idx = id.sparse_index();
-            assert!(idx < SyscallId::TOTAL_COUNT, "{id:?}.sparse_index() {idx} 超出范围");
+            assert!(
+                idx < SyscallId::TOTAL_COUNT,
+                "{id:?}.sparse_index() {idx} 超出范围"
+            );
         }
         // 验证 TOTAL_COUNT
         assert_eq!(SyscallId::TOTAL_COUNT, 36);

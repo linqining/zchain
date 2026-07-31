@@ -18,8 +18,8 @@
 //! ```
 
 use super::public_inputs::RecursivePublicInputs;
-use super::recursion_prover::{prove_recursive_with_fri, RecursionProvingError};
-use super::recursion_verifier::{verify_recursive_with_fri, RecursionVerificationError};
+use super::recursion_prover::{RecursionProvingError, prove_recursive_with_fri};
+use super::recursion_verifier::{RecursionVerificationError, verify_recursive_with_fri};
 use super::trace_gen::compute_fri_trace_log_size;
 use super::verifier_program::build_cpu_recursive_public_inputs;
 use crate::stwo_backend::prover::prove_cpu_trace;

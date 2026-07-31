@@ -29,7 +29,9 @@ pub use context::{ContractCallResult, PokerL1Context, TxContext};
 pub use contract::{ContractObject, ContractRegistry, UpgradeCap, UpgradeState};
 pub use gas_table::*;
 pub use loader::{LoadedContract, RbpfLoaderConfig, execute_contract, load_contract_bytecode};
-pub use precompile::{DispatchResult, Precompile, PrecompileRegistry, PrecompileStatus, PrecompileVersion};
+pub use precompile::{
+    DispatchResult, Precompile, PrecompileRegistry, PrecompileStatus, PrecompileVersion,
+};
 pub use syscalls::register_poker_l1_syscalls;
 pub use upgrade::{
     UpgradeConfig, UpgradeError, cancel_upgrade, commit_upgrade, dispute_emergency_upgrade,

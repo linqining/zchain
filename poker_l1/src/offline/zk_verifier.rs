@@ -371,9 +371,7 @@ impl ZkVerifier for StwoZkVerifier {
         status: VerifierStatus,
     ) -> Result<bool, PokerL1Error> {
         match status {
-            VerifierStatus::Stub => {
-                Ok(!proof.is_empty())
-            }
+            VerifierStatus::Stub => Ok(!proof.is_empty()),
             VerifierStatus::Production => Ok(false),
         }
     }
@@ -387,10 +385,7 @@ impl ZkVerifier for StwoZkVerifier {
 
         let _: poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof =
             bincode::deserialize(proof).map_err(|e| {
-                PokerL1Error::InvalidZkProofFormat(format!(
-                    "反序列化 L2 proof 失败: {}",
-                    e
-                ))
+                PokerL1Error::InvalidZkProofFormat(format!("反序列化 L2 proof 失败: {}", e))
             })?;
         Ok(())
     }

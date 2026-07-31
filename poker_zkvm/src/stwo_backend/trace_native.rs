@@ -24,9 +24,8 @@ use super::column_layout_v2::{
     COL_ABS_A_BASE, COL_ABS_B_BASE, COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE, COL_DIV_REM_BASE,
     COL_DIV_SIGN_Q, COL_DIV_SIGN_R, COL_LOW_NONZERO, COL_MEM_ADDR_BASE, COL_MUL_CARRY_HI0_BASE,
     COL_MUL_CARRY_HI1_BASE, COL_MUL_CARRY_LO_BASE, COL_MUL_HIGH_BASE, COL_MUL_LOW_BASE,
-    COL_PC_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B,
-    COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE, COL_VALUE_C_BASE, IS_PADDING, NUM_COLUMNS,
-    RANGE_CHECK_COL_INDICES, WORD_LIMB_COUNT,
+    COL_PC_BASE, COL_PC_NEXT_BASE, COL_SIGN_A, COL_SIGN_B, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
+    COL_VALUE_C_BASE, IS_PADDING, NUM_COLUMNS, RANGE_CHECK_COL_INDICES, WORD_LIMB_COUNT,
 };
 
 // ===========================================================================
@@ -399,13 +398,10 @@ pub fn trace_to_native(trace: &crate::trace::Trace) -> NativeTrace {
 /// 基础 81 列保留 v3.3 设计：PC/PcNext (8) + ArithFlag (2) + ValueAEff/B/C (12) +
 ///       Indicator (43) + HelperA/B (8) + Taken (1) + MemAddr (4) + SyscallId (1) + PcCarry (2) = 81
 #[must_use]
-pub fn step_to_m31_row(
-    step: &crate::trace::Step,
-    prev_registers: &[u32; 32],
-) -> Vec<M31> {
+pub fn step_to_m31_row(step: &crate::trace::Step, prev_registers: &[u32; 32]) -> Vec<M31> {
+    use super::column_layout_v2::WORD_LIMB_COUNT;
     use crate::isa::Instruction;
     use crate::stwo_backend::column_layout_v2::*;
-    use super::column_layout_v2::WORD_LIMB_COUNT;
 
     let mut row = vec![M31::from(0u32); NUM_COLUMNS];
 
@@ -469,11 +465,11 @@ pub fn step_to_m31_row(
     fill_word(&mut row, COL_HELPER_A_BASE, helper_a_value);
 
     // ----- 操作数值（v3：移除 ValueA 死列，仅保留 ValueAEff/ValueB/ValueC）-----
-    let value_b = prev_registers[op_b as usize];          // rs1 读值
+    let value_b = prev_registers[op_b as usize]; // rs1 读值
     let value_c = if imm_c_flag == 1 {
         imm_value
     } else {
-        prev_registers[op_c as usize]                    // rs2 读值
+        prev_registers[op_c as usize] // rs2 读值
     };
     // value_a_eff 计算：
     //   - JAL/JALR：始终填 PC+4（链接寄存器值）。即使 rd=0（x0），也需填 PC+4 以满足
@@ -508,9 +504,7 @@ pub fn step_to_m31_row(
             extract_mem_value(&step.instruction, step.mem_access.as_slice(), value_c)
         }
         // Store: HelperB = rs2_value = value_c
-        Instruction::Sb { .. }
-        | Instruction::Sh { .. }
-        | Instruction::Sw { .. } => value_c,
+        Instruction::Sb { .. } | Instruction::Sh { .. } | Instruction::Sw { .. } => value_c,
         _ => 0,
     };
     fill_word(&mut row, COL_HELPER_B_BASE, helper_b_value);
@@ -522,26 +516,27 @@ pub fn step_to_m31_row(
     //   - byte load（LB/LBU）：分解 HelperB[0]（原始字节）
     //   - halfword load（LH/LHU）：分解 HelperB[1]（原始半字高字节，含符号位 bit15）
     //   - LW/非 Load：全 0（gating 约束保证非 Load 行为 0）
-    let (is_load_byte, is_load_half, is_load_sign, sign_bit, load_bits_byte) = match &step.instruction {
-        Instruction::Lb { .. } => {
-            let raw_byte = (helper_b_value & 0xFF) as u8;
-            (1, 0, 1, ((raw_byte >> 7) & 1) as u32, raw_byte)
-        }
-        Instruction::Lbu { .. } => {
-            let raw_byte = (helper_b_value & 0xFF) as u8;
-            (1, 0, 0, ((raw_byte >> 7) & 1) as u32, raw_byte)
-        }
-        Instruction::Lh { .. } => {
-            let raw_hi_byte = ((helper_b_value >> 8) & 0xFF) as u8;
-            (0, 1, 1, ((raw_hi_byte >> 7) & 1) as u32, raw_hi_byte)
-        }
-        Instruction::Lhu { .. } => {
-            let raw_hi_byte = ((helper_b_value >> 8) & 0xFF) as u8;
-            (0, 1, 0, ((raw_hi_byte >> 7) & 1) as u32, raw_hi_byte)
-        }
-        Instruction::Lw { .. } => (0, 0, 0, 0, 0),
-        _ => (0, 0, 0, 0, 0),
-    };
+    let (is_load_byte, is_load_half, is_load_sign, sign_bit, load_bits_byte) =
+        match &step.instruction {
+            Instruction::Lb { .. } => {
+                let raw_byte = (helper_b_value & 0xFF) as u8;
+                (1, 0, 1, ((raw_byte >> 7) & 1) as u32, raw_byte)
+            }
+            Instruction::Lbu { .. } => {
+                let raw_byte = (helper_b_value & 0xFF) as u8;
+                (1, 0, 0, ((raw_byte >> 7) & 1) as u32, raw_byte)
+            }
+            Instruction::Lh { .. } => {
+                let raw_hi_byte = ((helper_b_value >> 8) & 0xFF) as u8;
+                (0, 1, 1, ((raw_hi_byte >> 7) & 1) as u32, raw_hi_byte)
+            }
+            Instruction::Lhu { .. } => {
+                let raw_hi_byte = ((helper_b_value >> 8) & 0xFF) as u8;
+                (0, 1, 0, ((raw_hi_byte >> 7) & 1) as u32, raw_hi_byte)
+            }
+            Instruction::Lw { .. } => (0, 0, 0, 0, 0),
+            _ => (0, 0, 0, 0, 0),
+        };
     row[COL_IS_LOAD_BYTE] = M31::from(is_load_byte);
     row[COL_IS_LOAD_HALF] = M31::from(is_load_half);
     row[COL_IS_LOAD_SIGN] = M31::from(is_load_sign);
@@ -683,8 +678,16 @@ pub fn step_to_m31_row(
             row[COL_LOW_NONZERO] = M31::from(low_nonzero);
             // abs 重建 borrow（复用 COL_CARRY_FLAG_BASE，与 ADD/SUB 互斥）
             // carry0 = abs_a borrow，carry1 = abs_b borrow（仅 sign=1 时有意义）
-            row[COL_CARRY_FLAG_BASE] = M31::from(if sign_a == 1 { compute_abs_borrow(value_b) } else { 0 });
-            row[COL_CARRY_FLAG_BASE + 1] = M31::from(if sign_b == 1 { compute_abs_borrow(value_c) } else { 0 });
+            row[COL_CARRY_FLAG_BASE] = M31::from(if sign_a == 1 {
+                compute_abs_borrow(value_b)
+            } else {
+                0
+            });
+            row[COL_CARRY_FLAG_BASE + 1] = M31::from(if sign_b == 1 {
+                compute_abs_borrow(value_c)
+            } else {
+                0
+            });
             // 结果符号 = sign_a ⊕ sign_b + 结果调整 carry（复用 COL_DIV_SIGN_Q/R，与 DIV 互斥）
             let result_sign = sign_a ^ sign_b;
             row[COL_DIV_SIGN_Q] = M31::from(result_sign);
@@ -709,7 +712,11 @@ pub fn step_to_m31_row(
             let low_nonzero = u32::from(low32 != 0);
             row[COL_LOW_NONZERO] = M31::from(low_nonzero);
             // abs_a 重建 borrow（abs_b = rs2 无符号，sign_b=0 无需 borrow）
-            row[COL_CARRY_FLAG_BASE] = M31::from(if sign_a == 1 { compute_abs_borrow(value_b) } else { 0 });
+            row[COL_CARRY_FLAG_BASE] = M31::from(if sign_a == 1 {
+                compute_abs_borrow(value_b)
+            } else {
+                0
+            });
             row[COL_CARRY_FLAG_BASE + 1] = M31::from(0u32);
             // 结果符号 = sign_a（有符号×无符号，结果符号 = 被乘数符号）
             let result_sign = sign_a;
@@ -750,10 +757,16 @@ pub fn step_to_m31_row(
             // - HelperA[1] → 范围检查 borrow1（正常时 = 0）
             // - HelperA[2] → 结果符号调整 carry
             // - HelperB[0..3] → 范围检查 diff（abs_b − r_abs − 1）
-            row[COL_CARRY_FLAG_BASE] =
-                M31::from(if sign_a == 1 { compute_abs_borrow(value_b) } else { 0 });
-            row[COL_HELPER_A_BASE] =
-                M31::from(if sign_b == 1 { compute_abs_borrow(value_c) } else { 0 });
+            row[COL_CARRY_FLAG_BASE] = M31::from(if sign_a == 1 {
+                compute_abs_borrow(value_b)
+            } else {
+                0
+            });
+            row[COL_HELPER_A_BASE] = M31::from(if sign_b == 1 {
+                compute_abs_borrow(value_c)
+            } else {
+                0
+            });
             row[COL_CARRY_FLAG_BASE + 1] = M31::from(compute_identity_carry(low32, r_abs));
             let (diff, borrow0, borrow1) = compute_range_check_witness(abs_b, r_abs);
             row[COL_LOW_NONZERO] = M31::from(borrow0);
@@ -765,8 +778,11 @@ pub fn step_to_m31_row(
                 Instruction::Rem { .. } => (r_abs, sign_r),
                 _ => unreachable!(),
             };
-            row[COL_HELPER_A_BASE + 2] =
-                M31::from(if result_sign == 1 { compute_abs_borrow(result_val) } else { 0 });
+            row[COL_HELPER_A_BASE + 2] = M31::from(if result_sign == 1 {
+                compute_abs_borrow(result_val)
+            } else {
+                0
+            });
         }
         Instruction::Divu { .. } | Instruction::Remu { .. } => {
             // 无符号除法：q·d+r=n，全部非负
@@ -814,9 +830,12 @@ pub fn step_to_m31_row(
         //   BNE: taken ⟺ diff!=0（(1-taken)*diff=0 + diff*diff_inv=taken）
         //   BLTU/BGEU: taken = borrow1 / 1-borrow1
         //   BLT/BGE: taken = slt_result / 1-slt_result（有符号比较公式）
-        Instruction::Beq { .. } | Instruction::Bne { .. }
-        | Instruction::Blt { .. } | Instruction::Bge { .. }
-        | Instruction::Bltu { .. } | Instruction::Bgeu { .. } => {
+        Instruction::Beq { .. }
+        | Instruction::Bne { .. }
+        | Instruction::Blt { .. }
+        | Instruction::Bge { .. }
+        | Instruction::Bltu { .. }
+        | Instruction::Bgeu { .. } => {
             // 分支的 value_c = imm（分支偏移），但比较需要 rs2 寄存器值。
             // 覆盖 ValueC 为 rs2 值（分支行无约束使用 ValueC，安全覆盖）。
             let rs2_value = prev_registers[op_c as usize];
@@ -833,11 +852,22 @@ pub fn step_to_m31_row(
             // half16 ∈ [0,65535] < p=2^31-1，M31 中唯一，无溢出。
             // - HelperB[0]=inv_low, [1]=inv_high, [2]=is_zero_low, [3]=is_zero_high
             // - half=0 → inv=0, is_zero=1；half≠0 → inv=half^(-1) mod p, is_zero=0
-            if matches!(&step.instruction, Instruction::Beq { .. } | Instruction::Bne { .. }) {
+            if matches!(
+                &step.instruction,
+                Instruction::Beq { .. } | Instruction::Bne { .. }
+            ) {
                 let diff_low16 = diff & 0xFFFF;
                 let diff_high16 = diff >> 16;
-                let inv_low = if diff_low16 == 0 { 0u32 } else { m31_inverse(diff_low16) };
-                let inv_high = if diff_high16 == 0 { 0u32 } else { m31_inverse(diff_high16) };
+                let inv_low = if diff_low16 == 0 {
+                    0u32
+                } else {
+                    m31_inverse(diff_low16)
+                };
+                let inv_high = if diff_high16 == 0 {
+                    0u32
+                } else {
+                    m31_inverse(diff_high16)
+                };
                 let is_zero_low = u32::from(diff_low16 == 0);
                 let is_zero_high = u32::from(diff_high16 == 0);
                 row[COL_HELPER_B_BASE] = M31::from(inv_low);
@@ -846,7 +876,10 @@ pub fn step_to_m31_row(
                 row[COL_HELPER_B_BASE + 3] = M31::from(is_zero_high);
             }
             // BLT/BGE 需符号 witness（BLTU/BGEU 不填，保持 0）
-            if matches!(&step.instruction, Instruction::Blt { .. } | Instruction::Bge { .. }) {
+            if matches!(
+                &step.instruction,
+                Instruction::Blt { .. } | Instruction::Bge { .. }
+            ) {
                 let sign_a = (value_b >> 31) & 1;
                 let sign_b = (rs2_value >> 31) & 1;
                 let same_sign = u32::from(sign_a == sign_b);
@@ -864,8 +897,10 @@ pub fn step_to_m31_row(
         // AIR 约束（cpu_air.rs:336-409）：
         //   SLTU/SLTIU: rd_eff = borrow1（无符号：rs1 < rs2 iff 高位借位）
         //   SLT/SLTI:   rd_eff = sign_a*(1-sign_b) + same_sign*borrow1（有符号比较公式）
-        Instruction::Slt { .. } | Instruction::Sltu { .. }
-        | Instruction::Slti { .. } | Instruction::Sltiu { .. } => {
+        Instruction::Slt { .. }
+        | Instruction::Sltu { .. }
+        | Instruction::Slti { .. }
+        | Instruction::Sltiu { .. } => {
             // diff = rs1 - rs2（存入 COL_MUL_LOW_BASE，复用 MUL 列，one-hot 互斥）
             let diff = value_b.wrapping_sub(value_c);
             fill_word(&mut row, COL_MUL_LOW_BASE, diff);
@@ -874,7 +909,10 @@ pub fn step_to_m31_row(
             row[COL_CARRY_FLAG_BASE] = M31::from(borrow0);
             row[COL_CARRY_FLAG_BASE + 1] = M31::from(borrow1);
             // 有符号比较（SLT/SLTI）需符号 witness（SLTU/SLTIU 不填，保持 0）
-            if matches!(&step.instruction, Instruction::Slt { .. } | Instruction::Slti { .. }) {
+            if matches!(
+                &step.instruction,
+                Instruction::Slt { .. } | Instruction::Slti { .. }
+            ) {
                 let sign_a = (value_b >> 31) & 1;
                 let sign_b = (value_c >> 31) & 1;
                 let same_sign = u32::from(sign_a == sign_b);
@@ -893,11 +931,16 @@ pub fn step_to_m31_row(
     // 与 cpu_air.rs A3 约束配合：g_sign = is_slt_group + is_signed_branch + g2 + g3
     let uses_sign = matches!(
         &step.instruction,
-        Instruction::Slt { .. } | Instruction::Slti { .. }
-        | Instruction::Blt { .. } | Instruction::Bge { .. }
-        | Instruction::Mulh { .. } | Instruction::Mulhsu { .. }
-        | Instruction::Div { .. } | Instruction::Divu { .. }
-        | Instruction::Rem { .. } | Instruction::Remu { .. }
+        Instruction::Slt { .. }
+            | Instruction::Slti { .. }
+            | Instruction::Blt { .. }
+            | Instruction::Bge { .. }
+            | Instruction::Mulh { .. }
+            | Instruction::Mulhsu { .. }
+            | Instruction::Div { .. }
+            | Instruction::Divu { .. }
+            | Instruction::Rem { .. }
+            | Instruction::Remu { .. }
     );
     if uses_sign {
         fill_sign_bits(&mut row, COL_SIGN_A_BITS_BASE, value_b >> 24);
@@ -924,14 +967,23 @@ pub fn step_to_m31_row(
     // ----- A1/A4 修复：填充 HelperA carry + HelperA_half（v3.9）-----
     // operand：Load/Store/JALR = ValueB（rs1），JAL/AUIPC/Branch = Pc，其他不影响（carry=0）
     let operand_value: u32 = match &step.instruction {
-        Instruction::Lb { .. } | Instruction::Lh { .. } | Instruction::Lw { .. }
-        | Instruction::Lbu { .. } | Instruction::Lhu { .. }
-        | Instruction::Sb { .. } | Instruction::Sh { .. } | Instruction::Sw { .. }
+        Instruction::Lb { .. }
+        | Instruction::Lh { .. }
+        | Instruction::Lw { .. }
+        | Instruction::Lbu { .. }
+        | Instruction::Lhu { .. }
+        | Instruction::Sb { .. }
+        | Instruction::Sh { .. }
+        | Instruction::Sw { .. }
         | Instruction::Jalr { .. } => value_b,
-        Instruction::Jal { .. } | Instruction::Auipc { .. }
-        | Instruction::Beq { .. } | Instruction::Bne { .. }
-        | Instruction::Blt { .. } | Instruction::Bge { .. }
-        | Instruction::Bltu { .. } | Instruction::Bgeu { .. } => step.pc,
+        Instruction::Jal { .. }
+        | Instruction::Auipc { .. }
+        | Instruction::Beq { .. }
+        | Instruction::Bne { .. }
+        | Instruction::Blt { .. }
+        | Instruction::Bge { .. }
+        | Instruction::Bltu { .. }
+        | Instruction::Bgeu { .. } => step.pc,
         _ => 0,
     };
     fill_a1_a4_helper_columns(
@@ -1016,8 +1068,8 @@ pub fn fill_a1_a4_helper_columns(
     operand_value: u32,
     imm_value: u32,
 ) {
-    use crate::stwo_backend::column_layout_v2::*;
     use crate::isa::Instruction;
+    use crate::stwo_backend::column_layout_v2::*;
 
     let (carry0, carry1) = match instruction {
         // Load/Store/JALR：HelperA = ValueB + ImmField（JALR 有 & !1 但不影响 carry）
@@ -1066,7 +1118,11 @@ fn compute_carry_16bit(a: u32, b: u32) -> (u32, u32) {
 
     let a_high = a >> 16;
     let b_high = b >> 16;
-    let carry1 = if a_high + b_high + carry0 >= 65536 { 1 } else { 0 };
+    let carry1 = if a_high + b_high + carry0 >= 65536 {
+        1
+    } else {
+        0
+    };
 
     (carry0, carry1)
 }
@@ -1240,10 +1296,14 @@ fn extract_mem_value(
 ) -> u32 {
     use crate::isa::Instruction::*;
     match insn {
-        Lb { .. } | Lh { .. } | Lw { .. } | Lbu { .. } | Lhu { .. }
-        | Sb { .. } | Sh { .. } | Sw { .. } => {
-            mem_access.first().map(|ma| ma.value).unwrap_or(0)
-        }
+        Lb { .. }
+        | Lh { .. }
+        | Lw { .. }
+        | Lbu { .. }
+        | Lhu { .. }
+        | Sb { .. }
+        | Sh { .. }
+        | Sw { .. } => mem_access.first().map(|ma| ma.value).unwrap_or(0),
         _ => 0,
     }
 }
@@ -1288,9 +1348,9 @@ fn extract_operands(insn: &crate::isa::Instruction) -> (u8, u8, u8, u8, u32) {
         | Andi { rd, rs1, imm } => (*rd, *rs1, 0, 1, *imm),
 
         // I-type 移位：rd, rs1, shamt
-        Slli { rd, rs1, shamt }
-        | Srli { rd, rs1, shamt }
-        | Srai { rd, rs1, shamt } => (*rd, *rs1, *shamt, 1, u32::from(*shamt)),
+        Slli { rd, rs1, shamt } | Srli { rd, rs1, shamt } | Srai { rd, rs1, shamt } => {
+            (*rd, *rs1, *shamt, 1, u32::from(*shamt))
+        }
 
         // I-type Load：rd, rs1, imm
         Lb { rd, rs1, imm }
@@ -1304,9 +1364,9 @@ fn extract_operands(insn: &crate::isa::Instruction) -> (u8, u8, u8, u8, u32) {
         // imm 值通过 Helper1 列传递（所有指令均填充 Helper1 = imm_value）。
         // 这样 ValueC = prev_registers[rs2] = rs2 值，用于 Store 值约束
         // （ValueC[i] - Helper4[i] = 0，即 rs2_value - mem_value = 0）。
-        Sb { rs1, rs2, imm }
-        | Sh { rs1, rs2, imm }
-        | Sw { rs1, rs2, imm } => (0, *rs1, *rs2, 0, *imm),
+        Sb { rs1, rs2, imm } | Sh { rs1, rs2, imm } | Sw { rs1, rs2, imm } => {
+            (0, *rs1, *rs2, 0, *imm)
+        }
 
         // B-type：rs1, rs2, imm（无 rd）
         Beq { rs1, rs2, imm }
@@ -1341,12 +1401,16 @@ fn compute_add_carries(rs1: u32, rs2: u32, _rd: u32) -> (u32, u32) {
     let rs1_bytes = rs1.to_le_bytes();
     let rs2_bytes = rs2.to_le_bytes();
     // 低 16 位加法：byte0 + byte1 + carry
-    let low_sum = u32::from(rs1_bytes[0]) + u32::from(rs2_bytes[0])
-        + u32::from(rs1_bytes[1]) * 256 + u32::from(rs2_bytes[1]) * 256;
+    let low_sum = u32::from(rs1_bytes[0])
+        + u32::from(rs2_bytes[0])
+        + u32::from(rs1_bytes[1]) * 256
+        + u32::from(rs2_bytes[1]) * 256;
     let carry0 = low_sum >> 16;
     // 高 16 位加法：byte2 + byte3 + carry0
-    let high_sum = u32::from(rs1_bytes[2]) + u32::from(rs2_bytes[2])
-        + u32::from(rs1_bytes[3]) * 256 + u32::from(rs2_bytes[3]) * 256
+    let high_sum = u32::from(rs1_bytes[2])
+        + u32::from(rs2_bytes[2])
+        + u32::from(rs1_bytes[3]) * 256
+        + u32::from(rs2_bytes[3]) * 256
         + carry0;
     let carry1 = high_sum >> 16;
     (carry0 & 1, carry1 & 1)
@@ -1363,11 +1427,13 @@ fn compute_sub_borrows(rs1: u32, rs2: u32, _rd: u32) -> (u32, u32) {
     let rs2_bytes = rs2.to_le_bytes();
     // 低 16 位减法
     let low_diff = i64::from(rs1_bytes[0]) + i64::from(rs1_bytes[1]) * 256
-        - i64::from(rs2_bytes[0]) - i64::from(rs2_bytes[1]) * 256;
+        - i64::from(rs2_bytes[0])
+        - i64::from(rs2_bytes[1]) * 256;
     let borrow0 = if low_diff < 0 { 1 } else { 0 };
     // 高 16 位减法
     let high_diff = i64::from(rs1_bytes[2]) + i64::from(rs1_bytes[3]) * 256
-        - i64::from(rs2_bytes[2]) - i64::from(rs2_bytes[3]) * 256
+        - i64::from(rs2_bytes[2])
+        - i64::from(rs2_bytes[3]) * 256
         - i64::from(borrow0);
     let borrow1 = if high_diff < 0 { 1 } else { 0 };
     (borrow0, borrow1)
@@ -1463,11 +1529,20 @@ fn compute_mul_carries(a: u32, b: u32) -> ([MulCarryDecomp; 7], u32, u32) {
     // 部分和 S_k = Σ a_i * b_j (where i+j == k)
     let s: [u32; 7] = [
         u32::from(a_bytes[0]) * u32::from(b_bytes[0]),
-        u32::from(a_bytes[0]) * u32::from(b_bytes[1]) + u32::from(a_bytes[1]) * u32::from(b_bytes[0]),
-        u32::from(a_bytes[0]) * u32::from(b_bytes[2]) + u32::from(a_bytes[1]) * u32::from(b_bytes[1]) + u32::from(a_bytes[2]) * u32::from(b_bytes[0]),
-        u32::from(a_bytes[0]) * u32::from(b_bytes[3]) + u32::from(a_bytes[1]) * u32::from(b_bytes[2]) + u32::from(a_bytes[2]) * u32::from(b_bytes[1]) + u32::from(a_bytes[3]) * u32::from(b_bytes[0]),
-        u32::from(a_bytes[1]) * u32::from(b_bytes[3]) + u32::from(a_bytes[2]) * u32::from(b_bytes[2]) + u32::from(a_bytes[3]) * u32::from(b_bytes[1]),
-        u32::from(a_bytes[2]) * u32::from(b_bytes[3]) + u32::from(a_bytes[3]) * u32::from(b_bytes[2]),
+        u32::from(a_bytes[0]) * u32::from(b_bytes[1])
+            + u32::from(a_bytes[1]) * u32::from(b_bytes[0]),
+        u32::from(a_bytes[0]) * u32::from(b_bytes[2])
+            + u32::from(a_bytes[1]) * u32::from(b_bytes[1])
+            + u32::from(a_bytes[2]) * u32::from(b_bytes[0]),
+        u32::from(a_bytes[0]) * u32::from(b_bytes[3])
+            + u32::from(a_bytes[1]) * u32::from(b_bytes[2])
+            + u32::from(a_bytes[2]) * u32::from(b_bytes[1])
+            + u32::from(a_bytes[3]) * u32::from(b_bytes[0]),
+        u32::from(a_bytes[1]) * u32::from(b_bytes[3])
+            + u32::from(a_bytes[2]) * u32::from(b_bytes[2])
+            + u32::from(a_bytes[3]) * u32::from(b_bytes[1]),
+        u32::from(a_bytes[2]) * u32::from(b_bytes[3])
+            + u32::from(a_bytes[3]) * u32::from(b_bytes[2]),
         u32::from(a_bytes[3]) * u32::from(b_bytes[3]),
     ];
 
@@ -1620,7 +1695,11 @@ fn compute_div_witness(n: u32, d: u32, signed: bool) -> (u32, u32, u32, u32, u32
     } else if signed {
         let n_s = n as i32;
         let d_s = d as i32;
-        (n_s.wrapping_div(d_s) as u32, n_s.wrapping_rem(d_s) as u32, 0)
+        (
+            n_s.wrapping_div(d_s) as u32,
+            n_s.wrapping_rem(d_s) as u32,
+            0,
+        )
     } else {
         (n / d, n % d, 0)
     };
@@ -1705,17 +1784,16 @@ pub fn trace_to_native_trace_placeholder(num_steps: usize) -> NativeTrace {
 // ===========================================================================
 
 use super::memory_air::{
-    MEM_COL_ADDR_BASE, MEM_COL_IS_FIRST_ACCESS, MEM_COL_IS_PADDING,
-    MEM_COL_IS_STORE, MEM_COL_TS_CUR, MEM_COL_TS_PREV, MEM_COL_VAL_CUR_BASE,
-    MEM_COL_VAL_PREV_BASE, MEM_NUM_COLUMNS,
+    MEM_COL_ADDR_BASE, MEM_COL_IS_FIRST_ACCESS, MEM_COL_IS_PADDING, MEM_COL_IS_STORE,
+    MEM_COL_TS_CUR, MEM_COL_TS_PREV, MEM_COL_VAL_CUR_BASE, MEM_COL_VAL_PREV_BASE, MEM_NUM_COLUMNS,
 };
 use crate::trace::MemOp;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::CircleEvaluation;
+use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::CircleEvaluation;
 
 /// 原生 M31 Memory trace（列主序，17 列，v3.3 P1.4）。
 ///
@@ -1775,8 +1853,8 @@ impl MemoryTrace {
 struct MemEntry {
     addr: u32,
     value: u32,
-    is_store: u8,  // 1=Store, 0=Load
-    ts: u32,       // step_index
+    is_store: u8, // 1=Store, 0=Load
+    ts: u32,      // step_index
 }
 
 /// 从 emulator `Trace` 生成 sorted Memory trace。
@@ -1810,9 +1888,7 @@ pub fn trace_to_memory_trace(trace: &crate::trace::Trace) -> MemoryTrace {
     }
 
     // Step 2: 按 (addr, ts) 排序
-    entries.sort_by(|a, b| {
-        (a.addr, a.ts).cmp(&(b.addr, b.ts))
-    });
+    entries.sort_by(|a, b| (a.addr, a.ts).cmp(&(b.addr, b.ts)));
 
     // Step 3: 计算 log_size 并填充 trace
     let num_entries = entries.len();
@@ -1899,7 +1975,11 @@ fn trace_to_memory_trace_inner(entries: &[MemEntry], log_size: u32) -> MemoryTra
         }
 
         // 填充 flags（v3.3 P1.4：移除 IsLoad 和 Size）
-        mem_trace.fill_scalar(row_idx, MEM_COL_IS_STORE, M31::from(u32::from(entry.is_store)));
+        mem_trace.fill_scalar(
+            row_idx,
+            MEM_COL_IS_STORE,
+            M31::from(u32::from(entry.is_store)),
+        );
         mem_trace.fill_scalar(row_idx, MEM_COL_IS_PADDING, M31::from(0u32));
 
         // 更新 prev 状态
@@ -2120,12 +2200,12 @@ use super::poseidon_air::{
     POSEIDON_AIR_COL_IS_LAST_ROUND, POSEIDON_AIR_COL_IS_PADDING, POSEIDON_AIR_COL_IS_PARTIAL_ROUND,
     POSEIDON_AIR_COL_OUTPUT_BASE, POSEIDON_AIR_COL_ROUND_CONSTANT_BASE,
     POSEIDON_AIR_COL_ROUND_COUNTER, POSEIDON_AIR_COL_SBOX_OUT_BASE, POSEIDON_AIR_COL_SBOX_SQ1_BASE,
-    POSEIDON_AIR_COL_SBOX_SQ2_BASE, POSEIDON_AIR_COL_STATE_BASE,
-    POSEIDON_AIR_COL_STATE_NEXT_BASE, POSEIDON_AIR_NUM_COLUMNS, POSEIDON_AIR_TOTAL_ROUNDS,
+    POSEIDON_AIR_COL_SBOX_SQ2_BASE, POSEIDON_AIR_COL_STATE_BASE, POSEIDON_AIR_COL_STATE_NEXT_BASE,
+    POSEIDON_AIR_NUM_COLUMNS, POSEIDON_AIR_TOTAL_ROUNDS,
 };
 use super::poseidon_m31::{
-    poseidon_m31_round_constants, poseidon_permutation_m31, poseidon_permutation_m31_steps,
     POSEIDON_M31_FULL_ROUNDS, POSEIDON_M31_PARTIAL_ROUNDS, POSEIDON_M31_WIDTH,
+    poseidon_m31_round_constants, poseidon_permutation_m31, poseidon_permutation_m31_steps,
 };
 
 /// 单次 Poseidon hash 调用记录（用于生成 Poseidon trace）。
@@ -2154,7 +2234,10 @@ impl PoseidonHashCall {
     #[must_use]
     pub fn from_input(input_state: [BaseField; 3]) -> Self {
         let output_state = poseidon_permutation_m31(input_state);
-        Self { input_state, output_state }
+        Self {
+            input_state,
+            output_state,
+        }
     }
 }
 
@@ -2306,8 +2389,7 @@ pub fn gen_poseidon_trace(hash_calls: &[PoseidonHashCall]) -> PoseidonTrace {
 
         // 可选：验证 output_state 一致性（debug 模式）
         debug_assert_eq!(
-            states[POSEIDON_AIR_TOTAL_ROUNDS],
-            call.output_state,
+            states[POSEIDON_AIR_TOTAL_ROUNDS], call.output_state,
             "PoseidonHashCall output_state 与 permutation 计算结果不一致"
         );
 
@@ -2316,7 +2398,11 @@ pub fn gen_poseidon_trace(hash_calls: &[PoseidonHashCall]) -> PoseidonTrace {
             // State[0..3] = states[round]
             trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_BASE, &states[round]);
             // StateNext[0..3] = states[round + 1]
-            trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_NEXT_BASE, &states[round + 1]);
+            trace.fill_state(
+                row_idx,
+                POSEIDON_AIR_COL_STATE_NEXT_BASE,
+                &states[round + 1],
+            );
 
             // IsFullRound / IsPartialRound
             let (is_full, is_partial) = if round < full_half {
@@ -2327,7 +2413,11 @@ pub fn gen_poseidon_trace(hash_calls: &[PoseidonHashCall]) -> PoseidonTrace {
                 (1u32, 0u32)
             };
             trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_FULL_ROUND, M31::from(is_full));
-            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_PARTIAL_ROUND, M31::from(is_partial));
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_IS_PARTIAL_ROUND,
+                M31::from(is_partial),
+            );
 
             // IsFirstRound / IsLastRound
             trace.fill_scalar(
@@ -2363,7 +2453,11 @@ pub fn gen_poseidon_trace(hash_calls: &[PoseidonHashCall]) -> PoseidonTrace {
 
             // RoundConstant[0..3] = rcs[round]
             for j in 0..POSEIDON_M31_WIDTH {
-                trace.fill_base(row_idx, POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + j, rcs[round][j]);
+                trace.fill_base(
+                    row_idx,
+                    POSEIDON_AIR_COL_ROUND_CONSTANT_BASE + j,
+                    rcs[round][j],
+                );
             }
 
             // ===== v2.1 新增：填充 S-box 中间列（SboxSq1/SboxSq2/SboxOut）=====
@@ -2436,14 +2530,17 @@ pub fn gen_poseidon_trace_with_min_log_size(
         );
 
         debug_assert_eq!(
-            states[POSEIDON_AIR_TOTAL_ROUNDS],
-            call.output_state,
+            states[POSEIDON_AIR_TOTAL_ROUNDS], call.output_state,
             "PoseidonHashCall output_state 与 permutation 计算结果不一致"
         );
 
         for round in 0..POSEIDON_AIR_TOTAL_ROUNDS {
             trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_BASE, &states[round]);
-            trace.fill_state(row_idx, POSEIDON_AIR_COL_STATE_NEXT_BASE, &states[round + 1]);
+            trace.fill_state(
+                row_idx,
+                POSEIDON_AIR_COL_STATE_NEXT_BASE,
+                &states[round + 1],
+            );
 
             let (is_full, is_partial) = if round < full_half {
                 (1u32, 0u32)
@@ -2453,7 +2550,11 @@ pub fn gen_poseidon_trace_with_min_log_size(
                 (1u32, 0u32)
             };
             trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_FULL_ROUND, M31::from(is_full));
-            trace.fill_scalar(row_idx, POSEIDON_AIR_COL_IS_PARTIAL_ROUND, M31::from(is_partial));
+            trace.fill_scalar(
+                row_idx,
+                POSEIDON_AIR_COL_IS_PARTIAL_ROUND,
+                M31::from(is_partial),
+            );
             trace.fill_scalar(
                 row_idx,
                 POSEIDON_AIR_COL_IS_FIRST_ROUND,
@@ -2547,7 +2648,7 @@ mod tests {
     use super::*;
     use crate::stwo_backend::column_layout_v2::{
         COL_DIV_IS_SPECIAL, COL_DIV_QUOT_BASE, COL_DIV_REM_BASE, COL_MUL_HIGH_BASE,
-        COL_MUL_LOW_BASE, COL_PC_BASE, COL_VALUE_A_EFF_BASE, IS_ADD, IS_MUL, IS_MULH, IS_DIV,
+        COL_MUL_LOW_BASE, COL_PC_BASE, COL_VALUE_A_EFF_BASE, IS_ADD, IS_DIV, IS_MUL, IS_MULH,
         IS_PADDING, NUM_COLUMNS,
     };
 
@@ -2567,16 +2668,14 @@ mod tests {
     fn test_u32_to_m31_limbs_boundary_values() {
         // 边界值测试
         for &value in &[
-            0u32,
-            1,
-            0xFF,           // u8::MAX
-            0x100,          // 256
-            0xFFFF,         // u16::MAX
-            0x10000,        // 65536
-            0xFFFFFF,       // 24-bit max
-            0xFFFFFFFF,     // u32::MAX
-            0xDEADBEEF,     // 随机值
-            0x80000000,     // 最高位为 1
+            0u32, 1, 0xFF,       // u8::MAX
+            0x100,      // 256
+            0xFFFF,     // u16::MAX
+            0x10000,    // 65536
+            0xFFFFFF,   // 24-bit max
+            0xFFFFFFFF, // u32::MAX
+            0xDEADBEEF, // 随机值
+            0x80000000, // 最高位为 1
         ] {
             let limbs = u32_to_m31_limbs(value);
             assert_eq!(limbs.len(), WORD_LIMB_COUNT);
@@ -2797,7 +2896,15 @@ mod tests {
         prev[3] = 7;
         let mut post = prev;
         post[1] = 42; // rd = 6*7 = 42
-        let step = make_m_step(0, crate::isa::Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_m_step(
+            0,
+            crate::isa::Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         // IS_MUL indicator = 1
@@ -2824,7 +2931,15 @@ mod tests {
         prev[3] = b;
         let mut post = prev;
         post[1] = product as u32;
-        let step = make_m_step(0, crate::isa::Instruction::Mul { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_m_step(
+            0,
+            crate::isa::Instruction::Mul {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         assert_eq!(row[IS_MUL].0, 1);
@@ -2850,7 +2965,15 @@ mod tests {
         prev[3] = b;
         let mut post = prev;
         post[1] = high32;
-        let step = make_m_step(0, crate::isa::Instruction::Mulhu { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_m_step(
+            0,
+            crate::isa::Instruction::Mulhu {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         // COL_MUL_HIGH 应为 0xFFFFFFFE 的高位分解
@@ -2880,7 +3003,15 @@ mod tests {
         // RISC-V：d=0 时 q=0xFFFFFFFF, r=n
         let mut post = prev;
         post[1] = 0xFFFF_FFFF;
-        let step = make_m_step(0, crate::isa::Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_m_step(
+            0,
+            crate::isa::Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         assert_eq!(row[IS_DIV].0, 1, "IS_DIV 应为 1");
@@ -2901,7 +3032,15 @@ mod tests {
         prev[3] = d;
         let mut post = prev;
         post[1] = 14; // q
-        let step = make_m_step(0, crate::isa::Instruction::Div { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_m_step(
+            0,
+            crate::isa::Instruction::Div {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         assert_eq!(row[COL_DIV_IS_SPECIAL].0, 0, "正常除法 is_special=0");
@@ -2921,7 +3060,15 @@ mod tests {
         prev[3] = b;
         let mut post = prev;
         post[1] = 0; // MULH(-1,-1) = high32(1) = 0
-        let step = make_m_step(0, crate::isa::Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_m_step(
+            0,
+            crate::isa::Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         assert_eq!(row[IS_MULH].0, 1, "IS_MULH 应为 1");
@@ -2948,7 +3095,15 @@ mod tests {
         prev[3] = b;
         let mut post = prev;
         post[1] = 0xFFFF_FFFF; // MULH(-1, 2) = high32(-2) = 0xFFFFFFFF
-        let step = make_m_step(0, crate::isa::Instruction::Mulh { rd: 1, rs1: 2, rs2: 3 }, post);
+        let step = make_m_step(
+            0,
+            crate::isa::Instruction::Mulh {
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+            },
+            post,
+        );
         let row = step_to_m31_row(&step, &prev);
 
         // |a|=1, |b|=2，无符号乘积 = 2，high32=0, low32=2
@@ -3030,7 +3185,11 @@ mod tests {
         let step = make_mem_step(
             0,
             0,
-            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            crate::isa::Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
             [0u32; 32],
             vec![crate::trace::MemAccess {
                 addr: 0x1000,
@@ -3072,7 +3231,10 @@ mod tests {
         // 首次访问：ValPrev = 0, TsPrev = 0
         // v3.3 P1.4：TsPrev 改为单 M31 标量
         for i in 0..4 {
-            assert_eq!(mem_trace.cols[MEM_COL_VAL_PREV_BASE + i][0], M31::from(0u32));
+            assert_eq!(
+                mem_trace.cols[MEM_COL_VAL_PREV_BASE + i][0],
+                M31::from(0u32)
+            );
         }
         assert_eq!(mem_trace.cols[MEM_COL_TS_PREV][0], M31::from(0u32));
 
@@ -3090,19 +3252,35 @@ mod tests {
         // 排序后：0x1000 在前，0x2000 在后
         let mut trace = crate::trace::Trace::new();
         trace.push_step(make_mem_step(
-            0, 0,
-            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            0,
+            0,
+            crate::isa::Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
             [0u32; 32],
             vec![crate::trace::MemAccess {
-                addr: 0x2000, op: crate::trace::MemOp::Write, value: 0x1111, size: 4,
+                addr: 0x2000,
+                op: crate::trace::MemOp::Write,
+                value: 0x1111,
+                size: 4,
             }],
         ));
         trace.push_step(make_mem_step(
-            1, 4,
-            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            1,
+            4,
+            crate::isa::Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
             [0u32; 32],
             vec![crate::trace::MemAccess {
-                addr: 0x1000, op: crate::trace::MemOp::Write, value: 0x2222, size: 4,
+                addr: 0x1000,
+                op: crate::trace::MemOp::Write,
+                value: 0x2222,
+                size: 4,
             }],
         ));
 
@@ -3134,19 +3312,35 @@ mod tests {
         // Step 1: SW 0x2222 到 addr=0x1000（同地址）
         let mut trace = crate::trace::Trace::new();
         trace.push_step(make_mem_step(
-            0, 0,
-            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            0,
+            0,
+            crate::isa::Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
             [0u32; 32],
             vec![crate::trace::MemAccess {
-                addr: 0x1000, op: crate::trace::MemOp::Write, value: 0x1111, size: 4,
+                addr: 0x1000,
+                op: crate::trace::MemOp::Write,
+                value: 0x1111,
+                size: 4,
             }],
         ));
         trace.push_step(make_mem_step(
-            1, 4,
-            crate::isa::Instruction::Sw { rs1: 1, rs2: 2, imm: 0 },
+            1,
+            4,
+            crate::isa::Instruction::Sw {
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
             [0u32; 32],
             vec![crate::trace::MemAccess {
-                addr: 0x1000, op: crate::trace::MemOp::Write, value: 0x2222, size: 4,
+                addr: 0x1000,
+                op: crate::trace::MemOp::Write,
+                value: 0x2222,
+                size: 4,
             }],
         ));
 
@@ -3191,7 +3385,11 @@ mod tests {
     #[test]
     fn test_poseidon_hash_call_from_input() {
         // PoseidonHashCall::from_input 应自动计算 output_state
-        let input = [BaseField::from(1u32), BaseField::from(2u32), BaseField::from(3u32)];
+        let input = [
+            BaseField::from(1u32),
+            BaseField::from(2u32),
+            BaseField::from(3u32),
+        ];
         let call = PoseidonHashCall::from_input(input);
         assert_eq!(call.input_state, input);
 
@@ -3203,7 +3401,10 @@ mod tests {
         );
 
         // input != output（permutation 是非平凡的）
-        assert_ne!(call.input_state, call.output_state, "permutation 应改变 state");
+        assert_ne!(
+            call.input_state, call.output_state,
+            "permutation 应改变 state"
+        );
     }
 
     #[test]
@@ -3349,9 +3550,18 @@ mod tests {
 
         // padding 行（30, 31）：IsPadding=1，Full=Partial=0
         for row in 30..32 {
-            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(1u32));
-            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_FULL_ROUND][row], M31::from(0u32));
-            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PARTIAL_ROUND][row], M31::from(0u32));
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PADDING][row],
+                M31::from(1u32)
+            );
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_FULL_ROUND][row],
+                M31::from(0u32)
+            );
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PARTIAL_ROUND][row],
+                M31::from(0u32)
+            );
         }
     }
 
@@ -3523,12 +3733,18 @@ mod tests {
 
         // padding 行（90..128）IsPadding=1
         for row in 90..128 {
-            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(1u32));
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PADDING][row],
+                M31::from(1u32)
+            );
         }
 
         // 真实行（0..90）IsPadding=0
         for row in 0..90 {
-            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(0u32));
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PADDING][row],
+                M31::from(0u32)
+            );
         }
     }
 
@@ -3544,7 +3760,10 @@ mod tests {
 
         // padding 行：30..32
         for row in 30..32 {
-            assert_eq!(trace.cols[POSEIDON_AIR_COL_IS_PADDING][row], M31::from(1u32));
+            assert_eq!(
+                trace.cols[POSEIDON_AIR_COL_IS_PADDING][row],
+                M31::from(1u32)
+            );
             // 其余列应为 0
             for col in 0..POSEIDON_AIR_NUM_COLUMNS {
                 if col != POSEIDON_AIR_COL_IS_PADDING {

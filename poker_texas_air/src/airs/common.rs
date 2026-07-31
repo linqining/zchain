@@ -403,8 +403,7 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let twelve: E::F = M31::from(12u32).into();
         let forty_seven: E::F = M31::from(47u32).into();
         let sixty: E::F = M31::from(60u32).into();
-        self.is_active.clone()
-            * (rs.clone() * q.clone() - twelve * q + forty_seven * rs - sixty)
+        self.is_active.clone() * (rs.clone() * q.clone() - twelve * q + forty_seven * rs - sixty)
     }
 
     /// 约束 `q == pre_round_state²`（Gap 1 witness 一致性，degree-2 两列乘积）。
@@ -501,22 +500,47 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
 
         let mut out = Vec::with_capacity(10);
         // Limb 0: cp0 + ap0 + am0 + df0 - mx0 - c0*65536 = 0 (carry_in = 0)
-        out.push(self.is_active.clone()
-            * (chip_pool[0].clone() + addon_pool[0].clone() + amount[0].clone() + diff[0].clone()
-                - mx_f[0].clone()
-                - c0.clone() * base.clone()));
+        out.push(
+            self.is_active.clone()
+                * (chip_pool[0].clone()
+                    + addon_pool[0].clone()
+                    + amount[0].clone()
+                    + diff[0].clone()
+                    - mx_f[0].clone()
+                    - c0.clone() * base.clone()),
+        );
         // Limb 1: cp1 + ap1 + am1 + df1 + c0 - mx1 - c1*65536 = 0
-        out.push(self.is_active.clone()
-            * (chip_pool[1].clone() + addon_pool[1].clone() + amount[1].clone() + diff[1].clone()
-                + c0.clone() - mx_f[1].clone() - c1.clone() * base.clone()));
+        out.push(
+            self.is_active.clone()
+                * (chip_pool[1].clone()
+                    + addon_pool[1].clone()
+                    + amount[1].clone()
+                    + diff[1].clone()
+                    + c0.clone()
+                    - mx_f[1].clone()
+                    - c1.clone() * base.clone()),
+        );
         // Limb 2: cp2 + ap2 + am2 + df2 + c1 - mx2 - c2*65536 = 0
-        out.push(self.is_active.clone()
-            * (chip_pool[2].clone() + addon_pool[2].clone() + amount[2].clone() + diff[2].clone()
-                + c1.clone() - mx_f[2].clone() - c2.clone() * base.clone()));
+        out.push(
+            self.is_active.clone()
+                * (chip_pool[2].clone()
+                    + addon_pool[2].clone()
+                    + amount[2].clone()
+                    + diff[2].clone()
+                    + c1.clone()
+                    - mx_f[2].clone()
+                    - c2.clone() * base.clone()),
+        );
         // Limb 3: cp3 + ap3 + am3 + df3 + c2 - mx3 = 0 (carry_out = 0)
-        out.push(self.is_active.clone()
-            * (chip_pool[3].clone() + addon_pool[3].clone() + amount[3].clone() + diff[3].clone()
-                + c2.clone() - mx_f[3].clone()));
+        out.push(
+            self.is_active.clone()
+                * (chip_pool[3].clone()
+                    + addon_pool[3].clone()
+                    + amount[3].clone()
+                    + diff[3].clone()
+                    + c2.clone()
+                    - mx_f[3].clone()),
+        );
         // carry bit booleanity（6 条独立）
         for i in 0..3 {
             out.push(carry_lo[i].clone() * (carry_lo[i].clone() - one.clone()));
@@ -545,14 +569,21 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let one: E::F = M31::from(1u32).into();
         let base: E::F = M31::from(65536u32).into();
         let zero: E::F = M31::from(0u32).into();
-        let carry_in = [zero.clone(), carry[0].clone(), carry[1].clone(), carry[2].clone()];
+        let carry_in = [
+            zero.clone(),
+            carry[0].clone(),
+            carry[1].clone(),
+            carry[2].clone(),
+        ];
         let carry_out = [carry[0].clone(), carry[1].clone(), carry[2].clone(), zero];
         let mut out = Vec::with_capacity(7);
         for i in 0..4 {
-            out.push(self.is_active.clone()
-                * (pre[i].clone() + amt[i].clone() + carry_in[i].clone()
-                    - post[i].clone()
-                    - base.clone() * carry_out[i].clone()));
+            out.push(
+                self.is_active.clone()
+                    * (pre[i].clone() + amt[i].clone() + carry_in[i].clone()
+                        - post[i].clone()
+                        - base.clone() * carry_out[i].clone()),
+            );
         }
         for bit in carry {
             out.push(bit.clone() * (bit.clone() - one.clone()));
@@ -623,11 +654,13 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         let mut out = Vec::with_capacity(7);
         // 每 limb 借位关系（4 条独立）
         for i in 0..4 {
-            out.push(self.is_active.clone()
-                * (a[i].clone() + base.clone() * b_in[i].clone()
-                    - b[i].clone()
-                    - diff[i].clone()
-                    - base.clone() * b_out[i].clone()));
+            out.push(
+                self.is_active.clone()
+                    * (a[i].clone() + base.clone() * b_in[i].clone()
+                        - b[i].clone()
+                        - diff[i].clone()
+                        - base.clone() * b_out[i].clone()),
+            );
         }
         // borrow booleanity（3 条独立）
         for i in 0..3 {

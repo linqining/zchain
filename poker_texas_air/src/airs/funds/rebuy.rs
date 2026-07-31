@@ -251,7 +251,9 @@ impl FrameworkEval for RebuyAir {
             &diff,
             &carry_lo,
             &carry_hi,
-        ) { eval.add_constraint(__c); }
+        ) {
+            eval.add_constraint(__c);
+        }
 
         // 约束 8（阶段 3 新增，soundness 关键）：addon_pool 守恒。
         // post_addon_pool = pre_addon_pool + amount（全 4-limb，对齐合约 `table.addon_pool += amount`）。
@@ -262,17 +264,26 @@ impl FrameworkEval for RebuyAir {
             eval.next_trace_mask(),
         ];
         let stack_add_carry: [E::F; 3] = [
-            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
         ];
         let addon_pool_add_carry: [E::F; 3] = [
-            eval.next_trace_mask(), eval.next_trace_mask(), eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
         ];
+        for __c in common.limb4_delta(&pre_stack, &post_stack, &input_amount, &stack_add_carry) {
+            eval.add_constraint(__c);
+        }
         for __c in common.limb4_delta(
-            &pre_stack, &post_stack, &input_amount, &stack_add_carry,
-        ) { eval.add_constraint(__c); }
-        for __c in common.limb4_delta(
-            &pre_addon_pool, &post_addon_pool, &amount, &addon_pool_add_carry,
-        ) { eval.add_constraint(__c); }
+            &pre_addon_pool,
+            &post_addon_pool,
+            &amount,
+            &addon_pool_add_carry,
+        ) {
+            eval.add_constraint(__c);
+        }
 
         // 约束 9（阶段 3 range-check 接线样例）：input_amount 各 limb ∈ [0, 65536)。
         // 通过 16-bit bit 分解约束，让 Lean 的 `Limb4Range16 ext.input_amount` 假设有 AIR 依据。
@@ -296,7 +307,9 @@ impl FrameworkEval for RebuyAir {
                 eval.next_trace_mask(),
                 eval.next_trace_mask(),
             ];
-            for __c in common.range16(&amount[limb_idx], &bits) { eval.add_constraint(__c); }
+            for __c in common.range16(&amount[limb_idx], &bits) {
+                eval.add_constraint(__c);
+            }
         }
 
         eval

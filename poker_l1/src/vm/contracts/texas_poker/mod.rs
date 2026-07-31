@@ -43,8 +43,8 @@ pub mod types;
 pub mod utils;
 
 // Phase 3: 状态机 + dispatch
-pub mod state_machine;
 pub mod dispatch;
+pub mod state_machine;
 
 // Post-commit Prover：证明任务（return_value 的 prove_task 部分）。
 // 与 poker_texas_air::prove_task 保持 borsh 二进制兼容（MethodInput 共享自 vm-common）。

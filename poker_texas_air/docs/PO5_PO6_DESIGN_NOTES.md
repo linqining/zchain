@@ -134,6 +134,24 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
      在当前 Stwo 2.3 上编译；但完整 witness 依赖闭包约 9.5k generated lines，且 Cairo verifier 的
      recursive PCS/FRI schema 与本项目 fixed CPU proof layout 不同。后续应抽取/审计最小 Poseidon252
      permutation component 与 call relation，而不是盲目 vendoring 整个 Cairo prover。
+   - **Poseidon/transcript canonical witness 子层（2026-07-31 进展）**：新增
+     `poseidon252_replay.rs`，逐操作镜像 Stwo 2.3 `Poseidon252Channel`、lifted Merkle leaf finalize 与
+     parent hash，把 transcript mix-root/mix-felts/mix-u32s/mix-u64、challenge/query draw、PoW prefix/
+     nonce 检查以及全部 Merkle leaf/parent 的每一次三元 Hades permutation 记录为精确
+     `(input_state, output_state, call_kind)`。`FriReplayChallenges` 现携带完整 transcript permutation
+     schedule；PCS 与 FRI Merkle replay 也携带 leaf absorb/finalize 和 parent call。新增
+     `CanonicalVerifierWitness` 按 transcript → PCS trees → FRI layer trees 的稳定顺序展平所有调用，
+     同时保存每层 FRI 的完整 pre-fold coset evaluations、domain initial indexes、folded positions 与
+     folded evaluations。真实 CPU proof 回归验证所有记录调用都能由原生 Starknet Poseidon252 重新计算，
+     且展平 witness 覆盖全部 committed FRI layers。该改动消除了后续 AIR trace 生成时再次从 proof
+     猜测调用顺序/折叠输入的自由度，但**尚未**把这些调用通过 lookup 连接到 non-native Poseidon AIR，
+     也尚未把 FRI fold rows 提交到 L2 trace，因此 production gate 仍保持关闭。
+   - **官方 witness 兼容性实验（2026-07-31）**：`cairo-air = 1.2.2` 已实测可直接对接当前 Stwo 2.3；
+     `stwo-cairo-prover = 1.2.2` 在当前 2026 nightly 只需三类机械兼容修复即可 `cargo check`：
+     `Mask::to_int` 改用 `to_array`、移除已稳定/删除的 `array_chunks` feature、slice `array_chunks`
+     改为 `chunks_exact + try_into`。因此下一步可采用 audited
+     `PoseidonAggregator ↔ MemoryIdToBig ↔ range-check/subcomponent` 闭包，并由本项目 canonical call AIR
+     通过 relation 绑定六个 synthetic memory IDs；无需自行设计高风险的 felt252 乘法约束。
 2. 递归只包裹**单个** L1 proof，**无 N-proof 聚合机制**（未变）。
 3. 递归只测试过 trivial padding CPU trace，从未跑过真实 Texas method AIR
    （未变；且 `poker_zkvm` 的 guest crate `guests/texas_poker` 本轮尚未迁入 zchain
@@ -174,8 +192,9 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 - **P05-R gap #1**（空-input Merkle no-op）已收窄闭合 + 回归（守卫拒绝空 commitments/query/log_size）；
   **gap #3-A**（felt252→M31 非法/有损编码）已修复为 9-limb radix-(2^31-1) 无损编码；
   **gap #3-B** 中 host canonical replay 部分（压缩 multi-query witness、全 tree commitment、column
-  metadata、完整 FRI layer folding/decommitment）已实现并有真实 proof/篡改回归；但这些 replay 尚未
-  完整进入 AIR。fixed `CpuV1` method schema 与 host verifier replay 已完成；CPU composition evaluator
+  metadata、完整 FRI layer folding/decommitment）已实现并有真实 proof/篡改回归；transcript、PCS
+  Merkle 与 FRI Merkle 的每次 Poseidon252 permutation 现也已按 canonical 执行顺序记录，FRI 每层
+  pre-fold coset witness 已固定展平；但这些 replay 尚未完整进入 AIR。fixed `CpuV1` method schema 与 host verifier replay 已完成；CPU composition evaluator
   已作为真实 AIR 子层实现并复用 `CpuAir::evaluate`，但它的 sampled values 和 transcript challenges
   尚未由 Merkle/Poseidon252 AIR 绑定。真实 Poseidon252 non-native AIR、transcript AIR 及 canonical
   Merkle/FRI replay 约束仍未实现。

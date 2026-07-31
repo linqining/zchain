@@ -7,14 +7,17 @@
 use std::collections::HashSet;
 
 use starknet_ff::FieldElement as FieldElement252;
-use stwo::core::fields::m31::BaseField;
-use stwo::core::pcs::utils::prepare_preprocessed_query_positions;
-use stwo::core::pcs::PcsConfig;
-use stwo::core::proof::StarkProof;
-use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
 use stwo::core::ColumnVec;
+use stwo::core::fields::m31::BaseField;
+use stwo::core::pcs::PcsConfig;
+use stwo::core::pcs::utils::prepare_preprocessed_query_positions;
+use stwo::core::proof::StarkProof;
+use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
 
+use super::poseidon252_replay::{
+    Poseidon252CallKind, Poseidon252PermutationCall, hash_m31_leaf_with_calls,
+    poseidon_hash_pair_with_call,
+};
 use super::public_inputs::{RecursivePublicInputs, RecursiveTreeMetadata};
 
 /// 一次 Merkle parent hash 的 canonical 重放步骤。
@@ -47,6 +50,8 @@ pub(crate) struct MerkleTreeReplay {
     pub leaves: Vec<(usize, FieldElement252)>,
     /// 按 Stwo verifier 执行顺序排列的 parent hash 步骤。
     pub steps: Vec<MerkleReplayStep>,
+    /// Leaf absorb/finalize and parent permutations in exact verifier execution order.
+    pub poseidon_calls: Vec<Poseidon252PermutationCall>,
     /// 被完整消费的压缩 witness 数量。
     pub consumed_witness: usize,
     /// 计算得到的 root。
@@ -67,7 +72,9 @@ pub(crate) enum MerkleReplayError {
         queried_values: usize,
     },
     /// 列 metadata 与 queried values 数量不一致。
-    #[error("tree {tree_index} column count mismatch: metadata={metadata}, queried_values={queried_values}")]
+    #[error(
+        "tree {tree_index} column count mismatch: metadata={metadata}, queried_values={queried_values}"
+    )]
     ColumnCountMismatch {
         tree_index: usize,
         metadata: usize,
@@ -239,6 +246,7 @@ pub(crate) fn replay_merkle_tree_with_sizes(
             query_positions: query_positions.to_vec(),
             leaves: Vec::new(),
             steps: Vec::new(),
+            poseidon_calls: Vec::new(),
             consumed_witness: 0,
             computed_root: None,
         });
@@ -280,14 +288,15 @@ pub(crate) fn replay_merkle_tree_with_sizes(
     }
 
     let mut leaves = Vec::with_capacity(unique_query_indices.len());
+    let mut poseidon_calls = Vec::new();
     for query_index in unique_query_indices {
-        let mut hasher = Poseidon252MerkleHasher::default();
         let row: Vec<BaseField> = column_order
             .iter()
             .map(|column_index| queried_values[*column_index][query_index])
             .collect();
-        hasher.update_leaf(&row);
-        leaves.push((query_positions[query_index], hasher.finalize()));
+        let (leaf, calls) = hash_m31_leaf_with_calls(&row);
+        poseidon_calls.extend(calls);
+        leaves.push((query_positions[query_index], leaf));
     }
 
     let mut previous_layer = leaves.clone();
@@ -321,7 +330,9 @@ pub(crate) fn replay_merkle_tree_with_sizes(
                     (sibling, hash, Some(consumed_index))
                 }
             };
-            let parent = Poseidon252MerkleHasher::hash_children((left, right));
+            let (parent, call) =
+                poseidon_hash_pair_with_call(left, right, Poseidon252CallKind::MerkleParent);
+            poseidon_calls.push(call);
             let parent_index = index >> 1;
             steps.push(MerkleReplayStep {
                 tree_index,
@@ -355,6 +366,7 @@ pub(crate) fn replay_merkle_tree_with_sizes(
         query_positions: query_positions.to_vec(),
         leaves,
         steps,
+        poseidon_calls,
         consumed_witness: witness_index,
         computed_root: Some(*computed_root),
     })
@@ -371,7 +383,7 @@ mod tests {
     };
     use crate::stwo_backend::trace_native::TraceBuilder;
     use stwo::core::circle::CirclePoint;
-    use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+    use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 
     const TEST_LOG_SIZE: u32 = 10;
     const TEST_OODS_POINT: CirclePoint<SecureField> = CirclePoint {

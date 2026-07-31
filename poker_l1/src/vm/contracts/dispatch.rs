@@ -199,7 +199,9 @@ pub fn dispatch(
         s if s == &selectors::force_advance() => dispatch_force_advance(context, game, args),
         s if s == &selectors::settle_hand() => dispatch_settle_hand(context, game, args),
         s if s == &selectors::force_checkpoint() => dispatch_force_checkpoint(context, game, args),
-        s if s == &selectors::checkpoint_anchor() => dispatch_checkpoint_anchor(context, game, args),
+        s if s == &selectors::checkpoint_anchor() => {
+            dispatch_checkpoint_anchor(context, game, args)
+        }
         s if s == &selectors::force_checkin() => dispatch_force_checkin(context, game, args),
         s if s == &selectors::force_settle() => dispatch_force_settle(context, game, args),
         s if s == &selectors::request_revert() => dispatch_request_revert(context, game, args),
@@ -225,8 +227,8 @@ fn dispatch_hand_started(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let input: hand_started::HandStartedInput =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("hand_started: {e}")))?;
+    let input: hand_started::HandStartedInput = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("hand_started: {e}")))?;
     let result = hand_started::hand_started_branch(game, input)?;
     let return_value = borsh::to_vec(&result)
         .map_err(|e| PokerL1Error::Serialization(format!("hand_started return: {e}")))?;
@@ -243,8 +245,8 @@ fn dispatch_force_advance(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let input: force_advance::ForceAdvanceInput =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_advance: {e}")))?;
+    let input: force_advance::ForceAdvanceInput = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("force_advance: {e}")))?;
     let _action = force_advance::apply_force_advance(game, &input)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -255,9 +257,10 @@ fn dispatch_settle_hand(
     game: &mut GameContract,
     _args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let hand = game.current_hand.as_ref().ok_or_else(|| {
-        PokerL1Error::SettleError(settle::SettleError::NoWinner)
-    })?;
+    let hand = game
+        .current_hand
+        .as_ref()
+        .ok_or_else(|| PokerL1Error::SettleError(settle::SettleError::NoWinner))?;
     let rake_config = settle::RakeConfig {
         rake_rate_bps: game.rake_config.rake_rate_bps,
         rake_cap: game.rake_config.rake_cap,
@@ -281,8 +284,8 @@ fn dispatch_force_checkpoint(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: force_checkpoint::ForceCheckpointTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_checkpoint: {e}")))?;
+    let tx: force_checkpoint::ForceCheckpointTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("force_checkpoint: {e}")))?;
     force_checkpoint::apply_force_checkpoint(game, &tx, context.block_height, 3)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -293,8 +296,8 @@ fn dispatch_checkpoint_anchor(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: checkpoint_anchor::CheckpointAnchorTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("checkpoint_anchor: {e}")))?;
+    let tx: checkpoint_anchor::CheckpointAnchorTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("checkpoint_anchor: {e}")))?;
     checkpoint_anchor::apply_checkpoint_anchor(game, &tx, context.block_height)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -305,8 +308,8 @@ fn dispatch_force_checkin(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let input: force_checkin::ForceCheckinInput =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_checkin: {e}")))?;
+    let input: force_checkin::ForceCheckinInput = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("force_checkin: {e}")))?;
     force_checkin::apply_force_checkin(game, &input)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -317,8 +320,8 @@ fn dispatch_force_settle(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: force_settle::ForceSettleTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_settle: {e}")))?;
+    let tx: force_settle::ForceSettleTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("force_settle: {e}")))?;
     let rake_config = settle::RakeConfig {
         rake_rate_bps: game.rake_config.rake_rate_bps,
         rake_cap: game.rake_config.rake_cap,
@@ -334,8 +337,8 @@ fn dispatch_request_revert(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: revert::RequestRevertTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("request_revert: {e}")))?;
+    let tx: revert::RequestRevertTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("request_revert: {e}")))?;
     revert::apply_request_revert(game, &tx, context.block_height, 10, 20, 30)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -346,8 +349,8 @@ fn dispatch_force_revert(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: revert::ForceRevertTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("force_revert: {e}")))?;
+    let tx: revert::ForceRevertTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("force_revert: {e}")))?;
     revert::apply_force_revert(game, &tx)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -358,7 +361,14 @@ fn dispatch_apply_forfeit(
     game: &mut GameContract,
     _args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    forfeit::apply_forfeit(game, None, force_checkin::ForfeitReason::MachineFailure, None, 0, &[])?;
+    forfeit::apply_forfeit(
+        game,
+        None,
+        force_checkin::ForfeitReason::MachineFailure,
+        None,
+        0,
+        &[],
+    )?;
     Ok(DispatchResult::game_only(game.id))
 }
 
@@ -368,8 +378,8 @@ fn dispatch_challenge_delta(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: challenge_delta::ChallengeDeltaTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("challenge_delta: {e}")))?;
+    let tx: challenge_delta::ChallengeDeltaTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("challenge_delta: {e}")))?;
     challenge_delta::apply_challenge_delta(game, &tx, [0u8; 32], 50)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -380,8 +390,8 @@ fn dispatch_request_da(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: request_da::RequestDaTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("request_da: {e}")))?;
+    let tx: request_da::RequestDaTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("request_da: {e}")))?;
     request_da::apply_request_da(game, &tx)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -392,8 +402,8 @@ fn dispatch_checkpoint_skip(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: checkpoint_skip::CheckpointSkipTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("checkpoint_skip: {e}")))?;
+    let tx: checkpoint_skip::CheckpointSkipTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("checkpoint_skip: {e}")))?;
     checkpoint_skip::apply_checkpoint_skip(game, &tx, context.block_height, 3)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -416,8 +426,8 @@ fn dispatch_request_ack(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: ack_protocol::RequestAckTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("request_ack: {e}")))?;
+    let tx: ack_protocol::RequestAckTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("request_ack: {e}")))?;
     ack_protocol::apply_request_ack(game, &tx, context.block_height, 20, 2)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -428,8 +438,8 @@ fn dispatch_refuse_ack(
     game: &mut GameContract,
     args: &[u8],
 ) -> PokerL1Result<DispatchResult> {
-    let tx: ack_protocol::RefuseAckTx =
-        borsh::from_slice(args).map_err(|e| PokerL1Error::Serialization(format!("refuse_ack: {e}")))?;
+    let tx: ack_protocol::RefuseAckTx = borsh::from_slice(args)
+        .map_err(|e| PokerL1Error::Serialization(format!("refuse_ack: {e}")))?;
     ack_protocol::apply_refuse_ack(game, &tx, context.block_height, context.chain_id, 3)?;
     Ok(DispatchResult::game_only(game.id))
 }
@@ -438,13 +448,18 @@ fn dispatch_refuse_ack(
 mod tests {
     use super::*;
     use crate::signature::TaggedPubkey;
-    use crate::vm::contracts::types::{ExecutionMode, GamePhase, HandState, PlayerStack, RakeConfigRef};
+    use crate::vm::contracts::types::{
+        ExecutionMode, GamePhase, HandState, PlayerStack, RakeConfigRef,
+    };
 
     fn create_test_game(id: ObjectID) -> GameContract {
         GameContract::new(
             id,
             [1u8; 20],
-            TaggedPubkey { tag: 0, raw: vec![2u8; 32] },
+            TaggedPubkey {
+                tag: 0,
+                raw: vec![2u8; 32],
+            },
             ExecutionMode::OnChain,
             RakeConfigRef {
                 rake_rate_bps: 50,
@@ -491,7 +506,10 @@ mod tests {
     fn create_test_context() -> DispatchContext {
         DispatchContext {
             caller: [6u8; 20],
-            caller_pubkey: TaggedPubkey { tag: 0, raw: vec![7u8; 32] },
+            caller_pubkey: TaggedPubkey {
+                tag: 0,
+                raw: vec![7u8; 32],
+            },
             chain_id: 1,
             block_height: 100,
             block_timestamp: 1_000_000,
@@ -549,7 +567,10 @@ mod tests {
         assert!(!result.modified_objects.is_empty());
         assert_eq!(game.hand_number, 1);
         assert!(game.current_hand.is_some());
-        assert_eq!(game.current_hand.as_ref().unwrap().phase, GamePhase::Preflop);
+        assert_eq!(
+            game.current_hand.as_ref().unwrap().phase,
+            GamePhase::Preflop
+        );
     }
 
     #[test]
@@ -599,7 +620,10 @@ mod tests {
         let unknown_selector = [255u8; 32];
         let result = dispatch(&context, &mut game, &unknown_selector, &[]);
 
-        assert!(matches!(result, Err(PokerL1Error::UnknownContractMethod { .. })));
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::UnknownContractMethod { .. })
+        ));
     }
 
     #[test]

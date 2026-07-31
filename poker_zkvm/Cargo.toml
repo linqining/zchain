@@ -39,6 +39,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rayon = { workspace = true }
+indexmap = { workspace = true }
 goblin = { workspace = true }
 tracing = { workspace = true }
 blstrs = { workspace = true }
@@ -52,6 +53,10 @@ stwo = { workspace = true }
 stwo-air-utils = { workspace = true }
 stwo-air-utils-derive = { workspace = true }
 stwo-constraint-framework = { workspace = true }
+cairo-air = { workspace = true }
+stwo-cairo-adapter = { workspace = true }
+stwo-cairo-common = { workspace = true }
+stwo-cairo-prover = { workspace = true }
 # StarkProof 序列化
 bincode = { workspace = true }
 # Poseidon252 哈希（Merkle Path AIR 递归验证用）

@@ -12,15 +12,17 @@ use stwo::core::fields::m31::M31;
 
 use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
-use poker_texas_air::airs::lifecycle::leave_table::{LeaveTableAir, LeaveTableInput, LeaveTableRow};
+use poker_texas_air::airs::lifecycle::leave_table::{
+    LeaveTableAir, LeaveTableInput, LeaveTableRow,
+};
 use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
     ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use poker_texas_air::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::prove_method;
 use poker_texas_air::public_inputs::TexasPublicInputs;
-use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method;
 
@@ -28,14 +30,18 @@ use poker_texas_air::verifier::verify_method;
 fn zero_root() -> [M31; 4] {
     // 与 synthetic_placeholder 的 pre_state_root 一致（AIR statement 绑定）
     poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
-        poker_texas_air::method_kind::MethodKind::Fold).0
+        poker_texas_air::method_kind::MethodKind::Fold,
+    )
+    .0
 }
 
 /// 构造 4 个 state_root limb（测试用，全 1）。
 fn one_root() -> [M31; 4] {
     // 与 synthetic_placeholder 的 post_state_root 一致（AIR statement 绑定）
     poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
-        poker_texas_air::method_kind::MethodKind::Fold).1
+        poker_texas_air::method_kind::MethodKind::Fold,
+    )
+    .1
 }
 
 // ========== join_table AIR ==========
@@ -80,7 +86,13 @@ fn test_e2e_join_table_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, JoinTableAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::JoinTable, 42, 0, 1)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        JoinTableAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinTable, 42, 0, 1),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -111,7 +123,13 @@ fn test_soundness_join_table_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, JoinTableAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::JoinTable, 42, 0, 1)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        JoinTableAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinTable, 42, 0, 1),
+    )
+    .expect("prove 失败");
 
     // 篡改 seat_index：trace 中是 2，AIR 声明 7
     proof.air = JoinTableAir {
@@ -136,7 +154,20 @@ fn test_soundness_join_table_tampered_seat() {
 fn test_e2e_leave_table_prove_verify() {
     let input = LeaveTableInput { seat_index: 3 };
     let row = LeaveTableRow::active(
-        &input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 4000, 0, 0,
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        2,
+        0,
+        1,
+        1000,
+        0,
+        5000,
+        4000,
+        0,
+        0,
     );
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
@@ -157,7 +188,13 @@ fn test_e2e_leave_table_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, LeaveTableAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::LeaveTable, 42, 0, 2)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        LeaveTableAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::LeaveTable, 42, 0, 2),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -166,7 +203,20 @@ fn test_e2e_leave_table_prove_verify() {
 fn test_soundness_leave_table_tampered_seat() {
     let input = LeaveTableInput { seat_index: 3 };
     let row = LeaveTableRow::active(
-        &input, zero_root(), one_root(), 42, 0, 2, 0, 1, 1000, 0, 5000, 4000, 0, 0,
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        2,
+        0,
+        1,
+        1000,
+        0,
+        5000,
+        4000,
+        0,
+        0,
     );
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
@@ -186,7 +236,13 @@ fn test_soundness_leave_table_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, LeaveTableAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::LeaveTable, 42, 0, 2)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        LeaveTableAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::LeaveTable, 42, 0, 2),
+    )
+    .expect("prove 失败");
 
     // 篡改 seat_index：trace 中是 3，AIR 声明 8
     proof.air = LeaveTableAir {
@@ -321,8 +377,24 @@ fn active_count_prod(active_count: u8) -> M31 {
 /// E2E: start_hand → trace → prove → verify（happy path）。
 #[test]
 fn test_e2e_start_hand_prove_verify() {
-    let input = StartHandInput { active_count: 4, ante_mode: 0, ante_amount: 0, ante_collected: 0 };
-    let row = StartHandRow::active(&input, active_count_inv(4), active_count_prod(4), zero_root(), one_root(), 42, 0, 3, 0, 1);
+    let input = StartHandInput {
+        active_count: 4,
+        ante_mode: 0,
+        ante_amount: 0,
+        ante_collected: 0,
+    };
+    let row = StartHandRow::active(
+        &input,
+        active_count_inv(4),
+        active_count_prod(4),
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+    );
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
         &row.to_vec(),
@@ -342,15 +414,37 @@ fn test_e2e_start_hand_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, StartHandAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        StartHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
 /// Soundness: 篡改 start_hand 的 `active_count` 公开输入后，verify 应失败。
 #[test]
 fn test_soundness_start_hand_tampered_count() {
-    let input = StartHandInput { active_count: 4, ante_mode: 0, ante_amount: 0, ante_collected: 0 };
-    let row = StartHandRow::active(&input, active_count_inv(4), active_count_prod(4), zero_root(), one_root(), 42, 0, 3, 0, 1);
+    let input = StartHandInput {
+        active_count: 4,
+        ante_mode: 0,
+        ante_amount: 0,
+        ante_collected: 0,
+    };
+    let row = StartHandRow::active(
+        &input,
+        active_count_inv(4),
+        active_count_prod(4),
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+    );
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
         &row.to_vec(),
@@ -369,11 +463,20 @@ fn test_soundness_start_hand_tampered_count() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, StartHandAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        StartHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3),
+    )
+    .expect("prove 失败");
 
     // 篡改 active_count：trace 中是 4，AIR 声明 9
     proof.air = StartHandAir {
-        input: StartHandInput { active_count: 9, ..proof.air.input.clone() }, // 篡改！
+        input: StartHandInput {
+            active_count: 9,
+            ..proof.air.input.clone()
+        }, // 篡改！
         ..proof.air.clone()
     };
 
@@ -387,8 +490,24 @@ fn test_soundness_start_hand_tampered_count() {
 /// Soundness: 篡改 start_hand 的 `ante_mode` 公开输入后，verify 应失败。
 #[test]
 fn test_soundness_start_hand_tampered_ante_mode() {
-    let input = StartHandInput { active_count: 4, ante_mode: 1, ante_amount: 10, ante_collected: 40 };
-    let row = StartHandRow::active(&input, active_count_inv(4), active_count_prod(4), zero_root(), one_root(), 42, 0, 3, 0, 1);
+    let input = StartHandInput {
+        active_count: 4,
+        ante_mode: 1,
+        ante_amount: 10,
+        ante_collected: 40,
+    };
+    let row = StartHandRow::active(
+        &input,
+        active_count_inv(4),
+        active_count_prod(4),
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+    );
     let trace = gen_method_trace(
         StartHandAir::num_columns(),
         &row.to_vec(),
@@ -407,11 +526,20 @@ fn test_soundness_start_hand_tampered_ante_mode() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, StartHandAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        StartHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3),
+    )
+    .expect("prove 失败");
 
     // 篡改 ante_mode：trace 中是 1 (NORMAL)，AIR 声明 2 (BBA)
     proof.air = StartHandAir {
-        input: StartHandInput { ante_mode: 2, ..proof.air.input.clone() },
+        input: StartHandInput {
+            ante_mode: 2,
+            ..proof.air.input.clone()
+        },
         ..proof.air.clone()
     };
 
@@ -447,8 +575,12 @@ fn test_e2e_tick_prove_verify() {
         1, // pre = SHUFFLE
         2, // post = DEAL_HOLE_CARDS
     );
-    let trace = gen_method_trace(TickAir::num_columns(), &row.to_vec(), &TickRow::padding().to_vec())
-        .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        TickAir::num_columns(),
+        &row.to_vec(),
+        &TickRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = TickAir {
         log_size: trace.log_size,
@@ -462,7 +594,13 @@ fn test_e2e_tick_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        TickAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -477,20 +615,13 @@ fn test_soundness_tick_tampered_kind() {
         rake_mode: 0,
         rake_amount: 0,
     };
-    let row = TickRow::active(
-        &input,
-        zero_root(),
-        one_root(),
-        42,
-        0,
-        4,
-        0,
-        1,
-        1,
-        2,
-    );
-    let trace = gen_method_trace(TickAir::num_columns(), &row.to_vec(), &TickRow::padding().to_vec())
-        .expect("trace 生成失败");
+    let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 1, 2);
+    let trace = gen_method_trace(
+        TickAir::num_columns(),
+        &row.to_vec(),
+        &TickRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = TickAir {
         log_size: trace.log_size,
@@ -503,7 +634,13 @@ fn test_soundness_tick_tampered_kind() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        TickAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+    )
+    .expect("prove 失败");
 
     // 篡改 timeout_kind：trace 中是 1，AIR 声明 3
     proof.air = TickAir {
@@ -533,8 +670,12 @@ fn test_soundness_tick_tampered_time_bank() {
         rake_amount: 0,
     };
     let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 5, 5);
-    let trace = gen_method_trace(TickAir::num_columns(), &row.to_vec(), &TickRow::padding().to_vec())
-        .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        TickAir::num_columns(),
+        &row.to_vec(),
+        &TickRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = TickAir {
         log_size: trace.log_size,
@@ -547,7 +688,13 @@ fn test_soundness_tick_tampered_time_bank() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        TickAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+    )
+    .expect("prove 失败");
 
     // 篡改 time_bank_consumed：trace 中是 10_000，AIR 声明 99_999
     proof.air = TickAir {
@@ -573,12 +720,16 @@ fn test_soundness_tick_tampered_rake() {
         timeout_kind: 1, // reveal timeout (triggers settlement)
         time_bank_consumed: 0,
         time_bank_post: 30_000,
-        rake_mode: 1, // PERCENTAGE
+        rake_mode: 1,    // PERCENTAGE
         rake_amount: 50, // 5% of 1000
     };
     let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 8, 8);
-    let trace = gen_method_trace(TickAir::num_columns(), &row.to_vec(), &TickRow::padding().to_vec())
-        .expect("trace 生成失败");
+    let trace = gen_method_trace(
+        TickAir::num_columns(),
+        &row.to_vec(),
+        &TickRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
 
     let air = TickAir {
         log_size: trace.log_size,
@@ -591,7 +742,13 @@ fn test_soundness_tick_tampered_rake() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, TickAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        TickAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+    )
+    .expect("prove 失败");
 
     // 篡改 rake_amount：trace 中是 50，AIR 声明 999
     proof.air = TickAir {
@@ -646,7 +803,13 @@ fn test_e2e_reset_for_next_hand_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, ResetForNextHandAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        ResetForNextHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -676,7 +839,13 @@ fn test_soundness_reset_for_next_hand_via_happy_path() {
         pre_version: 0,
         post_version: 1,
     };
-    let proof = prove_method(&trace, air, ResetForNextHandAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        ResetForNextHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5),
+    )
+    .expect("prove 失败");
     // happy path 验证通过即表明约束系统正常工作
     verify_method(proof).expect("verify 失败");
 }

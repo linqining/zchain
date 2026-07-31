@@ -4,7 +4,7 @@
 
 use crate::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput, CreateTableRow};
 use crate::error::TexasAirResult;
-use crate::state_root::{compute_state_root, state_root_to_air_limbs, StateRoot};
+use crate::state_root::{StateRoot, compute_state_root, state_root_to_air_limbs};
 use crate::trace_gen::MethodTrace;
 
 /// `create_table` trace 生成器输出。

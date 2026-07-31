@@ -251,7 +251,9 @@ impl FrameworkEval for JoinTableAir {
             &diff,
             &carry_lo,
             &carry_hi,
-        ) { eval.add_constraint(__c); }
+        ) {
+            eval.add_constraint(__c);
+        }
         // 约束 9（阶段 3 soundness 新增）：buy_in >= big_blind（全 4-limb ≥ 检查）。
         // 通过减法借位链约束 buy_in - big_blind = ge_diff，且无下溢（borrow_out[3]=0），
         // 在 Limb4Range16 假设下保证 decode(buy_in) >= decode(big_blind)。
@@ -270,7 +272,9 @@ impl FrameworkEval for JoinTableAir {
         let ge_borrow_2 = eval.next_trace_mask();
         let ge_diff = [ge_diff_0, ge_diff_1, ge_diff_2, ge_diff_3];
         let ge_borrow = [ge_borrow_0, ge_borrow_1, ge_borrow_2];
-        for __c in common.ge_4limb(&buy_in_limbs, &big_blind_limbs, &ge_diff, &ge_borrow) { eval.add_constraint(__c); }
+        for __c in common.ge_4limb(&buy_in_limbs, &big_blind_limbs, &ge_diff, &ge_borrow) {
+            eval.add_constraint(__c);
+        }
         let _ = MAX_TOTAL_BET;
         eval
     }

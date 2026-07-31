@@ -285,7 +285,10 @@ impl PrecompileRegistry {
     ///
     /// 默认返回 Stub。
     pub fn status(&self, chain_id: ChainId) -> PrecompileStatus {
-        *self.statuses.get(&chain_id).unwrap_or(&PrecompileStatus::Stub)
+        *self
+            .statuses
+            .get(&chain_id)
+            .unwrap_or(&PrecompileStatus::Stub)
     }
 
     /// 提交预编译合约升级提案。
@@ -335,16 +338,21 @@ impl PrecompileRegistry {
     }
 
     /// 激活待升级的预编译合约（timelock 到期后调用）。
-    pub fn activate_upgrade(&mut self, id: ObjectID, current_height: BlockHeight) -> PokerL1Result<()> {
+    pub fn activate_upgrade(
+        &mut self,
+        id: ObjectID,
+        current_height: BlockHeight,
+    ) -> PokerL1Result<()> {
         let version_info = self
             .versions
             .get_mut(&id)
             .ok_or_else(|| PokerL1Error::Other(format!("预编译未注册: {id:?}")))?;
 
-        let (pending_version, activation_height) = match (version_info.pending_version, version_info.activation_height) {
-            (Some(v), Some(h)) => (v, h),
-            _ => return Err(PokerL1Error::Other(format!("没有待激活的升级: {id:?}"))),
-        };
+        let (pending_version, activation_height) =
+            match (version_info.pending_version, version_info.activation_height) {
+                (Some(v), Some(h)) => (v, h),
+                _ => return Err(PokerL1Error::Other(format!("没有待激活的升级: {id:?}"))),
+            };
 
         if current_height < activation_height {
             return Err(PokerL1Error::Other(format!(
@@ -410,14 +418,35 @@ impl PrecompileRegistry {
 ///
 /// 参考以太坊预编译合约地址（0x01-0x09），使用固定前缀标识预编译合约。
 pub mod reserved {
-    use crate::object_model::ObjectID;
     use crate::Address;
+    use crate::object_model::ObjectID;
 
     /// 预编译合约地址前缀（0xFF 开头，表示系统预留）。
     pub const PRECOMPILE_PREFIX: u8 = 0xFF;
 
     /// 游戏合约预编译地址。
-    pub const GAME_CONTRACT_ADDRESS: Address = [PRECOMPILE_PREFIX, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+    pub const GAME_CONTRACT_ADDRESS: Address = [
+        PRECOMPILE_PREFIX,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+    ];
 
     /// 游戏合约预编译 ObjectID。
     #[must_use]
@@ -426,7 +455,28 @@ pub mod reserved {
     }
 
     /// Texas Poker 合约预编译地址（0xFF..02）。
-    pub const TEXAS_POKER_CONTRACT_ADDRESS: Address = [PRECOMPILE_PREFIX, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02];
+    pub const TEXAS_POKER_CONTRACT_ADDRESS: Address = [
+        PRECOMPILE_PREFIX,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x02,
+    ];
 
     /// Texas Poker 合约预编译 ObjectID。
     #[must_use]
@@ -516,7 +566,10 @@ mod tests {
         let result = registry.execute(
             id,
             &[0x00; 20],
-            &TaggedPubkey { tag: 0, raw: vec![0u8; 32] },
+            &TaggedPubkey {
+                tag: 0,
+                raw: vec![0u8; 32],
+            },
             &[0u8; 32],
             &[],
             &env,
@@ -536,7 +589,10 @@ mod tests {
         let result = registry.execute(
             id,
             &[0x00; 20],
-            &TaggedPubkey { tag: 0, raw: vec![0u8; 32] },
+            &TaggedPubkey {
+                tag: 0,
+                raw: vec![0u8; 32],
+            },
             &[0u8; 32],
             &[],
             &env,
@@ -579,7 +635,9 @@ mod tests {
         let id = ObjectID::new([0xFF; 20], 1);
 
         registry.register(make_test_precompile(id, 1));
-        registry.propose_upgrade(id, make_test_precompile(id, 2), 100).unwrap();
+        registry
+            .propose_upgrade(id, make_test_precompile(id, 2), 100)
+            .unwrap();
 
         let result = registry.activate_upgrade(id, 105);
         assert!(matches!(result, Err(PokerL1Error::Other(_))));
@@ -591,7 +649,9 @@ mod tests {
         let id = ObjectID::new([0xFF; 20], 1);
 
         registry.register(make_test_precompile(id, 1));
-        registry.propose_upgrade(id, make_test_precompile(id, 2), 100).unwrap();
+        registry
+            .propose_upgrade(id, make_test_precompile(id, 2), 100)
+            .unwrap();
 
         let result = registry.activate_upgrade(id, 110);
         assert!(result.is_ok());

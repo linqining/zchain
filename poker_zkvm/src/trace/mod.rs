@@ -350,12 +350,8 @@ impl Trace {
         let mut initial_registers = [0u32; 32];
         for i in 0..32 {
             let off = 16 + i * 4;
-            initial_registers[i] = u32::from_le_bytes([
-                bytes[off],
-                bytes[off + 1],
-                bytes[off + 2],
-                bytes[off + 3],
-            ]);
+            initial_registers[i] =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
         }
 
         // 第 1 步：总大小估算 + 早夭

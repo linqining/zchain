@@ -97,7 +97,9 @@ pub struct GameStatus {
 }
 
 /// Game 执行模式（spec：合约可选 OnChain 默认 / OffChain 可选）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum ExecutionMode {
     /// 全链上执行（默认）。
     OnChain,
@@ -108,7 +110,9 @@ pub enum ExecutionMode {
 /// 下注轮次（Texas Hold'em 四轮下注 + 摊牌）。
 ///
 /// 用于 [`GamePhase::Betting`] 标记当前下注轮次。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum BettingRound {
     /// Preflop：翻牌前下注轮（盲注后、翻牌前）。
     Preflop,
@@ -125,7 +129,9 @@ pub enum BettingRound {
 /// 多玩家提交阶段的子类型（spec：4 种并行/顺序提交阶段）。
 ///
 /// 用于 [`GamePhase::MultiPlayerSubmit`] 标记当前多玩家提交子阶段。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum SubmitPhaseKind {
     /// 洗牌提交：活跃玩家依次提交 shuffle proof（顺序）。
     Shuffle,
@@ -143,7 +149,9 @@ pub enum SubmitPhaseKind {
 ///   使用 `current_turn_player` 与 [`TurnRule::current_turn`] 校验
 /// - [`GamePhase::MultiPlayerSubmit`]：一组玩家并行/顺序提交（shuffle / reveal / reconstruct / leave），
 ///   使用 `pending_submitters` 与 [`TurnRule::current_submitters`] 校验
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum GamePhase {
     /// 下注阶段：单玩家轮转。
     Betting {

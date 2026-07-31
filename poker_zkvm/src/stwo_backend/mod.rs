@@ -37,10 +37,10 @@ pub mod cpu_air;
 pub mod lookups;
 pub mod memory_air;
 pub mod poseidon_air;
-pub mod range_check_air;
 #[allow(missing_docs)] // SmallFpConfig derive 宏生成的 associated functions 无需文档
 pub mod poseidon_m31;
 pub mod prover;
+pub mod range_check_air;
 pub mod recursive;
 pub mod sha256_air;
 pub mod trace_native;

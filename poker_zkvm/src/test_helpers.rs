@@ -376,7 +376,7 @@ pub fn build_poker_hand_eval_v2_elf() -> Vec<u8> {
         addi(6, 6, 1),
         // === category inference (15 条) ===
         // category = 0 (default)
-        addi(7, 0, 0),  // x7 = category = 0
+        addi(7, 0, 0), // x7 = category = 0
         // Block A: if pair_count > 2 (>=3), category = 4
         addi(14, 0, 2), // x14 = 2
         slt(15, 14, 6), // x15 = (2 < pair_count) ? 1 : 0
@@ -559,83 +559,76 @@ pub fn poker_hand_compare_expected(s1: u32, s2: u32) -> u8 {
 pub fn build_texas_poker_full_hand_elf() -> Vec<u8> {
     let text: Vec<u32> = vec![
         // === Phase 1: Setup (5 条) — read_input(0x2000, 62) ===
-        lui(20, 0x2),       // x20 = 0x2000
-        addi(10, 20, 0),    // a0 = 0x2000
-        addi(11, 0, 62),    // a1 = 62
-        addi(17, 0, 1),     // a7 = 1 (read_input)
+        lui(20, 0x2),    // x20 = 0x2000
+        addi(10, 20, 0), // a0 = 0x2000
+        addi(11, 0, 62), // a1 = 62
+        addi(17, 0, 1),  // a7 = 1 (read_input)
         ecall(),
-
         // === Phase 2: GameState write (5 条) — game_state_write(0x02, 0x2000, 52) ===
         // 模拟 ObjectDb 注册初始状态（SLOT_PLAYER_HANDS = 0x02）
-        addi(10, 0, 0x02),  // a0 = SLOT_PLAYER_HANDS
-        addi(11, 20, 0),    // a1 = 0x2000 (deck[0..52])
-        addi(12, 0, 52),    // a2 = 52
-        addi(17, 0, 0x21),  // a7 = 0x21 (game_state_write)
+        addi(10, 0, 0x02), // a0 = SLOT_PLAYER_HANDS
+        addi(11, 20, 0),   // a1 = 0x2000 (deck[0..52])
+        addi(12, 0, 52),   // a2 = 52
+        addi(17, 0, 0x21), // a7 = 0x21 (game_state_write)
         ecall(),
-
         // === Phase 3: GameState read (5 条) — game_state_read(0x02, 0x2100, 52) ===
-        addi(10, 0, 0x02),  // a0 = slot
-        addi(11, 20, 0x100),// a1 = 0x2100 (out_ptr)
-        addi(12, 0, 52),    // a2 = 52
-        addi(17, 0, 0x20),  // a7 = 0x20 (game_state_read)
+        addi(10, 0, 0x02),   // a0 = slot
+        addi(11, 20, 0x100), // a1 = 0x2100 (out_ptr)
+        addi(12, 0, 52),     // a2 = 52
+        addi(17, 0, 0x20),   // a7 = 0x20 (game_state_read)
         ecall(),
-
         // === Phase 4: CardDecode + CardEncode 往返 (11 条) ===
         // 对 deck[0] 做 byte → (rank, suit) → byte' 校验
-        lb(14, 20, 0),      // x14 = deck[0]
-        addi(10, 14, 0),    // a0 = byte = deck[0]
-        addi(11, 20, 0x200),// a1 = out_rank_ptr = 0x2200
-        addi(12, 20, 0x201),// a2 = out_suit_ptr = 0x2201
-        addi(17, 0, 0x31),  // a7 = 0x31 (card_decode)
+        lb(14, 20, 0),       // x14 = deck[0]
+        addi(10, 14, 0),     // a0 = byte = deck[0]
+        addi(11, 20, 0x200), // a1 = out_rank_ptr = 0x2200
+        addi(12, 20, 0x201), // a2 = out_suit_ptr = 0x2201
+        addi(17, 0, 0x31),   // a7 = 0x31 (card_decode)
         ecall(),
         // 重新 encode 回 byte'
-        lb(10, 20, 0x200),  // a0 = rank
-        lb(11, 20, 0x201),  // a1 = suit
-        addi(12, 20, 0x202),// a2 = out_ptr = 0x2202
-        addi(17, 0, 0x30),  // a7 = 0x30 (card_encode)
+        lb(10, 20, 0x200),   // a0 = rank
+        lb(11, 20, 0x201),   // a1 = suit
+        addi(12, 20, 0x202), // a2 = out_ptr = 0x2202
+        addi(17, 0, 0x30),   // a7 = 0x30 (card_encode)
         ecall(),
-
         // === Phase 5: ShuffleVerify (6 条) — shuffle_verify(0x2000, 52, 0x2000, 32) ===
         // 用 deck[0..32] 作 mock proof（非全零，满足 MVP 校验）
-        addi(10, 20, 0),    // a0 = deck_ptr = 0x2000
-        addi(11, 0, 52),    // a1 = 52
-        addi(12, 20, 0),    // a2 = proof_ptr = 0x2000 (复用 deck 前 32B)
-        addi(13, 0, 32),    // a3 = 32
-        addi(17, 0, 0x32),  // a7 = 0x32 (shuffle_verify)
+        addi(10, 20, 0),   // a0 = deck_ptr = 0x2000
+        addi(11, 0, 52),   // a1 = 52
+        addi(12, 20, 0),   // a2 = proof_ptr = 0x2000 (复用 deck 前 32B)
+        addi(13, 0, 32),   // a3 = 32
+        addi(17, 0, 0x32), // a7 = 0x32 (shuffle_verify)
         ecall(),
-
         // === Phase 6: BLS hash_to_curve (5 条) — bls_hash_to_curve(0x2000, 32, 0x2500) ===
-        addi(10, 20, 0),    // a0 = msg_ptr
-        addi(11, 0, 32),    // a1 = 32
-        addi(12, 20, 0x500),// a2 = out_ptr = 0x2500 (48B G1 point)
-        addi(17, 0, 0x10),  // a7 = 0x10 (bls_hash_to_curve)
+        addi(10, 20, 0),     // a0 = msg_ptr
+        addi(11, 0, 32),     // a1 = 32
+        addi(12, 20, 0x500), // a2 = out_ptr = 0x2500 (48B G1 point)
+        addi(17, 0, 0x10),   // a7 = 0x10 (bls_hash_to_curve)
         ecall(),
-
         // === Phase 7: BLS hash_to_scalar (5 条) — bls_hash_to_scalar(0x2000, 32, 0x2600) ===
-        addi(10, 20, 0),    // a0 = msg_ptr
-        addi(11, 0, 32),    // a1 = 32
-        addi(12, 20, 0x600),// a2 = out_ptr = 0x2600 (32B scalar)
-        addi(17, 0, 0x15),  // a7 = 0x15 (bls_hash_to_scalar)
+        addi(10, 20, 0),     // a0 = msg_ptr
+        addi(11, 0, 32),     // a1 = 32
+        addi(12, 20, 0x600), // a2 = out_ptr = 0x2600 (32B scalar)
+        addi(17, 0, 0x15),   // a7 = 0x15 (bls_hash_to_scalar)
         ecall(),
-
         // === Phase 8: P1 牌型评估 (73 条) — input[52..57] → (x21=cat, x22=max) ===
         // Load P1 cards (5 条)
-        lb(1, 20, 52),      // x1 = P1[0]
-        lb(2, 20, 53),      // x2 = P1[1]
-        lb(3, 20, 54),      // x3 = P1[2]
-        lb(4, 20, 55),      // x4 = P1[3]
-        lb(5, 20, 56),      // x5 = P1[4]
+        lb(1, 20, 52), // x1 = P1[0]
+        lb(2, 20, 53), // x2 = P1[1]
+        lb(3, 20, 54), // x3 = P1[2]
+        lb(4, 20, 55), // x4 = P1[3]
+        lb(5, 20, 56), // x5 = P1[4]
         // Init accumulators (3 条)
-        addi(6, 0, 0),      // x6 = pair_count = 0
-        addi(8, 1, 0),      // x8 = max = P1[0]
-        addi(9, 1, 0),      // x9 = min = P1[0]
+        addi(6, 0, 0), // x6 = pair_count = 0
+        addi(8, 1, 0), // x8 = max = P1[0]
+        addi(9, 1, 0), // x9 = min = P1[0]
         // max/min update for x2 (6 条)
-        slt(14, 8, 2),      // x14 = (max < x2) ? 1 : 0
-        beq(14, 0, 8),      // if max >= x2, skip ADDI (→+8 = 下条 SLT)
-        addi(8, 2, 0),      // max = x2
-        slt(15, 2, 9),      // x15 = (x2 < min) ? 1 : 0
-        beq(15, 0, 8),      // if x2 >= min, skip ADDI
-        addi(9, 2, 0),      // min = x2
+        slt(14, 8, 2), // x14 = (max < x2) ? 1 : 0
+        beq(14, 0, 8), // if max >= x2, skip ADDI (→+8 = 下条 SLT)
+        addi(8, 2, 0), // max = x2
+        slt(15, 2, 9), // x15 = (x2 < min) ? 1 : 0
+        beq(15, 0, 8), // if x2 >= min, skip ADDI
+        addi(9, 2, 0), // min = x2
         // max/min update for x3 (6 条)
         slt(14, 8, 3),
         beq(14, 0, 8),
@@ -658,64 +651,122 @@ pub fn build_texas_poker_full_hand_elf() -> Vec<u8> {
         beq(15, 0, 8),
         addi(9, 5, 0),
         // pair_count: 10 pairs (30 条)
-        sub(13, 1, 2), bne(13, 0, 8), addi(6, 6, 1),  // (0,1)
-        sub(13, 1, 3), bne(13, 0, 8), addi(6, 6, 1),  // (0,2)
-        sub(13, 1, 4), bne(13, 0, 8), addi(6, 6, 1),  // (0,3)
-        sub(13, 1, 5), bne(13, 0, 8), addi(6, 6, 1),  // (0,4)
-        sub(13, 2, 3), bne(13, 0, 8), addi(6, 6, 1),  // (1,2)
-        sub(13, 2, 4), bne(13, 0, 8), addi(6, 6, 1),  // (1,3)
-        sub(13, 2, 5), bne(13, 0, 8), addi(6, 6, 1),  // (1,4)
-        sub(13, 3, 4), bne(13, 0, 8), addi(6, 6, 1),  // (2,3)
-        sub(13, 3, 5), bne(13, 0, 8), addi(6, 6, 1),  // (2,4)
-        sub(13, 4, 5), bne(13, 0, 8), addi(6, 6, 1),  // (3,4)
+        sub(13, 1, 2),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (0,1)
+        sub(13, 1, 3),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (0,2)
+        sub(13, 1, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (0,3)
+        sub(13, 1, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (0,4)
+        sub(13, 2, 3),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (1,2)
+        sub(13, 2, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (1,3)
+        sub(13, 2, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (1,4)
+        sub(13, 3, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (2,3)
+        sub(13, 3, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (2,4)
+        sub(13, 4, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1), // (3,4)
         // category inference (15 条) — 末尾 BNE 目标为下方 "Save P1" 块
-        addi(7, 0, 0),      // x7 = category = 0
-        addi(14, 0, 2),     // x14 = 2
-        slt(15, 14, 6),     // x15 = (2 < pair_count) ? 1 : 0
-        beq(15, 0, 12),     // if not, skip to Block B
-        addi(7, 0, 4),      // category = 4
-        jal(0, 20),         // skip to Block C
-        addi(14, 0, 0),     // Block B: x14 = 0
-        slt(15, 14, 6),     // x15 = (0 < pair_count) ? 1 : 0
-        beq(15, 0, 8),      // if not, skip to Block C
-        addi(7, 0, 2),      // category = 2
-        bne(6, 0, 20),      // Block C: if pair_count != 0, skip to Save P1 (→+20)
-        sub(13, 8, 9),      // diff = max - min
-        addi(14, 0, 4),     // x14 = 4
-        bne(13, 14, 8),     // if diff != 4, skip to Save P1 (→+8)
-        addi(7, 0, 5),      // category = 5 (straight)
-
+        addi(7, 0, 0),  // x7 = category = 0
+        addi(14, 0, 2), // x14 = 2
+        slt(15, 14, 6), // x15 = (2 < pair_count) ? 1 : 0
+        beq(15, 0, 12), // if not, skip to Block B
+        addi(7, 0, 4),  // category = 4
+        jal(0, 20),     // skip to Block C
+        addi(14, 0, 0), // Block B: x14 = 0
+        slt(15, 14, 6), // x15 = (0 < pair_count) ? 1 : 0
+        beq(15, 0, 8),  // if not, skip to Block C
+        addi(7, 0, 2),  // category = 2
+        bne(6, 0, 20),  // Block C: if pair_count != 0, skip to Save P1 (→+20)
+        sub(13, 8, 9),  // diff = max - min
+        addi(14, 0, 4), // x14 = 4
+        bne(13, 14, 8), // if diff != 4, skip to Save P1 (→+8)
+        addi(7, 0, 5),  // category = 5 (straight)
         // === Save P1 (2 条) — BNE 目标 +20/+8 ===
-        addi(21, 7, 0),     // x21 = P1 category
-        addi(22, 8, 0),     // x22 = P1 max
-
+        addi(21, 7, 0), // x21 = P1 category
+        addi(22, 8, 0), // x22 = P1 max
         // === Phase 9: P2 牌型评估 (73 条) — input[57..62] → (x23=cat, x24=max) ===
         // Load P2 cards (5 条)
-        lb(1, 20, 57),      // x1 = P2[0]
-        lb(2, 20, 58),      // x2 = P2[1]
-        lb(3, 20, 59),      // x3 = P2[2]
-        lb(4, 20, 60),      // x4 = P2[3]
-        lb(5, 20, 61),      // x5 = P2[4]
+        lb(1, 20, 57), // x1 = P2[0]
+        lb(2, 20, 58), // x2 = P2[1]
+        lb(3, 20, 59), // x3 = P2[2]
+        lb(4, 20, 60), // x4 = P2[3]
+        lb(5, 20, 61), // x5 = P2[4]
         // Init (3 条)
         addi(6, 0, 0),
         addi(8, 1, 0),
         addi(9, 1, 0),
         // max/min (24 条 = 4 cards × 6 instrs)
-        slt(14, 8, 2), beq(14, 0, 8), addi(8, 2, 0), slt(15, 2, 9), beq(15, 0, 8), addi(9, 2, 0),
-        slt(14, 8, 3), beq(14, 0, 8), addi(8, 3, 0), slt(15, 3, 9), beq(15, 0, 8), addi(9, 3, 0),
-        slt(14, 8, 4), beq(14, 0, 8), addi(8, 4, 0), slt(15, 4, 9), beq(15, 0, 8), addi(9, 4, 0),
-        slt(14, 8, 5), beq(14, 0, 8), addi(8, 5, 0), slt(15, 5, 9), beq(15, 0, 8), addi(9, 5, 0),
+        slt(14, 8, 2),
+        beq(14, 0, 8),
+        addi(8, 2, 0),
+        slt(15, 2, 9),
+        beq(15, 0, 8),
+        addi(9, 2, 0),
+        slt(14, 8, 3),
+        beq(14, 0, 8),
+        addi(8, 3, 0),
+        slt(15, 3, 9),
+        beq(15, 0, 8),
+        addi(9, 3, 0),
+        slt(14, 8, 4),
+        beq(14, 0, 8),
+        addi(8, 4, 0),
+        slt(15, 4, 9),
+        beq(15, 0, 8),
+        addi(9, 4, 0),
+        slt(14, 8, 5),
+        beq(14, 0, 8),
+        addi(8, 5, 0),
+        slt(15, 5, 9),
+        beq(15, 0, 8),
+        addi(9, 5, 0),
         // pair_count (30 条)
-        sub(13, 1, 2), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 1, 3), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 1, 4), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 1, 5), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 2, 3), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 2, 4), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 2, 5), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 3, 4), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 3, 5), bne(13, 0, 8), addi(6, 6, 1),
-        sub(13, 4, 5), bne(13, 0, 8), addi(6, 6, 1),
+        sub(13, 1, 2),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 1, 3),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 1, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 1, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 2, 3),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 2, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 2, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 3, 4),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 3, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
+        sub(13, 4, 5),
+        bne(13, 0, 8),
+        addi(6, 6, 1),
         // category inference (15 条) — 末尾 BNE 目标为下方 "Save P2" 块
         addi(7, 0, 0),
         addi(14, 0, 2),
@@ -727,40 +778,38 @@ pub fn build_texas_poker_full_hand_elf() -> Vec<u8> {
         slt(15, 14, 6),
         beq(15, 0, 8),
         addi(7, 0, 2),
-        bne(6, 0, 20),      // if pair_count != 0, skip to Save P2 (→+20)
+        bne(6, 0, 20), // if pair_count != 0, skip to Save P2 (→+20)
         sub(13, 8, 9),
         addi(14, 0, 4),
-        bne(13, 14, 8),     // if diff != 4, skip to Save P2 (→+8)
+        bne(13, 14, 8), // if diff != 4, skip to Save P2 (→+8)
         addi(7, 0, 5),
-
         // === Save P2 (2 条) — BNE 目标 +20/+8 ===
-        addi(23, 7, 0),     // x23 = P2 category
-        addi(24, 8, 0),     // x24 = P2 max
-
+        addi(23, 7, 0), // x23 = P2 category
+        addi(24, 8, 0), // x24 = P2 max
         // === Phase 10: Compare (20 条) — (x21,x22) vs (x23,x24) → x13 = winner ===
         // 不使用 SLLI 合并 score，直接两次 SLT + BNE 比较
-        sub(13, 21, 23),    // x13 = cat1 - cat2
-        bne(13, 0, 20),     // if cat 不同, jump to cat_diff (→+20 = instr +5)
-        sub(13, 22, 24),    // x13 = max1 - max2
-        bne(13, 0, 32),     // if max 不同, jump to max_diff (→+32 = instr +8)
-        addi(13, 0, 0),     // winner = 0 (平局)
-        jal(0, 40),         // skip to output (→+40 = instr +10)
+        sub(13, 21, 23), // x13 = cat1 - cat2
+        bne(13, 0, 20),  // if cat 不同, jump to cat_diff (→+20 = instr +5)
+        sub(13, 22, 24), // x13 = max1 - max2
+        bne(13, 0, 32),  // if max 不同, jump to max_diff (→+32 = instr +8)
+        addi(13, 0, 0),  // winner = 0 (平局)
+        jal(0, 40),      // skip to output (→+40 = instr +10)
         // cat_diff (BNE target +20):
-        slt(14, 21, 23),    // x14 = (cat1 < cat2) ? 1 : 0
-        addi(13, 0, 1),     // winner = 1 (default)
-        beq(14, 0, 28),     // if cat1 > cat2, jump to output (→+28 = instr +7)
-        addi(13, 0, 2),     // winner = 2 (cat1 < cat2)
-        jal(0, 20),         // skip to output (→+20 = instr +5)
+        slt(14, 21, 23), // x14 = (cat1 < cat2) ? 1 : 0
+        addi(13, 0, 1),  // winner = 1 (default)
+        beq(14, 0, 28),  // if cat1 > cat2, jump to output (→+28 = instr +7)
+        addi(13, 0, 2),  // winner = 2 (cat1 < cat2)
+        jal(0, 20),      // skip to output (→+20 = instr +5)
         // max_diff (BNE target +32):
-        slt(14, 22, 24),    // x14 = (max1 < max2) ? 1 : 0
-        addi(13, 0, 1),     // winner = 1
-        beq(14, 0, 8),      // if max1 > max2, jump to output (→+8 = instr +2)
-        addi(13, 0, 2),     // winner = 2
+        slt(14, 22, 24), // x14 = (max1 < max2) ? 1 : 0
+        addi(13, 0, 1),  // winner = 1
+        beq(14, 0, 8),   // if max1 > max2, jump to output (→+8 = instr +2)
+        addi(13, 0, 2),  // winner = 2
         // output (JAL target +40, JAL target +20, BEQ target +28, BEQ target +8):
-        sb(13, 0, 0),       // store winner to addr 0
-        addi(10, 0, 0),     // a0 = 0
-        addi(11, 0, 1),     // a1 = 1
-        addi(17, 0, 2),     // a7 = 2 (commit_output)
+        sb(13, 0, 0),   // store winner to addr 0
+        addi(10, 0, 0), // a0 = 0
+        addi(11, 0, 1), // a1 = 1
+        addi(17, 0, 2), // a7 = 2 (commit_output)
         ecall(),
     ];
 

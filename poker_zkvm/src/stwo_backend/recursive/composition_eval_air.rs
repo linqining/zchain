@@ -16,9 +16,9 @@ use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub};
 
 use ark_ff::{One, Zero};
 use stwo::core::constraints::coset_vanishing;
-use stwo::core::fields::m31::BaseField;
-use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo::core::fields::FieldExpOps;
+use stwo::core::fields::m31::BaseField;
+use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
@@ -338,7 +338,7 @@ mod tests {
     use stwo::core::circle::CirclePoint;
     use stwo::core::pcs::TreeVec;
     use stwo_constraint_framework::{
-        assert_constraints_on_trace, FrameworkComponent, TraceLocationAllocator,
+        FrameworkComponent, TraceLocationAllocator, assert_constraints_on_trace,
     };
 
     use crate::stwo_backend::prover::prove_cpu_trace;

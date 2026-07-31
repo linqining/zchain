@@ -125,7 +125,10 @@ impl RangeCheckAir {
     /// - `range_lookup` — RangeCheckLookup relation 实例（从 channel draw 或 dummy）
     #[must_use]
     pub const fn new(log_size: u32, range_lookup: RangeCheckLookup) -> Self {
-        Self { log_size, range_lookup }
+        Self {
+            log_size,
+            range_lookup,
+        }
     }
 
     /// 获取 log_size。

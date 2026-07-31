@@ -703,12 +703,9 @@ impl Node {
         }
 
         // 5. 状态根重放比对（P0-2 接入）
-        let env = ExecutionEnvironment::new(
-            self.config.chain_id,
-            header.height,
-            header.timestamp_ms,
-        )
-        .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
+        let env =
+            ExecutionEnvironment::new(self.config.chain_id, header.height, header.timestamp_ms)
+                .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
         let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
         let outcome = execute_block(&env, &block.public_txs, &mut *object_db, &mut account_store);
@@ -764,7 +761,12 @@ impl Node {
             .account_store
             .lock()
             .map_err(|e| PokerL1Error::Other(format!("account_store mutex poisoned: {e}")))?;
-        Ok(execute_block(env, txs, &mut *object_db, &mut *account_store))
+        Ok(execute_block(
+            env,
+            txs,
+            &mut *object_db,
+            &mut *account_store,
+        ))
     }
 
     /// 按 hash 查询 DAG vertex。
@@ -857,10 +859,7 @@ impl Node {
     /// - 否则阻塞等待，被 `submit_tx` 的 `notify_one` 唤醒后返回 `true`
     /// - 超时返回 `false`（调用方据此决定是否产出空 vertex 推进 commit）
     pub fn wait_for_pending_tx(&self, timeout: std::time::Duration) -> bool {
-        let guard = self
-            .pending_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
         if !guard.is_empty() {
             return true;
         }
@@ -1553,11 +1552,7 @@ mod tests {
             author_sig: vec![0u8; 65],
         };
         let result = node.validate_vertex(&vertex);
-        assert!(
-            result.is_err(),
-            "S9 排序违规应被拒绝: {:?}",
-            result
-        );
+        assert!(result.is_err(), "S9 排序违规应被拒绝: {:?}", result);
     }
 
     #[test]
@@ -1572,11 +1567,7 @@ mod tests {
             author_sig: vec![0u8; 65],
         };
         let result = node.validate_vertex(&vertex);
-        assert!(
-            result.is_err(),
-            "不存在的 parent 应被拒绝: {:?}",
-            result
-        );
+        assert!(result.is_err(), "不存在的 parent 应被拒绝: {:?}", result);
     }
 
     #[test]
@@ -1667,11 +1658,7 @@ mod tests {
             vec![],
         );
         let result = node.validate_block(&block);
-        assert!(
-            result.is_err(),
-            "tx root 不匹配应被拒绝: {:?}",
-            result
-        );
+        assert!(result.is_err(), "tx root 不匹配应被拒绝: {:?}", result);
     }
 
     #[test]
@@ -1717,11 +1704,7 @@ mod tests {
             vec![gameturn_tx],
         );
         let result = node.validate_block(&block);
-        assert!(
-            result.is_err(),
-            "GameTurn 计费应被拒绝: {:?}",
-            result
-        );
+        assert!(result.is_err(), "GameTurn 计费应被拒绝: {:?}", result);
     }
 
     // ===== P0-4: 动态 quorum（ValidatorSet 接入节点）测试 =====
@@ -1855,10 +1838,7 @@ mod tests {
         };
         let result = node.validate_vertex(&vertex);
         assert!(
-            matches!(
-                result,
-                Err(PokerL1Error::VertexAuthorNotActiveValidator(_))
-            ),
+            matches!(result, Err(PokerL1Error::VertexAuthorNotActiveValidator(_))),
             "非 validator author 应被拒绝: {:?}",
             result
         );
@@ -1883,10 +1863,7 @@ mod tests {
         };
         let result = node.validate_vertex(&vertex);
         assert!(
-            matches!(
-                result,
-                Err(PokerL1Error::VertexAuthorNotActiveValidator(_))
-            ),
+            matches!(result, Err(PokerL1Error::VertexAuthorNotActiveValidator(_))),
             "Bonding author 应被拒绝: {:?}",
             result
         );

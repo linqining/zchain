@@ -490,8 +490,7 @@ impl Instruction {
             // ===== J-type =====
             Jal { rd, imm } => {
                 let imm = imm & 0x1FFFFF; // 21-bit
-                0x6F
-                    | ((rd as u32) << 7)
+                0x6F | ((rd as u32) << 7)
                     | (((imm >> 20) & 0x1) << 31)
                     | (((imm >> 1) & 0x3FF) << 21)
                     | (((imm >> 11) & 0x1) << 20)
@@ -599,10 +598,27 @@ impl Instruction {
             | Ori { imm, .. }
             | Andi { imm, .. } => imm,
             Slli { shamt, .. } | Srli { shamt, .. } | Srai { shamt, .. } => shamt as u32,
-            Add { .. } | Sub { .. } | Sll { .. } | Slt { .. } | Sltu { .. } | Xor { .. }
-            | Srl { .. } | Sra { .. } | Or { .. } | And { .. } | Mul { .. } | Mulh { .. }
-            | Mulhsu { .. } | Mulhu { .. } | Div { .. } | Divu { .. } | Rem { .. }
-            | Remu { .. } | Fence | Ecall | Ebreak => 0,
+            Add { .. }
+            | Sub { .. }
+            | Sll { .. }
+            | Slt { .. }
+            | Sltu { .. }
+            | Xor { .. }
+            | Srl { .. }
+            | Sra { .. }
+            | Or { .. }
+            | And { .. }
+            | Mul { .. }
+            | Mulh { .. }
+            | Mulhsu { .. }
+            | Mulhu { .. }
+            | Div { .. }
+            | Divu { .. }
+            | Rem { .. }
+            | Remu { .. }
+            | Fence
+            | Ecall
+            | Ebreak => 0,
         }
     }
 }
@@ -1516,14 +1532,46 @@ mod tests {
             Instruction::Ecall,
             Instruction::Ebreak,
             // M 扩展（8）
-            Instruction::Mul { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Mulh { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Mulhsu { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Mulhu { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Div { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Divu { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Rem { rd: 0, rs1: 0, rs2: 0 },
-            Instruction::Remu { rd: 0, rs1: 0, rs2: 0 },
+            Instruction::Mul {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Mulh {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Mulhsu {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Mulhu {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Div {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Divu {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Rem {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
+            Instruction::Remu {
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+            },
         ];
         assert_eq!(
             variants.len(),

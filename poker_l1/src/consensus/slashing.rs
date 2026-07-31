@@ -49,7 +49,18 @@ pub const DEFAULT_DEFENSE_WINDOW_BLOCKS: BlockHeight = 50;
 /// 3. `RefuseCheckpoint` — 拒收 checkpoint（审查证据）
 /// 4. `Downtime` — 停机
 /// 5. `RefuseAck` — 拒绝 ACK
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub enum SlashingReason {
     /// vertex equivocation（最高优先级，SEC2-H2）。
     VertexEquivocation,
@@ -92,7 +103,9 @@ impl SlashingReason {
 }
 
 /// Slashing 配置（可治理参数）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct SlashingConfig {
     /// equivocation 类 slashing 百分比（NEW-M15：默认 100%）。
     pub slash_percentage: u32,
@@ -162,7 +175,9 @@ pub const fn is_downtime_auto_slashable(
 /// - `defense_window_blocks` 内可提交"未收到证明"申辩
 /// - 申辩成功 → 豁免 slashing，仅记录审查嫌疑
 /// - 申辩失败或无申辩 → 治理 slashing
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct InvestigationState {
     /// 调查触发 block height（force_checkpoint 提交时的 block height）。
     pub triggered_at_height: BlockHeight,

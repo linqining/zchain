@@ -54,7 +54,9 @@ pub struct RequestDaTx {
 }
 
 /// request_da 应用结果（SubTask 28.6）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct RequestDaOutcome {
     /// 当前所处的故障恢复阶段。
     pub stage: RecoveryStage,

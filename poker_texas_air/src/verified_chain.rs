@@ -466,7 +466,10 @@ fn validate_adjacent_receipts(
 }
 
 fn anchor_mismatch(message: impl Into<String>) -> TexasAirError {
-    TexasAirError::RecursionError(format!("verified chain anchor mismatch: {}", message.into()))
+    TexasAirError::RecursionError(format!(
+        "verified chain anchor mismatch: {}",
+        message.into()
+    ))
 }
 
 #[cfg(test)]
@@ -568,17 +571,8 @@ mod tests {
         let root = StateRoot::from_field(FieldElement::ONE);
         assert!(ExpectedChainAnchor::new(7, 3, 0, root, root, 0, 0, vec![]).is_err());
         assert!(
-            ExpectedChainAnchor::new(
-                7,
-                3,
-                u32::MAX,
-                root,
-                root,
-                0,
-                0,
-                vec![[1; 32], [2; 32]],
-            )
-            .is_err()
+            ExpectedChainAnchor::new(7, 3, u32::MAX, root, root, 0, 0, vec![[1; 32], [2; 32]],)
+                .is_err()
         );
     }
 

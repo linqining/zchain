@@ -23,7 +23,7 @@
 //! poker_l1 **不依赖** poker_texas_air（依赖方向是 air → l1）。本模块是 poker_l1
 //! 侧的等价定义，通过 borsh 字节流与 Orchestrator 解耦。
 
-use borsh::{BorshSerialize, BorshDeserialize};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 // MethodInput 共享自 vm-common（poker_l1 与 poker_texas_air 的 borsh 契约边界）。
 pub use vm_common::prove_task::MethodInput;
@@ -168,7 +168,10 @@ mod tests {
         let recovered: L1ProveTask = borsh::from_slice(&bytes).unwrap();
         assert_eq!(recovered.method_kind, 6);
         assert_eq!(recovered.table_id, 42);
-        assert_eq!(recovered.method_input, MethodInput::SeatOnly { seat_index: 2 });
+        assert_eq!(
+            recovered.method_input,
+            MethodInput::SeatOnly { seat_index: 2 }
+        );
         assert_eq!(recovered.context, dummy_context());
         assert_eq!(recovered.selector, [0xCC; 32]);
         assert_eq!(recovered.raw_args, vec![2]);

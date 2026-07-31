@@ -25,8 +25,8 @@
 //! 布局逐字节一致（48B G1 compressed / 32B scalar big-endian / 96B ciphertext），
 //! 因此 guest 序列化的 buffer 可被 host 直接 `borsh::from_slice` 反序列化。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use borsh::BorshDeserialize;
 use pairing::group::ff::Field;
 use pairing::group::{Curve, Group, GroupEncoding};
@@ -44,7 +44,7 @@ use crate::error::ZkvmError;
 use crate::isa::state::VmState;
 use crate::syscalls::gas::{SyscallGasArgs, syscall_gas};
 use crate::syscalls::host::{read_vm_bytes, write_vm_bytes};
-use crate::syscalls::{Syscall, SyscallContext, SyscallId, REG_A0, REG_A1, REG_A2};
+use crate::syscalls::{REG_A0, REG_A1, REG_A2, Syscall, SyscallContext, SyscallId};
 
 // ===== 常量 =====
 
@@ -102,9 +102,8 @@ fn parse_g1(bytes: &[u8]) -> Option<G1Projective> {
 
 /// 反序列化 Vec<ElGamalCiphertext>（与 guest 端 Borsh 布局一致）。
 fn deserialize_ciphertexts(bytes: &[u8]) -> Result<Vec<ElGamalCiphertext>, ZkvmError> {
-    BorshDeserialize::try_from_slice(bytes).map_err(|e| {
-        ZkvmError::Other(format!("deserialize Vec<ElGamalCiphertext> failed: {e}"))
-    })
+    BorshDeserialize::try_from_slice(bytes)
+        .map_err(|e| ZkvmError::Other(format!("deserialize Vec<ElGamalCiphertext> failed: {e}")))
 }
 
 /// 反序列化 Vec<G1Projective>（明文点列表，Borsh 布局与 guest `Vec<G1Point>` 一致）。
@@ -290,10 +289,8 @@ fn verify_dleq_proof_inner(kind: u32, buf: &[u8]) -> Result<bool, ZkvmError> {
         }
         2 => {
             // ZKShuffleProof
-            let proof: ZKShuffleProof<DefaultCurve> =
-                BorshDeserialize::try_from_slice(proof_bytes).map_err(|e| {
-                    ZkvmError::Other(format!("deserialize ZKShuffleProof failed: {e}"))
-                })?;
+            let proof: ZKShuffleProof<DefaultCurve> = BorshDeserialize::try_from_slice(proof_bytes)
+                .map_err(|e| ZkvmError::Other(format!("deserialize ZKShuffleProof failed: {e}")))?;
             let mut t = MerlinTranscript::new(TRANSCRIPT_MASK_SHUFFLE.as_bytes());
             match proof.verify(&input_cts, &output_cts, &pk, &mut t) {
                 Ok(()) => Ok(true),

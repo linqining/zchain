@@ -28,8 +28,8 @@ use blstrs::G1Projective;
 use poker_protocol::crypto::types::{ECPoint, ECScalar};
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
-use crate::object_model::ObjectID;
 use crate::Address;
+use crate::object_model::ObjectID;
 
 use super::betting::BettingRound;
 use super::card::Card;
@@ -601,12 +601,12 @@ impl TexasPokerTable {
         small_blind: u64,
         big_blind: u64,
     ) -> Self {
-        assert!(max_players >= 2 && max_players <= 9, "max_players 必须 2..=9");
-        assert!(big_blind > 0, "big_blind 必须 > 0");
         assert!(
-            small_blind <= big_blind,
-            "small_blind 必须 <= big_blind"
+            max_players >= 2 && max_players <= 9,
+            "max_players 必须 2..=9"
         );
+        assert!(big_blind > 0, "big_blind 必须 > 0");
+        assert!(small_blind <= big_blind, "small_blind 必须 <= big_blind");
 
         let seats = (0..max_players).map(|_| Seat::empty()).collect();
 
@@ -770,7 +770,8 @@ mod tests {
 
     #[test]
     fn test_table_find_seat() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].player = [0x01; 20];
         table.seats[2].player = [0x02; 20];
 
@@ -781,7 +782,8 @@ mod tests {
 
     #[test]
     fn test_table_find_empty_seat() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].player = [0x01; 20];
         table.seats[1].player = [0x02; 20];
 
@@ -790,7 +792,8 @@ mod tests {
 
     #[test]
     fn test_table_active_count() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         table.seats[0].player = [0x01; 20];
         table.seats[1].player = [0x02; 20];
         table.seats[2].player = [0x03; 20];
@@ -802,7 +805,14 @@ mod tests {
 
     #[test]
     fn test_table_borsh_roundtrip() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "test-table".into(), EMPTY_PLAYER, 4, 50, 100);
+        let mut table = TexasPokerTable::new(
+            dummy_table_id(),
+            "test-table".into(),
+            EMPTY_PLAYER,
+            4,
+            50,
+            100,
+        );
         table.seats[0].player = [0xAB; 20];
         table.seats[0].stack = 1_000_000;
         table.pot = 200;
@@ -835,7 +845,8 @@ mod tests {
 
     #[test]
     fn test_table_bump_version() {
-        let mut table = TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
         assert_eq!(table.version, 0);
         table.bump_version();
         assert_eq!(table.version, 1);

@@ -32,7 +32,7 @@ use crate::error::ZkvmError;
 use crate::isa::state::VmState;
 use crate::syscalls::gas::{SyscallGasArgs, syscall_gas};
 use crate::syscalls::host::{is_whitelisted_slot, read_vm_bytes, write_vm_bytes};
-use crate::syscalls::{Syscall, SyscallContext, SyscallId, REG_A0, REG_A1, REG_A2};
+use crate::syscalls::{REG_A0, REG_A1, REG_A2, Syscall, SyscallContext, SyscallId};
 
 // ===== 1. GameStateRead (0x20) =====
 
@@ -60,11 +60,7 @@ impl Syscall for GameStateReadSyscall {
         SyscallId::GameStateRead
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let slot = state.read_register(REG_A0);
         let out_ptr = state.read_register(REG_A1);
         let out_len = state.read_register(REG_A2);
@@ -116,11 +112,7 @@ impl Syscall for GameStateWriteSyscall {
         SyscallId::GameStateWrite
     }
 
-    fn host_execute(
-        &self,
-        ctx: &mut SyscallContext,
-        state: &mut VmState,
-    ) -> Result<(), ZkvmError> {
+    fn host_execute(&self, ctx: &mut SyscallContext, state: &mut VmState) -> Result<(), ZkvmError> {
         let slot = state.read_register(REG_A0);
         let in_ptr = state.read_register(REG_A1);
         let in_len = state.read_register(REG_A2);
@@ -425,9 +417,6 @@ mod tests {
         state_large.write_register(REG_A2, 1024);
         let gas_large = GameStateWriteSyscall.gas_cost(&state_large);
 
-        assert!(
-            gas_large > gas_small,
-            "in_len=1024 应比 in_len=16 收费更高"
-        );
+        assert!(gas_large > gas_small, "in_len=1024 应比 in_len=16 收费更高");
     }
 }

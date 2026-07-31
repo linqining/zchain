@@ -110,15 +110,11 @@ impl SnapshotChunk {
                 MAX_OBJECTS_PER_CHUNK
             )));
         }
-        let serialized_len = borsh::to_vec(self)
-            .map(|v| v.len())
-            .unwrap_or(usize::MAX);
+        let serialized_len = borsh::to_vec(self).map(|v| v.len()).unwrap_or(usize::MAX);
         if serialized_len > MAX_SNAPSHOT_CHUNK_SIZE {
             return Err(PokerL1Error::Other(format!(
                 "snapshot chunk {} serialized size {} exceeds limit {}",
-                self.index,
-                serialized_len,
-                MAX_SNAPSHOT_CHUNK_SIZE
+                self.index, serialized_len, MAX_SNAPSHOT_CHUNK_SIZE
             )));
         }
         Ok(())
@@ -212,17 +208,13 @@ impl SnapshotVerifier {
     /// 校验单个分块的哈希与清单中对应索引的哈希一致。
     ///
     /// 防止 Byzantine peer 提供篡改的分块数据。
-    pub fn verify_chunk(
-        chunk: &SnapshotChunk,
-        manifest: &SnapshotManifest,
-    ) -> PokerL1Result<()> {
+    pub fn verify_chunk(chunk: &SnapshotChunk, manifest: &SnapshotManifest) -> PokerL1Result<()> {
         // 1. 校验分块索引在范围内
         let idx = chunk.index as usize;
         if idx >= manifest.chunk_hashes.len() {
             return Err(PokerL1Error::Other(format!(
                 "chunk index {} out of range (manifest has {} chunks)",
-                chunk.index,
-                manifest.chunk_count
+                chunk.index, manifest.chunk_count
             )));
         }
 
@@ -345,7 +337,10 @@ pub enum SyncState {
     /// 正在应用分块到 ObjectDb。
     ApplyingChunks { applied: u64, total: u64 },
     /// 快照应用完成，正在追赶区块。
-    CatchingUpBlocks { current_height: BlockHeight, tip_height: BlockHeight },
+    CatchingUpBlocks {
+        current_height: BlockHeight,
+        tip_height: BlockHeight,
+    },
     /// 同步完成。
     Synced,
     /// 同步失败（附带错误信息）。
@@ -469,7 +464,10 @@ impl<'a> FastSync<'a> {
 
         self.state = SyncState::CatchingUpBlocks {
             current_height: manifest.height,
-            tip_height: self.block_store.get_tip_height()?.unwrap_or(manifest.height),
+            tip_height: self
+                .block_store
+                .get_tip_height()?
+                .unwrap_or(manifest.height),
         };
 
         Ok(())
@@ -562,7 +560,9 @@ mod tests {
     fn make_object(id_byte: u8, version: u32) -> Object {
         Object::new(
             ObjectID::new([id_byte; 20], version as u64),
-            Ownership::AddressOwned { owner: [id_byte; 20] },
+            Ownership::AddressOwned {
+                owner: [id_byte; 20],
+            },
             "test_object".to_string(),
             b"data".to_vec(),
             None,
@@ -762,10 +762,7 @@ mod tests {
 
         let mut dst_db = ObjectDb::open_inmemory().unwrap();
         let result = SnapshotApplier::apply_chunks(&mut dst_db, &chunks, &manifest);
-        assert!(
-            result.is_err(),
-            "state_root 不匹配应被检测到"
-        );
+        assert!(result.is_err(), "state_root 不匹配应被检测到");
     }
 
     #[test]
@@ -810,7 +807,10 @@ mod tests {
 
         // 3a. 验证清单
         fast_sync.verify_manifest(&manifest).unwrap();
-        assert!(matches!(fast_sync.state(), SyncState::DownloadingChunks { .. }));
+        assert!(matches!(
+            fast_sync.state(),
+            SyncState::DownloadingChunks { .. }
+        ));
 
         // 3b. 接收所有分块
         for chunk in chunks {
@@ -822,7 +822,10 @@ mod tests {
 
         // 3c. 应用快照
         fast_sync.apply_snapshot(&manifest).unwrap();
-        assert!(matches!(fast_sync.state(), SyncState::CatchingUpBlocks { .. }));
+        assert!(matches!(
+            fast_sync.state(),
+            SyncState::CatchingUpBlocks { .. }
+        ));
 
         // 3d. 追赶区块（tip == snapshot height，无需追赶）
         let caught = fast_sync.catch_up_blocks(100).unwrap();

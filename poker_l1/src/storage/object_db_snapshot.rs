@@ -16,9 +16,9 @@
 //! - snapshot 只需保存正向 mutation log，apply_to 时复用 ObjectDb 现有方法
 //! - snapshot 的 state_root() 直接从克隆的 SMT 读取，无需重新计算
 
+use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, ObjectStore, Version};
 use crate::{Address, Hash};
-use crate::error::{PokerL1Error, PokerL1Result};
 
 use super::object_backend::ObjectBackend;
 use super::object_db::ObjectDb;
@@ -79,10 +79,16 @@ impl ObjectDbSnapshot {
         for m in self.mutations {
             match m {
                 Mutation::Create(o) => db.create(o)?,
-                Mutation::Update { id, actor, new_data } => db.update(&id, &actor, new_data)?,
-                Mutation::Transfer { id, actor, new_owner } => {
-                    db.transfer(&id, &actor, new_owner)?
-                }
+                Mutation::Update {
+                    id,
+                    actor,
+                    new_data,
+                } => db.update(&id, &actor, new_data)?,
+                Mutation::Transfer {
+                    id,
+                    actor,
+                    new_owner,
+                } => db.transfer(&id, &actor, new_owner)?,
                 Mutation::Delete(id) => {
                     db.delete(&id)?;
                 }
@@ -128,7 +134,12 @@ impl ObjectBackend for ObjectDbSnapshot {
         Ok(())
     }
 
-    fn transfer(&mut self, id: &ObjectID, actor: &Address, new_owner: Address) -> PokerL1Result<()> {
+    fn transfer(
+        &mut self,
+        id: &ObjectID,
+        actor: &Address,
+        new_owner: Address,
+    ) -> PokerL1Result<()> {
         self.store.transfer(id, actor, new_owner)?;
         self.mutations.push(Mutation::Transfer {
             id: *id,
@@ -175,7 +186,10 @@ mod tests {
         // 创建 snapshot
         let mut snap = db.create_snapshot();
         let snap_root_before = snap.state_root();
-        assert_eq!(snap_root_before, root_before, "snapshot 初始 state_root 应等于主 DB");
+        assert_eq!(
+            snap_root_before, root_before,
+            "snapshot 初始 state_root 应等于主 DB"
+        );
 
         // 在 snapshot 上写新对象
         let new_obj = make_obj(owner, 2, owner);
@@ -184,7 +198,10 @@ mod tests {
 
         // snapshot state_root 应变化
         let snap_root_after = snap.state_root();
-        assert_ne!(snap_root_after, snap_root_before, "snapshot state_root 应变化");
+        assert_ne!(
+            snap_root_after, snap_root_before,
+            "snapshot state_root 应变化"
+        );
 
         // 主 DB state_root 应不变
         assert_eq!(db.state_root(), root_before, "主 DB state_root 应不变");
@@ -215,7 +232,11 @@ mod tests {
         snap.apply_to(&mut db).expect("apply_to");
 
         // 主 DB state_root 应等于 snapshot 的 state_root
-        assert_eq!(db.state_root(), snap_root, "apply_to 后主 DB state_root 应等于 snapshot");
+        assert_eq!(
+            db.state_root(),
+            snap_root,
+            "apply_to 后主 DB state_root 应等于 snapshot"
+        );
 
         // 主 DB 应能读到 new_obj
         let read = db.read(&new_obj.id).expect("主 DB 应有 new_obj");

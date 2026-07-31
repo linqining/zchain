@@ -15,9 +15,9 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::VariableOutput;
+use sha2::Digest;
 use sha2::Sha256;
 use sha3::Keccak256;
-use sha2::Digest;
 
 use vm_common::crypto::{
     BLS12_381_G1_COMPRESSED_SIZE, BLS12_381_G2_COMPRESSED_SIZE, BN254_G1_COMPRESSED_SIZE,
@@ -58,7 +58,9 @@ impl CryptoProvider for BlstrsCryptoProvider {
         let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
         Update::update(&mut hasher, input);
         let mut result = [0u8; 32];
-        hasher.finalize_variable(&mut result).expect("32 bytes output");
+        hasher
+            .finalize_variable(&mut result)
+            .expect("32 bytes output");
         result
     }
 
@@ -151,13 +153,7 @@ impl CryptoProvider for BlstrsCryptoProvider {
         if pairs.len() != 2 {
             return false;
         }
-        bls::bls_pairing_check(
-            &pairs[0].0,
-            &pairs[0].1,
-            &pairs[1].0,
-            &pairs[1].1,
-        )
-        .unwrap_or(false)
+        bls::bls_pairing_check(&pairs[0].0, &pairs[0].1, &pairs[1].0, &pairs[1].1).unwrap_or(false)
     }
 
     fn bls12_381_hash_to_g1(
@@ -237,10 +233,11 @@ mod tests {
         let provider = BlstrsCryptoProvider::new();
         let result = provider.sha256(b"hello");
         // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-        let expected: [u8; 32] = hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let expected: [u8; 32] =
+            hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+                .unwrap()
+                .try_into()
+                .unwrap();
         assert_eq!(result, expected);
     }
 
@@ -249,10 +246,11 @@ mod tests {
         let provider = BlstrsCryptoProvider::new();
         let result = provider.keccak256(b"");
         // keccak256("") = c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
-        let expected: [u8; 32] = hex::decode("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let expected: [u8; 32] =
+            hex::decode("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
+                .unwrap()
+                .try_into()
+                .unwrap();
         assert_eq!(result, expected);
     }
 

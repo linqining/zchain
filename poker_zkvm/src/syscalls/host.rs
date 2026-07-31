@@ -64,7 +64,11 @@ pub(crate) fn read_vm_bytes(state: &VmState, addr: u32, len: u32) -> Result<Vec<
 }
 
 /// 将字节序列写入 VM 内存 `[addr, addr+bytes.len())`。
-pub(crate) fn write_vm_bytes(state: &mut VmState, addr: u32, bytes: &[u8]) -> Result<(), ZkvmError> {
+pub(crate) fn write_vm_bytes(
+    state: &mut VmState,
+    addr: u32,
+    bytes: &[u8],
+) -> Result<(), ZkvmError> {
     for (i, &byte) in bytes.iter().enumerate() {
         let byte_addr = addr.wrapping_add(i as u32);
         state.write_memory_byte(byte_addr, byte)?;
@@ -562,7 +566,9 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
     registry.register(Box::new(ReadStateSyscall)).unwrap();
     // E2E Phase 1 — BLS12-381 syscall（0x10-0x15，6 个）
     registry
-        .register(Box::new(crate::syscalls::bls12381::Bls12381HashToCurveSyscall))
+        .register(Box::new(
+            crate::syscalls::bls12381::Bls12381HashToCurveSyscall,
+        ))
         .unwrap();
     registry
         .register(Box::new(
@@ -614,14 +620,10 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
         .unwrap();
     // E2E Phase 1 — GameState mock syscall（0x20-0x21，2 个）
     registry
-        .register(Box::new(
-            crate::syscalls::game_state::GameStateReadSyscall,
-        ))
+        .register(Box::new(crate::syscalls::game_state::GameStateReadSyscall))
         .unwrap();
     registry
-        .register(Box::new(
-            crate::syscalls::game_state::GameStateWriteSyscall,
-        ))
+        .register(Box::new(crate::syscalls::game_state::GameStateWriteSyscall))
         .unwrap();
     // E2E Phase 1 — Game-specific syscall（0x30-0x32，3 个）
     registry
@@ -635,9 +637,7 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
         .unwrap();
     // Phase 4 — Mental Poker proof verify + hash syscall（0x33-0x36，4 个）
     registry
-        .register(Box::new(
-            crate::syscalls::proof_verify::Blake2b256Syscall,
-        ))
+        .register(Box::new(crate::syscalls::proof_verify::Blake2b256Syscall))
         .unwrap();
     registry
         .register(Box::new(

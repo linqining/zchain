@@ -513,7 +513,9 @@ mod tests {
     fn test_mds_stwo_shape() {
         let mds = poseidon_m31_mds();
         // 验证 MDS 矩阵非全零（MDS 性质要求非奇异）
-        let all_zero = mds.iter().all(|row| row.iter().all(|&v| v == BaseField::from(0u32)));
+        let all_zero = mds
+            .iter()
+            .all(|row| row.iter().all(|&v| v == BaseField::from(0u32)));
         assert!(!all_zero, "MDS 矩阵不应全为零");
     }
 
@@ -522,7 +524,9 @@ mod tests {
         let rcs = poseidon_m31_round_constants();
         assert_eq!(rcs.len(), POSEIDON_M31_TOTAL_ROUNDS);
         // 验证 round constants 非全零（至少有一轮非零）
-        let any_nonzero = rcs.iter().any(|rc| rc.iter().any(|&v| v != BaseField::from(0u32)));
+        let any_nonzero = rcs
+            .iter()
+            .any(|rc| rc.iter().any(|&v| v != BaseField::from(0u32)));
         assert!(any_nonzero, "Round constants 不应全为零");
     }
 
@@ -541,7 +545,11 @@ mod tests {
         for v_ark in test_vals {
             let v_stwo = ark_to_stwo(v_ark);
             let v_ark2 = stwo_to_ark(v_stwo);
-            assert_eq!(v_ark, v_ark2, "roundtrip 失败：{:?} → {:?} → {:?}", v_ark, v_stwo, v_ark2);
+            assert_eq!(
+                v_ark, v_ark2,
+                "roundtrip 失败：{:?} → {:?} → {:?}",
+                v_ark, v_stwo, v_ark2
+            );
         }
     }
 
@@ -563,7 +571,11 @@ mod tests {
 
     #[test]
     fn test_permutation_deterministic() {
-        let input = [BaseField::from(1u32), BaseField::from(2u32), BaseField::from(3u32)];
+        let input = [
+            BaseField::from(1u32),
+            BaseField::from(2u32),
+            BaseField::from(3u32),
+        ];
         let out1 = poseidon_permutation_m31(input);
         let out2 = poseidon_permutation_m31(input);
         assert_eq!(out1, out2, "相同输入应产生相同输出");
@@ -571,8 +583,16 @@ mod tests {
 
     #[test]
     fn test_permutation_different_inputs() {
-        let a = [BaseField::from(1u32), BaseField::from(2u32), BaseField::from(3u32)];
-        let b = [BaseField::from(1u32), BaseField::from(2u32), BaseField::from(4u32)];
+        let a = [
+            BaseField::from(1u32),
+            BaseField::from(2u32),
+            BaseField::from(3u32),
+        ];
+        let b = [
+            BaseField::from(1u32),
+            BaseField::from(2u32),
+            BaseField::from(4u32),
+        ];
         let out_a = poseidon_permutation_m31(a);
         let out_b = poseidon_permutation_m31(b);
         assert_ne!(out_a, out_b, "不同输入应产生不同输出");
@@ -584,7 +604,10 @@ mod tests {
         let zero = [BaseField::from(0u32); 3];
         let out = poseidon_permutation_m31(zero);
         let all_zero = out.iter().all(|&v| v == BaseField::from(0u32));
-        assert!(!all_zero, "零输入经 permutation 后不应全零（round constants 注入）");
+        assert!(
+            !all_zero,
+            "零输入经 permutation 后不应全零（round constants 注入）"
+        );
     }
 
     #[test]
@@ -602,8 +625,7 @@ mod tests {
         // 用 ark-crypto-primitives sponge 做相同操作
         let config = poseidon_m31_config_ark();
         let mut sponge = PoseidonSponge::<Mersenne31Ark>::new(config);
-        let inputs_ark: Vec<Mersenne31Ark> =
-            inputs_stwo.iter().map(|&b| stwo_to_ark(b)).collect();
+        let inputs_ark: Vec<Mersenne31Ark> = inputs_stwo.iter().map(|&b| stwo_to_ark(b)).collect();
         sponge.absorb(&inputs_ark);
         let ark_out = sponge.squeeze_native_field_elements(1);
         let ark_hash = ark_to_stwo(ark_out[0]);
@@ -628,7 +650,11 @@ mod tests {
     fn test_hash_different_inputs() {
         let a = vec![BaseField::from(1u32), BaseField::from(2u32)];
         let b = vec![BaseField::from(1u32), BaseField::from(3u32)];
-        assert_ne!(poseidon_hash_m31(&a), poseidon_hash_m31(&b), "不同输入应产生不同 hash");
+        assert_ne!(
+            poseidon_hash_m31(&a),
+            poseidon_hash_m31(&b),
+            "不同输入应产生不同 hash"
+        );
     }
 
     #[test]
@@ -678,24 +704,40 @@ mod tests {
 
     #[test]
     fn test_sbox_zero() {
-        assert_eq!(sbox(BaseField::from(0u32)), BaseField::from(0u32), "0^5 = 0");
+        assert_eq!(
+            sbox(BaseField::from(0u32)),
+            BaseField::from(0u32),
+            "0^5 = 0"
+        );
     }
 
     #[test]
     fn test_sbox_one() {
-        assert_eq!(sbox(BaseField::from(1u32)), BaseField::from(1u32), "1^5 = 1");
+        assert_eq!(
+            sbox(BaseField::from(1u32)),
+            BaseField::from(1u32),
+            "1^5 = 1"
+        );
     }
 
     #[test]
     fn test_sbox_two() {
         // 2^5 = 32
-        assert_eq!(sbox(BaseField::from(2u32)), BaseField::from(32u32), "2^5 = 32");
+        assert_eq!(
+            sbox(BaseField::from(2u32)),
+            BaseField::from(32u32),
+            "2^5 = 32"
+        );
     }
 
     #[test]
     fn test_sbox_three() {
         // 3^5 = 243
-        assert_eq!(sbox(BaseField::from(3u32)), BaseField::from(243u32), "3^5 = 243");
+        assert_eq!(
+            sbox(BaseField::from(3u32)),
+            BaseField::from(243u32),
+            "3^5 = 243"
+        );
     }
 
     #[test]
@@ -714,6 +756,10 @@ mod tests {
         let val = BaseField::from(1_073_741_824u32); // 2^30
         let result = sbox(val);
         // val^5 mod (2^31-1) — 仅验证非零（具体值依赖 mod 归一化）
-        assert_ne!(result, BaseField::from(0u32), "2^30 的 5 次方在 M31 上应非零");
+        assert_ne!(
+            result,
+            BaseField::from(0u32),
+            "2^30 的 5 次方在 M31 上应非零"
+        );
     }
 }

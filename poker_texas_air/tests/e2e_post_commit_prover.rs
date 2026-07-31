@@ -10,12 +10,12 @@
 
 use borsh::BorshDeserialize;
 
+use poker_l1::Address;
+use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::dispatch::{self, selectors, CreateTableArgs};
+use poker_l1::vm::contracts::texas_poker::dispatch::{self, CreateTableArgs, selectors};
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
-use poker_l1::object_model::ObjectID;
-use poker_l1::Address;
 
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::prove_task::DispatchOutput;
@@ -23,7 +23,10 @@ use poker_texas_air::prove_task::DispatchOutput;
 fn ctx_as(caller: Address) -> DispatchContext {
     DispatchContext {
         caller,
-        caller_pubkey: TaggedPubkey { tag: 0, raw: vec![0xBB; 32] },
+        caller_pubkey: TaggedPubkey {
+            tag: 0,
+            raw: vec![0xBB; 32],
+        },
         chain_id: 1,
         block_height: 100,
         block_timestamp: 1_000_000,
@@ -56,8 +59,13 @@ fn e2e_create_table_dispatch_to_orchestrator() {
     };
     let args_bytes = borsh::to_vec(&args).unwrap();
 
-    let result = dispatch::dispatch(&ctx_as(creator), &mut table, &selectors::create_table(), &args_bytes)
-        .expect("create_table dispatch 应成功");
+    let result = dispatch::dispatch(
+        &ctx_as(creator),
+        &mut table,
+        &selectors::create_table(),
+        &args_bytes,
+    )
+    .expect("create_table dispatch 应成功");
 
     // 1. return_value 反序列化为 DispatchOutput（borsh 跨 crate 兼容性验证）
     let output: DispatchOutput = BorshDeserialize::try_from_slice(&result.return_value)
@@ -73,7 +81,10 @@ fn e2e_create_table_dispatch_to_orchestrator() {
     let summary = orch
         .prove_and_verify_task(&task)
         .expect("Orchestrator prove+verify 应成功");
-    assert_eq!(summary.method_kind, poker_texas_air::method_kind::MethodKind::CreateTable);
+    assert_eq!(
+        summary.method_kind,
+        poker_texas_air::method_kind::MethodKind::CreateTable
+    );
 
     // 4. state_root 链自洽（单任务，verify_chain 应通过）
     orch.verify_chain().expect("单任务链应自洽");

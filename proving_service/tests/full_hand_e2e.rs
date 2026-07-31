@@ -9,9 +9,7 @@ use proving_service::HandRunner;
 /// 覆盖片段跑通：所有步骤 prove+verify 成功，state_root 链衔接，聚合明确禁用。
 #[test]
 fn full_hand_runner_proves_every_step() {
-    let (_plugin, report) = HandRunner::new()
-        .run()
-        .expect("HandRunner 应跑通");
+    let (_plugin, report) = HandRunner::new().run().expect("HandRunner 应跑通");
 
     // 每步都成功
     assert!(
@@ -47,10 +45,19 @@ fn full_hand_runner_proves_every_step() {
 fn full_hand_runner_covers_expected_methods() {
     let (_plugin, report) = HandRunner::new().run().expect("HandRunner 应跑通");
     let names: Vec<&str> = report.steps.iter().map(|(n, _)| *n).collect();
-    assert!(names.contains(&"create_table"), "缺少 create_table: {names:?}");
+    assert!(
+        names.contains(&"create_table"),
+        "缺少 create_table: {names:?}"
+    );
     assert!(names.contains(&"join_table"), "缺少 join_table: {names:?}");
     assert!(names.contains(&"addon"), "缺少 addon: {names:?}");
     assert!(names.contains(&"rebuy"), "缺少 rebuy: {names:?}");
-    assert!(names.contains(&"leave_table"), "缺少 leave_table: {names:?}");
-    assert!(!names.contains(&"kick_player"), "WAITING kick/reset 多步路径不应冒充单步 AIR: {names:?}");
+    assert!(
+        names.contains(&"leave_table"),
+        "缺少 leave_table: {names:?}"
+    );
+    assert!(
+        !names.contains(&"kick_player"),
+        "WAITING kick/reset 多步路径不应冒充单步 AIR: {names:?}"
+    );
 }

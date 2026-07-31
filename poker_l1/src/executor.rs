@@ -33,6 +33,7 @@
 //! 均通过 [`execute_block`] 得出 `state_root` 并比对（P0-2 接入）。
 
 use crate::account::{AccountStore, apply_public_tx, derive_address, validate_public_tx};
+use crate::block::validator::{validate_tx_chain_id, validate_tx_signature};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::offline::zk_verifier::ZkVerifierRegistry;
@@ -40,8 +41,7 @@ use crate::storage::{ObjectBackend, ObjectDb};
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
-use crate::vm::{ContractObject, execute_contract, load_contract_bytecode, PrecompileRegistry};
-use crate::block::validator::{validate_tx_chain_id, validate_tx_signature};
+use crate::vm::{ContractObject, PrecompileRegistry, execute_contract, load_contract_bytecode};
 use crate::{BlockHeight, ChainId, Hash, TimestampMs};
 use std::sync::Arc;
 
@@ -231,11 +231,9 @@ fn execute_tx_inner<B: ObjectBackend>(
     // - 非 gas-free lane（Public/ForceSync）+ 任意合约 → 需预检
     //   （包括调 gas-free precompile 的情况：按 Public 计费、推进 nonce）
     if !is_gas_free_lane {
-        let account = account_store
-            .get(&caller)
-            .ok_or_else(|| {
-                PokerL1Error::Other(format!("account not found for caller {caller:?}"))
-            })?;
+        let account = account_store.get(&caller).ok_or_else(|| {
+            PokerL1Error::Other(format!("account not found for caller {caller:?}"))
+        })?;
         validate_public_tx(account, tx, env.chain_id)?;
         // 费用预检：fee = gas_used ≤ budget，余额必须覆盖 budget
         if account.balance < tx.gas.budget {
@@ -277,14 +275,16 @@ fn execute_tx_inner<B: ObjectBackend>(
                 // 并推进 nonce — 这符合"gas 策略跟随 lane"的设计（Assumption 3）。
             } else {
                 // 非预编译合约，走 rBPF 执行
-                let (created, modified, used) = execute_contract_call(env, tx, &caller, call, object_db)?;
+                let (created, modified, used) =
+                    execute_contract_call(env, tx, &caller, call, object_db)?;
                 all_created.extend(created);
                 all_modified.extend(modified);
                 gas_used = used;
             }
         } else {
             // 无预编译注册表，所有合约调用走 rBPF
-            let (created, modified, used) = execute_contract_call(env, tx, &caller, call, object_db)?;
+            let (created, modified, used) =
+                execute_contract_call(env, tx, &caller, call, object_db)?;
             all_created.extend(created);
             all_modified.extend(modified);
             gas_used = used;
@@ -385,7 +385,11 @@ fn execute_contract_call<B: ObjectBackend>(
     // 6. 全有或全无提交：先校验全部待写对象，再落库
     commit_object_cache(object_db, caller, &ctx)?;
 
-    Ok((result.created_objects, result.modified_objects, result.gas_used))
+    Ok((
+        result.created_objects,
+        result.modified_objects,
+        result.gas_used,
+    ))
 }
 
 /// 将合约执行后的 `object_cache` 提交到 `ObjectDb`（全有或全无）。
@@ -496,7 +500,8 @@ pub fn execute_block<B: ObjectBackend>(
 
     for tx in txs {
         let needs_gas = !matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
-        if needs_gas && total_gas.saturating_add(tx.gas.budget.min(TX_GAS_LIMIT)) > env.block_gas_limit
+        if needs_gas
+            && total_gas.saturating_add(tx.gas.budget.min(TX_GAS_LIMIT)) > env.block_gas_limit
         {
             receipts.push(TxReceipt::failure(
                 tx,
@@ -531,7 +536,9 @@ mod tests {
     use crate::signature::TaggedPubkey;
     use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{ContractCall, Gas, RouteHint, TxRequest};
-    use crate::vm::precompile::{DispatchResult, ExecutionEnvironment as PrecompileEnv, Precompile};
+    use crate::vm::precompile::{
+        DispatchResult, ExecutionEnvironment as PrecompileEnv, Precompile,
+    };
     use rand::rngs::OsRng;
     use secp256k1::{Message, Secp256k1};
     use std::sync::Arc;
@@ -935,7 +942,11 @@ mod tests {
 
         let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
 
-        assert!(receipt.success, "GameTurn + gas-free precompile 应成功: {:?}", receipt.error);
+        assert!(
+            receipt.success,
+            "GameTurn + gas-free precompile 应成功: {:?}",
+            receipt.error
+        );
         assert_eq!(receipt.gas_used, 0, "GameTurn 免 gas");
         assert_eq!(receipt.fee_charged, 0);
         // 账户不被触碰（gas-free lane 不走 account nonce）
@@ -1375,7 +1386,12 @@ mod tests {
         let mut tx3 = fx.signer.sign(public_request(2));
         tx3.signature[0] ^= 0x01;
 
-        let outcome = execute_block(&env, &[tx1, tx2, tx3], &mut fx.object_db, &mut fx.account_store);
+        let outcome = execute_block(
+            &env,
+            &[tx1, tx2, tx3],
+            &mut fx.object_db,
+            &mut fx.account_store,
+        );
 
         assert_eq!(outcome.receipts.len(), 3);
         assert!(outcome.receipts[0].success);
@@ -1434,11 +1450,19 @@ mod tests {
         });
         let tx3 = fx.signer.sign(req3);
 
-        let outcome = execute_block(&env, &[tx1, tx2, tx3], &mut fx.object_db, &mut fx.account_store);
+        let outcome = execute_block(
+            &env,
+            &[tx1, tx2, tx3],
+            &mut fx.object_db,
+            &mut fx.account_store,
+        );
 
         assert_eq!(outcome.receipts.len(), 3);
         assert!(outcome.receipts[0].success, "tx1 应执行成功");
-        assert!(!outcome.receipts[1].success, "tx2 应被 block gas limit 跳过");
+        assert!(
+            !outcome.receipts[1].success,
+            "tx2 应被 block gas limit 跳过"
+        );
         assert!(
             outcome.receipts[1]
                 .error
@@ -1622,7 +1646,11 @@ mod tests {
 
         let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
 
-        assert!(receipt.success, "Public lane + gas-free precompile 应成功: {:?}", receipt.error);
+        assert!(
+            receipt.success,
+            "Public lane + gas-free precompile 应成功: {:?}",
+            receipt.error
+        );
         // precompile 不经 rBPF VM，gas_used 保持 0
         assert_eq!(receipt.gas_used, 0, "precompile 调用不消耗 gas");
         assert_eq!(receipt.fee_charged, 0, "gas_used=0 → fee_charged=0");
@@ -1650,7 +1678,11 @@ mod tests {
 
         let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
 
-        assert!(receipt.success, "CheckpointAnchor + gas-free precompile 应成功: {:?}", receipt.error);
+        assert!(
+            receipt.success,
+            "CheckpointAnchor + gas-free precompile 应成功: {:?}",
+            receipt.error
+        );
         assert_eq!(receipt.gas_used, 0, "gas-free lane 免 gas");
         assert_eq!(receipt.fee_charged, 0);
         assert_eq!(fx.account().nonce, 0, "gas-free lane 不推进 nonce");

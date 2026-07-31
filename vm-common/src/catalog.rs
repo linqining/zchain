@@ -95,7 +95,12 @@ impl PrecompileCatalog {
 
         // ===== 签名验证 =====
         for &(name, l1, zk, desc) in &[
-            ("ecdsa_secp256k1", true, false, "ECDSA secp256k1 签名验证（poker_l1）"),
+            (
+                "ecdsa_secp256k1",
+                true,
+                false,
+                "ECDSA secp256k1 签名验证（poker_l1）",
+            ),
             ("ed25519", true, true, "Ed25519 签名验证（跨 VM）"),
             ("ecdsa_verify", false, true, "ECDSA 验签电路（zkvm 专用）"),
         ] {
@@ -112,8 +117,18 @@ impl PrecompileCatalog {
 
         // ===== 配对 / 椭圆曲线 =====
         for &(name, l1, zk, desc) in &[
-            ("bls12_381_pairing", true, false, "BLS12-381 配对检查（poker_l1 blstrs）"),
-            ("bn254_pairing", false, true, "BN254 配对检查（zkvm ark-bn254）"),
+            (
+                "bls12_381_pairing",
+                true,
+                false,
+                "BLS12-381 配对检查（poker_l1 blstrs）",
+            ),
+            (
+                "bn254_pairing",
+                false,
+                true,
+                "BN254 配对检查（zkvm ark-bn254）",
+            ),
             ("bn254_ops", false, true, "BN254 椭圆曲线运算（zkvm）"),
         ] {
             entries.push(CatalogEntry {
@@ -131,7 +146,11 @@ impl PrecompileCatalog {
         // gas-free lane: gameturn + checkpoint_anchor
         for &(name, gas_free, desc) in &[
             ("gameturn", true, "游戏回合（gas-free lane，GameTurn 通道）"),
-            ("checkpoint_anchor", true, "检查点锚定（gas-free lane，Game 通道）"),
+            (
+                "checkpoint_anchor",
+                true,
+                "检查点锚定（gas-free lane，Game 通道）",
+            ),
             ("force_advance", false, "强制推进"),
             ("force_settle", false, "强制结算"),
             ("force_checkin", false, "强制签到"),
@@ -250,7 +269,9 @@ mod tests {
     #[test]
     fn test_find_checkpoint_anchor_gas_free() {
         let c = PrecompileCatalog::default_catalog();
-        let e = c.find("checkpoint_anchor").expect("checkpoint_anchor 应存在");
+        let e = c
+            .find("checkpoint_anchor")
+            .expect("checkpoint_anchor 应存在");
         assert!(e.l1_available);
         assert!(e.is_gas_free, "checkpoint_anchor 应免 gas");
     }

@@ -89,7 +89,9 @@ impl ChallengeDeltaTx {
 }
 
 /// challenge_delta 应用结果（SubTask 28.5）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct ChallengeDeltaOutcome {
     /// 挑战是否成立（true: Δ 不一致，操作方 forfeit；false: Δ 一致，挑战方 forfeit）。
     pub succeeded: bool,

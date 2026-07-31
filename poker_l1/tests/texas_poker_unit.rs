@@ -1,30 +1,26 @@
 //! Texas Poker 模块单元测试 — 覆盖核心游戏逻辑。
 
-use poker_l1::signature::TaggedPubkey;
 use poker_l1::Address;
+use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::texas_poker::{
-    betting::{BettingRound, BettingError},
+    betting::{BettingError, BettingRound},
     card::{
-        Card, PlayingCard,
-        SPADES, HEARTS, DIAMONDS, CLUBS,
-        TWO, THREE, FOUR, FIVE, SIX, SEVEN, EIGHT, NINE, TEN, JACK, QUEEN, KING, ACE,
+        ACE, CLUBS, Card, DIAMONDS, EIGHT, FIVE, FOUR, HEARTS, JACK, KING, NINE, PlayingCard,
+        QUEEN, SEVEN, SIX, SPADES, TEN, THREE, TWO,
     },
     constants::{
-        ACTION_CHECK, ACTION_CALL, ACTION_FOLD, ACTION_RAISE,
-        ROUND_WAITING, ROUND_PREFLOP, ROUND_FLOP, ROUND_TURN, ROUND_RIVER, ROUND_SHOWDOWN,
-        MAX_PLAYERS, MIN_PLAYERS_TO_START, MAX_TOTAL_BET,
-        SHUFFLE_PHASE_NONE, SHUFFLE_PHASE_BEFORE_PREFLOP,
-        REVEAL_PHASE_NONE, REVEAL_PHASE_FLOP,
-        RECONSTRUCT_PHASE_NONE, RECONSTRUCT_PHASE_COLLECTING,
-        ANTE_MODE_NONE, ANTE_MODE_NORMAL, ANTE_MODE_BBA,
-        RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE,
+        ACTION_CALL, ACTION_CHECK, ACTION_FOLD, ACTION_RAISE, ANTE_MODE_BBA, ANTE_MODE_NONE,
+        ANTE_MODE_NORMAL, MAX_PLAYERS, MAX_TOTAL_BET, MIN_PLAYERS_TO_START, RAKE_MODE_NONE,
+        RAKE_MODE_PERCENTAGE, RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_NONE,
+        REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER,
+        ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP,
+        SHUFFLE_PHASE_NONE,
     },
     hand_evaluator::{
-        HandRank, find_winners, evaluate_best,
-        HIGH_CARD, ONE_PAIR, TWO_PAIR, THREE_OF_A_KIND, STRAIGHT, FLUSH,
-        FULL_HOUSE, FOUR_OF_A_KIND, STRAIGHT_FLUSH, ROYAL_FLUSH,
+        FLUSH, FOUR_OF_A_KIND, FULL_HOUSE, HIGH_CARD, HandRank, ONE_PAIR, ROYAL_FLUSH, STRAIGHT,
+        STRAIGHT_FLUSH, THREE_OF_A_KIND, TWO_PAIR, evaluate_best, find_winners,
     },
-    side_pot::{SidePot, SidePotResult, calculate_side_pots, SidePotError},
+    side_pot::{SidePot, SidePotError, SidePotResult, calculate_side_pots},
     types::{Seat, SeatStatus},
 };
 
@@ -137,9 +133,19 @@ fn test_card_all_suit_names() {
 #[test]
 fn test_card_all_rank_names() {
     let ranks = [
-        (TWO, "2"), (THREE, "3"), (FOUR, "4"), (FIVE, "5"),
-        (SIX, "6"), (SEVEN, "7"), (EIGHT, "8"), (NINE, "9"),
-        (TEN, "10"), (JACK, "J"), (QUEEN, "Q"), (KING, "K"), (ACE, "A"),
+        (TWO, "2"),
+        (THREE, "3"),
+        (FOUR, "4"),
+        (FIVE, "5"),
+        (SIX, "6"),
+        (SEVEN, "7"),
+        (EIGHT, "8"),
+        (NINE, "9"),
+        (TEN, "10"),
+        (JACK, "J"),
+        (QUEEN, "Q"),
+        (KING, "K"),
+        (ACE, "A"),
     ];
     for (rank, expected) in ranks {
         assert_eq!(Card::new(SPADES, rank).rank_name(), expected);
@@ -268,21 +274,21 @@ fn test_betting_round_can_raise() {
 #[test]
 fn test_betting_round_available_actions() {
     let round = BettingRound::new(10, 10);
-    
+
     // 需要跟注，有足够筹码
     let actions = round.available_actions(0, 100);
     assert!(actions & ACTION_FOLD != 0);
     assert!(actions & ACTION_CALL != 0);
     assert!(actions & ACTION_RAISE != 0);
     assert!(actions & ACTION_CHECK == 0);
-    
+
     // 已跟注，有筹码
     let actions = round.available_actions(10, 100);
     assert!(actions & ACTION_FOLD != 0);
     assert!(actions & ACTION_CHECK != 0);
     assert!(actions & ACTION_RAISE != 0);
     assert!(actions & ACTION_CALL == 0);
-    
+
     // 需要跟注，但筹码不够加注
     let actions = round.available_actions(0, 10);
     assert!(actions & ACTION_FOLD != 0);
@@ -464,10 +470,22 @@ fn test_betting_round_can_call_zero_chips_needed_zero_stack() {
 
 #[test]
 fn test_betting_error_display() {
-    assert_eq!(format!("{}", BettingError::InvalidRaiseAmount), "invalid raise amount");
-    assert_eq!(format!("{}", BettingError::CannotRaise), "cannot raise: insufficient stack");
-    assert_eq!(format!("{}", BettingError::NotPlayerTurn), "not player's turn");
-    assert_eq!(format!("{}", BettingError::PlayerInactive), "player folded or all-in");
+    assert_eq!(
+        format!("{}", BettingError::InvalidRaiseAmount),
+        "invalid raise amount"
+    );
+    assert_eq!(
+        format!("{}", BettingError::CannotRaise),
+        "cannot raise: insufficient stack"
+    );
+    assert_eq!(
+        format!("{}", BettingError::NotPlayerTurn),
+        "not player's turn"
+    );
+    assert_eq!(
+        format!("{}", BettingError::PlayerInactive),
+        "player folded or all-in"
+    );
 }
 
 // ===========================================================================
@@ -520,7 +538,7 @@ fn test_hand_rank_ordering() {
     let four_of_a_kind = HandRank::new(FOUR_OF_A_KIND, &[ACE]);
     let straight_flush = HandRank::new(STRAIGHT_FLUSH, &[ACE]);
     let royal_flush = HandRank::new(ROYAL_FLUSH, &[]);
-    
+
     assert!(high_card < one_pair);
     assert!(one_pair < two_pair);
     assert!(two_pair < three_of_a_kind);
@@ -536,7 +554,7 @@ fn test_hand_rank_ordering() {
 fn test_find_winners_two_players_tie() {
     let player1 = make_cards(&[0, 1]); // 2♠ 3♠
     let player2 = make_cards(&[13, 14]); // 2♦ 3♦
-    
+
     let winners = find_winners(&[(0, player1), (1, player2)]);
     assert_eq!(winners.len(), 2);
     assert!(winners.contains(&0));
@@ -547,7 +565,7 @@ fn test_find_winners_two_players_tie() {
 fn test_find_winners_two_players_one_wins() {
     let player1 = make_cards(&[12, 25]); // A♠ A♥ (一对A)
     let player2 = make_cards(&[0, 13]); // 2♠ 2♦ (一对2)
-    
+
     let winners = find_winners(&[(0, player1), (1, player2)]);
     assert_eq!(winners.len(), 1);
     assert!(winners.contains(&0));
@@ -558,7 +576,7 @@ fn test_find_winners_three_players_one_winner() {
     let player1 = make_cards(&[0, 1]); // 2♠ 3♠
     let player2 = make_cards(&[12, 25]); // A♠ A♥ (一对A)
     let player3 = make_cards(&[2, 3]); // 4♠ 5♠
-    
+
     let winners = find_winners(&[(0, player1), (1, player2), (2, player3)]);
     assert_eq!(winners.len(), 1);
     assert!(winners.contains(&1));
@@ -577,7 +595,7 @@ fn test_hand_rank_kickers_padding() {
     // kickers 不足 5 位应补 0
     let hr = HandRank::new(ONE_PAIR, &[14, 13]);
     assert_eq!(hr.kickers, [14, 13, 0, 0, 0]);
-    
+
     // kickers 超过 5 位应截断
     let hr = HandRank::new(HIGH_CARD, &[14, 13, 12, 11, 10, 9]);
     assert_eq!(hr.kickers, [14, 13, 12, 11, 10]);
@@ -590,7 +608,7 @@ fn test_hand_rank_eq_and_ord() {
     assert_eq!(a, b);
     assert!(a <= b);
     assert!(a >= b);
-    
+
     let c = HandRank::new(ONE_PAIR, &[14, 13, 12, 10]);
     assert!(a > c);
     assert!(c < a);
@@ -680,13 +698,13 @@ fn test_straight_flush_wheel() {
 fn test_royal_flush_is_not_straight_flush() {
     // 皇家同花顺
     let cards = make_cards(&[
-        8,   // 10♠
-        9,   // J♠
-        10,  // Q♠
-        11,  // K♠
-        12,  // A♠
-        0,   // 2♠
-        13,  // 2♥
+        8,  // 10♠
+        9,  // J♠
+        10, // Q♠
+        11, // K♠
+        12, // A♠
+        0,  // 2♠
+        13, // 2♥
     ]);
     let rank = evaluate_best(&cards);
     assert_eq!(rank.category, ROYAL_FLUSH);
@@ -749,7 +767,7 @@ fn test_find_winners_three_way_tie() {
     let p1 = make_cards(&[0, 13]); // 2♠ 2♦ (一对2)
     let p2 = make_cards(&[1, 14]); // 3♠ 3♦ (一对3)
     let p3 = make_cards(&[2, 15]); // 4♠ 4♦ (一对4)
-    
+
     // 三个都是一对，p3 赢
     let winners = find_winners(&[(0, p1), (1, p2), (2, p3)]);
     assert_eq!(winners.len(), 1);
@@ -937,7 +955,7 @@ fn test_evaluate_best_seven_cards_multiple_options() {
         Card::new(SPADES, QUEEN),
         Card::new(SPADES, JACK),
         Card::new(SPADES, NINE), // 同花（缺10）
-        Card::new(HEARTS, TEN),   // 顺子 A-K-Q-J-10
+        Card::new(HEARTS, TEN),  // 顺子 A-K-Q-J-10
         Card::new(DIAMONDS, TWO),
     ];
     let rank = evaluate_best(&cards);
@@ -990,28 +1008,28 @@ fn test_hand_rank_different_categories() {
     let high_card = HandRank::new(HIGH_CARD, &[ACE, KING, QUEEN, JACK, TEN]);
     let one_pair = HandRank::new(ONE_PAIR, &[2, 2, 2, 2, 2]); // 一对2
     assert!(one_pair > high_card);
-    
+
     let two_pair = HandRank::new(TWO_PAIR, &[2, 2, 2, 2, 2]);
     assert!(two_pair > one_pair);
-    
+
     let three = HandRank::new(THREE_OF_A_KIND, &[2, 2, 2, 2, 2]);
     assert!(three > two_pair);
-    
+
     let straight = HandRank::new(STRAIGHT, &[5, 0, 0, 0, 0]); // wheel
     assert!(straight > three);
-    
+
     let flush = HandRank::new(FLUSH, &[2, 2, 2, 2, 2]);
     assert!(flush > straight);
-    
+
     let full_house = HandRank::new(FULL_HOUSE, &[2, 2, 2]);
     assert!(full_house > flush);
-    
+
     let four = HandRank::new(FOUR_OF_A_KIND, &[2, 2]);
     assert!(four > full_house);
-    
+
     let straight_flush = HandRank::new(STRAIGHT_FLUSH, &[5, 0, 0, 0, 0]);
     assert!(straight_flush > four);
-    
+
     let royal = HandRank::new(ROYAL_FLUSH, &[0, 0, 0, 0, 0]);
     assert!(royal > straight_flush);
 }
@@ -1180,7 +1198,7 @@ fn test_calculate_side_pots_four_players_multiple_all_in() {
     let folded = vec![false, false, false, false];
     let all_in = vec![true, true, true, false];
     let result = calculate_side_pots(&bets, &folded, &all_in).unwrap();
-    
+
     assert_eq!(result.pots.len(), 4);
     assert_eq!(result.pots[0].amount, 80);
     assert_eq!(result.pots[1].amount, 90);
@@ -1193,8 +1211,14 @@ fn test_calculate_side_pots_four_players_multiple_all_in() {
 
 #[test]
 fn test_side_pot_error_display() {
-    assert_eq!(format!("{}", SidePotError::BetOverflow), "total bets exceed MAX_TOTAL_BET, possible overflow");
-    assert_eq!(format!("{}", SidePotError::LengthMismatch), "bets/folded/all_in vectors must have same length");
+    assert_eq!(
+        format!("{}", SidePotError::BetOverflow),
+        "total bets exceed MAX_TOTAL_BET, possible overflow"
+    );
+    assert_eq!(
+        format!("{}", SidePotError::LengthMismatch),
+        "bets/folded/all_in vectors must have same length"
+    );
 }
 
 #[test]
@@ -1203,7 +1227,7 @@ fn test_side_pot_result_total_matches_sum() {
     let folded = vec![false, false, false];
     let all_in = vec![true, true, false];
     let result = calculate_side_pots(&bets, &folded, &all_in).unwrap();
-    
+
     let sum: u64 = result.pots.iter().map(|p| p.amount).sum();
     assert_eq!(result.total(), sum);
     assert_eq!(result.total(), 300);
@@ -1298,14 +1322,14 @@ fn test_calculate_side_pots_all_in_folded_only() {
 // 7. state_machine.rs — 状态机与游戏逻辑
 // ===========================================================================
 
-use group::Group;
 use blstrs::G1Projective;
-use poker_protocol::crypto::types::ECPoint;
+use group::Group;
 use poker_l1::vm::contracts::texas_poker::{
-    state_machine,
-    types::{TexasPokerTable, EMPTY_PLAYER},
     events::TexasPokerEvent,
+    state_machine,
+    types::{EMPTY_PLAYER, TexasPokerTable},
 };
+use poker_protocol::crypto::types::ECPoint;
 
 fn dummy_table(name: &str, max_players: u8) -> TexasPokerTable {
     let id = poker_l1::object_model::ObjectID::new([0xFF; 20], 0);
@@ -1340,7 +1364,7 @@ fn occupy_seat(table: &mut TexasPokerTable, seat_idx: u8, player: [u8; 20], stac
 fn test_state_predicates_can_join_state() {
     let mut table = dummy_table("test", 6);
     assert!(state_machine::can_join_state(&table));
-    
+
     table.round_state = ROUND_PREFLOP;
     assert!(!state_machine::can_join_state(&table));
 }
@@ -1349,7 +1373,7 @@ fn test_state_predicates_can_join_state() {
 fn test_state_predicates_can_leave_state() {
     let mut table = dummy_table("test", 6);
     assert!(state_machine::can_leave_state(&table));
-    
+
     table.round_state = ROUND_FLOP;
     assert!(!state_machine::can_leave_state(&table));
 }
@@ -1358,11 +1382,11 @@ fn test_state_predicates_can_leave_state() {
 fn test_state_predicates_is_betting_round() {
     let mut table = dummy_table("test", 6);
     assert!(!state_machine::is_betting_round(&table));
-    
+
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     assert!(state_machine::is_betting_round(&table));
-    
+
     table.round_state = ROUND_SHOWDOWN;
     assert!(!state_machine::is_betting_round(&table));
 }
@@ -1371,7 +1395,7 @@ fn test_state_predicates_is_betting_round() {
 fn test_state_predicates_is_playing() {
     let mut table = dummy_table("test", 6);
     assert!(!state_machine::is_playing(&table));
-    
+
     table.round_state = ROUND_PREFLOP;
     assert!(state_machine::is_playing(&table));
 }
@@ -1380,7 +1404,7 @@ fn test_state_predicates_is_playing() {
 fn test_state_predicates_is_player_turn() {
     let mut table = dummy_table("test", 6);
     table.current_turn = Some(2);
-    
+
     assert!(state_machine::is_player_turn(&table, 2));
     assert!(!state_machine::is_player_turn(&table, 3));
 }
@@ -1400,12 +1424,12 @@ fn test_seat_helpers_count_active_players() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
-    
+
     assert_eq!(state_machine::count_active_players(&table.seats), 3);
-    
+
     table.seats[1].folded = true;
     assert_eq!(state_machine::count_active_players(&table.seats), 2);
-    
+
     table.seats[2].is_waiting = true;
     assert_eq!(state_machine::count_active_players(&table.seats), 1);
 }
@@ -1415,12 +1439,12 @@ fn test_seat_helpers_count_active_occupied() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    
+
     assert_eq!(state_machine::count_active_occupied(&table.seats), 2);
-    
+
     table.seats[1].folded = true;
     assert_eq!(state_machine::count_active_occupied(&table.seats), 2);
-    
+
     table.seats[1].is_waiting = true;
     assert_eq!(state_machine::count_active_occupied(&table.seats), 1);
 }
@@ -1430,7 +1454,7 @@ fn test_seat_helpers_get_active_seat_indices() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 2, [0x02; 20], 1000);
-    
+
     let indices = state_machine::get_active_seat_indices(&table.seats);
     assert_eq!(indices, vec![0, 2]);
 }
@@ -1442,18 +1466,30 @@ fn test_seat_helpers_find_next_active_seat() {
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
     table.seats[0].folded = true;
-    
+
     // 环形查找：从 seat 0 开始找下一个，跳过 folded 的 seat 0，找到 seat 1
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 0, 4), Some(1));
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 0, 4),
+        Some(1)
+    );
     // 从 seat 1 开始找下一个，找到 seat 2
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 1, 4), Some(2));
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 1, 4),
+        Some(2)
+    );
     // 从 seat 2 开始找下一个，绕回找到 seat 1（seat 0 已 folded）
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 2, 4), Some(1));
-    
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 2, 4),
+        Some(1)
+    );
+
     // 所有玩家都 folded 时返回 None
     table.seats[1].folded = true;
     table.seats[2].folded = true;
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 0, 4), None);
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 0, 4),
+        None
+    );
 }
 
 #[test]
@@ -1461,18 +1497,21 @@ fn test_seat_helpers_find_next_participating_seat() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 2, [0x02; 20], 1000);
-    
-    assert_eq!(state_machine::find_next_participating_seat(&table.seats, 0, 4), Some(2));
+
+    assert_eq!(
+        state_machine::find_next_participating_seat(&table.seats, 0, 4),
+        Some(2)
+    );
 }
 
 #[test]
 fn test_seat_helpers_has_actionable_player() {
     let mut table = dummy_table("test", 4);
     assert!(!state_machine::has_actionable_player(&table.seats));
-    
+
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     assert!(state_machine::has_actionable_player(&table.seats));
-    
+
     table.seats[0].folded = true;
     assert!(!state_machine::has_actionable_player(&table.seats));
 }
@@ -1484,7 +1523,7 @@ fn test_apply_fold_not_betting_round() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.round_state = ROUND_WAITING;
-    
+
     let mut events = vec![];
     let result = state_machine::apply_fold(&mut table, 0, &mut events);
     assert!(matches!(result, Err(_)));
@@ -1498,7 +1537,7 @@ fn test_apply_fold_not_players_turn() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(1);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_fold(&mut table, 0, &mut events);
     assert!(matches!(result, Err(_)));
@@ -1513,7 +1552,7 @@ fn test_apply_fold_success() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_fold(&mut table, 0, &mut events);
     assert!(result.is_ok());
@@ -1524,7 +1563,7 @@ fn test_apply_fold_success() {
 fn test_apply_check_not_betting_round() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_check(&mut table, 0, &mut events);
     assert!(matches!(result, Err(_)));
@@ -1537,7 +1576,7 @@ fn test_apply_check_bet_below_current() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_check(&mut table, 0, &mut events);
     assert!(matches!(result, Err(_)));
@@ -1551,7 +1590,7 @@ fn test_apply_check_success() {
     table.round_state = ROUND_FLOP;
     table.betting_round = Some(BettingRound::new(100, 0));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_check(&mut table, 0, &mut events);
     assert!(result.is_ok());
@@ -1563,7 +1602,7 @@ fn test_apply_check_success() {
 fn test_apply_call_not_betting_round() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_call(&mut table, 0, &mut events);
     assert!(matches!(result, Err(_)));
@@ -1577,7 +1616,7 @@ fn test_apply_call_success() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_call(&mut table, 0, &mut events);
     assert!(result.is_ok());
@@ -1593,7 +1632,7 @@ fn test_apply_call_all_in() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_call(&mut table, 0, &mut events);
     assert!(result.is_ok());
@@ -1605,7 +1644,7 @@ fn test_apply_call_all_in() {
 fn test_apply_raise_not_betting_round() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_raise(&mut table, 0, 200, &mut events);
     assert!(matches!(result, Err(_)));
@@ -1619,7 +1658,7 @@ fn test_apply_raise_success() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_raise(&mut table, 0, 300, &mut events);
     assert!(result.is_ok());
@@ -1635,7 +1674,7 @@ fn test_apply_raise_all_in() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_raise(&mut table, 0, 500, &mut events);
     assert!(result.is_ok());
@@ -1652,7 +1691,7 @@ fn test_apply_raise_resets_other_players() {
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
     table.seats[1].acted_this_round = true;
-    
+
     let mut events = vec![];
     let result = state_machine::apply_raise(&mut table, 0, 300, &mut events);
     assert!(result.is_ok());
@@ -1670,11 +1709,11 @@ fn test_reset_for_next_hand_clears_state() {
     table.community_cards = vec![Card::new(0, 14), Card::new(1, 13)];
     table.round_state = ROUND_SHOWDOWN;
     table.betting_round = Some(BettingRound::new(100, 0));
-    
+
     let mut events = vec![];
     let result = state_machine::reset_for_next_hand(&mut table, &mut events);
     assert!(result.is_ok());
-    
+
     assert_eq!(table.round_state, ROUND_WAITING);
     assert_eq!(table.pot, 0);
     assert!(table.community_cards.is_empty());
@@ -1687,11 +1726,11 @@ fn test_reset_for_next_hand_merges_pending_addon() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 500);
     table.seats[0].pending_addon = 1000;
-    
+
     let mut events = vec![];
     let result = state_machine::reset_for_next_hand(&mut table, &mut events);
     assert!(result.is_ok());
-    
+
     assert_eq!(table.seats[0].stack, 1500);
     assert_eq!(table.seats[0].pending_addon, 0);
 }
@@ -1701,11 +1740,11 @@ fn test_reset_for_next_hand_refills_time_bank() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 500);
     table.seats[0].time_bank_ms = 0;
-    
+
     let mut events = vec![];
     let result = state_machine::reset_for_next_hand(&mut table, &mut events);
     assert!(result.is_ok());
-    
+
     assert!(table.seats[0].time_bank_ms > 0);
 }
 
@@ -1718,10 +1757,10 @@ fn test_kick_player_internal_refunds_stack() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 500);
     table.chip_pool = 500;
-    
+
     let mut events = vec![];
     state_machine::kick_player_internal(&mut table, 0, 0, &mut events);
-    
+
     assert!(!table.seats[0].is_occupied());
     assert_eq!(table.chip_pool, 0);
 }
@@ -1733,21 +1772,21 @@ fn test_is_playing_different_phases() {
     let mut table = dummy_table("test", 4);
     // 初始状态：不在游戏中
     assert!(!state_machine::is_playing(&table));
-    
+
     // round_state 非 WAITING
     table.round_state = ROUND_PREFLOP;
     assert!(state_machine::is_playing(&table));
-    
+
     // 回到 WAITING，但 shuffle phase 非 NONE
     table.round_state = ROUND_WAITING;
     table.shuffle_state.phase = SHUFFLE_PHASE_BEFORE_PREFLOP;
     assert!(state_machine::is_playing(&table));
-    
+
     // shuffle 结束，但 reveal phase 非 NONE
     table.shuffle_state.phase = SHUFFLE_PHASE_NONE;
     table.reveal_token_state.reveal_phase = REVEAL_PHASE_FLOP;
     assert!(state_machine::is_playing(&table));
-    
+
     // reveal 结束，但 reconstruct 非 NONE
     table.reveal_token_state.reveal_phase = REVEAL_PHASE_NONE;
     table.reconstruct_state.phase = RECONSTRUCT_PHASE_COLLECTING;
@@ -1760,11 +1799,17 @@ fn test_find_next_active_seat_all_in_filtered() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
-    
+
     // seat 1 all-in，应被跳过
     table.seats[1].all_in = true;
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 0, 4), Some(2));
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 2, 4), Some(0));
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 0, 4),
+        Some(2)
+    );
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 2, 4),
+        Some(0)
+    );
 }
 
 #[test]
@@ -1773,12 +1818,18 @@ fn test_find_next_participating_seat_includes_folded_and_all_in() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
-    
+
     // find_next_participating_seat 不过滤 folded / all_in
     table.seats[1].folded = true;
     table.seats[2].all_in = true;
-    assert_eq!(state_machine::find_next_participating_seat(&table.seats, 0, 4), Some(1));
-    assert_eq!(state_machine::find_next_participating_seat(&table.seats, 1, 4), Some(2));
+    assert_eq!(
+        state_machine::find_next_participating_seat(&table.seats, 0, 4),
+        Some(1)
+    );
+    assert_eq!(
+        state_machine::find_next_participating_seat(&table.seats, 1, 4),
+        Some(2)
+    );
 }
 
 #[test]
@@ -1786,10 +1837,10 @@ fn test_is_pk_registered() {
     let mut table = dummy_table("test", 4);
     let pk1 = G1Projective::generator();
     let pk2 = G1Projective::identity();
-    
+
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.seats[0].pk = ECPoint(pk1);
-    
+
     assert!(state_machine::is_pk_registered(&table.seats, &pk1));
     assert!(!state_machine::is_pk_registered(&table.seats, &pk2));
 }
@@ -1800,7 +1851,7 @@ fn test_get_pending_seat_indices_filters_completed() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
-    
+
     let completed = vec![0, 2];
     let pending = state_machine::get_pending_seat_indices(&completed, &table.seats);
     assert_eq!(pending, vec![1]);
@@ -1827,9 +1878,9 @@ fn test_collect_rake_none_mode() {
     let mut table = dummy_table("test", 4);
     table.rake_mode = RAKE_MODE_NONE;
     table.pot = 1000;
-    
-    let rake = state_machine::collect_rake(&mut table)
-        .expect("none-mode rake collection should succeed");
+
+    let rake =
+        state_machine::collect_rake(&mut table).expect("none-mode rake collection should succeed");
     assert_eq!(rake, 0);
     assert_eq!(table.pot, 1000);
 }
@@ -1841,7 +1892,7 @@ fn test_collect_rake_percentage_below_cap() {
     table.rake_bps = 500; // 5%
     table.rake_cap = 100;
     table.pot = 1000;
-    
+
     let rake = state_machine::collect_rake(&mut table)
         .expect("percentage rake collection below cap should succeed");
     assert_eq!(rake, 50); // 1000 * 5% = 50
@@ -1856,7 +1907,7 @@ fn test_collect_rake_percentage_at_cap() {
     table.rake_bps = 500; // 5%
     table.rake_cap = 30;
     table.pot = 1000;
-    
+
     let rake = state_machine::collect_rake(&mut table)
         .expect("percentage rake collection at cap should succeed");
     assert_eq!(rake, 30); // capped at 30
@@ -1870,9 +1921,9 @@ fn test_collect_rake_zero_pot() {
     table.rake_bps = 500;
     table.rake_cap = 100;
     table.pot = 0;
-    
-    let rake = state_machine::collect_rake(&mut table)
-        .expect("zero-pot rake collection should succeed");
+
+    let rake =
+        state_machine::collect_rake(&mut table).expect("zero-pot rake collection should succeed");
     assert_eq!(rake, 0);
     assert_eq!(table.pot, 0);
 }
@@ -1883,7 +1934,7 @@ fn test_collect_ante_none_mode() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.ante_mode = ANTE_MODE_NONE;
     table.ante_amount = 10;
-    
+
     let mut events = vec![];
     state_machine::collect_ante(&mut table, 0, &mut events);
     assert_eq!(table.seats[0].stack, 1000); // 未扣
@@ -1897,10 +1948,10 @@ fn test_collect_ante_normal_mode() {
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     table.ante_mode = ANTE_MODE_NORMAL;
     table.ante_amount = 10;
-    
+
     let mut events = vec![];
     state_machine::collect_ante(&mut table, 0, &mut events);
-    
+
     assert_eq!(table.seats[0].stack, 990);
     assert_eq!(table.seats[1].stack, 990);
     assert_eq!(table.ante_collected, 20);
@@ -1915,12 +1966,12 @@ fn test_collect_ante_bba_mode() {
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     table.ante_mode = ANTE_MODE_BBA;
     table.ante_amount = 10;
-    
+
     let mut events = vec![];
     state_machine::collect_ante(&mut table, 1, &mut events); // BB 是 seat 1
-    
+
     assert_eq!(table.seats[0].stack, 1000); // 非 BB 不扣
-    assert_eq!(table.seats[1].stack, 990);  // BB 扣
+    assert_eq!(table.seats[1].stack, 990); // BB 扣
     assert_eq!(table.ante_collected, 10);
 }
 
@@ -1930,10 +1981,10 @@ fn test_collect_ante_all_in_on_zero_stack() {
     occupy_seat(&mut table, 0, [0x01; 20], 5); // 只有 5 筹码
     table.ante_mode = ANTE_MODE_NORMAL;
     table.ante_amount = 10;
-    
+
     let mut events = vec![];
     state_machine::collect_ante(&mut table, 0, &mut events);
-    
+
     assert_eq!(table.seats[0].stack, 0);
     assert!(table.seats[0].all_in);
     assert_eq!(table.seats[0].bet, 5);
@@ -1965,7 +2016,7 @@ fn test_count_active_players_with_waiting() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     table.seats[1].is_waiting = true;
-    
+
     assert_eq!(state_machine::count_active_players(&table.seats), 1);
 }
 
@@ -1977,7 +2028,7 @@ fn test_count_active_players_with_folded_and_all_in() {
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
     table.seats[1].folded = true;
     table.seats[2].all_in = true;
-    
+
     // count_active_players 不过滤 all-in，只过滤 folded/waiting
     // seat 0: active, seat 1: folded(excluded), seat 2: all-in(included)
     assert_eq!(state_machine::count_active_players(&table.seats), 2);
@@ -1989,7 +2040,7 @@ fn test_count_active_occupied_includes_folded() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     table.seats[1].folded = true;
-    
+
     assert_eq!(state_machine::count_active_occupied(&table.seats), 2);
 }
 
@@ -2005,7 +2056,7 @@ fn test_get_active_seat_indices_excludes_waiting() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     table.seats[1].is_waiting = true;
-    
+
     let indices = state_machine::get_active_seat_indices(&table.seats);
     assert_eq!(indices, vec![0]);
 }
@@ -2017,8 +2068,11 @@ fn test_find_next_active_seat_all_folded() {
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     table.seats[0].folded = true;
     table.seats[1].folded = true;
-    
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 0, 4), None);
+
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 0, 4),
+        None
+    );
 }
 
 #[test]
@@ -2026,9 +2080,15 @@ fn test_find_next_active_seat_wraps_around() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 3, [0x03; 20], 1000);
-    
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 0, 4), Some(3));
-    assert_eq!(state_machine::find_next_active_seat(&table.seats, 3, 4), Some(0));
+
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 0, 4),
+        Some(3)
+    );
+    assert_eq!(
+        state_machine::find_next_active_seat(&table.seats, 3, 4),
+        Some(0)
+    );
 }
 
 // ========== state_machine.rs 补充边缘场景 — apply_raise ==========
@@ -2041,7 +2101,7 @@ fn test_apply_raise_minimum_raise() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100)); // current_bet=100, min_raise=100
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     // 从 0 raise 到 200（最小 raise），需要投入 200
     let result = state_machine::apply_raise(&mut table, 0, 200, &mut events);
@@ -2058,7 +2118,7 @@ fn test_apply_raise_below_minimum() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     // raise 到 150，低于最小 raise（需要到 200）
     let result = state_machine::apply_raise(&mut table, 0, 150, &mut events);
@@ -2073,7 +2133,7 @@ fn test_apply_raise_not_players_turn() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0); // seat 0 的回合
-    
+
     let mut events = vec![];
     // seat 1 尝试 raise（不是他的回合）
     let result = state_machine::apply_raise(&mut table, 1, 200, &mut events);
@@ -2088,14 +2148,14 @@ fn test_apply_raise_raises_minimum_after_all_in() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(1);
-    
+
     let mut events = vec![];
     // seat 1 all-in raise 到 150
     // raise_amount = 50，小于 min_raise=100，所以 min_raise 不更新
     state_machine::apply_raise(&mut table, 1, 150, &mut events).unwrap();
     assert_eq!(table.betting_round.as_ref().unwrap().current_bet, 150);
     assert_eq!(table.betting_round.as_ref().unwrap().min_raise, 100); // 短 all-in 不更新 min_raise
-    
+
     // seat 0 需要 raise 到 250（150+100）
     table.current_turn = Some(0);
     events.clear();
@@ -2113,24 +2173,24 @@ fn test_betting_round_complete_two_players() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100)); // BB = 100
     table.current_turn = Some(0);
-    
+
     // seat 1 是 BB，已下注 100
     table.seats[1].bet = 100;
     table.seats[1].total_bet = 100;
     table.seats[1].stack = 900;
-    
+
     let mut events = vec![];
-    
+
     // seat 0 calls（跟注 100）
     state_machine::apply_call(&mut table, 0, &mut events).unwrap();
     assert_eq!(table.seats[0].bet, 100);
     assert_eq!(table.seats[0].stack, 900);
-    
+
     // seat 1 checks（已跟注，无需行动）
     table.current_turn = Some(1);
     events.clear();
     state_machine::apply_check(&mut table, 1, &mut events).unwrap();
-    
+
     // 此时应该推进到下一回合（flop）
     // 由于 apply_check 会调用 advance_turn，最终会触发 advance_round
     assert_eq!(table.round_state, ROUND_FLOP);
@@ -2145,22 +2205,22 @@ fn test_raise_resets_other_players_acted() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
-    
+
     // seat 0 calls
     state_machine::apply_call(&mut table, 0, &mut events).unwrap();
     assert!(table.seats[0].acted_this_round);
-    
+
     // seat 1 calls
     table.current_turn = Some(1);
     state_machine::apply_call(&mut table, 1, &mut events).unwrap();
     assert!(table.seats[1].acted_this_round);
-    
+
     // seat 2 raises
     table.current_turn = Some(2);
     state_machine::apply_raise(&mut table, 2, 200, &mut events).unwrap();
-    
+
     // seat 0 和 seat 1 的 acted_this_round 应该被重置
     assert!(!table.seats[0].acted_this_round);
     assert!(!table.seats[1].acted_this_round);
@@ -2173,7 +2233,7 @@ fn test_consume_time_bank_normal() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.seats[0].time_bank_ms = 30000;
-    
+
     let mut events = vec![];
     let result = state_machine::consume_time_bank(&mut table, 0, 10000, &mut events);
     assert!(result.is_ok());
@@ -2201,7 +2261,7 @@ fn test_consume_time_bank_insufficient() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.seats[0].time_bank_ms = 5000;
-    
+
     let mut events = vec![];
     let result = state_machine::consume_time_bank(&mut table, 0, 10000, &mut events);
     assert!(result.is_err());
@@ -2214,7 +2274,7 @@ fn test_tick_waiting_starts_hand() {
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     // 2个玩家 >= MIN_PLAYERS_TO_START
     assert_eq!(table.round_state, ROUND_WAITING);
-    
+
     let mut events = vec![];
     let result = state_machine::tick(&mut table, 1_000_000, &mut events);
     assert!(result.is_ok());
@@ -2234,7 +2294,7 @@ fn test_tick_betting_timeout_with_time_bank() {
     table.timestamps.betting_started_at = 1_000_000;
     table.timeout_config.betting_timeout_ms = 30000;
     table.seats[0].time_bank_ms = 30000;
-    
+
     let mut events = vec![];
     // 超时但有 time_bank，应该消耗 time_bank 而不是 fold
     let result = state_machine::tick(&mut table, 1_030_000, &mut events);
@@ -2257,7 +2317,7 @@ fn test_tick_betting_timeout_triggers_fold() {
     table.timestamps.betting_started_at = 1_000_000;
     table.timeout_config.betting_timeout_ms = 30000;
     table.seats[0].time_bank_ms = 0; // 没有 time_bank
-    
+
     let mut events = vec![];
     // 超时且没有 time_bank，应该 fold
     let result = state_machine::tick(&mut table, 1_030_001, &mut events);
@@ -2274,7 +2334,7 @@ fn test_tick_showdown_settles_hand() {
     table.round_state = ROUND_SHOWDOWN;
     table.pot = 200;
     table.timestamps.showdown_at = 1_000_000;
-    
+
     let mut events = vec![];
     // showdown 时间到，应该结算
     let result = state_machine::tick(&mut table, 1_000_001, &mut events);
@@ -2314,7 +2374,7 @@ fn test_apply_fold_internal_betting_round() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_fold_internal(&mut table, 0, 0, &mut events);
     assert!(result.is_ok());
@@ -2326,7 +2386,7 @@ fn test_apply_fold_internal_not_betting_round() {
     let mut table = dummy_table("test", 2);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.round_state = ROUND_WAITING; // 不在 betting round
-    
+
     let mut events = vec![];
     let result = state_machine::apply_fold_internal(&mut table, 0, 0, &mut events);
     assert!(result.is_err());
@@ -2340,7 +2400,7 @@ fn test_apply_fold_internal_already_folded() {
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
     table.seats[0].folded = true;
-    
+
     let mut events = vec![];
     let result = state_machine::apply_fold_internal(&mut table, 0, 0, &mut events);
     assert!(result.is_err());
@@ -2356,7 +2416,7 @@ fn test_apply_bet_postflop_success() {
     table.round_state = ROUND_FLOP;
     table.betting_round = Some(BettingRound::new(100, 0)); // big_blind=100, current_bet=0
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_bet(&mut table, 0, 100, &mut events);
     assert!(result.is_ok());
@@ -2368,7 +2428,7 @@ fn test_apply_bet_not_betting_round() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.round_state = ROUND_WAITING;
-    
+
     let mut events = vec![];
     let result = state_machine::apply_bet(&mut table, 0, 100, &mut events);
     assert!(result.is_err());
@@ -2382,7 +2442,7 @@ fn test_apply_bet_not_players_turn() {
     table.round_state = ROUND_FLOP;
     table.betting_round = Some(BettingRound::new(100, 0));
     table.current_turn = Some(1); // seat 1 的回合
-    
+
     let mut events = vec![];
     let result = state_machine::apply_bet(&mut table, 0, 100, &mut events);
     assert!(result.is_err());
@@ -2395,7 +2455,7 @@ fn test_apply_bet_amount_zero() {
     table.round_state = ROUND_FLOP;
     table.betting_round = Some(BettingRound::new(100, 0));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_bet(&mut table, 0, 0, &mut events);
     assert!(result.is_err());
@@ -2408,7 +2468,7 @@ fn test_apply_bet_not_allowed_in_preflop() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_bet(&mut table, 0, 100, &mut events);
     assert!(result.is_err());
@@ -2423,7 +2483,7 @@ fn test_apply_bet_should_use_call_raise() {
     table.betting_round = Some(BettingRound::new(100, 100)); // big_blind=100, current_bet=100
     table.seats[0].bet = 0; // seat 0 还没跟注
     table.current_turn = Some(0);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_bet(&mut table, 0, 100, &mut events);
     assert!(result.is_err()); // current_bet > seat_bet，应使用 call/raise
@@ -2433,7 +2493,7 @@ fn test_apply_bet_should_use_call_raise() {
 fn test_apply_addon_success() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_addon(&mut table, 0, 500, &mut events);
     assert!(result.is_ok());
@@ -2462,7 +2522,7 @@ fn test_apply_addon_not_occupied() {
 fn test_apply_addon_amount_zero() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_addon(&mut table, 0, 0, &mut events);
     assert!(result.is_err());
@@ -2472,7 +2532,7 @@ fn test_apply_addon_amount_zero() {
 fn test_apply_rebuy_success() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_rebuy(&mut table, 0, 500, &mut events);
     assert!(result.is_ok());
@@ -2500,7 +2560,7 @@ fn test_apply_rebuy_not_occupied() {
 fn test_apply_rebuy_amount_zero() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    
+
     let mut events = vec![];
     let result = state_machine::apply_rebuy(&mut table, 0, 0, &mut events);
     assert!(result.is_err());
@@ -2510,15 +2570,14 @@ fn test_apply_rebuy_amount_zero() {
 // 8. dispatch.rs — 路由与参数校验
 // ===========================================================================
 
+use poker_l1::vm::contracts::dispatch::{DispatchContext, DispatchResult};
 use poker_l1::vm::contracts::texas_poker::{
     dispatch,
     dispatch::{
-        selectors,
-        CreateTableArgs, JoinTableArgs, LeaveTableArgs, AddonArgs, RebuyArgs,
-        SeatIndexArgs, RaiseArgs, BetArgs, TickArgs,
+        AddonArgs, BetArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RaiseArgs, RebuyArgs,
+        SeatIndexArgs, TickArgs, selectors,
     },
 };
-use poker_l1::vm::contracts::dispatch::{DispatchContext, DispatchResult};
 
 fn make_dispatch_context() -> DispatchContext {
     DispatchContext {
@@ -2618,7 +2677,7 @@ fn test_dispatch_join_table_rejects_non_waiting_state() {
     let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     table.round_state = ROUND_PREFLOP;
-    
+
     let args = JoinTableArgs {
         player: [0x11; 20],
         buy_in: 1000,
@@ -2634,7 +2693,7 @@ fn test_dispatch_join_table_rejects_buy_in_less_than_big_blind() {
     let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
     table.big_blind = 100;
-    
+
     let args = JoinTableArgs {
         player: [0x11; 20],
         buy_in: 50,
@@ -2649,14 +2708,20 @@ fn test_dispatch_join_table_rejects_buy_in_less_than_big_blind() {
 fn test_dispatch_join_table_rejects_duplicate_pk() {
     let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
-    
+
     let args1 = JoinTableArgs {
         player: [0x11; 20],
         buy_in: 1000,
         pk: ECPoint(G1Projective::identity()),
     };
-    dispatch::dispatch(&ctx, &mut table, &selectors::join_table(), &borsh::to_vec(&args1).unwrap()).unwrap();
-    
+    dispatch::dispatch(
+        &ctx,
+        &mut table,
+        &selectors::join_table(),
+        &borsh::to_vec(&args1).unwrap(),
+    )
+    .unwrap();
+
     let args2 = JoinTableArgs {
         player: [0x22; 20],
         buy_in: 1000,
@@ -2664,7 +2729,12 @@ fn test_dispatch_join_table_rejects_duplicate_pk() {
     };
     // P0-2：args2 用 player=[0x22] 自己的 ctx，确保测的是 duplicate pk 而非权限错。
     let ctx_p2 = make_dispatch_context_as([0x22; 20]);
-    let result = dispatch::dispatch(&ctx_p2, &mut table, &selectors::join_table(), &borsh::to_vec(&args2).unwrap());
+    let result = dispatch::dispatch(
+        &ctx_p2,
+        &mut table,
+        &selectors::join_table(),
+        &borsh::to_vec(&args2).unwrap(),
+    );
     assert!(result.is_err());
 }
 
@@ -2677,7 +2747,7 @@ fn test_dispatch_leave_table_rejects_non_waiting_state() {
     table.round_state = ROUND_PREFLOP;
     table.seats[0].player = [0x11; 20];
     table.seats[0].stack = 1000;
-    
+
     let args = LeaveTableArgs { seat_index: 0 };
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::leave_table(), &args_bytes);
@@ -2688,7 +2758,7 @@ fn test_dispatch_leave_table_rejects_non_waiting_state() {
 fn test_dispatch_leave_table_rejects_empty_seat() {
     let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
-    
+
     let args = LeaveTableArgs { seat_index: 0 };
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::leave_table(), &args_bytes);
@@ -2699,7 +2769,7 @@ fn test_dispatch_leave_table_rejects_empty_seat() {
 fn test_dispatch_leave_table_rejects_invalid_seat_index() {
     let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
-    
+
     let args = LeaveTableArgs { seat_index: 10 };
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::leave_table(), &args_bytes);
@@ -2713,7 +2783,7 @@ fn test_dispatch_addon_accumulates_pending() {
     let ctx = make_dispatch_context();
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 500);
-    
+
     let args = AddonArgs {
         seat_index: 0,
         amount: 1000,
@@ -2721,7 +2791,7 @@ fn test_dispatch_addon_accumulates_pending() {
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::addon(), &args_bytes);
     assert!(result.is_ok());
-    
+
     assert_eq!(table.seats[0].pending_addon, 1000);
     assert_eq!(table.seats[0].stack, 500);
 }
@@ -2730,7 +2800,7 @@ fn test_dispatch_addon_accumulates_pending() {
 fn test_dispatch_addon_rejects_invalid_seat() {
     let ctx = make_dispatch_context();
     let mut table = dummy_table("test", 4);
-    
+
     let args = AddonArgs {
         seat_index: 0,
         amount: 1000,
@@ -2745,7 +2815,7 @@ fn test_dispatch_rebuy_increases_stack_immediately() {
     let ctx = make_dispatch_context();
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 500);
-    
+
     let args = RebuyArgs {
         seat_index: 0,
         amount: 1000,
@@ -2753,7 +2823,7 @@ fn test_dispatch_rebuy_increases_stack_immediately() {
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::rebuy(), &args_bytes);
     assert!(result.is_ok());
-    
+
     assert_eq!(table.seats[0].stack, 1500);
     assert_eq!(table.seats[0].pending_addon, 0);
 }
@@ -2762,7 +2832,7 @@ fn test_dispatch_rebuy_increases_stack_immediately() {
 fn test_dispatch_rebuy_rejects_invalid_seat() {
     let ctx = make_dispatch_context();
     let mut table = dummy_table("test", 4);
-    
+
     let args = RebuyArgs {
         seat_index: 0,
         amount: 1000,
@@ -2784,7 +2854,7 @@ fn test_dispatch_fold_route() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let args = SeatIndexArgs { seat_index: 0 };
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::fold(), &args_bytes);
@@ -2801,7 +2871,7 @@ fn test_dispatch_check_route() {
     table.round_state = ROUND_FLOP;
     table.betting_round = Some(BettingRound::new(100, 0));
     table.current_turn = Some(0);
-    
+
     let args = SeatIndexArgs { seat_index: 0 };
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::check(), &args_bytes);
@@ -2817,7 +2887,7 @@ fn test_dispatch_call_route() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let args = SeatIndexArgs { seat_index: 0 };
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::call(), &args_bytes);
@@ -2834,7 +2904,7 @@ fn test_dispatch_raise_route() {
     table.round_state = ROUND_PREFLOP;
     table.betting_round = Some(BettingRound::new(100, 100));
     table.current_turn = Some(0);
-    
+
     let args = RaiseArgs {
         seat_index: 0,
         total_bet: 300,
@@ -2854,7 +2924,7 @@ fn test_dispatch_bet_route() {
     table.round_state = ROUND_FLOP;
     table.betting_round = Some(BettingRound::new(100, 0));
     table.current_turn = Some(0);
-    
+
     let args = BetArgs {
         seat_index: 0,
         amount: 200,
@@ -2873,7 +2943,10 @@ fn test_dispatch_unknown_method() {
     let mut table = dummy_table("test", 4);
     let unknown_selector = [0xFE; 32];
     let result = dispatch::dispatch(&ctx, &mut table, &unknown_selector, &[]);
-    assert!(matches!(result, Err(poker_l1::error::PokerL1Error::UnknownContractMethod { .. })));
+    assert!(matches!(
+        result,
+        Err(poker_l1::error::PokerL1Error::UnknownContractMethod { .. })
+    ));
 }
 
 // ========== dispatch.rs 补充边缘场景 ==========
@@ -2930,7 +3003,13 @@ fn test_dispatch_join_table_rejects_seat_full() {
         buy_in: 1000,
         pk: ECPoint(G1Projective::generator()),
     };
-    dispatch::dispatch(&ctx, &mut table, &selectors::join_table(), &borsh::to_vec(&args1).unwrap()).unwrap();
+    dispatch::dispatch(
+        &ctx,
+        &mut table,
+        &selectors::join_table(),
+        &borsh::to_vec(&args1).unwrap(),
+    )
+    .unwrap();
 
     // 加入第二个玩家（P0-2：须用 player=[0x22] 自己的 ctx）
     let pk2 = G1Projective::generator().double();
@@ -2940,7 +3019,13 @@ fn test_dispatch_join_table_rejects_seat_full() {
         pk: ECPoint(pk2),
     };
     let ctx_p2 = make_dispatch_context_as([0x22; 20]);
-    dispatch::dispatch(&ctx_p2, &mut table, &selectors::join_table(), &borsh::to_vec(&args2).unwrap()).unwrap();
+    dispatch::dispatch(
+        &ctx_p2,
+        &mut table,
+        &selectors::join_table(),
+        &borsh::to_vec(&args2).unwrap(),
+    )
+    .unwrap();
 
     // 加入第三个玩家（满员）
     let pk3 = G1Projective::generator() + G1Projective::generator().double();
@@ -2950,7 +3035,12 @@ fn test_dispatch_join_table_rejects_seat_full() {
         pk: ECPoint(pk3),
     };
     let ctx_p3 = make_dispatch_context_as([0x33; 20]);
-    let result = dispatch::dispatch(&ctx_p3, &mut table, &selectors::join_table(), &borsh::to_vec(&args3).unwrap());
+    let result = dispatch::dispatch(
+        &ctx_p3,
+        &mut table,
+        &selectors::join_table(),
+        &borsh::to_vec(&args3).unwrap(),
+    );
     assert!(result.is_err());
 }
 
@@ -3025,11 +3115,11 @@ fn test_seat_status_priority_order() {
     seat.left_during_hand = false;
     // folded 优先于 all_in
     assert_eq!(seat.status(), SeatStatus::Folded);
-    
+
     seat.is_waiting = true;
     // waiting 优先于 folded
     assert_eq!(seat.status(), SeatStatus::Waiting);
-    
+
     seat.left_during_hand = true;
     // out 优先于 waiting
     assert_eq!(seat.status(), SeatStatus::Out);
@@ -3041,7 +3131,7 @@ fn test_seat_borsh_roundtrip() {
     seat.player = [0xAB; 20];
     seat.stack = 5000;
     seat.folded = true;
-    
+
     let bytes = borsh::to_vec(&seat).unwrap();
     let decoded: Seat = borsh::from_slice(&bytes).unwrap();
     assert_eq!(decoded.player, seat.player);
@@ -3096,7 +3186,10 @@ fn test_utils_u64_to_ascii() {
     assert_eq!(utils::u64_to_ascii(0), b"0");
     assert_eq!(utils::u64_to_ascii(42), b"42");
     assert_eq!(utils::u64_to_ascii(12345), b"12345");
-    assert_eq!(utils::u64_to_ascii(u64::MAX / 1000), (u64::MAX / 1000).to_string().as_bytes());
+    assert_eq!(
+        utils::u64_to_ascii(u64::MAX / 1000),
+        (u64::MAX / 1000).to_string().as_bytes()
+    );
 }
 
 #[test]
@@ -3127,7 +3220,7 @@ fn test_utils_encrypt_decrypt_roundtrip() {
     let pk_computed = utils::g1_mul(&sk, &utils::g1_generator());
     let plaintext = utils::hash_to_g1(b"plaintext");
     let r = utils::scalar_from_u64(456);
-    
+
     let ct = utils::encrypt(&plaintext, &pk_computed, &r);
     let decrypted = utils::decrypt(&ct, &sk);
     assert!(utils::g1_equal(&decrypted, &plaintext));
@@ -3139,12 +3232,9 @@ fn test_utils_extract_c1s_c2s() {
     let r = utils::scalar_from_u64(1);
     let p1 = utils::hash_to_g1(b"card1");
     let p2 = utils::hash_to_g1(b"card2");
-    
-    let cts = vec![
-        utils::encrypt(&p1, &pk, &r),
-        utils::encrypt(&p2, &pk, &r),
-    ];
-    
+
+    let cts = vec![utils::encrypt(&p1, &pk, &r), utils::encrypt(&p2, &pk, &r)];
+
     let c1s = utils::extract_c1s(&cts);
     let c2s = utils::extract_c2s(&cts);
     assert_eq!(c1s.len(), 2);
@@ -3210,7 +3300,10 @@ fn test_event_serde_roundtrip() {
     let json = serde_json::to_string(&event).unwrap();
     let decoded: TexasPokerEvent = serde_json::from_str(&json).unwrap();
     match (&event, &decoded) {
-        (TexasPokerEvent::PlayerJoined { buy_in: b1, .. }, TexasPokerEvent::PlayerJoined { buy_in: b2, .. }) => {
+        (
+            TexasPokerEvent::PlayerJoined { buy_in: b1, .. },
+            TexasPokerEvent::PlayerJoined { buy_in: b2, .. },
+        ) => {
             assert_eq!(b1, b2);
         }
         _ => panic!("event type mismatch"),

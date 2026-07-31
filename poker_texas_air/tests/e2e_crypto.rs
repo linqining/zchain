@@ -36,9 +36,9 @@ use poker_texas_air::airs::crypto::submit_reconstruct_deck::{
 use poker_texas_air::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::prove_method;
 use poker_texas_air::public_inputs::TexasPublicInputs;
-use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method;
 
@@ -46,14 +46,18 @@ use poker_texas_air::verifier::verify_method;
 fn zero_root() -> [M31; 4] {
     // 与 synthetic_placeholder 的 pre_state_root 一致（AIR statement 绑定）
     poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
-        poker_texas_air::method_kind::MethodKind::Fold).0
+        poker_texas_air::method_kind::MethodKind::Fold,
+    )
+    .0
 }
 
 /// 构造 4 个 state_root limb（测试用，全 1）。
 fn one_root() -> [M31; 4] {
     // 与 synthetic_placeholder 的 post_state_root 一致（AIR statement 绑定）
     poker_texas_air::public_inputs::TexasPublicInputs::synthetic_air_roots(
-        poker_texas_air::method_kind::MethodKind::Fold).1
+        poker_texas_air::method_kind::MethodKind::Fold,
+    )
+    .1
 }
 
 // ========== join_and_shuffle AIR ==========
@@ -97,7 +101,13 @@ fn test_e2e_join_and_shuffle_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, JoinAndShuffleAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        JoinAndShuffleAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -128,7 +138,13 @@ fn test_soundness_join_and_shuffle_tampered_seat() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, JoinAndShuffleAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        JoinAndShuffleAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
+    )
+    .expect("prove 失败");
 
     // 篡改 seat_index：trace 中是 0，AIR 声明 5
     proof.air = JoinAndShuffleAir {
@@ -173,7 +189,13 @@ fn test_soundness_join_and_shuffle_tampered_commitment() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, JoinAndShuffleAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        JoinAndShuffleAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
+    )
+    .expect("prove 失败");
 
     // 篡改 new_deck_commitment：trace 中是 0xABCD_1234，AIR 声明 0xFFFF_FFFF
     proof.air = JoinAndShuffleAir {
@@ -198,7 +220,7 @@ fn test_soundness_join_and_shuffle_tampered_commitment() {
 fn test_e2e_leave_with_proof_prove_verify() {
     let input = LeaveWithProofInput {
         seat_index: 1,
-        leave_kind: 0, // LeaveKind::Normal
+        leave_kind: 0,    // LeaveKind::Normal
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
     let row = LeaveWithProofRow::active(
@@ -231,7 +253,13 @@ fn test_e2e_leave_with_proof_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, LeaveWithProofAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        LeaveWithProofAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -262,7 +290,13 @@ fn test_soundness_leave_with_proof_tampered_kind() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, LeaveWithProofAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        LeaveWithProofAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2),
+    )
+    .expect("prove 失败");
 
     // 篡改 leave_kind：trace 中是 0，AIR 声明 2
     proof.air = LeaveWithProofAir {
@@ -320,7 +354,13 @@ fn test_e2e_submit_shuffle_v2_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, SubmitShuffleV2Air::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::SubmitShuffleV2, 42, 1, 3)).expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        SubmitShuffleV2Air::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitShuffleV2, 42, 1, 3),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -351,7 +391,13 @@ fn test_soundness_submit_shuffle_v2_tampered_commitment() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, SubmitShuffleV2Air::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::SubmitShuffleV2, 42, 1, 3)).expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        SubmitShuffleV2Air::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitShuffleV2, 42, 1, 3),
+    )
+    .expect("prove 失败");
 
     // 篡改 new_deck_commitment：trace 中是 0xDEAD_BEEF，AIR 声明 0x1234_5678
     proof.air = SubmitShuffleV2Air {
@@ -408,8 +454,13 @@ fn test_e2e_submit_player_reveal_tokens_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, SubmitPlayerRevealTokensAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::SubmitPlayerRevealTokens, 42, 1, 4))
-        .expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        SubmitPlayerRevealTokensAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitPlayerRevealTokens, 42, 1, 4),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -440,8 +491,13 @@ fn test_soundness_submit_player_reveal_tokens_tampered_phase() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, SubmitPlayerRevealTokensAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::SubmitPlayerRevealTokens, 42, 1, 4))
-        .expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        SubmitPlayerRevealTokensAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitPlayerRevealTokens, 42, 1, 4),
+    )
+    .expect("prove 失败");
 
     // 篡改 reveal_phase：trace 中是 1，AIR 声明 3
     proof.air = SubmitPlayerRevealTokensAir {
@@ -498,8 +554,13 @@ fn test_e2e_submit_reconstruct_deck_prove_verify() {
         post_version: 1,
     };
 
-    let proof = prove_method(&trace, air, SubmitReconstructDeckAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::SubmitReconstructDeck, 42, 1, 5))
-        .expect("prove 失败");
+    let proof = prove_method(
+        &trace,
+        air,
+        SubmitReconstructDeckAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitReconstructDeck, 42, 1, 5),
+    )
+    .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
 }
 
@@ -510,8 +571,7 @@ fn test_soundness_submit_reconstruct_deck_tampered_phase() {
         seat_index: 3,
         reconstruct_phase: 1,
     };
-    let row =
-        SubmitReconstructDeckRow::active(&input, zero_root(), one_root(), 42, 1, 5, 0, 1, 1);
+    let row = SubmitReconstructDeckRow::active(&input, zero_root(), one_root(), 42, 1, 5, 0, 1, 1);
     let trace = gen_method_trace(
         SubmitReconstructDeckAir::num_columns(),
         &row.to_vec(),
@@ -530,8 +590,13 @@ fn test_soundness_submit_reconstruct_deck_tampered_phase() {
         pre_version: 0,
         post_version: 1,
     };
-    let mut proof = prove_method(&trace, air, SubmitReconstructDeckAir::num_columns(), TexasPublicInputs::synthetic_for_test(MethodKind::SubmitReconstructDeck, 42, 1, 5))
-        .expect("prove 失败");
+    let mut proof = prove_method(
+        &trace,
+        air,
+        SubmitReconstructDeckAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitReconstructDeck, 42, 1, 5),
+    )
+    .expect("prove 失败");
 
     // 篡改 reconstruct_phase：trace 中是 1，AIR 声明 0
     proof.air = SubmitReconstructDeckAir {
@@ -561,30 +626,21 @@ fn test_crypto_air_column_consistency() {
     };
 
     // join_and_shuffle: 通用 + 16 业务（含 Gap 6 shuffle_phase + q witness）= 53
-    assert_eq!(
-        join_and_shuffle::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 16
-    );
+    assert_eq!(join_and_shuffle::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 16);
     assert_eq!(
         JoinAndShuffleAir::num_columns(),
         join_and_shuffle::cols::NUM_COLUMNS
     );
 
     // leave_with_proof: 通用 + 5 业务（含 Gap 6 shuffle_phase + q witness）= 42
-    assert_eq!(
-        leave_with_proof::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 5
-    );
+    assert_eq!(leave_with_proof::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
     assert_eq!(
         LeaveWithProofAir::num_columns(),
         leave_with_proof::cols::NUM_COLUMNS
     );
 
     // submit_shuffle_v2: 通用 + 8 业务（含 Gap 6 shuffle_phase + q witness）= 45
-    assert_eq!(
-        submit_shuffle_v2::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 8
-    );
+    assert_eq!(submit_shuffle_v2::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
     assert_eq!(
         SubmitShuffleV2Air::num_columns(),
         submit_shuffle_v2::cols::NUM_COLUMNS
@@ -623,8 +679,5 @@ fn test_crypto_method_kinds() {
         MethodKind::SubmitPlayerRevealTokens.tier(),
         MethodTier::Crypto
     );
-    assert_eq!(
-        MethodKind::SubmitReconstructDeck.tier(),
-        MethodTier::Crypto
-    );
+    assert_eq!(MethodKind::SubmitReconstructDeck.tier(), MethodTier::Crypto);
 }

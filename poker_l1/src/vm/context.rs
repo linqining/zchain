@@ -281,7 +281,11 @@ mod tests {
         // 当前 gas_used=200，退款 u64::MAX 应只退 200
         ctx.refund_gas(u64::MAX);
         assert_eq!(ctx.gas_used(), 0, "退款不应使 gas_used 变负");
-        assert_eq!(ctx.remaining_gas(), 1000, "退款不应使 remaining 超过 initial_gas");
+        assert_eq!(
+            ctx.remaining_gas(),
+            1000,
+            "退款不应使 remaining 超过 initial_gas"
+        );
     }
 
     /// SEC-FIX-1：验证 `refund_gas` 不会超过初始 gas 上限（防恶意退款）。
@@ -297,7 +301,11 @@ mod tests {
 
         // 再次退款不应使 remaining 超过 100
         ctx.refund_gas(50);
-        assert_eq!(ctx.remaining_gas(), 100, "退款不应使 remaining 超过 initial_gas");
+        assert_eq!(
+            ctx.remaining_gas(),
+            100,
+            "退款不应使 remaining 超过 initial_gas"
+        );
     }
 
     #[test]

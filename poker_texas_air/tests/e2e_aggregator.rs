@@ -16,10 +16,8 @@
 
 use stwo::core::fields::m31::M31;
 
-use poker_texas_air::aggregator_air::{build_binary_tree, ChildDescriptor};
-use poker_texas_air::aggregator_prover::{
-    prove_aggregator, prove_aggregator_unchecked_for_tests,
-};
+use poker_texas_air::aggregator_air::{ChildDescriptor, build_binary_tree};
+use poker_texas_air::aggregator_prover::{prove_aggregator, prove_aggregator_unchecked_for_tests};
 use poker_texas_air::aggregator_verifier::{
     verify_aggregator, verify_aggregator_unchecked_for_tests,
 };
@@ -59,7 +57,11 @@ fn make_chain(seqs: &[u32], kinds: &[MethodKind], roots: &[u32]) -> Vec<ChildDes
         .enumerate()
         .map(|(i, &seq)| {
             let pre = roots[i];
-            let post = if i + 1 < roots.len() { roots[i + 1] } else { roots[i] };
+            let post = if i + 1 < roots.len() {
+                roots[i + 1]
+            } else {
+                roots[i]
+            };
             make_child(seq, kinds[i], pre, post)
         })
         .collect()
@@ -364,7 +366,7 @@ fn test_child_descriptor_construction() {
 /// 单元测试：AggregatorAIR 列数常量正确。
 #[test]
 fn test_aggregator_air_num_columns() {
-    use poker_texas_air::aggregator_air::{cols, AggregatorAir};
+    use poker_texas_air::aggregator_air::{AggregatorAir, cols};
     // 23 列：2 通用 + 4*4 state_root + 2 call_seq + 2 method_kind + 1 is_top_level
     assert_eq!(cols::NUM_COLUMNS, 23);
     assert_eq!(AggregatorAir::num_columns(), 23);
@@ -410,8 +412,14 @@ fn test_aggregator_row_active_top_level() {
     assert_eq!(v[cols::IS_TOP_LEVEL], M31::from(1u32));
     assert_eq!(v[cols::LEFT_CALL_SEQ], M31::from(0u32));
     assert_eq!(v[cols::RIGHT_CALL_SEQ], M31::from(1u32));
-    assert_eq!(v[cols::LEFT_METHOD_KIND], M31::from(MethodKind::CreateTable as u32));
-    assert_eq!(v[cols::RIGHT_METHOD_KIND], M31::from(MethodKind::JoinTable as u32));
+    assert_eq!(
+        v[cols::LEFT_METHOD_KIND],
+        M31::from(MethodKind::CreateTable as u32)
+    );
+    assert_eq!(
+        v[cols::RIGHT_METHOD_KIND],
+        M31::from(MethodKind::JoinTable as u32)
+    );
 }
 
 /// 单元测试：active 行的字段正确写入（is_top_level=false，底层行）。

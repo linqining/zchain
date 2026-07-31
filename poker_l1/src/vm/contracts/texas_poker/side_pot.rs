@@ -33,7 +33,9 @@ pub const fn is_eligible(mask: u16, seat: u8) -> bool {
 /// 单层 pot（主池或边池）。
 ///
 /// `eligible_seats` 为 `u16` 位掩码：第 j 位为 1 表示 seat j 有资格争夺该层。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct SidePot {
     /// 该层 pot 总金额。
     pub amount: u64,
@@ -160,13 +162,7 @@ pub fn calculate_side_pots(
 /// 切片单层：计算 [prev_level, level) 区间内各座位的贡献总额与 eligible 位掩码。
 ///
 /// `level = u64::MAX` 表示最外层（取全部超额部分）。
-fn slice_layer(
-    bets: &[u64],
-    folded: &[bool],
-    prev_level: u64,
-    level: u64,
-    n: usize,
-) -> (u64, u16) {
+fn slice_layer(bets: &[u64], folded: &[bool], prev_level: u64, level: u64, n: usize) -> (u64, u16) {
     let mut amount: u64 = 0;
     let mut eligible: u16 = 0;
     for j in 0..n {
@@ -203,9 +199,7 @@ fn push_or_merge(pots: &mut Vec<SidePot>, amount: u64, eligible: u16) {
 fn sum_bets(bets: &[u64]) -> Result<u64, SidePotError> {
     let mut total: u64 = 0;
     for &bet in bets {
-        total = total
-            .checked_add(bet)
-            .ok_or(SidePotError::BetOverflow)?;
+        total = total.checked_add(bet).ok_or(SidePotError::BetOverflow)?;
         if total > MAX_TOTAL_BET {
             return Err(SidePotError::BetOverflow);
         }

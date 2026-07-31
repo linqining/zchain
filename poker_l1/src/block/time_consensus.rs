@@ -42,7 +42,9 @@ use crate::error::{PokerL1Error, PokerL1Result};
 /// 时间共识可治理参数（SubTask 11.2 / 11.3）。
 ///
 /// 所有 timestamp 相关参数为软引用（SEC-M5），所有超时参数以 block height 计量。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct TimeConsensusConfig {
     /// `timestamp_ms` 相对 `prev.timestamp_ms` 的最大间隔（毫秒，软引用）。
     ///

@@ -52,9 +52,7 @@
 
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkEval, ORIGINAL_TRACE_IDX, RelationEntry,
-};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, ORIGINAL_TRACE_IDX, RelationEntry};
 
 use super::lookups::MemoryLookup;
 
@@ -128,7 +126,10 @@ impl MemoryAir {
     /// - `memory_lookup` — MemoryLookup relation 实例（从 channel draw 或 dummy）
     #[must_use]
     pub const fn new(log_size: u32, memory_lookup: MemoryLookup) -> Self {
-        Self { log_size, memory_lookup }
+        Self {
+            log_size,
+            memory_lookup,
+        }
     }
 
     /// 获取 log_size。
@@ -220,7 +221,8 @@ impl FrameworkEval for MemoryAir {
 
         // ===== 连续性约束 gating =====
         // !IsPadding ∧ !IsFirstAccess：连续访问同 addr
-        let is_continuation = (one.clone() - is_padding.clone()) * (one.clone() - is_first_access.clone());
+        let is_continuation =
+            (one.clone() - is_padding.clone()) * (one.clone() - is_first_access.clone());
         // !IsPadding ∧ IsFirstAccess：首次访问
         let is_first_non_padding = (one.clone() - is_padding.clone()) * is_first_access.clone();
 
@@ -282,7 +284,8 @@ impl FrameworkEval for MemoryAir {
         // 已知 soundness gap：首次访问 Load 的 ValCur 可被伪造。缓解：
         //   1) logup 绑定 CPU rd_eff ↔ Memory ValCur（伪造需同步篡改 CPU trace）
         //   2) 公共输入绑定（待实现）：首次访问 Load 的 ValCur 应 = 公开输入对应字节
-        let is_continuation_load = (one.clone() - is_store.clone()) * (one.clone() - is_first_access.clone());
+        let is_continuation_load =
+            (one.clone() - is_store.clone()) * (one.clone() - is_first_access.clone());
         for i in 0..4 {
             let val_cur = col(MEM_COL_VAL_CUR_BASE + i);
             let val_prev = col(MEM_COL_VAL_PREV_BASE + i);
@@ -344,18 +347,33 @@ mod tests {
         use std::collections::HashSet;
         let mut all_cols = HashSet::new();
         for i in 0..4 {
-            assert!(all_cols.insert(MEM_COL_ADDR_BASE + i), "Addr col {} 重复", i);
+            assert!(
+                all_cols.insert(MEM_COL_ADDR_BASE + i),
+                "Addr col {} 重复",
+                i
+            );
         }
         for i in 0..4 {
-            assert!(all_cols.insert(MEM_COL_VAL_CUR_BASE + i), "ValCur col {} 重复", i);
+            assert!(
+                all_cols.insert(MEM_COL_VAL_CUR_BASE + i),
+                "ValCur col {} 重复",
+                i
+            );
         }
         for i in 0..4 {
-            assert!(all_cols.insert(MEM_COL_VAL_PREV_BASE + i), "ValPrev col {} 重复", i);
+            assert!(
+                all_cols.insert(MEM_COL_VAL_PREV_BASE + i),
+                "ValPrev col {} 重复",
+                i
+            );
         }
         assert!(all_cols.insert(MEM_COL_TS_CUR), "TsCur 重复");
         assert!(all_cols.insert(MEM_COL_TS_PREV), "TsPrev 重复");
         assert!(all_cols.insert(MEM_COL_IS_STORE), "IsStore 重复");
         assert!(all_cols.insert(MEM_COL_IS_PADDING), "IsPadding 重复");
-        assert!(all_cols.insert(MEM_COL_IS_FIRST_ACCESS), "IsFirstAccess 重复");
+        assert!(
+            all_cols.insert(MEM_COL_IS_FIRST_ACCESS),
+            "IsFirstAccess 重复"
+        );
     }
 }

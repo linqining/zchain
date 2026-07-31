@@ -153,14 +153,11 @@ fn validate_native_mid_round(
 }
 
 fn seat<'a>(table: &'a TexasPokerTable, seat_index: u8, method: &str) -> TexasAirResult<&'a Seat> {
-    table
-        .seats
-        .get(usize::from(seat_index))
-        .ok_or_else(|| {
-            TexasAirError::SpecViolation(format!(
-                "{method}: seat_index {seat_index} is outside canonical table"
-            ))
-        })
+    table.seats.get(usize::from(seat_index)).ok_or_else(|| {
+        TexasAirError::SpecViolation(format!(
+            "{method}: seat_index {seat_index} is outside canonical table"
+        ))
+    })
 }
 
 fn validate_row(
@@ -221,7 +218,11 @@ pub(crate) fn validate_check(
         },
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "check")?;
-    let pre_round = tables.pre.betting_round.as_ref().expect("mid-round checked");
+    let pre_round = tables
+        .pre
+        .betting_round
+        .as_ref()
+        .expect("mid-round checked");
     let post_turn = tables.post.current_turn.expect("mid-round checked");
     if air.input.current_bet != pre_round.current_bet
         || air.input.seat_bet != pre_seat.bet
@@ -261,7 +262,11 @@ pub(crate) fn validate_call(
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "call")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "call")?;
-    let pre_round = tables.pre.betting_round.as_ref().expect("mid-round checked");
+    let pre_round = tables
+        .pre
+        .betting_round
+        .as_ref()
+        .expect("mid-round checked");
     let call_amount = pre_round.process_call(pre_seat.bet, pre_seat.stack);
     let post_turn = tables.post.current_turn.expect("mid-round checked");
     if air.input.call_amount != call_amount
@@ -313,8 +318,16 @@ pub(crate) fn validate_raise(
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "raise")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "raise")?;
-    let pre_round = tables.pre.betting_round.as_ref().expect("mid-round checked");
-    let post_round = tables.post.betting_round.as_ref().expect("mid-round checked");
+    let pre_round = tables
+        .pre
+        .betting_round
+        .as_ref()
+        .expect("mid-round checked");
+    let post_round = tables
+        .post
+        .betting_round
+        .as_ref()
+        .expect("mid-round checked");
     let post_turn = tables.post.current_turn.expect("mid-round checked");
     if air.input.raise_to != post_seat.bet
         || air.input.raise_to != post_round.current_bet
@@ -355,10 +368,7 @@ pub(crate) fn validate_raise(
     validate_row(public_inputs, &row.to_vec(), "raise")
 }
 
-pub(crate) fn validate_bet(
-    air: &BetAir,
-    public_inputs: &TexasPublicInputs,
-) -> TexasAirResult<()> {
+pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> TexasAirResult<()> {
     let tables = validate_native_mid_round(
         public_inputs,
         MethodKind::Bet,
@@ -369,7 +379,11 @@ pub(crate) fn validate_bet(
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "bet")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "bet")?;
-    let pre_round = tables.pre.betting_round.as_ref().expect("mid-round checked");
+    let pre_round = tables
+        .pre
+        .betting_round
+        .as_ref()
+        .expect("mid-round checked");
     let post_turn = tables.post.current_turn.expect("mid-round checked");
     let amount = post_seat.bet.checked_sub(pre_seat.bet).ok_or_else(|| {
         TexasAirError::SpecViolation("bet: canonical post seat.bet decreased".into())

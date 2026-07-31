@@ -37,7 +37,18 @@ pub const ACE: u8 = 14;
 /// 主牌结构（table.move 编码：suit 0-3, rank 2-14）。
 ///
 /// 与 Move `Card` struct 完全一致，使用 `copy + drop + store` 语义对应 Rust 的 `Copy + Clone`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct Card {
     /// 花色：0=SPADES, 1=HEARTS, 2=DIAMONDS, 3=CLUBS。
     pub suit: u8,
@@ -127,7 +138,18 @@ impl std::fmt::Display for Card {
 /// 与 Move `PlayingCard` struct 一致：
 /// - rank: 2-14
 /// - suit: 0=Club, 1=Diamond, 2=Heart, 3=Spade
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct PlayingCard {
     pub rank: u8,
     pub suit: u8,
@@ -196,10 +218,7 @@ mod tests {
     #[test]
     fn test_playing_card_to_card_mapping() {
         // PlayingCard Club(0) → Card CLUBS(3)
-        assert_eq!(
-            PlayingCard::new(ACE, 0).to_card(),
-            Card::new(CLUBS, ACE)
-        );
+        assert_eq!(PlayingCard::new(ACE, 0).to_card(), Card::new(CLUBS, ACE));
         // PlayingCard Diamond(1) → Card DIAMONDS(2)
         assert_eq!(
             PlayingCard::new(KING, 1).to_card(),
@@ -211,9 +230,6 @@ mod tests {
             Card::new(HEARTS, QUEEN)
         );
         // PlayingCard Spade(3) → Card SPADES(0)
-        assert_eq!(
-            PlayingCard::new(JACK, 3).to_card(),
-            Card::new(SPADES, JACK)
-        );
+        assert_eq!(PlayingCard::new(JACK, 3).to_card(), Card::new(SPADES, JACK));
     }
 }

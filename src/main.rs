@@ -29,22 +29,22 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
 use poker_l1::account::derive_address;
 use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, validate_tx_signature};
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
-use poker_l1::executor::ExecutionEnvironment;
 use poker_l1::consensus::{
     Dag, DagCommitCertificate, DagVertex, VertexBuilder, detect_commit_leader,
 };
 use poker_l1::error::PokerL1Result;
+use poker_l1::executor::ExecutionEnvironment;
 use poker_l1::network::{GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
-use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
-use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane, validate_tx_limits};
-use poker_l1::{Address, Hash};
+use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
 use poker_l1::rpc::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcClientInfo, RpcGuard, RpcHandler,
 };
+use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
+use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane, validate_tx_limits};
+use poker_l1::{Address, Hash};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -142,9 +142,7 @@ fn print_usage() {
     eprintln!(
         "  --validator-key <hex>                   validator 私钥（32B hex，不推荐：ps 可见）"
     );
-    eprintln!(
-        "  --block-interval-ms <ms>                出块间隔毫秒（默认 1000，仅 validator）"
-    );
+    eprintln!("  --block-interval-ms <ms>                出块间隔毫秒（默认 1000，仅 validator）");
     eprintln!(
         "  --peer <addr>                           P2P peer 地址（可重复，如 127.0.0.1:9001）"
     );
@@ -425,7 +423,15 @@ fn run_node(args: &[String]) -> Result<(), String> {
             std::thread::Builder::new()
                 .name("validator-loop".to_string())
                 .spawn(move || {
-                    run_validator_loop(v_node, vkey, chain_id, dag, v_transport, interval, v_shutdown);
+                    run_validator_loop(
+                        v_node,
+                        vkey,
+                        chain_id,
+                        dag,
+                        v_transport,
+                        interval,
+                        v_shutdown,
+                    );
                 })
                 .map_err(|e| format!("validator loop 线程启动失败：{e}"))?,
         )
@@ -654,11 +660,7 @@ impl TcpTransport {
 }
 
 impl NetworkTransport for TcpTransport {
-    fn gossip_broadcast(
-        &self,
-        _topic: GossipTopic,
-        message: &NetworkMessage,
-    ) -> PokerL1Result<()> {
+    fn gossip_broadcast(&self, _topic: GossipTopic, message: &NetworkMessage) -> PokerL1Result<()> {
         let bytes = borsh::to_vec(message)?;
         let len = bytes.len() as u32;
         let mut frame = len.to_be_bytes().to_vec();
@@ -692,9 +694,8 @@ impl NetworkTransport for TcpTransport {
             .map_err(|e| {
                 poker_l1::error::PokerL1Error::Other(format!("set_write_timeout 失败：{e}"))
             })?;
-        send_p2p_message(&mut stream, message).map_err(|e| {
-            poker_l1::error::PokerL1Error::Other(format!("send_to: 发送失败：{e}"))
-        })?;
+        send_p2p_message(&mut stream, message)
+            .map_err(|e| poker_l1::error::PokerL1Error::Other(format!("send_to: 发送失败：{e}")))?;
         debug!("send_to: 已发送消息到 peer={}", peer.address);
         Ok(())
     }
@@ -783,9 +784,7 @@ impl NetworkTransport for TcpTransport {
         ))
     }
 
-    fn subscribe_light_headers(
-        &self,
-    ) -> PokerL1Result<Vec<poker_l1::network::LightClientHeader>> {
+    fn subscribe_light_headers(&self) -> PokerL1Result<Vec<poker_l1::network::LightClientHeader>> {
         // 轻客户端 header 订阅依赖 validator 多签协议，超出本次重构范围
         Ok(Vec::new())
     }
@@ -795,10 +794,7 @@ impl NetworkTransport for TcpTransport {
 ///
 /// 用于 `request_blocks_by_range` / `request_vertices_by_range` 等请求-响应协议。
 /// 创建独立连接以避免与持久 P2P 读取循环冲突。
-fn send_request_and_recv(
-    peer_addr: &str,
-    req: &NetworkMessage,
-) -> Result<NetworkMessage, String> {
+fn send_request_and_recv(peer_addr: &str, req: &NetworkMessage) -> Result<NetworkMessage, String> {
     let mut stream =
         TcpStream::connect(peer_addr).map_err(|e| format!("连接 {peer_addr} 失败：{e}"))?;
     stream
@@ -862,11 +858,7 @@ fn recv_p2p_message(stream: &mut TcpStream) -> Result<Option<NetworkMessage>, St
 /// - `ResponseBlocks` → 逐个 `node.put_block`
 /// - `RequestBlocksByRange` → 查询本地并回送 `ResponseBlocks`
 /// - `RequestVerticesByRange` → 暂返回空（需 epoch 上下文，超出本次重构范围）
-fn handle_p2p_connection(
-    mut stream: TcpStream,
-    node: Arc<Node>,
-    transport: Arc<TcpTransport>,
-) {
+fn handle_p2p_connection(mut stream: TcpStream, node: Arc<Node>, transport: Arc<TcpTransport>) {
     let peer_addr = stream.peer_addr().ok();
     // 重构2：注册接入 peer 的地址信息（用于定向通信）
     if let Some(addr) = peer_addr {
@@ -1296,18 +1288,23 @@ fn run_validator_loop(
                                     );
 
                                     commit_round += 1;
-                                    prev_commit_hash = block
-                                        .header
-                                        .dag_commit_certificate
-                                        .cert_hash(chain_id);
+                                    prev_commit_hash =
+                                        block.header.dag_commit_certificate.cert_hash(chain_id);
                                     prev_block_hash = block_hash;
 
                                     // 清空 Dag，只保留当前 vertex
-                                    info!("[validator-loop] block#{} 提交完成，准备清空 Dag", block.header.height);
-                                    let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                                    info!(
+                                        "[validator-loop] block#{} 提交完成，准备清空 Dag",
+                                        block.header.height
+                                    );
+                                    let mut dag_guard =
+                                        dag.lock().unwrap_or_else(|e| e.into_inner());
                                     *dag_guard = Dag::new();
                                     dag_guard.insert(vertex.clone());
-                                    info!("[validator-loop] Dag 已清空，last_vertex 设为 round={} vertex", round);
+                                    info!(
+                                        "[validator-loop] Dag 已清空，last_vertex 设为 round={} vertex",
+                                        round
+                                    );
                                 }
                                 Err(e) => {
                                     error!("put_block 失败：{e}");
@@ -1393,8 +1390,8 @@ fn run_keygen(args: &[String]) -> Result<(), String> {
 /// 在单进程内以 validator 模式打开 Node，完成完整链路测试。
 /// 使用独立 data-dir（默认 /tmp/zchain-e2e），不影响正在运行的节点。
 fn run_test_e2e(args: &[String]) -> Result<(), String> {
-    use secp256k1::{Message, Secp256k1};
     use secp256k1::rand::rngs::OsRng;
+    use secp256k1::{Message, Secp256k1};
 
     let mut data_dir = PathBuf::from("/tmp/zchain-e2e");
     let mut i = 0;
@@ -1423,12 +1420,19 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
     let mut rng = OsRng;
     let (secret_key, public_key) = secp.generate_keypair(&mut rng);
     let compressed = public_key.serialize();
-    let tagged_pubkey =
-        TaggedPubkey::new(SignatureScheme::Secp256k1, CURRENT_VERSION, compressed.to_vec())
-            .map_err(|e| format!("构造 tagged_pubkey 失败：{e}"))?;
+    let tagged_pubkey = TaggedPubkey::new(
+        SignatureScheme::Secp256k1,
+        CURRENT_VERSION,
+        compressed.to_vec(),
+    )
+    .map_err(|e| format!("构造 tagged_pubkey 失败：{e}"))?;
     let address: Address = poker_l1::account::derive_address(&tagged_pubkey);
     info!("1. 密钥对生成完成");
-    info!("   tagged_pubkey tag=0x{:02x} raw={}B", tagged_pubkey.tag, tagged_pubkey.raw.len());
+    info!(
+        "   tagged_pubkey tag=0x{:02x} raw={}B",
+        tagged_pubkey.tag,
+        tagged_pubkey.raw.len()
+    );
     info!("   address={}", hex::encode(address));
 
     // 2. 构造 ValidatorKey 并以 validator 模式打开 Node
@@ -1438,7 +1442,10 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("构造 ValidatorKey 失败：{e}"))?;
     let config = NodeConfig::validator(data_dir.clone(), vkey);
     let node = Node::open(config).map_err(|e| format!("Node::open 失败：{e}"))?;
-    info!("2. Validator 节点已打开（chain_id=0x{:08x}）", node.chain_id());
+    info!(
+        "2. Validator 节点已打开（chain_id=0x{:08x}）",
+        node.chain_id()
+    );
 
     // 3. 构造交易（Public 通道，空 inputs/outputs，nonce=0）
     let tx = Transaction {
@@ -1469,7 +1476,10 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
     let tx_hash = tx.tx_hash();
     info!("3. 交易构造与签名完成");
     info!("   tx_hash={}", hex::encode(tx_hash));
-    info!("   lane=Public nonce=0 inputs=0 outputs=0 sig={}B", tx.signature.len());
+    info!(
+        "   lane=Public nonce=0 inputs=0 outputs=0 sig={}B",
+        tx.signature.len()
+    );
 
     // 5. 提交交易到 Node
     let returned_hash = node
@@ -1544,7 +1554,11 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
     let block = Block::new(header, public_txs, vec![]);
     let block_hash = block.header.block_hash(node.chain_id());
     info!("7. 区块构造完成");
-    info!("   height={} block_hash={}", block_height, hex::encode(block_hash));
+    info!(
+        "   height={} block_hash={}",
+        block_height,
+        hex::encode(block_hash)
+    );
     info!("   public_txs=1 gameturn_txs=0");
 
     // 9. 写入区块
@@ -1610,10 +1624,18 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
             new_tip_hash.map(hex::encode)
         ));
     }
-    info!("11. tip 已更新: height={} hash={}", block_height, hex::encode(block_hash));
+    info!(
+        "11. tip 已更新: height={} hash={}",
+        block_height,
+        hex::encode(block_hash)
+    );
 
     info!("===== 端到端链路测试全部通过 =====");
     info!("  密钥生成 → 交易构造 → 签名 → 提交 → 缓冲 → 出块 → 写入 → 查询 → tip 更新");
-    println!("\n✅ E2E 测试通过: block#{} 包含 1 笔交易, tx_hash={}", block_height, hex::encode(tx_hash));
+    println!(
+        "\n✅ E2E 测试通过: block#{} 包含 1 笔交易, tx_hash={}",
+        block_height,
+        hex::encode(tx_hash)
+    );
     Ok(())
 }

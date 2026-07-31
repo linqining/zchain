@@ -4,24 +4,25 @@
 //! opening、circle/line folding 和 last-layer polynomial 检查。它提供后续 FRI verifier
 //! AIR 的 canonical witness 布局；当前高层递归入口仍等待 transcript/Poseidon252 AIR。
 
+use stwo::core::ColumnVec;
 use stwo::core::channel::{Channel, MerkleChannel, Poseidon252Channel};
 use stwo::core::circle::{CirclePoint, Coset};
 use stwo::core::fields::m31::BaseField;
-use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::fri::{fold_circle_into_line, fold_coset};
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::poly::line::{LineDomain, LinePoly};
 use stwo::core::proof::StarkProof;
-use stwo::core::queries::{draw_queries, Queries};
+use stwo::core::queries::{Queries, draw_queries};
 use stwo::core::utils::bit_reverse_index;
 use stwo::core::vcs_lifted::poseidon252_merkle::{
     Poseidon252MerkleChannel, Poseidon252MerkleHasher,
 };
 use stwo::core::vcs_lifted::verifier::{LOG_PACKED_LEAF_SIZE, PACKED_LEAF_SIZE};
-use stwo::core::ColumnVec;
 
-use super::stwo_replay::{replay_merkle_tree_with_sizes, MerkleReplayError, MerkleTreeReplay};
+use super::poseidon252_replay::{Poseidon252PermutationCall, RecordingPoseidon252Channel};
+use super::stwo_replay::{MerkleReplayError, MerkleTreeReplay, replay_merkle_tree_with_sizes};
 
 /// 从 L1 transcript 重放得到的 FRI challenges。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub(crate) struct FriReplayChallenges {
     pub inner_layer_alphas: Vec<SecureField>,
     /// FRI first-layer query positions。
     pub query_positions: Vec<usize>,
+    /// Full fixed-verifier transcript permutation schedule, including PoW and query draws.
+    pub transcript_poseidon_calls: Vec<Poseidon252PermutationCall>,
 }
 
 /// 单个 FRI committed layer 的重放结果。
@@ -43,6 +46,10 @@ pub(crate) struct FriLayerReplay {
     pub fold_step: u32,
     /// 补齐 folding coset 后的 decommitment positions。
     pub decommitment_positions: Vec<usize>,
+    /// Exact coset evaluations consumed by this layer's fold, before folding.
+    pub opened_coset_evaluations: Vec<Vec<SecureField>>,
+    /// Natural-domain initial index corresponding to each opened coset.
+    pub coset_domain_initial_indexes: Vec<usize>,
     /// 此层 Merkle opening 的完整重放。
     pub merkle: MerkleTreeReplay,
     /// 折叠后传给下一层的 query positions。
@@ -111,22 +118,22 @@ pub(crate) fn extract_simple_fri_replay_challenges(
         return None;
     }
 
-    let mut channel = Poseidon252Channel::default();
+    let mut channel = RecordingPoseidon252Channel::default();
     for commitment in trace_commitments {
-        Poseidon252MerkleChannel::mix_root(&mut channel, *commitment);
+        channel.mix_root(*commitment);
     }
     let _composition_random_coeff = channel.draw_secure_felt();
-    Poseidon252MerkleChannel::mix_root(&mut channel, *composition_commitment);
+    channel.mix_root(*composition_commitment);
     let _oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
     channel.mix_felts(&l1_proof.0.sampled_values.clone().flatten_cols());
     let _fri_quotient_random_coeff = channel.draw_secure_felt();
 
     let fri_proof = &l1_proof.0.fri_proof;
-    Poseidon252MerkleChannel::mix_root(&mut channel, fri_proof.first_layer.commitment);
+    channel.mix_root(fri_proof.first_layer.commitment);
     let first_layer_alpha = channel.draw_secure_felt();
     let mut inner_layer_alphas = Vec::with_capacity(fri_proof.inner_layers.len());
     for layer in &fri_proof.inner_layers {
-        Poseidon252MerkleChannel::mix_root(&mut channel, layer.commitment);
+        channel.mix_root(layer.commitment);
         inner_layer_alphas.push(channel.draw_secure_felt());
     }
     channel.mix_felts(&fri_proof.last_layer_poly[..]);
@@ -150,6 +157,7 @@ pub(crate) fn extract_simple_fri_replay_challenges(
         first_layer_alpha,
         inner_layer_alphas,
         query_positions,
+        transcript_poseidon_calls: channel.calls(),
     })
 }
 
@@ -204,6 +212,8 @@ pub(crate) fn replay_fri_decommitment(
         source,
     })?;
 
+    let first_opened_coset_evaluations = first_sparse.subset_evaluations.clone();
+    let first_coset_domain_initial_indexes = first_sparse.subset_domain_initial_indexes.clone();
     let mut layer_queries = queries.fold(fri_config.fold_step);
     let mut layer_evaluations = first_sparse.fold_circle(
         challenges.first_layer_alpha,
@@ -214,6 +224,8 @@ pub(crate) fn replay_fri_decommitment(
         layer_index: 0,
         fold_step: fri_config.fold_step,
         decommitment_positions: first_positions,
+        opened_coset_evaluations: first_opened_coset_evaluations,
+        coset_domain_initial_indexes: first_coset_domain_initial_indexes,
         merkle: first_merkle,
         folded_query_positions: layer_queries.positions.clone(),
         folded_evaluations: layer_evaluations.clone(),
@@ -276,12 +288,16 @@ pub(crate) fn replay_fri_decommitment(
             source,
         })?;
 
+        let opened_coset_evaluations = sparse.subset_evaluations.clone();
+        let coset_domain_initial_indexes = sparse.subset_domain_initial_indexes.clone();
         let folded_queries = layer_queries.fold(fold_step);
         let folded_evaluations = sparse.fold_line(*alpha, layer_domain, fold_step);
         layers.push(FriLayerReplay {
             layer_index,
             fold_step,
             decommitment_positions: positions,
+            opened_coset_evaluations,
+            coset_domain_initial_indexes,
             merkle,
             folded_query_positions: folded_queries.positions.clone(),
             folded_evaluations: folded_evaluations.clone(),
@@ -487,7 +503,7 @@ mod tests {
     use crate::stwo_backend::recursive::trace_gen::extract_query_positions_from_l1;
     use crate::stwo_backend::trace_native::TraceBuilder;
     use stwo::core::air::{Component, Components};
-    use stwo::core::pcs::quotients::{fri_answers, PointSample};
+    use stwo::core::pcs::quotients::{PointSample, fri_answers};
     use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
     const TEST_LOG_SIZE: u32 = 10;

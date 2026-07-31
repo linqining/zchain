@@ -134,10 +134,11 @@ impl FrameworkEval for AutoFoldAir {
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
         // 约束 5（审计共性，degree-2 limb0）：pot 不变（auto_fold 不改变 pot）。
-        for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
+        for __c in common.pot_unchanged_4limb() {
+            eval.add_constraint(__c);
+        }
 
-        let expected_post_turn: E::F =
-            M31::from(u32::from(self.input.post_current_turn)).into();
+        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
         eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
 
         // TODO 阶段 3 完整版：约束 current_time - turn_started_at >= turn_timeout

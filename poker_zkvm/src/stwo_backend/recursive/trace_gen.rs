@@ -29,14 +29,14 @@ use starknet_ff::FieldElement as FieldElement252;
 use stwo::core::channel::{Channel, MerkleChannel, Poseidon252Channel};
 use stwo::core::circle::{CirclePoint, Coset};
 use stwo::core::fields::m31::BaseField;
-use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::fri::{CirclePolyDegreeBound, FriVerifier};
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::line::{LineDomain, LinePoly};
 use stwo::core::proof::StarkProof;
 use stwo::core::utils::bit_reverse_index;
 use stwo::core::vcs_lifted::poseidon252_merkle::{
-    poseidon_finalize, Poseidon252MerkleChannel, Poseidon252MerkleHasher,
+    Poseidon252MerkleChannel, Poseidon252MerkleHasher, poseidon_finalize,
 };
 
 /// OODS Check AIR 使用的 log_size（4 行 = 1 real + 3 padding）。
@@ -916,7 +916,7 @@ pub fn gen_fri_verifier_trace(
         cols[FRI_AIR_COL_IS_FIRST_ROW][row] = if is_first { one } else { BaseField::zero() };
         cols[FRI_AIR_COL_IS_LAST_ROW][row] = if is_last { one } else { BaseField::zero() };
         cols[FRI_AIR_COL_IS_PADDING][row] = BaseField::zero(); // real row
-                                                               // Gating = (1 - IsFirstRow) * (1 - IsPadding)
+        // Gating = (1 - IsFirstRow) * (1 - IsPadding)
         cols[FRI_AIR_COL_GATING][row] = if is_first { BaseField::zero() } else { one };
         // M[1..16] intermediates
         for i in 0..FRI_AIR_NUM_M_INTERMEDIATES {

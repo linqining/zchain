@@ -5,17 +5,13 @@
 
 use std::sync::Arc;
 
-use super::{
-    dispatch,
-    dispatch::selectors,
-    types::GameContract,
-};
+use super::{dispatch, dispatch::selectors, types::GameContract};
+use crate::Address;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
 use crate::storage::{ObjectBackend, ObjectDb};
 use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile};
-use crate::Address;
 
 /// 游戏合约预编译实现。
 ///

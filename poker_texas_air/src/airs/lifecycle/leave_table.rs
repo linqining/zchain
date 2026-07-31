@@ -163,7 +163,12 @@ impl FrameworkEval for LeaveTableAir {
             seat_pending_addon_2,
             seat_pending_addon_3,
         ];
-        let pre_chip_pool = [pre_chip_pool_0, pre_chip_pool_1, pre_chip_pool_2, pre_chip_pool_3];
+        let pre_chip_pool = [
+            pre_chip_pool_0,
+            pre_chip_pool_1,
+            pre_chip_pool_2,
+            pre_chip_pool_3,
+        ];
         let post_chip_pool = [
             post_chip_pool_0,
             post_chip_pool_1,
@@ -195,12 +200,9 @@ impl FrameworkEval for LeaveTableAir {
         ];
 
         // 退款：refund = stack + pending_addon。
-        for constraint in common.limb4_delta(
-            &seat_stack,
-            &refund,
-            &seat_pending_addon,
-            &refund_add_carry,
-        ) {
+        for constraint in
+            common.limb4_delta(&seat_stack, &refund, &seat_pending_addon, &refund_add_carry)
+        {
             eval.add_constraint(constraint);
         }
         // 资金池减法用反向加法表达，从而显式约束跨 limb 借位且禁止下溢。

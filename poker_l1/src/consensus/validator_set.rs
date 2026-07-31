@@ -80,7 +80,18 @@ mod big_array_33 {
 /// - `gamma`：ECVRF 的 gamma 值（compressed secp256k1 point，33 字节）
 /// - `c`：挑战值（32 字节）
 /// - `s`：响应值（32 字节）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct VrfProof {
     /// ECVRF gamma 值（compressed secp256k1 point）。
     #[serde(with = "big_array_33")]
@@ -208,7 +219,9 @@ pub fn compute_vrf_output(
 }
 
 /// Validator 状态（NEW-L3 / R5-H7 / SEC2-M10）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub enum ValidatorStatus {
     /// 活跃（参与共识出块）。
     Active,

@@ -30,7 +30,18 @@ use crate::signature::TaggedPubkey;
 ///   / checkin / challenge_delta / refuse_ack / request_ack / checkpoint_skip /
 ///   force_checkpoint / partial_checkin / revoke_delegated_escape / rotate_validator_key）
 ///   — 路由任意 validator，正常计费（request_ack / refuse_ack / checkpoint_skip 免 gas）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub enum TxLane {
     /// Public 通道：通用交易。
     Public,
@@ -47,7 +58,19 @@ pub enum TxLane {
 /// spec：
 /// - GameTurn + CheckpointAnchor → assigned_validator
 /// - ForceSync + Public → 任意 validator（客户端多副本广播）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub enum RouteHint {
     /// 路由到任意 validator（Public / ForceSync 通道）。
     #[default]
@@ -62,7 +85,18 @@ pub enum RouteHint {
 /// - `budget`：tx 愿意支付的最大 gas 量（tx gas limit = 10,000,000）
 /// - `price`：每 gas 单价（用于 priority 排序）
 /// - GameTurn 通道 tx 的 gas 字段忽略（免 gas），由买入锁仓作为反滥用保障
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct Gas {
     /// Gas 预算上限。
     pub budget: u64,

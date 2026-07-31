@@ -502,11 +502,7 @@ impl Indexer {
 
         // 选择最优反查索引缩小候选集，再统一用 filter.matches 过滤
         let candidates: Vec<Hash> = if let Some(sender) = filter.sender {
-            state
-                .tx_by_sender
-                .get(&sender)
-                .cloned()
-                .unwrap_or_default()
+            state.tx_by_sender.get(&sender).cloned().unwrap_or_default()
         } else if let Some(contract_id) = filter.contract_id {
             state
                 .tx_by_contract
@@ -582,7 +578,11 @@ impl Indexer {
     #[must_use]
     pub fn query_objects_by_owner(&self, owner: Address) -> Vec<ObjectID> {
         let state = self.state.lock().expect("indexer state mutex poisoned");
-        state.object_by_owner.get(&owner).cloned().unwrap_or_default()
+        state
+            .object_by_owner
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// 按对象类型查询对象 ID 列表。
@@ -699,8 +699,8 @@ mod tests {
     use super::*;
     use crate::block::{Block, BlockHeader};
     use crate::consensus::DagCommitCertificate;
-    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::signature::TaggedPubkey;
+    use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, TxLane};
 
     /// 构造测试用 DagCommitCertificate（最小有效结构）。
@@ -942,7 +942,8 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // limit 截断
-        let results = indexer.query_blocks(&BlockFilter::new().with_height_range(10, 14).with_limit(2));
+        let results =
+            indexer.query_blocks(&BlockFilter::new().with_height_range(10, 14).with_limit(2));
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].height, 10);
         assert_eq!(results[1].height, 11);
@@ -985,9 +986,7 @@ mod tests {
     #[test]
     fn test_subscription_block_events() {
         let indexer = Indexer::new();
-        let sub_id = indexer
-            .subscribe(vec![EventType::Block], None)
-            .unwrap();
+        let sub_id = indexer.subscribe(vec![EventType::Block], None).unwrap();
 
         // 索引区块应触发事件
         let block = make_block(100, [0u8; 32], vec![], vec![]);
@@ -1033,9 +1032,7 @@ mod tests {
     #[test]
     fn test_subscription_unsubscribe() {
         let indexer = Indexer::new();
-        let sub_id = indexer
-            .subscribe(vec![EventType::Block], None)
-            .unwrap();
+        let sub_id = indexer.subscribe(vec![EventType::Block], None).unwrap();
         assert_eq!(indexer.subscription_count(), 1);
 
         assert!(indexer.unsubscribe(sub_id));
@@ -1058,9 +1055,7 @@ mod tests {
     #[test]
     fn test_subscription_queue_overflow_drops_oldest() {
         let indexer = Indexer::new();
-        let sub_id = indexer
-            .subscribe(vec![EventType::Block], None)
-            .unwrap();
+        let sub_id = indexer.subscribe(vec![EventType::Block], None).unwrap();
 
         // 推入超过 MAX_EVENTS_PER_SUBSCRIPTION 个区块
         for h in 0..(MAX_EVENTS_PER_SUBSCRIPTION + 5) as BlockHeight {
@@ -1163,4 +1158,3 @@ mod tests {
         assert_eq!(indexer.pending_event_count(99999), None);
     }
 }
-

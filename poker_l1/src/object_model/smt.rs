@@ -39,7 +39,16 @@ const INTERNAL_DOMAIN: u8 = 0x01;
 ///
 /// `siblings[h]` = 高度 h 处的兄弟节点哈希（h ∈ [0, TREE_DEPTH-1]）。
 /// 验证时从叶到根逐层合并。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct MerklePath {
     /// 从叶（height 0）到根（height 255）的兄弟哈希，共 256 个。
     pub siblings: Vec<Hash>,

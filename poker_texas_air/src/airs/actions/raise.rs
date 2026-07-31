@@ -300,8 +300,7 @@ impl FrameworkEval for RaiseAir {
                     * (input_pre_seat_stack[i].clone() - expected_pre_stack[i].into()),
             );
             eval.add_constraint(
-                is_active.clone()
-                    * (input_pre_seat_bet[i].clone() - expected_pre_bet[i].into()),
+                is_active.clone() * (input_pre_seat_bet[i].clone() - expected_pre_bet[i].into()),
             );
             eval.add_constraint(
                 is_active.clone()
@@ -311,8 +310,7 @@ impl FrameworkEval for RaiseAir {
                 is_active.clone() * (input_call_delta[i].clone() - expected_needed[i].into()),
             );
             eval.add_constraint(
-                is_active.clone()
-                    * (output_seat_stack[i].clone() - expected_post_stack[i].into()),
+                is_active.clone() * (output_seat_stack[i].clone() - expected_post_stack[i].into()),
             );
             eval.add_constraint(
                 is_active.clone() * (output_seat_bet[i].clone() - expected_raise[i].into()),
@@ -322,8 +320,7 @@ impl FrameworkEval for RaiseAir {
                     * (output_seat_total_bet[i].clone() - expected_post_total[i].into()),
             );
             eval.add_constraint(
-                is_active.clone()
-                    * (output_current_bet[i].clone() - expected_raise[i].into()),
+                is_active.clone() * (output_current_bet[i].clone() - expected_raise[i].into()),
             );
         }
 
@@ -341,7 +338,9 @@ impl FrameworkEval for RaiseAir {
         // ===== 资金守恒约束（对齐 Lean PotDelta / Limb4Delta / Limb4DeltaRev / Limb4Eq）=====
 
         // 约束 8：VM 在 mid-round 不收池；筹码保留在 seat.bet。
-        for __c in common.pot_unchanged_4limb() { eval.add_constraint(__c); }
+        for __c in common.pot_unchanged_4limb() {
+            eval.add_constraint(__c);
+        }
 
         // stack/bet/total_bet/current_bet 已绑定到 verifier 端 checked u64 运算的
         // 逐 limb 常量；不使用无 carry 的逐 limb delta。
@@ -363,8 +362,7 @@ impl FrameworkEval for RaiseAir {
 
         let expected_all_in: E::F = M31::from(u32::from(is_all_in)).into();
         eval.add_constraint(is_active.clone() * (output_all_in - expected_all_in));
-        let expected_post_turn: E::F =
-            M31::from(u32::from(self.input.post_current_turn)).into();
+        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
         eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
 
         eval

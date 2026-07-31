@@ -35,7 +35,9 @@ pub const DEFAULT_GAME_VALIDATOR_TIMEOUT_BLOCKS: BlockHeight = 2;
 pub const DEFAULT_FORFEIT_BOND_PERCENTAGE: u32 = 50;
 
 /// 游戏分配配置（Task 12 可治理参数）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct GameAssignmentConfig {
     /// assigned_validator 失效超时 block 数（SubTask 12.4：默认 2，R4-L8 修正）。
     pub game_validator_timeout_blocks: BlockHeight,
@@ -99,7 +101,9 @@ pub fn client_route_validator(
 /// epoch 过渡锚点状态（NEW-M10）。
 ///
 /// 追踪操作方在 epoch 边界前 `epoch_transition_window_blocks` 内是否提交了 `checkpoint_anchor`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct EpochTransitionState {
     /// 过渡所属的 epoch（即将进入的新 epoch）。
     pub target_epoch: u64,

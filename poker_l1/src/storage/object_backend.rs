@@ -13,9 +13,9 @@
 //! - Fork/Snapshot 机制：克隆内存 SMT，所有写操作记录到 mutation log，
 //!   `apply_to()` 将 log 回放到主 ObjectDb（commit），`discard()` 丢弃（rollback）
 
+use crate::error::PokerL1Result;
 use crate::object_model::{Object, ObjectID, Version};
 use crate::{Address, Hash};
-use crate::error::PokerL1Result;
 
 /// Object 读写后端抽象。
 ///
@@ -39,7 +39,8 @@ pub trait ObjectBackend {
     fn update(&mut self, id: &ObjectID, actor: &Address, new_data: Vec<u8>) -> PokerL1Result<()>;
 
     /// 转移所有权（仅 AddressOwned 对象可转移）。
-    fn transfer(&mut self, id: &ObjectID, actor: &Address, new_owner: Address) -> PokerL1Result<()>;
+    fn transfer(&mut self, id: &ObjectID, actor: &Address, new_owner: Address)
+    -> PokerL1Result<()>;
 
     /// 删除对象（从 SMT 与持久化后端同步移除）。
     fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object>;
@@ -76,7 +77,12 @@ impl ObjectBackend for ObjectDb {
     }
 
     #[inline]
-    fn transfer(&mut self, id: &ObjectID, actor: &Address, new_owner: Address) -> PokerL1Result<()> {
+    fn transfer(
+        &mut self,
+        id: &ObjectID,
+        actor: &Address,
+        new_owner: Address,
+    ) -> PokerL1Result<()> {
         self.transfer(id, actor, new_owner)
     }
 

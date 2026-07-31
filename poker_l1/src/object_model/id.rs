@@ -21,7 +21,17 @@ pub type CreationNonce = u64;
 /// 28 字节定长：20 字节 creator_address + 8 字节 creation_nonce（little-endian）。
 /// 全局唯一性由「creator nonce 单调递增 + 不同 creator address 不碰撞」保证。
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, BorshSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
     BorshDeserialize,
 )]
 pub struct ObjectID {

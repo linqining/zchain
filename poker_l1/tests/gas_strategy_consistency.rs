@@ -20,10 +20,7 @@ fn test_bpf_vs_zkvm_meter_difference() {
     let zkvm = ZkvmGasStrategy::new();
 
     assert!(bpf.instruction_meter_enabled(), "BPF 应启用指令计量");
-    assert!(
-        !zkvm.instruction_meter_enabled(),
-        "zkvm 应禁用指令计量"
-    );
+    assert!(!zkvm.instruction_meter_enabled(), "zkvm 应禁用指令计量");
 }
 
 /// 验证 zkvm 所有指令类别 gas = 0，BPF 所有指令类别 gas > 0。
@@ -45,17 +42,8 @@ fn test_bpf_vs_zkvm_gas_difference() {
     ];
 
     for cat in all_categories {
-        assert_eq!(
-            zkvm.instruction_gas(cat),
-            0,
-            "zkvm {:?} 应为 0",
-            cat
-        );
-        assert!(
-            bpf.instruction_gas(cat) > 0,
-            "BPF {:?} 应 > 0",
-            cat
-        );
+        assert_eq!(zkvm.instruction_gas(cat), 0, "zkvm {:?} 应为 0", cat);
+        assert!(bpf.instruction_gas(cat) > 0, "BPF {:?} 应 > 0", cat);
     }
 }
 
@@ -64,10 +52,7 @@ fn test_bpf_vs_zkvm_gas_difference() {
 fn test_strategy_names() {
     assert_eq!(BpfGasStrategy::new().name(), "bpf");
     assert_eq!(ZkvmGasStrategy::new().name(), "zkvm");
-    assert_ne!(
-        BpfGasStrategy::new().name(),
-        ZkvmGasStrategy::new().name()
-    );
+    assert_ne!(BpfGasStrategy::new().name(), ZkvmGasStrategy::new().name());
 }
 
 /// 验证 BPF 的 gas 上限为正值，且 block > tx。
@@ -94,12 +79,24 @@ fn test_bpf_vs_zkvm_syscall_gas() {
     let zkvm = ZkvmGasStrategy::new();
 
     // BPF 对 ObjectRead 计费（10 + 1*100 = 110），zkvm 为 0
-    assert_eq!(bpf.syscall_gas(vm_common::syscall_id::SyscallId::ObjectRead, 100), 110);
-    assert_eq!(zkvm.syscall_gas(vm_common::syscall_id::SyscallId::ObjectRead, 100), 0);
+    assert_eq!(
+        bpf.syscall_gas(vm_common::syscall_id::SyscallId::ObjectRead, 100),
+        110
+    );
+    assert_eq!(
+        zkvm.syscall_gas(vm_common::syscall_id::SyscallId::ObjectRead, 100),
+        0
+    );
 
     // BPF 对 VerifySignature 固定 500，zkvm 为 0
-    assert_eq!(bpf.syscall_gas(vm_common::syscall_id::SyscallId::VerifySignature, 0), 500);
-    assert_eq!(zkvm.syscall_gas(vm_common::syscall_id::SyscallId::VerifySignature, 0), 0);
+    assert_eq!(
+        bpf.syscall_gas(vm_common::syscall_id::SyscallId::VerifySignature, 0),
+        500
+    );
+    assert_eq!(
+        zkvm.syscall_gas(vm_common::syscall_id::SyscallId::VerifySignature, 0),
+        0
+    );
 }
 
 /// 验证两个策略可作为 trait object 共存于集合。

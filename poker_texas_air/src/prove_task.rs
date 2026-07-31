@@ -22,9 +22,9 @@
 //! `return_value` = borsh([`DispatchOutput`])，其中 `DispatchOutput` 含
 //! `events` + `prove_task`。旧格式（仅 events）通过版本前缀区分。
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
 
 // MethodInput 复用 vm-common 的定义（poker_l1 与 poker_texas_air 共享的 borsh 契约）。
 pub use vm_common::prove_task::MethodInput;
@@ -43,9 +43,7 @@ pub fn dispatch_call_digest(
     raw_args: &[u8],
 ) -> crate::error::TexasAirResult<[u8; 32]> {
     let encoded = borsh::to_vec(&(context.clone(), *selector, raw_args.to_vec())).map_err(|e| {
-        crate::error::TexasAirError::SerializationError(format!(
-            "dispatch call context borsh: {e}"
-        ))
+        crate::error::TexasAirError::SerializationError(format!("dispatch call context borsh: {e}"))
     })?;
     let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
     hasher.update(b"zchain.texas_poker.dispatch_call.v1");

@@ -38,14 +38,14 @@ use super::betting::{BettingError, BettingRound};
 use super::card::{Card, PlayingCard};
 use super::constants::*;
 use super::events::{
-    self, TexasPokerEvent, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE,
-    DECK_REBUILT_REASON_SHUFFLE_TIMEOUT, POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN,
-    TRIGGER_ACTION_RAISE_ALL_IN,
+    self, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE, DECK_REBUILT_REASON_SHUFFLE_TIMEOUT,
+    POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN, TRIGGER_ACTION_RAISE_ALL_IN,
+    TexasPokerEvent,
 };
 use super::side_pot;
 use super::types::{
-    DecryptedCard, ReconstructPlayerDeck, RevealAssignment, RevealTokenData, Seat,
-    TexasPokerTable, EMPTY_PLAYER, OWNER_SEAT_PUBLIC,
+    DecryptedCard, EMPTY_PLAYER, OWNER_SEAT_PUBLIC, ReconstructPlayerDeck, RevealAssignment,
+    RevealTokenData, Seat, TexasPokerTable,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -109,9 +109,7 @@ pub fn is_in_list(list: &[u8], value: u8) -> bool {
 /// 是否已注册 pk（occupied 且 pk 匹配）。
 #[must_use]
 pub fn is_pk_registered(seats: &[Seat], pk: &G1Projective) -> bool {
-    seats
-        .iter()
-        .any(|s| s.is_occupied() && &s.pk.0 == pk)
+    seats.iter().any(|s| s.is_occupied() && &s.pk.0 == pk)
 }
 
 // ========== 座位/玩家辅助 ==========
@@ -151,9 +149,7 @@ pub fn get_pending_seat_indices(completed: &[u8], seats: &[Seat]) -> Vec<u8> {
     seats
         .iter()
         .enumerate()
-        .filter(|(i, s)| {
-            s.is_occupied() && !s.is_waiting && !is_in_list(completed, *i as u8)
-        })
+        .filter(|(i, s)| s.is_occupied() && !s.is_waiting && !is_in_list(completed, *i as u8))
         .map(|(i, _)| i as u8)
         .collect()
 }
@@ -224,7 +220,10 @@ fn add_pk_to_aggregated(old: Option<&G1Projective>, new_pk: &G1Projective) -> Op
 /// 从聚合 pk 移除 pk：None 直接返回 None；Some(old) - pk 返回 Some(old - pk) 或 None（若为单位元）。
 ///
 /// 若结果为单位元，返回 None（与 Move 端"空 Vec"语义一致）。
-fn remove_pk_from_aggregated(old: Option<&G1Projective>, pk: &G1Projective) -> Option<G1Projective> {
+fn remove_pk_from_aggregated(
+    old: Option<&G1Projective>,
+    pk: &G1Projective,
+) -> Option<G1Projective> {
     let old_pt = old?;
     let diff = g1_sub(old_pt, pk);
     if g1_is_identity(&diff) {
@@ -357,8 +356,8 @@ fn post_blinds(
         (sb, bb)
     } else {
         // 非 heads-up: SB=button 之后第一个参与本局的座位，BB=SB 之后下一个
-        let sb = find_next_participating_seat(&table.seats, table.button, n)
-            .unwrap_or(table.button);
+        let sb =
+            find_next_participating_seat(&table.seats, table.button, n).unwrap_or(table.button);
         let bb = find_next_participating_seat(&table.seats, sb, n).unwrap_or(sb);
         (sb, bb)
     };
@@ -373,12 +372,16 @@ fn post_blinds(
     table.seats[sb_seat_idx].stack = table.seats[sb_seat_idx]
         .stack
         .checked_sub(sb_amt)
-        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: sb stack -= sb_amt underflow".into()))?;
+        .ok_or_else(|| {
+            PokerL1Error::Serialization("post_blinds: sb stack -= sb_amt underflow".into())
+        })?;
     table.seats[sb_seat_idx].bet = sb_amt;
     table.seats[sb_seat_idx].total_bet = table.seats[sb_seat_idx]
         .total_bet
         .checked_add(sb_amt)
-        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: sb total_bet += sb_amt overflow".into()))?;
+        .ok_or_else(|| {
+            PokerL1Error::Serialization("post_blinds: sb total_bet += sb_amt overflow".into())
+        })?;
     if table.seats[sb_seat_idx].stack == 0 {
         table.seats[sb_seat_idx].all_in = true;
     }
@@ -386,12 +389,16 @@ fn post_blinds(
     table.seats[bb_seat_idx].stack = table.seats[bb_seat_idx]
         .stack
         .checked_sub(bb_amt)
-        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: bb stack -= bb_amt underflow".into()))?;
+        .ok_or_else(|| {
+            PokerL1Error::Serialization("post_blinds: bb stack -= bb_amt underflow".into())
+        })?;
     table.seats[bb_seat_idx].bet = bb_amt;
     table.seats[bb_seat_idx].total_bet = table.seats[bb_seat_idx]
         .total_bet
         .checked_add(bb_amt)
-        .ok_or_else(|| PokerL1Error::Serialization("post_blinds: bb total_bet += bb_amt overflow".into()))?;
+        .ok_or_else(|| {
+            PokerL1Error::Serialization("post_blinds: bb total_bet += bb_amt overflow".into())
+        })?;
     if table.seats[bb_seat_idx].stack == 0 {
         table.seats[bb_seat_idx].all_in = true;
     }
@@ -817,7 +824,11 @@ fn start_preflop_reveal_phase(
     for &seat in &active_seats {
         for _ in 0..CARDS_PER_PLAYER {
             // pending_players = 除牌主外的所有活跃玩家（牌主不为自己提交 reveal token）
-            let pending: Vec<u8> = active_seats.iter().copied().filter(|&s| s != seat).collect();
+            let pending: Vec<u8> = active_seats
+                .iter()
+                .copied()
+                .filter(|&s| s != seat)
+                .collect();
             assignments.push(RevealAssignment {
                 encrypted_card_index: card_idx,
                 pending_players: pending,
@@ -990,7 +1001,10 @@ fn check_reveal_phase_complete(
 }
 
 /// 将解密的公共牌写入 community_cards。
-fn write_decrypted_cards_to_community(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
+fn write_decrypted_cards_to_community(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) {
     let mut indices = Vec::new();
     let mut ranks = Vec::new();
     let mut suits = Vec::new();
@@ -1301,8 +1315,7 @@ pub fn apply_join_and_shuffle(
 
     // ZK verify shuffle (mask_cts → output_cts)，用 new_agg_pk
     // ECPoint → G1Projective（types.rs 字段为 Option<ECPoint>，add_pk_to_aggregated 接受 Option<&G1Projective>）
-    let agg_pk_pt: Option<G1Projective> =
-        table.deck_state.aggregated_pk.as_ref().map(|p| p.0);
+    let agg_pk_pt: Option<G1Projective> = table.deck_state.aggregated_pk.as_ref().map(|p| p.0);
     let new_agg_pk = add_pk_to_aggregated(agg_pk_pt.as_ref(), &pk_pt);
     let new_agg_pk_pt = new_agg_pk.unwrap_or(G1Projective::identity());
     let _ = utils::verify_or_skip(table.config.skip_shuffle(), || {
@@ -1354,9 +1367,10 @@ pub fn apply_join_and_shuffle(
             super::constants::MAX_TOTAL_BET
         )));
     }
-    table.chip_pool = table.chip_pool.checked_add(buy_in).ok_or_else(|| {
-        PokerL1Error::Serialization("chip_pool overflow on join".into())
-    })?;
+    table.chip_pool = table
+        .chip_pool
+        .checked_add(buy_in)
+        .ok_or_else(|| PokerL1Error::Serialization("chip_pool overflow on join".into()))?;
 
     table.shuffle_state.completed_players.push(seat_index);
     remove_from_pending(&mut table.shuffle_state.pending_players, seat_index);
@@ -1400,7 +1414,9 @@ pub fn apply_submit_shuffle_v2(
         )));
     }
     if is_in_list(&table.shuffle_state.completed_players, seat_index) {
-        return Err(PokerL1Error::Serialization("already completed shuffle".into()));
+        return Err(PokerL1Error::Serialization(
+            "already completed shuffle".into(),
+        ));
     }
 
     // typed 化后无需反序列化
@@ -1418,14 +1434,8 @@ pub fn apply_submit_shuffle_v2(
         .unwrap_or(G1Projective::identity());
     let _ = utils::verify_or_skip(table.config.skip_shuffle(), || {
         let mut t = utils::new_shuffle_transcript();
-        ZKShuffleProof::verify(
-            &shuffle_proof,
-            &input_cts,
-            &output_cts,
-            &agg_pk_pt,
-            &mut t,
-        )
-        .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
+        ZKShuffleProof::verify(&shuffle_proof, &input_cts, &output_cts, &agg_pk_pt, &mut t)
+            .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
         Ok(true)
     })?;
 
@@ -1470,9 +1480,7 @@ pub fn apply_submit_player_reveal_tokens(
     if table.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE {
         return Err(PokerL1Error::Serialization("reveal phase is NONE".into()));
     }
-    if assignment_indices.len() != reveal_tokens.len()
-        || assignment_indices.len() != proofs.len()
-    {
+    if assignment_indices.len() != reveal_tokens.len() || assignment_indices.len() != proofs.len() {
         return Err(PokerL1Error::Serialization(
             "assignment_indices/reveal_tokens/proofs length mismatch".into(),
         ));
@@ -1569,7 +1577,9 @@ pub fn apply_submit_player_reveal_tokens(
         );
 
         // 若 pending 为空，执行链上解密
-        let pending_empty = table.reveal_token_state.assignments[ai].pending_players.is_empty();
+        let pending_empty = table.reveal_token_state.assignments[ai]
+            .pending_players
+            .is_empty();
         if pending_empty {
             let tokens: Vec<G1Projective> = table.reveal_token_state.assignments[ai]
                 .reveal_tokens
@@ -1602,28 +1612,29 @@ pub fn apply_submit_player_reveal_tokens(
                 let c2 = table.deck_state.encrypted[card_index as usize].c2;
                 let decrypted_c2 = partial_decrypt_c2(&c2, &tokens);
 
-            if phase == REVEAL_PHASE_PREFLOP {
-                // 部分解密：ciphertext = Some(ElGamalCiphertext { c1, c2: partial })，plaintext = None
-                let c1 = table.deck_state.encrypted[card_index as usize].c1;
-                let owner = find_hand_card_owner(table, card_index).unwrap_or(OWNER_SEAT_PUBLIC);
-                table.deck_state.decrypted_cards.push(DecryptedCard {
-                    encrypted_card_index: card_index,
-                    owner_seat_index: owner,
-                    ciphertext: Some(ElGamalCiphertext {
-                        c1,
-                        c2: decrypted_c2,
-                    }),
-                    plaintext: None,
-                });
-            } else {
-                // 公共牌：完全解密
-                table.deck_state.decrypted_cards.push(DecryptedCard {
-                    encrypted_card_index: card_index,
-                    owner_seat_index: OWNER_SEAT_PUBLIC,
-                    ciphertext: None,
-                    plaintext: Some(ECPoint::from(decrypted_c2)),
-                });
-            }
+                if phase == REVEAL_PHASE_PREFLOP {
+                    // 部分解密：ciphertext = Some(ElGamalCiphertext { c1, c2: partial })，plaintext = None
+                    let c1 = table.deck_state.encrypted[card_index as usize].c1;
+                    let owner =
+                        find_hand_card_owner(table, card_index).unwrap_or(OWNER_SEAT_PUBLIC);
+                    table.deck_state.decrypted_cards.push(DecryptedCard {
+                        encrypted_card_index: card_index,
+                        owner_seat_index: owner,
+                        ciphertext: Some(ElGamalCiphertext {
+                            c1,
+                            c2: decrypted_c2,
+                        }),
+                        plaintext: None,
+                    });
+                } else {
+                    // 公共牌：完全解密
+                    table.deck_state.decrypted_cards.push(DecryptedCard {
+                        encrypted_card_index: card_index,
+                        owner_seat_index: OWNER_SEAT_PUBLIC,
+                        ciphertext: None,
+                        plaintext: Some(ECPoint::from(decrypted_c2)),
+                    });
+                }
             } // 闭合非 showdown 的 else 块
 
             table.reveal_token_state.assignments[ai].decrypted = true;
@@ -1738,7 +1749,9 @@ pub fn apply_leave_with_proof(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if seat_index >= table.max_players {
-        return Err(PokerL1Error::Serialization("seat_index out of range".into()));
+        return Err(PokerL1Error::Serialization(
+            "seat_index out of range".into(),
+        ));
     }
     if !table.seats[seat_index as usize].is_occupied() {
         return Err(PokerL1Error::Serialization("seat not occupied".into()));
@@ -1757,15 +1770,18 @@ pub fn apply_leave_with_proof(
     // arithmetic 在账户池不足时静默造币，也避免报错时留下部分状态变更。
     let stack_refund = table.seats[seat_index as usize].stack;
     let pending_refund = table.seats[seat_index as usize].pending_addon;
-    let refund = stack_refund.checked_add(pending_refund).ok_or_else(|| {
-        PokerL1Error::Serialization("leave_with_proof: refund overflow".into())
-    })?;
+    let refund = stack_refund
+        .checked_add(pending_refund)
+        .ok_or_else(|| PokerL1Error::Serialization("leave_with_proof: refund overflow".into()))?;
     let post_chip_pool = table.chip_pool.checked_sub(stack_refund).ok_or_else(|| {
         PokerL1Error::Serialization("leave_with_proof: chip_pool underflow".into())
     })?;
-    let post_addon_pool = table.addon_pool.checked_sub(pending_refund).ok_or_else(|| {
-        PokerL1Error::Serialization("leave_with_proof: addon_pool underflow".into())
-    })?;
+    let post_addon_pool = table
+        .addon_pool
+        .checked_sub(pending_refund)
+        .ok_or_else(|| {
+            PokerL1Error::Serialization("leave_with_proof: addon_pool underflow".into())
+        })?;
 
     // typed 化后无需反序列化。
     let output_cts = output_cards;
@@ -1784,12 +1800,17 @@ pub fn apply_leave_with_proof(
         if ok {
             Ok(true)
         } else {
-            Err(PokerL1Error::Serialization("leave proof verify failed".into()))
+            Err(PokerL1Error::Serialization(
+                "leave proof verify failed".into(),
+            ))
         }
     })?;
 
     // remove_pk_from_aggregated 已返回 Option<G1Projective>（None 表示结果为单位元/空）。
-    let new_agg = remove_pk_from_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &player_pk);
+    let new_agg = remove_pk_from_aggregated(
+        table.deck_state.aggregated_pk.as_ref().map(|p| &p.0),
+        &player_pk,
+    );
     table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
     table.deck_state.encrypted = output_cts;
 
@@ -2031,7 +2052,11 @@ pub fn apply_check(
     if !is_player_turn(table, seat_index) {
         return Err(PokerL1Error::Serialization("not player's turn".into()));
     }
-    let cb = table.betting_round.as_ref().expect("checked above").current_bet;
+    let cb = table
+        .betting_round
+        .as_ref()
+        .expect("checked above")
+        .current_bet;
     let seat = &mut table.seats[seat_index as usize];
     if seat.folded || seat.all_in {
         return Err(PokerL1Error::Serialization("player inactive".into()));
@@ -2161,12 +2186,7 @@ pub fn apply_raise(
 
     // raise 重置其他可行动玩家
     for (i, s) in table.seats.iter_mut().enumerate() {
-        if i as u8 != seat_index
-            && s.is_occupied()
-            && !s.folded
-            && !s.all_in
-            && !s.is_waiting
-        {
+        if i as u8 != seat_index && s.is_occupied() && !s.folded && !s.all_in && !s.is_waiting {
             s.acted_this_round = false;
         }
     }
@@ -2592,7 +2612,11 @@ fn settle_hand(
 
     // 先 side pot 分层，再基于分层总额算 rake，按比例从各 pot 扣除（守恒）。
     let bets: Vec<u64> = table.seats.iter().map(|s| s.total_bet).collect();
-    let folded: Vec<bool> = table.seats.iter().map(|s| s.folded || s.left_during_hand).collect();
+    let folded: Vec<bool> = table
+        .seats
+        .iter()
+        .map(|s| s.folded || s.left_during_hand)
+        .collect();
     let all_in: Vec<bool> = table.seats.iter().map(|s| s.all_in).collect();
 
     let mut result = match side_pot::calculate_side_pots(&bets, &folded, &all_in) {
@@ -2626,7 +2650,11 @@ fn settle_hand(
     // 逐层分配：pots[0] 是主池，pots[1..] 是边池。eligible 取分层算法结果（同源）。
     let mut all_winners: Vec<u8> = Vec::new();
     for (idx, sp) in result.pots.iter().enumerate() {
-        let pot_type = if idx == 0 { POT_TYPE_MAIN } else { POT_TYPE_SIDE };
+        let pot_type = if idx == 0 {
+            POT_TYPE_MAIN
+        } else {
+            POT_TYPE_SIDE
+        };
         let winners = find_winners_in_seats(table, sp.eligible_seats);
         distribute_pot_to_winners(table, sp.amount, &winners, pot_type, events)?;
         all_winners.extend(&winners);
@@ -2771,14 +2799,9 @@ fn refund_all_bets(
 ) -> PokerL1Result<()> {
     for (i, s) in table.seats.iter_mut().enumerate() {
         if s.is_occupied() && !s.folded && !s.left_during_hand && s.total_bet > 0 && !s.refunded {
-            s.stack = s
-                .stack
-                .checked_add(s.total_bet)
-                .ok_or_else(|| {
-                    PokerL1Error::Serialization(
-                        "refund_all_bets: stack += total_bet overflow".into(),
-                    )
-                })?;
+            s.stack = s.stack.checked_add(s.total_bet).ok_or_else(|| {
+                PokerL1Error::Serialization("refund_all_bets: stack += total_bet overflow".into())
+            })?;
             s.refunded = true;
             events::emit_event(
                 events,
@@ -2818,14 +2841,11 @@ pub fn reset_for_next_hand(
         if s.pending_addon > 0 && s.is_occupied() {
             let player = s.player;
             let amount = s.pending_addon;
-            s.stack = s
-                .stack
-                .checked_add(amount)
-                .ok_or_else(|| {
-                    PokerL1Error::Serialization(
-                        "reset_for_next_hand: stack += pending_addon overflow".into(),
-                    )
-                })?;
+            s.stack = s.stack.checked_add(amount).ok_or_else(|| {
+                PokerL1Error::Serialization(
+                    "reset_for_next_hand: stack += pending_addon overflow".into(),
+                )
+            })?;
             s.pending_addon = 0;
             events::emit_event(
                 events,
@@ -2862,7 +2882,8 @@ pub fn reset_for_next_hand(
         // typed 化后 pk 是 G1Projective；用 is_identity 判断未设置。
         if s.is_waiting && !g1_is_identity(&s.pk) {
             // add_pk_to_aggregated 接受 Option<&G1Projective>，返回 Option<G1Projective>。
-            let new_agg = add_pk_to_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &s.pk);
+            let new_agg =
+                add_pk_to_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &s.pk);
             table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
         }
         s.is_waiting = false;
@@ -2940,8 +2961,10 @@ pub fn reset_for_next_hand(
         let pk = table.seats[i as usize].pk;
         let player = table.seats[i as usize].player;
         if !g1_is_identity(&pk) {
-            let new_agg =
-                remove_pk_from_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &pk);
+            let new_agg = remove_pk_from_aggregated(
+                table.deck_state.aggregated_pk.as_ref().map(|p| &p.0),
+                &pk,
+            );
             table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
         }
         table.seats[i as usize] = Seat::empty();
@@ -3029,7 +3052,8 @@ pub fn kick_player_internal(
     seat.pk = ECPoint(G1Projective::identity());
 
     if !g1_is_identity(&pk) && !was_waiting {
-        let new_agg = remove_pk_from_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &pk);
+        let new_agg =
+            remove_pk_from_aggregated(table.deck_state.aggregated_pk.as_ref().map(|p| &p.0), &pk);
         table.deck_state.aggregated_pk = new_agg.map(ECPoint::from);
     }
 
@@ -3128,9 +3152,7 @@ pub fn apply_addon(
         )));
     }
     if amount == 0 {
-        return Err(PokerL1Error::Serialization(
-            "addon: amount must > 0".into(),
-        ));
+        return Err(PokerL1Error::Serialization("addon: amount must > 0".into()));
     }
 
     let seat = &mut table.seats[seat_index as usize];
@@ -3216,9 +3238,7 @@ pub fn apply_rebuy(
         )));
     }
     if amount == 0 {
-        return Err(PokerL1Error::Serialization(
-            "rebuy: amount must > 0".into(),
-        ));
+        return Err(PokerL1Error::Serialization("rebuy: amount must > 0".into()));
     }
 
     let seat = &mut table.seats[seat_index as usize];
@@ -3347,7 +3367,9 @@ pub fn apply_bet(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if !is_betting_round(table) {
-        return Err(PokerL1Error::Serialization("bet: not in betting round".into()));
+        return Err(PokerL1Error::Serialization(
+            "bet: not in betting round".into(),
+        ));
     }
     if !is_player_turn(table, seat_index) {
         return Err(PokerL1Error::Serialization("bet: not player's turn".into()));
@@ -3468,10 +3490,9 @@ pub fn collect_ante(
     for &seat_idx in &seats_to_ante {
         let seat = &mut table.seats[seat_idx as usize];
         let actual = amount.min(seat.stack);
-        seat.stack = seat
-            .stack
-            .checked_sub(actual)
-            .ok_or_else(|| PokerL1Error::Serialization("collect_ante: stack -= actual underflow".into()))?;
+        seat.stack = seat.stack.checked_sub(actual).ok_or_else(|| {
+            PokerL1Error::Serialization("collect_ante: stack -= actual underflow".into())
+        })?;
         // P0-4 修复：ante 同时计入 bet 与 total_bet，保持二者一致。
         // 这样 side_pot 分层（用 total_bet）与下注轮跟注计算（用 bet）基准统一，
         // 避免 ante 让 total_bet > bet 导致的分层/跟注脱节。
@@ -3514,9 +3535,7 @@ pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
         return Ok(0);
     }
     let pot = table.pot;
-    let raw_rake = pot
-        .checked_mul(table.rake_bps)
-        .unwrap_or(0) / 10_000;
+    let raw_rake = pot.checked_mul(table.rake_bps).unwrap_or(0) / 10_000;
     let rake = raw_rake.min(table.rake_cap).min(pot);
     table.rake_collected = table.rake_collected.saturating_add(rake);
     table.pot = table
@@ -3723,9 +3742,11 @@ mod tests {
         start_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.deck_state.encrypted.len(), 52);
         assert_eq!(table.deck_state.plaintext.len(), 52);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::HandStarted { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::HandStarted { .. }))
+        );
     }
 
     #[test]
@@ -3764,9 +3785,11 @@ mod tests {
         assert_eq!(table.seats[1].bet, 100);
         assert_eq!(table.seats[0].stack, 950);
         assert_eq!(table.seats[1].stack, 900);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { .. }))
+        );
     }
 
     #[test]
@@ -3785,12 +3808,16 @@ mod tests {
         apply_fold(&mut table, 0, &mut events).unwrap();
         // fold 后只剩 1 名活跃玩家 → end_without_showdown → reset_for_next_hand
         // 会清掉 folded 标记，故此处仅断言事件与筹码分配。
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerFolded { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::HandEndedWithoutShowdown { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerFolded { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::HandEndedWithoutShowdown { .. }))
+        );
         assert_eq!(table.seats[1].stack, 1200);
     }
 
@@ -3812,9 +3839,11 @@ mod tests {
         assert_eq!(table.seats[0].stack, 900);
         assert_eq!(table.seats[0].bet, 100);
         assert!(table.seats[0].acted_this_round);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerCalled { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerCalled { .. }))
+        );
     }
 
     #[test]
@@ -3895,12 +3924,16 @@ mod tests {
         let new_agg = table.deck_state.aggregated_pk.unwrap();
         let expected = pk1 + pk2;
         assert!(g1_equal(&new_agg, &expected));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerKicked { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerRefund { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerKicked { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerRefund { .. }))
+        );
     }
 
     #[test]
@@ -3953,10 +3986,11 @@ mod tests {
         assert_eq!(table.addon_pool, 200);
         assert_eq!(table.version, 1);
         // 事件
-        assert!(events.iter().any(|e| matches!(
-            e,
-            TexasPokerEvent::AddonRequested { amount: 200, .. }
-        )));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::AddonRequested { amount: 200, .. }))
+        );
     }
 
     #[test]
@@ -4004,7 +4038,11 @@ mod tests {
         // AddonCredited 事件应触发
         assert!(events.iter().any(|e| matches!(
             e,
-            TexasPokerEvent::AddonCredited { amount: 500, stack_after: 500, .. }
+            TexasPokerEvent::AddonCredited {
+                amount: 500,
+                stack_after: 500,
+                ..
+            }
         )));
     }
 
@@ -4019,10 +4057,11 @@ mod tests {
         let mut events = vec![];
         reset_for_next_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.seats[0].player, [0u8; 20]); // EMPTY_PLAYER
-        assert!(events.iter().any(|e| matches!(
-            e,
-            TexasPokerEvent::PlayerLeft { seat_index: 0, .. }
-        )));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerLeft { seat_index: 0, .. }))
+        );
     }
 
     #[test]
@@ -4038,7 +4077,11 @@ mod tests {
         assert_eq!(table.addon_pool, 500);
         assert!(events.iter().any(|e| matches!(
             e,
-            TexasPokerEvent::RebuyProcessed { amount: 500, stack_after: 600, .. }
+            TexasPokerEvent::RebuyProcessed {
+                amount: 500,
+                stack_after: 600,
+                ..
+            }
         )));
     }
 
@@ -4076,14 +4119,8 @@ mod tests {
         let before = table.clone();
         let mut events = vec![];
 
-        let error = apply_leave_with_proof(
-            &mut table,
-            0,
-            vec![],
-            empty_leave_proof(),
-            &mut events,
-        )
-        .unwrap_err();
+        let error = apply_leave_with_proof(&mut table, 0, vec![], empty_leave_proof(), &mut events)
+            .unwrap_err();
 
         assert!(error.to_string().contains("refund overflow"));
         assert_eq!(table, before, "failed refund must be atomic");
@@ -4098,14 +4135,8 @@ mod tests {
         let before = table.clone();
         let mut events = vec![];
 
-        let error = apply_leave_with_proof(
-            &mut table,
-            0,
-            vec![],
-            empty_leave_proof(),
-            &mut events,
-        )
-        .unwrap_err();
+        let error = apply_leave_with_proof(&mut table, 0, vec![], empty_leave_proof(), &mut events)
+            .unwrap_err();
 
         assert!(error.to_string().contains("addon_pool underflow"));
         assert_eq!(table, before, "failed refund must be atomic");
@@ -4131,10 +4162,11 @@ mod tests {
         assert_eq!(table.seats[0].bet, 200);
         assert_eq!(table.seats[0].stack, 800);
         assert!(table.seats[0].acted_this_round);
-        assert!(events.iter().any(|e| matches!(
-            e,
-            TexasPokerEvent::PlayerBet { amount: 200, .. }
-        )));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerBet { amount: 200, .. }))
+        );
     }
 
     #[test]
@@ -4179,7 +4211,11 @@ mod tests {
         assert_eq!(table.seats[0].time_bank_ms, 20_000);
         assert!(events.iter().any(|e| matches!(
             e,
-            TexasPokerEvent::TimeBankConsumed { consumed_ms: 10_000, remaining_ms: 20_000, .. }
+            TexasPokerEvent::TimeBankConsumed {
+                consumed_ms: 10_000,
+                remaining_ms: 20_000,
+                ..
+            }
         )));
     }
 
@@ -4189,7 +4225,10 @@ mod tests {
         table.seats[0].player = [0x01; 20];
         table.seats[0].time_bank_ms = 5_000;
         let err = consume_time_bank(&mut table, 0, 10_000, &mut vec![]).unwrap_err();
-        assert!(err.to_string().contains("time_bank_ms 5000 < consumed_ms 10000"));
+        assert!(
+            err.to_string()
+                .contains("time_bank_ms 5000 < consumed_ms 10000")
+        );
     }
 
     // ========== Ante 测试 ==========
@@ -4211,7 +4250,10 @@ mod tests {
         assert_eq!(table.seats[0].stack, 990);
         assert_eq!(table.seats[1].stack, 990);
         assert_eq!(
-            events.iter().filter(|e| matches!(e, TexasPokerEvent::AntePosted { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, TexasPokerEvent::AntePosted { .. }))
+                .count(),
             2
         );
     }
@@ -4233,7 +4275,10 @@ mod tests {
         assert_eq!(table.seats[0].stack, 1000); // SB 不投 ante
         assert_eq!(table.seats[1].stack, 980); // BB 投 ante
         assert_eq!(
-            events.iter().filter(|e| matches!(e, TexasPokerEvent::AntePosted { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, TexasPokerEvent::AntePosted { .. }))
+                .count(),
             1
         );
     }
@@ -4305,7 +4350,11 @@ mod tests {
         trigger_run_it_twice(&mut table, &mut events).unwrap();
         assert!(events.iter().any(|e| matches!(
             e,
-            TexasPokerEvent::RunItTwiceTriggered { board1_cards: 5, board2_cards: 5, .. }
+            TexasPokerEvent::RunItTwiceTriggered {
+                board1_cards: 5,
+                board2_cards: 5,
+                ..
+            }
         )));
     }
 

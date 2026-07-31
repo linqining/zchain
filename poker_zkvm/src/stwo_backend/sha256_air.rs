@@ -238,7 +238,9 @@ impl Sha256Air {
     #[must_use]
     pub const fn new(log_size: u32, sha256_lookup: Sha256Lookup) -> Self {
         let _ = (log_size, sha256_lookup);
-        panic!("Sha256Air is INCOMPLETE (V8 known gap): compression function / message schedule / round boundary constraints not implemented. Do not use in any proof path until Step 5.2 constraints are complete.");
+        panic!(
+            "Sha256Air is INCOMPLETE (V8 known gap): compression function / message schedule / round boundary constraints not implemented. Do not use in any proof path until Step 5.2 constraints are complete."
+        );
     }
 
     /// 获取 log_size。
@@ -287,23 +289,19 @@ impl FrameworkEval for Sha256Air {
         eval.add_constraint(padding_bin);
 
         // IsFirstBlock binality
-        let first_block_bin =
-            _is_first_block.clone() * (_is_first_block.clone() - one.clone());
+        let first_block_bin = _is_first_block.clone() * (_is_first_block.clone() - one.clone());
         eval.add_constraint(first_block_bin);
 
         // IsLastBlock binality
-        let last_block_bin =
-            is_last_block.clone() * (is_last_block.clone() - one.clone());
+        let last_block_bin = is_last_block.clone() * (is_last_block.clone() - one.clone());
         eval.add_constraint(last_block_bin);
 
         // IsFirstRound binality
-        let first_round_bin =
-            _is_first_round.clone() * (_is_first_round.clone() - one.clone());
+        let first_round_bin = _is_first_round.clone() * (_is_first_round.clone() - one.clone());
         eval.add_constraint(first_round_bin);
 
         // IsLastRound binality
-        let last_round_bin =
-            _is_last_round.clone() * (_is_last_round.clone() - one.clone());
+        let last_round_bin = _is_last_round.clone() * (_is_last_round.clone() - one.clone());
         eval.add_constraint(last_round_bin);
 
         // ===== Step 5.2: 位分解 binality（128 条约束）=====

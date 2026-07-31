@@ -143,13 +143,27 @@ pub trait CryptoProvider: Send + Sync {
     /// BLS12-381 pairing check。
     ///
     /// 验证 `e(pairs[0].0, pairs[0].1) * e(pairs[1].0, pairs[1].1) * ... == 1`。
-    fn bls12_381_pairing_check(&self, pairs: &[([u8; BLS12_381_G1_COMPRESSED_SIZE], [u8; BLS12_381_G2_COMPRESSED_SIZE])]) -> bool;
+    fn bls12_381_pairing_check(
+        &self,
+        pairs: &[(
+            [u8; BLS12_381_G1_COMPRESSED_SIZE],
+            [u8; BLS12_381_G2_COMPRESSED_SIZE],
+        )],
+    ) -> bool;
 
     /// BLS12-381 hash-to-G1（RFC 9380）。
-    fn bls12_381_hash_to_g1(&self, msg: &[u8], dst: &[u8]) -> Option<[u8; BLS12_381_G1_COMPRESSED_SIZE]>;
+    fn bls12_381_hash_to_g1(
+        &self,
+        msg: &[u8],
+        dst: &[u8],
+    ) -> Option<[u8; BLS12_381_G1_COMPRESSED_SIZE]>;
 
     /// BLS12-381 hash-to-G2（RFC 9380）。
-    fn bls12_381_hash_to_g2(&self, msg: &[u8], dst: &[u8]) -> Option<[u8; BLS12_381_G2_COMPRESSED_SIZE]>;
+    fn bls12_381_hash_to_g2(
+        &self,
+        msg: &[u8],
+        dst: &[u8],
+    ) -> Option<[u8; BLS12_381_G2_COMPRESSED_SIZE]>;
 
     /// BLS12-381 G1 聚合（点加法折叠）。
     fn bls12_381_aggregate_g1(
@@ -170,7 +184,10 @@ pub trait CryptoProvider: Send + Sync {
     /// 验证 `e(pairs[0].0, pairs[0].1) * e(pairs[1].0, pairs[1].1) * ... == 1`。
     fn bn254_pairing_check(
         &self,
-        pairs: &[([u8; BN254_G1_COMPRESSED_SIZE], [u8; BN254_G2_COMPRESSED_SIZE])],
+        pairs: &[(
+            [u8; BN254_G1_COMPRESSED_SIZE],
+            [u8; BN254_G2_COMPRESSED_SIZE],
+        )],
     ) -> bool;
 
     // ===== 元数据 =====
@@ -321,7 +338,8 @@ mod tests {
     #[test]
     fn test_provider_collection() {
         // 验证多个 provider 可作为 trait object 共存于集合
-        let providers: Vec<Box<dyn CryptoProvider>> = vec![Box::new(DummyProvider), Box::new(DummyProvider)];
+        let providers: Vec<Box<dyn CryptoProvider>> =
+            vec![Box::new(DummyProvider), Box::new(DummyProvider)];
         assert_eq!(providers.len(), 2);
         for p in &providers {
             assert_eq!(p.name(), "dummy");

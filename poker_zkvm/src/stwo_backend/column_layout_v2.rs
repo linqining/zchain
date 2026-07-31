@@ -619,8 +619,7 @@ mod tests {
     #[test]
     fn test_num_columns() {
         assert_eq!(
-            NUM_COLUMNS,
-            185,
+            NUM_COLUMNS, 185,
             "v3.9 列布局应为 185 列（v3.8 182 列 + A1/A4 HelperA carry 2 + HelperA_half 1）"
         );
     }
@@ -634,38 +633,38 @@ mod tests {
     #[test]
     fn test_column_ranges_no_overlap() {
         let ranges: [(usize, usize); 32] = [
-            (COL_PC_BASE, 4),                     // 0-3
-            (COL_PC_NEXT_BASE, 4),                // 4-7
-            (COL_CARRY_FLAG_BASE, 2),             // 8-9（合并 carry/borrow）
-            (COL_VALUE_A_EFF_BASE, 4),            // 10-13
-            (COL_VALUE_B_BASE, 4),                // 14-17
-            (COL_VALUE_C_BASE, 4),                // 18-21
-            (COL_HELPER_A_BASE, 4),               // 65-68
-            (COL_HELPER_B_BASE, 4),               // 69-72
-            (COL_MUL_CARRY_LO_BASE, MUL_CARRY_COUNT),    // 81-87
-            (COL_MUL_CARRY_HI0_BASE, MUL_CARRY_COUNT),   // 88-94
-            (COL_MUL_CARRY_HI1_BASE, MUL_CARRY_COUNT),   // 95-101
-            (COL_MUL_HIGH_BASE, 4),               // 102-105
-            (COL_ABS_A_BASE, 4),                   // 106-109
-            (COL_ABS_B_BASE, 4),                   // 110-113
-            (COL_SIGN_A, 1),                       // 114
-            (COL_SIGN_B, 1),                       // 115
-            (COL_LOW_NONZERO, 1),                  // 116
-            (COL_DIV_QUOT_BASE, 4),                // 117-120
-            (COL_DIV_REM_BASE, 4),                 // 121-124
-            (COL_DIV_IS_SPECIAL, 3),               // 125-127（IsSpecial + SignQ + SignR）
-            (COL_MUL_LOW_BASE, 4),                 // 128-131（MulLow c₀..c₃）
-            (COL_LOAD_BYTE_GATE, 1),               // 132（V7 预计算 gate）
-            (COL_LOAD_HALF_GATE, 1),               // 133（V7 预计算 gate）
+            (COL_PC_BASE, 4),                                  // 0-3
+            (COL_PC_NEXT_BASE, 4),                             // 4-7
+            (COL_CARRY_FLAG_BASE, 2),                          // 8-9（合并 carry/borrow）
+            (COL_VALUE_A_EFF_BASE, 4),                         // 10-13
+            (COL_VALUE_B_BASE, 4),                             // 14-17
+            (COL_VALUE_C_BASE, 4),                             // 18-21
+            (COL_HELPER_A_BASE, 4),                            // 65-68
+            (COL_HELPER_B_BASE, 4),                            // 69-72
+            (COL_MUL_CARRY_LO_BASE, MUL_CARRY_COUNT),          // 81-87
+            (COL_MUL_CARRY_HI0_BASE, MUL_CARRY_COUNT),         // 88-94
+            (COL_MUL_CARRY_HI1_BASE, MUL_CARRY_COUNT),         // 95-101
+            (COL_MUL_HIGH_BASE, 4),                            // 102-105
+            (COL_ABS_A_BASE, 4),                               // 106-109
+            (COL_ABS_B_BASE, 4),                               // 110-113
+            (COL_SIGN_A, 1),                                   // 114
+            (COL_SIGN_B, 1),                                   // 115
+            (COL_LOW_NONZERO, 1),                              // 116
+            (COL_DIV_QUOT_BASE, 4),                            // 117-120
+            (COL_DIV_REM_BASE, 4),                             // 121-124
+            (COL_DIV_IS_SPECIAL, 3), // 125-127（IsSpecial + SignQ + SignR）
+            (COL_MUL_LOW_BASE, 4),   // 128-131（MulLow c₀..c₃）
+            (COL_LOAD_BYTE_GATE, 1), // 132（V7 预计算 gate）
+            (COL_LOAD_HALF_GATE, 1), // 133（V7 预计算 gate）
             (COL_SIGN_A_BITS_BASE, COL_SIGN_A_BITS_COUNT), // 134-141（A3 符号位绑定）
             (COL_SIGN_B_BITS_BASE, COL_SIGN_B_BITS_COUNT), // 142-149（A3 符号位绑定）
-            (COL_INSTR_WORD_BASE, WORD_LIMB_COUNT),             // 150-153（A6 指令字）
-            (COL_INSTR_BITS_BYTE0_BASE, COL_INSTR_BITS_COUNT),  // 154-161（A6 位分解 byte0）
-            (COL_INSTR_BITS_BYTE1_BASE, COL_INSTR_BITS_COUNT),  // 162-169（A6 位分解 byte1）
-            (COL_INSTR_BITS_BYTE3_BASE, COL_INSTR_BITS_COUNT),  // 170-177（A6 位分解 byte3）
-            (COL_IMM_FIELD_BASE, WORD_LIMB_COUNT),              // 178-181（A6 立即数）
-            (COL_HELPER_A_CARRY_BASE, 2),                        // 182-183（A1 HelperA carry）
-            (COL_HELPER_A_HALF, 1),                              // 184（A4 HelperA_half）
+            (COL_INSTR_WORD_BASE, WORD_LIMB_COUNT), // 150-153（A6 指令字）
+            (COL_INSTR_BITS_BYTE0_BASE, COL_INSTR_BITS_COUNT), // 154-161（A6 位分解 byte0）
+            (COL_INSTR_BITS_BYTE1_BASE, COL_INSTR_BITS_COUNT), // 162-169（A6 位分解 byte1）
+            (COL_INSTR_BITS_BYTE3_BASE, COL_INSTR_BITS_COUNT), // 170-177（A6 位分解 byte3）
+            (COL_IMM_FIELD_BASE, WORD_LIMB_COUNT), // 178-181（A6 立即数）
+            (COL_HELPER_A_CARRY_BASE, 2), // 182-183（A1 HelperA carry）
+            (COL_HELPER_A_HALF, 1),  // 184（A4 HelperA_half）
         ];
         let mut all_cols = HashSet::new();
         for (base, count) in &ranges {
@@ -679,14 +678,11 @@ mod tests {
     #[test]
     fn test_indicator_columns_range() {
         let indicators = [
-            IS_LUI, IS_AUIPC, IS_JAL, IS_JALR, IS_BEQ, IS_BNE, IS_BLT, IS_BGE,
-            IS_BLTU, IS_BGEU, IS_LOAD, IS_STORE, IS_ADDI, IS_SLTI, IS_SLTIU,
-            IS_XORI, IS_ORI, IS_ANDI, IS_SLLI, IS_SRLI, IS_SRAI, IS_ADD, IS_SUB,
-            IS_SLL, IS_SLT, IS_SLTU, IS_XOR, IS_SRL, IS_SRA, IS_OR, IS_AND,
-            IS_FENCE, IS_ECALL, IS_EBREAK,
-            // M 扩展（8）
-            IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU, IS_DIV, IS_DIVU, IS_REM, IS_REMU,
-            IS_PADDING,
+            IS_LUI, IS_AUIPC, IS_JAL, IS_JALR, IS_BEQ, IS_BNE, IS_BLT, IS_BGE, IS_BLTU, IS_BGEU,
+            IS_LOAD, IS_STORE, IS_ADDI, IS_SLTI, IS_SLTIU, IS_XORI, IS_ORI, IS_ANDI, IS_SLLI,
+            IS_SRLI, IS_SRAI, IS_ADD, IS_SUB, IS_SLL, IS_SLT, IS_SLTU, IS_XOR, IS_SRL, IS_SRA,
+            IS_OR, IS_AND, IS_FENCE, IS_ECALL, IS_EBREAK, // M 扩展（8）
+            IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU, IS_DIV, IS_DIVU, IS_REM, IS_REMU, IS_PADDING,
         ];
         assert_eq!(indicators.len(), NUM_INSTRUCTION_CATEGORIES);
         for &col in &indicators {
@@ -702,14 +698,11 @@ mod tests {
     #[test]
     fn test_indicator_columns_distinct() {
         let indicators = [
-            IS_LUI, IS_AUIPC, IS_JAL, IS_JALR, IS_BEQ, IS_BNE, IS_BLT, IS_BGE,
-            IS_BLTU, IS_BGEU, IS_LOAD, IS_STORE, IS_ADDI, IS_SLTI, IS_SLTIU,
-            IS_XORI, IS_ORI, IS_ANDI, IS_SLLI, IS_SRLI, IS_SRAI, IS_ADD, IS_SUB,
-            IS_SLL, IS_SLT, IS_SLTU, IS_XOR, IS_SRL, IS_SRA, IS_OR, IS_AND,
-            IS_FENCE, IS_ECALL, IS_EBREAK,
-            // M 扩展（8）
-            IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU, IS_DIV, IS_DIVU, IS_REM, IS_REMU,
-            IS_PADDING,
+            IS_LUI, IS_AUIPC, IS_JAL, IS_JALR, IS_BEQ, IS_BNE, IS_BLT, IS_BGE, IS_BLTU, IS_BGEU,
+            IS_LOAD, IS_STORE, IS_ADDI, IS_SLTI, IS_SLTIU, IS_XORI, IS_ORI, IS_ANDI, IS_SLLI,
+            IS_SRLI, IS_SRAI, IS_ADD, IS_SUB, IS_SLL, IS_SLT, IS_SLTU, IS_XOR, IS_SRL, IS_SRA,
+            IS_OR, IS_AND, IS_FENCE, IS_ECALL, IS_EBREAK, // M 扩展（8）
+            IS_MUL, IS_MULH, IS_MULHSU, IS_MULHU, IS_DIV, IS_DIVU, IS_REM, IS_REMU, IS_PADDING,
         ];
         let unique: HashSet<_> = indicators.iter().collect();
         assert_eq!(unique.len(), indicators.len(), "IS_* 列有重复");
@@ -768,7 +761,11 @@ mod tests {
         assert_eq!(COL_DIV_SIGN_R, 127);
         assert_eq!(COL_MUL_LOW_BASE, 128);
         // M 扩展列结束于 132（最后一个 M 列索引 = 131）
-        assert_eq!(COL_MUL_LOW_BASE + WORD_LIMB_COUNT, 132, "M 扩展列结束于 132");
+        assert_eq!(
+            COL_MUL_LOW_BASE + WORD_LIMB_COUNT,
+            132,
+            "M 扩展列结束于 132"
+        );
         // V7 预计算 gate 列（132-133，独立新列，非 M 扩展复用）
         assert_eq!(COL_LOAD_BYTE_GATE, 132);
         assert_eq!(COL_LOAD_HALF_GATE, 133);
@@ -779,13 +776,25 @@ mod tests {
         assert_eq!(COL_SIGN_B_BITS_COUNT, 8);
         // A6 指令字解码列（150-181，v3.8 新增）
         assert_eq!(COL_INSTR_WORD_BASE, 150, "A6 InstrWord 起始 col 150");
-        assert_eq!(COL_INSTR_BITS_BYTE0_BASE, 154, "A6 InstrBitsByte0 起始 col 154");
-        assert_eq!(COL_INSTR_BITS_BYTE1_BASE, 162, "A6 InstrBitsByte1 起始 col 162");
-        assert_eq!(COL_INSTR_BITS_BYTE3_BASE, 170, "A6 InstrBitsByte3 起始 col 170");
+        assert_eq!(
+            COL_INSTR_BITS_BYTE0_BASE, 154,
+            "A6 InstrBitsByte0 起始 col 154"
+        );
+        assert_eq!(
+            COL_INSTR_BITS_BYTE1_BASE, 162,
+            "A6 InstrBitsByte1 起始 col 162"
+        );
+        assert_eq!(
+            COL_INSTR_BITS_BYTE3_BASE, 170,
+            "A6 InstrBitsByte3 起始 col 170"
+        );
         assert_eq!(COL_INSTR_BITS_COUNT, 8, "A6 每 byte 8 bit");
         assert_eq!(COL_IMM_FIELD_BASE, 178, "A6 ImmField 起始 col 178");
         // A1/A4 HelperA carry + half 列（182-184，v3.9 新增）
-        assert_eq!(COL_HELPER_A_CARRY_BASE, 182, "A1 HelperA carry 起始 col 182");
+        assert_eq!(
+            COL_HELPER_A_CARRY_BASE, 182,
+            "A1 HelperA carry 起始 col 182"
+        );
         assert_eq!(COL_HELPER_A_HALF, 184, "A4 HelperA_half col 184");
         // v3.9 总列数 = v3.8(182) + A1/A4(3) = 185
         assert_eq!(NUM_COLUMNS, 185, "v3.9 总列数 = 185");
@@ -800,7 +809,10 @@ mod tests {
         assert_eq!(COL_IS_LOAD_HALF, 82, "复用 MulCarryLo[1]");
         assert_eq!(COL_IS_LOAD_SIGN, 83, "复用 MulCarryLo[2]");
         assert_eq!(COL_SIGN_BIT, 84, "复用 MulCarryLo[3]");
-        assert_eq!(COL_LOAD_BITS_BASE, 85, "复用 MulCarryLo[4..6]+MulCarryHi0[0..4]");
+        assert_eq!(
+            COL_LOAD_BITS_BASE, 85,
+            "复用 MulCarryLo[4..6]+MulCarryHi0[0..4]"
+        );
         assert_eq!(COL_LOAD_BITS_COUNT, 8, "8 个 binary bit");
         // LOAD_BITS 范围 85-92，不超过 MulCarryHi0 范围（88-94）
         assert_eq!(COL_LOAD_BITS_BASE + COL_LOAD_BITS_COUNT, 93);

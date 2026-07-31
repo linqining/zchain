@@ -206,8 +206,9 @@ pub fn hash_to_scalar(data: &[u8]) -> PokerL1Result<BlsScalar> {
     h[0] &= 0x3F; // M-P18: 大端序下 h[0] 是 MSB，清高 2 位
     let mut arr = [0u8; SCALAR_SIZE];
     arr.copy_from_slice(&h);
-    ct_opt_to_opt(BlsScalar::from_bytes_be(&arr))
-        .ok_or_else(|| PokerL1Error::InvalidBlsScalar("hash_to_scalar reduction failed".to_string()))
+    ct_opt_to_opt(BlsScalar::from_bytes_be(&arr)).ok_or_else(|| {
+        PokerL1Error::InvalidBlsScalar("hash_to_scalar reduction failed".to_string())
+    })
 }
 
 /// RFC 9380 hash to G1（DST 固定为 [`BLS_G1_DST`]）。
@@ -243,11 +244,7 @@ pub fn derive_scalar_from_card_and_sk(c1_sk: &[u8], c2_sk: &[u8]) -> PokerL1Resu
 }
 
 /// 从密文 (c1, c2) 与公钥 pk 派生标量（m6 长度前缀防歧义编码）。
-pub fn derive_scalar_from_card_and_pk(
-    c1: &[u8],
-    c2: &[u8],
-    pk: &[u8],
-) -> PokerL1Result<BlsScalar> {
+pub fn derive_scalar_from_card_and_pk(c1: &[u8], c2: &[u8], pk: &[u8]) -> PokerL1Result<BlsScalar> {
     let mut data = Vec::with_capacity(12 + c1.len() + c2.len() + pk.len());
     data.extend_from_slice(&(c1.len() as u32).to_le_bytes());
     data.extend_from_slice(c1);
@@ -461,7 +458,8 @@ pub fn verify_pk_ownership(pk: &G1Projective, proof_bytes: &[u8]) -> bool {
 
     // M-D12 修复：使用 hash_to_scalar 派生挑战
     // challenge = hash_to_scalar(G_bytes || pk_bytes || commitment_bytes)
-    let mut hash_input = Vec::with_capacity(g_bytes.len() + pk_bytes.len() + commitment_bytes.len());
+    let mut hash_input =
+        Vec::with_capacity(g_bytes.len() + pk_bytes.len() + commitment_bytes.len());
     hash_input.extend_from_slice(&g_bytes);
     hash_input.extend_from_slice(&pk_bytes);
     hash_input.extend_from_slice(commitment_bytes);
@@ -528,7 +526,10 @@ mod tests {
         let points = vec![g1_generator(), hash_to_g1(b"point2")];
         let scalars = vec![scalar_from_u64(2), scalar_from_u64(3)];
         let msm = g1_msm(&scalars, &points).unwrap();
-        let manual = g1_add(&g1_mul(&scalars[0], &points[0]), &g1_mul(&scalars[1], &points[1]));
+        let manual = g1_add(
+            &g1_mul(&scalars[0], &points[0]),
+            &g1_mul(&scalars[1], &points[1]),
+        );
         assert!(g1_equal(&msm, &manual));
     }
 
@@ -649,8 +650,8 @@ mod tests {
 
     #[test]
     fn test_verify_pk_ownership_valid() {
-        use rand::rngs::StdRng;
         use rand::SeedableRng;
+        use rand::rngs::StdRng;
         let mut rng = StdRng::seed_from_u64(42);
         let sk = scalar_from_u64(123_456);
         let pk = g1_generator() * sk;
@@ -711,7 +712,9 @@ mod tests {
 
         // closure 返回 Err 时应透传。
         let err: PokerL1Result<bool> = verify_or_skip(false, || {
-            Err(PokerL1Error::Serialization("simulated verify failure".into()))
+            Err(PokerL1Error::Serialization(
+                "simulated verify failure".into(),
+            ))
         });
         assert!(err.is_err());
     }

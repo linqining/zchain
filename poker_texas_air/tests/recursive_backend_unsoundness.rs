@@ -7,7 +7,7 @@
 use poker_zkvm::stwo_backend::prover::prove_cpu_trace;
 use poker_zkvm::stwo_backend::recursive::public_inputs::RecursivePublicInputs;
 use poker_zkvm::stwo_backend::recursive::recursion_prover::{
-    prove_recursive_with_fri, RecursionProvingError,
+    RecursionProvingError, prove_recursive_with_fri,
 };
 use poker_zkvm::stwo_backend::recursive::trace_gen::{
     extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,

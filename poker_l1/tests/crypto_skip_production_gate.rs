@@ -10,7 +10,10 @@ use poker_l1::vm::contracts::texas_poker::types::TableConfig;
 fn state_carried_crypto_skip_flags_are_ignored_outside_crate_unit_tests() {
     let config = TableConfig::default();
 
-    assert!(config.zk_skip_enabled, "legacy serialized flag remains present");
+    assert!(
+        config.zk_skip_enabled,
+        "legacy serialized flag remains present"
+    );
     assert!(config.zk_skip_shuffle);
     assert!(config.zk_skip_reveal);
     assert!(config.zk_skip_reconstruct);
