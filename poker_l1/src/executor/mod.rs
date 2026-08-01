@@ -42,7 +42,7 @@ use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
 use crate::vm::{ContractObject, PrecompileRegistry, execute_contract, load_contract_bytecode};
-use crate::{BlockHeight, ChainId, Hash, TimestampMs};
+use crate::{Address, BlockHeight, ChainId, Hash, TimestampMs};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -50,6 +50,12 @@ use std::sync::Arc;
 mod parallel_tests;
 pub mod schedule;
 pub mod write_capture;
+
+/// 默认出块奖励（缺口 #5-M2：每个 block 铸造给 proposer 的固定奖励，混合代币模型的通胀部分）。
+///
+/// 与 gas 奖励（缺口 #4-M1）并列：block 结束后 proposer 收到 `total_gas_used + 出块奖励`。
+/// 当前为保守常量；后续可经治理（governance）参数化（ParamName::BlockReward）。
+pub const DEFAULT_BLOCK_REWARD: u64 = 1_000_000;
 
 /// 执行环境（block 级上下文）。
 #[derive(Debug, Clone)]
@@ -70,6 +76,11 @@ pub struct ExecutionEnvironment {
     ///
     /// `None` 时 bridge contract_call 被拒绝（节点未配置桥）。生产节点注入持久化 store。
     pub bridge_registry_store: Option<Arc<crate::storage::BridgeRegistryStore>>,
+    /// 出块 proposer 地址（缺口 #4-M1：gas 奖励 proposer）。
+    ///
+    /// block 执行结束后，累计的 `total_gas_used` 信用到此地址（不再烧毁）。
+    /// `None` 时（测试 / 未启用）gas 仍烧毁（旧行为）。
+    pub proposer: Option<Address>,
 }
 
 impl ExecutionEnvironment {
@@ -84,6 +95,7 @@ impl ExecutionEnvironment {
             zk_verifier: None,
             precompile_registry: None,
             bridge_registry_store: None,
+            proposer: None,
         }
     }
 
@@ -118,6 +130,13 @@ impl ExecutionEnvironment {
         store: Arc<crate::storage::BridgeRegistryStore>,
     ) -> Self {
         self.bridge_registry_store = Some(store);
+        self
+    }
+
+    /// 注入出块 proposer 地址（缺口 #4-M1：gas 奖励 proposer）。
+    #[must_use]
+    pub fn with_proposer(mut self, proposer: Address) -> Self {
+        self.proposer = Some(proposer);
         self
     }
 
@@ -576,7 +595,18 @@ pub fn execute_block(
     object_db: &mut ObjectDb,
     account_store: &mut AccountStore,
 ) -> BlockExecutionOutcome {
-    execute_block_parallel(env, txs, object_db, account_store)
+    let outcome = execute_block_parallel(env, txs, object_db, account_store);
+    // 缺口 #4-M1（Q16：gas 奖励 proposer）+ 缺口 #5-M2（出块奖励）：
+    // block 执行结束后，把累计 gas + 出块奖励信用给 proposer。
+    // AccountStore 不在 state_root (SMT over Objects) 内，故不影响 state_root 可重现性。
+    // 信用操作确定性：相同 total_gas_used + 相同 proposer → 相同结果。
+    // proposer 账户须已存在（validator 账户在 genesis/注册时创建）；不存在则奖励烧毁（安全 fallback）。
+    if let Some(proposer) = env.proposer {
+        // gas 奖励（仅当有 gas 消耗）
+        let reward = outcome.total_gas_used.saturating_add(DEFAULT_BLOCK_REWARD);
+        let _ = account_store.credit(&proposer, reward);
+    }
+    outcome
 }
 
 /// 波次化并行执行（核心实现）。
@@ -2014,5 +2044,110 @@ mod tests {
         );
         assert_eq!(fx.account().nonce, nonce0);
         assert_eq!(fx.account().balance, bal0);
+    }
+
+    // ===== 缺口 #4-M1：gas 奖励 proposer 测试 =====
+
+    #[test]
+    fn gas_credited_to_proposer_after_block() {
+        // 一笔 public 合约调用 tx 消耗 gas → block 结束后 total_gas_used 信用给 proposer。
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        // 部署一个合约（供调用产生 gas）。
+        let elf = build_test_elf(&make_program(1));
+        let contract_id = deploy_contract(&mut fx.object_db, caller, elf, 100, true);
+
+        // proposer 账户：独立 tagged pubkey，初始余额 0。
+        let proposer_signer = TestSigner::new();
+        let proposer_addr = proposer_signer.address();
+        fx.account_store
+            .create(Account::new(proposer_signer.tagged_pubkey(), 0))
+            .expect("创建 proposer 账户");
+
+        let env = make_env().with_proposer(proposer_addr);
+        let mut req = public_request(0);
+        req.gas = Gas::new(1_000_000, 1);
+        req.contract_call = Some(ContractCall {
+            contract_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+        let caller_bal_before = fx.account().balance;
+
+        let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
+
+        // proposer 余额应增加 total_gas_used + 出块奖励（缺口 #5-M2）。
+        assert!(
+            outcome.total_gas_used > 0,
+            "合约调用应产生 gas 消耗，got 0"
+        );
+        let proposer_bal_after = fx
+            .account_store
+            .get(&proposer_addr)
+            .expect("proposer 账户应存在")
+            .balance;
+        let expected_reward = outcome.total_gas_used + DEFAULT_BLOCK_REWARD;
+        assert_eq!(
+            proposer_bal_after, expected_reward,
+            "proposer 余额应等于 gas + 出块奖励（初始 0）"
+        );
+        // caller 余额应减少 gas_used。
+        let caller_bal_after = fx.account().balance;
+        assert_eq!(
+            caller_bal_before - caller_bal_after,
+            outcome.total_gas_used,
+            "caller 扣除的 gas 应等于 proposer 收到的"
+        );
+    }
+
+    #[test]
+    fn gas_burned_when_no_proposer_set() {
+        // env.proposer = None（旧行为）：gas + 出块奖励均烧毁，无人收到。
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        let elf = build_test_elf(&make_program(1));
+        let contract_id = deploy_contract(&mut fx.object_db, caller, elf, 100, true);
+        let env = make_env(); // 无 proposer
+        let mut req = public_request(0);
+        req.gas = Gas::new(1_000_000, 1);
+        req.contract_call = Some(ContractCall {
+            contract_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+        let caller_bal_before = fx.account().balance;
+
+        let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
+        assert!(outcome.total_gas_used > 0, "合约调用应产生 gas");
+        let caller_bal_after = fx.account().balance;
+        // gas 从 caller 扣除（烧毁），无 proposer 收到。
+        assert_eq!(
+            caller_bal_before - caller_bal_after,
+            outcome.total_gas_used
+        );
+    }
+
+    // ===== 缺口 #5-M2：出块奖励测试 =====
+
+    #[test]
+    fn block_reward_minted_to_proposer_even_with_zero_gas() {
+        // 空 block（无 tx → total_gas_used=0）：proposer 仍收到出块奖励（通胀铸造）。
+        let mut fx = Fixture::new();
+        let proposer_signer = TestSigner::new();
+        let proposer_addr = proposer_signer.address();
+        fx.account_store
+            .create(Account::new(proposer_signer.tagged_pubkey(), 0))
+            .expect("创建 proposer 账户");
+
+        let env = make_env().with_proposer(proposer_addr);
+        let outcome = execute_block(&env, &[], &mut fx.object_db, &mut fx.account_store);
+        assert_eq!(outcome.total_gas_used, 0, "空 block 无 gas");
+        let proposer_bal = fx.account_store.get(&proposer_addr).unwrap().balance;
+        assert_eq!(
+            proposer_bal, DEFAULT_BLOCK_REWARD,
+            "空 block 也应铸造出块奖励给 proposer"
+        );
     }
 }

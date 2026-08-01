@@ -34,10 +34,11 @@ use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, valida
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
 use poker_l1::consensus::{
     Dag, DagCommitCertificate, DagVertex, MAX_VERTEX_SIZE, VertexBuilder, detect_commit_leader,
+    required_quorum, assemble_commit_certificate,
 };
 use poker_l1::error::PokerL1Result;
 use poker_l1::executor::ExecutionEnvironment;
-use poker_l1::network::{GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
+use poker_l1::network::{CommitVote, GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
 use poker_l1::rpc::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcClientInfo, RpcGuard, RpcHandler,
@@ -58,6 +59,47 @@ const DEFAULT_MAX_CONNECTIONS: usize = 128;
 
 /// 优雅关闭轮询间隔（accept non-blocking 后 sleep）。
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// commit certificate 投票累加器（缺口 #3：多 validator 2/3 多签闭环）。
+///
+/// 跨线程共享（P2P handler 写入收集到的 peer 投票，validator loop 读取凑 quorum）。
+/// 按 `(epoch, commit_round, cert_signing_hash)` 索引收集投票；validator loop 凑齐
+/// ≥2/3 后用 [`poker_l1::consensus::bullshark::assemble_commit_certificate`] 组装 cert。
+#[derive(Debug, Default)]
+struct VoteCollector {
+    /// key = (epoch, commit_round, cert_signing_hash) → 去重的投票列表。
+    votes: std::sync::Mutex<Vec<CommitVote>>,
+}
+
+impl VoteCollector {
+    fn new() -> Self {
+        Self {
+            votes: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 收集一笔投票（去重：同一 signer_pubkey 对同一 cert_signing_hash 仅计一次）。
+    fn add_vote(&self, vote: CommitVote) {
+        let mut votes = self.votes.lock().unwrap_or_else(|e| e.into_inner());
+        let exists = votes.iter().any(|v| {
+            v.signer_pubkey == vote.signer_pubkey
+                && v.cert_signing_hash == vote.cert_signing_hash
+        });
+        if !exists {
+            votes.push(vote);
+        }
+    }
+
+    /// 取出针对指定 cert_signing_hash 的全部已收集投票（清空该 key 对应的投票）。
+    fn drain_for_hash(&self, cert_signing_hash: &poker_l1::Hash) -> Vec<CommitVote> {
+        let mut votes = self.votes.lock().unwrap_or_else(|e| e.into_inner());
+        let (matched, rest): (Vec<_>, Vec<_>) =
+            votes.drain(..).partition(|v| v.cert_signing_hash == *cert_signing_hash);
+        *votes = rest;
+        matched
+    }
+}
+
 
 /// 程序入口。
 fn main() {
@@ -146,6 +188,9 @@ fn print_usage() {
     eprintln!(
         "  --peer <addr>                           P2P peer 地址（可重复，如 127.0.0.1:9001）"
     );
+    eprintln!(
+        "  --genesis-validators <file>             genesis validator set JSON 文件（多 validator 共识所需，所有节点须一致）"
+    );
     eprintln!();
     eprintln!("环境变量：");
     eprintln!(
@@ -165,6 +210,56 @@ fn print_usage() {
 
 // ===== node 子命令 =====
 
+/// genesis validator JSON 条目（缺口 #3：`--genesis-validators` 文件格式）。
+#[derive(serde::Deserialize)]
+struct GenesisValidatorEntry {
+    /// secp256k1 pubkey（33 字节 compressed，hex）。
+    pubkey_hex: String,
+    /// VRF pubkey（33 字节 compressed，hex）。
+    vrf_pubkey_hex: String,
+    /// 质押金额。
+    stake: u64,
+}
+
+/// 从 JSON 文件加载 genesis validator set（缺口 #3）。
+///
+/// 文件格式：`[{"pubkey_hex": "..", "vrf_pubkey_hex": "..", "stake": N}, ...]`。
+/// 所有节点须用相同文件（signer_bitmap index 基准 = `active_validator_pubkeys_sorted()`）。
+fn load_genesis_validators(path: &std::path::Path) -> Result<Vec<poker_l1::consensus::ValidatorEntry>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取 genesis validators 文件失败：{e}"))?;
+    let entries: Vec<GenesisValidatorEntry> = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 genesis validators JSON 失败：{e}"))?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        let pubkey_bytes = hex::decode(&e.pubkey_hex)
+            .map_err(|e| format!("validator#{i} pubkey_hex 解码失败：{e}"))?;
+        let tagged = poker_l1::signature::TaggedPubkey::new(
+            poker_l1::signature::SignatureScheme::Secp256k1,
+            poker_l1::signature::CURRENT_VERSION,
+            pubkey_bytes,
+        )
+        .map_err(|e| format!("validator#{i} TaggedPubkey 构造失败：{e}"))?;
+        let vrf_pubkey_bytes = hex::decode(&e.vrf_pubkey_hex)
+            .map_err(|e| format!("validator#{i} vrf_pubkey_hex 解码失败：{e}"))?;
+        if vrf_pubkey_bytes.len() != 33 {
+            return Err(format!(
+                "validator#{i} vrf_pubkey 必须为 33 字节，得到 {}",
+                vrf_pubkey_bytes.len()
+            ));
+        }
+        let mut vrf_pk = [0u8; 33];
+        vrf_pk.copy_from_slice(&vrf_pubkey_bytes);
+        // 缺口 #3：genesis validator 立即 Active（无 bonding 期），使其能参与共识。
+        // ValidatorEntry::new 默认 Bonding，此处转为 Active。
+        let mut entry =
+            poker_l1::consensus::ValidatorEntry::new(tagged, vrf_pk, e.stake, 0);
+        entry.status = poker_l1::consensus::ValidatorStatus::Active;
+        out.push(entry);
+    }
+    Ok(out)
+}
+
 /// 启动节点。
 fn run_node(args: &[String]) -> Result<(), String> {
     let mut role: NodeRole = NodeRole::Full;
@@ -176,6 +271,8 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let mut validator_key_file: Option<PathBuf> = None;
     let mut block_interval_ms: u64 = DEFAULT_BLOCK_INTERVAL_MS;
     let mut peers: Vec<String> = Vec::new();
+    // 缺口 #3：genesis validator set 文件（多 validator 共识所需，所有节点须一致）。
+    let mut genesis_validators_file: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -243,6 +340,12 @@ fn run_node(args: &[String]) -> Result<(), String> {
                 let addr = args.get(i).ok_or("--peer 缺少参数")?.clone();
                 peers.push(addr);
             }
+            "--genesis-validators" => {
+                i += 1;
+                genesis_validators_file = Some(PathBuf::from(
+                    args.get(i).ok_or("--genesis-validators 缺少参数")?,
+                ));
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -278,6 +381,12 @@ fn run_node(args: &[String]) -> Result<(), String> {
     };
     config.rpc_listen = rpc_listen.clone();
     config.p2p_listen = p2p_listen.clone();
+    // 缺口 #3：加载 genesis validator set（多 validator 共识的 signer_bitmap index 基准）。
+    if let Some(gv_path) = &genesis_validators_file {
+        let entries = load_genesis_validators(gv_path)?;
+        info!("已加载 {} 个 genesis validator", entries.len());
+        config = config.with_genesis_validators(entries);
+    }
 
     // 打印启动信息
     info!("zchain {VERSION} — Poker L1 节点启动中");
@@ -372,10 +481,18 @@ fn run_node(args: &[String]) -> Result<(), String> {
     }
     info!("P2P 已连接 {} 个 peer", transport.peer_count());
 
+    // 缺口 #3：共享的 DAG + 投票累加器（P2P handler 与 validator loop 跨线程共享）。
+    // peer vertex 经 handle_p2p_connection 写入此 Dag（+ node.vertex_store），
+    // validator loop 从此 Dag 调 detect_commit_leader；否则 quorum 永远无法凑齐。
+    let shared_dag: Arc<Mutex<Dag>> = Arc::new(Mutex::new(Dag::new()));
+    let vote_collector: Arc<VoteCollector> = Arc::new(VoteCollector::new());
+
     // === P2P accept loop 线程 ===
     let p2p_node = Arc::clone(&node_arc);
     let p2p_transport = Arc::clone(&transport);
     let p2p_shutdown = Arc::clone(&shutdown_flag);
+    let p2p_dag = Arc::clone(&shared_dag);
+    let p2p_votes = Arc::clone(&vote_collector);
     let p2p_thread = std::thread::Builder::new()
         .name("p2p-accept".to_string())
         .spawn(move || {
@@ -389,8 +506,10 @@ fn run_node(args: &[String]) -> Result<(), String> {
                         info!("P2P 接入连接：{addr}");
                         let node = Arc::clone(&p2p_node);
                         let transport = Arc::clone(&p2p_transport);
+                        let dag = Arc::clone(&p2p_dag);
+                        let votes = Arc::clone(&p2p_votes);
                         std::thread::spawn(move || {
-                            handle_p2p_connection(stream, node, transport);
+                            handle_p2p_connection(stream, node, transport, dag, votes);
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -414,7 +533,9 @@ fn run_node(args: &[String]) -> Result<(), String> {
             .clone()
             .ok_or("validator 角色缺少 validator_key")?;
         let chain_id = node_arc.chain_id();
-        let dag = Arc::new(Mutex::new(Dag::new()));
+        // 缺口 #3：复用 shared_dag（与 P2P handler 共享，使 peer vertex 进入此 Dag）。
+        let dag = Arc::clone(&shared_dag);
+        let votes = Arc::clone(&vote_collector);
         let v_transport = Arc::clone(&transport);
         let v_shutdown = Arc::clone(&shutdown_flag);
         let v_node = Arc::clone(&node_arc);
@@ -428,6 +549,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
                         vkey,
                         chain_id,
                         dag,
+                        votes,
                         v_transport,
                         interval,
                         v_shutdown,
@@ -858,7 +980,13 @@ fn recv_p2p_message(stream: &mut TcpStream) -> Result<Option<NetworkMessage>, St
 /// - `ResponseBlocks` → 逐个 `node.put_block`
 /// - `RequestBlocksByRange` → 查询本地并回送 `ResponseBlocks`
 /// - `RequestVerticesByRange` → 暂返回空（需 epoch 上下文，超出本次重构范围）
-fn handle_p2p_connection(mut stream: TcpStream, node: Arc<Node>, transport: Arc<TcpTransport>) {
+fn handle_p2p_connection(
+    mut stream: TcpStream,
+    node: Arc<Node>,
+    transport: Arc<TcpTransport>,
+    dag: Arc<Mutex<Dag>>,
+    votes: Arc<VoteCollector>,
+) {
     let peer_addr = stream.peer_addr().ok();
     // 重构2：注册接入 peer 的地址信息（用于定向通信）
     if let Some(addr) = peer_addr {
@@ -873,9 +1001,20 @@ fn handle_p2p_connection(mut stream: TcpStream, node: Arc<Node>, transport: Arc<
             Ok(Some(msg)) => {
                 match msg {
                     NetworkMessage::DagVertex(vertex) => {
+                        // 缺口 #3：peer vertex 同时写入共享 Dag（供 detect_commit_leader）
+                        // 与 node.vertex_store（持久化）。
+                        {
+                            let mut dag_guard =
+                                dag.lock().unwrap_or_else(|e| e.into_inner());
+                            dag_guard.insert(vertex.clone());
+                        }
                         if let Err(e) = node.put_vertex(&vertex) {
                             warn!("P2P put_vertex 失败：{e}");
                         }
+                    }
+                    NetworkMessage::CommitVote(vote) => {
+                        // 缺口 #3：收集 peer 的 commit certificate 投票。
+                        votes.add_vote(vote);
                     }
                     NetworkMessage::Transaction(tx) => {
                         // C-1 安全修复：P2P 路径必须与 RPC 路径执行一致的验证链，
@@ -921,6 +1060,11 @@ fn handle_p2p_connection(mut stream: TcpStream, node: Arc<Node>, transport: Arc<
                     }
                     NetworkMessage::ResponseVertices(vertices) => {
                         for vertex in vertices {
+                            {
+                                let mut dag_guard =
+                                    dag.lock().unwrap_or_else(|e| e.into_inner());
+                                dag_guard.insert(vertex.clone());
+                            }
                             if let Err(e) = node.put_vertex(&vertex) {
                                 warn!("P2P put_vertex 失败：{e}");
                             }
@@ -1060,6 +1204,237 @@ fn split_txs_into_batches(txs: Vec<Transaction>, max_size: usize) -> Vec<Vec<Tra
     batches
 }
 
+/// 计算待出块 commit certificate 的 `signing_hash`（缺口 #3：多 validator 投票对象）。
+///
+/// 确定性执行 prev_vertex 的 txs 得到 state_root，按与 [`build_block_from_vertex`]
+/// 完全一致的 cert 字段构造一个**不含签名**的 cert 模板，返回其 `signing_hash`。
+/// 各 validator 对同一 (prev_vertex, epoch, commit_round, prev_commit_hash, state) 得到
+/// 相同的 signing_hash → 可对其签名并互验（CommitVote）。
+///
+/// 注意：state_root 由确定性执行得出，所有诚实 validator 对相同输入得到相同结果。
+fn compute_cert_signing_hash(
+    vertex: &DagVertex,
+    chain_id: poker_l1::ChainId,
+    epoch: u64,
+    commit_round: u64,
+    prev_commit_hash: Hash,
+    node: &Node,
+    height: u64,
+) -> Result<Hash, String> {
+    let sorted_txs = poker_l1::consensus::sort_vertex_txs_s9(vertex.tx_list.clone());
+    let mut public_txs = Vec::new();
+    let mut gameturn_txs = Vec::new();
+    for tx in &sorted_txs {
+        match tx.lane_hint {
+            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx.clone()),
+            _ => public_txs.push(tx.clone()),
+        }
+    }
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let env = ExecutionEnvironment::new(chain_id, height, timestamp_ms)
+        .with_precompile_registry_arc(node.precompile_registry());
+    let env = if let Some(bridge_store) = node.bridge_registry_store() {
+        env.with_bridge_registry_store(bridge_store)
+    } else {
+        env
+    };
+    // 缺口 #4-M1：proposer = vertex author（出块 validator）。
+    let env = env.with_proposer(poker_l1::account::derive_address(&vertex.author_pubkey));
+    let outcome = node
+        .execute_block_on_state(&env, &sorted_txs)
+        .map_err(|e| format!("execute_block failed: {e}"))?;
+    let public_tx_root = poker_l1::block::compute_tx_merkle_root(&public_txs);
+    let gameturn_tx_root = poker_l1::block::compute_tx_merkle_root(&gameturn_txs);
+    let vertex_hash = vertex.vertex_hash();
+    let cert = DagCommitCertificate {
+        epoch,
+        commit_round,
+        prev_commit_hash,
+        vertex_hash_list: vec![vertex_hash],
+        round_attendance_bitmap: vec![0xFF],
+        state_root: outcome.state_root,
+        public_tx_root,
+        gameturn_tx_root,
+        signature_list: vec![],
+        signer_bitmap: vec![0x00],
+    };
+    Ok(cert.signing_hash(chain_id))
+}
+
+/// 单 validator 引导期：从 vertex 构造 block、自签 cert、入链、广播、推进状态。
+///
+/// 封装原 `build_block_from_vertex` + put_block + 广播 + Dag 清空 的流程，
+/// 供单 validator 路径复用。
+#[allow(clippy::too_many_arguments)]
+fn commit_and_finalize_block(
+    prev_vertex: &DagVertex,
+    node: &Node,
+    secret_key: &secp256k1::SecretKey,
+    chain_id: poker_l1::ChainId,
+    commit_round: u64,
+    prev_commit_hash: Hash,
+    prev_block_hash: Hash,
+    height: u64,
+    transport: &TcpTransport,
+    dag: &Arc<Mutex<Dag>>,
+    vertex: &DagVertex,
+    commit_round_out: &mut u64,
+    prev_commit_hash_out: &mut Hash,
+    prev_block_hash_out: &mut Hash,
+) {
+    match build_block_from_vertex(
+        prev_vertex,
+        chain_id,
+        commit_round,
+        prev_commit_hash,
+        prev_block_hash,
+        height,
+        node,
+        node.state_root(),
+        secret_key,
+    ) {
+        Ok(block) => {
+            let block_hash = block.header.block_hash(chain_id);
+            match node.put_block(&block) {
+                Ok(_) => {
+                    info!(
+                        "✅ 出块成功 height={} hash={} public_txs={} gameturn_txs={} commit_round={}",
+                        block.header.height,
+                        hex::encode(block_hash),
+                        block.public_txs.len(),
+                        block.gameturn_txs.len(),
+                        commit_round
+                    );
+                    let _ = transport.gossip_broadcast(
+                        GossipTopic::DagVertex,
+                        &NetworkMessage::ResponseBlocks(vec![block.clone()]),
+                    );
+                    *commit_round_out += 1;
+                    *prev_commit_hash_out =
+                        block.header.dag_commit_certificate.cert_hash(chain_id);
+                    *prev_block_hash_out = block_hash;
+                    let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                    *dag_guard = Dag::new();
+                    dag_guard.insert(vertex.clone());
+                }
+                Err(e) => error!("put_block 失败：{e}"),
+            }
+        }
+        Err(e) => error!("build_block_from_vertex 失败：{e}"),
+    }
+}
+
+/// 多 validator：用收集到的 ≥2/3 签名组装 cert，构造 block、入链、广播、推进状态。
+#[allow(clippy::too_many_arguments)]
+fn commit_and_finalize_block_multi(
+    prev_vertex: &DagVertex,
+    node: &Node,
+    chain_id: poker_l1::ChainId,
+    epoch: u64,
+    commit_round: u64,
+    prev_commit_hash: Hash,
+    prev_block_hash: Hash,
+    height: u64,
+    sig_pairs: &[(usize, Vec<u8>)],
+    validator_count: usize,
+    transport: &TcpTransport,
+    dag: &Arc<Mutex<Dag>>,
+    vertex: &DagVertex,
+    commit_round_out: &mut u64,
+    prev_commit_hash_out: &mut Hash,
+    prev_block_hash_out: &mut Hash,
+) {
+    // 确定性执行得到 state_root + tx roots。
+    let sorted_txs = poker_l1::consensus::sort_vertex_txs_s9(prev_vertex.tx_list.clone());
+    let mut public_txs = Vec::new();
+    let mut gameturn_txs = Vec::new();
+    for tx in &sorted_txs {
+        match tx.lane_hint {
+            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx.clone()),
+            _ => public_txs.push(tx.clone()),
+        }
+    }
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let env = ExecutionEnvironment::new(chain_id, height, timestamp_ms)
+        .with_precompile_registry_arc(node.precompile_registry());
+    let env = if let Some(bridge_store) = node.bridge_registry_store() {
+        env.with_bridge_registry_store(bridge_store)
+    } else {
+        env
+    };
+    // 缺口 #4-M1：proposer = prev_vertex author（leader / 出块 validator）。
+    let env =
+        env.with_proposer(poker_l1::account::derive_address(&prev_vertex.author_pubkey));
+    let outcome = match node.execute_block_on_state(&env, &sorted_txs) {
+        Ok(o) => o,
+        Err(e) => {
+            error!("multi: execute_block 失败：{e}");
+            return;
+        }
+    };
+    let public_tx_root = poker_l1::block::compute_tx_merkle_root(&public_txs);
+    let gameturn_tx_root = poker_l1::block::compute_tx_merkle_root(&gameturn_txs);
+    let vertex_hash = prev_vertex.vertex_hash();
+    // 组装含 2/3 多签的 cert。
+    let cert = match assemble_commit_certificate(
+        epoch,
+        commit_round,
+        prev_commit_hash,
+        vec![vertex_hash],
+        vec![0xFF],
+        outcome.state_root,
+        public_tx_root,
+        gameturn_tx_root,
+        sig_pairs,
+        validator_count,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("assemble_commit_certificate 失败：{e}");
+            return;
+        }
+    };
+    let header = poker_l1::block::BlockHeader {
+        height,
+        timestamp_ms,
+        prev_hash: prev_block_hash,
+        state_root: outcome.state_root,
+        public_tx_root,
+        gameturn_tx_root,
+        dag_commit_certificate: cert,
+    };
+    let block = poker_l1::block::Block::new(header, public_txs, gameturn_txs);
+    let block_hash = block.header.block_hash(chain_id);
+    match node.put_block(&block) {
+        Ok(_) => {
+            info!(
+                "✅ 出块成功(多签 {} 票) height={} hash={} commit_round={}",
+                sig_pairs.len(),
+                block.header.height,
+                hex::encode(block_hash),
+                commit_round
+            );
+            let _ = transport.gossip_broadcast(
+                GossipTopic::DagVertex,
+                &NetworkMessage::ResponseBlocks(vec![block.clone()]),
+            );
+            *commit_round_out += 1;
+            *prev_commit_hash_out = block.header.dag_commit_certificate.cert_hash(chain_id);
+            *prev_block_hash_out = block_hash;
+            let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+            *dag_guard = Dag::new();
+            dag_guard.insert(vertex.clone());
+        }
+        Err(e) => error!("multi: put_block 失败：{e}"),
+    }
+}
+
 /// 从单个 vertex 构造 block（单 validator 简化模式）。
 ///
 /// 单 validator 自闭环模式下，每轮 vertex 直接对应一个 block。
@@ -1182,6 +1557,7 @@ fn run_validator_loop(
     validator_key: ValidatorKey,
     chain_id: poker_l1::ChainId,
     dag: Arc<Mutex<Dag>>,
+    votes: Arc<VoteCollector>,
     transport: Arc<TcpTransport>,
     block_interval: Duration,
     shutdown: Arc<AtomicBool>,
@@ -1275,8 +1651,11 @@ fn run_validator_loop(
             let builder = builder.with_parents(parent_hashes);
 
             // 创世轮（round 1）跳过 validate_parents（无 parent）
+            // 缺口 #3：parent quorum 用真实 validator 数（而非硬编码 1）。
+            // 单 validator 引导期（active=0/1）允许 1 个 parent；多 validator 时需 ≥2/3。
             if round > 1 {
-                if let Err(e) = builder.validate_parents(1) {
+                let vc = node.active_validator_count().max(1);
+                if let Err(e) = builder.validate_parents(vc) {
                     warn!("vertex parent 校验失败：{e}");
                 }
             }
@@ -1325,85 +1704,125 @@ fn run_validator_loop(
                 hex::encode(vertex_hash)
             );
 
-            // 从第 2 轮起，检测 commit 并产出 block
+            // 从第 2 轮起，检测 commit 并产出 block（缺口 #3：真实 2/3 多签闭环）
             if let Some(prev_vertex) = &last_vertex {
                 let prev_hash = prev_vertex.vertex_hash();
+                // validator_count：单 validator 引导期（active=0）按 1 处理。
+                let vc = node.active_validator_count().max(1);
                 // 注意：必须将 dag.lock() 限制在独立作用域内，否则临时 MutexGuard
                 // 会存活到 match 结束，导致下方 "清空 Dag" 处的 dag.lock() 自死锁
                 // （Rust std::sync::Mutex 不可重入）。
                 let commit_result = {
                     let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                    detect_commit_leader(&dag_guard, &prev_hash, 1)
+                    detect_commit_leader(&dag_guard, &prev_hash, vc)
                 };
                 match commit_result {
                     Ok(Some(_leader)) => {
-                        // 从上一个 vertex（被 commit 的）构造 block
-                        // 这样 block 包含的是被 commit 的 tx，而非当前 vertex 的 tx
-                        match build_block_from_vertex(
-                            prev_vertex,
-                            chain_id,
-                            commit_round,
-                            prev_commit_hash,
-                            prev_block_hash,
-                            node.block_store()
-                                .get_tip_height()
-                                .ok()
-                                .flatten()
-                                .map(|h| h + 1)
-                                .unwrap_or(1),
-                            &node,
-                            node.state_root(),
-                            &secret_key,
-                        ) {
-                            Ok(block) => {
-                                let block_hash = block.header.block_hash(chain_id);
-                                match node.put_block(&block) {
-                                    Ok(_) => {
-                                        info!(
-                                            "✅ 出块成功 height={} hash={} public_txs={} gameturn_txs={} commit_round={}",
-                                            block.header.height,
-                                            hex::encode(block_hash),
-                                            block.public_txs.len(),
-                                            block.gameturn_txs.len(),
-                                            commit_round
-                                        );
+                        let height = node
+                            .block_store()
+                            .get_tip_height()
+                            .ok()
+                            .flatten()
+                            .map(|h| h + 1)
+                            .unwrap_or(1);
+                        let required = poker_l1::consensus::required_quorum(vc);
 
-                                        let _ = transport.gossip_broadcast(
-                                            GossipTopic::DagVertex,
-                                            &NetworkMessage::ResponseBlocks(vec![block.clone()]),
-                                        );
-
-                                        commit_round += 1;
-                                        prev_commit_hash =
-                                            block.header.dag_commit_certificate.cert_hash(chain_id);
-                                        prev_block_hash = block_hash;
-
-                                        // 清空 Dag，只保留当前 vertex
-                                        info!(
-                                            "[validator-loop] block#{} 提交完成，准备清空 Dag",
-                                            block.header.height
-                                        );
-                                        let mut dag_guard =
-                                            dag.lock().unwrap_or_else(|e| e.into_inner());
-                                        *dag_guard = Dag::new();
-                                        dag_guard.insert(vertex.clone());
-                                        info!(
-                                            "[validator-loop] Dag 已清空，last_vertex 设为 round={} vertex",
-                                            round
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!("put_block 失败：{e}");
-                                    }
+                        if vc <= 1 {
+                            // ===== 单 validator 引导期：直接自签出块（兼容原 demo 路径）=====
+                            commit_and_finalize_block(
+                                prev_vertex,
+                                &node,
+                                &secret_key,
+                                chain_id,
+                                commit_round,
+                                prev_commit_hash,
+                                prev_block_hash,
+                                height,
+                                &transport,
+                                &dag,
+                                &vertex,
+                                &mut commit_round,
+                                &mut prev_commit_hash,
+                                &mut prev_block_hash,
+                            );
+                        } else {
+                            // ===== 多 validator：投票 gossip + 2/3 凑齐出块（缺口 #3）=====
+                            // 1. 计算确定性 cert signing_hash（基于 prev_vertex 的确定性执行结果）。
+                            let cert_signing_hash = match compute_cert_signing_hash(
+                                prev_vertex,
+                                chain_id,
+                                epoch,
+                                commit_round,
+                                prev_commit_hash,
+                                &node,
+                                height,
+                            ) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    error!("compute_cert_signing_hash 失败：{e}");
+                                    last_vertex = Some(vertex);
+                                    round += 1;
+                                    let _ = batch_tx_count;
+                                    continue;
                                 }
-                            }
-                            Err(e) => {
-                                error!("build_block_from_vertex 失败：{e}");
+                            };
+                            // 2. 广播本节点的投票。
+                            let self_sig = secp256k1_sign_hash(&secret_key, &cert_signing_hash);
+                            let self_vote = CommitVote {
+                                epoch,
+                                commit_round,
+                                cert_signing_hash,
+                                signer_pubkey: author_pubkey.clone(),
+                                signature: self_sig,
+                            };
+                            votes.add_vote(self_vote.clone());
+                            let _ = transport.gossip_broadcast(
+                                GossipTopic::CommitVote,
+                                &NetworkMessage::CommitVote(self_vote),
+                            );
+                            // 3. 收集投票并组装 cert。
+                            let collected = votes.drain_for_hash(&cert_signing_hash);
+                            let active_pubkeys = node.active_validator_pubkeys_sorted();
+                            let sig_pairs: Vec<(usize, Vec<u8>)> = collected
+                                .iter()
+                                .filter_map(|vote| {
+                                    active_pubkeys
+                                        .iter()
+                                        .position(|pk| *pk == vote.signer_pubkey)
+                                        .map(|idx| (idx, vote.signature.clone()))
+                                })
+                                .collect();
+                            if sig_pairs.len() >= required {
+                                commit_and_finalize_block_multi(
+                                    prev_vertex,
+                                    &node,
+                                    chain_id,
+                                    epoch,
+                                    commit_round,
+                                    prev_commit_hash,
+                                    prev_block_hash,
+                                    height,
+                                    &sig_pairs,
+                                    vc,
+                                    &transport,
+                                    &dag,
+                                    &vertex,
+                                    &mut commit_round,
+                                    &mut prev_commit_hash,
+                                    &mut prev_block_hash,
+                                );
+                            } else {
+                                info!(
+                                    "[validator-loop] commit 投票不足 {}/{}，等待（round={}）",
+                                    sig_pairs.len(),
+                                    required,
+                                    round
+                                );
                             }
                         }
                     }
                     Ok(None) => {
-                        warn!("detect_commit_leader 返回 None（不应发生）");
+                        // 未检测到 leader（2/3 引用未满足）：等待更多 vertex。
                     }
                     Err(e) => {
                         warn!("detect_commit_leader 错误：{e}");
@@ -1816,5 +2235,62 @@ mod tests {
                 MAX_VERTEX_SIZE
             );
         }
+    }
+
+    // ===== 缺口 #3：VoteCollector 测试 =====
+
+    fn make_vote(signer_byte: u8, cert_hash_byte: u8) -> CommitVote {
+        CommitVote {
+            epoch: 1,
+            commit_round: 5,
+            cert_signing_hash: [cert_hash_byte; 32],
+            signer_pubkey: TaggedPubkey {
+                tag: encode_tag(SignatureScheme::Secp256k1, 1),
+                raw: vec![signer_byte; 33],
+            },
+            signature: vec![0u8; 65],
+        }
+    }
+
+    #[test]
+    fn vote_collector_dedups_same_signer_same_hash() {
+        let vc = VoteCollector::new();
+        let vote = make_vote(0x10, 0xAA);
+        vc.add_vote(vote.clone());
+        vc.add_vote(vote.clone()); // 重复 → 去重
+        let collected = vc.drain_for_hash(&[0xAA; 32]);
+        assert_eq!(collected.len(), 1, "同一 signer + 同一 hash 应去重为 1 票");
+    }
+
+    #[test]
+    fn vote_collector_collects_distinct_signers() {
+        let vc = VoteCollector::new();
+        vc.add_vote(make_vote(0x10, 0xAA));
+        vc.add_vote(make_vote(0x20, 0xAA)); // 不同 signer → 计入
+        vc.add_vote(make_vote(0x30, 0xAA)); // 不同 signer → 计入
+        let collected = vc.drain_for_hash(&[0xAA; 32]);
+        assert_eq!(collected.len(), 3, "3 个不同 signer 应收集 3 票");
+    }
+
+    #[test]
+    fn vote_collector_drain_isolates_by_hash() {
+        let vc = VoteCollector::new();
+        vc.add_vote(make_vote(0x10, 0xAA));
+        vc.add_vote(make_vote(0x20, 0xBB)); // 不同 cert hash
+        let collected_aa = vc.drain_for_hash(&[0xAA; 32]);
+        assert_eq!(collected_aa.len(), 1, "仅 drain hash=AA 的投票");
+        // BB 投票仍保留
+        let collected_bb = vc.drain_for_hash(&[0xBB; 32]);
+        assert_eq!(collected_bb.len(), 1, "BB 投票应保留");
+    }
+
+    #[test]
+    fn vote_collector_drain_clears_returned_votes() {
+        // drain 后再次 drain 同 hash 应为空。
+        let vc = VoteCollector::new();
+        vc.add_vote(make_vote(0x10, 0xAA));
+        let _ = vc.drain_for_hash(&[0xAA; 32]);
+        let again = vc.drain_for_hash(&[0xAA; 32]);
+        assert!(again.is_empty(), "drain 后该 hash 的投票应清空");
     }
 }

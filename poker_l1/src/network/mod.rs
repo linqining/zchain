@@ -510,6 +510,8 @@ pub enum GossipTopic {
     CompactVertex,
     /// checkpoint_anchor 多副本广播（SubTask 30.8）。
     CheckpointAnchor,
+    /// commit certificate 投票传播（缺口 #3：多 validator 2/3 多签闭环）。
+    CommitVote,
 }
 
 /// 网络消息（SubTask 30.1）。
@@ -539,6 +541,31 @@ pub enum NetworkMessage {
     ResponseVertices(Vec<DagVertex>),
     /// 轻客户端 block header 订阅（SubTask 30.4）。
     LightClientHeader(LightClientHeader),
+    /// commit certificate 投票（缺口 #3：多 validator 2/3 多签闭环）。
+    ///
+    /// validator 观察到 commit leader 后，对 `cert_signing_hash` 单独签名并广播，
+    /// 收集方凑齐 ≥2/3 后用 [`crate::consensus::bullshark::assemble_commit_certificate`]
+    /// 组装完整 cert。cert signing_hash 域(0x43)与 vertex signing_hash 域不同，
+    /// 故不能复用 vertex 的 author_sig。
+    CommitVote(CommitVote),
+}
+
+/// commit certificate 投票（缺口 #3）。
+///
+/// 每个 validator 对拟出块的 commit certificate 的 `signing_hash(chain_id)` 签名，
+/// 广播给其他 validator。收集方凑齐 ≥2/3 签名后组装 cert 出块。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct CommitVote {
+    /// epoch。
+    pub epoch: crate::consensus::Epoch,
+    /// commit round。
+    pub commit_round: u64,
+    /// 签名对象（cert.signing_hash(chain_id)，32 字节）。供收集方校验签名一致性。
+    pub cert_signing_hash: Hash,
+    /// 签名者 tagged pubkey。
+    pub signer_pubkey: TaggedPubkey,
+    /// secp256k1 签名（65B r||s||v，对 cert_signing_hash）。
+    pub signature: Vec<u8>,
 }
 
 /// 轻客户端 block header（SubTask 30.4）。
