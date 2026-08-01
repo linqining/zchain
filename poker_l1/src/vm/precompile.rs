@@ -535,6 +535,36 @@ pub mod reserved {
     pub const fn bridge_contract_id() -> ObjectID {
         ObjectID::new(BRIDGE_CONTRACT_ADDRESS, 0)
     }
+
+    /// 原生转账合约预编译地址（0xFF..04，缺口 #4-M1）。
+    pub const TRANSFER_CONTRACT_ADDRESS: Address = [
+        PRECOMPILE_PREFIX,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x04,
+    ];
+
+    /// 原生转账合约预编译 ObjectID（0xFF..04，缺口 #4-M1）。
+    #[must_use]
+    pub const fn transfer_contract_id() -> ObjectID {
+        ObjectID::new(TRANSFER_CONTRACT_ADDRESS, 0)
+    }
 }
 
 #[cfg(test)]

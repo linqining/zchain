@@ -191,6 +191,12 @@ fn print_usage() {
     eprintln!(
         "  --genesis-validators <file>             genesis validator set JSON 文件（多 validator 共识所需，所有节点须一致）"
     );
+    eprintln!(
+        "  --vrf-key-file <path>                   VRF 私钥文件（32B hex，ECVRF-secp256k1，用于 epoch_randomness）"
+    );
+    eprintln!(
+        "  --genesis-alloc <file>                  genesis 余额分配 JSON（初始代币发行，[{{pubkey_hex, balance}}]）"
+    );
     eprintln!();
     eprintln!("环境变量：");
     eprintln!(
@@ -260,6 +266,41 @@ fn load_genesis_validators(path: &std::path::Path) -> Result<Vec<poker_l1::conse
     Ok(out)
 }
 
+/// genesis 余额分配 JSON 条目（缺口 #4-M1：`--genesis-alloc` 文件格式）。
+#[derive(serde::Deserialize)]
+struct GenesisAllocEntry {
+    /// secp256k1 pubkey（33 字节 compressed，hex）。
+    pubkey_hex: String,
+    /// 初始余额。
+    balance: u64,
+}
+
+/// 从 JSON 文件加载 genesis 余额分配（缺口 #4-M1）。
+///
+/// 文件格式：`[{"pubkey_hex": "..", "balance": N}, ...]`。
+/// 返回 `(TaggedPubkey, balance)` 列表供 [`Node::apply_genesis_alloc`] 应用。
+fn load_genesis_alloc(
+    path: &std::path::Path,
+) -> Result<Vec<(poker_l1::signature::TaggedPubkey, u64)>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取 genesis alloc 文件失败：{e}"))?;
+    let entries: Vec<GenesisAllocEntry> = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 genesis alloc JSON 失败：{e}"))?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        let pubkey_bytes = hex::decode(&e.pubkey_hex)
+            .map_err(|err| format!("alloc#{i} pubkey_hex 解码失败：{err}"))?;
+        let tagged = poker_l1::signature::TaggedPubkey::new(
+            poker_l1::signature::SignatureScheme::Secp256k1,
+            poker_l1::signature::CURRENT_VERSION,
+            pubkey_bytes,
+        )
+        .map_err(|err| format!("alloc#{i} TaggedPubkey 构造失败：{err}"))?;
+        out.push((tagged, e.balance));
+    }
+    Ok(out)
+}
+
 /// 启动节点。
 fn run_node(args: &[String]) -> Result<(), String> {
     let mut role: NodeRole = NodeRole::Full;
@@ -273,6 +314,10 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let mut peers: Vec<String> = Vec::new();
     // 缺口 #3：genesis validator set 文件（多 validator 共识所需，所有节点须一致）。
     let mut genesis_validators_file: Option<PathBuf> = None;
+    // 缺口 #3 §3.6：VRF 私钥文件（32B hex，ECVRF-secp256k1，用于 epoch_randomness 派生）。
+    let mut vrf_key_file: Option<PathBuf> = None;
+    // 缺口 #4-M1：genesis 余额分配文件（初始代币发行）。
+    let mut genesis_alloc_file: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -346,6 +391,18 @@ fn run_node(args: &[String]) -> Result<(), String> {
                     args.get(i).ok_or("--genesis-validators 缺少参数")?,
                 ));
             }
+            "--vrf-key-file" => {
+                i += 1;
+                vrf_key_file = Some(PathBuf::from(
+                    args.get(i).ok_or("--vrf-key-file 缺少参数")?,
+                ));
+            }
+            "--genesis-alloc" => {
+                i += 1;
+                genesis_alloc_file = Some(PathBuf::from(
+                    args.get(i).ok_or("--genesis-alloc 缺少参数")?,
+                ));
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -373,6 +430,27 @@ fn run_node(args: &[String]) -> Result<(), String> {
             key_bytes.fill(0);
             let vkey = ValidatorKey::from_secret_bytes(sk).map_err(|e| format!("私钥无效：{e}"))?;
             sk.fill(0);
+            // 缺口 #3 §3.6：加载 VRF 私钥（可选，用于 epoch_randomness 真实 ECVRF 派生）。
+            let vkey = if let Some(vrf_path) = &vrf_key_file {
+                let vrf_hex = std::fs::read_to_string(vrf_path)
+                    .map_err(|e| format!("读取 vrf-key-file {} 失败：{e}", vrf_path.display()))?;
+                let mut vrf_bytes = hex::decode(vrf_hex.trim())
+                    .map_err(|e| format!("VRF 私钥 hex 解码失败：{e}"))?;
+                if vrf_bytes.len() != 32 {
+                    return Err(format!(
+                        "VRF 私钥必须为 32 字节，得到 {} 字节",
+                        vrf_bytes.len()
+                    ));
+                }
+                let mut vrf_sk = [0u8; 32];
+                vrf_sk.copy_from_slice(&vrf_bytes);
+                vrf_bytes.fill(0);
+                info!("已加载 VRF 私钥（用于 epoch_randomness ECVRF 派生）");
+                vkey.with_vrf_secret(vrf_sk)
+            } else {
+                warn!("未配置 VRF 私钥（--vrf-key-file），epoch_randomness 将走 fallback");
+                vkey
+            };
             NodeConfig::validator(data_dir.clone(), vkey)
         }
         NodeRole::Full => NodeConfig::default_full(data_dir.clone()),
@@ -404,6 +482,14 @@ fn run_node(args: &[String]) -> Result<(), String> {
 
     // 打开节点
     let node = Node::open(config).map_err(|e| format!("Node::open 失败：{e}"))?;
+    // 缺口 #4-M1：应用 genesis 余额分配（初始代币发行，幂等——已存在账户不覆盖）。
+    if let Some(alloc_path) = &genesis_alloc_file {
+        let allocs = load_genesis_alloc(alloc_path)?;
+        let created = node
+            .apply_genesis_alloc(allocs)
+            .map_err(|e| format!("genesis alloc 应用失败：{e}"))?;
+        info!("已应用 genesis 余额分配：新建 {} 个账户", created);
+    }
     let node_arc = Arc::new(node);
     let backend = Arc::new(NodeRpcBackend::new(Arc::clone(&node_arc)));
 

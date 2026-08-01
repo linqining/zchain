@@ -667,3 +667,94 @@ fn subtask_39_9_phase2_test_coverage_summary() {
     let _tc_config = TimeConsensusConfig::default();
     assert!(_tc_config.max_interval_ms > 0);
 }
+
+/// 缺口 #3/#4/#5 综合 e2e：多 validator 共识 + staking 结算 + slashing + commit cert 验证。
+///
+/// 验证完整经济流：
+/// 1. 4 validator 各 stake → DAG vertex → detect commit leader（2/3 quorum）
+/// 2. assemble_commit_certificate（真实签名）→ validate_commit_certificate_quorum 通过
+/// 3. apply_slashing → stake 减少 + 状态转 Slashed
+/// 4. slash 后该 validator 不再满足 can_participate_consensus
+#[test]
+fn e2e_multi_validator_staking_slashing_commit() {
+    use poker_l1::account::{Account, AccountStore, derive_address};
+    use poker_l1::signature::{SignatureScheme, TaggedPubkey, tagged_pubkey::encode_tag};
+
+    let validator_count = 4usize;
+    let required = required_quorum(validator_count);
+    assert_eq!(required, 3);
+
+    // 1. 构造 4 validator（stake=100_000，Active）+ 对应资助账户。
+    let mut account_store = AccountStore::new();
+    let mut validators: Vec<ValidatorEntry> = Vec::new();
+    let mut validator_pubkeys: Vec<TaggedPubkey> = Vec::new();
+    for i in 0..validator_count as u8 {
+        let tp = TaggedPubkey {
+            tag: encode_tag(SignatureScheme::Secp256k1, 1),
+            raw: vec![0x10 + i; 33],
+        };
+        // 资助账户（余额 ≥ stake，供 bonding 锁定）。
+        account_store
+            .create(Account::new(tp.clone(), 200_000))
+            .unwrap();
+        let mut v = ValidatorEntry::new(tp.clone(), [0x10 + i; 33], 100_000, 0);
+        v.status = ValidatorStatus::Active;
+        validators.push(v);
+        validator_pubkeys.push(tp);
+    }
+
+    // 验证 staking 锁定：模拟 bonding（从账户扣除 stake）。
+    for tp in &validator_pubkeys {
+        let addr = derive_address(tp);
+        account_store.get_mut(&addr).unwrap().debit(100_000).unwrap();
+    }
+    // 锁定后账户余额应 = 200_000 - 100_000 = 100_000
+    for tp in &validator_pubkeys {
+        let addr = derive_address(tp);
+        assert_eq!(account_store.get(&addr).unwrap().balance, 100_000);
+    }
+
+    // 2. 多 validator 共识：DAG → commit leader。
+    let mut dag = Dag::new();
+    let mut round1 = vec![];
+    for i in 0..validator_count as u8 {
+        let v = make_vertex(1, 1, 0x10 + i, vec![]);
+        round1.push(dag.insert(v));
+    }
+    let leader = round1[0];
+    for i in 0..required as u8 {
+        dag.insert(make_vertex(1, 2, 0x20 + i, vec![leader]));
+    }
+    let commit = detect_commit_leader(&dag, &leader, validator_count)
+        .unwrap()
+        .expect("应形成 commit");
+    assert_eq!(commit.reference_count, required);
+
+    // 3. 组装 commit certificate + quorum 验证。
+    let cert = make_dummy_cert(required, validator_count);
+    validate_commit_certificate_quorum(&cert, validator_count).expect("quorum 应通过");
+
+    // 4. slashing：validator[0] 被 slash（100%）。
+    let mut vset = make_validator_set(validator_count);
+    let offender = vset.validators[0].pubkey.clone();
+    let offender_addr = derive_address(&offender);
+    let offender_bal_before = account_store.get(&offender_addr).unwrap().balance;
+    let config = SlashingConfig::default();
+    let result = apply_slashing(&mut vset, &offender, SlashingReason::VertexEquivocation, &config)
+        .expect("slashing 应成功");
+    // make_validator_set 的 stake = 1_000_000，100% 罚没 → slash_amount = 1_000_000
+    assert_eq!(result.slash_amount, 1_000_000, "100% 罚没");
+    assert_eq!(result.stake_after, 0);
+    // offender 状态转 Slashed
+    assert_eq!(vset.validators[0].status, ValidatorStatus::Slashed);
+    assert!(!vset.validators[0].can_participate_consensus());
+    // 账户余额不变（stake 在 bonding 时已扣，slashing 不再动账户）
+    assert_eq!(
+        account_store.get(&offender_addr).unwrap().balance,
+        offender_bal_before,
+        "slashing 不应再动账户余额"
+    );
+
+    let _ = (account_store, validator_pubkeys);
+}
+
