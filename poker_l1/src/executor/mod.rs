@@ -39,6 +39,20 @@ use crate::object_model::{Object, ObjectID, Ownership};
 use crate::offline::zk_verifier::ZkVerifierRegistry;
 use crate::storage::{ObjectBackend, ObjectDb};
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
+
+/// 原生转账参数（缺口 #4-M1：transfer contract_call 的 args 编码）。
+///
+/// caller debit `amount`（在 execute_tx_on_view_inner 内），recipient credit `amount`
+/// （在 block merge 阶段，因 account_store 在 execute_tx_on_view_inner 内不可访问）。
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize,
+)]
+pub struct TransferArgs {
+    /// 接收方地址。
+    pub recipient: Address,
+    /// 转账金额。
+    pub amount: u64,
+}
 use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
 use crate::vm::{ContractObject, PrecompileRegistry, execute_contract, load_contract_bytecode};
@@ -167,6 +181,12 @@ pub struct TxReceipt {
     pub created_objects: Vec<ObjectID>,
     /// 本 tx 修改的对象 ID。
     pub modified_objects: Vec<ObjectID>,
+    /// 原生转账意图（缺口 #4-M1：transfer contract_call 触发）。
+    ///
+    /// `Some((recipient, amount))` 表示该 tx 是一笔原生转账：caller 已在
+    /// `execute_tx_on_view_inner` 中 debit amount，merge 阶段由 `account_store`
+    /// 对 recipient credit amount。`None` 表示非转账 tx。
+    pub transfer: Option<(crate::Address, u64)>,
 }
 
 impl TxReceipt {
@@ -181,6 +201,7 @@ impl TxReceipt {
             fee_charged: 0,
             created_objects: Vec::new(),
             modified_objects: Vec::new(),
+            transfer: None,
         }
     }
 }
@@ -253,7 +274,7 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
     env: &ExecutionEnvironment,
     tx: &Transaction,
     object_db: &mut B,
-    account_view: Option<&mut crate::account::Account>,
+    mut account_view: Option<&mut crate::account::Account>,
 ) -> PokerL1Result<TxReceipt> {
     // ===== 1. 防御性重校验（limits / chain_id / 签名）=====
     validate_tx_limits(tx)?;
@@ -316,6 +337,8 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
     let mut all_created: Vec<ObjectID> = Vec::new();
     let mut all_modified: Vec<ObjectID> = Vec::new();
     let mut gas_used: u64 = 0;
+    // 缺口 #4-M1：原生转账意图（caller 已 debit，merge 阶段 credit recipient）。
+    let mut transfer_intent: Option<(crate::Address, u64)> = None;
 
     if let Some(call) = &tx.contract_call {
         // 缺口 #9：Bridge 铸币路径特判（在预编译/rBPF 之前）。
@@ -351,6 +374,27 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                 outcome.deposit.nonce,
             )?;
             // bridge 调用不经 rBPF，gas_used 保持 0；步骤 6 仍按 Public lane 扣费 + 推进 nonce。
+        } else if call.contract_id == crate::vm::precompile::reserved::transfer_contract_id() {
+            // 缺口 #4-M1：原生转账（caller debit amount，recipient credit 在 merge 阶段）。
+            let args: TransferArgs = borsh::from_slice(&call.args).map_err(|e| {
+                PokerL1Error::Other(format!("transfer: invalid args encoding: {e}"))
+            })?;
+            if args.amount == 0 {
+                return Err(PokerL1Error::Other(
+                    "transfer: amount must be > 0".to_string(),
+                ));
+            }
+            // caller debit（account_view 持有 caller 账户引用）。
+            // 注意：account_view 仅对非 gas-free lane 为 Some；transfer 走 Public lane（非 gas-free）。
+            if let Some(acc) = account_view.as_mut() {
+                acc.debit(args.amount).map_err(|_| PokerL1Error::InsufficientBalance {
+                    needed: args.amount,
+                    has: acc.balance,
+                })?;
+            }
+            // 记录意图：merge 阶段由 account_store credit recipient。
+            transfer_intent = Some((args.recipient, args.amount));
+            // 转账不经 rBPF，gas_used 保持 0；步骤 6 仍按 Public lane 扣费 + 推进 nonce。
         } else if let Some(registry) = &env.precompile_registry {
             // 优先检查预编译合约注册表（参考以太坊预编译合约设计）
             if registry.is_precompile(call.contract_id) {
@@ -420,6 +464,7 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
         fee_charged,
         created_objects: all_created,
         modified_objects: all_modified,
+        transfer: transfer_intent,
     })
 }
 
@@ -746,6 +791,26 @@ fn execute_block_parallel(
                 }
             }
 
+            // 缺口 #4-M1：原生转账 — merge 阶段重放 caller debit + recipient credit。
+            // caller 的 transfer amount debit 在 execute_tx_on_view_inner 的快照副本上已扣，
+            // 但 apply_public_tx（上面）只重放 gas + nonce，不含 transfer amount，
+            // 故此处须在主 account_store 上补扣 caller 的 transfer amount + credit recipient。
+            if let Some((recipient, amount)) = &receipt.transfer {
+                let caller = derive_address(&tx.tagged_pubkey);
+                if let Some(acc) = account_store.get_mut(&caller) {
+                    if let Err(e) = acc.debit(*amount) {
+                        receipts[idx] = Some(TxReceipt::failure(tx, &e));
+                        continue;
+                    }
+                }
+                let _ = account_store.flush(&caller);
+                if let Err(e) = account_store.credit(recipient, *amount) {
+                    receipts[idx] = Some(TxReceipt::failure(tx, &e));
+                    continue;
+                }
+                let _ = account_store.flush(recipient);
+            }
+
             // block gas 累计（仅成功且需 gas 的 tx）
             if receipt.success && needs_gas {
                 total_gas = total_gas.saturating_add(receipt.gas_used);
@@ -835,6 +900,19 @@ pub fn execute_block_serial<B: ObjectBackend>(
             if let Err(e) = account_store.flush(&caller) {
                 receipts.push(TxReceipt::failure(tx, &e));
                 continue;
+            }
+        }
+        // 缺口 #4-M1：原生转账 recipient credit（串行路径）。
+        // caller debit 已在 execute_tx_on_view_inner（直接操作 account_store）完成，
+        // 此处仅 credit recipient（account_store 在 execute_tx_on_view_inner 内只持有
+        // caller 的 &mut Account，无法 credit recipient）。
+        if receipt.transfer.is_some() && receipt.success {
+            if let Some((recipient, amount)) = &receipt.transfer {
+                if let Err(e) = account_store.credit(recipient, *amount) {
+                    receipts.push(TxReceipt::failure(tx, &e));
+                    continue;
+                }
+                let _ = account_store.flush(recipient);
             }
         }
         // 仅 gas 计费通道的成功 tx 累计 block gas（gas-free lane 不计入）
@@ -2148,6 +2226,107 @@ mod tests {
         assert_eq!(
             proposer_bal, DEFAULT_BLOCK_REWARD,
             "空 block 也应铸造出块奖励给 proposer"
+        );
+    }
+
+    // ===== 缺口 #4-M1：原生转账测试 =====
+
+    #[test]
+    fn native_transfer_debits_caller_credits_recipient() {
+        // 一笔原生转账：caller 余额减少 amount，recipient 余额增加 amount。
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        let caller_bal_before = fx.account().balance;
+
+        // recipient 账户（独立 TestSigner，初始余额 0）。
+        let recipient_signer = TestSigner::new();
+        let recipient_addr = recipient_signer.address();
+        fx.account_store
+            .create(Account::new(recipient_signer.tagged_pubkey(), 0))
+            .unwrap();
+
+        // 构造转账 tx：transfer contract_call。
+        let transfer_amount = 100_000u64;
+        let mut req = public_request(0);
+        req.contract_call = Some(ContractCall {
+            contract_id: crate::vm::precompile::reserved::transfer_contract_id(),
+            method_selector: [0u8; 32],
+            args: borsh::to_vec(&TransferArgs {
+                recipient: recipient_addr,
+                amount: transfer_amount,
+            })
+            .unwrap(),
+        });
+        let tx = fx.signer.sign(req);
+
+        let env = make_env();
+        let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
+        assert!(outcome.receipts[0].success, "转账应成功");
+        assert_eq!(
+            outcome.receipts[0].transfer,
+            Some((recipient_addr, transfer_amount)),
+            "回执应记录转账意图"
+        );
+
+        // caller 余额减少 transfer_amount（+ gas，但转账 tx gas_used=0）。
+        let caller_bal_after = fx.account().balance;
+        assert_eq!(
+            caller_bal_before - caller_bal_after,
+            transfer_amount,
+            "caller 应扣除转账金额"
+        );
+        // recipient 余额增加 transfer_amount。
+        let recipient_bal = fx
+            .account_store
+            .get(&recipient_addr)
+            .unwrap()
+            .balance;
+        assert_eq!(
+            recipient_bal, transfer_amount,
+            "recipient 应收到转账金额"
+        );
+    }
+
+    #[test]
+    fn native_transfer_rejects_insufficient_balance() {
+        // caller 余额不足 → 转账失败，余额不变。
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        // 先把 caller 余额降到很低（仅保留少量）。
+        let drain_amount = fx.account().balance - 10;
+        fx.account_store.get_mut(&caller).unwrap().debit(drain_amount).unwrap();
+
+        let recipient_signer = TestSigner::new();
+        let recipient_addr = recipient_signer.address();
+        fx.account_store
+            .create(Account::new(recipient_signer.tagged_pubkey(), 0))
+            .unwrap();
+
+        // 试图转 100（caller 仅余 10）。
+        let mut req = public_request(0);
+        req.contract_call = Some(ContractCall {
+            contract_id: crate::vm::precompile::reserved::transfer_contract_id(),
+            method_selector: [0u8; 32],
+            args: borsh::to_vec(&TransferArgs {
+                recipient: recipient_addr,
+                amount: 100,
+            })
+            .unwrap(),
+        });
+        let tx = fx.signer.sign(req);
+
+        let env = make_env();
+        let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
+        assert!(
+            !outcome.receipts[0].success,
+            "余额不足转账应失败"
+        );
+        // caller 余额不变（失败 tx 不产生状态变更）。
+        assert_eq!(fx.account().balance, 10, "失败转账不应改 caller 余额");
+        assert_eq!(
+            fx.account_store.get(&recipient_addr).unwrap().balance,
+            0,
+            "失败转账不应改 recipient 余额"
         );
     }
 }
