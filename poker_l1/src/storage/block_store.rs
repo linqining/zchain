@@ -141,6 +141,42 @@ impl BlockStore {
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))
     }
 
+    /// 裁剪旧区块 body（缺口 #4：State Pruning）。
+    ///
+    /// 删除 height < `prune_below` 的 block body（`blocks` CF）+ height index（`height_index` CF）。
+    /// Archive 节点不调用此方法（保留全量历史）。
+    ///
+    /// 返回裁剪的区块数量。
+    pub fn prune_old_blocks(&self, prune_below: BlockHeight) -> PokerL1Result<usize> {
+        let mut count = 0usize;
+        // 遍历 height_index，删除 height < prune_below 的条目 + 对应 block body。
+        let iter = self.db.iterator_cf(self.height_cf(), IteratorMode::Start);
+        let mut to_delete: Vec<([u8; 8], Hash)> = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+            if key.len() == 8 && value.len() == 32 {
+                let height = u64::from_le_bytes(key.as_ref().try_into().unwrap());
+                if height < prune_below {
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(&value);
+                    to_delete.push((key.as_ref().try_into().unwrap(), hash));
+                }
+            }
+        }
+        if !to_delete.is_empty() {
+            let mut batch = WriteBatch::default();
+            for (height_le, hash) in &to_delete {
+                batch.delete_cf(self.blocks_cf(), hash);
+                batch.delete_cf(self.height_cf(), height_le);
+            }
+            self.db
+                .write(batch)
+                .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+            count = to_delete.len();
+        }
+        Ok(count)
+    }
+
     /// 当前存储的区块数量（遍历 `blocks` CF 计数）。
     pub fn len(&self) -> PokerL1Result<usize> {
         let iter = self.db.iterator_cf(self.blocks_cf(), IteratorMode::Start);
@@ -560,5 +596,49 @@ mod tests {
         assert_eq!(range[0].header.height, 0);
         assert_eq!(range[1].header.height, 2);
         assert_eq!(range[2].header.height, 4);
+    }
+
+    #[test]
+    fn prune_old_blocks_deletes_below_threshold() {
+        // 缺口 #4：裁剪 height < threshold 的区块。
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path()).unwrap();
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        // 插入 height 0..4
+        let mut prev = [0u8; 32];
+        for h in 0u64..5 {
+            let blk = dummy_block(h, prev);
+            prev = blk.header.block_hash(chain_id);
+            store.put(&blk, chain_id).unwrap();
+        }
+        assert_eq!(store.len().unwrap(), 5);
+        // 裁剪 height < 3（删除 0,1,2）
+        let pruned = store.prune_old_blocks(3).unwrap();
+        assert_eq!(pruned, 3);
+        assert_eq!(store.len().unwrap(), 2, "应保留 height 3,4");
+        // 验证保留的区块可查
+        assert!(store.get_by_height(3).is_ok());
+        assert!(store.get_by_height(4).is_ok());
+        // 裁剪的区块不存在
+        assert!(store.get_by_height(0).is_err());
+        assert!(store.get_by_height(2).is_err());
+    }
+
+    #[test]
+    fn prune_old_blocks_noop_when_all_above_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path()).unwrap();
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let mut prev = [0u8; 32];
+        // 插入 height 10,11,12
+        for h in 10u64..13 {
+            let blk = dummy_block(h, prev);
+            prev = blk.header.block_hash(chain_id);
+            store.put(&blk, chain_id).unwrap();
+        }
+        // threshold=10，全部 >= 10 → 不裁剪
+        let pruned = store.prune_old_blocks(10).unwrap();
+        assert_eq!(pruned, 0);
+        assert_eq!(store.len().unwrap(), 3);
     }
 }

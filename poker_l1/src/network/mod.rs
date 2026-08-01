@@ -548,6 +548,8 @@ pub enum NetworkMessage {
     /// 组装完整 cert。cert signing_hash 域(0x43)与 vertex signing_hash 域不同，
     /// 故不能复用 vertex 的 author_sig。
     CommitVote(CommitVote),
+    /// Peer Exchange（PEX，缺口 #5）：节点交换已知 peer 地址列表。
+    PeerExchange(Vec<PeerInfo>),
 }
 
 /// commit certificate 投票（缺口 #3）。
@@ -591,7 +593,7 @@ pub struct ValidatorSig {
 }
 
 /// peer 信息（SubTask 30.2）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PeerInfo {
     /// peer ID（libp2p PeerId 或自定义）。
     pub peer_id: String,
@@ -944,6 +946,32 @@ impl GossipManager {
     ) -> PokerL1Result<(Vec<Hash>, Vec<ShortId>)> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         reconstruct_vertex_tx_hashes(compact, &state.short_id_map, &state.tx_cache)
+    }
+
+    /// 处理 compact vertex 的缺失 tx 回退（缺口 #8：Compact Block Relay 完整化）。
+    ///
+    /// `receive_compact_vertex` 返回的 `missing` short IDs 表示本地缺少的 tx。
+    /// 此方法把缺失 tx 对应的 tx_hash（若 short_id_map 有映射）收集为 `RequestTx` 请求列表。
+    /// 调用方（P2P handler）据此发送 `RequestTx(missing_hashes)` 给广播方。
+    ///
+    /// 返回 `(resolvable_hashes, unresolved_short_ids)`：
+    /// - `resolvable_hashes`：short_id_map 有映射但本地无完整 tx 的 tx_hash（可请求）
+    /// - `unresolved_short_ids`：short_id_map 无映射（需请求完整 vertex fallback）
+    #[must_use]
+    pub fn resolve_missing_txs(
+        &self,
+        missing_short_ids: &[ShortId],
+    ) -> (Vec<Hash>, Vec<ShortId>) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut resolvable = Vec::new();
+        let mut unresolved = Vec::new();
+        for sid in missing_short_ids {
+            match state.short_id_map.lookup(sid) {
+                Some(tx_hash) => resolvable.push(tx_hash),
+                None => unresolved.push(*sid),
+            }
+        }
+        (resolvable, unresolved)
     }
 
     /// 取出缓冲中的 tx 用于装入下一个 vertex（SubTask 30.7）。
@@ -1486,5 +1514,29 @@ mod tests {
         assert_eq!(SHORT_ID_LEN, 8);
         assert_eq!(MEMPOOL_BUFFER_WINDOW_MS, 100);
         assert_eq!(SHORT_ID_MAP_LIMIT, 100_000);
+    }
+
+    #[test]
+    fn test_resolve_missing_txs_separates_resolvable_and_unresolved() {
+        // 缺口 #8：compact relay 缺失 tx 回退测试。
+        let gm = GossipManager::new();
+        // 插入两个 tx 到 short_id_map（通过 receive_compact 或直接 insert）。
+        let tx_hash1 = [0x11u8; 32];
+        let tx_hash2 = [0x22u8; 32];
+        let sid1 = compute_short_id(&tx_hash1);
+        let sid2 = compute_short_id(&tx_hash2);
+        let unknown_sid = [0xFFu8; 8]; // 不在 map 中的 short_id
+        {
+            let mut state = gm.state.lock().unwrap();
+            state.short_id_map.insert(sid1, tx_hash1).unwrap();
+            state.short_id_map.insert(sid2, tx_hash2).unwrap();
+        }
+        // 传入 [sid1, sid2, unknown_sid] → 前两个可解析，最后一个不可解析。
+        let (resolvable, unresolved) = gm.resolve_missing_txs(&[sid1, sid2, unknown_sid]);
+        assert_eq!(resolvable.len(), 2, "sid1/sid2 应可解析为 tx_hash");
+        assert!(resolvable.contains(&tx_hash1));
+        assert!(resolvable.contains(&tx_hash2));
+        assert_eq!(unresolved.len(), 1, "unknown_sid 不可解析");
+        assert_eq!(unresolved[0], unknown_sid);
     }
 }

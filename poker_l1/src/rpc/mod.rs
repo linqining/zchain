@@ -603,6 +603,10 @@ pub trait RpcBackend: Send + Sync {
     fn chain_id(&self) -> ChainId;
     /// ZK verifier registry（用于 zk_verify RPC）。
     fn zk_verifier_registry(&self) -> Option<&ZkVerifierRegistry>;
+    /// 导出 Prometheus 格式指标文本（缺口 #7；默认空实现，NodeRpcBackend 覆写）。
+    fn export_metrics(&self) -> String {
+        String::new()
+    }
 }
 
 // ===== RpcHandler =====
@@ -916,10 +920,8 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
     ///
     /// 无参数，返回 `{"metrics": "<prometheus text>"}`。
     fn handle_get_metrics(&self) -> Result<serde_json::Value, RpcHandlerError> {
-        let text = self.backend.node().export_metrics();
-        serde_json::json!({ "metrics": text })
-            .into()
-            .map_err(|e| RpcHandlerError::Server(format!("serde_json: {e}")))
+        let text = self.backend.export_metrics();
+        Ok(serde_json::json!({ "metrics": text }))
     }
 }
 

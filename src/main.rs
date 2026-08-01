@@ -880,6 +880,33 @@ impl TcpTransport {
             .unwrap_or_else(|e| e.into_inner())
             .len()
     }
+
+    /// 缺口 #5：Peer Exchange（PEX）—— 广播本节点已知 peer 列表给所有已连接 peer。
+    fn broadcast_peer_exchange(&self) -> Result<(), String> {
+        let peers: Vec<PeerInfo> = self
+            .peer_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if peers.is_empty() {
+            return Ok(());
+        }
+        self.gossip_broadcast(
+            GossipTopic::DagVertex,
+            &NetworkMessage::PeerExchange(peers),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// 缺口 #5：合并 PEX 发现的新 peer 地址（去重）。
+    fn merge_discovered_peers(&self, new_peers: &[PeerInfo]) {
+        let mut addrs = self.peer_addrs.lock().unwrap_or_else(|e| e.into_inner());
+        for peer in new_peers {
+            if !addrs.iter().any(|p| p.address == peer.address) {
+                addrs.push(peer.clone());
+            }
+        }
+    }
 }
 
 impl NetworkTransport for TcpTransport {
@@ -1122,6 +1149,10 @@ fn handle_p2p_connection(
                     NetworkMessage::CommitVote(vote) => {
                         // 缺口 #3：收集 peer 的 commit certificate 投票。
                         votes.add_vote(vote);
+                    }
+                    NetworkMessage::PeerExchange(peers) => {
+                        // 缺口 #5：Peer Discovery / PEX —— 合并发现的 peer。
+                        transport.merge_discovered_peers(&peers);
                     }
                     NetworkMessage::Transaction(tx) => {
                         // C-1 安全修复：P2P 路径必须与 RPC 路径执行一致的验证链，

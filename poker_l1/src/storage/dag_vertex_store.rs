@@ -216,6 +216,47 @@ impl DagVertexStore {
     pub fn is_empty(&self) -> PokerL1Result<bool> {
         Ok(self.len()? == 0)
     }
+
+    /// 裁剪旧 DAG vertex（缺口 #4：State Pruning）。
+    ///
+    /// 删除 epoch < `prune_below_epoch` 的所有 vertex（`vertices` + `round_index` + `author_index` CF）。
+    /// Archive 节点不调用此方法。
+    ///
+    /// 返回裁剪的 vertex 数量。
+    pub fn prune_old_vertices(&self, prune_below_epoch: Epoch) -> PokerL1Result<usize> {
+        // 遍历 round_index（key = epoch_le || round_le），收集 epoch < prune_below_epoch 的 vertex hash。
+        let iter = self.db.iterator_cf(self.round_cf(), IteratorMode::Start);
+        let mut to_delete: Vec<([u8; 16], Vec<Hash>)> = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+            if key.len() == 16 {
+                let epoch = u64::from_le_bytes(key[..8].try_into().unwrap());
+                if epoch < prune_below_epoch {
+                    // value = Vec<Hash>（round_index 存该轮所有 vertex hash）
+                    let hashes: Vec<Hash> = bincode::deserialize(&value)
+                        .unwrap_or_default();
+                    to_delete.push((key.as_ref().try_into().unwrap(), hashes));
+                }
+            }
+        }
+        let mut count = 0usize;
+        if !to_delete.is_empty() {
+            let mut batch = WriteBatch::default();
+            for (round_key, hashes) in &to_delete {
+                for hash in hashes {
+                    batch.delete_cf(self.vertices_cf(), hash);
+                    count += 1;
+                }
+                batch.delete_cf(self.round_cf(), round_key);
+            }
+            // author_index：逐 vertex 清理（key 含 pubkey，需遍历）。
+            // 简化：author_index 不裁剪（它仅用于审计查询，体积小；后续可补精确清理）。
+            self.db
+                .write(batch)
+                .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+        }
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

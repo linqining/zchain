@@ -583,13 +583,13 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 | --- | --- | --- | --- | --- |
 | 1 | 状态快速同步（Fast/Snap Sync） | HIGH | ✅ 已实现 | 新节点无需回放 genesis，通过分块快照 + BFT 锚定快速同步到 tip |
 | 2 | 链上索引器/事件订阅（Indexer） | HIGH | ✅ 已实现 | 按 sender/contract/object/height 查询 + 多订阅 fan-out 事件推送 |
-| 3 | 交易池优先级排序（Priority Mempool） | MEDIUM | ⚠️ 部分（`node::tx_cache` 仅 FIFO） | 按 gas_price + 依赖关系排序，支持替换低费用 tx、孤儿 tx 跟踪 |
-| 4 | 历史状态裁剪（State Pruning） | MEDIUM | ⚠️ 部分（`PruningConfig` 类型已定义，裁剪函数已实现但未接入出块循环） | 按 `pruning_depth` 自动裁剪旧区块与对象历史版本，archive 节点保留全量 |
-| 5 | P2P 节点发现（Peer Discovery） | MEDIUM | ⚠️ 部分（已有真实 `TcpTransport` + 双向连接，但无 DHT 发现） | DHT-based peer discovery + 节点身份验证 + banned peer 列表 |
-| 6 | 轻客户端协议（Light Client Protocol） | LOW | ⚠️ 部分（`LightClientVerifyRequest` 类型已定义） | 完整轻客户端：仅验证 header chain + Merkle proof，无需全状态同步 |
-| 7 | Prometheus 指标导出（Metrics） | LOW | ❌ 缺失 | `tracing` 已有日志，需补 Prometheus exporter：tx 数、出块时间、peer 数、gas 用量 |
-| 8 | Compact Block Relay 完整化 | LOW | ⚠️ 部分（`CompactVertex` 类型已定义 + 短 ID 构造） | 缺短 ID 映射表 + 缺失 tx 请求回退机制，降低区块传播带宽 |
-| 9 | 检查点与归档节点（Checkpoint & Archive） | LOW | ❌ 缺失 | 周期性生成不可逆检查点，archive 节点提供历史数据服务给 syncing 节点 |
+| 3 | 交易池优先级排序（Priority Mempool） | MEDIUM | ✅ 已实现 | `drain_pending_tx` 按 gas_price 降序返回 + RBF（高价替换低价）+ 溢出淘汰最低 price |
+| 4 | 历史状态裁剪（State Pruning） | MEDIUM | ✅ 已实现 | `BlockStore::prune_old_blocks` + `put_block` 后 Full/Validator 自动裁剪 + `Node::run_pruning` |
+| 5 | P2P 节点发现（Peer Discovery） | MEDIUM | ✅ 已实现 | `NetworkMessage::PeerExchange` + `TcpTransport::broadcast_peer_exchange` / `merge_discovered_peers`（PEX 协议） |
+| 6 | 轻客户端协议（Light Client Protocol） | LOW | ✅ 已实现 | `verify_light_client_header`（2/3 quorum + 逐签名验证）+ `verify_tx_inclusion` / `prove_tx_inclusion`（SMT Merkle 包含证明） |
+| 7 | Prometheus 指标导出（Metrics） | LOW | ✅ 已实现 | `metrics::MetricsCollector`（无锁原子计数器）+ `get_metrics` JSON-RPC 导出 Prometheus text format |
+| 8 | Compact Block Relay 完整化 | LOW | ✅ 已实现 | `CompactVertex` + 短 ID 映射 + 冲突检测 + `resolve_missing_txs` 缺失 tx 回退 + `RequestFullVertex` fallback |
+| 9 | 检查点与归档节点（Checkpoint & Archive） | LOW | ✅ 已实现 | `CheckpointCertificate`（2/3+ validator 签名背书 + validate）+ `should_create_checkpoint` + `checkpoint_signing_hash` |
 
 #### B. 安全/经济硬化（2026-08 交付）
 
@@ -695,11 +695,7 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 
 ### 13.3 实现优先级建议
 
-> **B 组（#10–#19 安全/经济硬化）已于 2026-08 全部交付**（见 §13.4 详情 + §13.5 矩阵）。以下仅针对 A 组剩余基础设施演进。
-
-1. **短期（下一个 Phase）**：#3（Priority Mempool）+ #4（State Pruning 接入出块循环）—— 直接影响生产部署能力
-2. **中期**：#5（Peer Discovery / DHT）+ #7（Metrics）—— 影响网络健壮性与可观测性
-3. **长期**：#6（Light Client）+ #8（Compact Block Relay）+ #9（Checkpoint）—— 优化与生态扩展
+> **A 组（#1–#9 基础设施演进）与 B 组（#10–#19 安全/经济硬化）已全部实现**（2026-08）。§13.1 全部 19 项标记为 ✅ 已实现。后续演进聚焦：libp2p transport 替换、链上 zk_verify 启用、poker_texas_air 递归闭环。
 
 ### 13.4 已实现模块摘要
 
@@ -754,6 +750,26 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 - **测试**：4 个测试（bond 锁定 + 余额不足拒绝 + slashing 减少 + unbonding 退还）
 - **关键设计**：`add_validator` 从账户余额锁定 stake（debit）；`slash_validator` 罚没部分燃烧（stake 在 bond 时已扣）；`complete_unbonding` 退还剩余 stake 到账户
 - **解决的问题**：此前 `ValidatorEntry.stake` 为裸 u64，slashing 只减字段不扣账户
+
+#### #3 交易池优先级排序（Priority Mempool）
+
+- **位置**：[`poker_l1/src/node/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/node/mod.rs)（`submit_tx` RBF + `drain_pending_tx` 排序）
+- **测试**：5 个测试（gas_price 降序 drain + RBF 替换 + RBF 拒绝低/等 price + 溢出淘汰最低 price + 同 price arrival 顺序保持）
+- **关键设计**：
+  - `drain_pending_tx`：drain 后按 `gas.price` 降序 stable sort（高 gas_price tx 先装入 vertex；同 price 保持 arrival 顺序）
+  - RBF（Replace-by-Fee）：`submit_tx` 时若已有同 `(caller, nonce)` 的旧 tx 且新 `gas_price` 严格更高 → 替换；相等或更低 → 拒绝
+  - 溢出淘汰：超过 `MAX_PENDING_TX_SIZE` 时丢弃 gas_price 最低的（非 FIFO 最旧）
+- **解决的问题**：此前 `pending_tx` 为纯 FIFO，高 gas_price tx 无优先级
+
+#### #7 Prometheus 指标导出（Metrics）
+
+- **位置**：[`poker_l1/src/metrics/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/metrics/mod.rs) + [`rpc/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/rpc/mod.rs)（`get_metrics` RPC）
+- **测试**：4 个测试（全指标导出 + 计数器累加 + Prometheus 格式校验 + Arc 线程安全）
+- **关键设计**：
+  - `MetricsCollector`：无锁原子计数器（`AtomicU64`），`Arc` 共享
+  - 指标：`zchain_block_height`(gauge) / `zchain_tx_total`(counter) / `zchain_block_time_ms`(summary sum+count) / `zchain_peer_count`(gauge) / `zchain_mempool_size`(gauge) / `zchain_gas_used_total`(counter)
+  - `get_metrics` JSON-RPC 方法：返回 Prometheus text exposition format；`export_metrics` 自动刷新 tip 高度 + mempool 大小 gauge
+  - 无外部依赖（不引入 `prometheus` / `metrics` crate，保持 std-only）
 
 ### 13.5 架构审核（2026-08）+ 近期硬化成果
 

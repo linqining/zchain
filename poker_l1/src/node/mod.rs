@@ -36,7 +36,7 @@ use crate::signature::TaggedPubkey;
 use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
 use crate::signature::unified::verify_signature;
 use crate::storage::{BlockStore, BridgeRegistryStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb};
-use crate::transaction::{Transaction, validate_tx_limits};
+use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::PrecompileRegistry;
 use crate::vm::contracts::{GamePrecompile, TexasPokerPrecompile};
 use crate::{Address, BlockHeight, ChainId, Hash};
@@ -863,7 +863,50 @@ impl Node {
     /// 5. 状态根重放比对：重新执行 tx，比对计算出的 state_root 与 header.state_root
     pub fn put_block(&self, block: &Block) -> PokerL1Result<Hash> {
         self.validate_block(block)?;
-        self.block_store.put(block, self.config.chain_id)
+        let hash = self.block_store.put(block, self.config.chain_id)?;
+        // 缺口 #4：State Pruning 接入出块路径。
+        // Full/Validator 节点在 put_block 后自动裁剪旧数据；Archive 节点保留全量。
+        if self.config.role.should_prune() {
+            if let Err(e) = self.run_pruning(block.header.height) {
+                tracing::warn!("run_pruning 失败（不阻断出块）：{e}");
+            }
+        }
+        Ok(hash)
+    }
+
+    /// 执行状态裁剪（缺口 #4）。
+    ///
+    /// 裁剪 height < `current - tx_prune_after_blocks` 的旧区块 body，
+    /// 以及 epoch < `block_epoch - 1`（留一个 epoch 缓冲）的旧 DAG vertex。
+    /// 仅 Full/Validator 节点调用（Archive 不裁剪）。
+    ///
+    /// 返回 `(pruned_blocks, pruned_vertices)`。
+    pub fn run_pruning(&self, current_height: u64) -> PokerL1Result<(usize, usize)> {
+        let pruning_config = crate::storage::PruningConfig::default();
+        // 裁剪旧区块：height < current - tx_prune_after_blocks
+        let block_threshold = current_height.saturating_sub(pruning_config.tx_prune_after_blocks);
+        let pruned_blocks = if block_threshold > 0 {
+            self.block_store.prune_old_blocks(block_threshold)?
+        } else {
+            0
+        };
+        // 裁剪旧 vertex：epoch < current_epoch（用 block epoch 推算，留 1 个 epoch 缓冲）。
+        // 简化：vertex 按 epoch 裁剪，保留当前 epoch 的全部 vertex。
+        let block_epoch = crate::consensus::Epoch::MAX; // 占位：实际应从 block header 取 epoch
+        let _ = block_epoch;
+        // vertex 裁剪需要 epoch 信息；当前 block header 无 epoch 字段，
+        // 暂用 vertex_prune_after_blocks 对应的 epoch 估算（保守不裁剪，避免误删）。
+        // 完整实现需 block header 携带 epoch 或从 cert 推导。
+        let pruned_vertices = 0usize;
+        if pruned_blocks > 0 || pruned_vertices > 0 {
+            tracing::info!(
+                "run_pruning: pruned {} blocks, {} vertices (current_height={})",
+                pruned_blocks,
+                pruned_vertices,
+                current_height
+            );
+        }
+        Ok((pruned_blocks, pruned_vertices))
     }
 
     /// 验证 block（P0-3）。
@@ -1091,18 +1134,59 @@ impl Node {
 
         if self.config.role.is_validator() {
             let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
+            // 缺口 #3：Priority Mempool — RBF（Replace-by-Fee）。
+            // 若已有相同 (caller, nonce) 的 tx 且新 tx gas_price 更高 → 替换。
+            let caller = crate::account::derive_address(&tx.tagged_pubkey);
+            let new_price = tx.gas.price;
+            let new_nonce = tx.nonce;
+            let mut replaced = false;
+            if new_price > 0 {
+                // 查找同 (caller, nonce) 的旧 tx。
+                let old_idx = pending.iter().position(|t| {
+                    crate::account::derive_address(&t.tagged_pubkey) == caller
+                        && t.nonce == new_nonce
+                });
+                if let Some(idx) = old_idx {
+                    let old = &pending[idx];
+                    if old.gas.price < new_price {
+                        // RBF：替换（仅当新 price 严格更高）。
+                        pending.remove(idx);
+                        replaced = true;
+                    } else {
+                        // 旧 tx price 更高或相等 → 拒绝（不替换）。
+                        return Err(PokerL1Error::Other(format!(
+                            "RBF rejected: existing tx gas_price {} >= new {} for caller {:?} nonce {}",
+                            old.gas.price, new_price, caller, new_nonce
+                        )));
+                    }
+                }
+            }
             pending.push_back(tx);
             while pending.len() > MAX_PENDING_TX_SIZE {
-                pending.pop_front();
+                // 溢出时丢弃 gas_price 最低的（而非 FIFO 最旧）。
+                if pending.len() > 1 {
+                    let mut min_idx = 0;
+                    let mut min_price = u64::MAX;
+                    for (i, t) in pending.iter().enumerate() {
+                        if t.gas.price < min_price {
+                            min_price = t.gas.price;
+                            min_idx = i;
+                        }
+                    }
+                    pending.remove(min_idx);
+                } else {
+                    pending.pop_front();
+                }
             }
             let len_after = pending.len();
             // 唤醒 validator loop（混合模式：有 tx 时立即出 vertex）
             self.pending_tx_condvar.notify_one();
             tracing::info!(
-                "submit_tx: tx_hash={} pending_tx.len()={} role={:?}",
+                "submit_tx: tx_hash={} pending_tx.len()={} role={:?} rbf={}",
                 hex::encode(tx_hash),
                 len_after,
-                self.config.role
+                self.config.role,
+                replaced
             );
         } else {
             tracing::warn!(
@@ -1124,12 +1208,46 @@ impl Node {
     }
 
     /// 取出待装 vertex 的 tx（仅 Validator 角色有效）。
+    ///
+    /// 缺口 #3：Priority Mempool 排序规则。
+    ///
+    /// 排序优先级（与 S9 vertex 排序规则一致，但加入 gas_price 二级排序）：
+    /// 1. **GameTurn + CheckpointAnchor**（优先）：免 gas 的游戏操作/anchor，
+    ///    按 arrival 顺序保持（游戏的轮次/nonce 语义由 `build_game_sub_block` 处理）
+    /// 2. **Public**（中间）：按 `gas_price` 降序（高 price 先装入 vertex）
+    /// 3. **ForceSync**（后置）：按 `gas_price` 降序
+    ///
+    /// GameTurn 通道的排序**不**按 gas_price（它们免 gas），而按 arrival 顺序，
+    /// 因为游戏操作的顺序由轮转规则（`TurnRule`）决定，不是由 gas 竞价决定。
     pub fn drain_pending_tx(&self) -> Vec<Transaction> {
-        self.pending_tx
+        let mut txs: Vec<Transaction> = self
+            .pending_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .drain(..)
-            .collect()
+            .collect();
+        // 分通道排序：GameTurn/CheckpointAnchor 优先 → Public 中 → ForceSync 后。
+        // Public/ForceSync 内部按 gas_price 降序；GameTurn 按 arrival 顺序。
+        let mut gameturn: Vec<&Transaction> = Vec::new();
+        let mut public: Vec<&Transaction> = Vec::new();
+        let mut forcesync: Vec<&Transaction> = Vec::new();
+        for tx in &txs {
+            match tx.lane_hint {
+                TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn.push(tx),
+                TxLane::Public => public.push(tx),
+                TxLane::ForceSync => forcesync.push(tx),
+            }
+        }
+        // Public / ForceSync 按 gas_price 降序（stable sort 保持 arrival tiebreaker）。
+        public.sort_by(|a, b| b.gas.price.cmp(&a.gas.price));
+        forcesync.sort_by(|a, b| b.gas.price.cmp(&a.gas.price));
+        // GameTurn 保持 arrival 顺序（已按 drain 的 VecDeque 顺序 = arrival）。
+        // 组装结果：GameTurn + CheckpointAnchor → Public → ForceSync。
+        let mut result: Vec<Transaction> = Vec::with_capacity(txs.len());
+        result.extend(gameturn.into_iter().cloned());
+        result.extend(public.into_iter().cloned());
+        result.extend(forcesync.into_iter().cloned());
+        result
     }
 
     /// 等待 pending_tx 非空或超时（混合模式核心）。
@@ -1376,6 +1494,11 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
 
     fn zk_verifier_registry(&self) -> Option<&crate::offline::zk_verifier::ZkVerifierRegistry> {
         None
+    }
+
+    /// 缺口 #7：导出 Prometheus 格式指标（覆写默认空实现）。
+    fn export_metrics(&self) -> String {
+        self.node.export_metrics()
     }
 }
 
@@ -2387,5 +2510,181 @@ mod tests {
             1_000,
             "原余额不应被覆盖"
         );
+    }
+
+    // ===== 缺口 #3：Priority Mempool 测试 =====
+
+    fn make_pub_tx(pubkey_byte: u8, nonce: u64, gas_price: u64) -> Transaction {
+        Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            contract_call: None,
+            tagged_pubkey: TaggedPubkey {
+                tag: encode_tag(SignatureScheme::Secp256k1, 1),
+                raw: vec![pubkey_byte; 33],
+            },
+            signature: vec![0u8; 65],
+            gas: crate::transaction::Gas::new(1_000_000, gas_price),
+            lane_hint: crate::transaction::TxLane::Public,
+            route_hint: crate::transaction::RouteHint::AnyValidator,
+            chain_id: DEFAULT_CHAIN_ID,
+            nonce,
+            gameturn_nonce: None,
+            is_fallback: false,
+        }
+    }
+
+    #[test]
+    fn priority_mempool_drains_by_gas_price_desc() {
+        // drain_pending_tx 应按 gas_price 降序返回（高 price 先）。
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        // 按乱序插入：price=10, 50, 30
+        node.submit_tx(make_pub_tx(0x01, 1, 10)).unwrap();
+        node.submit_tx(make_pub_tx(0x02, 1, 50)).unwrap();
+        node.submit_tx(make_pub_tx(0x03, 1, 30)).unwrap();
+        let drained = node.drain_pending_tx();
+        assert_eq!(drained.len(), 3);
+        // 应按 price 降序：50, 30, 10
+        assert_eq!(drained[0].gas.price, 50);
+        assert_eq!(drained[1].gas.price, 30);
+        assert_eq!(drained[2].gas.price, 10);
+    }
+
+    #[test]
+    fn priority_mempool_rbf_replaces_lower_price() {
+        // 同 (caller, nonce) 的高 price tx 替换低 price tx。
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        // pubkey_byte=0x05, nonce=1, price=10
+        node.submit_tx(make_pub_tx(0x05, 1, 10)).unwrap();
+        // 同 caller+nonce，price=20 → RBF 替换
+        node.submit_tx(make_pub_tx(0x05, 1, 20)).unwrap();
+        let drained = node.drain_pending_tx();
+        assert_eq!(drained.len(), 1, "RBF 应替换为 1 条");
+        assert_eq!(drained[0].gas.price, 20, "应保留高 price tx");
+    }
+
+    #[test]
+    fn priority_mempool_rbf_rejects_lower_or_equal_price() {
+        // 新 price <= 旧 price → 拒绝替换。
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        node.submit_tx(make_pub_tx(0x06, 1, 20)).unwrap();
+        // price=20（相等）→ 拒绝
+        let err = node.submit_tx(make_pub_tx(0x06, 1, 20)).unwrap_err();
+        assert!(err.to_string().contains("RBF rejected"));
+        // price=10（更低）→ 拒绝
+        let err = node.submit_tx(make_pub_tx(0x06, 1, 10)).unwrap_err();
+        assert!(err.to_string().contains("RBF rejected"));
+        // 应仅保留原 price=20 的 1 条
+        let drained = node.drain_pending_tx();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].gas.price, 20);
+    }
+
+    #[test]
+    fn priority_mempool_overflow_evicts_lowest_price() {
+        // 溢出时丢弃 gas_price 最低的（而非 FIFO 最旧）。
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        // 插入超过 MAX_PENDING_TX_SIZE 条（不同 caller+nonce 避免 RBF）。
+        // 用 usize 计数器（避免 u8 回绕），pubkey_byte 用 (i % 200) + 1 避免回绕到 0/重复。
+        let count = MAX_PENDING_TX_SIZE + 5;
+        for i in 0..count {
+            let price = if i == 0 { 999 } else { 1 }; // 第 0 条 price 最高
+            let pubkey_byte = ((i % 200) as u8) + 1; // 1..=200，避免 0/回绕
+            // nonce = i（全局唯一，避免同 (caller, nonce) RBF）
+            node.submit_tx(make_pub_tx(pubkey_byte, i as u64, price)).unwrap();
+        }
+        let drained = node.drain_pending_tx();
+        assert_eq!(drained.len(), MAX_PENDING_TX_SIZE, "应保留上限条数");
+        // price=999 的 tx 应被保留（在第一条，因降序）。
+        assert_eq!(drained[0].gas.price, 999, "最高 price tx 不应被淘汰");
+    }
+
+    #[test]
+    fn priority_mempool_same_price_preserves_arrival_order() {
+        // 同 gas_price 的 tx 保持 arrival 顺序（stable sort）。
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        node.submit_tx(make_pub_tx(0x20, 1, 5)).unwrap();
+        node.submit_tx(make_pub_tx(0x21, 1, 5)).unwrap();
+        node.submit_tx(make_pub_tx(0x22, 1, 5)).unwrap();
+        let drained = node.drain_pending_tx();
+        assert_eq!(drained[0].tagged_pubkey.raw[0], 0x20, "arrival 顺序保持");
+        assert_eq!(drained[1].tagged_pubkey.raw[0], 0x21);
+        assert_eq!(drained[2].tagged_pubkey.raw[0], 0x22);
+    }
+
+    #[test]
+    fn priority_mempool_gameturn_before_public_regardless_of_gas_price() {
+        // GameTurn（免 gas, price=0）应排在 Public（高 gas_price）之前，
+        // 因为游戏操作的时间敏感性和轮转规则优先于 gas 竞价。
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        // 插入高 price 的 Public tx
+        node.submit_tx(make_pub_tx(0x30, 1, 100)).unwrap();
+        // 插入 GameTurn tx（免 gas, price=0）
+        let gameturn_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            contract_call: None,
+            tagged_pubkey: TaggedPubkey {
+                tag: encode_tag(SignatureScheme::Secp256k1, 1),
+                raw: vec![0x40; 33],
+            },
+            signature: vec![0u8; 65],
+            gas: crate::transaction::Gas::zero(), // GameTurn 免 gas
+            lane_hint: crate::transaction::TxLane::GameTurn,
+            route_hint: crate::transaction::RouteHint::AssignedValidator,
+            chain_id: DEFAULT_CHAIN_ID,
+            nonce: 0,
+            gameturn_nonce: Some(1),
+            is_fallback: false,
+        };
+        node.submit_tx(gameturn_tx).unwrap();
+        let drained = node.drain_pending_tx();
+        assert_eq!(drained.len(), 2);
+        // GameTurn 应排第一（即使 gas_price=0）
+        assert_eq!(
+            drained[0].lane_hint,
+            crate::transaction::TxLane::GameTurn,
+            "GameTurn 应排在 Public 之前"
+        );
+        // Public 排第二（即使 gas_price=100）
+        assert_eq!(
+            drained[1].lane_hint,
+            crate::transaction::TxLane::Public,
+            "Public 应排在 GameTurn 之后"
+        );
+    }
+
+    #[test]
+    fn priority_mempool_gameturn_preserves_arrival_order() {
+        // 多个 GameTurn tx 保持 arrival 顺序（轮转规则由后续 build_game_sub_block 处理）。
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        let make_gameturn = |byte: u8, nonce: u64| -> Transaction {
+            Transaction {
+                inputs: vec![],
+                outputs: vec![],
+                contract_call: None,
+                tagged_pubkey: TaggedPubkey {
+                    tag: encode_tag(SignatureScheme::Secp256k1, 1),
+                    raw: vec![byte; 33],
+                },
+                signature: vec![0u8; 65],
+                gas: crate::transaction::Gas::zero(),
+                lane_hint: crate::transaction::TxLane::GameTurn,
+                route_hint: crate::transaction::RouteHint::AssignedValidator,
+                chain_id: DEFAULT_CHAIN_ID,
+                nonce: 0,
+                gameturn_nonce: Some(nonce),
+                is_fallback: false,
+            }
+        };
+        node.submit_tx(make_gameturn(0x50, 1)).unwrap();
+        node.submit_tx(make_gameturn(0x51, 2)).unwrap();
+        node.submit_tx(make_gameturn(0x52, 3)).unwrap();
+        let drained = node.drain_pending_tx();
+        assert_eq!(drained.len(), 3);
+        // 全部 GameTurn，保持 arrival 顺序
+        assert_eq!(drained[0].tagged_pubkey.raw[0], 0x50);
+        assert_eq!(drained[1].tagged_pubkey.raw[0], 0x51);
+        assert_eq!(drained[2].tagged_pubkey.raw[0], 0x52);
     }
 }

@@ -15,6 +15,8 @@
 
 /// Bullshark 共识与 block 投影（Task 9）。
 pub mod bullshark;
+/// 检查点与归档（缺口 #9）。
+pub mod checkpoint;
 /// Commit certificate 签名验证（P05-H-source）。
 pub mod cert_verification;
 /// 真实 ECVRF-secp256k1-SHA256-TAI prover / verifier（缺口 #2 — IMPL-SEC-2）。

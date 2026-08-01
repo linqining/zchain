@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::consensus::DagCommitCertificate;
 use crate::transaction::Transaction;
+use crate::error::{PokerL1Error, PokerL1Result};
 use crate::{BlockHeight, Hash, TimestampMs};
 
 /// 签名域分隔前缀。
@@ -173,6 +174,50 @@ pub fn compute_tx_merkle_root(txs: &[Transaction]) -> Hash {
         smt.upsert(key, &tx_hash);
     }
     smt.root()
+}
+
+/// 轻客户端交易包含性验证（缺口 #6：Light Client Protocol）。
+///
+/// 验证某 tx_hash 是否包含在给定 Merkle root 对应的 tx 集合中。
+/// 轻客户端无需下载完整 block body，仅凭 `(tx_hash, merkle_proof, expected_root)` 即可验证。
+pub fn verify_tx_inclusion(
+    tx_hash: &Hash,
+    merkle_proof: &crate::object_model::MerklePath,
+    expected_root: &Hash,
+) -> PokerL1Result<()> {
+    let mut key_h = Blake2bVar::new(32).expect("32 <= 64");
+    key_h.update(tx_hash);
+    let mut key = [0u8; 32];
+    key_h.finalize_variable(&mut key).expect("32 <= 64");
+    if crate::object_model::SparseMerkleTree::verify(expected_root, &key, Some(tx_hash), merkle_proof) {
+        Ok(())
+    } else {
+        Err(PokerL1Error::Other("tx inclusion proof verification failed".to_string()))
+    }
+}
+
+/// 生成交易包含性证明（供全节点为轻客户端构造证明）。返回 `(proof, root)`。
+#[must_use]
+pub fn prove_tx_inclusion(
+    txs: &[Transaction],
+    target_tx_hash: &Hash,
+) -> Option<(crate::object_model::MerklePath, Hash)> {
+    let mut smt = crate::object_model::SparseMerkleTree::new();
+    for tx in txs {
+        let tx_hash = tx.tx_hash();
+        let mut key_h = Blake2bVar::new(32).expect("32 <= 64");
+        key_h.update(&tx_hash);
+        let mut key = [0u8; 32];
+        key_h.finalize_variable(&mut key).expect("32 <= 64");
+        smt.upsert(key, &tx_hash);
+    }
+    let root = smt.root();
+    let mut key_h = Blake2bVar::new(32).expect("32 <= 64");
+    key_h.update(target_tx_hash);
+    let mut key = [0u8; 32];
+    key_h.finalize_variable(&mut key).expect("32 <= 64");
+    let proof = smt.prove(&key);
+    Some((proof, root))
 }
 
 /// Genesis block 辅助函数（Phase 1 用于测试与初始化）。
@@ -386,6 +431,22 @@ mod tests {
         let root1 = compute_tx_merkle_root(&[tx1.clone(), tx2.clone()]);
         let root2 = compute_tx_merkle_root(&[tx2, tx1]);
         assert_eq!(root1, root2, "Sparse Merkle Tree 的 root 与插入顺序无关");
+    }
+
+    #[test]
+    fn light_client_tx_inclusion_prove_and_verify() {
+        // 缺口 #6：轻客户端 tx 包含性证明。
+        let tx1 = dummy_tx(1);
+        let tx2 = dummy_tx(2);
+        let txs = vec![tx1.clone(), tx2.clone()];
+        let target_hash = tx1.tx_hash();
+        // 生成证明
+        let (proof, root) = prove_tx_inclusion(&txs, &target_hash).expect("应能生成证明");
+        // 验证：target tx 确实包含
+        verify_tx_inclusion(&target_hash, &proof, &root).expect("包含性验证应通过");
+        // 验证：不存在的 tx → 失败
+        let fake_hash = [0xFF; 32];
+        assert!(verify_tx_inclusion(&fake_hash, &proof, &root).is_err(), "不存在的 tx 应验证失败");
     }
 
     #[test]
