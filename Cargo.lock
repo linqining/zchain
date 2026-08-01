@@ -2817,6 +2817,7 @@ dependencies = [
  "poker_l1",
  "poker_protocol",
  "poker_texas_air",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

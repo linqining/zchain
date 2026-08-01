@@ -32,6 +32,8 @@
 //! - **证明管线复用 poker_texas_air**：服务只负责编排，不实现 AIR。
 
 pub mod contracts;
+pub mod crypto_driver;
+pub mod full_hand;
 pub mod plugin;
 pub mod runner;
 pub mod server;
@@ -51,6 +53,14 @@ pub enum ServiceError {
     /// 编排错误（阶段顺序、状态前置条件不满足等）。
     #[error("runner error: {0}")]
     Runner(String),
+}
+
+/// crypto 驱动错误（shuffle / reveal token proof 生成失败等）。
+#[derive(Debug, thiserror::Error)]
+pub enum CryptoDriverError {
+    /// shuffle proof 生成失败（输入含 identity c2 等不合法状态）。
+    #[error("shuffle prove failed: {0}")]
+    ShuffleProve(String),
 }
 
 /// 服务结果别名。

@@ -447,6 +447,16 @@ impl VerifiedChainBuilder {
         Ok(())
     }
 
+    /// Clear accumulated receipts to begin a new chain segment.
+    ///
+    /// Used when crossing a `hand_id` boundary (e.g. after `start_hand` advances
+    /// the hand id): the single-hand continuity invariant in
+    /// [`validate_adjacent_receipts`] forbids receipts from two different hands in
+    /// one chain, so a driver that spans multiple hands must start a fresh segment.
+    pub(crate) fn clear_receipts(&mut self) {
+        self.receipts.clear();
+    }
+
     /// Snapshot the currently accumulated host-verified chain.
     ///
     /// # Errors

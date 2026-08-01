@@ -317,6 +317,21 @@ impl Orchestrator {
         &self.proven
     }
 
+    /// 开始一条新的已验证 receipt 链片段。
+    ///
+    /// 已验证 receipt 链按设计以单局 `hand_id` 为边界（相邻 receipt 的 `hand_id`
+    /// 必须相同，见 `verified_chain::validate_adjacent_receipts`）。当跨局推进
+    /// （如 `start_hand` 使 `hand_id` 递增）时，旧的局内链无法继续承接新 receipt，
+    /// 调用本方法清空 `verified_chain_builder` 的 receipts，使新一局从空链重新累积。
+    ///
+    /// 已证明任务的 `proven` 摘要历史**不清除**（聚合入口仍可见全部任务）；
+    /// 仅 `verify_chain` / `verified_chain` 反映当前局的连续性。
+    ///
+    /// 生产语义不变：链仍只做未外部锚定的相邻连续性检查，不声称 block inclusion。
+    pub fn start_new_chain_segment(&mut self) {
+        self.verified_chain_builder.clear_receipts();
+    }
+
     // ===== 各方法的 trace 构造 + prove + verify =====
 
     fn prove_create_table(

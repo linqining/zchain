@@ -55,6 +55,29 @@ impl TexasPokerPlugin {
         self.orchestrator.proven()
     }
 
+    /// 开始一条新的已验证 receipt 链片段。
+    ///
+    /// 跨局推进（`start_hand` 使 `hand_id` 递增）后，旧局内链无法承接新 receipt，
+    /// 调用本方法清空链 receipts，使新一局从空链重新累积（见
+    /// [`poker_texas_air::orchestrator::Orchestrator::start_new_chain_segment`]）。
+    pub fn start_new_chain_segment(&mut self) {
+        self.orchestrator.start_new_chain_segment();
+    }
+
+    /// 注册聚合公钥（`aggregated_pk`）到桌台 deck_state。
+    ///
+    /// 真实协议中每个玩家经 `join_and_shuffle` 入座时会把自己的 pk 累加进
+    /// `deck_state.aggregated_pk`；该值是后续 `submit_shuffle_v2` 的 shuffle proof
+    /// 绑定的共享公钥（proof 把它作为广义 Schnorr 的基点之一，禁止 identity）。
+    ///
+    /// 本驱动用 `join_table`（不设 aggregated_pk）入座以便 `start_hand` 后能洗牌，
+    /// 故需在 `start_hand` 前显式注册聚合 pk（= Σ player pk），使 shuffle proof
+    /// 可生成。仅在 WAITING 态、对局未开始时调用；`start_hand` 会保留该值
+    /// （`set_initial_encrypted_deck` 不清 aggregated_pk）。
+    pub fn register_aggregated_pk(&mut self, pk: poker_protocol::crypto::ECPoint) {
+        self.table.deck_state.aggregated_pk = Some(pk);
+    }
+
     /// 尝试 descriptor-only Aggregator 入口。
     ///
     /// 当前生产入口应返回 `UntrustedAggregationDisabled`；此方法存在是为了让服务

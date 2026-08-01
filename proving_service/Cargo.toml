@@ -23,8 +23,12 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rand = { workspace = true }
 # HTTP 服务（axum 框架已在 workspace 层声明）
 axum = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+default = []
