@@ -114,6 +114,10 @@ pub struct ChildDescriptor {
     pub call_seq: u32,
     /// 子节点的方法种类。
     pub method_kind: MethodKind,
+    /// 子节点的 recursive proof（可选；递归聚合模式下携带 L2 recursive proof）。
+    /// 当存在时，aggregator 可递归验证该 proof 的有效性。
+    /// `None` = 仅 descriptor 模式（host-attested，非 recursive）。
+    pub recursive_proof: Option<poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof>,
 }
 
 /// 把子节点描述符列表 mix 进 Fiat-Shamir channel（prover/verifier 共用，顺序固定）。
@@ -411,6 +415,7 @@ pub fn build_binary_tree(
                 post_state_root: right.post_state_root,
                 call_seq: left.call_seq, // 父节点用左子的 call_seq 作为起始
                 method_kind: left.method_kind, // 聚合节点不绑定单一方法
+                recursive_proof: None,
             };
             next.push(parent);
             i += 2;
@@ -453,6 +458,7 @@ mod tests {
             post_state_root: root,
             call_seq: seq,
             method_kind: kind,
+            recursive_proof: None,
         }
     }
 

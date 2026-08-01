@@ -348,6 +348,11 @@ pub struct Node {
     bridge_registry_store: Option<Arc<BridgeRegistryStore>>,
     /// 指标收集器（缺口 #7：Prometheus 风格指标导出）。
     metrics: Arc<crate::metrics::MetricsCollector>,
+    /// ZK verifier registry（链上 zk_verify 启用）。
+    zk_verifier: Option<crate::offline::zk_verifier::ZkVerifierRegistry>,
+    /// Light client header 缓存（缺口：subscribe_light_headers 完整实现）。
+    /// validator 节点在 put_block 时生成并签名；light/full 节点可订阅获取。
+    light_headers: std::sync::Mutex<Vec<crate::network::LightClientHeader>>,
 }
 
 /// 构造默认预编译合约注册表并注册内置预编译合约。
@@ -396,6 +401,9 @@ impl Node {
         let bridge_registry_store = BridgeRegistryStore::open(&bridge_path)?;
         let validator_set = build_genesis_validator_set(config.genesis_validators.clone());
         let precompile_registry = build_default_precompile_registry();
+        // 链上 zk_verify 启用：注册 Stwo verifier（Stub 模式默认，治理可切 Production）。
+        let mut zk_reg = crate::offline::zk_verifier::ZkVerifierRegistry::new();
+        crate::offline::zk_verifier::register_stwo_verifier(&mut zk_reg);
         Ok(Self {
             config,
             block_store,
@@ -409,6 +417,8 @@ impl Node {
             precompile_registry,
             bridge_registry_store: Some(Arc::new(bridge_registry_store)),
             metrics: Arc::new(crate::metrics::MetricsCollector::new()),
+            zk_verifier: Some(zk_reg),
+            light_headers: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -470,6 +480,8 @@ impl Node {
             // 需桥的测试可用 [`Node::with_bridge`] 显式注入。
             bridge_registry_store: None,
             metrics: Arc::new(crate::metrics::MetricsCollector::new()),
+            zk_verifier: None,
+            light_headers: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -865,13 +877,105 @@ impl Node {
         self.validate_block(block)?;
         let hash = self.block_store.put(block, self.config.chain_id)?;
         // 缺口 #4：State Pruning 接入出块路径。
-        // Full/Validator 节点在 put_block 后自动裁剪旧数据；Archive 节点保留全量。
         if self.config.role.should_prune() {
             if let Err(e) = self.run_pruning(block.header.height) {
                 tracing::warn!("run_pruning 失败（不阻断出块）：{e}");
             }
         }
+        // Light client header 多签背书：validator 节点用自己的 secp256k1 key
+        // 对 block header 签名，生成 LightClientHeader 并缓存供 light client 订阅。
+        if let Some(vkey) = &self.config.validator_key {
+            self.sign_and_store_light_header(block, vkey);
+        }
         Ok(hash)
+    }
+
+    /// 为 block 生成 validator 签名的 LightClientHeader（light client 协议核心）。
+    ///
+    /// validator 用自己的 secp256k1 secret key 对 `header_bytes` 的 blake2b_256 哈希签名，
+    /// 生成 `ValidatorSig`（tagged_pubkey + 65B 签名），存入 `LightClientHeader.signatures`。
+    /// 多个 validator 各自签名后，light client 收集 ≥2/3 签名即可验证 header 真实性。
+    fn sign_and_store_light_header(&self, block: &Block, vkey: &ValidatorKey) {
+        use blake2::digest::{Update, VariableOutput};
+        use secp256k1::{Secp256k1, SecretKey, Message};
+        let header_bytes = borsh::to_vec(&block.header).unwrap_or_default();
+        // 签名对象 = blake2b_256(header_bytes)
+        let mut hasher = blake2::Blake2bVar::new(32).expect("32 <= 64");
+        Update::update(&mut hasher, &header_bytes);
+        let mut msg_hash = [0u8; 32];
+        hasher.finalize_variable(&mut msg_hash).expect("32 <= 64");
+        // secp256k1 recoverable 签名
+        let secp = Secp256k1::new();
+        let secret = match SecretKey::from_slice(&vkey.secret_key_bytes) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let msg = Message::from_digest(msg_hash);
+        let sig = secp.sign_ecdsa_recoverable(&msg, &secret);
+        let (recovery_id, compact) = sig.serialize_compact();
+        let mut full_sig = compact.to_vec();
+        full_sig.push(recovery_id.to_i32() as u8);
+        let validator_sig = crate::network::ValidatorSig {
+            validator: vkey.tagged_pubkey.clone(),
+            signature: full_sig,
+        };
+        // 尝试合并到已有的同 header LightClientHeader，或新建。
+        let mut headers = self.light_headers.lock().unwrap_or_else(|e| e.into_inner());
+        // 查找是否已有同 header_bytes 的 header（多 validator 合并签名）。
+        if let Some(existing) = headers
+            .iter_mut()
+            .find(|h| h.header_bytes == header_bytes)
+        {
+            // 去重：同一 validator 不重复签名。
+            if !existing
+                .signatures
+                .iter()
+                .any(|s| s.validator == validator_sig.validator)
+            {
+                existing.signatures.push(validator_sig);
+            }
+        } else {
+            // 新建 LightClientHeader。
+            let lch = crate::network::LightClientHeader {
+                header_bytes,
+                signatures: vec![validator_sig],
+                signer_bitmap: vec![],
+            };
+            headers.push(lch);
+            // 限制缓存大小（保留最近 1000 个 header）。
+            if headers.len() > 1000 {
+                headers.remove(0);
+            }
+        }
+    }
+
+    /// 获取缓存的 LightClientHeader 列表（供 subscribe_light_headers RPC/P2P 使用）。
+    #[must_use]
+    pub fn get_light_headers(&self) -> Vec<crate::network::LightClientHeader> {
+        self.light_headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 合并 peer 发来的 LightClientHeader 签名（多 validator 签名合并）。
+    pub fn merge_light_header(&self, header: crate::network::LightClientHeader) {
+        let mut headers = self.light_headers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = headers
+            .iter_mut()
+            .find(|h| h.header_bytes == header.header_bytes)
+        {
+            for sig in &header.signatures {
+                if !existing.signatures.iter().any(|s| s.validator == sig.validator) {
+                    existing.signatures.push(sig.clone());
+                }
+            }
+        } else {
+            headers.push(header);
+            if headers.len() > 1000 {
+                headers.remove(0);
+            }
+        }
     }
 
     /// 执行状态裁剪（缺口 #4）。
@@ -1014,6 +1118,13 @@ impl Node {
     #[must_use]
     pub fn precompile_registry(&self) -> Arc<PrecompileRegistry> {
         Arc::clone(&self.precompile_registry)
+    }
+
+    /// 获取 ZK verifier registry 的 clone（链上 zk_verify 启用）。
+    /// 供 executor 构造 ExecutionEnvironment 时注入，使 VM 内 `zk_verify` syscall 可用。
+    #[must_use]
+    pub fn zk_verifier_registry_clone(&self) -> Option<crate::offline::zk_verifier::ZkVerifierRegistry> {
+        self.zk_verifier.clone()
     }
 
     /// 获取指标收集器引用（缺口 #7）。
@@ -1493,7 +1604,7 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
     }
 
     fn zk_verifier_registry(&self) -> Option<&crate::offline::zk_verifier::ZkVerifierRegistry> {
-        None
+        self.node.zk_verifier.as_ref()
     }
 
     /// 缺口 #7：导出 Prometheus 格式指标（覆写默认空实现）。
@@ -1505,6 +1616,7 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::{Block, BlockHeader};
     use crate::DEFAULT_CHAIN_ID;
     use crate::object_model::{Object, ObjectID, Ownership};
     use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
@@ -2686,5 +2798,98 @@ mod tests {
         assert_eq!(drained[0].tagged_pubkey.raw[0], 0x50);
         assert_eq!(drained[1].tagged_pubkey.raw[0], 0x51);
         assert_eq!(drained[2].tagged_pubkey.raw[0], 0x52);
+    }
+
+    #[test]
+    fn light_header_generated_with_validator_signature() {
+        // validator 节点 put_block 后应生成带 secp256k1 签名的 LightClientHeader。
+        let vkey = ValidatorKey::from_secret_bytes([0x42; 32]).unwrap();
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Validator,
+            DEFAULT_CHAIN_ID,
+            vec![],
+        )
+        .unwrap();
+        // 手动注入 validator_key（open_inmemory 默认无 key）。
+        // 通过直接调用 sign_and_store_light_header 测试。
+        let block = Block::new(
+            BlockHeader {
+                height: 1,
+                timestamp_ms: 1000,
+                prev_hash: [0u8; 32],
+                state_root: [0u8; 32],
+                public_tx_root: [0u8; 32],
+                gameturn_tx_root: [0u8; 32],
+                dag_commit_certificate: crate::consensus::DagCommitCertificate {
+                    epoch: 1,
+                    commit_round: 1,
+                    prev_commit_hash: [0u8; 32],
+                    vertex_hash_list: vec![],
+                    round_attendance_bitmap: vec![0xFF],
+                    state_root: [0u8; 32],
+                    public_tx_root: [0u8; 32],
+                    gameturn_tx_root: [0u8; 32],
+                    signature_list: vec![],
+                    signer_bitmap: vec![0x00],
+                },
+            },
+            vec![],
+            vec![],
+        );
+        node.sign_and_store_light_header(&block, &vkey);
+        let headers = node.get_light_headers();
+        assert_eq!(headers.len(), 1, "应生成 1 个 LightClientHeader");
+        assert_eq!(headers[0].signatures.len(), 1, "应有 1 个 validator 签名");
+        assert_eq!(headers[0].signatures[0].validator, vkey.tagged_pubkey);
+        assert_eq!(headers[0].signatures[0].signature.len(), 65, "secp256k1 签名 65B");
+    }
+
+    #[test]
+    fn light_header_merges_peer_signatures() {
+        // merge_light_header 应合并不同 validator 的签名到同一 header。
+        let vkey1 = ValidatorKey::from_secret_bytes([0x42; 32]).unwrap();
+        let vkey2 = ValidatorKey::from_secret_bytes([0x43; 32]).unwrap();
+        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
+        let block = Block::new(
+            BlockHeader {
+                height: 1,
+                timestamp_ms: 1000,
+                prev_hash: [0u8; 32],
+                state_root: [0u8; 32],
+                public_tx_root: [0u8; 32],
+                gameturn_tx_root: [0u8; 32],
+                dag_commit_certificate: crate::consensus::DagCommitCertificate {
+                    epoch: 1,
+                    commit_round: 1,
+                    prev_commit_hash: [0u8; 32],
+                    vertex_hash_list: vec![],
+                    round_attendance_bitmap: vec![0xFF],
+                    state_root: [0u8; 32],
+                    public_tx_root: [0u8; 32],
+                    gameturn_tx_root: [0u8; 32],
+                    signature_list: vec![],
+                    signer_bitmap: vec![0x00],
+                },
+            },
+            vec![],
+            vec![],
+        );
+        // validator 1 签名
+        node.sign_and_store_light_header(&block, &vkey1);
+        // validator 2 签名（通过 merge）
+        let header2 = {
+            let h = node.get_light_headers();
+            let mut h2 = h[0].clone();
+            h2.signatures.clear();
+            h2.signatures.push(crate::network::ValidatorSig {
+                validator: vkey2.tagged_pubkey.clone(),
+                signature: vec![0u8; 65],
+            });
+            h2
+        };
+        node.merge_light_header(header2);
+        let headers = node.get_light_headers();
+        assert_eq!(headers.len(), 1, "仍为 1 个 header");
+        assert_eq!(headers[0].signatures.len(), 2, "应有 2 个 validator 签名");
     }
 }

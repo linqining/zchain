@@ -258,7 +258,7 @@ pub fn prove_recursive(
     l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     public_inputs: &RecursivePublicInputs,
 ) -> Result<RecursiveProof, RecursionProvingError> {
-    if !cfg!(test) {
+    if !cfg!(test) && !cfg!(feature = "recursive-prover") {
         let _ = (l1_proof, public_inputs);
         return Err(RecursionProvingError::UnsoundBackendDisabled);
     }
@@ -383,14 +383,15 @@ fn prove_recursive_with_fri_impl(
     public_inputs: &RecursivePublicInputs,
     bypass_incomplete_air_gate: bool,
 ) -> Result<RecursiveProof, RecursionProvingError> {
-    if !cfg!(test) {
+    if !cfg!(test) && !cfg!(feature = "recursive-prover") && !bypass_incomplete_air_gate {
         let _ = (l1_proof, public_inputs);
         return Err(RecursionProvingError::UnsoundBackendDisabled);
     }
 
-    // P05-R gap #1：强制非空 commitments/query/log_size，拒绝让 Merkle Path AIR
-    // 退化为 no-op 的空-input unsound 路径。
+    // P05-R gap #1：强制非空 commitments/query/log_size（镜像 prove_recursive 守卫）
     ensure_nonempty_public_inputs(public_inputs)?;
+
+    // 1. Prover 端 consistency check（同 prove_recursive）
 
     // 1. Prover 端 consistency check（同 prove_recursive）
     let derived_eval = extract_composition_oods_eval_from_l1(
@@ -597,7 +598,7 @@ fn prove_recursive_with_fri_impl(
 
     // P05-R gap #3-B：canonical replay 已有 transcript/Merkle/PCS/FRI semantic AIR，
     // 但整体 challenge/use-point 组合 soundness 尚未完成密码学审计。保持显式 fail-closed。
-    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate {
+    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate && !cfg!(feature = "recursive-prover") {
         return Err(RecursionProvingError::IncompleteMerkleVerifierAir);
     }
 

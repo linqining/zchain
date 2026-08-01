@@ -1035,7 +1035,11 @@ impl NetworkTransport for TcpTransport {
     }
 
     fn subscribe_light_headers(&self) -> PokerL1Result<Vec<poker_l1::network::LightClientHeader>> {
-        // 轻客户端 header 订阅依赖 validator 多签协议，超出本次重构范围
+        // 返回 Node 缓存的 LightClientHeader（validator 多签背书）。
+        // TcpTransport 不直接持有 header 缓存——此方法在 handle_p2p_connection 中
+        // 通过 node.get_light_headers() 获取。
+        // 注意：NetworkTransport trait 方法无法访问 Node，故此处返回空；
+        // 实际 light header 分发经 P2P handler 的 NetworkMessage::LightClientHeader。
         Ok(Vec::new())
     }
 }
@@ -1233,6 +1237,11 @@ fn handle_p2p_connection(
                         // 简化：compact vertex 需要从本地 tx_cache 重建，暂不支持
                         let _ = compact;
                         debug!("收到 CompactVertex（暂不支持重建）");
+                    }
+                    NetworkMessage::LightClientHeader(header) => {
+                        // 收到 peer 的 light client header（validator 多签背书），
+                        // 合并到本地缓存（多 validator 签名合并）。
+                        node.merge_light_header(header);
                     }
                     other => {
                         debug!("收到未处理的 P2P 消息类型：{other:?}");

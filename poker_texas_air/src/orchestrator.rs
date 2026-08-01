@@ -119,6 +119,7 @@ impl ProvenTask {
             post_state_root: state_root_to_m31_limbs(self.post_state_root),
             call_seq: self.call_seq,
             method_kind: self.method_kind,
+            recursive_proof: None,
         }
     }
 }

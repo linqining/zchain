@@ -38,6 +38,22 @@ pub fn verify_aggregator(_proof: AggregatorProof) -> TexasAirResult<()> {
     Err(TexasAirError::UntrustedAggregationDisabled)
 }
 
+/// 验证 host-attested 聚合证明（非 recursive）。
+///
+/// 验证 STARK 内部约束 + descriptor chain 连续性（Fiat-Shamir 绑定）。
+/// 成功只证明 descriptor chain 的 state_root 连续性满足 AIR 约束，
+/// **不证明**子 proof 的密码学有效性——后者由 host-verify 回执保证。
+///
+/// **信任边界**：验证方须信任 orchestrator 的 host-verify 回执（O(N) 原生验证）。
+/// 这不是 succinct recursive proof。
+///
+/// # Errors
+/// - `TexasAirError::ConstraintUnsatisfied` — AIR 约束不满足
+/// - `TexasAirError::StwoProverError` — Stwo verifier 内部错误
+pub fn verify_aggregator_host_attested(proof: AggregatorProof) -> TexasAirResult<()> {
+    verify_aggregator_unchecked(proof)
+}
+
 /// 验证 descriptor-only Aggregator PoC，仅供测试与审计复现。
 ///
 /// 成功只说明摘要 trace 满足当前 Aggregator AIR，不说明任何子 proof 有效。

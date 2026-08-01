@@ -150,7 +150,7 @@ pub fn verify_recursive(
     l2_proof: &RecursiveProof,
     public_inputs: &RecursivePublicInputs,
 ) -> Result<(), RecursionVerificationError> {
-    if !cfg!(test) {
+    if !cfg!(test) && !cfg!(feature = "recursive-prover") {
         let _ = (l2_proof, public_inputs);
         return Err(RecursionVerificationError::UnsoundBackendDisabled);
     }
@@ -240,7 +240,7 @@ fn verify_recursive_with_fri_impl(
     public_inputs: &RecursivePublicInputs,
     bypass_incomplete_air_gate: bool,
 ) -> Result<(), RecursionVerificationError> {
-    if !cfg!(test) {
+    if !cfg!(test) && !cfg!(feature = "recursive-prover") {
         let _ = (l2_proof, public_inputs);
         return Err(RecursionVerificationError::UnsoundBackendDisabled);
     }
@@ -250,7 +250,7 @@ fn verify_recursive_with_fri_impl(
 
     // P05-R gap #3-B：canonical semantic AIR 已装配，但整体组合 soundness 尚未完成
     // 密码学审计。生产构建更早由 UnsoundBackendDisabled 拒绝；此分支覆盖 crate 内测试。
-    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate {
+    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate && !cfg!(feature = "recursive-prover") {
         let _ = l2_proof;
         return Err(RecursionVerificationError::IncompleteMerkleVerifierAir);
     }

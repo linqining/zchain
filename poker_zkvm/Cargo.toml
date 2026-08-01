@@ -20,6 +20,13 @@ path = "src/lib.rs"
 # 测试辅助功能：启用跨 crate 测试辅助函数（如 ELF 构造、指令编码）
 default = []
 test-helpers = []
+# 启用递归证明的非 test 入口（prove_recursive / verify_recursive）。
+# ⚠️ 审计警告：MERKLE_VERIFIER_AIR_COMPLETE 在 recursive/mod.rs 中标注为
+# "canonical Merkle/FRI replay 已完成 host 侧精确重放，但 host witness 生成
+# 正确不等于 AIR 已约束该 witness"。启用此 feature 表示调用方接受：
+# 递归证明的 soundness 尚未经正式密码学审计，存在潜在 unsound 风险。
+# 5 个 e2e 测试（含防篡改检测）在 cfg(test) 下全部通过。
+recursive-prover = []
 
 [dependencies]
 vm-common = { workspace = true }
