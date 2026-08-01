@@ -3,15 +3,23 @@
 //! 模块结构按 spec.md (FROZEN 2026-06-27) 组织：
 //! - [`object_model`]：对象模型（Object / ObjectID / Ownership / ObjectStore + Sparse Merkle Tree）
 //! - [`signature`]：多曲线钱包签名（tagged pubkey / secp256k1 / ed25519）
-//! - [`account`]：账户抽象与交易安全
+//! - [`account`]：账户抽象与交易安全（持久化 AccountStore + 原生转账 + staking 结算）
 //! - [`transaction`]：交易结构
 //! - [`block`]：区块结构
-//! - [`consensus`]：DAG vertex 与 commit certificate
-//! - [`storage`]：链存储（BlockStore / ObjectStore / DagVertexStore）
-//! - [`vm`]：rBPF VM 与 syscalls（Phase 3）
+//! - [`consensus`]：DAG vertex / commit certificate / Bullshark / ECVRF / slashing
+//! - [`storage`]：链存储（BlockStore / ObjectStore / DagVertexStore / BridgeRegistryStore，RocksDB）
+//! - [`vm`]：rBPF VM 与 syscalls（合约执行 + precompile）
 //!
-//! 其他阶段模块（crypto_precompiles / offline / network / bridge / governance / node）
-//! 当前为 stub，待对应 Phase 实现。
+//! 以下模块已为实质实现（非 stub）：
+//! - [`network`]：P2P 传输抽象（NetworkTransport trait + TcpTransport + gossip / compact block relay 类型）
+//! - [`bridge`]：跨链桥（bridge_verify / wrapped-asset 铸币 / nonce 持久化）
+//! - [`governance`]：治理（proposals / timelock / quorum / 参数治理 / key rotation）
+//! - [`node`]：节点（4 角色 / NodeConfig / CLI / 集成存储）
+//! - [`executor`]：交易执行引擎（串行 + 波次化并行 + gas→proposer + 出块奖励）
+//! - [`offline`]：链下 ZK 验证器注册（Stwo / Groth16 / IPA scheme 抽象）
+//! - [`rpc`]：JSON-RPC 2.0 接口
+//! - [`sync`]：Fast/Snap 同步；[`indexer`]：链上索引/事件订阅
+//! - [`crypto_precompiles`]：BLS12-381 等密码学预编译（部分实现）
 //!
 //! # 安全说明
 //!
@@ -33,6 +41,7 @@ pub mod error;
 pub mod executor;
 pub mod governance;
 pub mod indexer;
+pub mod metrics;
 pub mod network;
 pub mod node;
 pub mod object_model;

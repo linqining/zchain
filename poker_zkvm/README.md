@@ -1,8 +1,8 @@
-# poker_zkvm — Hypernova + CCS 零知识虚拟机
+# poker_zkvm — Stwo Circle-STARK 零知识虚拟机
 
-基于 Hypernova 折叠协议与 CCS（Customizable Constraint System）的零知识虚拟机，用于 zchain OffChain 模式的状态转换验证。
+基于 Stwo（Circle-STARK + AIR + FRI on M31）的零知识虚拟机，用于 zchain OffChain 模式的状态转换验证。v2 已完全放弃 Hypernova/CCS 折叠方案，迁移至 Stwo。
 
-严格遵循 `build-hypernova-zkvm` spec v1.4（FROZEN）。
+严格遵循 `.trae/documents/hypernova_to_stwo_migration_plan_v2.md`（v2 FROZEN）。
 
 ## 架构概览
 

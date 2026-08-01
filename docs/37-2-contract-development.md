@@ -269,7 +269,7 @@ gas 计费仅适用 Public 通道 tx 与合约调用；GameTurn 通道游戏操�
 
 | scheme_id | Scheme    | Gas                              |
 |-----------|-----------|----------------------------------|
-| 1         | Hypernova | `GAS_HYPERNOVA_VERIFY = 50000`   |
+| 1         | Stwo（历史名 Hypernova） | `GAS_STWO_VERIFY = 300000`       |
 | 2         | Groth16   | `GAS_GROTH16_VERIFY = 20000`     |
 | 3         | IPA       | `GAS_IPA_VERIFY = 15000`         |
 | 其他      | fallback  | `GAS_ZK_VERIFY = 50000`          |
@@ -347,7 +347,7 @@ poker_l1 注册全部 22 个 syscall 到 rBPF syscall table（10 核心 + 1 zk_v
 
 **`zk_verify`** 参数说明：
 
-- `scheme_id`：低 32 位有效（1=Hypernova, 2=Groth16, 3=IPA）
+- `scheme_id`：低 32 位有效（1=Stwo（历史名 Hypernova）, 2=Groth16, 3=IPA）
 - `max_skip_segments = 3`（默认，SubTask 27.11）
 - `max_ack_chain_length = DEFAULT_MAX_ACK_CHAIN_LENGTH`（默认 1000）
 - proof ≤ 256KB，public_io ≤ 64KB（防 DoS）

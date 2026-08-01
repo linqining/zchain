@@ -584,7 +584,7 @@ fn test_p0_ack_chain_partial_hash_mismatch_rejected() {
     use poker_l1::signature::TaggedPubkey;
 
     let mut registry = ZkVerifierRegistry::new();
-    poker_l1::offline::zk_verifier::register_hypernova_stub_verifier(&mut registry);
+    poker_l1::offline::zk_verifier::register_stwo_verifier(&mut registry);
 
     let make_ack = |seq: u64| AckEntry {
         chain_id: DEFAULT_CHAIN_ID,

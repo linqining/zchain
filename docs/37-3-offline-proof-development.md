@@ -1,10 +1,14 @@
-# 链下证明开发文档（Hypernova / Groth16 / IPA + checkpoint 协议）
+# 链下证明开发文档（Stwo / Groth16 / IPA + checkpoint 协议）
 
 > SubTask 37.3：poker_l1 OffChain 执行模型 + ZK 证明结算开发文档
 >
-> 实现来源：`poker_l1/src/offline/`（`mod.rs` / `state.rs` / `ccs.rs` / `hypernova.rs` / `groth16.rs` / `ipa.rs` / `zk_verifier.rs` / `ack_chain.rs`）、`poker_l1/src/vm/contracts/`（`checkpoint_anchor.rs` / `force_checkin.rs` / `challenge_delta.rs` / `checkpoint_skip.rs`）
+> **v2 更新**：Hypernova/CCS 折叠方案已废弃。链下证明现基于 **Stwo Circle-STARK**（`poker_zkvm`）+ **poker_texas_air 自定义 AIR 电路**（21 method AIR + host-verified receipts），经 `proving_service` 离线服务消费。链上 `zk_verify` scheme_id=1 统一为 Stwo（`SCHEME_STWO`）。
+>
+> 实现来源：`poker_l1/src/offline/`（`mod.rs` / `state.rs` / `zk_verifier.rs` / `ack_chain.rs`）、`poker_texas_air/src/`（`prover.rs` / `verifier.rs` / `orchestrator.rs` / `airs/`）、`proving_service/src/`（`server.rs` / `runner.rs` / `contracts/texas_poker.rs`）、`poker_l1/src/vm/contracts/`（`checkpoint_anchor.rs` / `force_checkin.rs` / `challenge_delta.rs` / `checkpoint_skip.rs`）
 >
 > 规范依据：`spec.md`（FROZEN 2026-06-27）L493–525 / L527–553 / L655–669 / L697–723 / L853–857
+>
+> ⚠️ **注意**：v1 文档中的 `offline/ccs.rs` / `hypernova.rs` / `groth16.rs` / `ipa.rs` 模块已删除（见 `offline/mod.rs` 顶部说明）。CCS/Hypernova 折叠相关章节（原 §4）已废弃，当前证明路径见下文 §4-new。
 
 ---
 
@@ -69,7 +73,7 @@ zk_verifier ┘            │
 
 链下执行期间操作方每 `checkpoint_interval_blocks` 提交 `CheckpointAnchorTx`（详见 §3）。该 tx 走 `CheckpointAnchor` 通道，路由到 assigned_validator，与 GameTurn 同路由但独立 lane（不参与 turn ordering），**免 gas**，通过 gossipsub 广播防栽赃。
 
-### 2.3 offline 执行（CCS 电路 + Hypernova fold）
+### 2.3 offline 执行（Stwo 自定义电路 / host-verify）
 
 每步链下执行生成一个 CCS 电路实例，多步折叠为单个最终证明 π（详见 §4）。skip 段不参与 ack_chain（R5-M5）。
 
@@ -84,7 +88,7 @@ zk_verifier ┘            │
 | `state_delta` | `Vec<u8>` | 状态增量 Δ |
 | `new_commitment` | `Hash` | 结算后状态承诺 |
 | `ack_chain` | `Vec<AckEntry>` | 正常 checkpoint ack 聚合 |
-| `scheme_id` | `u32` | Hypernova(1) / Groth16(2) / IPA(3) |
+| `scheme_id` | `u32` | Stwo(1，历史名 Hypernova) / Groth16(2) / IPA(3) |
 | `has_partial_checkin` | `bool` | 是否衔接 partial_checkin（SEC2-M8） |
 
 签名域（R5-M6）：`hash(chain_id || game_id || π_hash || state_delta_hash || new_commitment || ack_chain_hash)`。
@@ -221,9 +225,16 @@ fn merkle_root_from_leaves(leaves: &[Hash]) -> Hash {
 
 ---
 
-## 4. CCS 电路 + Hypernova Fold
+## 4. 【已废弃】CCS 电路 + Hypernova Fold
 
-### 4.1 CcsInstance 结构
+> ⚠️ **本节描述的 CCS/Hypernova 折叠方案已在 v2 完全废弃**。`offline/ccs.rs`、`offline/hypernova.rs` 等模块已删除。以下内容仅作历史参考。
+>
+> **当前证明路径（v2）**：链下证明由 `proving_service` 消费 `ProveTask`，调用 `poker_texas_air::Orchestrator` 执行 per-method Stwo AIR 证明 + 立即 native verify，产出 `VerifiedChain` 回执（host-verified receipts，非 succinct 递归）。详见：
+> - `poker_texas_air/src/{prover,verifier,orchestrator}.rs` + `airs/{lifecycle,actions,funds,crypto}/`
+> - `proving_service/src/{server,runner}.rs` + `contracts/texas_poker.rs`
+> - 链上 `zk_verify`（scheme_id=1 Stwo）当前 dormant；`StwoZkVerifier` 在 Production 状态 fail-closed。
+
+### 4.1 CcsInstance 结构（已废弃）
 
 每步链下执行生成一个 CCS 实例（`ccs.rs:33-44`）：
 

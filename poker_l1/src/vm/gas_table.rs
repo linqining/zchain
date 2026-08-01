@@ -13,7 +13,7 @@
 //!   - `secp256k1_verify` = 500（R3-M3 修正）
 //!   - `bls12_381_g1_mul` = 500
 //!   - `bls12_381_pairing_check` = 5000
-//!   - `hypernova_verify` = 300000
+//!   - `stwo_verify` = 300000（历史名 hypernova_verify，已废弃）
 //!   - `groth16_verify` = 20000
 //!   - `ipa_verify` = 15000
 //!   - `verify_failure_proof` = 80000（SEC-H9 修复）
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(GAS_OBJECT_READ_BASE, 10);
         assert_eq!(GAS_SECP256K1_VERIFY, 500);
         assert_eq!(GAS_BLS_PAIRING, 5000);
-        assert_eq!(GAS_HYPERNOVA_VERIFY, 300_000);
+        assert_eq!(GAS_STWO_VERIFY, 300_000);
         assert_eq!(GAS_GROTH16_VERIFY, 20000);
         assert_eq!(GAS_IPA_VERIFY, 15000);
         assert_eq!(GAS_ZK_VERIFY, 300_000);
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(emit_event_gas(100), 110);
         assert_eq!(bls_hash_to_g1_gas(32), 1000 + 320);
         assert_eq!(bls_hash_to_g2_gas(32), 1000 + 320);
-        assert_eq!(zk_verify_gas(1), GAS_HYPERNOVA_VERIFY);
+        assert_eq!(zk_verify_gas(1), GAS_STWO_VERIFY); // Stwo（历史名 Hypernova）
         assert_eq!(zk_verify_gas(2), GAS_GROTH16_VERIFY);
         assert_eq!(zk_verify_gas(3), GAS_IPA_VERIFY);
     }

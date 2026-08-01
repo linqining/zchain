@@ -529,7 +529,7 @@ mod tests {
     use super::*;
     use crate::offline::ack_chain::AckEntry;
     use crate::offline::zk_verifier::{
-        ProofKind, SCHEME_HYPERNOVA, SCHEME_ZKSHUFFLE, VerifierStatus, ZkVerifyContext,
+        ProofKind, SCHEME_STWO, SCHEME_ZKSHUFFLE, VerifierStatus, ZkVerifyContext,
         register_groth16_stub_verifier, register_ipa_stub_verifier,
         register_test_only_stwo_stub_verifier, register_zkshuffle_stub_verifier,
     };
@@ -998,7 +998,7 @@ mod tests {
             state_delta: vec![0xBB; 32],
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
-            scheme_id: SCHEME_HYPERNOVA,
+            scheme_id: SCHEME_STWO,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
             folded_step_count: 1,
@@ -1019,7 +1019,7 @@ mod tests {
         .expect("scheme_id=1 + proof_kind=Zkvm 一致时应成功");
 
         assert!(result.verified, "Stub 状态下合法 proof 应验证通过");
-        assert_eq!(result.scheme_id, SCHEME_HYPERNOVA);
+        assert_eq!(result.scheme_id, SCHEME_STWO);
         assert_eq!(result.verifier_status, VerifierStatus::Stub);
     }
 
@@ -1090,7 +1090,7 @@ mod tests {
             state_delta: vec![0xBB; 32],
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
-            scheme_id: SCHEME_HYPERNOVA,
+            scheme_id: SCHEME_STWO,
             proof_kind: ProofKind::ZkShuffle,
             has_partial_checkin: false,
             folded_step_count: 1,
@@ -1166,7 +1166,7 @@ mod tests {
             state_delta: vec![0xBB; 32],
             new_commitment: [0xCC; 32],
             ack_chain: vec![make_ack_entry(1)],
-            scheme_id: SCHEME_HYPERNOVA,
+            scheme_id: SCHEME_STWO,
             proof_kind: ProofKind::Zkvm,
             has_partial_checkin: false,
             folded_step_count: 1,

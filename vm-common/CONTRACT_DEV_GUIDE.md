@@ -110,7 +110,7 @@ for entry in catalog.by_category(PrecompileCategory::Hash) {
 
 | 名称 | L1 | zkvm | gas-free | 描述 |
 | --- | --- | --- | --- | --- |
-| `zk_verify` | ✅ | ✅ | ❌ | ZK 证明验证（Hypernova/Groth16/IPA） |
+| `zk_verify` | ✅ | ✅ | ❌ | ZK 证明验证（Stwo/Groth16/IPA） |
 
 ---
 

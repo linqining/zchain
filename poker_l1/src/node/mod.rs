@@ -346,6 +346,8 @@ pub struct Node {
     /// 生产节点持久化（重启不丢 nonce，防重放铸币）。`None` 表示节点未启用桥
     /// （bridge contract_call 会被 executor 拒绝）。
     bridge_registry_store: Option<Arc<BridgeRegistryStore>>,
+    /// 指标收集器（缺口 #7：Prometheus 风格指标导出）。
+    metrics: Arc<crate::metrics::MetricsCollector>,
 }
 
 /// 构造默认预编译合约注册表并注册内置预编译合约。
@@ -406,6 +408,7 @@ impl Node {
             validator_set: std::sync::Mutex::new(validator_set),
             precompile_registry,
             bridge_registry_store: Some(Arc::new(bridge_registry_store)),
+            metrics: Arc::new(crate::metrics::MetricsCollector::new()),
         })
     }
 
@@ -466,6 +469,7 @@ impl Node {
             // 缺口 #9：内存节点默认不启用桥（bridge contract_call 会拒绝）；
             // 需桥的测试可用 [`Node::with_bridge`] 显式注入。
             bridge_registry_store: None,
+            metrics: Arc::new(crate::metrics::MetricsCollector::new()),
         })
     }
 
@@ -967,6 +971,28 @@ impl Node {
     #[must_use]
     pub fn precompile_registry(&self) -> Arc<PrecompileRegistry> {
         Arc::clone(&self.precompile_registry)
+    }
+
+    /// 获取指标收集器引用（缺口 #7）。
+    #[must_use]
+    pub fn metrics(&self) -> Arc<crate::metrics::MetricsCollector> {
+        Arc::clone(&self.metrics)
+    }
+
+    /// 导出 Prometheus 格式指标文本（缺口 #7）。
+    #[must_use]
+    pub fn export_metrics(&self) -> String {
+        // 刷新 gauge 类指标（tip 高度 + mempool 大小）。
+        let tip = self
+            .block_store
+            .get_tip_height()
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        self.metrics.set_block_height(tip);
+        self.metrics
+            .set_mempool_size(self.pending_tx.lock().unwrap_or_else(|e| e.into_inner()).len() as u64);
+        self.metrics.export()
     }
 
     /// 获取 Bridge registry store 引用（共享 Arc；缺口 #9）。

@@ -15,22 +15,15 @@ use crate::error::PokerL1Error;
 /// ZK 证明 scheme 标识符（u32，与 syscall 接口一致）。
 pub type SchemeId = u32;
 
-/// Stwo scheme_id（替代原 SCHEME_HYPERNOVA，v2 Stwo 递归证明）。
-///
-/// v2 已完全放弃 Hypernova，使用 Stwo 递归证明方案。
+/// Stwo scheme_id（v2 Stwo Circle-STARK 递归证明；历史名 Hypernova，已废弃）。
 pub const SCHEME_STWO: SchemeId = 1;
-/// Hypernova scheme_id（spec.md L499，已废弃）。
-///
-/// v2 已完全放弃 Hypernova，使用 `SCHEME_STWO` 替代。
-#[deprecated(note = "v2 使用 SCHEME_STWO 替代")]
-pub const SCHEME_HYPERNOVA: SchemeId = SCHEME_STWO;
 /// Groth16 scheme_id（spec.md L505）。
 pub const SCHEME_GROTH16: SchemeId = 2;
 /// IPA scheme_id（spec.md L511）。
 pub const SCHEME_IPA: SchemeId = 3;
 /// ZkShuffle scheme_id（v1.2 spec.md L766 — `ProofKind::ZkShuffle → SCHEME_ZKSHUFFLE`）。
 ///
-/// grace 期后 `scheme_id=4` 走既有 ZkShuffle Production verifier（非 stub、非 Hypernova）。
+/// grace 期后 `scheme_id=4` 走既有 ZkShuffle Production verifier（非 stub）。
 pub const SCHEME_ZKSHUFFLE: SchemeId = 4;
 
 /// Proof kind（v1.2 spec.md L765-767 — 与 `scheme_id` 双向映射）。
@@ -42,7 +35,7 @@ pub enum ProofKind {
     ///
     /// grace 期内走 stub 路径，签名形式为旧签名（无 `proof_kind` 字段）。
     ZkShuffle,
-    /// Zkvm 新 proof（对应 `SCHEME_HYPERNOVA = 1`）。
+    /// Zkvm 新 proof（对应 `SCHEME_STWO = 1`）。
     ///
     /// 强制走 Production 路径，签名形式为新签名（含 `proof_kind` 字段）。
     Zkvm,
@@ -56,7 +49,7 @@ impl ProofKind {
     pub const fn from_scheme_id(scheme_id: SchemeId) -> Option<Self> {
         match scheme_id {
             SCHEME_ZKSHUFFLE => Some(Self::ZkShuffle),
-            SCHEME_STWO | SCHEME_HYPERNOVA => Some(Self::Zkvm),
+            SCHEME_STWO => Some(Self::Zkvm),
             _ => None,
         }
     }
@@ -73,7 +66,7 @@ impl ProofKind {
     /// 转为 1-byte 表示（用于 `signing_hash` 序列化，SubTask 11.2.3）。
     ///
     /// - `ZkShuffle` → 4（`SCHEME_ZKSHUFFLE`）
-    /// - `Zkvm` → 1（`SCHEME_STWO`，原 `SCHEME_HYPERNOVA`）
+    /// - `Zkvm` → 1（`SCHEME_STWO`）
     #[must_use]
     pub const fn to_byte(self) -> u8 {
         match self {
@@ -284,7 +277,7 @@ pub struct ZkVerifyResult {
 /// 每个 scheme（Hypernova / Groth16 / IPA）实现此 trait，
 /// 注册到 [`ZkVerifierRegistry`] 后即可通过 `zk_verify` syscall 调用。
 pub trait ZkVerifier: Send + Sync {
-    /// scheme_id（SCHEME_HYPERNOVA / SCHEME_GROTH16 / SCHEME_IPA）。
+    /// scheme_id（SCHEME_STWO / SCHEME_GROTH16 / SCHEME_IPA）。
     fn scheme_id(&self) -> SchemeId;
 
     /// 验证 ZK proof。
@@ -436,12 +429,6 @@ impl ZkVerifier for StubVerifier {
 /// 在递归 AIR 与 [`ZkPublicIo`] 完整绑定前，Production 验证始终返回 `false`。
 pub fn register_stwo_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StwoZkVerifier::new()));
-}
-
-/// 注册 Hypernova scheme（已废弃，使用 register_stwo_verifier）。
-#[deprecated(note = "使用 register_stwo_verifier 替代")]
-pub fn register_hypernova_stub_verifier(registry: &mut ZkVerifierRegistry) {
-    register_stwo_verifier(registry);
 }
 
 /// 注册 ZkShuffle scheme（`SCHEME_ZKSHUFFLE = 4`）的 stub verifier。

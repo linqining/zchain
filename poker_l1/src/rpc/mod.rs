@@ -240,7 +240,7 @@ pub struct BlsVerifyResult {
 /// `zk_verify` 参数。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZkVerifyParams {
-    /// ZK 证明 scheme_id（1=Hypernova / 2=Groth16 / 3=IPA）。
+    /// ZK 证明 scheme_id（1=Stwo / 2=Groth16 / 3=IPA）。
     pub scheme_id: SchemeId,
     /// proof 字节。
     pub proof: Vec<u8>,
@@ -698,6 +698,7 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
             "secp256k1_aggregate_verify" => self.handle_secp256k1_aggregate_verify(&req.params),
             "bls_verify" => self.handle_bls_verify(&req.params),
             "zk_verify" => self.handle_zk_verify(&req.params),
+            "get_metrics" => self.handle_get_metrics(),
             _ => {
                 return JsonRpcResponse::error(
                     JsonRpcError::new(
@@ -909,6 +910,16 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
             scheme_id: result.scheme_id,
         })
         .map_err(RpcHandlerError::from_serde_error)
+    }
+
+    /// `get_metrics` —— 导出 Prometheus 格式指标文本（缺口 #7）。
+    ///
+    /// 无参数，返回 `{"metrics": "<prometheus text>"}`。
+    fn handle_get_metrics(&self) -> Result<serde_json::Value, RpcHandlerError> {
+        let text = self.backend.node().export_metrics();
+        serde_json::json!({ "metrics": text })
+            .into()
+            .map_err(|e| RpcHandlerError::Server(format!("serde_json: {e}")))
     }
 }
 

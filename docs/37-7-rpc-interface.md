@@ -47,7 +47,7 @@ Poker L1 节点对外暴露 JSON-RPC 2.0 接口，供钱包、浏览器、其他
 | 6 | `get_dag_vertex` | DAG 查询 | 按 vertex hash 查询 DAG vertex |
 | 7 | `secp256k1_aggregate_verify` | 密码学验证 | 批量 secp256k1 签名聚合验证 |
 | 8 | `bls_verify` | 密码学验证 | BLS12-381 签名验证 |
-| 9 | `zk_verify` | 密码学验证 | ZK 证明验证（Hypernova / Groth16 / IPA） |
+| 9 | `zk_verify` | 密码学验证 | ZK 证明验证（Stwo / Groth16 / IPA） |
 
 ### 1.2 角色权限矩阵
 
@@ -718,7 +718,7 @@ raw  (变长): 公钥原始字节
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|:----:|------|
-| `scheme_id` | `u32` | ✓ | 1 = Hypernova / 2 = Groth16 / 3 = IPA |
+| `scheme_id` | `u32` | ✓ | 1 = Stwo（历史名 Hypernova） / 2 = Groth16 / 3 = IPA |
 | `proof` | `Vec<u8>` | ✓ | 证明字节 |
 | `public_io_bytes` | `Vec<u8>` | ✓ | public_io 的 BCS 序列化字节 |
 | `max_skip_segments` | `u32` | ✓ | skip_segments 上限 |
@@ -728,7 +728,7 @@ raw  (变长): 公钥原始字节
 
 | scheme_id | 名称 | 状态 | 用途 |
 |:---------:|------|:----:|------|
-| 1 | Hypernova | Stub | 递归 fold 证明（CCS） |
+| 1 | Stwo（历史名 Hypernova） | dormant | Stwo Circle-STARK 证明（链上 verifier 当前 dormant，证明走离线 proving_service） |
 | 2 | Groth16 | Stub | 单次证明 |
 | 3 | IPA | Stub | 内积论证（无 trusted setup） |
 
@@ -1046,7 +1046,7 @@ RPC 库单元测试位于 [poker_l1/src/rpc/mod.rs](../poker_l1/src/rpc/mod.rs) 
 |------|------|
 | [37-1-node-deployment.md](./37-1-node-deployment.md) | 节点部署指南（含 genesis 配置） |
 | [37-2-contract-development.md](./37-2-contract-development.md) | 合约开发（含 gas 表） |
-| [37-3-offline-proof-development.md](./37-3-offline-proof-development.md) | 离线证明开发（Hypernova / Groth16 / IPA） |
+| [37-3-offline-proof-development.md](./37-3-offline-proof-development.md) | 离线证明开发（Stwo / Groth16 / IPA） |
 | [37-4-bridge-extension.md](./37-4-bridge-extension.md) | 跨链桥扩展 |
 | [37-5-governance-operations.md](./37-5-governance-operations.md) | 治理操作（41 个参数） |
 | [37-6-dag-consensus-ops.md](./37-6-dag-consensus-ops.md) | DAG 共识运维 |

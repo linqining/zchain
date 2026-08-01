@@ -132,8 +132,8 @@ pub const DEFAULT_ZKVM_BATCH_SIZE: u64 = 1024;
 pub const DEFAULT_MAX_RECURSION_DEPTH: u64 = 16;
 /// 默认 max_trace_host_memory（512MB，与 `poker_zkvm::trace::MAX_TRACE_HOST_MEMORY` 对齐）。
 pub const DEFAULT_MAX_TRACE_HOST_MEMORY: u64 = 512 * 1024 * 1024;
-/// 默认 gas_hypernova_verify（300000，与 `gas_table::GAS_HYPERNOVA_VERIFY` 对齐）。
-pub const DEFAULT_GAS_HYPERNOVA_VERIFY: u64 = 300_000;
+/// 默认 gas_stwo_verify（300000，与 `gas_table::GAS_STWO_VERIFY` 对齐）。
+pub const DEFAULT_GAS_STWO_VERIFY: u64 = 300_000;
 /// 默认 max_public_io_size（8KB，v1.4 M3-001）。
 pub const DEFAULT_MAX_PUBLIC_IO_SIZE: u64 = 8 * 1024;
 /// 默认 max_folded_instance_size（8KB，v1.4 M3-001）。
@@ -266,8 +266,8 @@ pub enum ParamName {
     MaxTraceHostMemory,
     /// production_grace_blocks（Phase 11.5 — 敏感 90% quorum）
     ProductionGraceBlocks,
-    /// gas_hypernova_verify（Phase 11.5 — 敏感 90% quorum）
-    GasHypernovaVerify,
+    /// gas_stwo_verify（Phase 11.5 — 敏感 90% quorum；RPC 字符串保留 `gas_hypernova_verify` 兼容）
+    GasStwoVerify,
     /// max_public_io_size（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）
     MaxPublicIoSize,
     /// max_folded_instance_size（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）
@@ -337,7 +337,8 @@ impl ParamName {
             Self::MaxRecursionDepth => "max_recursion_depth",
             Self::MaxTraceHostMemory => "max_trace_host_memory",
             Self::ProductionGraceBlocks => "production_grace_blocks",
-            Self::GasHypernovaVerify => "gas_hypernova_verify",
+            // 向后兼容：RPC 字符串保留历史名 `gas_hypernova_verify`（避免破坏现有治理客户端）。
+            Self::GasStwoVerify => "gas_hypernova_verify",
             Self::MaxPublicIoSize => "max_public_io_size",
             Self::MaxFoldedInstanceSize => "max_folded_instance_size",
             Self::MaxSumcheckProofSize => "max_sumcheck_proof_size",
@@ -386,7 +387,7 @@ impl ParamName {
                 | Self::MaxRecursionDepth
                 | Self::MaxTraceHostMemory
                 | Self::ProductionGraceBlocks
-                | Self::GasHypernovaVerify
+                | Self::GasStwoVerify
                 | Self::MaxPublicIoSize
                 | Self::MaxFoldedInstanceSize
                 | Self::MaxSumcheckProofSize
@@ -505,8 +506,8 @@ pub struct GovernanceParams {
     pub max_trace_host_memory: u64,
     /// production_grace_blocks ∈ [720, 72000]（Phase 11.5 — 敏感 90% quorum）。
     pub production_grace_blocks: u64,
-    /// gas_hypernova_verify ∈ [100000, 1000000]（Phase 11.5 — 敏感 90% quorum）。
-    pub gas_hypernova_verify: u64,
+    /// gas_stwo_verify ∈ [100000, 1000000]（Phase 11.5 — 敏感 90% quorum；Stwo ZK 证明验证 gas）。
+    pub gas_stwo_verify: u64,
     /// max_public_io_size ∈ [4KB, 32KB]（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）。
     pub max_public_io_size: u64,
     /// max_folded_instance_size ∈ [4KB, 32KB]（Phase 11.5 v1.3 M2-002 子分配 — 敏感 90% quorum）。
@@ -574,7 +575,7 @@ impl GovernanceParams {
             max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
             max_trace_host_memory: DEFAULT_MAX_TRACE_HOST_MEMORY,
             production_grace_blocks: PRODUCTION_GRACE_BLOCKS,
-            gas_hypernova_verify: DEFAULT_GAS_HYPERNOVA_VERIFY,
+            gas_stwo_verify: DEFAULT_GAS_STWO_VERIFY,
             max_public_io_size: DEFAULT_MAX_PUBLIC_IO_SIZE,
             max_folded_instance_size: DEFAULT_MAX_FOLDED_INSTANCE_SIZE,
             max_sumcheck_proof_size: DEFAULT_MAX_SUMCHECK_PROOF_SIZE,
@@ -639,7 +640,7 @@ impl GovernanceParams {
             ParamName::MaxRecursionDepth => self.max_recursion_depth,
             ParamName::MaxTraceHostMemory => self.max_trace_host_memory,
             ParamName::ProductionGraceBlocks => self.production_grace_blocks,
-            ParamName::GasHypernovaVerify => self.gas_hypernova_verify,
+            ParamName::GasStwoVerify => self.gas_stwo_verify,
             ParamName::MaxPublicIoSize => self.max_public_io_size,
             ParamName::MaxFoldedInstanceSize => self.max_folded_instance_size,
             ParamName::MaxSumcheckProofSize => self.max_sumcheck_proof_size,
@@ -707,7 +708,7 @@ impl GovernanceParams {
             ParamName::MaxRecursionDepth => self.max_recursion_depth = value,
             ParamName::MaxTraceHostMemory => self.max_trace_host_memory = value,
             ParamName::ProductionGraceBlocks => self.production_grace_blocks = value,
-            ParamName::GasHypernovaVerify => self.gas_hypernova_verify = value,
+            ParamName::GasStwoVerify => self.gas_stwo_verify = value,
             ParamName::MaxPublicIoSize => self.max_public_io_size = value,
             ParamName::MaxFoldedInstanceSize => self.max_folded_instance_size = value,
             ParamName::MaxSumcheckProofSize => self.max_sumcheck_proof_size = value,
@@ -804,7 +805,7 @@ pub const fn validate_param(
         ParamName::MaxRecursionDepth => (4, 32),
         ParamName::MaxTraceHostMemory => (128 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
         ParamName::ProductionGraceBlocks => (720, 72_000),
-        ParamName::GasHypernovaVerify => (100_000, 1_000_000),
+        ParamName::GasStwoVerify => (100_000, 1_000_000),
         ParamName::MaxPublicIoSize => (4 * 1024, 32 * 1024),
         ParamName::MaxFoldedInstanceSize => (4 * 1024, 32 * 1024),
         ParamName::MaxSumcheckProofSize => (8 * 1024, 64 * 1024),
@@ -1616,8 +1617,8 @@ mod tests {
 
     #[test]
     fn test_new_sensitive_params_gas_and_grace() {
-        // Phase 11.5：gas_hypernova_verify / production_grace_blocks 敏感
-        assert!(ParamName::GasHypernovaVerify.is_sensitive());
+        // Phase 11.5：gas_stwo_verify / production_grace_blocks 敏感
+        assert!(ParamName::GasStwoVerify.is_sensitive());
         assert!(ParamName::ProductionGraceBlocks.is_sensitive());
     }
 
@@ -1641,7 +1642,7 @@ mod tests {
         assert_eq!(params.max_recursion_depth, DEFAULT_MAX_RECURSION_DEPTH);
         assert_eq!(params.max_trace_host_memory, DEFAULT_MAX_TRACE_HOST_MEMORY);
         assert_eq!(params.production_grace_blocks, PRODUCTION_GRACE_BLOCKS);
-        assert_eq!(params.gas_hypernova_verify, DEFAULT_GAS_HYPERNOVA_VERIFY);
+        assert_eq!(params.gas_stwo_verify, DEFAULT_GAS_STWO_VERIFY);
         assert_eq!(params.max_public_io_size, DEFAULT_MAX_PUBLIC_IO_SIZE);
         assert_eq!(
             params.max_folded_instance_size,
@@ -1667,8 +1668,8 @@ mod tests {
             DEFAULT_MAX_ZKVM_TRACE_STEPS
         );
         assert_eq!(
-            params.get(ParamName::GasHypernovaVerify),
-            DEFAULT_GAS_HYPERNOVA_VERIFY
+            params.get(ParamName::GasStwoVerify),
+            DEFAULT_GAS_STWO_VERIFY
         );
         // set() 后 get() 返回新值
         params.set(ParamName::MaxZkvmMemory, 32 * 1024 * 1024);
@@ -1691,7 +1692,7 @@ mod tests {
         assert!(validate_param(&params, ParamName::MaxRecursionDepth, 16).is_ok());
         assert!(validate_param(&params, ParamName::MaxTraceHostMemory, 512 * 1024 * 1024).is_ok());
         assert!(validate_param(&params, ParamName::ProductionGraceBlocks, 7200).is_ok());
-        assert!(validate_param(&params, ParamName::GasHypernovaVerify, 300_000).is_ok());
+        assert!(validate_param(&params, ParamName::GasStwoVerify, 300_000).is_ok());
         assert!(validate_param(&params, ParamName::MaxPublicIoSize, 8 * 1024).is_ok());
         assert!(validate_param(&params, ParamName::MaxFoldedInstanceSize, 8 * 1024).is_ok());
         assert!(validate_param(&params, ParamName::MaxSumcheckProofSize, 16 * 1024).is_ok());
@@ -1712,7 +1713,7 @@ mod tests {
         assert!(validate_param(&params, ParamName::MaxRecursionDepth, 3).is_err());
         assert!(validate_param(&params, ParamName::MaxRecursionDepth, 33).is_err());
         assert!(validate_param(&params, ParamName::ProductionGraceBlocks, 719).is_err());
-        assert!(validate_param(&params, ParamName::GasHypernovaVerify, 99_999).is_err());
+        assert!(validate_param(&params, ParamName::GasStwoVerify, 99_999).is_err());
         assert!(validate_param(&params, ParamName::MaxPublicIoSize, 3 * 1024).is_err());
         assert!(validate_param(&params, ParamName::MaxSumcheckProofSize, 7 * 1024).is_err());
         assert!(validate_param(&params, ParamName::MaxEventHashesCount, 31).is_err());

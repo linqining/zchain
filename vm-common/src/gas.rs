@@ -25,7 +25,7 @@
 //!   - `secp256k1_verify` = 500（R3-M3 修正）
 //!   - `bls12_381_g1_mul` = 500
 //!   - `bls12_381_pairing_check` = 5000
-//!   - `hypernova_verify` = 300000
+//!   - `stwo_verify` = 300000（历史名 `hypernova_verify`，Hypernova 已废弃）
 //!   - `groth16_verify` = 20000
 //!   - `ipa_verify` = 15000
 //!   - `verify_failure_proof` = 80000（SEC-H9 修复）
@@ -93,8 +93,8 @@ pub const GAS_BLS_HASH_TO_G1_PER_BYTE: u64 = 10;
 pub const GAS_BLS_HASH_TO_G2_BASE: u64 = 1000;
 /// `bls12_381_hash_to_g2` 每字节 gas。
 pub const GAS_BLS_HASH_TO_G2_PER_BYTE: u64 = 10;
-/// `hypernova_verify` gas（Phase 11.5 调整 — 覆盖 Spartan pairing + final exp + IPA verify log(N) 轮 MSM + 余量）。
-pub const GAS_HYPERNOVA_VERIFY: u64 = 300_000;
+/// `stwo_verify` gas（Stwo Circle-STARK 证明验证；历史名 `hypernova_verify`，Hypernova 方案已废弃，现统一为 Stwo）。
+pub const GAS_STWO_VERIFY: u64 = 300_000;
 /// `groth16_verify` gas。
 pub const GAS_GROTH16_VERIFY: u64 = 20000;
 /// `ipa_verify` gas。
@@ -102,7 +102,7 @@ pub const GAS_IPA_VERIFY: u64 = 15000;
 /// `zk_verify` syscall 默认 gas（用于未知 scheme_id 时的 fallback 计费）。
 ///
 /// 实际计费通过 [`zk_verify_gas`] 按 scheme 分派：
-/// - Hypernova → [`GAS_HYPERNOVA_VERIFY`] = 300000
+/// - Stwo（scheme_id=1，历史名 Hypernova）→ [`GAS_STWO_VERIFY`] = 300000
 /// - Groth16 → [`GAS_GROTH16_VERIFY`] = 20000
 /// - IPA → [`GAS_IPA_VERIFY`] = 15000
 pub const GAS_ZK_VERIFY: u64 = 300_000;
@@ -258,14 +258,14 @@ pub const fn bls_hash_to_g2_gas(msg_len: u64) -> u64 {
 
 /// 计算 `zk_verify` syscall 的 gas（按 scheme_id 分派，Task 22.2）。
 ///
-/// - `SCHEME_HYPERNOVA` (1) → [`GAS_HYPERNOVA_VERIFY`] = 300000
+/// - `SCHEME_STWO` (1，历史名 Hypernova) → [`GAS_STWO_VERIFY`] = 300000
 /// - `SCHEME_GROTH16` (2) → [`GAS_GROTH16_VERIFY`] = 20000
 /// - `SCHEME_IPA` (3) → [`GAS_IPA_VERIFY`] = 15000
 /// - 未知 scheme → [`GAS_ZK_VERIFY`] = 300000（fallback，实际会在 verifier 查找阶段失败）
 #[must_use]
 pub const fn zk_verify_gas(scheme_id: u32) -> u64 {
     match scheme_id {
-        1 => GAS_HYPERNOVA_VERIFY,
+        1 => GAS_STWO_VERIFY,
         2 => GAS_GROTH16_VERIFY,
         3 => GAS_IPA_VERIFY,
         _ => GAS_ZK_VERIFY,
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_zk_verify_gas_constants() {
-        assert_eq!(GAS_HYPERNOVA_VERIFY, 300_000);
+        assert_eq!(GAS_STWO_VERIFY, 300_000);
         assert_eq!(GAS_GROTH16_VERIFY, 20000);
         assert_eq!(GAS_IPA_VERIFY, 15000);
         assert_eq!(GAS_ZK_VERIFY, 300_000);
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_zk_verify_gas_dispatch() {
-        assert_eq!(zk_verify_gas(1), GAS_HYPERNOVA_VERIFY); // Hypernova
+        assert_eq!(zk_verify_gas(1), GAS_STWO_VERIFY); // Stwo（历史名 Hypernova）
         assert_eq!(zk_verify_gas(2), GAS_GROTH16_VERIFY); // Groth16
         assert_eq!(zk_verify_gas(3), GAS_IPA_VERIFY); // IPA
         // 未知 scheme → fallback GAS_ZK_VERIFY

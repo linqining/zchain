@@ -675,7 +675,7 @@ use crate::object_model::smt::SparseMerkleTree;
 //
 // 严格遵循 spec.md L493–525 + L853–857（FROZEN 2026-06-27）：
 // - 通用 `zk_verify(scheme_id, proof, public_io) -> bool` 入口
-// - gas 按 scheme 分派（zk_verify_gas：Hypernova=300000 / Groth16=20000 / IPA=15000）
+// - gas 按 scheme 分派（zk_verify_gas：Stwo=300000 / Groth16=20000 / IPA=15000）
 // - 通过 ctx.zk_verifier 注入 ZkVerifierRegistry（None → ZkVerifierNotRegistered）
 // - Stub 状态下仅校验 proof 格式（verifier_status 由 registry 管理）
 
@@ -692,7 +692,7 @@ declare_builtin_function!(
     ///
     /// # 参数
     /// - `scheme_id`：ZK scheme 标识（低 32 位有效）
-    ///   - `1` = Hypernova, `2` = Groth16, `3` = IPA
+    ///   - `1` = Stwo（历史名 Hypernova，已废弃）, `2` = Groth16, `3` = IPA
     /// - `proof_ptr` / `proof_len`：proof 字节，位于 heap region
     /// - `public_io_ptr` / `public_io_len`：[`ZkPublicIo`] 序列化字节，位于 heap region
     ///
@@ -703,7 +703,7 @@ declare_builtin_function!(
     ///
     /// # Gas
     /// 按 scheme_id 分派（[`zk_verify_gas`]）：
-    /// - Hypernova → 300000
+    /// - Stwo → 300000
     /// - Groth16 → 20000
     /// - IPA → 15000
     SyscallZkVerify,
@@ -1969,7 +1969,7 @@ mod tests {
 
         let result = SyscallZkVerify::rust(
             &mut ctx,
-            1, // SCHEME_HYPERNOVA
+            1, // SCHEME_STWO
             HEAP_BASE,
             0, // proof_len = 0
             HEAP_BASE,

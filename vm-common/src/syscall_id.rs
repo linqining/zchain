@@ -69,7 +69,7 @@ pub enum SyscallId {
     VerifySignature = 0x45,
     /// `verify_failure_proof(...)` — 验证失败证明（SEC-H9）。
     VerifyFailureProof = 0x46,
-    /// `zk_verify(scheme_id, proof_ptr, proof_len)` — ZK 证明验证（Hypernova/Groth16/IPA）。
+    /// `zk_verify(scheme_id, proof_ptr, proof_len)` — ZK 证明验证（Stwo/Groth16/IPA）。
     ZkVerify = 0x47,
 
     // ===== 0x80-0x8F：BLS12-381 系列（poker_l1） =====

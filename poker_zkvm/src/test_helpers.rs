@@ -507,7 +507,7 @@ pub fn poker_hand_compare_expected(s1: u32, s2: u32) -> u8 {
 /// shuffle_verify → BLS hash → 牌型评估(P1+P2) → showdown → commit_output。
 ///
 /// 这是"实际 zkvm 运行方式"的 texas_poker 合约：以手工 RV32I 汇编直接调用 26 个 syscall，
-/// 而非通过 trait 抽象。ELF 加载后由 zkvm 解释执行，trace 进入 Hypernova 折叠证明。
+/// 而非通过 trait 抽象。ELF 加载后由 zkvm 解释执行，trace 进入 Stwo Circle-STARK 证明。
 ///
 /// # 输入（62 字节）
 ///

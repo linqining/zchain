@@ -31,7 +31,7 @@ pub enum PrecompileCategory {
     Pairing,
     /// 业务合约（游戏逻辑：gameturn/settle/forfeit 等）。
     Business,
-    /// ZK 证明验证（Hypernova/Groth16/IPA）。
+    /// ZK 证明验证（Stwo/Groth16/IPA）。
     ZkProof,
     /// 其他。
     Other,
@@ -186,7 +186,7 @@ impl PrecompileCatalog {
             zkvm_available: true,
             is_gas_free: false,
             id_bytes: precompile_id_from_name("zk_verify"),
-            description: "ZK 证明验证（Hypernova/Groth16/IPA）",
+            description: "ZK 证明验证（Stwo/Groth16/IPA）",
         });
 
         Self { entries }

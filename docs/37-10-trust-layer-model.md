@@ -55,7 +55,7 @@ zchain poker_l1 采用**渐进式信任最小化**架构，按 tx 通道与执�
 - **assigned_validator**：per-Game per-epoch 单点打包 validator
 - **witness**：多副本见证 validator（fallback 时签名 TimeoutProof）
 - **commitment**：链下状态承诺（blake2b_256）
-- **ZK proof**：链下计算正确性的密码学证明（Hypernova / Groth16 / IPA）
+- **ZK proof**：链下计算正确性的密码学证明（Stwo / Groth16 / IPA）
 
 ---
 
@@ -183,7 +183,7 @@ zchain poker_l1 采用**渐进式信任最小化**架构，按 tx 通道与执�
 
 | 假设 | 说明 |
 | --- | --- |
-| **无信任假设** | 仅依赖 ZK proof soundness（Hypernova / Groth16 / IPA） |
+| **无信任假设** | 仅依赖 ZK proof soundness（Stwo / Groth16 / IPA；当前为 host-verified receipts） |
 | 活性假设 | 操作方定期提交 checkpoint_anchor（否则触发 fallback） |
 | 数据可用性假设 | 操作方公开链下数据（否则 force_checkpoint 逃生） |
 
@@ -228,7 +228,7 @@ zchain poker_l1 采用**渐进式信任最小化**架构，按 tx 通道与执�
 
 | scheme_id | 方案 | 适用场景 |
 | --- | --- | --- |
-| 0 | Hypernova | 递归折叠，多步结算 |
+| 0 | Stwo（历史名 Hypernova） | Stwo Circle-STARK，poker_texas_air 自定义电路（当前 host-verify receipts） |
 | 1 | Groth16 | 单次证明，验证快 |
 | 2 | IPA | 无 trusted setup |
 
@@ -406,7 +406,7 @@ zchain 当前 ~1,000 TPS 与 Sui/HyperBFT 相差 100-300 倍，差距来源：
 | 跨链互操作 | 不可替代 | ZK proof 可跨链验证，链上状态锁定在单链 |
 | 离线玩家 | 不可替代 | 链下可异步执行，链上需实时共识 |
 | 批量结算摊薄 | 部分可替代 | 链上 gas 低时摊薄不显著，但高 gas 时仍需链下摊薄 |
-| ZK 证明系统 | 不可替代 | 已投入的 Hypernova/Groth16/IPA 实现不可浪费 |
+| ZK 证明系统 | 不可替代 | 已投入的 Stwo/poker_texas_air/Groth16/IPA 实现不可浪费 |
 
 **修正后的结论**：即使 DAG 共识升级到 100,000+ TPS + <100ms finality（已被 Sui/HyperBFT 证明可行），OffChain 模式**仍然不多余**，主要价值从"吞吐量突破"转向"隐私保护 + 跨链互操作 + 离线玩家"。三层信任模型的协同设计在可预见的未来（10+ 年）仍然有效。
 
