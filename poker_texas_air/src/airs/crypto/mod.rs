@@ -14,7 +14,7 @@
 //! - Reconstruct 多方重构
 //! - Reveal Token 揭示
 //!
-//! `submit_shuffle_v2` 与 `submit_reconstruct_deck` 已采用 precompile 调用绑定：
+//! `submit_shuffle_v2` 与 Reconstruction V3 已采用 precompile 调用绑定：
 //! verifier 重放 canonical request 的 native 密码学验证，再将完整 request/receipt
 //! digest 和 replay scope 绑定进 AIR statement。其余 DLEq / reveal 类 proof 仍沿用
 //! 阶段 4 的协议状态约束，后续应扩展为相同的 precompile ABI，或嵌入
@@ -25,7 +25,8 @@
 //! [`crate::orchestrator::Orchestrator`]：它先重放完整原生 VM dispatch，再验证
 //! shuffle/reconstruction precompile 与 method AIR。`poker_l1` 在非 crate 内单元测试构建中已禁止运行时
 //! `zk_skip_*` 绕过，所以该 host replay 会执行真实密码学验证。
-//! 完整的 recursive AIR 子证明仍未实现。
+//! 阶段 4 的 [`crate::outer_precompile`] 会把这些 dual-proof child、完整 VM task 和
+//! 共识 anchor 包装为可转移的最终 digest AIR，但验证仍是 O(N)，不属于 succinct recursion。
 //!
 //! ## AIR 列布局
 //!

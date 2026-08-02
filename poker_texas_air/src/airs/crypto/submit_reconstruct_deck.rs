@@ -9,9 +9,10 @@
 //!    `round_state`）；reconstruct 期间 `round_state` 保持不变（pre == post）。真正的
 //!    相位约束由 `INPUT_RECONSTRUCT_PHASE` 列承载（见 evaluate）。
 //! 2. `seat_index` 在 `reconstruct_assignments` 中
-//! 3. 提交 ReconstructProof（证明重构密文正确性）
+//! 3. 提交 ReconstructProofV3；完整 statement 必须匹配 aggregate/owner key、固定
+//!    `init_deck` 明文点、重构 epoch，以及 pre-state 中该 seat 的上一轮未解手牌密文
 //! 4. 状态变更：
-//!    - `reconstruct_state.player_decks[seat_index] = deck`
+//!    - `reconstruct_state.player_decks[seat_index] = contributions`
 //!    - 若所有玩家都已提交，调用 `rebuild_deck_from_reconstruct_deck`
 //!    - 进入 settle 阶段
 //!    - `version += 1`
@@ -20,15 +21,15 @@
 //!
 //! AIR 除协议级状态变更外，还约束 canonical reconstruction precompile request
 //! digest 与 verifier-issued receipt digest。生产 verifier 会重新解码 request、
-//! 重新运行 Bayer--Groth ordered reconstruction verifier，并校验完整调用 replay
+//! 重新运行 Bayer--Groth shuffle + cross-key + slot-OR V3 verifier，并校验完整调用 replay
 //! scope；因此 reconstruction proof 的成功结果不是 prover 可伪造的布尔 witness。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
+use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
+use crate::precompile_binding::{PrecompileAirBinding, DIGEST_LIMBS};
 
 /// `submit_reconstruct_deck` 业务特定列布局。
 pub mod cols {
@@ -249,14 +250,14 @@ pub fn validate_public_inputs(
     air: &SubmitReconstructDeckAir,
     public_inputs: &crate::public_inputs::TexasPublicInputs,
 ) -> crate::error::TexasAirResult<()> {
-    use poker_protocol::precompile_abi::ReconstructionVerifyRequest;
+    use poker_protocol::precompile_abi::ReconstructionV3VerifyRequest;
 
     let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
         crate::error::TexasAirError::SpecViolation(
             "submit_reconstruct_deck requires a verifier-issued precompile binding".into(),
         )
     })?;
-    if binding.precompile_id() != crate::precompile_binding::PokerPrecompileId::Reconstruction {
+    if binding.precompile_id() != crate::precompile_binding::PokerPrecompileId::ReconstructionV3 {
         return Err(crate::error::TexasAirError::SpecViolation(
             "submit_reconstruct_deck received the wrong precompile receipt type".into(),
         ));
@@ -268,9 +269,9 @@ pub fn validate_public_inputs(
         ));
     }
     let request =
-        ReconstructionVerifyRequest::decode(binding.request_bytes()).map_err(|error| {
+        ReconstructionV3VerifyRequest::decode(binding.request_bytes()).map_err(|error| {
             crate::error::TexasAirError::SpecViolation(format!(
-                "reconstruction request canonical decode failed: {error}"
+                "reconstruction V3 request canonical decode failed: {error}"
             ))
         })?;
     let expected_context = crate::precompile_binding::precompile_call_context(

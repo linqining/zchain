@@ -41,7 +41,7 @@
 //! 证明 DLEq layer removal，也未覆盖可能发生的 `advance_turn`/settlement。
 
 use poker_protocol::precompile::{
-    build_bls12381_reconstruction_request, build_bls12381_shuffle_request,
+    build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::TranscriptId;
 use stwo::core::fields::m31::M31;
@@ -81,14 +81,14 @@ use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHand
 use crate::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
-use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
+use crate::precompile_binding::{precompile_call_context, PrecompileCallBinding};
+use crate::prove_task::{dispatch_call_digest, DispatchOutput, MethodInput, ProveTask};
 use crate::prover::prove_method;
-use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
-use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
+use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
+use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
 use crate::verified_chain::{
-    ExpectedChainAnchor, VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
-    verify_method_against_and_issue_receipt,
+    verify_method_against_and_issue_receipt, ExpectedChainAnchor, VerificationReceipt,
+    VerifiedChain, VerifiedChainBuilder,
 };
 
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {
@@ -1673,14 +1673,6 @@ impl Orchestrator {
                 "submit_reconstruct_deck method input seat differs from raw args".into(),
             ));
         }
-        let cards: Vec<_> = task
-            .pre_table
-            .deck_state
-            .plaintext
-            .iter()
-            .map(|card| card.0)
-            .collect();
-        let user_public_key = task.pre_table.seats[*seat_index as usize].pk.0;
         let call_context = precompile_call_context(
             MethodKind::SubmitReconstructDeck,
             *seat_index,
@@ -1693,15 +1685,11 @@ impl Orchestrator {
             pi.post_state_root,
             pi.dispatch_call_digest,
         );
-        let request = build_bls12381_reconstruction_request(
-            poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
+        let request = build_bls12381_reconstruction_v3_request(
+            poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
             &call_context,
             TranscriptId::FiatShamirSha3,
-            &cards,
-            &args.output_cards,
-            &args.swap_cards,
-            &args.user_readable_cards,
-            &user_public_key,
+            &args.statement,
             &args.proof,
         )
         .map_err(|error| {
@@ -1709,10 +1697,10 @@ impl Orchestrator {
                 "submit_reconstruct_deck precompile request construction failed: {error}"
             ))
         })?;
-        let binding = PrecompileCallBinding::verify_reconstruction(&request)?;
+        let binding = PrecompileCallBinding::verify_reconstruction_v3(&request)?;
         let input = SubmitReconstructDeckInput {
             seat_index: *seat_index,
-            reconstruct_phase: task.post_table.reconstruct_state.phase,
+            reconstruct_phase: task.pre_table.reconstruct_state.phase,
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);

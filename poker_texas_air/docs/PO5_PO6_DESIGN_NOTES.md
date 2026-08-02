@@ -294,6 +294,22 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
   semantic/leaf、PCS quotient、FRI fold、全局 lookup 归零、空输入守卫、9-limb 无损往返、完整 scaffold
   往返、statement/envelope tamper 与显式关闭；
 - **P05-H-core** O(N) 宿主验证与完整范围 anchor 校验已闭合；
+- **P05-H-precompile** 已闭合：`outer_precompile` 的规范 request 携带完整 `ProveTask`
+  和 `OuterAggregateBundle`，但验证者必须从外部提供已认证 `ExpectedChainAnchor`。
+  native backend 对每个 child 重放 VM、poker proof 与 method STARK，再签发绑定完整
+  256-bit request/aggregate/anchor/receipt digest 的 receipt；最终 68 列 STWO AIR 对四个
+  digest 的全部 16×u16 limbs、backend、ABI 与 child count 做等值约束。proof package
+  采用严格 magic/version/length/canonical decode，anchor 替换、child/request 篡改和
+  final AIR 篡改均 fail-closed。该路径是可转移的 circuit precompile 包，但验证成本仍
+  为 O(N)，不声称 recursive/succinct。
+- Reconstruction 生产路径已从 V2 迁移到 V3：VM 从 pre-state 重算 table/hand/curve
+  `context_digest`、`reconstruct_started_at` epoch 和上一轮 owner-readable hand 的
+  `prior_state_digest`，并要求 statement 的 aggregate key、owner key、固定 init-deck
+  card points 与 readable ciphertexts 完全一致。重建语义改为 aggregate-key canonical
+  base deck 加每个玩家的 canonical-slot contributions，不再使用公开 swap/output V2。
+  状态机回归覆盖两名不同 owner key 的真实 V3 proof 顺序提交，并验证最终牌组严格等于
+  `canonical_base_deck + contribution_0 + contribution_1`、旧 readable ciphertext 记录保留、
+  `cards_dealt` 归零且协议进入 `SHUFFLE_PHASE_RECONSTRUCT`。
 - **P05-H-source** 已闭合：`build_anchor_from_consensus` 从已认证 block/cert + SMT 包含证明
   构造 `ExpectedChainAnchor`，`verify_chain_against_consensus` 走锚定路径；剩余边界是
   调用顺序依赖 Bullshark projection（共识层不签名有序序列）；

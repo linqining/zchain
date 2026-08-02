@@ -4,14 +4,14 @@
 //! request. Production verification replays that verification and recomputes
 //! both digests; a proof-carried `success = true` value is never accepted.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use poker_protocol::precompile::{
-    NativeBls12381ReconstructionVerifier, NativeBls12381ShuffleVerifier,
+    NativeBls12381ReconstructionV3Verifier, NativeBls12381ShuffleVerifier,
 };
 use poker_protocol::precompile_abi::{
-    RECONSTRUCTION_ABI_VERSION, ReconstructionVerifier, ReconstructionVerifyRequest,
-    SHUFFLE_ABI_VERSION, ShuffleVerifier, ShuffleVerifyRequest,
+    ReconstructionV3Verifier, ReconstructionV3VerifyRequest, ShuffleVerifier, ShuffleVerifyRequest,
+    RECONSTRUCTION_V3_ABI_VERSION, SHUFFLE_ABI_VERSION,
 };
 use stwo::core::fields::m31::M31;
 
@@ -28,8 +28,8 @@ pub const DIGEST_LIMBS: usize = 16;
 pub enum PokerPrecompileId {
     /// Bayer--Groth shuffle proof verification.
     Shuffle = 1,
-    /// Reconstruction V2 verification.
-    Reconstruction = 2,
+    /// Reconstruction V3 slot-OR verification.
+    ReconstructionV3 = 3,
 }
 
 /// Native backend identity committed by the receipt digest.
@@ -93,15 +93,17 @@ impl PrecompileCallBinding {
         ))
     }
 
-    /// Verify and bind a canonical reconstruction request with the native backend.
-    pub fn verify_reconstruction(request: &ReconstructionVerifyRequest) -> TexasAirResult<Self> {
+    /// Verify and bind a canonical reconstruction V3 request with the native backend.
+    pub fn verify_reconstruction_v3(
+        request: &ReconstructionV3VerifyRequest,
+    ) -> TexasAirResult<Self> {
         let request_bytes = request.encode().map_err(precompile_error)?;
-        NativeBls12381ReconstructionVerifier
+        NativeBls12381ReconstructionV3Verifier
             .verify(request)
             .map_err(precompile_error)?;
         Ok(Self::issue(
-            PokerPrecompileId::Reconstruction,
-            RECONSTRUCTION_ABI_VERSION,
+            PokerPrecompileId::ReconstructionV3,
+            RECONSTRUCTION_V3_ABI_VERSION,
             request_bytes,
         ))
     }
@@ -137,10 +139,10 @@ impl PrecompileCallBinding {
                     ShuffleVerifyRequest::decode(&self.request_bytes).map_err(precompile_error)?;
                 Self::verify_shuffle(&request)?
             }
-            PokerPrecompileId::Reconstruction => {
-                let request = ReconstructionVerifyRequest::decode(&self.request_bytes)
+            PokerPrecompileId::ReconstructionV3 => {
+                let request = ReconstructionV3VerifyRequest::decode(&self.request_bytes)
                     .map_err(precompile_error)?;
-                Self::verify_reconstruction(&request)?
+                Self::verify_reconstruction_v3(&request)?
             }
         };
         if &rebuilt != self {

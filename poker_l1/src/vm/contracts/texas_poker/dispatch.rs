@@ -23,17 +23,17 @@
 //! dispatch 层目前仅记录日志（tracing::debug!）并丢弃，后续 Precompile
 //! 实现可在 Phase 3.3 / Phase 4 中扩展 DispatchResult 携带 events 字段。
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use blstrs::G1Projective;
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
-use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
-use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
+use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use poker_protocol::zk_shuffle::ShuffleProof;
 
 use super::constants::{FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN};
 use super::events::TexasPokerEvent;
@@ -366,14 +366,11 @@ pub struct SubmitRevealTokensArgs {
 pub struct SubmitReconstructDeckArgs {
     /// 座位索引。
     pub seat_index: u8,
-    /// 重构输出牌组（typed ElGamalCiphertext 列表）。
-    pub output_cards: Vec<ElGamalCiphertext>,
-    /// swap 牌组（typed ElGamalCiphertext 列表，暂时未用，保留）。
-    pub swap_cards: Vec<ElGamalCiphertext>,
-    /// user_readable 牌组（typed ElGamalCiphertext 列表，暂时未用，保留）。
-    pub user_readable_cards: Vec<ElGamalCiphertext>,
-    /// reconstruct proof（typed ReconstructProof）。
-    pub proof: ReconstructProof<DefaultCurve>,
+    /// Complete V3 public statement. The hidden readable-to-canonical mapping
+    /// is not serialized in this value.
+    pub statement: ReconstructionV3Statement<DefaultCurve>,
+    /// Reconstruction V3 proof for the exact statement above.
+    pub proof: ReconstructProofV3<DefaultCurve>,
 }
 
 /// `raise` 参数。
@@ -1294,9 +1291,7 @@ fn dispatch_submit_reconstruct_deck(
     state_machine::apply_submit_reconstruct_deck(
         table,
         input.seat_index,
-        input.output_cards,
-        input.swap_cards,
-        input.user_readable_cards,
+        input.statement,
         input.proof,
         events,
     )
@@ -2215,8 +2210,8 @@ mod tests {
         DLEqProof::from_parts(vec![], G1Projective::identity(), zero, zero)
     }
 
-    fn empty_schnorr_proof()
-    -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
+    fn empty_schnorr_proof(
+    ) -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
     {
         poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
             commitment: G1Projective::identity(),
@@ -2237,64 +2232,105 @@ mod tests {
         ShuffleProof::LegacyV1(legacy)
     }
 
-    fn empty_reconstruct_proof() -> ReconstructProof<DefaultCurve> {
+    fn empty_reconstruct_v3() -> (
+        ReconstructionV3Statement<DefaultCurve>,
+        ReconstructProofV3<DefaultCurve>,
+    ) {
         use poker_protocol::zk_shuffle::bayer_groth::{
             BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument,
         };
         use poker_protocol::zk_shuffle::reconstruction::{
-            ChaumPedersenDLEQProof, OrderedEncryptionProof, SwapOutCardProof,
+            CrossKeyNegationProof, SlotContributionOrProof,
         };
 
         let zero = super::super::utils::scalar_zero();
         let identity = G1Projective::identity();
+        let generator = super::super::utils::g1_generator();
+        let aggregate_pk = generator * super::super::utils::scalar_from_u64(17);
+        let owner_pk = generator * super::super::utils::scalar_from_u64(19);
+        let cards = vec![
+            generator * super::super::utils::scalar_from_u64(23),
+            generator * super::super::utils::scalar_from_u64(29),
+        ];
         let identity_ciphertext = ElGamalCiphertext {
             c1: identity,
             c2: identity,
         };
-        ReconstructProof {
-            // This fixture is only for Borsh/selector roundtrips. Keep every
-            // V2 vector length self-consistent; the identity values are not a
-            // valid cryptographic proof and are never verified as one.
-            swap_out_cards_proofs: vec![SwapOutCardProof {
-                user_readable_card: identity_ciphertext,
-                swap_out_card: identity_ciphertext,
-                chaum_pedersen_proof: ChaumPedersenDLEQProof {
-                    commitment_a: identity,
-                    commitment_b: identity,
-                    response: zero,
-                },
-            }],
-            padded_swap_cards: vec![identity_ciphertext; 2],
-            padded_swap_shuffle_proof: BayerGrothShuffleProof {
-                c_permutation: identity,
-                c_permuted_powers: identity,
-                multi_exponentiation: MultiExponentiationArgument {
-                    c_alpha: identity,
-                    c_beta: identity,
-                    ciphertext_0: identity_ciphertext,
-                    ciphertext_1: identity_ciphertext,
-                    alpha_response: vec![zero; 2],
-                    commitment_response: zero,
-                    beta: zero,
-                    beta_blinding_response: zero,
-                    rerandomization_response: zero,
-                },
-                product: ProductArgument {
-                    c_d: identity,
-                    c_delta: identity,
-                    c_capital_delta: identity,
-                    a_response: vec![zero; 2],
-                    b_response: vec![zero; 2],
-                    r_response: zero,
-                    s_response: zero,
-                },
+        // `build_method_input` validates the strict V3 wire shape even though
+        // these dispatch tests never execute the proof. Use a structurally
+        // valid public statement and keep only the proof equations as dummies.
+        let readable_ciphertext = ElGamalCiphertext::encrypt(
+            &cards[0],
+            &owner_pk,
+            &super::super::utils::scalar_from_u64(31),
+        );
+        let contributions = vec![
+            ElGamalCiphertext::encrypt(
+                &identity,
+                &aggregate_pk,
+                &super::super::utils::scalar_from_u64(37),
+            ),
+            ElGamalCiphertext::encrypt(
+                &identity,
+                &aggregate_pk,
+                &super::super::utils::scalar_from_u64(41),
+            ),
+        ];
+        let contribution_shuffle_proof = BayerGrothShuffleProof {
+            c_permutation: identity,
+            c_permuted_powers: identity,
+            multi_exponentiation: MultiExponentiationArgument {
+                c_alpha: identity,
+                c_beta: identity,
+                ciphertext_0: identity_ciphertext,
+                ciphertext_1: identity_ciphertext,
+                alpha_response: vec![zero; 2],
+                commitment_response: zero,
+                beta: zero,
+                beta_blinding_response: zero,
+                rerandomization_response: zero,
             },
-            ordered_encryption_proof: OrderedEncryptionProof {
-                commitment_g: vec![identity; 2],
-                commitment_pk: vec![identity; 2],
-                responses: vec![zero; 2],
+            product: ProductArgument {
+                c_d: identity,
+                c_delta: identity,
+                c_capital_delta: identity,
+                a_response: vec![zero; 2],
+                b_response: vec![zero; 2],
+                r_response: zero,
+                s_response: zero,
             },
-        }
+        };
+        let statement = ReconstructionV3Statement {
+            version: 3,
+            context_digest: [0; 32],
+            reconstruction_epoch: 0,
+            prior_state_digest: [0; 32],
+            aggregate_pk,
+            owner_pk,
+            cards,
+            user_readable_cards: vec![readable_ciphertext],
+            contributions,
+        };
+        let cross_key = CrossKeyNegationProof {
+            commitment_owner_key: identity,
+            commitment_contribution_c1: identity,
+            commitment_joint_c2: identity,
+            response_owner_sk: zero,
+            response_contribution_randomness: zero,
+        };
+        let slot = SlotContributionOrProof {
+            commitment_g: [identity; 2],
+            commitment_pk: [identity; 2],
+            challenges: [zero; 2],
+            responses: [zero; 2],
+        };
+        let proof = ReconstructProofV3 {
+            negative_contributions: vec![identity_ciphertext],
+            cross_key_proofs: vec![cross_key],
+            contribution_shuffle_proof,
+            slot_membership_proofs: vec![slot; 2],
+        };
+        (statement, proof)
     }
 
     fn crypto_args() -> Vec<([u8; 32], Vec<u8>, u8)> {
@@ -2325,12 +2361,11 @@ mod tests {
             reveal_tokens: vec![],
             proofs: vec![],
         };
+        let (statement, proof) = empty_reconstruct_v3();
         let reconstruct = SubmitReconstructDeckArgs {
             seat_index: 5,
-            output_cards: vec![],
-            swap_cards: vec![],
-            user_readable_cards: vec![],
-            proof: empty_reconstruct_proof(),
+            statement,
+            proof,
         };
         let fold = FoldWithProofArgs {
             seat_index: 0,

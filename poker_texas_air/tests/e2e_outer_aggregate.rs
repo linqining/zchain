@@ -8,12 +8,16 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, Sub
 use poker_l1::vm::contracts::texas_poker::types::{ShuffleState, TexasPokerTable};
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
-use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-use poker_texas_air::dual_proof::{DualProofBundle, prove_dual_proof};
+use poker_protocol::zk_shuffle::ShuffleProof;
+use poker_texas_air::dual_proof::{prove_dual_proof, DualProofBundle};
 use poker_texas_air::outer_aggregate::{
-    OUTER_AGGREGATE_VERSION, OuterAggregateBundle, aggregate_dual_proofs, prove_outer_aggregate,
-    verify_outer_aggregate,
+    aggregate_dual_proofs, prove_outer_aggregate, verify_outer_aggregate, OuterAggregateBundle,
+    OUTER_AGGREGATE_VERSION,
+};
+use poker_texas_air::outer_precompile::{
+    prove_host_verified_outer_aggregate_from_bundle, verify_host_verified_outer_aggregate,
+    HostVerifiedOuterAggregateProof,
 };
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
@@ -218,6 +222,47 @@ fn honest_outer_aggregate_roundtrips_verifies_and_anchors() {
 }
 
 #[test]
+fn host_verified_outer_precompile_roundtrips_and_rejects_anchor_or_air_tampering() {
+    let tasks = sequential_shuffle_tasks(551);
+    let aggregate = prove_outer_aggregate(&tasks).expect("outer aggregate should prove");
+    let verified = verify_outer_aggregate(&tasks, &aggregate).expect("children should verify");
+    let anchor = anchor_from_verified(&verified);
+    let package = prove_host_verified_outer_aggregate_from_bundle(&tasks, aggregate, &anchor)
+        .expect("outer precompile package should prove");
+    let encoded = package
+        .encode()
+        .expect("outer precompile package should encode");
+    let decoded = HostVerifiedOuterAggregateProof::decode(&encoded)
+        .expect("outer precompile package should decode");
+    let accepted = verify_host_verified_outer_aggregate(&decoded, &anchor)
+        .expect("native replay and final AIR should verify");
+    assert_eq!(accepted.child_count(), 3);
+    assert_eq!(accepted.table_id(), anchor.table_id());
+    assert_eq!(accepted.pre_state_root(), anchor.pre_state_root());
+    assert_eq!(accepted.post_state_root(), anchor.post_state_root());
+
+    // Package header (20) + request header (24) + anchor fixed fields (112)
+    // reaches the first authenticated dispatch digest. Changing it preserves
+    // canonical decoding but must fail comparison with the external anchor.
+    let mut changed_anchor = encoded.clone();
+    changed_anchor[20 + 24 + 112] ^= 1;
+    let changed_anchor = HostVerifiedOuterAggregateProof::decode(&changed_anchor)
+        .expect("changed digest remains structurally canonical");
+    assert!(verify_host_verified_outer_aggregate(&changed_anchor, &anchor).is_err());
+
+    let mut changed_air = encoded;
+    let request_len = u32::from_le_bytes(changed_air[12..16].try_into().unwrap()) as usize;
+    let proof_start = 20 + request_len;
+    // Fixed-int bincode starts the commitments Vec with an eight-byte length;
+    // mutate the low byte of the first commitment rather than corrupting an
+    // internal polynomial length (which some upstream Stwo versions panic on).
+    changed_air[proof_start + 8 + 31] ^= 1;
+    if let Ok(changed_air) = HostVerifiedOuterAggregateProof::decode(&changed_air) {
+        assert!(verify_host_verified_outer_aggregate(&changed_air, &anchor).is_err());
+    }
+}
+
+#[test]
 fn outer_aggregate_rejects_reorder_splice_deletion_and_manifest_tampering() {
     let tasks = sequential_shuffle_tasks(601);
     let aggregate = prove_outer_aggregate(&tasks).expect("fixture aggregate should prove");
@@ -249,11 +294,9 @@ fn outer_aggregate_rejects_reorder_splice_deletion_and_manifest_tampering() {
     let subrange = aggregate_dual_proofs(&tasks[..2], child_prefix).unwrap();
     let verified_subrange = verify_outer_aggregate(&tasks[..2], &subrange).unwrap();
     let full_verified = verify_outer_aggregate(&tasks, &aggregate).unwrap();
-    assert!(
-        verified_subrange
-            .verify_against_anchor(&anchor_from_verified(&full_verified))
-            .is_err()
-    );
+    assert!(verified_subrange
+        .verify_against_anchor(&anchor_from_verified(&full_verified))
+        .is_err());
 
     let mut bad_digest = encoded.clone();
     bad_digest[112] ^= 1;

@@ -2,14 +2,15 @@
 //!
 //! VM 当前注册 23 个 selector；其中 21 个有 method AIR / host prove+verify 路径，
 //! `request_leave_after_hand` 与 `fold_with_proof` 在生产 Orchestrator 中显式
-//! fail-closed。当前 Aggregator 只处理 descriptor，尚不能递归验证子 proof。
+//! fail-closed。阶段 4 提供可转移的 host-verified outer-precompile 包；验证者仍需
+//! O(N) 重放所有 child，当前 Aggregator 不能递归验证子 proof。
 //!
 //! ## 架构分层
 //!
 //! - **Layer 0**: Method AIRs（21 个启用；2 个注册 selector 禁用）
 //! - **Layer 1**: Host verification receipts（完整 VM dispatch replay 后逐 proof 原生验证）
-//! - **Layer 2**: Aggregator AIR PoC（只聚合 descriptor，不验证子 proof，生产入口禁用）
-//! - **Layer 3**: Final Recursion（尚未形成可用闭环）
+//! - **Layer 2**: Host-verified outer precompile（O(N) child replay + final digest AIR）
+//! - **Layer 3**: Succinct recursion（尚未形成可用闭环）
 //!
 //! ## 设计文档
 //!
@@ -42,6 +43,7 @@ pub mod error;
 pub mod merkle_tree;
 pub mod method_kind;
 pub mod outer_aggregate;
+pub mod outer_precompile;
 pub mod precompile_binding;
 pub mod public_inputs;
 pub mod state_root;

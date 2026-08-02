@@ -2,14 +2,14 @@
 
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::precompile::{
-    build_bls12381_reconstruction_request, build_bls12381_shuffle_request,
+    build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::TranscriptId;
-use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::reconstruction::{
-    RECONSTRUCTION_PROOF_LABEL, ReconstructProof, reconstruct_deck,
+    ReconstructProofV3, RECONSTRUCTION_V3_PROOF_LABEL,
 };
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_texas_air::airs::crypto::submit_reconstruct_deck::{
     SubmitReconstructDeckAir, SubmitReconstructDeckInput, SubmitReconstructDeckRow,
 };
@@ -17,8 +17,8 @@ use poker_texas_air::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
 use poker_texas_air::method_kind::MethodKind;
-use poker_texas_air::precompile_binding::{PrecompileCallBinding, precompile_call_context};
-use poker_texas_air::prover::{MethodProof, prove_method};
+use poker_texas_air::precompile_binding::{precompile_call_context, PrecompileCallBinding};
+use poker_texas_air::prover::{prove_method, MethodProof};
 use poker_texas_air::public_inputs::TexasPublicInputs;
 use poker_texas_air::state_root::state_root_to_air_limbs;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
@@ -180,7 +180,7 @@ fn changing_a_request_digest_limb_invalidates_the_statement() {
 }
 
 #[test]
-fn honest_reconstruction_v2_receipt_is_bound_to_the_air() {
+fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     let table_id = 51;
     let hand_id = 8;
     let call_seq = 6;
@@ -208,30 +208,19 @@ fn honest_reconstruction_v2_receipt_is_bound_to_the_air() {
             )
         })
         .collect();
-    let coefficient = <Bls12381Curve as Curve>::Scalar::from_u64(9);
-    let (s_vec, output_cards, indexed_swap_cards) = reconstruct_deck::<Bls12381Curve>(
-        &cards,
-        &readable_cards,
+    let (statement, reconstruction_proof) = ReconstructProofV3::prove(
+        [0x11; 32],
+        9,
+        [0x22; 32],
+        cards,
+        readable_cards,
         &secret_key,
         &public_key,
-        &coefficient,
-    )
-    .unwrap();
-    let proof = ReconstructProof::prove(
-        cards.clone(),
-        readable_cards.clone(),
-        output_cards.clone(),
-        indexed_swap_cards.clone(),
-        &secret_key,
         &public_key,
-        s_vec,
-        &mut FiatShamirTranscript::new(RECONSTRUCTION_PROOF_LABEL),
+        &mut OsRng,
+        &mut FiatShamirTranscript::new(RECONSTRUCTION_V3_PROOF_LABEL),
     )
     .unwrap();
-    let swap_cards: Vec<_> = indexed_swap_cards
-        .into_iter()
-        .map(|(_, ciphertext)| ciphertext)
-        .collect();
     let call_context = precompile_call_context(
         MethodKind::SubmitReconstructDeck,
         seat_index,
@@ -244,19 +233,15 @@ fn honest_reconstruction_v2_receipt_is_bound_to_the_air() {
         public_inputs.post_state_root,
         public_inputs.dispatch_call_digest,
     );
-    let request = build_bls12381_reconstruction_request(
-        RECONSTRUCTION_PROOF_LABEL,
+    let request = build_bls12381_reconstruction_v3_request(
+        RECONSTRUCTION_V3_PROOF_LABEL,
         &call_context,
         TranscriptId::FiatShamirSha3,
-        &cards,
-        &output_cards,
-        &swap_cards,
-        &readable_cards,
-        &public_key,
-        &proof,
+        &statement,
+        &reconstruction_proof,
     )
     .unwrap();
-    let binding = PrecompileCallBinding::verify_reconstruction(&request).unwrap();
+    let binding = PrecompileCallBinding::verify_reconstruction_v3(&request).unwrap();
     let input = SubmitReconstructDeckInput {
         seat_index,
         reconstruct_phase: 1,

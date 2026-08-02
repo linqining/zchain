@@ -6,7 +6,8 @@
 //!   等（blstrs 包装，与原 `crypto::bls_scalar` API 一致），最小化 `state_machine.rs` 改动
 //! - **ElGamal 操作**：`encrypt`/`decrypt`/`gen_reveal_token`/`remask`/`add_pk_to_c2` 等
 //!   包装 `poker_protocol::crypto::curve::ElGamalCiphertextGeneric::<Bls12381Curve>` 方法
-//! - **Transcript 工厂**：协议 V2 shuffle/reconstruction 使用 Move-compatible SHA3 transcript
+//! - **Transcript 工厂**：shuffle V2、legacy reconstruction 与 production reconstruction V3
+//!   使用各自固定的 Move-compatible SHA3 transcript domain
 //! - **ZK skip 回退**：`verify_or_skip` 保留 dev chain 友好的跳过逻辑
 //! - **PK 所有权证明**：`verify_pk_ownership` 保留 80 字节 Schnorr 自定义格式
 //!   （poker_protocol 的 `GeneralizedSchnorrProof` 是不同格式，不替换）
@@ -17,6 +18,8 @@
 //! - Scalar：32 字节大端序（blstrs `Scalar::to_bytes_be`）
 //! - SHA3-256 输出为大端序字节流，清高 2 位即 `h[0] & 0x3F`（M-P18）
 
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use blstrs::{G1Projective, Scalar as BlsScalar};
 use ff::Field;
 use group::Group;
@@ -75,12 +78,119 @@ pub fn new_leave_transcript() -> MerlinTranscript {
     MerlinTranscript::new(b"zk_leave_proof_v1")
 }
 
-/// 创建重建证明的 Transcript。
+/// Create the legacy reconstruction transcript.
+///
+/// Production `submit_reconstruct_deck` uses
+/// [`new_reconstruct_v3_transcript`]. This constructor remains available for
+/// decoding and auditing historical V2 artifacts.
 #[must_use]
 pub fn new_reconstruct_transcript() -> FiatShamirTranscript {
     FiatShamirTranscript::new(
         poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
     )
+}
+
+/// Create the Fiat--Shamir transcript used by reconstruction V3.
+#[must_use]
+pub fn new_reconstruct_v3_transcript() -> FiatShamirTranscript {
+    FiatShamirTranscript::new(
+        poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
+    )
+}
+
+/// Return the previous-round owner-readable ciphertexts authenticated by the
+/// current table state, preserving their canonical `decrypted_cards` order.
+///
+/// These records arise only after reveal-token processing of cards drawn from
+/// the shuffled `init_deck` lineage. Their deck indices do not reveal the
+/// hidden canonical plaintext-card mapping.
+#[must_use]
+pub fn reconstruction_v3_user_readable_cards(
+    table: &super::types::TexasPokerTable,
+    seat_index: u8,
+) -> Vec<ElGamalCiphertext> {
+    table
+        .deck_state
+        .decrypted_cards
+        .iter()
+        .filter(|card| card.owner_seat_index == seat_index)
+        .filter_map(|card| card.ciphertext.clone())
+        .collect()
+}
+
+/// Derive the application/domain digest required by reconstruction V3.
+///
+/// The proof statement separately binds keys and card points; this digest
+/// prevents cross-table, cross-hand, or cross-curve replay.
+#[must_use]
+pub fn reconstruction_v3_context_digest(table: &super::types::TexasPokerTable) -> [u8; 32] {
+    let mut material = Vec::with_capacity(96);
+    material.extend_from_slice(b"zchain.texas_poker.reconstruction_v3.context.v1");
+    material.extend_from_slice(&table.id.to_bytes());
+    material.extend_from_slice(&table.hand_id.to_le_bytes());
+    material.extend_from_slice(b"bls12-381-g1");
+    blake2b_256(&material)
+}
+
+/// Digest the authenticated prior owner-readable hand and its init-deck
+/// lineage for reconstruction V3.
+///
+/// This value is recomputed by VM replay and the AIR precompile adapter. It is
+/// not accepted from the prover. The full pre-state root in the call context
+/// additionally commits to the rest of the table state.
+pub fn reconstruction_v3_prior_state_digest(
+    table: &super::types::TexasPokerTable,
+    seat_index: u8,
+) -> PokerL1Result<[u8; 32]> {
+    let aggregate_pk = table.deck_state.aggregated_pk.as_ref().ok_or_else(|| {
+        PokerL1Error::Serialization(
+            "reconstruction V3 prior state requires aggregate public key".into(),
+        )
+    })?;
+    let mut material = Vec::new();
+    material.extend_from_slice(b"zchain.texas_poker.reconstruction_v3.prior_state.v1");
+    material.extend_from_slice(&table.id.to_bytes());
+    material.extend_from_slice(&table.hand_id.to_le_bytes());
+    material.push(seat_index);
+    material.extend_from_slice(&table.timestamps.reconstruct_started_at.to_le_bytes());
+    material.extend_from_slice(&aggregate_pk.0.to_compressed());
+    material.extend_from_slice(&(table.deck_state.plaintext.len() as u32).to_le_bytes());
+    for card in &table.deck_state.plaintext {
+        material.extend_from_slice(&card.0.to_compressed());
+    }
+
+    let readable_records = table
+        .deck_state
+        .decrypted_cards
+        .iter()
+        .filter(|card| card.owner_seat_index == seat_index && card.ciphertext.is_some())
+        .collect::<Vec<_>>();
+    if readable_records.is_empty() {
+        return Err(PokerL1Error::Serialization(
+            "reconstruction V3 requires an authenticated previous-round readable hand".into(),
+        ));
+    }
+    material.extend_from_slice(&(readable_records.len() as u32).to_le_bytes());
+    for card in readable_records {
+        material.push(card.encrypted_card_index);
+        material.push(card.owner_seat_index);
+        let ciphertext = card
+            .ciphertext
+            .as_ref()
+            .expect("filter requires an owner-readable ciphertext");
+        material.extend_from_slice(&ciphertext.c1.to_compressed());
+        material.extend_from_slice(&ciphertext.c2.to_compressed());
+    }
+    Ok(blake2b_256(&material))
+}
+
+fn blake2b_256(payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    Update::update(&mut hasher, &(payload.len() as u64).to_le_bytes());
+    Update::update(&mut hasher, payload);
+    let mut digest = [0u8; 32];
+    hasher.finalize_variable(&mut digest).expect("32 <= 64");
+    digest
 }
 
 /// 创建 remask + shuffle 共享 Transcript（用于 join_and_shuffle 场景）。
@@ -205,7 +315,7 @@ pub fn scalar_inv(a: &BlsScalar) -> BlsScalar {
 /// 3. Scalar::from_bytes_be(h)
 pub fn hash_to_scalar(data: &[u8]) -> PokerL1Result<BlsScalar> {
     let mut hasher = Sha3_256::new();
-    hasher.update(data);
+    Digest::update(&mut hasher, data);
     let mut h = hasher.finalize();
     h[0] &= 0x3F; // M-P18: 大端序下 h[0] 是 MSB，清高 2 位
     let mut arr = [0u8; SCALAR_SIZE];
@@ -654,8 +764,8 @@ mod tests {
 
     #[test]
     fn test_verify_pk_ownership_valid() {
-        use rand::SeedableRng;
         use rand::rngs::StdRng;
+        use rand::SeedableRng;
         let mut rng = StdRng::seed_from_u64(42);
         let sk = scalar_from_u64(123_456);
         let pk = g1_generator() * sk;

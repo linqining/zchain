@@ -10,17 +10,18 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, SubmitReconstructDeckArgs, SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    ReconstructState, ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, ShuffleState, TexasPokerTable,
 };
+use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
-use poker_protocol::crypto::types::{ECPoint, ECScalar};
-use poker_protocol::zk_shuffle::ShuffleProof;
+use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::reconstruction::{
-    RECONSTRUCTION_PROOF_LABEL, ReconstructProof, reconstruct_deck,
+    ReconstructProofV3, RECONSTRUCTION_V3_PROOF_LABEL,
 };
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_texas_air::dual_proof::{
-    DUAL_PROOF_MAGIC, DUAL_PROOF_VERSION, DualProofBundle, prove_dual_proof, verify_dual_proof,
+    prove_dual_proof, verify_dual_proof, DualProofBundle, DUAL_PROOF_MAGIC, DUAL_PROOF_VERSION,
 };
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
@@ -145,31 +146,6 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
             )
         })
         .collect();
-    let coefficient = <Bls12381Curve as Curve>::Scalar::from_u64(9 + nonce);
-    let (responses, output_cards, indexed_swap_cards) = reconstruct_deck::<Bls12381Curve>(
-        &cards,
-        &readable_cards,
-        &secret_key,
-        &public_key,
-        &coefficient,
-    )
-    .expect("reconstruction witness should build");
-    let proof = ReconstructProof::prove(
-        cards.clone(),
-        readable_cards.clone(),
-        output_cards.clone(),
-        indexed_swap_cards.clone(),
-        &secret_key,
-        &public_key,
-        responses,
-        &mut FiatShamirTranscript::new(RECONSTRUCTION_PROOF_LABEL),
-    )
-    .expect("reconstruction proof should build");
-    let swap_cards = indexed_swap_cards
-        .into_iter()
-        .map(|(_, card)| card)
-        .collect();
-
     let player = [0x51; 20];
     let mut table = TexasPokerTable::new(
         ObjectID::new([0xE4; 20], nonce),
@@ -187,18 +163,44 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
     table.seats[0].pk = ECPoint(public_key);
     table.seats[1].player = [0x52; 20];
     table.seats[1].stack = 1_000;
-    table.deck_state.plaintext = cards.into_iter().map(ECPoint).collect();
+    table.deck_state.plaintext = cards.iter().copied().map(ECPoint).collect();
+    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.deck_state.decrypted_cards = readable_cards
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, ciphertext)| DecryptedCard {
+            encrypted_card_index: index as u8,
+            owner_seat_index: 0,
+            ciphertext: Some(ciphertext),
+            plaintext: None,
+        })
+        .collect();
+    table.timestamps.reconstruct_started_at = 7_000 + nonce;
     table.reconstruct_state = ReconstructState {
         phase: RECONSTRUCT_PHASE_COLLECTING,
         pending_players: vec![0, 1],
-        coefficient: Some(ECScalar(coefficient)),
+        coefficient: None,
         player_decks: vec![],
     };
+    let context_digest = utils::reconstruction_v3_context_digest(&table);
+    let prior_state_digest = utils::reconstruction_v3_prior_state_digest(&table, 0).unwrap();
+    let (statement, proof) = ReconstructProofV3::prove(
+        context_digest,
+        table.timestamps.reconstruct_started_at,
+        prior_state_digest,
+        cards,
+        readable_cards,
+        &secret_key,
+        &public_key,
+        &public_key,
+        &mut OsRng,
+        &mut FiatShamirTranscript::new(RECONSTRUCTION_V3_PROOF_LABEL),
+    )
+    .expect("reconstruction V3 proof should build");
     let raw_args = borsh::to_vec(&SubmitReconstructDeckArgs {
         seat_index: 0,
-        output_cards,
-        swap_cards,
-        user_readable_cards: readable_cards,
+        statement,
         proof,
     })
     .expect("reconstruction args should encode");
@@ -292,6 +294,33 @@ fn reconstruction_dual_package_roundtrips_and_verifies() {
     let decoded = DualProofBundle::decode(&encoded).expect("package should decode");
     let accepted = verify_dual_proof(&task, &decoded).expect("both halves should verify");
     assert_eq!(accepted.receipt().kind(), MethodKind::SubmitReconstructDeck);
+}
+
+#[test]
+fn reconstruction_v3_rejects_prior_state_or_readable_hand_substitution() {
+    let task = reconstruction_task(304);
+
+    let mut changed_digest = task.clone();
+    let mut args: SubmitReconstructDeckArgs = borsh::from_slice(&changed_digest.raw_args).unwrap();
+    args.statement.prior_state_digest[0] ^= 1;
+    let raw_args = borsh::to_vec(&args).unwrap();
+    changed_digest.raw_args = raw_args.clone();
+    changed_digest.method_input = poker_texas_air::prove_task::MethodInput::SubmitReconstructDeck {
+        seat_index: args.seat_index,
+        raw_args,
+    };
+    assert!(prove_dual_proof(&changed_digest).is_err());
+
+    let mut changed_hand = task;
+    let mut args: SubmitReconstructDeckArgs = borsh::from_slice(&changed_hand.raw_args).unwrap();
+    args.statement.user_readable_cards.swap(0, 1);
+    let raw_args = borsh::to_vec(&args).unwrap();
+    changed_hand.raw_args = raw_args.clone();
+    changed_hand.method_input = poker_texas_air::prove_task::MethodInput::SubmitReconstructDeck {
+        seat_index: args.seat_index,
+        raw_args,
+    };
+    assert!(prove_dual_proof(&changed_hand).is_err());
 }
 
 #[test]

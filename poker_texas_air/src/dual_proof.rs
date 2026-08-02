@@ -5,7 +5,7 @@
 //!
 //! 1. the Stwo method proof for the state transition and AIR digest columns;
 //! 2. the complete canonical poker-precompile request, including the
-//!    Bayer--Groth shuffle or reconstruction proof.
+//!    Bayer--Groth shuffle or Reconstruction V3 slot-OR proof.
 //!
 //! The package does **not** carry a trusted AIR or trusted public inputs.
 //! Verification requires the independently authenticated [`ProveTask`], replays
@@ -16,11 +16,11 @@
 
 use bincode::Options;
 use poker_protocol::precompile::{
-    build_bls12381_reconstruction_request, build_bls12381_shuffle_request,
+    build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::{
-    RECONSTRUCTION_ABI_VERSION, ReconstructionVerifyRequest, SHUFFLE_ABI_VERSION,
-    ShuffleVerifyRequest, TranscriptId,
+    ReconstructionV3VerifyRequest, ShuffleVerifyRequest, TranscriptId,
+    RECONSTRUCTION_V3_ABI_VERSION, SHUFFLE_ABI_VERSION,
 };
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
@@ -35,14 +35,14 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::validate_full_dispatch_task;
 use crate::precompile_binding::{
-    PokerPrecompileId, PrecompileCallBinding, precompile_call_context,
+    precompile_call_context, PokerPrecompileId, PrecompileCallBinding,
 };
-use crate::prove_task::{MethodInput, ProveTask, dispatch_call_digest};
-use crate::prover::{MethodProof, prove_method};
+use crate::prove_task::{dispatch_call_digest, MethodInput, ProveTask};
+use crate::prover::{prove_method, MethodProof};
 use crate::public_inputs::TexasPublicInputs;
-use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
-use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
-use crate::verified_chain::{VerificationReceipt, verify_method_against_and_issue_receipt};
+use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
+use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
+use crate::verified_chain::{verify_method_against_and_issue_receipt, VerificationReceipt};
 
 /// Wire-format magic for a stage-3 dual proof package.
 pub const DUAL_PROOF_MAGIC: [u8; 8] = *b"ZPDUAL03";
@@ -164,7 +164,7 @@ impl DualProofBundle {
             .ok_or_else(|| wire_error("unknown dual proof method kind"))?;
         let precompile_id = match bytes[10] {
             1 => PokerPrecompileId::Shuffle,
-            2 => PokerPrecompileId::Reconstruction,
+            3 => PokerPrecompileId::ReconstructionV3,
             _ => return Err(wire_error("unknown poker precompile id")),
         };
         let abi_version = bytes[11];
@@ -280,8 +280,8 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
             )?;
             bundle_from_stark(
                 MethodKind::SubmitReconstructDeck,
-                PokerPrecompileId::Reconstruction,
-                RECONSTRUCTION_ABI_VERSION,
+                PokerPrecompileId::ReconstructionV3,
+                RECONSTRUCTION_V3_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
             )
@@ -519,24 +519,12 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "submit_reconstruct_deck seat differs between task fields".into(),
                 ));
             }
-            let cards: Vec<_> = task
-                .pre_table
-                .deck_state
-                .plaintext
-                .iter()
-                .map(|card| card.0)
-                .collect();
-            let user_public_key = task.pre_table.seats[*seat_index as usize].pk.0;
             let call_context = call_context(task, *seat_index, &public_inputs);
-            let expected_request = build_bls12381_reconstruction_request(
-                poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
+            let expected_request = build_bls12381_reconstruction_v3_request(
+                poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
                 &call_context,
                 TranscriptId::FiatShamirSha3,
-                &cards,
-                &args.output_cards,
-                &args.swap_cards,
-                &args.user_readable_cards,
-                &user_public_key,
+                &args.statement,
                 &args.proof,
             )
             .map_err(|error| {
@@ -550,15 +538,16 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 ))
             })?;
             let request_bytes = require_expected_request(supplied_request, expected_bytes)?;
-            let request = ReconstructionVerifyRequest::decode(&request_bytes).map_err(|error| {
-                TexasAirError::SpecViolation(format!(
-                    "reconstruction request canonical decode failed: {error}"
-                ))
-            })?;
-            let binding = PrecompileCallBinding::verify_reconstruction(&request)?;
+            let request =
+                ReconstructionV3VerifyRequest::decode(&request_bytes).map_err(|error| {
+                    TexasAirError::SpecViolation(format!(
+                        "reconstruction V3 request canonical decode failed: {error}"
+                    ))
+                })?;
+            let binding = PrecompileCallBinding::verify_reconstruction_v3(&request)?;
             let input = SubmitReconstructDeckInput {
                 seat_index: *seat_index,
-                reconstruct_phase: task.post_table.reconstruct_state.phase,
+                reconstruct_phase: task.pre_table.reconstruct_state.phase,
                 precompile: binding.air_binding(),
             };
             let row = SubmitReconstructDeckRow::active(
@@ -678,8 +667,8 @@ fn validate_route(
             SHUFFLE_ABI_VERSION
         ) | (
             MethodKind::SubmitReconstructDeck,
-            PokerPrecompileId::Reconstruction,
-            RECONSTRUCTION_ABI_VERSION
+            PokerPrecompileId::ReconstructionV3,
+            RECONSTRUCTION_V3_ABI_VERSION
         )
     );
     if !valid {

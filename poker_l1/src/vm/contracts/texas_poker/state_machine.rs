@@ -28,24 +28,27 @@ use blstrs::G1Projective;
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ECScalar, ElGamalCiphertext};
-use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
-use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
+use poker_protocol::zk_shuffle::reconstruction::{
+    apply_reconstruction_contributions, canonical_base_deck, ReconstructProofV3,
+    ReconstructionV3Statement,
+};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::ShuffleProof;
 
 use super::betting::{BettingError, BettingRound};
 use super::card::{Card, PlayingCard};
 use super::constants::*;
 use super::events::{
-    self, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE, DECK_REBUILT_REASON_SHUFFLE_TIMEOUT,
-    POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN, TRIGGER_ACTION_RAISE_ALL_IN,
-    TexasPokerEvent,
+    self, TexasPokerEvent, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE,
+    DECK_REBUILT_REASON_SHUFFLE_TIMEOUT, POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN,
+    TRIGGER_ACTION_RAISE_ALL_IN,
 };
 use super::side_pot;
 use super::types::{
-    DecryptedCard, EMPTY_PLAYER, OWNER_SEAT_PUBLIC, ReconstructPlayerDeck, RevealAssignment,
-    RevealTokenData, Seat, TexasPokerTable,
+    DecryptedCard, ReconstructPlayerDeck, RevealAssignment, RevealTokenData, Seat, TexasPokerTable,
+    EMPTY_PLAYER, OWNER_SEAT_PUBLIC,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -257,47 +260,31 @@ pub fn set_initial_encrypted_deck(table: &mut TexasPokerTable) -> PokerL1Result<
     Ok(())
 }
 
-/// 从 reconstruct 玩家提交的 deck 重建新 deck（累加所有 player_decks）。
+/// Rebuild a fresh aggregate-key deck from verified V3 contributions.
 ///
-/// 算法（`table.move::rebuild_deck_from_reconstruct_deck` line 1144-1198）：
-/// - 初始 `new_cts[j] = (G, plaintext_j)`
-/// - 对每个 player_deck p：`new_cts[j].c1 += p.c1[j]`, `new_cts[j].c2 += p.c2[j] - plaintext_j`
+/// The base is the deterministic canonical encryption of every public card
+/// under the table aggregate key. Each player contributes one canonical-slot
+/// vector whose plaintexts are proven to be either zero or `-card[i]`.
 fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Result<()> {
-    let n = table.deck_state.plaintext.len();
-    if n == 0 {
-        return Err(PokerL1Error::Serialization(
-            "rebuild_deck: plaintext 为空".into(),
-        ));
-    }
-
-    // 初始 (G, plaintext_j)
-    let g = g1_generator();
-    let mut new_cts: Vec<ElGamalCiphertext> = (0..n)
-        .map(|j| {
-            // ECPoint → G1Projective（Deref 后 copy）
-            let m: G1Projective = table.deck_state.plaintext[j].into();
-            Ok::<_, PokerL1Error>(ElGamalCiphertext { c1: g, c2: m })
-        })
-        .collect::<PokerL1Result<_>>()?;
-
-    // 累加每个 player_deck
+    let aggregate_pk = table.deck_state.aggregated_pk.as_ref().ok_or_else(|| {
+        PokerL1Error::Serialization("rebuild_deck V3 requires aggregate public key".into())
+    })?;
+    let cards = table
+        .deck_state
+        .plaintext
+        .iter()
+        .map(|card| card.0)
+        .collect::<Vec<_>>();
+    let mut new_cts = canonical_base_deck::<DefaultCurve>(&cards, &aggregate_pk.0)
+        .map_err(|error| PokerL1Error::Serialization(format!("rebuild_deck V3 base: {error}")))?;
     for deck in &table.reconstruct_state.player_decks {
-        for j in 0..n {
-            let p_ct = &deck.output_cts[j];
-            new_cts[j] = ElGamalCiphertext {
-                c1: g1_add(&new_cts[j].c1, &p_ct.c1),
-                c2: g1_add(&new_cts[j].c2, &p_ct.c2),
-            };
-        }
-    }
-
-    // 减去 plaintext_j（恢复正确语义）
-    for j in 0..n {
-        let m: G1Projective = table.deck_state.plaintext[j].into();
-        new_cts[j] = ElGamalCiphertext {
-            c1: new_cts[j].c1,
-            c2: g1_sub(&new_cts[j].c2, &m),
-        };
+        new_cts = apply_reconstruction_contributions::<DefaultCurve>(&new_cts, &deck.output_cts)
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!(
+                    "rebuild_deck V3 contribution for seat {}: {error}",
+                    deck.seat_index
+                ))
+            })?;
     }
 
     table.deck_state.encrypted = new_cts;
@@ -1665,10 +1652,8 @@ fn find_hand_card_owner(table: &TexasPokerTable, card_index: u8) -> Option<u8> {
 pub fn apply_submit_reconstruct_deck(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    output_cards: Vec<ElGamalCiphertext>,
-    swap_cards: Vec<ElGamalCiphertext>,
-    user_readable_cards: Vec<ElGamalCiphertext>,
-    proof: ReconstructProof<DefaultCurve>,
+    statement: ReconstructionV3Statement<DefaultCurve>,
+    proof: ReconstructProofV3<DefaultCurve>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.reconstruct_state.phase != RECONSTRUCT_PHASE_COLLECTING {
@@ -1685,28 +1670,40 @@ pub fn apply_submit_reconstruct_deck(
         ));
     }
 
-    // typed 化后无需反序列化：output_cards / swap_cards / user_readable_cards 已是
-    // Vec<ElGamalCiphertext>，proof 已是 ReconstructProof<DefaultCurve>。
-    let output_cts = output_cards;
-    let swap_cts = swap_cards;
-    let readable_cts = user_readable_cards;
-
-    let user_pk: G1Projective = table.seats[seat_index as usize].pk.0;
-    // ECPoint → G1Projective：types.rs 字段已改为 Vec<ECPoint>，需提取内部 G1Projective。
-    let card_points: Vec<G1Projective> = table.deck_state.plaintext.iter().map(|p| p.0).collect();
+    let aggregate_pk = table.deck_state.aggregated_pk.as_ref().ok_or_else(|| {
+        PokerL1Error::Serialization("reconstruction V3 requires aggregate public key".into())
+    })?;
+    let expected_owner_pk = table.seats[seat_index as usize].pk.0;
+    let expected_cards: Vec<G1Projective> = table
+        .deck_state
+        .plaintext
+        .iter()
+        .map(|point| point.0)
+        .collect();
+    let expected_readable = utils::reconstruction_v3_user_readable_cards(table, seat_index);
+    let expected_context_digest = utils::reconstruction_v3_context_digest(table);
+    let expected_prior_state_digest =
+        utils::reconstruction_v3_prior_state_digest(table, seat_index)?;
+    let expected_epoch = table.timestamps.reconstruct_started_at;
+    if statement.aggregate_pk != aggregate_pk.0
+        || statement.owner_pk != expected_owner_pk
+        || statement.cards != expected_cards
+        || statement.user_readable_cards != expected_readable
+        || statement.context_digest != expected_context_digest
+        || statement.prior_state_digest != expected_prior_state_digest
+        || statement.reconstruction_epoch != expected_epoch
+    {
+        return Err(PokerL1Error::Serialization(
+            "reconstruction V3 statement does not match authenticated table state".into(),
+        ));
+    }
+    let contributions = statement.contributions.clone();
 
     let _ = utils::verify_or_skip(table.config.skip_reconstruct(), || {
-        let mut t = utils::new_reconstruct_transcript();
-        ReconstructProof::verify(
-            &proof,
-            &card_points,
-            &output_cts,
-            &swap_cts,
-            &readable_cts,
-            &user_pk,
-            &mut t,
-        )
-        .map_err(|e| PokerL1Error::Serialization(format!("reconstruct proof: {e}")))?;
+        let mut transcript = utils::new_reconstruct_v3_transcript();
+        proof.verify(&statement, &mut transcript).map_err(|error| {
+            PokerL1Error::Serialization(format!("reconstruction V3 proof: {error}"))
+        })?;
         Ok(true)
     })?;
 
@@ -1716,7 +1713,7 @@ pub fn apply_submit_reconstruct_deck(
         .player_decks
         .push(ReconstructPlayerDeck {
             seat_index,
-            output_cts,
+            output_cts: contributions,
         });
 
     events::emit_event(
@@ -3597,6 +3594,8 @@ pub fn trigger_run_it_twice(
 mod tests {
     use super::*;
     use crate::object_model::ObjectID;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     fn dummy_id() -> ObjectID {
         ObjectID::new([0xFF; 20], 0)
@@ -3625,6 +3624,121 @@ mod tests {
             assert!(!g1_is_identity(&ct.c1));
             assert!(!g1_is_identity(&ct.c2));
         }
+    }
+
+    #[test]
+    fn test_reconstruction_v3_two_players_rebuilds_canonical_deck() {
+        let mut table = make_table();
+        let generator = g1_generator();
+        let owner_secrets = [scalar_from_u64(101), scalar_from_u64(202)];
+        let owner_public_keys = [generator * owner_secrets[0], generator * owner_secrets[1]];
+        let aggregate_pk = owner_public_keys[0] + owner_public_keys[1];
+
+        for (seat_index, owner_pk) in owner_public_keys.iter().enumerate() {
+            table.seats[seat_index].player = [(seat_index as u8) + 1; 20];
+            table.seats[seat_index].stack = 1_000;
+            table.seats[seat_index].pk = ECPoint::from(*owner_pk);
+        }
+        set_initial_encrypted_deck(&mut table).unwrap();
+        table.deck_state.aggregated_pk = Some(ECPoint::from(aggregate_pk));
+        table.hand_id = 7;
+        table.round_state = ROUND_FLOP;
+        table.timestamps.reconstruct_started_at = 9_000;
+        table.reconstruct_state = super::super::types::ReconstructState {
+            phase: RECONSTRUCT_PHASE_COLLECTING,
+            pending_players: vec![0, 1],
+            coefficient: Some(ECScalar::from(scalar_from_u64(1))),
+            player_decks: vec![],
+        };
+
+        // These ciphertexts model the authenticated, still-encrypted owner-readable
+        // cards retained from the previous round. Their plaintexts are canonical
+        // init-deck card points, but their readable-list order does not reveal the
+        // hidden canonical slots used by the V3 Bayer--Groth witness.
+        let readable_card_indices = [[17usize, 3usize], [41usize, 9usize]];
+        for (seat_index, indices) in readable_card_indices.iter().enumerate() {
+            for (record_index, card_index) in indices.iter().enumerate() {
+                let plaintext = table.deck_state.plaintext[*card_index].0;
+                let randomness =
+                    scalar_from_u64(1_000 + (seat_index as u64) * 10 + record_index as u64);
+                table.deck_state.decrypted_cards.push(DecryptedCard {
+                    encrypted_card_index: (20 + seat_index * 2 + record_index) as u8,
+                    owner_seat_index: seat_index as u8,
+                    ciphertext: Some(ElGamalCiphertext::encrypt(
+                        &plaintext,
+                        &owner_public_keys[seat_index],
+                        &randomness,
+                    )),
+                    plaintext: None,
+                });
+            }
+        }
+
+        let canonical_cards = table
+            .deck_state
+            .plaintext
+            .iter()
+            .map(|point| point.0)
+            .collect::<Vec<_>>();
+        let preserved_readable_cards = table.deck_state.decrypted_cards.clone();
+        let mut expected_deck =
+            canonical_base_deck::<DefaultCurve>(&canonical_cards, &aggregate_pk)
+                .expect("canonical aggregate-key base deck");
+        let mut events = vec![];
+
+        for seat_index in 0..2usize {
+            let context_digest = utils::reconstruction_v3_context_digest(&table);
+            let prior_state_digest =
+                utils::reconstruction_v3_prior_state_digest(&table, seat_index as u8).unwrap();
+            let readable_cards =
+                utils::reconstruction_v3_user_readable_cards(&table, seat_index as u8);
+            let mut transcript = utils::new_reconstruct_v3_transcript();
+            let mut rng = StdRng::seed_from_u64(0xC0DE_0000 + seat_index as u64);
+            let (statement, proof) = ReconstructProofV3::prove(
+                context_digest,
+                table.timestamps.reconstruct_started_at,
+                prior_state_digest,
+                canonical_cards.clone(),
+                readable_cards,
+                &owner_secrets[seat_index],
+                &owner_public_keys[seat_index],
+                &aggregate_pk,
+                &mut rng,
+                &mut transcript,
+            )
+            .expect("honest reconstruction V3 proof");
+
+            expected_deck = apply_reconstruction_contributions::<DefaultCurve>(
+                &expected_deck,
+                &statement.contributions,
+            )
+            .expect("apply verified contribution vector");
+            apply_submit_reconstruct_deck(
+                &mut table,
+                seat_index as u8,
+                statement,
+                proof,
+                &mut events,
+            )
+            .expect("state machine accepts honest reconstruction V3 submission");
+        }
+
+        assert_eq!(table.deck_state.encrypted, expected_deck);
+        assert_eq!(table.deck_state.cards_dealt, 0);
+        assert_eq!(table.deck_state.decrypted_cards, preserved_readable_cards);
+        assert_eq!(
+            table.reconstruct_state,
+            super::super::types::ReconstructState::default()
+        );
+        assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_RECONSTRUCT);
+        assert_eq!(table.shuffle_state.current_shuffler, Some(0));
+        assert_eq!(table.shuffle_state.pending_players, vec![0, 1]);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TexasPokerEvent::ReconstructComplete { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TexasPokerEvent::DeckRebuilt { .. })));
     }
 
     #[test]
@@ -3738,11 +3852,9 @@ mod tests {
         start_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.deck_state.encrypted.len(), 52);
         assert_eq!(table.deck_state.plaintext.len(), 52);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::HandStarted { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::HandStarted { .. })));
     }
 
     #[test]
@@ -3781,11 +3893,9 @@ mod tests {
         assert_eq!(table.seats[1].bet, 100);
         assert_eq!(table.seats[0].stack, 950);
         assert_eq!(table.seats[1].stack, 900);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { .. })));
     }
 
     #[test]
@@ -3804,16 +3914,12 @@ mod tests {
         apply_fold(&mut table, 0, &mut events).unwrap();
         // fold 后只剩 1 名活跃玩家 → end_without_showdown → reset_for_next_hand
         // 会清掉 folded 标记，故此处仅断言事件与筹码分配。
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::PlayerFolded { .. }))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::HandEndedWithoutShowdown { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::PlayerFolded { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::HandEndedWithoutShowdown { .. })));
         assert_eq!(table.seats[1].stack, 1200);
     }
 
@@ -3835,11 +3941,9 @@ mod tests {
         assert_eq!(table.seats[0].stack, 900);
         assert_eq!(table.seats[0].bet, 100);
         assert!(table.seats[0].acted_this_round);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::PlayerCalled { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::PlayerCalled { .. })));
     }
 
     #[test]
@@ -3920,16 +4024,12 @@ mod tests {
         let new_agg = table.deck_state.aggregated_pk.unwrap();
         let expected = pk1 + pk2;
         assert!(g1_equal(&new_agg, &expected));
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::PlayerKicked { .. }))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::PlayerRefund { .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::PlayerKicked { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::PlayerRefund { .. })));
     }
 
     #[test]
@@ -3982,11 +4082,9 @@ mod tests {
         assert_eq!(table.addon_pool, 200);
         assert_eq!(table.version, 1);
         // 事件
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::AddonRequested { amount: 200, .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::AddonRequested { amount: 200, .. })));
     }
 
     #[test]
@@ -4053,11 +4151,9 @@ mod tests {
         let mut events = vec![];
         reset_for_next_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.seats[0].player, [0u8; 20]); // EMPTY_PLAYER
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::PlayerLeft { seat_index: 0, .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::PlayerLeft { seat_index: 0, .. })));
     }
 
     #[test]
@@ -4158,11 +4254,9 @@ mod tests {
         assert_eq!(table.seats[0].bet, 200);
         assert_eq!(table.seats[0].stack, 800);
         assert!(table.seats[0].acted_this_round);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, TexasPokerEvent::PlayerBet { amount: 200, .. }))
-        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TexasPokerEvent::PlayerBet { amount: 200, .. })));
     }
 
     #[test]
@@ -4221,10 +4315,9 @@ mod tests {
         table.seats[0].player = [0x01; 20];
         table.seats[0].time_bank_ms = 5_000;
         let err = consume_time_bank(&mut table, 0, 10_000, &mut vec![]).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("time_bank_ms 5000 < consumed_ms 10000")
-        );
+        assert!(err
+            .to_string()
+            .contains("time_bank_ms 5000 < consumed_ms 10000"));
     }
 
     // ========== Ante 测试 ==========
