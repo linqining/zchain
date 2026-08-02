@@ -193,15 +193,17 @@ impl_texas_air!(
     crypto::leave_with_proof::LeaveWithProofAir,
     MethodKind::LeaveWithProof
 );
-impl_texas_air!(
+impl_validated_texas_air!(
     crypto::submit_shuffle_v2::SubmitShuffleV2Air,
-    MethodKind::SubmitShuffleV2
+    MethodKind::SubmitShuffleV2,
+    crypto::submit_shuffle_v2::validate_public_inputs
 );
 impl_texas_air!(
     crypto::submit_player_reveal_tokens::SubmitPlayerRevealTokensAir,
     MethodKind::SubmitPlayerRevealTokens
 );
-impl_texas_air!(
+impl_validated_texas_air!(
     crypto::submit_reconstruct_deck::SubmitReconstructDeckAir,
-    MethodKind::SubmitReconstructDeck
+    MethodKind::SubmitReconstructDeck,
+    crypto::submit_reconstruct_deck::validate_public_inputs
 );

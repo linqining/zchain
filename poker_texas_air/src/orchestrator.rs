@@ -40,6 +40,10 @@
 //! 反序列化，生产 Orchestrator 明确 fail-closed，不签发 proof/receipt。后者尤其尚未
 //! 证明 DLEq layer removal，也未覆盖可能发生的 `advance_turn`/settlement。
 
+use poker_protocol::precompile::{
+    build_bls12381_reconstruction_request, build_bls12381_shuffle_request,
+};
+use poker_protocol::precompile_abi::TranscriptId;
 use stwo::core::fields::m31::M31;
 
 use crate::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
@@ -77,6 +81,7 @@ use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHand
 use crate::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
 use crate::prover::prove_method;
 use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
@@ -183,6 +188,7 @@ impl Orchestrator {
                 &task.selector,
                 &task.raw_args,
             )?,
+            precompile_binding: None,
             expected_trace_row: None,
         };
         let summary = ProvenTask {
@@ -1487,7 +1493,7 @@ impl Orchestrator {
     ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SubmitShuffleV2 {
             seat_index,
-            raw_args: _,
+            raw_args,
         } = &task.method_input
         else {
             return Err(input_mismatch(
@@ -1496,10 +1502,59 @@ impl Orchestrator {
                 &task.method_input,
             ));
         };
+        let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
+            borsh::from_slice(raw_args).map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "submit_shuffle_v2 raw args borsh: {error}"
+                ))
+            })?;
+        if args.seat_index != *seat_index {
+            return Err(TexasAirError::SpecViolation(
+                "submit_shuffle_v2 method input seat differs from raw args".into(),
+            ));
+        }
+        let aggregated_pk = task
+            .pre_table
+            .deck_state
+            .aggregated_pk
+            .as_ref()
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "submit_shuffle_v2 requires a non-empty aggregated public key".into(),
+                )
+            })?;
+        let call_context = precompile_call_context(
+            MethodKind::SubmitShuffleV2,
+            *seat_index,
+            pi.table_id,
+            pi.hand_id,
+            pi.call_seq,
+            pi.pre_version,
+            pi.post_version,
+            pi.pre_state_root,
+            pi.post_state_root,
+            pi.dispatch_call_digest,
+        );
+        let request = build_bls12381_shuffle_request(
+            b"zk_shuffle_proof_v2",
+            &call_context,
+            TranscriptId::FiatShamirSha3,
+            &aggregated_pk.0,
+            &task.pre_table.deck_state.encrypted,
+            &args.output_cards,
+            &args.shuffle_proof,
+        )
+        .map_err(|error| {
+            TexasAirError::SpecViolation(format!(
+                "submit_shuffle_v2 precompile request construction failed: {error}"
+            ))
+        })?;
+        let binding = PrecompileCallBinding::verify_shuffle(&request)?;
         let input = SubmitShuffleV2Input {
             seat_index: *seat_index,
             new_deck_commitment: deck_commitment(&task.post_table),
             shuffle_phase: task.post_table.shuffle_state.phase,
+            precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
@@ -1514,11 +1569,13 @@ impl Orchestrator {
             post_v,
             post_cc,
         );
+        let mut bound_pi = pi.clone();
+        bound_pi.precompile_binding = Some(binding);
         run(
             SubmitShuffleV2Air::num_columns(),
             &row,
             &SubmitShuffleV2Row::padding(),
-            pi,
+            &bound_pi,
             move || SubmitShuffleV2Air {
                 log_size: MIN_LOG_SIZE,
                 input,
@@ -1596,7 +1653,7 @@ impl Orchestrator {
     ) -> TexasAirResult<VerificationReceipt> {
         let MethodInput::SubmitReconstructDeck {
             seat_index,
-            raw_args: _,
+            raw_args,
         } = &task.method_input
         else {
             return Err(input_mismatch(
@@ -1605,9 +1662,58 @@ impl Orchestrator {
                 &task.method_input,
             ));
         };
+        let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
+            borsh::from_slice(raw_args).map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "submit_reconstruct_deck raw args borsh: {error}"
+                ))
+            })?;
+        if args.seat_index != *seat_index {
+            return Err(TexasAirError::SpecViolation(
+                "submit_reconstruct_deck method input seat differs from raw args".into(),
+            ));
+        }
+        let cards: Vec<_> = task
+            .pre_table
+            .deck_state
+            .plaintext
+            .iter()
+            .map(|card| card.0)
+            .collect();
+        let user_public_key = task.pre_table.seats[*seat_index as usize].pk.0;
+        let call_context = precompile_call_context(
+            MethodKind::SubmitReconstructDeck,
+            *seat_index,
+            pi.table_id,
+            pi.hand_id,
+            pi.call_seq,
+            pi.pre_version,
+            pi.post_version,
+            pi.pre_state_root,
+            pi.post_state_root,
+            pi.dispatch_call_digest,
+        );
+        let request = build_bls12381_reconstruction_request(
+            poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
+            &call_context,
+            TranscriptId::FiatShamirSha3,
+            &cards,
+            &args.output_cards,
+            &args.swap_cards,
+            &args.user_readable_cards,
+            &user_public_key,
+            &args.proof,
+        )
+        .map_err(|error| {
+            TexasAirError::SpecViolation(format!(
+                "submit_reconstruct_deck precompile request construction failed: {error}"
+            ))
+        })?;
+        let binding = PrecompileCallBinding::verify_reconstruction(&request)?;
         let input = SubmitReconstructDeckInput {
             seat_index: *seat_index,
             reconstruct_phase: task.post_table.reconstruct_state.phase,
+            precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_sc = task.post_table.reconstruct_state.player_decks.len() as u8;
@@ -1622,11 +1728,13 @@ impl Orchestrator {
             post_v,
             post_sc,
         );
+        let mut bound_pi = pi.clone();
+        bound_pi.precompile_binding = Some(binding);
         run(
             SubmitReconstructDeckAir::num_columns(),
             &row,
             &SubmitReconstructDeckRow::padding(),
-            pi,
+            &bound_pi,
             move || SubmitReconstructDeckAir {
                 log_size: MIN_LOG_SIZE,
                 input,
@@ -1651,7 +1759,7 @@ impl Orchestrator {
 /// dispatch with the task-carried caller/context, selector, and raw Borsh
 /// arguments, then requires the complete post table and task metadata to match.
 /// Authentication of the task source remains an external consensus responsibility.
-fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()> {
+pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()> {
     if task.selector != task.method_kind.selector() {
         return Err(TexasAirError::SpecViolation(format!(
             "{}: task selector does not match MethodKind",

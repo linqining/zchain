@@ -16,19 +16,19 @@
 //!    - 进入 settle 阶段
 //!    - `version += 1`
 //!
-//! ## 简化策略
+//! ## 密码学调用绑定
 //!
-//! 阶段 4 PoC 只验证协议级状态变更：
-//! - `seat_index` 一致性
-//! - `output_submitted_count` 一致性
-//!
-//! ReconstructProof 验证留待阶段 5。
+//! AIR 除协议级状态变更外，还约束 canonical reconstruction precompile request
+//! digest 与 verifier-issued receipt digest。生产 verifier 会重新解码 request、
+//! 重新运行 Bayer--Groth ordered reconstruction verifier，并校验完整调用 replay
+//! scope；因此 reconstruction proof 的成功结果不是 prover 可伪造的布尔 witness。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
 
 /// `submit_reconstruct_deck` 业务特定列布局。
 pub mod cols {
@@ -39,8 +39,16 @@ pub mod cols {
     pub const INPUT_RECONSTRUCT_PHASE: usize = COMMON_NUM_COLUMNS + 1;
     /// `OUTPUT_SUBMITTED_COUNT` 列。
     pub const OUTPUT_SUBMITTED_COUNT: usize = COMMON_NUM_COLUMNS + 2;
+    /// Precompile selector column.
+    pub const PRECOMPILE_ID: usize = COMMON_NUM_COLUMNS + 3;
+    /// Canonical request ABI version column.
+    pub const PRECOMPILE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 4;
+    /// Full request digest columns.
+    pub const REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 5;
+    /// Full verifier receipt digest columns.
+    pub const RECEIPT_DIGEST_BASE: usize = REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `submit_reconstruct_deck` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 3;
+    pub const NUM_COLUMNS: usize = RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `submit_reconstruct_deck` 输入参数。
@@ -50,6 +58,8 @@ pub struct SubmitReconstructDeckInput {
     pub seat_index: u8,
     /// 当前 reconstruct 阶段枚举值。
     pub reconstruct_phase: u8,
+    /// Verifier-issued reconstruction precompile result.
+    pub precompile: PrecompileAirBinding,
 }
 
 /// `submit_reconstruct_deck` AIR 公开输入。
@@ -98,6 +108,10 @@ impl FrameworkEval for SubmitReconstructDeckAir {
         let input_seat_index = eval.next_trace_mask();
         let input_reconstruct_phase = eval.next_trace_mask();
         let _output_submitted_count = eval.next_trace_mask();
+        let precompile_id = eval.next_trace_mask();
+        let precompile_abi_version = eval.next_trace_mask();
+        let request_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let receipt_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -118,7 +132,19 @@ impl FrameworkEval for SubmitReconstructDeckAir {
         let p = input_reconstruct_phase.clone();
         let vp = (p.clone() - one) * (p - two);
         eval.add_constraint(is_active.clone() * vp);
-        // TODO 阶段 5：嵌入 ReconstructProof Verifier AIR。
+
+        let expected_precompile_id: E::F =
+            M31::from(u32::from(self.input.precompile.precompile_id)).into();
+        let expected_abi_version: E::F =
+            M31::from(u32::from(self.input.precompile.abi_version)).into();
+        eval.add_constraint(is_active.clone() * (precompile_id - expected_precompile_id));
+        eval.add_constraint(is_active.clone() * (precompile_abi_version - expected_abi_version));
+        for i in 0..DIGEST_LIMBS {
+            let expected_request: E::F = self.input.precompile.request_digest[i].into();
+            let expected_receipt: E::F = self.input.precompile.receipt_digest[i].into();
+            eval.add_constraint(is_active.clone() * (request_digest[i].clone() - expected_request));
+            eval.add_constraint(is_active.clone() * (receipt_digest[i].clone() - expected_receipt));
+        }
 
         eval
     }
@@ -135,6 +161,14 @@ pub struct SubmitReconstructDeckRow {
     pub input_reconstruct_phase: M31,
     /// `OUTPUT_SUBMITTED_COUNT`。
     pub output_submitted_count: M31,
+    /// Precompile selector.
+    pub precompile_id: M31,
+    /// Canonical request ABI version.
+    pub precompile_abi_version: M31,
+    /// Full request digest.
+    pub request_digest: [M31; DIGEST_LIMBS],
+    /// Full verifier receipt digest.
+    pub receipt_digest: [M31; DIGEST_LIMBS],
 }
 
 impl SubmitReconstructDeckRow {
@@ -172,6 +206,10 @@ impl SubmitReconstructDeckRow {
             input_seat_index: u8_to_m31(input.seat_index),
             input_reconstruct_phase: u8_to_m31(input.reconstruct_phase),
             output_submitted_count: u8_to_m31(post_submitted_count),
+            precompile_id: u8_to_m31(input.precompile.precompile_id),
+            precompile_abi_version: u8_to_m31(input.precompile.abi_version),
+            request_digest: input.precompile.request_digest,
+            receipt_digest: input.precompile.receipt_digest,
         }
     }
 
@@ -183,6 +221,10 @@ impl SubmitReconstructDeckRow {
             input_seat_index: ZERO,
             input_reconstruct_phase: ZERO,
             output_submitted_count: ZERO,
+            precompile_id: ZERO,
+            precompile_abi_version: ZERO,
+            request_digest: [ZERO; DIGEST_LIMBS],
+            receipt_digest: [ZERO; DIGEST_LIMBS],
         }
     }
 
@@ -193,7 +235,61 @@ impl SubmitReconstructDeckRow {
         v.push(self.input_seat_index);
         v.push(self.input_reconstruct_phase);
         v.push(self.output_submitted_count);
+        v.push(self.precompile_id);
+        v.push(self.precompile_abi_version);
+        v.extend_from_slice(&self.request_digest);
+        v.extend_from_slice(&self.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }
+}
+
+/// Validate the verifier-issued reconstruction receipt and replay scope.
+pub fn validate_public_inputs(
+    air: &SubmitReconstructDeckAir,
+    public_inputs: &crate::public_inputs::TexasPublicInputs,
+) -> crate::error::TexasAirResult<()> {
+    use poker_protocol::precompile_abi::ReconstructionVerifyRequest;
+
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        crate::error::TexasAirError::SpecViolation(
+            "submit_reconstruct_deck requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    if binding.precompile_id() != crate::precompile_binding::PokerPrecompileId::Reconstruction {
+        return Err(crate::error::TexasAirError::SpecViolation(
+            "submit_reconstruct_deck received the wrong precompile receipt type".into(),
+        ));
+    }
+    binding.reverify()?;
+    if binding.air_binding() != air.input.precompile {
+        return Err(crate::error::TexasAirError::SpecViolation(
+            "reconstruction AIR digest columns do not match the verifier-issued receipt".into(),
+        ));
+    }
+    let request =
+        ReconstructionVerifyRequest::decode(binding.request_bytes()).map_err(|error| {
+            crate::error::TexasAirError::SpecViolation(format!(
+                "reconstruction request canonical decode failed: {error}"
+            ))
+        })?;
+    let expected_context = crate::precompile_binding::precompile_call_context(
+        MethodKind::SubmitReconstructDeck,
+        air.input.seat_index,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    if request.call_context != expected_context {
+        return Err(crate::error::TexasAirError::SpecViolation(
+            "reconstruction precompile request is outside this table/hand/call/seat/state scope"
+                .into(),
+        ));
+    }
+    Ok(())
 }

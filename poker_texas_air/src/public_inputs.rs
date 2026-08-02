@@ -18,6 +18,7 @@ use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 use crate::airs::AirStatement;
 use crate::error::TexasAirResult;
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::PrecompileCallBinding;
 use crate::state_root::{StateRoot, field_element_to_u32_words, state_root_to_air_limbs};
 
 /// L1 proof 的 Stwo 内部公开输入（直接复用 `poker_zkvm`）。
@@ -180,6 +181,10 @@ pub struct TexasPublicInputs {
     /// Digest of the replayed VM dispatch context + selector + raw args.
     /// Task provenance is authenticated only by an external consensus anchor.
     pub dispatch_call_digest: [u8; 32],
+    /// Verifier-issued cryptographic precompile binding for methods that carry
+    /// shuffle or reconstruction proofs. Production verification rejects a
+    /// missing binding for those AIRs.
+    pub precompile_binding: Option<PrecompileCallBinding>,
     /// Verifier-reconstructed values of every original trace column in the
     /// replicated business row.
     ///
@@ -225,6 +230,7 @@ impl TexasPublicInputs {
             pre_version: pre_table.version,
             post_version: post_table.version,
             dispatch_call_digest: [0u8; 32],
+            precompile_binding: None,
             expected_trace_row: None,
         })
     }
@@ -256,6 +262,7 @@ impl TexasPublicInputs {
             pre_version: 0,
             post_version: 1,
             dispatch_call_digest: [0u8; 32],
+            precompile_binding: None,
             expected_trace_row: None,
         }
     }
@@ -416,7 +423,25 @@ impl TexasPublicInputs {
             .collect();
         channel.mix_u32s(&dispatch_words);
 
-        // 7. 元数据。
+        // 7. Verifier-issued precompile binding. The full request is replayed
+        // outside the circuit; these full-width digests bind its result to the
+        // STARK statement without trusting a prover-provided boolean.
+        match &self.precompile_binding {
+            Some(binding) => {
+                let air = binding.air_binding();
+                channel.mix_u32s(&[1, u32::from(air.precompile_id), u32::from(air.abi_version)]);
+                channel.mix_u32s(
+                    &air.request_digest
+                        .iter()
+                        .chain(&air.receipt_digest)
+                        .map(|limb| limb.0)
+                        .collect::<Vec<_>>(),
+                );
+            }
+            None => channel.mix_u32s(&[0, 0, 0]),
+        }
+
+        // 8. 元数据。
         channel.mix_u32s(&[u32::from(self.kind as u8), self.hand_id, self.call_seq]);
         channel.mix_u64(self.table_id);
         channel.mix_u64(self.pre_version);
@@ -571,6 +596,7 @@ mod tests {
             pre_version: 0,
             post_version: 1,
             dispatch_call_digest: [0u8; 32],
+            precompile_binding: None,
             expected_trace_row: None,
         };
         assert!(pi.verify_roots().is_err(), "empty image must fail");

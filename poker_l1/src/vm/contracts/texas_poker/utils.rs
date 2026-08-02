@@ -6,7 +6,7 @@
 //!   等（blstrs 包装，与原 `crypto::bls_scalar` API 一致），最小化 `state_machine.rs` 改动
 //! - **ElGamal 操作**：`encrypt`/`decrypt`/`gen_reveal_token`/`remask`/`add_pk_to_c2` 等
 //!   包装 `poker_protocol::crypto::curve::ElGamalCiphertextGeneric::<Bls12381Curve>` 方法
-//! - **Transcript 工厂**：`new_shuffle_transcript` 等返回 `MerlinTranscript`
+//! - **Transcript 工厂**：协议 V2 shuffle/reconstruction 使用 Move-compatible SHA3 transcript
 //! - **ZK skip 回退**：`verify_or_skip` 保留 dev chain 友好的跳过逻辑
 //! - **PK 所有权证明**：`verify_pk_ownership` 保留 80 字节 Schnorr 自定义格式
 //!   （poker_protocol 的 `GeneralizedSchnorrProof` 是不同格式，不替换）
@@ -27,7 +27,9 @@ use subtle::CtOption;
 // G1Projective / BlsScalar 上提供同名方法（identity / is_identity / invert），
 // 导致 E0034 多义性。统一使用 group::Group + ff::Field 即可覆盖所有调用点。
 use poker_protocol::crypto::types::ElGamalCiphertext;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{
+    CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
+};
 
 use crate::crypto_precompiles::bls::BLS_G1_DST;
 use crate::error::{PokerL1Error, PokerL1Result};
@@ -57,8 +59,8 @@ fn ct_opt_to_opt<T>(ct: CtOption<T>) -> Option<T> {
 
 /// 创建洗牌证明的 Transcript。
 #[must_use]
-pub fn new_shuffle_transcript() -> MerlinTranscript {
-    MerlinTranscript::new(b"zk_shuffle_proof_v1")
+pub fn new_shuffle_transcript() -> FiatShamirTranscript {
+    FiatShamirTranscript::new(b"zk_shuffle_proof_v2")
 }
 
 /// 创建重掩码证明的 Transcript。
@@ -75,14 +77,16 @@ pub fn new_leave_transcript() -> MerlinTranscript {
 
 /// 创建重建证明的 Transcript。
 #[must_use]
-pub fn new_reconstruct_transcript() -> MerlinTranscript {
-    MerlinTranscript::new(b"zk_reconstruct_proof_v1")
+pub fn new_reconstruct_transcript() -> FiatShamirTranscript {
+    FiatShamirTranscript::new(
+        poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
+    )
 }
 
 /// 创建 remask + shuffle 共享 Transcript（用于 join_and_shuffle 场景）。
 #[must_use]
-pub fn new_mask_shuffle_transcript() -> MerlinTranscript {
-    MerlinTranscript::new(b"zk_mask_shuffle_proof_v1")
+pub fn new_mask_shuffle_transcript() -> FiatShamirTranscript {
+    FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v2")
 }
 
 // ========== ZK skip 回退 ==========

@@ -28,10 +28,10 @@ use blstrs::G1Projective;
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ECScalar, ElGamalCiphertext};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 
 use super::betting::{BettingError, BettingRound};
@@ -1232,7 +1232,7 @@ pub fn apply_join_and_shuffle(
     mask_cards: Vec<ElGamalCiphertext>,
     output_cards: Vec<ElGamalCiphertext>,
     remask_proof: DLEqProof<DefaultCurve, RemaskKind>,
-    shuffle_proof: ZKShuffleProof<DefaultCurve>,
+    shuffle_proof: ShuffleProof,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if seat_index >= table.max_players {
@@ -1320,14 +1320,9 @@ pub fn apply_join_and_shuffle(
     let new_agg_pk_pt = new_agg_pk.unwrap_or(G1Projective::identity());
     let _ = utils::verify_or_skip(table.config.skip_shuffle(), || {
         let mut t = utils::new_mask_shuffle_transcript();
-        ZKShuffleProof::verify(
-            &shuffle_proof,
-            &mask_cts,
-            &output_cts,
-            &new_agg_pk_pt,
-            &mut t,
-        )
-        .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
+        shuffle_proof
+            .verify(&mask_cts, &output_cts, &new_agg_pk_pt, &mut t)
+            .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
         Ok(true)
     })?;
 
@@ -1398,7 +1393,7 @@ pub fn apply_submit_shuffle_v2(
     table: &mut TexasPokerTable,
     seat_index: u8,
     output_cards: Vec<ElGamalCiphertext>,
-    shuffle_proof: ZKShuffleProof<DefaultCurve>,
+    shuffle_proof: ShuffleProof,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.shuffle_state.phase == SHUFFLE_PHASE_NONE {
@@ -1434,7 +1429,8 @@ pub fn apply_submit_shuffle_v2(
         .unwrap_or(G1Projective::identity());
     let _ = utils::verify_or_skip(table.config.skip_shuffle(), || {
         let mut t = utils::new_shuffle_transcript();
-        ZKShuffleProof::verify(&shuffle_proof, &input_cts, &output_cts, &agg_pk_pt, &mut t)
+        shuffle_proof
+            .verify(&input_cts, &output_cts, &agg_pk_pt, &mut t)
             .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
         Ok(true)
     })?;

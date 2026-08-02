@@ -7,9 +7,9 @@
 //! - `submit_player_reveal_tokens`
 //! - `submit_reconstruct_deck`
 //!
-//! 阶段 4 PoC：crypto AIR 只验证协议级状态变更（seat_index / commitment / phase
-//! 一致性），完整密码学约束（DLEq / ZKShuffle / RevealToken / Reconstruct proof）
-//! 留待阶段 5 嵌入 Verifier AIR。
+//! 本文件保留阶段 4 的 AIR 机制/状态约束测试，并使用 synthetic binding 覆盖列布局。
+//! shuffle/reconstruction 的真实 native precompile 重放、digest、receipt 与 replay-scope
+//! soundness 测试位于 `e2e_precompile_binding.rs`；DLEq / RevealToken 的调用绑定仍待扩展。
 //!
 //! 验证流程：
 //! 1. 构造 method AIR 的 active row + padding row
@@ -20,7 +20,6 @@
 
 use stwo::core::fields::m31::M31;
 
-use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
 };
@@ -37,6 +36,7 @@ use poker_texas_air::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
 use poker_texas_air::method_kind::MethodKind;
+use poker_texas_air::precompile_binding::PrecompileAirBinding;
 use poker_texas_air::prover::prove_method;
 use poker_texas_air::public_inputs::TexasPublicInputs;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
@@ -323,6 +323,7 @@ fn test_e2e_submit_shuffle_v2_prove_verify() {
         seat_index: 2,
         new_deck_commitment: 0xDEAD_BEEF,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = SubmitShuffleV2Row::active(
         &input,
@@ -371,6 +372,7 @@ fn test_soundness_submit_shuffle_v2_tampered_commitment() {
         seat_index: 2,
         new_deck_commitment: 0xDEAD_BEEF,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = SubmitShuffleV2Row::active(&input, zero_root(), one_root(), 42, 1, 3, 0, 1, 2);
     let trace = gen_method_trace(
@@ -523,6 +525,7 @@ fn test_e2e_submit_reconstruct_deck_prove_verify() {
     let input = SubmitReconstructDeckInput {
         seat_index: 3,
         reconstruct_phase: 1, // ReconstructPhase::Started
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = SubmitReconstructDeckRow::active(
         &input,
@@ -570,6 +573,7 @@ fn test_soundness_submit_reconstruct_deck_tampered_phase() {
     let input = SubmitReconstructDeckInput {
         seat_index: 3,
         reconstruct_phase: 1,
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = SubmitReconstructDeckRow::active(&input, zero_root(), one_root(), 42, 1, 5, 0, 1, 1);
     let trace = gen_method_trace(
@@ -639,8 +643,11 @@ fn test_crypto_air_column_consistency() {
         leave_with_proof::cols::NUM_COLUMNS
     );
 
-    // submit_shuffle_v2: 通用 + 8 业务（含 Gap 6 shuffle_phase + q witness）= 45
-    assert_eq!(submit_shuffle_v2::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
+    // submit_shuffle_v2: 原 8 业务列 + id/version + 2×16 full digest limbs。
+    assert_eq!(
+        submit_shuffle_v2::cols::NUM_COLUMNS,
+        COMMON_NUM_COLUMNS + 42
+    );
     assert_eq!(
         SubmitShuffleV2Air::num_columns(),
         submit_shuffle_v2::cols::NUM_COLUMNS
@@ -656,10 +663,10 @@ fn test_crypto_air_column_consistency() {
         submit_player_reveal_tokens::cols::NUM_COLUMNS
     );
 
-    // submit_reconstruct_deck: 通用 + 3 业务 = 40
+    // submit_reconstruct_deck: 原 3 业务列 + id/version + 2×16 full digest limbs。
     assert_eq!(
         submit_reconstruct_deck::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 3
+        COMMON_NUM_COLUMNS + 37
     );
     assert_eq!(
         SubmitReconstructDeckAir::num_columns(),

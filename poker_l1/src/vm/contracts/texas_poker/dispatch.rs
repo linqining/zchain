@@ -30,10 +30,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
 
 use super::constants::{FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN};
 use super::events::TexasPokerEvent;
@@ -266,8 +266,8 @@ pub struct JoinAndShuffleArgs {
     pub output_cards: Vec<ElGamalCiphertext>,
     /// remask proof（typed DLEqProof<RemaskKind>）。
     pub remask_proof: DLEqProof<DefaultCurve, RemaskKind>,
-    /// shuffle proof（typed ZKShuffleProof）。
-    pub shuffle_proof: ZKShuffleProof<DefaultCurve>,
+    /// Versioned shuffle proof；生产验证仅接受 Bayer--Groth V2。
+    pub shuffle_proof: ShuffleProof,
 }
 
 /// `leave_with_proof` 参数。
@@ -344,8 +344,8 @@ pub struct SubmitShuffleV2Args {
     pub seat_index: u8,
     /// shuffle 输出牌组（typed ElGamalCiphertext 列表）。
     pub output_cards: Vec<ElGamalCiphertext>,
-    /// shuffle proof（typed ZKShuffleProof）。
-    pub shuffle_proof: ZKShuffleProof<DefaultCurve>,
+    /// Versioned shuffle proof；生产验证仅接受 Bayer--Groth V2。
+    pub shuffle_proof: ShuffleProof,
 }
 
 /// `submit_player_reveal_tokens` 参数。
@@ -2224,46 +2224,76 @@ mod tests {
         }
     }
 
-    fn empty_shuffle_proof() -> ZKShuffleProof<DefaultCurve> {
+    fn empty_shuffle_proof() -> ShuffleProof {
         let schnorr = empty_schnorr_proof();
-        ZKShuffleProof {
+        let legacy = poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof {
             sum_c1_commit: G1Projective::identity(),
             sum_c2_commit: G1Projective::identity(),
             combined_schnorr_proof: schnorr.clone(),
             sum_c1_schnorr_proof: schnorr.clone(),
             sum_c2_schnorr_proof: schnorr,
             nonce: super::super::utils::scalar_zero(),
-        }
+        };
+        ShuffleProof::LegacyV1(legacy)
     }
 
     fn empty_reconstruct_proof() -> ReconstructProof<DefaultCurve> {
+        use poker_protocol::zk_shuffle::bayer_groth::{
+            BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument,
+        };
         use poker_protocol::zk_shuffle::reconstruction::{
-            ChaumPedersenDLEQProof, ReconstructionDLEQProof,
+            ChaumPedersenDLEQProof, OrderedEncryptionProof, SwapOutCardProof,
         };
 
         let zero = super::super::utils::scalar_zero();
         let identity = G1Projective::identity();
-        let schnorr = empty_schnorr_proof();
+        let identity_ciphertext = ElGamalCiphertext {
+            c1: identity,
+            c2: identity,
+        };
         ReconstructProof {
-            swap_out_cards_proofs: vec![],
-            sum_c1_r_commit: identity,
-            sum_c2_r_commit: identity,
-            swap_sum_c1_commit: identity,
-            swap_sum_c2_commit: identity,
-            nonce: zero,
-            blind_dleq_proof: ReconstructionDLEQProof {
-                commitment: identity,
-                response: zero,
-                nonce: zero,
+            // This fixture is only for Borsh/selector roundtrips. Keep every
+            // V2 vector length self-consistent; the identity values are not a
+            // valid cryptographic proof and are never verified as one.
+            swap_out_cards_proofs: vec![SwapOutCardProof {
+                user_readable_card: identity_ciphertext,
+                swap_out_card: identity_ciphertext,
+                chaum_pedersen_proof: ChaumPedersenDLEQProof {
+                    commitment_a: identity,
+                    commitment_b: identity,
+                    response: zero,
+                },
+            }],
+            padded_swap_cards: vec![identity_ciphertext; 2],
+            padded_swap_shuffle_proof: BayerGrothShuffleProof {
+                c_permutation: identity,
+                c_permuted_powers: identity,
+                multi_exponentiation: MultiExponentiationArgument {
+                    c_alpha: identity,
+                    c_beta: identity,
+                    ciphertext_0: identity_ciphertext,
+                    ciphertext_1: identity_ciphertext,
+                    alpha_response: vec![zero; 2],
+                    commitment_response: zero,
+                    beta: zero,
+                    beta_blinding_response: zero,
+                    rerandomization_response: zero,
+                },
+                product: ProductArgument {
+                    c_d: identity,
+                    c_delta: identity,
+                    c_capital_delta: identity,
+                    a_response: vec![zero; 2],
+                    b_response: vec![zero; 2],
+                    r_response: zero,
+                    s_response: zero,
+                },
             },
-            total_dleq_proof: ChaumPedersenDLEQProof {
-                commitment_a: identity,
-                commitment_b: identity,
-                response: zero,
+            ordered_encryption_proof: OrderedEncryptionProof {
+                commitment_g: vec![identity; 2],
+                commitment_pk: vec![identity; 2],
+                responses: vec![zero; 2],
             },
-            swap_combined_schnorr_proof: schnorr.clone(),
-            sum_swap_out_c1_schnorr_proof: schnorr.clone(),
-            sum_swap_out_c2_schnorr_proof: schnorr,
         }
     }
 

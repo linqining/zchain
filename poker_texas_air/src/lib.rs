@@ -37,9 +37,11 @@ pub mod airs;
 pub mod trace_gen;
 
 // ===== 公共基础设施 =====
+pub mod dual_proof;
 pub mod error;
 pub mod merkle_tree;
 pub mod method_kind;
+pub mod precompile_binding;
 pub mod public_inputs;
 pub mod state_root;
 pub mod verified_chain;

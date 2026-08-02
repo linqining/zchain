@@ -14,14 +14,12 @@
 //!    - 若 `completed.len() == active_count - 1`，进入 reveal 阶段
 //!    - `version += 1`
 //!
-//! ## 简化策略
+//! ## 密码学调用绑定
 //!
-//! 阶段 4 PoC 只验证协议级状态变更：
-//! - `seat_index` 一致性
-//! - `new_deck_commitment` 一致性
-//! - `output_completed_count` 增加
-//!
-//! shuffle proof 验证留待阶段 5。
+//! AIR 除协议级状态变更外，还约束 canonical shuffle precompile request digest
+//! 与 verifier-issued receipt digest。生产 verifier 会重新解码 request、重新运行
+//! Bayer--Groth native verifier，并校验 table/hand/call/seat/state replay scope；
+//! 因此这里不接受 prover 提供的裸 `success = true`。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
@@ -30,6 +28,7 @@ use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
 
 /// `submit_shuffle_v2` 业务特定列布局。
 pub mod cols {
@@ -44,8 +43,16 @@ pub mod cols {
     pub const INPUT_SHUFFLE_PHASE: usize = COMMON_NUM_COLUMNS + 6;
     /// `INPUT_SHUFFLE_PHASE_Q` 列（Gap 6 witness：shuffle_phase²，拆 3 次 vanishing）。
     pub const INPUT_SHUFFLE_PHASE_Q: usize = COMMON_NUM_COLUMNS + 7;
+    /// Precompile selector column.
+    pub const PRECOMPILE_ID: usize = COMMON_NUM_COLUMNS + 8;
+    /// Canonical request ABI version column.
+    pub const PRECOMPILE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 9;
+    /// Full request digest columns.
+    pub const REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 10;
+    /// Full verifier receipt digest columns.
+    pub const RECEIPT_DIGEST_BASE: usize = REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `submit_shuffle_v2` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 8;
+    pub const NUM_COLUMNS: usize = RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `submit_shuffle_v2` 输入参数。
@@ -57,6 +64,8 @@ pub struct SubmitShuffleV2Input {
     pub new_deck_commitment: u64,
     /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {1,2,3}）。
     pub shuffle_phase: u8,
+    /// Verifier-issued precompile result bound into this AIR statement.
+    pub precompile: PrecompileAirBinding,
 }
 
 /// `submit_shuffle_v2` AIR 公开输入。
@@ -111,6 +120,10 @@ impl FrameworkEval for SubmitShuffleV2Air {
         // Gap 6：shuffle_phase 与 witness q
         let input_shuffle_phase = eval.next_trace_mask();
         let input_shuffle_phase_q = eval.next_trace_mask();
+        let precompile_id = eval.next_trace_mask();
+        let precompile_abi_version = eval.next_trace_mask();
+        let request_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let receipt_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -141,11 +154,25 @@ impl FrameworkEval for SubmitShuffleV2Air {
             - six;
         eval.add_constraint(is_active.clone() * vp);
 
+        let expected_precompile_id: E::F =
+            M31::from(u32::from(self.input.precompile.precompile_id)).into();
+        let expected_abi_version: E::F =
+            M31::from(u32::from(self.input.precompile.abi_version)).into();
+        eval.add_constraint(is_active.clone() * (precompile_id - expected_precompile_id));
+        eval.add_constraint(is_active.clone() * (precompile_abi_version - expected_abi_version));
+        for i in 0..DIGEST_LIMBS {
+            let expected_request: E::F = self.input.precompile.request_digest[i].into();
+            let expected_receipt: E::F = self.input.precompile.receipt_digest[i].into();
+            eval.add_constraint(is_active.clone() * (request_digest[i].clone() - expected_request));
+            eval.add_constraint(is_active.clone() * (receipt_digest[i].clone() - expected_receipt));
+        }
+
         // 约束 3（审计共性，degree-2）：round_state 不变（submit_shuffle_v2 阶段 round_state 恒为 WAITING=0）。
         eval.add_constraint(common.round_state_unchanged());
-        // TODO 阶段 5：shuffle_state.phase > 0 前置（需 invertibility witness 或 logup）；
-        //              嵌入 ZKShuffleProof Verifier AIR；
-        //              约束 52 个 DLEq proof。
+        // shuffle proof 本身由 production verifier 重放 native precompile；上面的完整
+        // request/receipt digest 列把该结果绑定到此 STARK statement。若未来要求
+        // trustless recursion，可在不改变 canonical request ABI 的前提下替换为
+        // Verifier AIR backend。逐牌 DLEq 仍属于 join/reveal 等后续 precompile 范围。
 
         eval
     }
@@ -166,6 +193,14 @@ pub struct SubmitShuffleV2Row {
     pub input_shuffle_phase: M31,
     /// Gap 6 witness：shuffle_phase²。
     pub input_shuffle_phase_q: M31,
+    /// Precompile selector.
+    pub precompile_id: M31,
+    /// Canonical request ABI version.
+    pub precompile_abi_version: M31,
+    /// Full request digest.
+    pub request_digest: [M31; DIGEST_LIMBS],
+    /// Full verifier receipt digest.
+    pub receipt_digest: [M31; DIGEST_LIMBS],
 }
 
 impl SubmitShuffleV2Row {
@@ -206,6 +241,10 @@ impl SubmitShuffleV2Row {
             output_completed_count: u8_to_m31(post_completed_count),
             input_shuffle_phase: sp,
             input_shuffle_phase_q: q,
+            precompile_id: u8_to_m31(input.precompile.precompile_id),
+            precompile_abi_version: u8_to_m31(input.precompile.abi_version),
+            request_digest: input.precompile.request_digest,
+            receipt_digest: input.precompile.receipt_digest,
         }
     }
 
@@ -219,6 +258,10 @@ impl SubmitShuffleV2Row {
             output_completed_count: ZERO,
             input_shuffle_phase: ZERO,
             input_shuffle_phase_q: ZERO,
+            precompile_id: ZERO,
+            precompile_abi_version: ZERO,
+            request_digest: [ZERO; DIGEST_LIMBS],
+            receipt_digest: [ZERO; DIGEST_LIMBS],
         }
     }
 
@@ -231,7 +274,59 @@ impl SubmitShuffleV2Row {
         v.push(self.output_completed_count);
         v.push(self.input_shuffle_phase);
         v.push(self.input_shuffle_phase_q);
+        v.push(self.precompile_id);
+        v.push(self.precompile_abi_version);
+        v.extend_from_slice(&self.request_digest);
+        v.extend_from_slice(&self.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }
+}
+
+/// Validate the verifier-issued shuffle receipt and its exact replay scope.
+pub fn validate_public_inputs(
+    air: &SubmitShuffleV2Air,
+    public_inputs: &crate::public_inputs::TexasPublicInputs,
+) -> crate::error::TexasAirResult<()> {
+    use poker_protocol::precompile_abi::ShuffleVerifyRequest;
+
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        crate::error::TexasAirError::SpecViolation(
+            "submit_shuffle_v2 requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    if binding.precompile_id() != crate::precompile_binding::PokerPrecompileId::Shuffle {
+        return Err(crate::error::TexasAirError::SpecViolation(
+            "submit_shuffle_v2 received the wrong precompile receipt type".into(),
+        ));
+    }
+    binding.reverify()?;
+    if binding.air_binding() != air.input.precompile {
+        return Err(crate::error::TexasAirError::SpecViolation(
+            "shuffle AIR digest columns do not match the verifier-issued receipt".into(),
+        ));
+    }
+    let request = ShuffleVerifyRequest::decode(binding.request_bytes()).map_err(|error| {
+        crate::error::TexasAirError::SpecViolation(format!(
+            "shuffle request canonical decode failed: {error}"
+        ))
+    })?;
+    let expected_context = crate::precompile_binding::precompile_call_context(
+        MethodKind::SubmitShuffleV2,
+        air.input.seat_index,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    if request.call_context != expected_context {
+        return Err(crate::error::TexasAirError::SpecViolation(
+            "shuffle precompile request is outside this table/hand/call/seat/state scope".into(),
+        ));
+    }
+    Ok(())
 }

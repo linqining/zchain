@@ -33,6 +33,7 @@ starknet-ff = { workspace = true }
 starknet-crypto = { workspace = true }
 # ===== 通用依赖 =====
 borsh = { workspace = true }
+bincode = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 blake2 = { workspace = true }
@@ -46,5 +47,6 @@ pairing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+rand = { workspace = true }
 secp256k1 = { workspace = true }
 poker_texas_air = { path = ".", features = ["test-helpers"] }
