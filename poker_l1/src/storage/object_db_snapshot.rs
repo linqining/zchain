@@ -21,7 +21,7 @@ use crate::object_model::{Object, ObjectID, ObjectStore, Version};
 use crate::{Address, Hash};
 
 use super::object_backend::ObjectBackend;
-use super::object_db::ObjectDb;
+use super::object_db::{ObjectDb, ObjectMutation};
 
 /// 写操作记录（用于 apply_to 回放）。
 #[derive(Debug, Clone)]
@@ -73,28 +73,35 @@ impl ObjectDbSnapshot {
 
     /// 将 mutation log 回放到主 ObjectDb（commit）。
     ///
-    /// 按序调用 ObjectDb 的 create/update/transfer/delete，
-    /// 任一失败立即返回错误（已应用的 mutation 不可撤销）。
+    /// 所有 mutation 在主库克隆上重新校验，并通过一个 RocksDB WriteBatch 提交。
     pub fn apply_to(self, db: &mut ObjectDb) -> PokerL1Result<()> {
-        for m in self.mutations {
-            match m {
-                Mutation::Create(o) => db.create(o)?,
+        let mutations = self
+            .mutations
+            .into_iter()
+            .map(|mutation| match mutation {
+                Mutation::Create(object) => ObjectMutation::Create(object),
                 Mutation::Update {
                     id,
                     actor,
                     new_data,
-                } => db.update(&id, &actor, new_data)?,
+                } => ObjectMutation::Update {
+                    id,
+                    actor,
+                    new_data,
+                },
                 Mutation::Transfer {
                     id,
                     actor,
                     new_owner,
-                } => db.transfer(&id, &actor, new_owner)?,
-                Mutation::Delete(id) => {
-                    db.delete(&id)?;
-                }
-            }
-        }
-        Ok(())
+                } => ObjectMutation::Transfer {
+                    id,
+                    actor,
+                    new_owner,
+                },
+                Mutation::Delete(id) => ObjectMutation::Delete(id),
+            })
+            .collect();
+        db.apply_batch(mutations)
     }
 
     /// 丢弃 snapshot（rollback，不写回主 DB）。

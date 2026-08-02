@@ -30,12 +30,14 @@ use crate::consensus::{
     compute_genesis_chain_randomness,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::executor::{BlockExecutionOutcome, ExecutionEnvironment, execute_block};
+use crate::executor::{BlockExecutionOutcome, ExecutionEnvironment, FeePolicy, execute_block};
 use crate::object_model::{Object, ObjectID};
 use crate::signature::TaggedPubkey;
 use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
 use crate::signature::unified::verify_signature;
-use crate::storage::{BlockStore, BridgeRegistryStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb};
+use crate::storage::{
+    BlockStore, BridgeRegistryStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb,
+};
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::PrecompileRegistry;
 use crate::vm::contracts::{GamePrecompile, TexasPokerPrecompile};
@@ -129,6 +131,9 @@ pub struct NodeConfig {
     /// 空列表表示创世引导期 — vertex/block 的 validator 成员校验跳过。
     #[serde(default)]
     pub genesis_validators: Vec<ValidatorEntry>,
+    /// Monetary fee policy. Compute metering remains enabled when set to `Free`.
+    #[serde(default)]
+    pub fee_policy: FeePolicy,
 }
 
 impl NodeConfig {
@@ -143,6 +148,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: None,
             genesis_validators: vec![],
+            fee_policy: FeePolicy::Charged,
         }
     }
 
@@ -157,6 +163,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: Some(validator_key),
             genesis_validators: vec![],
+            fee_policy: FeePolicy::Charged,
         }
     }
 
@@ -171,6 +178,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: None,
             genesis_validators: vec![],
+            fee_policy: FeePolicy::Charged,
         }
     }
 
@@ -185,6 +193,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: None,
             genesis_validators: vec![],
+            fee_policy: FeePolicy::Charged,
         }
     }
 
@@ -192,6 +201,13 @@ impl NodeConfig {
     #[must_use]
     pub fn with_genesis_validators(mut self, validators: Vec<ValidatorEntry>) -> Self {
         self.genesis_validators = validators;
+        self
+    }
+
+    /// Select the chain's monetary fee policy.
+    #[must_use]
+    pub const fn with_fee_policy(mut self, fee_policy: FeePolicy) -> Self {
+        self.fee_policy = fee_policy;
         self
     }
 }
@@ -477,6 +493,7 @@ impl Node {
                 p2p_listen: "127.0.0.1:0".to_string(),
                 validator_key: None,
                 genesis_validators,
+                fee_policy: FeePolicy::Charged,
             },
             block_store: BlockStore::open_inmemory()?,
             object_db: std::sync::Mutex::new(ObjectDb::open_inmemory()?),
@@ -568,17 +585,15 @@ impl Node {
         // stake 须有真实账户余额支撑，防"凭空质押"。
         if entry.stake > 0 {
             let validator_addr = crate::account::derive_address(&entry.pubkey);
-            let mut account_store =
-                self.account_store.lock().unwrap_or_else(|e| e.into_inner());
+            let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
             // 账户须存在且余额 ≥ stake，否则拒绝（质押不足）。
             match account_store.get_mut(&validator_addr) {
                 Some(acc) => {
-                    acc.debit(entry.stake).map_err(|_| {
-                        PokerL1Error::InsufficientBalance {
+                    acc.debit(entry.stake)
+                        .map_err(|_| PokerL1Error::InsufficientBalance {
                             needed: entry.stake,
                             has: acc.balance,
-                        }
-                    })?;
+                        })?;
                     account_store.flush(&validator_addr)?;
                 }
                 None => {
@@ -657,8 +672,7 @@ impl Node {
         // 退还到账户。
         if refund > 0 {
             let validator_addr = crate::account::derive_address(validator_pubkey);
-            let mut account_store =
-                self.account_store.lock().unwrap_or_else(|e| e.into_inner());
+            let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
             // 账户应存在（bonding 时创建）；不存在则忽略退还（防御性）。
             if account_store.get(&validator_addr).is_some() {
                 account_store.credit(&validator_addr, refund)?;
@@ -700,13 +714,19 @@ impl Node {
                     let verifier = crate::consensus::ecvrf::Secp256k1VrfVerifier::new();
                     set.submit_epoch_vrf_proof(
                         self.config.chain_id,
-                        &self.config.validator_key.as_ref().map(|k| &k.tagged_pubkey).cloned().unwrap_or_else(|| {
-                            // 无 validator_key 时无法标识 proposer，fallback。
-                            TaggedPubkey {
-                                tag: 0,
-                                raw: vec![],
-                            }
-                        }),
+                        &self
+                            .config
+                            .validator_key
+                            .as_ref()
+                            .map(|k| &k.tagged_pubkey)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                // 无 validator_key 时无法标识 proposer，fallback。
+                                TaggedPubkey {
+                                    tag: 0,
+                                    raw: vec![],
+                                }
+                            }),
                         &proof,
                         &verifier,
                     )
@@ -908,7 +928,7 @@ impl Node {
     /// 多个 validator 各自签名后，light client 收集 ≥2/3 签名即可验证 header 真实性。
     fn sign_and_store_light_header(&self, block: &Block, vkey: &ValidatorKey) {
         use blake2::digest::{Update, VariableOutput};
-        use secp256k1::{Secp256k1, SecretKey, Message};
+        use secp256k1::{Message, Secp256k1, SecretKey};
         let header_bytes = borsh::to_vec(&block.header).unwrap_or_default();
         // 签名对象 = blake2b_256(header_bytes)
         let mut hasher = blake2::Blake2bVar::new(32).expect("32 <= 64");
@@ -933,10 +953,7 @@ impl Node {
         // 尝试合并到已有的同 header LightClientHeader，或新建。
         let mut headers = self.light_headers.lock().unwrap_or_else(|e| e.into_inner());
         // 查找是否已有同 header_bytes 的 header（多 validator 合并签名）。
-        if let Some(existing) = headers
-            .iter_mut()
-            .find(|h| h.header_bytes == header_bytes)
-        {
+        if let Some(existing) = headers.iter_mut().find(|h| h.header_bytes == header_bytes) {
             // 去重：同一 validator 不重复签名。
             if !existing
                 .signatures
@@ -977,7 +994,11 @@ impl Node {
             .find(|h| h.header_bytes == header.header_bytes)
         {
             for sig in &header.signatures {
-                if !existing.signatures.iter().any(|s| s.validator == sig.validator) {
+                if !existing
+                    .signatures
+                    .iter()
+                    .any(|s| s.validator == sig.validator)
+                {
                     existing.signatures.push(sig.clone());
                 }
             }
@@ -1081,7 +1102,9 @@ impl Node {
                 }
                 tracing::warn!(
                     "block#{} cert 签名数 {} < quorum {}（DAG-backed 弱 cert，safety 由 DAG 引用保障）",
-                    header.height, signer_count, required
+                    header.height,
+                    signer_count,
+                    required
                 );
             }
         }
@@ -1167,7 +1190,8 @@ impl Node {
     ) -> ExecutionEnvironment {
         let mut env =
             ExecutionEnvironment::new(self.config.chain_id, block_height, block_timestamp)
-                .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
+                .with_precompile_registry_arc(Arc::clone(&self.precompile_registry))
+                .with_fee_policy(self.config.fee_policy);
         if let Some(registry) = &self.zk_verifier {
             env = env.with_zk_verifier(registry.clone());
         }
@@ -1194,8 +1218,12 @@ impl Node {
             .flatten()
             .unwrap_or(0);
         self.metrics.set_block_height(tip);
-        self.metrics
-            .set_mempool_size(self.pending_tx.lock().unwrap_or_else(|e| e.into_inner()).len() as u64);
+        self.metrics.set_mempool_size(
+            self.pending_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len() as u64,
+        );
         self.metrics.export()
     }
 
@@ -1649,6 +1677,18 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
         self.node.get_vertex(vertex_hash)
     }
 
+    fn get_native_coins(
+        &self,
+        owner: &Address,
+    ) -> PokerL1Result<Vec<crate::economics::OwnedNativeCoin>> {
+        let object_db = self
+            .node
+            .object_db
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::economics::list_owned_native_coins(&object_db, *owner)
+    }
+
     fn chain_id(&self) -> ChainId {
         self.node.chain_id()
     }
@@ -1666,8 +1706,9 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{Block, BlockHeader};
     use crate::DEFAULT_CHAIN_ID;
+    use crate::block::{Block, BlockHeader};
+    use crate::economics::native_coin_object;
     use crate::object_model::{Object, ObjectID, Ownership};
     use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
@@ -2086,11 +2127,17 @@ mod tests {
     fn node_rpc_backend_adapter() {
         use crate::rpc::RpcBackend;
         let node = Arc::new(Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap());
+        let owner = [0xAB; 20];
+        node.put_object(native_coin_object(owner, 42, 1).unwrap())
+            .unwrap();
         let backend = NodeRpcBackend::new(node);
         assert_eq!(backend.chain_id(), DEFAULT_CHAIN_ID);
         // get_object 返回 None（空库）
         let result = backend.get_object(&ObjectID::new([0xCC; 20], 0)).unwrap();
         assert!(result.is_none());
+        let coins = backend.get_native_coins(&owner).unwrap();
+        assert_eq!(coins.len(), 1);
+        assert_eq!(coins[0].amount, 42);
     }
 
     // ===== P0-3: validate_vertex 测试 =====
@@ -2611,7 +2658,11 @@ mod tests {
 
         let config = crate::consensus::SlashingConfig::default();
         let result = node
-            .slash_validator(&pubkey, crate::consensus::SlashingReason::VertexEquivocation, &config)
+            .slash_validator(
+                &pubkey,
+                crate::consensus::SlashingReason::VertexEquivocation,
+                &config,
+            )
             .unwrap();
         // 默认 slash_percentage=100 → slash_amount = 100_000（全额）
         assert_eq!(result.slash_amount, 100_000);
@@ -2660,8 +2711,8 @@ mod tests {
         // 构造一个 validator + VRF 密钥对，注册到 set。
         let prover = crate::consensus::ecvrf::Secp256k1VrfProver::from_secret_bytes(&[0x55; 32]);
         let vrf_pubkey = prover.derive_public_key().unwrap();
-        let tagged = TaggedPubkey::new(SignatureScheme::Secp256k1, CURRENT_VERSION, vec![0x55; 33])
-            .unwrap();
+        let tagged =
+            TaggedPubkey::new(SignatureScheme::Secp256k1, CURRENT_VERSION, vec![0x55; 33]).unwrap();
         let mut entry = ValidatorEntry::new(tagged.clone(), vrf_pubkey, 1000, 0);
         entry.status = crate::consensus::ValidatorStatus::Active;
         // 缺口 #5：stake 须有账户余额支撑。
@@ -2721,7 +2772,10 @@ mod tests {
         assert_eq!(created, 2);
         let addr1 = crate::account::derive_address(&pk1);
         let addr2 = crate::account::derive_address(&pk2);
-        assert_eq!(node.get_account(&addr1).unwrap().unwrap().balance, 1_000_000);
+        assert_eq!(
+            node.get_account(&addr1).unwrap().unwrap().balance,
+            1_000_000
+        );
         assert_eq!(node.get_account(&addr2).unwrap().unwrap().balance, 500_000);
     }
 
@@ -2821,7 +2875,8 @@ mod tests {
             let price = if i == 0 { 999 } else { 1 }; // 第 0 条 price 最高
             let pubkey_byte = ((i % 200) as u8) + 1; // 1..=200，避免 0/回绕
             // nonce = i（全局唯一，避免同 (caller, nonce) RBF）
-            node.submit_tx(make_pub_tx(pubkey_byte, i as u64, price)).unwrap();
+            node.submit_tx(make_pub_tx(pubkey_byte, i as u64, price))
+                .unwrap();
         }
         let drained = node.drain_pending_tx();
         assert_eq!(drained.len(), MAX_PENDING_TX_SIZE, "应保留上限条数");
@@ -2922,12 +2977,9 @@ mod tests {
     fn light_header_generated_with_validator_signature() {
         // validator 节点 put_block 后应生成带 secp256k1 签名的 LightClientHeader。
         let vkey = ValidatorKey::from_secret_bytes([0x42; 32]).unwrap();
-        let node = Node::open_inmemory_with_validators(
-            NodeRole::Validator,
-            DEFAULT_CHAIN_ID,
-            vec![],
-        )
-        .unwrap();
+        let node =
+            Node::open_inmemory_with_validators(NodeRole::Validator, DEFAULT_CHAIN_ID, vec![])
+                .unwrap();
         // 手动注入 validator_key（open_inmemory 默认无 key）。
         // 通过直接调用 sign_and_store_light_header 测试。
         let block = Block::new(
@@ -2959,7 +3011,11 @@ mod tests {
         assert_eq!(headers.len(), 1, "应生成 1 个 LightClientHeader");
         assert_eq!(headers[0].signatures.len(), 1, "应有 1 个 validator 签名");
         assert_eq!(headers[0].signatures[0].validator, vkey.tagged_pubkey);
-        assert_eq!(headers[0].signatures[0].signature.len(), 65, "secp256k1 签名 65B");
+        assert_eq!(
+            headers[0].signatures[0].signature.len(),
+            65,
+            "secp256k1 签名 65B"
+        );
     }
 
     #[test]

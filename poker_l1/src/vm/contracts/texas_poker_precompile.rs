@@ -23,8 +23,14 @@ use std::sync::Arc;
 
 use super::texas_poker::dispatch as tp_dispatch;
 use super::texas_poker::dispatch::selectors;
+use super::texas_poker::events::TexasPokerEvent;
+use super::texas_poker::prove_task::L1DispatchOutput;
 use super::texas_poker::types::TexasPokerTable;
 use crate::Address;
+use crate::economics::{
+    NativeCoinSelection, coin_output_nonce, consume_native_coin_selection,
+    create_native_coin_output, native_coin_object, select_owned_native_coins,
+};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
@@ -52,6 +58,22 @@ impl TexasPokerPrecompile {
     #[must_use]
     pub fn new_arc(version: u32) -> Arc<dyn Precompile> {
         Arc::new(Self::new(version))
+    }
+
+    fn refund_outputs(return_value: &[u8]) -> PokerL1Result<Vec<(Address, u64)>> {
+        let output: L1DispatchOutput = borsh::from_slice(return_value).map_err(|error| {
+            PokerL1Error::Serialization(format!("decode Texas dispatch funding output: {error}"))
+        })?;
+        Ok(output
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                TexasPokerEvent::PlayerRefund { player, amount, .. } if amount > 0 => {
+                    Some((player, amount))
+                }
+                _ => None,
+            })
+            .collect())
     }
 }
 
@@ -110,7 +132,89 @@ impl Precompile for TexasPokerPrecompile {
             Err(e) => return Err(e),
         };
 
+        let pre_locked = table.chip_pool;
+        let required_funding = tp_dispatch::required_funding(method_selector, args)?;
+        let selected_coins: Option<NativeCoinSelection> = required_funding
+            .map(|required| select_owned_native_coins(object_db, &env.tx_inputs, *caller, required))
+            .transpose()?;
+
         let result = tp_dispatch::dispatch(&dispatch_context, &mut table, method_selector, args)?;
+        let refunds = Self::refund_outputs(&result.return_value)?;
+        let total_refunds = refunds.iter().try_fold(0u64, |total, (_, amount)| {
+            total
+                .checked_add(*amount)
+                .ok_or_else(|| PokerL1Error::Other("Texas refund sum overflow".into()))
+        })?;
+        let expected_locked = pre_locked
+            .checked_add(required_funding.unwrap_or(0))
+            .and_then(|value| value.checked_sub(total_refunds))
+            .ok_or_else(|| {
+                PokerL1Error::Other("Texas TableVault balance transition overflow".into())
+            })?;
+        if table.chip_pool != expected_locked {
+            return Err(PokerL1Error::Other(format!(
+                "Texas TableVault mismatch: pre={pre_locked}, funding={}, refunds={total_refunds}, post={}, expected={expected_locked}",
+                required_funding.unwrap_or(0),
+                table.chip_pool,
+            )));
+        }
+
+        // Preflight every deterministic output before consuming an input. Normal execution uses
+        // WriteCaptureBackend and therefore rolls the complete transaction back on any later
+        // error; this preflight also keeps the direct ObjectBackend path fail-before-write.
+        let change_output = selected_coins
+            .as_ref()
+            .and_then(|selection| required_funding.map(|required| (selection, required)))
+            .and_then(|(selection, required)| {
+                selection
+                    .total
+                    .checked_sub(required)
+                    .filter(|change| *change > 0)
+            })
+            .map(|change| native_coin_object(*caller, change, coin_output_nonce(&env.tx_hash, 0)))
+            .transpose()?;
+        if let Some(change) = &change_output {
+            if object_db.read(&change.id).is_ok() {
+                return Err(PokerL1Error::ObjectIDCollision(change.id));
+            }
+        }
+        for (index, (player, amount)) in refunds.iter().enumerate() {
+            let output_index = u32::try_from(index + 1)
+                .map_err(|_| PokerL1Error::Other("too many Texas refund outputs".into()))?;
+            let payout = native_coin_object(
+                *player,
+                *amount,
+                coin_output_nonce(&env.tx_hash, output_index),
+            )?;
+            if object_db.read(&payout.id).is_ok() {
+                return Err(PokerL1Error::ObjectIDCollision(payout.id));
+            }
+        }
+
+        let mut economic_created = Vec::new();
+        if let (Some(selection), Some(required)) = (&selected_coins, required_funding) {
+            if let Some(change_id) = consume_native_coin_selection(
+                object_db,
+                selection,
+                *caller,
+                required,
+                &env.tx_hash,
+                0,
+            )? {
+                economic_created.push(change_id);
+            }
+        }
+        for (index, (player, amount)) in refunds.into_iter().enumerate() {
+            let output_index = u32::try_from(index + 1)
+                .map_err(|_| PokerL1Error::Other("too many Texas refund outputs".into()))?;
+            economic_created.push(create_native_coin_output(
+                object_db,
+                player,
+                amount,
+                &env.tx_hash,
+                output_index,
+            )?);
+        }
 
         // 持久化
         let table_data = borsh::to_vec(&table).map_err(|e| {
@@ -137,6 +241,10 @@ impl Precompile for TexasPokerPrecompile {
             read_objects: if is_new { vec![] } else { vec![table_id] },
             return_value: result.return_value,
         };
+        final_result.created_objects.extend(economic_created);
+        final_result
+            .read_objects
+            .extend(env.tx_inputs.iter().copied());
         if is_new && !final_result.created_objects.contains(&table_id) {
             final_result.created_objects.push(table_id);
         }
@@ -162,14 +270,23 @@ impl Precompile for TexasPokerPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blstrs::G1Projective;
+    use group::Group;
+    use poker_protocol::crypto::ECPoint;
+
+    use crate::economics::{coin_output_nonce, decode_native_coin, native_coin_object};
     use crate::signature::TaggedPubkey;
-    use crate::vm::contracts::texas_poker::dispatch::CreateTableArgs;
+    use crate::vm::contracts::texas_poker::dispatch::{
+        CreateTableArgs, JoinTableArgs, LeaveTableArgs,
+    };
 
     fn make_env() -> ExecutionEnvironment {
         ExecutionEnvironment {
             chain_id: 1,
             block_height: 100,
             block_timestamp: 1_000_000,
+            tx_inputs: vec![],
+            tx_hash: [0u8; 32],
         }
     }
 
@@ -273,5 +390,143 @@ mod tests {
             &mut object_db,
         );
         assert!(matches!(result, Err(PokerL1Error::ContractNotFound(_))));
+    }
+
+    fn create_test_table(
+        precompile: &TexasPokerPrecompile,
+        caller: &Address,
+        caller_pk: &TaggedPubkey,
+        object_db: &mut ObjectDb,
+    ) {
+        let args = borsh::to_vec(&CreateTableArgs {
+            name: "funded_game".into(),
+            max_players: 6,
+            small_blind: 25,
+            big_blind: 50,
+        })
+        .unwrap();
+        precompile
+            .call(
+                caller,
+                caller_pk,
+                &selectors::create_table(),
+                &args,
+                &make_env(),
+                object_db,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn funded_join_creates_change_and_leave_creates_payout() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let mut object_db = ObjectDb::open_inmemory().unwrap();
+        create_test_table(&precompile, &caller, &caller_pk, &mut object_db);
+
+        let input = native_coin_object(caller, 150, 77).unwrap();
+        object_db.create(input.clone()).unwrap();
+        let join_hash = [0x11; 32];
+        let join_env = ExecutionEnvironment {
+            tx_inputs: vec![input.id],
+            tx_hash: join_hash,
+            ..make_env()
+        };
+        let join_args = borsh::to_vec(&JoinTableArgs {
+            player: caller,
+            buy_in: 100,
+            pk: ECPoint(G1Projective::identity()),
+        })
+        .unwrap();
+
+        let result = precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::join_table(),
+                &join_args,
+                &join_env,
+                &mut object_db,
+            )
+            .unwrap();
+
+        assert!(object_db.read(&input.id).is_err());
+        let change_id = ObjectID::new(caller, coin_output_nonce(&join_hash, 0));
+        assert!(result.created_objects.contains(&change_id));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&change_id).unwrap())
+                .unwrap()
+                .amount,
+            50
+        );
+        let table_id = reserved::texas_poker_contract_id();
+        let table: TexasPokerTable =
+            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        assert_eq!(table.chip_pool, 100);
+        assert_eq!(table.seats[0].stack, 100);
+
+        let leave_hash = [0x22; 32];
+        let leave_env = ExecutionEnvironment {
+            tx_hash: leave_hash,
+            ..make_env()
+        };
+        let leave_args = borsh::to_vec(&LeaveTableArgs { seat_index: 0 }).unwrap();
+        let result = precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::leave_table(),
+                &leave_args,
+                &leave_env,
+                &mut object_db,
+            )
+            .unwrap();
+
+        let payout_id = ObjectID::new(caller, coin_output_nonce(&leave_hash, 1));
+        assert!(result.created_objects.contains(&payout_id));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&payout_id).unwrap())
+                .unwrap()
+                .amount,
+            100
+        );
+        let table: TexasPokerTable =
+            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        assert_eq!(table.chip_pool, 0);
+        assert!(!table.seats[0].is_occupied());
+    }
+
+    #[test]
+    fn funded_join_without_coin_input_is_rejected_without_table_mutation() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let mut object_db = ObjectDb::open_inmemory().unwrap();
+        create_test_table(&precompile, &caller, &caller_pk, &mut object_db);
+        let table_id = reserved::texas_poker_contract_id();
+        let table_before = object_db.read(&table_id).unwrap();
+        let join_args = borsh::to_vec(&JoinTableArgs {
+            player: caller,
+            buy_in: 100,
+            pk: ECPoint(G1Projective::identity()),
+        })
+        .unwrap();
+
+        let error = precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::join_table(),
+                &join_args,
+                &make_env(),
+                &mut object_db,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one native coin input")
+        );
+        assert_eq!(object_db.read(&table_id).unwrap(), table_before);
     }
 }

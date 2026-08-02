@@ -34,7 +34,7 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
 use crate::storage::{ObjectBackend, ObjectDb};
-use crate::{Address, BlockHeight, ChainId};
+use crate::{Address, BlockHeight, ChainId, Hash};
 
 /// 预编译合约 trait（统一接口）。
 ///
@@ -193,6 +193,11 @@ pub struct ExecutionEnvironment {
     pub block_height: BlockHeight,
     /// 当前 block timestamp（毫秒）。
     pub block_timestamp: u64,
+    /// Transaction-declared object inputs. Funded precompiles must only consume coins from this
+    /// signed set; accepting an object ID solely from call arguments would permit relabelling.
+    pub tx_inputs: Vec<ObjectID>,
+    /// Signed transaction hash used to derive deterministic change and payout object IDs.
+    pub tx_hash: Hash,
 }
 
 /// 预编译合约注册表（热插拔 + 版本管理）。
@@ -608,6 +613,8 @@ mod tests {
             chain_id: 1,
             block_height: 100,
             block_timestamp: 1_000_000,
+            tx_inputs: vec![],
+            tx_hash: [0u8; 32],
         }
     }
 

@@ -37,6 +37,7 @@ pub mod block;
 pub mod bridge;
 pub mod consensus;
 pub mod crypto_precompiles;
+pub mod economics;
 pub mod error;
 pub mod executor;
 pub mod governance;
@@ -52,6 +53,7 @@ pub mod storage;
 pub mod sync;
 pub mod transaction;
 pub mod vm;
+pub mod wallet;
 
 /// 网络标识（chain_id）类型。spec 中 chain_id 用于跨链重放保护（M10 / SEC-L4）。
 pub type ChainId = u64;

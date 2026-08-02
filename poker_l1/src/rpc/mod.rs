@@ -4,6 +4,7 @@
 //! - **SubTask 31.1**：JSON-RPC 方法
 //!   - `get_block(hash | height)` / `get_object(id)` / `get_tx(hash)`
 //!   - `submit_tx(tx_bytes)` / `get_account(address | pubkey)` / `get_dag_vertex(hash)`
+//!   - `get_native_balance` / `get_native_coins` / `select_native_coins`
 //! - **SubTask 31.2**：WebSocket 订阅事件（block / vertex / tx）
 //! - **SubTask 31.3**：crypto verify RPC
 //!   - `secp256k1_aggregate_verify(pubkeys, msg_hashes, sigs)`
@@ -28,6 +29,10 @@ use crate::consensus::DagVertex;
 use crate::crypto_precompiles::native_api::{
     bls_verify as native_bls_verify,
     secp256k1_aggregate_verify as native_secp256k1_aggregate_verify,
+};
+use crate::economics::{
+    OwnedNativeCoin, list_owned_native_coins, select_native_coins_from_candidates,
+    sum_native_coin_balance,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID};
@@ -197,6 +202,66 @@ pub enum GetAccountParams {
 pub struct GetDagVertexParams {
     /// vertex hash。
     pub vertex_hash: Hash,
+}
+
+/// `get_native_balance` / `get_native_coins` parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GetNativeCoinsParams {
+    /// Query by the 20-byte owner address.
+    ByAddress {
+        /// Native-coin owner.
+        address: Address,
+    },
+    /// Query by tagged public key; the node derives the owner address.
+    ByPubkey {
+        /// Wallet tagged public key.
+        tagged_pubkey: TaggedPubkey,
+    },
+}
+
+/// `select_native_coins` parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SelectNativeCoinsParams {
+    /// Select coins by owner address.
+    ByAddress {
+        /// Native-coin owner.
+        address: Address,
+        /// Required amount in indivisible ZCN base units.
+        required: u64,
+    },
+    /// Select coins by tagged public key.
+    ByPubkey {
+        /// Wallet tagged public key.
+        tagged_pubkey: TaggedPubkey,
+        /// Required amount in indivisible ZCN base units.
+        required: u64,
+    },
+}
+
+/// Aggregated native-coin balance returned to wallets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeBalanceResult {
+    /// Owner address used for the query.
+    pub owner: Address,
+    /// Sum of all live native-coin outputs owned by the address.
+    pub balance: u64,
+    /// Number of live native-coin outputs hidden behind the aggregated balance.
+    pub coin_count: u64,
+}
+
+/// Advisory deterministic coin selection returned to wallets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectNativeCoinsResult {
+    /// Owner address used for selection.
+    pub owner: Address,
+    /// Coin object IDs to place in the signed transaction's `inputs` field.
+    pub input_ids: Vec<ObjectID>,
+    /// Sum of selected inputs.
+    pub total: u64,
+    /// Deterministic change amount that execution will return to the owner.
+    pub change: u64,
 }
 
 // ===== SubTask 31.3: crypto verify RPC 参数与返回类型 =====
@@ -599,6 +664,15 @@ pub trait RpcBackend: Send + Sync {
     fn get_account(&self, address: &Address) -> PokerL1Result<Option<Account>>;
     /// 按 hash 查询 DAG vertex。
     fn get_dag_vertex(&self, vertex_hash: &Hash) -> PokerL1Result<Option<DagVertex>>;
+    /// List live native coins owned by an address.
+    ///
+    /// The default keeps existing external backend implementations source-compatible. Production
+    /// nodes should override it before exposing the native-coin wallet RPC methods.
+    fn get_native_coins(&self, _owner: &Address) -> PokerL1Result<Vec<OwnedNativeCoin>> {
+        Err(PokerL1Error::Other(
+            "native coin queries are not supported by this RPC backend".into(),
+        ))
+    }
     /// 当前 chain_id。
     fn chain_id(&self) -> ChainId;
     /// ZK verifier registry（用于 zk_verify RPC）。
@@ -699,6 +773,9 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
             "submit_tx" => self.handle_submit_tx(&req.params),
             "get_account" => self.handle_get_account(&req.params),
             "get_dag_vertex" => self.handle_get_dag_vertex(&req.params),
+            "get_native_balance" => self.handle_get_native_balance(&req.params),
+            "get_native_coins" => self.handle_get_native_coins(&req.params),
+            "select_native_coins" => self.handle_select_native_coins(&req.params),
             "secp256k1_aggregate_verify" => self.handle_secp256k1_aggregate_verify(&req.params),
             "bls_verify" => self.handle_bls_verify(&req.params),
             "zk_verify" => self.handle_zk_verify(&req.params),
@@ -850,6 +927,83 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
             .get_dag_vertex(&p.vertex_hash)
             .map_err(RpcHandlerError::from_poker_error)?;
         serde_json::to_value(vertex).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    fn native_coin_owner(params: GetNativeCoinsParams) -> Address {
+        match params {
+            GetNativeCoinsParams::ByAddress { address } => address,
+            GetNativeCoinsParams::ByPubkey { tagged_pubkey } => derive_address(&tagged_pubkey),
+        }
+    }
+
+    fn handle_get_native_balance(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let params: GetNativeCoinsParams =
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let owner = Self::native_coin_owner(params);
+        let coins = self
+            .backend
+            .get_native_coins(&owner)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        let balance = sum_native_coin_balance(&coins).map_err(RpcHandlerError::from_poker_error)?;
+        let coin_count = u64::try_from(coins.len()).map_err(|_| {
+            RpcHandlerError::Internal("native coin count exceeds RPC representation".into())
+        })?;
+        serde_json::to_value(NativeBalanceResult {
+            owner,
+            balance,
+            coin_count,
+        })
+        .map_err(RpcHandlerError::from_serde_error)
+    }
+
+    fn handle_get_native_coins(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let params: GetNativeCoinsParams =
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let owner = Self::native_coin_owner(params);
+        let coins = self
+            .backend
+            .get_native_coins(&owner)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(coins).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    fn handle_select_native_coins(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let params: SelectNativeCoinsParams =
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let (owner, required) = match params {
+            SelectNativeCoinsParams::ByAddress { address, required } => (address, required),
+            SelectNativeCoinsParams::ByPubkey {
+                tagged_pubkey,
+                required,
+            } => (derive_address(&tagged_pubkey), required),
+        };
+        if required == 0 {
+            return Err(RpcHandlerError::Client(
+                "required amount must be greater than zero".into(),
+            ));
+        }
+        let coins = self
+            .backend
+            .get_native_coins(&owner)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        let selection = select_native_coins_from_candidates(&coins, required)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(SelectNativeCoinsResult {
+            owner,
+            input_ids: selection.input_ids,
+            total: selection.total,
+            change: selection.total - required,
+        })
+        .map_err(RpcHandlerError::from_serde_error)
     }
 
     // ===== SubTask 31.3: crypto verify RPC =====
@@ -1119,6 +1273,11 @@ impl RpcBackend for MemoryBackend {
         }
     }
 
+    fn get_native_coins(&self, owner: &Address) -> PokerL1Result<Vec<OwnedNativeCoin>> {
+        let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        list_owned_native_coins(&object_db, *owner)
+    }
+
     fn chain_id(&self) -> ChainId {
         self.chain_id
     }
@@ -1135,6 +1294,7 @@ mod tests {
     use crate::account::Account;
     use crate::block::{Block, BlockHeader};
     use crate::consensus::DagVertex;
+    use crate::economics::native_coin_object;
     use crate::object_model::{Object, ObjectID, Ownership};
     use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, Transaction, TxLane};
@@ -1300,6 +1460,69 @@ mod tests {
         assert!(resp.error.is_none());
         let obj_resp: Object = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert_eq!(obj_resp.id, id);
+    }
+
+    #[test]
+    fn native_coin_rpc_aggregates_lists_and_selects_without_exposing_fragmentation_by_default() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let owner = [0x44; 20];
+        let first = native_coin_object(owner, 40, 2).unwrap();
+        let second = native_coin_object(owner, 70, 1).unwrap();
+        backend.insert_object(first.clone()).unwrap();
+        backend.insert_object(second.clone()).unwrap();
+
+        let handler = RpcHandler::new(&backend);
+        let balance = handler.handle(&JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_native_balance".to_string(),
+            params: serde_json::json!({"address": owner}),
+            id: serde_json::json!(1),
+        });
+        assert!(balance.error.is_none());
+        let balance: NativeBalanceResult = serde_json::from_value(balance.result.unwrap()).unwrap();
+        assert_eq!(balance.balance, 110);
+        assert_eq!(balance.coin_count, 2);
+
+        let coins = handler.handle(&JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_native_coins".to_string(),
+            params: serde_json::json!({"address": owner}),
+            id: serde_json::json!(2),
+        });
+        assert!(coins.error.is_none());
+        let coins: Vec<OwnedNativeCoin> = serde_json::from_value(coins.result.unwrap()).unwrap();
+        assert_eq!(coins[0].id, second.id);
+        assert_eq!(coins[1].id, first.id);
+
+        let selection = handler.handle(&JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "select_native_coins".to_string(),
+            params: serde_json::json!({"address": owner, "required": 100}),
+            id: serde_json::json!(3),
+        });
+        assert!(selection.error.is_none());
+        let selection: SelectNativeCoinsResult =
+            serde_json::from_value(selection.result.unwrap()).unwrap();
+        assert_eq!(selection.input_ids, vec![second.id, first.id]);
+        assert_eq!(selection.total, 110);
+        assert_eq!(selection.change, 10);
+    }
+
+    #[test]
+    fn native_coin_selection_rpc_reports_insufficient_balance_as_client_error() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let owner = [0x55; 20];
+        backend
+            .insert_object(native_coin_object(owner, 25, 1).unwrap())
+            .unwrap();
+
+        let response = RpcHandler::new(&backend).handle(&JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "select_native_coins".to_string(),
+            params: serde_json::json!({"address": owner, "required": 30}),
+            id: serde_json::json!(1),
+        });
+        assert_eq!(response.error.unwrap().code, JsonRpcError::INVALID_PARAMS);
     }
 
     #[test]

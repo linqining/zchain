@@ -32,7 +32,9 @@
 //! 同一组有序 tx + 同一初始状态 → 同一 `state_root`。出块方与验证方
 //! 均通过 [`execute_block`] 得出 `state_root` 并比对（P0-2 接入）。
 
-use crate::account::{Account, AccountStore, apply_public_tx, derive_address, validate_public_tx};
+use crate::account::{
+    Account, AccountStore, apply_public_tx_with_fee, derive_address, validate_public_tx,
+};
 use crate::block::validator::{validate_tx_chain_id, validate_tx_signature};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
@@ -45,7 +47,14 @@ use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 /// caller debit `amount`（在 execute_tx_on_view_inner 内），recipient credit `amount`
 /// （在 block merge 阶段，因 account_store 在 execute_tx_on_view_inner 内不可访问）。
 #[derive(
-    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
 )]
 pub struct TransferArgs {
     /// 接收方地址。
@@ -57,6 +66,7 @@ use crate::vm::context::{PokerL1Context, TxContext};
 use crate::vm::gas_table::{BLOCK_GAS_LIMIT, MAX_OBJECT_SIZE, TX_GAS_LIMIT};
 use crate::vm::{ContractObject, PrecompileRegistry, execute_contract, load_contract_bytecode};
 use crate::{Address, BlockHeight, ChainId, Hash, TimestampMs};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -70,6 +80,25 @@ pub mod write_capture;
 /// 与 gas 奖励（缺口 #4-M1）并列：block 结束后 proposer 收到 `total_gas_used + 出块奖励`。
 /// 当前为保守常量；后续可经治理（governance）参数化（ParamName::BlockReward）。
 pub const DEFAULT_BLOCK_REWARD: u64 = 1_000_000;
+
+/// Monetary fee policy. Resource metering and block gas limits remain active in every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FeePolicy {
+    /// Debit the caller by the metered gas amount.
+    #[default]
+    Charged,
+    /// Charge no monetary fee while still validating budgets and advancing account nonces.
+    Free,
+}
+
+impl FeePolicy {
+    const fn caller_fee(self, gas_used: u64) -> u64 {
+        match self {
+            Self::Charged => gas_used,
+            Self::Free => 0,
+        }
+    }
+}
 
 /// 执行环境（block 级上下文）。
 #[derive(Debug, Clone)]
@@ -95,6 +124,8 @@ pub struct ExecutionEnvironment {
     /// block 执行结束后，累计的 `total_gas_used` 信用到此地址（不再烧毁）。
     /// `None` 时（测试 / 未启用）gas 仍烧毁（旧行为）。
     pub proposer: Option<Address>,
+    /// Chain-wide monetary fee policy. This does not disable gas metering.
+    pub fee_policy: FeePolicy,
 }
 
 impl ExecutionEnvironment {
@@ -110,7 +141,15 @@ impl ExecutionEnvironment {
             precompile_registry: None,
             bridge_registry_store: None,
             proposer: None,
+            fee_policy: FeePolicy::Charged,
         }
+    }
+
+    /// Select the monetary fee policy while preserving compute metering.
+    #[must_use]
+    pub const fn with_fee_policy(mut self, fee_policy: FeePolicy) -> Self {
+        self.fee_policy = fee_policy;
+        self
     }
 
     /// 注入 ZK verifier 注册表（builder 模式）。
@@ -324,8 +363,9 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
             PokerL1Error::Other(format!("account not found for caller {caller:?}"))
         })?;
         validate_public_tx(account, tx, env.chain_id)?;
-        // 费用预检：fee = gas_used ≤ budget，余额必须覆盖 budget
-        if account.balance < tx.gas.budget {
+        // Charged mode reserves the signed budget. Free mode still validates nonce and budget
+        // during execution but deliberately does not depend on legacy Account.balance.
+        if env.fee_policy == FeePolicy::Charged && account.balance < tx.gas.budget {
             return Err(PokerL1Error::InsufficientBalance {
                 needed: tx.gas.budget,
                 has: account.balance,
@@ -347,17 +387,18 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
         // BridgeRegistry + 铸币 + nonce 持久化，超出 trait 的 ObjectBackend 签名）。
         // executor 直接：解码 BridgeVerifyTx → bridge_verify → 铸 wrapped Object → 落 nonce。
         if call.contract_id == crate::vm::precompile::reserved::bridge_contract_id() {
-            let bridge_tx: crate::bridge::BridgeVerifyTx = borsh::from_slice(&call.args)
-                .map_err(|e| {
+            let bridge_tx: crate::bridge::BridgeVerifyTx =
+                borsh::from_slice(&call.args).map_err(|e| {
                     PokerL1Error::Other(format!("bridge_verify: invalid args encoding: {e}"))
                 })?;
-            let bridge_store = env.bridge_registry_store.clone().ok_or_else(|| {
-                PokerL1Error::BridgeVerifyNotAuthorized
-            })?;
+            let bridge_store = env
+                .bridge_registry_store
+                .clone()
+                .ok_or_else(|| PokerL1Error::BridgeVerifyNotAuthorized)?;
             // bridge_verify 需 &mut BridgeRegistry（mutex 保护）。
             let outcome = {
                 let mut registry = bridge_store.registry();
-                    crate::bridge::bridge_verify(&mut registry, &bridge_tx, env.chain_id, true)?
+                crate::bridge::bridge_verify(&mut registry, &bridge_tx, env.chain_id, true)?
             };
             // 铸造 wrapped Object（creation_nonce 确定性：block_height 高 32 位 | tx_hash 低 32 位，
             // 保证出块/验块双方 ObjectID 一致 → state_root 可重现）。
@@ -366,13 +407,12 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                 let lo = u32::from_le_bytes(tx.tx_hash()[0..4].try_into().unwrap()) as u64;
                 hi | lo
             };
-            let wrapped_id = crate::bridge::mint_wrapped_object(&outcome, object_db, creation_nonce)?;
+            let wrapped_id =
+                crate::bridge::mint_wrapped_object(&outcome, object_db, creation_nonce)?;
             all_created.push(wrapped_id);
             // 持久化 deposit nonce（Q24：防重启重放铸币）。
-            bridge_store.persist_deposit_nonce(
-                outcome.deposit.source_chain_id,
-                outcome.deposit.nonce,
-            )?;
+            bridge_store
+                .persist_deposit_nonce(outcome.deposit.source_chain_id, outcome.deposit.nonce)?;
             // bridge 调用不经 rBPF，gas_used 保持 0；步骤 6 仍按 Public lane 扣费 + 推进 nonce。
         } else if call.contract_id == crate::vm::precompile::reserved::transfer_contract_id() {
             // 缺口 #4-M1：原生转账（caller debit amount，recipient credit 在 merge 阶段）。
@@ -387,10 +427,11 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
             // caller debit（account_view 持有 caller 账户引用）。
             // 注意：account_view 仅对非 gas-free lane 为 Some；transfer 走 Public lane（非 gas-free）。
             if let Some(acc) = account_view.as_mut() {
-                acc.debit(args.amount).map_err(|_| PokerL1Error::InsufficientBalance {
-                    needed: args.amount,
-                    has: acc.balance,
-                })?;
+                acc.debit(args.amount)
+                    .map_err(|_| PokerL1Error::InsufficientBalance {
+                        needed: args.amount,
+                        has: acc.balance,
+                    })?;
             }
             // 记录意图：merge 阶段由 account_store credit recipient。
             transfer_intent = Some((args.recipient, args.amount));
@@ -402,6 +443,8 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                     chain_id: env.chain_id,
                     block_height: env.block_height,
                     block_timestamp: env.block_timestamp,
+                    tx_inputs: tx.inputs.clone(),
+                    tx_hash: tx.tx_hash(),
                 };
                 let selector: [u8; 32] = call.method_selector;
                 let dispatch_result = registry.execute(
@@ -449,8 +492,9 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
     let fee_charged = if !is_gas_free_lane {
         let account = account_view
             .ok_or_else(|| PokerL1Error::Other("account disappeared mid-execution".into()))?;
-        apply_public_tx(account, tx, gas_used)?;
-        gas_used
+        let fee_charged = env.fee_policy.caller_fee(gas_used);
+        apply_public_tx_with_fee(account, tx, gas_used, fee_charged)?;
+        fee_charged
     } else {
         0u64
     };
@@ -596,6 +640,11 @@ fn apply_tx_outputs<B: ObjectBackend>(
 ) -> PokerL1Result<Vec<ObjectID>> {
     // 只读预检（全有或全无）
     for obj in &tx.outputs {
+        if crate::economics::is_native_coin_object(obj) {
+            return Err(PokerL1Error::Other(
+                "native ZCN coins may only be created by treasury/escrow system paths".into(),
+            ));
+        }
         if obj.id.creator_address != *caller {
             return Err(PokerL1Error::Other(format!(
                 "output object creator {:?} != caller {:?}",
@@ -647,8 +696,12 @@ pub fn execute_block(
     // 信用操作确定性：相同 total_gas_used + 相同 proposer → 相同结果。
     // proposer 账户须已存在（validator 账户在 genesis/注册时创建）；不存在则奖励烧毁（安全 fallback）。
     if let Some(proposer) = env.proposer {
-        // gas 奖励（仅当有 gas 消耗）
-        let reward = outcome.total_gas_used.saturating_add(DEFAULT_BLOCK_REWARD);
+        // Only fees actually collected are redistributed. Free-fee execution must not mint a
+        // synthetic "gas reward" merely because compute was metered.
+        let collected_fees = outcome.receipts.iter().fold(0u64, |total, receipt| {
+            total.saturating_add(receipt.fee_charged)
+        });
+        let reward = collected_fees.saturating_add(DEFAULT_BLOCK_REWARD);
         let _ = account_store.credit(&proposer, reward);
     }
     outcome
@@ -779,7 +832,9 @@ fn execute_block_parallel(
                 if let Some(acc) = account_store.get_mut(&caller) {
                     // 快照已成功通过 apply_public_tx，此处重放相同增量，必然成功；
                     // 失败则视为内部不一致（记失败回执，状态已 merge 不可回滚）。
-                    if let Err(e) = apply_public_tx(acc, tx, receipt.gas_used) {
+                    if let Err(e) =
+                        apply_public_tx_with_fee(acc, tx, receipt.gas_used, receipt.fee_charged)
+                    {
                         receipts[idx] = Some(TxReceipt::failure(tx, &e));
                         continue;
                     }
@@ -1322,6 +1377,49 @@ mod tests {
         assert_eq!(fx.account().nonce, 1);
         // 空 object_cache → 无状态变更
         assert_eq!(fx.object_db.state_root(), root_after_deploy);
+    }
+
+    #[test]
+    fn free_fee_policy_meters_compute_without_requiring_or_debiting_balance() {
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        let elf = build_test_elf(&make_program(1));
+        let contract_id = deploy_contract(&mut fx.object_db, caller, elf, 100, true);
+        fx.account_store.get_mut(&caller).unwrap().balance = 0;
+
+        let proposer_signer = TestSigner::new();
+        let proposer = proposer_signer.address();
+        fx.account_store
+            .create(Account::new(proposer_signer.tagged_pubkey(), 0))
+            .unwrap();
+        let env = make_env()
+            .with_fee_policy(FeePolicy::Free)
+            .with_proposer(proposer);
+        let mut req = public_request(0);
+        req.contract_call = Some(ContractCall {
+            contract_id,
+            method_selector: [0u8; 32],
+            args: vec![],
+        });
+        let tx = fx.signer.sign(req);
+
+        let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
+        let receipt = &outcome.receipts[0];
+        assert!(receipt.success, "free-fee tx failed: {:?}", receipt.error);
+        assert!(receipt.gas_used > 0, "compute must still be metered");
+        assert_eq!(receipt.fee_charged, 0);
+        assert_eq!(outcome.total_gas_used, receipt.gas_used);
+        assert_eq!(fx.account().balance, 0);
+        assert_eq!(
+            fx.account().nonce,
+            1,
+            "free-fee public tx still advances nonce"
+        );
+        assert_eq!(
+            fx.account_store.get(&proposer).unwrap().balance,
+            DEFAULT_BLOCK_REWARD,
+            "uncollected gas must not be minted as proposer revenue"
+        );
     }
 
     #[test]
@@ -2156,10 +2254,7 @@ mod tests {
         let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
 
         // proposer 余额应增加 total_gas_used + 出块奖励（缺口 #5-M2）。
-        assert!(
-            outcome.total_gas_used > 0,
-            "合约调用应产生 gas 消耗，got 0"
-        );
+        assert!(outcome.total_gas_used > 0, "合约调用应产生 gas 消耗，got 0");
         let proposer_bal_after = fx
             .account_store
             .get(&proposer_addr)
@@ -2201,10 +2296,7 @@ mod tests {
         assert!(outcome.total_gas_used > 0, "合约调用应产生 gas");
         let caller_bal_after = fx.account().balance;
         // gas 从 caller 扣除（烧毁），无 proposer 收到。
-        assert_eq!(
-            caller_bal_before - caller_bal_after,
-            outcome.total_gas_used
-        );
+        assert_eq!(caller_bal_before - caller_bal_after, outcome.total_gas_used);
     }
 
     // ===== 缺口 #5-M2：出块奖励测试 =====
@@ -2276,15 +2368,8 @@ mod tests {
             "caller 应扣除转账金额"
         );
         // recipient 余额增加 transfer_amount。
-        let recipient_bal = fx
-            .account_store
-            .get(&recipient_addr)
-            .unwrap()
-            .balance;
-        assert_eq!(
-            recipient_bal, transfer_amount,
-            "recipient 应收到转账金额"
-        );
+        let recipient_bal = fx.account_store.get(&recipient_addr).unwrap().balance;
+        assert_eq!(recipient_bal, transfer_amount, "recipient 应收到转账金额");
     }
 
     #[test]
@@ -2294,7 +2379,11 @@ mod tests {
         let caller = fx.caller();
         // 先把 caller 余额降到很低（仅保留少量）。
         let drain_amount = fx.account().balance - 10;
-        fx.account_store.get_mut(&caller).unwrap().debit(drain_amount).unwrap();
+        fx.account_store
+            .get_mut(&caller)
+            .unwrap()
+            .debit(drain_amount)
+            .unwrap();
 
         let recipient_signer = TestSigner::new();
         let recipient_addr = recipient_signer.address();
@@ -2317,10 +2406,7 @@ mod tests {
 
         let env = make_env();
         let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
-        assert!(
-            !outcome.receipts[0].success,
-            "余额不足转账应失败"
-        );
+        assert!(!outcome.receipts[0].success, "余额不足转账应失败");
         // caller 余额不变（失败 tx 不产生状态变更）。
         assert_eq!(fx.account().balance, 10, "失败转账不应改 caller 余额");
         assert_eq!(

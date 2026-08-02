@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options};
+use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options, WriteBatch};
 
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::smt::MerklePath;
@@ -23,6 +23,27 @@ use crate::{Address, Hash};
 
 /// `objects` 列族名。
 const OBJECTS_CF: &str = "objects";
+
+/// A validated object mutation committed as part of one RocksDB batch.
+#[derive(Debug, Clone)]
+pub(crate) enum ObjectMutation {
+    /// Create an object.
+    Create(Object),
+    /// Update an object's data as `actor`.
+    Update {
+        id: ObjectID,
+        actor: Address,
+        new_data: Vec<u8>,
+    },
+    /// Transfer an address-owned object.
+    Transfer {
+        id: ObjectID,
+        actor: Address,
+        new_owner: Address,
+    },
+    /// Delete an object.
+    Delete(ObjectID),
+}
 
 /// 持久化 ObjectStore（RocksDB + 内存 SMT）。
 ///
@@ -95,22 +116,7 @@ impl ObjectDb {
     ///
     /// 写入顺序：先持久化到 RocksDB，再更新内存 SMT；若 DB 写失败则内存不变。
     pub fn create(&mut self, object: Object) -> PokerL1Result<()> {
-        // 预检冲突（避免无谓的 DB 写入）
-        if self.store.read(&object.id).is_ok() {
-            return Err(PokerL1Error::ObjectIDCollision(object.id));
-        }
-
-        let key = object.id.to_bytes();
-        let value = borsh::to_vec(&object)?;
-
-        // 先持久化
-        self.db
-            .put_cf(self.objects_cf(), key, &value)
-            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
-
-        // 再更新内存（含 SMT）；此处不应失败（已预检冲突）
-        self.store.create(object)?;
-        Ok(())
+        self.apply_batch(vec![ObjectMutation::Create(object)])
     }
 
     /// 读取对象（返回 clone，因为不能借用 RocksDB 内部缓冲区）。
@@ -135,18 +141,11 @@ impl ObjectDb {
         actor: &Address,
         new_data: Vec<u8>,
     ) -> PokerL1Result<()> {
-        // 先更新内存（含所有权校验 + version bump + SMT 更新）
-        self.store.update(id, actor, new_data)?;
-
-        // 读取更新后的对象，持久化
-        let updated = self.store.read(id)?.clone();
-        let key = id.to_bytes();
-        let value = borsh::to_vec(&updated)?;
-        self.db
-            .put_cf(self.objects_cf(), key, &value)
-            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
-
-        Ok(())
+        self.apply_batch(vec![ObjectMutation::Update {
+            id: *id,
+            actor: *actor,
+            new_data,
+        }])
     }
 
     /// 转移所有权（仅 AddressOwned 对象可转移）。
@@ -156,34 +155,78 @@ impl ObjectDb {
         actor: &Address,
         new_owner: Address,
     ) -> PokerL1Result<()> {
-        // 先内存转移
-        self.store.transfer(id, actor, new_owner)?;
-
-        // 持久化更新后的对象
-        let updated = self.store.read(id)?.clone();
-        let key = id.to_bytes();
-        let value = borsh::to_vec(&updated)?;
-        self.db
-            .put_cf(self.objects_cf(), key, &value)
-            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
-
-        Ok(())
+        self.apply_batch(vec![ObjectMutation::Transfer {
+            id: *id,
+            actor: *actor,
+            new_owner,
+        }])
     }
 
     /// 删除对象（从 SMT 与 RocksDB 同步移除）。
     ///
     /// 写入顺序：先内存删除（含存在性校验），再持久化删除。
     pub fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object> {
-        // 先内存删除（含存在性校验）
-        let deleted = self.store.delete(id)?;
-
-        // 再持久化删除
-        let key = id.to_bytes();
-        self.db
-            .delete_cf(self.objects_cf(), key)
-            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
-
+        let deleted = self.read(id)?;
+        self.apply_batch(vec![ObjectMutation::Delete(*id)])?;
         Ok(deleted)
+    }
+
+    /// Validate all mutations against a cloned in-memory store and commit their final values in
+    /// one RocksDB `WriteBatch`. The live SMT is replaced only after the durable write succeeds.
+    pub(crate) fn apply_batch(&mut self, mutations: Vec<ObjectMutation>) -> PokerL1Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+
+        let mut staged = self.store.clone();
+        let mut touched = Vec::<ObjectID>::new();
+        for mutation in mutations {
+            let id = match mutation {
+                ObjectMutation::Create(object) => {
+                    let id = object.id;
+                    staged.create(object)?;
+                    id
+                }
+                ObjectMutation::Update {
+                    id,
+                    actor,
+                    new_data,
+                } => {
+                    staged.update(&id, &actor, new_data)?;
+                    id
+                }
+                ObjectMutation::Transfer {
+                    id,
+                    actor,
+                    new_owner,
+                } => {
+                    staged.transfer(&id, &actor, new_owner)?;
+                    id
+                }
+                ObjectMutation::Delete(id) => {
+                    staged.delete(&id)?;
+                    id
+                }
+            };
+            if !touched.contains(&id) {
+                touched.push(id);
+            }
+        }
+
+        let cf = self.objects_cf();
+        let mut batch = WriteBatch::default();
+        for id in touched {
+            match staged.read(&id) {
+                Ok(object) => batch.put_cf(cf, id.to_bytes(), borsh::to_vec(object)?),
+                Err(PokerL1Error::ObjectNotFound(_)) => batch.delete_cf(cf, id.to_bytes()),
+                Err(error) => return Err(error),
+            }
+        }
+        self.db
+            .write(batch)
+            .map_err(|error| PokerL1Error::Rocksdb(error.to_string()))?;
+        self.store = staged;
+        Ok(())
     }
 
     /// 当前 live 对象数量。
@@ -459,6 +502,40 @@ mod tests {
 
         let read2 = db2.read(&o2.id).unwrap();
         assert_eq!(read2.version, 0);
+    }
+
+    #[test]
+    fn rejected_batch_leaves_memory_and_rocksdb_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = [1u8; 20];
+        let first = make_obj(owner, 1, owner);
+        let existing = make_obj(owner, 2, owner);
+
+        {
+            let mut db = ObjectDb::open(dir.path()).unwrap();
+            db.create(first.clone()).unwrap();
+            db.create(existing.clone()).unwrap();
+            let root_before = db.state_root();
+
+            let error = db
+                .apply_batch(vec![
+                    ObjectMutation::Update {
+                        id: first.id,
+                        actor: owner,
+                        new_data: b"must-not-commit".to_vec(),
+                    },
+                    ObjectMutation::Create(existing.clone()),
+                ])
+                .unwrap_err();
+
+            assert!(matches!(error, PokerL1Error::ObjectIDCollision(id) if id == existing.id));
+            assert_eq!(db.state_root(), root_before);
+            assert_eq!(db.read(&first.id).unwrap(), first);
+        }
+
+        let reopened = ObjectDb::open(dir.path()).unwrap();
+        assert_eq!(reopened.read(&first.id).unwrap(), first);
+        assert_eq!(reopened.read(&existing.id).unwrap(), existing);
     }
 
     #[test]

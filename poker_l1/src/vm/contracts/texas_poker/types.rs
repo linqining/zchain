@@ -531,15 +531,17 @@ pub struct TexasPokerTable {
     /// 时间戳集合。
     pub timestamps: Timestamps,
 
-    /// 玩家存入资金池（用于 buy_in 兑换 stack，离开时兑换回）。
-    /// 对应 Move 的 `sui_balance: Balance<SUI>`，zchain 无原生 SUI，用 u64。
+    /// 桌台实际锁仓的 ZCN 总额。
+    ///
+    /// 这是嵌入 Texas shared object 的 `TableVault.balance`。join/addon/rebuy 的生产
+    /// precompile 路径必须先消费等额 native Coin UTXO 才能增加该值；任何退款/离场
+    /// 创建 Coin 输出前必须先减少该值。
     pub chip_pool: u64,
 
-    /// Addon 资金池（与 `chip_pool` 平行，记录所有 addon 入金总额）。
+    /// 尚未并入玩家 stack 的 pending addon 总额。
     ///
-    /// 业务语义：玩家调用 `addon(amount)` 时，`addon_pool += amount`，
-    /// 同时 `seats[i].pending_addon += amount`（下一手合并到 stack）。
-    /// 离开桌台时，`pending_addon` 与 `stack` 一起退还。
+    /// 该值是 `chip_pool` 的子集而不是第二份资产：addon 时两者同时增加；下一手
+    /// pending_addon 合并进 stack 时本字段减少、chip_pool 不变。
     pub addon_pool: u64,
 
     /// Ante 模式（`ANTE_MODE_NONE/NORMAL/BBA`）。

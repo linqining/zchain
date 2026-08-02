@@ -132,6 +132,9 @@ pub fn estimate_rwset(
             // precompile 通常读 + 写自身对象。保守纳入写集。
             // 真实 read_objects 由 DispatchResult 在执行后回填复核。
             write.insert(call.contract_id);
+            // Funded precompiles may consume declared owned Coin UTXOs. Treat every declared
+            // input as potentially writable so two spends of the same coin cannot share a wave.
+            write.extend(tx.inputs.iter().copied());
         } else {
             // rBPF 合约：能写的对象 ⊆ inputs ∪ created（见 syscalls 所有权校验）。
             // 把全部 inputs 当潜在写集（保守完备）。

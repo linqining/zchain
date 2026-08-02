@@ -1726,6 +1726,8 @@ fn test_reset_for_next_hand_merges_pending_addon() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 500);
     table.seats[0].pending_addon = 1000;
+    table.chip_pool = 1500;
+    table.addon_pool = 1000;
 
     let mut events = vec![];
     let result = state_machine::reset_for_next_hand(&mut table, &mut events);
@@ -2537,7 +2539,8 @@ fn test_apply_rebuy_success() {
     let result = state_machine::apply_rebuy(&mut table, 0, 500, &mut events);
     assert!(result.is_ok());
     assert_eq!(table.seats[0].stack, 1500); // stack 立即增加
-    assert_eq!(table.addon_pool, 500);
+    assert_eq!(table.chip_pool, 500);
+    assert_eq!(table.addon_pool, 0);
 }
 
 #[test]

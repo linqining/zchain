@@ -233,13 +233,31 @@ pub fn apply_public_tx(
     tx: &Transaction,
     gas_used: Balance,
 ) -> PokerL1Result<()> {
+    apply_public_tx_with_fee(account, tx, gas_used, gas_used)
+}
+
+/// Apply a metered Public / ForceSync transaction with an explicit monetary fee.
+///
+/// `gas_used` is always checked against the signed budget. `fee_charged` may be zero under a
+/// chain-wide free-fee policy, but the account nonce still advances after successful execution.
+pub fn apply_public_tx_with_fee(
+    account: &mut Account,
+    tx: &Transaction,
+    gas_used: Balance,
+    fee_charged: Balance,
+) -> PokerL1Result<()> {
     if gas_used > tx.gas.budget {
         return Err(PokerL1Error::GasExceedsBudget {
             used: gas_used,
             budget: tx.gas.budget,
         });
     }
-    account.debit(gas_used)?;
+    if fee_charged > gas_used {
+        return Err(PokerL1Error::Other(format!(
+            "fee charged {fee_charged} exceeds metered gas {gas_used}"
+        )));
+    }
+    account.debit(fee_charged)?;
     account.increment_nonce();
     Ok(())
 }

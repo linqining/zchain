@@ -131,6 +131,8 @@ mod tests {
             chain_id: 1,
             block_height: 100,
             block_timestamp: 1_000_000,
+            tx_inputs: vec![],
+            tx_hash: [0u8; 32],
         }
     }
 

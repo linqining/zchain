@@ -413,6 +413,42 @@ pub struct RebuyArgs {
     pub amount: u64,
 }
 
+/// Decode the native ZCN amount required by a funded Texas Poker method.
+///
+/// This is the canonical selector-to-funding mapping shared by consensus execution and
+/// frictionless wallet builders. Non-funding methods return `Ok(None)`.
+pub fn required_funding(method_selector: &[u8; 32], args: &[u8]) -> PokerL1Result<Option<u64>> {
+    let amount = if method_selector == &selectors::join_and_shuffle() {
+        borsh::from_slice::<JoinAndShuffleArgs>(args)
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!("join_and_shuffle funding args: {error}"))
+            })?
+            .buy_in
+    } else if method_selector == &selectors::join_table() {
+        borsh::from_slice::<JoinTableArgs>(args)
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!("join_table funding args: {error}"))
+            })?
+            .buy_in
+    } else if method_selector == &selectors::addon() {
+        borsh::from_slice::<AddonArgs>(args)
+            .map_err(|error| PokerL1Error::Serialization(format!("addon funding args: {error}")))?
+            .amount
+    } else if method_selector == &selectors::rebuy() {
+        borsh::from_slice::<RebuyArgs>(args)
+            .map_err(|error| PokerL1Error::Serialization(format!("rebuy funding args: {error}")))?
+            .amount
+    } else {
+        return Ok(None);
+    };
+    if amount == 0 {
+        return Err(PokerL1Error::Other(
+            "funded Texas call amount must be greater than zero".into(),
+        ));
+    }
+    Ok(Some(amount))
+}
+
 // ========== Dispatch 路由入口 ==========
 
 /// Dispatch 路由入口。
@@ -1122,7 +1158,7 @@ fn dispatch_leave_table(
         .ok_or_else(|| PokerL1Error::Serialization("leave_table refund overflow".into()))?;
     let post_chip_pool = table
         .chip_pool
-        .checked_sub(seat.stack)
+        .checked_sub(refund_amt)
         .ok_or_else(|| PokerL1Error::Serialization("leave_table chip_pool underflow".into()))?;
     let post_addon_pool = table
         .addon_pool
@@ -1132,9 +1168,7 @@ fn dispatch_leave_table(
     if refund_amt > 0 {
         // 同步扣减 addon_pool（资金流出）
         table.addon_pool = post_addon_pool;
-        // P0 修复：对偶地扣减 chip_pool（join 时 buy_in 已计入 chip_pool，
-        // 离开时退出的 stack 必须从 chip_pool 扣除，保持资金账平衡）。
-        // 注意：pending_addon 已计入 addon_pool（不计入 chip_pool），此处只扣 stack 部分。
+        // chip_pool 是总锁仓，必须扣除 stack + pending_addon 的完整退款。
         table.chip_pool = post_chip_pool;
     }
     table.seats[input.seat_index as usize] = super::types::Seat::empty();

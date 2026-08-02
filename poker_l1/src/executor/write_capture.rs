@@ -32,6 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership, Version};
+use crate::storage::object_db::ObjectMutation;
 use crate::storage::{ObjectBackend, ObjectDb};
 use crate::{Address, Hash};
 
@@ -175,32 +176,38 @@ impl ObjectWriteLog {
         self.writes.push(WriteOp::Delete(id));
     }
 
-    /// 将日志按序回放到主 ObjectDb（commit）。
+    /// 将日志原子提交到主 ObjectDb（commit）。
     ///
-    /// 复用 `ObjectDb` 的 `create/update/transfer/delete`，任一失败立即返回
-    /// （已应用的 mutation 不可撤销——与 `ObjectDbSnapshot::apply_to` 语义一致）。
-    ///
-    /// 注：capture 阶段已做过一次写校验，此处由 ObjectDb 再校验一次（纵深防御）。
+    /// capture 阶段已做过一次写校验，提交时 `ObjectDb` 在克隆状态上
+    /// 再校验一次，然后使用单个 RocksDB WriteBatch 落盘。
     pub fn apply_to(self, db: &mut ObjectDb) -> PokerL1Result<()> {
-        for op in self.writes {
-            match op {
-                WriteOp::Create(o) => db.create(o)?,
+        let mutations = self
+            .writes
+            .into_iter()
+            .map(|op| match op {
+                WriteOp::Create(object) => ObjectMutation::Create(object),
                 WriteOp::Update {
                     id,
                     actor,
                     new_data,
-                } => db.update(&id, &actor, new_data)?,
+                } => ObjectMutation::Update {
+                    id,
+                    actor,
+                    new_data,
+                },
                 WriteOp::Transfer {
                     id,
                     actor,
                     new_owner,
-                } => db.transfer(&id, &actor, new_owner)?,
-                WriteOp::Delete(id) => {
-                    db.delete(&id)?;
-                }
-            }
-        }
-        Ok(())
+                } => ObjectMutation::Transfer {
+                    id,
+                    actor,
+                    new_owner,
+                },
+                WriteOp::Delete(id) => ObjectMutation::Delete(id),
+            })
+            .collect();
+        db.apply_batch(mutations)
     }
 }
 
@@ -279,6 +286,11 @@ impl ObjectBackend for WriteCaptureBackend<'_> {
         // 校验：对象存在 + 可写（所有权）。
         let existing = self.resolved_get(id)?;
         let obj = existing.ok_or(PokerL1Error::ObjectNotFound(*id))?;
+        if crate::economics::is_native_coin_object(&obj) {
+            return Err(PokerL1Error::Other(format!(
+                "native coin {id:?} is an immutable UTXO and cannot be updated"
+            )));
+        }
         if !obj.can_write(actor) {
             return Err(PokerL1Error::NotOwner(*id));
         }
@@ -302,6 +314,11 @@ impl ObjectBackend for WriteCaptureBackend<'_> {
         // 校验：对象存在 + 可转移（仅 AddressOwned，且 actor 是当前 owner）。
         let existing = self.resolved_get(id)?;
         let obj = existing.ok_or(PokerL1Error::ObjectNotFound(*id))?;
+        if crate::economics::is_native_coin_object(&obj) {
+            return Err(PokerL1Error::Other(format!(
+                "native coin {id:?} is an immutable UTXO and cannot be transferred in place"
+            )));
+        }
         if !obj.owner.is_transferable() {
             return Err(PokerL1Error::ObjectImmutable(*id));
         }

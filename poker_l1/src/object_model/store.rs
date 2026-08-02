@@ -95,6 +95,12 @@ impl ObjectStore {
             .get_mut(id)
             .ok_or(PokerL1Error::ObjectNotFound(*id))?;
 
+        if crate::economics::is_native_coin_object(obj) {
+            return Err(PokerL1Error::Other(format!(
+                "native coin {id:?} is an immutable UTXO and cannot be updated"
+            )));
+        }
+
         if !obj.can_write(actor) {
             return if obj.owner.is_immutable() {
                 Err(PokerL1Error::ObjectImmutable(*id))
@@ -125,6 +131,12 @@ impl ObjectStore {
             .objects
             .get_mut(id)
             .ok_or(PokerL1Error::ObjectNotFound(*id))?;
+
+        if crate::economics::is_native_coin_object(obj) {
+            return Err(PokerL1Error::Other(format!(
+                "native coin {id:?} is an immutable UTXO and cannot be transferred in place"
+            )));
+        }
 
         if !obj.owner.is_transferable() {
             return Err(PokerL1Error::ObjectImmutable(*id));
