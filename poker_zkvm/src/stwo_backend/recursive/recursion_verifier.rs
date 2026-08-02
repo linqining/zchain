@@ -1,4 +1,4 @@
-//! # Recursion Verifier — 实验性 L2 proof 验证器（Phase 5 PoC）
+//! # Recursion Verifier — STWO recursive proof verifier
 //!
 //! 详见 `.trae/documents/stwo_phase5_verifier_air_design.md` §8.2。
 //!
@@ -10,10 +10,12 @@
 //! 3. 从 proof 读取 preprocessed commitment (tree 0) + trace commitment (tree 1, 9 列)
 //! 4. 构建 `OodsCheckAir` component + `verify`
 //!
-//! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
-//! [`RecursionVerificationError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
+//! 完整多组件路径通过 `recursive-verifier` feature 显式开放；旧的仅 OODS
+//! [`verify_recursive`] 入口在所有非测试构建中永久 fail-closed。
 
-use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir};
+use super::composition_eval_air::{
+    COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir, SampledValuesBindingAir, VerifierCompositionAir,
+};
 use super::cpu_transcript_binding_air::{
     CPU_TRANSCRIPT_BINDING_INTERACTION_COLUMNS, CpuTranscriptBindingAir,
     CpuTranscriptBindingWitness, mix_cpu_transcript_claim,
@@ -47,7 +49,7 @@ use super::transcript_air::{
 };
 use ark_ff::Zero;
 use cairo_air::relations::CommonLookupElements;
-use stwo::core::air::Component;
+use stwo::core::air::{Component, Components};
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
@@ -59,11 +61,10 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 /// Recursion verifier 错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum RecursionVerificationError {
-    /// 当前递归 AIR 尚未完整约束 L1 Merkle/FRI decommitment 与公开输入。
-    ///
-    /// 跨 crate/生产构建中的 verifier 必须 fail closed；仅 crate 自身的
-    /// `cfg(test)` 审计测试可执行实验性 PoC verifier。
-    #[error("recursive verifier is disabled until the verifier AIR fully constrains the L1 proof")]
+    /// 当前入口未对该构建开放，或调用了永久禁用的旧 OODS-only 路径。
+    #[error(
+        "this recursive verifier entry is disabled; enable the recursive-verifier feature"
+    )]
     UnsoundBackendDisabled,
     /// L2 proof 验证失败。
     #[error("L2 proof verification failed: {0}")]
@@ -85,12 +86,110 @@ pub enum RecursionVerificationError {
     /// P05-R gap #1：`public_inputs.log_size == 0`。
     #[error("public_inputs.log_size must be > 0 so the Merkle tree has a non-trivial height")]
     InvalidLogSize,
-    /// Merkle verifier AIR 尚未实现 Stwo 的压缩多 query decommitment 与真实
-    /// Poseidon252 约束，因此即使底层 Stwo proof 可解析也必须拒绝。
+    /// 默认构建的外部审计 gate。variant 名称为兼容早期 API 保留；active 完整路径已经
+    /// 装配 semantic Merkle/FRI/Poseidon AIR，但尚未完成独立密码学审计。
     #[error(
-        "recursive verifier is disabled: the Merkle verifier AIR does not yet constrain Stwo's compressed multi-query decommitment and Poseidon252 hash"
+        "recursive verifier is disabled by the external-audit gate; enable recursive-verifier only after accepting the experimental trust boundary"
     )]
     IncompleteMerkleVerifierAir,
+}
+
+/// Verify a `ReplicatedRowV1` recursive proof and evaluate the application component's
+/// composition claim from the outer proof's bound L1 samples.
+///
+/// The caller must first reconstruct and compare `public_inputs.statement_transcript` from its
+/// independently trusted application statement. This function then verifies the recursive
+/// PCS/Merkle/FRI proof and checks the fixed application AIR at the transcript-derived OODS point.
+#[allow(clippy::missing_errors_doc)]
+pub fn verify_replicated_row_with_component(
+    l2_proof: &RecursiveProof,
+    public_inputs: &RecursivePublicInputs,
+    component: &dyn Component,
+) -> Result<(), RecursionVerificationError> {
+    if public_inputs.verifier_program
+        != super::public_inputs::RecursiveVerifierProgram::ReplicatedRowV1
+    {
+        return Err(RecursionVerificationError::PublicInputsMismatch);
+    }
+    verify_recursive_with_fri(l2_proof, public_inputs)?;
+
+    let claim = l2_proof.1.as_ref().ok_or_else(|| {
+        RecursionVerificationError::VerificationFailed(
+            "recursive proof is missing its bound L1 sampled values".into(),
+        )
+    })?;
+    let components = Components {
+        components: vec![component],
+        n_preprocessed_columns: 0,
+    };
+    let max_log_degree_bound = components
+        .composition_log_degree_bound()
+        .checked_sub(1)
+        .ok_or_else(|| {
+            RecursionVerificationError::VerificationFailed(
+                "application component has an invalid composition degree".into(),
+            )
+        })?;
+    let mut column_log_sizes = components.column_log_sizes();
+    column_log_sizes.push(vec![
+        max_log_degree_bound;
+        2 * stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
+    ]);
+    if max_log_degree_bound != public_inputs.max_log_degree_bound
+        || column_log_sizes.len() != public_inputs.l1_tree_metadata.len()
+        || column_log_sizes
+            .iter()
+            .zip(&public_inputs.l1_tree_metadata)
+            .any(|(actual, expected)| actual != &expected.column_log_sizes)
+    {
+        return Err(RecursionVerificationError::PublicInputsMismatch);
+    }
+
+    let mut sample_points = components.mask_points(
+        public_inputs.oods_point,
+        public_inputs.max_log_degree_bound,
+        false,
+    );
+    sample_points.push(vec![
+        vec![public_inputs.oods_point];
+        2 * stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
+    ]);
+    let expected_sample_count = sample_points
+        .iter()
+        .flat_map(|tree| tree.iter())
+        .map(Vec::len)
+        .sum::<usize>();
+    if expected_sample_count != claim.sampled_values.len() {
+        return Err(RecursionVerificationError::PublicInputsMismatch);
+    }
+    let mut cursor = 0usize;
+    let sampled_values = stwo::core::pcs::TreeVec(
+        sample_points
+            .iter()
+            .map(|tree| {
+                tree.iter()
+                    .map(|points| {
+                        let end = cursor + points.len();
+                        let values = claim.sampled_values[cursor..end].to_vec();
+                        cursor = end;
+                        values
+                    })
+                    .collect()
+            })
+            .collect(),
+    );
+    let computed = components.eval_composition_polynomial_at_point(
+        public_inputs.oods_point,
+        &sampled_values,
+        public_inputs.composition_random_coeff,
+        public_inputs.max_log_degree_bound,
+    );
+    if computed != public_inputs.composition_oods_eval {
+        return Err(RecursionVerificationError::VerificationFailed(
+            "application AIR composition does not match the recursive L1 claim".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// P05-R gap #1：校验 `RecursivePublicInputs` 携带非空 commitments/query/log_size。
@@ -150,7 +249,7 @@ pub fn verify_recursive(
     l2_proof: &RecursiveProof,
     public_inputs: &RecursivePublicInputs,
 ) -> Result<(), RecursionVerificationError> {
-    if !cfg!(test) && !cfg!(feature = "recursive-prover") {
+    if !cfg!(test) {
         let _ = (l2_proof, public_inputs);
         return Err(RecursionVerificationError::UnsoundBackendDisabled);
     }
@@ -240,7 +339,7 @@ fn verify_recursive_with_fri_impl(
     public_inputs: &RecursivePublicInputs,
     bypass_incomplete_air_gate: bool,
 ) -> Result<(), RecursionVerificationError> {
-    if !cfg!(test) && !cfg!(feature = "recursive-prover") {
+    if !cfg!(test) && !cfg!(feature = "recursive-verifier") {
         let _ = (l2_proof, public_inputs);
         return Err(RecursionVerificationError::UnsoundBackendDisabled);
     }
@@ -248,9 +347,12 @@ fn verify_recursive_with_fri_impl(
     // P05-R gap #1：拒绝空-input L2 proof（镜像 prover 侧守卫）。
     ensure_nonempty_public_inputs(public_inputs)?;
 
-    // P05-R gap #3-B：canonical semantic AIR 已装配，但整体组合 soundness 尚未完成
-    // 密码学审计。生产构建更早由 UnsoundBackendDisabled 拒绝；此分支覆盖 crate 内测试。
-    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate && !cfg!(feature = "recursive-prover") {
+    // Active semantic path 已闭环；默认构建仍等待独立密码学审计。调用方只有显式启用
+    // recursive-verifier 才能接受该实验性信任边界。
+    if !super::RECURSIVE_AIR_EXTERNAL_AUDIT_COMPLETE
+        && !bypass_incomplete_air_gate
+        && !cfg!(feature = "recursive-verifier")
+    {
         let _ = l2_proof;
         return Err(RecursionVerificationError::IncompleteMerkleVerifierAir);
     }
@@ -435,7 +537,17 @@ fn verify_recursive_with_fri_impl(
     ]);
     trace_log_sizes.extend(vec![quotient_public.log_size; PCS_QUOTIENT_AIR_NUM_COLUMNS]);
     trace_log_sizes.extend(vec![fri_fold_public.log_size; FRI_FOLD_AIR_NUM_COLUMNS]);
-    let verifier_trace_cols = OODS_AIR_NUM_COLUMNS + COMP_EVAL_AIR_NUM_COLUMNS;
+    let original_sample_count = public_inputs
+        .l1_tree_metadata
+        .get(1)
+        .map_or(0, |tree| tree.column_log_sizes.len());
+    let composition_trace_cols = match public_inputs.verifier_program {
+        super::public_inputs::RecursiveVerifierProgram::CpuV1 => COMP_EVAL_AIR_NUM_COLUMNS,
+        super::public_inputs::RecursiveVerifierProgram::ReplicatedRowV1 => {
+            original_sample_count * stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
+        }
+    };
+    let verifier_trace_cols = OODS_AIR_NUM_COLUMNS + composition_trace_cols;
     trace_log_sizes.extend(vec![verifier_log_size; verifier_trace_cols]);
     commitment_scheme.commit(trace_commitment, &trace_log_sizes, &mut channel);
 
@@ -521,15 +633,12 @@ fn verify_recursive_with_fri_impl(
     commitment_scheme.commit(interaction_commitment, &interaction_log_sizes, &mut channel);
 
     // 5. 构建 canonical semantic + OODS/composition components（与 prover 顺序一致）。
-    let composition_samples = poseidon_claim.sampled_values
-        [..crate::stwo_backend::column_layout_v2::NUM_COLUMNS]
-        .to_vec();
-    let oods_samples = poseidon_claim.sampled_values
-        [crate::stwo_backend::column_layout_v2::NUM_COLUMNS..]
+    let composition_samples = poseidon_claim.sampled_values[..original_sample_count].to_vec();
+    let oods_samples = poseidon_claim.sampled_values[original_sample_count..]
         .try_into()
         .map_err(|_| {
             RecursionVerificationError::VerificationFailed(
-                "fixed CpuV1 composition sampled-value tail has the wrong length".to_string(),
+                "single-component composition sampled-value tail has the wrong length".to_string(),
             )
         })?;
     let oods_doubling_factor_x = public_inputs
@@ -542,14 +651,24 @@ fn verify_recursive_with_fri_impl(
         public_inputs.composition_oods_eval,
         oods_doubling_factor_x,
     );
-    let composition_air = CompositionEvalAir::new_bound(
-        verifier_log_size,
-        public_inputs.log_size,
-        public_inputs.oods_point,
-        public_inputs.composition_random_coeff,
-        public_inputs.composition_oods_eval,
-        composition_samples,
-    );
+    let composition_air = match public_inputs.verifier_program {
+        super::public_inputs::RecursiveVerifierProgram::CpuV1 => {
+            VerifierCompositionAir::Cpu(CompositionEvalAir::new_bound(
+                verifier_log_size,
+                public_inputs.log_size,
+                public_inputs.oods_point,
+                public_inputs.composition_random_coeff,
+                public_inputs.composition_oods_eval,
+                composition_samples,
+            ))
+        }
+        super::public_inputs::RecursiveVerifierProgram::ReplicatedRowV1 => {
+            VerifierCompositionAir::ReplicatedRow(SampledValuesBindingAir::new(
+                verifier_log_size,
+                composition_samples,
+            ))
+        }
+    };
     let mut allocator =
         TraceLocationAllocator::new_with_preprocessed_columns(&poseidon_preprocessed_ids);
     let poseidon_components = Poseidon252ClosureComponents::new(
@@ -816,12 +935,9 @@ mod tests {
 
     /// v5.1 多组件 verify：正确 proof 应验证通过。
     #[test]
-    #[ignore = "P05-R gap #3-B: _with_fri 显式返回 IncompleteMerkleVerifierAir"]
+    #[ignore = "expensive recursive STWO verification test"]
     fn test_verify_recursive_with_fri_succeeds() {
         use super::super::recursion_prover::prove_recursive_with_fri;
-        use super::super::trace_gen::{
-            extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
-        };
 
         // 1. 生成真实 L1 proof
         let mut builder = TraceBuilder::new(10);
@@ -829,50 +945,11 @@ mod tests {
         let trace = builder.finalize();
         let l1_proof = prove_cpu_trace(&trace).expect("L1 prove 应成功");
 
-        // 2. 构造 public_inputs（含真实 fri_last_layer_poly + fri_query）
-        let oods_point = CirclePoint {
-            x: SecureField::from_u32_unchecked(1, 0, 0, 0),
-            y: SecureField::from_u32_unchecked(0, 1, 0, 0),
-        };
-        let max_log_degree_bound = 10u32;
-        let composition_oods_eval =
-            extract_composition_oods_eval_from_l1(&l1_proof, oods_point, max_log_degree_bound)
-                .expect("提取 composition_oods_eval 应成功");
-        let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
-        let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
-            &l1_proof,
-            PcsConfig::default(),
-            max_log_degree_bound,
-            &last_layer_poly,
-        )
-        .expect("提取 fri_query 应成功");
-        // P05-R gap #1：从 L1 proof 提取真实 commitments/query_positions（见 gap #3 limb 修复）。
-        let l1_commitments: Vec<FieldElement252> = l1_proof.0.commitments.iter().copied().collect();
-        let query_positions = super::super::trace_gen::extract_query_positions_from_l1(
-            &l1_proof,
-            PcsConfig::default(),
-            max_log_degree_bound,
-            &last_layer_poly,
-        )
-        .expect("提取 query_positions 应成功");
-        let inputs = RecursivePublicInputs::new(
-            l1_commitments,
-            oods_point,
-            composition_oods_eval,
-            l1_proof
-                .0
-                .commitments
-                .first()
-                .copied()
-                .unwrap_or(FieldElement252::ZERO),
-            last_layer_poly,
-            max_log_degree_bound,
-            PcsConfig::default(),
-            query_positions,
-            10,
-            fri_query_x,
-            fri_query_eval,
-        );
+        // 2. 使用固定 CpuV1 verifier 的 canonical builder，避免手写一组与真实
+        // Fiat-Shamir transcript 不一致的公开输入。
+        let inputs =
+            super::super::verifier_program::build_cpu_recursive_public_inputs(&l1_proof, 10)
+                .expect("固定 CpuV1 verifier statement 构造应成功");
 
         // 3. prove + verify
         let l2_proof =
@@ -887,68 +964,25 @@ mod tests {
 
     /// v5.1 多组件 verify：篡改 composition_oods_eval 应失败。
     #[test]
-    #[ignore = "P05-R gap #3-B: _with_fri 显式 fail-closed"]
+    #[ignore = "expensive recursive STWO tampering test"]
     fn test_verify_recursive_with_fri_fails_on_tampered_composition_oods_eval() {
         use super::super::recursion_prover::prove_recursive_with_fri;
-        use super::super::trace_gen::{
-            extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
-        };
 
         let mut builder = TraceBuilder::new(10);
         builder.fill_padding_to_full();
         let trace = builder.finalize();
         let l1_proof = prove_cpu_trace(&trace).expect("L1 prove 应成功");
 
-        let oods_point = CirclePoint {
-            x: SecureField::from_u32_unchecked(1, 0, 0, 0),
-            y: SecureField::from_u32_unchecked(0, 1, 0, 0),
-        };
-        let max_log_degree_bound = 10u32;
-        let composition_oods_eval =
-            extract_composition_oods_eval_from_l1(&l1_proof, oods_point, max_log_degree_bound)
-                .expect("提取 composition_oods_eval 应成功");
-        let last_layer_poly = l1_proof.0.fri_proof.last_layer_poly.clone();
-        let (fri_query_x, fri_query_eval) = extract_fri_query_from_l1(
-            &l1_proof,
-            PcsConfig::default(),
-            max_log_degree_bound,
-            &last_layer_poly,
-        )
-        .expect("提取 fri_query 应成功");
-        // P05-R gap #1：从 L1 proof 提取真实 commitments/query_positions（见 gap #3 limb 修复）。
-        let l1_commitments: Vec<FieldElement252> = l1_proof.0.commitments.iter().copied().collect();
-        let query_positions = super::super::trace_gen::extract_query_positions_from_l1(
-            &l1_proof,
-            PcsConfig::default(),
-            max_log_degree_bound,
-            &last_layer_poly,
-        )
-        .expect("提取 query_positions 应成功");
-        let inputs = RecursivePublicInputs::new(
-            l1_commitments,
-            oods_point,
-            composition_oods_eval,
-            l1_proof
-                .0
-                .commitments
-                .first()
-                .copied()
-                .unwrap_or(FieldElement252::ZERO),
-            last_layer_poly,
-            max_log_degree_bound,
-            PcsConfig::default(),
-            query_positions,
-            10,
-            fri_query_x,
-            fri_query_eval,
-        );
+        let inputs =
+            super::super::verifier_program::build_cpu_recursive_public_inputs(&l1_proof, 10)
+                .expect("固定 CpuV1 verifier statement 构造应成功");
 
         let l2_proof =
             prove_recursive_with_fri(&l1_proof, &inputs).expect("prove_recursive_with_fri 应成功");
 
         // 篡改 composition_oods_eval
         let mut tampered = inputs.clone();
-        tampered.composition_oods_eval = composition_oods_eval + SecureField::from(1u32);
+        tampered.composition_oods_eval += SecureField::from(1u32);
         let verify_result = verify_recursive_with_fri(&l2_proof, &tampered);
         assert!(
             verify_result.is_err(),

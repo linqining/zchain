@@ -74,8 +74,6 @@ pub(crate) enum TranscriptAirError {
     InvalidPayloadIds,
     #[error("canonical transcript modular addition is inconsistent at row {row}")]
     InvalidAddition { row: usize },
-    #[error("fixed CpuV1 transcript must start with mix_root")]
-    InvalidInitialEvent,
     #[error("empty hash-many transcript payload is not supported yet")]
     EmptyHashManyPayload,
     #[error("transcript trace is too large for the exact three-limb draw counter encoding")]
@@ -539,9 +537,6 @@ impl TranscriptSemanticWitness {
     ) -> Result<Self, TranscriptAirError> {
         if mappings.is_empty() {
             return Err(TranscriptAirError::EmptyCalls);
-        }
-        if events.first().map(|event| event.kind) != Some(Poseidon252CallKind::TranscriptMixRoot) {
-            return Err(TranscriptAirError::InvalidInitialEvent);
         }
         let transcript_calls = poseidon_calls
             .iter()
@@ -1124,9 +1119,11 @@ impl FrameworkEval for TranscriptSemanticAir {
         eval.add_constraint(
             fixed_first.clone() * (trace.first_in_event.current.clone() - one.clone()),
         );
-        eval.add_constraint(
-            fixed_first.clone() * (trace.kind_selectors[3].current.clone() - one.clone()),
-        );
+        // A CPU proof starts with its first commitment root, while an application proof may first
+        // absorb a verifier-trusted statement using mix_felts/mix_u32s/mix_u64.  In both cases the
+        // first event must update the zero digest; the exact event kind and payload are fixed by
+        // CpuTranscriptBindingAir's program-specific transcript schedule.
+        eval.add_constraint(fixed_first.clone() * (updates_kind.clone() - one.clone()));
         eval.add_constraint(fixed_first.clone() * trace.n_draws_before.current.clone());
         for limb in &trace.digest_before {
             eval.add_constraint(fixed_first.clone() * limb.current.clone());

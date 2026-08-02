@@ -37,9 +37,9 @@ use poker_l1::consensus::{
     required_quorum, assemble_commit_certificate,
 };
 use poker_l1::error::PokerL1Result;
-use poker_l1::executor::ExecutionEnvironment;
 use poker_l1::network::{CommitVote, GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
+use poker_l1::offline::zk_verifier::ZkVerifierRegistry;
 use poker_l1::rpc::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcClientInfo, RpcGuard, RpcHandler,
 };
@@ -61,6 +61,12 @@ const DEFAULT_MAX_CONNECTIONS: usize = 128;
 
 /// 优雅关闭轮询间隔（accept non-blocking 后 sleep）。
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn open_node_with_application_verifiers(config: NodeConfig) -> PokerL1Result<Node> {
+    let mut registry = ZkVerifierRegistry::new();
+    poker_texas_air::l1_verifier::register_texas_stwo_recursive_verifier(&mut registry)?;
+    Node::open_with_zk_verifier_registry(config, registry)
+}
 
 /// commit certificate 投票累加器（缺口 #3：多 validator 2/3 多签闭环）。
 ///
@@ -496,7 +502,8 @@ fn run_node(args: &[String]) -> Result<(), String> {
     }
 
     // 打开节点
-    let node = Node::open(config).map_err(|e| format!("Node::open 失败：{e}"))?;
+    let node = open_node_with_application_verifiers(config)
+        .map_err(|e| format!("Node::open 失败：{e}"))?;
     // 缺口 #4-M1：应用 genesis 余额分配（初始代币发行，幂等——已存在账户不覆盖）。
     if let Some(alloc_path) = &genesis_alloc_file {
         let allocs = load_genesis_alloc(alloc_path)?;
@@ -1381,13 +1388,7 @@ fn compute_cert_signing_hash(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let env = ExecutionEnvironment::new(chain_id, height, timestamp_ms)
-        .with_precompile_registry_arc(node.precompile_registry());
-    let env = if let Some(bridge_store) = node.bridge_registry_store() {
-        env.with_bridge_registry_store(bridge_store)
-    } else {
-        env
-    };
+    let env = node.execution_environment(height, timestamp_ms);
     // 缺口 #4-M1：proposer = vertex author（出块 validator）。
     let env = env.with_proposer(poker_l1::account::derive_address(&vertex.author_pubkey));
     let outcome = node
@@ -1508,16 +1509,11 @@ fn commit_and_finalize_block_multi(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let env = ExecutionEnvironment::new(chain_id, height, timestamp_ms)
-        .with_precompile_registry_arc(node.precompile_registry());
-    let env = if let Some(bridge_store) = node.bridge_registry_store() {
-        env.with_bridge_registry_store(bridge_store)
-    } else {
-        env
-    };
+    let env = node.execution_environment(height, timestamp_ms);
     // 缺口 #4-M1：proposer = prev_vertex author（leader / 出块 validator）。
-    let env =
-        env.with_proposer(poker_l1::account::derive_address(&prev_vertex.author_pubkey));
+    let env = env.with_proposer(poker_l1::account::derive_address(
+        &prev_vertex.author_pubkey,
+    ));
     let outcome = match node.execute_block_on_state(&env, &sorted_txs) {
         Ok(o) => o,
         Err(e) => {
@@ -1629,14 +1625,7 @@ fn build_block_from_vertex(
     //
     // execute_block 内部已处理失败 tx（返回失败回执，不阻断 block），
     // 故此处仅在底层错误（锁中毒 / RocksDB 写失败）时返回 Err。
-    let env = ExecutionEnvironment::new(chain_id, height, timestamp_ms)
-        .with_precompile_registry_arc(node.precompile_registry());
-    // 缺口 #9：注入 Bridge registry store，使出块时 bridge contract_call 能铸币。
-    let env = if let Some(bridge_store) = node.bridge_registry_store() {
-        env.with_bridge_registry_store(bridge_store)
-    } else {
-        env
-    };
+    let env = node.execution_environment(height, timestamp_ms);
     let outcome = node
         .execute_block_on_state(&env, &sorted_txs)
         .map_err(|e| format!("execute_block failed: {e}"))?;
@@ -2191,7 +2180,8 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
     let vkey = ValidatorKey::from_secret_bytes(sk_bytes)
         .map_err(|e| format!("构造 ValidatorKey 失败：{e}"))?;
     let config = NodeConfig::validator(data_dir.clone(), vkey);
-    let node = Node::open(config).map_err(|e| format!("Node::open 失败：{e}"))?;
+    let node = open_node_with_application_verifiers(config)
+        .map_err(|e| format!("Node::open 失败：{e}"))?;
     info!(
         "2. Validator 节点已打开（chain_id=0x{:08x}）",
         node.chain_id()

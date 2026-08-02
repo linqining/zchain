@@ -2,15 +2,15 @@
 //!
 //! VM 当前注册 23 个 selector；其中 21 个有 method AIR / host prove+verify 路径，
 //! `request_leave_after_hand` 与 `fold_with_proof` 在生产 Orchestrator 中显式
-//! fail-closed。阶段 4 提供可转移的 host-verified outer-precompile 包；验证者仍需
-//! O(N) 重放所有 child，当前 Aggregator 不能递归验证子 proof。
+//! fail-closed。单方法 proof 已可封装为 application-aware native STWO recursive proof，
+//! 最终 verifier 不接收 inner proof；批量 Aggregator 仍是 descriptor-only PoC。
 //!
 //! ## 架构分层
 //!
 //! - **Layer 0**: Method AIRs（21 个启用；2 个注册 selector 禁用）
 //! - **Layer 1**: Host verification receipts（完整 VM dispatch replay 后逐 proof 原生验证）
 //! - **Layer 2**: Host-verified outer precompile（O(N) child replay + final digest AIR）
-//! - **Layer 3**: Succinct recursion（尚未形成可用闭环）
+//! - **Layer 3**: Native STWO recursion（单方法闭环；约 240 KiB，不是 Groth16 级压缩）
 //!
 //! ## 设计文档
 //!
@@ -18,7 +18,8 @@
 //!
 //! ## 复用率 ~85%
 //!
-//! - 审计结论：`poker_zkvm` recursive 模块目前只能作为实验性 PoC，不能作为可信 verifier
+//! - `poker_zkvm` complete semantic recursive path 已接入 Texas application component；独立
+//!   密码学审计 gate 仍保持关闭，回归通过不等价于外部审计完成
 //! - state root 在可信 host 端从 canonical Borsh preimage 重算，并与完整公开输入一起
 //!   混入 Fiat–Shamir；当前 method AIR 内没有嵌入 Poseidon verifier 组件
 //! - 直接复用 `poker_zkvm::stwo_backend::range_check_air`（列范围检查）
@@ -40,12 +41,15 @@ pub mod trace_gen;
 // ===== 公共基础设施 =====
 pub mod dual_proof;
 pub mod error;
+pub mod l1_verifier;
 pub mod merkle_tree;
 pub mod method_kind;
 pub mod outer_aggregate;
 pub mod outer_precompile;
 pub mod precompile_binding;
 pub mod public_inputs;
+pub mod recursive;
+pub mod recursive_envelope;
 pub mod state_root;
 pub mod verified_chain;
 

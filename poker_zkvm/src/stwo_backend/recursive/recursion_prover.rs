@@ -1,4 +1,4 @@
-//! # Recursion Prover — 实验性 Verifier AIR 的 L2 prover（Phase 5 PoC）
+//! # Recursion Prover — STWO verifier AIR prover
 //!
 //! 详见 `.trae/documents/stwo_phase5_verifier_air_design.md` §8.1。
 //!
@@ -19,10 +19,12 @@
 //! preprocessed/base/interaction commitments。旧的 `FriVerifierAir` 与 `MerklePathAir`
 //! 占位组件不再进入该证明路径。
 //!
-//! 当前 Merkle/FRI/public-input 约束尚不完整；跨 crate 调用始终返回
-//! [`RecursionProvingError::UnsoundBackendDisabled`]，仅 crate 自身测试执行 PoC。
+//! 完整多组件路径通过 `recursive-prover` feature 显式开放；旧的仅 OODS
+//! [`prove_recursive`] 入口在所有非测试构建中永久 fail-closed。
 
-use super::composition_eval_air::{COMP_EVAL_AIR_NUM_COLUMNS, CompositionEvalAir};
+use super::composition_eval_air::{
+    CompositionEvalAir, SampledValuesBindingAir, VerifierCompositionAir,
+};
 use super::cpu_transcript_binding_air::{
     CpuTranscriptBindingAir, CpuTranscriptBindingWitness, mix_cpu_transcript_claim,
 };
@@ -42,13 +44,14 @@ use super::public_inputs::RecursivePublicInputs;
 use super::replay_witness::CanonicalVerifierWitness;
 use super::trace_gen::{
     OODS_TRACE_LOG_SIZE, extract_composition_oods_eval_from_l1, extract_fri_query_from_l1,
-    gen_composition_eval_trace, gen_oods_check_trace, pad_oods_trace_to_log_size,
+    gen_composition_eval_trace, gen_oods_check_trace, gen_sampled_values_binding_trace,
+    pad_oods_trace_to_log_size,
 };
 use super::transcript_air::{
     TranscriptSemanticAir, TranscriptSemanticWitness, ensure_lookup_balanced,
     transcript_payload_values,
 };
-use super::verifier_program::replay_cpu_verifier;
+use super::verifier_program::replay_selected_verifier;
 use ark_ff::Zero;
 use cairo_air::relations::CommonLookupElements;
 use starknet_ff::FieldElement as FieldElement252;
@@ -111,11 +114,10 @@ pub(crate) struct RecursivePoseidonClaim {
 /// Recursion prover 错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum RecursionProvingError {
-    /// 当前递归 AIR 尚未完整约束 L1 Merkle/FRI decommitment 与公开输入。
-    ///
-    /// 为避免实验性 PoC 被生产调用方误认为 sound recursion，跨 crate 构建中的
-    /// 递归 prover 始终 fail closed；仅 crate 自身的 `cfg(test)` 审计测试可执行 PoC。
-    #[error("recursive prover is disabled until the verifier AIR fully constrains the L1 proof")]
+    /// 当前入口未对该构建开放，或调用了永久禁用的旧 OODS-only 路径。
+    #[error(
+        "this recursive prover entry is disabled; use the full semantic path with the recursive-prover feature"
+    )]
     UnsoundBackendDisabled,
     /// L1 proof 在 recursion 过程中验证失败。
     #[error("L1 proof verification failed during recursion")]
@@ -174,10 +176,10 @@ pub enum RecursionProvingError {
     /// final-root 检查退化为 trivial。入口显式拒绝。
     #[error("public_inputs.log_size must be > 0 so the Merkle tree has a non-trivial height")]
     InvalidLogSize,
-    /// Merkle/FRI canonical replay 已实现，但尚未被真实 Poseidon252 non-native AIR、
-    /// transcript AIR 与 composition verifier AIR 完整约束，不能生成 sound L2 proof。
+    /// 默认构建的外部审计 gate。variant 名称为兼容早期 API 保留；active 完整路径已经
+    /// 装配 semantic Merkle/FRI/Poseidon AIR，但尚未完成独立密码学审计。
     #[error(
-        "recursive prover is disabled: canonical Merkle/FRI replay is not yet constrained by the Poseidon252 and transcript verifier AIR"
+        "recursive prover is disabled by the external-audit gate; enable recursive-prover only after accepting the experimental trust boundary"
     )]
     IncompleteMerkleVerifierAir,
     /// 固定 `CpuV1` verifier 的完整 host replay 失败。
@@ -258,7 +260,7 @@ pub fn prove_recursive(
     l1_proof: &StarkProof<Poseidon252MerkleHasher>,
     public_inputs: &RecursivePublicInputs,
 ) -> Result<RecursiveProof, RecursionProvingError> {
-    if !cfg!(test) && !cfg!(feature = "recursive-prover") {
+    if !cfg!(test) {
         let _ = (l1_proof, public_inputs);
         return Err(RecursionProvingError::UnsoundBackendDisabled);
     }
@@ -412,35 +414,40 @@ fn prove_recursive_with_fri_impl(
         });
     }
 
-    // 1b. Prover 端 FRI query consistency check（v5.2 soundness fix）
-    // 验证 public_inputs.fri_query_x / fri_query_eval 与从 L1 proof Fiat-Shamir transcript
-    // 重新推导的值一致。防止 prover 伪造 query point。
-    let (derived_x, derived_fri_eval) = extract_fri_query_from_l1(
-        l1_proof,
-        public_inputs.config,
-        public_inputs.max_log_degree_bound,
-        &public_inputs.fri_last_layer_poly,
-    )
-    .ok_or_else(|| {
-        RecursionProvingError::L1ProofStructureInvalid(
-            "无法从 L1 proof 提取 fri_query（commitment 数量不足或 FriVerifier 构造失败）"
-                .to_string(),
+    // 1b. CpuV1 kept its historical transcript-specific early error.  Application programs mix a
+    // statement prefix before commitments, so the old helper (which starts from an empty channel)
+    // is not valid for them. Their exact query point/evaluation is checked by
+    // `replay_selected_verifier` below using the selected program's full transcript.
+    if public_inputs.verifier_program == super::public_inputs::RecursiveVerifierProgram::CpuV1 {
+        let (derived_x, derived_fri_eval) = extract_fri_query_from_l1(
+            l1_proof,
+            public_inputs.config,
+            public_inputs.max_log_degree_bound,
+            &public_inputs.fri_last_layer_poly,
         )
-    })?;
+        .ok_or_else(|| {
+            RecursionProvingError::L1ProofStructureInvalid(
+                "无法从 L1 proof 提取 fri_query（commitment 数量不足或 FriVerifier 构造失败）"
+                    .to_string(),
+            )
+        })?;
 
-    if derived_x != public_inputs.fri_query_x || derived_fri_eval != public_inputs.fri_query_eval {
-        return Err(RecursionProvingError::FriQueryMismatch {
-            claimed_x: public_inputs.fri_query_x,
-            derived_x,
-            claimed_eval: public_inputs.fri_query_eval,
-            derived_eval: derived_fri_eval,
-        });
+        if derived_x != public_inputs.fri_query_x
+            || derived_fri_eval != public_inputs.fri_query_eval
+        {
+            return Err(RecursionProvingError::FriQueryMismatch {
+                claimed_x: public_inputs.fri_query_x,
+                derived_x,
+                claimed_eval: public_inputs.fri_query_eval,
+                derived_eval: derived_fri_eval,
+            });
+        }
     }
 
     // 固定 method verifier：重建 CpuAir component、mask points、composition OODS、全部
     // tree commitments 与完整 FRI。该检查禁止 prover 自报 transcript/component schema。
     // 它仍是 host replay；下方 gate 继续关闭，直到同一计算被 AIR 约束。
-    let replay = replay_cpu_verifier(l1_proof, public_inputs)
+    let replay = replay_selected_verifier(l1_proof, public_inputs)
         .map_err(|error| RecursionProvingError::FixedVerifierReplayFailed(error.to_string()))?;
     let canonical_witness = CanonicalVerifierWitness::from_cpu_replay(&replay);
     if !canonical_witness.is_host_consistent() {
@@ -596,9 +603,12 @@ fn prove_recursive_with_fri_impl(
         ))
     })?;
 
-    // P05-R gap #3-B：canonical replay 已有 transcript/Merkle/PCS/FRI semantic AIR，
-    // 但整体 challenge/use-point 组合 soundness 尚未完成密码学审计。保持显式 fail-closed。
-    if !super::MERKLE_VERIFIER_AIR_COMPLETE && !bypass_incomplete_air_gate && !cfg!(feature = "recursive-prover") {
+    // Active semantic path 已闭环；默认构建仍等待独立密码学审计。调用方只有显式启用
+    // recursive-prover 才能接受该实验性信任边界。
+    if !super::RECURSIVE_AIR_EXTERNAL_AUDIT_COMPLETE
+        && !bypass_incomplete_air_gate
+        && !cfg!(feature = "recursive-prover")
+    {
         return Err(RecursionProvingError::IncompleteMerkleVerifierAir);
     }
 
@@ -740,13 +750,19 @@ fn prove_recursive_with_fri_impl(
         column.fill(bound_value);
     }
 
-    // 4. 固定 CpuAir composition evaluation：185 个 QM31 samples = 740 个 M31 columns。
-    let composition_trace = gen_composition_eval_trace(l1_proof, verifier_log_size);
-    assert_eq!(
-        composition_trace.len(),
-        COMP_EVAL_AIR_NUM_COLUMNS,
-        "Composition trace 列数不匹配"
-    );
+    // 4. Program-specific original-sample/composition component.
+    let original_sample_count = public_inputs
+        .l1_tree_metadata
+        .get(1)
+        .map_or(0, |tree| tree.column_log_sizes.len());
+    let composition_trace = match public_inputs.verifier_program {
+        super::public_inputs::RecursiveVerifierProgram::CpuV1 => {
+            gen_composition_eval_trace(l1_proof, verifier_log_size)
+        }
+        super::public_inputs::RecursiveVerifierProgram::ReplicatedRowV1 => {
+            gen_sampled_values_binding_trace(l1_proof, verifier_log_size, original_sample_count)
+        }
+    };
     poseidon_base_trace.extend(trace_cols_to_evaluations(
         &oods_trace_padded,
         verifier_log_size,
@@ -882,13 +898,12 @@ fn prove_recursive_with_fri_impl(
     }
 
     // 11. 构建 canonical semantic + OODS/composition components。
-    let composition_samples =
-        sampled_values[..crate::stwo_backend::column_layout_v2::NUM_COLUMNS].to_vec();
-    let oods_samples = sampled_values[crate::stwo_backend::column_layout_v2::NUM_COLUMNS..]
+    let composition_samples = sampled_values[..original_sample_count].to_vec();
+    let oods_samples = sampled_values[original_sample_count..]
         .try_into()
         .map_err(|_| {
             RecursionProvingError::FixedVerifierReplayFailed(
-                "fixed CpuV1 composition sampled-value tail has the wrong length".to_string(),
+                "single-component composition sampled-value tail has the wrong length".to_string(),
             )
         })?;
     let oods_doubling_factor_x = public_inputs
@@ -901,14 +916,24 @@ fn prove_recursive_with_fri_impl(
         public_inputs.composition_oods_eval,
         oods_doubling_factor_x,
     );
-    let composition_air = CompositionEvalAir::new_bound(
-        verifier_log_size,
-        public_inputs.log_size,
-        public_inputs.oods_point,
-        public_inputs.composition_random_coeff,
-        public_inputs.composition_oods_eval,
-        composition_samples,
-    );
+    let composition_air = match public_inputs.verifier_program {
+        super::public_inputs::RecursiveVerifierProgram::CpuV1 => {
+            VerifierCompositionAir::Cpu(CompositionEvalAir::new_bound(
+                verifier_log_size,
+                public_inputs.log_size,
+                public_inputs.oods_point,
+                public_inputs.composition_random_coeff,
+                public_inputs.composition_oods_eval,
+                composition_samples,
+            ))
+        }
+        super::public_inputs::RecursiveVerifierProgram::ReplicatedRowV1 => {
+            VerifierCompositionAir::ReplicatedRow(SampledValuesBindingAir::new(
+                verifier_log_size,
+                composition_samples,
+            ))
+        }
+    };
     let mut allocator =
         TraceLocationAllocator::new_with_preprocessed_columns(&poseidon_preprocessed_ids);
     let poseidon_components = Poseidon252ClosureComponents::new(
@@ -1292,7 +1317,7 @@ mod tests {
 
     /// v5.1 多组件 prove 应成功：OODS + FRI Verifier AIR 联合 proof。
     #[test]
-    #[ignore = "P05-R gap #3-B: _with_fri 显式返回 IncompleteMerkleVerifierAir"]
+    #[ignore = "expensive full semantic recursive STWO proving test"]
     fn test_prove_recursive_with_fri_succeeds() {
         let l1_proof = make_l1_proof();
         let inputs = make_test_public_inputs_with_fri_from_l1(&l1_proof);
@@ -1381,13 +1406,20 @@ mod tests {
 
         let production_verify_result =
             super::super::recursion_verifier::verify_recursive_with_fri(&l2_proof, &inputs);
-        assert!(
-            matches!(
-                production_verify_result,
-                Err(super::super::recursion_verifier::RecursionVerificationError::IncompleteMerkleVerifierAir)
-            ),
-            "未完成密码学审计前，生产 verifier gate 必须保持 fail-closed: {production_verify_result:?}"
-        );
+        if cfg!(feature = "recursive-prover") {
+            assert!(
+                production_verify_result.is_ok(),
+                "显式启用 recursive-prover 后 production 入口应验证成功: {production_verify_result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    production_verify_result,
+                    Err(super::super::recursion_verifier::RecursionVerificationError::IncompleteMerkleVerifierAir)
+                ),
+                "默认测试构建仍应由不完整 AIR gate fail-closed: {production_verify_result:?}"
+            );
+        }
     }
 
     /// v5.1 多组件 soundness 测试 — 篡改 composition_oods_eval 应导致 prove 失败。
@@ -1440,20 +1472,10 @@ mod tests {
         );
     }
 
-    /// v5.2 多组件 soundness 测试 — 篡改 fri_last_layer_poly 后 prove 仍应成功
-    /// （FRI AIR 约束只检查 trace 内部一致性，不检查 poly 与 L1 proof 的一致性）。
-    ///
-    /// prove 成功是因为 `gen_fri_verifier_trace` 使用 `public_inputs.fri_last_layer_poly`
-    /// 计算 `query_eval = poly.eval_at_point(x)` 和 Horner 累积值，trace 内部一致。
-    /// 篡改的 poly 通过 channel mix 绑定到 L2 proof（v5.1 soundness fix），
-    /// 因此 verifier 用不同 poly 验证时会失败（见
-    /// `test_verify_with_fri_fails_on_tampered_last_layer_poly`）。
-    ///
-    /// v5.2 注意：篡改 poly 后必须同步更新 `fri_query_eval`，否则 prover 端
-    /// FRI query consistency check 会因 `fri_query_eval` 与篡改后 poly 不一致而失败。
-    /// `fri_query_x` 不需要更新（只依赖 L1 transcript，不依赖 poly）。
+    /// 固定 CpuV1 verifier replay 必须拒绝与 L1 proof 不一致的 last-layer polynomial，
+    /// 即使调用方同步修改了 `fri_query_eval` 让局部 Horner 关系保持一致。
     #[test]
-    #[ignore = "P05-R gap #3-B: _with_fri 显式 fail-closed"]
+    #[ignore = "expensive fixed-verifier replay tampering test"]
     fn test_prove_with_fri_fails_on_tampered_last_layer_poly() {
         let l1_proof = make_l1_proof();
         let mut inputs = make_test_public_inputs_with_fri_from_l1(&l1_proof);
@@ -1476,12 +1498,15 @@ mod tests {
         // （query_x 不变，因为 query_x 只依赖 L1 transcript，不依赖 poly）
         inputs.fri_query_eval = inputs.fri_last_layer_poly.eval_at_point(inputs.fri_query_x);
 
-        // prove 应该成功（trace 内部一致，不依赖 poly 与 L1 proof 的一致性）
+        // 固定 verifier replay 会从真实 L1 transcript 重建 last-layer polynomial，
+        // 不能被一组内部自洽但与 L1 proof 不一致的公开输入替代。
         let prove_result = prove_recursive_with_fri(&l1_proof, &inputs);
         assert!(
-            prove_result.is_ok(),
-            "prove_recursive_with_fri 应成功（篡改 poly 不影响 prove）: {:?}",
-            prove_result.err()
+            matches!(
+                prove_result,
+                Err(RecursionProvingError::FixedVerifierReplayFailed(_))
+            ),
+            "篡改 last-layer polynomial 应被 fixed verifier replay 拒绝: {prove_result:?}"
         );
     }
 

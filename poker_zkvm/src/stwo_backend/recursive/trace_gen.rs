@@ -1197,6 +1197,37 @@ pub fn gen_composition_eval_trace(
     trace
 }
 
+/// Generate a dynamic original-sample binding trace for `ReplicatedRowV1`.
+#[must_use]
+pub(crate) fn gen_sampled_values_binding_trace(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    trace_log_size: u32,
+    expected_columns: usize,
+) -> Vec<Vec<BaseField>> {
+    let samples = l1_proof
+        .0
+        .sampled_values
+        .get(1)
+        .expect("ReplicatedRowV1 proof must contain original-trace sampled values");
+    assert_eq!(samples.len(), expected_columns);
+    let n_rows = 1usize << trace_log_size;
+    samples
+        .iter()
+        .flat_map(|column| {
+            assert_eq!(
+                column.len(),
+                1,
+                "replicated-row columns use offset-zero only"
+            );
+            column[0]
+                .to_m31_array()
+                .into_iter()
+                .map(|limb| vec![limb; n_rows])
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

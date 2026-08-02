@@ -7,29 +7,172 @@
 //! 但 transcript binding 本身不等价于 verifier AIR 已验证对应 L1 proof。
 
 use starknet_ff::FieldElement as FieldElement252;
-use stwo::core::channel::Channel;
+use stwo::core::channel::{Channel, Poseidon252Channel};
 use stwo::core::circle::CirclePoint;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::line::LinePoly;
 
+mod circle_point_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use stwo::core::circle::CirclePoint;
+    use stwo::core::fields::qm31::SecureField;
+
+    pub fn serialize<S>(
+        point: &CirclePoint<SecureField>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        (point.x, point.y).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<CirclePoint<SecureField>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let (x, y) = <(SecureField, SecureField)>::deserialize(deserializer)?;
+        Ok(CirclePoint { x, y })
+    }
+}
+
 /// 递归证明内固定执行的 L1 verifier 程序。
 ///
 /// 递归 verifier 不能接受 prover 自报的 component layout 或 transcript schedule；每个
 /// 变体必须在代码中固定 commitments、interaction 消息、mask points 和 composition AIR。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 pub enum RecursiveVerifierProgram {
     /// `prove_cpu_trace` / `verify_cpu_proof` 的单组件、无 interaction CPU verifier。
     #[default]
     CpuV1,
+    /// One fixed, no-interaction component whose original columns are sampled only at offset 0.
+    ///
+    /// This is the protocol shape used by the Texas method AIRs: application public inputs are
+    /// mixed before the trace commitments and every row is bound to one verifier-reconstructed
+    /// business row.  The application wrapper must independently reconstruct the component and
+    /// evaluate its composition claim; the recursive AIR proves the common PCS/Merkle/FRI part.
+    ReplicatedRowV1,
 }
 
 impl RecursiveVerifierProgram {
     const fn transcript_id(self) -> u32 {
         match self {
             Self::CpuV1 => 1,
+            Self::ReplicatedRowV1 => 2,
         }
+    }
+}
+
+/// A canonical operation mixed into the L1 Poseidon252 transcript before commitments.
+///
+/// Application statements cannot be represented by a digest chosen by the prover: the exact
+/// typed channel operations are carried in the recursive public inputs and replayed by the fixed
+/// verifier program.  An application verifier must reconstruct this list from independently
+/// trusted public inputs and require exact equality before accepting the recursive proof.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RecursiveStatementOp {
+    /// [`Channel::mix_u32s`] with a length-delimited payload.
+    MixU32s(Vec<u32>),
+    /// [`Channel::mix_felts`] with a length-delimited payload.
+    MixFelts(Vec<SecureField>),
+    /// [`Channel::mix_u64`].
+    MixU64(u64),
+}
+
+impl RecursiveStatementOp {
+    /// Apply this operation to a transcript channel.
+    pub fn apply(&self, channel: &mut impl Channel) {
+        match self {
+            Self::MixU32s(values) => channel.mix_u32s(values),
+            Self::MixFelts(values) => channel.mix_felts(values),
+            Self::MixU64(value) => channel.mix_u64(*value),
+        }
+    }
+
+    fn mix_into_outer(&self, channel: &mut impl Channel) {
+        match self {
+            Self::MixU32s(values) => {
+                channel.mix_u32s(&[1]);
+                mix_len(channel, values.len());
+                channel.mix_u32s(values);
+            }
+            Self::MixFelts(values) => {
+                channel.mix_u32s(&[2]);
+                mix_len(channel, values.len());
+                channel.mix_felts(values);
+            }
+            Self::MixU64(value) => {
+                channel.mix_u32s(&[3]);
+                channel.mix_u64(*value);
+            }
+        }
+    }
+}
+
+/// Channel adapter that records an application's exact statement transcript while preserving
+/// normal Poseidon252 semantics.
+///
+/// It lets downstream crates reuse their existing `mix_into<C: Channel>` implementation without
+/// duplicating its serialization schedule. Draw operations are delegated but are not recorded;
+/// statement construction is expected to contain only mix operations.
+#[derive(Debug, Clone, Default)]
+pub struct RecursiveStatementRecorder {
+    channel: Poseidon252Channel,
+    operations: Vec<RecursiveStatementOp>,
+}
+
+impl RecursiveStatementRecorder {
+    /// Finish recording and return the canonical operation sequence.
+    #[must_use]
+    pub fn into_operations(self) -> Vec<RecursiveStatementOp> {
+        self.operations
+    }
+
+    /// Borrow the recorded operation sequence.
+    #[must_use]
+    pub fn operations(&self) -> &[RecursiveStatementOp] {
+        &self.operations
+    }
+}
+
+impl Channel for RecursiveStatementRecorder {
+    const BYTES_PER_HASH: usize = Poseidon252Channel::BYTES_PER_HASH;
+
+    fn verify_pow_nonce(&self, n_bits: u32, nonce: u64) -> bool {
+        self.channel.verify_pow_nonce(n_bits, nonce)
+    }
+
+    fn mix_felts(&mut self, felts: &[SecureField]) {
+        self.operations
+            .push(RecursiveStatementOp::MixFelts(felts.to_vec()));
+        self.channel.mix_felts(felts);
+    }
+
+    fn mix_u32s(&mut self, data: &[u32]) {
+        self.operations
+            .push(RecursiveStatementOp::MixU32s(data.to_vec()));
+        self.channel.mix_u32s(data);
+    }
+
+    fn mix_u64(&mut self, value: u64) {
+        self.operations.push(RecursiveStatementOp::MixU64(value));
+        self.channel.mix_u64(value);
+    }
+
+    fn draw_secure_felt(&mut self) -> SecureField {
+        self.channel.draw_secure_felt()
+    }
+
+    fn draw_secure_felts(&mut self, n_felts: usize) -> Vec<SecureField> {
+        self.channel.draw_secure_felts(n_felts)
+    }
+
+    fn draw_u32s(&mut self) -> Vec<u32> {
+        self.channel.draw_u32s()
     }
 }
 
@@ -38,7 +181,9 @@ impl RecursiveVerifierProgram {
 /// `column_log_sizes` 使用提交前的多项式 log degree；Stwo verifier 会为每列加上
 /// `config.fri_config.log_blowup_factor`，再结合 `config.lifting_log_size` 得到 Merkle
 /// tree height。列顺序必须与 prover 调用 `tree_builder.extend_evals` 的顺序一致。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 pub struct RecursiveTreeMetadata {
     /// 该 commitment tree 中各列的多项式 log degree。
     pub column_log_sizes: Vec<u32>,
@@ -77,10 +222,16 @@ impl RecursiveTreeMetadata {
 ///
 /// 包含 L1 proof 的所有公开承诺，作为 L2 verifier 的输入。
 /// 任何字段被篡改都会导致 L2 proof 验证失败（因为 channel mix）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecursivePublicInputs {
     /// 固定的 L1 verifier 程序；禁止 prover 自报 transcript/component schema。
     pub verifier_program: RecursiveVerifierProgram,
+
+    /// Exact application-statement transcript prefix mixed before L1 commitments.
+    ///
+    /// `CpuV1` requires this list to be empty. `ReplicatedRowV1` requires the application wrapper
+    /// to reconstruct it from trusted public inputs and compare it byte-for-byte.
+    pub statement_transcript: Vec<RecursiveStatementOp>,
 
     /// L1 proof 的 Merkle roots（所有 trees 的 commitments）。
     ///
@@ -97,6 +248,7 @@ pub struct RecursivePublicInputs {
     /// L1 proof 的 OODS（Out-Of-Domain Sampling）point。
     ///
     /// 由 L1 verifier 在 commit phase 通过 `CirclePoint::get_random_point(channel)` 抽取。
+    #[serde(with = "circle_point_serde")]
     pub oods_point: CirclePoint<SecureField>,
 
     /// L1 composition constraints 的 transcript 随机线性组合系数。
@@ -173,6 +325,7 @@ impl RecursivePublicInputs {
     ) -> Self {
         Self {
             verifier_program: RecursiveVerifierProgram::CpuV1,
+            statement_transcript: Vec::new(),
             l1_commitments,
             l1_tree_metadata: Vec::new(),
             oods_point,
@@ -215,6 +368,25 @@ impl RecursivePublicInputs {
         self
     }
 
+    /// Select a verifier program and bind its exact pre-commitment statement transcript.
+    #[must_use]
+    pub fn with_statement_transcript(
+        mut self,
+        verifier_program: RecursiveVerifierProgram,
+        statement_transcript: Vec<RecursiveStatementOp>,
+    ) -> Self {
+        self.verifier_program = verifier_program;
+        self.statement_transcript = statement_transcript;
+        self
+    }
+
+    /// Replay the application statement prefix into an L1 Poseidon transcript.
+    pub fn replay_statement_transcript(&self, channel: &mut impl Channel) {
+        for operation in &self.statement_transcript {
+            operation.apply(channel);
+        }
+    }
+
     /// 获取 L1 FRI config。
     #[must_use]
     pub const fn fri_config(&self) -> FriConfig {
@@ -229,6 +401,10 @@ impl RecursivePublicInputs {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u32s(&Self::TRANSCRIPT_DOMAIN);
         channel.mix_u32s(&[self.verifier_program.transcript_id()]);
+        mix_len(channel, self.statement_transcript.len());
+        for operation in &self.statement_transcript {
+            operation.mix_into_outer(channel);
+        }
         self.config.mix_into(channel);
         channel.mix_u32s(&[self.max_log_degree_bound]);
         channel.mix_felts(&[
@@ -379,5 +555,28 @@ mod tests {
         let mut changed_log_size = baseline;
         changed_log_size.log_size = 1;
         assert_ne!(expected, transcript_challenge(&changed_log_size));
+    }
+
+    #[test]
+    fn statement_recorder_replays_exact_poseidon_transcript() {
+        let mut recorder = RecursiveStatementRecorder::default();
+        recorder.mix_u32s(&[1, 2, 3]);
+        recorder.mix_felts(&[SecureField::from(4u32)]);
+        recorder.mix_u64(5);
+        let recorded_draw = recorder.draw_secure_felt();
+        let operations = recorder.into_operations();
+
+        let mut replay = Poseidon252Channel::default();
+        for operation in &operations {
+            operation.apply(&mut replay);
+        }
+        assert_eq!(recorded_draw, replay.draw_secure_felt());
+
+        let mut inputs = RecursivePublicInputs::default();
+        inputs =
+            inputs.with_statement_transcript(RecursiveVerifierProgram::ReplicatedRowV1, operations);
+        let expected = transcript_challenge(&inputs);
+        inputs.statement_transcript[0] = RecursiveStatementOp::MixU32s(vec![1, 2, 4]);
+        assert_ne!(expected, transcript_challenge(&inputs));
     }
 }

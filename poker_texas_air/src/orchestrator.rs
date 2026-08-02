@@ -84,6 +84,9 @@ use crate::method_kind::MethodKind;
 use crate::precompile_binding::{precompile_call_context, PrecompileCallBinding};
 use crate::prove_task::{dispatch_call_digest, DispatchOutput, MethodInput, ProveTask};
 use crate::prover::prove_method;
+#[cfg(feature = "recursive-prover")]
+use crate::recursive::prove_method_recursive;
+use crate::recursive::verify_method_recursive_proof;
 use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
 use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
 use crate::verified_chain::{
@@ -153,6 +156,63 @@ impl Orchestrator {
     /// - Stwo prover 错误（约束不满足）
     /// - verify 失败（proof 无效）
     pub fn prove_and_verify_task(&mut self, task: &ProveTask) -> TexasAirResult<ProvenTask> {
+        let mut backend = NativeMethodProofBackend;
+        let (summary, receipt) = self.process_task(task, &mut backend)?;
+        self.verified_chain_builder.push_receipt(receipt)?;
+        self.proven.push(summary.clone());
+        Ok(summary)
+    }
+
+    /// Replay an authenticated task, reconstruct its trusted AIR/public inputs, and directly
+    /// verify a recursive STWO proof without accepting or regenerating the inner method proof.
+    ///
+    /// The caller remains responsible for authenticating `task` against L1 consensus/state. This
+    /// function treats every task field as untrusted, replays the VM dispatch, and derives the AIR
+    /// and replicated row locally before invoking the recursive verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled selector, failed VM replay, task/row mismatch, or invalid
+    /// recursive proof/public inputs.
+    pub fn verify_recursive_task(
+        task: &ProveTask,
+        recursive_proof: &poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
+        recursive_inputs: &poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
+    ) -> TexasAirResult<()> {
+        let orchestrator = Self::new();
+        let mut backend = RecursiveMethodVerifierBackend {
+            recursive_proof,
+            recursive_inputs,
+        };
+        orchestrator.process_task(task, &mut backend).map(|_| ())
+    }
+
+    /// Replay one task, generate its inner method proof, and immediately wrap it in a recursive
+    /// STWO proof. The returned value intentionally excludes the inner proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for failed task replay, method proving, native verification, or recursive
+    /// proving.
+    #[cfg(feature = "recursive-prover")]
+    pub fn prove_recursive_task(
+        task: &ProveTask,
+    ) -> TexasAirResult<(
+        poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
+        poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
+    )> {
+        let orchestrator = Self::new();
+        let mut backend = RecursiveMethodProverBackend;
+        orchestrator
+            .process_task(task, &mut backend)
+            .map(|(_, recursive)| recursive)
+    }
+
+    fn process_task<B: MethodBackend>(
+        &self,
+        task: &ProveTask,
+        backend: &mut B,
+    ) -> TexasAirResult<(ProvenTask, B::Output)> {
         // These selectors are part of the VM/task wire format, but their AIR
         // statements are not yet trustworthy. Reject them before dispatch
         // replay or any proof construction so no partial receipt can escape.
@@ -198,48 +258,60 @@ impl Orchestrator {
             call_seq: task.call_seq,
         };
 
-        let receipt = match task.method_kind {
-            MethodKind::CreateTable => self.prove_create_table(task, pre_root, post_root, &pi)?,
-            MethodKind::JoinTable => self.prove_join_table(task, pre_root, post_root, &pi)?,
-            MethodKind::LeaveTable => self.prove_leave_table(task, pre_root, post_root, &pi)?,
-            MethodKind::StartHand => self.prove_start_hand(task, pre_root, post_root, &pi)?,
-            MethodKind::Tick => self.prove_tick(task, pre_root, post_root, &pi)?,
-            MethodKind::ResetForNextHand => {
-                self.prove_reset_for_next_hand(task, pre_root, post_root, &pi)?
+        let output = match task.method_kind {
+            MethodKind::CreateTable => {
+                self.prove_create_table(task, pre_root, post_root, &pi, backend)?
             }
-            MethodKind::Fold => self.prove_fold(task, pre_root, post_root, &pi)?,
-            MethodKind::Check => self.prove_check(task, pre_root, post_root, &pi)?,
-            MethodKind::Call => self.prove_call(task, pre_root, post_root, &pi)?,
-            MethodKind::Raise => self.prove_raise(task, pre_root, post_root, &pi)?,
-            MethodKind::AutoFold => self.prove_auto_fold(task, pre_root, post_root, &pi)?,
-            MethodKind::ForceFold => self.prove_force_fold(task, pre_root, post_root, &pi)?,
-            MethodKind::KickPlayer => self.prove_kick_player(task, pre_root, post_root, &pi)?,
-            MethodKind::Addon => self.prove_addon(task, pre_root, post_root, &pi)?,
-            MethodKind::Rebuy => self.prove_rebuy(task, pre_root, post_root, &pi)?,
-            MethodKind::Bet => self.prove_bet(task, pre_root, post_root, &pi)?,
+            MethodKind::JoinTable => {
+                self.prove_join_table(task, pre_root, post_root, &pi, backend)?
+            }
+            MethodKind::LeaveTable => {
+                self.prove_leave_table(task, pre_root, post_root, &pi, backend)?
+            }
+            MethodKind::StartHand => {
+                self.prove_start_hand(task, pre_root, post_root, &pi, backend)?
+            }
+            MethodKind::Tick => self.prove_tick(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::ResetForNextHand => {
+                self.prove_reset_for_next_hand(task, pre_root, post_root, &pi, backend)?
+            }
+            MethodKind::Fold => self.prove_fold(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::Check => self.prove_check(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::Call => self.prove_call(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::Raise => self.prove_raise(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::AutoFold => {
+                self.prove_auto_fold(task, pre_root, post_root, &pi, backend)?
+            }
+            MethodKind::ForceFold => {
+                self.prove_force_fold(task, pre_root, post_root, &pi, backend)?
+            }
+            MethodKind::KickPlayer => {
+                self.prove_kick_player(task, pre_root, post_root, &pi, backend)?
+            }
+            MethodKind::Addon => self.prove_addon(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::Rebuy => self.prove_rebuy(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::Bet => self.prove_bet(task, pre_root, post_root, &pi, backend)?,
             MethodKind::JoinAndShuffle => {
-                self.prove_join_and_shuffle(task, pre_root, post_root, &pi)?
+                self.prove_join_and_shuffle(task, pre_root, post_root, &pi, backend)?
             }
             MethodKind::LeaveWithProof => {
-                self.prove_leave_with_proof(task, pre_root, post_root, &pi)?
+                self.prove_leave_with_proof(task, pre_root, post_root, &pi, backend)?
             }
             MethodKind::SubmitShuffleV2 => {
-                self.prove_submit_shuffle_v2(task, pre_root, post_root, &pi)?
+                self.prove_submit_shuffle_v2(task, pre_root, post_root, &pi, backend)?
             }
             MethodKind::SubmitPlayerRevealTokens => {
-                self.prove_submit_reveal_tokens(task, pre_root, post_root, &pi)?
+                self.prove_submit_reveal_tokens(task, pre_root, post_root, &pi, backend)?
             }
             MethodKind::SubmitReconstructDeck => {
-                self.prove_submit_reconstruct_deck(task, pre_root, post_root, &pi)?
+                self.prove_submit_reconstruct_deck(task, pre_root, post_root, &pi, backend)?
             }
             MethodKind::RequestLeaveAfterHand | MethodKind::FoldWithProof => {
                 return Err(unsupported_registered_method(task.method_kind));
             }
         };
 
-        self.verified_chain_builder.push_receipt(receipt)?;
-        self.proven.push(summary.clone());
-        Ok(summary)
+        Ok((summary, output))
     }
 
     /// 处理一批任务（按顺序 prove + verify）。
@@ -340,13 +412,14 @@ impl Orchestrator {
 
     // ===== 各方法的 trace 构造 + prove + verify =====
 
-    fn prove_create_table(
+    fn prove_create_table<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::CreateTable {
             name,
             max_players,
@@ -379,41 +452,36 @@ impl Orchestrator {
             pre_version,
             post_version,
         );
-        let padding = CreateTableRow::padding();
-        let trace = gen_method_trace(
+        run(
+            backend,
             CreateTableAir::num_columns(),
-            &row.to_vec(),
-            &padding.to_vec(),
-        )?;
-        let air = CreateTableAir::new(
-            crate::trace_gen::generic_trace::MIN_LOG_SIZE,
-            input,
-            state_root_to_m31_limbs(pre_root),
-            state_root_to_m31_limbs(post_root),
-            task.table_id,
-            task.hand_id,
-            task.call_seq,
-            pre_version,
-            post_version,
-        );
-        let mut bound_pi = pi.clone();
-        bound_pi.bind_expected_trace_row(&row.to_vec())?;
-        let proof = prove_method(
-            &trace,
-            air.clone(),
-            CreateTableAir::num_columns(),
-            bound_pi.clone(),
-        )?;
-        verify_method_against_and_issue_receipt(proof, air, &bound_pi)
+            &row,
+            &CreateTableRow::padding(),
+            pi,
+            move || {
+                CreateTableAir::new(
+                    MIN_LOG_SIZE,
+                    input,
+                    state_root_to_m31_limbs(pre_root),
+                    state_root_to_m31_limbs(post_root),
+                    task.table_id,
+                    task.hand_id,
+                    task.call_seq,
+                    pre_version,
+                    post_version,
+                )
+            },
+        )
     }
 
-    fn prove_fold(
+    fn prove_fold<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(TexasAirError::SpecViolation(format!(
                 "fold 任务的 method_input 应为 SeatOnly，实际：{:?}",
@@ -447,28 +515,24 @@ impl Orchestrator {
             pre_round_state,
             post_round_state,
         );
-        let padding = FoldRow::padding();
-        let trace = gen_method_trace(FoldAir::num_columns(), &row.to_vec(), &padding.to_vec())?;
-        let air = FoldAir {
-            log_size: crate::trace_gen::generic_trace::MIN_LOG_SIZE,
-            input,
-            pre_state_root: state_root_to_m31_limbs(pre_root),
-            post_state_root: state_root_to_m31_limbs(post_root),
-            table_id: task.table_id,
-            hand_id: task.hand_id,
-            call_seq: task.call_seq,
-            pre_version,
-            post_version,
-        };
-        let mut bound_pi = pi.clone();
-        bound_pi.bind_expected_trace_row(&row.to_vec())?;
-        let proof = prove_method(
-            &trace,
-            air.clone(),
+        run(
+            backend,
             FoldAir::num_columns(),
-            bound_pi.clone(),
-        )?;
-        verify_method_against_and_issue_receipt(proof, air, &bound_pi)
+            &row,
+            &FoldRow::padding(),
+            pi,
+            move || FoldAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: state_root_to_m31_limbs(pre_root),
+                post_state_root: state_root_to_m31_limbs(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version,
+                post_version,
+            },
+        )
     }
 
     // ===== 以下为其余 19 个方法的 trace 构造（模式同 prove_create_table / prove_fold）=====
@@ -497,13 +561,14 @@ impl Orchestrator {
             })
     }
 
-    fn prove_join_table(
+    fn prove_join_table<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::Join { player, buy_in } = &task.method_input else {
             return Err(input_mismatch("join_table", "Join", &task.method_input));
         };
@@ -527,6 +592,7 @@ impl Orchestrator {
             task.pre_table.addon_pool,
         );
         run(
+            backend,
             JoinTableAir::num_columns(),
             &row,
             &JoinTableRow::padding(),
@@ -545,13 +611,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_leave_table(
+    fn prove_leave_table<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch(
                 "leave_table",
@@ -606,6 +673,7 @@ impl Orchestrator {
             task.post_table.addon_pool,
         );
         run(
+            backend,
             LeaveTableAir::num_columns(),
             &row,
             &LeaveTableRow::padding(),
@@ -624,13 +692,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_start_hand(
+    fn prove_start_hand<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let input = StartHandInput {
             active_count: count_active_occupied(&task.pre_table),
             ante_mode: task.post_table.ante_mode,
@@ -657,6 +726,7 @@ impl Orchestrator {
             post_v,
         );
         run(
+            backend,
             StartHandAir::num_columns(),
             &row,
             &StartHandRow::padding(),
@@ -675,13 +745,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_tick(
+    fn prove_tick<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         // tick 无 prove_task（dispatch 返回 None），但保留接线以备手动/集成驱动。
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("tick", "Empty", &task.method_input));
@@ -712,6 +783,7 @@ impl Orchestrator {
             post_r,
         );
         run(
+            backend,
             TickAir::num_columns(),
             &row,
             &TickRow::padding(),
@@ -730,13 +802,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_reset_for_next_hand(
+    fn prove_reset_for_next_hand<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch(
                 "reset_for_next_hand",
@@ -762,6 +835,7 @@ impl Orchestrator {
             pre_r,
         );
         run(
+            backend,
             ResetForNextHandAir::num_columns(),
             &row,
             &ResetForNextHandRow::padding(),
@@ -780,13 +854,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_check(
+    fn prove_check<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("check", "SeatOnly", &task.method_input));
         };
@@ -826,6 +901,7 @@ impl Orchestrator {
             post_pot,
         );
         run(
+            backend,
             CheckAir::num_columns(),
             &row,
             &CheckRow::padding(),
@@ -844,13 +920,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_call(
+    fn prove_call<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("call", "SeatOnly", &task.method_input));
         };
@@ -903,6 +980,7 @@ impl Orchestrator {
             pre_seat.total_bet,
         );
         run(
+            backend,
             CallAir::num_columns(),
             &row,
             &CallRow::padding(),
@@ -921,13 +999,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_raise(
+    fn prove_raise<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::Raise {
             seat_index,
             total_bet,
@@ -997,6 +1076,7 @@ impl Orchestrator {
             post_seat.all_in,
         );
         run(
+            backend,
             RaiseAir::num_columns(),
             &row,
             &RaiseRow::padding(),
@@ -1015,13 +1095,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_bet(
+    fn prove_bet<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::Bet { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("bet", "Bet", &task.method_input));
         };
@@ -1073,6 +1154,7 @@ impl Orchestrator {
             post_seat.total_bet,
         );
         run(
+            backend,
             BetAir::num_columns(),
             &row,
             &BetRow::padding(),
@@ -1091,13 +1173,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_auto_fold(
+    fn prove_auto_fold<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("auto_fold", "SeatOnly", &task.method_input));
         };
@@ -1127,6 +1210,7 @@ impl Orchestrator {
             post_r,
         );
         run(
+            backend,
             AutoFoldAir::num_columns(),
             &row,
             &AutoFoldRow::padding(),
@@ -1145,13 +1229,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_force_fold(
+    fn prove_force_fold<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("force_fold", "SeatOnly", &task.method_input));
         };
@@ -1180,6 +1265,7 @@ impl Orchestrator {
             post_r,
         );
         run(
+            backend,
             ForceFoldAir::num_columns(),
             &row,
             &ForceFoldRow::padding(),
@@ -1198,13 +1284,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_kick_player(
+    fn prove_kick_player<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::Kick {
             seat_index,
             reason: _,
@@ -1250,6 +1337,7 @@ impl Orchestrator {
             post_pot,
         );
         run(
+            backend,
             KickPlayerAir::num_columns(),
             &row,
             &KickPlayerRow::padding(),
@@ -1268,13 +1356,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_addon(
+    fn prove_addon<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::Funds { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("addon", "Funds", &task.method_input));
         };
@@ -1301,6 +1390,7 @@ impl Orchestrator {
             post_r,
         );
         run(
+            backend,
             AddonAir::num_columns(),
             &row,
             &AddonRow::padding(),
@@ -1319,13 +1409,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_rebuy(
+    fn prove_rebuy<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::Funds { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("rebuy", "Funds", &task.method_input));
         };
@@ -1352,6 +1443,7 @@ impl Orchestrator {
             post_r,
         );
         run(
+            backend,
             RebuyAir::num_columns(),
             &row,
             &RebuyRow::padding(),
@@ -1370,13 +1462,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_join_and_shuffle(
+    fn prove_join_and_shuffle<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::JoinAndShuffle {
             seat_index,
             player: _,
@@ -1411,6 +1504,7 @@ impl Orchestrator {
             post_cc,
         );
         run(
+            backend,
             JoinAndShuffleAir::num_columns(),
             &row,
             &JoinAndShuffleRow::padding(),
@@ -1429,13 +1523,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_leave_with_proof(
+    fn prove_leave_with_proof<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::LeaveWithProof {
             seat_index,
             raw_args: _,
@@ -1466,6 +1561,7 @@ impl Orchestrator {
             post_cc,
         );
         run(
+            backend,
             LeaveWithProofAir::num_columns(),
             &row,
             &LeaveWithProofRow::padding(),
@@ -1484,13 +1580,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_submit_shuffle_v2(
+    fn prove_submit_shuffle_v2<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SubmitShuffleV2 {
             seat_index,
             raw_args,
@@ -1572,6 +1669,7 @@ impl Orchestrator {
         let mut bound_pi = pi.clone();
         bound_pi.precompile_binding = Some(binding);
         run(
+            backend,
             SubmitShuffleV2Air::num_columns(),
             &row,
             &SubmitShuffleV2Row::padding(),
@@ -1590,13 +1688,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_submit_reveal_tokens(
+    fn prove_submit_reveal_tokens<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SubmitPlayerRevealTokens {
             seat_index,
             raw_args: _,
@@ -1626,6 +1725,7 @@ impl Orchestrator {
             post_rc,
         );
         run(
+            backend,
             SubmitPlayerRevealTokensAir::num_columns(),
             &row,
             &SubmitPlayerRevealTokensRow::padding(),
@@ -1644,13 +1744,14 @@ impl Orchestrator {
         )
     }
 
-    fn prove_submit_reconstruct_deck(
+    fn prove_submit_reconstruct_deck<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
         post_root: StateRoot,
         pi: &crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<VerificationReceipt> {
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
         let MethodInput::SubmitReconstructDeck {
             seat_index,
             raw_args,
@@ -1719,6 +1820,7 @@ impl Orchestrator {
         let mut bound_pi = pi.clone();
         bound_pi.precompile_binding = Some(binding);
         run(
+            backend,
             SubmitReconstructDeckAir::num_columns(),
             &row,
             &SubmitReconstructDeckRow::padding(),
@@ -1949,30 +2051,121 @@ fn srm(root: StateRoot) -> [M31; 4] {
     state_root_to_m31_limbs(root)
 }
 
-/// 通用 prove + verify 流程：构造 trace → prove → verify。
-fn run<A, F>(
+trait MethodBackend {
+    type Output;
+
+    fn execute<A: crate::airs::TexasAir>(
+        &mut self,
+        num_columns: usize,
+        row: &[M31],
+        padding: &[M31],
+        air: A,
+        public_inputs: crate::public_inputs::TexasPublicInputs,
+    ) -> TexasAirResult<Self::Output>;
+}
+
+struct NativeMethodProofBackend;
+
+impl MethodBackend for NativeMethodProofBackend {
+    type Output = VerificationReceipt;
+
+    fn execute<A: crate::airs::TexasAir>(
+        &mut self,
+        num_columns: usize,
+        row: &[M31],
+        padding: &[M31],
+        air: A,
+        public_inputs: crate::public_inputs::TexasPublicInputs,
+    ) -> TexasAirResult<Self::Output> {
+        let trace = gen_method_trace(num_columns, row, padding)?;
+        let proof = prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
+        verify_method_against_and_issue_receipt(proof, air, &public_inputs)
+    }
+}
+
+struct RecursiveMethodVerifierBackend<'a> {
+    recursive_proof:
+        &'a poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
+    recursive_inputs: &'a poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
+}
+
+#[cfg(feature = "recursive-prover")]
+struct RecursiveMethodProverBackend;
+
+#[cfg(feature = "recursive-prover")]
+impl MethodBackend for RecursiveMethodProverBackend {
+    type Output = (
+        poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
+        poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
+    );
+
+    fn execute<A: crate::airs::TexasAir>(
+        &mut self,
+        num_columns: usize,
+        row: &[M31],
+        padding: &[M31],
+        air: A,
+        public_inputs: crate::public_inputs::TexasPublicInputs,
+    ) -> TexasAirResult<Self::Output> {
+        let trace = gen_method_trace(num_columns, row, padding)?;
+        let method_proof =
+            prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
+        prove_method_recursive(&method_proof, air, &public_inputs)
+    }
+}
+
+impl MethodBackend for RecursiveMethodVerifierBackend<'_> {
+    type Output = ();
+
+    fn execute<A: crate::airs::TexasAir>(
+        &mut self,
+        num_columns: usize,
+        row: &[M31],
+        padding: &[M31],
+        air: A,
+        public_inputs: crate::public_inputs::TexasPublicInputs,
+    ) -> TexasAirResult<Self::Output> {
+        if row.len() != num_columns || padding.len() != num_columns {
+            return Err(TexasAirError::SpecViolation(format!(
+                "trusted row/padding width mismatch: row={}, padding={}, expected={num_columns}",
+                row.len(),
+                padding.len()
+            )));
+        }
+        verify_method_recursive_proof(
+            self.recursive_proof,
+            self.recursive_inputs,
+            air,
+            &public_inputs,
+        )
+    }
+}
+
+/// Shared trusted-statement path for native method proving and recursive-only verification.
+fn run<B, A, F>(
+    backend: &mut B,
     num_columns: usize,
     row: &impl ToM31Vec,
     padding: &impl ToM31Vec,
     public_inputs: &crate::public_inputs::TexasPublicInputs,
     build_air: F,
-) -> TexasAirResult<VerificationReceipt>
+) -> TexasAirResult<B::Output>
 where
+    B: MethodBackend,
     A: crate::airs::TexasAir,
     F: FnOnce() -> A,
 {
     let row_values = row.to_vec_m31();
-    let trace = gen_method_trace(num_columns, &row_values, &padding.to_vec_m31())?;
     let air = build_air();
     let mut bound_public_inputs = public_inputs.clone();
     bound_public_inputs.bind_expected_trace_row(&row_values)?;
-    let proof = prove_method(
-        &trace,
-        air.clone(),
+    backend.execute(
         num_columns,
-        bound_public_inputs.clone(),
-    )?;
-    verify_method_against_and_issue_receipt(proof, air, &bound_public_inputs)
+        &row_values,
+        &padding.to_vec_m31(),
+        air,
+        bound_public_inputs,
+    )
 }
 
 /// 能产出 `Vec<M31>` 的抽象（避免与 CommonRow 的 `to_vec` 命名冲突）。
@@ -2001,6 +2194,8 @@ macro_rules! impl_row_to_vec {
     };
 }
 impl_row_to_vec!(
+    CreateTableRow,
+    FoldRow,
     JoinTableRow,
     LeaveTableRow,
     StartHandRow,
@@ -2274,6 +2469,126 @@ mod tests {
         let mut orch = Orchestrator::new();
         orch.prove_and_verify_task(&task)
             .expect("fold prove+verify 应成功");
+    }
+
+    #[cfg(feature = "recursive-prover")]
+    #[test]
+    #[ignore = "recursive STWO proving is intentionally expensive"]
+    fn l1_registry_directly_verifies_recursive_fold_envelope_without_inner_proof() {
+        let mut pre = make_table("recursive-l1-fold");
+        pre.version = 1;
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+        }
+        let caller = pre.seats[0].player;
+        let (task, _) = dispatch_task(
+            pre,
+            caller,
+            texas_dispatch::selectors::fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("fold args should serialize"),
+        );
+
+        let (recursive_proof, recursive_inputs) =
+            Orchestrator::prove_recursive_task(&task).expect("recursive proof should be produced");
+        let envelope = crate::recursive_envelope::TexasRecursiveProofEnvelope::new(
+            task.clone(),
+            recursive_inputs,
+            recursive_proof,
+        );
+        let encoded = envelope.encode().expect("envelope should encode");
+        assert!(
+            encoded.len() <= poker_l1::offline::zk_verifier::MAX_ZK_PROOF_BYTES,
+            "recursive envelope size {} exceeds the L1 zk_verify limit {}",
+            encoded.len(),
+            poker_l1::offline::zk_verifier::MAX_ZK_PROOF_BYTES,
+        );
+        let decoded = crate::recursive_envelope::TexasRecursiveProofEnvelope::decode(&encoded)
+            .expect("envelope should round-trip");
+        assert_eq!(decoded.task().method_kind, MethodKind::Fold);
+
+        let public_io = crate::l1_verifier::texas_recursive_public_io(&task).unwrap();
+        let anchor = crate::verified_chain::ExpectedChainAnchor::new(
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            crate::state_root::compute_state_root(&task.pre_table).unwrap(),
+            crate::state_root::compute_state_root(&task.post_table).unwrap(),
+            task.pre_table.version,
+            task.post_table.version,
+            vec![dispatch_call_digest(&task.context, &task.selector, &task.raw_args).unwrap()],
+        )
+        .unwrap();
+        let mut registry = poker_l1::offline::zk_verifier::ZkVerifierRegistry::new();
+        crate::l1_verifier::register_texas_stwo_recursive_verifier(&mut registry).unwrap();
+
+        let stub_result = crate::l1_verifier::verify_authenticated_texas_recursive_transition(
+            &registry,
+            poker_l1::DEFAULT_CHAIN_ID,
+            &encoded,
+            &task,
+        );
+        assert!(matches!(
+            stub_result,
+            Err(poker_l1::error::PokerL1Error::ZkVerifierNotProduction { .. })
+        ));
+
+        registry.set_verifier_status(
+            poker_l1::DEFAULT_CHAIN_ID,
+            poker_l1::offline::zk_verifier::VerifierStatus::Production,
+        );
+        let authenticated =
+            crate::l1_verifier::verify_consensus_anchored_texas_recursive_transition(
+                &registry,
+                poker_l1::DEFAULT_CHAIN_ID,
+                &encoded,
+                &task,
+                &anchor,
+            )
+            .expect("authenticated L1 transition should verify");
+        assert!(authenticated.verified);
+
+        let mut different_authenticated_task = task.clone();
+        different_authenticated_task.post_table.version += 1;
+        assert!(
+            crate::l1_verifier::verify_consensus_anchored_texas_recursive_transition(
+                &registry,
+                poker_l1::DEFAULT_CHAIN_ID,
+                &encoded,
+                &different_authenticated_task,
+                &anchor,
+            )
+            .is_err()
+        );
+
+        let result = registry
+            .zk_verify(
+                poker_l1::DEFAULT_CHAIN_ID,
+                poker_l1::offline::zk_verifier::SCHEME_STWO,
+                &encoded,
+                &public_io,
+                3,
+                1_000,
+            )
+            .expect("registry verification should execute");
+        assert!(result.verified);
+
+        let mut relabeled_public_io = public_io;
+        relabeled_public_io.final_commitment[0] ^= 1;
+        let relabeled = registry
+            .zk_verify(
+                poker_l1::DEFAULT_CHAIN_ID,
+                poker_l1::offline::zk_verifier::SCHEME_STWO,
+                &encoded,
+                &relabeled_public_io,
+                3,
+                1_000,
+            )
+            .expect("mismatched public I/O should return a negative result");
+        assert!(!relabeled.verified);
     }
 
     #[test]

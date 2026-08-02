@@ -7,7 +7,7 @@
 //! - **zk_verify(scheme_id, proof, public_io) -> bool** 通用 syscall 入口
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::Hash;
 use crate::error::PokerL1Error;
@@ -17,6 +17,10 @@ pub type SchemeId = u32;
 
 /// Stwo scheme_id（v2 Stwo Circle-STARK 递归证明；历史名 Hypernova，已废弃）。
 pub const SCHEME_STWO: SchemeId = 1;
+/// VM `zk_verify` 可接收的最大 proof/envelope 字节数。
+///
+/// Texas recursive STWO 的真实 E2E 会断言当前 envelope 不超过该共识边界。
+pub const MAX_ZK_PROOF_BYTES: usize = 256 * 1024;
 /// Groth16 scheme_id（spec.md L505）。
 pub const SCHEME_GROTH16: SchemeId = 2;
 /// IPA scheme_id（spec.md L511）。
@@ -131,7 +135,7 @@ impl<'a> ZkVerifyContext<'a> {
 /// - `Production`：完整验证
 ///
 /// 升级须治理 90% quorum + `parameter_delay_blocks` timelock 双重保护。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VerifierStatus {
     /// Stub 状态：仅校验格式，主网 chain_id 拒绝 OffChain checkout（NEW-C1）。
     Stub,
@@ -333,7 +337,7 @@ pub struct ZkVerifierRegistry {
     /// scheme_id → verifier 实例。
     verifiers: BTreeMap<SchemeId, Arc<dyn ZkVerifier>>,
     /// per-chain_id verifier_status（NEW-C1）。
-    statuses: BTreeMap<crate::ChainId, VerifierStatus>,
+    statuses: Arc<RwLock<BTreeMap<crate::ChainId, VerifierStatus>>>,
 }
 
 /// Stwo ZK Verifier — 实验性递归 proof 的保护性入口。
@@ -454,12 +458,16 @@ pub fn register_ipa_stub_verifier(registry: &mut ZkVerifierRegistry) {
 
 impl std::fmt::Debug for ZkVerifierRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let statuses = self
+            .statuses
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
         f.debug_struct("ZkVerifierRegistry")
             .field(
                 "registered_schemes",
                 &self.verifiers.keys().collect::<Vec<_>>(),
             )
-            .field("statuses", &self.statuses)
+            .field("statuses", &*statuses)
             .finish()
     }
 }
@@ -494,8 +502,30 @@ impl ZkVerifierRegistry {
     /// 设置 per-chain_id verifier_status（NEW-C1）。
     ///
     /// 升级为 `Production` 须治理 90% quorum + `parameter_delay_blocks` timelock。
-    pub fn set_verifier_status(&mut self, chain_id: crate::ChainId, status: VerifierStatus) {
-        self.statuses.insert(chain_id, status);
+    pub fn set_verifier_status(&self, chain_id: crate::ChainId, status: VerifierStatus) {
+        self.statuses
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(chain_id, status);
+    }
+
+    /// Replace the runtime status view with the statuses from authenticated governance state.
+    ///
+    /// Registry clones share this status control plane, so a governance update becomes visible to
+    /// RPC, block production, block replay, and VM syscall environments without rebuilding the
+    /// registered verifier implementations.
+    pub fn synchronize_governance_statuses(&self, governance: &crate::governance::GovernanceState) {
+        let mut statuses = self
+            .statuses
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        statuses.clear();
+        statuses.extend(
+            governance
+                .verifier_statuses
+                .iter()
+                .map(|(chain_id, status)| (*chain_id, *status)),
+        );
     }
 
     /// 查询 per-chain_id verifier_status（NEW-C1）。
@@ -503,6 +533,8 @@ impl ZkVerifierRegistry {
     /// 未设置时默认 `Stub`（NEW-C1：初始 Stub）。
     pub fn verifier_status(&self, chain_id: crate::ChainId) -> VerifierStatus {
         self.statuses
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
             .get(&chain_id)
             .copied()
             .unwrap_or(VerifierStatus::Stub)

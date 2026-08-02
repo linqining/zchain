@@ -463,6 +463,22 @@ pub enum PokerL1Error {
     /// ZK verifier 未注册（scheme_id 已知但 registry 中无对应 verifier）。
     #[error("zk verifier not registered for scheme_id={0}")]
     ZkVerifierNotRegistered(u32),
+    /// 共识状态尚未把指定 verifier 切换到 Production，不能把格式检查当成证明接受。
+    #[error("zk verifier is not in Production: chain_id={chain_id}, scheme_id={scheme_id}")]
+    ZkVerifierNotProduction {
+        /// 目标链 ID。
+        chain_id: crate::ChainId,
+        /// 证明系统 ID。
+        scheme_id: u32,
+    },
+    /// 节点二进制未编译指定 verifier 能力，不能注册一个运行时必然失败的适配器。
+    #[error("zk verifier capability is disabled at compile time: scheme_id={scheme_id}, capability={capability}")]
+    ZkVerifierCapabilityDisabled {
+        /// 证明系统 ID。
+        scheme_id: u32,
+        /// 缺失的编译能力名称。
+        capability: &'static str,
+    },
     /// Groth16 verifying_key 未注册到 ZkVerifierRegistry（SubTask 24.3a）。
     #[error("groth16 verifying_key not registered: vk_id={0:?}")]
     Groth16VkNotRegistered(crate::Hash),

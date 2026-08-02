@@ -2986,7 +2986,9 @@ fn test_dispatch_create_table_max_players_over_limit() {
 fn test_dispatch_tick_increments_timestamp() {
     let ctx = make_dispatch_context();
     let mut table = dummy_table("test", 4);
-    let args = TickArgs { now_ms: 2_000_000 };
+    let args = TickArgs {
+        now_ms: ctx.block_timestamp,
+    };
     let args_bytes = borsh::to_vec(&args).unwrap();
     let result = dispatch::dispatch(&ctx, &mut table, &selectors::tick(), &args_bytes);
     assert!(result.is_ok());

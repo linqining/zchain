@@ -656,19 +656,55 @@ fn quotient_schedule(
     public_inputs: &RecursivePublicInputs,
     sampled_values: &[SecureField],
 ) -> Result<Vec<QuotientScheduleRow>, FriSemanticAirError> {
-    ensure_default_cpu_config(public_inputs)?;
-    let mut allocator = TraceLocationAllocator::default();
-    let component = FrameworkComponent::new(
-        &mut allocator,
-        CpuAir::new(public_inputs.log_size),
-        SecureField::from(0u32),
-    );
-    let components = Components {
-        components: vec![&component as &dyn Component],
-        n_preprocessed_columns: 0,
+    ensure_supported_single_component_config(public_inputs)?;
+    let (column_log_sizes, sample_points) = match public_inputs.verifier_program {
+        RecursiveVerifierProgram::CpuV1 => {
+            let mut allocator = TraceLocationAllocator::default();
+            let component = FrameworkComponent::new(
+                &mut allocator,
+                CpuAir::new(public_inputs.log_size),
+                SecureField::from(0u32),
+            );
+            let components = Components {
+                components: vec![&component as &dyn Component],
+                n_preprocessed_columns: 0,
+            };
+            let mut column_log_sizes = components.column_log_sizes();
+            column_log_sizes.push(vec![public_inputs.log_size; 2 * SECURE_EXTENSION_DEGREE]);
+            let mut sample_points = components.mask_points(
+                public_inputs.oods_point,
+                public_inputs.max_log_degree_bound,
+                false,
+            );
+            sample_points.push(vec![
+                vec![public_inputs.oods_point];
+                2 * SECURE_EXTENSION_DEGREE
+            ]);
+            (column_log_sizes, sample_points)
+        }
+        RecursiveVerifierProgram::ReplicatedRowV1 => {
+            let column_log_sizes = stwo::core::pcs::TreeVec(
+                public_inputs
+                    .l1_tree_metadata
+                    .iter()
+                    .map(|tree| tree.column_log_sizes.clone())
+                    .collect(),
+            );
+            if column_log_sizes.len() != 3
+                || !column_log_sizes[0].is_empty()
+                || column_log_sizes[1].is_empty()
+                || column_log_sizes[2].len() != 2 * SECURE_EXTENSION_DEGREE
+            {
+                return Err(FriSemanticAirError::InvalidColumnMetadata);
+            }
+            let sample_points = stwo::core::pcs::TreeVec(vec![
+                Vec::new(),
+                vec![vec![public_inputs.oods_point]; column_log_sizes[1].len()],
+                vec![vec![public_inputs.oods_point]; 2 * SECURE_EXTENSION_DEGREE],
+            ]);
+            (column_log_sizes, sample_points)
+        }
     };
-    let mut column_log_sizes = components.column_log_sizes();
-    column_log_sizes.push(vec![public_inputs.log_size; 2 * SECURE_EXTENSION_DEGREE]);
     if column_log_sizes.len() != public_inputs.l1_tree_metadata.len()
         || column_log_sizes
             .iter()
@@ -678,23 +714,12 @@ fn quotient_schedule(
         return Err(FriSemanticAirError::InvalidColumnMetadata);
     }
 
-    let mut sample_points = components.mask_points(
-        public_inputs.oods_point,
-        public_inputs.max_log_degree_bound,
-        false,
-    );
-    sample_points.push(vec![
-        vec![public_inputs.oods_point];
-        2 * SECURE_EXTENSION_DEGREE
-    ]);
     let expected_sample_count = sample_points
         .iter()
         .flat_map(|tree| tree.iter())
         .map(Vec::len)
         .sum::<usize>();
-    if expected_sample_count != sampled_values.len()
-        || sampled_values.len() != NUM_COLUMNS + 2 * SECURE_EXTENSION_DEGREE
-    {
+    if expected_sample_count != sampled_values.len() {
         return Err(FriSemanticAirError::InvalidSampleShape);
     }
     let mut sample_cursor = 0usize;
@@ -793,7 +818,7 @@ fn fold_schedule(
     public_inputs: &RecursivePublicInputs,
     draw_results: &[starknet_ff::FieldElement],
 ) -> Result<Vec<FoldScheduleRow>, FriSemanticAirError> {
-    ensure_default_cpu_config(public_inputs)?;
+    ensure_supported_single_component_config(public_inputs)?;
     let n_layers = 1 + public_inputs.fri_inner_layer_commitments.len();
     let expected_layers = public_inputs
         .max_log_degree_bound
@@ -862,11 +887,13 @@ fn fold_schedule(
     Ok(rows)
 }
 
-fn ensure_default_cpu_config(
+fn ensure_supported_single_component_config(
     public_inputs: &RecursivePublicInputs,
 ) -> Result<(), FriSemanticAirError> {
-    if public_inputs.verifier_program != RecursiveVerifierProgram::CpuV1
-        || public_inputs.config != PcsConfig::default()
+    if !matches!(
+        public_inputs.verifier_program,
+        RecursiveVerifierProgram::CpuV1 | RecursiveVerifierProgram::ReplicatedRowV1
+    ) || public_inputs.config != PcsConfig::default()
         || public_inputs.max_log_degree_bound != public_inputs.log_size
         || public_inputs.config.fri_config.fold_step != 1
         || public_inputs.config.fri_config.log_last_layer_degree_bound != 0

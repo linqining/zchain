@@ -314,10 +314,14 @@ pub struct LeaveTableArgs {
     pub seat_index: u8,
 }
 
-/// `tick` 参数。
+/// `tick` 的兼容参数。
+///
+/// 新调用应传空参数；若旧客户端仍携带时间戳，该值必须与共识提供的
+/// [`DispatchContext::block_timestamp`] 完全一致。状态机绝不使用调用者提供的
+/// 时间作为超时依据。
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct TickArgs {
-    /// 当前时间戳（毫秒）。
+    /// 兼容字段：必须等于当前区块时间戳（毫秒）。
     pub now_ms: u64,
 }
 
@@ -453,7 +457,7 @@ pub fn dispatch(
         s if s == &selectors::start_hand() => {
             dispatch_start_hand(context, table, args, &mut events)
         }
-        s if s == &selectors::tick() => dispatch_tick(table, args, &mut events),
+        s if s == &selectors::tick() => dispatch_tick(context, table, args, &mut events),
         s if s == &selectors::auto_fold() => dispatch_auto_fold(context, table, args, &mut events),
         s if s == &selectors::force_fold() => {
             dispatch_force_fold(context, table, args, &mut events)
@@ -1168,24 +1172,28 @@ fn dispatch_start_hand(
 
 /// `tick` — 超时驱动。
 fn dispatch_tick(
+    context: &DispatchContext,
     table: &mut TexasPokerTable,
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    // 允许空 args（兼容无参调用）；非空则解析为 TickArgs
-    let now_ms = if args.is_empty() {
-        // 无 args 时使用 0（仅推进状态机，超时不触发）
-        0u64
-    } else {
-        decode_args::<TickArgs>(args, "tick")?.now_ms
-    };
-    state_machine::tick(table, now_ms, events)
+    // 时间属于共识上下文，不能由 permissionless 调用者选择。为兼容旧 wire
+    // format，非空 args 仍可解析，但仅接受与区块时间完全一致的值。
+    if !args.is_empty() {
+        let supplied = decode_args::<TickArgs>(args, "tick")?.now_ms;
+        if supplied != context.block_timestamp {
+            return Err(PokerL1Error::Other(format!(
+                "tick timestamp must equal consensus block timestamp: supplied={supplied}, consensus={}",
+                context.block_timestamp
+            )));
+        }
+    }
+    state_machine::tick(table, context.block_timestamp, events)
 }
 
 /// `auto_fold` — 玩家超时自动 fold。
 ///
 /// 权限：仅 creator 可触发（超时处理属管理动作）。
-/// TODO(P1)：当前不校验是否真已超时（依赖 timestamps），完整超时校验留待后续。
 fn dispatch_auto_fold(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
@@ -1194,6 +1202,40 @@ fn dispatch_auto_fold(
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "auto_fold")?;
     require_caller_is_creator(context, table, "auto_fold")?;
+    if !state_machine::is_betting_round(table) {
+        return Err(PokerL1Error::Other(
+            "auto_fold requires an active betting round".into(),
+        ));
+    }
+    if table.current_turn != Some(input.seat_index) {
+        return Err(PokerL1Error::Other(format!(
+            "auto_fold seat is not current turn: requested={}, current={:?}",
+            input.seat_index, table.current_turn
+        )));
+    }
+    let seat = table
+        .seats
+        .get(input.seat_index as usize)
+        .ok_or_else(|| PokerL1Error::Other("auto_fold seat index out of range".into()))?;
+    if seat.time_bank_ms > 0 {
+        return Err(PokerL1Error::Other(format!(
+            "auto_fold cannot bypass time bank: remaining_ms={}",
+            seat.time_bank_ms
+        )));
+    }
+    let started = table.timestamps.betting_started_at;
+    if started == 0 {
+        return Err(PokerL1Error::Other(
+            "auto_fold betting timer has not started".into(),
+        ));
+    }
+    let deadline = started.saturating_add(table.timeout_config.betting_timeout_ms);
+    if context.block_timestamp < deadline {
+        return Err(PokerL1Error::Other(format!(
+            "auto_fold before timeout: block_timestamp={}, deadline={deadline}",
+            context.block_timestamp
+        )));
+    }
     state_machine::apply_fold_internal(table, input.seat_index, FOLD_REASON_AUTO_TIMEOUT, events)
 }
 
@@ -1761,14 +1803,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_tick_with_empty_args_uses_zero() {
+    fn dispatch_tick_with_empty_args_uses_consensus_timestamp() {
         let ctx = make_context();
         let mut table = make_table();
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 1000;
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
-        // 空 args 调用 tick：等价于 now_ms=0，触发 start_hand
+        // 空 args 调用 tick：时间来自共识 context，并可触发无需等待的 start_hand。
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
         let output = decode_output(&result);
         let task = output
@@ -1807,12 +1849,11 @@ mod tests {
         table.shuffle_state.phase = super::super::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
         table.shuffle_state.pending_players = vec![0];
         table.shuffle_state.current_shuffler = Some(0);
-        let args = borsh::to_vec(&TickArgs { now_ms: 777 }).unwrap();
-        let result = dispatch(&ctx, &mut table, &selectors::tick(), &args).unwrap();
+        let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
         let task = decode_output(&result)
             .prove_task
             .expect("tick 修改超时起点后必须产生 task");
-        assert_eq!(table.timestamps.shuffle_started_at, 777);
+        assert_eq!(table.timestamps.shuffle_started_at, ctx.block_timestamp);
         assert_eq!(table.version, 1);
         assert_eq!(table.call_seq, 1);
         assert_eq!(task.method_kind, 4);
@@ -1820,17 +1861,82 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_tick_with_args_uses_provided_timestamp() {
+    fn dispatch_tick_rejects_timestamp_different_from_consensus() {
         let ctx = make_context();
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
         let args = TickArgs { now_ms: 5_000_000 };
         let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &args_bytes);
+        assert!(result.is_err());
+        assert_eq!(table, make_table());
+    }
+
+    #[test]
+    fn dispatch_tick_accepts_legacy_timestamp_equal_to_consensus() {
+        let ctx = make_context();
+        let mut table = make_table();
+        let args = TickArgs {
+            now_ms: ctx.block_timestamp,
+        };
+        let args_bytes = borsh::to_vec(&args).unwrap();
+        let result = dispatch(&ctx, &mut table, &selectors::tick(), &args_bytes);
         assert!(result.is_ok());
+    }
+
+    fn make_auto_fold_table() -> TexasPokerTable {
+        let mut table = make_table();
+        table.round_state = super::super::constants::ROUND_PREFLOP;
+        table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+        for index in 0..3 {
+            table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
+            table.seats[index].stack = 1_000;
+        }
+        table
+    }
+
+    #[test]
+    fn dispatch_auto_fold_rejects_before_consensus_timeout() {
+        let ctx = make_context();
+        let mut table = make_auto_fold_table();
+        table.timestamps.betting_started_at = ctx.block_timestamp - 1;
+        let pre = table.clone();
+        let args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap();
+
+        let result = dispatch(&ctx, &mut table, &selectors::auto_fold(), &args);
+
+        assert!(result.is_err());
+        assert_eq!(table, pre);
+    }
+
+    #[test]
+    fn dispatch_auto_fold_rejects_while_time_bank_remains() {
+        let ctx = make_context();
+        let mut table = make_auto_fold_table();
+        table.timestamps.betting_started_at = 1;
+        table.seats[0].time_bank_ms = 1;
+        let pre = table.clone();
+        let args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap();
+
+        let result = dispatch(&ctx, &mut table, &selectors::auto_fold(), &args);
+
+        assert!(result.is_err());
+        assert_eq!(table, pre);
+    }
+
+    #[test]
+    fn dispatch_auto_fold_accepts_expired_turn_without_time_bank() {
+        let ctx = make_context();
+        let mut table = make_auto_fold_table();
+        table.timestamps.betting_started_at = 1;
+        table.seats[0].time_bank_ms = 0;
+        let args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap();
+
+        let result = dispatch(&ctx, &mut table, &selectors::auto_fold(), &args);
+
+        assert!(result.is_ok());
+        assert!(table.seats[0].folded);
+        assert_eq!(table.call_seq, 1);
     }
 
     // ========== P0-1 / P0-2 回归测试 ==========

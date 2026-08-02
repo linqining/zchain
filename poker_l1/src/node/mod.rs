@@ -387,6 +387,20 @@ fn build_genesis_validator_set(validators: Vec<ValidatorEntry>) -> ValidatorSet 
 impl Node {
     /// 打开节点（初始化所有存储后端）。
     pub fn open(config: NodeConfig) -> PokerL1Result<Self> {
+        let mut zk_registry = crate::offline::zk_verifier::ZkVerifierRegistry::new();
+        crate::offline::zk_verifier::register_stwo_verifier(&mut zk_registry);
+        Self::open_with_zk_verifier_registry(config, zk_registry)
+    }
+
+    /// Open a node with an application-supplied ZK verifier registry.
+    ///
+    /// This is the dependency-inversion boundary for application-aware verifiers such as the
+    /// Texas recursive STWO verifier. `poker_l1` cannot depend on `poker_texas_air` without a Cargo
+    /// cycle, so the top-level node binary constructs and injects the final registry here.
+    pub fn open_with_zk_verifier_registry(
+        config: NodeConfig,
+        zk_registry: crate::offline::zk_verifier::ZkVerifierRegistry,
+    ) -> PokerL1Result<Self> {
         let block_path = config.data_dir.join("blocks");
         let object_path = config.data_dir.join("objects");
         let vertex_path = config.data_dir.join("vertices");
@@ -401,9 +415,6 @@ impl Node {
         let bridge_registry_store = BridgeRegistryStore::open(&bridge_path)?;
         let validator_set = build_genesis_validator_set(config.genesis_validators.clone());
         let precompile_registry = build_default_precompile_registry();
-        // 链上 zk_verify 启用：注册 Stwo verifier（Stub 模式默认，治理可切 Production）。
-        let mut zk_reg = crate::offline::zk_verifier::ZkVerifierRegistry::new();
-        crate::offline::zk_verifier::register_stwo_verifier(&mut zk_reg);
         Ok(Self {
             config,
             block_store,
@@ -417,7 +428,7 @@ impl Node {
             precompile_registry,
             bridge_registry_store: Some(Arc::new(bridge_registry_store)),
             metrics: Arc::new(crate::metrics::MetricsCollector::new()),
-            zk_verifier: Some(zk_reg),
+            zk_verifier: Some(zk_registry),
             light_headers: std::sync::Mutex::new(Vec::new()),
         })
     }
@@ -1076,13 +1087,7 @@ impl Node {
         }
 
         // 5. 状态根重放比对（P0-2 接入）
-        let mut env =
-            ExecutionEnvironment::new(self.config.chain_id, header.height, header.timestamp_ms)
-                .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
-        // 缺口 #9：注入 Bridge registry store，使重放时 bridge 铸币路径可执行。
-        if let Some(bridge_store) = &self.bridge_registry_store {
-            env = env.with_bridge_registry_store(Arc::clone(bridge_store));
-        }
+        let mut env = self.execution_environment(header.height, header.timestamp_ms);
         // 缺口 #4-M1 / #5-M2 一致性：验证方也须 credit proposer（gas + 出块奖励），
         // 使各节点账户状态一致。proposer = commit cert 引用的第一个 vertex 的 author。
         // （账户不在 state_root 内，不影响共识；但账户余额在各节点应一致。）
@@ -1123,8 +1128,53 @@ impl Node {
     /// 获取 ZK verifier registry 的 clone（链上 zk_verify 启用）。
     /// 供 executor 构造 ExecutionEnvironment 时注入，使 VM 内 `zk_verify` syscall 可用。
     #[must_use]
-    pub fn zk_verifier_registry_clone(&self) -> Option<crate::offline::zk_verifier::ZkVerifierRegistry> {
+    pub fn zk_verifier_registry_clone(
+        &self,
+    ) -> Option<crate::offline::zk_verifier::ZkVerifierRegistry> {
         self.zk_verifier.clone()
+    }
+
+    /// Synchronize the shared verifier-status control plane from authenticated governance state.
+    ///
+    /// The verifier implementations themselves remain fixed at node startup; only the per-chain
+    /// Stub/Production status is updated. All registry clones observe the same status map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this node has no ZK verifier registry configured.
+    pub fn synchronize_zk_verifier_governance(
+        &self,
+        governance: &crate::governance::GovernanceState,
+    ) -> PokerL1Result<()> {
+        let registry = self.zk_verifier.as_ref().ok_or_else(|| {
+            PokerL1Error::Other("node has no ZK verifier registry to synchronize".into())
+        })?;
+        registry.synchronize_governance_statuses(governance);
+        Ok(())
+    }
+
+    /// Construct the deterministic block execution environment owned by this node.
+    ///
+    /// Keeping this assembly in one place is consensus-critical: block production and block
+    /// replay must inject the same precompile, ZK-verifier, and bridge registries. In particular,
+    /// an application-aware recursive verifier registered at node startup must be visible to the
+    /// VM `zk_verify` syscall on every execution path.
+    #[must_use]
+    pub fn execution_environment(
+        &self,
+        block_height: BlockHeight,
+        block_timestamp: crate::TimestampMs,
+    ) -> ExecutionEnvironment {
+        let mut env =
+            ExecutionEnvironment::new(self.config.chain_id, block_height, block_timestamp)
+                .with_precompile_registry_arc(Arc::clone(&self.precompile_registry));
+        if let Some(registry) = &self.zk_verifier {
+            env = env.with_zk_verifier(registry.clone());
+        }
+        if let Some(bridge_store) = &self.bridge_registry_store {
+            env = env.with_bridge_registry_store(Arc::clone(bridge_store));
+        }
+        env
     }
 
     /// 获取指标收集器引用（缺口 #7）。
@@ -1686,6 +1736,74 @@ mod tests {
     fn node_config_light() {
         let cfg = NodeConfig::light(PathBuf::from("/tmp/test"));
         assert_eq!(cfg.role, NodeRole::Light);
+    }
+
+    #[test]
+    fn execution_environment_includes_injected_zk_verifier_registry() {
+        use crate::offline::zk_verifier::{
+            SCHEME_STWO, VerifierStatus, ZkVerifierRegistry, register_stwo_verifier,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut registry = ZkVerifierRegistry::new();
+        register_stwo_verifier(&mut registry);
+        registry.set_verifier_status(DEFAULT_CHAIN_ID, VerifierStatus::Production);
+        let node = Node::open_with_zk_verifier_registry(
+            NodeConfig::default_full(temp.path().to_path_buf()),
+            registry,
+        )
+        .unwrap();
+
+        let env = node.execution_environment(7, 11);
+        let injected = env
+            .zk_verifier
+            .expect("node verifier registry must be injected");
+        assert_eq!(
+            injected.verifier_status(DEFAULT_CHAIN_ID),
+            VerifierStatus::Production
+        );
+        assert!(injected.registered_schemes().contains(&SCHEME_STWO));
+        assert!(env.precompile_registry.is_some());
+        assert!(env.bridge_registry_store.is_some());
+    }
+
+    #[test]
+    fn governance_status_sync_reaches_existing_registry_clones() {
+        use crate::governance::GovernanceState;
+        use crate::offline::zk_verifier::{
+            VerifierStatus, ZkVerifierRegistry, register_stwo_verifier,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut registry = ZkVerifierRegistry::new();
+        register_stwo_verifier(&mut registry);
+        let node = Node::open_with_zk_verifier_registry(
+            NodeConfig::default_full(temp.path().to_path_buf()),
+            registry,
+        )
+        .unwrap();
+        let observer = node.zk_verifier_registry_clone().unwrap();
+        assert_eq!(
+            observer.verifier_status(DEFAULT_CHAIN_ID),
+            VerifierStatus::Stub
+        );
+
+        let mut governance = GovernanceState::new();
+        governance.set_verifier_status(DEFAULT_CHAIN_ID, VerifierStatus::Production);
+        node.synchronize_zk_verifier_governance(&governance)
+            .unwrap();
+
+        assert_eq!(
+            observer.verifier_status(DEFAULT_CHAIN_ID),
+            VerifierStatus::Production
+        );
+        assert_eq!(
+            node.execution_environment(8, 13)
+                .zk_verifier
+                .unwrap()
+                .verifier_status(DEFAULT_CHAIN_ID),
+            VerifierStatus::Production
+        );
     }
 
     #[test]

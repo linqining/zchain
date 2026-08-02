@@ -5,8 +5,8 @@
 //! 合约执行层（`poker_l1` dispatch）每次成功执行一个 method 后，产出一个
 //! [`ProveTask`]，序列化进 `DispatchResult.return_value`（与 events 一起）。
 //! 链下 Orchestrator（[`crate::orchestrator`]）消费任务队列，为每个任务
-//! 生成 method proof，并在 host 端逐个原生验证后形成 [`crate::verified_chain::VerifiedChain`]。
-//! 当前不存在可信的单个 recursive/final aggregate proof。
+//! 生成 method proof，并可立即封装为单方法 recursive STWO proof。最终 application-aware
+//! verifier 不接收 inner method proof；批量 final aggregate proof 仍未完成。
 //!
 //! ## 设计原则
 //!

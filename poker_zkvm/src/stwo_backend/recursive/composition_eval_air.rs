@@ -28,6 +28,81 @@ use crate::stwo_backend::cpu_air::CpuAir;
 /// Four M31 columns are used for each sampled QM31 value.
 pub const COMP_EVAL_AIR_NUM_COLUMNS: usize = NUM_COLUMNS * SECURE_EXTENSION_DEGREE;
 
+/// Program-specific composition component used by the recursive wrapper.
+#[derive(Debug, Clone)]
+pub(crate) enum VerifierCompositionAir {
+    /// Evaluate the fixed CPU AIR inside recursion.
+    Cpu(CompositionEvalAir),
+    /// Bind all original OODS samples; the application verifier evaluates its fixed component
+    /// natively before accepting the outer proof.
+    ReplicatedRow(SampledValuesBindingAir),
+}
+
+impl VerifierCompositionAir {
+    pub(crate) fn num_columns(&self) -> usize {
+        match self {
+            Self::Cpu(_) => COMP_EVAL_AIR_NUM_COLUMNS,
+            Self::ReplicatedRow(air) => air.expected_sampled_values.len() * SECURE_EXTENSION_DEGREE,
+        }
+    }
+}
+
+impl FrameworkEval for VerifierCompositionAir {
+    fn log_size(&self) -> u32 {
+        match self {
+            Self::Cpu(air) => air.log_size(),
+            Self::ReplicatedRow(air) => air.trace_log_size,
+        }
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size() + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, eval: E) -> E {
+        match self {
+            Self::Cpu(air) => air.evaluate(eval),
+            Self::ReplicatedRow(air) => air.evaluate(eval),
+        }
+    }
+}
+
+/// Binds a dynamic list of original-trace OODS samples into the recursive proof.
+#[derive(Debug, Clone)]
+pub(crate) struct SampledValuesBindingAir {
+    trace_log_size: u32,
+    expected_sampled_values: Vec<SecureField>,
+}
+
+impl SampledValuesBindingAir {
+    pub(crate) fn new(trace_log_size: u32, expected_sampled_values: Vec<SecureField>) -> Self {
+        assert!(!expected_sampled_values.is_empty());
+        Self {
+            trace_log_size,
+            expected_sampled_values,
+        }
+    }
+}
+
+impl FrameworkEval for SampledValuesBindingAir {
+    fn log_size(&self) -> u32 {
+        self.trace_log_size
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.trace_log_size + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        for expected in &self.expected_sampled_values {
+            let limbs = array::from_fn(|_| eval.next_trace_mask());
+            let actual = E::combine_ef(limbs);
+            eval.add_constraint(actual - E::EF::from(*expected));
+        }
+        eval
+    }
+}
+
 /// Evaluates the fixed `CpuAir` composition claim from all original-trace OODS samples.
 #[derive(Debug, Clone)]
 pub struct CompositionEvalAir {

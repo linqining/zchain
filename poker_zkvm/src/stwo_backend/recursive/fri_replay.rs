@@ -24,6 +24,7 @@ use stwo::core::vcs_lifted::verifier::{LOG_PACKED_LEAF_SIZE, PACKED_LEAF_SIZE};
 use super::poseidon252_replay::{
     Poseidon252PermutationCall, RecordingPoseidon252Channel, TranscriptPoseidonEvent,
 };
+use super::public_inputs::RecursiveStatementOp;
 use super::stwo_replay::{MerkleReplayError, MerkleTreeReplay, replay_merkle_tree_with_sizes};
 
 /// 从 L1 transcript 重放得到的 FRI challenges。
@@ -116,6 +117,17 @@ pub(crate) fn extract_simple_fri_replay_challenges(
     config: PcsConfig,
     max_log_degree_bound: u32,
 ) -> Option<FriReplayChallenges> {
+    extract_single_component_fri_replay_challenges(l1_proof, config, max_log_degree_bound, &[])
+}
+
+/// Extract the canonical transcript for a single no-interaction component after replaying an
+/// application statement prefix.
+pub(crate) fn extract_single_component_fri_replay_challenges(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    config: PcsConfig,
+    max_log_degree_bound: u32,
+    statement_transcript: &[RecursiveStatementOp],
+) -> Option<FriReplayChallenges> {
     let commitments = &l1_proof.0.commitments;
     let (composition_commitment, trace_commitments) = commitments.split_last()?;
     if trace_commitments.len() < 2 {
@@ -123,6 +135,9 @@ pub(crate) fn extract_simple_fri_replay_challenges(
     }
 
     let mut channel = RecordingPoseidon252Channel::default();
+    for operation in statement_transcript {
+        operation.apply(&mut channel);
+    }
     for commitment in trace_commitments {
         channel.mix_root(*commitment);
     }

@@ -16,6 +16,7 @@ use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
+use stwo::core::queries::{Queries, draw_queries};
 use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
@@ -70,6 +71,8 @@ pub(crate) enum CpuTranscriptBindingError {
     InvalidProofOfWork,
     #[error("CpuV1 transcript binding metadata does not fit M31")]
     MetadataOverflow,
+    #[error("recursive statement transcript does not match the selected verifier program")]
+    StatementTranscriptMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +122,20 @@ impl CpuTranscriptBindingWitness {
         proof_of_work: u64,
         pow_hash: FieldElement252,
     ) -> Result<Self, CpuTranscriptBindingError> {
+        if public_inputs.verifier_program
+            == super::public_inputs::RecursiveVerifierProgram::ReplicatedRowV1
+        {
+            return Self::new_replicated_row(
+                public_inputs,
+                sampled_values,
+                draw_results,
+                proof_of_work,
+                pow_hash,
+            );
+        }
+        if !public_inputs.statement_transcript.is_empty() {
+            return Err(CpuTranscriptBindingError::StatementTranscriptMismatch);
+        }
         if public_inputs.config != PcsConfig::default() {
             return Err(CpuTranscriptBindingError::InvalidConfig);
         }
@@ -353,6 +370,179 @@ impl CpuTranscriptBindingWitness {
             n_rows,
             log_size,
             rows: flat_rows,
+        })
+    }
+
+    fn new_replicated_row(
+        public_inputs: &RecursivePublicInputs,
+        sampled_values: &[SecureField],
+        draw_results: &[FieldElement252],
+        proof_of_work: u64,
+        pow_hash: FieldElement252,
+    ) -> Result<Self, CpuTranscriptBindingError> {
+        if public_inputs.config != PcsConfig::default() {
+            return Err(CpuTranscriptBindingError::InvalidConfig);
+        }
+        if public_inputs.l1_commitments.len() != 3 || public_inputs.l1_tree_metadata.len() != 3 {
+            return Err(CpuTranscriptBindingError::InvalidCommitments);
+        }
+        let expected_sample_count =
+            public_inputs.l1_tree_metadata[1].column_log_sizes.len() + 2 * SECURE_EXTENSION_DEGREE;
+        if sampled_values.len() != expected_sample_count {
+            return Err(CpuTranscriptBindingError::InvalidSampleCount {
+                expected: expected_sample_count,
+                actual: sampled_values.len(),
+            });
+        }
+        let expected_draw_count = 5 + public_inputs.fri_inner_layer_commitments.len();
+        if draw_results.len() != expected_draw_count {
+            return Err(CpuTranscriptBindingError::InvalidDrawCount {
+                expected: expected_draw_count,
+                actual: draw_results.len(),
+            });
+        }
+
+        let mut channel = RecordingPoseidon252Channel::default();
+        public_inputs.replay_statement_transcript(&mut channel);
+        for root in &public_inputs.l1_commitments[..2] {
+            channel.mix_root(*root);
+        }
+        let composition_random_coeff = channel.draw_secure_felt();
+        channel.mix_root(public_inputs.l1_commitments[2]);
+        let oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
+        channel.mix_felts(sampled_values);
+        let fri_quotient_random_coeff = channel.draw_secure_felt();
+        channel.mix_root(public_inputs.fri_first_layer_commitment);
+        let _first_alpha = channel.draw_secure_felt();
+        for root in &public_inputs.fri_inner_layer_commitments {
+            channel.mix_root(*root);
+            let _inner_alpha = channel.draw_secure_felt();
+        }
+        channel.mix_felts(&public_inputs.fri_last_layer_poly[..]);
+        if !channel.verify_pow_nonce(public_inputs.config.pow_bits, proof_of_work) {
+            return Err(CpuTranscriptBindingError::InvalidProofOfWork);
+        }
+        channel.mix_u64(proof_of_work);
+        let first_layer_log_size = public_inputs
+            .max_log_degree_bound
+            .checked_add(public_inputs.config.fri_config.log_blowup_factor)
+            .ok_or(CpuTranscriptBindingError::MetadataOverflow)?;
+        let raw_query_positions = draw_queries(
+            &mut channel,
+            first_layer_log_size,
+            public_inputs.config.fri_config.n_queries,
+        );
+        let query_positions = Queries::new(&raw_query_positions, first_layer_log_size).positions;
+        if composition_random_coeff != public_inputs.composition_random_coeff
+            || oods_point != public_inputs.oods_point
+            || fri_quotient_random_coeff != public_inputs.fri_quotient_random_coeff
+        {
+            return Err(CpuTranscriptBindingError::ChallengeMismatch);
+        }
+        if query_positions != public_inputs.query_positions {
+            return Err(CpuTranscriptBindingError::QueryPositionsMismatch);
+        }
+
+        let events = channel.events();
+        let actual_draw_results = events
+            .iter()
+            .filter(|event| event.kind == Poseidon252CallKind::TranscriptDraw)
+            .map(|event| event.result)
+            .collect::<Vec<_>>();
+        let actual_pow_hash = events
+            .iter()
+            .find(|event| event.kind == Poseidon252CallKind::TranscriptPowNonce)
+            .map(|event| event.result)
+            .ok_or(CpuTranscriptBindingError::InvalidProofOfWork)?;
+        if actual_draw_results != draw_results || actual_pow_hash != pow_hash {
+            return Err(CpuTranscriptBindingError::ChallengeMismatch);
+        }
+
+        let mut binding_rows = Vec::new();
+        for event in &events {
+            let mut push_payload = |payload_index: usize, value: FieldElement252| {
+                binding_rows.push(BindingRow {
+                    kind: BindingKind::Payload,
+                    event_index: event.event_index,
+                    payload_index,
+                    event_kind: event.kind,
+                    value,
+                });
+            };
+            match event.kind {
+                Poseidon252CallKind::TranscriptMixRoot | Poseidon252CallKind::TranscriptMixU64 => {
+                    let value = *event
+                        .absorbed_values
+                        .get(1)
+                        .ok_or(CpuTranscriptBindingError::StatementTranscriptMismatch)?;
+                    push_payload(1, value);
+                }
+                Poseidon252CallKind::TranscriptMixFelts
+                | Poseidon252CallKind::TranscriptMixU32s => {
+                    // hash_many's first absorbed felt is its internal length/domain element.  The
+                    // transcript semantic AIR derives that value from the event shape and exports
+                    // only caller-controlled payloads, at one-based payload indices.
+                    for (index, value) in event.absorbed_values.iter().copied().skip(1).enumerate()
+                    {
+                        push_payload(index + 1, value);
+                    }
+                }
+                Poseidon252CallKind::TranscriptDraw => binding_rows.push(BindingRow {
+                    kind: BindingKind::Result,
+                    event_index: event.event_index,
+                    payload_index: 0,
+                    event_kind: event.kind,
+                    value: event.result,
+                }),
+                Poseidon252CallKind::TranscriptPowPrefix => {
+                    let prefix = *event
+                        .absorbed_values
+                        .first()
+                        .ok_or(CpuTranscriptBindingError::StatementTranscriptMismatch)?;
+                    let bits = *event
+                        .absorbed_values
+                        .get(2)
+                        .ok_or(CpuTranscriptBindingError::StatementTranscriptMismatch)?;
+                    push_payload(0, prefix);
+                    push_payload(2, bits);
+                }
+                Poseidon252CallKind::TranscriptPowNonce => {
+                    let nonce = *event
+                        .absorbed_values
+                        .get(1)
+                        .ok_or(CpuTranscriptBindingError::StatementTranscriptMismatch)?;
+                    push_payload(1, nonce);
+                    binding_rows.push(BindingRow {
+                        kind: BindingKind::Result,
+                        event_index: event.event_index,
+                        payload_index: 0,
+                        event_kind: event.kind,
+                        value: event.result,
+                    });
+                }
+                Poseidon252CallKind::MerkleLeafAbsorb
+                | Poseidon252CallKind::MerkleLeafFinalize
+                | Poseidon252CallKind::MerkleParent => {
+                    return Err(CpuTranscriptBindingError::StatementTranscriptMismatch);
+                }
+            }
+        }
+
+        let n_rows = binding_rows.len();
+        let padded_size = n_rows.next_power_of_two().max(N_LANES);
+        let log_size = padded_size.ilog2();
+        let mut rows = binding_rows
+            .iter()
+            .map(BindingRow::flat)
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.resize(
+            padded_size,
+            [BaseField::from(0u32); CPU_TRANSCRIPT_BINDING_NUM_COLUMNS],
+        );
+        Ok(Self {
+            n_rows,
+            log_size,
+            rows,
         })
     }
 

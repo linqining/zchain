@@ -23,11 +23,11 @@ use crate::stwo_backend::cpu_air::CpuAir;
 
 use super::fri_replay::{
     FriReplay, FriReplayChallenges, FriReplayError, extract_simple_fri_replay_challenges,
-    replay_fri_decommitment,
+    extract_single_component_fri_replay_challenges, replay_fri_decommitment,
 };
 use super::poseidon252_replay::Poseidon252PermutationCall;
 use super::public_inputs::{
-    RecursivePublicInputs, RecursiveTreeMetadata, RecursiveVerifierProgram,
+    RecursivePublicInputs, RecursiveStatementOp, RecursiveTreeMetadata, RecursiveVerifierProgram,
 };
 use super::stwo_replay::{MerkleReplayError, MerkleTreeReplay, replay_all_l1_merkle_trees};
 use super::trace_gen::extract_composition_oods_eval_from_l1;
@@ -98,6 +98,10 @@ pub enum VerifierProgramError {
     /// The fixed FRI transcript could not be derived.
     #[error("failed to derive fixed CpuV1 FRI transcript")]
     FriTranscript,
+    /// A replicated-row program must contain one no-interaction component with an empty
+    /// preprocessed tree and at least one same-sized original column.
+    #[error("ReplicatedRowV1 component layout is not a single no-interaction replicated row")]
+    InvalidReplicatedRowLayout,
     /// Canonical Merkle replay failed.
     #[error("Merkle replay failed: {0}")]
     Merkle(String),
@@ -165,6 +169,151 @@ pub fn build_cpu_recursive_public_inputs(
     Ok(inputs)
 }
 
+/// Build a recursive statement for one no-interaction component whose original columns are all
+/// sampled at offset zero.
+///
+/// The caller supplies the independently constructed Stwo component and the exact application
+/// statement transcript recorded before L1 commitments. This function checks the native L1
+/// composition claim against that component before producing public inputs; the final verifier
+/// must reconstruct the same component and statement transcript again.
+#[allow(clippy::missing_errors_doc)]
+pub fn build_replicated_row_recursive_public_inputs(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    component: &dyn Component,
+    statement_transcript: Vec<RecursiveStatementOp>,
+) -> Result<RecursivePublicInputs, VerifierProgramError> {
+    let config = PcsConfig::default();
+    if l1_proof.0.commitments.len() != 3 {
+        return Err(VerifierProgramError::InvalidCommitmentLayout);
+    }
+
+    let components = Components {
+        components: vec![component],
+        n_preprocessed_columns: 0,
+    };
+    let max_log_degree_bound = components
+        .composition_log_degree_bound()
+        .checked_sub(1)
+        .ok_or(VerifierProgramError::InvalidReplicatedRowLayout)?;
+    let mut column_log_sizes = components.column_log_sizes();
+    if column_log_sizes.len() != 2 || !column_log_sizes[0].is_empty() {
+        return Err(VerifierProgramError::InvalidReplicatedRowLayout);
+    }
+    let original_log_sizes = &column_log_sizes[1];
+    let Some(&log_size) = original_log_sizes.first() else {
+        return Err(VerifierProgramError::InvalidReplicatedRowLayout);
+    };
+    if log_size == 0
+        || max_log_degree_bound != log_size
+        || original_log_sizes.iter().any(|size| *size != log_size)
+    {
+        return Err(VerifierProgramError::InvalidReplicatedRowLayout);
+    }
+    column_log_sizes.push(vec![max_log_degree_bound; 2 * SECURE_EXTENSION_DEGREE]);
+    let tree_metadata = column_log_sizes
+        .iter()
+        .cloned()
+        .map(RecursiveTreeMetadata::new)
+        .collect::<Vec<_>>();
+
+    let mut channel = Poseidon252Channel::default();
+    for operation in &statement_transcript {
+        operation.apply(&mut channel);
+    }
+    Poseidon252MerkleChannel::mix_root(&mut channel, l1_proof.0.commitments[0]);
+    Poseidon252MerkleChannel::mix_root(&mut channel, l1_proof.0.commitments[1]);
+    let composition_random_coeff = channel.draw_secure_felt();
+    Poseidon252MerkleChannel::mix_root(&mut channel, l1_proof.0.commitments[2]);
+    let oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
+
+    let mut sample_points = components.mask_points(oods_point, max_log_degree_bound, false);
+    sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
+    if !same_sample_shape(&sample_points, &l1_proof.0.sampled_values) {
+        return Err(VerifierProgramError::InvalidSampledValues);
+    }
+    let composition_oods_eval =
+        extract_composition_oods_eval_from_l1(l1_proof, oods_point, max_log_degree_bound)
+            .ok_or(VerifierProgramError::InvalidSampledValues)?;
+    let computed_composition = components.eval_composition_polynomial_at_point(
+        oods_point,
+        &l1_proof.0.sampled_values,
+        composition_random_coeff,
+        max_log_degree_bound,
+    );
+    if composition_oods_eval != computed_composition {
+        return Err(VerifierProgramError::CompositionOodsMismatch);
+    }
+
+    channel.mix_felts(&l1_proof.0.sampled_values.clone().flatten_cols());
+    let fri_quotient_random_coeff = channel.draw_secure_felt();
+    let fri_challenges = extract_single_component_fri_replay_challenges(
+        l1_proof,
+        config,
+        max_log_degree_bound,
+        &statement_transcript,
+    )
+    .ok_or(VerifierProgramError::FriTranscript)?;
+    let samples = sample_points
+        .zip_cols(l1_proof.0.sampled_values.clone())
+        .map_cols(|(points, values)| {
+            zip(points, values)
+                .map(|(point, value)| PointSample { point, value })
+                .collect()
+        });
+    let lifting_log_size = log_size + config.fri_config.log_blowup_factor;
+    let first_layer_answers = fri_answers(
+        column_log_sizes,
+        samples,
+        fri_quotient_random_coeff,
+        &fri_challenges.query_positions,
+        l1_proof.0.queried_values.clone(),
+        lifting_log_size,
+    )
+    .map_err(|error| VerifierProgramError::FriAnswers(error.to_string()))?;
+    // Force full quotient construction here so malformed queried values fail before an outer
+    // proof is attempted. The answers are deterministically reconstructed again by recursion.
+    if first_layer_answers.is_empty() {
+        return Err(VerifierProgramError::FriAnswers(
+            "replicated-row quotient answer set is empty".into(),
+        ));
+    }
+
+    let fri_query_x = first_last_layer_query_x(&fri_challenges, config, max_log_degree_bound)?;
+    let fri_query_eval = l1_proof
+        .0
+        .fri_proof
+        .last_layer_poly
+        .eval_at_point(fri_query_x);
+    Ok(RecursivePublicInputs::new(
+        l1_proof.0.commitments.iter().copied().collect(),
+        oods_point,
+        composition_oods_eval,
+        l1_proof.0.fri_proof.first_layer.commitment,
+        l1_proof.0.fri_proof.last_layer_poly.clone(),
+        max_log_degree_bound,
+        config,
+        fri_challenges.query_positions,
+        log_size,
+        fri_query_x,
+        fri_query_eval,
+    )
+    .with_verifier_metadata(
+        tree_metadata,
+        l1_proof
+            .0
+            .fri_proof
+            .inner_layers
+            .iter()
+            .map(|layer| layer.commitment)
+            .collect(),
+    )
+    .with_verifier_challenges(composition_random_coeff, fri_quotient_random_coeff)
+    .with_statement_transcript(
+        RecursiveVerifierProgram::ReplicatedRowV1,
+        statement_transcript,
+    ))
+}
+
 /// 验证公开 statement 与固定 CPU verifier replay 完全一致。
 pub(crate) fn replay_cpu_verifier(
     l1_proof: &StarkProof<Poseidon252MerkleHasher>,
@@ -230,6 +379,173 @@ pub(crate) fn replay_cpu_verifier(
         merkle_trees,
         fri,
     })
+}
+
+/// Replay the common PCS/Merkle/FRI verifier for `ReplicatedRowV1`.
+///
+/// Application composition evaluation is deliberately not accepted from the prover here. The
+/// final application verifier must reconstruct its fixed component and call
+/// `validate_replicated_row_composition` before accepting the outer proof.
+pub(crate) fn replay_replicated_row_verifier(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    public_inputs: &RecursivePublicInputs,
+) -> Result<CpuVerifierReplay, VerifierProgramError> {
+    if public_inputs.verifier_program != RecursiveVerifierProgram::ReplicatedRowV1
+        || public_inputs.config != PcsConfig::default()
+        || public_inputs.max_log_degree_bound != public_inputs.log_size
+        || public_inputs.l1_commitments.len() != 3
+        || public_inputs.l1_tree_metadata.len() != 3
+        || !public_inputs.l1_tree_metadata[0]
+            .column_log_sizes
+            .is_empty()
+        || public_inputs.l1_tree_metadata[1]
+            .column_log_sizes
+            .is_empty()
+        || public_inputs.l1_tree_metadata[1]
+            .column_log_sizes
+            .iter()
+            .any(|size| *size != public_inputs.log_size)
+        || public_inputs.l1_tree_metadata[2].column_log_sizes
+            != vec![public_inputs.log_size; 2 * SECURE_EXTENSION_DEGREE]
+    {
+        return Err(VerifierProgramError::InvalidReplicatedRowLayout);
+    }
+
+    let mut channel = Poseidon252Channel::default();
+    public_inputs.replay_statement_transcript(&mut channel);
+    Poseidon252MerkleChannel::mix_root(&mut channel, l1_proof.0.commitments[0]);
+    Poseidon252MerkleChannel::mix_root(&mut channel, l1_proof.0.commitments[1]);
+    let composition_random_coeff = channel.draw_secure_felt();
+    Poseidon252MerkleChannel::mix_root(&mut channel, l1_proof.0.commitments[2]);
+    let oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
+    let composition_oods_eval = extract_composition_oods_eval_from_l1(
+        l1_proof,
+        oods_point,
+        public_inputs.max_log_degree_bound,
+    )
+    .ok_or(VerifierProgramError::InvalidSampledValues)?;
+    let expected_sample_count =
+        public_inputs.l1_tree_metadata[1].column_log_sizes.len() + 2 * SECURE_EXTENSION_DEGREE;
+    let flattened_samples = l1_proof.0.sampled_values.clone().flatten_cols();
+    if flattened_samples.len() != expected_sample_count {
+        return Err(VerifierProgramError::InvalidSampledValues);
+    }
+    channel.mix_felts(&flattened_samples);
+    let fri_quotient_random_coeff = channel.draw_secure_felt();
+    let fri_challenges = extract_single_component_fri_replay_challenges(
+        l1_proof,
+        public_inputs.config,
+        public_inputs.max_log_degree_bound,
+        &public_inputs.statement_transcript,
+    )
+    .ok_or(VerifierProgramError::FriTranscript)?;
+
+    let sample_points = stwo::core::pcs::TreeVec(vec![
+        Vec::new(),
+        vec![
+            vec![public_inputs.oods_point];
+            public_inputs.l1_tree_metadata[1].column_log_sizes.len()
+        ],
+        vec![vec![public_inputs.oods_point]; 2 * SECURE_EXTENSION_DEGREE],
+    ]);
+    if !same_sample_shape(&sample_points, &l1_proof.0.sampled_values) {
+        return Err(VerifierProgramError::InvalidSampledValues);
+    }
+    let mut cursor = 0usize;
+    let samples = sample_points.map_cols(|points| {
+        points
+            .into_iter()
+            .map(|point| {
+                let value = flattened_samples[cursor];
+                cursor += 1;
+                PointSample { point, value }
+            })
+            .collect::<Vec<_>>()
+    });
+    let column_log_sizes = stwo::core::pcs::TreeVec(
+        public_inputs
+            .l1_tree_metadata
+            .iter()
+            .map(|tree| tree.column_log_sizes.clone())
+            .collect(),
+    );
+    let lifting_log_size =
+        public_inputs.log_size + public_inputs.config.fri_config.log_blowup_factor;
+    let first_layer_answers = fri_answers(
+        column_log_sizes,
+        samples,
+        fri_quotient_random_coeff,
+        &fri_challenges.query_positions,
+        l1_proof.0.queried_values.clone(),
+        lifting_log_size,
+    )
+    .map_err(|error| VerifierProgramError::FriAnswers(error.to_string()))?;
+
+    let expected_inner_commitments = l1_proof
+        .0
+        .fri_proof
+        .inner_layers
+        .iter()
+        .map(|layer| layer.commitment)
+        .collect::<Vec<_>>();
+    let expected_query_x = first_last_layer_query_x(
+        &fri_challenges,
+        public_inputs.config,
+        public_inputs.max_log_degree_bound,
+    )?;
+    let expected_query_eval = l1_proof
+        .0
+        .fri_proof
+        .last_layer_poly
+        .eval_at_point(expected_query_x);
+    if public_inputs.l1_commitments.as_slice() != l1_proof.0.commitments.as_slice()
+        || public_inputs.oods_point != oods_point
+        || public_inputs.composition_random_coeff != composition_random_coeff
+        || public_inputs.composition_oods_eval != composition_oods_eval
+        || public_inputs.fri_quotient_random_coeff != fri_quotient_random_coeff
+        || public_inputs.fri_first_layer_commitment != l1_proof.0.fri_proof.first_layer.commitment
+        || public_inputs.fri_inner_layer_commitments != expected_inner_commitments
+        || public_inputs.fri_last_layer_poly != l1_proof.0.fri_proof.last_layer_poly
+        || public_inputs.query_positions != fri_challenges.query_positions
+        || public_inputs.fri_query_x != expected_query_x
+        || public_inputs.fri_query_eval != expected_query_eval
+    {
+        return Err(VerifierProgramError::PublicInputsMismatch);
+    }
+
+    let merkle_trees = replay_all_l1_merkle_trees(l1_proof, public_inputs)?;
+    let fri = replay_fri_decommitment(
+        l1_proof,
+        public_inputs.config,
+        public_inputs.max_log_degree_bound,
+        &fri_challenges,
+        first_layer_answers.clone(),
+    )?;
+    Ok(CpuVerifierReplay {
+        composition_random_coeff,
+        oods_point,
+        composition_oods_eval,
+        fri_quotient_random_coeff,
+        tree_metadata: public_inputs.l1_tree_metadata.clone(),
+        transcript_poseidon_calls: fri_challenges.transcript_poseidon_calls.clone(),
+        fri_challenges,
+        first_layer_answers,
+        merkle_trees,
+        fri,
+    })
+}
+
+/// Replay the verifier program selected by the recursive public inputs.
+pub(crate) fn replay_selected_verifier(
+    l1_proof: &StarkProof<Poseidon252MerkleHasher>,
+    public_inputs: &RecursivePublicInputs,
+) -> Result<CpuVerifierReplay, VerifierProgramError> {
+    match public_inputs.verifier_program {
+        RecursiveVerifierProgram::CpuV1 => replay_cpu_verifier(l1_proof, public_inputs),
+        RecursiveVerifierProgram::ReplicatedRowV1 => {
+            replay_replicated_row_verifier(l1_proof, public_inputs)
+        }
+    }
 }
 
 struct CpuVerifierCore {

@@ -147,16 +147,10 @@ pub const DEFAULT_MAX_EVENT_HASHES_COUNT: u64 = 256;
 
 // ===== VerifierStatus（NEW-C1 + SEC-M4） =====
 
-/// ZK verifier 状态（NEW-C1：Stub / Production）。
+/// ZK verifier 状态的共识/runtime 统一类型。
 ///
 /// SEC-M4：per-chain_id 命名空间隔离，存储为 `BTreeMap<chain_id, VerifierStatus>`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VerifierStatus {
-    /// Stub 模式：主网 chain_id 拒绝 OffChain checkout。
-    Stub,
-    /// Production 模式：主网允许 OffChain checkout。
-    Production,
-}
+pub use crate::offline::zk_verifier::VerifierStatus;
 
 // ===== ParamName（可治理参数完整列表，NEW-M12 / R4-M3 / R5-H8 / R7-M2/M5） =====
 
@@ -1475,6 +1469,22 @@ impl GovernanceState {
         Ok(())
     }
 
+    /// Execute a proposal and publish the resulting verifier statuses to the runtime registry.
+    ///
+    /// Governance executors should use this boundary whenever a node has ZK verification enabled,
+    /// so the serializable consensus state and the shared runtime verifier control plane cannot
+    /// silently diverge after a `VerifierStatus` proposal.
+    pub fn execute_proposal_and_sync_verifier_registry(
+        &mut self,
+        proposal_id: u64,
+        current_height: BlockHeight,
+        registry: &crate::offline::zk_verifier::ZkVerifierRegistry,
+    ) -> PokerL1Result<()> {
+        self.execute_proposal(proposal_id, current_height)?;
+        registry.synchronize_governance_statuses(self);
+        Ok(())
+    }
+
     /// 检查 timelock 内是否有撤销提案（SEC-H8）。
     ///
     /// 返回 true 表示原提案已被撤销，不可执行。
@@ -2384,6 +2394,7 @@ mod tests {
     #[test]
     fn test_verifier_status_governance() {
         let mut state = GovernanceState::new();
+        let registry = crate::offline::zk_verifier::ZkVerifierRegistry::new();
         let proposer = make_pubkey(0x01);
         let pubkeys = make_pubkeys(10);
 
@@ -2413,13 +2424,21 @@ mod tests {
 
         // timelock 结束后执行
         state
-            .execute_proposal(id, 1100 + DEFAULT_PARAMETER_DELAY_BLOCKS)
+            .execute_proposal_and_sync_verifier_registry(
+                id,
+                1100 + DEFAULT_PARAMETER_DELAY_BLOCKS,
+                &registry,
+            )
             .unwrap();
         assert_eq!(
             state.verifier_status(crate::DEFAULT_CHAIN_ID),
             VerifierStatus::Production
         );
         assert!(state.is_offchain_checkout_allowed(crate::DEFAULT_CHAIN_ID));
+        assert_eq!(
+            registry.verifier_status(crate::DEFAULT_CHAIN_ID),
+            VerifierStatus::Production
+        );
     }
 
     // ===== 密钥轮换测试 =====

@@ -2,7 +2,7 @@
 name = "poker_texas_air"
 version = "0.1.0"
 edition = "2024"
-description = "Texas Poker 自定义 AIR + descriptor-only Aggregator PoC（可信递归闭环尚未实现）"
+description = "Texas Poker method AIR + application-aware native STWO recursion verifier"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -10,6 +10,11 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# Enable only the production-facing recursive verifier adapter. L1 nodes use
+# this feature so they do not expose or link the recursive prover entry point.
+recursive-verifier = ["poker_zkvm/recursive-verifier"]
+# Enable the recursive prover as well; proving implies verification.
+recursive-prover = ["recursive-verifier", "poker_zkvm/recursive-prover"]
 # 保留 Aggregator PoC 配置；生产 prove/verify 默认拒绝 descriptor-only 聚合
 aggregator = []
 # 测试辅助：暴露不可信负向测试工具；lib.rs 禁止其进入 release 构建

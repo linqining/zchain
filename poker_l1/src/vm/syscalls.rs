@@ -679,13 +679,10 @@ use crate::object_model::smt::SparseMerkleTree;
 // - 通过 ctx.zk_verifier 注入 ZkVerifierRegistry（None → ZkVerifierNotRegistered）
 // - Stub 状态下仅校验 proof 格式（verifier_status 由 registry 管理）
 
-use crate::offline::zk_verifier::{ZkPublicIo, ZkVerifierRegistry};
+use crate::offline::zk_verifier::{MAX_ZK_PROOF_BYTES, ZkPublicIo, ZkVerifierRegistry};
 
 /// `zk_verify` public_io 最大字节数（防 DoS，segment_continuity_proof 上限）。
 const MAX_ZK_PUBLIC_IO_BYTES: u64 = 64 * 1024;
-
-/// `zk_verify` proof 最大字节数（防 DoS）。
-const MAX_ZK_PROOF_BYTES: u64 = 256 * 1024;
 
 declare_builtin_function!(
     /// 通用 ZK 证明验证 syscall（Task 22.2）。
@@ -721,10 +718,10 @@ declare_builtin_function!(
         validate_heap_ptr(public_io_ptr, public_io_len)?;
 
         // 长度上限校验（防 DoS）
-        if proof_len > MAX_ZK_PROOF_BYTES {
+        if proof_len > MAX_ZK_PROOF_BYTES as u64 {
             return Err(to_syscall_err(PokerL1Error::InputTooLong {
                 actual: proof_len as usize,
-                limit: MAX_ZK_PROOF_BYTES as usize,
+                limit: MAX_ZK_PROOF_BYTES,
             }));
         }
         if public_io_len > MAX_ZK_PUBLIC_IO_BYTES {

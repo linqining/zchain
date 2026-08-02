@@ -4641,6 +4641,7 @@ dependencies = [
  "hex",
  "poker_l1",
  "poker_protocol",
+ "poker_texas_air",
  "poker_zkvm",
  "rand 0.8.6",
  "secp256k1",

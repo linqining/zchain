@@ -115,6 +115,12 @@ fn verify_call_and_compute_digest(
     public_tx_root: &Hash,
     gameturn_tx_root: &Hash,
 ) -> TexasAirResult<[u8; 32]> {
+    if call.tx.lane_hint != call.lane {
+        return Err(TexasAirError::ConsensusAnchor(format!(
+            "declared dispatch lane {:?} does not match transaction lane {:?}",
+            call.lane, call.tx.lane_hint
+        )));
+    }
     let tx_hash = call.tx.tx_hash();
     let key = blake2b_32(&tx_hash);
     let tx_root = match call.lane {
@@ -138,6 +144,11 @@ fn verify_call_and_compute_digest(
     let contract_call = call.tx.contract_call.as_ref().ok_or_else(|| {
         TexasAirError::ConsensusAnchor("dispatch call tx has no contract_call".into())
     })?;
+    if contract_call.contract_id != poker_l1::vm::precompile::reserved::texas_poker_contract_id() {
+        return Err(TexasAirError::ConsensusAnchor(
+            "dispatch transaction does not target the Texas Poker precompile".into(),
+        ));
+    }
     dispatch_call_digest(context, &contract_call.method_selector, &contract_call.args)
 }
 
@@ -218,6 +229,12 @@ pub fn build_anchor_from_consensus(
     // 3. 逐调用：重建 DispatchContext、认证 tx ∈ tx_root、重算 digest。
     let mut dispatch_call_digests = Vec::with_capacity(calls.len());
     for call in calls {
+        if call.tx.chain_id != chain_id {
+            return Err(TexasAirError::ConsensusAnchor(format!(
+                "dispatch transaction chain_id {} does not match authenticated chain_id {}",
+                call.tx.chain_id, chain_id
+            )));
+        }
         let context = rebuild_dispatch_context(&call.tx, pre_block_header);
         let digest = verify_call_and_compute_digest(
             call,
@@ -238,8 +255,22 @@ pub fn build_anchor_from_consensus(
     }
     let pre_state_root = compute_state_root(&pre_table)?;
     let post_state_root = compute_state_root(&post_table)?;
-    let hand_id = pre_table.hand_id;
-    let first_call_seq = pre_table.call_seq;
+    let call_count = u32::try_from(calls.len()).map_err(|_| {
+        TexasAirError::ConsensusAnchor("dispatch call count does not fit u32".into())
+    })?;
+    let expected_post_call_seq = pre_table.call_seq.checked_add(call_count).ok_or_else(|| {
+        TexasAirError::ConsensusAnchor("anchored call_seq transition overflows u32".into())
+    })?;
+    if post_table.call_seq != expected_post_call_seq {
+        return Err(TexasAirError::ConsensusAnchor(format!(
+            "post table call_seq {} does not equal pre call_seq {} + authenticated call count {}",
+            post_table.call_seq, pre_table.call_seq, call_count
+        )));
+    }
+    let hand_id = post_table.hand_id;
+    let first_call_seq = pre_table.call_seq.checked_add(1).ok_or_else(|| {
+        TexasAirError::ConsensusAnchor("anchored first call_seq overflows u32".into())
+    })?;
 
     ExpectedChainAnchor::new(
         table_id,
@@ -321,7 +352,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![],
             contract_call: Some(ContractCall {
-                contract_id: ObjectID::new([0u8; 20], 1),
+                contract_id: poker_l1::vm::precompile::reserved::texas_poker_contract_id(),
                 method_selector: selector,
                 args,
             }),
@@ -433,6 +464,7 @@ mod tests {
         // post snapshot：version +1，单独 ObjectDb。
         let mut post_table = table.clone();
         post_table.version = 11;
+        post_table.call_seq += 1;
         let mut post_db = ObjectStore::new();
         let post_obj = Object::new(
             table_id,
@@ -542,9 +574,92 @@ mod tests {
         // 端点元数据来自 table snapshot。
         assert_eq!(anchor.table_id(), f.table.id.creation_nonce);
         assert_eq!(anchor.hand_id(), f.table.hand_id);
-        assert_eq!(anchor.first_call_seq(), f.table.call_seq);
+        assert_eq!(anchor.first_call_seq(), f.table.call_seq + 1);
         // dispatch digests 与独立重算一致。
         assert_eq!(anchor.dispatch_call_digests(), &f.expected_digests[..]);
+    }
+
+    #[test]
+    fn declared_lane_mismatch_is_rejected() {
+        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        f.calls[0].lane = TxLane::Public;
+
+        let result = build_anchor_from_consensus(
+            &f.pre_header,
+            &f.pre_snapshot,
+            &f.cert,
+            poker_l1::DEFAULT_CHAIN_ID,
+            &f.validators,
+            &f.post_header,
+            &f.post_snapshot,
+            &f.calls,
+        );
+        assert!(matches!(
+            result,
+            Err(TexasAirError::ConsensusAnchor(msg)) if msg.contains("does not match transaction lane")
+        ));
+    }
+
+    #[test]
+    fn non_texas_contract_is_rejected_even_with_valid_tx_inclusion() {
+        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let mut tx = f.calls[0].tx.clone();
+        tx.contract_call.as_mut().unwrap().contract_id = ObjectID::new([0xEE; 20], 99);
+        let (gameturn_tx_root, paths) = build_tx_smt(std::slice::from_ref(&tx));
+        let call = ConsensusDispatchCall {
+            tx,
+            lane: TxLane::GameTurn,
+            inclusion_path: paths.into_iter().next().unwrap(),
+        };
+        let context = rebuild_dispatch_context(&call.tx, &f.pre_header);
+
+        let result = verify_call_and_compute_digest(
+            &call,
+            &context,
+            &f.pre_header.public_tx_root,
+            &gameturn_tx_root,
+        );
+        assert!(matches!(
+            result,
+            Err(TexasAirError::ConsensusAnchor(msg)) if msg.contains("does not target the Texas Poker precompile")
+        ));
+    }
+
+    #[test]
+    fn post_call_sequence_mismatch_is_rejected() {
+        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let mut post_table = f.post_snapshot.table().unwrap();
+        post_table.call_seq += 1;
+
+        let mut post_db = ObjectStore::new();
+        let post_obj = Object::new(
+            post_table.id,
+            Ownership::Shared,
+            "TexasPokerTable",
+            borsh::to_vec(&post_table).unwrap(),
+            None,
+        );
+        post_db.create(post_obj.clone()).unwrap();
+        f.post_header.state_root = post_db.state_root();
+        f.post_snapshot = TableSnapshot {
+            object: post_obj,
+            inclusion_path: post_db.prove(&post_table.id).unwrap(),
+        };
+
+        let result = build_anchor_from_consensus(
+            &f.pre_header,
+            &f.pre_snapshot,
+            &f.cert,
+            poker_l1::DEFAULT_CHAIN_ID,
+            &f.validators,
+            &f.post_header,
+            &f.post_snapshot,
+            &f.calls,
+        );
+        assert!(matches!(
+            result,
+            Err(TexasAirError::ConsensusAnchor(msg)) if msg.contains("does not equal pre call_seq")
+        ));
     }
 
     #[test]
