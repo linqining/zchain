@@ -16,12 +16,14 @@ fn descriptor_only_summary_remains_fail_closed() {
         post_state_root: [stwo::core::fields::m31::M31::from(2u32); 4],
         call_seq: 1,
         method_kind: MethodKind::Fold,
+        recursive_proof: None,
     };
     let second = ChildDescriptor {
         pre_state_root: [stwo::core::fields::m31::M31::from(2u32); 4],
         post_state_root: [stwo::core::fields::m31::M31::from(3u32); 4],
         call_seq: 2,
         method_kind: MethodKind::Check,
+        recursive_proof: None,
     };
 
     assert!(matches!(

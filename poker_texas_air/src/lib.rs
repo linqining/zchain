@@ -41,6 +41,7 @@ pub mod dual_proof;
 pub mod error;
 pub mod merkle_tree;
 pub mod method_kind;
+pub mod outer_aggregate;
 pub mod precompile_binding;
 pub mod public_inputs;
 pub mod state_root;
