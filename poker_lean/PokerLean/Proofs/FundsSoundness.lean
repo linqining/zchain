@@ -14,6 +14,9 @@ namespace PokerLean
 
 open TexasPoker.Constants
 
+-- 两个端到端 refinement 定理会展开完整 TexasPokerTable 提取器。
+set_option maxHeartbeats 500000
+
 set_option linter.unusedVariables false in
 
 /-! # 资金方法 AIR soundness（addon, rebuy）
@@ -27,10 +30,10 @@ set_option linter.unusedVariables false in
 
 ## 当前结论
 
-- `addon_air_sound`：addon AIR 在正确提取下满足 `ContractAddon`（4-limb 守恒 +
-  addon_pool 守恒 + 版本递增 + 座位占用 + 金额 > 0）。
-- `rebuy_air_sound`：rebuy AIR 在正确提取下满足 `ContractRebuy`（4-limb 守恒 +
-  addon_pool 守恒 + 版本递增 + 座位占用 + 金额 > 0）。
+- `addon_air_sound`：addon AIR 在正确提取下满足 `ContractAddon`（pending_addon、
+  addon_pool、chip_pool 三条 4-limb 守恒 + 版本递增 + 座位占用 + 金额 > 0）。
+- `rebuy_air_sound`：rebuy AIR 在正确提取下满足 `ContractRebuy`（stack、chip_pool
+  两条 4-limb 守恒 + addon_pool 不变 + 版本递增 + 座位占用 + 金额 > 0）。
 
 ## carry-chain 对齐
 
@@ -107,6 +110,14 @@ private lemma addon_post_addon_pool
     (extractPostTableFromAddonAir row ext max_players seat_index).addon_pool =
       decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
         ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2 := by
+  simp [extractPostTableFromAddonAir, extractPreTableFromAddonAir,
+         extractPreTableFromFundsAir, TexasPokerTable.update_seat]
+
+private lemma addon_post_chip_pool
+    (row : CommonRow) (ext : AddonMethodColumns) (max_players : Nat) (seat_index : Nat) :
+    (extractPostTableFromAddonAir row ext max_players seat_index).chip_pool =
+      decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
+        ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2 := by
   simp [extractPostTableFromAddonAir, extractPreTableFromAddonAir,
          extractPreTableFromFundsAir, TexasPokerTable.update_seat]
 
@@ -220,7 +231,7 @@ theorem addon_air_sound :
   have h_c := h_method h_active
   rcases h_c with ⟨h_ver, h_rs_unch, h_seat_eq, _h_amt_eq, h_amt_pos,
                     _h_occ, h_pending_add, h_addon_pool,
-                    h_bound_check, _h_src⟩
+                    h_chip_pool, h_bound_check, _h_src⟩
   -- 3. 关键派生：seat_index 一致性
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
     rw [h_seat_eq]; simp [nat_to_m31]
@@ -255,7 +266,17 @@ theorem addon_air_sound :
         ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
     limb4_delta_implies_decode_eq ext.input_pre_addon_pool ext.output_post_addon_pool
       ext.input_amount ext.addon_pool_add_carry h_addon_pool
-  -- 7. 座位级引理
+  -- 7. chip_pool 守恒
+  have h_chip_pool' :
+      decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
+        ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2 =
+      decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
+        ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2 +
+      decodeU64 ext.input_amount.1 ext.input_amount.2.1
+        ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
+    limb4_delta_implies_decode_eq ext.input_pre_chip_pool ext.output_post_chip_pool
+      ext.input_amount ext.chip_pool_add_carry h_chip_pool
+  -- 8. 座位级引理
   have h_pre_seat : (extractPreTableFromAddonAir row ext max_players expected_seat_index).get_seat
       expected_seat_index =
       { Seat.empty with
@@ -270,9 +291,9 @@ theorem addon_air_sound :
         pending_addon := decodeU64 ext.post_pending_addon.1 ext.post_pending_addon.2.1
             ext.post_pending_addon.2.2.1 ext.post_pending_addon.2.2.2 } :=
     addon_post_get_seat_at_index row ext max_players expected_seat_index hseat
-  -- 8. 证明 ContractAddon 的 13 个合取（含全局上界检查）
+  -- 9. 证明 ContractAddon 的 14 个合取（含全局上界检查）
   unfold ContractAddon
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · -- 1. params.seat_index < pre.max_players
     rw [h_params_seat, addon_pre_max_players]; exact hseat
   · -- 2. params.amount > 0
@@ -280,34 +301,36 @@ theorem addon_air_sound :
   · -- 3. (pre.get_seat params.seat_index).is_occupied = true
     rw [h_params_seat, h_pre_seat]
     simp [Seat.is_occupied, Seat.empty, EMPTY_PLAYER, PlayerId.ofNat]
-  · -- 4. pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET
+  · -- 4. pre.chip_pool + params.amount ≤ MAX_TOTAL_BET
     -- 由 BoundCheck4Limb + bound_check_4limb_le 推出
-    rw [addon_pre_chip_pool, addon_pre_addon_pool, h_params_amount]
-    exact bound_check_4limb_le ext.input_pre_chip_pool ext.input_pre_addon_pool
-      ext.input_amount ext.input_bound_diff
-      ext.input_bound_carry_lo ext.input_bound_carry_hi h_bound_check
+    rw [addon_pre_chip_pool, h_params_amount]
+    exact bound_check_4limb_zero_le ext.input_pre_chip_pool ext.input_amount
+      ext.input_bound_diff ext.input_bound_carry_lo ext.input_bound_carry_hi h_bound_check
   · -- 5. (post.get_seat ...).pending_addon = (pre.get_seat ...).pending_addon + params.amount
     rw [h_params_seat, h_post_seat, h_pre_seat, h_params_amount]
     exact h_pending_addon_eq
-  · -- 6. post.addon_pool = pre.addon_pool + params.amount
+  · -- 6. post.chip_pool = pre.chip_pool + params.amount
+    rw [addon_post_chip_pool, addon_pre_chip_pool, h_params_amount]
+    exact h_chip_pool'
+  · -- 7. post.addon_pool = pre.addon_pool + params.amount
     rw [addon_post_addon_pool, addon_pre_addon_pool, h_params_amount]
     exact h_addon_pool'
-  · -- 7. post.version = pre.version + 1
+  · -- 8. post.version = pre.version + 1
     rw [addon_post_version, addon_pre_version]; exact h_ver'
-  · -- 8. ∀ i, i ≠ params.seat_index → i < pre.max_players → post.get_seat i = pre.get_seat i
+  · -- 9. ∀ i, i ≠ params.seat_index → i < pre.max_players → post.get_seat i = pre.get_seat i
     intro i h_ne h_lt
     rw [h_params_seat] at h_ne
     rw [addon_pre_max_players] at h_lt
     exact addon_post_get_seat_other row ext max_players expected_seat_index i h_ne h_lt
-  · -- 9. post.round_state = pre.round_state
+  · -- 10. post.round_state = pre.round_state
     rw [addon_post_round_state, addon_pre_round_state, h_rs']
-  · -- 10. post.max_players = pre.max_players
+  · -- 11. post.max_players = pre.max_players
     exact addon_post_max_players row ext max_players expected_seat_index
-  · -- 11. post.big_blind = pre.big_blind
+  · -- 12. post.big_blind = pre.big_blind
     rw [addon_post_big_blind, addon_pre_big_blind]
-  · -- 12. post.small_blind = pre.small_blind
+  · -- 13. post.small_blind = pre.small_blind
     rw [addon_post_small_blind, addon_pre_small_blind]
-  · -- 13. post.hand_id = pre.hand_id
+  · -- 14. post.hand_id = pre.hand_id
     rw [addon_post_hand_id, addon_pre_hand_id]
 
 /-! ## rebuy 辅助引理 -/
@@ -379,6 +402,14 @@ private lemma rebuy_post_addon_pool
     (extractPostTableFromRebuyAir row ext max_players seat_index).addon_pool =
       decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
         ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2 := by
+  simp [extractPostTableFromRebuyAir, extractPreTableFromRebuyAir,
+         extractPreTableFromFundsAir, TexasPokerTable.update_seat]
+
+private lemma rebuy_post_chip_pool
+    (row : CommonRow) (ext : RebuyMethodColumns) (max_players : Nat) (seat_index : Nat) :
+    (extractPostTableFromRebuyAir row ext max_players seat_index).chip_pool =
+      decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
+        ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2 := by
   simp [extractPostTableFromRebuyAir, extractPreTableFromRebuyAir,
          extractPreTableFromFundsAir, TexasPokerTable.update_seat]
 
@@ -492,7 +523,7 @@ theorem rebuy_air_sound :
   have h_c := h_method h_active
   rcases h_c with ⟨h_ver, h_rs_unch, h_seat_eq, _h_amt_eq, h_amt_pos,
                     _h_occ, h_stack_add, h_addon_pool,
-                    h_bound_check, _h_src⟩
+                    _h_addon_carry_zero, h_chip_pool, h_bound_check, _h_src⟩
   -- 3. 关键派生：seat_index 一致性
   have h_seat_val : ext.input_seat_index.val = expected_seat_index := by
     rw [h_seat_eq]; simp [nat_to_m31]
@@ -517,17 +548,26 @@ theorem rebuy_air_sound :
         ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
     limb4_delta_implies_decode_eq ext.pre_stack ext.post_stack ext.input_amount
       ext.stack_add_carry h_stack_add
-  -- 6. addon_pool 守恒
+  -- 6. addon_pool 不变
   have h_addon_pool' :
       decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
         ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2 =
       decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
-        ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2 +
+        ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2 := by
+    symm
+    exact limb4_eq_implies_decode_eq ext.input_pre_addon_pool ext.output_post_addon_pool
+      h_addon_pool
+  -- 7. chip_pool 守恒
+  have h_chip_pool' :
+      decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
+        ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2 =
+      decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
+        ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2 +
       decodeU64 ext.input_amount.1 ext.input_amount.2.1
         ext.input_amount.2.2.1 ext.input_amount.2.2.2 :=
-    limb4_delta_implies_decode_eq ext.input_pre_addon_pool ext.output_post_addon_pool
-      ext.input_amount ext.addon_pool_add_carry h_addon_pool
-  -- 7. 座位级引理
+    limb4_delta_implies_decode_eq ext.input_pre_chip_pool ext.output_post_chip_pool
+      ext.input_amount ext.chip_pool_add_carry h_chip_pool
+  -- 8. 座位级引理
   have h_pre_seat : (extractPreTableFromRebuyAir row ext max_players expected_seat_index).get_seat
       expected_seat_index =
       { Seat.empty with
@@ -542,9 +582,9 @@ theorem rebuy_air_sound :
         stack := decodeU64 ext.post_stack.1 ext.post_stack.2.1
             ext.post_stack.2.2.1 ext.post_stack.2.2.2 } :=
     rebuy_post_get_seat_at_index row ext max_players expected_seat_index hseat
-  -- 8. 证明 ContractRebuy 的 13 个合取（含全局上界检查）
+  -- 9. 证明 ContractRebuy 的 14 个合取（含全局上界检查）
   unfold ContractRebuy
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · -- 1. params.seat_index < pre.max_players
     rw [h_params_seat, rebuy_pre_max_players]; exact hseat
   · -- 2. params.amount > 0
@@ -552,34 +592,36 @@ theorem rebuy_air_sound :
   · -- 3. (pre.get_seat params.seat_index).is_occupied = true
     rw [h_params_seat, h_pre_seat]
     simp [Seat.is_occupied, Seat.empty, EMPTY_PLAYER, PlayerId.ofNat]
-  · -- 4. pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET
+  · -- 4. pre.chip_pool + params.amount ≤ MAX_TOTAL_BET
     -- 由 BoundCheck4Limb + bound_check_4limb_le 推出
-    rw [rebuy_pre_chip_pool, rebuy_pre_addon_pool, h_params_amount]
-    exact bound_check_4limb_le ext.input_pre_chip_pool ext.input_pre_addon_pool
-      ext.input_amount ext.input_bound_diff
-      ext.input_bound_carry_lo ext.input_bound_carry_hi h_bound_check
+    rw [rebuy_pre_chip_pool, h_params_amount]
+    exact bound_check_4limb_zero_le ext.input_pre_chip_pool ext.input_amount
+      ext.input_bound_diff ext.input_bound_carry_lo ext.input_bound_carry_hi h_bound_check
   · -- 5. (post.get_seat ...).stack = (pre.get_seat ...).stack + params.amount
     rw [h_params_seat, h_post_seat, h_pre_seat, h_params_amount]
     exact h_stack_eq
-  · -- 6. post.addon_pool = pre.addon_pool + params.amount
-    rw [rebuy_post_addon_pool, rebuy_pre_addon_pool, h_params_amount]
+  · -- 6. post.chip_pool = pre.chip_pool + params.amount
+    rw [rebuy_post_chip_pool, rebuy_pre_chip_pool, h_params_amount]
+    exact h_chip_pool'
+  · -- 7. post.addon_pool = pre.addon_pool
+    rw [rebuy_post_addon_pool, rebuy_pre_addon_pool]
     exact h_addon_pool'
-  · -- 7. post.version = pre.version + 1
+  · -- 8. post.version = pre.version + 1
     rw [rebuy_post_version, rebuy_pre_version]; exact h_ver'
-  · -- 8. ∀ i, i ≠ params.seat_index → i < pre.max_players → post.get_seat i = pre.get_seat i
+  · -- 9. ∀ i, i ≠ params.seat_index → i < pre.max_players → post.get_seat i = pre.get_seat i
     intro i h_ne h_lt
     rw [h_params_seat] at h_ne
     rw [rebuy_pre_max_players] at h_lt
     exact rebuy_post_get_seat_other row ext max_players expected_seat_index i h_ne h_lt
-  · -- 9. post.round_state = pre.round_state
+  · -- 10. post.round_state = pre.round_state
     rw [rebuy_post_round_state, rebuy_pre_round_state, h_rs']
-  · -- 10. post.max_players = pre.max_players
+  · -- 11. post.max_players = pre.max_players
     exact rebuy_post_max_players row ext max_players expected_seat_index
-  · -- 11. post.big_blind = pre.big_blind
+  · -- 12. post.big_blind = pre.big_blind
     rw [rebuy_post_big_blind, rebuy_pre_big_blind]
-  · -- 12. post.small_blind = pre.small_blind
+  · -- 13. post.small_blind = pre.small_blind
     rw [rebuy_post_small_blind, rebuy_pre_small_blind]
-  · -- 12. post.hand_id = pre.hand_id
+  · -- 14. post.hand_id = pre.hand_id
     rw [rebuy_post_hand_id, rebuy_pre_hand_id]
 
 end PokerLean

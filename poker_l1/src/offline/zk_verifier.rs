@@ -131,13 +131,13 @@ impl<'a> ZkVerifyContext<'a> {
 
 /// Verifier 状态（NEW-C1，spec.md L853–857）。
 ///
-/// - `Stub`：MVP 阶段，仅校验 proof 格式合法性，不实际验证
+/// - `Stub`：验证器尚未启用，所有 proof 均 fail closed
 /// - `Production`：完整验证
 ///
 /// 升级须治理 90% quorum + `parameter_delay_blocks` timelock 双重保护。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VerifierStatus {
-    /// Stub 状态：仅校验格式，主网 chain_id 拒绝 OffChain checkout（NEW-C1）。
+    /// Stub 状态：验证器未启用，任何网络均不得据此接受 proof 或进入 OffChain。
     Stub,
     /// Production 状态：完整 ZK 验证。
     Production,
@@ -146,13 +146,11 @@ pub enum VerifierStatus {
 impl VerifierStatus {
     /// 是否允许 OffChain checkout（NEW-C1）。
     ///
-    /// `Stub` 状态下主网 chain_id 拒绝 OffChain checkout。
+    /// `Stub` 状态在所有网络拒绝 OffChain checkout。测试必须显式安装真实 verifier
+    /// 并切换到 `Production`，不能再把格式校验当作密码学验证。
     pub fn allows_offchain(self, chain_id: crate::ChainId, is_mainnet: bool) -> bool {
-        if self == Self::Stub && is_mainnet {
-            return false;
-        }
-        let _ = chain_id;
-        true
+        let _ = (chain_id, is_mainnet);
+        matches!(self, Self::Production)
     }
 }
 
@@ -289,10 +287,10 @@ pub trait ZkVerifier: Send + Sync {
     /// # 参数
     /// - `proof`：proof 字节
     /// - `public_io`：public_io 边界
-    /// - `status`：当前 verifier 状态（Stub 时仅校验格式）
+    /// - `status`：当前 verifier 状态（Stub 必须 fail closed）
     ///
     /// # 返回
-    /// `true` 当且仅当 proof 合法（Stub 状态下 = 格式校验通过）。
+    /// `true` 当且仅当 Production verifier 完整验证 proof 合法。
     fn verify(
         &self,
         proof: &[u8],
@@ -388,15 +386,16 @@ impl ZkVerifier for StwoZkVerifier {
     }
 }
 
-/// Stub verifier — v2 过渡期占位实现（已废弃）。
+/// Stub verifier — 仅供 crate 内测试构造边界场景。
 ///
 /// v2 Phase 5 已实现真实的 StwoZkVerifier，此 stub verifier 仅用于测试。
-#[deprecated(note = "使用 StwoZkVerifier 替代")]
+#[cfg(test)]
 #[derive(Debug)]
-pub struct StubVerifier {
+pub(crate) struct StubVerifier {
     scheme_id: SchemeId,
 }
 
+#[cfg(test)]
 impl StubVerifier {
     #[must_use]
     pub const fn new(scheme_id: SchemeId) -> Self {
@@ -404,6 +403,7 @@ impl StubVerifier {
     }
 }
 
+#[cfg(test)]
 impl ZkVerifier for StubVerifier {
     fn scheme_id(&self) -> SchemeId {
         self.scheme_id
@@ -435,24 +435,21 @@ pub fn register_stwo_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StwoZkVerifier::new()));
 }
 
-/// 注册 ZkShuffle scheme（`SCHEME_ZKSHUFFLE = 4`）的 stub verifier。
-///
-/// 保留为 stub，ZkShuffle 旧 proof 验证逻辑待后续实现。
-pub fn register_zkshuffle_stub_verifier(registry: &mut ZkVerifierRegistry) {
+/// 注册 ZkShuffle scheme 的测试 stub；不会进入生产构建。
+#[cfg(test)]
+pub(crate) fn register_zkshuffle_stub_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StubVerifier::new(SCHEME_ZKSHUFFLE)));
 }
 
-/// 注册 Groth16 scheme（`SCHEME_GROTH16 = 2`）的 stub verifier。
-///
-/// 保留为 stub，Groth16 验证逻辑待后续实现。
-pub fn register_groth16_stub_verifier(registry: &mut ZkVerifierRegistry) {
+/// 注册 Groth16 scheme 的测试 stub；不会进入生产构建。
+#[cfg(test)]
+pub(crate) fn register_groth16_stub_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StubVerifier::new(SCHEME_GROTH16)));
 }
 
-/// 注册 IPA scheme（`SCHEME_IPA = 3`）的 stub verifier。
-///
-/// 保留为 stub，IPA 验证逻辑待后续实现。
-pub fn register_ipa_stub_verifier(registry: &mut ZkVerifierRegistry) {
+/// 注册 IPA scheme 的测试 stub；不会进入生产构建。
+#[cfg(test)]
+pub(crate) fn register_ipa_stub_verifier(registry: &mut ZkVerifierRegistry) {
     registry.register(Arc::new(StubVerifier::new(SCHEME_IPA)));
 }
 
@@ -546,7 +543,7 @@ impl ZkVerifierRegistry {
     /// 1. 查找 verifier（未注册返回 `ZkVerifierNotRegistered`）
     /// 2. 查询 `verifier_status`（per-chain_id）
     /// 3. 校验 public_io 边界（O15 + SubTask 27.11）
-    /// 4. 调用 verifier.verify()（Stub 状态下仅校验格式）
+    /// 4. Stub 状态强制返回 `verified=false`；Production 才调用 verifier
     pub fn zk_verify(
         &self,
         chain_id: crate::ChainId,
@@ -569,8 +566,12 @@ impl ZkVerifierRegistry {
         // 校验 proof 格式（无论 Stub/Production 都校验）
         verifier.validate_proof_format(proof)?;
 
-        // 验证 proof
-        let verified = verifier.verify(proof, public_io, status)?;
+        // Registry owns the status gate. Even a mistakenly registered verifier cannot turn a
+        // disabled/Stub scheme into an accepting MVP path.
+        let verified = match status {
+            VerifierStatus::Stub => false,
+            VerifierStatus::Production => verifier.verify(proof, public_io, status)?,
+        };
 
         Ok(ZkVerifyResult {
             verified,
@@ -612,7 +613,12 @@ impl ZkVerifierRegistry {
         verifier.validate_proof_format(proof)?;
 
         // 验证 proof（带 context）
-        let verified = verifier.verify_with_context(proof, public_io, status, ctx)?;
+        let verified = match status {
+            VerifierStatus::Stub => false,
+            VerifierStatus::Production => {
+                verifier.verify_with_context(proof, public_io, status, ctx)?
+            }
+        };
 
         Ok(ZkVerifyResult {
             verified,
@@ -790,24 +796,23 @@ mod tests {
     }
 
     #[test]
-    fn test_zk_verify_success_stub() {
+    fn test_zk_verify_stub_status_fails_closed_even_if_verifier_would_accept() {
         let mut registry = ZkVerifierRegistry::new();
         registry.register(Arc::new(StubVerifier { scheme_id: 99 }));
         let public_io = make_public_io(1, 0);
         let result = registry
             .zk_verify(crate::DEFAULT_CHAIN_ID, 99, &[0x01], &public_io, 3, 1000)
-            .expect("zk_verify 应成功");
-        assert!(result.verified);
+            .expect("disabled verifier should return a fail-closed result");
+        assert!(!result.verified);
         assert_eq!(result.verifier_status, VerifierStatus::Stub);
         assert_eq!(result.scheme_id, 99);
     }
 
     #[test]
     fn test_verifier_status_allows_offchain() {
-        // Stub + mainnet → 拒绝
+        // Stub 在任意网络都拒绝，避免测试网格式检查被误当作有效证明。
         assert!(!VerifierStatus::Stub.allows_offchain(crate::DEFAULT_CHAIN_ID, true));
-        // Stub + testnet → 允许
-        assert!(VerifierStatus::Stub.allows_offchain(crate::DEFAULT_CHAIN_ID, false));
+        assert!(!VerifierStatus::Stub.allows_offchain(crate::DEFAULT_CHAIN_ID, false));
         // Production + mainnet → 允许
         assert!(VerifierStatus::Production.allows_offchain(crate::DEFAULT_CHAIN_ID, true));
     }

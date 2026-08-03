@@ -62,9 +62,7 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 #[derive(Debug, thiserror::Error)]
 pub enum RecursionVerificationError {
     /// 当前入口未对该构建开放，或调用了永久禁用的旧 OODS-only 路径。
-    #[error(
-        "this recursive verifier entry is disabled; enable the recursive-verifier feature"
-    )]
+    #[error("this recursive verifier entry is disabled; enable the recursive-verifier feature")]
     UnsoundBackendDisabled,
     /// L2 proof 验证失败。
     #[error("L2 proof verification failed: {0}")]

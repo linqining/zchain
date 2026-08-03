@@ -374,8 +374,10 @@ pub fn execute_checkin(
         });
     }
 
-    // zk_verify（v1.2 SubTask 11.2.4 — 带 grace period 上下文）
-    registry.zk_verify_with_context(
+    // zk_verify（v1.2 SubTask 11.2.4 — 带 grace period 上下文）。Do not expose a
+    // boolean result that a caller could forget to check: check-in is a state-unlocking action,
+    // so a disabled or rejecting verifier is an execution error.
+    let result = registry.zk_verify_with_context(
         chain_id,
         tx.scheme_id,
         &tx.proof,
@@ -383,7 +385,13 @@ pub fn execute_checkin(
         max_skip_segments,
         max_ack_chain_length,
         ctx,
-    )
+    )?;
+    if !result.verified {
+        return Err(PokerL1Error::InvalidZkProofFormat(
+            "checkin proof verification failed".to_string(),
+        ));
+    }
+    Ok(result)
 }
 
 /// 处理 partial_checkin tx（SubTask 28.7a + Phase 8 M2-003 + v1.2 SubTask 11.2.4/11.2.6）。
@@ -511,7 +519,7 @@ pub fn execute_partial_checkin(
 
 /// 检查 verifier_status 是否允许 OffChain checkout（NEW-C1）。
 ///
-/// `Stub` 状态下主网 chain_id 拒绝 OffChain checkout。
+/// `Stub` 状态在所有网络拒绝 OffChain checkout。
 pub fn check_offchain_allowed(
     registry: &ZkVerifierRegistry,
     chain_id: crate::ChainId,
@@ -710,11 +718,14 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_checkin_offchain_allowed_on_testnet_stub() {
-        // NEW-C1：Stub + testnet → 允许
+    fn test_execute_checkin_offchain_disabled_on_testnet_stub() {
+        // Stub is disabled on every network; testnet no longer treats format checks as proofs.
         let registry = make_registry_with_all_verifiers();
         let result = check_offchain_allowed(&registry, crate::DEFAULT_CHAIN_ID, false);
-        assert!(result.is_ok());
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::OffChainDisabledOnMainnet)
+        ));
     }
 
     #[test]
@@ -727,8 +738,9 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_checkin_success_stub() {
+    fn test_execute_checkin_success_requires_production_status() {
         let registry = make_registry_with_all_verifiers();
+        registry.set_verifier_status(crate::DEFAULT_CHAIN_ID, VerifierStatus::Production);
         let tx = CheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
             proof: vec![0xAA; 64],
@@ -756,7 +768,7 @@ mod tests {
         .expect("checkin 应成功");
 
         assert!(result.verified);
-        assert_eq!(result.verifier_status, VerifierStatus::Stub);
+        assert_eq!(result.verifier_status, VerifierStatus::Production);
     }
 
     #[test]
@@ -886,6 +898,7 @@ mod tests {
     #[test]
     fn test_execute_partial_checkin_success() {
         let registry = make_registry_with_all_verifiers();
+        registry.set_verifier_status(crate::DEFAULT_CHAIN_ID, VerifierStatus::Production);
         let tx = PartialCheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
             proof_partial: vec![0xAA; 64],
@@ -987,11 +1000,11 @@ mod tests {
 
     /// SubTask 11.2.7：scheme_id=1 + proof_kind=Zkvm + 合法 proof → 通过。
     ///
-    /// 验证 `execute_checkin` 在 proof_kind 与 scheme_id 一致时正常分派到
-    /// Hypernova verifier 的 stub 路径。
+    /// 验证 `execute_checkin` 在 proof_kind 与 scheme_id 一致且 verifier 已启用时分派成功。
     #[test]
     fn test_execute_checkin_zkvm_proof_kind_consistency() {
         let registry = make_registry_with_all_verifiers();
+        registry.set_verifier_status(crate::DEFAULT_CHAIN_ID, VerifierStatus::Production);
         let tx = CheckinTx {
             game_id: ObjectID::new([0x01; 20], 1),
             proof: vec![0xAA; 64],
@@ -1018,16 +1031,12 @@ mod tests {
         )
         .expect("scheme_id=1 + proof_kind=Zkvm 一致时应成功");
 
-        assert!(result.verified, "Stub 状态下合法 proof 应验证通过");
+        assert!(result.verified, "Production test verifier should accept the fixture");
         assert_eq!(result.scheme_id, SCHEME_STWO);
-        assert_eq!(result.verifier_status, VerifierStatus::Stub);
+        assert_eq!(result.verifier_status, VerifierStatus::Production);
     }
 
-    /// SubTask 11.2.7：scheme_id=4 + proof_kind=ZkShuffle + grace 期 ctx + 匹配
-    /// `last_partial_proof_hash` → 通过 stub 路径。
-    ///
-    /// 验证 `execute_checkin` 在 ZkShuffle proof 的 grace 期 stub 路径下，
-    /// `proof_hash` 匹配链上 `last_partial_fold.proof_partial_hash` 时通过（M2-003）。
+    /// Legacy ZkShuffle remains fail closed during the former grace period while status is Stub.
     #[test]
     fn test_execute_checkin_zkshuffle_proof_kind_consistency() {
         let mut registry = make_registry_with_all_verifiers();
@@ -1067,12 +1076,9 @@ mod tests {
             DEFAULT_MAX_ACK_CHAIN_LENGTH,
             &ctx,
             [0xDD; 32], // H6: checkout_commitment ≠ new_commitment
-        )
-        .expect("grace 期 ZkShuffle + 匹配 proof_hash 时应成功");
+        );
 
-        assert!(result.verified, "grace 期 ZkShuffle stub 路径应验证通过");
-        assert_eq!(result.scheme_id, SCHEME_ZKSHUFFLE);
-        assert_eq!(result.verifier_status, VerifierStatus::Stub);
+        assert!(matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))));
     }
 
     // ===== SubTask 11.2.8：proof_kind 健壮性负测试 =====

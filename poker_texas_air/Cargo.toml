@@ -55,3 +55,4 @@ proptest = { workspace = true }
 rand = { workspace = true }
 secp256k1 = { workspace = true }
 poker_texas_air = { path = ".", features = ["test-helpers"] }
+poker_zkvm = { workspace = true, features = ["experimental-cpu-prover"] }

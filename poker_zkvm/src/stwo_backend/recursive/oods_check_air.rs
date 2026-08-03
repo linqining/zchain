@@ -470,65 +470,107 @@ mod tests {
 
     #[test]
     fn bound_oods_air_accepts_public_values() {
-        let sample = SecureField::from_m31_array([
-            BaseField::from(7u32),
-            BaseField::from(11u32),
-            BaseField::from(13u32),
-            BaseField::from(17u32),
-        ]);
-        let trace = simple_oods_trace(sample);
-        let air =
-            OodsCheckAir::new_bound(2, expected_samples(sample), sample, SecureField::from(0u32));
-        assert_oods_constraints(&trace, &air);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "bound-oods-air-accepts-public-values",
+            128 * 1024 * 1024,
+            || {
+                let sample = SecureField::from_m31_array([
+                    BaseField::from(7u32),
+                    BaseField::from(11u32),
+                    BaseField::from(13u32),
+                    BaseField::from(17u32),
+                ]);
+                let trace = simple_oods_trace(sample);
+                let air = OodsCheckAir::new_bound(
+                    2,
+                    expected_samples(sample),
+                    sample,
+                    SecureField::from(0u32),
+                );
+                assert_oods_constraints(&trace, &air);
+            },
+        );
     }
 
     #[test]
     #[should_panic]
     fn bound_oods_air_rejects_wrong_public_claim() {
-        let sample = SecureField::from(7u32);
-        let trace = simple_oods_trace(sample);
-        let air = OodsCheckAir::new_bound(
-            2,
-            expected_samples(sample),
-            sample + SecureField::from(1u32),
-            SecureField::from(0u32),
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "bound-oods-air-wrong-public-claim",
+            128 * 1024 * 1024,
+            || {
+                let sample = SecureField::from(7u32);
+                let trace = simple_oods_trace(sample);
+                let air = OodsCheckAir::new_bound(
+                    2,
+                    expected_samples(sample),
+                    sample + SecureField::from(1u32),
+                    SecureField::from(0u32),
+                );
+                assert_oods_constraints(&trace, &air);
+            },
         );
-        assert_oods_constraints(&trace, &air);
     }
 
     #[test]
     #[should_panic]
     fn bound_oods_air_rejects_wrong_public_doubling_factor() {
-        let sample = SecureField::from(7u32);
-        let trace = simple_oods_trace(sample);
-        let air =
-            OodsCheckAir::new_bound(2, expected_samples(sample), sample, SecureField::from(1u32));
-        assert_oods_constraints(&trace, &air);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "bound-oods-air-wrong-doubling-factor",
+            128 * 1024 * 1024,
+            || {
+                let sample = SecureField::from(7u32);
+                let trace = simple_oods_trace(sample);
+                let air = OodsCheckAir::new_bound(
+                    2,
+                    expected_samples(sample),
+                    sample,
+                    SecureField::from(1u32),
+                );
+                assert_oods_constraints(&trace, &air);
+            },
+        );
     }
 
     #[test]
     #[should_panic]
     fn bound_oods_air_rejects_self_consistent_sample_tampering() {
-        let expected = SecureField::from(7u32);
-        let trace = simple_oods_trace(expected + SecureField::from(1u32));
-        let air = OodsCheckAir::new_bound(
-            2,
-            expected_samples(expected),
-            expected,
-            SecureField::from(0u32),
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "bound-oods-air-self-consistent-tampering",
+            128 * 1024 * 1024,
+            || {
+                let expected = SecureField::from(7u32);
+                let trace = simple_oods_trace(expected + SecureField::from(1u32));
+                let air = OodsCheckAir::new_bound(
+                    2,
+                    expected_samples(expected),
+                    expected,
+                    SecureField::from(0u32),
+                );
+                assert_oods_constraints(&trace, &air);
+            },
         );
-        assert_oods_constraints(&trace, &air);
     }
 
     #[test]
     #[should_panic]
     fn bound_oods_air_rejects_all_padding_bypass() {
-        let sample = SecureField::from(7u32);
-        let mut trace = simple_oods_trace(sample);
-        trace[OODS_AIR_COL_IS_PADDING].fill(BaseField::from(1u32));
-        let air =
-            OodsCheckAir::new_bound(2, expected_samples(sample), sample, SecureField::from(0u32));
-        assert_oods_constraints(&trace, &air);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "bound-oods-air-all-padding-bypass",
+            128 * 1024 * 1024,
+            || {
+                let sample = SecureField::from(7u32);
+                let mut trace = simple_oods_trace(sample);
+                trace[OODS_AIR_COL_IS_PADDING].fill(BaseField::from(1u32));
+                let air = OodsCheckAir::new_bound(
+                    2,
+                    expected_samples(sample),
+                    sample,
+                    SecureField::from(0u32),
+                );
+                assert_oods_constraints(&trace, &air);
+            },
+        );
     }
 
     #[test]

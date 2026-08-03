@@ -33,11 +33,13 @@ Rust/VM 当前已有 23 个 selector；21 `request_leave_after_hand` 与 22
   `limb4_delta`、`limb4_delta_rev`、`limb4_eq`、`ge_4limb`、`bound_check_4limb`、`range16`
   全部改为**逐 limb 独立 `add_constraint`**（返回 `Vec`，调用点循环），不再求和成单约束。
   消除了 limb 间互相抵消（如残差 (+1, -1) 求和为 0 仍通过）的攻击。
-- **资金加法 carry-chain 已修复**：addon 的 pending/addon_pool、rebuy 的 stack/addon_pool、
+- **资金加法 carry-chain 已修复**：addon 的 pending/addon_pool/chip_pool、rebuy 的
+  stack/chip_pool、
   kick_player 的 pot 均加入 3 个 boolean ripple-carry witness；Rust AIR、真实 VM replay 回归
   与 Lean `Limb4Delta`/`PotDelta` 现一致覆盖跨 16-bit limb 的合法 `checked_add` 转移。
-- **leave_table 资金 carry-chain 已修复**：refund 使用规范 `Limb4Delta`；chip_pool/addon_pool
-  减法使用 `Limb4DeltaRev`（即 `pre = post + amount`）表达跨 limb 借位并禁止下溢；Rust
+- **leave_table 资金 carry-chain 已修复**：refund 使用规范 `Limb4Delta`；chip_pool 按完整
+  refund、addon_pool 按 pending addon 使用 `Limb4DeltaRev`（即 `pre = post + amount`）
+  表达跨 limb 借位并禁止下溢；Rust
   trace、宿主 fail-closed 校验、真实 VM replay 回归与 Lean refinement 已同步。
 - **离座退款的 VM checked arithmetic 已补齐**：`leave_table` 与
   `leave_with_proof` 均不再使用 `saturating_add/sub`。refund 溢出、chip_pool/addon_pool

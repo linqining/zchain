@@ -623,12 +623,13 @@ impl SyscallRegistry {
         }
     }
 
-    /// 创建注册表并注册全部 10 个 host syscall。
+    /// 创建生产 syscall 注册表。
     ///
-    /// 委托到 [`host::create_full_registry`]。
+    /// 默认入口不会注册 GameState mock syscall 或 MVP `ShuffleVerify`。需要这些测试
+    /// syscall 的 E2E 测试必须显式使用 `host::create_test_registry()`。
     #[must_use]
     pub fn new() -> Self {
-        host::create_full_registry()
+        host::create_production_registry()
     }
 
     /// 注册一个 syscall。
@@ -693,6 +694,33 @@ impl Default for SyscallRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_registry_rejects_mock_and_mvp_syscalls() {
+        let registry = SyscallRegistry::new();
+        let mut ctx = SyscallContext::new(Vec::new());
+        let mut state = VmState::new();
+
+        for id in [
+            SyscallId::GameStateRead,
+            SyscallId::GameStateWrite,
+            SyscallId::ShuffleVerify,
+        ] {
+            let error = registry
+                .dispatch(id as u32, &mut ctx, &mut state)
+                .expect_err("production registry must reject test-only syscall");
+            assert!(
+                error.to_string().contains("not registered"),
+                "unexpected error for {id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_test_registry_contains_mock_and_mvp_syscalls() {
+        let registry = host::create_test_registry();
+        assert_eq!(registry.len(), 31);
+    }
 
     #[test]
     fn test_abi_version_is_one() {
@@ -1022,9 +1050,9 @@ mod tests {
     #[test]
     fn test_syscall_registry_default() {
         let registry = SyscallRegistry::default();
-        // default() = new() = 全部 31 个 host syscall 已注册
-        // (10 基础 + 12 BLS12-381 + 2 GameState + 3 Game-specific + 4 Phase 4 proof verify)
-        assert_eq!(registry.len(), 31);
+        // default() = new() = 28 个 production-safe host syscall 已注册
+        // (10 基础 + 12 BLS12-381 + 2 card codec + 4 Phase 4 proof verify)
+        assert_eq!(registry.len(), 28);
         assert!(!registry.is_empty());
     }
 }

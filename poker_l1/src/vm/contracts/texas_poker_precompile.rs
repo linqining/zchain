@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use super::texas_poker::dispatch as tp_dispatch;
 use super::texas_poker::dispatch::selectors;
-use super::texas_poker::events::TexasPokerEvent;
+use super::texas_poker::events::{
+    REFUND_TYPE_BET_ONLY, REFUND_TYPE_STACK_AND_BET, REFUND_TYPE_STACK_ONLY, TexasPokerEvent,
+};
 use super::texas_poker::prove_task::L1DispatchOutput;
 use super::texas_poker::types::TexasPokerTable;
 use crate::Address;
@@ -64,16 +66,34 @@ impl TexasPokerPrecompile {
         let output: L1DispatchOutput = borsh::from_slice(return_value).map_err(|error| {
             PokerL1Error::Serialization(format!("decode Texas dispatch funding output: {error}"))
         })?;
-        Ok(output
-            .events
-            .into_iter()
-            .filter_map(|event| match event {
-                TexasPokerEvent::PlayerRefund { player, amount, .. } if amount > 0 => {
-                    Some((player, amount))
+        let mut refunds = Vec::new();
+        for event in output.events {
+            let TexasPokerEvent::PlayerRefund {
+                player,
+                amount,
+                refund_type,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            match refund_type {
+                // STACK refunds leave the TableVault and therefore become wallet-owned UTXOs.
+                REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET if amount > 0 => {
+                    refunds.push((player, amount));
                 }
-                _ => None,
-            })
-            .collect())
+                // BET_ONLY is an in-table rollback: state_machine puts the value back into the
+                // seat stack while chip_pool remains unchanged. Creating a UTXO here would pay
+                // the same value twice and make the TableVault transition inconsistent.
+                REFUND_TYPE_BET_ONLY | REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET => {}
+                unknown => {
+                    return Err(PokerL1Error::Other(format!(
+                        "unknown Texas refund type {unknown}"
+                    )));
+                }
+            }
+        }
+        Ok(refunds)
     }
 }
 
@@ -274,10 +294,15 @@ mod tests {
     use group::Group;
     use poker_protocol::crypto::ECPoint;
 
-    use crate::economics::{coin_output_nonce, decode_native_coin, native_coin_object};
+    use crate::economics::{
+        coin_output_nonce, decode_native_coin, genesis_mint, list_owned_native_coins,
+        native_coin_object, read_treasury,
+    };
+    use crate::executor::write_capture::WriteCaptureBackend;
+    use crate::object_model::Version;
     use crate::signature::TaggedPubkey;
     use crate::vm::contracts::texas_poker::dispatch::{
-        CreateTableArgs, JoinTableArgs, LeaveTableArgs,
+        AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs,
     };
 
     fn make_env() -> ExecutionEnvironment {
@@ -333,6 +358,57 @@ mod tests {
     fn test_texas_poker_precompile_is_gas_free() {
         let precompile = TexasPokerPrecompile::new(1);
         assert!(precompile.is_gas_free());
+    }
+
+    #[test]
+    fn bet_only_refund_stays_inside_table_vault() {
+        let table_id = reserved::texas_poker_contract_id();
+        let player = [0x44; 20];
+        let output = L1DispatchOutput::events_only(vec![TexasPokerEvent::PlayerRefund {
+            table_id,
+            seat_index: 2,
+            player,
+            amount: 75,
+            refund_type: REFUND_TYPE_BET_ONLY,
+        }]);
+
+        let encoded = borsh::to_vec(&output).unwrap();
+        assert!(
+            TexasPokerPrecompile::refund_outputs(&encoded)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn stack_refunds_leave_table_vault_but_unknown_types_fail_closed() {
+        let table_id = reserved::texas_poker_contract_id();
+        let player = [0x55; 20];
+        for refund_type in [REFUND_TYPE_STACK_ONLY, REFUND_TYPE_STACK_AND_BET] {
+            let output = L1DispatchOutput::events_only(vec![TexasPokerEvent::PlayerRefund {
+                table_id,
+                seat_index: 1,
+                player,
+                amount: 90,
+                refund_type,
+            }]);
+            let encoded = borsh::to_vec(&output).unwrap();
+            assert_eq!(
+                TexasPokerPrecompile::refund_outputs(&encoded).unwrap(),
+                vec![(player, 90)]
+            );
+        }
+
+        let unknown = L1DispatchOutput::events_only(vec![TexasPokerEvent::PlayerRefund {
+            table_id,
+            seat_index: 1,
+            player,
+            amount: 90,
+            refund_type: u8::MAX,
+        }]);
+        let error =
+            TexasPokerPrecompile::refund_outputs(&borsh::to_vec(&unknown).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("unknown Texas refund type"));
     }
 
     #[test]
@@ -415,6 +491,110 @@ mod tests {
                 object_db,
             )
             .unwrap();
+    }
+
+    fn create_funded_table(
+        precompile: &TexasPokerPrecompile,
+        caller: &Address,
+        caller_pk: &TaggedPubkey,
+        total_supply: u64,
+    ) -> (ObjectDb, ObjectID) {
+        let mut object_db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut object_db, 1, &[(*caller, total_supply)]).unwrap();
+        create_test_table(precompile, caller, caller_pk, &mut object_db);
+        let coins = list_owned_native_coins(&object_db, *caller).unwrap();
+        assert_eq!(coins.len(), 1);
+        (object_db, coins[0].id)
+    }
+
+    fn funded_join(
+        precompile: &TexasPokerPrecompile,
+        caller: &Address,
+        caller_pk: &TaggedPubkey,
+        object_db: &mut ObjectDb,
+        input_id: ObjectID,
+        buy_in: u64,
+        tx_hash: [u8; 32],
+    ) -> ObjectID {
+        let join_args = borsh::to_vec(&JoinTableArgs {
+            player: *caller,
+            buy_in,
+            pk: ECPoint(G1Projective::identity()),
+        })
+        .unwrap();
+        precompile
+            .call(
+                caller,
+                caller_pk,
+                &selectors::join_table(),
+                &join_args,
+                &ExecutionEnvironment {
+                    tx_inputs: vec![input_id],
+                    tx_hash,
+                    ..make_env()
+                },
+                object_db,
+            )
+            .unwrap();
+        ObjectID::new(*caller, coin_output_nonce(&tx_hash, 0))
+    }
+
+    struct FailTableUpdateBackend<'a> {
+        inner: WriteCaptureBackend<'a>,
+        table_id: ObjectID,
+    }
+
+    impl ObjectBackend for FailTableUpdateBackend<'_> {
+        fn create(&mut self, object: Object) -> PokerL1Result<()> {
+            self.inner.create(object)
+        }
+
+        fn read(&self, id: &ObjectID) -> PokerL1Result<Object> {
+            self.inner.read(id)
+        }
+
+        fn version_of(&self, id: &ObjectID) -> PokerL1Result<Version> {
+            self.inner.version_of(id)
+        }
+
+        fn update(
+            &mut self,
+            id: &ObjectID,
+            actor: &Address,
+            new_data: Vec<u8>,
+        ) -> PokerL1Result<()> {
+            if id == &self.table_id {
+                return Err(PokerL1Error::Other(
+                    "injected table persistence failure".into(),
+                ));
+            }
+            self.inner.update(id, actor, new_data)
+        }
+
+        fn transfer(
+            &mut self,
+            id: &ObjectID,
+            actor: &Address,
+            new_owner: Address,
+        ) -> PokerL1Result<()> {
+            self.inner.transfer(id, actor, new_owner)
+        }
+
+        fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object> {
+            self.inner.delete(id)
+        }
+
+        fn replace_objects(
+            &mut self,
+            delete_ids: &[ObjectID],
+            create_objects: Vec<Object>,
+        ) -> PokerL1Result<()> {
+            self.inner.replace_objects(delete_ids, create_objects)
+        }
+
+        fn state_root(&self) -> crate::Hash {
+            self.inner.state_root()
+        }
     }
 
     #[test]
@@ -528,5 +708,261 @@ mod tests {
                 .contains("requires at least one native coin input")
         );
         assert_eq!(object_db.read(&table_id).unwrap(), table_before);
+    }
+
+    #[test]
+    fn funded_addon_consumes_input_creates_change_and_updates_all_vaults() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let (mut object_db, genesis_coin) =
+            create_funded_table(&precompile, &caller, &caller_pk, 300);
+        let join_change = funded_join(
+            &precompile,
+            &caller,
+            &caller_pk,
+            &mut object_db,
+            genesis_coin,
+            100,
+            [0x31; 32],
+        );
+        let treasury_before = read_treasury(&object_db).unwrap();
+
+        let addon_hash = [0x32; 32];
+        let addon_args = borsh::to_vec(&AddonArgs {
+            seat_index: 0,
+            amount: 60,
+        })
+        .unwrap();
+        let result = precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::addon(),
+                &addon_args,
+                &ExecutionEnvironment {
+                    tx_inputs: vec![join_change],
+                    tx_hash: addon_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+
+        assert!(object_db.read(&join_change).is_err());
+        let addon_change = ObjectID::new(caller, coin_output_nonce(&addon_hash, 0));
+        assert!(result.created_objects.contains(&addon_change));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&addon_change).unwrap())
+                .unwrap()
+                .amount,
+            140
+        );
+        let table: TexasPokerTable = borsh::from_slice(
+            &object_db
+                .read(&reserved::texas_poker_contract_id())
+                .unwrap()
+                .data,
+        )
+        .unwrap();
+        assert_eq!(table.seats[0].stack, 100);
+        assert_eq!(table.seats[0].pending_addon, 60);
+        assert_eq!(table.chip_pool, 160);
+        assert_eq!(table.addon_pool, 60);
+        assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
+    }
+
+    #[test]
+    fn funded_rebuy_consumes_input_creates_change_and_preserves_addon_pool() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let (mut object_db, genesis_coin) =
+            create_funded_table(&precompile, &caller, &caller_pk, 300);
+        let join_change = funded_join(
+            &precompile,
+            &caller,
+            &caller_pk,
+            &mut object_db,
+            genesis_coin,
+            100,
+            [0x41; 32],
+        );
+        let treasury_before = read_treasury(&object_db).unwrap();
+
+        let rebuy_hash = [0x42; 32];
+        let rebuy_args = borsh::to_vec(&RebuyArgs {
+            seat_index: 0,
+            amount: 70,
+        })
+        .unwrap();
+        precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::rebuy(),
+                &rebuy_args,
+                &ExecutionEnvironment {
+                    tx_inputs: vec![join_change],
+                    tx_hash: rebuy_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+
+        assert!(object_db.read(&join_change).is_err());
+        let rebuy_change = ObjectID::new(caller, coin_output_nonce(&rebuy_hash, 0));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&rebuy_change).unwrap())
+                .unwrap()
+                .amount,
+            130
+        );
+        let table: TexasPokerTable = borsh::from_slice(
+            &object_db
+                .read(&reserved::texas_poker_contract_id())
+                .unwrap()
+                .data,
+        )
+        .unwrap();
+        assert_eq!(table.seats[0].stack, 170);
+        assert_eq!(table.seats[0].pending_addon, 0);
+        assert_eq!(table.chip_pool, 170);
+        assert_eq!(table.addon_pool, 0);
+        assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
+    }
+
+    #[test]
+    fn leave_after_pending_addon_refunds_stack_and_pending_addon() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let (mut object_db, genesis_coin) =
+            create_funded_table(&precompile, &caller, &caller_pk, 300);
+        let join_change = funded_join(
+            &precompile,
+            &caller,
+            &caller_pk,
+            &mut object_db,
+            genesis_coin,
+            100,
+            [0x51; 32],
+        );
+        let addon_hash = [0x52; 32];
+        let addon_args = borsh::to_vec(&AddonArgs {
+            seat_index: 0,
+            amount: 60,
+        })
+        .unwrap();
+        precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::addon(),
+                &addon_args,
+                &ExecutionEnvironment {
+                    tx_inputs: vec![join_change],
+                    tx_hash: addon_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+
+        let leave_hash = [0x53; 32];
+        let leave_args = borsh::to_vec(&LeaveTableArgs { seat_index: 0 }).unwrap();
+        precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::leave_table(),
+                &leave_args,
+                &ExecutionEnvironment {
+                    tx_hash: leave_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+
+        let payout_id = ObjectID::new(caller, coin_output_nonce(&leave_hash, 1));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&payout_id).unwrap())
+                .unwrap()
+                .amount,
+            160
+        );
+        let addon_change = ObjectID::new(caller, coin_output_nonce(&addon_hash, 0));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&addon_change).unwrap())
+                .unwrap()
+                .amount,
+            140
+        );
+        let table: TexasPokerTable = borsh::from_slice(
+            &object_db
+                .read(&reserved::texas_poker_contract_id())
+                .unwrap()
+                .data,
+        )
+        .unwrap();
+        assert_eq!(table.chip_pool, 0);
+        assert_eq!(table.addon_pool, 0);
+        assert!(!table.seats[0].is_occupied());
+        assert_eq!(read_treasury(&object_db).unwrap().unwrap().total_supply, 300);
+    }
+
+    #[test]
+    fn funded_addon_failure_discards_table_coin_treasury_and_root_changes() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let (mut object_db, genesis_coin) =
+            create_funded_table(&precompile, &caller, &caller_pk, 300);
+        let join_change = funded_join(
+            &precompile,
+            &caller,
+            &caller_pk,
+            &mut object_db,
+            genesis_coin,
+            100,
+            [0x61; 32],
+        );
+        let table_id = reserved::texas_poker_contract_id();
+        let table_before = object_db.read(&table_id).unwrap();
+        let input_before = object_db.read(&join_change).unwrap();
+        let treasury_before = read_treasury(&object_db).unwrap();
+        let root_before = object_db.state_root();
+
+        let addon_args = borsh::to_vec(&AddonArgs {
+            seat_index: 0,
+            amount: 60,
+        })
+        .unwrap();
+        let error = {
+            let mut backend = FailTableUpdateBackend {
+                inner: WriteCaptureBackend::new(&object_db),
+                table_id,
+            };
+            precompile
+                .call(
+                    &caller,
+                    &caller_pk,
+                    &selectors::addon(),
+                    &addon_args,
+                    &ExecutionEnvironment {
+                        tx_inputs: vec![join_change],
+                        tx_hash: [0x62; 32],
+                        ..make_env()
+                    },
+                    &mut backend,
+                )
+                .unwrap_err()
+        };
+
+        assert!(error.to_string().contains("injected table persistence failure"));
+        assert_eq!(object_db.read(&table_id).unwrap(), table_before);
+        assert_eq!(object_db.read(&join_change).unwrap(), input_before);
+        assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
+        assert_eq!(object_db.state_root(), root_before);
+        let discarded_change = ObjectID::new(caller, coin_output_nonce(&[0x62; 32], 0));
+        assert!(object_db.read(&discarded_change).is_err());
     }
 }

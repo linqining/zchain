@@ -10,7 +10,7 @@
 
 use stwo::core::fields::m31::M31;
 
-use poker_texas_air::airs::common::ZERO;
+use poker_texas_air::airs::common::MAX_TOTAL_BET;
 use poker_texas_air::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use poker_texas_air::airs::lifecycle::leave_table::{
     LeaveTableAir, LeaveTableInput, LeaveTableRow,
@@ -94,6 +94,57 @@ fn test_e2e_join_table_prove_verify() {
     )
     .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
+}
+
+/// 资金语义回归：addon_pool 是 chip_pool 的子集，join 上界不能重复计入；同时
+/// `chip_pool + buy_in` 跨 16-bit limb 时必须由 ripple carry 正确证明。
+#[test]
+fn test_e2e_join_table_nonzero_addon_pool_and_cross_limb_carry() {
+    let buy_in = 65_536;
+    let pre_chip_pool = MAX_TOTAL_BET - buy_in;
+    let input = JoinTableInput {
+        seat_index: 2,
+        buy_in,
+        player_addr: [0x42; 20],
+    };
+    let row = JoinTableRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        1,
+        0,
+        1,
+        10,
+        pre_chip_pool,
+        1, // 非零 addon_pool；旧语义会把它重复计入并错误超界
+    );
+    let trace = gen_method_trace(
+        JoinTableAir::num_columns(),
+        &row.to_vec(),
+        &JoinTableRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+    let air = JoinTableAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 1,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let proof = prove_method(
+        &trace,
+        air,
+        JoinTableAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinTable, 42, 0, 1),
+    )
+    .expect("跨 limb join prove 失败");
+    verify_method(proof).expect("跨 limb join verify 失败");
 }
 
 /// Soundness: 篡改 join_table 的 `seat_index` 公开输入后，verify 应失败。
@@ -273,7 +324,7 @@ fn test_e2e_leave_table_funds_ripple_carry() {
         65_535,
         1,
         65_536,
-        1,
+        0,
         65_536,
         65_535,
     );
@@ -322,7 +373,7 @@ fn test_soundness_leave_table_tampered_funds_rejected() {
         65_535,
         1,
         65_536,
-        1,
+        0,
         65_536,
         65_535,
     );
@@ -860,12 +911,13 @@ fn test_lifecycle_air_column_consistency() {
         join_table, leave_table, reset_for_next_hand, start_hand, tick,
     };
 
-    // join_table: 通用 + 40 业务
+    // join_table: 通用 + 50 业务
     //   原始 14 列（seat_index + buy_in 4 + player_addr 4 + seat_stack 4 + seat_empty 1）
     //   + 12 列（big_blind 4 + pre_chip_pool 4 + post_chip_pool 4）用于 buy_in >= big_blind 和 chip_pool 守恒
     //   + 14 列（pre_addon_pool 4 + bound_diff 4 + carry_lo 3 + carry_hi 3）用于全局上界 range check
     //   + 7 列（阶段 3 新增：ge_diff 4 + ge_borrow 3）用于 buy_in >= big_blind
-    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 47);
+    //   + 3 列 chip_pool ripple carry
+    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 50);
     assert_eq!(JoinTableAir::num_columns(), join_table::cols::NUM_COLUMNS);
 
     // leave_table: 通用 + 39 业务

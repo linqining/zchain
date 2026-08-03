@@ -511,100 +511,130 @@ mod tests {
 
     #[test]
     fn fixed_cpu_composition_air_accepts_real_samples() {
-        let (trace, air, _, _) = fixed_cpu_composition_fixture();
-        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
-        assert_constraints_on_trace(
-            &trees,
-            air.log_size(),
-            |eval| {
-                air.evaluate(eval);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "fixed-cpu-composition-air-accepts",
+            128 * 1024 * 1024,
+            || {
+                let (trace, air, _, _) = fixed_cpu_composition_fixture();
+                let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+                assert_constraints_on_trace(
+                    &trees,
+                    air.log_size(),
+                    |eval| {
+                        air.evaluate(eval);
+                    },
+                    SecureField::zero(),
+                );
             },
-            SecureField::zero(),
         );
     }
 
     #[test]
     #[should_panic(expected = "constraint #0")]
     fn fixed_cpu_composition_air_rejects_wrong_claim() {
-        let (trace, air, expected, _) = fixed_cpu_composition_fixture();
-        let bad_air = CompositionEvalAir::new(
-            air.trace_log_size,
-            air.cpu_log_size,
-            air.oods_point,
-            air.composition_random_coeff,
-            expected + SecureField::from(1u32),
-        );
-        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
-        assert_constraints_on_trace(
-            &trees,
-            bad_air.log_size(),
-            |eval| {
-                bad_air.evaluate(eval);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "fixed-cpu-composition-air-wrong-claim",
+            128 * 1024 * 1024,
+            || {
+                let (trace, air, expected, _) = fixed_cpu_composition_fixture();
+                let bad_air = CompositionEvalAir::new(
+                    air.trace_log_size,
+                    air.cpu_log_size,
+                    air.oods_point,
+                    air.composition_random_coeff,
+                    expected + SecureField::from(1u32),
+                );
+                let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+                assert_constraints_on_trace(
+                    &trees,
+                    bad_air.log_size(),
+                    |eval| {
+                        bad_air.evaluate(eval);
+                    },
+                    SecureField::zero(),
+                );
             },
-            SecureField::zero(),
         );
     }
 
     #[test]
     #[should_panic(expected = "constraint #0")]
     fn fixed_cpu_composition_air_rejects_tampered_sample() {
-        let (mut trace, air, _, _) = fixed_cpu_composition_fixture();
-        trace[crate::stwo_backend::column_layout_v2::IS_PADDING * SECURE_EXTENSION_DEGREE][0] +=
-            BaseField::from(1u32);
-        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
-        assert_constraints_on_trace(
-            &trees,
-            air.log_size(),
-            |eval| {
-                air.evaluate(eval);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "fixed-cpu-composition-air-tampered-sample",
+            128 * 1024 * 1024,
+            || {
+                let (mut trace, air, _, _) = fixed_cpu_composition_fixture();
+                trace[crate::stwo_backend::column_layout_v2::IS_PADDING
+                    * SECURE_EXTENSION_DEGREE][0] += BaseField::from(1u32);
+                let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+                assert_constraints_on_trace(
+                    &trees,
+                    air.log_size(),
+                    |eval| {
+                        air.evaluate(eval);
+                    },
+                    SecureField::zero(),
+                );
             },
-            SecureField::zero(),
         );
     }
 
     #[test]
     fn fixed_cpu_composition_bound_air_accepts_expected_samples() {
-        let (trace, air, _, expected_samples) = fixed_cpu_composition_fixture();
-        let bound_air = CompositionEvalAir::new_bound(
-            air.trace_log_size,
-            air.cpu_log_size,
-            air.oods_point,
-            air.composition_random_coeff,
-            air.claimed_composition_eval,
-            expected_samples,
-        );
-        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
-        assert_constraints_on_trace(
-            &trees,
-            bound_air.log_size(),
-            |eval| {
-                bound_air.evaluate(eval);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "fixed-cpu-composition-bound-air-accepts",
+            128 * 1024 * 1024,
+            || {
+                let (trace, air, _, expected_samples) = fixed_cpu_composition_fixture();
+                let bound_air = CompositionEvalAir::new_bound(
+                    air.trace_log_size,
+                    air.cpu_log_size,
+                    air.oods_point,
+                    air.composition_random_coeff,
+                    air.claimed_composition_eval,
+                    expected_samples,
+                );
+                let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+                assert_constraints_on_trace(
+                    &trees,
+                    bound_air.log_size(),
+                    |eval| {
+                        bound_air.evaluate(eval);
+                    },
+                    SecureField::zero(),
+                );
             },
-            SecureField::zero(),
         );
     }
 
     #[test]
     #[should_panic]
     fn fixed_cpu_composition_bound_air_rejects_wrong_expected_sample() {
-        let (trace, air, _, mut expected_samples) = fixed_cpu_composition_fixture();
-        expected_samples[0] += SecureField::from(1u32);
-        let bound_air = CompositionEvalAir::new_bound(
-            air.trace_log_size,
-            air.cpu_log_size,
-            air.oods_point,
-            air.composition_random_coeff,
-            air.claimed_composition_eval,
-            expected_samples,
-        );
-        let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
-        assert_constraints_on_trace(
-            &trees,
-            bound_air.log_size(),
-            |eval| {
-                bound_air.evaluate(eval);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "fixed-cpu-composition-bound-air-wrong-sample",
+            128 * 1024 * 1024,
+            || {
+                let (trace, air, _, mut expected_samples) = fixed_cpu_composition_fixture();
+                expected_samples[0] += SecureField::from(1u32);
+                let bound_air = CompositionEvalAir::new_bound(
+                    air.trace_log_size,
+                    air.cpu_log_size,
+                    air.oods_point,
+                    air.composition_random_coeff,
+                    air.claimed_composition_eval,
+                    expected_samples,
+                );
+                let trees = TreeVec::new(vec![vec![], trace.iter().collect()]);
+                assert_constraints_on_trace(
+                    &trees,
+                    bound_air.log_size(),
+                    |eval| {
+                        bound_air.evaluate(eval);
+                    },
+                    SecureField::zero(),
+                );
             },
-            SecureField::zero(),
         );
     }
 }

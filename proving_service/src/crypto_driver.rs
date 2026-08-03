@@ -23,21 +23,23 @@
 
 use blstrs::G1Projective;
 use group::Group;
-use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 use poker_protocol::crypto::{
-    curve::{Curve, CurveScalar},
+    curve::CurveScalar,
     DefaultCurve, ElGamalCiphertext, Scalar,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_protocol::zk_shuffle::transcript_ext::{
+    CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
+};
+use poker_protocol::zk_shuffle::ShuffleProof;
 
 use crate::CryptoDriverError;
 
 /// shuffle proof 的 transcript label —— 必须与合约
-/// `utils::new_shuffle_transcript()`（`b"zk_shuffle_proof_v1"`）一致。
-const SHUFFLE_PROOF_LABEL: &[u8] = b"zk_shuffle_proof_v1";
+/// `utils::new_shuffle_transcript()`（`b"zk_shuffle_proof_v2"`）一致。
+const SHUFFLE_PROOF_LABEL: &[u8] = b"zk_shuffle_proof_v2";
 /// reveal token proof 的 transcript label —— 必须与合约
 /// `state_machine.rs` 中 `MerlinTranscript::new(b"reveal_token_proof_v3")` 一致。
 const REVEAL_TOKEN_PROOF_LABEL: &[u8] = b"reveal_token_proof_v3";
@@ -70,8 +72,8 @@ impl ShufflePlayer {
 pub struct ShuffleV2Step {
     /// 玩家洗牌后的输出牌组（proof 覆盖的对象；合约会在此基础上做 `add_pk_to_c2`）。
     pub output_cards: Vec<ElGamalCiphertext>,
-    /// shuffle proof（绑定 identity aggregated_pk）。
-    pub shuffle_proof: ZKShuffleProof<DefaultCurve>,
+    /// 生产版本化 shuffle proof（当前生成 Bayer--Groth V2）。
+    pub shuffle_proof: ShuffleProof,
 }
 
 /// 生成 `submit_shuffle_v2` 所需的 output_cards + shuffle proof。
@@ -115,9 +117,9 @@ pub fn build_shuffle_v2(
         .map(|j| input_cards[permute[j]].re_encrypt(aggregated_pk, &r_values[j]))
         .collect();
 
-    // 用 MerlinTranscript 生成 shuffle proof（与合约 verify 端一致）
-    let mut transcript = MerlinTranscript::new(SHUFFLE_PROOF_LABEL);
-    let shuffle_proof = ZKShuffleProof::<DefaultCurve>::prove(
+    // 生产证明必须使用版本化入口；Legacy V1 已被 verifier 永久 fail-closed。
+    let mut transcript = FiatShamirTranscript::new(SHUFFLE_PROOF_LABEL);
+    let shuffle_proof = ShuffleProof::prove(
         input_cards,
         &output_cards,
         &permute,
@@ -203,9 +205,8 @@ mod tests {
         let player = ShufflePlayer::deterministic(1);
         let step = build_shuffle_v2(&deck, &player.sk, &player.pk, &agg_pk, 42)
             .expect("prove 成功");
-        let mut t = MerlinTranscript::new(b"zk_shuffle_proof_v1");
-        let r = ZKShuffleProof::<DefaultCurve>::verify(
-            &step.shuffle_proof,
+        let mut t = FiatShamirTranscript::new(b"zk_shuffle_proof_v2");
+        let r = step.shuffle_proof.verify(
             &deck,
             &step.output_cards,
             &agg_pk,

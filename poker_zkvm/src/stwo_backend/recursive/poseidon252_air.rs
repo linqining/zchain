@@ -1386,9 +1386,10 @@ mod tests {
 
     #[test]
     fn official_poseidon_closure_satisfies_every_air_component() {
-        std::thread::Builder::new()
-            .stack_size(128 * 1024 * 1024)
-            .spawn(|| {
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "official-poseidon-closure-air",
+            128 * 1024 * 1024,
+            || {
                 let witness =
                     Poseidon252ClosureWitness::from_canonical_calls(&[CanonicalPoseidonCall {
                         global_index: 0,
@@ -1490,10 +1491,8 @@ mod tests {
                 );
                 assert_component(&components.caller, &trace);
                 assert_component(&components.semantic, &trace);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+            },
+        );
     }
 
     #[test]

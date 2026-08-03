@@ -32,7 +32,7 @@ namespace PokerLean
 - `RoundStateEq(0)` + `RoundStateUnchanged`：仅在 WAITING 状态离座
 - `SeatOccupied`：目标座位必须被占用
 - `RefundConservation`：refund = seat.stack + seat.pending_addon
-- `ChipPoolConservation`：post_chip_pool = pre_chip_pool - seat.stack
+- `ChipPoolConservation`：post_chip_pool = pre_chip_pool - refund
 - `AddonPoolConservation`：post_addon_pool = pre_addon_pool - seat.pending_addon
 - `VersionIncrementConstraint`：version += 1
 - post 状态提取：目标座位正确清空
@@ -60,7 +60,7 @@ structure LeaveTableMethodColumns where
   output_refund : M31 × M31 × M31 × M31
   /-- `refund = stack + pending_addon` 的 3 个 ripple-carry bit。 -/
   refund_add_carry : M31 × M31 × M31
-  /-- `pre_chip_pool = post_chip_pool + stack` 的 3 个 ripple-carry bit。 -/
+  /-- `pre_chip_pool = post_chip_pool + refund` 的 3 个 ripple-carry bit。 -/
   chip_pool_sub_carry : M31 × M31 × M31
   /-- `pre_addon_pool = post_addon_pool + pending_addon` 的 3 个 ripple-carry bit。 -/
   addon_pool_sub_carry : M31 × M31 × M31
@@ -175,9 +175,9 @@ def RefundConservation (ext : LeaveTableMethodColumns) : Prop :=
   Limb4Delta ext.input_seat_stack ext.output_refund ext.input_seat_pending_addon
     ext.refund_add_carry
 
-/-- chip_pool 守恒约束：`pre = post + stack`，对应无下溢减法。 -/
+/-- chip_pool 守恒约束：`pre = post + refund`，对应无下溢减法。 -/
 def ChipPoolLeaveConservation (ext : LeaveTableMethodColumns) : Prop :=
-  Limb4DeltaRev ext.input_pre_chip_pool ext.output_post_chip_pool ext.input_seat_stack
+  Limb4DeltaRev ext.input_pre_chip_pool ext.output_post_chip_pool ext.output_refund
     ext.chip_pool_sub_carry
 
 /-- addon_pool 守恒约束：`pre = post + pending_addon`，对应无下溢减法。 -/
@@ -202,7 +202,7 @@ def LeaveTableMethodConstraints
   SeatOccupied ext.input_seat_is_occupied ∧
   -- 退款守恒：refund = stack + pending_addon
   RefundConservation ext ∧
-  -- chip_pool 守恒：post = pre - stack
+  -- chip_pool 守恒：post = pre - refund
   ChipPoolLeaveConservation ext ∧
   -- addon_pool 守恒：post = pre - pending_addon
   AddonPoolLeaveConservation ext ∧

@@ -631,17 +631,17 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
-        pre_seat
+        let refund = pre_seat
             .stack
             .checked_add(pre_seat.pending_addon)
             .ok_or_else(|| TexasAirError::SpecViolation("leave_table refund overflow".into()))?;
-        let expected_post_chip_pool = task
-            .pre_table
-            .chip_pool
-            .checked_sub(pre_seat.stack)
-            .ok_or_else(|| {
-                TexasAirError::SpecViolation("leave_table chip_pool underflow".into())
-            })?;
+        let expected_post_chip_pool =
+            task.pre_table
+                .chip_pool
+                .checked_sub(refund)
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation("leave_table chip_pool underflow".into())
+                })?;
         let expected_post_addon_pool = task
             .pre_table
             .addon_pool
@@ -1378,7 +1378,9 @@ impl Orchestrator {
             &input,
             pre_seat.pending_addon,
             task.pre_table.chip_pool,
+            task.post_table.chip_pool,
             task.pre_table.addon_pool,
+            task.post_table.addon_pool,
             srm(pre_root),
             srm(post_root),
             task.table_id,
@@ -1431,7 +1433,9 @@ impl Orchestrator {
             &input,
             pre_seat.stack,
             task.pre_table.chip_pool,
+            task.post_table.chip_pool,
             task.pre_table.addon_pool,
+            task.post_table.addon_pool,
             srm(pre_root),
             srm(post_root),
             task.table_id,
@@ -2636,7 +2640,7 @@ mod tests {
             .expect("rebuy args should serialize"),
         );
         assert_eq!(post.seats[0].stack, 65_536);
-        assert_eq!(post.addon_pool, 65_536);
+        assert_eq!(post.addon_pool, 65_535);
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept rebuy carry");
@@ -2688,7 +2692,7 @@ mod tests {
             texas_dispatch::selectors::leave_table(),
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("leave args should serialize"),
         );
-        assert_eq!(post.chip_pool, 1);
+        assert_eq!(post.chip_pool, 0);
         assert_eq!(post.addon_pool, 65_535);
         Orchestrator::new()
             .prove_and_verify_task(&task)

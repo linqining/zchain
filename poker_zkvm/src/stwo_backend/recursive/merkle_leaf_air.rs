@@ -898,9 +898,10 @@ mod tests {
 
     #[test]
     fn leaf_packing_constraints_bind_values_and_state_transitions() {
-        std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
-            .spawn(|| {
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "merkle-leaf-packing-air",
+            256 * 1024 * 1024,
+            || {
                 let mut builder = TraceBuilder::new(10);
                 builder.fill_padding_to_full();
                 let proof = prove_cpu_trace(&builder.finalize()).expect("L1 proof should succeed");
@@ -969,9 +970,7 @@ mod tests {
                     }))
                     .is_err()
                 );
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+            },
+        );
     }
 }

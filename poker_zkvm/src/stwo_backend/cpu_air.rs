@@ -176,14 +176,14 @@ impl CpuAir {
     /// `memory_lookup = Some, ecall_lookup = Some, range_lookup = None` 的 CpuAir。
     /// 适用于 Phase 4 Tier 1+ 多组件 prove/verify（配合 Memory AIR + Precompile AIR）。
     ///
-    /// # Phase 4 Tier 1 注意
-    /// Tier 1 阶段尚无 Precompile AIR 发送 yield，因此 ECALL logup claim 的
-    /// multiplicity 应为 0（trace 填充暂留 0）。Tier 2 实施 Precompile AIR 后
-    /// 才能实现 claim + yield 平衡。
+    /// # Safety
+    /// 当前 relation 只绑定 syscall ID，且仓库尚无完整 Precompile AIR yield 组件。
+    /// 因此该构造函数仅暴露给测试辅助构建，不属于生产 API。
     ///
     /// # v3 变更
     /// ECALL logup claim 从 25 元组（SyscallId + Args/Outputs）缩减为 1 元组（仅 SyscallId）。
     /// 如需恢复 Args/Outputs，需在 column_layout_v2.rs 中恢复相关列。
+    #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub const fn new_with_ecall_lookup(
         log_size: u32,
@@ -209,6 +209,7 @@ impl CpuAir {
     /// # 返回
     /// `memory_lookup = Some, ecall_lookup = Some, range_lookup = Some` 的 CpuAir。
     /// 适用于 V4 修复多组件 prove/verify（配合 Memory AIR + RangeCheck AIR）。
+    #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub const fn new_with_range_check(
         log_size: u32,
@@ -1497,6 +1498,15 @@ impl FrameworkEval for CpuAir {
         let is_ecall = col(IS_ECALL);
         let is_ecall_bin = is_ecall.clone() * (is_ecall.clone() - one.clone());
         eval.add_constraint(is_ecall_bin);
+
+        // Production fail-closed: the current production constructors do not attach a
+        // syscall/precompile AIR that proves ECALL arguments, return values, or memory effects.
+        // Allowing ECALL in that configuration would leave its semantics entirely prover-chosen.
+        // Until the full relation has a balanced yield component, traces built without an
+        // `ecall_lookup` must therefore contain no ECALL rows.
+        if self.ecall_lookup.is_none() {
+            eval.add_constraint(is_ecall.clone());
+        }
 
         // ===== v3 约束 C58：ECALL SyscallId zero gating（1 条）=====
         // 非 ECALL 行的 SyscallId 列必须为 0

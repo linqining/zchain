@@ -1340,86 +1340,92 @@ mod tests {
     /// Gate 后完整 semantic scaffold 应 roundtrip，并拒绝 statement/envelope 篡改。
     #[test]
     fn test_semantic_scaffold_roundtrip_recursive_with_fri() {
-        let l1_proof = make_l1_proof();
-        let inputs = make_test_public_inputs_with_fri_from_l1(&l1_proof);
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "semantic-scaffold-recursive-fri",
+            256 * 1024 * 1024,
+            || {
+                let l1_proof = make_l1_proof();
+                let inputs = make_test_public_inputs_with_fri_from_l1(&l1_proof);
 
-        let l2_proof = prove_recursive_with_fri_scaffold_for_test(&l1_proof, &inputs)
-            .expect("gate 后完整 semantic scaffold prove 失败");
+                let l2_proof = prove_recursive_with_fri_scaffold_for_test(&l1_proof, &inputs)
+                    .expect("gate 后完整 semantic scaffold prove 失败");
 
-        let verify_result =
-            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
-                &l2_proof, &inputs,
-            );
-        assert!(
-            verify_result.is_ok(),
-            "gate 后完整 semantic scaffold verify 应成功: {:?}",
-            verify_result.err()
-        );
+                let verify_result =
+                    super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                        &l2_proof, &inputs,
+                    );
+                assert!(
+                    verify_result.is_ok(),
+                    "gate 后完整 semantic scaffold verify 应成功: {:?}",
+                    verify_result.err()
+                );
 
-        let mut tampered_inputs = inputs.clone();
-        tampered_inputs.l1_commitments[0] += FieldElement252::from(1u32);
-        let verify_result =
-            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
-                &l2_proof,
-                &tampered_inputs,
-            );
-        assert!(
-            verify_result.is_err(),
-            "gate 后 scaffold 必须拒绝篡改的 RecursivePublicInputs"
-        );
+                let mut tampered_inputs = inputs.clone();
+                tampered_inputs.l1_commitments[0] += FieldElement252::from(1u32);
+                let verify_result =
+                    super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                        &l2_proof,
+                        &tampered_inputs,
+                    );
+                assert!(
+                    verify_result.is_err(),
+                    "gate 后 scaffold 必须拒绝篡改的 RecursivePublicInputs"
+                );
 
-        let mut tampered_envelope = l2_proof.clone();
-        tampered_envelope
-            .1
-            .as_mut()
-            .expect("scaffold proof 必须携带 Poseidon252 claim")
-            .n_transcript_calls += 1;
-        let verify_result =
-            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
-                &tampered_envelope,
-                &inputs,
-            );
-        assert!(
-            verify_result.is_err(),
-            "gate 后 scaffold 必须拒绝篡改的 RecursivePoseidonClaim 元数据"
-        );
+                let mut tampered_envelope = l2_proof.clone();
+                tampered_envelope
+                    .1
+                    .as_mut()
+                    .expect("scaffold proof 必须携带 Poseidon252 claim")
+                    .n_transcript_calls += 1;
+                let verify_result =
+                    super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                        &tampered_envelope,
+                        &inputs,
+                    );
+                assert!(
+                    verify_result.is_err(),
+                    "gate 后 scaffold 必须拒绝篡改的 RecursivePoseidonClaim 元数据"
+                );
 
-        let mut tampered_lookup_claim = l2_proof.clone();
-        tampered_lookup_claim
-            .1
-            .as_mut()
-            .expect("scaffold proof 必须携带 Poseidon252 claim")
-            .transcript_claimed_sum += SecureField::from(1u32);
-        let verify_result =
-            super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
-                &tampered_lookup_claim,
-                &inputs,
-            );
-        assert!(
-            matches!(
-                &verify_result,
-                Err(super::super::recursion_verifier::RecursionVerificationError::VerificationFailed(message))
-                    if message.contains("global lookup claimed sums are unbalanced")
-            ),
-            "verifier 必须独立拒绝不平衡的全局 lookup claims: {verify_result:?}"
-        );
+                let mut tampered_lookup_claim = l2_proof.clone();
+                tampered_lookup_claim
+                    .1
+                    .as_mut()
+                    .expect("scaffold proof 必须携带 Poseidon252 claim")
+                    .transcript_claimed_sum += SecureField::from(1u32);
+                let verify_result =
+                    super::super::recursion_verifier::verify_recursive_with_fri_scaffold_for_test(
+                        &tampered_lookup_claim,
+                        &inputs,
+                    );
+                assert!(
+                    matches!(
+                        &verify_result,
+                        Err(super::super::recursion_verifier::RecursionVerificationError::VerificationFailed(message))
+                            if message.contains("global lookup claimed sums are unbalanced")
+                    ),
+                    "verifier 必须独立拒绝不平衡的全局 lookup claims: {verify_result:?}"
+                );
 
-        let production_verify_result =
-            super::super::recursion_verifier::verify_recursive_with_fri(&l2_proof, &inputs);
-        if cfg!(feature = "recursive-prover") {
-            assert!(
-                production_verify_result.is_ok(),
-                "显式启用 recursive-prover 后 production 入口应验证成功: {production_verify_result:?}"
-            );
-        } else {
-            assert!(
+                let production_verify_result =
+                    super::super::recursion_verifier::verify_recursive_with_fri(&l2_proof, &inputs);
+                if cfg!(feature = "recursive-prover") {
+                    assert!(
+                        production_verify_result.is_ok(),
+                        "显式启用 recursive-prover 后 production 入口应验证成功: {production_verify_result:?}"
+                    );
+                } else {
+                    assert!(
                 matches!(
                     production_verify_result,
                     Err(super::super::recursion_verifier::RecursionVerificationError::IncompleteMerkleVerifierAir)
                 ),
                 "默认测试构建仍应由不完整 AIR gate fail-closed: {production_verify_result:?}"
             );
-        }
+                }
+            },
+        );
     }
 
     /// v5.1 多组件 soundness 测试 — 篡改 composition_oods_eval 应导致 prove 失败。

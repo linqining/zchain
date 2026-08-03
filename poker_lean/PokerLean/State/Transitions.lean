@@ -94,12 +94,11 @@ def seat_chips (s : Seat) : Nat := s.stack + s.bet
 
 /-- 桌台级总筹码 = Σ(stack + bet + pending_addon) + pot + rake_collected。
 
-**不含以下记录字段**（否则双重计数）：
+**不含以下锁仓/子集字段**（否则与座位筹码双重计数）：
 - `total_bet`：= bet + 已入 pot 部分，是历史记录。
-- `addon_pool`：累积 addon/rebuy 记录，非独立筹码池。Rust `apply_addon`/`apply_rebuy`
-  同时累加 `addon_pool` 与 `pending_addon`（前者为表级累积，后者为座位级欠账），
-  且 `reset_for_next_hand` 合并 `pending_addon` 到 `stack` 时 **不** 清零 `addon_pool`，
-  故 `addon_pool` 是单调累积的记录字段，不应计入 `total_chips`。
+- `chip_pool`：完整 TableVault 锁仓，与 seat stack/bet/pending/pot 表示的是同一批资金。
+- `addon_pool`：`chip_pool` 中 pending addon 的子集；rebuy 不增加它，下一手合并
+  pending addon 时相应扣减，因此也不应计入 `total_chips`。
 - `ante_collected`：pot 中已含 ante，`ante_collected` 是其子集记录。 -/
 def total_chips (t : TexasPokerTable) : Nat :=
   (t.seats.map seat_chips).sum + t.pot + t.rake_collected +

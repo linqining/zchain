@@ -1699,57 +1699,65 @@ mod tests {
 
     #[test]
     fn merkle_semantic_and_binding_components_satisfy_air() {
-        let fixture = fixture();
-        let binding = MerklePublicBindingWitness::new(&fixture.public_inputs).unwrap();
-        let payloads = transcript_payload_values(&fixture.canonical.transcript_events);
-        let poseidon = Poseidon252ClosureWitness::from_canonical_calls_and_values(
-            &fixture.canonical.poseidon_calls,
-            &payloads,
-        )
-        .unwrap();
-        let merkle = MerkleSemanticWitness::new(
-            &fixture.canonical,
-            &binding,
-            &poseidon.synthetic_memory.call_ids,
-        )
-        .unwrap();
-        let lookup_elements = cairo_air::relations::CommonLookupElements::dummy();
-        let (mut ids, mut preprocessed) = binding.semantic_preprocessed_columns();
-        let (binding_ids, binding_preprocessed) = binding.preprocessed_columns();
-        ids.extend(binding_ids);
-        preprocessed.extend(binding_preprocessed);
-        let (merkle_interaction, merkle_sum) = merkle.write_interaction_trace(&lookup_elements);
-        let (binding_interaction, binding_sum) = binding.write_interaction_trace(&lookup_elements);
-        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-        let merkle_component = FrameworkComponent::new(
-            &mut allocator,
-            MerkleSemanticAir::new(merkle.log_size, merkle.n_rows, lookup_elements.clone()),
-            merkle_sum,
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "merkle-semantic-binding-air",
+            128 * 1024 * 1024,
+            || {
+                let fixture = fixture();
+                let binding = MerklePublicBindingWitness::new(&fixture.public_inputs).unwrap();
+                let payloads = transcript_payload_values(&fixture.canonical.transcript_events);
+                let poseidon = Poseidon252ClosureWitness::from_canonical_calls_and_values(
+                    &fixture.canonical.poseidon_calls,
+                    &payloads,
+                )
+                .unwrap();
+                let merkle = MerkleSemanticWitness::new(
+                    &fixture.canonical,
+                    &binding,
+                    &poseidon.synthetic_memory.call_ids,
+                )
+                .unwrap();
+                let lookup_elements = cairo_air::relations::CommonLookupElements::dummy();
+                let (mut ids, mut preprocessed) = binding.semantic_preprocessed_columns();
+                let (binding_ids, binding_preprocessed) = binding.preprocessed_columns();
+                ids.extend(binding_ids);
+                preprocessed.extend(binding_preprocessed);
+                let (merkle_interaction, merkle_sum) =
+                    merkle.write_interaction_trace(&lookup_elements);
+                let (binding_interaction, binding_sum) =
+                    binding.write_interaction_trace(&lookup_elements);
+                let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+                let merkle_component = FrameworkComponent::new(
+                    &mut allocator,
+                    MerkleSemanticAir::new(merkle.log_size, merkle.n_rows, lookup_elements.clone()),
+                    merkle_sum,
+                );
+                let binding_component = FrameworkComponent::new(
+                    &mut allocator,
+                    MerklePublicBindingAir::new(binding.log_size, binding.n_rows, lookup_elements),
+                    binding_sum,
+                );
+                let mut interaction = merkle_interaction;
+                interaction.extend(binding_interaction);
+                let trace = TreeVec::new(vec![
+                    preprocessed
+                        .into_iter()
+                        .map(|evaluation| evaluation.values.to_cpu())
+                        .collect(),
+                    merkle
+                        .base_trace
+                        .into_iter()
+                        .map(|evaluation| evaluation.values.to_cpu())
+                        .collect(),
+                    interaction
+                        .into_iter()
+                        .map(|evaluation| evaluation.values.to_cpu())
+                        .collect(),
+                ]);
+                let trace = trace.as_cols_ref();
+                assert_component(&merkle_component, &trace);
+                assert_component(&binding_component, &trace);
+            },
         );
-        let binding_component = FrameworkComponent::new(
-            &mut allocator,
-            MerklePublicBindingAir::new(binding.log_size, binding.n_rows, lookup_elements),
-            binding_sum,
-        );
-        let mut interaction = merkle_interaction;
-        interaction.extend(binding_interaction);
-        let trace = TreeVec::new(vec![
-            preprocessed
-                .into_iter()
-                .map(|evaluation| evaluation.values.to_cpu())
-                .collect(),
-            merkle
-                .base_trace
-                .into_iter()
-                .map(|evaluation| evaluation.values.to_cpu())
-                .collect(),
-            interaction
-                .into_iter()
-                .map(|evaluation| evaluation.values.to_cpu())
-                .collect(),
-        ]);
-        let trace = trace.as_cols_ref();
-        assert_component(&merkle_component, &trace);
-        assert_component(&binding_component, &trace);
     }
 }

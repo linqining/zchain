@@ -5,7 +5,7 @@
 //! 2. `seat_index < max_players`
 //! 3. 座位非空
 //! 4. 退款：`refund = seat.stack + seat.pending_addon`
-//! 5. 资金守恒：`chip_pool -= seat.stack`, `addon_pool -= pending_addon`
+//! 5. 资金守恒：`chip_pool -= refund`, `addon_pool -= pending_addon`
 //! 6. 状态变更：`seat = Seat::empty()`, `version += 1`
 
 use stwo::core::fields::m31::M31;
@@ -209,7 +209,7 @@ impl FrameworkEval for LeaveTableAir {
         for constraint in common.limb4_delta_rev(
             &pre_chip_pool,
             &post_chip_pool,
-            &seat_stack,
+            &refund,
             &chip_pool_sub_carry,
         ) {
             eval.add_constraint(constraint);
@@ -251,7 +251,7 @@ pub struct LeaveTableRow {
     pub output_post_addon_pool: [M31; 4],
     /// `refund = stack + pending_addon` 的 ripple-carry bit。
     pub refund_add_carry: [M31; 3],
-    /// `pre_chip_pool = post_chip_pool + stack` 的 ripple-carry bit。
+    /// `pre_chip_pool = post_chip_pool + refund` 的 ripple-carry bit。
     pub chip_pool_sub_carry: [M31; 3],
     /// `pre_addon_pool = post_addon_pool + pending_addon` 的 ripple-carry bit。
     pub addon_pool_sub_carry: [M31; 3],
@@ -280,7 +280,7 @@ impl LeaveTableRow {
             .checked_add(seat_pending_addon)
             .expect("leave_table refund must not overflow");
         assert_eq!(
-            post_chip_pool.checked_add(seat_stack),
+            post_chip_pool.checked_add(refund),
             Some(pre_chip_pool),
             "leave_table chip_pool subtraction must not underflow"
         );
@@ -313,14 +313,14 @@ impl LeaveTableRow {
             // 退款计算字段。
             input_seat_stack: u64_to_m31_limbs(seat_stack),
             input_seat_pending_addon: u64_to_m31_limbs(seat_pending_addon),
-            // chip_pool 守恒：post = pre - stack。
+            // chip_pool 守恒：post = pre - (stack + pending_addon)。
             input_pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
             output_post_chip_pool: u64_to_m31_limbs(post_chip_pool),
             // addon_pool 守恒：post = pre - pending_addon。
             input_pre_addon_pool: u64_to_m31_limbs(pre_addon_pool),
             output_post_addon_pool: u64_to_m31_limbs(post_addon_pool),
             refund_add_carry: compute_add_carries(seat_stack, seat_pending_addon),
-            chip_pool_sub_carry: compute_add_carries(post_chip_pool, seat_stack),
+            chip_pool_sub_carry: compute_add_carries(post_chip_pool, refund),
             addon_pool_sub_carry: compute_add_carries(post_addon_pool, seat_pending_addon),
         }
     }

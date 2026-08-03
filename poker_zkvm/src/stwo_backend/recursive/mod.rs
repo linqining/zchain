@@ -49,6 +49,34 @@
 /// `recursive-verifier` 表示调用方接受该实验性边界，而不是修改本标志。
 pub(crate) const RECURSIVE_AIR_EXTERNAL_AUDIT_COMPLETE: bool = false;
 
+#[cfg(test)]
+static LARGE_STACK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run one of the recursive AIR constraint tests on an explicitly sized Rayon worker stack.
+///
+/// `assert_constraints_on_trace` evaluates rows through Rayon, so merely moving the test body to a
+/// large `std::thread` does not resize the worker that actually builds the debug expression tree.
+/// Use a one-worker local pool instead: the complete closure and all nested Rayon iterators then run
+/// on the same explicitly sized stack.  The shared lock prevents several 128-256 MiB test pools from
+/// competing while the rest of libtest remains parallel.
+#[cfg(test)]
+pub(crate) fn run_large_stack_test(
+    name: &'static str,
+    stack_size: usize,
+    test: impl FnOnce() + Send + 'static,
+) {
+    let _guard = LARGE_STACK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .stack_size(stack_size)
+        .thread_name(move |index| format!("{name}-rayon-{index}"))
+        .build()
+        .expect("large-stack recursive test pool should build");
+    pool.install(test);
+}
+
 pub(crate) mod composition_eval_air;
 pub(crate) mod cpu_transcript_binding_air;
 #[cfg(test)]

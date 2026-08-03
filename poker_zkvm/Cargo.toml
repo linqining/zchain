@@ -20,6 +20,11 @@ path = "src/lib.rs"
 # 测试辅助功能：启用跨 crate 测试辅助函数（如 ELF 构造、指令编码）
 default = []
 test-helpers = []
+# Unsoundness quarantine for the legacy CPU proof APIs. These entry points do not yet bind
+# register-file continuity, authenticated initial memory, or a complete public execution
+# statement. Production/default builds must not expose them; the feature exists only for
+# soundness-remediation tests and recursive-verifier development.
+experimental-cpu-prover = []
 # 启用完整多组件递归验证的非 test 入口。L1 节点只需要该能力，不应链接重型 prover
 # 入口。启用此 feature 表示调用方接受：semantic AIR 已闭环并通过递归回归与 Texas
 # direct-recursive E2E，但尚未经独立密码学审计。

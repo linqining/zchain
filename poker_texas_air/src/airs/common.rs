@@ -639,13 +639,13 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         // P0-2 修复：逐 limb 借位关系 + 借位 booleanity 各自独立约束（此前相加可抵消）。
         let one: E::F = M31::from(1u32).into();
         let base: E::F = M31::from(65536u32).into();
-        let b_in = [
+        let borrow_in = [
             M31::from(0u32).into(),
             borrow[0].clone(),
             borrow[1].clone(),
             borrow[2].clone(),
         ];
-        let b_out = [
+        let borrow_out = [
             borrow[0].clone(),
             borrow[1].clone(),
             borrow[2].clone(),
@@ -656,10 +656,11 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         for i in 0..4 {
             out.push(
                 self.is_active.clone()
-                    * (a[i].clone() + base.clone() * b_in[i].clone()
+                    * (a[i].clone() + base.clone() * borrow_out[i].clone()
                         - b[i].clone()
+                        - borrow_in[i].clone()
                         - diff[i].clone()
-                        - base.clone() * b_out[i].clone()),
+                    ),
             );
         }
         // borrow booleanity（3 条独立）

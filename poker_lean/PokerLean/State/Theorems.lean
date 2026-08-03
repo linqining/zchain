@@ -418,10 +418,10 @@ theorem reset_for_next_hand_preserves_all_invariants (t : TexasPokerTable)
     rw [reset_for_next_hand_pot_zero, reset_for_next_hand_ante_collected,
         reset_for_next_hand_rake_collected, reset_for_next_hand_addon_pool]
     refine ⟨Nat.zero_le _, h_ante, h_rake, ?_, ?_⟩
-    · -- addon_pool ≤ MAX_TOTAL_BET: from total_chips_bound (chip_pool + addon_pool ≤ MAX)
+    · -- addon_pool ≤ MAX_TOTAL_BET: addon_pool 是 chip_pool 子集
       have h_tcb' := h_tcb
       unfold total_chips_bound at h_tcb'
-      exact le_trans (Nat.le_add_left _ _) h_tcb'
+      exact le_trans h_tcb'.2 h_tcb'.1
     · intro s hs
       obtain ⟨x, hx, heq⟩ := List.mem_map.mp hs
       subst heq

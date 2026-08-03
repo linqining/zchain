@@ -39,6 +39,7 @@ use poker_l1::consensus::{
 use poker_l1::error::PokerL1Result;
 use poker_l1::network::{CommitVote, GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
+#[cfg(feature = "recursive-verifier")]
 use poker_l1::offline::zk_verifier::ZkVerifierRegistry;
 use poker_l1::rpc::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcClientInfo, RpcGuard, RpcHandler,
@@ -63,9 +64,17 @@ const DEFAULT_MAX_CONNECTIONS: usize = 128;
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn open_node_with_application_verifiers(config: NodeConfig) -> PokerL1Result<Node> {
-    let mut registry = ZkVerifierRegistry::new();
-    poker_texas_air::l1_verifier::register_texas_stwo_recursive_verifier(&mut registry)?;
-    Node::open_with_zk_verifier_registry(config, registry)
+    #[cfg(feature = "recursive-verifier")]
+    {
+        let mut registry = ZkVerifierRegistry::new();
+        poker_texas_air::l1_verifier::register_texas_stwo_recursive_verifier(&mut registry)?;
+        Node::open_with_zk_verifier_registry(config, registry)
+    }
+
+    #[cfg(not(feature = "recursive-verifier"))]
+    {
+        Node::open(config)
+    }
 }
 
 /// commit certificate 投票累加器（缺口 #3：多 validator 2/3 多签闭环）。

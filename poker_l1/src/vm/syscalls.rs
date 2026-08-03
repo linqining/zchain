@@ -1887,8 +1887,8 @@ mod tests {
     }
 
     #[test]
-    fn test_zk_verify_success_test_only_stwo_stub() {
-        // 此用例只验证 syscall 成功路径；真实 Stwo 格式拒绝由 zk_verifier 单测覆盖。
+    fn test_zk_verify_stub_status_fails_closed() {
+        // Stub 只保留格式与 gas 路径，不能被 syscall 解释为密码学验证成功。
         let mut heap = vec![0u8; 4096];
         let mut mapping = make_test_mapping(&mut heap);
         let registry = make_test_zk_registry();
@@ -1910,9 +1910,9 @@ mod tests {
             pio_bytes.len() as u64,
             &mut mapping,
         )
-        .expect("Stub 验证应成功");
+        .expect("Stub 状态应返回 fail-closed 结果而不是 trap");
 
-        assert_eq!(result, 0, "Stub 状态下合法 proof 应验证通过");
+        assert_eq!(result, 1, "Stub 状态不得接受格式正确但未验证的 proof");
         // Hypernova gas = 300000（Phase 11.5 调整）
         assert_eq!(ctx.gas_used(), 300_000);
     }
@@ -1942,9 +1942,9 @@ mod tests {
                 pio_bytes.len() as u64,
                 &mut mapping,
             )
-            .expect("Stub 验证应成功");
+            .expect("Stub 状态应完成格式检查与 gas 分派");
 
-            assert_eq!(result, 0, "scheme {scheme_id} 应验证通过");
+            assert_eq!(result, 1, "scheme {scheme_id} 在 Stub 状态必须 fail closed");
             assert_eq!(
                 ctx.gas_used(),
                 expected_gas,

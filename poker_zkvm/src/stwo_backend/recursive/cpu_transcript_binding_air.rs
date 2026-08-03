@@ -1060,65 +1060,63 @@ mod tests {
 
     #[test]
     fn fixed_cpu_transcript_binding_component_satisfies_air() {
-        let fixture = fixture();
-        let binding = CpuTranscriptBindingWitness::new(
-            &fixture.public_inputs,
-            &fixture.sampled_values,
-            &fixture.draw_results,
-            fixture.proof_of_work,
-            fixture.pow_hash,
-        )
-        .unwrap();
-        let lookup_elements = cairo_air::relations::CommonLookupElements::dummy();
-        let (ids, preprocessed) = binding.preprocessed_columns();
-        let (interaction, claimed_sum) = binding.write_interaction_trace(&lookup_elements);
-        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-        let component = FrameworkComponent::new(
-            &mut allocator,
-            CpuTranscriptBindingAir::new(binding.log_size, binding.n_rows, lookup_elements),
-            claimed_sum,
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "fixed-cpu-transcript-binding-air",
+            128 * 1024 * 1024,
+            || {
+                let fixture = fixture();
+                let binding = CpuTranscriptBindingWitness::new(
+                    &fixture.public_inputs,
+                    &fixture.sampled_values,
+                    &fixture.draw_results,
+                    fixture.proof_of_work,
+                    fixture.pow_hash,
+                )
+                .unwrap();
+                let lookup_elements = cairo_air::relations::CommonLookupElements::dummy();
+                let (ids, preprocessed) = binding.preprocessed_columns();
+                let (interaction, claimed_sum) = binding.write_interaction_trace(&lookup_elements);
+                let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+                let component = FrameworkComponent::new(
+                    &mut allocator,
+                    CpuTranscriptBindingAir::new(binding.log_size, binding.n_rows, lookup_elements),
+                    claimed_sum,
+                );
+                let trace = TreeVec::new(vec![
+                    preprocessed
+                        .into_iter()
+                        .map(|evaluation| evaluation.values.to_cpu())
+                        .collect(),
+                    vec![],
+                    interaction
+                        .into_iter()
+                        .map(|evaluation| evaluation.values.to_cpu())
+                        .collect(),
+                ]);
+                assert_component(&component, &trace.as_cols_ref());
+            },
         );
-        let trace = TreeVec::new(vec![
-            preprocessed
-                .into_iter()
-                .map(|evaluation| evaluation.values.to_cpu())
-                .collect(),
-            vec![],
-            interaction
-                .into_iter()
-                .map(|evaluation| evaluation.values.to_cpu())
-                .collect(),
-        ]);
-        assert_component(&component, &trace.as_cols_ref());
     }
 
     #[test]
     fn fixed_cpu_transcript_usage_rejects_root_and_sample_relabelling() {
-        let fixture = fixture();
-        let mut changed_inputs = fixture.public_inputs.clone();
-        changed_inputs.l1_commitments[1] += FieldElement252::ONE;
-        let changed_binding = CpuTranscriptBindingWitness::new(
-            &changed_inputs,
-            &fixture.sampled_values,
-            &fixture.draw_results,
-            fixture.proof_of_work,
-            fixture.pow_hash,
-        )
-        .unwrap();
-        let [
-            poseidon,
-            transcript,
-            binding,
-            merkle,
-            merkle_binding,
-            merkle_leaf,
-            quotient,
-            fri_fold,
-        ] = lookup_sums(&fixture, &changed_binding);
-        assert!(
-            ensure_lookup_balanced(
-                poseidon,
-                &[
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "fixed-cpu-transcript-root-sample-relabel",
+            128 * 1024 * 1024,
+            || {
+                let fixture = fixture();
+                let mut changed_inputs = fixture.public_inputs.clone();
+                changed_inputs.l1_commitments[1] += FieldElement252::ONE;
+                let changed_binding = CpuTranscriptBindingWitness::new(
+                    &changed_inputs,
+                    &fixture.sampled_values,
+                    &fixture.draw_results,
+                    fixture.proof_of_work,
+                    fixture.pow_hash,
+                )
+                .unwrap();
+                let [
+                    poseidon,
                     transcript,
                     binding,
                     merkle,
@@ -1126,35 +1124,35 @@ mod tests {
                     merkle_leaf,
                     quotient,
                     fri_fold,
-                ],
-            )
-            .is_err()
-        );
+                ] = lookup_sums(&fixture, &changed_binding);
+                assert!(
+                    ensure_lookup_balanced(
+                        poseidon,
+                        &[
+                            transcript,
+                            binding,
+                            merkle,
+                            merkle_binding,
+                            merkle_leaf,
+                            quotient,
+                            fri_fold,
+                        ],
+                    )
+                    .is_err()
+                );
 
-        let mut changed_samples = fixture.sampled_values.clone();
-        changed_samples[0] += SecureField::from(1u32);
-        let changed_binding = CpuTranscriptBindingWitness::new(
-            &fixture.public_inputs,
-            &changed_samples,
-            &fixture.draw_results,
-            fixture.proof_of_work,
-            fixture.pow_hash,
-        )
-        .unwrap();
-        let [
-            poseidon,
-            transcript,
-            binding,
-            merkle,
-            merkle_binding,
-            merkle_leaf,
-            quotient,
-            fri_fold,
-        ] = lookup_sums(&fixture, &changed_binding);
-        assert!(
-            ensure_lookup_balanced(
-                poseidon,
-                &[
+                let mut changed_samples = fixture.sampled_values.clone();
+                changed_samples[0] += SecureField::from(1u32);
+                let changed_binding = CpuTranscriptBindingWitness::new(
+                    &fixture.public_inputs,
+                    &changed_samples,
+                    &fixture.draw_results,
+                    fixture.proof_of_work,
+                    fixture.pow_hash,
+                )
+                .unwrap();
+                let [
+                    poseidon,
                     transcript,
                     binding,
                     merkle,
@@ -1162,9 +1160,23 @@ mod tests {
                     merkle_leaf,
                     quotient,
                     fri_fold,
-                ],
-            )
-            .is_err()
+                ] = lookup_sums(&fixture, &changed_binding);
+                assert!(
+                    ensure_lookup_balanced(
+                        poseidon,
+                        &[
+                            transcript,
+                            binding,
+                            merkle,
+                            merkle_binding,
+                            merkle_leaf,
+                            quotient,
+                            fri_fold,
+                        ],
+                    )
+                    .is_err()
+                );
+            },
         );
     }
 

@@ -19,10 +19,7 @@ mod circle_point_serde {
     use stwo::core::circle::CirclePoint;
     use stwo::core::fields::qm31::SecureField;
 
-    pub fn serialize<S>(
-        point: &CirclePoint<SecureField>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(point: &CirclePoint<SecureField>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -42,9 +39,7 @@ mod circle_point_serde {
 ///
 /// 递归 verifier 不能接受 prover 自报的 component layout 或 transcript schedule；每个
 /// 变体必须在代码中固定 commitments、interaction 消息、mask points 和 composition AIR。
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecursiveVerifierProgram {
     /// `prove_cpu_trace` / `verify_cpu_proof` 的单组件、无 interaction CPU verifier。
     #[default]
@@ -181,9 +176,7 @@ impl Channel for RecursiveStatementRecorder {
 /// `column_log_sizes` 使用提交前的多项式 log degree；Stwo verifier 会为每列加上
 /// `config.fri_config.log_blowup_factor`，再结合 `config.lifting_log_size` 得到 Merkle
 /// tree height。列顺序必须与 prover 调用 `tree_builder.extend_evals` 的顺序一致。
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecursiveTreeMetadata {
     /// 该 commitment tree 中各列的多项式 log degree。
     pub column_log_sizes: Vec<u32>,

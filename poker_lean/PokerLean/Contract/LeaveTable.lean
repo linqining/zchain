@@ -16,7 +16,7 @@ namespace PokerLean
 5. 退款：`refund = seat.stack + seat.pending_addon`
 6. 资金守恒：
    - `addon_pool -= pending_addon`
-   - `chip_pool -= seat.stack`
+   - `chip_pool -= refund`，其中 `refund = seat.stack + seat.pending_addon`
 7. 座位清空：`seat = Seat::empty()`
 8. `table.bump_version()` — version += 1
 -/
@@ -53,7 +53,9 @@ def ContractLeaveTable
     i < pre.max_players →
     post.get_seat i = pre.get_seat i) ∧
   -- 资金守恒
-  post.chip_pool = pre.chip_pool - (pre.get_seat params.seat_index).stack ∧
+  post.chip_pool = pre.chip_pool -
+    ((pre.get_seat params.seat_index).stack +
+      (pre.get_seat params.seat_index).pending_addon) ∧
   post.addon_pool = pre.addon_pool - (pre.get_seat params.seat_index).pending_addon ∧
   -- version 递增
   post.version = pre.version + 1 ∧

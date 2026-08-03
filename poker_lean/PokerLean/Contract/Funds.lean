@@ -16,10 +16,11 @@ open TexasPoker.Constants
 1. `seat_index < max_players`
 2. `amount > 0`
 3. `seat.is_occupied()` — 座位必须被占用
-4. **全局上界**：`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`（溢出修复）
+4. **全局上界**：`chip_pool + amount <= MAX_TOTAL_BET`（`chip_pool` 已是完整锁仓）
 5. `seat.pending_addon += amount`
-6. `table.addon_pool += amount`（资金守恒）
-7. `table.bump_version()` — version saturating_add(1)
+6. `table.chip_pool += amount`（完整 TableVault 锁仓增加）
+7. `table.addon_pool += amount`（pending addon 子集增加）
+8. `table.bump_version()` — version saturating_add(1)
 -/
 
 /-- addon 参数 -/
@@ -39,11 +40,12 @@ def ContractAddon
   params.amount > 0 ∧
   (pre.get_seat params.seat_index).is_occupied = true ∧
   -- 全局上界检查（对齐合约 apply_addon 溢出修复）
-  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET ∧
+  pre.chip_pool + params.amount ≤ MAX_TOTAL_BET ∧
   -- 后置状态
   (post.get_seat params.seat_index).pending_addon =
     (pre.get_seat params.seat_index).pending_addon + params.amount ∧
-  -- 资金守恒
+  -- 完整锁仓与 pending addon 子集同步增加
+  post.chip_pool = pre.chip_pool + params.amount ∧
   post.addon_pool = pre.addon_pool + params.amount ∧
   -- version 递增
   post.version = pre.version + 1 ∧
@@ -64,10 +66,11 @@ def ContractAddon
 1. `seat_index < max_players`
 2. `amount > 0`
 3. `seat.is_occupied()` — 座位必须被占用
-4. **全局上界**：`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`（溢出修复）
+4. **全局上界**：`chip_pool + amount <= MAX_TOTAL_BET`（`chip_pool` 已是完整锁仓）
 5. `seat.stack += amount`（立即生效）
-6. `table.addon_pool += amount`（资金守恒）
-7. `table.bump_version()` — version saturating_add(1)
+6. `table.chip_pool += amount`（完整 TableVault 锁仓增加）
+7. `table.addon_pool` 不变（rebuy 不属于 pending addon）
+8. `table.bump_version()` — version saturating_add(1)
 -/
 
 /-- rebuy 参数 -/
@@ -87,12 +90,13 @@ def ContractRebuy
   params.amount > 0 ∧
   (pre.get_seat params.seat_index).is_occupied = true ∧
   -- 全局上界检查（对齐合约 apply_rebuy 溢出修复）
-  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET ∧
+  pre.chip_pool + params.amount ≤ MAX_TOTAL_BET ∧
   -- 后置状态
   (post.get_seat params.seat_index).stack =
     (pre.get_seat params.seat_index).stack + params.amount ∧
-  -- 资金守恒
-  post.addon_pool = pre.addon_pool + params.amount ∧
+  -- 完整锁仓增加；pending addon 子集保持不变
+  post.chip_pool = pre.chip_pool + params.amount ∧
+  post.addon_pool = pre.addon_pool ∧
   -- version 递增
   post.version = pre.version + 1 ∧
   -- 其他座位不变
@@ -126,7 +130,7 @@ theorem rebuy_amount_pos (pre : TexasPokerTable)
 theorem addon_within_bound (pre : TexasPokerTable)
     (params : AddonParams) (post : TexasPokerTable)
     (h : ContractAddon pre params post) :
-  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET := by
+  pre.chip_pool + params.amount ≤ MAX_TOTAL_BET := by
   rcases h with ⟨_, _, _, h_bound, _⟩
   exact h_bound
 
@@ -134,7 +138,7 @@ theorem addon_within_bound (pre : TexasPokerTable)
 theorem rebuy_within_bound (pre : TexasPokerTable)
     (params : RebuyParams) (post : TexasPokerTable)
     (h : ContractRebuy pre params post) :
-  pre.chip_pool + pre.addon_pool + params.amount ≤ MAX_TOTAL_BET := by
+  pre.chip_pool + params.amount ≤ MAX_TOTAL_BET := by
   rcases h with ⟨_, _, _, h_bound, _⟩
   exact h_bound
 

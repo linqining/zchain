@@ -12,7 +12,7 @@ namespace PokerLean
 
 对齐 `poker_texas_air/src/airs/lifecycle/join_table.rs`。
 
-## AIR 列布局（共 26 业务列）
+## AIR 列布局（共 50 业务列）
 
 通用列 37 个 + 业务列：
 - `INPUT_SEAT_INDEX`（1）
@@ -23,6 +23,10 @@ namespace PokerLean
 - `INPUT_BIG_BLIND`（4 limb）— Gap 闭合：buy_in >= big_blind
 - `INPUT_PRE_CHIP_POOL`（4 limb）— Gap 闭合：资金守恒
 - `OUTPUT_POST_CHIP_POOL`（4 limb）— Gap 闭合：资金守恒
+- `INPUT_PRE_ADDON_POOL`（4 limb）— 状态绑定；不重复计入全局上界
+- `BOUND_DIFF` + carry（10）— `chip_pool + buy_in ≤ MAX_TOTAL_BET`
+- `GE_DIFF` + borrow（7）— `buy_in ≥ big_blind`
+- `CHIP_POOL_ADD_CARRY`（3）— `chip_pool += buy_in` ripple carry
 
 ## 闭合的 Gap
 
@@ -52,14 +56,16 @@ structure JoinTableMethodColumns where
   output_post_chip_pool : M31 × M31 × M31 × M31
   /-- 输出：座位 stack（4 limb） -/
   output_seat_stack : M31 × M31 × M31 × M31
-  /-- 输入：pre addon_pool（4 limb）- 用于全局上界检查 -/
+  /-- 输入：pre addon_pool（4 limb）- 用于状态绑定，不重复计入全局上界 -/
   input_pre_addon_pool : M31 × M31 × M31 × M31
-  /-- 输入：bound_diff（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + addon_pool + buy_in） -/
+  /-- 输入：bound_diff（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + buy_in） -/
   input_bound_diff : M31 × M31 × M31 × M31
   /-- 输入：bound carry_lo（3 个低位 bit）— 2-bit carry 分解的 lo 部分 -/
   input_bound_carry_lo : M31 × M31 × M31
   /-- 输入：bound carry_hi（3 个高位 bit）— 2-bit carry 分解的 hi 部分 -/
   input_bound_carry_hi : M31 × M31 × M31
+  /-- chip_pool += buy_in 的 3 个 ripple-carry bit。 -/
+  chip_pool_add_carry : M31 × M31 × M31
 deriving Repr
 
 /-- 从 AIR 行提取前状态表 -/
@@ -187,14 +193,8 @@ def BuyInGeBigBlind (ext : JoinTableMethodColumns) : Prop :=
 /-- chip_pool 守恒约束：post_chip_pool = pre_chip_pool + buy_in。
     对齐 Rust 合约 `dispatch_join_table` 的 `table.chip_pool += input.buy_in`。 -/
 def ChipPoolConservation (ext : JoinTableMethodColumns) : Prop :=
-  decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
-      ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2
-  =
-  decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
-      ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2
-  +
-  decodeU64 ext.input_buy_in.1 ext.input_buy_in.2.1
-      ext.input_buy_in.2.2.1 ext.input_buy_in.2.2.2
+  Limb4Delta ext.input_pre_chip_pool ext.output_post_chip_pool ext.input_buy_in
+    ext.chip_pool_add_carry
 
 /-- player_addr 非空约束：玩家地址 ≠ 0（即 ≠ EMPTY_PLAYER）。
     对齐 Rust 合约 `dispatch_join_table` 中 `input.player ≠ EMPTY_PLAYER` 的隐含前置条件
@@ -228,9 +228,11 @@ def JoinTableMethodConstraints
   -- 约束 5：player_addr 非空（防止以 EMPTY_PLAYER 入座）
   PlayerAddrNonEmpty ext ∧
   -- 约束 6（溢出防护，degree-2）：全局上界 range check
-  -- 验证 chip_pool + addon_pool + buy_in + diff = MAX_TOTAL_BET（逐 limb + 2-bit carry）
+  -- 验证 chip_pool + buy_in + diff = MAX_TOTAL_BET（逐 limb + 2-bit carry）。
+  -- addon_pool 是 chip_pool 的 pending-addon 子集，不能重复计入。
   -- 对齐 Rust AIR join_table.rs 的 bound_check_4limb 与合约 apply_join 的上界检查。
-  BoundCheck4Limb ext.input_pre_chip_pool ext.input_pre_addon_pool
+  BoundCheck4Limb ext.input_pre_chip_pool
+    (M31.zero, M31.zero, M31.zero, M31.zero)
     ext.input_buy_in ext.input_bound_diff
     ext.input_bound_carry_lo ext.input_bound_carry_hi ∧
   -- 状态根一致性

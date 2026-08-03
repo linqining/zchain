@@ -99,6 +99,14 @@ private lemma join_post_chip_pool
   simp [extractPostTableFromJoinTableAir, extractPreTableFromJoinTableAir,
         TexasPokerTable.update_seat]
 
+private lemma join_post_addon_pool
+    (row : CommonRow) (ext : JoinTableMethodColumns) (max_players : Nat) (seat_index : Nat) :
+    (extractPostTableFromJoinTableAir row ext max_players seat_index).addon_pool =
+      decodeU64 ext.input_pre_addon_pool.1 ext.input_pre_addon_pool.2.1
+        ext.input_pre_addon_pool.2.2.1 ext.input_pre_addon_pool.2.2.2 := by
+  simp [extractPostTableFromJoinTableAir, extractPreTableFromJoinTableAir,
+        TexasPokerTable.update_seat]
+
 private lemma join_post_max_players
     (row : CommonRow) (ext : JoinTableMethodColumns) (max_players : Nat) (seat_index : Nat) :
     (extractPostTableFromJoinTableAir row ext max_players seat_index).max_players = max_players := by
@@ -245,7 +253,9 @@ theorem join_table_air_sound :
                       decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
                         ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2 +
                       decodeU64 ext.input_buy_in.1 ext.input_buy_in.2.1
-                        ext.input_buy_in.2.2.1 ext.input_buy_in.2.2.2 := h_chip_pool
+                        ext.input_buy_in.2.2.1 ext.input_buy_in.2.2.2 := by
+    exact limb4_delta_implies_decode_eq ext.input_pre_chip_pool ext.output_post_chip_pool
+      ext.input_buy_in ext.chip_pool_add_carry h_chip_pool
   have h_player_ne : decodeU64 ext.input_player_addr.1 ext.input_player_addr.2.1
                        ext.input_player_addr.2.2.1 ext.input_player_addr.2.2.2 ≠ 0 :=
     h_player_nonempty
@@ -262,9 +272,9 @@ theorem join_table_air_sound :
         is_waiting := false, left_during_hand := false,
         pending_addon := 0, time_bank_ms := 0 } :=
     join_post_get_seat_at_index row ext max_players expected_seat_index h_seat_lt
-  -- 6. 证明 ContractJoinTable 的 22 个合取
+  -- 6. 证明 ContractJoinTable 的 23 个合取
   unfold ContractJoinTable
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · -- 1. pre.round_state = ROUND_WAITING
     rw [join_pre_round_state, h_rs_val]; rfl
   · -- 2. params.seat_index < pre.max_players
@@ -274,11 +284,9 @@ theorem join_table_air_sound :
     rfl
   · -- 4. params.buy_in ≥ pre.big_blind
     rw [join_params_buy_in, join_pre_big_blind]; exact h_buy_in'
-  · -- 5. pre.chip_pool + pre.addon_pool + params.buy_in ≤ MAX_TOTAL_BET
-    -- 由 BoundCheck4Limb + bound_check_4limb_le 推出全局上界
-    rw [join_pre_chip_pool, join_pre_addon_pool, join_params_buy_in]
-    exact bound_check_4limb_le ext.input_pre_chip_pool ext.input_pre_addon_pool
-      ext.input_buy_in ext.input_bound_diff
+  · -- 5. pre.chip_pool + params.buy_in ≤ MAX_TOTAL_BET
+    rw [join_pre_chip_pool, join_params_buy_in]
+    exact bound_check_4limb_zero_le ext.input_pre_chip_pool ext.input_buy_in ext.input_bound_diff
       ext.input_bound_carry_lo ext.input_bound_carry_hi h_bound_check
   · -- 6. ∀ i, (pre.get_seat i).player ≠ params.player
     intro i h_lt
@@ -308,17 +316,19 @@ theorem join_table_air_sound :
     exact join_post_get_seat_other row ext max_players expected_seat_index i h_ne h_lt
   · -- 16. post.chip_pool = pre.chip_pool + params.buy_in
     rw [join_post_chip_pool, join_pre_chip_pool, join_params_buy_in]; exact h_chip_pool'
-  · -- 17. post.version = pre.version + 1
+  · -- 17. post.addon_pool = pre.addon_pool
+    rw [join_post_addon_pool, join_pre_addon_pool]
+  · -- 18. post.version = pre.version + 1
     rw [join_post_version, join_pre_version]; exact h_ver'
-  · -- 18. post.round_state = pre.round_state
+  · -- 19. post.round_state = pre.round_state
     rw [join_post_round_state, join_pre_round_state, h_rs']
-  · -- 19. post.max_players = pre.max_players
+  · -- 20. post.max_players = pre.max_players
     rw [join_post_max_players, join_pre_max_players]
-  · -- 20. post.big_blind = pre.big_blind
+  · -- 21. post.big_blind = pre.big_blind
     rw [join_post_big_blind, join_pre_big_blind]
-  · -- 21. post.small_blind = pre.small_blind
+  · -- 22. post.small_blind = pre.small_blind
     rw [join_post_small_blind, join_pre_small_blind]
-  · -- 22. post.hand_id = pre.hand_id
+  · -- 23. post.hand_id = pre.hand_id
     rw [join_post_hand_id, join_pre_hand_id]
 
 end PokerLean

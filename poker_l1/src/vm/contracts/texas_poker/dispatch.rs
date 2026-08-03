@@ -1455,10 +1455,9 @@ fn dispatch_reset_for_next_hand(
 /// 调用 `state_machine::apply_addon`：累加 `pending_addon`，不动 `stack`。
 /// 在下一手 `reset_for_next_hand` 第一阶段合并到 `stack`。
 ///
-/// TODO(P1-1 资金来源)：当前 addon 只改 `pending_addon` + `addon_pool` 记账，
-/// **未校验真实资金到账**（无 Treasury 锁仓 / PaymentProof）。完整资金方案
-/// 待独立 Treasury 合约统一处理（deposit → lock → addon/rebuy → settle）。
-/// 在此之前，caller 权限校验（caller == seat 玩家）是唯一的滥用防线。
+/// 资金来源由 Texas Poker precompile 统一校验：executor 传入 NativeCoin
+/// UTXO，precompile 按 [`required_funding`] 消费 amount、生成确定性 change，
+/// 并校验 `chip_pool` 的 TableVault 转移与实际到账一致。
 fn dispatch_addon(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
@@ -1474,9 +1473,9 @@ fn dispatch_addon(
 ///
 /// 调用 `state_machine::apply_rebuy`：直接改 `stack`（影响下一动作可用筹码）。
 ///
-/// TODO(P1-1 资金来源)：同 `addon`，rebuy 立即增加 stack 但未校验资金来源。
-/// **这是已知的资金凭空增发风险**，必须在接入 Treasury 前限制 rebuy 仅在
-/// 测试/dev 链使用，mainnet 启用前由 governance 强制禁用或接入 Treasury。
+/// 资金来源与 `addon` 一样由 Texas Poker precompile 消费 NativeCoin UTXO；
+/// rebuy 金额立即进入 `stack` 和完整 TableVault `chip_pool`，不进入
+/// 仅记录 pending addon 子集的 `addon_pool`。
 fn dispatch_rebuy(
     context: &DispatchContext,
     table: &mut TexasPokerTable,

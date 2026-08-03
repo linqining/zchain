@@ -534,24 +534,22 @@ impl Syscall for ReadStateSyscall {
     }
 }
 
-// ===== 注册全部 host syscall 的辅助函数 =====
+// ===== Host syscall registry constructors =====
 
-/// 创建注册全部 host syscall 的 [`SyscallRegistry`](crate::syscalls::SyscallRegistry)。
+/// 注册可用于生产执行的 host syscall。
 ///
-/// 包含：
-/// - 基础 syscall（0x01-0x0A，10 个）
-/// - BLS12-381 syscall（0x10-0x15，6 个，E2E Phase 1）
-/// - BLS12-381 扩展 syscall（0x16-0x1B，6 个，Phase 3）
-/// - GameState mock syscall（0x20-0x21，2 个，E2E Phase 1）
-/// - Game-specific syscall（0x30-0x32，3 个，E2E Phase 1）
-/// - Mental Poker proof verify + hash syscall（0x33-0x36，4 个，Phase 4）
+/// 该注册表刻意排除：
+/// - `GameStateRead` / `GameStateWrite`：仅用于在 zkVM 内模拟 ObjectDb 的 E2E mock；
+/// - `ShuffleVerify`：仅检查牌组排列和 proof 非空/非全零的 MVP verifier。
+///
+/// 安全的牌编码/解码 syscall 与真实 Mental Poker proof verifier 仍可用。测试若需要
+/// mock/MVP syscall，必须显式使用 [`create_test_registry`]，且该函数只在单元测试或
+/// `test-helpers` feature 下编译。
 ///
 /// 注：0x0B-0x0F（keccak256/modexp/merkle_verify/ed25519/bn254_pairing）暂无 host 实现，
-/// 注册表对应 slot 为 None，dispatch 时返回 `Unregistered` 错误。
-///
-/// 供 executor 和测试使用。
+/// 注册表对应 slot 为 None，dispatch 时返回 `not registered` 错误。
 #[must_use]
-pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
+pub fn create_production_registry() -> crate::syscalls::SyscallRegistry {
     let mut registry = crate::syscalls::SyscallRegistry::new_empty();
     // 基础 syscall（0x01-0x0A，10 个 host 实现）
     registry.register(Box::new(ReadInputSyscall)).unwrap();
@@ -618,22 +616,12 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
             crate::syscalls::bls12381::Bls12381G1GeneratorSyscall,
         ))
         .unwrap();
-    // E2E Phase 1 — GameState mock syscall（0x20-0x21，2 个）
-    registry
-        .register(Box::new(crate::syscalls::game_state::GameStateReadSyscall))
-        .unwrap();
-    registry
-        .register(Box::new(crate::syscalls::game_state::GameStateWriteSyscall))
-        .unwrap();
-    // E2E Phase 1 — Game-specific syscall（0x30-0x32，3 个）
+    // Production-safe game-specific syscall（0x30-0x31，2 个）
     registry
         .register(Box::new(crate::syscalls::game::CardEncodeSyscall))
         .unwrap();
     registry
         .register(Box::new(crate::syscalls::game::CardDecodeSyscall))
-        .unwrap();
-    registry
-        .register(Box::new(crate::syscalls::game::ShuffleVerifySyscall))
         .unwrap();
     // Phase 4 — Mental Poker proof verify + hash syscall（0x33-0x36，4 个）
     registry
@@ -657,6 +645,26 @@ pub fn create_full_registry() -> crate::syscalls::SyscallRegistry {
     registry
 }
 
+/// 创建包含 E2E mock/MVP syscall 的显式测试注册表。
+///
+/// 此入口不参与普通库或生产二进制编译，避免调用方误把 GameState mock 或 MVP
+/// `ShuffleVerify` 当成生产验证能力。
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn create_test_registry() -> crate::syscalls::SyscallRegistry {
+    let mut registry = create_production_registry();
+    registry
+        .register(Box::new(crate::syscalls::game_state::GameStateReadSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::game_state::GameStateWriteSyscall))
+        .unwrap();
+    registry
+        .register(Box::new(crate::syscalls::game::ShuffleVerifySyscall))
+        .unwrap();
+    registry
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,9 +673,9 @@ mod tests {
 
     // ===== 辅助函数 =====
 
-    /// 创建注册全部 10 个 host syscall 的 registry。
+    /// 创建显式包含 E2E mock/MVP syscall 的测试 registry。
     fn full_registry() -> SyscallRegistry {
-        create_full_registry()
+        create_test_registry()
     }
 
     /// 写入字节到 VM 内存。

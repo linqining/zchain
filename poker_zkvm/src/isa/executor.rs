@@ -155,7 +155,7 @@ pub fn execute_elf_with_limits(
 /// # 执行循环
 ///
 /// 1. `validate_elf` → `load_elf`
-/// 2. 创建 `SyscallRegistry::new()`（注册全部 10 个 syscall）
+/// 2. 创建 `SyscallRegistry::new()`（仅注册 production-safe syscall）
 /// 3. 创建 `SyscallContext`（注入 input + randomness + host_state）
 /// 4. 循环：halt 检查 → 步数检查 → 内存检查 → fetch → decode → execute → ECALL 分派
 /// 5. 返回 `ExecuteResult { trace, output, events, logs }`
@@ -261,12 +261,19 @@ pub fn execute_elf_with_limits_and_config(
         let insn = crate::isa::decode(word)?;
         ctx.step_index = trace.len() as u64;
 
-        let log = crate::isa::execute(&mut state, insn.clone())?;
+        let mut log = crate::isa::execute(&mut state, insn.clone())?;
 
         // ECALL → syscall 分派
         if matches!(insn, crate::isa::Instruction::Ecall) {
             let syscall_id = state.read_register(crate::syscalls::REG_A7);
             registry.dispatch(syscall_id, &mut ctx, &mut state)?;
+            // `isa::execute` records the ECALL instruction's post-state before the host
+            // syscall is dispatched. Refresh the register snapshot so the ECALL Step reflects
+            // syscall return values such as read_input's a0/a1 write-back.
+            //
+            // Syscall memory effects still require the dedicated ECALL/precompile relation;
+            // they cannot be reconstructed from this instruction-local StepLog alone.
+            log.registers = state.registers;
         }
 
         // 组装 Step 并追加
@@ -422,6 +429,18 @@ mod tests {
         let result = execute_elf(&elf, b"hello").unwrap();
         assert_eq!(result.trace.len(), 5, "5 instructions");
         assert_eq!(result.output, b"hello", "echo: input == output");
+
+        let read_input_ecall = result.trace.step(2).unwrap();
+        assert_eq!(
+            read_input_ecall.registers[crate::syscalls::REG_A0 as usize],
+            crate::isa::state::HEAP_START,
+            "read_input ECALL trace must contain the syscall-updated a0 pointer"
+        );
+        assert_eq!(
+            read_input_ecall.registers[crate::syscalls::REG_A1 as usize],
+            5,
+            "read_input ECALL trace must contain the syscall-updated a1 length"
+        );
     }
 
     #[test]

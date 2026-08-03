@@ -3,7 +3,12 @@
 //! 严格遵循 `.trae/documents/stwo_phase2_cpu_air_design.md` Step 2.5：
 //! - 集成 Stwo 原生 Prover/Verifier API
 //! - 输入 `NativeTrace`（132 列（v3.5）× 2^log_size 行）→ 输出 `StarkProof`
-//! - prove/verify roundtrip 的主入口
+//! - prove/verify roundtrip 的实验入口
+//!
+//! CPU proof entry points are quarantined behind `experimental-cpu-prover` outside this
+//! crate's unit tests. The current CPU statement does not yet prove register-file continuity,
+//! authenticated initial memory, or complete ECALL effects, so it must not be exposed by a
+//! default production build.
 //!
 //! ## 工作流
 //!
@@ -41,6 +46,7 @@ use stwo::core::vcs_lifted::poseidon252_merkle::{
 };
 use stwo::core::verifier::{VerificationError, verify};
 use stwo::prover::backend::simd::SimdBackend;
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, PackedBaseField};
 use stwo::prover::backend::simd::qm31::PackedSecureField;
@@ -48,22 +54,30 @@ use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::{ProvingError, prove};
+#[cfg(test)]
+use stwo_constraint_framework::FrameworkEval;
 use stwo_constraint_framework::{
-    FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, TraceLocationAllocator,
+    FrameworkComponent, LogupTraceGenerator, Relation, TraceLocationAllocator,
 };
 
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 use super::column_layout_v2::{
     COL_MEM_ADDR_BASE, COL_PC_BASE, COL_PC_NEXT_BASE, COL_VALUE_A_EFF_BASE, COL_VALUE_B_BASE,
     COL_VALUE_C_BASE, IS_LOAD, IS_PADDING, IS_STORE, NUM_COLUMNS, RANGE_CHECK_COL_INDICES,
     WORD_LIMB_COUNT,
 };
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 use super::cpu_air::CpuAir;
-use super::lookups::{EcallLookup, MemoryLookup, RangeCheckLookup};
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
+use super::lookups::{MemoryLookup, RangeCheckLookup};
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 use super::memory_air::{
     MEM_COL_ADDR_BASE, MEM_COL_IS_PADDING, MEM_COL_IS_STORE, MEM_COL_VAL_CUR_BASE, MEM_NUM_COLUMNS,
     MemoryAir,
 };
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 use super::range_check_air::{RC_COL_MULTIPLICITY, RC_COL_VALUE, RC_NUM_COLUMNS, RangeCheckAir};
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 use super::trace_native::{
     MemoryTrace, NativeTrace, gen_range_check_air_trace, memory_trace_to_evaluations,
     range_check_trace_to_evaluations,
@@ -89,6 +103,7 @@ pub type CpuProof = StarkProof<Poseidon252MerkleHasher>;
 ///
 /// # 返回
 /// `NUM_COLUMNS`（v3.5 = 132）个 `CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>` 列
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 fn native_trace_to_evaluations(
     trace: &NativeTrace,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
@@ -114,6 +129,24 @@ fn native_trace_to_evaluations(
 // Prover 主入口
 // ===========================================================================
 
+#[cfg(test)]
+static CPU_PROVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+static CPU_PROVER_TEST_POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn cpu_prover_test_pool() -> &'static rayon::ThreadPool {
+    CPU_PROVER_TEST_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .stack_size(128 * 1024 * 1024)
+            .thread_name(|index| format!("cpu-prover-test-rayon-{index}"))
+            .build()
+            .expect("CPU prover test pool should build")
+    })
+}
+
 /// 生成 CPU trace 的 Stwo STARK 证明。
 ///
 /// # 参数
@@ -133,7 +166,24 @@ fn native_trace_to_evaluations(
 /// let native_trace = trace_to_native(&emulator_trace);
 /// let proof = prove_cpu_trace(&native_trace).expect("prove failed");
 /// ```
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 pub fn prove_cpu_trace(trace: &NativeTrace) -> Result<CpuProof, ProvingError> {
+    #[cfg(test)]
+    {
+        let _guard = CPU_PROVER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return cpu_prover_test_pool().install(|| prove_cpu_trace_inner(trace));
+    }
+
+    #[cfg(not(test))]
+    {
+        prove_cpu_trace_inner(trace)
+    }
+}
+
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
+fn prove_cpu_trace_inner(trace: &NativeTrace) -> Result<CpuProof, ProvingError> {
     let log_size = trace.log_size;
 
     // 1. PCS 配置 + twiddles 预计算
@@ -193,6 +243,7 @@ pub fn prove_cpu_trace(trace: &NativeTrace) -> Result<CpuProof, ProvingError> {
 /// let proof = prove_cpu_trace(&native_trace)?;
 /// verify_cpu_proof(proof, native_trace.log_size)?;
 /// ```
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 pub fn verify_cpu_proof(proof: CpuProof, log_size: u32) -> Result<(), VerificationError> {
     let config = PcsConfig::default();
 
@@ -316,6 +367,7 @@ pub struct CpuMemoryProof {
 ///
 /// # 返回
 /// (4 个 CircleEvaluation, claimed_sum) — 4 列即 SecureField 的 4 个坐标
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 fn gen_cpu_interaction_trace(
     cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
@@ -377,6 +429,7 @@ fn gen_cpu_interaction_trace(
 /// padding 行 multiplicity = 0（不贡献 sum），确保 CPU padding 行（multiplicity = 0）
 /// 与 Memory padding 行（multiplicity = 0）保持一致，使 `claimed_sum_cpu + claimed_sum_mem == 0`
 /// 可被满足。
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 fn gen_mem_interaction_trace(
     mem_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
@@ -446,6 +499,7 @@ fn gen_mem_interaction_trace(
 /// (224 CircleEvaluations, claimed_sum) — 56 SecureField 列 × 4 base cols + 总 sum。
 /// `claimed_sum` = 最后一列（col_55 = 全部 56 frac 的逐行累积）跨所有行的总和，
 /// 即 CPU 组件全部 logup claim 的总 sum。
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 fn gen_cpu_full_interaction_trace(
     cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
@@ -519,6 +573,7 @@ fn gen_cpu_full_interaction_trace(
 ///
 /// # 返回
 /// (4 CircleEvaluations, claimed_sum) — 1 SecureField 列 × 4 base cols + sum
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 fn gen_range_check_air_interaction_trace(
     rc_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
@@ -547,6 +602,7 @@ fn gen_range_check_air_interaction_trace(
 ///
 /// 与 `gen_cpu_full_interaction_trace` 相同，但跳过 Memory claim（frac_0），
 /// 只发送 64 个 RangeCheckLookup frac。用于 2 组件隔离测试（CPU + RangeCheck）。
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 fn gen_cpu_range_only_interaction_trace(
     cpu_trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     log_size: u32,
@@ -600,6 +656,7 @@ fn gen_cpu_range_only_interaction_trace(
 /// let mem_trace = trace_to_memory_trace(&emulator_trace);
 /// let proof = prove_cpu_memory_trace(&cpu_trace, &mem_trace).expect("prove failed");
 /// ```
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 pub fn prove_cpu_memory_trace(
     cpu_trace: &NativeTrace,
     mem_trace: &MemoryTrace,
@@ -711,6 +768,7 @@ pub fn prove_cpu_memory_trace(
 /// let proof = prove_cpu_memory_trace(&cpu_trace, &mem_trace)?;
 /// verify_cpu_memory_proof(proof, cpu_trace.log_size)?;
 /// ```
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 pub fn verify_cpu_memory_proof(
     proof: CpuMemoryProof,
     log_size: u32,
@@ -841,6 +899,7 @@ pub struct CpuMemRangeProof {
 /// # Panics
 /// 若 soundness check 失败（`claimed_sum_cpu + claimed_sum_mem + claimed_sum_range != 0`），
 /// panic（trace 生成有 bug 或 limb 值超出 [0, 255] 范围）。
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 pub fn prove_cpu_mem_range_trace(
     cpu_trace: &NativeTrace,
     mem_trace: &MemoryTrace,
@@ -964,6 +1023,7 @@ pub fn prove_cpu_mem_range_trace(
 /// # 返回
 /// - `Ok(())` — 验证通过
 /// - `Err(VerificationError)` — 验证失败
+#[cfg(any(test, feature = "experimental-cpu-prover"))]
 pub fn verify_cpu_mem_range_proof(
     proof: CpuMemRangeProof,
     log_size: u32,
@@ -3644,6 +3704,46 @@ mod tests {
     }
 
     #[test]
+    fn test_first_load_nonzero_is_rejected_without_initial_memory_binding() {
+        // No Store precedes this Load. Until an authenticated initial-memory table is part of the
+        // statement, accepting 0xDEADBEEF here would let the prover choose arbitrary input memory.
+        let mut initial = zero_registers();
+        initial[2] = 0x1000;
+        let mut post = initial;
+        post[1] = 0xDEADBEEF;
+        let step = make_step_indexed(
+            0,
+            0,
+            Instruction::Lw {
+                rd: 1,
+                rs1: 2,
+                imm: 0,
+            },
+            post,
+            vec![crate::trace::MemAccess {
+                addr: 0x1000,
+                op: crate::trace::MemOp::Read,
+                value: 0xDEADBEEF,
+                size: 4,
+            }],
+        );
+        let mut emulator_trace = crate::trace::Trace::new();
+        emulator_trace.set_initial_registers(initial);
+        emulator_trace.push_step(step);
+
+        let cpu_trace = trace_to_native(&emulator_trace);
+        let mem_trace = trace_to_memory_trace(&emulator_trace);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prove_cpu_memory_trace(&cpu_trace, &mem_trace)
+        }));
+        let rejected = result.is_err() || result.as_ref().is_ok_and(|proof| proof.is_err());
+        assert!(
+            rejected,
+            "首次 Load 非零值必须在 initial-memory binding 接入前 fail closed"
+        );
+    }
+
+    #[test]
     fn test_prove_verify_multi_lw() {
         // SW + LW 同地址序列（A2 修复后，Load 须有前驱 Store 初始化内存）。
         // 内存模型为零初始化：首次访问 ValPrev=0（M15-M18），Load 行 ValCur=ValPrev（A2），
@@ -4171,7 +4271,7 @@ mod tests {
     // =======================================================================
     //
     // 验证内容：
-    // 1. ECALL 行 prove/verify 通过（不破坏现有功能）
+    // 1. 未接 syscall yield 组件的生产 CPU AIR 拒绝 ECALL
     // 2. 非 ECALL 行 ECALL 列 zero gating soundness（篡改被拒绝）
     // 3. IS_ECALL binality soundness（非 0/1 值被拒绝）
     //
@@ -4223,17 +4323,13 @@ mod tests {
     }
 
     #[test]
-    fn test_prove_verify_roundtrip_ecall() {
-        // Phase 4 Tier 1：含 ECALL 指令的 trace prove/verify 通过
-        // 验证：
-        // - IS_ECALL binality 约束（C57）：IS_ECALL * (IS_ECALL - 1) = 1 * 0 = 0 ✓
-        // - ECALL zero gating（C58-C82）：ECALL 行 IS_ECALL=1，(1-1)*col = 0 自动成立 ✓
-        // - 非 ECALL（padding）行：IS_ECALL=0，(1-0)*0 = 0 ✓
+    fn test_production_cpu_air_rejects_ecall_without_semantic_relation() {
         let trace = make_single_ecall_trace();
-        let log_size = trace.log_size;
-
-        let proof = prove_cpu_trace(&trace).expect("prove 失败：ECALL 约束应满足");
-        verify_cpu_proof(proof, log_size).expect("verify 失败");
+        let result = prove_cpu_trace(&trace);
+        assert!(
+            result.is_err(),
+            "未配置 ECALL semantic relation 时生产 CPU AIR 必须拒绝 ECALL"
+        );
     }
 
     #[test]

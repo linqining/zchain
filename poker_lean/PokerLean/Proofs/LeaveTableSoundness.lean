@@ -17,7 +17,7 @@ namespace PokerLean
     - RoundStateEq(0) + RoundStateUnchanged：仅在 WAITING 状态离座
     - SeatOccupied：目标座位必须被占用
     - RefundConservation：refund = seat.stack + seat.pending_addon
-    - ChipPoolLeaveConservation：post_chip_pool = pre_chip_pool - seat.stack
+    - ChipPoolLeaveConservation：post_chip_pool = pre_chip_pool - refund
     - AddonPoolLeaveConservation：post_addon_pool = pre_addon_pool - seat.pending_addon
     - VersionIncrementConstraint：version += 1
     - post 状态提取：目标座位正确清空为 Seat.empty
@@ -199,7 +199,7 @@ private lemma leave_params_seat
     - Gap 1 (RoundStateEq(0))：仅在 WAITING 状态离座
     - SeatOccupied：目标座位必须被占用
     - RefundConservation：refund = stack + pending_addon
-    - ChipPoolLeaveConservation：post_chip_pool = pre_chip_pool - stack
+    - ChipPoolLeaveConservation：post_chip_pool = pre_chip_pool - refund
     - AddonPoolLeaveConservation：post_addon_pool = pre_addon_pool - pending_addon
     - VersionIncrementConstraint：version += 1
     - post 状态提取：目标座位正确清空为 Seat.empty -/
@@ -236,15 +236,27 @@ theorem leave_table_air_sound :
                 decodeU64 row.pre_version.1 row.pre_version.2.1
                   row.pre_version.2.2.1 row.pre_version.2.2.2 + 1 := h_ver h_active
   have h_rs' : row.post_round_state = row.pre_round_state := h_rs_unch h_active
+  have h_refund_eq :
+      decodeU64 ext.output_refund.1 ext.output_refund.2.1
+        ext.output_refund.2.2.1 ext.output_refund.2.2.2 =
+      decodeU64 ext.input_seat_stack.1 ext.input_seat_stack.2.1
+        ext.input_seat_stack.2.2.1 ext.input_seat_stack.2.2.2 +
+      decodeU64 ext.input_seat_pending_addon.1 ext.input_seat_pending_addon.2.1
+        ext.input_seat_pending_addon.2.2.1 ext.input_seat_pending_addon.2.2.2 :=
+    limb4_delta_implies_decode_eq ext.input_seat_stack ext.output_refund
+      ext.input_seat_pending_addon ext.refund_add_carry _h_refund
   have h_chip_pool_add := limb4_delta_rev_implies_decode_eq
-    ext.input_pre_chip_pool ext.output_post_chip_pool ext.input_seat_stack
+    ext.input_pre_chip_pool ext.output_post_chip_pool ext.output_refund
     ext.chip_pool_sub_carry h_chip_pool
   have h_chip_pool' : decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
                         ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2 =
                       decodeU64 ext.input_pre_chip_pool.1 ext.input_pre_chip_pool.2.1
                         ext.input_pre_chip_pool.2.2.1 ext.input_pre_chip_pool.2.2.2 -
-                      decodeU64 ext.input_seat_stack.1 ext.input_seat_stack.2.1
-                        ext.input_seat_stack.2.2.1 ext.input_seat_stack.2.2.2 := by
+                      (decodeU64 ext.input_seat_stack.1 ext.input_seat_stack.2.1
+                        ext.input_seat_stack.2.2.1 ext.input_seat_stack.2.2.2 +
+                       decodeU64 ext.input_seat_pending_addon.1 ext.input_seat_pending_addon.2.1
+                        ext.input_seat_pending_addon.2.2.1 ext.input_seat_pending_addon.2.2.2) := by
+    rw [← h_refund_eq]
     omega
   have h_addon_pool_add := limb4_delta_rev_implies_decode_eq
     ext.input_pre_addon_pool ext.output_post_addon_pool ext.input_seat_pending_addon
@@ -313,7 +325,7 @@ theorem leave_table_air_sound :
     rw [h_params_seat] at h_ne
     rw [leave_pre_max_players] at h_lt
     exact leave_post_get_seat_other row ext max_players expected_seat_index i h_ne h_lt
-  · -- 14. post.chip_pool = pre.chip_pool - (pre.get_seat ...).stack
+  · -- 14. post.chip_pool = pre.chip_pool - (stack + pending_addon)
     rw [leave_post_chip_pool, leave_pre_chip_pool]
     rw [h_params_seat, h_pre_seat]
     exact h_chip_pool'

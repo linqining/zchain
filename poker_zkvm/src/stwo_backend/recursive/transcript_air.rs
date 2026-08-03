@@ -1576,9 +1576,10 @@ mod tests {
 
     #[test]
     fn transcript_semantics_export_usage_lookups_and_satisfy_air() {
-        std::thread::Builder::new()
-            .stack_size(128 * 1024 * 1024)
-            .spawn(|| {
+        crate::stwo_backend::recursive::run_large_stack_test(
+            "transcript-semantics-air",
+            128 * 1024 * 1024,
+            || {
                 let (calls, events, mappings) = sample_witness();
                 let payloads = transcript_payload_values(&events);
                 let poseidon =
@@ -1732,10 +1733,8 @@ mod tests {
                     }))
                     .is_err()
                 );
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+            },
+        );
     }
 
     #[test]

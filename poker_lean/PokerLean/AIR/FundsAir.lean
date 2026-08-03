@@ -19,9 +19,10 @@ open TexasPoker.Constants
 - `AmountPositive`：金额 > 0
 - `SeatOccupied`：座位必须被占用
 - `AddonPoolFundsConservation`：post_addon_pool = pre_addon_pool + amount
+- `ChipPoolFundsConservation`：post_chip_pool = pre_chip_pool + amount
 - `VersionIncrementConstraint`：version += 1
 - `RoundStateUnchanged`：round_state 不变
-- post 状态提取：正确更新 seat.pending_addon / seat.stack 和 addon_pool
+- post 状态提取：正确更新 seat.pending_addon / seat.stack、chip_pool 和 addon_pool
 -/
 
 /-! ## 通用提取函数（内部辅助） -/
@@ -101,7 +102,9 @@ structure AddonMethodColumns where
   output_post_addon_pool : M31 × M31 × M31 × M31
   /-- 输入：pre chip_pool（4 limb）- 用于全局上界检查（对齐 Rust AIR PRE_CHIP_POOL witness） -/
   input_pre_chip_pool : M31 × M31 × M31 × M31
-  /-- BOUND_DIFF（4 limb）- diff = MAX_TOTAL_BET - (chip_pool + addon_pool + amount) -/
+  /-- 输出：post chip_pool（4 limb）- 完整锁仓守恒 -/
+  output_post_chip_pool : M31 × M31 × M31 × M31
+  /-- BOUND_DIFF（4 limb）- diff = MAX_TOTAL_BET - (chip_pool + amount) -/
   input_bound_diff : M31 × M31 × M31 × M31
   /-- BOUND_CARRY_LO（3 个低位 bit）- 2-bit carry 分解的 lo 部分 -/
   input_bound_carry_lo : M31 × M31 × M31
@@ -111,6 +114,8 @@ structure AddonMethodColumns where
   pending_add_carry : M31 × M31 × M31
   /-- addon_pool += amount 的 3 个 ripple-carry bit。 -/
   addon_pool_add_carry : M31 × M31 × M31
+  /-- chip_pool += amount 的 3 个 ripple-carry bit。 -/
+  chip_pool_add_carry : M31 × M31 × M31
 deriving Repr
 
 /-- addon_pool 守恒约束，使用与 Rust AIR 相同的 ripple-carry chain。 -/
@@ -118,8 +123,13 @@ def AddonPoolFundsConservation (ext : AddonMethodColumns) : Prop :=
   Limb4Delta ext.input_pre_addon_pool ext.output_post_addon_pool ext.input_amount
     ext.addon_pool_add_carry
 
+/-- chip_pool 是完整 TableVault 锁仓，addon 入金后增加 amount。 -/
+def AddonChipPoolFundsConservation (ext : AddonMethodColumns) : Prop :=
+  Limb4Delta ext.input_pre_chip_pool ext.output_post_chip_pool ext.input_amount
+    ext.chip_pool_add_carry
+
 /-- 全局上界检查约束：within_bound == 1。
-    对齐合约 `if chip_pool + addon_pool + amount > MAX_TOTAL_BET { return Err }`。
+    对齐合约 `if chip_pool + amount > MAX_TOTAL_BET { return Err }`。
     对齐 Rust AIR `CommonConstraints::within_bound_check`。
 
     注：这是保留的旧弱谓词。完整版本见下方 `BoundCheck4Limb` 及
@@ -131,13 +141,13 @@ def WithinBoundConstraint (within_bound : M31) : Prop :=
 
 对齐 Rust AIR `CommonConstraints::bound_check_4limb`。
 
-验证 `chip_pool + addon_pool + amount + diff = MAX_TOTAL_BET`（逐 limb + 2-bit carry），
-其中 `diff = MAX_TOTAL_BET - (chip_pool + addon_pool + amount) ≥ 0`。
+验证 `chip_pool + amount + diff = MAX_TOTAL_BET`（逐 limb + 2-bit carry）。
+`BoundCheck4Limb` 保留通用第二加数，资金方法传入全零 limb。
 
 由于每 limb < 65536 且 carry ∈ {0,1,2,3}，4 数 limb 之和 < 4×65536 = 262144
 < M31_P = 2^31−1，M31 运算无取模，limb 方程等价于 Nat 方程。
 配合 `Limb4Range16` range constraint（diff 全 limb < 65536）可推出
-`decodeU64(cp) + decodeU64(ap) + decodeU64(am) ≤ MAX_TOTAL_BET`。
+`decodeU64(cp) + decodeU64(am) ≤ MAX_TOTAL_BET`。
 -/
 
 /-- MAX_TOTAL_BET 的 4-limb 分解（每 limb 16 bit）。 -/
@@ -206,12 +216,15 @@ def extractPostTableFromAddonAir
   let pre := extractPreTableFromAddonAir row ext max_players seat_index
   let post_addon_pool := decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
       ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2
+  let post_chip_pool := decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
+      ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2
   let post_pending_addon := decodeU64 ext.post_pending_addon.1 ext.post_pending_addon.2.1
       ext.post_pending_addon.2.2.1 ext.post_pending_addon.2.2.2
   let updated : TexasPokerTable := { pre with
     version := decodeU64 row.post_version.1 row.post_version.2.1
         row.post_version.2.2.1 row.post_version.2.2.2
     round_state := RoundState.fromNat row.post_round_state.val
+    chip_pool := post_chip_pool
     addon_pool := post_addon_pool
   }
   updated.update_seat seat_index (fun s => { s with pending_addon := post_pending_addon })
@@ -235,8 +248,11 @@ def AddonMethodConstraints
     ext.pending_add_carry ∧
   -- addon_pool 守恒：post = pre + amount
   AddonPoolFundsConservation ext ∧
+  -- chip_pool 守恒：post = pre + amount
+  AddonChipPoolFundsConservation ext ∧
   -- 全局上界 range check（对齐合约溢出修复 + Rust AIR bound_check_4limb）
-  BoundCheck4Limb ext.input_pre_chip_pool ext.input_pre_addon_pool
+  BoundCheck4Limb ext.input_pre_chip_pool
+    (M31.zero, M31.zero, M31.zero, M31.zero)
     ext.input_amount ext.input_bound_diff
     ext.input_bound_carry_lo ext.input_bound_carry_hi ∧
   let pre_table := extractPreTableFromAddonAir row ext max_players expected_seat_index
@@ -273,7 +289,9 @@ structure RebuyMethodColumns where
   output_post_addon_pool : M31 × M31 × M31 × M31
   /-- 输入：pre chip_pool（4 limb）- 用于全局上界检查（对齐 Rust AIR PRE_CHIP_POOL witness） -/
   input_pre_chip_pool : M31 × M31 × M31 × M31
-  /-- BOUND_DIFF（4 limb）- diff = MAX_TOTAL_BET - (chip_pool + addon_pool + amount) -/
+  /-- 输出：post chip_pool（4 limb）- 完整锁仓守恒 -/
+  output_post_chip_pool : M31 × M31 × M31 × M31
+  /-- BOUND_DIFF（4 limb）- diff = MAX_TOTAL_BET - (chip_pool + amount) -/
   input_bound_diff : M31 × M31 × M31 × M31
   /-- BOUND_CARRY_LO（3 个低位 bit）- 2-bit carry 分解的 lo 部分 -/
   input_bound_carry_lo : M31 × M31 × M31
@@ -281,14 +299,26 @@ structure RebuyMethodColumns where
   input_bound_carry_hi : M31 × M31 × M31
   /-- stack += amount 的 3 个 ripple-carry bit。 -/
   stack_add_carry : M31 × M31 × M31
-  /-- addon_pool += amount 的 3 个 ripple-carry bit。 -/
+  /-- 兼容保留列；rebuy 不修改 addon_pool，active 行要求全零。 -/
   addon_pool_add_carry : M31 × M31 × M31
+  /-- chip_pool += amount 的 3 个 ripple-carry bit。 -/
+  chip_pool_add_carry : M31 × M31 × M31
 deriving Repr
 
-/-- rebuy 的 addon_pool 守恒约束，使用规范 ripple-carry 加法。 -/
+/-- rebuy 不属于 pending addon，因此 addon_pool 逐 limb 保持不变。 -/
 def RebuyAddonPoolConservation (ext : RebuyMethodColumns) : Prop :=
-  Limb4Delta ext.input_pre_addon_pool ext.output_post_addon_pool ext.input_amount
-    ext.addon_pool_add_carry
+  Limb4Eq ext.input_pre_addon_pool ext.output_post_addon_pool
+
+/-- Rust 兼容保留 carry 列在 active 行必须为零。 -/
+def RebuyAddonPoolCarryZero (ext : RebuyMethodColumns) : Prop :=
+  ext.addon_pool_add_carry.1 = M31.zero ∧
+  ext.addon_pool_add_carry.2.1 = M31.zero ∧
+  ext.addon_pool_add_carry.2.2 = M31.zero
+
+/-- rebuy 入金立即进入 stack，同时完整 TableVault 锁仓增加 amount。 -/
+def RebuyChipPoolFundsConservation (ext : RebuyMethodColumns) : Prop :=
+  Limb4Delta ext.input_pre_chip_pool ext.output_post_chip_pool ext.input_amount
+    ext.chip_pool_add_carry
 
 /-- 从 AIR 行提取 rebuy pre 状态表 -/
 def extractPreTableFromRebuyAir
@@ -321,12 +351,15 @@ def extractPostTableFromRebuyAir
   let pre := extractPreTableFromRebuyAir row ext max_players seat_index
   let post_addon_pool := decodeU64 ext.output_post_addon_pool.1 ext.output_post_addon_pool.2.1
       ext.output_post_addon_pool.2.2.1 ext.output_post_addon_pool.2.2.2
+  let post_chip_pool := decodeU64 ext.output_post_chip_pool.1 ext.output_post_chip_pool.2.1
+      ext.output_post_chip_pool.2.2.1 ext.output_post_chip_pool.2.2.2
   let post_stack := decodeU64 ext.post_stack.1 ext.post_stack.2.1
       ext.post_stack.2.2.1 ext.post_stack.2.2.2
   let updated : TexasPokerTable := { pre with
     version := decodeU64 row.post_version.1 row.post_version.2.1
         row.post_version.2.2.1 row.post_version.2.2.2
     round_state := RoundState.fromNat row.post_round_state.val
+    chip_pool := post_chip_pool
     addon_pool := post_addon_pool
   }
   updated.update_seat seat_index (fun s => { s with stack := post_stack })
@@ -347,10 +380,14 @@ def RebuyMethodConstraints
   SeatOccupied ext.input_seat_is_occupied ∧
   -- stack 守恒：规范 u64 ripple-carry 加法
   Limb4Delta ext.pre_stack ext.post_stack ext.input_amount ext.stack_add_carry ∧
-  -- addon_pool 守恒：post = pre + amount
+  -- addon_pool 不变；兼容 carry 列归零
   RebuyAddonPoolConservation ext ∧
+  RebuyAddonPoolCarryZero ext ∧
+  -- chip_pool 守恒：post = pre + amount
+  RebuyChipPoolFundsConservation ext ∧
   -- 全局上界 range check（对齐合约溢出修复 + Rust AIR bound_check_4limb）
-  BoundCheck4Limb ext.input_pre_chip_pool ext.input_pre_addon_pool
+  BoundCheck4Limb ext.input_pre_chip_pool
+    (M31.zero, M31.zero, M31.zero, M31.zero)
     ext.input_amount ext.input_bound_diff
     ext.input_bound_carry_lo ext.input_bound_carry_hi ∧
   let pre_table := extractPreTableFromRebuyAir row ext max_players expected_seat_index
@@ -442,6 +479,20 @@ lemma bound_check_4limb_le (cp ap am df : M31 × M31 × M31 × M31)
   -- h_sum: decodeU64(cp) + ... + decodeU64(df) = MAX_TOTAL_BET
   -- Goal: decodeU64(cp) + ... + decodeU64(am) ≤ MAX_TOTAL_BET
   -- 由 decodeU64(df) ≥ 0（Nat 自带非负性）+ omega 推出
+  omega
+
+/-- 资金方法使用的专门形式：第二个通用加数为零，因此推出
+    `decodeU64(cp) + decodeU64(amount) ≤ MAX_TOTAL_BET`。 -/
+lemma bound_check_4limb_zero_le (cp am df : M31 × M31 × M31 × M31)
+    (carry_lo carry_hi : M31 × M31 × M31)
+    (h : BoundCheck4Limb cp (M31.zero, M31.zero, M31.zero, M31.zero)
+      am df carry_lo carry_hi) :
+    decodeU64 cp.1 cp.2.1 cp.2.2.1 cp.2.2.2 +
+    decodeU64 am.1 am.2.1 am.2.2.1 am.2.2.2 ≤ MAX_TOTAL_BET := by
+  have h_le := bound_check_4limb_le cp
+    (M31.zero, M31.zero, M31.zero, M31.zero) am df carry_lo carry_hi h
+  change decodeU64 cp.1 cp.2.1 cp.2.2.1 cp.2.2.2 + 0 +
+    decodeU64 am.1 am.2.1 am.2.2.1 am.2.2.2 ≤ MAX_TOTAL_BET at h_le
   omega
 
 end PokerLean

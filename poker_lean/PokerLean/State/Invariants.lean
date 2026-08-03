@@ -151,6 +151,7 @@ theorem update_nth_preserves_prop (l : List Seat) (i : Nat) (f : Seat → Seat)
 def apply_addon (t : TexasPokerTable) (i : Nat) (amount : Nat) : TexasPokerTable :=
   { t with
     seats := update_nth t.seats i (fun s => { s with pending_addon := s.pending_addon + amount }),
+    chip_pool := t.chip_pool + amount,
     addon_pool := t.addon_pool + amount,
     version := t.version + 1 }
 
@@ -158,7 +159,7 @@ def apply_addon (t : TexasPokerTable) (i : Nat) (amount : Nat) : TexasPokerTable
 def apply_rebuy (t : TexasPokerTable) (i : Nat) (amount : Nat) : TexasPokerTable :=
   { t with
     seats := update_nth t.seats i (fun s => { s with stack := s.stack + amount }),
-    addon_pool := t.addon_pool + amount,
+    chip_pool := t.chip_pool + amount,
     version := t.version + 1 }
 
 /-- `collect_rake`：对应 `state_machine.rs:3345-3357`。 -/
@@ -390,11 +391,11 @@ def inv_chip_bounds (t : TexasPokerTable) : Prop :=
     s.stack + s.bet ≤ MAX_TOTAL_BET ∧
     s.pending_addon ≤ MAX_TOTAL_BET
 
-/-- **不变量 1b：全局筹码上界**。chip_pool + addon_pool ≤ MAX_TOTAL_BET。
-    对齐合约 apply_addon/apply_rebuy/apply_join 的全局上界检查
-    （`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`）。 -/
+/-- **不变量 1b：全局锁仓上界与子集关系**。
+    `chip_pool` 是完整 TableVault 锁仓；`addon_pool` 是其中尚未并入 stack 的
+    pending addon 子集，不能再次加到总额中。 -/
 def total_chips_bound (t : TexasPokerTable) : Prop :=
-  t.chip_pool + t.addon_pool ≤ MAX_TOTAL_BET
+  t.chip_pool ≤ MAX_TOTAL_BET ∧ t.addon_pool ≤ t.chip_pool
 
 /-- **不变量 2：状态一致性**（子相位互斥）。 -/
 def inv_state_consistency (t : TexasPokerTable) : Prop :=

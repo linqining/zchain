@@ -16,7 +16,7 @@ open TexasPoker.Constants
 2. `can_join_state(table)` — `round_state == ROUND_WAITING`
 3. `is_pk_registered(&table.seats, &pk)` 为 false（pk 未注册）
 4. `input.buy_in >= table.big_blind`
-5. **全局上界**：`chip_pool + addon_pool + buy_in <= MAX_TOTAL_BET`（溢出修复）
+5. **全局上界**：`chip_pool + buy_in <= MAX_TOTAL_BET`（`chip_pool` 已是完整锁仓）
 6. `find_empty_seat()` 自动分配座位（合约不接收 seat_index 参数）
 7. 座位字段更新：
    - `seat.player = input.player`
@@ -56,7 +56,7 @@ def ContractJoinTable
   -- 买入金额必须 >= 大盲注
   params.buy_in ≥ pre.big_blind ∧
   -- 全局上界检查（对齐合约 apply_join 溢出修复）
-  pre.chip_pool + pre.addon_pool + params.buy_in ≤ MAX_TOTAL_BET ∧
+  pre.chip_pool + params.buy_in ≤ MAX_TOTAL_BET ∧
   -- pk 不能已注册（简化：玩家不能已在其他座位）
   (∀ i : Nat, i < pre.max_players →
     (pre.get_seat i).player ≠ params.player) ∧
@@ -75,6 +75,8 @@ def ContractJoinTable
     post.get_seat i = pre.get_seat i) ∧
   -- 资金守恒：chip_pool += buy_in
   post.chip_pool = pre.chip_pool + params.buy_in ∧
+  -- addon_pool 只是 pending addon 子集，join 不修改它
+  post.addon_pool = pre.addon_pool ∧
   -- version 递增
   post.version = pre.version + 1 ∧
   -- 不变量
@@ -112,7 +114,7 @@ theorem join_table_buy_in_ge_big_blind (pre : TexasPokerTable)
 theorem join_table_within_bound (pre : TexasPokerTable)
     (params : JoinTableParams) (post : TexasPokerTable)
     (h : ContractJoinTable pre params post) :
-  pre.chip_pool + pre.addon_pool + params.buy_in ≤ MAX_TOTAL_BET := by
+  pre.chip_pool + params.buy_in ≤ MAX_TOTAL_BET := by
   rcases h with ⟨_, _, _, _, h_bound, _⟩
   exact h_bound
 
@@ -131,5 +133,13 @@ theorem join_table_chip_pool_inc (pre : TexasPokerTable)
   post.chip_pool = pre.chip_pool + params.buy_in := by
   rcases h with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, h_chip, _⟩
   exact h_chip
+
+/-- 推论：join_table 不修改 pending-addon 子集池。 -/
+theorem join_table_addon_pool_unchanged (pre : TexasPokerTable)
+    (params : JoinTableParams) (post : TexasPokerTable)
+    (h : ContractJoinTable pre params post) :
+  post.addon_pool = pre.addon_pool := by
+  rcases h with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, h_addon, _⟩
+  exact h_addon
 
 end PokerLean
