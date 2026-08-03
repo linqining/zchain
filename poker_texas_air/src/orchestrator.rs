@@ -35,10 +35,10 @@
 //!
 //! ## 当前覆盖
 //!
-//! 23 个 VM selector 都能进入统一任务格式；其中 21 个已有 trace 构造 + prove +
-//! verify 路径。`request_leave_after_hand` 与 `fold_with_proof` 只允许任务被编码和
-//! 反序列化，生产 Orchestrator 明确 fail-closed，不签发 proof/receipt。后者尤其尚未
-//! 证明 DLEq layer removal，也未覆盖可能发生的 `advance_turn`/settlement。
+//! 23 个 VM selector 都能进入统一任务格式；其中 22 个已有 trace 构造 + prove +
+//! verify 路径。`fold_with_proof` 只允许任务被编码和反序列化，生产 Orchestrator
+//! 明确 fail-closed，不签发 proof/receipt；它尚未证明 DLEq layer removal，也未覆盖
+//! 可能发生的 `advance_turn`/settlement。
 
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
@@ -49,11 +49,14 @@ use stwo::core::fields::m31::M31;
 use crate::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
 use crate::airs::actions::bet::{BetAir, BetInput, BetRow};
 use crate::airs::actions::call::{CallAir, CallInput, CallRow};
-use crate::airs::actions::check::{CheckAir, CheckInput, CheckRow};
+use crate::airs::actions::check::{CheckAir, CheckInput, CheckRow, NO_CURRENT_TURN};
 use crate::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use crate::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 use crate::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use crate::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
+use crate::airs::actions::request_leave_after_hand::{
+    RequestLeaveAfterHandAir, RequestLeaveAfterHandInput, RequestLeaveAfterHandRow,
+};
 use crate::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
 };
@@ -133,7 +136,7 @@ impl ProvenTask {
 }
 
 /// Orchestrator：消费证明任务，生成并自验 proof。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Orchestrator {
     /// 已证明的任务摘要（按 prove 顺序）。
     proven: Vec<ProvenTask>,
@@ -213,17 +216,10 @@ impl Orchestrator {
         task: &ProveTask,
         backend: &mut B,
     ) -> TexasAirResult<(ProvenTask, B::Output)> {
-        // These selectors are part of the VM/task wire format, but their AIR
-        // statements are not yet trustworthy. Reject them before dispatch
-        // replay or any proof construction so no partial receipt can escape.
-        match task.method_kind {
-            MethodKind::RequestLeaveAfterHand => {
-                return Err(unsupported_registered_method(task.method_kind));
-            }
-            MethodKind::FoldWithProof => {
-                return Err(unsupported_registered_method(task.method_kind));
-            }
-            _ => {}
+        // `fold_with_proof` remains in the task wire format, but its DLEq
+        // layer-removal transition does not yet have a trustworthy AIR.
+        if task.method_kind == MethodKind::FoldWithProof {
+            return Err(unsupported_registered_method(task.method_kind));
         }
 
         validate_full_dispatch_task(task)?;
@@ -291,6 +287,9 @@ impl Orchestrator {
             MethodKind::Addon => self.prove_addon(task, pre_root, post_root, &pi, backend)?,
             MethodKind::Rebuy => self.prove_rebuy(task, pre_root, post_root, &pi, backend)?,
             MethodKind::Bet => self.prove_bet(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::RequestLeaveAfterHand => {
+                self.prove_request_leave_after_hand(task, pre_root, post_root, &pi, backend)?
+            }
             MethodKind::JoinAndShuffle => {
                 self.prove_join_and_shuffle(task, pre_root, post_root, &pi, backend)?
             }
@@ -306,7 +305,7 @@ impl Orchestrator {
             MethodKind::SubmitReconstructDeck => {
                 self.prove_submit_reconstruct_deck(task, pre_root, post_root, &pi, backend)?
             }
-            MethodKind::RequestLeaveAfterHand | MethodKind::FoldWithProof => {
+            MethodKind::FoldWithProof => {
                 return Err(unsupported_registered_method(task.method_kind));
             }
         };
@@ -692,6 +691,69 @@ impl Orchestrator {
         )
     }
 
+    fn prove_request_leave_after_hand<B: MethodBackend>(
+        &self,
+        task: &ProveTask,
+        pre_root: StateRoot,
+        post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
+        let MethodInput::RequestLeaveAfterHand { seat_index } = &task.method_input else {
+            return Err(input_mismatch(
+                "request_leave_after_hand",
+                "RequestLeaveAfterHand",
+                &task.method_input,
+            ));
+        };
+        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
+        let post_seat = Self::seat(&task.post_table, *seat_index)?;
+        let input = RequestLeaveAfterHandInput {
+            seat_index: *seat_index,
+            pre_want_leave: pre_seat.want_leave,
+            post_want_leave: post_seat.want_leave,
+        };
+        if input.pre_want_leave == input.post_want_leave {
+            return Err(TexasAirError::SpecViolation(
+                "request_leave_after_hand did not toggle want_leave".into(),
+            ));
+        }
+
+        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let row = RequestLeaveAfterHandRow::active(
+            &input,
+            srm(pre_root),
+            srm(post_root),
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            pre_v,
+            post_v,
+            task.pre_table.round_state,
+            task.post_table.round_state,
+            task.pre_table.pot,
+            task.post_table.pot,
+        );
+        run(
+            backend,
+            RequestLeaveAfterHandAir::num_columns(),
+            &row,
+            &RequestLeaveAfterHandRow::padding(),
+            pi,
+            move || RequestLeaveAfterHandAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: srm(pre_root),
+                post_state_root: srm(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version: pre_v,
+                post_version: post_v,
+            },
+        )
+    }
+
     fn prove_start_hand<B: MethodBackend>(
         &self,
         task: &ProveTask,
@@ -865,11 +927,12 @@ impl Orchestrator {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("check", "SeatOnly", &task.method_input));
         };
-        let post_current_turn = validate_native_mid_round_action(
+        let transition = validate_native_betting_action(
             task,
             NativeMidRoundAction::Check {
                 seat_index: *seat_index,
             },
+            true,
         )?;
         let seat = Self::seat(&task.pre_table, *seat_index)?;
         let current_bet = task
@@ -881,7 +944,10 @@ impl Orchestrator {
             seat_index: *seat_index,
             current_bet,
             seat_bet: seat.bet,
-            post_current_turn,
+            post_current_turn: transition.post_current_turn.unwrap_or(NO_CURRENT_TURN),
+            completes_betting_round: transition.completes_betting_round,
+            post_round_state: task.post_table.round_state,
+            post_pot: task.post_table.pot,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1490,7 +1556,10 @@ impl Orchestrator {
         let input = JoinAndShuffleInput {
             seat_index: *seat_index,
             new_deck_commitment: deck_commitment(&task.post_table),
-            shuffle_phase: task.post_table.shuffle_state.phase,
+            // The phase is an admission precondition. `advance_shuffle` may complete the last
+            // participant and reset the post-state phase to NONE, so deriving it from post-state
+            // rejects a valid terminal shuffle.
+            shuffle_phase: task.pre_table.shuffle_state.phase,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_cc = task.pre_table.shuffle_state.completed_players.len() as u8;
@@ -1549,7 +1618,7 @@ impl Orchestrator {
         let input = LeaveWithProofInput {
             seat_index: *seat_index,
             leave_kind: 0,
-            shuffle_phase: task.post_table.shuffle_state.phase,
+            shuffle_phase: task.pre_table.shuffle_state.phase,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
@@ -1654,7 +1723,7 @@ impl Orchestrator {
         let input = SubmitShuffleV2Input {
             seat_index: *seat_index,
             new_deck_commitment: deck_commitment(&task.post_table),
-            shuffle_phase: task.post_table.shuffle_state.phase,
+            shuffle_phase: task.pre_table.shuffle_state.phase,
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
@@ -1713,7 +1782,11 @@ impl Orchestrator {
         };
         let input = SubmitPlayerRevealTokensInput {
             seat_index: *seat_index,
-            reveal_phase: task.post_table.reveal_token_state.reveal_phase,
+            // Admission is determined by the pre-dispatch reveal phase. The final player in a
+            // reveal round legitimately advances the post-state to NONE after all assigned
+            // tokens have been received.
+            reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
+            version_increment: reveal_version_increment(task)?,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_rc = task.post_table.reveal_token_state.assignments.len() as u8;
@@ -1915,7 +1988,46 @@ pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()
     Ok(())
 }
 
-/// 当前 action AIR 只覆盖 `advance_turn` 的 mid-round 分支。
+/// Determine the version change represented by one reveal-token dispatch.
+///
+/// A normal token submission invokes `bump_version` once. The final showdown
+/// token is an atomic compound transition: after storing the token it settles
+/// the hand and `reset_for_next_hand` bumps the version once more. Preserve
+/// fail-closed behavior for every other multi-version transition.
+fn reveal_version_increment(task: &ProveTask) -> TexasAirResult<u8> {
+    use poker_l1::vm::contracts::texas_poker::constants::{
+        REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
+    };
+
+    let pre = &task.pre_table;
+    let post = &task.post_table;
+    let completed_showdown = post.round_state == ROUND_WAITING
+        && post.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
+        && post.pot == 0;
+    let increment = if completed_showdown {
+        if pre.round_state != ROUND_SHOWDOWN
+            || pre.reveal_token_state.reveal_phase != REVEAL_PHASE_SHOWDOWN
+        {
+            return Err(TexasAirError::UnsupportedBettingTransition(
+                "submit_player_reveal_tokens reset without a showdown reveal pre-state".into(),
+            ));
+        }
+        2
+    } else {
+        1
+    };
+
+    let expected_post_version = pre.version.saturating_add(u64::from(increment));
+    if post.version != expected_post_version {
+        return Err(TexasAirError::SpecViolation(format!(
+            "submit_player_reveal_tokens: expected version {} after {increment} native bump(s), got {}",
+            expected_post_version, post.version
+        )));
+    }
+    Ok(increment)
+}
+
+/// 原生下注动作种类。
 #[derive(Debug, Clone, Copy)]
 enum NativeMidRoundAction {
     Fold { seat_index: u8 },
@@ -1941,13 +2053,21 @@ impl NativeMidRoundAction {
     }
 }
 
+/// 由 canonical VM replay 得出的下注动作分支。
+#[derive(Debug, Clone, Copy)]
+struct NativeBettingTransition {
+    post_current_turn: Option<u8>,
+    completes_betting_round: bool,
+}
+
 /// 先重放真实 VM action 并逐字段比对 post table，再收窄到 AIR 已覆盖的
 /// mid-round 分支。这样诚实 prover 不会把 end-of-round/settlement transition
 /// 塞进简化 AIR；生产 verifier 侧还会由 trusted-row 绑定再次检查 witness。
-fn validate_native_mid_round_action(
+fn validate_native_betting_action(
     task: &ProveTask,
     action: NativeMidRoundAction,
-) -> TexasAirResult<u8> {
+    allow_round_completion: bool,
+) -> TexasAirResult<NativeBettingTransition> {
     let method = action.name();
     let pre = &task.pre_table;
     let post = &task.post_table;
@@ -1957,17 +2077,6 @@ fn validate_native_mid_round_action(
             "{method}: pre-state is not a betting round"
         )));
     }
-    if post.round_state != pre.round_state
-        || post.betting_round.is_none()
-        || post.current_turn.is_none()
-        || post.pot != pre.pot
-    {
-        return Err(TexasAirError::UnsupportedBettingTransition(format!(
-            "{method} triggered collect_bets_to_pot / advance_round / settlement; \
-             current AIR proves only same-round transitions with unchanged pot and Some(current_turn)"
-        )));
-    }
-
     let mut expected = pre.clone();
     let mut events = Vec::new();
     let vm_result = match action {
@@ -2047,7 +2156,33 @@ fn validate_native_mid_round_action(
         )));
     }
 
-    Ok(post.current_turn.expect("checked Some above"))
+    let completes_betting_round =
+        post.round_state != pre.round_state || post.betting_round.is_none() || post.pot != pre.pot;
+    if completes_betting_round && !allow_round_completion {
+        return Err(TexasAirError::UnsupportedBettingTransition(format!(
+            "{method} triggered collect_bets_to_pot / advance_round / settlement; \
+             current AIR proves only same-round transitions with unchanged pot and Some(current_turn)"
+        )));
+    }
+    Ok(NativeBettingTransition {
+        post_current_turn: post.current_turn,
+        completes_betting_round,
+    })
+}
+
+/// Validate an action AIR that only models the same-round `advance_turn` branch.
+fn validate_native_mid_round_action(
+    task: &ProveTask,
+    action: NativeMidRoundAction,
+) -> TexasAirResult<u8> {
+    validate_native_betting_action(task, action, false)?
+        .post_current_turn
+        .ok_or_else(|| {
+            TexasAirError::UnsupportedBettingTransition(format!(
+                "{} completed a transition without a subsequent current_turn",
+                action.name()
+            ))
+        })
 }
 
 /// `state_root_to_m31_limbs` 的短别名。
@@ -2088,8 +2223,7 @@ impl MethodBackend for NativeMethodProofBackend {
 }
 
 struct RecursiveMethodVerifierBackend<'a> {
-    recursive_proof:
-        &'a poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
+    recursive_proof: &'a poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
     recursive_inputs: &'a poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
 }
 
@@ -2112,8 +2246,7 @@ impl MethodBackend for RecursiveMethodProverBackend {
         public_inputs: crate::public_inputs::TexasPublicInputs,
     ) -> TexasAirResult<Self::Output> {
         let trace = gen_method_trace(num_columns, row, padding)?;
-        let method_proof =
-            prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
+        let method_proof = prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
         prove_method_recursive(&method_proof, air, &public_inputs)
     }
 }
@@ -2212,6 +2345,7 @@ impl_row_to_vec!(
     AutoFoldRow,
     ForceFoldRow,
     KickPlayerRow,
+    RequestLeaveAfterHandRow,
     AddonRow,
     RebuyRow,
     JoinAndShuffleRow,
@@ -2234,10 +2368,6 @@ fn input_mismatch(method: &str, expected: &str, actual: &MethodInput) -> TexasAi
 /// defense-in-depth fallback agree on the exact fail-closed boundary.
 fn unsupported_registered_method(kind: MethodKind) -> TexasAirError {
     let reason = match kind {
-        MethodKind::RequestLeaveAfterHand => {
-            "request_leave_after_hand AIR 尚未完成 VM→AIR→Lean 语义证明；\
-             该 selector 只允许生成/反序列化 ProveTask，Orchestrator fail-closed，no proof/receipt"
-        }
         MethodKind::FoldWithProof => {
             "fold_with_proof AIR 尚未证明 DLEq crypto layer removal，也未覆盖\
              advance_turn/settlement；Orchestrator fail-closed，no proof/receipt"
@@ -2398,15 +2528,37 @@ mod tests {
     }
 
     #[test]
-    fn request_leave_after_hand_task_deserializes_but_issues_no_receipt() {
+    fn request_leave_after_hand_dispatch_proves_and_issues_receipt() {
+        let mut pre = make_table("request-leave");
+        pre.seats[0].player = [0x11; 20];
+        pre.seats[0].stack = 1_000;
         let raw_args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
             .expect("request_leave_after_hand args should serialize");
-        let task = registered_but_unsupported_task(
-            MethodKind::RequestLeaveAfterHand,
-            MethodInput::RequestLeaveAfterHand { seat_index: 0 },
+        let (task, post) = dispatch_task(
+            pre,
+            [0x11; 20],
+            texas_dispatch::selectors::request_leave_after_hand(),
             raw_args,
         );
-        assert_registered_method_fails_closed(task);
+        assert!(post.seats[0].want_leave);
+        let mut orchestrator = Orchestrator::new();
+        let summary = orchestrator
+            .prove_and_verify_task(&task)
+            .expect("request_leave_after_hand should produce a verified receipt");
+        assert_eq!(summary.method_kind, MethodKind::RequestLeaveAfterHand);
+        let (cancel_task, cancelled) = dispatch_task(
+            post,
+            [0x11; 20],
+            texas_dispatch::selectors::request_leave_after_hand(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("request_leave_after_hand args should serialize"),
+        );
+        assert!(!cancelled.seats[0].want_leave);
+        orchestrator
+            .prove_and_verify_task(&cancel_task)
+            .expect("cancelling request_leave_after_hand should also prove");
+        assert_eq!(orchestrator.proven().len(), 2);
+        assert!(orchestrator.verify_chain().is_ok());
     }
 
     #[test]
@@ -2888,10 +3040,10 @@ mod tests {
         ));
     }
 
-    /// P06 回归：heads-up 最后一个 check 会收池并推进轮次，简化 action AIR
-    /// 必须在生产 prover 入口显式 fail-closed。
+    /// 回归：heads-up 最后一个 check 会收池并推进到公共牌揭示阶段。该阶段没有
+    /// `current_turn`，但 canonical VM replay 与 sentinel trace encoding 必须一致。
     #[test]
-    fn orchestrator_rejects_heads_up_end_round_check() {
+    fn orchestrator_proves_heads_up_end_round_check() {
         let mut pre = make_table("end-round-check");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
@@ -2918,11 +3070,9 @@ mod tests {
         assert!(post.current_turn.is_none());
         assert!(post.pot > pre.pot);
 
-        let result = Orchestrator::new().prove_and_verify_task(&task);
-        assert!(matches!(
-            result,
-            Err(TexasAirError::UnsupportedBettingTransition(_))
-        ));
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("end-of-round check should prove and verify");
     }
 
     /// A WAITING-state kick may internally reset the table and bump version
@@ -2953,7 +3103,7 @@ mod tests {
 
     /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
     ///
-    /// 之前 Check 是"未实现"的代表；启用的 21 个方法接线后，此测试确认 Check
+    /// 之前 Check 是"未实现"的代表；启用的 22 个方法接线后，此测试确认 Check
     /// 走完了 trace 构造路径（成功或返回非 NotImplemented 的业务错误均算通过）。
     #[test]
     fn orchestrator_check_is_now_supported() {

@@ -5,8 +5,8 @@
 //! only be spent by deleting the whole object and creating new coin objects.
 //! Generic object outputs are not allowed to mint this reserved object type.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,8 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::storage::object_db::ObjectMutation;
 use crate::storage::{ObjectBackend, ObjectDb};
+use crate::vm::contracts::texas_poker::types::TexasPokerTable;
+use crate::vm::contracts::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
 use crate::{Address, ChainId, Hash};
 
 /// Reserved object type for the native ZCN coin.
@@ -63,7 +65,9 @@ impl TreasuryCap {
         let expected_supply = self
             .total_minted
             .checked_sub(self.total_burned)
-            .ok_or_else(|| PokerL1Error::Other("TreasuryCap burned amount exceeds minted amount".into()))?;
+            .ok_or_else(|| {
+                PokerL1Error::Other("TreasuryCap burned amount exceeds minted amount".into())
+            })?;
         if self.total_supply != expected_supply {
             return Err(PokerL1Error::Other(format!(
                 "TreasuryCap invariant violated: supply={} minted={} burned={}",
@@ -72,6 +76,166 @@ impl TreasuryCap {
         }
         Ok(())
     }
+}
+
+/// Global reconciliation of every currently modelled native ZCN custody domain.
+///
+/// `addon_pool` and `rake_collected` are accounting subsets of a table's `chip_pool`, so Texas
+/// escrow is counted exactly once. Legacy [`crate::account::Account::balance`] is a resource
+/// credit and is intentionally absent from this report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSupplyReconciliation {
+    /// Supply committed by the singleton TreasuryCap.
+    pub treasury_total_supply: u64,
+    /// Cumulative authorised mint counter.
+    pub treasury_total_minted: u64,
+    /// Cumulative authorised burn counter.
+    pub treasury_total_burned: u64,
+    /// Sum of all structurally valid live NativeCoin UTXOs.
+    pub live_utxo: u64,
+    /// Sum of all validator stake currently held in staking escrow.
+    pub staking_escrow: u64,
+    /// Sum of `chip_pool` across every persisted Texas Poker table.
+    pub texas_table_escrow: u64,
+    /// `live_utxo + staking_escrow + texas_table_escrow`.
+    pub observed_total: u64,
+    /// Signed `observed_total - treasury_total_supply` diagnostic.
+    pub delta: i128,
+}
+
+impl NativeSupplyReconciliation {
+    /// Whether observed custody exactly matches the TreasuryCap supply.
+    #[must_use]
+    pub const fn is_balanced(&self) -> bool {
+        self.delta == 0
+    }
+
+    /// Reject a supply mismatch while preserving the detailed report on success.
+    pub fn require_balanced(self) -> PokerL1Result<Self> {
+        if self.is_balanced() {
+            return Ok(self);
+        }
+        Err(PokerL1Error::Other(format!(
+            "native supply reconciliation mismatch: treasury={}, live_utxo={}, staking_escrow={}, texas_table_escrow={}, observed={}, delta={}",
+            self.treasury_total_supply,
+            self.live_utxo,
+            self.staking_escrow,
+            self.texas_table_escrow,
+            self.observed_total,
+            self.delta,
+        )))
+    }
+}
+
+/// Inspect every native ZCN custody domain and return a diagnostic report.
+///
+/// Structural corruption is fail-closed: malformed TreasuryCap/coin/table data, mutable coin
+/// versions, invalid ownership, mismatched embedded table IDs and arithmetic overflow all return
+/// an error. A pure supply mismatch is represented by a non-zero [`NativeSupplyReconciliation::delta`].
+pub fn audit_native_supply(
+    object_db: &ObjectDb,
+    staking_escrow: u64,
+) -> PokerL1Result<NativeSupplyReconciliation> {
+    let cap = read_treasury(object_db)?.ok_or_else(|| {
+        PokerL1Error::Other(
+            "native supply reconciliation requires an initialized TreasuryCap".into(),
+        )
+    })?;
+
+    let mut live_utxo = 0u64;
+    let mut texas_table_escrow = 0u64;
+    for object in object_db.iter() {
+        if object.id == TREASURY_CAP_OBJECT_ID || object.object_type == TREASURY_CAP_OBJECT_TYPE {
+            // Reject duplicate/wrongly-addressed TreasuryCap objects instead of ignoring them.
+            decode_treasury_cap(object)?;
+            continue;
+        }
+
+        if is_native_coin_object(object) {
+            let owner = match object.owner {
+                Ownership::AddressOwned { owner } => owner,
+                _ => {
+                    return Err(PokerL1Error::Other(format!(
+                        "native coin {:?} must be address-owned",
+                        object.id
+                    )));
+                }
+            };
+            if object.id.creator_address != owner {
+                return Err(PokerL1Error::Other(format!(
+                    "native coin {:?} creator address does not match owner {:?}",
+                    object.id, owner
+                )));
+            }
+            if object.version != 0 {
+                return Err(PokerL1Error::Other(format!(
+                    "native coin {:?} is mutable/versioned; immutable UTXO version 0 required",
+                    object.id
+                )));
+            }
+            live_utxo = live_utxo
+                .checked_add(decode_native_coin(object)?.amount)
+                .ok_or_else(|| PokerL1Error::Other("live native UTXO sum overflow".into()))?;
+            continue;
+        }
+
+        if object.object_type == TEXAS_POKER_TABLE_OBJECT_TYPE {
+            if object.owner != Ownership::Shared {
+                return Err(PokerL1Error::Other(format!(
+                    "Texas Poker table {:?} must be shared",
+                    object.id
+                )));
+            }
+            let table: TexasPokerTable = borsh::from_slice(&object.data).map_err(|error| {
+                PokerL1Error::Serialization(format!(
+                    "decode TexasPokerTable {:?} during supply reconciliation: {error}",
+                    object.id
+                ))
+            })?;
+            if table.id != object.id {
+                return Err(PokerL1Error::Other(format!(
+                    "Texas Poker table embedded id {:?} does not match object id {:?}",
+                    table.id, object.id
+                )));
+            }
+            if table.addon_pool > table.chip_pool {
+                return Err(PokerL1Error::Other(format!(
+                    "Texas Poker table {:?} addon_pool {} exceeds chip_pool {}",
+                    object.id, table.addon_pool, table.chip_pool
+                )));
+            }
+            texas_table_escrow = texas_table_escrow
+                .checked_add(table.chip_pool)
+                .ok_or_else(|| PokerL1Error::Other("Texas table escrow sum overflow".into()))?;
+        }
+    }
+
+    let observed_total = live_utxo
+        .checked_add(staking_escrow)
+        .and_then(|total| total.checked_add(texas_table_escrow))
+        .ok_or_else(|| PokerL1Error::Other("observed native supply sum overflow".into()))?;
+
+    Ok(NativeSupplyReconciliation {
+        treasury_total_supply: cap.total_supply,
+        treasury_total_minted: cap.total_minted,
+        treasury_total_burned: cap.total_burned,
+        live_utxo,
+        staking_escrow,
+        texas_table_escrow,
+        observed_total,
+        delta: i128::from(observed_total) - i128::from(cap.total_supply),
+    })
+}
+
+/// Strict global native-supply reconciliation.
+///
+/// This is the production health gate: unlike [`audit_native_supply`], a non-zero delta is an
+/// error rather than a diagnostic-only result.
+pub fn reconcile_native_supply(
+    object_db: &ObjectDb,
+    staking_escrow: u64,
+) -> PokerL1Result<NativeSupplyReconciliation> {
+    audit_native_supply(object_db, staking_escrow)?.require_balanced()
 }
 
 /// Returns true for the singleton TreasuryCap ID or its reserved type tag.
@@ -132,16 +296,19 @@ pub fn read_treasury(object_db: &ObjectDb) -> PokerL1Result<Option<TreasuryCap>>
 /// occur in one atomic batch. This function exists for explicit genesis builders and tests.
 pub fn initialize_treasury(object_db: &mut ObjectDb) -> PokerL1Result<()> {
     if read_treasury(object_db)?.is_some() {
-        return Err(PokerL1Error::Other("TreasuryCap is already initialized".into()));
+        return Err(PokerL1Error::Other(
+            "TreasuryCap is already initialized".into(),
+        ));
     }
     if object_db.iter().any(is_native_coin_object) {
         return Err(PokerL1Error::Other(
             "cannot initialize TreasuryCap after native coins already exist".into(),
         ));
     }
-    object_db.apply_batch(vec![ObjectMutation::SystemCreate(
-        treasury_cap_object(TreasuryCap::empty_open(), 0)?,
-    )])
+    object_db.apply_batch(vec![ObjectMutation::SystemCreate(treasury_cap_object(
+        TreasuryCap::empty_open(),
+        0,
+    )?)])
 }
 
 fn canonical_genesis_allocations(
@@ -663,10 +830,7 @@ pub fn consume_native_coin_selection(
         }
     }
     let change_id = change_object.as_ref().map(|object| object.id);
-    object_db.replace_objects(
-        &selection.input_ids,
-        change_object.into_iter().collect(),
-    )?;
+    object_db.replace_objects(&selection.input_ids, change_object.into_iter().collect())?;
     Ok(change_id)
 }
 
@@ -694,8 +858,7 @@ pub fn transfer_native_coins(
 
     // Revalidate the supplied selection at the point of consumption. This prevents callers from
     // constructing a selection whose total or ownership differs from the live UTXOs.
-    let validated =
-        select_owned_native_coins(object_db, &selection.input_ids, sender, amount)?;
+    let validated = select_owned_native_coins(object_db, &selection.input_ids, sender, amount)?;
     if validated.total != selection.total {
         return Err(PokerL1Error::Other(format!(
             "native coin selection total mismatch: declared={}, actual={}",
@@ -703,11 +866,7 @@ pub fn transfer_native_coins(
         )));
     }
 
-    let recipient_object = native_coin_object(
-        recipient,
-        amount,
-        coin_output_nonce(tx_hash, 0),
-    )?;
+    let recipient_object = native_coin_object(recipient, amount, coin_output_nonce(tx_hash, 0))?;
     let change_object = if change == 0 {
         None
     } else {
@@ -789,12 +948,91 @@ pub fn create_native_coin_output(
 mod tests {
     use super::*;
     use crate::storage::object_db::ObjectDb;
+    use crate::vm::contracts::texas_poker::types::TexasPokerTable;
 
     fn live_native_supply(db: &ObjectDb) -> u64 {
         db.iter()
             .filter(|object| is_native_coin_object(object))
             .map(|object| decode_native_coin(object).unwrap().amount)
             .sum()
+    }
+
+    fn texas_table_object(id: ObjectID, chip_pool: u64, addon_pool: u64) -> Object {
+        let mut table = TexasPokerTable::new(id, "reconciliation".into(), [0x77; 20], 6, 50, 100);
+        table.chip_pool = chip_pool;
+        table.addon_pool = addon_pool;
+        Object::new(
+            id,
+            Ownership::Shared,
+            TEXAS_POKER_TABLE_OBJECT_TYPE,
+            borsh::to_vec(&table).unwrap(),
+            None,
+        )
+    }
+
+    #[test]
+    fn native_supply_reconciliation_counts_utxo_staking_and_table_escrow_once() {
+        let owner = [0x11; 20];
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[(owner, 1_000)]).unwrap();
+        let input = list_owned_native_coins(&db, owner).unwrap()[0];
+        let selection = select_owned_native_coins(&db, &[input.id], owner, 300).unwrap();
+        consume_native_coin_selection(&mut db, &selection, owner, 300, &[0xCD; 32], 0).unwrap();
+
+        let table_id = ObjectID::new([0x88; 20], 9);
+        db.create(texas_table_object(table_id, 200, 50)).unwrap();
+
+        let report = reconcile_native_supply(&db, 100).unwrap();
+        assert_eq!(report.treasury_total_supply, 1_000);
+        assert_eq!(report.live_utxo, 700);
+        assert_eq!(report.staking_escrow, 100);
+        assert_eq!(report.texas_table_escrow, 200);
+        assert_eq!(report.observed_total, 1_000);
+        assert_eq!(report.delta, 0);
+    }
+
+    #[test]
+    fn native_supply_audit_reports_unbacked_table_value_but_strict_reconcile_rejects_it() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[([0x11; 20], 1_000)]).unwrap();
+        let table_id = ObjectID::new([0x88; 20], 10);
+        db.create(texas_table_object(table_id, 25, 0)).unwrap();
+
+        let report = audit_native_supply(&db, 0).unwrap();
+        assert_eq!(report.delta, 25);
+        assert!(reconcile_native_supply(&db, 0).is_err());
+    }
+
+    #[test]
+    fn native_supply_audit_rejects_malformed_coin_and_table_objects() {
+        let mut wrong_owner_db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut wrong_owner_db, 7, &[([0x11; 20], 100)]).unwrap();
+        let mut wrong_owner_coin = native_coin_object([0x22; 20], 1, 99).unwrap();
+        wrong_owner_coin.owner = Ownership::AddressOwned { owner: [0x33; 20] };
+        wrong_owner_db.create(wrong_owner_coin).unwrap();
+        assert!(audit_native_supply(&wrong_owner_db, 0).is_err());
+
+        let mut versioned_db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut versioned_db, 7, &[([0x11; 20], 100)]).unwrap();
+        let mut versioned_coin = native_coin_object([0x22; 20], 1, 100).unwrap();
+        versioned_coin.version = 1;
+        versioned_db.create(versioned_coin).unwrap();
+        assert!(audit_native_supply(&versioned_db, 0).is_err());
+
+        let mut malformed_table_db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut malformed_table_db, 7, &[([0x11; 20], 100)]).unwrap();
+        let table_id = ObjectID::new([0x88; 20], 11);
+        let mut table = texas_table_object(table_id, 5, 6);
+        table.owner = Ownership::AddressOwned { owner: [0x88; 20] };
+        malformed_table_db.create(table).unwrap();
+        assert!(audit_native_supply(&malformed_table_db, 0).is_err());
+    }
+
+    #[test]
+    fn native_supply_audit_rejects_overflow() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[([0x11; 20], u64::MAX)]).unwrap();
+        assert!(audit_native_supply(&db, 1).is_err());
     }
 
     #[test]
@@ -833,7 +1071,10 @@ mod tests {
         genesis_mint(&mut db, 7, &[(owner, 1_000), ([0x22; 20], 500)]).unwrap();
         let coin = list_owned_native_coins(&db, owner).unwrap()[0];
 
-        assert_eq!(burn_native_coins(&mut db, owner, &[coin.id]).unwrap(), 1_000);
+        assert_eq!(
+            burn_native_coins(&mut db, owner, &[coin.id]).unwrap(),
+            1_000
+        );
         assert!(db.read(&coin.id).is_err());
         let cap = read_treasury(&db).unwrap().unwrap();
         assert_eq!(cap.total_supply, 500);
@@ -855,20 +1096,18 @@ mod tests {
         assert!(burn_native_coins(&mut db, [0x22; 20], &[coin.id]).is_err());
         assert_eq!(db.state_root(), root);
         assert_eq!(read_treasury(&db).unwrap().unwrap(), cap);
-        assert_eq!(decode_native_coin(&db.read(&coin.id).unwrap()).unwrap().amount, 1_000);
+        assert_eq!(
+            decode_native_coin(&db.read(&coin.id).unwrap())
+                .unwrap()
+                .amount,
+            1_000
+        );
     }
 
     #[test]
     fn genesis_overflow_fails_without_partial_state() {
         let mut db = ObjectDb::open_inmemory().unwrap();
-        assert!(
-            genesis_mint(
-                &mut db,
-                7,
-                &[([0x11; 20], u64::MAX), ([0x22; 20], 1)]
-            )
-            .is_err()
-        );
+        assert!(genesis_mint(&mut db, 7, &[([0x11; 20], u64::MAX), ([0x22; 20], 1)]).is_err());
         assert!(read_treasury(&db).unwrap().is_none());
         assert_eq!(live_native_supply(&db), 0);
     }
@@ -879,7 +1118,9 @@ mod tests {
         genesis_mint(&mut db, 7, &[([0x11; 20], 1_000)]).unwrap();
         let root = db.state_root();
 
-        assert!(db.update(&TREASURY_CAP_OBJECT_ID, &[0x44; 20], vec![]).is_err());
+        assert!(db
+            .update(&TREASURY_CAP_OBJECT_ID, &[0x44; 20], vec![])
+            .is_err());
         assert!(db.delete(&TREASURY_CAP_OBJECT_ID).is_err());
         assert_eq!(db.state_root(), root);
         assert!(read_treasury(&db).unwrap().is_some());
@@ -918,19 +1159,18 @@ mod tests {
         let selection =
             select_owned_native_coins(&db, &[first.id, second.id], sender, 100).unwrap();
 
-        let (payment_id, change_id) = transfer_native_coins(
-            &mut db,
-            &selection,
-            sender,
-            recipient,
-            100,
-            &[0xAB; 32],
-        )
-        .unwrap();
+        let (payment_id, change_id) =
+            transfer_native_coins(&mut db, &selection, sender, recipient, 100, &[0xAB; 32])
+                .unwrap();
 
         assert!(db.read(&first.id).is_err());
         assert!(db.read(&second.id).is_err());
-        assert_eq!(decode_native_coin(&db.read(&payment_id).unwrap()).unwrap().amount, 100);
+        assert_eq!(
+            decode_native_coin(&db.read(&payment_id).unwrap())
+                .unwrap()
+                .amount,
+            100
+        );
         assert_eq!(
             decode_native_coin(&db.read(&change_id.unwrap()).unwrap())
                 .unwrap()
@@ -948,8 +1188,7 @@ mod tests {
         genesis_mint(&mut db, 7, &[(owner, 1_000)]).unwrap();
         let input = list_owned_native_coins(&db, owner).unwrap()[0];
         let selection = select_owned_native_coins(&db, &[input.id], owner, 250).unwrap();
-        consume_native_coin_selection(&mut db, &selection, owner, 250, &[0xBC; 32], 0)
-            .unwrap();
+        consume_native_coin_selection(&mut db, &selection, owner, 250, &[0xBC; 32], 0).unwrap();
         burn_escrowed_native(&mut db, 250).unwrap();
 
         let cap = read_treasury(&db).unwrap().unwrap();

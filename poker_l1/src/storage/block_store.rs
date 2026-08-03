@@ -31,6 +31,9 @@ const HEIGHT_INDEX_CF: &str = "height_index";
 pub struct BlockStore {
     /// RocksDB 句柄（包含 `blocks` + `height_index` 两个 CF）。
     db: Arc<DB>,
+    /// Serialize check-and-insert so a competing local writer cannot replace a height between
+    /// the conflict check and the atomic RocksDB batch.
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl BlockStore {
@@ -48,7 +51,10 @@ impl BlockStore {
         let db = DB::open_cf_descriptors(&db_opts, path, vec![blocks_cf, height_cf])
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            write_lock: std::sync::Mutex::new(()),
+        })
     }
 
     /// 打开一个临时目录下的 BlockStore（用于测试 / 开发）。
@@ -82,14 +88,28 @@ impl BlockStore {
     ///
     /// 返回该区块的 `block_hash`。重复写入同一 hash 是幂等的（覆盖写）。
     ///
-    /// 注意：调用方负责保证同一 `height` 不会被不同 block 覆盖（链式增长约束）。
+    /// 同一 `height` 仅接受同一 block hash 的幂等重放；不同 hash 会被拒绝，不能覆盖
+    /// canonical height index。
     pub fn put(&self, block: &Block, chain_id: ChainId) -> PokerL1Result<Hash> {
         let hash = block.block_hash(chain_id);
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 幂等优化：已存在则直接返回
         if self.exists(&hash)? {
             return Ok(hash);
         }
         let height_le = block.header.height.to_le_bytes();
+        if let Some(existing_hash) = self
+            .db
+            .get_cf(self.height_cf(), height_le)
+            .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
+        {
+            if existing_hash.as_ref() != hash {
+                return Err(PokerL1Error::Other(format!(
+                    "block height {} is already bound to a different hash",
+                    block.header.height
+                )));
+            }
+        }
         let value = borsh::to_vec(block)?;
 
         let mut batch = WriteBatch::default();
@@ -460,6 +480,27 @@ mod tests {
         let h2 = store.put(&block, crate::DEFAULT_CHAIN_ID).unwrap();
         assert_eq!(h1, h2);
         assert_eq!(store.len().unwrap(), 1, "幂等写入不应增加计数");
+    }
+
+    #[test]
+    fn put_rejects_a_different_block_at_an_existing_height() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path()).unwrap();
+        let first = dummy_block(5, [0u8; 32]);
+        let first_hash = store.put(&first, crate::DEFAULT_CHAIN_ID).unwrap();
+
+        let mut conflicting = dummy_block(5, [0u8; 32]);
+        conflicting.header.timestamp_ms += 1;
+        let error = store.put(&conflicting, crate::DEFAULT_CHAIN_ID).unwrap_err();
+        assert!(error.to_string().contains("already bound"));
+        assert_eq!(
+            store
+                .get_by_height(5)
+                .unwrap()
+                .block_hash(crate::DEFAULT_CHAIN_ID),
+            first_hash
+        );
+        assert_eq!(store.len().unwrap(), 1);
     }
 
     #[test]

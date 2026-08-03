@@ -258,6 +258,9 @@ fn test_e2e_check_prove_verify() {
         current_bet: 20,
         seat_bet: 20, // 守卫：seat.bet == current_bet
         post_current_turn: 2,
+        completes_betting_round: false,
+        post_round_state: 2,
+        post_pot: 0,
     };
     let row = CheckRow::active(
         &input,
@@ -312,6 +315,9 @@ fn test_soundness_check_tampered_bet() {
         current_bet: 20,
         seat_bet: 20,
         post_current_turn: 2,
+        completes_betting_round: false,
+        post_round_state: 2,
+        post_pot: 0,
     };
     let row = CheckRow::active(
         &input,

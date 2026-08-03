@@ -27,7 +27,7 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
+use crate::airs::common::{u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO};
 use crate::method_kind::MethodKind;
 
 /// `submit_player_reveal_tokens` 业务特定列布局。
@@ -52,8 +52,16 @@ pub mod cols {
 pub struct SubmitPlayerRevealTokensInput {
     /// 提交令牌的座位索引。
     pub seat_index: u8,
-    /// 当前 reveal 阶段枚举值。
+    /// 调用准入时（pre-dispatch）的 reveal 阶段枚举值。
+    ///
+    /// 最后一个被分配的玩家提交 token 后，状态机会将 post-dispatch 阶段推进到
+    /// `NONE`；这不改变本次调用在非 `NONE` 阶段获准执行的事实。
     pub reveal_phase: u8,
+    /// 原生状态机在此调用中执行的 `bump_version` 次数。
+    ///
+    /// 普通 reveal 为 1；最后一个 showdown token 会同步结算并 reset 手牌，
+    /// 因而为 2。该值由 Orchestrator 的 canonical VM replay 推导。
+    pub version_increment: u8,
 }
 
 /// `submit_player_reveal_tokens` AIR 公开输入。
@@ -96,7 +104,11 @@ impl FrameworkEval for SubmitPlayerRevealTokensAir {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let statement = crate::airs::TexasAir::statement(self);
-        let common = CommonConstraints::write(&mut eval, &statement);
+        let common = CommonConstraints::write_with_version_increment(
+            &mut eval,
+            &statement,
+            u64::from(self.input.version_increment),
+        );
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();

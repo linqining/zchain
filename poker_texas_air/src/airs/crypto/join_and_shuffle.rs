@@ -51,9 +51,9 @@ pub mod cols {
     pub const OUTPUT_DECK_COMMITMENT_BASE: usize = COMMON_NUM_COLUMNS + 6;
     /// `OUTPUT_OLD_DECK_COMMITMENT` 起始列（4 limb，原牌组承诺）。
     pub const OUTPUT_OLD_DECK_COMMITMENT_BASE: usize = COMMON_NUM_COLUMNS + 10;
-    /// `INPUT_SHUFFLE_PHASE` 列（Gap 6：调用时的 shuffle_state.phase）。
+    /// `INPUT_SHUFFLE_PHASE` 列（调用前的 `shuffle_state.phase`）。
     pub const INPUT_SHUFFLE_PHASE: usize = COMMON_NUM_COLUMNS + 14;
-    /// `INPUT_SHUFFLE_PHASE_Q` 列（Gap 6 witness：shuffle_phase²，拆 3 次 vanishing）。
+    /// `INPUT_SHUFFLE_PHASE_Q` 列（phase² witness，拆 3 次 vanishing）。
     pub const INPUT_SHUFFLE_PHASE_Q: usize = COMMON_NUM_COLUMNS + 15;
     /// `join_and_shuffle` AIR 总列数。
     pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 16;
@@ -66,7 +66,7 @@ pub struct JoinAndShuffleInput {
     pub seat_index: u8,
     /// 新牌组承诺（Blake2b 压缩后 4 limb）。
     pub new_deck_commitment: u64,
-    /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {1,2,3}）。
+    /// 调用前的 `shuffle_state.phase`（必须 ∈ {1,2,3}）。
     pub shuffle_phase: u8,
 }
 
@@ -127,7 +127,7 @@ impl FrameworkEval for JoinAndShuffleAir {
         let _output_old_deck_commitment_1 = eval.next_trace_mask();
         let _output_old_deck_commitment_2 = eval.next_trace_mask();
         let _output_old_deck_commitment_3 = eval.next_trace_mask();
-        // Gap 6：shuffle_phase 与 witness q
+        // 调用前 shuffle phase 与平方 witness。
         let input_shuffle_phase = eval.next_trace_mask();
         let input_shuffle_phase_q = eval.next_trace_mask();
 
@@ -147,16 +147,16 @@ impl FrameworkEval for JoinAndShuffleAir {
             is_active.clone() * (output_deck_commitment_0 - input_new_deck_commitment_0),
         );
 
-        // 约束（Gap 6 part 1）：shuffle_phase == input.shuffle_phase
+        // 约束 4a：shuffle_phase == input.shuffle_phase
         let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();
         eval.add_constraint(is_active.clone() * (input_shuffle_phase.clone() - expected_phase));
-        // 约束（Gap 6 part 2）：q == shuffle_phase²（witness 一致性，degree-2）
+        // 约束 4b：q == shuffle_phase²（witness 一致性，degree-2）
         eval.add_constraint(
             is_active.clone()
                 * (input_shuffle_phase_q.clone()
                     - input_shuffle_phase.clone() * input_shuffle_phase.clone()),
         );
-        // 约束（Gap 6 part 3）：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
+        // 约束 4c：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
         // vanishing (phase-1)(phase-2)(phase-3) = phase³-6phase²+11phase-6
         // 经 q=phase² 展开为 degree ≤ 2：(phase·q) - 6·q + 11·phase - 6 == 0
         let six: E::F = M31::from(6u32).into();
@@ -192,9 +192,9 @@ pub struct JoinAndShuffleRow {
     pub output_deck_commitment: [M31; 4],
     /// `OUTPUT_OLD_DECK_COMMITMENT`（4 limb）。
     pub output_old_deck_commitment: [M31; 4],
-    /// Gap 6：调用时的 shuffle_state.phase。
+    /// 调用前的 shuffle_state.phase。
     pub input_shuffle_phase: M31,
-    /// Gap 6 witness：shuffle_phase²。
+    /// phase² witness。
     pub input_shuffle_phase_q: M31,
 }
 

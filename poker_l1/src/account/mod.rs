@@ -21,7 +21,7 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
-use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+use rocksdb::{ColumnFamilyDescriptor, DB, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -362,6 +362,57 @@ impl AccountStore {
             rand::random::<u64>()
         ));
         Self::open(path)
+    }
+
+    /// Create an isolated, in-memory execution snapshot.
+    ///
+    /// Block validation uses this snapshot while replaying a candidate block.  In particular,
+    /// validation must never advance a live account nonce or persist a resource-credit change
+    /// merely because a block later proves to have the wrong state root.
+    pub(crate) fn create_snapshot(&self) -> Self {
+        Self {
+            accounts: self.accounts.clone(),
+            // A snapshot deliberately has no RocksDB handle: it is a pure staging area.
+            db: None,
+        }
+    }
+
+    /// Atomically replace the changed account rows with a previously validated snapshot.
+    ///
+    /// The in-memory working set is updated only after the RocksDB `WriteBatch` succeeds.  This
+    /// keeps an account-store write failure from leaving the persistent and in-memory nonce views
+    /// divergent.  This method intentionally owns only the account-store half of the protocol;
+    /// callers must coordinate it with `ObjectDb`.
+    pub(crate) fn apply_snapshot(&mut self, snapshot: Self) -> PokerL1Result<()> {
+        let mut changed: Vec<Address> = self
+            .accounts
+            .keys()
+            .chain(snapshot.accounts.keys())
+            .copied()
+            .collect();
+        changed.sort_unstable();
+        changed.dedup();
+        changed.retain(|address| self.accounts.get(address) != snapshot.accounts.get(address));
+
+        if let Some(db) = &self.db {
+            let cf = db
+                .cf_handle(ACCOUNTS_CF)
+                .expect("accounts CF 必须存在（由 open 创建）");
+            let mut batch = WriteBatch::default();
+            for address in &changed {
+                match snapshot.accounts.get(address) {
+                    Some(account) => batch.put_cf(cf, address, borsh::to_vec(account)?),
+                    None => batch.delete_cf(cf, address),
+                }
+            }
+            if !changed.is_empty() {
+                db.write(batch)
+                    .map_err(|error| PokerL1Error::Rocksdb(error.to_string()))?;
+            }
+        }
+
+        self.accounts = snapshot.accounts;
+        Ok(())
     }
 
     /// 把单个账户落盘（持久化模式下；内存模式为 no-op）。

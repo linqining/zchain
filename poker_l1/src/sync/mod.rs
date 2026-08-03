@@ -26,7 +26,7 @@
 use crate::block::BlockHeader;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::Object;
-use crate::storage::{BlockStore, ObjectDb};
+use crate::storage::{BlockStore, ObjectBackend, ObjectDb};
 use crate::{BlockHeight, Hash};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
@@ -281,14 +281,14 @@ impl SnapshotVerifier {
 
 /// 快照应用器——将验证过的分块应用到 `ObjectDb`。
 ///
-/// 应用顺序：清空目标库 → 按 chunk index 顺序写入所有对象 → 校验 state_root。
+/// 应用顺序：在隔离 snapshot 中按 chunk index 写入所有对象 → 校验 state_root → 单批提交。
 pub struct SnapshotApplier;
 
 impl SnapshotApplier {
     /// 将一组已验证的分块应用到目标 `ObjectDb`。
     ///
     /// # 参数
-    /// - `object_db`：目标状态库（将被写入）
+    /// - `object_db`：空的目标状态库（将被写入）
     /// - `chunks`：已通过 `SnapshotVerifier::verify_chunk` 的分块（按 index 排序）
     /// - `manifest`：用于最终 state_root 校验
     ///
@@ -300,14 +300,26 @@ impl SnapshotApplier {
         chunks: &[SnapshotChunk],
         manifest: &SnapshotManifest,
     ) -> PokerL1Result<()> {
+        if !object_db.is_empty() {
+            return Err(PokerL1Error::Other(
+                "snapshot application requires an empty ObjectDb".to_string(),
+            ));
+        }
         // 按 index 排序确保应用顺序确定
         let mut sorted_chunks: Vec<&SnapshotChunk> = chunks.iter().collect();
         sorted_chunks.sort_by_key(|c| c.index);
 
+        // Do all state changes on an isolated SMT first.  A malformed chunk, collision, wrong
+        // object count, or wrong root leaves the live database completely untouched.
+        let mut snapshot = object_db.create_snapshot();
         let mut applied_count: u64 = 0;
         for chunk in sorted_chunks {
             for object in &chunk.objects {
-                object_db.create(object.clone())?;
+                if crate::economics::is_treasury_cap_object(object) {
+                    snapshot.system_create(object.clone())?;
+                } else {
+                    snapshot.create(object.clone())?;
+                }
                 applied_count += 1;
             }
         }
@@ -320,8 +332,15 @@ impl SnapshotApplier {
             )));
         }
 
-        // 端到端 state_root 校验
-        SnapshotVerifier::verify_applied_state(object_db, manifest)
+        // Verify the candidate root before the single RocksDB batch is made visible.
+        if snapshot.state_root() != manifest.state_root {
+            return Err(PokerL1Error::Other(format!(
+                "applied state_root {} != manifest state_root {}",
+                hex_encode(&snapshot.state_root()),
+                hex_encode(&manifest.state_root)
+            )));
+        }
+        snapshot.apply_to(object_db)
     }
 }
 
@@ -573,10 +592,13 @@ mod tests {
     /// 使用 (id_byte, version) 组合确保 ObjectID 唯一。
     fn make_object_db(count: usize) -> ObjectDb {
         let mut db = ObjectDb::open_inmemory().unwrap();
-        for i in 0..count {
-            let id_byte = ((i % 200) as u8) + 1;
-            db.create(make_object(id_byte, i as u32)).unwrap();
-        }
+        let objects = (0..count)
+            .map(|i| {
+                let id_byte = ((i % 200) as u8) + 1;
+                make_object(id_byte, i as u32)
+            })
+            .collect();
+        db.create_batch(objects).unwrap();
         db
     }
 
@@ -763,6 +785,7 @@ mod tests {
         let mut dst_db = ObjectDb::open_inmemory().unwrap();
         let result = SnapshotApplier::apply_chunks(&mut dst_db, &chunks, &manifest);
         assert!(result.is_err(), "state_root 不匹配应被检测到");
+        assert!(dst_db.is_empty(), "失败的快照不得留下部分对象");
     }
 
     #[test]

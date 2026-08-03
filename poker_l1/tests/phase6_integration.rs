@@ -557,6 +557,14 @@ mod subtask_43_7_node {
         // P0-3 验证链：tx roots 必须一致；状态根重放必须匹配（空块 → 当前空库 state_root）
         let empty_root = poker_l1::block::compute_tx_merkle_root(&[]);
         let state_root = node.state_root();
+        // Certificate commitments are part of the signed block statement.  Keep this empty-set
+        // test certificate self-consistent rather than relying on the pre-P0-3 placeholder.
+        let cert = DagCommitCertificate {
+            state_root,
+            public_tx_root: empty_root,
+            gameturn_tx_root: empty_root,
+            ..dummy_commit_certificate()
+        };
         let block = Block::new(
             BlockHeader {
                 height: 10,
@@ -565,7 +573,7 @@ mod subtask_43_7_node {
                 state_root,
                 public_tx_root: empty_root,
                 gameturn_tx_root: empty_root,
-                dag_commit_certificate: dummy_commit_certificate(),
+                dag_commit_certificate: cert,
             },
             vec![],
             vec![],

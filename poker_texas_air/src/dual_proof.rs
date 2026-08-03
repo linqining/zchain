@@ -19,8 +19,8 @@ use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::{
-    ReconstructionV3VerifyRequest, ShuffleVerifyRequest, TranscriptId,
-    RECONSTRUCTION_V3_ABI_VERSION, SHUFFLE_ABI_VERSION,
+    RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3VerifyRequest, SHUFFLE_ABI_VERSION,
+    ShuffleVerifyRequest, TranscriptId,
 };
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
@@ -35,14 +35,14 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::validate_full_dispatch_task;
 use crate::precompile_binding::{
-    precompile_call_context, PokerPrecompileId, PrecompileCallBinding,
+    PokerPrecompileId, PrecompileCallBinding, precompile_call_context,
 };
-use crate::prove_task::{dispatch_call_digest, MethodInput, ProveTask};
-use crate::prover::{prove_method, MethodProof};
+use crate::prove_task::{MethodInput, ProveTask, dispatch_call_digest};
+use crate::prover::{MethodProof, prove_method};
 use crate::public_inputs::TexasPublicInputs;
-use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
-use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
-use crate::verified_chain::{verify_method_against_and_issue_receipt, VerificationReceipt};
+use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
+use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
+use crate::verified_chain::{VerificationReceipt, verify_method_against_and_issue_receipt};
 
 /// Wire-format magic for a stage-3 dual proof package.
 pub const DUAL_PROOF_MAGIC: [u8; 8] = *b"ZPDUAL03";
@@ -464,7 +464,9 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let input = SubmitShuffleV2Input {
                 seat_index: *seat_index,
                 new_deck_commitment: task.post_table.deck_state.encrypted.len() as u64,
-                shuffle_phase: task.post_table.shuffle_state.phase,
+                // Admission is determined by the pre-dispatch shuffle phase. The final shuffler
+                // legitimately drives the post-state to NONE after `advance_shuffle`.
+                shuffle_phase: task.pre_table.shuffle_state.phase,
                 precompile: binding.air_binding(),
             };
             let row = SubmitShuffleV2Row::active(

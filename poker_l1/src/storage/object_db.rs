@@ -127,6 +127,15 @@ impl ObjectDb {
         self.apply_batch(vec![ObjectMutation::Create(object)])
     }
 
+    /// Atomically create multiple objects in one durable write and one in-memory SMT staging pass.
+    ///
+    /// This is the bulk counterpart of [`Self::create`].  It is intended for trusted import and
+    /// genesis-style callers that have already assembled a complete object set; collisions still
+    /// reject the entire batch without changing either RocksDB or the live state root.
+    pub fn create_batch(&mut self, objects: Vec<Object>) -> PokerL1Result<()> {
+        self.apply_batch(objects.into_iter().map(ObjectMutation::Create).collect())
+    }
+
     /// 读取对象（返回 clone，因为不能借用 RocksDB 内部缓冲区）。
     pub fn read(&self, id: &ObjectID) -> PokerL1Result<Object> {
         // 内存查询更快，直接走内存

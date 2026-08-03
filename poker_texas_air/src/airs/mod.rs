@@ -1,14 +1,14 @@
-//! Method AIRs — 21 个已启用的专用 AIR。
+//! Method AIRs — 22 个已启用的专用 AIR。
 //!
 //! ## 分类
 //!
 //! - [`lifecycle`] — A 档：6 个表台生命周期方法
-//! - [`actions`] — B 档：8 个已启用玩家动作方法
+//! - [`actions`] — B 档：9 个已启用玩家动作方法
 //! - [`funds`] — B+ 档：2 个资金动作方法（addon/rebuy）
 //! - [`crypto`] — C 档：5 个密码学协议方法
 //!
-//! VM 另注册 `request_leave_after_hand` 与 `fold_with_proof`，但二者尚无可信
-//! AIR statement，生产 Orchestrator 会在 proof 构造前拒绝。
+//! VM 另注册 `fold_with_proof`，该 selector 尚无可信 AIR statement，生产
+//! Orchestrator 会在 proof 构造前拒绝。
 //!
 //! ## 通用模板
 //!
@@ -183,6 +183,11 @@ impl_validated_texas_air!(
     actions::validation::validate_force_fold
 );
 impl_texas_air!(actions::kick_player::KickPlayerAir, MethodKind::KickPlayer);
+impl_validated_texas_air!(
+    actions::request_leave_after_hand::RequestLeaveAfterHandAir,
+    MethodKind::RequestLeaveAfterHand,
+    actions::validation::validate_request_leave_after_hand
+);
 impl_texas_air!(funds::addon::AddonAir, MethodKind::Addon);
 impl_texas_air!(funds::rebuy::RebuyAir, MethodKind::Rebuy);
 impl_texas_air!(

@@ -39,12 +39,10 @@ use poker_l1::consensus::{
 use poker_l1::error::PokerL1Result;
 use poker_l1::network::{CommitVote, GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
-#[cfg(feature = "recursive-verifier")]
-use poker_l1::offline::zk_verifier::ZkVerifierRegistry;
 use poker_l1::rpc::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcClientInfo, RpcGuard, RpcHandler,
 };
-use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey};
+use poker_l1::signature::{CURRENT_VERSION, SignatureScheme, TaggedPubkey, verify_signature};
 use poker_l1::transaction::{Gas, RouteHint, Transaction, TxLane, validate_tx_limits};
 use poker_l1::{Address, Hash};
 use tracing::{debug, error, info, warn};
@@ -63,18 +61,46 @@ const DEFAULT_MAX_CONNECTIONS: usize = 128;
 /// 优雅关闭轮询间隔（accept non-blocking 后 sleep）。
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-fn open_node_with_application_verifiers(config: NodeConfig) -> PokerL1Result<Node> {
-    #[cfg(feature = "recursive-verifier")]
-    {
-        let mut registry = ZkVerifierRegistry::new();
-        poker_texas_air::l1_verifier::register_texas_stwo_recursive_verifier(&mut registry)?;
-        Node::open_with_zk_verifier_registry(config, registry)
-    }
+/// Deterministic logical-time increment used for a committed block.
+///
+/// Header time is a soft reference, but it is part of the execution environment.  Validators
+/// must therefore never derive it independently from wall-clock time while signing the same
+/// certificate; doing so can produce distinct state roots for a single DAG leader.
+const CONSENSUS_TIMESTAMP_STEP_MS: u64 = 1_000;
 
-    #[cfg(not(feature = "recursive-verifier"))]
-    {
-        Node::open(config)
+/// Bound a vertex range response by both rounds scanned and vertices returned.
+const MAX_VERTEX_RANGE_ROUNDS: u64 = 512;
+const MAX_VERTEX_RANGE_RESPONSE: usize = 512;
+
+/// Derive the execution timestamp from already-finalized chain state rather than the local clock.
+///
+/// This preserves the header's monotonic soft-time invariant and is identical for every validator
+/// which has the same parent.  The genesis fallback is also deterministic for integration tests
+/// and a freshly initialized chain.
+fn consensus_block_timestamp(node: &Node, height: u64) -> Result<u64, String> {
+    let previous = height
+        .checked_sub(1)
+        .and_then(|previous_height| {
+            node.block_store()
+                .get_by_height(previous_height)
+                .ok()
+                .map(|block| block.header.timestamp_ms)
+        });
+    match previous {
+        Some(timestamp) => timestamp
+            .checked_add(CONSENSUS_TIMESTAMP_STEP_MS)
+            .ok_or_else(|| "block timestamp overflow".to_string()),
+        None => height
+            .checked_mul(CONSENSUS_TIMESTAMP_STEP_MS)
+            .ok_or_else(|| "genesis block timestamp overflow".to_string()),
     }
+}
+
+fn open_node_with_application_verifiers(config: NodeConfig) -> PokerL1Result<Node> {
+    // The standard binary deliberately does not expose the experimental zkVM recursive verifier.
+    // Texas proof work continues through the custom AIR/proving-service path until the recursive
+    // verifier has its own completed soundness review and an explicit re-enable decision.
+    Node::open(config)
 }
 
 /// commit certificate 投票累加器（缺口 #3：多 validator 2/3 多签闭环）。
@@ -1167,7 +1193,29 @@ fn handle_p2p_connection(
                         }
                     }
                     NetworkMessage::CommitVote(vote) => {
-                        // 缺口 #3：收集 peer 的 commit certificate 投票。
+                        // A vote is useful only if its signer is an active validator and its
+                        // signature is valid for this exact certificate statement.  Otherwise an
+                        // attacker could fill the collector with junk that later consumes a
+                        // quorum attempt and causes valid votes to be discarded.
+                        let active_validators = node.active_validator_pubkeys_sorted();
+                        if !active_validators.iter().any(|pk| pk == &vote.signer_pubkey) {
+                            warn!("P2P commit vote rejected: signer is not an active validator");
+                            continue;
+                        }
+                        if !matches!(
+                            vote.signer_pubkey.scheme(),
+                            Ok(SignatureScheme::Secp256k1)
+                        )
+                            || verify_signature(
+                                &vote.signer_pubkey,
+                                &vote.signature,
+                                &vote.cert_signing_hash,
+                            )
+                            .is_err()
+                        {
+                            warn!("P2P commit vote rejected: invalid secp256k1 signature");
+                            continue;
+                        }
                         votes.add_vote(vote);
                     }
                     NetworkMessage::PeerExchange(peers) => {
@@ -1237,14 +1285,11 @@ fn handle_p2p_connection(
                             warn!("P2P 回送 ResponseBlocks 失败：{e}");
                         }
                     }
-                    NetworkMessage::RequestVerticesByRange(_start_round, _end_round) => {
-                        // 需 epoch 上下文才能查询 vertex_store.get_by_round(epoch, round)，
-                        // 当前请求未携带 epoch，暂返回空 Vec。
-                        // TODO: 协议升级后补充 epoch 字段。
-                        debug!("收到 RequestVerticesByRange（暂不支持，需 epoch）");
+                    NetworkMessage::RequestVerticesByRange(start_round, end_round) => {
+                        let vertices = collect_vertices_by_round(&dag, start_round, end_round);
                         if let Err(e) = send_p2p_message(
                             &mut stream,
-                            &NetworkMessage::ResponseVertices(Vec::new()),
+                            &NetworkMessage::ResponseVertices(vertices),
                         ) {
                             warn!("P2P 回送 ResponseVertices 失败：{e}");
                         }
@@ -1298,6 +1343,31 @@ fn collect_blocks_by_range(
         }
     }
     blocks
+}
+
+/// Collect the current DAG's full vertices for an inclusive round range.
+///
+/// `RequestVerticesByRange` has no epoch field.  The in-memory DAG is intentionally scoped to
+/// the active epoch and is reset after commit, so it is the authoritative answer for this wire
+/// request.  A bounded scan prevents a peer from turning a sparse, enormous range into CPU work.
+fn collect_vertices_by_round(dag: &Arc<Mutex<Dag>>, start_round: u64, end_round: u64) -> Vec<DagVertex> {
+    if start_round > end_round {
+        return Vec::new();
+    }
+    let capped_end = end_round.min(start_round.saturating_add(MAX_VERTEX_RANGE_ROUNDS - 1));
+    let dag = dag.lock().unwrap_or_else(|e| e.into_inner());
+    let mut vertices = Vec::new();
+    for round in start_round..=capped_end {
+        for hash in dag.round_vertices(round) {
+            if let Some(vertex) = dag.get(hash) {
+                vertices.push(vertex.clone());
+                if vertices.len() == MAX_VERTEX_RANGE_RESPONSE {
+                    return vertices;
+                }
+            }
+        }
+    }
+    vertices
 }
 
 // ===== validator 产块循环 =====
@@ -1393,15 +1463,12 @@ fn compute_cert_signing_hash(
             _ => public_txs.push(tx.clone()),
         }
     }
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let timestamp_ms = consensus_block_timestamp(node, height)?;
     let env = node.execution_environment(height, timestamp_ms);
     // 缺口 #4-M1：proposer = vertex author（出块 validator）。
     let env = env.with_proposer(poker_l1::account::derive_address(&vertex.author_pubkey));
     let outcome = node
-        .execute_block_on_state(&env, &sorted_txs)
+        .simulate_block_execution(&env, &sorted_txs)
         .map_err(|e| format!("execute_block failed: {e}"))?;
     let public_tx_root = poker_l1::block::compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = poker_l1::block::compute_tx_merkle_root(&gameturn_txs);
@@ -1514,16 +1581,19 @@ fn commit_and_finalize_block_multi(
             _ => public_txs.push(tx.clone()),
         }
     }
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let timestamp_ms = match consensus_block_timestamp(node, height) {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            error!("multi: derive deterministic block timestamp failed: {error}");
+            return;
+        }
+    };
     let env = node.execution_environment(height, timestamp_ms);
     // 缺口 #4-M1：proposer = prev_vertex author（leader / 出块 validator）。
     let env = env.with_proposer(poker_l1::account::derive_address(
         &prev_vertex.author_pubkey,
     ));
-    let outcome = match node.execute_block_on_state(&env, &sorted_txs) {
+    let outcome = match node.simulate_block_execution(&env, &sorted_txs) {
         Ok(o) => o,
         Err(e) => {
             error!("multi: execute_block 失败：{e}");
@@ -1636,7 +1706,7 @@ fn build_block_from_vertex(
     // 故此处仅在底层错误（锁中毒 / RocksDB 写失败）时返回 Err。
     let env = node.execution_environment(height, timestamp_ms);
     let outcome = node
-        .execute_block_on_state(&env, &sorted_txs)
+        .simulate_block_execution(&env, &sorted_txs)
         .map_err(|e| format!("execute_block failed: {e}"))?;
     let state_root = outcome.state_root;
     if state_root == prev_state_root && !sorted_txs.is_empty() {
@@ -1971,12 +2041,9 @@ fn run_validator_loop(
                                     &mut prev_block_hash,
                                 );
                             } else {
-                                // 多 validator：稳健 commit 回退（缺口 #3 活性）。
-                                // detect_commit_leader 已确认该 leader 有 ≥2/3 distinct-author
-                                // 引用（vertex 签名固定，即 2/3 safety）。cert 签名收集尽可能多
-                                // 的 CommitVote（本节点签名 + 已到达的 peer 投票），**不阻塞**
-                                // 等待 quorum —— DAG 引用本身已是 2/3 safety，cert 签名为附加
-                                // 审计。这避免跨进程投票时序导致的活性问题。
+                                // 多 validator：DAG 的 2/3 引用与 certificate 的 2/3 签名
+                                // 都是 finality 条件。后者不能降级为“仅审计”，否则本节点会
+                                // 自产随后被严格 block validation 拒绝的区块。
                                 let cert_signing_hash = match compute_cert_signing_hash(
                                     &leader_vertex,
                                     chain_id,
@@ -2005,7 +2072,8 @@ fn run_validator_loop(
                                     GossipTopic::CommitVote,
                                     &NetworkMessage::CommitVote(self_vote),
                                 );
-                                // 收集已到达的全部投票（本节点 + peer），不要求满 quorum。
+                                // 收集已到达的投票（本节点 + peer）。不足 quorum 时保留它们，
+                                // 让后续轮次继续累积，而不是出一个必然无效的 block。
                                 let collected = votes.peek_for_hash(&cert_signing_hash);
                                 let active_pubkeys = node.active_validator_pubkeys_sorted();
                                 let mut sig_pairs: Vec<(usize, Vec<u8>)> = collected
@@ -2025,9 +2093,18 @@ fn run_validator_loop(
                                         sig_pairs.push((idx, secp256k1_sign_hash(&secret_key, &cert_signing_hash)));
                                     }
                                 }
+                                let quorum = required_quorum(vc);
+                                if sig_pairs.len() < quorum {
+                                    debug!(
+                                        commit_round,
+                                        votes = sig_pairs.len(),
+                                        quorum,
+                                        "waiting for commit certificate quorum"
+                                    );
+                                    continue;
+                                }
+                                // Only discard votes after enough signer positions were collected.
                                 let _ = votes.drain_for_hash(&cert_signing_hash);
-                                // **不阻塞**：即使 sig_pairs < quorum 也出块（DAG 引用为 safety）。
-                                // validate_block 的 cert 签名校验对此路径放宽（见 validate_block）。
                                 commit_and_finalize_block_multi(
                                     &leader_vertex,
                                     &node,
@@ -2491,6 +2568,34 @@ mod tests {
             },
             signature: vec![0u8; 65],
         }
+    }
+
+    fn make_vertex(round: u64, author_byte: u8) -> DagVertex {
+        DagVertex {
+            epoch: 1,
+            round,
+            author_pubkey: TaggedPubkey {
+                tag: encode_tag(SignatureScheme::Secp256k1, 1),
+                raw: vec![author_byte; 33],
+            },
+            tx_list: vec![],
+            parent_hashes: vec![],
+            author_sig: vec![],
+        }
+    }
+
+    #[test]
+    fn vertex_range_response_returns_only_requested_rounds() {
+        let mut dag = Dag::new();
+        dag.insert(make_vertex(1, 0x01));
+        dag.insert(make_vertex(1, 0x02));
+        dag.insert(make_vertex(2, 0x03));
+        let dag = Arc::new(Mutex::new(dag));
+
+        let first_round = collect_vertices_by_round(&dag, 1, 1);
+        assert_eq!(first_round.len(), 2);
+        assert!(first_round.iter().all(|vertex| vertex.round == 1));
+        assert!(collect_vertices_by_round(&dag, 3, 2).is_empty());
     }
 
     #[test]

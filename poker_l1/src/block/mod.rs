@@ -146,6 +146,21 @@ impl Block {
         compute_tx_merkle_root(&self.gameturn_txs)
     }
 
+    /// Return the only valid block execution order.
+    ///
+    /// The two body lanes have independent Merkle commitments but do not execute
+    /// independently: S9 requires all GameTurn / CheckpointAnchor transactions before the
+    /// Public / ForceSync lane.  Producers and validators must use this helper instead of
+    /// replaying only one lane.
+    #[must_use]
+    pub fn canonical_execution_txs(&self) -> Vec<Transaction> {
+        self.gameturn_txs
+            .iter()
+            .chain(&self.public_txs)
+            .cloned()
+            .collect()
+    }
+
     /// BCS 序列化。
     pub fn to_bcs(&self) -> crate::error::PokerL1Result<Vec<u8>> {
         Ok(borsh::to_vec(self)?)

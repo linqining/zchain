@@ -8,7 +8,8 @@
 //! 2. `seat_index == current_turn`
 //! 3. 当前下注 `current_bet == seat.bet`（无需跟注）
 //! 4. 玩家未 fold、未 all_in
-//! 5. 状态变更：`seat.acted_this_round = true`, `version += 1`
+//! 5. 状态变更：`seat.acted_this_round = true`, `version += 1`；若本次 check
+//!    使所有可行动玩家完成本轮，则合约还会收集下注并进入下一轮 reveal 阶段。
 //!
 //! ## AIR 列布局
 //!
@@ -19,7 +20,7 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
+    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
 };
 use crate::method_kind::MethodKind;
 
@@ -42,6 +43,15 @@ pub mod cols {
     pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 9;
 }
 
+/// Trace encoding for a post-state without an active betting player.
+///
+/// The native table represents this as `current_turn: None` while transitioning
+/// from a completed betting round to a community-reveal phase. The check trace
+/// has a single field element column, so this value is used only for that
+/// `None` representation; verifier-side canonical replay binds it to the
+/// complete post table.
+pub const NO_CURRENT_TURN: u8 = u8::MAX;
+
 /// `check` 输入参数。
 #[derive(Debug, Clone)]
 pub struct CheckInput {
@@ -53,8 +63,18 @@ pub struct CheckInput {
     /// 实际等价于 `seat.bet == current_bet`，因为若 `seat.bet > current_bet`
     /// 玩家本应被退还差额而非 check —— 这里约束两者 limb 0 相等）。
     pub seat_bet: u64,
-    /// mid-round 推进后的下一行动座位。
+    /// 调用后的下一行动座位；若本次结束下注轮、进入揭示阶段则为
+    /// [`NO_CURRENT_TURN`]（对应 VM 的 `current_turn: None`）。
     pub post_current_turn: u8,
+    /// 是否由本次 check 完成下注轮并触发收池/推进到下一轮。
+    ///
+    /// `true` 时 `post_round_state` 与 `post_pot` 由 VM replay 计算并作为 AIR
+    /// 常量约束；完整状态机语义仍由 verifier-side canonical replay 绑定。
+    pub completes_betting_round: bool,
+    /// 调用后的 round_state（仅在完成下注轮时可与 pre-state 不同）。
+    pub post_round_state: u8,
+    /// 调用后的 pot（仅在完成下注轮时可与 pre-state 不同）。
+    pub post_pot: u64,
 }
 
 /// `check` AIR 公开输入。
@@ -133,15 +153,32 @@ impl FrameworkEval for CheckAir {
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (output_acted - one));
 
-        // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
+        // 约束 4（审计共性）：调用前必须处于下注轮（Gap 1）。
         // round_state_is_betting 用 degree-4 vanishing (rs-2)(rs-3)(rs-4)(rs-5)==0
         // 经 q=rs² witness 展开为 degree-2 项，强制 rs ∈ {PREFLOP,FLOP,TURN,RIVER}。
-        eval.add_constraint(common.round_state_unchanged());
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
-        // 约束 5（审计共性，degree-2 limb0）：pot 不变（check 不改变 pot）。
-        for __c in common.pot_unchanged_4limb() {
-            eval.add_constraint(__c);
+
+        if self.input.completes_betting_round {
+            // The final check in a betting round calls native `advance_turn`, which collects
+            // every outstanding seat bet into the pot and starts the next reveal phase. These
+            // endpoint constants are independently reconstructed from canonical pre/post table
+            // images by `actions::validation::validate_check`.
+            let expected_post_round: E::F =
+                M31::from(u32::from(self.input.post_round_state)).into();
+            eval.add_constraint(
+                is_active.clone() * (common.post_round_state.clone() - expected_post_round),
+            );
+            let expected_post_pot = u64_to_m31_limbs(self.input.post_pot);
+            for (actual, expected) in common.post_pot.iter().zip(expected_post_pot) {
+                let expected: E::F = expected.into();
+                eval.add_constraint(is_active.clone() * (actual.clone() - expected));
+            }
+        } else {
+            eval.add_constraint(common.round_state_unchanged());
+            for constraint in common.pot_unchanged_4limb() {
+                eval.add_constraint(constraint);
+            }
         }
 
         let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
@@ -166,7 +203,7 @@ pub struct CheckRow {
     pub input_pre_round_state_q: M31,
     /// `INPUT_CURRENT_TURN` witness（Gap: current_turn == seat_index）。
     pub input_current_turn: M31,
-    /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
+    /// `OUTPUT_CURRENT_TURN` — 下一行动座位，或 [`NO_CURRENT_TURN`]。
     pub output_current_turn: M31,
 }
 

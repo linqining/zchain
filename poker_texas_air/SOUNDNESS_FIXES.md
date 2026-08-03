@@ -3,7 +3,7 @@
 > **历史记录，已被 P05/P06 审计边界取代。** 本文保留早期 AIR 加固工作的背景，
 > 其中“21/21 sound”、固定字段 state-root、动作时立即 `pot += amount` 和测试数量等
 > 旧结论都不是当前可信声明。当前权威状态见
-> [`docs/PO5_PO6_DESIGN_NOTES.md`](docs/PO5_PO6_DESIGN_NOTES.md)：21 个 AIR 路径中只有
+> [`docs/PO5_PO6_DESIGN_NOTES.md`](docs/PO5_PO6_DESIGN_NOTES.md)：22 个 AIR 路径中只有
 > host 完整 dispatch replay + 原生逐 proof 验证形成 P05-H；P05-R 递归聚合未完成；
 > P06 下注动作只覆盖 pot 不变、same-round、`current_turn = Some(next)` 的 mid-round
 > 子集，收池/推进/结算 fail-closed。

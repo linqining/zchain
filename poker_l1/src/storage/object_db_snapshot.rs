@@ -42,6 +42,8 @@ enum Mutation {
     },
     /// 删除对象。
     Delete(ObjectID),
+    /// Create the singleton TreasuryCap through the system path.
+    SystemCreate(Object),
 }
 
 /// ObjectDb 的内存 fork（snapshot）。
@@ -99,6 +101,7 @@ impl ObjectDbSnapshot {
                     new_owner,
                 },
                 Mutation::Delete(id) => ObjectMutation::Delete(id),
+                Mutation::SystemCreate(object) => ObjectMutation::SystemCreate(object),
             })
             .collect();
         db.apply_batch(mutations)
@@ -113,6 +116,16 @@ impl ObjectDbSnapshot {
     /// 已记录的 mutation 数量（用于测试 / 调试）。
     pub fn mutation_count(&self) -> usize {
         self.mutations.len()
+    }
+
+    /// Create the singleton TreasuryCap in an isolated snapshot.
+    ///
+    /// This mirrors `ObjectDb`'s system-only creation rule so Fast Sync can import a complete
+    /// post-genesis state without treating the monetary capability as an ordinary object.
+    pub(crate) fn system_create(&mut self, object: Object) -> PokerL1Result<()> {
+        self.store.system_create(object.clone())?;
+        self.mutations.push(Mutation::SystemCreate(object));
+        Ok(())
     }
 }
 

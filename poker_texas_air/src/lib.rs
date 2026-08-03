@@ -1,13 +1,13 @@
 //! # poker_texas_air — Texas Poker method AIR + host verification
 //!
-//! VM 当前注册 23 个 selector；其中 21 个有 method AIR / host prove+verify 路径，
-//! `request_leave_after_hand` 与 `fold_with_proof` 在生产 Orchestrator 中显式
-//! fail-closed。单方法 proof 已可封装为 application-aware native STWO recursive proof，
+//! VM 当前注册 23 个 selector；其中 22 个有 method AIR / host prove+verify 路径，
+//! `fold_with_proof` 在生产 Orchestrator 中显式 fail-closed。单方法 proof 已可封装为
+//! application-aware native STWO recursive proof，
 //! 最终 verifier 不接收 inner proof；批量 Aggregator 仍是 descriptor-only PoC。
 //!
 //! ## 架构分层
 //!
-//! - **Layer 0**: Method AIRs（21 个启用；2 个注册 selector 禁用）
+//! - **Layer 0**: Method AIRs（22 个启用；1 个注册 selector 禁用）
 //! - **Layer 1**: Host verification receipts（完整 VM dispatch replay 后逐 proof 原生验证）
 //! - **Layer 2**: Host-verified outer precompile（O(N) child replay + final digest AIR）
 //! - **Layer 3**: Native STWO recursion（单方法闭环；约 240 KiB，不是 Groth16 级压缩）

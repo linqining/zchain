@@ -1,6 +1,6 @@
 //! Method AIR 通用列布局与约束宏。
 //!
-//! 所有 21 个已启用 method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
+//! 所有 22 个已启用 method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
 //! 业务特定列在每个 AIR 的 `*Air` 结构里定义。
 //!
 //! ## 列布局策略
@@ -226,6 +226,22 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// # 返回
     /// `CommonConstraints` 实例，业务约束可用 `is_active` 做 gating。
     pub fn write(eval: &mut E, statement: &crate::airs::AirStatement) -> Self {
+        Self::write_with_version_increment(eval, statement, 1)
+    }
+
+    /// Same as [`Self::write`], with an explicitly modeled number of native
+    /// `bump_version` calls in the transition.
+    ///
+    /// Most selectors mutate a table exactly once. A final showdown reveal is
+    /// the exceptional atomic transition: it records the reveal and then
+    /// settles/resets the hand, which performs a second version bump. Callers
+    /// must derive this value from the canonical transition rather than from
+    /// prover-supplied data.
+    pub fn write_with_version_increment(
+        eval: &mut E,
+        statement: &crate::airs::AirStatement,
+        version_increment: u64,
+    ) -> Self {
         let one: E::F = M31::from(1u32).into();
 
         // 读取通用列（顺序必须与 COL_* 常量定义一致）
@@ -328,7 +344,7 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         // 这等价于完整的 4-limb ripple-carry 加 1，无需额外 witness 列，且对 u64
         // 任意值（含 limb0 = 0xFFFF 进位情形）均 sound —— 彻底消除「version 不递增」反例。
         // 对齐合约 bump_version 的 saturating_add：u64::MAX 时保持不变（不 wrap 回 0）。
-        let expected_post = statement.pre_version.saturating_add(1);
+        let expected_post = statement.pre_version.saturating_add(version_increment);
         let expected_post_limbs = u64_to_m31_limbs(expected_post);
         for i in 0..4 {
             eval.add_constraint(post_version_cols[i].clone() - expected_post_limbs[i].into());
@@ -659,8 +675,7 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
                     * (a[i].clone() + base.clone() * borrow_out[i].clone()
                         - b[i].clone()
                         - borrow_in[i].clone()
-                        - diff[i].clone()
-                    ),
+                        - diff[i].clone()),
             );
         }
         // borrow booleanity（3 条独立）

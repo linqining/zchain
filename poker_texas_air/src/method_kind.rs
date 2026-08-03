@@ -6,7 +6,7 @@
 //! # 分类
 //!
 //! - **A 档（生命周期，6 个）**：表台创建/入座/离座/开局/超时/重置
-//! - **B 档（玩家动作，9 个）**：8 个启用 AIR + fail-closed 的 request_leave_after_hand
+//! - **B 档（玩家动作，9 个）**：9 个启用 AIR
 //! - **B+ 档（资金动作，2 个）**：addon（下一手生效）/rebuy（立即生效）
 //! - **C 档（密码学协议，6 个）**：5 个启用 AIR + fail-closed 的 fold_with_proof
 
@@ -34,8 +34,9 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
 
 /// 23 个方法种类的枚举。
 ///
-/// 每个 variant 对应 `poker_l1` 的一个公开 dispatch selector。21 个 variant
-/// 拥有启用的专用 AIR；另外两个只保留 wire compatibility 并在生产中 fail-closed。
+/// 每个 variant 对应 `poker_l1` 的一个公开 dispatch selector。22 个 variant
+/// 拥有启用的专用 AIR；`fold_with_proof` 只保留 wire compatibility 并在生产中
+/// fail-closed。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -108,7 +109,7 @@ impl MethodKind {
     /// the Orchestrator receipt path.
     #[must_use]
     pub const fn is_production_air_enabled(self) -> bool {
-        !matches!(self, Self::RequestLeaveAfterHand | Self::FoldWithProof)
+        !matches!(self, Self::FoldWithProof)
     }
 
     /// 返回方法名字符串（snake_case，与 Move 端 entry function 名一一对应）。
@@ -315,7 +316,7 @@ mod tests {
         assert_eq!(MethodKind::Raise.tier(), MethodTier::Action);
         assert_eq!(MethodKind::JoinAndShuffle.tier(), MethodTier::Crypto);
         assert!(MethodKind::Bet.is_production_air_enabled());
-        assert!(!MethodKind::RequestLeaveAfterHand.is_production_air_enabled());
+        assert!(MethodKind::RequestLeaveAfterHand.is_production_air_enabled());
         assert!(!MethodKind::FoldWithProof.is_production_air_enabled());
     }
 

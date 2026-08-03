@@ -6,7 +6,7 @@
 //! create_table → join_table×2 → start_hand
 //!   → submit_shuffle_v2×2          (Mental Poker 洗牌)
 //!   → preflop reveal (4 token)
-//!   → call(SB) + check(BB)          (preflop 下注)
+//!   → call + check                   (preflop 下注)
 //!   → flop reveal (6 token) → check×2
 //!   → turn reveal (2 token) → check×2
 //!   → river reveal (2 token) → check×2
@@ -17,19 +17,16 @@
 //! 每步经 [`crate::contracts::TexasPokerPlugin`] 真实 dispatch，产出的 `ProveTask`
 //! 由 Orchestrator prove + verify；并记录每步 dispatch / prove 耗时。
 //!
-//! # 容错与已知阻断点
+//! # 容错与覆盖范围
 //!
 //! 本 runner 采用**容错**策略：任一步 dispatch 或 prove 失败时，记录 `ok=false`
 //! 并把首个失败原因写入 `stopped_at`，后续步骤标记为跳过（不再 dispatch），
 //! 最终仍返回一份 [`FullHandReport`]，便于性能评估。
 //!
-//! 当前已知的 ZK 完备性阻断点（详见 `PERFORMANCE_REPORT.md` / `AIR_GAP.md`）：
-//! crypto AIR（`submit_shuffle_v2` / `join_and_shuffle` 等）的 **Gap-6 约束**强制
-//! `shuffle_phase ∈ {1,2,3}`，但真实对局里这些 dispatch 的
-//! `post_table.shuffle_state.phase` 是 `NONE(0)`（join 发生在 WAITING；终结洗牌者
-//! submit 后 `advance_shuffle` 把 phase 重置为 NONE）。因此**终结洗牌者**的
-//! `submit_shuffle_v2` 的 Stwo AIR proof 会在 Gap-6 处失败，之后的状态机未推进，
-//! 后续步骤被跳过。非终结洗牌者及所有 lifecycle/action 方法均可正常 prove+verify。
+//! 目前的 heads-up 回归覆盖 create/join/start、两次 shuffle、preflop 到 showdown
+//! 的所有 reveal token、四轮下注，以及最后一次 showdown reveal 触发的结算/reset。
+//! 各任务均经 canonical VM replay、Stwo prove 和 host verify；该链仍不是递归聚合
+//! 证明，也不构成区块共识锚定。
 //!
 //! # 不声称的内容
 //!
@@ -42,17 +39,20 @@ use borsh::BorshSerialize;
 
 use blstrs::G1Projective;
 use group::Group;
-use poker_l1::Address;
 use poker_l1::object_model::ObjectID;
+use poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
-    selectors,
+    selectors, CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs,
+    SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{TableConfig, TexasPokerTable};
-use poker_protocol::crypto::{ElGamalCiphertext, ECPoint};
+use poker_l1::Address;
+use poker_protocol::crypto::{ECPoint, ElGamalCiphertext};
 
 use crate::contracts::TexasPokerPlugin;
-use crate::crypto_driver::{ShufflePlayer, apply_add_pk_to_c2, build_reveal_token, build_shuffle_v2};
+use crate::crypto_driver::{
+    apply_add_pk_to_c2, build_reveal_token, build_shuffle_v2, ShufflePlayer,
+};
 use crate::plugin::ContractPlugin;
 
 /// 单步计时记录（用于性能报告）。
@@ -79,7 +79,7 @@ pub struct FullHandReport {
     pub chain_ok: bool,
     /// 最终统计。
     pub stats: crate::PluginStats,
-    /// 赢家座位（settle 后观察；None 表示未结算或异常）。
+    /// 赢家座位（settle 后按 stack 观察；`None` 表示平局、未结算或异常）。
     pub winner_seat: Option<u8>,
     /// 提前停止的原因（None = 跑完整局）。
     pub stopped_at: Option<String>,
@@ -177,8 +177,7 @@ impl FullHandRunner {
                         let p_start = Instant::now();
                         let ok = plugin.prove_task(task).is_ok();
                         if !ok {
-                            ctx.stopped_at =
-                                Some("start_hand prove/verify failed".to_string());
+                            ctx.stopped_at = Some("start_hand prove/verify failed".to_string());
                         }
                         (p_start.elapsed(), ok)
                     } else {
@@ -263,84 +262,79 @@ impl FullHandRunner {
             "reveal_preflop",
         );
 
-        // ===== Step 7: preflop 下注（heads-up：SB=button 先动）=====
-        dispatch_and_prove(
+        // ===== Step 7: preflop 下注 =====
+        // `start_hand` rotates the button before the first hand, so seat 0 is not
+        // intrinsically the small blind. Read the contract's authoritative current_turn
+        // before every action rather than reproducing its button/blind policy here.
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[0],
+            &self.players,
             &selectors::call(),
-            &SeatIndexArgs { seat_index: 0 },
-            "call(SB)",
+            "call(preflop)",
         );
-        dispatch_and_prove(
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[1],
+            &self.players,
             &selectors::check(),
-            &SeatIndexArgs { seat_index: 1 },
-            "check(BB)",
+            "check(preflop)",
         );
 
-        // ===== Step 8: flop reveal（3 张公共牌，索引 4,5,6）=====
-        submit_community_reveal(&mut plugin, &mut ctx, &self.players, 4, 3, "reveal_flop");
+        // ===== Step 8: flop reveal（3 张公共牌）=====
+        submit_community_reveal(&mut plugin, &mut ctx, &self.players, 3, "reveal_flop");
 
         // ===== Step 9: flop 下注 =====
-        dispatch_and_prove(
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[0],
+            &self.players,
             &selectors::check(),
-            &SeatIndexArgs { seat_index: 0 },
             "check(flop0)",
         );
-        dispatch_and_prove(
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[1],
+            &self.players,
             &selectors::check(),
-            &SeatIndexArgs { seat_index: 1 },
             "check(flop1)",
         );
 
-        // ===== Step 10: turn reveal（1 张公共牌，索引 7）=====
-        submit_community_reveal(&mut plugin, &mut ctx, &self.players, 7, 1, "reveal_turn");
+        // ===== Step 10: turn reveal（1 张公共牌）=====
+        submit_community_reveal(&mut plugin, &mut ctx, &self.players, 1, "reveal_turn");
 
         // ===== Step 11: turn 下注 =====
-        dispatch_and_prove(
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[0],
+            &self.players,
             &selectors::check(),
-            &SeatIndexArgs { seat_index: 0 },
             "check(turn0)",
         );
-        dispatch_and_prove(
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[1],
+            &self.players,
             &selectors::check(),
-            &SeatIndexArgs { seat_index: 1 },
             "check(turn1)",
         );
 
-        // ===== Step 12: river reveal（1 张公共牌，索引 8）=====
-        submit_community_reveal(&mut plugin, &mut ctx, &self.players, 8, 1, "reveal_river");
+        // ===== Step 12: river reveal（1 张公共牌）=====
+        submit_community_reveal(&mut plugin, &mut ctx, &self.players, 1, "reveal_river");
 
         // ===== Step 13: river 下注 =====
-        dispatch_and_prove(
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[0],
+            &self.players,
             &selectors::check(),
-            &SeatIndexArgs { seat_index: 0 },
             "check(river0)",
         );
-        dispatch_and_prove(
+        dispatch_current_turn(
             &mut plugin,
             &mut ctx,
-            self.players[1],
+            &self.players,
             &selectors::check(),
-            &SeatIndexArgs { seat_index: 1 },
             "check(river1)",
         );
 
@@ -361,7 +355,9 @@ impl FullHandRunner {
         let total = start_total.elapsed();
         let chain_ok = plugin.verify_chain().is_ok();
         let stats = plugin.stats();
-        let HandCtx { steps, stopped_at, .. } = ctx;
+        let HandCtx {
+            steps, stopped_at, ..
+        } = ctx;
 
         (
             plugin,
@@ -464,6 +460,63 @@ fn dispatch_and_prove<A: BorshSerialize>(
     });
 }
 
+/// Dispatch a seat-indexed betting action for the contract's current actor.
+///
+/// Button placement changes at `start_hand`, and future rules may skip folded, all-in or waiting
+/// seats. Resolving the actor from the table immediately before dispatch makes this integration
+/// runner exercise the state machine instead of duplicating its turn-selection rules.
+fn dispatch_current_turn(
+    plugin: &mut TexasPokerPlugin,
+    ctx: &mut HandCtx,
+    players: &[Address; 2],
+    selector: &[u8; 32],
+    name: &str,
+) {
+    if ctx.stopped_at.is_some() {
+        dispatch_and_prove(
+            plugin,
+            ctx,
+            [0u8; 20],
+            selector,
+            &SeatIndexArgs { seat_index: 0 },
+            name,
+        );
+        return;
+    }
+
+    let Some(seat_index) = plugin.table().current_turn else {
+        ctx.stopped_at = Some(format!("{name}: table has no current_turn"));
+        ctx.steps.push(StepTiming {
+            method: name.to_string(),
+            dispatch: Duration::ZERO,
+            prove: Duration::ZERO,
+            ok: false,
+        });
+        return;
+    };
+    let Some(&caller) = players.get(usize::from(seat_index)) else {
+        ctx.stopped_at = Some(format!(
+            "{name}: current_turn seat {seat_index} is not a runner player"
+        ));
+        ctx.steps.push(StepTiming {
+            method: name.to_string(),
+            dispatch: Duration::ZERO,
+            prove: Duration::ZERO,
+            ok: false,
+        });
+        return;
+    };
+
+    dispatch_and_prove(
+        plugin,
+        ctx,
+        caller,
+        selector,
+        &SeatIndexArgs { seat_index },
+        name,
+    );
+}
+
 /// 提交一轮 reveal token：`submissions` 是 `(submitter_seat, assignment_indices)`。
 fn submit_reveal_round(
     plugin: &mut TexasPokerPlugin,
@@ -478,8 +531,58 @@ fn submit_reveal_round(
             if ctx.stopped_at.is_none() {
                 let sp = ctx.players[submitter_seat as usize].clone();
                 if let Some(sp) = sp {
-                    let rstep =
-                        build_reveal_token(&sp, &ctx.deck_view[assignment_idx], step_no as u64 + 1);
+                    let Some(card_idx) = plugin
+                        .table()
+                        .reveal_token_state
+                        .assignments
+                        .get(assignment_idx)
+                        .map(|assignment| usize::from(assignment.encrypted_card_index))
+                    else {
+                        ctx.stopped_at = Some(format!(
+                            "{name}[{step_no}]: assignment {assignment_idx} is absent from canonical table state"
+                        ));
+                        ctx.steps.push(StepTiming {
+                            method: format!("{name}[{step_no}]"),
+                            dispatch: Duration::ZERO,
+                            prove: Duration::ZERO,
+                            ok: false,
+                        });
+                        step_no += 1;
+                        continue;
+                    };
+                    // At showdown the contract verifies against the partial ciphertext
+                    // persisted after the preflop reveals, rather than the current deck.
+                    // This also remains correct if a later reconstruction replaced the deck.
+                    let card = if plugin.table().reveal_token_state.reveal_phase
+                        == REVEAL_PHASE_SHOWDOWN
+                    {
+                        plugin
+                            .table()
+                            .deck_state
+                            .decrypted_cards
+                            .iter()
+                            .find(|card| {
+                                card.encrypted_card_index == card_idx as u8
+                                    && card.ciphertext.is_some()
+                            })
+                            .and_then(|card| card.ciphertext.clone())
+                    } else {
+                        ctx.deck_view.get(card_idx).cloned()
+                    };
+                    let Some(card) = card else {
+                        ctx.stopped_at = Some(format!(
+                            "{name}[{step_no}]: proof ciphertext for card {card_idx} is absent from canonical table state"
+                        ));
+                        ctx.steps.push(StepTiming {
+                            method: format!("{name}[{step_no}]"),
+                            dispatch: Duration::ZERO,
+                            prove: Duration::ZERO,
+                            ok: false,
+                        });
+                        step_no += 1;
+                        continue;
+                    };
+                    let rstep = build_reveal_token(&sp, &card, step_no as u64 + 1);
                     let args = SubmitRevealTokensArgs {
                         seat_index: submitter_seat,
                         assignment_indices: vec![assignment_idx as u8],
@@ -508,27 +611,56 @@ fn submit_reveal_round(
     }
 }
 
-/// 提交公共牌 reveal：`start` 是起始 assignment 索引，`count` 是牌数，每张牌两人都提交。
+/// 提交公共牌 reveal：每个 phase 的 assignment 索引从零开始，每张牌两人都提交。
+///
+/// 密文在整副牌中的索引从合约的当前 assignment 读取，不能把前一阶段的 deck 索引
+/// 当作新的 assignment 索引。
 fn submit_community_reveal(
     plugin: &mut TexasPokerPlugin,
     ctx: &mut HandCtx,
     players: &[Address; 2],
-    start: usize,
     count: usize,
     name: &str,
 ) {
     let mut step_no = 0u32;
-    for offset in 0..count {
-        let assignment_idx = start + offset;
+    for assignment_idx in 0..count {
         for seat in 0..2u8 {
             if ctx.stopped_at.is_none() {
                 let sp = ctx.players[seat as usize].clone();
                 if let Some(sp) = sp {
-                    let rstep = build_reveal_token(
-                        &sp,
-                        &ctx.deck_view[assignment_idx],
-                        step_no as u64 + 1,
-                    );
+                    let Some(card_idx) = plugin
+                        .table()
+                        .reveal_token_state
+                        .assignments
+                        .get(assignment_idx)
+                        .map(|assignment| usize::from(assignment.encrypted_card_index))
+                    else {
+                        ctx.stopped_at = Some(format!(
+                            "{name}[{step_no}]: assignment {assignment_idx} is absent from canonical table state"
+                        ));
+                        ctx.steps.push(StepTiming {
+                            method: format!("{name}[{step_no}]"),
+                            dispatch: Duration::ZERO,
+                            prove: Duration::ZERO,
+                            ok: false,
+                        });
+                        step_no += 1;
+                        continue;
+                    };
+                    let Some(card) = ctx.deck_view.get(card_idx) else {
+                        ctx.stopped_at = Some(format!(
+                            "{name}[{step_no}]: encrypted card {card_idx} is absent from runner deck view"
+                        ));
+                        ctx.steps.push(StepTiming {
+                            method: format!("{name}[{step_no}]"),
+                            dispatch: Duration::ZERO,
+                            prove: Duration::ZERO,
+                            ok: false,
+                        });
+                        step_no += 1;
+                        continue;
+                    };
+                    let rstep = build_reveal_token(&sp, card, step_no as u64 + 1);
                     let args = SubmitRevealTokensArgs {
                         seat_index: seat,
                         assignment_indices: vec![assignment_idx as u8],

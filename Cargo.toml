@@ -11,15 +11,11 @@ edition = "2024"
 
 [features]
 default = []
-# The recursive verifier remains experimental until its external-audit gate is closed. Operators
-# must opt in explicitly instead of receiving it through the default node build.
-recursive-verifier = ["poker_texas_air/recursive-verifier"]
 
 [dependencies]
 poker_l1 = { path = "poker_l1" }
 poker_texas_air = { path = "poker_texas_air" }
 poker_protocol = { workspace = true }
-poker_zkvm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }

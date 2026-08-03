@@ -30,13 +30,16 @@ use crate::consensus::{
     compute_genesis_chain_randomness,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::executor::{BlockExecutionOutcome, ExecutionEnvironment, FeePolicy, execute_block};
+use crate::executor::{
+    BlockExecutionOutcome, ExecutionEnvironment, FeePolicy, execute_block, execute_block_serial,
+};
 use crate::object_model::{Object, ObjectID};
 use crate::signature::TaggedPubkey;
 use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
 use crate::signature::unified::verify_signature;
 use crate::storage::{
     BlockStore, BridgeRegistryStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb,
+    ObjectDbSnapshot,
 };
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::PrecompileRegistry;
@@ -323,6 +326,95 @@ impl TxCacheState {
     }
 }
 
+/// A pending transaction together with the data needed to index it cheaply.
+///
+/// `Transaction` deliberately does not cache its derived caller address.  The mempool does: the
+/// address is required for RBF, and deriving it for every queued transaction on every submission
+/// turned a 10,000-entry mempool into an O(N²) hot path.
+struct PendingTxEntry {
+    /// Monotonic, in-process identifier.  It distinguishes otherwise identical transactions in
+    /// the (permitted) zero-fee non-RBF case.
+    id: u64,
+    /// Caller derived once when the transaction enters the mempool.
+    caller: Address,
+    /// Full transaction in FIFO arrival order.
+    tx: Transaction,
+}
+
+/// Pending transaction queue and its RBF index.
+///
+/// The queue remains the source of truth for arrival ordering.  `by_caller_nonce` points at the
+/// oldest queued entry for a key, matching the previous linear `VecDeque::iter().position()`
+/// semantics while making the common no-conflict submission O(1).  It contains a deque because
+/// legacy zero-fee submissions do not participate in RBF and may share a caller/nonce.
+struct PendingTxState {
+    queue: std::collections::VecDeque<PendingTxEntry>,
+    by_caller_nonce: std::collections::HashMap<(Address, u64), std::collections::VecDeque<u64>>,
+    next_id: u64,
+}
+
+impl PendingTxState {
+    fn new() -> Self {
+        Self {
+            queue: std::collections::VecDeque::new(),
+            by_caller_nonce: std::collections::HashMap::new(),
+            next_id: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    fn oldest_for(&self, caller: Address, nonce: u64) -> Option<(usize, &PendingTxEntry)> {
+        let id = *self.by_caller_nonce.get(&(caller, nonce))?.front()?;
+        self.queue
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.id == id)
+    }
+
+    fn push(&mut self, caller: Address, tx: Transaction) {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.by_caller_nonce
+            .entry((caller, tx.nonce))
+            .or_default()
+            .push_back(id);
+        self.queue.push_back(PendingTxEntry { id, caller, tx });
+    }
+
+    /// Remove an entry by its queue position and update the RBF index at the same time.
+    fn remove(&mut self, index: usize) -> Option<PendingTxEntry> {
+        let entry = self.queue.remove(index)?;
+        let key = (entry.caller, entry.tx.nonce);
+        let remove_key = if let Some(ids) = self.by_caller_nonce.get_mut(&key) {
+            // This cannot fail while `queue` and the index are mutated only through this type.
+            let id_index = ids
+                .iter()
+                .position(|id| *id == entry.id)
+                .expect("pending transaction RBF index must reference queue entry");
+            ids.remove(id_index);
+            ids.is_empty()
+        } else {
+            false
+        };
+        if remove_key {
+            self.by_caller_nonce.remove(&key);
+        }
+        Some(entry)
+    }
+
+    fn drain(&mut self) -> std::collections::VecDeque<PendingTxEntry> {
+        self.by_caller_nonce.clear();
+        std::mem::take(&mut self.queue)
+    }
+}
+
 /// 节点实例 — 持有存储后端与可选 validator 密钥。
 ///
 /// 不直接运行网络/event loop；由上层二进制集成 tokio runtime + network + RPC server。
@@ -332,6 +424,11 @@ pub struct Node {
     config: NodeConfig,
     /// BlockStore。
     block_store: BlockStore,
+    /// Serializes the complete validate → execute snapshots → persist block transition.
+    ///
+    /// ObjectDb, AccountStore and BlockStore do not share one physical transaction, so two local
+    /// block writers must not interleave their preflight checks and commits.
+    block_commit_lock: std::sync::Mutex<()>,
     /// ObjectDb。
     object_db: std::sync::Mutex<ObjectDb>,
     /// DagVertexStore。
@@ -341,7 +438,7 @@ pub struct Node {
     /// 已提交的 tx 缓存（M-6 修复 — cache + order 合并到单个 Mutex）。
     tx_cache: std::sync::Mutex<TxCacheState>,
     /// 待装 vertex 的 tx 缓冲（仅 Validator 角色）。
-    pending_tx: std::sync::Mutex<std::collections::VecDeque<Transaction>>,
+    pending_tx: std::sync::Mutex<PendingTxState>,
     /// pending_tx 的 Condvar — submit_tx 时 notify，validator loop 用 wait_timeout 等待。
     pending_tx_condvar: std::sync::Condvar,
     /// 当前 ValidatorSet（P0-4 动态 quorum）。
@@ -409,10 +506,14 @@ fn build_genesis_validator_set(validators: Vec<ValidatorEntry>) -> PokerL1Result
 
 impl Node {
     /// 打开节点（初始化所有存储后端）。
+    ///
+    /// The standard node intentionally starts without a generic ZK verifier registry. The former
+    /// STWO/zkVM MVP registry had no production soundness guarantee, so exposing it by default
+    /// would make the VM `zk_verify` syscall look available when it must remain fail-closed.
+    /// Applications which eventually provide an independently audited verifier can use the
+    /// explicit [`Self::open_with_zk_verifier_registry`] constructor instead.
     pub fn open(config: NodeConfig) -> PokerL1Result<Self> {
-        let mut zk_registry = crate::offline::zk_verifier::ZkVerifierRegistry::new();
-        crate::offline::zk_verifier::register_stwo_verifier(&mut zk_registry);
-        Self::open_with_zk_verifier_registry(config, zk_registry)
+        Self::open_with_optional_zk_verifier_registry(config, None)
     }
 
     /// Open a node with an application-supplied ZK verifier registry.
@@ -423,6 +524,15 @@ impl Node {
     pub fn open_with_zk_verifier_registry(
         config: NodeConfig,
         zk_registry: crate::offline::zk_verifier::ZkVerifierRegistry,
+    ) -> PokerL1Result<Self> {
+        Self::open_with_optional_zk_verifier_registry(config, Some(zk_registry))
+    }
+
+    /// Shared construction path for the standard fail-closed node and an explicitly configured
+    /// verifier registry.
+    fn open_with_optional_zk_verifier_registry(
+        config: NodeConfig,
+        zk_verifier: Option<crate::offline::zk_verifier::ZkVerifierRegistry>,
     ) -> PokerL1Result<Self> {
         let block_path = config.data_dir.join("blocks");
         let object_path = config.data_dir.join("objects");
@@ -441,17 +551,18 @@ impl Node {
         Ok(Self {
             config,
             block_store,
+            block_commit_lock: std::sync::Mutex::new(()),
             object_db: std::sync::Mutex::new(object_db),
             vertex_store,
             account_store: std::sync::Mutex::new(account_store),
             tx_cache: std::sync::Mutex::new(TxCacheState::new()),
-            pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            pending_tx: std::sync::Mutex::new(PendingTxState::new()),
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
             precompile_registry,
             bridge_registry_store: Some(Arc::new(bridge_registry_store)),
             metrics: Arc::new(crate::metrics::MetricsCollector::new()),
-            zk_verifier: Some(zk_registry),
+            zk_verifier,
             light_headers: std::sync::Mutex::new(Vec::new()),
         })
     }
@@ -492,11 +603,8 @@ impl Node {
             }
             native_allocs.push((addr, *amount));
         }
-        let minted = crate::economics::genesis_mint(
-            &mut object_db,
-            self.config.chain_id,
-            &native_allocs,
-        )?;
+        let minted =
+            crate::economics::genesis_mint(&mut object_db, self.config.chain_id, &native_allocs)?;
         // Account records are non-monetary identity/nonce metadata. If persistence fails here,
         // startup fails and the identical genesis call repairs missing zero-balance accounts on
         // the next restart without minting again.
@@ -531,11 +639,12 @@ impl Node {
                 fee_policy: FeePolicy::Free,
             },
             block_store: BlockStore::open_inmemory()?,
+            block_commit_lock: std::sync::Mutex::new(()),
             object_db: std::sync::Mutex::new(ObjectDb::open_inmemory()?),
             vertex_store: DagVertexStore::open_inmemory()?,
             account_store: std::sync::Mutex::new(AccountStore::new()),
             tx_cache: std::sync::Mutex::new(TxCacheState::new()),
-            pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            pending_tx: std::sync::Mutex::new(PendingTxState::new()),
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
             precompile_registry,
@@ -933,6 +1042,35 @@ impl Node {
         crate::economics::read_treasury(&object_db)
     }
 
+    /// Audit every currently modelled native ZCN custody domain.
+    ///
+    /// Lock ordering intentionally matches bond/slash/unbond paths: `ObjectDb` first, then
+    /// `ValidatorSet`. Keeping both locks for the duration gives the report one coherent view of
+    /// live UTXOs, table vaults and staking escrow.
+    pub fn audit_native_supply(
+        &self,
+    ) -> PokerL1Result<crate::economics::NativeSupplyReconciliation> {
+        let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let validator_set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        let staking_escrow =
+            validator_set
+                .validators
+                .iter()
+                .try_fold(0u64, |total, validator| {
+                    total.checked_add(validator.stake).ok_or_else(|| {
+                        PokerL1Error::Other("validator staking escrow sum overflow".into())
+                    })
+                })?;
+        crate::economics::audit_native_supply(&object_db, staking_escrow)
+    }
+
+    /// Require Treasury supply to equal live UTXOs plus staking and Texas table escrow.
+    pub fn reconcile_native_supply(
+        &self,
+    ) -> PokerL1Result<crate::economics::NativeSupplyReconciliation> {
+        self.audit_native_supply()?.require_balanced()
+    }
+
     /// 写入 DAG vertex（入库前验证）。
     ///
     /// P0-3 修复：在写入存储前执行完整验证链：
@@ -1012,7 +1150,51 @@ impl Node {
     /// 4. commit certificate 多签验证
     /// 5. 状态根重放比对：重新执行 tx，比对计算出的 state_root 与 header.state_root
     pub fn put_block(&self, block: &Block) -> PokerL1Result<Hash> {
-        self.validate_block(block)?;
+        let _commit_guard = self
+            .block_commit_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.validate_block_structure(block)?;
+
+        let candidate_hash = block.block_hash(self.config.chain_id);
+        match self.block_store.get_by_height(block.header.height) {
+            Ok(existing) => {
+                let existing_hash = existing.block_hash(self.config.chain_id);
+                if existing_hash == candidate_hash {
+                    return Ok(candidate_hash);
+                }
+                return Err(PokerL1Error::Other(format!(
+                    "block height {} is already committed to a different hash",
+                    block.header.height
+                )));
+            }
+            Err(PokerL1Error::BlockNotFound) => {}
+            Err(error) => return Err(error),
+        }
+
+        // Hold both state locks across provisional replay and commit.  A block is first executed
+        // against isolated snapshots; only a matching state root may be materialized locally.
+        // This prevents a rejected block from changing objects or account nonces.
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
+        let (object_snapshot, account_snapshot, _) =
+            self.prepare_block_execution(block, &object_db, &account_store)?;
+
+        // Account nonces are replay protection.  Commit their RocksDB batch first; should the
+        // following ObjectDb write fail, make a best-effort restoration before surfacing failure.
+        // The two stores currently have independent RocksDB handles, so a future storage
+        // consolidation is still required for crash-atomic cross-store commits.
+        let account_before = account_store.create_snapshot();
+        account_store.apply_snapshot(account_snapshot)?;
+        if let Err(error) = object_snapshot.apply_to(&mut object_db) {
+            if let Err(rollback_error) = account_store.apply_snapshot(account_before) {
+                tracing::error!(
+                    "ObjectDb commit failed after account snapshot commit; account rollback also failed: {rollback_error}"
+                );
+            }
+            return Err(error);
+        }
+
         let hash = self.block_store.put(block, self.config.chain_id)?;
         // 缺口 #4：State Pruning 接入出块路径。
         if self.config.role.should_prune() {
@@ -1156,20 +1338,31 @@ impl Node {
     ///
     /// 在 block 入库前调用，确保 block 合法且状态根正确。
     pub fn validate_block(&self, block: &Block) -> PokerL1Result<()> {
+        self.validate_block_structure(block)?;
+        let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.prepare_block_execution(block, &object_db, &account_store)?;
+        Ok(())
+    }
+
+    /// Validate block metadata that is independent of the local execution state.
+    fn validate_block_structure(&self, block: &Block) -> PokerL1Result<()> {
         let header = &block.header;
 
-        // 1. 检查 prev_hash 连续性（如果存在前一个 block）
-        if let Ok(Some(prev_block)) = self.get_block_by_height(header.height - 1) {
-            let expected_prev_hash = prev_block.block_hash(self.config.chain_id);
-            if header.prev_hash != expected_prev_hash {
-                return Err(PokerL1Error::InvalidPrevHash {
-                    expected: expected_prev_hash,
-                    got: header.prev_hash,
-                });
+        // 1. Check the parent link without underflowing at a genesis-height header.
+        if header.height > 0 {
+            if let Ok(Some(prev_block)) = self.get_block_by_height(header.height - 1) {
+                let expected_prev_hash = prev_block.block_hash(self.config.chain_id);
+                if header.prev_hash != expected_prev_hash {
+                    return Err(PokerL1Error::InvalidPrevHash {
+                        expected: expected_prev_hash,
+                        got: header.prev_hash,
+                    });
+                }
             }
         }
 
-        // 2. tx roots 一致性校验
+        // 2. Both lane commitments must exactly match their bodies.
         validate_block_tx_roots(
             &block.public_txs,
             &block.gameturn_txs,
@@ -1177,60 +1370,72 @@ impl Node {
             header.gameturn_tx_root,
         )?;
 
-        // 3. GameTurn 免 gas 校验
+        // 3. GameTurn / CheckpointAnchor are the only gas-free body lane.
         validate_gameturn_no_gas(&block.gameturn_txs)?;
 
-        // 4. commit certificate 多签验证（P0-4 动态 quorum；创世引导期空集跳过）。
-        //
-        // 缺口 #3 多 validator 活性回退：若 cert 签名数 < 2/3 quorum（DAG-backed 弱 cert，
-        // safety 由 detect_commit_leader 的 2/3 distinct-author DAG 引用保障），跳过
-        // quorum 计数校验，但仍验证每个存在签名的有效性（防伪造）。
-        let active_pubkeys = self.active_validator_pubkeys_sorted();
-        if !active_pubkeys.is_empty() {
-            let cert = &header.dag_commit_certificate;
-            let required = crate::consensus::required_quorum(active_pubkeys.len());
-            let signer_count = cert.signer_count();
-            if signer_count >= required {
-                // 完整 quorum：严格验证（计数 + 逐签名）。
-                validate_commit_certificate_signatures(
-                    cert,
-                    &active_pubkeys,
-                    self.config.chain_id,
-                )?;
-            } else {
-                // 弱 cert（签名 < quorum）：仅验证存在的签名有效，跳过 quorum 计数。
-                // safety 由出块方的 DAG 2/3 引用保障（detect_commit_leader 已校验）。
-                let signing_hash = cert.signing_hash(self.config.chain_id);
-                for sig in &cert.signature_list {
-                    // 找到对应 validator pubkey（按 bitmap）并验证。
-                    // 弱校验：任一签名无效不阻断（弱 cert 仅作审计），但记录 warn。
-                    let _ = signing_hash;
-                    let _ = sig;
-                }
-                tracing::warn!(
-                    "block#{} cert 签名数 {} < quorum {}（DAG-backed 弱 cert，safety 由 DAG 引用保障）",
-                    header.height,
-                    signer_count,
-                    required
-                );
-            }
+        // 4. The certificate signs these exact header commitments, not merely an arbitrary
+        // certificate carried alongside the block.
+        let cert = &header.dag_commit_certificate;
+        if cert.state_root != header.state_root
+            || cert.public_tx_root != header.public_tx_root
+            || cert.gameturn_tx_root != header.gameturn_tx_root
+        {
+            return Err(PokerL1Error::CommitCertificateMismatch(
+                "certificate commitments do not match block header".to_string(),
+            ));
         }
 
-        // 5. 状态根重放比对（P0-2 接入）
+        // 5. A populated validator set always requires a full, individually verified quorum.
+        // A DAG reference graph is not a substitute for a finality certificate.
+        let active_pubkeys = self.active_validator_pubkeys_sorted();
+        if !active_pubkeys.is_empty() {
+            validate_commit_certificate_signatures(cert, &active_pubkeys, self.config.chain_id)?;
+        }
+
+        // Bridge execution currently mutates an independent nonce registry.  Until that registry
+        // participates in the same staged commit as ObjectDb and AccountStore, accepting such a
+        // block would make failed validation stateful.  Reject it rather than silently replaying
+        // a non-transactional bridge side effect.
+        let bridge_contract_id = crate::vm::precompile::reserved::bridge_contract_id();
+        if block.canonical_execution_txs().iter().any(|tx| {
+            tx.contract_call
+                .as_ref()
+                .is_some_and(|call| call.contract_id == bridge_contract_id)
+        }) {
+            return Err(PokerL1Error::Other(
+                "bridge block execution is disabled until nonce/object/account commits are transactional"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Execute a candidate block against isolated ObjectDb and AccountStore snapshots.
+    ///
+    /// The returned snapshots are suitable for a caller that has already completed all validation
+    /// and wants to commit them.  Ordinary validation simply drops them, leaving live state
+    /// untouched even when the candidate state root is wrong.
+    fn prepare_block_execution(
+        &self,
+        block: &Block,
+        object_db: &ObjectDb,
+        account_store: &AccountStore,
+    ) -> PokerL1Result<(ObjectDbSnapshot, AccountStore, BlockExecutionOutcome)> {
+        let header = &block.header;
         let mut env = self.execution_environment(header.height, header.timestamp_ms);
-        // Bind the proposer into deterministic execution context. This is metadata only: gas
-        // metering and block validation do not credit Account.balance or mint native ZCN.
         if let Some(first_vh) = header.dag_commit_certificate.vertex_hash_list.first() {
             if let Ok(vertex) = self.vertex_store.get_by_hash(first_vh) {
                 env = env.with_proposer(crate::account::derive_address(&vertex.author_pubkey));
             }
         }
-        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
-        let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
-        let outcome = execute_block(&env, &block.public_txs, &mut *object_db, &mut account_store);
-        validate_state_root_transition(outcome.state_root, header.state_root)?;
 
-        Ok(())
+        let mut object_snapshot = object_db.create_snapshot();
+        let mut account_snapshot = account_store.create_snapshot();
+        let txs = block.canonical_execution_txs();
+        let outcome = execute_block_serial(&env, &txs, &mut object_snapshot, &mut account_snapshot);
+        validate_state_root_transition(outcome.state_root, header.state_root)?;
+        Ok((object_snapshot, account_snapshot, outcome))
     }
 
     /// 当前全局状态根（所有 live 对象的 Sparse Merkle Root）。
@@ -1386,6 +1591,41 @@ impl Node {
         ))
     }
 
+    /// Deterministically execute transactions on isolated state snapshots.
+    ///
+    /// Block producers use this to derive a candidate state root before the resulting block is
+    /// finalized and submitted through [`Self::put_block`].  Unlike
+    /// [`Self::execute_block_on_state`], this method never changes the node's live ObjectDb or
+    /// AccountStore, so producing a block cannot cause the later validation path to replay the
+    /// same transaction twice.
+    ///
+    /// Bridge calls intentionally execute with no bridge registry here and therefore fail closed.
+    /// Their nonce registry does not yet support staged commits with objects and accounts.
+    pub fn simulate_block_execution(
+        &self,
+        env: &ExecutionEnvironment,
+        txs: &[Transaction],
+    ) -> PokerL1Result<BlockExecutionOutcome> {
+        let object_db = self
+            .object_db
+            .lock()
+            .map_err(|e| PokerL1Error::Other(format!("object_db mutex poisoned: {e}")))?;
+        let account_store = self
+            .account_store
+            .lock()
+            .map_err(|e| PokerL1Error::Other(format!("account_store mutex poisoned: {e}")))?;
+        let mut object_snapshot = object_db.create_snapshot();
+        let mut account_snapshot = account_store.create_snapshot();
+        let mut simulation_env = env.clone();
+        simulation_env.bridge_registry_store = None;
+        Ok(execute_block_serial(
+            &simulation_env,
+            txs,
+            &mut object_snapshot,
+            &mut account_snapshot,
+        ))
+    }
+
     /// 按 hash 查询 DAG vertex。
     pub fn get_vertex(&self, hash: &Hash) -> PokerL1Result<Option<DagVertex>> {
         match self.vertex_store.get_by_hash(hash) {
@@ -1431,19 +1671,16 @@ impl Node {
             let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
             // 缺口 #3：Priority Mempool — RBF（Replace-by-Fee）。
             // 若已有相同 (caller, nonce) 的 tx 且新 tx gas_price 更高 → 替换。
+            // Caller address is derived exactly once per submission; `PendingTxState` supplies an
+            // O(1) key lookup instead of deriving every queued caller on every new transaction.
             let caller = crate::account::derive_address(&tx.tagged_pubkey);
             let new_price = tx.gas.price;
             let new_nonce = tx.nonce;
             let mut replaced = false;
             if new_price > 0 {
-                // 查找同 (caller, nonce) 的旧 tx。
-                let old_idx = pending.iter().position(|t| {
-                    crate::account::derive_address(&t.tagged_pubkey) == caller
-                        && t.nonce == new_nonce
-                });
-                if let Some(idx) = old_idx {
-                    let old = &pending[idx];
-                    if old.gas.price < new_price {
+                // 查找同 (caller, nonce) 的最早到达旧 tx，保持此前 FIFO 查找语义。
+                if let Some((idx, old)) = pending.oldest_for(caller, new_nonce) {
+                    if old.tx.gas.price < new_price {
                         // RBF：替换（仅当新 price 严格更高）。
                         pending.remove(idx);
                         replaced = true;
@@ -1451,26 +1688,26 @@ impl Node {
                         // 旧 tx price 更高或相等 → 拒绝（不替换）。
                         return Err(PokerL1Error::Other(format!(
                             "RBF rejected: existing tx gas_price {} >= new {} for caller {:?} nonce {}",
-                            old.gas.price, new_price, caller, new_nonce
+                            old.tx.gas.price, new_price, caller, new_nonce
                         )));
                     }
                 }
             }
-            pending.push_back(tx);
+            pending.push(caller, tx);
             while pending.len() > MAX_PENDING_TX_SIZE {
                 // 溢出时丢弃 gas_price 最低的（而非 FIFO 最旧）。
                 if pending.len() > 1 {
                     let mut min_idx = 0;
                     let mut min_price = u64::MAX;
-                    for (i, t) in pending.iter().enumerate() {
-                        if t.gas.price < min_price {
-                            min_price = t.gas.price;
+                    for (i, entry) in pending.queue.iter().enumerate() {
+                        if entry.tx.gas.price < min_price {
+                            min_price = entry.tx.gas.price;
                             min_idx = i;
                         }
                     }
                     pending.remove(min_idx);
                 } else {
-                    pending.pop_front();
+                    pending.remove(0);
                 }
             }
             let len_after = pending.len();
@@ -1515,11 +1752,13 @@ impl Node {
     /// GameTurn 通道的排序**不**按 gas_price（它们免 gas），而按 arrival 顺序，
     /// 因为游戏操作的顺序由轮转规则（`TurnRule`）决定，不是由 gas 竞价决定。
     pub fn drain_pending_tx(&self) -> Vec<Transaction> {
-        let mut txs: Vec<Transaction> = self
+        let txs: Vec<Transaction> = self
             .pending_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
+            .drain()
+            .into_iter()
+            .map(|entry| entry.tx)
             .collect();
         // 分通道排序：GameTurn/CheckpointAnchor 优先 → Public 中 → ForceSync 后。
         // Public/ForceSync 内部按 gas_price 降序；GameTurn 按 arrival 顺序。
@@ -1813,9 +2052,11 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
 mod tests {
     use super::*;
     use crate::DEFAULT_CHAIN_ID;
+    use crate::account::derive_address;
     use crate::block::{Block, BlockHeader};
     use crate::object_model::{Object, ObjectID, Ownership};
     use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
+    use crate::transaction::{Gas, RouteHint, TxRequest};
 
     fn dummy_tagged_pubkey() -> TaggedPubkey {
         TaggedPubkey {
@@ -1882,6 +2123,15 @@ mod tests {
     fn node_config_light() {
         let cfg = NodeConfig::light(PathBuf::from("/tmp/test"));
         assert_eq!(cfg.role, NodeRole::Light);
+    }
+
+    #[test]
+    fn standard_node_has_no_zk_verifier_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = Node::open(NodeConfig::default_full(temp.path().to_path_buf())).unwrap();
+
+        assert!(node.zk_verifier_registry_clone().is_none());
+        assert!(node.execution_environment(7, 11).zk_verifier.is_none());
     }
 
     #[test]
@@ -2491,6 +2741,154 @@ mod tests {
         assert!(result.is_err(), "GameTurn 计费应被拒绝: {:?}", result);
     }
 
+    #[test]
+    fn state_root_mismatch_does_not_mutate_live_state() {
+        use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+
+        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let tagged_pubkey = TaggedPubkey {
+            tag: encode_tag(SignatureScheme::Secp256k1, 1),
+            raw: PublicKey::from_secret_key(&secp, &secret)
+                .serialize()
+                .to_vec(),
+        };
+        let caller = derive_address(&tagged_pubkey);
+        node.put_account(Account::new(tagged_pubkey.clone(), 0))
+            .unwrap();
+
+        let created = Object::new(
+            ObjectID::new(caller, 1),
+            Ownership::AddressOwned { owner: caller },
+            "ValidationRegression",
+            b"must-not-leak".to_vec(),
+            None,
+        );
+        let request = TxRequest {
+            inputs: vec![],
+            outputs: vec![created.clone()],
+            contract_call: None,
+            gas: Gas::new(1_000, 1),
+            lane_hint: TxLane::Public,
+            route_hint: RouteHint::AnyValidator,
+            chain_id: DEFAULT_CHAIN_ID,
+            nonce: 0,
+            gameturn_nonce: None,
+            is_fallback: false,
+        };
+        let signature = {
+            let signature =
+                secp.sign_ecdsa_recoverable(&Message::from_digest(request.signing_hash()), &secret);
+            let (recovery_id, compact) = signature.serialize_compact();
+            let mut bytes = compact.to_vec();
+            bytes.push(recovery_id.to_i32() as u8);
+            bytes
+        };
+        let tx = request.into_transaction(tagged_pubkey, signature);
+        let env = node.execution_environment(1, 1_000);
+        let expected_state_root = node
+            .simulate_block_execution(&env, std::slice::from_ref(&tx))
+            .unwrap()
+            .state_root;
+        let mut wrong_state_root = expected_state_root;
+        wrong_state_root[0] ^= 0xFF;
+        let public_tx_root = crate::block::compute_tx_merkle_root(std::slice::from_ref(&tx));
+        let empty_root = crate::block::compute_tx_merkle_root(&[]);
+        let certificate = crate::consensus::DagCommitCertificate {
+            epoch: 0,
+            commit_round: 1,
+            prev_commit_hash: [0u8; 32],
+            vertex_hash_list: vec![],
+            round_attendance_bitmap: vec![],
+            state_root: wrong_state_root,
+            public_tx_root,
+            gameturn_tx_root: empty_root,
+            signature_list: vec![],
+            signer_bitmap: vec![],
+        };
+        let mut block = Block::new(
+            BlockHeader {
+                height: 1,
+                timestamp_ms: 1_000,
+                prev_hash: [0u8; 32],
+                state_root: wrong_state_root,
+                public_tx_root,
+                gameturn_tx_root: empty_root,
+                dag_commit_certificate: certificate,
+            },
+            vec![tx],
+            vec![],
+        );
+
+        let root_before = node.state_root();
+        assert!(node.validate_block(&block).is_err());
+        assert_eq!(node.state_root(), root_before);
+        assert!(node.get_object(&created.id).unwrap().is_none());
+        assert_eq!(node.get_account(&caller).unwrap().unwrap().nonce, 0);
+
+        // The same transaction is committed exactly once only after its state root matches.
+        block.header.state_root = expected_state_root;
+        block.header.dag_commit_certificate.state_root = expected_state_root;
+        node.validate_block(&block).unwrap();
+        assert!(node.get_object(&created.id).unwrap().is_none());
+        node.put_block(&block).unwrap();
+        assert!(node.get_object(&created.id).unwrap().is_some());
+        assert_eq!(node.get_account(&caller).unwrap().unwrap().nonce, 1);
+    }
+
+    #[test]
+    fn conflicting_height_is_rejected_before_any_state_commit() {
+        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
+        let empty_root = crate::block::compute_tx_merkle_root(&[]);
+        let state_root = node.state_root();
+        let certificate = crate::consensus::DagCommitCertificate {
+            epoch: 0,
+            commit_round: 1,
+            prev_commit_hash: [0u8; 32],
+            vertex_hash_list: vec![],
+            round_attendance_bitmap: vec![],
+            state_root,
+            public_tx_root: empty_root,
+            gameturn_tx_root: empty_root,
+            signature_list: vec![],
+            signer_bitmap: vec![],
+        };
+        let first = Block::new(
+            BlockHeader {
+                height: 1,
+                timestamp_ms: 1_000,
+                prev_hash: [0u8; 32],
+                state_root,
+                public_tx_root: empty_root,
+                gameturn_tx_root: empty_root,
+                dag_commit_certificate: certificate.clone(),
+            },
+            vec![],
+            vec![],
+        );
+        let first_hash = node.put_block(&first).unwrap();
+        let conflicting = Block::new(
+            BlockHeader {
+                timestamp_ms: 2_000,
+                dag_commit_certificate: certificate,
+                ..first.header.clone()
+            },
+            vec![],
+            vec![],
+        );
+
+        assert!(node.put_block(&conflicting).is_err());
+        assert_eq!(node.state_root(), state_root);
+        assert_eq!(
+            node.get_block_by_height(1)
+                .unwrap()
+                .unwrap()
+                .block_hash(DEFAULT_CHAIN_ID),
+            first_hash
+        );
+    }
+
     // ===== P0-4: 动态 quorum（ValidatorSet 接入节点）测试 =====
 
     use crate::consensus::ValidatorStatus;
@@ -2743,7 +3141,13 @@ mod tests {
         node.bond_validator(entry, &inputs).unwrap();
         assert_eq!(node.native_coin_balance(addr).unwrap(), 1_000_000);
         assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 0);
-        assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 1_005_000);
+        assert_eq!(
+            node.treasury_cap().unwrap().unwrap().total_supply,
+            1_005_000
+        );
+        let reconciliation = node.reconcile_native_supply().unwrap();
+        assert_eq!(reconciliation.live_utxo, 1_000_000);
+        assert_eq!(reconciliation.staking_escrow, 5_000);
     }
 
     #[test]
@@ -2789,6 +3193,7 @@ mod tests {
         assert_eq!(cap_after.total_supply, cap_before.total_supply - 100_000);
         assert_eq!(cap_after.total_burned, cap_before.total_burned + 100_000);
         assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 0);
+        assert!(node.reconcile_native_supply().unwrap().is_balanced());
     }
 
     #[test]
@@ -2818,6 +3223,9 @@ mod tests {
         assert_eq!(node.native_coin_balance(addr).unwrap(), 75_000);
         assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 0);
         assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 75_000);
+        let reconciliation = node.reconcile_native_supply().unwrap();
+        assert_eq!(reconciliation.live_utxo, 75_000);
+        assert_eq!(reconciliation.staking_escrow, 0);
     }
 
     // ===== 缺口 #3 §3.6：VRF 时序接入测试 =====
@@ -2892,9 +3300,16 @@ mod tests {
         let cap = node.treasury_cap().unwrap().unwrap();
         assert_eq!(cap.total_supply, 1_500_000);
         assert!(cap.minting_closed);
+        assert!(node.reconcile_native_supply().unwrap().is_balanced());
         let object_db = node.object_db.lock().unwrap();
-        assert_eq!(crate::economics::native_coin_balance(&object_db, addr1).unwrap(), 1_000_000);
-        assert_eq!(crate::economics::native_coin_balance(&object_db, addr2).unwrap(), 500_000);
+        assert_eq!(
+            crate::economics::native_coin_balance(&object_db, addr1).unwrap(),
+            1_000_000
+        );
+        assert_eq!(
+            crate::economics::native_coin_balance(&object_db, addr2).unwrap(),
+            500_000
+        );
     }
 
     #[test]

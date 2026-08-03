@@ -22,6 +22,7 @@ use poker_texas_air::verified_chain::ExpectedChainAnchor;
 use crate::plugin::{DispatchOutcome, PluginError, PluginResult, PluginStats};
 
 /// texas_poker 合约插件。
+#[derive(Clone)]
 pub struct TexasPokerPlugin {
     /// 桌台状态（dispatch 就地修改）。
     table: TexasPokerTable,
@@ -178,6 +179,12 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
     }
 
     fn prove_task(&mut self, task: &ProveTask) -> PluginResult<ProvenTask> {
+        // `start_hand` is the only normal transition that advances `hand_id`. A receipt chain is
+        // deliberately scoped to one hand, so perform the segment boundary here instead of
+        // relying on an individual HTTP/CLI caller to remember it.
+        if task.pre_table.hand_id != task.post_table.hand_id {
+            self.orchestrator.start_new_chain_segment();
+        }
         let summary = self
             .orchestrator
             .prove_and_verify_task(task)

@@ -294,11 +294,11 @@ pub fn project_block_from_commit(
     // 4. 拆分为 public_txs 与 gameturn_txs（按 lane_hint）
     let mut public_txs = Vec::new();
     let mut gameturn_txs = Vec::new();
-    for tx in sorted_txs {
+    for tx in &sorted_txs {
         use crate::transaction::TxLane;
         match tx.lane_hint {
-            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx),
-            TxLane::Public | TxLane::ForceSync => public_txs.push(tx),
+            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx.clone()),
+            TxLane::Public | TxLane::ForceSync => public_txs.push(tx.clone()),
         }
     }
 
@@ -306,8 +306,12 @@ pub fn project_block_from_commit(
     let public_tx_root = crate::block::compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = crate::block::compute_tx_merkle_root(&gameturn_txs);
 
-    // 6. 执行交易并获取新的 state_root
-    let outcome = execute_block(env, &public_txs, object_db, account_store);
+    // 6. 执行交易并获取新的 state_root。
+    //
+    // `public_txs` / `gameturn_txs` 是为了分别承诺 Merkle root 而拆分的；它们不是
+    // 两套独立状态机。必须重放完整的 S9/R4-M4 有序序列，否则 GameTurn 状态变化会
+    // 游离在 block header 的 state_root 之外。
+    let outcome = execute_block(env, &sorted_txs, object_db, account_store);
     let state_root = outcome.state_root;
 
     // 7. 构造 block header

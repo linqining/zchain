@@ -23,8 +23,8 @@
 //! - [`contracts::texas_poker::TexasPokerPlugin`]：封装 texas_poker 合约 + Orchestrator。
 //! - [`runner::HandRunner`]：驱动 6 步 WAITING 状态覆盖片段，串联未外部锚定的
 //!   host-verified state-root 链；它不是完整一手牌，也不证明 block inclusion。
-//! - [`server`]：axum HTTP 服务（`POST /hands/run`、fail-closed 的 `POST /dispatch`、
-//!   `GET /plugins`）。
+//! - [`server`]：axum HTTP 服务（进程内单桌、原子 `POST /dispatch`，以及
+//!   `POST /hands/run`、`GET /plugins`）。
 //!
 //! ## 设计原则
 //!

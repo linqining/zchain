@@ -7,6 +7,11 @@
 
 ## P0-5:Aggregator 不验证任何子证明
 
+> 架构决策（2026-08-04）：主路线是 `poker_texas_air` 的全自定义电路。
+> `poker_zkvm` 只保留为当前依赖图中的编译边界，不再投入修复、soundness 或递归架构工作。
+> 本文中提到该 crate 的段落是历史记录；未来若恢复递归聚合，必须基于 Texas AIR
+> 重新设计并独立审计，不能把 `poker_zkvm` 作为交付前置条件。
+
 本项拆分为两个不同的交付边界：
 - **P05-H-core（Host O(N) verification）：✅ 已完成。** 完整 VM dispatch replay、
   逐 proof 原生验证、opaque receipt、连续性和显式 `ExpectedChainAnchor` 首尾/范围/
@@ -338,11 +343,12 @@ Orchestrator 只接受 round 不变、`post_pot = pre_pot + kicked_bet` 且恰�
 推进的 kick；触发嵌套 reset、settlement 或其他多步变化时同样返回
 `UnsupportedBettingTransition`，不签发 proof/receipt。
 
-VM 新注册的 `request_leave_after_hand` 与 `fold_with_proof` 仍可进入统一
-ProveTask wire format，但生产 Orchestrator 在 dispatch replay/prove 之前显式
-`NotImplemented` fail-closed，不生成 proof/receipt；泛型 `prove_method` /
-`verify_method_against` 也通过 production AIR allowlist 拒绝二者。尤其 `fold_with_proof` 的
-DLEq layer removal 及其可能触发的 advance/settlement 尚未进入可信 AIR。
+VM 新注册的 `request_leave_after_hand` 已有独立 toggle AIR：canonical verifier
+从 pre/post table 重放 `apply_request_leave`，绑定 occupied seat、`false↔true`、
+round/pot 不变及正常 version/call-seq 推进。`fold_with_proof` 仍只可进入统一
+ProveTask wire format，生产 Orchestrator 在 dispatch replay/prove 之前显式
+`NotImplemented` fail-closed，不生成 proof/receipt；其 DLEq layer removal 及可能触发的
+advance/settlement 尚未进入可信 AIR。
 
 ### 具体反例(heads-up preflop)
 SB=BB=10。SB call(amt=0)→ mid-round。BB check 使 `is_betting_complete==true`，则

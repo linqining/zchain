@@ -24,21 +24,23 @@ use std::sync::Arc;
 use super::texas_poker::dispatch as tp_dispatch;
 use super::texas_poker::dispatch::selectors;
 use super::texas_poker::events::{
-    REFUND_TYPE_BET_ONLY, REFUND_TYPE_STACK_AND_BET, REFUND_TYPE_STACK_ONLY, TexasPokerEvent,
+    TexasPokerEvent, REFUND_TYPE_BET_ONLY, REFUND_TYPE_STACK_AND_BET, REFUND_TYPE_STACK_ONLY,
 };
 use super::texas_poker::prove_task::L1DispatchOutput;
+use super::texas_poker::state_machine::reconcile_table_vault;
 use super::texas_poker::types::TexasPokerTable;
-use crate::Address;
+use super::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
 use crate::economics::{
-    NativeCoinSelection, coin_output_nonce, consume_native_coin_selection,
-    create_native_coin_output, native_coin_object, select_owned_native_coins,
+    coin_output_nonce, consume_native_coin_selection, create_native_coin_output,
+    native_coin_object, select_owned_native_coins, NativeCoinSelection,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
 use crate::storage::{ObjectBackend, ObjectDb};
 use crate::vm::contracts::dispatch::DispatchContext;
-use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile, reserved};
+use crate::vm::precompile::{reserved, DispatchResult, ExecutionEnvironment, Precompile};
+use crate::Address;
 
 /// Texas Poker 合约预编译实现。
 ///
@@ -152,7 +154,7 @@ impl Precompile for TexasPokerPrecompile {
             Err(e) => return Err(e),
         };
 
-        let pre_locked = table.chip_pool;
+        let pre_locked = reconcile_table_vault(&table)?;
         let required_funding = tp_dispatch::required_funding(method_selector, args)?;
         let selected_coins: Option<NativeCoinSelection> = required_funding
             .map(|required| select_owned_native_coins(object_db, &env.tx_inputs, *caller, required))
@@ -178,6 +180,7 @@ impl Precompile for TexasPokerPrecompile {
                 table.chip_pool,
             )));
         }
+        reconcile_table_vault(&table)?;
 
         // Preflight every deterministic output before consuming an input. Normal execution uses
         // WriteCaptureBackend and therefore rolls the complete transaction back on any later
@@ -244,7 +247,7 @@ impl Precompile for TexasPokerPrecompile {
             let obj = Object::new(
                 table_id,
                 Ownership::Shared,
-                "TexasPokerTable",
+                TEXAS_POKER_TABLE_OBJECT_TYPE,
                 table_data,
                 None,
             );
@@ -373,11 +376,9 @@ mod tests {
         }]);
 
         let encoded = borsh::to_vec(&output).unwrap();
-        assert!(
-            TexasPokerPrecompile::refund_outputs(&encoded)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(TexasPokerPrecompile::refund_outputs(&encoded)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -702,11 +703,9 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("requires at least one native coin input")
-        );
+        assert!(error
+            .to_string()
+            .contains("requires at least one native coin input"));
         assert_eq!(object_db.read(&table_id).unwrap(), table_before);
     }
 
@@ -907,7 +906,10 @@ mod tests {
         assert_eq!(table.chip_pool, 0);
         assert_eq!(table.addon_pool, 0);
         assert!(!table.seats[0].is_occupied());
-        assert_eq!(read_treasury(&object_db).unwrap().unwrap().total_supply, 300);
+        assert_eq!(
+            read_treasury(&object_db).unwrap().unwrap().total_supply,
+            300
+        );
     }
 
     #[test]
@@ -957,7 +959,9 @@ mod tests {
                 .unwrap_err()
         };
 
-        assert!(error.to_string().contains("injected table persistence failure"));
+        assert!(error
+            .to_string()
+            .contains("injected table persistence failure"));
         assert_eq!(object_db.read(&table_id).unwrap(), table_before);
         assert_eq!(object_db.read(&join_change).unwrap(), input_before);
         assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);

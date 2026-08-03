@@ -117,10 +117,18 @@ fn run_full_hand() -> ExitCode {
         );
     }
     println!("  {:-<70}", "");
-    let dispatch_total: f64 =
-        report.steps.iter().map(|s| s.dispatch.as_secs_f64()).sum::<f64>() * 1000.0;
-    let prove_total: f64 =
-        report.steps.iter().map(|s| s.prove.as_secs_f64()).sum::<f64>() * 1000.0;
+    let dispatch_total: f64 = report
+        .steps
+        .iter()
+        .map(|s| s.dispatch.as_secs_f64())
+        .sum::<f64>()
+        * 1000.0;
+    let prove_total: f64 = report
+        .steps
+        .iter()
+        .map(|s| s.prove.as_secs_f64())
+        .sum::<f64>()
+        * 1000.0;
     println!("  dispatch 合计: {:.2}ms", dispatch_total);
     println!("  prove+verify 合计: {:.2}ms", prove_total);
     println!("  总耗时: {:.2}ms", report.total.as_secs_f64() * 1000.0);
@@ -139,15 +147,13 @@ fn run_full_hand() -> ExitCode {
     );
     if let Some(w) = report.winner_seat {
         println!("  赢家: seat {w}");
+    } else if report.stopped_at.is_none() {
+        println!("  赢家: 平局或无法由最终 stack 唯一判定");
     } else {
         println!("  赢家: 未结算（见 stopped_at）");
     }
     if let Some(reason) = &report.stopped_at {
         println!("  ⚠ 提前停止: {reason}");
-        println!(
-            "  注：crypto AIR Gap-6 约束 (shuffle_phase ∈ {{1,2,3}}) 会拒绝终结洗牌者的 submit_shuffle_v2，"
-        );
-        println!("     详见 AIR_GAP.md；其前各步均可正常 prove+verify。");
     }
     let all_ok = report.steps.iter().all(|s| s.ok) && report.stopped_at.is_none();
     if all_ok {

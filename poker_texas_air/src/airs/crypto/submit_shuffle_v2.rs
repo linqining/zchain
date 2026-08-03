@@ -39,9 +39,9 @@ pub mod cols {
     pub const INPUT_NEW_DECK_COMMITMENT_BASE: usize = COMMON_NUM_COLUMNS + 1;
     /// `OUTPUT_COMPLETED_COUNT` 列。
     pub const OUTPUT_COMPLETED_COUNT: usize = COMMON_NUM_COLUMNS + 5;
-    /// `INPUT_SHUFFLE_PHASE` 列（Gap 6：调用时的 shuffle_state.phase）。
+    /// `INPUT_SHUFFLE_PHASE` 列（调用前的 `shuffle_state.phase`）。
     pub const INPUT_SHUFFLE_PHASE: usize = COMMON_NUM_COLUMNS + 6;
-    /// `INPUT_SHUFFLE_PHASE_Q` 列（Gap 6 witness：shuffle_phase²，拆 3 次 vanishing）。
+    /// `INPUT_SHUFFLE_PHASE_Q` 列（phase² witness，拆 3 次 vanishing）。
     pub const INPUT_SHUFFLE_PHASE_Q: usize = COMMON_NUM_COLUMNS + 7;
     /// Precompile selector column.
     pub const PRECOMPILE_ID: usize = COMMON_NUM_COLUMNS + 8;
@@ -62,7 +62,7 @@ pub struct SubmitShuffleV2Input {
     pub seat_index: u8,
     /// 新牌组承诺哈希。
     pub new_deck_commitment: u64,
-    /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {1,2,3}）。
+    /// 调用前的 `shuffle_state.phase`（必须 ∈ {1,2,3}）。
     pub shuffle_phase: u8,
     /// Verifier-issued precompile result bound into this AIR statement.
     pub precompile: PrecompileAirBinding,
@@ -117,7 +117,7 @@ impl FrameworkEval for SubmitShuffleV2Air {
         let _input_new_deck_commitment_2 = eval.next_trace_mask();
         let _input_new_deck_commitment_3 = eval.next_trace_mask();
         let _output_completed_count = eval.next_trace_mask();
-        // Gap 6：shuffle_phase 与 witness q
+        // 调用前 shuffle phase 与平方 witness。
         let input_shuffle_phase = eval.next_trace_mask();
         let input_shuffle_phase_q = eval.next_trace_mask();
         let precompile_id = eval.next_trace_mask();
@@ -134,16 +134,16 @@ impl FrameworkEval for SubmitShuffleV2Air {
             M31::from((self.input.new_deck_commitment & 0xFFFF) as u32).into();
         eval.add_constraint(is_active.clone() * (input_new_deck_commitment_0 - expected_commit_0));
 
-        // 约束（Gap 6 part 1）：shuffle_phase == input.shuffle_phase
+        // 约束 3a：shuffle_phase == input.shuffle_phase
         let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();
         eval.add_constraint(is_active.clone() * (input_shuffle_phase.clone() - expected_phase));
-        // 约束（Gap 6 part 2）：q == shuffle_phase²（witness 一致性，degree-2）
+        // 约束 3b：q == shuffle_phase²（witness 一致性，degree-2）
         eval.add_constraint(
             is_active.clone()
                 * (input_shuffle_phase_q.clone()
                     - input_shuffle_phase.clone() * input_shuffle_phase.clone()),
         );
-        // 约束（Gap 6 part 3）：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
+        // 约束 3c：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
         // vanishing (phase-1)(phase-2)(phase-3) = phase³-6phase²+11phase-6
         // 经 q=phase² 展开为 degree ≤ 2：(phase·q) - 6·q + 11·phase - 6 == 0
         let six: E::F = M31::from(6u32).into();
@@ -189,9 +189,9 @@ pub struct SubmitShuffleV2Row {
     pub input_new_deck_commitment: [M31; 4],
     /// `OUTPUT_COMPLETED_COUNT`。
     pub output_completed_count: M31,
-    /// Gap 6：调用时的 shuffle_state.phase。
+    /// 调用前的 shuffle_state.phase。
     pub input_shuffle_phase: M31,
-    /// Gap 6 witness：shuffle_phase²。
+    /// phase² witness。
     pub input_shuffle_phase_q: M31,
     /// Precompile selector.
     pub precompile_id: M31,

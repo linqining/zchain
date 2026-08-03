@@ -425,6 +425,7 @@ fn test_e2e_submit_player_reveal_tokens_prove_verify() {
     let input = SubmitPlayerRevealTokensInput {
         seat_index: 0,
         reveal_phase: 1, // RevealPhase::HoleCards
+        version_increment: 1,
     };
     let row = SubmitPlayerRevealTokensRow::active(
         &input,
@@ -466,12 +467,56 @@ fn test_e2e_submit_player_reveal_tokens_prove_verify() {
     verify_method(proof).expect("verify 失败");
 }
 
+/// 回归：最后一个 showdown token 会在同一 dispatch 内结算并 reset，因此
+/// `reset_for_next_hand` 会造成第二次 `bump_version`。
+#[test]
+fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
+    let input = SubmitPlayerRevealTokensInput {
+        seat_index: 1,
+        reveal_phase: 6,
+        version_increment: 2,
+    };
+    let row =
+        SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 5, 7, 9, 0);
+    let trace = gen_method_trace(
+        SubmitPlayerRevealTokensAir::num_columns(),
+        &row.to_vec(),
+        &SubmitPlayerRevealTokensRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+    let air = SubmitPlayerRevealTokensAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 1,
+        call_seq: 5,
+        pre_version: 7,
+        post_version: 9,
+    };
+
+    let mut public_inputs =
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitPlayerRevealTokens, 42, 1, 5);
+    public_inputs.pre_version = 7;
+    public_inputs.post_version = 9;
+    let proof = prove_method(
+        &trace,
+        air,
+        SubmitPlayerRevealTokensAir::num_columns(),
+        public_inputs,
+    )
+    .expect("terminal showdown reveal prove 失败");
+    verify_method(proof).expect("terminal showdown reveal verify 失败");
+}
+
 /// Soundness: 篡改 submit_player_reveal_tokens 的 `reveal_phase` 公开输入后，verify 应失败。
 #[test]
 fn test_soundness_submit_player_reveal_tokens_tampered_phase() {
     let input = SubmitPlayerRevealTokensInput {
         seat_index: 0,
         reveal_phase: 1,
+        version_increment: 1,
     };
     let row =
         SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 4, 0, 1, 1);

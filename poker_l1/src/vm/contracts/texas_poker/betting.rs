@@ -199,7 +199,7 @@ mod tests {
     fn test_process_raise_all_in_short() {
         let mut round = BettingRound::new(100, 100);
         round.process_raise(300, 0, 1000).unwrap(); // min_raise = 200
-        // 短 all-in：raise_amount=100 < min_raise=200
+                                                    // 短 all-in：raise_amount=100 < min_raise=200
         let needed = round.process_raise(400, 0, 400).unwrap();
         assert_eq!(needed, 400);
         assert_eq!(round.min_raise, 200); // 不更新

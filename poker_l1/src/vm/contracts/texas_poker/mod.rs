@@ -42,6 +42,13 @@ pub mod side_pot;
 pub mod types;
 pub mod utils;
 
+/// Canonical Object type tag for persisted Texas Poker table state.
+///
+/// Keep this separate from the reserved precompile contract ID: reconciliation, snapshots and
+/// proof anchors identify table escrow by this stable type tag, while the current MVP happens to
+/// store its single table at the precompile ID.
+pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
+
 // Phase 3: 状态机 + dispatch
 pub mod dispatch;
 pub mod state_machine;
