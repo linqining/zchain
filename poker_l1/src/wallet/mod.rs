@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::Address;
 use crate::economics::auto_select_native_coins;
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::executor::TransferArgs;
 use crate::storage::ObjectDb;
-use crate::transaction::{Gas, RouteHint, TxLane, TxRequest};
+use crate::transaction::{ContractCall, Gas, RouteHint, TxLane, TxRequest};
+use crate::ChainId;
 use crate::vm::contracts::texas_poker::dispatch::required_funding;
 use crate::vm::precompile::reserved;
 
@@ -25,6 +27,53 @@ pub struct FundedTexasTxRequest {
     pub selected_total: u64,
     /// Change that execution will create for the caller.
     pub change: u64,
+}
+
+/// Wallet result for an automatically selected native ZCN transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FundedTransferTxRequest {
+    /// Unsigned Public-lane transfer request ready for signing.
+    pub request: TxRequest,
+    /// Sum of the selected sender UTXOs.
+    pub selected_total: u64,
+    /// Deterministic change amount that execution returns to the sender.
+    pub change: u64,
+}
+
+/// Build a frictionless native ZCN transfer by aggregating and selecting sender UTXOs.
+///
+/// The wallet exposes one balance and never asks the caller to manage coin object IDs manually.
+/// Execution revalidates ownership and creates the exact recipient output plus sender change.
+pub fn build_native_transfer_tx_request(
+    object_db: &ObjectDb,
+    owner: Address,
+    recipient: Address,
+    amount: u64,
+    chain_id: ChainId,
+    nonce: u64,
+) -> PokerL1Result<FundedTransferTxRequest> {
+    let selection = auto_select_native_coins(object_db, owner, amount)?;
+    let request = TxRequest {
+        inputs: selection.input_ids,
+        outputs: vec![],
+        contract_call: Some(ContractCall {
+            contract_id: reserved::transfer_contract_id(),
+            method_selector: [0u8; 32],
+            args: borsh::to_vec(&TransferArgs { recipient, amount })?,
+        }),
+        gas: Gas::zero(),
+        lane_hint: TxLane::Public,
+        route_hint: RouteHint::AnyValidator,
+        chain_id,
+        nonce,
+        gameturn_nonce: None,
+        is_fallback: false,
+    };
+    Ok(FundedTransferTxRequest {
+        request,
+        selected_total: selection.total,
+        change: selection.total - amount,
+    })
 }
 
 /// Automatically fund an unsigned Texas Poker request from an owner's native-coin UTXOs.
@@ -81,7 +130,6 @@ mod tests {
     use super::*;
     use crate::DEFAULT_CHAIN_ID;
     use crate::economics::native_coin_object;
-    use crate::transaction::ContractCall;
     use crate::vm::contracts::texas_poker::dispatch::{AddonArgs, SeatIndexArgs, selectors};
 
     fn request(method_selector: [u8; 32], args: Vec<u8>) -> TxRequest {
@@ -159,5 +207,42 @@ mod tests {
         let mut with_input = request(selectors::addon(), addon_args);
         with_input.inputs.push(coin.id);
         assert!(build_funded_texas_tx_request(&db, owner, with_input).is_err());
+    }
+
+    #[test]
+    fn transfer_builder_hides_utxo_selection_and_reports_change() {
+        let owner = [0x41; 20];
+        let recipient = [0x42; 20];
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        let first = native_coin_object(owner, 70, 1).unwrap();
+        let second = native_coin_object(owner, 50, 2).unwrap();
+        db.create(first.clone()).unwrap();
+        db.create(second.clone()).unwrap();
+
+        let funded = build_native_transfer_tx_request(
+            &db,
+            owner,
+            recipient,
+            100,
+            DEFAULT_CHAIN_ID,
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(funded.request.inputs, vec![first.id, second.id]);
+        assert_eq!(funded.selected_total, 120);
+        assert_eq!(funded.change, 20);
+        assert_eq!(funded.request.gas, Gas::zero());
+        assert_eq!(funded.request.lane_hint, TxLane::Public);
+        assert_eq!(funded.request.nonce, 7);
+        let call = funded.request.contract_call.unwrap();
+        assert_eq!(call.contract_id, reserved::transfer_contract_id());
+        assert_eq!(
+            borsh::from_slice::<TransferArgs>(&call.args).unwrap(),
+            TransferArgs {
+                recipient,
+                amount: 100,
+            }
+        );
     }
 }

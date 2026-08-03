@@ -30,8 +30,8 @@ pub const TREASURY_CAP_OBJECT_ID: ObjectID = ObjectID::new(TREASURY_SYSTEM_ADDRE
 
 /// Native ZCN supply state.
 ///
-/// This cap currently tracks the UTXO/escrow monetary domain only. Legacy `Account.balance`
-/// rewards, gas and staking are intentionally not included until those paths are migrated.
+/// This cap tracks the complete native monetary domain: live UTXOs plus value locked in contract
+/// and staking escrow. `Account.balance` is not native ZCN and is deliberately excluded.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
@@ -318,6 +318,34 @@ pub fn burn_native_coins(
     )?));
     object_db.apply_batch(mutations)?;
     Ok(burned)
+}
+
+/// Atomically account for native ZCN destroyed from an escrow balance.
+///
+/// Unlike [`burn_native_coins`], the value has already left the live UTXO set, so this operation
+/// only advances the singleton TreasuryCap counters. Staking slashing uses this path after first
+/// computing the corresponding reduction on a cloned validator set.
+pub fn burn_escrowed_native(object_db: &mut ObjectDb, amount: u64) -> PokerL1Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    let cap_object = object_db.read(&TREASURY_CAP_OBJECT_ID)?;
+    let mut cap = decode_treasury_cap(&cap_object)?;
+    cap.total_supply = cap
+        .total_supply
+        .checked_sub(amount)
+        .ok_or_else(|| PokerL1Error::Other("escrow burn exceeds TreasuryCap supply".into()))?;
+    cap.total_burned = cap
+        .total_burned
+        .checked_add(amount)
+        .ok_or_else(|| PokerL1Error::Other("TreasuryCap burned counter overflow".into()))?;
+    object_db.apply_batch(vec![ObjectMutation::SystemReplace(treasury_cap_object(
+        cap,
+        cap_object
+            .version
+            .checked_add(1)
+            .ok_or_else(|| PokerL1Error::Other("TreasuryCap object version overflow".into()))?,
+    )?)])
 }
 
 /// One immutable, address-owned native coin output.
@@ -634,16 +662,113 @@ pub fn consume_native_coin_selection(
             return Err(PokerL1Error::ObjectIDCollision(object.id));
         }
     }
-    for id in &selection.input_ids {
-        object_db.delete(id)?;
+    let change_id = change_object.as_ref().map(|object| object.id);
+    object_db.replace_objects(
+        &selection.input_ids,
+        change_object.into_iter().collect(),
+    )?;
+    Ok(change_id)
+}
+
+/// Consume native-coin inputs and create an exact recipient output plus deterministic change.
+///
+/// Output index 0 is always the recipient payment and output index 1 is sender change. Every
+/// input and output is validated before the first write, giving direct backends fail-before-write
+/// semantics and capture backends a fully discardable transaction log.
+pub fn transfer_native_coins(
+    object_db: &mut dyn ObjectBackend,
+    selection: &NativeCoinSelection,
+    sender: Address,
+    recipient: Address,
+    amount: u64,
+    tx_hash: &Hash,
+) -> PokerL1Result<(ObjectID, Option<ObjectID>)> {
+    if amount == 0 {
+        return Err(PokerL1Error::Other(
+            "native transfer amount must be greater than zero".into(),
+        ));
     }
-    if let Some(object) = change_object {
-        let id = object.id;
-        object_db.create(object)?;
-        Ok(Some(id))
+    let change = selection.total.checked_sub(amount).ok_or_else(|| {
+        PokerL1Error::Other("native coin selection is smaller than transfer amount".into())
+    })?;
+
+    // Revalidate the supplied selection at the point of consumption. This prevents callers from
+    // constructing a selection whose total or ownership differs from the live UTXOs.
+    let validated =
+        select_owned_native_coins(object_db, &selection.input_ids, sender, amount)?;
+    if validated.total != selection.total {
+        return Err(PokerL1Error::Other(format!(
+            "native coin selection total mismatch: declared={}, actual={}",
+            selection.total, validated.total
+        )));
+    }
+
+    let recipient_object = native_coin_object(
+        recipient,
+        amount,
+        coin_output_nonce(tx_hash, 0),
+    )?;
+    let change_object = if change == 0 {
+        None
     } else {
-        Ok(None)
+        Some(native_coin_object(
+            sender,
+            change,
+            coin_output_nonce(tx_hash, 1),
+        )?)
+    };
+
+    if change_object
+        .as_ref()
+        .is_some_and(|object| object.id == recipient_object.id)
+    {
+        return Err(PokerL1Error::ObjectIDCollision(recipient_object.id));
     }
+    for object in std::iter::once(&recipient_object).chain(change_object.iter()) {
+        match object_db.read(&object.id) {
+            Ok(_) => return Err(PokerL1Error::ObjectIDCollision(object.id)),
+            Err(PokerL1Error::ObjectNotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    let recipient_id = recipient_object.id;
+    let change_id = change_object.as_ref().map(|object| object.id);
+    let mut outputs = vec![recipient_object];
+    outputs.extend(change_object);
+    object_db.replace_objects(&selection.input_ids, outputs)?;
+    Ok((recipient_id, change_id))
+}
+
+/// Derive a deterministic pseudo-transaction hash for a system-owned native-coin operation.
+///
+/// The caller supplies a fixed protocol domain. Sorted input IDs make retries deterministic while
+/// still producing a distinct output namespace for different consumed UTXOs.
+#[must_use]
+pub fn system_coin_operation_hash(
+    domain: &[u8],
+    owner: Address,
+    input_ids: &[ObjectID],
+    amount: u64,
+    sequence: u64,
+) -> Hash {
+    let mut ids = input_ids.to_vec();
+    ids.sort();
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(b"ZCHAIN_SYSTEM_NATIVE_COIN_OP_V1");
+    hasher.update(&(domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    hasher.update(&owner);
+    hasher.update(&amount.to_be_bytes());
+    hasher.update(&sequence.to_be_bytes());
+    for id in ids {
+        hasher.update(&id.to_bytes());
+    }
+    let mut digest = [0u8; 32];
+    hasher
+        .finalize_variable(&mut digest)
+        .expect("output length is fixed");
+    digest
 }
 
 /// Create one deterministic escrow payout coin.
@@ -779,6 +904,59 @@ mod tests {
         assert!(db.read(&second.id).is_err());
         let change = decode_native_coin(&db.read(&change_id).unwrap()).unwrap();
         assert_eq!(change.amount, 20);
+    }
+
+    #[test]
+    fn native_transfer_preserves_value_across_payment_and_change() {
+        let sender = [0x11; 20];
+        let recipient = [0x22; 20];
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        let first = native_coin_object(sender, 70, 1).unwrap();
+        let second = native_coin_object(sender, 50, 2).unwrap();
+        db.create(first.clone()).unwrap();
+        db.create(second.clone()).unwrap();
+        let selection =
+            select_owned_native_coins(&db, &[first.id, second.id], sender, 100).unwrap();
+
+        let (payment_id, change_id) = transfer_native_coins(
+            &mut db,
+            &selection,
+            sender,
+            recipient,
+            100,
+            &[0xAB; 32],
+        )
+        .unwrap();
+
+        assert!(db.read(&first.id).is_err());
+        assert!(db.read(&second.id).is_err());
+        assert_eq!(decode_native_coin(&db.read(&payment_id).unwrap()).unwrap().amount, 100);
+        assert_eq!(
+            decode_native_coin(&db.read(&change_id.unwrap()).unwrap())
+                .unwrap()
+                .amount,
+            20
+        );
+        assert_eq!(native_coin_balance(&db, recipient).unwrap(), 100);
+        assert_eq!(native_coin_balance(&db, sender).unwrap(), 20);
+    }
+
+    #[test]
+    fn escrow_burn_updates_treasury_without_deleting_live_change() {
+        let owner = [0x11; 20];
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[(owner, 1_000)]).unwrap();
+        let input = list_owned_native_coins(&db, owner).unwrap()[0];
+        let selection = select_owned_native_coins(&db, &[input.id], owner, 250).unwrap();
+        consume_native_coin_selection(&mut db, &selection, owner, 250, &[0xBC; 32], 0)
+            .unwrap();
+        burn_escrowed_native(&mut db, 250).unwrap();
+
+        let cap = read_treasury(&db).unwrap().unwrap();
+        assert_eq!(cap.total_supply, 750);
+        assert_eq!(cap.total_minted, 1_000);
+        assert_eq!(cap.total_burned, 250);
+        assert_eq!(native_coin_balance(&db, owner).unwrap(), 750);
     }
 
     #[test]

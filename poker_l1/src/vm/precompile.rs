@@ -80,7 +80,7 @@ pub trait Precompile: Send + Sync {
     /// 免 gas 预编译合约（如 [`crate::vm::contracts::GamePrecompile`]）的调用：
     /// - 不消耗 gas、不扣费
     /// - 不推进 account nonce（重放保护由 `gameturn_nonce` + 轮次约束保障）
-    /// - 跳过账户余额预检
+    /// - 跳过账户 nonce 与 resource-credit 预检
     ///
     /// 反滥用由游戏买入锁仓 + `gameturn_nonce` + 轮次约束（routing.rs）保障。
     ///

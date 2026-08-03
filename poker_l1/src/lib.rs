@@ -3,7 +3,8 @@
 //! 模块结构按 spec.md (FROZEN 2026-06-27) 组织：
 //! - [`object_model`]：对象模型（Object / ObjectID / Ownership / ObjectStore + Sparse Merkle Tree）
 //! - [`signature`]：多曲线钱包签名（tagged pubkey / secp256k1 / ed25519）
-//! - [`account`]：账户抽象与交易安全（持久化 AccountStore + 原生转账 + staking 结算）
+//! - [`account`]：账户身份、nonce 与可选不可转让 resource credits
+//! - [`economics`]：NativeCoin UTXO、TreasuryCap、合约与 staking escrow 守恒
 //! - [`transaction`]：交易结构
 //! - [`block`]：区块结构
 //! - [`consensus`]：DAG vertex / commit certificate / Bullshark / ECVRF / slashing
@@ -15,7 +16,7 @@
 //! - [`bridge`]：跨链桥（bridge_verify / wrapped-asset 铸币 / nonce 持久化）
 //! - [`governance`]：治理（proposals / timelock / quorum / 参数治理 / key rotation）
 //! - [`node`]：节点（4 角色 / NodeConfig / CLI / 集成存储）
-//! - [`executor`]：交易执行引擎（串行 + 波次化并行 + gas→proposer + 出块奖励）
+//! - [`executor`]：交易执行引擎（串行 + 波次化并行 + 默认免 Gas 的 resource metering）
 //! - [`offline`]：链下 ZK 验证器注册（Stwo / Groth16 / IPA scheme 抽象）
 //! - [`rpc`]：JSON-RPC 2.0 接口
 //! - [`sync`]：Fast/Snap 同步；[`indexer`]：链上索引/事件订阅

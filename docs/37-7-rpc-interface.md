@@ -545,7 +545,7 @@ raw  (变长): 公钥原始字节
     "address": [...20 字节...],
     "tagged_pubkey": {"tag": 1, "raw": [...]},
     "nonce": 5,
-    "balance": 1000000000
+    "balance": 0
   },
   "id": 1
 }
@@ -558,7 +558,7 @@ raw  (变长): 公钥原始字节
 | `address` | `Address` | 20 字节地址 |
 | `tagged_pubkey` | `TaggedPubkey` | 绑定的公钥 |
 | `nonce` | `u64` | 账户 nonce（Public tx 重放保护） |
-| `balance` | `u64` | 账户余额（用于 gas 扣费） |
+| `balance` | `u64` | 兼容字段：不可转让 resource credits，不是 ZCN；默认 Free 策略不消耗 |
 
 **未命中**：`"result": null`
 

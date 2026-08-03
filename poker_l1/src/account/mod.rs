@@ -16,7 +16,7 @@
 //! - `Account` 结构与地址派生
 //! - `AccountStore`（内存版，Phase 4 接入 rocksdb）
 //! - 重放保护校验函数（chain_id / nonce / gameturn_nonce / is_fallback）
-//! - 余额管理（debit / credit）
+//! - 可选 resource-credit 管理（debit / credit；不属于原生 ZCN 货币供应）
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
@@ -35,13 +35,14 @@ use crate::{Address, ChainId};
 /// 账户 nonce 类型（M10：Public / ForceSync 通道重放保护）。
 pub type Nonce = u64;
 
-/// 账户余额类型（用于 Public 通道 gas 支付）。
+/// 不可转让 resource-credit 类型（兼容旧持久化 schema，不属于原生 ZCN）。
 pub type Balance = u64;
 
 /// 账户（spec M9 修复）。
 ///
 /// 一个账户绑定一个 tagged pubkey（MVP 不支持多 key 账户）。
-/// `balance` 用于支付 Public 通道 tx 的 gas；GameTurn 通道 tx 免 gas。
+/// `balance` 是兼容旧 schema 的不可转让 resource credit，不是 ZCN。原生资金仅存在于
+/// NativeCoin UTXO、合约/质押 escrow 与 TreasuryCap。默认 Free 策略不会消耗该字段。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Account {
     /// 账户地址 = `blake2b_256(tagged_pubkey)[0..20]`（S7 修复）。
@@ -50,7 +51,7 @@ pub struct Account {
     pub tagged_pubkey: TaggedPubkey,
     /// Account nonce（M10：仅由 Public / ForceSync tx 推进）。
     pub nonce: Nonce,
-    /// 账户余额（用于 Public 通道 gas 支付）。
+    /// 不可转让 resource credits；不是原生 ZCN，不计入 TreasuryCap。
     pub balance: Balance,
 }
 
@@ -77,8 +78,7 @@ impl Account {
         self.nonce = self.nonce.saturating_add(1);
     }
 
-    /// 扣除 gas 费用（Public 通道 tx 执行后调用）。
-    /// 余额不足返回 `InsufficientBalance`。
+    /// 扣除 resource credits（仅显式启用 Charged 策略时调用）。
     pub const fn debit(&mut self, amount: Balance) -> PokerL1Result<()> {
         if amount > self.balance {
             return Err(PokerL1Error::InsufficientBalance {
@@ -90,7 +90,7 @@ impl Account {
         Ok(())
     }
 
-    /// 充值余额（faucet / 收款）。
+    /// 增加不可转让 resource credits。
     ///
     /// SEC-FIX-3：使用 `checked_add` 替代 `saturating_add`，溢出时返回
     /// `BalanceOverflow` 错误而非静默封顶。调用方应处理错误并决定是否回滚。
@@ -236,7 +236,7 @@ pub fn apply_public_tx(
     apply_public_tx_with_fee(account, tx, gas_used, gas_used)
 }
 
-/// Apply a metered Public / ForceSync transaction with an explicit monetary fee.
+/// Apply a metered Public / ForceSync transaction with an explicit resource-credit charge.
 ///
 /// `gas_used` is always checked against the signed budget. `fee_charged` may be zero under a
 /// chain-wide free-fee policy, but the account nonce still advances after successful execution.
@@ -280,7 +280,7 @@ const ACCOUNTS_CF: &str = "accounts";
 ///
 /// 按 `address` 索引账户。内存 `HashMap` 作为权威工作集（保证 `get`/`get_mut` 返回引用，
 /// 与 executor 的 `&mut AccountStore` 签名兼容）；可选的 RocksDB 后端在每次变更后
-/// 落盘，重启时 `open` 全量加载，防止账户余额与 nonce 丢失（缺口 #8）。
+/// 落盘，重启时 `open` 全量加载，防止 resource credits 与 nonce 丢失（缺口 #8）。
 ///
 /// 设计权衡（Q11 选项①）：纯 RocksDB 会破坏 `get`/`get_mut` 返回 `&Account`/`&mut Account`
 /// 的现有 API（BTreeMap 式借用），需重写 executor 全部账户访问点。此处采用混合模型：

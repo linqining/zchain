@@ -187,7 +187,7 @@ epoch 推进规则（`poker_l1/src/block/time_consensus.rs`）：
       {
         "pubkey": { "tag": "0x01", "raw": "02..." },
         "vrf_pubkey": "02...(33 bytes)",
-        "stake": 1000000,
+        "stake": 0,
         "status": "Active",
         "bonding_until_height": 0,
         "unbonding_until_height": 0,
@@ -224,6 +224,10 @@ epoch 推进规则（`poker_l1/src/block/time_consensus.rs`）：
   }
 }
 ```
+
+创世 validator 清单只建立初始共识身份，`stake` 必须为 `0`。原生 ZCN 先通过
+genesis allocation 生成 NativeCoin UTXO，再由 `bond_validator` 消费 UTXO 进入 staking
+escrow；节点会拒绝配置文件中未被 TreasuryCap/UTXO 支撑的非零创世 stake。
 
 > 注：genesis validator 初始 `status` 可设为 `Active` 以跳过 bonding 期；新加入 validator 须经历 `bonding_period_blocks=1000` 锁定期。
 

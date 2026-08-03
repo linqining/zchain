@@ -329,7 +329,7 @@ sequenceDiagram
 
     U->>V: submit_tx (JSON-RPC)
     V->>V: validate_tx_signature + chain_id + nonce + limits
-    V->>V: gas 预扣 (balance >= gas_limit * price)
+    V->>V: 校验 gas budget 并启用 resource metering（默认 FeePolicy::Free）
     V->>DAG: 装入 100ms 缓冲 vertex
     DAG->>DAG: gossipsub 广播 CompactVertex
     DAG->>DAG: 引用 ≥2/3 上一轮 vertex hash
@@ -595,16 +595,16 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 
 | # | 模块 | 优先级 | 当前状态 | 目标 / 实现要点 |
 | --- | --- | --- | --- | --- |
-| 10 | AccountStore 持久化 | HIGH | ✅ 已实现 | 内存 HashMap + 可选 `Arc<DB>` RocksDB，重启不丢账户/余额/nonce（`AccountStore::open`） |
+| 10 | AccountStore 持久化 | HIGH | ✅ 已实现 | 内存 HashMap + 可选 `Arc<DB>` RocksDB，重启不丢身份/nonce/resource credits（`AccountStore::open`） |
 | 11 | commit certificate 真验签 | HIGH | ✅ 已实现 | `validate_commit_certificate_signatures` 逐签名 `verify_signature`（`block/validator.rs` + `cert_verification.rs`） |
 | 12 | ECVRF-secp256k1-SHA256-TAI | HIGH | ✅ 已实现 | 真实 prover + verifier（`consensus/ecvrf.rs`，`vrf` crate + vendored openssl），替换 StubVrfVerifier |
 | 13 | slashing 证据真验签 | HIGH | ✅ 已实现 | `VertexEquivocationEvidence` / `CommitCertEquivocationEvidence` 携带完整 vertex/cert + 真验签 |
 | 14 | 多 validator BFT 闭环 | HIGH | ✅ 已实现 | Dag 跨线程共享 + CommitVote gossip + 真实 2/3 quorum + genesis set CLI + 双向 TCP（`scripts/multi_node_e2e.sh 3` 稳定出块） |
 | 15 | Bridge 接线 | MEDIUM | ✅ 已实现 | wrapped-asset Object 铸币 + BridgeRegistry nonce 持久化 + executor 接线（`bridge/mod.rs` + `storage/bridge_registry_store.rs`） |
-| 16 | 代币经济（gas→proposer + 出块奖励 + 原生转账 + genesis 分配） | MEDIUM | ✅ 已实现 | `execute_block` credit proposer gas+`DEFAULT_BLOCK_REWARD`；`TransferArgs` 原生转账；`--genesis-alloc` CLI |
-| 17 | staking 结算 | MEDIUM | ✅ 已实现 | bond 锁定账户余额 + slashing 燃烧 + unbonding 退还（`Node::add_validator` / `slash_validator` / `complete_unbonding`） |
+| 16 | UTXO 代币经济 | MEDIUM | ✅ 已实现 | `TreasuryCap` + NativeCoin UTXO；原生转账生成 recipient/change；默认免 Gas 且无 proposer 凭空奖励；`--genesis-alloc` CLI |
+| 17 | staking 结算 | MEDIUM | ✅ 已实现 | bond 消费 UTXO 进入 escrow；slashing 同步 Treasury burn；unbonding 创建 payout UTXO（`Node::bond_validator` / `slash_validator` / `complete_unbonding`） |
 | 18 | VRF 时序接入 | MEDIUM | ✅ 已实现 | `advance_epoch_with_vrf` + `--vrf-key-file` CLI + 每 EPOCH_LENGTH commit 推进 epoch + 真实 ECVRF 派生 |
-| 19 | validate_block proposer 一致性 | LOW | ✅ 已实现 | 验证方从 commit cert vertex author 派生 proposer，重放时也 credit gas+奖励 |
+| 19 | validate_block proposer 一致性 | LOW | ✅ 已实现 | 验证方从 commit cert vertex author 派生 proposer，作为确定性执行元数据，不触发货币入账 |
 
 ### 13.2 各模块设计要点
 
@@ -720,9 +720,9 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 #### #10 AccountStore 持久化
 
 - **位置**：[`poker_l1/src/account/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/account/mod.rs)
-- **测试**：3 个持久化测试（重启后余额/nonce 保留 + 内存模式 no-op）
+- **测试**：3 个持久化测试（重启后 resource credits/nonce 保留 + 内存模式 no-op）
 - **关键设计**：内存 HashMap 为权威工作集 + 可选 `Arc<DB>` RocksDB 后端；`AccountStore::open(path)` 启动全量加载；`flush(&addr)` 在 executor 变更后显式落盘
-- **解决的问题**：此前 `AccountStore` 为纯内存，节点重启即丢账户余额/nonce
+- **解决的问题**：此前 `AccountStore` 为纯内存，节点重启即丢身份、resource credits 与 nonce
 
 #### #12 ECVRF-secp256k1-SHA256-TAI
 
@@ -738,18 +738,18 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 - **关键设计**：共享 `Arc<Mutex<Dag>>`（peer vertex 写入）+ round 同步到 `dag.max_round()+1` + parent 引用 max_round 轮所有不同 author vertex（跨 validator 引用扇形）+ CommitVote gossip + 稳健弱 cert 回退（DAG 引用为 safety）+ 双向 TCP 连接（`stream.try_clone()`）+ `--genesis-validators` CLI
 - **解决的问题**：原 validator loop 用 `quorum=1` 自签单签出块（demo 路径），无真实多 validator 共识
 
-#### #16 代币经济（gas→proposer + 出块奖励 + 原生转账 + genesis 分配）
+#### #16 UTXO 代币经济
 
-- **位置**：[`poker_l1/src/executor/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/executor/mod.rs)（`execute_block` credit + `TransferArgs` + `DEFAULT_BLOCK_REWARD`）+ `src/main.rs`（`--genesis-alloc` CLI + `load_genesis_alloc`）
-- **测试**：gas→proposer 2 测试 + 原生转账 2 测试 + genesis 分配 2 测试
-- **关键设计**：block 结束后 proposer 收 `total_gas_used + DEFAULT_BLOCK_REWARD`（账户不在 state_root，不影响可重现性）；原生转账 `TransferArgs`（caller debit in execute_tx_on_view_inner，recipient credit in merge 阶段，解决借用冲突）；`Node::apply_genesis_alloc`（幂等初始余额）
+- **位置**：`poker_l1/src/economics/mod.rs`（`TreasuryCap` / NativeCoin / transfer helpers）+ `poker_l1/src/executor/mod.rs`（`TransferArgs` UTXO 执行）+ `poker_l1/src/wallet/mod.rs`（自动选币）
+- **测试**：genesis/Treasury 守恒、UTXO transfer、默认 Free metering、proposer 不铸币、钱包自动选币
+- **关键设计**：ZCN 只存在于 live UTXO + contract/staking escrow + TreasuryCap；Account.balance 降级为不可转让 resource credits；Public tx 默认免收费但继续计量 gas、限制 block resource、推进 nonce；原生转账消费完整输入并创建精确收款和确定性找零
 
 #### #17 staking 结算
 
-- **位置**：[`poker_l1/src/node/mod.rs`](file:///Users/mac/projects/zchain/poker_l1/src/node/mod.rs)（`add_validator` / `slash_validator` / `complete_unbonding`）
-- **测试**：4 个测试（bond 锁定 + 余额不足拒绝 + slashing 减少 + unbonding 退还）
-- **关键设计**：`add_validator` 从账户余额锁定 stake（debit）；`slash_validator` 罚没部分燃烧（stake 在 bond 时已扣）；`complete_unbonding` 退还剩余 stake 到账户
-- **解决的问题**：此前 `ValidatorEntry.stake` 为裸 u64，slashing 只减字段不扣账户
+- **位置**：`poker_l1/src/node/mod.rs`（`bond_validator` / `slash_validator` / `complete_unbonding`）
+- **测试**：bond UTXO 锁仓、余额不足失败原子性、slashing Treasury burn、unbonding payout UTXO
+- **关键设计**：bond 将 validator-owned Coin 转为 stake escrow并生成找零；slash 先在 cloned ValidatorSet 计算，再更新 TreasuryCap；unbond 将剩余 escrow 还原为确定性 NativeCoin output；创世 validator 配置禁止携带未担保的非零 stake
+- **解决的问题**：此前 staking 依赖 legacy Account.balance，且 slashing 不更新全局供应
 
 #### #3 交易池优先级排序（Priority Mempool）
 
@@ -781,7 +781,7 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 | 网络（P2P） | PARTIAL | `network/mod.rs`：`NetworkTransport` trait + 真实 `TcpTransport`（双向连接）；无 libp2p/DHT 发现 |
 | 存储（RocksDB） | COMPLETE | `storage/{block_store,object_db,dag_vertex_store,bridge_registry_store,pruning}.rs` |
 | VM（智能合约） | COMPLETE | `vm/{syscalls,precompile,contracts/texas_poker/*,upgrade,gas_table}.rs` |
-| 账户/代币经济 | COMPLETE | `account/mod.rs`（持久化）+ gas→proposer + 出块奖励 + staking 结算 + 原生转账 |
+| 账户/代币经济 | COMPLETE | Account 身份/nonce + TreasuryCap + NativeCoin UTXO + contract/staking escrow；默认免 Gas、无隐式奖励 |
 | 桥（Bridge） | COMPLETE | `bridge/mod.rs`（bridge_verify + wrapped-asset 铸币 + nonce 持久化） |
 | 治理（Governance） | COMPLETE | `governance/mod.rs`（proposals/timelock/quorum/参数治理/key rotation） |
 | RPC/API | COMPLETE | `rpc/mod.rs`（JSON-RPC 2.0 + 限流 + 认证） |
@@ -798,10 +798,10 @@ zchain 是一个**面向链下博弈场景的专用 L1 区块链**，架构核�
 
 本轮完成区块链核心硬化，全量回归通过（lib **1613** + 全集成测试 0 failed）：
 
-- **AccountStore 持久化**：内存 HashMap + 可选 `Arc<DB>` RocksDB，重启不丢账户/余额/nonce。
+- **AccountStore 持久化**：内存 HashMap + 可选 `Arc<DB>` RocksDB，重启不丢账户身份/resource credits/nonce。
 - **共识签名验证**：commit certificate 真验签（`validate_commit_certificate_signatures`）+ slashing 证据携带完整 vertex/cert + 真验签。
 - **ECVRF-secp256k1-SHA256-TAI**：真实 prover + verifier（`vrf` crate + vendored openssl），替换 StubVrfVerifier。
 - **多 validator BFT 闭环**：Dag 跨线程共享 + CommitVote gossip + 真实 2/3 quorum + genesis set CLI + 双向 TCP 连接（`scripts/multi_node_e2e.sh 3` 稳定出块）。
 - **Bridge 接线**：wrapped-asset Object 铸币 + BridgeRegistry nonce 持久化 + executor 接线。
-- **代币经济**：gas→proposer + 出块奖励（`DEFAULT_BLOCK_REWARD`）+ staking 结算（bond 锁定 / slashing 燃烧 / unbonding 退还）+ 原生转账（TransferArgs + executor 特判）+ genesis 余额分配（`--genesis-alloc`）。
+- **代币经济**：TreasuryCap + NativeCoin UTXO；UTXO 原生转账与自动找零；staking escrow 的 bond/unbond/slash 守恒；默认 Free resource metering；移除 proposer gas 入账与固定出块奖励。
 - **VRF 时序接入**：`advance_epoch_with_vrf` + `--vrf-key-file` CLI + 每 EPOCH_LENGTH commit 推进 epoch。

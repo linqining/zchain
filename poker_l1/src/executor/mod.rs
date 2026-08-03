@@ -36,16 +36,17 @@ use crate::account::{
     Account, AccountStore, apply_public_tx_with_fee, derive_address, validate_public_tx,
 };
 use crate::block::validator::{validate_tx_chain_id, validate_tx_signature};
+use crate::economics::{select_owned_native_coins, transfer_native_coins};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::offline::zk_verifier::ZkVerifierRegistry;
 use crate::storage::{ObjectBackend, ObjectDb};
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 
-/// 原生转账参数（缺口 #4-M1：transfer contract_call 的 args 编码）。
+/// 原生 UTXO 转账参数。
 ///
-/// caller debit `amount`（在 execute_tx_on_view_inner 内），recipient credit `amount`
-/// （在 block merge 阶段，因 account_store 在 execute_tx_on_view_inner 内不可访问）。
+/// Wallets place the sender's selected native coin IDs in `Transaction.inputs`. Execution deletes
+/// those immutable UTXOs and creates an exact recipient output plus deterministic sender change.
 #[derive(
     Debug,
     Clone,
@@ -75,19 +76,13 @@ mod parallel_tests;
 pub mod schedule;
 pub mod write_capture;
 
-/// 默认出块奖励（缺口 #5-M2：每个 block 铸造给 proposer 的固定奖励，混合代币模型的通胀部分）。
-///
-/// 与 gas 奖励（缺口 #4-M1）并列：block 结束后 proposer 收到 `total_gas_used + 出块奖励`。
-/// 当前为保守常量；后续可经治理（governance）参数化（ParamName::BlockReward）。
-pub const DEFAULT_BLOCK_REWARD: u64 = 1_000_000;
-
-/// Monetary fee policy. Resource metering and block gas limits remain active in every mode.
+/// Resource-credit policy. Resource metering and block gas limits remain active in every mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FeePolicy {
-    /// Debit the caller by the metered gas amount.
-    #[default]
+    /// Debit non-transferable legacy resource credits by the metered gas amount.
     Charged,
-    /// Charge no monetary fee while still validating budgets and advancing account nonces.
+    /// Charge no resource credit while still validating budgets and advancing account nonces.
+    #[default]
     Free,
 }
 
@@ -119,12 +114,9 @@ pub struct ExecutionEnvironment {
     ///
     /// `None` 时 bridge contract_call 被拒绝（节点未配置桥）。生产节点注入持久化 store。
     pub bridge_registry_store: Option<Arc<crate::storage::BridgeRegistryStore>>,
-    /// 出块 proposer 地址（缺口 #4-M1：gas 奖励 proposer）。
-    ///
-    /// block 执行结束后，累计的 `total_gas_used` 信用到此地址（不再烧毁）。
-    /// `None` 时（测试 / 未启用）gas 仍烧毁（旧行为）。
+    /// 出块 proposer 地址（用于执行上下文和后续证明/统计，不产生货币奖励）。
     pub proposer: Option<Address>,
-    /// Chain-wide monetary fee policy. This does not disable gas metering.
+    /// Chain-wide resource-credit policy. This does not disable gas metering.
     pub fee_policy: FeePolicy,
 }
 
@@ -141,11 +133,11 @@ impl ExecutionEnvironment {
             precompile_registry: None,
             bridge_registry_store: None,
             proposer: None,
-            fee_policy: FeePolicy::Charged,
+            fee_policy: FeePolicy::Free,
         }
     }
 
-    /// Select the monetary fee policy while preserving compute metering.
+    /// Select the resource-credit policy while preserving compute metering.
     #[must_use]
     pub const fn with_fee_policy(mut self, fee_policy: FeePolicy) -> Self {
         self.fee_policy = fee_policy;
@@ -186,7 +178,7 @@ impl ExecutionEnvironment {
         self
     }
 
-    /// 注入出块 proposer 地址（缺口 #4-M1：gas 奖励 proposer）。
+    /// 注入出块 proposer 地址。
     #[must_use]
     pub fn with_proposer(mut self, proposer: Address) -> Self {
         self.proposer = Some(proposer);
@@ -214,18 +206,12 @@ pub struct TxReceipt {
     pub error: Option<String>,
     /// 实际消耗 gas（GameTurn 通道恒为 0；失败 tx 为 0）。
     pub gas_used: u64,
-    /// 实际收取费用（= gas_used，与既有 `apply_public_tx` 语义一致）。
+    /// 实际消耗的不可转让 resource credits；默认免收费时为 0。
     pub fee_charged: u64,
     /// 本 tx 创建的对象 ID。
     pub created_objects: Vec<ObjectID>,
     /// 本 tx 修改的对象 ID。
     pub modified_objects: Vec<ObjectID>,
-    /// 原生转账意图（缺口 #4-M1：transfer contract_call 触发）。
-    ///
-    /// `Some((recipient, amount))` 表示该 tx 是一笔原生转账：caller 已在
-    /// `execute_tx_on_view_inner` 中 debit amount，merge 阶段由 `account_store`
-    /// 对 recipient credit amount。`None` 表示非转账 tx。
-    pub transfer: Option<(crate::Address, u64)>,
 }
 
 impl TxReceipt {
@@ -240,7 +226,6 @@ impl TxReceipt {
             fee_charged: 0,
             created_objects: Vec::new(),
             modified_objects: Vec::new(),
-            transfer: None,
         }
     }
 }
@@ -377,9 +362,6 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
     let mut all_created: Vec<ObjectID> = Vec::new();
     let mut all_modified: Vec<ObjectID> = Vec::new();
     let mut gas_used: u64 = 0;
-    // 缺口 #4-M1：原生转账意图（caller 已 debit，merge 阶段 credit recipient）。
-    let mut transfer_intent: Option<(crate::Address, u64)> = None;
-
     if let Some(call) = &tx.contract_call {
         // 缺口 #9：Bridge 铸币路径特判（在预编译/rBPF 之前）。
         //
@@ -415,7 +397,13 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                 .persist_deposit_nonce(outcome.deposit.source_chain_id, outcome.deposit.nonce)?;
             // bridge 调用不经 rBPF，gas_used 保持 0；步骤 6 仍按 Public lane 扣费 + 推进 nonce。
         } else if call.contract_id == crate::vm::precompile::reserved::transfer_contract_id() {
-            // 缺口 #4-M1：原生转账（caller debit amount，recipient credit 在 merge 阶段）。
+            // Native transfer: selected immutable UTXOs become recipient payment + sender change.
+            if !tx.outputs.is_empty() {
+                return Err(PokerL1Error::Other(
+                    "native transfer outputs are executor-derived; explicit tx.outputs are forbidden"
+                        .into(),
+                ));
+            }
             let args: TransferArgs = borsh::from_slice(&call.args).map_err(|e| {
                 PokerL1Error::Other(format!("transfer: invalid args encoding: {e}"))
             })?;
@@ -424,17 +412,20 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                     "transfer: amount must be > 0".to_string(),
                 ));
             }
-            // caller debit（account_view 持有 caller 账户引用）。
-            // 注意：account_view 仅对非 gas-free lane 为 Some；transfer 走 Public lane（非 gas-free）。
-            if let Some(acc) = account_view.as_mut() {
-                acc.debit(args.amount)
-                    .map_err(|_| PokerL1Error::InsufficientBalance {
-                        needed: args.amount,
-                        has: acc.balance,
-                    })?;
+            let selection =
+                select_owned_native_coins(object_db, &tx.inputs, caller, args.amount)?;
+            let (recipient_output, change_output) = transfer_native_coins(
+                object_db,
+                &selection,
+                caller,
+                args.recipient,
+                args.amount,
+                &tx.tx_hash(),
+            )?;
+            all_created.push(recipient_output);
+            if let Some(change_output) = change_output {
+                all_created.push(change_output);
             }
-            // 记录意图：merge 阶段由 account_store credit recipient。
-            transfer_intent = Some((args.recipient, args.amount));
             // 转账不经 rBPF，gas_used 保持 0；步骤 6 仍按 Public lane 扣费 + 推进 nonce。
         } else if let Some(registry) = &env.precompile_registry {
             // 优先检查预编译合约注册表（参考以太坊预编译合约设计）
@@ -508,7 +499,6 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
         fee_charged,
         created_objects: all_created,
         modified_objects: all_modified,
-        transfer: transfer_intent,
     })
 }
 
@@ -690,22 +680,7 @@ pub fn execute_block(
     object_db: &mut ObjectDb,
     account_store: &mut AccountStore,
 ) -> BlockExecutionOutcome {
-    let outcome = execute_block_parallel(env, txs, object_db, account_store);
-    // 缺口 #4-M1（Q16：gas 奖励 proposer）+ 缺口 #5-M2（出块奖励）：
-    // block 执行结束后，把累计 gas + 出块奖励信用给 proposer。
-    // AccountStore 不在 state_root (SMT over Objects) 内，故不影响 state_root 可重现性。
-    // 信用操作确定性：相同 total_gas_used + 相同 proposer → 相同结果。
-    // proposer 账户须已存在（validator 账户在 genesis/注册时创建）；不存在则奖励烧毁（安全 fallback）。
-    if let Some(proposer) = env.proposer {
-        // Only fees actually collected are redistributed. Free-fee execution must not mint a
-        // synthetic "gas reward" merely because compute was metered.
-        let collected_fees = outcome.receipts.iter().fold(0u64, |total, receipt| {
-            total.saturating_add(receipt.fee_charged)
-        });
-        let reward = collected_fees.saturating_add(DEFAULT_BLOCK_REWARD);
-        let _ = account_store.credit(&proposer, reward);
-    }
-    outcome
+    execute_block_parallel(env, txs, object_db, account_store)
 }
 
 /// 波次化并行执行（核心实现）。
@@ -847,26 +822,6 @@ fn execute_block_parallel(
                 }
             }
 
-            // 缺口 #4-M1：原生转账 — merge 阶段重放 caller debit + recipient credit。
-            // caller 的 transfer amount debit 在 execute_tx_on_view_inner 的快照副本上已扣，
-            // 但 apply_public_tx（上面）只重放 gas + nonce，不含 transfer amount，
-            // 故此处须在主 account_store 上补扣 caller 的 transfer amount + credit recipient。
-            if let Some((recipient, amount)) = &receipt.transfer {
-                let caller = derive_address(&tx.tagged_pubkey);
-                if let Some(acc) = account_store.get_mut(&caller) {
-                    if let Err(e) = acc.debit(*amount) {
-                        receipts[idx] = Some(TxReceipt::failure(tx, &e));
-                        continue;
-                    }
-                }
-                let _ = account_store.flush(&caller);
-                if let Err(e) = account_store.credit(recipient, *amount) {
-                    receipts[idx] = Some(TxReceipt::failure(tx, &e));
-                    continue;
-                }
-                let _ = account_store.flush(recipient);
-            }
-
             // block gas 累计（仅成功且需 gas 的 tx）
             if receipt.success && needs_gas {
                 total_gas = total_gas.saturating_add(receipt.gas_used);
@@ -956,19 +911,6 @@ pub fn execute_block_serial<B: ObjectBackend>(
             if let Err(e) = account_store.flush(&caller) {
                 receipts.push(TxReceipt::failure(tx, &e));
                 continue;
-            }
-        }
-        // 缺口 #4-M1：原生转账 recipient credit（串行路径）。
-        // caller debit 已在 execute_tx_on_view_inner（直接操作 account_store）完成，
-        // 此处仅 credit recipient（account_store 在 execute_tx_on_view_inner 内只持有
-        // caller 的 &mut Account，无法 credit recipient）。
-        if receipt.transfer.is_some() && receipt.success {
-            if let Some((recipient, amount)) = &receipt.transfer {
-                if let Err(e) = account_store.credit(recipient, *amount) {
-                    receipts.push(TxReceipt::failure(tx, &e));
-                    continue;
-                }
-                let _ = account_store.flush(recipient);
             }
         }
         // 仅 gas 计费通道的成功 tx 累计 block gas（gas-free lane 不计入）
@@ -1203,6 +1145,7 @@ mod tests {
 
     fn make_env() -> ExecutionEnvironment {
         ExecutionEnvironment::new(DEFAULT_CHAIN_ID, 100, 1_000_000)
+            .with_fee_policy(FeePolicy::Charged)
     }
 
     // ===== 测试辅助：gas-free 预编译合约 stub =====
@@ -1418,8 +1361,16 @@ mod tests {
         );
         assert_eq!(
             fx.account_store.get(&proposer).unwrap().balance,
-            DEFAULT_BLOCK_REWARD,
-            "uncollected gas must not be minted as proposer revenue"
+            0,
+            "metered compute and free-fee execution must not mint proposer revenue"
+        );
+    }
+
+    #[test]
+    fn execution_environment_defaults_to_free_resource_policy() {
+        assert_eq!(
+            ExecutionEnvironment::new(DEFAULT_CHAIN_ID, 1, 1).fee_policy,
+            FeePolicy::Free
         );
     }
 
@@ -2223,11 +2174,10 @@ mod tests {
         assert_eq!(fx.account().balance, bal0);
     }
 
-    // ===== 缺口 #4-M1：gas 奖励 proposer 测试 =====
+    // ===== resource metering 与 proposer 不铸币 =====
 
     #[test]
-    fn gas_credited_to_proposer_after_block() {
-        // 一笔 public 合约调用 tx 消耗 gas → block 结束后 total_gas_used 信用给 proposer。
+    fn charged_resource_credits_are_not_transferred_to_proposer() {
         let mut fx = Fixture::new();
         let caller = fx.caller();
         // 部署一个合约（供调用产生 gas）。
@@ -2254,30 +2204,27 @@ mod tests {
 
         let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
 
-        // proposer 余额应增加 total_gas_used + 出块奖励（缺口 #5-M2）。
         assert!(outcome.total_gas_used > 0, "合约调用应产生 gas 消耗，got 0");
         let proposer_bal_after = fx
             .account_store
             .get(&proposer_addr)
             .expect("proposer 账户应存在")
             .balance;
-        let expected_reward = outcome.total_gas_used + DEFAULT_BLOCK_REWARD;
         assert_eq!(
-            proposer_bal_after, expected_reward,
-            "proposer 余额应等于 gas + 出块奖励（初始 0）"
+            proposer_bal_after, 0,
+            "resource credits are non-transferable and proposer rewards must not mint ZCN"
         );
-        // caller 余额应减少 gas_used。
+        // Explicit Charged mode still consumes the caller's legacy resource credits.
         let caller_bal_after = fx.account().balance;
         assert_eq!(
             caller_bal_before - caller_bal_after,
             outcome.total_gas_used,
-            "caller 扣除的 gas 应等于 proposer 收到的"
+            "caller resource-credit debit must equal metered gas"
         );
     }
 
     #[test]
-    fn gas_burned_when_no_proposer_set() {
-        // env.proposer = None（旧行为）：gas + 出块奖励均烧毁，无人收到。
+    fn charged_resource_credits_are_consumed_without_a_proposer() {
         let mut fx = Fixture::new();
         let caller = fx.caller();
         let elf = build_test_elf(&make_program(1));
@@ -2300,11 +2247,8 @@ mod tests {
         assert_eq!(caller_bal_before - caller_bal_after, outcome.total_gas_used);
     }
 
-    // ===== 缺口 #5-M2：出块奖励测试 =====
-
     #[test]
-    fn block_reward_minted_to_proposer_even_with_zero_gas() {
-        // 空 block（无 tx → total_gas_used=0）：proposer 仍收到出块奖励（通胀铸造）。
+    fn empty_block_does_not_mint_proposer_reward() {
         let mut fx = Fixture::new();
         let proposer_signer = TestSigner::new();
         let proposer_addr = proposer_signer.address();
@@ -2317,16 +2261,15 @@ mod tests {
         assert_eq!(outcome.total_gas_used, 0, "空 block 无 gas");
         let proposer_bal = fx.account_store.get(&proposer_addr).unwrap().balance;
         assert_eq!(
-            proposer_bal, DEFAULT_BLOCK_REWARD,
-            "空 block 也应铸造出块奖励给 proposer"
+            proposer_bal, 0,
+            "empty blocks must not mint value outside TreasuryCap"
         );
     }
 
     // ===== 缺口 #4-M1：原生转账测试 =====
 
     #[test]
-    fn native_transfer_debits_caller_credits_recipient() {
-        // 一笔原生转账：caller 余额减少 amount，recipient 余额增加 amount。
+    fn native_transfer_consumes_utxo_and_creates_recipient_plus_change() {
         let mut fx = Fixture::new();
         let caller = fx.caller();
         let caller_bal_before = fx.account().balance;
@@ -2338,9 +2281,13 @@ mod tests {
             .create(Account::new(recipient_signer.tagged_pubkey(), 0))
             .unwrap();
 
+        let input = crate::economics::native_coin_object(caller, 120_000, 77).unwrap();
+        fx.object_db.create(input.clone()).unwrap();
+
         // 构造转账 tx：transfer contract_call。
         let transfer_amount = 100_000u64;
         let mut req = public_request(0);
+        req.inputs = vec![input.id];
         req.contract_call = Some(ContractCall {
             contract_id: crate::vm::precompile::reserved::transfer_contract_id(),
             method_selector: [0u8; 32],
@@ -2355,36 +2302,30 @@ mod tests {
         let env = make_env();
         let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
         assert!(outcome.receipts[0].success, "转账应成功");
+        assert!(fx.object_db.read(&input.id).is_err(), "input UTXO must be spent");
         assert_eq!(
-            outcome.receipts[0].transfer,
-            Some((recipient_addr, transfer_amount)),
-            "回执应记录转账意图"
+            crate::economics::native_coin_balance(&fx.object_db, recipient_addr).unwrap(),
+            transfer_amount
         );
-
-        // caller 余额减少 transfer_amount（+ gas，但转账 tx gas_used=0）。
-        let caller_bal_after = fx.account().balance;
         assert_eq!(
-            caller_bal_before - caller_bal_after,
-            transfer_amount,
-            "caller 应扣除转账金额"
+            crate::economics::native_coin_balance(&fx.object_db, caller).unwrap(),
+            20_000
         );
-        // recipient 余额增加 transfer_amount。
-        let recipient_bal = fx.account_store.get(&recipient_addr).unwrap().balance;
-        assert_eq!(recipient_bal, transfer_amount, "recipient 应收到转账金额");
+        assert_eq!(fx.account().balance, caller_bal_before);
+        assert_eq!(
+            fx.account_store.get(&recipient_addr).unwrap().balance,
+            0,
+            "recipient Account metadata must not carry ZCN"
+        );
     }
 
     #[test]
-    fn native_transfer_rejects_insufficient_balance() {
-        // caller 余额不足 → 转账失败，余额不变。
+    fn native_transfer_rejects_insufficient_utxo_value_atomically() {
         let mut fx = Fixture::new();
         let caller = fx.caller();
-        // 先把 caller 余额降到很低（仅保留少量）。
-        let drain_amount = fx.account().balance - 10;
-        fx.account_store
-            .get_mut(&caller)
-            .unwrap()
-            .debit(drain_amount)
-            .unwrap();
+        let account_balance_before = fx.account().balance;
+        let input = crate::economics::native_coin_object(caller, 10, 78).unwrap();
+        fx.object_db.create(input.clone()).unwrap();
 
         let recipient_signer = TestSigner::new();
         let recipient_addr = recipient_signer.address();
@@ -2392,8 +2333,8 @@ mod tests {
             .create(Account::new(recipient_signer.tagged_pubkey(), 0))
             .unwrap();
 
-        // 试图转 100（caller 仅余 10）。
         let mut req = public_request(0);
+        req.inputs = vec![input.id];
         req.contract_call = Some(ContractCall {
             contract_id: crate::vm::precompile::reserved::transfer_contract_id(),
             method_selector: [0u8; 32],
@@ -2407,13 +2348,48 @@ mod tests {
 
         let env = make_env();
         let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
-        assert!(!outcome.receipts[0].success, "余额不足转账应失败");
-        // caller 余额不变（失败 tx 不产生状态变更）。
-        assert_eq!(fx.account().balance, 10, "失败转账不应改 caller 余额");
+        assert!(!outcome.receipts[0].success, "UTXO value不足转账应失败");
+        assert_eq!(fx.account().balance, account_balance_before);
+        assert_eq!(fx.account().nonce, 0);
+        assert!(fx.object_db.read(&input.id).is_ok(), "failed spend keeps input");
         assert_eq!(
-            fx.account_store.get(&recipient_addr).unwrap().balance,
-            0,
-            "失败转账不应改 recipient 余额"
+            crate::economics::native_coin_balance(&fx.object_db, caller).unwrap(),
+            10
         );
+        assert_eq!(
+            crate::economics::native_coin_balance(&fx.object_db, recipient_addr).unwrap(),
+            0,
+            "failed transfer creates no recipient UTXO"
+        );
+    }
+
+    #[test]
+    fn native_transfer_rejects_explicit_outputs_before_spending_inputs() {
+        let mut fx = Fixture::new();
+        let caller = fx.caller();
+        let recipient = [0x55; 20];
+        let input = crate::economics::native_coin_object(caller, 100, 79).unwrap();
+        fx.object_db.create(input.clone()).unwrap();
+
+        let mut req = public_request(0);
+        req.inputs = vec![input.id];
+        req.outputs = vec![make_output(caller, 999, b"unexpected")];
+        req.contract_call = Some(ContractCall {
+            contract_id: crate::vm::precompile::reserved::transfer_contract_id(),
+            method_selector: [0u8; 32],
+            args: borsh::to_vec(&TransferArgs {
+                recipient,
+                amount: 60,
+            })
+            .unwrap(),
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&make_env(), &tx, &mut fx.object_db, &mut fx.account_store);
+        assert!(!receipt.success);
+        assert!(fx.object_db.read(&input.id).is_ok());
+        assert_eq!(crate::economics::native_coin_balance(&fx.object_db, caller).unwrap(), 100);
+        assert_eq!(crate::economics::native_coin_balance(&fx.object_db, recipient).unwrap(), 0);
+        assert_eq!(fx.account().nonce, 0);
     }
 }

@@ -129,9 +129,10 @@ pub struct NodeConfig {
     ///
     /// 节点启动时以此初始化 ValidatorSet（epoch 0）。
     /// 空列表表示创世引导期 — vertex/block 的 validator 成员校验跳过。
+    /// Entries must have zero stake; native ZCN stake is admitted only through UTXO-backed bond.
     #[serde(default)]
     pub genesis_validators: Vec<ValidatorEntry>,
-    /// Monetary fee policy. Compute metering remains enabled when set to `Free`.
+    /// Resource-credit policy. Compute metering remains enabled when set to `Free`.
     #[serde(default)]
     pub fee_policy: FeePolicy,
 }
@@ -148,7 +149,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: None,
             genesis_validators: vec![],
-            fee_policy: FeePolicy::Charged,
+            fee_policy: FeePolicy::Free,
         }
     }
 
@@ -163,7 +164,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: Some(validator_key),
             genesis_validators: vec![],
-            fee_policy: FeePolicy::Charged,
+            fee_policy: FeePolicy::Free,
         }
     }
 
@@ -178,7 +179,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: None,
             genesis_validators: vec![],
-            fee_policy: FeePolicy::Charged,
+            fee_policy: FeePolicy::Free,
         }
     }
 
@@ -193,7 +194,7 @@ impl NodeConfig {
             p2p_listen: "127.0.0.1:9000".to_string(),
             validator_key: None,
             genesis_validators: vec![],
-            fee_policy: FeePolicy::Charged,
+            fee_policy: FeePolicy::Free,
         }
     }
 
@@ -204,7 +205,7 @@ impl NodeConfig {
         self
     }
 
-    /// Select the chain's monetary fee policy.
+    /// Select the chain's resource-credit policy.
     #[must_use]
     pub const fn with_fee_policy(mut self, fee_policy: FeePolicy) -> Self {
         self.fee_policy = fee_policy;
@@ -386,7 +387,13 @@ fn build_default_precompile_registry() -> Arc<PrecompileRegistry> {
 ///
 /// - `genesis_chain_randomness` 由所有 validator pubkey 聚合派生（SEC2-M12）
 /// - 初始 `epoch_randomness = genesis_chain_randomness`，`prev_epoch_randomness = 0`
-fn build_genesis_validator_set(validators: Vec<ValidatorEntry>) -> ValidatorSet {
+fn build_genesis_validator_set(validators: Vec<ValidatorEntry>) -> PokerL1Result<ValidatorSet> {
+    if let Some(validator) = validators.iter().find(|validator| validator.stake != 0) {
+        return Err(PokerL1Error::Other(format!(
+            "genesis validator {:?} declares unbacked stake {}; genesis validators must start at zero and bond NativeCoin UTXOs after genesis mint",
+            validator.pubkey, validator.stake
+        )));
+    }
     let genesis_chain_randomness = compute_genesis_chain_randomness(&validators);
     let mut set = ValidatorSet {
         epoch: 0,
@@ -397,7 +404,7 @@ fn build_genesis_validator_set(validators: Vec<ValidatorEntry>) -> ValidatorSet 
         genesis_chain_randomness,
     };
     set.validator_set_hash = set.compute_hash();
-    set
+    Ok(set)
 }
 
 impl Node {
@@ -429,7 +436,7 @@ impl Node {
         let account_store = AccountStore::open(&account_path)?;
         // 缺口 #9：BridgeRegistryStore 落 RocksDB，重启后 deposit/burn nonce 不丢失（防重放铸币）。
         let bridge_registry_store = BridgeRegistryStore::open(&bridge_path)?;
-        let validator_set = build_genesis_validator_set(config.genesis_validators.clone());
+        let validator_set = build_genesis_validator_set(config.genesis_validators.clone())?;
         let precompile_registry = build_default_precompile_registry();
         Ok(Self {
             config,
@@ -510,7 +517,7 @@ impl Node {
         chain_id: ChainId,
         genesis_validators: Vec<ValidatorEntry>,
     ) -> PokerL1Result<Self> {
-        let validator_set = build_genesis_validator_set(genesis_validators.clone());
+        let validator_set = build_genesis_validator_set(genesis_validators.clone())?;
         let precompile_registry = build_default_precompile_registry();
         Ok(Self {
             config: NodeConfig {
@@ -521,7 +528,7 @@ impl Node {
                 p2p_listen: "127.0.0.1:0".to_string(),
                 validator_key: None,
                 genesis_validators,
-                fee_policy: FeePolicy::Charged,
+                fee_policy: FeePolicy::Free,
             },
             block_store: BlockStore::open_inmemory()?,
             object_db: std::sync::Mutex::new(ObjectDb::open_inmemory()?),
@@ -607,31 +614,17 @@ impl Node {
         pubkeys
     }
 
-    /// 加入新 validator（初始 Bonding 状态，NEW-L3）。
-    pub fn add_validator(&self, entry: ValidatorEntry) -> PokerL1Result<()> {
-        // 缺口 #5（staking 结算）：validator 注册时把 stake 从账户余额锁定（扣除）。
-        // stake 须有真实账户余额支撑，防"凭空质押"。
+    /// Register an unfunded validator entry for consensus-only unit tests.
+    ///
+    /// Production registration must use [`Self::bond_validator`] so stake is backed by consumed
+    /// ZCN UTXOs. Keeping this path test-only prevents zero-stake validator admission in a node.
+    #[cfg(test)]
+    pub(crate) fn add_validator(&self, entry: ValidatorEntry) -> PokerL1Result<()> {
         if entry.stake > 0 {
-            let validator_addr = crate::account::derive_address(&entry.pubkey);
-            let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
-            // 账户须存在且余额 ≥ stake，否则拒绝（质押不足）。
-            match account_store.get_mut(&validator_addr) {
-                Some(acc) => {
-                    acc.debit(entry.stake)
-                        .map_err(|_| PokerL1Error::InsufficientBalance {
-                            needed: entry.stake,
-                            has: acc.balance,
-                        })?;
-                    account_store.flush(&validator_addr)?;
-                }
-                None => {
-                    return Err(PokerL1Error::Other(format!(
-                        "validator account not found for bonding (address={:?}); \
-                         须先创建账户并存入 ≥ {} 余额",
-                        validator_addr, entry.stake
-                    )));
-                }
-            }
+            return Err(PokerL1Error::Other(
+                "non-zero validator stake must be funded through bond_validator native-coin inputs"
+                    .into(),
+            ));
         }
         let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
         if set.find_validator(&entry.pubkey).is_some() {
@@ -645,38 +638,91 @@ impl Node {
         Ok(())
     }
 
-    /// 执行 slashing 并把罚没金额从锁定的 stake 中真实销毁（缺口 #5：staking 结算）。
+    /// Consume validator-owned native coin UTXOs and lock `entry.stake` in staking escrow.
     ///
-    /// 封装 [`crate::consensus::apply_slashing`]：除更新 `ValidatorEntry.stake` 外，
-    /// 把 `slash_amount` 记为已销毁（质押锁定时已从账户扣除，此处仅记录，不重复扣账户）。
-    /// 被罚没的 stake 从链上总质押中移除（燃烧，Q15 混合模型的通缩对冲）。
-    ///
-    /// 返回 [`crate::consensus::SlashingResult`]（含 slash_amount）。
+    /// Any excess input value is returned as deterministic change. Treasury supply is unchanged:
+    /// value moves from live UTXOs into `ValidatorEntry.stake` escrow.
+    pub fn bond_validator(
+        &self,
+        mut entry: ValidatorEntry,
+        coin_inputs: &[ObjectID],
+    ) -> PokerL1Result<Option<ObjectID>> {
+        if entry.stake == 0 {
+            return Err(PokerL1Error::Other(
+                "bond_validator requires non-zero stake".into(),
+            ));
+        }
+        // Admission always begins in Bonding; callers cannot buy immediate consensus power by
+        // submitting an entry pre-marked Active.
+        entry.status = crate::consensus::ValidatorStatus::Bonding;
+        let owner = crate::account::derive_address(&entry.pubkey);
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let selection = crate::economics::select_owned_native_coins(
+            &*object_db,
+            coin_inputs,
+            owner,
+            entry.stake,
+        )?;
+
+        let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next_set = set.clone();
+        if next_set.find_validator(&entry.pubkey).is_some() {
+            return Err(PokerL1Error::Other(format!(
+                "validator already in set: {:?}",
+                entry.pubkey
+            )));
+        }
+        next_set.validators.push(entry.clone());
+        next_set.validator_set_hash = next_set.compute_hash();
+
+        let operation_hash = crate::economics::system_coin_operation_hash(
+            b"STAKING_BOND_V1",
+            owner,
+            coin_inputs,
+            entry.stake,
+            next_set.epoch,
+        );
+        let change = crate::economics::consume_native_coin_selection(
+            &mut *object_db,
+            &selection,
+            owner,
+            entry.stake,
+            &operation_hash,
+            0,
+        )?;
+        *set = next_set;
+        Ok(change)
+    }
+
+    /// Slash staking escrow and atomically account for the destroyed ZCN in TreasuryCap.
     pub fn slash_validator(
         &self,
         validator_pubkey: &TaggedPubkey,
         reason: crate::consensus::SlashingReason,
         config: &crate::consensus::SlashingConfig,
     ) -> PokerL1Result<crate::consensus::SlashingResult> {
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
-        // apply_slashing 内部更新 ValidatorEntry.stake（stake_after = stake_before - slash_amount）。
-        // 质押在 add_validator 时已从账户锁定扣除，故 slashing 仅减少 stake 记录；
-        // 被罚没部分（slash_amount）不再退还账户 → 等效燃烧。
-        let result = crate::consensus::apply_slashing(&mut set, validator_pubkey, reason, config)?;
+        let mut next_set = set.clone();
+        let result =
+            crate::consensus::apply_slashing(&mut next_set, validator_pubkey, reason, config)?;
+        next_set.validator_set_hash = next_set.compute_hash();
+        crate::economics::burn_escrowed_native(&mut object_db, result.slash_amount)?;
+        *set = next_set;
         Ok(result)
     }
 
-    /// 完成 unbonding：把剩余 stake 退还 validator 账户（缺口 #5：staking 结算）。
-    ///
-    /// 在 unbonding 期结束（`unbonding_until_height` 已到）后调用：
-    /// 把 validator 剩余 stake 退还其账户余额，并把 stake 清零、状态置 Retired。
+    /// Complete unbonding by converting staking escrow back into a native coin UTXO.
     pub fn complete_unbonding(
         &self,
         validator_pubkey: &TaggedPubkey,
         current_height: BlockHeight,
     ) -> PokerL1Result<u64> {
+        let owner = crate::account::derive_address(validator_pubkey);
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
-        let validator = set
+        let mut next_set = set.clone();
+        let validator = next_set
             .find_validator_mut(validator_pubkey)
             .ok_or_else(|| PokerL1Error::ValidatorNotInSet(validator_pubkey.clone()))?;
         // 须处于 Unbonding 且 lock 期已到。
@@ -695,18 +741,25 @@ impl Node {
         let refund = validator.stake;
         validator.stake = 0;
         validator.status = crate::consensus::ValidatorStatus::Retired;
-        drop(set);
+        next_set.validator_set_hash = next_set.compute_hash();
 
-        // 退还到账户。
         if refund > 0 {
-            let validator_addr = crate::account::derive_address(validator_pubkey);
-            let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
-            // 账户应存在（bonding 时创建）；不存在则忽略退还（防御性）。
-            if account_store.get(&validator_addr).is_some() {
-                account_store.credit(&validator_addr, refund)?;
-                account_store.flush(&validator_addr)?;
-            }
+            let payout_hash = crate::economics::system_coin_operation_hash(
+                b"STAKING_UNBOND_V1",
+                owner,
+                &[],
+                refund,
+                current_height,
+            );
+            crate::economics::create_native_coin_output(
+                &mut *object_db,
+                owner,
+                refund,
+                &payout_hash,
+                0,
+            )?;
         }
+        *set = next_set;
         Ok(refund)
     }
 
@@ -857,6 +910,21 @@ impl Node {
             Err(PokerL1Error::ObjectNotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// List an address's spendable native ZCN UTXOs in deterministic object-ID order.
+    pub fn list_native_coins(
+        &self,
+        owner: Address,
+    ) -> PokerL1Result<Vec<crate::economics::OwnedNativeCoin>> {
+        let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        crate::economics::list_owned_native_coins(&object_db, owner)
+    }
+
+    /// Return the wallet-facing aggregate ZCN balance across all owned UTXOs.
+    pub fn native_coin_balance(&self, owner: Address) -> PokerL1Result<u64> {
+        let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        crate::economics::native_coin_balance(&object_db, owner)
     }
 
     /// Read the native ZCN TreasuryCap tracked by the UTXO/escrow monetary domain.
@@ -1150,9 +1218,8 @@ impl Node {
 
         // 5. 状态根重放比对（P0-2 接入）
         let mut env = self.execution_environment(header.height, header.timestamp_ms);
-        // 缺口 #4-M1 / #5-M2 一致性：验证方也须 credit proposer（gas + 出块奖励），
-        // 使各节点账户状态一致。proposer = commit cert 引用的第一个 vertex 的 author。
-        // （账户不在 state_root 内，不影响共识；但账户余额在各节点应一致。）
+        // Bind the proposer into deterministic execution context. This is metadata only: gas
+        // metering and block validation do not credit Account.balance or mint native ZCN.
         if let Some(first_vh) = header.dag_commit_certificate.vertex_hash_list.first() {
             if let Ok(vertex) = self.vertex_store.get_by_hash(first_vh) {
                 env = env.with_proposer(crate::account::derive_address(&vertex.author_pubkey));
@@ -2436,7 +2503,7 @@ mod tests {
                 raw: vec![byte; 33],
             },
             [byte; 33],
-            1000,
+            0,
             0,
         );
         entry.status = status;
@@ -2466,6 +2533,21 @@ mod tests {
     }
 
     #[test]
+    fn node_rejects_unbacked_genesis_validator_stake() {
+        let mut validator = make_validator_entry(0xB1, ValidatorStatus::Active);
+        validator.stake = 1;
+        let error = match Node::open_inmemory_with_validators(
+            NodeRole::Validator,
+            DEFAULT_CHAIN_ID,
+            vec![validator],
+        ) {
+            Ok(_) => panic!("unbacked genesis stake must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unbacked stake"));
+    }
+
+    #[test]
     fn node_required_quorum_empty_set_is_zero() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         assert_eq!(node.validator_count(), 0);
@@ -2484,12 +2566,9 @@ mod tests {
                 .unwrap();
         assert_eq!(node.required_quorum(), 3); // 2*3/3+1
 
-        // 加入第 4 个 validator（Bonding 状态）→ active 数不变
-        // 缺口 #5：add_validator 现要求 stake 有账户余额支撑，先注入账户。
-        let entry4 = make_validator_entry(4, ValidatorStatus::Bonding);
-        let addr4 = crate::account::derive_address(&entry4.pubkey);
-        node.put_account(crate::account::Account::new(entry4.pubkey.clone(), 100_000))
-            .unwrap();
+        // 加入第 4 个零质押测试 validator（Bonding 状态）→ active 数不变。
+        let mut entry4 = make_validator_entry(4, ValidatorStatus::Bonding);
+        entry4.stake = 0;
         node.add_validator(entry4).unwrap();
         assert_eq!(node.validator_count(), 4);
         assert_eq!(node.active_validator_count(), 3);
@@ -2502,10 +2581,8 @@ mod tests {
 
         // 再加入 2 个 active → 6 active → quorum = 2*6/3+1 = 5
         for b in [5u8, 6u8] {
-            let entry = make_validator_entry(b, ValidatorStatus::Active);
-            let addr = crate::account::derive_address(&entry.pubkey);
-            node.put_account(crate::account::Account::new(entry.pubkey.clone(), 100_000))
-                .unwrap();
+            let mut entry = make_validator_entry(b, ValidatorStatus::Active);
+            entry.stake = 0;
             node.add_validator(entry).unwrap();
         }
         assert_eq!(node.active_validator_count(), 6);
@@ -2637,62 +2714,64 @@ mod tests {
 
     // ===== 缺口 #5：staking 结算测试 =====
 
-    /// 创建带资助账户的 validator entry（用于 staking 测试）。
-    fn make_funded_validator(node: &Node, byte: u8, stake: u64) -> ValidatorEntry {
+    /// 创建 validator entry（用于 UTXO-backed staking 测试）。
+    fn make_funded_validator(byte: u8, stake: u64) -> ValidatorEntry {
         let entry = make_validator_entry(byte, ValidatorStatus::Active);
-        // 资助账户：余额 = stake + 缓冲，确保 bonding 能扣除。
-        node.put_account(crate::account::Account::new(
-            entry.pubkey.clone(),
-            stake + 1_000_000,
-        ))
-        .unwrap();
         let mut e = entry;
         e.stake = stake;
         e
     }
 
-    #[test]
-    fn add_validator_locks_stake_from_account() {
-        // stake 从账户余额扣除（锁定）。
-        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
-        let entry = make_funded_validator(&node, 0x20, 5_000);
-        let addr = crate::account::derive_address(&entry.pubkey);
-        // 资助后余额 = 5_000 + 1_000_000
-        assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 1_005_000);
-        node.add_validator(entry).unwrap();
-        // bonding 后余额应减少 stake（5_000）
-        assert_eq!(
-            node.get_account(&addr).unwrap().unwrap().balance,
-            1_000_000,
-            "stake 应从账户锁定扣除"
-        );
+    fn genesis_fund_validator(node: &Node, entry: &ValidatorEntry, amount: u64) -> Vec<ObjectID> {
+        node.apply_genesis_alloc([(entry.pubkey.clone(), amount)])
+            .unwrap();
+        let owner = crate::account::derive_address(&entry.pubkey);
+        node.list_native_coins(owner)
+            .unwrap()
+            .into_iter()
+            .map(|coin| coin.id)
+            .collect()
     }
 
     #[test]
-    fn add_validator_rejects_insufficient_balance() {
-        // 账户余额 < stake → 拒绝。
+    fn bond_validator_locks_utxo_value_in_staking_escrow() {
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        let entry = make_funded_validator(0x20, 5_000);
+        let addr = crate::account::derive_address(&entry.pubkey);
+        let inputs = genesis_fund_validator(&node, &entry, 1_005_000);
+        assert_eq!(node.native_coin_balance(addr).unwrap(), 1_005_000);
+        node.bond_validator(entry, &inputs).unwrap();
+        assert_eq!(node.native_coin_balance(addr).unwrap(), 1_000_000);
+        assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 0);
+        assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 1_005_000);
+    }
+
+    #[test]
+    fn bond_validator_rejects_insufficient_utxo_value_without_mutation() {
         let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
         let mut entry = make_validator_entry(0x21, ValidatorStatus::Active);
         entry.stake = 10_000;
-        // 仅资助 100（不足）
-        node.put_account(crate::account::Account::new(entry.pubkey.clone(), 100))
-            .unwrap();
-        let err = node.add_validator(entry).unwrap_err();
+        let owner = crate::account::derive_address(&entry.pubkey);
+        let inputs = genesis_fund_validator(&node, &entry, 100);
+        let err = node.bond_validator(entry, &inputs).unwrap_err();
         assert!(
             matches!(err, PokerL1Error::InsufficientBalance { .. }),
             "余额不足应拒绝: {err:?}"
         );
+        assert_eq!(node.native_coin_balance(owner).unwrap(), 100);
+        assert_eq!(node.validator_count(), 0);
     }
 
     #[test]
     fn slash_validator_reduces_stake() {
         // slashing 减少 ValidatorEntry.stake（锁定部分燃烧，不退账户）。
         let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
-        let entry = make_funded_validator(&node, 0x22, 100_000);
+        let entry = make_funded_validator(0x22, 100_000);
         let pubkey = entry.pubkey.clone();
         let addr = crate::account::derive_address(&pubkey);
-        node.add_validator(entry).unwrap();
-        let bal_before = node.get_account(&addr).unwrap().unwrap().balance;
+        let inputs = genesis_fund_validator(&node, &entry, 150_000);
+        node.bond_validator(entry, &inputs).unwrap();
+        let cap_before = node.treasury_cap().unwrap().unwrap();
 
         let config = crate::consensus::SlashingConfig::default();
         let result = node
@@ -2705,20 +2784,24 @@ mod tests {
         // 默认 slash_percentage=100 → slash_amount = 100_000（全额）
         assert_eq!(result.slash_amount, 100_000);
         assert_eq!(result.stake_after, 0);
-        // 账户余额不变（stake 在 bonding 时已扣；slashing 不再动账户，等效燃烧）
-        let bal_after = node.get_account(&addr).unwrap().unwrap().balance;
-        assert_eq!(bal_before, bal_after, "slashing 不应再动账户余额");
+        assert_eq!(node.native_coin_balance(addr).unwrap(), 50_000);
+        let cap_after = node.treasury_cap().unwrap().unwrap();
+        assert_eq!(cap_after.total_supply, cap_before.total_supply - 100_000);
+        assert_eq!(cap_after.total_burned, cap_before.total_burned + 100_000);
+        assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 0);
     }
 
     #[test]
     fn complete_unbonding_refunds_stake() {
         // unbonding 完成后退还剩余 stake 到账户。
         let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
-        let entry = make_funded_validator(&node, 0x23, 50_000);
+        let entry = make_funded_validator(0x23, 50_000);
         let pubkey = entry.pubkey.clone();
         let addr = crate::account::derive_address(&pubkey);
-        node.add_validator(entry).unwrap();
-        let bal_after_bond = node.get_account(&addr).unwrap().unwrap().balance;
+        let inputs = genesis_fund_validator(&node, &entry, 75_000);
+        node.bond_validator(entry, &inputs).unwrap();
+        assert_eq!(node.native_coin_balance(addr).unwrap(), 25_000);
+        node.process_bonding_expiry(0);
 
         // 启动 unbonding（锁定到 height 100）
         {
@@ -2732,12 +2815,9 @@ mod tests {
         // 到期 → 退还
         let refund = node.complete_unbonding(&pubkey, 100).unwrap();
         assert_eq!(refund, 50_000, "应退还全部剩余 stake");
-        let bal_after_refund = node.get_account(&addr).unwrap().unwrap().balance;
-        assert_eq!(
-            bal_after_refund,
-            bal_after_bond + 50_000,
-            "退还后账户余额应恢复 stake"
-        );
+        assert_eq!(node.native_coin_balance(addr).unwrap(), 75_000);
+        assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 0);
+        assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 75_000);
     }
 
     // ===== 缺口 #3 §3.6：VRF 时序接入测试 =====
@@ -2751,11 +2831,8 @@ mod tests {
         let vrf_pubkey = prover.derive_public_key().unwrap();
         let tagged =
             TaggedPubkey::new(SignatureScheme::Secp256k1, CURRENT_VERSION, vec![0x55; 33]).unwrap();
-        let mut entry = ValidatorEntry::new(tagged.clone(), vrf_pubkey, 1000, 0);
+        let mut entry = ValidatorEntry::new(tagged.clone(), vrf_pubkey, 0, 0);
         entry.status = crate::consensus::ValidatorStatus::Active;
-        // 缺口 #5：stake 须有账户余额支撑。
-        node.put_account(crate::account::Account::new(tagged.clone(), 100_000))
-            .unwrap();
         node.add_validator(entry).unwrap();
         // 注入 validator_key（使 advance_epoch_with_vrf 能标识 proposer）。
         // 注意：tagged_pubkey 需匹配 set 中的 validator。

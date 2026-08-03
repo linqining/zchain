@@ -45,6 +45,24 @@ pub trait ObjectBackend {
     /// 删除对象（从 SMT 与持久化后端同步移除）。
     fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object>;
 
+    /// Replace a set of consumed objects with newly created outputs.
+    ///
+    /// Backends with transactional storage should override this method. Fork/capture backends use
+    /// the default ordered mutation path after callers have completed full preflight validation.
+    fn replace_objects(
+        &mut self,
+        delete_ids: &[ObjectID],
+        create_objects: Vec<Object>,
+    ) -> PokerL1Result<()> {
+        for id in delete_ids {
+            self.delete(id)?;
+        }
+        for object in create_objects {
+            self.create(object)?;
+        }
+        Ok(())
+    }
+
     /// 当前全局状态根（所有 live 对象的 Sparse Merkle Root）。
     fn state_root(&self) -> Hash;
 }
@@ -89,6 +107,19 @@ impl ObjectBackend for ObjectDb {
     #[inline]
     fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object> {
         self.delete(id)
+    }
+
+    #[inline]
+    fn replace_objects(
+        &mut self,
+        delete_ids: &[ObjectID],
+        create_objects: Vec<Object>,
+    ) -> PokerL1Result<()> {
+        use crate::storage::object_db::ObjectMutation;
+        let mut mutations = Vec::with_capacity(delete_ids.len() + create_objects.len());
+        mutations.extend(delete_ids.iter().copied().map(ObjectMutation::Delete));
+        mutations.extend(create_objects.into_iter().map(ObjectMutation::Create));
+        self.apply_batch(mutations)
     }
 
     #[inline]
