@@ -449,26 +449,54 @@ impl Node {
         })
     }
 
-    /// 应用 genesis 余额分配（缺口 #4-M1：初始代币发行）。
+    /// Apply the one-time native ZCN genesis allocation.
     ///
-    /// 为每个 `(tagged_pubkey, balance)` 创建账户（若不存在）。幂等：已存在的账户不覆盖。
-    /// 在节点首次启动（`Node::open` 后）调用一次，实现混合代币模型（Q15）的 genesis 分配。
+    /// Accounts remain identity/nonce records with zero legacy balance; spendable funds are
+    /// emitted as address-owned native coin UTXOs. TreasuryCap creation, all coin creations and
+    /// permanent closure of genesis minting are committed in one ObjectDb batch.
     ///
-    /// **幂等性**：仅在账户不存在时创建；重启不重复分配（持久化 AccountStore 已有则跳过）。
+    /// Reapplying the identical allocation is a no-op. A different allocation after mint closure
+    /// is rejected instead of being silently ignored.
     pub fn apply_genesis_alloc(
         &self,
         allocs: impl IntoIterator<Item = (TaggedPubkey, u64)>,
     ) -> PokerL1Result<usize> {
+        let allocs: Vec<(TaggedPubkey, u64)> = allocs.into_iter().collect();
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
-        let mut created = 0usize;
-        for (pubkey, balance) in allocs {
+        let mut native_allocs = Vec::with_capacity(allocs.len());
+        let mut missing_accounts = Vec::new();
+        for (pubkey, amount) in &allocs {
             let addr = crate::account::derive_address(&pubkey);
-            if account_store.get(&addr).is_none() {
-                account_store.create(crate::account::Account::new(pubkey, balance))?;
-                created += 1;
+            if let Some(account) = account_store.get(&addr) {
+                if account.tagged_pubkey != *pubkey {
+                    return Err(PokerL1Error::Other(format!(
+                        "genesis account pubkey mismatch at address {addr:?}"
+                    )));
+                }
+                if account.balance != 0 {
+                    return Err(PokerL1Error::Other(format!(
+                        "genesis account {addr:?} has legacy balance {}; refusing duplicate monetary state",
+                        account.balance
+                    )));
+                }
+            } else {
+                missing_accounts.push(pubkey.clone());
             }
+            native_allocs.push((addr, *amount));
         }
-        Ok(created)
+        let minted = crate::economics::genesis_mint(
+            &mut object_db,
+            self.config.chain_id,
+            &native_allocs,
+        )?;
+        // Account records are non-monetary identity/nonce metadata. If persistence fails here,
+        // startup fails and the identical genesis call repairs missing zero-balance accounts on
+        // the next restart without minting again.
+        for pubkey in missing_accounts {
+            account_store.create(crate::account::Account::new(pubkey, 0))?;
+        }
+        Ok(minted)
     }
 
     /// 创建内存节点（用于测试）。
@@ -806,6 +834,11 @@ impl Node {
 
     /// 写入对象。
     pub fn put_object(&self, object: Object) -> PokerL1Result<()> {
+        if crate::economics::is_reserved_economic_object(&object) {
+            return Err(PokerL1Error::Other(
+                "reserved economic objects must be created through economics APIs".into(),
+            ));
+        }
         self.object_db
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -824,6 +857,12 @@ impl Node {
             Err(PokerL1Error::ObjectNotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Read the native ZCN TreasuryCap tracked by the UTXO/escrow monetary domain.
+    pub fn treasury_cap(&self) -> PokerL1Result<Option<crate::economics::TreasuryCap>> {
+        let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        crate::economics::read_treasury(&object_db)
     }
 
     /// 写入 DAG vertex（入库前验证）。
@@ -1708,7 +1747,6 @@ mod tests {
     use super::*;
     use crate::DEFAULT_CHAIN_ID;
     use crate::block::{Block, BlockHeader};
-    use crate::economics::native_coin_object;
     use crate::object_model::{Object, ObjectID, Ownership};
     use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
 
@@ -2127,9 +2165,9 @@ mod tests {
     fn node_rpc_backend_adapter() {
         use crate::rpc::RpcBackend;
         let node = Arc::new(Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap());
-        let owner = [0xAB; 20];
-        node.put_object(native_coin_object(owner, 42, 1).unwrap())
-            .unwrap();
+        let owner_key = tp(0x33);
+        let owner = crate::account::derive_address(&owner_key);
+        node.apply_genesis_alloc(vec![(owner_key, 42)]).unwrap();
         let backend = NodeRpcBackend::new(node);
         assert_eq!(backend.chain_id(), DEFAULT_CHAIN_ID);
         // get_object 返回 None（空库）
@@ -2763,7 +2801,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_genesis_alloc_creates_accounts() {
+    fn apply_genesis_alloc_creates_zero_balance_accounts_and_coins() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         let pk1 = tp(0x30);
         let pk2 = tp(0x31);
@@ -2772,28 +2810,29 @@ mod tests {
         assert_eq!(created, 2);
         let addr1 = crate::account::derive_address(&pk1);
         let addr2 = crate::account::derive_address(&pk2);
-        assert_eq!(
-            node.get_account(&addr1).unwrap().unwrap().balance,
-            1_000_000
-        );
-        assert_eq!(node.get_account(&addr2).unwrap().unwrap().balance, 500_000);
+        assert_eq!(node.get_account(&addr1).unwrap().unwrap().balance, 0);
+        assert_eq!(node.get_account(&addr2).unwrap().unwrap().balance, 0);
+        let cap = node.treasury_cap().unwrap().unwrap();
+        assert_eq!(cap.total_supply, 1_500_000);
+        assert!(cap.minting_closed);
+        let object_db = node.object_db.lock().unwrap();
+        assert_eq!(crate::economics::native_coin_balance(&object_db, addr1).unwrap(), 1_000_000);
+        assert_eq!(crate::economics::native_coin_balance(&object_db, addr2).unwrap(), 500_000);
     }
 
     #[test]
     fn apply_genesis_alloc_is_idempotent() {
-        // 重复应用不覆盖已存在账户。
+        // 完全相同的 genesis allocation 在重启时是 no-op。
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         let pk = tp(0x32);
         node.apply_genesis_alloc(vec![(pk.clone(), 1_000)]).unwrap();
-        // 再次应用不同余额 → 不覆盖（仍 1_000）
-        let created = node.apply_genesis_alloc(vec![(pk.clone(), 9_999)]).unwrap();
-        assert_eq!(created, 0, "已存在账户不应重复创建");
+        let created = node.apply_genesis_alloc(vec![(pk.clone(), 1_000)]).unwrap();
+        assert_eq!(created, 0, "相同 allocation 不应重复铸币");
         let addr = crate::account::derive_address(&pk);
-        assert_eq!(
-            node.get_account(&addr).unwrap().unwrap().balance,
-            1_000,
-            "原余额不应被覆盖"
-        );
+        assert_eq!(node.get_account(&addr).unwrap().unwrap().balance, 0);
+        assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 1_000);
+        assert!(node.apply_genesis_alloc(vec![(pk, 9_999)]).is_err());
+        assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 1_000);
     }
 
     // ===== 缺口 #3：Priority Mempool 测试 =====

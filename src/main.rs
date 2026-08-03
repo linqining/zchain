@@ -504,13 +504,13 @@ fn run_node(args: &[String]) -> Result<(), String> {
     // 打开节点
     let node = open_node_with_application_verifiers(config)
         .map_err(|e| format!("Node::open 失败：{e}"))?;
-    // 缺口 #4-M1：应用 genesis 余额分配（初始代币发行，幂等——已存在账户不覆盖）。
+    // Apply the canonical native-coin genesis allocation (idempotent across restarts).
     if let Some(alloc_path) = &genesis_alloc_file {
         let allocs = load_genesis_alloc(alloc_path)?;
         let created = node
             .apply_genesis_alloc(allocs)
             .map_err(|e| format!("genesis alloc 应用失败：{e}"))?;
-        info!("已应用 genesis 余额分配：新建 {} 个账户", created);
+        info!("已应用 genesis UTXO 分配：新铸 {} 个 coin outputs", created);
     }
     let node_arc = Arc::new(node);
     let backend = Arc::new(NodeRpcBackend::new(Arc::clone(&node_arc)));

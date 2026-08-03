@@ -2825,6 +2825,53 @@ pub fn reset_for_next_hand(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    // Preflight the complete addon merge before changing any seat or emitting events. This keeps
+    // a corrupt pool/overflow failure atomic instead of crediting an earlier seat partially.
+    let mut total_pending_addon = 0u64;
+    let mut to_remove_leave: Vec<u8> = vec![];
+    let mut total_leave_refund = 0u64;
+    for (i, s) in table.seats.iter().enumerate() {
+        if s.pending_addon > 0 && s.is_occupied() {
+            s.stack.checked_add(s.pending_addon).ok_or_else(|| {
+                PokerL1Error::Serialization(
+                    "reset_for_next_hand: stack += pending_addon overflow".into(),
+                )
+            })?;
+            total_pending_addon = total_pending_addon
+                .checked_add(s.pending_addon)
+                .ok_or_else(|| {
+                    PokerL1Error::Serialization(
+                        "reset_for_next_hand: total pending addon overflow".into(),
+                    )
+                })?;
+        }
+        if s.is_occupied() && s.want_leave {
+            let refund = s.stack.checked_add(s.pending_addon).ok_or_else(|| {
+                PokerL1Error::Serialization("reset_for_next_hand: leave refund overflow".into())
+            })?;
+            total_leave_refund = total_leave_refund.checked_add(refund).ok_or_else(|| {
+                PokerL1Error::Serialization(
+                    "reset_for_next_hand: total leave refund overflow".into(),
+                )
+            })?;
+            to_remove_leave.push(i as u8);
+        }
+    }
+    let post_addon_pool = table
+        .addon_pool
+        .checked_sub(total_pending_addon)
+        .ok_or_else(|| {
+            PokerL1Error::Serialization(
+                "reset_for_next_hand: pending addon pool underflow".into(),
+            )
+        })?;
+    let post_leave_chip_pool = table
+        .chip_pool
+        .checked_sub(total_leave_refund)
+        .ok_or_else(|| {
+            PokerL1Error::Serialization("reset_for_next_hand: leave chip_pool underflow".into())
+        })?;
+
     // 第一阶段：合并 pending_addon 到 stack（在清理 stack==0 之前）
     //
     // 关键不变量：addon 在下一手生效，合并发生在任何清理之前，
@@ -2833,16 +2880,7 @@ pub fn reset_for_next_hand(
         if s.pending_addon > 0 && s.is_occupied() {
             let player = s.player;
             let amount = s.pending_addon;
-            s.stack = s.stack.checked_add(amount).ok_or_else(|| {
-                PokerL1Error::Serialization(
-                    "reset_for_next_hand: stack += pending_addon overflow".into(),
-                )
-            })?;
-            table.addon_pool = table.addon_pool.checked_sub(amount).ok_or_else(|| {
-                PokerL1Error::Serialization(
-                    "reset_for_next_hand: pending addon pool underflow".into(),
-                )
-            })?;
+            s.stack += amount;
             s.pending_addon = 0;
             events::emit_event(
                 events,
@@ -2856,6 +2894,7 @@ pub fn reset_for_next_hand(
             );
         }
     }
+    table.addon_pool = post_addon_pool;
 
     // P2-11 修复：每手开始时补充 Time Bank（按 TIME_BANK_REFILL_PER_HAND_MS，
     // 上限 DEFAULT_TIME_BANK_MS）。此前 constants 定义了 refill 常量但 reset
@@ -2900,23 +2939,15 @@ pub fn reset_for_next_hand(
     // 时机说明：必须在第二阶段（重置 seat 字段）之后、第三阶段（清理 stack==0）
     // 之前。理由：第二阶段已把 pending_addon 合并到 stack（退款金额正确），
     // 第三阶段的 stack==0 判定不会误清已退款的座位。
-    let mut to_remove_leave: Vec<u8> = vec![];
-    for (i, s) in table.seats.iter().enumerate() {
-        if s.is_occupied() && s.want_leave {
-            to_remove_leave.push(i as u8);
-        }
-    }
     for &i in &to_remove_leave {
         let stack_refund = table.seats[i as usize].stack;
         let pending_refund = table.seats[i as usize].pending_addon;
-        let refund = stack_refund.saturating_add(pending_refund);
+        let refund = stack_refund + pending_refund;
         let pk = table.seats[i as usize].pk;
         let player = table.seats[i as usize].player;
         if refund > 0 {
             table.seats[i as usize].stack = 0;
             table.seats[i as usize].pending_addon = 0;
-            table.chip_pool = table.chip_pool.saturating_sub(refund);
-            table.addon_pool = table.addon_pool.saturating_sub(pending_refund);
             events::emit_event(
                 events,
                 TexasPokerEvent::PlayerRefund {
@@ -2945,6 +2976,7 @@ pub fn reset_for_next_hand(
             },
         );
     }
+    table.chip_pool = post_leave_chip_pool;
 
     // 第三阶段：清理 stack==0 的 occupied seat
     let mut to_remove: Vec<u8> = vec![];
@@ -3032,15 +3064,25 @@ pub fn kick_player_internal(
     let pk = seat.pk;
     let player = seat.player;
 
+    // Preflight every fallible monetary transition before mutating the seat, pot or aggregate key.
+    let post_pot = table
+        .pot
+        .checked_add(seat.bet)
+        .ok_or_else(|| PokerL1Error::Serialization("kick_player: pot overflow".into()))?;
+    let post_chip_pool = table.chip_pool.checked_sub(refund_amt).ok_or_else(|| {
+        PokerL1Error::Serialization("kick_player: chip_pool underflow".into())
+    })?;
+    let post_addon_pool = table
+        .addon_pool
+        .checked_sub(pending_refund)
+        .ok_or_else(|| PokerL1Error::Serialization("kick_player: addon_pool underflow".into()))?;
+
     // P1-2 语义说明：被踢玩家的 bet 立即并入 pot（区别于 fold/auto_fold/force_fold，
     // 后者保留 seat.bet，等下注轮结束由 collect_bets_to_pot 统一收集）。
     // 这是 kick 的特殊路径：被踢玩家立即离开，其本轮已下注金额不参与后续轮次，
     // 故提前单独收集。资金账安全：collect_bets_to_pot 后续不会再收（seat.bet 已为 0）；
     // side_pot 分层依据 total_bet（不受 bet 清零影响）。
-    table.pot = table
-        .pot
-        .checked_add(seat.bet)
-        .ok_or_else(|| PokerL1Error::Serialization("kick_player: pot overflow".into()))?;
+    table.pot = post_pot;
     seat.bet = 0;
     seat.stack = 0;
     seat.hand.clear();
@@ -3060,15 +3102,8 @@ pub fn kick_player_internal(
 
     if refund_amt > 0 {
         // chip_pool 是完整 TableVault 锁仓；pending addon 同时是 addon_pool 子集。
-        table.chip_pool = table.chip_pool.checked_sub(refund_amt).ok_or_else(|| {
-            PokerL1Error::Serialization("kick_player: chip_pool underflow".into())
-        })?;
-        table.addon_pool = table
-            .addon_pool
-            .checked_sub(pending_refund)
-            .ok_or_else(|| {
-                PokerL1Error::Serialization("kick_player: addon_pool underflow".into())
-            })?;
+        table.chip_pool = post_chip_pool;
+        table.addon_pool = post_addon_pool;
         table.seats[seat_index as usize].pending_addon = 0;
         events::emit_event(
             events,
@@ -4026,6 +4061,7 @@ mod tests {
         table.seats[1].pk = ECPoint::from(pk1);
         table.seats[2].player = [0x03; 20];
         table.seats[2].stack = 500;
+        table.chip_pool = 1_500;
         table.seats[2].pk = ECPoint::from(pk2);
         table.deck_state.aggregated_pk = Some(ECPoint::from(agg));
         // 用一个非 NONE 的 round_state，使 reset_for_next_hand 不会被触发
@@ -4054,6 +4090,23 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, TexasPokerEvent::PlayerRefund { .. }))
         );
+    }
+
+    #[test]
+    fn test_kick_player_pool_underflow_is_atomic() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = 10;
+        table.chip_pool = 9;
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("chip_pool underflow"));
+        assert_eq!(table, before, "failed kick refund must be atomic");
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -4147,6 +4200,8 @@ mod tests {
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 0; // stack==0 触发清理
         table.seats[0].pending_addon = 500; // 但有 addon
+        table.chip_pool = 500;
+        table.addon_pool = 500;
 
         let mut events = vec![];
         reset_for_next_hand(&mut table, &mut events).unwrap();
@@ -4164,6 +4219,40 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn test_reset_for_next_hand_pool_underflow_is_atomic() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].pending_addon = 5;
+        table.chip_pool = 5;
+        table.addon_pool = 4;
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = reset_for_next_hand(&mut table, &mut events).unwrap_err();
+
+        assert!(error.to_string().contains("pending addon pool underflow"));
+        assert_eq!(table, before, "failed addon merge must be atomic");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_reset_for_next_hand_leave_underflow_is_atomic() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = 10;
+        table.seats[0].want_leave = true;
+        table.chip_pool = 9;
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = reset_for_next_hand(&mut table, &mut events).unwrap_err();
+
+        assert!(error.to_string().contains("leave chip_pool underflow"));
+        assert_eq!(table, before, "failed leave refund must be atomic");
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -4189,12 +4278,14 @@ mod tests {
         let mut table = make_table();
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 100;
+        table.chip_pool = 100;
 
         let mut events = vec![];
         apply_rebuy(&mut table, 0, 500, &mut events).unwrap();
         // 立即生效
         assert_eq!(table.seats[0].stack, 600);
-        assert_eq!(table.addon_pool, 500);
+        assert_eq!(table.chip_pool, 600);
+        assert_eq!(table.addon_pool, 0);
         assert!(events.iter().any(|e| matches!(
             e,
             TexasPokerEvent::RebuyProcessed {
@@ -4250,7 +4341,7 @@ mod tests {
     #[test]
     fn test_leave_with_proof_rejects_pool_underflow_without_mutation() {
         let mut table = make_leave_with_proof_table(10, 5);
-        table.chip_pool = 10;
+        table.chip_pool = 15;
         table.addon_pool = 4;
         let before = table.clone();
         let mut events = vec![];

@@ -640,9 +640,10 @@ fn apply_tx_outputs<B: ObjectBackend>(
 ) -> PokerL1Result<Vec<ObjectID>> {
     // 只读预检（全有或全无）
     for obj in &tx.outputs {
-        if crate::economics::is_native_coin_object(obj) {
+        if crate::economics::is_reserved_economic_object(obj) {
             return Err(PokerL1Error::Other(
-                "native ZCN coins may only be created by treasury/escrow system paths".into(),
+                "native ZCN economic objects may only be created by treasury/escrow system paths"
+                    .into(),
             ));
         }
         if obj.id.creator_address != *caller {

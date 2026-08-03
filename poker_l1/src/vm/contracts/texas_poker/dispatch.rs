@@ -1824,6 +1824,7 @@ mod tests {
         table.seats[1].stack = 500;
         table.seats[2].player = [0x03; 20];
         table.seats[2].stack = 500;
+        table.chip_pool = 1_500;
 
         let args = KickPlayerArgs {
             seat_index: 0,

@@ -258,6 +258,11 @@ impl<'a> WriteCaptureBackend<'a> {
 
 impl ObjectBackend for WriteCaptureBackend<'_> {
     fn create(&mut self, object: Object) -> PokerL1Result<()> {
+        if crate::economics::is_treasury_cap_object(&object) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be created by the economics system path".into(),
+            ));
+        }
         // 校验：shared 与 log 中都不应存在该 id（防碰撞）。
         if self.resolved_get(&object.id)?.is_some() {
             return Err(PokerL1Error::ObjectIDCollision(object.id));
@@ -286,6 +291,11 @@ impl ObjectBackend for WriteCaptureBackend<'_> {
         // 校验：对象存在 + 可写（所有权）。
         let existing = self.resolved_get(id)?;
         let obj = existing.ok_or(PokerL1Error::ObjectNotFound(*id))?;
+        if crate::economics::is_treasury_cap_object(&obj) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be updated by the economics system path".into(),
+            ));
+        }
         if crate::economics::is_native_coin_object(&obj) {
             return Err(PokerL1Error::Other(format!(
                 "native coin {id:?} is an immutable UTXO and cannot be updated"
@@ -314,6 +324,11 @@ impl ObjectBackend for WriteCaptureBackend<'_> {
         // 校验：对象存在 + 可转移（仅 AddressOwned，且 actor 是当前 owner）。
         let existing = self.resolved_get(id)?;
         let obj = existing.ok_or(PokerL1Error::ObjectNotFound(*id))?;
+        if crate::economics::is_treasury_cap_object(&obj) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be transferred by the economics system path".into(),
+            ));
+        }
         if crate::economics::is_native_coin_object(&obj) {
             return Err(PokerL1Error::Other(format!(
                 "native coin {id:?} is an immutable UTXO and cannot be transferred in place"
@@ -334,6 +349,11 @@ impl ObjectBackend for WriteCaptureBackend<'_> {
         let existing = self
             .resolved_get(id)?
             .ok_or(PokerL1Error::ObjectNotFound(*id))?;
+        if crate::economics::is_treasury_cap_object(&existing) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be replaced by the economics system path".into(),
+            ));
+        }
         self.log.push_delete(*id);
         Ok(existing)
     }

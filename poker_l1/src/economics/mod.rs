@@ -12,11 +12,313 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
+use crate::storage::object_db::ObjectMutation;
 use crate::storage::{ObjectBackend, ObjectDb};
-use crate::{Address, Hash};
+use crate::{Address, ChainId, Hash};
 
 /// Reserved object type for the native ZCN coin.
 pub const NATIVE_COIN_OBJECT_TYPE: &str = "0x2::zcn::Coin";
+
+/// Reserved object type for the native ZCN supply controller.
+pub const TREASURY_CAP_OBJECT_TYPE: &str = "0x2::zcn::TreasuryCap";
+
+/// Protocol-owned address namespace. No user key is allowed to act as this address.
+pub const TREASURY_SYSTEM_ADDRESS: Address = [0u8; 20];
+
+/// Singleton system object that commits to the native ZCN monetary supply.
+pub const TREASURY_CAP_OBJECT_ID: ObjectID = ObjectID::new(TREASURY_SYSTEM_ADDRESS, u64::MAX);
+
+/// Native ZCN supply state.
+///
+/// This cap currently tracks the UTXO/escrow monetary domain only. Legacy `Account.balance`
+/// rewards, gas and staking are intentionally not included until those paths are migrated.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct TreasuryCap {
+    /// Outstanding native ZCN supply, including value temporarily locked in contract escrow.
+    pub total_supply: u64,
+    /// Cumulative native ZCN created by authorised mint operations.
+    pub total_minted: u64,
+    /// Cumulative native ZCN permanently destroyed by authorised burn operations.
+    pub total_burned: u64,
+    /// Once true, the one-time genesis mint authority can never be reopened.
+    pub minting_closed: bool,
+    /// Canonical commitment to the genesis allocation used for restart idempotence.
+    pub genesis_commitment: Hash,
+}
+
+impl TreasuryCap {
+    fn empty_open() -> Self {
+        Self {
+            total_supply: 0,
+            total_minted: 0,
+            total_burned: 0,
+            minting_closed: false,
+            genesis_commitment: [0u8; 32],
+        }
+    }
+
+    fn validate(&self) -> PokerL1Result<()> {
+        let expected_supply = self
+            .total_minted
+            .checked_sub(self.total_burned)
+            .ok_or_else(|| PokerL1Error::Other("TreasuryCap burned amount exceeds minted amount".into()))?;
+        if self.total_supply != expected_supply {
+            return Err(PokerL1Error::Other(format!(
+                "TreasuryCap invariant violated: supply={} minted={} burned={}",
+                self.total_supply, self.total_minted, self.total_burned
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Returns true for the singleton TreasuryCap ID or its reserved type tag.
+#[must_use]
+pub fn is_treasury_cap_object(object: &Object) -> bool {
+    object.id == TREASURY_CAP_OBJECT_ID || object.object_type == TREASURY_CAP_OBJECT_TYPE
+}
+
+/// Returns true for object types whose creation or mutation is reserved to economics paths.
+#[must_use]
+pub fn is_reserved_economic_object(object: &Object) -> bool {
+    is_native_coin_object(object) || is_treasury_cap_object(object)
+}
+
+fn treasury_cap_object(cap: TreasuryCap, version: u64) -> PokerL1Result<Object> {
+    cap.validate()?;
+    let data = borsh::to_vec(&cap)
+        .map_err(|error| PokerL1Error::Serialization(format!("encode TreasuryCap: {error}")))?;
+    let mut object = Object::new(
+        TREASURY_CAP_OBJECT_ID,
+        Ownership::Shared,
+        TREASURY_CAP_OBJECT_TYPE,
+        data,
+        None,
+    );
+    object.version = version;
+    Ok(object)
+}
+
+/// Decode and validate the singleton TreasuryCap object.
+pub fn decode_treasury_cap(object: &Object) -> PokerL1Result<TreasuryCap> {
+    if object.id != TREASURY_CAP_OBJECT_ID
+        || object.object_type != TREASURY_CAP_OBJECT_TYPE
+        || object.owner != Ownership::Shared
+    {
+        return Err(PokerL1Error::Other(
+            "invalid TreasuryCap singleton identity, type or ownership".into(),
+        ));
+    }
+    let cap: TreasuryCap = borsh::from_slice(&object.data)
+        .map_err(|error| PokerL1Error::Serialization(format!("decode TreasuryCap: {error}")))?;
+    cap.validate()?;
+    Ok(cap)
+}
+
+/// Read the native ZCN TreasuryCap. Absence is only valid before genesis initialisation.
+pub fn read_treasury(object_db: &ObjectDb) -> PokerL1Result<Option<TreasuryCap>> {
+    match object_db.read(&TREASURY_CAP_OBJECT_ID) {
+        Ok(object) => Ok(Some(decode_treasury_cap(&object)?)),
+        Err(PokerL1Error::ObjectNotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Initialise an empty, open TreasuryCap without minting any coin.
+///
+/// Normal node startup uses [`genesis_mint`] so cap creation, coin creation and authority closure
+/// occur in one atomic batch. This function exists for explicit genesis builders and tests.
+pub fn initialize_treasury(object_db: &mut ObjectDb) -> PokerL1Result<()> {
+    if read_treasury(object_db)?.is_some() {
+        return Err(PokerL1Error::Other("TreasuryCap is already initialized".into()));
+    }
+    if object_db.iter().any(is_native_coin_object) {
+        return Err(PokerL1Error::Other(
+            "cannot initialize TreasuryCap after native coins already exist".into(),
+        ));
+    }
+    object_db.apply_batch(vec![ObjectMutation::SystemCreate(
+        treasury_cap_object(TreasuryCap::empty_open(), 0)?,
+    )])
+}
+
+fn canonical_genesis_allocations(
+    allocations: &[(Address, u64)],
+) -> PokerL1Result<Vec<(Address, u64)>> {
+    let mut canonical = allocations.to_vec();
+    canonical.sort_by_key(|(owner, _)| *owner);
+    for window in canonical.windows(2) {
+        if window[0].0 == window[1].0 {
+            return Err(PokerL1Error::Other(format!(
+                "duplicate genesis allocation address {:?}",
+                window[0].0
+            )));
+        }
+    }
+    if let Some((owner, _)) = canonical.iter().find(|(_, amount)| *amount == 0) {
+        return Err(PokerL1Error::Other(format!(
+            "genesis allocation for {owner:?} must be greater than zero"
+        )));
+    }
+    Ok(canonical)
+}
+
+fn genesis_allocation_commitment(chain_id: ChainId, allocations: &[(Address, u64)]) -> Hash {
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(b"ZCHAIN_GENESIS_NATIVE_ALLOC_V1");
+    hasher.update(&chain_id.to_be_bytes());
+    for (owner, amount) in allocations {
+        hasher.update(owner);
+        hasher.update(&amount.to_be_bytes());
+    }
+    let mut digest = [0u8; 32];
+    hasher
+        .finalize_variable(&mut digest)
+        .expect("output length is fixed");
+    digest
+}
+
+fn genesis_coin_nonce(chain_id: ChainId, owner: &Address) -> u64 {
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(b"ZCHAIN_GENESIS_NATIVE_COIN_V1");
+    hasher.update(&chain_id.to_be_bytes());
+    hasher.update(owner);
+    let mut digest = [0u8; 32];
+    hasher
+        .finalize_variable(&mut digest)
+        .expect("output length is fixed");
+    u64::from_be_bytes(digest[..8].try_into().expect("slice length is fixed"))
+}
+
+/// Atomically mint the canonical genesis allocation and permanently close minting.
+///
+/// Reapplying the identical allocation is a no-op. A different allocation after closure is
+/// rejected, preventing a restart/configuration change from silently issuing more ZCN.
+pub fn genesis_mint(
+    object_db: &mut ObjectDb,
+    chain_id: ChainId,
+    allocations: &[(Address, u64)],
+) -> PokerL1Result<usize> {
+    let canonical = canonical_genesis_allocations(allocations)?;
+    let commitment = genesis_allocation_commitment(chain_id, &canonical);
+
+    let existing = match object_db.read(&TREASURY_CAP_OBJECT_ID) {
+        Ok(object) => Some((decode_treasury_cap(&object)?, object.version)),
+        Err(PokerL1Error::ObjectNotFound(_)) => None,
+        Err(error) => return Err(error),
+    };
+    if let Some((cap, _)) = existing {
+        if cap.minting_closed {
+            return if cap.genesis_commitment == commitment {
+                Ok(0)
+            } else {
+                Err(PokerL1Error::Other(
+                    "genesis mint is closed and allocation commitment differs".into(),
+                ))
+            };
+        }
+        if cap.total_supply != 0 || cap.total_minted != 0 || cap.total_burned != 0 {
+            return Err(PokerL1Error::Other(
+                "open TreasuryCap must be empty before genesis mint".into(),
+            ));
+        }
+    } else if object_db.iter().any(is_native_coin_object) {
+        return Err(PokerL1Error::Other(
+            "cannot establish genesis supply after untracked native coins already exist".into(),
+        ));
+    }
+
+    let total = canonical.iter().try_fold(0u64, |sum, (_, amount)| {
+        sum.checked_add(*amount)
+            .ok_or_else(|| PokerL1Error::Other("genesis native supply overflow".into()))
+    })?;
+    let cap = TreasuryCap {
+        total_supply: total,
+        total_minted: total,
+        total_burned: 0,
+        minting_closed: true,
+        genesis_commitment: commitment,
+    };
+    let cap_version = existing
+        .map(|(_, version)| {
+            version
+                .checked_add(1)
+                .ok_or_else(|| PokerL1Error::Other("TreasuryCap object version overflow".into()))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let cap_mutation = if existing.is_some() {
+        ObjectMutation::SystemReplace(treasury_cap_object(cap, cap_version)?)
+    } else {
+        ObjectMutation::SystemCreate(treasury_cap_object(cap, cap_version)?)
+    };
+    let mut mutations = Vec::with_capacity(canonical.len() + 1);
+    mutations.push(cap_mutation);
+    for (owner, amount) in &canonical {
+        mutations.push(ObjectMutation::Create(native_coin_object(
+            *owner,
+            *amount,
+            genesis_coin_nonce(chain_id, owner),
+        )?));
+    }
+    object_db.apply_batch(mutations)?;
+    Ok(canonical.len())
+}
+
+/// Atomically destroy address-owned native coin UTXOs and reduce total supply.
+pub fn burn_native_coins(
+    object_db: &mut ObjectDb,
+    owner: Address,
+    input_ids: &[ObjectID],
+) -> PokerL1Result<u64> {
+    if input_ids.is_empty() {
+        return Err(PokerL1Error::Other(
+            "native coin burn requires at least one input".into(),
+        ));
+    }
+    let cap_object = object_db.read(&TREASURY_CAP_OBJECT_ID)?;
+    let mut cap = decode_treasury_cap(&cap_object)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut burned = 0u64;
+    for id in input_ids {
+        if !seen.insert(*id) {
+            return Err(PokerL1Error::Other(format!(
+                "duplicate native coin burn input {id:?}"
+            )));
+        }
+        let object = object_db.read(id)?;
+        if object.owner != (Ownership::AddressOwned { owner }) {
+            return Err(PokerL1Error::NotOwner(*id));
+        }
+        burned = burned
+            .checked_add(decode_native_coin(&object)?.amount)
+            .ok_or_else(|| PokerL1Error::Other("native coin burn sum overflow".into()))?;
+    }
+    cap.total_supply = cap
+        .total_supply
+        .checked_sub(burned)
+        .ok_or_else(|| PokerL1Error::Other("native coin burn exceeds TreasuryCap supply".into()))?;
+    cap.total_burned = cap
+        .total_burned
+        .checked_add(burned)
+        .ok_or_else(|| PokerL1Error::Other("TreasuryCap burned counter overflow".into()))?;
+
+    let mut mutations = Vec::with_capacity(input_ids.len() + 1);
+    for id in input_ids {
+        mutations.push(ObjectMutation::Delete(*id));
+    }
+    mutations.push(ObjectMutation::SystemReplace(treasury_cap_object(
+        cap,
+        cap_object
+            .version
+            .checked_add(1)
+            .ok_or_else(|| PokerL1Error::Other("TreasuryCap object version overflow".into()))?,
+    )?));
+    object_db.apply_batch(mutations)?;
+    Ok(burned)
+}
 
 /// One immutable, address-owned native coin output.
 #[derive(
@@ -362,6 +664,101 @@ pub fn create_native_coin_output(
 mod tests {
     use super::*;
     use crate::storage::object_db::ObjectDb;
+
+    fn live_native_supply(db: &ObjectDb) -> u64 {
+        db.iter()
+            .filter(|object| is_native_coin_object(object))
+            .map(|object| decode_native_coin(object).unwrap().amount)
+            .sum()
+    }
+
+    #[test]
+    fn genesis_mint_atomically_establishes_closed_supply() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        let allocations = vec![([0x22; 20], 500), ([0x11; 20], 1_000)];
+
+        assert_eq!(genesis_mint(&mut db, 7, &allocations).unwrap(), 2);
+        let cap = read_treasury(&db).unwrap().unwrap();
+        assert_eq!(cap.total_supply, 1_500);
+        assert_eq!(cap.total_minted, 1_500);
+        assert_eq!(cap.total_burned, 0);
+        assert!(cap.minting_closed);
+        assert_eq!(cap.total_supply, cap.total_minted - cap.total_burned);
+        assert_eq!(live_native_supply(&db), cap.total_supply);
+    }
+
+    #[test]
+    fn repeated_genesis_is_idempotent_but_changed_allocation_is_rejected() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        let allocations = vec![([0x11; 20], 1_000), ([0x22; 20], 500)];
+        genesis_mint(&mut db, 7, &allocations).unwrap();
+        let root = db.state_root();
+
+        let reordered = vec![([0x22; 20], 500), ([0x11; 20], 1_000)];
+        assert_eq!(genesis_mint(&mut db, 7, &reordered).unwrap(), 0);
+        assert_eq!(db.state_root(), root);
+        assert!(genesis_mint(&mut db, 7, &[([0x11; 20], 1_001)]).is_err());
+        assert_eq!(db.state_root(), root);
+    }
+
+    #[test]
+    fn burn_atomically_deletes_coins_and_updates_supply() {
+        let owner = [0x11; 20];
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[(owner, 1_000), ([0x22; 20], 500)]).unwrap();
+        let coin = list_owned_native_coins(&db, owner).unwrap()[0];
+
+        assert_eq!(burn_native_coins(&mut db, owner, &[coin.id]).unwrap(), 1_000);
+        assert!(db.read(&coin.id).is_err());
+        let cap = read_treasury(&db).unwrap().unwrap();
+        assert_eq!(cap.total_supply, 500);
+        assert_eq!(cap.total_minted, 1_500);
+        assert_eq!(cap.total_burned, 1_000);
+        assert_eq!(cap.total_supply, cap.total_minted - cap.total_burned);
+        assert_eq!(live_native_supply(&db), cap.total_supply);
+    }
+
+    #[test]
+    fn failed_burn_preserves_coin_and_treasury_state() {
+        let owner = [0x11; 20];
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[(owner, 1_000)]).unwrap();
+        let coin = list_owned_native_coins(&db, owner).unwrap()[0];
+        let root = db.state_root();
+        let cap = read_treasury(&db).unwrap().unwrap();
+
+        assert!(burn_native_coins(&mut db, [0x22; 20], &[coin.id]).is_err());
+        assert_eq!(db.state_root(), root);
+        assert_eq!(read_treasury(&db).unwrap().unwrap(), cap);
+        assert_eq!(decode_native_coin(&db.read(&coin.id).unwrap()).unwrap().amount, 1_000);
+    }
+
+    #[test]
+    fn genesis_overflow_fails_without_partial_state() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        assert!(
+            genesis_mint(
+                &mut db,
+                7,
+                &[([0x11; 20], u64::MAX), ([0x22; 20], 1)]
+            )
+            .is_err()
+        );
+        assert!(read_treasury(&db).unwrap().is_none());
+        assert_eq!(live_native_supply(&db), 0);
+    }
+
+    #[test]
+    fn treasury_rejects_generic_mutation_and_deletion() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[([0x11; 20], 1_000)]).unwrap();
+        let root = db.state_root();
+
+        assert!(db.update(&TREASURY_CAP_OBJECT_ID, &[0x44; 20], vec![]).is_err());
+        assert!(db.delete(&TREASURY_CAP_OBJECT_ID).is_err());
+        assert_eq!(db.state_root(), root);
+        assert!(read_treasury(&db).unwrap().is_some());
+    }
 
     #[test]
     fn owned_coin_selection_consumes_inputs_and_creates_change() {

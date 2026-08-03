@@ -45,6 +45,26 @@ impl ObjectStore {
     /// 创建对象。ObjectID 冲突返回 `ObjectIDCollision`（NEW-L4）。
     /// L-1 修复：校验 data 大小 ≤ MAX_OBJECT_SIZE（defense in depth，syscall 层已校验）。
     pub fn create(&mut self, object: Object) -> PokerL1Result<()> {
+        if crate::economics::is_treasury_cap_object(&object) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be created by the economics system path".into(),
+            ));
+        }
+        self.create_inner(object)
+    }
+
+    /// Create the singleton TreasuryCap from the economics system path.
+    pub(crate) fn system_create(&mut self, object: Object) -> PokerL1Result<()> {
+        if !crate::economics::is_treasury_cap_object(&object) {
+            return Err(PokerL1Error::Other(
+                "system object creation is restricted to TreasuryCap".into(),
+            ));
+        }
+        crate::economics::decode_treasury_cap(&object)?;
+        self.create_inner(object)
+    }
+
+    fn create_inner(&mut self, object: Object) -> PokerL1Result<()> {
         if object.data.len() > MAX_OBJECT_SIZE {
             return Err(PokerL1Error::ObjectTooLarge {
                 actual: object.data.len(),
@@ -53,6 +73,46 @@ impl ObjectStore {
         }
         if self.objects.contains_key(&object.id) {
             return Err(PokerL1Error::ObjectIDCollision(object.id));
+        }
+        let key = object.id.merkle_key();
+        let value = borsh::to_vec(&object)
+            .map_err(|e| PokerL1Error::Serialization(format!("Object BCS encode: {e}")))?;
+        self.smt.upsert(key, &value);
+        self.objects.insert(object.id, object);
+        Ok(())
+    }
+
+    /// Replace the singleton TreasuryCap without exposing a generic Shared-object write path.
+    pub(crate) fn system_replace(&mut self, object: Object) -> PokerL1Result<()> {
+        if !crate::economics::is_treasury_cap_object(&object) {
+            return Err(PokerL1Error::Other(
+                "system object replacement is restricted to TreasuryCap".into(),
+            ));
+        }
+        crate::economics::decode_treasury_cap(&object)?;
+        if object.data.len() > MAX_OBJECT_SIZE {
+            return Err(PokerL1Error::ObjectTooLarge {
+                actual: object.data.len(),
+                limit: MAX_OBJECT_SIZE,
+            });
+        }
+        let existing = self
+            .objects
+            .get(&object.id)
+            .ok_or(PokerL1Error::ObjectNotFound(object.id))?;
+        if !crate::economics::is_treasury_cap_object(existing) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap ID is occupied by a non-system object".into(),
+            ));
+        }
+        let expected_version = existing.version.checked_add(1).ok_or_else(|| {
+            PokerL1Error::Other("TreasuryCap object version overflow".into())
+        })?;
+        if object.version != expected_version {
+            return Err(PokerL1Error::ObjectVersionMismatch {
+                expected: expected_version,
+                actual: object.version,
+            });
         }
         let key = object.id.merkle_key();
         let value = borsh::to_vec(&object)
@@ -95,6 +155,11 @@ impl ObjectStore {
             .get_mut(id)
             .ok_or(PokerL1Error::ObjectNotFound(*id))?;
 
+        if crate::economics::is_treasury_cap_object(obj) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be updated by the economics system path".into(),
+            ));
+        }
         if crate::economics::is_native_coin_object(obj) {
             return Err(PokerL1Error::Other(format!(
                 "native coin {id:?} is an immutable UTXO and cannot be updated"
@@ -132,6 +197,11 @@ impl ObjectStore {
             .get_mut(id)
             .ok_or(PokerL1Error::ObjectNotFound(*id))?;
 
+        if crate::economics::is_treasury_cap_object(obj) {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be transferred by the economics system path".into(),
+            ));
+        }
         if crate::economics::is_native_coin_object(obj) {
             return Err(PokerL1Error::Other(format!(
                 "native coin {id:?} is an immutable UTXO and cannot be transferred in place"
@@ -157,6 +227,15 @@ impl ObjectStore {
 
     /// 删除对象（从 SMT 移除，状态根同步更新）。
     pub fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object> {
+        if self
+            .objects
+            .get(id)
+            .is_some_and(crate::economics::is_treasury_cap_object)
+        {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap may only be replaced by the economics system path".into(),
+            ));
+        }
         let obj = self
             .objects
             .remove(id)
