@@ -20,6 +20,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::BorshDeserialize;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -31,9 +32,13 @@ use crate::repository::{
 };
 use crate::runner::HandRunner;
 use crate::{ServiceError, ServiceResult};
+use poker_l1::vm::contracts::dispatch::DispatchContext;
+use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
 
 const LEGACY_TABLE_ID: u64 = 0;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
+/// Bound the decoded Borsh package before it reaches certificate/SMT verification.
+const MAX_CONSENSUS_ANCHOR_BYTES: usize = 16 * 1024 * 1024;
 
 type HttpError = (axum::http::StatusCode, String);
 
@@ -131,12 +136,32 @@ impl HandReportJson {
 pub struct DispatchRequest {
     /// Caller address (20-byte hexadecimal).
     pub caller_hex: String,
+    /// Optional tagged caller public key (`tag || raw`, hexadecimal).  When
+    /// supplied it must derive `caller_hex`, and its exact bytes are committed
+    /// to the generated receipt.  Supplying it is required for a later
+    /// `/verify-chain-consensus` success path because consensus reconstruction
+    /// derives the dispatch context from the transaction's tagged public key.
+    #[serde(default)]
+    pub caller_pubkey_hex: Option<String>,
     /// Method selector (32-byte hexadecimal).
     pub selector_hex: String,
     /// Borsh method arguments (hexadecimal).
     pub args_hex: String,
     #[serde(default)]
     pub idempotency_key: Option<String>,
+}
+
+/// Authenticated consensus material submitted to verify a live receipt range.
+///
+/// The package is Borsh-encoded [`ConsensusAnchorMaterial`] represented as hex.
+/// It contains block headers, certificates and SMT inclusion paths; the service
+/// verifies all of them before accepting an anchor.  This route deliberately
+/// verifies only the current in-memory receipt segment, because the local job
+/// journal is not a STARK proof archive.
+#[derive(Debug, Deserialize)]
+pub struct ConsensusAnchorRequest {
+    /// Hexadecimal Borsh encoding of `ConsensusAnchorMaterial`.
+    pub material_borsh_hex: String,
 }
 
 /// A completed dispatch result.
@@ -174,6 +199,21 @@ pub struct JobResponse {
     pub error: Option<String>,
 }
 
+/// Result of anchoring the current live receipt segment to authenticated consensus data.
+#[derive(Debug, Serialize)]
+pub struct ConsensusAnchorResponse {
+    /// Table whose receipts and table snapshots were authenticated.
+    pub table_id: u64,
+    /// Hand shared by every receipt in the verified range.
+    pub hand_id: u32,
+    /// First authenticated call sequence, inclusive.
+    pub first_call_seq: u32,
+    /// Last authenticated call sequence, inclusive.
+    pub last_call_seq: u32,
+    /// Exact number of authenticated dispatch calls/receipts.
+    pub call_count: usize,
+}
+
 /// Start the loopback-only development proving service.
 ///
 /// Override the state file with `ZCHAIN_PROVING_SERVICE_STATE` when running
@@ -198,15 +238,7 @@ pub async fn serve_with_repository_path(
 ) -> ServiceResult<()> {
     ensure_loopback_bind(addr)?;
     let state = ServerState::from_repository(ServiceRepository::open(repository_path)?);
-    let app = axum::Router::new()
-        // Legacy single-table compatibility route.
-        .route("/dispatch", post(dispatch_legacy))
-        .route("/tables/:table_id/dispatch", post(dispatch_table))
-        .route("/jobs/:job_id", get(get_job))
-        .route("/hands/run", post(run_hand))
-        .route("/plugins", get(list_plugins))
-        .route("/health", get(|| async { "ok" }))
-        .with_state(state);
+    let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -216,6 +248,27 @@ pub async fn serve_with_repository_path(
         .await
         .map_err(|error| ServiceError::Runner(format!("serve: {error}")))?;
     Ok(())
+}
+
+/// Construct the HTTP application for the loopback development service.
+///
+/// Keeping route assembly separate lets integration tests exercise the same
+/// JSON/path routing stack as a real listener without exposing an unanchored
+/// mutation endpoint on a non-loopback address.
+fn router(state: ServerState) -> axum::Router {
+    axum::Router::new()
+        // Legacy single-table compatibility route.
+        .route("/dispatch", post(dispatch_legacy))
+        .route("/tables/:table_id/dispatch", post(dispatch_table))
+        .route(
+            "/tables/:table_id/verify-chain-consensus",
+            post(verify_table_chain_consensus),
+        )
+        .route("/jobs/:job_id", get(get_job))
+        .route("/hands/run", post(run_hand))
+        .route("/plugins", get(list_plugins))
+        .route("/health", get(|| async { "ok" }))
+        .with_state(state)
 }
 
 /// Reject exposing the unanchored state-mutating harness over the network.
@@ -258,6 +311,32 @@ async fn dispatch_for_table(
     request: DispatchRequest,
 ) -> Result<Json<DispatchResponse>, HttpError> {
     let caller = decode_fixed_hex::<20>(&request.caller_hex, "caller_hex")?;
+    let caller_pubkey = request
+        .caller_pubkey_hex
+        .as_deref()
+        .map(|encoded| {
+            let bytes = hex::decode(encoded).map_err(|error| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("caller_pubkey_hex must be hexadecimal: {error}"),
+                )
+            })?;
+            poker_l1::signature::TaggedPubkey::from_bytes(&bytes).map_err(|error| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("caller_pubkey_hex is not a valid tagged public key: {error}"),
+                )
+            })
+        })
+        .transpose()?;
+    if let Some(pubkey) = &caller_pubkey
+        && poker_l1::account::derive_address(pubkey) != caller
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "caller_hex does not match caller_pubkey_hex-derived address".into(),
+        ));
+    }
     let selector = decode_fixed_hex::<32>(&request.selector_hex, "selector_hex")?;
     let args = hex::decode(&request.args_hex).map_err(|error| {
         (
@@ -266,7 +345,14 @@ async fn dispatch_for_table(
         )
     })?;
     let idempotency_key = normalize_idempotency_key(request.idempotency_key)?;
-    let request_digest = digest_request(table_id, &idempotency_key, caller, selector, &args);
+    let request_digest = digest_request(
+        table_id,
+        &idempotency_key,
+        caller,
+        caller_pubkey.as_ref(),
+        selector,
+        &args,
+    );
 
     // Proving is CPU-bound and deliberately serialized with repository writes.
     // The staged clone means dispatch/prove errors cannot mutate the committed
@@ -310,7 +396,29 @@ async fn dispatch_for_table(
     };
 
     let mut staged = runtime.staged_plugin(table_id);
-    let outcome = match staged.dispatch(caller, &selector, &args) {
+    let context = caller_pubkey.map_or_else(
+        || DispatchContext {
+            caller,
+            // Compatibility-only development mode.  A receipt from this path
+            // cannot match an authenticated transaction unless the caller
+            // supplied `caller_pubkey_hex` above.
+            caller_pubkey: poker_l1::signature::TaggedPubkey {
+                tag: 0,
+                raw: vec![0xBB; 32],
+            },
+            chain_id: poker_l1::DEFAULT_CHAIN_ID,
+            block_height: 100,
+            block_timestamp: 1_000_000,
+        },
+        |caller_pubkey| DispatchContext {
+            caller,
+            caller_pubkey,
+            chain_id: poker_l1::DEFAULT_CHAIN_ID,
+            block_height: 100,
+            block_timestamp: 1_000_000,
+        },
+    );
+    let outcome = match staged.dispatch_with_context(&context, &selector, &args) {
         Ok(outcome) => outcome,
         Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
     };
@@ -386,6 +494,78 @@ async fn get_job(
         )
     })?;
     Ok(Json(job_response(job)?))
+}
+
+/// Verify the current process-local receipt segment against authenticated consensus material.
+///
+/// A service restart intentionally clears the process-local receipt segment, so callers must
+/// first retrieve/reprove the relevant tasks from consensus rather than treating durable job
+/// metadata as a portable STARK archive.
+async fn verify_table_chain_consensus(
+    State(state): State<ServerState>,
+    AxumPath(table_id): AxumPath<u64>,
+    Json(request): Json<ConsensusAnchorRequest>,
+) -> Result<Json<ConsensusAnchorResponse>, HttpError> {
+    if request.material_borsh_hex.len() > MAX_CONSENSUS_ANCHOR_BYTES * 2 {
+        return Err((
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "consensus anchor hex material exceeds {} character limit",
+                MAX_CONSENSUS_ANCHOR_BYTES * 2
+            ),
+        ));
+    }
+    let material_bytes = hex::decode(&request.material_borsh_hex).map_err(|error| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("material_borsh_hex must be hexadecimal: {error}"),
+        )
+    })?;
+    if material_bytes.len() > MAX_CONSENSUS_ANCHOR_BYTES {
+        return Err((
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            format!("consensus anchor material exceeds {MAX_CONSENSUS_ANCHOR_BYTES} byte limit"),
+        ));
+    }
+    let material = ConsensusAnchorMaterial::try_from_slice(&material_bytes).map_err(|error| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("invalid consensus anchor Borsh material: {error}"),
+        )
+    })?;
+
+    let runtime = state.runtime.lock().await;
+    let plugin = runtime.plugins.get(&table_id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Texas Poker table {table_id} is not loaded"),
+        )
+    })?;
+    let anchor = plugin
+        .verify_chain_from_consensus_material(&material)
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                error.to_string(),
+            )
+        })?;
+    if anchor.table_id() != table_id {
+        return Err((
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "authenticated anchor targets table {}, not requested table {table_id}",
+                anchor.table_id()
+            ),
+        ));
+    }
+
+    Ok(Json(ConsensusAnchorResponse {
+        table_id: anchor.table_id(),
+        hand_id: anchor.hand_id(),
+        first_call_seq: anchor.first_call_seq(),
+        last_call_seq: anchor.last_call_seq_public(),
+        call_count: anchor.dispatch_call_digests().len(),
+    }))
 }
 
 async fn list_plugins(State(state): State<ServerState>) -> impl IntoResponse {
@@ -531,13 +711,31 @@ fn digest_request(
     table_id: u64,
     idempotency_key: &Option<String>,
     caller: [u8; 20],
+    caller_pubkey: Option<&poker_l1::signature::TaggedPubkey>,
     selector: [u8; 32],
     args: &[u8],
 ) -> [u8; 32] {
     let key = idempotency_key.as_deref().unwrap_or("");
-    let mut material = Vec::with_capacity(8 + 20 + 32 + 8 + args.len() + key.len());
+    let caller_pubkey_bytes = caller_pubkey.map(poker_l1::signature::TaggedPubkey::to_bytes);
+    let mut material = Vec::with_capacity(
+        8 + 20
+            + 1
+            + caller_pubkey_bytes.as_ref().map_or(0, Vec::len)
+            + 32
+            + 8
+            + args.len()
+            + key.len(),
+    );
     material.extend_from_slice(&table_id.to_le_bytes());
     material.extend_from_slice(&caller);
+    match caller_pubkey_bytes {
+        Some(bytes) => {
+            material.push(1);
+            material.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            material.extend_from_slice(&bytes);
+        }
+        None => material.push(0),
+    }
     material.extend_from_slice(&selector);
     material.extend_from_slice(&(key.len() as u64).to_le_bytes());
     material.extend_from_slice(key.as_bytes());
@@ -608,12 +806,209 @@ fn internal_error(message: String) -> HttpError {
 mod tests {
     use super::*;
 
+    use axum::body::{Body, to_bytes};
     use blstrs::G1Projective;
     use group::Group;
+    use poker_l1::account::derive_address;
+    use poker_l1::block::BlockHeader;
+    use poker_l1::consensus::ValidatorEntry;
+    use poker_l1::consensus::bullshark::assemble_commit_certificate;
+    use poker_l1::object_model::{Object, ObjectStore, Ownership, SparseMerkleTree};
+    use poker_l1::signature::TaggedPubkey;
+    use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
+    use poker_l1::transaction::{ContractCall, Gas, RouteHint, Transaction, TxLane};
     use poker_l1::vm::contracts::texas_poker::dispatch::{
         CreateTableArgs, JoinTableArgs, SeatIndexArgs, selectors,
     };
     use poker_protocol::crypto::types::ECPoint;
+    use poker_texas_air::consensus_anchor::{ConsensusDispatchCall, TableSnapshot};
+    use secp256k1::{Message, Secp256k1, SecretKey};
+    use tower::ServiceExt;
+
+    fn test_tagged_pubkey(secret: &SecretKey) -> TaggedPubkey {
+        let secp = Secp256k1::new();
+        let public = secp256k1::PublicKey::from_secret_key(&secp, secret);
+        TaggedPubkey::new(
+            SignatureScheme::Secp256k1,
+            CURRENT_VERSION,
+            public.serialize().to_vec(),
+        )
+        .expect("secp256k1 public key has canonical tagged encoding")
+    }
+
+    fn test_validators() -> (Vec<ValidatorEntry>, Vec<SecretKey>) {
+        let secrets: Vec<_> = (1u8..=5)
+            .map(|byte| SecretKey::from_slice(&[byte; 32]).expect("fixed secret scalar is valid"))
+            .collect();
+        let validators = secrets
+            .iter()
+            .map(|secret| ValidatorEntry::new(test_tagged_pubkey(secret), [0; 33], 1_000, 0))
+            .collect();
+        (validators, secrets)
+    }
+
+    fn sign_certificate(
+        validators: &[ValidatorEntry],
+        secrets: &[SecretKey],
+        roots: ([u8; 32], [u8; 32], [u8; 32]),
+    ) -> poker_l1::consensus::DagCommitCertificate {
+        let placeholder = assemble_commit_certificate(
+            1,
+            1,
+            [0; 32],
+            vec![],
+            vec![],
+            roots.0,
+            roots.1,
+            roots.2,
+            &[],
+            validators.len(),
+        )
+        .expect("certificate placeholder must assemble");
+        let message = Message::from_digest(placeholder.signing_hash(poker_l1::DEFAULT_CHAIN_ID));
+        let secp = Secp256k1::new();
+        let signatures: Vec<_> = secrets
+            .iter()
+            .take(validators.len() * 2 / 3 + 1)
+            .enumerate()
+            .map(|(index, secret)| {
+                let signature = secp.sign_ecdsa_recoverable(&message, secret);
+                let (recovery_id, compact) = signature.serialize_compact();
+                let mut bytes = compact.to_vec();
+                bytes.push(recovery_id.to_i32() as u8);
+                (index, bytes)
+            })
+            .collect();
+        assemble_commit_certificate(
+            1,
+            1,
+            [0; 32],
+            vec![],
+            vec![],
+            roots.0,
+            roots.1,
+            roots.2,
+            &signatures,
+            validators.len(),
+        )
+        .expect("signed certificate must assemble")
+    }
+
+    fn tx_smt(tx: &Transaction) -> ([u8; 32], poker_l1::object_model::MerklePath) {
+        let mut smt = SparseMerkleTree::new();
+        let tx_hash = tx.tx_hash();
+        let mut hasher = Blake2bVar::new(32).expect("32-byte Blake2 output is supported");
+        hasher.update(&tx_hash);
+        let mut key = [0; 32];
+        hasher
+            .finalize_variable(&mut key)
+            .expect("32-byte Blake2 output is supported");
+        smt.upsert(key, &tx_hash);
+        (smt.root(), smt.prove(&key))
+    }
+
+    fn snapshot(
+        table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    ) -> ([u8; 32], TableSnapshot) {
+        let object = Object::new(
+            table.id,
+            Ownership::Shared,
+            "TexasPokerTable",
+            borsh::to_vec(table).expect("table must serialize"),
+            None,
+        );
+        let mut store = ObjectStore::new();
+        store
+            .create(object.clone())
+            .expect("table object must store");
+        (
+            store.state_root(),
+            TableSnapshot {
+                object,
+                inclusion_path: store
+                    .prove(&table.id)
+                    .expect("stored object has inclusion proof"),
+            },
+        )
+    }
+
+    fn consensus_material_for_create(
+        pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        post_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        sender: TaggedPubkey,
+        selector: [u8; 32],
+        args: Vec<u8>,
+    ) -> ConsensusAnchorMaterial {
+        let (validators, validator_secrets) = test_validators();
+        let (pre_state_root, pre_snapshot) = snapshot(pre_table);
+        let (post_state_root, post_snapshot) = snapshot(post_table);
+        let signing_secret =
+            SecretKey::from_slice(&[42; 32]).expect("fixed secret scalar is valid");
+        let secp = Secp256k1::new();
+        let signature =
+            secp.sign_ecdsa_recoverable(&Message::from_digest([0xA5; 32]), &signing_secret);
+        let (recovery_id, compact) = signature.serialize_compact();
+        let mut tx_signature = compact.to_vec();
+        tx_signature.push(recovery_id.to_i32() as u8);
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            contract_call: Some(ContractCall {
+                contract_id: poker_l1::vm::precompile::reserved::texas_poker_contract_id(),
+                method_selector: selector,
+                args,
+            }),
+            tagged_pubkey: sender,
+            signature: tx_signature,
+            gas: Gas::new(1_000_000, 1),
+            lane_hint: TxLane::Public,
+            route_hint: RouteHint::AnyValidator,
+            chain_id: poker_l1::DEFAULT_CHAIN_ID,
+            nonce: 0,
+            gameturn_nonce: None,
+            is_fallback: false,
+        };
+        let (public_tx_root, tx_path) = tx_smt(&tx);
+        let empty_tx_root = SparseMerkleTree::new().root();
+        let pre_certificate = sign_certificate(
+            &validators,
+            &validator_secrets,
+            (pre_state_root, public_tx_root, empty_tx_root),
+        );
+        let post_certificate = sign_certificate(
+            &validators,
+            &validator_secrets,
+            (post_state_root, public_tx_root, empty_tx_root),
+        );
+        let pre_block_header = BlockHeader {
+            height: 100,
+            timestamp_ms: 1_000_000,
+            prev_hash: [0; 32],
+            state_root: pre_state_root,
+            public_tx_root,
+            gameturn_tx_root: empty_tx_root,
+            dag_commit_certificate: pre_certificate.clone(),
+        };
+        let post_block_header = BlockHeader {
+            state_root: post_state_root,
+            dag_commit_certificate: post_certificate,
+            ..pre_block_header.clone()
+        };
+        ConsensusAnchorMaterial {
+            pre_block_header,
+            pre_snapshot,
+            pre_certificate,
+            chain_id: poker_l1::DEFAULT_CHAIN_ID,
+            validators,
+            post_block_header,
+            post_snapshot,
+            calls: vec![ConsensusDispatchCall {
+                tx,
+                lane: TxLane::Public,
+                inclusion_path: tx_path,
+            }],
+        }
+    }
 
     #[test]
     fn unanchored_dispatch_service_is_loopback_only() {
@@ -631,6 +1026,7 @@ mod tests {
     fn create_request(creator: [u8; 20], key: &str) -> DispatchRequest {
         DispatchRequest {
             caller_hex: hex::encode(creator),
+            caller_pubkey_hex: None,
             selector_hex: hex::encode(selectors::create_table()),
             args_hex: hex::encode(
                 borsh::to_vec(&CreateTableArgs {
@@ -670,6 +1066,7 @@ mod tests {
             7,
             DispatchRequest {
                 caller_hex: hex::encode(creator),
+                caller_pubkey_hex: None,
                 selector_hex: hex::encode(selectors::create_table()),
                 args_hex: hex::encode(
                     borsh::to_vec(&CreateTableArgs {
@@ -717,6 +1114,7 @@ mod tests {
         let player = [0x10; 20];
         let join = DispatchRequest {
             caller_hex: hex::encode(player),
+            caller_pubkey_hex: None,
             selector_hex: hex::encode(selectors::join_table()),
             args_hex: hex::encode(
                 borsh::to_vec(&JoinTableArgs {
@@ -759,6 +1157,7 @@ mod tests {
         let player = [0x10; 20];
         let join = DispatchRequest {
             caller_hex: hex::encode(player),
+            caller_pubkey_hex: None,
             selector_hex: hex::encode(selectors::join_table()),
             args_hex: hex::encode(
                 borsh::to_vec(&JoinTableArgs {
@@ -778,6 +1177,7 @@ mod tests {
 
         let leave = DispatchRequest {
             caller_hex: hex::encode(player),
+            caller_pubkey_hex: None,
             selector_hex: hex::encode(selectors::request_leave_after_hand()),
             args_hex: hex::encode(borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap()),
             idempotency_key: Some("leave".into()),
@@ -789,5 +1189,87 @@ mod tests {
         assert_eq!(leave.call_seq, 3);
         let runtime = state.runtime.lock().await;
         assert!(runtime.plugins.get(&LEGACY_TABLE_ID).unwrap().table().seats[0].want_leave);
+    }
+
+    #[tokio::test]
+    async fn consensus_anchor_route_rejects_malformed_material_before_chain_access() {
+        let result = verify_table_chain_consensus(
+            State(ServerState::default()),
+            AxumPath(LEGACY_TABLE_ID),
+            Json(ConsensusAnchorRequest {
+                material_borsh_hex: "not-hex".into(),
+            }),
+        )
+        .await;
+
+        match result {
+            Err((status, message)) => {
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+                assert!(message.contains("hexadecimal"));
+            }
+            Ok(_) => panic!("malformed consensus material must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn consensus_anchor_http_route_accepts_certificate_smt_and_receipt_chain() {
+        let state = ServerState::default();
+        let table_id = 91;
+        let sender_secret =
+            SecretKey::from_slice(&[9; 32]).expect("fixed sender secret scalar is valid");
+        let sender = test_tagged_pubkey(&sender_secret);
+        let caller = derive_address(&sender);
+        let mut create = create_request(caller, "anchored-create");
+        create.caller_pubkey_hex = Some(hex::encode(sender.to_bytes()));
+        let create_args = hex::decode(&create.args_hex).expect("create args are hex");
+        let selector = selectors::create_table();
+
+        let response = dispatch_for_table(state.clone(), table_id, create)
+            .await
+            .expect("dispatch with an address-bound public key must prove")
+            .0;
+        assert!(response.proof_verified);
+
+        let (pre_table, post_table) = {
+            let runtime = state.runtime.lock().await;
+            let pre_table = new_service_plugin(table_id).table().clone();
+            let post_table = runtime
+                .plugins
+                .get(&table_id)
+                .expect("dispatched table is loaded")
+                .table()
+                .clone();
+            (pre_table, post_table)
+        };
+        let material =
+            consensus_material_for_create(&pre_table, &post_table, sender, selector, create_args);
+        let body = serde_json::json!({
+            "material_borsh_hex": hex::encode(
+                borsh::to_vec(&material).expect("authenticated material must serialize")
+            ),
+        });
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/tables/{table_id}/verify-chain-consensus"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("HTTP request must build");
+
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("router must return a response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("response body must be readable");
+        let json: serde_json::Value =
+            serde_json::from_slice(&response_body).expect("response must be valid JSON");
+        assert_eq!(json["table_id"], table_id);
+        assert_eq!(json["hand_id"], 0);
+        assert_eq!(json["first_call_seq"], 1);
+        assert_eq!(json["last_call_seq"], 1);
+        assert_eq!(json["call_count"], 1);
     }
 }

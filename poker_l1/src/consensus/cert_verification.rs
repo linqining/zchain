@@ -195,8 +195,7 @@ mod tests {
     #[test]
     fn valid_quorum_signatures_pass() {
         let (validators, secrets) = make_validators(5); // 2/3 of 5 = 4
-        let signer_secrets: Vec<(usize, SecretKey)> =
-            (0..4).map(|i| (i, secrets[i])).collect();
+        let signer_secrets: Vec<(usize, SecretKey)> = (0..4).map(|i| (i, secrets[i])).collect();
         let cert = make_signed_cert(
             &validators,
             &signer_secrets,
@@ -217,8 +216,7 @@ mod tests {
     #[test]
     fn insufficient_quorum_fails() {
         let (validators, secrets) = make_validators(6); // 2/3 of 6 = 4
-        let signer_secrets: Vec<(usize, SecretKey)> =
-            (0..3).map(|i| (i, secrets[i])).collect(); // only 3 < 4
+        let signer_secrets: Vec<(usize, SecretKey)> = (0..3).map(|i| (i, secrets[i])).collect(); // only 3 < 4
         let cert = make_signed_cert(
             &validators,
             &signer_secrets,
@@ -239,8 +237,7 @@ mod tests {
     #[test]
     fn wrong_message_hash_fails() {
         let (validators, secrets) = make_validators(5);
-        let signer_secrets: Vec<(usize, SecretKey)> =
-            (0..4).map(|i| (i, secrets[i])).collect();
+        let signer_secrets: Vec<(usize, SecretKey)> = (0..4).map(|i| (i, secrets[i])).collect();
         // 签名用 DEFAULT_CHAIN_ID，但验证用不同 chain_id → signing_hash 不同。
         let cert = make_signed_cert(
             &validators,
@@ -262,8 +259,7 @@ mod tests {
     #[test]
     fn bitmap_signature_list_length_mismatch_fails() {
         let (validators, secrets) = make_validators(5);
-        let signer_secrets: Vec<(usize, SecretKey)> =
-            (0..4).map(|i| (i, secrets[i])).collect();
+        let signer_secrets: Vec<(usize, SecretKey)> = (0..4).map(|i| (i, secrets[i])).collect();
         let mut cert = make_signed_cert(
             &validators,
             &signer_secrets,
@@ -294,8 +290,7 @@ mod tests {
     fn wrong_scheme_verify_fn_rejects() {
         // 用 ed25519 verify 闭包验证 secp256k1 签名必须失败。
         let (validators, secrets) = make_validators(5);
-        let signer_secrets: Vec<(usize, SecretKey)> =
-            (0..4).map(|i| (i, secrets[i])).collect();
+        let signer_secrets: Vec<(usize, SecretKey)> = (0..4).map(|i| (i, secrets[i])).collect();
         let cert = make_signed_cert(
             &validators,
             &signer_secrets,

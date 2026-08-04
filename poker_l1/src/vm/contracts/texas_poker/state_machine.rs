@@ -28,27 +28,27 @@ use blstrs::G1Projective;
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ECScalar, ElGamalCiphertext};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{
-    apply_reconstruction_contributions, canonical_base_deck, ReconstructProofV3,
-    ReconstructionV3Statement,
+    ReconstructProofV3, ReconstructionV3Statement, apply_reconstruction_contributions,
+    canonical_base_deck,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
-use poker_protocol::zk_shuffle::ShuffleProof;
 
 use super::betting::{BettingError, BettingRound};
 use super::card::{Card, PlayingCard};
 use super::constants::*;
 use super::events::{
-    self, TexasPokerEvent, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE,
-    DECK_REBUILT_REASON_SHUFFLE_TIMEOUT, POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN,
-    TRIGGER_ACTION_RAISE_ALL_IN,
+    self, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE, DECK_REBUILT_REASON_SHUFFLE_TIMEOUT,
+    POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN, TRIGGER_ACTION_RAISE_ALL_IN,
+    TexasPokerEvent,
 };
 use super::side_pot;
 use super::types::{
-    DecryptedCard, ReconstructPlayerDeck, RevealAssignment, RevealTokenData, Seat, TexasPokerTable,
-    EMPTY_PLAYER, OWNER_SEAT_PUBLIC,
+    DecryptedCard, EMPTY_PLAYER, OWNER_SEAT_PUBLIC, ReconstructPlayerDeck, RevealAssignment,
+    RevealTokenData, Seat, TexasPokerTable,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -2763,10 +2763,7 @@ fn compute_rake_amount(table: &TexasPokerTable, pot: u64) -> PokerL1Result<u64> 
 /// 按各 pot 占比扣除 rake，再按固定 pot 顺序扣除整除尾差（守恒）。
 ///
 /// 扣除后 `result.total()` 恰好减少 `rake`。
-fn apply_rake_to_pots(
-    result: &mut side_pot::SidePotResult,
-    rake: u64,
-) -> PokerL1Result<()> {
+fn apply_rake_to_pots(result: &mut side_pot::SidePotResult, rake: u64) -> PokerL1Result<()> {
     let total = result.total();
     if total == 0 || rake == 0 || result.pots.is_empty() {
         return Ok(());
@@ -3705,10 +3702,9 @@ pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
         .pot
         .checked_sub(rake)
         .ok_or_else(|| PokerL1Error::Serialization("collect_rake: pot -= rake underflow".into()))?;
-    let post_chip_pool = table
-        .chip_pool
-        .checked_sub(rake)
-        .ok_or_else(|| PokerL1Error::Serialization("collect_rake: rake exceeds TableVault".into()))?;
+    let post_chip_pool = table.chip_pool.checked_sub(rake).ok_or_else(|| {
+        PokerL1Error::Serialization("collect_rake: rake exceeds TableVault".into())
+    })?;
     table.rake_collected = post_rake_receipt;
     table.pot = post_pot;
     table.chip_pool = post_chip_pool;
@@ -3771,8 +3767,8 @@ pub fn trigger_run_it_twice(
 mod tests {
     use super::*;
     use crate::object_model::ObjectID;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn dummy_id() -> ObjectID {
         ObjectID::new([0xFF; 20], 0)
@@ -3910,12 +3906,16 @@ mod tests {
         assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_RECONSTRUCT);
         assert_eq!(table.shuffle_state.current_shuffler, Some(0));
         assert_eq!(table.shuffle_state.pending_players, vec![0, 1]);
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, TexasPokerEvent::ReconstructComplete { .. })));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, TexasPokerEvent::DeckRebuilt { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TexasPokerEvent::ReconstructComplete { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TexasPokerEvent::DeckRebuilt { .. }))
+        );
     }
 
     #[test]
@@ -4029,9 +4029,11 @@ mod tests {
         start_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.deck_state.encrypted.len(), 52);
         assert_eq!(table.deck_state.plaintext.len(), 52);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::HandStarted { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::HandStarted { .. }))
+        );
     }
 
     #[test]
@@ -4070,9 +4072,11 @@ mod tests {
         assert_eq!(table.seats[1].bet, 100);
         assert_eq!(table.seats[0].stack, 950);
         assert_eq!(table.seats[1].stack, 900);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::BlindsPosted { .. }))
+        );
     }
 
     #[test]
@@ -4091,12 +4095,16 @@ mod tests {
         apply_fold(&mut table, 0, &mut events).unwrap();
         // fold 后只剩 1 名活跃玩家 → end_without_showdown → reset_for_next_hand
         // 会清掉 folded 标记，故此处仅断言事件与筹码分配。
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerFolded { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::HandEndedWithoutShowdown { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerFolded { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::HandEndedWithoutShowdown { .. }))
+        );
         assert_eq!(table.seats[1].stack, 1200);
     }
 
@@ -4118,9 +4126,11 @@ mod tests {
         assert_eq!(table.seats[0].stack, 900);
         assert_eq!(table.seats[0].bet, 100);
         assert!(table.seats[0].acted_this_round);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerCalled { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerCalled { .. }))
+        );
     }
 
     #[test]
@@ -4202,12 +4212,16 @@ mod tests {
         let new_agg = table.deck_state.aggregated_pk.unwrap();
         let expected = pk1 + pk2;
         assert!(g1_equal(&new_agg, &expected));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerKicked { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerRefund { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerKicked { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerRefund { .. }))
+        );
     }
 
     #[test]
@@ -4277,9 +4291,11 @@ mod tests {
         assert_eq!(table.addon_pool, 200);
         assert_eq!(table.version, 1);
         // 事件
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::AddonRequested { amount: 200, .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::AddonRequested { amount: 200, .. }))
+        );
     }
 
     #[test]
@@ -4382,9 +4398,11 @@ mod tests {
         let mut events = vec![];
         reset_for_next_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.seats[0].player, [0u8; 20]); // EMPTY_PLAYER
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerLeft { seat_index: 0, .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerLeft { seat_index: 0, .. }))
+        );
     }
 
     #[test]
@@ -4487,9 +4505,11 @@ mod tests {
         assert_eq!(table.seats[0].bet, 200);
         assert_eq!(table.seats[0].stack, 800);
         assert!(table.seats[0].acted_this_round);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TexasPokerEvent::PlayerBet { amount: 200, .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TexasPokerEvent::PlayerBet { amount: 200, .. }))
+        );
     }
 
     #[test]
@@ -4548,9 +4568,10 @@ mod tests {
         table.seats[0].player = [0x01; 20];
         table.seats[0].time_bank_ms = 5_000;
         let err = consume_time_bank(&mut table, 0, 10_000, &mut vec![]).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("time_bank_ms 5000 < consumed_ms 10000"));
+        assert!(
+            err.to_string()
+                .contains("time_bank_ms 5000 < consumed_ms 10000")
+        );
     }
 
     // ========== Ante 测试 ==========

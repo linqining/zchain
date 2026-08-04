@@ -637,8 +637,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::InMemoryTransport;
     use crate::block::BlockHeader;
+    use crate::network::InMemoryTransport;
     use crate::object_model::{Object, ObjectID, Ownership};
     use crate::storage::{BlockStore, ObjectDb};
 
@@ -1035,12 +1035,14 @@ mod tests {
         fast_sync.apply_snapshot(&manifest).unwrap();
 
         let mut apply_count = 0;
-        assert!(fast_sync
-            .catch_up_blocks_from_network(&transport, 102, |_| {
-                apply_count += 1;
-                Ok(())
-            })
-            .is_err());
+        assert!(
+            fast_sync
+                .catch_up_blocks_from_network(&transport, 102, |_| {
+                    apply_count += 1;
+                    Ok(())
+                })
+                .is_err()
+        );
         assert_eq!(apply_count, 0);
         assert!(matches!(fast_sync.state(), SyncState::Failed(_)));
     }

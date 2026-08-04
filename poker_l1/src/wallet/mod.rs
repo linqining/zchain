@@ -7,12 +7,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Address;
+use crate::ChainId;
 use crate::economics::auto_select_native_coins;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::executor::TransferArgs;
 use crate::storage::ObjectDb;
 use crate::transaction::{ContractCall, Gas, RouteHint, TxLane, TxRequest};
-use crate::ChainId;
 use crate::vm::contracts::texas_poker::dispatch::required_funding;
 use crate::vm::precompile::reserved;
 
@@ -219,15 +219,9 @@ mod tests {
         db.create(first.clone()).unwrap();
         db.create(second.clone()).unwrap();
 
-        let funded = build_native_transfer_tx_request(
-            &db,
-            owner,
-            recipient,
-            100,
-            DEFAULT_CHAIN_ID,
-            7,
-        )
-        .unwrap();
+        let funded =
+            build_native_transfer_tx_request(&db, owner, recipient, 100, DEFAULT_CHAIN_ID, 7)
+                .unwrap();
 
         assert_eq!(funded.request.inputs, vec![first.id, second.id]);
         assert_eq!(funded.selected_total, 120);

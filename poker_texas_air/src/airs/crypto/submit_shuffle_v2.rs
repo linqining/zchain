@@ -25,10 +25,10 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{PrecompileAirBinding, DIGEST_LIMBS};
+use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
 
 /// `submit_shuffle_v2` 业务特定列布局。
 pub mod cols {

@@ -38,8 +38,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::DagCommitCertificate;
-use crate::transaction::Transaction;
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::transaction::Transaction;
 use crate::{BlockHeight, Hash, TimestampMs};
 
 /// 签名域分隔前缀。
@@ -204,10 +204,17 @@ pub fn verify_tx_inclusion(
     key_h.update(tx_hash);
     let mut key = [0u8; 32];
     key_h.finalize_variable(&mut key).expect("32 <= 64");
-    if crate::object_model::SparseMerkleTree::verify(expected_root, &key, Some(tx_hash), merkle_proof) {
+    if crate::object_model::SparseMerkleTree::verify(
+        expected_root,
+        &key,
+        Some(tx_hash),
+        merkle_proof,
+    ) {
         Ok(())
     } else {
-        Err(PokerL1Error::Other("tx inclusion proof verification failed".to_string()))
+        Err(PokerL1Error::Other(
+            "tx inclusion proof verification failed".to_string(),
+        ))
     }
 }
 
@@ -461,7 +468,10 @@ mod tests {
         verify_tx_inclusion(&target_hash, &proof, &root).expect("包含性验证应通过");
         // 验证：不存在的 tx → 失败
         let fake_hash = [0xFF; 32];
-        assert!(verify_tx_inclusion(&fake_hash, &proof, &root).is_err(), "不存在的 tx 应验证失败");
+        assert!(
+            verify_tx_inclusion(&fake_hash, &proof, &root).is_err(),
+            "不存在的 tx 应验证失败"
+        );
     }
 
     #[test]

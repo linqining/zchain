@@ -1031,7 +1031,10 @@ mod tests {
         )
         .expect("scheme_id=1 + proof_kind=Zkvm 一致时应成功");
 
-        assert!(result.verified, "Production test verifier should accept the fixture");
+        assert!(
+            result.verified,
+            "Production test verifier should accept the fixture"
+        );
         assert_eq!(result.scheme_id, SCHEME_STWO);
         assert_eq!(result.verifier_status, VerifierStatus::Production);
     }

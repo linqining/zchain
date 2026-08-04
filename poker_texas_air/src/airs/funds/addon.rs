@@ -43,8 +43,8 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    compute_add_carries, compute_bound_carries, u64_to_m31_limbs, u8_to_m31, CommonConstraints,
-    CommonRow, COMMON_NUM_COLUMNS, MAX_TOTAL_BET, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, MAX_TOTAL_BET, ZERO, compute_add_carries,
+    compute_bound_carries, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 

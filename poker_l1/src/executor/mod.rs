@@ -412,8 +412,7 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                     "transfer: amount must be > 0".to_string(),
                 ));
             }
-            let selection =
-                select_owned_native_coins(object_db, &tx.inputs, caller, args.amount)?;
+            let selection = select_owned_native_coins(object_db, &tx.inputs, caller, args.amount)?;
             let (recipient_output, change_output) = transfer_native_coins(
                 object_db,
                 &selection,
@@ -2302,7 +2301,10 @@ mod tests {
         let env = make_env();
         let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
         assert!(outcome.receipts[0].success, "转账应成功");
-        assert!(fx.object_db.read(&input.id).is_err(), "input UTXO must be spent");
+        assert!(
+            fx.object_db.read(&input.id).is_err(),
+            "input UTXO must be spent"
+        );
         assert_eq!(
             crate::economics::native_coin_balance(&fx.object_db, recipient_addr).unwrap(),
             transfer_amount
@@ -2351,7 +2353,10 @@ mod tests {
         assert!(!outcome.receipts[0].success, "UTXO value不足转账应失败");
         assert_eq!(fx.account().balance, account_balance_before);
         assert_eq!(fx.account().nonce, 0);
-        assert!(fx.object_db.read(&input.id).is_ok(), "failed spend keeps input");
+        assert!(
+            fx.object_db.read(&input.id).is_ok(),
+            "failed spend keeps input"
+        );
         assert_eq!(
             crate::economics::native_coin_balance(&fx.object_db, caller).unwrap(),
             10
@@ -2388,8 +2393,14 @@ mod tests {
         let receipt = execute_tx(&make_env(), &tx, &mut fx.object_db, &mut fx.account_store);
         assert!(!receipt.success);
         assert!(fx.object_db.read(&input.id).is_ok());
-        assert_eq!(crate::economics::native_coin_balance(&fx.object_db, caller).unwrap(), 100);
-        assert_eq!(crate::economics::native_coin_balance(&fx.object_db, recipient).unwrap(), 0);
+        assert_eq!(
+            crate::economics::native_coin_balance(&fx.object_db, caller).unwrap(),
+            100
+        );
+        assert_eq!(
+            crate::economics::native_coin_balance(&fx.object_db, recipient).unwrap(),
+            0
+        );
         assert_eq!(fx.account().nonce, 0);
     }
 }

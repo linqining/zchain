@@ -12,11 +12,11 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::BlockHeight;
+use crate::Hash;
 use crate::consensus::Epoch;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
 use crate::signature::unified::verify_signature;
-use crate::Hash;
 
 /// 检查点生成间隔（每 10,000 区块生成一个检查点）。
 pub const CHECKPOINT_INTERVAL: u64 = 10_000;
@@ -25,9 +25,7 @@ pub const CHECKPOINT_INTERVAL: u64 = 10_000;
 ///
 /// 由 ≥2/3 validator 签名背书的不可逆转检查点。一旦形成，该 height 之前的
 /// 所有区块被视为 finalized，pruned 节点可安全丢弃更早的数据。
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct CheckpointCertificate {
     /// 检查点对应的区块高度。
     pub height: BlockHeight,
@@ -194,11 +192,13 @@ mod tests {
         let block_hash = [0xAA; 32];
         let state_root = [0xBB; 32];
         let height = 10_000u64;
-        let signing_hash =
-            checkpoint_signing_hash(height, block_hash, state_root, chain_epoch);
+        let signing_hash = checkpoint_signing_hash(height, block_hash, state_root, chain_epoch);
 
         let keys: Vec<_> = (0..3).map(|i| make_real_keypair(0x10 + i)).collect();
-        let sigs: Vec<Vec<u8>> = keys.iter().map(|(sk, _)| sign_hash(sk, &signing_hash)).collect();
+        let sigs: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|(sk, _)| sign_hash(sk, &signing_hash))
+            .collect();
         let pubkeys: Vec<TaggedPubkey> = keys.iter().map(|(_, pk)| pk.clone()).collect();
 
         let cert = CheckpointCertificate {
@@ -217,7 +217,10 @@ mod tests {
         // 5 validator，需 4 签名，仅给 3 → 拒绝。
         let signing_hash = checkpoint_signing_hash(10_000, [0xAA; 32], [0xBB; 32], 1);
         let keys: Vec<_> = (0..3).map(|i| make_real_keypair(0x20 + i)).collect();
-        let sigs: Vec<Vec<u8>> = keys.iter().map(|(sk, _)| sign_hash(sk, &signing_hash)).collect();
+        let sigs: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|(sk, _)| sign_hash(sk, &signing_hash))
+            .collect();
         let pubkeys: Vec<TaggedPubkey> = keys.iter().map(|(_, pk)| pk.clone()).collect();
         let cert = CheckpointCertificate {
             height: 10_000,
@@ -237,7 +240,10 @@ mod tests {
         // 通过 quorum 检查（4>=4），但在逐签名验证时检测到重复。
         let signing_hash = checkpoint_signing_hash(10_000, [0xAA; 32], [0xBB; 32], 1);
         let keys: Vec<_> = (0..3).map(|i| make_real_keypair(0x30 + i)).collect();
-        let sigs: Vec<Vec<u8>> = keys.iter().map(|(sk, _)| sign_hash(sk, &signing_hash)).collect();
+        let sigs: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|(sk, _)| sign_hash(sk, &signing_hash))
+            .collect();
         let pubkeys: Vec<TaggedPubkey> = keys.iter().map(|(_, pk)| pk.clone()).collect();
         // 3 个不同 + 1 个重复（复制第 0 个）→ 共 4 个签名
         let cert = CheckpointCertificate {
@@ -257,7 +263,10 @@ mod tests {
             },
         };
         let err = cert.validate(5).unwrap_err();
-        assert!(matches!(err, PokerL1Error::Other(_)), "应检测到重复签名者: {err:?}");
+        assert!(
+            matches!(err, PokerL1Error::Other(_)),
+            "应检测到重复签名者: {err:?}"
+        );
     }
 
     #[test]

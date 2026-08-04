@@ -9,10 +9,10 @@
 
 use std::ops::Mul;
 
-use stwo::core::fields::m31::M31;
 use stwo::core::Fraction;
+use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
+    EvalAtRow, FrameworkEval, ORIGINAL_TRACE_IDX, Relation, RelationEntry,
 };
 
 use super::{AirStatement, TexasAir};

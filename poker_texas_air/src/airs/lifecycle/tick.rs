@@ -10,7 +10,7 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u64_to_m31_limbs,
 };
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
@@ -880,4 +880,188 @@ pub fn validate_public_inputs(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TICK_KIND_BETTING, TICK_KIND_NON_TIMER, canonical_input};
+    use poker_l1::object_model::ObjectID;
+    use poker_l1::vm::contracts::texas_poker::{
+        betting::BettingRound,
+        constants::{FOLD_REASON_AUTO_TIMEOUT, RAKE_MODE_PERCENTAGE, ROUND_PREFLOP},
+        events::TexasPokerEvent,
+        state_machine,
+        types::TexasPokerTable,
+    };
+
+    fn table() -> TexasPokerTable {
+        TexasPokerTable::new(
+            ObjectID::new([0xA1; 20], 42),
+            "canonical-tick".into(),
+            [0xB2; 20],
+            4,
+            50,
+            100,
+        )
+    }
+
+    fn occupy(table: &mut TexasPokerTable, index: usize, player: u8, stack: u64) {
+        let seat = &mut table.seats[index];
+        seat.player = [player; 20];
+        seat.stack = stack;
+        seat.folded = false;
+        seat.all_in = false;
+        seat.acted_this_round = false;
+        seat.is_waiting = false;
+        seat.left_during_hand = false;
+        seat.bet = 0;
+        seat.total_bet = 0;
+        seat.pending_addon = 0;
+    }
+
+    /// The state machine owns call/hand sequence maintenance at the dispatch
+    /// layer.  Mirror that small dispatch step so `canonical_input` receives
+    /// the exact pre/post tables used by a real prove task.
+    fn execute_tick(pre: &TexasPokerTable, now_ms: u64) -> (TexasPokerTable, Vec<TexasPokerEvent>) {
+        let mut post = pre.clone();
+        let mut events = Vec::new();
+        state_machine::tick(&mut post, now_ms, &mut events).expect("fixture tick must succeed");
+        assert_ne!(post, *pre, "fixture tick must change the table");
+        post.call_seq = pre.call_seq.checked_add(1).expect("fixture call sequence");
+        post.hand_id = if events
+            .iter()
+            .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }))
+        {
+            pre.hand_id.checked_add(1).expect("fixture hand sequence")
+        } else {
+            pre.hand_id
+        };
+        (post, events)
+    }
+
+    fn betting_table(time_bank_ms: u64) -> TexasPokerTable {
+        let mut table = table();
+        occupy(&mut table, 0, 1, 1_000);
+        occupy(&mut table, 1, 2, 1_000);
+        occupy(&mut table, 2, 3, 1_000);
+        table.round_state = ROUND_PREFLOP;
+        table.betting_round = Some(BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+        table.timestamps.betting_started_at = 1_000_000;
+        table.timeout_config.betting_timeout_ms = 30_000;
+        table.seats[0].time_bank_ms = time_bank_ms;
+        table.chip_pool = 3_000;
+        table.hand_id = 7;
+        table.call_seq = 11;
+        table
+    }
+
+    #[test]
+    fn canonical_input_binds_betting_time_bank_and_saturating_deadline() {
+        let mut pre = betting_table(10);
+        pre.timestamps.betting_started_at = u64::MAX - 5;
+        pre.timeout_config.betting_timeout_ms = 10;
+        let (post, events) = execute_tick(&pre, u64::MAX);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TexasPokerEvent::TimeBankConsumed {
+                consumed_ms: 10,
+                remaining_ms: 0,
+                ..
+            }
+        )));
+        assert_eq!(post.timestamps.betting_started_at, u64::MAX);
+        assert!(!post.seats[0].folded);
+
+        let input = canonical_input(&pre, &post, u64::MAX).expect("canonical betting tick");
+        assert_eq!(input.timeout_kind, TICK_KIND_BETTING);
+        assert!(input.timeout_required);
+        assert_eq!(input.timeout_started_at, u64::MAX - 5);
+        assert_eq!(input.timeout_ms, 10);
+        assert_eq!(input.pre_time_bank, 10);
+        assert_eq!(input.time_bank_consumed, 10);
+        assert_eq!(input.time_bank_post, 0);
+        assert_eq!(input.rake_amount, 0);
+        assert_eq!(input.version_increment, 1);
+    }
+
+    #[test]
+    fn canonical_input_binds_rake_event_from_betting_timeout_settlement() {
+        let mut pre = betting_table(0);
+        // Model an already-collected 100-chip wager from each player.  The
+        // table vault is therefore stacks (1,800) + pot (200) = 2,000.
+        pre.seats.truncate(2);
+        pre.max_players = 2;
+        pre.seats[0].stack = 900;
+        pre.seats[1].stack = 900;
+        pre.seats[0].total_bet = 100;
+        pre.seats[1].total_bet = 100;
+        pre.pot = 200;
+        pre.chip_pool = 2_000;
+        pre.rake_mode = RAKE_MODE_PERCENTAGE;
+        pre.rake_bps = 500;
+        pre.rake_cap = 20;
+
+        let now_ms = 1_030_001;
+        let (post, events) = execute_tick(&pre, now_ms);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TexasPokerEvent::RakeCollected {
+                rake_amount: 10,
+                rake_mode: RAKE_MODE_PERCENTAGE,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TexasPokerEvent::PlayerFolded {
+                seat_index: 0,
+                reason: FOLD_REASON_AUTO_TIMEOUT,
+                ..
+            }
+        )));
+
+        let input = canonical_input(&pre, &post, now_ms).expect("canonical rake tick");
+        assert_eq!(input.timeout_kind, TICK_KIND_BETTING);
+        assert!(input.timeout_required);
+        assert_eq!(input.time_bank_consumed, 0);
+        assert_eq!(input.rake_mode, RAKE_MODE_PERCENTAGE);
+        assert_eq!(input.rake_amount, 10);
+    }
+
+    #[test]
+    fn canonical_input_tracks_waiting_tick_hand_sequence_without_timeout_claim() {
+        let mut pre = table();
+        occupy(&mut pre, 0, 1, 1_000);
+        occupy(&mut pre, 1, 2, 1_000);
+        pre.chip_pool = 2_000;
+        pre.hand_id = 9;
+        pre.call_seq = 13;
+
+        let (post, events) = execute_tick(&pre, 2_000_000);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }))
+        );
+        assert_eq!(post.hand_id, pre.hand_id + 1);
+
+        let input = canonical_input(&pre, &post, 2_000_000).expect("canonical waiting tick");
+        assert_eq!(input.timeout_kind, TICK_KIND_NON_TIMER);
+        assert!(!input.timeout_required);
+        assert_eq!(input.timeout_started_at, 0);
+        assert_eq!(input.timeout_ms, 0);
+        assert_eq!(input.time_bank_consumed, 0);
+        assert_eq!(input.rake_amount, 0);
+    }
+
+    #[test]
+    fn canonical_input_rejects_post_state_not_produced_by_native_tick() {
+        let pre = betting_table(30_000);
+        let (mut post, _) = execute_tick(&pre, 1_030_000);
+        post.timestamps.betting_started_at = 123;
+
+        assert!(canonical_input(&pre, &post, 1_030_000).is_err());
+    }
 }

@@ -33,3 +33,7 @@ serde_json = { workspace = true }
 
 [features]
 default = []
+
+[dev-dependencies]
+secp256k1 = { workspace = true }
+tower = { workspace = true, features = ["util"] }

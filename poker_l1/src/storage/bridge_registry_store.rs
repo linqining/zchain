@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
+use crate::ChainId;
 use crate::bridge::BridgeRegistry;
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::ChainId;
 
 /// `deposit_nonces` 列族名（bridge deposit 防重放）。
 const DEPOSIT_NONCES_CF: &str = "bridge_deposit_nonces";
@@ -46,7 +46,8 @@ pub struct BridgeRegistryStore {
 
 impl std::fmt::Debug for BridgeRegistryStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BridgeRegistryStore").finish_non_exhaustive()
+        f.debug_struct("BridgeRegistryStore")
+            .finish_non_exhaustive()
     }
 }
 
@@ -150,12 +151,11 @@ impl BridgeRegistryStore {
 
 /// 仅用于测试：从 DB 直接读取已持久化的 deposit nonce 集合（验证持久化生效）。
 #[cfg(test)]
-pub(crate) fn dump_persisted_deposit_nonces(store: &BridgeRegistryStore) -> BTreeSet<(ChainId, u64)> {
+pub(crate) fn dump_persisted_deposit_nonces(
+    store: &BridgeRegistryStore,
+) -> BTreeSet<(ChainId, u64)> {
     let mut out = BTreeSet::new();
-    let cf = store
-        .db
-        .cf_handle(DEPOSIT_NONCES_CF)
-        .expect("CF 必须存在");
+    let cf = store.db.cf_handle(DEPOSIT_NONCES_CF).expect("CF 必须存在");
     for item in store.db.iterator_cf(cf, rocksdb::IteratorMode::Start) {
         let (key, _) = item.expect("iter");
         if key.len() == 16 {
@@ -171,10 +171,7 @@ pub(crate) fn dump_persisted_deposit_nonces(store: &BridgeRegistryStore) -> BTre
 #[cfg(test)]
 pub(crate) fn dump_persisted_burn_nonces(store: &BridgeRegistryStore) -> BTreeSet<(ChainId, u64)> {
     let mut out = BTreeSet::new();
-    let cf = store
-        .db
-        .cf_handle(BURN_NONCES_CF)
-        .expect("CF 必须存在");
+    let cf = store.db.cf_handle(BURN_NONCES_CF).expect("CF 必须存在");
     for item in store.db.iterator_cf(cf, rocksdb::IteratorMode::Start) {
         let (key, _) = item.expect("iter");
         if key.len() == 16 {
@@ -231,9 +228,7 @@ mod tests {
         ));
         {
             let store = BridgeRegistryStore::open(&path).expect("open");
-            store
-                .persist_burn_nonce(0xCCCC_DDDD, 7)
-                .expect("persist");
+            store.persist_burn_nonce(0xCCCC_DDDD, 7).expect("persist");
         }
         {
             let store = BridgeRegistryStore::open(&path).expect("reopen");
@@ -255,7 +250,9 @@ mod tests {
         ));
         let store = BridgeRegistryStore::open(&path).expect("open");
         store.persist_deposit_nonce(1, 100).expect("first");
-        store.persist_deposit_nonce(1, 100).expect("second (idempotent)");
+        store
+            .persist_deposit_nonce(1, 100)
+            .expect("second (idempotent)");
         let persisted = dump_persisted_deposit_nonces(&store);
         assert_eq!(persisted.iter().filter(|(_, n)| *n == 100).count(), 1);
         let _ = std::fs::remove_dir_all(&path);

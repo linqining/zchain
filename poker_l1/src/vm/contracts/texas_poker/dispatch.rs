@@ -23,17 +23,17 @@
 //! dispatch 层目前仅记录日志（tracing::debug!）并丢弃，后续 Precompile
 //! 实现可在 Phase 3.3 / Phase 4 中扩展 DispatchResult 携带 events 字段。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use blstrs::G1Projective;
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::ShuffleProof;
 
 use super::constants::{FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN};
 use super::events::TexasPokerEvent;
@@ -2350,8 +2350,8 @@ mod tests {
         DLEqProof::from_parts(vec![], G1Projective::identity(), zero, zero)
     }
 
-    fn empty_schnorr_proof(
-    ) -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
+    fn empty_schnorr_proof()
+    -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
     {
         poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
             commitment: G1Projective::identity(),

@@ -233,8 +233,7 @@ impl DagVertexStore {
                 let epoch = u64::from_le_bytes(key[..8].try_into().unwrap());
                 if epoch < prune_below_epoch {
                     // value = Vec<Hash>（round_index 存该轮所有 vertex hash）
-                    let hashes: Vec<Hash> = bincode::deserialize(&value)
-                        .unwrap_or_default();
+                    let hashes: Vec<Hash> = bincode::deserialize(&value).unwrap_or_default();
                     to_delete.push((key.as_ref().try_into().unwrap(), hashes));
                 }
             }

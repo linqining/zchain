@@ -25,11 +25,11 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::BlockHeight;
+use crate::ChainId;
 use crate::consensus::{DagCommitCertificate, DagVertex, Epoch, ValidatorSet};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::TaggedPubkey;
 use crate::signature::unified::verify_signature;
-use crate::ChainId;
 
 /// 默认 slashing 百分比（NEW-M15：equivocation 全额罚没，可治理）。
 pub const DEFAULT_SLASH_PERCENTAGE: u32 = 100;
@@ -1007,7 +1007,11 @@ mod tests {
         let (secret, author) = make_real_keypair(0x10);
         let v1 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xAA; 32]], chain_id);
         let v2 = make_signed_vertex(&secret, author.clone(), 1, 10, vec![[0xBB; 32]], chain_id);
-        assert_ne!(v1.vertex_hash(), v2.vertex_hash(), "parent 不同 → hash 不同");
+        assert_ne!(
+            v1.vertex_hash(),
+            v2.vertex_hash(),
+            "parent 不同 → hash 不同"
+        );
         let evidence = VertexEquivocationEvidence {
             chain_id,
             epoch: 1,
@@ -1064,7 +1068,14 @@ mod tests {
         let chain_id = crate::DEFAULT_CHAIN_ID;
         let (secret_a, author_a) = make_real_keypair(0x13);
         let (secret_b, author_b) = make_real_keypair(0x14);
-        let v1 = make_signed_vertex(&secret_a, author_a.clone(), 1, 10, vec![[0xAA; 32]], chain_id);
+        let v1 = make_signed_vertex(
+            &secret_a,
+            author_a.clone(),
+            1,
+            10,
+            vec![[0xAA; 32]],
+            chain_id,
+        );
         // v2 用 author_b 签名，但证据 author 填 author_a
         let v2 = make_signed_vertex(&secret_b, author_b, 1, 10, vec![[0xBB; 32]], chain_id);
         let evidence = VertexEquivocationEvidence {
@@ -1160,7 +1171,10 @@ mod tests {
             cert_2: cert2,
         };
         let err = evidence.validate().unwrap_err();
-        assert!(matches!(err, PokerL1Error::Other(_)), "相同 cert 非 equivocation");
+        assert!(
+            matches!(err, PokerL1Error::Other(_)),
+            "相同 cert 非 equivocation"
+        );
     }
 
     #[test]

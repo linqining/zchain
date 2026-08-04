@@ -105,9 +105,10 @@ impl ObjectStore {
                 "TreasuryCap ID is occupied by a non-system object".into(),
             ));
         }
-        let expected_version = existing.version.checked_add(1).ok_or_else(|| {
-            PokerL1Error::Other("TreasuryCap object version overflow".into())
-        })?;
+        let expected_version = existing
+            .version
+            .checked_add(1)
+            .ok_or_else(|| PokerL1Error::Other("TreasuryCap object version overflow".into()))?;
         if object.version != expected_version {
             return Err(PokerL1Error::ObjectVersionMismatch {
                 expected: expected_version,

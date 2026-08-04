@@ -15,6 +15,7 @@ use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch as texas_dispatch;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
+use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
 use poker_texas_air::orchestrator::{Orchestrator, ProvenTask};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
@@ -148,6 +149,38 @@ impl TexasPokerPlugin {
         }
     }
 
+    /// Execute a dispatch with the exact context supplied by the transaction
+    /// adapter.
+    ///
+    /// The loopback development API historically received only an address and
+    /// therefore used [`Self::make_ctx`] as a compatibility fallback.  A
+    /// receipt that is later anchored to a consensus transaction must instead
+    /// use this method: its `caller` and `caller_pubkey` are committed by
+    /// `dispatch_call_digest` and must be identical to the context rebuilt
+    /// from that transaction.
+    pub fn dispatch_with_context(
+        &mut self,
+        context: &DispatchContext,
+        selector: &[u8; 32],
+        args: &[u8],
+    ) -> PluginResult<DispatchOutcome> {
+        let result = texas_dispatch::dispatch(context, &mut self.table, selector, args)
+            .map_err(|e| PluginError::Dispatch(e.to_string()))?;
+
+        // Deserialize return_value as poker_texas_air::DispatchOutput (the
+        // Borsh contract is shared across the VM and proving crates).
+        let output: DispatchOutput = BorshDeserialize::try_from_slice(&result.return_value)
+            .map_err(|e| PluginError::Decode(format!("{e}")))?;
+
+        // The VM owns all task metadata.  Consume it unchanged so the
+        // Orchestrator replay sees precisely the context authenticated by the
+        // transaction adapter.
+        let prove_task = output.prove_task.clone();
+        self.dispatch_count += 1;
+
+        Ok(DispatchOutcome { output, prove_task })
+    }
+
     /// 用共识来源的 [`ExpectedChainAnchor`] 锚定当前已证明 receipt 链（P05-H-source）。
     ///
     /// 与 [`ContractPlugin::verify_chain`](crate::plugin::ContractPlugin::verify_chain)
@@ -169,6 +202,27 @@ impl TexasPokerPlugin {
             .verify_against_anchor(anchor)
             .map_err(|e| PluginError::Prover(e.to_string()))
     }
+
+    /// 从原始共识材料构造 anchor 并验证当前 receipt chain。
+    ///
+    /// 这是生产适配器的唯一入口：服务不会接受由同一批未认证 prove task
+    /// 自行拼出的 endpoint/digest。`material.build()` 先验证 block certificate
+    /// 的 quorum 签名和所有 SMT inclusion proof，随后本方法才将得到的完整
+    /// range 与本进程已原生验证的 receipt 逐项比对。
+    ///
+    /// # Errors
+    ///
+    /// 无效共识材料、空/不连续 receipt chain 或任一 anchor 字段不匹配时返回错误。
+    pub fn verify_chain_from_consensus_material(
+        &self,
+        material: &ConsensusAnchorMaterial,
+    ) -> PluginResult<ExpectedChainAnchor> {
+        let anchor = material
+            .build()
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        self.verify_chain_against_consensus(&anchor)?;
+        Ok(anchor)
+    }
 }
 
 impl crate::plugin::ContractPlugin for TexasPokerPlugin {
@@ -183,19 +237,7 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
         args: &[u8],
     ) -> PluginResult<DispatchOutcome> {
         let ctx = self.make_ctx(caller);
-        let result = texas_dispatch::dispatch(&ctx, &mut self.table, selector, args)
-            .map_err(|e| PluginError::Dispatch(e.to_string()))?;
-
-        // 反序列化 return_value 为 poker_texas_air::DispatchOutput（borsh 跨 crate 兼容）
-        let output: DispatchOutput = BorshDeserialize::try_from_slice(&result.return_value)
-            .map_err(|e| PluginError::Decode(format!("{e}")))?;
-
-        // 任务元数据由 VM dispatch 写入。原样消费，确保 Orchestrator 的完整
-        // dispatch replay 能逐字段匹配 regenerated task；本地服务不声称 block inclusion。
-        let prove_task = output.prove_task.clone();
-        self.dispatch_count += 1;
-
-        Ok(DispatchOutcome { output, prove_task })
+        self.dispatch_with_context(&ctx, selector, args)
     }
 
     fn prove_task(&mut self, task: &ProveTask) -> PluginResult<ProvenTask> {

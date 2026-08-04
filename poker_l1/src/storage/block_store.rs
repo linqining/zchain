@@ -491,7 +491,9 @@ mod tests {
 
         let mut conflicting = dummy_block(5, [0u8; 32]);
         conflicting.header.timestamp_ms += 1;
-        let error = store.put(&conflicting, crate::DEFAULT_CHAIN_ID).unwrap_err();
+        let error = store
+            .put(&conflicting, crate::DEFAULT_CHAIN_ID)
+            .unwrap_err();
         assert!(error.to_string().contains("already bound"));
         assert_eq!(
             store

@@ -958,10 +958,7 @@ impl GossipManager {
     /// - `resolvable_hashes`：short_id_map 有映射但本地无完整 tx 的 tx_hash（可请求）
     /// - `unresolved_short_ids`：short_id_map 无映射（需请求完整 vertex fallback）
     #[must_use]
-    pub fn resolve_missing_txs(
-        &self,
-        missing_short_ids: &[ShortId],
-    ) -> (Vec<Hash>, Vec<ShortId>) {
+    pub fn resolve_missing_txs(&self, missing_short_ids: &[ShortId]) -> (Vec<Hash>, Vec<ShortId>) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut resolvable = Vec::new();
         let mut unresolved = Vec::new();
@@ -972,6 +969,21 @@ impl GossipManager {
             }
         }
         (resolvable, unresolved)
+    }
+
+    /// Return the locally cached transactions for an explicit set of hashes.
+    ///
+    /// The result keeps the request order and omits cache misses.  It is used
+    /// exclusively to answer a peer's [`NetworkMessage::RequestTx`] during
+    /// compact-vertex recovery; callers must still validate every returned
+    /// transaction before admitting it to the node.
+    #[must_use]
+    pub fn cached_transactions(&self, hashes: &[Hash]) -> Vec<Transaction> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        hashes
+            .iter()
+            .filter_map(|hash| state.tx_cache.get(hash).cloned())
+            .collect()
     }
 
     /// 取出缓冲中的 tx 用于装入下一个 vertex（SubTask 30.7）。
@@ -1337,6 +1349,36 @@ mod tests {
         let tx_hash = tx.tx_hash();
         assert!(manager.tx_cache_contains(&tx_hash));
         assert_eq!(manager.short_id_map_len(), 1);
+    }
+
+    #[test]
+    fn test_gossip_manager_cached_transactions_preserves_request_order() {
+        let manager = GossipManager::new();
+        let first = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            contract_call: None,
+            tagged_pubkey: make_tagged_pubkey(0x01),
+            signature: vec![0x42; 65],
+            gas: Gas::default(),
+            lane_hint: TxLane::Public,
+            route_hint: RouteHint::default(),
+            chain_id: crate::DEFAULT_CHAIN_ID,
+            nonce: 1,
+            gameturn_nonce: None,
+            is_fallback: false,
+        };
+        let mut second = first.clone();
+        second.nonce = 2;
+        let first_hash = first.tx_hash();
+        let second_hash = second.tx_hash();
+        manager.receive_tx(first).unwrap();
+        manager.receive_tx(second).unwrap();
+
+        let cached = manager.cached_transactions(&[[0xFF; 32], second_hash, first_hash]);
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0].tx_hash(), second_hash);
+        assert_eq!(cached[1].tx_hash(), first_hash);
     }
 
     #[test]

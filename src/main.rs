@@ -22,7 +22,7 @@
 //! ```
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -33,11 +33,14 @@ use poker_l1::account::derive_address;
 use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, validate_tx_signature};
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
 use poker_l1::consensus::{
-    Dag, DagCommitCertificate, DagVertex, MAX_VERTEX_SIZE, VertexBuilder, detect_commit_leader,
-    required_quorum, assemble_commit_certificate,
+    Dag, DagCommitCertificate, DagVertex, MAX_VERTEX_SIZE, VertexBuilder,
+    assemble_commit_certificate, detect_commit_leader, required_quorum,
 };
 use poker_l1::error::PokerL1Result;
-use poker_l1::network::{CommitVote, GossipTopic, NetworkMessage, NetworkTransport, PeerInfo};
+use poker_l1::network::{
+    CommitVote, GossipManager, GossipTopic, LightClientHeader, NetworkMessage, NetworkTransport,
+    PeerInfo,
+};
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
 use poker_l1::rpc::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, RpcClientInfo, RpcGuard, RpcHandler,
@@ -71,6 +74,8 @@ const CONSENSUS_TIMESTAMP_STEP_MS: u64 = 1_000;
 /// Bound a vertex range response by both rounds scanned and vertices returned.
 const MAX_VERTEX_RANGE_ROUNDS: u64 = 512;
 const MAX_VERTEX_RANGE_RESPONSE: usize = 512;
+/// Bound untrusted peer-exchange payloads before they become dial targets.
+const MAX_DISCOVERED_PEERS: usize = 256;
 
 /// Derive the execution timestamp from already-finalized chain state rather than the local clock.
 ///
@@ -78,14 +83,12 @@ const MAX_VERTEX_RANGE_RESPONSE: usize = 512;
 /// which has the same parent.  The genesis fallback is also deterministic for integration tests
 /// and a freshly initialized chain.
 fn consensus_block_timestamp(node: &Node, height: u64) -> Result<u64, String> {
-    let previous = height
-        .checked_sub(1)
-        .and_then(|previous_height| {
-            node.block_store()
-                .get_by_height(previous_height)
-                .ok()
-                .map(|block| block.header.timestamp_ms)
-        });
+    let previous = height.checked_sub(1).and_then(|previous_height| {
+        node.block_store()
+            .get_by_height(previous_height)
+            .ok()
+            .map(|block| block.header.timestamp_ms)
+    });
     match previous {
         Some(timestamp) => timestamp
             .checked_add(CONSENSUS_TIMESTAMP_STEP_MS)
@@ -125,8 +128,7 @@ impl VoteCollector {
     fn add_vote(&self, vote: CommitVote) {
         let mut votes = self.votes.lock().unwrap_or_else(|e| e.into_inner());
         let exists = votes.iter().any(|v| {
-            v.signer_pubkey == vote.signer_pubkey
-                && v.cert_signing_hash == vote.cert_signing_hash
+            v.signer_pubkey == vote.signer_pubkey && v.cert_signing_hash == vote.cert_signing_hash
         });
         if !exists {
             votes.push(vote);
@@ -136,8 +138,9 @@ impl VoteCollector {
     /// 取出针对指定 cert_signing_hash 的全部已收集投票（清空该 key 对应的投票）。
     fn drain_for_hash(&self, cert_signing_hash: &poker_l1::Hash) -> Vec<CommitVote> {
         let mut votes = self.votes.lock().unwrap_or_else(|e| e.into_inner());
-        let (matched, rest): (Vec<_>, Vec<_>) =
-            votes.drain(..).partition(|v| v.cert_signing_hash == *cert_signing_hash);
+        let (matched, rest): (Vec<_>, Vec<_>) = votes
+            .drain(..)
+            .partition(|v| v.cert_signing_hash == *cert_signing_hash);
         *votes = rest;
         matched
     }
@@ -155,7 +158,6 @@ impl VoteCollector {
             .collect()
     }
 }
-
 
 /// 程序入口。
 fn main() {
@@ -287,7 +289,9 @@ struct GenesisValidatorEntry {
 ///
 /// 文件格式：`[{"pubkey_hex": "..", "vrf_pubkey_hex": "..", "stake": N}, ...]`。
 /// 所有节点须用相同文件（signer_bitmap index 基准 = `active_validator_pubkeys_sorted()`）。
-fn load_genesis_validators(path: &std::path::Path) -> Result<Vec<poker_l1::consensus::ValidatorEntry>, String> {
+fn load_genesis_validators(
+    path: &std::path::Path,
+) -> Result<Vec<poker_l1::consensus::ValidatorEntry>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("读取 genesis validators 文件失败：{e}"))?;
     let entries: Vec<GenesisValidatorEntry> = serde_json::from_str(&content)
@@ -314,8 +318,7 @@ fn load_genesis_validators(path: &std::path::Path) -> Result<Vec<poker_l1::conse
         vrf_pk.copy_from_slice(&vrf_pubkey_bytes);
         // 缺口 #3：genesis validator 立即 Active（无 bonding 期），使其能参与共识。
         // ValidatorEntry::new 默认 Bonding，此处转为 Active。
-        let mut entry =
-            poker_l1::consensus::ValidatorEntry::new(tagged, vrf_pk, e.stake, 0);
+        let mut entry = poker_l1::consensus::ValidatorEntry::new(tagged, vrf_pk, e.stake, 0);
         entry.status = poker_l1::consensus::ValidatorStatus::Active;
         out.push(entry);
     }
@@ -338,10 +341,10 @@ struct GenesisAllocEntry {
 fn load_genesis_alloc(
     path: &std::path::Path,
 ) -> Result<Vec<(poker_l1::signature::TaggedPubkey, u64)>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取 genesis alloc 文件失败：{e}"))?;
-    let entries: Vec<GenesisAllocEntry> = serde_json::from_str(&content)
-        .map_err(|e| format!("解析 genesis alloc JSON 失败：{e}"))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("读取 genesis alloc 文件失败：{e}"))?;
+    let entries: Vec<GenesisAllocEntry> =
+        serde_json::from_str(&content).map_err(|e| format!("解析 genesis alloc JSON 失败：{e}"))?;
     let mut out = Vec::with_capacity(entries.len());
     for (i, e) in entries.iter().enumerate() {
         let pubkey_bytes = hex::decode(&e.pubkey_hex)
@@ -449,9 +452,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
             }
             "--vrf-key-file" => {
                 i += 1;
-                vrf_key_file = Some(PathBuf::from(
-                    args.get(i).ok_or("--vrf-key-file 缺少参数")?,
-                ));
+                vrf_key_file = Some(PathBuf::from(args.get(i).ok_or("--vrf-key-file 缺少参数")?));
             }
             "--genesis-alloc" => {
                 i += 1;
@@ -607,6 +608,14 @@ fn run_node(args: &[String]) -> Result<(), String> {
 
     // === P2P 传输层 ===
     let transport = Arc::new(TcpTransport::new());
+    // Compact vertex recovery needs one shared, bounded tx/short-id cache on
+    // every P2P handler and the validator loop.
+    let gossip = Arc::new(GossipManager::new());
+    // Shared by inbound and outbound P2P readers as well as the validator
+    // loop. A remotely accepted vertex reaches this DAG only after the node's
+    // persistent validation succeeds.
+    let shared_dag: Arc<Mutex<Dag>> = Arc::new(Mutex::new(Dag::new()));
+    let vote_collector: Arc<VoteCollector> = Arc::new(VoteCollector::new());
 
     // 绑定 P2P listener
     let p2p_listener = TcpListener::bind(&p2p_listen)
@@ -616,19 +625,39 @@ fn run_node(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("P2P set_nonblocking 失败：{e}"))?;
     info!("P2P server 监听 {p2p_listen}（length-prefixed BCS）");
 
-    // 主动连接 --peer 列表
+    // 主动连接 --peer 列表。每条连接都运行同一 P2P 读取循环，否则对端发回的
+    // Response*/Compact fallback 永远不会被本节点消费。
     for peer_addr in &peers {
-        if let Err(e) = transport.connect_peer(peer_addr) {
-            warn!("初始连接 peer {peer_addr} 失败：{e}（后续可重试）");
+        match transport.connect_peer(peer_addr) {
+            Ok(stream) => {
+                let node = Arc::clone(&node_arc);
+                let reader_transport = Arc::clone(&transport);
+                let dag = Arc::clone(&shared_dag);
+                let votes = Arc::clone(&vote_collector);
+                let reader_gossip = Arc::clone(&gossip);
+                if let Err(error) = std::thread::Builder::new()
+                    .name("p2p-outbound-reader".to_string())
+                    .spawn(move || {
+                        handle_p2p_connection(
+                            stream,
+                            node,
+                            reader_transport,
+                            dag,
+                            votes,
+                            reader_gossip,
+                        );
+                    })
+                {
+                    warn!("主动 peer 读取线程启动失败：{error}");
+                }
+            }
+            Err(error) => warn!("初始连接 peer {peer_addr} 失败：{error}（后续可重试）"),
         }
     }
     info!("P2P 已连接 {} 个 peer", transport.peer_count());
-
-    // 缺口 #3：共享的 DAG + 投票累加器（P2P handler 与 validator loop 跨线程共享）。
-    // peer vertex 经 handle_p2p_connection 写入此 Dag（+ node.vertex_store），
-    // validator loop 从此 Dag 调 detect_commit_leader；否则 quorum 永远无法凑齐。
-    let shared_dag: Arc<Mutex<Dag>> = Arc::new(Mutex::new(Dag::new()));
-    let vote_collector: Arc<VoteCollector> = Arc::new(VoteCollector::new());
+    if let Err(error) = transport.broadcast_peer_exchange() {
+        warn!("初始 PEX 广播失败：{error}");
+    }
 
     // === P2P accept loop 线程 ===
     let p2p_node = Arc::clone(&node_arc);
@@ -636,6 +665,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let p2p_shutdown = Arc::clone(&shutdown_flag);
     let p2p_dag = Arc::clone(&shared_dag);
     let p2p_votes = Arc::clone(&vote_collector);
+    let p2p_gossip = Arc::clone(&gossip);
     let p2p_thread = std::thread::Builder::new()
         .name("p2p-accept".to_string())
         .spawn(move || {
@@ -651,8 +681,9 @@ fn run_node(args: &[String]) -> Result<(), String> {
                         let transport = Arc::clone(&p2p_transport);
                         let dag = Arc::clone(&p2p_dag);
                         let votes = Arc::clone(&p2p_votes);
+                        let gossip = Arc::clone(&p2p_gossip);
                         std::thread::spawn(move || {
-                            handle_p2p_connection(stream, node, transport, dag, votes);
+                            handle_p2p_connection(stream, node, transport, dag, votes, gossip);
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -682,6 +713,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
         let v_transport = Arc::clone(&transport);
         let v_shutdown = Arc::clone(&shutdown_flag);
         let v_node = Arc::clone(&node_arc);
+        let v_gossip = Arc::clone(&gossip);
         let interval = Duration::from_millis(block_interval_ms);
         Some(
             std::thread::Builder::new()
@@ -694,6 +726,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
                         dag,
                         votes,
                         v_transport,
+                        v_gossip,
                         interval,
                         v_shutdown,
                     );
@@ -868,10 +901,18 @@ const P2P_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// - `peer_addrs` 用于 `send_to` / `request_blocks_by_range` / `request_vertices_by_range`
 ///   —— 通过创建临时连接发送，避免与持久读取循环冲突
 struct TcpTransport {
-    /// 已连接的 peer streams（仅用于 gossip_broadcast）。
-    peers: Arc<Mutex<Vec<TcpStream>>>,
+    /// 已连接 peer 的共享写端（仅用于 gossip_broadcast）。
+    ///
+    /// 同一连接还会由其接收循环发送 Response*/fallback 消息。每个写端单独
+    /// 加锁，保证两类 writer 不会把 length-prefixed frame 交错写入 TCP 字节流。
+    peers: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
     /// 已连接 peer 的地址信息（用于定向通信）。
     peer_addrs: Arc<Mutex<Vec<PeerInfo>>>,
+    /// 已收到或本地生成的轻客户端 headers。
+    ///
+    /// 该缓存属于传输层，令 `NetworkTransport::subscribe_light_headers` 不再是空
+    /// 实现；`Node` 仍是 header 签名和合并的权威来源。
+    light_headers: Arc<Mutex<Vec<LightClientHeader>>>,
 }
 
 impl TcpTransport {
@@ -880,11 +921,12 @@ impl TcpTransport {
         Self {
             peers: Arc::new(Mutex::new(Vec::new())),
             peer_addrs: Arc::new(Mutex::new(Vec::new())),
+            light_headers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// 添加已连接的 peer stream（仅加入广播列表）。
-    fn add_peer(&self, stream: TcpStream) {
+    /// 添加已连接 peer 的共享写端（仅加入广播列表）。
+    fn add_peer(&self, stream: Arc<Mutex<TcpStream>>) {
         self.peers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -900,19 +942,20 @@ impl TcpTransport {
         }
     }
 
-    /// 主动连接到 peer。
+    /// 主动连接到 peer，返回由调用方交给 P2P 接收循环的 stream。
     ///
-    /// 连接成功后：stream 加入广播列表，PeerInfo 加入定向通信列表。
-    fn connect_peer(&self, addr: &str) -> Result<(), String> {
+    /// `handle_p2p_connection` 会在读取端启动后克隆该 stream 并加入广播
+    /// 列表。这样主动连接与入站连接都具备双向收发能力，而不会留下一个只写
+    /// 不读的 socket。
+    fn connect_peer(&self, addr: &str) -> Result<TcpStream, String> {
         let stream = TcpStream::connect(addr).map_err(|e| format!("连接 peer {addr} 失败：{e}"))?;
         info!("已连接 peer：{addr}");
-        self.add_peer(stream);
         self.register_peer_info(PeerInfo {
             peer_id: addr.to_string(),
             address: addr.to_string(),
             validator_pubkey: None,
         });
-        Ok(())
+        Ok(stream)
     }
 
     /// 获取当前 peer 数量（按地址计数）。
@@ -933,19 +976,91 @@ impl TcpTransport {
         if peers.is_empty() {
             return Ok(());
         }
-        self.gossip_broadcast(
-            GossipTopic::DagVertex,
-            &NetworkMessage::PeerExchange(peers),
-        )
-        .map_err(|e| e.to_string())
+        self.gossip_broadcast(GossipTopic::DagVertex, &NetworkMessage::PeerExchange(peers))
+            .map_err(|e| e.to_string())
     }
 
     /// 缺口 #5：合并 PEX 发现的新 peer 地址（去重）。
-    fn merge_discovered_peers(&self, new_peers: &[PeerInfo]) {
+    fn merge_discovered_peers(&self, new_peers: &[PeerInfo]) -> bool {
         let mut addrs = self.peer_addrs.lock().unwrap_or_else(|e| e.into_inner());
-        for peer in new_peers {
-            if !addrs.iter().any(|p| p.address == peer.address) {
-                addrs.push(peer.clone());
+        let mut changed = false;
+        for peer in new_peers.iter().take(MAX_DISCOVERED_PEERS) {
+            // PEX 是不可信网络输入。仅保留可拨号 socket 地址，避免随后同步请求
+            // 把任意字符串变成连接目标；同时限制总条目数，防止地址表无界增长。
+            let Ok(address) = peer.address.parse::<SocketAddr>() else {
+                debug!(peer = %peer.address, "忽略 PEX 中的非 socket 地址");
+                continue;
+            };
+            if address.port() == 0 || address.ip().is_unspecified() || address.ip().is_multicast() {
+                debug!(peer = %peer.address, "忽略 PEX 中不可拨号的地址");
+                continue;
+            }
+            if addrs.len() >= MAX_DISCOVERED_PEERS {
+                warn!(
+                    limit = MAX_DISCOVERED_PEERS,
+                    "PEX peer 地址表已满，忽略后续发现结果"
+                );
+                break;
+            }
+            if !addrs.iter().any(|p| p.address == address.to_string()) {
+                let mut peer = peer.clone();
+                peer.address = address.to_string();
+                addrs.push(peer);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Merge one light-client header and report whether it added new material.
+    ///
+    /// Header signatures are intentionally deduplicated by validator key.  The
+    /// cache is bounded just like `Node`'s cache so a remote peer cannot retain
+    /// an unbounded historical stream in this transport object.
+    fn merge_light_header(&self, header: LightClientHeader) -> bool {
+        const MAX_LIGHT_HEADERS: usize = 1_000;
+
+        let mut headers = self.light_headers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = headers
+            .iter_mut()
+            .find(|existing| existing.header_bytes == header.header_bytes)
+        {
+            let mut changed = false;
+            for signature in header.signatures {
+                if !existing
+                    .signatures
+                    .iter()
+                    .any(|known| known.validator == signature.validator)
+                {
+                    existing.signatures.push(signature);
+                    changed = true;
+                }
+            }
+            if existing.signer_bitmap != header.signer_bitmap && !header.signer_bitmap.is_empty() {
+                existing.signer_bitmap = header.signer_bitmap;
+                changed = true;
+            }
+            return changed;
+        }
+
+        headers.push(header);
+        if headers.len() > MAX_LIGHT_HEADERS {
+            headers.remove(0);
+        }
+        true
+    }
+
+    /// Cache and gossip any locally generated headers that were not previously
+    /// announced on this transport.
+    fn publish_light_headers_from_node(&self, node: &Node) {
+        for header in node.get_light_headers() {
+            if self.merge_light_header(header.clone()) {
+                if let Err(error) = self.gossip_broadcast(
+                    GossipTopic::DagVertex,
+                    &NetworkMessage::LightClientHeader(header),
+                ) {
+                    warn!("P2P 广播 LightClientHeader 失败：{error}");
+                }
             }
         }
     }
@@ -958,17 +1073,25 @@ impl NetworkTransport for TcpTransport {
         let mut frame = len.to_be_bytes().to_vec();
         frame.extend_from_slice(&bytes);
 
-        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+        // Do not retain the peer-list mutex while writing to the network.  A
+        // slow peer then blocks only its own per-connection writer, while
+        // request/response code for other connections remains live.
+        let peers = self.peers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut failed = Vec::new();
-        for (i, stream) in peers.iter_mut().enumerate() {
+        for (i, stream) in peers.iter().enumerate() {
+            let mut stream = stream.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = stream.write_all(&frame).and_then(|_| stream.flush()) {
                 warn!("广播消息到 peer {i} 失败：{e}，移除连接");
-                failed.push(i);
+                failed.push(Arc::clone(&peers[i]));
             }
         }
-        // 从后往前移除失败的 peer
-        for i in failed.into_iter().rev() {
-            peers.remove(i);
+        if !failed.is_empty() {
+            let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+            peers.retain(|candidate| {
+                !failed
+                    .iter()
+                    .any(|failed_writer| Arc::ptr_eq(candidate, failed_writer))
+            });
         }
         Ok(())
     }
@@ -1077,12 +1200,11 @@ impl NetworkTransport for TcpTransport {
     }
 
     fn subscribe_light_headers(&self) -> PokerL1Result<Vec<poker_l1::network::LightClientHeader>> {
-        // 返回 Node 缓存的 LightClientHeader（validator 多签背书）。
-        // TcpTransport 不直接持有 header 缓存——此方法在 handle_p2p_connection 中
-        // 通过 node.get_light_headers() 获取。
-        // 注意：NetworkTransport trait 方法无法访问 Node，故此处返回空；
-        // 实际 light header 分发经 P2P handler 的 NetworkMessage::LightClientHeader。
-        Ok(Vec::new())
+        Ok(self
+            .light_headers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 }
 
@@ -1124,6 +1246,19 @@ fn send_p2p_message(stream: &mut TcpStream, msg: &NetworkMessage) -> Result<(), 
     Ok(())
 }
 
+/// Write one framed P2P message through a connection's shared write half.
+///
+/// The P2P handler owns the read half independently, but all messages in the
+/// other direction (gossip plus request/response) pass through this lock so a
+/// frame length and its payload cannot be interleaved on TCP.
+fn send_p2p_message_locked(
+    writer: &Arc<Mutex<TcpStream>>,
+    msg: &NetworkMessage,
+) -> Result<(), String> {
+    let mut stream = writer.lock().unwrap_or_else(|e| e.into_inner());
+    send_p2p_message(&mut stream, msg)
+}
+
 /// 接收一条 length-prefixed BCS 消息。
 ///
 /// 返回 `Ok(None)` 表示连接已关闭（EOF）。
@@ -1146,51 +1281,137 @@ fn recv_p2p_message(stream: &mut TcpStream) -> Result<Option<NetworkMessage>, St
     Ok(Some(msg))
 }
 
+/// Validate, persist, and only then expose a remotely supplied vertex to the
+/// in-memory DAG used by the validator loop.
+///
+/// Keeping the insertion order this way is material: an invalid compact/full
+/// vertex must not influence leader detection merely because it arrived before
+/// its signature, parents, or transactions were checked.
+fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, source: &str) {
+    match node.put_vertex(&vertex) {
+        Ok(_) => {
+            let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+            dag_guard.insert(vertex);
+        }
+        Err(error) => warn!("P2P {source} vertex 拒绝：{error}"),
+    }
+}
+
+/// Validate a P2P transaction through the same admission path used by the
+/// previous full-transaction branch, then retain it in the bounded compact
+/// relay cache only after node admission succeeds.
+fn accept_p2p_transaction(node: &Node, gossip: &GossipManager, tx: Transaction, source: &str) {
+    let chain_id = node.chain_id();
+    if let Err(error) = validate_tx_limits(&tx) {
+        warn!("P2P {source} 交易拒绝（limits）：{error}");
+        return;
+    }
+    if let Err(error) = validate_tx_chain_id(&tx, chain_id) {
+        warn!("P2P {source} 交易拒绝（chain_id）：{error}");
+        return;
+    }
+    if let Err(error) = validate_tx_signature(&tx) {
+        warn!("P2P {source} 交易拒绝（签名无效）：{error}");
+        return;
+    }
+    // Public/ForceSync/CheckpointAnchor use the account nonce. GameTurn's
+    // nonce depends on game state and remains verified during block execution.
+    if tx.lane_hint != TxLane::GameTurn {
+        let caller_address = derive_address(&tx.tagged_pubkey);
+        let account_nonce = node
+            .get_account(&caller_address)
+            .ok()
+            .flatten()
+            .map(|account| account.nonce)
+            .unwrap_or(0);
+        if let Err(error) = validate_tx_nonce(&tx, account_nonce, None) {
+            warn!("P2P {source} 交易拒绝（nonce）：{error}");
+            return;
+        }
+    }
+
+    match node.submit_tx(tx.clone()) {
+        Ok(_) => {
+            if let Err(error) = gossip.receive_tx(tx) {
+                warn!("P2P {source} transaction 已入节点但未进入 compact-relay 缓存：{error}");
+            }
+        }
+        Err(error) => warn!("P2P {source} submit_tx 失败：{error}"),
+    }
+}
+
+/// Rebuild a full vertex from a compact relay message and the bounded local tx
+/// cache. The compact-provided content hash is checked before the normal node
+/// vertex validation path handles the author signature and parents.
+fn reconstruct_compact_vertex(
+    compact: &poker_l1::network::CompactVertex,
+    gossip: &GossipManager,
+) -> Result<DagVertex, String> {
+    let (tx_hashes, missing) = gossip
+        .receive_compact_vertex(compact)
+        .map_err(|error| error.to_string())?;
+    if !missing.is_empty() {
+        return Err(format!(
+            "{} 个 short ID 未在本地 tx cache 命中",
+            missing.len()
+        ));
+    }
+    if tx_hashes.len() != compact.tx_short_ids.len() {
+        return Err("compact vertex 的已匹配 tx 数量不完整".into());
+    }
+    let tx_list = gossip.cached_transactions(&tx_hashes);
+    if tx_list.len() != tx_hashes.len() {
+        return Err("compact vertex 的 tx cache 在重建期间发生缺失".into());
+    }
+
+    let vertex = DagVertex {
+        epoch: compact.epoch,
+        round: compact.round,
+        author_pubkey: compact.author_pubkey.clone(),
+        tx_list,
+        parent_hashes: compact.parent_hashes.clone(),
+        author_sig: compact.author_sig.clone(),
+    };
+    if vertex.vertex_hash() != compact.vertex_hash {
+        return Err("compact vertex hash 与重建内容不匹配".into());
+    }
+    Ok(vertex)
+}
+
 /// 处理 P2P 连接（接收端）。
 ///
-/// 接收消息并分发处理：
-/// - `DagVertex` → `node.put_vertex`
-/// - `Transaction` → `node.submit_tx`（含完整验证链）
-/// - `ResponseBlocks` → 逐个 `node.put_block`
-/// - `RequestBlocksByRange` → 查询本地并回送 `ResponseBlocks`
-/// - `RequestVerticesByRange` → 暂返回空（需 epoch 上下文，超出本次重构范围）
+/// All compact-relay fallback messages are handled on the same connection: a
+/// cache miss asks for the authenticated full vertex rather than admitting an
+/// incomplete descriptor.
 fn handle_p2p_connection(
     mut stream: TcpStream,
     node: Arc<Node>,
     transport: Arc<TcpTransport>,
     dag: Arc<Mutex<Dag>>,
     votes: Arc<VoteCollector>,
+    gossip: Arc<GossipManager>,
 ) {
     let peer_addr = stream.peer_addr().ok();
-    // 重构2：注册接入 peer 的地址信息（用于定向通信）
-    if let Some(addr) = peer_addr {
-        transport.register_peer_info(PeerInfo {
-            peer_id: addr.to_string(),
-            address: addr.to_string(),
-            validator_pubkey: None,
-        });
-    }
-    // 缺口 #3 活性修复：把入站连接的 stream clone 加入广播列表，使本节点能通过
-    // 此连接向对方广播（双向通信）。此前入站连接只能读不能写 → 对方收不到本节点的
-    // vertex/vote，多 validator 共识无法形成。
-    if let Ok(write_stream) = stream.try_clone() {
-        transport.add_peer(write_stream);
+    // The read loop owns `stream`; every write path shares this cloned writer.
+    // Without the shared mutex, a concurrent gossip broadcast and a direct
+    // Response*/fallback reply can interleave their length-prefix frames.
+    let writer = match stream.try_clone() {
+        Ok(write_stream) => Arc::new(Mutex::new(write_stream)),
+        Err(error) => {
+            warn!("P2P 无法克隆写端（peer={peer_addr:?}）：{error}");
+            return;
+        }
+    };
+    transport.add_peer(Arc::clone(&writer));
+    if let Err(error) = transport.broadcast_peer_exchange() {
+        warn!("P2P 接入后的 PEX 广播失败：{error}");
     }
     loop {
         match recv_p2p_message(&mut stream) {
             Ok(Some(msg)) => {
                 match msg {
                     NetworkMessage::DagVertex(vertex) => {
-                        // 缺口 #3：peer vertex 同时写入共享 Dag（供 detect_commit_leader）
-                        // 与 node.vertex_store（持久化）。
-                        {
-                            let mut dag_guard =
-                                dag.lock().unwrap_or_else(|e| e.into_inner());
-                            dag_guard.insert(vertex.clone());
-                        }
-                        if let Err(e) = node.put_vertex(&vertex) {
-                            warn!("P2P put_vertex 失败：{e}");
-                        }
+                        accept_p2p_vertex(&node, &dag, vertex, "full");
                     }
                     NetworkMessage::CommitVote(vote) => {
                         // A vote is useful only if its signer is an active validator and its
@@ -1202,10 +1423,7 @@ fn handle_p2p_connection(
                             warn!("P2P commit vote rejected: signer is not an active validator");
                             continue;
                         }
-                        if !matches!(
-                            vote.signer_pubkey.scheme(),
-                            Ok(SignatureScheme::Secp256k1)
-                        )
+                        if !matches!(vote.signer_pubkey.scheme(), Ok(SignatureScheme::Secp256k1))
                             || verify_signature(
                                 &vote.signer_pubkey,
                                 &vote.signature,
@@ -1220,92 +1438,119 @@ fn handle_p2p_connection(
                     }
                     NetworkMessage::PeerExchange(peers) => {
                         // 缺口 #5：Peer Discovery / PEX —— 合并发现的 peer。
-                        transport.merge_discovered_peers(&peers);
+                        if transport.merge_discovered_peers(&peers)
+                            && let Err(error) = transport.broadcast_peer_exchange()
+                        {
+                            warn!("P2P 转发新增 PEX 结果失败：{error}");
+                        }
                     }
                     NetworkMessage::Transaction(tx) => {
-                        // C-1 安全修复：P2P 路径必须与 RPC 路径执行一致的验证链，
-                        // 防止恶意节点注入未签名/跨链重放/超大交易进入 pending_tx。
-                        let chain_id = node.chain_id();
-                        if let Err(e) = validate_tx_limits(&tx) {
-                            warn!("P2P 交易拒绝（limits）：{e}");
-                            continue;
-                        }
-                        if let Err(e) = validate_tx_chain_id(&tx, chain_id) {
-                            warn!("P2P 交易拒绝（chain_id）：{e}");
-                            continue;
-                        }
-                        if let Err(e) = validate_tx_signature(&tx) {
-                            warn!("P2P 交易拒绝（签名无效）：{e}");
-                            continue;
-                        }
-                        // nonce 校验：Public/ForceSync/CheckpointAnchor 用 account nonce；
-                        // GameTurn 的 game_player_nonce 需游戏状态，留待 block 验证。
-                        if tx.lane_hint != TxLane::GameTurn {
-                            let caller_address = derive_address(&tx.tagged_pubkey);
-                            let account_nonce = node
-                                .get_account(&caller_address)
-                                .ok()
-                                .flatten()
-                                .map(|a| a.nonce)
-                                .unwrap_or(0);
-                            if let Err(e) = validate_tx_nonce(&tx, account_nonce, None) {
-                                warn!("P2P 交易拒绝（nonce）：{e}");
-                                continue;
-                            }
-                        }
-                        if let Err(e) = node.submit_tx(tx) {
-                            warn!("P2P submit_tx 失败：{e}");
-                        }
+                        accept_p2p_transaction(&node, &gossip, tx, "transaction");
                     }
                     NetworkMessage::ResponseBlocks(blocks) => {
                         for block in blocks {
                             if let Err(e) = node.put_block(&block) {
                                 warn!("P2P put_block 失败：{e}");
+                            } else {
+                                transport.publish_light_headers_from_node(&node);
                             }
                         }
                     }
                     NetworkMessage::ResponseVertices(vertices) => {
                         for vertex in vertices {
-                            {
-                                let mut dag_guard =
-                                    dag.lock().unwrap_or_else(|e| e.into_inner());
-                                dag_guard.insert(vertex.clone());
-                            }
-                            if let Err(e) = node.put_vertex(&vertex) {
-                                warn!("P2P put_vertex 失败：{e}");
-                            }
+                            accept_p2p_vertex(&node, &dag, vertex, "range-response");
                         }
                     }
                     NetworkMessage::RequestBlocksByRange(start, end) => {
                         // 重构2：响应 block range 请求
                         let blocks = collect_blocks_by_range(&node, start, end);
-                        if let Err(e) =
-                            send_p2p_message(&mut stream, &NetworkMessage::ResponseBlocks(blocks))
+                        if let Err(e) = send_p2p_message_locked(
+                            &writer,
+                            &NetworkMessage::ResponseBlocks(blocks),
+                        )
                         {
                             warn!("P2P 回送 ResponseBlocks 失败：{e}");
                         }
                     }
                     NetworkMessage::RequestVerticesByRange(start_round, end_round) => {
                         let vertices = collect_vertices_by_round(&dag, start_round, end_round);
-                        if let Err(e) = send_p2p_message(
-                            &mut stream,
+                        if let Err(e) = send_p2p_message_locked(
+                            &writer,
                             &NetworkMessage::ResponseVertices(vertices),
                         ) {
                             warn!("P2P 回送 ResponseVertices 失败：{e}");
                         }
                     }
                     NetworkMessage::CompactVertex(compact) => {
-                        // 简化：compact vertex 需要从本地 tx_cache 重建，暂不支持
-                        let _ = compact;
-                        debug!("收到 CompactVertex（暂不支持重建）");
+                        match reconstruct_compact_vertex(&compact, &gossip) {
+                            Ok(vertex) => {
+                                accept_p2p_vertex(&node, &dag, vertex, "compact");
+                            }
+                            Err(error) => {
+                                // A cache miss or a short-id collision never creates a partial
+                                // vertex. Ask the sender for the signed full fallback instead.
+                                debug!("CompactVertex 重建失败（请求 full fallback）：{error}");
+                                if let Err(send_error) = send_p2p_message_locked(
+                                    &writer,
+                                    &NetworkMessage::RequestFullVertex(compact.vertex_hash),
+                                ) {
+                                    warn!(
+                                        "P2P 请求 CompactVertex full fallback 失败：{send_error}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    NetworkMessage::RequestTx(hashes) => {
+                        let transactions = gossip.cached_transactions(&hashes);
+                        if let Err(error) = send_p2p_message_locked(
+                            &writer,
+                            &NetworkMessage::ResponseTx(transactions),
+                        )
+                        {
+                            warn!("P2P 回送 ResponseTx 失败：{error}");
+                        }
+                    }
+                    NetworkMessage::ResponseTx(transactions) => {
+                        for transaction in transactions {
+                            accept_p2p_transaction(&node, &gossip, transaction, "response-tx");
+                        }
+                    }
+                    NetworkMessage::RequestFullVertex(vertex_hash) => {
+                        let vertex = {
+                            let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                            dag_guard.get(&vertex_hash).cloned()
+                        }
+                        .or_else(|| node.vertex_store().get_by_hash(&vertex_hash).ok());
+                        if let Some(vertex) = vertex {
+                            if let Err(error) = send_p2p_message_locked(
+                                &writer,
+                                &NetworkMessage::ResponseFullVertex(vertex),
+                            ) {
+                                warn!("P2P 回送 ResponseFullVertex 失败：{error}");
+                            }
+                        } else {
+                            debug!(hash = %hex::encode(vertex_hash), "请求的 full vertex 不在本地");
+                        }
+                    }
+                    NetworkMessage::ResponseFullVertex(vertex) => {
+                        accept_p2p_vertex(&node, &dag, vertex, "full-fallback");
                     }
                     NetworkMessage::LightClientHeader(header) => {
                         // 收到 peer 的 light client header（validator 多签背书），
                         // 合并到本地缓存（多 validator 签名合并）。
-                        node.merge_light_header(header);
-                    }
-                    other => {
-                        debug!("收到未处理的 P2P 消息类型：{other:?}");
+                        let changed = transport.merge_light_header(header.clone());
+                        node.merge_light_header(header.clone());
+                        // Forward only newly learned signatures, avoiding P2P echo loops while
+                        // letting a multi-hop light client collect the complete quorum.
+                        if changed
+                            && let Err(error) = transport.gossip_broadcast(
+                                GossipTopic::DagVertex,
+                                &NetworkMessage::LightClientHeader(header),
+                            )
+                        {
+                            warn!("P2P 转发 LightClientHeader 失败：{error}");
+                        }
                     }
                 }
             }
@@ -1350,7 +1595,11 @@ fn collect_blocks_by_range(
 /// `RequestVerticesByRange` has no epoch field.  The in-memory DAG is intentionally scoped to
 /// the active epoch and is reset after commit, so it is the authoritative answer for this wire
 /// request.  A bounded scan prevents a peer from turning a sparse, enormous range into CPU work.
-fn collect_vertices_by_round(dag: &Arc<Mutex<Dag>>, start_round: u64, end_round: u64) -> Vec<DagVertex> {
+fn collect_vertices_by_round(
+    dag: &Arc<Mutex<Dag>>,
+    start_round: u64,
+    end_round: u64,
+) -> Vec<DagVertex> {
     if start_round > end_round {
         return Vec::new();
     }
@@ -1536,9 +1785,9 @@ fn commit_and_finalize_block(
                         GossipTopic::DagVertex,
                         &NetworkMessage::ResponseBlocks(vec![block.clone()]),
                     );
+                    transport.publish_light_headers_from_node(node);
                     *commit_round_out += 1;
-                    *prev_commit_hash_out =
-                        block.header.dag_commit_certificate.cert_hash(chain_id);
+                    *prev_commit_hash_out = block.header.dag_commit_certificate.cert_hash(chain_id);
                     *prev_block_hash_out = block_hash;
                     let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
                     *dag_guard = Dag::new();
@@ -1646,6 +1895,7 @@ fn commit_and_finalize_block_multi(
                 GossipTopic::DagVertex,
                 &NetworkMessage::ResponseBlocks(vec![block.clone()]),
             );
+            transport.publish_light_headers_from_node(node);
             *commit_round_out += 1;
             *prev_commit_hash_out = block.header.dag_commit_certificate.cert_hash(chain_id);
             *prev_block_hash_out = block_hash;
@@ -1774,6 +2024,7 @@ fn run_validator_loop(
     dag: Arc<Mutex<Dag>>,
     votes: Arc<VoteCollector>,
     transport: Arc<TcpTransport>,
+    gossip: Arc<GossipManager>,
     block_interval: Duration,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -1952,10 +2203,24 @@ fn run_validator_loop(
                 round += 1;
                 continue;
             }
-            let _ = transport.gossip_broadcast(
-                GossipTopic::DagVertex,
-                &NetworkMessage::DagVertex(vertex.clone()),
-            );
+            // Feed the bounded cache and gossip each transaction before the
+            // compact vertex. Peers that already saw the tx can reconstruct
+            // the vertex from short IDs; peers that missed one safely request
+            // the full vertex fallback below.
+            for tx in &vertex.tx_list {
+                if let Err(error) = gossip.receive_tx(tx.clone()) {
+                    warn!("本地 vertex tx 未进入 compact-relay 缓存：{error}");
+                }
+                if let Err(error) = transport.gossip_broadcast(
+                    GossipTopic::Transaction,
+                    &NetworkMessage::Transaction(tx.clone()),
+                ) {
+                    warn!("P2P 广播 transaction 失败：{error}");
+                }
+            }
+            if let Err(error) = gossip.broadcast_compact_vertex(&vertex, transport.as_ref()) {
+                warn!("P2P 广播 CompactVertex 失败：{error}");
+            }
 
             info!(
                 "vertex 已产出 round={} batch_idx={}/{} tx_count={} hash={}",
@@ -1976,7 +2241,10 @@ fn run_validator_loop(
                 let vc = node.active_validator_count().max(1);
                 // 收集候选 leader：单 validator 用 last_vertex；多 validator 扫描旧轮。
                 let candidate_leaders: Vec<Hash> = if vc <= 1 {
-                    last_vertex.as_ref().map(|v| vec![v.vertex_hash()]).unwrap_or_default()
+                    last_vertex
+                        .as_ref()
+                        .map(|v| vec![v.vertex_hash()])
+                        .unwrap_or_default()
                 } else {
                     let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
                     let max_r = match dag_guard.max_round() {
@@ -2089,8 +2357,13 @@ fn run_validator_loop(
                                 if !sig_pairs.iter().any(|(idx, _)| {
                                     active_pubkeys.get(*idx) == Some(&author_pubkey)
                                 }) {
-                                    if let Some(idx) = active_pubkeys.iter().position(|pk| *pk == author_pubkey) {
-                                        sig_pairs.push((idx, secp256k1_sign_hash(&secret_key, &cert_signing_hash)));
+                                    if let Some(idx) =
+                                        active_pubkeys.iter().position(|pk| *pk == author_pubkey)
+                                    {
+                                        sig_pairs.push((
+                                            idx,
+                                            secp256k1_sign_hash(&secret_key, &cert_signing_hash),
+                                        ));
                                     }
                                 }
                                 let quorum = required_quorum(vc);
@@ -2491,6 +2764,112 @@ mod tests {
             gameturn_nonce: None,
             is_fallback: false,
         }
+    }
+
+    #[test]
+    fn tcp_transport_subscribes_to_deduplicated_light_headers() {
+        let transport = TcpTransport::new();
+        let header = LightClientHeader {
+            header_bytes: vec![0xA5; 16],
+            signatures: vec![],
+            signer_bitmap: vec![],
+        };
+
+        assert!(transport.merge_light_header(header.clone()));
+        assert!(!transport.merge_light_header(header.clone()));
+        assert_eq!(
+            transport.subscribe_light_headers().unwrap(),
+            vec![header],
+            "transport subscription must expose the cached header exactly once"
+        );
+    }
+
+    #[test]
+    fn tcp_transport_pex_rejects_non_dialable_addresses_and_deduplicates() {
+        let transport = TcpTransport::new();
+        let valid = PeerInfo {
+            peer_id: "valid".into(),
+            address: "127.0.0.1:9001".into(),
+            validator_pubkey: None,
+        };
+        let invalid = PeerInfo {
+            peer_id: "invalid".into(),
+            address: "not-a-socket-address".into(),
+            validator_pubkey: None,
+        };
+
+        assert!(transport.merge_discovered_peers(&[valid.clone(), invalid]));
+        assert!(!transport.merge_discovered_peers(&[valid]));
+        let peers = transport.discover_peers().unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, "127.0.0.1:9001");
+    }
+
+    #[test]
+    fn tcp_transport_serializes_concurrent_gossip_and_response_frames() {
+        // The persistent broadcast path and a request/response reply share a
+        // single TCP write half.  This loopback test is deliberately at the
+        // framing boundary: receiving two independently framed messages proves
+        // that the length prefix of one was not interleaved with the other's
+        // payload.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            vec![
+                recv_p2p_message(&mut stream).unwrap().unwrap(),
+                recv_p2p_message(&mut stream).unwrap().unwrap(),
+            ]
+        });
+
+        let writer = Arc::new(Mutex::new(TcpStream::connect(address).unwrap()));
+        let transport = Arc::new(TcpTransport::new());
+        transport.add_peer(Arc::clone(&writer));
+
+        let broadcast_transport = Arc::clone(&transport);
+        let broadcast = std::thread::spawn(move || {
+            broadcast_transport
+                .gossip_broadcast(
+                    GossipTopic::DagVertex,
+                    &NetworkMessage::LightClientHeader(LightClientHeader {
+                        header_bytes: vec![0xA5; 32 * 1024],
+                        signatures: vec![],
+                        signer_bitmap: vec![],
+                    }),
+                )
+                .unwrap();
+        });
+        let response_writer = Arc::clone(&writer);
+        let response = std::thread::spawn(move || {
+            send_p2p_message_locked(
+                &response_writer,
+                &NetworkMessage::PeerExchange(vec![PeerInfo {
+                    peer_id: "response".into(),
+                    address: "127.0.0.1:9001".into(),
+                    validator_pubkey: None,
+                }]),
+            )
+            .unwrap();
+        });
+
+        broadcast.join().unwrap();
+        response.join().unwrap();
+        let messages = receiver.join().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, NetworkMessage::LightClientHeader(_))),
+            "gossip frame must remain parseable"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, NetworkMessage::PeerExchange(_))),
+            "response frame must remain parseable"
+        );
     }
 
     #[test]

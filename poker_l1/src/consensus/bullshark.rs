@@ -1117,7 +1117,8 @@ mod tests {
             signature_list: vec![],
             signer_bitmap: vec![0xFF],
         };
-        let evidence = detect_commit_cert_equivocation(&cert1, &cert2, crate::DEFAULT_CHAIN_ID, &[]);
+        let evidence =
+            detect_commit_cert_equivocation(&cert1, &cert2, crate::DEFAULT_CHAIN_ID, &[]);
         // 缺口 #1-路径C：detect 现需从签名交集构造证据；此用例 signature_list 为空，
         // 无法构造（build_..._intersecting_signer 返回 None）。检测逻辑本身已识别差异，
         // 完整证据构造由带签名的用例覆盖。此处仅验证函数不 panic。
@@ -1150,7 +1151,8 @@ mod tests {
             signature_list: vec![],
             signer_bitmap: vec![0xFF],
         };
-        let evidence = detect_commit_cert_equivocation(&cert1, &cert2, crate::DEFAULT_CHAIN_ID, &[]);
+        let evidence =
+            detect_commit_cert_equivocation(&cert1, &cert2, crate::DEFAULT_CHAIN_ID, &[]);
         assert!(evidence.is_none(), "不同 epoch 不算 equivocation");
     }
 

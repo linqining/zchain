@@ -1073,8 +1073,8 @@ mod tests {
             preferred_relayer: None,
         };
         let creation_nonce = 0x0100_0000_0000_0001u64;
-        let obj_id = mint_wrapped_object(&outcome, &mut db, creation_nonce)
-            .expect("mint wrapped object");
+        let obj_id =
+            mint_wrapped_object(&outcome, &mut db, creation_nonce).expect("mint wrapped object");
 
         // state_root 应变化（新对象入 SMT）。
         let root_after = db.state_root();
@@ -1082,7 +1082,10 @@ mod tests {
 
         // 读回对象校验。
         let obj = db.read(&obj_id).expect("read minted object");
-        assert_eq!(obj.owner, crate::object_model::Ownership::AddressOwned { owner: recipient });
+        assert_eq!(
+            obj.owner,
+            crate::object_model::Ownership::AddressOwned { owner: recipient }
+        );
         assert_eq!(
             obj.object_type.as_str(),
             BRIDGE_WRAPPED_OBJECT_TYPE,

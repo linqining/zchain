@@ -52,7 +52,7 @@ use blake2::digest::{Update, VariableOutput};
 
 /// 一个已认证的 dispatch 调用：其 `Transaction`（来自 block body）+ 在对应 tx-lane SMT
 /// 中的包含证明。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct ConsensusDispatchCall {
     /// 来自 `Block.public_txs` 或 `Block.gameturn_txs` 的原始交易。
     pub tx: Transaction,
@@ -67,7 +67,7 @@ pub struct ConsensusDispatchCall {
 /// `object` 的 `data` 字段是 `borsh::to_vec(&TexasPokerTable)`；SMT leaf value 是
 /// `borsh::to_vec(&Object)`（完整包装器），与 [`poker_l1::object_model::ObjectDb`] 的
 /// 存储口径一致。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct TableSnapshot {
     /// 包装 table 的 `Object`（其 `data` 反序列化为 `TexasPokerTable`）。
     pub object: Object,
@@ -84,6 +84,54 @@ impl TableSnapshot {
     pub fn table(&self) -> TexasAirResult<TexasPokerTable> {
         borsh::from_slice::<TexasPokerTable>(&self.object.data)
             .map_err(|e| TexasAirError::SerializationError(format!("TexasPokerTable borsh: {e}")))
+    }
+}
+
+/// 可序列化的、用于构造一个共识锚点的完整认证材料。
+///
+/// 该结构是 proving-service 与共识适配器之间的二进制契约。它携带认证两个
+/// table endpoint 所需的 block header/certificate/SMT proof，以及构造精确
+/// receipt range 所需的逐调用交易包含证明。反序列化本身不建立信任；调用
+/// [`Self::build`] 会验证所有 certificate 签名和 SMT 包含证明后才返回
+/// [`ExpectedChainAnchor`]。
+#[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
+pub struct ConsensusAnchorMaterial {
+    /// 证明范围起点所在块的 header。
+    pub pre_block_header: BlockHeader,
+    /// 起点 table snapshot 及 state-root 包含证明。
+    pub pre_snapshot: TableSnapshot,
+    /// `pre_block_header` 携带的 commit certificate。
+    pub pre_certificate: DagCommitCertificate,
+    /// 已认证链的 chain ID。
+    pub chain_id: poker_l1::ChainId,
+    /// 对应 epoch 的 validator set，用于验证 certificate quorum 签名。
+    pub validators: Vec<ValidatorEntry>,
+    /// 证明范围终点所在块的 header。
+    pub post_block_header: BlockHeader,
+    /// 终点 table snapshot 及 state-root 包含证明。
+    pub post_snapshot: TableSnapshot,
+    /// 以 call sequence 顺序排列的、被认证的 Texas dispatch 调用。
+    pub calls: Vec<ConsensusDispatchCall>,
+}
+
+impl ConsensusAnchorMaterial {
+    /// 验证所有认证材料并构造精确的 receipt-chain anchor。
+    ///
+    /// # Errors
+    ///
+    /// 任一 certificate、SMT inclusion、链 ID、table endpoint 或 dispatch digest
+    /// 不匹配时返回错误；不可信输入永远不会产生 anchor。
+    pub fn build(&self) -> TexasAirResult<ExpectedChainAnchor> {
+        build_anchor_from_consensus(
+            &self.pre_block_header,
+            &self.pre_snapshot,
+            &self.pre_certificate,
+            self.chain_id,
+            &self.validators,
+            &self.post_block_header,
+            &self.post_snapshot,
+            &self.calls,
+        )
     }
 }
 
@@ -325,6 +373,7 @@ fn blake2b_32(input: &[u8]) -> Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use borsh::BorshDeserialize;
     use poker_l1::consensus::ValidatorEntry;
     use poker_l1::consensus::bullshark::assemble_commit_certificate;
     use poker_l1::object_model::{ObjectID, ObjectStore, Ownership};
@@ -613,6 +662,33 @@ mod tests {
         assert_eq!(anchor.hand_id(), f.table.hand_id);
         assert_eq!(anchor.first_call_seq(), f.table.call_seq + 1);
         // dispatch digests 与独立重算一致。
+        assert_eq!(anchor.dispatch_call_digests(), &f.expected_digests[..]);
+    }
+
+    #[test]
+    fn serialized_consensus_material_rebuilds_the_same_authenticated_anchor() {
+        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let material = ConsensusAnchorMaterial {
+            pre_block_header: f.pre_header.clone(),
+            pre_snapshot: f.pre_snapshot.clone(),
+            pre_certificate: f.cert.clone(),
+            chain_id: poker_l1::DEFAULT_CHAIN_ID,
+            validators: f.validators.clone(),
+            post_block_header: f.post_header.clone(),
+            post_snapshot: f.post_snapshot.clone(),
+            calls: f.calls.clone(),
+        };
+
+        let wire = borsh::to_vec(&material).expect("consensus material must serialize");
+        let recovered = ConsensusAnchorMaterial::try_from_slice(&wire)
+            .expect("consensus material must deserialize");
+        let anchor = recovered
+            .build()
+            .expect("authenticated material must rebuild an anchor");
+
+        assert_eq!(anchor.table_id(), f.table.id.creation_nonce);
+        assert_eq!(anchor.hand_id(), f.table.hand_id);
+        assert_eq!(anchor.first_call_seq(), f.table.call_seq + 1);
         assert_eq!(anchor.dispatch_call_digests(), &f.expected_digests[..]);
     }
 

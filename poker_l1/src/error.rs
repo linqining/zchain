@@ -472,7 +472,9 @@ pub enum PokerL1Error {
         scheme_id: u32,
     },
     /// 节点二进制未编译指定 verifier 能力，不能注册一个运行时必然失败的适配器。
-    #[error("zk verifier capability is disabled at compile time: scheme_id={scheme_id}, capability={capability}")]
+    #[error(
+        "zk verifier capability is disabled at compile time: scheme_id={scheme_id}, capability={capability}"
+    )]
     ZkVerifierCapabilityDisabled {
         /// 证明系统 ID。
         scheme_id: u32,

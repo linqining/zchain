@@ -706,7 +706,11 @@ fn e2e_multi_validator_staking_slashing_commit() {
     // 验证 staking 锁定：模拟 bonding（从账户扣除 stake）。
     for tp in &validator_pubkeys {
         let addr = derive_address(tp);
-        account_store.get_mut(&addr).unwrap().debit(100_000).unwrap();
+        account_store
+            .get_mut(&addr)
+            .unwrap()
+            .debit(100_000)
+            .unwrap();
     }
     // 锁定后账户余额应 = 200_000 - 100_000 = 100_000
     for tp in &validator_pubkeys {
@@ -740,8 +744,13 @@ fn e2e_multi_validator_staking_slashing_commit() {
     let offender_addr = derive_address(&offender);
     let offender_bal_before = account_store.get(&offender_addr).unwrap().balance;
     let config = SlashingConfig::default();
-    let result = apply_slashing(&mut vset, &offender, SlashingReason::VertexEquivocation, &config)
-        .expect("slashing 应成功");
+    let result = apply_slashing(
+        &mut vset,
+        &offender,
+        SlashingReason::VertexEquivocation,
+        &config,
+    )
+    .expect("slashing 应成功");
     // make_validator_set 的 stake = 1_000_000，100% 罚没 → slash_amount = 1_000_000
     assert_eq!(result.slash_amount, 1_000_000, "100% 罚没");
     assert_eq!(result.stake_after, 0);
@@ -757,4 +766,3 @@ fn e2e_multi_validator_staking_slashing_commit() {
 
     let _ = (account_store, validator_pubkeys);
 }
-

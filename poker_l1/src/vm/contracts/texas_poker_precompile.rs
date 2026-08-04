@@ -21,26 +21,26 @@
 
 use std::sync::Arc;
 
+use super::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
 use super::texas_poker::dispatch as tp_dispatch;
 use super::texas_poker::dispatch::selectors;
 use super::texas_poker::events::{
-    TexasPokerEvent, REFUND_TYPE_BET_ONLY, REFUND_TYPE_STACK_AND_BET, REFUND_TYPE_STACK_ONLY,
+    REFUND_TYPE_BET_ONLY, REFUND_TYPE_STACK_AND_BET, REFUND_TYPE_STACK_ONLY, TexasPokerEvent,
 };
 use super::texas_poker::prove_task::L1DispatchOutput;
 use super::texas_poker::state_machine::reconcile_table_vault;
 use super::texas_poker::types::TexasPokerTable;
-use super::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
+use crate::Address;
 use crate::economics::{
-    coin_output_nonce, consume_native_coin_selection, create_native_coin_output,
-    native_coin_object, select_owned_native_coins, NativeCoinSelection, TREASURY_SYSTEM_ADDRESS,
+    NativeCoinSelection, TREASURY_SYSTEM_ADDRESS, coin_output_nonce, consume_native_coin_selection,
+    create_native_coin_output, native_coin_object, select_owned_native_coins,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
 use crate::storage::{ObjectBackend, ObjectDb};
 use crate::vm::contracts::dispatch::DispatchContext;
-use crate::vm::precompile::{reserved, DispatchResult, ExecutionEnvironment, Precompile};
-use crate::Address;
+use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile, reserved};
 
 /// Texas Poker 合约预编译实现。
 ///
@@ -308,8 +308,8 @@ mod tests {
     use poker_protocol::crypto::ECPoint;
 
     use crate::economics::{
-        coin_output_nonce, decode_native_coin, genesis_mint, list_owned_native_coins,
-        native_coin_object, read_treasury, reconcile_native_supply, TREASURY_SYSTEM_ADDRESS,
+        TREASURY_SYSTEM_ADDRESS, coin_output_nonce, decode_native_coin, genesis_mint,
+        list_owned_native_coins, native_coin_object, read_treasury, reconcile_native_supply,
     };
     use crate::executor::write_capture::WriteCaptureBackend;
     use crate::object_model::Version;
@@ -317,10 +317,7 @@ mod tests {
     use crate::vm::contracts::texas_poker::dispatch::{
         AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs, SeatIndexArgs,
     };
-    use crate::vm::contracts::texas_poker::{
-        betting::BettingRound,
-        constants::ROUND_PREFLOP,
-    };
+    use crate::vm::contracts::texas_poker::{betting::BettingRound, constants::ROUND_PREFLOP};
 
     fn make_env() -> ExecutionEnvironment {
         ExecutionEnvironment {
@@ -390,9 +387,11 @@ mod tests {
         }]);
 
         let encoded = borsh::to_vec(&output).unwrap();
-        assert!(TexasPokerPrecompile::escrow_outputs(&encoded)
-            .unwrap()
-            .is_empty());
+        assert!(
+            TexasPokerPrecompile::escrow_outputs(&encoded)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -801,9 +800,11 @@ mod tests {
                 )
                 .unwrap_err()
         };
-        assert!(error
-            .to_string()
-            .contains("injected table persistence failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("injected table persistence failure")
+        );
         assert_eq!(object_db.read(&table_id).unwrap(), table_before);
         assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
         assert_eq!(object_db.state_root(), root_before);
@@ -812,9 +813,11 @@ mod tests {
             coin_output_nonce(&failed_settlement_hash, 1),
         );
         assert!(object_db.read(&discarded_treasury_coin).is_err());
-        assert!(list_owned_native_coins(&object_db, TREASURY_SYSTEM_ADDRESS)
-            .unwrap()
-            .is_empty());
+        assert!(
+            list_owned_native_coins(&object_db, TREASURY_SYSTEM_ADDRESS)
+                .unwrap()
+                .is_empty()
+        );
         reconcile_native_supply(&object_db, 0).unwrap();
 
         let settlement_hash = [0x73; 32];
@@ -858,20 +861,27 @@ mod tests {
 
         // The finished hand cannot be paid twice: the folded player has been removed during
         // reset, so a replayed action fails before any extra Treasury output is created.
-        assert!(precompile
-            .call(
-                &player_a,
-                &player_a_pk,
-                &selectors::fold(),
-                &borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap(),
-                &ExecutionEnvironment {
-                    tx_hash: [0x74; 32],
-                    ..make_env()
-                },
-                &mut object_db,
-            )
-            .is_err());
-        assert_eq!(list_owned_native_coins(&object_db, TREASURY_SYSTEM_ADDRESS).unwrap().len(), 1);
+        assert!(
+            precompile
+                .call(
+                    &player_a,
+                    &player_a_pk,
+                    &selectors::fold(),
+                    &borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap(),
+                    &ExecutionEnvironment {
+                        tx_hash: [0x74; 32],
+                        ..make_env()
+                    },
+                    &mut object_db,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            list_owned_native_coins(&object_db, TREASURY_SYSTEM_ADDRESS)
+                .unwrap()
+                .len(),
+            1
+        );
         reconcile_native_supply(&object_db, 0).unwrap();
     }
 
@@ -901,9 +911,11 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("requires at least one native coin input"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one native coin input")
+        );
         assert_eq!(object_db.read(&table_id).unwrap(), table_before);
     }
 
@@ -1157,9 +1169,11 @@ mod tests {
                 .unwrap_err()
         };
 
-        assert!(error
-            .to_string()
-            .contains("injected table persistence failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("injected table persistence failure")
+        );
         assert_eq!(object_db.read(&table_id).unwrap(), table_before);
         assert_eq!(object_db.read(&join_change).unwrap(), input_before);
         assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);

@@ -81,17 +81,17 @@ use crate::airs::lifecycle::reset_for_next_hand::{
     ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
-use crate::airs::lifecycle::tick::{canonical_input as canonical_tick_input, TickAir, TickRow};
+use crate::airs::lifecycle::tick::{TickAir, TickRow, canonical_input as canonical_tick_input};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{precompile_call_context, PrecompileCallBinding};
-use crate::prove_task::{dispatch_call_digest, DispatchOutput, MethodInput, ProveTask};
+use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
+use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
 use crate::prover::prove_method;
-use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
-use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
+use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
+use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verified_chain::{
-    verify_method_against_and_issue_receipt, ExpectedChainAnchor, VerificationReceipt,
-    VerifiedChain, VerifiedChainBuilder,
+    ExpectedChainAnchor, VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
+    verify_method_against_and_issue_receipt,
 };
 
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {

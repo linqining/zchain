@@ -5,8 +5,8 @@
 //! only be spent by deleting the whole object and creating new coin objects.
 //! Generic object outputs are not allowed to mint this reserved object type.
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +14,8 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::storage::object_db::ObjectMutation;
 use crate::storage::{ObjectBackend, ObjectDb};
-use crate::vm::contracts::texas_poker::types::TexasPokerTable;
 use crate::vm::contracts::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
+use crate::vm::contracts::texas_poker::types::TexasPokerTable;
 use crate::{Address, ChainId, Hash};
 
 /// Reserved object type for the native ZCN coin.
@@ -1125,9 +1125,10 @@ mod tests {
         genesis_mint(&mut db, 7, &[([0x11; 20], 1_000)]).unwrap();
         let root = db.state_root();
 
-        assert!(db
-            .update(&TREASURY_CAP_OBJECT_ID, &[0x44; 20], vec![])
-            .is_err());
+        assert!(
+            db.update(&TREASURY_CAP_OBJECT_ID, &[0x44; 20], vec![])
+                .is_err()
+        );
         assert!(db.delete(&TREASURY_CAP_OBJECT_ID).is_err());
         assert_eq!(db.state_root(), root);
         assert!(read_treasury(&db).unwrap().is_some());

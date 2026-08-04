@@ -20,8 +20,8 @@
 //!
 //! [`ValidatorEntry::vrf_pubkey`]: super::validator_set::ValidatorEntry::vrf_pubkey
 
-use vrf::openssl::{CipherSuite, ECVRF};
 use vrf::VRF;
+use vrf::openssl::{CipherSuite, ECVRF};
 
 use super::validator_set::{
     VRF_OUTPUT_SIZE, VRF_PROOF_SIZE, VRF_PUBKEY_SIZE, VrfProof, VrfVerifier,
@@ -162,9 +162,7 @@ impl Secp256k1VrfProver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::validator_set::{
-        VRF_PUBKEY_SIZE, compute_vrf_input, compute_vrf_output,
-    };
+    use crate::consensus::validator_set::{VRF_PUBKEY_SIZE, compute_vrf_input, compute_vrf_output};
 
     /// 生成一对 (prover, pubkey) 用于测试。
     fn make_keypair(seed: u8) -> (Secp256k1VrfProver, [u8; VRF_PUBKEY_SIZE]) {

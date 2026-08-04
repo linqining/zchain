@@ -18,8 +18,8 @@
 //! - Scalar：32 字节大端序（blstrs `Scalar::to_bytes_be`）
 //! - SHA3-256 输出为大端序字节流，清高 2 位即 `h[0] & 0x3F`（M-P18）
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use blstrs::{G1Projective, Scalar as BlsScalar};
 use ff::Field;
 use group::Group;
@@ -764,8 +764,8 @@ mod tests {
 
     #[test]
     fn test_verify_pk_ownership_valid() {
-        use rand::rngs::StdRng;
         use rand::SeedableRng;
+        use rand::rngs::StdRng;
         let mut rng = StdRng::seed_from_u64(42);
         let sk = scalar_from_u64(123_456);
         let pk = g1_generator() * sk;

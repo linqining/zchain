@@ -19,8 +19,8 @@
 //! | `zchain_mempool_size` | gauge | 交易池当前大小 |
 //! | `zchain_gas_used_total` | counter | 累计 gas 用量 |
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 节点运行指标收集器（线程安全，`Arc` 共享）。
 #[derive(Debug)]
@@ -197,8 +197,14 @@ mod tests {
             "zchain_mempool_size",
             "zchain_gas_used_total",
         ] {
-            assert!(text.contains(&format!("# HELP {name}")), "缺少 HELP for {name}");
-            assert!(text.contains(&format!("# TYPE {name}")), "缺少 TYPE for {name}");
+            assert!(
+                text.contains(&format!("# HELP {name}")),
+                "缺少 HELP for {name}"
+            );
+            assert!(
+                text.contains(&format!("# TYPE {name}")),
+                "缺少 TYPE for {name}"
+            );
         }
     }
 
