@@ -28,7 +28,7 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::network::NetworkTransport;
 use crate::object_model::Object;
 use crate::storage::{BlockStore, ObjectBackend, ObjectDb};
-use crate::{BlockHeight, Hash};
+use crate::{BlockHeight, ChainId, Hash};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -139,6 +139,7 @@ impl SnapshotBuilder {
     /// # 参数
     /// - `object_db`：源状态库（只读迭代）
     /// - `block_header`：对应高度的区块头（提供 state_root / timestamp / block_hash）
+    /// - `chain_id`：生成该区块哈希时使用的网络 chain ID
     ///
     /// # 返回
     /// `(SnapshotManifest, Vec<SnapshotChunk>)` —— 清单 + 全部分块
@@ -149,6 +150,7 @@ impl SnapshotBuilder {
     pub fn build_snapshot(
         object_db: &ObjectDb,
         block_header: &BlockHeader,
+        chain_id: ChainId,
     ) -> PokerL1Result<(SnapshotManifest, Vec<SnapshotChunk>)> {
         if object_db.is_empty() {
             return Err(PokerL1Error::Other(
@@ -196,7 +198,7 @@ impl SnapshotBuilder {
 
         let manifest = SnapshotManifest {
             height: block_header.height,
-            block_hash: block_header.block_hash(crate::DEFAULT_CHAIN_ID),
+            block_hash: block_header.block_hash(chain_id),
             state_root: block_header.state_root,
             object_count: total_object_count,
             chunk_count: chunks.len() as u64,
@@ -758,7 +760,8 @@ mod tests {
         let state_root = db.state_root();
         let header = make_block_header(100, state_root);
 
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         assert_eq!(manifest.height, 100);
         assert_eq!(manifest.state_root, state_root);
@@ -774,13 +777,31 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_manifest_block_hash_uses_the_supplied_chain_id() {
+        let db = make_object_db(1);
+        let header = make_block_header(100, db.state_root());
+        let non_default_chain_id = crate::DEFAULT_CHAIN_ID + 17;
+
+        let (manifest, _) =
+            SnapshotBuilder::build_snapshot(&db, &header, non_default_chain_id).unwrap();
+
+        assert_eq!(manifest.block_hash, header.block_hash(non_default_chain_id));
+        assert_ne!(
+            manifest.block_hash,
+            header.block_hash(crate::DEFAULT_CHAIN_ID),
+            "snapshot manifests must not silently bind to DEFAULT_CHAIN_ID"
+        );
+    }
+
+    #[test]
     fn test_build_snapshot_large() {
         // 构造足够多对象以触发分块
         let db = make_object_db(15_000);
         let state_root = db.state_root();
         let header = make_block_header(200, state_root);
 
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         assert_eq!(manifest.object_count, 15_000);
         assert!(chunks.len() > 1, "15k 对象应跨多个分块");
@@ -796,7 +817,7 @@ mod tests {
     fn test_build_snapshot_empty_db_errors() {
         let db = ObjectDb::open_inmemory().unwrap();
         let header = make_block_header(0, [0u8; 32]);
-        let result = SnapshotBuilder::build_snapshot(&db, &header);
+        let result = SnapshotBuilder::build_snapshot(&db, &header, crate::DEFAULT_CHAIN_ID);
         assert!(result.is_err(), "空 ObjectDb 不应生成快照");
     }
 
@@ -806,7 +827,8 @@ mod tests {
         let state_root = db.state_root();
         let header = make_block_header(50, state_root);
 
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         for chunk in &chunks {
             SnapshotVerifier::verify_chunk(chunk, &manifest).unwrap();
@@ -819,7 +841,8 @@ mod tests {
         let state_root = db.state_root();
         let header = make_block_header(50, state_root);
 
-        let (mut manifest, mut chunks) = SnapshotBuilder::build_snapshot(&db, &header).unwrap();
+        let (mut manifest, mut chunks) =
+            SnapshotBuilder::build_snapshot(&db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         // 篡改分块数据
         chunks[0].objects[0] = make_object(0xFE, 999);
@@ -839,7 +862,8 @@ mod tests {
         let state_root = db.state_root();
         let header = make_block_header(50, state_root);
 
-        let (manifest, _chunks) = SnapshotBuilder::build_snapshot(&db, &header).unwrap();
+        let (manifest, _chunks) =
+            SnapshotBuilder::build_snapshot(&db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         let bogus_chunk = SnapshotChunk {
             index: manifest.chunk_count + 100,
@@ -855,7 +879,8 @@ mod tests {
         let src_db = make_object_db(20);
         let state_root = src_db.state_root();
         let header = make_block_header(100, state_root);
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         // 2. 目标库应用快照
         let mut dst_db = ObjectDb::open_inmemory().unwrap();
@@ -874,7 +899,8 @@ mod tests {
     fn test_apply_snapshot_state_root_mismatch_detected() {
         let src_db = make_object_db(10);
         let header = make_block_header(100, src_db.state_root());
-        let (mut manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (mut manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         // 篡改 manifest 的 state_root（模拟 Byzantine peer 投毒）
         manifest.state_root = [0xFF; 32];
@@ -889,7 +915,8 @@ mod tests {
     fn test_apply_snapshot_object_count_mismatch() {
         let src_db = make_object_db(10);
         let header = make_block_header(100, src_db.state_root());
-        let (mut manifest, mut chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (mut manifest, mut chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         // 移除一个对象，模拟分块不完整
         chunks[0].objects.pop();
@@ -908,7 +935,8 @@ mod tests {
         let src_db = make_object_db(30);
         let state_root = src_db.state_root();
         let header = make_block_header(100, state_root);
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         // 2. BlockStore 中放入对应区块（简化：用 inmemory）
         let block_store = BlockStore::open_inmemory().unwrap();
@@ -960,7 +988,8 @@ mod tests {
     fn fast_sync_downloads_complete_ranges_and_executes_each_block() {
         let src_db = make_object_db(3);
         let header = make_block_header(100, src_db.state_root());
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
         let block_store = BlockStore::open_inmemory().unwrap();
         block_store
             .put(
@@ -1006,7 +1035,8 @@ mod tests {
     fn fast_sync_rejects_an_incomplete_peer_block_range_before_execution() {
         let src_db = make_object_db(3);
         let header = make_block_header(100, src_db.state_root());
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
         let block_store = BlockStore::open_inmemory().unwrap();
         block_store
             .put(
@@ -1051,7 +1081,8 @@ mod tests {
     fn test_fast_sync_rejects_incomplete_chunks() {
         let src_db = make_object_db(5);
         let header = make_block_header(100, src_db.state_root());
-        let (manifest, mut chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (manifest, mut chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         // 故意丢弃最后一个分块
         chunks.pop();
@@ -1082,7 +1113,8 @@ mod tests {
     fn test_fast_sync_dedup_chunks() {
         let src_db = make_object_db(3);
         let header = make_block_header(100, src_db.state_root());
-        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let (manifest, chunks) =
+            SnapshotBuilder::build_snapshot(&src_db, &header, crate::DEFAULT_CHAIN_ID).unwrap();
 
         let block_store = BlockStore::open_inmemory().unwrap();
         // 将区块放入 BlockStore，以便 verify_manifest 能查到

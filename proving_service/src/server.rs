@@ -196,6 +196,19 @@ pub struct DispatchRequest {
     /// derives the dispatch context from the transaction's tagged public key.
     #[serde(default)]
     pub caller_pubkey_hex: Option<String>,
+    /// Chain identifier used by the consensus transaction that will later
+    /// authenticate this dispatch.  This field, `block_height`, and
+    /// `block_timestamp_ms` must either all be supplied with
+    /// `caller_pubkey_hex`, or all be omitted for the compatibility-only local
+    /// development path.
+    #[serde(default)]
+    pub chain_id: Option<u64>,
+    /// Height of the block whose execution context produced this transition.
+    #[serde(default)]
+    pub block_height: Option<u64>,
+    /// Timestamp of the block whose execution context produced this transition.
+    #[serde(default)]
+    pub block_timestamp_ms: Option<u64>,
     /// Method selector (32-byte hexadecimal).
     pub selector_hex: String,
     /// Borsh method arguments (hexadecimal).
@@ -411,11 +424,35 @@ async fn dispatch_for_table(
         )
     })?;
     let idempotency_key = normalize_idempotency_key(request.idempotency_key)?;
+    let consensus_context = match (
+        request.chain_id,
+        request.block_height,
+        request.block_timestamp_ms,
+    ) {
+        (None, None, None) => None,
+        (Some(chain_id), Some(block_height), Some(block_timestamp_ms)) => {
+            Some((chain_id, block_height, block_timestamp_ms))
+        }
+        _ => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "chain_id, block_height and block_timestamp_ms must be supplied together".into(),
+            ));
+        }
+    };
+    if caller_pubkey.is_some() != consensus_context.is_some() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "caller_pubkey_hex and the complete consensus execution context must be supplied together"
+                .into(),
+        ));
+    }
     let request_digest = digest_request(
         table_id,
         &idempotency_key,
         caller,
         caller_pubkey.as_ref(),
+        consensus_context,
         selector,
         &args,
     );
@@ -462,12 +499,12 @@ async fn dispatch_for_table(
     };
 
     let mut staged = runtime.staged_plugin(table_id);
-    let context = caller_pubkey.map_or_else(
-        || DispatchContext {
+    let context = match (caller_pubkey, consensus_context) {
+        (None, None) => DispatchContext {
             caller,
             // Compatibility-only development mode.  A receipt from this path
             // cannot match an authenticated transaction unless the caller
-            // supplied `caller_pubkey_hex` above.
+            // supplies the exact public key and consensus context above.
             caller_pubkey: poker_l1::signature::TaggedPubkey {
                 tag: 0,
                 raw: vec![0xBB; 32],
@@ -476,14 +513,15 @@ async fn dispatch_for_table(
             block_height: 100,
             block_timestamp: 1_000_000,
         },
-        |caller_pubkey| DispatchContext {
+        (Some(caller_pubkey), Some((chain_id, block_height, block_timestamp))) => DispatchContext {
             caller,
             caller_pubkey,
-            chain_id: poker_l1::DEFAULT_CHAIN_ID,
-            block_height: 100,
-            block_timestamp: 1_000_000,
+            chain_id,
+            block_height,
+            block_timestamp,
         },
-    );
+        _ => unreachable!("public key/context pairing was validated above"),
+    };
     let outcome = match staged.dispatch_with_context(&context, &selector, &args) {
         Ok(outcome) => outcome,
         Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
@@ -788,6 +826,7 @@ fn digest_request(
     idempotency_key: &Option<String>,
     caller: [u8; 20],
     caller_pubkey: Option<&poker_l1::signature::TaggedPubkey>,
+    consensus_context: Option<(u64, u64, u64)>,
     selector: [u8; 32],
     args: &[u8],
 ) -> [u8; 32] {
@@ -812,12 +851,26 @@ fn digest_request(
         }
         None => material.push(0),
     }
+    let digest_domain =
+        if let Some((chain_id, block_height, block_timestamp_ms)) = consensus_context {
+            // Context-aware requests use a new domain and explicitly commit the
+            // consensus execution tuple. Context-free development requests retain
+            // the exact v1 preimage/domain so idempotent jobs persisted by an older
+            // service binary remain replayable after upgrade.
+            material.push(1);
+            material.extend_from_slice(&chain_id.to_le_bytes());
+            material.extend_from_slice(&block_height.to_le_bytes());
+            material.extend_from_slice(&block_timestamp_ms.to_le_bytes());
+            b"zchain.proving_service.request.v2".as_slice()
+        } else {
+            b"zchain.proving_service.request.v1".as_slice()
+        };
     material.extend_from_slice(&selector);
     material.extend_from_slice(&(key.len() as u64).to_le_bytes());
     material.extend_from_slice(key.as_bytes());
     material.extend_from_slice(&(args.len() as u64).to_le_bytes());
     material.extend_from_slice(args);
-    blake2b_256(b"zchain.proving_service.request.v1", &material)
+    blake2b_256(digest_domain, &material)
 }
 
 fn digest_job_id(table_id: u64, request_digest: [u8; 32], nonce: Option<u64>) -> [u8; 32] {
@@ -1040,6 +1093,8 @@ mod tests {
         sender: TaggedPubkey,
         selector: [u8; 32],
         args: Vec<u8>,
+        block_height: u64,
+        block_timestamp_ms: u64,
     ) -> ConsensusAnchorMaterial {
         let (validators, validator_secrets) = test_validators();
         let (pre_state_root, pre_snapshot) = snapshot(pre_table);
@@ -1083,8 +1138,8 @@ mod tests {
             (post_state_root, public_tx_root, empty_tx_root),
         );
         let pre_block_header = BlockHeader {
-            height: 100,
-            timestamp_ms: 1_000_000,
+            height: block_height,
+            timestamp_ms: block_timestamp_ms,
             prev_hash: [0; 32],
             state_root: pre_state_root,
             public_tx_root,
@@ -1129,6 +1184,9 @@ mod tests {
         DispatchRequest {
             caller_hex: hex::encode(creator),
             caller_pubkey_hex: None,
+            chain_id: None,
+            block_height: None,
+            block_timestamp_ms: None,
             selector_hex: hex::encode(selectors::create_table()),
             args_hex: hex::encode(
                 borsh::to_vec(&CreateTableArgs {
@@ -1141,6 +1199,88 @@ mod tests {
             ),
             idempotency_key: Some(key.into()),
         }
+    }
+
+    #[test]
+    fn context_free_request_digest_retains_the_v1_wire_value() {
+        let digest = digest_request(
+            7,
+            &Some("legacy".into()),
+            [0xAA; 20],
+            None,
+            None,
+            selectors::create_table(),
+            &[1, 2, 3],
+        );
+        assert_eq!(
+            hex::encode(digest),
+            "ec1d127b8dc1b6354159ecf2f6cf63827af73513c08da4423e22bb5a44cbae17"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_requires_public_key_and_complete_consensus_context_together() {
+        let state = ServerState::default();
+        let sender_secret =
+            SecretKey::from_slice(&[11; 32]).expect("fixed sender secret scalar is valid");
+        let sender = test_tagged_pubkey(&sender_secret);
+        let caller = derive_address(&sender);
+        let sender_hex = hex::encode(sender.to_bytes());
+
+        let mut missing_context = create_request(caller, "missing-context");
+        missing_context.caller_pubkey_hex = Some(sender_hex.clone());
+        let error = dispatch_for_table(state.clone(), 70, missing_context)
+            .await
+            .expect_err("a public key without consensus context must be rejected");
+        assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("complete consensus execution context"));
+
+        let mut partial_context = create_request(caller, "partial-context");
+        partial_context.caller_pubkey_hex = Some(sender_hex);
+        partial_context.chain_id = Some(poker_l1::DEFAULT_CHAIN_ID);
+        let error = dispatch_for_table(state.clone(), 70, partial_context)
+            .await
+            .expect_err("a partial consensus context must be rejected");
+        assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("must be supplied together"));
+
+        let mut missing_public_key = create_request(caller, "missing-public-key");
+        missing_public_key.chain_id = Some(poker_l1::DEFAULT_CHAIN_ID);
+        missing_public_key.block_height = Some(100);
+        missing_public_key.block_timestamp_ms = Some(1_000_000);
+        let error = dispatch_for_table(state, 70, missing_public_key)
+            .await
+            .expect_err("consensus context without a public key must be rejected");
+        assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("complete consensus execution context"));
+    }
+
+    #[tokio::test]
+    async fn idempotency_key_conflicts_when_consensus_context_changes() {
+        let state = ServerState::default();
+        let sender_secret =
+            SecretKey::from_slice(&[12; 32]).expect("fixed sender secret scalar is valid");
+        let sender = test_tagged_pubkey(&sender_secret);
+        let caller = derive_address(&sender);
+
+        let mut first = create_request(caller, "context-bound-create");
+        first.caller_pubkey_hex = Some(hex::encode(sender.to_bytes()));
+        first.chain_id = Some(poker_l1::DEFAULT_CHAIN_ID);
+        first.block_height = Some(777);
+        first.block_timestamp_ms = Some(9_876_543);
+        let _ = dispatch_for_table(state.clone(), 71, first)
+            .await
+            .expect("the first context-bound request must prove");
+
+        let mut changed = create_request(caller, "context-bound-create");
+        changed.caller_pubkey_hex = Some(hex::encode(sender.to_bytes()));
+        changed.chain_id = Some(poker_l1::DEFAULT_CHAIN_ID);
+        changed.block_height = Some(778);
+        changed.block_timestamp_ms = Some(9_876_543);
+        let error = dispatch_for_table(state, 71, changed)
+            .await
+            .expect_err("the same idempotency key must not cross execution contexts");
+        assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -1169,6 +1309,9 @@ mod tests {
             DispatchRequest {
                 caller_hex: hex::encode(creator),
                 caller_pubkey_hex: None,
+                chain_id: None,
+                block_height: None,
+                block_timestamp_ms: None,
                 selector_hex: hex::encode(selectors::create_table()),
                 args_hex: hex::encode(
                     borsh::to_vec(&CreateTableArgs {
@@ -1217,6 +1360,9 @@ mod tests {
         let join = DispatchRequest {
             caller_hex: hex::encode(player),
             caller_pubkey_hex: None,
+            chain_id: None,
+            block_height: None,
+            block_timestamp_ms: None,
             selector_hex: hex::encode(selectors::join_table()),
             args_hex: hex::encode(
                 borsh::to_vec(&JoinTableArgs {
@@ -1260,6 +1406,9 @@ mod tests {
         let join = DispatchRequest {
             caller_hex: hex::encode(player),
             caller_pubkey_hex: None,
+            chain_id: None,
+            block_height: None,
+            block_timestamp_ms: None,
             selector_hex: hex::encode(selectors::join_table()),
             args_hex: hex::encode(
                 borsh::to_vec(&JoinTableArgs {
@@ -1280,6 +1429,9 @@ mod tests {
         let leave = DispatchRequest {
             caller_hex: hex::encode(player),
             caller_pubkey_hex: None,
+            chain_id: None,
+            block_height: None,
+            block_timestamp_ms: None,
             selector_hex: hex::encode(selectors::request_leave_after_hand()),
             args_hex: hex::encode(borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap()),
             idempotency_key: Some("leave".into()),
@@ -1323,6 +1475,9 @@ mod tests {
         let caller = derive_address(&sender);
         let mut create = create_request(caller, "anchored-create");
         create.caller_pubkey_hex = Some(hex::encode(sender.to_bytes()));
+        create.chain_id = Some(poker_l1::DEFAULT_CHAIN_ID);
+        create.block_height = Some(777);
+        create.block_timestamp_ms = Some(9_876_543);
         let create_args = hex::decode(&create.args_hex).expect("create args are hex");
         let selector = selectors::create_table();
 
@@ -1343,8 +1498,15 @@ mod tests {
                 .clone();
             (pre_table, post_table)
         };
-        let material =
-            consensus_material_for_create(&pre_table, &post_table, sender, selector, create_args);
+        let material = consensus_material_for_create(
+            &pre_table,
+            &post_table,
+            sender,
+            selector,
+            create_args,
+            777,
+            9_876_543,
+        );
         let body = serde_json::json!({
             "material_borsh_hex": hex::encode(
                 borsh::to_vec(&material).expect("authenticated material must serialize")

@@ -23,11 +23,12 @@ use crate::account::{Account, AccountStore};
 use crate::block::Block;
 use crate::block::validator::{
     validate_block_tx_roots, validate_commit_certificate_signatures, validate_gameturn_no_gas,
-    validate_state_root_transition, validate_tx_chain_id, validate_vertex_tx_ordering,
+    validate_state_root_transition, validate_tx_chain_id, validate_tx_signature,
+    validate_vertex_tx_ordering,
 };
 use crate::consensus::{
     DagVertex, Epoch, MAX_VERTEX_SIZE, ValidatorEntry, ValidatorSet,
-    compute_genesis_chain_randomness,
+    compute_genesis_chain_randomness, required_parent_count,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::executor::{
@@ -386,6 +387,16 @@ impl PendingTxState {
             .or_default()
             .push_back(id);
         self.queue.push_back(PendingTxEntry { id, caller, tx });
+    }
+
+    fn push_front(&mut self, caller: Address, tx: Transaction) {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.by_caller_nonce
+            .entry((caller, tx.nonce))
+            .or_default()
+            .push_front(id);
+        self.queue.push_front(PendingTxEntry { id, caller, tx });
     }
 
     /// Remove an entry by its queue position and update the RBF index at the same time.
@@ -1076,10 +1087,9 @@ impl Node {
     /// P0-3 修复：在写入存储前执行完整验证链：
     /// 1. 大小校验（≤ MAX_VERTEX_SIZE）
     /// 2. 签名验证（author_sig 对 signing_hash）
-    /// 3. tx 边界校验（validate_tx_limits）
-    /// 4. chain_id 校验（所有 tx 的 chain_id 必须匹配节点 chain_id）
+    /// 3. tx 边界、chain_id 与签名校验
     /// 5. vertex 内 tx 排序校验（S9 规则）
-    /// 6. parent_hashes 存在性校验（必须在已知 DAG 中）
+    /// 6. parent graph 校验（存在、去重、严格上一轮、distinct active-author quorum）
     pub fn put_vertex(&self, vertex: &DagVertex) -> PokerL1Result<Hash> {
         self.validate_vertex(vertex)?;
         self.vertex_store.put(vertex)
@@ -1122,20 +1132,84 @@ impl Node {
             },
         )?;
 
-        // 3. tx 边界校验 + chain_id 校验
+        // 3. tx 边界、chain_id 与签名校验。P2P vertex 绕过普通 RPC admission，
+        // 因此不能等到 block execution 才发现并拒绝无效交易。
         for tx in &vertex.tx_list {
             validate_tx_limits(tx)?;
             validate_tx_chain_id(tx, self.config.chain_id)?;
+            validate_tx_signature(tx)?;
         }
 
         // 4. vertex 内 tx 排序校验（S9：GameTurn 优先于 ForceSync）
         validate_vertex_tx_ordering(&vertex.tx_list)?;
 
-        // 5. parent_hashes 存在性校验（必须在已知 DAG 中）
-        for parent_hash in &vertex.parent_hashes {
-            if self.vertex_store.get_by_hash(parent_hash).is_err() {
-                return Err(PokerL1Error::ParentVertexNotFound(*parent_hash));
+        // 5. Parent graph validation. Counting raw hashes is insufficient: one validator could
+        // otherwise equivocate multiple parents and manufacture a quorum. Round 1 is the only
+        // parentless round; every later vertex must reference a distinct-author quorum from the
+        // immediately preceding round.
+        if vertex.round == 0 {
+            return Err(PokerL1Error::InvalidVertexRound {
+                round: vertex.round,
+            });
+        }
+        if vertex.round == 1 {
+            if !vertex.parent_hashes.is_empty() {
+                return Err(PokerL1Error::UnexpectedFirstRoundParents {
+                    actual: vertex.parent_hashes.len(),
+                });
             }
+            return Ok(());
+        }
+
+        let active_parent_authors: std::collections::BTreeSet<Vec<u8>> = self
+            .active_validator_pubkeys_sorted()
+            .into_iter()
+            .map(|pubkey| pubkey.to_bytes())
+            .collect();
+        let validator_count = active_parent_authors.len().max(1);
+        let required = required_parent_count(validator_count);
+        let expected_parent_round = vertex.round - 1;
+        let mut seen_parent_hashes = std::collections::BTreeSet::new();
+        let mut seen_parent_authors = std::collections::BTreeSet::new();
+
+        for parent_hash in &vertex.parent_hashes {
+            if !seen_parent_hashes.insert(*parent_hash) {
+                return Err(PokerL1Error::DuplicateParentVertex(*parent_hash));
+            }
+            let parent = match self.vertex_store.get_by_hash(parent_hash) {
+                Ok(parent) => parent,
+                Err(PokerL1Error::DagVertexNotFound) => {
+                    return Err(PokerL1Error::ParentVertexNotFound(*parent_hash));
+                }
+                Err(error) => return Err(error),
+            };
+            if parent.round != expected_parent_round {
+                return Err(PokerL1Error::InvalidParentVertexRound {
+                    parent_hash: *parent_hash,
+                    actual: parent.round,
+                    expected: expected_parent_round,
+                });
+            }
+
+            let parent_author = parent.author_pubkey.to_bytes();
+            if !active_parent_authors.is_empty() && !active_parent_authors.contains(&parent_author)
+            {
+                return Err(PokerL1Error::ParentVertexAuthorNotActiveValidator(
+                    parent.author_pubkey,
+                ));
+            }
+            if !seen_parent_authors.insert(parent_author) {
+                return Err(PokerL1Error::DuplicateParentVertexAuthor(
+                    parent.author_pubkey,
+                ));
+            }
+        }
+
+        if seen_parent_authors.len() < required {
+            return Err(PokerL1Error::InsufficientParents {
+                actual: seen_parent_authors.len(),
+                required,
+            });
         }
 
         Ok(())
@@ -1782,6 +1856,35 @@ impl Node {
         result.extend(public.into_iter().cloned());
         result.extend(forcesync.into_iter().cloned());
         result
+    }
+
+    /// Return transactions drained by the validator loop to the front of the mempool.
+    ///
+    /// This is used when a multi-validator node cannot yet assemble a valid previous-round
+    /// parent quorum. The original arrival order is preserved ahead of transactions that arrived
+    /// concurrently while the batch was being assembled, so a temporary DAG lag cannot silently
+    /// drop or reorder user submissions.
+    pub fn requeue_pending_txs(&self, txs: Vec<Transaction>) {
+        if !self.config.role.is_validator() || txs.is_empty() {
+            return;
+        }
+
+        let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
+        for tx in txs.into_iter().rev() {
+            let caller = crate::account::derive_address(&tx.tagged_pubkey);
+            pending.push_front(caller, tx);
+        }
+        while pending.len() > MAX_PENDING_TX_SIZE {
+            let min_index = pending
+                .queue
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.tx.gas.price)
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            pending.remove(min_index);
+        }
+        self.pending_tx_condvar.notify_one();
     }
 
     /// 等待 pending_tx 非空或超时（混合模式核心）。
@@ -2909,6 +3012,250 @@ mod tests {
             .collect()
     }
 
+    fn make_real_validator(
+        seed: u8,
+        status: ValidatorStatus,
+    ) -> (secp256k1::SecretKey, ValidatorEntry) {
+        let secret = secp256k1::SecretKey::from_slice(&[seed; 32]).unwrap();
+        let public = secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret);
+        let tagged = TaggedPubkey::new(
+            SignatureScheme::Secp256k1,
+            CURRENT_VERSION,
+            public.serialize().to_vec(),
+        )
+        .unwrap();
+        let mut entry = ValidatorEntry::new(tagged, public.serialize(), 0, 0);
+        entry.status = status;
+        (secret, entry)
+    }
+
+    fn signed_empty_vertex(
+        secret: &secp256k1::SecretKey,
+        author: TaggedPubkey,
+        epoch: u64,
+        round: u64,
+        parent_hashes: Vec<Hash>,
+    ) -> DagVertex {
+        sign_vertex(
+            secret,
+            DagVertex {
+                epoch,
+                round,
+                author_pubkey: author,
+                tx_list: vec![],
+                parent_hashes,
+                author_sig: vec![],
+            },
+        )
+    }
+
+    fn sign_vertex(secret: &secp256k1::SecretKey, mut vertex: DagVertex) -> DagVertex {
+        let message = secp256k1::Message::from_digest(vertex.signing_hash(DEFAULT_CHAIN_ID));
+        let signature = secp256k1::Secp256k1::new().sign_ecdsa_recoverable(&message, secret);
+        let (recovery_id, compact) = signature.serialize_compact();
+        vertex.author_sig = compact
+            .into_iter()
+            .chain(std::iter::once(recovery_id.to_i32() as u8))
+            .collect();
+        vertex
+    }
+
+    fn four_real_validators() -> Vec<(secp256k1::SecretKey, ValidatorEntry)> {
+        (1..=4)
+            .map(|seed| make_real_validator(seed, ValidatorStatus::Active))
+            .collect()
+    }
+
+    #[test]
+    fn validate_vertex_rejects_invalid_transaction_signature_at_admission() {
+        let (secret, validator) = make_real_validator(9, ValidatorStatus::Active);
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            vec![validator.clone()],
+        )
+        .unwrap();
+        let mut invalid_tx = make_pub_tx(0x44, 1, 5);
+        invalid_tx.tagged_pubkey = validator.pubkey.clone();
+        let wrong_message = secp256k1::Message::from_digest([0xAA; 32]);
+        let wrong_signature =
+            secp256k1::Secp256k1::new().sign_ecdsa_recoverable(&wrong_message, &secret);
+        let (wrong_recovery_id, wrong_compact) = wrong_signature.serialize_compact();
+        invalid_tx.signature = wrong_compact
+            .into_iter()
+            .chain(std::iter::once(wrong_recovery_id.to_i32() as u8))
+            .collect();
+        let vertex = sign_vertex(
+            &secret,
+            DagVertex {
+                epoch: 1,
+                round: 1,
+                author_pubkey: validator.pubkey,
+                tx_list: vec![invalid_tx],
+                parent_hashes: vec![],
+                author_sig: vec![],
+            },
+        );
+
+        assert!(matches!(
+            node.validate_vertex(&vertex),
+            Err(PokerL1Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn validate_vertex_accepts_distinct_active_parent_quorum() {
+        let validators = four_real_validators();
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            validators.iter().map(|(_, entry)| entry.clone()).collect(),
+        )
+        .unwrap();
+
+        let mut parent_hashes = Vec::new();
+        for (secret, entry) in validators.iter().take(3) {
+            let parent = signed_empty_vertex(secret, entry.pubkey.clone(), 1, 1, vec![]);
+            parent_hashes.push(node.put_vertex(&parent).unwrap());
+        }
+        let child = signed_empty_vertex(
+            &validators[3].0,
+            validators[3].1.pubkey.clone(),
+            1,
+            2,
+            parent_hashes,
+        );
+
+        node.validate_vertex(&child).unwrap();
+    }
+
+    #[test]
+    fn validate_vertex_rejects_parent_hash_count_without_distinct_author_quorum() {
+        let validators = four_real_validators();
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            validators.iter().map(|(_, entry)| entry.clone()).collect(),
+        )
+        .unwrap();
+
+        let first = signed_empty_vertex(
+            &validators[0].0,
+            validators[0].1.pubkey.clone(),
+            1,
+            1,
+            vec![],
+        );
+        let equivocation = signed_empty_vertex(
+            &validators[0].0,
+            validators[0].1.pubkey.clone(),
+            2,
+            1,
+            vec![],
+        );
+        // The distinct epoch changes the content hash while retaining the same parent author.
+        let first_hash = node.vertex_store.put(&first).unwrap();
+        let equivocation_hash = node.vertex_store.put(&equivocation).unwrap();
+        let third = signed_empty_vertex(
+            &validators[1].0,
+            validators[1].1.pubkey.clone(),
+            1,
+            1,
+            vec![],
+        );
+        let third_hash = node.put_vertex(&third).unwrap();
+        let child = signed_empty_vertex(
+            &validators[3].0,
+            validators[3].1.pubkey.clone(),
+            1,
+            2,
+            vec![first_hash, equivocation_hash, third_hash],
+        );
+
+        assert!(matches!(
+            node.validate_vertex(&child),
+            Err(PokerL1Error::DuplicateParentVertexAuthor(_))
+        ));
+    }
+
+    #[test]
+    fn validate_vertex_rejects_insufficient_previous_round_quorum() {
+        let validators = four_real_validators();
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            validators.iter().map(|(_, entry)| entry.clone()).collect(),
+        )
+        .unwrap();
+        let mut parent_hashes = Vec::new();
+        for (secret, entry) in validators.iter().take(2) {
+            let parent = signed_empty_vertex(secret, entry.pubkey.clone(), 1, 1, vec![]);
+            parent_hashes.push(node.put_vertex(&parent).unwrap());
+        }
+        let child = signed_empty_vertex(
+            &validators[3].0,
+            validators[3].1.pubkey.clone(),
+            1,
+            2,
+            parent_hashes,
+        );
+
+        assert!(matches!(
+            node.validate_vertex(&child),
+            Err(PokerL1Error::InsufficientParents {
+                actual: 2,
+                required: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_vertex_rejects_duplicate_or_wrong_round_parent() {
+        let validators = four_real_validators();
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            validators.iter().map(|(_, entry)| entry.clone()).collect(),
+        )
+        .unwrap();
+        let parent = signed_empty_vertex(
+            &validators[0].0,
+            validators[0].1.pubkey.clone(),
+            1,
+            1,
+            vec![],
+        );
+        let parent_hash = node.put_vertex(&parent).unwrap();
+
+        let duplicate = signed_empty_vertex(
+            &validators[3].0,
+            validators[3].1.pubkey.clone(),
+            1,
+            2,
+            vec![parent_hash, parent_hash],
+        );
+        assert!(matches!(
+            node.validate_vertex(&duplicate),
+            Err(PokerL1Error::DuplicateParentVertex(hash)) if hash == parent_hash
+        ));
+
+        let wrong_round = signed_empty_vertex(
+            &validators[3].0,
+            validators[3].1.pubkey.clone(),
+            1,
+            3,
+            vec![parent_hash],
+        );
+        assert!(matches!(
+            node.validate_vertex(&wrong_round),
+            Err(PokerL1Error::InvalidParentVertexRound {
+                actual: 1,
+                expected: 2,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn node_genesis_validators_loaded() {
         let node = Node::open_inmemory_with_validators(
@@ -3420,6 +3767,23 @@ mod tests {
         assert_eq!(drained[0].tagged_pubkey.raw[0], 0x20, "arrival 顺序保持");
         assert_eq!(drained[1].tagged_pubkey.raw[0], 0x21);
         assert_eq!(drained[2].tagged_pubkey.raw[0], 0x22);
+    }
+
+    #[test]
+    fn requeue_pending_txs_preserves_drained_order_ahead_of_new_arrivals() {
+        let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        node.submit_tx(make_pub_tx(0x20, 1, 5)).unwrap();
+        node.submit_tx(make_pub_tx(0x21, 1, 5)).unwrap();
+        let drained = node.drain_pending_tx();
+        node.submit_tx(make_pub_tx(0x22, 1, 5)).unwrap();
+
+        node.requeue_pending_txs(drained);
+
+        let retried = node.drain_pending_tx();
+        assert_eq!(retried.len(), 3);
+        assert_eq!(retried[0].tagged_pubkey.raw[0], 0x20);
+        assert_eq!(retried[1].tagged_pubkey.raw[0], 0x21);
+        assert_eq!(retried[2].tagged_pubkey.raw[0], 0x22);
     }
 
     #[test]

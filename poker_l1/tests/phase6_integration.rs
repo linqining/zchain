@@ -598,28 +598,41 @@ mod subtask_43_7_node {
     #[test]
     fn subtask_43_7_m_node_put_and_query_vertex() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
-        // P0-3 验证链：vertex 必须带真实 author 签名
+        // P0-3 验证链：vertex 必须带真实 author 签名，round > 1 还必须引用上一轮。
         let (secret_key, _public_key, tagged) = make_real_keypair();
-        let mut vertex = DagVertex {
+        let sign = |mut vertex: DagVertex| {
+            let signing_hash = vertex.signing_hash(DEFAULT_CHAIN_ID);
+            let sig = Secp256k1::new()
+                .sign_ecdsa_recoverable(&Message::from_digest(signing_hash), &secret_key);
+            let (rid, compact) = sig.serialize_compact();
+            vertex.author_sig = compact
+                .into_iter()
+                .chain(std::iter::once(rid.to_i32() as u8))
+                .collect();
+            vertex
+        };
+        let parent = sign(DagVertex {
             epoch: 1,
-            round: 5,
-            author_pubkey: tagged,
+            round: 1,
+            author_pubkey: tagged.clone(),
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![],
-        };
-        let signing_hash = vertex.signing_hash(DEFAULT_CHAIN_ID);
-        let secp = Secp256k1::new();
-        let sig = secp.sign_ecdsa_recoverable(&Message::from_digest(signing_hash), &secret_key);
-        let (rid, compact) = sig.serialize_compact();
-        let mut full_sig = compact.to_vec();
-        full_sig.push(rid.to_i32() as u8);
-        vertex.author_sig = full_sig;
+        });
+        let parent_hash = node.put_vertex(&parent).unwrap();
+        let vertex = sign(DagVertex {
+            epoch: 1,
+            round: 2,
+            author_pubkey: tagged,
+            tx_list: vec![],
+            parent_hashes: vec![parent_hash],
+            author_sig: vec![],
+        });
 
         let hash = node.put_vertex(&vertex).unwrap();
         let got = node.get_vertex(&hash).unwrap();
         assert!(got.is_some());
-        assert_eq!(got.unwrap().round, 5);
+        assert_eq!(got.unwrap().round, 2);
     }
 
     #[test]

@@ -42,6 +42,7 @@ pub mod method_kind;
 pub mod outer_aggregate;
 pub mod outer_precompile;
 pub mod precompile_binding;
+pub mod proof_archive;
 pub mod public_inputs;
 pub mod state_root;
 pub mod verified_chain;

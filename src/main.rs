@@ -1467,8 +1467,7 @@ fn handle_p2p_connection(
                         if let Err(e) = send_p2p_message_locked(
                             &writer,
                             &NetworkMessage::ResponseBlocks(blocks),
-                        )
-                        {
+                        ) {
                             warn!("P2P 回送 ResponseBlocks 失败：{e}");
                         }
                     }
@@ -1506,8 +1505,7 @@ fn handle_p2p_connection(
                         if let Err(error) = send_p2p_message_locked(
                             &writer,
                             &NetworkMessage::ResponseTx(transactions),
-                        )
-                        {
+                        ) {
                             warn!("P2P 回送 ResponseTx 失败：{error}");
                         }
                     }
@@ -2110,8 +2108,9 @@ fn run_validator_loop(
             }
         };
         let batch_count = batches.len();
+        let mut batches = batches.into_iter().enumerate().peekable();
 
-        for (batch_idx, batch) in batches.into_iter().enumerate() {
+        while let Some((batch_idx, batch)) = batches.next() {
             let batch_tx_count = batch.len();
 
             // 构造 vertex 的 parent_hashes。
@@ -2139,7 +2138,9 @@ fn run_validator_loop(
                         let mut parents: Vec<Hash> = Vec::new();
                         for vh in dag_guard.round_vertices(max_r) {
                             if let Some(v) = dag_guard.get(vh) {
-                                if seen_authors.insert(v.author_pubkey.to_bytes()) {
+                                if node.is_active_validator(&v.author_pubkey)
+                                    && seen_authors.insert(v.author_pubkey.to_bytes())
+                                {
                                     parents.push(*vh);
                                 }
                             }
@@ -2156,26 +2157,29 @@ fn run_validator_loop(
             }
             let builder = builder.with_parents(parent_hashes);
 
-            // 创世轮（round 1）跳过 validate_parents（无 parent）
-            // 缺口 #3：parent quorum 用真实 validator 数（而非硬编码 1）。
-            // 单 validator 引导期（active=0/1）允许 1 个 parent；多 validator 时需 ≥2/3。
-            // 注意：多 validator 时若 peer vertex 未及时到达，parent 数可能 < quorum，
-            // 此处仅 warn 不阻断（活性优先；validate_parents 在 vc<=1 时才强制）。
+            // 创世轮（round 1）无 parent。其余轮次必须先凑齐真实 validator quorum；
+            // 不足时把本批及尚未处理的批次放回 mempool，等待 peer vertex，而不是产出一个
+            // 接收侧必然拒绝的弱 vertex 或静默丢失已经 drain 的交易。
             if round > 1 {
                 let vc_check = node.active_validator_count().max(1);
-                if vc_check > 1 {
-                    // 多 validator：parent 不足仅 warn（peer 可能未到达），不阻断出 vertex。
-                    if let Err(e) = builder.validate_parents(vc_check) {
-                        warn!("vertex parent 校验（多 validator，非阻断）：{e}");
+                if let Err(e) = builder.validate_parents(vc_check) {
+                    let mut deferred = builder.tx_list;
+                    for (_, remaining_batch) in batches {
+                        deferred.extend(remaining_batch);
                     }
-                } else if let Err(e) = builder.validate_parents(vc_check) {
-                    warn!("vertex parent 校验失败：{e}");
+                    let deferred_count = deferred.len();
+                    node.requeue_pending_txs(deferred);
+                    warn!(
+                        "vertex parent quorum 未就绪，跳过本轮并回排 {} 笔交易：{e}",
+                        deferred_count
+                    );
+                    std::thread::sleep(block_interval.min(Duration::from_secs(1)));
+                    break;
                 }
             }
             // validate_size 为粗估；put_vertex 内部用精确 BCS 再校验一次，此处仅作提前拒绝。
             if let Err(e) = builder.validate_size() {
                 warn!("vertex 大小校验失败（batch_idx={}）：{e}", batch_idx);
-                round += 1;
                 continue;
             }
 
@@ -2188,20 +2192,29 @@ fn run_validator_loop(
                 ..unsigned
             };
 
-            // 插入 Dag + 持久化 + 广播
-            let vertex_hash = {
-                let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                dag_guard.insert(vertex.clone())
+            // 先通过完整验证并持久化，再让 vertex 进入 live DAG。反过来的顺序会在
+            // put_vertex 失败时污染 parent 选择和 commit leader 检测。
+            let vertex_hash = match node.put_vertex(&vertex) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    let mut deferred = vertex.tx_list.clone();
+                    for (_, remaining_batch) in batches {
+                        deferred.extend(remaining_batch);
+                    }
+                    let deferred_count = deferred.len();
+                    node.requeue_pending_txs(deferred);
+                    warn!(
+                        "put_vertex 失败（batch_idx={}），未写入 DAG/广播并回排 {} 笔交易：{e}",
+                        batch_idx, deferred_count
+                    );
+                    std::thread::sleep(block_interval.min(Duration::from_secs(1)));
+                    break;
+                }
             };
-            if let Err(e) = node.put_vertex(&vertex) {
-                // put_vertex 持久化失败：跳过本 vertex 的 commit 与广播，避免基于未持久化 vertex 出块。
-                warn!(
-                    "put_vertex 失败（batch_idx={}），跳过 commit：{e}",
-                    batch_idx
-                );
-                last_vertex = Some(vertex);
-                round += 1;
-                continue;
+            {
+                let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                let live_hash = dag_guard.insert(vertex.clone());
+                debug_assert_eq!(live_hash, vertex_hash);
             }
             // Feed the bounded cache and gossip each transaction before the
             // compact vertex. Peers that already saw the tx can reconstruct
@@ -2875,10 +2888,8 @@ mod tests {
     #[test]
     fn compact_vertex_cache_miss_falls_back_to_full_vertex_and_persists() {
         let secret_key = secp256k1::SecretKey::from_slice(&[0x37; 32]).unwrap();
-        let public_key = secp256k1::PublicKey::from_secret_key(
-            &secp256k1::Secp256k1::new(),
-            &secret_key,
-        );
+        let public_key =
+            secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret_key);
         let author_pubkey = TaggedPubkey::new(
             SignatureScheme::Secp256k1,
             CURRENT_VERSION,
@@ -2891,6 +2902,8 @@ mod tests {
         // authenticated full vertex from the sender.
         let mut tx = make_sized_tx(64);
         tx.chain_id = poker_l1::DEFAULT_CHAIN_ID;
+        tx.tagged_pubkey = author_pubkey.clone();
+        tx.signature = secp256k1_sign_hash(&secret_key, &tx.signing_hash());
         let mut vertex = DagVertex {
             epoch: 1,
             round: 1,
@@ -2905,13 +2918,11 @@ mod tests {
         );
         let vertex_hash = vertex.vertex_hash();
 
-        let sender_node = Arc::new(
-            Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap(),
-        );
+        let sender_node =
+            Arc::new(Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap());
         sender_node.put_vertex(&vertex).unwrap();
-        let receiver_node = Arc::new(
-            Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap(),
-        );
+        let receiver_node =
+            Arc::new(Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap());
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

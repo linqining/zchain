@@ -210,6 +210,30 @@ pub enum PokerL1Error {
     /// vertex parent_hashes 数量不足 2/3 validator（spec：vertex 须引用 ≥2/3 validator 的上一轮 vertex hash）。
     #[error("vertex parent count {actual} < required {required} (2/3 of validator set)")]
     InsufficientParents { actual: usize, required: usize },
+    /// DAG round 从 1 开始；round 0 没有合法的共识语义。
+    #[error("invalid dag vertex round {round}; rounds start at 1")]
+    InvalidVertexRound { round: u64 },
+    /// 第一轮 vertex 不得引用 parent，因为不存在 round 0。
+    #[error("first-round dag vertex must not contain parents (got {actual})")]
+    UnexpectedFirstRoundParents { actual: usize },
+    /// 同一个 parent hash 在一个 vertex 中出现多次。
+    #[error("duplicate parent vertex hash: {0:?}")]
+    DuplicateParentVertex(crate::Hash),
+    /// parent 必须严格来自当前 vertex 的上一轮。
+    #[error(
+        "parent vertex {parent_hash:?} is from round {actual}; expected previous round {expected}"
+    )]
+    InvalidParentVertexRound {
+        parent_hash: crate::Hash,
+        actual: u64,
+        expected: u64,
+    },
+    /// parent 作者必须仍属于当前活跃 validator 集。
+    #[error("parent vertex author is not an active validator: {0:?}")]
+    ParentVertexAuthorNotActiveValidator(crate::signature::TaggedPubkey),
+    /// 同一 validator 的多个 parent 不能重复计入 parent quorum。
+    #[error("duplicate parent vertex author: {0:?}")]
+    DuplicateParentVertexAuthor(crate::signature::TaggedPubkey),
     /// vertex 大小超限（max_vertex_size 默认 256KB）。
     #[error("vertex size {actual} exceeds max_vertex_size {limit}")]
     VertexTooLarge { actual: usize, limit: usize },
