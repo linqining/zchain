@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
-use axum::response::IntoResponse;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
@@ -27,6 +28,7 @@ use tokio::sync::Mutex;
 use crate::contracts::TexasPokerPlugin;
 use crate::full_hand::{FullHandReport, FullHandRunner};
 use crate::plugin::ContractPlugin;
+use crate::proof_package::ServiceProofPackage;
 use crate::repository::{
     JobReservation, RepositoryError, ServiceRepository, StoredDispatchJob, StoredDispatchResult,
     StoredJobStatus, StoredProofMetadata, StoredTable,
@@ -35,6 +37,7 @@ use crate::runner::HandRunner;
 use crate::{ServiceError, ServiceResult};
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
+use poker_texas_air::orchestrator::Orchestrator;
 
 const LEGACY_TABLE_ID: u64 = 0;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
@@ -262,7 +265,21 @@ pub struct JobResponse {
     pub task_digest_hex: Option<String>,
     pub pre_state_root_hex: Option<String>,
     pub post_state_root_hex: Option<String>,
+    pub proof_archive_available: bool,
     pub error: Option<String>,
+}
+
+/// Result of reverifying a durable proof package after service restart.
+#[derive(Debug, Serialize)]
+pub struct ProofVerificationResponse {
+    pub job_id: String,
+    pub verified: bool,
+    pub method: &'static str,
+    pub table_id: u64,
+    pub hand_id: u32,
+    pub call_seq: u32,
+    pub pre_state_root_hex: String,
+    pub post_state_root_hex: String,
 }
 
 /// Result of anchoring the current live receipt segment to authenticated consensus data.
@@ -331,6 +348,8 @@ fn router(state: ServerState) -> axum::Router {
             post(verify_table_chain_consensus),
         )
         .route("/jobs/:job_id", get(get_job))
+        .route("/jobs/:job_id/proof", get(get_job_proof))
+        .route("/jobs/:job_id/verify-proof", post(verify_job_proof))
         .route("/hands/run", post(run_hand))
         .route("/hands/run-full", post(run_full_hand))
         .route("/plugins", get(list_plugins))
@@ -527,16 +546,24 @@ async fn dispatch_for_table(
         Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
     };
     let had_prove_task = outcome.prove_task.is_some();
-    let proof = if let Some(task) = &outcome.prove_task {
-        if let Err(error) = staged.prove_task(task) {
-            return fail_reserved_job(&mut runtime, job, error.to_string());
-        }
-        match proof_metadata(task) {
-            Ok(proof) => Some(proof),
+    let (proof, proof_package) = if let Some(task) = &outcome.prove_task {
+        let archived = match staged.prove_task_archived(task) {
+            Ok(archived) => archived,
             Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
-        }
+        };
+        let metadata = match proof_metadata(task) {
+            Ok(proof) => proof,
+            Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
+        };
+        let package = match ServiceProofPackage::new(task.clone(), archived.archive)
+            .and_then(|package| package.to_bytes())
+        {
+            Ok(package) => package,
+            Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
+        };
+        (Some(metadata), Some(package))
     } else {
-        None
+        (None, None)
     };
 
     let stats = staged.stats();
@@ -560,6 +587,12 @@ async fn dispatch_for_table(
         dispatch_count: stats.dispatch_count,
         prove_count: stats.prove_count,
     };
+    if let Some(package) = &proof_package {
+        runtime
+            .repository
+            .store_proof_package(job.job_id(), package)
+            .map_err(|error| internal_error(error.to_string()))?;
+    }
     runtime
         .repository
         .complete_job(stored_table, job.clone(), result.clone(), proof)
@@ -597,14 +630,65 @@ async fn get_job(
             "proving job was not found".to_string(),
         )
     })?;
-    Ok(Json(job_response(job)?))
+    let archive_available = runtime
+        .repository
+        .has_proof_package(job.job_id())
+        .map_err(|error| internal_error(error.to_string()))?;
+    Ok(Json(job_response(job, archive_available)?))
+}
+
+async fn get_job_proof(
+    State(state): State<ServerState>,
+    AxumPath(job_hex): AxumPath<String>,
+) -> Result<Response, HttpError> {
+    let job_id = decode_fixed_hex::<32>(&job_hex, "job_id")?;
+    let runtime = state.runtime.lock().await;
+    let (_job, bytes) = completed_job_proof(&runtime.repository, job_id)?;
+    Ok(([(CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+}
+
+async fn verify_job_proof(
+    State(state): State<ServerState>,
+    AxumPath(job_hex): AxumPath<String>,
+) -> Result<Json<ProofVerificationResponse>, HttpError> {
+    let job_id = decode_fixed_hex::<32>(&job_hex, "job_id")?;
+    let runtime = state.runtime.lock().await;
+    let (job, bytes) = completed_job_proof(&runtime.repository, job_id)?;
+    let package = ServiceProofPackage::from_bytes(&bytes)
+        .map_err(|error| unprocessable(error.to_string()))?;
+    let expected_metadata =
+        proof_metadata(package.task()).map_err(|error| unprocessable(error.to_string()))?;
+    let stored_metadata = job
+        .proof
+        .as_ref()
+        .ok_or_else(|| internal_error("completed proof job is missing metadata".into()))?;
+    if stored_metadata.task_digest != expected_metadata.task_digest
+        || stored_metadata.pre_state_root != expected_metadata.pre_state_root
+        || stored_metadata.post_state_root != expected_metadata.post_state_root
+    {
+        return Err(unprocessable(
+            "stored proof package does not match completed job metadata".into(),
+        ));
+    }
+    let receipt = Orchestrator::verify_archived_method_proof(package.task(), package.archive())
+        .map_err(|error| unprocessable(error.to_string()))?;
+    Ok(Json(ProofVerificationResponse {
+        job_id: hex::encode(job_id),
+        verified: true,
+        method: receipt.kind().method_name(),
+        table_id: receipt.table_id(),
+        hand_id: receipt.hand_id(),
+        call_seq: receipt.call_seq(),
+        pre_state_root_hex: hex::encode(receipt.pre_state_root().field().to_bytes_be()),
+        post_state_root_hex: hex::encode(receipt.post_state_root().field().to_bytes_be()),
+    }))
 }
 
 /// Verify the current process-local receipt segment against authenticated consensus material.
 ///
-/// A service restart intentionally clears the process-local receipt segment, so callers must
-/// first retrieve/reprove the relevant tasks from consensus rather than treating durable job
-/// metadata as a portable STARK archive.
+/// A service restart intentionally clears the process-local receipt segment. Individual durable
+/// proof packages remain re-verifiable through `/jobs/:job_id/verify-proof`, but callers must
+/// rebuild the exact ordered receipt range before anchoring a multi-call chain here.
 async fn verify_table_chain_consensus(
     State(state): State<ServerState>,
     AxumPath(table_id): AxumPath<u64>,
@@ -736,7 +820,10 @@ fn completed_job_response(
     }
 }
 
-fn job_response(job: StoredDispatchJob) -> Result<JobResponse, HttpError> {
+fn job_response(
+    job: StoredDispatchJob,
+    proof_archive_available: bool,
+) -> Result<JobResponse, HttpError> {
     let status = match job.status {
         StoredJobStatus::Running => "running",
         StoredJobStatus::Completed => "completed",
@@ -764,8 +851,32 @@ fn job_response(job: StoredDispatchJob) -> Result<JobResponse, HttpError> {
         task_digest_hex,
         pre_state_root_hex,
         post_state_root_hex,
+        proof_archive_available,
         error: job.error,
     })
+}
+
+fn completed_job_proof(
+    repository: &ServiceRepository,
+    job_id: [u8; 32],
+) -> Result<(StoredDispatchJob, Vec<u8>), HttpError> {
+    let job = repository.job(job_id).cloned().ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "proving job was not found".to_string(),
+        )
+    })?;
+    if job.status != StoredJobStatus::Completed || job.proof.is_none() {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "completed job has no proof archive".into(),
+        ));
+    }
+    let bytes = repository
+        .load_proof_package(job_id)
+        .map_err(|error| internal_error(error.to_string()))?
+        .ok_or_else(|| internal_error("completed job is missing its proof archive".into()))?;
+    Ok((job, bytes))
 }
 
 fn response_from_result(
@@ -929,6 +1040,10 @@ fn new_service_plugin(table_id: u64) -> TexasPokerPlugin {
 
 fn internal_error(message: String) -> HttpError {
     (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
+}
+
+fn unprocessable(message: String) -> HttpError {
+    (axum::http::StatusCode::UNPROCESSABLE_ENTITY, message)
 }
 
 #[cfg(test)]
@@ -1385,6 +1500,71 @@ mod tests {
             .0;
         assert_eq!(job.status, "completed");
         assert!(job.task_digest_hex.is_some());
+        assert!(job.proof_archive_available);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn durable_proof_archive_survives_restart_and_rejects_tampering() {
+        let dir = std::env::temp_dir().join(format!(
+            "zchain_proving_service_proof_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = dir.join("state.borsh");
+        let creator = [0xAA; 20];
+        let initial = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let created = dispatch_for_table(initial, 91, create_request(creator, "archive-create"))
+            .await
+            .expect("create proof should complete")
+            .0;
+
+        let recovered = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let job = get_job(State(recovered.clone()), AxumPath(created.job_id.clone()))
+            .await
+            .expect("completed job should reload")
+            .0;
+        assert!(job.proof_archive_available);
+
+        let proof_response =
+            get_job_proof(State(recovered.clone()), AxumPath(created.job_id.clone()))
+                .await
+                .expect("proof download should succeed");
+        let downloaded = axum::body::to_bytes(
+            proof_response.into_body(),
+            crate::proof_package::MAX_SERVICE_PROOF_PACKAGE_BYTES,
+        )
+        .await
+        .expect("proof response body should decode");
+        ServiceProofPackage::from_bytes(&downloaded)
+            .expect("downloaded proof package should be canonical");
+        let mut trailing = downloaded.to_vec();
+        trailing.push(0);
+        assert!(ServiceProofPackage::from_bytes(&trailing).is_err());
+
+        let verified = verify_job_proof(State(recovered.clone()), AxumPath(created.job_id.clone()))
+            .await
+            .expect("fresh service should reverify archived proof")
+            .0;
+        assert!(verified.verified);
+        assert_eq!(verified.table_id, 91);
+        assert_eq!(verified.call_seq, 1);
+        drop(recovered);
+
+        let proof_path = path
+            .with_extension("proofs")
+            .join(format!("{}.proof", created.job_id));
+        let mut tampered = std::fs::read(&proof_path).expect("proof sidecar should exist");
+        *tampered
+            .last_mut()
+            .expect("proof package should not be empty") ^= 0x01;
+        std::fs::write(&proof_path, tampered).expect("test should replace proof sidecar");
+
+        let recovered = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let error = verify_job_proof(State(recovered), AxumPath(created.job_id))
+            .await
+            .expect_err("tampered archive must be rejected");
+        assert_eq!(error.0, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -31,7 +31,8 @@
 //! - **外部锚定**：本模块验证“给定 pre-state 上该 dispatch 的 VM 语义有效”；调用方仍须
 //!   从已认证区块/receipt 取得任务，或把首尾 state root 与外部共识状态比对。本模块不证明
 //!   `ProveTask.context` 自身已被链共识认证
-//! - **不负责**：proof 序列化/传输/L1 提交（留后续 L1 submit 层）
+//! - **归档**：可返回只含 Stwo proof/shape 的 restart-safe archive；验证时仍由 task 重建 statement
+//! - **不负责**：proof 网络传输与 L1 提交（留后续 L1 submit 层）
 //!
 //! ## 当前覆盖
 //!
@@ -85,8 +86,9 @@ use crate::airs::lifecycle::tick::{TickAir, TickRow, canonical_input as canonica
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
+use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
-use crate::prover::prove_method;
+use crate::prover::{MethodProof, prove_method};
 use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
 use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verified_chain::{
@@ -113,6 +115,15 @@ pub struct ProvenTask {
     pub post_state_root: StateRoot,
     /// call_seq（链排序用）。
     pub call_seq: u32,
+}
+
+/// A method task that was proved, natively verified, and encoded for restart-safe verification.
+#[derive(Debug, Clone)]
+pub struct ArchivedProvenTask {
+    /// Descriptor summary recorded by the Orchestrator.
+    pub summary: ProvenTask,
+    /// Durable Stwo method-proof archive.
+    pub archive: ArchivedMethodProof,
 }
 
 impl ProvenTask {
@@ -155,11 +166,52 @@ impl Orchestrator {
     /// - Stwo prover 错误（约束不满足）
     /// - verify 失败（proof 无效）
     pub fn prove_and_verify_task(&mut self, task: &ProveTask) -> TexasAirResult<ProvenTask> {
+        Ok(self.prove_verify_and_archive_task(task)?.summary)
+    }
+
+    /// Prove and natively verify one task, returning a restart-safe proof archive.
+    ///
+    /// The task remains the verifier-owned statement. The archive contains only
+    /// the Stwo proof and structural metadata, so replay verification must use
+    /// the exact canonical task again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for VM replay, trace construction, proving, archive
+    /// encoding, native verification, or receipt-chain failure.
+    pub fn prove_verify_and_archive_task(
+        &mut self,
+        task: &ProveTask,
+    ) -> TexasAirResult<ArchivedProvenTask> {
         let mut backend = NativeMethodProofBackend;
-        let (summary, receipt) = self.process_task(task, &mut backend)?;
-        self.verified_chain_builder.push_receipt(receipt)?;
+        let (summary, output) = self.process_task(task, &mut backend)?;
+        self.verified_chain_builder.push_receipt(output.receipt)?;
         self.proven.push(summary.clone());
-        Ok(summary)
+        Ok(ArchivedProvenTask {
+            summary,
+            archive: output.archive,
+        })
+    }
+
+    /// Reconstruct a method statement from a canonical task and verify an archived proof.
+    ///
+    /// This is the restart path: no proof-carried AIR or public input is trusted.
+    /// The same VM dispatch replay, trusted-row construction, method selector,
+    /// log size, and trace width checks used during proving are repeated before
+    /// the native verifier can issue a receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is invalid, archive metadata differs from
+    /// the reconstructed method statement, decoding fails, or Stwo rejects the proof.
+    pub fn verify_archived_method_proof(
+        task: &ProveTask,
+        archive: &ArchivedMethodProof,
+    ) -> TexasAirResult<VerificationReceipt> {
+        let orchestrator = Self::new();
+        let mut backend = ArchivedVerificationBackend { archive };
+        let (_summary, receipt) = orchestrator.process_task(task, &mut backend)?;
+        Ok(receipt)
     }
 
     fn process_task<B: MethodBackend>(
@@ -2169,8 +2221,13 @@ trait MethodBackend {
 
 struct NativeMethodProofBackend;
 
+struct NativeMethodProofOutput {
+    receipt: VerificationReceipt,
+    archive: ArchivedMethodProof,
+}
+
 impl MethodBackend for NativeMethodProofBackend {
-    type Output = VerificationReceipt;
+    type Output = NativeMethodProofOutput;
 
     fn execute<A: crate::airs::TexasAir>(
         &mut self,
@@ -2182,7 +2239,68 @@ impl MethodBackend for NativeMethodProofBackend {
     ) -> TexasAirResult<Self::Output> {
         let trace = gen_method_trace(num_columns, row, padding)?;
         let proof = prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
-        verify_method_against_and_issue_receipt(proof, air, &public_inputs)
+        let archive = ArchivedMethodProof::from_stark(
+            public_inputs.kind,
+            proof.log_size,
+            proof.num_columns,
+            &proof.stark_proof,
+        )?;
+        let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+        Ok(NativeMethodProofOutput { receipt, archive })
+    }
+}
+
+struct ArchivedVerificationBackend<'a> {
+    archive: &'a ArchivedMethodProof,
+}
+
+impl MethodBackend for ArchivedVerificationBackend<'_> {
+    type Output = VerificationReceipt;
+
+    fn execute<A: crate::airs::TexasAir>(
+        &mut self,
+        num_columns: usize,
+        _row: &[M31],
+        _padding: &[M31],
+        air: A,
+        public_inputs: crate::public_inputs::TexasPublicInputs,
+    ) -> TexasAirResult<Self::Output> {
+        if self.archive.method_kind() != public_inputs.kind {
+            return Err(TexasAirError::SerializationError(format!(
+                "archived method kind {:?} does not match reconstructed {:?}",
+                self.archive.method_kind(),
+                public_inputs.kind
+            )));
+        }
+        if self.archive.log_size() != air.log_size() {
+            return Err(TexasAirError::SerializationError(format!(
+                "archived log_size {} does not match reconstructed {}",
+                self.archive.log_size(),
+                air.log_size()
+            )));
+        }
+        if self.archive.num_columns()? != num_columns || num_columns != air.trace_num_columns() {
+            return Err(TexasAirError::SerializationError(format!(
+                "archived/reconstructed column mismatch: archive={}, row={num_columns}, AIR={}",
+                self.archive.num_columns()?,
+                air.trace_num_columns()
+            )));
+        }
+        let proof = MethodProof {
+            stark_proof: self.archive.decode_stark()?,
+            air: air.clone(),
+            log_size: air.log_size(),
+            num_columns,
+            public_inputs: public_inputs.clone(),
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_method_against_and_issue_receipt(proof, air, &public_inputs)
+        }))
+        .map_err(|_| {
+            TexasAirError::ConstraintUnsatisfied(
+                "archived Stwo proof triggered a verifier panic".into(),
+            )
+        })?
     }
 }
 
@@ -2467,6 +2585,95 @@ mod tests {
             .expect("cancelling request_leave_after_hand should also prove");
         assert_eq!(orchestrator.proven().len(), 2);
         assert!(orchestrator.verify_chain().is_ok());
+    }
+
+    #[test]
+    fn archived_method_proof_roundtrips_and_verifies_after_restart() {
+        let pre = make_table("archive-create");
+        let args = CreateTableArgs {
+            name: "archive-created".into(),
+            max_players: 6,
+            small_blind: 50,
+            big_blind: 100,
+        };
+        let (task, _) = dispatch_task(
+            pre,
+            [0u8; 20],
+            texas_dispatch::selectors::create_table(),
+            borsh::to_vec(&args).expect("create args should serialize"),
+        );
+
+        let mut proving = Orchestrator::new();
+        let archived = proving
+            .prove_verify_and_archive_task(&task)
+            .expect("method proof should archive");
+        let wire = archived.archive.to_bytes().expect("archive should encode");
+        let decoded = ArchivedMethodProof::from_bytes(&wire).expect("archive should decode");
+
+        let receipt = Orchestrator::verify_archived_method_proof(&task, &decoded)
+            .expect("fresh verifier should accept archived proof");
+        assert_eq!(receipt.kind(), task.method_kind);
+        assert_eq!(receipt.table_id(), task.table_id);
+        assert_eq!(receipt.hand_id(), task.hand_id);
+        assert_eq!(receipt.call_seq(), task.call_seq);
+        assert_eq!(receipt.pre_version(), task.pre_table.version);
+        assert_eq!(receipt.post_version(), task.post_table.version);
+    }
+
+    #[test]
+    fn archived_method_proof_rejects_wrong_task_and_tampering() {
+        let (task, _) = dispatch_task(
+            make_table("archive-original"),
+            [0u8; 20],
+            texas_dispatch::selectors::create_table(),
+            borsh::to_vec(&CreateTableArgs {
+                name: "original".into(),
+                max_players: 6,
+                small_blind: 50,
+                big_blind: 100,
+            })
+            .unwrap(),
+        );
+        let mut proving = Orchestrator::new();
+        let archived = proving.prove_verify_and_archive_task(&task).unwrap();
+        let original_wire = archived.archive.to_bytes().unwrap();
+
+        let (wrong_task, _) = dispatch_task(
+            make_table("archive-wrong"),
+            [0u8; 20],
+            texas_dispatch::selectors::create_table(),
+            borsh::to_vec(&CreateTableArgs {
+                name: "different".into(),
+                max_players: 6,
+                small_blind: 50,
+                big_blind: 100,
+            })
+            .unwrap(),
+        );
+        assert!(
+            Orchestrator::verify_archived_method_proof(&wrong_task, &archived.archive).is_err()
+        );
+
+        let mut wrong_kind = original_wire.clone();
+        wrong_kind[1] = MethodKind::JoinTable as u8;
+        let wrong_kind = ArchivedMethodProof::from_bytes(&wrong_kind).unwrap();
+        assert!(Orchestrator::verify_archived_method_proof(&task, &wrong_kind).is_err());
+
+        let mut wrong_log_size = original_wire.clone();
+        wrong_log_size[2..6].copy_from_slice(&(MIN_LOG_SIZE + 1).to_le_bytes());
+        let wrong_log_size = ArchivedMethodProof::from_bytes(&wrong_log_size).unwrap();
+        assert!(Orchestrator::verify_archived_method_proof(&task, &wrong_log_size).is_err());
+
+        let mut wrong_columns = original_wire.clone();
+        let columns = archived.archive.num_columns().unwrap() as u32 + 1;
+        wrong_columns[6..10].copy_from_slice(&columns.to_le_bytes());
+        let wrong_columns = ArchivedMethodProof::from_bytes(&wrong_columns).unwrap();
+        assert!(Orchestrator::verify_archived_method_proof(&task, &wrong_columns).is_err());
+
+        let mut damaged_proof = original_wire;
+        *damaged_proof.last_mut().unwrap() ^= 0x01;
+        let damaged_proof = ArchivedMethodProof::from_bytes(&damaged_proof).unwrap();
+        assert!(Orchestrator::verify_archived_method_proof(&task, &damaged_proof).is_err());
     }
 
     #[test]

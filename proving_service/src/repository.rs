@@ -1,11 +1,14 @@
-//! Durable, single-process repository for Texas proving jobs.
+//! Durable, single-process repository for Texas proving jobs and proof archives.
 //!
 //! The service intentionally keeps the storage format small and explicit: one
 //! Borsh snapshot contains all table snapshots and dispatch job records.  A
 //! write is staged to a sibling temporary file and renamed only after it has
 //! been flushed, so a failed write never makes the in-memory state authoritative.
-//! It is a durable job journal, not a consensus database or proof archive.
+//! Complete proof packages are stored as atomic per-job sidecars before the job
+//! journal can mark the corresponding transition completed. This remains a local
+//! service repository, not a consensus database.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,6 +17,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use poker_l1::Address;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
+use crate::proof_package::MAX_SERVICE_PROOF_PACKAGE_BYTES;
 use crate::{ServiceError, ServiceResult};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -27,12 +31,11 @@ pub struct StoredTable {
     pub prove_count: u64,
 }
 
-/// Metadata retained for an accepted native proof.
+/// Metadata retained in the journal for an accepted native proof.
 ///
-/// The current Stwo proof object is process-local and deliberately not encoded
-/// here.  The durable record instead identifies the exact replayed task and its
-/// full-width state-root endpoints, allowing an auditor to retrieve/reprove the
-/// task from its consensus source.
+/// The complete task and Stwo archive live in the job's proof sidecar. These
+/// compact fields bind that sidecar to the completed journal record and support
+/// inexpensive job listing without loading a potentially large proof package.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct StoredProofMetadata {
     pub task_digest: [u8; 32],
@@ -142,6 +145,7 @@ impl From<RepositoryError> for ServiceError {
 pub struct ServiceRepository {
     path: Option<PathBuf>,
     snapshot: RepositorySnapshot,
+    in_memory_proofs: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
 impl ServiceRepository {
@@ -151,6 +155,7 @@ impl ServiceRepository {
         Self {
             path: None,
             snapshot: RepositorySnapshot::default(),
+            in_memory_proofs: BTreeMap::new(),
         }
     }
 
@@ -177,6 +182,7 @@ impl ServiceRepository {
         Ok(Self {
             path: Some(path),
             snapshot,
+            in_memory_proofs: BTreeMap::new(),
         })
     }
 
@@ -202,6 +208,61 @@ impl ServiceRepository {
     #[must_use]
     pub fn jobs(&self) -> &[StoredDispatchJob] {
         &self.snapshot.jobs
+    }
+
+    /// Persist the complete proof package before marking its job completed.
+    ///
+    /// Disk repositories use one atomic sidecar per job. An orphan sidecar is
+    /// acceptable after a later journal failure, but a completed job must never
+    /// be committed before its proof is durable.
+    pub fn store_proof_package(&mut self, job_id: [u8; 32], bytes: &[u8]) -> ServiceResult<()> {
+        if bytes.is_empty() || bytes.len() > MAX_SERVICE_PROOF_PACKAGE_BYTES {
+            return Err(RepositoryError::Corruption("invalid proof package length".into()).into());
+        }
+        if let Some(path) = self.proof_path(job_id) {
+            write_atomic(&path, bytes)?;
+        } else {
+            self.in_memory_proofs.insert(job_id, bytes.to_vec());
+        }
+        Ok(())
+    }
+
+    /// Load the complete proof package for a job, if present.
+    pub fn load_proof_package(&self, job_id: [u8; 32]) -> ServiceResult<Option<Vec<u8>>> {
+        if let Some(path) = self.proof_path(job_id) {
+            return match fs::read(&path) {
+                Ok(bytes) => {
+                    if bytes.is_empty() || bytes.len() > MAX_SERVICE_PROOF_PACKAGE_BYTES {
+                        Err(RepositoryError::Corruption(format!(
+                            "invalid proof package length: {}",
+                            path.display()
+                        ))
+                        .into())
+                    } else {
+                        Ok(Some(bytes))
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => {
+                    Err(RepositoryError::Io(format!("{}: {error}", path.display())).into())
+                }
+            };
+        }
+        Ok(self.in_memory_proofs.get(&job_id).cloned())
+    }
+
+    /// Whether a complete proof package is available for the job.
+    pub fn has_proof_package(&self, job_id: [u8; 32]) -> ServiceResult<bool> {
+        if let Some(path) = self.proof_path(job_id) {
+            return match fs::metadata(&path) {
+                Ok(metadata) => Ok(metadata.is_file()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => {
+                    Err(RepositoryError::Io(format!("{}: {error}", path.display())).into())
+                }
+            };
+        }
+        Ok(self.in_memory_proofs.contains_key(&job_id))
     }
 
     /// Persist a table only after it has a fully verified transition to commit.
@@ -268,6 +329,12 @@ impl ServiceRepository {
         result: StoredDispatchResult,
         proof: Option<StoredProofMetadata>,
     ) -> ServiceResult<()> {
+        if proof.is_some() && !self.has_proof_package(job.job_id)? {
+            return Err(RepositoryError::Corruption(
+                "cannot complete a proof job before its archive is durable".into(),
+            )
+            .into());
+        }
         let mut candidate = self.snapshot.clone();
         let target = candidate
             .jobs
@@ -340,6 +407,14 @@ impl ServiceRepository {
         }
         self.snapshot = candidate;
         Ok(())
+    }
+
+    fn proof_path(&self, job_id: [u8; 32]) -> Option<PathBuf> {
+        self.path.as_ref().map(|repository_path| {
+            repository_path
+                .with_extension("proofs")
+                .join(format!("{}.proof", hex::encode(job_id)))
+        })
     }
 }
 

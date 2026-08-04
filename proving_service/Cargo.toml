@@ -2,7 +2,7 @@
 name = "proving_service"
 version = "0.1.0"
 edition = "2024"
-description = "链下证明服务：提供进程内单桌 dispatch + host-side prove/verify，并保留 Texas Poker 的 6 步 WAITING 覆盖片段；不声称完整牌局、持久化或递归聚合。"
+description = "链下 Texas Poker 证明服务：持久化 dispatch job 与可重启 method-proof archive；递归聚合尚未完成。"
 
 [lib]
 path = "src/lib.rs"

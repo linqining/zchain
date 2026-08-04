@@ -43,13 +43,11 @@ impl ArchivedMethodProof {
         let num_columns = u32::try_from(num_columns).map_err(|_| {
             TexasAirError::SerializationError("method proof column count exceeds u32".into())
         })?;
-        let stark_proof_bytes = bincode_options()
-            .serialize(stark_proof)
-            .map_err(|error| {
-                TexasAirError::SerializationError(format!(
-                    "Stwo method proof serialization failed: {error}"
-                ))
-            })?;
+        let stark_proof_bytes = bincode_options().serialize(stark_proof).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "Stwo method proof serialization failed: {error}"
+            ))
+        })?;
         let archive = Self {
             version: METHOD_PROOF_ARCHIVE_VERSION,
             method_kind,
@@ -109,9 +107,7 @@ impl ArchivedMethodProof {
     }
 
     /// Deserialize the bounded Stwo proof for native verification.
-    pub(crate) fn decode_stark(
-        &self,
-    ) -> TexasAirResult<StarkProof<Poseidon252MerkleHasher>> {
+    pub(crate) fn decode_stark(&self) -> TexasAirResult<StarkProof<Poseidon252MerkleHasher>> {
         self.validate()?;
         bincode_options()
             .reject_trailing_bytes()
@@ -123,7 +119,13 @@ impl ArchivedMethodProof {
             })
     }
 
-    fn validate(&self) -> TexasAirResult<()> {
+    /// Validate the archive envelope and bounded proof payload without decoding Stwo internals.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported version, invalid trace shape, or
+    /// empty/oversized proof payload.
+    pub fn validate(&self) -> TexasAirResult<()> {
         if self.version != METHOD_PROOF_ARCHIVE_VERSION {
             return Err(TexasAirError::SerializationError(format!(
                 "unsupported method proof archive version {}",
@@ -158,3 +160,50 @@ fn bincode_options() -> impl Options {
         .with_limit(MAX_ARCHIVED_STARK_PROOF_BYTES as u64)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthetic_archive(proof_bytes: Vec<u8>) -> ArchivedMethodProof {
+        ArchivedMethodProof {
+            version: METHOD_PROOF_ARCHIVE_VERSION,
+            method_kind: MethodKind::CreateTable,
+            log_size: 10,
+            num_columns: 1,
+            stark_proof_bytes: proof_bytes,
+        }
+    }
+
+    #[test]
+    fn borsh_archive_rejects_trailing_bytes() {
+        let archive = synthetic_archive(vec![1, 2, 3]);
+        let mut bytes = archive.to_bytes().unwrap();
+        bytes.push(0);
+        assert!(ArchivedMethodProof::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn archive_rejects_empty_and_oversized_proof_payloads() {
+        assert!(synthetic_archive(Vec::new()).to_bytes().is_err());
+        assert!(
+            synthetic_archive(vec![0; MAX_ARCHIVED_STARK_PROOF_BYTES + 1])
+                .to_bytes()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn archive_rejects_unsupported_version_and_invalid_shape() {
+        let mut archive = synthetic_archive(vec![1]);
+        archive.version = METHOD_PROOF_ARCHIVE_VERSION + 1;
+        assert!(archive.to_bytes().is_err());
+
+        let mut archive = synthetic_archive(vec![1]);
+        archive.log_size = 0;
+        assert!(archive.to_bytes().is_err());
+
+        let mut archive = synthetic_archive(vec![1]);
+        archive.num_columns = 0;
+        assert!(archive.to_bytes().is_err());
+    }
+}

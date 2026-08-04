@@ -16,7 +16,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch as texas_dispatch;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
-use poker_texas_air::orchestrator::{Orchestrator, ProvenTask};
+use poker_texas_air::orchestrator::{ArchivedProvenTask, Orchestrator, ProvenTask};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
 
@@ -49,10 +49,10 @@ impl TexasPokerPlugin {
 
     /// Rehydrate a durable service table after a process restart.
     ///
-    /// Method proof objects are deliberately not serialized by the service, so
-    /// the in-memory verified-chain segment starts empty after recovery.  The
-    /// persisted table snapshot and counters still make the next canonical VM
-    /// dispatch deterministic and retain the durable proof-job history.
+    /// The in-memory verified-chain segment starts empty after recovery. Durable
+    /// proof packages can be reverified independently from the repository, while
+    /// the persisted table snapshot and counters make the next canonical VM
+    /// dispatch deterministic.
     #[must_use]
     pub fn from_persisted_state(
         table: TexasPokerTable,
@@ -98,6 +98,23 @@ impl TexasPokerPlugin {
     /// （`set_initial_encrypted_deck` 不清 aggregated_pk）。
     pub fn register_aggregated_pk(&mut self, pk: poker_protocol::crypto::ECPoint) {
         self.table.deck_state.aggregated_pk = Some(pk);
+    }
+
+    /// Prove, verify, and archive one canonical task for durable service storage.
+    ///
+    /// Hand-boundary handling is identical to the compatibility `prove_task`
+    /// trait method. The prove counter advances only after proof generation,
+    /// native verification, archive encoding, and receipt insertion all succeed.
+    pub fn prove_task_archived(&mut self, task: &ProveTask) -> PluginResult<ArchivedProvenTask> {
+        if task.pre_table.hand_id != task.post_table.hand_id {
+            self.orchestrator.start_new_chain_segment();
+        }
+        let archived = self
+            .orchestrator
+            .prove_verify_and_archive_task(task)
+            .map_err(|e| PluginError::Prover(e.to_string()))?;
+        self.prove_count += 1;
+        Ok(archived)
     }
 
     /// 尝试 descriptor-only Aggregator 入口。
@@ -241,18 +258,7 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
     }
 
     fn prove_task(&mut self, task: &ProveTask) -> PluginResult<ProvenTask> {
-        // `start_hand` is the only normal transition that advances `hand_id`. A receipt chain is
-        // deliberately scoped to one hand, so perform the segment boundary here instead of
-        // relying on an individual HTTP/CLI caller to remember it.
-        if task.pre_table.hand_id != task.post_table.hand_id {
-            self.orchestrator.start_new_chain_segment();
-        }
-        let summary = self
-            .orchestrator
-            .prove_and_verify_task(task)
-            .map_err(|e| PluginError::Prover(e.to_string()))?;
-        self.prove_count += 1;
-        Ok(summary)
+        Ok(self.prove_task_archived(task)?.summary)
     }
 
     fn verify_chain(&self) -> PluginResult<()> {
