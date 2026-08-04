@@ -81,7 +81,7 @@ use crate::airs::lifecycle::reset_for_next_hand::{
     ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
-use crate::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
+use crate::airs::lifecycle::tick::{canonical_input as canonical_tick_input, TickAir, TickRow};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{precompile_call_context, PrecompileCallBinding};
@@ -769,21 +769,15 @@ impl Orchestrator {
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("tick", "Empty", &task.method_input));
         };
-        let input = TickInput {
-            // Time is a consensus value from the dispatch context, never a
-            // local clock or an unbound placeholder.
-            current_time: task.context.block_timestamp,
-            // Gap 5：tick AIR 现要求 timeout_kind > 0（invertibility witness 约束
-            // `timeout_kind * inv == 1`）。完整 tick transition AIR 尚在拆分中，
-            // 此处固定为 1 只维持现有 trace ABI；full VM replay 仍是当前生产
-            // receipt 的语义边界。
-            timeout_kind: 1,
-            time_bank_consumed: 0,
-            time_bank_post: 0,
-            rake_mode: task.post_table.rake_mode,
-            rake_amount: task.post_table.rake_collected,
-            ..TickInput::default()
-        };
+        // Time and every Tick branch witness are reconstructed from the same
+        // consensus timestamp and canonical pre/post tables used by the VM
+        // replay above.  Never retain an ABI placeholder here: verifier-side
+        // Tick validation performs the identical reconstruction.
+        let input = canonical_tick_input(
+            &task.pre_table,
+            &task.post_table,
+            task.context.block_timestamp,
+        )?;
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
         let row = TickRow::active(

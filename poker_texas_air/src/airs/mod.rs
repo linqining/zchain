@@ -142,7 +142,11 @@ impl_texas_air!(
     MethodKind::LeaveTable
 );
 impl_texas_air!(lifecycle::start_hand::StartHandAir, MethodKind::StartHand);
-impl_texas_air!(lifecycle::tick::TickAir, MethodKind::Tick);
+impl_validated_texas_air!(
+    lifecycle::tick::TickAir,
+    MethodKind::Tick,
+    lifecycle::tick::validate_public_inputs
+);
 impl_texas_air!(
     lifecycle::reset_for_next_hand::ResetForNextHandAir,
     MethodKind::ResetForNextHand

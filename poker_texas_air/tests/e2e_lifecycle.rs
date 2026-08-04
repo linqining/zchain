@@ -989,8 +989,8 @@ fn test_lifecycle_air_column_consistency() {
     assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
     assert_eq!(StartHandAir::num_columns(), start_hand::cols::NUM_COLUMNS);
 
-    // tick: 通用 + 11 业务（含 time_bank 2 列 + rake 2 列 + Gap 5 INPUT_TIMEOUT_KIND_INV）= 48
-    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 11);
+    // tick: 通用 + 53 个业务列（完整 64-bit Time Bank / Rake / deadline witness）。
+    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 53);
     assert_eq!(TickAir::num_columns(), tick::cols::NUM_COLUMNS);
 
     // reset_for_next_hand: 通用 + 7 业务（含 POST_PENDING_ADDON 4 limb + Gap 6 shuffle_phase + q witness）= 44

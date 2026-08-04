@@ -12,8 +12,8 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
-    u64_to_m31_limbs,
+    compute_add_carries, u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow,
+    COMMON_NUM_COLUMNS, ZERO,
 };
 use crate::method_kind::MethodKind;
 

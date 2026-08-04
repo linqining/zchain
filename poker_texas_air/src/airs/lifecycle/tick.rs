@@ -18,8 +18,8 @@ use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_NONE, ROUND_SHOWDOWN, ROUND_WAITING,
-    SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_RECONSTRUCT,
+    RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_NONE, ROUND_SHOWDOWN, SHUFFLE_PHASE_BEFORE_PREFLOP,
+    SHUFFLE_PHASE_RECONSTRUCT,
 };
 use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
 use poker_l1::vm::contracts::texas_poker::state_machine;
@@ -85,7 +85,7 @@ pub mod cols {
 }
 
 /// `tick` 输入参数。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickInput {
     /// 当前时间戳。
     pub current_time: u64,
@@ -131,6 +131,235 @@ impl Default for TickInput {
             version_increment: 1,
         }
     }
+}
+
+/// Canonically reconstruct all business constants for a state-changing `tick`.
+///
+/// The native VM deliberately has several `tick` branches that are not timer
+/// expirations (start a timer, advance a completed protocol phase, start a
+/// hand, or repair an inconsistent table).  This helper follows the same
+/// priority order as [`state_machine::tick`], replays it, and derives the
+/// input constants from the resulting VM events and post-state.  It is shared
+/// by the prover and production verifier so no Tick witness is selected by the
+/// prover.
+pub fn canonical_input(
+    pre: &TexasPokerTable,
+    post: &TexasPokerTable,
+    current_time: u64,
+) -> TexasAirResult<TickInput> {
+    let (timeout_kind, timeout_started_at, timeout_ms, timer_is_pending, actor) =
+        select_tick_timer(pre)?;
+    let timeout_required = timer_is_pending
+        && timeout_started_at != 0
+        && current_time >= timeout_started_at.saturating_add(timeout_ms);
+
+    let pre_time_bank = actor
+        .map(|seat| seat_time_bank(pre, seat, "pre"))
+        .transpose()?
+        .unwrap_or(0);
+    let post_time_bank = actor
+        .map(|seat| seat_time_bank(post, seat, "post"))
+        .transpose()?
+        .unwrap_or(0);
+
+    let mut replay = pre.clone();
+    let mut events = Vec::new();
+    state_machine::tick(&mut replay, current_time, &mut events).map_err(|error| {
+        TexasAirError::SpecViolation(format!(
+            "tick: canonical state-machine replay failed: {error}"
+        ))
+    })?;
+    if replay == *pre {
+        return Err(TexasAirError::SpecViolation(
+            "tick: canonical replay made no state change, so dispatch must not issue a proof task"
+                .into(),
+        ));
+    }
+
+    replay.call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation("tick: call_seq overflow during canonical replay".into())
+    })?;
+    if events
+        .iter()
+        .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }))
+    {
+        replay.hand_id = pre.hand_id.checked_add(1).ok_or_else(|| {
+            TexasAirError::SpecViolation("tick: hand_id overflow during canonical replay".into())
+        })?;
+    } else {
+        replay.hand_id = pre.hand_id;
+    }
+    if replay != *post {
+        return Err(TexasAirError::SpecViolation(
+            "tick: canonical post-table differs from VM replay".into(),
+        ));
+    }
+
+    let mut time_bank_consumed = 0u64;
+    let mut event_post_time_bank = None;
+    let mut rake_amount = 0u64;
+    let mut rake_mode = pre.rake_mode;
+    for event in &events {
+        match event {
+            TexasPokerEvent::TimeBankConsumed {
+                table_id,
+                seat_index,
+                consumed_ms,
+                remaining_ms,
+            } => {
+                if *table_id != pre.id {
+                    return Err(TexasAirError::SpecViolation(
+                        "tick: TimeBankConsumed event references another table".into(),
+                    ));
+                }
+                if Some(*seat_index) != actor || event_post_time_bank.is_some() {
+                    return Err(TexasAirError::SpecViolation(
+                        "tick: invalid TimeBankConsumed event for the selected betting actor"
+                            .into(),
+                    ));
+                }
+                time_bank_consumed = *consumed_ms;
+                event_post_time_bank = Some(*remaining_ms);
+            }
+            TexasPokerEvent::RakeCollected {
+                table_id,
+                rake_amount: amount,
+                rake_mode: mode,
+                ..
+            } => {
+                if *table_id != pre.id {
+                    return Err(TexasAirError::SpecViolation(
+                        "tick: RakeCollected event references another table".into(),
+                    ));
+                }
+                rake_amount = rake_amount.checked_add(*amount).ok_or_else(|| {
+                    TexasAirError::SpecViolation("tick: rake event sum overflow".into())
+                })?;
+                rake_mode = *mode;
+            }
+            _ => {}
+        }
+    }
+    if let Some(remaining) = event_post_time_bank {
+        if pre_time_bank
+            .checked_sub(time_bank_consumed)
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "tick: Time Bank consumption exceeds pre balance".into(),
+                )
+            })?
+            != remaining
+            || post_time_bank != remaining
+        {
+            return Err(TexasAirError::SpecViolation(
+                "tick: Time Bank event is inconsistent with canonical table balances".into(),
+            ));
+        }
+    } else if time_bank_consumed != 0 {
+        return Err(TexasAirError::SpecViolation(
+            "tick: non-zero Time Bank consumption lacks a canonical event".into(),
+        ));
+    }
+
+    let version_increment = post.version.checked_sub(pre.version).ok_or_else(|| {
+        TexasAirError::SpecViolation("tick: post version precedes pre version".into())
+    })?;
+    let version_increment = u8::try_from(version_increment).map_err(|_| {
+        TexasAirError::SpecViolation("tick: version increment exceeds Tick AIR encoding".into())
+    })?;
+
+    Ok(TickInput {
+        current_time,
+        timeout_kind,
+        timeout_required,
+        timeout_started_at,
+        timeout_ms,
+        time_bank_consumed,
+        time_bank_post: post_time_bank,
+        pre_time_bank,
+        rake_mode,
+        rake_amount,
+        version_increment,
+    })
+}
+
+/// Return the canonical timer family that has priority in the pre-state.
+fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, bool, Option<u8>)> {
+    if table.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE {
+        return Ok((
+            TICK_KIND_RECONSTRUCT,
+            table.timestamps.reconstruct_started_at,
+            table.timeout_config.reconstruct_timeout_ms,
+            true,
+            None,
+        ));
+    }
+    if matches!(
+        table.shuffle_state.phase,
+        SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
+    ) {
+        let pending = !table.shuffle_state.pending_players.is_empty()
+            && table.shuffle_state.current_shuffler.is_some();
+        return Ok((
+            TICK_KIND_SHUFFLE,
+            table.timestamps.shuffle_started_at,
+            table.timeout_config.shuffle_timeout_ms,
+            pending,
+            None,
+        ));
+    }
+    if table.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE {
+        let pending = !table
+            .reveal_token_state
+            .assignments
+            .iter()
+            .all(|assignment| assignment.pending_players.is_empty());
+        return Ok((
+            TICK_KIND_REVEAL,
+            table.timestamps.reveal_started_at,
+            table.timeout_config.reveal_timeout_ms,
+            pending,
+            None,
+        ));
+    }
+    if state_machine::is_betting_round(table) {
+        if let Some(seat) = table.current_turn {
+            // Validate this now rather than letting an out-of-range index reach
+            // the native state machine's indexing path later.
+            let _ = seat_time_bank(table, seat, "pre")?;
+            return Ok((
+                TICK_KIND_BETTING,
+                table.timestamps.betting_started_at,
+                table.timeout_config.betting_timeout_ms,
+                true,
+                Some(seat),
+            ));
+        }
+    }
+    if table.round_state == ROUND_SHOWDOWN {
+        // `showdown_at` is already a deadline in the native VM. Model it as
+        // `started_at + 0` so the common 64-bit comparison AIR remains exact.
+        return Ok((
+            TICK_KIND_NON_TIMER,
+            table.timestamps.showdown_at,
+            0,
+            table.timestamps.showdown_at != 0,
+            None,
+        ));
+    }
+    Ok((TICK_KIND_NON_TIMER, 0, 0, false, None))
+}
+
+fn seat_time_bank(table: &TexasPokerTable, seat: u8, label: &str) -> TexasAirResult<u64> {
+    table
+        .seats
+        .get(usize::from(seat))
+        .map(|entry| entry.time_bank_ms)
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation(format!(
+                "tick: {label}-state current_turn {seat} is outside the table seats"
+            ))
+        })
 }
 
 /// `tick` AIR。
@@ -593,4 +822,62 @@ impl TickRow {
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }
+}
+
+/// Reconstruct the canonical native Tick transition and its complete AIR row.
+///
+/// This closes the gap between the trace's Tick business columns and the
+/// public table images.  A verifier now rejects a proof whose timer family,
+/// Time Bank accounting, rake receipt, version delta, or trusted trace row was
+/// not derived from the same VM transition as the committed pre/post tables.
+pub fn validate_public_inputs(
+    air: &TickAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    if public_inputs.kind != MethodKind::Tick {
+        return Err(TexasAirError::SpecViolation(
+            "tick: public-input method kind mismatch".into(),
+        ));
+    }
+    let pre = table_from_state_preimage(&public_inputs.pre_image)?;
+    let post = table_from_state_preimage(&public_inputs.post_image)?;
+    if pre.id != post.id
+        || public_inputs.table_id != pre.id.creation_nonce
+        || public_inputs.table_id != post.id.creation_nonce
+        || public_inputs.pre_version != pre.version
+        || public_inputs.post_version != post.version
+        || public_inputs.hand_id != post.hand_id
+        || public_inputs.call_seq != post.call_seq
+    {
+        return Err(TexasAirError::SpecViolation(
+            "tick: public metadata does not match canonical pre/post tables".into(),
+        ));
+    }
+
+    let expected_input = canonical_input(&pre, &post, air.input.current_time)?;
+    if air.input != expected_input {
+        return Err(TexasAirError::SpecViolation(
+            "tick: AIR constants do not match the canonical VM transition".into(),
+        ));
+    }
+    let expected_row = TickRow::active(
+        &expected_input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        post.version,
+        pre.round_state,
+        post.round_state,
+    )
+    .to_vec();
+    let trusted_row = public_inputs.require_expected_trace_row(expected_row.len())?;
+    if trusted_row != expected_row {
+        return Err(TexasAirError::SpecViolation(
+            "tick: trusted trace row was not reconstructed from canonical public inputs".into(),
+        ));
+    }
+    Ok(())
 }
