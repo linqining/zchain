@@ -82,29 +82,22 @@ pub fn prove_aggregator(_children: Vec<ChildDescriptor>) -> TexasAirResult<Aggre
 /// - `TexasAirError::RecursionError` — 链式连续性破坏
 /// - `TexasAirError::StwoProverError` — Stwo prover 内部错误
 pub fn prove_aggregator_host_attested(
-    children: Vec<ChildDescriptor>,
-    attestation: &HostAttestation,
+    _children: Vec<ChildDescriptor>,
+    _attestation: &HostAttestation,
 ) -> TexasAirResult<AggregatorProof> {
-    // 校验 attestation 覆盖所有子节点。
-    if attestation.verified_count != children.len() {
-        return Err(TexasAirError::RecursionError(format!(
-            "host attestation covers {} children but aggregator has {}",
-            attestation.verified_count,
-            children.len()
-        )));
-    }
-    // 生成 descriptor chain STARK（复用 unchecked 逻辑，但此入口有 attestation 背书）。
-    let mut proof = prove_aggregator_unchecked(children)?;
-    // 标记 proof 为 host-attested（通过 num_levels 字段的负值编码，或附加元数据）。
-    // 此处通过 children 数量与 attestation 的一致性已隐含保证。
-    proof.num_levels = proof.num_levels.wrapping_add(0x8000_0000); // 标记位
-    Ok(proof)
+    // `HostAttestation` is caller-constructible data, not an unforgeable verifier
+    // receipt. A count/endpoints check cannot turn descriptor-only aggregation
+    // into proof of child validity. The safe O(N) transition path is
+    // `outer_aggregate`, which actually re-verifies every child package.
+    Err(TexasAirError::UntrustedAggregationDisabled)
 }
 
-/// 宿主证明：声明 orchestrator 已在宿主上原生验证了 N 个子 proof。
+/// Legacy host-attestation descriptor retained for source compatibility.
 ///
-/// 由 [`crate::orchestrator::Orchestrator`] 在 `prove_and_verify_task` 后构造，
-/// 传递给 [`prove_aggregator_host_attested`] 作为聚合的前置条件。
+/// This structure is ordinary caller-constructible data and therefore cannot
+/// authorize aggregation. [`prove_aggregator_host_attested`] always fails
+/// closed. Use [`crate::outer_aggregate`] for the explicit O(N) host-verified
+/// path while the Texas-owned recursive verifier is unfinished.
 #[derive(Debug, Clone)]
 pub struct HostAttestation {
     /// 已验证的子 proof 数量。

@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::contracts::TexasPokerPlugin;
+use crate::full_hand::{FullHandReport, FullHandRunner};
 use crate::plugin::ContractPlugin;
 use crate::repository::{
     JobReservation, RepositoryError, ServiceRepository, StoredDispatchJob, StoredDispatchResult,
@@ -48,6 +49,7 @@ type HttpError = (axum::http::StatusCode, String);
 struct ServerState {
     runtime: Arc<Mutex<ServiceRuntime>>,
     last_report: Arc<Mutex<Option<HandReportJson>>>,
+    last_full_report: Arc<Mutex<Option<FullHandReportJson>>>,
 }
 
 struct ServiceRuntime {
@@ -90,6 +92,7 @@ impl ServerState {
         Self {
             runtime: Arc::new(Mutex::new(ServiceRuntime::new(repository))),
             last_report: Arc::new(Mutex::new(None)),
+            last_full_report: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -127,6 +130,56 @@ impl HandReportJson {
             chain_length: r.stats.chain_length,
         }
     }
+}
+
+/// JSON representation of one full-hand dispatch/prove step.
+#[derive(Debug, Clone, Serialize)]
+pub struct FullHandStepJson {
+    pub method: String,
+    pub dispatch_micros: u64,
+    pub prove_verify_micros: u64,
+    pub ok: bool,
+}
+
+/// JSON representation of the complete 32-transition Texas proving run.
+#[derive(Debug, Clone, Serialize)]
+pub struct FullHandReportJson {
+    pub steps: Vec<FullHandStepJson>,
+    pub total_micros: u64,
+    pub chain_ok: bool,
+    pub dispatch_count: u64,
+    pub prove_count: u64,
+    pub chain_length: usize,
+    pub winner_seat: Option<u8>,
+    pub stopped_at: Option<String>,
+}
+
+impl FullHandReportJson {
+    fn from_report(report: &FullHandReport) -> Self {
+        Self {
+            steps: report
+                .steps
+                .iter()
+                .map(|step| FullHandStepJson {
+                    method: step.method.clone(),
+                    dispatch_micros: duration_micros(step.dispatch),
+                    prove_verify_micros: duration_micros(step.prove),
+                    ok: step.ok,
+                })
+                .collect(),
+            total_micros: duration_micros(report.total),
+            chain_ok: report.chain_ok,
+            dispatch_count: report.stats.dispatch_count,
+            prove_count: report.stats.prove_count,
+            chain_length: report.stats.chain_length,
+            winner_seat: report.winner_seat,
+            stopped_at: report.stopped_at.clone(),
+        }
+    }
+}
+
+fn duration_micros(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Dispatch request.  Supplying `idempotency_key` makes retries safe across a
@@ -266,6 +319,7 @@ fn router(state: ServerState) -> axum::Router {
         )
         .route("/jobs/:job_id", get(get_job))
         .route("/hands/run", post(run_hand))
+        .route("/hands/run-full", post(run_full_hand))
         .route("/plugins", get(list_plugins))
         .route("/health", get(|| async { "ok" }))
         .with_state(state)
@@ -282,11 +336,23 @@ fn ensure_loopback_bind(addr: SocketAddr) -> ServiceResult<()> {
 }
 
 async fn run_hand(State(state): State<ServerState>) -> Result<Json<HandReportJson>, HttpError> {
-    let (_plugin, report) = HandRunner::new()
-        .run()
+    let (_plugin, report) = tokio::task::spawn_blocking(|| HandRunner::new().run())
+        .await
+        .map_err(|error| internal_error(format!("hand runner task failed: {error}")))?
         .map_err(|error| internal_error(error.to_string()))?;
     let json = HandReportJson::from_report(&report);
     *state.last_report.lock().await = Some(json.clone());
+    Ok(Json(json))
+}
+
+async fn run_full_hand(
+    State(state): State<ServerState>,
+) -> Result<Json<FullHandReportJson>, HttpError> {
+    let (_plugin, report) = tokio::task::spawn_blocking(|| FullHandRunner::new().run())
+        .await
+        .map_err(|error| internal_error(format!("full-hand runner task failed: {error}")))?;
+    let json = FullHandReportJson::from_report(&report);
+    *state.last_full_report.lock().await = Some(json.clone());
     Ok(Json(json))
 }
 
@@ -570,6 +636,7 @@ async fn verify_table_chain_consensus(
 
 async fn list_plugins(State(state): State<ServerState>) -> impl IntoResponse {
     let last_report = state.last_report.lock().await.clone();
+    let last_full_report = state.last_full_report.lock().await.clone();
     let runtime = state.runtime.lock().await;
     let tables: Vec<_> = runtime
         .repository
@@ -595,6 +662,15 @@ async fn list_plugins(State(state): State<ServerState>) -> impl IntoResponse {
             "dispatch_count": report.dispatch_count,
             "prove_count": report.prove_count,
             "chain_length": report.chain_length,
+        })),
+        "last_full_report": last_full_report.map(|report| serde_json::json!({
+            "chain_ok": report.chain_ok,
+            "dispatch_count": report.dispatch_count,
+            "prove_count": report.prove_count,
+            "chain_length": report.chain_length,
+            "winner_seat": report.winner_seat,
+            "stopped_at": report.stopped_at,
+            "total_micros": report.total_micros,
         })),
     }))
 }
@@ -824,6 +900,32 @@ mod tests {
     use poker_texas_air::consensus_anchor::{ConsensusDispatchCall, TableSnapshot};
     use secp256k1::{Message, Secp256k1, SecretKey};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn full_hand_http_route_proves_and_reports_all_transitions() {
+        let response = router(ServerState::default())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/hands/run-full")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("full-hand route must return a response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("full-hand response body must be readable");
+        let report: serde_json::Value =
+            serde_json::from_slice(&body).expect("full-hand response must be JSON");
+        assert_eq!(report["steps"].as_array().map(Vec::len), Some(32));
+        assert_eq!(report["chain_ok"], true);
+        assert_eq!(report["dispatch_count"], 32);
+        assert_eq!(report["prove_count"], 32);
+        assert_eq!(report["chain_length"], 32);
+        assert!(report["stopped_at"].is_null());
+    }
 
     fn test_tagged_pubkey(secret: &SecretKey) -> TaggedPubkey {
         let secp = Secp256k1::new();

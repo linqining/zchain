@@ -103,7 +103,7 @@ pub mod cols {
 }
 
 /// Aggregator AIR 的子节点描述符（一个被聚合的 method proof 摘要）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildDescriptor {
     /// 子节点的 pre state_root（4 limb）。
     pub pre_state_root: [M31; 4],
@@ -140,7 +140,7 @@ pub fn mix_children_into_channel<C: stwo::core::channel::Channel>(
 }
 
 /// Aggregator AIR 公开输入。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregatorAir {
     /// log2(trace 行数)。
     pub log_size: u32,
@@ -201,12 +201,44 @@ impl FrameworkEval for AggregatorAir {
         let right_method_kind = eval.next_trace_mask();
         let is_top_level = eval.next_trace_mask();
 
-        // 约束 1：IS_ACTIVE, IS_PADDING boolean + 互斥
+        // 约束 1：IS_ACTIVE, IS_PADDING boolean + 恰好二选一。
+        //
+        // 仅约束互斥会允许 `(0, 0)` 行，从而让攻击者构造既不是 active 也不是
+        // padding 的完全无约束行。聚合 trace 的每一行必须明确属于其中一种。
         let active_minus_one = is_active.clone() - one.clone();
         let padding_minus_one = is_padding.clone() - one.clone();
         eval.add_constraint(is_active.clone() * active_minus_one);
         eval.add_constraint(is_padding.clone() * padding_minus_one);
         eval.add_constraint(is_active.clone() * is_padding.clone());
+        eval.add_constraint(is_active.clone() + is_padding.clone() - one.clone());
+
+        // Padding 行必须是规范全零行，避免把未被 active gate 消费的 descriptor
+        // 数据藏在 padding 区域。IS_PADDING 自身按上面的约束固定为 1。
+        for value in [
+            left_pre_0.clone(),
+            left_pre_1.clone(),
+            left_pre_2.clone(),
+            left_pre_3.clone(),
+            left_post_0.clone(),
+            left_post_1.clone(),
+            left_post_2.clone(),
+            left_post_3.clone(),
+            right_pre_0.clone(),
+            right_pre_1.clone(),
+            right_pre_2.clone(),
+            right_pre_3.clone(),
+            right_post_0.clone(),
+            right_post_1.clone(),
+            right_post_2.clone(),
+            right_post_3.clone(),
+            left_call_seq.clone(),
+            right_call_seq.clone(),
+            left_method_kind.clone(),
+            right_method_kind.clone(),
+            is_top_level.clone(),
+        ] {
+            eval.add_constraint(is_padding.clone() * value);
+        }
 
         // 约束 2：链式连续性 — LEFT_POST == RIGHT_PRE（4 limb）
         // left.post_state_root == right.pre_state_root
@@ -237,19 +269,43 @@ impl FrameworkEval for AggregatorAir {
         let expected_left_seq: E::F = M31::from(self.left.call_seq).into();
         let expected_right_seq_pub: E::F = M31::from(self.right.call_seq).into();
         eval.add_constraint(is_top_level.clone() * (left_call_seq - expected_left_seq));
-        eval.add_constraint(is_top_level * (right_call_seq.clone() - expected_right_seq_pub));
-
-        // 抑制未使用警告（agg_pre/post_state_root 在 verifier 端验证，AIR 内已通过 left_pre/right_post 间接约束）
-        let _ = (
-            left_pre_0,
-            left_pre_1,
-            left_pre_2,
-            left_pre_3,
-            right_post_0,
-            right_post_1,
-            right_post_2,
-            right_post_3,
+        eval.add_constraint(
+            is_top_level.clone() * (right_call_seq.clone() - expected_right_seq_pub),
         );
+
+        // 约束 6：顶层 row 必须绑定完整 left/right descriptor roots，并把聚合
+        // 端点传播为 `left.pre` / `right.post`。此前这些字段只存在于 AIR struct，
+        // 没有进入任何多项式约束，篡改 aggregate endpoint 不会影响验证结果。
+        let left_pre = [left_pre_0, left_pre_1, left_pre_2, left_pre_3];
+        let left_post = [left_post_0, left_post_1, left_post_2, left_post_3];
+        let right_pre = [right_pre_0, right_pre_1, right_pre_2, right_pre_3];
+        let right_post = [right_post_0, right_post_1, right_post_2, right_post_3];
+        for i in 0..4 {
+            let expected_left_pre: E::F = self.left.pre_state_root[i].into();
+            let expected_left_post: E::F = self.left.post_state_root[i].into();
+            let expected_right_pre: E::F = self.right.pre_state_root[i].into();
+            let expected_right_post: E::F = self.right.post_state_root[i].into();
+            let expected_agg_pre: E::F = self.agg_pre_state_root[i].into();
+            let expected_agg_post: E::F = self.agg_post_state_root[i].into();
+            eval.add_constraint(
+                is_top_level.clone() * (left_pre[i].clone() - expected_left_pre),
+            );
+            eval.add_constraint(
+                is_top_level.clone() * (left_post[i].clone() - expected_left_post),
+            );
+            eval.add_constraint(
+                is_top_level.clone() * (right_pre[i].clone() - expected_right_pre),
+            );
+            eval.add_constraint(
+                is_top_level.clone() * (right_post[i].clone() - expected_right_post),
+            );
+            eval.add_constraint(
+                is_top_level.clone() * (left_pre[i].clone() - expected_agg_pre),
+            );
+            eval.add_constraint(
+                is_top_level.clone() * (right_post[i].clone() - expected_agg_post),
+            );
+        }
 
         eval
     }
@@ -372,6 +428,31 @@ pub fn build_binary_tree(
     // 单节点：直接返回（无聚合行）
     if children.len() == 1 {
         return Ok((children.into_iter().next().unwrap(), levels));
+    }
+
+    // Leaf descriptors represent consecutive VM calls. Merely requiring a
+    // strictly increasing sequence permits deletion/splicing gaps such as
+    // `10, 12`; the aggregate must reject those before constructing parents.
+    for (index, pair) in children.windows(2).enumerate() {
+        let expected = pair[0].call_seq.checked_add(1).ok_or_else(|| {
+            crate::error::TexasAirError::RecursionError(format!(
+                "build_binary_tree: call_seq overflow at child {index}"
+            ))
+        })?;
+        if pair[1].call_seq != expected {
+            return Err(crate::error::TexasAirError::RecursionError(format!(
+                "build_binary_tree: call_seq 不连续 at index {index}..{}：right={}，期望 {}",
+                index + 1,
+                pair[1].call_seq,
+                expected
+            )));
+        }
+        if pair[0].post_state_root != pair[1].pre_state_root {
+            return Err(crate::error::TexasAirError::RecursionError(format!(
+                "build_binary_tree: 链式连续性破坏 at index {index}..{}：left.post != right.pre",
+                index + 1
+            )));
+        }
     }
 
     // 二叉树层级聚合

@@ -51,7 +51,8 @@ pub fn verify_aggregator(_proof: AggregatorProof) -> TexasAirResult<()> {
 /// - `TexasAirError::ConstraintUnsatisfied` — AIR 约束不满足
 /// - `TexasAirError::StwoProverError` — Stwo verifier 内部错误
 pub fn verify_aggregator_host_attested(proof: AggregatorProof) -> TexasAirResult<()> {
-    verify_aggregator_unchecked(proof)
+    let _ = proof;
+    Err(TexasAirError::UntrustedAggregationDisabled)
 }
 
 /// 验证 descriptor-only Aggregator PoC，仅供测试与审计复现。
@@ -68,6 +69,7 @@ pub fn verify_aggregator_unchecked_for_tests(proof: AggregatorProof) -> TexasAir
 }
 
 fn verify_aggregator_unchecked(proof: AggregatorProof) -> TexasAirResult<()> {
+    validate_proof_metadata(&proof)?;
     let config = PcsConfig::default();
     let log_size = proof.log_size;
     let stark_proof = proof.stark_proof.clone();
@@ -115,5 +117,84 @@ fn verify_aggregator_unchecked(proof: AggregatorProof) -> TexasAirResult<()> {
     )
     .map_err(|e: VerificationError| TexasAirError::ConstraintUnsatisfied(e.to_string()))?;
 
+    Ok(())
+}
+
+/// Reconstruct every verifier-controlled Aggregator statement field from the
+/// transcript-bound leaf descriptors. Proof-carried AIR metadata is never an
+/// independent source of truth.
+fn validate_proof_metadata(proof: &AggregatorProof) -> TexasAirResult<()> {
+    if proof.num_children != proof.children.len() {
+        return Err(TexasAirError::RecursionError(format!(
+            "aggregator num_children {} != descriptor count {}",
+            proof.num_children,
+            proof.children.len()
+        )));
+    }
+
+    let (root, levels) = crate::aggregator_air::build_binary_tree(proof.children.clone())?;
+    if levels.is_empty() {
+        return Err(TexasAirError::RecursionError(
+            "aggregator proof must contain at least two children".into(),
+        ));
+    }
+    if proof.num_levels != levels.len() {
+        return Err(TexasAirError::RecursionError(format!(
+            "aggregator num_levels {} != reconstructed level count {}",
+            proof.num_levels,
+            levels.len()
+        )));
+    }
+
+    let row_count: usize = levels.iter().map(Vec::len).sum();
+    let mut expected_log_size = 10u32;
+    while (1usize << expected_log_size) < row_count {
+        expected_log_size += 1;
+    }
+    if proof.log_size != expected_log_size || proof.air.log_size != expected_log_size {
+        return Err(TexasAirError::RecursionError(format!(
+            "aggregator log_size mismatch: proof={}, air={}, expected={expected_log_size}",
+            proof.log_size, proof.air.log_size
+        )));
+    }
+
+    let top_row = levels
+        .last()
+        .and_then(|level| level.first())
+        .ok_or_else(|| TexasAirError::RecursionError("aggregator top row missing".into()))?;
+    let left_kind = crate::method_kind::MethodKind::from_u8(
+        u8::try_from(top_row.left_method_kind.0).map_err(|_| {
+            TexasAirError::RecursionError("aggregator left method kind exceeds u8".into())
+        })?,
+    )
+    .ok_or_else(|| TexasAirError::RecursionError("aggregator left method kind invalid".into()))?;
+    let right_kind = crate::method_kind::MethodKind::from_u8(
+        u8::try_from(top_row.right_method_kind.0).map_err(|_| {
+            TexasAirError::RecursionError("aggregator right method kind exceeds u8".into())
+        })?,
+    )
+    .ok_or_else(|| TexasAirError::RecursionError("aggregator right method kind invalid".into()))?;
+    let expected_air = crate::aggregator_air::AggregatorAir {
+        log_size: expected_log_size,
+        left: crate::aggregator_air::ChildDescriptor {
+            pre_state_root: top_row.left_pre_state_root,
+            post_state_root: top_row.left_post_state_root,
+            call_seq: top_row.left_call_seq.0,
+            method_kind: left_kind,
+        },
+        right: crate::aggregator_air::ChildDescriptor {
+            pre_state_root: top_row.right_pre_state_root,
+            post_state_root: top_row.right_post_state_root,
+            call_seq: top_row.right_call_seq.0,
+            method_kind: right_kind,
+        },
+        agg_pre_state_root: root.pre_state_root,
+        agg_post_state_root: root.post_state_root,
+    };
+    if proof.air != expected_air {
+        return Err(TexasAirError::RecursionError(
+            "aggregator AIR metadata does not match transcript-bound descriptors".into(),
+        ));
+    }
     Ok(())
 }

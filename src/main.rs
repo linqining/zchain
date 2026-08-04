@@ -2873,6 +2873,152 @@ mod tests {
     }
 
     #[test]
+    fn compact_vertex_cache_miss_falls_back_to_full_vertex_and_persists() {
+        let secret_key = secp256k1::SecretKey::from_slice(&[0x37; 32]).unwrap();
+        let public_key = secp256k1::PublicKey::from_secret_key(
+            &secp256k1::Secp256k1::new(),
+            &secret_key,
+        );
+        let author_pubkey = TaggedPubkey::new(
+            SignatureScheme::Secp256k1,
+            CURRENT_VERSION,
+            public_key.serialize().to_vec(),
+        )
+        .unwrap();
+
+        // The receiver deliberately does not cache this transaction. Its first
+        // attempt to reconstruct the compact vertex must therefore request the
+        // authenticated full vertex from the sender.
+        let mut tx = make_sized_tx(64);
+        tx.chain_id = poker_l1::DEFAULT_CHAIN_ID;
+        let mut vertex = DagVertex {
+            epoch: 1,
+            round: 1,
+            author_pubkey,
+            tx_list: vec![tx],
+            parent_hashes: vec![],
+            author_sig: vec![],
+        };
+        vertex.author_sig = secp256k1_sign_hash(
+            &secret_key,
+            &vertex.signing_hash(poker_l1::DEFAULT_CHAIN_ID),
+        );
+        let vertex_hash = vertex.vertex_hash();
+
+        let sender_node = Arc::new(
+            Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap(),
+        );
+        sender_node.put_vertex(&vertex).unwrap();
+        let receiver_node = Arc::new(
+            Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap(),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender_stream = TcpStream::connect(address).unwrap();
+        let (receiver_stream, _) = listener.accept().unwrap();
+        sender_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        receiver_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let sender_transport = Arc::new(TcpTransport::new());
+        let receiver_transport = Arc::new(TcpTransport::new());
+        let sender_dag = Arc::new(Mutex::new(Dag::new()));
+        let receiver_dag = Arc::new(Mutex::new(Dag::new()));
+        let sender_gossip = Arc::new(GossipManager::new());
+        let receiver_gossip = Arc::new(GossipManager::new());
+
+        let sender_handler = {
+            let node = Arc::clone(&sender_node);
+            let transport = Arc::clone(&sender_transport);
+            let dag = Arc::clone(&sender_dag);
+            let gossip = Arc::clone(&sender_gossip);
+            std::thread::spawn(move || {
+                handle_p2p_connection(
+                    sender_stream,
+                    node,
+                    transport,
+                    dag,
+                    Arc::new(VoteCollector::new()),
+                    gossip,
+                );
+            })
+        };
+        let receiver_handler = {
+            let node = Arc::clone(&receiver_node);
+            let transport = Arc::clone(&receiver_transport);
+            let dag = Arc::clone(&receiver_dag);
+            let gossip = Arc::clone(&receiver_gossip);
+            std::thread::spawn(move || {
+                handle_p2p_connection(
+                    receiver_stream,
+                    node,
+                    transport,
+                    dag,
+                    Arc::new(VoteCollector::new()),
+                    gossip,
+                );
+            })
+        };
+
+        let connected_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while sender_transport
+            .peers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+        {
+            assert!(
+                std::time::Instant::now() < connected_deadline,
+                "sender handler did not register its shared writer"
+            );
+            std::thread::yield_now();
+        }
+
+        sender_gossip
+            .broadcast_compact_vertex(&vertex, sender_transport.as_ref())
+            .unwrap();
+
+        let persistence_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if receiver_node
+                .vertex_store()
+                .get_by_hash(&vertex_hash)
+                .is_ok()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < persistence_deadline,
+                "receiver did not persist the full-vertex fallback"
+            );
+            std::thread::yield_now();
+        }
+
+        assert_eq!(
+            receiver_node
+                .vertex_store()
+                .get_by_hash(&vertex_hash)
+                .unwrap(),
+            vertex
+        );
+        assert!(
+            receiver_dag
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&vertex_hash)
+                .is_some(),
+            "validated fallback vertex must also enter the live DAG"
+        );
+
+        sender_handler.join().unwrap();
+        receiver_handler.join().unwrap();
+    }
+
+    #[test]
     fn split_batches_empty_input_returns_empty() {
         let batches = split_txs_into_batches(Vec::new(), MAX_VERTEX_SIZE);
         assert!(batches.is_empty(), "空输入应返回空 Vec");

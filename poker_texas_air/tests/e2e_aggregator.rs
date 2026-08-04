@@ -17,9 +17,12 @@
 use stwo::core::fields::m31::M31;
 
 use poker_texas_air::aggregator_air::{ChildDescriptor, build_binary_tree};
-use poker_texas_air::aggregator_prover::{prove_aggregator, prove_aggregator_unchecked_for_tests};
+use poker_texas_air::aggregator_prover::{
+    HostAttestation, prove_aggregator, prove_aggregator_host_attested,
+    prove_aggregator_unchecked_for_tests,
+};
 use poker_texas_air::aggregator_verifier::{
-    verify_aggregator, verify_aggregator_unchecked_for_tests,
+    verify_aggregator, verify_aggregator_host_attested, verify_aggregator_unchecked_for_tests,
 };
 use poker_texas_air::airs::common::ZERO;
 use poker_texas_air::error::TexasAirError;
@@ -84,11 +87,59 @@ fn test_production_aggregator_entry_points_reject_untrusted_poc() {
     ));
 
     let poc_proof =
-        prove_aggregator_unchecked_for_tests(children).expect("test-only PoC prove should work");
+        prove_aggregator_unchecked_for_tests(children.clone()).expect("test-only PoC prove should work");
     assert!(matches!(
-        verify_aggregator(poc_proof),
+        verify_aggregator(poc_proof.clone()),
         Err(TexasAirError::UntrustedAggregationDisabled)
     ));
+
+    let attestation = HostAttestation {
+        verified_count: children.len(),
+        anchor_state_root: poker_texas_air::state_root::StateRoot::zero(),
+        final_state_root: poker_texas_air::state_root::StateRoot::zero(),
+    };
+    assert!(matches!(
+        prove_aggregator_host_attested(children, &attestation),
+        Err(TexasAirError::UntrustedAggregationDisabled)
+    ));
+    assert!(matches!(
+        verify_aggregator_host_attested(poc_proof),
+        Err(TexasAirError::UntrustedAggregationDisabled)
+    ));
+}
+
+#[test]
+fn test_soundness_aggregator_rejects_call_seq_gap() {
+    let children = vec![
+        make_child(10, MethodKind::CreateTable, 10, 20),
+        make_child(12, MethodKind::JoinTable, 20, 30),
+    ];
+    assert!(matches!(
+        prove_aggregator_unchecked_for_tests(children),
+        Err(TexasAirError::RecursionError(_))
+    ));
+}
+
+#[test]
+fn test_soundness_aggregator_rejects_tampered_endpoints_and_metadata() {
+    let children = make_chain(
+        &[0, 1],
+        &[MethodKind::CreateTable, MethodKind::JoinTable],
+        &[10, 20],
+    );
+    let proof = prove_aggregator_unchecked_for_tests(children).expect("fixture proof");
+
+    let mut changed_endpoint = proof.clone();
+    changed_endpoint.air.agg_post_state_root = root_of(999);
+    assert!(verify_aggregator_unchecked_for_tests(changed_endpoint).is_err());
+
+    let mut changed_count = proof.clone();
+    changed_count.num_children += 1;
+    assert!(verify_aggregator_unchecked_for_tests(changed_count).is_err());
+
+    let mut changed_levels = proof;
+    changed_levels.num_levels += 1;
+    assert!(verify_aggregator_unchecked_for_tests(changed_levels).is_err());
 }
 
 /// E2E: 聚合 2 个 method proof → prove → verify（happy path，单层聚合）。
