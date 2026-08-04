@@ -39,19 +39,19 @@ use borsh::BorshSerialize;
 
 use blstrs::G1Projective;
 use group::Group;
+use poker_l1::Address;
 use poker_l1::object_model::ObjectID;
 use poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    selectors, CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs,
-    SubmitShuffleV2Args,
+    CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
+    selectors,
 };
 use poker_l1::vm::contracts::texas_poker::types::{TableConfig, TexasPokerTable};
-use poker_l1::Address;
 use poker_protocol::crypto::{ECPoint, ElGamalCiphertext};
 
 use crate::contracts::TexasPokerPlugin;
 use crate::crypto_driver::{
-    apply_add_pk_to_c2, build_reveal_token, build_shuffle_v2, ShufflePlayer,
+    ShufflePlayer, apply_add_pk_to_c2, build_reveal_token, build_shuffle_v2,
 };
 use crate::plugin::ContractPlugin;
 

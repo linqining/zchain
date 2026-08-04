@@ -23,17 +23,14 @@
 
 use blstrs::G1Projective;
 use group::Group;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
-use poker_protocol::crypto::{
-    curve::CurveScalar,
-    DefaultCurve, ElGamalCiphertext, Scalar,
-};
+use poker_protocol::crypto::{DefaultCurve, ElGamalCiphertext, Scalar, curve::CurveScalar};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::transcript_ext::{
     CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
 };
-use poker_protocol::zk_shuffle::ShuffleProof;
 
 use crate::CryptoDriverError;
 
@@ -203,15 +200,12 @@ mod tests {
             .collect();
         let agg_pk = g * Scalar::from_u64(12345);
         let player = ShufflePlayer::deterministic(1);
-        let step = build_shuffle_v2(&deck, &player.sk, &player.pk, &agg_pk, 42)
-            .expect("prove 成功");
+        let step =
+            build_shuffle_v2(&deck, &player.sk, &player.pk, &agg_pk, 42).expect("prove 成功");
         let mut t = FiatShamirTranscript::new(b"zk_shuffle_proof_v2");
-        let r = step.shuffle_proof.verify(
-            &deck,
-            &step.output_cards,
-            &agg_pk,
-            &mut t,
-        );
+        let r = step
+            .shuffle_proof
+            .verify(&deck, &step.output_cards, &agg_pk, &mut t);
         assert!(r.is_ok(), "verify 应成功: {r:?}");
     }
 
@@ -229,7 +223,8 @@ mod tests {
         // 故必须用非 identity pk（真实对局里 aggregated_pk = Σ player pk）。
         let agg_pk = g * Scalar::from_u64(999);
         let player = ShufflePlayer::deterministic(1);
-        let step = build_shuffle_v2(&deck, &player.sk, &player.pk, &agg_pk, 42).expect("prove 成功");
+        let step =
+            build_shuffle_v2(&deck, &player.sk, &player.pk, &agg_pk, 42).expect("prove 成功");
         assert_eq!(step.output_cards.len(), 52);
     }
 

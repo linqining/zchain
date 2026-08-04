@@ -282,12 +282,7 @@ impl FrameworkEval for AddonAir {
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
-        for __c in common.limb4_delta(
-            &chip_pool,
-            &post_chip_pool,
-            &amount,
-            &chip_pool_add_carry,
-        ) {
+        for __c in common.limb4_delta(&chip_pool, &post_chip_pool, &amount, &chip_pool_add_carry) {
             eval.add_constraint(__c);
         }
 

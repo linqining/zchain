@@ -18,6 +18,7 @@ vm-common = { path = "../vm-common" }
 poker_protocol = { workspace = true }
 blstrs = { workspace = true }
 borsh = { workspace = true }
+blake2 = { workspace = true }
 group = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }

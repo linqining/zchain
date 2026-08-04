@@ -8,16 +8,16 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, Sub
 use poker_l1::vm::contracts::texas_poker::types::{ShuffleState, TexasPokerTable};
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
 use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_texas_air::dual_proof::{prove_dual_proof, DualProofBundle};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_texas_air::dual_proof::{DualProofBundle, prove_dual_proof};
 use poker_texas_air::outer_aggregate::{
-    aggregate_dual_proofs, prove_outer_aggregate, verify_outer_aggregate, OuterAggregateBundle,
-    OUTER_AGGREGATE_VERSION,
+    OUTER_AGGREGATE_VERSION, OuterAggregateBundle, aggregate_dual_proofs, prove_outer_aggregate,
+    verify_outer_aggregate,
 };
 use poker_texas_air::outer_precompile::{
-    prove_host_verified_outer_aggregate_from_bundle, verify_host_verified_outer_aggregate,
-    HostVerifiedOuterAggregateProof,
+    HostVerifiedOuterAggregateProof, prove_host_verified_outer_aggregate_from_bundle,
+    verify_host_verified_outer_aggregate,
 };
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
@@ -294,9 +294,11 @@ fn outer_aggregate_rejects_reorder_splice_deletion_and_manifest_tampering() {
     let subrange = aggregate_dual_proofs(&tasks[..2], child_prefix).unwrap();
     let verified_subrange = verify_outer_aggregate(&tasks[..2], &subrange).unwrap();
     let full_verified = verify_outer_aggregate(&tasks, &aggregate).unwrap();
-    assert!(verified_subrange
-        .verify_against_anchor(&anchor_from_verified(&full_verified))
-        .is_err());
+    assert!(
+        verified_subrange
+            .verify_against_anchor(&anchor_from_verified(&full_verified))
+            .is_err()
+    );
 
     let mut bad_digest = encoded.clone();
     bad_digest[112] ^= 1;

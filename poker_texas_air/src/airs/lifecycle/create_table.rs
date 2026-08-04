@@ -220,7 +220,25 @@ impl FrameworkEval for CreateTableAir {
 
         // 9. post_version == pre_version + 1 已由 CommonConstraints 完整约束。
 
-        // 10. state_root 的 full-width preimage/hash 自洽目前由生产 host verifier
+        // 10. The name commitment must match the verifier-reconstructed public input.
+        // The full name remains in the canonical post-state preimage; this projection prevents
+        // the trace columns from becoming free witnesses.
+        let expected_name_hash =
+            field_to_m31_limbs(crate::state_root::table_name_commitment(&self.input.name).field());
+        for (actual, expected) in [
+            input_name_hash_0.clone(),
+            input_name_hash_1.clone(),
+            input_name_hash_2.clone(),
+            input_name_hash_3.clone(),
+        ]
+        .into_iter()
+        .zip(expected_name_hash)
+        {
+            let expected: E::F = expected.into();
+            eval.add_constraint(is_active.clone() * (actual - expected));
+        }
+
+        // 11. state_root 的 full-width preimage/hash 自洽目前由生产 host verifier
         //     检查并混入 transcript；本 AIR 只约束域分隔 M31 投影，未嵌入 Poseidon AIR。
 
         // Suppress unused warnings
@@ -231,10 +249,6 @@ impl FrameworkEval for CreateTableAir {
             input_big_blind_1,
             input_big_blind_2,
             input_big_blind_3,
-            input_name_hash_0,
-            input_name_hash_1,
-            input_name_hash_2,
-            input_name_hash_3,
             one,
             two,
             nine,
@@ -280,13 +294,8 @@ impl CreateTableRow {
         pre_version: u64,
         post_version: u64,
     ) -> Self {
-        // 保留的 name-hash 列尚未承载 Poseidon 子证明，固定为 0 以避免自由 witness。
-        // 生产 Orchestrator 通过完整 VM replay、canonical table root 和 trusted-row
-        // 绑定名称语义；不能把此占位列解释为 AIR 内 name hash 验证。
-        let name_hash_field = crate::state_root::StateRoot::from_field(
-            starknet_ff::FieldElement::ZERO, // TODO 阶段 2: poseidon_string(&input.name)
-        );
-        let name_hash_m31 = field_to_m31_limbs(name_hash_field.field());
+        let name_hash_m31 =
+            field_to_m31_limbs(crate::state_root::table_name_commitment(&input.name).field());
 
         Self {
             common: CommonRow::active(
@@ -346,15 +355,14 @@ impl CreateTableRow {
     }
 }
 
-/// 把 Starknet FieldElement 转 4 个 M31 limb（Poseidon252 AIR 输入用）。
+/// Project a Starknet field element into the four M31 limbs available in this AIR.
 ///
-/// Starknet Fr 模数 ~2^252，需要 8 个 M31 limb（每 limb 31-bit）才能完整表示。
-/// 当前简化版用 4 limb（覆盖 ~124 bit），适合 trace < 2^124 的场景。
-/// TODO 阶段 2：扩展为 8 limb 完整表示。
+/// Four M31 elements cannot losslessly encode a 252-bit field element. The projection is
+/// domain-separated and collision resistant rather than a truncation. The full value must also
+/// be bound through canonical public inputs.
 #[must_use]
-pub fn field_to_m31_limbs(_f: starknet_ff::FieldElement) -> [M31; 4] {
-    // 简化实现：暂时返回 0（阶段 2 接入真实 Poseidon252 AIR 时实现）
-    [ZERO; 4]
+pub fn field_to_m31_limbs(f: starknet_ff::FieldElement) -> [M31; 4] {
+    crate::state_root::state_root_to_air_limbs(crate::state_root::StateRoot::from_field(f))
 }
 
 #[cfg(test)]
@@ -388,8 +396,20 @@ mod tests {
         assert_eq!(v[cols::INPUT_MAX_PLAYERS], M31::from(6u32));
         assert_eq!(v[cols::INPUT_SMALL_BLIND_BASE], M31::from(10u32));
         assert_eq!(v[cols::INPUT_BIG_BLIND_BASE], M31::from(20u32));
+        assert_eq!(
+            row.input_name_hash,
+            field_to_m31_limbs(crate::state_root::table_name_commitment("test").field())
+        );
         assert_eq!(v[cols::OUTPUT_BUTTON], ZERO);
         assert_eq!(v[cols::OUTPUT_ROUND_STATE], ZERO);
+    }
+
+    #[test]
+    fn table_name_projection_is_not_a_constant_placeholder() {
+        let alpha = field_to_m31_limbs(crate::state_root::table_name_commitment("alpha").field());
+        let beta = field_to_m31_limbs(crate::state_root::table_name_commitment("beta").field());
+        assert_ne!(alpha, [ZERO; 4]);
+        assert_ne!(alpha, beta);
     }
 
     #[test]

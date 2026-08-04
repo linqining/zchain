@@ -10,9 +10,9 @@
 //! ## 认证链
 //!
 //! 1. **块认证**：[`poker_l1::consensus::bullshark::validate_commit_certificate_fields`] 校验
-//!    cert 的 epoch/prev_commit_hash/三个 root 与 block header 一致；
-//!    [`poker_l1::consensus::cert_verification::verify_commit_certificate_signatures`] 校验
-//!    ≥ 2/3 validator 的 secp256k1 quorum 签名。
+//!    pre/post 两个 block header 各自携带的 cert，其 epoch/prev_commit_hash/三个 root
+//!    与 header 一致；[`poker_l1::consensus::cert_verification::verify_commit_certificate_signatures`]
+//!    校验 ≥ 2/3 validator 的 secp256k1 quorum 签名。
 //! 2. **单桌 snapshot ∈ 全局 state_root**：[`poker_l1::object_model::SparseMerkleTree::verify`]
 //!    证明该 table `Object` 属于 block header 的全局 `state_root`，从而锚定端点
 //!    `pre/post_state_root = compute_state_root(table)`。
@@ -170,6 +170,43 @@ fn rebuild_dispatch_context(tx: &Transaction, header: &BlockHeader) -> DispatchC
     }
 }
 
+/// Verify that one header is backed by the exact certificate it carries.
+///
+/// A state-root inclusion proof is meaningful only after the header's root is
+/// authenticated.  In particular, the final table snapshot may be in a later
+/// block, so accepting an unauthenticated `post_block_header` would let a
+/// caller choose an arbitrary post-state root.
+fn verify_authenticated_header(
+    label: &str,
+    header: &BlockHeader,
+    cert: &DagCommitCertificate,
+    chain_id: poker_l1::ChainId,
+    validators: &[ValidatorEntry],
+) -> TexasAirResult<()> {
+    if header.dag_commit_certificate != *cert {
+        return Err(TexasAirError::ConsensusAnchor(format!(
+            "{label} block header does not carry the supplied commit certificate"
+        )));
+    }
+    validate_commit_certificate_fields(
+        cert,
+        cert.epoch,
+        cert.prev_commit_hash,
+        header.state_root,
+        header.public_tx_root,
+        header.gameturn_tx_root,
+    )
+    .map_err(|error| {
+        TexasAirError::ConsensusAnchor(format!("{label} cert field mismatch: {error}"))
+    })?;
+    validate_commit_certificate_quorum(cert, validators.len())
+        .map_err(|error| TexasAirError::ConsensusAnchor(format!("{label} cert quorum: {error}")))?;
+    verify_commit_certificate_signatures(cert, chain_id, validators, verify_signature).map_err(
+        |error| TexasAirError::ConsensusAnchor(format!("{label} cert signatures: {error}")),
+    )?;
+    Ok(())
+}
+
 /// 从共识材料构造 [`ExpectedChainAnchor`]。
 ///
 /// 调用方负责把 `calls` 按 `call_seq` 升序排列；本函数不重新排序（顺序是信任 Bullshark
@@ -191,7 +228,7 @@ fn rebuild_dispatch_context(tx: &Transaction, header: &BlockHeader) -> DispatchC
 pub fn build_anchor_from_consensus(
     pre_block_header: &BlockHeader,
     pre_snapshot: &TableSnapshot,
-    cert: &DagCommitCertificate,
+    pre_cert: &DagCommitCertificate,
     chain_id: poker_l1::ChainId,
     validators: &[ValidatorEntry],
     post_block_header: &BlockHeader,
@@ -204,23 +241,15 @@ pub fn build_anchor_from_consensus(
         ));
     }
 
-    // 1. 块认证：cert 字段一致性（三个 root + epoch + prev_commit_hash）。
-    //    用 pre 块做主校验；post 块的 state_root 由 post_snapshot 单独认证。
-    validate_commit_certificate_fields(
-        cert,
-        cert.epoch,
-        cert.prev_commit_hash,
-        pre_block_header.state_root,
-        pre_block_header.public_tx_root,
-        pre_block_header.gameturn_tx_root,
-    )
-    .map_err(|e| TexasAirError::ConsensusAnchor(format!("cert field mismatch: {e}")))?;
-
-    //    quorum 计数 + secp256k1 签名验证。
-    validate_commit_certificate_quorum(cert, validators.len())
-        .map_err(|e| TexasAirError::ConsensusAnchor(format!("cert quorum: {e}")))?;
-    verify_commit_certificate_signatures(cert, chain_id, validators, verify_signature)
-        .map_err(|e| TexasAirError::ConsensusAnchor(format!("cert signatures: {e}")))?;
+    // 1. Authenticate both endpoint roots before accepting their SMT proofs.
+    verify_authenticated_header("pre", pre_block_header, pre_cert, chain_id, validators)?;
+    verify_authenticated_header(
+        "post",
+        post_block_header,
+        &post_block_header.dag_commit_certificate,
+        chain_id,
+        validators,
+    )?;
 
     // 2. 单桌 snapshot ∈ 全局 state_root（pre 用 pre 块，post 用 post 块）。
     let pre_table = verify_table_inclusion(pre_snapshot, &pre_block_header.state_root)?;
@@ -310,6 +339,7 @@ mod tests {
         post_header: BlockHeader,
         cert: DagCommitCertificate,
         validators: Vec<ValidatorEntry>,
+        secrets: Vec<SecretKey>,
         pre_snapshot: TableSnapshot,
         post_snapshot: TableSnapshot,
         calls: Vec<ConsensusDispatchCall>,
@@ -508,9 +538,15 @@ mod tests {
             gameturn_tx_root,
             dag_commit_certificate: cert.clone(),
         };
-        // post header 用 post_state_root（post snapshot 跨块）。
+        let post_cert = sign_cert(
+            &validators,
+            &secrets,
+            (post_state_root, empty_root, gameturn_tx_root),
+        );
+        // post header 用 post_state_root（post snapshot 跨块）及其独立 quorum cert。
         let post_header = BlockHeader {
             state_root: post_state_root,
+            dag_commit_certificate: post_cert.clone(),
             ..pre_header.clone()
         };
 
@@ -519,6 +555,7 @@ mod tests {
             post_header,
             cert,
             validators,
+            secrets,
             pre_snapshot: TableSnapshot {
                 object: pre_obj,
                 inclusion_path: pre_path,
@@ -641,6 +678,15 @@ mod tests {
         );
         post_db.create(post_obj.clone()).unwrap();
         f.post_header.state_root = post_db.state_root();
+        f.post_header.dag_commit_certificate = sign_cert(
+            &f.validators,
+            &f.secrets,
+            (
+                f.post_header.state_root,
+                f.post_header.public_tx_root,
+                f.post_header.gameturn_tx_root,
+            ),
+        );
         f.post_snapshot = TableSnapshot {
             object: post_obj,
             inclusion_path: post_db.prove(&post_table.id).unwrap(),
@@ -659,6 +705,28 @@ mod tests {
         assert!(matches!(
             result,
             Err(TexasAirError::ConsensusAnchor(msg)) if msg.contains("does not equal pre call_seq")
+        ));
+    }
+
+    #[test]
+    fn unauthenticated_post_header_is_rejected() {
+        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        // A caller must not be able to select a different terminal root while
+        // reusing the original post-block certificate.
+        f.post_header.state_root = [0xA5; 32];
+        let result = build_anchor_from_consensus(
+            &f.pre_header,
+            &f.pre_snapshot,
+            &f.cert,
+            poker_l1::DEFAULT_CHAIN_ID,
+            &f.validators,
+            &f.post_header,
+            &f.post_snapshot,
+            &f.calls,
+        );
+        assert!(matches!(
+            result,
+            Err(TexasAirError::ConsensusAnchor(msg)) if msg.contains("post cert field mismatch")
         ));
     }
 

@@ -2136,13 +2136,10 @@ mod tests {
 
     #[test]
     fn execution_environment_includes_injected_zk_verifier_registry() {
-        use crate::offline::zk_verifier::{
-            SCHEME_STWO, VerifierStatus, ZkVerifierRegistry, register_stwo_verifier,
-        };
+        use crate::offline::zk_verifier::{VerifierStatus, ZkVerifierRegistry};
 
         let temp = tempfile::tempdir().unwrap();
-        let mut registry = ZkVerifierRegistry::new();
-        register_stwo_verifier(&mut registry);
+        let registry = ZkVerifierRegistry::new();
         registry.set_verifier_status(DEFAULT_CHAIN_ID, VerifierStatus::Production);
         let node = Node::open_with_zk_verifier_registry(
             NodeConfig::default_full(temp.path().to_path_buf()),
@@ -2158,7 +2155,7 @@ mod tests {
             injected.verifier_status(DEFAULT_CHAIN_ID),
             VerifierStatus::Production
         );
-        assert!(injected.registered_schemes().contains(&SCHEME_STWO));
+        assert!(injected.registered_schemes().is_empty());
         assert!(env.precompile_registry.is_some());
         assert!(env.bridge_registry_store.is_some());
     }
@@ -2166,13 +2163,10 @@ mod tests {
     #[test]
     fn governance_status_sync_reaches_existing_registry_clones() {
         use crate::governance::GovernanceState;
-        use crate::offline::zk_verifier::{
-            VerifierStatus, ZkVerifierRegistry, register_stwo_verifier,
-        };
+        use crate::offline::zk_verifier::{VerifierStatus, ZkVerifierRegistry};
 
         let temp = tempfile::tempdir().unwrap();
-        let mut registry = ZkVerifierRegistry::new();
-        register_stwo_verifier(&mut registry);
+        let registry = ZkVerifierRegistry::new();
         let node = Node::open_with_zk_verifier_registry(
             NodeConfig::default_full(temp.path().to_path_buf()),
             registry,

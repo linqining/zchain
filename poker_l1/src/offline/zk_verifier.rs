@@ -338,57 +338,9 @@ pub struct ZkVerifierRegistry {
     statuses: Arc<RwLock<BTreeMap<crate::ChainId, VerifierStatus>>>,
 }
 
-/// Stwo ZK Verifier — 实验性递归 proof 的保护性入口。
-///
-/// 当前 verifier AIR 尚未完整约束 L1 Merkle/FRI decommitment，也没有把链上
-/// [`ZkPublicIo`] refinement 到递归 statement。Production 状态必须 fail closed；
-/// proof 只做格式解析，不能解锁 OffChain checkout。
-#[derive(Debug)]
-pub struct StwoZkVerifier;
-
-impl StwoZkVerifier {
-    /// 创建 Stwo ZK Verifier。
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-impl ZkVerifier for StwoZkVerifier {
-    fn scheme_id(&self) -> SchemeId {
-        SCHEME_STWO
-    }
-
-    fn verify(
-        &self,
-        proof: &[u8],
-        _public_io: &ZkPublicIo,
-        status: VerifierStatus,
-    ) -> Result<bool, PokerL1Error> {
-        match status {
-            VerifierStatus::Stub => Ok(!proof.is_empty()),
-            VerifierStatus::Production => Ok(false),
-        }
-    }
-
-    fn validate_proof_format(&self, proof: &[u8]) -> Result<(), PokerL1Error> {
-        if proof.is_empty() {
-            return Err(PokerL1Error::InvalidZkProofFormat(
-                "proof 不能为空".to_string(),
-            ));
-        }
-
-        let _: poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof =
-            bincode::deserialize(proof).map_err(|e| {
-                PokerL1Error::InvalidZkProofFormat(format!("反序列化 L2 proof 失败: {}", e))
-            })?;
-        Ok(())
-    }
-}
-
 /// Stub verifier — 仅供 crate 内测试构造边界场景。
 ///
-/// v2 Phase 5 已实现真实的 StwoZkVerifier，此 stub verifier 仅用于测试。
+/// 生产代码必须由 Texas 自有电路注册经过审计的 verifier；此类型不能进入生产构建。
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct StubVerifier {
@@ -426,13 +378,6 @@ impl ZkVerifier for StubVerifier {
         }
         Ok(())
     }
-}
-
-/// 注册 Stwo scheme（`SCHEME_STWO = 1`）的保护性 verifier。
-///
-/// 在递归 AIR 与 [`ZkPublicIo`] 完整绑定前，Production 验证始终返回 `false`。
-pub fn register_stwo_verifier(registry: &mut ZkVerifierRegistry) {
-    registry.register(Arc::new(StwoZkVerifier::new()));
 }
 
 /// 注册 ZkShuffle scheme 的测试 stub；不会进入生产构建。
@@ -628,9 +573,9 @@ impl ZkVerifierRegistry {
     }
 }
 
-/// 为不关注 Stwo proof 格式的上层单元测试注册 scheme 1 stub。
+/// 为不关注证明格式的上层单元测试注册 scheme 1 stub。
 ///
-/// 生产注册路径仍使用 [`register_stwo_verifier`]；此 helper 不会进入生产构建。
+/// Texas 生产节点不会调用此 helper；实际 verifier 必须由 Texas AIR crate 在审计完成后注册。
 #[cfg(test)]
 pub(crate) fn register_test_only_stwo_stub_verifier(registry: &mut ZkVerifierRegistry) {
     #[allow(deprecated)]
@@ -742,9 +687,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stwo_registry_rejects_malformed_proof_in_stub_status() {
-        let mut registry = ZkVerifierRegistry::new();
-        register_stwo_verifier(&mut registry);
+    fn test_reserved_texas_scheme_is_unregistered_by_default() {
+        let registry = ZkVerifierRegistry::new();
         let public_io = make_public_io(1, 0);
 
         let result = registry.zk_verify(
@@ -756,19 +700,10 @@ mod tests {
             1000,
         );
 
-        assert!(matches!(result, Err(PokerL1Error::InvalidZkProofFormat(_))));
-    }
-
-    #[test]
-    fn test_stwo_production_verifier_fails_closed() {
-        let verifier = StwoZkVerifier::new();
-        let public_io = make_public_io(1, 0);
-
-        let verified = verifier
-            .verify(&[0x01], &public_io, VerifierStatus::Production)
-            .expect("fail-closed verifier should return a boolean result");
-
-        assert!(!verified);
+        assert!(matches!(
+            result,
+            Err(PokerL1Error::ZkVerifierNotRegistered(SCHEME_STWO))
+        ));
     }
 
     #[test]

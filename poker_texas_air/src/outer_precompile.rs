@@ -15,8 +15,8 @@
 //! the final AIR proof.
 
 use bincode::Options;
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use borsh::BorshDeserialize;
 use starknet_ff::FieldElement;
 use stwo::core::channel::{Channel, Poseidon252Channel};
@@ -27,11 +27,11 @@ use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::{
     Poseidon252MerkleChannel, Poseidon252MerkleHasher,
 };
-use stwo::core::verifier::{verify, VerificationError};
+use stwo::core::verifier::{VerificationError, verify};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{prove, ProvingError};
+use stwo::prover::{ProvingError, prove};
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
 };
@@ -39,13 +39,13 @@ use stwo_constraint_framework::{
 use crate::dual_proof::MAX_STARK_PROOF_BYTES;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::outer_aggregate::{
-    prove_outer_aggregate, verify_outer_aggregate, OuterAggregateBundle, VerifiedOuterAggregate,
-    MAX_OUTER_AGGREGATE_BYTES, MAX_OUTER_CHILDREN, MIN_OUTER_CHILDREN,
+    MAX_OUTER_AGGREGATE_BYTES, MAX_OUTER_CHILDREN, MIN_OUTER_CHILDREN, OuterAggregateBundle,
+    VerifiedOuterAggregate, prove_outer_aggregate, verify_outer_aggregate,
 };
-use crate::precompile_binding::{digest_to_m31_limbs, DIGEST_LIMBS};
+use crate::precompile_binding::{DIGEST_LIMBS, digest_to_m31_limbs};
 use crate::prove_task::ProveTask;
 use crate::state_root::StateRoot;
-use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
+use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verified_chain::ExpectedChainAnchor;
 
 /// Wire magic for the canonical outer-precompile request.

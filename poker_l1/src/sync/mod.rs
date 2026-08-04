@@ -23,8 +23,9 @@
 //! - 复用 [`crate::object_model::Object`] 作为状态快照的基本单元
 //! - 不引入新依赖，仅使用 `blake2b_256`（与全库一致）
 
-use crate::block::BlockHeader;
+use crate::block::{Block, BlockHeader};
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::network::NetworkTransport;
 use crate::object_model::Object;
 use crate::storage::{BlockStore, ObjectBackend, ObjectDb};
 use crate::{BlockHeight, Hash};
@@ -37,6 +38,12 @@ pub const MAX_SNAPSHOT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// 每个快照分块最多包含的对象数（防单块过大导致 OOM）。
 pub const MAX_OBJECTS_PER_CHUNK: usize = 10_000;
+
+/// The largest block range requested in one P2P round-trip during Fast Sync.
+///
+/// Bound requests before decoding a peer response so a remote tip cannot force
+/// an unbounded allocation in a single response.
+pub const MAX_BLOCKS_PER_SYNC_REQUEST: BlockHeight = 128;
 
 /// 快照清单（manifest）—— 描述一个状态快照的元数据。
 ///
@@ -385,8 +392,11 @@ pub enum SyncState {
 /// }
 /// // 4. 应用分块
 /// fast_sync.apply_snapshot(&manifest)?;
-/// // 5. 追赶区块
-/// fast_sync.catch_up_blocks(tip_height)?;
+/// // 5. 追赶区块。回调必须走 Node::put_block（或等价的完整执行路径），
+/// //    不能直接写 BlockStore。
+/// fast_sync.catch_up_blocks_from_network(transport, tip_height, |block| {
+///     node.put_block(block).map(|_| ())
+/// })?;
 /// ```
 pub struct FastSync<'a> {
     block_store: &'a BlockStore,
@@ -492,31 +502,117 @@ impl<'a> FastSync<'a> {
         Ok(())
     }
 
-    /// 步骤 4：从快照高度追赶区块到 tip。
+    /// Steps 4-5: download every missing block and submit it through the supplied execution path.
     ///
-    /// 返回追赶的区块数（0 表示已在 tip）。
-    pub fn catch_up_blocks(&mut self, tip_height: BlockHeight) -> PokerL1Result<u64> {
-        let start_height = match &self.state {
-            SyncState::CatchingUpBlocks { current_height, .. } => *current_height,
-            _ => {
-                self.state = SyncState::Failed("not in catching-up state".to_string());
-                return Err(PokerL1Error::Other(
-                    "catch_up_blocks called before apply_snapshot".to_string(),
-                ));
+    /// Each peer response must contain exactly the requested, strictly ordered height range.
+    /// The callback must perform full consensus/state validation, normally by delegating to
+    /// [`crate::node::Node::put_block`].  Fast Sync deliberately never writes downloaded block
+    /// bodies to [`BlockStore`] itself because that would bypass state-root replay.
+    ///
+    /// Returns the number of blocks successfully executed.
+    pub fn catch_up_blocks_from_network<F>(
+        &mut self,
+        transport: &dyn NetworkTransport,
+        tip_height: BlockHeight,
+        mut apply_block: F,
+    ) -> PokerL1Result<u64>
+    where
+        F: FnMut(&Block) -> PokerL1Result<()>,
+    {
+        let start_height = self.catch_up_start_height()?;
+        if start_height >= tip_height {
+            self.state = SyncState::Synced;
+            return Ok(0);
+        }
+
+        let mut next_height = start_height.checked_add(1).ok_or_else(|| {
+            PokerL1Error::Other("cannot advance Fast Sync height beyond u64::MAX".to_string())
+        })?;
+        let mut caught_up = 0u64;
+
+        while next_height <= tip_height {
+            let end_height = next_height
+                .saturating_add(MAX_BLOCKS_PER_SYNC_REQUEST - 1)
+                .min(tip_height);
+            let expected_count = usize::try_from(end_height - next_height + 1).map_err(|_| {
+                PokerL1Error::Other("Fast Sync block range does not fit usize".to_string())
+            })?;
+            let blocks = match transport.request_blocks_by_range(next_height, end_height) {
+                Ok(blocks) => blocks,
+                Err(error) => return self.fail_catch_up(error),
+            };
+            if blocks.len() != expected_count {
+                return self.fail_catch_up(PokerL1Error::Other(format!(
+                    "Fast Sync peer returned {} blocks for requested inclusive range {next_height}..={end_height} (expected {expected_count})",
+                    blocks.len()
+                )));
             }
-        };
+
+            for (offset, block) in blocks.iter().enumerate() {
+                let expected_height = next_height + offset as BlockHeight;
+                if block.header.height != expected_height {
+                    return self.fail_catch_up(PokerL1Error::Other(format!(
+                        "Fast Sync peer returned block height {} at position {offset}; expected {expected_height}",
+                        block.header.height
+                    )));
+                }
+                if let Err(error) = apply_block(block) {
+                    return self.fail_catch_up(error);
+                }
+                caught_up += 1;
+                self.state = SyncState::CatchingUpBlocks {
+                    current_height: expected_height,
+                    tip_height,
+                };
+            }
+
+            if end_height == tip_height {
+                break;
+            }
+            next_height = end_height.checked_add(1).ok_or_else(|| {
+                PokerL1Error::Other("cannot advance Fast Sync height beyond u64::MAX".to_string())
+            })?;
+        }
+
+        self.state = SyncState::Synced;
+        Ok(caught_up)
+    }
+
+    /// Retained for callers already at the snapshot tip.
+    ///
+    /// A local [`BlockStore`] scan cannot validate or execute downloaded blocks. When a peer tip
+    /// is ahead of the snapshot, use [`Self::catch_up_blocks_from_network`] instead.
+    #[deprecated(
+        note = "use catch_up_blocks_from_network with a Node::put_block execution callback"
+    )]
+    pub fn catch_up_blocks(&mut self, tip_height: BlockHeight) -> PokerL1Result<u64> {
+        let start_height = self.catch_up_start_height()?;
 
         if start_height >= tip_height {
             self.state = SyncState::Synced;
             return Ok(0);
         }
 
-        // 验证从 start_height+1 到 tip_height 的所有区块连续性
-        let blocks = self.block_store.get_range(start_height + 1, tip_height)?;
-        let caught_up = blocks.len() as u64;
+        self.fail_catch_up(PokerL1Error::Other(
+            "cannot catch up from a local BlockStore scan; a network transport and full block execution callback are required".to_string(),
+        ))
+    }
 
-        self.state = SyncState::Synced;
-        Ok(caught_up)
+    fn catch_up_start_height(&mut self) -> PokerL1Result<BlockHeight> {
+        match &self.state {
+            SyncState::CatchingUpBlocks { current_height, .. } => Ok(*current_height),
+            _ => {
+                self.state = SyncState::Failed("not in catching-up state".to_string());
+                Err(PokerL1Error::Other(
+                    "catch_up_blocks called before apply_snapshot".to_string(),
+                ))
+            }
+        }
+    }
+
+    fn fail_catch_up<T>(&mut self, error: PokerL1Error) -> PokerL1Result<T> {
+        self.state = SyncState::Failed(error.to_string());
+        Err(error)
     }
 }
 
@@ -541,6 +637,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::InMemoryTransport;
     use crate::block::BlockHeader;
     use crate::object_model::{Object, ObjectID, Ownership};
     use crate::storage::{BlockStore, ObjectDb};
@@ -857,6 +954,95 @@ mod tests {
 
         // 4. 最终 state_root 一致
         assert_eq!(dst_db.state_root(), state_root);
+    }
+
+    #[test]
+    fn fast_sync_downloads_complete_ranges_and_executes_each_block() {
+        let src_db = make_object_db(3);
+        let header = make_block_header(100, src_db.state_root());
+        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let block_store = BlockStore::open_inmemory().unwrap();
+        block_store
+            .put(
+                &Block {
+                    header,
+                    public_txs: vec![],
+                    gameturn_txs: vec![],
+                },
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        let transport = InMemoryTransport::new();
+        for height in 101..=102 {
+            transport.inject_block(Block {
+                header: make_block_header(height, [0u8; 32]),
+                public_txs: vec![],
+                gameturn_txs: vec![],
+            });
+        }
+
+        let mut dst_db = ObjectDb::open_inmemory().unwrap();
+        let mut fast_sync = FastSync::new(&block_store, &mut dst_db);
+        fast_sync.verify_manifest(&manifest).unwrap();
+        for chunk in chunks {
+            fast_sync.receive_chunk(chunk, &manifest).unwrap();
+        }
+        fast_sync.apply_snapshot(&manifest).unwrap();
+
+        let mut applied = Vec::new();
+        let caught = fast_sync
+            .catch_up_blocks_from_network(&transport, 102, |block| {
+                applied.push(block.header.height);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(caught, 2);
+        assert_eq!(applied, vec![101, 102]);
+        assert_eq!(fast_sync.state(), &SyncState::Synced);
+    }
+
+    #[test]
+    fn fast_sync_rejects_an_incomplete_peer_block_range_before_execution() {
+        let src_db = make_object_db(3);
+        let header = make_block_header(100, src_db.state_root());
+        let (manifest, chunks) = SnapshotBuilder::build_snapshot(&src_db, &header).unwrap();
+        let block_store = BlockStore::open_inmemory().unwrap();
+        block_store
+            .put(
+                &Block {
+                    header,
+                    public_txs: vec![],
+                    gameturn_txs: vec![],
+                },
+                crate::DEFAULT_CHAIN_ID,
+            )
+            .unwrap();
+
+        let transport = InMemoryTransport::new();
+        transport.inject_block(Block {
+            header: make_block_header(101, [0u8; 32]),
+            public_txs: vec![],
+            gameturn_txs: vec![],
+        });
+
+        let mut dst_db = ObjectDb::open_inmemory().unwrap();
+        let mut fast_sync = FastSync::new(&block_store, &mut dst_db);
+        fast_sync.verify_manifest(&manifest).unwrap();
+        for chunk in chunks {
+            fast_sync.receive_chunk(chunk, &manifest).unwrap();
+        }
+        fast_sync.apply_snapshot(&manifest).unwrap();
+
+        let mut apply_count = 0;
+        assert!(fast_sync
+            .catch_up_blocks_from_network(&transport, 102, |_| {
+                apply_count += 1;
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(apply_count, 0);
+        assert!(matches!(fast_sync.state(), SyncState::Failed(_)));
     }
 
     #[test]

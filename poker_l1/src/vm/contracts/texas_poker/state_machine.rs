@@ -101,7 +101,9 @@ pub fn is_playing(table: &TexasPokerTable) -> bool {
 ///
 /// `total_bet`, `ante_collected`, `addon_pool` and `side_pots` are accounting views, not
 /// additional assets. The actual locked value is represented exactly once by seat stacks,
-/// pending addons, current-round bets, the collected pot and accrued rake escrow.
+/// pending addons, current-round bets and the collected pot. `rake_collected` is a transient
+/// settlement receipt: its matching value has already left `chip_pool` for the Treasury output
+/// and it must be cleared by `reset_for_next_hand` before the table is persisted.
 pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
     let mut stacks = 0u64;
     let mut pending_addons = 0u64;
@@ -155,12 +157,11 @@ pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
     let accounted = stacks
         .checked_add(pending_addons)
         .and_then(|value| value.checked_add(wagers_in_custody))
-        .and_then(|value| value.checked_add(table.rake_collected))
         .ok_or_else(|| PokerL1Error::Other("Texas TableVault accounting overflow".into()))?;
     if accounted != table.chip_pool {
         return Err(PokerL1Error::Other(format!(
-            "Texas TableVault invariant violated: stacks={stacks}, pending_addons={pending_addons}, pot={}, current_bets={current_bets}, rake={}, accounted={accounted}, chip_pool={}",
-            table.pot, table.rake_collected, table.chip_pool
+            "Texas TableVault invariant violated: stacks={stacks}, pending_addons={pending_addons}, pot={}, current_bets={current_bets}, accounted={accounted}, chip_pool={}",
+            table.pot, table.chip_pool
         )));
     }
     Ok(accounted)
@@ -2690,11 +2691,21 @@ fn settle_hand(
     let total_before_rake = result.total();
     let rake = compute_rake_amount(table, total_before_rake)?;
     if rake > 0 {
-        apply_rake_to_pots(&mut result, rake)?;
-        table.rake_collected = table
+        // The rake is not table-owned escrow. Reserve its deterministic Treasury output before
+        // paying winners, so the post-state root already matches the table that the precompile
+        // persists and the proof task replays. `reset_for_next_hand` clears this receipt after
+        // the `RakeCollected` event has made the payout amount explicit.
+        let post_rake_collected = table
             .rake_collected
             .checked_add(rake)
-            .ok_or_else(|| PokerL1Error::Serialization("rake escrow overflow".into()))?;
+            .ok_or_else(|| PokerL1Error::Serialization("rake receipt overflow".into()))?;
+        let post_chip_pool = table
+            .chip_pool
+            .checked_sub(rake)
+            .ok_or_else(|| PokerL1Error::Serialization("rake exceeds TableVault".into()))?;
+        apply_rake_to_pots(&mut result, rake)?;
+        table.rake_collected = post_rake_collected;
+        table.chip_pool = post_chip_pool;
         events::emit_event(
             events,
             TexasPokerEvent::RakeCollected {
@@ -3104,6 +3115,9 @@ pub fn reset_for_next_hand(
     }
 
     table.pot = 0;
+    // `rake_collected` is only a same-dispatch receipt for the Treasury UTXO. No persisted
+    // table may retain it as unclaimed money.
+    table.rake_collected = 0;
     table.side_pots.clear();
     table.ante_collected = 0;
     table.community_cards.clear();
@@ -3672,8 +3686,9 @@ pub fn collect_ante(
 /// - `RAKE_MODE_PERCENTAGE`：`rake = min(pot * rake_bps / 10000, rake_cap)`
 ///
 /// 抽水后：
-/// - `table.rake_collected += rake`
+/// - `table.rake_collected += rake`（本次 dispatch 的 Treasury 出金收据）
 /// - `table.pot -= rake`（从奖池中扣除）
+/// - `table.chip_pool -= rake`（资金已离开桌台，预编译将创建 Treasury Coin 输出）
 ///
 /// 返回实际抽水金额（调用方用于 emit RakeCollected 事件）。
 pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
@@ -3682,16 +3697,21 @@ pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
     }
     let pot = table.pot;
     let rake = compute_rake_amount(table, pot)?;
-    let post_rake_escrow = table
+    let post_rake_receipt = table
         .rake_collected
         .checked_add(rake)
-        .ok_or_else(|| PokerL1Error::Serialization("collect_rake: rake escrow overflow".into()))?;
+        .ok_or_else(|| PokerL1Error::Serialization("collect_rake: rake receipt overflow".into()))?;
     let post_pot = table
         .pot
         .checked_sub(rake)
         .ok_or_else(|| PokerL1Error::Serialization("collect_rake: pot -= rake underflow".into()))?;
-    table.rake_collected = post_rake_escrow;
+    let post_chip_pool = table
+        .chip_pool
+        .checked_sub(rake)
+        .ok_or_else(|| PokerL1Error::Serialization("collect_rake: rake exceeds TableVault".into()))?;
+    table.rake_collected = post_rake_receipt;
     table.pot = post_pot;
+    table.chip_pool = post_chip_pool;
     Ok(rake)
 }
 
@@ -4633,11 +4653,13 @@ mod tests {
         table.rake_bps = 500; // 5%
         table.rake_cap = 100;
         table.pot = 1000;
+        table.chip_pool = 1000;
 
         let pot_before = table.pot;
         let rake = collect_rake(&mut table).unwrap();
         assert_eq!(rake, 50); // 1000 * 5% = 50
         assert_eq!(table.pot, 950);
+        assert_eq!(table.chip_pool, 950);
         assert_eq!(table.rake_collected, 50);
         assert_eq!(pot_before, 1000);
     }
@@ -4649,6 +4671,7 @@ mod tests {
         table.rake_bps = 500; // 5%
         table.rake_cap = 30;
         table.pot = 1000;
+        table.chip_pool = 1000;
 
         let rake = collect_rake(&mut table).unwrap();
         // raw_rake = 50，但 cap = 30
@@ -4663,10 +4686,12 @@ mod tests {
         table.rake_bps = u64::MAX;
         table.rake_cap = u64::MAX;
         table.pot = u64::MAX;
+        table.chip_pool = u64::MAX;
 
         let rake = collect_rake(&mut table).unwrap();
         assert_eq!(rake, u64::MAX);
         assert_eq!(table.pot, 0);
+        assert_eq!(table.chip_pool, 0);
         assert_eq!(table.rake_collected, u64::MAX);
     }
 

@@ -46,6 +46,26 @@ impl TexasPokerPlugin {
         }
     }
 
+    /// Rehydrate a durable service table after a process restart.
+    ///
+    /// Method proof objects are deliberately not serialized by the service, so
+    /// the in-memory verified-chain segment starts empty after recovery.  The
+    /// persisted table snapshot and counters still make the next canonical VM
+    /// dispatch deterministic and retain the durable proof-job history.
+    #[must_use]
+    pub fn from_persisted_state(
+        table: TexasPokerTable,
+        dispatch_count: u64,
+        prove_count: u64,
+    ) -> Self {
+        Self {
+            table,
+            orchestrator: Orchestrator::new(),
+            dispatch_count,
+            prove_count,
+        }
+    }
+
     /// 借用当前桌台状态（供 runner / 调试观察）。
     pub fn table(&self) -> &TexasPokerTable {
         &self.table

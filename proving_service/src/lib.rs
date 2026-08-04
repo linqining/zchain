@@ -35,6 +35,7 @@ pub mod contracts;
 pub mod crypto_driver;
 pub mod full_hand;
 pub mod plugin;
+pub mod repository;
 pub mod runner;
 pub mod server;
 

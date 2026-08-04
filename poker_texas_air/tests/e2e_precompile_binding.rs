@@ -5,11 +5,11 @@ use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::TranscriptId;
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::reconstruction::{
-    ReconstructProofV3, RECONSTRUCTION_V3_PROOF_LABEL,
+    RECONSTRUCTION_V3_PROOF_LABEL, ReconstructProofV3,
 };
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_texas_air::airs::crypto::submit_reconstruct_deck::{
     SubmitReconstructDeckAir, SubmitReconstructDeckInput, SubmitReconstructDeckRow,
 };
@@ -17,8 +17,8 @@ use poker_texas_air::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
 use poker_texas_air::method_kind::MethodKind;
-use poker_texas_air::precompile_binding::{precompile_call_context, PrecompileCallBinding};
-use poker_texas_air::prover::{prove_method, MethodProof};
+use poker_texas_air::precompile_binding::{PrecompileCallBinding, precompile_call_context};
+use poker_texas_air::prover::{MethodProof, prove_method};
 use poker_texas_air::public_inputs::TexasPublicInputs;
 use poker_texas_air::state_root::state_root_to_air_limbs;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;

@@ -6,7 +6,7 @@
 //! - 叶子节点：业务对象（如 `Seat`）的 Poseidon252 编码
 //! - 内部节点：`Poseidon252(left_child, right_child)`
 //! - Padding：用 `FieldElement::ZERO` 补齐到 2^k
-//! - 用于 AIR 内 Merkle Path 验证（复用 `poker_zkvm::stwo_backend::recursive::merkle_path_air`）
+//! - 用于 AIR 内 Merkle Path 验证（Texas 自有组件待接入）
 
 use starknet_ff::FieldElement;
 

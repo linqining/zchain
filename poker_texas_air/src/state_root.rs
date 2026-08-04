@@ -84,6 +84,16 @@ pub fn state_root_to_air_limbs(root: StateRoot) -> [M31; 4] {
     limbs
 }
 
+/// Compute the domain-separated commitment used for a table name.
+///
+/// The full-width value is included in the canonical table-state preimage.
+/// Method AIRs with only four M31 columns bind its domain-separated projection
+/// through [`state_root_to_air_limbs`].
+#[must_use]
+pub fn table_name_commitment(name: &str) -> StateRoot {
+    StateRoot(poseidon_string(name))
+}
+
 /// 把 u64 编码为 Starknet `FieldElement`。
 #[must_use]
 pub fn u64_to_field(v: u64) -> FieldElement {

@@ -59,9 +59,9 @@ fn test_e2e_addon_prove_verify() {
     let row = AddonRow::active(
         &input,
         pre_pending,
-        0, // pre_chip_pool
+        0,   // pre_chip_pool
         200, // post_chip_pool
-        0, // pre_addon_pool
+        0,   // pre_addon_pool
         200, // post_addon_pool
         zero_root(),
         one_root(),
@@ -111,10 +111,10 @@ fn test_e2e_addon_from_zero_pending() {
     };
     let row = AddonRow::active(
         &input,
-        0, // pre_pending = 0
-        0, // pre_chip_pool
+        0,   // pre_pending = 0
+        0,   // pre_chip_pool
         500, // post_chip_pool
-        0, // pre_addon_pool
+        0,   // pre_addon_pool
         500, // post_addon_pool
         zero_root(),
         one_root(),
@@ -272,9 +272,9 @@ fn test_soundness_addon_tampered_amount() {
     let row = AddonRow::active(
         &input,
         pre_pending,
-        0, // pre_chip_pool
+        0,   // pre_chip_pool
         200, // post_chip_pool
-        0, // pre_addon_pool
+        0,   // pre_addon_pool
         200, // post_addon_pool
         zero_root(),
         one_root(),
@@ -340,9 +340,9 @@ fn test_soundness_addon_tampered_seat() {
     let row = AddonRow::active(
         &input,
         100,
-        0, // pre_chip_pool
+        0,   // pre_chip_pool
         200, // post_chip_pool
-        0, // pre_addon_pool
+        0,   // pre_addon_pool
         200, // post_addon_pool
         zero_root(),
         one_root(),
@@ -519,10 +519,10 @@ fn test_e2e_rebuy_prove_verify() {
     let row = RebuyRow::active(
         &input,
         pre_stack,
-        0, // pre_chip_pool
+        0,   // pre_chip_pool
         500, // post_chip_pool
-        0, // pre_addon_pool
-        0, // post_addon_pool
+        0,   // pre_addon_pool
+        0,   // post_addon_pool
         zero_root(),
         one_root(),
         42, // table_id
@@ -627,10 +627,10 @@ fn test_soundness_rebuy_tampered_amount() {
     let row = RebuyRow::active(
         &input,
         pre_stack,
-        0, // pre_chip_pool
+        0,   // pre_chip_pool
         500, // post_chip_pool
-        0, // pre_addon_pool
-        0, // post_addon_pool
+        0,   // pre_addon_pool
+        0,   // post_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -754,10 +754,10 @@ fn test_soundness_rebuy_tampered_seat() {
     let row = RebuyRow::active(
         &input,
         1000,
-        0, // pre_chip_pool
+        0,   // pre_chip_pool
         500, // post_chip_pool
-        0, // pre_addon_pool
-        0, // post_addon_pool
+        0,   // pre_addon_pool
+        0,   // post_addon_pool
         zero_root(),
         one_root(),
         42,

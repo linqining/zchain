@@ -43,7 +43,6 @@ fn make_child(seq: u32, kind: MethodKind, pre: u32, post: u32) -> ChildDescripto
         post_state_root: root_of(post),
         call_seq: seq,
         method_kind: kind,
-        recursive_proof: None,
     }
 }
 

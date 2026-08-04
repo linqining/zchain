@@ -1894,6 +1894,7 @@ fn test_collect_rake_percentage_below_cap() {
     table.rake_bps = 500; // 5%
     table.rake_cap = 100;
     table.pot = 1000;
+    table.chip_pool = 1000;
 
     let rake = state_machine::collect_rake(&mut table)
         .expect("percentage rake collection below cap should succeed");
@@ -1909,6 +1910,7 @@ fn test_collect_rake_percentage_at_cap() {
     table.rake_bps = 500; // 5%
     table.rake_cap = 30;
     table.pot = 1000;
+    table.chip_pool = 1000;
 
     let rake = state_machine::collect_rake(&mut table)
         .expect("percentage rake collection at cap should succeed");
@@ -1957,7 +1959,9 @@ fn test_collect_ante_normal_mode() {
     assert_eq!(table.seats[0].stack, 990);
     assert_eq!(table.seats[1].stack, 990);
     assert_eq!(table.ante_collected, 20);
-    assert_eq!(table.seats[0].bet, 10);
+    // Antes are dead money: they increase total_bet and pot, but do not reduce
+    // the amount still owed in the current betting round.
+    assert_eq!(table.seats[0].bet, 0);
     assert_eq!(table.seats[0].total_bet, 10);
 }
 
@@ -1989,7 +1993,8 @@ fn test_collect_ante_all_in_on_zero_stack() {
 
     assert_eq!(table.seats[0].stack, 0);
     assert!(table.seats[0].all_in);
-    assert_eq!(table.seats[0].bet, 5);
+    // A short-stack ante is still dead money and therefore does not enter bet.
+    assert_eq!(table.seats[0].bet, 0);
     assert_eq!(table.ante_collected, 5);
 }
 

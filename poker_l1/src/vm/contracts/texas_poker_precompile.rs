@@ -32,7 +32,7 @@ use super::texas_poker::types::TexasPokerTable;
 use super::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
 use crate::economics::{
     coin_output_nonce, consume_native_coin_selection, create_native_coin_output,
-    native_coin_object, select_owned_native_coins, NativeCoinSelection,
+    native_coin_object, select_owned_native_coins, NativeCoinSelection, TREASURY_SYSTEM_ADDRESS,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
@@ -64,38 +64,48 @@ impl TexasPokerPrecompile {
         Arc::new(Self::new(version))
     }
 
-    fn refund_outputs(return_value: &[u8]) -> PokerL1Result<Vec<(Address, u64)>> {
+    /// Decode every native Coin output that must leave the Texas TableVault.
+    ///
+    /// Player stack refunds and rake have the same conservation requirement, but different
+    /// recipients: rake is paid to the protocol-owned Treasury address.  The state machine has
+    /// already subtracted every returned amount from `chip_pool`, while `RakeCollected` records
+    /// the exact amount that must become a Treasury-owned UTXO in this transaction.
+    fn escrow_outputs(return_value: &[u8]) -> PokerL1Result<Vec<(Address, u64)>> {
         let output: L1DispatchOutput = borsh::from_slice(return_value).map_err(|error| {
             PokerL1Error::Serialization(format!("decode Texas dispatch funding output: {error}"))
         })?;
-        let mut refunds = Vec::new();
+        let mut outputs = Vec::new();
         for event in output.events {
-            let TexasPokerEvent::PlayerRefund {
-                player,
-                amount,
-                refund_type,
-                ..
-            } = event
-            else {
-                continue;
-            };
-            match refund_type {
-                // STACK refunds leave the TableVault and therefore become wallet-owned UTXOs.
-                REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET if amount > 0 => {
-                    refunds.push((player, amount));
+            match event {
+                TexasPokerEvent::PlayerRefund {
+                    player,
+                    amount,
+                    refund_type,
+                    ..
+                } => match refund_type {
+                    // STACK refunds leave the TableVault and therefore become wallet-owned
+                    // UTXOs.
+                    REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET if amount > 0 => {
+                        outputs.push((player, amount));
+                    }
+                    // BET_ONLY is an in-table rollback: state_machine puts the value back into
+                    // the seat stack while chip_pool remains unchanged. Creating a UTXO here
+                    // would pay the same value twice and make the TableVault transition
+                    // inconsistent.
+                    REFUND_TYPE_BET_ONLY | REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET => {}
+                    unknown => {
+                        return Err(PokerL1Error::Other(format!(
+                            "unknown Texas refund type {unknown}"
+                        )));
+                    }
+                },
+                TexasPokerEvent::RakeCollected { rake_amount, .. } if rake_amount > 0 => {
+                    outputs.push((TREASURY_SYSTEM_ADDRESS, rake_amount));
                 }
-                // BET_ONLY is an in-table rollback: state_machine puts the value back into the
-                // seat stack while chip_pool remains unchanged. Creating a UTXO here would pay
-                // the same value twice and make the TableVault transition inconsistent.
-                REFUND_TYPE_BET_ONLY | REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET => {}
-                unknown => {
-                    return Err(PokerL1Error::Other(format!(
-                        "unknown Texas refund type {unknown}"
-                    )));
-                }
+                _ => {}
             }
         }
-        Ok(refunds)
+        Ok(outputs)
     }
 }
 
@@ -161,21 +171,21 @@ impl Precompile for TexasPokerPrecompile {
             .transpose()?;
 
         let result = tp_dispatch::dispatch(&dispatch_context, &mut table, method_selector, args)?;
-        let refunds = Self::refund_outputs(&result.return_value)?;
-        let total_refunds = refunds.iter().try_fold(0u64, |total, (_, amount)| {
+        let escrow_outputs = Self::escrow_outputs(&result.return_value)?;
+        let total_escrow_outputs = escrow_outputs.iter().try_fold(0u64, |total, (_, amount)| {
             total
                 .checked_add(*amount)
-                .ok_or_else(|| PokerL1Error::Other("Texas refund sum overflow".into()))
+                .ok_or_else(|| PokerL1Error::Other("Texas escrow output sum overflow".into()))
         })?;
         let expected_locked = pre_locked
             .checked_add(required_funding.unwrap_or(0))
-            .and_then(|value| value.checked_sub(total_refunds))
+            .and_then(|value| value.checked_sub(total_escrow_outputs))
             .ok_or_else(|| {
                 PokerL1Error::Other("Texas TableVault balance transition overflow".into())
             })?;
         if table.chip_pool != expected_locked {
             return Err(PokerL1Error::Other(format!(
-                "Texas TableVault mismatch: pre={pre_locked}, funding={}, refunds={total_refunds}, post={}, expected={expected_locked}",
+                "Texas TableVault mismatch: pre={pre_locked}, funding={}, escrow_outputs={total_escrow_outputs}, post={}, expected={expected_locked}",
                 required_funding.unwrap_or(0),
                 table.chip_pool,
             )));
@@ -201,9 +211,9 @@ impl Precompile for TexasPokerPrecompile {
                 return Err(PokerL1Error::ObjectIDCollision(change.id));
             }
         }
-        for (index, (player, amount)) in refunds.iter().enumerate() {
+        for (index, (player, amount)) in escrow_outputs.iter().enumerate() {
             let output_index = u32::try_from(index + 1)
-                .map_err(|_| PokerL1Error::Other("too many Texas refund outputs".into()))?;
+                .map_err(|_| PokerL1Error::Other("too many Texas escrow outputs".into()))?;
             let payout = native_coin_object(
                 *player,
                 *amount,
@@ -227,9 +237,9 @@ impl Precompile for TexasPokerPrecompile {
                 economic_created.push(change_id);
             }
         }
-        for (index, (player, amount)) in refunds.into_iter().enumerate() {
+        for (index, (player, amount)) in escrow_outputs.into_iter().enumerate() {
             let output_index = u32::try_from(index + 1)
-                .map_err(|_| PokerL1Error::Other("too many Texas refund outputs".into()))?;
+                .map_err(|_| PokerL1Error::Other("too many Texas escrow outputs".into()))?;
             economic_created.push(create_native_coin_output(
                 object_db,
                 player,
@@ -299,13 +309,17 @@ mod tests {
 
     use crate::economics::{
         coin_output_nonce, decode_native_coin, genesis_mint, list_owned_native_coins,
-        native_coin_object, read_treasury,
+        native_coin_object, read_treasury, reconcile_native_supply, TREASURY_SYSTEM_ADDRESS,
     };
     use crate::executor::write_capture::WriteCaptureBackend;
     use crate::object_model::Version;
     use crate::signature::TaggedPubkey;
     use crate::vm::contracts::texas_poker::dispatch::{
-        AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs,
+        AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs, SeatIndexArgs,
+    };
+    use crate::vm::contracts::texas_poker::{
+        betting::BettingRound,
+        constants::ROUND_PREFLOP,
     };
 
     fn make_env() -> ExecutionEnvironment {
@@ -376,7 +390,7 @@ mod tests {
         }]);
 
         let encoded = borsh::to_vec(&output).unwrap();
-        assert!(TexasPokerPrecompile::refund_outputs(&encoded)
+        assert!(TexasPokerPrecompile::escrow_outputs(&encoded)
             .unwrap()
             .is_empty());
     }
@@ -395,7 +409,7 @@ mod tests {
             }]);
             let encoded = borsh::to_vec(&output).unwrap();
             assert_eq!(
-                TexasPokerPrecompile::refund_outputs(&encoded).unwrap(),
+                TexasPokerPrecompile::escrow_outputs(&encoded).unwrap(),
                 vec![(player, 90)]
             );
         }
@@ -408,8 +422,25 @@ mod tests {
             refund_type: u8::MAX,
         }]);
         let error =
-            TexasPokerPrecompile::refund_outputs(&borsh::to_vec(&unknown).unwrap()).unwrap_err();
+            TexasPokerPrecompile::escrow_outputs(&borsh::to_vec(&unknown).unwrap()).unwrap_err();
         assert!(error.to_string().contains("unknown Texas refund type"));
+    }
+
+    #[test]
+    fn rake_event_creates_a_treasury_escrow_output() {
+        let table_id = reserved::texas_poker_contract_id();
+        let output = L1DispatchOutput::events_only(vec![TexasPokerEvent::RakeCollected {
+            table_id,
+            pot_before: 200,
+            rake_amount: 10,
+            pot_after: 190,
+            rake_mode: 1,
+        }]);
+
+        assert_eq!(
+            TexasPokerPrecompile::escrow_outputs(&borsh::to_vec(&output).unwrap()).unwrap(),
+            vec![(TREASURY_SYSTEM_ADDRESS, 10)]
+        );
     }
 
     #[test]
@@ -675,6 +706,173 @@ mod tests {
             borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
         assert_eq!(table.chip_pool, 0);
         assert!(!table.seats[0].is_occupied());
+    }
+
+    #[test]
+    fn rake_settlement_pays_treasury_once_and_preserves_native_supply() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (player_a, player_a_pk) = make_caller();
+        let player_b = [0xBC; 20];
+        let player_b_pk = TaggedPubkey {
+            tag: 0,
+            raw: vec![0xCD; 32],
+        };
+        let mut object_db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut object_db, 1, &[(player_a, 100), (player_b, 100)]).unwrap();
+        create_test_table(&precompile, &player_a, &player_a_pk, &mut object_db);
+
+        let a_coin = list_owned_native_coins(&object_db, player_a).unwrap()[0].id;
+        funded_join(
+            &precompile,
+            &player_a,
+            &player_a_pk,
+            &mut object_db,
+            a_coin,
+            100,
+            [0x71; 32],
+        );
+        let b_coin = list_owned_native_coins(&object_db, player_b).unwrap()[0].id;
+        let b_join_args = borsh::to_vec(&JoinTableArgs {
+            player: player_b,
+            buy_in: 100,
+            pk: ECPoint(G1Projective::generator()),
+        })
+        .unwrap();
+        precompile
+            .call(
+                &player_b,
+                &player_b_pk,
+                &selectors::join_table(),
+                &b_join_args,
+                &ExecutionEnvironment {
+                    tx_inputs: vec![b_coin],
+                    tx_hash: [0x72; 32],
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+
+        // Build a valid two-player all-in pot from the funded table. Folding player A ends the
+        // hand, charges 5% rake, and exercises the same precompile path as production settlement.
+        let table_id = reserved::texas_poker_contract_id();
+        let mut table: TexasPokerTable =
+            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        table.round_state = ROUND_PREFLOP;
+        table.betting_round = Some(BettingRound::new(50, 100));
+        table.current_turn = Some(0);
+        table.pot = 200;
+        table.rake_mode = crate::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
+        table.rake_bps = 500;
+        table.rake_cap = 100;
+        for seat in table.seats.iter_mut().take(2) {
+            seat.stack = 0;
+            seat.bet = 0;
+            seat.total_bet = 100;
+            seat.is_waiting = false;
+        }
+        object_db
+            .update(&table_id, &player_a, borsh::to_vec(&table).unwrap())
+            .unwrap();
+
+        // A later persistence failure must roll back the Treasury output together with the
+        // state transition.  This exercises the failure point after the rake UTXO has been
+        // staged, not just the deterministic-output collision preflight.
+        let table_before = object_db.read(&table_id).unwrap();
+        let treasury_before = read_treasury(&object_db).unwrap();
+        let root_before = object_db.state_root();
+        let failed_settlement_hash = [0x75; 32];
+        let error = {
+            let mut backend = FailTableUpdateBackend {
+                inner: WriteCaptureBackend::new(&object_db),
+                table_id,
+            };
+            precompile
+                .call(
+                    &player_a,
+                    &player_a_pk,
+                    &selectors::fold(),
+                    &borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap(),
+                    &ExecutionEnvironment {
+                        tx_hash: failed_settlement_hash,
+                        ..make_env()
+                    },
+                    &mut backend,
+                )
+                .unwrap_err()
+        };
+        assert!(error
+            .to_string()
+            .contains("injected table persistence failure"));
+        assert_eq!(object_db.read(&table_id).unwrap(), table_before);
+        assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
+        assert_eq!(object_db.state_root(), root_before);
+        let discarded_treasury_coin = ObjectID::new(
+            TREASURY_SYSTEM_ADDRESS,
+            coin_output_nonce(&failed_settlement_hash, 1),
+        );
+        assert!(object_db.read(&discarded_treasury_coin).is_err());
+        assert!(list_owned_native_coins(&object_db, TREASURY_SYSTEM_ADDRESS)
+            .unwrap()
+            .is_empty());
+        reconcile_native_supply(&object_db, 0).unwrap();
+
+        let settlement_hash = [0x73; 32];
+        let result = precompile
+            .call(
+                &player_a,
+                &player_a_pk,
+                &selectors::fold(),
+                &borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap(),
+                &ExecutionEnvironment {
+                    tx_hash: settlement_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+
+        let treasury_coin = ObjectID::new(
+            TREASURY_SYSTEM_ADDRESS,
+            coin_output_nonce(&settlement_hash, 1),
+        );
+        assert!(result.created_objects.contains(&treasury_coin));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&treasury_coin).unwrap())
+                .unwrap()
+                .amount,
+            10
+        );
+        let stored: TexasPokerTable =
+            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        let prove_task = borsh::from_slice::<L1DispatchOutput>(&result.return_value)
+            .unwrap()
+            .prove_task
+            .expect("settling fold must issue a proof task");
+        assert_eq!(prove_task.post_table, stored);
+        assert_eq!(stored.chip_pool, 190);
+        assert_eq!(stored.rake_collected, 0);
+        assert_eq!(stored.seats[1].stack, 190);
+        reconcile_table_vault(&stored).unwrap();
+        reconcile_native_supply(&object_db, 0).unwrap();
+
+        // The finished hand cannot be paid twice: the folded player has been removed during
+        // reset, so a replayed action fails before any extra Treasury output is created.
+        assert!(precompile
+            .call(
+                &player_a,
+                &player_a_pk,
+                &selectors::fold(),
+                &borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap(),
+                &ExecutionEnvironment {
+                    tx_hash: [0x74; 32],
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .is_err());
+        assert_eq!(list_owned_native_coins(&object_db, TREASURY_SYSTEM_ADDRESS).unwrap().len(), 1);
+        reconcile_native_supply(&object_db, 0).unwrap();
     }
 
     #[test]

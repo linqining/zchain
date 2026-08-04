@@ -18,7 +18,7 @@
 //! verifier 重放 canonical request 的 native 密码学验证，再将完整 request/receipt
 //! digest 和 replay scope 绑定进 AIR statement。其余 DLEq / reveal 类 proof 仍沿用
 //! 阶段 4 的协议状态约束，后续应扩展为相同的 precompile ABI，或嵌入
-//! [`poker_zkvm::stwo_backend::recursive`] 的 Verifier AIR。
+//! Texas 自有 Verifier AIR。
 //!
 //! 当前 STARK proof 仍不能脱离 native verifier binding 单独作为密码学 proof 已验证的
 //! 可转移证据。当前生产 receipt 路径的信任边界是

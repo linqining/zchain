@@ -564,7 +564,11 @@ pub struct TexasPokerTable {
     pub rake_bps: u64,
     /// Rake 上限（单手最多抽水金额）。
     pub rake_cap: u64,
-    /// 本手已抽水金额（settle 时计算并扣除）。
+    /// 本次结算已抽水金额。
+    ///
+    /// 此字段不是 TableVault 余额；它是状态机在同一 dispatch 中留给
+    /// `TexasPokerPrecompile` 的 Treasury Coin 出金收据。结算的
+    /// `reset_for_next_hand` 会在持久化前将其清零。
     pub rake_collected: u64,
 
     /// Run It Twice 模式（`RIT_MODE_DISABLED/TWICE`）。

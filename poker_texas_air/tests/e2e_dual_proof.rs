@@ -15,13 +15,13 @@ use poker_l1::vm::contracts::texas_poker::types::{
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::reconstruction::{
-    ReconstructProofV3, RECONSTRUCTION_V3_PROOF_LABEL,
+    RECONSTRUCTION_V3_PROOF_LABEL, ReconstructProofV3,
 };
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
-use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_texas_air::dual_proof::{
-    prove_dual_proof, verify_dual_proof, DualProofBundle, DUAL_PROOF_MAGIC, DUAL_PROOF_VERSION,
+    DUAL_PROOF_MAGIC, DUAL_PROOF_VERSION, DualProofBundle, prove_dual_proof, verify_dual_proof,
 };
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};

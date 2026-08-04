@@ -8,8 +8,8 @@
 ## P0-5:Aggregator 不验证任何子证明
 
 > 架构决策（2026-08-04）：主路线是 `poker_texas_air` 的全自定义电路。
-> `poker_zkvm` 只保留为当前依赖图中的编译边界，不再投入修复、soundness 或递归架构工作。
-> 本文中提到该 crate 的段落是历史记录；未来若恢复递归聚合，必须基于 Texas AIR
+> `poker_zkvm` 已从 zchain workspace 和 Texas/L1 依赖图移除，不再投入修复、soundness 或
+> 递归架构工作。本文中提到该 crate 的段落是历史记录；未来若恢复递归聚合，必须基于 Texas AIR
 > 重新设计并独立审计，不能把 `poker_zkvm` 作为交付前置条件。
 
 本项拆分为两个不同的交付边界：
@@ -205,10 +205,9 @@ dispatch replay 与 proof 均被 host 接受”，但不能单靠任务里自带
 
 **当前状态**：
 - descriptor-only prove/verify 生产入口继续 fail-closed；
-- `poker_zkvm` recursive PoC 与 L1 `StwoZkVerifier` 生产路径均 fail-closed；
-- `poker_zkvm` 主 crate 已迁入 zchain workspace（`members` 含 `poker_zkvm`）；其
-  guest 子 crate（`guest_sdk` / `guests/texas_poker`）暂未迁入，依赖它们的 E2E
-  测试与 bench 暂留外部目录；
+- 旧 zkVM recursive PoC、proof envelope 和 L1 `StwoZkVerifier` 注册入口已从主线删除；
+  scheme 1 在没有未来 Texas verifier 显式注册时保持未注册；
+- `poker_zkvm` 目录保留在仓库外的独立实验范围，不属于 zchain workspace；
 - `test-helpers` 已从 root / `poker_l1` 普通依赖移除，仅保留在 `poker_l1` dev-dependency；
   release 依赖图不再暴露测试 ELF/证明构造器；
 - **P05-R gap #1**（空-input Merkle no-op）已收窄闭合 + 回归（守卫拒绝空 commitments/query/log_size）；

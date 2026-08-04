@@ -80,9 +80,10 @@ impl TreasuryCap {
 
 /// Global reconciliation of every currently modelled native ZCN custody domain.
 ///
-/// `addon_pool` and `rake_collected` are accounting subsets of a table's `chip_pool`, so Texas
-/// escrow is counted exactly once. Legacy [`crate::account::Account::balance`] is a resource
-/// credit and is intentionally absent from this report.
+/// `addon_pool` is an accounting subset of a table's `chip_pool`. A Texas rake is moved to a
+/// Treasury-owned native Coin in the same precompile call, so it is counted as a live UTXO rather
+/// than table escrow. Legacy [`crate::account::Account::balance`] is a resource credit and is
+/// intentionally absent from this report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeSupplyReconciliation {
     /// Supply committed by the singleton TreasuryCap.
@@ -202,6 +203,12 @@ pub fn audit_native_supply(
                 return Err(PokerL1Error::Other(format!(
                     "Texas Poker table {:?} addon_pool {} exceeds chip_pool {}",
                     object.id, table.addon_pool, table.chip_pool
+                )));
+            }
+            if table.rake_collected != 0 {
+                return Err(PokerL1Error::Other(format!(
+                    "Texas Poker table {:?} retained an unfinalized rake receipt {}",
+                    object.id, table.rake_collected
                 )));
             }
             texas_table_escrow = texas_table_escrow

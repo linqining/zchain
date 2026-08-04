@@ -7,8 +7,8 @@
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
-use proving_service::full_hand::FullHandRunner;
 use proving_service::HandRunner;
+use proving_service::full_hand::FullHandRunner;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()

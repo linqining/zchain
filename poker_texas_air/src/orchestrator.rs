@@ -84,17 +84,14 @@ use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHand
 use crate::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{precompile_call_context, PrecompileCallBinding};
-use crate::prove_task::{dispatch_call_digest, DispatchOutput, MethodInput, ProveTask};
+use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
+use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
 use crate::prover::prove_method;
-#[cfg(feature = "recursive-prover")]
-use crate::recursive::prove_method_recursive;
-use crate::recursive::verify_method_recursive_proof;
-use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
-use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
+use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
+use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verified_chain::{
-    verify_method_against_and_issue_receipt, ExpectedChainAnchor, VerificationReceipt,
-    VerifiedChain, VerifiedChainBuilder,
+    ExpectedChainAnchor, VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
+    verify_method_against_and_issue_receipt,
 };
 
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {
@@ -130,7 +127,6 @@ impl ProvenTask {
             post_state_root: state_root_to_m31_limbs(self.post_state_root),
             call_seq: self.call_seq,
             method_kind: self.method_kind,
-            recursive_proof: None,
         }
     }
 }
@@ -164,51 +160,6 @@ impl Orchestrator {
         self.verified_chain_builder.push_receipt(receipt)?;
         self.proven.push(summary.clone());
         Ok(summary)
-    }
-
-    /// Replay an authenticated task, reconstruct its trusted AIR/public inputs, and directly
-    /// verify a recursive STWO proof without accepting or regenerating the inner method proof.
-    ///
-    /// The caller remains responsible for authenticating `task` against L1 consensus/state. This
-    /// function treats every task field as untrusted, replays the VM dispatch, and derives the AIR
-    /// and replicated row locally before invoking the recursive verifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a disabled selector, failed VM replay, task/row mismatch, or invalid
-    /// recursive proof/public inputs.
-    pub fn verify_recursive_task(
-        task: &ProveTask,
-        recursive_proof: &poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
-        recursive_inputs: &poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
-    ) -> TexasAirResult<()> {
-        let orchestrator = Self::new();
-        let mut backend = RecursiveMethodVerifierBackend {
-            recursive_proof,
-            recursive_inputs,
-        };
-        orchestrator.process_task(task, &mut backend).map(|_| ())
-    }
-
-    /// Replay one task, generate its inner method proof, and immediately wrap it in a recursive
-    /// STWO proof. The returned value intentionally excludes the inner proof.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for failed task replay, method proving, native verification, or recursive
-    /// proving.
-    #[cfg(feature = "recursive-prover")]
-    pub fn prove_recursive_task(
-        task: &ProveTask,
-    ) -> TexasAirResult<(
-        poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
-        poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
-    )> {
-        let orchestrator = Self::new();
-        let mut backend = RecursiveMethodProverBackend;
-        orchestrator
-            .process_task(task, &mut backend)
-            .map(|(_, recursive)| recursive)
     }
 
     fn process_task<B: MethodBackend>(
@@ -2222,63 +2173,7 @@ impl MethodBackend for NativeMethodProofBackend {
     }
 }
 
-struct RecursiveMethodVerifierBackend<'a> {
-    recursive_proof: &'a poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
-    recursive_inputs: &'a poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
-}
-
-#[cfg(feature = "recursive-prover")]
-struct RecursiveMethodProverBackend;
-
-#[cfg(feature = "recursive-prover")]
-impl MethodBackend for RecursiveMethodProverBackend {
-    type Output = (
-        poker_zkvm::stwo_backend::recursive::recursion_prover::RecursiveProof,
-        poker_zkvm::stwo_backend::recursive::RecursivePublicInputs,
-    );
-
-    fn execute<A: crate::airs::TexasAir>(
-        &mut self,
-        num_columns: usize,
-        row: &[M31],
-        padding: &[M31],
-        air: A,
-        public_inputs: crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<Self::Output> {
-        let trace = gen_method_trace(num_columns, row, padding)?;
-        let method_proof = prove_method(&trace, air.clone(), num_columns, public_inputs.clone())?;
-        prove_method_recursive(&method_proof, air, &public_inputs)
-    }
-}
-
-impl MethodBackend for RecursiveMethodVerifierBackend<'_> {
-    type Output = ();
-
-    fn execute<A: crate::airs::TexasAir>(
-        &mut self,
-        num_columns: usize,
-        row: &[M31],
-        padding: &[M31],
-        air: A,
-        public_inputs: crate::public_inputs::TexasPublicInputs,
-    ) -> TexasAirResult<Self::Output> {
-        if row.len() != num_columns || padding.len() != num_columns {
-            return Err(TexasAirError::SpecViolation(format!(
-                "trusted row/padding width mismatch: row={}, padding={}, expected={num_columns}",
-                row.len(),
-                padding.len()
-            )));
-        }
-        verify_method_recursive_proof(
-            self.recursive_proof,
-            self.recursive_inputs,
-            air,
-            &public_inputs,
-        )
-    }
-}
-
-/// Shared trusted-statement path for native method proving and recursive-only verification.
+/// Shared trusted-statement path for native method proving.
 fn run<B, A, F>(
     backend: &mut B,
     num_columns: usize,
@@ -2625,126 +2520,6 @@ mod tests {
         let mut orch = Orchestrator::new();
         orch.prove_and_verify_task(&task)
             .expect("fold prove+verify 应成功");
-    }
-
-    #[cfg(feature = "recursive-prover")]
-    #[test]
-    #[ignore = "recursive STWO proving is intentionally expensive"]
-    fn l1_registry_directly_verifies_recursive_fold_envelope_without_inner_proof() {
-        let mut pre = make_table("recursive-l1-fold");
-        pre.version = 1;
-        pre.round_state = ROUND_PREFLOP;
-        pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
-        for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
-        }
-        let caller = pre.seats[0].player;
-        let (task, _) = dispatch_task(
-            pre,
-            caller,
-            texas_dispatch::selectors::fold(),
-            borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("fold args should serialize"),
-        );
-
-        let (recursive_proof, recursive_inputs) =
-            Orchestrator::prove_recursive_task(&task).expect("recursive proof should be produced");
-        let envelope = crate::recursive_envelope::TexasRecursiveProofEnvelope::new(
-            task.clone(),
-            recursive_inputs,
-            recursive_proof,
-        );
-        let encoded = envelope.encode().expect("envelope should encode");
-        assert!(
-            encoded.len() <= poker_l1::offline::zk_verifier::MAX_ZK_PROOF_BYTES,
-            "recursive envelope size {} exceeds the L1 zk_verify limit {}",
-            encoded.len(),
-            poker_l1::offline::zk_verifier::MAX_ZK_PROOF_BYTES,
-        );
-        let decoded = crate::recursive_envelope::TexasRecursiveProofEnvelope::decode(&encoded)
-            .expect("envelope should round-trip");
-        assert_eq!(decoded.task().method_kind, MethodKind::Fold);
-
-        let public_io = crate::l1_verifier::texas_recursive_public_io(&task).unwrap();
-        let anchor = crate::verified_chain::ExpectedChainAnchor::new(
-            task.table_id,
-            task.hand_id,
-            task.call_seq,
-            crate::state_root::compute_state_root(&task.pre_table).unwrap(),
-            crate::state_root::compute_state_root(&task.post_table).unwrap(),
-            task.pre_table.version,
-            task.post_table.version,
-            vec![dispatch_call_digest(&task.context, &task.selector, &task.raw_args).unwrap()],
-        )
-        .unwrap();
-        let mut registry = poker_l1::offline::zk_verifier::ZkVerifierRegistry::new();
-        crate::l1_verifier::register_texas_stwo_recursive_verifier(&mut registry).unwrap();
-
-        let stub_result = crate::l1_verifier::verify_authenticated_texas_recursive_transition(
-            &registry,
-            poker_l1::DEFAULT_CHAIN_ID,
-            &encoded,
-            &task,
-        );
-        assert!(matches!(
-            stub_result,
-            Err(poker_l1::error::PokerL1Error::ZkVerifierNotProduction { .. })
-        ));
-
-        registry.set_verifier_status(
-            poker_l1::DEFAULT_CHAIN_ID,
-            poker_l1::offline::zk_verifier::VerifierStatus::Production,
-        );
-        let authenticated =
-            crate::l1_verifier::verify_consensus_anchored_texas_recursive_transition(
-                &registry,
-                poker_l1::DEFAULT_CHAIN_ID,
-                &encoded,
-                &task,
-                &anchor,
-            )
-            .expect("authenticated L1 transition should verify");
-        assert!(authenticated.verified);
-
-        let mut different_authenticated_task = task.clone();
-        different_authenticated_task.post_table.version += 1;
-        assert!(
-            crate::l1_verifier::verify_consensus_anchored_texas_recursive_transition(
-                &registry,
-                poker_l1::DEFAULT_CHAIN_ID,
-                &encoded,
-                &different_authenticated_task,
-                &anchor,
-            )
-            .is_err()
-        );
-
-        let result = registry
-            .zk_verify(
-                poker_l1::DEFAULT_CHAIN_ID,
-                poker_l1::offline::zk_verifier::SCHEME_STWO,
-                &encoded,
-                &public_io,
-                3,
-                1_000,
-            )
-            .expect("registry verification should execute");
-        assert!(result.verified);
-
-        let mut relabeled_public_io = public_io;
-        relabeled_public_io.final_commitment[0] ^= 1;
-        let relabeled = registry
-            .zk_verify(
-                poker_l1::DEFAULT_CHAIN_ID,
-                poker_l1::offline::zk_verifier::SCHEME_STWO,
-                &encoded,
-                &relabeled_public_io,
-                3,
-                1_000,
-            )
-            .expect("mismatched public I/O should return a negative result");
-        assert!(!relabeled.verified);
     }
 
     #[test]

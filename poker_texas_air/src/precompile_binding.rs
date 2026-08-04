@@ -4,14 +4,14 @@
 //! request. Production verification replays that verification and recomputes
 //! both digests; a proof-carried `success = true` value is never accepted.
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use poker_protocol::precompile::{
     NativeBls12381ReconstructionV3Verifier, NativeBls12381ShuffleVerifier,
 };
 use poker_protocol::precompile_abi::{
-    ReconstructionV3Verifier, ReconstructionV3VerifyRequest, ShuffleVerifier, ShuffleVerifyRequest,
-    RECONSTRUCTION_V3_ABI_VERSION, SHUFFLE_ABI_VERSION,
+    RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3Verifier, ReconstructionV3VerifyRequest,
+    SHUFFLE_ABI_VERSION, ShuffleVerifier, ShuffleVerifyRequest,
 };
 use stwo::core::fields::m31::M31;
 

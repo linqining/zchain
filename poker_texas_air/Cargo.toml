@@ -2,7 +2,7 @@
 name = "poker_texas_air"
 version = "0.1.0"
 edition = "2024"
-description = "Texas Poker method AIR + application-aware native STWO recursion verifier"
+description = "Texas Poker method AIR and custom-circuit proving primitives"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -10,11 +10,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Enable only the production-facing recursive verifier adapter. L1 nodes use
-# this feature so they do not expose or link the recursive prover entry point.
-recursive-verifier = ["poker_zkvm/recursive-verifier"]
-# Enable the recursive prover as well; proving implies verification.
-recursive-prover = ["recursive-verifier", "poker_zkvm/recursive-prover"]
 # 保留 Aggregator PoC 配置；生产 prove/verify 默认拒绝 descriptor-only 聚合
 aggregator = []
 # 测试辅助：暴露不可信负向测试工具；lib.rs 禁止其进入 release 构建
@@ -23,10 +18,9 @@ test-helpers = []
 [dependencies]
 # ===== 工作区内复用 =====
 poker_l1 = { path = "../poker_l1" }
-poker_zkvm = { workspace = true }
 poker_protocol = { workspace = true }
 vm-common = { path = "../vm-common" }
-# ===== Stwo 证明后端（与 poker_zkvm 同版本）=====
+# ===== Stwo 证明后端 =====
 stwo = { workspace = true }
 stwo-air-utils = { workspace = true }
 stwo-air-utils-derive = { workspace = true }
@@ -55,4 +49,3 @@ proptest = { workspace = true }
 rand = { workspace = true }
 secp256k1 = { workspace = true }
 poker_texas_air = { path = ".", features = ["test-helpers"] }
-poker_zkvm = { workspace = true, features = ["experimental-cpu-prover"] }

@@ -50,38 +50,17 @@ pub struct AggregatorProof {
     pub children: Vec<crate::aggregator_air::ChildDescriptor>,
 }
 
-/// 递归聚合证明。
+/// Produce a succinct recursive aggregation proof.
 ///
-/// 当所有 `ChildDescriptor` 均携带 `recursive_proof` 时，此函数：
-/// 1. 逐个递归验证每个子 proof（`poker_zkvm::verify_recursive`）
-/// 2. 生成 descriptor chain STARK（state_root 连续性约束）
-/// 3. 返回聚合 proof
-///
-/// 当子节点无 recursive_proof（仅 descriptor 模式）时，返回 `UntrustedAggregationDisabled`。
+/// This entry is intentionally unavailable until the Texas-owned verifier AIR
+/// validates every child proof and binds their statements.  A descriptor chain
+/// alone cannot establish child-proof validity.
 ///
 /// # Errors
-/// - `TexasAirError::UntrustedAggregationDisabled` — 子节点缺少 recursive_proof
-/// - `TexasAirError::RecursionError` — 递归验证失败或链式连续性破坏
-pub fn prove_aggregator(children: Vec<ChildDescriptor>) -> TexasAirResult<AggregatorProof> {
-    // 检查所有子节点是否都携带 recursive_proof。
-    let has_recursive = children
-        .iter()
-        .all(|c| c.recursive_proof.is_some());
-    if !has_recursive {
-        return Err(TexasAirError::UntrustedAggregationDisabled);
-    }
-    // 递归验证每个子 proof（如果 poker_zkvm 启用了 recursive-prover feature）。
-    // 在未启用 feature 时，verify_recursive 返回 UnsoundBackendDisabled；
-    // 此处容错：仅记录但不阻断（由调用方决定是否信任）。
-    for child in &children {
-        if let Some(ref l2_proof) = child.recursive_proof {
-            // 注意：需要 RecursivePublicInputs 才能验证；此处仅做格式存在性检查。
-            // 完整递归验证需从 child 构造 RecursivePublicInputs（后续实现）。
-            let _ = l2_proof;
-        }
-    }
-    // 生成 descriptor chain STARK。
-    prove_aggregator_unchecked(children)
+///
+/// Always returns [`TexasAirError::UntrustedAggregationDisabled`].
+pub fn prove_aggregator(_children: Vec<ChildDescriptor>) -> TexasAirResult<AggregatorProof> {
+    Err(TexasAirError::UntrustedAggregationDisabled)
 }
 
 /// Host-attested 聚合证明（非 recursive）。
@@ -93,7 +72,7 @@ pub fn prove_aggregator(children: Vec<ChildDescriptor>) -> TexasAirResult<Aggreg
 ///
 /// **信任边界**：此 proof 证明 descriptor chain 的连续性（Fiat-Shamir 绑定），
 /// 但**不证明**子 proof 的密码学有效性——后者由 host-verify 回执保证。
-/// 这不是 succinct recursive proof；完整的递归闭环需 `poker_zkvm` 递归电路审计完成。
+/// 这不是 succinct recursive proof；完整闭环需要 Texas 自有递归 verifier AIR。
 ///
 /// # 参数
 /// - `children`：子节点描述符链（须有连续的 state_root / call_seq）
@@ -203,7 +182,6 @@ fn prove_aggregator_unchecked(children: Vec<ChildDescriptor>) -> TexasAirResult<
         call_seq: top_row.left_call_seq.0,
         method_kind: crate::method_kind::MethodKind::from_u8(top_row.left_method_kind.0 as u8)
             .unwrap_or(crate::method_kind::MethodKind::CreateTable),
-        recursive_proof: None,
     };
     let right_desc = ChildDescriptor {
         pre_state_root: top_row.right_pre_state_root,
@@ -211,7 +189,6 @@ fn prove_aggregator_unchecked(children: Vec<ChildDescriptor>) -> TexasAirResult<
         call_seq: top_row.right_call_seq.0,
         method_kind: crate::method_kind::MethodKind::from_u8(top_row.right_method_kind.0 as u8)
             .unwrap_or(crate::method_kind::MethodKind::CreateTable),
-        recursive_proof: None,
     };
 
     let air = AggregatorAir {
