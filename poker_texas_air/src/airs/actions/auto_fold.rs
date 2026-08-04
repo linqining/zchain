@@ -1,4 +1,4 @@
-//! `auto_fold` AIR — 玩家超时自动 fold（permissionless）。
+//! `auto_fold` AIR — 玩家超时自动 fold（仅 table creator 可发起）。
 //!
 //! 移植自 `dispatch::dispatch_auto_fold` 与 `state_machine::apply_auto_fold`。
 //!
@@ -12,19 +12,22 @@
 //!
 //! 与 [`crate::airs::actions::fold`] 的区别：
 //! - `fold`：玩家主动操作
-//! - `auto_fold`：超时驱动（任何人都可以发起）
+//! - `auto_fold`：由 table creator 在超时后发起
 //!
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 7 个：`INPUT_SEAT_INDEX`, `INPUT_CURRENT_TIME_BASE[4]`,
-//!   `OUTPUT_FOLDED`
+//! - 业务列 42 个：seat、完整 timeout 输入、64-bit 饱和 deadline 加法和
+//!   `current_time >= deadline` 的借位证明，以及 fold/turn 输出。
+//!
+//! `DispatchContext::block_timestamp` 是 consensus input。该值由
+//! `Orchestrator` 从重放的 dispatch task 取出，而非由 prover 自行选择。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
+    u64_to_m31_limbs, u8_to_m31, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
 };
 use crate::method_kind::MethodKind;
 
@@ -43,8 +46,28 @@ pub mod cols {
     pub const INPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 7;
     /// `OUTPUT_CURRENT_TURN` — mid-round 推进后的下一行动座位。
     pub const OUTPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 8;
+    /// `PRE_BETTING_STARTED_AT` 起始列（4 limb）。
+    pub const PRE_BETTING_STARTED_AT_BASE: usize = COMMON_NUM_COLUMNS + 9;
+    /// `BETTING_TIMEOUT_MS` 起始列（4 limb）。
+    pub const BETTING_TIMEOUT_MS_BASE: usize = COMMON_NUM_COLUMNS + 13;
+    /// 目标座位调用前 `time_bank_ms` 起始列（4 limb）。
+    pub const PRE_TIME_BANK_MS_BASE: usize = COMMON_NUM_COLUMNS + 17;
+    /// `started + timeout` 的模 `2^64` 和起始列（4 limb）。
+    pub const DEADLINE_SUM_BASE: usize = COMMON_NUM_COLUMNS + 21;
+    /// 饱和后的 deadline 起始列（4 limb）。
+    pub const DEADLINE_BASE: usize = COMMON_NUM_COLUMNS + 25;
+    /// deadline 加法的三个 limb carry 起始列。
+    pub const DEADLINE_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 29;
+    /// deadline 加法的最终 overflow witness。
+    pub const DEADLINE_ADD_OVERFLOW: usize = COMMON_NUM_COLUMNS + 32;
+    /// `current_time - deadline` 的差起始列（4 limb）。
+    pub const TIME_ELAPSED_BASE: usize = COMMON_NUM_COLUMNS + 33;
+    /// `current_time - deadline` 的四个 limb borrow 起始列。
+    pub const TIME_SUB_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 37;
+    /// `betting_started_at != 0` 的非零逆元 witness。
+    pub const PRE_BETTING_STARTED_AT_INV: usize = COMMON_NUM_COLUMNS + 41;
     /// `auto_fold` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 9;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 42;
 }
 
 /// `auto_fold` 输入参数。
@@ -54,6 +77,12 @@ pub struct AutoFoldInput {
     pub seat_index: u8,
     /// 触发时的当前时间戳。
     pub current_time: u64,
+    /// 调用前本轮下注计时开始时间。
+    pub pre_betting_started_at: u64,
+    /// 调用前下注超时配置。
+    pub betting_timeout_ms: u64,
+    /// 目标座位调用前的 Time Bank 余额。
+    pub pre_time_bank_ms: u64,
     /// mid-round 推进后的下一行动座位。
     pub post_current_turn: u8,
 }
@@ -102,16 +131,67 @@ impl FrameworkEval for AutoFoldAir {
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
-        let input_current_time_0 = eval.next_trace_mask();
-        let _input_current_time_1 = eval.next_trace_mask();
-        let _input_current_time_2 = eval.next_trace_mask();
-        let _input_current_time_3 = eval.next_trace_mask();
+        let input_current_time = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         let output_folded = eval.next_trace_mask();
         // Gap 1 witness：pre_round_state²
         let input_pre_round_state_q = eval.next_trace_mask();
         // Gap: current_turn == seat_index witness
         let input_current_turn = eval.next_trace_mask();
         let output_current_turn = eval.next_trace_mask();
+        let pre_betting_started_at = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let betting_timeout_ms = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let pre_time_bank_ms = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline_sum = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline_add_carry = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline_add_overflow = eval.next_trace_mask();
+        let time_elapsed = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let time_sub_borrow = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let pre_betting_started_at_inv = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -119,12 +199,107 @@ impl FrameworkEval for AutoFoldAir {
         // 约束: current_turn == seat_index（Gap: 阻止为非当前行动座位构造动作）
         eval.add_constraint(is_active.clone() * (input_current_turn - expected_seat));
 
-        // 约束 2：current_time 一致性（limb 0）
-        let expected_time_0: E::F = M31::from((self.input.current_time & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_current_time_0 - expected_time_0));
+        // 约束 2：所有 timeout 输入都与 trusted AIR statement 完整绑定；此前只
+        // 绑定 current_time 的 limb 0，会允许跨 16-bit 边界的伪造时间戳。
+        let expected_current_time = u64_to_m31_limbs(self.input.current_time);
+        let expected_started_at = u64_to_m31_limbs(self.input.pre_betting_started_at);
+        let expected_timeout = u64_to_m31_limbs(self.input.betting_timeout_ms);
+        let expected_time_bank = u64_to_m31_limbs(self.input.pre_time_bank_ms);
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (input_current_time[i].clone() - expected_current_time[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (pre_betting_started_at[i].clone() - expected_started_at[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (betting_timeout_ms[i].clone() - expected_timeout[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (pre_time_bank_ms[i].clone() - expected_time_bank[i].into()),
+            );
+            // L1 rejects auto-fold while any Time Bank remains. Enforce every
+            // limb, not merely the low limb, to prevent a high-limb bypass.
+            eval.add_constraint(is_active.clone() * pre_time_bank_ms[i].clone());
+        }
+
+        // `betting_started_at == 0` means the timer was never started and is
+        // explicitly rejected by dispatch. The limbs are canonical 16-bit
+        // values, so their M31 sum is zero iff all four limbs are zero.
+        let started_sum = pre_betting_started_at[0].clone()
+            + pre_betting_started_at[1].clone()
+            + pre_betting_started_at[2].clone()
+            + pre_betting_started_at[3].clone();
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(
+            is_active.clone() * (started_sum * pre_betting_started_at_inv - one.clone()),
+        );
+
+        // `deadline = started.saturating_add(timeout)`. First prove the
+        // 64-bit limb addition (including its final overflow bit), then select
+        // the wrapping sum or u64::MAX exactly as Rust's saturating_add does.
+        let limb_base: E::F = M31::from(1u32 << 16).into();
+        for carry in deadline_add_carry.iter() {
+            eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
+        }
+        eval.add_constraint(
+            deadline_add_overflow.clone() * (deadline_add_overflow.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            pre_betting_started_at[0].clone() + betting_timeout_ms[0].clone()
+                - deadline_sum[0].clone()
+                - limb_base.clone() * deadline_add_carry[0].clone(),
+        );
+        for i in 1..3 {
+            eval.add_constraint(
+                pre_betting_started_at[i].clone()
+                    + betting_timeout_ms[i].clone()
+                    + deadline_add_carry[i - 1].clone()
+                    - deadline_sum[i].clone()
+                    - limb_base.clone() * deadline_add_carry[i].clone(),
+            );
+        }
+        eval.add_constraint(
+            pre_betting_started_at[3].clone()
+                + betting_timeout_ms[3].clone()
+                + deadline_add_carry[2].clone()
+                - deadline_sum[3].clone()
+                - limb_base.clone() * deadline_add_overflow.clone(),
+        );
+        let limb_max: E::F = M31::from(0xFFFFu32).into();
+        for i in 0..4 {
+            eval.add_constraint(
+                deadline[i].clone()
+                    - deadline_sum[i].clone()
+                    - deadline_add_overflow.clone() * (limb_max.clone() - deadline_sum[i].clone()),
+            );
+        }
+
+        // Prove `current_time >= deadline` through a complete little-endian
+        // 4×16-bit subtraction. The final borrow must be zero; this is the
+        // exact unsigned comparison, including high-limb / borrow boundaries.
+        for borrow in time_sub_borrow.iter() {
+            eval.add_constraint(borrow.clone() * (borrow.clone() - one.clone()));
+        }
+        eval.add_constraint(
+            input_current_time[0].clone() - deadline[0].clone()
+                + limb_base.clone() * time_sub_borrow[0].clone()
+                - time_elapsed[0].clone(),
+        );
+        for i in 1..4 {
+            eval.add_constraint(
+                input_current_time[i].clone()
+                    - deadline[i].clone()
+                    - time_sub_borrow[i - 1].clone()
+                    + limb_base.clone() * time_sub_borrow[i].clone()
+                    - time_elapsed[i].clone(),
+            );
+        }
+        eval.add_constraint(time_sub_borrow[3].clone());
 
         // 约束 3：output_folded == 1
-        let one: E::F = M31::from(1u32).into();
         eval.add_constraint(is_active.clone() * (output_folded - one));
 
         // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
@@ -140,8 +315,6 @@ impl FrameworkEval for AutoFoldAir {
 
         let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
         eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
-
-        // TODO 阶段 3 完整版：约束 current_time - turn_started_at >= turn_timeout
 
         eval
     }
@@ -164,6 +337,26 @@ pub struct AutoFoldRow {
     pub input_current_turn: M31,
     /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
     pub output_current_turn: M31,
+    /// 调用前下注计时开始时间。
+    pub pre_betting_started_at: [M31; 4],
+    /// 下注超时配置。
+    pub betting_timeout_ms: [M31; 4],
+    /// 目标座位调用前 Time Bank。
+    pub pre_time_bank_ms: [M31; 4],
+    /// `started + timeout` 的模 `2^64` 结果。
+    pub deadline_sum: [M31; 4],
+    /// Rust `saturating_add` 后的 deadline。
+    pub deadline: [M31; 4],
+    /// `deadline_sum` 加法的中间 carries。
+    pub deadline_add_carry: [M31; 3],
+    /// `deadline_sum` 加法是否发生 u64 overflow。
+    pub deadline_add_overflow: M31,
+    /// `current_time - deadline` 的 4-limb 差。
+    pub time_elapsed: [M31; 4],
+    /// `current_time - deadline` 的 4-limb borrows（最高 limb 必须为 0）。
+    pub time_sub_borrow: [M31; 4],
+    /// `pre_betting_started_at` 全零检查的逆元。
+    pub pre_betting_started_at_inv: M31,
 }
 
 impl AutoFoldRow {
@@ -182,6 +375,49 @@ impl AutoFoldRow {
         post_round_state: u8,
     ) -> Self {
         let rs_m31 = u8_to_m31(pre_round_state);
+        let pre_betting_started_at = u64_to_m31_limbs(input.pre_betting_started_at);
+        let betting_timeout_ms = u64_to_m31_limbs(input.betting_timeout_ms);
+        let pre_time_bank_ms = u64_to_m31_limbs(input.pre_time_bank_ms);
+        let (deadline_sum_u64, deadline_overflow) = input
+            .pre_betting_started_at
+            .overflowing_add(input.betting_timeout_ms);
+        let deadline_u64 = input
+            .pre_betting_started_at
+            .saturating_add(input.betting_timeout_ms);
+        let deadline_sum = u64_to_m31_limbs(deadline_sum_u64);
+        let deadline = u64_to_m31_limbs(deadline_u64);
+
+        let mut add_carry = 0u32;
+        let mut deadline_add_carry = [ZERO; 3];
+        for i in 0..3 {
+            let sum = pre_betting_started_at[i].0 + betting_timeout_ms[i].0 + add_carry;
+            add_carry = sum >> 16;
+            deadline_add_carry[i] = M31::from(add_carry);
+        }
+
+        let current_time = u64_to_m31_limbs(input.current_time);
+        let mut time_elapsed = [ZERO; 4];
+        let mut time_sub_borrow = [ZERO; 4];
+        let mut borrow = 0i64;
+        for i in 0..4 {
+            let difference = i64::from(current_time[i].0) - i64::from(deadline[i].0) - borrow;
+            if difference < 0 {
+                time_elapsed[i] = M31::from((difference + (1_i64 << 16)) as u32);
+                borrow = 1;
+            } else {
+                time_elapsed[i] = M31::from(difference as u32);
+                borrow = 0;
+            }
+            time_sub_borrow[i] = M31::from(borrow as u32);
+        }
+        let started_limb_sum = pre_betting_started_at
+            .iter()
+            .fold(ZERO, |sum, limb| sum + *limb);
+        let pre_betting_started_at_inv = if started_limb_sum == ZERO {
+            ZERO
+        } else {
+            started_limb_sum.inverse()
+        };
         Self {
             common: CommonRow::active(
                 MethodKind::AutoFold,
@@ -200,12 +436,22 @@ impl AutoFoldRow {
                 0,
             ),
             input_seat_index: u8_to_m31(input.seat_index),
-            input_current_time: u64_to_m31_limbs(input.current_time),
+            input_current_time: current_time,
             output_folded: M31::from(1u32),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
             input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
             output_current_turn: u8_to_m31(input.post_current_turn),
+            pre_betting_started_at,
+            betting_timeout_ms,
+            pre_time_bank_ms,
+            deadline_sum,
+            deadline,
+            deadline_add_carry,
+            deadline_add_overflow: M31::from(u32::from(deadline_overflow)),
+            time_elapsed,
+            time_sub_borrow,
+            pre_betting_started_at_inv,
         }
     }
 
@@ -220,6 +466,16 @@ impl AutoFoldRow {
             input_pre_round_state_q: ZERO,
             input_current_turn: ZERO,
             output_current_turn: ZERO,
+            pre_betting_started_at: [ZERO; 4],
+            betting_timeout_ms: [ZERO; 4],
+            pre_time_bank_ms: [ZERO; 4],
+            deadline_sum: [ZERO; 4],
+            deadline: [ZERO; 4],
+            deadline_add_carry: [ZERO; 3],
+            deadline_add_overflow: ZERO,
+            time_elapsed: [ZERO; 4],
+            time_sub_borrow: [ZERO; 4],
+            pre_betting_started_at_inv: ZERO,
         }
     }
 
@@ -233,6 +489,16 @@ impl AutoFoldRow {
         v.push(self.input_pre_round_state_q);
         v.push(self.input_current_turn);
         v.push(self.output_current_turn);
+        v.extend_from_slice(&self.pre_betting_started_at);
+        v.extend_from_slice(&self.betting_timeout_ms);
+        v.extend_from_slice(&self.pre_time_bank_ms);
+        v.extend_from_slice(&self.deadline_sum);
+        v.extend_from_slice(&self.deadline);
+        v.extend_from_slice(&self.deadline_add_carry);
+        v.push(self.deadline_add_overflow);
+        v.extend_from_slice(&self.time_elapsed);
+        v.extend_from_slice(&self.time_sub_borrow);
+        v.push(self.pre_betting_started_at_inv);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

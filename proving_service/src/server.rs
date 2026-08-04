@@ -1,10 +1,13 @@
-//! Durable, table-scoped HTTP proving service.
+//! Durable, local-only HTTP proving service.
 //!
-//! `POST /tables/:table_id/dispatch` is the production-shaped entry point.  It
-//! keeps one VM/plugin state per table, persists a `Running` job before proof
-//! work, and commits the completed job with the post-dispatch table snapshot in
-//! one repository snapshot.  It is still a host-side proof service: no endpoint
-//! claims that a receipt is included in consensus without an external anchor.
+//! `POST /tables/:table_id/dispatch` is deliberately restricted to loopback
+//! addresses.  It is a development harness that replays unanchored candidate
+//! transitions, not a network authority: its request format carries no block
+//! inclusion proof, and callers must not mistake a local receipt for consensus
+//! finality.  A production-facing service must instead accept authenticated
+//! consensus material and build an anchor with
+//! `poker_texas_air::consensus_anchor::build_anchor_from_consensus` before it
+//! persists an externally usable receipt.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -171,8 +174,12 @@ pub struct JobResponse {
     pub error: Option<String>,
 }
 
-/// Start the durable HTTP service.  Override the state file with
-/// `ZCHAIN_PROVING_SERVICE_STATE` when running more than one instance.
+/// Start the loopback-only development proving service.
+///
+/// Override the state file with `ZCHAIN_PROVING_SERVICE_STATE` when running
+/// more than one local instance.  Binding the unanchored dispatch harness to a
+/// non-loopback address is rejected; it has no request authentication or
+/// consensus-inclusion verification.
 pub async fn serve(addr: SocketAddr) -> ServiceResult<()> {
     let state_path = std::env::var_os("ZCHAIN_PROVING_SERVICE_STATE")
         .map(PathBuf::from)
@@ -180,11 +187,16 @@ pub async fn serve(addr: SocketAddr) -> ServiceResult<()> {
     serve_with_repository_path(addr, state_path).await
 }
 
-/// Start the HTTP service with an explicit durable repository location.
+/// Start the loopback-only development service with an explicit repository.
+///
+/// The durable repository makes retries crash-safe, but it does not make its
+/// local dispatches consensus-authenticated.  See [`serve`] for the binding
+/// restriction.
 pub async fn serve_with_repository_path(
     addr: SocketAddr,
     repository_path: impl AsRef<Path>,
 ) -> ServiceResult<()> {
+    ensure_loopback_bind(addr)?;
     let state = ServerState::from_repository(ServiceRepository::open(repository_path)?);
     let app = axum::Router::new()
         // Legacy single-table compatibility route.
@@ -204,6 +216,16 @@ pub async fn serve_with_repository_path(
         .await
         .map_err(|error| ServiceError::Runner(format!("serve: {error}")))?;
     Ok(())
+}
+
+/// Reject exposing the unanchored state-mutating harness over the network.
+fn ensure_loopback_bind(addr: SocketAddr) -> ServiceResult<()> {
+    if addr.ip().is_loopback() {
+        return Ok(());
+    }
+    Err(ServiceError::Runner(format!(
+        "refusing to bind unanchored proving dispatch service to {addr}; use a consensus-anchored adapter for non-loopback deployment"
+    )))
 }
 
 async fn run_hand(State(state): State<ServerState>) -> Result<Json<HandReportJson>, HttpError> {
@@ -592,6 +614,19 @@ mod tests {
         CreateTableArgs, JoinTableArgs, SeatIndexArgs, selectors,
     };
     use poker_protocol::crypto::types::ECPoint;
+
+    #[test]
+    fn unanchored_dispatch_service_is_loopback_only() {
+        let loopback_v4 = "127.0.0.1:7878".parse().unwrap();
+        let loopback_v6 = "[::1]:7878".parse().unwrap();
+        let wildcard = "0.0.0.0:7878".parse().unwrap();
+        let remote = "192.0.2.1:7878".parse().unwrap();
+
+        assert!(ensure_loopback_bind(loopback_v4).is_ok());
+        assert!(ensure_loopback_bind(loopback_v6).is_ok());
+        assert!(ensure_loopback_bind(wildcard).is_err());
+        assert!(ensure_loopback_bind(remote).is_err());
+    }
 
     fn create_request(creator: [u8; 20], key: &str) -> DispatchRequest {
         DispatchRequest {

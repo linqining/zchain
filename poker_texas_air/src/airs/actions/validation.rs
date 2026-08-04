@@ -446,11 +446,22 @@ pub(crate) fn validate_auto_fold(
         false,
     )?;
     let post_turn = tables.post.current_turn.expect("mid-round checked");
-    // ProveTask currently carries SeatOnly for auto-fold, so the canonical AIR
-    // representation uses zero rather than an unauthenticated wall-clock value.
-    if air.input.current_time != 0 || air.input.post_current_turn != post_turn {
+    let pre_seat = seat(&tables.pre, air.input.seat_index, "auto_fold")?;
+    let deadline = tables
+        .pre
+        .timestamps
+        .betting_started_at
+        .saturating_add(tables.pre.timeout_config.betting_timeout_ms);
+    if air.input.pre_betting_started_at != tables.pre.timestamps.betting_started_at
+        || air.input.betting_timeout_ms != tables.pre.timeout_config.betting_timeout_ms
+        || air.input.pre_time_bank_ms != pre_seat.time_bank_ms
+        || air.input.pre_betting_started_at == 0
+        || air.input.pre_time_bank_ms != 0
+        || air.input.current_time < deadline
+        || air.input.post_current_turn != post_turn
+    {
         return Err(TexasAirError::SpecViolation(
-            "auto_fold: AIR input does not match canonical action representation".into(),
+            "auto_fold: AIR timeout inputs do not match the canonical table transition".into(),
         ));
     }
     let row = AutoFoldRow::active(

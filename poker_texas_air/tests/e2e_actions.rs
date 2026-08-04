@@ -38,6 +38,42 @@ fn one_root() -> [M31; 4] {
     .1
 }
 
+/// Build an auto-fold trace using the same complete timeout columns as the
+/// production method.  The negative tests deliberately use this direct path:
+/// an invalid timeout predicate must be rejected by the AIR before any host
+/// canonical-table replay is involved.
+fn auto_fold_timeout_trace_proves(
+    input: poker_texas_air::airs::actions::auto_fold::AutoFoldInput,
+) -> bool {
+    use poker_texas_air::airs::actions::auto_fold::{AutoFoldAir, AutoFoldRow};
+
+    let row = AutoFoldRow::active(&input, zero_root(), one_root(), 42, 0, 5, 0, 1, 4, 4);
+    let trace = gen_method_trace(
+        AutoFoldAir::num_columns(),
+        &row.to_vec(),
+        &AutoFoldRow::padding().to_vec(),
+    )
+    .expect("auto_fold trace should generate");
+    let air = AutoFoldAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 5,
+        pre_version: 0,
+        post_version: 1,
+    };
+    prove_method(
+        &trace,
+        air,
+        AutoFoldAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::AutoFold, 42, 0, 5),
+    )
+    .is_ok()
+}
+
 // ========== fold AIR ==========
 
 /// E2E: fold → trace → prove → verify（happy path）。
@@ -678,6 +714,9 @@ fn test_e2e_auto_fold_prove_verify() {
     let input = AutoFoldInput {
         seat_index: 1,
         current_time: 1_700_000_000,
+        pre_betting_started_at: 1_699_970_000,
+        betting_timeout_ms: 30_000,
+        pre_time_bank_ms: 0,
         post_current_turn: 2,
     };
     let row = AutoFoldRow::active(
@@ -729,6 +768,9 @@ fn test_soundness_auto_fold_tampered_time() {
     let input = AutoFoldInput {
         seat_index: 1,
         current_time: 1_700_000_000,
+        pre_betting_started_at: 1_699_970_000,
+        betting_timeout_ms: 30_000,
+        pre_time_bank_ms: 0,
         post_current_turn: 2,
     };
     let row = AutoFoldRow::active(&input, zero_root(), one_root(), 42, 0, 5, 0, 1, 4, 4);
@@ -771,6 +813,75 @@ fn test_soundness_auto_fold_tampered_time() {
     assert!(
         result.is_err(),
         "篡改 current_time 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
+/// The timeout predicate itself must reject an action before the consensus
+/// deadline, rather than relying on the host dispatch's prior rejection.
+#[test]
+fn test_soundness_auto_fold_rejects_before_deadline() {
+    use poker_texas_air::airs::actions::auto_fold::AutoFoldInput;
+
+    assert!(
+        !auto_fold_timeout_trace_proves(AutoFoldInput {
+            seat_index: 1,
+            current_time: 1_699_999_999,
+            pre_betting_started_at: 1_699_970_000,
+            betting_timeout_ms: 30_000,
+            pre_time_bank_ms: 0,
+            post_current_turn: 2,
+        }),
+        "auto_fold before deadline must make the AIR unsatisfiable"
+    );
+}
+
+/// A nonzero time bank—especially one outside limb 0—must not be bypassable
+/// by an auto-fold proof.  L1 requires a tick that consumes it first.
+#[test]
+fn test_soundness_auto_fold_rejects_high_limb_time_bank() {
+    use poker_texas_air::airs::actions::auto_fold::AutoFoldInput;
+
+    assert!(
+        !auto_fold_timeout_trace_proves(AutoFoldInput {
+            seat_index: 1,
+            current_time: 1_700_000_000,
+            pre_betting_started_at: 1_699_970_000,
+            betting_timeout_ms: 30_000,
+            pre_time_bank_ms: 1_u64 << 32,
+            post_current_turn: 2,
+        }),
+        "a high-limb time bank must make auto_fold unsatisfiable"
+    );
+}
+
+/// Exercise both a 16-bit borrow cascade and Rust's `saturating_add` deadline
+/// semantics.  The first input is one millisecond early across a high-limb
+/// boundary; the second reaches a saturated u64::MAX deadline exactly.
+#[test]
+fn test_soundness_auto_fold_handles_high_limb_boundary_and_saturation() {
+    use poker_texas_air::airs::actions::auto_fold::AutoFoldInput;
+
+    assert!(
+        !auto_fold_timeout_trace_proves(AutoFoldInput {
+            seat_index: 1,
+            current_time: 0x0000_0002_0000_001F,
+            pre_betting_started_at: 0x0000_0001_FFFF_FFF0,
+            betting_timeout_ms: 0x30,
+            pre_time_bank_ms: 0,
+            post_current_turn: 2,
+        }),
+        "a borrow that reaches the high limb must reject a pre-deadline proof"
+    );
+    assert!(
+        auto_fold_timeout_trace_proves(AutoFoldInput {
+            seat_index: 1,
+            current_time: u64::MAX,
+            pre_betting_started_at: u64::MAX - 4,
+            betting_timeout_ms: 10,
+            pre_time_bank_ms: 0,
+            post_current_turn: 2,
+        }),
+        "deadline overflow must follow saturating_add and accept u64::MAX"
     );
 }
 
@@ -1091,8 +1202,8 @@ fn test_action_air_column_consistency() {
     // bet: 通用 + 34 业务（含 Gap 1、pre/post current_turn）
     assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 34);
 
-    // auto_fold: 通用 + 9 业务（含 Gap 1、pre/post current_turn）
-    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 9);
+    // auto_fold: 通用 + 42 业务（含完整 timeout / time-bank 64-bit 约束）。
+    assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 42);
 
     // force_fold: 通用 + 5 业务（含 Gap 1、pre/post current_turn）
     assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);

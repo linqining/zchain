@@ -84,14 +84,14 @@ use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHand
 use crate::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
-use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
+use crate::precompile_binding::{precompile_call_context, PrecompileCallBinding};
+use crate::prove_task::{dispatch_call_digest, DispatchOutput, MethodInput, ProveTask};
 use crate::prover::prove_method;
-use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
-use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
+use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
+use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
 use crate::verified_chain::{
-    ExpectedChainAnchor, VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
-    verify_method_against_and_issue_receipt,
+    verify_method_against_and_issue_receipt, ExpectedChainAnchor, VerificationReceipt,
+    VerifiedChain, VerifiedChainBuilder,
 };
 
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {
@@ -766,20 +766,23 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        // tick 无 prove_task（dispatch 返回 None），但保留接线以备手动/集成驱动。
         let MethodInput::Empty = &task.method_input else {
             return Err(input_mismatch("tick", "Empty", &task.method_input));
         };
         let input = TickInput {
-            current_time: 0,
+            // Time is a consensus value from the dispatch context, never a
+            // local clock or an unbound placeholder.
+            current_time: task.context.block_timestamp,
             // Gap 5：tick AIR 现要求 timeout_kind > 0（invertibility witness 约束
-            // `timeout_kind * inv == 1`）。tick 暂无 prove_task，此处固定为 1 以使
-            // inverse(1) = 1 存在、约束可满足。真实驱动时由调用方按超时类型传入。
+            // `timeout_kind * inv == 1`）。完整 tick transition AIR 尚在拆分中，
+            // 此处固定为 1 只维持现有 trace ABI；full VM replay 仍是当前生产
+            // receipt 的语义边界。
             timeout_kind: 1,
             time_bank_consumed: 0,
             time_bank_post: 0,
             rake_mode: task.post_table.rake_mode,
             rake_amount: task.post_table.rake_collected,
+            ..TickInput::default()
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1209,7 +1212,23 @@ impl Orchestrator {
         )?;
         let input = AutoFoldInput {
             seat_index: *seat_index,
-            current_time: 0,
+            // The timestamp is consensus data carried by the dispatch task.
+            // Never replace it with a local wall clock (or the previous zero
+            // placeholder), otherwise the AIR has no timeout statement to
+            // prove.
+            current_time: task.context.block_timestamp,
+            pre_betting_started_at: task.pre_table.timestamps.betting_started_at,
+            betting_timeout_ms: task.pre_table.timeout_config.betting_timeout_ms,
+            pre_time_bank_ms: task
+                .pre_table
+                .seats
+                .get(usize::from(*seat_index))
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation(format!(
+                        "auto_fold: seat_index {seat_index} is outside pre_table"
+                    ))
+                })?
+                .time_bank_ms,
             post_current_turn,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
@@ -2520,6 +2539,39 @@ mod tests {
         let mut orch = Orchestrator::new();
         orch.prove_and_verify_task(&task)
             .expect("fold prove+verify 应成功");
+    }
+
+    /// The timeout statement must be built from the consensus timestamp in
+    /// `DispatchContext`, not a prover-controlled clock or the former zero
+    /// placeholder.  A stale timer makes the real VM dispatch valid; proving
+    /// the task therefore exercises the full dispatch → task → AIR route.
+    #[test]
+    fn orchestrator_proves_auto_fold_with_consensus_timestamp() {
+        let mut pre = make_table("auto-fold-consensus-time");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        pre.timestamps.betting_started_at = 1;
+        for i in 0..3 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+            pre.seats[i].time_bank_ms = 0;
+        }
+
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::auto_fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("auto_fold args should serialize"),
+        );
+        assert!(post.seats[0].folded);
+        assert_eq!(task.context.block_timestamp, 1_000_000);
+
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("expired auto_fold must prove against the consensus timestamp");
     }
 
     #[test]

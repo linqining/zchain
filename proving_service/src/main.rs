@@ -1,7 +1,8 @@
 //! proving_service 二进制入口。
 //!
 //! 两种模式：
-//! - `proving_service serve [addr]`：启动 axum HTTP 服务（默认 `127.0.0.1:7878`）。
+//! - `proving_service serve [addr]`：启动仅限 loopback 的本地 axum 开发服务
+//!   （默认 `127.0.0.1:7878`）。
 //! - `proving_service --once`：同步跑 6 步 WAITING 覆盖片段到 stdout（不启服务）。
 
 use std::net::SocketAddr;
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage:\n  proving_service --once        跑 6 步 WAITING 覆盖片段到 stdout\n  proving_service --full-hand   跑一局完整 Texas Hold'em 牌局 + 性能报告\n  proving_service serve [addr]  启动 HTTP 服务（默认 127.0.0.1:7878）"
+                "usage:\n  proving_service --once        跑 6 步 WAITING 覆盖片段到 stdout\n  proving_service --full-hand   跑一局完整 Texas Hold'em 牌局 + 性能报告\n  proving_service serve [addr]  启动 loopback 本地开发服务（默认 127.0.0.1:7878）"
             );
             ExitCode::FAILURE
         }

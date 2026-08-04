@@ -9,8 +9,36 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO};
+use crate::airs::common::{
+    u64_to_m31_limbs, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+};
+use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
+use crate::public_inputs::TexasPublicInputs;
+use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
+
+use poker_l1::vm::contracts::texas_poker::constants::{
+    RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_NONE, ROUND_SHOWDOWN, ROUND_WAITING,
+    SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_RECONSTRUCT,
+};
+use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
+use poker_l1::vm::contracts::texas_poker::state_machine;
+use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+
+/// `timeout_kind` values used in the tick statement.  The value denotes the
+/// highest-priority timer family visible in the pre-state; `5` is a non-timer
+/// tick transition such as waiting/start-hand, showdown, or the consistency
+/// fallback.  Zero is deliberately invalid so the AIR has no all-zero
+/// "timeout happened" witness.
+pub const TICK_KIND_SHUFFLE: u8 = 1;
+/// The canonical tick branch is governed by the reveal timer.
+pub const TICK_KIND_REVEAL: u8 = 2;
+/// The canonical tick branch is governed by the reconstruction timer.
+pub const TICK_KIND_RECONSTRUCT: u8 = 3;
+/// The canonical tick branch is governed by the betting-turn timer.
+pub const TICK_KIND_BETTING: u8 = 4;
+/// The canonical tick branch has no timer predicate (e.g. hand start/reset).
+pub const TICK_KIND_NON_TIMER: u8 = 5;
 
 /// `tick` 业务特定列布局。
 pub mod cols {
@@ -21,19 +49,39 @@ pub mod cols {
     pub const INPUT_TIMEOUT_KIND: usize = COMMON_NUM_COLUMNS + 4;
     /// `OUTPUT_NEW_ROUND_STATE` 列。
     pub const OUTPUT_NEW_ROUND_STATE: usize = COMMON_NUM_COLUMNS + 5;
-    /// `TIME_BANK_CONSUMED_0` 列（time_bank 消耗量 limb 0）。
-    pub const TIME_BANK_CONSUMED_0: usize = COMMON_NUM_COLUMNS + 6;
-    /// `TIME_BANK_POST_0` 列（消耗后剩余 time_bank limb 0）。
-    pub const TIME_BANK_POST_0: usize = COMMON_NUM_COLUMNS + 7;
+    /// `TIME_BANK_CONSUMED` 起始列（完整 64-bit 消耗量）。
+    pub const TIME_BANK_CONSUMED_BASE: usize = COMMON_NUM_COLUMNS + 6;
+    /// `TIME_BANK_POST` 起始列（完整 64-bit 剩余 time bank）。
+    pub const TIME_BANK_POST_BASE: usize = COMMON_NUM_COLUMNS + 10;
     /// `RAKE_MODE` 列（0=NONE, 1=PERCENTAGE）。
-    pub const RAKE_MODE: usize = COMMON_NUM_COLUMNS + 8;
+    pub const RAKE_MODE: usize = COMMON_NUM_COLUMNS + 14;
     /// `RAKE_AMOUNT_0` 列（抽水金额 limb 0）。
-    pub const RAKE_AMOUNT_0: usize = COMMON_NUM_COLUMNS + 9;
+    pub const RAKE_AMOUNT_BASE: usize = COMMON_NUM_COLUMNS + 15;
     /// `INPUT_TIMEOUT_KIND_INV` invertibility witness（Gap 5）：timeout_kind 的乘法逆元，
     /// 约束 `timeout_kind * inv == 1` 证明 timeout_kind ≠ 0（即存在真实超时）。
-    pub const INPUT_TIMEOUT_KIND_INV: usize = COMMON_NUM_COLUMNS + 10;
+    pub const INPUT_TIMEOUT_KIND_INV: usize = COMMON_NUM_COLUMNS + 19;
+    /// 当前 betting actor 调用前完整 time bank（仅 betting 分支有意义）。
+    pub const PRE_TIME_BANK_BASE: usize = COMMON_NUM_COLUMNS + 20;
+    /// 触发的 timer 开始时间（完整 64-bit）。
+    pub const TIMEOUT_STARTED_AT_BASE: usize = COMMON_NUM_COLUMNS + 24;
+    /// 触发的 timer 配置（完整 64-bit）。
+    pub const TIMEOUT_MS_BASE: usize = COMMON_NUM_COLUMNS + 28;
+    /// `started_at + timeout_ms` 的模 2^64 加法结果。
+    pub const DEADLINE_SUM_BASE: usize = COMMON_NUM_COLUMNS + 32;
+    /// Rust `saturating_add` 后的 deadline。
+    pub const DEADLINE_BASE: usize = COMMON_NUM_COLUMNS + 36;
+    /// deadline 加法的 3 个 limb carry。
+    pub const DEADLINE_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 40;
+    /// deadline 加法的最终 overflow witness。
+    pub const DEADLINE_ADD_OVERFLOW: usize = COMMON_NUM_COLUMNS + 43;
+    /// `current_time - deadline` 的完整 64-bit 差。
+    pub const TIME_ELAPSED_BASE: usize = COMMON_NUM_COLUMNS + 44;
+    /// 上述减法的 4 个 borrow witness。
+    pub const TIME_SUB_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 48;
+    /// `timeout_started_at != 0` 的非零 inverse witness。
+    pub const TIMEOUT_STARTED_AT_INV: usize = COMMON_NUM_COLUMNS + 52;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 11;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 53;
 }
 
 /// `tick` 输入参数。
@@ -43,14 +91,46 @@ pub struct TickInput {
     pub current_time: u64,
     /// 超时类型。
     pub timeout_kind: u8,
+    /// Whether the selected branch requires `current_time >= started + timeout`.
+    /// This is a verifier-reconstructed AIR constant, not a prover witness.
+    pub timeout_required: bool,
+    /// Timer start timestamp selected by the canonical tick branch.
+    pub timeout_started_at: u64,
+    /// Timeout configuration selected by the canonical tick branch.
+    pub timeout_ms: u64,
     /// Time Bank 消耗量（毫秒，0 = 未消耗）。
     pub time_bank_consumed: u64,
     /// Time Bank 消耗后余额（毫秒）。
     pub time_bank_post: u64,
+    /// Current betting actor's pre-transition Time Bank.  It is zero outside
+    /// an active betting-turn branch.
+    pub pre_time_bank: u64,
     /// Rake 模式（0=NONE, 1=PERCENTAGE）。
     pub rake_mode: u8,
     /// Rake 抽水金额。
     pub rake_amount: u64,
+    /// Exact native `bump_version` count for this tick transition.  Some tick
+    /// helpers alter state without bumping the table version, so treating every
+    /// tick as `+1` was an invalid proof precondition.
+    pub version_increment: u8,
+}
+
+impl Default for TickInput {
+    fn default() -> Self {
+        Self {
+            current_time: 0,
+            timeout_kind: TICK_KIND_NON_TIMER,
+            timeout_required: false,
+            timeout_started_at: 0,
+            timeout_ms: 0,
+            time_bank_consumed: 0,
+            time_bank_post: 0,
+            pre_time_bank: 0,
+            rake_mode: 0,
+            rake_amount: 0,
+            version_increment: 1,
+        }
+    }
 }
 
 /// `tick` AIR。
@@ -93,55 +173,232 @@ impl FrameworkEval for TickAir {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let statement = crate::airs::TexasAir::statement(self);
-        let common = CommonConstraints::write(&mut eval, &statement);
+        let common = CommonConstraints::write_with_version_increment(
+            &mut eval,
+            &statement,
+            u64::from(self.input.version_increment),
+        );
         let is_active = common.is_active.clone();
 
-        let _input_time_0 = eval.next_trace_mask();
-        let _input_time_1 = eval.next_trace_mask();
-        let _input_time_2 = eval.next_trace_mask();
-        let _input_time_3 = eval.next_trace_mask();
+        let input_current_time = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         let input_timeout_kind = eval.next_trace_mask();
-        let _output_new_round_state = eval.next_trace_mask();
-        let time_bank_consumed_0 = eval.next_trace_mask();
-        let time_bank_post_0 = eval.next_trace_mask();
+        let output_new_round_state = eval.next_trace_mask();
+        let time_bank_consumed = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let time_bank_post = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         let rake_mode = eval.next_trace_mask();
-        let rake_amount_0 = eval.next_trace_mask();
+        let rake_amount = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         // Gap 5 invertibility witness（timeout_kind ≠ 0）。
         let input_timeout_kind_inv = eval.next_trace_mask();
+        let pre_time_bank = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let timeout_started_at = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let timeout_ms = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline_sum = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline_add_carry = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let deadline_add_overflow = eval.next_trace_mask();
+        let time_elapsed = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let time_sub_borrow = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let timeout_started_at_inv = eval.next_trace_mask();
 
-        // 约束 1：timeout_kind == input.timeout_kind
+        // 约束 1：完整 consensus timestamp 必须与 trusted AIR statement
+        // 一致。只读而不绑定这些 limb 会允许证明与不同区块时间脱钩。
+        let expected_current_time = crate::airs::common::u64_to_m31_limbs(self.input.current_time);
+        for i in 0..4 {
+            let expected_time: E::F = expected_current_time[i].into();
+            eval.add_constraint(
+                is_active.clone() * (input_current_time[i].clone() - expected_time),
+            );
+        }
+
+        // 约束 2：timeout_kind == input.timeout_kind
         let expected: E::F = M31::from(u32::from(self.input.timeout_kind)).into();
         eval.add_constraint(is_active.clone() * (input_timeout_kind.clone() - expected));
 
-        // 约束 2（Time Bank）：consumed_0 == input.time_bank_consumed (limb 0)
-        let expected_tb_consumed: E::F =
-            M31::from((self.input.time_bank_consumed & 0xFFFF) as u32).into();
-        eval.add_constraint(
-            is_active.clone() * (time_bank_consumed_0.clone() - expected_tb_consumed),
-        );
+        // 约束 3（Time Bank）：所有 64-bit limb 都必须绑定，不能让高 limb
+        // 成为 prover 可选 witness。对于 betting timer 分支还证明
+        // pre_time_bank = consumed + post_time_bank。
+        let expected_tb_consumed = u64_to_m31_limbs(self.input.time_bank_consumed);
+        let expected_tb_post = u64_to_m31_limbs(self.input.time_bank_post);
+        let expected_pre_tb = u64_to_m31_limbs(self.input.pre_time_bank);
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (time_bank_consumed[i].clone() - expected_tb_consumed[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (time_bank_post[i].clone() - expected_tb_post[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (pre_time_bank[i].clone() - expected_pre_tb[i].into()),
+            );
+        }
 
-        // 约束 3（Time Bank）：post_0 == input.time_bank_post (limb 0)
-        let expected_tb_post: E::F = M31::from((self.input.time_bank_post & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (time_bank_post_0 - expected_tb_post));
-
-        // 约束 4（Rake）：rake_mode == input.rake_mode
+        // 约束 5（Rake）：rake_mode == input.rake_mode
         let expected_rake_mode: E::F = M31::from(u32::from(self.input.rake_mode)).into();
         eval.add_constraint(is_active.clone() * (rake_mode - expected_rake_mode));
 
-        // 约束 5（Rake）：rake_amount_0 == input.rake_amount (limb 0)
-        let expected_rake_amt: E::F = M31::from((self.input.rake_amount & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (rake_amount_0 - expected_rake_amt));
+        // 约束 6（Rake）：完整 64-bit rake amount 与 canonical replay 一致。
+        let expected_rake_amt = u64_to_m31_limbs(self.input.rake_amount);
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone() * (rake_amount[i].clone() - expected_rake_amt[i].into()),
+            );
+        }
+
+        // The business-row output must agree with the common post-state value.
+        eval.add_constraint(
+            is_active.clone() * (output_new_round_state - common.post_round_state.clone()),
+        );
 
         // 注：tick 会驱动状态机阶段转换（SHUFFLE→DEAL→BETTING 等），
         // round_state 可合法变化，故不施加 round_state 不变约束。
         // tick 的 Lean 反例「version 不递增」已由通用层 version+=1 约束消除。
-        // 约束 6（Gap 5，degree-2）：timeout_kind * inv == 1 — 证明 timeout_kind ≠ 0
+        // 约束 7（Gap 5，degree-2）：timeout_kind * inv == 1 — 证明 timeout_kind ≠ 0
         // （即存在真实超时）。诚实 host 必须 timeout_kind > 0 才存在逆元。
         let one: E::F = M31::from(1u32).into();
         eval.add_constraint(
-            is_active.clone() * (input_timeout_kind * input_timeout_kind_inv - one),
+            is_active.clone() * (input_timeout_kind * input_timeout_kind_inv - one.clone()),
         );
-        // TODO 阶段 2：真实超时校验。
+
+        let expected_started_at = u64_to_m31_limbs(self.input.timeout_started_at);
+        let expected_timeout_ms = u64_to_m31_limbs(self.input.timeout_ms);
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone() * (timeout_started_at[i].clone() - expected_started_at[i].into()),
+            );
+            eval.add_constraint(
+                is_active.clone() * (timeout_ms[i].clone() - expected_timeout_ms[i].into()),
+            );
+        }
+
+        // Timeout branches prove Rust's exact `saturating_add` deadline and
+        // unsigned `current_time >= deadline` comparison.  Non-timeout tick
+        // branches intentionally do not claim a timeout predicate.
+        if self.input.timeout_required {
+            let started_sum = timeout_started_at[0].clone()
+                + timeout_started_at[1].clone()
+                + timeout_started_at[2].clone()
+                + timeout_started_at[3].clone();
+            eval.add_constraint(
+                is_active.clone() * (started_sum * timeout_started_at_inv - one.clone()),
+            );
+
+            let limb_base: E::F = M31::from(1u32 << 16).into();
+            for carry in deadline_add_carry.iter() {
+                eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
+            }
+            eval.add_constraint(
+                deadline_add_overflow.clone() * (deadline_add_overflow.clone() - one.clone()),
+            );
+            eval.add_constraint(
+                timeout_started_at[0].clone() + timeout_ms[0].clone()
+                    - deadline_sum[0].clone()
+                    - limb_base.clone() * deadline_add_carry[0].clone(),
+            );
+            for i in 1..3 {
+                eval.add_constraint(
+                    timeout_started_at[i].clone()
+                        + timeout_ms[i].clone()
+                        + deadline_add_carry[i - 1].clone()
+                        - deadline_sum[i].clone()
+                        - limb_base.clone() * deadline_add_carry[i].clone(),
+                );
+            }
+            eval.add_constraint(
+                timeout_started_at[3].clone()
+                    + timeout_ms[3].clone()
+                    + deadline_add_carry[2].clone()
+                    - deadline_sum[3].clone()
+                    - limb_base.clone() * deadline_add_overflow.clone(),
+            );
+            let limb_max: E::F = M31::from(0xFFFFu32).into();
+            for i in 0..4 {
+                eval.add_constraint(
+                    deadline[i].clone()
+                        - deadline_sum[i].clone()
+                        - deadline_add_overflow.clone()
+                            * (limb_max.clone() - deadline_sum[i].clone()),
+                );
+            }
+
+            for borrow in time_sub_borrow.iter() {
+                eval.add_constraint(borrow.clone() * (borrow.clone() - one.clone()));
+            }
+            eval.add_constraint(
+                input_current_time[0].clone() - deadline[0].clone()
+                    + limb_base.clone() * time_sub_borrow[0].clone()
+                    - time_elapsed[0].clone(),
+            );
+            for i in 1..4 {
+                eval.add_constraint(
+                    input_current_time[i].clone()
+                        - deadline[i].clone()
+                        - time_sub_borrow[i - 1].clone()
+                        + limb_base.clone() * time_sub_borrow[i].clone()
+                        - time_elapsed[i].clone(),
+                );
+            }
+            eval.add_constraint(time_sub_borrow[3].clone());
+        }
 
         eval
     }
@@ -158,16 +415,36 @@ pub struct TickRow {
     pub input_timeout_kind: M31,
     /// 新 round_state。
     pub output_new_round_state: M31,
-    /// Time Bank 消耗量 limb 0。
-    pub time_bank_consumed_0: M31,
-    /// Time Bank 剩余 limb 0。
-    pub time_bank_post_0: M31,
+    /// Time Bank 消耗量（4×16-bit limb）。
+    pub time_bank_consumed: [M31; 4],
+    /// Time Bank 剩余余额（4×16-bit limb）。
+    pub time_bank_post: [M31; 4],
     /// Rake 模式。
     pub rake_mode: M31,
-    /// Rake 金额 limb 0。
-    pub rake_amount_0: M31,
+    /// Rake 金额（4×16-bit limb）。
+    pub rake_amount: [M31; 4],
     /// `INPUT_TIMEOUT_KIND_INV` invertibility witness（Gap 5）。
     pub input_timeout_kind_inv: M31,
+    /// 当前 betting actor 的调用前 Time Bank。
+    pub pre_time_bank: [M31; 4],
+    /// 所选 timer 的开始时间。
+    pub timeout_started_at: [M31; 4],
+    /// 所选 timer 的超时配置。
+    pub timeout_ms: [M31; 4],
+    /// `started_at + timeout_ms` 的 wrapping 结果。
+    pub deadline_sum: [M31; 4],
+    /// Rust `saturating_add` 后的 deadline。
+    pub deadline: [M31; 4],
+    /// 加法过程的 3 个跨 limb 进位。
+    pub deadline_add_carry: [M31; 3],
+    /// 加法是否溢出 64 位。
+    pub deadline_add_overflow: M31,
+    /// `current_time - deadline` 的 4×16-bit 差。
+    pub time_elapsed: [M31; 4],
+    /// 上述减法的 4 个 borrow witness。
+    pub time_sub_borrow: [M31; 4],
+    /// `timeout_started_at` 非零性 witness。
+    pub timeout_started_at_inv: M31,
 }
 
 impl TickRow {
@@ -186,10 +463,49 @@ impl TickRow {
         post_round_state: u8,
     ) -> Self {
         use crate::airs::common::u64_to_m31_limbs;
-        // Gap 5：timeout_kind 的乘法逆元。诚实 host 必须 timeout_kind > 0
-        // 才存在逆元（orchestrator prove_tick 现固定为 1）。
+        // timeout_kind is non-zero by construction and therefore has a field
+        // inverse used by the AIR's non-zero constraint.
         let kind_m31 = M31::from(u32::from(input.timeout_kind));
         let input_timeout_kind_inv = kind_m31.inverse();
+        let time_bank_consumed = u64_to_m31_limbs(input.time_bank_consumed);
+        let time_bank_post = u64_to_m31_limbs(input.time_bank_post);
+        let pre_time_bank = u64_to_m31_limbs(input.pre_time_bank);
+        let timeout_started_at = u64_to_m31_limbs(input.timeout_started_at);
+        let timeout_ms = u64_to_m31_limbs(input.timeout_ms);
+        let (deadline_sum_u64, deadline_overflow) =
+            input.timeout_started_at.overflowing_add(input.timeout_ms);
+        let deadline_sum = u64_to_m31_limbs(deadline_sum_u64);
+        let deadline = u64_to_m31_limbs(input.timeout_started_at.saturating_add(input.timeout_ms));
+        let mut carry = 0u32;
+        let mut deadline_add_carry = [ZERO; 3];
+        for i in 0..3 {
+            let sum = timeout_started_at[i].0 + timeout_ms[i].0 + carry;
+            carry = sum >> 16;
+            deadline_add_carry[i] = M31::from(carry);
+        }
+        let current_time = u64_to_m31_limbs(input.current_time);
+        let mut time_elapsed = [ZERO; 4];
+        let mut time_sub_borrow = [ZERO; 4];
+        let mut borrow = 0i64;
+        for i in 0..4 {
+            let difference = i64::from(current_time[i].0) - i64::from(deadline[i].0) - borrow;
+            if difference < 0 {
+                time_elapsed[i] = M31::from((difference + (1_i64 << 16)) as u32);
+                borrow = 1;
+            } else {
+                time_elapsed[i] = M31::from(difference as u32);
+                borrow = 0;
+            }
+            time_sub_borrow[i] = M31::from(borrow as u32);
+        }
+        let timeout_started_at_sum = timeout_started_at
+            .iter()
+            .fold(ZERO, |sum, limb| sum + *limb);
+        let timeout_started_at_inv = if timeout_started_at_sum == ZERO {
+            ZERO
+        } else {
+            timeout_started_at_sum.inverse()
+        };
         Self {
             common: CommonRow::active(
                 MethodKind::Tick,
@@ -207,15 +523,24 @@ impl TickRow {
                 0,
                 0,
             ),
-            input_current_time: u64_to_m31_limbs(input.current_time),
+            input_current_time: current_time,
             input_timeout_kind: kind_m31,
             output_new_round_state: M31::from(u32::from(post_round_state)),
-            time_bank_consumed_0: M31::from((input.time_bank_consumed & 0xFFFF) as u32),
-            time_bank_post_0: M31::from((input.time_bank_post & 0xFFFF) as u32),
+            time_bank_consumed,
+            time_bank_post,
             rake_mode: M31::from(u32::from(input.rake_mode)),
-            rake_amount_0: M31::from((input.rake_amount & 0xFFFF) as u32),
-            // Gap 5：timeout_kind 的乘法逆元。
+            rake_amount: u64_to_m31_limbs(input.rake_amount),
             input_timeout_kind_inv,
+            pre_time_bank,
+            timeout_started_at,
+            timeout_ms,
+            deadline_sum,
+            deadline,
+            deadline_add_carry,
+            deadline_add_overflow: M31::from(u32::from(deadline_overflow)),
+            time_elapsed,
+            time_sub_borrow,
+            timeout_started_at_inv,
         }
     }
     /// padding 行。
@@ -226,11 +551,21 @@ impl TickRow {
             input_current_time: [ZERO; 4],
             input_timeout_kind: ZERO,
             output_new_round_state: ZERO,
-            time_bank_consumed_0: ZERO,
-            time_bank_post_0: ZERO,
+            time_bank_consumed: [ZERO; 4],
+            time_bank_post: [ZERO; 4],
             rake_mode: ZERO,
-            rake_amount_0: ZERO,
+            rake_amount: [ZERO; 4],
             input_timeout_kind_inv: ZERO,
+            pre_time_bank: [ZERO; 4],
+            timeout_started_at: [ZERO; 4],
+            timeout_ms: [ZERO; 4],
+            deadline_sum: [ZERO; 4],
+            deadline: [ZERO; 4],
+            deadline_add_carry: [ZERO; 3],
+            deadline_add_overflow: ZERO,
+            time_elapsed: [ZERO; 4],
+            time_sub_borrow: [ZERO; 4],
+            timeout_started_at_inv: ZERO,
         }
     }
     /// 转列向量。
@@ -240,11 +575,21 @@ impl TickRow {
         v.extend_from_slice(&self.input_current_time);
         v.push(self.input_timeout_kind);
         v.push(self.output_new_round_state);
-        v.push(self.time_bank_consumed_0);
-        v.push(self.time_bank_post_0);
+        v.extend_from_slice(&self.time_bank_consumed);
+        v.extend_from_slice(&self.time_bank_post);
         v.push(self.rake_mode);
-        v.push(self.rake_amount_0);
+        v.extend_from_slice(&self.rake_amount);
         v.push(self.input_timeout_kind_inv);
+        v.extend_from_slice(&self.pre_time_bank);
+        v.extend_from_slice(&self.timeout_started_at);
+        v.extend_from_slice(&self.timeout_ms);
+        v.extend_from_slice(&self.deadline_sum);
+        v.extend_from_slice(&self.deadline);
+        v.extend_from_slice(&self.deadline_add_carry);
+        v.push(self.deadline_add_overflow);
+        v.extend_from_slice(&self.time_elapsed);
+        v.extend_from_slice(&self.time_sub_borrow);
+        v.push(self.timeout_started_at_inv);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

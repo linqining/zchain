@@ -613,6 +613,7 @@ fn test_e2e_tick_prove_verify() {
         time_bank_post: 30_000,
         rake_mode: 0,
         rake_amount: 0,
+        ..TickInput::default()
     };
     let row = TickRow::active(
         &input,
@@ -665,6 +666,7 @@ fn test_soundness_tick_tampered_kind() {
         time_bank_post: 30_000,
         rake_mode: 0,
         rake_amount: 0,
+        ..TickInput::default()
     };
     let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 1, 2);
     let trace = gen_method_trace(
@@ -709,6 +711,59 @@ fn test_soundness_tick_tampered_kind() {
     );
 }
 
+/// The full 64-bit consensus timestamp is part of the tick statement.  A
+/// change outside limb 0 must invalidate the proof just as a low-limb change
+/// does.
+#[test]
+fn test_soundness_tick_tampered_high_limb_time() {
+    let input = TickInput {
+        current_time: 1_700_000_000,
+        timeout_kind: 1,
+        time_bank_consumed: 0,
+        time_bank_post: 30_000,
+        rake_mode: 0,
+        rake_amount: 0,
+        ..TickInput::default()
+    };
+    let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 1, 2);
+    let trace = gen_method_trace(
+        TickAir::num_columns(),
+        &row.to_vec(),
+        &TickRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+    let air = TickAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 4,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(
+        &trace,
+        air,
+        TickAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+    )
+    .expect("prove 失败");
+
+    proof.air = TickAir {
+        input: TickInput {
+            current_time: 1_700_000_000 + (1_u64 << 32),
+            ..proof.air.input.clone()
+        },
+        ..proof.air.clone()
+    };
+    assert!(
+        verify_method(proof).is_err(),
+        "篡改 tick timestamp 的高 limb 后 verify 必须失败"
+    );
+}
+
 /// Soundness: 篡改 tick 的 `time_bank_consumed` 公开输入后，verify 应失败。
 #[test]
 fn test_soundness_tick_tampered_time_bank() {
@@ -719,6 +774,7 @@ fn test_soundness_tick_tampered_time_bank() {
         time_bank_post: 20_000,
         rake_mode: 0,
         rake_amount: 0,
+        ..TickInput::default()
     };
     let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 5, 5);
     let trace = gen_method_trace(
@@ -773,6 +829,7 @@ fn test_soundness_tick_tampered_rake() {
         time_bank_post: 30_000,
         rake_mode: 1,    // PERCENTAGE
         rake_amount: 50, // 5% of 1000
+        ..TickInput::default()
     };
     let row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 8, 8);
     let trace = gen_method_trace(
