@@ -39,7 +39,8 @@ use poker_l1::consensus::{
 use poker_l1::error::PokerL1Result;
 use poker_l1::network::{
     CommitVote, GossipManager, GossipTopic, LightClientHeader, NetworkMessage, NetworkTransport,
-    PeerInfo,
+    PeerInfo, ProofPackageChunk, ProofPackageManifest, MAX_PROOF_PACKAGE_BYTES,
+    build_proof_package_chunk, build_proof_package_manifest,
 };
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
 use poker_l1::rpc::{
@@ -51,7 +52,7 @@ use poker_l1::{Address, Hash};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod poker_demo;
 
@@ -74,6 +75,8 @@ const CONSENSUS_TIMESTAMP_STEP_MS: u64 = 1_000;
 /// Bound a vertex range response by both rounds scanned and vertices returned.
 const MAX_VERTEX_RANGE_ROUNDS: u64 = 512;
 const MAX_VERTEX_RANGE_RESPONSE: usize = 512;
+/// Bound block range scans by requested heights, including sparse/missing heights.
+const MAX_BLOCK_RANGE_HEIGHTS: u64 = 512;
 /// Bound untrusted peer-exchange payloads before they become dial targets.
 const MAX_DISCOVERED_PEERS: usize = 256;
 
@@ -237,6 +240,9 @@ fn print_usage() {
     eprintln!("  --data-dir <path>                       数据目录（默认 ./data）");
     eprintln!("  --rpc-listen <addr>                     RPC 监听地址（默认 127.0.0.1:8545）");
     eprintln!("  --p2p-listen <addr>                     P2P 监听地址（默认 127.0.0.1:9000）");
+    eprintln!(
+        "  --proof-package-dir <path>               向 P2P peers 提供 proving_service .proof sidecars"
+    );
     eprintln!("  --max-connections <n>                   最大并发连接数（默认 128）");
     eprintln!("  --validator-key-file <path>             validator 私钥文件（32B hex，推荐）");
     eprintln!(
@@ -366,6 +372,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let mut data_dir = PathBuf::from("./data");
     let mut rpc_listen = "127.0.0.1:8545".to_string();
     let mut p2p_listen = "127.0.0.1:9000".to_string();
+    let mut proof_package_dir: Option<PathBuf> = None;
     let mut max_connections: usize = DEFAULT_MAX_CONNECTIONS;
     let mut validator_key_hex: Option<String> = None;
     let mut validator_key_file: Option<PathBuf> = None;
@@ -408,6 +415,12 @@ fn run_node(args: &[String]) -> Result<(), String> {
             "--p2p-listen" => {
                 i += 1;
                 p2p_listen = args.get(i).ok_or("--p2p-listen 缺少参数")?.clone();
+            }
+            "--proof-package-dir" => {
+                i += 1;
+                proof_package_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("--proof-package-dir 缺少参数")?,
+                ));
             }
             "--max-connections" => {
                 i += 1;
@@ -608,6 +621,14 @@ fn run_node(args: &[String]) -> Result<(), String> {
 
     // === P2P 传输层 ===
     let transport = Arc::new(TcpTransport::new());
+    if let Some(directory) = &proof_package_dir {
+        let loaded = load_proof_packages_from_dir(&transport, directory)?;
+        info!(
+            directory = %directory.display(),
+            loaded,
+            "loaded proof packages for P2P serving"
+        );
+    }
     // Compact vertex recovery needs one shared, bounded tx/short-id cache on
     // every P2P handler and the validator loop.
     let gossip = Arc::new(GossipManager::new());
@@ -886,7 +907,7 @@ fn handle_connection(
 const DEFAULT_BLOCK_INTERVAL_MS: u64 = 1000;
 
 /// P2P 消息最大长度（16MB，防止恶意大消息 OOM）。
-const MAX_P2P_MSG_SIZE: usize = 16 * 1024 * 1024;
+const MAX_P2P_MSG_SIZE: usize = poker_l1::network::MAX_P2P_MESSAGE_BYTES;
 
 /// 默认 P2P 请求-响应超时（秒）。
 const P2P_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -913,6 +934,12 @@ struct TcpTransport {
     /// 该缓存属于传输层，令 `NetworkTransport::subscribe_light_headers` 不再是空
     /// 实现；`Node` 仍是 header 签名和合并的权威来源。
     light_headers: Arc<Mutex<Vec<LightClientHeader>>>,
+    /// Bounded opaque proof packages available to peers on this transport.
+    ///
+    /// The node binary does not interpret these bytes. A proving-service adapter
+    /// must canonical-decode and reverify every downloaded package before adding
+    /// it to its durable repository.
+    proof_packages: Arc<Mutex<BTreeMap<Hash, Vec<u8>>>>,
 }
 
 impl TcpTransport {
@@ -922,7 +949,18 @@ impl TcpTransport {
             peers: Arc::new(Mutex::new(Vec::new())),
             peer_addrs: Arc::new(Mutex::new(Vec::new())),
             light_headers: Arc::new(Mutex::new(Vec::new())),
+            proof_packages: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// Register one already-canonical package for bounded P2P serving.
+    fn register_proof_package(&self, job_id: Hash, bytes: Vec<u8>) -> Result<(), String> {
+        build_proof_package_manifest(job_id, &bytes).map_err(|error| error.to_string())?;
+        self.proof_packages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(job_id, bytes);
+        Ok(())
     }
 
     /// 添加已连接 peer 的共享写端（仅加入广播列表）。
@@ -1066,6 +1104,56 @@ impl TcpTransport {
     }
 }
 
+/// Load canonical proving-service sidecars named `<64-hex-job-id>.proof`.
+///
+/// Directory entries are untrusted local input: non-files and unrelated names
+/// are ignored, while a file that claims the canonical sidecar name but is
+/// oversized or malformed aborts startup rather than being served to peers.
+fn load_proof_packages_from_dir(
+    transport: &TcpTransport,
+    directory: &std::path::Path,
+) -> Result<usize, String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("读取 proof package 目录 {} 失败：{error}", directory.display()))?;
+    let mut loaded = 0usize;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("读取 proof package 目录项 {} 失败：{error}", directory.display())
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("读取 {} 类型失败：{error}", entry.path().display()))?;
+        if !file_type.is_file() || entry.path().extension().and_then(|value| value.to_str()) != Some("proof") {
+            continue;
+        }
+        let Some(stem) = entry.path().file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let job_bytes = match hex::decode(stem) {
+            Ok(bytes) if bytes.len() == 32 => bytes,
+            _ => continue,
+        };
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("读取 {} 元数据失败：{error}", entry.path().display()))?;
+        if metadata.len() == 0 || metadata.len() > MAX_PROOF_PACKAGE_BYTES as u64 {
+            return Err(format!(
+                "proof package {} 长度 {} 超出 1..={} 范围",
+                entry.path().display(),
+                metadata.len(),
+                MAX_PROOF_PACKAGE_BYTES
+            ));
+        }
+        let bytes = std::fs::read(entry.path())
+            .map_err(|error| format!("读取 {} 失败：{error}", entry.path().display()))?;
+        let mut job_id = [0u8; 32];
+        job_id.copy_from_slice(&job_bytes);
+        transport.register_proof_package(job_id, bytes)?;
+        loaded += 1;
+    }
+    Ok(loaded)
+}
+
 impl NetworkTransport for TcpTransport {
     fn gossip_broadcast(&self, _topic: GossipTopic, message: &NetworkMessage) -> PokerL1Result<()> {
         let bytes = borsh::to_vec(message)?;
@@ -1196,6 +1284,97 @@ impl NetworkTransport for TcpTransport {
         }
         Err(poker_l1::error::PokerL1Error::Other(
             "request_vertices_by_range: 所有 peer 请求失败".to_string(),
+        ))
+    }
+
+    fn request_proof_package_manifest(
+        &self,
+        job_id: Hash,
+    ) -> PokerL1Result<Option<ProofPackageManifest>> {
+        let peers = self
+            .peer_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if peers.is_empty() {
+            return Err(poker_l1::error::PokerL1Error::Other(
+                "request_proof_package_manifest: no available peer".to_string(),
+            ));
+        }
+        let request = NetworkMessage::RequestProofPackageManifest(job_id);
+        for peer in &peers {
+            match send_request_and_recv(&peer.address, &request) {
+                Ok(NetworkMessage::ResponseProofPackageManifest(manifest)) => {
+                    if let Some(manifest) = &manifest {
+                        manifest.validate()?;
+                        if manifest.job_id != job_id {
+                            warn!(peer = %peer.address, "proof package manifest job mismatch");
+                            continue;
+                        }
+                    }
+                    return Ok(manifest);
+                }
+                Ok(other) => warn!(
+                    peer = %peer.address,
+                    "unexpected proof package manifest response: {other:?}"
+                ),
+                Err(error) => warn!(
+                    peer = %peer.address,
+                    "proof package manifest request failed: {error}"
+                ),
+            }
+        }
+        Err(poker_l1::error::PokerL1Error::Other(
+            "request_proof_package_manifest: all peers failed".to_string(),
+        ))
+    }
+
+    fn request_proof_package_chunk(
+        &self,
+        job_id: Hash,
+        package_hash: Hash,
+        index: u32,
+    ) -> PokerL1Result<Option<ProofPackageChunk>> {
+        let peers = self
+            .peer_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if peers.is_empty() {
+            return Err(poker_l1::error::PokerL1Error::Other(
+                "request_proof_package_chunk: no available peer".to_string(),
+            ));
+        }
+        let request = NetworkMessage::RequestProofPackageChunk {
+            job_id,
+            package_hash,
+            index,
+        };
+        for peer in &peers {
+            match send_request_and_recv(&peer.address, &request) {
+                Ok(NetworkMessage::ResponseProofPackageChunk(chunk)) => {
+                    if let Some(chunk) = &chunk
+                        && (chunk.job_id != job_id
+                            || chunk.package_hash != package_hash
+                            || chunk.index != index)
+                    {
+                        warn!(peer = %peer.address, "proof package chunk identity mismatch");
+                        continue;
+                    }
+                    return Ok(chunk);
+                }
+                Ok(other) => warn!(
+                    peer = %peer.address,
+                    "unexpected proof package chunk response: {other:?}"
+                ),
+                Err(error) => warn!(
+                    peer = %peer.address,
+                    "proof package chunk request failed: {error}"
+                ),
+            }
+        }
+        Err(poker_l1::error::PokerL1Error::Other(
+            "request_proof_package_chunk: all peers failed".to_string(),
         ))
     }
 
@@ -1480,6 +1659,70 @@ fn handle_p2p_connection(
                             warn!("P2P 回送 ResponseVertices 失败：{e}");
                         }
                     }
+                    NetworkMessage::RequestProofPackageManifest(job_id) => {
+                        let bytes = transport
+                            .proof_packages
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&job_id)
+                            .cloned();
+                        let manifest = bytes.as_deref().and_then(|bytes| {
+                            match build_proof_package_manifest(job_id, bytes) {
+                                Ok(manifest) => Some(manifest),
+                                Err(error) => {
+                                    warn!("local proof package rejected before serving: {error}");
+                                    None
+                                }
+                            }
+                        });
+                        if let Err(error) = send_p2p_message_locked(
+                            &writer,
+                            &NetworkMessage::ResponseProofPackageManifest(manifest),
+                        ) {
+                            warn!("P2P proof package manifest response failed: {error}");
+                        }
+                    }
+                    NetworkMessage::RequestProofPackageChunk {
+                        job_id,
+                        package_hash,
+                        index,
+                    } => {
+                        let bytes = transport
+                            .proof_packages
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&job_id)
+                            .cloned();
+                        let chunk = bytes.as_deref().and_then(|bytes| {
+                            let manifest = match build_proof_package_manifest(job_id, bytes) {
+                                Ok(manifest) => manifest,
+                                Err(error) => {
+                                    warn!("local proof package rejected before serving: {error}");
+                                    return None;
+                                }
+                            };
+                            if manifest.package_hash != package_hash {
+                                return None;
+                            }
+                            match build_proof_package_chunk(&manifest, bytes, index) {
+                                Ok(chunk) => Some(chunk),
+                                Err(error) => {
+                                    debug!("proof package chunk unavailable: {error}");
+                                    None
+                                }
+                            }
+                        });
+                        if let Err(error) = send_p2p_message_locked(
+                            &writer,
+                            &NetworkMessage::ResponseProofPackageChunk(chunk),
+                        ) {
+                            warn!("P2P proof package chunk response failed: {error}");
+                        }
+                    }
+                    NetworkMessage::ResponseProofPackageManifest(_)
+                    | NetworkMessage::ResponseProofPackageChunk(_) => {
+                        debug!("unsolicited proof package response ignored");
+                    }
                     NetworkMessage::CompactVertex(compact) => {
                         match reconstruct_compact_vertex(&compact, &gossip) {
                             Ok(vertex) => {
@@ -1572,17 +1815,16 @@ fn collect_blocks_by_range(
     start: poker_l1::BlockHeight,
     end: poker_l1::BlockHeight,
 ) -> Vec<Block> {
+    if start > end {
+        return Vec::new();
+    }
+    let capped_end = end.min(start.saturating_add(MAX_BLOCK_RANGE_HEIGHTS - 1));
     let mut blocks = Vec::new();
-    for height in start..=end {
+    for height in start..=capped_end {
         match node.get_block_by_height(height) {
             Ok(Some(block)) => blocks.push(block),
             Ok(None) => debug!("collect_blocks: height {height} 无 block"),
             Err(e) => warn!("collect_blocks: 查询 height {height} 失败：{e}"),
-        }
-        // 防止单次请求扫表过大（DoS 防护）
-        if blocks.len() >= 512 {
-            debug!("collect_blocks: 达到 512 上限，截断");
-            break;
         }
     }
     blocks
@@ -2038,7 +2280,7 @@ fn run_validator_loop(
     };
     let author_pubkey = validator_key.tagged_pubkey.clone();
 
-    let mut epoch: u64 = 1;
+    let mut epoch = node.current_epoch();
     let mut round: u64 = 1;
     let mut commit_round: u64 = 1;
     let mut prev_commit_hash: Hash = [0u8; 32];
@@ -2425,16 +2667,22 @@ fn run_validator_loop(
                 let new_epoch = epoch + 1;
                 node.advance_epoch_with_vrf(new_epoch, vrf_secret.as_ref());
                 epoch = new_epoch;
+                // DAG parents are epoch-local. Start the new epoch from a parentless round 1
+                // and discard the old-epoch live DAG so the next vertex cannot accidentally
+                // reference a parent which admission must reject.
+                round = 1;
+                commit_round = 1;
+                last_vertex = None;
+                *dag.lock().unwrap_or_else(|e| e.into_inner()) = Dag::new();
                 info!(
-                    "[validator-loop] epoch 推进至 {}（commit_round={}，VRF={}）",
+                    "[validator-loop] epoch 推进至 {}（round/commit_round 已重置，VRF={}）",
                     epoch,
-                    commit_round,
                     vrf_secret.is_some()
                 );
+            } else {
+                last_vertex = Some(vertex);
+                round += 1;
             }
-
-            last_vertex = Some(vertex);
-            round += 1;
             // batch_tx_count 仅供本作用域日志/调试上下文，显式标记避免未使用告警。
             let _ = batch_tx_count;
         }
@@ -2905,7 +3153,7 @@ mod tests {
         tx.tagged_pubkey = author_pubkey.clone();
         tx.signature = secp256k1_sign_hash(&secret_key, &tx.signing_hash());
         let mut vertex = DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 1,
             author_pubkey,
             tx_list: vec![tx],
@@ -3132,6 +3380,14 @@ mod tests {
         assert_eq!(first_round.len(), 2);
         assert!(first_round.iter().all(|vertex| vertex.round == 1));
         assert!(collect_vertices_by_round(&dag, 3, 2).is_empty());
+    }
+
+    #[test]
+    fn block_range_scan_is_bounded_even_when_range_is_huge_and_sparse() {
+        let node = Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap();
+
+        assert!(collect_blocks_by_range(&node, 10, 9).is_empty());
+        assert!(collect_blocks_by_range(&node, 1, u64::MAX).is_empty());
     }
 
     #[test]

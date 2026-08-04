@@ -54,6 +54,9 @@ impl Dag {
     /// 插入 vertex。
     pub fn insert(&mut self, vertex: DagVertex) -> Hash {
         let hash = vertex.vertex_hash();
+        if self.vertices.contains_key(&hash) {
+            return hash;
+        }
         let round = vertex.round;
 
         // 更新 children 索引（parent → child）
@@ -645,6 +648,19 @@ mod tests {
         let children = dag.children_of(&parent_hash);
         assert_eq!(children.len(), 1);
         assert_eq!(children[0], child_hash);
+    }
+
+    #[test]
+    fn dag_insert_same_vertex_is_idempotent_for_all_indexes() {
+        let mut dag = Dag::new();
+        let parent_hash = dag.insert(make_vertex(1, 1, 0x10, vec![]));
+        let child = make_vertex(1, 2, 0x11, vec![parent_hash]);
+        let child_hash = dag.insert(child.clone());
+        assert_eq!(dag.insert(child), child_hash);
+
+        assert_eq!(dag.len(), 2);
+        assert_eq!(dag.round_vertices(2), &[child_hash]);
+        assert_eq!(dag.children_of(&parent_hash), &[child_hash]);
     }
 
     #[test]

@@ -612,7 +612,7 @@ mod subtask_43_7_node {
             vertex
         };
         let parent = sign(DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 1,
             author_pubkey: tagged.clone(),
             tx_list: vec![],
@@ -621,7 +621,7 @@ mod subtask_43_7_node {
         });
         let parent_hash = node.put_vertex(&parent).unwrap();
         let vertex = sign(DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 2,
             author_pubkey: tagged,
             tx_list: vec![],

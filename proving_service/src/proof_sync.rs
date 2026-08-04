@@ -1,0 +1,296 @@
+//! Verified P2P repair/download path for durable Texas proof packages.
+//!
+//! The wire protocol treats packages as opaque bounded bytes. This module is
+//! the business boundary that canonical-decodes the downloaded package, binds
+//! it to an existing durable job, replays the method statement and runs native
+//! Stwo verification before the sidecar is persisted.
+
+use poker_l1::Hash;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
+
+use borsh::BorshDeserialize;
+use poker_l1::network::{
+    MAX_P2P_MESSAGE_BYTES, NetworkMessage, NetworkTransport, ProofPackageAssembler,
+    ProofPackageChunk, ProofPackageManifest,
+};
+use poker_texas_air::orchestrator::Orchestrator;
+
+use crate::proof_package::{ServiceProofPackage, stored_proof_metadata};
+use crate::repository::{ServiceRepository, StoredJobStatus};
+use crate::{ServiceError, ServiceResult};
+
+/// Result of one fully verified package synchronization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofPackageSyncReport {
+    pub job_id: Hash,
+    pub package_hash: Hash,
+    pub total_len: u64,
+    pub chunk_count: u32,
+    pub method: &'static str,
+    pub table_id: u64,
+    pub hand_id: u32,
+    pub call_seq: u32,
+}
+
+/// Narrow peer interface required by proof-package synchronization.
+pub trait ProofPackagePeer {
+    fn request_manifest(&self, job_id: Hash) -> ServiceResult<Option<ProofPackageManifest>>;
+
+    fn request_chunk(
+        &self,
+        job_id: Hash,
+        package_hash: Hash,
+        index: u32,
+    ) -> ServiceResult<Option<ProofPackageChunk>>;
+}
+
+impl<T: NetworkTransport + ?Sized> ProofPackagePeer for T {
+    fn request_manifest(&self, job_id: Hash) -> ServiceResult<Option<ProofPackageManifest>> {
+        self.request_proof_package_manifest(job_id)
+            .map_err(network_error)
+    }
+
+    fn request_chunk(
+        &self,
+        job_id: Hash,
+        package_hash: Hash,
+        index: u32,
+    ) -> ServiceResult<Option<ProofPackageChunk>> {
+        self.request_proof_package_chunk(job_id, package_hash, index)
+            .map_err(network_error)
+    }
+}
+
+/// Minimal TCP client for syncing from one or more zchain P2P listeners.
+#[derive(Debug, Clone)]
+pub struct TcpProofPackagePeer {
+    peers: Vec<SocketAddr>,
+    timeout: Duration,
+}
+
+impl TcpProofPackagePeer {
+    /// Construct a client with deterministic peer order and the default 30s timeout.
+    pub fn new(peers: Vec<SocketAddr>) -> ServiceResult<Self> {
+        if peers.is_empty() {
+            return Err(ServiceError::Runner(
+                "proof package sync requires at least one peer".into(),
+            ));
+        }
+        Ok(Self {
+            peers,
+            timeout: Duration::from_secs(30),
+        })
+    }
+
+    fn request_matching<F>(
+        &self,
+        request: &NetworkMessage,
+        mut select: F,
+    ) -> ServiceResult<NetworkMessage>
+    where
+        F: FnMut(&NetworkMessage) -> bool,
+    {
+        let mut failures = Vec::new();
+        for peer in &self.peers {
+            match request_one_peer(*peer, self.timeout, request, &mut select) {
+                Ok(response) => return Ok(response),
+                Err(error) => failures.push(format!("{peer}: {error}")),
+            }
+        }
+        Err(ServiceError::Runner(format!(
+            "all proof package peers failed: {}",
+            failures.join("; ")
+        )))
+    }
+}
+
+impl ProofPackagePeer for TcpProofPackagePeer {
+    fn request_manifest(&self, job_id: Hash) -> ServiceResult<Option<ProofPackageManifest>> {
+        let response = self.request_matching(
+            &NetworkMessage::RequestProofPackageManifest(job_id),
+            |message| matches!(message, NetworkMessage::ResponseProofPackageManifest(_)),
+        )?;
+        match response {
+            NetworkMessage::ResponseProofPackageManifest(manifest) => Ok(manifest),
+            _ => unreachable!("response selector accepted only manifest responses"),
+        }
+    }
+
+    fn request_chunk(
+        &self,
+        job_id: Hash,
+        package_hash: Hash,
+        index: u32,
+    ) -> ServiceResult<Option<ProofPackageChunk>> {
+        let response = self.request_matching(
+            &NetworkMessage::RequestProofPackageChunk {
+                job_id,
+                package_hash,
+                index,
+            },
+            |message| matches!(message, NetworkMessage::ResponseProofPackageChunk(_)),
+        )?;
+        match response {
+            NetworkMessage::ResponseProofPackageChunk(chunk) => Ok(chunk),
+            _ => unreachable!("response selector accepted only chunk responses"),
+        }
+    }
+}
+
+/// Download and durably repair one completed job's proof sidecar.
+///
+/// An untrusted peer can choose bytes and manifest metadata, but cannot make
+/// them durable unless the complete hash, canonical package schema, local job
+/// metadata, canonical VM replay and native method-proof verification all pass.
+pub fn sync_proof_package(
+    repository: &mut ServiceRepository,
+    peer: &dyn ProofPackagePeer,
+    job_id: Hash,
+) -> ServiceResult<ProofPackageSyncReport> {
+    let manifest = peer
+        .request_manifest(job_id)?
+        .ok_or_else(|| ServiceError::Runner("proof package manifest not found".into()))?;
+    manifest.validate().map_err(network_error)?;
+    if manifest.job_id != job_id {
+        return Err(ServiceError::Runner(
+            "proof package manifest does not target requested job".into(),
+        ));
+    }
+
+    let mut assembler = ProofPackageAssembler::new(manifest.clone()).map_err(network_error)?;
+    for index in 0..manifest.chunk_count {
+        let chunk = peer
+            .request_chunk(job_id, manifest.package_hash, index)?
+            .ok_or_else(|| {
+                ServiceError::Runner(format!("proof package chunk {index} not found"))
+            })?;
+        assembler.insert(chunk).map_err(network_error)?;
+    }
+    let bytes = assembler.finish().map_err(network_error)?;
+    let receipt = verify_downloaded_package(repository, job_id, &bytes)?;
+    repository.store_proof_package(job_id, &bytes)?;
+
+    Ok(ProofPackageSyncReport {
+        job_id,
+        package_hash: manifest.package_hash,
+        total_len: manifest.total_len,
+        chunk_count: manifest.chunk_count,
+        method: receipt.kind().method_name(),
+        table_id: receipt.table_id(),
+        hand_id: receipt.hand_id(),
+        call_seq: receipt.call_seq(),
+    })
+}
+
+fn verify_downloaded_package(
+    repository: &ServiceRepository,
+    job_id: Hash,
+    bytes: &[u8],
+) -> ServiceResult<poker_texas_air::verified_chain::VerificationReceipt> {
+    let job = repository
+        .job(job_id)
+        .ok_or_else(|| ServiceError::Runner("proof package job not found locally".into()))?;
+    if job.status != StoredJobStatus::Completed {
+        return Err(ServiceError::Runner(
+            "proof package can only repair a completed job".into(),
+        ));
+    }
+    let result = job.result.as_ref().ok_or_else(|| {
+        ServiceError::Runner("completed proof package job is missing result metadata".into())
+    })?;
+    if !result.had_prove_task || !result.proof_verified {
+        return Err(ServiceError::Runner(
+            "completed job does not describe a verified proof".into(),
+        ));
+    }
+    let stored = job.proof.as_ref().ok_or_else(|| {
+        ServiceError::Runner("completed proof package job is missing proof metadata".into())
+    })?;
+
+    let package = ServiceProofPackage::from_bytes(bytes)?;
+    let expected = stored_proof_metadata(package.task())?;
+    if stored.task_digest != expected.task_digest
+        || stored.pre_state_root != expected.pre_state_root
+        || stored.post_state_root != expected.post_state_root
+    {
+        return Err(ServiceError::Prover(
+            "downloaded proof package does not match local job metadata".into(),
+        ));
+    }
+
+    let receipt = Orchestrator::verify_archived_method_proof(package.task(), package.archive())
+        .map_err(|error| ServiceError::Prover(error.to_string()))?;
+    if receipt.table_id() != job.table_id
+        || receipt.hand_id() != result.hand_id
+        || receipt.call_seq() != result.call_seq
+    {
+        return Err(ServiceError::Prover(
+            "downloaded proof receipt does not match local completed result".into(),
+        ));
+    }
+    Ok(receipt)
+}
+
+fn network_error(error: poker_l1::error::PokerL1Error) -> ServiceError {
+    ServiceError::Runner(error.to_string())
+}
+
+fn request_one_peer<F>(
+    peer: SocketAddr,
+    timeout: Duration,
+    request: &NetworkMessage,
+    select: &mut F,
+) -> ServiceResult<NetworkMessage>
+where
+    F: FnMut(&NetworkMessage) -> bool,
+{
+    let mut stream = TcpStream::connect_timeout(&peer, timeout)
+        .map_err(|error| ServiceError::Runner(format!("connect failed: {error}")))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|_| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| ServiceError::Runner(format!("set timeout failed: {error}")))?;
+    let bytes = borsh::to_vec(request)
+        .map_err(|error| ServiceError::Runner(format!("encode P2P request: {error}")))?;
+    if bytes.len() > MAX_P2P_MESSAGE_BYTES {
+        return Err(ServiceError::Runner("P2P request exceeds frame limit".into()));
+    }
+    stream
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .and_then(|_| stream.write_all(&bytes))
+        .and_then(|_| stream.flush())
+        .map_err(|error| ServiceError::Runner(format!("send P2P request: {error}")))?;
+
+    // A newly accepted zchain connection may receive bounded PEX/header gossip
+    // before the direct response. Ignore a small number of unrelated frames.
+    for _ in 0..8 {
+        let message = read_framed_message(&mut stream)?;
+        if select(&message) {
+            return Ok(message);
+        }
+    }
+    Err(ServiceError::Runner(
+        "peer did not return the requested proof package response".into(),
+    ))
+}
+
+fn read_framed_message(stream: &mut TcpStream) -> ServiceResult<NetworkMessage> {
+    let mut len = [0u8; 4];
+    stream
+        .read_exact(&mut len)
+        .map_err(|error| ServiceError::Runner(format!("read P2P frame length: {error}")))?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len == 0 || len > MAX_P2P_MESSAGE_BYTES {
+        return Err(ServiceError::Runner(format!(
+            "invalid P2P response frame length {len}"
+        )));
+    }
+    let mut bytes = vec![0u8; len];
+    stream
+        .read_exact(&mut bytes)
+        .map_err(|error| ServiceError::Runner(format!("read P2P frame body: {error}")))?;
+    NetworkMessage::try_from_slice(&bytes)
+        .map_err(|error| ServiceError::Runner(format!("decode P2P response: {error}")))
+}

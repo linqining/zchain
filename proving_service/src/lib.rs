@@ -38,6 +38,7 @@ pub mod crypto_driver;
 pub mod full_hand;
 pub mod plugin;
 pub mod proof_package;
+pub mod proof_sync;
 pub mod repository;
 pub mod runner;
 pub mod server;

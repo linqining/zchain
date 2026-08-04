@@ -129,7 +129,7 @@ const COMMIT_CERT_SIG_DOMAIN: u8 = 0x43; // 'C' for Commit Certificate
 pub struct DagVertex {
     /// 当前 epoch（SEC-C1：绑定 epoch 防 equivocation 证据歧义）。
     pub epoch: Epoch,
-    /// DAG round（全局递增，跨 epoch 不重置）。
+    /// DAG round（epoch 内递增；epoch 切换后从 1 重新开始）。
     pub round: Round,
     /// 作者 validator 的 tagged pubkey（SEC-C1：author_pubkey 字段）。
     pub author_pubkey: TaggedPubkey,

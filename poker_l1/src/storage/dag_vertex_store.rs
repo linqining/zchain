@@ -12,8 +12,9 @@
 //!
 //! 注意：tagged_pubkey 序列化为 `tag || raw_bytes`（参考 `src/signature/tagged_pubkey.rs`）。
 
+use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options, WriteBatch};
 
@@ -32,10 +33,12 @@ const AUTHOR_INDEX_CF: &str = "author_index";
 /// DAG vertex 存储（RocksDB 后端）。
 ///
 /// 支持按 hash / round / author 三维查询。`put` 用 WriteBatch 保证 vertex 与
-/// 两个索引原子写入（read-modify-write 索引在单 writer 假设下安全）。
+/// 两个索引原子写入，并用进程内写锁串行化索引的 read-modify-write。
 pub struct DagVertexStore {
     /// RocksDB 句柄（3 个 CF）。
     db: Arc<DB>,
+    /// 串行化跨 CF 的 check/read/modify/write，防止并发 P2P writer 丢失索引更新。
+    write_lock: Mutex<()>,
 }
 
 impl DagVertexStore {
@@ -52,7 +55,10 @@ impl DagVertexStore {
         let db = DB::open_cf_descriptors(&db_opts, path, vec![vertices_cf, round_cf, author_cf])
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            write_lock: Mutex::new(()),
+        })
     }
 
     /// 打开一个临时目录下的 DagVertexStore（用于测试 / 开发）。
@@ -99,6 +105,7 @@ impl DagVertexStore {
     /// 返回该 vertex 的 `vertex_hash`。重复写入同一 hash 是幂等的（不重复追加到索引）。
     pub fn put(&self, vertex: &DagVertex) -> PokerL1Result<Hash> {
         let hash = vertex.vertex_hash();
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 幂等优化：已存在则直接返回，不重复追加索引
         if self.exists(&hash)? {
             return Ok(hash);
@@ -108,7 +115,7 @@ impl DagVertexStore {
         let round_key = Self::round_key(vertex.epoch, vertex.round);
         let author_key = vertex.author_pubkey.to_bytes();
 
-        // read-modify-write 两个索引（单 writer 假设下安全）
+        // read-modify-write 两个索引；由 write_lock 保证同进程内不会发生 lost update。
         let mut round_list: Vec<Hash> = self
             .db
             .get_cf(self.round_cf(), round_key)
@@ -224,6 +231,7 @@ impl DagVertexStore {
     ///
     /// 返回裁剪的 vertex 数量。
     pub fn prune_old_vertices(&self, prune_below_epoch: Epoch) -> PokerL1Result<usize> {
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 遍历 round_index（key = epoch_le || round_le），收集 epoch < prune_below_epoch 的 vertex hash。
         let iter = self.db.iterator_cf(self.round_cf(), IteratorMode::Start);
         let mut to_delete: Vec<([u8; 16], Vec<Hash>)> = Vec::new();
@@ -233,13 +241,17 @@ impl DagVertexStore {
                 let epoch = u64::from_le_bytes(key[..8].try_into().unwrap());
                 if epoch < prune_below_epoch {
                     // value = Vec<Hash>（round_index 存该轮所有 vertex hash）
-                    let hashes: Vec<Hash> = bincode::deserialize(&value).unwrap_or_default();
+                    let hashes: Vec<Hash> = borsh::from_slice(&value)?;
                     to_delete.push((key.as_ref().try_into().unwrap(), hashes));
                 }
             }
         }
         let mut count = 0usize;
         if !to_delete.is_empty() {
+            let deleted_hashes: HashSet<Hash> = to_delete
+                .iter()
+                .flat_map(|(_, hashes)| hashes.iter().copied())
+                .collect();
             let mut batch = WriteBatch::default();
             for (round_key, hashes) in &to_delete {
                 for hash in hashes {
@@ -248,8 +260,23 @@ impl DagVertexStore {
                 }
                 batch.delete_cf(self.round_cf(), round_key);
             }
-            // author_index：逐 vertex 清理（key 含 pubkey，需遍历）。
-            // 简化：author_index 不裁剪（它仅用于审计查询，体积小；后续可补精确清理）。
+
+            // author_index 必须同步清理，否则 get_by_author 会追到已删除 vertex 并报错。
+            let author_iter = self.db.iterator_cf(self.author_cf(), IteratorMode::Start);
+            for item in author_iter {
+                let (author_key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+                let mut hashes: Vec<Hash> = borsh::from_slice(&value)?;
+                let original_len = hashes.len();
+                hashes.retain(|hash| !deleted_hashes.contains(hash));
+                if hashes.len() == original_len {
+                    continue;
+                }
+                if hashes.is_empty() {
+                    batch.delete_cf(self.author_cf(), &author_key);
+                } else {
+                    batch.put_cf(self.author_cf(), &author_key, borsh::to_vec(&hashes)?);
+                }
+            }
             self.db
                 .write(batch)
                 .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
@@ -503,5 +530,63 @@ mod tests {
                 50
             );
         }
+    }
+
+    #[test]
+    fn concurrent_puts_preserve_every_round_and_author_index_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DagVertexStore::open(dir.path()).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let mut threads = Vec::new();
+        for index in 0..16u8 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                let vertex = make_vertex(7, 9, index + 2, index + 1);
+                barrier.wait();
+                store.put(&vertex).unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(store.len().unwrap(), 16);
+        assert_eq!(store.get_by_round(7, 9).unwrap().len(), 16);
+        for index in 0..16u8 {
+            assert_eq!(
+                store.get_by_author(&make_pubkey(index + 2)).unwrap().len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn pruning_uses_borsh_and_cleans_author_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DagVertexStore::open(dir.path()).unwrap();
+        let old_same_author = make_vertex(1, 10, 0x02, 0x11);
+        let old_other_author = make_vertex(2, 11, 0x03, 0x22);
+        let retained_same_author = make_vertex(3, 12, 0x02, 0x33);
+        let old_same_hash = store.put(&old_same_author).unwrap();
+        let old_other_hash = store.put(&old_other_author).unwrap();
+        store.put(&retained_same_author).unwrap();
+
+        assert_eq!(store.prune_old_vertices(3).unwrap(), 2);
+        assert!(matches!(
+            store.get_by_hash(&old_same_hash),
+            Err(PokerL1Error::DagVertexNotFound)
+        ));
+        assert!(matches!(
+            store.get_by_hash(&old_other_hash),
+            Err(PokerL1Error::DagVertexNotFound)
+        ));
+        assert!(store.get_by_round(1, 10).unwrap().is_empty());
+        assert!(store.get_by_round(2, 11).unwrap().is_empty());
+        assert_eq!(store.get_by_round(3, 12).unwrap().len(), 1);
+
+        let same_author = store.get_by_author(&make_pubkey(0x02)).unwrap();
+        assert_eq!(same_author, vec![retained_same_author]);
+        assert!(store.get_by_author(&make_pubkey(0x03)).unwrap().is_empty());
     }
 }

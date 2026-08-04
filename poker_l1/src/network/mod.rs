@@ -37,6 +37,9 @@ use crate::{BlockHeight, Hash};
 /// Block 序列化后最大 4MB（SubTask 30.6）。
 pub const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
+/// Maximum length-prefixed P2P message accepted by the TCP protocol.
+pub const MAX_P2P_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 /// tx 序列化后最大 128KB（SubTask 30.6）。
 pub const MAX_TX_SIZE: usize = 128 * 1024;
 
@@ -51,6 +54,296 @@ pub const MEMPOOL_BUFFER_WINDOW_MS: u64 = 100;
 
 /// Compact Block Relay short ID 域分隔前缀。
 const SHORT_ID_DOMAIN: u8 = 0x53; // 'S' for Short ID
+
+/// Maximum opaque proof-package size accepted by the P2P sync protocol.
+///
+/// This deliberately matches the proving-service package limit without making
+/// `poker_l1` depend on that higher-level crate.
+pub const MAX_PROOF_PACKAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Canonical proof-package chunk size.  One chunk remains comfortably below
+/// the node binary's 16 MiB framed-message limit after wire metadata is added.
+pub const PROOF_PACKAGE_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Maximum number of chunks in one package under the canonical limits.
+pub const MAX_PROOF_PACKAGE_CHUNKS: u32 =
+    (MAX_PROOF_PACKAGE_BYTES / PROOF_PACKAGE_CHUNK_SIZE) as u32;
+
+const PROOF_PACKAGE_HASH_DOMAIN: &[u8] = b"zchain.proof_package.v1";
+const PROOF_PACKAGE_CHUNK_HASH_DOMAIN: &[u8] = b"zchain.proof_package.chunk.v1";
+
+/// Bounded description of one opaque proving-service package.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct ProofPackageManifest {
+    /// Durable proving job whose sidecar is being synchronized.
+    pub job_id: Hash,
+    /// Domain-separated hash of the complete canonical package bytes.
+    pub package_hash: Hash,
+    /// Exact complete package length.
+    pub total_len: u64,
+    /// Canonical chunk size used for every non-final chunk.
+    pub chunk_size: u32,
+    /// Exact number of chunks required to reconstruct the package.
+    pub chunk_count: u32,
+}
+
+impl ProofPackageManifest {
+    /// Validate all manifest bounds before allocating download state.
+    pub fn validate(&self) -> PokerL1Result<()> {
+        if self.total_len == 0 || self.total_len > MAX_PROOF_PACKAGE_BYTES as u64 {
+            return Err(proof_sync_error(format!(
+                "invalid proof package length {}",
+                self.total_len
+            )));
+        }
+        if self.chunk_size as usize != PROOF_PACKAGE_CHUNK_SIZE {
+            return Err(proof_sync_error(format!(
+                "invalid proof package chunk size {}",
+                self.chunk_size
+            )));
+        }
+        let expected_count = self.total_len.div_ceil(u64::from(self.chunk_size));
+        if expected_count == 0
+            || expected_count > u64::from(MAX_PROOF_PACKAGE_CHUNKS)
+            || self.chunk_count != expected_count as u32
+        {
+            return Err(proof_sync_error(format!(
+                "invalid proof package chunk count {} for length {}",
+                self.chunk_count, self.total_len
+            )));
+        }
+        Ok(())
+    }
+
+    fn expected_chunk_len(&self, index: u32) -> PokerL1Result<usize> {
+        self.validate()?;
+        if index >= self.chunk_count {
+            return Err(proof_sync_error(format!(
+                "proof package chunk index {index} out of range {}",
+                self.chunk_count
+            )));
+        }
+        let offset = u64::from(index) * u64::from(self.chunk_size);
+        let remaining = self.total_len - offset;
+        usize::try_from(remaining.min(u64::from(self.chunk_size)))
+            .map_err(|_| proof_sync_error("proof package chunk length does not fit usize"))
+    }
+}
+
+/// One independently authenticated package chunk.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct ProofPackageChunk {
+    pub job_id: Hash,
+    pub package_hash: Hash,
+    pub index: u32,
+    pub bytes: Vec<u8>,
+    pub chunk_hash: Hash,
+}
+
+impl ProofPackageChunk {
+    /// Validate identity, size and hash against a previously accepted manifest.
+    pub fn validate_against(&self, manifest: &ProofPackageManifest) -> PokerL1Result<()> {
+        manifest.validate()?;
+        if self.job_id != manifest.job_id || self.package_hash != manifest.package_hash {
+            return Err(proof_sync_error(
+                "proof package chunk identity does not match manifest",
+            ));
+        }
+        let expected_len = manifest.expected_chunk_len(self.index)?;
+        if self.bytes.len() != expected_len {
+            return Err(proof_sync_error(format!(
+                "proof package chunk {} length {} != expected {expected_len}",
+                self.index,
+                self.bytes.len()
+            )));
+        }
+        let expected_hash = proof_package_chunk_hash(
+            self.job_id,
+            self.package_hash,
+            self.index,
+            &self.bytes,
+        );
+        if self.chunk_hash != expected_hash {
+            return Err(proof_sync_error(format!(
+                "proof package chunk {} hash mismatch",
+                self.index
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Build a canonical manifest for already-bounded opaque package bytes.
+pub fn build_proof_package_manifest(
+    job_id: Hash,
+    bytes: &[u8],
+) -> PokerL1Result<ProofPackageManifest> {
+    if bytes.is_empty() || bytes.len() > MAX_PROOF_PACKAGE_BYTES {
+        return Err(proof_sync_error(format!(
+            "invalid proof package length {}",
+            bytes.len()
+        )));
+    }
+    let chunk_count = bytes.len().div_ceil(PROOF_PACKAGE_CHUNK_SIZE);
+    let manifest = ProofPackageManifest {
+        job_id,
+        package_hash: proof_package_hash(bytes),
+        total_len: bytes.len() as u64,
+        chunk_size: PROOF_PACKAGE_CHUNK_SIZE as u32,
+        chunk_count: u32::try_from(chunk_count)
+            .map_err(|_| proof_sync_error("proof package chunk count does not fit u32"))?,
+    };
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+/// Extract one canonical chunk from a package described by `manifest`.
+pub fn build_proof_package_chunk(
+    manifest: &ProofPackageManifest,
+    bytes: &[u8],
+    index: u32,
+) -> PokerL1Result<ProofPackageChunk> {
+    manifest.validate()?;
+    if bytes.len() as u64 != manifest.total_len || proof_package_hash(bytes) != manifest.package_hash
+    {
+        return Err(proof_sync_error(
+            "proof package bytes do not match manifest",
+        ));
+    }
+    let expected_len = manifest.expected_chunk_len(index)?;
+    let start = index as usize * PROOF_PACKAGE_CHUNK_SIZE;
+    let end = start + expected_len;
+    let chunk_bytes = bytes[start..end].to_vec();
+    Ok(ProofPackageChunk {
+        job_id: manifest.job_id,
+        package_hash: manifest.package_hash,
+        index,
+        chunk_hash: proof_package_chunk_hash(
+            manifest.job_id,
+            manifest.package_hash,
+            index,
+            &chunk_bytes,
+        ),
+        bytes: chunk_bytes,
+    })
+}
+
+/// Bounded, order-independent package download state.
+#[derive(Debug)]
+pub struct ProofPackageAssembler {
+    manifest: ProofPackageManifest,
+    chunks: Vec<Option<Vec<u8>>>,
+    received_len: u64,
+}
+
+impl ProofPackageAssembler {
+    pub fn new(manifest: ProofPackageManifest) -> PokerL1Result<Self> {
+        manifest.validate()?;
+        let chunk_count = manifest.chunk_count as usize;
+        Ok(Self {
+            manifest,
+            chunks: vec![None; chunk_count],
+            received_len: 0,
+        })
+    }
+
+    #[must_use]
+    pub const fn manifest(&self) -> &ProofPackageManifest {
+        &self.manifest
+    }
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.chunks.iter().all(Option::is_some)
+    }
+
+    /// Insert an out-of-order chunk. Exact duplicates are idempotent; a conflicting
+    /// duplicate is rejected instead of silently changing the assembled package.
+    pub fn insert(&mut self, chunk: ProofPackageChunk) -> PokerL1Result<()> {
+        chunk.validate_against(&self.manifest)?;
+        let slot = &mut self.chunks[chunk.index as usize];
+        if let Some(existing) = slot {
+            if existing == &chunk.bytes {
+                return Ok(());
+            }
+            return Err(proof_sync_error(format!(
+                "conflicting duplicate proof package chunk {}",
+                chunk.index
+            )));
+        }
+        self.received_len = self
+            .received_len
+            .checked_add(chunk.bytes.len() as u64)
+            .ok_or_else(|| proof_sync_error("proof package received length overflow"))?;
+        if self.received_len > self.manifest.total_len {
+            return Err(proof_sync_error(
+                "proof package received length exceeds manifest",
+            ));
+        }
+        *slot = Some(chunk.bytes);
+        Ok(())
+    }
+
+    /// Finish reconstruction and authenticate the complete package hash.
+    pub fn finish(self) -> PokerL1Result<Vec<u8>> {
+        if !self.is_complete() || self.received_len != self.manifest.total_len {
+            return Err(proof_sync_error("proof package download is incomplete"));
+        }
+        let capacity = usize::try_from(self.manifest.total_len)
+            .map_err(|_| proof_sync_error("proof package length does not fit usize"))?;
+        let mut bytes = Vec::with_capacity(capacity);
+        for chunk in self.chunks {
+            bytes.extend(chunk.expect("complete package checked above"));
+        }
+        if bytes.len() != capacity || proof_package_hash(&bytes) != self.manifest.package_hash {
+            return Err(proof_sync_error("complete proof package hash mismatch"));
+        }
+        Ok(bytes)
+    }
+}
+
+#[must_use]
+fn proof_package_hash(bytes: &[u8]) -> Hash {
+    domain_hash(PROOF_PACKAGE_HASH_DOMAIN, &[bytes])
+}
+
+#[must_use]
+fn proof_package_chunk_hash(
+    job_id: Hash,
+    package_hash: Hash,
+    index: u32,
+    bytes: &[u8],
+) -> Hash {
+    domain_hash(
+        PROOF_PACKAGE_CHUNK_HASH_DOMAIN,
+        &[
+            &job_id,
+            &package_hash,
+            &index.to_le_bytes(),
+            &(bytes.len() as u64).to_le_bytes(),
+            bytes,
+        ],
+    )
+}
+
+fn domain_hash(domain: &[u8], parts: &[&[u8]]) -> Hash {
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(domain);
+    for part in parts {
+        hasher.update(part);
+    }
+    let mut output = [0u8; 32];
+    hasher.finalize_variable(&mut output).expect("32 <= 64");
+    output
+}
+
+fn proof_sync_error(message: impl Into<String>) -> PokerL1Error {
+    PokerL1Error::Other(format!("proof package sync: {}", message.into()))
+}
 
 // ===== 大小校验（SubTask 30.6） =====
 
@@ -539,6 +832,18 @@ pub enum NetworkMessage {
     RequestVerticesByRange(u64, u64),
     /// sync protocol：响应 vertices。
     ResponseVertices(Vec<DagVertex>),
+    /// Request the bounded manifest for one opaque proving-service package.
+    RequestProofPackageManifest(Hash),
+    /// Return a package manifest, or `None` when this peer does not retain it.
+    ResponseProofPackageManifest(Option<ProofPackageManifest>),
+    /// Request one package chunk by canonical zero-based index.
+    RequestProofPackageChunk {
+        job_id: Hash,
+        package_hash: Hash,
+        index: u32,
+    },
+    /// Return one authenticated chunk, or `None` when unavailable.
+    ResponseProofPackageChunk(Option<ProofPackageChunk>),
     /// 轻客户端 block header 订阅（SubTask 30.4）。
     LightClientHeader(LightClientHeader),
     /// commit certificate 投票（缺口 #3：多 validator 2/3 多签闭环）。
@@ -630,6 +935,20 @@ pub trait NetworkTransport: Send + Sync {
         end_round: u64,
     ) -> PokerL1Result<Vec<DagVertex>>;
 
+    /// Fetch the manifest for one opaque proof package from an available peer.
+    fn request_proof_package_manifest(
+        &self,
+        job_id: Hash,
+    ) -> PokerL1Result<Option<ProofPackageManifest>>;
+
+    /// Fetch one authenticated proof-package chunk from an available peer.
+    fn request_proof_package_chunk(
+        &self,
+        job_id: Hash,
+        package_hash: Hash,
+        index: u32,
+    ) -> PokerL1Result<Option<ProofPackageChunk>>;
+
     /// 订阅轻客户端 block header（SubTask 30.4）。
     fn subscribe_light_headers(&self) -> PokerL1Result<Vec<LightClientHeader>>;
 }
@@ -650,6 +969,8 @@ pub struct InMemoryTransport {
     vertices: std::sync::Mutex<BTreeMap<u64, DagVertex>>,
     /// 模拟轻客户端 header 存储。
     light_headers: std::sync::Mutex<Vec<LightClientHeader>>,
+    /// Opaque proof packages retained by this mock peer.
+    proof_packages: std::sync::Mutex<BTreeMap<Hash, Vec<u8>>>,
 }
 
 impl InMemoryTransport {
@@ -691,6 +1012,16 @@ impl InMemoryTransport {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(header);
+    }
+
+    /// Inject one bounded opaque package for request/response sync tests.
+    pub fn inject_proof_package(&self, job_id: Hash, bytes: Vec<u8>) -> PokerL1Result<()> {
+        build_proof_package_manifest(job_id, &bytes)?;
+        self.proof_packages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(job_id, bytes);
+        Ok(())
     }
 
     /// 获取已广播的消息（测试验证用）。
@@ -752,6 +1083,38 @@ impl NetworkTransport for InMemoryTransport {
             }
         }
         Ok(result)
+    }
+
+    fn request_proof_package_manifest(
+        &self,
+        job_id: Hash,
+    ) -> PokerL1Result<Option<ProofPackageManifest>> {
+        self.proof_packages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&job_id)
+            .map(|bytes| build_proof_package_manifest(job_id, bytes))
+            .transpose()
+    }
+
+    fn request_proof_package_chunk(
+        &self,
+        job_id: Hash,
+        package_hash: Hash,
+        index: u32,
+    ) -> PokerL1Result<Option<ProofPackageChunk>> {
+        let packages = self
+            .proof_packages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(bytes) = packages.get(&job_id) else {
+            return Ok(None);
+        };
+        let manifest = build_proof_package_manifest(job_id, bytes)?;
+        if manifest.package_hash != package_hash {
+            return Ok(None);
+        }
+        Ok(Some(build_proof_package_chunk(&manifest, bytes, index)?))
     }
 
     fn subscribe_light_headers(&self) -> PokerL1Result<Vec<LightClientHeader>> {
@@ -1055,6 +1418,72 @@ mod tests {
                 raw: vec![byte; 33],
             }
         })
+    }
+
+    #[test]
+    fn proof_package_chunks_roundtrip_out_of_order() {
+        let job_id = [0xA5; 32];
+        let bytes: Vec<u8> = (0..(PROOF_PACKAGE_CHUNK_SIZE * 2 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let transport = InMemoryTransport::new();
+        transport
+            .inject_proof_package(job_id, bytes.clone())
+            .unwrap();
+
+        let manifest = transport
+            .request_proof_package_manifest(job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(manifest.chunk_count, 3);
+        let mut assembler = ProofPackageAssembler::new(manifest.clone()).unwrap();
+        for index in (0..manifest.chunk_count).rev() {
+            let chunk = transport
+                .request_proof_package_chunk(job_id, manifest.package_hash, index)
+                .unwrap()
+                .unwrap();
+            assembler.insert(chunk.clone()).unwrap();
+            assembler.insert(chunk).unwrap();
+        }
+        assert!(assembler.is_complete());
+        assert_eq!(assembler.finish().unwrap(), bytes);
+    }
+
+    #[test]
+    fn proof_package_sync_rejects_tampering_and_bad_bounds() {
+        let job_id = [0x3C; 32];
+        let bytes = vec![0x55; PROOF_PACKAGE_CHUNK_SIZE + 1];
+        let manifest = build_proof_package_manifest(job_id, &bytes).unwrap();
+        let mut chunk = build_proof_package_chunk(&manifest, &bytes, 0).unwrap();
+        chunk.bytes[0] ^= 1;
+        assert!(chunk.validate_against(&manifest).is_err());
+
+        let mut bad_manifest = manifest.clone();
+        bad_manifest.total_len = MAX_PROOF_PACKAGE_BYTES as u64 + 1;
+        assert!(ProofPackageAssembler::new(bad_manifest).is_err());
+
+        let mut assembler = ProofPackageAssembler::new(manifest.clone()).unwrap();
+        let first = build_proof_package_chunk(&manifest, &bytes, 0).unwrap();
+        assembler.insert(first).unwrap();
+        let mut conflicting = build_proof_package_chunk(&manifest, &bytes, 0).unwrap();
+        conflicting.bytes[0] ^= 1;
+        conflicting.chunk_hash = proof_package_chunk_hash(
+            conflicting.job_id,
+            conflicting.package_hash,
+            conflicting.index,
+            &conflicting.bytes,
+        );
+        assert!(assembler.insert(conflicting).is_err());
+    }
+
+    #[test]
+    fn proof_package_chunk_message_stays_below_node_frame_limit() {
+        let bytes = vec![0x77; PROOF_PACKAGE_CHUNK_SIZE];
+        let manifest = build_proof_package_manifest([0x11; 32], &bytes).unwrap();
+        let chunk = build_proof_package_chunk(&manifest, &bytes, 0).unwrap();
+        let encoded = borsh::to_vec(&NetworkMessage::ResponseProofPackageChunk(Some(chunk)))
+            .unwrap();
+        assert!(encoded.len() < 2 * 1024 * 1024);
     }
 
     // ===== 大小校验测试（SubTask 30.6） =====

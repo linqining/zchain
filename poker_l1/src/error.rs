@@ -213,6 +213,9 @@ pub enum PokerL1Error {
     /// DAG round 从 1 开始；round 0 没有合法的共识语义。
     #[error("invalid dag vertex round {round}; rounds start at 1")]
     InvalidVertexRound { round: u64 },
+    /// vertex 必须属于节点当前接受的 epoch，旧 epoch 或未来 epoch 均不得进入活跃 DAG。
+    #[error("invalid dag vertex epoch {actual}; expected current epoch {expected}")]
+    InvalidVertexEpoch { actual: u64, expected: u64 },
     /// 第一轮 vertex 不得引用 parent，因为不存在 round 0。
     #[error("first-round dag vertex must not contain parents (got {actual})")]
     UnexpectedFirstRoundParents { actual: usize },
@@ -224,6 +227,15 @@ pub enum PokerL1Error {
         "parent vertex {parent_hash:?} is from round {actual}; expected previous round {expected}"
     )]
     InvalidParentVertexRound {
+        parent_hash: crate::Hash,
+        actual: u64,
+        expected: u64,
+    },
+    /// parent 与 child 必须属于同一 epoch，防止 round 编号跨 epoch 混用。
+    #[error(
+        "parent vertex {parent_hash:?} is from epoch {actual}; expected child epoch {expected}"
+    )]
+    InvalidParentVertexEpoch {
         parent_hash: crate::Hash,
         actual: u64,
         expected: u64,

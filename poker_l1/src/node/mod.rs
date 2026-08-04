@@ -1108,6 +1108,14 @@ impl Node {
             });
         }
 
+        let current_epoch = self.current_epoch();
+        if vertex.epoch != current_epoch {
+            return Err(PokerL1Error::InvalidVertexEpoch {
+                actual: vertex.epoch,
+                expected: current_epoch,
+            });
+        }
+
         // 2. author 必须是当前活跃 validator（P0-4 动态 quorum；创世引导期空集跳过）
         // 放在签名验证之前，可快速丢弃非 validator 的顶点并避免验签开销。
         {
@@ -1131,6 +1139,21 @@ impl Node {
                 vertex_hash: vertex.vertex_hash(),
             },
         )?;
+
+        // 同一 author 在同一 (epoch, round) 只能有一个内容 hash。完全相同的 vertex
+        // 属于网络重放，保持幂等；内容不同则在进入 tx/parent 深层校验前直接拒绝。
+        let vertex_hash = vertex.vertex_hash();
+        for existing in self.vertex_store.get_by_round(vertex.epoch, vertex.round)? {
+            if existing.author_pubkey == vertex.author_pubkey
+                && existing.vertex_hash() != vertex_hash
+            {
+                return Err(PokerL1Error::VertexEquivocation {
+                    epoch: vertex.epoch,
+                    round: vertex.round,
+                    author: vertex.author_pubkey.clone(),
+                });
+            }
+        }
 
         // 3. tx 边界、chain_id 与签名校验。P2P vertex 绕过普通 RPC admission，
         // 因此不能等到 block execution 才发现并拒绝无效交易。
@@ -1183,6 +1206,13 @@ impl Node {
                 }
                 Err(error) => return Err(error),
             };
+            if parent.epoch != vertex.epoch {
+                return Err(PokerL1Error::InvalidParentVertexEpoch {
+                    parent_hash: *parent_hash,
+                    actual: parent.epoch,
+                    expected: vertex.epoch,
+                });
+            }
             if parent.round != expected_parent_round {
                 return Err(PokerL1Error::InvalidParentVertexRound {
                     parent_hash: *parent_hash,
@@ -2598,7 +2628,7 @@ mod tests {
     fn validate_vertex_rejects_wrong_chain_id() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         let mut vertex = DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 1,
             author_pubkey: dummy_tagged_pubkey(),
             tx_list: vec![Transaction {
@@ -2630,7 +2660,7 @@ mod tests {
     fn validate_vertex_rejects_invalid_signature() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         let vertex = DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 1,
             author_pubkey: dummy_tagged_pubkey(),
             tx_list: vec![],
@@ -2645,7 +2675,7 @@ mod tests {
     fn validate_vertex_rejects_s9_ordering_violation() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         let vertex = DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 1,
             author_pubkey: dummy_tagged_pubkey(),
             tx_list: vec![
@@ -2690,7 +2720,7 @@ mod tests {
     fn validate_vertex_rejects_parent_not_found() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         let vertex = DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 2,
             author_pubkey: dummy_tagged_pubkey(),
             tx_list: vec![],
@@ -2706,7 +2736,7 @@ mod tests {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
         // 先创建一个有效的 vertex 并入库，作为后续 vertex 的 parent
         let parent = DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 1,
             author_pubkey: dummy_tagged_pubkey(),
             tx_list: vec![],
@@ -2717,7 +2747,7 @@ mod tests {
         let parent_hash = node.vertex_store.put(&parent).unwrap();
 
         let vertex = DagVertex {
-            epoch: 1,
+            epoch: 0,
             round: 2,
             author_pubkey: dummy_tagged_pubkey(),
             tx_list: vec![Transaction {
@@ -3088,7 +3118,7 @@ mod tests {
         let vertex = sign_vertex(
             &secret,
             DagVertex {
-                epoch: 1,
+                epoch: 0,
                 round: 1,
                 author_pubkey: validator.pubkey,
                 tx_list: vec![invalid_tx],
@@ -3115,13 +3145,13 @@ mod tests {
 
         let mut parent_hashes = Vec::new();
         for (secret, entry) in validators.iter().take(3) {
-            let parent = signed_empty_vertex(secret, entry.pubkey.clone(), 1, 1, vec![]);
+            let parent = signed_empty_vertex(secret, entry.pubkey.clone(), 0, 1, vec![]);
             parent_hashes.push(node.put_vertex(&parent).unwrap());
         }
         let child = signed_empty_vertex(
             &validators[3].0,
             validators[3].1.pubkey.clone(),
-            1,
+            0,
             2,
             parent_hashes,
         );
@@ -3142,24 +3172,27 @@ mod tests {
         let first = signed_empty_vertex(
             &validators[0].0,
             validators[0].1.pubkey.clone(),
-            1,
+            0,
             1,
             vec![],
         );
         let equivocation = signed_empty_vertex(
             &validators[0].0,
             validators[0].1.pubkey.clone(),
-            2,
+            0,
             1,
             vec![],
         );
-        // The distinct epoch changes the content hash while retaining the same parent author.
+        // Different tx content changes the hash while retaining epoch/round/author.
+        let mut equivocation = equivocation;
+        equivocation.tx_list.push(make_pub_tx(0x55, 1, 1));
+        let equivocation = sign_vertex(&validators[0].0, equivocation);
         let first_hash = node.vertex_store.put(&first).unwrap();
         let equivocation_hash = node.vertex_store.put(&equivocation).unwrap();
         let third = signed_empty_vertex(
             &validators[1].0,
             validators[1].1.pubkey.clone(),
-            1,
+            0,
             1,
             vec![],
         );
@@ -3167,7 +3200,7 @@ mod tests {
         let child = signed_empty_vertex(
             &validators[3].0,
             validators[3].1.pubkey.clone(),
-            1,
+            0,
             2,
             vec![first_hash, equivocation_hash, third_hash],
         );
@@ -3189,13 +3222,13 @@ mod tests {
         .unwrap();
         let mut parent_hashes = Vec::new();
         for (secret, entry) in validators.iter().take(2) {
-            let parent = signed_empty_vertex(secret, entry.pubkey.clone(), 1, 1, vec![]);
+            let parent = signed_empty_vertex(secret, entry.pubkey.clone(), 0, 1, vec![]);
             parent_hashes.push(node.put_vertex(&parent).unwrap());
         }
         let child = signed_empty_vertex(
             &validators[3].0,
             validators[3].1.pubkey.clone(),
-            1,
+            0,
             2,
             parent_hashes,
         );
@@ -3221,7 +3254,7 @@ mod tests {
         let parent = signed_empty_vertex(
             &validators[0].0,
             validators[0].1.pubkey.clone(),
-            1,
+            0,
             1,
             vec![],
         );
@@ -3230,7 +3263,7 @@ mod tests {
         let duplicate = signed_empty_vertex(
             &validators[3].0,
             validators[3].1.pubkey.clone(),
-            1,
+            0,
             2,
             vec![parent_hash, parent_hash],
         );
@@ -3242,7 +3275,7 @@ mod tests {
         let wrong_round = signed_empty_vertex(
             &validators[3].0,
             validators[3].1.pubkey.clone(),
-            1,
+            0,
             3,
             vec![parent_hash],
         );
@@ -3253,6 +3286,91 @@ mod tests {
                 expected: 2,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn validate_vertex_rejects_wrong_epoch() {
+        let (secret, validator) = make_real_validator(8, ValidatorStatus::Active);
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            vec![validator.clone()],
+        )
+        .unwrap();
+        let vertex = signed_empty_vertex(&secret, validator.pubkey, 1, 1, vec![]);
+
+        assert!(matches!(
+            node.validate_vertex(&vertex),
+            Err(PokerL1Error::InvalidVertexEpoch {
+                actual: 1,
+                expected: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_vertex_rejects_parent_from_different_epoch() {
+        let (secret, validator) = make_real_validator(7, ValidatorStatus::Active);
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            vec![validator.clone()],
+        )
+        .unwrap();
+        let old_epoch_parent = signed_empty_vertex(&secret, validator.pubkey.clone(), 1, 1, vec![]);
+        let parent_hash = node.vertex_store.put(&old_epoch_parent).unwrap();
+        let child = signed_empty_vertex(&secret, validator.pubkey, 0, 2, vec![parent_hash]);
+
+        assert!(matches!(
+            node.validate_vertex(&child),
+            Err(PokerL1Error::InvalidParentVertexEpoch {
+                parent_hash: actual_hash,
+                actual: 1,
+                expected: 0
+            }) if actual_hash == parent_hash
+        ));
+    }
+
+    #[test]
+    fn validate_vertex_rejects_same_author_equivocation_at_admission() {
+        let validators = four_real_validators();
+        let node = Node::open_inmemory_with_validators(
+            NodeRole::Full,
+            DEFAULT_CHAIN_ID,
+            validators.iter().map(|(_, entry)| entry.clone()).collect(),
+        )
+        .unwrap();
+
+        let mut parent_hashes = Vec::new();
+        for (secret, entry) in validators.iter().take(3) {
+            let parent = signed_empty_vertex(secret, entry.pubkey.clone(), 0, 1, vec![]);
+            parent_hashes.push(node.put_vertex(&parent).unwrap());
+        }
+        let first = signed_empty_vertex(
+            &validators[3].0,
+            validators[3].1.pubkey.clone(),
+            0,
+            2,
+            parent_hashes.clone(),
+        );
+        node.put_vertex(&first).unwrap();
+
+        parent_hashes.swap(0, 1);
+        let conflicting = signed_empty_vertex(
+            &validators[3].0,
+            validators[3].1.pubkey.clone(),
+            0,
+            2,
+            parent_hashes,
+        );
+        assert!(matches!(
+            node.validate_vertex(&conflicting),
+            Err(PokerL1Error::VertexEquivocation {
+                epoch: 0,
+                round: 2,
+                author
+            }) if author == validators[3].1.pubkey
         ));
     }
 

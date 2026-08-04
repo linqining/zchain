@@ -10,6 +10,8 @@ use std::process::ExitCode;
 
 use proving_service::HandRunner;
 use proving_service::full_hand::FullHandRunner;
+use proving_service::proof_sync::{TcpProofPackagePeer, sync_proof_package};
+use proving_service::repository::ServiceRepository;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -20,6 +22,7 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         Some("--once") => run_once(),
         Some("--full-hand") => run_full_hand(),
+        Some("sync-proof") => sync_proof(&args[2..]),
         Some("serve") => {
             let addr: SocketAddr = args
                 .get(2)
@@ -37,8 +40,76 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage:\n  proving_service --once        跑 6 步 WAITING 覆盖片段到 stdout\n  proving_service --full-hand   跑一局完整 Texas Hold'em 牌局 + 性能报告\n  proving_service serve [addr]  启动 loopback 本地开发服务（默认 127.0.0.1:7878）"
+                "usage:\n  proving_service --once        跑 6 步 WAITING 覆盖片段到 stdout\n  proving_service --full-hand   跑一局完整 Texas Hold'em 牌局 + 性能报告\n  proving_service serve [addr]  启动 loopback 本地开发服务（默认 127.0.0.1:7878）\n  proving_service sync-proof <state-path> <job-id-hex> <peer> [peer...]"
             );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Repair a missing/corrupt local proof sidecar from bounded zchain P2P peers.
+fn sync_proof(args: &[String]) -> ExitCode {
+    if args.len() < 3 {
+        eprintln!(
+            "usage: proving_service sync-proof <state-path> <job-id-hex> <peer> [peer...]"
+        );
+        return ExitCode::FAILURE;
+    }
+    let job_bytes = match hex::decode(&args[1]) {
+        Ok(bytes) if bytes.len() == 32 => bytes,
+        Ok(bytes) => {
+            eprintln!("job id must be 32 bytes, got {}", bytes.len());
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("invalid job id hex: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut job_id = [0u8; 32];
+    job_id.copy_from_slice(&job_bytes);
+    let peers = match args[2..]
+        .iter()
+        .map(|peer| peer.parse::<SocketAddr>())
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(peers) => peers,
+        Err(error) => {
+            eprintln!("invalid peer address: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let peer = match TcpProofPackagePeer::new(peers) {
+        Ok(peer) => peer,
+        Err(error) => {
+            eprintln!("proof sync setup failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut repository = match ServiceRepository::open(&args[0]) {
+        Ok(repository) => repository,
+        Err(error) => {
+            eprintln!("open repository failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match sync_proof_package(&mut repository, &peer, job_id) {
+        Ok(report) => {
+            println!(
+                "synced proof package job={} method={} table={} hand={} call_seq={} bytes={} chunks={} hash={}",
+                hex::encode(report.job_id),
+                report.method,
+                report.table_id,
+                report.hand_id,
+                report.call_seq,
+                report.total_len,
+                report.chunk_count,
+                hex::encode(report.package_hash)
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("proof sync failed: {error}");
             ExitCode::FAILURE
         }
     }

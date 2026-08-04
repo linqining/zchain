@@ -9,6 +9,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use poker_texas_air::proof_archive::ArchivedMethodProof;
 use poker_texas_air::prove_task::ProveTask;
 
+use crate::repository::StoredProofMetadata;
 use crate::{ServiceError, ServiceResult};
 
 /// Current proving-service proof package schema.
@@ -113,4 +114,29 @@ impl ServiceProofPackage {
         }
         Ok(())
     }
+}
+
+/// Reconstruct the compact journal metadata for a canonical proof task.
+pub(crate) fn stored_proof_metadata(task: &ProveTask) -> ServiceResult<StoredProofMetadata> {
+    use blake2::Blake2bVar;
+    use blake2::digest::{Update, VariableOutput};
+
+    let task_bytes = borsh::to_vec(task)
+        .map_err(|error| ServiceError::Prover(format!("encode proved task: {error}")))?;
+    let pre_state_root = poker_texas_air::state_root::compute_state_root(&task.pre_table)
+        .map_err(|error| ServiceError::Prover(error.to_string()))?;
+    let post_state_root = poker_texas_air::state_root::compute_state_root(&task.post_table)
+        .map_err(|error| ServiceError::Prover(error.to_string()))?;
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(b"zchain.proving_service.task.v1");
+    hasher.update(&task_bytes);
+    let mut task_digest = [0u8; 32];
+    hasher
+        .finalize_variable(&mut task_digest)
+        .expect("32 <= 64");
+    Ok(StoredProofMetadata {
+        task_digest,
+        pre_state_root: pre_state_root.field().to_bytes_be(),
+        post_state_root: post_state_root.field().to_bytes_be(),
+    })
 }

@@ -28,10 +28,10 @@ use tokio::sync::Mutex;
 use crate::contracts::TexasPokerPlugin;
 use crate::full_hand::{FullHandReport, FullHandRunner};
 use crate::plugin::ContractPlugin;
-use crate::proof_package::ServiceProofPackage;
+use crate::proof_package::{ServiceProofPackage, stored_proof_metadata};
 use crate::repository::{
     JobReservation, RepositoryError, ServiceRepository, StoredDispatchJob, StoredDispatchResult,
-    StoredJobStatus, StoredProofMetadata, StoredTable,
+    StoredJobStatus, StoredTable,
 };
 use crate::runner::HandRunner;
 use crate::{ServiceError, ServiceResult};
@@ -551,7 +551,7 @@ async fn dispatch_for_table(
             Ok(archived) => archived,
             Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
         };
-        let metadata = match proof_metadata(task) {
+        let metadata = match stored_proof_metadata(task) {
             Ok(proof) => proof,
             Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
         };
@@ -656,8 +656,8 @@ async fn verify_job_proof(
     let (job, bytes) = completed_job_proof(&runtime.repository, job_id)?;
     let package = ServiceProofPackage::from_bytes(&bytes)
         .map_err(|error| unprocessable(error.to_string()))?;
-    let expected_metadata =
-        proof_metadata(package.task()).map_err(|error| unprocessable(error.to_string()))?;
+    let expected_metadata = stored_proof_metadata(package.task())
+        .map_err(|error| unprocessable(error.to_string()))?;
     let stored_metadata = job
         .proof
         .as_ref()
@@ -903,22 +903,6 @@ fn response_from_result(
     })
 }
 
-fn proof_metadata(
-    task: &poker_texas_air::prove_task::ProveTask,
-) -> ServiceResult<StoredProofMetadata> {
-    let task_bytes = borsh::to_vec(task)
-        .map_err(|error| ServiceError::Prover(format!("encode proved task: {error}")))?;
-    let pre_state_root = poker_texas_air::state_root::compute_state_root(&task.pre_table)
-        .map_err(|error| ServiceError::Prover(error.to_string()))?;
-    let post_state_root = poker_texas_air::state_root::compute_state_root(&task.post_table)
-        .map_err(|error| ServiceError::Prover(error.to_string()))?;
-    Ok(StoredProofMetadata {
-        task_digest: blake2b_256(b"zchain.proving_service.task.v1", &task_bytes),
-        pre_state_root: pre_state_root.field().to_bytes_be(),
-        post_state_root: post_state_root.field().to_bytes_be(),
-    })
-}
-
 fn normalize_idempotency_key(key: Option<String>) -> Result<Option<String>, HttpError> {
     let Some(key) = key else {
         return Ok(None);
@@ -1057,6 +1041,7 @@ mod tests {
     use poker_l1::block::BlockHeader;
     use poker_l1::consensus::ValidatorEntry;
     use poker_l1::consensus::bullshark::assemble_commit_certificate;
+    use poker_l1::network::InMemoryTransport;
     use poker_l1::object_model::{Object, ObjectStore, Ownership, SparseMerkleTree};
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
@@ -1549,11 +1534,34 @@ mod tests {
         assert!(verified.verified);
         assert_eq!(verified.table_id, 91);
         assert_eq!(verified.call_seq, 1);
+        let job_id = decode_fixed_hex::<32>(&created.job_id, "job_id").unwrap();
+        let transport = InMemoryTransport::new();
+        transport
+            .inject_proof_package(job_id, downloaded.to_vec())
+            .expect("remote peer should retain canonical proof package");
         drop(recovered);
 
         let proof_path = path
             .with_extension("proofs")
             .join(format!("{}.proof", created.job_id));
+        std::fs::remove_file(&proof_path).expect("test should remove local proof sidecar");
+        let mut repository = ServiceRepository::open(&path).unwrap();
+        assert!(!repository.has_proof_package(job_id).unwrap());
+        let report = crate::proof_sync::sync_proof_package(&mut repository, &transport, job_id)
+            .expect("P2P sync should reverify and repair the missing sidecar");
+        assert_eq!(report.job_id, job_id);
+        assert_eq!(report.table_id, 91);
+        assert_eq!(report.call_seq, 1);
+        assert!(repository.has_proof_package(job_id).unwrap());
+        drop(repository);
+
+        let repaired = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let verified = verify_job_proof(State(repaired), AxumPath(created.job_id.clone()))
+            .await
+            .expect("repaired proof sidecar should remain re-verifiable")
+            .0;
+        assert!(verified.verified);
+
         let mut tampered = std::fs::read(&proof_path).expect("proof sidecar should exist");
         *tampered
             .last_mut()
