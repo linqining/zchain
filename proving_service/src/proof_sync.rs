@@ -121,9 +121,7 @@ impl ProofPackagePeer for TcpProofPackagePeer {
                 peer,
                 self.timeout,
                 &NetworkMessage::RequestProofPackageManifest(job_id),
-                &mut |message| {
-                    matches!(message, NetworkMessage::ResponseProofPackageManifest(_))
-                },
+                &mut |message| matches!(message, NetworkMessage::ResponseProofPackageManifest(_)),
             )?;
             let NetworkMessage::ResponseProofPackageManifest(manifest) = response else {
                 unreachable!("response selector accepted only manifest responses");
@@ -155,9 +153,7 @@ impl ProofPackagePeer for TcpProofPackagePeer {
                     package_hash: manifest.package_hash,
                     index,
                 },
-                &mut |message| {
-                    matches!(message, NetworkMessage::ResponseProofPackageChunk(_))
-                },
+                &mut |message| matches!(message, NetworkMessage::ResponseProofPackageChunk(_)),
             )?;
             let NetworkMessage::ResponseProofPackageChunk(chunk) = response else {
                 unreachable!("response selector accepted only chunk responses");
@@ -193,11 +189,9 @@ pub fn sync_proof_package(
 
     let mut assembler = ProofPackageAssembler::new(manifest.clone()).map_err(network_error)?;
     for index in 0..manifest.chunk_count {
-        let chunk = peer
-            .request_chunk(&manifest, index)?
-            .ok_or_else(|| {
-                ServiceError::Runner(format!("proof package chunk {index} not found"))
-            })?;
+        let chunk = peer.request_chunk(&manifest, index)?.ok_or_else(|| {
+            ServiceError::Runner(format!("proof package chunk {index} not found"))
+        })?;
         assembler.insert(chunk).map_err(network_error)?;
     }
     let bytes = assembler.finish().map_err(network_error)?;
@@ -284,10 +278,24 @@ where
         .set_read_timeout(Some(timeout))
         .and_then(|_| stream.set_write_timeout(Some(timeout)))
         .map_err(|error| ServiceError::Runner(format!("set timeout failed: {error}")))?;
+    request_on_stream(&mut stream, request, select)
+}
+
+fn request_on_stream<S, F>(
+    stream: &mut S,
+    request: &NetworkMessage,
+    select: &mut F,
+) -> ServiceResult<NetworkMessage>
+where
+    S: Read + Write,
+    F: FnMut(&NetworkMessage) -> bool,
+{
     let bytes = borsh::to_vec(request)
         .map_err(|error| ServiceError::Runner(format!("encode P2P request: {error}")))?;
     if bytes.len() > MAX_P2P_MESSAGE_BYTES {
-        return Err(ServiceError::Runner("P2P request exceeds frame limit".into()));
+        return Err(ServiceError::Runner(
+            "P2P request exceeds frame limit".into(),
+        ));
     }
     stream
         .write_all(&(bytes.len() as u32).to_be_bytes())
@@ -298,7 +306,7 @@ where
     // A newly accepted zchain connection may receive bounded PEX/header gossip
     // before the direct response. Ignore a small number of unrelated frames.
     for _ in 0..8 {
-        let message = read_framed_message(&mut stream)?;
+        let message = read_framed_message(stream)?;
         if select(&message) {
             return Ok(message);
         }
@@ -308,7 +316,7 @@ where
     ))
 }
 
-fn read_framed_message(stream: &mut TcpStream) -> ServiceResult<NetworkMessage> {
+fn read_framed_message<R: Read>(stream: &mut R) -> ServiceResult<NetworkMessage> {
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)
@@ -325,4 +333,175 @@ fn read_framed_message(stream: &mut TcpStream) -> ServiceResult<NetworkMessage> 
         .map_err(|error| ServiceError::Runner(format!("read P2P frame body: {error}")))?;
     NetworkMessage::try_from_slice(&bytes)
         .map_err(|error| ServiceError::Runner(format!("decode P2P response: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Read, Write};
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    use super::*;
+
+    struct ScriptedStream {
+        incoming: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl ScriptedStream {
+        fn new(incoming: Vec<u8>) -> Self {
+            Self {
+                incoming: Cursor::new(incoming),
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for ScriptedStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.incoming.read(buf)
+        }
+    }
+
+    impl Write for ScriptedStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn peer(port: u16) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+    }
+
+    fn tcp_peer() -> TcpProofPackagePeer {
+        TcpProofPackagePeer::new(vec![peer(10001), peer(10002)]).unwrap()
+    }
+
+    fn frame(message: &NetworkMessage) -> Vec<u8> {
+        let bytes = borsh::to_vec(message).unwrap();
+        let mut out = Vec::with_capacity(4 + bytes.len());
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(&bytes);
+        out
+    }
+
+    #[test]
+    fn failover_continues_after_missing_response() {
+        let client = tcp_peer();
+        let result = client
+            .request_from_first_available("test", |address| {
+                if address == peer(10001) {
+                    Ok(None)
+                } else {
+                    Ok(Some(7u32))
+                }
+            })
+            .unwrap();
+        assert_eq!(result, Some(7));
+    }
+
+    #[test]
+    fn failover_continues_after_invalid_peer_error() {
+        let client = tcp_peer();
+        let result = client
+            .request_from_first_available("test", |address| {
+                if address == peer(10001) {
+                    Err(ServiceError::Runner("bad manifest".into()))
+                } else {
+                    Ok(Some(9u32))
+                }
+            })
+            .unwrap();
+        assert_eq!(result, Some(9));
+    }
+
+    #[test]
+    fn failover_returns_none_when_every_peer_is_missing() {
+        let result: Option<u32> = tcp_peer()
+            .request_from_first_available("test", |_| Ok(None))
+            .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn failover_reports_errors_when_no_peer_succeeds() {
+        let error = tcp_peer()
+            .request_from_first_available::<u32, _>("chunk", |address| {
+                if address == peer(10001) {
+                    Ok(None)
+                } else {
+                    Err(ServiceError::Runner("hash mismatch".into()))
+                }
+            })
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("1 missing"), "{message}");
+        assert!(message.contains("hash mismatch"), "{message}");
+        assert!(message.contains("10002"), "{message}");
+    }
+
+    #[test]
+    fn request_stream_skips_unrelated_frames_and_writes_canonical_request() {
+        let request = NetworkMessage::RequestProofPackageManifest([3u8; 32]);
+        let expected = NetworkMessage::ResponseProofPackageManifest(None);
+        let mut incoming = frame(&NetworkMessage::PeerExchange(Vec::new()));
+        incoming.extend(frame(&expected));
+        let mut stream = ScriptedStream::new(incoming);
+
+        let response = request_on_stream(&mut stream, &request, &mut |message| {
+            matches!(message, NetworkMessage::ResponseProofPackageManifest(_))
+        })
+        .unwrap();
+        assert!(matches!(
+            response,
+            NetworkMessage::ResponseProofPackageManifest(None)
+        ));
+
+        let mut written = Cursor::new(stream.written);
+        let decoded = read_framed_message(&mut written).unwrap();
+        assert!(matches!(
+            decoded,
+            NetworkMessage::RequestProofPackageManifest(job_id) if job_id == [3u8; 32]
+        ));
+    }
+
+    #[test]
+    fn framed_reader_rejects_zero_and_oversized_lengths() {
+        for length in [0usize, MAX_P2P_MESSAGE_BYTES + 1] {
+            let mut input = Cursor::new((length as u32).to_be_bytes().to_vec());
+            let error = read_framed_message(&mut input).unwrap_err().to_string();
+            assert!(
+                error.contains("invalid P2P response frame length"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn framed_reader_rejects_truncated_length_and_body() {
+        let mut short_length = Cursor::new(vec![0, 0]);
+        let error = read_framed_message(&mut short_length)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("read P2P frame length"), "{error}");
+
+        let mut short_body = Cursor::new(vec![0, 0, 0, 4, 1, 2]);
+        let error = read_framed_message(&mut short_body)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("read P2P frame body"), "{error}");
+    }
+
+    #[test]
+    fn framed_reader_rejects_malformed_borsh() {
+        let mut malformed = vec![0, 0, 0, 1, 0xff];
+        let error = read_framed_message(&mut Cursor::new(&mut malformed))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("decode P2P response"), "{error}");
+    }
 }

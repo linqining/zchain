@@ -19,10 +19,7 @@
 //! - nonce 校验严格匹配，防重放（M10 / NEW-M9）
 //! - GameTurn 通道免 gas 硬约束（SubTask 10.4）
 
-use crate::consensus::{
-    DagCommitCertificate, GameStatus, TurnRule, validate_commit_certificate_quorum,
-    validate_turn_order,
-};
+use crate::consensus::{DagCommitCertificate, GameStatus, TurnRule, validate_turn_order};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::signature::{TaggedPubkey, unified::verify_signature};
 use crate::transaction::{Gas, Transaction, TxLane, validate_tx_limits};
@@ -446,49 +443,12 @@ pub fn validate_commit_certificate_signatures(
     validator_pubkeys: &[TaggedPubkey],
     chain_id: ChainId,
 ) -> PokerL1Result<()> {
-    let validator_count = validator_pubkeys.len();
-
-    // 1. quorum 校验
-    validate_commit_certificate_quorum(cert, validator_count)?;
-
-    // 2. signer_bitmap 一致性：bitmap 位数 == signature_list 长度
-    let bitmap_signer_count = cert.signer_count();
-    if bitmap_signer_count != cert.signature_list.len() {
-        return Err(PokerL1Error::CommitCertificateMismatch(format!(
-            "signer_bitmap count {} != signature_list len {}",
-            bitmap_signer_count,
-            cert.signature_list.len()
-        )));
-    }
-
-    // 3. 签名对象哈希（SEC2-C1）
-    let signing_hash = cert.signing_hash(chain_id);
-
-    // 4. 逐个验证签名
-    let mut sig_idx = 0;
-    for (validator_idx, validator_pubkey) in validator_pubkeys.iter().enumerate() {
-        // 检查 validator_idx 是否在 signer_bitmap 中
-        let byte_idx = validator_idx / 8;
-        let bit_idx = validator_idx % 8;
-        let is_signer = if byte_idx < cert.signer_bitmap.len() {
-            (cert.signer_bitmap[byte_idx] >> bit_idx) & 1 == 1
-        } else {
-            false
-        };
-
-        if is_signer {
-            // 验证此签名
-            let sig = &cert.signature_list[sig_idx];
-            verify_signature(validator_pubkey, sig, &signing_hash).map_err(|_| {
-                PokerL1Error::InvalidCommitCertificateSignature {
-                    signer_idx: validator_idx,
-                }
-            })?;
-            sig_idx += 1;
-        }
-    }
-
-    Ok(())
+    crate::consensus::cert_verification::verify_commit_certificate_pubkey_signatures(
+        cert,
+        chain_id,
+        validator_pubkeys,
+        verify_signature,
+    )
 }
 
 // ===== 综合校验入口 =====
@@ -911,7 +871,26 @@ mod tests {
         let pubkeys: Vec<TaggedPubkey> = (0..4).map(|i| make_tagged_pubkey(0x10 + i)).collect();
         let err = validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID)
             .unwrap_err();
-        assert!(matches!(err, PokerL1Error::CommitCertificateMismatch(_)));
+        assert!(matches!(
+            err,
+            PokerL1Error::CommitCertSignatureBitmapMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_commit_certificate_signatures_rejects_out_of_range_quorum_bits() {
+        let mut cert = make_dummy_cert(3);
+        // Four validators have indices 0..=3. Bits 4, 5 and 6 used to count toward quorum while
+        // the legacy verifier silently skipped their three unverified signatures.
+        cert.signer_bitmap = vec![0b0111_0000];
+        cert.signature_list = vec![vec![0u8; 65]; 3];
+        let pubkeys: Vec<TaggedPubkey> = (0..4).map(|i| make_tagged_pubkey(0x10 + i)).collect();
+        let err = validate_commit_certificate_signatures(&cert, &pubkeys, crate::DEFAULT_CHAIN_ID)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PokerL1Error::InvalidCommitCertificateSignature { signer_idx: 4 }
+        ));
     }
 
     // ===== 综合校验测试 =====

@@ -49,8 +49,26 @@ pub fn verify_commit_certificate_signatures(
     validators: &[ValidatorEntry],
     verify_fn: impl Fn(&TaggedPubkey, &[u8], &[u8; 32]) -> PokerL1Result<()>,
 ) -> PokerL1Result<()> {
+    let validator_pubkeys: Vec<TaggedPubkey> = validators
+        .iter()
+        .map(|entry| entry.pubkey.clone())
+        .collect();
+    verify_commit_certificate_pubkey_signatures(cert, chain_id, &validator_pubkeys, verify_fn)
+}
+
+/// Strictly verify a certificate against the canonical bitmap-indexed pubkey list.
+///
+/// Unlike the legacy block-validator implementation, this enumerates every set bit before
+/// accepting the certificate. A bit beyond `validator_pubkeys.len()` is therefore rejected and
+/// cannot inflate quorum without a corresponding validator signature.
+pub fn verify_commit_certificate_pubkey_signatures(
+    cert: &DagCommitCertificate,
+    chain_id: ChainId,
+    validator_pubkeys: &[TaggedPubkey],
+    verify_fn: impl Fn(&TaggedPubkey, &[u8], &[u8; 32]) -> PokerL1Result<()>,
+) -> PokerL1Result<()> {
     // 1. 复用现有 2/3 计数校验。
-    super::bullshark::validate_commit_certificate_quorum(cert, validators.len())?;
+    super::bullshark::validate_commit_certificate_quorum(cert, validator_pubkeys.len())?;
 
     // 2. signer_bitmap 置位（升序）必须与 signature_list 紧凑对应。
     let signer_indices: Vec<usize> = bitmap_set_bits(&cert.signer_bitmap);
@@ -68,7 +86,7 @@ pub fn verify_commit_certificate_signatures(
     let mut seen: BTreeSet<usize> = BTreeSet::new();
     for (list_pos, &validator_idx) in signer_indices.iter().enumerate() {
         // 索引越界：bitmap 引用了不存在的 validator。归并为签名验证失败以便上层统一处理。
-        let validator = validators.get(validator_idx).ok_or(
+        let validator_pubkey = validator_pubkeys.get(validator_idx).ok_or(
             PokerL1Error::InvalidCommitCertificateSignature {
                 signer_idx: validator_idx,
             },
@@ -82,7 +100,7 @@ pub fn verify_commit_certificate_signatures(
         }
 
         let sig = &cert.signature_list[list_pos];
-        verify_fn(&validator.pubkey, sig, &msg_hash).map_err(|_| {
+        verify_fn(validator_pubkey, sig, &msg_hash).map_err(|_| {
             PokerL1Error::InvalidCommitCertificateSignature {
                 signer_idx: validator_idx,
             }

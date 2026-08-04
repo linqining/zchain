@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use poker_l1::account::derive_address;
 use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, validate_tx_signature};
@@ -553,6 +553,11 @@ fn run_node(args: &[String]) -> Result<(), String> {
     // 打开节点
     let node = open_node_with_application_verifiers(config)
         .map_err(|e| format!("Node::open 失败：{e}"))?;
+    node.ensure_consensus_ready().map_err(|error| {
+        format!(
+            "节点拒绝以空 ValidatorSet 启动共识/RPC/P2P；请提供 --genesis-validators 或恢复已持久化集合：{error}"
+        )
+    })?;
     // Apply the canonical native-coin genesis allocation (idempotent across restarts).
     // Even a zero-allocation chain creates and permanently closes TreasuryCap before
     // networking starts, so every production block commit is covered by supply reconciliation.
@@ -2198,11 +2203,9 @@ fn build_block_from_vertex(
         }
     }
 
-    // 3. 计算 timestamp（提前到执行之前，供 ExecutionEnvironment 使用）
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    // 3. 从 finalized parent 确定性派生 timestamp。若使用本地墙钟，节点停机超过
+    // `max_interval_ms` 后会自产一个无法通过时间共识校验的区块。
+    let timestamp_ms = consensus_block_timestamp(node, height)?;
 
     // 4. 执行 txs，得到新 state_root
     //
@@ -2296,9 +2299,25 @@ fn run_validator_loop(
 
     let mut epoch = node.current_epoch();
     let mut round: u64 = 1;
-    let mut commit_round: u64 = 1;
-    let mut prev_commit_hash: Hash = [0u8; 32];
-    let mut prev_block_hash: Hash = [0u8; 32];
+    let (mut commit_round, mut prev_commit_hash, mut prev_block_hash) = node
+        .block_store()
+        .get_tip_height()
+        .ok()
+        .flatten()
+        .and_then(|height| node.block_store().get_by_height(height).ok())
+        .map_or((1, [0u8; 32], [0u8; 32]), |tip| {
+            let next_round = tip
+                .header
+                .dag_commit_certificate
+                .commit_round
+                .checked_add(1)
+                .unwrap_or(u64::MAX);
+            (
+                next_round,
+                tip.header.dag_commit_certificate.cert_hash(chain_id),
+                tip.block_hash(chain_id),
+            )
+        });
     // 存完整 vertex（非仅 hash），以便 commit 时从上一个 vertex 构造 block
     let mut last_vertex: Option<DagVertex> = None;
     // 缺口 #3 §3.6：epoch 推进周期（每 EPOCH_LENGTH 个 commit 推进一次 epoch）。
@@ -2686,14 +2705,16 @@ fn run_validator_loop(
                 epoch = new_epoch;
                 // DAG parents are epoch-local. Start the new epoch from a parentless round 1
                 // and discard the old-epoch live DAG so the next vertex cannot accidentally
-                // reference a parent which admission must reject.
+                // reference a parent which admission must reject. Certificate commit rounds are
+                // chain-global and must remain continuous across the epoch boundary: resetting
+                // them here would make the next locally produced block fail Node's prev+1 check.
                 round = 1;
-                commit_round = 1;
                 last_vertex = None;
                 *dag.lock().unwrap_or_else(|e| e.into_inner()) = Dag::new();
                 info!(
-                    "[validator-loop] epoch 推进至 {}（round/commit_round 已重置，VRF={}）",
+                    "[validator-loop] epoch 推进至 {}（DAG round 已重置，commit_round={}，VRF={}）",
                     epoch,
+                    commit_round,
                     vrf_secret.is_some()
                 );
             } else {

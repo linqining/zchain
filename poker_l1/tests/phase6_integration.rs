@@ -560,6 +560,7 @@ mod subtask_43_7_node {
         // Certificate commitments are part of the signed block statement.  Keep this empty-set
         // test certificate self-consistent rather than relying on the pre-P0-3 placeholder.
         let cert = DagCommitCertificate {
+            commit_round: 1,
             state_root,
             public_tx_root: empty_root,
             gameturn_tx_root: empty_root,
@@ -567,8 +568,8 @@ mod subtask_43_7_node {
         };
         let block = Block::new(
             BlockHeader {
-                height: 10,
-                timestamp_ms: 10_000,
+                height: 1,
+                timestamp_ms: 1_000,
                 prev_hash: [0u8; 32],
                 state_root,
                 public_tx_root: empty_root,
@@ -583,15 +584,15 @@ mod subtask_43_7_node {
         // 按 hash 查询
         let got1 = node.get_block_by_hash(&hash).unwrap();
         assert!(got1.is_some());
-        assert_eq!(got1.unwrap().header.height, 10);
+        assert_eq!(got1.unwrap().header.height, 1);
 
         // 按 height 查询
-        let got2 = node.get_block_by_height(10).unwrap();
+        let got2 = node.get_block_by_height(1).unwrap();
         assert!(got2.is_some());
 
         // 查询 tip
         let info = query_node_info(&node).unwrap();
-        assert_eq!(info.tip_height, Some(10));
+        assert_eq!(info.tip_height, Some(1));
         assert_eq!(info.tip_hash, Some(hash));
     }
 

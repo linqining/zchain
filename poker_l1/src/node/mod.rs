@@ -20,15 +20,15 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::account::{Account, AccountStore};
-use crate::block::Block;
 use crate::block::validator::{
     validate_block_tx_roots, validate_commit_certificate_signatures, validate_gameturn_no_gas,
     validate_state_root_transition, validate_tx_chain_id, validate_tx_signature,
     validate_vertex_tx_ordering,
 };
+use crate::block::{Block, TimeConsensusConfig, validate_block_time};
 use crate::consensus::{
     DagVertex, Epoch, MAX_VERTEX_SIZE, ValidatorEntry, ValidatorSet,
-    compute_genesis_chain_randomness, required_parent_count,
+    compute_genesis_chain_randomness, required_parent_count, validate_commit_certificate_fields,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::executor::{
@@ -132,7 +132,8 @@ pub struct NodeConfig {
     /// 创世 validator 列表（P0-4 动态 quorum）。
     ///
     /// 节点启动时以此初始化 ValidatorSet（epoch 0）。
-    /// 空列表表示创世引导期 — vertex/block 的 validator 成员校验跳过。
+    /// 空列表仅适合在注册 validator 之前准备 genesis 状态；生产入口在启动
+    /// RPC/P2P/共识前必须调用 [`Node::ensure_consensus_ready`] 并拒绝空集合。
     /// Entries must have zero stake; native ZCN stake is admitted only through UTXO-backed bond.
     #[serde(default)]
     pub genesis_validators: Vec<ValidatorEntry>,
@@ -454,9 +455,12 @@ pub struct Node {
     pending_tx_condvar: std::sync::Condvar,
     /// 当前 ValidatorSet（P0-4 动态 quorum）。
     ///
-    /// - 创世引导期（validators 为空）时，vertex/block 的 validator 成员校验跳过
-    /// - 非空时，vertex author 必须是活跃 validator；commit certificate 必须满足动态 quorum
+    /// Production consensus admission fails closed when there are no active validators. Explicit
+    /// in-memory constructors retain an empty-set mode for unit and integration tests which focus
+    /// on execution rather than consensus membership.
     validator_set: std::sync::Mutex<ValidatorSet>,
+    /// Whether consensus admission may bypass validator membership for explicit in-memory tests.
+    allow_empty_consensus_for_tests: bool,
     /// 预编译合约注册表（共享 Arc — block 执行时 clone 引用而非重建）。
     ///
     /// 注册内置预编译合约：
@@ -631,6 +635,7 @@ impl Node {
             pending_tx: std::sync::Mutex::new(PendingTxState::new()),
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
+            allow_empty_consensus_for_tests: false,
             precompile_registry,
             bridge_registry_store: Some(Arc::new(bridge_registry_store)),
             metrics: Arc::new(crate::metrics::MetricsCollector::new()),
@@ -733,6 +738,7 @@ impl Node {
             pending_tx: std::sync::Mutex::new(PendingTxState::new()),
             pending_tx_condvar: std::sync::Condvar::new(),
             validator_set: std::sync::Mutex::new(validator_set),
+            allow_empty_consensus_for_tests: true,
             precompile_registry,
             // 缺口 #9：内存节点默认不启用桥（bridge contract_call 会拒绝）；
             // 需桥的测试可用 [`Node::with_bridge`] 显式注入。
@@ -774,9 +780,24 @@ impl Node {
             .active_count()
     }
 
+    /// Ensure this node has an active validator set before it starts serving consensus traffic.
+    ///
+    /// Persistent production entry points must call this after loading genesis state and before
+    /// starting RPC/P2P listeners. Consensus admission also enforces the same invariant, so an
+    /// accidentally exposed node cannot accept unsigned vertices or blocks while unconfigured.
+    pub fn ensure_consensus_ready(&self) -> PokerL1Result<()> {
+        let active = self.active_validator_count();
+        if active == 0 {
+            return Err(PokerL1Error::Other(
+                "consensus is not configured: active ValidatorSet is empty".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// 当前动态 quorum（严格 > 2/3 活跃 validator：`2 * n / 3 + 1`）。
     ///
-    /// 创世引导期（validator 集为空）返回 0。
+    /// 未配置 active validator 时返回 0；生产入口不得以此状态启动共识服务。
     pub fn required_quorum(&self) -> usize {
         let active = self.active_validator_count();
         if active == 0 {
@@ -1259,19 +1280,23 @@ impl Node {
             });
         }
 
-        // 2. author 必须是当前活跃 validator（P0-4 动态 quorum；创世引导期空集跳过）
+        // 2. author 必须是当前活跃 validator（P0-4 动态 quorum）。
         // 放在签名验证之前，可快速丢弃非 validator 的顶点并避免验签开销。
         {
             let set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
-            if !set.validators.is_empty() {
-                let is_active = set
-                    .find_validator(&vertex.author_pubkey)
-                    .is_some_and(ValidatorEntry::can_participate_consensus);
-                if !is_active {
-                    return Err(PokerL1Error::VertexAuthorNotActiveValidator(
-                        vertex.author_pubkey.clone(),
-                    ));
-                }
+            let active_count = set.active_count();
+            if active_count == 0 && !self.allow_empty_consensus_for_tests {
+                return Err(PokerL1Error::Other(
+                    "cannot admit DAG vertex with an empty active ValidatorSet".into(),
+                ));
+            }
+            let is_active = set
+                .find_validator(&vertex.author_pubkey)
+                .is_some_and(ValidatorEntry::can_participate_consensus);
+            if active_count > 0 && !is_active {
+                return Err(PokerL1Error::VertexAuthorNotActiveValidator(
+                    vertex.author_pubkey.clone(),
+                ));
             }
         }
 
@@ -1401,8 +1426,6 @@ impl Node {
             .block_commit_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        self.validate_block_structure(block)?;
-
         let candidate_hash = block.block_hash(self.config.chain_id);
         match self.block_store.get_by_height(block.header.height) {
             Ok(existing) => {
@@ -1418,6 +1441,8 @@ impl Node {
             Err(PokerL1Error::BlockNotFound) => {}
             Err(error) => return Err(error),
         }
+
+        self.validate_block_structure(block)?;
 
         // Hold both state locks across provisional replay and commit.  A block is first executed
         // against isolated snapshots; only a matching state root may be materialized locally.
@@ -1603,18 +1628,53 @@ impl Node {
     fn validate_block_structure(&self, block: &Block) -> PokerL1Result<()> {
         let header = &block.header;
 
-        // 1. Check the parent link without underflowing at a genesis-height header.
-        if header.height > 0 {
-            if let Ok(Some(prev_block)) = self.get_block_by_height(header.height - 1) {
-                let expected_prev_hash = prev_block.block_hash(self.config.chain_id);
+        // 1. Resolve the canonical parent from the local tip. A missing `height - 1` must never
+        // make validation weaker: that previously allowed an isolated block at an arbitrary
+        // height to skip both the parent hash and time-consensus checks.
+        let previous_block = match self.block_store.get_tip_height()? {
+            Some(tip_height) => {
+                let expected_height = tip_height
+                    .checked_add(1)
+                    .ok_or_else(|| PokerL1Error::Other("block height overflow".into()))?;
+                if header.height != expected_height {
+                    return Err(PokerL1Error::BlockHeightNotIncreasing {
+                        prev: tip_height,
+                        got: header.height,
+                    });
+                }
+                let previous = self.block_store.get_by_height(tip_height)?;
+                validate_block_time(
+                    Some(&previous.header),
+                    header,
+                    &TimeConsensusConfig::default(),
+                )?;
+                let expected_prev_hash = previous.block_hash(self.config.chain_id);
                 if header.prev_hash != expected_prev_hash {
                     return Err(PokerL1Error::InvalidPrevHash {
                         expected: expected_prev_hash,
                         got: header.prev_hash,
                     });
                 }
+                Some(previous)
             }
-        }
+            None => {
+                // Genesis monetary/object state is initialized outside BlockStore, so the first
+                // committed consensus block is height 1 and references the logical genesis hash 0.
+                if header.height != 1 {
+                    return Err(PokerL1Error::BlockHeightNotIncreasing {
+                        prev: 0,
+                        got: header.height,
+                    });
+                }
+                if header.prev_hash != [0u8; 32] {
+                    return Err(PokerL1Error::InvalidPrevHash {
+                        expected: [0u8; 32],
+                        got: header.prev_hash,
+                    });
+                }
+                None
+            }
+        };
 
         // 2. Both lane commitments must exactly match their bodies.
         validate_block_tx_roots(
@@ -1627,21 +1687,73 @@ impl Node {
         // 3. GameTurn / CheckpointAnchor are the only gas-free body lane.
         validate_gameturn_no_gas(&block.gameturn_txs)?;
 
-        // 4. The certificate signs these exact header commitments, not merely an arbitrary
-        // certificate carried alongside the block.
+        // 4. Bind the certificate to both this header and the previous finalized certificate.
+        // The signature alone proves only that validators signed a self-contained statement; it
+        // does not establish that the statement belongs at this point in the local chain.
         let cert = &header.dag_commit_certificate;
-        if cert.state_root != header.state_root
-            || cert.public_tx_root != header.public_tx_root
-            || cert.gameturn_tx_root != header.gameturn_tx_root
-        {
-            return Err(PokerL1Error::CommitCertificateMismatch(
-                "certificate commitments do not match block header".to_string(),
-            ));
+        let expected_prev_commit_hash = previous_block
+            .as_ref()
+            .map(|previous| {
+                previous
+                    .header
+                    .dag_commit_certificate
+                    .cert_hash(self.config.chain_id)
+            })
+            .unwrap_or([0u8; 32]);
+        match previous_block.as_ref() {
+            None if cert.epoch != self.current_epoch() => {
+                return Err(PokerL1Error::CommitCertificateMismatch(format!(
+                    "first certificate epoch mismatch: cert={}, validator_set={}",
+                    cert.epoch,
+                    self.current_epoch()
+                )));
+            }
+            Some(previous) => {
+                let previous_epoch = previous.header.dag_commit_certificate.epoch;
+                let max_epoch = previous_epoch
+                    .checked_add(1)
+                    .ok_or_else(|| PokerL1Error::Other("certificate epoch overflow".into()))?;
+                if cert.epoch < previous_epoch || cert.epoch > max_epoch {
+                    return Err(PokerL1Error::CommitCertificateMismatch(format!(
+                        "certificate epoch must stay at {previous_epoch} or advance once to {max_epoch}, got {}",
+                        cert.epoch
+                    )));
+                }
+            }
+            None => {}
+        }
+        validate_commit_certificate_fields(
+            cert,
+            cert.epoch,
+            expected_prev_commit_hash,
+            header.state_root,
+            header.public_tx_root,
+            header.gameturn_tx_root,
+        )?;
+
+        let expected_commit_round = previous_block.as_ref().map_or(Ok(1), |previous| {
+            previous
+                .header
+                .dag_commit_certificate
+                .commit_round
+                .checked_add(1)
+                .ok_or_else(|| PokerL1Error::Other("commit round overflow".into()))
+        })?;
+        if cert.commit_round != expected_commit_round {
+            return Err(PokerL1Error::CommitCertificateMismatch(format!(
+                "commit_round mismatch: cert={}, expected={expected_commit_round}",
+                cert.commit_round
+            )));
         }
 
-        // 5. A populated validator set always requires a full, individually verified quorum.
+        // 5. A production node always requires a full, individually verified quorum.
         // A DAG reference graph is not a substitute for a finality certificate.
         let active_pubkeys = self.active_validator_pubkeys_sorted();
+        if active_pubkeys.is_empty() && !self.allow_empty_consensus_for_tests {
+            return Err(PokerL1Error::Other(
+                "cannot admit block with an empty active ValidatorSet".into(),
+            ));
+        }
         if !active_pubkeys.is_empty() {
             validate_commit_certificate_signatures(cert, &active_pubkeys, self.config.chain_id)?;
         }
@@ -2927,6 +3039,129 @@ mod tests {
     }
 
     // ===== P0-3: validate_block 测试 =====
+
+    fn empty_consensus_block(
+        node: &Node,
+        height: u64,
+        timestamp_ms: u64,
+        prev_hash: Hash,
+        epoch: u64,
+        commit_round: u64,
+        prev_commit_hash: Hash,
+    ) -> Block {
+        let empty_root = crate::block::compute_tx_merkle_root(&[]);
+        let state_root = node.state_root();
+        Block::new(
+            BlockHeader {
+                height,
+                timestamp_ms,
+                prev_hash,
+                state_root,
+                public_tx_root: empty_root,
+                gameturn_tx_root: empty_root,
+                dag_commit_certificate: crate::consensus::DagCommitCertificate {
+                    epoch,
+                    commit_round,
+                    prev_commit_hash,
+                    vertex_hash_list: vec![],
+                    round_attendance_bitmap: vec![],
+                    state_root,
+                    public_tx_root: empty_root,
+                    gameturn_tx_root: empty_root,
+                    signature_list: vec![],
+                    signer_bitmap: vec![],
+                },
+            },
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn empty_block_store_accepts_only_canonical_first_block() {
+        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
+
+        let height_gap = empty_consensus_block(&node, 2, 1_000, [0u8; 32], 0, 1, [0u8; 32]);
+        assert!(matches!(
+            node.validate_block(&height_gap),
+            Err(PokerL1Error::BlockHeightNotIncreasing { prev: 0, got: 2 })
+        ));
+
+        let bad_parent = empty_consensus_block(&node, 1, 1_000, [0xAA; 32], 0, 1, [0u8; 32]);
+        assert!(matches!(
+            node.validate_block(&bad_parent),
+            Err(PokerL1Error::InvalidPrevHash { .. })
+        ));
+    }
+
+    #[test]
+    fn block_certificate_chain_and_timestamp_are_strict() {
+        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
+        let first = empty_consensus_block(&node, 1, 1_000, [0u8; 32], 0, 1, [0u8; 32]);
+        let first_hash = node.put_block(&first).unwrap();
+        let first_cert_hash = first
+            .header
+            .dag_commit_certificate
+            .cert_hash(DEFAULT_CHAIN_ID);
+        let second = empty_consensus_block(&node, 2, 2_000, first_hash, 1, 2, first_cert_hash);
+
+        let mut backwards = second.clone();
+        backwards.header.timestamp_ms = 999;
+        assert!(matches!(
+            node.validate_block(&backwards),
+            Err(PokerL1Error::BlockTimestampMovedBackwards { .. })
+        ));
+
+        let mut too_far = second.clone();
+        too_far.header.timestamp_ms = 31_001;
+        assert!(matches!(
+            node.validate_block(&too_far),
+            Err(PokerL1Error::BlockTimestampIntervalExceeded { .. })
+        ));
+
+        let mut wrong_prev_cert = second.clone();
+        wrong_prev_cert
+            .header
+            .dag_commit_certificate
+            .prev_commit_hash = [0xBB; 32];
+        assert!(matches!(
+            node.validate_block(&wrong_prev_cert),
+            Err(PokerL1Error::CommitCertificateMismatch(_))
+        ));
+
+        let mut reset_round = second.clone();
+        reset_round.header.dag_commit_certificate.commit_round = 1;
+        assert!(matches!(
+            node.validate_block(&reset_round),
+            Err(PokerL1Error::CommitCertificateMismatch(_))
+        ));
+
+        let mut epoch_jump = second.clone();
+        epoch_jump.header.dag_commit_certificate.epoch = 2;
+        assert!(matches!(
+            node.validate_block(&epoch_jump),
+            Err(PokerL1Error::CommitCertificateMismatch(_))
+        ));
+
+        node.put_block(&second).unwrap();
+    }
+
+    #[test]
+    fn repeated_block_commit_is_idempotent() {
+        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
+        let block = empty_consensus_block(&node, 1, 1_000, [0u8; 32], 0, 1, [0u8; 32]);
+        let first_hash = node.put_block(&block).unwrap();
+        let repeated_hash = node.put_block(&block).unwrap();
+        assert_eq!(repeated_hash, first_hash);
+        assert_eq!(node.block_store().len().unwrap(), 1);
+    }
+
+    #[test]
+    fn persistent_node_rejects_empty_consensus_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = Node::open(NodeConfig::default_full(temp.path().to_path_buf())).unwrap();
+        assert!(node.ensure_consensus_ready().is_err());
+    }
 
     #[test]
     fn validate_block_rejects_tx_root_mismatch() {
