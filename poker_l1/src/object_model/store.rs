@@ -14,6 +14,25 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::vm::gas_table::MAX_OBJECT_SIZE;
 use std::collections::HashMap;
 
+fn is_system_object(object: &Object) -> bool {
+    crate::economics::is_treasury_cap_object(object)
+        || crate::consensus::validator_set::is_validator_set_object(object)
+}
+
+fn validate_system_object(object: &Object) -> PokerL1Result<()> {
+    if crate::economics::is_treasury_cap_object(object) {
+        crate::economics::decode_treasury_cap(object)?;
+        return Ok(());
+    }
+    if crate::consensus::validator_set::is_validator_set_object(object) {
+        crate::consensus::validator_set::validate_validator_set_object(object)?;
+        return Ok(());
+    }
+    Err(PokerL1Error::Other(
+        "object is not a recognized system singleton".into(),
+    ))
+}
+
 /// 内存版 ObjectStore + SMT backing。
 ///
 /// Phase 1 内存实现；Phase 4 扩展 rocksdb 后端。
@@ -45,22 +64,17 @@ impl ObjectStore {
     /// 创建对象。ObjectID 冲突返回 `ObjectIDCollision`（NEW-L4）。
     /// L-1 修复：校验 data 大小 ≤ MAX_OBJECT_SIZE（defense in depth，syscall 层已校验）。
     pub fn create(&mut self, object: Object) -> PokerL1Result<()> {
-        if crate::economics::is_treasury_cap_object(&object) {
+        if is_system_object(&object) {
             return Err(PokerL1Error::Other(
-                "TreasuryCap may only be created by the economics system path".into(),
+                "reserved system objects may only be created by a system path".into(),
             ));
         }
         self.create_inner(object)
     }
 
-    /// Create the singleton TreasuryCap from the economics system path.
+    /// Create one validated singleton from a trusted system path.
     pub(crate) fn system_create(&mut self, object: Object) -> PokerL1Result<()> {
-        if !crate::economics::is_treasury_cap_object(&object) {
-            return Err(PokerL1Error::Other(
-                "system object creation is restricted to TreasuryCap".into(),
-            ));
-        }
-        crate::economics::decode_treasury_cap(&object)?;
+        validate_system_object(&object)?;
         self.create_inner(object)
     }
 
@@ -82,14 +96,9 @@ impl ObjectStore {
         Ok(())
     }
 
-    /// Replace the singleton TreasuryCap without exposing a generic Shared-object write path.
+    /// Replace one validated singleton without exposing a generic privileged write path.
     pub(crate) fn system_replace(&mut self, object: Object) -> PokerL1Result<()> {
-        if !crate::economics::is_treasury_cap_object(&object) {
-            return Err(PokerL1Error::Other(
-                "system object replacement is restricted to TreasuryCap".into(),
-            ));
-        }
-        crate::economics::decode_treasury_cap(&object)?;
+        validate_system_object(&object)?;
         if object.data.len() > MAX_OBJECT_SIZE {
             return Err(PokerL1Error::ObjectTooLarge {
                 actual: object.data.len(),
@@ -100,15 +109,15 @@ impl ObjectStore {
             .objects
             .get(&object.id)
             .ok_or(PokerL1Error::ObjectNotFound(object.id))?;
-        if !crate::economics::is_treasury_cap_object(existing) {
+        if !is_system_object(existing) || existing.object_type != object.object_type {
             return Err(PokerL1Error::Other(
-                "TreasuryCap ID is occupied by a non-system object".into(),
+                "system object ID is occupied by a different object type".into(),
             ));
         }
         let expected_version = existing
             .version
             .checked_add(1)
-            .ok_or_else(|| PokerL1Error::Other("TreasuryCap object version overflow".into()))?;
+            .ok_or_else(|| PokerL1Error::Other("system object version overflow".into()))?;
         if object.version != expected_version {
             return Err(PokerL1Error::ObjectVersionMismatch {
                 expected: expected_version,
@@ -156,9 +165,9 @@ impl ObjectStore {
             .get_mut(id)
             .ok_or(PokerL1Error::ObjectNotFound(*id))?;
 
-        if crate::economics::is_treasury_cap_object(obj) {
+        if is_system_object(obj) {
             return Err(PokerL1Error::Other(
-                "TreasuryCap may only be updated by the economics system path".into(),
+                "reserved system objects may only be updated by a system path".into(),
             ));
         }
         if crate::economics::is_native_coin_object(obj) {
@@ -198,9 +207,9 @@ impl ObjectStore {
             .get_mut(id)
             .ok_or(PokerL1Error::ObjectNotFound(*id))?;
 
-        if crate::economics::is_treasury_cap_object(obj) {
+        if is_system_object(obj) {
             return Err(PokerL1Error::Other(
-                "TreasuryCap may only be transferred by the economics system path".into(),
+                "reserved system objects may only be transferred by a system path".into(),
             ));
         }
         if crate::economics::is_native_coin_object(obj) {
@@ -228,13 +237,9 @@ impl ObjectStore {
 
     /// 删除对象（从 SMT 移除，状态根同步更新）。
     pub fn delete(&mut self, id: &ObjectID) -> PokerL1Result<Object> {
-        if self
-            .objects
-            .get(id)
-            .is_some_and(crate::economics::is_treasury_cap_object)
-        {
+        if self.objects.get(id).is_some_and(is_system_object) {
             return Err(PokerL1Error::Other(
-                "TreasuryCap may only be replaced by the economics system path".into(),
+                "reserved system objects may only be replaced by a system path".into(),
             ));
         }
         let obj = self

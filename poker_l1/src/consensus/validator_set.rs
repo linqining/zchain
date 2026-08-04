@@ -31,8 +31,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::consensus::Epoch;
 use crate::error::{PokerL1Error, PokerL1Result};
+use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
-use crate::{BlockHeight, ChainId, Hash};
+use crate::{Address, BlockHeight, ChainId, Hash};
+
+/// Reserved type tag for the canonical on-chain validator-set system object.
+pub const VALIDATOR_SET_OBJECT_TYPE: &str = "0x2::consensus::ValidatorSet";
+
+/// System address used by validator-set state.
+pub const VALIDATOR_SET_SYSTEM_ADDRESS: Address = [0u8; 20];
+
+/// Reserved singleton ID for the canonical validator-set state.
+pub const VALIDATOR_SET_OBJECT_ID: ObjectID =
+    ObjectID::new(VALIDATOR_SET_SYSTEM_ADDRESS, u64::MAX - 1);
+
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+struct PersistedValidatorSet {
+    chain_id: ChainId,
+    set: ValidatorSet,
+}
 
 /// VRF proof 字节长度（IMPL-SEC-2 / ECVRF-secp256k1-SHA256-TAI）。
 ///
@@ -342,18 +359,41 @@ pub const MIN_VALIDATOR_SET_SIZE: usize = 5;
 pub const MAX_SINGLE_REDUCTION_RATIO: u32 = 20;
 
 impl ValidatorSet {
-    /// 计算 validator_set_hash。
+    /// Compute a commitment to every consensus-relevant validator-set field.
     pub fn compute_hash(&self) -> Hash {
         let mut h = Blake2bVar::new(32).expect("32 <= 64");
-        h.update(&self.epoch.to_le_bytes());
-        for v in &self.validators {
-            h.update(&v.pubkey.to_bytes());
-            h.update(&v.vrf_pubkey);
-            h.update(&v.stake.to_le_bytes());
-        }
+        h.update(b"ZCHAIN_VALIDATOR_SET_V2");
+        let committed = borsh::to_vec(&(
+            self.epoch,
+            &self.validators,
+            self.epoch_randomness,
+            self.prev_epoch_randomness,
+            self.genesis_chain_randomness,
+        ))
+        .expect("ValidatorSet commitment serialization is infallible");
+        h.update(&committed);
         let mut out = [0u8; 32];
         h.finalize_variable(&mut out).expect("32 <= 64");
         out
+    }
+
+    /// Validate invariants required before validator state becomes authoritative.
+    pub fn validate_persisted(&self) -> PokerL1Result<()> {
+        if self.validator_set_hash != self.compute_hash() {
+            return Err(PokerL1Error::Other(
+                "persisted ValidatorSet hash does not match its contents".into(),
+            ));
+        }
+        let mut pubkeys = std::collections::BTreeSet::new();
+        for validator in &self.validators {
+            if !pubkeys.insert(validator.pubkey.to_bytes()) {
+                return Err(PokerL1Error::Other(format!(
+                    "persisted ValidatorSet contains duplicate pubkey {:?}",
+                    validator.pubkey
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// 获取活跃 validator 数量。
@@ -428,10 +468,15 @@ impl ValidatorSet {
     ///
     /// 到达 `bonding_until_height` 后转为 Active。
     pub fn process_bonding_expiry(&mut self, current_height: BlockHeight) {
+        let mut changed = false;
         for v in &mut self.validators {
             if v.status == ValidatorStatus::Bonding && current_height >= v.bonding_until_height {
                 v.status = ValidatorStatus::Active;
+                changed = true;
             }
+        }
+        if changed {
+            self.validator_set_hash = self.compute_hash();
         }
     }
 
@@ -452,6 +497,7 @@ impl ValidatorSet {
         }
         v.status = ValidatorStatus::Unbonding;
         v.unbonding_until_height = unbonding_until_height;
+        self.validator_set_hash = self.compute_hash();
         Ok(())
     }
 
@@ -480,6 +526,7 @@ impl ValidatorSet {
         }
         v.status = ValidatorStatus::Retired;
         v.vrf_retired = true;
+        self.validator_set_hash = self.compute_hash();
         Ok(())
     }
 
@@ -499,6 +546,7 @@ impl ValidatorSet {
             )));
         }
         v.last_vertex_height = height;
+        self.validator_set_hash = self.compute_hash();
         Ok(())
     }
 
@@ -508,6 +556,7 @@ impl ValidatorSet {
             .find_validator_mut(pubkey)
             .ok_or_else(|| PokerL1Error::ValidatorNotInSet(pubkey.clone()))?;
         v.vrf_key_destroyed = true;
+        self.validator_set_hash = self.compute_hash();
         Ok(())
     }
 
@@ -551,6 +600,7 @@ impl ValidatorSet {
 
         // 4. 写入 epoch_randomness
         self.epoch_randomness = output;
+        self.validator_set_hash = self.compute_hash();
         Ok(())
     }
 
@@ -565,6 +615,7 @@ impl ValidatorSet {
         let mut out = [0u8; 32];
         h.finalize_variable(&mut out).expect("32 <= 64");
         self.epoch_randomness = out;
+        self.validator_set_hash = self.compute_hash();
     }
 
     /// 计算某 Game 的 assigned_validator（SubTask 12.1）。
@@ -598,6 +649,66 @@ impl ValidatorSet {
         let idx = (u64::from_le_bytes(idx_bytes) % active.len() as u64) as usize;
         Ok(active[idx].pubkey.clone())
     }
+}
+
+/// Return true when an object claims the reserved validator-set identity or type.
+#[must_use]
+pub fn is_validator_set_object(object: &Object) -> bool {
+    object.id == VALIDATOR_SET_OBJECT_ID || object.object_type == VALIDATOR_SET_OBJECT_TYPE
+}
+
+/// Encode authoritative validator state as an immutable, system-replaceable object.
+pub(crate) fn validator_set_object(
+    chain_id: ChainId,
+    set: &ValidatorSet,
+    version: u64,
+) -> PokerL1Result<Object> {
+    set.validate_persisted()?;
+    let data = borsh::to_vec(&PersistedValidatorSet {
+        chain_id,
+        set: set.clone(),
+    })
+    .map_err(|error| PokerL1Error::Serialization(format!("encode ValidatorSet: {error}")))?;
+    let mut object = Object::new(
+        VALIDATOR_SET_OBJECT_ID,
+        Ownership::Immutable,
+        VALIDATOR_SET_OBJECT_TYPE,
+        data,
+        None,
+    );
+    object.version = version;
+    Ok(object)
+}
+
+/// Decode and validate the canonical validator-set system object for one chain.
+pub fn decode_validator_set_object(
+    object: &Object,
+    expected_chain_id: ChainId,
+) -> PokerL1Result<ValidatorSet> {
+    let (chain_id, set) = validate_validator_set_object(object)?;
+    if chain_id != expected_chain_id {
+        return Err(PokerL1Error::Other(format!(
+            "persisted ValidatorSet chain_id {chain_id} does not match configured chain_id {expected_chain_id}"
+        )));
+    }
+    Ok(set)
+}
+
+pub(crate) fn validate_validator_set_object(
+    object: &Object,
+) -> PokerL1Result<(ChainId, ValidatorSet)> {
+    if object.id != VALIDATOR_SET_OBJECT_ID
+        || object.object_type != VALIDATOR_SET_OBJECT_TYPE
+        || object.owner != Ownership::Immutable
+    {
+        return Err(PokerL1Error::Other(
+            "invalid ValidatorSet singleton identity, type or ownership".into(),
+        ));
+    }
+    let persisted: PersistedValidatorSet = borsh::from_slice(&object.data)
+        .map_err(|error| PokerL1Error::Serialization(format!("decode ValidatorSet: {error}")))?;
+    persisted.set.validate_persisted()?;
+    Ok((persisted.chain_id, persisted.set))
 }
 
 /// 计算 genesis_chain_randomness（SEC2-M12）。

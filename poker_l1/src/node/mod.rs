@@ -39,8 +39,8 @@ use crate::signature::TaggedPubkey;
 use crate::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
 use crate::signature::unified::verify_signature;
 use crate::storage::{
-    BlockStore, BridgeRegistryStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectDb,
-    ObjectDbSnapshot,
+    BlockStore, BridgeRegistryStore, DagVertexStore, NodeRole as PruningNodeRole, ObjectBackend,
+    ObjectDb, ObjectDbSnapshot,
 };
 use crate::transaction::{Transaction, TxLane, validate_tx_limits};
 use crate::vm::PrecompileRegistry;
@@ -523,6 +523,44 @@ fn validator_staking_escrow(set: &ValidatorSet) -> PokerL1Result<u64> {
     })
 }
 
+fn read_persisted_validator_set(
+    object_db: &ObjectDb,
+    chain_id: ChainId,
+) -> PokerL1Result<Option<(ValidatorSet, u64)>> {
+    use crate::consensus::validator_set::{VALIDATOR_SET_OBJECT_ID, decode_validator_set_object};
+    match object_db.read(&VALIDATOR_SET_OBJECT_ID) {
+        Ok(object) => Ok(Some((
+            decode_validator_set_object(&object, chain_id)?,
+            object.version,
+        ))),
+        Err(PokerL1Error::ObjectNotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn stage_validator_set_update(
+    snapshot: &mut ObjectDbSnapshot,
+    chain_id: ChainId,
+    current: &ValidatorSet,
+    next: &ValidatorSet,
+) -> PokerL1Result<()> {
+    use crate::consensus::validator_set::{
+        VALIDATOR_SET_OBJECT_ID, decode_validator_set_object, validator_set_object,
+    };
+    let existing = snapshot.read(&VALIDATOR_SET_OBJECT_ID)?;
+    let persisted = decode_validator_set_object(&existing, chain_id)?;
+    if &persisted != current {
+        return Err(PokerL1Error::Other(
+            "in-memory ValidatorSet differs from authoritative persisted state".into(),
+        ));
+    }
+    let next_version = existing
+        .version
+        .checked_add(1)
+        .ok_or_else(|| PokerL1Error::Other("ValidatorSet object version overflow".into()))?;
+    snapshot.replace_system_object(validator_set_object(chain_id, next, next_version)?)
+}
+
 impl Node {
     /// 打开节点（初始化所有存储后端）。
     ///
@@ -565,7 +603,18 @@ impl Node {
         let account_store = AccountStore::open(&account_path)?;
         // 缺口 #9：BridgeRegistryStore 落 RocksDB，重启后 deposit/burn nonce 不丢失（防重放铸币）。
         let bridge_registry_store = BridgeRegistryStore::open(&bridge_path)?;
-        let validator_set = build_genesis_validator_set(config.genesis_validators.clone())?;
+        let configured_validator_set =
+            build_genesis_validator_set(config.genesis_validators.clone())?;
+        let persisted_validator_set = read_persisted_validator_set(&object_db, config.chain_id)?;
+        let treasury_initialized = crate::economics::read_treasury(&object_db)?.is_some();
+        if treasury_initialized != persisted_validator_set.is_some() {
+            return Err(PokerL1Error::Other(
+                "TreasuryCap and ValidatorSet system objects must be initialized together".into(),
+            ));
+        }
+        let validator_set = persisted_validator_set
+            .map(|(set, _)| set)
+            .unwrap_or(configured_validator_set);
         crate::economics::reconcile_native_supply_if_initialized(
             &object_db,
             validator_staking_escrow(&validator_set)?,
@@ -626,15 +675,24 @@ impl Node {
             }
             native_allocs.push((addr, *amount));
         }
-        let minted =
-            crate::economics::genesis_mint(&mut object_db, self.config.chain_id, &native_allocs)?;
+        let validator_set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        let validator_set_object = crate::consensus::validator_set::validator_set_object(
+            self.config.chain_id,
+            &validator_set,
+            0,
+        )?;
+        let minted = crate::economics::genesis_mint_with_system_objects(
+            &mut object_db,
+            self.config.chain_id,
+            &native_allocs,
+            vec![validator_set_object],
+        )?;
         // Account records are non-monetary identity/nonce metadata. If persistence fails here,
         // startup fails and the identical genesis call repairs missing zero-balance accounts on
         // the next restart without minting again.
         for pubkey in missing_accounts {
             account_store.create(crate::account::Account::new(pubkey, 0))?;
         }
-        let validator_set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
         crate::economics::reconcile_native_supply(
             &object_db,
             validator_staking_escrow(&validator_set)?,
@@ -763,15 +821,27 @@ impl Node {
                     .into(),
             ));
         }
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
-        if set.find_validator(&entry.pubkey).is_some() {
+        let mut next_set = set.clone();
+        if next_set.find_validator(&entry.pubkey).is_some() {
             return Err(PokerL1Error::Other(format!(
                 "validator already in set: {:?}",
                 entry.pubkey
             )));
         }
-        set.validators.push(entry);
-        set.validator_set_hash = set.compute_hash();
+        next_set.validators.push(entry);
+        next_set.validator_set_hash = next_set.compute_hash();
+        if read_persisted_validator_set(&object_db, self.config.chain_id)?.is_some() {
+            let mut snapshot = object_db.create_snapshot();
+            stage_validator_set_update(&mut snapshot, self.config.chain_id, &set, &next_set)?;
+            snapshot.apply_to(&mut object_db)?;
+        } else if crate::economics::read_treasury(&object_db)?.is_some() {
+            return Err(PokerL1Error::Other(
+                "initialized Treasury is missing authoritative ValidatorSet state".into(),
+            ));
+        }
+        *set = next_set;
         Ok(())
     }
 
@@ -828,6 +898,7 @@ impl Node {
             &operation_hash,
             0,
         )?;
+        stage_validator_set_update(&mut object_snapshot, self.config.chain_id, &set, &next_set)?;
         crate::economics::reconcile_native_supply_snapshot_if_initialized(
             &object_snapshot,
             validator_staking_escrow(&next_set)?,
@@ -852,6 +923,7 @@ impl Node {
         next_set.validator_set_hash = next_set.compute_hash();
         let mut object_snapshot = object_db.create_snapshot();
         crate::economics::burn_escrowed_native(&mut object_snapshot, result.slash_amount)?;
+        stage_validator_set_update(&mut object_snapshot, self.config.chain_id, &set, &next_set)?;
         crate::economics::reconcile_native_supply_snapshot_if_initialized(
             &object_snapshot,
             validator_staking_escrow(&next_set)?,
@@ -909,6 +981,7 @@ impl Node {
                 0,
             )?;
         }
+        stage_validator_set_update(&mut object_snapshot, self.config.chain_id, &set, &next_set)?;
         crate::economics::reconcile_native_supply_snapshot_if_initialized(
             &object_snapshot,
             validator_staking_escrow(&next_set)?,
@@ -931,42 +1004,49 @@ impl Node {
     /// 多 validator 完整 VRF 协议（proposer 选举 + proof gossip）属后续工作；
     /// 此实现使 epoch_randomness 来自真实 ECVRF（非 stub），且与验证方一致
     /// （验证方用同一 prover pub key + proof 重算相同 output）。
-    pub fn advance_epoch_with_vrf(&self, new_epoch: Epoch, vrf_secret: Option<&[u8; 32]>) {
+    pub fn advance_epoch_with_vrf(
+        &self,
+        new_epoch: Epoch,
+        vrf_secret: Option<&[u8; 32]>,
+    ) -> PokerL1Result<()> {
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
-        set.advance_epoch(new_epoch);
+        let mut next_set = set.clone();
+        next_set.advance_epoch(new_epoch);
 
         // 尝试用 VRF proof 派生 epoch_randomness。
         let vrf_ok = if let Some(secret) = vrf_secret {
             let prover = crate::consensus::ecvrf::Secp256k1VrfProver::from_secret_bytes(secret);
             let vrf_input = crate::consensus::validator_set::compute_vrf_input(
                 self.config.chain_id,
-                set.epoch,
-                &set.prev_epoch_randomness,
+                next_set.epoch,
+                &next_set.prev_epoch_randomness,
             );
             match prover.prove(&vrf_input) {
                 Ok((proof, _output)) => {
                     // submit_epoch_vrf_proof 内部用 Secp256k1VrfVerifier 验证 proof
                     // 并把 output 写入 epoch_randomness。
                     let verifier = crate::consensus::ecvrf::Secp256k1VrfVerifier::new();
-                    set.submit_epoch_vrf_proof(
-                        self.config.chain_id,
-                        &self
-                            .config
-                            .validator_key
-                            .as_ref()
-                            .map(|k| &k.tagged_pubkey)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                // 无 validator_key 时无法标识 proposer，fallback。
-                                TaggedPubkey {
-                                    tag: 0,
-                                    raw: vec![],
-                                }
-                            }),
-                        &proof,
-                        &verifier,
-                    )
-                    .is_ok()
+                    next_set
+                        .submit_epoch_vrf_proof(
+                            self.config.chain_id,
+                            &self
+                                .config
+                                .validator_key
+                                .as_ref()
+                                .map(|k| &k.tagged_pubkey)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    // 无 validator_key 时无法标识 proposer，fallback。
+                                    TaggedPubkey {
+                                        tag: 0,
+                                        raw: vec![],
+                                    }
+                                }),
+                            &proof,
+                            &verifier,
+                        )
+                        .is_ok()
                 }
                 Err(_) => false,
             }
@@ -976,24 +1056,60 @@ impl Node {
 
         if !vrf_ok {
             // 降级：fallback epoch_randomness（SEC2-M12）。
-            set.fallback_epoch_randomness();
+            next_set.fallback_epoch_randomness();
         }
+        next_set.validator_set_hash = next_set.compute_hash();
+        let mut snapshot = object_db.create_snapshot();
+        stage_validator_set_update(&mut snapshot, self.config.chain_id, &set, &next_set)?;
+        snapshot.apply_to(&mut object_db)?;
+        *set = next_set;
+        Ok(())
     }
 
     /// 推进 epoch（不派生 VRF randomness，仅滚动 prev + 衰减；旧行为）。
-    pub fn advance_epoch(&self, new_epoch: Epoch) {
-        self.validator_set
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .advance_epoch(new_epoch);
+    pub fn advance_epoch(&self, new_epoch: Epoch) -> PokerL1Result<()> {
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next_set = set.clone();
+        next_set.advance_epoch(new_epoch);
+        let mut snapshot = object_db.create_snapshot();
+        stage_validator_set_update(&mut snapshot, self.config.chain_id, &set, &next_set)?;
+        snapshot.apply_to(&mut object_db)?;
+        *set = next_set;
+        Ok(())
     }
 
     /// 处理 bonding 到期（NEW-L3：到达 bonding_until_height 后转 Active）。
-    pub fn process_bonding_expiry(&self, current_height: BlockHeight) {
-        self.validator_set
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .process_bonding_expiry(current_height);
+    pub fn process_bonding_expiry(&self, current_height: BlockHeight) -> PokerL1Result<()> {
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next_set = set.clone();
+        next_set.process_bonding_expiry(current_height);
+        if next_set == *set {
+            return Ok(());
+        }
+        let mut snapshot = object_db.create_snapshot();
+        stage_validator_set_update(&mut snapshot, self.config.chain_id, &set, &next_set)?;
+        snapshot.apply_to(&mut object_db)?;
+        *set = next_set;
+        Ok(())
+    }
+
+    /// Persistently move an active validator into the unbonding state.
+    pub fn start_validator_unbonding(
+        &self,
+        validator_pubkey: &TaggedPubkey,
+        unbonding_until_height: BlockHeight,
+    ) -> PokerL1Result<()> {
+        let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next_set = set.clone();
+        next_set.start_unbonding(validator_pubkey, unbonding_until_height)?;
+        let mut snapshot = object_db.create_snapshot();
+        stage_validator_set_update(&mut snapshot, self.config.chain_id, &set, &next_set)?;
+        snapshot.apply_to(&mut object_db)?;
+        *set = next_set;
+        Ok(())
     }
 
     /// 当前 epoch。
@@ -3455,6 +3571,7 @@ mod tests {
         let node =
             Node::open_inmemory_with_validators(NodeRole::Validator, DEFAULT_CHAIN_ID, validators)
                 .unwrap();
+        node.apply_genesis_alloc(std::iter::empty()).unwrap();
         assert_eq!(node.required_quorum(), 3); // 2*3/3+1
 
         // 加入第 4 个零质押测试 validator（Bonding 状态）→ active 数不变。
@@ -3466,7 +3583,7 @@ mod tests {
         assert_eq!(node.required_quorum(), 3);
 
         // bonding 到期 → Active → quorum 变为 2*4/3+1 = 3
-        node.process_bonding_expiry(100);
+        node.process_bonding_expiry(100).unwrap();
         assert_eq!(node.active_validator_count(), 4);
         assert_eq!(node.required_quorum(), 3);
 
@@ -3488,6 +3605,7 @@ mod tests {
             five_active_validators(),
         )
         .unwrap();
+        node.apply_genesis_alloc(std::iter::empty()).unwrap();
         let dup = make_validator_entry(0xA1, ValidatorStatus::Active);
         let result = node.add_validator(dup);
         assert!(result.is_err(), "重复 pubkey 应被拒绝: {:?}", result);
@@ -3501,11 +3619,12 @@ mod tests {
             five_active_validators(),
         )
         .unwrap();
+        node.apply_genesis_alloc(std::iter::empty()).unwrap();
         let randomness_before = {
             let set = node.validator_set.lock().unwrap_or_else(|e| e.into_inner());
             set.epoch_randomness
         };
-        node.advance_epoch(1);
+        node.advance_epoch(1).unwrap();
         assert_eq!(node.current_epoch(), 1);
         let set = node.validator_set.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(set.prev_epoch_randomness, randomness_before);
@@ -3644,6 +3763,36 @@ mod tests {
     }
 
     #[test]
+    fn bonded_validator_and_epoch_survive_persistent_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = NodeConfig::default_full(temp.path().to_path_buf());
+        let node = Node::open(config.clone()).unwrap();
+        let entry = make_funded_validator(0x24, 5_000);
+        let pubkey = entry.pubkey.clone();
+        let inputs = genesis_fund_validator(&node, &entry, 10_000);
+        node.bond_validator(entry, &inputs).unwrap();
+        node.advance_epoch(1).unwrap();
+        assert_eq!(
+            node.reconcile_native_supply().unwrap().staking_escrow,
+            5_000
+        );
+        drop(node);
+
+        let reopened = Node::open(config).unwrap();
+        assert_eq!(reopened.current_epoch(), 1);
+        let set = reopened.validator_set.lock().unwrap();
+        let restored = set
+            .find_validator(&pubkey)
+            .expect("bonded validator restored");
+        assert_eq!(restored.stake, 5_000);
+        drop(set);
+        assert_eq!(
+            reopened.reconcile_native_supply().unwrap().staking_escrow,
+            5_000
+        );
+    }
+
+    #[test]
     fn bond_validator_rejects_insufficient_utxo_value_without_mutation() {
         let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
         let mut entry = make_validator_entry(0x21, ValidatorStatus::Active);
@@ -3699,13 +3848,10 @@ mod tests {
         let inputs = genesis_fund_validator(&node, &entry, 75_000);
         node.bond_validator(entry, &inputs).unwrap();
         assert_eq!(node.native_coin_balance(addr).unwrap(), 25_000);
-        node.process_bonding_expiry(0);
+        node.process_bonding_expiry(0).unwrap();
 
         // 启动 unbonding（锁定到 height 100）
-        {
-            let mut set = node.validator_set.lock().unwrap();
-            set.start_unbonding(&pubkey, 100).unwrap();
-        }
+        node.start_validator_unbonding(&pubkey, 100).unwrap();
         // 未到期 → 拒绝
         let err = node.complete_unbonding(&pubkey, 50).unwrap_err();
         assert!(matches!(err, PokerL1Error::Other(_)));
@@ -3735,6 +3881,7 @@ mod tests {
         let mut entry = ValidatorEntry::new(tagged.clone(), vrf_pubkey, 0, 0);
         entry.status = crate::consensus::ValidatorStatus::Active;
         node.add_validator(entry).unwrap();
+        node.apply_genesis_alloc(std::iter::empty()).unwrap();
         // 注入 validator_key（使 advance_epoch_with_vrf 能标识 proposer）。
         // 注意：tagged_pubkey 需匹配 set 中的 validator。
         let randomness_before = {
@@ -3742,7 +3889,7 @@ mod tests {
             set.epoch_randomness
         };
 
-        node.advance_epoch_with_vrf(1, Some(&[0x55; 32]));
+        node.advance_epoch_with_vrf(1, Some(&[0x55; 32])).unwrap();
 
         let set = node.validator_set.lock().unwrap();
         // epoch_randomness 应已变化（真实 ECVRF output，非 fallback 也非旧值）。
@@ -3757,11 +3904,12 @@ mod tests {
     fn advance_epoch_without_vrf_uses_fallback() {
         // 无 VRF 私钥 → fallback_epoch_randomness（SEC2-M12）。
         let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
+        node.apply_genesis_alloc(std::iter::empty()).unwrap();
         let randomness_before = {
             let set = node.validator_set.lock().unwrap();
             set.epoch_randomness
         };
-        node.advance_epoch_with_vrf(1, None);
+        node.advance_epoch_with_vrf(1, None).unwrap();
         let set = node.validator_set.lock().unwrap();
         // fallback = hash(prev || genesis)，应不同于原 epoch_randomness（genesis 随机性）。
         assert_eq!(set.epoch, 1);
@@ -3851,7 +3999,11 @@ mod tests {
             Ok(_) => panic!("startup must reject an unbalanced Treasury state"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("native supply reconciliation mismatch"));
+        assert!(
+            error
+                .to_string()
+                .contains("native supply reconciliation mismatch")
+        );
     }
 
     // ===== 缺口 #3：Priority Mempool 测试 =====

@@ -61,8 +61,8 @@ struct ServiceRuntime {
 }
 
 impl ServiceRuntime {
-    fn new(repository: ServiceRepository) -> Self {
-        let plugins = repository
+    fn new(repository: ServiceRepository) -> ServiceResult<Self> {
+        let mut plugins: BTreeMap<u64, TexasPokerPlugin> = repository
             .tables()
             .iter()
             .map(|stored| {
@@ -76,10 +76,100 @@ impl ServiceRuntime {
                 )
             })
             .collect();
-        Self {
+
+        // Rebuild every table's verifier-issued receipt history from durable
+        // proof sidecars in the same serialized order in which jobs committed.
+        // Completed proof metadata is authoritative: a missing or invalid
+        // sidecar makes startup fail closed instead of silently shortening the
+        // chain that a later consensus anchor would inspect.
+        let jobs = repository.jobs().to_vec();
+        for job in jobs {
+            let Some(result) = job.result.as_ref() else {
+                if job.status == StoredJobStatus::Completed {
+                    return Err(ServiceError::Runner(format!(
+                        "completed job {} is missing result metadata",
+                        hex::encode(job.job_id())
+                    )));
+                }
+                continue;
+            };
+            if job.status != StoredJobStatus::Completed {
+                continue;
+            }
+            if !result.had_prove_task && !result.proof_verified && job.proof.is_none() {
+                continue;
+            }
+            if !result.had_prove_task || !result.proof_verified {
+                return Err(ServiceError::Runner(format!(
+                    "completed job {} has inconsistent proof flags",
+                    hex::encode(job.job_id())
+                )));
+            }
+            let stored_metadata = job.proof.as_ref().ok_or_else(|| {
+                ServiceError::Runner(format!(
+                    "completed proof job {} is missing proof metadata",
+                    hex::encode(job.job_id())
+                ))
+            })?;
+            let bytes = repository
+                .load_proof_package(job.job_id())?
+                .ok_or_else(|| {
+                    ServiceError::Runner(format!(
+                        "completed proof job {} is missing its durable proof package",
+                        hex::encode(job.job_id())
+                    ))
+                })?;
+            let package = ServiceProofPackage::from_bytes(&bytes)?;
+            let expected_metadata = stored_proof_metadata(package.task())?;
+            if stored_metadata.task_digest != expected_metadata.task_digest
+                || stored_metadata.pre_state_root != expected_metadata.pre_state_root
+                || stored_metadata.post_state_root != expected_metadata.post_state_root
+            {
+                return Err(ServiceError::Prover(format!(
+                    "durable proof package for job {} does not match journal metadata",
+                    hex::encode(job.job_id())
+                )));
+            }
+            let task = package.task();
+            if task.table_id != job.table_id
+                || task.hand_id != result.hand_id
+                || task.call_seq != result.call_seq
+                || task.post_table.version != result.table_version
+            {
+                return Err(ServiceError::Prover(format!(
+                    "durable proof package for job {} does not match completed result",
+                    hex::encode(job.job_id())
+                )));
+            }
+            let plugin = plugins.get_mut(&job.table_id).ok_or_else(|| {
+                ServiceError::Runner(format!(
+                    "completed proof job {} references missing table {}",
+                    hex::encode(job.job_id()),
+                    job.table_id
+                ))
+            })?;
+            plugin.restore_archived_task(task, package.archive())?;
+        }
+
+        for stored in repository.tables() {
+            let plugin = plugins
+                .get(&stored.table_id)
+                .expect("plugin was constructed for every stored table");
+            let restored = u64::try_from(plugin.proven().len()).map_err(|_| {
+                ServiceError::Runner("restored proof count does not fit u64".into())
+            })?;
+            if restored != stored.prove_count {
+                return Err(ServiceError::Runner(format!(
+                    "table {} restored {restored} proofs but journal expects {}",
+                    stored.table_id, stored.prove_count
+                )));
+            }
+        }
+
+        Ok(Self {
             repository,
             plugins,
-        }
+        })
     }
 
     fn staged_plugin(&mut self, table_id: u64) -> TexasPokerPlugin {
@@ -91,18 +181,19 @@ impl ServiceRuntime {
 }
 
 impl ServerState {
-    fn from_repository(repository: ServiceRepository) -> Self {
-        Self {
-            runtime: Arc::new(Mutex::new(ServiceRuntime::new(repository))),
+    fn from_repository(repository: ServiceRepository) -> ServiceResult<Self> {
+        Ok(Self {
+            runtime: Arc::new(Mutex::new(ServiceRuntime::new(repository)?)),
             last_report: Arc::new(Mutex::new(None)),
             last_full_report: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 }
 
 impl Default for ServerState {
     fn default() -> Self {
         Self::from_repository(ServiceRepository::in_memory())
+            .expect("empty in-memory proving repository must recover")
     }
 }
 
@@ -320,7 +411,7 @@ pub async fn serve_with_repository_path(
     repository_path: impl AsRef<Path>,
 ) -> ServiceResult<()> {
     ensure_loopback_bind(addr)?;
-    let state = ServerState::from_repository(ServiceRepository::open(repository_path)?);
+    let state = ServerState::from_repository(ServiceRepository::open(repository_path)?)?;
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -656,8 +747,8 @@ async fn verify_job_proof(
     let (job, bytes) = completed_job_proof(&runtime.repository, job_id)?;
     let package = ServiceProofPackage::from_bytes(&bytes)
         .map_err(|error| unprocessable(error.to_string()))?;
-    let expected_metadata = stored_proof_metadata(package.task())
-        .map_err(|error| unprocessable(error.to_string()))?;
+    let expected_metadata =
+        stored_proof_metadata(package.task()).map_err(|error| unprocessable(error.to_string()))?;
     let stored_metadata = job
         .proof
         .as_ref()
@@ -1448,14 +1539,23 @@ mod tests {
         ));
         let path = dir.join("state.borsh");
         let creator = [0xAA; 20];
-        let state = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let state = ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
         let create = dispatch_for_table(state, 42, create_request(creator, "create"))
             .await
             .unwrap()
             .0;
         assert_eq!(create.call_seq, 1);
 
-        let recovered = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let recovered =
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
+        {
+            let runtime = recovered.runtime.lock().await;
+            let plugin = runtime.plugins.get(&42).expect("table must recover");
+            assert_eq!(plugin.stats().chain_length, 1);
+            plugin
+                .verify_chain()
+                .expect("restart must rebuild the verified receipt chain");
+        }
         let player = [0x10; 20];
         let join = DispatchRequest {
             caller_hex: hex::encode(player),
@@ -1498,13 +1598,15 @@ mod tests {
         ));
         let path = dir.join("state.borsh");
         let creator = [0xAA; 20];
-        let initial = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let initial =
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
         let created = dispatch_for_table(initial, 91, create_request(creator, "archive-create"))
             .await
             .expect("create proof should complete")
             .0;
 
-        let recovered = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let recovered =
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
         let job = get_job(State(recovered.clone()), AxumPath(created.job_id.clone()))
             .await
             .expect("completed job should reload")
@@ -1545,6 +1647,10 @@ mod tests {
             .with_extension("proofs")
             .join(format!("{}.proof", created.job_id));
         std::fs::remove_file(&proof_path).expect("test should remove local proof sidecar");
+        assert!(
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).is_err(),
+            "startup must fail closed while a completed proof sidecar is missing"
+        );
         let mut repository = ServiceRepository::open(&path).unwrap();
         assert!(!repository.has_proof_package(job_id).unwrap());
         let report = crate::proof_sync::sync_proof_package(&mut repository, &transport, job_id)
@@ -1555,7 +1661,8 @@ mod tests {
         assert!(repository.has_proof_package(job_id).unwrap());
         drop(repository);
 
-        let repaired = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
+        let repaired =
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
         let verified = verify_job_proof(State(repaired), AxumPath(created.job_id.clone()))
             .await
             .expect("repaired proof sidecar should remain re-verifiable")
@@ -1568,11 +1675,10 @@ mod tests {
             .expect("proof package should not be empty") ^= 0x01;
         std::fs::write(&proof_path, tampered).expect("test should replace proof sidecar");
 
-        let recovered = ServerState::from_repository(ServiceRepository::open(&path).unwrap());
-        let error = verify_job_proof(State(recovered), AxumPath(created.job_id))
-            .await
-            .expect_err("tampered archive must be rejected");
-        assert_eq!(error.0, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).is_err(),
+            "tampered durable proof must be rejected during startup recovery"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1654,8 +1760,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consensus_anchor_http_route_accepts_certificate_smt_and_receipt_chain() {
-        let state = ServerState::default();
+    async fn consensus_anchor_http_route_accepts_recovered_receipt_chain() {
+        let dir = std::env::temp_dir().join(format!(
+            "zchain_proving_service_anchor_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = dir.join("state.borsh");
+        let initial =
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
         let table_id = 91;
         let sender_secret =
             SecretKey::from_slice(&[9; 32]).expect("fixed sender secret scalar is valid");
@@ -1669,14 +1782,14 @@ mod tests {
         let create_args = hex::decode(&create.args_hex).expect("create args are hex");
         let selector = selectors::create_table();
 
-        let response = dispatch_for_table(state.clone(), table_id, create)
+        let response = dispatch_for_table(initial.clone(), table_id, create)
             .await
             .expect("dispatch with an address-bound public key must prove")
             .0;
         assert!(response.proof_verified);
 
         let (pre_table, post_table) = {
-            let runtime = state.runtime.lock().await;
+            let runtime = initial.runtime.lock().await;
             let pre_table = new_service_plugin(table_id).table().clone();
             let post_table = runtime
                 .plugins
@@ -1686,6 +1799,9 @@ mod tests {
                 .clone();
             (pre_table, post_table)
         };
+        drop(initial);
+        let recovered =
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
         let material = consensus_material_for_create(
             &pre_table,
             &post_table,
@@ -1700,7 +1816,7 @@ mod tests {
                 borsh::to_vec(&material).expect("authenticated material must serialize")
             ),
         });
-        let app = router(state);
+        let app = router(recovered);
         let request = axum::http::Request::builder()
             .method("POST")
             .uri(format!("/tables/{table_id}/verify-chain-consensus"))
@@ -1723,5 +1839,6 @@ mod tests {
         assert_eq!(json["first_call_seq"], 1);
         assert_eq!(json["last_call_seq"], 1);
         assert_eq!(json["call_count"], 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

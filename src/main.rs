@@ -38,8 +38,8 @@ use poker_l1::consensus::{
 };
 use poker_l1::error::PokerL1Result;
 use poker_l1::network::{
-    CommitVote, GossipManager, GossipTopic, LightClientHeader, NetworkMessage, NetworkTransport,
-    PeerInfo, ProofPackageChunk, ProofPackageManifest, MAX_PROOF_PACKAGE_BYTES,
+    CommitVote, GossipManager, GossipTopic, LightClientHeader, MAX_PROOF_PACKAGE_BYTES,
+    NetworkMessage, NetworkTransport, PeerInfo, ProofPackageChunk, ProofPackageManifest,
     build_proof_package_chunk, build_proof_package_manifest,
 };
 use poker_l1::node::{Node, NodeConfig, NodeRole, NodeRpcBackend, ValidatorKey};
@@ -1117,12 +1117,19 @@ fn load_proof_packages_from_dir(
     transport: &TcpTransport,
     directory: &std::path::Path,
 ) -> Result<usize, String> {
-    let entries = std::fs::read_dir(directory)
-        .map_err(|error| format!("读取 proof package 目录 {} 失败：{error}", directory.display()))?;
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        format!(
+            "读取 proof package 目录 {} 失败：{error}",
+            directory.display()
+        )
+    })?;
     let mut loaded = 0usize;
     for entry in entries {
         let entry = entry.map_err(|error| {
-            format!("读取 proof package 目录项 {} 失败：{error}", directory.display())
+            format!(
+                "读取 proof package 目录项 {} 失败：{error}",
+                directory.display()
+            )
         })?;
         let path = entry.path();
         let file_type = entry
@@ -2672,7 +2679,10 @@ fn run_validator_loop(
             // 并用 VRF 派生新 epoch_randomness）。仅在发生 commit 时计数。
             if commit_round > 1 && (commit_round - 1) % EPOCH_LENGTH == 0 && round > 1 {
                 let new_epoch = epoch + 1;
-                node.advance_epoch_with_vrf(new_epoch, vrf_secret.as_ref());
+                if let Err(error) = node.advance_epoch_with_vrf(new_epoch, vrf_secret.as_ref()) {
+                    error!("[validator-loop] epoch 状态持久化失败：{error}");
+                    break;
+                }
                 epoch = new_epoch;
                 // DAG parents are epoch-local. Start the new epoch from a parentless round 1
                 // and discard the old-epoch live DAG so the next vertex cannot accidentally

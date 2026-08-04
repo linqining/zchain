@@ -214,6 +214,36 @@ impl Orchestrator {
         Ok(receipt)
     }
 
+    /// Reverify one durable proof archive and append its receipt to this orchestrator.
+    ///
+    /// This is the stateful counterpart of [`Self::verify_archived_method_proof`]
+    /// used by proving-service restart recovery. The canonical task is replayed,
+    /// the expected AIR and public inputs are reconstructed, and the archived
+    /// Stwo proof is verified before either the receipt chain or proven-summary
+    /// history is mutated.
+    ///
+    /// Callers remain responsible for starting a new chain segment before a
+    /// cross-hand task, exactly as they do for newly generated proofs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when VM replay, archive verification, or receipt-chain
+    /// continuity validation fails. On error this orchestrator is unchanged.
+    pub fn restore_verified_archived_task(
+        &mut self,
+        task: &ProveTask,
+        archive: &ArchivedMethodProof,
+    ) -> TexasAirResult<ProvenTask> {
+        let mut backend = ArchivedVerificationBackend { archive };
+        let (summary, receipt) = self.process_task(task, &mut backend)?;
+
+        let mut next_chain = self.verified_chain_builder.clone();
+        next_chain.push_receipt(receipt)?;
+        self.verified_chain_builder = next_chain;
+        self.proven.push(summary.clone());
+        Ok(summary)
+    }
+
     fn process_task<B: MethodBackend>(
         &self,
         task: &ProveTask,

@@ -43,9 +43,9 @@ pub(crate) enum ObjectMutation {
     },
     /// Delete an object.
     Delete(ObjectID),
-    /// Create the singleton TreasuryCap through the economics system path.
+    /// Create a validated singleton through a trusted system path.
     SystemCreate(Object),
-    /// Replace the singleton TreasuryCap through the economics system path.
+    /// Replace a validated singleton through a trusted system path.
     SystemReplace(Object),
 }
 
@@ -82,7 +82,9 @@ impl ObjectDb {
             let (_key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
             let object: Object = borsh::from_slice(&value)?;
             // 启动加载：DB 中的对象不应冲突；若冲突说明 DB 已损坏，返回错误
-            if crate::economics::is_treasury_cap_object(&object) {
+            if crate::economics::is_treasury_cap_object(&object)
+                || crate::consensus::validator_set::is_validator_set_object(&object)
+            {
                 store.system_create(object)?;
             } else {
                 store.create(object)?;

@@ -420,6 +420,19 @@ pub fn genesis_mint(
     chain_id: ChainId,
     allocations: &[(Address, u64)],
 ) -> PokerL1Result<usize> {
+    genesis_mint_with_system_objects(object_db, chain_id, allocations, Vec::new())
+}
+
+/// Atomically mint genesis supply together with other canonical system singletons.
+///
+/// This is used by the node bootstrap so TreasuryCap, native UTXOs and the
+/// validator-set state cannot be separated by a crash between database writes.
+pub(crate) fn genesis_mint_with_system_objects(
+    object_db: &mut ObjectDb,
+    chain_id: ChainId,
+    allocations: &[(Address, u64)],
+    system_objects: Vec<Object>,
+) -> PokerL1Result<usize> {
     let canonical = canonical_genesis_allocations(allocations)?;
     let commitment = genesis_allocation_commitment(chain_id, &canonical);
 
@@ -430,13 +443,26 @@ pub fn genesis_mint(
     };
     if let Some((cap, _)) = existing {
         if cap.minting_closed {
-            return if cap.genesis_commitment == commitment {
-                Ok(0)
-            } else {
-                Err(PokerL1Error::Other(
+            if cap.genesis_commitment != commitment {
+                return Err(PokerL1Error::Other(
                     "genesis mint is closed and allocation commitment differs".into(),
-                ))
-            };
+                ));
+            }
+            for expected in &system_objects {
+                let actual = object_db.read(&expected.id).map_err(|error| {
+                    PokerL1Error::Other(format!(
+                        "genesis system object {:?} is missing after mint closure: {error}",
+                        expected.id
+                    ))
+                })?;
+                if &actual != expected {
+                    return Err(PokerL1Error::Other(format!(
+                        "genesis system object {:?} differs after mint closure",
+                        expected.id
+                    )));
+                }
+            }
+            return Ok(0);
         }
         if cap.total_supply != 0 || cap.total_minted != 0 || cap.total_burned != 0 {
             return Err(PokerL1Error::Other(
@@ -473,8 +499,9 @@ pub fn genesis_mint(
     } else {
         ObjectMutation::SystemCreate(treasury_cap_object(cap, cap_version)?)
     };
-    let mut mutations = Vec::with_capacity(canonical.len() + 1);
+    let mut mutations = Vec::with_capacity(canonical.len() + system_objects.len() + 1);
     mutations.push(cap_mutation);
+    mutations.extend(system_objects.into_iter().map(ObjectMutation::SystemCreate));
     for (owner, amount) in &canonical {
         mutations.push(ObjectMutation::Create(native_coin_object(
             *owner,
@@ -544,10 +571,7 @@ pub fn burn_native_coins(
 /// Unlike [`burn_native_coins`], the value has already left the live UTXO set, so this operation
 /// only advances the singleton TreasuryCap counters. Staking slashing uses this path after first
 /// computing the corresponding reduction on a cloned validator set.
-pub fn burn_escrowed_native(
-    object_db: &mut dyn ObjectBackend,
-    amount: u64,
-) -> PokerL1Result<()> {
+pub fn burn_escrowed_native(object_db: &mut dyn ObjectBackend, amount: u64) -> PokerL1Result<()> {
     if amount == 0 {
         return Ok(());
     }
@@ -1069,7 +1093,11 @@ mod tests {
         let table_id = ObjectID::new([0x88; 20], 110);
         db.create(texas_table_object(table_id, 1, 0)).unwrap();
         let error = reconcile_native_supply_if_initialized(&db, 0).unwrap_err();
-        assert!(error.to_string().contains("without an initialized TreasuryCap"));
+        assert!(
+            error
+                .to_string()
+                .contains("without an initialized TreasuryCap")
+        );
     }
 
     #[test]
@@ -1080,9 +1108,7 @@ mod tests {
 
         let mut snapshot = db.create_snapshot();
         let table_id = ObjectID::new([0x88; 20], 111);
-        snapshot
-            .create(texas_table_object(table_id, 1, 0))
-            .unwrap();
+        snapshot.create(texas_table_object(table_id, 1, 0)).unwrap();
         assert!(reconcile_native_supply_snapshot_if_initialized(&snapshot, 0).is_err());
         snapshot.discard();
 

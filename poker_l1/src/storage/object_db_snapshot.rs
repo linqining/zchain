@@ -42,9 +42,9 @@ enum Mutation {
     },
     /// 删除对象。
     Delete(ObjectID),
-    /// Create the singleton TreasuryCap through the system path.
+    /// Create a validated singleton through the system path.
     SystemCreate(Object),
-    /// Replace the singleton TreasuryCap through the system path.
+    /// Replace a validated singleton through the system path.
     SystemReplace(Object),
 }
 
@@ -126,7 +126,7 @@ impl ObjectDbSnapshot {
         self.store.iter()
     }
 
-    /// Create the singleton TreasuryCap in an isolated snapshot.
+    /// Create a validated singleton in an isolated snapshot.
     ///
     /// This mirrors `ObjectDb`'s system-only creation rule so Fast Sync can import a complete
     /// post-genesis state without treating the monetary capability as an ordinary object.

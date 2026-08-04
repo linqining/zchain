@@ -63,9 +63,9 @@ pub trait ObjectBackend {
         Ok(())
     }
 
-    /// Replace one system-owned reserved object.
+    /// Replace one validated system-owned reserved object.
     ///
-    /// Audited economics paths use this to advance the singleton TreasuryCap
+    /// Audited economics and consensus paths use this to advance singleton state
     /// without bypassing snapshot/commit semantics. Ordinary contract backends
     /// reject the capability unless they explicitly implement the system path.
     fn replace_system_object(&mut self, _object: Object) -> PokerL1Result<()> {

@@ -17,6 +17,7 @@ use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
 use poker_texas_air::orchestrator::{ArchivedProvenTask, Orchestrator, ProvenTask};
+use poker_texas_air::proof_archive::ArchivedMethodProof;
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
 
@@ -115,6 +116,26 @@ impl TexasPokerPlugin {
             .map_err(|e| PluginError::Prover(e.to_string()))?;
         self.prove_count += 1;
         Ok(archived)
+    }
+
+    /// Reverify and restore one durable proof without changing persisted counters.
+    ///
+    /// Service startup calls this in journal order after loading the canonical
+    /// task and proof archive from a completed job sidecar. A hand transition
+    /// starts a fresh receipt-chain segment, matching the live proving path.
+    /// The table snapshot is not mutated: it has already been recovered from the
+    /// repository and every task is independently replayed by the Orchestrator.
+    pub fn restore_archived_task(
+        &mut self,
+        task: &ProveTask,
+        archive: &ArchivedMethodProof,
+    ) -> PluginResult<ProvenTask> {
+        if task.pre_table.hand_id != task.post_table.hand_id {
+            self.orchestrator.start_new_chain_segment();
+        }
+        self.orchestrator
+            .restore_verified_archived_task(task, archive)
+            .map_err(|error| PluginError::Prover(error.to_string()))
     }
 
     /// 尝试 descriptor-only Aggregator 入口。

@@ -40,8 +40,7 @@ pub trait ProofPackagePeer {
 
     fn request_chunk(
         &self,
-        job_id: Hash,
-        package_hash: Hash,
+        manifest: &ProofPackageManifest,
         index: u32,
     ) -> ServiceResult<Option<ProofPackageChunk>>;
 }
@@ -54,12 +53,16 @@ impl<T: NetworkTransport + ?Sized> ProofPackagePeer for T {
 
     fn request_chunk(
         &self,
-        job_id: Hash,
-        package_hash: Hash,
+        manifest: &ProofPackageManifest,
         index: u32,
     ) -> ServiceResult<Option<ProofPackageChunk>> {
-        self.request_proof_package_chunk(job_id, package_hash, index)
-            .map_err(network_error)
+        let chunk = self
+            .request_proof_package_chunk(manifest.job_id, manifest.package_hash, index)
+            .map_err(network_error)?;
+        if let Some(chunk) = &chunk {
+            chunk.validate_against(manifest).map_err(network_error)?;
+        }
+        Ok(chunk)
     }
 }
 
@@ -84,23 +87,28 @@ impl TcpProofPackagePeer {
         })
     }
 
-    fn request_matching<F>(
+    fn request_from_first_available<T, F>(
         &self,
-        request: &NetworkMessage,
-        mut select: F,
-    ) -> ServiceResult<NetworkMessage>
+        operation: &str,
+        mut request: F,
+    ) -> ServiceResult<Option<T>>
     where
-        F: FnMut(&NetworkMessage) -> bool,
+        F: FnMut(SocketAddr) -> ServiceResult<Option<T>>,
     {
         let mut failures = Vec::new();
+        let mut missing = 0usize;
         for peer in &self.peers {
-            match request_one_peer(*peer, self.timeout, request, &mut select) {
-                Ok(response) => return Ok(response),
+            match request(*peer) {
+                Ok(Some(response)) => return Ok(Some(response)),
+                Ok(None) => missing += 1,
                 Err(error) => failures.push(format!("{peer}: {error}")),
             }
         }
+        if failures.is_empty() {
+            return Ok(None);
+        }
         Err(ServiceError::Runner(format!(
-            "all proof package peers failed: {}",
+            "no proof package peer supplied a valid {operation} response ({missing} missing): {}",
             failures.join("; ")
         )))
     }
@@ -108,34 +116,58 @@ impl TcpProofPackagePeer {
 
 impl ProofPackagePeer for TcpProofPackagePeer {
     fn request_manifest(&self, job_id: Hash) -> ServiceResult<Option<ProofPackageManifest>> {
-        let response = self.request_matching(
-            &NetworkMessage::RequestProofPackageManifest(job_id),
-            |message| matches!(message, NetworkMessage::ResponseProofPackageManifest(_)),
-        )?;
-        match response {
-            NetworkMessage::ResponseProofPackageManifest(manifest) => Ok(manifest),
-            _ => unreachable!("response selector accepted only manifest responses"),
-        }
+        self.request_from_first_available("manifest", |peer| {
+            let response = request_one_peer(
+                peer,
+                self.timeout,
+                &NetworkMessage::RequestProofPackageManifest(job_id),
+                &mut |message| {
+                    matches!(message, NetworkMessage::ResponseProofPackageManifest(_))
+                },
+            )?;
+            let NetworkMessage::ResponseProofPackageManifest(manifest) = response else {
+                unreachable!("response selector accepted only manifest responses");
+            };
+            let Some(manifest) = manifest else {
+                return Ok(None);
+            };
+            manifest.validate().map_err(network_error)?;
+            if manifest.job_id != job_id {
+                return Err(ServiceError::Runner(
+                    "proof package manifest does not target requested job".into(),
+                ));
+            }
+            Ok(Some(manifest))
+        })
     }
 
     fn request_chunk(
         &self,
-        job_id: Hash,
-        package_hash: Hash,
+        manifest: &ProofPackageManifest,
         index: u32,
     ) -> ServiceResult<Option<ProofPackageChunk>> {
-        let response = self.request_matching(
-            &NetworkMessage::RequestProofPackageChunk {
-                job_id,
-                package_hash,
-                index,
-            },
-            |message| matches!(message, NetworkMessage::ResponseProofPackageChunk(_)),
-        )?;
-        match response {
-            NetworkMessage::ResponseProofPackageChunk(chunk) => Ok(chunk),
-            _ => unreachable!("response selector accepted only chunk responses"),
-        }
+        self.request_from_first_available("chunk", |peer| {
+            let response = request_one_peer(
+                peer,
+                self.timeout,
+                &NetworkMessage::RequestProofPackageChunk {
+                    job_id: manifest.job_id,
+                    package_hash: manifest.package_hash,
+                    index,
+                },
+                &mut |message| {
+                    matches!(message, NetworkMessage::ResponseProofPackageChunk(_))
+                },
+            )?;
+            let NetworkMessage::ResponseProofPackageChunk(chunk) = response else {
+                unreachable!("response selector accepted only chunk responses");
+            };
+            let Some(chunk) = chunk else {
+                return Ok(None);
+            };
+            chunk.validate_against(manifest).map_err(network_error)?;
+            Ok(Some(chunk))
+        })
     }
 }
 
@@ -162,7 +194,7 @@ pub fn sync_proof_package(
     let mut assembler = ProofPackageAssembler::new(manifest.clone()).map_err(network_error)?;
     for index in 0..manifest.chunk_count {
         let chunk = peer
-            .request_chunk(job_id, manifest.package_hash, index)?
+            .request_chunk(&manifest, index)?
             .ok_or_else(|| {
                 ServiceError::Runner(format!("proof package chunk {index} not found"))
             })?;
