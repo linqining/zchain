@@ -13,7 +13,7 @@
 //! - Fork/Snapshot 机制：克隆内存 SMT，所有写操作记录到 mutation log，
 //!   `apply_to()` 将 log 回放到主 ObjectDb（commit），`discard()` 丢弃（rollback）
 
-use crate::error::PokerL1Result;
+use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Version};
 use crate::{Address, Hash};
 
@@ -61,6 +61,17 @@ pub trait ObjectBackend {
             self.create(object)?;
         }
         Ok(())
+    }
+
+    /// Replace one system-owned reserved object.
+    ///
+    /// Audited economics paths use this to advance the singleton TreasuryCap
+    /// without bypassing snapshot/commit semantics. Ordinary contract backends
+    /// reject the capability unless they explicitly implement the system path.
+    fn replace_system_object(&mut self, _object: Object) -> PokerL1Result<()> {
+        Err(PokerL1Error::Other(
+            "system object replacement is unavailable on this backend".into(),
+        ))
     }
 
     /// 当前全局状态根（所有 live 对象的 Sparse Merkle Root）。
@@ -120,6 +131,12 @@ impl ObjectBackend for ObjectDb {
         mutations.extend(delete_ids.iter().copied().map(ObjectMutation::Delete));
         mutations.extend(create_objects.into_iter().map(ObjectMutation::Create));
         self.apply_batch(mutations)
+    }
+
+    #[inline]
+    fn replace_system_object(&mut self, object: Object) -> PokerL1Result<()> {
+        use crate::storage::object_db::ObjectMutation;
+        self.apply_batch(vec![ObjectMutation::SystemReplace(object)])
     }
 
     #[inline]

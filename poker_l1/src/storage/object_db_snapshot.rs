@@ -44,6 +44,8 @@ enum Mutation {
     Delete(ObjectID),
     /// Create the singleton TreasuryCap through the system path.
     SystemCreate(Object),
+    /// Replace the singleton TreasuryCap through the system path.
+    SystemReplace(Object),
 }
 
 /// ObjectDb 的内存 fork（snapshot）。
@@ -102,6 +104,7 @@ impl ObjectDbSnapshot {
                 },
                 Mutation::Delete(id) => ObjectMutation::Delete(id),
                 Mutation::SystemCreate(object) => ObjectMutation::SystemCreate(object),
+                Mutation::SystemReplace(object) => ObjectMutation::SystemReplace(object),
             })
             .collect();
         db.apply_batch(mutations)
@@ -116,6 +119,11 @@ impl ObjectDbSnapshot {
     /// 已记录的 mutation 数量（用于测试 / 调试）。
     pub fn mutation_count(&self) -> usize {
         self.mutations.len()
+    }
+
+    /// Iterate over every live object in this isolated candidate state.
+    pub fn iter(&self) -> impl Iterator<Item = &Object> {
+        self.store.iter()
     }
 
     /// Create the singleton TreasuryCap in an isolated snapshot.
@@ -173,6 +181,12 @@ impl ObjectBackend for ObjectDbSnapshot {
         let deleted = self.store.delete(id)?;
         self.mutations.push(Mutation::Delete(*id));
         Ok(deleted)
+    }
+
+    fn replace_system_object(&mut self, object: Object) -> PokerL1Result<()> {
+        self.store.system_replace(object.clone())?;
+        self.mutations.push(Mutation::SystemReplace(object));
+        Ok(())
     }
 
     fn state_root(&self) -> Hash {

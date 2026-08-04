@@ -515,6 +515,14 @@ fn build_genesis_validator_set(validators: Vec<ValidatorEntry>) -> PokerL1Result
     Ok(set)
 }
 
+fn validator_staking_escrow(set: &ValidatorSet) -> PokerL1Result<u64> {
+    set.validators.iter().try_fold(0u64, |total, validator| {
+        total
+            .checked_add(validator.stake)
+            .ok_or_else(|| PokerL1Error::Other("validator staking escrow sum overflow".into()))
+    })
+}
+
 impl Node {
     /// 打开节点（初始化所有存储后端）。
     ///
@@ -558,6 +566,10 @@ impl Node {
         // 缺口 #9：BridgeRegistryStore 落 RocksDB，重启后 deposit/burn nonce 不丢失（防重放铸币）。
         let bridge_registry_store = BridgeRegistryStore::open(&bridge_path)?;
         let validator_set = build_genesis_validator_set(config.genesis_validators.clone())?;
+        crate::economics::reconcile_native_supply_if_initialized(
+            &object_db,
+            validator_staking_escrow(&validator_set)?,
+        )?;
         let precompile_registry = build_default_precompile_registry();
         Ok(Self {
             config,
@@ -622,6 +634,11 @@ impl Node {
         for pubkey in missing_accounts {
             account_store.create(crate::account::Account::new(pubkey, 0))?;
         }
+        let validator_set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        crate::economics::reconcile_native_supply(
+            &object_db,
+            validator_staking_escrow(&validator_set)?,
+        )?;
         Ok(minted)
     }
 
@@ -777,8 +794,9 @@ impl Node {
         entry.status = crate::consensus::ValidatorStatus::Bonding;
         let owner = crate::account::derive_address(&entry.pubkey);
         let mut object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut object_snapshot = object_db.create_snapshot();
         let selection = crate::economics::select_owned_native_coins(
-            &*object_db,
+            &object_snapshot,
             coin_inputs,
             owner,
             entry.stake,
@@ -803,13 +821,18 @@ impl Node {
             next_set.epoch,
         );
         let change = crate::economics::consume_native_coin_selection(
-            &mut *object_db,
+            &mut object_snapshot,
             &selection,
             owner,
             entry.stake,
             &operation_hash,
             0,
         )?;
+        crate::economics::reconcile_native_supply_snapshot_if_initialized(
+            &object_snapshot,
+            validator_staking_escrow(&next_set)?,
+        )?;
+        object_snapshot.apply_to(&mut object_db)?;
         *set = next_set;
         Ok(change)
     }
@@ -827,7 +850,13 @@ impl Node {
         let result =
             crate::consensus::apply_slashing(&mut next_set, validator_pubkey, reason, config)?;
         next_set.validator_set_hash = next_set.compute_hash();
-        crate::economics::burn_escrowed_native(&mut object_db, result.slash_amount)?;
+        let mut object_snapshot = object_db.create_snapshot();
+        crate::economics::burn_escrowed_native(&mut object_snapshot, result.slash_amount)?;
+        crate::economics::reconcile_native_supply_snapshot_if_initialized(
+            &object_snapshot,
+            validator_staking_escrow(&next_set)?,
+        )?;
+        object_snapshot.apply_to(&mut object_db)?;
         *set = next_set;
         Ok(result)
     }
@@ -863,6 +892,7 @@ impl Node {
         validator.status = crate::consensus::ValidatorStatus::Retired;
         next_set.validator_set_hash = next_set.compute_hash();
 
+        let mut object_snapshot = object_db.create_snapshot();
         if refund > 0 {
             let payout_hash = crate::economics::system_coin_operation_hash(
                 b"STAKING_UNBOND_V1",
@@ -872,13 +902,18 @@ impl Node {
                 current_height,
             );
             crate::economics::create_native_coin_output(
-                &mut *object_db,
+                &mut object_snapshot,
                 owner,
                 refund,
                 &payout_hash,
                 0,
             )?;
         }
+        crate::economics::reconcile_native_supply_snapshot_if_initialized(
+            &object_snapshot,
+            validator_staking_escrow(&next_set)?,
+        )?;
+        object_snapshot.apply_to(&mut object_db)?;
         *set = next_set;
         Ok(refund)
     }
@@ -1063,15 +1098,7 @@ impl Node {
     ) -> PokerL1Result<crate::economics::NativeSupplyReconciliation> {
         let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         let validator_set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
-        let staking_escrow =
-            validator_set
-                .validators
-                .iter()
-                .try_fold(0u64, |total, validator| {
-                    total.checked_add(validator.stake).ok_or_else(|| {
-                        PokerL1Error::Other("validator staking escrow sum overflow".into())
-                    })
-                })?;
+        let staking_escrow = validator_staking_escrow(&validator_set)?;
         crate::economics::audit_native_supply(&object_db, staking_escrow)
     }
 
@@ -1283,6 +1310,13 @@ impl Node {
         let mut account_store = self.account_store.lock().unwrap_or_else(|e| e.into_inner());
         let (object_snapshot, account_snapshot, _) =
             self.prepare_block_execution(block, &object_db, &account_store)?;
+        {
+            let validator_set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+            crate::economics::reconcile_native_supply_snapshot_if_initialized(
+                &object_snapshot,
+                validator_staking_escrow(&validator_set)?,
+            )?;
+        }
 
         // Account nonces are replay protection.  Commit their RocksDB batch first; should the
         // following ObjectDb write fail, make a best-effort restoration before surfacing failure.
@@ -3784,6 +3818,40 @@ mod tests {
         assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 1_000);
         assert!(node.apply_genesis_alloc(vec![(pk, 9_999)]).is_err());
         assert_eq!(node.treasury_cap().unwrap().unwrap().total_supply, 1_000);
+    }
+
+    #[test]
+    fn persistent_node_startup_rejects_unbalanced_native_supply() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = NodeConfig::default_full(temp.path().to_path_buf());
+        let node = Node::open(config.clone()).unwrap();
+        node.apply_genesis_alloc(std::iter::empty()).unwrap();
+
+        let table_id = ObjectID::new([0x88; 20], 44);
+        let mut table = crate::vm::contracts::texas_poker::types::TexasPokerTable::new(
+            table_id,
+            "startup-gate".into(),
+            [0x77; 20],
+            6,
+            50,
+            100,
+        );
+        table.chip_pool = 1;
+        let object = Object::new(
+            table_id,
+            Ownership::Shared,
+            crate::vm::contracts::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE,
+            borsh::to_vec(&table).unwrap(),
+            None,
+        );
+        node.object_db.lock().unwrap().create(object).unwrap();
+        drop(node);
+
+        let error = match Node::open(config) {
+            Ok(_) => panic!("startup must reject an unbalanced Treasury state"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("native supply reconciliation mismatch"));
     }
 
     // ===== 缺口 #3：Priority Mempool 测试 =====

@@ -137,18 +137,30 @@ pub fn audit_native_supply(
     object_db: &ObjectDb,
     staking_escrow: u64,
 ) -> PokerL1Result<NativeSupplyReconciliation> {
-    let cap = read_treasury(object_db)?.ok_or_else(|| {
+    audit_native_supply_objects(object_db.iter(), staking_escrow)?.ok_or_else(|| {
         PokerL1Error::Other(
             "native supply reconciliation requires an initialized TreasuryCap".into(),
         )
-    })?;
+    })
+}
+
+fn audit_native_supply_objects<'a>(
+    objects: impl IntoIterator<Item = &'a Object>,
+    staking_escrow: u64,
+) -> PokerL1Result<Option<NativeSupplyReconciliation>> {
+    let mut cap = None;
 
     let mut live_utxo = 0u64;
     let mut texas_table_escrow = 0u64;
-    for object in object_db.iter() {
+    for object in objects {
         if object.id == TREASURY_CAP_OBJECT_ID || object.object_type == TREASURY_CAP_OBJECT_TYPE {
             // Reject duplicate/wrongly-addressed TreasuryCap objects instead of ignoring them.
-            decode_treasury_cap(object)?;
+            let decoded = decode_treasury_cap(object)?;
+            if cap.replace(decoded).is_some() {
+                return Err(PokerL1Error::Other(
+                    "multiple TreasuryCap objects found during native supply reconciliation".into(),
+                ));
+            }
             continue;
         }
 
@@ -222,7 +234,16 @@ pub fn audit_native_supply(
         .and_then(|total| total.checked_add(texas_table_escrow))
         .ok_or_else(|| PokerL1Error::Other("observed native supply sum overflow".into()))?;
 
-    Ok(NativeSupplyReconciliation {
+    let Some(cap) = cap else {
+        if observed_total == 0 {
+            return Ok(None);
+        }
+        return Err(PokerL1Error::Other(format!(
+            "native value exists without an initialized TreasuryCap: live_utxo={live_utxo}, staking_escrow={staking_escrow}, texas_table_escrow={texas_table_escrow}"
+        )));
+    };
+
+    Ok(Some(NativeSupplyReconciliation {
         treasury_total_supply: cap.total_supply,
         treasury_total_minted: cap.total_minted,
         treasury_total_burned: cap.total_burned,
@@ -231,7 +252,7 @@ pub fn audit_native_supply(
         texas_table_escrow,
         observed_total,
         delta: i128::from(observed_total) - i128::from(cap.total_supply),
-    })
+    }))
 }
 
 /// Strict global native-supply reconciliation.
@@ -243,6 +264,30 @@ pub fn reconcile_native_supply(
     staking_escrow: u64,
 ) -> PokerL1Result<NativeSupplyReconciliation> {
     audit_native_supply(object_db, staking_escrow)?.require_balanced()
+}
+
+/// Reconcile native supply when Treasury has been initialized.
+///
+/// A pristine pre-genesis state with no native value is accepted as `None`.
+/// Any native UTXO, staking escrow or Texas table escrow without TreasuryCap
+/// is rejected instead of being treated as legacy monetary state.
+pub fn reconcile_native_supply_if_initialized(
+    object_db: &ObjectDb,
+    staking_escrow: u64,
+) -> PokerL1Result<Option<NativeSupplyReconciliation>> {
+    audit_native_supply_objects(object_db.iter(), staking_escrow)?
+        .map(NativeSupplyReconciliation::require_balanced)
+        .transpose()
+}
+
+/// Reconcile an isolated candidate block state before any durable commit.
+pub(crate) fn reconcile_native_supply_snapshot_if_initialized(
+    snapshot: &crate::storage::ObjectDbSnapshot,
+    staking_escrow: u64,
+) -> PokerL1Result<Option<NativeSupplyReconciliation>> {
+    audit_native_supply_objects(snapshot.iter(), staking_escrow)?
+        .map(NativeSupplyReconciliation::require_balanced)
+        .transpose()
 }
 
 /// Returns true for the singleton TreasuryCap ID or its reserved type tag.
@@ -499,7 +544,10 @@ pub fn burn_native_coins(
 /// Unlike [`burn_native_coins`], the value has already left the live UTXO set, so this operation
 /// only advances the singleton TreasuryCap counters. Staking slashing uses this path after first
 /// computing the corresponding reduction on a cloned validator set.
-pub fn burn_escrowed_native(object_db: &mut ObjectDb, amount: u64) -> PokerL1Result<()> {
+pub fn burn_escrowed_native(
+    object_db: &mut dyn ObjectBackend,
+    amount: u64,
+) -> PokerL1Result<()> {
     if amount == 0 {
         return Ok(());
     }
@@ -513,13 +561,13 @@ pub fn burn_escrowed_native(object_db: &mut ObjectDb, amount: u64) -> PokerL1Res
         .total_burned
         .checked_add(amount)
         .ok_or_else(|| PokerL1Error::Other("TreasuryCap burned counter overflow".into()))?;
-    object_db.apply_batch(vec![ObjectMutation::SystemReplace(treasury_cap_object(
+    object_db.replace_system_object(treasury_cap_object(
         cap,
         cap_object
             .version
             .checked_add(1)
             .ok_or_else(|| PokerL1Error::Other("TreasuryCap object version overflow".into()))?,
-    )?)])
+    )?)
 }
 
 /// One immutable, address-owned native coin output.
@@ -1008,6 +1056,38 @@ mod tests {
         let report = audit_native_supply(&db, 0).unwrap();
         assert_eq!(report.delta, 25);
         assert!(reconcile_native_supply(&db, 0).is_err());
+    }
+
+    #[test]
+    fn pregenesis_reconciliation_allows_only_zero_native_value() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        assert_eq!(
+            reconcile_native_supply_if_initialized(&db, 0).unwrap(),
+            None
+        );
+
+        let table_id = ObjectID::new([0x88; 20], 110);
+        db.create(texas_table_object(table_id, 1, 0)).unwrap();
+        let error = reconcile_native_supply_if_initialized(&db, 0).unwrap_err();
+        assert!(error.to_string().contains("without an initialized TreasuryCap"));
+    }
+
+    #[test]
+    fn candidate_snapshot_reconciliation_rejects_unbacked_table_escrow() {
+        let mut db = ObjectDb::open_inmemory().unwrap();
+        genesis_mint(&mut db, 7, &[([0x11; 20], 1_000)]).unwrap();
+        let root_before = db.state_root();
+
+        let mut snapshot = db.create_snapshot();
+        let table_id = ObjectID::new([0x88; 20], 111);
+        snapshot
+            .create(texas_table_object(table_id, 1, 0))
+            .unwrap();
+        assert!(reconcile_native_supply_snapshot_if_initialized(&snapshot, 0).is_err());
+        snapshot.discard();
+
+        assert_eq!(db.state_root(), root_before);
+        assert!(reconcile_native_supply(&db, 0).unwrap().is_balanced());
     }
 
     #[test]

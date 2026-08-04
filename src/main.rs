@@ -554,13 +554,17 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let node = open_node_with_application_verifiers(config)
         .map_err(|e| format!("Node::open 失败：{e}"))?;
     // Apply the canonical native-coin genesis allocation (idempotent across restarts).
-    if let Some(alloc_path) = &genesis_alloc_file {
-        let allocs = load_genesis_alloc(alloc_path)?;
-        let created = node
-            .apply_genesis_alloc(allocs)
-            .map_err(|e| format!("genesis alloc 应用失败：{e}"))?;
-        info!("已应用 genesis UTXO 分配：新铸 {} 个 coin outputs", created);
-    }
+    // Even a zero-allocation chain creates and permanently closes TreasuryCap before
+    // networking starts, so every production block commit is covered by supply reconciliation.
+    let genesis_allocs = genesis_alloc_file
+        .as_deref()
+        .map(load_genesis_alloc)
+        .transpose()?
+        .unwrap_or_default();
+    let created = node
+        .apply_genesis_alloc(genesis_allocs)
+        .map_err(|e| format!("genesis alloc 应用失败：{e}"))?;
+    info!("已应用 genesis UTXO 分配：新铸 {} 个 coin outputs", created);
     let node_arc = Arc::new(node);
     let backend = Arc::new(NodeRpcBackend::new(Arc::clone(&node_arc)));
 
@@ -1120,13 +1124,16 @@ fn load_proof_packages_from_dir(
         let entry = entry.map_err(|error| {
             format!("读取 proof package 目录项 {} 失败：{error}", directory.display())
         })?;
+        let path = entry.path();
         let file_type = entry
             .file_type()
-            .map_err(|error| format!("读取 {} 类型失败：{error}", entry.path().display()))?;
-        if !file_type.is_file() || entry.path().extension().and_then(|value| value.to_str()) != Some("proof") {
+            .map_err(|error| format!("读取 {} 类型失败：{error}", path.display()))?;
+        if !file_type.is_file()
+            || path.extension().and_then(|value| value.to_str()) != Some("proof")
+        {
             continue;
         }
-        let Some(stem) = entry.path().file_stem().and_then(|value| value.to_str()) else {
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
         let job_bytes = match hex::decode(stem) {
@@ -1135,17 +1142,17 @@ fn load_proof_packages_from_dir(
         };
         let metadata = entry
             .metadata()
-            .map_err(|error| format!("读取 {} 元数据失败：{error}", entry.path().display()))?;
+            .map_err(|error| format!("读取 {} 元数据失败：{error}", path.display()))?;
         if metadata.len() == 0 || metadata.len() > MAX_PROOF_PACKAGE_BYTES as u64 {
             return Err(format!(
                 "proof package {} 长度 {} 超出 1..={} 范围",
-                entry.path().display(),
+                path.display(),
                 metadata.len(),
                 MAX_PROOF_PACKAGE_BYTES
             ));
         }
-        let bytes = std::fs::read(entry.path())
-            .map_err(|error| format!("读取 {} 失败：{error}", entry.path().display()))?;
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
         let mut job_id = [0u8; 32];
         job_id.copy_from_slice(&job_bytes);
         transport.register_proof_package(job_id, bytes)?;
