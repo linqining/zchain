@@ -91,8 +91,9 @@ pub use game_assignment::{
 // 重新导出 bullshark 模块公开 API（Task 9）。
 pub use bullshark::{
     BlockProjection, CommitLeader, Dag, assemble_commit_certificate, bullshark_linear_order,
-    detect_commit_cert_equivocation, detect_commit_leader, project_block_from_commit,
-    validate_commit_certificate_fields, validate_commit_certificate_quorum,
+    bullshark_linear_order_uncommitted, detect_commit_cert_equivocation, detect_commit_leader,
+    project_block_from_commit, validate_commit_certificate_fields,
+    validate_commit_certificate_quorum,
 };
 
 use blake2::Blake2bVar;

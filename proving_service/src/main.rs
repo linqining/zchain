@@ -50,9 +50,7 @@ fn main() -> ExitCode {
 /// Repair a missing/corrupt local proof sidecar from bounded zchain P2P peers.
 fn sync_proof(args: &[String]) -> ExitCode {
     if args.len() < 3 {
-        eprintln!(
-            "usage: proving_service sync-proof <state-path> <job-id-hex> <peer> [peer...]"
-        );
+        eprintln!("usage: proving_service sync-proof <state-path> <job-id-hex> <peer> [peer...]");
         return ExitCode::FAILURE;
     }
     let job_bytes = match hex::decode(&args[1]) {

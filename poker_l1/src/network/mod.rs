@@ -73,9 +73,7 @@ const PROOF_PACKAGE_HASH_DOMAIN: &[u8] = b"zchain.proof_package.v1";
 const PROOF_PACKAGE_CHUNK_HASH_DOMAIN: &[u8] = b"zchain.proof_package.chunk.v1";
 
 /// Bounded description of one opaque proving-service package.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ProofPackageManifest {
     /// Durable proving job whose sidecar is being synchronized.
     pub job_id: Hash,
@@ -133,9 +131,7 @@ impl ProofPackageManifest {
 }
 
 /// One independently authenticated package chunk.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ProofPackageChunk {
     pub job_id: Hash,
     pub package_hash: Hash,
@@ -161,12 +157,8 @@ impl ProofPackageChunk {
                 self.bytes.len()
             )));
         }
-        let expected_hash = proof_package_chunk_hash(
-            self.job_id,
-            self.package_hash,
-            self.index,
-            &self.bytes,
-        );
+        let expected_hash =
+            proof_package_chunk_hash(self.job_id, self.package_hash, self.index, &self.bytes);
         if self.chunk_hash != expected_hash {
             return Err(proof_sync_error(format!(
                 "proof package chunk {} hash mismatch",
@@ -208,7 +200,8 @@ pub fn build_proof_package_chunk(
     index: u32,
 ) -> PokerL1Result<ProofPackageChunk> {
     manifest.validate()?;
-    if bytes.len() as u64 != manifest.total_len || proof_package_hash(bytes) != manifest.package_hash
+    if bytes.len() as u64 != manifest.total_len
+        || proof_package_hash(bytes) != manifest.package_hash
     {
         return Err(proof_sync_error(
             "proof package bytes do not match manifest",
@@ -312,12 +305,7 @@ fn proof_package_hash(bytes: &[u8]) -> Hash {
 }
 
 #[must_use]
-fn proof_package_chunk_hash(
-    job_id: Hash,
-    package_hash: Hash,
-    index: u32,
-    bytes: &[u8],
-) -> Hash {
+fn proof_package_chunk_hash(job_id: Hash, package_hash: Hash, index: u32, bytes: &[u8]) -> Hash {
     domain_hash(
         PROOF_PACKAGE_CHUNK_HASH_DOMAIN,
         &[
@@ -1481,8 +1469,8 @@ mod tests {
         let bytes = vec![0x77; PROOF_PACKAGE_CHUNK_SIZE];
         let manifest = build_proof_package_manifest([0x11; 32], &bytes).unwrap();
         let chunk = build_proof_package_chunk(&manifest, &bytes, 0).unwrap();
-        let encoded = borsh::to_vec(&NetworkMessage::ResponseProofPackageChunk(Some(chunk)))
-            .unwrap();
+        let encoded =
+            borsh::to_vec(&NetworkMessage::ResponseProofPackageChunk(Some(chunk))).unwrap();
         assert!(encoded.len() < 2 * 1024 * 1024);
     }
 

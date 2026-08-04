@@ -34,7 +34,8 @@ use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, valida
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
 use poker_l1::consensus::{
     Dag, DagCommitCertificate, DagVertex, MAX_VERTEX_SIZE, VertexBuilder,
-    assemble_commit_certificate, detect_commit_leader, required_quorum,
+    assemble_commit_certificate, bullshark_linear_order_uncommitted, detect_commit_leader,
+    required_quorum, sort_commit_txs_r4m4,
 };
 use poker_l1::error::PokerL1Result;
 use poker_l1::network::{
@@ -1945,24 +1946,63 @@ fn split_txs_into_batches(txs: Vec<Transaction>, max_size: usize) -> Vec<Vec<Tra
     batches
 }
 
-/// 计算待出块 commit certificate 的 `signing_hash`（缺口 #3：多 validator 投票对象）。
+/// Resolve one Bullshark leader into the canonical, not-yet-committed projection.
 ///
-/// 确定性执行 prev_vertex 的 txs 得到 state_root，按与 [`build_block_from_vertex`]
-/// 完全一致的 cert 字段构造一个**不含签名**的 cert 模板，返回其 `signing_hash`。
-/// 各 validator 对同一 (prev_vertex, epoch, commit_round, prev_commit_hash, state) 得到
-/// 相同的 signing_hash → 可对其签名并互验（CommitVote）。
+/// Committed vertices remain in the in-memory DAG because later rounds reference them.  The
+/// committed frontier therefore has to be applied before building a block, otherwise an old
+/// ancestor's transactions would be replayed in every later commit.
+fn canonical_commit_projection(
+    dag: &Dag,
+    leader: &poker_l1::consensus::CommitLeader,
+    committed_vertices: &BTreeSet<Hash>,
+) -> Result<(Vec<Hash>, Vec<DagVertex>), String> {
+    let ordered_hashes =
+        bullshark_linear_order_uncommitted(dag, &leader.referencing_hashes, committed_vertices)
+            .map_err(|error| format!("Bullshark projection unavailable: {error}"))?;
+    if ordered_hashes.is_empty() {
+        return Err("Bullshark commit contains no uncommitted vertices".into());
+    }
+    let mut vertices = Vec::with_capacity(ordered_hashes.len());
+    for hash in &ordered_hashes {
+        vertices.push(
+            dag.get(hash)
+                .cloned()
+                .ok_or_else(|| "Bullshark projection lost a referenced vertex".to_string())?,
+        );
+    }
+    Ok((ordered_hashes, vertices))
+}
+
+/// Derive the canonical execution result shared by commit votes and final block construction.
 ///
-/// 注意：state_root 由确定性执行得出，所有诚实 validator 对相同输入得到相同结果。
-fn compute_cert_signing_hash(
-    vertex: &DagVertex,
-    chain_id: poker_l1::ChainId,
-    epoch: u64,
-    commit_round: u64,
-    prev_commit_hash: Hash,
+/// The two transaction lanes are storage commitments only; execution always replays the single
+/// R4-M4 ordered sequence.  This function is deliberately the only producer-side path used to
+/// compute the certificate roots and state root.
+fn derive_commit_execution(
+    vertices: &[DagVertex],
+    leader: &DagVertex,
     node: &Node,
     height: u64,
-) -> Result<Hash, String> {
-    let sorted_txs = poker_l1::consensus::sort_vertex_txs_s9(vertex.tx_list.clone());
+) -> Result<
+    (
+        Vec<Transaction>,
+        Vec<Transaction>,
+        poker_l1::executor::BlockExecutionOutcome,
+        u64,
+    ),
+    String,
+> {
+    if vertices.is_empty() {
+        return Err("cannot execute an empty Bullshark projection".into());
+    }
+    if vertices.iter().any(|vertex| vertex.epoch != leader.epoch) {
+        return Err("Bullshark projection crosses an epoch boundary".into());
+    }
+    let vertex_txs: Vec<Vec<Transaction>> = vertices
+        .iter()
+        .map(|vertex| vertex.tx_list.clone())
+        .collect();
+    let sorted_txs = sort_commit_txs_r4m4(vertex_txs);
     let mut public_txs = Vec::new();
     let mut gameturn_txs = Vec::new();
     for tx in &sorted_txs {
@@ -1972,20 +2012,43 @@ fn compute_cert_signing_hash(
         }
     }
     let timestamp_ms = consensus_block_timestamp(node, height)?;
-    let env = node.execution_environment(height, timestamp_ms);
-    // 缺口 #4-M1：proposer = vertex author（出块 validator）。
-    let env = env.with_proposer(poker_l1::account::derive_address(&vertex.author_pubkey));
+    let proposer = vertices
+        .first()
+        .map(|vertex| poker_l1::account::derive_address(&vertex.author_pubkey))
+        .ok_or_else(|| "cannot derive proposer for an empty projection".to_string())?;
+    let env = node
+        .execution_environment(height, timestamp_ms)
+        .with_proposer(proposer);
     let outcome = node
         .simulate_block_execution(&env, &sorted_txs)
         .map_err(|e| format!("execute_block failed: {e}"))?;
+    Ok((public_txs, gameturn_txs, outcome, timestamp_ms))
+}
+
+/// 计算待出块 commit certificate 的 `signing_hash`（缺口 #3：多 validator 投票对象）。
+///
+/// Votes commit to the complete canonical projection, not merely the leader vertex.  Every
+/// honest validator therefore signs the same vertex list, lane roots, and post-state root.
+fn compute_cert_signing_hash(
+    vertices: &[DagVertex],
+    ordered_hashes: &[Hash],
+    leader: &DagVertex,
+    chain_id: poker_l1::ChainId,
+    epoch: u64,
+    commit_round: u64,
+    prev_commit_hash: Hash,
+    node: &Node,
+    height: u64,
+) -> Result<Hash, String> {
+    let (public_txs, gameturn_txs, outcome, _) =
+        derive_commit_execution(vertices, leader, node, height)?;
     let public_tx_root = poker_l1::block::compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = poker_l1::block::compute_tx_merkle_root(&gameturn_txs);
-    let vertex_hash = vertex.vertex_hash();
     let cert = DagCommitCertificate {
         epoch,
         commit_round,
         prev_commit_hash,
-        vertex_hash_list: vec![vertex_hash],
+        vertex_hash_list: ordered_hashes.to_vec(),
         round_attendance_bitmap: vec![0xFF],
         state_root: outcome.state_root,
         public_tx_root,
@@ -1996,13 +2059,12 @@ fn compute_cert_signing_hash(
     Ok(cert.signing_hash(chain_id))
 }
 
-/// 单 validator 引导期：从 vertex 构造 block、自签 cert、入链、广播、推进状态。
-///
-/// 封装原 `build_block_from_vertex` + put_block + 广播 + Dag 清空 的流程，
-/// 供单 validator 路径复用。
+/// 单 validator 引导期：从完整 Bullshark 投影构造 block、自签 cert、入链并广播。
 #[allow(clippy::too_many_arguments)]
 fn commit_and_finalize_block(
-    prev_vertex: &DagVertex,
+    commit_vertices: &[DagVertex],
+    ordered_hashes: &[Hash],
+    leader: &DagVertex,
     node: &Node,
     secret_key: &secp256k1::SecretKey,
     chain_id: poker_l1::ChainId,
@@ -2012,20 +2074,21 @@ fn commit_and_finalize_block(
     height: u64,
     transport: &TcpTransport,
     dag: &Arc<Mutex<Dag>>,
-    vertex: &DagVertex,
+    committed_vertices: &mut BTreeSet<Hash>,
     commit_round_out: &mut u64,
     prev_commit_hash_out: &mut Hash,
     prev_block_hash_out: &mut Hash,
-) {
-    match build_block_from_vertex(
-        prev_vertex,
+) -> bool {
+    match build_block_from_commit_projection(
+        commit_vertices,
+        ordered_hashes,
+        leader,
         chain_id,
         commit_round,
         prev_commit_hash,
         prev_block_hash,
         height,
         node,
-        node.state_root(),
         secret_key,
     ) {
         Ok(block) => {
@@ -2048,21 +2111,29 @@ fn commit_and_finalize_block(
                     *commit_round_out += 1;
                     *prev_commit_hash_out = block.header.dag_commit_certificate.cert_hash(chain_id);
                     *prev_block_hash_out = block_hash;
-                    let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                    *dag_guard = Dag::new();
-                    dag_guard.insert(vertex.clone());
+                    committed_vertices.extend(ordered_hashes.iter().copied());
+                    let _ = dag;
+                    true
                 }
-                Err(e) => error!("put_block 失败：{e}"),
+                Err(e) => {
+                    error!("put_block 失败：{e}");
+                    false
+                }
             }
         }
-        Err(e) => error!("build_block_from_vertex 失败：{e}"),
+        Err(e) => {
+            error!("build_block_from_commit_projection 失败：{e}");
+            false
+        }
     }
 }
 
-/// 多 validator：用收集到的 ≥2/3 签名组装 cert，构造 block、入链、广播、推进状态。
+/// 多 validator：用收集到的 ≥2/3 签名组装完整投影的 cert 并入链。
 #[allow(clippy::too_many_arguments)]
 fn commit_and_finalize_block_multi(
-    prev_vertex: &DagVertex,
+    commit_vertices: &[DagVertex],
+    ordered_hashes: &[Hash],
+    leader: &DagVertex,
     node: &Node,
     chain_id: poker_l1::ChainId,
     epoch: u64,
@@ -2074,49 +2145,27 @@ fn commit_and_finalize_block_multi(
     validator_count: usize,
     transport: &TcpTransport,
     dag: &Arc<Mutex<Dag>>,
-    vertex: &DagVertex,
+    committed_vertices: &mut BTreeSet<Hash>,
     commit_round_out: &mut u64,
     prev_commit_hash_out: &mut Hash,
     prev_block_hash_out: &mut Hash,
-) {
-    // 确定性执行得到 state_root + tx roots。
-    let sorted_txs = poker_l1::consensus::sort_vertex_txs_s9(prev_vertex.tx_list.clone());
-    let mut public_txs = Vec::new();
-    let mut gameturn_txs = Vec::new();
-    for tx in &sorted_txs {
-        match tx.lane_hint {
-            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx.clone()),
-            _ => public_txs.push(tx.clone()),
-        }
-    }
-    let timestamp_ms = match consensus_block_timestamp(node, height) {
-        Ok(timestamp) => timestamp,
-        Err(error) => {
-            error!("multi: derive deterministic block timestamp failed: {error}");
-            return;
-        }
-    };
-    let env = node.execution_environment(height, timestamp_ms);
-    // 缺口 #4-M1：proposer = prev_vertex author（leader / 出块 validator）。
-    let env = env.with_proposer(poker_l1::account::derive_address(
-        &prev_vertex.author_pubkey,
-    ));
-    let outcome = match node.simulate_block_execution(&env, &sorted_txs) {
-        Ok(o) => o,
-        Err(e) => {
-            error!("multi: execute_block 失败：{e}");
-            return;
-        }
-    };
+) -> bool {
+    let (public_txs, gameturn_txs, outcome, timestamp_ms) =
+        match derive_commit_execution(commit_vertices, leader, node, height) {
+            Ok(result) => result,
+            Err(e) => {
+                error!("multi: execute_block 失败：{e}");
+                return false;
+            }
+        };
     let public_tx_root = poker_l1::block::compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = poker_l1::block::compute_tx_merkle_root(&gameturn_txs);
-    let vertex_hash = prev_vertex.vertex_hash();
     // 组装含 2/3 多签的 cert。
     let cert = match assemble_commit_certificate(
         epoch,
         commit_round,
         prev_commit_hash,
-        vec![vertex_hash],
+        ordered_hashes.to_vec(),
         vec![0xFF],
         outcome.state_root,
         public_tx_root,
@@ -2127,7 +2176,7 @@ fn commit_and_finalize_block_multi(
         Ok(c) => c,
         Err(e) => {
             error!("assemble_commit_certificate 失败：{e}");
-            return;
+            return false;
         }
     };
     let header = poker_l1::block::BlockHeader {
@@ -2158,84 +2207,58 @@ fn commit_and_finalize_block_multi(
             *commit_round_out += 1;
             *prev_commit_hash_out = block.header.dag_commit_certificate.cert_hash(chain_id);
             *prev_block_hash_out = block_hash;
-            let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-            *dag_guard = Dag::new();
-            dag_guard.insert(vertex.clone());
+            committed_vertices.extend(ordered_hashes.iter().copied());
+            let _ = dag;
+            true
         }
-        Err(e) => error!("multi: put_block 失败：{e}"),
+        Err(e) => {
+            error!("multi: put_block 失败：{e}");
+            false
+        }
     }
 }
 
-/// 从单个 vertex 构造 block（单 validator 简化模式）。
-///
-/// 单 validator 自闭环模式下，每轮 vertex 直接对应一个 block。
-/// 不调用 `project_block_from_commit`（其 `collect_ancestors` 会包含历史 vertex 的 tx 导致重复），
-/// 而是直接从当前 vertex 的 tx_list 构造 block。
-///
-/// tx 执行引擎接入：caller 传入 `node` + `prev_state_root`，本函数：
-/// 1. 对 vertex 的 txs 执行 S9 排序
-/// 2. 调用 `node.execute_block_on_state` 执行全部 txs（含 public + gameturn）
-/// 3. 取 `outcome.state_root` 作为新 block header 的 state_root
-/// 4. 按 public / gameturn 拆分 txs 用于 merkle root 计算 + block body
-///
-/// `prev_state_root` 仅用于日志对比（检测执行引擎是否真正推进了状态）。
-fn build_block_from_vertex(
-    vertex: &DagVertex,
+/// 从完整 Bullshark commit projection 构造 block。
+fn build_block_from_commit_projection(
+    vertices: &[DagVertex],
+    ordered_hashes: &[Hash],
+    leader: &DagVertex,
     chain_id: poker_l1::ChainId,
     commit_round: u64,
     prev_commit_hash: Hash,
     prev_block_hash: Hash,
     height: u64,
     node: &Node,
-    prev_state_root: Hash,
     secret_key: &secp256k1::SecretKey,
 ) -> Result<Block, String> {
-    // 1. S9 排序：GameTurn/CheckpointAnchor 优先，Public 中间，ForceSync 后置
-    let sorted_txs = poker_l1::consensus::sort_vertex_txs_s9(vertex.tx_list.clone());
-
-    // 2. 拆分 public / gameturn（用于 merkle root + block body）
-    let mut public_txs = Vec::new();
-    let mut gameturn_txs = Vec::new();
-    for tx in &sorted_txs {
-        match tx.lane_hint {
-            TxLane::GameTurn | TxLane::CheckpointAnchor => gameturn_txs.push(tx.clone()),
-            _ => public_txs.push(tx.clone()),
+    if vertices.is_empty() || vertices.len() != ordered_hashes.len() {
+        return Err("commit projection vertices and hashes have different lengths".into());
+    }
+    for (vertex, hash) in vertices.iter().zip(ordered_hashes) {
+        if vertex.vertex_hash() != *hash {
+            return Err("commit projection hash does not match vertex contents".into());
         }
     }
-
-    // 3. 从 finalized parent 确定性派生 timestamp。若使用本地墙钟，节点停机超过
-    // `max_interval_ms` 后会自产一个无法通过时间共识校验的区块。
-    let timestamp_ms = consensus_block_timestamp(node, height)?;
-
-    // 4. 执行 txs，得到新 state_root
-    //
-    // execute_block 内部已处理失败 tx（返回失败回执，不阻断 block），
-    // 故此处仅在底层错误（锁中毒 / RocksDB 写失败）时返回 Err。
-    let env = node.execution_environment(height, timestamp_ms);
-    let outcome = node
-        .simulate_block_execution(&env, &sorted_txs)
-        .map_err(|e| format!("execute_block failed: {e}"))?;
-    let state_root = outcome.state_root;
-    if state_root == prev_state_root && !sorted_txs.is_empty() {
+    let previous_state_root = node.state_root();
+    let (public_txs, gameturn_txs, outcome, timestamp_ms) =
+        derive_commit_execution(vertices, leader, node, height)?;
+    if outcome.state_root == previous_state_root
+        && !(public_txs.is_empty() && gameturn_txs.is_empty())
+    {
         warn!(
             "执行 {} 笔 tx 后 state_root 未变化（可能全部失败或为无状态 tx）",
-            sorted_txs.len()
+            public_txs.len() + gameturn_txs.len()
         );
     }
-
-    // 5. 计算 roots
     let public_tx_root = compute_tx_merkle_root(&public_txs);
     let gameturn_tx_root = compute_tx_merkle_root(&gameturn_txs);
-
-    // 6. 构造 commit certificate（先不含签名）
-    let vertex_hash = vertex.vertex_hash();
     let cert = DagCommitCertificate {
-        epoch: vertex.epoch,
+        epoch: leader.epoch,
         commit_round,
         prev_commit_hash,
-        vertex_hash_list: vec![vertex_hash],
+        vertex_hash_list: ordered_hashes.to_vec(),
         round_attendance_bitmap: vec![0xFF],
-        state_root,
+        state_root: outcome.state_root,
         public_tx_root,
         gameturn_tx_root,
         signature_list: vec![],
@@ -2258,7 +2281,7 @@ fn build_block_from_vertex(
         height,
         timestamp_ms,
         prev_hash: prev_block_hash,
-        state_root,
+        state_root: outcome.state_root,
         public_tx_root,
         gameturn_tx_root,
         dag_commit_certificate: cert,
@@ -2320,6 +2343,9 @@ fn run_validator_loop(
         });
     // 存完整 vertex（非仅 hash），以便 commit 时从上一个 vertex 构造 block
     let mut last_vertex: Option<DagVertex> = None;
+    // Keep committed frontier vertices in the live DAG for ancestry traversal, but filter them
+    // out of later block projections so their transactions cannot execute twice.
+    let mut committed_vertices: BTreeSet<Hash> = BTreeSet::new();
     // 缺口 #3 §3.6：epoch 推进周期（每 EPOCH_LENGTH 个 commit 推进一次 epoch）。
     const EPOCH_LENGTH: u64 = 10;
 
@@ -2557,138 +2583,173 @@ fn run_validator_loop(
                 };
 
                 // 对每个候选 leader 调 detect_commit_leader，首个满足 quorum 的提交。
-                let mut committed = false;
+                let mut committed;
                 for leader_hash in &candidate_leaders {
                     let commit_result = {
                         let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
                         detect_commit_leader(&dag_guard, leader_hash, vc)
                     };
-                    if let Ok(Some(_leader)) = commit_result {
-                        // 找到可 commit 的 leader。取该 leader vertex 构造 block。
-                        let leader_vertex = {
+                    if let Ok(Some(_)) = &commit_result {
+                        // 找到可 commit 的 leader，并 resolve the same canonical projection
+                        // that will be committed in the certificate and block body.
+                        let (leader_vertex, ordered_hashes, commit_vertices) = {
                             let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                            dag_guard.get(leader_hash).cloned()
-                        };
-                        if let Some(leader_vertex) = leader_vertex {
-                            let height = node
-                                .block_store()
-                                .get_tip_height()
-                                .ok()
-                                .flatten()
-                                .map(|h| h + 1)
-                                .unwrap_or(1);
-
-                            if vc <= 1 {
-                                // 单 validator：自签出块。
-                                commit_and_finalize_block(
-                                    &leader_vertex,
-                                    &node,
-                                    &secret_key,
-                                    chain_id,
-                                    commit_round,
-                                    prev_commit_hash,
-                                    prev_block_hash,
-                                    height,
-                                    &transport,
-                                    &dag,
-                                    &vertex,
-                                    &mut commit_round,
-                                    &mut prev_commit_hash,
-                                    &mut prev_block_hash,
-                                );
-                            } else {
-                                // 多 validator：DAG 的 2/3 引用与 certificate 的 2/3 签名
-                                // 都是 finality 条件。后者不能降级为“仅审计”，否则本节点会
-                                // 自产随后被严格 block validation 拒绝的区块。
-                                let cert_signing_hash = match compute_cert_signing_hash(
-                                    &leader_vertex,
-                                    chain_id,
-                                    epoch,
-                                    commit_round,
-                                    prev_commit_hash,
-                                    &node,
-                                    height,
+                            let leader_vertex = match dag_guard.get(leader_hash).cloned() {
+                                Some(vertex) => vertex,
+                                None => continue,
+                            };
+                            if committed_vertices.contains(leader_hash) {
+                                continue;
+                            }
+                            let commit_leader = match commit_result.as_ref() {
+                                Ok(Some(commit_leader)) => commit_leader,
+                                _ => continue,
+                            };
+                            let (ordered_hashes, commit_vertices) =
+                                match canonical_commit_projection(
+                                    &dag_guard,
+                                    commit_leader,
+                                    &committed_vertices,
                                 ) {
-                                    Ok(h) => h,
-                                    Err(e) => {
-                                        error!("compute_cert_signing_hash 失败：{e}");
-                                        break;
+                                    Ok(projection) => projection,
+                                    Err(error) => {
+                                        warn!(
+                                            "Bullshark commit projection unavailable for {}: {}",
+                                            hex::encode(leader_hash),
+                                            error
+                                        );
+                                        continue;
                                     }
                                 };
-                                let self_sig = secp256k1_sign_hash(&secret_key, &cert_signing_hash);
-                                let self_vote = CommitVote {
-                                    epoch,
-                                    commit_round,
-                                    cert_signing_hash,
-                                    signer_pubkey: author_pubkey.clone(),
-                                    signature: self_sig,
-                                };
-                                votes.add_vote(self_vote.clone());
-                                let _ = transport.gossip_broadcast(
-                                    GossipTopic::CommitVote,
-                                    &NetworkMessage::CommitVote(self_vote),
-                                );
-                                // 收集已到达的投票（本节点 + peer）。不足 quorum 时保留它们，
-                                // 让后续轮次继续累积，而不是出一个必然无效的 block。
-                                let collected = votes.peek_for_hash(&cert_signing_hash);
-                                let active_pubkeys = node.active_validator_pubkeys_sorted();
-                                let mut sig_pairs: Vec<(usize, Vec<u8>)> = collected
-                                    .iter()
-                                    .filter_map(|vote| {
-                                        active_pubkeys
-                                            .iter()
-                                            .position(|pk| *pk == vote.signer_pubkey)
-                                            .map(|idx| (idx, vote.signature.clone()))
-                                    })
-                                    .collect();
-                                // 确保本节点签名在列（防御性）。
-                                if !sig_pairs.iter().any(|(idx, _)| {
-                                    active_pubkeys.get(*idx) == Some(&author_pubkey)
-                                }) {
-                                    if let Some(idx) =
-                                        active_pubkeys.iter().position(|pk| *pk == author_pubkey)
-                                    {
-                                        sig_pairs.push((
-                                            idx,
-                                            secp256k1_sign_hash(&secret_key, &cert_signing_hash),
-                                        ));
-                                    }
-                                }
-                                let quorum = required_quorum(vc);
-                                if sig_pairs.len() < quorum {
-                                    debug!(
-                                        commit_round,
-                                        votes = sig_pairs.len(),
-                                        quorum,
-                                        "waiting for commit certificate quorum"
-                                    );
+                            (leader_vertex, ordered_hashes, commit_vertices)
+                        };
+                        let height = node
+                            .block_store()
+                            .get_tip_height()
+                            .ok()
+                            .flatten()
+                            .map(|h| h + 1)
+                            .unwrap_or(1);
+
+                        if vc <= 1 {
+                            // 单 validator：自签出块。
+                            committed = commit_and_finalize_block(
+                                &commit_vertices,
+                                &ordered_hashes,
+                                &leader_vertex,
+                                &node,
+                                &secret_key,
+                                chain_id,
+                                commit_round,
+                                prev_commit_hash,
+                                prev_block_hash,
+                                height,
+                                &transport,
+                                &dag,
+                                &mut committed_vertices,
+                                &mut commit_round,
+                                &mut prev_commit_hash,
+                                &mut prev_block_hash,
+                            );
+                        } else {
+                            // 多 validator：DAG 的 2/3 引用与 certificate 的 2/3 签名
+                            // 都是 finality 条件。后者不能降级为“仅审计”，否则本节点会
+                            // 自产随后被严格 block validation 拒绝的区块。
+                            let cert_signing_hash = match compute_cert_signing_hash(
+                                &commit_vertices,
+                                &ordered_hashes,
+                                &leader_vertex,
+                                chain_id,
+                                epoch,
+                                commit_round,
+                                prev_commit_hash,
+                                &node,
+                                height,
+                            ) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    error!("compute_cert_signing_hash 失败：{e}");
                                     continue;
                                 }
-                                // Only discard votes after enough signer positions were collected.
-                                let _ = votes.drain_for_hash(&cert_signing_hash);
-                                commit_and_finalize_block_multi(
-                                    &leader_vertex,
-                                    &node,
-                                    chain_id,
-                                    epoch,
+                            };
+                            let self_sig = secp256k1_sign_hash(&secret_key, &cert_signing_hash);
+                            let self_vote = CommitVote {
+                                epoch,
+                                commit_round,
+                                cert_signing_hash,
+                                signer_pubkey: author_pubkey.clone(),
+                                signature: self_sig,
+                            };
+                            votes.add_vote(self_vote.clone());
+                            let _ = transport.gossip_broadcast(
+                                GossipTopic::CommitVote,
+                                &NetworkMessage::CommitVote(self_vote),
+                            );
+                            // 收集已到达的投票（本节点 + peer）。不足 quorum 时保留它们，
+                            // 让后续轮次继续累积，而不是出一个必然无效的 block。
+                            let collected = votes.peek_for_hash(&cert_signing_hash);
+                            let active_pubkeys = node.active_validator_pubkeys_sorted();
+                            let mut sig_pairs: Vec<(usize, Vec<u8>)> = collected
+                                .iter()
+                                .filter_map(|vote| {
+                                    active_pubkeys
+                                        .iter()
+                                        .position(|pk| *pk == vote.signer_pubkey)
+                                        .map(|idx| (idx, vote.signature.clone()))
+                                })
+                                .collect();
+                            // 确保本节点签名在列（防御性）。
+                            if !sig_pairs
+                                .iter()
+                                .any(|(idx, _)| active_pubkeys.get(*idx) == Some(&author_pubkey))
+                            {
+                                if let Some(idx) =
+                                    active_pubkeys.iter().position(|pk| *pk == author_pubkey)
+                                {
+                                    sig_pairs.push((
+                                        idx,
+                                        secp256k1_sign_hash(&secret_key, &cert_signing_hash),
+                                    ));
+                                }
+                            }
+                            let quorum = required_quorum(vc);
+                            if sig_pairs.len() < quorum {
+                                debug!(
                                     commit_round,
-                                    prev_commit_hash,
-                                    prev_block_hash,
-                                    height,
-                                    &sig_pairs,
-                                    vc,
-                                    &transport,
-                                    &dag,
-                                    &vertex,
-                                    &mut commit_round,
-                                    &mut prev_commit_hash,
-                                    &mut prev_block_hash,
+                                    votes = sig_pairs.len(),
+                                    quorum,
+                                    "waiting for commit certificate quorum"
                                 );
-                                committed = true;
+                                continue;
                             }
-                            if committed || vc <= 1 {
-                                break;
+                            // Only discard votes after the block is accepted; a failed put_block
+                            // must leave the certificate material available for retry.
+                            committed = commit_and_finalize_block_multi(
+                                &commit_vertices,
+                                &ordered_hashes,
+                                &leader_vertex,
+                                &node,
+                                chain_id,
+                                epoch,
+                                commit_round,
+                                prev_commit_hash,
+                                prev_block_hash,
+                                height,
+                                &sig_pairs,
+                                vc,
+                                &transport,
+                                &dag,
+                                &mut committed_vertices,
+                                &mut commit_round,
+                                &mut prev_commit_hash,
+                                &mut prev_block_hash,
+                            );
+                            if committed {
+                                let _ = votes.drain_for_hash(&cert_signing_hash);
                             }
+                        }
+                        if committed {
+                            break;
                         }
                     }
                 }
@@ -2710,6 +2771,7 @@ fn run_validator_loop(
                 // them here would make the next locally produced block fail Node's prev+1 check.
                 round = 1;
                 last_vertex = None;
+                committed_vertices.clear();
                 *dag.lock().unwrap_or_else(|e| e.into_inner()) = Dag::new();
                 info!(
                     "[validator-loop] epoch 推进至 {}（DAG round 已重置，commit_round={}，VRF={}）",

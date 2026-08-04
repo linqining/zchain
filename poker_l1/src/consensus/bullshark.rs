@@ -220,11 +220,20 @@ pub fn bullshark_linear_order(dag: &Dag, commit_hashes: &[Hash]) -> PokerL1Resul
         }
     }
 
+    // Never let an incomplete DAG turn deterministic ordering into a panic.  A commit can only
+    // be projected when every referenced vertex is present locally; callers should request the
+    // missing vertex from the peer and retry instead of producing a partial block.
+    for hash in &all_hashes {
+        if dag.get(hash).is_none() {
+            return Err(PokerL1Error::DagVertexNotFound);
+        }
+    }
+
     // 转为 Vec 并按 (round, author_pubkey_bytes) 排序
     let mut sorted: Vec<Hash> = all_hashes.into_iter().collect();
     sorted.sort_by(|a, b| {
-        let va = dag.get(a).expect("vertex must exist in DAG");
-        let vb = dag.get(b).expect("vertex must exist in DAG");
+        let va = dag.get(a).expect("validated vertex must exist in DAG");
+        let vb = dag.get(b).expect("validated vertex must exist in DAG");
         // 先按 round 排序
         va.round
             .cmp(&vb.round)
@@ -239,6 +248,24 @@ pub fn bullshark_linear_order(dag: &Dag, commit_hashes: &[Hash]) -> PokerL1Resul
     });
 
     Ok(sorted)
+}
+
+/// Return the canonical Bullshark order after removing vertices already materialized in an
+/// earlier block.
+///
+/// The DAG deliberately retains committed frontier vertices because later vertices reference
+/// them.  They must remain available for ancestry traversal, but their transactions must never be
+/// executed twice.  Keeping this filtering in the consensus module makes the committed-frontier
+/// rule explicit and gives every producer the same projection primitive.
+pub fn bullshark_linear_order_uncommitted(
+    dag: &Dag,
+    commit_hashes: &[Hash],
+    committed: &BTreeSet<Hash>,
+) -> PokerL1Result<Vec<Hash>> {
+    Ok(bullshark_linear_order(dag, commit_hashes)?
+        .into_iter()
+        .filter(|hash| !committed.contains(hash))
+        .collect())
 }
 
 /// Block 投影结果（SubTask 9.3）。
@@ -281,8 +308,21 @@ pub fn project_block_from_commit(
     height: u64,
     timestamp_ms: u64,
 ) -> PokerL1Result<BlockProjection> {
-    // 1. Bullshark 线性排序
-    let ordered_hashes = bullshark_linear_order(dag, &commit_leader.referencing_hashes)?;
+    // 1. Bullshark 线性排序。新证书必须承诺 canonical projection；空列表保留旧的
+    // library/test compatibility and is replaced by the leader roots below.
+    let commit_roots = if commit_certificate.vertex_hash_list.is_empty() {
+        commit_leader.referencing_hashes.clone()
+    } else {
+        commit_certificate.vertex_hash_list.clone()
+    };
+    let ordered_hashes = bullshark_linear_order(dag, &commit_roots)?;
+    if !commit_certificate.vertex_hash_list.is_empty()
+        && commit_certificate.vertex_hash_list != ordered_hashes
+    {
+        return Err(PokerL1Error::CommitCertificateMismatch(
+            "commit certificate vertex_hash_list is not the canonical Bullshark order".into(),
+        ));
+    }
 
     // 2. 按 vertex 顺序收集 tx_list（保留 vertex 边界，供 R4-M4 跨 vertex 排序）
     let mut vertex_txs: Vec<Vec<Transaction>> = Vec::with_capacity(ordered_hashes.len());

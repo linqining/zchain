@@ -287,24 +287,14 @@ impl FrameworkEval for AggregatorAir {
             let expected_right_post: E::F = self.right.post_state_root[i].into();
             let expected_agg_pre: E::F = self.agg_pre_state_root[i].into();
             let expected_agg_post: E::F = self.agg_post_state_root[i].into();
-            eval.add_constraint(
-                is_top_level.clone() * (left_pre[i].clone() - expected_left_pre),
-            );
-            eval.add_constraint(
-                is_top_level.clone() * (left_post[i].clone() - expected_left_post),
-            );
-            eval.add_constraint(
-                is_top_level.clone() * (right_pre[i].clone() - expected_right_pre),
-            );
+            eval.add_constraint(is_top_level.clone() * (left_pre[i].clone() - expected_left_pre));
+            eval.add_constraint(is_top_level.clone() * (left_post[i].clone() - expected_left_post));
+            eval.add_constraint(is_top_level.clone() * (right_pre[i].clone() - expected_right_pre));
             eval.add_constraint(
                 is_top_level.clone() * (right_post[i].clone() - expected_right_post),
             );
-            eval.add_constraint(
-                is_top_level.clone() * (left_pre[i].clone() - expected_agg_pre),
-            );
-            eval.add_constraint(
-                is_top_level.clone() * (right_post[i].clone() - expected_agg_post),
-            );
+            eval.add_constraint(is_top_level.clone() * (left_pre[i].clone() - expected_agg_pre));
+            eval.add_constraint(is_top_level.clone() * (right_post[i].clone() - expected_agg_post));
         }
 
         eval

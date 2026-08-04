@@ -86,8 +86,8 @@ fn test_production_aggregator_entry_points_reject_untrusted_poc() {
         Err(TexasAirError::UntrustedAggregationDisabled)
     ));
 
-    let poc_proof =
-        prove_aggregator_unchecked_for_tests(children.clone()).expect("test-only PoC prove should work");
+    let poc_proof = prove_aggregator_unchecked_for_tests(children.clone())
+        .expect("test-only PoC prove should work");
     assert!(matches!(
         verify_aggregator(poc_proof.clone()),
         Err(TexasAirError::UntrustedAggregationDisabled)
