@@ -10,7 +10,7 @@ use proving_service::full_hand::FullHandRunner;
 /// prove+verify 成功，并在最后一个 showdown reveal 中完成结算与 reset。
 #[test]
 fn full_hand_proves_complete_game() {
-    let (_plugin, report) = FullHandRunner::new().run();
+    let (plugin, report) = FullHandRunner::new().run();
 
     assert!(
         report.stopped_at.is_none(),
@@ -53,6 +53,12 @@ fn full_hand_proves_complete_game() {
         "最后一个 showdown reveal 必须完成 prove+verify"
     );
     assert!(report.chain_ok, "state_root 链应衔接");
+
+    let aggregate = plugin
+        .aggregate_crypto_proofs()
+        .expect("连续 shuffle archive 应生成 host-verified outer aggregate");
+    assert_eq!(aggregate.children().len(), 2);
+    assert_eq!(aggregate.hand_id(), 1);
 
     let has_dispatch_timing = report.steps.iter().any(|s| s.dispatch.as_micros() > 0);
     assert!(has_dispatch_timing, "应有非零 dispatch 计时");

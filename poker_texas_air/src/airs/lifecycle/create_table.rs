@@ -157,14 +157,8 @@ impl FrameworkEval for CreateTableAir {
 
         // 2. 读取业务列
         let input_max_players = eval.next_trace_mask();
-        let input_small_blind_0 = eval.next_trace_mask();
-        let input_small_blind_1 = eval.next_trace_mask();
-        let input_small_blind_2 = eval.next_trace_mask();
-        let input_small_blind_3 = eval.next_trace_mask();
-        let input_big_blind_0 = eval.next_trace_mask();
-        let input_big_blind_1 = eval.next_trace_mask();
-        let input_big_blind_2 = eval.next_trace_mask();
-        let input_big_blind_3 = eval.next_trace_mask();
+        let input_small_blind: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
+        let input_big_blind: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
         let input_name_hash_0 = eval.next_trace_mask();
         let input_name_hash_1 = eval.next_trace_mask();
         let input_name_hash_2 = eval.next_trace_mask();
@@ -176,38 +170,32 @@ impl FrameworkEval for CreateTableAir {
         let output_button = eval.next_trace_mask();
         let output_round_state = eval.next_trace_mask();
 
-        let one: E::F = M31::from(1u32).into();
-        let two: E::F = M31::from(2u32).into();
-        let nine: E::F = M31::from(9u32).into();
-
-        // 3. 业务约束 1：max_players ∈ [2, 9]
-        //    (max_players - 2) * (9 - max_players) >= 0
-        //    AIR 中验证：max_players ∈ {2..=9} 用 boolean 分解（简化版）
-        //    完整实现需要 8-bit 分解 + range check，这里先用简化形式：
-        //    (max_players - 2) 在 [0, 7] 内 — 用 4-bit 分解 + range check
-        //    简化约束：max_players >= 2 且 max_players <= 9
-        //    用差值非负的 boolean 位分解（4 bit 足够 0..=15）
-        //    为了简化模板，约束 max_players ∈ [2, 9] 用 (max_players - 2) * (max_players - 9) <= 0
-        //    这需要 sign 检查；为简化，约束 max_players * (max_players - 2) * (max_players - 9) = 0 是错的（不连续）
-        //    正确做法：max_players ∈ {2,3,4,5,6,7,8,9} 用 lookup table
-        //    阶段 1 PoC 用简化约束：max_players == 9 (固定)，阶段 2 改 lookup
-        //    TODO 阶段 2：用 logup lookup table 约束 max_players ∈ {2..=9}
+        // 3. 业务约束 1：max_players ∈ [2, 9]。
+        // `CreateTableInput` 是 verifier 重建的公开 statement，因此无效公开值可直接
+        // 变成 active 行上的非零常量约束，无需额外 range witness。
         let expected_max_players: E::F = M31::from(u32::from(self.input.max_players)).into();
         let max_players_diff = input_max_players.clone() - expected_max_players;
         eval.add_constraint(is_active.clone() * max_players_diff);
+        let invalid_max_players: E::F =
+            M31::from(u32::from(!(2..=9).contains(&self.input.max_players))).into();
+        eval.add_constraint(is_active.clone() * invalid_max_players);
 
-        // 4. 业务约束 2：big_blind > 0
-        //    TODO 阶段 2：用 range check + is_nonzero witness 完整实现
-        //    简化：约束 input_big_blind == 公开输入 big_blind（host 已校验 > 0）
-        let expected_big_blind_0: E::F = M31::from((self.input.big_blind & 0xFFFF) as u32).into();
-        let big_blind_diff = input_big_blind_0.clone() - expected_big_blind_0;
-        eval.add_constraint(is_active.clone() * big_blind_diff);
-
-        // 5. 业务约束 3：small_blind <= big_blind（host 已校验，AIR 内只验证输入一致性）
-        let expected_small_blind_0: E::F =
-            M31::from((self.input.small_blind & 0xFFFF) as u32).into();
-        let small_blind_diff = input_small_blind_0.clone() - expected_small_blind_0;
-        eval.add_constraint(is_active.clone() * small_blind_diff);
+        // 4-5. 完整绑定两个 64-bit blind，并在 AIR statement 内拒绝零大盲和倒置盲注。
+        for limb in 0..4 {
+            let expected_big: E::F =
+                M31::from(((self.input.big_blind >> (limb * 16)) & 0xFFFF) as u32).into();
+            let expected_small: E::F =
+                M31::from(((self.input.small_blind >> (limb * 16)) & 0xFFFF) as u32).into();
+            eval.add_constraint(is_active.clone() * (input_big_blind[limb].clone() - expected_big));
+            eval.add_constraint(
+                is_active.clone() * (input_small_blind[limb].clone() - expected_small),
+            );
+        }
+        let zero_big_blind: E::F = M31::from(u32::from(self.input.big_blind == 0)).into();
+        let inverted_blinds: E::F =
+            M31::from(u32::from(self.input.small_blind > self.input.big_blind)).into();
+        eval.add_constraint(is_active.clone() * zero_big_blind);
+        eval.add_constraint(is_active.clone() * inverted_blinds);
 
         // 6. 业务约束 4：output_pot == 0（4 个 limb 都为 0）
         eval.add_constraint(is_active.clone() * output_pot_0.clone());
@@ -243,19 +231,6 @@ impl FrameworkEval for CreateTableAir {
 
         // 11. state_root 的 full-width preimage/hash 自洽目前由生产 host verifier
         //     检查并混入 transcript；本 AIR 只约束域分隔 M31 投影，未嵌入 Poseidon AIR。
-
-        // Suppress unused warnings
-        let _ = (
-            input_small_blind_1,
-            input_small_blind_2,
-            input_small_blind_3,
-            input_big_blind_1,
-            input_big_blind_2,
-            input_big_blind_3,
-            one,
-            two,
-            nine,
-        );
 
         eval
     }

@@ -31,12 +31,14 @@ use crate::airs::crypto::submit_reconstruct_deck::{
 use crate::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
+use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::validate_full_dispatch_task;
 use crate::precompile_binding::{
     PokerPrecompileId, PrecompileCallBinding, precompile_call_context,
 };
+use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{MethodInput, ProveTask};
 use crate::prover::{MethodProof, prove_method};
 use crate::public_inputs::TexasPublicInputs;
@@ -164,7 +166,9 @@ impl DualProofBundle {
             .ok_or_else(|| wire_error("unknown dual proof method kind"))?;
         let precompile_id = match bytes[10] {
             1 => PokerPrecompileId::Shuffle,
+            2 => PokerPrecompileId::DleqLeave,
             3 => PokerPrecompileId::ReconstructionV3,
+            4 => PokerPrecompileId::RevealToken,
             _ => return Err(wire_error("unknown poker precompile id")),
         };
         let abi_version = bytes[11];
@@ -289,6 +293,60 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
     }
 }
 
+/// Repackage an already archived, natively verified method proof as a dual
+/// proof without running the prover again.
+///
+/// The canonical precompile request is rebuilt from `task`; the archive only
+/// supplies the serialized Stwo half and is never trusted for method metadata.
+/// This is the bridge used by proving-service outer aggregation after restart.
+pub fn dual_proof_from_archived(
+    task: &ProveTask,
+    archive: &ArchivedMethodProof,
+) -> TexasAirResult<DualProofBundle> {
+    if archive.method_kind() != task.method_kind {
+        return Err(TexasAirError::SpecViolation(
+            "archived dual proof method kind does not match task".into(),
+        ));
+    }
+    let prepared = prepare(task, None)?;
+    let (method_kind, precompile_id, abi_version, request_bytes, num_columns, log_size) =
+        match prepared {
+            PreparedMethod::Shuffle {
+                request_bytes, air, ..
+            } => (
+                MethodKind::SubmitShuffleV2,
+                PokerPrecompileId::Shuffle,
+                SHUFFLE_ABI_VERSION,
+                request_bytes,
+                SubmitShuffleV2Air::num_columns(),
+                air.log_size,
+            ),
+            PreparedMethod::Reconstruction {
+                request_bytes, air, ..
+            } => (
+                MethodKind::SubmitReconstructDeck,
+                PokerPrecompileId::ReconstructionV3,
+                RECONSTRUCTION_V3_ABI_VERSION,
+                request_bytes,
+                SubmitReconstructDeckAir::num_columns(),
+                air.log_size,
+            ),
+        };
+    if archive.num_columns()? != num_columns || archive.log_size() != log_size {
+        return Err(TexasAirError::SpecViolation(
+            "archived dual proof trace shape does not match canonical task".into(),
+        ));
+    }
+    let stark = archive.decode_stark()?;
+    bundle_from_stark(
+        method_kind,
+        precompile_id,
+        abi_version,
+        &stark,
+        request_bytes,
+    )
+}
+
 /// Verify both proof halves against an independently authenticated task.
 ///
 /// Verification never falls back to package-carried AIR or public inputs:
@@ -402,11 +460,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
         precompile_binding: None,
         expected_trace_row: None,
     };
-    public_inputs.bind_dispatch_call(
-        task.context.clone(),
-        task.selector,
-        task.raw_args.clone(),
-    )?;
+    public_inputs.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
 
     match task.method_kind {
         MethodKind::SubmitShuffleV2 => {
@@ -469,7 +523,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let binding = PrecompileCallBinding::verify_shuffle(&request)?;
             let input = SubmitShuffleV2Input {
                 seat_index: *seat_index,
-                new_deck_commitment: task.post_table.deck_state.encrypted.len() as u64,
+                new_deck_commitment: deck_commitment(&task.post_table),
                 // Admission is determined by the pre-dispatch shuffle phase. The final shuffler
                 // legitimately drives the post-state to NONE after `advance_shuffle`.
                 shuffle_phase: task.pre_table.shuffle_state.phase,

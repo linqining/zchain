@@ -35,6 +35,7 @@ pub mod airs;
 pub mod trace_gen;
 
 // ===== 公共基础设施 =====
+pub mod deck_commitment;
 pub mod dual_proof;
 pub mod error;
 pub mod merkle_tree;

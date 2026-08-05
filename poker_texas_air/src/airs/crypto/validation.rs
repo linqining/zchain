@@ -24,8 +24,12 @@ use super::submit_reconstruct_deck::{
 };
 use super::submit_shuffle_v2::{SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row};
 use crate::airs::validation::{validate_canonical_dispatch, validate_row};
+use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::{
+    LeaveDleqVerifyRequest, PokerPrecompileId, RevealTokenVerifyRequest, precompile_call_context,
+};
 use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::state_root_to_air_limbs;
@@ -64,10 +68,12 @@ pub(crate) fn validate_join_and_shuffle(
 
     let input = JoinAndShuffleInput {
         seat_index: args.seat_index,
+        old_deck_commitment: deck_commitment(&canonical.pre),
         new_deck_commitment: deck_commitment(&canonical.post),
         shuffle_phase: canonical.pre.shuffle_state.phase,
     };
     if air.input.seat_index != input.seat_index
+        || air.input.old_deck_commitment != input.old_deck_commitment
         || air.input.new_deck_commitment != input.new_deck_commitment
         || air.input.shuffle_phase != input.shuffle_phase
     {
@@ -127,6 +133,52 @@ pub(crate) fn validate_leave_with_proof(
         ));
     }
 
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        TexasAirError::SpecViolation(
+            "leave_with_proof requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    if binding.precompile_id() != PokerPrecompileId::DleqLeave {
+        return Err(TexasAirError::SpecViolation(
+            "leave_with_proof received the wrong precompile receipt type".into(),
+        ));
+    }
+    let player_pk = canonical
+        .pre
+        .seats
+        .get(usize::from(args.seat_index))
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "leave_with_proof seat is outside the canonical pre-table".into(),
+            )
+        })?
+        .pk;
+    let expected_context = precompile_call_context(
+        MethodKind::LeaveWithProof,
+        args.seat_index,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    let expected_request = LeaveDleqVerifyRequest::new(
+        expected_context,
+        canonical.pre.deck_state.encrypted.clone(),
+        args.output_cards.clone(),
+        player_pk,
+        args.leave_proof.clone(),
+    );
+    if binding.request_bytes() != expected_request.encode()? {
+        return Err(TexasAirError::SpecViolation(
+            "leave_with_proof precompile request does not match the canonical dispatch".into(),
+        ));
+    }
+    binding.reverify()?;
+
     let input = LeaveWithProofInput {
         seat_index: args.seat_index,
         // `LeaveKind` is the proof marker type, not a runtime enum. The current
@@ -134,10 +186,12 @@ pub(crate) fn validate_leave_with_proof(
         // AIR replaces this placeholder column.
         leave_kind: 0,
         shuffle_phase: canonical.pre.shuffle_state.phase,
+        precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
         || air.input.leave_kind != input.leave_kind
         || air.input.shuffle_phase != input.shuffle_phase
+        || air.input.precompile != input.precompile
     {
         return Err(TexasAirError::SpecViolation(
             "leave_with_proof: AIR input does not match the canonical dispatch".into(),
@@ -190,14 +244,48 @@ pub(crate) fn validate_submit_player_reveal_tokens(
         ));
     }
 
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        TexasAirError::SpecViolation(
+            "submit_player_reveal_tokens requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    if binding.precompile_id() != PokerPrecompileId::RevealToken {
+        return Err(TexasAirError::SpecViolation(
+            "submit_player_reveal_tokens received the wrong precompile receipt type".into(),
+        ));
+    }
+    let expected_context = precompile_call_context(
+        MethodKind::SubmitPlayerRevealTokens,
+        args.seat_index,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    let expected_request =
+        RevealTokenVerifyRequest::from_dispatch(expected_context, &canonical.pre, &args)?;
+    if binding.request_bytes() != expected_request.encode()? {
+        return Err(TexasAirError::SpecViolation(
+            "submit_player_reveal_tokens precompile request does not match the canonical dispatch"
+                .into(),
+        ));
+    }
+    binding.reverify()?;
+
     let input = SubmitPlayerRevealTokensInput {
         seat_index: args.seat_index,
         reveal_phase: canonical.pre.reveal_token_state.reveal_phase,
         version_increment: reveal_version_increment(&canonical.pre, &canonical.post)?,
+        precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
         || air.input.reveal_phase != input.reveal_phase
         || air.input.version_increment != input.version_increment
+        || air.input.precompile != input.precompile
     {
         return Err(TexasAirError::SpecViolation(
             "submit_player_reveal_tokens: AIR input does not match the canonical dispatch".into(),
@@ -389,11 +477,4 @@ fn count_as_u8(count: usize, method: &str, field: &str) -> TexasAirResult<u8> {
     u8::try_from(count).map_err(|_| {
         TexasAirError::SpecViolation(format!("{method}: {field} count {count} exceeds u8"))
     })
-}
-
-fn deck_commitment(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable) -> u64 {
-    // This intentionally mirrors the current trace contract. A real
-    // ciphertext commitment replaces both this helper and the Orchestrator
-    // helper in the next soundness step.
-    table.deck_state.encrypted.len() as u64
 }

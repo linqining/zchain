@@ -6,6 +6,8 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
+use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext, N_CARDS};
 use poker_protocol::precompile::{
     NativeBls12381ReconstructionV3Verifier, NativeBls12381ShuffleVerifier,
 };
@@ -13,6 +15,9 @@ use poker_protocol::precompile_abi::{
     RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3Verifier, ReconstructionV3VerifyRequest,
     SHUFFLE_ABI_VERSION, ShuffleVerifier, ShuffleVerifyRequest,
 };
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
+use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
+use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -22,14 +27,302 @@ use crate::state_root::StateRoot;
 /// Number of M31 columns used for one full 256-bit digest.
 pub const DIGEST_LIMBS: usize = 16;
 
+/// Canonical ABI version for a Texas leave-layer DLEq verification request.
+pub const LEAVE_DLEQ_ABI_VERSION: u8 = 1;
+
+/// Canonical ABI version for batched reveal-token DLEq verification.
+pub const REVEAL_TOKEN_ABI_VERSION: u8 = 1;
+
+/// Canonical request for verifying one player's encrypted-deck layer removal.
+///
+/// The DLEq transcript remains the protocol-compatible `zk_leave_proof_v1`
+/// transcript used by the L1 state machine. `call_context` is committed by the
+/// request/receipt digests so an otherwise valid proof cannot reuse a verifier
+/// receipt at another table, hand, call sequence, state transition, or dispatch.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct LeaveDleqVerifyRequest {
+    abi_version: u8,
+    call_context: Vec<u8>,
+    input_cards: Vec<ElGamalCiphertext>,
+    output_cards: Vec<ElGamalCiphertext>,
+    player_pk: ECPoint,
+    leave_proof: DLEqProof<DefaultCurve, LeaveKind>,
+}
+
+impl LeaveDleqVerifyRequest {
+    /// Build a request with the current ABI version.
+    #[must_use]
+    pub fn new(
+        call_context: Vec<u8>,
+        input_cards: Vec<ElGamalCiphertext>,
+        output_cards: Vec<ElGamalCiphertext>,
+        player_pk: ECPoint,
+        leave_proof: DLEqProof<DefaultCurve, LeaveKind>,
+    ) -> Self {
+        Self {
+            abi_version: LEAVE_DLEQ_ABI_VERSION,
+            call_context,
+            input_cards,
+            output_cards,
+            player_pk,
+            leave_proof,
+        }
+    }
+
+    /// Strict canonical encoding used by request digests.
+    pub fn encode(&self) -> TexasAirResult<Vec<u8>> {
+        self.validate_shape()?;
+        borsh::to_vec(self).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "leave DLEq request Borsh encode failed: {error}"
+            ))
+        })
+    }
+
+    /// Strict canonical decoding with trailing-byte and shape rejection.
+    pub fn decode(bytes: &[u8]) -> TexasAirResult<Self> {
+        let request: Self = borsh::from_slice(bytes).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "leave DLEq request Borsh decode failed: {error}"
+            ))
+        })?;
+        request.validate_shape()?;
+        Ok(request)
+    }
+
+    fn validate_shape(&self) -> TexasAirResult<()> {
+        if self.abi_version != LEAVE_DLEQ_ABI_VERSION {
+            return Err(TexasAirError::SpecViolation(format!(
+                "unsupported leave DLEq ABI version {}",
+                self.abi_version
+            )));
+        }
+        if self.call_context.is_empty() {
+            return Err(TexasAirError::SpecViolation(
+                "leave DLEq request requires a non-empty call context".into(),
+            ));
+        }
+        if self.input_cards.len() != N_CARDS || self.output_cards.len() != N_CARDS {
+            return Err(TexasAirError::SpecViolation(format!(
+                "leave DLEq request requires exactly {N_CARDS} input/output cards, got {}/{}",
+                self.input_cards.len(),
+                self.output_cards.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// One exact reveal-token statement selected by a dispatch assignment index.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct RevealTokenVerifyItem {
+    assignment_index: u8,
+    encrypted_card: ElGamalCiphertext,
+    reveal_token: ECPoint,
+    proof: RevealTokenProof<DefaultCurve>,
+}
+
+/// Canonical batched request for one `submit_player_reveal_tokens` dispatch.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct RevealTokenVerifyRequest {
+    abi_version: u8,
+    call_context: Vec<u8>,
+    seat_index: u8,
+    reveal_phase: u8,
+    player_pk: ECPoint,
+    items: Vec<RevealTokenVerifyItem>,
+}
+
+impl RevealTokenVerifyRequest {
+    /// Rebuild the exact proof statements consumed by the native L1 dispatch.
+    pub fn from_dispatch(
+        call_context: Vec<u8>,
+        pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+        args: &poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs,
+    ) -> TexasAirResult<Self> {
+        use poker_l1::vm::contracts::texas_poker::constants::{
+            REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN,
+        };
+
+        if args.assignment_indices.len() != args.reveal_tokens.len()
+            || args.assignment_indices.len() != args.proofs.len()
+        {
+            return Err(TexasAirError::SpecViolation(
+                "reveal-token request vectors have different lengths".into(),
+            ));
+        }
+        if args.assignment_indices.is_empty() || args.assignment_indices.len() > N_CARDS {
+            return Err(TexasAirError::SpecViolation(format!(
+                "reveal-token request requires 1..={N_CARDS} statements"
+            )));
+        }
+        let seat = pre_table
+            .seats
+            .get(usize::from(args.seat_index))
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "reveal-token seat is outside the canonical pre-table".into(),
+                )
+            })?;
+        if !seat.is_occupied() {
+            return Err(TexasAirError::SpecViolation(
+                "reveal-token seat is not occupied in the canonical pre-table".into(),
+            ));
+        }
+        let reveal_phase = pre_table.reveal_token_state.reveal_phase;
+        if reveal_phase == REVEAL_PHASE_NONE {
+            return Err(TexasAirError::SpecViolation(
+                "reveal-token request cannot target the NONE phase".into(),
+            ));
+        }
+
+        let mut seen = [false; 256];
+        let mut items = Vec::with_capacity(args.assignment_indices.len());
+        for ((assignment_index, reveal_token), proof) in args
+            .assignment_indices
+            .iter()
+            .zip(&args.reveal_tokens)
+            .zip(&args.proofs)
+        {
+            let slot = usize::from(*assignment_index);
+            if seen[slot] {
+                return Err(TexasAirError::SpecViolation(format!(
+                    "duplicate reveal assignment index {assignment_index}"
+                )));
+            }
+            seen[slot] = true;
+            let assignment = pre_table
+                .reveal_token_state
+                .assignments
+                .get(slot)
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation(format!(
+                        "reveal assignment index {assignment_index} is outside the canonical pre-table"
+                    ))
+                })?;
+            if assignment.decrypted {
+                return Err(TexasAirError::SpecViolation(format!(
+                    "reveal assignment index {assignment_index} is already decrypted"
+                )));
+            }
+            if !assignment.pending_players.contains(&args.seat_index) {
+                return Err(TexasAirError::SpecViolation(format!(
+                    "reveal seat {} is not pending for assignment {assignment_index}",
+                    args.seat_index
+                )));
+            }
+            let card_index = usize::from(assignment.encrypted_card_index);
+            let encrypted_card = if reveal_phase == REVEAL_PHASE_SHOWDOWN {
+                pre_table
+                    .deck_state
+                    .decrypted_cards
+                    .iter()
+                    .find(|card| {
+                        usize::from(card.encrypted_card_index) == card_index
+                            && card.ciphertext.is_some()
+                    })
+                    .and_then(|card| card.ciphertext)
+                    .or_else(|| pre_table.deck_state.encrypted.get(card_index).copied())
+            } else {
+                pre_table.deck_state.encrypted.get(card_index).copied()
+            }
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(format!(
+                    "reveal assignment {assignment_index} references missing ciphertext {}",
+                    assignment.encrypted_card_index
+                ))
+            })?;
+            items.push(RevealTokenVerifyItem {
+                assignment_index: *assignment_index,
+                encrypted_card,
+                reveal_token: *reveal_token,
+                proof: *proof,
+            });
+        }
+
+        let request = Self {
+            abi_version: REVEAL_TOKEN_ABI_VERSION,
+            call_context,
+            seat_index: args.seat_index,
+            reveal_phase,
+            player_pk: seat.pk,
+            items,
+        };
+        request.validate_shape()?;
+        Ok(request)
+    }
+
+    /// Strict canonical encoding used by request digests.
+    pub fn encode(&self) -> TexasAirResult<Vec<u8>> {
+        self.validate_shape()?;
+        borsh::to_vec(self).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "reveal-token request Borsh encode failed: {error}"
+            ))
+        })
+    }
+
+    /// Strict canonical decoding with trailing-byte and shape rejection.
+    pub fn decode(bytes: &[u8]) -> TexasAirResult<Self> {
+        let request: Self = borsh::from_slice(bytes).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "reveal-token request Borsh decode failed: {error}"
+            ))
+        })?;
+        request.validate_shape()?;
+        Ok(request)
+    }
+
+    fn validate_shape(&self) -> TexasAirResult<()> {
+        if self.abi_version != REVEAL_TOKEN_ABI_VERSION {
+            return Err(TexasAirError::SpecViolation(format!(
+                "unsupported reveal-token ABI version {}",
+                self.abi_version
+            )));
+        }
+        if self.call_context.is_empty() {
+            return Err(TexasAirError::SpecViolation(
+                "reveal-token request requires a non-empty call context".into(),
+            ));
+        }
+        if !(1..=6).contains(&self.reveal_phase) {
+            return Err(TexasAirError::SpecViolation(format!(
+                "invalid reveal-token phase {}",
+                self.reveal_phase
+            )));
+        }
+        if self.items.is_empty() || self.items.len() > N_CARDS {
+            return Err(TexasAirError::SpecViolation(format!(
+                "reveal-token request requires 1..={N_CARDS} statements"
+            )));
+        }
+        let mut seen = [false; 256];
+        for item in &self.items {
+            let slot = usize::from(item.assignment_index);
+            if seen[slot] {
+                return Err(TexasAirError::SpecViolation(format!(
+                    "duplicate reveal assignment index {}",
+                    item.assignment_index
+                )));
+            }
+            seen[slot] = true;
+        }
+        Ok(())
+    }
+}
+
 /// Poker proof precompile selected by a call binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PokerPrecompileId {
     /// Bayer--Groth shuffle proof verification.
     Shuffle = 1,
+    /// Batched DLEq verification for removing one player's encryption layer.
+    DleqLeave = 2,
     /// Reconstruction V3 slot-OR verification.
     ReconstructionV3 = 3,
+    /// Batched reveal-token Chaum--Pedersen verification.
+    RevealToken = 4,
 }
 
 /// Native backend identity committed by the receipt digest.
@@ -93,6 +386,51 @@ impl PrecompileCallBinding {
         ))
     }
 
+    /// Verify and bind a canonical leave-layer DLEq request.
+    pub fn verify_leave_dleq(request: &LeaveDleqVerifyRequest) -> TexasAirResult<Self> {
+        let request_bytes = request.encode()?;
+        let mut transcript = poker_l1::vm::contracts::texas_poker::utils::new_leave_transcript();
+        if !request.leave_proof.verify(
+            &request.input_cards,
+            &request.output_cards,
+            &request.player_pk.0,
+            &mut transcript,
+        ) {
+            return Err(TexasAirError::SpecViolation(
+                "poker precompile verification failed: leave DLEq proof rejected".into(),
+            ));
+        }
+        Ok(Self::issue(
+            PokerPrecompileId::DleqLeave,
+            LEAVE_DLEQ_ABI_VERSION,
+            request_bytes,
+        ))
+    }
+
+    /// Verify and bind every reveal-token proof in one canonical dispatch request.
+    pub fn verify_reveal_tokens(request: &RevealTokenVerifyRequest) -> TexasAirResult<Self> {
+        let request_bytes = request.encode()?;
+        for item in &request.items {
+            item.proof
+                .verify(
+                    &item.encrypted_card,
+                    &item.reveal_token.0,
+                    &request.player_pk.0,
+                    &mut MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
+                )
+                .map_err(|error| {
+                    TexasAirError::SpecViolation(format!(
+                        "poker precompile verification failed: reveal-token proof rejected: {error:?}"
+                    ))
+                })?;
+        }
+        Ok(Self::issue(
+            PokerPrecompileId::RevealToken,
+            REVEAL_TOKEN_ABI_VERSION,
+            request_bytes,
+        ))
+    }
+
     /// Verify and bind a canonical reconstruction V3 request with the native backend.
     pub fn verify_reconstruction_v3(
         request: &ReconstructionV3VerifyRequest,
@@ -139,10 +477,18 @@ impl PrecompileCallBinding {
                     ShuffleVerifyRequest::decode(&self.request_bytes).map_err(precompile_error)?;
                 Self::verify_shuffle(&request)?
             }
+            PokerPrecompileId::DleqLeave => {
+                let request = LeaveDleqVerifyRequest::decode(&self.request_bytes)?;
+                Self::verify_leave_dleq(&request)?
+            }
             PokerPrecompileId::ReconstructionV3 => {
                 let request = ReconstructionV3VerifyRequest::decode(&self.request_bytes)
                     .map_err(precompile_error)?;
                 Self::verify_reconstruction_v3(&request)?
+            }
+            PokerPrecompileId::RevealToken => {
+                let request = RevealTokenVerifyRequest::decode(&self.request_bytes)?;
+                Self::verify_reveal_tokens(&request)?
             }
         };
         if &rebuilt != self {

@@ -208,6 +208,75 @@ fn test_soundness_zero_big_blind() {
     );
 }
 
+/// Soundness: 仅篡改大盲高位 limb、保持低 16 位不变也必须失败。
+#[test]
+fn test_soundness_tampered_big_blind_high_limb() {
+    let pre_table = make_pre_table();
+    let post_table = make_post_table();
+    let input = CreateTableInput {
+        name: "test_table".to_string(),
+        max_players: 6,
+        small_blind: 10,
+        big_blind: 20,
+    };
+    let trace =
+        gen_create_table_trace(input, &pre_table, &post_table, 42, 0, 1).expect("trace 生成失败");
+    let mut proof = prove_create_table(
+        &trace,
+        TexasPublicInputs::from_tables(&pre_table, &post_table, MethodKind::CreateTable, 42, 0, 1)
+            .expect("PI 构造失败"),
+    )
+    .expect("prove 失败");
+    proof.air.input.big_blind = 20 + (1u64 << 32);
+    assert!(verify_create_table(proof).is_err());
+}
+
+fn invalid_statement_cannot_prove(input: CreateTableInput) {
+    let pre_table = make_pre_table();
+    let post_table = make_post_table();
+    let trace = gen_create_table_trace(input, &pre_table, &post_table, 42, 0, 1)
+        .expect("invalid statement trace construction should remain deterministic");
+    let result = prove_create_table(
+        &trace,
+        TexasPublicInputs::from_tables(&pre_table, &post_table, MethodKind::CreateTable, 42, 0, 1)
+            .expect("PI 构造失败"),
+    );
+    assert!(
+        result.is_err(),
+        "invalid create_table statement unexpectedly proved"
+    );
+}
+
+#[test]
+fn test_air_rejects_out_of_range_max_players_without_host_validation() {
+    invalid_statement_cannot_prove(CreateTableInput {
+        name: "invalid-max".into(),
+        max_players: 1,
+        small_blind: 10,
+        big_blind: 20,
+    });
+}
+
+#[test]
+fn test_air_rejects_zero_big_blind_without_host_validation() {
+    invalid_statement_cannot_prove(CreateTableInput {
+        name: "zero-big".into(),
+        max_players: 6,
+        small_blind: 0,
+        big_blind: 0,
+    });
+}
+
+#[test]
+fn test_air_rejects_inverted_blinds_without_host_validation() {
+    invalid_statement_cannot_prove(CreateTableInput {
+        name: "inverted".into(),
+        max_players: 6,
+        small_blind: 21,
+        big_blind: 20,
+    });
+}
+
 /// 单元测试：验证 `CreateTableAir::num_columns()` 与 `cols::NUM_COLUMNS` 一致。
 #[test]
 fn test_num_columns_consistency() {

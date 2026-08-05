@@ -83,9 +83,13 @@ use crate::airs::lifecycle::reset_for_next_hand::{
 };
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use crate::airs::lifecycle::tick::{TickAir, TickRow, canonical_input as canonical_tick_input};
+use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
+use crate::precompile_binding::{
+    LeaveDleqVerifyRequest, PrecompileCallBinding, RevealTokenVerifyRequest,
+    precompile_call_context,
+};
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
 use crate::prover::{MethodProof, prove_method};
@@ -1600,6 +1604,7 @@ impl Orchestrator {
         };
         let input = JoinAndShuffleInput {
             seat_index: *seat_index,
+            old_deck_commitment: deck_commitment(&task.pre_table),
             new_deck_commitment: deck_commitment(&task.post_table),
             // The phase is an admission precondition. `advance_shuffle` may complete the last
             // participant and reset the post-state phase to NONE, so deriving it from post-state
@@ -1651,7 +1656,7 @@ impl Orchestrator {
     ) -> TexasAirResult<B::Output> {
         let MethodInput::LeaveWithProof {
             seat_index,
-            raw_args: _,
+            raw_args,
         } = &task.method_input
         else {
             return Err(input_mismatch(
@@ -1660,10 +1665,52 @@ impl Orchestrator {
                 &task.method_input,
             ));
         };
+        let args: poker_l1::vm::contracts::texas_poker::dispatch::LeaveWithProofArgs =
+            borsh::from_slice(raw_args).map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "leave_with_proof raw args borsh: {error}"
+                ))
+            })?;
+        if args.seat_index != *seat_index {
+            return Err(TexasAirError::SpecViolation(
+                "leave_with_proof method input seat differs from raw args".into(),
+            ));
+        }
+        let player_pk = task
+            .pre_table
+            .seats
+            .get(usize::from(*seat_index))
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "leave_with_proof seat is outside the canonical pre-table".into(),
+                )
+            })?
+            .pk;
+        let call_context = precompile_call_context(
+            MethodKind::LeaveWithProof,
+            *seat_index,
+            pi.table_id,
+            pi.hand_id,
+            pi.call_seq,
+            pi.pre_version,
+            pi.post_version,
+            pi.pre_state_root,
+            pi.post_state_root,
+            pi.dispatch_call_digest,
+        );
+        let request = LeaveDleqVerifyRequest::new(
+            call_context,
+            task.pre_table.deck_state.encrypted.clone(),
+            args.output_cards,
+            player_pk,
+            args.leave_proof,
+        );
+        let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
         let input = LeaveWithProofInput {
             seat_index: *seat_index,
             leave_kind: 0,
             shuffle_phase: task.pre_table.shuffle_state.phase,
+            precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
@@ -1678,12 +1725,14 @@ impl Orchestrator {
             post_v,
             post_cc,
         );
+        let mut bound_pi = pi.clone();
+        bound_pi.precompile_binding = Some(binding);
         run(
             backend,
             LeaveWithProofAir::num_columns(),
             &row,
             &LeaveWithProofRow::padding(),
-            pi,
+            &bound_pi,
             move || LeaveWithProofAir {
                 log_size: MIN_LOG_SIZE,
                 input,
@@ -1816,7 +1865,7 @@ impl Orchestrator {
     ) -> TexasAirResult<B::Output> {
         let MethodInput::SubmitPlayerRevealTokens {
             seat_index,
-            raw_args: _,
+            raw_args,
         } = &task.method_input
         else {
             return Err(input_mismatch(
@@ -1825,6 +1874,32 @@ impl Orchestrator {
                 &task.method_input,
             ));
         };
+        let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
+            borsh::from_slice(raw_args).map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "submit_player_reveal_tokens raw args borsh: {error}"
+                ))
+            })?;
+        if args.seat_index != *seat_index {
+            return Err(TexasAirError::SpecViolation(
+                "submit_player_reveal_tokens method input seat differs from raw args".into(),
+            ));
+        }
+        let call_context = precompile_call_context(
+            MethodKind::SubmitPlayerRevealTokens,
+            *seat_index,
+            pi.table_id,
+            pi.hand_id,
+            pi.call_seq,
+            pi.pre_version,
+            pi.post_version,
+            pi.pre_state_root,
+            pi.post_state_root,
+            pi.dispatch_call_digest,
+        );
+        let request =
+            RevealTokenVerifyRequest::from_dispatch(call_context, &task.pre_table, &args)?;
+        let binding = PrecompileCallBinding::verify_reveal_tokens(&request)?;
         let input = SubmitPlayerRevealTokensInput {
             seat_index: *seat_index,
             // Admission is determined by the pre-dispatch reveal phase. The final player in a
@@ -1832,6 +1907,7 @@ impl Orchestrator {
             // tokens have been received.
             reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
             version_increment: reveal_version_increment(task)?,
+            precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_rc = task.post_table.reveal_token_state.assignments.len() as u8;
@@ -1846,12 +1922,14 @@ impl Orchestrator {
             post_v,
             post_rc,
         );
+        let mut bound_pi = pi.clone();
+        bound_pi.precompile_binding = Some(binding);
         run(
             backend,
             SubmitPlayerRevealTokensAir::num_columns(),
             &row,
             &SubmitPlayerRevealTokensRow::padding(),
-            pi,
+            &bound_pi,
             move || SubmitPlayerRevealTokensAir {
                 log_size: MIN_LOG_SIZE,
                 input,
@@ -2445,11 +2523,6 @@ fn find_join_seat(
         .ok_or_else(|| {
             TexasAirError::SpecViolation(format!("join 后未在 seats 中找到 player {player:?}"))
         })
-}
-
-/// 计算 `deck_state.encrypted` 的低位承诺（PoC：取长度作占位）。
-fn deck_commitment(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable) -> u64 {
-    table.deck_state.encrypted.len() as u64
 }
 
 /// 统计活跃占用座数（与合约 `count_active_occupied` 语义一致）。

@@ -8,8 +8,8 @@
 //! - `submit_reconstruct_deck`
 //!
 //! 本文件保留阶段 4 的 AIR 机制/状态约束测试，并使用 synthetic binding 覆盖列布局。
-//! shuffle/reconstruction 的真实 native precompile 重放、digest、receipt 与 replay-scope
-//! soundness 测试位于 `e2e_precompile_binding.rs`；DLEq / RevealToken 的调用绑定仍待扩展。
+//! shuffle/leave-DLEq/reveal-token/reconstruction 的真实 native precompile 重放、digest、
+//! receipt 与 replay-scope soundness 测试位于 `e2e_precompile_binding.rs`。
 //!
 //! 验证流程：
 //! 1. 构造 method AIR 的 active row + padding row
@@ -70,6 +70,7 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
                     log_size: 10,
                     input: JoinAndShuffleInput {
                         seat_index: 0,
+                        old_deck_commitment: 51,
                         new_deck_commitment: 52,
                         shuffle_phase: 1,
                     },
@@ -95,6 +96,7 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
                         seat_index: 0,
                         leave_kind: 0,
                         shuffle_phase: 1,
+                        precompile: PrecompileAirBinding::synthetic_unverified(),
                     },
                     pre_state_root: zero_root(),
                     post_state_root: one_root(),
@@ -118,6 +120,7 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
                         seat_index: 0,
                         reveal_phase: 1,
                         version_increment: 1,
+                        precompile: PrecompileAirBinding::synthetic_unverified(),
                     },
                     pre_state_root: zero_root(),
                     post_state_root: one_root(),
@@ -148,6 +151,7 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
 fn test_e2e_join_and_shuffle_prove_verify() {
     let input = JoinAndShuffleInput {
         seat_index: 0,
+        old_deck_commitment: 0x1020_3040,
         new_deck_commitment: 0xABCD_1234,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
@@ -197,6 +201,7 @@ fn test_e2e_join_and_shuffle_prove_verify() {
 fn test_soundness_join_and_shuffle_tampered_seat() {
     let input = JoinAndShuffleInput {
         seat_index: 0,
+        old_deck_commitment: 0x1020_3040,
         new_deck_commitment: 0xABCD_1234,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
@@ -248,6 +253,7 @@ fn test_soundness_join_and_shuffle_tampered_seat() {
 fn test_soundness_join_and_shuffle_tampered_commitment() {
     let input = JoinAndShuffleInput {
         seat_index: 0,
+        old_deck_commitment: 0x1020_3040,
         new_deck_commitment: 0xABCD_1234,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
     };
@@ -294,6 +300,82 @@ fn test_soundness_join_and_shuffle_tampered_commitment() {
     );
 }
 
+/// Soundness: 仅篡改高位 limb、保持低 16 位不变也必须失败。
+#[test]
+fn test_soundness_join_and_shuffle_tampered_high_commitment_limb() {
+    let input = JoinAndShuffleInput {
+        seat_index: 0,
+        old_deck_commitment: 0x1020_3040,
+        new_deck_commitment: 0x0001_0000_ABCD_1234,
+        shuffle_phase: 1,
+    };
+    let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
+    let trace = gen_method_trace(
+        JoinAndShuffleAir::num_columns(),
+        &row.to_vec(),
+        &JoinAndShuffleRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+    let air = JoinAndShuffleAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 1,
+        call_seq: 1,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(
+        &trace,
+        air,
+        JoinAndShuffleAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
+    )
+    .expect("prove 失败");
+    proof.air.input.new_deck_commitment = 0x0002_0000_ABCD_1234;
+    assert!(verify_method(proof).is_err());
+}
+
+/// Soundness: 原牌组承诺也必须绑定到 trace，不能被替换。
+#[test]
+fn test_soundness_join_and_shuffle_tampered_old_commitment() {
+    let input = JoinAndShuffleInput {
+        seat_index: 0,
+        old_deck_commitment: 0x0001_0000_1020_3040,
+        new_deck_commitment: 0x0001_0000_ABCD_1234,
+        shuffle_phase: 1,
+    };
+    let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
+    let trace = gen_method_trace(
+        JoinAndShuffleAir::num_columns(),
+        &row.to_vec(),
+        &JoinAndShuffleRow::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+    let air = JoinAndShuffleAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 1,
+        call_seq: 1,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(
+        &trace,
+        air,
+        JoinAndShuffleAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
+    )
+    .expect("prove 失败");
+    proof.air.input.old_deck_commitment = 0x0002_0000_1020_3040;
+    assert!(verify_method(proof).is_err());
+}
+
 // ========== leave_with_proof AIR ==========
 
 /// E2E: leave_with_proof → trace → prove → verify（happy path）。
@@ -303,6 +385,7 @@ fn test_e2e_leave_with_proof_prove_verify() {
         seat_index: 1,
         leave_kind: 0,    // LeaveKind::Normal
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = LeaveWithProofRow::active(
         &input,
@@ -351,6 +434,7 @@ fn test_soundness_leave_with_proof_tampered_kind() {
         seat_index: 1,
         leave_kind: 0,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = LeaveWithProofRow::active(&input, zero_root(), one_root(), 42, 1, 2, 0, 1, 0);
     let trace = gen_method_trace(
@@ -498,6 +582,44 @@ fn test_soundness_submit_shuffle_v2_tampered_commitment() {
     );
 }
 
+/// Soundness: 仅篡改高位 limb、保持低 16 位不变也必须失败。
+#[test]
+fn test_soundness_submit_shuffle_v2_tampered_high_commitment_limb() {
+    let input = SubmitShuffleV2Input {
+        seat_index: 2,
+        new_deck_commitment: 0x0001_0000_DEAD_BEEF,
+        shuffle_phase: 1,
+        precompile: PrecompileAirBinding::synthetic_unverified(),
+    };
+    let row = SubmitShuffleV2Row::active(&input, zero_root(), one_root(), 42, 1, 3, 0, 1, 2);
+    let trace = gen_method_trace(
+        SubmitShuffleV2Air::num_columns(),
+        &row.to_vec(),
+        &SubmitShuffleV2Row::padding().to_vec(),
+    )
+    .expect("trace 生成失败");
+    let air = SubmitShuffleV2Air {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 1,
+        call_seq: 3,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(
+        &trace,
+        air,
+        SubmitShuffleV2Air::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::SubmitShuffleV2, 42, 1, 3),
+    )
+    .expect("prove 失败");
+    proof.air.input.new_deck_commitment = 0x0002_0000_DEAD_BEEF;
+    assert!(verify_method(proof).is_err());
+}
+
 // ========== submit_player_reveal_tokens AIR ==========
 
 /// E2E: submit_player_reveal_tokens → trace → prove → verify（happy path）。
@@ -507,6 +629,7 @@ fn test_e2e_submit_player_reveal_tokens_prove_verify() {
         seat_index: 0,
         reveal_phase: 1, // RevealPhase::HoleCards
         version_increment: 1,
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = SubmitPlayerRevealTokensRow::active(
         &input,
@@ -556,6 +679,7 @@ fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
         seat_index: 1,
         reveal_phase: 6,
         version_increment: 2,
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row =
         SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 5, 7, 9, 0);
@@ -598,6 +722,7 @@ fn test_soundness_submit_player_reveal_tokens_tampered_phase() {
         seat_index: 0,
         reveal_phase: 1,
         version_increment: 1,
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row =
         SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 4, 0, 1, 1);
@@ -763,7 +888,7 @@ fn test_crypto_air_column_consistency() {
     );
 
     // leave_with_proof: 通用 + 5 业务（含 Gap 6 shuffle_phase + q witness）= 42
-    assert_eq!(leave_with_proof::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
+    assert_eq!(leave_with_proof::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 39);
     assert_eq!(
         LeaveWithProofAir::num_columns(),
         leave_with_proof::cols::NUM_COLUMNS
@@ -782,7 +907,7 @@ fn test_crypto_air_column_consistency() {
     // submit_player_reveal_tokens: 通用 + 5 业务 = 42（含 Gap 7 witness q1/q2）
     assert_eq!(
         submit_player_reveal_tokens::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 5
+        COMMON_NUM_COLUMNS + 39
     );
     assert_eq!(
         SubmitPlayerRevealTokensAir::num_columns(),

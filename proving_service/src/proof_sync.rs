@@ -71,7 +71,10 @@ impl<T: NetworkTransport + ?Sized> ProofPackagePeer for T {
 pub struct TcpProofPackagePeer {
     peers: Vec<SocketAddr>,
     timeout: Duration,
+    max_attempts: usize,
 }
+
+const DEFAULT_PEER_ATTEMPTS: usize = 3;
 
 impl TcpProofPackagePeer {
     /// Construct a client with deterministic peer order and the default 30s timeout.
@@ -84,6 +87,39 @@ impl TcpProofPackagePeer {
         Ok(Self {
             peers,
             timeout: Duration::from_secs(30),
+            max_attempts: DEFAULT_PEER_ATTEMPTS,
+        })
+    }
+
+    /// Construct a client with explicit timeout and bounded retry attempts.
+    ///
+    /// An attempt opens a fresh TCP connection, so transient connection and
+    /// framed-read failures do not permanently exclude an otherwise healthy
+    /// peer. A value of zero is rejected to avoid silently disabling repair.
+    pub fn with_timeout_and_attempts(
+        peers: Vec<SocketAddr>,
+        timeout: Duration,
+        max_attempts: usize,
+    ) -> ServiceResult<Self> {
+        if peers.is_empty() {
+            return Err(ServiceError::Runner(
+                "proof package sync requires at least one peer".into(),
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(ServiceError::Runner(
+                "proof package sync timeout must be non-zero".into(),
+            ));
+        }
+        if max_attempts == 0 {
+            return Err(ServiceError::Runner(
+                "proof package sync retry attempts must be non-zero".into(),
+            ));
+        }
+        Ok(Self {
+            peers,
+            timeout,
+            max_attempts,
         })
     }
 
@@ -98,10 +134,20 @@ impl TcpProofPackagePeer {
         let mut failures = Vec::new();
         let mut missing = 0usize;
         for peer in &self.peers {
-            match request(*peer) {
-                Ok(Some(response)) => return Ok(Some(response)),
-                Ok(None) => missing += 1,
-                Err(error) => failures.push(format!("{peer}: {error}")),
+            for attempt in 1..=self.max_attempts {
+                match request(*peer) {
+                    Ok(Some(response)) => return Ok(Some(response)),
+                    Ok(None) => {
+                        // A well-formed negative response is authoritative for
+                        // this peer; retrying it only adds load.
+                        missing += 1;
+                        break;
+                    }
+                    Err(error) => failures.push(format!(
+                        "{peer} attempt {attempt}/{}: {error}",
+                        self.max_attempts
+                    )),
+                }
             }
         }
         if failures.is_empty() {
@@ -407,9 +453,11 @@ mod tests {
     #[test]
     fn failover_continues_after_invalid_peer_error() {
         let client = tcp_peer();
+        let mut attempts = 0;
         let result = client
             .request_from_first_available("test", |address| {
                 if address == peer(10001) {
+                    attempts += 1;
                     Err(ServiceError::Runner("bad manifest".into()))
                 } else {
                     Ok(Some(9u32))
@@ -417,6 +465,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result, Some(9));
+        assert_eq!(attempts, DEFAULT_PEER_ATTEMPTS);
+    }
+
+    #[test]
+    fn retry_configuration_rejects_zero_values() {
+        assert!(
+            TcpProofPackagePeer::with_timeout_and_attempts(
+                vec![peer(10001)],
+                Duration::from_secs(1),
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            TcpProofPackagePeer::with_timeout_and_attempts(vec![peer(10001)], Duration::ZERO, 1,)
+                .is_err()
+        );
     }
 
     #[test]

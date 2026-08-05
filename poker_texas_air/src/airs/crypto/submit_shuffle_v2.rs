@@ -112,10 +112,7 @@ impl FrameworkEval for SubmitShuffleV2Air {
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
-        let input_new_deck_commitment_0 = eval.next_trace_mask();
-        let _input_new_deck_commitment_1 = eval.next_trace_mask();
-        let _input_new_deck_commitment_2 = eval.next_trace_mask();
-        let _input_new_deck_commitment_3 = eval.next_trace_mask();
+        let input_new_deck_commitment: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
         let _output_completed_count = eval.next_trace_mask();
         // 调用前 shuffle phase 与平方 witness。
         let input_shuffle_phase = eval.next_trace_mask();
@@ -129,10 +126,12 @@ impl FrameworkEval for SubmitShuffleV2Air {
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
         eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat));
 
-        // 约束 2：new_deck_commitment 一致性（limb 0）
-        let expected_commit_0: E::F =
-            M31::from((self.input.new_deck_commitment & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_new_deck_commitment_0 - expected_commit_0));
+        // 约束 2：完整 64-bit new_deck_commitment 一致性。
+        for (limb, actual) in input_new_deck_commitment.iter().enumerate() {
+            let expected: E::F =
+                M31::from(((self.input.new_deck_commitment >> (limb * 16)) & 0xFFFF) as u32).into();
+            eval.add_constraint(is_active.clone() * (actual.clone() - expected));
+        }
 
         // 约束 3a：shuffle_phase == input.shuffle_phase
         let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();

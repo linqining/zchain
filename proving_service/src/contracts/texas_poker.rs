@@ -16,7 +16,11 @@ use poker_l1::vm::contracts::texas_poker::dispatch as texas_dispatch;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
+use poker_texas_air::dual_proof::dual_proof_from_archived;
 use poker_texas_air::orchestrator::{ArchivedProvenTask, Orchestrator, ProvenTask};
+use poker_texas_air::outer_aggregate::{
+    MIN_OUTER_CHILDREN, OuterAggregateBundle, aggregate_dual_proofs, verify_outer_aggregate,
+};
 use poker_texas_air::proof_archive::ArchivedMethodProof;
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
@@ -34,6 +38,12 @@ pub struct TexasPokerPlugin {
     dispatch_count: u64,
     /// 累计 prove 次数（统计用）。
     prove_count: u64,
+    /// Canonical tasks retained alongside durable archives for outer aggregation.
+    proved_tasks: Vec<ProveTask>,
+    /// Durable archives corresponding one-to-one with `proved_tasks`.
+    proved_archives: Vec<poker_texas_air::proof_archive::ArchivedMethodProof>,
+    /// First task index in the currently active hand segment.
+    segment_start: usize,
 }
 
 impl TexasPokerPlugin {
@@ -45,6 +55,9 @@ impl TexasPokerPlugin {
             orchestrator: Orchestrator::new(),
             dispatch_count: 0,
             prove_count: 0,
+            proved_tasks: Vec::new(),
+            proved_archives: Vec::new(),
+            segment_start: 0,
         }
     }
 
@@ -65,6 +78,9 @@ impl TexasPokerPlugin {
             orchestrator: Orchestrator::new(),
             dispatch_count,
             prove_count,
+            proved_tasks: Vec::new(),
+            proved_archives: Vec::new(),
+            segment_start: 0,
         }
     }
 
@@ -85,6 +101,7 @@ impl TexasPokerPlugin {
     /// [`poker_texas_air::orchestrator::Orchestrator::start_new_chain_segment`]）。
     pub fn start_new_chain_segment(&mut self) {
         self.orchestrator.start_new_chain_segment();
+        self.segment_start = self.proved_tasks.len();
     }
 
     /// 注册聚合公钥（`aggregated_pk`）到桌台 deck_state。
@@ -109,11 +126,14 @@ impl TexasPokerPlugin {
     pub fn prove_task_archived(&mut self, task: &ProveTask) -> PluginResult<ArchivedProvenTask> {
         if task.pre_table.hand_id != task.post_table.hand_id {
             self.orchestrator.start_new_chain_segment();
+            self.segment_start = self.proved_tasks.len();
         }
         let archived = self
             .orchestrator
             .prove_verify_and_archive_task(task)
             .map_err(|e| PluginError::Prover(e.to_string()))?;
+        self.proved_tasks.push(task.clone());
+        self.proved_archives.push(archived.archive.clone());
         self.prove_count += 1;
         Ok(archived)
     }
@@ -132,10 +152,74 @@ impl TexasPokerPlugin {
     ) -> PluginResult<ProvenTask> {
         if task.pre_table.hand_id != task.post_table.hand_id {
             self.orchestrator.start_new_chain_segment();
+            self.segment_start = self.proved_tasks.len();
         }
-        self.orchestrator
+        let summary = self
+            .orchestrator
             .restore_verified_archived_task(task, archive)
-            .map_err(|error| PluginError::Prover(error.to_string()))
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        self.proved_tasks.push(task.clone());
+        self.proved_archives.push(archive.clone());
+        Ok(summary)
+    }
+
+    /// Build and independently verify a host-verified outer aggregate for the
+    /// longest contiguous crypto-proof run in the current hand segment.
+    ///
+    /// This is deliberately an O(N) verified transport package, not recursive
+    /// compression. Non-crypto methods are never converted into descriptor
+    /// children, and a run with fewer than two children is rejected.
+    pub fn aggregate_crypto_proofs(&self) -> PluginResult<OuterAggregateBundle> {
+        let start = self.segment_start.min(self.proved_tasks.len());
+        let tasks = &self.proved_tasks[start..];
+        let archives = &self.proved_archives[start..];
+        if tasks.len() != archives.len() {
+            return Err(PluginError::Precondition(
+                "stored task/archive history is inconsistent".into(),
+            ));
+        }
+        let mut best_start = None;
+        let mut best_end = 0usize;
+        let mut run_start = 0usize;
+        for (index, task) in tasks.iter().enumerate() {
+            let supported = matches!(
+                task.method_kind,
+                poker_texas_air::method_kind::MethodKind::SubmitShuffleV2
+                    | poker_texas_air::method_kind::MethodKind::SubmitReconstructDeck
+            );
+            if !supported {
+                if index - run_start > best_end.saturating_sub(best_start.unwrap_or(0)) {
+                    best_start = Some(run_start);
+                    best_end = index;
+                }
+                run_start = index + 1;
+            }
+        }
+        if tasks.len() - run_start > best_end.saturating_sub(best_start.unwrap_or(0)) {
+            best_start = Some(run_start);
+            best_end = tasks.len();
+        }
+        let run_start = best_start.ok_or_else(|| {
+            PluginError::Precondition("current hand has no contiguous crypto proof run".into())
+        })?;
+        if best_end - run_start < MIN_OUTER_CHILDREN {
+            return Err(PluginError::Precondition(format!(
+                "outer aggregation requires at least {MIN_OUTER_CHILDREN} contiguous crypto proofs, found {}",
+                best_end - run_start
+            )));
+        }
+        let run_tasks = &tasks[run_start..best_end];
+        let children = run_tasks
+            .iter()
+            .zip(&archives[run_start..best_end])
+            .map(|(task, archive)| dual_proof_from_archived(task, archive))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        let bundle = aggregate_dual_proofs(run_tasks, children)
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        verify_outer_aggregate(run_tasks, &bundle)
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        Ok(bundle)
     }
 
     /// 尝试 descriptor-only Aggregator 入口。

@@ -1619,6 +1619,11 @@ pub fn apply_submit_player_reveal_tokens(
             "assignment_indices/reveal_tokens/proofs length mismatch".into(),
         ));
     }
+    if assignment_indices.is_empty() {
+        return Err(PokerL1Error::Serialization(
+            "reveal token submission must not be empty".into(),
+        ));
+    }
     if !table.seats[seat_index as usize].is_occupied() {
         return Err(PokerL1Error::Serialization("seat not occupied".into()));
     }
@@ -3883,6 +3888,109 @@ mod tests {
             assert!(!g1_is_identity(&ct.c1));
             assert!(!g1_is_identity(&ct.c2));
         }
+    }
+
+    #[test]
+    fn test_community_reveal_uses_plaintext_identity_not_encrypted_index() {
+        let mut table = make_table();
+        set_initial_encrypted_deck(&mut table).unwrap();
+        let plaintext_id = 3u8;
+        let encrypted_card_index = 41u8;
+        table.deck_state.decrypted_cards.push(DecryptedCard {
+            encrypted_card_index,
+            owner_seat_index: OWNER_SEAT_PUBLIC,
+            ciphertext: None,
+            plaintext: Some(table.deck_state.plaintext[usize::from(plaintext_id)]),
+        });
+        let mut events = vec![];
+
+        write_decrypted_cards_to_community(&mut table, REVEAL_PHASE_TURN, &mut events).unwrap();
+
+        assert_eq!(table.community_cards, vec![Card::from_index(plaintext_id)]);
+        assert_ne!(
+            table.community_cards[0],
+            Card::from_index(encrypted_card_index)
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [TexasPokerEvent::CommunityCardRevealed { phase, card_indices, card_ranks, card_suits, .. }]
+                if *phase == REVEAL_PHASE_TURN
+                    && card_indices == &vec![encrypted_card_index]
+                    && card_ranks == &vec![Card::from_index(plaintext_id).rank]
+                    && card_suits == &vec![Card::from_index(plaintext_id).suit]
+        ));
+    }
+
+    #[test]
+    fn test_unknown_community_plaintext_is_rejected_atomically() {
+        let mut table = make_table();
+        set_initial_encrypted_deck(&mut table).unwrap();
+        table.deck_state.decrypted_cards.push(DecryptedCard {
+            encrypted_card_index: 7,
+            owner_seat_index: OWNER_SEAT_PUBLIC,
+            ciphertext: None,
+            plaintext: Some(ECPoint::from(utils::hash_to_g1(b"not-a-canonical-card"))),
+        });
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = write_decrypted_cards_to_community(&mut table, REVEAL_PHASE_FLOP, &mut events)
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("not a canonical Texas Poker card")
+        );
+        assert_eq!(table, before);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_duplicate_community_plaintext_is_rejected_atomically() {
+        let mut table = make_table();
+        set_initial_encrypted_deck(&mut table).unwrap();
+        let plaintext = table.deck_state.plaintext[9];
+        for encrypted_card_index in [2u8, 38u8] {
+            table.deck_state.decrypted_cards.push(DecryptedCard {
+                encrypted_card_index,
+                owner_seat_index: OWNER_SEAT_PUBLIC,
+                ciphertext: None,
+                plaintext: Some(plaintext),
+            });
+        }
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = write_decrypted_cards_to_community(&mut table, REVEAL_PHASE_FLOP, &mut events)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate decrypted card id 9"));
+        assert_eq!(table, before);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_hole_card_duplicate_with_community_is_rejected_atomically() {
+        let mut table = make_table();
+        set_initial_encrypted_deck(&mut table).unwrap();
+        table.seats[0].player = [1; 20];
+        let duplicate_id = 12u8;
+        table.community_cards.push(Card::from_index(duplicate_id));
+        table.deck_state.decrypted_cards.push(DecryptedCard {
+            encrypted_card_index: 44,
+            owner_seat_index: 0,
+            ciphertext: None,
+            plaintext: Some(table.deck_state.plaintext[usize::from(duplicate_id)]),
+        });
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = write_decrypted_cards_to_hands(&mut table, &mut events).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate decrypted card id 12"));
+        assert_eq!(table, before);
+        assert!(events.is_empty());
     }
 
     #[test]

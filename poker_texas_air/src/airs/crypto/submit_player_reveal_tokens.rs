@@ -16,19 +16,18 @@
 //!    - 若所有需揭示的玩家都已提交，进入 reconstruct 阶段
 //!    - `version += 1`
 //!
-//! ## 简化策略
+//! ## 密码学调用绑定
 //!
-//! 阶段 4 PoC 只验证协议级状态变更：
-//! - `seat_index` 一致性
-//! - `output_revealed_count` 一致性
-//!
-//! RevealTokenProof 验证留待阶段 5。
+//! AIR 约束 canonical batched reveal-token request digest 与 verifier-issued
+//! receipt digest。生产 verifier 会按 pre-state assignment 重建 exact ciphertext、
+//! token、registered player key、proof 和 replay scope，并重新执行原生验证。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
 
 /// `submit_player_reveal_tokens` 业务特定列布局。
 pub mod cols {
@@ -43,8 +42,16 @@ pub mod cols {
     pub const INPUT_REVEAL_PHASE_Q1: usize = COMMON_NUM_COLUMNS + 3;
     /// `INPUT_REVEAL_PHASE_Q2` 列（Gap 7 witness：reveal_phase⁴ = q1²）。
     pub const INPUT_REVEAL_PHASE_Q2: usize = COMMON_NUM_COLUMNS + 4;
+    /// Precompile selector column.
+    pub const PRECOMPILE_ID: usize = COMMON_NUM_COLUMNS + 5;
+    /// Canonical request ABI version column.
+    pub const PRECOMPILE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 6;
+    /// Full request digest columns.
+    pub const REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 7;
+    /// Full verifier receipt digest columns.
+    pub const RECEIPT_DIGEST_BASE: usize = REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `submit_player_reveal_tokens` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 5;
+    pub const NUM_COLUMNS: usize = RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `submit_player_reveal_tokens` 输入参数。
@@ -62,6 +69,8 @@ pub struct SubmitPlayerRevealTokensInput {
     /// 普通 reveal 为 1；最后一个 showdown token 会同步结算并 reset 手牌，
     /// 因而为 2。该值由 Orchestrator 的 canonical VM replay 推导。
     pub version_increment: u8,
+    /// Verifier-issued batched reveal-token verification result.
+    pub precompile: PrecompileAirBinding,
 }
 
 /// `submit_player_reveal_tokens` AIR 公开输入。
@@ -117,6 +126,10 @@ impl FrameworkEval for SubmitPlayerRevealTokensAir {
         // Gap 7 witnesses：reveal_phase² 与 reveal_phase⁴
         let input_reveal_phase_q1 = eval.next_trace_mask();
         let input_reveal_phase_q2 = eval.next_trace_mask();
+        let precompile_id = eval.next_trace_mask();
+        let precompile_abi_version = eval.next_trace_mask();
+        let request_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let receipt_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -152,7 +165,19 @@ impl FrameworkEval for SubmitPlayerRevealTokensAir {
             - c21 * (rp.clone() * q2.clone())
             + (q1 * q2);
         eval.add_constraint(is_active.clone() * vp);
-        // TODO 阶段 5：嵌入 RevealTokenProof Verifier AIR。
+
+        let expected_precompile_id: E::F =
+            M31::from(u32::from(self.input.precompile.precompile_id)).into();
+        let expected_abi_version: E::F =
+            M31::from(u32::from(self.input.precompile.abi_version)).into();
+        eval.add_constraint(is_active.clone() * (precompile_id - expected_precompile_id));
+        eval.add_constraint(is_active.clone() * (precompile_abi_version - expected_abi_version));
+        for i in 0..DIGEST_LIMBS {
+            let expected_request: E::F = self.input.precompile.request_digest[i].into();
+            let expected_receipt: E::F = self.input.precompile.receipt_digest[i].into();
+            eval.add_constraint(is_active.clone() * (request_digest[i].clone() - expected_request));
+            eval.add_constraint(is_active.clone() * (receipt_digest[i].clone() - expected_receipt));
+        }
 
         eval
     }
@@ -173,6 +198,14 @@ pub struct SubmitPlayerRevealTokensRow {
     pub input_reveal_phase_q1: M31,
     /// Gap 7 witness：reveal_phase⁴。
     pub input_reveal_phase_q2: M31,
+    /// Precompile selector.
+    pub precompile_id: M31,
+    /// Canonical request ABI version.
+    pub precompile_abi_version: M31,
+    /// Full request digest.
+    pub request_digest: [M31; DIGEST_LIMBS],
+    /// Full verifier receipt digest.
+    pub receipt_digest: [M31; DIGEST_LIMBS],
 }
 
 impl SubmitPlayerRevealTokensRow {
@@ -216,6 +249,10 @@ impl SubmitPlayerRevealTokensRow {
             // Gap 7 witnesses：reveal_phase² 与 reveal_phase⁴（M31 域内）
             input_reveal_phase_q1: q1,
             input_reveal_phase_q2: q2,
+            precompile_id: u8_to_m31(input.precompile.precompile_id),
+            precompile_abi_version: u8_to_m31(input.precompile.abi_version),
+            request_digest: input.precompile.request_digest,
+            receipt_digest: input.precompile.receipt_digest,
         }
     }
 
@@ -229,6 +266,10 @@ impl SubmitPlayerRevealTokensRow {
             output_revealed_count: ZERO,
             input_reveal_phase_q1: ZERO,
             input_reveal_phase_q2: ZERO,
+            precompile_id: ZERO,
+            precompile_abi_version: ZERO,
+            request_digest: [ZERO; DIGEST_LIMBS],
+            receipt_digest: [ZERO; DIGEST_LIMBS],
         }
     }
 
@@ -241,6 +282,10 @@ impl SubmitPlayerRevealTokensRow {
         v.push(self.output_revealed_count);
         v.push(self.input_reveal_phase_q1);
         v.push(self.input_reveal_phase_q2);
+        v.push(self.precompile_id);
+        v.push(self.precompile_abi_version);
+        v.extend_from_slice(&self.request_digest);
+        v.extend_from_slice(&self.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

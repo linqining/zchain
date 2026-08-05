@@ -64,6 +64,8 @@ pub mod cols {
 pub struct JoinAndShuffleInput {
     /// 执行洗牌的座位索引。
     pub seat_index: u8,
+    /// 调用前的有序密文牌组承诺。
+    pub old_deck_commitment: u64,
     /// 新牌组承诺（Blake2b 压缩后 4 limb）。
     pub new_deck_commitment: u64,
     /// 调用前的 `shuffle_state.phase`（必须 ∈ {1,2,3}）。
@@ -114,19 +116,10 @@ impl FrameworkEval for JoinAndShuffleAir {
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
-        let input_new_deck_commitment_0 = eval.next_trace_mask();
-        let _input_new_deck_commitment_1 = eval.next_trace_mask();
-        let _input_new_deck_commitment_2 = eval.next_trace_mask();
-        let _input_new_deck_commitment_3 = eval.next_trace_mask();
+        let input_new_deck_commitment: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
         let _output_completed_count = eval.next_trace_mask();
-        let output_deck_commitment_0 = eval.next_trace_mask();
-        let _output_deck_commitment_1 = eval.next_trace_mask();
-        let _output_deck_commitment_2 = eval.next_trace_mask();
-        let _output_deck_commitment_3 = eval.next_trace_mask();
-        let _output_old_deck_commitment_0 = eval.next_trace_mask();
-        let _output_old_deck_commitment_1 = eval.next_trace_mask();
-        let _output_old_deck_commitment_2 = eval.next_trace_mask();
-        let _output_old_deck_commitment_3 = eval.next_trace_mask();
+        let output_deck_commitment: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
+        let output_old_deck_commitment: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();
         // 调用前 shuffle phase 与平方 witness。
         let input_shuffle_phase = eval.next_trace_mask();
         let input_shuffle_phase_q = eval.next_trace_mask();
@@ -135,17 +128,24 @@ impl FrameworkEval for JoinAndShuffleAir {
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
         eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat));
 
-        // 约束 2：新牌组承诺一致性（limb 0）
-        let expected_commit_0: E::F =
-            M31::from((self.input.new_deck_commitment & 0xFFFF) as u32).into();
-        eval.add_constraint(
-            is_active.clone() * (input_new_deck_commitment_0.clone() - expected_commit_0),
-        );
-
-        // 约束 3：output_deck_commitment == input_new_deck_commitment（洗牌后牌组已更新）
-        eval.add_constraint(
-            is_active.clone() * (output_deck_commitment_0 - input_new_deck_commitment_0),
-        );
+        // 约束 2-3：完整 64-bit 新牌组承诺一致，且输出承诺等于输入承诺。
+        for limb in 0..4 {
+            let expected: E::F =
+                M31::from(((self.input.new_deck_commitment >> (limb * 16)) & 0xFFFF) as u32).into();
+            eval.add_constraint(
+                is_active.clone() * (input_new_deck_commitment[limb].clone() - expected),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_deck_commitment[limb].clone()
+                        - input_new_deck_commitment[limb].clone()),
+            );
+            let expected_old: E::F =
+                M31::from(((self.input.old_deck_commitment >> (limb * 16)) & 0xFFFF) as u32).into();
+            eval.add_constraint(
+                is_active.clone() * (output_old_deck_commitment[limb].clone() - expected_old),
+            );
+        }
 
         // 约束 4a：shuffle_phase == input.shuffle_phase
         let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();
@@ -236,7 +236,7 @@ impl JoinAndShuffleRow {
             input_new_deck_commitment: u64_to_m31_limbs(input.new_deck_commitment),
             output_completed_count: u8_to_m31(post_completed_count),
             output_deck_commitment: u64_to_m31_limbs(input.new_deck_commitment),
-            output_old_deck_commitment: [ZERO; 4], // 简化：旧承诺占位（阶段 5 接入真实 hash）
+            output_old_deck_commitment: u64_to_m31_limbs(input.old_deck_commitment),
             input_shuffle_phase: sp,
             input_shuffle_phase_q: q,
         }

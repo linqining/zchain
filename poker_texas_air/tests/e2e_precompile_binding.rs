@@ -4,13 +4,15 @@ use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, SHUFFLE_PHASE_WAITING,
+    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, SHUFFLE_PHASE_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    self as texas_dispatch, SubmitReconstructDeckArgs, SubmitShuffleV2Args,
+    self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
+    SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealTokenState, ShuffleState,
+    TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -20,18 +22,32 @@ use poker_protocol::precompile::{
 };
 use poker_protocol::precompile_abi::TranscriptId;
 use poker_protocol::zk_shuffle::ShuffleProof;
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reconstruction::{
     RECONSTRUCTION_V3_PROOF_LABEL, ReconstructProofV3,
 };
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
+use poker_protocol::zk_shuffle::transcript_ext::{
+    CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
+};
+use poker_texas_air::airs::crypto::leave_with_proof::{
+    LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
+};
+use poker_texas_air::airs::crypto::submit_player_reveal_tokens::{
+    SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
+};
 use poker_texas_air::airs::crypto::submit_reconstruct_deck::{
     SubmitReconstructDeckAir, SubmitReconstructDeckInput, SubmitReconstructDeckRow,
 };
 use poker_texas_air::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
+use poker_texas_air::deck_commitment::deck_commitment;
 use poker_texas_air::method_kind::MethodKind;
-use poker_texas_air::precompile_binding::{PrecompileCallBinding, precompile_call_context};
+use poker_texas_air::precompile_binding::{
+    LeaveDleqVerifyRequest, PrecompileCallBinding, RevealTokenVerifyRequest,
+    precompile_call_context,
+};
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::prover::{MethodProof, prove_method};
 use poker_texas_air::public_inputs::TexasPublicInputs;
@@ -190,7 +206,7 @@ fn fixture(
     let binding = PrecompileCallBinding::verify_shuffle(&request).unwrap();
     let input = SubmitShuffleV2Input {
         seat_index,
-        new_deck_commitment: task.post_table.deck_state.encrypted.len() as u64,
+        new_deck_commitment: deck_commitment(&task.post_table),
         shuffle_phase: task.pre_table.shuffle_state.phase,
         precompile: binding.air_binding(),
     };
@@ -269,6 +285,432 @@ fn changing_a_receipt_digest_limb_invalidates_the_statement() {
 fn changing_a_request_digest_limb_invalidates_the_statement() {
     let (proof, mut air, public_inputs) = fixture(3, 3);
     air.input.precompile.request_digest[0] += stwo::core::fields::m31::M31::from(1u32);
+    assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+fn leave_fixture(
+    statement_call_seq: u32,
+    request_scope_call_seq: u32,
+) -> (
+    MethodProof<LeaveWithProofAir>,
+    LeaveWithProofAir,
+    TexasPublicInputs,
+) {
+    let table_id = 61;
+    let hand_id = 9;
+    let seat_index = 1;
+    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let input_cards: Vec<_> = (0..52)
+        .map(|i| {
+            let plaintext = Bls12381Curve::hash_to_curve(format!("air-leave/card/{i}").as_bytes());
+            ElGamalCiphertextGeneric::encrypt(
+                &plaintext,
+                &public_key,
+                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+            )
+        })
+        .collect();
+    let output_cards: Vec<_> = input_cards
+        .iter()
+        .map(|ciphertext| ElGamalCiphertextGeneric {
+            c1: ciphertext.c1,
+            c2: ciphertext.decrypt(&secret_key),
+        })
+        .collect();
+    let leave_proof = DLEqProof::<Bls12381Curve, LeaveKind>::prove(
+        &input_cards,
+        &output_cards,
+        &secret_key,
+        &public_key,
+        &mut utils::new_leave_transcript(),
+    );
+
+    let player = [0x61; 20];
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xF5; 20], table_id),
+        "precompile-binding-leave".into(),
+        [0xC0; 20],
+        4,
+        50,
+        100,
+    );
+    table.call_seq = statement_call_seq
+        .checked_sub(1)
+        .expect("statement call sequence must be non-zero");
+    table.hand_id = hand_id;
+    table.version = 21;
+    table.seats[usize::from(seat_index)].player = player;
+    table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
+    table.deck_state.encrypted = input_cards.clone();
+    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.shuffle_state = ShuffleState {
+        phase: SHUFFLE_PHASE_WAITING,
+        current_shuffler: None,
+        pending_players: vec![],
+        completed_players: vec![seat_index],
+    };
+    let raw_args = borsh::to_vec(&LeaveWithProofArgs {
+        seat_index,
+        output_cards: output_cards.clone(),
+        leave_proof: leave_proof.clone(),
+    })
+    .expect("leave args should encode");
+    let task = dispatch_task(
+        table,
+        player,
+        texas_dispatch::selectors::leave_with_proof(),
+        raw_args,
+    );
+    assert_eq!(task.call_seq, statement_call_seq);
+    let mut public_inputs = canonical_public_inputs(&task);
+
+    let call_context = precompile_call_context(
+        MethodKind::LeaveWithProof,
+        seat_index,
+        table_id,
+        hand_id,
+        request_scope_call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    let request = LeaveDleqVerifyRequest::new(
+        call_context,
+        input_cards,
+        output_cards,
+        ECPoint(public_key),
+        leave_proof,
+    );
+    let binding = PrecompileCallBinding::verify_leave_dleq(&request).unwrap();
+    let input = LeaveWithProofInput {
+        seat_index,
+        leave_kind: 0,
+        shuffle_phase: task.pre_table.shuffle_state.phase,
+        precompile: binding.air_binding(),
+    };
+    let pre_root = state_root_to_air_limbs(public_inputs.pre_state_root);
+    let post_root = state_root_to_air_limbs(public_inputs.post_state_root);
+    let row = LeaveWithProofRow::active(
+        &input,
+        pre_root,
+        post_root,
+        table_id,
+        hand_id,
+        statement_call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        u8::try_from(task.post_table.shuffle_state.completed_players.len())
+            .expect("completed player count should fit u8"),
+    );
+    let trace = gen_method_trace(
+        LeaveWithProofAir::num_columns(),
+        &row.to_vec(),
+        &LeaveWithProofRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = LeaveWithProofAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: pre_root,
+        post_state_root: post_root,
+        table_id,
+        hand_id,
+        call_seq: statement_call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    public_inputs.precompile_binding = Some(binding);
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        LeaveWithProofAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .unwrap();
+    (proof, air, public_inputs)
+}
+
+#[test]
+fn honest_leave_dleq_receipt_is_bound_to_exact_dispatch() {
+    let (proof, air, public_inputs) = leave_fixture(5, 5);
+    verify_method_against(proof, air, &public_inputs).unwrap();
+}
+
+#[test]
+fn leave_dleq_fails_closed_without_a_verifier_binding() {
+    let (proof, air, mut public_inputs) = leave_fixture(5, 5);
+    public_inputs.precompile_binding = None;
+    assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+#[test]
+fn leave_dleq_receipt_cannot_cross_call_sequence_scope() {
+    let (proof, air, public_inputs) = leave_fixture(5, 6);
+    assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+#[test]
+fn changing_leave_dleq_digest_columns_invalidates_the_statement() {
+    let (proof, mut air, public_inputs) = leave_fixture(5, 5);
+    air.input.precompile.request_digest[7] += stwo::core::fields::m31::M31::from(1u32);
+    assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+#[derive(Clone, Copy)]
+enum RevealRequestVariant {
+    Honest,
+    OtherCallSequence,
+    OtherCiphertext,
+    OtherAssignment,
+    OtherPlayerKey,
+    OtherValidProof,
+}
+
+fn prove_reveal_token(
+    secret_key: &<Bls12381Curve as Curve>::Scalar,
+    public_key: &<Bls12381Curve as Curve>::Point,
+    encrypted_card: &ElGamalCiphertextGeneric<Bls12381Curve>,
+) -> (ECPoint, RevealTokenProof<Bls12381Curve>) {
+    let reveal_token = encrypted_card.c1 * *secret_key;
+    let proof = RevealTokenProof::prove(
+        secret_key,
+        public_key,
+        encrypted_card,
+        &reveal_token,
+        &mut OsRng,
+        &mut MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
+    );
+    (ECPoint(reveal_token), proof)
+}
+
+fn reveal_fixture(
+    variant: RevealRequestVariant,
+) -> (
+    MethodProof<SubmitPlayerRevealTokensAir>,
+    SubmitPlayerRevealTokensAir,
+    TexasPublicInputs,
+) {
+    let table_id = 71;
+    let hand_id = 11;
+    let call_seq = 8;
+    let seat_index = 1;
+    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let encrypted_cards: Vec<_> = (0..2)
+        .map(|i| {
+            let plaintext = Bls12381Curve::hash_to_curve(format!("air-reveal/card/{i}").as_bytes());
+            ElGamalCiphertextGeneric::encrypt(
+                &plaintext,
+                &public_key,
+                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+            )
+        })
+        .collect();
+    let (reveal_token, reveal_proof) =
+        prove_reveal_token(&secret_key, &public_key, &encrypted_cards[0]);
+
+    let player = [0x71; 20];
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xA6; 20], table_id),
+        "precompile-binding-reveal".into(),
+        [0xC0; 20],
+        3,
+        50,
+        100,
+    );
+    table.call_seq = call_seq - 1;
+    table.hand_id = hand_id;
+    table.version = 31;
+    table.seats[usize::from(seat_index)].player = player;
+    table.seats[usize::from(seat_index)].stack = 1_000;
+    table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
+    table.deck_state.encrypted = encrypted_cards.clone();
+    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.reveal_token_state = RevealTokenState {
+        reveal_phase: REVEAL_PHASE_PREFLOP,
+        assignments: vec![
+            RevealAssignment {
+                encrypted_card_index: 0,
+                pending_players: vec![seat_index],
+                reveal_tokens: vec![],
+                decrypted: false,
+            },
+            RevealAssignment {
+                encrypted_card_index: 1,
+                pending_players: vec![0],
+                reveal_tokens: vec![],
+                decrypted: false,
+            },
+        ],
+    };
+    let args = SubmitRevealTokensArgs {
+        seat_index,
+        assignment_indices: vec![0],
+        reveal_tokens: vec![reveal_token],
+        proofs: vec![reveal_proof],
+    };
+    let raw_args = borsh::to_vec(&args).expect("reveal args should encode");
+    let task = dispatch_task(
+        table,
+        player,
+        texas_dispatch::selectors::submit_player_reveal_tokens(),
+        raw_args,
+    );
+    assert_eq!(task.call_seq, call_seq);
+    let mut public_inputs = canonical_public_inputs(&task);
+
+    let request_call_seq = if matches!(variant, RevealRequestVariant::OtherCallSequence) {
+        call_seq + 1
+    } else {
+        call_seq
+    };
+    let call_context = precompile_call_context(
+        MethodKind::SubmitPlayerRevealTokens,
+        seat_index,
+        table_id,
+        hand_id,
+        request_call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    let mut request_table = task.pre_table.clone();
+    let mut request_args = args;
+    match variant {
+        RevealRequestVariant::Honest | RevealRequestVariant::OtherCallSequence => {}
+        RevealRequestVariant::OtherCiphertext => {
+            let plaintext = Bls12381Curve::hash_to_curve(b"air-reveal/other-ciphertext");
+            let ciphertext = ElGamalCiphertextGeneric::encrypt(
+                &plaintext,
+                &public_key,
+                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+            );
+            let (token, proof) = prove_reveal_token(&secret_key, &public_key, &ciphertext);
+            request_table.deck_state.encrypted[0] = ciphertext;
+            request_args.reveal_tokens[0] = token;
+            request_args.proofs[0] = proof;
+        }
+        RevealRequestVariant::OtherAssignment => {
+            request_table.reveal_token_state.assignments[1].pending_players = vec![seat_index];
+            let (token, proof) = prove_reveal_token(&secret_key, &public_key, &encrypted_cards[1]);
+            request_args.assignment_indices[0] = 1;
+            request_args.reveal_tokens[0] = token;
+            request_args.proofs[0] = proof;
+        }
+        RevealRequestVariant::OtherPlayerKey => {
+            let other_secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+            let other_public_key = <Bls12381Curve as Curve>::base_g() * other_secret_key;
+            let (token, proof) =
+                prove_reveal_token(&other_secret_key, &other_public_key, &encrypted_cards[0]);
+            request_table.seats[usize::from(seat_index)].pk = ECPoint(other_public_key);
+            request_args.reveal_tokens[0] = token;
+            request_args.proofs[0] = proof;
+        }
+        RevealRequestVariant::OtherValidProof => {
+            let (_, proof) = prove_reveal_token(&secret_key, &public_key, &encrypted_cards[0]);
+            request_args.proofs[0] = proof;
+        }
+    }
+    let request =
+        RevealTokenVerifyRequest::from_dispatch(call_context, &request_table, &request_args)
+            .unwrap();
+    let binding = PrecompileCallBinding::verify_reveal_tokens(&request).unwrap();
+    let input = SubmitPlayerRevealTokensInput {
+        seat_index,
+        reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
+        version_increment: u8::try_from(task.post_table.version - task.pre_table.version)
+            .expect("reveal version delta should fit u8"),
+        precompile: binding.air_binding(),
+    };
+    let pre_root = state_root_to_air_limbs(public_inputs.pre_state_root);
+    let post_root = state_root_to_air_limbs(public_inputs.post_state_root);
+    let row = SubmitPlayerRevealTokensRow::active(
+        &input,
+        pre_root,
+        post_root,
+        table_id,
+        hand_id,
+        call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        u8::try_from(task.post_table.reveal_token_state.assignments.len())
+            .expect("reveal assignment count should fit u8"),
+    );
+    let trace = gen_method_trace(
+        SubmitPlayerRevealTokensAir::num_columns(),
+        &row.to_vec(),
+        &SubmitPlayerRevealTokensRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = SubmitPlayerRevealTokensAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: pre_root,
+        post_state_root: post_root,
+        table_id,
+        hand_id,
+        call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    public_inputs.precompile_binding = Some(binding);
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        SubmitPlayerRevealTokensAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .unwrap();
+    (proof, air, public_inputs)
+}
+
+#[test]
+fn honest_reveal_token_receipt_is_bound_to_exact_dispatch() {
+    let (proof, air, public_inputs) = reveal_fixture(RevealRequestVariant::Honest);
+    verify_method_against(proof, air, &public_inputs).unwrap();
+}
+
+#[test]
+fn reveal_token_fails_closed_without_a_verifier_binding() {
+    let (proof, air, mut public_inputs) = reveal_fixture(RevealRequestVariant::Honest);
+    public_inputs.precompile_binding = None;
+    assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+#[test]
+fn reveal_token_receipt_cannot_cross_call_sequence_scope() {
+    let (proof, air, public_inputs) = reveal_fixture(RevealRequestVariant::OtherCallSequence);
+    assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+#[test]
+fn reveal_token_receipt_binds_ciphertext_assignment_player_key_and_proof() {
+    for variant in [
+        RevealRequestVariant::OtherCiphertext,
+        RevealRequestVariant::OtherAssignment,
+        RevealRequestVariant::OtherPlayerKey,
+        RevealRequestVariant::OtherValidProof,
+    ] {
+        let (proof, air, public_inputs) = reveal_fixture(variant);
+        assert!(verify_method_against(proof, air, &public_inputs).is_err());
+    }
+}
+
+#[test]
+fn changing_reveal_token_digest_columns_invalidates_the_statement() {
+    let (proof, mut air, public_inputs) = reveal_fixture(RevealRequestVariant::Honest);
+    air.input.precompile.receipt_digest[3] += stwo::core::fields::m31::M31::from(1u32);
     assert!(verify_method_against(proof, air, &public_inputs).is_err());
 }
 
