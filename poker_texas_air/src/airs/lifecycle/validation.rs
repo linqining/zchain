@@ -6,119 +6,19 @@
 //! digest, replay native Texas Poker dispatch, compare the complete post table,
 //! and finally rebuild the row accepted by each AIR.
 
-use poker_l1::vm::contracts::texas_poker::dispatch::{
-    JoinTableArgs, LeaveTableArgs, dispatch,
-};
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::vm::contracts::texas_poker::dispatch::{JoinTableArgs, LeaveTableArgs};
 use stwo::core::fields::m31::M31;
 
 use super::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use super::leave_table::{LeaveTableAir, LeaveTableInput, LeaveTableRow};
-use super::reset_for_next_hand::{
-    ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
-};
+use super::reset_for_next_hand::{ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow};
 use super::start_hand::{StartHandAir, StartHandInput, StartHandRow};
+use crate::airs::validation::{validate_canonical_dispatch, validate_row};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
-use crate::public_inputs::{DispatchCallPublicInput, TexasPublicInputs};
-use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
-
-struct CanonicalDispatch {
-    pre: TexasPokerTable,
-    post: TexasPokerTable,
-    call: DispatchCallPublicInput,
-    task: ProveTask,
-}
-
-fn validate_canonical_dispatch(
-    public_inputs: &TexasPublicInputs,
-    expected_kind: MethodKind,
-) -> TexasAirResult<CanonicalDispatch> {
-    let method = expected_kind.method_name();
-    if public_inputs.kind != expected_kind {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{method}: public-input method kind mismatch"
-        )));
-    }
-
-    let call = public_inputs.require_dispatch_call()?.clone();
-    if call.selector != expected_kind.selector() {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{method}: dispatch selector does not match method kind"
-        )));
-    }
-
-    let pre = table_from_state_preimage(&public_inputs.pre_image)?;
-    let post = table_from_state_preimage(&public_inputs.post_image)?;
-    if pre.id != post.id
-        || public_inputs.table_id != pre.id.creation_nonce
-        || public_inputs.table_id != post.id.creation_nonce
-        || public_inputs.pre_version != pre.version
-        || public_inputs.post_version != post.version
-        || public_inputs.hand_id != post.hand_id
-        || public_inputs.call_seq != post.call_seq
-    {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{method}: public metadata does not match canonical pre/post tables"
-        )));
-    }
-
-    let expected_call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
-        TexasAirError::SpecViolation(format!("{method}: call_seq overflow during VM replay"))
-    })?;
-    if post.call_seq != expected_call_seq {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{method}: post call_seq must equal pre call_seq + 1"
-        )));
-    }
-
-    let mut replay = pre.clone();
-    let result = dispatch(&call.context, &mut replay, &call.selector, &call.raw_args).map_err(
-        |error| {
-            TexasAirError::SpecViolation(format!(
-                "{method}: canonical pre-state cannot execute native VM dispatch: {error}"
-            ))
-        },
-    )?;
-    if replay != post {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{method}: canonical post-table differs from native VM dispatch replay"
-        )));
-    }
-
-    let output: DispatchOutput = borsh::from_slice(&result.return_value).map_err(|error| {
-        TexasAirError::SerializationError(format!(
-            "{method}: replayed dispatch output borsh: {error}"
-        ))
-    })?;
-    let task = output.prove_task.ok_or_else(|| {
-        TexasAirError::SpecViolation(format!(
-            "{method}: replayed state-changing dispatch produced no prove task"
-        ))
-    })?;
-    if task.method_kind != expected_kind
-        || task.context != call.context
-        || task.selector != call.selector
-        || task.raw_args != call.raw_args
-        || task.pre_table != pre
-        || task.post_table != post
-        || task.table_id != public_inputs.table_id
-        || task.hand_id != public_inputs.hand_id
-        || task.call_seq != public_inputs.call_seq
-    {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{method}: replayed prove task does not match verifier public inputs"
-        )));
-    }
-
-    Ok(CanonicalDispatch {
-        pre,
-        post,
-        call,
-        task,
-    })
-}
+use crate::prove_task::MethodInput;
+use crate::public_inputs::TexasPublicInputs;
+use crate::state_root::state_root_to_air_limbs;
 
 /// Replay canonical `start_hand` and reconstruct its complete trusted row.
 pub(crate) fn validate_start_hand(
@@ -212,20 +112,6 @@ pub(crate) fn validate_reset_for_next_hand(
         canonical.pre.round_state,
     );
     validate_row(public_inputs, &row.to_vec(), METHOD)
-}
-
-fn validate_row(
-    public_inputs: &TexasPublicInputs,
-    expected_row: &[M31],
-    method: &str,
-) -> TexasAirResult<()> {
-    let trusted_row = public_inputs.require_expected_trace_row(expected_row.len())?;
-    if trusted_row != expected_row {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{method}: trusted trace row was not reconstructed from canonical public inputs"
-        )));
-    }
-    Ok(())
 }
 
 /// Replay canonical `join_table` and reconstruct its complete trusted row.

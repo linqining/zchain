@@ -1,0 +1,399 @@
+//! Canonical verifier-side reconstruction for crypto protocol AIR rows.
+//!
+//! These validators close the state-root/business-row detachment gap by
+//! replaying the complete native dispatch and rebuilding the exact row accepted
+//! by each AIR.  They do not turn the current protocol-state AIRs into embedded
+//! DLEq or reveal-token verifiers; that separate cryptographic closure remains
+//! explicit in the individual AIR modules.
+
+use poker_l1::vm::contracts::texas_poker::constants::{
+    REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
+};
+use poker_l1::vm::contracts::texas_poker::dispatch::{
+    JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
+    SubmitShuffleV2Args,
+};
+
+use super::join_and_shuffle::{JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow};
+use super::leave_with_proof::{LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow};
+use super::submit_player_reveal_tokens::{
+    SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
+};
+use super::submit_reconstruct_deck::{
+    SubmitReconstructDeckAir, SubmitReconstructDeckInput, SubmitReconstructDeckRow,
+};
+use super::submit_shuffle_v2::{SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row};
+use crate::airs::validation::{validate_canonical_dispatch, validate_row};
+use crate::error::{TexasAirError, TexasAirResult};
+use crate::method_kind::MethodKind;
+use crate::prove_task::MethodInput;
+use crate::public_inputs::TexasPublicInputs;
+use crate::state_root::state_root_to_air_limbs;
+
+/// Bind `join_and_shuffle` to its exact authenticated dispatch and post table.
+pub(crate) fn validate_join_and_shuffle(
+    air: &JoinAndShuffleAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    const METHOD: &str = "join_and_shuffle";
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::JoinAndShuffle)?;
+    let args: JoinAndShuffleArgs =
+        borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+            TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
+        })?;
+    let MethodInput::JoinAndShuffle {
+        seat_index,
+        player,
+        buy_in,
+        raw_args,
+    } = &canonical.task.method_input
+    else {
+        return Err(TexasAirError::SpecViolation(
+            "join_and_shuffle: replayed task has the wrong MethodInput variant".into(),
+        ));
+    };
+    if *seat_index != args.seat_index
+        || *player != args.player
+        || *buy_in != args.buy_in
+        || raw_args != &canonical.call.raw_args
+    {
+        return Err(TexasAirError::SpecViolation(
+            "join_and_shuffle: replayed MethodInput does not match raw args".into(),
+        ));
+    }
+
+    let input = JoinAndShuffleInput {
+        seat_index: args.seat_index,
+        new_deck_commitment: deck_commitment(&canonical.post),
+        shuffle_phase: canonical.pre.shuffle_state.phase,
+    };
+    if air.input.seat_index != input.seat_index
+        || air.input.new_deck_commitment != input.new_deck_commitment
+        || air.input.shuffle_phase != input.shuffle_phase
+    {
+        return Err(TexasAirError::SpecViolation(
+            "join_and_shuffle: AIR input does not match the canonical dispatch".into(),
+        ));
+    }
+
+    let pre_completed_count = count_as_u8(
+        canonical.pre.shuffle_state.completed_players.len(),
+        METHOD,
+        "pre completed player",
+    )?;
+    let post_completed_count = count_as_u8(
+        canonical.post.shuffle_state.completed_players.len(),
+        METHOD,
+        "post completed player",
+    )?;
+    let row = JoinAndShuffleRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        pre_completed_count,
+        post_completed_count,
+    );
+    validate_row(public_inputs, &row.to_vec(), METHOD)
+}
+
+/// Bind `leave_with_proof` to its exact authenticated dispatch and post table.
+pub(crate) fn validate_leave_with_proof(
+    air: &LeaveWithProofAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    const METHOD: &str = "leave_with_proof";
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::LeaveWithProof)?;
+    let args: LeaveWithProofArgs =
+        borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+            TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
+        })?;
+    let MethodInput::LeaveWithProof {
+        seat_index,
+        raw_args,
+    } = &canonical.task.method_input
+    else {
+        return Err(TexasAirError::SpecViolation(
+            "leave_with_proof: replayed task has the wrong MethodInput variant".into(),
+        ));
+    };
+    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+        return Err(TexasAirError::SpecViolation(
+            "leave_with_proof: replayed MethodInput does not match raw args".into(),
+        ));
+    }
+
+    let input = LeaveWithProofInput {
+        seat_index: args.seat_index,
+        // `LeaveKind` is the proof marker type, not a runtime enum. The current
+        // row keeps its historical zero discriminator until the DLEq verifier
+        // AIR replaces this placeholder column.
+        leave_kind: 0,
+        shuffle_phase: canonical.pre.shuffle_state.phase,
+    };
+    if air.input.seat_index != input.seat_index
+        || air.input.leave_kind != input.leave_kind
+        || air.input.shuffle_phase != input.shuffle_phase
+    {
+        return Err(TexasAirError::SpecViolation(
+            "leave_with_proof: AIR input does not match the canonical dispatch".into(),
+        ));
+    }
+
+    let post_completed_count = count_as_u8(
+        canonical.post.shuffle_state.completed_players.len(),
+        METHOD,
+        "post completed player",
+    )?;
+    let row = LeaveWithProofRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        post_completed_count,
+    );
+    validate_row(public_inputs, &row.to_vec(), METHOD)
+}
+
+/// Bind reveal-token submission to its exact authenticated dispatch and post table.
+pub(crate) fn validate_submit_player_reveal_tokens(
+    air: &SubmitPlayerRevealTokensAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    const METHOD: &str = "submit_player_reveal_tokens";
+    let canonical =
+        validate_canonical_dispatch(public_inputs, MethodKind::SubmitPlayerRevealTokens)?;
+    let args: SubmitRevealTokensArgs =
+        borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+            TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
+        })?;
+    let MethodInput::SubmitPlayerRevealTokens {
+        seat_index,
+        raw_args,
+    } = &canonical.task.method_input
+    else {
+        return Err(TexasAirError::SpecViolation(
+            "submit_player_reveal_tokens: replayed task has the wrong MethodInput variant".into(),
+        ));
+    };
+    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+        return Err(TexasAirError::SpecViolation(
+            "submit_player_reveal_tokens: replayed MethodInput does not match raw args".into(),
+        ));
+    }
+
+    let input = SubmitPlayerRevealTokensInput {
+        seat_index: args.seat_index,
+        reveal_phase: canonical.pre.reveal_token_state.reveal_phase,
+        version_increment: reveal_version_increment(&canonical.pre, &canonical.post)?,
+    };
+    if air.input.seat_index != input.seat_index
+        || air.input.reveal_phase != input.reveal_phase
+        || air.input.version_increment != input.version_increment
+    {
+        return Err(TexasAirError::SpecViolation(
+            "submit_player_reveal_tokens: AIR input does not match the canonical dispatch".into(),
+        ));
+    }
+
+    let post_revealed_count = count_as_u8(
+        canonical.post.reveal_token_state.assignments.len(),
+        METHOD,
+        "post reveal assignment",
+    )?;
+    let row = SubmitPlayerRevealTokensRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        post_revealed_count,
+    );
+    validate_row(public_inputs, &row.to_vec(), METHOD)
+}
+
+/// Bind a verifier-issued shuffle receipt to the exact VM dispatch and row.
+pub(crate) fn validate_submit_shuffle_v2(
+    air: &SubmitShuffleV2Air,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    const METHOD: &str = "submit_shuffle_v2";
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::SubmitShuffleV2)?;
+    let args: SubmitShuffleV2Args =
+        borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+            TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
+        })?;
+    let MethodInput::SubmitShuffleV2 {
+        seat_index,
+        raw_args,
+    } = &canonical.task.method_input
+    else {
+        return Err(TexasAirError::SpecViolation(
+            "submit_shuffle_v2: replayed task has the wrong MethodInput variant".into(),
+        ));
+    };
+    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+        return Err(TexasAirError::SpecViolation(
+            "submit_shuffle_v2: replayed MethodInput does not match raw args".into(),
+        ));
+    }
+
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        TexasAirError::SpecViolation(
+            "submit_shuffle_v2 requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    let input = SubmitShuffleV2Input {
+        seat_index: args.seat_index,
+        new_deck_commitment: deck_commitment(&canonical.post),
+        shuffle_phase: canonical.pre.shuffle_state.phase,
+        precompile: binding.air_binding(),
+    };
+    if air.input.seat_index != input.seat_index
+        || air.input.new_deck_commitment != input.new_deck_commitment
+        || air.input.shuffle_phase != input.shuffle_phase
+        || air.input.precompile != input.precompile
+    {
+        return Err(TexasAirError::SpecViolation(
+            "submit_shuffle_v2: AIR input does not match the canonical dispatch".into(),
+        ));
+    }
+
+    let post_completed_count = count_as_u8(
+        canonical.post.shuffle_state.completed_players.len(),
+        METHOD,
+        "post completed player",
+    )?;
+    let row = SubmitShuffleV2Row::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        post_completed_count,
+    );
+    validate_row(public_inputs, &row.to_vec(), METHOD)?;
+    super::submit_shuffle_v2::validate_public_inputs(air, public_inputs)
+}
+
+/// Bind a verifier-issued reconstruction receipt to the exact VM dispatch and row.
+pub(crate) fn validate_submit_reconstruct_deck(
+    air: &SubmitReconstructDeckAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    const METHOD: &str = "submit_reconstruct_deck";
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::SubmitReconstructDeck)?;
+    let args: SubmitReconstructDeckArgs =
+        borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+            TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
+        })?;
+    let MethodInput::SubmitReconstructDeck {
+        seat_index,
+        raw_args,
+    } = &canonical.task.method_input
+    else {
+        return Err(TexasAirError::SpecViolation(
+            "submit_reconstruct_deck: replayed task has the wrong MethodInput variant".into(),
+        ));
+    };
+    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+        return Err(TexasAirError::SpecViolation(
+            "submit_reconstruct_deck: replayed MethodInput does not match raw args".into(),
+        ));
+    }
+
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        TexasAirError::SpecViolation(
+            "submit_reconstruct_deck requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    let input = SubmitReconstructDeckInput {
+        seat_index: args.seat_index,
+        reconstruct_phase: canonical.pre.reconstruct_state.phase,
+        precompile: binding.air_binding(),
+    };
+    if air.input.seat_index != input.seat_index
+        || air.input.reconstruct_phase != input.reconstruct_phase
+        || air.input.precompile != input.precompile
+    {
+        return Err(TexasAirError::SpecViolation(
+            "submit_reconstruct_deck: AIR input does not match the canonical dispatch".into(),
+        ));
+    }
+
+    let post_submitted_count = count_as_u8(
+        canonical.post.reconstruct_state.player_decks.len(),
+        METHOD,
+        "post submitted deck",
+    )?;
+    let row = SubmitReconstructDeckRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        post_submitted_count,
+    );
+    validate_row(public_inputs, &row.to_vec(), METHOD)?;
+    super::submit_reconstruct_deck::validate_public_inputs(air, public_inputs)
+}
+
+fn reveal_version_increment(
+    pre: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+    post: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+) -> TexasAirResult<u8> {
+    let completed_showdown = post.round_state == ROUND_WAITING
+        && post.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
+        && post.pot == 0;
+    let increment = if completed_showdown {
+        if pre.round_state != ROUND_SHOWDOWN
+            || pre.reveal_token_state.reveal_phase != REVEAL_PHASE_SHOWDOWN
+        {
+            return Err(TexasAirError::UnsupportedBettingTransition(
+                "submit_player_reveal_tokens reset without a showdown reveal pre-state".into(),
+            ));
+        }
+        2
+    } else {
+        1
+    };
+
+    let expected_post_version = pre.version.saturating_add(u64::from(increment));
+    if post.version != expected_post_version {
+        return Err(TexasAirError::SpecViolation(format!(
+            "submit_player_reveal_tokens: expected version {expected_post_version} after {increment} native bump(s), got {}",
+            post.version
+        )));
+    }
+    Ok(increment)
+}
+
+fn count_as_u8(count: usize, method: &str, field: &str) -> TexasAirResult<u8> {
+    u8::try_from(count).map_err(|_| {
+        TexasAirError::SpecViolation(format!("{method}: {field} count {count} exceeds u8"))
+    })
+}
+
+fn deck_commitment(table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable) -> u64 {
+    // This intentionally mirrors the current trace contract. A real
+    // ciphertext commitment replaces both this helper and the Orchestrator
+    // helper in the next soundness step.
+    table.deck_state.encrypted.len() as u64
+}

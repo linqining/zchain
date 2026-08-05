@@ -8,12 +8,13 @@ use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 use poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    self as texas_dispatch, JoinTableArgs, LeaveTableArgs,
+    self as texas_dispatch, JoinTableArgs, KickPlayerArgs, LeaveTableArgs,
 };
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 use poker_protocol::crypto::types::ECPoint;
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
+use poker_texas_air::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use poker_texas_air::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use poker_texas_air::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
 use poker_texas_air::airs::lifecycle::create_table::CreateTableInput;
@@ -21,6 +22,10 @@ use poker_texas_air::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput,
 use poker_texas_air::airs::lifecycle::leave_table::{
     LeaveTableAir, LeaveTableInput, LeaveTableRow,
 };
+use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
+    ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
+};
+use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use poker_texas_air::airs::{AirStatement, TexasAir};
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::{prove_create_table, prove_method};
@@ -408,6 +413,305 @@ fn dispatch_context(caller: [u8; 20]) -> DispatchContext {
     }
 }
 
+fn make_kick_player_transition() -> (DispatchContext, TexasPokerTable, TexasPokerTable, Vec<u8>) {
+    let creator = [0x61; 20];
+    let context = dispatch_context(creator);
+    let mut pre = TexasPokerTable::new(
+        ObjectID::new([0xE2; 20], 24),
+        "canonical-kick".to_owned(),
+        creator,
+        6,
+        50,
+        100,
+    );
+    pre.hand_id = 5;
+    pre.call_seq = 19;
+    pre.round_state = ROUND_PREFLOP;
+    pre.betting_round = Some(BettingRound::new(100, 100));
+    pre.current_turn = Some(0);
+    pre.pot = 75;
+    for seat_index in 0..3 {
+        pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+        pre.seats[seat_index].stack = 1_000;
+    }
+    pre.seats[2].bet = 25;
+    pre.seats[2].total_bet = 25;
+    pre.chip_pool = 3_000;
+
+    let raw_args = borsh::to_vec(&KickPlayerArgs {
+        seat_index: 2,
+        reason: 1,
+    })
+    .unwrap();
+    let mut post = pre.clone();
+    texas_dispatch::dispatch(
+        &context,
+        &mut post,
+        &texas_dispatch::selectors::kick_player(),
+        &raw_args,
+    )
+    .unwrap();
+    (context, pre, post, raw_args)
+}
+
+#[test]
+fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
+    let (context, pre, canonical_post, raw_args) = make_kick_player_transition();
+    let input = KickPlayerInput {
+        seat_index: 2,
+        refund: pre.seats[2].stack,
+        kicked_bet: pre.seats[2].bet,
+    };
+
+    let mut unrelated_post = canonical_post.clone();
+    unrelated_post.name = "unrelated-kick-post".to_owned();
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &unrelated_post,
+        MethodKind::KickPlayer,
+        pre.id.creation_nonce,
+        unrelated_post.hand_id,
+        unrelated_post.call_seq,
+    )
+    .unwrap();
+    public_inputs
+        .bind_dispatch_call(context, texas_dispatch::selectors::kick_player(), raw_args)
+        .unwrap();
+    let row = KickPlayerRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        canonical_post.version,
+        pre.round_state,
+        canonical_post.round_state,
+        pre.pot,
+        canonical_post.pot,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let trace = gen_method_trace(
+        KickPlayerAir::num_columns(),
+        &row.to_vec(),
+        &KickPlayerRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = KickPlayerAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        KickPlayerAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("unrelated kick roots and row are intentionally AIR-consistent");
+
+    let error = verify_method_against(proof, air, &public_inputs)
+        .expect_err("production kick verification must replay the exact dispatch");
+    assert!(error.to_string().contains("native VM dispatch replay"));
+}
+
+fn make_start_hand_transition() -> (DispatchContext, TexasPokerTable, TexasPokerTable, Vec<u8>) {
+    let creator = [0x71; 20];
+    let context = dispatch_context(creator);
+    let mut pre = TexasPokerTable::new(
+        ObjectID::new([0xE3; 20], 25),
+        "canonical-start".to_owned(),
+        creator,
+        6,
+        50,
+        100,
+    );
+    pre.hand_id = 6;
+    pre.call_seq = 20;
+    pre.button = 0;
+    pre.seats[0].player = [0x72; 20];
+    pre.seats[0].stack = 1_000;
+    pre.seats[2].player = [0x73; 20];
+    pre.seats[2].stack = 1_000;
+    pre.chip_pool = 2_000;
+
+    let raw_args = vec![];
+    let mut post = pre.clone();
+    texas_dispatch::dispatch(
+        &context,
+        &mut post,
+        &texas_dispatch::selectors::start_hand(),
+        &raw_args,
+    )
+    .unwrap();
+    (context, pre, post, raw_args)
+}
+
+fn start_hand_input(pre: &TexasPokerTable, post: &TexasPokerTable) -> StartHandInput {
+    StartHandInput {
+        active_count: u8::try_from(pre.seats.iter().filter(|seat| seat.is_occupied()).count())
+            .unwrap(),
+        new_button: post.button,
+        ante_mode: post.ante_mode,
+        ante_amount: post.ante_amount,
+        ante_collected: post.ante_collected,
+    }
+}
+
+#[test]
+fn production_verifier_rejects_start_hand_row_attached_to_unrelated_post_table() {
+    let (context, pre, canonical_post, raw_args) = make_start_hand_transition();
+    let input = start_hand_input(&pre, &canonical_post);
+    let count = M31::from(u32::from(input.active_count));
+    let count_product = count * (count - M31::from(1u32));
+
+    let mut unrelated_post = canonical_post.clone();
+    unrelated_post.name = "unrelated-start-post".to_owned();
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &unrelated_post,
+        MethodKind::StartHand,
+        pre.id.creation_nonce,
+        unrelated_post.hand_id,
+        unrelated_post.call_seq,
+    )
+    .unwrap();
+    public_inputs
+        .bind_dispatch_call(context, texas_dispatch::selectors::start_hand(), raw_args)
+        .unwrap();
+    let row = StartHandRow::active(
+        &input,
+        count_product.inverse(),
+        count_product,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        canonical_post.version,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let trace = gen_method_trace(
+        StartHandAir::num_columns(),
+        &row.to_vec(),
+        &StartHandRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = StartHandAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        StartHandAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("unrelated start roots and row are intentionally AIR-consistent");
+
+    let error = verify_method_against(proof, air, &public_inputs)
+        .expect_err("production start-hand verification must replay the exact dispatch");
+    assert!(error.to_string().contains("native VM dispatch replay"));
+}
+
+#[test]
+fn production_verifier_rejects_reset_row_attached_to_unrelated_post_table() {
+    let (context, _, pre, _) = make_start_hand_transition();
+    let raw_args = vec![];
+    let mut canonical_post = pre.clone();
+    texas_dispatch::dispatch(
+        &context,
+        &mut canonical_post,
+        &texas_dispatch::selectors::reset_for_next_hand(),
+        &raw_args,
+    )
+    .unwrap();
+    let input = ResetForNextHandInput {
+        shuffle_phase: pre.shuffle_state.phase,
+    };
+
+    let mut unrelated_post = canonical_post.clone();
+    unrelated_post.name = "unrelated-reset-post".to_owned();
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &unrelated_post,
+        MethodKind::ResetForNextHand,
+        pre.id.creation_nonce,
+        unrelated_post.hand_id,
+        unrelated_post.call_seq,
+    )
+    .unwrap();
+    public_inputs
+        .bind_dispatch_call(
+            context,
+            texas_dispatch::selectors::reset_for_next_hand(),
+            raw_args,
+        )
+        .unwrap();
+    let row = ResetForNextHandRow::active(
+        &input,
+        0,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        canonical_post.version,
+        pre.round_state,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let trace = gen_method_trace(
+        ResetForNextHandAir::num_columns(),
+        &row.to_vec(),
+        &ResetForNextHandRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = ResetForNextHandAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        ResetForNextHandAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("unrelated reset roots and row are intentionally AIR-consistent");
+
+    let error = verify_method_against(proof, air, &public_inputs)
+        .expect_err("production reset verification must replay the exact dispatch");
+    assert!(error.to_string().contains("native VM dispatch replay"));
+}
+
 #[test]
 fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
     let player = [0x51; 20];
@@ -458,11 +762,7 @@ fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
     )
     .unwrap();
     public_inputs
-        .bind_dispatch_call(
-            context,
-            texas_dispatch::selectors::join_table(),
-            raw_args,
-        )
+        .bind_dispatch_call(context, texas_dispatch::selectors::join_table(), raw_args)
         .unwrap();
     let row = JoinTableRow::active(
         &input,
@@ -563,11 +863,7 @@ fn production_verifier_rejects_leave_row_attached_to_unrelated_post_table() {
     )
     .unwrap();
     public_inputs
-        .bind_dispatch_call(
-            context,
-            texas_dispatch::selectors::leave_table(),
-            raw_args,
-        )
+        .bind_dispatch_call(context, texas_dispatch::selectors::leave_table(), raw_args)
         .unwrap();
     let row = LeaveTableRow::active(
         &input,

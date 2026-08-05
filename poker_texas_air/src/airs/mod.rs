@@ -20,6 +20,7 @@ pub mod common;
 pub mod crypto;
 pub mod funds;
 pub mod lifecycle;
+pub(crate) mod validation;
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::FrameworkEval;
@@ -70,36 +71,13 @@ pub trait TexasAir: FrameworkEval + Clone + Sync {
     /// Validate method-specific AIR constants and the complete trusted row
     /// against canonical pre/post table images supplied by the verifier.
     ///
-    /// Most legacy AIRs still use the default no-op. Production betting AIRs
-    /// override this hook so a prover cannot pair valid state roots with an
-    /// unrelated, self-consistent business row. The Orchestrator additionally
-    /// replays full VM dispatch for every enabled method before issuing a receipt.
+    /// Every enabled production method overrides this hook so a prover cannot
+    /// pair valid state roots with an unrelated, self-consistent business row.
+    /// The Orchestrator additionally replays full VM dispatch before issuing a
+    /// receipt.
     fn validate_public_inputs(&self, _public_inputs: &TexasPublicInputs) -> TexasAirResult<()> {
         Ok(())
     }
-}
-
-macro_rules! impl_texas_air {
-    ($ty:path, $kind:expr) => {
-        impl TexasAir for $ty {
-            fn statement(&self) -> AirStatement {
-                AirStatement {
-                    kind: $kind,
-                    pre_state_root: self.pre_state_root,
-                    post_state_root: self.post_state_root,
-                    table_id: self.table_id,
-                    hand_id: self.hand_id,
-                    call_seq: self.call_seq,
-                    pre_version: self.pre_version,
-                    post_version: self.post_version,
-                }
-            }
-
-            fn trace_num_columns(&self) -> usize {
-                Self::num_columns()
-            }
-        }
-    };
 }
 
 macro_rules! impl_validated_texas_air {
@@ -197,7 +175,11 @@ impl_validated_texas_air!(
     MethodKind::ForceFold,
     actions::validation::validate_force_fold
 );
-impl_texas_air!(actions::kick_player::KickPlayerAir, MethodKind::KickPlayer);
+impl_validated_texas_air!(
+    actions::kick_player::KickPlayerAir,
+    MethodKind::KickPlayer,
+    actions::validation::validate_kick_player
+);
 impl_validated_texas_air!(
     actions::request_leave_after_hand::RequestLeaveAfterHandAir,
     MethodKind::RequestLeaveAfterHand,
@@ -213,25 +195,28 @@ impl_validated_texas_air!(
     MethodKind::Rebuy,
     funds::validation::validate_rebuy
 );
-impl_texas_air!(
+impl_validated_texas_air!(
     crypto::join_and_shuffle::JoinAndShuffleAir,
-    MethodKind::JoinAndShuffle
+    MethodKind::JoinAndShuffle,
+    crypto::validation::validate_join_and_shuffle
 );
-impl_texas_air!(
+impl_validated_texas_air!(
     crypto::leave_with_proof::LeaveWithProofAir,
-    MethodKind::LeaveWithProof
+    MethodKind::LeaveWithProof,
+    crypto::validation::validate_leave_with_proof
 );
 impl_validated_texas_air!(
     crypto::submit_shuffle_v2::SubmitShuffleV2Air,
     MethodKind::SubmitShuffleV2,
-    crypto::submit_shuffle_v2::validate_public_inputs
+    crypto::validation::validate_submit_shuffle_v2
 );
-impl_texas_air!(
+impl_validated_texas_air!(
     crypto::submit_player_reveal_tokens::SubmitPlayerRevealTokensAir,
-    MethodKind::SubmitPlayerRevealTokens
+    MethodKind::SubmitPlayerRevealTokens,
+    crypto::validation::validate_submit_player_reveal_tokens
 );
 impl_validated_texas_air!(
     crypto::submit_reconstruct_deck::SubmitReconstructDeckAir,
     MethodKind::SubmitReconstructDeck,
-    crypto::submit_reconstruct_deck::validate_public_inputs
+    crypto::validation::validate_submit_reconstruct_deck
 );

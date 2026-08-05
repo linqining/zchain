@@ -128,9 +128,9 @@ impl FrameworkEval for ResetForNextHandAir {
         let six: E::F = M31::from(6u32).into();
         let eleven: E::F = M31::from(11u32).into();
         let vp = input_shuffle_phase_q.clone() * input_shuffle_phase_q.clone()
-            - six * input_shuffle_phase.clone() * input_shuffle_phase_q.clone()
+            - six.clone() * input_shuffle_phase.clone() * input_shuffle_phase_q.clone()
             + eleven * input_shuffle_phase_q.clone()
-            - M31::from(6u32).into() * input_shuffle_phase.clone();
+            - six * input_shuffle_phase.clone();
         eval.add_constraint(is_active.clone() * vp);
 
         eval

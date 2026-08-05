@@ -1040,11 +1040,11 @@ fn check_reveal_phase_complete(
             start_betting_round(table, true, Some(bb_seat), events)?;
         }
         REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
-            write_decrypted_cards_to_community(table, events);
+            write_decrypted_cards_to_community(table, phase, events)?;
             start_betting_round(table, false, None, events)?;
         }
         REVEAL_PHASE_SHOWDOWN => {
-            write_decrypted_cards_to_hands(table, events);
+            write_decrypted_cards_to_hands(table, events)?;
             table.timestamps.showdown_at = 0;
             settle_hand(table, events)?;
         }
@@ -1056,23 +1056,38 @@ fn check_reveal_phase_complete(
 /// 将解密的公共牌写入 community_cards。
 fn write_decrypted_cards_to_community(
     table: &mut TexasPokerTable,
+    reveal_phase: u8,
     events: &mut Vec<TexasPokerEvent>,
-) {
+) -> PokerL1Result<()> {
+    let canonical_cards = generate_plaintext_cards();
+    let mut seen = exposed_card_ids(table)?;
+    let mut pending = Vec::new();
+
+    for (decrypted_index, dc) in table.deck_state.decrypted_cards.iter().enumerate() {
+        if dc.owner_seat_index != OWNER_SEAT_PUBLIC {
+            continue;
+        }
+        let Some(plaintext) = &dc.plaintext else {
+            continue;
+        };
+        let (card_id, card) = card_from_plaintext(&plaintext.0, &canonical_cards)?;
+        if !seen.insert(card_id) {
+            return Err(PokerL1Error::Serialization(format!(
+                "duplicate decrypted card id {card_id} while writing community cards"
+            )));
+        }
+        pending.push((decrypted_index, dc.encrypted_card_index, card));
+    }
+
     let mut indices = Vec::new();
     let mut ranks = Vec::new();
     let mut suits = Vec::new();
-
-    for dc in &mut table.deck_state.decrypted_cards {
-        // typed 化后 plaintext 是 Option<G1Projective>；is_some 等价于旧的 !is_empty()。
-        if dc.owner_seat_index == OWNER_SEAT_PUBLIC && dc.plaintext.is_some() {
-            // 直接通过 encrypted_card_index 反查 Card（plaintext G1 点不可逆）。
-            let card = card_from_encrypted_index(dc.encrypted_card_index);
-            table.community_cards.push(card);
-            indices.push(dc.encrypted_card_index);
-            ranks.push(card.rank);
-            suits.push(card.suit);
-            dc.plaintext = None; // 防重复
-        }
+    for (decrypted_index, encrypted_card_index, card) in pending {
+        table.deck_state.decrypted_cards[decrypted_index].plaintext = None;
+        table.community_cards.push(card);
+        indices.push(encrypted_card_index);
+        ranks.push(card.rank);
+        suits.push(card.suit);
     }
 
     if !indices.is_empty() {
@@ -1080,49 +1095,120 @@ fn write_decrypted_cards_to_community(
             events,
             TexasPokerEvent::CommunityCardRevealed {
                 table_id: table.id,
-                phase: table.reveal_token_state.reveal_phase,
+                phase: reveal_phase,
                 card_indices: indices,
                 card_ranks: ranks,
                 card_suits: suits,
             },
         );
     }
+    Ok(())
 }
 
 /// 将解密的手牌写入 seat.hand。
-fn write_decrypted_cards_to_hands(table: &mut TexasPokerTable, events: &mut Vec<TexasPokerEvent>) {
-    for dc in table.deck_state.decrypted_cards.clone().iter() {
-        if dc.owner_seat_index != OWNER_SEAT_PUBLIC
-            && dc.plaintext.is_some()
-            && (dc.owner_seat_index as usize) < table.seats.len()
-        {
-            let card = card_from_encrypted_index(dc.encrypted_card_index);
-            let seat_idx = dc.owner_seat_index as usize;
-            table.seats[seat_idx].hand.push(card);
+fn write_decrypted_cards_to_hands(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let canonical_cards = generate_plaintext_cards();
+    let mut seen = exposed_card_ids(table)?;
+    let mut pending = Vec::new();
 
-            if !table.seats[seat_idx].folded {
-                events::emit_event(
-                    events,
-                    TexasPokerEvent::ShowdownHoleCardsRevealed {
-                        table_id: table.id,
-                        seat_index: dc.owner_seat_index,
-                        player: table.seats[seat_idx].player,
-                        card_indices: vec![dc.encrypted_card_index],
-                        card_ranks: vec![card.rank],
-                        card_suits: vec![card.suit],
-                    },
-                );
-            }
+    for (decrypted_index, dc) in table.deck_state.decrypted_cards.iter().enumerate() {
+        if dc.owner_seat_index == OWNER_SEAT_PUBLIC {
+            continue;
+        }
+        let Some(plaintext) = &dc.plaintext else {
+            continue;
+        };
+        let seat_index = usize::from(dc.owner_seat_index);
+        let seat = table.seats.get(seat_index).ok_or_else(|| {
+            PokerL1Error::Serialization(format!(
+                "decrypted hole card owner seat {} is out of range",
+                dc.owner_seat_index
+            ))
+        })?;
+        if !seat.is_occupied() {
+            return Err(PokerL1Error::Serialization(format!(
+                "decrypted hole card owner seat {} is not occupied",
+                dc.owner_seat_index
+            )));
+        }
+        let (card_id, card) = card_from_plaintext(&plaintext.0, &canonical_cards)?;
+        if !seen.insert(card_id) {
+            return Err(PokerL1Error::Serialization(format!(
+                "duplicate decrypted card id {card_id} while writing hole cards"
+            )));
+        }
+        pending.push((
+            decrypted_index,
+            dc.owner_seat_index,
+            dc.encrypted_card_index,
+            card,
+        ));
+    }
+
+    for (decrypted_index, owner_seat_index, encrypted_card_index, card) in pending {
+        table.deck_state.decrypted_cards[decrypted_index].plaintext = None;
+        let seat_index = usize::from(owner_seat_index);
+        table.seats[seat_index].hand.push(card);
+        if !table.seats[seat_index].folded {
+            events::emit_event(
+                events,
+                TexasPokerEvent::ShowdownHoleCardsRevealed {
+                    table_id: table.id,
+                    seat_index: owner_seat_index,
+                    player: table.seats[seat_index].player,
+                    card_indices: vec![encrypted_card_index],
+                    card_ranks: vec![card.rank],
+                    card_suits: vec![card.suit],
+                },
+            );
         }
     }
+    Ok(())
 }
 
-/// 根据 encrypted_card_index 反查 Card。
-///
-/// typed 化后 `DecryptedCard` 携带 `encrypted_card_index`，可通过 `% 52` 直接得到 Card。
-/// 原 `plaintext_bytes_to_card` 桩函数已删除（G1 点不可逆）。
-fn card_from_encrypted_index(idx: u8) -> Card {
-    Card::from_index(idx % 52)
+/// Match a decrypted plaintext point against the protocol's canonical 52-card domain.
+fn card_from_plaintext(
+    plaintext: &G1Projective,
+    canonical_cards: &[G1Projective],
+) -> PokerL1Result<(u8, Card)> {
+    let card_id = canonical_cards
+        .iter()
+        .position(|candidate| g1_equal(candidate, plaintext))
+        .ok_or_else(|| {
+            PokerL1Error::Serialization(
+                "decrypted plaintext is not a canonical Texas Poker card".into(),
+            )
+        })?;
+    let card_id = u8::try_from(card_id)
+        .map_err(|_| PokerL1Error::Serialization("canonical card id exceeds u8".into()))?;
+    Ok((card_id, Card::from_index(card_id)))
+}
+
+/// Collect all already exposed card identities and reject corrupt duplicate state.
+fn exposed_card_ids(table: &TexasPokerTable) -> PokerL1Result<std::collections::HashSet<u8>> {
+    let mut seen = std::collections::HashSet::new();
+    for card in table
+        .community_cards
+        .iter()
+        .chain(table.seats.iter().flat_map(|seat| seat.hand.iter()))
+    {
+        if !card.is_valid() {
+            return Err(PokerL1Error::Serialization(format!(
+                "table contains invalid exposed card suit={} rank={}",
+                card.suit, card.rank
+            )));
+        }
+        let card_id = card.to_index();
+        if !seen.insert(card_id) {
+            return Err(PokerL1Error::Serialization(format!(
+                "table contains duplicate exposed card id {card_id}"
+            )));
+        }
+    }
+    Ok(seen)
 }
 
 // ========== 部分解密 ==========

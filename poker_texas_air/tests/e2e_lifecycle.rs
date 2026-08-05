@@ -430,6 +430,7 @@ fn active_count_prod(active_count: u8) -> M31 {
 fn test_e2e_start_hand_prove_verify() {
     let input = StartHandInput {
         active_count: 4,
+        new_button: 2,
         ante_mode: 0,
         ante_amount: 0,
         ante_collected: 0,
@@ -480,6 +481,7 @@ fn test_e2e_start_hand_prove_verify() {
 fn test_soundness_start_hand_tampered_count() {
     let input = StartHandInput {
         active_count: 4,
+        new_button: 2,
         ante_mode: 0,
         ante_amount: 0,
         ante_collected: 0,
@@ -543,6 +545,7 @@ fn test_soundness_start_hand_tampered_count() {
 fn test_soundness_start_hand_tampered_ante_mode() {
     let input = StartHandInput {
         active_count: 4,
+        new_button: 2,
         ante_mode: 1,
         ante_amount: 10,
         ante_collected: 40,
@@ -879,7 +882,8 @@ fn test_soundness_tick_tampered_rake() {
 /// E2E: reset_for_next_hand → trace → prove → verify（happy path）。
 #[test]
 fn test_e2e_reset_for_next_hand_prove_verify() {
-    let input = ResetForNextHandInput { shuffle_phase: 1 }; // Gap 6：∈ {1,2,3}（非 NONE）
+    // VM 允许显式重置尚未开局的 WAITING/NONE 桌台。
+    let input = ResetForNextHandInput { shuffle_phase: 0 };
     let row = ResetForNextHandRow::active(
         &input,
         0, // pre_pending_addon

@@ -9,6 +9,7 @@
 use poker_l1::vm::contracts::texas_poker::constants::{
     FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN,
 };
+use poker_l1::vm::contracts::texas_poker::dispatch::KickPlayerArgs;
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{Seat, TexasPokerTable};
 use stwo::core::fields::m31::M31;
@@ -19,10 +20,15 @@ use super::call::{CallAir, CallRow};
 use super::check::{CheckAir, CheckRow, NO_CURRENT_TURN};
 use super::fold::{FoldAir, FoldRow};
 use super::force_fold::{ForceFoldAir, ForceFoldRow};
+use super::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use super::raise::{RaiseAir, RaiseRow};
 use super::request_leave_after_hand::{RequestLeaveAfterHandAir, RequestLeaveAfterHandRow};
+use crate::airs::validation::{
+    validate_canonical_dispatch, validate_row as validate_canonical_row,
+};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
+use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
@@ -510,6 +516,74 @@ pub(crate) fn validate_force_fold(
         tables.post.round_state,
     );
     validate_row(public_inputs, &row.to_vec(), "force_fold")
+}
+
+/// Replay the complete administrator dispatch and reconstruct the exact kick row.
+pub(crate) fn validate_kick_player(
+    air: &KickPlayerAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    const METHOD: &str = "kick_player";
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::KickPlayer)?;
+    let args: KickPlayerArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+        TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
+    })?;
+    let MethodInput::Kick { seat_index, reason } = canonical.task.method_input else {
+        return Err(TexasAirError::SpecViolation(
+            "kick_player: replayed task has the wrong MethodInput variant".into(),
+        ));
+    };
+    if seat_index != args.seat_index || reason != args.reason {
+        return Err(TexasAirError::SpecViolation(
+            "kick_player: replayed MethodInput does not match raw args".into(),
+        ));
+    }
+
+    let pre_seat = seat(&canonical.pre, args.seat_index, METHOD)?;
+    let expected_post_pot = canonical
+        .pre
+        .pot
+        .checked_add(pre_seat.bet)
+        .ok_or_else(|| TexasAirError::SpecViolation("kick_player: pot overflow".into()))?;
+    let expected_post_version = canonical.pre.version.saturating_add(1);
+    if canonical.post.round_state != canonical.pre.round_state
+        || canonical.post.pot != expected_post_pot
+        || canonical.post.version != expected_post_version
+    {
+        return Err(TexasAirError::UnsupportedBettingTransition(
+            "kick_player triggered nested advance/reset/settlement or a multi-version transition; current AIR supports only round-unchanged, pot += kicked_bet, single-version transitions".into(),
+        ));
+    }
+
+    let input = KickPlayerInput {
+        seat_index: args.seat_index,
+        refund: pre_seat.stack,
+        kicked_bet: pre_seat.bet,
+    };
+    if air.input.seat_index != input.seat_index
+        || air.input.refund != input.refund
+        || air.input.kicked_bet != input.kicked_bet
+    {
+        return Err(TexasAirError::SpecViolation(
+            "kick_player: AIR input does not match the canonical dispatch".into(),
+        ));
+    }
+
+    let row = KickPlayerRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        canonical.pre.round_state,
+        canonical.post.round_state,
+        canonical.pre.pot,
+        canonical.post.pot,
+    );
+    validate_canonical_row(public_inputs, &row.to_vec(), METHOD)
 }
 
 /// Reconstruct and bind the complete single-seat toggle performed by

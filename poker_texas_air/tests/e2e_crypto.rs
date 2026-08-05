@@ -20,6 +20,7 @@
 
 use stwo::core::fields::m31::M31;
 
+use poker_texas_air::airs::TexasAir;
 use poker_texas_air::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
 };
@@ -58,6 +59,86 @@ fn one_root() -> [M31; 4] {
         poker_texas_air::method_kind::MethodKind::Fold,
     )
     .1
+}
+
+#[test]
+fn production_crypto_validators_require_an_exact_dispatch_call() {
+    let cases: Vec<(Box<dyn Fn(&TexasPublicInputs) -> String>, TexasPublicInputs)> = vec![
+        (
+            Box::new(|public_inputs| {
+                JoinAndShuffleAir {
+                    log_size: 10,
+                    input: JoinAndShuffleInput {
+                        seat_index: 0,
+                        new_deck_commitment: 52,
+                        shuffle_phase: 1,
+                    },
+                    pre_state_root: zero_root(),
+                    post_state_root: one_root(),
+                    table_id: 42,
+                    hand_id: 1,
+                    call_seq: 1,
+                    pre_version: 0,
+                    post_version: 1,
+                }
+                .validate_public_inputs(public_inputs)
+                .unwrap_err()
+                .to_string()
+            }),
+            TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
+        ),
+        (
+            Box::new(|public_inputs| {
+                LeaveWithProofAir {
+                    log_size: 10,
+                    input: LeaveWithProofInput {
+                        seat_index: 0,
+                        leave_kind: 0,
+                        shuffle_phase: 1,
+                    },
+                    pre_state_root: zero_root(),
+                    post_state_root: one_root(),
+                    table_id: 42,
+                    hand_id: 1,
+                    call_seq: 2,
+                    pre_version: 0,
+                    post_version: 1,
+                }
+                .validate_public_inputs(public_inputs)
+                .unwrap_err()
+                .to_string()
+            }),
+            TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2),
+        ),
+        (
+            Box::new(|public_inputs| {
+                SubmitPlayerRevealTokensAir {
+                    log_size: 10,
+                    input: SubmitPlayerRevealTokensInput {
+                        seat_index: 0,
+                        reveal_phase: 1,
+                        version_increment: 1,
+                    },
+                    pre_state_root: zero_root(),
+                    post_state_root: one_root(),
+                    table_id: 42,
+                    hand_id: 1,
+                    call_seq: 3,
+                    pre_version: 0,
+                    post_version: 1,
+                }
+                .validate_public_inputs(public_inputs)
+                .unwrap_err()
+                .to_string()
+            }),
+            TexasPublicInputs::synthetic_for_test(MethodKind::SubmitPlayerRevealTokens, 42, 1, 3),
+        ),
+    ];
+
+    for (validate, public_inputs) in cases {
+        let error = validate(&public_inputs);
+        assert!(error.contains("dispatch-call preimage"), "{error}");
+    }
 }
 
 // ========== join_and_shuffle AIR ==========

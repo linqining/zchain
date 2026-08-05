@@ -37,3 +37,4 @@ pub mod leave_with_proof;
 pub mod submit_player_reveal_tokens;
 pub mod submit_reconstruct_deck;
 pub mod submit_shuffle_v2;
+pub(crate) mod validation;

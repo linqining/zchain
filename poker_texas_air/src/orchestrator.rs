@@ -277,11 +277,7 @@ impl Orchestrator {
             precompile_binding: None,
             expected_trace_row: None,
         };
-        pi.bind_dispatch_call(
-            task.context.clone(),
-            task.selector,
-            task.raw_args.clone(),
-        )?;
+        pi.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
         let summary = ProvenTask {
             method_kind: task.method_kind,
             pre_state_root: pre_root,
