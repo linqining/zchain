@@ -420,14 +420,6 @@ pub(crate) struct VerifiedChainBuilder {
 }
 
 impl VerifiedChainBuilder {
-    /// Create an empty host-side chain verifier.
-    #[must_use]
-    pub(crate) const fn new() -> Self {
-        Self {
-            receipts: Vec::new(),
-        }
-    }
-
     /// Append a receipt previously issued by the native verifier.
     ///
     /// This accepts only [`VerificationReceipt`], whose fields are private and
@@ -464,15 +456,6 @@ impl VerifiedChainBuilder {
     /// Returns an error if no verified receipts have been added.
     pub(crate) fn snapshot(&self) -> TexasAirResult<VerifiedChain> {
         VerifiedChain::try_from_receipts(self.receipts.clone())
-    }
-
-    /// Finish the host-side batch and return a checked chain.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no verified proofs were added.
-    pub(crate) fn finish(self) -> TexasAirResult<VerifiedChain> {
-        VerifiedChain::try_from_receipts(self.receipts)
     }
 }
 

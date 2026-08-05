@@ -28,8 +28,10 @@ use crate::merkle_tree::{MerkleTree, SeatLeaf};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 
-// 从 poker_l1 引入业务类型（用于 state_root 编码）
+// Historical sub-structure encoding regression fixtures.
+#[cfg(test)]
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
+#[cfg(test)]
 use poker_l1::vm::contracts::texas_poker::types::{
     DeckState, ReconstructState, RevealTokenState, ShuffleState, TableConfig, TimeoutConfig,
     Timestamps,
@@ -377,10 +379,6 @@ fn poseidon_string(s: &str) -> FieldElement {
     poseidon_borsh("zchain.string.v2", &s.as_bytes().to_vec())
 }
 
-fn poseidon_cards(cards: &[poker_l1::vm::contracts::texas_poker::card::Card]) -> FieldElement {
-    poseidon_borsh("zchain.texas_poker.cards.v2", &cards.to_vec())
-}
-
 /// 通用「borsh 序列化 → Poseidon」编码契约（带域分隔标签）。
 ///
 /// 把任意 `BorshSerialize` 类型序列化为字节，按 31 字节右对齐分块转 FieldElement，
@@ -406,37 +404,45 @@ pub(crate) fn poseidon_borsh<T: borsh::BorshSerialize>(tag: &str, value: &T) -> 
     poseidon_hash_many(&fields)
 }
 
+#[cfg(test)]
 fn poseidon_betting_round(br: &BettingRound) -> FieldElement {
     // current_bet (u64) || min_raise (u64)，borsh 编码后哈希。
     // 注：BettingRound 仅含两个 u64，borsh 序列化为 16 字节定长。
     poseidon_borsh("betting_round", br)
 }
 
+#[cfg(test)]
 fn poseidon_deck_state(ds: &DeckState) -> FieldElement {
     // 含加密牌组（ElGamalCiphertext 向量）、EC 点等，统一走 borsh 编码契约。
     poseidon_borsh("deck_state", ds)
 }
 
+#[cfg(test)]
 fn poseidon_shuffle_state(ss: &ShuffleState) -> FieldElement {
     poseidon_borsh("shuffle_state", ss)
 }
 
+#[cfg(test)]
 fn poseidon_reveal_token_state(rs: &RevealTokenState) -> FieldElement {
     poseidon_borsh("reveal_token_state", rs)
 }
 
+#[cfg(test)]
 fn poseidon_reconstruct_state(rs: &ReconstructState) -> FieldElement {
     poseidon_borsh("reconstruct_state", rs)
 }
 
+#[cfg(test)]
 fn poseidon_timeout_config(tc: &TimeoutConfig) -> FieldElement {
     poseidon_borsh("timeout_config", tc)
 }
 
+#[cfg(test)]
 fn poseidon_timestamps(ts: &Timestamps) -> FieldElement {
     poseidon_borsh("timestamps", ts)
 }
 
+#[cfg(test)]
 fn poseidon_table_config(cfg: &TableConfig) -> FieldElement {
     poseidon_borsh("table_config", cfg)
 }

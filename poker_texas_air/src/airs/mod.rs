@@ -1,14 +1,11 @@
-//! Method AIRs — 22 个已启用的专用 AIR。
+//! Method AIRs — 23 个已启用的专用 AIR。
 //!
 //! ## 分类
 //!
 //! - [`lifecycle`] — A 档：6 个表台生命周期方法
 //! - [`actions`] — B 档：9 个已启用玩家动作方法
 //! - [`funds`] — B+ 档：2 个资金动作方法（addon/rebuy）
-//! - [`crypto`] — C 档：5 个密码学协议方法
-//!
-//! VM 另注册 `fold_with_proof`，该 selector 尚无可信 AIR statement，生产
-//! Orchestrator 会在 proof 构造前拒绝。
+//! - [`crypto`] — C 档：6 个密码学协议方法
 //!
 //! ## 通用模板
 //!
@@ -194,6 +191,11 @@ impl_validated_texas_air!(
     funds::rebuy::RebuyAir,
     MethodKind::Rebuy,
     funds::validation::validate_rebuy
+);
+impl_validated_texas_air!(
+    crypto::fold_with_proof::FoldWithProofAir,
+    MethodKind::FoldWithProof,
+    crypto::validation::validate_fold_with_proof
 );
 impl_validated_texas_air!(
     crypto::join_and_shuffle::JoinAndShuffleAir,

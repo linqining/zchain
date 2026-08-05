@@ -25,10 +25,11 @@
 //! ## 关于完整 shuffle/reveal/reconstruct 牌局
 //!
 //! Mental Poker 的 crypto 阶段（`join_and_shuffle`/`submit_shuffle_v2`/
-//! `submit_player_reveal_tokens`/`submit_reconstruct_deck`/`leave_with_proof`）
+//! `submit_player_reveal_tokens`/`submit_reconstruct_deck`/`leave_with_proof`/
+//! `fold_with_proof`）
 //! 需要构造合法的 BLS/ElGamal 密文与 ZK proof（`ElGamalCiphertext`/`DLEqProof`/
 //! `ZKShuffleProof`）。即便合约 `config` 默认 skip ZK 验证，仍需结构合法的密文
-//! 数据。Orchestrator 已为这 5 个方法接线 trace 构造（见
+//! 数据。Orchestrator 已为这 6 个方法接线 trace 构造（见
 //! `poker_texas_air::orchestrator`），待 crypto 数据构造器就绪后即可纳入 runner。
 
 use blstrs::G1Projective;

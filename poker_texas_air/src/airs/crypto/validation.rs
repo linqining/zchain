@@ -10,10 +10,12 @@ use poker_l1::vm::contracts::texas_poker::constants::{
     REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
-    SubmitShuffleV2Args,
+    FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs,
+    SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
+use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
+use super::fold_with_proof::{FoldWithProofAir, FoldWithProofInput, FoldWithProofRow};
 use super::join_and_shuffle::{JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow};
 use super::leave_with_proof::{LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow};
 use super::submit_player_reveal_tokens::{
@@ -34,6 +36,143 @@ use crate::precompile_binding::{
 use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::state_root_to_air_limbs;
+
+/// Reject compound `fold_with_proof` transitions that require collection,
+/// round advancement, settlement, or reset AIRs.
+pub(crate) fn ensure_fold_with_proof_mid_round(
+    pre: &TexasPokerTable,
+    post: &TexasPokerTable,
+) -> TexasAirResult<u8> {
+    let expected_version = pre
+        .version
+        .checked_add(1)
+        .ok_or_else(|| TexasAirError::SpecViolation("fold_with_proof version overflow".into()))?;
+    if post.version != expected_version
+        || pre.betting_round.is_none()
+        || post.betting_round.is_none()
+        || pre.round_state != post.round_state
+        || pre.pot != post.pot
+    {
+        return Err(TexasAirError::UnsupportedBettingTransition(
+            "fold_with_proof triggered collect_bets_to_pot / round advance / settlement; the current AIR covers only a single-version same-round transition with unchanged pot"
+                .into(),
+        ));
+    }
+    post.current_turn.ok_or_else(|| {
+        TexasAirError::UnsupportedBettingTransition(
+            "fold_with_proof produced no next current_turn; terminal settlement remains fail-closed"
+                .into(),
+        )
+    })
+}
+
+/// Bind a non-terminal `fold_with_proof` transition to its exact dispatch and
+/// verifier-issued leave-layer DLEq receipt.
+pub(crate) fn validate_fold_with_proof(
+    air: &FoldWithProofAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    const METHOD: &str = "fold_with_proof";
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::FoldWithProof)?;
+    let args: FoldWithProofArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+        TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
+    })?;
+    let MethodInput::FoldWithProof {
+        seat_index,
+        raw_args,
+    } = &canonical.task.method_input
+    else {
+        return Err(TexasAirError::SpecViolation(
+            "fold_with_proof: replayed task has the wrong MethodInput variant".into(),
+        ));
+    };
+    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+        return Err(TexasAirError::SpecViolation(
+            "fold_with_proof: replayed MethodInput does not match raw args".into(),
+        ));
+    }
+    let post_current_turn = ensure_fold_with_proof_mid_round(&canonical.pre, &canonical.post)?;
+
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        TexasAirError::SpecViolation(
+            "fold_with_proof requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    if binding.precompile_id() != PokerPrecompileId::DleqLeave {
+        return Err(TexasAirError::SpecViolation(
+            "fold_with_proof received the wrong precompile receipt type".into(),
+        ));
+    }
+    let player_pk = canonical
+        .pre
+        .seats
+        .get(usize::from(args.seat_index))
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "fold_with_proof seat is outside the canonical pre-table".into(),
+            )
+        })?
+        .pk;
+    let expected_context = precompile_call_context(
+        MethodKind::FoldWithProof,
+        args.seat_index,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        public_inputs.pre_version,
+        public_inputs.post_version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    let expected_request = LeaveDleqVerifyRequest::new(
+        expected_context,
+        canonical.pre.deck_state.encrypted.clone(),
+        args.output_cards,
+        player_pk,
+        args.fold_proof,
+    );
+    if binding.request_bytes() != expected_request.encode()? {
+        return Err(TexasAirError::SpecViolation(
+            "fold_with_proof precompile request does not match canonical dispatch".into(),
+        ));
+    }
+    binding.validate_issued()?;
+
+    let input = FoldWithProofInput {
+        seat_index: args.seat_index,
+        post_current_turn,
+        old_deck_commitment: deck_commitment(&canonical.pre),
+        new_deck_commitment: deck_commitment(&canonical.post),
+        precompile: binding.air_binding(),
+    };
+    if air.input.seat_index != input.seat_index
+        || air.input.post_current_turn != input.post_current_turn
+        || air.input.old_deck_commitment != input.old_deck_commitment
+        || air.input.new_deck_commitment != input.new_deck_commitment
+        || air.input.precompile != input.precompile
+    {
+        return Err(TexasAirError::SpecViolation(
+            "fold_with_proof: AIR input does not match the canonical dispatch".into(),
+        ));
+    }
+
+    let row = FoldWithProofRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        canonical.pre.round_state,
+        canonical.post.round_state,
+        canonical.pre.pot,
+        canonical.post.pot,
+    );
+    validate_row(public_inputs, &row.to_vec(), METHOD)
+}
 
 /// Bind `join_and_shuffle` to its exact authenticated dispatch and post table.
 pub(crate) fn validate_join_and_shuffle(

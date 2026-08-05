@@ -1,5 +1,6 @@
-//! C 档 — Mental Poker 协议方法 AIRs（5 个）。
+//! C 档 — Mental Poker 协议方法 AIRs（6 个）。
 //!
+//! - [`fold_with_proof`] — 局中 fold 并剥离玩家加密层
 //! - [`join_and_shuffle`] — 玩家加入并完成首洗牌
 //! - [`leave_with_proof`] — 玩家带 proof 离场
 //! - [`submit_shuffle_v2`] — 玩家提交洗牌结果（V2）
@@ -14,7 +15,7 @@
 //! - Reconstruct 多方重构
 //! - Reveal Token 揭示
 //!
-//! 五条 crypto route 都采用同一 precompile 调用绑定：verifier 从 canonical dispatch 重建
+//! 六条 crypto route 都采用同一 precompile 调用绑定：verifier 从 canonical dispatch 重建
 //! request，执行一次 host-native 密码学验证并签发不可伪造 binding，再将完整
 //! request/receipt digest 和 replay scope 绑定进 AIR statement。AIR verifier 会检查该
 //! binding 的 canonical bytes、ABI/backend/digest，但不会重复同一昂贵 BLS 验证。
@@ -31,6 +32,7 @@
 //!
 //! 所有 crypto AIR 共享通用 37 列 + 业务列（每个方法自定义）。
 
+pub mod fold_with_proof;
 pub mod join_and_shuffle;
 pub mod leave_with_proof;
 pub mod submit_player_reveal_tokens;

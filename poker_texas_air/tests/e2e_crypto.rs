@@ -1,6 +1,7 @@
 //! E2E 测试 — crypto 模块（Mental Poker 协议方法）prove + verify + soundness。
 //!
-//! 覆盖 5 个 crypto 协议方法：
+//! 覆盖 6 个 crypto 协议方法：
+//! - `fold_with_proof`
 //! - `join_and_shuffle`
 //! - `leave_with_proof`
 //! - `submit_shuffle_v2`
@@ -21,6 +22,7 @@
 use stwo::core::fields::m31::M31;
 
 use poker_texas_air::airs::TexasAir;
+use poker_texas_air::airs::crypto::fold_with_proof::{FoldWithProofAir, FoldWithProofInput};
 use poker_texas_air::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
 };
@@ -64,6 +66,31 @@ fn one_root() -> [M31; 4] {
 #[test]
 fn production_crypto_validators_require_an_exact_dispatch_call() {
     let cases: Vec<(Box<dyn Fn(&TexasPublicInputs) -> String>, TexasPublicInputs)> = vec![
+        (
+            Box::new(|public_inputs| {
+                FoldWithProofAir {
+                    log_size: 10,
+                    input: FoldWithProofInput {
+                        seat_index: 0,
+                        post_current_turn: 1,
+                        old_deck_commitment: 10,
+                        new_deck_commitment: 11,
+                        precompile: PrecompileAirBinding::synthetic_unverified(),
+                    },
+                    pre_state_root: zero_root(),
+                    post_state_root: one_root(),
+                    table_id: 42,
+                    hand_id: 1,
+                    call_seq: 1,
+                    pre_version: 0,
+                    post_version: 1,
+                }
+                .validate_public_inputs(public_inputs)
+                .unwrap_err()
+                .to_string()
+            }),
+            TexasPublicInputs::synthetic_for_test(MethodKind::FoldWithProof, 42, 1, 1),
+        ),
         (
             Box::new(|public_inputs| {
                 JoinAndShuffleAir {
@@ -882,9 +909,15 @@ fn test_soundness_submit_reconstruct_deck_tampered_phase() {
 fn test_crypto_air_column_consistency() {
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
     use poker_texas_air::airs::crypto::{
-        join_and_shuffle, leave_with_proof, submit_player_reveal_tokens, submit_reconstruct_deck,
-        submit_shuffle_v2,
+        fold_with_proof, join_and_shuffle, leave_with_proof, submit_player_reveal_tokens,
+        submit_reconstruct_deck, submit_shuffle_v2,
     };
+
+    assert_eq!(fold_with_proof::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 47);
+    assert_eq!(
+        FoldWithProofAir::num_columns(),
+        fold_with_proof::cols::NUM_COLUMNS
+    );
 
     // join_and_shuffle: 原 16 业务列 + precompile id/version + 两个 256-bit digest。
     assert_eq!(join_and_shuffle::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 50);

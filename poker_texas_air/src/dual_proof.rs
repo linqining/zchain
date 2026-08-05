@@ -5,7 +5,7 @@
 //!
 //! 1. the Stwo method proof for the state transition and AIR digest columns;
 //! 2. the complete canonical poker-precompile request, including the
-//!    shuffle, leave-layer DLEq, reveal-token, or Reconstruction V3 proof.
+//!    shuffle, leave/fold layer DLEq, reveal-token, or Reconstruction V3 proof.
 //!
 //! The package does **not** carry a trusted AIR or trusted public inputs.
 //! Verification requires the independently authenticated [`ProveTask`], replays
@@ -25,6 +25,9 @@ use poker_protocol::precompile_abi::{
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
 
+use crate::airs::crypto::fold_with_proof::{
+    FoldWithProofAir, FoldWithProofInput, FoldWithProofRow,
+};
 use crate::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
 };
@@ -40,6 +43,7 @@ use crate::airs::crypto::submit_reconstruct_deck::{
 use crate::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
+use crate::airs::crypto::validation::ensure_fold_with_proof_mid_round;
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
@@ -348,6 +352,29 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 request_bytes,
             )
         }
+        PreparedMethod::Fold {
+            air,
+            mut public_inputs,
+            row,
+            request_bytes,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let trace = gen_method_trace(
+                FoldWithProofAir::num_columns(),
+                &row_values,
+                &FoldWithProofRow::padding().to_vec(),
+            )?;
+            let proof = prove_method(&trace, air, FoldWithProofAir::num_columns(), public_inputs)?;
+            bundle_from_stark(
+                MethodKind::FoldWithProof,
+                PokerPrecompileId::DleqLeave,
+                LEAVE_DLEQ_ABI_VERSION,
+                &proof.stark_proof,
+                request_bytes,
+            )
+        }
         PreparedMethod::Reveal {
             air,
             mut public_inputs,
@@ -435,6 +462,16 @@ pub fn dual_proof_from_archived(
                 LEAVE_DLEQ_ABI_VERSION,
                 request_bytes,
                 LeaveWithProofAir::num_columns(),
+                air.log_size,
+            ),
+            PreparedMethod::Fold {
+                request_bytes, air, ..
+            } => (
+                MethodKind::FoldWithProof,
+                PokerPrecompileId::DleqLeave,
+                LEAVE_DLEQ_ABI_VERSION,
+                request_bytes,
+                FoldWithProofAir::num_columns(),
                 air.log_size,
             ),
             PreparedMethod::Reveal {
@@ -580,6 +617,29 @@ pub fn verify_dual_proof(
                 precompile_binding: binding,
             })
         }
+        PreparedMethod::Fold {
+            air,
+            mut public_inputs,
+            row,
+            binding,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let proof = MethodProof {
+                stark_proof,
+                air: air.clone(),
+                log_size: air.log_size,
+                num_columns: FoldWithProofAir::num_columns(),
+                public_inputs: public_inputs.clone(),
+            };
+            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            Ok(VerifiedDualProof {
+                receipt,
+                precompile_binding: binding,
+            })
+        }
         PreparedMethod::Reveal {
             air,
             mut public_inputs,
@@ -632,6 +692,13 @@ enum PreparedMethod {
         air: LeaveWithProofAir,
         public_inputs: TexasPublicInputs,
         row: LeaveWithProofRow,
+        binding: PrecompileCallBinding,
+        request_bytes: Vec<u8>,
+    },
+    Fold {
+        air: FoldWithProofAir,
+        public_inputs: TexasPublicInputs,
+        row: FoldWithProofRow,
         binding: PrecompileCallBinding,
         request_bytes: Vec<u8>,
     },
@@ -1007,6 +1074,91 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 request_bytes,
             })
         }
+        MethodKind::FoldWithProof => {
+            let MethodInput::FoldWithProof {
+                seat_index,
+                raw_args,
+            } = &task.method_input
+            else {
+                return Err(TexasAirError::SpecViolation(
+                    "fold_with_proof task has the wrong MethodInput variant".into(),
+                ));
+            };
+            let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
+                borsh::from_slice(raw_args).map_err(|error| {
+                    TexasAirError::SerializationError(format!(
+                        "fold_with_proof raw args borsh: {error}"
+                    ))
+                })?;
+            if args.seat_index != *seat_index {
+                return Err(TexasAirError::SpecViolation(
+                    "fold_with_proof seat differs between task fields".into(),
+                ));
+            }
+            let post_current_turn =
+                ensure_fold_with_proof_mid_round(&task.pre_table, &task.post_table)?;
+            let player_pk = task
+                .pre_table
+                .seats
+                .get(usize::from(*seat_index))
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation(
+                        "fold_with_proof seat is outside the canonical pre-table".into(),
+                    )
+                })?
+                .pk;
+            let expected_request = LeaveDleqVerifyRequest::new(
+                call_context(task, *seat_index, &public_inputs),
+                task.pre_table.deck_state.encrypted.clone(),
+                args.output_cards,
+                player_pk,
+                args.fold_proof,
+            );
+            let request_bytes =
+                require_expected_request(supplied_request, expected_request.encode()?)?;
+            let request = LeaveDleqVerifyRequest::decode(&request_bytes)?;
+            let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
+            let input = FoldWithProofInput {
+                seat_index: *seat_index,
+                post_current_turn,
+                old_deck_commitment: deck_commitment(&task.pre_table),
+                new_deck_commitment: deck_commitment(&task.post_table),
+                precompile: binding.air_binding(),
+            };
+            let row = FoldWithProofRow::active(
+                &input,
+                state_root_to_air_limbs(pre_root),
+                state_root_to_air_limbs(post_root),
+                task.table_id,
+                task.hand_id,
+                task.call_seq,
+                task.pre_table.version,
+                task.post_table.version,
+                task.pre_table.round_state,
+                task.post_table.round_state,
+                task.pre_table.pot,
+                task.post_table.pot,
+            );
+            let air = FoldWithProofAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: state_root_to_air_limbs(pre_root),
+                post_state_root: state_root_to_air_limbs(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version: task.pre_table.version,
+                post_version: task.post_table.version,
+            };
+            public_inputs.precompile_binding = Some(binding.clone());
+            Ok(PreparedMethod::Fold {
+                air,
+                public_inputs,
+                row,
+                binding,
+                request_bytes,
+            })
+        }
         MethodKind::SubmitPlayerRevealTokens => {
             let MethodInput::SubmitPlayerRevealTokens {
                 seat_index,
@@ -1170,6 +1322,10 @@ fn validate_route(
             RECONSTRUCTION_V3_ABI_VERSION
         ) | (
             MethodKind::LeaveWithProof,
+            PokerPrecompileId::DleqLeave,
+            LEAVE_DLEQ_ABI_VERSION
+        ) | (
+            MethodKind::FoldWithProof,
             PokerPrecompileId::DleqLeave,
             LEAVE_DLEQ_ABI_VERSION
         ) | (

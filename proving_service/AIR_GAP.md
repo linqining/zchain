@@ -23,8 +23,10 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
 - 管理签名、超时和完整 range checks 尚未全部放入 AIR；当前生产 receipt 依赖
   Orchestrator 的 canonical VM replay 与绑定的 trace row。
 - `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
-  仍没有覆盖 DLEq layer removal 与可能的 settlement，入口保持 fail-closed。
-- stage-3 dual-proof package 已覆盖全部五条 crypto route：`join_and_shuffle`、
+  的单版本 mid-round 路径现已绑定 native DLEq receipt、前后牌组 commitment 与 fold/turn
+  状态。last-opponent fold 触发 settlement/reset 时仍保持 fail-closed。
+- stage-3 dual-proof package 已覆盖全部六条 crypto route：`fold_with_proof`、
+  `join_and_shuffle`、
   `submit_shuffle_v2`、`leave_with_proof`、`submit_player_reveal_tokens` 与
   `submit_reconstruct_deck`。每条 route 都先对 canonical request 执行一次 host-native
   BLS12-381 verifier，再签发字段私有、无反序列化入口的 binding；AIR verifier 只重算

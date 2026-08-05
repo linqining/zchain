@@ -3,12 +3,13 @@
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
+use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, SHUFFLE_PHASE_WAITING,
+    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, ROUND_PREFLOP, SHUFFLE_PHASE_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    self as texas_dispatch, JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs,
-    SubmitRevealTokensArgs, SubmitShuffleV2Args,
+    self as texas_dispatch, FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs,
+    SubmitReconstructDeckArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
     DecryptedCard, ReconstructState, RevealAssignment, RevealTokenState, ShuffleState,
@@ -364,6 +365,76 @@ fn leave_task(nonce: u64) -> ProveTask {
     )
 }
 
+fn fold_with_proof_task(nonce: u64, active_players: u8) -> ProveTask {
+    assert!((2..=3).contains(&active_players));
+    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let input_cards: Vec<_> = (0..52)
+        .map(|i| {
+            let card = Bls12381Curve::hash_to_curve(
+                format!("dual-proof/fold/{nonce}/card/{i}").as_bytes(),
+            );
+            ElGamalCiphertextGeneric::encrypt(
+                &card,
+                &public_key,
+                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+            )
+        })
+        .collect();
+    let output_cards: Vec<_> = input_cards
+        .iter()
+        .map(|ciphertext| ElGamalCiphertextGeneric {
+            c1: ciphertext.c1,
+            c2: ciphertext.decrypt(&secret_key),
+        })
+        .collect();
+    let fold_proof = DLEqProof::<Bls12381Curve, LeaveKind>::prove(
+        &input_cards,
+        &output_cards,
+        &secret_key,
+        &public_key,
+        &mut utils::new_leave_transcript(),
+    );
+    let player = [0x81; 20];
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xD5; 20], nonce),
+        format!("fold-{nonce}"),
+        [0xC0; 20],
+        4,
+        50,
+        100,
+    );
+    table.call_seq = 12;
+    table.hand_id = 14;
+    table.version = 40;
+    table.round_state = ROUND_PREFLOP;
+    table.betting_round = Some(BettingRound::new(100, 100));
+    table.current_turn = Some(0);
+    for index in 0..active_players {
+        table.seats[usize::from(index)].player = if index == 0 {
+            player
+        } else {
+            [0x81 + index; 20]
+        };
+        table.seats[usize::from(index)].stack = 1_000;
+    }
+    table.seats[0].pk = ECPoint(public_key);
+    table.deck_state.encrypted = input_cards;
+    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    let raw_args = borsh::to_vec(&FoldWithProofArgs {
+        seat_index: 0,
+        output_cards,
+        fold_proof,
+    })
+    .expect("fold_with_proof args should encode");
+    dispatch_task(
+        table,
+        player,
+        texas_dispatch::selectors::fold_with_proof(),
+        raw_args,
+    )
+}
+
 fn reveal_task(nonce: u64) -> ProveTask {
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
@@ -542,6 +613,42 @@ fn leave_and_reveal_dual_packages_roundtrip_and_verify() {
             .expect("archive-derived dual proof should verify");
         assert_eq!(restored.receipt().kind(), expected_kind);
     }
+}
+
+#[test]
+fn fold_with_proof_dual_package_roundtrips_archives_and_rejects_replay() {
+    let task = fold_with_proof_task(309, 3);
+    let bundle = prove_dual_proof(&task).expect("mid-round fold package should prove");
+    let encoded = bundle.encode().expect("fold package should encode");
+    let decoded = DualProofBundle::decode(&encoded).expect("fold package should decode");
+    let accepted =
+        verify_dual_proof(&task, &decoded).expect("fold method and DLEq proof should verify");
+    assert_eq!(accepted.receipt().kind(), MethodKind::FoldWithProof);
+
+    let archived = Orchestrator::new()
+        .prove_verify_and_archive_task(&task)
+        .expect("fold method proof should archive");
+    let restored_bundle = dual_proof_from_archived(&task, &archived.archive)
+        .expect("fold archive should repackage as a dual proof");
+    let restored = verify_dual_proof(&task, &restored_bundle)
+        .expect("archive-derived fold dual proof should verify");
+    assert_eq!(restored.receipt().kind(), MethodKind::FoldWithProof);
+
+    let replay_task = fold_with_proof_task(310, 3);
+    assert!(verify_dual_proof(&replay_task, &bundle).is_err());
+}
+
+#[test]
+fn terminal_fold_with_proof_remains_fail_closed_until_settlement_air() {
+    let task = fold_with_proof_task(311, 2);
+    let error = prove_dual_proof(&task)
+        .expect_err("last-opponent fold must not use the mid-round fold AIR");
+    assert!(error.to_string().contains("settlement"), "{error}");
+
+    let error = Orchestrator::new()
+        .prove_and_verify_task(&task)
+        .expect_err("orchestrator must reject terminal fold_with_proof");
+    assert!(error.to_string().contains("settlement"), "{error}");
 }
 
 #[test]

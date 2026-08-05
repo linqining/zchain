@@ -12,12 +12,18 @@
 //!
 //! 当前实现不验证子 proof；生产入口默认拒绝，显式测试入口只检查 PoC STARK。
 
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::core::channel::Poseidon252Channel;
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::core::verifier::{VerificationError, verify};
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::aggregator_air::cols;
 use crate::aggregator_prover::AggregatorProof;
 use crate::error::{TexasAirError, TexasAirResult};
@@ -68,6 +74,7 @@ pub fn verify_aggregator_unchecked_for_tests(proof: AggregatorProof) -> TexasAir
     verify_aggregator_unchecked(proof)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn verify_aggregator_unchecked(proof: AggregatorProof) -> TexasAirResult<()> {
     validate_proof_metadata(&proof)?;
     let config = PcsConfig::default();
@@ -123,6 +130,7 @@ fn verify_aggregator_unchecked(proof: AggregatorProof) -> TexasAirResult<()> {
 /// Reconstruct every verifier-controlled Aggregator statement field from the
 /// transcript-bound leaf descriptors. Proof-carried AIR metadata is never an
 /// independent source of truth.
+#[cfg(any(test, feature = "test-helpers"))]
 fn validate_proof_metadata(proof: &AggregatorProof) -> TexasAirResult<()> {
     if proof.num_children != proof.children.len() {
         return Err(TexasAirError::RecursionError(format!(

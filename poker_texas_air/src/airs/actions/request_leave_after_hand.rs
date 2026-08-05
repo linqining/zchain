@@ -2,7 +2,7 @@
 //!
 //! 此方法只切换一个已占用座位的 `want_leave` 标记，不改变底池、轮次、手牌或
 //! 筹码池。实际退款和座位清理由后续 `reset_for_next_hand` 处理。因此它是一个
-//! 可独立证明的单步 transition，不应继续和 `fold_with_proof` 一样被 fail-closed。
+//! 可独立证明的单步 transition，与局中 `fold_with_proof` 的加密层剥离语义相互独立。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};

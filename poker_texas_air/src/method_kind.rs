@@ -8,7 +8,7 @@
 //! - **A 档（生命周期，6 个）**：表台创建/入座/离座/开局/超时/重置
 //! - **B 档（玩家动作，9 个）**：9 个启用 AIR
 //! - **B+ 档（资金动作，2 个）**：addon（下一手生效）/rebuy（立即生效）
-//! - **C 档（密码学协议，6 个）**：5 个启用 AIR + fail-closed 的 fold_with_proof
+//! - **C 档（密码学协议，6 个）**：6 个启用 AIR
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
@@ -34,9 +34,7 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
 
 /// 23 个方法种类的枚举。
 ///
-/// 每个 variant 对应 `poker_l1` 的一个公开 dispatch selector。22 个 variant
-/// 拥有启用的专用 AIR；`fold_with_proof` 只保留 wire compatibility 并在生产中
-/// fail-closed。
+/// 每个 variant 对应 `poker_l1` 的一个公开 dispatch selector，并拥有启用的专用 AIR。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -77,7 +75,7 @@ pub enum MethodKind {
     /// `rebuy` — 玩家重购（立即生效，MTT 早期用）。
     Rebuy = 14,
 
-    // ===== C 档：Mental Poker 协议（5 个）=====
+    // ===== C 档：Mental Poker 协议（6 个）=====
     /// `join_and_shuffle` — 玩家加入并完成首洗牌。
     JoinAndShuffle = 15,
     /// `leave_with_proof` — 玩家带 proof 离场。
@@ -104,12 +102,10 @@ impl MethodKind {
 
     /// Whether the repository ships an enabled production AIR for this selector.
     ///
-    /// Registered-but-disabled selectors remain in the wire enum so VM tasks can
-    /// round-trip, but generic prover/verifier APIs must reject them as well as
-    /// the Orchestrator receipt path.
+    /// All 23 registered VM selectors currently have an enabled production AIR.
     #[must_use]
     pub const fn is_production_air_enabled(self) -> bool {
-        !matches!(self, Self::FoldWithProof)
+        true
     }
 
     /// 返回方法名字符串（snake_case，与 Move 端 entry function 名一一对应）。
@@ -248,11 +244,11 @@ impl MethodKind {
 pub enum MethodTier {
     /// A 档：表台生命周期（6 个，阶段 1-2 实现）。
     Lifecycle,
-    /// B 档：玩家动作（9 个 selector；8 个 AIR 启用）。
+    /// B 档：玩家动作（9 个，全部启用 AIR）。
     Action,
     /// B+ 档：资金动作（2 个：addon/rebuy）。
     Funds,
-    /// C 档：Mental Poker 协议（6 个 selector；5 个 AIR 启用）。
+    /// C 档：Mental Poker 协议（6 个，全部启用 AIR）。
     Crypto,
 }
 
@@ -317,7 +313,7 @@ mod tests {
         assert_eq!(MethodKind::JoinAndShuffle.tier(), MethodTier::Crypto);
         assert!(MethodKind::Bet.is_production_air_enabled());
         assert!(MethodKind::RequestLeaveAfterHand.is_production_air_enabled());
-        assert!(!MethodKind::FoldWithProof.is_production_air_enabled());
+        assert!(MethodKind::FoldWithProof.is_production_air_enabled());
     }
 
     #[test]

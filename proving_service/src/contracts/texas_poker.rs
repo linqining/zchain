@@ -184,9 +184,11 @@ impl TexasPokerPlugin {
         for (index, task) in tasks.iter().enumerate() {
             let supported = matches!(
                 task.method_kind,
-                poker_texas_air::method_kind::MethodKind::SubmitShuffleV2
+                poker_texas_air::method_kind::MethodKind::JoinAndShuffle
+                    | poker_texas_air::method_kind::MethodKind::SubmitShuffleV2
                     | poker_texas_air::method_kind::MethodKind::SubmitReconstructDeck
                     | poker_texas_air::method_kind::MethodKind::LeaveWithProof
+                    | poker_texas_air::method_kind::MethodKind::FoldWithProof
                     | poker_texas_air::method_kind::MethodKind::SubmitPlayerRevealTokens
             );
             if !supported {

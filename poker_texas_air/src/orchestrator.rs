@@ -36,10 +36,9 @@
 //!
 //! ## 当前覆盖
 //!
-//! 23 个 VM selector 都能进入统一任务格式；其中 22 个已有 trace 构造 + prove +
-//! verify 路径。`fold_with_proof` 只允许任务被编码和反序列化，生产 Orchestrator
-//! 明确 fail-closed，不签发 proof/receipt；它尚未证明 DLEq layer removal，也未覆盖
-//! 可能发生的 `advance_turn`/settlement。
+//! 23 个 VM selector 都能进入统一任务格式与 trace/prove/verify 路径。
+//! `fold_with_proof` 的单版本 mid-round 路径会绑定 native DLEq receipt；触发
+//! settlement/reset 的 terminal 路径继续 fail-closed。
 
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
@@ -58,6 +57,9 @@ use crate::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
 use crate::airs::actions::request_leave_after_hand::{
     RequestLeaveAfterHandAir, RequestLeaveAfterHandInput, RequestLeaveAfterHandRow,
 };
+use crate::airs::crypto::fold_with_proof::{
+    FoldWithProofAir, FoldWithProofInput, FoldWithProofRow,
+};
 use crate::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
 };
@@ -73,6 +75,7 @@ use crate::airs::crypto::submit_reconstruct_deck::{
 use crate::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
+use crate::airs::crypto::validation::ensure_fold_with_proof_mid_round;
 use crate::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use crate::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
 use crate::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput, CreateTableRow};
@@ -253,12 +256,6 @@ impl Orchestrator {
         task: &ProveTask,
         backend: &mut B,
     ) -> TexasAirResult<(ProvenTask, B::Output)> {
-        // `fold_with_proof` remains in the task wire format, but its DLEq
-        // layer-removal transition does not yet have a trustworthy AIR.
-        if task.method_kind == MethodKind::FoldWithProof {
-            return Err(unsupported_registered_method(task.method_kind));
-        }
-
         validate_full_dispatch_task(task)?;
         let pre_image = table_state_preimage(&task.pre_table)?;
         let post_image = table_state_preimage(&task.post_table)?;
@@ -341,7 +338,7 @@ impl Orchestrator {
                 self.prove_submit_reconstruct_deck(task, pre_root, post_root, &pi, backend)?
             }
             MethodKind::FoldWithProof => {
-                return Err(unsupported_registered_method(task.method_kind));
+                self.prove_fold_with_proof(task, pre_root, post_root, &pi, backend)?
             }
         };
 
@@ -1776,6 +1773,112 @@ impl Orchestrator {
         )
     }
 
+    fn prove_fold_with_proof<B: MethodBackend>(
+        &self,
+        task: &ProveTask,
+        pre_root: StateRoot,
+        post_root: StateRoot,
+        pi: &crate::public_inputs::TexasPublicInputs,
+        backend: &mut B,
+    ) -> TexasAirResult<B::Output> {
+        let MethodInput::FoldWithProof {
+            seat_index,
+            raw_args,
+        } = &task.method_input
+        else {
+            return Err(input_mismatch(
+                "fold_with_proof",
+                "FoldWithProof",
+                &task.method_input,
+            ));
+        };
+        let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
+            borsh::from_slice(raw_args).map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "fold_with_proof raw args borsh: {error}"
+                ))
+            })?;
+        if args.seat_index != *seat_index {
+            return Err(TexasAirError::SpecViolation(
+                "fold_with_proof method input seat differs from raw args".into(),
+            ));
+        }
+        let post_current_turn =
+            ensure_fold_with_proof_mid_round(&task.pre_table, &task.post_table)?;
+        let player_pk = task
+            .pre_table
+            .seats
+            .get(usize::from(*seat_index))
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "fold_with_proof seat is outside the canonical pre-table".into(),
+                )
+            })?
+            .pk;
+        let call_context = precompile_call_context(
+            MethodKind::FoldWithProof,
+            *seat_index,
+            pi.table_id,
+            pi.hand_id,
+            pi.call_seq,
+            pi.pre_version,
+            pi.post_version,
+            pi.pre_state_root,
+            pi.post_state_root,
+            pi.dispatch_call_digest,
+        );
+        let request = LeaveDleqVerifyRequest::new(
+            call_context,
+            task.pre_table.deck_state.encrypted.clone(),
+            args.output_cards,
+            player_pk,
+            args.fold_proof,
+        );
+        let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
+        let input = FoldWithProofInput {
+            seat_index: *seat_index,
+            post_current_turn,
+            old_deck_commitment: deck_commitment(&task.pre_table),
+            new_deck_commitment: deck_commitment(&task.post_table),
+            precompile: binding.air_binding(),
+        };
+        let (pre_version, post_version) = (task.pre_table.version, task.post_table.version);
+        let row = FoldWithProofRow::active(
+            &input,
+            srm(pre_root),
+            srm(post_root),
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            pre_version,
+            post_version,
+            task.pre_table.round_state,
+            task.post_table.round_state,
+            task.pre_table.pot,
+            task.post_table.pot,
+        );
+        let mut bound_pi = pi.clone();
+        bound_pi.precompile_binding = Some(binding);
+        run(
+            backend,
+            FoldWithProofAir::num_columns(),
+            &row,
+            &FoldWithProofRow::padding(),
+            &bound_pi,
+            move || FoldWithProofAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: srm(pre_root),
+                post_state_root: srm(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version,
+                post_version,
+            },
+        )
+    }
+
     fn prove_submit_shuffle_v2<B: MethodBackend>(
         &self,
         task: &ProveTask,
@@ -2510,6 +2613,7 @@ impl_row_to_vec!(
     RequestLeaveAfterHandRow,
     AddonRow,
     RebuyRow,
+    FoldWithProofRow,
     JoinAndShuffleRow,
     LeaveWithProofRow,
     SubmitShuffleV2Row,
@@ -2522,21 +2626,6 @@ fn input_mismatch(method: &str, expected: &str, actual: &MethodInput) -> TexasAi
     TexasAirError::SpecViolation(format!(
         "{method} 任务的 method_input 应为 {expected}，实际：{actual:?}"
     ))
-}
-
-/// Registered VM selectors whose proof statements are intentionally disabled.
-///
-/// Keeping one canonical error constructor makes the production match and its
-/// defense-in-depth fallback agree on the exact fail-closed boundary.
-fn unsupported_registered_method(kind: MethodKind) -> TexasAirError {
-    let reason = match kind {
-        MethodKind::FoldWithProof => {
-            "fold_with_proof AIR 尚未证明 DLEq crypto layer removal，也未覆盖\
-             advance_turn/settlement；Orchestrator fail-closed，no proof/receipt"
-        }
-        _ => "internal error: method is not a registered fail-closed selector",
-    };
-    TexasAirError::NotImplemented(reason.into())
 }
 
 /// 在 post_table 中找到 player 占用的座位（join_table / join_and_shuffle 用）。
@@ -2635,64 +2724,6 @@ mod tests {
         assert_eq!(task.selector, selector);
         assert_eq!(task.raw_args, raw_args);
         (task, post_table)
-    }
-
-    fn registered_but_unsupported_task(
-        method_kind: MethodKind,
-        method_input: MethodInput,
-        raw_args: Vec<u8>,
-    ) -> ProveTask {
-        let pre = make_table("unsupported-pre");
-        let mut post = pre.clone();
-        post.version = pre.version + 1;
-        ProveTask::new(
-            method_kind,
-            method_input,
-            DispatchContext {
-                caller: pre.creator,
-                caller_pubkey: TaggedPubkey {
-                    tag: 0,
-                    raw: vec![0xCC; 32],
-                },
-                chain_id: 1,
-                block_height: 100,
-                block_timestamp: 1_000_000,
-            },
-            method_kind.selector(),
-            raw_args,
-            pre,
-            post,
-            1,
-            0,
-            1,
-        )
-    }
-
-    fn assert_registered_method_fails_closed(task: ProveTask) {
-        let encoded = borsh::to_vec(&task).expect("registered task should serialize");
-        let decoded: ProveTask =
-            borsh::from_slice(&encoded).expect("registered task should deserialize");
-
-        let mut orchestrator = Orchestrator::new();
-        let error = orchestrator
-            .prove_and_verify_task(&decoded)
-            .expect_err("unsupported registered selector must issue no proof/receipt");
-        assert!(
-            matches!(error, TexasAirError::NotImplemented(_)),
-            "registered unsupported selector must fail with an explicit boundary: {error}"
-        );
-        assert!(
-            error.to_string().contains("no proof/receipt"),
-            "error must state that no receipt is issued: {error}"
-        );
-        assert!(
-            orchestrator.proven().is_empty(),
-            "fail-closed task must leave no proven descriptor"
-        );
-        assert!(
-            orchestrator.verified_chain().is_err(),
-            "fail-closed task must leave no verifier-issued receipt"
-        );
     }
 
     #[test]
@@ -2816,23 +2847,6 @@ mod tests {
         *damaged_proof.last_mut().unwrap() ^= 0x01;
         let damaged_proof = ArchivedMethodProof::from_bytes(&damaged_proof).unwrap();
         assert!(Orchestrator::verify_archived_method_proof(&task, &damaged_proof).is_err());
-    }
-
-    #[test]
-    fn fold_with_proof_task_deserializes_but_issues_no_receipt() {
-        // The task wire format must remain forward-compatible even while its
-        // cryptographic AIR is disabled. The opaque bytes are deliberately not
-        // interpreted because rejection happens before proof construction.
-        let raw_args = vec![0xF0, 0x1D, 0xCA, 0xFE];
-        let task = registered_but_unsupported_task(
-            MethodKind::FoldWithProof,
-            MethodInput::FoldWithProof {
-                seat_index: 0,
-                raw_args: raw_args.clone(),
-            },
-            raw_args,
-        );
-        assert_registered_method_fails_closed(task);
     }
 
     #[test]
@@ -3273,7 +3287,7 @@ mod tests {
 
     /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
     ///
-    /// 之前 Check 是"未实现"的代表；启用的 22 个方法接线后，此测试确认 Check
+    /// 之前 Check 是"未实现"的代表；启用的 23 个方法接线后，此测试确认 Check
     /// 走完了 trace 构造路径（成功或返回非 NotImplemented 的业务错误均算通过）。
     #[test]
     fn orchestrator_check_is_now_supported() {

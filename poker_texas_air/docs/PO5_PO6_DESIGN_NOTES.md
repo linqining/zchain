@@ -15,7 +15,8 @@
   `ExpectedChainAnchor` 再绑定精确 receipt 数量、调用 digest 和首尾状态。
 - consensus anchor 路径会验证 block/certificate 与 SMT inclusion proof，避免仅从同一批
   未认证 task 反推 anchor。
-- 五条 Mental Poker crypto route 均有 stage-3 dual-proof package：
+- 六条 Mental Poker crypto route 均有 stage-3 dual-proof package：
+  `fold_with_proof`、
   `join_and_shuffle`、`submit_shuffle_v2`、`leave_with_proof`、
   `submit_player_reveal_tokens`、`submit_reconstruct_deck`。
 
@@ -57,10 +58,9 @@ native crypto 验证即可。
 
 ### 仍 fail-closed
 
-- last-opponent fold 触发的结算；
+- last-opponent `fold` / `fold_with_proof` 触发的结算；
 - terminal `call` / `raise` / `bet` 的通用收池与 round advance；
 - side pot、winner distribution、完整 hand evaluator 与 rake settlement 的 AIR；
-- `fold_with_proof` 的 DLEq layer removal 与可能的 settlement；
 - `kick_player` 在 WAITING 状态触发 nested reset/multi-version transition 的复合路径。
 
 这些分支不能只增加一个布尔列完成：VM transition 会同时扫描多个 seat、收集 bets、推进

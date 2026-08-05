@@ -1,12 +1,11 @@
 //! # poker_texas_air — Texas Poker method AIR + host verification
 //!
-//! VM 当前注册 23 个 selector；其中 22 个有 method AIR / host prove+verify 路径，
-//! `fold_with_proof` 在生产 Orchestrator 中显式 fail-closed。批量 Aggregator 仍是
-//! descriptor-only PoC，不能作为递归压缩证明使用。
+//! VM 当前注册的 23 个 selector 均有 method AIR / host prove+verify 路径。批量
+//! Aggregator 仍是 descriptor-only PoC，不能作为递归压缩证明使用。
 //!
 //! ## 架构分层
 //!
-//! - **Layer 0**: Method AIRs（22 个启用；1 个注册 selector 禁用）
+//! - **Layer 0**: Method AIRs（23 个启用）
 //! - **Layer 1**: Host verification receipts（完整 VM dispatch replay 后逐 proof 原生验证）
 //! - **Layer 2**: Host-verified outer precompile（O(N) child replay + final digest AIR）
 //! - **Layer 3**: Texas 自有递归协议（尚未实现，生产验证入口保持关闭）

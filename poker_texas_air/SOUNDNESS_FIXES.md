@@ -3,7 +3,7 @@
 > **历史记录，已被 P05/P06 审计边界取代。** 本文保留早期 AIR 加固工作的背景，
 > 其中“21/21 sound”、固定字段 state-root、动作时立即 `pot += amount` 和测试数量等
 > 旧结论都不是当前可信声明。当前权威状态见
-> [`docs/PO5_PO6_DESIGN_NOTES.md`](docs/PO5_PO6_DESIGN_NOTES.md)：22 个 AIR 路径中只有
+> [`docs/PO5_PO6_DESIGN_NOTES.md`](docs/PO5_PO6_DESIGN_NOTES.md)：23 个 AIR 路径中只有
 > host 完整 dispatch replay + 原生逐 proof 验证形成 P05-H；P05-R 递归聚合未完成；
 > P06 下注动作只覆盖 pot 不变、same-round、`current_turn = Some(next)` 的 mid-round
 > 子集，收池/推进/结算 fail-closed。
@@ -45,7 +45,8 @@ prove 失败）。
 | join_table / leave_table / start_hand | `pre_round_state == WAITING(0)`（等式，消除「PREFLOP 下 join/leave/start」反例） |
 | fold / check / call / raise / bet / auto_fold / force_fold / kick_player | `post_round_state == pre_round_state`（round 不变） |
 | reset_for_next_hand | `post_round_state == WAITING(0)`（已有） |
-| 5 个 crypto 方法 | `post_round_state == pre_round_state`（shuffle/reveal/reconstruct 阶段 round 恒为 WAITING） |
+| 5 个 WAITING crypto 方法 | `post_round_state == pre_round_state`（shuffle/reveal/reconstruct 阶段 round 恒为 WAITING） |
+| fold_with_proof | `post_round_state == pre_round_state`，并约束 pre/post 均属于下注轮且存在下一行动玩家 |
 | tick | 不约束 round_state（tick 合法驱动状态机阶段转换） |
 
 > **残余缺口**：完整的 `round_state ∈ {PREFLOP=2,FLOP=3,TURN=4,RIVER=5}`

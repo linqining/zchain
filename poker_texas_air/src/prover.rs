@@ -235,7 +235,7 @@ where
 /// trace. Test-only compatibility builds may derive it from row zero so the
 /// historical mechanism tests keep exercising Stwo.
 fn prepare_public_inputs_for_trace(
-    mut public_inputs: TexasPublicInputs,
+    public_inputs: TexasPublicInputs,
     trace: &MethodTrace,
     num_columns: usize,
 ) -> TexasAirResult<TexasPublicInputs> {
@@ -247,15 +247,23 @@ fn prepare_public_inputs_for_trace(
         )));
     }
 
-    if public_inputs.expected_trace_row.is_none() {
+    let public_inputs = if public_inputs.expected_trace_row.is_none() {
         #[cfg(any(test, feature = "test-helpers"))]
-        public_inputs.bind_expected_trace_row(&trace_row)?;
+        {
+            let mut public_inputs = public_inputs;
+            public_inputs.bind_expected_trace_row(&trace_row)?;
+            public_inputs
+        }
 
         #[cfg(not(any(test, feature = "test-helpers")))]
-        return Err(TexasAirError::SpecViolation(
-            "production proving requires a verifier-reconstructed expected trace row".into(),
-        ));
-    }
+        {
+            return Err(TexasAirError::SpecViolation(
+                "production proving requires a verifier-reconstructed expected trace row".into(),
+            ));
+        }
+    } else {
+        public_inputs
+    };
 
     let expected = public_inputs.require_expected_trace_row(num_columns)?;
     if expected != trace_row {

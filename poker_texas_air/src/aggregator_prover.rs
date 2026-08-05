@@ -2,8 +2,8 @@
 //!
 //! ## 流程
 //!
-//! 1. 调用 [`build_binary_tree`] 构造二叉树聚合层级
-//! 2. 把每层的聚合行（`AggregatorRow`）写入 trace
+//! 1. 调用 [`crate::aggregator_air::build_binary_tree`] 构造二叉树聚合层级
+//! 2. 把每层的聚合行（[`crate::aggregator_air::AggregatorRow`]）写入 trace
 //! 3. 调用 Stwo prover 生成 proof
 //! 4. 返回 `AggregatorProof`（含 stark_proof + AggregatorAir 公开输入）
 //!
@@ -12,24 +12,33 @@
 //! 阶段 4 PoC：把所有聚合层展平为单 trace（一行 = 一个聚合节点），且不验证
 //! 任何子 proof。生产入口默认拒绝；显式测试入口仅用于机制测试。
 
-use stwo::core::channel::Poseidon252Channel;
-use stwo::core::pcs::PcsConfig;
-use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
-use stwo::core::vcs_lifted::poseidon252_merkle::{
-    Poseidon252MerkleChannel, Poseidon252MerkleHasher,
-};
+use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
+
+#[cfg(any(test, feature = "test-helpers"))]
+use stwo::core::channel::Poseidon252Channel;
+#[cfg(any(test, feature = "test-helpers"))]
+use stwo::core::pcs::PcsConfig;
+#[cfg(any(test, feature = "test-helpers"))]
+use stwo::core::poly::circle::CanonicCoset;
+#[cfg(any(test, feature = "test-helpers"))]
+use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleChannel;
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::prover::backend::simd::SimdBackend;
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::prover::pcs::CommitmentSchemeProver;
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::prover::poly::circle::PolyOps;
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo::prover::{ProvingError, prove};
+#[cfg(any(test, feature = "test-helpers"))]
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
-use crate::aggregator_air::{
-    AggregatorAir, AggregatorRow, ChildDescriptor, build_binary_tree, cols,
-    mix_children_into_channel,
-};
+use crate::aggregator_air::{AggregatorAir, ChildDescriptor};
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::aggregator_air::{AggregatorRow, build_binary_tree, cols, mix_children_into_channel};
 use crate::error::{TexasAirError, TexasAirResult};
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::trace_gen::MethodTrace;
 
 /// Aggregator proof（含 StarkProof + AIR 公开输入）。
@@ -124,6 +133,7 @@ pub fn prove_aggregator_unchecked_for_tests(
     prove_aggregator_unchecked(children)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn prove_aggregator_unchecked(children: Vec<ChildDescriptor>) -> TexasAirResult<AggregatorProof> {
     // 1. 构造二叉树聚合
     let num_children = children.len();
