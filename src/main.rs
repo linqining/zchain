@@ -81,6 +81,39 @@ const MAX_BLOCK_RANGE_HEIGHTS: u64 = 512;
 /// Bound untrusted peer-exchange payloads before they become dial targets.
 const MAX_DISCOVERED_PEERS: usize = 256;
 
+/// Bidirectional stream used by the persistent P2P connection handler.
+///
+/// Production connections use [`TcpStream`]. Keeping the handler generic over
+/// this narrow boundary lets protocol tests use an already-connected local
+/// socket pair without opening a listening port.
+trait P2pIo: Read + Write + Send {
+    fn try_clone_box(&self) -> std::io::Result<Box<dyn P2pIo>>;
+    fn peer_socket_addr(&self) -> Option<SocketAddr>;
+}
+
+impl P2pIo for TcpStream {
+    fn try_clone_box(&self) -> std::io::Result<Box<dyn P2pIo>> {
+        self.try_clone()
+            .map(|stream| Box::new(stream) as Box<dyn P2pIo>)
+    }
+
+    fn peer_socket_addr(&self) -> Option<SocketAddr> {
+        self.peer_addr().ok()
+    }
+}
+
+#[cfg(all(test, unix))]
+impl P2pIo for std::os::unix::net::UnixStream {
+    fn try_clone_box(&self) -> std::io::Result<Box<dyn P2pIo>> {
+        self.try_clone()
+            .map(|stream| Box::new(stream) as Box<dyn P2pIo>)
+    }
+
+    fn peer_socket_addr(&self) -> Option<SocketAddr> {
+        None
+    }
+}
+
 /// Derive the execution timestamp from already-finalized chain state rather than the local clock.
 ///
 /// This preserves the header's monotonic soft-time invariant and is identical for every validator
@@ -936,7 +969,7 @@ struct TcpTransport {
     ///
     /// 同一连接还会由其接收循环发送 Response*/fallback 消息。每个写端单独
     /// 加锁，保证两类 writer 不会把 length-prefixed frame 交错写入 TCP 字节流。
-    peers: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
+    peers: Arc<Mutex<Vec<Arc<Mutex<Box<dyn P2pIo>>>>>>,
     /// 已连接 peer 的地址信息（用于定向通信）。
     peer_addrs: Arc<Mutex<Vec<PeerInfo>>>,
     /// 已收到或本地生成的轻客户端 headers。
@@ -974,7 +1007,7 @@ impl TcpTransport {
     }
 
     /// 添加已连接 peer 的共享写端（仅加入广播列表）。
-    fn add_peer(&self, stream: Arc<Mutex<TcpStream>>) {
+    fn add_peer(&self, stream: Arc<Mutex<Box<dyn P2pIo>>>) {
         self.peers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1429,7 +1462,7 @@ fn send_request_and_recv(peer_addr: &str, req: &NetworkMessage) -> Result<Networ
 
 /// 发送一条 length-prefixed BCS 消息到 stream。
 #[allow(dead_code)]
-fn send_p2p_message(stream: &mut TcpStream, msg: &NetworkMessage) -> Result<(), String> {
+fn send_p2p_message<S: Write + ?Sized>(stream: &mut S, msg: &NetworkMessage) -> Result<(), String> {
     let bytes = borsh::to_vec(msg).map_err(|e| format!("BCS 序列化失败：{e}"))?;
     if bytes.len() > MAX_P2P_MSG_SIZE {
         return Err(format!("消息过大：{} bytes", bytes.len()));
@@ -1451,17 +1484,17 @@ fn send_p2p_message(stream: &mut TcpStream, msg: &NetworkMessage) -> Result<(), 
 /// other direction (gossip plus request/response) pass through this lock so a
 /// frame length and its payload cannot be interleaved on TCP.
 fn send_p2p_message_locked(
-    writer: &Arc<Mutex<TcpStream>>,
+    writer: &Arc<Mutex<Box<dyn P2pIo>>>,
     msg: &NetworkMessage,
 ) -> Result<(), String> {
     let mut stream = writer.lock().unwrap_or_else(|e| e.into_inner());
-    send_p2p_message(&mut stream, msg)
+    send_p2p_message(&mut **stream, msg)
 }
 
 /// 接收一条 length-prefixed BCS 消息。
 ///
 /// 返回 `Ok(None)` 表示连接已关闭（EOF）。
-fn recv_p2p_message(stream: &mut TcpStream) -> Result<Option<NetworkMessage>, String> {
+fn recv_p2p_message(stream: &mut impl Read) -> Result<Option<NetworkMessage>, String> {
     let mut len_buf = [0u8; 4];
     match stream.read_exact(&mut len_buf) {
         Ok(()) => {}
@@ -1582,19 +1615,19 @@ fn reconstruct_compact_vertex(
 /// All compact-relay fallback messages are handled on the same connection: a
 /// cache miss asks for the authenticated full vertex rather than admitting an
 /// incomplete descriptor.
-fn handle_p2p_connection(
-    mut stream: TcpStream,
+fn handle_p2p_connection<S: P2pIo + 'static>(
+    mut stream: S,
     node: Arc<Node>,
     transport: Arc<TcpTransport>,
     dag: Arc<Mutex<Dag>>,
     votes: Arc<VoteCollector>,
     gossip: Arc<GossipManager>,
 ) {
-    let peer_addr = stream.peer_addr().ok();
+    let peer_addr = stream.peer_socket_addr();
     // The read loop owns `stream`; every write path shares this cloned writer.
     // Without the shared mutex, a concurrent gossip broadcast and a direct
     // Response*/fallback reply can interleave their length-prefix frames.
-    let writer = match stream.try_clone() {
+    let writer = match stream.try_clone_box() {
         Ok(write_stream) => Arc::new(Mutex::new(write_stream)),
         Err(error) => {
             warn!("P2P 无法克隆写端（peer={peer_addr:?}）：{error}");
@@ -3173,20 +3206,18 @@ mod tests {
         // framing boundary: receiving two independently framed messages proves
         // that the length prefix of one was not interleaved with the other's
         // payload.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (mut read_stream, write_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        read_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let receiver = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
             vec![
-                recv_p2p_message(&mut stream).unwrap().unwrap(),
-                recv_p2p_message(&mut stream).unwrap().unwrap(),
+                recv_p2p_message(&mut read_stream).unwrap().unwrap(),
+                recv_p2p_message(&mut read_stream).unwrap().unwrap(),
             ]
         });
 
-        let writer = Arc::new(Mutex::new(TcpStream::connect(address).unwrap()));
+        let writer: Arc<Mutex<Box<dyn P2pIo>>> = Arc::new(Mutex::new(Box::new(write_stream)));
         let transport = Arc::new(TcpTransport::new());
         transport.add_peer(Arc::clone(&writer));
 
@@ -3272,10 +3303,7 @@ mod tests {
         let receiver_node =
             Arc::new(Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let sender_stream = TcpStream::connect(address).unwrap();
-        let (receiver_stream, _) = listener.accept().unwrap();
+        let (sender_stream, receiver_stream) = std::os::unix::net::UnixStream::pair().unwrap();
         sender_stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
