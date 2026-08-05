@@ -14,16 +14,15 @@
 //! - Reconstruct 多方重构
 //! - Reveal Token 揭示
 //!
-//! `submit_shuffle_v2`、`leave_with_proof` 与 Reconstruction V3 已采用 precompile 调用绑定：
-//! verifier 重放 canonical request 的 native 密码学验证，再将完整 request/receipt
-//! digest 和 replay scope 绑定进 AIR statement。`join_and_shuffle` 的 remask DLEq 与
-//! reveal-token proof 仍沿用阶段 4 的协议状态约束，后续应扩展为相同的 precompile ABI，或嵌入
-//! Texas 自有 Verifier AIR。
+//! 五条 crypto route 都采用同一 precompile 调用绑定：verifier 从 canonical dispatch 重建
+//! request，执行一次 host-native 密码学验证并签发不可伪造 binding，再将完整
+//! request/receipt digest 和 replay scope 绑定进 AIR statement。AIR verifier 会检查该
+//! binding 的 canonical bytes、ABI/backend/digest，但不会重复同一昂贵 BLS 验证。
 //!
 //! 当前 STARK proof 仍不能脱离 native verifier binding 单独作为密码学 proof 已验证的
 //! 可转移证据。当前生产 receipt 路径的信任边界是
 //! [`crate::orchestrator::Orchestrator`]：它先重放完整原生 VM dispatch，再验证
-//! shuffle/leave/reconstruction precompile 与 method AIR。`poker_l1` 在非 crate 内单元测试构建中已禁止运行时
+//! join/shuffle/leave/reveal/reconstruction precompile 与 method AIR。`poker_l1` 在非 crate 内单元测试构建中已禁止运行时
 //! `zk_skip_*` 绕过，所以该 host replay 会执行真实密码学验证。
 //! 阶段 4 的 [`crate::outer_precompile`] 会把这些 dual-proof child、完整 VM task 和
 //! 共识 anchor 包装为可转移的最终 digest AIR，但验证仍是 O(N)，不属于 succinct recursion。

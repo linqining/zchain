@@ -33,7 +33,9 @@ use std::sync::Arc;
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
-use crate::storage::{ObjectBackend, ObjectDb};
+use crate::storage::ObjectBackend;
+#[cfg(test)]
+use crate::storage::ObjectDb;
 use crate::{Address, BlockHeight, ChainId, Hash};
 
 /// 预编译合约 trait（统一接口）。
@@ -75,10 +77,20 @@ pub trait Precompile: Send + Sync {
         true
     }
 
+    /// Deterministic host resource cost for this call.
+    ///
+    /// This is block-resource metering, independent from [`Self::is_gas_free`]. A gas-free
+    /// precompile may charge no caller fee while still consuming block gas. Implementations
+    /// performing expensive native cryptography should override this method with a conservative
+    /// method-specific cost.
+    fn gas_cost(&self, _method_selector: &[u8; 32], args: &[u8]) -> u64 {
+        crate::vm::gas_table::precompile_gas(args.len() as u64)
+    }
+
     /// 该预编译合约是否免 gas。
     ///
     /// 免 gas 预编译合约（如 [`crate::vm::contracts::GamePrecompile`]）的调用：
-    /// - 不消耗 gas、不扣费
+    /// - 不扣 caller fee，但仍按 [`Self::gas_cost`] 计入 block resource gas
     /// - 不推进 account nonce（重放保护由 `gameturn_nonce` + 轮次约束保障）
     /// - 跳过账户 nonce 与 resource-credit 预检
     ///
@@ -296,6 +308,20 @@ impl PrecompileRegistry {
     #[must_use]
     pub fn is_gas_free(&self, id: ObjectID) -> bool {
         self.precompiles.get(&id).is_some_and(|p| p.is_gas_free())
+    }
+
+    /// Return the deterministic block-resource cost of one precompile call.
+    pub fn gas_cost(
+        &self,
+        id: ObjectID,
+        method_selector: &[u8; 32],
+        args: &[u8],
+    ) -> PokerL1Result<u64> {
+        let precompile = self
+            .precompiles
+            .get(&id)
+            .ok_or_else(|| PokerL1Error::Other(format!("预编译合约未注册: {id:?}")))?;
+        Ok(precompile.gas_cost(method_selector, args))
     }
 
     /// 获取所有已注册的预编译合约 ID。

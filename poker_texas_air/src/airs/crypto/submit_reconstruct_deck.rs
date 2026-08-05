@@ -20,9 +20,10 @@
 //! ## 密码学调用绑定
 //!
 //! AIR 除协议级状态变更外，还约束 canonical reconstruction precompile request
-//! digest 与 verifier-issued receipt digest。生产 verifier 会重新解码 request、
-//! 重新运行 Bayer--Groth shuffle + cross-key + slot-OR V3 verifier，并校验完整调用 replay
-//! scope；因此 reconstruction proof 的成功结果不是 prover 可伪造的布尔 witness。
+//! digest 与 verifier-issued receipt digest。host-native Bayer--Groth shuffle + cross-key +
+//! slot-OR V3 verifier 在 binding 的唯一构造路径执行一次；生产 AIR verifier 随后重新解码
+//! request、校验 ABI/backend/digest 和完整调用 replay scope，而不重复昂贵密码学验证。
+//! 因此 reconstruction proof 的成功结果不是 prover 可伪造的布尔 witness。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
@@ -262,7 +263,7 @@ pub fn validate_public_inputs(
             "submit_reconstruct_deck received the wrong precompile receipt type".into(),
         ));
     }
-    binding.reverify()?;
+    binding.validate_issued()?;
     if binding.air_binding() != air.input.precompile {
         return Err(crate::error::TexasAirError::SpecViolation(
             "reconstruction AIR digest columns do not match the verifier-issued receipt".into(),

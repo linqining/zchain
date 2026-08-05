@@ -7,8 +7,8 @@ use poker_l1::vm::contracts::texas_poker::constants::{
     RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, SHUFFLE_PHASE_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
-    SubmitShuffleV2Args,
+    self as texas_dispatch, JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs,
+    SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
     DecryptedCard, ReconstructState, RevealAssignment, RevealTokenState, ShuffleState,
@@ -18,7 +18,7 @@ use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{
     RECONSTRUCTION_V3_PROOF_LABEL, ReconstructProofV3,
 };
@@ -130,6 +130,85 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
         table,
         player,
         texas_dispatch::selectors::submit_shuffle_v2(),
+        raw_args,
+    )
+}
+
+fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
+    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let plaintext_cards = utils::generate_plaintext_cards();
+    let input_cards: Vec<_> = plaintext_cards
+        .iter()
+        .map(|plaintext| ElGamalCiphertextGeneric {
+            c1: <Bls12381Curve as Curve>::base_g(),
+            c2: *plaintext,
+        })
+        .collect();
+    let mask_cards: Vec<_> = input_cards
+        .iter()
+        .map(|card| card.remask(&secret_key))
+        .collect();
+    let remask_proof = DLEqProof::<Bls12381Curve, RemaskKind>::prove(
+        &input_cards,
+        &mask_cards,
+        &secret_key,
+        &public_key,
+        &mut utils::new_mask_shuffle_transcript(),
+    );
+    let permutation: Vec<_> = (0..mask_cards.len()).rev().collect();
+    let rerandomizers: Vec<_> = (0..mask_cards.len())
+        .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+        .collect();
+    let output_cards: Vec<_> = (0..mask_cards.len())
+        .map(|index| mask_cards[permutation[index]].re_encrypt(&public_key, &rerandomizers[index]))
+        .collect();
+    let shuffle_proof = ShuffleProof::prove(
+        &mask_cards,
+        &output_cards,
+        &permutation,
+        &rerandomizers,
+        &public_key,
+        &mut OsRng,
+        &mut utils::new_mask_shuffle_transcript(),
+    )
+    .expect("join shuffle proof should build");
+
+    let player = [0x41; 20];
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xC4; 20], nonce),
+        format!("join-{nonce}"),
+        [0xC0; 20],
+        4,
+        50,
+        100,
+    );
+    table.call_seq = call_seq;
+    table.hand_id = 6;
+    table.version = u64::from(call_seq) + 20;
+    table.deck_state.plaintext = plaintext_cards.into_iter().map(ECPoint).collect();
+    table.shuffle_state = ShuffleState {
+        phase: SHUFFLE_PHASE_WAITING,
+        current_shuffler: None,
+        pending_players: vec![],
+        completed_players: vec![],
+    };
+    let raw_args = borsh::to_vec(&JoinAndShuffleArgs {
+        seat_index: 1,
+        player,
+        buy_in: 2_000,
+        pk: ECPoint(public_key),
+        pk_ownership_proof: vec![],
+        mask_cards,
+        output_cards,
+        remask_proof,
+        shuffle_proof,
+    })
+    .expect("join args should encode");
+    dispatch_task(
+        table,
+        player,
+        texas_dispatch::selectors::join_and_shuffle(),
         raw_args,
     )
 }
@@ -463,6 +542,35 @@ fn leave_and_reveal_dual_packages_roundtrip_and_verify() {
             .expect("archive-derived dual proof should verify");
         assert_eq!(restored.receipt().kind(), expected_kind);
     }
+}
+
+#[test]
+fn join_dual_package_roundtrips_archives_and_rejects_replay_or_request_tamper() {
+    let task = join_task(307, 5);
+    let bundle = prove_dual_proof(&task).expect("join package should prove");
+    let encoded = bundle.encode().expect("join package should encode");
+    let decoded = DualProofBundle::decode(&encoded).expect("join package should decode");
+    let accepted = verify_dual_proof(&task, &decoded).expect("both proof halves should verify");
+    assert_eq!(accepted.receipt().kind(), MethodKind::JoinAndShuffle);
+
+    let archived = Orchestrator::new()
+        .prove_verify_and_archive_task(&task)
+        .expect("join method proof should archive");
+    let restored_bundle = dual_proof_from_archived(&task, &archived.archive)
+        .expect("join archive should repackage as a dual proof");
+    let restored = verify_dual_proof(&task, &restored_bundle)
+        .expect("archive-derived join dual proof should verify");
+    assert_eq!(restored.receipt().kind(), MethodKind::JoinAndShuffle);
+
+    let replay_task = join_task(308, 8);
+    assert!(verify_dual_proof(&replay_task, &bundle).is_err());
+
+    let mut bad_request = bundle.crypto_request_bytes().to_vec();
+    let last = bad_request.len() - 1;
+    bad_request[last] ^= 1;
+    let bad_request = rebuild_wire(&bundle, bundle.stark_proof_bytes(), &bad_request);
+    let bad_request = DualProofBundle::decode(&bad_request).unwrap();
+    assert!(verify_dual_proof(&task, &bad_request).is_err());
 }
 
 #[test]

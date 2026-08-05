@@ -14,14 +14,11 @@
 //!    - `shuffle_state.completed.push(seat_index)`
 //!    - `version += 1`
 //!
-//! ## 简化策略
+//! ## 密码学调用绑定
 //!
-//! 阶段 4 PoC 只验证协议级状态变更：
-//! - `shuffle_state.phase` 保持 SHUFFLE_PHASE_SHUFFLING
-//! - 玩家加入 `completed` 列表（通过 `output_completed_count += 1` 见证）
-//! - 牌组 commitment hash 一致性
-//!
-//! 完整密码学约束（DLEq verification）留待阶段 5 嵌入 Verifier AIR。
+//! Production verifier 重建并重放完整 native proof bundle：PK ownership、52-card
+//! remask DLEq 和 Bayer--Groth shuffle。AIR 约束 canonical request/receipt digest，
+//! 与其他 crypto method 使用同一 host-native trust boundary。
 //!
 //! ## AIR 列布局
 //!
@@ -37,6 +34,7 @@ use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
 
 /// `join_and_shuffle` 业务特定列布局。
 pub mod cols {
@@ -55,8 +53,16 @@ pub mod cols {
     pub const INPUT_SHUFFLE_PHASE: usize = COMMON_NUM_COLUMNS + 14;
     /// `INPUT_SHUFFLE_PHASE_Q` 列（phase² witness，拆 3 次 vanishing）。
     pub const INPUT_SHUFFLE_PHASE_Q: usize = COMMON_NUM_COLUMNS + 15;
+    /// Precompile selector column.
+    pub const PRECOMPILE_ID: usize = COMMON_NUM_COLUMNS + 16;
+    /// Canonical request ABI version column.
+    pub const PRECOMPILE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 17;
+    /// Full request digest columns.
+    pub const REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 18;
+    /// Full verifier receipt digest columns.
+    pub const RECEIPT_DIGEST_BASE: usize = REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `join_and_shuffle` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 16;
+    pub const NUM_COLUMNS: usize = RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `join_and_shuffle` 输入参数。
@@ -70,6 +76,8 @@ pub struct JoinAndShuffleInput {
     pub new_deck_commitment: u64,
     /// 调用前的 `shuffle_state.phase`（必须 ∈ {1,2,3}）。
     pub shuffle_phase: u8,
+    /// Verifier-issued native proof result bound into this AIR statement.
+    pub precompile: PrecompileAirBinding,
 }
 
 /// `join_and_shuffle` AIR 公开输入。
@@ -123,6 +131,10 @@ impl FrameworkEval for JoinAndShuffleAir {
         // 调用前 shuffle phase 与平方 witness。
         let input_shuffle_phase = eval.next_trace_mask();
         let input_shuffle_phase_q = eval.next_trace_mask();
+        let precompile_id = eval.next_trace_mask();
+        let precompile_abi_version = eval.next_trace_mask();
+        let request_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let receipt_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -167,11 +179,24 @@ impl FrameworkEval for JoinAndShuffleAir {
             - six;
         eval.add_constraint(is_active.clone() * vp);
 
+        let expected_precompile_id: E::F =
+            M31::from(u32::from(self.input.precompile.precompile_id)).into();
+        let expected_abi_version: E::F =
+            M31::from(u32::from(self.input.precompile.abi_version)).into();
+        eval.add_constraint(is_active.clone() * (precompile_id - expected_precompile_id));
+        eval.add_constraint(is_active.clone() * (precompile_abi_version - expected_abi_version));
+        for i in 0..DIGEST_LIMBS {
+            let expected_request: E::F = self.input.precompile.request_digest[i].into();
+            let expected_receipt: E::F = self.input.precompile.receipt_digest[i].into();
+            eval.add_constraint(is_active.clone() * (request_digest[i].clone() - expected_request));
+            eval.add_constraint(is_active.clone() * (receipt_digest[i].clone() - expected_receipt));
+        }
+
         // 约束 4（审计共性，degree-2）：round_state 不变（shuffle 阶段 round_state 恒为 WAITING=0）。
         eval.add_constraint(common.round_state_unchanged());
-        // TODO 阶段 5：shuffle_state.phase > 0 前置（需 invertibility witness 或 logup）；
-        //              嵌入 DLEq Verifier AIR 验证 52 个 DLEq proof；
-        //              约束 deck_state.encrypted 新密文与 DLEq 一致。
+        // Host-native cryptography is executed when the verifier-issued binding is created. These
+        // full digest columns bind that accepted request to the business transition without
+        // embedding BLS12-381 in AIR or repeating the same native verification here.
 
         eval
     }
@@ -196,6 +221,14 @@ pub struct JoinAndShuffleRow {
     pub input_shuffle_phase: M31,
     /// phase² witness。
     pub input_shuffle_phase_q: M31,
+    /// Precompile selector.
+    pub precompile_id: M31,
+    /// Canonical request ABI version.
+    pub precompile_abi_version: M31,
+    /// Full request digest.
+    pub request_digest: [M31; DIGEST_LIMBS],
+    /// Full verifier receipt digest.
+    pub receipt_digest: [M31; DIGEST_LIMBS],
 }
 
 impl JoinAndShuffleRow {
@@ -239,6 +272,10 @@ impl JoinAndShuffleRow {
             output_old_deck_commitment: u64_to_m31_limbs(input.old_deck_commitment),
             input_shuffle_phase: sp,
             input_shuffle_phase_q: q,
+            precompile_id: u8_to_m31(input.precompile.precompile_id),
+            precompile_abi_version: u8_to_m31(input.precompile.abi_version),
+            request_digest: input.precompile.request_digest,
+            receipt_digest: input.precompile.receipt_digest,
         }
     }
 
@@ -254,6 +291,10 @@ impl JoinAndShuffleRow {
             output_old_deck_commitment: [ZERO; 4],
             input_shuffle_phase: ZERO,
             input_shuffle_phase_q: ZERO,
+            precompile_id: ZERO,
+            precompile_abi_version: ZERO,
+            request_digest: [ZERO; DIGEST_LIMBS],
+            receipt_digest: [ZERO; DIGEST_LIMBS],
         }
     }
 
@@ -268,6 +309,10 @@ impl JoinAndShuffleRow {
         v.extend_from_slice(&self.output_old_deck_commitment);
         v.push(self.input_shuffle_phase);
         v.push(self.input_shuffle_phase_q);
+        v.push(self.precompile_id);
+        v.push(self.precompile_abi_version);
+        v.extend_from_slice(&self.request_digest);
+        v.extend_from_slice(&self.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

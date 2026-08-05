@@ -25,6 +25,9 @@ use poker_protocol::precompile_abi::{
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
 
+use crate::airs::crypto::join_and_shuffle::{
+    JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
+};
 use crate::airs::crypto::leave_with_proof::{
     LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
 };
@@ -42,8 +45,9 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::validate_full_dispatch_task;
 use crate::precompile_binding::{
-    LEAVE_DLEQ_ABI_VERSION, LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding,
-    REVEAL_TOKEN_ABI_VERSION, RevealTokenVerifyRequest, precompile_call_context,
+    JOIN_AND_SHUFFLE_ABI_VERSION, JoinAndShuffleVerifyRequest, LEAVE_DLEQ_ABI_VERSION,
+    LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding, REVEAL_TOKEN_ABI_VERSION,
+    RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{MethodInput, ProveTask};
@@ -176,6 +180,7 @@ impl DualProofBundle {
             2 => PokerPrecompileId::DleqLeave,
             3 => PokerPrecompileId::ReconstructionV3,
             4 => PokerPrecompileId::RevealToken,
+            5 => PokerPrecompileId::JoinAndShuffle,
             _ => return Err(wire_error("unknown poker precompile id")),
         };
         let abi_version = bytes[11];
@@ -241,6 +246,29 @@ impl VerifiedDualProof {
 /// Stwo proving, or serialization fails.
 pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
     match prepare(task, None)? {
+        PreparedMethod::Join {
+            air,
+            mut public_inputs,
+            row,
+            request_bytes,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let trace = gen_method_trace(
+                JoinAndShuffleAir::num_columns(),
+                &row_values,
+                &JoinAndShuffleRow::padding().to_vec(),
+            )?;
+            let proof = prove_method(&trace, air, JoinAndShuffleAir::num_columns(), public_inputs)?;
+            bundle_from_stark(
+                MethodKind::JoinAndShuffle,
+                PokerPrecompileId::JoinAndShuffle,
+                JOIN_AND_SHUFFLE_ABI_VERSION,
+                &proof.stark_proof,
+                request_bytes,
+            )
+        }
         PreparedMethod::Shuffle {
             air,
             mut public_inputs,
@@ -369,6 +397,16 @@ pub fn dual_proof_from_archived(
     let prepared = prepare(task, None)?;
     let (method_kind, precompile_id, abi_version, request_bytes, num_columns, log_size) =
         match prepared {
+            PreparedMethod::Join {
+                request_bytes, air, ..
+            } => (
+                MethodKind::JoinAndShuffle,
+                PokerPrecompileId::JoinAndShuffle,
+                JOIN_AND_SHUFFLE_ABI_VERSION,
+                request_bytes,
+                JoinAndShuffleAir::num_columns(),
+                air.log_size,
+            ),
             PreparedMethod::Shuffle {
                 request_bytes, air, ..
             } => (
@@ -450,6 +488,29 @@ pub fn verify_dual_proof(
     validate_route(bundle.method_kind, bundle.precompile_id, bundle.abi_version)?;
 
     match prepare(task, Some(&bundle.crypto_request_bytes))? {
+        PreparedMethod::Join {
+            air,
+            mut public_inputs,
+            row,
+            binding,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let proof = MethodProof {
+                stark_proof,
+                air: air.clone(),
+                log_size: air.log_size,
+                num_columns: JoinAndShuffleAir::num_columns(),
+                public_inputs: public_inputs.clone(),
+            };
+            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            Ok(VerifiedDualProof {
+                receipt,
+                precompile_binding: binding,
+            })
+        }
         PreparedMethod::Shuffle {
             air,
             mut public_inputs,
@@ -546,6 +607,13 @@ pub fn verify_dual_proof(
 }
 
 enum PreparedMethod {
+    Join {
+        air: JoinAndShuffleAir,
+        public_inputs: TexasPublicInputs,
+        row: JoinAndShuffleRow,
+        binding: PrecompileCallBinding,
+        request_bytes: Vec<u8>,
+    },
     Shuffle {
         air: SubmitShuffleV2Air,
         public_inputs: TexasPublicInputs,
@@ -601,6 +669,76 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
     public_inputs.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
 
     match task.method_kind {
+        MethodKind::JoinAndShuffle => {
+            let MethodInput::JoinAndShuffle {
+                seat_index,
+                raw_args,
+                ..
+            } = &task.method_input
+            else {
+                return Err(TexasAirError::SpecViolation(
+                    "join_and_shuffle task has the wrong MethodInput variant".into(),
+                ));
+            };
+            let args: poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs =
+                borsh::from_slice(raw_args).map_err(|error| {
+                    TexasAirError::SerializationError(format!(
+                        "join_and_shuffle raw args borsh: {error}"
+                    ))
+                })?;
+            if args.seat_index != *seat_index {
+                return Err(TexasAirError::SpecViolation(
+                    "join_and_shuffle seat differs between task fields".into(),
+                ));
+            }
+            let expected_request = JoinAndShuffleVerifyRequest::from_dispatch(
+                call_context(task, *seat_index, &public_inputs),
+                &task.pre_table,
+                &args,
+            )?;
+            let request_bytes =
+                require_expected_request(supplied_request, expected_request.encode()?)?;
+            let request = JoinAndShuffleVerifyRequest::decode(&request_bytes)?;
+            let binding = PrecompileCallBinding::verify_join_and_shuffle(&request)?;
+            let input = JoinAndShuffleInput {
+                seat_index: *seat_index,
+                old_deck_commitment: deck_commitment(&task.pre_table),
+                new_deck_commitment: deck_commitment(&task.post_table),
+                shuffle_phase: task.pre_table.shuffle_state.phase,
+                precompile: binding.air_binding(),
+            };
+            let row = JoinAndShuffleRow::active(
+                &input,
+                state_root_to_air_limbs(pre_root),
+                state_root_to_air_limbs(post_root),
+                task.table_id,
+                task.hand_id,
+                task.call_seq,
+                task.pre_table.version,
+                task.post_table.version,
+                task.pre_table.shuffle_state.completed_players.len() as u8,
+                task.post_table.shuffle_state.completed_players.len() as u8,
+            );
+            let air = JoinAndShuffleAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: state_root_to_air_limbs(pre_root),
+                post_state_root: state_root_to_air_limbs(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version: task.pre_table.version,
+                post_version: task.post_table.version,
+            };
+            public_inputs.precompile_binding = Some(binding.clone());
+            Ok(PreparedMethod::Join {
+                air,
+                public_inputs,
+                row,
+                binding,
+                request_bytes,
+            })
+        }
         MethodKind::SubmitShuffleV2 => {
             let MethodInput::SubmitShuffleV2 {
                 seat_index,
@@ -1038,6 +1176,10 @@ fn validate_route(
             MethodKind::SubmitPlayerRevealTokens,
             PokerPrecompileId::RevealToken,
             REVEAL_TOKEN_ABI_VERSION
+        ) | (
+            MethodKind::JoinAndShuffle,
+            PokerPrecompileId::JoinAndShuffle,
+            JOIN_AND_SHUFFLE_ABI_VERSION
         )
     );
     if !valid {

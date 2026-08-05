@@ -73,6 +73,7 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
                         old_deck_commitment: 51,
                         new_deck_commitment: 52,
                         shuffle_phase: 1,
+                        precompile: PrecompileAirBinding::synthetic_unverified(),
                     },
                     pre_state_root: zero_root(),
                     post_state_root: one_root(),
@@ -154,6 +155,7 @@ fn test_e2e_join_and_shuffle_prove_verify() {
         old_deck_commitment: 0x1020_3040,
         new_deck_commitment: 0xABCD_1234,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = JoinAndShuffleRow::active(
         &input,
@@ -204,6 +206,7 @@ fn test_soundness_join_and_shuffle_tampered_seat() {
         old_deck_commitment: 0x1020_3040,
         new_deck_commitment: 0xABCD_1234,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
     let trace = gen_method_trace(
@@ -256,6 +259,7 @@ fn test_soundness_join_and_shuffle_tampered_commitment() {
         old_deck_commitment: 0x1020_3040,
         new_deck_commitment: 0xABCD_1234,
         shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
     let trace = gen_method_trace(
@@ -308,6 +312,7 @@ fn test_soundness_join_and_shuffle_tampered_high_commitment_limb() {
         old_deck_commitment: 0x1020_3040,
         new_deck_commitment: 0x0001_0000_ABCD_1234,
         shuffle_phase: 1,
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
     let trace = gen_method_trace(
@@ -346,6 +351,7 @@ fn test_soundness_join_and_shuffle_tampered_old_commitment() {
         old_deck_commitment: 0x0001_0000_1020_3040,
         new_deck_commitment: 0x0001_0000_ABCD_1234,
         shuffle_phase: 1,
+        precompile: PrecompileAirBinding::synthetic_unverified(),
     };
     let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
     let trace = gen_method_trace(
@@ -880,8 +886,8 @@ fn test_crypto_air_column_consistency() {
         submit_shuffle_v2,
     };
 
-    // join_and_shuffle: 通用 + 16 业务（含 Gap 6 shuffle_phase + q witness）= 53
-    assert_eq!(join_and_shuffle::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 16);
+    // join_and_shuffle: 原 16 业务列 + precompile id/version + 两个 256-bit digest。
+    assert_eq!(join_and_shuffle::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 50);
     assert_eq!(
         JoinAndShuffleAir::num_columns(),
         join_and_shuffle::cols::NUM_COLUMNS

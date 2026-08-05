@@ -15,9 +15,10 @@
 //!
 //! # Gas
 //!
-//! Texas Poker 操作通过 GameTurn 通道提交（spec：GameTurn 通道免 gas），
-//! 故 `is_gas_free() = true`。反滥用由 `gameturn_nonce` 重放保护 +
-//! 轮次约束 + assigned_validator 路由共同保障。
+//! Texas Poker 操作通过 GameTurn 通道提交，故不向调用者收取 resource credits。
+//! 但 host-native 密码学验证仍计入 block resource gas，避免无效 proof 免费占满
+//! validator CPU。重放保护继续由 `gameturn_nonce`、轮次约束和 assigned-validator
+//! 路由共同提供。
 
 use std::sync::Arc;
 
@@ -38,7 +39,9 @@ use crate::economics::{
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
-use crate::storage::{ObjectBackend, ObjectDb};
+use crate::storage::ObjectBackend;
+#[cfg(test)]
+use crate::storage::ObjectDb;
 use crate::vm::contracts::dispatch::DispatchContext;
 use crate::vm::precompile::{DispatchResult, ExecutionEnvironment, Precompile, reserved};
 
@@ -289,7 +292,22 @@ impl Precompile for TexasPokerPrecompile {
         selectors::all().contains(selector)
     }
 
-    /// Texas Poker 合约预编译免 gas（GameTurn 通道）。
+    fn gas_cost(&self, selector: &[u8; 32], args: &[u8]) -> u64 {
+        let dispatch_cost = crate::vm::gas_table::precompile_gas(args.len() as u64);
+        let performs_native_crypto = *selector == selectors::join_and_shuffle()
+            || *selector == selectors::leave_with_proof()
+            || *selector == selectors::submit_shuffle_v2()
+            || *selector == selectors::submit_player_reveal_tokens()
+            || *selector == selectors::submit_reconstruct_deck()
+            || *selector == selectors::fold_with_proof();
+        if performs_native_crypto {
+            dispatch_cost.saturating_add(crate::vm::gas_table::GAS_STWO_VERIFY)
+        } else {
+            dispatch_cost
+        }
+    }
+
+    /// Texas Poker 合约预编译免 caller fee（GameTurn 通道）。
     ///
     /// 反滥用由以下机制保障：
     /// - `gameturn_nonce` per-game per-player 重放保护

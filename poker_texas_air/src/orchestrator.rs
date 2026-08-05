@@ -87,8 +87,8 @@ use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{
-    LeaveDleqVerifyRequest, PrecompileCallBinding, RevealTokenVerifyRequest,
-    precompile_call_context,
+    JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PrecompileCallBinding,
+    RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
@@ -1593,7 +1593,7 @@ impl Orchestrator {
             seat_index,
             player: _,
             buy_in: _,
-            raw_args: _,
+            raw_args,
         } = &task.method_input
         else {
             return Err(input_mismatch(
@@ -1602,6 +1602,32 @@ impl Orchestrator {
                 &task.method_input,
             ));
         };
+        let args: poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs =
+            borsh::from_slice(raw_args).map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "join_and_shuffle raw args borsh: {error}"
+                ))
+            })?;
+        if args.seat_index != *seat_index {
+            return Err(TexasAirError::SpecViolation(
+                "join_and_shuffle method input seat differs from raw args".into(),
+            ));
+        }
+        let call_context = precompile_call_context(
+            MethodKind::JoinAndShuffle,
+            *seat_index,
+            pi.table_id,
+            pi.hand_id,
+            pi.call_seq,
+            pi.pre_version,
+            pi.post_version,
+            pi.pre_state_root,
+            pi.post_state_root,
+            pi.dispatch_call_digest,
+        );
+        let request =
+            JoinAndShuffleVerifyRequest::from_dispatch(call_context, &task.pre_table, &args)?;
+        let binding = PrecompileCallBinding::verify_join_and_shuffle(&request)?;
         let input = JoinAndShuffleInput {
             seat_index: *seat_index,
             old_deck_commitment: deck_commitment(&task.pre_table),
@@ -1610,6 +1636,7 @@ impl Orchestrator {
             // participant and reset the post-state phase to NONE, so deriving it from post-state
             // rejects a valid terminal shuffle.
             shuffle_phase: task.pre_table.shuffle_state.phase,
+            precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_cc = task.pre_table.shuffle_state.completed_players.len() as u8;
@@ -1626,12 +1653,14 @@ impl Orchestrator {
             pre_cc,
             post_cc,
         );
+        let mut bound_pi = pi.clone();
+        bound_pi.precompile_binding = Some(binding);
         run(
             backend,
             JoinAndShuffleAir::num_columns(),
             &row,
             &JoinAndShuffleRow::padding(),
-            pi,
+            &bound_pi,
             move || JoinAndShuffleAir {
                 log_size: MIN_LOG_SIZE,
                 input,

@@ -20,12 +20,18 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
 
 ## 仍需解决的安全与产品边界
 
-- Reveal-token DLEq、管理签名、超时和完整 range checks 尚未全部放入 AIR；当前生产 receipt
-  依赖 Orchestrator 的 canonical VM replay 与绑定的 trace row。
+- 管理签名、超时和完整 range checks 尚未全部放入 AIR；当前生产 receipt 依赖
+  Orchestrator 的 canonical VM replay 与绑定的 trace row。
 - `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
   仍没有覆盖 DLEq layer removal 与可能的 settlement，入口保持 fail-closed。
-- stage-3 dual-proof package 已覆盖 `submit_shuffle_v2`、`leave_with_proof`、
-  `submit_player_reveal_tokens` 与 `submit_reconstruct_deck`；每个 child 仍由 host
-  原生重放密码学 verifier，这不是递归 verifier AIR。
+- stage-3 dual-proof package 已覆盖全部五条 crypto route：`join_and_shuffle`、
+  `submit_shuffle_v2`、`leave_with_proof`、`submit_player_reveal_tokens` 与
+  `submit_reconstruct_deck`。每条 route 都先对 canonical request 执行一次 host-native
+  BLS12-381 verifier，再签发字段私有、无反序列化入口的 binding；AIR verifier 只重算
+  canonical bytes、ABI/backend、request/receipt digest 与 table/hand/call/state scope，
+  不重复同一昂贵密码学验证。这不是 BLS12-381 verifier AIR，也不是递归 proof。
+- GameTurn / CheckpointAnchor 的 gas-free 仅表示不扣 caller fee、不推进 account nonce；
+  成功或失败的 native crypto 调用仍按确定性 `gas_cost` 计入 block resource gas，超过
+  block limit 的后续调用会在执行昂贵 verifier 前被 admission 拒绝。
 - 聚合器仅维护 descriptor 链，不验证 child proof；递归聚合生产入口保持 fail-closed。
 - 本地 receipt 链不等同于区块包含或共识锚定；调用方仍需提供经认证的任务来源与链端锚点。

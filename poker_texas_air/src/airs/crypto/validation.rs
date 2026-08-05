@@ -28,7 +28,8 @@ use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{
-    LeaveDleqVerifyRequest, PokerPrecompileId, RevealTokenVerifyRequest, precompile_call_context,
+    JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PokerPrecompileId,
+    RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
@@ -66,16 +67,49 @@ pub(crate) fn validate_join_and_shuffle(
         ));
     }
 
+    let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
+        TexasAirError::SpecViolation(
+            "join_and_shuffle requires a verifier-issued precompile binding".into(),
+        )
+    })?;
+    if binding.precompile_id() != PokerPrecompileId::JoinAndShuffle {
+        return Err(TexasAirError::SpecViolation(
+            "join_and_shuffle received the wrong precompile receipt type".into(),
+        ));
+    }
+    binding.validate_issued()?;
+    let call_context = precompile_call_context(
+        MethodKind::JoinAndShuffle,
+        args.seat_index,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    );
+    let expected_request =
+        JoinAndShuffleVerifyRequest::from_dispatch(call_context, &canonical.pre, &args)?;
+    if expected_request.encode()? != binding.request_bytes() {
+        return Err(TexasAirError::SpecViolation(
+            "join_and_shuffle precompile request does not match canonical dispatch".into(),
+        ));
+    }
+
     let input = JoinAndShuffleInput {
         seat_index: args.seat_index,
         old_deck_commitment: deck_commitment(&canonical.pre),
         new_deck_commitment: deck_commitment(&canonical.post),
         shuffle_phase: canonical.pre.shuffle_state.phase,
+        precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
         || air.input.old_deck_commitment != input.old_deck_commitment
         || air.input.new_deck_commitment != input.new_deck_commitment
         || air.input.shuffle_phase != input.shuffle_phase
+        || air.input.precompile != input.precompile
     {
         return Err(TexasAirError::SpecViolation(
             "join_and_shuffle: AIR input does not match the canonical dispatch".into(),
@@ -177,7 +211,7 @@ pub(crate) fn validate_leave_with_proof(
             "leave_with_proof precompile request does not match the canonical dispatch".into(),
         ));
     }
-    binding.reverify()?;
+    binding.validate_issued()?;
 
     let input = LeaveWithProofInput {
         seat_index: args.seat_index,
@@ -274,7 +308,7 @@ pub(crate) fn validate_submit_player_reveal_tokens(
                 .into(),
         ));
     }
-    binding.reverify()?;
+    binding.validate_issued()?;
 
     let input = SubmitPlayerRevealTokensInput {
         seat_index: args.seat_index,

@@ -17,8 +17,9 @@
 //! ## 密码学调用绑定
 //!
 //! AIR 除协议级状态变更外，还约束 canonical shuffle precompile request digest
-//! 与 verifier-issued receipt digest。生产 verifier 会重新解码 request、重新运行
-//! Bayer--Groth native verifier，并校验 table/hand/call/seat/state replay scope；
+//! 与 verifier-issued receipt digest。生产 verifier 会重新解码 request、校验不可伪造
+//! binding 的 ABI/backend/digest，并校验 table/hand/call/seat/state replay scope；
+//! host-native Bayer--Groth verifier 已在该 binding 的唯一构造路径执行一次，
 //! 因此这里不接受 prover 提供的裸 `success = true`。
 
 use stwo::core::fields::m31::M31;
@@ -168,8 +169,8 @@ impl FrameworkEval for SubmitShuffleV2Air {
 
         // 约束 3（审计共性，degree-2）：round_state 不变（submit_shuffle_v2 阶段 round_state 恒为 WAITING=0）。
         eval.add_constraint(common.round_state_unchanged());
-        // shuffle proof 本身由 production verifier 重放 native precompile；上面的完整
-        // request/receipt digest 列把该结果绑定到此 STARK statement。若未来要求
+        // shuffle proof 在 verifier-issued binding 构造时由 host-native precompile 验证一次；
+        // 上面的完整 request/receipt digest 列把该结果绑定到此 STARK statement。若未来要求
         // trustless recursion，可在不改变 canonical request ABI 的前提下替换为
         // Verifier AIR backend。逐牌 DLEq 仍属于 join/reveal 等后续 precompile 范围。
 
@@ -299,7 +300,7 @@ pub fn validate_public_inputs(
             "submit_shuffle_v2 received the wrong precompile receipt type".into(),
         ));
     }
-    binding.reverify()?;
+    binding.validate_issued()?;
     if binding.air_binding() != air.input.precompile {
         return Err(crate::error::TexasAirError::SpecViolation(
             "shuffle AIR digest columns do not match the verifier-issued receipt".into(),

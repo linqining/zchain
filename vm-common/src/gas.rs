@@ -112,6 +112,22 @@ pub const GAS_ZK_VERIFY: u64 = 300_000;
 /// 预留 30% 安全边际上取整至 80000。
 pub const GAS_VERIFY_FAILURE_PROOF: u64 = 80000;
 
+/// Generic native precompile dispatch base cost.
+///
+/// Precompiles may remain caller-fee-free, but they must still consume deterministic
+/// block resources so malformed requests cannot trigger unbounded host-native work.
+pub const GAS_PRECOMPILE_BASE: u64 = 1_000;
+/// Generic native precompile dispatch cost per argument byte.
+pub const GAS_PRECOMPILE_PER_BYTE: u64 = 2;
+/// Minimum resource cost recorded for a transaction that passed admission but failed execution.
+pub const GAS_FAILED_TX_BASE: u64 = 1_000;
+
+/// Deterministic fallback cost for a native precompile call.
+#[must_use]
+pub const fn precompile_gas(args_len: u64) -> u64 {
+    GAS_PRECOMPILE_BASE.saturating_add(GAS_PRECOMPILE_PER_BYTE.saturating_mul(args_len))
+}
+
 // ===========================================================================
 // poker_zkvm syscall gas（Phase 11.5 — 原 re-export 自 poker_zkvm，现统一到 vm-common）
 // ===========================================================================

@@ -143,7 +143,7 @@ fn open_node_with_application_verifiers(config: NodeConfig) -> PokerL1Result<Nod
     Node::open(config)
 }
 
-/// commit certificate 投票累加器（缺口 #3：多 validator 2/3 多签闭环）。
+/// commit certificate 投票累加器（多 validator 2/3 多签闭环）。
 ///
 /// 跨线程共享（P2P handler 写入收集到的 peer 投票，validator loop 读取凑 quorum）。
 /// 按 `(epoch, commit_round, cert_signing_hash)` 索引收集投票；validator loop 凑齐
@@ -182,7 +182,7 @@ impl VoteCollector {
         matched
     }
 
-    /// 非破坏性地查看针对指定 cert_signing_hash 的全部已收集投票（缺口 #3 活性修复）。
+    /// 非破坏性地查看针对指定 cert_signing_hash 的全部已收集投票。
     ///
     /// 与 [`drain_for_hash`] 的区别：不删除投票，供跨轮次重试 commit（投票可能跨进程
     /// 延迟到达，须保留直到成功组装 cert 后才 drain）。

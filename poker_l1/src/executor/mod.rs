@@ -21,9 +21,9 @@
 //! - rBPF 合约状态提交**全有或全无**：先在内存中校验所有待写对象
 //!   （存在性 + 所有权 + 大小），全部通过后才落 `ObjectDb`；任一失败则
 //!   整个 tx 状态不变。
-//! - 执行失败的 tx **不扣 gas、不推进 nonce**（MVP 语义，与既有
-//!   `apply_public_tx` 仅在成功后调用一致）。已知局限：失败 tx 免费，
-//!   后续硬化版本将引入 failed-tx 扣费。
+//! - 通过 admission 校验后才进入执行的 tx 即使失败，也会记录确定性的 resource gas；
+//!   Public / ForceSync 交易同时推进 account nonce，并按链上 fee policy 扣除失败 gas。
+//!   签名、chain-id、nonce 等 admission 失败仍保持零费用且不改变状态。
 //! - 创建对象校验 `ObjectID.creator_address == caller`，防止冒名创建。
 //! - block 级 gas 累计超过 `block_gas_limit` 的 tx 跳过执行（状态不变）。
 //!
@@ -204,7 +204,8 @@ pub struct TxReceipt {
     pub success: bool,
     /// 失败原因（success=false 时为 `Some`）。
     pub error: Option<String>,
-    /// 实际消耗 gas（GameTurn 通道恒为 0；失败 tx 为 0）。
+    /// 实际消耗的 block resource gas。GameTurn 可免 caller fee，但 host-native
+    /// precompile work 仍会计入此字段。
     pub gas_used: u64,
     /// 实际消耗的不可转让 resource credits；默认免收费时为 0。
     pub fee_charged: u64,
@@ -215,15 +216,25 @@ pub struct TxReceipt {
 }
 
 impl TxReceipt {
-    /// 构造失败回执（无 gas、无状态变更）。
+    /// 构造 admission 失败回执（无 gas、无状态变更）。
     fn failure(tx: &Transaction, err: &PokerL1Error) -> Self {
+        Self::failure_with_gas(tx, err, 0, 0)
+    }
+
+    /// 构造已进入执行阶段的失败回执。
+    fn failure_with_gas(
+        tx: &Transaction,
+        err: &PokerL1Error,
+        gas_used: u64,
+        fee_charged: u64,
+    ) -> Self {
         Self {
             tx_hash: tx.signing_hash(),
             lane: tx.lane_hint,
             success: false,
             error: Some(err.to_string()),
-            gas_used: 0,
-            fee_charged: 0,
+            gas_used,
+            fee_charged,
             created_objects: Vec::new(),
             modified_objects: Vec::new(),
         }
@@ -237,15 +248,18 @@ pub struct BlockExecutionOutcome {
     pub receipts: Vec<TxReceipt>,
     /// 执行全部 tx 后的全局状态根（ObjectDb SMT root）。
     pub state_root: Hash,
-    /// block 累计消耗 gas（仅 Public / ForceSync 成功 tx）。
+    /// block 累计消耗的 resource gas。所有通过 admission 并实际执行的交易都会计入，
+    /// 包括失败交易和免 caller fee 的 GameTurn / CheckpointAnchor native precompile。
     pub total_gas_used: u64,
 }
 
 /// 执行单笔 tx（骨架版，P0-1）。
 ///
-/// 失败语义：返回 `success=false` 的回执，**不产生任何状态变更**（不写对象、
-/// 不推进 nonce、不扣 gas）。本函数本身不返回 `Err` —— 所有执行级错误都
-/// 转化为回执，保证 block 内后续 tx 继续执行。
+/// 失败语义：admission 失败返回零 gas、零状态变更回执；已进入执行阶段后失败时，
+/// 合约对象状态回滚，但仍记录实际 block resource gas。Public / ForceSync 还会推进
+/// account nonce，并按 [`FeePolicy`] 结算 caller fee；gas-free lane 不推进 account
+/// nonce、也不扣 caller fee。本函数本身不返回 `Err`，所有执行级错误都转化为回执，
+/// 保证 block 内后续 tx 继续执行。
 ///
 /// # 参数
 ///
@@ -261,8 +275,101 @@ pub fn execute_tx<B: ObjectBackend>(
 ) -> TxReceipt {
     match execute_tx_inner(env, tx, object_db, account_store) {
         Ok(receipt) => receipt,
-        Err(err) => TxReceipt::failure(tx, &err),
+        Err(err) => settle_failed_tx(env, tx, &err, account_store),
     }
+}
+
+/// Return the deterministic resource cost of a call before executing it.
+fn estimated_call_gas(env: &ExecutionEnvironment, tx: &Transaction) -> u64 {
+    let Some(call) = &tx.contract_call else {
+        return crate::vm::gas_table::GAS_FAILED_TX_BASE;
+    };
+    if let Some(registry) = &env.precompile_registry
+        && registry.is_precompile(call.contract_id)
+        && let Ok(cost) = registry.gas_cost(call.contract_id, &call.method_selector, &call.args)
+    {
+        return cost.max(crate::vm::gas_table::GAS_FAILED_TX_BASE);
+    }
+    crate::vm::gas_table::GAS_FAILED_TX_BASE.saturating_add(call.args.len() as u64)
+}
+
+/// Conservative block-gas reservation used before a transaction starts executing.
+///
+/// Public/ForceSync transactions reserve their signed budget; gas-free lanes reserve the
+/// deterministic native precompile cost. Successful and chargeable failed executions are
+/// guaranteed not to exceed this value.
+fn block_gas_reservation(env: &ExecutionEnvironment, tx: &Transaction) -> u64 {
+    if matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor) {
+        estimated_call_gas(env, tx)
+    } else {
+        tx.gas.budget.min(TX_GAS_LIMIT)
+    }
+}
+
+/// Re-run only admission checks to decide whether an execution failure is chargeable.
+fn failure_passed_admission(
+    env: &ExecutionEnvironment,
+    tx: &Transaction,
+    account_store: &AccountStore,
+) -> bool {
+    if validate_tx_limits(tx).is_err()
+        || validate_tx_chain_id(tx, env.chain_id).is_err()
+        || validate_tx_signature(tx).is_err()
+    {
+        return false;
+    }
+    let is_gas_free_lane = matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
+    let target_is_gas_free = match (&tx.contract_call, &env.precompile_registry) {
+        (Some(call), Some(registry)) if registry.is_precompile(call.contract_id) => {
+            registry.is_gas_free(call.contract_id)
+        }
+        _ => false,
+    };
+    if is_gas_free_lane {
+        return target_is_gas_free;
+    }
+    let caller = derive_address(&tx.tagged_pubkey);
+    account_store.get(&caller).is_some_and(|account| {
+        validate_public_tx(account, tx, env.chain_id).is_ok()
+            && (env.fee_policy == FeePolicy::Free || account.balance >= tx.gas.budget)
+    })
+}
+
+/// Charge deterministic failure resources while preserving object-state rollback semantics.
+fn settle_failed_tx(
+    env: &ExecutionEnvironment,
+    tx: &Transaction,
+    err: &PokerL1Error,
+    account_store: &mut AccountStore,
+) -> TxReceipt {
+    if !failure_passed_admission(env, tx, account_store) {
+        return TxReceipt::failure(tx, err);
+    }
+
+    let estimated = estimated_call_gas(env, tx);
+    let observed = match err {
+        PokerL1Error::OutOfGas { used, .. } => *used,
+        _ => 0,
+    };
+    let is_gas_free_lane = matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
+    let gas_used = if is_gas_free_lane {
+        estimated.max(observed)
+    } else {
+        estimated.max(observed).min(tx.gas.budget)
+    };
+    if is_gas_free_lane {
+        return TxReceipt::failure_with_gas(tx, err, gas_used, 0);
+    }
+
+    let caller = derive_address(&tx.tagged_pubkey);
+    let fee_charged = env.fee_policy.caller_fee(gas_used);
+    let Some(account) = account_store.get_mut(&caller) else {
+        return TxReceipt::failure(tx, err);
+    };
+    if apply_public_tx_with_fee(account, tx, gas_used, fee_charged).is_err() {
+        return TxReceipt::failure(tx, err);
+    }
+    TxReceipt::failure_with_gas(tx, err, gas_used, fee_charged)
 }
 
 /// `execute_tx` 内部实现（错误向上传播，由外层转为失败回执）。
@@ -298,7 +405,7 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
     env: &ExecutionEnvironment,
     tx: &Transaction,
     object_db: &mut B,
-    mut account_view: Option<&mut crate::account::Account>,
+    account_view: Option<&mut crate::account::Account>,
 ) -> PokerL1Result<TxReceipt> {
     // ===== 1. 防御性重校验（limits / chain_id / 签名）=====
     validate_tx_limits(tx)?;
@@ -429,6 +536,14 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
         } else if let Some(registry) = &env.precompile_registry {
             // 优先检查预编译合约注册表（参考以太坊预编译合约设计）
             if registry.is_precompile(call.contract_id) {
+                let precompile_gas =
+                    registry.gas_cost(call.contract_id, &call.method_selector, &call.args)?;
+                if !is_gas_free_lane && precompile_gas > tx.gas.budget {
+                    return Err(PokerL1Error::OutOfGas {
+                        used: precompile_gas,
+                        limit: tx.gas.budget,
+                    });
+                }
                 let precompile_env = crate::vm::precompile::ExecutionEnvironment {
                     chain_id: env.chain_id,
                     block_height: env.block_height,
@@ -448,9 +563,9 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                 )?;
                 all_created.extend(dispatch_result.created_objects);
                 all_modified.extend(dispatch_result.modified_objects);
-                // 注：precompile 调用不经 rBPF VM，gas_used 保持 0。
-                // 非 gas-free lane 调 precompile 时，步骤 6 仍会扣费（gas_used=0）
-                // 并推进 nonce — 这符合"gas 策略跟随 lane"的设计（Assumption 3）。
+                // Native precompiles bypass rBPF instruction metering, so their deterministic
+                // host resource cost is supplied by the precompile implementation.
+                gas_used = precompile_gas;
             } else {
                 // 非预编译合约，走 rBPF 执行
                 let (created, modified, used) =
@@ -664,15 +779,14 @@ fn apply_tx_outputs<B: ObjectBackend>(
 ///
 /// - 逐笔执行，失败 tx 仅记录回执，不中断后续 tx。
 /// - block gas 累计（`receipt.gas_used`）超过 `env.block_gas_limit` 后，
-///   后续需 gas 的 tx 跳过执行（回执标记 `OutOfGas`），免 gas tx 不受影响。
+///   后续 tx 跳过执行（回执标记 `OutOfGas`）。免 caller fee 的 native precompile
+///   仍消耗 block resource gas。
 /// - 返回的 `state_root` 为全部 tx 执行后的 `ObjectDb` SMT root。
 ///
 /// # block-level gas 判定说明
 ///
-/// 此处用 `tx.lane_hint` 判定是否跳过 block gas 累计（gas-free lane 不消耗 block gas），
-/// 而非查询 `Precompile::is_gas_free()`。理由：`execute_tx_inner` 步骤 3 已强制
-/// lane-contract 一致性（gas-free lane 必须配 gas-free precompile），故到达 `execute_block`
-/// 时 lane 已是合约 gas 属性的可靠代理。两套判定保持一致。
+/// Public/rBPF 调用以 signed budget 作为执行前 reservation；native precompile 使用其
+/// deterministic `gas_cost`。这保证 fee-free GameTurn 也不能绕过 block resource limit。
 pub fn execute_block(
     env: &ExecutionEnvironment,
     txs: &[Transaction],
@@ -710,7 +824,7 @@ fn execute_block_parallel(
     object_db: &mut ObjectDb,
     account_store: &mut AccountStore,
 ) -> BlockExecutionOutcome {
-    use crate::executor::write_capture::{ObjectWriteLog, WriteCaptureBackend};
+    use crate::executor::write_capture::ObjectWriteLog;
     use rayon::prelude::*;
 
     // 空 block 快路径
@@ -752,81 +866,137 @@ fn execute_block_parallel(
             })
             .collect();
 
-        // ---- 3b. 波次内并发执行 ----
-        // shared_db: &ObjectDb（&self，可被多 worker 共享引用）。
-        let shared_db: &ObjectDb = &*object_db;
-        let wave_outcomes: Vec<(usize, PokerL1Result<(TxReceipt, ObjectWriteLog)>)> = wave
-            .par_iter()
-            .map(|&idx| {
-                let tx = &txs[idx];
-                let result = run_one_tx(env, tx, shared_db, &snapshots);
-                (idx, result)
-            })
-            .collect();
+        // A wave may need multiple execution batches. Each batch reserves a prefix of the
+        // remaining txs whose worst-case gas fits. After their actual gas is known, deferred txs
+        // are reconsidered. This preserves serial admission semantics while ensuring a tx is
+        // never sent to a worker before block-gas admission.
+        let mut pending = wave;
+        while !pending.is_empty() {
+            let mut batch_indices = Vec::new();
+            let mut batch_order = Vec::new();
+            let mut reserved_gas = 0u64;
+            let mut consumed = 0usize;
 
-        // ---- 4. 波次间串行 merge（按 tx_index 升序）----
-        let mut ordered = wave_outcomes;
-        ordered.sort_by_key(|(idx, _)| *idx);
-
-        for (idx, result) in ordered {
-            let tx = &txs[idx];
-            let needs_gas = !matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
-
-            // block gas 限判定（与串行版一致）
-            if needs_gas
-                && total_gas.saturating_add(tx.gas.budget.min(TX_GAS_LIMIT)) > env.block_gas_limit
-            {
-                receipts[idx] = Some(TxReceipt::failure(
-                    tx,
-                    &PokerL1Error::OutOfGas {
-                        used: total_gas,
-                        limit: env.block_gas_limit,
-                    },
-                ));
-                continue;
-            }
-
-            // 执行结果：成功则 merge，失败则失败回执（不写状态、不推进 nonce、不扣费）
-            let (receipt, log) = match result {
-                Ok(v) => v,
-                Err(e) => {
-                    receipts[idx] = Some(TxReceipt::failure(tx, &e));
+            for &idx in &pending {
+                let reservation = block_gas_reservation(env, &txs[idx]);
+                if total_gas.saturating_add(reservation) > env.block_gas_limit {
+                    // This tx cannot become admissible after earlier txs consume more gas. Keep
+                    // it in the ordered merge plan, but do not execute it.
+                    batch_order.push((idx, false));
+                    consumed += 1;
                     continue;
                 }
-            };
-
-            // 回放写日志到主 ObjectDb（capture 阶段已校验，主库再校验一次）
-            if let Err(e) = log.apply_to(object_db) {
-                receipts[idx] = Some(TxReceipt::failure(tx, &e));
-                continue;
+                if total_gas
+                    .saturating_add(reserved_gas)
+                    .saturating_add(reservation)
+                    > env.block_gas_limit
+                {
+                    // Actual gas from the current batch may be lower than its reservation. Stop
+                    // here and reconsider this ordered suffix after merging the batch.
+                    break;
+                }
+                reserved_gas = reserved_gas.saturating_add(reservation);
+                batch_indices.push(idx);
+                batch_order.push((idx, true));
+                consumed += 1;
             }
 
-            // 应用账户增量（扣费 + nonce 推进）到主 account_store
-            if needs_gas {
-                let caller = derive_address(&tx.tagged_pubkey);
-                if let Some(acc) = account_store.get_mut(&caller) {
-                    // 快照已成功通过 apply_public_tx，此处重放相同增量，必然成功；
-                    // 失败则视为内部不一致（记失败回执，状态已 merge 不可回滚）。
-                    if let Err(e) =
-                        apply_public_tx_with_fee(acc, tx, receipt.gas_used, receipt.fee_charged)
-                    {
+            debug_assert!(
+                consumed > 0,
+                "the first individually admissible tx must fit an empty batch"
+            );
+            let deferred = pending.split_off(consumed);
+
+            // ---- 3b. Admitted batch executes concurrently ----
+            // shared_db is refreshed after every merge batch. Transactions in the same original
+            // wave are disjoint, so prior batch writes cannot invalidate their snapshots.
+            let shared_db: &ObjectDb = &*object_db;
+            let batch_outcomes: Vec<(usize, PokerL1Result<(TxReceipt, ObjectWriteLog)>)> =
+                batch_indices
+                    .par_iter()
+                    .map(|&idx| {
+                        let tx = &txs[idx];
+                        let result = run_one_tx(env, tx, shared_db, &snapshots);
+                        (idx, result)
+                    })
+                    .collect();
+            let mut outcome_by_index: HashMap<usize, PokerL1Result<(TxReceipt, ObjectWriteLog)>> =
+                batch_outcomes.into_iter().collect();
+
+            // ---- 4. Ordered merge, including pre-admission rejections ----
+            for (idx, admitted) in batch_order {
+                let tx = &txs[idx];
+                if !admitted {
+                    receipts[idx] = Some(TxReceipt::failure(
+                        tx,
+                        &PokerL1Error::OutOfGas {
+                            used: total_gas,
+                            limit: env.block_gas_limit,
+                        },
+                    ));
+                    continue;
+                }
+                let result = outcome_by_index
+                    .remove(&idx)
+                    .expect("every admitted tx must produce one worker outcome");
+                let needs_gas =
+                    !matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
+
+                // 执行结果：成功则 merge；通过 admission 后的失败结算 resource gas，
+                // Public/ForceSync 同时推进 nonce 并按 fee policy 扣费。
+                let (receipt, log) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let receipt = settle_failed_tx(env, tx, &e, account_store);
+                        if needs_gas {
+                            let caller = derive_address(&tx.tagged_pubkey);
+                            let _ = account_store.flush(&caller);
+                        }
+                        total_gas = total_gas.saturating_add(receipt.gas_used);
+                        receipts[idx] = Some(receipt);
+                        continue;
+                    }
+                };
+
+                // 回放写日志到主 ObjectDb（capture 阶段已校验，主库再校验一次）
+                if let Err(e) = log.apply_to(object_db) {
+                    let receipt = settle_failed_tx(env, tx, &e, account_store);
+                    if needs_gas {
+                        let caller = derive_address(&tx.tagged_pubkey);
+                        let _ = account_store.flush(&caller);
+                    }
+                    total_gas = total_gas.saturating_add(receipt.gas_used);
+                    receipts[idx] = Some(receipt);
+                    continue;
+                }
+
+                // 应用账户增量（扣费 + nonce 推进）到主 account_store
+                if needs_gas {
+                    let caller = derive_address(&tx.tagged_pubkey);
+                    if let Some(acc) = account_store.get_mut(&caller) {
+                        // 快照已成功通过 apply_public_tx，此处重放相同增量，必然成功；
+                        // 失败则视为内部不一致（记失败回执，状态已 merge 不可回滚）。
+                        if let Err(e) =
+                            apply_public_tx_with_fee(acc, tx, receipt.gas_used, receipt.fee_charged)
+                        {
+                            receipts[idx] = Some(TxReceipt::failure(tx, &e));
+                            continue;
+                        }
+                    }
+                    // 缺口 #8：get_mut 变更后显式落盘（持久化模式下；内存模式 no-op）。
+                    if let Err(e) = account_store.flush(&caller) {
                         receipts[idx] = Some(TxReceipt::failure(tx, &e));
                         continue;
                     }
                 }
-                // 缺口 #8：get_mut 变更后显式落盘（持久化模式下；内存模式 no-op）。
-                if let Err(e) = account_store.flush(&caller) {
-                    receipts[idx] = Some(TxReceipt::failure(tx, &e));
-                    continue;
-                }
-            }
 
-            // block gas 累计（仅成功且需 gas 的 tx）
-            if receipt.success && needs_gas {
                 total_gas = total_gas.saturating_add(receipt.gas_used);
+
+                receipts[idx] = Some(receipt);
             }
 
-            receipts[idx] = Some(receipt);
+            debug_assert!(outcome_by_index.is_empty());
+            pending = deferred;
         }
     }
 
@@ -891,9 +1061,8 @@ pub fn execute_block_serial<B: ObjectBackend>(
 
     for tx in txs {
         let needs_gas = !matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor);
-        if needs_gas
-            && total_gas.saturating_add(tx.gas.budget.min(TX_GAS_LIMIT)) > env.block_gas_limit
-        {
+        let reservation = block_gas_reservation(env, tx);
+        if total_gas.saturating_add(reservation) > env.block_gas_limit {
             receipts.push(TxReceipt::failure(
                 tx,
                 &PokerL1Error::OutOfGas {
@@ -912,10 +1081,7 @@ pub fn execute_block_serial<B: ObjectBackend>(
                 continue;
             }
         }
-        // 仅 gas 计费通道的成功 tx 累计 block gas（gas-free lane 不计入）
-        if receipt.success && needs_gas {
-            total_gas = total_gas.saturating_add(receipt.gas_used);
-        }
+        total_gas = total_gas.saturating_add(receipt.gas_used);
         receipts.push(receipt);
     }
 
@@ -941,6 +1107,7 @@ mod tests {
     use rand::rngs::OsRng;
     use secp256k1::{Message, Secp256k1};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ===== 测试辅助：最小 ELF 构造 =====
 
@@ -1155,11 +1322,28 @@ mod tests {
     /// 仅用于验证 executor 的 lane-contract 一致性校验与 gas 策略。
     struct GasFreeTestPrecompile {
         id: ObjectID,
+        fixed_gas: Option<u64>,
+        failure: Option<&'static str>,
+        calls: Option<Arc<AtomicUsize>>,
     }
 
     impl GasFreeTestPrecompile {
         fn new(id: ObjectID) -> Arc<dyn Precompile> {
-            Arc::new(Self { id })
+            Arc::new(Self {
+                id,
+                fixed_gas: None,
+                failure: None,
+                calls: None,
+            })
+        }
+
+        fn failing(id: ObjectID, fixed_gas: u64, calls: Arc<AtomicUsize>) -> Arc<dyn Precompile> {
+            Arc::new(Self {
+                id,
+                fixed_gas: Some(fixed_gas),
+                failure: Some("synthetic native crypto proof verification failed"),
+                calls: Some(calls),
+            })
         }
     }
 
@@ -1181,7 +1365,18 @@ mod tests {
             _env: &PrecompileEnv,
             _object_db: &mut dyn ObjectBackend,
         ) -> PokerL1Result<DispatchResult> {
+            if let Some(calls) = &self.calls {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+            if let Some(message) = self.failure {
+                return Err(PokerL1Error::Other(message.into()));
+            }
             Ok(DispatchResult::empty())
+        }
+
+        fn gas_cost(&self, _method_selector: &[u8; 32], args: &[u8]) -> u64 {
+            self.fixed_gas
+                .unwrap_or_else(|| crate::vm::gas_table::precompile_gas(args.len() as u64))
         }
 
         fn is_gas_free(&self) -> bool {
@@ -1201,6 +1396,20 @@ mod tests {
     /// 构造注入 GasFreeTestPrecompile 的执行环境。
     fn make_gas_free_env(gas_free_id: ObjectID) -> ExecutionEnvironment {
         let registry = make_registry_with_gas_free_precompile(gas_free_id);
+        make_env().with_precompile_registry(registry)
+    }
+
+    fn make_failing_gas_free_env(
+        gas_free_id: ObjectID,
+        fixed_gas: u64,
+        calls: Arc<AtomicUsize>,
+    ) -> ExecutionEnvironment {
+        let mut registry = PrecompileRegistry::new();
+        registry.register(GasFreeTestPrecompile::failing(
+            gas_free_id,
+            fixed_gas,
+            calls,
+        ));
         make_env().with_precompile_registry(registry)
     }
 
@@ -1251,6 +1460,25 @@ mod tests {
             assert_eq!(acc.nonce, nonce_before, "失败 tx 不得推进 nonce");
             assert_eq!(acc.balance, balance_before, "失败 tx 不得扣费");
         }
+    }
+
+    fn assert_failed_execution_settled(
+        fx: &Fixture,
+        receipt: &TxReceipt,
+        nonce_before: u64,
+        balance_before: u64,
+    ) {
+        assert!(!receipt.success);
+        assert!(
+            receipt.gas_used > 0,
+            "已进入执行阶段的失败必须计 resource gas"
+        );
+        assert_eq!(fx.account().nonce, nonce_before + 1);
+        assert_eq!(
+            fx.account().balance,
+            balance_before - receipt.fee_charged,
+            "失败执行只结算 receipt 声明的 resource fee"
+        );
     }
 
     // ===== execute_tx 正向路径 =====
@@ -1398,7 +1626,11 @@ mod tests {
             "GameTurn + gas-free precompile 应成功: {:?}",
             receipt.error
         );
-        assert_eq!(receipt.gas_used, 0, "GameTurn 免 gas");
+        assert_eq!(
+            receipt.gas_used,
+            crate::vm::gas_table::GAS_PRECOMPILE_BASE,
+            "GameTurn 免 caller fee，但 native work 计入 block gas"
+        );
         assert_eq!(receipt.fee_charged, 0);
         // 账户不被触碰（gas-free lane 不走 account nonce）
         assert_eq!(fx.account().nonce, 0);
@@ -1587,7 +1819,7 @@ mod tests {
             "错误应为 ContractNotFound: {:?}",
             receipt.error
         );
-        assert_state_unchanged(&fx, nonce0, bal0);
+        assert_failed_execution_settled(&fx, &receipt, nonce0, bal0);
     }
 
     #[test]
@@ -1625,7 +1857,11 @@ mod tests {
         );
         // 部署后的 root 不变（执行无效果）
         assert_eq!(fx.object_db.state_root(), root_after_deploy);
-        assert_eq!(fx.account().nonce, 0, "失败 tx 不推进 nonce");
+        assert_eq!(
+            fx.account().nonce,
+            1,
+            "合法 Public tx 的执行失败仍推进 nonce"
+        );
     }
 
     #[test]
@@ -1654,7 +1890,7 @@ mod tests {
             "错误应为 OldVersionNotCallable: {:?}",
             receipt.error
         );
-        assert_eq!(fx.account().nonce, 0);
+        assert_eq!(fx.account().nonce, 1);
     }
 
     #[test]
@@ -1686,7 +1922,7 @@ mod tests {
             receipt.error
         );
         assert_eq!(fx.object_db.state_root(), root_after_deploy);
-        assert_eq!(fx.account().nonce, 0);
+        assert_eq!(fx.account().nonce, 1);
     }
 
     #[test]
@@ -1718,11 +1954,12 @@ mod tests {
             "错误应为 OutOfGas: {:?}",
             receipt.error
         );
-        assert_eq!(receipt.gas_used, 0, "失败 tx 不计费（MVP 语义）");
-        // 状态不变：nonce 不推进、不扣费、state_root 不变
+        assert_eq!(receipt.gas_used, 10, "失败 tx 消耗其已执行的 gas budget");
+        assert_eq!(receipt.fee_charged, 10);
+        // 合约对象状态回滚；账户 nonce/资源费仍结算，阻止免费重放。
         assert_eq!(fx.object_db.state_root(), root_after_deploy);
-        assert_eq!(fx.account().nonce, 0);
-        assert_eq!(fx.account().balance, 1_000_000);
+        assert_eq!(fx.account().nonce, 1);
+        assert_eq!(fx.account().balance, 1_000_000 - 10);
     }
 
     // ===== execute_tx 反向路径：outputs 创建 =====
@@ -1748,7 +1985,7 @@ mod tests {
             "错误应为 creator 不匹配: {:?}",
             receipt.error
         );
-        assert_state_unchanged(&fx, nonce0, bal0);
+        assert_failed_execution_settled(&fx, &receipt, nonce0, bal0);
     }
 
     #[test]
@@ -1782,7 +2019,7 @@ mod tests {
         let existing = fx.object_db.read(&collision_id).expect("已有对象仍在");
         assert_eq!(existing.data, b"existing");
         assert_eq!(fx.object_db.state_root(), root_after_pre);
-        assert_eq!(fx.account().nonce, 0);
+        assert_eq!(fx.account().nonce, 1);
     }
 
     #[test]
@@ -1806,7 +2043,7 @@ mod tests {
             "错误应为 ObjectTooLarge: {:?}",
             receipt.error
         );
-        assert_state_unchanged(&fx, nonce0, bal0);
+        assert_failed_execution_settled(&fx, &receipt, nonce0, bal0);
     }
 
     // ===== execute_block =====
@@ -1891,8 +2128,7 @@ mod tests {
         });
         let tx2 = fx.signer.sign(req2);
 
-        // GameTurn tx（免 gas）：即使 block gas 受限仍执行
-        // 重构后必须配 gas-free precompile（用 gas_free_id）
+        // GameTurn tx 免 caller fee，但 native work 仍受 block resource limit 约束。
         let mut req3 = gameturn_request();
         req3.contract_call = Some(ContractCall {
             contract_id: gas_free_id,
@@ -1922,10 +2158,12 @@ mod tests {
             "tx2 错误应为 OutOfGas: {:?}",
             outcome.receipts[1].error
         );
+        assert!(!outcome.receipts[2].success);
         assert!(
-            outcome.receipts[2].success,
-            "GameTurn 免 gas tx 不受 block gas limit 影响: {:?}",
-            outcome.receipts[2].error
+            outcome.receipts[2]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("out of gas"))
         );
         assert_eq!(outcome.receipts[2].gas_used, 0);
         // block gas 仅含 tx1 的消耗
@@ -1991,7 +2229,8 @@ mod tests {
 
     #[test]
     fn test_gas_free_lane_with_gas_free_precompile_succeeds() {
-        // lane=GameTurn + gas-free precompile → 执行成功，gas_used=0，不扣费不推进 nonce。
+        // lane=GameTurn + gas-free precompile → 执行成功，计 block gas，
+        // 不扣 caller fee、不推进 account nonce。
         let mut fx = Fixture::new();
         let gas_free_id = ObjectID::new([0xFE; 20], 200);
         let env = make_gas_free_env(gas_free_id);
@@ -2007,10 +2246,89 @@ mod tests {
         let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
 
         assert!(receipt.success, "应执行成功: {:?}", receipt.error);
-        assert_eq!(receipt.gas_used, 0, "gas-free lane 免 gas");
+        assert_eq!(receipt.gas_used, crate::vm::gas_table::GAS_PRECOMPILE_BASE);
         assert_eq!(receipt.fee_charged, 0, "gas-free lane 不扣费");
         assert_eq!(fx.account().nonce, 0, "gas-free lane 不推进 nonce");
         assert_eq!(fx.account().balance, 1_000_000, "gas-free lane 不扣余额");
+    }
+
+    #[test]
+    fn failed_gas_free_crypto_precompile_consumes_block_gas_without_caller_fee() {
+        let mut fx = Fixture::new();
+        let gas_free_id = ObjectID::new([0xFC; 20], 201);
+        let native_crypto_gas = crate::vm::gas_table::GAS_STWO_VERIFY + 123;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let env = make_failing_gas_free_env(gas_free_id, native_crypto_gas, calls.clone());
+        let initial_root = fx.object_db.state_root();
+        let initial_nonce = fx.account().nonce;
+        let initial_balance = fx.account().balance;
+
+        let mut req = gameturn_request();
+        req.contract_call = Some(ContractCall {
+            contract_id: gas_free_id,
+            method_selector: [0xA5; 32],
+            args: vec![7; 64],
+        });
+        let tx = fx.signer.sign(req);
+
+        let receipt = execute_tx(&env, &tx, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(!receipt.success);
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("crypto proof"))
+        );
+        assert_eq!(receipt.gas_used, native_crypto_gas);
+        assert_eq!(receipt.fee_charged, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fx.object_db.state_root(), initial_root);
+        assert_eq!(fx.account().nonce, initial_nonce);
+        assert_eq!(fx.account().balance, initial_balance);
+    }
+
+    #[test]
+    fn parallel_block_admission_skips_over_limit_native_crypto_before_execution() {
+        let mut fx = Fixture::new();
+        let gas_free_id = ObjectID::new([0xFB; 20], 202);
+        let native_crypto_gas = crate::vm::gas_table::GAS_STWO_VERIFY;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let env = make_failing_gas_free_env(gas_free_id, native_crypto_gas, calls.clone())
+            .with_block_gas_limit(native_crypto_gas);
+
+        let make_tx = |selector: u8| {
+            let mut req = gameturn_request();
+            req.contract_call = Some(ContractCall {
+                contract_id: gas_free_id,
+                method_selector: [selector; 32],
+                args: vec![selector; 32],
+            });
+            fx.signer.sign(req)
+        };
+        let txs = [make_tx(1), make_tx(2)];
+
+        let outcome = execute_block(&env, &txs, &mut fx.object_db, &mut fx.account_store);
+
+        assert!(
+            !outcome.receipts[0].success,
+            "first native verifier call fails after execution"
+        );
+        assert_eq!(outcome.receipts[0].gas_used, native_crypto_gas);
+        assert!(!outcome.receipts[1].success);
+        assert_eq!(outcome.receipts[1].gas_used, 0);
+        assert!(
+            outcome.receipts[1]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("out of gas"))
+        );
+        assert_eq!(outcome.total_gas_used, native_crypto_gas);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "over-limit proof must never reach host verifier"
+        );
     }
 
     #[test]
@@ -2081,7 +2399,7 @@ mod tests {
 
     #[test]
     fn test_public_lane_with_gas_free_precompile_charges_nonce() {
-        // lane=Public + gas-free precompile → 执行成功，扣 gas_used(=0)，推进 nonce。
+        // lane=Public + gas-free precompile → 执行成功，按 native resource gas 计费并推进 nonce。
         // 验证非对称策略：gas 策略跟随 lane 而非合约属性（Assumption 3）。
         let mut fx = Fixture::new();
         let gas_free_id = ObjectID::new([0xFE; 20], 200);
@@ -2102,17 +2420,16 @@ mod tests {
             "Public lane + gas-free precompile 应成功: {:?}",
             receipt.error
         );
-        // precompile 不经 rBPF VM，gas_used 保持 0
-        assert_eq!(receipt.gas_used, 0, "precompile 调用不消耗 gas");
-        assert_eq!(receipt.fee_charged, 0, "gas_used=0 → fee_charged=0");
+        assert_eq!(receipt.gas_used, crate::vm::gas_table::GAS_PRECOMPILE_BASE);
+        assert_eq!(receipt.fee_charged, receipt.gas_used);
         // 但 Public lane 推进 nonce（重放保护）
         assert_eq!(fx.account().nonce, 1, "Public lane 必须推进 nonce");
-        assert_eq!(fx.account().balance, 1_000_000, "gas_used=0 → 余额不变");
+        assert_eq!(fx.account().balance, 1_000_000 - receipt.fee_charged);
     }
 
     #[test]
     fn test_checkpoint_anchor_lane_with_gas_free_precompile_succeeds() {
-        // lane=CheckpointAnchor + gas-free precompile → 免 gas 执行（与 GameTurn 同语义）。
+        // lane=CheckpointAnchor + gas-free precompile → 免 caller fee，但计 block gas。
         let mut fx = Fixture::new();
         let gas_free_id = ObjectID::new([0xFE; 20], 200);
         let env = make_gas_free_env(gas_free_id);
@@ -2134,7 +2451,7 @@ mod tests {
             "CheckpointAnchor + gas-free precompile 应成功: {:?}",
             receipt.error
         );
-        assert_eq!(receipt.gas_used, 0, "gas-free lane 免 gas");
+        assert_eq!(receipt.gas_used, crate::vm::gas_table::GAS_PRECOMPILE_BASE);
         assert_eq!(receipt.fee_charged, 0);
         assert_eq!(fx.account().nonce, 0, "gas-free lane 不推进 nonce");
         assert_eq!(fx.account().balance, 1_000_000);
@@ -2351,8 +2668,11 @@ mod tests {
         let env = make_env();
         let outcome = execute_block(&env, &[tx], &mut fx.object_db, &mut fx.account_store);
         assert!(!outcome.receipts[0].success, "UTXO value不足转账应失败");
-        assert_eq!(fx.account().balance, account_balance_before);
-        assert_eq!(fx.account().nonce, 0);
+        assert_eq!(
+            fx.account().balance,
+            account_balance_before - outcome.receipts[0].fee_charged
+        );
+        assert_eq!(fx.account().nonce, 1);
         assert!(
             fx.object_db.read(&input.id).is_ok(),
             "failed spend keeps input"
@@ -2401,6 +2721,7 @@ mod tests {
             crate::economics::native_coin_balance(&fx.object_db, recipient).unwrap(),
             0
         );
-        assert_eq!(fx.account().nonce, 0);
+        assert_eq!(fx.account().nonce, 1);
+        assert!(receipt.gas_used > 0);
     }
 }

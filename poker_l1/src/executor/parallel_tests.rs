@@ -200,6 +200,29 @@ fn parallel_multi_caller_same_nonce_concurrent() {
     }
 }
 
+#[test]
+fn parallel_reconsiders_deferred_tx_after_actual_gas_is_known() {
+    // Both independent txs reserve the full 1M budget, so they cannot enter one execution batch
+    // under a 1M block limit. Their actual gas is zero, therefore serial semantics admit both;
+    // the parallel executor must execute the second in a follow-up batch instead of rejecting it.
+    let det = deterministic_signers(2);
+    let txs = vec![
+        output_tx(&det[0], 0, 700, b"first"),
+        output_tx(&det[1], 0, 701, b"second"),
+    ];
+    let env = make_env().with_block_gas_limit(1_000_000);
+    let mut par = fresh_state(&det);
+    let mut ser = fresh_state(&det);
+
+    let out_par = execute_block(&env, &txs, &mut par.object_db, &mut par.account_store);
+    let out_ser = execute_block_serial(&env, &txs, &mut ser.object_db, &mut ser.account_store);
+
+    assert!(out_par.receipts.iter().all(|receipt| receipt.success));
+    assert_eq!(out_par.state_root, out_ser.state_root);
+    assert_eq!(out_par.total_gas_used, out_ser.total_gas_used);
+    assert_eq!(out_par.total_gas_used, 0);
+}
+
 // ===== 等价性 fuzz：随机 N 笔 tx（多 caller）串行/并行一致 =====
 
 #[test]
