@@ -132,9 +132,10 @@ macro_rules! impl_validated_texas_air {
     };
 }
 
-impl_texas_air!(
+impl_validated_texas_air!(
     lifecycle::create_table::CreateTableAir,
-    MethodKind::CreateTable
+    MethodKind::CreateTable,
+    lifecycle::create_table::validate_public_inputs
 );
 impl_texas_air!(lifecycle::join_table::JoinTableAir, MethodKind::JoinTable);
 impl_texas_air!(
@@ -192,8 +193,16 @@ impl_validated_texas_air!(
     MethodKind::RequestLeaveAfterHand,
     actions::validation::validate_request_leave_after_hand
 );
-impl_texas_air!(funds::addon::AddonAir, MethodKind::Addon);
-impl_texas_air!(funds::rebuy::RebuyAir, MethodKind::Rebuy);
+impl_validated_texas_air!(
+    funds::addon::AddonAir,
+    MethodKind::Addon,
+    funds::validation::validate_addon
+);
+impl_validated_texas_air!(
+    funds::rebuy::RebuyAir,
+    MethodKind::Rebuy,
+    funds::validation::validate_rebuy
+);
 impl_texas_air!(
     crypto::join_and_shuffle::JoinAndShuffleAir,
     MethodKind::JoinAndShuffle

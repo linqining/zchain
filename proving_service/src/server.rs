@@ -1103,11 +1103,11 @@ fn new_service_plugin(table_id: u64) -> TexasPokerPlugin {
 
     let mut table = TexasPokerTable::new(
         ObjectID::new([0xFF; 20], table_id),
-        "service_placeholder".into(),
+        String::new(),
         EMPTY_PLAYER,
-        6,
-        50,
-        100,
+        2,
+        1,
+        1,
     );
     table.config = TableConfig::default();
     TexasPokerPlugin::new(table)

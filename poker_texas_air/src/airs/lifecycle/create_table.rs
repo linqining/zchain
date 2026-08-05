@@ -42,7 +42,10 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
+use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
+use crate::public_inputs::TexasPublicInputs;
+use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
 /// `create_table` 业务特定列布局（接在通用列之后）。
 pub mod cols {
@@ -365,9 +368,234 @@ pub fn field_to_m31_limbs(f: starknet_ff::FieldElement) -> [M31; 4] {
     crate::state_root::state_root_to_air_limbs(crate::state_root::StateRoot::from_field(f))
 }
 
+/// Reconstruct the canonical first-call `create_table` transition and its exact AIR row.
+///
+/// The L1 precompile only permits `create_table` when the shared table object does not yet
+/// exist.  It represents that absence with one canonical placeholder table, then overwrites it
+/// with `TexasPokerTable::new`, bumps the version, and advances `call_seq`.  Requiring that exact
+/// pre/post pair prevents a valid create-table row from being attached to an arbitrary table
+/// reinitialisation.
+pub fn validate_public_inputs(
+    air: &CreateTableAir,
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<()> {
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+
+    if public_inputs.kind != MethodKind::CreateTable {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: public-input method kind mismatch".into(),
+        ));
+    }
+    let pre = table_from_state_preimage(&public_inputs.pre_image)?;
+    let post = table_from_state_preimage(&public_inputs.post_image)?;
+    if pre.id != post.id
+        || public_inputs.table_id != pre.id.creation_nonce
+        || public_inputs.table_id != post.id.creation_nonce
+        || public_inputs.pre_version != pre.version
+        || public_inputs.post_version != post.version
+        || public_inputs.hand_id != post.hand_id
+        || public_inputs.call_seq != post.call_seq
+    {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: public metadata does not match canonical pre/post tables".into(),
+        ));
+    }
+
+    let canonical_pre = TexasPokerTable::new(pre.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+    if pre != canonical_pre {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: canonical first-call placeholder mismatch".into(),
+        ));
+    }
+    if !(2..=9).contains(&air.input.max_players) {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: max_players must be in [2, 9]".into(),
+        ));
+    }
+    if air.input.big_blind == 0 {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: big_blind must be non-zero".into(),
+        ));
+    }
+    if air.input.small_blind > air.input.big_blind {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: small_blind exceeds big_blind".into(),
+        ));
+    }
+
+    let mut expected_post = TexasPokerTable::new(
+        pre.id,
+        air.input.name.clone(),
+        post.creator,
+        air.input.max_players,
+        air.input.small_blind,
+        air.input.big_blind,
+    );
+    expected_post.bump_version();
+    expected_post.call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation("create_table: call_seq overflow during replay".into())
+    })?;
+    expected_post.hand_id = pre.hand_id;
+    if post != expected_post {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: canonical post-table differs from native VM replay".into(),
+        ));
+    }
+
+    let expected_row = CreateTableRow::active(
+        &air.input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        post.version,
+    )
+    .to_vec();
+    let trusted_row = public_inputs.require_expected_trace_row(expected_row.len())?;
+    if trusted_row != expected_row {
+        return Err(TexasAirError::SpecViolation(
+            "create_table: trusted trace row was not reconstructed from canonical public inputs"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poker_l1::object_model::ObjectID;
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+
+    fn canonical_transition() -> (
+        CreateTableAir,
+        TexasPublicInputs,
+        TexasPokerTable,
+        TexasPokerTable,
+    ) {
+        let id = ObjectID::new([0xA1; 20], 42);
+        let pre = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+        let input = CreateTableInput {
+            name: "canonical-create".into(),
+            max_players: 6,
+            small_blind: 10,
+            big_blind: 20,
+        };
+        let mut post = TexasPokerTable::new(
+            id,
+            input.name.clone(),
+            [0xC1; 20],
+            input.max_players,
+            input.small_blind,
+            input.big_blind,
+        );
+        post.bump_version();
+        post.call_seq = 1;
+        let mut public_inputs = TexasPublicInputs::from_tables(
+            &pre,
+            &post,
+            MethodKind::CreateTable,
+            id.creation_nonce,
+            0,
+            1,
+        )
+        .unwrap();
+        let row = CreateTableRow::active(
+            &input,
+            state_root_to_air_limbs(public_inputs.pre_state_root),
+            state_root_to_air_limbs(public_inputs.post_state_root),
+            id.creation_nonce,
+            0,
+            1,
+            pre.version,
+            post.version,
+        );
+        public_inputs
+            .bind_expected_trace_row(&row.to_vec())
+            .unwrap();
+        let air = CreateTableAir::new(
+            10,
+            input,
+            state_root_to_air_limbs(public_inputs.pre_state_root),
+            state_root_to_air_limbs(public_inputs.post_state_root),
+            id.creation_nonce,
+            0,
+            1,
+            pre.version,
+            post.version,
+        );
+        (air, public_inputs, pre, post)
+    }
+
+    #[test]
+    fn canonical_public_inputs_reconstruct_first_create() {
+        let (air, public_inputs, _, _) = canonical_transition();
+        validate_public_inputs(&air, &public_inputs).unwrap();
+    }
+
+    #[test]
+    fn public_input_validation_rejects_table_reinitialisation() {
+        let (air, _, mut pre, post) = canonical_transition();
+        pre.name = "already-created".into();
+        let mut public_inputs = TexasPublicInputs::from_tables(
+            &pre,
+            &post,
+            MethodKind::CreateTable,
+            pre.id.creation_nonce,
+            post.hand_id,
+            post.call_seq,
+        )
+        .unwrap();
+        let row = CreateTableRow::active(
+            &air.input,
+            state_root_to_air_limbs(public_inputs.pre_state_root),
+            state_root_to_air_limbs(public_inputs.post_state_root),
+            public_inputs.table_id,
+            public_inputs.hand_id,
+            public_inputs.call_seq,
+            pre.version,
+            post.version,
+        );
+        public_inputs
+            .bind_expected_trace_row(&row.to_vec())
+            .unwrap();
+
+        let error = validate_public_inputs(&air, &public_inputs).unwrap_err();
+        assert!(error.to_string().contains("first-call placeholder"));
+    }
+
+    #[test]
+    fn public_input_validation_rejects_post_state_unrelated_to_air_input() {
+        let (air, _, pre, mut post) = canonical_transition();
+        post.name = "different-name".into();
+        let mut public_inputs = TexasPublicInputs::from_tables(
+            &pre,
+            &post,
+            MethodKind::CreateTable,
+            pre.id.creation_nonce,
+            post.hand_id,
+            post.call_seq,
+        )
+        .unwrap();
+        let row = CreateTableRow::active(
+            &air.input,
+            state_root_to_air_limbs(public_inputs.pre_state_root),
+            state_root_to_air_limbs(public_inputs.post_state_root),
+            public_inputs.table_id,
+            public_inputs.hand_id,
+            public_inputs.call_seq,
+            pre.version,
+            post.version,
+        );
+        public_inputs
+            .bind_expected_trace_row(&row.to_vec())
+            .unwrap();
+
+        let error = validate_public_inputs(&air, &public_inputs).unwrap_err();
+        assert!(error.to_string().contains("native VM replay"));
+    }
 
     #[test]
     fn test_create_table_row_active_columns() {

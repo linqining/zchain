@@ -15,7 +15,7 @@ use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch::{self, CreateTableArgs, selectors};
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::prove_task::DispatchOutput;
@@ -44,11 +44,11 @@ fn e2e_create_table_dispatch_to_orchestrator() {
     let creator: Address = [0xAA; 20];
     let mut table = TexasPokerTable::new(
         ObjectID::new([0xFF; 20], 0),
-        "placeholder".into(),
-        creator,
-        6,
-        50,
-        100,
+        String::new(),
+        EMPTY_PLAYER,
+        2,
+        1,
+        1,
     );
 
     let args = CreateTableArgs {

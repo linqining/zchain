@@ -6,6 +6,8 @@ use poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
+use poker_texas_air::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
+use poker_texas_air::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
 use poker_texas_air::airs::lifecycle::create_table::CreateTableInput;
 use poker_texas_air::airs::{AirStatement, TexasAir};
 use poker_texas_air::method_kind::MethodKind;
@@ -111,24 +113,11 @@ fn generic_verifier_does_not_fallback_to_the_proof_carried_row() {
 }
 
 fn make_create_tables() -> (TexasPokerTable, TexasPokerTable) {
-    let mut pre = TexasPokerTable::new(
-        ObjectID::new([0u8; 20], 0),
-        "pre_placeholder".to_owned(),
-        EMPTY_PLAYER,
-        2,
-        1,
-        2,
-    );
-    pre.version = 0;
-    let mut post = TexasPokerTable::new(
-        ObjectID::new([0xAA; 20], 1),
-        "test_table".to_owned(),
-        EMPTY_PLAYER,
-        6,
-        10,
-        20,
-    );
-    post.version = 1;
+    let id = ObjectID::new([0xAA; 20], 42);
+    let pre = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+    let mut post = TexasPokerTable::new(id, "test_table".to_owned(), EMPTY_PLAYER, 6, 10, 20);
+    post.bump_version();
+    post.call_seq = 1;
     (pre, post)
 }
 
@@ -375,4 +364,179 @@ fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
         verify_method_against(proof, air, &public_inputs).is_err(),
         "production verifier must bind table_id to the canonical table image"
     );
+}
+
+fn make_funds_pre_table() -> TexasPokerTable {
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xDD; 20], 19),
+        "canonical-funds".to_owned(),
+        EMPTY_PLAYER,
+        6,
+        50,
+        100,
+    );
+    table.hand_id = 3;
+    table.call_seq = 11;
+    table.seats[0].player = [0x31; 20];
+    table.seats[0].stack = 1_000;
+    table.chip_pool = 1_000;
+    table
+}
+
+#[test]
+fn production_verifier_rejects_addon_row_attached_to_unrelated_post_table() {
+    let pre = make_funds_pre_table();
+    let input = AddonInput {
+        seat_index: 0,
+        amount: 200,
+    };
+    let mut canonical_post = pre.clone();
+    state_machine::apply_addon(
+        &mut canonical_post,
+        input.seat_index,
+        input.amount,
+        &mut vec![],
+    )
+    .unwrap();
+    canonical_post.call_seq = pre.call_seq + 1;
+
+    // Keep every row-visible funds value valid, but commit to a different table name.
+    // Before canonical replay, roots and this self-consistent row were unrelated inputs.
+    let mut unrelated_post = canonical_post.clone();
+    unrelated_post.name = "unrelated-post".to_owned();
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &unrelated_post,
+        MethodKind::Addon,
+        pre.id.creation_nonce,
+        unrelated_post.hand_id,
+        unrelated_post.call_seq,
+    )
+    .unwrap();
+    let row = AddonRow::active(
+        &input,
+        pre.seats[0].pending_addon,
+        pre.chip_pool,
+        canonical_post.chip_pool,
+        pre.addon_pool,
+        canonical_post.addon_pool,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        canonical_post.version,
+        pre.round_state,
+        canonical_post.round_state,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let trace = gen_method_trace(
+        AddonAir::num_columns(),
+        &row.to_vec(),
+        &AddonRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = AddonAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        AddonAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("unrelated roots and row are intentionally AIR-consistent");
+
+    let error = verify_method_against(proof, air, &public_inputs)
+        .expect_err("production addon verification must replay the canonical table transition");
+    assert!(error.to_string().contains("native VM replay"));
+}
+
+#[test]
+fn production_verifier_rejects_rebuy_row_attached_to_unrelated_post_table() {
+    let pre = make_funds_pre_table();
+    let input = RebuyInput {
+        seat_index: 0,
+        amount: 300,
+    };
+    let mut canonical_post = pre.clone();
+    state_machine::apply_rebuy(
+        &mut canonical_post,
+        input.seat_index,
+        input.amount,
+        &mut vec![],
+    )
+    .unwrap();
+    canonical_post.call_seq = pre.call_seq + 1;
+
+    let mut unrelated_post = canonical_post.clone();
+    unrelated_post.name = "unrelated-post".to_owned();
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &unrelated_post,
+        MethodKind::Rebuy,
+        pre.id.creation_nonce,
+        unrelated_post.hand_id,
+        unrelated_post.call_seq,
+    )
+    .unwrap();
+    let row = RebuyRow::active(
+        &input,
+        pre.seats[0].stack,
+        pre.chip_pool,
+        canonical_post.chip_pool,
+        pre.addon_pool,
+        canonical_post.addon_pool,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        canonical_post.version,
+        pre.round_state,
+        canonical_post.round_state,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let trace = gen_method_trace(
+        RebuyAir::num_columns(),
+        &row.to_vec(),
+        &RebuyRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = RebuyAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        RebuyAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("unrelated roots and row are intentionally AIR-consistent");
+
+    let error = verify_method_against(proof, air, &public_inputs)
+        .expect_err("production rebuy verification must replay the canonical table transition");
+    assert!(error.to_string().contains("native VM replay"));
 }

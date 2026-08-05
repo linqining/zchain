@@ -46,7 +46,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
     selectors,
 };
-use poker_l1::vm::contracts::texas_poker::types::{TableConfig, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TableConfig, TexasPokerTable};
 use poker_protocol::crypto::{ECPoint, ElGamalCiphertext};
 
 use crate::contracts::TexasPokerPlugin;
@@ -701,9 +701,9 @@ fn observe_winner(table: &TexasPokerTable) -> Option<u8> {
 }
 
 /// 构造占位桌台（create_table 会覆写）。
-fn make_placeholder_table(creator: Address) -> TexasPokerTable {
+fn make_placeholder_table(_creator: Address) -> TexasPokerTable {
     let id = ObjectID::new([0xFF; 20], 0);
-    let mut table = TexasPokerTable::new(id, "placeholder".into(), creator, 6, 50, 100);
+    let mut table = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
     table.config = TableConfig::default();
     table
 }

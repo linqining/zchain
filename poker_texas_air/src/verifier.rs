@@ -40,9 +40,21 @@ pub fn verify_create_table_against(
     expected_air: CreateTableAir,
     expected_public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<()> {
+    verify_create_table_inner(proof, expected_air, expected_public_inputs, true)
+}
+
+fn verify_create_table_inner(
+    proof: CreateTableProof,
+    expected_air: CreateTableAir,
+    expected_public_inputs: &TexasPublicInputs,
+    validate_canonical_state: bool,
+) -> TexasAirResult<()> {
     let config = PcsConfig::default();
     expected_public_inputs.verify_roots()?;
     expected_public_inputs.verify_air_statement(&expected_air.statement())?;
+    if validate_canonical_state {
+        expected_air.validate_public_inputs(expected_public_inputs)?;
+    }
     let log_size = expected_air.log_size();
     let expected_trace_row =
         expected_public_inputs.require_expected_trace_row(cols::NUM_COLUMNS)?;
@@ -100,7 +112,7 @@ pub fn verify_create_table_against(
 pub fn verify_create_table(proof: CreateTableProof) -> TexasAirResult<()> {
     let expected_air = proof.air.clone();
     let expected_public_inputs = proof.public_inputs.clone();
-    verify_create_table_against(proof, expected_air, &expected_public_inputs)
+    verify_create_table_inner(proof, expected_air, &expected_public_inputs, false)
 }
 
 /// 泛型 method verify — 验证任意 method AIR 的 L1 proof。

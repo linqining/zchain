@@ -1123,6 +1123,133 @@ mod tests {
     }
 
     #[test]
+    fn join_addon_rebuy_leave_preserves_wallet_vault_and_treasury() {
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let (mut object_db, genesis_coin) =
+            create_funded_table(&precompile, &caller, &caller_pk, 400);
+        let treasury_before = read_treasury(&object_db).unwrap();
+
+        let join_hash = [0x81; 32];
+        let join_change = funded_join(
+            &precompile,
+            &caller,
+            &caller_pk,
+            &mut object_db,
+            genesis_coin,
+            100,
+            join_hash,
+        );
+        assert_eq!(
+            decode_native_coin(&object_db.read(&join_change).unwrap())
+                .unwrap()
+                .amount,
+            300
+        );
+
+        let addon_hash = [0x82; 32];
+        precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::addon(),
+                &borsh::to_vec(&AddonArgs {
+                    seat_index: 0,
+                    amount: 60,
+                })
+                .unwrap(),
+                &ExecutionEnvironment {
+                    tx_inputs: vec![join_change],
+                    tx_hash: addon_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+        let addon_change = ObjectID::new(caller, coin_output_nonce(&addon_hash, 0));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&addon_change).unwrap())
+                .unwrap()
+                .amount,
+            240
+        );
+
+        let rebuy_hash = [0x83; 32];
+        precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::rebuy(),
+                &borsh::to_vec(&RebuyArgs {
+                    seat_index: 0,
+                    amount: 70,
+                })
+                .unwrap(),
+                &ExecutionEnvironment {
+                    tx_inputs: vec![addon_change],
+                    tx_hash: rebuy_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+        let rebuy_change = ObjectID::new(caller, coin_output_nonce(&rebuy_hash, 0));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&rebuy_change).unwrap())
+                .unwrap()
+                .amount,
+            170
+        );
+
+        let table_id = reserved::texas_poker_contract_id();
+        let table: TexasPokerTable =
+            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        assert_eq!(table.seats[0].stack, 170);
+        assert_eq!(table.seats[0].pending_addon, 60);
+        assert_eq!(table.chip_pool, 230);
+        assert_eq!(table.addon_pool, 60);
+        reconcile_table_vault(&table).unwrap();
+
+        let leave_hash = [0x84; 32];
+        precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::leave_table(),
+                &borsh::to_vec(&LeaveTableArgs { seat_index: 0 }).unwrap(),
+                &ExecutionEnvironment {
+                    tx_hash: leave_hash,
+                    ..make_env()
+                },
+                &mut object_db,
+            )
+            .unwrap();
+
+        let payout_id = ObjectID::new(caller, coin_output_nonce(&leave_hash, 1));
+        assert_eq!(
+            decode_native_coin(&object_db.read(&payout_id).unwrap())
+                .unwrap()
+                .amount,
+            230
+        );
+        let final_table: TexasPokerTable =
+            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        assert_eq!(final_table.chip_pool, 0);
+        assert_eq!(final_table.addon_pool, 0);
+        assert!(!final_table.seats[0].is_occupied());
+        reconcile_table_vault(&final_table).unwrap();
+
+        let wallet_total = list_owned_native_coins(&object_db, caller)
+            .unwrap()
+            .iter()
+            .try_fold(0u64, |total, coin| total.checked_add(coin.amount))
+            .unwrap();
+        assert_eq!(wallet_total, 400);
+        assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
+        reconcile_native_supply(&object_db, 0).unwrap();
+    }
+
+    #[test]
     fn funded_addon_failure_discards_table_coin_treasury_and_root_changes() {
         let precompile = TexasPokerPrecompile::new(1);
         let (caller, caller_pk) = make_caller();

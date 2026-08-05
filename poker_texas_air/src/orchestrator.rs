@@ -2473,7 +2473,7 @@ mod tests {
         RebuyArgs, SeatIndexArgs,
     };
     use poker_l1::vm::contracts::texas_poker::state_machine;
-    use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 
     fn make_table(name: &str) -> TexasPokerTable {
         TexasPokerTable::new(
@@ -2483,6 +2483,17 @@ mod tests {
             6,
             50,
             100,
+        )
+    }
+
+    fn make_create_placeholder() -> TexasPokerTable {
+        TexasPokerTable::new(
+            ObjectID::new([0xFF; 20], 0),
+            String::new(),
+            EMPTY_PLAYER,
+            2,
+            1,
+            1,
         )
     }
 
@@ -2619,7 +2630,7 @@ mod tests {
 
     #[test]
     fn archived_method_proof_roundtrips_and_verifies_after_restart() {
-        let pre = make_table("archive-create");
+        let pre = make_create_placeholder();
         let args = CreateTableArgs {
             name: "archive-created".into(),
             max_players: 6,
@@ -2653,7 +2664,7 @@ mod tests {
     #[test]
     fn archived_method_proof_rejects_wrong_task_and_tampering() {
         let (task, _) = dispatch_task(
-            make_table("archive-original"),
+            make_create_placeholder(),
             [0u8; 20],
             texas_dispatch::selectors::create_table(),
             borsh::to_vec(&CreateTableArgs {
@@ -2669,7 +2680,7 @@ mod tests {
         let original_wire = archived.archive.to_bytes().unwrap();
 
         let (wrong_task, _) = dispatch_task(
-            make_table("archive-wrong"),
+            make_create_placeholder(),
             [0u8; 20],
             texas_dispatch::selectors::create_table(),
             borsh::to_vec(&CreateTableArgs {
@@ -2725,7 +2736,7 @@ mod tests {
 
     #[test]
     fn orchestrator_prove_create_table() {
-        let pre = make_table("pre");
+        let pre = make_create_placeholder();
         let raw_args = borsh::to_vec(&CreateTableArgs {
             name: "post".into(),
             max_players: 6,
