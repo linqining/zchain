@@ -186,6 +186,8 @@ impl TexasPokerPlugin {
                 task.method_kind,
                 poker_texas_air::method_kind::MethodKind::SubmitShuffleV2
                     | poker_texas_air::method_kind::MethodKind::SubmitReconstructDeck
+                    | poker_texas_air::method_kind::MethodKind::LeaveWithProof
+                    | poker_texas_air::method_kind::MethodKind::SubmitPlayerRevealTokens
             );
             if !supported {
                 if index - run_start > best_end.saturating_sub(best_start.unwrap_or(0)) {
@@ -387,5 +389,216 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
             prove_count: self.prove_count,
             chain_length: self.orchestrator.proven().len(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poker_l1::object_model::ObjectID;
+    use poker_l1::vm::contracts::texas_poker::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
+    use poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args;
+    use poker_l1::vm::contracts::texas_poker::types::ShuffleState;
+    use poker_protocol::crypto::curve::{
+        Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric,
+    };
+    use poker_protocol::crypto::types::ECPoint;
+    use poker_protocol::zk_shuffle::ShuffleProof;
+    use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+    use rand::rngs::OsRng;
+
+    fn context(caller: poker_l1::Address) -> DispatchContext {
+        DispatchContext {
+            caller,
+            caller_pubkey: TaggedPubkey {
+                tag: 0,
+                raw: vec![0xD1; 32],
+            },
+            chain_id: 377,
+            block_height: 12_345,
+            block_timestamp: 2_000_000,
+        }
+    }
+
+    fn next_shuffle_task(
+        pre_table: TexasPokerTable,
+        aggregated_pk: <Bls12381Curve as Curve>::Point,
+        permutation: &[usize],
+    ) -> (ProveTask, TexasPokerTable) {
+        let seat_index = pre_table
+            .shuffle_state
+            .current_shuffler
+            .expect("a shuffler should remain");
+        let input_cards = pre_table.deck_state.encrypted.clone();
+        let rerandomizers: Vec<_> = (0..input_cards.len())
+            .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+            .collect();
+        let output_cards: Vec<_> = (0..input_cards.len())
+            .map(|index| {
+                input_cards[permutation[index]].re_encrypt(&aggregated_pk, &rerandomizers[index])
+            })
+            .collect();
+        let shuffle_proof = ShuffleProof::prove(
+            &input_cards,
+            &output_cards,
+            permutation,
+            &rerandomizers,
+            &aggregated_pk,
+            &mut OsRng,
+            &mut FiatShamirTranscript::new(b"zk_shuffle_proof_v2"),
+        )
+        .expect("shuffle proof should build");
+        let raw_args = borsh::to_vec(&SubmitShuffleV2Args {
+            seat_index,
+            output_cards,
+            shuffle_proof,
+        })
+        .expect("shuffle args should encode");
+        let caller = pre_table.seats[usize::from(seat_index)].player;
+        let mut post_table = pre_table;
+        let result = texas_dispatch::dispatch(
+            &context(caller),
+            &mut post_table,
+            &texas_dispatch::selectors::submit_shuffle_v2(),
+            &raw_args,
+        )
+        .expect("sequential shuffle should dispatch");
+        let output: DispatchOutput =
+            borsh::from_slice(&result.return_value).expect("dispatch output should decode");
+        (
+            output.prove_task.expect("shuffle should emit a prove task"),
+            post_table,
+        )
+    }
+
+    fn sequential_shuffle_tasks() -> (Vec<ProveTask>, TexasPokerTable) {
+        let seat_secrets: Vec<_> = (0..2)
+            .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
+            .collect();
+        let seat_keys: Vec<_> = seat_secrets
+            .iter()
+            .map(|secret| <Bls12381Curve as Curve>::base_g() * secret)
+            .collect();
+        let aggregated_pk = seat_keys[0] + seat_keys[1];
+        let input_cards: Vec<_> = (0..8)
+            .map(|index| {
+                let card = Bls12381Curve::hash_to_curve(
+                    format!("restart-aggregate/card/{index}").as_bytes(),
+                );
+                ElGamalCiphertextGeneric::encrypt(
+                    &card,
+                    &aggregated_pk,
+                    &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+                )
+            })
+            .collect();
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xB8; 20], 901),
+            "restart-aggregate".into(),
+            [0xC0; 20],
+            2,
+            50,
+            100,
+        );
+        table.call_seq = 20;
+        table.hand_id = 9;
+        table.version = 30;
+        for (index, key) in seat_keys.into_iter().enumerate() {
+            table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
+            table.seats[index].stack = 1_000;
+            table.seats[index].pk = ECPoint(key);
+        }
+        table.deck_state.encrypted = input_cards;
+        table.deck_state.aggregated_pk = Some(ECPoint(aggregated_pk));
+        table.shuffle_state = ShuffleState {
+            phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
+            current_shuffler: Some(0),
+            pending_players: vec![0, 1],
+            completed_players: vec![],
+        };
+
+        let (first, table) = next_shuffle_task(table, aggregated_pk, &[3, 0, 7, 1, 6, 2, 5, 4]);
+        let (second, table) = next_shuffle_task(table, aggregated_pk, &[1, 7, 3, 5, 0, 6, 4, 2]);
+        (vec![first, second], table)
+    }
+
+    #[test]
+    fn restored_archives_aggregate_and_reject_reorder_or_tampering() {
+        let (tasks, persisted_table) = sequential_shuffle_tasks();
+        let mut proving = Orchestrator::new();
+        let archives: Vec<_> = tasks
+            .iter()
+            .map(|task| {
+                proving
+                    .prove_verify_and_archive_task(task)
+                    .expect("method proof should archive")
+                    .archive
+            })
+            .collect();
+
+        let mut mismatched = TexasPokerPlugin::from_persisted_state(persisted_table.clone(), 2, 2);
+        assert!(
+            mismatched
+                .restore_archived_task(&tasks[0], &archives[1])
+                .is_err(),
+            "an archive from a later task must not verify against an earlier task"
+        );
+        assert!(
+            mismatched.proven().is_empty(),
+            "failed archive restoration must be atomic"
+        );
+
+        let mut reversed = TexasPokerPlugin::from_persisted_state(persisted_table.clone(), 2, 2);
+        reversed
+            .restore_archived_task(&tasks[1], &archives[1])
+            .expect("an independently valid first receipt may start a recovered segment");
+        assert!(
+            reversed
+                .restore_archived_task(&tasks[0], &archives[0])
+                .is_err(),
+            "reversing journal order must break receipt-chain continuity"
+        );
+        assert_eq!(
+            reversed.proven().len(),
+            1,
+            "the rejected out-of-order receipt must not mutate recovered history"
+        );
+        assert!(
+            reversed.aggregate_crypto_proofs().is_err(),
+            "a partial reversed recovery must not produce an aggregate"
+        );
+
+        let mut tampered_bytes = archives[0]
+            .to_bytes()
+            .expect("archive should encode for corruption testing");
+        *tampered_bytes
+            .last_mut()
+            .expect("archive should contain a proof payload") ^= 0x01;
+        let tampered = ArchivedMethodProof::from_bytes(&tampered_bytes)
+            .expect("the corrupted payload should remain a well-formed archive envelope");
+        let mut corrupted = TexasPokerPlugin::from_persisted_state(persisted_table.clone(), 2, 2);
+        assert!(
+            corrupted
+                .restore_archived_task(&tasks[0], &tampered)
+                .is_err(),
+            "native STARK verification must reject a corrupted archive"
+        );
+        assert!(
+            corrupted.proven().is_empty(),
+            "tampered archive rejection must leave recovered history unchanged"
+        );
+
+        let mut restored = TexasPokerPlugin::from_persisted_state(persisted_table, 2, 2);
+        for (task, archive) in tasks.iter().zip(&archives) {
+            restored
+                .restore_archived_task(task, archive)
+                .expect("restart should reverify and restore each archive");
+        }
+        let aggregate = restored
+            .aggregate_crypto_proofs()
+            .expect("restored crypto run should aggregate");
+        assert_eq!(aggregate.children().len(), 2);
+        assert_eq!(aggregate.hand_id(), tasks[0].hand_id);
+        assert_eq!(restored.proven().len(), 2);
     }
 }

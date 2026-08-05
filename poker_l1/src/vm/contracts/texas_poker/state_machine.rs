@@ -3235,6 +3235,23 @@ pub fn kick_player_internal(
     reason: u8,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    // A kick can cascade into end_without_showdown/settlement and finally reset_for_next_hand.
+    // Execute the whole cascade on a candidate table so a late reset failure cannot leave a
+    // partially refunded seat or a partially collected pot in the caller's state.
+    let mut candidate = table.clone();
+    let mut candidate_events = Vec::new();
+    kick_player_internal_in_place(&mut candidate, seat_index, reason, &mut candidate_events)?;
+    *table = candidate;
+    events.extend(candidate_events);
+    Ok(())
+}
+
+fn kick_player_internal_in_place(
+    table: &mut TexasPokerTable,
+    seat_index: u8,
+    reason: u8,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
     // P0-1 修复：seat_index 越界校验（原先直接索引会 panic）。
     if seat_index >= table.max_players {
         return Err(PokerL1Error::Serialization(format!(
@@ -3346,7 +3363,7 @@ pub fn kick_player_internal(
     }
 
     if count_active_players(&table.seats) < MIN_PLAYERS_TO_START {
-        let _ = reset_for_next_hand(table, events);
+        reset_for_next_hand(table, events)?;
     }
     Ok(())
 }
@@ -4433,6 +4450,35 @@ mod tests {
         assert!(error.to_string().contains("chip_pool underflow"));
         assert_eq!(table, before, "failed kick refund must be atomic");
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_kick_player_nested_reset_failure_is_atomic() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = 10;
+        // A waiting seat is not counted as active, so kicking seat 0 triggers reset. Keep the
+        // addon pool deliberately inconsistent so reset fails after the kick candidate mutates.
+        table.seats[1].player = [0x02; 20];
+        table.seats[1].is_waiting = true;
+        table.seats[1].pending_addon = 5;
+        table.chip_pool = 10;
+        table.addon_pool = 4;
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events)
+            .expect_err("nested reset failure must propagate");
+
+        assert!(error.to_string().contains("pending addon pool underflow"));
+        assert_eq!(
+            table, before,
+            "nested reset failure must not commit the kick"
+        );
+        assert!(
+            events.is_empty(),
+            "failed kick must not emit partial events"
+        );
     }
 
     #[test]

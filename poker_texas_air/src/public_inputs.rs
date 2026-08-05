@@ -79,8 +79,8 @@ pub struct TexasPublicInputs {
     /// validators that need VM replay must call [`Self::require_dispatch_call`].
     pub dispatch_call: Option<DispatchCallPublicInput>,
     /// Verifier-issued cryptographic precompile binding for methods that carry
-    /// shuffle or reconstruction proofs. Production verification rejects a
-    /// missing binding for those AIRs.
+    /// shuffle, leave-layer, reveal-token, or reconstruction proofs. Production
+    /// verification rejects a missing binding for those AIRs.
     pub precompile_binding: Option<PrecompileCallBinding>,
     /// Verifier-reconstructed values of every original trace column in the
     /// replicated business row.

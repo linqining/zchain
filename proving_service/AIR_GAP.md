@@ -24,5 +24,8 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
   依赖 Orchestrator 的 canonical VM replay 与绑定的 trace row。
 - `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
   仍没有覆盖 DLEq layer removal 与可能的 settlement，入口保持 fail-closed。
+- stage-3 dual-proof package 已覆盖 `submit_shuffle_v2`、`leave_with_proof`、
+  `submit_player_reveal_tokens` 与 `submit_reconstruct_deck`；每个 child 仍由 host
+  原生重放密码学 verifier，这不是递归 verifier AIR。
 - 聚合器仅维护 descriptor 链，不验证 child proof；递归聚合生产入口保持 fail-closed。
 - 本地 receipt 链不等同于区块包含或共识锚定；调用方仍需提供经认证的任务来源与链端锚点。

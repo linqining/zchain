@@ -4,26 +4,34 @@ use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, SHUFFLE_PHASE_WAITING,
+    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, SHUFFLE_PHASE_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    self as texas_dispatch, SubmitReconstructDeckArgs, SubmitShuffleV2Args,
+    self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
+    SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealTokenState, ShuffleState,
+    TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reconstruction::{
     RECONSTRUCTION_V3_PROOF_LABEL, ReconstructProofV3,
 };
-use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
+use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
+use poker_protocol::zk_shuffle::transcript_ext::{
+    CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
+};
 use poker_texas_air::dual_proof::{
-    DUAL_PROOF_MAGIC, DUAL_PROOF_VERSION, DualProofBundle, prove_dual_proof, verify_dual_proof,
+    DUAL_PROOF_MAGIC, DUAL_PROOF_VERSION, DualProofBundle, dual_proof_from_archived,
+    prove_dual_proof, verify_dual_proof,
 };
 use poker_texas_air::method_kind::MethodKind;
+use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use rand::rngs::OsRng;
 
@@ -212,6 +220,144 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
     )
 }
 
+fn leave_task(nonce: u64) -> ProveTask {
+    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let input_cards: Vec<_> = (0..52)
+        .map(|i| {
+            let card = Bls12381Curve::hash_to_curve(
+                format!("dual-proof/leave/{nonce}/card/{i}").as_bytes(),
+            );
+            ElGamalCiphertextGeneric::encrypt(
+                &card,
+                &public_key,
+                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+            )
+        })
+        .collect();
+    let output_cards: Vec<_> = input_cards
+        .iter()
+        .map(|ciphertext| ElGamalCiphertextGeneric {
+            c1: ciphertext.c1,
+            c2: ciphertext.decrypt(&secret_key),
+        })
+        .collect();
+    let leave_proof = DLEqProof::<Bls12381Curve, LeaveKind>::prove(
+        &input_cards,
+        &output_cards,
+        &secret_key,
+        &public_key,
+        &mut utils::new_leave_transcript(),
+    );
+    let player = [0x61; 20];
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xF5; 20], nonce),
+        format!("leave-{nonce}"),
+        [0xC0; 20],
+        4,
+        50,
+        100,
+    );
+    table.call_seq = 4;
+    table.hand_id = 9;
+    table.version = 21;
+    table.seats[1].player = player;
+    table.seats[1].pk = ECPoint(public_key);
+    table.deck_state.encrypted = input_cards;
+    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.shuffle_state = ShuffleState {
+        phase: SHUFFLE_PHASE_WAITING,
+        current_shuffler: None,
+        pending_players: vec![],
+        completed_players: vec![1],
+    };
+    let raw_args = borsh::to_vec(&LeaveWithProofArgs {
+        seat_index: 1,
+        output_cards,
+        leave_proof,
+    })
+    .expect("leave args should encode");
+    dispatch_task(
+        table,
+        player,
+        texas_dispatch::selectors::leave_with_proof(),
+        raw_args,
+    )
+}
+
+fn reveal_task(nonce: u64) -> ProveTask {
+    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let encrypted_cards: Vec<_> = (0..2)
+        .map(|i| {
+            let card = Bls12381Curve::hash_to_curve(
+                format!("dual-proof/reveal/{nonce}/card/{i}").as_bytes(),
+            );
+            ElGamalCiphertextGeneric::encrypt(
+                &card,
+                &public_key,
+                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+            )
+        })
+        .collect();
+    let reveal_token = encrypted_cards[0].c1 * secret_key;
+    let proof = RevealTokenProof::prove(
+        &secret_key,
+        &public_key,
+        &encrypted_cards[0],
+        &reveal_token,
+        &mut OsRng,
+        &mut MerlinTranscript::new(REVEAL_TOKEN_PROOF_LABEL),
+    );
+    let player = [0x71; 20];
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xA6; 20], nonce),
+        format!("reveal-{nonce}"),
+        [0xC0; 20],
+        3,
+        50,
+        100,
+    );
+    table.call_seq = 7;
+    table.hand_id = 11;
+    table.version = 31;
+    table.seats[1].player = player;
+    table.seats[1].stack = 1_000;
+    table.seats[1].pk = ECPoint(public_key);
+    table.deck_state.encrypted = encrypted_cards;
+    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.reveal_token_state = RevealTokenState {
+        reveal_phase: REVEAL_PHASE_PREFLOP,
+        assignments: vec![
+            RevealAssignment {
+                encrypted_card_index: 0,
+                pending_players: vec![1],
+                reveal_tokens: vec![],
+                decrypted: false,
+            },
+            RevealAssignment {
+                encrypted_card_index: 1,
+                pending_players: vec![0],
+                reveal_tokens: vec![],
+                decrypted: false,
+            },
+        ],
+    };
+    let raw_args = borsh::to_vec(&SubmitRevealTokensArgs {
+        seat_index: 1,
+        assignment_indices: vec![0],
+        reveal_tokens: vec![ECPoint(reveal_token)],
+        proofs: vec![proof],
+    })
+    .expect("reveal args should encode");
+    dispatch_task(
+        table,
+        player,
+        texas_dispatch::selectors::submit_player_reveal_tokens(),
+        raw_args,
+    )
+}
+
 fn rebuild_wire(template: &DualProofBundle, proof_bytes: &[u8], request_bytes: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&DUAL_PROOF_MAGIC);
@@ -294,6 +440,29 @@ fn reconstruction_dual_package_roundtrips_and_verifies() {
     let decoded = DualProofBundle::decode(&encoded).expect("package should decode");
     let accepted = verify_dual_proof(&task, &decoded).expect("both halves should verify");
     assert_eq!(accepted.receipt().kind(), MethodKind::SubmitReconstructDeck);
+}
+
+#[test]
+fn leave_and_reveal_dual_packages_roundtrip_and_verify() {
+    for (task, expected_kind) in [
+        (leave_task(305), MethodKind::LeaveWithProof),
+        (reveal_task(306), MethodKind::SubmitPlayerRevealTokens),
+    ] {
+        let bundle = prove_dual_proof(&task).expect("crypto package should prove");
+        let encoded = bundle.encode().expect("crypto package should encode");
+        let decoded = DualProofBundle::decode(&encoded).expect("crypto package should decode");
+        let accepted = verify_dual_proof(&task, &decoded).expect("both proof halves should verify");
+        assert_eq!(accepted.receipt().kind(), expected_kind);
+
+        let archived = Orchestrator::new()
+            .prove_verify_and_archive_task(&task)
+            .expect("crypto method proof should archive");
+        let restored_bundle = dual_proof_from_archived(&task, &archived.archive)
+            .expect("archive should repackage as a dual proof");
+        let restored = verify_dual_proof(&task, &restored_bundle)
+            .expect("archive-derived dual proof should verify");
+        assert_eq!(restored.receipt().kind(), expected_kind);
+    }
 }
 
 #[test]

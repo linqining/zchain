@@ -56,8 +56,12 @@ fn full_hand_proves_complete_game() {
 
     let aggregate = plugin
         .aggregate_crypto_proofs()
-        .expect("连续 shuffle archive 应生成 host-verified outer aggregate");
-    assert_eq!(aggregate.children().len(), 2);
+        .expect("连续 shuffle/reveal archive 应生成 host-verified outer aggregate");
+    assert_eq!(
+        aggregate.children().len(),
+        6,
+        "preflop 的 2 次 shuffle 与 4 次 reveal 应形成一个连续 crypto run"
+    );
     assert_eq!(aggregate.hand_id(), 1);
 
     let has_dispatch_timing = report.steps.iter().any(|s| s.dispatch.as_micros() > 0);

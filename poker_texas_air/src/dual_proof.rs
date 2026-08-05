@@ -5,7 +5,7 @@
 //!
 //! 1. the Stwo method proof for the state transition and AIR digest columns;
 //! 2. the complete canonical poker-precompile request, including the
-//!    Bayer--Groth shuffle or Reconstruction V3 slot-OR proof.
+//!    shuffle, leave-layer DLEq, reveal-token, or Reconstruction V3 proof.
 //!
 //! The package does **not** carry a trusted AIR or trusted public inputs.
 //! Verification requires the independently authenticated [`ProveTask`], replays
@@ -25,6 +25,12 @@ use poker_protocol::precompile_abi::{
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
 
+use crate::airs::crypto::leave_with_proof::{
+    LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
+};
+use crate::airs::crypto::submit_player_reveal_tokens::{
+    SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
+};
 use crate::airs::crypto::submit_reconstruct_deck::{
     SubmitReconstructDeckAir, SubmitReconstructDeckInput, SubmitReconstructDeckRow,
 };
@@ -36,7 +42,8 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::validate_full_dispatch_task;
 use crate::precompile_binding::{
-    PokerPrecompileId, PrecompileCallBinding, precompile_call_context,
+    LEAVE_DLEQ_ABI_VERSION, LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding,
+    REVEAL_TOKEN_ABI_VERSION, RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{MethodInput, ProveTask};
@@ -223,7 +230,7 @@ impl VerifiedDualProof {
     }
 }
 
-/// Build both proof halves for a shuffle or reconstruction task.
+/// Build both proof halves for a supported crypto task.
 ///
 /// The task is replayed before proof generation. Other method kinds are
 /// rejected because they do not yet have a stage-3 poker-precompile binding.
@@ -290,6 +297,57 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 request_bytes,
             )
         }
+        PreparedMethod::Leave {
+            air,
+            mut public_inputs,
+            row,
+            request_bytes,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let trace = gen_method_trace(
+                LeaveWithProofAir::num_columns(),
+                &row_values,
+                &LeaveWithProofRow::padding().to_vec(),
+            )?;
+            let proof = prove_method(&trace, air, LeaveWithProofAir::num_columns(), public_inputs)?;
+            bundle_from_stark(
+                MethodKind::LeaveWithProof,
+                PokerPrecompileId::DleqLeave,
+                LEAVE_DLEQ_ABI_VERSION,
+                &proof.stark_proof,
+                request_bytes,
+            )
+        }
+        PreparedMethod::Reveal {
+            air,
+            mut public_inputs,
+            row,
+            request_bytes,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let trace = gen_method_trace(
+                SubmitPlayerRevealTokensAir::num_columns(),
+                &row_values,
+                &SubmitPlayerRevealTokensRow::padding().to_vec(),
+            )?;
+            let proof = prove_method(
+                &trace,
+                air,
+                SubmitPlayerRevealTokensAir::num_columns(),
+                public_inputs,
+            )?;
+            bundle_from_stark(
+                MethodKind::SubmitPlayerRevealTokens,
+                PokerPrecompileId::RevealToken,
+                REVEAL_TOKEN_ABI_VERSION,
+                &proof.stark_proof,
+                request_bytes,
+            )
+        }
     }
 }
 
@@ -329,6 +387,26 @@ pub fn dual_proof_from_archived(
                 RECONSTRUCTION_V3_ABI_VERSION,
                 request_bytes,
                 SubmitReconstructDeckAir::num_columns(),
+                air.log_size,
+            ),
+            PreparedMethod::Leave {
+                request_bytes, air, ..
+            } => (
+                MethodKind::LeaveWithProof,
+                PokerPrecompileId::DleqLeave,
+                LEAVE_DLEQ_ABI_VERSION,
+                request_bytes,
+                LeaveWithProofAir::num_columns(),
+                air.log_size,
+            ),
+            PreparedMethod::Reveal {
+                request_bytes, air, ..
+            } => (
+                MethodKind::SubmitPlayerRevealTokens,
+                PokerPrecompileId::RevealToken,
+                REVEAL_TOKEN_ABI_VERSION,
+                request_bytes,
+                SubmitPlayerRevealTokensAir::num_columns(),
                 air.log_size,
             ),
         };
@@ -418,6 +496,52 @@ pub fn verify_dual_proof(
                 precompile_binding: binding,
             })
         }
+        PreparedMethod::Leave {
+            air,
+            mut public_inputs,
+            row,
+            binding,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let proof = MethodProof {
+                stark_proof,
+                air: air.clone(),
+                log_size: air.log_size,
+                num_columns: LeaveWithProofAir::num_columns(),
+                public_inputs: public_inputs.clone(),
+            };
+            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            Ok(VerifiedDualProof {
+                receipt,
+                precompile_binding: binding,
+            })
+        }
+        PreparedMethod::Reveal {
+            air,
+            mut public_inputs,
+            row,
+            binding,
+            ..
+        } => {
+            let row_values = row.to_vec();
+            public_inputs.bind_expected_trace_row(&row_values)?;
+            let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
+            let proof = MethodProof {
+                stark_proof,
+                air: air.clone(),
+                log_size: air.log_size,
+                num_columns: SubmitPlayerRevealTokensAir::num_columns(),
+                public_inputs: public_inputs.clone(),
+            };
+            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
+            Ok(VerifiedDualProof {
+                receipt,
+                precompile_binding: binding,
+            })
+        }
     }
 }
 
@@ -433,6 +557,20 @@ enum PreparedMethod {
         air: SubmitReconstructDeckAir,
         public_inputs: TexasPublicInputs,
         row: SubmitReconstructDeckRow,
+        binding: PrecompileCallBinding,
+        request_bytes: Vec<u8>,
+    },
+    Leave {
+        air: LeaveWithProofAir,
+        public_inputs: TexasPublicInputs,
+        row: LeaveWithProofRow,
+        binding: PrecompileCallBinding,
+        request_bytes: Vec<u8>,
+    },
+    Reveal {
+        air: SubmitPlayerRevealTokensAir,
+        public_inputs: TexasPublicInputs,
+        row: SubmitPlayerRevealTokensRow,
         binding: PrecompileCallBinding,
         request_bytes: Vec<u8>,
     },
@@ -643,6 +781,167 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 request_bytes,
             })
         }
+        MethodKind::LeaveWithProof => {
+            let MethodInput::LeaveWithProof {
+                seat_index,
+                raw_args,
+            } = &task.method_input
+            else {
+                return Err(TexasAirError::SpecViolation(
+                    "leave_with_proof task has the wrong MethodInput variant".into(),
+                ));
+            };
+            let args: poker_l1::vm::contracts::texas_poker::dispatch::LeaveWithProofArgs =
+                borsh::from_slice(raw_args).map_err(|error| {
+                    TexasAirError::SerializationError(format!(
+                        "leave_with_proof raw args borsh: {error}"
+                    ))
+                })?;
+            if args.seat_index != *seat_index {
+                return Err(TexasAirError::SpecViolation(
+                    "leave_with_proof seat differs between task fields".into(),
+                ));
+            }
+            let player_pk = task
+                .pre_table
+                .seats
+                .get(usize::from(*seat_index))
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation(
+                        "leave_with_proof seat is outside the canonical pre-table".into(),
+                    )
+                })?
+                .pk;
+            let call_context = call_context(task, *seat_index, &public_inputs);
+            let expected_request = LeaveDleqVerifyRequest::new(
+                call_context,
+                task.pre_table.deck_state.encrypted.clone(),
+                args.output_cards,
+                player_pk,
+                args.leave_proof,
+            );
+            let expected_bytes = expected_request.encode()?;
+            let request_bytes = require_expected_request(supplied_request, expected_bytes)?;
+            let request = LeaveDleqVerifyRequest::decode(&request_bytes)?;
+            let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
+            let input = LeaveWithProofInput {
+                seat_index: *seat_index,
+                leave_kind: 0,
+                shuffle_phase: task.pre_table.shuffle_state.phase,
+                precompile: binding.air_binding(),
+            };
+            let post_completed_count = u8::try_from(
+                task.post_table.shuffle_state.completed_players.len(),
+            )
+            .map_err(|_| {
+                TexasAirError::SpecViolation(
+                    "leave_with_proof completed player count exceeds u8".into(),
+                )
+            })?;
+            let row = LeaveWithProofRow::active(
+                &input,
+                state_root_to_air_limbs(pre_root),
+                state_root_to_air_limbs(post_root),
+                task.table_id,
+                task.hand_id,
+                task.call_seq,
+                task.pre_table.version,
+                task.post_table.version,
+                post_completed_count,
+            );
+            let air = LeaveWithProofAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: state_root_to_air_limbs(pre_root),
+                post_state_root: state_root_to_air_limbs(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version: task.pre_table.version,
+                post_version: task.post_table.version,
+            };
+            public_inputs.precompile_binding = Some(binding.clone());
+            Ok(PreparedMethod::Leave {
+                air,
+                public_inputs,
+                row,
+                binding,
+                request_bytes,
+            })
+        }
+        MethodKind::SubmitPlayerRevealTokens => {
+            let MethodInput::SubmitPlayerRevealTokens {
+                seat_index,
+                raw_args,
+            } = &task.method_input
+            else {
+                return Err(TexasAirError::SpecViolation(
+                    "submit_player_reveal_tokens task has the wrong MethodInput variant".into(),
+                ));
+            };
+            let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
+                borsh::from_slice(raw_args).map_err(|error| {
+                    TexasAirError::SerializationError(format!(
+                        "submit_player_reveal_tokens raw args borsh: {error}"
+                    ))
+                })?;
+            if args.seat_index != *seat_index {
+                return Err(TexasAirError::SpecViolation(
+                    "submit_player_reveal_tokens seat differs between task fields".into(),
+                ));
+            }
+            let call_context = call_context(task, *seat_index, &public_inputs);
+            let expected_request =
+                RevealTokenVerifyRequest::from_dispatch(call_context, &task.pre_table, &args)?;
+            let expected_bytes = expected_request.encode()?;
+            let request_bytes = require_expected_request(supplied_request, expected_bytes)?;
+            let request = RevealTokenVerifyRequest::decode(&request_bytes)?;
+            let binding = PrecompileCallBinding::verify_reveal_tokens(&request)?;
+            let input = SubmitPlayerRevealTokensInput {
+                seat_index: *seat_index,
+                reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
+                version_increment: reveal_version_increment(task)?,
+                precompile: binding.air_binding(),
+            };
+            let post_revealed_count = u8::try_from(
+                task.post_table.reveal_token_state.assignments.len(),
+            )
+            .map_err(|_| {
+                TexasAirError::SpecViolation(
+                    "submit_player_reveal_tokens assignment count exceeds u8".into(),
+                )
+            })?;
+            let row = SubmitPlayerRevealTokensRow::active(
+                &input,
+                state_root_to_air_limbs(pre_root),
+                state_root_to_air_limbs(post_root),
+                task.table_id,
+                task.hand_id,
+                task.call_seq,
+                task.pre_table.version,
+                task.post_table.version,
+                post_revealed_count,
+            );
+            let air = SubmitPlayerRevealTokensAir {
+                log_size: MIN_LOG_SIZE,
+                input,
+                pre_state_root: state_root_to_air_limbs(pre_root),
+                post_state_root: state_root_to_air_limbs(post_root),
+                table_id: task.table_id,
+                hand_id: task.hand_id,
+                call_seq: task.call_seq,
+                pre_version: task.pre_table.version,
+                post_version: task.post_table.version,
+            };
+            public_inputs.precompile_binding = Some(binding.clone());
+            Ok(PreparedMethod::Reveal {
+                air,
+                public_inputs,
+                row,
+                binding,
+                request_bytes,
+            })
+        }
         other => Err(TexasAirError::NotImplemented(format!(
             "{} has no stage-3 dual proof package",
             other.method_name()
@@ -731,6 +1030,14 @@ fn validate_route(
             MethodKind::SubmitReconstructDeck,
             PokerPrecompileId::ReconstructionV3,
             RECONSTRUCTION_V3_ABI_VERSION
+        ) | (
+            MethodKind::LeaveWithProof,
+            PokerPrecompileId::DleqLeave,
+            LEAVE_DLEQ_ABI_VERSION
+        ) | (
+            MethodKind::SubmitPlayerRevealTokens,
+            PokerPrecompileId::RevealToken,
+            REVEAL_TOKEN_ABI_VERSION
         )
     );
     if !valid {
@@ -739,6 +1046,36 @@ fn validate_route(
         ));
     }
     Ok(())
+}
+
+fn reveal_version_increment(task: &ProveTask) -> TexasAirResult<u8> {
+    use poker_l1::vm::contracts::texas_poker::constants::{
+        REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
+    };
+
+    let completed_showdown = task.post_table.round_state == ROUND_WAITING
+        && task.post_table.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
+        && task.post_table.pot == 0;
+    let increment = if completed_showdown {
+        if task.pre_table.round_state != ROUND_SHOWDOWN
+            || task.pre_table.reveal_token_state.reveal_phase != REVEAL_PHASE_SHOWDOWN
+        {
+            return Err(TexasAirError::UnsupportedBettingTransition(
+                "submit_player_reveal_tokens reset without a showdown reveal pre-state".into(),
+            ));
+        }
+        2
+    } else {
+        1
+    };
+    let expected_post_version = task.pre_table.version.saturating_add(u64::from(increment));
+    if task.post_table.version != expected_post_version {
+        return Err(TexasAirError::SpecViolation(format!(
+            "submit_player_reveal_tokens: expected version {expected_post_version} after {increment} native bump(s), got {}",
+            task.post_table.version
+        )));
+    }
+    Ok(increment)
 }
 
 fn validate_lengths(proof_len: usize, request_len: usize) -> TexasAirResult<()> {
