@@ -137,20 +137,30 @@ impl_validated_texas_air!(
     MethodKind::CreateTable,
     lifecycle::create_table::validate_public_inputs
 );
-impl_texas_air!(lifecycle::join_table::JoinTableAir, MethodKind::JoinTable);
-impl_texas_air!(
-    lifecycle::leave_table::LeaveTableAir,
-    MethodKind::LeaveTable
+impl_validated_texas_air!(
+    lifecycle::join_table::JoinTableAir,
+    MethodKind::JoinTable,
+    lifecycle::validation::validate_join_table
 );
-impl_texas_air!(lifecycle::start_hand::StartHandAir, MethodKind::StartHand);
+impl_validated_texas_air!(
+    lifecycle::leave_table::LeaveTableAir,
+    MethodKind::LeaveTable,
+    lifecycle::validation::validate_leave_table
+);
+impl_validated_texas_air!(
+    lifecycle::start_hand::StartHandAir,
+    MethodKind::StartHand,
+    lifecycle::validation::validate_start_hand
+);
 impl_validated_texas_air!(
     lifecycle::tick::TickAir,
     MethodKind::Tick,
     lifecycle::tick::validate_public_inputs
 );
-impl_texas_air!(
+impl_validated_texas_air!(
     lifecycle::reset_for_next_hand::ResetForNextHandAir,
-    MethodKind::ResetForNextHand
+    MethodKind::ResetForNextHand,
+    lifecycle::validation::validate_reset_for_next_hand
 );
 impl_validated_texas_air!(
     actions::fold::FoldAir,

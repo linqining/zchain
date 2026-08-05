@@ -87,7 +87,7 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{PrecompileCallBinding, precompile_call_context};
 use crate::proof_archive::ArchivedMethodProof;
-use crate::prove_task::{DispatchOutput, MethodInput, ProveTask, dispatch_call_digest};
+use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
 use crate::prover::{MethodProof, prove_method};
 use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
 use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
@@ -261,7 +261,7 @@ impl Orchestrator {
         let pre_root = StateRoot(starknet_crypto::poseidon_hash_many(&pre_image));
         let post_root = StateRoot(starknet_crypto::poseidon_hash_many(&post_image));
         // 完整公开输入（preimage + 重算 root + 元数据），用于 state_root 绑定。
-        let pi = crate::public_inputs::TexasPublicInputs {
+        let mut pi = crate::public_inputs::TexasPublicInputs {
             pre_image,
             post_image,
             pre_state_root: pre_root,
@@ -272,14 +272,16 @@ impl Orchestrator {
             call_seq: task.call_seq,
             pre_version: task.pre_table.version,
             post_version: task.post_table.version,
-            dispatch_call_digest: dispatch_call_digest(
-                &task.context,
-                &task.selector,
-                &task.raw_args,
-            )?,
+            dispatch_call_digest: [0u8; 32],
+            dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
         };
+        pi.bind_dispatch_call(
+            task.context.clone(),
+            task.selector,
+            task.raw_args.clone(),
+        )?;
         let summary = ProvenTask {
             method_kind: task.method_kind,
             pre_state_root: pre_root,
@@ -797,6 +799,7 @@ impl Orchestrator {
     ) -> TexasAirResult<B::Output> {
         let input = StartHandInput {
             active_count: count_active_occupied(&task.pre_table),
+            new_button: task.post_table.button,
             ante_mode: task.post_table.ante_mode,
             ante_amount: task.post_table.ante_amount,
             ante_collected: task.post_table.ante_collected,
@@ -910,7 +913,7 @@ impl Orchestrator {
             ));
         };
         let input = ResetForNextHandInput {
-            shuffle_phase: task.post_table.shuffle_state.phase,
+            shuffle_phase: task.pre_table.shuffle_state.phase,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_r = task.pre_table.round_state;
@@ -3293,8 +3296,18 @@ mod tests {
             task1.pre_table.version,
             task2.post_table.version,
             vec![
-                dispatch_call_digest(&task1.context, &task1.selector, &task1.raw_args).unwrap(),
-                dispatch_call_digest(&task2.context, &task2.selector, &task2.raw_args).unwrap(),
+                crate::prove_task::dispatch_call_digest(
+                    &task1.context,
+                    &task1.selector,
+                    &task1.raw_args,
+                )
+                .unwrap(),
+                crate::prove_task::dispatch_call_digest(
+                    &task2.context,
+                    &task2.selector,
+                    &task2.raw_args,
+                )
+                .unwrap(),
             ],
         )
         .unwrap();

@@ -1,14 +1,26 @@
 //! Regression tests for verifier-trusted complete business-row binding.
 
+use blstrs::G1Projective;
+use group::Group;
 use poker_l1::object_model::ObjectID;
+use poker_l1::signature::TaggedPubkey;
+use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 use poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
+use poker_l1::vm::contracts::texas_poker::dispatch::{
+    self as texas_dispatch, JoinTableArgs, LeaveTableArgs,
+};
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+use poker_protocol::crypto::types::ECPoint;
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
 use poker_texas_air::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use poker_texas_air::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
 use poker_texas_air::airs::lifecycle::create_table::CreateTableInput;
+use poker_texas_air::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
+use poker_texas_air::airs::lifecycle::leave_table::{
+    LeaveTableAir, LeaveTableInput, LeaveTableRow,
+};
 use poker_texas_air::airs::{AirStatement, TexasAir};
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::{prove_create_table, prove_method};
@@ -381,6 +393,229 @@ fn make_funds_pre_table() -> TexasPokerTable {
     table.seats[0].stack = 1_000;
     table.chip_pool = 1_000;
     table
+}
+
+fn dispatch_context(caller: [u8; 20]) -> DispatchContext {
+    DispatchContext {
+        caller,
+        caller_pubkey: TaggedPubkey {
+            tag: 0,
+            raw: vec![0xA5; 32],
+        },
+        chain_id: poker_l1::DEFAULT_CHAIN_ID,
+        block_height: 100,
+        block_timestamp: 1_000_000,
+    }
+}
+
+#[test]
+fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
+    let player = [0x51; 20];
+    let context = dispatch_context(player);
+    let args = JoinTableArgs {
+        player,
+        buy_in: 500,
+        pk: ECPoint(G1Projective::generator()),
+    };
+    let raw_args = borsh::to_vec(&args).unwrap();
+    let mut pre = TexasPokerTable::new(
+        ObjectID::new([0xE1; 20], 23),
+        "canonical-join".to_owned(),
+        EMPTY_PLAYER,
+        6,
+        50,
+        100,
+    );
+    pre.hand_id = 4;
+    pre.call_seq = 9;
+    let mut canonical_post = pre.clone();
+    texas_dispatch::dispatch(
+        &context,
+        &mut canonical_post,
+        &texas_dispatch::selectors::join_table(),
+        &raw_args,
+    )
+    .unwrap();
+    let seat_index = pre.find_empty_seat().unwrap();
+    let input = JoinTableInput {
+        seat_index,
+        buy_in: args.buy_in,
+        player_addr: player,
+    };
+
+    // The row remains internally valid, while the committed post table changes
+    // an unrelated field. Transcript binding alone cannot prove that the roots
+    // came from this dispatch; verifier-side replay must reject it.
+    let mut unrelated_post = canonical_post.clone();
+    unrelated_post.name = "unrelated-join-post".to_owned();
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &unrelated_post,
+        MethodKind::JoinTable,
+        pre.id.creation_nonce,
+        unrelated_post.hand_id,
+        unrelated_post.call_seq,
+    )
+    .unwrap();
+    public_inputs
+        .bind_dispatch_call(
+            context,
+            texas_dispatch::selectors::join_table(),
+            raw_args,
+        )
+        .unwrap();
+    let row = JoinTableRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        canonical_post.version,
+        pre.big_blind,
+        pre.chip_pool,
+        pre.addon_pool,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let trace = gen_method_trace(
+        JoinTableAir::num_columns(),
+        &row.to_vec(),
+        &JoinTableRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = JoinTableAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        JoinTableAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("unrelated join roots and row are intentionally AIR-consistent");
+
+    let error = verify_method_against(proof, air, &public_inputs)
+        .expect_err("production join verification must replay the exact dispatch");
+    assert!(error.to_string().contains("native VM dispatch replay"));
+}
+
+#[test]
+fn production_verifier_rejects_leave_row_attached_to_unrelated_post_table() {
+    let player = [0x61; 20];
+    let context = dispatch_context(player);
+    let join_args = JoinTableArgs {
+        player,
+        buy_in: 700,
+        pk: ECPoint(G1Projective::generator()),
+    };
+    let mut pre = TexasPokerTable::new(
+        ObjectID::new([0xE2; 20], 24),
+        "canonical-leave".to_owned(),
+        EMPTY_PLAYER,
+        6,
+        50,
+        100,
+    );
+    pre.hand_id = 5;
+    pre.call_seq = 12;
+    texas_dispatch::dispatch(
+        &context,
+        &mut pre,
+        &texas_dispatch::selectors::join_table(),
+        &borsh::to_vec(&join_args).unwrap(),
+    )
+    .unwrap();
+
+    let seat_index = 0;
+    let leave_args = LeaveTableArgs { seat_index };
+    let raw_args = borsh::to_vec(&leave_args).unwrap();
+    let mut canonical_post = pre.clone();
+    texas_dispatch::dispatch(
+        &context,
+        &mut canonical_post,
+        &texas_dispatch::selectors::leave_table(),
+        &raw_args,
+    )
+    .unwrap();
+    let pre_seat = pre.seats[usize::from(seat_index)].clone();
+    let input = LeaveTableInput { seat_index };
+
+    let mut unrelated_post = canonical_post.clone();
+    unrelated_post.name = "unrelated-leave-post".to_owned();
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &unrelated_post,
+        MethodKind::LeaveTable,
+        pre.id.creation_nonce,
+        unrelated_post.hand_id,
+        unrelated_post.call_seq,
+    )
+    .unwrap();
+    public_inputs
+        .bind_dispatch_call(
+            context,
+            texas_dispatch::selectors::leave_table(),
+            raw_args,
+        )
+        .unwrap();
+    let row = LeaveTableRow::active(
+        &input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        canonical_post.version,
+        pre_seat.stack,
+        pre_seat.pending_addon,
+        pre.chip_pool,
+        canonical_post.chip_pool,
+        pre.addon_pool,
+        canonical_post.addon_pool,
+    );
+    public_inputs
+        .bind_expected_trace_row(&row.to_vec())
+        .unwrap();
+    let trace = gen_method_trace(
+        LeaveTableAir::num_columns(),
+        &row.to_vec(),
+        &LeaveTableRow::padding().to_vec(),
+    )
+    .unwrap();
+    let air = LeaveTableAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        LeaveTableAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("unrelated leave roots and row are intentionally AIR-consistent");
+
+    let error = verify_method_against(proof, air, &public_inputs)
+        .expect_err("production leave verification must replay the exact dispatch");
+    assert!(error.to_string().contains("native VM dispatch replay"));
 }
 
 #[test]

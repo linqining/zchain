@@ -37,7 +37,7 @@ use crate::orchestrator::validate_full_dispatch_task;
 use crate::precompile_binding::{
     PokerPrecompileId, PrecompileCallBinding, precompile_call_context,
 };
-use crate::prove_task::{MethodInput, ProveTask, dispatch_call_digest};
+use crate::prove_task::{MethodInput, ProveTask};
 use crate::prover::{MethodProof, prove_method};
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
@@ -397,10 +397,16 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
         call_seq: task.call_seq,
         pre_version: task.pre_table.version,
         post_version: task.post_table.version,
-        dispatch_call_digest: dispatch_call_digest(&task.context, &task.selector, &task.raw_args)?,
+        dispatch_call_digest: [0u8; 32],
+        dispatch_call: None,
         precompile_binding: None,
         expected_trace_row: None,
     };
+    public_inputs.bind_dispatch_call(
+        task.context.clone(),
+        task.selector,
+        task.raw_args.clone(),
+    )?;
 
     match task.method_kind {
         MethodKind::SubmitShuffleV2 => {

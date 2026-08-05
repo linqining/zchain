@@ -10,10 +10,28 @@ use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 
 use crate::airs::AirStatement;
-use crate::error::TexasAirResult;
+use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::PrecompileCallBinding;
+use crate::prove_task::dispatch_call_digest;
 use crate::state_root::{StateRoot, field_element_to_u32_words, state_root_to_air_limbs};
+
+/// Exact VM dispatch call whose digest is part of a method statement.
+///
+/// The call preimage is verifier auxiliary data rather than an additional
+/// Fiat--Shamir field: [`TexasPublicInputs::require_dispatch_call`] recomputes
+/// [`TexasPublicInputs::dispatch_call_digest`] before any canonical VM replay.
+/// This lets method validators recover permissions and opaque arguments while
+/// consensus anchors continue authenticating one fixed-size digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchCallPublicInput {
+    /// Consensus/execution context supplied to the VM dispatch.
+    pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
+    /// Exact routed Texas Poker selector.
+    pub selector: [u8; 32],
+    /// Exact Borsh argument bytes consumed by the VM.
+    pub raw_args: Vec<u8>,
+}
 
 /// 单方法 proof 的**完整公开输入**——用于把证明绑定到 state_root（soundness 关键）。
 ///
@@ -54,6 +72,12 @@ pub struct TexasPublicInputs {
     /// Digest of the replayed VM dispatch context + selector + raw args.
     /// Task provenance is authenticated only by an external consensus anchor.
     pub dispatch_call_digest: [u8; 32],
+    /// Exact dispatch-call preimage used by production canonical validators.
+    ///
+    /// Synthetic mechanism tests may leave this absent because their verifier
+    /// entry point deliberately skips canonical table validation. Production
+    /// validators that need VM replay must call [`Self::require_dispatch_call`].
+    pub dispatch_call: Option<DispatchCallPublicInput>,
     /// Verifier-issued cryptographic precompile binding for methods that carry
     /// shuffle or reconstruction proofs. Production verification rejects a
     /// missing binding for those AIRs.
@@ -103,6 +127,7 @@ impl TexasPublicInputs {
             pre_version: pre_table.version,
             post_version: post_table.version,
             dispatch_call_digest: [0u8; 32],
+            dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
         })
@@ -135,6 +160,7 @@ impl TexasPublicInputs {
             pre_version: 0,
             post_version: 1,
             dispatch_call_digest: [0u8; 32],
+            dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
         }
@@ -182,8 +208,6 @@ impl TexasPublicInputs {
     /// is present, its width differs from `num_columns`, or any word is not a
     /// canonical M31 representative.
     pub fn require_expected_trace_row(&self, num_columns: usize) -> TexasAirResult<Vec<M31>> {
-        use crate::error::TexasAirError;
-
         let row = self.expected_trace_row.as_ref().ok_or_else(|| {
             TexasAirError::SpecViolation(
                 "missing verifier-trusted expected trace row (fail-closed)".into(),
@@ -207,6 +231,52 @@ impl TexasPublicInputs {
                 }
             })
             .collect()
+    }
+
+    /// Bind the exact VM dispatch-call preimage and install its canonical digest.
+    ///
+    /// Rebinding to different call bytes is rejected. The digest, rather than
+    /// this potentially large preimage, is mixed into the proof transcript and
+    /// authenticated by consensus anchors.
+    pub fn bind_dispatch_call(
+        &mut self,
+        context: poker_l1::vm::contracts::dispatch::DispatchContext,
+        selector: [u8; 32],
+        raw_args: Vec<u8>,
+    ) -> TexasAirResult<()> {
+        let digest = dispatch_call_digest(&context, &selector, &raw_args)?;
+        let call = DispatchCallPublicInput {
+            context,
+            selector,
+            raw_args,
+        };
+        if let Some(existing) = &self.dispatch_call {
+            if existing != &call || self.dispatch_call_digest != digest {
+                return Err(TexasAirError::SpecViolation(
+                    "attempted to replace an existing dispatch-call binding".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.dispatch_call_digest = digest;
+        self.dispatch_call = Some(call);
+        Ok(())
+    }
+
+    /// Return the exact dispatch call after recomputing and checking its digest.
+    pub fn require_dispatch_call(&self) -> TexasAirResult<&DispatchCallPublicInput> {
+        let call = self.dispatch_call.as_ref().ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "missing verifier-trusted dispatch-call preimage (fail-closed)".into(),
+            )
+        })?;
+        let digest = dispatch_call_digest(&call.context, &call.selector, &call.raw_args)?;
+        if digest != self.dispatch_call_digest {
+            return Err(TexasAirError::SpecViolation(
+                "dispatch-call preimage does not match the transcript-bound digest".into(),
+            ));
+        }
+        Ok(call)
     }
 
     /// 构造一个固定的、自洽的「占位」公开输入（机制测试用）。
@@ -426,6 +496,7 @@ mod tests {
             pre_version: 0,
             post_version: 1,
             dispatch_call_digest: [0u8; 32],
+            dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
         };

@@ -47,6 +47,8 @@ pub mod cols {
 pub struct StartHandInput {
     /// 活跃玩家数。
     pub active_count: u8,
+    /// 移动后的庄家座位。
+    pub new_button: u8,
     /// Ante 模式（0=NONE, 1=NORMAL, 2=BBA）。
     pub ante_mode: u8,
     /// Ante 金额。
@@ -99,7 +101,7 @@ impl FrameworkEval for StartHandAir {
         let is_active = common.is_active.clone();
 
         let input_active_count = eval.next_trace_mask();
-        let _output_new_button = eval.next_trace_mask();
+        let output_new_button = eval.next_trace_mask();
         let output_new_round_state = eval.next_trace_mask();
         let output_ante_mode = eval.next_trace_mask();
         let output_ante_amount_0 = eval.next_trace_mask();
@@ -127,6 +129,9 @@ impl FrameworkEval for StartHandAir {
             is_active.clone()
                 * (input_active_count_prod.clone() * input_active_count_inv.clone() - one),
         );
+        // 约束 2c：移动后的 button 与 verifier-trusted 输入一致。
+        let expected_button: E::F = M31::from(u32::from(self.input.new_button)).into();
+        eval.add_constraint(is_active.clone() * (output_new_button - expected_button));
         // 约束 3：output_new_round_state == ROUND_WAITING (常量)
         // 合约 start_hand 后 round_state 仍为 ROUND_WAITING=0；真正进入 shuffle 由
         // shuffle_state.phase 表达（SHUFFLE_PHASE_BEFORE_PREFLOP=3），不属于 round_state。
@@ -219,7 +224,7 @@ impl StartHandRow {
                 0,
             ),
             input_active_count: u8_to_m31(input.active_count),
-            output_new_button: ZERO,                 // 由 pre_button + 1 计算
+            output_new_button: u8_to_m31(input.new_button),
             output_new_round_state: M31::from(0u32), // ROUND_WAITING
             output_ante_mode: u8_to_m31(input.ante_mode),
             output_ante_amount_0: M31::from((input.ante_amount & 0xFFFF) as u32),

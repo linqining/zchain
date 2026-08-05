@@ -44,7 +44,7 @@ pub mod cols {
 /// `reset_for_next_hand` 输入参数。
 #[derive(Debug, Clone, Default)]
 pub struct ResetForNextHandInput {
-    /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {1,2,3}）。
+    /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {0,1,2,3}）。
     pub shuffle_phase: u8,
 }
 
@@ -121,15 +121,16 @@ impl FrameworkEval for ResetForNextHandAir {
                 * (input_shuffle_phase_q.clone()
                     - input_shuffle_phase.clone() * input_shuffle_phase.clone()),
         );
-        // 约束（Gap 6 part 3）：shuffle_phase ∈ {1,2,3}（非 NONE=0）。
-        // vanishing (phase-1)(phase-2)(phase-3) = phase³-6phase²+11phase-6
-        // 经 q=phase² 展开为 degree ≤ 2：(phase·q) - 6·q + 11·phase - 6 == 0
+        // 约束（Gap 6 part 3）：shuffle_phase ∈ {0,1,2,3}。
+        // VM 允许显式重置尚未开局的 WAITING/NONE 桌台，因此不能排除 0。
+        // vanishing phase(phase-1)(phase-2)(phase-3)
+        // = phase⁴-6phase³+11phase²-6phase；经 q=phase² 展开为 degree ≤ 2。
         let six: E::F = M31::from(6u32).into();
         let eleven: E::F = M31::from(11u32).into();
-        let vp = (input_shuffle_phase.clone() * input_shuffle_phase_q.clone())
-            - six.clone() * input_shuffle_phase_q.clone()
-            + eleven * input_shuffle_phase.clone()
-            - six;
+        let vp = input_shuffle_phase_q.clone() * input_shuffle_phase_q.clone()
+            - six * input_shuffle_phase.clone() * input_shuffle_phase_q.clone()
+            + eleven * input_shuffle_phase_q.clone()
+            - M31::from(6u32).into() * input_shuffle_phase.clone();
         eval.add_constraint(is_active.clone() * vp);
 
         eval
