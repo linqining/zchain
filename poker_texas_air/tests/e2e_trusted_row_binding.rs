@@ -97,6 +97,7 @@ fn generic_fixture() -> (
             call_seq: 9,
             pre_version: 0,
             post_version: 1,
+            component: None,
         },
     };
     let proof = prove_method(&trace, air.clone(), 2, public_inputs.clone())
@@ -570,6 +571,7 @@ fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
         seat_index: 2,
         refund: pre.seats[2].stack,
         kicked_bet: pre.seats[2].bet,
+        version_increment: 1,
     };
 
     let mut unrelated_post = canonical_post.clone();

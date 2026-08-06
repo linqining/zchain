@@ -17,6 +17,8 @@ use super::seat_update::{COMPOSITION_SEATS, SeatUpdatePlan};
 use super::settlement::{SettlementKind, SettlementStagePlan};
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
+use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
+use crate::public_inputs::TexasPublicInputs;
 use crate::settlement_binding::SettlementPlanBinding;
 
 /// Encoding version for the composite plan and all stage boundary commitments.
@@ -26,6 +28,26 @@ const PLAN_DOMAIN: &[u8] = b"zchain.texas.composite-transition-plan.v1";
 const TABLE_DOMAIN: &[u8] = b"zchain.texas.composite-table-image.v1";
 const BOUNDARY_DOMAIN: &[u8] = b"zchain.texas.composite-stage-boundary.v1";
 const NO_SHOWDOWN_DOMAIN: &[u8] = b"zchain.texas.no-showdown-settlement.v1";
+const RESET_ONLY_DOMAIN: &[u8] = b"zchain.texas.reset-only.v1";
+
+/// Whether a method is normalized through the four-stage composition pipeline.
+#[must_use]
+pub const fn supports_composite_proof(method_kind: MethodKind) -> bool {
+    matches!(
+        method_kind,
+        MethodKind::Fold
+            | MethodKind::Check
+            | MethodKind::Call
+            | MethodKind::Raise
+            | MethodKind::Bet
+            | MethodKind::AutoFold
+            | MethodKind::ForceFold
+            | MethodKind::KickPlayer
+            | MethodKind::ResetForNextHand
+            | MethodKind::FoldWithProof
+            | MethodKind::SubmitPlayerRevealTokens
+    )
+}
 
 /// Canonical order of independently composable transition components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -65,6 +87,44 @@ pub struct StageLink {
     pub input_digest: [u8; 32],
     /// Commitment at the stage output boundary.
     pub output_digest: [u8; 32],
+}
+
+/// Public statement that distinguishes one component proof inside a composite transition.
+///
+/// The complete value is mixed into Fiat--Shamir independently of the trusted trace row, so
+/// proofs for different stages or plans cannot be exchanged even when their table roots match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentStatement {
+    /// Composite plan ABI version.
+    pub plan_version: u8,
+    /// Component discriminator.
+    pub stage_kind: StageKind,
+    /// Fixed component position in the four-stage pipeline.
+    pub stage_index: u8,
+    /// Whether the component performs a business transition.
+    pub active: bool,
+    /// Digest of the complete canonical transition plan.
+    pub plan_digest: [u8; 32],
+    /// Input projection commitment for this component.
+    pub input_digest: [u8; 32],
+    /// Output projection commitment for this component.
+    pub output_digest: [u8; 32],
+}
+
+impl ComponentStatement {
+    /// Construct the public statement carried by one canonical stage link.
+    #[must_use]
+    pub const fn from_link(link: &StageLink) -> Self {
+        Self {
+            plan_version: COMPOSITE_PLAN_VERSION,
+            stage_kind: link.stage_kind,
+            stage_index: link.stage_index,
+            active: link.active,
+            plan_digest: link.plan_digest,
+            input_digest: link.input_digest,
+            output_digest: link.output_digest,
+        }
+    }
 }
 
 /// Verifier-owned projection of one atomic dispatch into four composable stages.
@@ -283,6 +343,95 @@ pub fn derive_composite_transition_plan(
     };
     plan.validate_composition()?;
     Ok(plan)
+}
+
+/// Replay a canonical proof task and derive its unique composite transition plan.
+pub fn derive_composite_transition_plan_from_task(
+    task: &ProveTask,
+) -> TexasAirResult<CompositeTransitionPlan> {
+    if !supports_composite_proof(task.method_kind) {
+        return Err(TexasAirError::NotImplemented(format!(
+            "{} does not use the composite proof pipeline",
+            task.method_kind.method_name()
+        )));
+    }
+    crate::orchestrator::validate_full_dispatch_task(task)?;
+    let mut replay = task.pre_table.clone();
+    let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+        &task.context,
+        &mut replay,
+        &task.selector,
+        &task.raw_args,
+    )
+    .map_err(|error| {
+        TexasAirError::SpecViolation(format!(
+            "{} composite replay failed: {error}",
+            task.method_kind.method_name()
+        ))
+    })?;
+    let output: DispatchOutput = borsh::from_slice(&result.return_value).map_err(|error| {
+        TexasAirError::SerializationError(format!(
+            "{} composite replay output borsh: {error}",
+            task.method_kind.method_name()
+        ))
+    })?;
+    derive_composite_transition_plan(
+        task.method_kind,
+        &task.pre_table,
+        &task.post_table,
+        acting_seat(task.method_kind, &task.method_input)?,
+        &output.events,
+    )
+}
+
+pub(crate) fn derive_composite_transition_plan_from_public_inputs(
+    public_inputs: &TexasPublicInputs,
+) -> TexasAirResult<CompositeTransitionPlan> {
+    if !supports_composite_proof(public_inputs.kind) {
+        return Err(TexasAirError::NotImplemented(format!(
+            "{} does not use the composite proof pipeline",
+            public_inputs.kind.method_name()
+        )));
+    }
+    let canonical =
+        crate::airs::validation::validate_canonical_dispatch(public_inputs, public_inputs.kind)?;
+    derive_composite_transition_plan(
+        public_inputs.kind,
+        &canonical.pre,
+        &canonical.post,
+        acting_seat(public_inputs.kind, &canonical.task.method_input)?,
+        &canonical.events,
+    )
+}
+
+fn acting_seat(method_kind: MethodKind, input: &MethodInput) -> TexasAirResult<Option<u8>> {
+    let seat = match (method_kind, input) {
+        (
+            MethodKind::Fold
+            | MethodKind::Check
+            | MethodKind::Call
+            | MethodKind::AutoFold
+            | MethodKind::ForceFold,
+            MethodInput::SeatOnly { seat_index },
+        )
+        | (MethodKind::Raise, MethodInput::Raise { seat_index, .. })
+        | (MethodKind::Bet, MethodInput::Bet { seat_index, .. })
+        | (MethodKind::FoldWithProof, MethodInput::FoldWithProof { seat_index, .. }) => {
+            Some(*seat_index)
+        }
+        (MethodKind::KickPlayer, MethodInput::Kick { .. })
+        | (MethodKind::ResetForNextHand, MethodInput::Empty)
+        | (MethodKind::SubmitPlayerRevealTokens, MethodInput::SubmitPlayerRevealTokens { .. }) => {
+            None
+        }
+        _ => {
+            return Err(TexasAirError::SpecViolation(format!(
+                "{} method input does not match composite-plan routing",
+                method_kind.method_name()
+            )));
+        }
+    };
+    Ok(seat)
 }
 
 fn derive_seat_update(
@@ -641,6 +790,7 @@ fn derive_settlement(
     method_kind: MethodKind,
     events: &[TexasPokerEvent],
 ) -> TexasAirResult<SettlementStagePlan> {
+    let reset = derive_reset_projection(pre, post, events)?;
     let has_showdown = events
         .iter()
         .any(|event| matches!(event, TexasPokerEvent::SettlementPlanCommitted { .. }));
@@ -685,6 +835,19 @@ fn derive_settlement(
             rake: binding.rake,
             total_awards: binding.total_awards,
             awards: binding.awards,
+            pre_chip_pool: reset.pre_chip_pool,
+            post_chip_pool: reset.post_chip_pool,
+            pre_addon_pool: reset.pre_addon_pool,
+            post_addon_pool: reset.post_addon_pool,
+            addon_credits: reset.addon_credits,
+            refunds: reset.refunds,
+            addon_refunds: reset.addon_refunds,
+            total_addon_credits: reset.total_addon_credits,
+            total_refunds: reset.total_refunds,
+            total_addon_refunds: reset.total_addon_refunds,
+            post_stacks: reset.post_stacks,
+            post_pending_addons: reset.post_pending_addons,
+            post_occupied: reset.post_occupied,
             reset_applied: true,
         });
     }
@@ -701,7 +864,58 @@ fn derive_settlement(
                 "settlement side events exist without a canonical settlement event".into(),
             ));
         }
-        return Ok(SettlementStagePlan::inactive());
+        let reset_only = matches!(
+            method_kind,
+            MethodKind::KickPlayer | MethodKind::ResetForNextHand
+        ) && post.round_state == ROUND_WAITING
+            && post.betting_round.is_none()
+            && post.current_turn.is_none()
+            && post.pot == 0;
+        if !reset_only {
+            return Ok(SettlementStagePlan::inactive());
+        }
+        require_canonical_reset(post, events, None)?;
+        let native_plan_digest = hash_borsh(
+            RESET_ONLY_DOMAIN,
+            &(
+                pre.id,
+                post.hand_id,
+                post.call_seq,
+                reset.pre_chip_pool,
+                reset.post_chip_pool,
+                reset.pre_addon_pool,
+                reset.post_addon_pool,
+                reset.addon_credits,
+                reset.refunds,
+                reset.addon_refunds,
+                reset.post_stacks,
+                reset.post_occupied,
+            ),
+        )?;
+        return Ok(SettlementStagePlan {
+            active: true,
+            kind: SettlementKind::ResetOnly,
+            native_plan_digest,
+            runout_count: 0,
+            gross_pot: 0,
+            rake: 0,
+            total_awards: 0,
+            awards: [0; COMPOSITION_SEATS],
+            pre_chip_pool: reset.pre_chip_pool,
+            post_chip_pool: reset.post_chip_pool,
+            pre_addon_pool: reset.pre_addon_pool,
+            post_addon_pool: reset.post_addon_pool,
+            addon_credits: reset.addon_credits,
+            refunds: reset.refunds,
+            addon_refunds: reset.addon_refunds,
+            total_addon_credits: reset.total_addon_credits,
+            total_refunds: reset.total_refunds,
+            total_addon_refunds: reset.total_addon_refunds,
+            post_stacks: reset.post_stacks,
+            post_pending_addons: reset.post_pending_addons,
+            post_occupied: reset.post_occupied,
+            reset_applied: true,
+        });
     }
     let [(table_id, winner_seat, award)] = no_showdown.as_slice() else {
         return Err(TexasAirError::SpecViolation(
@@ -713,16 +927,6 @@ fn derive_settlement(
             "no-showdown settlement is missing its collection stage".into(),
         ));
     }
-    if pre
-        .seats
-        .iter()
-        .any(|seat| seat.is_occupied() && (seat.pending_addon != 0 || seat.want_leave))
-    {
-        return Err(TexasAirError::UnsupportedBettingTransition(format!(
-            "{}: terminal reset with pending addon/leave requires a dedicated reset-flow component",
-            method_kind.method_name()
-        )));
-    }
     require_canonical_reset(post, events, Some(RESET_REASON_LAST_PLAYER_STANDING))?;
     let winner_index = usize::from(*winner_seat);
     let pre_winner = pre.seats.get(winner_index).ok_or_else(|| {
@@ -731,18 +935,24 @@ fn derive_settlement(
     let post_winner = post.seats.get(winner_index).ok_or_else(|| {
         TexasAirError::SpecViolation("post-reset winner seat is outside table".into())
     })?;
-    if !post_winner.is_occupied() || post_winner.player != pre_winner.player {
-        return Err(TexasAirError::UnsupportedBettingTransition(
-            "terminal reset removed or replaced the no-showdown winner".into(),
-        ));
-    }
     let gross_pot = collection.post_pot;
     let rake = gross_pot.checked_sub(*award).ok_or_else(|| {
         TexasAirError::SpecViolation("no-showdown award exceeds gross pot".into())
     })?;
-    if pre_winner.stack.checked_add(*award) != Some(post_winner.stack) {
+    let winner_after_credit = pre_winner
+        .stack
+        .checked_add(*award)
+        .and_then(|value| value.checked_add(reset.addon_credits[winner_index]))
+        .ok_or_else(|| TexasAirError::SpecViolation("winner reset stack overflow".into()))?;
+    if post_winner.is_occupied() {
+        if post_winner.player != pre_winner.player || post_winner.stack != winner_after_credit {
+            return Err(TexasAirError::SpecViolation(
+                "no-showdown award/addon credit does not match winner post stack".into(),
+            ));
+        }
+    } else if !pre_winner.want_leave || reset.refunds[winner_index] != winner_after_credit {
         return Err(TexasAirError::SpecViolation(
-            "no-showdown award does not match winner stack delta".into(),
+            "removed no-showdown winner is not bound to its complete reset refund".into(),
         ));
     }
     let rake_events = events
@@ -795,7 +1005,170 @@ fn derive_settlement(
         rake,
         total_awards: *award,
         awards,
+        pre_chip_pool: reset.pre_chip_pool,
+        post_chip_pool: reset.post_chip_pool,
+        pre_addon_pool: reset.pre_addon_pool,
+        post_addon_pool: reset.post_addon_pool,
+        addon_credits: reset.addon_credits,
+        refunds: reset.refunds,
+        addon_refunds: reset.addon_refunds,
+        total_addon_credits: reset.total_addon_credits,
+        total_refunds: reset.total_refunds,
+        total_addon_refunds: reset.total_addon_refunds,
+        post_stacks: reset.post_stacks,
+        post_pending_addons: reset.post_pending_addons,
+        post_occupied: reset.post_occupied,
         reset_applied: true,
+    })
+}
+
+struct ResetProjection {
+    pre_chip_pool: u64,
+    post_chip_pool: u64,
+    pre_addon_pool: u64,
+    post_addon_pool: u64,
+    addon_credits: [u64; COMPOSITION_SEATS],
+    refunds: [u64; COMPOSITION_SEATS],
+    addon_refunds: [u64; COMPOSITION_SEATS],
+    total_addon_credits: u64,
+    total_refunds: u64,
+    total_addon_refunds: u64,
+    post_stacks: [u64; COMPOSITION_SEATS],
+    post_pending_addons: [u64; COMPOSITION_SEATS],
+    post_occupied: [bool; COMPOSITION_SEATS],
+}
+
+fn derive_reset_projection(
+    pre: &TexasPokerTable,
+    post: &TexasPokerTable,
+    events: &[TexasPokerEvent],
+) -> TexasAirResult<ResetProjection> {
+    let mut addon_credits = [0u64; COMPOSITION_SEATS];
+    let mut refunds = [0u64; COMPOSITION_SEATS];
+    let mut kicked = [false; COMPOSITION_SEATS];
+    for event in events {
+        match event {
+            TexasPokerEvent::AddonCredited {
+                table_id,
+                seat_index,
+                amount,
+                ..
+            } => {
+                let index = usize::from(*seat_index);
+                if *table_id != pre.id
+                    || index >= COMPOSITION_SEATS
+                    || addon_credits[index] != 0
+                    || *amount == 0
+                {
+                    return Err(TexasAirError::SpecViolation(
+                        "AddonCredited event is not a unique fixed-seat reset credit".into(),
+                    ));
+                }
+                addon_credits[index] = *amount;
+            }
+            TexasPokerEvent::PlayerRefund {
+                table_id,
+                seat_index,
+                amount,
+                ..
+            } => {
+                let index = usize::from(*seat_index);
+                if *table_id != pre.id
+                    || index >= COMPOSITION_SEATS
+                    || refunds[index] != 0
+                    || *amount == 0
+                {
+                    return Err(TexasAirError::SpecViolation(
+                        "PlayerRefund event is not a unique fixed-seat refund".into(),
+                    ));
+                }
+                refunds[index] = *amount;
+            }
+            TexasPokerEvent::PlayerKicked {
+                table_id,
+                seat_index,
+                ..
+            } => {
+                let index = usize::from(*seat_index);
+                if *table_id != pre.id || index >= COMPOSITION_SEATS || kicked[index] {
+                    return Err(TexasAirError::SpecViolation(
+                        "PlayerKicked event is not a unique fixed-seat kick".into(),
+                    ));
+                }
+                kicked[index] = true;
+            }
+            _ => {}
+        }
+    }
+    let mut addon_refunds = [0u64; COMPOSITION_SEATS];
+    for index in 0..COMPOSITION_SEATS.min(pre.seats.len()) {
+        if kicked[index] && addon_credits[index] == 0 {
+            addon_refunds[index] = pre.seats[index].pending_addon;
+        }
+    }
+    let sum = |values: &[u64; COMPOSITION_SEATS], name: &str| {
+        values.iter().try_fold(0u64, |total, value| {
+            total
+                .checked_add(*value)
+                .ok_or_else(|| TexasAirError::SpecViolation(format!("reset {name} sum overflow")))
+        })
+    };
+    let total_addon_credits = sum(&addon_credits, "addon credit")?;
+    let total_refunds = sum(&refunds, "refund")?;
+    let total_addon_refunds = sum(&addon_refunds, "addon refund")?;
+    let rake = events
+        .iter()
+        .filter_map(|event| match event {
+            TexasPokerEvent::RakeCollected { rake_amount, .. } => Some(*rake_amount),
+            _ => None,
+        })
+        .try_fold(0u64, |total, value| {
+            total
+                .checked_add(value)
+                .ok_or_else(|| TexasAirError::SpecViolation("reset rake sum overflow".into()))
+        })?;
+    if post
+        .chip_pool
+        .checked_add(total_refunds)
+        .and_then(|value| value.checked_add(rake))
+        != Some(pre.chip_pool)
+    {
+        return Err(TexasAirError::SpecViolation(
+            "reset TableVault conservation does not match refunds plus rake".into(),
+        ));
+    }
+    if post
+        .addon_pool
+        .checked_add(total_addon_credits)
+        .and_then(|value| value.checked_add(total_addon_refunds))
+        != Some(pre.addon_pool)
+    {
+        return Err(TexasAirError::SpecViolation(
+            "reset addon-pool conservation does not match credits/refunds".into(),
+        ));
+    }
+    let mut post_stacks = [0u64; COMPOSITION_SEATS];
+    let mut post_pending_addons = [0u64; COMPOSITION_SEATS];
+    let mut post_occupied = [false; COMPOSITION_SEATS];
+    for (index, seat) in post.seats.iter().enumerate() {
+        post_stacks[index] = seat.stack;
+        post_pending_addons[index] = seat.pending_addon;
+        post_occupied[index] = seat.is_occupied();
+    }
+    Ok(ResetProjection {
+        pre_chip_pool: pre.chip_pool,
+        post_chip_pool: post.chip_pool,
+        pre_addon_pool: pre.addon_pool,
+        post_addon_pool: post.addon_pool,
+        addon_credits,
+        refunds,
+        addon_refunds,
+        total_addon_credits,
+        total_refunds,
+        total_addon_refunds,
+        post_stacks,
+        post_pending_addons,
+        post_occupied,
     })
 }
 

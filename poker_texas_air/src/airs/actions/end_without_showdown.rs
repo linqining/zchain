@@ -13,6 +13,7 @@ use stwo_constraint_framework::EvalAtRow;
 use crate::airs::common::{
     CommonConstraints, ZERO, compute_add_carries, u8_to_m31, u64_to_m31_limbs,
 };
+use crate::airs::composition::settlement::{SettlementKind, SettlementStagePlan};
 use crate::error::{TexasAirError, TexasAirResult};
 
 /// Sentinel trace value for `current_turn: None`.
@@ -75,6 +76,7 @@ pub(crate) fn derive_fold_outcome(
     post: &TexasPokerTable,
     acting_seat: u8,
     method: &str,
+    settlement: Option<&SettlementStagePlan>,
 ) -> TexasAirResult<FoldOutcome> {
     if pre.betting_round.is_none() {
         return Err(TexasAirError::SpecViolation(format!(
@@ -105,19 +107,6 @@ pub(crate) fn derive_fold_outcome(
         )));
     }
 
-    // Pending addon/leave requests add independent reset-time money flows. Keep
-    // those compound variants fail-closed until their dedicated constraints are
-    // composed with this settlement component.
-    if pre
-        .seats
-        .iter()
-        .any(|seat| seat.is_occupied() && (seat.pending_addon != 0 || seat.want_leave))
-    {
-        return Err(TexasAirError::UnsupportedBettingTransition(format!(
-            "{method}: terminal fold with pending addon/leave reset effects is not supported"
-        )));
-    }
-
     let active: Vec<usize> = pre
         .seats
         .iter()
@@ -137,14 +126,6 @@ pub(crate) fn derive_fold_outcome(
     let winner_seat = u8::try_from(winner_index)
         .map_err(|_| TexasAirError::SpecViolation(format!("{method}: winner seat exceeds u8")))?;
     let pre_winner = &pre.seats[winner_index];
-    let post_winner = post.seats.get(winner_index).ok_or_else(|| {
-        TexasAirError::SpecViolation(format!("{method}: post winner seat is missing"))
-    })?;
-    if !post_winner.is_occupied() || post_winner.player != pre_winner.player {
-        return Err(TexasAirError::UnsupportedBettingTransition(format!(
-            "{method}: terminal reset removed or replaced the winner seat"
-        )));
-    }
 
     let collected_bets = pre.seats.iter().try_fold(0u64, |total, seat| {
         total
@@ -155,13 +136,43 @@ pub(crate) fn derive_fold_outcome(
         .pot
         .checked_add(collected_bets)
         .ok_or_else(|| TexasAirError::SpecViolation(format!("{method}: gross pot overflow")))?;
-    let award = post_winner
-        .stack
-        .checked_sub(pre_winner.stack)
-        .ok_or_else(|| TexasAirError::SpecViolation(format!("{method}: winner stack decreased")))?;
+    let award = if let Some(settlement) = settlement {
+        if settlement.kind != SettlementKind::WithoutShowdown
+            || settlement.awards[winner_index] == 0
+            || settlement
+                .awards
+                .iter()
+                .enumerate()
+                .any(|(index, award)| index != winner_index && *award != 0)
+        {
+            return Err(TexasAirError::SpecViolation(format!(
+                "{method}: composite settlement does not identify the canonical sole winner"
+            )));
+        }
+        settlement.awards[winner_index]
+    } else {
+        let post_winner = post.seats.get(winner_index).ok_or_else(|| {
+            TexasAirError::SpecViolation(format!("{method}: post winner seat is missing"))
+        })?;
+        if !post_winner.is_occupied() || post_winner.player != pre_winner.player {
+            return Err(TexasAirError::UnsupportedBettingTransition(format!(
+                "{method}: terminal reset removed or replaced the winner seat"
+            )));
+        }
+        post_winner
+            .stack
+            .checked_sub(pre_winner.stack)
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(format!("{method}: winner stack decreased"))
+            })?
+    };
     let rake = gross_pot.checked_sub(award).ok_or_else(|| {
         TexasAirError::SpecViolation(format!("{method}: winner award exceeds gross pot"))
     })?;
+    let winner_after_award = pre_winner
+        .stack
+        .checked_add(award)
+        .ok_or_else(|| TexasAirError::SpecViolation(format!("{method}: winner stack overflow")))?;
 
     Ok(FoldOutcome::EndWithoutShowdown(EndWithoutShowdownInput {
         winner_seat,
@@ -170,7 +181,7 @@ pub(crate) fn derive_fold_outcome(
         rake,
         award,
         pre_winner_stack: pre_winner.stack,
-        post_winner_stack: post_winner.stack,
+        post_winner_stack: winner_after_award,
     }))
 }
 

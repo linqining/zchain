@@ -74,6 +74,7 @@ impl NativeAction {
 struct ValidatedTables {
     pre: TexasPokerTable,
     post: TexasPokerTable,
+    composition: crate::airs::composition::CompositeTransitionPlan,
 }
 
 fn validate_native_mid_round(
@@ -164,7 +165,7 @@ fn validate_native_mid_round(
     // Existing method rows remain the proof entry point during migration, but
     // every production action verification now also passes the shared component
     // ABI and event-consistency checks.
-    crate::airs::composition::derive_composite_transition_plan(
+    let composition = crate::airs::composition::derive_composite_transition_plan(
         expected_kind,
         &pre,
         &post,
@@ -180,7 +181,11 @@ fn validate_native_mid_round(
         )));
     }
 
-    Ok(ValidatedTables { pre, post })
+    Ok(ValidatedTables {
+        pre,
+        post,
+        composition,
+    })
 }
 
 fn seat<'a>(table: &'a TexasPokerTable, seat_index: u8, method: &str) -> TexasAirResult<&'a Seat> {
@@ -217,8 +222,13 @@ pub(crate) fn validate_fold(
         },
         true,
     )?;
-    let expected_outcome =
-        derive_fold_outcome(&tables.pre, &tables.post, air.input.seat_index, "fold")?;
+    let expected_outcome = derive_fold_outcome(
+        &tables.pre,
+        &tables.post,
+        air.input.seat_index,
+        "fold",
+        Some(&tables.composition.settlement),
+    )?;
     if air.input.outcome != expected_outcome {
         return Err(TexasAirError::SpecViolation(
             "fold: AIR outcome does not match the canonical dispatch".into(),
@@ -586,24 +596,53 @@ pub(crate) fn validate_kick_player(
         .pot
         .checked_add(pre_seat.bet)
         .ok_or_else(|| TexasAirError::SpecViolation("kick_player: pot overflow".into()))?;
-    let expected_post_version = canonical.pre.version.saturating_add(1);
+    let version_increment = if canonical.post.version == canonical.pre.version.saturating_add(1) {
+        1
+    } else if canonical.post.version == canonical.pre.version.saturating_add(2) {
+        2
+    } else {
+        return Err(TexasAirError::UnsupportedBettingTransition(
+            "kick_player produced an unsupported version increment".into(),
+        ));
+    };
+    let simple = version_increment == 1
+        && canonical.post.round_state == canonical.pre.round_state
+        && canonical.post.pot == expected_post_pot;
+    let waiting_nested_reset = version_increment == 2
+        && canonical.pre.round_state
+            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        && canonical.post.round_state
+            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        && canonical.pre.pot == 0
+        && pre_seat.bet == 0
+        && canonical.post.pot == 0;
+    if !simple && !waiting_nested_reset {
+        return Err(TexasAirError::UnsupportedBettingTransition(
+            "kick_player triggered an unsupported active-hand advance/settlement cascade".into(),
+        ));
+    }
     if canonical.post.round_state != canonical.pre.round_state
         || canonical.post.pot != expected_post_pot
-        || canonical.post.version != expected_post_version
     {
         return Err(TexasAirError::UnsupportedBettingTransition(
-            "kick_player triggered nested advance/reset/settlement or a multi-version transition; current AIR supports only round-unchanged, pot += kicked_bet, single-version transitions".into(),
+            "kick_player post round/pot does not match its simple or WAITING-reset projection"
+                .into(),
         ));
     }
 
     let input = KickPlayerInput {
         seat_index: args.seat_index,
-        refund: pre_seat.stack,
+        refund: pre_seat
+            .stack
+            .checked_add(pre_seat.pending_addon)
+            .ok_or_else(|| TexasAirError::SpecViolation("kick_player refund overflow".into()))?,
         kicked_bet: pre_seat.bet,
+        version_increment,
     };
     if air.input.seat_index != input.seat_index
         || air.input.refund != input.refund
         || air.input.kicked_bet != input.kicked_bet
+        || air.input.version_increment != input.version_increment
     {
         return Err(TexasAirError::SpecViolation(
             "kick_player: AIR input does not match the canonical dispatch".into(),

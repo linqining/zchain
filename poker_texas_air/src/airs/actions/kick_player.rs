@@ -64,6 +64,8 @@ pub struct KickPlayerInput {
     pub refund: u64,
     /// 被踢者当前下注（kick 时立即并入底池：`pot += kicked_bet`）。
     pub kicked_bet: u64,
+    /// Native version bumps: one for the kick and one more when it cascades into reset.
+    pub version_increment: u8,
 }
 
 /// `kick_player` AIR 公开输入。
@@ -106,7 +108,11 @@ impl FrameworkEval for KickPlayerAir {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let statement = crate::airs::TexasAir::statement(self);
-        let common = CommonConstraints::write(&mut eval, &statement);
+        let common = CommonConstraints::write_with_version_increment(
+            &mut eval,
+            &statement,
+            u64::from(self.input.version_increment),
+        );
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();

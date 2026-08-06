@@ -91,6 +91,8 @@ pub struct TexasPublicInputs {
     /// compatibility code may populate it from a locally supplied trace.
     /// Values are canonical M31 representatives (`0 <= value < 2^31 - 1`).
     pub expected_trace_row: Option<Vec<u32>>,
+    /// Independent component-proof scope; absent for the original method proof.
+    pub component: Option<crate::airs::composition::ComponentStatement>,
 }
 
 impl TexasPublicInputs {
@@ -130,6 +132,7 @@ impl TexasPublicInputs {
             dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
+            component: None,
         })
     }
 
@@ -163,6 +166,7 @@ impl TexasPublicInputs {
             dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
+            component: None,
         }
     }
 
@@ -384,7 +388,34 @@ impl TexasPublicInputs {
             None => channel.mix_u32s(&[0, 0, 0]),
         }
 
-        // 8. 元数据。
+        // 8. Independent composition-stage statement.
+        match &self.component {
+            Some(component) => {
+                channel.mix_u32s(&[
+                    1,
+                    u32::from(component.plan_version),
+                    u32::from(component.stage_kind as u8),
+                    u32::from(component.stage_index),
+                    u32::from(component.active),
+                ]);
+                for digest in [
+                    component.plan_digest,
+                    component.input_digest,
+                    component.output_digest,
+                ] {
+                    let words = digest
+                        .chunks_exact(4)
+                        .map(|chunk| {
+                            u32::from_be_bytes(chunk.try_into().expect("4-byte digest word"))
+                        })
+                        .collect::<Vec<_>>();
+                    channel.mix_u32s(&words);
+                }
+            }
+            None => channel.mix_u32s(&[0, 0, 0, 0, 0]),
+        }
+
+        // 9. 元数据。
         channel.mix_u32s(&[u32::from(self.kind as u8), self.hand_id, self.call_seq]);
         channel.mix_u64(self.table_id);
         channel.mix_u64(self.pre_version);
@@ -435,7 +466,8 @@ impl TexasPublicInputs {
             && statement.hand_id == self.hand_id
             && statement.call_seq == self.call_seq
             && statement.pre_version == self.pre_version
-            && statement.post_version == self.post_version;
+            && statement.post_version == self.post_version
+            && statement.component == self.component;
         if !matches {
             return Err(TexasAirError::SpecViolation(
                 "AIR statement does not match verifier-trusted Texas public inputs".into(),
@@ -499,6 +531,7 @@ mod tests {
             dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
+            component: None,
         };
         assert!(pi.verify_roots().is_err(), "empty image must fail");
     }

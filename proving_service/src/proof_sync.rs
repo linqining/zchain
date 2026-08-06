@@ -292,8 +292,12 @@ fn verify_downloaded_package(
         ));
     }
 
-    let receipt = Orchestrator::verify_archived_method_proof(package.task(), package.archive())
-        .map_err(|error| ServiceError::Prover(error.to_string()))?;
+    let receipt = Orchestrator::verify_archived_task_parts(
+        package.task(),
+        package.archive(),
+        package.composition_archive(),
+    )
+    .map_err(|error| ServiceError::Prover(error.to_string()))?;
     if receipt.table_id() != job.table_id
         || receipt.hand_id() != result.hand_id
         || receipt.call_seq() != result.call_seq

@@ -50,6 +50,8 @@ pub struct AirStatement {
     pub pre_version: u64,
     /// Version after execution.
     pub post_version: u64,
+    /// Component-proof scope; absent for the original method proof.
+    pub component: Option<composition::ComponentStatement>,
 }
 
 /// AIRs that expose a verifier-trusted Texas Poker statement.
@@ -91,6 +93,7 @@ macro_rules! impl_validated_texas_air {
                     call_seq: self.call_seq,
                     pre_version: self.pre_version,
                     post_version: self.post_version,
+                    component: None,
                 }
             }
 

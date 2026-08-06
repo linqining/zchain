@@ -148,7 +148,11 @@ impl ServiceRuntime {
                     job.table_id
                 ))
             })?;
-            plugin.restore_archived_task(task, package.archive())?;
+            plugin.restore_archived_task(
+                task,
+                package.archive(),
+                package.composition_archive(),
+            )?;
         }
 
         for stored in repository.tables() {
@@ -646,8 +650,12 @@ async fn dispatch_for_table(
             Ok(proof) => proof,
             Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
         };
-        let package = match ServiceProofPackage::new(task.clone(), archived.archive)
-            .and_then(|package| package.to_bytes())
+        let package = match ServiceProofPackage::new(
+            task.clone(),
+            archived.archive,
+            archived.composition_archive,
+        )
+        .and_then(|package| package.to_bytes())
         {
             Ok(package) => package,
             Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
@@ -761,8 +769,12 @@ async fn verify_job_proof(
             "stored proof package does not match completed job metadata".into(),
         ));
     }
-    let receipt = Orchestrator::verify_archived_method_proof(package.task(), package.archive())
-        .map_err(|error| unprocessable(error.to_string()))?;
+    let receipt = Orchestrator::verify_archived_task_parts(
+        package.task(),
+        package.archive(),
+        package.composition_archive(),
+    )
+    .map_err(|error| unprocessable(error.to_string()))?;
     Ok(Json(ProofVerificationResponse {
         job_id: hex::encode(job_id),
         verified: true,

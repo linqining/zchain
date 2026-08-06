@@ -655,7 +655,7 @@ fn fold_with_proof_dual_package_roundtrips_archives_and_rejects_replay() {
 }
 
 #[test]
-fn terminal_fold_with_proof_proves_settlement_and_keeps_compound_reset_fail_closed() {
+fn terminal_fold_with_proof_proves_clean_and_compound_settlement() {
     let task = fold_with_proof_task(311, 2, false);
     assert_eq!(task.pre_table.pot, 200);
     assert_eq!(task.post_table.pot, 0);
@@ -675,9 +675,16 @@ fn terminal_fold_with_proof_proves_settlement_and_keeps_compound_reset_fail_clos
         .expect("archive-derived terminal fold dual proof should verify");
 
     let compound = fold_with_proof_task(312, 2, true);
-    let error = prove_dual_proof(&compound)
-        .expect_err("terminal fold with pending addon must remain fail-closed");
-    assert!(error.to_string().contains("pending addon/leave"), "{error}");
+    let compound_bundle =
+        prove_dual_proof(&compound).expect("terminal fold with pending addon should prove");
+    verify_dual_proof(&compound, &compound_bundle)
+        .expect("compound terminal fold method and DLEq proof should verify");
+    let compound_archived = Orchestrator::new()
+        .prove_verify_and_archive_task(&compound)
+        .expect("compound terminal fold should archive all four component proofs");
+    assert!(compound_archived.composition_archive.is_some());
+    Orchestrator::verify_archived_proven_task(&compound, &compound_archived)
+        .expect("full compound archive should verify method and component proofs");
 }
 
 #[test]

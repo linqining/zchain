@@ -15,6 +15,7 @@ use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch as texas_dispatch;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
+use poker_texas_air::airs::composition::ArchivedCompositionProofBundle;
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
 use poker_texas_air::dual_proof::dual_proof_from_archived;
 use poker_texas_air::orchestrator::{ArchivedProvenTask, Orchestrator, ProvenTask};
@@ -149,6 +150,7 @@ impl TexasPokerPlugin {
         &mut self,
         task: &ProveTask,
         archive: &ArchivedMethodProof,
+        composition_archive: Option<&ArchivedCompositionProofBundle>,
     ) -> PluginResult<ProvenTask> {
         if task.pre_table.hand_id != task.post_table.hand_id {
             self.orchestrator.start_new_chain_segment();
@@ -156,7 +158,7 @@ impl TexasPokerPlugin {
         }
         let summary = self
             .orchestrator
-            .restore_verified_archived_task(task, archive)
+            .restore_verified_archived_task(task, archive, composition_archive)
             .map_err(|error| PluginError::Prover(error.to_string()))?;
         self.proved_tasks.push(task.clone());
         self.proved_archives.push(archive.clone());
@@ -541,7 +543,7 @@ mod tests {
         let mut mismatched = TexasPokerPlugin::from_persisted_state(persisted_table.clone(), 2, 2);
         assert!(
             mismatched
-                .restore_archived_task(&tasks[0], &archives[1])
+                .restore_archived_task(&tasks[0], &archives[1], None)
                 .is_err(),
             "an archive from a later task must not verify against an earlier task"
         );
@@ -552,11 +554,11 @@ mod tests {
 
         let mut reversed = TexasPokerPlugin::from_persisted_state(persisted_table.clone(), 2, 2);
         reversed
-            .restore_archived_task(&tasks[1], &archives[1])
+            .restore_archived_task(&tasks[1], &archives[1], None)
             .expect("an independently valid first receipt may start a recovered segment");
         assert!(
             reversed
-                .restore_archived_task(&tasks[0], &archives[0])
+                .restore_archived_task(&tasks[0], &archives[0], None)
                 .is_err(),
             "reversing journal order must break receipt-chain continuity"
         );
@@ -581,7 +583,7 @@ mod tests {
         let mut corrupted = TexasPokerPlugin::from_persisted_state(persisted_table.clone(), 2, 2);
         assert!(
             corrupted
-                .restore_archived_task(&tasks[0], &tampered)
+                .restore_archived_task(&tasks[0], &tampered, None)
                 .is_err(),
             "native STARK verification must reject a corrupted archive"
         );
@@ -593,7 +595,7 @@ mod tests {
         let mut restored = TexasPokerPlugin::from_persisted_state(persisted_table, 2, 2);
         for (task, archive) in tasks.iter().zip(&archives) {
             restored
-                .restore_archived_task(task, archive)
+                .restore_archived_task(task, archive, None)
                 .expect("restart should reverify and restore each archive");
         }
         let aggregate = restored

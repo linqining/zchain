@@ -1,11 +1,15 @@
-//! Restart-safe proving-service package for one Texas method proof.
+//! Restart-safe proving-service package for one Texas transition proof set.
 //!
 //! The package stores the complete canonical task beside the bounded Stwo
+//! method archive and, for composite methods, the required four-stage component
 //! archive. Verification never trusts proof-carried AIR metadata: it replays the
 //! task through [`poker_texas_air::orchestrator::Orchestrator`] and reconstructs
-//! the trusted statement before decoding the proof.
+//! every trusted statement before decoding the proofs.
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use poker_texas_air::airs::composition::{
+    ArchivedCompositionProofBundle, supports_composite_proof,
+};
 use poker_texas_air::proof_archive::ArchivedMethodProof;
 use poker_texas_air::prove_task::ProveTask;
 
@@ -13,9 +17,9 @@ use crate::repository::StoredProofMetadata;
 use crate::{ServiceError, ServiceResult};
 
 /// Current proving-service proof package schema.
-pub const SERVICE_PROOF_PACKAGE_VERSION: u8 = 1;
+pub const SERVICE_PROOF_PACKAGE_VERSION: u8 = 2;
 /// Maximum accepted task-plus-proof package size.
-pub const MAX_SERVICE_PROOF_PACKAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_SERVICE_PROOF_PACKAGE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Durable package required to reverify one completed proving job.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -23,6 +27,7 @@ pub struct ServiceProofPackage {
     version: u8,
     task: ProveTask,
     archive: ArchivedMethodProof,
+    composition_archive: Option<ArchivedCompositionProofBundle>,
 }
 
 impl ServiceProofPackage {
@@ -31,11 +36,16 @@ impl ServiceProofPackage {
     /// # Errors
     ///
     /// Returns an error when archive validation fails.
-    pub fn new(task: ProveTask, archive: ArchivedMethodProof) -> ServiceResult<Self> {
+    pub fn new(
+        task: ProveTask,
+        archive: ArchivedMethodProof,
+        composition_archive: Option<ArchivedCompositionProofBundle>,
+    ) -> ServiceResult<Self> {
         let package = Self {
             version: SERVICE_PROOF_PACKAGE_VERSION,
             task,
             archive,
+            composition_archive,
         };
         package.validate()?;
         Ok(package)
@@ -91,10 +101,22 @@ impl ServiceProofPackage {
         &self.archive
     }
 
+    /// Optional four-stage component-proof bundle required by composite methods.
+    #[must_use]
+    pub const fn composition_archive(&self) -> Option<&ArchivedCompositionProofBundle> {
+        self.composition_archive.as_ref()
+    }
+
     /// Consume the package into its task and archive.
     #[must_use]
-    pub fn into_parts(self) -> (ProveTask, ArchivedMethodProof) {
-        (self.task, self.archive)
+    pub fn into_parts(
+        self,
+    ) -> (
+        ProveTask,
+        ArchivedMethodProof,
+        Option<ArchivedCompositionProofBundle>,
+    ) {
+        (self.task, self.archive, self.composition_archive)
     }
 
     fn validate(&self) -> ServiceResult<()> {
@@ -111,6 +133,25 @@ impl ServiceProofPackage {
             return Err(ServiceError::Prover(
                 "proof package task/archive method mismatch".into(),
             ));
+        }
+        match (
+            supports_composite_proof(self.task.method_kind),
+            self.composition_archive.as_ref(),
+        ) {
+            (true, Some(bundle)) => bundle
+                .validate()
+                .map_err(|error| ServiceError::Prover(error.to_string()))?,
+            (true, None) => {
+                return Err(ServiceError::Prover(
+                    "composite proof package is missing its four-stage STARK proof bundle".into(),
+                ));
+            }
+            (false, None) => {}
+            (false, Some(_)) => {
+                return Err(ServiceError::Prover(
+                    "non-composite proof package carries an unexpected component bundle".into(),
+                ));
+            }
         }
         Ok(())
     }

@@ -74,10 +74,14 @@ native crypto 验证即可。
   reconstruct restart 使用新 deck index 且保留两块已公开 board，终局 plan 的
   `runout_count = 2` 会进入上述 AIR 投影。
 
-### 仍 fail-closed
+### 本轮补齐的 fail-closed 分支
 
-- terminal fold reset 同时包含 pending addon 或 `want_leave` 资金流的复合路径；
-- `kick_player` 在 WAITING 状态触发 nested reset/multi-version transition 的复合路径。
+- terminal fold reset 已覆盖 pending addon credit、`want_leave` seat removal/refund，并在
+  Settlement component 中固定绑定 9 座位 post stack、post pending addon、post occupancy、
+  addon credit/refund 与 chip refund；reset 后所有 pending addon 必须为 0。
+- `kick_player` 在 WAITING 状态触发的 nested reset 已规范化为 `ResetOnly` settlement，
+  method AIR 只允许该 canonical 路径使用 version increment 2，其他未建模 multi-version
+  transition 继续 fail-closed。
 
 showdown side pot、多人 winner、hand evaluator、rake 和 RIT 结算现在可由当前生产架构接受，
 但其可信性来自 verifier 对 canonical native dispatch 的重放与完整 `SettlementPlan` digest
@@ -87,11 +91,12 @@ program，这不属于当前 host-native + digest 架构。
 
 terminal `call` / `raise` / `bet` 的 clean round completion 已支持：native replay 先重建动作后
 的下注状态，再约束所有 live `seat.bet` 收池、`pre_pot + collected_bets = post_pot`、清零
-seat bets 和下一 reveal phase。仍未覆盖的上述分支不能只增加一个布尔列完成：VM transition
-会同时扫描多个 seat、推进 round/reveal phase，甚至执行 settlement/reset。因此已先建立下述
-四段可组合 AIR 基础层；现有 method AIR 在迁移完成前仍保留原入口和 fail-closed 范围。
+seat bets 和下一 reveal phase。这些此前未覆盖的分支不能只增加一个布尔列完成：VM transition
+会同时扫描多个 seat、推进 round/reveal phase，甚至执行 settlement/reset。因此现通过下述
+四段可组合 AIR；现有 method AIR 仍作为兼容层保留，但完整生产 archive 还必须携带四段独立
+proof bundle，不能只提交 method proof 绕过 component 验证。
 
-### 可组合 transition plan / multi-AIR 基础层
+### 可组合 transition plan / 四份独立 STARK proof
 
 新增 `airs::composition`，canonical native replay 会把一个原子 dispatch 规范化为固定顺序：
 
@@ -113,9 +118,10 @@ pre/post table image digest 和四段业务 payload。每段都有相同的 stag
 - 相邻段强制使用同一 boundary digest。
 
 这里的 boundary digest 是 verifier 从完整原子 replay 生成的 projection commitment，不冒充链上
-持久化的 intermediate table root。这样当前可以把 component 嵌入单 method AIR，未来拆成独立
-proof 时可以直接检查 `stage[i].output_digest == stage[i+1].input_digest`，而不要求 VM 在一个
-atomic dispatch 中额外落盘四份中间 table。
+持久化的 intermediate table root。四个 component 现在分别生成独立 Stwo proof、独立 trace
+commitment 和独立 Fiat–Shamir transcript；bundle 验证固定检查
+`stage[i].output_digest == stage[i+1].input_digest`，而不要求 VM 在一个 atomic dispatch 中额外
+落盘四份中间 table。
 
 四个固定宽度 component 当前包含：
 
@@ -126,16 +132,26 @@ atomic dispatch 中额外落盘四份中间 table。
 - `RoundAdvance`：pre/post round、reveal phase、current turn sentinel、pot 和 community-card count，
   并限制合法的 preflop→flop→turn→river→showdown 边。
 - `Settlement`：复用 showdown `SettlementPlanBinding`，无摊牌路径生成 domain-separated deterministic
-  plan digest；固定 9 座 awards 在 AIR 内逐座求和，并约束 `total_awards + rake = gross_pot` 和 reset。
+  plan digest；固定 9 座 awards、addon credits、chip/addon refunds、post stacks、post pending
+  addons 和 post occupancy 均进入 AIR，并约束 chip pool / addon pool / rake 守恒和 reset。
 
 production verifier 已在 fold/check/call/raise/bet/auto-fold/force-fold、`fold_with_proof` 和
 `submit_player_reveal_tokens` 的 canonical replay 后派生并验证该 plan，因而旧 method row 与新
 component ABI 迁移期间不会形成第二套可自由选择的业务解释。
 
-当前阶段不声称已经完成独立 multi-proof bundle 或递归聚合：`AirStatement` / `TexasPublicInputs`
-尚未加入 component kind、plan digest、stage index 和 boundary commitments，prover 也还没有为四段
-分别签发 proof。下一步是在保持上述 ABI 不变的前提下，把旧 `EndBettingRound` /
-`EndWithoutShowdown` 嵌入列替换为对应 component row，再扩展 statement/public inputs 和 proof bundle。
+`AirStatement` / `TexasPublicInputs` 已加入完整 `ComponentStatement`，把 component kind、plan
+digest、stage index、input/output boundary commitment 混入 transcript。`ArchivedCompositionProofBundle`
+固定保存 SeatUpdate、BetCollection、RoundAdvance、Settlement 四份 proof；缺失、重复、重排、
+plan digest 不符或 task scope 不符都会拒绝。proving service durable package 已升级为 schema v2，
+启动恢复、下载验证和 P2P proof repair 都同时验证 method archive 与所需 component bundle。
+
+这仍不是 recursive/succinct aggregation：验证一个 composite transition 需要验证原 method proof
+和四份 component proof，成本与包体均增加。它解决的是职责拆分、可组合性和 fail-closed 边界，
+不解决链上常数成本压缩。
+
+现有 `DualProofBundle` 仍是“method STARK + native crypto request”的两部分传输格式；对
+`fold_with_proof` / terminal reveal 这类 composite method，它不能替代 durable v2 package 中的
+四份 component proof，也不能单独作为完整 composite archive。
 
 ## 其他仍存在的证明缺口
 
@@ -154,4 +170,4 @@ component ABI 迁移期间不会形成第二套可自由选择的业务解释。
 
 当前主线适合“不追求链上压缩”的目标：host-native crypto/Stwo 验证性能最高，digest 与
 canonical context 防止 proof、receipt、table 或 call scope 被替换。它提供可信 host acceptance，
-但不声称递归压缩；上述复合 reset 与剩余产品功能缺口仍需后续独立设计。
+但不声称递归压缩；剩余产品功能缺口仍需后续独立设计。

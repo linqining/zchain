@@ -1375,6 +1375,7 @@ fn test_e2e_kick_player_prove_verify() {
         seat_index: 2,
         refund: 500,
         kicked_bet: 50,
+        version_increment: 1,
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1429,6 +1430,7 @@ fn test_e2e_kick_player_ripple_carry() {
         seat_index: 2,
         refund: 500,
         kicked_bet: 1,
+        version_increment: 1,
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1482,6 +1484,7 @@ fn test_soundness_kick_player_tampered_refund() {
         seat_index: 2,
         refund: 500,
         kicked_bet: 50,
+        version_increment: 1,
     };
     let row = KickPlayerRow::active(
         &input,

@@ -38,7 +38,7 @@
 //!
 //! 23 个 VM selector 都能进入统一任务格式与 trace/prove/verify 路径。
 //! `fold_with_proof` 的 mid-round 与 clean last-opponent settlement 路径会绑定 native
-//! DLEq receipt；同时处理 pending addon/leave 的复合 terminal reset 继续 fail-closed。
+//! DLEq receipt；复合状态变更另外绑定四段独立的 component STARK proof。
 
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
@@ -132,6 +132,8 @@ pub struct ArchivedProvenTask {
     pub summary: ProvenTask,
     /// Durable Stwo method-proof archive.
     pub archive: ArchivedMethodProof,
+    /// Four independently verified component proofs for composite transitions.
+    pub composition_archive: Option<crate::airs::composition::ArchivedCompositionProofBundle>,
 }
 
 impl ProvenTask {
@@ -193,12 +195,61 @@ impl Orchestrator {
     ) -> TexasAirResult<ArchivedProvenTask> {
         let mut backend = NativeMethodProofBackend;
         let (summary, output) = self.process_task(task, &mut backend)?;
+        let composition_archive = crate::airs::composition::prove_composition_bundle(task)?;
         self.verified_chain_builder.push_receipt(output.receipt)?;
         self.proven.push(summary.clone());
         Ok(ArchivedProvenTask {
             summary,
             archive: output.archive,
+            composition_archive,
         })
+    }
+
+    /// Reverify both the original method proof and every required component proof.
+    ///
+    /// Composite tasks fail closed when their four-proof archive is absent. Non-composite methods
+    /// reject an unexpected component archive, preventing a caller from attaching unrelated data.
+    pub fn verify_archived_proven_task(
+        task: &ProveTask,
+        archived: &ArchivedProvenTask,
+    ) -> TexasAirResult<VerificationReceipt> {
+        Self::verify_archived_task_parts(
+            task,
+            &archived.archive,
+            archived.composition_archive.as_ref(),
+        )
+    }
+
+    /// Reverify a durable method archive and its optional four-stage component bundle.
+    ///
+    /// This parts-based entry point is used by external durable package formats that cannot
+    /// construct an [`ArchivedProvenTask`] summary without first issuing a verification receipt.
+    pub fn verify_archived_task_parts(
+        task: &ProveTask,
+        archive: &ArchivedMethodProof,
+        composition_archive: Option<&crate::airs::composition::ArchivedCompositionProofBundle>,
+    ) -> TexasAirResult<VerificationReceipt> {
+        let receipt = Self::verify_archived_method_proof(task, archive)?;
+        match (
+            crate::airs::composition::supports_composite_proof(task.method_kind),
+            composition_archive,
+        ) {
+            (true, Some(bundle)) => {
+                crate::airs::composition::verify_composition_bundle(task, bundle)?;
+            }
+            (true, None) => {
+                return Err(TexasAirError::SpecViolation(
+                    "composite task is missing its four-stage STARK proof bundle".into(),
+                ));
+            }
+            (false, None) => {}
+            (false, Some(_)) => {
+                return Err(TexasAirError::SpecViolation(
+                    "non-composite task carries an unexpected component proof bundle".into(),
+                ));
+            }
+        }
+        Ok(receipt)
     }
 
     /// Reconstruct a method statement from a canonical task and verify an archived proof.
@@ -241,9 +292,29 @@ impl Orchestrator {
         &mut self,
         task: &ProveTask,
         archive: &ArchivedMethodProof,
+        composition_archive: Option<&crate::airs::composition::ArchivedCompositionProofBundle>,
     ) -> TexasAirResult<ProvenTask> {
         let mut backend = ArchivedVerificationBackend { archive };
         let (summary, receipt) = self.process_task(task, &mut backend)?;
+        match (
+            crate::airs::composition::supports_composite_proof(task.method_kind),
+            composition_archive,
+        ) {
+            (true, Some(bundle)) => {
+                crate::airs::composition::verify_composition_bundle(task, bundle)?;
+            }
+            (true, None) => {
+                return Err(TexasAirError::SpecViolation(
+                    "composite task is missing its four-stage STARK proof bundle".into(),
+                ));
+            }
+            (false, None) => {}
+            (false, Some(_)) => {
+                return Err(TexasAirError::SpecViolation(
+                    "non-composite task carries an unexpected component proof bundle".into(),
+                ));
+            }
+        }
 
         let mut next_chain = self.verified_chain_builder.clone();
         next_chain.push_receipt(receipt)?;
@@ -278,6 +349,7 @@ impl Orchestrator {
             dispatch_call: None,
             precompile_binding: None,
             expected_trace_row: None,
+            component: None,
         };
         pi.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
         let summary = ProvenTask {
@@ -527,7 +599,15 @@ impl Orchestrator {
             },
             true,
         )?;
-        let outcome = derive_fold_outcome(&task.pre_table, &task.post_table, *seat_index, "fold")?;
+        let composition =
+            crate::airs::composition::derive_composite_transition_plan_from_task(task)?;
+        let outcome = derive_fold_outcome(
+            &task.pre_table,
+            &task.post_table,
+            *seat_index,
+            "fold",
+            Some(&composition.settlement),
+        )?;
         let input = FoldInput {
             seat_index: *seat_index,
             outcome,
@@ -1437,19 +1517,43 @@ impl Orchestrator {
             .pot
             .checked_add(pre_seat.bet)
             .ok_or_else(|| TexasAirError::SpecViolation("kick_player pot overflow".into()))?;
-        let expected_post_version = task.pre_table.version.saturating_add(1);
-        if task.post_table.round_state != task.pre_table.round_state
-            || task.post_table.pot != expected_post_pot
-            || task.post_table.version != expected_post_version
-        {
+        let version_increment =
+            if task.post_table.version == task.pre_table.version.saturating_add(1) {
+                1
+            } else if task.post_table.version == task.pre_table.version.saturating_add(2) {
+                2
+            } else {
+                return Err(TexasAirError::UnsupportedBettingTransition(
+                    "kick_player produced an unsupported version increment".into(),
+                ));
+            };
+        let simple = version_increment == 1
+            && task.post_table.round_state == task.pre_table.round_state
+            && task.post_table.pot == expected_post_pot;
+        let waiting_nested_reset = version_increment == 2
+            && task.pre_table.round_state
+                == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+            && task.post_table.round_state
+                == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+            && task.pre_table.pot == 0
+            && pre_seat.bet == 0
+            && task.post_table.pot == 0;
+        if !simple && !waiting_nested_reset {
             return Err(TexasAirError::UnsupportedBettingTransition(
-                "kick_player triggered nested advance/reset/settlement or a multi-version transition; current AIR supports only round-unchanged, pot += kicked_bet, single-version transitions".into(),
+                "kick_player triggered an unsupported active-hand advance/settlement cascade"
+                    .into(),
             ));
         }
         let input = KickPlayerInput {
             seat_index: *seat_index,
-            refund: pre_seat.stack,
+            refund: pre_seat
+                .stack
+                .checked_add(pre_seat.pending_addon)
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation("kick_player refund overflow".into())
+                })?,
             kicked_bet: pre_seat.bet,
+            version_increment,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1828,6 +1932,10 @@ impl Orchestrator {
             &task.post_table,
             *seat_index,
             "fold_with_proof",
+            Some(
+                &crate::airs::composition::derive_composite_transition_plan_from_task(task)?
+                    .settlement,
+            ),
         )?;
         let player_pk = task
             .pre_table
@@ -3413,10 +3521,29 @@ mod tests {
             texas_dispatch::selectors::fold(),
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("fold args should serialize"),
         );
-        assert!(matches!(
-            Orchestrator::new().prove_and_verify_task(&compound_task),
-            Err(TexasAirError::UnsupportedBettingTransition(_))
-        ));
+        Orchestrator::new()
+            .prove_and_verify_task(&compound_task)
+            .expect("terminal fold with pending addon should prove through Settlement/Reset");
+
+        let mut leave_pre = task.pre_table.clone();
+        leave_pre.seats[1].want_leave = true;
+        leave_pre.chip_pool = leave_pre
+            .seats
+            .iter()
+            .map(|seat| seat.stack + seat.bet + seat.pending_addon)
+            .sum::<u64>()
+            + leave_pre.pot;
+        let caller = leave_pre.seats[0].player;
+        let (leave_task, leave_post) = dispatch_task(
+            leave_pre,
+            caller,
+            texas_dispatch::selectors::fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("fold args should serialize"),
+        );
+        assert!(!leave_post.seats[1].is_occupied());
+        Orchestrator::new()
+            .prove_and_verify_task(&leave_task)
+            .expect("terminal fold with winner leave refund should prove");
     }
 
     /// 回归：heads-up 最后一个 check 会收池并推进到公共牌揭示阶段。该阶段没有
@@ -3454,10 +3581,9 @@ mod tests {
             .expect("end-of-round check should prove and verify");
     }
 
-    /// A WAITING-state kick may internally reset the table and bump version
-    /// more than once. The single-step kick AIR must reject that composite path.
+    /// A WAITING-state kick internally resets the table and is composed with a reset proof.
     #[test]
-    fn orchestrator_rejects_kick_that_triggers_nested_reset() {
+    fn orchestrator_proves_kick_that_triggers_nested_reset() {
         let mut pre = make_table("kick-nested-reset");
         pre.seats[0].player = [0x31; 20];
         pre.seats[0].stack = 1_000;
@@ -3474,10 +3600,9 @@ mod tests {
             .expect("kick args should serialize"),
         );
         assert!(post.version > pre.version.saturating_add(1));
-        assert!(matches!(
-            Orchestrator::new().prove_and_verify_task(&task),
-            Err(TexasAirError::UnsupportedBettingTransition(_))
-        ));
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("WAITING kick nested reset should prove as a ResetOnly component");
     }
 
     /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
@@ -3503,8 +3628,43 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("check args should serialize"),
         );
         let mut orch = Orchestrator::new();
-        orch.prove_and_verify_task(&task)
+        let archived = orch
+            .prove_verify_and_archive_task(&task)
             .expect("enabled check path should prove and verify");
+        let composition = archived
+            .composition_archive
+            .as_ref()
+            .expect("check must carry four independent component proofs");
+        assert_eq!(composition.stages().len(), 4);
+        let wire = composition.to_bytes().expect("bundle should encode");
+        let decoded = crate::airs::composition::ArchivedCompositionProofBundle::from_bytes(&wire)
+            .expect("bundle should decode");
+        crate::airs::composition::verify_composition_bundle(&task, &decoded)
+            .expect("decoded four-proof bundle should verify");
+        Orchestrator::verify_archived_proven_task(&task, &archived)
+            .expect("complete archived task should verify method and component proofs");
+
+        let mut missing = archived.clone();
+        missing.composition_archive = None;
+        assert!(
+            Orchestrator::verify_archived_proven_task(&task, &missing).is_err(),
+            "composite archive verification must fail closed without all four component proofs"
+        );
+
+        let plan_digest = composition.plan_digest();
+        let digest_offset = wire
+            .windows(plan_digest.len())
+            .position(|window| window == plan_digest)
+            .expect("encoded bundle must contain its plan digest");
+        let mut tampered_wire = wire;
+        tampered_wire[digest_offset] ^= 0x01;
+        let tampered =
+            crate::airs::composition::ArchivedCompositionProofBundle::from_bytes(&tampered_wire)
+                .expect("plan-digest corruption leaves a structurally valid envelope");
+        assert!(
+            crate::airs::composition::verify_composition_bundle(&task, &tampered).is_err(),
+            "canonical replay must reject a modified composition plan digest"
+        );
     }
 
     /// 端到端：两步链式证明，验证 state_root 链衔接。

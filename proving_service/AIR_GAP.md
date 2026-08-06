@@ -25,8 +25,8 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
   assignment 显式路由到两个 board；reconstruct 保留已公开双 board 并从新 deck index
   继续。终局 RIT canonical replay + Orchestrator prove/verify 已有集成测试。
 - last-opponent `fold` / `fold_with_proof` 会先收集 live bets，再证明 gross pot、rake、winner
-  award 与 winner stack 的三条资金等式并 reset 到 `WAITING`；带 pending addon/leave 的复合
-  reset 继续 fail-closed。
+  award 与 winner stack 的三条资金等式并 reset 到 `WAITING`；pending addon credit、leave
+  refund 和 seat removal 由独立 Settlement/Reset component proof 绑定。
 - runner 按每个 reveal phase 的 assignment（局部索引）读取加密牌索引，并在 showdown 对
   保存的 partial ciphertext 构造 DLEq token proof。
 
@@ -36,8 +36,8 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
   Orchestrator 的 canonical VM replay 与绑定的 trace row。
 - `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
   的 mid-round 与 clean last-opponent settlement 路径均绑定 native DLEq receipt、前后牌组
-  commitment 与 canonical fold outcome。terminal reset 若同时处理 pending addon/leave，仍
-  保持 fail-closed。
+  commitment 与 canonical fold outcome。terminal reset 同时处理 pending addon/leave 时，
+  完整生产 archive 必须携带四段 component proof bundle。
 - stage-3 dual-proof package 已覆盖全部六条 crypto route：`fold_with_proof`、
   `join_and_shuffle`、
   `submit_shuffle_v2`、`leave_with_proof`、`submit_player_reveal_tokens` 与

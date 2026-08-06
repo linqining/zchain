@@ -7,8 +7,10 @@
 //! current method AIRs and later promoted to independent proofs without inventing
 //! persistent intermediate table roots.
 
+pub(crate) mod air;
 pub mod bet_collection;
 pub mod plan;
+pub mod proof;
 pub mod round_advance;
 pub mod seat_update;
 pub mod settlement;
@@ -19,8 +21,13 @@ use stwo_constraint_framework::EvalAtRow;
 use crate::precompile_binding::{DIGEST_LIMBS, digest_to_m31_limbs};
 
 pub use plan::{
-    COMPOSITE_PLAN_VERSION, CompositeTransitionPlan, StageKind, StageLink,
-    derive_composite_transition_plan,
+    COMPOSITE_PLAN_VERSION, ComponentStatement, CompositeTransitionPlan, StageKind, StageLink,
+    derive_composite_transition_plan, derive_composite_transition_plan_from_task,
+    supports_composite_proof,
+};
+pub use proof::{
+    ArchivedComponentProof, ArchivedCompositionProofBundle, COMPOSITION_PROOF_BUNDLE_VERSION,
+    prove_composition_bundle, verify_composition_bundle,
 };
 
 /// Columns shared by every composable stage.

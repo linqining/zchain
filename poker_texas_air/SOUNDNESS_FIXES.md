@@ -8,7 +8,8 @@
 > P06 下注动作已覆盖 same-round 分支、heads-up terminal check、clean terminal
 > `call` / `raise` / `bet`，以及 clean last-opponent `fold` / `fold_with_proof` settlement。
 > showdown side-pot/RIT 已通过 canonical native `SettlementPlan` replay + digest/award AIR
-> binding 支持；带 pending addon/leave 的复合 reset 仍 fail-closed。
+> binding 支持；pending addon/leave terminal reset 与 WAITING kick nested reset 已由独立
+> Settlement/Reset component proof 补齐。
 
 本文档记录针对 `poker_lean`（`Audit/SoundnessAudit.lean`）形式化审计所列反例的
 Rust AIR 修复，并明确残余风险。

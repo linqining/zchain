@@ -732,6 +732,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
         dispatch_call: None,
         precompile_binding: None,
         expected_trace_row: None,
+        component: None,
     };
     public_inputs.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
 
@@ -1100,6 +1101,10 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 &task.post_table,
                 *seat_index,
                 "fold_with_proof",
+                Some(
+                    &crate::airs::composition::derive_composite_transition_plan_from_task(task)?
+                        .settlement,
+                ),
             )?;
             let player_pk = task
                 .pre_table
