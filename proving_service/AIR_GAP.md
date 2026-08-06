@@ -27,6 +27,11 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
 - last-opponent `fold` / `fold_with_proof` 会先收集 live bets，再证明 gross pot、rake、winner
   award 与 winner stack 的三条资金等式并 reset 到 `WAITING`；pending addon credit、leave
   refund 和 seat removal 由独立 Settlement/Reset component proof 绑定。
+- terminal `auto_fold` / `force_fold` 使用同一 `EndWithoutShowdown` method projection 和四段
+  component bundle；creator-only `auto_fold` 与 `force_fold` 都绑定 canonical table-creator
+  authorization request/receipt digest，归档重启后会同时重验 method 与四份 component proof。
+- `tick` 已进入四段 durable archive：betting-timeout fold、收池/round advance、无摊牌、showdown
+  与 reset-only 分支会激活对应 component，不能再只持久化 Tick method proof。
 - active heads-up `kick_player`（无论是否踢当前行动者）已消除 native 双 reset/version bump
   或 bare reset 丢失底池的分支，并规范化为一次
   `BetCollection -> WithoutShowdown -> reset`：method AIR 绑定 `reset_cascade`、最终 WAITING/零
@@ -43,9 +48,24 @@ method archive 与 component archive 的验证也并行执行。参考开发机�
 `TEXAS_PROVE_TIMING=1` 后，`--full-hand` 会额外打印 method/SeatUpdate/BetCollection/
 RoundAdvance/Settlement 的 prove/verify 明细；默认不启用计时。
 
+进一步分项显示固定 prover 启动成本占主导：完整牌局旧路径有 26 个连续 composite transition，
+即 104 次 component prove。`--full-hand` 现使用 batch throughput 路径，把同种 Stage 的 26 行
+canonical transition 写入一份 1024 行 trace，最终只生成 4 份 Stage proof。verifier 重放 task、
+重建完整 trace 并独立重算 original-trace commitment，拒绝 proof 自报行；batch/task digest、
+table/hand/call range 和 Stage kind 同时进入 transcript。
+
+2026-08-06 最终复测：完整牌局由 335.99s 降至 168.14s（约 -50%），四份 batch Stage prove
+分别约 6.00s、6.04s、7.28s、8.33s，batch step wall-clock 20.36s；每类 Stage 只执行一次
+host verify。不同轮次受机器负载影响曾测得 154.48s，但 component prove 启动数从 104 降到 4
+是稳定结果。生产 server 的 durable package v2 暂时仍使用 per-task component bundle，batch
+archive 尚未接入 job/package 引用与重启恢复，所以该优化当前针对 full-hand/in-memory
+throughput，不会放宽现有持久化 fail-closed 规则。
+
 ## 仍需解决的安全与产品边界
 
-- `kick_player` / `force_fold` 已把 canonical table-creator authorization request/receipt
+- `start_hand` / `reset_for_next_hand` / `kick_player` / `force_fold` / creator-only
+  `auto_fold` 已把 canonical table-creator
+  authorization request/receipt
   digest 放入 AIR；consensus anchor 会显式验证 included transaction signature，并从签名
   pubkey 重建 caller。AIR 不模拟 ECDSA/Ed25519，因此未锚定的单 proof 不能单独证明交易授权。
 - production trace-visible u64 金额已统一为 verifier-reconstructed 4×16-bit limbs；资金运算
@@ -53,11 +73,19 @@ RoundAdvance/Settlement 的 prove/verify 明细；默认不启用计时。
   与 pot checked-add，以及 auto/force-fold、addon/rebuy、reconstruct、create/join/leave/reset、
   join-and-shuffle/submit-shuffle/leave-with-proof 的真实 pot 投影；不改变 pot 的路径使用完整
   4-limb equality，create/reset 的 canonical post pot 必须为零。
-- terminal auto-fold/force-fold settlement、tick 间接触发的复合状态变更仍 fail-closed 或依赖
-  canonical native replay，尚未全部拆成独立 component proof。
-- `reset_for_next_hand`、`join_and_shuffle`、`leave_with_proof` 的完整座位与资金约束位于 durable
-  四段 component bundle；裸 method STARK 只绑定方法级投影和 canonical pot，不能脱离 bundle
-  当作完整结算证明。
+- `tick` 的 start-hand、仅启动 timer、shuffle/reconstruct/reveal 修复分支仍依赖 canonical
+  native replay 与完整 table/plan digest；当前四段 AIR 对这些 lifecycle 变化保持 inactive，不能
+  解释成独立执行了 start-hand、deck rebuild 或 reconstruct 算法。若要消除恶意 host 信任，需新增
+  lifecycle-specific component/verifier program。
+- `reset_for_next_hand` 的完整座位与资金约束位于 durable 四段 component bundle；裸
+  method STARK 不能脱离 bundle 当作完整重置证明。`join_and_shuffle` / `leave_with_proof`
+  则是 method STARK + crypto dual-proof package，不携带四段 component proof；完整 deck/seat
+  语义仍由 canonical native replay 和 precompile receipt 绑定。
+- `start_hand` / `reset_for_next_hand` 的零参数 dispatch 已 fail-closed 拒绝尾随 bytes，
+  避免同一授权状态转换存在多个非 canonical 调用编码。
+- showdown settlement projection 严格校验唯一 `HandSettled` marker、固定升序 winners 与
+  award 聚合，以及 `RakeCollected` 的唯一性和 pot/rake 数值；不完整或错配的事件集合不会
+  进入四段 component plan。
 - `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
   的 mid-round 与 clean last-opponent settlement 路径均绑定 native DLEq receipt、前后牌组
   commitment 与 canonical fold outcome。terminal reset 同时处理 pending addon/leave 时，

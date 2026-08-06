@@ -8,7 +8,8 @@
 //! 2. `seat_index == current_turn`
 //! 3. 玩家未 fold、未 all_in
 //! 4. 触发条件：`current_time - turn_started_at >= turn_timeout`
-//! 5. 状态变更：`seat.folded = true`, `version += 1`
+//! 5. mid-round：`seat.folded = true`, `version += 1`
+//! 6. last-player-standing：收集下注、结算并 reset 到 WAITING
 //!
 //! 与 [`crate::airs::actions::fold`] 的区别：
 //! - `fold`：玩家主动操作
@@ -17,8 +18,9 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 42 个：seat、完整 timeout 输入、64-bit 饱和 deadline 加法和
-//!   `current_time >= deadline` 的借位证明，以及 fold/turn 输出。
+//! - timeout/fold 列 42 个
+//! - 管理员授权列 34 个
+//! - terminal settlement 列 34 个（mid-round 时全零）
 //!
 //! `DispatchContext::block_timestamp` 是 consensus input。该值由
 //! `Orchestrator` 从重放的 dispatch task 取出，而非由 prover 自行选择。
@@ -26,10 +28,14 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
+use crate::airs::actions::end_without_showdown::{self, EndWithoutShowdownRow, FoldOutcome};
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, bool_to_m31, u8_to_m31,
+    u64_to_m31_limbs,
 };
+use crate::authorization_binding::AdminAuthorizationAirBinding;
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::DIGEST_LIMBS;
 
 /// `auto_fold` 业务特定列布局。
 pub mod cols {
@@ -66,8 +72,17 @@ pub mod cols {
     pub const TIME_SUB_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 37;
     /// `betting_started_at != 0` 的非零逆元 witness。
     pub const PRE_BETTING_STARTED_AT_INV: usize = COMMON_NUM_COLUMNS + 41;
+    /// 管理员授权 ABI 版本。
+    pub const AUTH_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 42;
+    /// 管理员授权角色。
+    pub const AUTH_ROLE: usize = COMMON_NUM_COLUMNS + 43;
+    /// 完整授权请求摘要。
+    pub const AUTH_REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 44;
+    /// 完整授权成功 receipt 摘要。
+    pub const AUTH_RECEIPT_DIGEST_BASE: usize = AUTH_REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `auto_fold` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 42;
+    pub const NUM_COLUMNS: usize =
+        AUTH_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS + super::end_without_showdown::NUM_COLUMNS;
 }
 
 /// `auto_fold` 输入参数。
@@ -83,8 +98,10 @@ pub struct AutoFoldInput {
     pub betting_timeout_ms: u64,
     /// 目标座位调用前的 Time Bank 余额。
     pub pre_time_bank_ms: u64,
-    /// mid-round 推进后的下一行动座位。
-    pub post_current_turn: u8,
+    /// Native-replayed mid-round or terminal settlement branch.
+    pub outcome: FoldOutcome,
+    /// Verifier-issued table-creator authorization receipt.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 /// `auto_fold` AIR 公开输入。
@@ -192,6 +209,12 @@ impl FrameworkEval for AutoFoldAir {
             eval.next_trace_mask(),
         ];
         let pre_betting_started_at_inv = eval.next_trace_mask();
+        let auth_abi_version = eval.next_trace_mask();
+        let auth_role = eval.next_trace_mask();
+        let auth_request_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let auth_receipt_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -299,22 +322,44 @@ impl FrameworkEval for AutoFoldAir {
         }
         eval.add_constraint(time_sub_borrow[3].clone());
 
-        // 约束 3：output_folded == 1
-        eval.add_constraint(is_active.clone() * (output_folded - one));
+        // 约束 3：terminal reset 会清除 folded；mid-round 保留 folded。
+        let expected_folded: E::F = bool_to_m31(self.input.outcome.output_folded()).into();
+        eval.add_constraint(is_active.clone() * (output_folded - expected_folded));
 
         // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
         // round_state_is_betting 用 degree-4 vanishing (rs-2)(rs-3)(rs-4)(rs-5)==0
         // 经 q=rs² witness 展开为 degree-2 项，强制 rs ∈ {PREFLOP,FLOP,TURN,RIVER}。
-        eval.add_constraint(common.round_state_unchanged());
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
-        // 约束 5（审计共性）：pot 完整 4-limb 不变（auto_fold 不改变 pot）。
-        for __c in common.pot_unchanged_4limb() {
-            eval.add_constraint(__c);
+
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.outcome.post_current_turn())).into();
+        eval.add_constraint(is_active.clone() * (output_current_turn - expected_post_turn));
+
+        // 约束 5：绑定 creator authorization request/receipt。
+        let expected_abi: E::F = M31::from(u32::from(self.input.authorization.abi_version)).into();
+        let expected_role: E::F = M31::from(u32::from(self.input.authorization.role)).into();
+        eval.add_constraint(is_active.clone() * (auth_abi_version - expected_abi));
+        eval.add_constraint(is_active.clone() * (auth_role - expected_role));
+        for limb in 0..DIGEST_LIMBS {
+            let request: E::F = self.input.authorization.request_digest[limb].into();
+            let receipt: E::F = self.input.authorization.receipt_digest[limb].into();
+            eval.add_constraint(is_active.clone() * (auth_request_digest[limb].clone() - request));
+            eval.add_constraint(is_active.clone() * (auth_receipt_digest[limb].clone() - receipt));
         }
 
-        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
-        eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
+        match &self.input.outcome {
+            FoldOutcome::MidRound { .. } => {
+                eval.add_constraint(common.round_state_unchanged());
+                for constraint in common.pot_unchanged_4limb() {
+                    eval.add_constraint(constraint);
+                }
+                end_without_showdown::evaluate(&mut eval, &common, None);
+            }
+            FoldOutcome::EndWithoutShowdown(settlement) => {
+                end_without_showdown::evaluate(&mut eval, &common, Some(settlement));
+            }
+        }
 
         eval
     }
@@ -357,6 +402,10 @@ pub struct AutoFoldRow {
     pub time_sub_borrow: [M31; 4],
     /// `pre_betting_started_at` 全零检查的逆元。
     pub pre_betting_started_at_inv: M31,
+    /// Verifier-issued administrator authorization binding.
+    pub authorization: AdminAuthorizationAirBinding,
+    /// Shared terminal settlement columns; zero for mid-round folds.
+    pub settlement: EndWithoutShowdownRow,
 }
 
 impl AutoFoldRow {
@@ -437,11 +486,11 @@ impl AutoFoldRow {
             ),
             input_seat_index: u8_to_m31(input.seat_index),
             input_current_time: current_time,
-            output_folded: M31::from(1u32),
+            output_folded: bool_to_m31(input.outcome.output_folded()),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
             input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
-            output_current_turn: u8_to_m31(input.post_current_turn),
+            output_current_turn: u8_to_m31(input.outcome.post_current_turn()),
             pre_betting_started_at,
             betting_timeout_ms,
             pre_time_bank_ms,
@@ -452,6 +501,13 @@ impl AutoFoldRow {
             time_elapsed,
             time_sub_borrow,
             pre_betting_started_at_inv,
+            authorization: input.authorization,
+            settlement: match &input.outcome {
+                FoldOutcome::MidRound { .. } => EndWithoutShowdownRow::zero(),
+                FoldOutcome::EndWithoutShowdown(settlement) => {
+                    EndWithoutShowdownRow::active(settlement)
+                }
+            },
         }
     }
 
@@ -476,6 +532,13 @@ impl AutoFoldRow {
             time_elapsed: [ZERO; 4],
             time_sub_borrow: [ZERO; 4],
             pre_betting_started_at_inv: ZERO,
+            authorization: AdminAuthorizationAirBinding {
+                abi_version: 0,
+                role: 0,
+                request_digest: [ZERO; DIGEST_LIMBS],
+                receipt_digest: [ZERO; DIGEST_LIMBS],
+            },
+            settlement: EndWithoutShowdownRow::zero(),
         }
     }
 
@@ -499,6 +562,11 @@ impl AutoFoldRow {
         v.extend_from_slice(&self.time_elapsed);
         v.extend_from_slice(&self.time_sub_borrow);
         v.push(self.pre_betting_started_at_inv);
+        v.push(M31::from(u32::from(self.authorization.abi_version)));
+        v.push(M31::from(u32::from(self.authorization.role)));
+        v.extend_from_slice(&self.authorization.request_digest);
+        v.extend_from_slice(&self.authorization.receipt_digest);
+        self.settlement.append_to(&mut v);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

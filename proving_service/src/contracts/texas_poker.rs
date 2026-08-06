@@ -15,7 +15,10 @@ use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch as texas_dispatch;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
-use poker_texas_air::airs::composition::ArchivedCompositionProofBundle;
+use poker_texas_air::airs::composition::{
+    ArchivedCompositionBatchProofBundle, ArchivedCompositionProofBundle,
+    MAX_COMPOSITION_BATCH_TASKS, prove_composition_batch, supports_composite_proof,
+};
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
 use poker_texas_air::dual_proof::dual_proof_from_archived;
 use poker_texas_air::orchestrator::{ArchivedProvenTask, Orchestrator, ProvenTask};
@@ -45,6 +48,10 @@ pub struct TexasPokerPlugin {
     proved_archives: Vec<poker_texas_air::proof_archive::ArchivedMethodProof>,
     /// First task index in the currently active hand segment.
     segment_start: usize,
+    /// Composite tasks whose method proofs are complete but Stage proofs are deferred.
+    deferred_composition_tasks: Vec<ProveTask>,
+    /// Verified four-proof batches produced for deferred composite transitions.
+    composition_batches: Vec<ArchivedCompositionBatchProofBundle>,
 }
 
 impl TexasPokerPlugin {
@@ -59,6 +66,8 @@ impl TexasPokerPlugin {
             proved_tasks: Vec::new(),
             proved_archives: Vec::new(),
             segment_start: 0,
+            deferred_composition_tasks: Vec::new(),
+            composition_batches: Vec::new(),
         }
     }
 
@@ -82,6 +91,8 @@ impl TexasPokerPlugin {
             proved_tasks: Vec::new(),
             proved_archives: Vec::new(),
             segment_start: 0,
+            deferred_composition_tasks: Vec::new(),
+            composition_batches: Vec::new(),
         }
     }
 
@@ -125,6 +136,11 @@ impl TexasPokerPlugin {
     /// trait method. The prove counter advances only after proof generation,
     /// native verification, archive encoding, and receipt insertion all succeed.
     pub fn prove_task_archived(&mut self, task: &ProveTask) -> PluginResult<ArchivedProvenTask> {
+        if !self.deferred_composition_tasks.is_empty() {
+            return Err(PluginError::Precondition(
+                "cannot use per-task composition proving while a batch is pending".into(),
+            ));
+        }
         if task.pre_table.hand_id != task.post_table.hand_id {
             self.orchestrator.start_new_chain_segment();
             self.segment_start = self.proved_tasks.len();
@@ -137,6 +153,72 @@ impl TexasPokerPlugin {
         self.proved_archives.push(archived.archive.clone());
         self.prove_count += 1;
         Ok(archived)
+    }
+
+    /// Prove one method immediately while collecting composite Stage transitions for one later
+    /// 1024-row batch proof per Stage.
+    ///
+    /// Non-composite methods keep the ordinary complete proving path. Composite methods are not
+    /// durable-package complete until [`Self::finalize_composition_batches`] succeeds.
+    pub fn prove_task_deferred_components(&mut self, task: &ProveTask) -> PluginResult<ProvenTask> {
+        if !supports_composite_proof(task.method_kind) {
+            self.finalize_composition_batches()?;
+            return Ok(self.prove_task_archived(task)?.summary);
+        }
+        if task.pre_table.hand_id != task.post_table.hand_id {
+            return Err(PluginError::Precondition(
+                "composite batch task must not cross a hand boundary".into(),
+            ));
+        }
+        if let Some(previous) = self.deferred_composition_tasks.last() {
+            let expected_call_seq = previous.call_seq.checked_add(1).ok_or_else(|| {
+                PluginError::Precondition("deferred composition call_seq overflow".into())
+            })?;
+            if task.table_id != previous.table_id
+                || task.hand_id != previous.hand_id
+                || task.call_seq != expected_call_seq
+            {
+                self.finalize_composition_batches()?;
+            }
+        }
+        let archived = self
+            .orchestrator
+            .prove_verify_and_archive_method_only(task)
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        self.proved_tasks.push(task.clone());
+        self.proved_archives.push(archived.archive);
+        self.deferred_composition_tasks.push(task.clone());
+        self.prove_count += 1;
+        Ok(archived.summary)
+    }
+
+    /// Finalize all collected composite transitions as four proofs per 1024-task chunk.
+    ///
+    /// The generated bundles are immediately replay-verified before pending tasks are cleared.
+    /// On any error, the pending task list remains available for a retry.
+    pub fn finalize_composition_batches(&mut self) -> PluginResult<usize> {
+        if self.deferred_composition_tasks.is_empty() {
+            return Ok(0);
+        }
+        let mut completed = Vec::new();
+        for tasks in self
+            .deferred_composition_tasks
+            .chunks(MAX_COMPOSITION_BATCH_TASKS)
+        {
+            let bundle = prove_composition_batch(tasks)
+                .map_err(|error| PluginError::Prover(error.to_string()))?;
+            completed.push(bundle);
+        }
+        let count = completed.len();
+        self.composition_batches.extend(completed);
+        self.deferred_composition_tasks.clear();
+        Ok(count)
+    }
+
+    /// Verified throughput-oriented composition batches retained by this plugin instance.
+    #[must_use]
+    pub fn composition_batches(&self) -> &[ArchivedCompositionBatchProofBundle] {
+        &self.composition_batches
     }
 
     /// Reverify and restore one durable proof without changing persisted counters.

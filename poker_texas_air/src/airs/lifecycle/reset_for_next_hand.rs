@@ -21,7 +21,9 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
+use crate::authorization_binding::AdminAuthorizationAirBinding;
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::DIGEST_LIMBS;
 
 /// `reset_for_next_hand` 业务特定列布局。
 pub mod cols {
@@ -37,15 +39,25 @@ pub mod cols {
     pub const INPUT_SHUFFLE_PHASE: usize = COMMON_NUM_COLUMNS + 5;
     /// `INPUT_SHUFFLE_PHASE_Q` 列（Gap 6 witness：shuffle_phase²，拆 3 次 vanishing）。
     pub const INPUT_SHUFFLE_PHASE_Q: usize = COMMON_NUM_COLUMNS + 6;
+    /// Creator authorization ABI version.
+    pub const AUTH_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 7;
+    /// Creator authorization role.
+    pub const AUTH_ROLE: usize = COMMON_NUM_COLUMNS + 8;
+    /// Creator authorization request digest.
+    pub const AUTH_REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 9;
+    /// Creator authorization receipt digest.
+    pub const AUTH_RECEIPT_DIGEST_BASE: usize = AUTH_REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 7;
+    pub const NUM_COLUMNS: usize = AUTH_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `reset_for_next_hand` 输入参数。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ResetForNextHandInput {
     /// 调用时的 `shuffle_state.phase`（Gap 6：必须 ∈ {0,1,2,3}）。
     pub shuffle_phase: u8,
+    /// Verifier-issued table-creator authorization receipt.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 /// `reset_for_next_hand` AIR。
@@ -101,6 +113,12 @@ impl FrameworkEval for ResetForNextHandAir {
         // Gap 6：shuffle_phase 与 witness q
         let input_shuffle_phase = eval.next_trace_mask();
         let input_shuffle_phase_q = eval.next_trace_mask();
+        let auth_abi_version = eval.next_trace_mask();
+        let auth_role = eval.next_trace_mask();
+        let auth_request_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let auth_receipt_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：output_new_round_state == ROUND_WAITING (== 0)
         eval.add_constraint(is_active.clone() * output_new_round_state);
@@ -136,6 +154,23 @@ impl FrameworkEval for ResetForNextHandAir {
             - six * input_shuffle_phase.clone();
         eval.add_constraint(is_active.clone() * vp);
 
+        let expected_abi: E::F = M31::from(u32::from(self.input.authorization.abi_version)).into();
+        let expected_role: E::F = M31::from(u32::from(self.input.authorization.role)).into();
+        eval.add_constraint(is_active.clone() * (auth_abi_version - expected_abi));
+        eval.add_constraint(is_active.clone() * (auth_role - expected_role));
+        for limb in 0..DIGEST_LIMBS {
+            eval.add_constraint(
+                is_active.clone()
+                    * (auth_request_digest[limb].clone()
+                        - E::F::from(self.input.authorization.request_digest[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (auth_receipt_digest[limb].clone()
+                        - E::F::from(self.input.authorization.receipt_digest[limb])),
+            );
+        }
+
         eval
     }
 }
@@ -153,6 +188,8 @@ pub struct ResetForNextHandRow {
     pub input_shuffle_phase: M31,
     /// Gap 6 witness：shuffle_phase²。
     pub input_shuffle_phase_q: M31,
+    /// Verifier-issued table-creator authorization binding.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 impl ResetForNextHandRow {
@@ -200,6 +237,7 @@ impl ResetForNextHandRow {
             post_pending_addon: [ZERO; 4],
             input_shuffle_phase: sp,
             input_shuffle_phase_q: q,
+            authorization: input.authorization,
         }
     }
     /// padding 行。
@@ -211,6 +249,12 @@ impl ResetForNextHandRow {
             post_pending_addon: [ZERO; 4],
             input_shuffle_phase: ZERO,
             input_shuffle_phase_q: ZERO,
+            authorization: AdminAuthorizationAirBinding {
+                abi_version: 0,
+                role: 0,
+                request_digest: [ZERO; DIGEST_LIMBS],
+                receipt_digest: [ZERO; DIGEST_LIMBS],
+            },
         }
     }
     /// 转列向量。
@@ -221,6 +265,10 @@ impl ResetForNextHandRow {
         v.extend_from_slice(&self.post_pending_addon);
         v.push(self.input_shuffle_phase);
         v.push(self.input_shuffle_phase_q);
+        v.push(M31::from(u32::from(self.authorization.abi_version)));
+        v.push(M31::from(u32::from(self.authorization.role)));
+        v.extend_from_slice(&self.authorization.request_digest);
+        v.extend_from_slice(&self.authorization.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

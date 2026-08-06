@@ -18,7 +18,9 @@ use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
     u64_to_m31_limbs,
 };
+use crate::authorization_binding::AdminAuthorizationAirBinding;
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::DIGEST_LIMBS;
 
 /// `start_hand` 业务特定列布局。
 pub mod cols {
@@ -43,8 +45,16 @@ pub mod cols {
     pub const INPUT_ACTIVE_COUNT_PROD: usize = COMMON_NUM_COLUMNS + 13;
     /// `pre_pot + ante_collected = post_pot` 的 ripple carry。
     pub const ANTE_POT_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 14;
+    /// Creator authorization ABI version.
+    pub const AUTH_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 17;
+    /// Creator authorization role.
+    pub const AUTH_ROLE: usize = COMMON_NUM_COLUMNS + 18;
+    /// Creator authorization request digest.
+    pub const AUTH_REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 19;
+    /// Creator authorization receipt digest.
+    pub const AUTH_RECEIPT_DIGEST_BASE: usize = AUTH_REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 17;
+    pub const NUM_COLUMNS: usize = AUTH_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `start_hand` 输入参数。
@@ -64,6 +74,8 @@ pub struct StartHandInput {
     pub pre_pot: u64,
     /// 调用后底池。
     pub post_pot: u64,
+    /// Verifier-issued table-creator authorization receipt.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 /// `start_hand` AIR。
@@ -133,6 +145,12 @@ impl FrameworkEval for StartHandAir {
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
+        let auth_abi_version = eval.next_trace_mask();
+        let auth_role = eval.next_trace_mask();
+        let auth_request_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let auth_receipt_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：active_count == input.active_count
         let expected_count: E::F = M31::from(u32::from(self.input.active_count)).into();
@@ -211,6 +229,23 @@ impl FrameworkEval for StartHandAir {
             eval.add_constraint(constraint);
         }
 
+        let expected_abi: E::F = M31::from(u32::from(self.input.authorization.abi_version)).into();
+        let expected_role: E::F = M31::from(u32::from(self.input.authorization.role)).into();
+        eval.add_constraint(is_active.clone() * (auth_abi_version - expected_abi));
+        eval.add_constraint(is_active.clone() * (auth_role - expected_role));
+        for limb in 0..DIGEST_LIMBS {
+            eval.add_constraint(
+                is_active.clone()
+                    * (auth_request_digest[limb].clone()
+                        - E::F::from(self.input.authorization.request_digest[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (auth_receipt_digest[limb].clone()
+                        - E::F::from(self.input.authorization.receipt_digest[limb])),
+            );
+        }
+
         eval
     }
 }
@@ -238,6 +273,8 @@ pub struct StartHandRow {
     pub input_active_count_prod: M31,
     /// ante 加入 pot 的 3 个 ripple-carry bit。
     pub ante_pot_add_carry: [M31; 3],
+    /// Verifier-issued table-creator authorization binding.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 impl StartHandRow {
@@ -293,6 +330,7 @@ impl StartHandRow {
             } else {
                 [ZERO; 3]
             },
+            authorization: input.authorization,
         }
     }
     /// padding 行。
@@ -310,6 +348,12 @@ impl StartHandRow {
             input_active_count_inv: ZERO,
             input_active_count_prod: ZERO,
             ante_pot_add_carry: [ZERO; 3],
+            authorization: AdminAuthorizationAirBinding {
+                abi_version: 0,
+                role: 0,
+                request_digest: [ZERO; DIGEST_LIMBS],
+                receipt_digest: [ZERO; DIGEST_LIMBS],
+            },
         }
     }
     /// 转列向量。
@@ -325,6 +369,10 @@ impl StartHandRow {
         v.push(self.input_active_count_inv);
         v.push(self.input_active_count_prod);
         v.extend_from_slice(&self.ante_pot_add_carry);
+        v.push(M31::from(u32::from(self.authorization.abi_version)));
+        v.push(M31::from(u32::from(self.authorization.role)));
+        v.extend_from_slice(&self.authorization.request_digest);
+        v.extend_from_slice(&self.authorization.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

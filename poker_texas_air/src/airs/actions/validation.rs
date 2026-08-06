@@ -495,15 +495,38 @@ pub(crate) fn validate_auto_fold(
     air: &AutoFoldAir,
     public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<()> {
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::AutoFold)?;
+    let authorization = AdminAuthorizationBinding::verify_table_creator(
+        MethodKind::AutoFold,
+        &canonical.call.context,
+        &canonical.call.selector,
+        &canonical.call.raw_args,
+        canonical.pre.creator,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    )?
+    .air_binding();
     let tables = validate_native_mid_round(
         public_inputs,
         MethodKind::AutoFold,
         NativeAction::AutoFold {
             seat_index: air.input.seat_index,
         },
-        false,
+        true,
     )?;
-    let post_turn = tables.post.current_turn.expect("mid-round checked");
+    let expected_outcome = derive_fold_outcome(
+        &tables.pre,
+        &tables.post,
+        air.input.seat_index,
+        "auto_fold",
+        Some(&tables.composition.settlement),
+    )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "auto_fold")?;
     let deadline = tables
         .pre
@@ -516,7 +539,8 @@ pub(crate) fn validate_auto_fold(
         || air.input.pre_betting_started_at == 0
         || air.input.pre_time_bank_ms != 0
         || air.input.current_time < deadline
-        || air.input.post_current_turn != post_turn
+        || air.input.outcome != expected_outcome
+        || air.input.authorization != authorization
     {
         return Err(TexasAirError::SpecViolation(
             "auto_fold: AIR timeout inputs do not match the canonical table transition".into(),
@@ -566,10 +590,16 @@ pub(crate) fn validate_force_fold(
         NativeAction::ForceFold {
             seat_index: air.input.seat_index,
         },
-        false,
+        true,
     )?;
-    let post_turn = tables.post.current_turn.expect("mid-round checked");
-    if air.input.post_current_turn != post_turn || air.input.authorization != authorization {
+    let expected_outcome = derive_fold_outcome(
+        &tables.pre,
+        &tables.post,
+        air.input.seat_index,
+        "force_fold",
+        Some(&tables.composition.settlement),
+    )?;
+    if air.input.outcome != expected_outcome || air.input.authorization != authorization {
         return Err(TexasAirError::SpecViolation(
             "force_fold: AIR input/authorization does not match canonical dispatch".into(),
         ));

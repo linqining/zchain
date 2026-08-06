@@ -15,7 +15,8 @@
 //! ```
 //!
 //! 每步经 [`crate::contracts::TexasPokerPlugin`] 真实 dispatch，产出的 `ProveTask`
-//! 由 Orchestrator prove + verify；并记录每步 dispatch / prove 耗时。
+//! 由 Orchestrator 立即生成并验证 method proof；连续 composite transition 在牌局结束时按
+//! Stage 批量装入四份 1024 行 proof。报告同时记录每步 dispatch/method prove 与最终 batch 耗时。
 //!
 //! # 容错与覆盖范围
 //!
@@ -25,7 +26,8 @@
 //!
 //! 目前的 heads-up 回归覆盖 create/join/start、两次 shuffle、preflop 到 showdown
 //! 的所有 reveal token、四轮下注，以及最后一次 showdown reveal 触发的结算/reset。
-//! 各任务均经 canonical VM replay、Stwo prove 和 host verify；该链仍不是递归聚合
+//! 各任务均经 canonical VM replay、Stwo prove 和 host verify；批量 Stage verifier 还会重算
+//! verifier-owned trace commitment。该链仍不是递归聚合
 //! 证明，也不构成区块共识锚定。
 //!
 //! # 不声称的内容
@@ -180,7 +182,7 @@ impl FullHandRunner {
                     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
                         let p_start = Instant::now();
                         let _drained_before = poker_texas_air::prove_timing::take_drain();
-                        let ok = plugin.prove_task(task).is_ok();
+                        let ok = plugin.prove_task_deferred_components(task).is_ok();
                         if !ok {
                             ctx.stopped_at = Some("start_hand prove/verify failed".to_string());
                         }
@@ -356,6 +358,33 @@ impl FullHandRunner {
             "reveal_showdown",
         );
 
+        // All composite transitions after the shuffle phase are contiguous. Pack their four
+        // Stage projections into four 1024-row proofs instead of proving four components per
+        // dispatch. Method proofs remain immediate so the verified receipt chain is unchanged.
+        if ctx.stopped_at.is_none() {
+            let p_start = Instant::now();
+            let _drained_before = poker_texas_air::prove_timing::take_drain();
+            match plugin.finalize_composition_batches() {
+                Ok(batch_count) => ctx.steps.push(StepTiming {
+                    method: format!("composition_batch[{batch_count}x4 proofs]"),
+                    dispatch: Duration::ZERO,
+                    prove: p_start.elapsed(),
+                    ok: true,
+                    proof_breakdown: poker_texas_air::prove_timing::take_drain(),
+                }),
+                Err(error) => {
+                    ctx.stopped_at = Some(format!("composition batch prove/verify: {error}"));
+                    ctx.steps.push(StepTiming {
+                        method: "composition_batch".into(),
+                        dispatch: Duration::ZERO,
+                        prove: p_start.elapsed(),
+                        ok: false,
+                        proof_breakdown: poker_texas_air::prove_timing::take_drain(),
+                    });
+                }
+            }
+        }
+
         let winner_seat = if ctx.stopped_at.is_none() {
             observe_winner(plugin.table())
         } else {
@@ -448,7 +477,7 @@ fn dispatch_and_prove<A: BorshSerialize>(
     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
         let p_start = Instant::now();
         let _drained_before = poker_texas_air::prove_timing::take_drain();
-        match plugin.prove_task(task) {
+        match plugin.prove_task_deferred_components(task) {
             Ok(_) => (p_start.elapsed(), true),
             Err(error) => {
                 ctx.stopped_at = Some(format!("{name} prove/verify: {error}"));

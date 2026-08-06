@@ -213,6 +213,29 @@ impl Orchestrator {
         })
     }
 
+    /// Prove and verify only the original method proof, deferring required composition Stage
+    /// proofs to [`crate::airs::composition::prove_composition_batch`].
+    ///
+    /// This entry point exists for throughput-oriented callers that collect a contiguous run of
+    /// composite transitions and later finalize it as four batched Stage proofs. Callers must not
+    /// persist or publish the returned archive as a complete composite proof package until the
+    /// corresponding batch has also been proved and verified.
+    pub fn prove_verify_and_archive_method_only(
+        &mut self,
+        task: &ProveTask,
+    ) -> TexasAirResult<ArchivedProvenTask> {
+        let current = &*self;
+        let mut backend = NativeMethodProofBackend;
+        let (summary, output) = current.process_task(task, &mut backend)?;
+        self.verified_chain_builder.push_receipt(output.receipt)?;
+        self.proven.push(summary.clone());
+        Ok(ArchivedProvenTask {
+            summary,
+            archive: output.archive,
+            composition_archive: None,
+        })
+    }
+
     /// Reverify both the original method proof and every required component proof.
     ///
     /// Composite tasks fail closed when their four-proof archive is absent. Non-composite methods
@@ -904,6 +927,22 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
+        let authorization = AdminAuthorizationBinding::verify_table_creator(
+            MethodKind::StartHand,
+            &task.context,
+            &task.selector,
+            &task.raw_args,
+            task.pre_table.creator,
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            task.pre_table.version,
+            task.post_table.version,
+            pre_root,
+            post_root,
+            pi.dispatch_call_digest,
+        )?
+        .air_binding();
         let input = StartHandInput {
             active_count: count_active_occupied(&task.pre_table),
             new_button: task.post_table.button,
@@ -912,6 +951,7 @@ impl Orchestrator {
             ante_collected: task.post_table.ante_collected,
             pre_pot: task.pre_table.pot,
             post_pot: task.post_table.pot,
+            authorization,
         };
         // Gap 4 witness：active_count*(active_count-1) 在 M31 域内的乘法逆元 + 乘积。
         // active_count ≥ 2（合约 start_hand 前置）时该乘积非零，inverse 存在。
@@ -1025,6 +1065,22 @@ impl Orchestrator {
         };
         let input = ResetForNextHandInput {
             shuffle_phase: task.pre_table.shuffle_state.phase,
+            authorization: AdminAuthorizationBinding::verify_table_creator(
+                MethodKind::ResetForNextHand,
+                &task.context,
+                &task.selector,
+                &task.raw_args,
+                task.pre_table.creator,
+                task.table_id,
+                task.hand_id,
+                task.call_seq,
+                task.pre_table.version,
+                task.post_table.version,
+                pre_root,
+                post_root,
+                pi.dispatch_call_digest,
+            )?
+            .air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_r = task.pre_table.round_state;
@@ -1411,12 +1467,38 @@ impl Orchestrator {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("auto_fold", "SeatOnly", &task.method_input));
         };
-        let post_current_turn = validate_native_mid_round_action(
+        validate_native_betting_action(
             task,
             NativeMidRoundAction::AutoFold {
                 seat_index: *seat_index,
             },
+            true,
         )?;
+        let composition =
+            crate::airs::composition::derive_composite_transition_plan_from_task(task)?;
+        let outcome = derive_fold_outcome(
+            &task.pre_table,
+            &task.post_table,
+            *seat_index,
+            "auto_fold",
+            Some(&composition.settlement),
+        )?;
+        let authorization = AdminAuthorizationBinding::verify_table_creator(
+            MethodKind::AutoFold,
+            &task.context,
+            &task.selector,
+            &task.raw_args,
+            task.pre_table.creator,
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            task.pre_table.version,
+            task.post_table.version,
+            pre_root,
+            post_root,
+            pi.dispatch_call_digest,
+        )?
+        .air_binding();
         let input = AutoFoldInput {
             seat_index: *seat_index,
             // The timestamp is consensus data carried by the dispatch task.
@@ -1436,7 +1518,8 @@ impl Orchestrator {
                     ))
                 })?
                 .time_bank_ms,
-            post_current_turn,
+            outcome,
+            authorization,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1485,11 +1568,21 @@ impl Orchestrator {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("force_fold", "SeatOnly", &task.method_input));
         };
-        let post_current_turn = validate_native_mid_round_action(
+        validate_native_betting_action(
             task,
             NativeMidRoundAction::ForceFold {
                 seat_index: *seat_index,
             },
+            true,
+        )?;
+        let composition =
+            crate::airs::composition::derive_composite_transition_plan_from_task(task)?;
+        let outcome = derive_fold_outcome(
+            &task.pre_table,
+            &task.post_table,
+            *seat_index,
+            "force_fold",
+            Some(&composition.settlement),
         )?;
         let authorization = AdminAuthorizationBinding::verify_table_creator(
             MethodKind::ForceFold,
@@ -1509,7 +1602,7 @@ impl Orchestrator {
         .air_binding();
         let input = ForceFoldInput {
             seat_index: *seat_index,
-            post_current_turn,
+            outcome,
             authorization,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
@@ -2572,19 +2665,13 @@ impl NativeMidRoundAction {
     }
 }
 
-/// 由 canonical VM replay 得出的下注动作分支。
-#[derive(Debug, Clone, Copy)]
-struct NativeBettingTransition {
-    post_current_turn: Option<u8>,
-}
-
 /// 先重放真实 VM action 并逐字段比对 post table，再按调用方声明的覆盖范围接受或拒绝
 /// round completion。生产 verifier 侧还会由 trusted-row 绑定再次检查 witness。
 fn validate_native_betting_action(
     task: &ProveTask,
     action: NativeMidRoundAction,
     allow_round_completion: bool,
-) -> TexasAirResult<NativeBettingTransition> {
+) -> TexasAirResult<()> {
     let method = action.name();
     let pre = &task.pre_table;
     let post = &task.post_table;
@@ -2681,24 +2768,7 @@ fn validate_native_betting_action(
              this AIR only accepts the canonical mid-round branch or its explicitly modeled clean collection branch"
         )));
     }
-    Ok(NativeBettingTransition {
-        post_current_turn: post.current_turn,
-    })
-}
-
-/// Validate an action AIR that only models the same-round `advance_turn` branch.
-fn validate_native_mid_round_action(
-    task: &ProveTask,
-    action: NativeMidRoundAction,
-) -> TexasAirResult<u8> {
-    validate_native_betting_action(task, action, false)?
-        .post_current_turn
-        .ok_or_else(|| {
-            TexasAirError::UnsupportedBettingTransition(format!(
-                "{} completed a transition without a subsequent current_turn",
-                action.name()
-            ))
-        })
+    Ok(())
 }
 
 /// `state_root_to_m31_limbs` 的短别名。
@@ -3192,6 +3262,148 @@ mod tests {
             .expect("expired auto_fold must prove against the consensus timestamp");
     }
 
+    fn terminal_admin_fold_table(name: &str) -> TexasPokerTable {
+        let mut pre = make_table(name);
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        pre.timestamps.betting_started_at = 1;
+        pre.pot = 250;
+        pre.hand_id = 17;
+        pre.call_seq = 70;
+        for i in 0..2 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+            pre.seats[i].bet = 100;
+            pre.seats[i].total_bet = 100;
+            pre.seats[i].time_bank_ms = 0;
+        }
+        pre
+    }
+
+    fn assert_terminal_admin_fold_archive(task: &ProveTask, post: &TexasPokerTable) {
+        assert_eq!(
+            post.round_state,
+            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        );
+        assert!(post.current_turn.is_none());
+        assert!(post.betting_round.is_none());
+        assert_eq!(post.pot, 0);
+        assert_eq!(post.seats[1].stack, 1_450);
+
+        let archived = Orchestrator::new()
+            .prove_verify_and_archive_task(task)
+            .expect("terminal administrator fold should prove and verify");
+        let composition = archived
+            .composition_archive
+            .as_ref()
+            .expect("terminal administrator fold must carry four component proofs");
+        assert_eq!(composition.stages().len(), 4);
+        crate::airs::composition::verify_composition_bundle(task, composition)
+            .expect("terminal administrator fold component bundle should reverify");
+        Orchestrator::verify_archived_proven_task(task, &archived)
+            .expect("terminal administrator fold method and component archives should reverify");
+    }
+
+    #[test]
+    fn orchestrator_proves_terminal_auto_fold_settlement_and_archive() {
+        let pre = terminal_admin_fold_table("terminal-auto-fold");
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::auto_fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("auto_fold args should serialize"),
+        );
+        assert_eq!(task.method_kind, MethodKind::AutoFold);
+        assert_terminal_admin_fold_archive(&task, &post);
+    }
+
+    #[test]
+    fn orchestrator_proves_terminal_force_fold_settlement_and_archive() {
+        let pre = terminal_admin_fold_table("terminal-force-fold");
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::force_fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("force_fold args should serialize"),
+        );
+        assert_eq!(task.method_kind, MethodKind::ForceFold);
+        assert_terminal_admin_fold_archive(&task, &post);
+    }
+
+    #[test]
+    fn orchestrator_proves_terminal_tick_settlement_and_archive() {
+        let pre = terminal_admin_fold_table("terminal-tick-fold");
+        let (task, post) = dispatch_task(
+            pre,
+            [0x77; 20],
+            texas_dispatch::selectors::tick(),
+            Vec::new(),
+        );
+        assert_eq!(task.method_kind, MethodKind::Tick);
+        assert_eq!(
+            post.round_state,
+            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        );
+        assert_eq!(post.pot, 0);
+        assert_eq!(post.seats[1].stack, 1_450);
+
+        let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
+            .expect("terminal tick should have a canonical composite plan");
+        assert!(plan.seat_update.active);
+        assert!(plan.bet_collection.active);
+        assert!(!plan.round_advance.active);
+        assert!(plan.settlement.active);
+
+        let archived = Orchestrator::new()
+            .prove_verify_and_archive_task(&task)
+            .expect("terminal tick should prove method and component bundle");
+        let composition = archived
+            .composition_archive
+            .as_ref()
+            .expect("terminal tick must carry four component proofs");
+        assert_eq!(composition.stages().len(), 4);
+        Orchestrator::verify_archived_proven_task(&task, &archived)
+            .expect("terminal tick archive should reverify after restart");
+    }
+
+    #[test]
+    fn orchestrator_preserves_waiting_tick_with_required_component_archive() {
+        let mut pre = make_table("waiting-tick-start-hand");
+        for i in 0..2 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            pre.seats[i].stack = 1_000;
+        }
+        pre.chip_pool = 2_000;
+
+        let (task, post) = dispatch_task(
+            pre,
+            [0x78; 20],
+            texas_dispatch::selectors::tick(),
+            Vec::new(),
+        );
+        assert_eq!(task.method_kind, MethodKind::Tick);
+        assert_eq!(post.hand_id, task.pre_table.hand_id + 1);
+
+        let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
+            .expect("waiting tick should still have a canonical four-stage envelope");
+        assert!(!plan.seat_update.active);
+        assert!(!plan.bet_collection.active);
+        assert!(!plan.round_advance.active);
+        assert!(!plan.settlement.active);
+
+        let archived = Orchestrator::new()
+            .prove_verify_and_archive_task(&task)
+            .expect("waiting tick should preserve its method proof plus required envelope");
+        assert!(archived.composition_archive.is_some());
+        Orchestrator::verify_archived_proven_task(&task, &archived)
+            .expect("waiting tick archive should reverify");
+    }
+
     #[test]
     fn orchestrator_accepts_addon_ripple_carry() {
         let mut pre = make_table("addon-ripple-carry");
@@ -3297,6 +3509,59 @@ mod tests {
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("creator-authorized force_fold should prove and verify");
+    }
+
+    #[test]
+    fn orchestrator_binds_start_hand_creator_authorization_receipt() {
+        let mut pre = make_table("start-hand-admin-binding");
+        for seat_index in [0usize, 2] {
+            pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+            pre.seats[seat_index].stack = 1_000;
+        }
+        pre.chip_pool = 2_000;
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::start_hand(),
+            Vec::new(),
+        );
+        assert_eq!(task.method_kind, MethodKind::StartHand);
+        assert_eq!(post.hand_id, 1);
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("creator-authorized start_hand should prove and verify");
+    }
+
+    #[test]
+    fn orchestrator_binds_reset_for_next_hand_creator_authorization_receipt() {
+        let mut waiting = make_table("reset-admin-binding");
+        for seat_index in [0usize, 2] {
+            waiting.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+            waiting.seats[seat_index].stack = 1_000;
+        }
+        waiting.chip_pool = 2_000;
+        let creator = waiting.creator;
+        let (_, pre) = dispatch_task(
+            waiting,
+            creator,
+            texas_dispatch::selectors::start_hand(),
+            Vec::new(),
+        );
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::reset_for_next_hand(),
+            Vec::new(),
+        );
+        assert_eq!(task.method_kind, MethodKind::ResetForNextHand);
+        assert_eq!(
+            post.round_state,
+            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        );
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("creator-authorized reset_for_next_hand should prove and verify");
     }
 
     #[test]

@@ -138,7 +138,7 @@ commitment 和独立 Fiat–Shamir transcript；bundle 验证固定检查
   plan digest；固定 9 座 awards、addon credits、chip/addon refunds、post stacks、post pending
   addons 和 post occupancy 均进入 AIR，并约束 chip pool / addon pool / rake 守恒和 reset。
 
-production verifier 已在 fold/check/call/raise/bet/auto-fold/force-fold、`fold_with_proof`、
+production verifier 已在 fold/check/call/raise/bet/auto-fold/force-fold/tick、`fold_with_proof`、
 `kick_player`、`reset_for_next_hand` 和 `submit_player_reveal_tokens` 的 canonical replay 后派生并
 验证该 plan，因而旧 method row 与新 component ABI 迁移期间不会形成第二套可自由选择的业务解释。
 
@@ -156,10 +156,39 @@ plan digest 不符或 task scope 不符都会拒绝。proving service durable pa
 
 四份 proof 的独立性现在也用于本地并行执行：method proof 与 component bundle 并行，四个
 component proof/verify 以两层 Rayon join 并行，durable method archive 与 component archive 的
-恢复验证同样并行。proof 数量、每份 trace commitment、Fiat-Shamir transcript、stage 顺序与
+恢复验证同样并行。proof 数量、每份 trace commitment、Fiat–Shamir transcript、stage 顺序与
 plan digest 均未改变。参考开发机上，单个 composite check 从约 22.97s 降至约 7.2s；完整牌局
 从约 425.03s 降至约 213.46s。`TEXAS_PROVE_TIMING=1` 可输出 method 与四个 stage 的逐 proof
 prove/verify 耗时，计时器默认关闭。
+
+2026-08-06 的完整牌局分项基准进一步确认，主要开销是每份 Stwo proof 的固定启动成本，而不是
+Stage 列数线性增长：65 列 `RoundAdvance` 与 610 列 `Settlement` 相差约 9.4 倍，单 proof
+prove 时间却只相差约 36%；旧路径 32 次 dispatch 共启动 104 次 component prove，四类 Stage
+累计约 800s CPU span。
+
+因此新增 throughput-oriented `ArchivedCompositionBatchProofBundle`：同一 table/hand 下，最多
+1024 个 call-seq/state-root 连续的 composite transition 按行写入同一 Stage trace，剩余行使用
+Stage-specific canonical padding。四类 Stage 仍分别拥有独立 trace commitment、Fiat–Shamir
+transcript 和 STARK proof，只把 transition 维度从 `4N` 份 proof 改为
+`4 * ceil(N / 1024)` 份 proof。
+
+批量路径没有沿用只能固定单行的 `BoundAir`。verifier 会重放完整 task 列表，重建每个 canonical
+Stage row 和 1024 行 padding，独立重算 Stwo original-trace commitment，并要求它与 proof 的
+trace commitment 完全一致；batch ABI version、Stage kind、task count、table/hand/call range 和
+完整有序 task digest 也进入 transcript。空 batch、超过 1024、unsupported method、跨 table/hand、
+call-seq 不连续、state-root 不连续、task digest/Stage 顺序/trace commitment 不符均 fail-closed。
+这避免了再复制一套 119/165/65/610 列 preprocessed tree，保持 verifier-owned 逐行绑定的同时
+控制列与 commitment 开销。
+
+最终 full-hand 复测把 26 个连续 composite transition 从 104 次 Stage prove 降为 4 次：
+完整牌局 wall-clock 由基准 335.99s 降至 168.14s（约 -50%）。批量四 Stage 的 prove span为
+6.00s / 6.04s / 7.28s / 8.33s，且每类只执行一次 host verify；batch step wall-clock 为
+20.36s。不同轮次受机器负载影响曾测得 154.48s，但 proof 启动数从 104 降至 4 是稳定结果。
+
+当前 durable service package v2 和 server/job 恢复路径仍保留每 task 四份 component archive，
+以兼容低延迟和独立任务下载；批量 archive 已用于 full-hand/in-memory throughput 路径。把 batch
+作为持久化一等对象还需增加“task package -> batch id/row index”引用和原子恢复语义，不能把缺少
+per-task bundle 的现有 v2 package 静默当作完整证明。
 
 现有 `DualProofBundle` 仍是“method STARK + native crypto request”的两部分传输格式；对
 `fold_with_proof` / terminal reveal 这类 composite method，它不能替代 durable v2 package 中的
@@ -167,7 +196,9 @@ prove/verify 耗时，计时器默认关闭。
 
 ## 本轮关闭的管理员授权与金额缺口
 
-- `kick_player` / `force_fold` 新增独立 `AdminAuthorizationBinding`。production prover 与
+- `start_hand` / `reset_for_next_hand` / `kick_player` / `force_fold` / creator-only
+  `auto_fold` 使用独立
+  `AdminAuthorizationBinding`。production prover 与
   verifier 都从 canonical dispatch 重建 table-creator 权限，并把 ABI、role、完整 256-bit
   request digest 与 receipt digest 放入 AIR。request 覆盖 caller/pubkey、creator、链/块/时间、
   selector/raw args、table/hand/call/version、pre/post root 和 dispatch digest，不能再用
@@ -186,20 +217,33 @@ prove/verify 耗时，计时器默认关闭。
 
 ## 重新审核后仍存在的证明缺口
 
-- 管理员签名、Mental Poker BLS12-381 proof、state-root Poseidon preimage hash、showdown hand
+- 所有 creator-only method 已绑定 canonical authorization request/receipt digest，但管理员签名
+  算法本身、Mental Poker BLS12-381 proof、state-root Poseidon preimage hash、showdown hand
   evaluator/side-pot planner 仍由 host-native verifier 执行；AIR 绑定其 canonical 输入、输出或
   receipt digest，不提供“恶意 host 下仍可独立验证”的执行证明。
-- terminal `auto_fold` / `force_fold` 仍只接受 mid-round 分支；如果该 fold 直接触发
-  last-player settlement/reset，method AIR 会 fail-closed。普通 `fold` / `fold_with_proof` 的
-  对应终局分支已经支持。
+- terminal `auto_fold` / `force_fold` 已复用 `FoldOutcome::EndWithoutShowdown`：method AIR
+  约束收池、rake、唯一 winner award、winner stack 与 WAITING/zero-pot reset，并强制携带
+  SeatUpdate/BetCollection/RoundAdvance/Settlement 四段 archive；creator authorization 的完整
+  request/receipt digest 也进入 `auto_fold` AIR。
 - `kick_player` 只接受普通 `version + 1` 路径，以及已规范化的 `WithoutShowdown` / `ResetOnly`
   双 bump cascade；其他未来出现的 multi-version advance/settlement 继续 fail-closed。
-- `tick` 是多分支 native dispatcher。timeout/deadline/time-bank 已有完整 checked-u64 AIR，
-  但由 tick 间接触发的 start-hand、settlement 或修复分支仍依赖 canonical native replay，尚未
-  统一拆成对应 component proof。
-- `reset_for_next_hand`、`join_and_shuffle`、`leave_with_proof` 的完整座位/资金语义由 durable
-  component bundle 承担；单独拿 method STARK 只证明方法投影与 canonical pot，不应被解释为
-  独立完整结算证明。
+- `tick` 已接入四段 archive。下注超时 fold 会派生 SeatUpdate，终局/当前轮完成会派生
+  BetCollection、RoundAdvance、WithoutShowdown/Showdown/ResetOnly Settlement，并由 restart
+  verifier 重建后重验。`tick` 的 start-hand、仅启动 timer、shuffle/reconstruct/reveal 修复等
+  非四段业务分支仍主要依赖 canonical native replay 与 plan/table digest；若要求这些分支在
+  恶意 host 下也能由 STARK 独立执行验证，需要新增专门 lifecycle component，而不能把 inactive
+  四段 header 当作 start-hand/shuffle 执行证明。
+- `reset_for_next_hand` 的完整座位/资金重置语义由 durable 四段 component bundle
+  承担；单独拿 method STARK 只证明方法级投影。`join_and_shuffle` / `leave_with_proof`
+  使用的是 method STARK + crypto dual-proof package，不携带这四份 component proof；其
+  完整 deck/seat 转换仍由 canonical native replay 和 precompile receipt 绑定，不应被解释为
+  四段独立执行证明。
+- `start_hand` / `reset_for_next_hand` 的零参数 ABI 现在在 L1 dispatch 边界拒绝任意尾随
+  bytes，拒绝发生在任何状态变更前，避免同一管理操作存在多个非 canonical 调用编码。
+- showdown settlement binding 现在要求唯一 `HandSettled` marker，且其 table、gross pot 和
+  固定升序 winners 列表必须与 `WinnerAwarded` 聚合一致；`RakeCollected` 也必须按
+  `gross_pot/rake/total_awards` 恰好出现一次或在零 rake 时完全缺失。截断、重复或错配的
+  结算事件会在生成 component plan 前 fail-closed。
 - consensus anchor 的 tx-root 是 order-independent SMT；某 table/hand 的完整有序调用范围仍
   依赖 `call_seq`、端点 snapshot 和 Bullshark projection 一致性。
 - 当前没有 sound recursive/succinct aggregate proof；descriptor-only Aggregator 生产入口仍拒绝。

@@ -1197,9 +1197,14 @@ fn dispatch_leave_table(
 fn dispatch_start_hand(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
-    _args: &[u8],
+    args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    if !args.is_empty() {
+        return Err(PokerL1Error::Serialization(
+            "start_hand does not accept arguments".into(),
+        ));
+    }
     require_caller_is_creator(context, table, "start_hand")?;
     state_machine::start_hand(table, events)
 }
@@ -1443,9 +1448,14 @@ fn dispatch_bet(
 fn dispatch_reset_for_next_hand(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
-    _args: &[u8],
+    args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    if !args.is_empty() {
+        return Err(PokerL1Error::Serialization(
+            "reset_for_next_hand does not accept arguments".into(),
+        ));
+    }
     require_caller_is_creator(context, table, "reset_for_next_hand")?;
     state_machine::reset_for_next_hand(table, events)
 }
@@ -1578,6 +1588,22 @@ mod tests {
             result,
             Err(PokerL1Error::UnknownContractMethod { .. })
         ));
+    }
+
+    #[test]
+    fn zero_argument_admin_methods_reject_trailing_bytes_atomically() {
+        let context = make_context();
+        for (name, selector) in [
+            ("start_hand", selectors::start_hand()),
+            ("reset_for_next_hand", selectors::reset_for_next_hand()),
+        ] {
+            let mut table = make_table();
+            let before = table.clone();
+            let error = dispatch(&context, &mut table, &selector, &[0x01])
+                .expect_err("zero-argument admin method must reject trailing bytes");
+            assert!(error.to_string().contains("does not accept arguments"));
+            assert_eq!(table, before, "{name} argument rejection must be atomic");
+        }
     }
 
     #[test]

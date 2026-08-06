@@ -141,6 +141,68 @@ impl SettlementPlanBinding {
             )));
         }
 
+        // The plan and award events are not a complete normalized settlement
+        // sequence on their own.  Require the unique terminal marker and make
+        // its winner projection agree with the fixed-seat award aggregation.
+        let settled = events
+            .iter()
+            .filter_map(|event| match event {
+                TexasPokerEvent::HandSettled {
+                    table_id: settled_table_id,
+                    pot,
+                    winners,
+                } => Some((*settled_table_id, *pot, winners)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [(settled_table_id, settled_pot, winners)] = settled.as_slice() else {
+            return Err(TexasAirError::SpecViolation(
+                "terminal showdown replay must emit exactly one HandSettled event".into(),
+            ));
+        };
+        if *settled_table_id != *table_id || *settled_pot != *gross_pot {
+            return Err(TexasAirError::SpecViolation(
+                "HandSettled event does not match settlement plan scope".into(),
+            ));
+        }
+        let expected_winners = awards
+            .iter()
+            .enumerate()
+            .filter_map(|(seat, amount)| (*amount > 0).then_some(seat as u8))
+            .collect::<Vec<_>>();
+        if **winners != expected_winners {
+            return Err(TexasAirError::SpecViolation(
+                "HandSettled winners do not match fixed-seat awards".into(),
+            ));
+        }
+
+        let rake_events = events
+            .iter()
+            .filter_map(|event| match event {
+                TexasPokerEvent::RakeCollected {
+                    table_id: rake_table_id,
+                    pot_before,
+                    rake_amount,
+                    pot_after,
+                    ..
+                } => Some((*rake_table_id, *pot_before, *rake_amount, *pot_after)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        match (*rake, rake_events.as_slice()) {
+            (0, []) => {}
+            (rake, [(rake_table_id, pot_before, rake_amount, pot_after)])
+                if *rake_table_id == *table_id
+                    && *pot_before == *gross_pot
+                    && *rake_amount == rake
+                    && *pot_after == *total_awards => {}
+            _ => {
+                return Err(TexasAirError::SpecViolation(
+                    "RakeCollected events do not match settlement plan".into(),
+                ));
+            }
+        }
+
         Ok(Self {
             active: true,
             plan_digest: *plan_digest,
@@ -197,6 +259,24 @@ mod tests {
         }
     }
 
+    fn settled_event(pot: u64, winners: Vec<u8>) -> TexasPokerEvent {
+        TexasPokerEvent::HandSettled {
+            table_id: ObjectID::new([0x11; 20], 7),
+            pot,
+            winners,
+        }
+    }
+
+    fn rake_event(pot_before: u64, rake_amount: u64, pot_after: u64) -> TexasPokerEvent {
+        TexasPokerEvent::RakeCollected {
+            table_id: ObjectID::new([0x11; 20], 7),
+            pot_before,
+            rake_amount,
+            pot_after,
+            rake_mode: 1,
+        }
+    }
+
     #[test]
     fn terminal_projection_aggregates_awards_by_fixed_seat() {
         let binding = SettlementPlanBinding::from_events(&[
@@ -204,6 +284,8 @@ mod tests {
             award_event(0, 90),
             award_event(0, 5),
             award_event(4, 95),
+            rake_event(200, 10, 190),
+            settled_event(200, vec![0, 4]),
         ])
         .unwrap();
 
@@ -216,11 +298,17 @@ mod tests {
     #[test]
     fn terminal_projection_requires_exactly_one_plan_event() {
         assert!(SettlementPlanBinding::from_events(&[award_event(0, 10)]).is_err());
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 0, 10),
+            award_event(0, 10),
+        ])
+        .is_err());
         assert!(
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 plan_event(1, 10, 0, 10),
                 award_event(0, 10),
+                settled_event(10, vec![0]),
             ])
             .is_err()
         );
@@ -229,28 +317,42 @@ mod tests {
     #[test]
     fn terminal_projection_fails_closed_on_invalid_summary_or_awards() {
         assert!(
-            SettlementPlanBinding::from_events(&[plan_event(3, 10, 0, 10), award_event(0, 10),])
+            SettlementPlanBinding::from_events(&[
+                plan_event(3, 10, 0, 10),
+                award_event(0, 10),
+                settled_event(10, vec![0]),
+            ])
                 .is_err()
         );
         assert!(
-            SettlementPlanBinding::from_events(&[plan_event(1, 10, 1, 10), award_event(0, 10),])
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 1, 10),
+                award_event(0, 10),
+                settled_event(10, vec![0]),
+            ])
                 .is_err()
         );
         assert!(
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 award_event(SETTLEMENT_SEATS as u8, 10),
+                settled_event(10, vec![0]),
             ])
             .is_err()
         );
         assert!(
-            SettlementPlanBinding::from_events(&[plan_event(1, 10, 0, 10), award_event(0, 9),])
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 0, 10),
+                award_event(0, 9),
+                settled_event(10, vec![0]),
+            ])
                 .is_err()
         );
         assert!(
             SettlementPlanBinding::from_events(&[
                 plan_event(1, 10, 0, 10),
                 award_event_for_other_table(0, 10),
+                settled_event(10, vec![0]),
             ])
             .is_err()
         );
@@ -264,5 +366,27 @@ mod tests {
             SettlementPlanBinding::from_replay(&[], false).unwrap(),
             SettlementPlanBinding::inactive()
         );
+    }
+
+    #[test]
+    fn terminal_projection_rejects_mismatched_terminal_markers() {
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 0, 10),
+            award_event(0, 10),
+            settled_event(9, vec![0]),
+        ])
+        .is_err());
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 0, 10),
+            award_event(0, 10),
+            settled_event(10, vec![1]),
+        ])
+        .is_err());
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 1, 9),
+            award_event(0, 9),
+            settled_event(10, vec![0]),
+        ])
+        .is_err());
     }
 }

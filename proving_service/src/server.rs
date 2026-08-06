@@ -239,7 +239,7 @@ pub struct FullHandStepJson {
     pub ok: bool,
 }
 
-/// JSON representation of the complete 32-transition Texas proving run.
+/// JSON representation of the complete 32-transition Texas proving run plus batch finalization.
 #[derive(Debug, Clone, Serialize)]
 pub struct FullHandReportJson {
     pub steps: Vec<FullHandStepJson>,
@@ -1175,7 +1175,16 @@ mod tests {
             .expect("full-hand response body must be readable");
         let report: serde_json::Value =
             serde_json::from_slice(&body).expect("full-hand response must be JSON");
-        assert_eq!(report["steps"].as_array().map(Vec::len), Some(32));
+        let steps = report["steps"]
+            .as_array()
+            .expect("full-hand response must carry step records");
+        assert_eq!(steps.len(), 33);
+        assert!(
+            steps
+                .last()
+                .and_then(|step| step["method"].as_str())
+                .is_some_and(|method| method.starts_with("composition_batch[1x4 proofs]"))
+        );
         assert_eq!(report["chain_ok"], true);
         assert_eq!(report["dispatch_count"], 32);
         assert_eq!(report["prove_count"], 32);

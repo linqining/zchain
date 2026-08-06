@@ -6,6 +6,8 @@
 //! 3. **Time Bank**：下注超时时若 `time_bank_ms > 0`，消耗等量时间延长截止
 //! 4. **Rake**：reveal 阶段完成触发 settle_hand 时抽水（`pot_after = pot_before - rake`）
 
+use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
@@ -14,6 +16,7 @@ use crate::airs::common::{
 };
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::{DIGEST_LIMBS, digest_to_m31_limbs};
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
@@ -39,6 +42,57 @@ pub const TICK_KIND_RECONSTRUCT: u8 = 3;
 pub const TICK_KIND_BETTING: u8 = 4;
 /// The canonical tick branch has no timer predicate (e.g. hand start/reset).
 pub const TICK_KIND_NON_TIMER: u8 = 5;
+
+/// Canonical Tick lifecycle receipt ABI.
+pub const TICK_LIFECYCLE_ABI_VERSION: u8 = 1;
+/// Tick started a previously unset shuffle/reveal/betting/showdown timer.
+pub const TICK_BRANCH_TIMER_STARTED: u8 = 1;
+/// Tick started a new hand from WAITING.
+pub const TICK_BRANCH_HAND_STARTED: u8 = 2;
+/// Tick advanced the shuffle protocol without a timeout.
+pub const TICK_BRANCH_SHUFFLE_ADVANCED: u8 = 3;
+/// Tick handled a shuffle timeout.
+pub const TICK_BRANCH_SHUFFLE_TIMEOUT: u8 = 4;
+/// Tick completed or advanced a reveal phase without a timeout.
+pub const TICK_BRANCH_REVEAL_ADVANCED: u8 = 5;
+/// Tick handled a reveal timeout or its reconstruct/reset cascade.
+pub const TICK_BRANCH_REVEAL_TIMEOUT: u8 = 6;
+/// Tick handled a reconstruction timeout.
+pub const TICK_BRANCH_RECONSTRUCT_TIMEOUT: u8 = 7;
+/// Tick collected bets and advanced a completed betting round.
+pub const TICK_BRANCH_BETTING_ROUND_ADVANCED: u8 = 8;
+/// Tick consumed the current actor's time bank.
+pub const TICK_BRANCH_TIME_BANK_CONSUMED: u8 = 9;
+/// Tick auto-folded the current actor after a betting timeout.
+pub const TICK_BRANCH_BETTING_TIMEOUT: u8 = 10;
+/// Tick settled/reset a completed showdown display period.
+pub const TICK_BRANCH_SHOWDOWN_SETTLED: u8 = 11;
+/// Tick repaired an inconsistent non-WAITING table by refunding/resetting it.
+pub const TICK_BRANCH_INCONSISTENT_RESET: u8 = 12;
+
+/// AIR projection of a verifier-issued canonical Tick lifecycle receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickLifecycleAirBinding {
+    /// Lifecycle receipt ABI version.
+    pub abi_version: u8,
+    /// Exact canonical lifecycle branch.
+    pub branch_kind: u8,
+    /// Digest of the complete canonical lifecycle request.
+    pub request_digest: [M31; DIGEST_LIMBS],
+    /// Digest of the verifier-issued successful receipt.
+    pub receipt_digest: [M31; DIGEST_LIMBS],
+}
+
+impl TickLifecycleAirBinding {
+    const fn zero() -> Self {
+        Self {
+            abi_version: 0,
+            branch_kind: 0,
+            request_digest: [ZERO; DIGEST_LIMBS],
+            receipt_digest: [ZERO; DIGEST_LIMBS],
+        }
+    }
+}
 
 /// `tick` 业务特定列布局。
 pub mod cols {
@@ -80,8 +134,17 @@ pub mod cols {
     pub const TIME_SUB_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 48;
     /// `timeout_started_at != 0` 的非零 inverse witness。
     pub const TIMEOUT_STARTED_AT_INV: usize = COMMON_NUM_COLUMNS + 52;
+    /// Tick lifecycle receipt ABI version.
+    pub const LIFECYCLE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 53;
+    /// Canonical Tick lifecycle branch kind.
+    pub const LIFECYCLE_BRANCH_KIND: usize = COMMON_NUM_COLUMNS + 54;
+    /// Complete lifecycle request digest.
+    pub const LIFECYCLE_REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 55;
+    /// Complete lifecycle receipt digest.
+    pub const LIFECYCLE_RECEIPT_DIGEST_BASE: usize =
+        LIFECYCLE_REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 53;
+    pub const NUM_COLUMNS: usize = LIFECYCLE_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `tick` 输入参数。
@@ -113,6 +176,8 @@ pub struct TickInput {
     /// helpers alter state without bumping the table version, so treating every
     /// tick as `+1` was an invalid proof precondition.
     pub version_increment: u8,
+    /// Verifier-issued receipt for the exact lifecycle branch executed by Tick.
+    pub lifecycle: TickLifecycleAirBinding,
 }
 
 impl Default for TickInput {
@@ -129,6 +194,7 @@ impl Default for TickInput {
             rake_mode: 0,
             rake_amount: 0,
             version_increment: 1,
+            lifecycle: TickLifecycleAirBinding::zero(),
         }
     }
 }
@@ -267,6 +333,7 @@ pub fn canonical_input(
     let version_increment = u8::try_from(version_increment).map_err(|_| {
         TexasAirError::SpecViolation("tick: version increment exceeds Tick AIR encoding".into())
     })?;
+    let lifecycle = issue_lifecycle_binding(pre, post, current_time, &events)?;
 
     Ok(TickInput {
         current_time,
@@ -280,7 +347,131 @@ pub fn canonical_input(
         rake_mode,
         rake_amount,
         version_increment,
+        lifecycle,
     })
+}
+
+fn issue_lifecycle_binding(
+    pre: &TexasPokerTable,
+    post: &TexasPokerTable,
+    current_time: u64,
+    events: &[TexasPokerEvent],
+) -> TexasAirResult<TickLifecycleAirBinding> {
+    use poker_l1::vm::contracts::texas_poker::constants::{
+        FOLD_REASON_AUTO_TIMEOUT, RESET_REASON_STATE_INCONSISTENT,
+    };
+
+    let has = |predicate: fn(&TexasPokerEvent) -> bool| events.iter().any(predicate);
+    let branch_kind = if has(|event| matches!(event, TexasPokerEvent::ReconstructTimeout { .. })) {
+        TICK_BRANCH_RECONSTRUCT_TIMEOUT
+    } else if has(|event| matches!(event, TexasPokerEvent::ShuffleTimeout { .. })) {
+        TICK_BRANCH_SHUFFLE_TIMEOUT
+    } else if has(|event| matches!(event, TexasPokerEvent::RevealTimeout { .. })) {
+        TICK_BRANCH_REVEAL_TIMEOUT
+    } else if has(|event| matches!(event, TexasPokerEvent::TimeBankConsumed { .. })) {
+        TICK_BRANCH_TIME_BANK_CONSUMED
+    } else if events.iter().any(|event| {
+        matches!(
+            event,
+            TexasPokerEvent::PlayerFolded {
+                reason: FOLD_REASON_AUTO_TIMEOUT,
+                ..
+            }
+        )
+    }) {
+        TICK_BRANCH_BETTING_TIMEOUT
+    } else if has(|event| matches!(event, TexasPokerEvent::HandStarted { .. })) {
+        TICK_BRANCH_HAND_STARTED
+    } else if events.iter().any(|event| {
+        matches!(
+            event,
+            TexasPokerEvent::HandReset {
+                reason: RESET_REASON_STATE_INCONSISTENT,
+                ..
+            }
+        )
+    }) {
+        TICK_BRANCH_INCONSISTENT_RESET
+    } else if pre.round_state == ROUND_SHOWDOWN
+        && (has(|event| matches!(event, TexasPokerEvent::SettlementPlanCommitted { .. }))
+            || has(|event| matches!(event, TexasPokerEvent::HandEndedWithoutShowdown { .. })))
+    {
+        TICK_BRANCH_SHOWDOWN_SETTLED
+    } else if pre.timestamps.shuffle_started_at == 0
+        && post.timestamps.shuffle_started_at == current_time
+        && pre.shuffle_state.phase != 0
+    {
+        TICK_BRANCH_TIMER_STARTED
+    } else if pre.timestamps.reveal_started_at == 0
+        && post.timestamps.reveal_started_at == current_time
+        && pre.reveal_token_state.reveal_phase != 0
+    {
+        TICK_BRANCH_TIMER_STARTED
+    } else if pre.timestamps.betting_started_at == 0
+        && post.timestamps.betting_started_at == current_time
+        && state_machine::is_betting_round(pre)
+    {
+        TICK_BRANCH_TIMER_STARTED
+    } else if pre.round_state == ROUND_SHOWDOWN
+        && pre.timestamps.showdown_at == 0
+        && post.timestamps.showdown_at
+            == current_time.saturating_add(pre.timeout_config.showdown_display_ms)
+    {
+        TICK_BRANCH_TIMER_STARTED
+    } else if matches!(
+        pre.shuffle_state.phase,
+        SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
+    ) {
+        TICK_BRANCH_SHUFFLE_ADVANCED
+    } else if pre.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE {
+        TICK_BRANCH_REVEAL_ADVANCED
+    } else if state_machine::is_betting_round(pre) && pre.current_turn.is_none() {
+        TICK_BRANCH_BETTING_ROUND_ADVANCED
+    } else {
+        return Err(TexasAirError::SpecViolation(
+            "tick: state-changing canonical replay has no supported lifecycle branch".into(),
+        ));
+    };
+
+    let payload = borsh::to_vec(&(
+        TICK_LIFECYCLE_ABI_VERSION,
+        branch_kind,
+        current_time,
+        pre,
+        post,
+        events,
+    ))
+    .map_err(|error| {
+        TexasAirError::SerializationError(format!(
+            "tick: lifecycle request borsh encoding failed: {error}"
+        ))
+    })?;
+    let request_digest = tick_lifecycle_hash(b"zchain.texas.tick.lifecycle.request.v1", &payload);
+    let mut receipt = Vec::with_capacity(4 + request_digest.len());
+    receipt.extend_from_slice(&[
+        TICK_LIFECYCLE_ABI_VERSION,
+        branch_kind,
+        1, // canonical native Tick replay backend
+        1, // verified-success result
+    ]);
+    receipt.extend_from_slice(&request_digest);
+    let receipt_digest = tick_lifecycle_hash(b"zchain.texas.tick.lifecycle.receipt.v1", &receipt);
+    Ok(TickLifecycleAirBinding {
+        abi_version: TICK_LIFECYCLE_ABI_VERSION,
+        branch_kind,
+        request_digest: digest_to_m31_limbs(request_digest),
+        receipt_digest: digest_to_m31_limbs(receipt_digest),
+    })
+}
+
+fn tick_lifecycle_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(domain);
+    hasher.update(&(payload.len() as u64).to_le_bytes());
+    hasher.update(payload);
+    let mut digest = [0u8; 32];
+    hasher.finalize_variable(&mut digest).expect("32 <= 64");
+    digest
 }
 
 /// Return the canonical timer family that has priority in the pre-state.
@@ -487,6 +678,12 @@ impl FrameworkEval for TickAir {
             eval.next_trace_mask(),
         ];
         let timeout_started_at_inv = eval.next_trace_mask();
+        let lifecycle_abi_version = eval.next_trace_mask();
+        let lifecycle_branch_kind = eval.next_trace_mask();
+        let lifecycle_request_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let lifecycle_receipt_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：完整 consensus timestamp 必须与 trusted AIR statement
         // 一致。只读而不绑定这些 limb 会允许证明与不同区块时间脱钩。
@@ -629,6 +826,24 @@ impl FrameworkEval for TickAir {
             eval.add_constraint(time_sub_borrow[3].clone());
         }
 
+        let expected_lifecycle_abi: E::F =
+            M31::from(u32::from(self.input.lifecycle.abi_version)).into();
+        let expected_branch: E::F = M31::from(u32::from(self.input.lifecycle.branch_kind)).into();
+        eval.add_constraint(is_active.clone() * (lifecycle_abi_version - expected_lifecycle_abi));
+        eval.add_constraint(is_active.clone() * (lifecycle_branch_kind - expected_branch));
+        for limb in 0..DIGEST_LIMBS {
+            eval.add_constraint(
+                is_active.clone()
+                    * (lifecycle_request_digest[limb].clone()
+                        - E::F::from(self.input.lifecycle.request_digest[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (lifecycle_receipt_digest[limb].clone()
+                        - E::F::from(self.input.lifecycle.receipt_digest[limb])),
+            );
+        }
+
         eval
     }
 }
@@ -674,6 +889,8 @@ pub struct TickRow {
     pub time_sub_borrow: [M31; 4],
     /// `timeout_started_at` 非零性 witness。
     pub timeout_started_at_inv: M31,
+    /// Verifier-issued canonical lifecycle branch receipt.
+    pub lifecycle: TickLifecycleAirBinding,
 }
 
 impl TickRow {
@@ -770,6 +987,7 @@ impl TickRow {
             time_elapsed,
             time_sub_borrow,
             timeout_started_at_inv,
+            lifecycle: input.lifecycle,
         }
     }
     /// padding 行。
@@ -795,6 +1013,7 @@ impl TickRow {
             time_elapsed: [ZERO; 4],
             time_sub_borrow: [ZERO; 4],
             timeout_started_at_inv: ZERO,
+            lifecycle: TickLifecycleAirBinding::zero(),
         }
     }
     /// 转列向量。
@@ -819,6 +1038,10 @@ impl TickRow {
         v.extend_from_slice(&self.time_elapsed);
         v.extend_from_slice(&self.time_sub_borrow);
         v.push(self.timeout_started_at_inv);
+        v.push(M31::from(u32::from(self.lifecycle.abi_version)));
+        v.push(M31::from(u32::from(self.lifecycle.branch_kind)));
+        v.extend_from_slice(&self.lifecycle.request_digest);
+        v.extend_from_slice(&self.lifecycle.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }
@@ -886,7 +1109,10 @@ pub fn validate_public_inputs(
 
 #[cfg(test)]
 mod tests {
-    use super::{TICK_KIND_BETTING, TICK_KIND_NON_TIMER, canonical_input};
+    use super::{
+        TICK_BRANCH_BETTING_TIMEOUT, TICK_BRANCH_HAND_STARTED, TICK_BRANCH_TIME_BANK_CONSUMED,
+        TICK_KIND_BETTING, TICK_KIND_NON_TIMER, canonical_input,
+    };
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::{
         betting::BettingRound,
@@ -986,6 +1212,7 @@ mod tests {
         assert_eq!(input.time_bank_post, 0);
         assert_eq!(input.rake_amount, 0);
         assert_eq!(input.version_increment, 1);
+        assert_eq!(input.lifecycle.branch_kind, TICK_BRANCH_TIME_BANK_CONSUMED);
     }
 
     #[test]
@@ -1030,6 +1257,7 @@ mod tests {
         assert_eq!(input.time_bank_consumed, 0);
         assert_eq!(input.rake_mode, RAKE_MODE_PERCENTAGE);
         assert_eq!(input.rake_amount, 10);
+        assert_eq!(input.lifecycle.branch_kind, TICK_BRANCH_BETTING_TIMEOUT);
     }
 
     #[test]
@@ -1056,6 +1284,7 @@ mod tests {
         assert_eq!(input.timeout_ms, 0);
         assert_eq!(input.time_bank_consumed, 0);
         assert_eq!(input.rake_amount, 0);
+        assert_eq!(input.lifecycle.branch_kind, TICK_BRANCH_HAND_STARTED);
     }
 
     #[test]

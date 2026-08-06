@@ -26,8 +26,10 @@ pub use plan::{
     supports_composite_proof,
 };
 pub use proof::{
-    ArchivedComponentProof, ArchivedCompositionProofBundle, COMPOSITION_PROOF_BUNDLE_VERSION,
-    prove_composition_bundle, verify_composition_bundle,
+    ArchivedComponentProof, ArchivedCompositionBatchProofBundle, ArchivedCompositionProofBundle,
+    COMPOSITION_BATCH_PROOF_BUNDLE_VERSION, COMPOSITION_PROOF_BUNDLE_VERSION,
+    MAX_COMPOSITION_BATCH_TASKS, prove_composition_batch, prove_composition_bundle,
+    verify_composition_batch, verify_composition_bundle,
 };
 pub use settlement::SettlementKind;
 

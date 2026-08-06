@@ -1,10 +1,26 @@
 //! Four-proof bundle for one canonical composite Texas Poker transition.
 
 use bincode::Options;
+use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
+use stwo::core::channel::{Channel, Poseidon252Channel};
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::SecureField;
+use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
-use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
+use stwo::core::vcs_lifted::poseidon252_merkle::{
+    Poseidon252MerkleChannel, Poseidon252MerkleHasher,
+};
+use stwo::core::verifier::{VerificationError, verify};
+use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::pcs::CommitmentSchemeProver;
+use stwo::prover::poly::circle::PolyOps;
+use stwo::prover::{ProvingError, prove};
+use stwo_constraint_framework::{
+    EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
+};
 
 use super::air::{
     BetCollectionAir, ComponentTexasAir, RoundAdvanceAir, SeatUpdateAir, SettlementAir,
@@ -18,14 +34,22 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::prover::{MethodProof, prove_method};
 use crate::public_inputs::TexasPublicInputs;
+use crate::trace_gen::MethodTrace;
 use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verifier::verify_method_against;
 
 /// Durable composition-proof bundle schema version.
 pub const COMPOSITION_PROOF_BUNDLE_VERSION: u8 = 1;
 
+/// Durable batched composition-proof bundle schema version.
+pub const COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 1;
+
+/// Maximum canonical transitions packed into one 1024-row proof per stage.
+pub const MAX_COMPOSITION_BATCH_TASKS: usize = 1 << MIN_LOG_SIZE;
+
 const MAX_COMPONENT_STARK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMPOSITION_BUNDLE_BYTES: usize = 4 * MAX_COMPONENT_STARK_BYTES + 64 * 1024;
+const MAX_COMPOSITION_BATCH_BUNDLE_BYTES: usize = MAX_COMPOSITION_BUNDLE_BYTES;
 
 /// One independently committed STARK proof inside a four-stage bundle.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -180,6 +204,97 @@ impl ArchivedCompositionProofBundle {
             }
         }
         Ok(())
+    }
+}
+
+/// Four independent Stage proofs sharing one ordered batch of canonical transitions.
+///
+/// The verifier receives the exact tasks separately, replays each transition, rebuilds all
+/// 1024 trace rows (including deterministic padding), and recomputes every Stage trace
+/// commitment. Proof-carried rows and task metadata are never trusted.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ArchivedCompositionBatchProofBundle {
+    version: u8,
+    table_id: u64,
+    hand_id: u32,
+    first_call_seq: u32,
+    last_call_seq: u32,
+    task_count: u16,
+    batch_digest: [u8; 32],
+    stages: [ArchivedComponentProof; 4],
+}
+
+impl ArchivedCompositionBatchProofBundle {
+    /// Number of canonical transitions packed into each Stage proof.
+    #[must_use]
+    pub const fn task_count(&self) -> u16 {
+        self.task_count
+    }
+
+    /// Digest of the exact ordered canonical task list.
+    #[must_use]
+    pub const fn batch_digest(&self) -> [u8; 32] {
+        self.batch_digest
+    }
+
+    /// Child proofs in SeatUpdate, BetCollection, RoundAdvance, Settlement order.
+    #[must_use]
+    pub const fn stages(&self) -> &[ArchivedComponentProof; 4] {
+        &self.stages
+    }
+
+    /// Validate the bounded archive envelope without trusting proof-carried task scope.
+    pub fn validate(&self) -> TexasAirResult<()> {
+        if self.version != COMPOSITION_BATCH_PROOF_BUNDLE_VERSION
+            || self.task_count == 0
+            || usize::from(self.task_count) > MAX_COMPOSITION_BATCH_TASKS
+            || self.first_call_seq > self.last_call_seq
+        {
+            return Err(TexasAirError::SerializationError(
+                "invalid composition batch proof envelope".into(),
+            ));
+        }
+        for (index, stage) in self.stages.iter().enumerate() {
+            stage.validate()?;
+            if usize::from(stage.stage_kind as u8) != index {
+                return Err(TexasAirError::SerializationError(
+                    "batched component proofs are not in canonical stage order".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Encode the complete bounded bundle as canonical Borsh bytes.
+    pub fn to_bytes(&self) -> TexasAirResult<Vec<u8>> {
+        self.validate()?;
+        let bytes = borsh::to_vec(self).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "composition batch proof Borsh encoding failed: {error}"
+            ))
+        })?;
+        if bytes.len() > MAX_COMPOSITION_BATCH_BUNDLE_BYTES {
+            return Err(TexasAirError::SerializationError(
+                "composition batch proof bundle exceeds size limit".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Decode a complete bounded bundle and reject trailing bytes.
+    pub fn from_bytes(bytes: &[u8]) -> TexasAirResult<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_COMPOSITION_BATCH_BUNDLE_BYTES {
+            return Err(TexasAirError::SerializationError(
+                "invalid composition batch proof bundle length".into(),
+            ));
+        }
+        let bundle = Self::try_from_slice(bytes).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "composition batch proof Borsh decoding failed: {error}"
+            ))
+        })?;
+        bundle.validate()?;
+        Ok(bundle)
     }
 }
 
@@ -381,6 +496,426 @@ fn verify_stage<A: ComponentTexasAir>(
     verify_method_against(proof, air, &public_inputs)
 }
 
+/// Prove four Stage traces for an ordered contiguous batch of canonical transitions.
+///
+/// Each returned proof has exactly 1024 rows. Row `i < tasks.len()` is the canonical row for
+/// `tasks[i]`; the remaining rows use a deterministic Stage-specific padding row. This reduces
+/// `4 * N` component prover startups to four startups for every batch of at most 1024 tasks.
+///
+/// # Errors
+///
+/// Rejects empty, oversized, unsupported, cross-table, cross-hand, out-of-order, or state-chain
+/// discontinuous batches. Every task is fully replayed before proving.
+pub fn prove_composition_batch(
+    tasks: &[crate::prove_task::ProveTask],
+) -> TexasAirResult<ArchivedCompositionBatchProofBundle> {
+    let statement = CompositionBatchStatement::from_tasks(tasks)?;
+    let traces = build_batch_traces(tasks)?;
+    let ((seat_update, bet_collection), (round_advance, settlement)) = rayon::join(
+        || {
+            rayon::join(
+                || prove_batch_stage(StageKind::SeatUpdate, &statement, &traces[0]),
+                || prove_batch_stage(StageKind::BetCollection, &statement, &traces[1]),
+            )
+        },
+        || {
+            rayon::join(
+                || prove_batch_stage(StageKind::RoundAdvance, &statement, &traces[2]),
+                || prove_batch_stage(StageKind::Settlement, &statement, &traces[3]),
+            )
+        },
+    );
+    let bundle = ArchivedCompositionBatchProofBundle {
+        version: COMPOSITION_BATCH_PROOF_BUNDLE_VERSION,
+        table_id: statement.table_id,
+        hand_id: statement.hand_id,
+        first_call_seq: statement.first_call_seq,
+        last_call_seq: statement.last_call_seq,
+        task_count: statement.task_count,
+        batch_digest: statement.batch_digest,
+        stages: [seat_update?, bet_collection?, round_advance?, settlement?],
+    };
+    bundle.validate()?;
+    Ok(bundle)
+}
+
+/// Replay an ordered transition batch and verify all four independently committed Stage proofs.
+///
+/// Verification recomputes each expected Stwo trace commitment from verifier-owned canonical
+/// tasks and compares it with the proof commitment before invoking Stwo. This is the per-row
+/// trusted binding that replaces single-row [`crate::airs::bound::BoundAir`] in batch mode.
+pub fn verify_composition_batch(
+    tasks: &[crate::prove_task::ProveTask],
+    bundle: &ArchivedCompositionBatchProofBundle,
+) -> TexasAirResult<()> {
+    bundle.validate()?;
+    let statement = CompositionBatchStatement::from_tasks(tasks)?;
+    if bundle.table_id != statement.table_id
+        || bundle.hand_id != statement.hand_id
+        || bundle.first_call_seq != statement.first_call_seq
+        || bundle.last_call_seq != statement.last_call_seq
+        || bundle.task_count != statement.task_count
+        || bundle.batch_digest != statement.batch_digest
+    {
+        return Err(TexasAirError::SpecViolation(
+            "composition batch proof scope does not match canonical tasks".into(),
+        ));
+    }
+    let traces = build_batch_traces(tasks)?;
+    let ((seat_update, bet_collection), (round_advance, settlement)) = rayon::join(
+        || {
+            rayon::join(
+                || {
+                    verify_batch_stage(
+                        &bundle.stages[0],
+                        StageKind::SeatUpdate,
+                        &statement,
+                        &traces[0],
+                    )
+                },
+                || {
+                    verify_batch_stage(
+                        &bundle.stages[1],
+                        StageKind::BetCollection,
+                        &statement,
+                        &traces[1],
+                    )
+                },
+            )
+        },
+        || {
+            rayon::join(
+                || {
+                    verify_batch_stage(
+                        &bundle.stages[2],
+                        StageKind::RoundAdvance,
+                        &statement,
+                        &traces[2],
+                    )
+                },
+                || {
+                    verify_batch_stage(
+                        &bundle.stages[3],
+                        StageKind::Settlement,
+                        &statement,
+                        &traces[3],
+                    )
+                },
+            )
+        },
+    );
+    seat_update?;
+    bet_collection?;
+    round_advance?;
+    settlement
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompositionBatchStatement {
+    table_id: u64,
+    hand_id: u32,
+    first_call_seq: u32,
+    last_call_seq: u32,
+    task_count: u16,
+    batch_digest: [u8; 32],
+}
+
+impl CompositionBatchStatement {
+    fn from_tasks(tasks: &[crate::prove_task::ProveTask]) -> TexasAirResult<Self> {
+        validate_batch_tasks(tasks)?;
+        let first = tasks.first().expect("non-empty batch validated");
+        let last = tasks.last().expect("non-empty batch validated");
+        let encoded = borsh::to_vec(&tasks).map_err(|error| {
+            TexasAirError::SerializationError(format!(
+                "composition batch task encoding failed: {error}"
+            ))
+        })?;
+        let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+        hasher.update(b"zchain.texas.composition_batch.v1");
+        hasher.update(&encoded);
+        let mut batch_digest = [0u8; 32];
+        hasher
+            .finalize_variable(&mut batch_digest)
+            .expect("32 <= 64");
+        Ok(Self {
+            table_id: first.table_id,
+            hand_id: first.hand_id,
+            first_call_seq: first.call_seq,
+            last_call_seq: last.call_seq,
+            task_count: u16::try_from(tasks.len()).map_err(|_| {
+                TexasAirError::SpecViolation("composition batch task count exceeds u16".into())
+            })?,
+            batch_digest,
+        })
+    }
+
+    fn mix_into<C: Channel>(&self, channel: &mut C, stage_kind: StageKind, num_columns: usize) {
+        channel.mix_u32s(&[
+            0x5a43_4241,
+            u32::from(COMPOSITION_BATCH_PROOF_BUNDLE_VERSION),
+            u32::from(stage_kind as u8),
+            u32::from(self.task_count),
+            u32::try_from(num_columns).expect("Stage width fits u32"),
+            self.hand_id,
+            self.first_call_seq,
+            self.last_call_seq,
+        ]);
+        channel.mix_u64(self.table_id);
+        channel.mix_u32s(
+            &self
+                .batch_digest
+                .chunks_exact(4)
+                .map(|chunk| u32::from_be_bytes(chunk.try_into().expect("4-byte digest word")))
+                .collect::<Vec<_>>(),
+        );
+    }
+}
+
+fn validate_batch_tasks(tasks: &[crate::prove_task::ProveTask]) -> TexasAirResult<()> {
+    if tasks.is_empty() || tasks.len() > MAX_COMPOSITION_BATCH_TASKS {
+        return Err(TexasAirError::SpecViolation(format!(
+            "composition batch must contain 1..={MAX_COMPOSITION_BATCH_TASKS} tasks"
+        )));
+    }
+    let first = &tasks[0];
+    for (index, task) in tasks.iter().enumerate() {
+        if !supports_composite_proof(task.method_kind) {
+            return Err(TexasAirError::SpecViolation(format!(
+                "composition batch task {index} uses unsupported method {}",
+                task.method_kind.method_name()
+            )));
+        }
+        if task.table_id != first.table_id || task.hand_id != first.hand_id {
+            return Err(TexasAirError::SpecViolation(
+                "composition batch crosses table or hand scope".into(),
+            ));
+        }
+        if let Some(previous) = index.checked_sub(1).map(|i| &tasks[i]) {
+            if task.call_seq
+                != previous.call_seq.checked_add(1).ok_or_else(|| {
+                    TexasAirError::SpecViolation("composition batch call_seq overflow".into())
+                })?
+            {
+                return Err(TexasAirError::SpecViolation(
+                    "composition batch tasks are not call_seq-contiguous".into(),
+                ));
+            }
+            let previous_post = crate::state_root::compute_state_root(&previous.post_table)?;
+            let current_pre = crate::state_root::compute_state_root(&task.pre_table)?;
+            if previous_post != current_pre {
+                return Err(TexasAirError::SpecViolation(
+                    "composition batch tasks are not state-root-contiguous".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_batch_traces(tasks: &[crate::prove_task::ProveTask]) -> TexasAirResult<[MethodTrace; 4]> {
+    validate_batch_tasks(tasks)?;
+    let widths = [
+        super::seat_update::NUM_COLUMNS,
+        super::bet_collection::NUM_COLUMNS,
+        super::round_advance::NUM_COLUMNS,
+        super::settlement::NUM_COLUMNS,
+    ];
+    let mut traces = std::array::from_fn(|index| MethodTrace::new(MIN_LOG_SIZE, widths[index]));
+    for (row_index, task) in tasks.iter().enumerate() {
+        let plan = derive_composite_transition_plan_from_task(task)?;
+        let base = base_public_inputs(task)?;
+        let airs = build_airs(&plan, &base);
+        let rows = [
+            airs.0.canonical_row(),
+            airs.1.canonical_row(),
+            airs.2.canonical_row(),
+            airs.3.canonical_row(),
+        ];
+        for (trace, row) in traces.iter_mut().zip(rows) {
+            trace.write_row(row_index, &row)?;
+        }
+    }
+    for (index, trace) in traces.iter_mut().enumerate() {
+        let stage_kind = match index {
+            0 => StageKind::SeatUpdate,
+            1 => StageKind::BetCollection,
+            2 => StageKind::RoundAdvance,
+            3 => StageKind::Settlement,
+            _ => unreachable!(),
+        };
+        let mut padding = vec![M31::from(0u32); trace.num_columns];
+        padding[1] = M31::from(u32::from(stage_kind as u8));
+        padding[2] = M31::from(u32::from(stage_kind.index()));
+        for row_index in tasks.len()..MAX_COMPOSITION_BATCH_TASKS {
+            trace.write_row(row_index, &padding)?;
+        }
+    }
+    Ok(traces)
+}
+
+#[derive(Debug, Clone)]
+struct BatchStageAir {
+    stage_kind: StageKind,
+    num_columns: usize,
+}
+
+impl FrameworkEval for BatchStageAir {
+    fn log_size(&self) -> u32 {
+        MIN_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        MIN_LOG_SIZE + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let active = eval.next_trace_mask();
+        let stage_kind = eval.next_trace_mask();
+        let stage_index = eval.next_trace_mask();
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(active.clone() * (active - one));
+        eval.add_constraint(stage_kind - M31::from(u32::from(self.stage_kind as u8)).into());
+        eval.add_constraint(stage_index - M31::from(u32::from(self.stage_kind.index())).into());
+        for _ in 3..self.num_columns {
+            let _ = eval.next_trace_mask();
+        }
+        eval
+    }
+}
+
+fn prove_batch_stage(
+    stage_kind: StageKind,
+    statement: &CompositionBatchStatement,
+    trace: &MethodTrace,
+) -> TexasAirResult<ArchivedComponentProof> {
+    let timing_start = crate::prove_timing::enabled().then(std::time::Instant::now);
+    let config = PcsConfig::default();
+    let blowup_log = config.fri_config.log_blowup_factor;
+    let big_domain = CanonicCoset::new(MIN_LOG_SIZE + blowup_log);
+    let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
+    let mut channel = Poseidon252Channel::default();
+    statement.mix_into(&mut channel, stage_kind, trace.num_columns);
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
+    {
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![]);
+        tree_builder.commit(&mut channel);
+    }
+    {
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(trace.to_evaluations());
+        tree_builder.commit(&mut channel);
+    }
+    let mut allocator = TraceLocationAllocator::default();
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        BatchStageAir {
+            stage_kind,
+            num_columns: trace.num_columns,
+        },
+        SecureField::from(0u32),
+    );
+    let stark_proof = prove(&[&component], &mut channel, commitment_scheme)
+        .map_err(|error: ProvingError| TexasAirError::StwoProverError(error.to_string()))?;
+    if let Some(start) = timing_start {
+        crate::prove_timing::record(
+            format!("batch-stage:{stage_kind:?}[{}]", statement.task_count),
+            crate::prove_timing::TimingKind::Prove,
+            start,
+            Some(trace.num_columns),
+        );
+    }
+    let archive = ArchivedComponentProof::from_stark(
+        stage_kind,
+        MIN_LOG_SIZE,
+        trace.num_columns,
+        &stark_proof,
+    )?;
+    verify_batch_stage(&archive, stage_kind, statement, trace)?;
+    Ok(archive)
+}
+
+fn verify_batch_stage(
+    archive: &ArchivedComponentProof,
+    stage_kind: StageKind,
+    statement: &CompositionBatchStatement,
+    trace: &MethodTrace,
+) -> TexasAirResult<()> {
+    let timing_start = crate::prove_timing::enabled().then(std::time::Instant::now);
+    if archive.stage_kind != stage_kind
+        || archive.log_size != MIN_LOG_SIZE
+        || archive.num_columns()? != trace.num_columns
+    {
+        return Err(TexasAirError::SerializationError(
+            "batched component proof shape does not match canonical trace".into(),
+        ));
+    }
+    let stark_proof = archive.decode_stark()?;
+    let config = PcsConfig::default();
+    let blowup_log = config.fri_config.log_blowup_factor;
+    let big_domain = CanonicCoset::new(MIN_LOG_SIZE + blowup_log);
+    let twiddles = SimdBackend::precompute_twiddles(big_domain.half_coset());
+
+    // Recompute the exact original-trace commitment from verifier-owned rows. This closes the
+    // dynamic-row gap without doubling every Stage width with matching preprocessed columns.
+    let mut trusted_channel = Poseidon252Channel::default();
+    let mut trusted_scheme =
+        CommitmentSchemeProver::<SimdBackend, Poseidon252MerkleChannel>::new(config, &twiddles);
+    {
+        let mut tree_builder = trusted_scheme.tree_builder();
+        tree_builder.extend_evals(trace.to_evaluations());
+        tree_builder.commit(&mut trusted_channel);
+    }
+    let trusted_root = trusted_scheme.roots()[0];
+    let proof_trace_root = *stark_proof.commitments.get(1).ok_or_else(|| {
+        TexasAirError::SerializationError("batched proof is missing trace commitment".into())
+    })?;
+    if proof_trace_root != trusted_root {
+        return Err(TexasAirError::ConstraintUnsatisfied(
+            "batched proof trace commitment differs from verifier-reconstructed rows".into(),
+        ));
+    }
+
+    let mut channel = Poseidon252Channel::default();
+    statement.mix_into(&mut channel, stage_kind, trace.num_columns);
+    let mut commitment_scheme = CommitmentSchemeVerifier::<Poseidon252MerkleChannel>::new(config);
+    let preprocessed_root = *stark_proof.commitments.first().ok_or_else(|| {
+        TexasAirError::SerializationError("batched proof is missing preprocessed commitment".into())
+    })?;
+    commitment_scheme.commit(preprocessed_root, &[], &mut channel);
+    commitment_scheme.commit(
+        trusted_root,
+        &vec![MIN_LOG_SIZE; trace.num_columns],
+        &mut channel,
+    );
+    let mut allocator = TraceLocationAllocator::default();
+    let component = FrameworkComponent::new(
+        &mut allocator,
+        BatchStageAir {
+            stage_kind,
+            num_columns: trace.num_columns,
+        },
+        SecureField::from(0u32),
+    );
+    verify(
+        &[&component],
+        &mut channel,
+        &mut commitment_scheme,
+        stark_proof,
+    )
+    .map_err(|error: VerificationError| TexasAirError::ConstraintUnsatisfied(error.to_string()))?;
+    if let Some(start) = timing_start {
+        crate::prove_timing::record(
+            format!("batch-stage:{stage_kind:?}[{}]", statement.task_count),
+            crate::prove_timing::TimingKind::Verify,
+            start,
+            Some(trace.num_columns),
+        );
+    }
+    Ok(())
+}
+
 fn bincode_options() -> impl Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -426,6 +961,33 @@ mod tests {
         }
     }
 
+    fn batch_envelope() -> ArchivedCompositionBatchProofBundle {
+        ArchivedCompositionBatchProofBundle {
+            version: COMPOSITION_BATCH_PROOF_BUNDLE_VERSION,
+            table_id: 7,
+            hand_id: 3,
+            first_call_seq: 9,
+            last_call_seq: 34,
+            task_count: 26,
+            batch_digest: [8; 32],
+            stages: [
+                stage(
+                    StageKind::SeatUpdate,
+                    super::super::seat_update::NUM_COLUMNS,
+                ),
+                stage(
+                    StageKind::BetCollection,
+                    super::super::bet_collection::NUM_COLUMNS,
+                ),
+                stage(
+                    StageKind::RoundAdvance,
+                    super::super::round_advance::NUM_COLUMNS,
+                ),
+                stage(StageKind::Settlement, super::super::settlement::NUM_COLUMNS),
+            ],
+        }
+    }
+
     #[test]
     fn archive_roundtrip_preserves_canonical_stage_order() {
         let bundle = envelope();
@@ -441,6 +1003,25 @@ mod tests {
         assert!(bundle.to_bytes().is_err());
         let mut bundle = envelope();
         bundle.stages[3].stage_kind = StageKind::RoundAdvance;
+        assert!(bundle.to_bytes().is_err());
+    }
+
+    #[test]
+    fn batch_archive_roundtrip_preserves_scope_and_stage_order() {
+        let bundle = batch_envelope();
+        let bytes = bundle.to_bytes().unwrap();
+        let decoded = ArchivedCompositionBatchProofBundle::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
+    fn batch_archive_rejects_empty_or_reordered_envelope() {
+        let mut bundle = batch_envelope();
+        bundle.task_count = 0;
+        assert!(bundle.to_bytes().is_err());
+
+        let mut bundle = batch_envelope();
+        bundle.stages.swap(1, 2);
         assert!(bundle.to_bytes().is_err());
     }
 }

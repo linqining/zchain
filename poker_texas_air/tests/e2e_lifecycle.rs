@@ -20,6 +20,7 @@ use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
 };
 use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use poker_texas_air::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
+use poker_texas_air::authorization_binding::AdminAuthorizationAirBinding;
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::prove_method;
 use poker_texas_air::public_inputs::TexasPublicInputs;
@@ -42,6 +43,10 @@ fn one_root() -> [M31; 4] {
         poker_texas_air::method_kind::MethodKind::Fold,
     )
     .1
+}
+
+fn synthetic_admin_authorization() -> AdminAuthorizationAirBinding {
+    AdminAuthorizationAirBinding::synthetic_unverified()
 }
 
 // ========== join_table AIR ==========
@@ -436,6 +441,7 @@ fn test_e2e_start_hand_prove_verify() {
         ante_collected: 0,
         pre_pot: 0,
         post_pot: 0,
+        authorization: synthetic_admin_authorization(),
     };
     let row = StartHandRow::active(
         &input,
@@ -489,6 +495,7 @@ fn test_soundness_start_hand_tampered_count() {
         ante_collected: 0,
         pre_pot: 0,
         post_pot: 0,
+        authorization: synthetic_admin_authorization(),
     };
     let row = StartHandRow::active(
         &input,
@@ -555,6 +562,7 @@ fn test_soundness_start_hand_tampered_ante_mode() {
         ante_collected: 40,
         pre_pot: 0,
         post_pot: 40,
+        authorization: synthetic_admin_authorization(),
     };
     let row = StartHandRow::active(
         &input,
@@ -610,6 +618,62 @@ fn test_soundness_start_hand_tampered_ante_mode() {
     );
 }
 
+/// Soundness: creator authorization receipt digests are constrained by the
+/// start_hand AIR rather than trusted as host-only metadata.
+#[test]
+fn test_soundness_start_hand_tampered_authorization_digest() {
+    let input = StartHandInput {
+        active_count: 4,
+        new_button: 2,
+        ante_mode: 0,
+        ante_amount: 0,
+        ante_collected: 0,
+        pre_pot: 0,
+        post_pot: 0,
+        authorization: synthetic_admin_authorization(),
+    };
+    let mut row = StartHandRow::active(
+        &input,
+        active_count_inv(4),
+        active_count_prod(4),
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+    );
+    row.authorization.receipt_digest[7] = M31::from(1u32);
+    let trace = gen_method_trace(
+        StartHandAir::num_columns(),
+        &row.to_vec(),
+        &StartHandRow::padding().to_vec(),
+    )
+    .expect("trace generation failed");
+
+    let result = prove_method(
+        &trace,
+        StartHandAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 3,
+            pre_version: 0,
+            post_version: 1,
+        },
+        StartHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3),
+    );
+    assert!(
+        result.is_err(),
+        "tampered start_hand authorization receipt must not prove"
+    );
+}
+
 /// Soundness: ante high limbs are constrained, not truncated to limb 0.
 #[test]
 fn test_soundness_start_hand_rejects_high_limb_ante_substitution() {
@@ -621,6 +685,7 @@ fn test_soundness_start_hand_rejects_high_limb_ante_substitution() {
         ante_collected: 0,
         pre_pot: 0,
         post_pot: 0,
+        authorization: synthetic_admin_authorization(),
     };
     let mut row = StartHandRow::active(
         &input,
@@ -673,6 +738,7 @@ fn test_e2e_start_hand_ante_pot_ripple_carry() {
         ante_collected: 1,
         pre_pot: 65_535,
         post_pot: 65_536,
+        authorization: synthetic_admin_authorization(),
     };
     let row = StartHandRow::active(
         &input,
@@ -821,6 +887,50 @@ fn test_soundness_tick_tampered_kind() {
     assert!(
         result.is_err(),
         "篡改 timeout_kind 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
+/// Soundness: the verifier-issued Tick lifecycle receipt is constrained by
+/// the method AIR even when all four business components are inactive.
+#[test]
+fn test_soundness_tick_tampered_lifecycle_receipt() {
+    let input = TickInput {
+        current_time: 1_700_000_000,
+        timeout_kind: 1,
+        time_bank_consumed: 0,
+        time_bank_post: 30_000,
+        rake_mode: 0,
+        rake_amount: 0,
+        ..TickInput::default()
+    };
+    let mut row = TickRow::active(&input, zero_root(), one_root(), 42, 0, 4, 0, 1, 1, 2);
+    row.lifecycle.receipt_digest[7] = M31::from(1u32);
+    let trace = gen_method_trace(
+        TickAir::num_columns(),
+        &row.to_vec(),
+        &TickRow::padding().to_vec(),
+    )
+    .expect("trace generation failed");
+
+    let result = prove_method(
+        &trace,
+        TickAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 4,
+            pre_version: 0,
+            post_version: 1,
+        },
+        TickAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+    );
+    assert!(
+        result.is_err(),
+        "tampered Tick lifecycle receipt must not prove"
     );
 }
 
@@ -993,7 +1103,10 @@ fn test_soundness_tick_tampered_rake() {
 #[test]
 fn test_e2e_reset_for_next_hand_prove_verify() {
     // VM 允许显式重置尚未开局的 WAITING/NONE 桌台。
-    let input = ResetForNextHandInput { shuffle_phase: 0 };
+    let input = ResetForNextHandInput {
+        shuffle_phase: 0,
+        authorization: synthetic_admin_authorization(),
+    };
     let row = ResetForNextHandRow::active(
         &input,
         0, // pre_pending_addon
@@ -1041,7 +1154,10 @@ fn test_e2e_reset_for_next_hand_prove_verify() {
 /// 由于 reset 的公开输入为空，soundness 通过 happy-path 间接覆盖。
 #[test]
 fn test_soundness_reset_for_next_hand_via_happy_path() {
-    let input = ResetForNextHandInput { shuffle_phase: 1 }; // Gap 6：∈ {1,2,3}（非 NONE）
+    let input = ResetForNextHandInput {
+        shuffle_phase: 1,
+        authorization: synthetic_admin_authorization(),
+    }; // Gap 6：∈ {1,2,3}（非 NONE）
     let row = ResetForNextHandRow::active(&input, 0, zero_root(), one_root(), 42, 0, 5, 0, 1, 8);
     let trace = gen_method_trace(
         ResetForNextHandAir::num_columns(),
@@ -1072,6 +1188,46 @@ fn test_soundness_reset_for_next_hand_via_happy_path() {
     verify_method(proof).expect("verify 失败");
 }
 
+/// Soundness: creator authorization receipt digests are constrained by the
+/// reset_for_next_hand AIR rather than trusted as host-only metadata.
+#[test]
+fn test_soundness_reset_for_next_hand_tampered_authorization_digest() {
+    let input = ResetForNextHandInput {
+        shuffle_phase: 1,
+        authorization: synthetic_admin_authorization(),
+    };
+    let mut row =
+        ResetForNextHandRow::active(&input, 0, zero_root(), one_root(), 42, 0, 5, 0, 1, 8);
+    row.authorization.receipt_digest[7] = M31::from(1u32);
+    let trace = gen_method_trace(
+        ResetForNextHandAir::num_columns(),
+        &row.to_vec(),
+        &ResetForNextHandRow::padding().to_vec(),
+    )
+    .expect("trace generation failed");
+
+    let result = prove_method(
+        &trace,
+        ResetForNextHandAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 5,
+            pre_version: 0,
+            post_version: 1,
+        },
+        ResetForNextHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5),
+    );
+    assert!(
+        result.is_err(),
+        "tampered reset authorization receipt must not prove"
+    );
+}
+
 // ========== 列数一致性 ==========
 
 /// 单元测试：所有 lifecycle AIR 的列数与常量声明一致。
@@ -1100,17 +1256,18 @@ fn test_lifecycle_air_column_consistency() {
     assert_eq!(LeaveTableAir::num_columns(), leave_table::cols::NUM_COLUMNS);
 
     // start_hand: 通用 + 17 业务（完整 ante 金额、active_count witnesses、pot add carries）
-    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 17);
+    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 51);
     assert_eq!(StartHandAir::num_columns(), start_hand::cols::NUM_COLUMNS);
 
-    // tick: 通用 + 53 个业务列（完整 64-bit Time Bank / Rake / deadline witness）。
-    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 53);
+    // tick: 通用 + 87 个业务列：53 列完整 64-bit Time Bank / Rake / deadline witness，
+    // 再加 lifecycle ABI/branch 两列和完整 request/receipt digest 各 16 列。
+    assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 87);
     assert_eq!(TickAir::num_columns(), tick::cols::NUM_COLUMNS);
 
     // reset_for_next_hand: 通用 + 7 业务（含 POST_PENDING_ADDON 4 limb + Gap 6 shuffle_phase + q witness）= 44
     assert_eq!(
         reset_for_next_hand::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 7
+        COMMON_NUM_COLUMNS + 41
     );
     assert_eq!(
         ResetForNextHandAir::num_columns(),

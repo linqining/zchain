@@ -18,6 +18,7 @@
 //! - 通用列 37 个
 //! - 动作列 5 个
 //! - 管理员授权列 34 个：ABI、role、完整 request/receipt digest
+//! - terminal settlement 列 34 个（mid-round 时全零）
 //!
 //! 交易签名由共识锚验证；本 AIR 绑定 canonical dispatch replay 签发的管理员授权
 //! receipt，不能由 prover 自报 `is_admin = 1`。
@@ -25,7 +26,10 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
+use crate::airs::actions::end_without_showdown::{self, EndWithoutShowdownRow, FoldOutcome};
+use crate::airs::common::{
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, bool_to_m31, u8_to_m31,
+};
 use crate::authorization_binding::AdminAuthorizationAirBinding;
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::DIGEST_LIMBS;
@@ -52,7 +56,8 @@ pub mod cols {
     /// 完整授权成功 receipt 摘要。
     pub const AUTH_RECEIPT_DIGEST_BASE: usize = AUTH_REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `force_fold` AIR 总列数。
-    pub const NUM_COLUMNS: usize = AUTH_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
+    pub const NUM_COLUMNS: usize =
+        AUTH_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS + super::end_without_showdown::NUM_COLUMNS;
 }
 
 /// `force_fold` 输入参数。
@@ -60,8 +65,8 @@ pub mod cols {
 pub struct ForceFoldInput {
     /// 被强制 fold 的座位索引。
     pub seat_index: u8,
-    /// mid-round 推进后的下一行动座位。
-    pub post_current_turn: u8,
+    /// Native-replayed mid-round or terminal settlement branch.
+    pub outcome: FoldOutcome,
     /// Verifier-issued table-creator authorization receipt.
     pub authorization: AdminAuthorizationAirBinding,
 }
@@ -129,22 +134,18 @@ impl FrameworkEval for ForceFoldAir {
         // 约束: current_turn == seat_index（Gap: 阻止为非当前行动座位构造动作）
         eval.add_constraint(is_active.clone() * (input_current_turn - expected_seat));
 
-        // 约束 2：output_folded == 1
-        let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active.clone() * (output_folded - one));
+        // 约束 2：terminal reset 会清除 folded；mid-round 保留 folded。
+        let expected_folded: E::F = bool_to_m31(self.input.outcome.output_folded()).into();
+        eval.add_constraint(is_active.clone() * (output_folded - expected_folded));
 
-        // 约束 3（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
+        // 约束 3（审计共性）：必须处于下注轮（Gap 1）。
         // round_state_is_betting 用 degree-4 vanishing (rs-2)(rs-3)(rs-4)(rs-5)==0
         // 经 q=rs² witness 展开为 degree-2 项，强制 rs ∈ {PREFLOP,FLOP,TURN,RIVER}。
-        eval.add_constraint(common.round_state_unchanged());
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
-        // 约束 4（审计共性）：pot 完整 4-limb 不变（force_fold 不改变 pot）。
-        for __c in common.pot_unchanged_4limb() {
-            eval.add_constraint(__c);
-        }
 
-        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.outcome.post_current_turn())).into();
         eval.add_constraint(is_active.clone() * (output_current_turn - expected_post_turn));
 
         // 约束 5：绑定 host-native canonical authorization request/receipt。
@@ -157,6 +158,19 @@ impl FrameworkEval for ForceFoldAir {
             let receipt: E::F = self.input.authorization.receipt_digest[limb].into();
             eval.add_constraint(is_active.clone() * (auth_request_digest[limb].clone() - request));
             eval.add_constraint(is_active.clone() * (auth_receipt_digest[limb].clone() - receipt));
+        }
+
+        match &self.input.outcome {
+            FoldOutcome::MidRound { .. } => {
+                eval.add_constraint(common.round_state_unchanged());
+                for constraint in common.pot_unchanged_4limb() {
+                    eval.add_constraint(constraint);
+                }
+                end_without_showdown::evaluate(&mut eval, &common, None);
+            }
+            FoldOutcome::EndWithoutShowdown(settlement) => {
+                end_without_showdown::evaluate(&mut eval, &common, Some(settlement));
+            }
         }
 
         eval
@@ -180,6 +194,8 @@ pub struct ForceFoldRow {
     pub output_current_turn: M31,
     /// Verifier-issued administrator authorization binding.
     pub authorization: AdminAuthorizationAirBinding,
+    /// Shared terminal settlement columns; zero for mid-round folds.
+    pub settlement: EndWithoutShowdownRow,
 }
 
 impl ForceFoldRow {
@@ -216,12 +232,18 @@ impl ForceFoldRow {
                 0,
             ),
             input_seat_index: u8_to_m31(input.seat_index),
-            output_folded: M31::from(1u32),
+            output_folded: bool_to_m31(input.outcome.output_folded()),
             // Gap 1 witness：pre_round_state²（M31 域内）
             input_pre_round_state_q: rs_m31 * rs_m31,
             input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
-            output_current_turn: u8_to_m31(input.post_current_turn),
+            output_current_turn: u8_to_m31(input.outcome.post_current_turn()),
             authorization: input.authorization,
+            settlement: match &input.outcome {
+                FoldOutcome::MidRound { .. } => EndWithoutShowdownRow::zero(),
+                FoldOutcome::EndWithoutShowdown(settlement) => {
+                    EndWithoutShowdownRow::active(settlement)
+                }
+            },
         }
     }
 
@@ -241,6 +263,7 @@ impl ForceFoldRow {
                 request_digest: [ZERO; DIGEST_LIMBS],
                 receipt_digest: [ZERO; DIGEST_LIMBS],
             },
+            settlement: EndWithoutShowdownRow::zero(),
         }
     }
 
@@ -257,6 +280,7 @@ impl ForceFoldRow {
         v.push(M31::from(u32::from(self.authorization.role)));
         v.extend_from_slice(&self.authorization.request_digest);
         v.extend_from_slice(&self.authorization.receipt_digest);
+        self.settlement.append_to(&mut v);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

@@ -4,8 +4,8 @@
 //! boundary. This module consumes that exact dispatch context and performs the
 //! contract-level authorization check (`caller == table.creator`), then issues
 //! a domain-separated request/receipt digest pair. The binding is projected
-//! into the `force_fold` and `kick_player` AIR rows, so an administrator action
-//! proof cannot be detached from its caller, public key, selector, arguments,
+//! into every creator-only method AIR row, so an administrator action proof
+//! cannot be detached from its caller, public key, selector, arguments,
 //! table, state transition, or dispatch digest.
 
 use blake2::Blake2bVar;
@@ -80,7 +80,14 @@ impl AdminAuthorizationBinding {
         post_state_root: StateRoot,
         expected_dispatch_digest: [u8; 32],
     ) -> TexasAirResult<Self> {
-        if !matches!(kind, MethodKind::ForceFold | MethodKind::KickPlayer) {
+        if !matches!(
+            kind,
+            MethodKind::StartHand
+                | MethodKind::ResetForNextHand
+                | MethodKind::AutoFold
+                | MethodKind::ForceFold
+                | MethodKind::KickPlayer
+        ) {
             return Err(TexasAirError::SpecViolation(format!(
                 "administrator authorization is not defined for {}",
                 kind.method_name()

@@ -30,6 +30,7 @@ use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
 };
 use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use poker_texas_air::airs::{AirStatement, TexasAir};
+use poker_texas_air::authorization_binding::AdminAuthorizationAirBinding;
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::{prove_create_table, prove_method};
 use poker_texas_air::public_inputs::TexasPublicInputs;
@@ -45,6 +46,10 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 #[derive(Debug, Clone)]
 struct PartiallyConstrainedAir {
     statement: AirStatement,
+}
+
+fn synthetic_admin_authorization() -> AdminAuthorizationAirBinding {
+    AdminAuthorizationAirBinding::synthetic_unverified()
 }
 
 impl FrameworkEval for PartiallyConstrainedAir {
@@ -681,6 +686,7 @@ fn start_hand_input(pre: &TexasPokerTable, post: &TexasPokerTable) -> StartHandI
         ante_collected: post.ante_collected,
         pre_pot: pre.pot,
         post_pot: post.pot,
+        authorization: synthetic_admin_authorization(),
     }
 }
 
@@ -764,6 +770,7 @@ fn production_verifier_rejects_reset_row_attached_to_unrelated_post_table() {
     .unwrap();
     let input = ResetForNextHandInput {
         shuffle_phase: pre.shuffle_state.phase,
+        authorization: synthetic_admin_authorization(),
     };
 
     let mut unrelated_post = canonical_post.clone();

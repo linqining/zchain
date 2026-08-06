@@ -14,6 +14,7 @@ use super::leave_table::{LeaveTableAir, LeaveTableInput, LeaveTableRow};
 use super::reset_for_next_hand::{ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow};
 use super::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use crate::airs::validation::{validate_canonical_dispatch, validate_row};
+use crate::authorization_binding::AdminAuthorizationBinding;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::prove_task::MethodInput;
@@ -50,6 +51,22 @@ pub(crate) fn validate_start_hand(
         ante_collected: canonical.post.ante_collected,
         pre_pot: canonical.pre.pot,
         post_pot: canonical.post.pot,
+        authorization: AdminAuthorizationBinding::verify_table_creator(
+            MethodKind::StartHand,
+            &canonical.call.context,
+            &canonical.call.selector,
+            &canonical.call.raw_args,
+            canonical.pre.creator,
+            public_inputs.table_id,
+            public_inputs.hand_id,
+            public_inputs.call_seq,
+            canonical.pre.version,
+            canonical.post.version,
+            public_inputs.pre_state_root,
+            public_inputs.post_state_root,
+            public_inputs.dispatch_call_digest,
+        )?
+        .air_binding(),
     };
     if air.input.active_count != input.active_count
         || air.input.new_button != input.new_button
@@ -58,6 +75,7 @@ pub(crate) fn validate_start_hand(
         || air.input.ante_collected != input.ante_collected
         || air.input.pre_pot != input.pre_pot
         || air.input.post_pot != input.post_pot
+        || air.input.authorization != input.authorization
     {
         return Err(TexasAirError::SpecViolation(
             "start_hand: AIR input does not match the canonical dispatch".into(),
@@ -96,8 +114,26 @@ pub(crate) fn validate_reset_for_next_hand(
 
     let input = ResetForNextHandInput {
         shuffle_phase: canonical.pre.shuffle_state.phase,
+        authorization: AdminAuthorizationBinding::verify_table_creator(
+            MethodKind::ResetForNextHand,
+            &canonical.call.context,
+            &canonical.call.selector,
+            &canonical.call.raw_args,
+            canonical.pre.creator,
+            public_inputs.table_id,
+            public_inputs.hand_id,
+            public_inputs.call_seq,
+            canonical.pre.version,
+            canonical.post.version,
+            public_inputs.pre_state_root,
+            public_inputs.post_state_root,
+            public_inputs.dispatch_call_digest,
+        )?
+        .air_binding(),
     };
-    if air.input.shuffle_phase != input.shuffle_phase {
+    if air.input.shuffle_phase != input.shuffle_phase
+        || air.input.authorization != input.authorization
+    {
         return Err(TexasAirError::SpecViolation(
             "reset_for_next_hand: AIR input does not match the canonical dispatch".into(),
         ));
