@@ -60,12 +60,30 @@ native crypto 验证即可。
   canonical VM replay 派生 winner 与完整 pre/post table；`fold_with_proof` 同时保留 native
   DLEq request/receipt digest 和调用上下文绑定。
 - terminal showdown reveal 的 settlement + reset 双 version bump 已有专门允许路径。
+- showdown 已先在 `poker_l1::texas_poker` 规范化为确定性的 `SettlementPlan`：固定 9 座位、
+  最多 9 层 side pot、1/2 个 runout、完整 hand rank/winner mask、按 button 顺时针分配奇数
+  筹码，并对完整 Borsh plan 做 domain-separated Blake2b digest。单座位外层 pot 被视为
+  uncalled return，不抽水且不拆成两次 runout。
+- 最后一个 showdown reveal 的 canonical replay 必须恰好产生一个
+  `SettlementPlanCommitted`。verifier 从事件重建 plan digest、runout count、gross/rake/
+  total awards 和固定 9 座位 award；submit-reveal AIR 绑定全部投影，并用 4×16-bit ripple
+  carry 约束 `total_awards + rake = gross_pot`。非终局 reveal 出现任何 settlement event
+  会 fail-closed。
+- Run It Twice 已具备完整 native 状态与 reveal routing：记录触发轮次、共享 board 前缀和
+  第二 board；后续公共牌 assignment 显式绑定 `(encrypted index, runout, board position)`，
+  reconstruct restart 使用新 deck index 且保留两块已公开 board，终局 plan 的
+  `runout_count = 2` 会进入上述 AIR 投影。
 
 ### 仍 fail-closed
 
 - terminal fold reset 同时包含 pending addon 或 `want_leave` 资金流的复合路径；
-- showdown side pot、多人 winner distribution、完整 hand evaluator 与 rake settlement AIR；
 - `kick_player` 在 WAITING 状态触发 nested reset/multi-version transition 的复合路径。
+
+showdown side pot、多人 winner、hand evaluator、rake 和 RIT 结算现在可由当前生产架构接受，
+但其可信性来自 verifier 对 canonical native dispatch 的重放与完整 `SettlementPlan` digest
+绑定；STWO AIR 本身不重新执行 hand evaluator 或 side-pot planner。若目标改为“即使 host
+verifier 恶意也能由单个 STARK 独立证明结算计算”，仍需把这些算法改写为 AIR/固定 verifier
+program，这不属于当前 host-native + digest 架构。
 
 terminal `call` / `raise` / `bet` 的 clean round completion 已支持：native replay 先重建动作后
 的下注状态，再约束所有 live `seat.bet` 收池、`pre_pot + collected_bets = post_pot`、清零
@@ -79,7 +97,8 @@ AIR 入口 fail-closed。
 - `kick_player` / `force_fold` 的管理员签名尚未放入 AIR；权限当前依赖 canonical dispatch
   replay 和已认证调用上下文。
 - 金额字段尚未全部统一为完整 nonnegative/range/checked-u64 AIR 约束。
-- Run It Twice 仍只有配置标记，没有完整双 board 证明流程。
+- `TexasPokerTable` Borsh ABI 已升级为 schema v2 并显式校验；旧 v1 singleton table 不会被
+  静默解释为 v2，部署升级时必须迁移或重建。
 - 多 validator `CommitVote` 已接入 P2P 签名校验、按 signer 去重、2/3 quorum 收集、
   certificate 组装与成功提交后的清理；它不再属于“消息结构存在但未收集”的缺口。
 - PEX 目前会校验、去重并传播发现地址，但尚无针对新地址的后台主动拨号、失败退避与
@@ -90,4 +109,4 @@ AIR 入口 fail-closed。
 
 当前主线适合“不追求链上压缩”的目标：host-native crypto/Stwo 验证性能最高，digest 与
 canonical context 防止 proof、receipt、table 或 call scope 被替换。它提供可信 host acceptance，
-但不声称递归压缩；上述复合 reset、通用 round completion 与产品功能缺口仍需后续独立设计。
+但不声称递归压缩；上述复合 reset 与剩余产品功能缺口仍需后续独立设计。

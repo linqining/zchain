@@ -493,12 +493,16 @@ fn reveal_task(nonce: u64) -> ProveTask {
         assignments: vec![
             RevealAssignment {
                 encrypted_card_index: 0,
+                runout_index: 0,
+                board_position: u8::MAX,
                 pending_players: vec![1],
                 reveal_tokens: vec![],
                 decrypted: false,
             },
             RevealAssignment {
                 encrypted_card_index: 1,
+                runout_index: 0,
+                board_position: u8::MAX,
                 pending_players: vec![0],
                 reveal_tokens: vec![],
                 decrypted: false,

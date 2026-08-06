@@ -8,6 +8,7 @@
 //! - `evaluate_best` 统一处理 5..=7 张牌（C(n,5) 组合枚举），<5 张用 0 填充。
 //!   删除占位牌补齐路径（避免重复牌污染评估）。
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::card::Card;
@@ -29,7 +30,18 @@ pub const ROYAL_FLUSH: u8 = 9;
 ///
 /// - `category`: 牌型（0-9）
 /// - `kickers`: tiebreaker 点数列表（定长 5，降序，不足位补 0）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct HandRank {
     pub category: u8,
     pub kickers: [u8; 5],

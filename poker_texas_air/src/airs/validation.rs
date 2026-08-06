@@ -26,6 +26,8 @@ pub(crate) struct CanonicalDispatch {
     pub(crate) call: DispatchCallPublicInput,
     /// Prove task emitted by the replayed VM dispatch.
     pub(crate) task: ProveTask,
+    /// Events emitted by the canonical native replay.
+    pub(crate) events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
 }
 
 /// Replay an exact dispatch call and bind every verifier-controlled task field.
@@ -114,6 +116,7 @@ pub(crate) fn validate_canonical_dispatch(
         post,
         call,
         task,
+        events: output.events,
     })
 }
 

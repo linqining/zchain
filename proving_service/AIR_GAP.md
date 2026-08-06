@@ -17,6 +17,13 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
   重建动作后的 `seat.bet`，约束 live bet 总和收池、pot 加法、下注清零和下一 reveal phase。
 - 最后一个 showdown reveal 同时执行结算和 `reset_for_next_hand`，因此版本从 pre-state
   递增两次；仅该 canonical terminal transition 被允许使用 version increment 2。
+- showdown 结算先生成并原子应用规范化 `SettlementPlan`。verifier 从 canonical replay
+  事件提取完整 plan digest、1/2 runout、gross/rake/total awards 和固定 9 座位 award；
+  submit-reveal AIR 绑定这些字段并约束 `total_awards + rake = gross_pot`。非终局 reveal
+  携带 settlement 投影、缺少 plan event、重复 plan event 或 award 汇总不一致都会拒绝。
+- Run It Twice 的 native 状态机会在无后续 contested betting 且 board 未完成时触发，后续
+  assignment 显式路由到两个 board；reconstruct 保留已公开双 board 并从新 deck index
+  继续。终局 RIT canonical replay + Orchestrator prove/verify 已有集成测试。
 - last-opponent `fold` / `fold_with_proof` 会先收集 live bets，再证明 gross pot、rake、winner
   award 与 winner stack 的三条资金等式并 reset 到 `WAITING`；带 pending addon/leave 的复合
   reset 继续 fail-closed。
@@ -43,3 +50,5 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
   block limit 的后续调用会在执行昂贵 verifier 前被 admission 拒绝。
 - 聚合器仅维护 descriptor 链，不验证 child proof；递归聚合生产入口保持 fail-closed。
 - 本地 receipt 链不等同于区块包含或共识锚定；调用方仍需提供经认证的任务来源与链端锚点。
+- `TexasPokerTable` 当前 Borsh schema version 为 v2；旧 v1 table 需要在部署升级边界显式
+  迁移或重建，不能直接按 v2 解码继续运行。

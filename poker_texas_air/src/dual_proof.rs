@@ -47,7 +47,7 @@ use crate::airs::crypto::submit_shuffle_v2::{
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::orchestrator::validate_full_dispatch_task;
+use crate::orchestrator::{replay_reveal_settlement_binding, validate_full_dispatch_task};
 use crate::precompile_binding::{
     JOIN_AND_SHUFFLE_ABI_VERSION, JoinAndShuffleVerifyRequest, LEAVE_DLEQ_ABI_VERSION,
     LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding, REVEAL_TOKEN_ABI_VERSION,
@@ -1191,11 +1191,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let request_bytes = require_expected_request(supplied_request, expected_bytes)?;
             let request = RevealTokenVerifyRequest::decode(&request_bytes)?;
             let binding = PrecompileCallBinding::verify_reveal_tokens(&request)?;
+            let version_increment = reveal_version_increment(task)?;
             let input = SubmitPlayerRevealTokensInput {
                 seat_index: *seat_index,
                 reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
-                version_increment: reveal_version_increment(task)?,
+                version_increment,
                 precompile: binding.air_binding(),
+                settlement: replay_reveal_settlement_binding(task, version_increment == 2)?,
             };
             let post_revealed_count = u8::try_from(
                 task.post_table.reveal_token_state.assignments.len(),

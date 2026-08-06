@@ -151,6 +151,8 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
                         reveal_phase: 1,
                         version_increment: 1,
                         precompile: PrecompileAirBinding::synthetic_unverified(),
+                        settlement:
+                            poker_texas_air::settlement_binding::SettlementPlanBinding::inactive(),
                     },
                     pre_state_root: zero_root(),
                     post_state_root: one_root(),
@@ -665,6 +667,7 @@ fn test_e2e_submit_player_reveal_tokens_prove_verify() {
         reveal_phase: 1, // RevealPhase::HoleCards
         version_increment: 1,
         precompile: PrecompileAirBinding::synthetic_unverified(),
+        settlement: poker_texas_air::settlement_binding::SettlementPlanBinding::inactive(),
     };
     let row = SubmitPlayerRevealTokensRow::active(
         &input,
@@ -710,11 +713,23 @@ fn test_e2e_submit_player_reveal_tokens_prove_verify() {
 /// `reset_for_next_hand` 会造成第二次 `bump_version`。
 #[test]
 fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
+    let mut awards = [0u64; 9];
+    awards[0] = 95;
+    awards[1] = 95;
     let input = SubmitPlayerRevealTokensInput {
         seat_index: 1,
         reveal_phase: 6,
         version_increment: 2,
         precompile: PrecompileAirBinding::synthetic_unverified(),
+        settlement: poker_texas_air::settlement_binding::SettlementPlanBinding {
+            active: true,
+            plan_digest: [0x5A; 32],
+            runout_count: 2,
+            gross_pot: 200,
+            rake: 10,
+            total_awards: 190,
+            awards,
+        },
     };
     let row =
         SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 5, 7, 9, 0);
@@ -747,7 +762,35 @@ fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
         public_inputs,
     )
     .expect("terminal showdown reveal prove 失败");
-    verify_method(proof).expect("terminal showdown reveal verify 失败");
+    verify_method(proof.clone()).expect("terminal showdown reveal verify 失败");
+
+    let mut tampered_digest = proof.clone();
+    tampered_digest.air.input.settlement.plan_digest[0] ^= 1;
+    assert!(
+        verify_method(tampered_digest).is_err(),
+        "tampered settlement digest must invalidate the proof"
+    );
+
+    let mut tampered_runouts = proof.clone();
+    tampered_runouts.air.input.settlement.runout_count = 1;
+    assert!(
+        verify_method(tampered_runouts).is_err(),
+        "tampered settlement runout count must invalidate the proof"
+    );
+
+    let mut tampered_gross = proof.clone();
+    tampered_gross.air.input.settlement.gross_pot += 1;
+    assert!(
+        verify_method(tampered_gross).is_err(),
+        "tampered settlement conservation summary must invalidate the proof"
+    );
+
+    let mut tampered_award = proof;
+    tampered_award.air.input.settlement.awards[0] += 1;
+    assert!(
+        verify_method(tampered_award).is_err(),
+        "tampered per-seat settlement award must invalidate the proof"
+    );
 }
 
 /// Soundness: 篡改 submit_player_reveal_tokens 的 `reveal_phase` 公开输入后，verify 应失败。
@@ -758,6 +801,7 @@ fn test_soundness_submit_player_reveal_tokens_tampered_phase() {
         reveal_phase: 1,
         version_increment: 1,
         precompile: PrecompileAirBinding::synthetic_unverified(),
+        settlement: poker_texas_air::settlement_binding::SettlementPlanBinding::inactive(),
     };
     let row =
         SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 4, 0, 1, 1);
@@ -950,10 +994,11 @@ fn test_crypto_air_column_consistency() {
         submit_shuffle_v2::cols::NUM_COLUMNS
     );
 
-    // submit_player_reveal_tokens: 通用 + 5 业务 = 42（含 Gap 7 witness q1/q2）
+    // submit_player_reveal_tokens: 通用 + 108 业务列：基础 reveal/precompile 39 列，
+    // 再加 settlement active/digest/runout/金额/逐座位 award/守恒 carry 共 69 列。
     assert_eq!(
         submit_player_reveal_tokens::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 39
+        COMMON_NUM_COLUMNS + 108
     );
     assert_eq!(
         SubmitPlayerRevealTokensAir::num_columns(),

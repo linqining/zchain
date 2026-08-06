@@ -419,16 +419,23 @@ pub(crate) fn validate_submit_player_reveal_tokens(
     }
     binding.validate_issued()?;
 
+    let version_increment = reveal_version_increment(&canonical.pre, &canonical.post)?;
+    let settlement = crate::settlement_binding::SettlementPlanBinding::from_replay(
+        &canonical.events,
+        version_increment == 2,
+    )?;
     let input = SubmitPlayerRevealTokensInput {
         seat_index: args.seat_index,
         reveal_phase: canonical.pre.reveal_token_state.reveal_phase,
-        version_increment: reveal_version_increment(&canonical.pre, &canonical.post)?,
+        version_increment,
         precompile: binding.air_binding(),
+        settlement,
     };
     if air.input.seat_index != input.seat_index
         || air.input.reveal_phase != input.reveal_phase
         || air.input.version_increment != input.version_increment
         || air.input.precompile != input.precompile
+        || air.input.settlement != input.settlement
     {
         return Err(TexasAirError::SpecViolation(
             "submit_player_reveal_tokens: AIR input does not match the canonical dispatch".into(),

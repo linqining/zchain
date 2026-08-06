@@ -44,6 +44,7 @@ pub mod outer_precompile;
 pub mod precompile_binding;
 pub mod proof_archive;
 pub mod public_inputs;
+pub mod settlement_binding;
 pub mod state_root;
 pub mod verified_chain;
 

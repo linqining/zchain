@@ -396,6 +396,26 @@ pub enum TexasPokerEvent {
         board1_cards: u8, // 牌数
         board2_cards: u8,
     },
+
+    // ========== 15. Canonical settlement plan ==========
+    /// The state machine derived and atomically applied a canonical settlement plan.
+    ///
+    /// The digest commits to every pot layer, runout amount, eligible/winner mask, hand rank,
+    /// per-seat award, rake allocation, and odd-chip decision.
+    SettlementPlanCommitted {
+        /// Settled table.
+        table_id: ObjectID,
+        /// Domain-separated digest of the canonical Borsh plan.
+        plan_digest: [u8; 32],
+        /// Number of independent runouts (`1` or `2`).
+        runout_count: u8,
+        /// Total wager amount before rake.
+        gross_pot: u64,
+        /// Total rake removed from table custody.
+        rake: u64,
+        /// Total amount awarded to seats.
+        total_awards: u64,
+    },
 }
 
 /// 将事件追加到事件日志（链下索引友好）。
@@ -837,6 +857,14 @@ mod tests {
                 board1_cards: 0,
                 board2_cards: 0,
             },
+            TexasPokerEvent::SettlementPlanCommitted {
+                table_id,
+                plan_digest: [0; 32],
+                runout_count: 1,
+                gross_pot: 0,
+                rake: 0,
+                total_awards: 0,
+            },
         ];
 
         for evt in &samples {
@@ -844,7 +872,7 @@ mod tests {
             let _recovered: TexasPokerEvent =
                 borsh::from_slice(&bytes).expect("Borsh deserialize 失败");
         }
-        // 验证样本数量（48 个变体）
-        assert_eq!(samples.len(), 48, "事件变体数应为 48");
+        // 验证样本数量（49 个变体）
+        assert_eq!(samples.len(), 49, "事件变体数应为 49");
     }
 }

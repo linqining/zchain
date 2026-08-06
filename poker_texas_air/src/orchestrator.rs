@@ -2056,14 +2056,17 @@ impl Orchestrator {
         let request =
             RevealTokenVerifyRequest::from_dispatch(call_context, &task.pre_table, &args)?;
         let binding = PrecompileCallBinding::verify_reveal_tokens(&request)?;
+        let version_increment = reveal_version_increment(task)?;
+        let settlement = replay_reveal_settlement_binding(task, version_increment == 2)?;
         let input = SubmitPlayerRevealTokensInput {
             seat_index: *seat_index,
             // Admission is determined by the pre-dispatch reveal phase. The final player in a
             // reveal round legitimately advances the post-state to NONE after all assigned
             // tokens have been received.
             reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
-            version_increment: reveal_version_increment(task)?,
+            version_increment,
             precompile: binding.air_binding(),
+            settlement,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_rc = task.post_table.reveal_token_state.assignments.len() as u8;
@@ -2304,6 +2307,35 @@ fn reveal_version_increment(task: &ProveTask) -> TexasAirResult<u8> {
         )));
     }
     Ok(increment)
+}
+
+pub(crate) fn replay_reveal_settlement_binding(
+    task: &ProveTask,
+    terminal: bool,
+) -> TexasAirResult<crate::settlement_binding::SettlementPlanBinding> {
+    let mut replayed_post = task.pre_table.clone();
+    let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+        &task.context,
+        &mut replayed_post,
+        &task.selector,
+        &task.raw_args,
+    )
+    .map_err(|error| {
+        TexasAirError::SpecViolation(format!(
+            "submit_player_reveal_tokens settlement replay failed: {error}"
+        ))
+    })?;
+    if replayed_post != task.post_table {
+        return Err(TexasAirError::SpecViolation(
+            "submit_player_reveal_tokens settlement replay post-table mismatch".into(),
+        ));
+    }
+    let output: DispatchOutput = borsh::from_slice(&result.return_value).map_err(|error| {
+        TexasAirError::SerializationError(format!(
+            "submit_player_reveal_tokens settlement replay output: {error}"
+        ))
+    })?;
+    crate::settlement_binding::SettlementPlanBinding::from_replay(&output.events, terminal)
 }
 
 /// 原生下注动作种类。

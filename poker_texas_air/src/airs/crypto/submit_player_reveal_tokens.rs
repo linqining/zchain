@@ -25,9 +25,13 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
+use crate::airs::common::{
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
+    u64_to_m31_limbs,
+};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
+use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding, digest_to_m31_limbs};
+use crate::settlement_binding::{SETTLEMENT_SEATS, SettlementPlanBinding};
 
 /// `submit_player_reveal_tokens` 业务特定列布局。
 pub mod cols {
@@ -50,8 +54,25 @@ pub mod cols {
     pub const REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 7;
     /// Full verifier receipt digest columns.
     pub const RECEIPT_DIGEST_BASE: usize = REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
+    /// Terminal-settlement activation flag.
+    pub const SETTLEMENT_ACTIVE: usize = RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
+    /// Canonical settlement-plan digest columns.
+    pub const SETTLEMENT_DIGEST_BASE: usize = SETTLEMENT_ACTIVE + 1;
+    /// Number of active runouts.
+    pub const SETTLEMENT_RUNOUT_COUNT: usize = SETTLEMENT_DIGEST_BASE + super::DIGEST_LIMBS;
+    /// Gross-pot u64 limbs.
+    pub const SETTLEMENT_GROSS_BASE: usize = SETTLEMENT_RUNOUT_COUNT + 1;
+    /// Rake u64 limbs.
+    pub const SETTLEMENT_RAKE_BASE: usize = SETTLEMENT_GROSS_BASE + 4;
+    /// Total-awards u64 limbs.
+    pub const SETTLEMENT_TOTAL_AWARDS_BASE: usize = SETTLEMENT_RAKE_BASE + 4;
+    /// Nine fixed per-seat award projections.
+    pub const SETTLEMENT_AWARDS_BASE: usize = SETTLEMENT_TOTAL_AWARDS_BASE + 4;
+    /// Ripple carries for `total_awards + rake = gross_pot`.
+    pub const SETTLEMENT_CONSERVATION_CARRY_BASE: usize =
+        SETTLEMENT_AWARDS_BASE + super::SETTLEMENT_SEATS * 4;
     /// `submit_player_reveal_tokens` AIR 总列数。
-    pub const NUM_COLUMNS: usize = RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
+    pub const NUM_COLUMNS: usize = SETTLEMENT_CONSERVATION_CARRY_BASE + 3;
 }
 
 /// `submit_player_reveal_tokens` 输入参数。
@@ -71,6 +92,8 @@ pub struct SubmitPlayerRevealTokensInput {
     pub version_increment: u8,
     /// Verifier-issued batched reveal-token verification result.
     pub precompile: PrecompileAirBinding,
+    /// Verifier-replayed normalized showdown settlement; zero for non-terminal reveals.
+    pub settlement: SettlementPlanBinding,
 }
 
 /// `submit_player_reveal_tokens` AIR 公开输入。
@@ -130,6 +153,16 @@ impl FrameworkEval for SubmitPlayerRevealTokensAir {
         let precompile_abi_version = eval.next_trace_mask();
         let request_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
         let receipt_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let settlement_active = eval.next_trace_mask();
+        let settlement_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let settlement_runout_count = eval.next_trace_mask();
+        let settlement_gross: [E::F; 4] = std::array::from_fn(|_| eval.next_trace_mask());
+        let settlement_rake: [E::F; 4] = std::array::from_fn(|_| eval.next_trace_mask());
+        let settlement_total_awards: [E::F; 4] = std::array::from_fn(|_| eval.next_trace_mask());
+        let settlement_awards: [[E::F; 4]; SETTLEMENT_SEATS] =
+            std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
+        let settlement_conservation_carry: [E::F; 3] =
+            std::array::from_fn(|_| eval.next_trace_mask());
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -179,6 +212,57 @@ impl FrameworkEval for SubmitPlayerRevealTokensAir {
             eval.add_constraint(is_active.clone() * (receipt_digest[i].clone() - expected_receipt));
         }
 
+        let expected_settlement_active: E::F =
+            M31::from(u32::from(self.input.settlement.active)).into();
+        eval.add_constraint(
+            is_active.clone() * (settlement_active.clone() - expected_settlement_active),
+        );
+        let expected_settlement_digest = digest_to_m31_limbs(self.input.settlement.plan_digest);
+        for i in 0..DIGEST_LIMBS {
+            let expected: E::F = expected_settlement_digest[i].into();
+            eval.add_constraint(is_active.clone() * (settlement_digest[i].clone() - expected));
+        }
+        let expected_runouts: E::F =
+            M31::from(u32::from(self.input.settlement.runout_count)).into();
+        eval.add_constraint(
+            is_active.clone() * (settlement_runout_count.clone() - expected_runouts),
+        );
+        let expected_u64s = [
+            u64_to_m31_limbs(self.input.settlement.gross_pot),
+            u64_to_m31_limbs(self.input.settlement.rake),
+            u64_to_m31_limbs(self.input.settlement.total_awards),
+        ];
+        for (actual, expected) in [
+            &settlement_gross,
+            &settlement_rake,
+            &settlement_total_awards,
+        ]
+        .into_iter()
+        .zip(expected_u64s)
+        {
+            for limb in 0..4 {
+                let expected: E::F = expected[limb].into();
+                eval.add_constraint(is_active.clone() * (actual[limb].clone() - expected));
+            }
+        }
+        for (seat, actual) in settlement_awards.iter().enumerate() {
+            let expected = u64_to_m31_limbs(self.input.settlement.awards[seat]);
+            for limb in 0..4 {
+                let expected: E::F = expected[limb].into();
+                eval.add_constraint(is_active.clone() * (actual[limb].clone() - expected));
+            }
+        }
+        for constraint in common.limb4_delta(
+            &settlement_total_awards,
+            &settlement_gross,
+            &settlement_rake,
+            &settlement_conservation_carry,
+        ) {
+            eval.add_constraint(constraint);
+        }
+        let one: E::F = M31::from(1u32).into();
+        eval.add_constraint(settlement_active.clone() * (settlement_active - one));
+
         eval
     }
 }
@@ -206,6 +290,22 @@ pub struct SubmitPlayerRevealTokensRow {
     pub request_digest: [M31; DIGEST_LIMBS],
     /// Full verifier receipt digest.
     pub receipt_digest: [M31; DIGEST_LIMBS],
+    /// Terminal-settlement activation flag.
+    pub settlement_active: M31,
+    /// Canonical settlement-plan digest.
+    pub settlement_digest: [M31; DIGEST_LIMBS],
+    /// Number of runouts.
+    pub settlement_runout_count: M31,
+    /// Gross pot.
+    pub settlement_gross: [M31; 4],
+    /// Rake.
+    pub settlement_rake: [M31; 4],
+    /// Total awards.
+    pub settlement_total_awards: [M31; 4],
+    /// Fixed per-seat awards.
+    pub settlement_awards: [[M31; 4]; SETTLEMENT_SEATS],
+    /// Conservation ripple carries.
+    pub settlement_conservation_carry: [M31; 3],
 }
 
 impl SubmitPlayerRevealTokensRow {
@@ -253,6 +353,23 @@ impl SubmitPlayerRevealTokensRow {
             precompile_abi_version: u8_to_m31(input.precompile.abi_version),
             request_digest: input.precompile.request_digest,
             receipt_digest: input.precompile.receipt_digest,
+            settlement_active: u8_to_m31(u8::from(input.settlement.active)),
+            settlement_digest: digest_to_m31_limbs(input.settlement.plan_digest),
+            settlement_runout_count: u8_to_m31(input.settlement.runout_count),
+            settlement_gross: u64_to_m31_limbs(input.settlement.gross_pot),
+            settlement_rake: u64_to_m31_limbs(input.settlement.rake),
+            settlement_total_awards: u64_to_m31_limbs(input.settlement.total_awards),
+            settlement_awards: input.settlement.awards.map(u64_to_m31_limbs),
+            settlement_conservation_carry: if input
+                .settlement
+                .total_awards
+                .checked_add(input.settlement.rake)
+                == Some(input.settlement.gross_pot)
+            {
+                compute_add_carries(input.settlement.total_awards, input.settlement.rake)
+            } else {
+                [ZERO; 3]
+            },
         }
     }
 
@@ -270,6 +387,14 @@ impl SubmitPlayerRevealTokensRow {
             precompile_abi_version: ZERO,
             request_digest: [ZERO; DIGEST_LIMBS],
             receipt_digest: [ZERO; DIGEST_LIMBS],
+            settlement_active: ZERO,
+            settlement_digest: [ZERO; DIGEST_LIMBS],
+            settlement_runout_count: ZERO,
+            settlement_gross: [ZERO; 4],
+            settlement_rake: [ZERO; 4],
+            settlement_total_awards: [ZERO; 4],
+            settlement_awards: [[ZERO; 4]; SETTLEMENT_SEATS],
+            settlement_conservation_carry: [ZERO; 3],
         }
     }
 
@@ -286,6 +411,16 @@ impl SubmitPlayerRevealTokensRow {
         v.push(self.precompile_abi_version);
         v.extend_from_slice(&self.request_digest);
         v.extend_from_slice(&self.receipt_digest);
+        v.push(self.settlement_active);
+        v.extend_from_slice(&self.settlement_digest);
+        v.push(self.settlement_runout_count);
+        v.extend_from_slice(&self.settlement_gross);
+        v.extend_from_slice(&self.settlement_rake);
+        v.extend_from_slice(&self.settlement_total_awards);
+        for award in &self.settlement_awards {
+            v.extend_from_slice(award);
+        }
+        v.extend_from_slice(&self.settlement_conservation_carry);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

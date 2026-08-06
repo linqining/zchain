@@ -12,6 +12,7 @@
 //! - `hand_evaluator`：7选5最佳手牌评估（10 种牌型）
 //! - `betting`：下注规则（BettingRound + all-in 处理）
 //! - `side_pot`：边池分层算法（统一 pots 结构 + 位掩码 eligible）
+//! - `settlement`：确定性结算计划（side-pot/rake/runout/winner/award）
 //! - `events`：40 种事件类型枚举
 //! - `types`：核心数据结构（TexasPokerTable/Seat/DeckState/ShuffleState/...）
 //! - `state_machine`：状态机推进 + tick + reveal/reconstruct 编排
@@ -38,6 +39,7 @@ pub mod card;
 pub mod constants;
 pub mod events;
 pub mod hand_evaluator;
+pub mod settlement;
 pub mod side_pot;
 pub mod types;
 pub mod utils;
@@ -48,6 +50,13 @@ pub mod utils;
 /// proof anchors identify table escrow by this stable type tag, while the current MVP happens to
 /// store its single table at the precompile ID.
 pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
+
+/// Persisted Borsh schema version for [`types::TexasPokerTable`].
+///
+/// Version 2 adds explicit runout routing to reveal assignments and per-hand two-board state.
+/// Version-1 table bytes are intentionally not accepted as version 2; deployments must migrate
+/// or recreate the singleton table object at an upgrade boundary.
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 2;
 
 // Phase 3: 状态机 + dispatch
 pub mod dispatch;

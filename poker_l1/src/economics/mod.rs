@@ -205,6 +205,7 @@ fn audit_native_supply_objects<'a>(
                     object.id
                 ))
             })?;
+            table.validate_state_schema()?;
             if table.id != object.id {
                 return Err(PokerL1Error::Other(format!(
                     "Texas Poker table embedded id {:?} does not match object id {:?}",

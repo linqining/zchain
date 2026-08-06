@@ -7,7 +7,8 @@
 > host 完整 dispatch replay + 原生逐 proof 验证形成 P05-H；P05-R 递归聚合未完成；
 > P06 下注动作已覆盖 same-round 分支、heads-up terminal check、clean terminal
 > `call` / `raise` / `bet`，以及 clean last-opponent `fold` / `fold_with_proof` settlement。
-> showdown side-pot 和带 pending addon/leave 的复合 reset 仍 fail-closed。
+> showdown side-pot/RIT 已通过 canonical native `SettlementPlan` replay + digest/award AIR
+> binding 支持；带 pending addon/leave 的复合 reset 仍 fail-closed。
 
 本文档记录针对 `poker_lean`（`Audit/SoundnessAudit.lean`）形式化审计所列反例的
 Rust AIR 修复，并明确残余风险。
@@ -72,8 +73,10 @@ prove 失败）。
 
 > **残余缺口**：上述下注动作的金额增量和参与者状态仍主要由 canonical VM replay
 > 与 verifier-trusted row 绑定；AIR 内尚未对所有金额字段统一做 nonnegative/range/
-> invertibility 约束。clean terminal 收池的共享列只证明收池总额和 pot 加法，不等同于
-> showdown side-pot 或多人 winner 分配证明。
+> invertibility 约束。showdown 的 side-pot、多人 winner、hand evaluator、rake 与 RIT
+> 由 native replay 生成完整 `SettlementPlan`，AIR 绑定 plan digest、runout summary、固定
+> 9 座位 award；verifier 校验逐座位 award 汇总，AIR 约束 `total_awards + rake = gross`。
+> AIR 不独立重算 plan 内部算法。
 
 ### 4. addon / rebuy / join_table — 全局上界 range check
 
@@ -102,6 +105,9 @@ Lean 证明使用 `bound_check_4limb_le` 引理直接推出 `decodeU64` 级上�
    digest 与完整调用上下文绑定进 AIR；这仍不是 BLS12-381 verifier AIR 或递归证明。
 3. **集合归属 / 非负 / 全 limb 比较**：受 degree ≤ 2 限制，本轮用等式/不变 + host
    公开输入；严格判定需 logup / invertibility witness（TODO 已在各 AIR 标注）。
+4. **结算算法嵌入**：确定性 side-pot、hand evaluator、rake、odd-chip 与 RIT planner 已在
+   native VM 规范化并由 plan digest 绑定，但未改写成 STWO AIR；当前安全边界仍要求
+   canonical host verifier 正确重放 VM。
 
 ## 当时的验证快照（不可替代当前测试结果）
 

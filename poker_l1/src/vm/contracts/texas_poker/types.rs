@@ -29,6 +29,7 @@ use poker_protocol::crypto::types::{ECPoint, ECScalar};
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
 use crate::Address;
+use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 
 use super::betting::BettingRound;
@@ -234,12 +235,44 @@ pub struct RevealTokenData {
 pub struct RevealAssignment {
     /// 牌组中的加密牌索引。
     pub encrypted_card_index: u8,
+    /// Runout index for a public board card (`0` for normal play and hole-card phases).
+    pub runout_index: u8,
+    /// Position in the target board (`0..=4`), or `u8::MAX` for hole-card assignments.
+    pub board_position: u8,
     /// 待提交 reveal token 的玩家 seat_index 列表。
     pub pending_players: Vec<u8>,
     /// 已收集的 reveal tokens。
     pub reveal_tokens: Vec<RevealTokenData>,
     /// 是否已解密。
     pub decrypted: bool,
+}
+
+/// Per-hand Run It Twice state.
+///
+/// `community_cards` remains the canonical first board. When active,
+/// `second_board_cards` starts with the already exposed shared prefix and receives the second
+/// runout's remaining cards.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RunItTwiceState {
+    /// Whether this hand is currently using two runouts.
+    pub active: bool,
+    /// Betting round at which further betting became impossible.
+    pub trigger_round: u8,
+    /// Number of already exposed community cards shared by both boards.
+    pub shared_board_len: u8,
+    /// Canonical second board, including the shared prefix.
+    pub second_board_cards: Vec<Card>,
+}
+
+impl Default for RunItTwiceState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            trigger_round: super::constants::ROUND_WAITING,
+            shared_board_len: 0,
+            second_board_cards: vec![],
+        }
+    }
 }
 
 /// Reveal Token 状态（镜像 Move `RevealTokenState`，table.move:146-149）。
@@ -481,6 +514,8 @@ impl TableConfig {
 pub struct TexasPokerTable {
     /// 桌台 ObjectID（保留 `0xFF..02`）。
     pub id: ObjectID,
+    /// Persisted table-state schema version.
+    pub state_schema_version: u8,
     /// 桌台名称。
     pub name: String,
     /// 桌台创建者（管理类方法权限基准：kick_player/force_fold/reset_for_next_hand）。
@@ -573,9 +608,12 @@ pub struct TexasPokerTable {
 
     /// Run It Twice 模式（`RIT_MODE_DISABLED/TWICE`）。
     ///
-    /// 默认 DISABLED。设置为 TWICE 后，all-in 时发两次 board，降低方差。
-    /// v2 PoC：仅作为配置标记，完整双 board 流程留待后续。
+    /// 默认 DISABLED。设置为 TWICE 后，无进一步争议下注时，已公开公共牌成为共享前缀，
+    /// 后续公共牌按两个独立 runout 发牌并由规范化结算计划逐层拆池。
     pub rit_mode: u8,
+
+    /// Current hand's two-runout state. Empty outside an active RIT hand.
+    pub run_it_twice_state: RunItTwiceState,
 
     /// 桌台配置（ZK skip 等）。
     pub config: TableConfig,
@@ -618,6 +656,7 @@ impl TexasPokerTable {
 
         Self {
             id,
+            state_schema_version: super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
             name,
             creator,
             max_players,
@@ -647,6 +686,7 @@ impl TexasPokerTable {
             rake_cap: super::constants::DEFAULT_RAKE_CAP,
             rake_collected: 0,
             rit_mode: super::constants::RIT_MODE_DISABLED,
+            run_it_twice_state: RunItTwiceState::default(),
             config: TableConfig::default(),
             hand_id: 0,
             call_seq: 0,
@@ -687,6 +727,18 @@ impl TexasPokerTable {
             .map(|i| i as u8)
     }
 
+    /// Reject a table encoded for a different persisted state schema.
+    pub fn validate_state_schema(&self) -> PokerL1Result<()> {
+        if self.state_schema_version != super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
+            return Err(PokerL1Error::Serialization(format!(
+                "unsupported TexasPokerTable state schema {}, expected {}",
+                self.state_schema_version,
+                super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION
+            )));
+        }
+        Ok(())
+    }
+
     /// 状态版本号自增（每次 mutation 后调用）。
     pub fn bump_version(&mut self) {
         // 用 saturating_add 避免 version 达到 u64::MAX 时 panic（DoS）。
@@ -706,6 +758,10 @@ mod tests {
     #[test]
     fn test_table_new() {
         let table = TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+        assert_eq!(
+            table.state_schema_version,
+            super::super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION
+        );
         assert_eq!(table.max_players, 6);
         assert_eq!(table.seats.len(), 6);
         assert_eq!(table.small_blind, 50);
@@ -828,6 +884,15 @@ mod tests {
         let bytes = borsh::to_vec(&table).unwrap();
         let recovered: TexasPokerTable = borsh::from_slice(&bytes).unwrap();
         assert_eq!(table, recovered);
+    }
+
+    #[test]
+    fn test_table_rejects_wrong_state_schema() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100);
+        table.state_schema_version = 1;
+        let error = table.validate_state_schema().unwrap_err();
+        assert!(error.to_string().contains("state schema 1"));
     }
 
     #[test]

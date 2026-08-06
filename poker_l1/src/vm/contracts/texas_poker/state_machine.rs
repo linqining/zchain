@@ -37,18 +37,18 @@ use poker_protocol::zk_shuffle::reconstruction::{
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 
-use super::betting::{BettingError, BettingRound};
-use super::card::{Card, PlayingCard};
+use super::betting::BettingRound;
+use super::card::Card;
 use super::constants::*;
 use super::events::{
     self, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE, DECK_REBUILT_REASON_SHUFFLE_TIMEOUT,
     POT_TYPE_MAIN, POT_TYPE_SIDE, TRIGGER_ACTION_CALL_ALL_IN, TRIGGER_ACTION_RAISE_ALL_IN,
     TexasPokerEvent,
 };
-use super::side_pot;
+use super::settlement::{self, SettlementPlan};
 use super::types::{
     DecryptedCard, EMPTY_PLAYER, OWNER_SEAT_PUBLIC, ReconstructPlayerDeck, RevealAssignment,
-    RevealTokenData, Seat, TexasPokerTable,
+    RevealTokenData, RunItTwiceState, Seat, TexasPokerTable,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -95,6 +95,7 @@ pub fn is_playing(table: &TexasPokerTable) -> bool {
         || table.shuffle_state.phase != SHUFFLE_PHASE_NONE
         || table.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE
         || table.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE
+        || table.run_it_twice_state.active
 }
 
 /// Reconcile the embedded TableVault against every canonical custody bucket.
@@ -105,6 +106,7 @@ pub fn is_playing(table: &TexasPokerTable) -> bool {
 /// settlement receipt: its matching value has already left `chip_pool` for the Treasury output
 /// and it must be cleared by `reset_for_next_hand` before the table is persisted.
 pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
+    table.validate_state_schema()?;
     let mut stacks = 0u64;
     let mut pending_addons = 0u64;
     let mut current_bets = 0u64;
@@ -269,6 +271,25 @@ pub fn has_actionable_player(seats: &[Seat]) -> bool {
     seats
         .iter()
         .any(|s| s.is_occupied() && !s.folded && !s.all_in && !s.is_waiting)
+}
+
+/// Number of live players who can still wager chips.
+fn count_actionable_players(seats: &[Seat]) -> usize {
+    seats
+        .iter()
+        .filter(|seat| {
+            seat.is_occupied()
+                && !seat.folded
+                && !seat.all_in
+                && !seat.is_waiting
+                && !seat.left_during_hand
+        })
+        .count()
+}
+
+/// Whether no further contested betting decision is possible.
+fn no_further_betting_possible(table: &TexasPokerTable) -> bool {
+    count_active_players(&table.seats) >= 2 && count_actionable_players(&table.seats) <= 1
 }
 
 /// 从 list 中移除首个匹配项（不报错）。
@@ -552,8 +573,8 @@ fn start_betting_round(
 
     set_current_turn(table, start_seat, events);
 
-    // 检查全员 all-in 死锁（无可行动玩家）
-    if !has_actionable_player(&table.seats) {
+    // All-in runout: with at most one stack still able to wager, no matched action remains.
+    if no_further_betting_possible(table) {
         collect_bets_to_pot(table, events)?;
         advance_round(table, events)?;
         return Ok(());
@@ -681,6 +702,7 @@ fn advance_round(
         end_without_showdown(table, events)?;
         return Ok(());
     }
+    maybe_trigger_run_it_twice(table, events)?;
     let from = table.round_state;
     let to = match from {
         ROUND_PREFLOP => {
@@ -815,6 +837,7 @@ fn restart_reveal_after_reconstruct(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    validate_run_it_twice_progress(table)?;
     match table.round_state {
         ROUND_PREFLOP => {
             // 防御性：清空残留的旧 partial 手牌记录，避免 showdown 时新旧记录并存。
@@ -893,6 +916,8 @@ fn start_preflop_reveal_phase(
                 .collect();
             assignments.push(RevealAssignment {
                 encrypted_card_index: card_idx,
+                runout_index: 0,
+                board_position: u8::MAX,
                 pending_players: pending,
                 reveal_tokens: vec![],
                 decrypted: false,
@@ -925,20 +950,43 @@ fn start_community_reveal_phase(
     phase: u8,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    validate_run_it_twice_progress(table)?;
     let active_seats = get_active_seat_indices(&table.seats);
+    let runout_count = if table.run_it_twice_state.active {
+        2
+    } else {
+        1
+    };
     let mut assignments = Vec::new();
     let mut card_idx = table.deck_state.cards_dealt;
 
-    for _ in 0..count {
-        // 所有活跃玩家都要为公共牌提交 token
-        let pending: Vec<u8> = active_seats.clone();
-        assignments.push(RevealAssignment {
-            encrypted_card_index: card_idx,
-            pending_players: pending,
-            reveal_tokens: vec![],
-            decrypted: false,
-        });
-        card_idx += 1;
+    for runout_index in 0..runout_count {
+        let board_len = if runout_index == 0 {
+            table.community_cards.len()
+        } else {
+            table.run_it_twice_state.second_board_cards.len()
+        };
+        for offset in 0..count {
+            // 所有活跃玩家都要为公共牌提交 token.
+            let pending: Vec<u8> = active_seats.clone();
+            let board_position = board_len
+                .checked_add(usize::from(offset))
+                .and_then(|position| u8::try_from(position).ok())
+                .ok_or_else(|| {
+                    PokerL1Error::Serialization("community reveal board position exceeds u8".into())
+                })?;
+            assignments.push(RevealAssignment {
+                encrypted_card_index: card_idx,
+                runout_index,
+                board_position,
+                pending_players: pending,
+                reveal_tokens: vec![],
+                decrypted: false,
+            });
+            card_idx = card_idx.checked_add(1).ok_or_else(|| {
+                PokerL1Error::Serialization("community reveal card index overflow".into())
+            })?;
+        }
     }
 
     table.deck_state.cards_dealt = card_idx;
@@ -974,6 +1022,8 @@ fn start_showdown_reveal_phase(
                 // pending = [seat]（只牌主自己提交）
                 assignments.push(RevealAssignment {
                     encrypted_card_index: dc.encrypted_card_index,
+                    runout_index: 0,
+                    board_position: u8::MAX,
                     pending_players: vec![seat],
                     reveal_tokens: vec![],
                     decrypted: false,
@@ -1028,6 +1078,7 @@ fn check_reveal_phase_complete(
     }
 
     let phase = table.reveal_token_state.reveal_phase;
+    let completed_assignments = table.reveal_token_state.assignments.clone();
     events::emit_event(
         events,
         TexasPokerEvent::RevealPhaseComplete {
@@ -1049,7 +1100,7 @@ fn check_reveal_phase_complete(
             start_betting_round(table, true, Some(bb_seat), events)?;
         }
         REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
-            write_decrypted_cards_to_community(table, phase, events)?;
+            write_decrypted_cards_to_community(table, phase, &completed_assignments, events)?;
             start_betting_round(table, false, None, events)?;
         }
         REVEAL_PHASE_SHOWDOWN => {
@@ -1066,34 +1117,79 @@ fn check_reveal_phase_complete(
 fn write_decrypted_cards_to_community(
     table: &mut TexasPokerTable,
     reveal_phase: u8,
+    assignments: &[RevealAssignment],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let canonical_cards = generate_plaintext_cards();
     let mut seen = exposed_card_ids(table)?;
     let mut pending = Vec::new();
+    let mut expected_positions = [
+        table.community_cards.len(),
+        table.run_it_twice_state.second_board_cards.len(),
+    ];
 
-    for (decrypted_index, dc) in table.deck_state.decrypted_cards.iter().enumerate() {
-        if dc.owner_seat_index != OWNER_SEAT_PUBLIC {
-            continue;
+    for assignment in assignments {
+        let runout_index = usize::from(assignment.runout_index);
+        if runout_index
+            >= if table.run_it_twice_state.active {
+                2
+            } else {
+                1
+            }
+        {
+            return Err(PokerL1Error::Serialization(format!(
+                "community reveal targets inactive runout {runout_index}"
+            )));
         }
-        let Some(plaintext) = &dc.plaintext else {
-            continue;
-        };
+        if usize::from(assignment.board_position) != expected_positions[runout_index] {
+            return Err(PokerL1Error::Serialization(format!(
+                "community reveal position {} is not canonical next position {} for runout {runout_index}",
+                assignment.board_position, expected_positions[runout_index]
+            )));
+        }
+        let matches = table
+            .deck_state
+            .decrypted_cards
+            .iter()
+            .enumerate()
+            .filter(|(_, card)| {
+                card.owner_seat_index == OWNER_SEAT_PUBLIC
+                    && card.encrypted_card_index == assignment.encrypted_card_index
+                    && card.plaintext.is_some()
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(PokerL1Error::Serialization(format!(
+                "community reveal assignment for encrypted card {} has {} plaintext records",
+                assignment.encrypted_card_index,
+                matches.len()
+            )));
+        }
+        let (decrypted_index, dc) = matches[0];
+        let plaintext = dc
+            .plaintext
+            .as_ref()
+            .expect("filtered for a plaintext record");
         let (card_id, card) = card_from_plaintext(&plaintext.0, &canonical_cards)?;
         if !seen.insert(card_id) {
             return Err(PokerL1Error::Serialization(format!(
                 "duplicate decrypted card id {card_id} while writing community cards"
             )));
         }
-        pending.push((decrypted_index, dc.encrypted_card_index, card));
+        pending.push((decrypted_index, dc.encrypted_card_index, runout_index, card));
+        expected_positions[runout_index] += 1;
     }
 
     let mut indices = Vec::new();
     let mut ranks = Vec::new();
     let mut suits = Vec::new();
-    for (decrypted_index, encrypted_card_index, card) in pending {
+    for (decrypted_index, encrypted_card_index, runout_index, card) in pending {
         table.deck_state.decrypted_cards[decrypted_index].plaintext = None;
-        table.community_cards.push(card);
+        if runout_index == 0 {
+            table.community_cards.push(card);
+        } else {
+            table.run_it_twice_state.second_board_cards.push(card);
+        }
         indices.push(encrypted_card_index);
         ranks.push(card.rank);
         suits.push(card.suit);
@@ -1202,6 +1298,13 @@ fn exposed_card_ids(table: &TexasPokerTable) -> PokerL1Result<std::collections::
     for card in table
         .community_cards
         .iter()
+        .chain(
+            table
+                .run_it_twice_state
+                .second_board_cards
+                .iter()
+                .skip(usize::from(table.run_it_twice_state.shared_board_len)),
+        )
         .chain(table.seats.iter().flat_map(|seat| seat.hand.iter()))
     {
         if !card.is_valid() {
@@ -1218,6 +1321,50 @@ fn exposed_card_ids(table: &TexasPokerTable) -> PokerL1Result<std::collections::
         }
     }
     Ok(seen)
+}
+
+/// Validate the canonical in-progress shape of a two-runout board.
+fn validate_run_it_twice_progress(table: &TexasPokerTable) -> PokerL1Result<()> {
+    let state = &table.run_it_twice_state;
+    if !state.active {
+        if state.shared_board_len != 0 || !state.second_board_cards.is_empty() {
+            return Err(PokerL1Error::Serialization(
+                "inactive run it twice state carries board data".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if !matches!(
+        state.trigger_round,
+        ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
+    ) {
+        return Err(PokerL1Error::Serialization(
+            "run it twice state has an invalid trigger round".into(),
+        ));
+    }
+    let shared = usize::from(state.shared_board_len);
+    if shared > 4
+        || table.community_cards.len() > 5
+        || state.second_board_cards.len() > 5
+        || table.community_cards.len() < shared
+        || state.second_board_cards.len() < shared
+    {
+        return Err(PokerL1Error::Serialization(
+            "run it twice board lengths are outside canonical bounds".into(),
+        ));
+    }
+    if table.community_cards[..shared] != state.second_board_cards[..shared] {
+        return Err(PokerL1Error::Serialization(
+            "run it twice boards disagree on their shared prefix".into(),
+        ));
+    }
+    if state.second_board_cards.len() != table.community_cards.len() {
+        return Err(PokerL1Error::Serialization(
+            "run it twice boards have diverging lengths before reveal".into(),
+        ));
+    }
+    exposed_card_ids(table)?;
+    Ok(())
 }
 
 // ========== 部分解密 ==========
@@ -2773,81 +2920,136 @@ fn settle_hand(
         return Ok(());
     }
 
-    // 先 side pot 分层，再基于分层总额算 rake，按比例从各 pot 扣除（守恒）。
-    let bets: Vec<u64> = table.seats.iter().map(|s| s.total_bet).collect();
-    let folded: Vec<bool> = table
-        .seats
-        .iter()
-        .map(|s| s.folded || s.left_during_hand)
-        .collect();
-    let all_in: Vec<bool> = table.seats.iter().map(|s| s.all_in).collect();
-
-    let mut result = match side_pot::calculate_side_pots(&bets, &folded, &all_in) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("settle_hand: side_pot 计算失败: {e:?}");
-            refund_all_bets(table, events)?;
-            reset_for_next_hand(table, events)?;
-            return Ok(());
-        }
+    // Derive the complete plan before touching balances. Apply and reset on a scratch table so a
+    // corrupt addon/leave ledger cannot leave a partially paid showdown when reset fails.
+    let plan = if table.run_it_twice_state.active {
+        settlement::derive_settlement_plan_for_boards(
+            table,
+            &settlement::SettlementBoards::twice(
+                table.run_it_twice_state.shared_board_len,
+                table.community_cards.clone(),
+                table.run_it_twice_state.second_board_cards.clone(),
+            ),
+        )?
+    } else {
+        settlement::derive_settlement_plan(table)?
     };
+    let mut next_table = table.clone();
+    let mut staged_events = Vec::new();
+    apply_settlement_plan(&mut next_table, &plan, &mut staged_events)?;
+    reset_for_next_hand(&mut next_table, &mut staged_events)?;
+    *table = next_table;
+    events.extend(staged_events);
+    Ok(())
+}
 
-    // 基于分层总额计算 rake，按各 pot 占比扣除（余数归 pots[0]，守恒）。
-    let total_before_rake = result.total();
-    let rake = compute_rake_amount(table, total_before_rake)?;
-    if rake > 0 {
-        // The rake is not table-owned escrow. Reserve its deterministic Treasury output before
-        // paying winners, so the post-state root already matches the table that the precompile
-        // persists and the proof task replays. `reset_for_next_hand` clears this receipt after
-        // the `RakeCollected` event has made the payout amount explicit.
-        let post_rake_collected = table
-            .rake_collected
-            .checked_add(rake)
-            .ok_or_else(|| PokerL1Error::Serialization("rake receipt overflow".into()))?;
-        let post_chip_pool = table
-            .chip_pool
-            .checked_sub(rake)
-            .ok_or_else(|| PokerL1Error::Serialization("rake exceeds TableVault".into()))?;
-        apply_rake_to_pots(&mut result, rake)?;
-        table.rake_collected = post_rake_collected;
-        table.chip_pool = post_chip_pool;
+/// Atomically applicable projection of a canonical [`SettlementPlan`].
+///
+/// This function never evaluates cards or reconstructs side pots. It only validates the plan's
+/// internal conservation equations, preflights every balance update, and applies the explicit
+/// per-seat awards. Callers must derive the plan from the same authenticated pre-state.
+fn apply_settlement_plan(
+    table: &mut TexasPokerTable,
+    plan: &SettlementPlan,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    plan.validate(table.seats.len())?;
+    if table.pot != plan.gross_pot {
+        return Err(PokerL1Error::Serialization(format!(
+            "settlement: plan gross pot {} does not match table pot {}",
+            plan.gross_pot, table.pot
+        )));
+    }
+    let post_rake_collected = table
+        .rake_collected
+        .checked_add(plan.rake)
+        .ok_or_else(|| PokerL1Error::Serialization("settlement: rake receipt overflow".into()))?;
+    let post_chip_pool = table
+        .chip_pool
+        .checked_sub(plan.rake)
+        .ok_or_else(|| PokerL1Error::Serialization("settlement: rake exceeds TableVault".into()))?;
+    let mut post_stacks = Vec::with_capacity(table.seats.len());
+    for (seat_index, seat) in table.seats.iter().enumerate() {
+        post_stacks.push(
+            seat.stack
+                .checked_add(plan.awards[seat_index])
+                .ok_or_else(|| {
+                    PokerL1Error::Serialization(format!(
+                        "settlement: seat {seat_index} stack award overflow"
+                    ))
+                })?,
+        );
+    }
+    let plan_digest = plan.digest()?;
+
+    table.rake_collected = post_rake_collected;
+    table.chip_pool = post_chip_pool;
+    for (seat, post_stack) in table.seats.iter_mut().zip(post_stacks) {
+        seat.stack = post_stack;
+    }
+    table.pot = 0;
+
+    events::emit_event(
+        events,
+        TexasPokerEvent::SettlementPlanCommitted {
+            table_id: table.id,
+            plan_digest,
+            runout_count: plan.runout_count,
+            gross_pot: plan.gross_pot,
+            rake: plan.rake,
+            total_awards: plan.total_awards,
+        },
+    );
+    if plan.rake > 0 {
         events::emit_event(
             events,
             TexasPokerEvent::RakeCollected {
                 table_id: table.id,
-                pot_before: total_before_rake,
-                rake_amount: rake,
-                pot_after: result.total(),
+                pot_before: plan.gross_pot,
+                rake_amount: plan.rake,
+                pot_after: plan.total_awards,
                 rake_mode: table.rake_mode,
             },
         );
     }
-
-    // 逐层分配：pots[0] 是主池，pots[1..] 是边池。eligible 取分层算法结果（同源）。
-    let mut all_winners: Vec<u8> = Vec::new();
-    for (idx, sp) in result.pots.iter().enumerate() {
-        let pot_type = if idx == 0 {
+    for pot in &plan.pots {
+        let pot_type = if pot.pot_index == 0 {
             POT_TYPE_MAIN
         } else {
             POT_TYPE_SIDE
         };
-        let winners = find_winners_in_seats(table, sp.eligible_seats);
-        distribute_pot_to_winners(table, sp.amount, &winners, pot_type, events)?;
-        all_winners.extend(&winners);
+        for runout in pot.runouts.iter().take(usize::from(plan.runout_count)) {
+            for seat_index in 0..table.seats.len() {
+                let amount = runout.awards[seat_index];
+                if amount == 0 {
+                    continue;
+                }
+                events::emit_event(
+                    events,
+                    TexasPokerEvent::WinnerAwarded {
+                        table_id: table.id,
+                        seat_index: seat_index as u8,
+                        player: table.seats[seat_index].player,
+                        amount,
+                        pot_type,
+                        hand_rank: runout.ranks[seat_index].map(|rank| rank.category),
+                    },
+                );
+            }
+        }
     }
-
+    let winners = (0..table.seats.len())
+        .filter(|seat| plan.winner_mask & (1u16 << seat) != 0)
+        .map(|seat| seat as u8)
+        .collect();
     events::emit_event(
         events,
         TexasPokerEvent::HandSettled {
             table_id: table.id,
-            pot: result.total() + rake,
-            winners: all_winners,
+            pot: plan.gross_pot,
+            winners,
         },
     );
-
-    // pot 已全部分配给赢家（含 rake 扣除），清零。
-    table.pot = 0;
-    reset_for_next_hand(table, events)?;
     Ok(())
 }
 
@@ -2863,130 +3065,6 @@ fn compute_rake_amount(table: &TexasPokerTable, pot: u64) -> PokerL1Result<u64> 
     Ok(raw_rake
         .min(u128::from(table.rake_cap))
         .min(u128::from(pot)) as u64)
-}
-
-/// 按各 pot 占比扣除 rake，再按固定 pot 顺序扣除整除尾差（守恒）。
-///
-/// 扣除后 `result.total()` 恰好减少 `rake`。
-fn apply_rake_to_pots(result: &mut side_pot::SidePotResult, rake: u64) -> PokerL1Result<()> {
-    let total = result.total();
-    if total == 0 || rake == 0 || result.pots.is_empty() {
-        return Ok(());
-    }
-    let mut remaining = rake;
-    // Use the original amount in each independent proportional calculation. The floor shares can
-    // leave at most a small deterministic remainder, which is consumed in the second pass.
-    for sp in &mut result.pots {
-        let this_rake = (sp.amount as u128 * rake as u128 / total as u128) as u64;
-        sp.amount = sp.amount.checked_sub(this_rake).ok_or_else(|| {
-            PokerL1Error::Serialization("side-pot rake exceeds pot amount".into())
-        })?;
-        remaining = remaining.checked_sub(this_rake).ok_or_else(|| {
-            PokerL1Error::Serialization("side-pot proportional rake exceeds total rake".into())
-        })?;
-    }
-    for sp in &mut result.pots {
-        if remaining == 0 {
-            break;
-        }
-        let take = remaining.min(sp.amount);
-        sp.amount -= take;
-        remaining -= take;
-    }
-    if remaining != 0 {
-        return Err(PokerL1Error::Serialization(
-            "side-pot rake remainder exceeds available pots".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// 在指定 eligible seats（位掩码）中找最佳手牌持有者。
-///
-/// 用 `evaluate_best` 评估手牌+公共牌（统一处理 5..=7 张及不足 5 张的 0 填充），
-/// 取最大 HandRank 的玩家；平局返回多人。
-fn find_winners_in_seats(table: &TexasPokerTable, eligible_mask: u16) -> Vec<u8> {
-    if eligible_mask == 0 {
-        return vec![];
-    }
-    let mut best_rank: Option<super::hand_evaluator::HandRank> = None;
-    let mut winners: Vec<u8> = vec![];
-
-    for seat in 0..table.seats.len() as u8 {
-        if !side_pot::is_eligible(eligible_mask, seat) {
-            continue;
-        }
-        let s = &table.seats[seat as usize];
-        if s.hand.is_empty() {
-            continue;
-        }
-        let mut cards = s.hand.clone();
-        cards.extend_from_slice(&table.community_cards);
-
-        let rank = super::hand_evaluator::evaluate_best(&cards);
-        match &best_rank {
-            None => {
-                best_rank = Some(rank);
-                winners = vec![seat];
-            }
-            Some(b) => {
-                use std::cmp::Ordering;
-                match rank.cmp(b) {
-                    Ordering::Greater => {
-                        best_rank = Some(rank);
-                        winners = vec![seat];
-                    }
-                    Ordering::Equal => {
-                        winners.push(seat);
-                    }
-                    Ordering::Less => {}
-                }
-            }
-        }
-    }
-    if winners.is_empty() {
-        // 所有 eligible 玩家都无手牌（异常），回退到最低位 eligible 座位。
-        winners.push(eligible_mask.trailing_zeros() as u8);
-    }
-    winners
-}
-
-/// 将 pot 分配给赢家列表（平局均分，余数给 winners[0]）。
-fn distribute_pot_to_winners(
-    table: &mut TexasPokerTable,
-    pot: u64,
-    winners: &[u8],
-    pot_type: u8,
-    events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<()> {
-    if winners.is_empty() || pot == 0 {
-        return Ok(());
-    }
-    let share = pot / winners.len() as u64;
-    let remainder = pot % winners.len() as u64;
-    for (idx, &winner) in winners.iter().enumerate() {
-        let amount = if idx == 0 { share + remainder } else { share };
-        table.seats[winner as usize].stack = table.seats[winner as usize]
-            .stack
-            .checked_add(amount)
-            .ok_or_else(|| {
-                PokerL1Error::Serialization(
-                    "distribute_pot_to_winners: winner stack += amount overflow".into(),
-                )
-            })?;
-        events::emit_event(
-            events,
-            TexasPokerEvent::WinnerAwarded {
-                table_id: table.id,
-                seat_index: winner,
-                player: table.seats[winner as usize].player,
-                amount,
-                pot_type,
-                hand_rank: None,
-            },
-        );
-    }
-    Ok(())
 }
 
 /// 退还所有下注（异常路径）。
@@ -3232,6 +3310,7 @@ pub fn reset_for_next_hand(
     table.shuffle_state = super::types::ShuffleState::default();
     table.reveal_token_state = super::types::RevealTokenState::default();
     table.reconstruct_state = super::types::ReconstructState::default();
+    table.run_it_twice_state = RunItTwiceState::default();
     table.timestamps = super::types::Timestamps::default();
 
     set_initial_encrypted_deck(table)?;
@@ -3833,30 +3912,26 @@ pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
     Ok(rake)
 }
 
-/// `trigger_run_it_twice` — 标记本手将执行 Run It Twice（all-in 后）。
+/// Activate Run It Twice once no further contested betting is possible.
+fn maybe_trigger_run_it_twice(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    if table.rit_mode == RIT_MODE_DISABLED
+        || table.run_it_twice_state.active
+        || table.community_cards.len() >= 5
+        || !no_further_betting_possible(table)
+    {
+        return Ok(());
+    }
+    trigger_run_it_twice(table, events)
+}
+
+/// Activate the two-runout board schedule for the current all-in hand.
 ///
-/// ## v2 PoC 范围
-///
-/// 当前实现：仅设置标记并 emit 事件。
-///
-/// ## 完整实现路线图
-///
-/// 完整 RIT 流程需要扩展 Mental Poker 协议层：
-///
-/// 1. **双 board 发牌**：all-in 后，从剩余牌组发两套公共牌（各 5 张），
-///    需要扩展 `submit_player_reveal_tokens` 以支持两个 board 的独立 reveal phase
-/// 2. **双 board settlement**：分别评估两套 board 的胜者，pot 对半分
-/// 3. **AIR 影响**：需要扩展 `submit_player_reveal_tokens` AIR 约束以验证两套 board
-///    的 reveal 一致性；settlement AIR 需约束双 pot 分配
-///
-/// ## AIR 约束策略
-///
-/// RIT AIR 约束嵌入 `submit_player_reveal_tokens` AIR 和 settlement 流程：
-/// - Board 1 reveal tokens 与 Board 2 reveal tokens 独立约束
-/// - Pot split 不变量：`pot_after = pot_before`（总额不变，只是分配方式改变）
-/// - 双 board 使用的牌不重叠（range check on deck indices）
-///
-/// 此 PoC 仅标记状态，完整流程待 Mental Poker V3 实现。
+/// Already exposed community cards become a shared prefix. Every later community reveal creates
+/// one assignment per runout, and settlement splits each post-rake pot before independently
+/// selecting the winner of each board.
 pub fn trigger_run_it_twice(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
@@ -3870,16 +3945,43 @@ pub fn trigger_run_it_twice(
             table.rit_mode
         )));
     }
-    // PoC: 仅 emit 事件，标记本手为 RIT 模式
+    if table.run_it_twice_state.active {
+        return Ok(());
+    }
+    if !matches!(
+        table.round_state,
+        ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
+    ) || !no_further_betting_possible(table)
+    {
+        return Err(PokerL1Error::Serialization(
+            "trigger_run_it_twice requires an all-in betting state with no further contested action"
+                .into(),
+        ));
+    }
+    let shared_board_len = u8::try_from(table.community_cards.len()).map_err(|_| {
+        PokerL1Error::Serialization("run it twice shared board length exceeds u8".into())
+    })?;
+    if shared_board_len >= 5 {
+        return Err(PokerL1Error::Serialization(
+            "trigger_run_it_twice requires at least one undealt community card".into(),
+        ));
+    }
+    exposed_card_ids(table)?;
+    table.run_it_twice_state = RunItTwiceState {
+        active: true,
+        trigger_round: table.round_state,
+        shared_board_len,
+        second_board_cards: table.community_cards.clone(),
+    };
+    let remaining = 5 - shared_board_len;
     events::emit_event(
         events,
         TexasPokerEvent::RunItTwiceTriggered {
             table_id: table.id,
-            board1_cards: 5, // 完整 board
-            board2_cards: 5,
+            board1_cards: remaining,
+            board2_cards: remaining,
         },
     );
-    table.bump_version();
     Ok(())
 }
 
@@ -3898,6 +4000,38 @@ mod tests {
 
     fn make_table() -> TexasPokerTable {
         TexasPokerTable::new(dummy_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100)
+    }
+
+    fn community_assignment(encrypted_card_index: u8, board_position: u8) -> RevealAssignment {
+        RevealAssignment {
+            encrypted_card_index,
+            runout_index: 0,
+            board_position,
+            pending_players: vec![],
+            reveal_tokens: vec![],
+            decrypted: true,
+        }
+    }
+
+    fn complete_public_reveal_with_card_ids(
+        table: &mut TexasPokerTable,
+        card_ids: &[u8],
+        events: &mut Vec<TexasPokerEvent>,
+    ) {
+        assert_eq!(table.reveal_token_state.assignments.len(), card_ids.len());
+        let assignments = table.reveal_token_state.assignments.clone();
+        for (assignment, card_id) in assignments.iter().zip(card_ids) {
+            table.deck_state.decrypted_cards.push(DecryptedCard {
+                encrypted_card_index: assignment.encrypted_card_index,
+                owner_seat_index: OWNER_SEAT_PUBLIC,
+                ciphertext: None,
+                plaintext: Some(table.deck_state.plaintext[usize::from(*card_id)]),
+            });
+        }
+        for assignment in &mut table.reveal_token_state.assignments {
+            assignment.decrypted = true;
+        }
+        check_reveal_phase_complete(table, events).unwrap();
     }
 
     #[test]
@@ -3935,7 +4069,13 @@ mod tests {
         });
         let mut events = vec![];
 
-        write_decrypted_cards_to_community(&mut table, REVEAL_PHASE_TURN, &mut events).unwrap();
+        write_decrypted_cards_to_community(
+            &mut table,
+            REVEAL_PHASE_TURN,
+            &[community_assignment(encrypted_card_index, 0)],
+            &mut events,
+        )
+        .unwrap();
 
         assert_eq!(table.community_cards, vec![Card::from_index(plaintext_id)]);
         assert_ne!(
@@ -3965,8 +4105,13 @@ mod tests {
         let before = table.clone();
         let mut events = vec![];
 
-        let error = write_decrypted_cards_to_community(&mut table, REVEAL_PHASE_FLOP, &mut events)
-            .unwrap_err();
+        let error = write_decrypted_cards_to_community(
+            &mut table,
+            REVEAL_PHASE_FLOP,
+            &[community_assignment(7, 0)],
+            &mut events,
+        )
+        .unwrap_err();
 
         assert!(
             error
@@ -3993,8 +4138,13 @@ mod tests {
         let before = table.clone();
         let mut events = vec![];
 
-        let error = write_decrypted_cards_to_community(&mut table, REVEAL_PHASE_FLOP, &mut events)
-            .unwrap_err();
+        let error = write_decrypted_cards_to_community(
+            &mut table,
+            REVEAL_PHASE_FLOP,
+            &[community_assignment(2, 0), community_assignment(38, 1)],
+            &mut events,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("duplicate decrypted card id 9"));
         assert_eq!(table, before);
@@ -5000,20 +5150,6 @@ mod tests {
     }
 
     #[test]
-    fn test_side_pot_rake_remainder_never_overdraws_small_main_pot() {
-        let mut result = side_pot::SidePotResult {
-            pots: vec![
-                side_pot::SidePot::new(1, 0b111),
-                side_pot::SidePot::new(1, 0b110),
-                side_pot::SidePot::new(1, 0b100),
-            ],
-        };
-
-        apply_rake_to_pots(&mut result, 2).unwrap();
-        assert_eq!(result.total(), 1);
-    }
-
-    #[test]
     fn test_collect_rake_none_mode() {
         let mut table = make_table();
         table.rake_mode = RAKE_MODE_NONE;
@@ -5030,9 +5166,16 @@ mod tests {
     fn test_trigger_run_it_twice_enabled() {
         let mut table = make_table();
         table.rit_mode = RIT_MODE_TWICE;
+        table.round_state = ROUND_PREFLOP;
+        for seat_index in 0..2 {
+            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].all_in = true;
+        }
         let mut events = vec![];
 
         trigger_run_it_twice(&mut table, &mut events).unwrap();
+        assert!(table.run_it_twice_state.active);
+        assert_eq!(table.run_it_twice_state.shared_board_len, 0);
         assert!(events.iter().any(|e| matches!(
             e,
             TexasPokerEvent::RunItTwiceTriggered {
@@ -5051,6 +5194,336 @@ mod tests {
 
         trigger_run_it_twice(&mut table, &mut events).unwrap();
         // DISABLED 模式下不 emit 事件
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn run_it_twice_turn_reveal_schedules_one_card_per_board() {
+        let mut table = make_table();
+        table.rit_mode = RIT_MODE_TWICE;
+        table.round_state = ROUND_FLOP;
+        table.community_cards = vec![Card::new(0, 2), Card::new(1, 3), Card::new(2, 4)];
+        for seat_index in 0..2 {
+            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].all_in = true;
+        }
+        let mut events = vec![];
+        trigger_run_it_twice(&mut table, &mut events).unwrap();
+        start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_TURN, &mut events).unwrap();
+
+        assert_eq!(table.run_it_twice_state.shared_board_len, 3);
+        assert_eq!(
+            table.run_it_twice_state.second_board_cards,
+            table.community_cards
+        );
+        assert_eq!(table.reveal_token_state.assignments.len(), 2);
+        assert_eq!(table.reveal_token_state.assignments[0].runout_index, 0);
+        assert_eq!(table.reveal_token_state.assignments[0].board_position, 3);
+        assert_eq!(table.reveal_token_state.assignments[1].runout_index, 1);
+        assert_eq!(table.reveal_token_state.assignments[1].board_position, 3);
+        assert_ne!(
+            table.reveal_token_state.assignments[0].encrypted_card_index,
+            table.reveal_token_state.assignments[1].encrypted_card_index
+        );
+    }
+
+    #[test]
+    fn run_it_twice_triggers_from_each_incomplete_street() {
+        for (round_state, shared_cards) in [
+            (ROUND_PREFLOP, vec![]),
+            (
+                ROUND_FLOP,
+                vec![
+                    Card::from_index(0),
+                    Card::from_index(1),
+                    Card::from_index(2),
+                ],
+            ),
+            (
+                ROUND_TURN,
+                vec![
+                    Card::from_index(0),
+                    Card::from_index(1),
+                    Card::from_index(2),
+                    Card::from_index(3),
+                ],
+            ),
+        ] {
+            let mut table = make_table();
+            table.rit_mode = RIT_MODE_TWICE;
+            table.round_state = round_state;
+            table.community_cards = shared_cards.clone();
+            for seat_index in 0..2 {
+                table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+                table.seats[seat_index].all_in = true;
+            }
+            let mut events = vec![];
+
+            maybe_trigger_run_it_twice(&mut table, &mut events).unwrap();
+
+            assert!(table.run_it_twice_state.active);
+            assert_eq!(
+                usize::from(table.run_it_twice_state.shared_board_len),
+                shared_cards.len()
+            );
+            assert_eq!(table.run_it_twice_state.second_board_cards, shared_cards);
+        }
+    }
+
+    #[test]
+    fn run_it_twice_does_not_trigger_after_river_is_complete() {
+        let mut table = make_table();
+        table.rit_mode = RIT_MODE_TWICE;
+        table.round_state = ROUND_RIVER;
+        table.community_cards = (0..5).map(Card::from_index).collect();
+        for seat_index in 0..2 {
+            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].all_in = true;
+        }
+        let mut events = vec![];
+
+        maybe_trigger_run_it_twice(&mut table, &mut events).unwrap();
+
+        assert!(!table.run_it_twice_state.active);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn run_it_twice_plaintexts_route_through_turn_river_and_settlement() {
+        let mut table = make_table();
+        set_initial_encrypted_deck(&mut table).unwrap();
+        table.rit_mode = RIT_MODE_TWICE;
+        table.round_state = ROUND_FLOP;
+        table.community_cards = (0..3).map(Card::from_index).collect();
+        table.deck_state.cards_dealt = 7;
+        table.pot = 200;
+        table.chip_pool = 2_000;
+        table.seats[0].player = [1; 20];
+        table.seats[0].stack = 900;
+        table.seats[0].total_bet = 100;
+        table.seats[0].all_in = true;
+        table.seats[0].hand = vec![Card::from_index(20), Card::from_index(21)];
+        table.seats[1].player = [2; 20];
+        table.seats[1].stack = 900;
+        table.seats[1].total_bet = 100;
+        table.seats[1].all_in = true;
+        table.seats[1].hand = vec![Card::from_index(30), Card::from_index(31)];
+        let mut events = vec![];
+
+        trigger_run_it_twice(&mut table, &mut events).unwrap();
+        table.round_state = ROUND_TURN;
+        start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_TURN, &mut events).unwrap();
+        assert_eq!(
+            table
+                .reveal_token_state
+                .assignments
+                .iter()
+                .map(|assignment| assignment.encrypted_card_index)
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+
+        complete_public_reveal_with_card_ids(&mut table, &[3, 4], &mut events);
+        assert_eq!(table.round_state, ROUND_RIVER);
+        assert_eq!(
+            table.community_cards,
+            (0..=3).map(Card::from_index).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            table.run_it_twice_state.second_board_cards,
+            vec![
+                Card::from_index(0),
+                Card::from_index(1),
+                Card::from_index(2),
+                Card::from_index(4),
+            ]
+        );
+        assert_eq!(
+            table
+                .reveal_token_state
+                .assignments
+                .iter()
+                .map(|assignment| assignment.encrypted_card_index)
+                .collect::<Vec<_>>(),
+            vec![9, 10]
+        );
+
+        complete_public_reveal_with_card_ids(&mut table, &[5, 6], &mut events);
+        assert_eq!(table.round_state, ROUND_SHOWDOWN);
+        assert_eq!(
+            table.community_cards,
+            vec![
+                Card::from_index(0),
+                Card::from_index(1),
+                Card::from_index(2),
+                Card::from_index(3),
+                Card::from_index(5),
+            ]
+        );
+        assert_eq!(
+            table.run_it_twice_state.second_board_cards,
+            vec![
+                Card::from_index(0),
+                Card::from_index(1),
+                Card::from_index(2),
+                Card::from_index(4),
+                Card::from_index(6),
+            ]
+        );
+
+        // The test preloads authenticated hole cards, so showdown has no remaining owner-token
+        // assignments. Completing that empty phase must settle both boards and reset atomically.
+        assert!(table.reveal_token_state.assignments.is_empty());
+        check_reveal_phase_complete(&mut table, &mut events).unwrap();
+        assert_eq!(table.round_state, ROUND_WAITING);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TexasPokerEvent::SettlementPlanCommitted {
+                runout_count: 2,
+                gross_pot: 200,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn rit_reconstruct_restart_uses_fresh_indices_and_preserves_both_boards() {
+        let mut table = make_table();
+        set_initial_encrypted_deck(&mut table).unwrap();
+        table.rit_mode = RIT_MODE_TWICE;
+        table.round_state = ROUND_FLOP;
+        table.community_cards = (0..3).map(Card::from_index).collect();
+        for seat_index in 0..2 {
+            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].all_in = true;
+        }
+        let mut events = vec![];
+        trigger_run_it_twice(&mut table, &mut events).unwrap();
+        table.community_cards.push(Card::from_index(3));
+        table
+            .run_it_twice_state
+            .second_board_cards
+            .push(Card::from_index(4));
+        table.round_state = ROUND_RIVER;
+
+        // `rebuild_deck_from_reconstruct_deck` resets only the new deck's index space.
+        table.deck_state.cards_dealt = 0;
+        table.reveal_token_state = Default::default();
+        restart_reveal_after_reconstruct(&mut table, &mut events).unwrap();
+
+        assert_eq!(table.community_cards.len(), 4);
+        assert_eq!(table.run_it_twice_state.second_board_cards.len(), 4);
+        assert_eq!(table.reveal_token_state.reveal_phase, REVEAL_PHASE_RIVER);
+        assert_eq!(table.reveal_token_state.assignments.len(), 2);
+        assert_eq!(
+            table.reveal_token_state.assignments[0].encrypted_card_index,
+            0
+        );
+        assert_eq!(table.reveal_token_state.assignments[0].runout_index, 0);
+        assert_eq!(table.reveal_token_state.assignments[0].board_position, 4);
+        assert_eq!(
+            table.reveal_token_state.assignments[1].encrypted_card_index,
+            1
+        );
+        assert_eq!(table.reveal_token_state.assignments[1].runout_index, 1);
+        assert_eq!(table.reveal_token_state.assignments[1].board_position, 4);
+    }
+
+    #[test]
+    fn rit_reconstruct_restart_rejects_diverged_boards_atomically() {
+        let mut table = make_table();
+        table.rit_mode = RIT_MODE_TWICE;
+        table.round_state = ROUND_RIVER;
+        table.community_cards = (0..4).map(Card::from_index).collect();
+        table.run_it_twice_state = RunItTwiceState {
+            active: true,
+            trigger_round: ROUND_FLOP,
+            shared_board_len: 3,
+            second_board_cards: (0..3).map(Card::from_index).collect(),
+        };
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = restart_reveal_after_reconstruct(&mut table, &mut events).unwrap_err();
+
+        assert!(error.to_string().contains("diverging lengths"));
+        assert_eq!(table, before);
+        assert!(events.is_empty());
+    }
+
+    fn complete_rit_showdown_table() -> TexasPokerTable {
+        let mut table = make_table();
+        table.round_state = ROUND_SHOWDOWN;
+        table.rit_mode = RIT_MODE_TWICE;
+        table.run_it_twice_state = RunItTwiceState {
+            active: true,
+            trigger_round: ROUND_PREFLOP,
+            shared_board_len: 0,
+            second_board_cards: vec![
+                Card::new(2, 13),
+                Card::new(3, 13),
+                Card::new(2, 3),
+                Card::new(3, 5),
+                Card::new(2, 7),
+            ],
+        };
+        table.community_cards = vec![
+            Card::new(2, 2),
+            Card::new(3, 4),
+            Card::new(2, 6),
+            Card::new(3, 8),
+            Card::new(2, 10),
+        ];
+        table.pot = 200;
+        table.chip_pool = 2_000;
+        table.seats[0].player = [1; 20];
+        table.seats[0].stack = 900;
+        table.seats[0].total_bet = 100;
+        table.seats[0].all_in = true;
+        table.seats[0].hand = vec![Card::new(0, 14), Card::new(1, 14)];
+        table.seats[1].player = [2; 20];
+        table.seats[1].stack = 900;
+        table.seats[1].total_bet = 100;
+        table.seats[1].all_in = true;
+        table.seats[1].hand = vec![Card::new(0, 13), Card::new(1, 13)];
+        table
+    }
+
+    #[test]
+    fn settle_hand_applies_two_runouts_and_resets_atomically() {
+        let mut table = complete_rit_showdown_table();
+        let mut events = vec![];
+
+        settle_hand(&mut table, &mut events).unwrap();
+
+        assert_eq!(table.round_state, ROUND_WAITING);
+        assert!(!table.run_it_twice_state.active);
+        assert_eq!(table.seats[0].stack, 1_000);
+        assert_eq!(table.seats[1].stack, 1_000);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TexasPokerEvent::SettlementPlanCommitted {
+                runout_count: 2,
+                gross_pot: 200,
+                rake: 0,
+                total_awards: 200,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn settlement_reset_failure_leaves_table_and_events_unchanged() {
+        let mut table = complete_rit_showdown_table();
+        table.seats[0].pending_addon = 5;
+        table.addon_pool = 0;
+        let before = table.clone();
+        let mut events = vec![];
+
+        let error = settle_hand(&mut table, &mut events).unwrap_err();
+
+        assert!(error.to_string().contains("pending addon pool underflow"));
+        assert_eq!(table, before);
         assert!(events.is_empty());
     }
 }

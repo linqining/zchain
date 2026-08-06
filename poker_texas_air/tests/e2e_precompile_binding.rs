@@ -3,16 +3,18 @@
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
+use poker_l1::vm::contracts::texas_poker::card::Card;
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, SHUFFLE_PHASE_WAITING,
+    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_SHOWDOWN, RIT_MODE_TWICE,
+    ROUND_PREFLOP, ROUND_SHOWDOWN, SHUFFLE_PHASE_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
     SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealTokenState, ShuffleState,
-    TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealTokenState, RunItTwiceState,
+    ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -44,6 +46,7 @@ use poker_texas_air::airs::crypto::submit_shuffle_v2::{
 };
 use poker_texas_air::deck_commitment::deck_commitment;
 use poker_texas_air::method_kind::MethodKind;
+use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::precompile_binding::{
     LeaveDleqVerifyRequest, PrecompileCallBinding, RevealTokenVerifyRequest,
     precompile_call_context,
@@ -537,12 +540,16 @@ fn reveal_fixture(
         assignments: vec![
             RevealAssignment {
                 encrypted_card_index: 0,
+                runout_index: 0,
+                board_position: u8::MAX,
                 pending_players: vec![seat_index],
                 reveal_tokens: vec![],
                 decrypted: false,
             },
             RevealAssignment {
                 encrypted_card_index: 1,
+                runout_index: 0,
+                board_position: u8::MAX,
                 pending_players: vec![0],
                 reveal_tokens: vec![],
                 decrypted: false,
@@ -629,6 +636,7 @@ fn reveal_fixture(
         version_increment: u8::try_from(task.post_table.version - task.pre_table.version)
             .expect("reveal version delta should fit u8"),
         precompile: binding.air_binding(),
+        settlement: poker_texas_air::settlement_binding::SettlementPlanBinding::inactive(),
     };
     let pre_root = state_root_to_air_limbs(public_inputs.pre_state_root);
     let post_root = state_root_to_air_limbs(public_inputs.post_state_root);
@@ -712,6 +720,134 @@ fn changing_reveal_token_digest_columns_invalidates_the_statement() {
     let (proof, mut air, public_inputs) = reveal_fixture(RevealRequestVariant::Honest);
     air.input.precompile.receipt_digest[3] += stwo::core::fields::m31::M31::from(1u32);
     assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+#[test]
+fn non_terminal_reveal_cannot_claim_an_active_settlement() {
+    let (proof, mut air, public_inputs) = reveal_fixture(RevealRequestVariant::Honest);
+    air.input.settlement.active = true;
+    air.input.settlement.plan_digest = [0x77; 32];
+    air.input.settlement.runout_count = 1;
+    assert!(verify_method_against(proof, air, &public_inputs).is_err());
+}
+
+#[test]
+fn terminal_rit_replay_binds_the_canonical_settlement_and_proves() {
+    let table_id = 72;
+    let hand_id = 12;
+    let seat_index = 1;
+    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let canonical_cards = utils::generate_plaintext_cards();
+    let encrypted_cards: Vec<_> = [30usize, 31]
+        .into_iter()
+        .map(|card_id| {
+            ElGamalCiphertextGeneric::encrypt(
+                &canonical_cards[card_id],
+                &public_key,
+                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
+            )
+        })
+        .collect();
+    let submissions: Vec<_> = encrypted_cards
+        .iter()
+        .map(|ciphertext| prove_reveal_token(&secret_key, &public_key, ciphertext))
+        .collect();
+
+    let player0 = [0x72; 20];
+    let player1 = [0x73; 20];
+    let mut table = TexasPokerTable::new(
+        ObjectID::new([0xA6; 20], table_id),
+        "terminal-rit-binding".into(),
+        [0xC0; 20],
+        3,
+        50,
+        100,
+    );
+    table.call_seq = 8;
+    table.hand_id = hand_id;
+    table.version = 40;
+    table.round_state = ROUND_SHOWDOWN;
+    table.rit_mode = RIT_MODE_TWICE;
+    table.run_it_twice_state = RunItTwiceState {
+        active: true,
+        trigger_round: ROUND_PREFLOP,
+        shared_board_len: 0,
+        second_board_cards: (5u8..10).map(Card::from_index).collect(),
+    };
+    table.community_cards = (0u8..5).map(Card::from_index).collect();
+    table.pot = 200;
+    table.chip_pool = 2_000;
+    table.seats[0].player = player0;
+    table.seats[0].stack = 900;
+    table.seats[0].total_bet = 100;
+    table.seats[0].all_in = true;
+    table.seats[0].hand = vec![Card::from_index(20), Card::from_index(21)];
+    table.seats[1].player = player1;
+    table.seats[1].stack = 900;
+    table.seats[1].total_bet = 100;
+    table.seats[1].all_in = true;
+    table.seats[1].pk = ECPoint(public_key);
+    table.deck_state.encrypted = encrypted_cards.clone();
+    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.deck_state.decrypted_cards = encrypted_cards
+        .iter()
+        .enumerate()
+        .map(|(index, ciphertext)| DecryptedCard {
+            encrypted_card_index: u8::try_from(index).unwrap(),
+            owner_seat_index: seat_index,
+            ciphertext: Some(ciphertext.clone()),
+            plaintext: None,
+        })
+        .collect();
+    table.reveal_token_state = RevealTokenState {
+        reveal_phase: REVEAL_PHASE_SHOWDOWN,
+        assignments: (0u8..2)
+            .map(|encrypted_card_index| RevealAssignment {
+                encrypted_card_index,
+                runout_index: 0,
+                board_position: u8::MAX,
+                pending_players: vec![seat_index],
+                reveal_tokens: vec![],
+                decrypted: false,
+            })
+            .collect(),
+    };
+    let raw_args = borsh::to_vec(&SubmitRevealTokensArgs {
+        seat_index,
+        assignment_indices: vec![0, 1],
+        reveal_tokens: submissions.iter().map(|(token, _)| *token).collect(),
+        proofs: submissions.into_iter().map(|(_, proof)| proof).collect(),
+    })
+    .unwrap();
+    let task = dispatch_task(
+        table,
+        player1,
+        texas_dispatch::selectors::submit_player_reveal_tokens(),
+        raw_args,
+    );
+    assert_eq!(task.post_table.version - task.pre_table.version, 2);
+    assert_eq!(task.post_table.pot, 0);
+
+    let mut replayed = task.pre_table.clone();
+    let result =
+        texas_dispatch::dispatch(&task.context, &mut replayed, &task.selector, &task.raw_args)
+            .unwrap();
+    let output: DispatchOutput = borsh::from_slice(&result.return_value).unwrap();
+    let settlement =
+        poker_texas_air::settlement_binding::SettlementPlanBinding::from_events(&output.events)
+            .unwrap();
+    assert_eq!(settlement.runout_count, 2);
+    assert_eq!(settlement.gross_pot, 200);
+    assert_eq!(settlement.rake + settlement.total_awards, 200);
+    assert_eq!(
+        settlement.awards.iter().sum::<u64>(),
+        settlement.total_awards
+    );
+
+    Orchestrator::new()
+        .prove_and_verify_task(&task)
+        .expect("terminal RIT reveal settlement should prove and verify");
 }
 
 #[test]
