@@ -196,12 +196,21 @@ pub fn prove_composition_bundle(
     let plan = derive_composite_transition_plan_from_task(task)?;
     let base = base_public_inputs(task)?;
     let airs = build_airs(&plan, &base);
-    let stages = [
-        prove_stage(StageKind::SeatUpdate, airs.0, &base)?,
-        prove_stage(StageKind::BetCollection, airs.1, &base)?,
-        prove_stage(StageKind::RoundAdvance, airs.2, &base)?,
-        prove_stage(StageKind::Settlement, airs.3, &base)?,
-    ];
+    let ((seat_update, bet_collection), (round_advance, settlement)) = rayon::join(
+        || {
+            rayon::join(
+                || prove_stage(StageKind::SeatUpdate, airs.0, &base),
+                || prove_stage(StageKind::BetCollection, airs.1, &base),
+            )
+        },
+        || {
+            rayon::join(
+                || prove_stage(StageKind::RoundAdvance, airs.2, &base),
+                || prove_stage(StageKind::Settlement, airs.3, &base),
+            )
+        },
+    );
+    let stages = [seat_update?, bet_collection?, round_advance?, settlement?];
     let bundle = ArchivedCompositionProofBundle {
         version: COMPOSITION_PROOF_BUNDLE_VERSION,
         method_kind: task.method_kind,
@@ -239,10 +248,24 @@ pub fn verify_composition_bundle(
     }
     let base = base_public_inputs(task)?;
     let airs = build_airs(&plan, &base);
-    verify_stage(&bundle.stages[0], StageKind::SeatUpdate, airs.0, &base)?;
-    verify_stage(&bundle.stages[1], StageKind::BetCollection, airs.1, &base)?;
-    verify_stage(&bundle.stages[2], StageKind::RoundAdvance, airs.2, &base)?;
-    verify_stage(&bundle.stages[3], StageKind::Settlement, airs.3, &base)
+    let ((seat_update, bet_collection), (round_advance, settlement)) = rayon::join(
+        || {
+            rayon::join(
+                || verify_stage(&bundle.stages[0], StageKind::SeatUpdate, airs.0, &base),
+                || verify_stage(&bundle.stages[1], StageKind::BetCollection, airs.1, &base),
+            )
+        },
+        || {
+            rayon::join(
+                || verify_stage(&bundle.stages[2], StageKind::RoundAdvance, airs.2, &base),
+                || verify_stage(&bundle.stages[3], StageKind::Settlement, airs.3, &base),
+            )
+        },
+    );
+    seat_update?;
+    bet_collection?;
+    round_advance?;
+    settlement
 }
 
 fn base_public_inputs(task: &crate::prove_task::ProveTask) -> TexasAirResult<TexasPublicInputs> {

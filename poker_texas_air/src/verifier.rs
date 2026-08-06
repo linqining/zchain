@@ -153,6 +153,12 @@ fn verify_method_inner<A>(
 where
     A: TexasAir,
 {
+    let timing = crate::prove_timing::enabled().then(|| {
+        (
+            crate::prove_timing::method_label(expected_public_inputs),
+            std::time::Instant::now(),
+        )
+    });
     let config = PcsConfig::default();
     let statement = expected_air.statement();
     if !statement.kind.is_production_air_enabled() {
@@ -212,6 +218,14 @@ where
     )
     .map_err(|e: VerificationError| TexasAirError::ConstraintUnsatisfied(e.to_string()))?;
 
+    if let Some((timing_label, timing_start)) = timing {
+        crate::prove_timing::record(
+            timing_label,
+            crate::prove_timing::TimingKind::Verify,
+            timing_start,
+            Some(num_columns),
+        );
+    }
     Ok(())
 }
 

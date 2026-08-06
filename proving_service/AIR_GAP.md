@@ -27,8 +27,21 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
 - last-opponent `fold` / `fold_with_proof` 会先收集 live bets，再证明 gross pot、rake、winner
   award 与 winner stack 的三条资金等式并 reset 到 `WAITING`；pending addon credit、leave
   refund 和 seat removal 由独立 Settlement/Reset component proof 绑定。
+- active heads-up `kick_player`（无论是否踢当前行动者）已消除 native 双 reset/version bump
+  或 bare reset 丢失底池的分支，并规范化为一次
+  `BetCollection -> WithoutShowdown -> reset`：method AIR 绑定 `reset_cascade`、最终 WAITING/零
+  pot 和双 version bump，四段 proof 再绑定被踢下注、其余 live bets、winner award、refund 与
+  完整 reset。WAITING nested kick 继续使用 `ResetOnly`；其他未知 multi-version kick fail-closed。
 - runner 按每个 reveal phase 的 assignment（局部索引）读取加密牌索引，并在 showdown 对
   保存的 partial ciphertext 构造 DLEq token proof。
+
+## 证明时间
+
+composite dispatch 的 method proof 与四段 bundle 已并行生成；四个 component proof/verify、
+method archive 与 component archive 的验证也并行执行。参考开发机上，单个 composite check
+约由 22.97s 降至 7.2s，完整牌局约由 425.03s 降至 213.46s。设置
+`TEXAS_PROVE_TIMING=1` 后，`--full-hand` 会额外打印 method/SeatUpdate/BetCollection/
+RoundAdvance/Settlement 的 prove/verify 明细；默认不启用计时。
 
 ## 仍需解决的安全与产品边界
 

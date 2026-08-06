@@ -3450,13 +3450,25 @@ fn kick_player_internal_in_place(
         let active = count_active_players(&table.seats);
         if active <= 1 {
             end_without_showdown(table, events)?;
+            // end_without_showdown already performs the complete award + reset cascade. Do not
+            // fall through to the generic low-player reset below, which would reset and bump the
+            // version a second time in the same kick dispatch.
+            return Ok(());
         } else {
             advance_turn(table, events)?;
         }
     }
 
-    if count_active_players(&table.seats) < MIN_PLAYERS_TO_START {
-        reset_for_next_hand(table, events)?;
+    let active = count_active_players(&table.seats);
+    if active < MIN_PLAYERS_TO_START {
+        if active == 1 && is_betting_round(table) {
+            // Kicking a non-current heads-up player must award the complete pot to the survivor;
+            // a bare reset here would silently clear the kicked bet, all remaining live bets and
+            // the pre-existing pot without a winner event.
+            end_without_showdown(table, events)?;
+        } else {
+            reset_for_next_hand(table, events)?;
+        }
     }
     Ok(())
 }
@@ -4672,6 +4684,65 @@ mod tests {
             events.is_empty(),
             "failed kick must not emit partial events"
         );
+    }
+
+    #[test]
+    fn test_active_kick_settlement_resets_once() {
+        let mut table = make_table();
+        table.round_state = ROUND_PREFLOP;
+        table.betting_round = Some(BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+        for seat_index in 0..2 {
+            table.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+            table.seats[seat_index].stack = 900;
+            table.seats[seat_index].bet = 100;
+            table.seats[seat_index].total_bet = 100;
+        }
+        table.chip_pool = 2_000;
+        let pre_version = table.version;
+        let mut events = vec![];
+
+        kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events).unwrap();
+
+        assert_eq!(table.version, pre_version.saturating_add(1));
+        assert_eq!(table.round_state, ROUND_WAITING);
+        assert_eq!(table.pot, 0);
+        assert_eq!(table.seats[1].stack, 1_100);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, TexasPokerEvent::HandEndedWithoutShowdown { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_non_current_active_kick_awards_survivor_before_reset() {
+        let mut table = make_table();
+        table.round_state = ROUND_PREFLOP;
+        table.betting_round = Some(BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+        for seat_index in 0..2 {
+            table.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+            table.seats[seat_index].stack = 900;
+            table.seats[seat_index].bet = 100;
+            table.seats[seat_index].total_bet = 100;
+        }
+        table.chip_pool = 2_000;
+        let pre_version = table.version;
+        let mut events = vec![];
+
+        kick_player_internal(&mut table, 1, KICK_REASON_ADMIN, &mut events).unwrap();
+
+        assert_eq!(table.version, pre_version.saturating_add(1));
+        assert_eq!(table.round_state, ROUND_WAITING);
+        assert_eq!(table.pot, 0);
+        assert_eq!(table.seats[0].stack, 1_100);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TexasPokerEvent::HandEndedWithoutShowdown { winner_seat: 0, .. }
+        )));
     }
 
     #[test]

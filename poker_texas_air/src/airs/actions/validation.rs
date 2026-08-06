@@ -608,25 +608,34 @@ pub(crate) fn validate_kick_player(
     let simple = version_increment == 1
         && canonical.post.round_state == canonical.pre.round_state
         && canonical.post.pot == expected_post_pot;
-    let waiting_nested_reset = version_increment == 2
-        && canonical.pre.round_state
-            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+    let reset_cascade = if version_increment == 2
         && canonical.post.round_state
             == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
-        && canonical.pre.pot == 0
-        && pre_seat.bet == 0
-        && canonical.post.pot == 0;
-    if !simple && !waiting_nested_reset {
+        && canonical.post.pot == 0
+    {
+        let composition =
+            crate::airs::composition::plan::derive_composite_transition_plan_from_public_inputs(
+                public_inputs,
+            )?;
+        composition.settlement.active
+            && composition.settlement.reset_applied
+            && match composition.settlement.kind {
+                crate::airs::composition::SettlementKind::WithoutShowdown => true,
+                crate::airs::composition::SettlementKind::ResetOnly => {
+                    canonical.pre.round_state
+                        == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+                        && canonical.pre.pot == 0
+                        && pre_seat.bet == 0
+                }
+                crate::airs::composition::SettlementKind::None
+                | crate::airs::composition::SettlementKind::Showdown => false,
+            }
+    } else {
+        false
+    };
+    if !simple && !reset_cascade {
         return Err(TexasAirError::UnsupportedBettingTransition(
             "kick_player triggered an unsupported active-hand advance/settlement cascade".into(),
-        ));
-    }
-    if canonical.post.round_state != canonical.pre.round_state
-        || canonical.post.pot != expected_post_pot
-    {
-        return Err(TexasAirError::UnsupportedBettingTransition(
-            "kick_player post round/pot does not match its simple or WAITING-reset projection"
-                .into(),
         ));
     }
 
@@ -638,11 +647,13 @@ pub(crate) fn validate_kick_player(
             .ok_or_else(|| TexasAirError::SpecViolation("kick_player refund overflow".into()))?,
         kicked_bet: pre_seat.bet,
         version_increment,
+        reset_cascade,
     };
     if air.input.seat_index != input.seat_index
         || air.input.refund != input.refund
         || air.input.kicked_bet != input.kicked_bet
         || air.input.version_increment != input.version_increment
+        || air.input.reset_cascade != input.reset_cascade
     {
         return Err(TexasAirError::SpecViolation(
             "kick_player: AIR input does not match the canonical dispatch".into(),

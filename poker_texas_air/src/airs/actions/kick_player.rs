@@ -6,28 +6,35 @@
 //!
 //! 1. 调用者是管理员（admin）
 //! 2. 目标座位存在且 occupied
-//! 3. 退还玩家剩余 stack 到其地址
+//! 3. 退还玩家剩余 stack + pending addon 到其地址
 //! 4. 状态变更（与 fold **不同**的资金流向）：
 //!    - **`table.pot += seat.bet; seat.bet = 0`**（被踢者当前下注立即入底池，
 //!      见 `state_machine::kick_player_internal` state_machine.rs:2689）
-//!    - `seat.player = EMPTY_PLAYER`
-//!    - `seat.stack = 0`, `seat.folded = false`, `seat.all_in = false`
-//!    - `seat.is_waiting = true`
-//!    - `version += 1`
+//!    - `seat.stack = 0`, `seat.left_during_hand = true`, `seat.folded = true`
+//!    - `seat.all_in = false`, `seat.is_waiting = false`, `seat.pk = identity`
+//!    - ordinary active-hand path retains the player marker for hand accounting; a later reset
+//!      removes the zero-stack occupied seat
+//!    - ordinary kick: `version += 1`, final `pot = pre_pot + kicked_bet`
+//!    - canonical settlement/reset cascade: `version += 2`, final round is WAITING and pot is 0;
+//!      the intermediate collection and complete award/reset projection are bound by the
+//!      independent BetCollection and Settlement STARK proofs.
 //!
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 14 个：`INPUT_SEAT_INDEX`, `OUTPUT_REFUND_BASE[4]`,
+//! - 业务列 15 个：`INPUT_SEAT_INDEX`, `OUTPUT_REFUND_BASE[4]`,
 //!   `OUTPUT_KICKED`, `KICKED_BET_BASE[4]`, `INPUT_SEAT_OCCUPIED`,
-//!   `POT_ADD_CARRY_BASE[3]`
+//!   `POT_ADD_CARRY_BASE[3]`, `RESET_CASCADE`
 //!
 //! 资金流向约束（全 4 limb，对齐合约 checked_add 修复）：除 seat_index / refund /
-//! kicked 一致性外，强制 **`post_pot = pre_pot + kicked_bet`**（全 4 limb delta，
-//! 底池增量 == 被踢者下注）。admin 签名约束留待阶段 3/5。
+//! kicked 一致性外，普通路径强制 **`post_pot = pre_pot + kicked_bet`**（全 4 limb
+//! delta，底池增量 == 被踢者下注）；reset cascade 路径强制最终
+//! **`post_round = WAITING && post_pot = 0`**。admin 签名约束留待阶段 3/5。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
+
+use poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING;
 
 use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
@@ -51,8 +58,10 @@ pub mod cols {
     pub const INPUT_SEAT_OCCUPIED: usize = COMMON_NUM_COLUMNS + 10;
     /// pot 加法的 3 个 ripple-carry bit。
     pub const POT_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 11;
+    /// 是否触发 canonical settlement/reset cascade。
+    pub const RESET_CASCADE: usize = COMMON_NUM_COLUMNS + 14;
     /// `kick_player` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 14;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 15;
 }
 
 /// `kick_player` 输入参数。
@@ -60,12 +69,14 @@ pub mod cols {
 pub struct KickPlayerInput {
     /// 被踢出的座位索引。
     pub seat_index: u8,
-    /// 退还金额（= seat.stack）。
+    /// 退还金额（= seat.stack + seat.pending_addon）。
     pub refund: u64,
     /// 被踢者当前下注（kick 时立即并入底池：`pot += kicked_bet`）。
     pub kicked_bet: u64,
     /// Native version bumps: one for the kick and one more when it cascades into reset.
     pub version_increment: u8,
+    /// Whether the native kick cascaded through settlement/reset to WAITING.
+    pub reset_cascade: bool,
 }
 
 /// `kick_player` AIR 公开输入。
@@ -139,6 +150,7 @@ impl FrameworkEval for KickPlayerAir {
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
+        let reset_cascade = eval.next_trace_mask();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -156,18 +168,38 @@ impl FrameworkEval for KickPlayerAir {
         //   `table.pot = table.pot.checked_add(seat.bet)?`（state_machine.rs）
         //   即 post_pot = pre_pot + kicked_bet（全 4 limb delta）
         //   对齐合约 checked_add 修复：溢出时合约返回 Err，AIR 约束 delta 一致性。
-        // 约束 kicked_bet limb 0 与 input 一致
-        let expected_kicked_bet_0: E::F = M31::from((self.input.kicked_bet & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (kicked_bet_0.clone() - expected_kicked_bet_0));
-        // 全 4 limb pot delta
-        for __c in common.pot_delta_4limb(&kicked_bet_limbs, &pot_add_carry) {
-            eval.add_constraint(__c);
+        let expected_kicked_bet = u64_to_m31_limbs(self.input.kicked_bet);
+        for i in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (kicked_bet_limbs[i].clone() - E::F::from(expected_kicked_bet[i])),
+            );
         }
 
-        // 约束 5（审计共性，degree-2）：round_state 不变（kick_player 不改变 round_state）。
-        eval.add_constraint(common.round_state_unchanged());
+        // 约束 5：reset_cascade 是公开绑定的 boolean witness。
+        let expected_reset: E::F = M31::from(u32::from(self.input.reset_cascade)).into();
+        eval.add_constraint(is_active.clone() * (reset_cascade.clone() - expected_reset.clone()));
+        eval.add_constraint(reset_cascade.clone() * (reset_cascade - one.clone()));
 
-        // 约束 6（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只踢占用座位。
+        // 约束 6：普通路径保持旧语义；cascade 路径绑定最终 WAITING/zero-pot 边界。
+        // Branch selectors come from the verifier-reconstructed AIR input, so multiplying the
+        // existing degree-2 common constraints does not raise their algebraic degree.
+        let ordinary = one.clone() - expected_reset.clone();
+        for constraint in common.pot_delta_4limb(&kicked_bet_limbs, &pot_add_carry) {
+            eval.add_constraint(ordinary.clone() * constraint);
+        }
+        eval.add_constraint(ordinary * common.round_state_unchanged());
+        let waiting: E::F = M31::from(u32::from(ROUND_WAITING)).into();
+        eval.add_constraint(
+            is_active.clone()
+                * expected_reset.clone()
+                * (common.post_round_state.clone() - waiting),
+        );
+        for limb in &common.post_pot {
+            eval.add_constraint(is_active.clone() * expected_reset.clone() * limb.clone());
+        }
+
+        // 约束 7（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只踢占用座位。
         eval.add_constraint(is_active.clone() * (input_seat_occupied - one.clone()));
 
         // TODO 阶段 3 完整版：约束 admin 签名。
@@ -193,6 +225,8 @@ pub struct KickPlayerRow {
     pub input_seat_occupied: M31,
     /// pot 加法的 3 个 ripple-carry bit。
     pub pot_add_carry: [M31; 3],
+    /// 是否触发 settlement/reset cascade。
+    pub reset_cascade: M31,
 }
 
 impl KickPlayerRow {
@@ -235,7 +269,12 @@ impl KickPlayerRow {
             kicked_bet: u64_to_m31_limbs(input.kicked_bet),
             // Gap 3：诚实 host 只踢占用座位。
             input_seat_occupied: M31::from(1u32),
-            pot_add_carry: compute_add_carries(pre_pot, input.kicked_bet),
+            pot_add_carry: if input.reset_cascade {
+                [ZERO; 3]
+            } else {
+                compute_add_carries(pre_pot, input.kicked_bet)
+            },
+            reset_cascade: M31::from(u32::from(input.reset_cascade)),
         }
     }
 
@@ -250,6 +289,7 @@ impl KickPlayerRow {
             kicked_bet: [ZERO; 4],
             input_seat_occupied: ZERO,
             pot_add_carry: [ZERO; 3],
+            reset_cascade: ZERO,
         }
     }
 
@@ -263,6 +303,7 @@ impl KickPlayerRow {
         v.extend_from_slice(&self.kicked_bet);
         v.push(self.input_seat_occupied);
         v.extend_from_slice(&self.pot_add_carry);
+        v.push(self.reset_cascade);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

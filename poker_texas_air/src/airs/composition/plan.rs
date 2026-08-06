@@ -254,7 +254,8 @@ pub fn derive_composite_transition_plan(
         .iter()
         .any(|event| matches!(event, TexasPokerEvent::PotCollected { .. }));
     let collection_active = has_round_advance || has_no_showdown || has_collection_event;
-    let bet_collection = derive_bet_collection(pre, &seat_update, collection_active, events)?;
+    let bet_collection =
+        derive_bet_collection(method_kind, pre, &seat_update, collection_active, events)?;
     let round_advance = derive_round_advance(pre, post, events)?;
     let settlement = derive_settlement(pre, post, &bet_collection, method_kind, events)?;
 
@@ -655,6 +656,7 @@ fn derive_seat_update(
 }
 
 fn derive_bet_collection(
+    method_kind: MethodKind,
     pre: &TexasPokerTable,
     seat_update: &SeatUpdatePlan,
     active: bool,
@@ -686,11 +688,53 @@ fn derive_bet_collection(
         .pot
         .checked_add(collected_bets)
         .ok_or_else(|| TexasAirError::SpecViolation("collection pot overflow".into()))?;
+    // kick_player moves the kicked seat's bet into the pot before
+    // end_without_showdown invokes collect_bets_to_pot. The component still accounts for that
+    // pre-state bet in the complete pot delta, while the native PotCollected event correctly
+    // lists only the seats scanned by the later collection call.
+    let immediately_collected_kick_seat = if method_kind == MethodKind::KickPlayer {
+        let kicked = events
+            .iter()
+            .filter_map(|event| match event {
+                TexasPokerEvent::PlayerKicked {
+                    table_id,
+                    seat_index,
+                    ..
+                } => Some((*table_id, *seat_index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [(table_id, seat_index)] = kicked.as_slice() else {
+            return Err(TexasAirError::SpecViolation(
+                "active kick collection requires exactly one PlayerKicked event".into(),
+            ));
+        };
+        if *table_id != pre.id || usize::from(*seat_index) >= pre.seats.len() {
+            return Err(TexasAirError::SpecViolation(
+                "PlayerKicked event does not match collection table scope".into(),
+            ));
+        }
+        Some(*seat_index)
+    } else {
+        None
+    };
     let expected_seats = seat_bets
         .iter()
         .enumerate()
-        .filter_map(|(index, bet)| (*bet > 0).then_some(index as u8))
+        .filter_map(|(index, bet)| {
+            let seat_index = index as u8;
+            (*bet > 0 && Some(seat_index) != immediately_collected_kick_seat).then_some(seat_index)
+        })
         .collect::<Vec<_>>();
+    let event_collected_bets = seat_bets
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index as u8) != immediately_collected_kick_seat)
+        .try_fold(0u64, |sum, (_, bet)| {
+            sum.checked_add(*bet).ok_or_else(|| {
+                TexasAirError::SpecViolation("event collection bet sum overflow".into())
+            })
+        })?;
     let pot_events = events
         .iter()
         .filter_map(|event| match event {
@@ -704,7 +748,7 @@ fn derive_bet_collection(
         })
         .collect::<Vec<_>>();
     match pot_events.as_slice() {
-        [] if collected_bets == 0 => {}
+        [] if event_collected_bets == 0 => {}
         [(table_id, round_state, pot_after, seats)]
             if *table_id == pre.id
                 && *round_state == pre.round_state

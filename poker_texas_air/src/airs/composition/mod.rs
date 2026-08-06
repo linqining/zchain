@@ -29,6 +29,7 @@ pub use proof::{
     ArchivedComponentProof, ArchivedCompositionProofBundle, COMPOSITION_PROOF_BUNDLE_VERSION,
     prove_composition_bundle, verify_composition_bundle,
 };
+pub use settlement::SettlementKind;
 
 /// Columns shared by every composable stage.
 pub const STAGE_HEADER_NUM_COLUMNS: usize = 3 + 3 * DIGEST_LIMBS;

@@ -80,8 +80,11 @@ native crypto 验证即可。
   Settlement component 中固定绑定 9 座位 post stack、post pending addon、post occupancy、
   addon credit/refund 与 chip refund；reset 后所有 pending addon 必须为 0。
 - `kick_player` 在 WAITING 状态触发的 nested reset 已规范化为 `ResetOnly` settlement，
-  method AIR 只允许该 canonical 路径使用 version increment 2，其他未建模 multi-version
-  transition 继续 fail-closed。
+  active heads-up 任一玩家被踢时触发的 `PotCollected -> WithoutShowdown -> reset` 也已规范化。
+  native 状态机先消除了同一 dispatch 重复 reset/version bump 的级联；method AIR 通过绑定的
+  `reset_cascade` 只允许 canonical `version += 2, post_round = WAITING, post_pot = 0`，被踢下注
+  与其余 live bets 由 BetCollection component 统一守恒，award/refund/reset 则由 Settlement
+  component 约束。其他未建模 multi-version transition 继续 fail-closed。
 
 showdown side pot、多人 winner、hand evaluator、rake 和 RIT 结算现在可由当前生产架构接受，
 但其可信性来自 verifier 对 canonical native dispatch 的重放与完整 `SettlementPlan` digest
@@ -135,9 +138,9 @@ commitment 和独立 Fiat–Shamir transcript；bundle 验证固定检查
   plan digest；固定 9 座 awards、addon credits、chip/addon refunds、post stacks、post pending
   addons 和 post occupancy 均进入 AIR，并约束 chip pool / addon pool / rake 守恒和 reset。
 
-production verifier 已在 fold/check/call/raise/bet/auto-fold/force-fold、`fold_with_proof` 和
-`submit_player_reveal_tokens` 的 canonical replay 后派生并验证该 plan，因而旧 method row 与新
-component ABI 迁移期间不会形成第二套可自由选择的业务解释。
+production verifier 已在 fold/check/call/raise/bet/auto-fold/force-fold、`fold_with_proof`、
+`kick_player`、`reset_for_next_hand` 和 `submit_player_reveal_tokens` 的 canonical replay 后派生并
+验证该 plan，因而旧 method row 与新 component ABI 迁移期间不会形成第二套可自由选择的业务解释。
 
 `AirStatement` / `TexasPublicInputs` 已加入完整 `ComponentStatement`，把 component kind、plan
 digest、stage index、input/output boundary commitment 混入 transcript。`ArchivedCompositionProofBundle`
@@ -148,6 +151,15 @@ plan digest 不符或 task scope 不符都会拒绝。proving service durable pa
 这仍不是 recursive/succinct aggregation：验证一个 composite transition 需要验证原 method proof
 和四份 component proof，成本与包体均增加。它解决的是职责拆分、可组合性和 fail-closed 边界，
 不解决链上常数成本压缩。
+
+### 证明时间优化
+
+四份 proof 的独立性现在也用于本地并行执行：method proof 与 component bundle 并行，四个
+component proof/verify 以两层 Rayon join 并行，durable method archive 与 component archive 的
+恢复验证同样并行。proof 数量、每份 trace commitment、Fiat-Shamir transcript、stage 顺序与
+plan digest 均未改变。参考开发机上，单个 composite check 从约 22.97s 降至约 7.2s；完整牌局
+从约 425.03s 降至约 213.46s。`TEXAS_PROVE_TIMING=1` 可输出 method 与四个 stage 的逐 proof
+prove/verify 耗时，计时器默认关闭。
 
 现有 `DualProofBundle` 仍是“method STARK + native crypto request”的两部分传输格式；对
 `fold_with_proof` / terminal reveal 这类 composite method，它不能替代 durable v2 package 中的

@@ -66,6 +66,10 @@ pub struct StepTiming {
     pub prove: Duration,
     /// 是否成功（dispatch + 可选 prove 均成功）。
     pub ok: bool,
+    /// Per-proof breakdown collected during `prove` (empty unless
+    /// `TEXAS_PROVE_TIMING` is set): legacy method prove/verify plus up to
+    /// four component stage prove/verify records.
+    pub proof_breakdown: Vec<poker_texas_air::prove_timing::TimingRecord>,
 }
 
 /// 完整牌局性能 + 正确性报告。
@@ -175,6 +179,7 @@ impl FullHandRunner {
                     plugin.start_new_chain_segment();
                     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
                         let p_start = Instant::now();
+                        let _drained_before = poker_texas_air::prove_timing::take_drain();
                         let ok = plugin.prove_task(task).is_ok();
                         if !ok {
                             ctx.stopped_at = Some("start_hand prove/verify failed".to_string());
@@ -188,6 +193,7 @@ impl FullHandRunner {
                         dispatch: d_dur,
                         prove: prove_dur,
                         ok,
+                        proof_breakdown: poker_texas_air::prove_timing::take_drain(),
                     });
                 }
                 Err(error) => {
@@ -196,6 +202,7 @@ impl FullHandRunner {
                         method: "start_hand".into(),
                         dispatch: d_start.elapsed(),
                         prove: Duration::ZERO,
+                        proof_breakdown: Vec::new(),
                         ok: false,
                     });
                 }
@@ -211,6 +218,7 @@ impl FullHandRunner {
                     method: format!("submit_shuffle_v2[seat{seat}]"),
                     dispatch: Duration::ZERO,
                     prove: Duration::ZERO,
+                    proof_breakdown: Vec::new(),
                     ok: false,
                 });
                 continue;
@@ -230,6 +238,7 @@ impl FullHandRunner {
                         method: format!("submit_shuffle_v2[seat{seat}]"),
                         dispatch: Duration::ZERO,
                         prove: Duration::ZERO,
+                        proof_breakdown: Vec::new(),
                         ok: false,
                     });
                     continue;
@@ -412,6 +421,7 @@ fn dispatch_and_prove<A: BorshSerialize>(
             method: name.to_string(),
             dispatch: Duration::ZERO,
             prove: Duration::ZERO,
+            proof_breakdown: Vec::new(),
             ok: false,
         });
         return;
@@ -428,6 +438,7 @@ fn dispatch_and_prove<A: BorshSerialize>(
                 method: name.to_string(),
                 dispatch: d_start.elapsed(),
                 prove: Duration::ZERO,
+                proof_breakdown: Vec::new(),
                 ok: false,
             });
             return;
@@ -436,6 +447,7 @@ fn dispatch_and_prove<A: BorshSerialize>(
     let d_dur = d_start.elapsed();
     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
         let p_start = Instant::now();
+        let _drained_before = poker_texas_air::prove_timing::take_drain();
         match plugin.prove_task(task) {
             Ok(_) => (p_start.elapsed(), true),
             Err(error) => {
@@ -445,6 +457,7 @@ fn dispatch_and_prove<A: BorshSerialize>(
                     dispatch: d_dur,
                     prove: p_start.elapsed(),
                     ok: false,
+                    proof_breakdown: poker_texas_air::prove_timing::take_drain(),
                 });
                 return;
             }
@@ -457,6 +470,7 @@ fn dispatch_and_prove<A: BorshSerialize>(
         dispatch: d_dur,
         prove: prove_dur,
         ok,
+        proof_breakdown: poker_texas_air::prove_timing::take_drain(),
     });
 }
 
@@ -490,6 +504,7 @@ fn dispatch_current_turn(
             method: name.to_string(),
             dispatch: Duration::ZERO,
             prove: Duration::ZERO,
+            proof_breakdown: Vec::new(),
             ok: false,
         });
         return;
@@ -502,6 +517,7 @@ fn dispatch_current_turn(
             method: name.to_string(),
             dispatch: Duration::ZERO,
             prove: Duration::ZERO,
+            proof_breakdown: Vec::new(),
             ok: false,
         });
         return;
@@ -545,6 +561,7 @@ fn submit_reveal_round(
                             method: format!("{name}[{step_no}]"),
                             dispatch: Duration::ZERO,
                             prove: Duration::ZERO,
+                            proof_breakdown: Vec::new(),
                             ok: false,
                         });
                         step_no += 1;
@@ -577,6 +594,7 @@ fn submit_reveal_round(
                             method: format!("{name}[{step_no}]"),
                             dispatch: Duration::ZERO,
                             prove: Duration::ZERO,
+                            proof_breakdown: Vec::new(),
                             ok: false,
                         });
                         step_no += 1;
@@ -603,6 +621,7 @@ fn submit_reveal_round(
                     method: format!("{name}[{step_no}]"),
                     dispatch: Duration::ZERO,
                     prove: Duration::ZERO,
+                    proof_breakdown: Vec::new(),
                     ok: false,
                 });
             }
@@ -642,6 +661,7 @@ fn submit_community_reveal(
                             method: format!("{name}[{step_no}]"),
                             dispatch: Duration::ZERO,
                             prove: Duration::ZERO,
+                            proof_breakdown: Vec::new(),
                             ok: false,
                         });
                         step_no += 1;
@@ -655,6 +675,7 @@ fn submit_community_reveal(
                             method: format!("{name}[{step_no}]"),
                             dispatch: Duration::ZERO,
                             prove: Duration::ZERO,
+                            proof_breakdown: Vec::new(),
                             ok: false,
                         });
                         step_no += 1;
@@ -681,6 +702,7 @@ fn submit_community_reveal(
                     method: format!("{name}[{step_no}]"),
                     dispatch: Duration::ZERO,
                     prove: Duration::ZERO,
+                    proof_breakdown: Vec::new(),
                     ok: false,
                 });
             }

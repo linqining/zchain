@@ -187,6 +187,71 @@ fn run_full_hand() -> ExitCode {
         );
     }
     println!("  {:-<70}", "");
+
+    // Per-proof breakdown (legacy method + 4 component stages), printed when
+    // TEXAS_PROVE_TIMING was set so the run captured the finer-grained spans.
+    let breakdown_total: f64 = report
+        .steps
+        .iter()
+        .flat_map(|s| s.proof_breakdown.iter())
+        .map(|r| r.elapsed.as_secs_f64() * 1000.0)
+        .sum();
+    if breakdown_total > 0.0 {
+        use std::collections::BTreeMap;
+        println!("===== 每步 prove/verify 细分 (prove_method + verify_method) =====");
+        for s in &report.steps {
+            if s.proof_breakdown.is_empty() {
+                continue;
+            }
+            println!("  {}:", s.method);
+            for r in &s.proof_breakdown {
+                let side = match r.kind {
+                    poker_texas_air::prove_timing::TimingKind::Prove => "prove",
+                    poker_texas_air::prove_timing::TimingKind::Verify => "verify",
+                };
+                let cols = r.num_columns.map_or("-".to_string(), |c| c.to_string());
+                println!(
+                    "    {:<28} {:>6} {:>8.2}ms  cols={}",
+                    r.label,
+                    side,
+                    r.elapsed.as_secs_f64() * 1000.0,
+                    cols,
+                );
+            }
+        }
+        // Aggregate by label across the whole hand.
+        let mut agg: BTreeMap<String, (f64, f64, usize)> = BTreeMap::new();
+        for r in report.steps.iter().flat_map(|s| s.proof_breakdown.iter()) {
+            let (p, v, n) = agg.entry(r.label.clone()).or_insert((0.0, 0.0, 0));
+            match r.kind {
+                poker_texas_air::prove_timing::TimingKind::Prove => *p += r.elapsed.as_secs_f64() * 1000.0,
+                poker_texas_air::prove_timing::TimingKind::Verify => *v += r.elapsed.as_secs_f64() * 1000.0,
+            }
+            *n += 1;
+        }
+        println!("===== 按标签聚合（全手）=====");
+        println!("  {:<28} {:>5} {:>10} {:>10} {:>10}", "label", "calls", "prove_ms", "verify_ms", "total_ms");
+        for (label, (p, v, n)) in &agg {
+            println!(
+                "  {:<28} {:>5} {:>10.2} {:>10.2} {:>10.2}",
+                label,
+                n,
+                p,
+                v,
+                p + v,
+            );
+        }
+        let agg_prove: f64 = agg.values().map(|(p, _, _)| *p).sum();
+        let agg_verify: f64 = agg.values().map(|(_, v, _)| *v).sum();
+        println!(
+            "  合计: prove {:.2}ms  verify {:.2}ms  总计 {:.2}ms",
+            agg_prove,
+            agg_verify,
+            agg_prove + agg_verify,
+        );
+        println!("  {:-<70}", "");
+    }
+
     let dispatch_total: f64 = report
         .steps
         .iter()

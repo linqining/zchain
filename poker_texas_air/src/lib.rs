@@ -43,6 +43,7 @@ pub mod outer_aggregate;
 pub mod outer_precompile;
 pub mod precompile_binding;
 pub mod proof_archive;
+pub mod prove_timing;
 pub mod public_inputs;
 pub mod settlement_binding;
 pub mod state_root;

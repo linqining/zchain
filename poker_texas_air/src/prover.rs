@@ -161,6 +161,12 @@ pub fn prove_method<A>(
 where
     A: TexasAir,
 {
+    let timing = crate::prove_timing::enabled().then(|| {
+        (
+            crate::prove_timing::method_label(&public_inputs),
+            std::time::Instant::now(),
+        )
+    });
     let log_size = trace.log_size;
     let statement = air.statement();
     if !statement.kind.is_production_air_enabled() {
@@ -222,6 +228,14 @@ where
     let stark_proof = prove(&[&component], &mut channel, commitment_scheme)
         .map_err(|e: ProvingError| TexasAirError::StwoProverError(e.to_string()))?;
 
+    if let Some((timing_label, timing_start)) = timing {
+        crate::prove_timing::record(
+            timing_label,
+            crate::prove_timing::TimingKind::Prove,
+            timing_start,
+            Some(num_columns),
+        );
+    }
     Ok(MethodProof {
         stark_proof,
         air,

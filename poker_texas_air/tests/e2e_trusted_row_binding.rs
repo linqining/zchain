@@ -572,6 +572,7 @@ fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
         refund: pre.seats[2].stack,
         kicked_bet: pre.seats[2].bet,
         version_increment: 1,
+        reset_cascade: false,
     };
 
     let mut unrelated_post = canonical_post.clone();

@@ -1376,6 +1376,7 @@ fn test_e2e_kick_player_prove_verify() {
         refund: 500,
         kicked_bet: 50,
         version_increment: 1,
+        reset_cascade: false,
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1431,6 +1432,7 @@ fn test_e2e_kick_player_ripple_carry() {
         refund: 500,
         kicked_bet: 1,
         version_increment: 1,
+        reset_cascade: false,
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1485,6 +1487,7 @@ fn test_soundness_kick_player_tampered_refund() {
         refund: 500,
         kicked_bet: 50,
         version_increment: 1,
+        reset_cascade: false,
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1602,8 +1605,8 @@ fn test_action_air_column_consistency() {
     // force_fold: 通用 + 5 业务（含 Gap 1、pre/post current_turn）
     assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
 
-    // kick_player: 通用 + 14 业务（pot u64 加法增加 3 个 carry bit）
-    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 14);
+    // kick_player: 通用 + 15 业务（pot u64 carry + reset_cascade selector）
+    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 15);
 }
 
 /// 单元测试：MethodKind 的 actions 档位分类正确。

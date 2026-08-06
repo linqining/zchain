@@ -193,9 +193,16 @@ impl Orchestrator {
         &mut self,
         task: &ProveTask,
     ) -> TexasAirResult<ArchivedProvenTask> {
-        let mut backend = NativeMethodProofBackend;
-        let (summary, output) = self.process_task(task, &mut backend)?;
-        let composition_archive = crate::airs::composition::prove_composition_bundle(task)?;
+        let current = &*self;
+        let (method_result, composition_result) = rayon::join(
+            || {
+                let mut backend = NativeMethodProofBackend;
+                current.process_task(task, &mut backend)
+            },
+            || crate::airs::composition::prove_composition_bundle(task),
+        );
+        let (summary, output) = method_result?;
+        let composition_archive = composition_result?;
         self.verified_chain_builder.push_receipt(output.receipt)?;
         self.proven.push(summary.clone());
         Ok(ArchivedProvenTask {
@@ -229,27 +236,27 @@ impl Orchestrator {
         archive: &ArchivedMethodProof,
         composition_archive: Option<&crate::airs::composition::ArchivedCompositionProofBundle>,
     ) -> TexasAirResult<VerificationReceipt> {
-        let receipt = Self::verify_archived_method_proof(task, archive)?;
         match (
             crate::airs::composition::supports_composite_proof(task.method_kind),
             composition_archive,
         ) {
             (true, Some(bundle)) => {
-                crate::airs::composition::verify_composition_bundle(task, bundle)?;
+                let (method_result, composition_result) = rayon::join(
+                    || Self::verify_archived_method_proof(task, archive),
+                    || crate::airs::composition::verify_composition_bundle(task, bundle),
+                );
+                let receipt = method_result?;
+                composition_result?;
+                Ok(receipt)
             }
-            (true, None) => {
-                return Err(TexasAirError::SpecViolation(
-                    "composite task is missing its four-stage STARK proof bundle".into(),
-                ));
-            }
-            (false, None) => {}
-            (false, Some(_)) => {
-                return Err(TexasAirError::SpecViolation(
-                    "non-composite task carries an unexpected component proof bundle".into(),
-                ));
-            }
+            (true, None) => Err(TexasAirError::SpecViolation(
+                "composite task is missing its four-stage STARK proof bundle".into(),
+            )),
+            (false, None) => Self::verify_archived_method_proof(task, archive),
+            (false, Some(_)) => Err(TexasAirError::SpecViolation(
+                "non-composite task carries an unexpected component proof bundle".into(),
+            )),
         }
-        Ok(receipt)
     }
 
     /// Reconstruct a method statement from a canonical task and verify an archived proof.
@@ -294,27 +301,38 @@ impl Orchestrator {
         archive: &ArchivedMethodProof,
         composition_archive: Option<&crate::airs::composition::ArchivedCompositionProofBundle>,
     ) -> TexasAirResult<ProvenTask> {
-        let mut backend = ArchivedVerificationBackend { archive };
-        let (summary, receipt) = self.process_task(task, &mut backend)?;
-        match (
+        let required_composition = match (
             crate::airs::composition::supports_composite_proof(task.method_kind),
             composition_archive,
         ) {
-            (true, Some(bundle)) => {
-                crate::airs::composition::verify_composition_bundle(task, bundle)?;
-            }
+            (true, Some(bundle)) => Some(bundle),
             (true, None) => {
                 return Err(TexasAirError::SpecViolation(
                     "composite task is missing its four-stage STARK proof bundle".into(),
                 ));
             }
-            (false, None) => {}
+            (false, None) => None,
             (false, Some(_)) => {
                 return Err(TexasAirError::SpecViolation(
                     "non-composite task carries an unexpected component proof bundle".into(),
                 ));
             }
-        }
+        };
+        let current = &*self;
+        let method = || {
+            let mut backend = ArchivedVerificationBackend { archive };
+            current.process_task(task, &mut backend)
+        };
+        let (summary, receipt) = if let Some(bundle) = required_composition {
+            let (method_result, composition_result) = rayon::join(method, || {
+                crate::airs::composition::verify_composition_bundle(task, bundle)
+            });
+            let output = method_result?;
+            composition_result?;
+            output
+        } else {
+            method()?
+        };
 
         let mut next_chain = self.verified_chain_builder.clone();
         next_chain.push_receipt(receipt)?;
@@ -1530,15 +1548,30 @@ impl Orchestrator {
         let simple = version_increment == 1
             && task.post_table.round_state == task.pre_table.round_state
             && task.post_table.pot == expected_post_pot;
-        let waiting_nested_reset = version_increment == 2
-            && task.pre_table.round_state
-                == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        let reset_cascade = if version_increment == 2
             && task.post_table.round_state
                 == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
-            && task.pre_table.pot == 0
-            && pre_seat.bet == 0
-            && task.post_table.pot == 0;
-        if !simple && !waiting_nested_reset {
+            && task.post_table.pot == 0
+        {
+            let composition =
+                crate::airs::composition::derive_composite_transition_plan_from_task(task)?;
+            composition.settlement.active
+                && composition.settlement.reset_applied
+                && match composition.settlement.kind {
+                    crate::airs::composition::SettlementKind::WithoutShowdown => true,
+                    crate::airs::composition::SettlementKind::ResetOnly => {
+                        task.pre_table.round_state
+                            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+                            && task.pre_table.pot == 0
+                            && pre_seat.bet == 0
+                    }
+                    crate::airs::composition::SettlementKind::None
+                    | crate::airs::composition::SettlementKind::Showdown => false,
+                }
+        } else {
+            false
+        };
+        if !simple && !reset_cascade {
             return Err(TexasAirError::UnsupportedBettingTransition(
                 "kick_player triggered an unsupported active-hand advance/settlement cascade"
                     .into(),
@@ -1554,6 +1587,7 @@ impl Orchestrator {
                 })?,
             kicked_bet: pre_seat.bet,
             version_increment,
+            reset_cascade,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -3603,6 +3637,92 @@ mod tests {
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("WAITING kick nested reset should prove as a ResetOnly component");
+    }
+
+    /// An active heads-up kick of the current player immediately collects that seat's bet,
+    /// collects the remaining live bet, awards the sole survivor, and resets in one dispatch.
+    #[test]
+    fn orchestrator_proves_active_kick_settlement_cascade() {
+        let mut pre = make_table("kick-active-settlement");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        pre.hand_id = 9;
+        pre.call_seq = 17;
+        for seat_index in 0..2 {
+            pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+            pre.seats[seat_index].stack = 900;
+            pre.seats[seat_index].bet = 100;
+            pre.seats[seat_index].total_bet = 100;
+        }
+        pre.chip_pool = 2_000;
+
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre.clone(),
+            creator,
+            texas_dispatch::selectors::kick_player(),
+            borsh::to_vec(&KickPlayerArgs {
+                seat_index: 0,
+                reason: 1,
+            })
+            .expect("kick args should serialize"),
+        );
+        assert_eq!(post.version, pre.version.saturating_add(2));
+        assert_eq!(
+            post.round_state,
+            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        );
+        assert_eq!(post.pot, 0);
+        assert_eq!(post.seats[1].stack, 1_100);
+
+        let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
+            .expect("active kick should normalize into the four-stage plan");
+        assert!(plan.bet_collection.active);
+        assert_eq!(plan.bet_collection.collected_bets, 200);
+        assert_eq!(
+            plan.settlement.kind,
+            crate::airs::composition::SettlementKind::WithoutShowdown
+        );
+
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("active kick settlement/reset cascade should prove");
+    }
+
+    /// The kicked seat's immediately collected bet still activates the collection component even
+    /// when no other seat has a live bet and native collect_bets_to_pot emits no marker event.
+    #[test]
+    fn active_kick_plan_accepts_immediate_collection_without_pot_event() {
+        let mut pre = make_table("kick-immediate-collection-only");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        for seat_index in 0..2 {
+            pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+            pre.seats[seat_index].stack = 900;
+        }
+        pre.seats[1].bet = 100;
+        pre.seats[1].total_bet = 100;
+        pre.chip_pool = 1_900;
+
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::kick_player(),
+            borsh::to_vec(&KickPlayerArgs {
+                seat_index: 1,
+                reason: 1,
+            })
+            .expect("kick args should serialize"),
+        );
+        assert_eq!(post.seats[0].stack, 1_000);
+        let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
+            .expect("immediate kick collection should not require a PotCollected marker");
+        assert!(plan.bet_collection.active);
+        assert_eq!(plan.bet_collection.collected_bets, 100);
+        assert_eq!(plan.bet_collection.post_pot, 100);
     }
 
     /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
