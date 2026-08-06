@@ -6,15 +6,6 @@
 //! DLEq or reveal-token verifiers; that separate cryptographic closure remains
 //! explicit in the individual AIR modules.
 
-use poker_l1::vm::contracts::texas_poker::constants::{
-    REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
-};
-use poker_l1::vm::contracts::texas_poker::dispatch::{
-    FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs,
-    SubmitRevealTokensArgs, SubmitShuffleV2Args,
-};
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
-
 use super::fold_with_proof::{FoldWithProofAir, FoldWithProofInput, FoldWithProofRow};
 use super::join_and_shuffle::{JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow};
 use super::leave_with_proof::{LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow};
@@ -25,6 +16,7 @@ use super::submit_reconstruct_deck::{
     SubmitReconstructDeckAir, SubmitReconstructDeckInput, SubmitReconstructDeckRow,
 };
 use super::submit_shuffle_v2::{SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row};
+use crate::airs::actions::end_without_showdown::derive_fold_outcome;
 use crate::airs::validation::{validate_canonical_dispatch, validate_row};
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
@@ -36,37 +28,15 @@ use crate::precompile_binding::{
 use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::state_root_to_air_limbs;
+use poker_l1::vm::contracts::texas_poker::constants::{
+    REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
+};
+use poker_l1::vm::contracts::texas_poker::dispatch::{
+    FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs,
+    SubmitRevealTokensArgs, SubmitShuffleV2Args,
+};
 
-/// Reject compound `fold_with_proof` transitions that require collection,
-/// round advancement, settlement, or reset AIRs.
-pub(crate) fn ensure_fold_with_proof_mid_round(
-    pre: &TexasPokerTable,
-    post: &TexasPokerTable,
-) -> TexasAirResult<u8> {
-    let expected_version = pre
-        .version
-        .checked_add(1)
-        .ok_or_else(|| TexasAirError::SpecViolation("fold_with_proof version overflow".into()))?;
-    if post.version != expected_version
-        || pre.betting_round.is_none()
-        || post.betting_round.is_none()
-        || pre.round_state != post.round_state
-        || pre.pot != post.pot
-    {
-        return Err(TexasAirError::UnsupportedBettingTransition(
-            "fold_with_proof triggered collect_bets_to_pot / round advance / settlement; the current AIR covers only a single-version same-round transition with unchanged pot"
-                .into(),
-        ));
-    }
-    post.current_turn.ok_or_else(|| {
-        TexasAirError::UnsupportedBettingTransition(
-            "fold_with_proof produced no next current_turn; terminal settlement remains fail-closed"
-                .into(),
-        )
-    })
-}
-
-/// Bind a non-terminal `fold_with_proof` transition to its exact dispatch and
+/// Bind a `fold_with_proof` transition to its exact dispatch and
 /// verifier-issued leave-layer DLEq receipt.
 pub(crate) fn validate_fold_with_proof(
     air: &FoldWithProofAir,
@@ -91,7 +61,7 @@ pub(crate) fn validate_fold_with_proof(
             "fold_with_proof: replayed MethodInput does not match raw args".into(),
         ));
     }
-    let post_current_turn = ensure_fold_with_proof_mid_round(&canonical.pre, &canonical.post)?;
+    let outcome = derive_fold_outcome(&canonical.pre, &canonical.post, args.seat_index, METHOD)?;
 
     let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
         TexasAirError::SpecViolation(
@@ -141,13 +111,13 @@ pub(crate) fn validate_fold_with_proof(
 
     let input = FoldWithProofInput {
         seat_index: args.seat_index,
-        post_current_turn,
+        outcome,
         old_deck_commitment: deck_commitment(&canonical.pre),
         new_deck_commitment: deck_commitment(&canonical.post),
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
-        || air.input.post_current_turn != input.post_current_turn
+        || air.input.outcome != input.outcome
         || air.input.old_deck_commitment != input.old_deck_commitment
         || air.input.new_deck_commitment != input.new_deck_commitment
         || air.input.precompile != input.precompile

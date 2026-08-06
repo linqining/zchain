@@ -634,16 +634,25 @@ fn collect_bets_to_pot(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    // Preflight the complete collection so an overflow cannot leave an earlier
+    // seat collected while a later seat still carries its bet.
+    let total_to_collect = table.seats.iter().try_fold(0u64, |total, seat| {
+        total.checked_add(seat.bet).ok_or_else(|| {
+            PokerL1Error::Serialization("collect_bets_to_pot: bet sum overflow".into())
+        })
+    })?;
+    let post_pot = table.pot.checked_add(total_to_collect).ok_or_else(|| {
+        PokerL1Error::Serialization("collect_bets_to_pot: pot += bets overflow".into())
+    })?;
+
     let mut collected_seats = Vec::new();
     for (i, s) in table.seats.iter_mut().enumerate() {
         if s.bet > 0 {
-            table.pot = table.pot.checked_add(s.bet).ok_or_else(|| {
-                PokerL1Error::Serialization("collect_bets_to_pot: pot += bet overflow".into())
-            })?;
             s.bet = 0;
             collected_seats.push(i as u8);
         }
     }
+    table.pot = post_pot;
     if !collected_seats.is_empty() {
         events::emit_event(
             events,
@@ -2696,6 +2705,11 @@ fn end_without_showdown(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    // A fold can leave live bets in the current betting round. They are part of
+    // the hand's funds and must enter the pot before rake and winner payout;
+    // otherwise reset_for_next_hand would silently clear them.
+    collect_bets_to_pot(table, events)?;
+
     let winner = table
         .seats
         .iter()
@@ -4301,6 +4315,10 @@ mod tests {
         table.betting_round = Some(BettingRound::new(100, 100));
         table.current_turn = Some(0);
         table.pot = 200;
+        table.seats[0].bet = 25;
+        table.seats[0].total_bet = 25;
+        table.seats[1].bet = 75;
+        table.seats[1].total_bet = 75;
         let mut events = vec![];
 
         apply_fold(&mut table, 0, &mut events).unwrap();
@@ -4316,7 +4334,32 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, TexasPokerEvent::HandEndedWithoutShowdown { .. }))
         );
-        assert_eq!(table.seats[1].stack, 1200);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TexasPokerEvent::PotCollected { pot_after: 300, .. }))
+        );
+        assert_eq!(table.seats[1].stack, 1300);
+    }
+
+    #[test]
+    fn test_collect_bets_to_pot_overflow_is_atomic() {
+        let mut pot_overflow = make_table();
+        pot_overflow.pot = u64::MAX;
+        pot_overflow.seats[0].bet = 1;
+        let before = pot_overflow.clone();
+        let mut events = vec![];
+        assert!(collect_bets_to_pot(&mut pot_overflow, &mut events).is_err());
+        assert_eq!(pot_overflow, before);
+        assert!(events.is_empty());
+
+        let mut sum_overflow = make_table();
+        sum_overflow.seats[0].bet = u64::MAX;
+        sum_overflow.seats[1].bet = 1;
+        let before = sum_overflow.clone();
+        assert!(collect_bets_to_pot(&mut sum_overflow, &mut events).is_err());
+        assert_eq!(sum_overflow, before);
+        assert!(events.is_empty());
     }
 
     #[test]

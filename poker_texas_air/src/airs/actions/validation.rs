@@ -17,7 +17,9 @@ use stwo::core::fields::m31::M31;
 use super::auto_fold::{AutoFoldAir, AutoFoldRow};
 use super::bet::{BetAir, BetRow};
 use super::call::{CallAir, CallRow};
-use super::check::{CheckAir, CheckRow, NO_CURRENT_TURN};
+use super::check::{CheckAir, CheckRow};
+use super::end_betting_round::derive_betting_outcome;
+use super::end_without_showdown::derive_fold_outcome;
 use super::fold::{FoldAir, FoldRow};
 use super::force_fold::{ForceFoldAir, ForceFoldRow};
 use super::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
@@ -150,7 +152,7 @@ fn validate_native_mid_round(
         post.round_state != pre.round_state || post.betting_round.is_none() || post.pot != pre.pot;
     if pre.betting_round.is_none() || (completes_betting_round && !allow_round_completion) {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
-            "{method} triggered collect_bets_to_pot / advance_round / settlement; current AIR proves only same-round transitions with unchanged pot and Some(current_turn)"
+            "{method} triggered an unsupported betting-round completion; this AIR only accepts the canonical mid-round branch or its explicitly modeled clean collection branch"
         )));
     }
 
@@ -189,12 +191,13 @@ pub(crate) fn validate_fold(
         NativeAction::Fold {
             seat_index: air.input.seat_index,
         },
-        false,
+        true,
     )?;
-    let post_turn = tables.post.current_turn.expect("mid-round checked");
-    if air.input.post_current_turn != post_turn {
+    let expected_outcome =
+        derive_fold_outcome(&tables.pre, &tables.post, air.input.seat_index, "fold")?;
+    if air.input.outcome != expected_outcome {
         return Err(TexasAirError::SpecViolation(
-            "fold: AIR input does not match canonical post current_turn".into(),
+            "fold: AIR outcome does not match the canonical dispatch".into(),
         ));
     }
     let row = FoldRow::active(
@@ -208,6 +211,8 @@ pub(crate) fn validate_fold(
         tables.post.version,
         tables.pre.round_state,
         tables.post.round_state,
+        tables.pre.pot,
+        tables.post.pot,
     );
     validate_row(public_inputs, &row.to_vec(), "fold")
 }
@@ -230,16 +235,10 @@ pub(crate) fn validate_check(
         .betting_round
         .as_ref()
         .expect("mid-round checked");
-    let post_turn = tables.post.current_turn.unwrap_or(NO_CURRENT_TURN);
-    let completes_betting_round = tables.post.round_state != tables.pre.round_state
-        || tables.post.betting_round.is_none()
-        || tables.post.pot != tables.pre.pot;
+    let outcome = derive_betting_outcome(&tables.pre, &tables.post, 0, "check")?;
     if air.input.current_bet != pre_round.current_bet
         || air.input.seat_bet != pre_seat.bet
-        || air.input.post_current_turn != post_turn
-        || air.input.completes_betting_round != completes_betting_round
-        || air.input.post_round_state != tables.post.round_state
-        || air.input.post_pot != tables.post.pot
+        || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
             "check: AIR input does not match canonical table fields".into(),
@@ -272,7 +271,7 @@ pub(crate) fn validate_call(
         NativeAction::Call {
             seat_index: air.input.seat_index,
         },
-        false,
+        true,
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "call")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "call")?;
@@ -282,13 +281,17 @@ pub(crate) fn validate_call(
         .as_ref()
         .expect("mid-round checked");
     let call_amount = pre_round.process_call(pre_seat.bet, pre_seat.stack);
-    let post_turn = tables.post.current_turn.expect("mid-round checked");
+    let outcome = derive_betting_outcome(&tables.pre, &tables.post, call_amount, "call")?;
+    let action_post_bet = pre_seat
+        .bet
+        .checked_add(call_amount)
+        .ok_or_else(|| TexasAirError::SpecViolation("call: action seat.bet overflow".into()))?;
     if air.input.call_amount != call_amount
         || air.input.pre_current_bet != pre_round.current_bet
         || air.input.pre_seat_bet != pre_seat.bet
         || air.input.pre_seat_stack != pre_seat.stack
         || air.input.pre_seat_total_bet != pre_seat.total_bet
-        || air.input.post_current_turn != post_turn
+        || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
             "call: AIR input does not match canonical table fields".into(),
@@ -308,7 +311,7 @@ pub(crate) fn validate_call(
         tables.pre.pot,
         tables.post.pot,
         post_seat.stack,
-        post_seat.bet,
+        action_post_bet,
         post_seat.all_in,
         pre_seat.bet,
         pre_seat.stack,
@@ -329,7 +332,7 @@ pub(crate) fn validate_raise(
             seat_index: air.input.seat_index,
             total_bet: air.input.raise_to,
         },
-        false,
+        true,
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "raise")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "raise")?;
@@ -338,20 +341,26 @@ pub(crate) fn validate_raise(
         .betting_round
         .as_ref()
         .expect("mid-round checked");
-    let post_round = tables
-        .post
-        .betting_round
-        .as_ref()
-        .expect("mid-round checked");
-    let post_turn = tables.post.current_turn.expect("mid-round checked");
-    if air.input.raise_to != post_seat.bet
-        || air.input.raise_to != post_round.current_bet
-        || air.input.min_raise != pre_round.min_raise
+    let action_delta = air
+        .input
+        .raise_to
+        .checked_sub(pre_seat.bet)
+        .ok_or_else(|| TexasAirError::SpecViolation("raise: action bet decreased".into()))?;
+    let mut action_round = pre_round.clone();
+    action_round
+        .process_raise(air.input.raise_to, pre_seat.bet, pre_seat.stack)
+        .map_err(|error| {
+            TexasAirError::SpecViolation(format!(
+                "raise: cannot reconstruct action-round state: {error}"
+            ))
+        })?;
+    let outcome = derive_betting_outcome(&tables.pre, &tables.post, action_delta, "raise")?;
+    if air.input.min_raise != pre_round.min_raise
         || air.input.pre_current_bet != pre_round.current_bet
         || air.input.pre_seat_stack != pre_seat.stack
         || air.input.pre_seat_bet != pre_seat.bet
         || air.input.pre_seat_total_bet != pre_seat.total_bet
-        || air.input.post_current_turn != post_turn
+        || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
             "raise: AIR input does not match canonical table fields".into(),
@@ -374,10 +383,10 @@ pub(crate) fn validate_raise(
         pre_seat.bet,
         pre_seat.total_bet,
         post_seat.stack,
-        post_seat.bet,
+        air.input.raise_to,
         post_seat.total_bet,
-        post_round.current_bet,
-        post_round.min_raise,
+        action_round.current_bet,
+        action_round.min_raise,
         post_seat.all_in,
     );
     validate_row(public_inputs, &row.to_vec(), "raise")
@@ -391,7 +400,7 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
             seat_index: air.input.seat_index,
             amount: air.input.amount,
         },
-        false,
+        true,
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "bet")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "bet")?;
@@ -400,17 +409,25 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
         .betting_round
         .as_ref()
         .expect("mid-round checked");
-    let post_turn = tables.post.current_turn.expect("mid-round checked");
-    let amount = post_seat.bet.checked_sub(pre_seat.bet).ok_or_else(|| {
-        TexasAirError::SpecViolation("bet: canonical post seat.bet decreased".into())
-    })?;
-    if air.input.amount != amount
-        || air.input.pre_current_bet != pre_round.current_bet
+    let action_post_bet = pre_seat
+        .bet
+        .checked_add(air.input.amount)
+        .ok_or_else(|| TexasAirError::SpecViolation("bet: action seat.bet overflow".into()))?;
+    let mut action_round = pre_round.clone();
+    action_round
+        .process_raise(action_post_bet, pre_seat.bet, pre_seat.stack)
+        .map_err(|error| {
+            TexasAirError::SpecViolation(format!(
+                "bet: cannot reconstruct action-round state: {error}"
+            ))
+        })?;
+    let outcome = derive_betting_outcome(&tables.pre, &tables.post, air.input.amount, "bet")?;
+    if air.input.pre_current_bet != pre_round.current_bet
         || air.input.pre_min_raise != pre_round.min_raise
         || air.input.pre_seat_bet != pre_seat.bet
         || air.input.pre_seat_stack != pre_seat.stack
         || air.input.pre_seat_total_bet != pre_seat.total_bet
-        || air.input.post_current_turn != post_turn
+        || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
             "bet: AIR input does not match canonical table fields".into(),
@@ -429,7 +446,7 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
         tables.post.round_state,
         tables.pre.pot,
         tables.post.pot,
-        post_seat.bet,
+        action_post_bet,
         pre_seat.bet,
         pre_seat.stack,
         post_seat.stack,

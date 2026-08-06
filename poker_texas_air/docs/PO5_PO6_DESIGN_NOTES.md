@@ -54,18 +54,25 @@ native crypto 验证即可。
 - mid-round 路径约束 actor 的 stack/bet/total_bet、pot/round 不变和下一行动座位。
 - heads-up 最后一个 `check` 已支持 terminal end-of-round：可收池、清零 seat bets、推进
   round、令 `current_turn = None`，并用 sentinel trace encoding 与 canonical post-state 对齐。
+- last-opponent `fold` / `fold_with_proof` 已支持 clean terminal settlement：先收集全部 live
+  `seat.bet`，再约束 `pre_pot + collected_bets = gross_pot`、`award + rake = gross_pot`、
+  `pre_winner_stack + award = post_winner_stack`，最后 reset 到 `WAITING`。生产 verifier 仍从
+  canonical VM replay 派生 winner 与完整 pre/post table；`fold_with_proof` 同时保留 native
+  DLEq request/receipt digest 和调用上下文绑定。
 - terminal showdown reveal 的 settlement + reset 双 version bump 已有专门允许路径。
 
 ### 仍 fail-closed
 
-- last-opponent `fold` / `fold_with_proof` 触发的结算；
-- terminal `call` / `raise` / `bet` 的通用收池与 round advance；
-- side pot、winner distribution、完整 hand evaluator 与 rake settlement 的 AIR；
+- terminal fold reset 同时包含 pending addon 或 `want_leave` 资金流的复合路径；
+- showdown side pot、多人 winner distribution、完整 hand evaluator 与 rake settlement AIR；
 - `kick_player` 在 WAITING 状态触发 nested reset/multi-version transition 的复合路径。
 
-这些分支不能只增加一个布尔列完成：VM transition 会同时扫描多个 seat、收集 bets、推进
-round/reveal phase，甚至执行 settlement/reset。正确方向是把 seat update、bet collection、
-round advance 和 settlement 拆成可组合的多 AIR，或继续在现有单步 AIR 入口 fail-closed。
+terminal `call` / `raise` / `bet` 的 clean round completion 已支持：native replay 先重建动作后
+的下注状态，再约束所有 live `seat.bet` 收池、`pre_pot + collected_bets = post_pot`、清零
+seat bets 和下一 reveal phase。仍未覆盖的上述分支不能只增加一个布尔列完成：VM transition
+会同时扫描多个 seat、推进 round/reveal phase，甚至执行 settlement/reset。正确方向是把 seat
+update、bet collection、round advance 和 settlement 拆成可组合的多 AIR，或继续在现有单步
+AIR 入口 fail-closed。
 
 ## 其他仍存在的证明缺口
 
@@ -83,4 +90,4 @@ round advance 和 settlement 拆成可组合的多 AIR，或继续在现有单�
 
 当前主线适合“不追求链上压缩”的目标：host-native crypto/Stwo 验证性能最高，digest 与
 canonical context 防止 proof、receipt、table 或 call scope 被替换。它提供可信 host acceptance，
-但不声称递归压缩；上述 terminal settlement 与产品功能缺口仍需后续独立设计。
+但不声称递归压缩；上述复合 reset、通用 round completion 与产品功能缺口仍需后续独立设计。

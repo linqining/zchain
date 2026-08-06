@@ -14,6 +14,9 @@ use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 use poker_protocol::crypto::types::ECPoint;
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
+use poker_texas_air::airs::actions::end_betting_round::BettingOutcome;
+use poker_texas_air::airs::actions::end_without_showdown::{EndWithoutShowdownInput, FoldOutcome};
+use poker_texas_air::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use poker_texas_air::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use poker_texas_air::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use poker_texas_air::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
@@ -237,7 +240,9 @@ fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_table
         pre_seat_bet: 50,
         pre_seat_stack: 1_000,
         pre_seat_total_bet: 50,
-        post_current_turn: 1,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 1,
+        },
     };
     let mut public_inputs = TexasPublicInputs::from_tables(
         &pre,
@@ -304,6 +309,108 @@ fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_table
 }
 
 #[test]
+fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
+    let mut pre = TexasPokerTable::new(
+        ObjectID::new([0xCF; 20], 17),
+        "canonical-terminal-fold".to_owned(),
+        EMPTY_PLAYER,
+        6,
+        50,
+        100,
+    );
+    pre.round_state = ROUND_PREFLOP;
+    pre.betting_round = Some(BettingRound::new(100, 100));
+    pre.current_turn = Some(0);
+    pre.pot = 200;
+    pre.hand_id = 6;
+    pre.call_seq = 9;
+    for i in 0..2 {
+        pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        pre.seats[i].stack = 1_000;
+    }
+    pre.seats[0].bet = 25;
+    pre.seats[0].total_bet = 25;
+    pre.seats[1].bet = 75;
+    pre.seats[1].total_bet = 75;
+
+    let mut post = pre.clone();
+    state_machine::apply_fold(&mut post, 0, &mut vec![]).unwrap();
+    post.call_seq = pre.call_seq + 1;
+    assert_eq!(post.seats[1].stack, 1_300);
+
+    // The arithmetic is self-consistent, but seat 2 is not the canonical
+    // last player standing. The low-level AIR intentionally cannot discover
+    // that from a complete table it does not carry.
+    let fake_input = FoldInput {
+        seat_index: 0,
+        outcome: FoldOutcome::EndWithoutShowdown(EndWithoutShowdownInput {
+            winner_seat: 2,
+            collected_bets: 100,
+            gross_pot: 300,
+            rake: 0,
+            award: 300,
+            pre_winner_stack: 1_000,
+            post_winner_stack: 1_300,
+        }),
+    };
+    let mut public_inputs = TexasPublicInputs::from_tables(
+        &pre,
+        &post,
+        MethodKind::Fold,
+        pre.id.creation_nonce,
+        post.hand_id,
+        post.call_seq,
+    )
+    .expect("canonical public inputs should be generated");
+    let fake_row = FoldRow::active(
+        &fake_input,
+        state_root_to_air_limbs(public_inputs.pre_state_root),
+        state_root_to_air_limbs(public_inputs.post_state_root),
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        pre.version,
+        post.version,
+        pre.round_state,
+        post.round_state,
+        pre.pot,
+        post.pot,
+    );
+    public_inputs
+        .bind_expected_trace_row(&fake_row.to_vec())
+        .expect("fake terminal row should bind for the low-level proof");
+    let trace = gen_method_trace(
+        FoldAir::num_columns(),
+        &fake_row.to_vec(),
+        &FoldRow::padding().to_vec(),
+    )
+    .expect("fake terminal trace should generate");
+    let air = FoldAir {
+        log_size: trace.log_size,
+        input: fake_input,
+        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
+        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
+        table_id: public_inputs.table_id,
+        hand_id: public_inputs.hand_id,
+        call_seq: public_inputs.call_seq,
+        pre_version: public_inputs.pre_version,
+        post_version: public_inputs.post_version,
+    };
+    let proof = prove_method(
+        &trace,
+        air.clone(),
+        FoldAir::num_columns(),
+        public_inputs.clone(),
+    )
+    .expect("the fake winner row is intentionally AIR-consistent");
+
+    assert!(
+        verify_method_against(proof, air, &public_inputs).is_err(),
+        "production verification must derive the winner seat from canonical VM replay"
+    );
+}
+
+#[test]
 fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
     let (pre, post) = make_canonical_call_tables();
     let input = CallInput {
@@ -313,7 +420,9 @@ fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
         pre_seat_bet: 50,
         pre_seat_stack: 1_000,
         pre_seat_total_bet: 50,
-        post_current_turn: 1,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 1,
+        },
     };
 
     // The canonical table id nonce is 7. Build a self-consistent proof statement

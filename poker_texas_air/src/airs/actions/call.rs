@@ -13,8 +13,9 @@
 //!    - `seat.bet += call_amount`
 //!    - `seat.total_bet += call_amount`
 //!    - 若 `seat.stack == 0` 则 `seat.all_in = true`
-//!    - mid-round 时 `pot` 不变（下注暂存在 `seat.bet`），`version += 1`
-//!    - `post.current_turn = Some(next_seat)`；收池/推进轮次/结算分支不属于本 AIR
+//!    - mid-round 时 `pot` 不变（下注暂存在 `seat.bet`）
+//!    - round completion 时收集全部 live bets 并推进到下一 reveal phase
+//!    - `version += 1`
 //!
 //! ## AIR 列布局
 //!
@@ -23,10 +24,12 @@
 //!   `OUTPUT_SEAT_STACK_BASE[4]`, `OUTPUT_SEAT_BET_BASE[4]`,
 //!   `OUTPUT_ALL_IN`, `OUTPUT_ACTED`, `INPUT_PRE_ROUND_STATE_Q`,
 //!   `INPUT_CURRENT_TURN`, `PRE_SEAT_BET_BASE[4]`
+//! - shared end-betting-round columns 7 个（mid-round 时全零）
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
+use crate::airs::actions::end_betting_round::{self, BettingOutcome, EndBettingRoundRow};
 use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
@@ -63,7 +66,7 @@ pub mod cols {
     /// `OUTPUT_CURRENT_TURN` — mid-round 推进后的下一行动座位。
     pub const OUTPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 33;
     /// `call` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 34;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 34 + super::end_betting_round::NUM_COLUMNS;
 }
 
 /// `call` 输入参数。
@@ -81,8 +84,8 @@ pub struct CallInput {
     pub pre_seat_stack: u64,
     /// 调用前 seat.total_bet（verifier-trusted）。
     pub pre_seat_total_bet: u64,
-    /// mid-round 推进后的下一行动座位；`None` 分支在生产入口 fail-closed。
-    pub post_current_turn: u8,
+    /// Canonical mid-round or bet-collection branch derived by native replay.
+    pub outcome: BettingOutcome,
 }
 
 /// `call` AIR 公开输入。
@@ -251,15 +254,21 @@ impl FrameworkEval for CallAir {
         // 约束 3：output_acted == 1
         eval.add_constraint(is_active.clone() * (output_acted - one));
 
-        // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
-        eval.add_constraint(common.round_state_unchanged());
+        // 约束 4（审计共性）：必须处于下注轮（Gap 1）。
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
 
-        // 约束 5（阶段 3 soundness 升级：全 4-limb 资金守恒，对齐 raise.rs）：
-        // VM 在 mid-round 不收池；筹码保留在 seat.bet，pot 必须不变。
-        for __c in common.pot_unchanged_4limb() {
-            eval.add_constraint(__c);
+        match &self.input.outcome {
+            BettingOutcome::MidRound { .. } => {
+                eval.add_constraint(common.round_state_unchanged());
+                for constraint in common.pot_unchanged_4limb() {
+                    eval.add_constraint(constraint);
+                }
+                end_betting_round::evaluate(&mut eval, &common, None);
+            }
+            BettingOutcome::EndBettingRound(completion) => {
+                end_betting_round::evaluate(&mut eval, &common, Some(completion));
+            }
         }
         // stack/bet/total_bet 已绑定到 verifier 端 checked u64 运算的逐 limb 常量；
         // 不使用无 carry 的逐 limb delta，因此跨 16-bit limb 的进位保持正确。
@@ -270,7 +279,8 @@ impl FrameworkEval for CallAir {
         ))
         .into();
         eval.add_constraint(is_active.clone() * (output_all_in - expected_all_in));
-        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.outcome.post_current_turn())).into();
         eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
         eval
     }
@@ -307,6 +317,8 @@ pub struct CallRow {
     pub pre_seat_total_bet: [M31; 4],
     /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
     pub output_current_turn: M31,
+    /// Shared round-completion columns; zero for mid-round calls.
+    pub round_completion: EndBettingRoundRow,
 }
 
 impl CallRow {
@@ -373,7 +385,13 @@ impl CallRow {
             pre_seat_stack: u64_to_m31_limbs(pre_seat_stack),
             output_seat_total_bet: u64_to_m31_limbs(post_seat_total_bet),
             pre_seat_total_bet: u64_to_m31_limbs(pre_seat_total_bet),
-            output_current_turn: u8_to_m31(input.post_current_turn),
+            output_current_turn: u8_to_m31(input.outcome.post_current_turn()),
+            round_completion: match &input.outcome {
+                BettingOutcome::MidRound { .. } => EndBettingRoundRow::zero(),
+                BettingOutcome::EndBettingRound(completion) => {
+                    EndBettingRoundRow::active(completion, pre_pot, post_pot)
+                }
+            },
         }
     }
 
@@ -395,6 +413,7 @@ impl CallRow {
             output_seat_total_bet: [ZERO; 4],
             pre_seat_total_bet: [ZERO; 4],
             output_current_turn: ZERO,
+            round_completion: EndBettingRoundRow::zero(),
         }
     }
 
@@ -415,6 +434,7 @@ impl CallRow {
         v.extend_from_slice(&self.output_seat_total_bet);
         v.extend_from_slice(&self.pre_seat_total_bet);
         v.push(self.output_current_turn);
+        self.round_completion.append_to(&mut v);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

@@ -11,6 +11,8 @@ use stwo::core::fields::m31::M31;
 
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
 use poker_texas_air::airs::actions::check::{CheckAir, CheckInput, CheckRow};
+use poker_texas_air::airs::actions::end_betting_round::{BettingOutcome, EndBettingRoundInput};
+use poker_texas_air::airs::actions::end_without_showdown::{EndWithoutShowdownInput, FoldOutcome};
 use poker_texas_air::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use poker_texas_air::airs::actions::raise::RaiseAir;
 use poker_texas_air::airs::common::ZERO;
@@ -81,7 +83,9 @@ fn auto_fold_timeout_trace_proves(
 fn test_e2e_fold_prove_verify() {
     let input = FoldInput {
         seat_index: 3,
-        post_current_turn: 4,
+        outcome: FoldOutcome::MidRound {
+            post_current_turn: 4,
+        },
     };
     let row = FoldRow::active(
         &input,
@@ -94,6 +98,8 @@ fn test_e2e_fold_prove_verify() {
         1,  // post_version
         4,  // pre_round_state (PREFLOP)
         4,  // post_round_state (PREFLOP)
+        0,  // pre_pot
+        0,  // post_pot
     );
     let trace = gen_method_trace(
         FoldAir::num_columns(),
@@ -124,6 +130,85 @@ fn test_e2e_fold_prove_verify() {
     verify_method(proof).expect("verify 失败");
 }
 
+fn terminal_fold_trace_proves(settlement: EndWithoutShowdownInput) -> bool {
+    let input = FoldInput {
+        seat_index: 0,
+        outcome: FoldOutcome::EndWithoutShowdown(settlement),
+    };
+    let row = FoldRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        1,
+        0,
+        1,
+        2,
+        0,
+        200,
+        0,
+    );
+    let trace = gen_method_trace(
+        FoldAir::num_columns(),
+        &row.to_vec(),
+        &FoldRow::padding().to_vec(),
+    )
+    .expect("terminal fold trace should generate");
+    let air = FoldAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 1,
+        pre_version: 0,
+        post_version: 1,
+    };
+    prove_method(
+        &trace,
+        air,
+        FoldAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Fold, 42, 0, 1),
+    )
+    .is_ok()
+}
+
+fn valid_terminal_settlement() -> EndWithoutShowdownInput {
+    EndWithoutShowdownInput {
+        winner_seat: 1,
+        collected_bets: 100,
+        gross_pot: 300,
+        rake: 30,
+        award: 270,
+        pre_winner_stack: 1_000,
+        post_winner_stack: 1_270,
+    }
+}
+
+#[test]
+fn terminal_fold_settlement_constrains_all_money_equalities() {
+    let settlement = valid_terminal_settlement();
+    assert!(terminal_fold_trace_proves(settlement.clone()));
+
+    let mut bad = settlement.clone();
+    bad.collected_bets += 1;
+    assert!(!terminal_fold_trace_proves(bad));
+
+    let mut bad = settlement.clone();
+    bad.rake += 1;
+    assert!(!terminal_fold_trace_proves(bad));
+
+    let mut bad = settlement.clone();
+    bad.award -= 1;
+    assert!(!terminal_fold_trace_proves(bad));
+
+    let mut bad = settlement;
+    bad.post_winner_stack -= 1;
+    assert!(!terminal_fold_trace_proves(bad));
+}
+
 /// Soundness: 篡改 fold 的 `seat_index` 公开输入后，verify 应失败。
 ///
 /// 流程：用正确 AIR 生成 proof → 篡改 proof.air.input.seat_index → verify 应失败。
@@ -131,9 +216,11 @@ fn test_e2e_fold_prove_verify() {
 fn test_soundness_fold_tampered_seat() {
     let input = FoldInput {
         seat_index: 3,
-        post_current_turn: 4,
+        outcome: FoldOutcome::MidRound {
+            post_current_turn: 4,
+        },
     };
-    let row = FoldRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1, 4, 4);
+    let row = FoldRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1, 4, 4, 0, 0);
     let trace = gen_method_trace(
         FoldAir::num_columns(),
         &row.to_vec(),
@@ -165,7 +252,9 @@ fn test_soundness_fold_tampered_seat() {
     proof.air = FoldAir {
         input: FoldInput {
             seat_index: 5,
-            post_current_turn: 4,
+            outcome: FoldOutcome::MidRound {
+                post_current_turn: 4,
+            },
         }, // 篡改！
         ..proof.air.clone()
     };
@@ -186,7 +275,9 @@ fn test_soundness_fold_tampered_seat() {
 fn test_soundness_fold_version_not_incremented() {
     let input = FoldInput {
         seat_index: 3,
-        post_current_turn: 4,
+        outcome: FoldOutcome::MidRound {
+            post_current_turn: 4,
+        },
     };
     let row = FoldRow::active(
         &input,
@@ -199,6 +290,8 @@ fn test_soundness_fold_version_not_incremented() {
         0, // post_version（未递增！应为 1）
         4,
         4, // round_state 不变
+        0,
+        0,
     );
     let trace = gen_method_trace(
         FoldAir::num_columns(),
@@ -237,7 +330,9 @@ fn test_soundness_fold_pot_changed() {
     use poker_texas_air::airs::common::{COL_POST_POT_BASE, COL_PRE_POT_BASE};
     let input = FoldInput {
         seat_index: 3,
-        post_current_turn: 4,
+        outcome: FoldOutcome::MidRound {
+            post_current_turn: 4,
+        },
     };
     let row = FoldRow::active(
         &input,
@@ -250,6 +345,8 @@ fn test_soundness_fold_pot_changed() {
         1, // version 正确递增
         4,
         4, // round_state 不变
+        0,
+        0,
     );
     let mut trace_vec = row.to_vec();
     // 篡改：post_pot limb0 = 100（fold 不应改变 pot，pre=0）。
@@ -293,10 +390,9 @@ fn test_e2e_check_prove_verify() {
         seat_index: 1,
         current_bet: 20,
         seat_bet: 20, // 守卫：seat.bet == current_bet
-        post_current_turn: 2,
-        completes_betting_round: false,
-        post_round_state: 2,
-        post_pot: 0,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 2,
+        },
     };
     let row = CheckRow::active(
         &input,
@@ -350,10 +446,9 @@ fn test_soundness_check_tampered_bet() {
         seat_index: 1,
         current_bet: 20,
         seat_bet: 20,
-        post_current_turn: 2,
-        completes_betting_round: false,
-        post_round_state: 2,
-        post_pot: 0,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 2,
+        },
     };
     let row = CheckRow::active(
         &input,
@@ -424,7 +519,9 @@ fn test_e2e_call_prove_verify() {
         pre_seat_bet: 0,
         pre_seat_stack: 100,
         pre_seat_total_bet: 0,
-        post_current_turn: 3,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 3,
+        },
     };
     let row = CallRow::active(
         &input,
@@ -488,7 +585,9 @@ fn test_soundness_call_tampered_amount() {
         pre_seat_bet: 0,
         pre_seat_stack: 100,
         pre_seat_total_bet: 0,
-        post_current_turn: 3,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 3,
+        },
     };
     let row = CallRow::active(
         &input,
@@ -555,6 +654,139 @@ fn test_soundness_call_tampered_amount() {
     );
 }
 
+/// Terminal call collects all live bets and advances to the next reveal phase.
+#[test]
+fn test_e2e_terminal_call_collects_bets() {
+    let input = CallInput {
+        seat_index: 1,
+        call_amount: 50,
+        pre_current_bet: 100,
+        pre_seat_bet: 50,
+        pre_seat_stack: 1_000,
+        pre_seat_total_bet: 50,
+        outcome: BettingOutcome::EndBettingRound(EndBettingRoundInput {
+            collected_bets: 200,
+            post_round_state: 5,
+        }),
+    };
+    let row = CallRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+        4,
+        5,
+        25,
+        225,
+        950,
+        100, // action-intermediate bet before collection
+        false,
+        50,
+        1_000,
+        100,
+        50,
+    );
+    let trace = gen_method_trace(
+        CallAir::num_columns(),
+        &row.to_vec(),
+        &CallRow::padding().to_vec(),
+    )
+    .expect("terminal call trace should generate");
+    let air = CallAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 3,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let proof = prove_method(
+        &trace,
+        air,
+        CallAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Call, 42, 0, 3),
+    )
+    .expect("terminal call should prove");
+    verify_method(proof).expect("terminal call should verify");
+}
+
+/// Changing the collected bet total breaks both its row binding and pot delta.
+#[test]
+fn test_soundness_terminal_call_rejects_tampered_collection() {
+    let input = CallInput {
+        seat_index: 1,
+        call_amount: 50,
+        pre_current_bet: 100,
+        pre_seat_bet: 50,
+        pre_seat_stack: 1_000,
+        pre_seat_total_bet: 50,
+        outcome: BettingOutcome::EndBettingRound(EndBettingRoundInput {
+            collected_bets: 200,
+            post_round_state: 5,
+        }),
+    };
+    let row = CallRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+        4,
+        5,
+        25,
+        225,
+        950,
+        100,
+        false,
+        50,
+        1_000,
+        100,
+        50,
+    );
+    let trace = gen_method_trace(
+        CallAir::num_columns(),
+        &row.to_vec(),
+        &CallRow::padding().to_vec(),
+    )
+    .expect("terminal call trace should generate");
+    let air = CallAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 3,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let mut proof = prove_method(
+        &trace,
+        air,
+        CallAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Call, 42, 0, 3),
+    )
+    .expect("honest terminal call should prove");
+    let BettingOutcome::EndBettingRound(completion) = &mut proof.air.input.outcome else {
+        panic!("test input must be terminal");
+    };
+    completion.collected_bets = 199;
+    assert!(
+        verify_method(proof).is_err(),
+        "tampered terminal collection must fail verification"
+    );
+}
+
 // ========== raise AIR ==========
 
 /// E2E: raise → trace → prove → verify（happy path）。
@@ -570,7 +802,9 @@ fn test_e2e_raise_prove_verify() {
         pre_seat_stack: 80,
         pre_seat_bet: 20,
         pre_seat_total_bet: 20,
-        post_current_turn: 5,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 5,
+        },
     };
     let row = RaiseRow::active(
         &input,
@@ -637,7 +871,9 @@ fn test_soundness_raise_tampered_raise_to() {
         pre_seat_stack: 80,
         pre_seat_bet: 20,
         pre_seat_total_bet: 20,
-        post_current_turn: 5,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 5,
+        },
     };
     let row = RaiseRow::active(
         &input,
@@ -702,6 +938,143 @@ fn test_soundness_raise_tampered_raise_to() {
         result.is_err(),
         "篡改 raise_to 后 verify 应失败，但成功了 — soundness 漏洞！"
     );
+}
+
+/// Terminal raise must bind the action delta to the shared bet collection.
+#[test]
+fn test_e2e_terminal_raise_collects_bets() {
+    use poker_texas_air::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
+
+    let input = RaiseInput {
+        seat_index: 1,
+        raise_to: 150,
+        min_raise: 100,
+        pre_current_bet: 100,
+        pre_seat_stack: 100,
+        pre_seat_bet: 50,
+        pre_seat_total_bet: 50,
+        outcome: BettingOutcome::EndBettingRound(EndBettingRoundInput {
+            collected_bets: 250,
+            post_round_state: 5,
+        }),
+    };
+    let row = RaiseRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        14,
+        0,
+        1,
+        4,
+        5,
+        25,
+        275,
+        100,
+        50,
+        50,
+        0,
+        150,
+        150,
+        150,
+        100,
+        true,
+    );
+    let trace = gen_method_trace(
+        RaiseAir::num_columns(),
+        &row.to_vec(),
+        &RaiseRow::padding().to_vec(),
+    )
+    .expect("terminal raise trace should generate");
+    let proof = prove_method(
+        &trace,
+        RaiseAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 14,
+            pre_version: 0,
+            post_version: 1,
+        },
+        RaiseAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Raise, 42, 0, 14),
+    )
+    .expect("terminal raise should prove");
+    verify_method(proof).expect("terminal raise should verify");
+}
+
+/// A terminal raise cannot replace the collected amount in its trace.
+#[test]
+fn test_soundness_terminal_raise_rejects_tampered_collection() {
+    use poker_texas_air::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
+
+    let input = RaiseInput {
+        seat_index: 1,
+        raise_to: 150,
+        min_raise: 100,
+        pre_current_bet: 100,
+        pre_seat_stack: 100,
+        pre_seat_bet: 50,
+        pre_seat_total_bet: 50,
+        outcome: BettingOutcome::EndBettingRound(EndBettingRoundInput {
+            collected_bets: 250,
+            post_round_state: 5,
+        }),
+    };
+    let row = RaiseRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        15,
+        0,
+        1,
+        4,
+        5,
+        25,
+        275,
+        100,
+        50,
+        50,
+        0,
+        150,
+        150,
+        150,
+        100,
+        true,
+    );
+    let trace = gen_method_trace(
+        RaiseAir::num_columns(),
+        &row.to_vec(),
+        &RaiseRow::padding().to_vec(),
+    )
+    .expect("terminal raise trace should generate");
+    let mut proof = prove_method(
+        &trace,
+        RaiseAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 15,
+            pre_version: 0,
+            post_version: 1,
+        },
+        RaiseAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Raise, 42, 0, 15),
+    )
+    .expect("terminal raise should prove");
+    if let BettingOutcome::EndBettingRound(completion) = &mut proof.air.input.outcome {
+        completion.collected_bets = 249;
+    }
+    assert!(verify_method(proof).is_err());
 }
 
 // ========== auto_fold AIR ==========
@@ -1172,35 +1545,53 @@ fn test_soundness_kick_player_tampered_refund() {
 #[test]
 fn test_action_air_column_consistency() {
     use poker_texas_air::airs::actions::{
-        auto_fold, bet, call, check, fold, force_fold, kick_player, raise,
+        auto_fold, bet, call, check, end_betting_round, end_without_showdown, fold, force_fold,
+        kick_player, raise,
     };
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
 
-    // fold: 通用 + 5 业务（含 Gap 1、pre/post current_turn）
-    assert_eq!(fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
+    // fold: 通用 + 5 基础业务 + 34 终局结算业务。
+    assert_eq!(end_without_showdown::NUM_COLUMNS, 34);
+    assert_eq!(
+        fold::cols::NUM_COLUMNS,
+        COMMON_NUM_COLUMNS + 5 + end_without_showdown::NUM_COLUMNS
+    );
     assert_eq!(FoldAir::num_columns(), fold::cols::NUM_COLUMNS);
 
-    // check: 通用 + 9 业务（含 Gap 1、pre/post current_turn）
-    assert_eq!(check::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 9);
+    // check: 通用 + 9 基础业务 + 7 收池/推进轮次业务。
+    assert_eq!(end_betting_round::NUM_COLUMNS, 7);
+    assert_eq!(
+        check::cols::NUM_COLUMNS,
+        COMMON_NUM_COLUMNS + 9 + end_betting_round::NUM_COLUMNS
+    );
     assert_eq!(CheckAir::num_columns(), check::cols::NUM_COLUMNS);
 
     // call: 通用 + 34 业务（阶段 3 soundness 升级：全 4-limb delta）
     // 业务列：seat_index/current_turn(2) + call_amount/stack/bet(12) + all_in/acted(2)
     // + pre_round_state_q(1) + pre_seat_bet/stack(8) + pre/post_total_bet(8)
     // + post_current_turn(1) = 34
-    assert_eq!(call::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 34);
+    assert_eq!(
+        call::cols::NUM_COLUMNS,
+        COMMON_NUM_COLUMNS + 34 + end_betting_round::NUM_COLUMNS
+    );
     assert_eq!(CallAir::num_columns(), call::cols::NUM_COLUMNS);
 
-    // raise: 通用 + 47 业务（含 Gap 1、pre/post current_turn）
+    // raise: 通用 + 47 业务（含 Gap 1、pre/post current_turn）+ 7 收池列
     // 业务列：seat_index/current_turn/seat_occupied(3) + raise_to(4)
     // + pre_seat_stack/bet/total_bet(12) + call_delta(4)
     // + post_seat_stack/bet/total_bet(12) + post_current_bet/min_raise(8)
     // + output_all_in/acted(2) + pre_round_state_q/post_current_turn(2) = 47
-    assert_eq!(raise::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 47);
+    assert_eq!(
+        raise::cols::NUM_COLUMNS,
+        COMMON_NUM_COLUMNS + 47 + end_betting_round::NUM_COLUMNS
+    );
     assert_eq!(RaiseAir::num_columns(), raise::cols::NUM_COLUMNS);
 
-    // bet: 通用 + 34 业务（含 Gap 1、pre/post current_turn）
-    assert_eq!(bet::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 34);
+    // bet: 通用 + 34 业务（含 Gap 1、pre/post current_turn）+ 7 收池列
+    assert_eq!(
+        bet::cols::NUM_COLUMNS,
+        COMMON_NUM_COLUMNS + 34 + end_betting_round::NUM_COLUMNS
+    );
 
     // auto_fold: 通用 + 42 业务（含完整 timeout / time-bank 64-bit 约束）。
     assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 42);
@@ -1244,7 +1635,9 @@ fn test_e2e_bet_prove_verify() {
         pre_seat_bet: 0,
         pre_seat_stack: 100,
         pre_seat_total_bet: 0,
-        post_current_turn: 2,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 2,
+        },
     };
     let row = BetRow::active(
         &input,
@@ -1308,7 +1701,9 @@ fn test_soundness_bet_tampered_amount() {
         pre_seat_bet: 0,
         pre_seat_stack: 100,
         pre_seat_total_bet: 0,
-        post_current_turn: 2,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 2,
+        },
     };
     let row = BetRow::active(
         &input,
@@ -1385,7 +1780,9 @@ fn test_soundness_bet_tampered_seat() {
         pre_seat_bet: 0,
         pre_seat_stack: 100,
         pre_seat_total_bet: 0,
-        post_current_turn: 2,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 2,
+        },
     };
     let row = BetRow::active(
         &input,
@@ -1447,4 +1844,68 @@ fn test_soundness_bet_tampered_seat() {
         result.is_err(),
         "篡改 seat_index 后 verify 应失败，但成功了 — soundness 漏洞！"
     );
+}
+
+/// Terminal bet uses the same collection columns as call/check.
+#[test]
+fn test_e2e_terminal_bet_collects_bets() {
+    use poker_texas_air::airs::actions::bet::{BetAir, BetInput, BetRow};
+
+    let input = BetInput {
+        seat_index: 0,
+        amount: 100,
+        pre_current_bet: 0,
+        pre_min_raise: 100,
+        pre_seat_bet: 0,
+        pre_seat_stack: 100,
+        pre_seat_total_bet: 0,
+        outcome: BettingOutcome::EndBettingRound(EndBettingRoundInput {
+            collected_bets: 100,
+            post_round_state: 6,
+        }),
+    };
+    let row = BetRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        16,
+        0,
+        1,
+        5,
+        6,
+        300,
+        400,
+        100,
+        0,
+        100,
+        0,
+        0,
+        100,
+    );
+    let trace = gen_method_trace(
+        BetAir::num_columns(),
+        &row.to_vec(),
+        &BetRow::padding().to_vec(),
+    )
+    .expect("terminal bet trace should generate");
+    let proof = prove_method(
+        &trace,
+        BetAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 16,
+            pre_version: 0,
+            post_version: 1,
+        },
+        BetAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Bet, 42, 0, 16),
+    )
+    .expect("terminal bet should prove");
+    verify_method(proof).expect("terminal bet should verify");
 }

@@ -1,11 +1,9 @@
-//! `fold_with_proof` AIR — mid-round fold plus encrypted-deck layer removal.
+//! `fold_with_proof` AIR — fold plus encrypted-deck layer removal.
 //!
 //! The native VM verifies a `LeaveKind` DLEq proof, removes the player's public
 //! key from the aggregate key, replaces the encrypted deck, marks the acting
-//! seat folded, and advances to the next active seat. This AIR deliberately
-//! covers only the single-version, same-round path. A last-opponent fold invokes
-//! settlement/reset logic and remains fail-closed until the settlement AIR is
-//! available.
+//! seat folded, and either advances to the next active seat or, when only one
+//! player remains, proves the shared end-without-showdown settlement/reset.
 //!
 //! Cryptography follows the repository's host-native trust model: the verifier
 //! reconstructs the exact DLEq request from canonical dispatch state, executes
@@ -15,8 +13,10 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
+use crate::airs::actions::end_without_showdown::{self, EndWithoutShowdownRow, FoldOutcome};
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, bool_to_m31, u8_to_m31,
+    u64_to_m31_limbs,
 };
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{DIGEST_LIMBS, PrecompileAirBinding};
@@ -48,16 +48,18 @@ pub mod cols {
     /// Full verifier receipt digest columns.
     pub const RECEIPT_DIGEST_BASE: usize = REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// Total trace width.
-    pub const NUM_COLUMNS: usize = RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
+    pub const NUM_COLUMNS: usize = RECEIPT_DIGEST_BASE
+        + super::DIGEST_LIMBS
+        + crate::airs::actions::end_without_showdown::NUM_COLUMNS;
 }
 
-/// Verifier-owned inputs for one non-terminal `fold_with_proof` transition.
+/// Verifier-owned inputs for one `fold_with_proof` transition.
 #[derive(Debug, Clone)]
 pub struct FoldWithProofInput {
     /// Acting seat.
     pub seat_index: u8,
-    /// Next active seat after the fold.
-    pub post_current_turn: u8,
+    /// Native-replayed mid-round or terminal settlement branch.
+    pub outcome: FoldOutcome,
     /// Commitment to the exact pre-dispatch encrypted deck.
     pub old_deck_commitment: u64,
     /// Commitment to the exact post-dispatch encrypted deck.
@@ -127,17 +129,12 @@ impl FrameworkEval for FoldWithProofAir {
         eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat.clone()));
         eval.add_constraint(is_active.clone() * (input_current_turn - expected_seat));
 
-        let one: E::F = M31::from(1u32).into();
-        eval.add_constraint(is_active.clone() * (output_folded - one));
-
-        eval.add_constraint(common.round_state_unchanged());
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
-        for constraint in common.pot_unchanged_4limb() {
-            eval.add_constraint(constraint);
-        }
-
-        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
+        let expected_folded: E::F = bool_to_m31(self.input.outcome.output_folded()).into();
+        eval.add_constraint(is_active.clone() * (output_folded - expected_folded));
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.outcome.post_current_turn())).into();
         eval.add_constraint(is_active.clone() * (output_current_turn - expected_post_turn));
 
         let expected_old = u64_to_m31_limbs(self.input.old_deck_commitment);
@@ -164,6 +161,19 @@ impl FrameworkEval for FoldWithProofAir {
             eval.add_constraint(
                 is_active.clone() * (receipt_digest[limb].clone() - expected_receipt),
             );
+        }
+
+        match &self.input.outcome {
+            FoldOutcome::MidRound { .. } => {
+                eval.add_constraint(common.round_state_unchanged());
+                for constraint in common.pot_unchanged_4limb() {
+                    eval.add_constraint(constraint);
+                }
+                end_without_showdown::evaluate(&mut eval, &common, None);
+            }
+            FoldOutcome::EndWithoutShowdown(settlement) => {
+                end_without_showdown::evaluate(&mut eval, &common, Some(settlement));
+            }
         }
 
         eval
@@ -197,6 +207,8 @@ pub struct FoldWithProofRow {
     pub request_digest: [M31; DIGEST_LIMBS],
     /// Full verifier receipt digest.
     pub receipt_digest: [M31; DIGEST_LIMBS],
+    /// Shared terminal settlement columns; zero for mid-round folds.
+    pub settlement: EndWithoutShowdownRow,
 }
 
 impl FoldWithProofRow {
@@ -236,16 +248,22 @@ impl FoldWithProofRow {
                 0,
             ),
             input_seat_index: u8_to_m31(input.seat_index),
-            output_folded: M31::from(1u32),
+            output_folded: bool_to_m31(input.outcome.output_folded()),
             input_pre_round_state_q: round * round,
             input_current_turn: u8_to_m31(input.seat_index),
-            output_current_turn: u8_to_m31(input.post_current_turn),
+            output_current_turn: u8_to_m31(input.outcome.post_current_turn()),
             old_deck_commitment: u64_to_m31_limbs(input.old_deck_commitment),
             new_deck_commitment: u64_to_m31_limbs(input.new_deck_commitment),
             precompile_id: u8_to_m31(input.precompile.precompile_id),
             precompile_abi_version: u8_to_m31(input.precompile.abi_version),
             request_digest: input.precompile.request_digest,
             receipt_digest: input.precompile.receipt_digest,
+            settlement: match &input.outcome {
+                FoldOutcome::MidRound { .. } => EndWithoutShowdownRow::zero(),
+                FoldOutcome::EndWithoutShowdown(settlement) => {
+                    EndWithoutShowdownRow::active(settlement)
+                }
+            },
         }
     }
 
@@ -265,6 +283,7 @@ impl FoldWithProofRow {
             precompile_abi_version: ZERO,
             request_digest: [ZERO; DIGEST_LIMBS],
             receipt_digest: [ZERO; DIGEST_LIMBS],
+            settlement: EndWithoutShowdownRow::zero(),
         }
     }
 
@@ -283,6 +302,7 @@ impl FoldWithProofRow {
         values.push(self.precompile_abi_version);
         values.extend_from_slice(&self.request_digest);
         values.extend_from_slice(&self.receipt_digest);
+        self.settlement.append_to(&mut values);
         debug_assert_eq!(values.len(), cols::NUM_COLUMNS);
         values
     }

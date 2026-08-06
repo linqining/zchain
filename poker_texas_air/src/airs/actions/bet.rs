@@ -13,19 +13,22 @@
 //! 3. `amount > 0`
 //! 4. `current_bet == seat.bet`（无已有下注，否则应使用 call/raise）
 //! 5. 状态变更（复用 raise）：`seat.stack -= amount`, `seat.bet += amount`,
-//!    `seat.total_bet += amount`；mid-round 时 `pot` 不变
+//!    `seat.total_bet += amount`；mid-round 时 `pot` 不变，round completion
+//!    时收集全部 live bets 并推进到下一 reveal phase
 //! 6. 玩家标记 `acted_this_round = true`
-//! 7. `post.current_turn = Some(next_seat)`；收池/推进/结算分支不属于本 AIR
+//! 7. mid-round 时推进到下一行动座位
 //!
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
 //! - 业务列 11 个：`INPUT_SEAT_INDEX`, `INPUT_AMOUNT_BASE[4]`,
 //!   `OUTPUT_SEAT_BET_BASE[4]`, `OUTPUT_ACTED`
+//! - shared end-betting-round columns 7 个（mid-round 时全零）
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
+use crate::airs::actions::end_betting_round::{self, BettingOutcome, EndBettingRoundRow};
 use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31, u64_to_m31_limbs,
 };
@@ -61,7 +64,7 @@ pub mod cols {
     /// `OUTPUT_CURRENT_TURN` — mid-round 推进后的下一行动座位。
     pub const OUTPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 33;
     /// `bet` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 34;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 34 + super::end_betting_round::NUM_COLUMNS;
 }
 
 /// `bet` 输入参数。
@@ -81,8 +84,8 @@ pub struct BetInput {
     pub pre_seat_stack: u64,
     /// 调用前 seat.total_bet（verifier-trusted）。
     pub pre_seat_total_bet: u64,
-    /// mid-round 推进后的下一行动座位。
-    pub post_current_turn: u8,
+    /// Native VM replay selected branch.
+    pub outcome: BettingOutcome,
 }
 
 /// `bet` AIR 公开输入。
@@ -250,20 +253,27 @@ impl FrameworkEval for BetAir {
         // 约束 3：output_acted == 1（玩家已行动）
         eval.add_constraint(is_active.clone() * (output_acted - one));
 
-        // 约束 4（审计共性）：round_state 不变 + 必须处于下注轮（Gap 1）。
-        eval.add_constraint(common.round_state_unchanged());
+        // 约束 4（审计共性）：必须处于下注轮（Gap 1）。
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_postflop_betting(input_pre_round_state_q));
 
-        // 约束 5（阶段 3 soundness 升级：全 4-limb 资金守恒，对齐 raise/call）：
-        // VM 在 mid-round 不收池；筹码保留在 seat.bet。
-        for __c in common.pot_unchanged_4limb() {
-            eval.add_constraint(__c);
+        match &self.input.outcome {
+            BettingOutcome::MidRound { .. } => {
+                eval.add_constraint(common.round_state_unchanged());
+                for constraint in common.pot_unchanged_4limb() {
+                    eval.add_constraint(constraint);
+                }
+                end_betting_round::evaluate(&mut eval, &common, None);
+            }
+            BettingOutcome::EndBettingRound(completion) => {
+                end_betting_round::evaluate(&mut eval, &common, Some(completion));
+            }
         }
         // stack/bet/total_bet 已绑定到 verifier 端 checked u64 运算的逐 limb常量；
         // 不使用无 carry 的逐 limb delta。
 
-        let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
+        let expected_post_turn: E::F =
+            M31::from(u32::from(self.input.outcome.post_current_turn())).into();
         eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
 
         eval
@@ -299,8 +309,10 @@ pub struct BetRow {
     pub output_seat_total_bet: [M31; 4],
     /// 保留列（旧 amount limb0 inverse witness，固定为 0）。
     pub input_amount_inv: M31,
-    /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
+    /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位，否则为 sentinel。
     pub output_current_turn: M31,
+    /// Shared round-completion columns; zero for mid-round bets.
+    pub round_completion: EndBettingRoundRow,
 }
 
 impl BetRow {
@@ -358,7 +370,13 @@ impl BetRow {
             pre_seat_total_bet: u64_to_m31_limbs(pre_seat_total_bet),
             output_seat_total_bet: u64_to_m31_limbs(post_seat_total_bet),
             input_amount_inv: ZERO,
-            output_current_turn: u8_to_m31(input.post_current_turn),
+            output_current_turn: u8_to_m31(input.outcome.post_current_turn()),
+            round_completion: match &input.outcome {
+                BettingOutcome::MidRound { .. } => EndBettingRoundRow::zero(),
+                BettingOutcome::EndBettingRound(completion) => {
+                    EndBettingRoundRow::active(completion, pre_pot, post_pot)
+                }
+            },
         }
     }
 
@@ -380,6 +398,7 @@ impl BetRow {
             output_seat_total_bet: [ZERO; 4],
             input_amount_inv: ZERO,
             output_current_turn: ZERO,
+            round_completion: EndBettingRoundRow::zero(),
         }
     }
 
@@ -400,6 +419,7 @@ impl BetRow {
         v.extend_from_slice(&self.output_seat_total_bet);
         v.push(self.input_amount_inv);
         v.push(self.output_current_turn);
+        self.round_completion.append_to(&mut v);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

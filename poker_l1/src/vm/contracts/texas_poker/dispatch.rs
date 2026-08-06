@@ -2927,8 +2927,11 @@ mod tests {
         table.deck_state.encrypted = (0..52)
             .map(|_| ElGamalCiphertext { c1: g, c2: g })
             .collect();
-        // 设 pot（已收集的下注）
+        // Prior-round pot plus live current-round bets. Terminal fold must
+        // collect the live bets before payout instead of clearing them in reset.
         table.pot = 200;
+        table.seats[0].bet = 25;
+        table.seats[1].bet = 75;
 
         let ctx_p1 = make_context_as([0x11; 20]);
         let args = FoldWithProofArgs {
@@ -2948,8 +2951,8 @@ mod tests {
         // （reset 第二阶段会把所有 seat.folded 重置为 false，故此处不能断言 folded=true）
         assert_eq!(
             table.seats[1].stack,
-            1000 + 200,
-            "p2 应独得 pot 200（end_without_showdown）"
+            1000 + 300,
+            "p2 应独得 prior pot + current-round bets（end_without_showdown）"
         );
         assert_eq!(table.pot, 0, "pot 应清零");
         // reset 后回到 WAITING

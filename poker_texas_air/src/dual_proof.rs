@@ -25,6 +25,7 @@ use poker_protocol::precompile_abi::{
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
 
+use crate::airs::actions::end_without_showdown::derive_fold_outcome;
 use crate::airs::crypto::fold_with_proof::{
     FoldWithProofAir, FoldWithProofInput, FoldWithProofRow,
 };
@@ -43,7 +44,6 @@ use crate::airs::crypto::submit_reconstruct_deck::{
 use crate::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
-use crate::airs::crypto::validation::ensure_fold_with_proof_mid_round;
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
@@ -1095,8 +1095,12 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "fold_with_proof seat differs between task fields".into(),
                 ));
             }
-            let post_current_turn =
-                ensure_fold_with_proof_mid_round(&task.pre_table, &task.post_table)?;
+            let outcome = derive_fold_outcome(
+                &task.pre_table,
+                &task.post_table,
+                *seat_index,
+                "fold_with_proof",
+            )?;
             let player_pk = task
                 .pre_table
                 .seats
@@ -1120,7 +1124,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
             let input = FoldWithProofInput {
                 seat_index: *seat_index,
-                post_current_turn,
+                outcome,
                 old_deck_commitment: deck_commitment(&task.pre_table),
                 new_deck_commitment: deck_commitment(&task.post_table),
                 precompile: binding.air_binding(),

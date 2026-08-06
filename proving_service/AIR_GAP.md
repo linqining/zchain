@@ -13,8 +13,13 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
 - 终结 reveal 使用 **pre-dispatch** reveal phase；post phase 可推进到 `NONE`。
 - 完成下注轮的最后一个 `check` 显式约束 VM replay 导出的 round/pot，并用 sentinel 表达
   `current_turn: None`（进入 reveal phase）。
+- terminal `call` / `raise` / `bet` 同样支持 clean round completion：按 native replay
+  重建动作后的 `seat.bet`，约束 live bet 总和收池、pot 加法、下注清零和下一 reveal phase。
 - 最后一个 showdown reveal 同时执行结算和 `reset_for_next_hand`，因此版本从 pre-state
   递增两次；仅该 canonical terminal transition 被允许使用 version increment 2。
+- last-opponent `fold` / `fold_with_proof` 会先收集 live bets，再证明 gross pot、rake、winner
+  award 与 winner stack 的三条资金等式并 reset 到 `WAITING`；带 pending addon/leave 的复合
+  reset 继续 fail-closed。
 - runner 按每个 reveal phase 的 assignment（局部索引）读取加密牌索引，并在 showdown 对
   保存的 partial ciphertext 构造 DLEq token proof。
 
@@ -23,8 +28,9 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
 - 管理签名、超时和完整 range checks 尚未全部放入 AIR；当前生产 receipt 依赖
   Orchestrator 的 canonical VM replay 与绑定的 trace row。
 - `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
-  的单版本 mid-round 路径现已绑定 native DLEq receipt、前后牌组 commitment 与 fold/turn
-  状态。last-opponent fold 触发 settlement/reset 时仍保持 fail-closed。
+  的 mid-round 与 clean last-opponent settlement 路径均绑定 native DLEq receipt、前后牌组
+  commitment 与 canonical fold outcome。terminal reset 若同时处理 pending addon/leave，仍
+  保持 fail-closed。
 - stage-3 dual-proof package 已覆盖全部六条 crypto route：`fold_with_proof`、
   `join_and_shuffle`、
   `submit_shuffle_v2`、`leave_with_proof`、`submit_player_reveal_tokens` 与

@@ -5,8 +5,9 @@
 > 旧结论都不是当前可信声明。当前权威状态见
 > [`docs/PO5_PO6_DESIGN_NOTES.md`](docs/PO5_PO6_DESIGN_NOTES.md)：23 个 AIR 路径中只有
 > host 完整 dispatch replay + 原生逐 proof 验证形成 P05-H；P05-R 递归聚合未完成；
-> P06 下注动作只覆盖 pot 不变、same-round、`current_turn = Some(next)` 的 mid-round
-> 子集，收池/推进/结算 fail-closed。
+> P06 下注动作已覆盖 same-round 分支、heads-up terminal check、clean terminal
+> `call` / `raise` / `bet`，以及 clean last-opponent `fold` / `fold_with_proof` settlement。
+> showdown side-pot 和带 pending addon/leave 的复合 reset 仍 fail-closed。
 
 本文档记录针对 `poker_lean`（`Audit/SoundnessAudit.lean`）形式化审计所列反例的
 Rust AIR 修复，并明确残余风险。
@@ -43,10 +44,11 @@ prove 失败）。
 | 方法 | 约束 |
 |------|------|
 | join_table / leave_table / start_hand | `pre_round_state == WAITING(0)`（等式，消除「PREFLOP 下 join/leave/start」反例） |
-| fold / check / call / raise / bet / auto_fold / force_fold / kick_player | `post_round_state == pre_round_state`（round 不变） |
+| fold | mid-round 时 `post_round_state == pre_round_state`；clean terminal settlement 时 `post_round_state == WAITING` |
+| check / call / raise / bet / auto_fold / force_fold / kick_player | 各自已支持分支按当前权威设计约束；本表不再作为完成度声明 |
 | reset_for_next_hand | `post_round_state == WAITING(0)`（已有） |
 | 5 个 WAITING crypto 方法 | `post_round_state == pre_round_state`（shuffle/reveal/reconstruct 阶段 round 恒为 WAITING） |
-| fold_with_proof | `post_round_state == pre_round_state`，并约束 pre/post 均属于下注轮且存在下一行动玩家 |
+| fold_with_proof | mid-round 时 round 不变；clean terminal settlement 时约束 reset 到 `WAITING`，并保留 DLEq digest binding |
 | tick | 不约束 round_state（tick 合法驱动状态机阶段转换） |
 
 > **残余缺口**：完整的 `round_state ∈ {PREFLOP=2,FLOP=3,TURN=4,RIVER=5}`
@@ -60,18 +62,18 @@ prove 失败）。
 
 | 方法 | 约束 |
 |------|------|
-| fold / check / auto_fold / force_fold | `post_pot == pre_pot`（pot 不变，全 4 limb） |
-| call / raise / bet | 当前已更正为 mid-round `post_pot == pre_pot`；筹码暂存在 `seat.bet` |
+| fold | mid-round 时 `post_pot == pre_pot`；clean terminal 时证明 live-bet collection、rake/award split、winner stack delta 与 `post_pot == 0` |
+| check / auto_fold / force_fold | 已支持分支按当前权威设计约束；本历史表不再作为完成度声明 |
+| call / raise / bet | mid-round 约束 `post_pot == pre_pot`、筹码暂存在 `seat.bet`；clean terminal 分支额外约束全 live `seat.bet` 收池、`post_pot = pre_pot + collected_bets` 并清零下注 |
 | kick_player | `post_pot == pre_pot + kicked_bet`（全 4 limb delta，kicked_bet witness 对齐 seat.bet） |
 | leave_table | `post_chip_pool == pre_chip_pool - refund`、`post_addon_pool == pre_addon_pool - pending`（全 4 limb delta） |
 
 回归测试：`test_soundness_fold_pot_changed`（构造 fold 改 pot 的 trace，prove 失败）。
 
-> **残余缺口**：call/raise/bet 的完整 `stack -= delta`、`bet += delta`、
-> `pot += delta` 三联守恒，以及 amount > 0、seat 状态检查，需要新增业务列
-> （pre_seat_bet / pre_seat_stack）与 invertibility witness（degree-2 表达 `x ≠ 0`
-> 需 `x * inv - 1 = 0`）。本轮以全 limb pot 守恒 + 各方法 round 不变为增量；
-> 完整资金守恒列为后续工作。
+> **残余缺口**：上述下注动作的金额增量和参与者状态仍主要由 canonical VM replay
+> 与 verifier-trusted row 绑定；AIR 内尚未对所有金额字段统一做 nonnegative/range/
+> invertibility 约束。clean terminal 收池的共享列只证明收池总额和 pot 加法，不等同于
+> showdown side-pot 或多人 winner 分配证明。
 
 ### 4. addon / rebuy / join_table — 全局上界 range check
 
@@ -96,7 +98,8 @@ Lean 证明使用 `bound_check_4limb_le` 引理直接推出 `decodeU64` 级上�
 1. **C1 State Root Poseidon252 验证**：需嵌入哈希 AIR 子组件，工程量大且独立，
    本次不实现，列为残余风险。
 2. **密码学 ZK proof 嵌入**（DLEq / ZKShuffle / RevealToken / Reconstruct）：
-   靠 host 公开输入 + round_state 不变约束；完整嵌入列为阶段 5。
+   当前由 host-native verifier 验证 canonical request，并把 verifier-issued request/receipt
+   digest 与完整调用上下文绑定进 AIR；这仍不是 BLS12-381 verifier AIR 或递归证明。
 3. **集合归属 / 非负 / 全 limb 比较**：受 degree ≤ 2 限制，本轮用等式/不变 + host
    公开输入；严格判定需 logup / invertibility witness（TODO 已在各 AIR 标注）。
 

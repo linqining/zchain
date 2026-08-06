@@ -37,8 +37,8 @@
 //! ## 当前覆盖
 //!
 //! 23 个 VM selector 都能进入统一任务格式与 trace/prove/verify 路径。
-//! `fold_with_proof` 的单版本 mid-round 路径会绑定 native DLEq receipt；触发
-//! settlement/reset 的 terminal 路径继续 fail-closed。
+//! `fold_with_proof` 的 mid-round 与 clean last-opponent settlement 路径会绑定 native
+//! DLEq receipt；同时处理 pending addon/leave 的复合 terminal reset 继续 fail-closed。
 
 use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
@@ -49,7 +49,9 @@ use stwo::core::fields::m31::M31;
 use crate::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
 use crate::airs::actions::bet::{BetAir, BetInput, BetRow};
 use crate::airs::actions::call::{CallAir, CallInput, CallRow};
-use crate::airs::actions::check::{CheckAir, CheckInput, CheckRow, NO_CURRENT_TURN};
+use crate::airs::actions::check::{CheckAir, CheckInput, CheckRow};
+use crate::airs::actions::end_betting_round::derive_betting_outcome;
+use crate::airs::actions::end_without_showdown::derive_fold_outcome;
 use crate::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use crate::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 use crate::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
@@ -75,7 +77,6 @@ use crate::airs::crypto::submit_reconstruct_deck::{
 use crate::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
-use crate::airs::crypto::validation::ensure_fold_with_proof_mid_round;
 use crate::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use crate::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
 use crate::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput, CreateTableRow};
@@ -519,15 +520,17 @@ impl Orchestrator {
                 task.method_input
             )));
         };
-        let post_current_turn = validate_native_mid_round_action(
+        validate_native_betting_action(
             task,
             NativeMidRoundAction::Fold {
                 seat_index: *seat_index,
             },
+            true,
         )?;
+        let outcome = derive_fold_outcome(&task.pre_table, &task.post_table, *seat_index, "fold")?;
         let input = FoldInput {
             seat_index: *seat_index,
-            post_current_turn,
+            outcome,
         };
         let pre_version = task.pre_table.version;
         let post_version = task.post_table.version;
@@ -545,6 +548,8 @@ impl Orchestrator {
             post_version,
             pre_round_state,
             post_round_state,
+            task.pre_table.pot,
+            task.post_table.pot,
         );
         run(
             backend,
@@ -957,7 +962,7 @@ impl Orchestrator {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("check", "SeatOnly", &task.method_input));
         };
-        let transition = validate_native_betting_action(
+        validate_native_betting_action(
             task,
             NativeMidRoundAction::Check {
                 seat_index: *seat_index,
@@ -970,14 +975,12 @@ impl Orchestrator {
             .betting_round
             .as_ref()
             .map_or(0, |b| b.current_bet);
+        let outcome = derive_betting_outcome(&task.pre_table, &task.post_table, 0, "check")?;
         let input = CheckInput {
             seat_index: *seat_index,
             current_bet,
             seat_bet: seat.bet,
-            post_current_turn: transition.post_current_turn.unwrap_or(NO_CURRENT_TURN),
-            completes_betting_round: transition.completes_betting_round,
-            post_round_state: task.post_table.round_state,
-            post_pot: task.post_table.pot,
+            outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1027,21 +1030,28 @@ impl Orchestrator {
         let MethodInput::SeatOnly { seat_index } = &task.method_input else {
             return Err(input_mismatch("call", "SeatOnly", &task.method_input));
         };
-        let post_current_turn = validate_native_mid_round_action(
+        validate_native_betting_action(
             task,
             NativeMidRoundAction::Call {
                 seat_index: *seat_index,
             },
+            true,
         )?;
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
-        let call_amount = pre_seat.stack.saturating_sub(post_seat.stack);
-        let pre_current_bet = task
+        let pre_round = task
             .pre_table
             .betting_round
             .as_ref()
-            .expect("mid-round validator requires betting_round")
-            .current_bet;
+            .expect("betting validator requires betting_round");
+        let pre_current_bet = pre_round.current_bet;
+        let call_amount = pre_round.process_call(pre_seat.bet, pre_seat.stack);
+        let action_post_bet = pre_seat
+            .bet
+            .checked_add(call_amount)
+            .ok_or_else(|| TexasAirError::SpecViolation("call: action seat.bet overflow".into()))?;
+        let outcome =
+            derive_betting_outcome(&task.pre_table, &task.post_table, call_amount, "call")?;
         let input = CallInput {
             seat_index: *seat_index,
             call_amount,
@@ -1049,7 +1059,7 @@ impl Orchestrator {
             pre_seat_bet: pre_seat.bet,
             pre_seat_stack: pre_seat.stack,
             pre_seat_total_bet: pre_seat.total_bet,
-            post_current_turn,
+            outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1068,7 +1078,7 @@ impl Orchestrator {
             pre_pot,
             post_pot,
             post_seat.stack,
-            post_seat.bet,
+            action_post_bet,
             post_seat.all_in,
             pre_seat.bet,
             pre_seat.stack,
@@ -1110,12 +1120,13 @@ impl Orchestrator {
         else {
             return Err(input_mismatch("raise", "Raise", &task.method_input));
         };
-        let post_current_turn = validate_native_mid_round_action(
+        validate_native_betting_action(
             task,
             NativeMidRoundAction::Raise {
                 seat_index: *seat_index,
                 total_bet: *total_bet,
             },
+            true,
         )?;
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
@@ -1123,18 +1134,21 @@ impl Orchestrator {
             .pre_table
             .betting_round
             .as_ref()
-            .expect("mid-round validator requires betting_round");
+            .expect("betting validator requires betting_round");
         let min_raise = pre_round.min_raise;
-        let post_current_bet = task
-            .post_table
-            .betting_round
-            .as_ref()
-            .map_or(0, |b| b.current_bet);
-        let post_min_raise = task
-            .post_table
-            .betting_round
-            .as_ref()
-            .map_or(0, |b| b.min_raise);
+        let action_delta = total_bet
+            .checked_sub(pre_seat.bet)
+            .ok_or_else(|| TexasAirError::SpecViolation("raise: action bet decreased".into()))?;
+        let mut action_round = pre_round.clone();
+        action_round
+            .process_raise(*total_bet, pre_seat.bet, pre_seat.stack)
+            .map_err(|error| {
+                TexasAirError::SpecViolation(format!(
+                    "raise: cannot reconstruct action-round state: {error}"
+                ))
+            })?;
+        let outcome =
+            derive_betting_outcome(&task.pre_table, &task.post_table, action_delta, "raise")?;
         let input = RaiseInput {
             seat_index: *seat_index,
             raise_to: *total_bet,
@@ -1143,7 +1157,7 @@ impl Orchestrator {
             pre_seat_stack: pre_seat.stack,
             pre_seat_bet: pre_seat.bet,
             pre_seat_total_bet: pre_seat.total_bet,
-            post_current_turn,
+            outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1165,10 +1179,10 @@ impl Orchestrator {
             pre_seat.bet,
             pre_seat.total_bet,
             post_seat.stack,
-            post_seat.bet,
+            *total_bet,
             post_seat.total_bet,
-            post_current_bet,
-            post_min_raise,
+            action_round.current_bet,
+            action_round.min_raise,
             post_seat.all_in,
         );
         run(
@@ -1202,12 +1216,13 @@ impl Orchestrator {
         let MethodInput::Bet { seat_index, amount } = &task.method_input else {
             return Err(input_mismatch("bet", "Bet", &task.method_input));
         };
-        let post_current_turn = validate_native_mid_round_action(
+        validate_native_betting_action(
             task,
             NativeMidRoundAction::Bet {
                 seat_index: *seat_index,
                 amount: *amount,
             },
+            true,
         )?;
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
@@ -1215,7 +1230,12 @@ impl Orchestrator {
             .pre_table
             .betting_round
             .as_ref()
-            .expect("mid-round validator requires betting_round");
+            .expect("betting validator requires betting_round");
+        let action_post_bet = pre_seat
+            .bet
+            .checked_add(*amount)
+            .ok_or_else(|| TexasAirError::SpecViolation("bet: action seat.bet overflow".into()))?;
+        let outcome = derive_betting_outcome(&task.pre_table, &task.post_table, *amount, "bet")?;
         let input = BetInput {
             seat_index: *seat_index,
             amount: *amount,
@@ -1224,7 +1244,7 @@ impl Orchestrator {
             pre_seat_bet: pre_seat.bet,
             pre_seat_stack: pre_seat.stack,
             pre_seat_total_bet: pre_seat.total_bet,
-            post_current_turn,
+            outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1242,7 +1262,7 @@ impl Orchestrator {
             post_r,
             pre_pot,
             post_pot,
-            post_seat.bet,
+            action_post_bet,
             pre_seat.bet,
             pre_seat.stack,
             post_seat.stack,
@@ -1803,8 +1823,12 @@ impl Orchestrator {
                 "fold_with_proof method input seat differs from raw args".into(),
             ));
         }
-        let post_current_turn =
-            ensure_fold_with_proof_mid_round(&task.pre_table, &task.post_table)?;
+        let outcome = derive_fold_outcome(
+            &task.pre_table,
+            &task.post_table,
+            *seat_index,
+            "fold_with_proof",
+        )?;
         let player_pk = task
             .pre_table
             .seats
@@ -1837,7 +1861,7 @@ impl Orchestrator {
         let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
         let input = FoldWithProofInput {
             seat_index: *seat_index,
-            post_current_turn,
+            outcome,
             old_deck_commitment: deck_commitment(&task.pre_table),
             new_deck_commitment: deck_commitment(&task.post_table),
             precompile: binding.air_binding(),
@@ -2312,12 +2336,10 @@ impl NativeMidRoundAction {
 #[derive(Debug, Clone, Copy)]
 struct NativeBettingTransition {
     post_current_turn: Option<u8>,
-    completes_betting_round: bool,
 }
 
-/// 先重放真实 VM action 并逐字段比对 post table，再收窄到 AIR 已覆盖的
-/// mid-round 分支。这样诚实 prover 不会把 end-of-round/settlement transition
-/// 塞进简化 AIR；生产 verifier 侧还会由 trusted-row 绑定再次检查 witness。
+/// 先重放真实 VM action 并逐字段比对 post table，再按调用方声明的覆盖范围接受或拒绝
+/// round completion。生产 verifier 侧还会由 trusted-row 绑定再次检查 witness。
 fn validate_native_betting_action(
     task: &ProveTask,
     action: NativeMidRoundAction,
@@ -2416,12 +2438,11 @@ fn validate_native_betting_action(
     if completes_betting_round && !allow_round_completion {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
             "{method} triggered collect_bets_to_pot / advance_round / settlement; \
-             current AIR proves only same-round transitions with unchanged pot and Some(current_turn)"
+             this AIR only accepts the canonical mid-round branch or its explicitly modeled clean collection branch"
         )));
     }
     Ok(NativeBettingTransition {
         post_current_turn: post.current_turn,
-        completes_betting_round,
     })
 }
 
@@ -3067,6 +3088,93 @@ mod tests {
             .expect("nonzero mid-round call should prove and verify");
     }
 
+    /// A final call collects every live bet, clears seat bets, and starts the
+    /// next reveal phase while preserving the acting seat's money delta.
+    #[test]
+    fn orchestrator_proves_end_round_call_collection() {
+        let mut pre = make_table("end-round-call");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(1);
+        pre.pot = 25;
+        pre.hand_id = 7;
+        pre.call_seq = 12;
+        for i in 0..2 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        }
+        pre.seats[0].stack = 900;
+        pre.seats[0].bet = 100;
+        pre.seats[0].total_bet = 100;
+        pre.seats[0].acted_this_round = true;
+        pre.seats[1].stack = 950;
+        pre.seats[1].bet = 50;
+        pre.seats[1].total_bet = 50;
+        state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
+
+        let caller = pre.seats[1].player;
+        let (task, post) = dispatch_task(
+            pre.clone(),
+            caller,
+            texas_dispatch::selectors::call(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).expect("call args should serialize"),
+        );
+        assert_eq!(post.seats[1].stack, 900);
+        assert_eq!(post.seats[1].total_bet, 100);
+        assert!(post.seats.iter().all(|seat| seat.bet == 0));
+        assert_eq!(post.pot, 225);
+        assert_ne!(post.round_state, pre.round_state);
+        assert!(post.betting_round.is_none());
+        assert!(post.current_turn.is_none());
+
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("end-of-round call should prove and verify");
+    }
+
+    /// A final all-in raise collects every live bet and advances the round.
+    #[test]
+    fn orchestrator_proves_end_round_raise_collection() {
+        let mut pre = make_table("end-round-raise");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(1);
+        pre.pot = 25;
+        pre.hand_id = 13;
+        pre.call_seq = 60;
+        for i in 0..2 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        }
+        pre.seats[0].stack = 0;
+        pre.seats[0].bet = 100;
+        pre.seats[0].total_bet = 100;
+        pre.seats[0].all_in = true;
+        pre.seats[0].acted_this_round = true;
+        pre.seats[1].stack = 100;
+        pre.seats[1].bet = 50;
+        pre.seats[1].total_bet = 50;
+        state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
+
+        let caller = pre.seats[1].player;
+        let (task, post) = dispatch_task(
+            pre.clone(),
+            caller,
+            texas_dispatch::selectors::raise(),
+            borsh::to_vec(&RaiseArgs {
+                seat_index: 1,
+                total_bet: 150,
+            })
+            .expect("raise args should serialize"),
+        );
+        assert!(post.seats.iter().all(|seat| seat.bet == 0));
+        assert_eq!(post.pot, 275);
+        assert_ne!(post.round_state, pre.round_state);
+        assert!(post.betting_round.is_none());
+        assert!(post.current_turn.is_none());
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("end-of-round raise should prove and verify");
+    }
+
     /// P06 回归：完整加注更新 current_bet/min_raise，但 mid-round 不收池。
     #[test]
     fn orchestrator_accepts_normal_mid_round_raise() {
@@ -3190,9 +3298,48 @@ mod tests {
             .expect("postflop mid-round bet should prove and verify");
     }
 
-    /// P06 回归：最后一个对手 fold 会直接结算/重置，当前 action AIR 必须拒绝。
+    /// A final all-in postflop bet uses the shared collection proof.
     #[test]
-    fn orchestrator_rejects_last_opponent_fold_settlement() {
+    fn orchestrator_proves_end_round_bet_collection() {
+        let mut pre = make_table("end-round-bet");
+        pre.round_state = ROUND_FLOP;
+        pre.betting_round = Some(BettingRound::new(100, 0));
+        pre.current_turn = Some(0);
+        pre.pot = 300;
+        pre.hand_id = 14;
+        pre.call_seq = 61;
+        for i in 0..2 {
+            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        }
+        pre.seats[0].stack = 100;
+        pre.seats[1].stack = 0;
+        pre.seats[1].all_in = true;
+        state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
+
+        let caller = pre.seats[0].player;
+        let (task, post) = dispatch_task(
+            pre.clone(),
+            caller,
+            texas_dispatch::selectors::bet(),
+            borsh::to_vec(&BetArgs {
+                seat_index: 0,
+                amount: 100,
+            })
+            .expect("bet args should serialize"),
+        );
+        assert!(post.seats.iter().all(|seat| seat.bet == 0));
+        assert_eq!(post.pot, 400);
+        assert_ne!(post.round_state, pre.round_state);
+        assert!(post.betting_round.is_none());
+        assert!(post.current_turn.is_none());
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("end-of-round bet should prove and verify");
+    }
+
+    /// 最后一个对手 fold 会收集 live bets、结算并重置，且可由 terminal AIR 证明。
+    #[test]
+    fn orchestrator_proves_last_opponent_fold_settlement() {
         let mut pre = make_table("fold-settlement");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
@@ -3217,9 +3364,25 @@ mod tests {
         assert_ne!(post.round_state, pre.round_state);
         assert!(post.current_turn.is_none());
         assert!(post.betting_round.is_none());
+        assert_eq!(post.pot, 0);
+        assert_eq!(post.seats[1].stack, 1_450);
 
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("last-opponent fold settlement should prove and verify");
+
+        let mut compound_pre = pre;
+        compound_pre.seats[1].pending_addon = 25;
+        compound_pre.addon_pool = 25;
+        let caller = compound_pre.seats[0].player;
+        let (compound_task, _) = dispatch_task(
+            compound_pre,
+            caller,
+            texas_dispatch::selectors::fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("fold args should serialize"),
+        );
         assert!(matches!(
-            Orchestrator::new().prove_and_verify_task(&task),
+            Orchestrator::new().prove_and_verify_task(&compound_task),
             Err(TexasAirError::UnsupportedBettingTransition(_))
         ));
     }

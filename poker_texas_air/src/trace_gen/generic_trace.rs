@@ -14,12 +14,16 @@
 //! ## 使用示例
 //!
 //! ```ignore
+//! use poker_texas_air::airs::actions::end_without_showdown::FoldOutcome;
 //! use poker_texas_air::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 //! use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 //! use poker_texas_air::trace_gen::MethodTrace;
 //!
-//! let input = FoldInput { seat_index: 0, post_current_turn: 1 };
-//! let row = FoldRow::active(&input, [ZERO; 4], [ZERO; 4], 1, 0, 0, 0, 1, 2, 2);
+//! let input = FoldInput {
+//!     seat_index: 0,
+//!     outcome: FoldOutcome::MidRound { post_current_turn: 1 },
+//! };
+//! let row = FoldRow::active(&input, [ZERO; 4], [ZERO; 4], 1, 0, 0, 0, 1, 2, 2, 0, 0);
 //! let trace = gen_method_trace(FoldAir::num_columns(), &row.to_vec(), &FoldRow::padding().to_vec());
 //! ```
 

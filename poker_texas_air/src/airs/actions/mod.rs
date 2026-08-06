@@ -21,6 +21,8 @@ pub mod auto_fold;
 pub mod bet;
 pub mod call;
 pub mod check;
+pub mod end_betting_round;
+pub mod end_without_showdown;
 pub mod fold;
 pub mod force_fold;
 pub mod kick_player;

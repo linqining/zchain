@@ -72,7 +72,9 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
                     log_size: 10,
                     input: FoldWithProofInput {
                         seat_index: 0,
-                        post_current_turn: 1,
+                        outcome: poker_texas_air::airs::actions::end_without_showdown::FoldOutcome::MidRound {
+                            post_current_turn: 1,
+                        },
                         old_deck_commitment: 10,
                         new_deck_commitment: 11,
                         precompile: PrecompileAirBinding::synthetic_unverified(),
@@ -907,13 +909,18 @@ fn test_soundness_submit_reconstruct_deck_tampered_phase() {
 /// 单元测试：所有 crypto AIR 的列数与常量声明一致。
 #[test]
 fn test_crypto_air_column_consistency() {
+    use poker_texas_air::airs::actions::end_without_showdown;
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
     use poker_texas_air::airs::crypto::{
         fold_with_proof, join_and_shuffle, leave_with_proof, submit_player_reveal_tokens,
         submit_reconstruct_deck, submit_shuffle_v2,
     };
 
-    assert_eq!(fold_with_proof::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 47);
+    // fold_with_proof: 通用 + 47 基础/precompile binding + 34 终局结算业务。
+    assert_eq!(
+        fold_with_proof::cols::NUM_COLUMNS,
+        COMMON_NUM_COLUMNS + 47 + end_without_showdown::NUM_COLUMNS
+    );
     assert_eq!(
         FoldWithProofAir::num_columns(),
         fold_with_proof::cols::NUM_COLUMNS

@@ -365,7 +365,7 @@ fn leave_task(nonce: u64) -> ProveTask {
     )
 }
 
-fn fold_with_proof_task(nonce: u64, active_players: u8) -> ProveTask {
+fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) -> ProveTask {
     assert!((2..=3).contains(&active_players));
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
@@ -417,6 +417,18 @@ fn fold_with_proof_task(nonce: u64, active_players: u8) -> ProveTask {
             [0x81 + index; 20]
         };
         table.seats[usize::from(index)].stack = 1_000;
+    }
+    if active_players == 2 {
+        table.pot = 200;
+        table.seats[0].bet = 25;
+        table.seats[0].total_bet = 25;
+        table.seats[1].bet = 75;
+        table.seats[1].total_bet = 75;
+    }
+    if compound_reset {
+        assert_eq!(active_players, 2);
+        table.seats[1].pending_addon = 20;
+        table.addon_pool = 20;
     }
     table.seats[0].pk = ECPoint(public_key);
     table.deck_state.encrypted = input_cards;
@@ -617,7 +629,7 @@ fn leave_and_reveal_dual_packages_roundtrip_and_verify() {
 
 #[test]
 fn fold_with_proof_dual_package_roundtrips_archives_and_rejects_replay() {
-    let task = fold_with_proof_task(309, 3);
+    let task = fold_with_proof_task(309, 3, false);
     let bundle = prove_dual_proof(&task).expect("mid-round fold package should prove");
     let encoded = bundle.encode().expect("fold package should encode");
     let decoded = DualProofBundle::decode(&encoded).expect("fold package should decode");
@@ -634,21 +646,34 @@ fn fold_with_proof_dual_package_roundtrips_archives_and_rejects_replay() {
         .expect("archive-derived fold dual proof should verify");
     assert_eq!(restored.receipt().kind(), MethodKind::FoldWithProof);
 
-    let replay_task = fold_with_proof_task(310, 3);
+    let replay_task = fold_with_proof_task(310, 3, false);
     assert!(verify_dual_proof(&replay_task, &bundle).is_err());
 }
 
 #[test]
-fn terminal_fold_with_proof_remains_fail_closed_until_settlement_air() {
-    let task = fold_with_proof_task(311, 2);
-    let error = prove_dual_proof(&task)
-        .expect_err("last-opponent fold must not use the mid-round fold AIR");
-    assert!(error.to_string().contains("settlement"), "{error}");
+fn terminal_fold_with_proof_proves_settlement_and_keeps_compound_reset_fail_closed() {
+    let task = fold_with_proof_task(311, 2, false);
+    assert_eq!(task.pre_table.pot, 200);
+    assert_eq!(task.post_table.pot, 0);
+    assert_eq!(task.post_table.seats[1].stack, 1_300);
 
-    let error = Orchestrator::new()
-        .prove_and_verify_task(&task)
-        .expect_err("orchestrator must reject terminal fold_with_proof");
-    assert!(error.to_string().contains("settlement"), "{error}");
+    let bundle = prove_dual_proof(&task).expect("terminal fold package should prove");
+    let accepted = verify_dual_proof(&task, &bundle)
+        .expect("terminal fold method and DLEq proof should verify");
+    assert_eq!(accepted.receipt().kind(), MethodKind::FoldWithProof);
+
+    let archived = Orchestrator::new()
+        .prove_verify_and_archive_task(&task)
+        .expect("terminal fold method proof should archive");
+    let restored_bundle = dual_proof_from_archived(&task, &archived.archive)
+        .expect("terminal fold archive should repackage as a dual proof");
+    verify_dual_proof(&task, &restored_bundle)
+        .expect("archive-derived terminal fold dual proof should verify");
+
+    let compound = fold_with_proof_task(312, 2, true);
+    let error = prove_dual_proof(&compound)
+        .expect_err("terminal fold with pending addon must remain fail-closed");
+    assert!(error.to_string().contains("pending addon/leave"), "{error}");
 }
 
 #[test]
