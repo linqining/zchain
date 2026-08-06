@@ -61,6 +61,13 @@ pub(crate) fn validate_fold_with_proof(
             "fold_with_proof: replayed MethodInput does not match raw args".into(),
         ));
     }
+    crate::airs::composition::derive_composite_transition_plan(
+        MethodKind::FoldWithProof,
+        &canonical.pre,
+        &canonical.post,
+        Some(args.seat_index),
+        &canonical.events,
+    )?;
     let outcome = derive_fold_outcome(&canonical.pre, &canonical.post, args.seat_index, METHOD)?;
 
     let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
@@ -275,6 +282,13 @@ pub(crate) fn validate_leave_with_proof(
             "leave_with_proof: replayed MethodInput does not match raw args".into(),
         ));
     }
+    crate::airs::composition::derive_composite_transition_plan(
+        MethodKind::SubmitPlayerRevealTokens,
+        &canonical.pre,
+        &canonical.post,
+        None,
+        &canonical.events,
+    )?;
 
     let binding = public_inputs.precompile_binding.as_ref().ok_or_else(|| {
         TexasAirError::SpecViolation(

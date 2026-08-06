@@ -57,6 +57,18 @@ impl NativeAction {
             Self::ForceFold { .. } => "force_fold",
         }
     }
+
+    const fn seat_index(self) -> u8 {
+        match self {
+            Self::Fold { seat_index }
+            | Self::Check { seat_index }
+            | Self::Call { seat_index }
+            | Self::Raise { seat_index, .. }
+            | Self::Bet { seat_index, .. }
+            | Self::AutoFold { seat_index }
+            | Self::ForceFold { seat_index } => seat_index,
+        }
+    }
 }
 
 struct ValidatedTables {
@@ -147,6 +159,18 @@ fn validate_native_mid_round(
             "{method}: canonical post-table differs from native VM replay"
         )));
     }
+
+    // Reconstruct the normalized four-stage plan from the same native replay.
+    // Existing method rows remain the proof entry point during migration, but
+    // every production action verification now also passes the shared component
+    // ABI and event-consistency checks.
+    crate::airs::composition::derive_composite_transition_plan(
+        expected_kind,
+        &pre,
+        &post,
+        Some(action.seat_index()),
+        &events,
+    )?;
 
     let completes_betting_round =
         post.round_state != pre.round_state || post.betting_round.is_none() || post.pot != pre.pot;

@@ -14,6 +14,7 @@
 pub mod actions;
 pub mod bound;
 pub mod common;
+pub mod composition;
 pub mod crypto;
 pub mod funds;
 pub mod lifecycle;

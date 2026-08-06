@@ -1,0 +1,992 @@
+//! Canonical verifier-side derivation of composable transition plans.
+
+use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
+use borsh::{BorshDeserialize, BorshSerialize};
+use poker_l1::vm::contracts::texas_poker::constants::{
+    FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN, FOLD_REASON_MANUAL, ROUND_WAITING,
+};
+use poker_l1::vm::contracts::texas_poker::events::{
+    RESET_REASON_LAST_PLAYER_STANDING, TexasPokerEvent,
+};
+use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+
+use super::bet_collection::BetCollectionPlan;
+use super::round_advance::{NO_CURRENT_TURN, RoundAdvancePlan};
+use super::seat_update::{COMPOSITION_SEATS, SeatUpdatePlan};
+use super::settlement::{SettlementKind, SettlementStagePlan};
+use crate::error::{TexasAirError, TexasAirResult};
+use crate::method_kind::MethodKind;
+use crate::settlement_binding::SettlementPlanBinding;
+
+/// Encoding version for the composite plan and all stage boundary commitments.
+pub const COMPOSITE_PLAN_VERSION: u8 = 1;
+
+const PLAN_DOMAIN: &[u8] = b"zchain.texas.composite-transition-plan.v1";
+const TABLE_DOMAIN: &[u8] = b"zchain.texas.composite-table-image.v1";
+const BOUNDARY_DOMAIN: &[u8] = b"zchain.texas.composite-stage-boundary.v1";
+const NO_SHOWDOWN_DOMAIN: &[u8] = b"zchain.texas.no-showdown-settlement.v1";
+
+/// Canonical order of independently composable transition components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum StageKind {
+    /// Acting-seat and per-round acted-flag mutation.
+    SeatUpdate = 0,
+    /// Fixed nine-seat wager collection into the pot.
+    BetCollection = 1,
+    /// Betting-round and reveal-phase advancement.
+    RoundAdvance = 2,
+    /// Deterministic award projection plus reset.
+    Settlement = 3,
+}
+
+impl StageKind {
+    /// Fixed stage index used by composition links.
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Commitment metadata carried by every stage AIR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageLink {
+    /// Whether the stage changes its business projection.
+    pub active: bool,
+    /// Stage discriminator.
+    pub stage_kind: StageKind,
+    /// Fixed position in the four-stage pipeline.
+    pub stage_index: u8,
+    /// Digest of the complete canonical plan payload.
+    pub plan_digest: [u8; 32],
+    /// Commitment at the stage input boundary.
+    pub input_digest: [u8; 32],
+    /// Commitment at the stage output boundary.
+    pub output_digest: [u8; 32],
+}
+
+/// Verifier-owned projection of one atomic dispatch into four composable stages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeTransitionPlan {
+    /// Plan ABI version.
+    pub version: u8,
+    /// Original dispatch method.
+    pub method_kind: MethodKind,
+    /// Table creation nonce used by existing Texas AIR public inputs.
+    pub table_id: u64,
+    /// Hand sequence after the dispatch.
+    pub hand_id: u32,
+    /// Call sequence after the dispatch.
+    pub call_seq: u32,
+    /// Digest of the canonical complete pre-table image.
+    pub pre_table_digest: [u8; 32],
+    /// Digest of the canonical complete post-table image.
+    pub post_table_digest: [u8; 32],
+    /// Digest of every business-stage payload and dispatch scope field.
+    pub plan_digest: [u8; 32],
+    /// Acting-seat mutation projection.
+    pub seat_update: SeatUpdatePlan,
+    /// Bet collection projection.
+    pub bet_collection: BetCollectionPlan,
+    /// Round/reveal advancement projection.
+    pub round_advance: RoundAdvancePlan,
+    /// Settlement and reset projection.
+    pub settlement: SettlementStagePlan,
+    links: [StageLink; 4],
+}
+
+impl CompositeTransitionPlan {
+    /// Return a stage link by its fixed kind.
+    #[must_use]
+    pub fn link(&self, kind: StageKind) -> &StageLink {
+        &self.links[usize::from(kind.index())]
+    }
+
+    /// Return all links in canonical execution order.
+    #[must_use]
+    pub fn links(&self) -> &[StageLink; 4] {
+        &self.links
+    }
+
+    /// Verify local plan/link invariants without replaying the VM again.
+    pub fn validate_composition(&self) -> TexasAirResult<()> {
+        if self.version != COMPOSITE_PLAN_VERSION {
+            return Err(TexasAirError::SpecViolation(format!(
+                "unsupported composite plan version {}",
+                self.version
+            )));
+        }
+        let active = [
+            self.seat_update.active,
+            self.bet_collection.active,
+            self.round_advance.active,
+            self.settlement.active,
+        ];
+        for (index, link) in self.links.iter().enumerate() {
+            if usize::from(link.stage_index) != index
+                || usize::from(link.stage_kind.index()) != index
+                || link.plan_digest != self.plan_digest
+                || link.active != active[index]
+            {
+                return Err(TexasAirError::SpecViolation(format!(
+                    "composite stage link {index} does not match its payload"
+                )));
+            }
+            if index > 0 && self.links[index - 1].output_digest != link.input_digest {
+                return Err(TexasAirError::SpecViolation(format!(
+                    "composite boundary between stages {} and {index} is broken",
+                    index - 1
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(BorshSerialize)]
+struct CompositePlanBody {
+    version: u8,
+    method_kind: MethodKind,
+    table_id: u64,
+    hand_id: u32,
+    call_seq: u32,
+    pre_table_digest: [u8; 32],
+    post_table_digest: [u8; 32],
+    seat_update: SeatUpdatePlan,
+    bet_collection: BetCollectionPlan,
+    round_advance: RoundAdvancePlan,
+    settlement: SettlementStagePlan,
+}
+
+/// Derive the unique four-stage plan from canonical replayed tables and events.
+///
+/// `acting_seat` is required only for betting actions. Non-action dispatches use
+/// `None`, producing inactive seat/collection/round stages while still allowing a
+/// terminal showdown settlement stage.
+pub fn derive_composite_transition_plan(
+    method_kind: MethodKind,
+    pre: &TexasPokerTable,
+    post: &TexasPokerTable,
+    acting_seat: Option<u8>,
+    events: &[TexasPokerEvent],
+) -> TexasAirResult<CompositeTransitionPlan> {
+    if pre.id != post.id {
+        return Err(TexasAirError::SpecViolation(
+            "composite transition changed table object id".into(),
+        ));
+    }
+    if pre.seats.len() > COMPOSITION_SEATS || post.seats.len() > COMPOSITION_SEATS {
+        return Err(TexasAirError::SpecViolation(
+            "composite transition exceeds fixed nine-seat ABI".into(),
+        ));
+    }
+
+    let seat_update = derive_seat_update(method_kind, pre, acting_seat, events)?;
+    let has_round_advance = events
+        .iter()
+        .any(|event| matches!(event, TexasPokerEvent::RoundAdvanced { .. }));
+    let has_no_showdown = events
+        .iter()
+        .any(|event| matches!(event, TexasPokerEvent::HandEndedWithoutShowdown { .. }));
+    let has_collection_event = events
+        .iter()
+        .any(|event| matches!(event, TexasPokerEvent::PotCollected { .. }));
+    let collection_active = has_round_advance || has_no_showdown || has_collection_event;
+    let bet_collection = derive_bet_collection(pre, &seat_update, collection_active, events)?;
+    let round_advance = derive_round_advance(pre, post, events)?;
+    let settlement = derive_settlement(pre, post, &bet_collection, method_kind, events)?;
+
+    if round_advance.active && settlement.active {
+        return Err(TexasAirError::SpecViolation(
+            "one dispatch cannot both emit RoundAdvanced and settle/reset".into(),
+        ));
+    }
+    if bet_collection.active && !round_advance.active && !settlement.active {
+        return Err(TexasAirError::SpecViolation(
+            "bet collection is not followed by round advance or settlement".into(),
+        ));
+    }
+    if round_advance.active && bet_collection.post_pot != post.pot {
+        return Err(TexasAirError::SpecViolation(
+            "round-advance post pot does not match collection output".into(),
+        ));
+    }
+
+    let pre_table_digest = hash_borsh(TABLE_DOMAIN, pre)?;
+    let post_table_digest = hash_borsh(TABLE_DOMAIN, post)?;
+    let body = CompositePlanBody {
+        version: COMPOSITE_PLAN_VERSION,
+        method_kind,
+        table_id: pre.id.creation_nonce,
+        hand_id: post.hand_id,
+        call_seq: post.call_seq,
+        pre_table_digest,
+        post_table_digest,
+        seat_update: seat_update.clone(),
+        bet_collection: bet_collection.clone(),
+        round_advance: round_advance.clone(),
+        settlement: settlement.clone(),
+    };
+    let plan_digest = hash_borsh(PLAN_DOMAIN, &body)?;
+    let boundaries: [[u8; 32]; 5] = std::array::from_fn(|boundary_index| {
+        hash_bytes(
+            BOUNDARY_DOMAIN,
+            &borsh::to_vec(&(
+                COMPOSITE_PLAN_VERSION,
+                method_kind,
+                pre.id.creation_nonce,
+                post.hand_id,
+                post.call_seq,
+                plan_digest,
+                u8::try_from(boundary_index).expect("five boundaries fit u8"),
+            ))
+            .expect("fixed composite boundary tuple serializes"),
+        )
+    });
+    let active = [
+        seat_update.active,
+        bet_collection.active,
+        round_advance.active,
+        settlement.active,
+    ];
+    let kinds = [
+        StageKind::SeatUpdate,
+        StageKind::BetCollection,
+        StageKind::RoundAdvance,
+        StageKind::Settlement,
+    ];
+    let links = std::array::from_fn(|index| StageLink {
+        active: active[index],
+        stage_kind: kinds[index],
+        stage_index: u8::try_from(index).expect("four stages fit u8"),
+        plan_digest,
+        input_digest: boundaries[index],
+        output_digest: boundaries[index + 1],
+    });
+
+    let plan = CompositeTransitionPlan {
+        version: COMPOSITE_PLAN_VERSION,
+        method_kind,
+        table_id: pre.id.creation_nonce,
+        hand_id: post.hand_id,
+        call_seq: post.call_seq,
+        pre_table_digest,
+        post_table_digest,
+        plan_digest,
+        seat_update,
+        bet_collection,
+        round_advance,
+        settlement,
+        links,
+    };
+    plan.validate_composition()?;
+    Ok(plan)
+}
+
+fn derive_seat_update(
+    method_kind: MethodKind,
+    pre: &TexasPokerTable,
+    acting_seat: Option<u8>,
+    events: &[TexasPokerEvent],
+) -> TexasAirResult<SeatUpdatePlan> {
+    let is_action = matches!(
+        method_kind,
+        MethodKind::Fold
+            | MethodKind::Check
+            | MethodKind::Call
+            | MethodKind::Raise
+            | MethodKind::Bet
+            | MethodKind::AutoFold
+            | MethodKind::ForceFold
+            | MethodKind::FoldWithProof
+    );
+    if !is_action {
+        return Ok(SeatUpdatePlan::inactive());
+    }
+    let seat_index = acting_seat.ok_or_else(|| {
+        TexasAirError::SpecViolation(format!(
+            "{} composite plan is missing acting seat",
+            method_kind.method_name()
+        ))
+    })?;
+    let seat = pre.seats.get(usize::from(seat_index)).ok_or_else(|| {
+        TexasAirError::SpecViolation("composite acting seat is outside the table".into())
+    })?;
+    let mut primary = Vec::new();
+    for event in events {
+        let candidate = match (method_kind, event) {
+            (
+                MethodKind::Fold
+                | MethodKind::AutoFold
+                | MethodKind::ForceFold
+                | MethodKind::FoldWithProof,
+                TexasPokerEvent::PlayerFolded {
+                    table_id,
+                    seat_index: event_seat,
+                    reason,
+                    round_state,
+                },
+            ) => Some((*table_id, *event_seat, 0, true, *reason, *round_state)),
+            (
+                MethodKind::Check,
+                TexasPokerEvent::PlayerChecked {
+                    table_id,
+                    seat_index: event_seat,
+                    round_state,
+                },
+            ) => Some((*table_id, *event_seat, 0, false, u8::MAX, *round_state)),
+            (
+                MethodKind::Call,
+                TexasPokerEvent::PlayerCalled {
+                    table_id,
+                    seat_index: event_seat,
+                    call_delta,
+                    round_state,
+                },
+            ) => Some((
+                *table_id,
+                *event_seat,
+                *call_delta,
+                false,
+                u8::MAX,
+                *round_state,
+            )),
+            (
+                MethodKind::Raise,
+                TexasPokerEvent::PlayerRaised {
+                    table_id,
+                    seat_index: event_seat,
+                    raise_delta,
+                    round_state,
+                    ..
+                },
+            ) => Some((
+                *table_id,
+                *event_seat,
+                *raise_delta,
+                false,
+                u8::MAX,
+                *round_state,
+            )),
+            (
+                MethodKind::Bet,
+                TexasPokerEvent::PlayerRaised {
+                    table_id,
+                    seat_index: event_seat,
+                    raise_delta,
+                    round_state,
+                    ..
+                },
+            ) => Some((
+                *table_id,
+                *event_seat,
+                *raise_delta,
+                false,
+                u8::MAX,
+                *round_state,
+            )),
+            _ => None,
+        };
+        if let Some(candidate) = candidate {
+            primary.push(candidate);
+        }
+    }
+    let [(event_table, event_seat, amount, folded, reason, event_round)] = primary.as_slice()
+    else {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{} replay must emit exactly one primary betting action event",
+            method_kind.method_name()
+        )));
+    };
+    if *event_table != pre.id || *event_seat != seat_index || *event_round != pre.round_state {
+        return Err(TexasAirError::SpecViolation(
+            "primary betting action event does not match dispatch scope".into(),
+        ));
+    }
+    let expected_fold_reason = match method_kind {
+        MethodKind::Fold | MethodKind::FoldWithProof => Some(FOLD_REASON_MANUAL),
+        MethodKind::AutoFold => Some(FOLD_REASON_AUTO_TIMEOUT),
+        MethodKind::ForceFold => Some(FOLD_REASON_FORCE_ADMIN),
+        _ => None,
+    };
+    if expected_fold_reason.is_some() != *folded
+        || expected_fold_reason.is_some_and(|expected| expected != *reason)
+    {
+        return Err(TexasAirError::SpecViolation(
+            "primary action event kind/reason does not match method".into(),
+        ));
+    }
+    let expected_money_kind = match method_kind {
+        MethodKind::Check
+        | MethodKind::Fold
+        | MethodKind::AutoFold
+        | MethodKind::ForceFold
+        | MethodKind::FoldWithProof => *amount == 0,
+        MethodKind::Call | MethodKind::Raise | MethodKind::Bet => !*folded,
+        _ => false,
+    };
+    if !expected_money_kind {
+        return Err(TexasAirError::SpecViolation(
+            "primary action event amount does not match method".into(),
+        ));
+    }
+    if method_kind == MethodKind::Bet {
+        let markers = events
+            .iter()
+            .filter_map(|event| match event {
+                TexasPokerEvent::PlayerBet {
+                    table_id,
+                    seat_index,
+                    amount,
+                    ..
+                } => Some((*table_id, *seat_index, *amount)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if markers.as_slice() != [(*event_table, *event_seat, *amount)] {
+            return Err(TexasAirError::SpecViolation(
+                "bet replay must emit one semantic PlayerBet marker matching PlayerRaised".into(),
+            ));
+        }
+    }
+
+    let post_stack = seat
+        .stack
+        .checked_sub(*amount)
+        .ok_or_else(|| TexasAirError::SpecViolation("seat-update stack debit underflow".into()))?;
+    let post_bet = seat
+        .bet
+        .checked_add(*amount)
+        .ok_or_else(|| TexasAirError::SpecViolation("seat-update bet credit overflow".into()))?;
+    let post_total_bet = seat.total_bet.checked_add(*amount).ok_or_else(|| {
+        TexasAirError::SpecViolation("seat-update total_bet credit overflow".into())
+    })?;
+    let post_all_in = seat.all_in || (*amount > 0 && post_stack == 0);
+    let mut acted_before = [false; COMPOSITION_SEATS];
+    let mut acted_after = [false; COMPOSITION_SEATS];
+    for (index, table_seat) in pre.seats.iter().enumerate() {
+        acted_before[index] = table_seat.acted_this_round;
+        acted_after[index] = table_seat.acted_this_round;
+    }
+    acted_after[usize::from(seat_index)] = true;
+    if matches!(method_kind, MethodKind::Raise | MethodKind::Bet) {
+        for (index, table_seat) in pre.seats.iter().enumerate() {
+            if index != usize::from(seat_index)
+                && table_seat.is_occupied()
+                && !table_seat.folded
+                && !table_seat.all_in
+                && !table_seat.is_waiting
+            {
+                acted_after[index] = false;
+            }
+        }
+    }
+
+    Ok(SeatUpdatePlan {
+        active: true,
+        seat_index,
+        pre_stack: seat.stack,
+        post_stack,
+        stack_debit: *amount,
+        pre_bet: seat.bet,
+        post_bet,
+        bet_credit: *amount,
+        pre_total_bet: seat.total_bet,
+        post_total_bet,
+        total_bet_credit: *amount,
+        pre_folded: seat.folded,
+        post_folded: seat.folded || *folded,
+        pre_all_in: seat.all_in,
+        post_all_in,
+        acted_before,
+        acted_after,
+    })
+}
+
+fn derive_bet_collection(
+    pre: &TexasPokerTable,
+    seat_update: &SeatUpdatePlan,
+    active: bool,
+    events: &[TexasPokerEvent],
+) -> TexasAirResult<BetCollectionPlan> {
+    if !active {
+        if events
+            .iter()
+            .any(|event| matches!(event, TexasPokerEvent::PotCollected { .. }))
+        {
+            return Err(TexasAirError::SpecViolation(
+                "inactive collection has PotCollected event".into(),
+            ));
+        }
+        return Ok(BetCollectionPlan::inactive());
+    }
+    let mut seat_bets = [0u64; COMPOSITION_SEATS];
+    for (index, seat) in pre.seats.iter().enumerate() {
+        seat_bets[index] = seat.bet;
+    }
+    if seat_update.active {
+        seat_bets[usize::from(seat_update.seat_index)] = seat_update.post_bet;
+    }
+    let collected_bets = seat_bets.iter().try_fold(0u64, |sum, bet| {
+        sum.checked_add(*bet)
+            .ok_or_else(|| TexasAirError::SpecViolation("collection bet sum overflow".into()))
+    })?;
+    let post_pot = pre
+        .pot
+        .checked_add(collected_bets)
+        .ok_or_else(|| TexasAirError::SpecViolation("collection pot overflow".into()))?;
+    let expected_seats = seat_bets
+        .iter()
+        .enumerate()
+        .filter_map(|(index, bet)| (*bet > 0).then_some(index as u8))
+        .collect::<Vec<_>>();
+    let pot_events = events
+        .iter()
+        .filter_map(|event| match event {
+            TexasPokerEvent::PotCollected {
+                table_id,
+                round_state,
+                pot_after,
+                collected_from_seats,
+            } => Some((*table_id, *round_state, *pot_after, collected_from_seats)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match pot_events.as_slice() {
+        [] if collected_bets == 0 => {}
+        [(table_id, round_state, pot_after, seats)]
+            if *table_id == pre.id
+                && *round_state == pre.round_state
+                && *pot_after == post_pot
+                && **seats == expected_seats => {}
+        _ => {
+            return Err(TexasAirError::SpecViolation(
+                "PotCollected event does not match fixed-seat collection projection".into(),
+            ));
+        }
+    }
+    Ok(BetCollectionPlan {
+        active: true,
+        pre_pot: pre.pot,
+        seat_bets,
+        collected_bets,
+        post_pot,
+    })
+}
+
+fn derive_round_advance(
+    pre: &TexasPokerTable,
+    post: &TexasPokerTable,
+    events: &[TexasPokerEvent],
+) -> TexasAirResult<RoundAdvancePlan> {
+    let rounds = events
+        .iter()
+        .filter_map(|event| match event {
+            TexasPokerEvent::RoundAdvanced {
+                table_id,
+                from_round,
+                to_round,
+                pot,
+                community_cards_count,
+            } => Some((
+                *table_id,
+                *from_round,
+                *to_round,
+                *pot,
+                *community_cards_count,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [] = rounds.as_slice() else {
+        let [(table_id, from_round, to_round, pot, community_cards_count)] = rounds.as_slice()
+        else {
+            return Err(TexasAirError::SpecViolation(
+                "replay emitted multiple RoundAdvanced events".into(),
+            ));
+        };
+        if *table_id != pre.id
+            || *from_round != pre.round_state
+            || *to_round != post.round_state
+            || *pot != post.pot
+            || *community_cards_count != post.community_cards.len() as u64
+            || post.betting_round.is_some()
+            || post.current_turn.is_some()
+        {
+            return Err(TexasAirError::SpecViolation(
+                "RoundAdvanced event does not match canonical post table".into(),
+            ));
+        }
+        return Ok(RoundAdvancePlan {
+            active: true,
+            pre_round_state: *from_round,
+            post_round_state: *to_round,
+            pre_reveal_phase: pre.reveal_token_state.reveal_phase,
+            post_reveal_phase: post.reveal_token_state.reveal_phase,
+            pre_current_turn: pre.current_turn.unwrap_or(NO_CURRENT_TURN),
+            post_current_turn: NO_CURRENT_TURN,
+            post_pot: *pot,
+            community_cards_count: *community_cards_count,
+        });
+    };
+    Ok(RoundAdvancePlan::inactive())
+}
+
+fn derive_settlement(
+    pre: &TexasPokerTable,
+    post: &TexasPokerTable,
+    collection: &BetCollectionPlan,
+    method_kind: MethodKind,
+    events: &[TexasPokerEvent],
+) -> TexasAirResult<SettlementStagePlan> {
+    let has_showdown = events
+        .iter()
+        .any(|event| matches!(event, TexasPokerEvent::SettlementPlanCommitted { .. }));
+    let no_showdown = events
+        .iter()
+        .filter_map(|event| match event {
+            TexasPokerEvent::HandEndedWithoutShowdown {
+                table_id,
+                winner_seat,
+                pot,
+                ..
+            } => Some((*table_id, *winner_seat, *pot)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if has_showdown && !no_showdown.is_empty() {
+        return Err(TexasAirError::SpecViolation(
+            "dispatch emitted both showdown and no-showdown settlement".into(),
+        ));
+    }
+    if has_showdown {
+        let commitment_tables = events
+            .iter()
+            .filter_map(|event| match event {
+                TexasPokerEvent::SettlementPlanCommitted { table_id, .. } => Some(*table_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if commitment_tables.as_slice() != [pre.id] {
+            return Err(TexasAirError::SpecViolation(
+                "showdown settlement commitment table mismatch".into(),
+            ));
+        }
+        require_canonical_reset(post, events, None)?;
+        let binding = SettlementPlanBinding::from_events(events)?;
+        return Ok(SettlementStagePlan {
+            active: true,
+            kind: SettlementKind::Showdown,
+            native_plan_digest: binding.plan_digest,
+            runout_count: binding.runout_count,
+            gross_pot: binding.gross_pot,
+            rake: binding.rake,
+            total_awards: binding.total_awards,
+            awards: binding.awards,
+            reset_applied: true,
+        });
+    }
+    if no_showdown.is_empty() {
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                TexasPokerEvent::WinnerAwarded { .. }
+                    | TexasPokerEvent::HandSettled { .. }
+                    | TexasPokerEvent::RakeCollected { .. }
+            )
+        }) {
+            return Err(TexasAirError::SpecViolation(
+                "settlement side events exist without a canonical settlement event".into(),
+            ));
+        }
+        return Ok(SettlementStagePlan::inactive());
+    }
+    let [(table_id, winner_seat, award)] = no_showdown.as_slice() else {
+        return Err(TexasAirError::SpecViolation(
+            "replay emitted multiple HandEndedWithoutShowdown events".into(),
+        ));
+    };
+    if *table_id != pre.id || !collection.active {
+        return Err(TexasAirError::SpecViolation(
+            "no-showdown settlement is missing its collection stage".into(),
+        ));
+    }
+    if pre
+        .seats
+        .iter()
+        .any(|seat| seat.is_occupied() && (seat.pending_addon != 0 || seat.want_leave))
+    {
+        return Err(TexasAirError::UnsupportedBettingTransition(format!(
+            "{}: terminal reset with pending addon/leave requires a dedicated reset-flow component",
+            method_kind.method_name()
+        )));
+    }
+    require_canonical_reset(post, events, Some(RESET_REASON_LAST_PLAYER_STANDING))?;
+    let winner_index = usize::from(*winner_seat);
+    let pre_winner = pre.seats.get(winner_index).ok_or_else(|| {
+        TexasAirError::SpecViolation("no-showdown winner seat is outside table".into())
+    })?;
+    let post_winner = post.seats.get(winner_index).ok_or_else(|| {
+        TexasAirError::SpecViolation("post-reset winner seat is outside table".into())
+    })?;
+    if !post_winner.is_occupied() || post_winner.player != pre_winner.player {
+        return Err(TexasAirError::UnsupportedBettingTransition(
+            "terminal reset removed or replaced the no-showdown winner".into(),
+        ));
+    }
+    let gross_pot = collection.post_pot;
+    let rake = gross_pot.checked_sub(*award).ok_or_else(|| {
+        TexasAirError::SpecViolation("no-showdown award exceeds gross pot".into())
+    })?;
+    if pre_winner.stack.checked_add(*award) != Some(post_winner.stack) {
+        return Err(TexasAirError::SpecViolation(
+            "no-showdown award does not match winner stack delta".into(),
+        ));
+    }
+    let rake_events = events
+        .iter()
+        .filter_map(|event| match event {
+            TexasPokerEvent::RakeCollected {
+                table_id,
+                pot_before,
+                rake_amount,
+                pot_after,
+                ..
+            } => Some((*table_id, *pot_before, *rake_amount, *pot_after)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match rake_events.as_slice() {
+        [] if rake == 0 => {}
+        [(rake_table, pot_before, rake_amount, pot_after)]
+            if *rake_table == pre.id
+                && *pot_before == gross_pot
+                && *rake_amount == rake
+                && *pot_after == *award => {}
+        _ => {
+            return Err(TexasAirError::SpecViolation(
+                "RakeCollected event does not match no-showdown settlement".into(),
+            ));
+        }
+    }
+    let mut awards = [0u64; COMPOSITION_SEATS];
+    awards[winner_index] = *award;
+    let native_plan_digest = hash_borsh(
+        NO_SHOWDOWN_DOMAIN,
+        &(
+            pre.id,
+            post.hand_id,
+            post.call_seq,
+            *winner_seat,
+            gross_pot,
+            rake,
+            *award,
+            awards,
+        ),
+    )?;
+    Ok(SettlementStagePlan {
+        active: true,
+        kind: SettlementKind::WithoutShowdown,
+        native_plan_digest,
+        runout_count: 0,
+        gross_pot,
+        rake,
+        total_awards: *award,
+        awards,
+        reset_applied: true,
+    })
+}
+
+fn require_canonical_reset(
+    post: &TexasPokerTable,
+    events: &[TexasPokerEvent],
+    expected_reason: Option<u8>,
+) -> TexasAirResult<()> {
+    if post.round_state != ROUND_WAITING
+        || post.betting_round.is_some()
+        || post.current_turn.is_some()
+        || post.pot != 0
+    {
+        return Err(TexasAirError::SpecViolation(
+            "settlement did not reset table to WAITING".into(),
+        ));
+    }
+    let resets = events
+        .iter()
+        .filter_map(|event| match event {
+            TexasPokerEvent::HandReset {
+                table_id,
+                reason,
+                round_state,
+            } => Some((*table_id, *reason, *round_state)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match resets.as_slice() {
+        [] => {
+            // Normal settle_hand/end_without_showdown call reset_for_next_hand
+            // directly and do not emit a separate HandReset indexer event.
+            // The complete canonical post image above is the reset authority.
+        }
+        [(table_id, reason, round_state)]
+            if *table_id == post.id
+                && *round_state == ROUND_WAITING
+                && !expected_reason.is_some_and(|expected| expected != *reason) => {}
+        _ => {
+            return Err(TexasAirError::SpecViolation(
+                "HandReset event does not match settlement output".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn hash_borsh<T: BorshSerialize>(domain: &[u8], value: &T) -> TexasAirResult<[u8; 32]> {
+    let encoded = borsh::to_vec(value).map_err(|error| {
+        TexasAirError::SpecViolation(format!("composite plan serialization failed: {error}"))
+    })?;
+    Ok(hash_bytes(domain, &encoded))
+}
+
+fn hash_bytes(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Blake2bVar::new(32).expect("32 <= Blake2b maximum output");
+    hasher.update(domain);
+    hasher.update(&(payload.len() as u64).to_le_bytes());
+    hasher.update(payload);
+    let mut digest = [0u8; 32];
+    hasher
+        .finalize_variable(&mut digest)
+        .expect("configured Blake2b output length is valid");
+    digest
+}
+
+#[cfg(test)]
+mod tests {
+    use poker_l1::object_model::ObjectID;
+    use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
+    use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
+    use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
+
+    use super::*;
+
+    fn table() -> TexasPokerTable {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0x11; 20], 7),
+            "composition".into(),
+            [0x22; 20],
+            2,
+            50,
+            100,
+        );
+        for (index, seat) in table.seats.iter_mut().enumerate() {
+            seat.player = [index as u8 + 1; 20];
+            seat.stack = 1_000;
+            seat.is_waiting = false;
+        }
+        table.round_state = ROUND_PREFLOP;
+        table.betting_round = Some(BettingRound::new(100, 100));
+        table.current_turn = Some(0);
+        table.hand_id = 3;
+        table.call_seq = 8;
+        table
+    }
+
+    #[test]
+    fn mid_round_action_has_only_seat_stage_active() {
+        let pre = table();
+        let mut post = pre.clone();
+        post.seats[0].acted_this_round = true;
+        post.current_turn = Some(1);
+        post.call_seq += 1;
+        let events = vec![TexasPokerEvent::PlayerChecked {
+            table_id: pre.id,
+            seat_index: 0,
+            round_state: ROUND_PREFLOP,
+        }];
+        let plan =
+            derive_composite_transition_plan(MethodKind::Check, &pre, &post, Some(0), &events)
+                .unwrap();
+        assert!(plan.seat_update.active);
+        assert!(!plan.bet_collection.active);
+        assert!(!plan.round_advance.active);
+        assert!(!plan.settlement.active);
+        plan.validate_composition().unwrap();
+    }
+
+    #[test]
+    fn zero_bet_round_advance_still_has_collection_stage() {
+        let mut pre = table();
+        pre.round_state = ROUND_FLOP;
+        pre.betting_round = Some(BettingRound::new(100, 0));
+        pre.seats[1].acted_this_round = true;
+        let mut post = pre.clone();
+        post.seats[0].acted_this_round = true;
+        post.round_state = poker_l1::vm::contracts::texas_poker::constants::ROUND_TURN;
+        post.betting_round = None;
+        post.current_turn = None;
+        post.reveal_token_state.reveal_phase =
+            poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN;
+        post.call_seq += 1;
+        let events = vec![
+            TexasPokerEvent::PlayerChecked {
+                table_id: pre.id,
+                seat_index: 0,
+                round_state: ROUND_FLOP,
+            },
+            TexasPokerEvent::RoundAdvanced {
+                table_id: pre.id,
+                from_round: ROUND_FLOP,
+                to_round: post.round_state,
+                pot: 0,
+                community_cards_count: 0,
+            },
+        ];
+        let plan =
+            derive_composite_transition_plan(MethodKind::Check, &pre, &post, Some(0), &events)
+                .unwrap();
+        assert!(plan.bet_collection.active);
+        assert_eq!(plan.bet_collection.collected_bets, 0);
+        assert!(plan.round_advance.active);
+        assert_eq!(
+            plan.link(StageKind::BetCollection).output_digest,
+            plan.link(StageKind::RoundAdvance).input_digest
+        );
+    }
+
+    #[test]
+    fn native_terminal_fold_splits_collection_and_settlement() {
+        let mut pre = table();
+        pre.pot = 50;
+        pre.seats[0].bet = 25;
+        pre.seats[0].total_bet = 25;
+        pre.seats[1].bet = 25;
+        pre.seats[1].total_bet = 25;
+        pre.betting_round = Some(BettingRound::new(100, 25));
+        pre.chip_pool = pre
+            .seats
+            .iter()
+            .map(|seat| seat.stack + seat.bet)
+            .sum::<u64>()
+            + pre.pot;
+        let mut post = pre.clone();
+        let mut events = Vec::new();
+        poker_l1::vm::contracts::texas_poker::state_machine::apply_fold(&mut post, 0, &mut events)
+            .unwrap();
+        post.call_seq += 1;
+
+        let plan =
+            derive_composite_transition_plan(MethodKind::Fold, &pre, &post, Some(0), &events)
+                .unwrap();
+        assert!(plan.seat_update.active);
+        assert!(plan.bet_collection.active);
+        assert_eq!(plan.bet_collection.collected_bets, 50);
+        assert!(!plan.round_advance.active);
+        assert_eq!(plan.settlement.kind, SettlementKind::WithoutShowdown);
+        assert_eq!(plan.settlement.gross_pot, 100);
+        assert_eq!(plan.settlement.total_awards, 100);
+        assert_eq!(plan.settlement.awards[1], 100);
+        plan.validate_composition().unwrap();
+    }
+}

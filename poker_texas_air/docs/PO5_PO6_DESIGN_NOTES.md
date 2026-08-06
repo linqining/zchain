@@ -88,9 +88,54 @@ program，这不属于当前 host-native + digest 架构。
 terminal `call` / `raise` / `bet` 的 clean round completion 已支持：native replay 先重建动作后
 的下注状态，再约束所有 live `seat.bet` 收池、`pre_pot + collected_bets = post_pot`、清零
 seat bets 和下一 reveal phase。仍未覆盖的上述分支不能只增加一个布尔列完成：VM transition
-会同时扫描多个 seat、推进 round/reveal phase，甚至执行 settlement/reset。正确方向是把 seat
-update、bet collection、round advance 和 settlement 拆成可组合的多 AIR，或继续在现有单步
-AIR 入口 fail-closed。
+会同时扫描多个 seat、推进 round/reveal phase，甚至执行 settlement/reset。因此已先建立下述
+四段可组合 AIR 基础层；现有 method AIR 在迁移完成前仍保留原入口和 fail-closed 范围。
+
+### 可组合 transition plan / multi-AIR 基础层
+
+新增 `airs::composition`，canonical native replay 会把一个原子 dispatch 规范化为固定顺序：
+
+```text
+dispatch pre image
+  -> SeatUpdate
+  -> BetCollection
+  -> RoundAdvance
+  -> Settlement/Reset
+  -> dispatch post image
+```
+
+`CompositeTransitionPlan` 固定绑定 schema version、method/table/hand/call scope、完整 canonical
+pre/post table image digest 和四段业务 payload。每段都有相同的 stage header：
+
+- `active + stage_kind + stage_index`；
+- 完整 256-bit `plan_digest`（16 个精确 u16/M31 limb）；
+- 完整 256-bit `input_digest` / `output_digest`；
+- 相邻段强制使用同一 boundary digest。
+
+这里的 boundary digest 是 verifier 从完整原子 replay 生成的 projection commitment，不冒充链上
+持久化的 intermediate table root。这样当前可以把 component 嵌入单 method AIR，未来拆成独立
+proof 时可以直接检查 `stage[i].output_digest == stage[i+1].input_digest`，而不要求 VM 在一个
+atomic dispatch 中额外落盘四份中间 table。
+
+四个固定宽度 component 当前包含：
+
+- `SeatUpdate`：acting seat 的 stack/bet/total_bet checked-u64 delta、fold/all-in 和固定 9 座
+  `acted_this_round` 前后投影；raise/bet 对其他可行动座位的 acted reset 也进入 payload。
+- `BetCollection`：action 后固定 9 座 seat bets，使用 9 段 4×16-bit ripple-carry 在 AIR 内求和，
+  再约束 `pre_pot + collected_bets = post_pot`；全员 check 的零金额 collection 仍是 active stage。
+- `RoundAdvance`：pre/post round、reveal phase、current turn sentinel、pot 和 community-card count，
+  并限制合法的 preflop→flop→turn→river→showdown 边。
+- `Settlement`：复用 showdown `SettlementPlanBinding`，无摊牌路径生成 domain-separated deterministic
+  plan digest；固定 9 座 awards 在 AIR 内逐座求和，并约束 `total_awards + rake = gross_pot` 和 reset。
+
+production verifier 已在 fold/check/call/raise/bet/auto-fold/force-fold、`fold_with_proof` 和
+`submit_player_reveal_tokens` 的 canonical replay 后派生并验证该 plan，因而旧 method row 与新
+component ABI 迁移期间不会形成第二套可自由选择的业务解释。
+
+当前阶段不声称已经完成独立 multi-proof bundle 或递归聚合：`AirStatement` / `TexasPublicInputs`
+尚未加入 component kind、plan digest、stage index 和 boundary commitments，prover 也还没有为四段
+分别签发 proof。下一步是在保持上述 ABI 不变的前提下，把旧 `EndBettingRound` /
+`EndWithoutShowdown` 嵌入列替换为对应 component row，再扩展 statement/public inputs 和 proof bundle。
 
 ## 其他仍存在的证明缺口
 
