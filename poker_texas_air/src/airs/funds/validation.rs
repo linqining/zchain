@@ -148,7 +148,7 @@ pub(crate) fn validate_addon(
                 input.seat_index
             ))
         })?;
-    let row = AddonRow::active(
+    let mut row = AddonRow::active(
         &input,
         pre_seat.pending_addon,
         tables.pre.chip_pool,
@@ -165,6 +165,8 @@ pub(crate) fn validate_addon(
         tables.pre.round_state,
         tables.post.round_state,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
     validate_row(public_inputs, &row.to_vec(), "addon")
 }
 
@@ -194,7 +196,7 @@ pub(crate) fn validate_rebuy(
                 input.seat_index
             ))
         })?;
-    let row = RebuyRow::active(
+    let mut row = RebuyRow::active(
         &input,
         pre_seat.stack,
         tables.pre.chip_pool,
@@ -211,5 +213,7 @@ pub(crate) fn validate_rebuy(
         tables.pre.round_state,
         tables.post.round_state,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
     validate_row(public_inputs, &row.to_vec(), "rebuy")
 }

@@ -13,8 +13,8 @@
   `VerificationReceipt`。
 - `VerifiedChain` 检查 table/hand、连续 call sequence、完整 state root/version 链；
   `ExpectedChainAnchor` 再绑定精确 receipt 数量、调用 digest 和首尾状态。
-- consensus anchor 路径会验证 block/certificate 与 SMT inclusion proof，避免仅从同一批
-  未认证 task 反推 anchor。
+- consensus anchor 路径会验证 block/certificate、SMT inclusion proof 和每笔 transaction
+  signature，并从签名 pubkey 重建 caller，避免仅从同一批未认证 task 反推 anchor。
 - 六条 Mental Poker crypto route 均有 stage-3 dual-proof package：
   `fold_with_proof`、
   `join_and_shuffle`、`submit_shuffle_v2`、`leave_with_proof`、
@@ -165,11 +165,44 @@ prove/verify 耗时，计时器默认关闭。
 `fold_with_proof` / terminal reveal 这类 composite method，它不能替代 durable v2 package 中的
 四份 component proof，也不能单独作为完整 composite archive。
 
-## 其他仍存在的证明缺口
+## 本轮关闭的管理员授权与金额缺口
 
-- `kick_player` / `force_fold` 的管理员签名尚未放入 AIR；权限当前依赖 canonical dispatch
-  replay 和已认证调用上下文。
-- 金额字段尚未全部统一为完整 nonnegative/range/checked-u64 AIR 约束。
+- `kick_player` / `force_fold` 新增独立 `AdminAuthorizationBinding`。production prover 与
+  verifier 都从 canonical dispatch 重建 table-creator 权限，并把 ABI、role、完整 256-bit
+  request digest 与 receipt digest 放入 AIR。request 覆盖 caller/pubkey、creator、链/块/时间、
+  selector/raw args、table/hand/call/version、pre/post root 和 dispatch digest，不能再用
+  prover 自报的 `is_admin = 1` 代替授权。
+- 签名算法本身仍不在 STWO 中模拟。最终生产接受必须走 consensus-derived anchor；anchor
+  现在显式验证 included transaction 的 ECDSA/Ed25519 签名，并将同一 signed call 的 dispatch
+  digest 与 method receipt 链比对。未锚定的单 method/chain API 仍只是开发与离线语义验证接口。
+- 所有 production trace-visible u64 金额都由 verifier 从 canonical table/input 重建为完整
+  4×16-bit limb，并由 `BoundAir` 固定整行；资金加减使用 ripple carry/borrow 与最高 limb
+  无溢出约束。本轮具体关闭了：`check` 的 current/seat bet 高 limb、`kick_player` 的完整
+  `refund = pre_stack + pre_pending_addon`、`start_hand` 的 ante 高 limb以及
+  `pre_pot + ante_collected = post_pot`、auto/force-fold、addon/rebuy 与 reconstruct 路径中
+  曾经被零占位掩盖的真实 pot 投影。复审又补齐了 create/join/leave/reset、
+  join-and-shuffle/submit-shuffle/leave-with-proof 的 canonical pre/post pot；不改变 pot 的路径
+  使用完整 4-limb equality，reset/create 则显式约束 canonical post pot 为零。
+
+## 重新审核后仍存在的证明缺口
+
+- 管理员签名、Mental Poker BLS12-381 proof、state-root Poseidon preimage hash、showdown hand
+  evaluator/side-pot planner 仍由 host-native verifier 执行；AIR 绑定其 canonical 输入、输出或
+  receipt digest，不提供“恶意 host 下仍可独立验证”的执行证明。
+- terminal `auto_fold` / `force_fold` 仍只接受 mid-round 分支；如果该 fold 直接触发
+  last-player settlement/reset，method AIR 会 fail-closed。普通 `fold` / `fold_with_proof` 的
+  对应终局分支已经支持。
+- `kick_player` 只接受普通 `version + 1` 路径，以及已规范化的 `WithoutShowdown` / `ResetOnly`
+  双 bump cascade；其他未来出现的 multi-version advance/settlement 继续 fail-closed。
+- `tick` 是多分支 native dispatcher。timeout/deadline/time-bank 已有完整 checked-u64 AIR，
+  但由 tick 间接触发的 start-hand、settlement 或修复分支仍依赖 canonical native replay，尚未
+  统一拆成对应 component proof。
+- `reset_for_next_hand`、`join_and_shuffle`、`leave_with_proof` 的完整座位/资金语义由 durable
+  component bundle 承担；单独拿 method STARK 只证明方法投影与 canonical pot，不应被解释为
+  独立完整结算证明。
+- consensus anchor 的 tx-root 是 order-independent SMT；某 table/hand 的完整有序调用范围仍
+  依赖 `call_seq`、端点 snapshot 和 Bullshark projection 一致性。
+- 当前没有 sound recursive/succinct aggregate proof；descriptor-only Aggregator 生产入口仍拒绝。
 - `TexasPokerTable` Borsh ABI 已升级为 schema v2 并显式校验；旧 v1 singleton table 不会被
   静默解释为 v2，部署升级时必须迁移或重建。
 - 多 validator `CommitVote` 已接入 P2P 签名校验、按 signer 去重、2/3 quorum 收集、

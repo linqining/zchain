@@ -202,6 +202,10 @@ impl FrameworkEval for CreateTableAir {
         eval.add_constraint(is_active.clone() * output_pot_1.clone());
         eval.add_constraint(is_active.clone() * output_pot_2.clone());
         eval.add_constraint(is_active.clone() * output_pot_3.clone());
+        for limb in 0..4 {
+            eval.add_constraint(is_active.clone() * common.pre_pot[limb].clone());
+            eval.add_constraint(is_active.clone() * common.post_pot[limb].clone());
+        }
 
         // 7. 业务约束 5：output_button == 0
         eval.add_constraint(is_active.clone() * output_button.clone());
@@ -417,7 +421,7 @@ pub fn validate_public_inputs(
         ));
     }
 
-    let expected_row = CreateTableRow::active(
+    let mut expected_row = CreateTableRow::active(
         &air.input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -426,8 +430,10 @@ pub fn validate_public_inputs(
         public_inputs.call_seq,
         pre.version,
         post.version,
-    )
-    .to_vec();
+    );
+    expected_row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(pre.pot);
+    expected_row.common.post_pot = crate::airs::common::u64_to_m31_limbs(post.pot);
+    let expected_row = expected_row.to_vec();
     let trusted_row = public_inputs.require_expected_trace_row(expected_row.len())?;
     if trusted_row != expected_row {
         return Err(TexasAirError::SpecViolation(

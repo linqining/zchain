@@ -111,6 +111,9 @@ impl FrameworkEval for ResetForNextHandAir {
         eval.add_constraint(is_active.clone() * post_pending_1);
         eval.add_constraint(is_active.clone() * post_pending_2);
         eval.add_constraint(is_active.clone() * post_pending_3);
+        for limb in &common.post_pot {
+            eval.add_constraint(is_active.clone() * limb.clone());
+        }
 
         // 约束（Gap 6 part 1）：shuffle_phase == input.shuffle_phase
         let expected_phase: E::F = M31::from(u32::from(self.input.shuffle_phase)).into();

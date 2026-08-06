@@ -308,7 +308,7 @@ impl FrameworkEval for AutoFoldAir {
         eval.add_constraint(common.round_state_unchanged());
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
-        // 约束 5（审计共性，degree-2 limb0）：pot 不变（auto_fold 不改变 pot）。
+        // 约束 5（审计共性）：pot 完整 4-limb 不变（auto_fold 不改变 pot）。
         for __c in common.pot_unchanged_4limb() {
             eval.add_constraint(__c);
         }

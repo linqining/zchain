@@ -14,7 +14,10 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
-use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
+use crate::airs::common::{
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
+    u64_to_m31_limbs,
+};
 use crate::method_kind::MethodKind;
 
 /// `start_hand` 业务特定列布局。
@@ -28,18 +31,20 @@ pub mod cols {
     pub const OUTPUT_NEW_ROUND_STATE: usize = COMMON_NUM_COLUMNS + 2;
     /// `OUTPUT_ANTE_MODE` 列（0=NONE, 1=NORMAL, 2=BBA）。
     pub const OUTPUT_ANTE_MODE: usize = COMMON_NUM_COLUMNS + 3;
-    /// `OUTPUT_ANTE_AMOUNT_LIMB0` 列（ante_amount 的低 16 位）。
-    pub const OUTPUT_ANTE_AMOUNT_0: usize = COMMON_NUM_COLUMNS + 4;
-    /// `OUTPUT_ANTE_COLLECTED_LIMB0` 列（ante_collected 的低 16 位）。
-    pub const OUTPUT_ANTE_COLLECTED_0: usize = COMMON_NUM_COLUMNS + 5;
+    /// `OUTPUT_ANTE_AMOUNT` 起始列（完整 4×16-bit u64）。
+    pub const OUTPUT_ANTE_AMOUNT_BASE: usize = COMMON_NUM_COLUMNS + 4;
+    /// `OUTPUT_ANTE_COLLECTED` 起始列（完整 4×16-bit u64）。
+    pub const OUTPUT_ANTE_COLLECTED_BASE: usize = COMMON_NUM_COLUMNS + 8;
     /// `INPUT_ACTIVE_COUNT_INV` 列（Gap 4 witness：active_count*(active_count-1) 的乘法逆元）。
-    pub const INPUT_ACTIVE_COUNT_INV: usize = COMMON_NUM_COLUMNS + 6;
+    pub const INPUT_ACTIVE_COUNT_INV: usize = COMMON_NUM_COLUMNS + 12;
     /// `INPUT_ACTIVE_COUNT_PROD` 列（Gap 4 witness：active_count*(active_count-1)）。
     /// 引入此中间列把 `prod * inv == 1` 约束降到 degree-2（两列乘积），
     /// 否则 `active_count*(active_count-1)*inv` 是三列乘积，degree 超过 Stwo 上界。
-    pub const INPUT_ACTIVE_COUNT_PROD: usize = COMMON_NUM_COLUMNS + 7;
+    pub const INPUT_ACTIVE_COUNT_PROD: usize = COMMON_NUM_COLUMNS + 13;
+    /// `pre_pot + ante_collected = post_pot` 的 ripple carry。
+    pub const ANTE_POT_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 14;
     /// 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 8;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 17;
 }
 
 /// `start_hand` 输入参数。
@@ -53,8 +58,12 @@ pub struct StartHandInput {
     pub ante_mode: u8,
     /// Ante 金额。
     pub ante_amount: u64,
-    /// 本手累积 ante 总额（NORMAL = active_count * ante_amount, BBA = ante_amount, NONE = 0）。
+    /// 本手实际收取的 ante 总额；短码座位只缴纳其剩余 stack。
     pub ante_collected: u64,
+    /// 调用前底池。
+    pub pre_pot: u64,
+    /// 调用后底池。
+    pub post_pot: u64,
 }
 
 /// `start_hand` AIR。
@@ -104,11 +113,26 @@ impl FrameworkEval for StartHandAir {
         let output_new_button = eval.next_trace_mask();
         let output_new_round_state = eval.next_trace_mask();
         let output_ante_mode = eval.next_trace_mask();
-        let output_ante_amount_0 = eval.next_trace_mask();
-        let output_ante_collected_0 = eval.next_trace_mask();
+        let output_ante_amount = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let output_ante_collected = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         // Gap 4 witnesses：active_count*(active_count-1) 及其乘法逆元
         let input_active_count_inv = eval.next_trace_mask();
         let input_active_count_prod = eval.next_trace_mask();
+        let ante_pot_add_carry = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
 
         // 约束 1：active_count == input.active_count
         let expected_count: E::F = M31::from(u32::from(self.input.active_count)).into();
@@ -146,17 +170,46 @@ impl FrameworkEval for StartHandAir {
         let expected_ante_mode: E::F = M31::from(u32::from(self.input.ante_mode)).into();
         eval.add_constraint(is_active.clone() * (output_ante_mode - expected_ante_mode));
 
-        // 约束 5（Ante）：ante_amount limb 0 一致
-        let expected_ante_amt_0: E::F = M31::from((self.input.ante_amount & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (output_ante_amount_0 - expected_ante_amt_0));
-
-        // 约束 6（Ante 核心不变量）：ante_collected limb 0 一致
+        // 约束 5/6（Ante）：金额与累计金额均完整绑定为 canonical u64 limbs。
         //   - NONE 模式 (mode==0)：host 设置 ante_collected = 0
-        //   - NORMAL/BBA：host 按 active_count * ante_amount 计算
-        //   trace 中 collected_0 必须与公开输入一致；state_root 验证捕获实际状态正确性
-        let expected_collected_0: E::F =
-            M31::from((self.input.ante_collected & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active * (output_ante_collected_0 - expected_collected_0));
+        //   - NORMAL/BBA：host 按 canonical per-seat `min(ante_amount, stack)` 结果重建
+        // verifier 从 canonical post-state 重建两个 u64，因此逐 limb 常量等式同时固定
+        // 16-bit range，拒绝跨 limb 截断或高位替换。
+        let expected_amount = u64_to_m31_limbs(self.input.ante_amount);
+        let expected_collected = u64_to_m31_limbs(self.input.ante_collected);
+        for limb in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_ante_amount[limb].clone() - E::F::from(expected_amount[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_ante_collected[limb].clone() - E::F::from(expected_collected[limb])),
+            );
+        }
+
+        // 约束 7：ante 资金完整进入 pot，使用 4×16-bit ripple carry，并拒绝
+        // 最高 limb overflow。pre/post pot 同样来自 verifier 重建的 canonical u64。
+        let expected_pre_pot = u64_to_m31_limbs(self.input.pre_pot);
+        let expected_post_pot = u64_to_m31_limbs(self.input.post_pot);
+        for limb in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (common.pre_pot[limb].clone() - E::F::from(expected_pre_pot[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (common.post_pot[limb].clone() - E::F::from(expected_post_pot[limb])),
+            );
+        }
+        for constraint in common.limb4_delta(
+            &common.pre_pot,
+            &common.post_pot,
+            &output_ante_collected,
+            &ante_pot_add_carry,
+        ) {
+            eval.add_constraint(constraint);
+        }
 
         eval
     }
@@ -175,14 +228,16 @@ pub struct StartHandRow {
     pub output_new_round_state: M31,
     /// Ante 模式。
     pub output_ante_mode: M31,
-    /// Ante 金额 limb 0。
-    pub output_ante_amount_0: M31,
-    /// Ante 已收 limb 0。
-    pub output_ante_collected_0: M31,
+    /// Ante 金额（完整 4×16-bit u64）。
+    pub output_ante_amount: [M31; 4],
+    /// Ante 已收（完整 4×16-bit u64）。
+    pub output_ante_collected: [M31; 4],
     /// Gap 4 witness：active_count*(active_count-1) 的乘法逆元（M31 域内）。
     pub input_active_count_inv: M31,
     /// Gap 4 witness：active_count*(active_count-1)（中间列，拆三列乘积为两个两列乘积）。
     pub input_active_count_prod: M31,
+    /// ante 加入 pot 的 3 个 ripple-carry bit。
+    pub ante_pot_add_carry: [M31; 3],
 }
 
 impl StartHandRow {
@@ -218,8 +273,8 @@ impl StartHandRow {
                 post_version,
                 0, // pre = ROUND_WAITING
                 0, // post = ROUND_WAITING（合约 start_hand 后 round_state 不变）
-                0,
-                0,
+                input.pre_pot,
+                input.post_pot,
                 0,
                 0,
             ),
@@ -227,10 +282,17 @@ impl StartHandRow {
             output_new_button: u8_to_m31(input.new_button),
             output_new_round_state: M31::from(0u32), // ROUND_WAITING
             output_ante_mode: u8_to_m31(input.ante_mode),
-            output_ante_amount_0: M31::from((input.ante_amount & 0xFFFF) as u32),
-            output_ante_collected_0: M31::from((input.ante_collected & 0xFFFF) as u32),
+            output_ante_amount: u64_to_m31_limbs(input.ante_amount),
+            output_ante_collected: u64_to_m31_limbs(input.ante_collected),
             input_active_count_inv: active_count_inv,
             input_active_count_prod: active_count_prod,
+            ante_pot_add_carry: if input.pre_pot.checked_add(input.ante_collected)
+                == Some(input.post_pot)
+            {
+                compute_add_carries(input.pre_pot, input.ante_collected)
+            } else {
+                [ZERO; 3]
+            },
         }
     }
     /// padding 行。
@@ -242,11 +304,12 @@ impl StartHandRow {
             output_new_button: ZERO,
             output_new_round_state: ZERO,
             output_ante_mode: ZERO,
-            output_ante_amount_0: ZERO,
-            output_ante_collected_0: ZERO,
+            output_ante_amount: [ZERO; 4],
+            output_ante_collected: [ZERO; 4],
             // padding 行 is_active=0，约束自动满足（gated），witness 值任意；用 ZERO。
             input_active_count_inv: ZERO,
             input_active_count_prod: ZERO,
+            ante_pot_add_carry: [ZERO; 3],
         }
     }
     /// 转列向量。
@@ -257,10 +320,11 @@ impl StartHandRow {
         v.push(self.output_new_button);
         v.push(self.output_new_round_state);
         v.push(self.output_ante_mode);
-        v.push(self.output_ante_amount_0);
-        v.push(self.output_ante_collected_0);
+        v.extend_from_slice(&self.output_ante_amount);
+        v.extend_from_slice(&self.output_ante_collected);
         v.push(self.input_active_count_inv);
         v.push(self.input_active_count_prod);
+        v.extend_from_slice(&self.ante_pot_add_carry);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

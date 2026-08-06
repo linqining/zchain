@@ -87,6 +87,7 @@ use crate::airs::lifecycle::reset_for_next_hand::{
 };
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use crate::airs::lifecycle::tick::{TickAir, TickRow, canonical_input as canonical_tick_input};
+use crate::authorization_binding::AdminAuthorizationBinding;
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
@@ -564,7 +565,7 @@ impl Orchestrator {
         let pre_version = task.pre_table.version;
         let post_version = task.post_table.version;
 
-        let row = CreateTableRow::active(
+        let mut row = CreateTableRow::active(
             &input,
             state_root_to_m31_limbs(pre_root),
             state_root_to_m31_limbs(post_root),
@@ -574,6 +575,8 @@ impl Orchestrator {
             pre_version,
             post_version,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             CreateTableAir::num_columns(),
@@ -712,7 +715,7 @@ impl Orchestrator {
             player_addr: *player,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let row = JoinTableRow::active(
+        let mut row = JoinTableRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -725,6 +728,8 @@ impl Orchestrator {
             task.pre_table.chip_pool,
             task.pre_table.addon_pool,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             JoinTableAir::num_columns(),
@@ -790,7 +795,7 @@ impl Orchestrator {
                 "leave_table post funds do not match non-underflowing pool subtraction".into(),
             ));
         }
-        let row = LeaveTableRow::active(
+        let mut row = LeaveTableRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -806,6 +811,8 @@ impl Orchestrator {
             task.pre_table.addon_pool,
             task.post_table.addon_pool,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             LeaveTableAir::num_columns(),
@@ -903,6 +910,8 @@ impl Orchestrator {
             ante_mode: task.post_table.ante_mode,
             ante_amount: task.post_table.ante_amount,
             ante_collected: task.post_table.ante_collected,
+            pre_pot: task.pre_table.pot,
+            post_pot: task.post_table.pot,
         };
         // Gap 4 witness：active_count*(active_count-1) 在 M31 域内的乘法逆元 + 乘积。
         // active_count ≥ 2（合约 start_hand 前置）时该乘积非零，inverse 存在。
@@ -965,7 +974,7 @@ impl Orchestrator {
         )?;
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
-        let row = TickRow::active(
+        let mut row = TickRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -977,6 +986,8 @@ impl Orchestrator {
             pre_r,
             post_r,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             TickAir::num_columns(),
@@ -1017,7 +1028,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_r = task.pre_table.round_state;
-        let row = ResetForNextHandRow::active(
+        let mut row = ResetForNextHandRow::active(
             &input,
             0, // _pre_pending_addon（未用）
             srm(pre_root),
@@ -1029,6 +1040,8 @@ impl Orchestrator {
             post_v,
             pre_r,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             ResetForNextHandAir::num_columns(),
@@ -1427,7 +1440,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
-        let row = AutoFoldRow::active(
+        let mut row = AutoFoldRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -1439,6 +1452,8 @@ impl Orchestrator {
             pre_r,
             post_r,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             AutoFoldAir::num_columns(),
@@ -1476,13 +1491,30 @@ impl Orchestrator {
                 seat_index: *seat_index,
             },
         )?;
+        let authorization = AdminAuthorizationBinding::verify_table_creator(
+            MethodKind::ForceFold,
+            &task.context,
+            &task.selector,
+            &task.raw_args,
+            task.pre_table.creator,
+            task.table_id,
+            task.hand_id,
+            task.call_seq,
+            task.pre_table.version,
+            task.post_table.version,
+            pre_root,
+            post_root,
+            pi.dispatch_call_digest,
+        )?
+        .air_binding();
         let input = ForceFoldInput {
             seat_index: *seat_index,
             post_current_turn,
+            authorization,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
-        let row = ForceFoldRow::active(
+        let mut row = ForceFoldRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -1494,6 +1526,8 @@ impl Orchestrator {
             pre_r,
             post_r,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             ForceFoldAir::num_columns(),
@@ -1585,9 +1619,27 @@ impl Orchestrator {
                 .ok_or_else(|| {
                     TexasAirError::SpecViolation("kick_player refund overflow".into())
                 })?,
+            pre_stack: pre_seat.stack,
+            pre_pending_addon: pre_seat.pending_addon,
             kicked_bet: pre_seat.bet,
             version_increment,
             reset_cascade,
+            authorization: AdminAuthorizationBinding::verify_table_creator(
+                MethodKind::KickPlayer,
+                &task.context,
+                &task.selector,
+                &task.raw_args,
+                task.pre_table.creator,
+                task.table_id,
+                task.hand_id,
+                task.call_seq,
+                task.pre_table.version,
+                task.post_table.version,
+                pre_root,
+                post_root,
+                pi.dispatch_call_digest,
+            )?
+            .air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
@@ -1644,7 +1696,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
-        let row = AddonRow::active(
+        let mut row = AddonRow::active(
             &input,
             pre_seat.pending_addon,
             task.pre_table.chip_pool,
@@ -1661,6 +1713,8 @@ impl Orchestrator {
             pre_r,
             post_r,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             AddonAir::num_columns(),
@@ -1699,7 +1753,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
-        let row = RebuyRow::active(
+        let mut row = RebuyRow::active(
             &input,
             pre_seat.stack,
             task.pre_table.chip_pool,
@@ -1716,6 +1770,8 @@ impl Orchestrator {
             pre_r,
             post_r,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
             RebuyAir::num_columns(),
@@ -1796,7 +1852,7 @@ impl Orchestrator {
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let pre_cc = task.pre_table.shuffle_state.completed_players.len() as u8;
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
-        let row = JoinAndShuffleRow::active(
+        let mut row = JoinAndShuffleRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -1808,6 +1864,8 @@ impl Orchestrator {
             pre_cc,
             post_cc,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         let mut bound_pi = pi.clone();
         bound_pi.precompile_binding = Some(binding);
         run(
@@ -1898,7 +1956,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
-        let row = LeaveWithProofRow::active(
+        let mut row = LeaveWithProofRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -1909,6 +1967,8 @@ impl Orchestrator {
             post_v,
             post_cc,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         let mut bound_pi = pi.clone();
         bound_pi.precompile_binding = Some(binding);
         run(
@@ -2120,7 +2180,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
-        let row = SubmitShuffleV2Row::active(
+        let mut row = SubmitShuffleV2Row::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -2131,6 +2191,8 @@ impl Orchestrator {
             post_v,
             post_cc,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         let mut bound_pi = pi.clone();
         bound_pi.precompile_binding = Some(binding);
         run(
@@ -2212,7 +2274,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_rc = task.post_table.reveal_token_state.assignments.len() as u8;
-        let row = SubmitPlayerRevealTokensRow::active(
+        let mut row = SubmitPlayerRevealTokensRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -2223,6 +2285,8 @@ impl Orchestrator {
             post_v,
             post_rc,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         let mut bound_pi = pi.clone();
         bound_pi.precompile_binding = Some(binding);
         run(
@@ -2307,7 +2371,7 @@ impl Orchestrator {
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
         let post_sc = task.post_table.reconstruct_state.player_decks.len() as u8;
-        let row = SubmitReconstructDeckRow::active(
+        let mut row = SubmitReconstructDeckRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -2318,6 +2382,8 @@ impl Orchestrator {
             post_v,
             post_sc,
         );
+        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         let mut bound_pi = pi.clone();
         bound_pi.precompile_binding = Some(binding);
         run(
@@ -3206,6 +3272,31 @@ mod tests {
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept kick pot carry");
+    }
+
+    #[test]
+    fn orchestrator_binds_force_fold_creator_authorization_receipt() {
+        let mut pre = make_table("force-fold-admin-binding");
+        pre.round_state = ROUND_PREFLOP;
+        pre.betting_round = Some(BettingRound::new(100, 100));
+        pre.current_turn = Some(0);
+        for index in 0..3 {
+            pre.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
+            pre.seats[index].stack = 1_000;
+        }
+        pre.chip_pool = 3_000;
+        let creator = pre.creator;
+        let (task, post) = dispatch_task(
+            pre,
+            creator,
+            texas_dispatch::selectors::force_fold(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("force_fold args should serialize"),
+        );
+        assert!(post.seats[0].folded);
+        Orchestrator::new()
+            .prove_and_verify_task(&task)
+            .expect("creator-authorized force_fold should prove and verify");
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //! 每个 funds AIR 验证：
 //! 1. 通用约束（[`crate::airs::common::CommonConstraints`]）
 //! 2. `seat_index == input.seat_index`（输入一致性）
-//! 3. `amount` 一致性（limb 0）
+//! 3. `amount` 完整 4×16-bit u64 一致性
 //! 4. 业务约束：
 //!    - `addon`: `pending_addon_post == pending_addon_pre + amount`
 //!    - `rebuy`: `stack_post == stack_pre + amount`

@@ -1293,7 +1293,7 @@ mod tests {
     fn consensus_material_for_create(
         pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
         post_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-        sender: TaggedPubkey,
+        sender_secret: &SecretKey,
         selector: [u8; 32],
         args: Vec<u8>,
         block_height: u64,
@@ -1302,15 +1302,8 @@ mod tests {
         let (validators, validator_secrets) = test_validators();
         let (pre_state_root, pre_snapshot) = snapshot(pre_table);
         let (post_state_root, post_snapshot) = snapshot(post_table);
-        let signing_secret =
-            SecretKey::from_slice(&[42; 32]).expect("fixed secret scalar is valid");
-        let secp = Secp256k1::new();
-        let signature =
-            secp.sign_ecdsa_recoverable(&Message::from_digest([0xA5; 32]), &signing_secret);
-        let (recovery_id, compact) = signature.serialize_compact();
-        let mut tx_signature = compact.to_vec();
-        tx_signature.push(recovery_id.to_i32() as u8);
-        let tx = Transaction {
+        let sender = test_tagged_pubkey(sender_secret);
+        let mut tx = Transaction {
             inputs: vec![],
             outputs: vec![],
             contract_call: Some(ContractCall {
@@ -1319,7 +1312,7 @@ mod tests {
                 args,
             }),
             tagged_pubkey: sender,
-            signature: tx_signature,
+            signature: vec![],
             gas: Gas::new(1_000_000, 1),
             lane_hint: TxLane::Public,
             route_hint: RouteHint::AnyValidator,
@@ -1328,6 +1321,12 @@ mod tests {
             gameturn_nonce: None,
             is_fallback: false,
         };
+        let secp = Secp256k1::new();
+        let signature =
+            secp.sign_ecdsa_recoverable(&Message::from_digest(tx.signing_hash()), sender_secret);
+        let (recovery_id, compact) = signature.serialize_compact();
+        tx.signature = compact.to_vec();
+        tx.signature.push(recovery_id.to_i32() as u8);
         let (public_tx_root, tx_path) = tx_smt(&tx);
         let empty_tx_root = SparseMerkleTree::new().root();
         let pre_certificate = sign_certificate(
@@ -1817,7 +1816,7 @@ mod tests {
         let material = consensus_material_for_create(
             &pre_table,
             &post_table,
-            sender,
+            &sender_secret,
             selector,
             create_args,
             777,

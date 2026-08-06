@@ -54,7 +54,7 @@ pub struct CheckInput {
     pub current_bet: u64,
     /// 该座位已下注额（合约守卫：`seat.bet >= current_bet` 才允许 check；
     /// 实际等价于 `seat.bet == current_bet`，因为若 `seat.bet > current_bet`
-    /// 玩家本应被退还差额而非 check —— 这里约束两者 limb 0 相等）。
+    /// 玩家本应被退还差额而非 check；AIR 约束完整 64-bit 相等）。
     pub seat_bet: u64,
     /// Canonical mid-round or bet-collection branch derived by native replay.
     pub outcome: BettingOutcome,
@@ -104,10 +104,12 @@ impl FrameworkEval for CheckAir {
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
-        let input_current_bet_0 = eval.next_trace_mask();
-        let _input_current_bet_1 = eval.next_trace_mask();
-        let _input_current_bet_2 = eval.next_trace_mask();
-        let _input_current_bet_3 = eval.next_trace_mask();
+        let input_current_bet = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         let output_acted = eval.next_trace_mask();
         // Gap 1 witness：pre_round_state²
         let input_pre_round_state_q = eval.next_trace_mask();
@@ -121,16 +123,21 @@ impl FrameworkEval for CheckAir {
         // 约束: current_turn == seat_index（Gap: 阻止为非当前行动座位构造动作）
         eval.add_constraint(is_active.clone() * (input_current_turn - expected_seat));
 
-        // 约束 2：current_bet 一致性（验证 limb 0）
-        let expected_bet_0: E::F = M31::from((self.input.current_bet & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (input_current_bet_0.clone() - expected_bet_0));
-
-        // 约束 2b（合约守卫，limb 0）：check 仅在 `seat.bet == current_bet` 时合法
-        //   （`apply_check` 要求 `seat.bet >= current_bet`；等价于两者相等）。
-        let expected_seat_bet_0: E::F = M31::from((self.input.seat_bet & 0xFFFF) as u32).into();
-        eval.add_constraint(
-            is_active.clone() * (input_current_bet_0.clone() - expected_seat_bet_0),
-        );
+        // 约束 2/2b：current_bet 完整 4-limb 绑定，并证明 seat.bet == current_bet。
+        // 两个值均为 verifier 从 canonical u64 状态重建的常量，因此逐 limb 等式同时
+        // 固定了每个 limb 的 16-bit canonical range，而不是接受 prover 自选 M31 值。
+        let expected_bet = u64_to_m31_limbs(self.input.current_bet);
+        let expected_seat_bet = u64_to_m31_limbs(self.input.seat_bet);
+        for limb in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (input_current_bet[limb].clone() - E::F::from(expected_bet[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (input_current_bet[limb].clone() - E::F::from(expected_seat_bet[limb])),
+            );
+        }
 
         // 约束 3：output_acted == 1
         let one: E::F = M31::from(1u32).into();

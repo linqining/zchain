@@ -248,7 +248,7 @@ pub(crate) fn validate_join_and_shuffle(
         METHOD,
         "post completed player",
     )?;
-    let row = JoinAndShuffleRow::active(
+    let mut row = JoinAndShuffleRow::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -260,6 +260,8 @@ pub(crate) fn validate_join_and_shuffle(
         pre_completed_count,
         post_completed_count,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }
 
@@ -366,7 +368,7 @@ pub(crate) fn validate_leave_with_proof(
         METHOD,
         "post completed player",
     )?;
-    let row = LeaveWithProofRow::active(
+    let mut row = LeaveWithProofRow::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -377,6 +379,8 @@ pub(crate) fn validate_leave_with_proof(
         canonical.post.version,
         post_completed_count,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }
 
@@ -467,7 +471,7 @@ pub(crate) fn validate_submit_player_reveal_tokens(
         METHOD,
         "post reveal assignment",
     )?;
-    let row = SubmitPlayerRevealTokensRow::active(
+    let mut row = SubmitPlayerRevealTokensRow::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -478,6 +482,8 @@ pub(crate) fn validate_submit_player_reveal_tokens(
         canonical.post.version,
         post_revealed_count,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }
 
@@ -533,7 +539,7 @@ pub(crate) fn validate_submit_shuffle_v2(
         METHOD,
         "post completed player",
     )?;
-    let row = SubmitShuffleV2Row::active(
+    let mut row = SubmitShuffleV2Row::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -544,6 +550,8 @@ pub(crate) fn validate_submit_shuffle_v2(
         canonical.post.version,
         post_completed_count,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)?;
     super::submit_shuffle_v2::validate_public_inputs(air, public_inputs)
 }
@@ -598,7 +606,7 @@ pub(crate) fn validate_submit_reconstruct_deck(
         METHOD,
         "post submitted deck",
     )?;
-    let row = SubmitReconstructDeckRow::active(
+    let mut row = SubmitReconstructDeckRow::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -609,6 +617,8 @@ pub(crate) fn validate_submit_reconstruct_deck(
         canonical.post.version,
         post_submitted_count,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)?;
     super::submit_reconstruct_deck::validate_public_inputs(air, public_inputs)
 }

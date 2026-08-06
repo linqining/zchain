@@ -200,10 +200,6 @@ pub struct CommonConstraints<E: stwo_constraint_framework::EvalAtRow> {
     pub pre_round_state: E::F,
     /// `POST_ROUND_STATE` 列。
     pub post_round_state: E::F,
-    /// `PRE_POT` limb 0（资金流向约束用，如 kick 的 pot+=bet）。
-    pub pre_pot_0: E::F,
-    /// `POST_POT` limb 0。
-    pub post_pot_0: E::F,
     /// `PRE_POT` 全 4 limb（全 limb 资金守恒约束用，如 call/bet/raise 的 PotDelta）。
     pub pre_pot: [E::F; 4],
     /// `POST_POT` 全 4 limb。
@@ -356,8 +352,6 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
             method_kind,
             pre_round_state,
             post_round_state,
-            pre_pot_0: pre_pot_0.clone(),
-            post_pot_0: post_pot_0.clone(),
             pre_pot: [pre_pot_0, pre_pot_1, pre_pot_2, pre_pot_3],
             post_pot: [post_pot_0, post_pot_1, post_pot_2, post_pot_3],
             pre_button,
@@ -433,12 +427,6 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         self.is_active.clone() * (self.post_round_state.clone() - self.pre_round_state.clone())
     }
 
-    /// 约束 pot limb0 不变（`post_pot_0 == pre_pot_0`，degree-2）。
-    /// 用于不改变 pot 的方法（fold/check 等）。完整 4-limb 守恒见 `pot_unchanged_4limb`。
-    pub fn pot_unchanged_limb0(&self) -> E::F {
-        self.is_active.clone() * (self.post_pot_0.clone() - self.pre_pot_0.clone())
-    }
-
     /// 约束 pot 全 4-limb 不变（`post_pot[i] == pre_pot[i]`，每 limb degree-2）。
     /// 阶段 3 soundness 升级：fold/check 之前仅约束 limb 0，恶意 prover 可在 limb 1-3 造假。
     /// 对齐 Lean 的 pot-unchanged 契约。
@@ -455,19 +443,6 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// 用于 fold/check/call/bet/raise 等 button 不变的方法。
     pub fn button_unchanged(&self) -> E::F {
         self.is_active.clone() * (self.post_button.clone() - self.pre_button.clone())
-    }
-
-    /// 约束 `is_within_bound == 1`（全局上界检查 witness，degree-2）。
-    ///
-    /// 对齐合约 `apply_addon`/`apply_rebuy`/`apply_join` 中的全局上界检查：
-    /// `if chip_pool + addon_pool + amount > MAX_TOTAL_BET { return Err(...) }`
-    ///
-    /// 诚实 host 在上界检查通过时设 witness = 1。完整 range check
-    /// （分解 `MAX_TOTAL_BET - total_chips` 并逐 limb 验证非负）留待阶段 3，
-    /// 当前与 `INPUT_SEAT_OCCUPIED` / `INPUT_SEAT_EMPTY` 同属 boolean witness 模式。
-    pub fn within_bound_check(&self, is_within_bound: E::F) -> E::F {
-        let one: E::F = M31::from(1u32).into();
-        self.is_active.clone() * (is_within_bound - one)
     }
 
     /// 约束全局上界 `chip_pool + addon_pool + amount + diff = MAX_TOTAL_BET`，

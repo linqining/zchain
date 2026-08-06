@@ -570,9 +570,12 @@ fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
     let input = KickPlayerInput {
         seat_index: 2,
         refund: pre.seats[2].stack,
+        pre_stack: pre.seats[2].stack,
+        pre_pending_addon: pre.seats[2].pending_addon,
         kicked_bet: pre.seats[2].bet,
         version_increment: 1,
         reset_cascade: false,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
     };
 
     let mut unrelated_post = canonical_post.clone();
@@ -676,6 +679,8 @@ fn start_hand_input(pre: &TexasPokerTable, post: &TexasPokerTable) -> StartHandI
         ante_mode: post.ante_mode,
         ante_amount: post.ante_amount,
         ante_collected: post.ante_collected,
+        pre_pot: pre.pot,
+        post_pot: post.pot,
     }
 }
 

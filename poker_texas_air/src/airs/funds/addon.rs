@@ -177,6 +177,9 @@ impl FrameworkEval for AddonAir {
 
         // 约束 4（审计共性，degree-2）：round_state 不变（addon 不改变 round_state）。
         eval.add_constraint(common.round_state_unchanged());
+        for constraint in common.pot_unchanged_4limb() {
+            eval.add_constraint(constraint);
+        }
 
         // 约束 5（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只对占用座位 addon。
         let one: E::F = M31::from(1u32).into();

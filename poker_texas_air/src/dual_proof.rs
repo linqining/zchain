@@ -775,7 +775,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 shuffle_phase: task.pre_table.shuffle_state.phase,
                 precompile: binding.air_binding(),
             };
-            let row = JoinAndShuffleRow::active(
+            let mut row = JoinAndShuffleRow::active(
                 &input,
                 state_root_to_air_limbs(pre_root),
                 state_root_to_air_limbs(post_root),
@@ -787,6 +787,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.pre_table.shuffle_state.completed_players.len() as u8,
                 task.post_table.shuffle_state.completed_players.len() as u8,
             );
+            row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+            row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
             let air = JoinAndShuffleAir {
                 log_size: MIN_LOG_SIZE,
                 input,
@@ -873,7 +875,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 shuffle_phase: task.pre_table.shuffle_state.phase,
                 precompile: binding.air_binding(),
             };
-            let row = SubmitShuffleV2Row::active(
+            let mut row = SubmitShuffleV2Row::active(
                 &input,
                 state_root_to_air_limbs(pre_root),
                 state_root_to_air_limbs(post_root),
@@ -884,6 +886,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.post_table.version,
                 task.post_table.shuffle_state.completed_players.len() as u8,
             );
+            row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+            row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
             let air = SubmitShuffleV2Air {
                 log_size: MIN_LOG_SIZE,
                 input,
@@ -1044,7 +1048,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "leave_with_proof completed player count exceeds u8".into(),
                 )
             })?;
-            let row = LeaveWithProofRow::active(
+            let mut row = LeaveWithProofRow::active(
                 &input,
                 state_root_to_air_limbs(pre_root),
                 state_root_to_air_limbs(post_root),
@@ -1055,6 +1059,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.post_table.version,
                 post_completed_count,
             );
+            row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+            row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
             let air = LeaveWithProofAir {
                 log_size: MIN_LOG_SIZE,
                 input,
@@ -1212,7 +1218,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                     "submit_player_reveal_tokens assignment count exceeds u8".into(),
                 )
             })?;
-            let row = SubmitPlayerRevealTokensRow::active(
+            let mut row = SubmitPlayerRevealTokensRow::active(
                 &input,
                 state_root_to_air_limbs(pre_root),
                 state_root_to_air_limbs(post_root),
@@ -1223,6 +1229,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.post_table.version,
                 post_revealed_count,
             );
+            row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
+            row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
             let air = SubmitPlayerRevealTokensAir {
                 log_size: MIN_LOG_SIZE,
                 input,

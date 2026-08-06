@@ -48,12 +48,16 @@ pub(crate) fn validate_start_hand(
         ante_mode: canonical.post.ante_mode,
         ante_amount: canonical.post.ante_amount,
         ante_collected: canonical.post.ante_collected,
+        pre_pot: canonical.pre.pot,
+        post_pot: canonical.post.pot,
     };
     if air.input.active_count != input.active_count
         || air.input.new_button != input.new_button
         || air.input.ante_mode != input.ante_mode
         || air.input.ante_amount != input.ante_amount
         || air.input.ante_collected != input.ante_collected
+        || air.input.pre_pot != input.pre_pot
+        || air.input.post_pot != input.post_pot
     {
         return Err(TexasAirError::SpecViolation(
             "start_hand: AIR input does not match the canonical dispatch".into(),
@@ -99,7 +103,7 @@ pub(crate) fn validate_reset_for_next_hand(
         ));
     }
 
-    let row = ResetForNextHandRow::active(
+    let mut row = ResetForNextHandRow::active(
         &input,
         0,
         state_root_to_air_limbs(public_inputs.pre_state_root),
@@ -111,6 +115,8 @@ pub(crate) fn validate_reset_for_next_hand(
         canonical.post.version,
         canonical.pre.round_state,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }
 
@@ -162,7 +168,7 @@ pub(crate) fn validate_join_table(
         buy_in: args.buy_in,
         player_addr: args.player,
     };
-    let row = JoinTableRow::active(
+    let mut row = JoinTableRow::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -175,6 +181,8 @@ pub(crate) fn validate_join_table(
         canonical.pre.chip_pool,
         canonical.pre.addon_pool,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }
 
@@ -207,7 +215,7 @@ pub(crate) fn validate_leave_table(
     let input = LeaveTableInput {
         seat_index: args.seat_index,
     };
-    let row = LeaveTableRow::active(
+    let mut row = LeaveTableRow::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -223,5 +231,7 @@ pub(crate) fn validate_leave_table(
         canonical.pre.addon_pool,
         canonical.post.addon_pool,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }

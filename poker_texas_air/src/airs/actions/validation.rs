@@ -28,6 +28,7 @@ use super::request_leave_after_hand::{RequestLeaveAfterHandAir, RequestLeaveAfte
 use crate::airs::validation::{
     validate_canonical_dispatch, validate_row as validate_canonical_row,
 };
+use crate::authorization_binding::AdminAuthorizationBinding;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::prove_task::MethodInput;
@@ -521,7 +522,7 @@ pub(crate) fn validate_auto_fold(
             "auto_fold: AIR timeout inputs do not match the canonical table transition".into(),
         ));
     }
-    let row = AutoFoldRow::active(
+    let mut row = AutoFoldRow::active(
         &air.input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -533,6 +534,8 @@ pub(crate) fn validate_auto_fold(
         tables.pre.round_state,
         tables.post.round_state,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
     validate_row(public_inputs, &row.to_vec(), "auto_fold")
 }
 
@@ -540,6 +543,23 @@ pub(crate) fn validate_force_fold(
     air: &ForceFoldAir,
     public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<()> {
+    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::ForceFold)?;
+    let authorization = AdminAuthorizationBinding::verify_table_creator(
+        MethodKind::ForceFold,
+        &canonical.call.context,
+        &canonical.call.selector,
+        &canonical.call.raw_args,
+        canonical.pre.creator,
+        public_inputs.table_id,
+        public_inputs.hand_id,
+        public_inputs.call_seq,
+        canonical.pre.version,
+        canonical.post.version,
+        public_inputs.pre_state_root,
+        public_inputs.post_state_root,
+        public_inputs.dispatch_call_digest,
+    )?
+    .air_binding();
     let tables = validate_native_mid_round(
         public_inputs,
         MethodKind::ForceFold,
@@ -549,12 +569,12 @@ pub(crate) fn validate_force_fold(
         false,
     )?;
     let post_turn = tables.post.current_turn.expect("mid-round checked");
-    if air.input.post_current_turn != post_turn {
+    if air.input.post_current_turn != post_turn || air.input.authorization != authorization {
         return Err(TexasAirError::SpecViolation(
-            "force_fold: AIR input does not match canonical post current_turn".into(),
+            "force_fold: AIR input/authorization does not match canonical dispatch".into(),
         ));
     }
-    let row = ForceFoldRow::active(
+    let mut row = ForceFoldRow::active(
         &air.input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -566,6 +586,8 @@ pub(crate) fn validate_force_fold(
         tables.pre.round_state,
         tables.post.round_state,
     );
+    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
+    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
     validate_row(public_inputs, &row.to_vec(), "force_fold")
 }
 
@@ -645,15 +667,36 @@ pub(crate) fn validate_kick_player(
             .stack
             .checked_add(pre_seat.pending_addon)
             .ok_or_else(|| TexasAirError::SpecViolation("kick_player refund overflow".into()))?,
+        pre_stack: pre_seat.stack,
+        pre_pending_addon: pre_seat.pending_addon,
         kicked_bet: pre_seat.bet,
         version_increment,
         reset_cascade,
+        authorization: AdminAuthorizationBinding::verify_table_creator(
+            MethodKind::KickPlayer,
+            &canonical.call.context,
+            &canonical.call.selector,
+            &canonical.call.raw_args,
+            canonical.pre.creator,
+            public_inputs.table_id,
+            public_inputs.hand_id,
+            public_inputs.call_seq,
+            canonical.pre.version,
+            canonical.post.version,
+            public_inputs.pre_state_root,
+            public_inputs.post_state_root,
+            public_inputs.dispatch_call_digest,
+        )?
+        .air_binding(),
     };
     if air.input.seat_index != input.seat_index
         || air.input.refund != input.refund
+        || air.input.pre_stack != input.pre_stack
+        || air.input.pre_pending_addon != input.pre_pending_addon
         || air.input.kicked_bet != input.kicked_bet
         || air.input.version_increment != input.version_increment
         || air.input.reset_cascade != input.reset_cascade
+        || air.input.authorization != input.authorization
     {
         return Err(TexasAirError::SpecViolation(
             "kick_player: AIR input does not match the canonical dispatch".into(),

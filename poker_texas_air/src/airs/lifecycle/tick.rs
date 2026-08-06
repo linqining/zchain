@@ -55,7 +55,7 @@ pub mod cols {
     pub const TIME_BANK_POST_BASE: usize = COMMON_NUM_COLUMNS + 10;
     /// `RAKE_MODE` 列（0=NONE, 1=PERCENTAGE）。
     pub const RAKE_MODE: usize = COMMON_NUM_COLUMNS + 14;
-    /// `RAKE_AMOUNT_0` 列（抽水金额 limb 0）。
+    /// `RAKE_AMOUNT` 起始列（完整 4×16-bit u64）。
     pub const RAKE_AMOUNT_BASE: usize = COMMON_NUM_COLUMNS + 15;
     /// `INPUT_TIMEOUT_KIND_INV` invertibility witness（Gap 5）：timeout_kind 的乘法逆元，
     /// 约束 `timeout_kind * inv == 1` 证明 timeout_kind ≠ 0（即存在真实超时）。
@@ -860,7 +860,7 @@ pub fn validate_public_inputs(
             "tick: AIR constants do not match the canonical VM transition".into(),
         ));
     }
-    let expected_row = TickRow::active(
+    let mut expected_row = TickRow::active(
         &expected_input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -871,8 +871,10 @@ pub fn validate_public_inputs(
         post.version,
         pre.round_state,
         post.round_state,
-    )
-    .to_vec();
+    );
+    expected_row.common.pre_pot = u64_to_m31_limbs(pre.pot);
+    expected_row.common.post_pot = u64_to_m31_limbs(post.pot);
+    let expected_row = expected_row.to_vec();
     let trusted_row = public_inputs.require_expected_trace_row(expected_row.len())?;
     if trusted_row != expected_row {
         return Err(TexasAirError::SpecViolation(

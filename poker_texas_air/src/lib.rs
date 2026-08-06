@@ -61,6 +61,7 @@ pub mod prove_task;
 pub mod aggregator_air;
 pub mod aggregator_prover;
 pub mod aggregator_verifier;
+pub mod authorization_binding;
 
 // P05-H-source：从已认证共识材料构造 ExpectedChainAnchor。
 pub mod consensus_anchor;

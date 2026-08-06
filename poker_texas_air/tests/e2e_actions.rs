@@ -507,6 +507,60 @@ fn test_soundness_check_tampered_bet() {
     );
 }
 
+/// Soundness: a forged high limb cannot alias the same low 16 bits.
+#[test]
+fn test_soundness_check_rejects_high_limb_bet_substitution() {
+    let input = CheckInput {
+        seat_index: 1,
+        current_bet: 0,
+        seat_bet: 0,
+        outcome: BettingOutcome::MidRound {
+            post_current_turn: 2,
+        },
+    };
+    let mut row = CheckRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        2,
+        0,
+        1,
+        4,
+        4,
+        100,
+        100,
+    );
+    row.input_current_bet[1] = M31::from(1u32);
+    let trace = gen_method_trace(
+        CheckAir::num_columns(),
+        &row.to_vec(),
+        &CheckRow::padding().to_vec(),
+    )
+    .unwrap();
+    let result = prove_method(
+        &trace,
+        CheckAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 2,
+            pre_version: 0,
+            post_version: 1,
+        },
+        CheckAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::Check, 42, 0, 2),
+    );
+    assert!(
+        result.is_err(),
+        "high-limb check bet substitution must fail"
+    );
+}
+
 // ========== call AIR ==========
 
 /// E2E: call → trace → prove → verify（happy path）。
@@ -1268,6 +1322,7 @@ fn test_e2e_force_fold_prove_verify() {
     let input = ForceFoldInput {
         seat_index: 5,
         post_current_turn: 0,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
     };
     let row = ForceFoldRow::active(
         &input,
@@ -1318,6 +1373,7 @@ fn test_soundness_force_fold_tampered_seat() {
     let input = ForceFoldInput {
         seat_index: 5,
         post_current_turn: 0,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
     };
     let row = ForceFoldRow::active(&input, zero_root(), one_root(), 42, 0, 6, 0, 1, 4, 4);
     let trace = gen_method_trace(
@@ -1351,6 +1407,7 @@ fn test_soundness_force_fold_tampered_seat() {
         input: ForceFoldInput {
             seat_index: 0,
             post_current_turn: 0,
+            authorization: proof.air.input.authorization,
         }, // 篡改！
         ..proof.air.clone()
     };
@@ -1359,6 +1416,46 @@ fn test_soundness_force_fold_tampered_seat() {
     assert!(
         result.is_err(),
         "篡改 seat_index 后 verify 应失败，但成功了 — soundness 漏洞！"
+    );
+}
+
+/// Soundness: administrator receipt digests are AIR columns, not a host-only boolean.
+#[test]
+fn test_soundness_force_fold_tampered_authorization_digest() {
+    use poker_texas_air::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
+
+    let input = ForceFoldInput {
+        seat_index: 5,
+        post_current_turn: 0,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
+    };
+    let mut row = ForceFoldRow::active(&input, zero_root(), one_root(), 42, 0, 6, 0, 1, 4, 4);
+    row.authorization.receipt_digest[7] = M31::from(1u32);
+    let trace = gen_method_trace(
+        ForceFoldAir::num_columns(),
+        &row.to_vec(),
+        &ForceFoldRow::padding().to_vec(),
+    )
+    .unwrap();
+    let result = prove_method(
+        &trace,
+        ForceFoldAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 6,
+            pre_version: 0,
+            post_version: 1,
+        },
+        ForceFoldAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::ForceFold, 42, 0, 6),
+    );
+    assert!(
+        result.is_err(),
+        "tampered administrator receipt must fail in AIR"
     );
 }
 
@@ -1374,9 +1471,12 @@ fn test_e2e_kick_player_prove_verify() {
     let input = KickPlayerInput {
         seat_index: 2,
         refund: 500,
+        pre_stack: 500,
+        pre_pending_addon: 0,
         kicked_bet: 50,
         version_increment: 1,
         reset_cascade: false,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1430,9 +1530,12 @@ fn test_e2e_kick_player_ripple_carry() {
     let input = KickPlayerInput {
         seat_index: 2,
         refund: 500,
+        pre_stack: 500,
+        pre_pending_addon: 0,
         kicked_bet: 1,
         version_increment: 1,
         reset_cascade: false,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1475,6 +1578,62 @@ fn test_e2e_kick_player_ripple_carry() {
     verify_method(proof).expect("跨 limb kick_player 应可验证");
 }
 
+/// Regression: refund checked-add carries across the 16-bit limb boundary.
+#[test]
+fn test_e2e_kick_player_refund_ripple_carry() {
+    use poker_texas_air::airs::actions::kick_player::{
+        KickPlayerAir, KickPlayerInput, KickPlayerRow,
+    };
+    let input = KickPlayerInput {
+        seat_index: 2,
+        refund: 65_536,
+        pre_stack: 65_535,
+        pre_pending_addon: 1,
+        kicked_bet: 0,
+        version_increment: 1,
+        reset_cascade: false,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
+    };
+    let row = KickPlayerRow::active(
+        &input,
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        7,
+        0,
+        1,
+        4,
+        4,
+        100,
+        100,
+    );
+    let trace = gen_method_trace(
+        KickPlayerAir::num_columns(),
+        &row.to_vec(),
+        &KickPlayerRow::padding().to_vec(),
+    )
+    .unwrap();
+    let proof = prove_method(
+        &trace,
+        KickPlayerAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 7,
+            pre_version: 0,
+            post_version: 1,
+        },
+        KickPlayerAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::KickPlayer, 42, 0, 7),
+    )
+    .expect("refund carry should prove");
+    verify_method(proof).expect("refund carry should verify");
+}
+
 /// Soundness: 篡改 kick_player 的 `refund` 公开输入后，verify 应失败。
 #[test]
 fn test_soundness_kick_player_tampered_refund() {
@@ -1485,9 +1644,12 @@ fn test_soundness_kick_player_tampered_refund() {
     let input = KickPlayerInput {
         seat_index: 2,
         refund: 500,
+        pre_stack: 500,
+        pre_pending_addon: 0,
         kicked_bet: 50,
         version_increment: 1,
         reset_cascade: false,
+        authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
     };
     let row = KickPlayerRow::active(
         &input,
@@ -1603,10 +1765,10 @@ fn test_action_air_column_consistency() {
     assert_eq!(auto_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 42);
 
     // force_fold: 通用 + 5 业务（含 Gap 1、pre/post current_turn）
-    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 5);
+    assert_eq!(force_fold::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 39);
 
     // kick_player: 通用 + 15 业务（pot u64 carry + reset_cascade selector）
-    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 15);
+    assert_eq!(kick_player::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 60);
 }
 
 /// 单元测试：MethodKind 的 actions 档位分类正确。

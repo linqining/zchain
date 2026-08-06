@@ -45,8 +45,19 @@ RoundAdvance/Settlement 的 prove/verify 明细；默认不启用计时。
 
 ## 仍需解决的安全与产品边界
 
-- 管理签名、超时和完整 range checks 尚未全部放入 AIR；当前生产 receipt 依赖
-  Orchestrator 的 canonical VM replay 与绑定的 trace row。
+- `kick_player` / `force_fold` 已把 canonical table-creator authorization request/receipt
+  digest 放入 AIR；consensus anchor 会显式验证 included transaction signature，并从签名
+  pubkey 重建 caller。AIR 不模拟 ECDSA/Ed25519，因此未锚定的单 proof 不能单独证明交易授权。
+- production trace-visible u64 金额已统一为 verifier-reconstructed 4×16-bit limbs；资金运算
+  使用完整 carry/borrow。此次补齐了 check 高 limb、kick refund checked-add、start-hand ante
+  与 pot checked-add，以及 auto/force-fold、addon/rebuy、reconstruct、create/join/leave/reset、
+  join-and-shuffle/submit-shuffle/leave-with-proof 的真实 pot 投影；不改变 pot 的路径使用完整
+  4-limb equality，create/reset 的 canonical post pot 必须为零。
+- terminal auto-fold/force-fold settlement、tick 间接触发的复合状态变更仍 fail-closed 或依赖
+  canonical native replay，尚未全部拆成独立 component proof。
+- `reset_for_next_hand`、`join_and_shuffle`、`leave_with_proof` 的完整座位与资金约束位于 durable
+  四段 component bundle；裸 method STARK 只绑定方法级投影和 canonical pot，不能脱离 bundle
+  当作完整结算证明。
 - `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
   的 mid-round 与 clean last-opponent settlement 路径均绑定 native DLEq receipt、前后牌组
   commitment 与 canonical fold outcome。terminal reset 同时处理 pending addon/leave 时，

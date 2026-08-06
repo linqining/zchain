@@ -125,6 +125,9 @@ impl FrameworkEval for SubmitReconstructDeckAir {
 
         // 约束 3（审计共性，degree-2）：round_state 不变（reconstruct 阶段 round_state 恒为 WAITING=0）。
         eval.add_constraint(common.round_state_unchanged());
+        for constraint in common.pot_unchanged_4limb() {
+            eval.add_constraint(constraint);
+        }
 
         // 约束 4（Gap 8：ReconstructStateNotIdle）：reconstruct_phase ∈ {1,2}（非 NONE=0）。
         // 用 degree-2 vanishing 多项式 (p-1)(p-2)==0（COLLECTING=1, COMPLETE=2），

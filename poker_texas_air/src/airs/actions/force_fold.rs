@@ -16,16 +16,19 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 3 个：`INPUT_SEAT_INDEX`, `INPUT_ADMIN_ADDR_BASE[4]`,
-//!   `OUTPUT_FOLDED` — 实际占 5 列（seat + 1，admin 占 4 列但简化为不存储）
+//! - 动作列 5 个
+//! - 管理员授权列 34 个：ABI、role、完整 request/receipt digest
 //!
-//! 简化版只保留 `INPUT_SEAT_INDEX` + `OUTPUT_FOLDED`（admin 验证在 L1 层做）。
+//! 交易签名由共识锚验证；本 AIR 绑定 canonical dispatch replay 签发的管理员授权
+//! receipt，不能由 prover 自报 `is_admin = 1`。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
+use crate::authorization_binding::AdminAuthorizationAirBinding;
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::DIGEST_LIMBS;
 
 /// `force_fold` 业务特定列布局。
 pub mod cols {
@@ -40,8 +43,16 @@ pub mod cols {
     pub const INPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 3;
     /// `OUTPUT_CURRENT_TURN` — mid-round 推进后的下一行动座位。
     pub const OUTPUT_CURRENT_TURN: usize = COMMON_NUM_COLUMNS + 4;
+    /// 管理员授权 ABI 版本。
+    pub const AUTH_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 5;
+    /// 管理员授权角色。
+    pub const AUTH_ROLE: usize = COMMON_NUM_COLUMNS + 6;
+    /// 完整授权请求摘要。
+    pub const AUTH_REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 7;
+    /// 完整授权成功 receipt 摘要。
+    pub const AUTH_RECEIPT_DIGEST_BASE: usize = AUTH_REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `force_fold` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 5;
+    pub const NUM_COLUMNS: usize = AUTH_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `force_fold` 输入参数。
@@ -51,6 +62,8 @@ pub struct ForceFoldInput {
     pub seat_index: u8,
     /// mid-round 推进后的下一行动座位。
     pub post_current_turn: u8,
+    /// Verifier-issued table-creator authorization receipt.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 /// `force_fold` AIR 公开输入。
@@ -103,6 +116,12 @@ impl FrameworkEval for ForceFoldAir {
         // Gap: current_turn == seat_index witness
         let input_current_turn = eval.next_trace_mask();
         let output_current_turn = eval.next_trace_mask();
+        let auth_abi_version = eval.next_trace_mask();
+        let auth_role = eval.next_trace_mask();
+        let auth_request_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let auth_receipt_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
@@ -120,15 +139,25 @@ impl FrameworkEval for ForceFoldAir {
         eval.add_constraint(common.round_state_unchanged());
         eval.add_constraint(common.round_state_q_constraint(input_pre_round_state_q.clone()));
         eval.add_constraint(common.round_state_is_betting(input_pre_round_state_q));
-        // 约束 4（审计共性，degree-2 limb0）：pot 不变（force_fold 不改变 pot）。
+        // 约束 4（审计共性）：pot 完整 4-limb 不变（force_fold 不改变 pot）。
         for __c in common.pot_unchanged_4limb() {
             eval.add_constraint(__c);
         }
 
         let expected_post_turn: E::F = M31::from(u32::from(self.input.post_current_turn)).into();
-        eval.add_constraint(is_active * (output_current_turn - expected_post_turn));
+        eval.add_constraint(is_active.clone() * (output_current_turn - expected_post_turn));
 
-        // TODO 阶段 3 完整版：约束 admin 签名（需引入 ECDSA AIR 子组件）
+        // 约束 5：绑定 host-native canonical authorization request/receipt。
+        let expected_abi: E::F = M31::from(u32::from(self.input.authorization.abi_version)).into();
+        let expected_role: E::F = M31::from(u32::from(self.input.authorization.role)).into();
+        eval.add_constraint(is_active.clone() * (auth_abi_version - expected_abi));
+        eval.add_constraint(is_active.clone() * (auth_role - expected_role));
+        for limb in 0..DIGEST_LIMBS {
+            let request: E::F = self.input.authorization.request_digest[limb].into();
+            let receipt: E::F = self.input.authorization.receipt_digest[limb].into();
+            eval.add_constraint(is_active.clone() * (auth_request_digest[limb].clone() - request));
+            eval.add_constraint(is_active.clone() * (auth_receipt_digest[limb].clone() - receipt));
+        }
 
         eval
     }
@@ -149,6 +178,8 @@ pub struct ForceFoldRow {
     pub input_current_turn: M31,
     /// `OUTPUT_CURRENT_TURN` — mid-round 的下一行动座位。
     pub output_current_turn: M31,
+    /// Verifier-issued administrator authorization binding.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 impl ForceFoldRow {
@@ -190,6 +221,7 @@ impl ForceFoldRow {
             input_pre_round_state_q: rs_m31 * rs_m31,
             input_current_turn: u8_to_m31(input.seat_index), // current_turn == seat_index
             output_current_turn: u8_to_m31(input.post_current_turn),
+            authorization: input.authorization,
         }
     }
 
@@ -203,6 +235,12 @@ impl ForceFoldRow {
             input_pre_round_state_q: ZERO,
             input_current_turn: ZERO,
             output_current_turn: ZERO,
+            authorization: AdminAuthorizationAirBinding {
+                abi_version: 0,
+                role: 0,
+                request_digest: [ZERO; DIGEST_LIMBS],
+                receipt_digest: [ZERO; DIGEST_LIMBS],
+            },
         }
     }
 
@@ -215,6 +253,10 @@ impl ForceFoldRow {
         v.push(self.input_pre_round_state_q);
         v.push(self.input_current_turn);
         v.push(self.output_current_turn);
+        v.push(M31::from(u32::from(self.authorization.abi_version)));
+        v.push(M31::from(u32::from(self.authorization.role)));
+        v.extend_from_slice(&self.authorization.request_digest);
+        v.extend_from_slice(&self.authorization.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

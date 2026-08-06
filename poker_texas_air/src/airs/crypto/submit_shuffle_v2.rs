@@ -111,6 +111,9 @@ impl FrameworkEval for SubmitShuffleV2Air {
         let statement = crate::airs::TexasAir::statement(self);
         let common = CommonConstraints::write(&mut eval, &statement);
         let is_active = common.is_active.clone();
+        for constraint in common.pot_unchanged_4limb() {
+            eval.add_constraint(constraint);
+        }
 
         let input_seat_index = eval.next_trace_mask();
         let input_new_deck_commitment: Vec<_> = (0..4).map(|_| eval.next_trace_mask()).collect();

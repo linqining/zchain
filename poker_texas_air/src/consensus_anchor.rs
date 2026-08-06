@@ -16,9 +16,10 @@
 //! 2. **单桌 snapshot ∈ 全局 state_root**：[`poker_l1::object_model::SparseMerkleTree::verify`]
 //!    证明该 table `Object` 属于 block header 的全局 `state_root`，从而锚定端点
 //!    `pre/post_state_root = compute_state_root(table)`。
-//! 3. **逐调用包含**：每个 dispatch 调用的 `Transaction` 用 SMT 包含证明认证其属于
-//!    `public_tx_root` 或 `gameturn_tx_root`；dispatch call digest 从 `{tx, block_header}`
-//!    独立重算（见 [`crate::prove_task::dispatch_call_digest`]）。
+//! 3. **逐调用签名与包含**：每个 dispatch 调用先验证 transaction signature，再用 SMT
+//!    包含证明认证其属于 `public_tx_root` 或 `gameturn_tx_root`；caller 从签名 pubkey 派生，
+//!    dispatch call digest 从 `{tx, block_header}` 独立重算（见
+//!    [`crate::prove_task::dispatch_call_digest`]）。
 //!
 //! ## 固有边界（文档化）
 //!
@@ -36,6 +37,7 @@ use crate::verified_chain::ExpectedChainAnchor;
 use poker_l1::Hash;
 use poker_l1::account::derive_address;
 use poker_l1::block::BlockHeader;
+use poker_l1::block::validator::validate_tx_signature;
 use poker_l1::consensus::bullshark::{
     validate_commit_certificate_fields, validate_commit_certificate_quorum,
 };
@@ -197,6 +199,16 @@ fn verify_call_and_compute_digest(
             "dispatch transaction does not target the Texas Poker precompile".into(),
         ));
     }
+
+    // Certified inclusion authenticates the tx bytes, but administrator
+    // authorization also requires the transaction signature itself. Verify it
+    // explicitly so the AIR-bound dispatch digest is linked to the exact
+    // tagged public key that signed the call and derives `context.caller`.
+    validate_tx_signature(&call.tx).map_err(|error| {
+        TexasAirError::ConsensusAnchor(format!(
+            "dispatch transaction signature verification failed: {error}"
+        ))
+    })?;
     dispatch_call_digest(context, &contract_call.method_selector, &contract_call.args)
 }
 
@@ -416,18 +428,14 @@ mod tests {
     }
 
     /// 构造一个 poker dispatch tx（GameTurn 通道，固定 selector/args）。
-    fn make_dispatch_tx(tagged: &TaggedPubkey, selector: [u8; 32], args: Vec<u8>) -> Transaction {
+    fn make_dispatch_tx(
+        tagged: &TaggedPubkey,
+        secret: &SecretKey,
+        selector: [u8; 32],
+        args: Vec<u8>,
+    ) -> Transaction {
         let secp = Secp256k1::new();
-        // 用一个 dummy sk 签名以使 tx_hash 确定可复现；签名内容对 anchor 不重要
-        // （anchor 只用 tx_hash 做 SMT key，用 contract_call + tagged_pubkey 重算 digest）。
-        let sk = SecretKey::from_slice(&[1u8; 32]).unwrap();
-        let dummy_hash = [0xAAu8; 32];
-        let sig = secp.sign_ecdsa_recoverable(&Message::from_digest(dummy_hash), &sk);
-        let (rid, compact) = sig.serialize_compact();
-        let mut full_sig = compact.to_vec();
-        full_sig.push(rid.to_i32() as u8);
-
-        Transaction {
+        let mut tx = Transaction {
             inputs: vec![],
             outputs: vec![],
             contract_call: Some(ContractCall {
@@ -436,7 +444,7 @@ mod tests {
                 args,
             }),
             tagged_pubkey: tagged.clone(),
-            signature: full_sig,
+            signature: Vec::new(),
             gas: Gas::new(1_000_000, 1),
             lane_hint: TxLane::GameTurn,
             route_hint: RouteHint::AnyValidator,
@@ -444,7 +452,12 @@ mod tests {
             nonce: 0,
             gameturn_nonce: None,
             is_fallback: false,
-        }
+        };
+        let sig = secp.sign_ecdsa_recoverable(&Message::from_digest(tx.signing_hash()), secret);
+        let (rid, compact) = sig.serialize_compact();
+        tx.signature = compact.to_vec();
+        tx.signature.push(rid.to_i32() as u8);
+        tx
     }
 
     /// 用 txs 填充一个 SMT（key=blake2b(tx_hash), value=tx_hash），返回 (root, per-tx paths)。
@@ -558,7 +571,7 @@ mod tests {
 
         // 一个 dispatch call（GameTurn 通道）。
         let caller_tagged = validators[0].pubkey.clone();
-        let tx = make_dispatch_tx(&caller_tagged, selector_a, args_a.clone());
+        let tx = make_dispatch_tx(&caller_tagged, &secrets[0], selector_a, args_a.clone());
         let (gameturn_tx_root, tx_paths) = build_tx_smt(std::slice::from_ref(&tx));
 
         // 重算预期 digest（与 build_anchor 内部逻辑独立地重算）。
@@ -827,6 +840,49 @@ mod tests {
         assert_eq!(anchor.dispatch_call_digests(), &f.expected_digests[..]);
         // 确认 digest 不是全零（即确实从 tx 内容算出来的）。
         assert_ne!(anchor.dispatch_call_digests()[0], [0u8; 32]);
+    }
+
+    #[test]
+    fn included_transaction_with_invalid_signature_is_rejected() {
+        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        f.calls[0].tx.signature = vec![0u8; 65];
+
+        // Rebuild the authenticated tx-root around the malformed transaction.
+        // This isolates signature validation from the independent SMT-inclusion
+        // check: the transaction is genuinely included in the certified root,
+        // but it still must not authorize an administrator dispatch.
+        let (gameturn_tx_root, paths) = build_tx_smt(&[f.calls[0].tx.clone()]);
+        f.calls[0].inclusion_path = paths[0].clone();
+        f.pre_header.gameturn_tx_root = gameturn_tx_root;
+        f.post_header.gameturn_tx_root = gameturn_tx_root;
+        let empty_root = SparseMerkleTree::new().root();
+        f.cert = sign_cert(
+            &f.validators,
+            &f.secrets,
+            (f.pre_header.state_root, empty_root, gameturn_tx_root),
+        );
+        f.pre_header.dag_commit_certificate = f.cert.clone();
+        f.post_header.dag_commit_certificate = sign_cert(
+            &f.validators,
+            &f.secrets,
+            (f.post_header.state_root, empty_root, gameturn_tx_root),
+        );
+
+        let result = build_anchor_from_consensus(
+            &f.pre_header,
+            &f.pre_snapshot,
+            &f.cert,
+            poker_l1::DEFAULT_CHAIN_ID,
+            &f.validators,
+            &f.post_header,
+            &f.post_snapshot,
+            &f.calls,
+        );
+        assert!(matches!(
+            result,
+            Err(TexasAirError::ConsensusAnchor(msg))
+                if msg.contains("transaction signature verification failed")
+        ));
     }
 
     #[test]

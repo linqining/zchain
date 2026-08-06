@@ -22,14 +22,17 @@
 //! ## AIR 列布局
 //!
 //! - 通用列 37 个
-//! - 业务列 15 个：`INPUT_SEAT_INDEX`, `OUTPUT_REFUND_BASE[4]`,
+//! - 基础业务列 26 个：`INPUT_SEAT_INDEX`, `OUTPUT_REFUND_BASE[4]`,
 //!   `OUTPUT_KICKED`, `KICKED_BET_BASE[4]`, `INPUT_SEAT_OCCUPIED`,
-//!   `POT_ADD_CARRY_BASE[3]`, `RESET_CASCADE`
+//!   `POT_ADD_CARRY_BASE[3]`, `RESET_CASCADE`, refund source limbs/carries
+//! - 管理员授权列 34 个：ABI、role、完整 request/receipt digest
 //!
 //! 资金流向约束（全 4 limb，对齐合约 checked_add 修复）：除 seat_index / refund /
 //! kicked 一致性外，普通路径强制 **`post_pot = pre_pot + kicked_bet`**（全 4 limb
 //! delta，底池增量 == 被踢者下注）；reset cascade 路径强制最终
-//! **`post_round = WAITING && post_pot = 0`**。admin 签名约束留待阶段 3/5。
+//! **`post_round = WAITING && post_pot = 0`**。退款还必须满足完整 checked-u64
+//! `refund = pre_stack + pre_pending_addon`。交易签名由共识锚验证；AIR 绑定 canonical
+//! dispatch replay 签发的管理员 authorization receipt。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
@@ -40,7 +43,9 @@ use crate::airs::common::{
     COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, compute_add_carries, u8_to_m31,
     u64_to_m31_limbs,
 };
+use crate::authorization_binding::AdminAuthorizationAirBinding;
 use crate::method_kind::MethodKind;
+use crate::precompile_binding::DIGEST_LIMBS;
 
 /// `kick_player` 业务特定列布局。
 pub mod cols {
@@ -60,8 +65,22 @@ pub mod cols {
     pub const POT_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 11;
     /// 是否触发 canonical settlement/reset cascade。
     pub const RESET_CASCADE: usize = COMMON_NUM_COLUMNS + 14;
+    /// 被踢座位调用前 stack（4 limb）。
+    pub const INPUT_PRE_STACK_BASE: usize = COMMON_NUM_COLUMNS + 15;
+    /// 被踢座位调用前 pending addon（4 limb）。
+    pub const INPUT_PRE_PENDING_ADDON_BASE: usize = COMMON_NUM_COLUMNS + 19;
+    /// `pre_stack + pending_addon = refund` 的 ripple carry。
+    pub const REFUND_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 23;
+    /// 管理员授权 ABI 版本。
+    pub const AUTH_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 26;
+    /// 管理员授权角色。
+    pub const AUTH_ROLE: usize = COMMON_NUM_COLUMNS + 27;
+    /// 完整授权请求摘要。
+    pub const AUTH_REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 28;
+    /// 完整授权成功 receipt 摘要。
+    pub const AUTH_RECEIPT_DIGEST_BASE: usize = AUTH_REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `kick_player` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 15;
+    pub const NUM_COLUMNS: usize = AUTH_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
 /// `kick_player` 输入参数。
@@ -71,12 +90,18 @@ pub struct KickPlayerInput {
     pub seat_index: u8,
     /// 退还金额（= seat.stack + seat.pending_addon）。
     pub refund: u64,
+    /// 被踢座位调用前 stack。
+    pub pre_stack: u64,
+    /// 被踢座位调用前 pending addon。
+    pub pre_pending_addon: u64,
     /// 被踢者当前下注（kick 时立即并入底池：`pot += kicked_bet`）。
     pub kicked_bet: u64,
     /// Native version bumps: one for the kick and one more when it cascades into reset.
     pub version_increment: u8,
     /// Whether the native kick cascaded through settlement/reset to WAITING.
     pub reset_cascade: bool,
+    /// Verifier-issued table-creator authorization receipt.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 /// `kick_player` AIR 公开输入。
@@ -127,10 +152,12 @@ impl FrameworkEval for KickPlayerAir {
         let is_active = common.is_active.clone();
 
         let input_seat_index = eval.next_trace_mask();
-        let output_refund_0 = eval.next_trace_mask();
-        let _output_refund_1 = eval.next_trace_mask();
-        let _output_refund_2 = eval.next_trace_mask();
-        let _output_refund_3 = eval.next_trace_mask();
+        let output_refund = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
         let output_kicked = eval.next_trace_mask();
         // KICKED_BET（4 limb）— 被踢者当前下注，pot += kicked_bet
         let kicked_bet_0 = eval.next_trace_mask();
@@ -151,14 +178,60 @@ impl FrameworkEval for KickPlayerAir {
             eval.next_trace_mask(),
         ];
         let reset_cascade = eval.next_trace_mask();
+        let pre_stack = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let pre_pending_addon = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let refund_add_carry = [
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+            eval.next_trace_mask(),
+        ];
+        let auth_abi_version = eval.next_trace_mask();
+        let auth_role = eval.next_trace_mask();
+        let auth_request_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
+        let auth_receipt_digest: Vec<_> =
+            (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
 
         // 约束 1：seat_index == input.seat_index
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
         eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat));
 
-        // 约束 2：refund 一致性（limb 0）
-        let expected_refund_0: E::F = M31::from((self.input.refund & 0xFFFF) as u32).into();
-        eval.add_constraint(is_active.clone() * (output_refund_0 - expected_refund_0));
+        // 约束 2：refund 与两个来源金额均完整绑定为 verifier-owned u64 limbs。
+        let expected_refund = u64_to_m31_limbs(self.input.refund);
+        let expected_stack = u64_to_m31_limbs(self.input.pre_stack);
+        let expected_pending = u64_to_m31_limbs(self.input.pre_pending_addon);
+        for limb in 0..4 {
+            eval.add_constraint(
+                is_active.clone()
+                    * (output_refund[limb].clone() - E::F::from(expected_refund[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone() * (pre_stack[limb].clone() - E::F::from(expected_stack[limb])),
+            );
+            eval.add_constraint(
+                is_active.clone()
+                    * (pre_pending_addon[limb].clone() - E::F::from(expected_pending[limb])),
+            );
+        }
+        // 完整 ripple-carry 同时证明无 u64 overflow。
+        for constraint in common.limb4_delta(
+            &pre_stack,
+            &output_refund,
+            &pre_pending_addon,
+            &refund_add_carry,
+        ) {
+            eval.add_constraint(constraint);
+        }
 
         // 约束 3：output_kicked == 1
         let one: E::F = M31::from(1u32).into();
@@ -202,7 +275,17 @@ impl FrameworkEval for KickPlayerAir {
         // 约束 7（Gap 3，degree-2）：input_seat_occupied == 1 — 诚实 host 只踢占用座位。
         eval.add_constraint(is_active.clone() * (input_seat_occupied - one.clone()));
 
-        // TODO 阶段 3 完整版：约束 admin 签名。
+        // 约束 8：绑定 host-native canonical authorization request/receipt。
+        let expected_abi: E::F = M31::from(u32::from(self.input.authorization.abi_version)).into();
+        let expected_role: E::F = M31::from(u32::from(self.input.authorization.role)).into();
+        eval.add_constraint(is_active.clone() * (auth_abi_version - expected_abi));
+        eval.add_constraint(is_active.clone() * (auth_role - expected_role));
+        for limb in 0..DIGEST_LIMBS {
+            let request: E::F = self.input.authorization.request_digest[limb].into();
+            let receipt: E::F = self.input.authorization.receipt_digest[limb].into();
+            eval.add_constraint(is_active.clone() * (auth_request_digest[limb].clone() - request));
+            eval.add_constraint(is_active.clone() * (auth_receipt_digest[limb].clone() - receipt));
+        }
 
         eval
     }
@@ -227,6 +310,14 @@ pub struct KickPlayerRow {
     pub pot_add_carry: [M31; 3],
     /// 是否触发 settlement/reset cascade。
     pub reset_cascade: M31,
+    /// 被踢座位调用前 stack。
+    pub input_pre_stack: [M31; 4],
+    /// 被踢座位调用前 pending addon。
+    pub input_pre_pending_addon: [M31; 4],
+    /// refund checked-add ripple carry。
+    pub refund_add_carry: [M31; 3],
+    /// Verifier-issued administrator authorization binding.
+    pub authorization: AdminAuthorizationAirBinding,
 }
 
 impl KickPlayerRow {
@@ -275,6 +366,10 @@ impl KickPlayerRow {
                 compute_add_carries(pre_pot, input.kicked_bet)
             },
             reset_cascade: M31::from(u32::from(input.reset_cascade)),
+            input_pre_stack: u64_to_m31_limbs(input.pre_stack),
+            input_pre_pending_addon: u64_to_m31_limbs(input.pre_pending_addon),
+            refund_add_carry: compute_add_carries(input.pre_stack, input.pre_pending_addon),
+            authorization: input.authorization,
         }
     }
 
@@ -290,6 +385,15 @@ impl KickPlayerRow {
             input_seat_occupied: ZERO,
             pot_add_carry: [ZERO; 3],
             reset_cascade: ZERO,
+            input_pre_stack: [ZERO; 4],
+            input_pre_pending_addon: [ZERO; 4],
+            refund_add_carry: [ZERO; 3],
+            authorization: AdminAuthorizationAirBinding {
+                abi_version: 0,
+                role: 0,
+                request_digest: [ZERO; DIGEST_LIMBS],
+                receipt_digest: [ZERO; DIGEST_LIMBS],
+            },
         }
     }
 
@@ -304,6 +408,13 @@ impl KickPlayerRow {
         v.push(self.input_seat_occupied);
         v.extend_from_slice(&self.pot_add_carry);
         v.push(self.reset_cascade);
+        v.extend_from_slice(&self.input_pre_stack);
+        v.extend_from_slice(&self.input_pre_pending_addon);
+        v.extend_from_slice(&self.refund_add_carry);
+        v.push(M31::from(u32::from(self.authorization.abi_version)));
+        v.push(M31::from(u32::from(self.authorization.role)));
+        v.extend_from_slice(&self.authorization.request_digest);
+        v.extend_from_slice(&self.authorization.receipt_digest);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);
         v
     }

@@ -434,6 +434,8 @@ fn test_e2e_start_hand_prove_verify() {
         ante_mode: 0,
         ante_amount: 0,
         ante_collected: 0,
+        pre_pot: 0,
+        post_pot: 0,
     };
     let row = StartHandRow::active(
         &input,
@@ -485,6 +487,8 @@ fn test_soundness_start_hand_tampered_count() {
         ante_mode: 0,
         ante_amount: 0,
         ante_collected: 0,
+        pre_pot: 0,
+        post_pot: 0,
     };
     let row = StartHandRow::active(
         &input,
@@ -549,6 +553,8 @@ fn test_soundness_start_hand_tampered_ante_mode() {
         ante_mode: 1,
         ante_amount: 10,
         ante_collected: 40,
+        pre_pot: 0,
+        post_pot: 40,
     };
     let row = StartHandRow::active(
         &input,
@@ -602,6 +608,110 @@ fn test_soundness_start_hand_tampered_ante_mode() {
         result.is_err(),
         "篡改 ante_mode 后 verify 应失败，但成功了 — soundness 漏洞！"
     );
+}
+
+/// Soundness: ante high limbs are constrained, not truncated to limb 0.
+#[test]
+fn test_soundness_start_hand_rejects_high_limb_ante_substitution() {
+    let input = StartHandInput {
+        active_count: 2,
+        new_button: 1,
+        ante_mode: 2,
+        ante_amount: 0,
+        ante_collected: 0,
+        pre_pot: 0,
+        post_pot: 0,
+    };
+    let mut row = StartHandRow::active(
+        &input,
+        active_count_inv(2),
+        active_count_prod(2),
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+    );
+    row.output_ante_amount[1] = M31::from(1u32);
+    row.output_ante_collected[1] = M31::from(1u32);
+    let trace = gen_method_trace(
+        StartHandAir::num_columns(),
+        &row.to_vec(),
+        &StartHandRow::padding().to_vec(),
+    )
+    .unwrap();
+    let result = prove_method(
+        &trace,
+        StartHandAir {
+            log_size: trace.log_size,
+            input,
+            pre_state_root: zero_root(),
+            post_state_root: one_root(),
+            table_id: 42,
+            hand_id: 0,
+            call_seq: 3,
+            pre_version: 0,
+            post_version: 1,
+        },
+        StartHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3),
+    );
+    assert!(result.is_err(), "high-limb ante substitution must fail");
+}
+
+/// `start_hand` proves the full checked-u64 pot update, including a carry from
+/// limb 0 into limb 1.
+#[test]
+fn test_e2e_start_hand_ante_pot_ripple_carry() {
+    let input = StartHandInput {
+        active_count: 2,
+        new_button: 1,
+        ante_mode: 2,
+        ante_amount: 1,
+        ante_collected: 1,
+        pre_pot: 65_535,
+        post_pot: 65_536,
+    };
+    let row = StartHandRow::active(
+        &input,
+        active_count_inv(2),
+        active_count_prod(2),
+        zero_root(),
+        one_root(),
+        42,
+        0,
+        3,
+        0,
+        1,
+    );
+    assert_eq!(row.ante_pot_add_carry[0], M31::from(1u32));
+    let trace = gen_method_trace(
+        StartHandAir::num_columns(),
+        &row.to_vec(),
+        &StartHandRow::padding().to_vec(),
+    )
+    .expect("trace generation failed");
+    let air = StartHandAir {
+        log_size: trace.log_size,
+        input,
+        pre_state_root: zero_root(),
+        post_state_root: one_root(),
+        table_id: 42,
+        hand_id: 0,
+        call_seq: 3,
+        pre_version: 0,
+        post_version: 1,
+    };
+    let proof = prove_method(
+        &trace,
+        air,
+        StartHandAir::num_columns(),
+        TexasPublicInputs::synthetic_for_test(MethodKind::StartHand, 42, 0, 3),
+    )
+    .expect("prove failed");
+    verify_method(proof).expect("verify failed");
 }
 
 // ========== tick AIR ==========
@@ -989,8 +1099,8 @@ fn test_lifecycle_air_column_consistency() {
     assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 39);
     assert_eq!(LeaveTableAir::num_columns(), leave_table::cols::NUM_COLUMNS);
 
-    // start_hand: 通用 + 8 业务（含 ante 3 列 + active_count_inv/prod witness）= 45
-    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 8);
+    // start_hand: 通用 + 17 业务（完整 ante 金额、active_count witnesses、pot add carries）
+    assert_eq!(start_hand::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 17);
     assert_eq!(StartHandAir::num_columns(), start_hand::cols::NUM_COLUMNS);
 
     // tick: 通用 + 53 个业务列（完整 64-bit Time Bank / Rake / deadline witness）。
