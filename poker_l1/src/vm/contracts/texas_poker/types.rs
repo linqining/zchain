@@ -297,8 +297,6 @@ impl Seat {
 pub struct ShuffleState {
     /// 洗牌阶段（SHUFFLE_PHASE_NONE/WAITING/RECONSTRUCT/BEFORE_PREFLOP）。
     pub phase: u8,
-    /// 当前洗牌者 seat_index（None 表示未开始或已完成）。
-    pub current_shuffler: u8,
     /// 等待洗牌的玩家集合。
     pub pending_mask: SeatMask,
     /// 已完成洗牌的玩家集合。
@@ -309,7 +307,6 @@ impl Default for ShuffleState {
     fn default() -> Self {
         Self {
             phase: SHUFFLE_PHASE_NONE,
-            current_shuffler: NO_SEAT,
             pending_mask: 0,
             completed_mask: 0,
         }
@@ -1230,13 +1227,6 @@ impl TexasPokerTable {
                     "Texas shuffle phase has an invalid active-phase combination".into(),
                 ));
             }
-            let expected_shuffler = self.shuffle_state.derived_current_shuffler();
-            if self.shuffle_state.current_shuffler != expected_shuffler {
-                return Err(PokerL1Error::Serialization(format!(
-                    "Texas persisted current shuffler {} is not canonical; expected {}",
-                    self.shuffle_state.current_shuffler, expected_shuffler
-                )));
-            }
             return Ok(HandPhase::Shuffling {
                 street: self.round_state,
                 state: self.shuffle_state.clone(),
@@ -1452,16 +1442,6 @@ impl TexasPokerTable {
         if self.shuffle_state.pending_mask & self.shuffle_state.completed_mask != 0 {
             return Err(PokerL1Error::Serialization(
                 "Texas shuffle pending/completed masks overlap".into(),
-            ));
-        }
-        if self.shuffle_state.current_shuffler != NO_SEAT
-            && !seat_mask_contains(
-                self.shuffle_state.pending_mask,
-                self.shuffle_state.current_shuffler,
-            )
-        {
-            return Err(PokerL1Error::Serialization(
-                "Texas current shuffler is not pending".into(),
             ));
         }
         for assignment in &self.reveal_token_state.assignments {
@@ -1696,7 +1676,7 @@ mod tests {
     fn test_shuffle_state_default() {
         let state = ShuffleState::default();
         assert_eq!(state.phase, SHUFFLE_PHASE_NONE);
-        assert_eq!(state.current_shuffler, NO_SEAT);
+        assert_eq!(state.derived_current_shuffler(), NO_SEAT);
         assert_eq!(state.pending_mask, 0);
         assert_eq!(state.completed_mask, 0);
     }

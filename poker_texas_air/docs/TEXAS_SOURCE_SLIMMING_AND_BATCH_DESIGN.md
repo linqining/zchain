@@ -69,6 +69,18 @@ occupied seat 的非 identity `seat.pk` 确定性重建。v2-v9 migration 最多
 reconstruct 不改变 lineage。跨局 reset 会从所有仍占座且公钥有效的玩家重建新牌组 lineage，避免
 `fold_with_proof` 玩家留座后永久丢失下一手密钥贡献。
 
+schema v11 已物理删除运行时与持久化 `ShuffleState.current_shuffler`。当前洗牌者始终是
+`first(pending_mask)`，因此不再需要写同步字段，也不再需要 normalize 为“选择 actor”单独产生一个
+micro-step。v5-v10 的精确 legacy phase mirror 仍读取旧字段；迁移只接受它等于 pending mask 的最低
+seat（空 mask 时必须为 `NO_SEAT`），随后丢弃，任何错配均 fail-closed。
+
+外部命令序号也已完成收口。所有真正改变状态的 dispatch 在原子提交边界统一写入
+`post.version = pre.version + 1` 与 `post.call_seq = pre.call_seq + 1`；内部 normalize、reset、settlement
+执行多少个 micro-stage 都不再改变该事实。no-op `tick` 不递增序号、也不产生 proof task。
+Kick/reveal/tick 的复合分支改由 canonical replay events 与四阶段 composition plan 判定，禁止再用
+`version + 2/+N` 猜测 settlement。这使 method batch 的每一行都能使用固定的命令序号约束，Stage
+顺序只由 batch id/row index 表达。
+
 ## 下一步字段处理
 
 ### A. 保守方案：应优先完成
@@ -78,7 +90,7 @@ reconstruct 不改变 lineage。跨局 reset 会从所有仍占座且公钥有�
 | ~~`Seat.folded/all_in/is_waiting/left_during_hand`~~ | 已完成：`SeatStatus: u8` | enum 已消灭 `folded && all_in` 等非法组合。|
 | ~~`Seat.acted_this_round/want_leave`~~ | 已完成：桌级 `acted_mask/leave_after_hand_mask: u16` | 九个 seat 的正交 bool 分别只占一个 bit；空 seat 的 live bit 被拒绝。|
 | ~~`current_turn: Option<u8>`~~ | 已完成：`u8` + `NO_SEAT = 0xff` | Borsh `Option<u8>` 使用 tag+value；固定哨兵更适合一列 AIR。|
-| ~~`ShuffleState.current_shuffler: Option<u8>`~~ | 已完成：同一 `NO_SEAT` 编码 | 与 `current_turn` 使用统一 seat-index 编码。|
+| ~~`ShuffleState.current_shuffler`~~ | schema v11 已删除 | 始终由 `first(pending_mask)` 派生；旧 schema 字段仅用于迁移校验。|
 | ~~`pending_players/completed_players: Vec<u8>`~~ | 已完成：`u16` seat mask | 最多 9 seat；mask 消除重复、顺序和变长编码。|
 | ~~每个 reveal/reconstruct pending vector~~ | 已完成：`u16` seat mask | 提交即清 bit；越界 bit 在 state codec 和 canonical validation 拒绝。|
 | ~~`Card { suit, rank }`~~ | 已完成：canonical `card_id: u8` (`0..51`) | suit/rank 由 canonical id 确定性派生。|
@@ -97,8 +109,8 @@ reconstruct 不改变 lineage。跨局 reset 会从所有仍占座且公钥有�
 | 必须保留 | `stack/bet/total_bet/pot/chip_pool` | 保持 checked `u64`；这些是资产与 side-pot 的 canonical 输入，不能为了减列缩窄。|
 | 必须保留 | seat `player/pk`、当前 encrypted deck | Mental Poker custody 与 proof request 的 canonical statement。|
 | 已从 persisted state 删除 | `aggregated_pk` | schema v10 只持久化 `DeckState.contributor_mask`；runtime cache 必须等于 mask + seat pk 派生值。|
-| 应收口 | `version` + `call_seq` | 桌内 `version` 不是 ObjectDb 的真实 CAS version；先改成每个外部命令只增长一次，再删除或令其等于 `call_seq`。|
-| 可立即派生 | `ShuffleState.current_shuffler` | v5 已要求它是 pending 的 canonical first seat；v6 可删除并使用 `first(pending_mask)`。|
+| 已收口，待删除重复字段 | `version` + `call_seq` | 两者现在每个外部命令都只增长一次；下一 schema 删除桌内 `version`，证明顺序只保留 `call_seq`。|
+| 已删除 | `ShuffleState.current_shuffler` | schema v11 使用 `first(pending_mask)`；v5-v10 迁移校验后丢弃旧字段。|
 | 可立即派生 | `RevealTokenData.seat_index` | token 按 seat slot 或 seat-index 升序存放后，提交者由 slot/bitmap 决定。|
 | normalize 后可删 | `RevealAssignment.decrypted` | `pending_mask == 0` 时立即 materialize card 并移除 assignment，不持久化“已完成但未消费”状态。|
 | normalize 后可删 | 已 materialize 的 `DecryptedCard` | 明文已经写入 hole/board 后不再重复保存在 deck ledger；只保留仍需继续部分解密的记录。|
@@ -128,7 +140,7 @@ Tagged-union Stage 已稳定且 status 列确认为热点后再做。
 | `TexasPokerTable.id` | 中期移出 table payload | ObjectDb key、dispatch context 和 AIR 公共输入已经绑定 table id；前提是对象存储层保证 key/payload 不可错配。事件从执行上下文取 id。|
 | `state_schema_version` | 中期移到 codec envelope | schema 版本属于编码层，不是扑克业务状态；state-root domain 仍必须包含版本，迁移入口继续 fail-closed。|
 | `max_players` | 与 `seats` 表示二选一 | 若继续使用长度永久不变的 `Vec<Seat>`，容量可由 `seats.len()` 派生；若改固定 `[Seat; 9]`，则必须保留独立 `seat_capacity`。不要同时保存两份容量事实。|
-| `ShuffleState.current_shuffler` | 删除 | normalize 已选择 `first(pending_mask)`，当前洗牌者是 canonical 派生值。|
+| `ShuffleState.current_shuffler` | schema v11 已删除 | 当前洗牌者是 `first(pending_mask)`，不再产生仅用于同步缓存的 normalize step。|
 | `ShuffleState.completed_mask` | shuffle 内只表示本轮已提交者；完成后移入 `DeckState.contributor_mask` | `HandPhase::Shuffling` 结束后 shuffle payload 会消失，因此 deck 贡献者 lineage 不能只存在于 shuffle variant。|
 | `DeckState.aggregated_pk` | schema v10 已由持久化 `contributor_mask + seat.pk` 派生 | host-native verifier 最多做 9 次 G1 加法；join 置 bit，leave/fold proof 清 bit，跨局 reset 为仍占座玩家重建 mask。|
 | `DeckState.cards_dealt` | 暂时保留 | reconstruct 会开启新的 deck epoch，旧 hole/board 仍存在，不能只用已公开牌数量推导新 deck 游标。引入显式 deck epoch 和 lineage 后才可重新评估。|
@@ -148,10 +160,9 @@ enum/tagged union。不要为了 Borsh 少几个字节把 `SeatStatus`、phase t
 hash；不要让每个 method row重复携带所有 rules 位。
 
 `TexasPokerTable.version` 不是 `Object.version`：真实 CAS version 位于 ObjectDb/object envelope。
-因此当前桌内 `version` 只是另一套逻辑序号，并且由于 `bump_version()` 散落在 micro-transition 中，
-一次外部命令可能增长多次。应先把增长收口到 dispatch 原子提交点；Stage 内部顺序由 batch row index
-表示。完成后桌内 `version` 可直接删除并由 object version 提供并发控制，证明链只保留 `call_seq`；
-兼容期也可以令 `version == call_seq`，但不再允许 `+2/+N` 的命令结果。
+当前已把增长收口到 dispatch 原子提交点，Stage 内部顺序由 batch row index 表示；任何已提交命令
+都严格满足 `post.version = pre.version + 1`，不再允许 `+2/+N`。下一 schema 可直接删除桌内
+`version`，由 object version 提供并发控制，证明链只保留 `call_seq`。
 
 ### B. 中等方案：先建立 custody/phase invariant 再删除
 
@@ -214,7 +225,7 @@ hash；不要让每个 method row重复携带所有 rules 位。
 | 立即采用 | `Card { suit, rank }`、可变长 hole/board、重复 RIT prefix | `CardId(u8)` + 固定容量数组 + second-board suffix |
 | 已在 v8-v10 codec 生效 | `round_state`/`betting_round`/crypto phase/timestamps/reveal ledger/contributor lineage | persisted state 只保留 `HandPhase`、互斥 reveal enum 与 contributor mask；aggregate/runtime flattened 字段仅为派生缓存 |
 | 下一 schema | `Seat.time_bank_ms`、`rake_bps`、时长类 `u64` | 分别收窄到 checked `u32`/`u16`；绝对 deadline 仍为 `u64` |
-| 部分完成 | `ShuffleState.current_shuffler`、`DeckState.aggregated_pk` | current shuffler 已强制等于 pending first；schema v10 已删除 persisted aggregate，crypto statement 从 validated runtime-derived cache 读取 |
+| 已完成 | `ShuffleState.current_shuffler`、`DeckState.aggregated_pk` | schema v11 已删除 shuffler；schema v10 已删除 persisted aggregate，crypto statement 从 validated runtime-derived cache 读取 |
 | 不应删除 | `stack/bet/total_bet/pot/chip_pool`、`deck.encrypted`、`hand/board`、`total_bet` side-pot 输入 | 这些是资产守恒、牌组 lineage 或结算唯一事实 |
 | 可合并入口 | `check`/`call`/`raise`/`bet` | canonical `PlayerAction::{MatchBet,RaiseTo}`；旧 selector 只做参数转换和严格语义断言 |
 | 可合并入口 | `auto_fold`/`force_fold`/手动 `fold` | canonical `Fold { cause }`；timeout、admin、player 授权在 wrapper 校验 |
@@ -390,7 +401,7 @@ transition，不再有第三套自动 fold 业务逻辑。
 | `SeatStatus`、`HandPhase`、`RevealTarget`、`RevealProgress`、`RunoutMode` | 保持 enum/tagged union | 这些值互斥；硬塞进 flags 会把非法组合转移到 AIR 拆位。|
 | `Card { suit, rank }`、可变长 hand/board、重复 RIT prefix | `CardId` + 固定容量数组 + suffix | 只接受 0..51 card id 和 canonical zero padding。|
 | `side_pots`、`refunded`、`DeckState.plaintext`、ready/complete 的 transient reveal record | 删除或 normalize 后删除 | 删除前必须由同一 checked settlement/reveal plan 唯一重建，并 fail-closed 拒绝歧义旧状态。|
-| `aggregated_pk`、`current_shuffler`、`ante_collected`、`addon_pool`、`rake_collected` | aggregate 已从 persisted state 删除；其余继续派生/移出 hot state | contributor mask 已落地；剩余字段仍需 custody delta、treasury receipt 或物理 runtime cache 删除。|
+| `aggregated_pk`、`current_shuffler`、`ante_collected`、`addon_pool`、`rake_collected` | aggregate 与 shuffler 已删除；其余继续派生/移出 hot state | contributor mask 与 mask-derived actor 已落地；剩余资金字段仍需 custody delta 或 treasury receipt。|
 | `stack`、`bet`、`total_bet`、`pot`、`chip_pool`、encrypted deck、seat player/pk | 必须保留 | 它们分别是资产守恒、side-pot eligibility、Mental Poker lineage 和身份授权的唯一事实。|
 | duration/time-bank/rake parameters | bounded `u32`/`u16` | AIR 做 range/checked-u64；绝对 `deadline_ms` 继续 `u64`。|
 

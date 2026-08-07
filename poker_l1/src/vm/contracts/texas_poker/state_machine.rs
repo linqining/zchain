@@ -892,7 +892,6 @@ fn advance_shuffle(
     let next = seat_mask_first(table.shuffle_state.pending_mask).ok_or_else(|| {
         PokerL1Error::Serialization("shuffle pending mask unexpectedly empty".into())
     })?;
-    table.shuffle_state.current_shuffler = next;
     table.timestamps.shuffle_started_at = 0;
     events::emit_event(
         events,
@@ -972,7 +971,6 @@ fn rebuild_deck_and_shuffle_on_timeout(
     let active = get_active_seat_mask(&table.seats);
     table.shuffle_state = super::types::ShuffleState {
         phase,
-        current_shuffler: NO_SEAT,
         pending_mask: active,
         completed_mask: 0,
     };
@@ -1581,7 +1579,6 @@ fn on_complete_reconstruct(
     let active = get_active_seat_mask(&table.seats);
     table.shuffle_state = super::types::ShuffleState {
         phase: SHUFFLE_PHASE_RECONSTRUCT,
-        current_shuffler: NO_SEAT,
         pending_mask: active,
         completed_mask: 0,
     };
@@ -1784,7 +1781,6 @@ pub fn apply_join_and_shuffle(
 
     table.shuffle_state.completed_mask |= 1u16 << seat_index;
     seat_mask_remove(&mut table.shuffle_state.pending_mask, seat_index);
-    table.shuffle_state.current_shuffler = table.shuffle_state.derived_current_shuffler();
 
     let active_after = count_active_occupied(&table.seats);
     events::emit_event(
@@ -1818,10 +1814,11 @@ pub fn apply_submit_shuffle_v2(
     if !table.seats[seat_index as usize].is_occupied() {
         return Err(PokerL1Error::Serialization("seat not occupied".into()));
     }
-    if table.shuffle_state.current_shuffler != seat_index {
+    let current_shuffler = table.shuffle_state.derived_current_shuffler();
+    if current_shuffler != seat_index {
         return Err(PokerL1Error::Serialization(format!(
             "not shuffler's turn: expected {:?}, got {seat_index}",
-            table.shuffle_state.current_shuffler
+            current_shuffler
         )));
     }
     if is_in_mask(table.shuffle_state.completed_mask, seat_index) {
@@ -1862,7 +1859,6 @@ pub fn apply_submit_shuffle_v2(
 
     table.shuffle_state.completed_mask |= 1u16 << seat_index;
     seat_mask_remove(&mut table.shuffle_state.pending_mask, seat_index);
-    table.shuffle_state.current_shuffler = table.shuffle_state.derived_current_shuffler();
 
     events::emit_event(
         events,
@@ -2701,7 +2697,6 @@ pub fn start_hand(
     let pending_mask = get_pending_seat_mask(completed_mask, &table.seats);
     table.shuffle_state = super::types::ShuffleState {
         phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-        current_shuffler: NO_SEAT,
         pending_mask,
         completed_mask,
     };
@@ -2769,9 +2764,7 @@ fn normalize_until_blocked_in_place(
             table.shuffle_state.phase,
             SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
         ) {
-            if table.shuffle_state.pending_mask == 0
-                || table.shuffle_state.current_shuffler == NO_SEAT
-            {
+            if table.shuffle_state.pending_mask == 0 {
                 Some(NormalizationStep::AdvanceShuffle)
             } else {
                 None
@@ -2906,7 +2899,7 @@ fn advance_deadline_in_place(
 
     let sp = table.shuffle_state.phase;
     if sp == SHUFFLE_PHASE_RECONSTRUCT || sp == SHUFFLE_PHASE_BEFORE_PREFLOP {
-        let subject = table.shuffle_state.current_shuffler;
+        let subject = table.shuffle_state.derived_current_shuffler();
         let started = table.timestamps.shuffle_started_at;
         if started == 0 {
             table.timestamps.shuffle_started_at = now_ms;
@@ -3051,7 +3044,7 @@ fn on_shuffle_timeout(
     now_ms: u64,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    let seat = table.shuffle_state.current_shuffler;
+    let seat = table.shuffle_state.derived_current_shuffler();
     let phase = table.shuffle_state.phase;
     events::emit_event(
         events,
@@ -3752,8 +3745,7 @@ fn kick_player_internal_in_place(
     );
 
     let _ = reason;
-    if table.shuffle_state.current_shuffler == seat_index {
-        table.shuffle_state.current_shuffler = NO_SEAT;
+    if table.shuffle_state.derived_current_shuffler() == seat_index {
         let mut tmp_events = Vec::new();
         advance_shuffle(table, &mut tmp_events)?;
         events.extend(tmp_events);
@@ -4589,7 +4581,7 @@ mod tests {
             super::super::types::ReconstructState::default()
         );
         assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_RECONSTRUCT);
-        assert_eq!(table.shuffle_state.current_shuffler, 0);
+        assert_eq!(table.shuffle_state.derived_current_shuffler(), 0);
         assert_eq!(table.shuffle_state.pending_mask, 0b11);
         assert!(
             events
@@ -4738,7 +4730,7 @@ mod tests {
 
         start_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_BEFORE_PREFLOP);
-        assert_ne!(table.shuffle_state.current_shuffler, NO_SEAT);
+        assert_ne!(table.shuffle_state.derived_current_shuffler(), NO_SEAT);
         assert_eq!(table.timestamps.shuffle_started_at, 0);
         // The next tick only arms the active shuffle deadline.
         tick(&mut table, 1000, &mut events).unwrap();
@@ -4746,7 +4738,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_selects_canonical_shuffler() {
+    fn shuffle_actor_is_derived_without_normalization_step() {
         let mut table = make_table();
         for (seat_index, player) in [(0usize, [0x01; 20]), (2usize, [0x03; 20])] {
             table.seats[seat_index].player = player;
@@ -4755,7 +4747,6 @@ mod tests {
         }
         table.shuffle_state = super::super::types::ShuffleState {
             phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-            current_shuffler: NO_SEAT,
             pending_mask: 0b0101,
             completed_mask: 0,
         };
@@ -4763,12 +4754,9 @@ mod tests {
         let mut events = vec![];
         let report = normalize_until_blocked(&mut table, &mut events).unwrap();
 
-        assert_eq!(report.steps, vec![NormalizationStep::AdvanceShuffle]);
-        assert_eq!(table.shuffle_state.current_shuffler, 0);
-        assert!(matches!(
-            events.as_slice(),
-            [TexasPokerEvent::ShuffleTurn { seat_index: 0, .. }]
-        ));
+        assert!(report.steps.is_empty());
+        assert_eq!(table.shuffle_state.derived_current_shuffler(), 0);
+        assert!(events.is_empty());
     }
 
     #[test]

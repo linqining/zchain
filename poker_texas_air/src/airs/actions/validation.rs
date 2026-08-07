@@ -648,21 +648,18 @@ pub(crate) fn validate_kick_player(
         .pot
         .checked_add(pre_seat.bet)
         .ok_or_else(|| TexasAirError::SpecViolation("kick_player: pot overflow".into()))?;
-    let version_increment = if canonical.post.version == canonical.pre.version.saturating_add(1) {
-        1
-    } else if canonical.post.version == canonical.pre.version.saturating_add(2) {
-        2
-    } else {
+    let expected_version =
+        canonical.pre.version.checked_add(1).ok_or_else(|| {
+            TexasAirError::SpecViolation("kick_player: pre-version overflow".into())
+        })?;
+    if canonical.post.version != expected_version {
         return Err(TexasAirError::UnsupportedBettingTransition(
-            "kick_player produced an unsupported version increment".into(),
+            "kick_player must increment the external-command version exactly once".into(),
         ));
-    };
-    let simple = version_increment == 1
-        && canonical.post.round_state == canonical.pre.round_state
-        && canonical.post.pot == expected_post_pot;
-    let reset_cascade = if version_increment == 2
-        && canonical.post.round_state
-            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+    }
+    let version_increment = 1;
+    let reset_cascade = if canonical.post.round_state
+        == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
         && canonical.post.pot == 0
     {
         let composition =
@@ -685,6 +682,9 @@ pub(crate) fn validate_kick_player(
     } else {
         false
     };
+    let simple = !reset_cascade
+        && canonical.post.round_state == canonical.pre.round_state
+        && canonical.post.pot == expected_post_pot;
     if !simple && !reset_cascade {
         return Err(TexasAirError::UnsupportedBettingTransition(
             "kick_player triggered an unsupported active-hand advance/settlement cascade".into(),

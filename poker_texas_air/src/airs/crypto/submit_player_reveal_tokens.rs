@@ -85,10 +85,8 @@ pub struct SubmitPlayerRevealTokensInput {
     /// 最后一个被分配的玩家提交 token 后，状态机会将 post-dispatch 阶段推进到
     /// `NONE`；这不改变本次调用在非 `NONE` 阶段获准执行的事实。
     pub reveal_phase: u8,
-    /// 原生状态机在此调用中执行的 `bump_version` 次数。
-    ///
-    /// 普通 reveal 为 1；最后一个 showdown token 会同步结算并 reset 手牌，
-    /// 因而为 2。该值由 Orchestrator 的 canonical VM replay 推导。
+    /// External-command version increment. Every committed dispatch is exactly one;
+    /// settlement composition is carried by the tagged settlement projection below.
     pub version_increment: u8,
     /// Verifier-issued batched reveal-token verification result.
     pub precompile: PrecompileAirBinding,

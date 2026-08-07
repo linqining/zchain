@@ -86,23 +86,23 @@ use crate::airs::lifecycle::reset_for_next_hand::{
     ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
-use crate::airs::lifecycle::tick::{TickAir, TickRow, canonical_input as canonical_tick_input};
+use crate::airs::lifecycle::tick::{canonical_input as canonical_tick_input, TickAir, TickRow};
 use crate::authorization_binding::AdminAuthorizationBinding;
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{
-    JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PrecompileCallBinding,
-    RevealTokenVerifyRequest, precompile_call_context,
+    precompile_call_context, JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest,
+    PrecompileCallBinding, RevealTokenVerifyRequest,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
-use crate::prover::{MethodProof, prove_method};
-use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
-use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
+use crate::prover::{prove_method, MethodProof};
+use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
+use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
 use crate::verified_chain::{
-    ExpectedChainAnchor, VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
-    verify_method_against_and_issue_receipt,
+    verify_method_against_and_issue_receipt, ExpectedChainAnchor, VerificationReceipt,
+    VerifiedChain, VerifiedChainBuilder,
 };
 
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {
@@ -1663,22 +1663,17 @@ impl Orchestrator {
             .pot
             .checked_add(pre_seat.bet)
             .ok_or_else(|| TexasAirError::SpecViolation("kick_player pot overflow".into()))?;
-        let version_increment =
-            if task.post_table.version == task.pre_table.version.saturating_add(1) {
-                1
-            } else if task.post_table.version == task.pre_table.version.saturating_add(2) {
-                2
-            } else {
-                return Err(TexasAirError::UnsupportedBettingTransition(
-                    "kick_player produced an unsupported version increment".into(),
-                ));
-            };
-        let simple = version_increment == 1
-            && task.post_table.round_state == task.pre_table.round_state
-            && task.post_table.pot == expected_post_pot;
-        let reset_cascade = if version_increment == 2
-            && task.post_table.round_state
-                == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
+        let expected_version = task.pre_table.version.checked_add(1).ok_or_else(|| {
+            TexasAirError::SpecViolation("kick_player pre-version overflow".into())
+        })?;
+        if task.post_table.version != expected_version {
+            return Err(TexasAirError::UnsupportedBettingTransition(
+                "kick_player must increment the external-command version exactly once".into(),
+            ));
+        }
+        let version_increment = 1;
+        let reset_cascade = if task.post_table.round_state
+            == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
             && task.post_table.pot == 0
         {
             let composition =
@@ -1699,6 +1694,9 @@ impl Orchestrator {
         } else {
             false
         };
+        let simple = !reset_cascade
+            && task.post_table.round_state == task.pre_table.round_state
+            && task.post_table.pot == expected_post_pot;
         if !simple && !reset_cascade {
             return Err(TexasAirError::UnsupportedBettingTransition(
                 "kick_player triggered an unsupported active-hand advance/settlement cascade"
@@ -2355,7 +2353,7 @@ impl Orchestrator {
             RevealTokenVerifyRequest::from_dispatch(call_context, &task.pre_table, &args)?;
         let binding = PrecompileCallBinding::verify_reveal_tokens(&request)?;
         let version_increment = reveal_version_increment(task)?;
-        let settlement = replay_reveal_settlement_binding(task, version_increment == 2)?;
+        let settlement = replay_reveal_settlement_binding(task)?;
         let input = SubmitPlayerRevealTokensInput {
             seat_index: *seat_index,
             // Admission is determined by the pre-dispatch reveal phase. The final player in a
@@ -2570,48 +2568,24 @@ pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()
     Ok(())
 }
 
-/// Determine the version change represented by one reveal-token dispatch.
-///
-/// A normal token submission invokes `bump_version` once. The final showdown
-/// token is an atomic compound transition: after storing the token it settles
-/// the hand and `reset_for_next_hand` bumps the version once more. Preserve
-/// fail-closed behavior for every other multi-version transition.
+/// Require one external-command version increment for a reveal-token dispatch.
 fn reveal_version_increment(task: &ProveTask) -> TexasAirResult<u8> {
-    use poker_l1::vm::contracts::texas_poker::constants::{
-        REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
-    };
-
     let pre = &task.pre_table;
     let post = &task.post_table;
-    let completed_showdown = post.round_state == ROUND_WAITING
-        && post.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
-        && post.pot == 0;
-    let increment = if completed_showdown {
-        if pre.round_state != ROUND_SHOWDOWN
-            || pre.reveal_token_state.reveal_phase != REVEAL_PHASE_SHOWDOWN
-        {
-            return Err(TexasAirError::UnsupportedBettingTransition(
-                "submit_player_reveal_tokens reset without a showdown reveal pre-state".into(),
-            ));
-        }
-        2
-    } else {
-        1
-    };
-
-    let expected_post_version = pre.version.saturating_add(u64::from(increment));
+    let expected_post_version = pre.version.checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation("submit_player_reveal_tokens pre-version overflow".into())
+    })?;
     if post.version != expected_post_version {
         return Err(TexasAirError::SpecViolation(format!(
-            "submit_player_reveal_tokens: expected version {} after {increment} native bump(s), got {}",
+            "submit_player_reveal_tokens: expected one external-command version increment to {}, got {}",
             expected_post_version, post.version
         )));
     }
-    Ok(increment)
+    Ok(1)
 }
 
 pub(crate) fn replay_reveal_settlement_binding(
     task: &ProveTask,
-    terminal: bool,
 ) -> TexasAirResult<crate::settlement_binding::SettlementPlanBinding> {
     let mut replayed_post = task.pre_table.clone();
     let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
@@ -2635,7 +2609,7 @@ pub(crate) fn replay_reveal_settlement_binding(
             "submit_player_reveal_tokens settlement replay output: {error}"
         ))
     })?;
-    crate::settlement_binding::SettlementPlanBinding::from_replay(&output.events, terminal)
+    crate::settlement_binding::SettlementPlanBinding::from_replay(&output.events)
 }
 
 /// 原生下注动作种类。
@@ -2993,7 +2967,7 @@ mod tests {
         RebuyArgs, SeatIndexArgs,
     };
     use poker_l1::vm::contracts::texas_poker::state_machine;
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
+    use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable, EMPTY_PLAYER};
 
     fn make_table(name: &str) -> TexasPokerTable {
         TexasPokerTable::new(
@@ -3378,36 +3352,25 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_preserves_waiting_tick_with_required_component_archive() {
+    fn orchestrator_omits_proof_for_waiting_noop_tick() {
         let mut pre = make_table("waiting-tick-start-hand");
         for i in 0..2 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
             pre.seats[i].stack = 1_000;
+            pre.seats[i].set_status(SeatStatus::Active);
         }
         pre.chip_pool = 2_000;
 
-        let (task, post) = dispatch_task(
-            pre,
-            [0x78; 20],
-            texas_dispatch::selectors::tick(),
-            Vec::new(),
-        );
-        assert_eq!(task.method_kind, MethodKind::Tick);
-        assert_eq!(post.hand_id, task.pre_table.hand_id + 1);
-
-        let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
-            .expect("waiting tick should still have a canonical four-stage envelope");
-        assert!(!plan.seat_update.active);
-        assert!(!plan.bet_collection.active);
-        assert!(!plan.round_advance.active);
-        assert!(!plan.settlement.active);
-
-        let archived = Orchestrator::new()
-            .prove_verify_and_archive_task(&task)
-            .expect("waiting tick should preserve its method proof plus required envelope");
-        assert!(archived.composition_archive.is_some());
-        Orchestrator::verify_archived_proven_task(&task, &archived)
-            .expect("waiting tick archive should reverify");
+        let context = test_context([0x78; 20]);
+        let mut post = pre.clone();
+        let result =
+            texas_dispatch::dispatch(&context, &mut post, &texas_dispatch::selectors::tick(), &[])
+                .expect("waiting tick should be a valid no-op");
+        let output: DispatchOutput =
+            borsh::from_slice(&result.return_value).expect("dispatch output should decode");
+        assert_eq!(post, pre);
+        assert!(output.events.is_empty());
+        assert!(output.prove_task.is_none());
     }
 
     #[test]
@@ -3995,7 +3958,7 @@ mod tests {
             })
             .expect("kick args should serialize"),
         );
-        assert!(post.version > pre.version.saturating_add(1));
+        assert_eq!(post.version, pre.version.saturating_add(1));
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("WAITING kick nested reset should prove as a ResetOnly component");
@@ -4030,7 +3993,7 @@ mod tests {
             })
             .expect("kick args should serialize"),
         );
-        assert_eq!(post.version, pre.version.saturating_add(2));
+        assert_eq!(post.version, pre.version.saturating_add(1));
         assert_eq!(
             post.round_state,
             poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING

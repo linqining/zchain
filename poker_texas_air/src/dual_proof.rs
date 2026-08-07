@@ -19,8 +19,8 @@ use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::{
-    RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3VerifyRequest, SHUFFLE_ABI_VERSION,
-    ShuffleVerifyRequest, TranscriptId,
+    ReconstructionV3VerifyRequest, ShuffleVerifyRequest, TranscriptId,
+    RECONSTRUCTION_V3_ABI_VERSION, SHUFFLE_ABI_VERSION,
 };
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
@@ -49,17 +49,17 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::{replay_reveal_settlement_binding, validate_full_dispatch_task};
 use crate::precompile_binding::{
-    JOIN_AND_SHUFFLE_ABI_VERSION, JoinAndShuffleVerifyRequest, LEAVE_DLEQ_ABI_VERSION,
-    LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding, REVEAL_TOKEN_ABI_VERSION,
-    RevealTokenVerifyRequest, precompile_call_context,
+    precompile_call_context, JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest,
+    PokerPrecompileId, PrecompileCallBinding, RevealTokenVerifyRequest,
+    JOIN_AND_SHUFFLE_ABI_VERSION, LEAVE_DLEQ_ABI_VERSION, REVEAL_TOKEN_ABI_VERSION,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{MethodInput, ProveTask};
-use crate::prover::{MethodProof, prove_method};
+use crate::prover::{prove_method, MethodProof};
 use crate::public_inputs::TexasPublicInputs;
-use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
-use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
-use crate::verified_chain::{VerificationReceipt, verify_method_against_and_issue_receipt};
+use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
+use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
+use crate::verified_chain::{verify_method_against_and_issue_receipt, VerificationReceipt};
 
 /// Wire-format magic for a stage-3 dual proof package.
 pub const DUAL_PROOF_MAGIC: [u8; 8] = *b"ZPDUAL03";
@@ -1207,7 +1207,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
                 version_increment,
                 precompile: binding.air_binding(),
-                settlement: replay_reveal_settlement_binding(task, version_increment == 2)?,
+                settlement: replay_reveal_settlement_binding(task)?,
             };
             let post_revealed_count = u8::try_from(
                 task.post_table.reveal_token_state.assignments.len(),
@@ -1365,33 +1365,16 @@ fn validate_route(
 }
 
 fn reveal_version_increment(task: &ProveTask) -> TexasAirResult<u8> {
-    use poker_l1::vm::contracts::texas_poker::constants::{
-        REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
-    };
-
-    let completed_showdown = task.post_table.round_state == ROUND_WAITING
-        && task.post_table.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
-        && task.post_table.pot == 0;
-    let increment = if completed_showdown {
-        if task.pre_table.round_state != ROUND_SHOWDOWN
-            || task.pre_table.reveal_token_state.reveal_phase != REVEAL_PHASE_SHOWDOWN
-        {
-            return Err(TexasAirError::UnsupportedBettingTransition(
-                "submit_player_reveal_tokens reset without a showdown reveal pre-state".into(),
-            ));
-        }
-        2
-    } else {
-        1
-    };
-    let expected_post_version = task.pre_table.version.saturating_add(u64::from(increment));
+    let expected_post_version = task.pre_table.version.checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation("submit_player_reveal_tokens pre-version overflow".into())
+    })?;
     if task.post_table.version != expected_post_version {
         return Err(TexasAirError::SpecViolation(format!(
-            "submit_player_reveal_tokens: expected version {expected_post_version} after {increment} native bump(s), got {}",
+            "submit_player_reveal_tokens: expected one external-command version increment to {expected_post_version}, got {}",
             task.post_table.version
         )));
     }
-    Ok(increment)
+    Ok(1)
 }
 
 fn validate_lengths(proof_len: usize, request_len: usize) -> TexasAirResult<()> {

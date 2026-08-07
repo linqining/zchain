@@ -120,7 +120,6 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
     table.sync_aggregated_pk().unwrap();
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_WAITING,
-        current_shuffler: 0,
         pending_mask: (1u16 << (0)),
         completed_mask: 0,
     };
@@ -192,7 +191,6 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
     table.version = u64::from(call_seq) + 20;
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_WAITING,
-        current_shuffler: u8::MAX,
         pending_mask: 0,
         completed_mask: 0,
     };
@@ -344,7 +342,6 @@ fn leave_task(nonce: u64) -> ProveTask {
     table.sync_aggregated_pk().unwrap();
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_WAITING,
-        current_shuffler: u8::MAX,
         pending_mask: 0,
         completed_mask: (1u16 << (1)),
     };

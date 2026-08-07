@@ -167,7 +167,6 @@ fn fixture(
     table.sync_aggregated_pk().unwrap();
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_WAITING,
-        current_shuffler: seat_index,
         pending_mask: (1u16 << (seat_index)),
         completed_mask: 0,
     };
@@ -353,7 +352,6 @@ fn leave_fixture(
     table.sync_aggregated_pk().unwrap();
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_WAITING,
-        current_shuffler: u8::MAX,
         pending_mask: 0,
         completed_mask: (1u16 << (seat_index)),
     };

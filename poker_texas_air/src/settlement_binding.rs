@@ -46,19 +46,28 @@ impl SettlementPlanBinding {
     }
 
     /// Select the canonical zero/terminal projection for one replayed reveal dispatch.
-    pub fn from_replay(events: &[TexasPokerEvent], terminal: bool) -> TexasAirResult<Self> {
-        if terminal {
+    ///
+    /// Settlement is classified from canonical replay events. Version deltas are command
+    /// sequence facts and must not double as a compound-transition discriminator.
+    pub fn from_replay(events: &[TexasPokerEvent]) -> TexasAirResult<Self> {
+        let has_commitment = events
+            .iter()
+            .any(|event| matches!(event, TexasPokerEvent::SettlementPlanCommitted { .. }));
+        if has_commitment {
             return Self::from_events(events);
         }
         if events.iter().any(|event| {
             matches!(
                 event,
-                TexasPokerEvent::SettlementPlanCommitted { .. }
-                    | TexasPokerEvent::WinnerAwarded { .. }
+                TexasPokerEvent::WinnerAwarded { .. }
+                    | TexasPokerEvent::HandSettled { .. }
+                    | TexasPokerEvent::HandEndedWithoutShowdown { .. }
+                    | TexasPokerEvent::RakeCollected { .. }
+                    | TexasPokerEvent::HandReset { .. }
             )
         }) {
             return Err(TexasAirError::SpecViolation(
-                "non-terminal reveal replay emitted settlement events".into(),
+                "reveal replay emitted settlement side events without a plan commitment".into(),
             ));
         }
         Ok(Self::inactive())
@@ -303,67 +312,55 @@ mod tests {
             award_event(0, 10),
         ])
         .is_err());
-        assert!(
-            SettlementPlanBinding::from_events(&[
-                plan_event(1, 10, 0, 10),
-                plan_event(1, 10, 0, 10),
-                award_event(0, 10),
-                settled_event(10, vec![0]),
-            ])
-            .is_err()
-        );
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 0, 10),
+            plan_event(1, 10, 0, 10),
+            award_event(0, 10),
+            settled_event(10, vec![0]),
+        ])
+        .is_err());
     }
 
     #[test]
     fn terminal_projection_fails_closed_on_invalid_summary_or_awards() {
-        assert!(
-            SettlementPlanBinding::from_events(&[
-                plan_event(3, 10, 0, 10),
-                award_event(0, 10),
-                settled_event(10, vec![0]),
-            ])
-                .is_err()
-        );
-        assert!(
-            SettlementPlanBinding::from_events(&[
-                plan_event(1, 10, 1, 10),
-                award_event(0, 10),
-                settled_event(10, vec![0]),
-            ])
-                .is_err()
-        );
-        assert!(
-            SettlementPlanBinding::from_events(&[
-                plan_event(1, 10, 0, 10),
-                award_event(SETTLEMENT_SEATS as u8, 10),
-                settled_event(10, vec![0]),
-            ])
-            .is_err()
-        );
-        assert!(
-            SettlementPlanBinding::from_events(&[
-                plan_event(1, 10, 0, 10),
-                award_event(0, 9),
-                settled_event(10, vec![0]),
-            ])
-                .is_err()
-        );
-        assert!(
-            SettlementPlanBinding::from_events(&[
-                plan_event(1, 10, 0, 10),
-                award_event_for_other_table(0, 10),
-                settled_event(10, vec![0]),
-            ])
-            .is_err()
-        );
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(3, 10, 0, 10),
+            award_event(0, 10),
+            settled_event(10, vec![0]),
+        ])
+        .is_err());
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 1, 10),
+            award_event(0, 10),
+            settled_event(10, vec![0]),
+        ])
+        .is_err());
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 0, 10),
+            award_event(SETTLEMENT_SEATS as u8, 10),
+            settled_event(10, vec![0]),
+        ])
+        .is_err());
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 0, 10),
+            award_event(0, 9),
+            settled_event(10, vec![0]),
+        ])
+        .is_err());
+        assert!(SettlementPlanBinding::from_events(&[
+            plan_event(1, 10, 0, 10),
+            award_event_for_other_table(0, 10),
+            settled_event(10, vec![0]),
+        ])
+        .is_err());
     }
 
     #[test]
     fn non_terminal_projection_rejects_any_settlement_event() {
-        assert!(SettlementPlanBinding::from_replay(&[plan_event(1, 10, 0, 10)], false).is_err());
-        assert!(SettlementPlanBinding::from_replay(&[award_event(0, 10)], false).is_err());
+        assert!(SettlementPlanBinding::from_replay(&[plan_event(1, 10, 0, 10)]).is_err());
+        assert!(SettlementPlanBinding::from_replay(&[award_event(0, 10)]).is_err());
         assert_eq!(
-            SettlementPlanBinding::from_replay(&[], false).unwrap(),
+            SettlementPlanBinding::from_replay(&[]).unwrap(),
             SettlementPlanBinding::inactive()
         );
     }

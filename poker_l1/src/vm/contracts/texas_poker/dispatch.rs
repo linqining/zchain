@@ -23,17 +23,17 @@
 //! dispatch 层目前仅记录日志（tracing::debug!）并丢弃，后续 Precompile
 //! 实现可在 Phase 3.3 / Phase 4 中扩展 DispatchResult 携带 events 字段。
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use blstrs::G1Projective;
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
-use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use poker_protocol::zk_shuffle::ShuffleProof;
 
 use super::constants::FOLD_REASON_FORCE_ADMIN;
 use super::events::TexasPokerEvent;
@@ -686,6 +686,10 @@ pub fn dispatch(
             .call_seq
             .checked_add(1)
             .ok_or_else(|| PokerL1Error::Serialization("texas_poker call_seq overflow".into()))?;
+        let next_version = pre_table
+            .version
+            .checked_add(1)
+            .ok_or_else(|| PokerL1Error::Serialization("texas_poker version overflow".into()))?;
         let hand_started = events
             .iter()
             .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }));
@@ -698,6 +702,10 @@ pub fn dispatch(
             pre_table.hand_id
         };
         table.call_seq = next_call_seq;
+        // Version is an external-command sequence, not a count of deterministic micro-stages.
+        // Internal helpers may still bump while the migration is in progress; the atomic
+        // dispatch boundary canonicalizes every committed command to exactly one increment.
+        table.version = next_version;
         table.hand_id = next_hand_id;
     }
     log_events(&events);
@@ -2071,7 +2079,6 @@ mod tests {
         let mut table = make_table();
         table.shuffle_state.phase = super::super::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
         table.shuffle_state.pending_mask = 1;
-        table.shuffle_state.current_shuffler = 0;
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
         let task = decode_output(&result)
             .prove_task
@@ -2545,8 +2552,8 @@ mod tests {
         DLEqProof::from_parts(vec![], G1Projective::identity(), zero, zero)
     }
 
-    fn empty_schnorr_proof()
-    -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
+    fn empty_schnorr_proof(
+    ) -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
     {
         poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
             commitment: G1Projective::identity(),
@@ -3156,6 +3163,9 @@ mod tests {
         assert_eq!(table.seats[0].player, [0x11; 20]);
         assert_eq!(table.seats[0].stack, 1000);
         assert_eq!(table.deck_state.contributor_mask, 0b11);
-        assert_eq!(table.deck_state.aggregated_pk, table.derived_aggregated_pk().unwrap());
+        assert_eq!(
+            table.deck_state.aggregated_pk,
+            table.derived_aggregated_pk().unwrap()
+        );
     }
 }

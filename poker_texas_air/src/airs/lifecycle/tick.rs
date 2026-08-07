@@ -6,17 +6,17 @@
 //! 3. **Time Bank**：下注超时时若 `time_bank_ms > 0`，消耗等量时间延长截止
 //! 4. **Rake**：reveal 阶段完成触发 settle_hand 时抽水（`pot_after = pot_before - rake`）
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u64_to_m31_limbs,
+    u64_to_m31_limbs, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
 };
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{DIGEST_LIMBS, digest_to_m31_limbs};
+use crate::precompile_binding::{digest_to_m31_limbs, DIGEST_LIMBS};
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
@@ -26,7 +26,7 @@ use poker_l1::vm::contracts::texas_poker::constants::{
 };
 use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
 use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{TexasPokerTable, NO_SEAT};
 
 /// `timeout_kind` values used in the tick statement.  The value denotes the
 /// highest-priority timer family visible in the pre-state; `5` is a non-timer
@@ -327,12 +327,16 @@ pub fn canonical_input(
         ));
     }
 
-    let version_increment = post.version.checked_sub(pre.version).ok_or_else(|| {
-        TexasAirError::SpecViolation("tick: post version precedes pre version".into())
-    })?;
-    let version_increment = u8::try_from(version_increment).map_err(|_| {
-        TexasAirError::SpecViolation("tick: version increment exceeds Tick AIR encoding".into())
-    })?;
+    let expected_version = pre
+        .version
+        .checked_add(1)
+        .ok_or_else(|| TexasAirError::SpecViolation("tick: pre-version overflow".into()))?;
+    if post.version != expected_version {
+        return Err(TexasAirError::SpecViolation(
+            "tick: a committed external command must increment version exactly once".into(),
+        ));
+    }
+    let version_increment = 1;
     let lifecycle = issue_lifecycle_binding(pre, post, current_time, &events)?;
 
     Ok(TickInput {
@@ -490,7 +494,7 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
         let pending = table.shuffle_state.pending_mask != 0
-            && table.shuffle_state.current_shuffler != NO_SEAT;
+            && table.shuffle_state.derived_current_shuffler() != NO_SEAT;
         return Ok((
             TICK_KIND_SHUFFLE,
             table.timestamps.shuffle_started_at,
@@ -1111,8 +1115,8 @@ pub fn validate_public_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        TICK_BRANCH_BETTING_TIMEOUT, TICK_BRANCH_HAND_STARTED, TICK_BRANCH_TIME_BANK_CONSUMED,
-        TICK_KIND_BETTING, TICK_KIND_NON_TIMER, canonical_input,
+        canonical_input, TICK_BRANCH_BETTING_TIMEOUT, TICK_BRANCH_TIME_BANK_CONSUMED,
+        TICK_KIND_BETTING,
     };
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::{
@@ -1154,6 +1158,10 @@ mod tests {
         state_machine::tick(&mut post, now_ms, &mut events).expect("fixture tick must succeed");
         assert_ne!(post, *pre, "fixture tick must change the table");
         post.call_seq = pre.call_seq.checked_add(1).expect("fixture call sequence");
+        post.version = pre
+            .version
+            .checked_add(1)
+            .expect("fixture version sequence");
         post.hand_id = if events
             .iter()
             .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }))
@@ -1183,11 +1191,12 @@ mod tests {
     }
 
     #[test]
-    fn canonical_input_binds_betting_time_bank_and_saturating_deadline() {
+    fn canonical_input_binds_betting_time_bank_at_maximum_legal_deadline() {
         let mut pre = betting_table(10);
-        pre.timestamps.betting_started_at = u64::MAX - 5;
+        pre.timestamps.betting_started_at = u64::MAX - 20;
         pre.timeout_config.betting_timeout_ms = 10;
-        let (post, events) = execute_tick(&pre, u64::MAX);
+        let now_ms = u64::MAX - 10;
+        let (post, events) = execute_tick(&pre, now_ms);
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1197,13 +1206,13 @@ mod tests {
                 ..
             }
         )));
-        assert_eq!(post.timestamps.betting_started_at, u64::MAX);
+        assert_eq!(post.timestamps.betting_started_at, now_ms);
         assert!(!post.seats[0].is_folded());
 
-        let input = canonical_input(&pre, &post, u64::MAX).expect("canonical betting tick");
+        let input = canonical_input(&pre, &post, now_ms).expect("canonical betting tick");
         assert_eq!(input.timeout_kind, TICK_KIND_BETTING);
         assert!(input.timeout_required);
-        assert_eq!(input.timeout_started_at, u64::MAX - 5);
+        assert_eq!(input.timeout_started_at, u64::MAX - 20);
         assert_eq!(input.timeout_ms, 10);
         assert_eq!(input.pre_time_bank, 10);
         assert_eq!(input.time_bank_consumed, 10);
@@ -1259,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_input_tracks_waiting_tick_hand_sequence_without_timeout_claim() {
+    fn canonical_input_rejects_waiting_noop_tick() {
         let mut pre = table();
         occupy(&mut pre, 0, 1, 1_000);
         occupy(&mut pre, 1, 2, 1_000);
@@ -1267,22 +1276,12 @@ mod tests {
         pre.hand_id = 9;
         pre.call_seq = 13;
 
-        let (post, events) = execute_tick(&pre, 2_000_000);
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }))
-        );
-        assert_eq!(post.hand_id, pre.hand_id + 1);
-
-        let input = canonical_input(&pre, &post, 2_000_000).expect("canonical waiting tick");
-        assert_eq!(input.timeout_kind, TICK_KIND_NON_TIMER);
-        assert!(!input.timeout_required);
-        assert_eq!(input.timeout_started_at, 0);
-        assert_eq!(input.timeout_ms, 0);
-        assert_eq!(input.time_bank_consumed, 0);
-        assert_eq!(input.rake_amount, 0);
-        assert_eq!(input.lifecycle.branch_kind, TICK_BRANCH_HAND_STARTED);
+        let mut post = pre.clone();
+        let mut events = Vec::new();
+        state_machine::tick(&mut post, 2_000_000, &mut events).expect("waiting tick");
+        assert_eq!(post, pre);
+        assert!(events.is_empty());
+        assert!(canonical_input(&pre, &post, 2_000_000).is_err());
     }
 
     #[test]

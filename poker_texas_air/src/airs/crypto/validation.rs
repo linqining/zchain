@@ -22,15 +22,12 @@ use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{
-    JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PokerPrecompileId,
-    RevealTokenVerifyRequest, precompile_call_context,
+    precompile_call_context, JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest,
+    PokerPrecompileId, RevealTokenVerifyRequest,
 };
 use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::state_root_to_air_limbs;
-use poker_l1::vm::contracts::texas_poker::constants::{
-    REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN, ROUND_SHOWDOWN, ROUND_WAITING,
-};
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs, SubmitReconstructDeckArgs,
     SubmitRevealTokensArgs, SubmitShuffleV2Args,
@@ -444,10 +441,8 @@ pub(crate) fn validate_submit_player_reveal_tokens(
     binding.validate_issued()?;
 
     let version_increment = reveal_version_increment(&canonical.pre, &canonical.post)?;
-    let settlement = crate::settlement_binding::SettlementPlanBinding::from_replay(
-        &canonical.events,
-        version_increment == 2,
-    )?;
+    let settlement =
+        crate::settlement_binding::SettlementPlanBinding::from_replay(&canonical.events)?;
     let input = SubmitPlayerRevealTokensInput {
         seat_index: args.seat_index,
         reveal_phase: canonical.pre.reveal_token_state.reveal_phase,
@@ -621,30 +616,16 @@ fn reveal_version_increment(
     pre: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
     post: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<u8> {
-    let completed_showdown = post.round_state == ROUND_WAITING
-        && post.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
-        && post.pot == 0;
-    let increment = if completed_showdown {
-        if pre.round_state != ROUND_SHOWDOWN
-            || pre.reveal_token_state.reveal_phase != REVEAL_PHASE_SHOWDOWN
-        {
-            return Err(TexasAirError::UnsupportedBettingTransition(
-                "submit_player_reveal_tokens reset without a showdown reveal pre-state".into(),
-            ));
-        }
-        2
-    } else {
-        1
-    };
-
-    let expected_post_version = pre.version.saturating_add(u64::from(increment));
+    let expected_post_version = pre.version.checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation("submit_player_reveal_tokens: pre-version overflow".into())
+    })?;
     if post.version != expected_post_version {
         return Err(TexasAirError::SpecViolation(format!(
-            "submit_player_reveal_tokens: expected version {expected_post_version} after {increment} native bump(s), got {}",
+            "submit_player_reveal_tokens: expected one external-command version increment to {expected_post_version}, got {}",
             post.version
         )));
     }
-    Ok(increment)
+    Ok(1)
 }
 
 fn count_as_u8(count: usize, method: &str, field: &str) -> TexasAirResult<u8> {

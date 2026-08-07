@@ -21,7 +21,6 @@
 
 use stwo::core::fields::m31::M31;
 
-use poker_texas_air::airs::TexasAir;
 use poker_texas_air::airs::crypto::fold_with_proof::{FoldWithProofAir, FoldWithProofInput};
 use poker_texas_air::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
@@ -38,6 +37,7 @@ use poker_texas_air::airs::crypto::submit_reconstruct_deck::{
 use poker_texas_air::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
+use poker_texas_air::airs::TexasAir;
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::precompile_binding::PrecompileAirBinding;
 use poker_texas_air::prover::prove_method;
@@ -709,8 +709,7 @@ fn test_e2e_submit_player_reveal_tokens_prove_verify() {
     verify_method(proof).expect("verify 失败");
 }
 
-/// 回归：最后一个 showdown token 会在同一 dispatch 内结算并 reset，因此
-/// `reset_for_next_hand` 会造成第二次 `bump_version`。
+/// 回归：复合 settlement 标签不改变一次外部命令只递增一次 version 的语义。
 #[test]
 fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
     let mut awards = [0u64; 9];
@@ -719,7 +718,7 @@ fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
     let input = SubmitPlayerRevealTokensInput {
         seat_index: 1,
         reveal_phase: 6,
-        version_increment: 2,
+        version_increment: 1,
         precompile: PrecompileAirBinding::synthetic_unverified(),
         settlement: poker_texas_air::settlement_binding::SettlementPlanBinding {
             active: true,
@@ -732,7 +731,7 @@ fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
         },
     };
     let row =
-        SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 5, 7, 9, 0);
+        SubmitPlayerRevealTokensRow::active(&input, zero_root(), one_root(), 42, 1, 5, 7, 8, 0);
     let trace = gen_method_trace(
         SubmitPlayerRevealTokensAir::num_columns(),
         &row.to_vec(),
@@ -748,13 +747,13 @@ fn test_e2e_submit_reveal_terminal_showdown_version_increment() {
         hand_id: 1,
         call_seq: 5,
         pre_version: 7,
-        post_version: 9,
+        post_version: 8,
     };
 
     let mut public_inputs =
         TexasPublicInputs::synthetic_for_test(MethodKind::SubmitPlayerRevealTokens, 42, 1, 5);
     public_inputs.pre_version = 7;
-    public_inputs.post_version = 9;
+    public_inputs.post_version = 8;
     let proof = prove_method(
         &trace,
         air,
@@ -995,10 +994,10 @@ fn test_crypto_air_column_consistency() {
         submit_player_reveal_tokens::cols::NUM_COLUMNS
     );
 
-    // submit_reconstruct_deck: 原 3 业务列 + id/version + 2×16 full digest limbs。
+    // submit_reconstruct_deck: 4 stage/precompile columns + 2×16 full digest limbs。
     assert_eq!(
         submit_reconstruct_deck::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 37
+        COMMON_NUM_COLUMNS + 36
     );
     assert_eq!(
         SubmitReconstructDeckAir::num_columns(),

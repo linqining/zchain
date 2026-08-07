@@ -146,14 +146,13 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-        current_shuffler: 0,
         pending_mask: (1u16 << (0)) | (1u16 << (1)) | (1u16 << (2)) | (1u16 << (3)),
         completed_mask: 0,
     };
 
     let mut tasks = Vec::new();
     for round in 0..3 {
-        let seat_index = table.shuffle_state.current_shuffler;
+        let seat_index = table.shuffle_state.derived_current_shuffler();
         assert_ne!(seat_index, u8::MAX, "three shufflers should remain");
         let (task, post) = next_shuffle_task(table, seat_index, aggregated_pk, round);
         tasks.push(task);
