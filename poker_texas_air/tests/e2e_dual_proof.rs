@@ -37,6 +37,7 @@ use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use rand::rngs::OsRng;
 
 const HEADER_LEN: usize = 20;
+const FIXTURE_TIMESTAMP_MS: u64 = 1_900_000;
 
 fn context(caller: poker_l1::Address) -> DispatchContext {
     DispatchContext {
@@ -47,7 +48,7 @@ fn context(caller: poker_l1::Address) -> DispatchContext {
         },
         chain_id: 377,
         block_height: 9_001,
-        block_timestamp: 1_900_000,
+        block_timestamp: FIXTURE_TIMESTAMP_MS,
     }
 }
 
@@ -123,7 +124,7 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
                 pending_mask: 1u16 << 0,
                 completed_mask: 0,
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let raw_args = borsh::to_vec(&SubmitShuffleV2Args {
@@ -201,7 +202,7 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
                 pending_mask: 0,
                 completed_mask: 0,
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let raw_args = borsh::to_vec(&JoinAndShuffleArgs {
@@ -366,7 +367,7 @@ fn leave_task(nonce: u64) -> ProveTask {
                 pending_mask: (1u16 << 0) | (1u16 << 2),
                 completed_mask: 1u16 << 1,
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let raw_args = borsh::to_vec(&LeaveWithProofArgs {
@@ -426,7 +427,12 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
     table.hand_id = 14;
     table.version = 40;
     table
-        .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+        .enter_betting(
+            ROUND_PREFLOP,
+            BettingRound::new(100, 100),
+            0,
+            FIXTURE_TIMESTAMP_MS,
+        )
         .unwrap();
     for index in 0..active_players {
         table.seats[usize::from(index)].player = if index == 0 {
@@ -542,7 +548,7 @@ fn reveal_task(nonce: u64) -> ProveTask {
                     },
                 ],
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let raw_args = borsh::to_vec(&SubmitRevealTokensArgs {

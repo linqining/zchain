@@ -19,10 +19,7 @@ use poker_l1::vm::contracts::texas_poker::{
         STRAIGHT_FLUSH, THREE_OF_A_KIND, TWO_PAIR, evaluate_best, find_winners,
     },
     side_pot::{SidePot, SidePotError, calculate_side_pots},
-    types::{
-        ReconstructState, RevealTokenState, Seat, SeatStatus, ShuffleState,
-        seat_mask_remove,
-    },
+    types::{ReconstructState, RevealTokenState, Seat, SeatStatus, ShuffleState, seat_mask_remove},
 };
 
 // ===========================================================================
@@ -1360,7 +1357,7 @@ fn enter_betting_fixture(
     current_turn: u8,
 ) {
     table
-        .enter_betting(street, round, current_turn, 0)
+        .enter_betting(street, round, current_turn, 1_000)
         .unwrap();
 }
 
@@ -1371,12 +1368,7 @@ fn test_state_predicates_can_join_state() {
     let mut table = dummy_table("test", 6);
     assert!(state_machine::can_join_state(&table));
 
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 0),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 0), 0);
     assert!(!state_machine::can_join_state(&table));
 }
 
@@ -1394,12 +1386,7 @@ fn test_state_predicates_is_betting_round() {
     let mut table = dummy_table("test", 6);
     assert!(!state_machine::is_betting_round(&table));
 
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
     assert!(state_machine::is_betting_round(&table));
 
     table.enter_showdown_display(0);
@@ -1411,24 +1398,14 @@ fn test_state_predicates_is_playing() {
     let mut table = dummy_table("test", 6);
     assert!(!state_machine::is_playing(&table));
 
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 0),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 0), 0);
     assert!(state_machine::is_playing(&table));
 }
 
 #[test]
 fn test_state_predicates_is_player_turn() {
     let mut table = dummy_table("test", 6);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 0),
-        2,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 0), 2);
 
     assert!(state_machine::is_player_turn(&table, 2));
     assert!(!state_machine::is_player_turn(&table, 3));
@@ -1559,12 +1536,7 @@ fn test_apply_fold_not_players_turn() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        1,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 1);
 
     let mut events = vec![];
     let result = state_machine::apply_fold(&mut table, 0, &mut events);
@@ -1577,12 +1549,7 @@ fn test_apply_fold_success() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_fold(&mut table, 0, &mut events);
@@ -1604,12 +1571,7 @@ fn test_apply_check_not_betting_round() {
 fn test_apply_check_bet_below_current() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_check(&mut table, 0, &mut events);
@@ -1645,12 +1607,7 @@ fn test_apply_call_success() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_call(&mut table, 0, &mut events);
@@ -1664,12 +1621,7 @@ fn test_apply_call_all_in() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 50);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_call(&mut table, 0, &mut events);
@@ -1693,12 +1645,7 @@ fn test_apply_raise_success() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_raise(&mut table, 0, 300, &mut events);
@@ -1712,12 +1659,7 @@ fn test_apply_raise_all_in() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 500);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_raise(&mut table, 0, 500, &mut events);
@@ -1731,12 +1673,7 @@ fn test_apply_raise_resets_other_players() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
     table.set_seat_acted_this_round(1, true);
 
     let mut events = vec![];
@@ -1753,9 +1690,7 @@ fn test_reset_for_next_hand_clears_state() {
     occupy_seat(&mut table, 0, [0x01; 20], 500);
     occupy_seat(&mut table, 1, [0x02; 20], 500);
     table.pot = 1000;
-    table.community_cards = vec![Card::new(0, 14), Card::new(1, 13)]
-        .try_into()
-        .unwrap();
+    table.community_cards = vec![Card::new(0, 14), Card::new(1, 13)].try_into().unwrap();
     table.enter_showdown_display(0);
 
     let mut events = vec![];
@@ -1824,12 +1759,7 @@ fn test_is_playing_different_phases() {
     assert!(!state_machine::is_playing(&table));
 
     // round_state 非 WAITING
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 0),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 0), 0);
     assert!(state_machine::is_playing(&table));
 
     // 回到 WAITING，但 shuffle phase 非 NONE
@@ -2185,12 +2115,7 @@ fn test_apply_raise_minimum_raise() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    ); // current_bet=100, min_raise=100
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0); // current_bet=100, min_raise=100
 
     let mut events = vec![];
     // 从 0 raise 到 200（最小 raise），需要投入 200
@@ -2205,12 +2130,7 @@ fn test_apply_raise_minimum_raise() {
 fn test_apply_raise_below_minimum() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     // raise 到 150，低于最小 raise（需要到 200）
@@ -2223,12 +2143,7 @@ fn test_apply_raise_not_players_turn() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    ); // seat 0 的回合
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0); // seat 0 的回合
 
     let mut events = vec![];
     // seat 1 尝试 raise（不是他的回合）
@@ -2241,12 +2156,7 @@ fn test_apply_raise_raises_minimum_after_all_in() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 150);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        1,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 1);
 
     let mut events = vec![];
     // seat 1 all-in raise 到 150
@@ -2269,12 +2179,7 @@ fn test_betting_round_complete_two_players() {
     let mut table = dummy_table("test", 2);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    ); // BB = 100
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0); // BB = 100
 
     // seat 1 是 BB，已下注 100
     table.seats[1].bet = 100;
@@ -2304,12 +2209,7 @@ fn test_raise_resets_other_players_acted() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
 
@@ -2396,12 +2296,7 @@ fn test_tick_betting_timeout_with_time_bank() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
     table.arm_betting_deadline(1_000_000).unwrap();
     table.timeout_config.betting_timeout_ms = 30000;
     table.seats[0].time_bank_ms = 30000;
@@ -2422,12 +2317,7 @@ fn test_tick_betting_timeout_triggers_fold() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000); // 第三个玩家，防止立即结束
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
     table.arm_betting_deadline(1_000_000).unwrap();
     table.timeout_config.betting_timeout_ms = 30000;
     table.seats[0].time_bank_ms = 0; // 没有 time_bank
@@ -2500,12 +2390,7 @@ fn test_apply_fold_internal_betting_round() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000); // 第三个玩家，防止立即结束
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_fold_internal(&mut table, 0, 0, &mut events);
@@ -2528,12 +2413,7 @@ fn test_apply_fold_internal_not_betting_round() {
 fn test_apply_fold_internal_already_folded() {
     let mut table = dummy_table("test", 2);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
     table.seats[0].set_status(SeatStatus::Folded);
 
     let mut events = vec![];
@@ -2594,12 +2474,7 @@ fn test_apply_bet_amount_zero() {
 fn test_apply_bet_not_allowed_in_preflop() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let mut events = vec![];
     let result = state_machine::apply_bet(&mut table, 0, 100, &mut events);
@@ -2808,12 +2683,7 @@ fn test_dispatch_create_table_rejects_max_players_too_small() {
 fn test_dispatch_join_table_rejects_non_waiting_state() {
     let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 0),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 0), 0);
 
     let args = JoinTableArgs::with_key(
         [0x11; 20],
@@ -2889,12 +2759,7 @@ fn test_dispatch_join_table_rejects_duplicate_pk() {
 fn test_dispatch_leave_table_rejects_non_waiting_state() {
     let ctx = make_dispatch_context_as([0x11; 20]);
     let mut table = dummy_table("test", 4);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 0),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 0), 0);
     table.seats[0].player = [0x11; 20];
     table.seats[0].stack = 1000;
 
@@ -3001,12 +2866,7 @@ fn test_dispatch_fold_route() {
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
     occupy_seat(&mut table, 2, [0x03; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let args = SeatIndexArgs { seat_index: 0 };
     let args_bytes = borsh::to_vec(&args).unwrap();
@@ -3035,12 +2895,7 @@ fn test_dispatch_call_route() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let args = SeatIndexArgs { seat_index: 0 };
     let args_bytes = borsh::to_vec(&args).unwrap();
@@ -3055,12 +2910,7 @@ fn test_dispatch_raise_route() {
     let mut table = dummy_table("test", 4);
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     occupy_seat(&mut table, 1, [0x02; 20], 1000);
-    enter_betting_fixture(
-        &mut table,
-        ROUND_PREFLOP,
-        BettingRound::new(100, 100),
-        0,
-    );
+    enter_betting_fixture(&mut table, ROUND_PREFLOP, BettingRound::new(100, 100), 0);
 
     let args = RaiseArgs {
         seat_index: 0,

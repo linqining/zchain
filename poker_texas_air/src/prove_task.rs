@@ -101,9 +101,11 @@ impl ProveTask {
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
-        poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
+        poker_l1::vm::contracts::texas_poker::dispatch::derive_authenticated_method_input(
             method_kind as u8,
             &raw_args,
+            &context,
+            &pre_table,
         )
         .expect("ProveTask requires a validated canonical command");
         Self {
@@ -126,9 +128,11 @@ impl ProveTask {
 
     /// Decode the transient typed input from the only persisted command payload.
     pub fn method_input(&self) -> crate::error::TexasAirResult<MethodInput> {
-        poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
+        poker_l1::vm::contracts::texas_poker::dispatch::derive_authenticated_method_input(
             self.method_kind as u8,
             &self.raw_args,
+            &self.context,
+            &self.pre_table,
         )
         .map_err(|error| {
             crate::error::TexasAirError::SerializationError(format!(
@@ -177,9 +181,11 @@ impl BorshDeserialize for ProveTask {
         let table_id = u64::deserialize_reader(reader)?;
         let hand_id = u32::deserialize_reader(reader)?;
         let call_seq = u32::deserialize_reader(reader)?;
-        poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
+        poker_l1::vm::contracts::texas_poker::dispatch::derive_authenticated_method_input(
             method_kind as u8,
             &raw_args,
+            &context,
+            &pre_table,
         )
         .map_err(|error| {
             borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
@@ -243,14 +249,17 @@ mod tests {
 
     fn dummy_table(name: &str) -> poker_l1::vm::contracts::texas_poker::types::TexasPokerTable {
         use poker_l1::object_model::ObjectID;
-        poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
+        let mut table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
             name.into(),
             [0u8; 20],
             6,
             50,
             100,
-        )
+        );
+        table.seats[2].player = [0xAA; 20];
+        table.seats[2].set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Active);
+        table
     }
 
     fn dummy_context() -> DispatchContext {

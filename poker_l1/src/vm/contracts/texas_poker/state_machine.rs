@@ -110,8 +110,6 @@ pub enum DeadlineKind {
 pub enum AdvanceDeadlineOutcome {
     /// The table is waiting for a signed command or crypto proof, not time.
     NoDeadline,
-    /// Compatibility storage had no start time, so the canonical timer was armed.
-    Armed { kind: DeadlineKind, subject: u8 },
     /// A deadline exists but consensus time has not reached it.
     NotDue {
         kind: DeadlineKind,
@@ -2781,11 +2779,12 @@ pub fn start_hand(
 /// the legacy `tick` refund-and-reset fallback.
 pub fn normalize_until_blocked(
     table: &mut TexasPokerTable,
+    now_ms: u64,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<NormalizationReport> {
     let mut candidate = table.clone();
     let mut staged_events = Vec::new();
-    let report = normalize_until_blocked_in_place(&mut candidate, &mut staged_events)?;
+    let report = normalize_until_blocked_in_place(&mut candidate, now_ms, &mut staged_events)?;
     *table = candidate;
     events.extend(staged_events);
     Ok(report)
@@ -2793,8 +2792,10 @@ pub fn normalize_until_blocked(
 
 fn normalize_until_blocked_in_place(
     table: &mut TexasPokerTable,
+    now_ms: u64,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<NormalizationReport> {
+    table.arm_active_deadline_if_needed(now_ms)?;
     table.validate_state_schema()?;
     let mut report = NormalizationReport::default();
 
@@ -2890,6 +2891,7 @@ fn normalize_until_blocked_in_place(
         if table.version == before.version {
             table.bump_version();
         }
+        table.arm_active_deadline_if_needed(now_ms)?;
         table.validate_state_schema()?;
         let _ = table.canonical_hand_phase()?;
         report.steps.push(step);
@@ -2919,20 +2921,15 @@ fn advance_deadline_in_place(
     now_ms: u64,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<AdvanceDeadlineOutcome> {
-    let _ = normalize_until_blocked_in_place(table, events)?;
+    // A persisted/current table must already expose an authenticated non-zero deadline. Only the
+    // normalization suffix of the command that creates or rotates a phase may arm it.
+    table.validate_state_schema()?;
+    let _ = normalize_until_blocked_in_place(table, now_ms, events)?;
 
     if table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE {
         let deadline_ms = table.reconstruct_deadline_ms()?.ok_or_else(|| {
             PokerL1Error::Serialization("reconstruct phase has no deadline projection".into())
         })?;
-        if deadline_ms == 0 {
-            let _ = table.arm_reconstruct_deadline(now_ms)?;
-            table.bump_version();
-            return Ok(AdvanceDeadlineOutcome::Armed {
-                kind: DeadlineKind::Reconstruct,
-                subject: NO_SEAT,
-            });
-        }
         if now_ms < deadline_ms {
             return Ok(AdvanceDeadlineOutcome::NotDue {
                 kind: DeadlineKind::Reconstruct,
@@ -2941,7 +2938,7 @@ fn advance_deadline_in_place(
             });
         }
         on_reconstruct_timeout(table, now_ms, events)?;
-        let _ = normalize_until_blocked_in_place(table, events)?;
+        let _ = normalize_until_blocked_in_place(table, now_ms, events)?;
         return Ok(AdvanceDeadlineOutcome::Advanced {
             kind: DeadlineKind::Reconstruct,
             subject: NO_SEAT,
@@ -2954,14 +2951,6 @@ fn advance_deadline_in_place(
         let deadline_ms = table.shuffle_deadline_ms()?.ok_or_else(|| {
             PokerL1Error::Serialization("shuffle phase has no deadline projection".into())
         })?;
-        if deadline_ms == 0 {
-            let _ = table.arm_shuffle_deadline(now_ms)?;
-            table.bump_version();
-            return Ok(AdvanceDeadlineOutcome::Armed {
-                kind: DeadlineKind::Shuffle,
-                subject,
-            });
-        }
         if now_ms < deadline_ms {
             return Ok(AdvanceDeadlineOutcome::NotDue {
                 kind: DeadlineKind::Shuffle,
@@ -2970,7 +2959,7 @@ fn advance_deadline_in_place(
             });
         }
         on_shuffle_timeout(table, now_ms, events)?;
-        let _ = normalize_until_blocked_in_place(table, events)?;
+        let _ = normalize_until_blocked_in_place(table, now_ms, events)?;
         return Ok(AdvanceDeadlineOutcome::Advanced {
             kind: DeadlineKind::Shuffle,
             subject,
@@ -2987,14 +2976,6 @@ fn advance_deadline_in_place(
         let deadline_ms = table.reveal_deadline_ms()?.ok_or_else(|| {
             PokerL1Error::Serialization("reveal phase has no deadline projection".into())
         })?;
-        if deadline_ms == 0 {
-            let _ = table.arm_reveal_deadline(now_ms)?;
-            table.bump_version();
-            return Ok(AdvanceDeadlineOutcome::Armed {
-                kind: DeadlineKind::Reveal,
-                subject,
-            });
-        }
         if now_ms < deadline_ms {
             return Ok(AdvanceDeadlineOutcome::NotDue {
                 kind: DeadlineKind::Reveal,
@@ -3003,7 +2984,7 @@ fn advance_deadline_in_place(
             });
         }
         on_reveal_timeout(table, now_ms, events)?;
-        let _ = normalize_until_blocked_in_place(table, events)?;
+        let _ = normalize_until_blocked_in_place(table, now_ms, events)?;
         return Ok(AdvanceDeadlineOutcome::Advanced {
             kind: DeadlineKind::Reveal,
             subject,
@@ -3020,14 +3001,6 @@ fn advance_deadline_in_place(
         let deadline_ms = table.betting_deadline_ms()?.ok_or_else(|| {
             PokerL1Error::Serialization("betting phase has no deadline projection".into())
         })?;
-        if deadline_ms == 0 {
-            let _ = table.arm_betting_deadline(now_ms)?;
-            table.bump_version();
-            return Ok(AdvanceDeadlineOutcome::Armed {
-                kind: DeadlineKind::Betting,
-                subject,
-            });
-        }
         if now_ms < deadline_ms {
             return Ok(AdvanceDeadlineOutcome::NotDue {
                 kind: DeadlineKind::Betting,
@@ -3046,7 +3019,7 @@ fn advance_deadline_in_place(
             });
         }
         on_betting_timeout(table, events)?;
-        let _ = normalize_until_blocked_in_place(table, events)?;
+        let _ = normalize_until_blocked_in_place(table, now_ms, events)?;
         return Ok(AdvanceDeadlineOutcome::Advanced {
             kind: DeadlineKind::Betting,
             subject,
@@ -3057,14 +3030,6 @@ fn advance_deadline_in_place(
         let deadline_ms = table.showdown_deadline_ms().ok_or_else(|| {
             PokerL1Error::Serialization("showdown phase has no deadline projection".into())
         })?;
-        if deadline_ms == 0 {
-            let _ = table.arm_showdown_deadline(now_ms)?;
-            table.bump_version();
-            return Ok(AdvanceDeadlineOutcome::Armed {
-                kind: DeadlineKind::ShowdownDisplay,
-                subject: NO_SEAT,
-            });
-        }
         if now_ms < deadline_ms {
             return Ok(AdvanceDeadlineOutcome::NotDue {
                 kind: DeadlineKind::ShowdownDisplay,
@@ -3073,7 +3038,7 @@ fn advance_deadline_in_place(
             });
         }
         settle_hand(table, events)?;
-        let _ = normalize_until_blocked_in_place(table, events)?;
+        let _ = normalize_until_blocked_in_place(table, now_ms, events)?;
         return Ok(AdvanceDeadlineOutcome::Advanced {
             kind: DeadlineKind::ShowdownDisplay,
             subject: NO_SEAT,
@@ -3981,7 +3946,54 @@ pub fn apply_rebuy(
 
 // ========== Request Leave After Hand（sit out next hand） ==========
 
-/// `request_leave_after_hand` — 玩家请求「下局开始前离场」（toggle）。
+/// Set whether an occupied seat must leave after the current hand.
+///
+/// This is the canonical idempotent business transition intended for the tagged Seat command.
+/// Repeating the same target bit is a no-op: it emits no duplicate event and does not bump the
+/// table version. The legacy toggle wrapper below is retained only for historical ABI replay.
+///
+/// # Errors
+///
+/// - `seat_index` is outside the configured table capacity
+/// - the selected seat is vacant
+pub fn apply_set_leave_after_hand(
+    table: &mut TexasPokerTable,
+    seat_index: u8,
+    want_leave: bool,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<bool> {
+    if seat_index >= table.max_players {
+        return Err(PokerL1Error::Serialization(format!(
+            "set_leave_after_hand: seat_index {seat_index} out of range (max_players={})",
+            table.max_players
+        )));
+    }
+    let seat = &table.seats[seat_index as usize];
+    if !seat.is_occupied() {
+        return Err(PokerL1Error::Serialization(format!(
+            "set_leave_after_hand: seat {seat_index} not occupied"
+        )));
+    }
+    if table.seat_wants_leave(seat_index) == want_leave {
+        return Ok(false);
+    }
+
+    let player = seat.player;
+    table.set_seat_wants_leave(seat_index, want_leave);
+    events::emit_event(
+        events,
+        TexasPokerEvent::LeaveRequested {
+            table_id: table.id,
+            seat_index,
+            player,
+            want_leave,
+        },
+    );
+    table.bump_version();
+    Ok(true)
+}
+
+/// `request_leave_after_hand` — legacy toggle wrapper.
 ///
 /// 业务语义（在线扑克 "sit out next hand / stand up next hand" 标准模式）：
 /// 玩家可在**任意时刻**（含对局进行中的 shuffle / reveal / betting / showdown）
@@ -4017,27 +4029,9 @@ pub fn apply_request_leave(
             table.max_players
         )));
     }
-    let seat = &mut table.seats[seat_index as usize];
-    if !seat.is_occupied() {
-        return Err(PokerL1Error::Serialization(format!(
-            "request_leave_after_hand: seat {seat_index} not occupied"
-        )));
-    }
-
-    let player = seat.player;
     let want_leave = !table.seat_wants_leave(seat_index);
-    table.set_seat_wants_leave(seat_index, want_leave);
-
-    events::emit_event(
-        events,
-        TexasPokerEvent::LeaveRequested {
-            table_id: table.id,
-            seat_index,
-            player,
-            want_leave,
-        },
-    );
-    table.bump_version();
+    let changed = apply_set_leave_after_hand(table, seat_index, want_leave, events)?;
+    debug_assert!(changed, "legacy toggle must always change the target bit");
     Ok(())
 }
 
@@ -4723,7 +4717,10 @@ mod tests {
         assert_eq!(table.reveal_token_state().as_ref(), &suspended_reveal);
         assert_eq!(table.shuffle_state().pending_mask, 0b110);
         assert_eq!(table.shuffle_state().derived_current_shuffler(), 1);
-        assert_eq!(table.shuffle_deadline_ms().unwrap(), Some(0));
+        assert_eq!(
+            table.shuffle_deadline_ms().unwrap(),
+            Some(deadline_ms + u64::from(table.timeout_config.shuffle_timeout_ms))
+        );
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -4869,9 +4866,15 @@ mod tests {
         assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_BEFORE_PREFLOP);
         assert_ne!(table.shuffle_state().derived_current_shuffler(), NO_SEAT);
         assert_eq!(table.timestamps().shuffle_started_at, 0);
-        // The next tick only arms the active shuffle deadline.
-        tick(&mut table, 1000, &mut events).unwrap();
+        // The start-hand command's own normalization suffix arms the active shuffle deadline.
+        normalize_until_blocked(&mut table, 1000, &mut events).unwrap();
         assert_eq!(table.timestamps().shuffle_started_at, 1000);
+        let before_tick = table.clone();
+        tick(&mut table, 1000, &mut events).unwrap();
+        assert_eq!(
+            table, before_tick,
+            "tick must not be used only to arm a timer"
+        );
     }
 
     #[test]
@@ -4893,7 +4896,7 @@ mod tests {
             .unwrap();
 
         let mut events = vec![];
-        let report = normalize_until_blocked(&mut table, &mut events).unwrap();
+        let report = normalize_until_blocked(&mut table, 1_000, &mut events).unwrap();
 
         assert!(report.steps.is_empty());
         assert_eq!(table.shuffle_state().derived_current_shuffler(), 0);
@@ -4915,7 +4918,7 @@ mod tests {
             .unwrap();
 
         let mut events = vec![];
-        let report = normalize_until_blocked(&mut table, &mut events).unwrap();
+        let report = normalize_until_blocked(&mut table, 1_000, &mut events).unwrap();
 
         assert_eq!(report.steps, vec![NormalizationStep::CompleteReveal]);
         assert_eq!(
@@ -4958,7 +4961,7 @@ mod tests {
         let before = table.clone();
         let mut events = vec![];
 
-        let error = normalize_until_blocked(&mut table, &mut events).unwrap_err();
+        let error = normalize_until_blocked(&mut table, 1_000, &mut events).unwrap_err();
 
         assert!(error.to_string().contains("plaintext records"));
         assert_eq!(table, before);
@@ -4977,7 +4980,7 @@ mod tests {
         let before = table.clone();
         let mut events = vec![];
 
-        let error = normalize_until_blocked(&mut table, &mut events).unwrap_err();
+        let error = normalize_until_blocked(&mut table, 1_000, &mut events).unwrap_err();
 
         assert!(!error.to_string().is_empty());
         assert_eq!(table, before);
@@ -4985,7 +4988,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_betting_deadline_arms_reports_not_due_and_extends_time_bank() {
+    fn advance_betting_deadline_normalizes_then_reports_not_due_and_extends_time_bank() {
         let mut table = make_table();
         for (seat_index, player) in [(0usize, [0x01; 20]), (1usize, [0x02; 20])] {
             table.seats[seat_index].player = player;
@@ -4994,18 +4997,11 @@ mod tests {
         }
         table.timeout_config.betting_timeout_ms = 100;
         table
-            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1_000)
             .unwrap();
         table.seats[0].time_bank_ms = 40;
         let mut events = vec![];
 
-        assert_eq!(
-            advance_deadline(&mut table, 1_000, &mut events).unwrap(),
-            AdvanceDeadlineOutcome::Armed {
-                kind: DeadlineKind::Betting,
-                subject: 0,
-            }
-        );
         assert_eq!(
             advance_deadline(&mut table, 1_099, &mut events).unwrap(),
             AdvanceDeadlineOutcome::NotDue {
@@ -5418,6 +5414,33 @@ mod tests {
     }
 
     #[test]
+    fn test_set_leave_after_hand_is_idempotent() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].set_status(SeatStatus::Waiting);
+        let mut events = vec![];
+
+        assert!(apply_set_leave_after_hand(&mut table, 0, true, &mut events).unwrap());
+        assert!(table.seat_wants_leave(0));
+        assert_eq!(table.version, 1);
+        assert_eq!(events.len(), 1);
+
+        assert!(!apply_set_leave_after_hand(&mut table, 0, true, &mut events).unwrap());
+        assert!(table.seat_wants_leave(0));
+        assert_eq!(table.version, 1, "idempotent retry must not bump version");
+        assert_eq!(
+            events.len(),
+            1,
+            "idempotent retry must not duplicate events"
+        );
+
+        assert!(apply_set_leave_after_hand(&mut table, 0, false, &mut events).unwrap());
+        assert!(!table.seat_wants_leave(0));
+        assert_eq!(table.version, 2);
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
     fn test_reset_for_next_hand_merges_addon() {
         let mut table = make_table();
         table.seats[0].player = [0x01; 20];
@@ -5715,6 +5738,7 @@ mod tests {
         let (_, bb_seat, _) = post_blinds(&mut table, &mut events).unwrap();
         collect_ante(&mut table, bb_seat, &mut events).unwrap();
         start_betting_round(&mut table, true, Some(bb_seat), &mut events).unwrap();
+        table.arm_betting_deadline(1).unwrap();
 
         assert_eq!(table.betting_round().unwrap().current_bet, table.big_blind);
         assert_eq!(table.pot, 20);
@@ -6054,14 +6078,7 @@ mod tests {
         assert!(table.reveal_token_state().assignments.is_empty());
         check_reveal_phase_complete(&mut table, &mut events).unwrap();
         assert_eq!(table.round_state(), ROUND_SHOWDOWN);
-        let armed = advance_deadline(&mut table, 1_000, &mut events).unwrap();
-        assert!(matches!(
-            armed,
-            AdvanceDeadlineOutcome::Armed {
-                kind: DeadlineKind::ShowdownDisplay,
-                ..
-            }
-        ));
+        normalize_until_blocked(&mut table, 1_000, &mut events).unwrap();
         let deadline = 1_000 + u64::from(table.timeout_config.showdown_display_ms);
         let advanced = advance_deadline(&mut table, deadline, &mut events).unwrap();
         assert!(matches!(

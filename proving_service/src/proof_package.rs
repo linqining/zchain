@@ -486,16 +486,20 @@ mod tests {
     use poker_l1::object_model::ObjectID;
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, SeatIndexArgs};
+    use poker_l1::vm::contracts::texas_poker::types::SeatStatus;
 
     fn table(name: &str) -> TexasPokerTable {
-        TexasPokerTable::new(
+        let mut table = TexasPokerTable::new(
             ObjectID::new([0x55; 20], 7),
             name.into(),
             [0xAA; 20],
             6,
             50,
             100,
-        )
+        );
+        table.seats[2].player = [0x11; 20];
+        table.seats[2].set_status(SeatStatus::Active);
+        table
     }
 
     fn context() -> DispatchContext {

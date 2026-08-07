@@ -2699,6 +2699,21 @@ fn validate_native_betting_action(
         TexasAirError::SpecViolation(format!("{method}: native VM replay failed: {e}"))
     })?;
 
+    // Public dispatch always appends the same bounded deterministic suffix.
+    // In schema v15 this is also where a rotated betting actor receives its
+    // non-zero consensus deadline, so replaying only the immediate action no
+    // longer reconstructs the committed post table.
+    poker_l1::vm::contracts::texas_poker::state_machine::normalize_until_blocked(
+        &mut expected,
+        task.context.block_timestamp,
+        &mut events,
+    )
+    .map_err(|e| {
+        TexasAirError::SpecViolation(format!(
+            "{method}: deterministic normalization replay failed: {e}"
+        ))
+    })?;
+
     // dispatch() advances consensus sequence metadata after a successful state-machine call.
     expected.call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
         TexasAirError::SpecViolation(format!("{method}: call_seq overflow during replay"))

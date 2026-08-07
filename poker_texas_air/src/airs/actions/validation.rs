@@ -153,6 +153,18 @@ fn validate_native_mid_round(
         ))
     })?;
 
+    let normalization_time = public_inputs
+        .require_dispatch_call()?
+        .context
+        .block_timestamp;
+    state_machine::normalize_until_blocked(&mut replay, normalization_time, &mut events).map_err(
+        |error| {
+            TexasAirError::SpecViolation(format!(
+                "{method}: deterministic normalization replay failed: {error}"
+            ))
+        },
+    )?;
+
     // dispatch() advances sequence metadata outside the state-machine helper.
     replay.call_seq = expected_call_seq;
     replay.hand_id = pre.hand_id;

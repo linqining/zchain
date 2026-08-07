@@ -248,9 +248,10 @@ impl FrameworkEval for AutoFoldAir {
             eval.add_constraint(is_active.clone() * pre_time_bank_ms[i].clone());
         }
 
-        // `betting_started_at == 0` means the timer was never started and is
-        // explicitly rejected by dispatch. The limbs are canonical 16-bit
-        // values, so their M31 sum is zero iff all four limbs are zero.
+        // Schema v15 makes a zero active betting deadline invalid before
+        // dispatch. Bind that invariant in AIR as well. The limbs are
+        // canonical 16-bit values, so their M31 sum is zero iff all four
+        // limbs are zero.
         let started_sum = pre_betting_started_at[0].clone()
             + pre_betting_started_at[1].clone()
             + pre_betting_started_at[2].clone()

@@ -101,6 +101,14 @@ pub mod selectors {
         compute_method_selector("tick")
     }
 
+    /// `advance_deadline` — canonical permissionless timeout entry.
+    ///
+    /// The legacy `tick` selector remains accepted as an ABI alias and both selectors lower to
+    /// the same canonical `Tick` archive/proof tag.
+    pub fn advance_deadline() -> [u8; 32] {
+        compute_method_selector("advance_deadline")
+    }
+
     /// `auto_fold` — 玩家超时自动 fold。
     pub fn auto_fold() -> [u8; 32] {
         compute_method_selector("auto_fold")
@@ -201,7 +209,7 @@ pub mod selectors {
         compute_method_selector("fold_with_proof")
     }
 
-    /// 返回所有 23 个 selector，供 `supports_selector` 等使用。
+    /// Return the 23 historical selectors required for archive decoding.
     #[must_use]
     pub fn all() -> Vec<[u8; 32]> {
         vec![
@@ -233,14 +241,23 @@ pub mod selectors {
 
     /// Selectors accepted for new consensus execution under fresh-deck-per-hand semantics.
     ///
-    /// `join_and_shuffle` and WAITING-only `leave_with_proof` remain named for archive decoding,
-    /// but new calls must use `join_table` with a key-ownership proof and plain `leave_table`.
+    /// Retired selectors remain in [`all`] for archive decoding. New consensus execution rejects
+    /// `join_and_shuffle`, WAITING-only `leave_with_proof`, `auto_fold`, and the unsafe ordinary
+    /// public `reset_for_next_hand`. `advance_deadline` is the canonical timeout entry; `tick`
+    /// remains an accepted wire alias during migration.
     #[must_use]
     pub fn active() -> Vec<[u8; 32]> {
-        all()
+        let mut selectors: Vec<_> = all()
             .into_iter()
-            .filter(|selector| selector != &join_and_shuffle() && selector != &leave_with_proof())
-            .collect()
+            .filter(|selector| {
+                selector != &join_and_shuffle()
+                    && selector != &leave_with_proof()
+                    && selector != &auto_fold()
+                    && selector != &reset_for_next_hand()
+            })
+            .collect();
+        selectors.push(advance_deadline());
+        selectors
     }
 }
 
@@ -377,10 +394,8 @@ impl CanonicalCommand {
             Self::LeaveTable
         } else if selector == &selectors::start_hand() {
             Self::StartHand
-        } else if selector == &selectors::tick() {
+        } else if selector == &selectors::tick() || selector == &selectors::advance_deadline() {
             Self::Tick
-        } else if selector == &selectors::reset_for_next_hand() {
-            Self::ResetForNextHand
         } else if selector == &selectors::fold() {
             Self::Fold
         } else if selector == &selectors::check() {
@@ -389,8 +404,6 @@ impl CanonicalCommand {
             Self::Call
         } else if selector == &selectors::raise() {
             Self::Raise
-        } else if selector == &selectors::auto_fold() {
-            Self::AutoFold
         } else if selector == &selectors::force_fold() {
             Self::ForceFold
         } else if selector == &selectors::kick_player() {
@@ -423,6 +436,10 @@ impl CanonicalCommand {
             Some(Self::JoinAndShuffle)
         } else if selector == &selectors::leave_with_proof() {
             Some(Self::LeaveWithProof)
+        } else if selector == &selectors::auto_fold() {
+            Some(Self::AutoFold)
+        } else if selector == &selectors::reset_for_next_hand() {
+            Some(Self::ResetForNextHand)
         } else {
             Self::from_selector(selector)
         }
@@ -744,7 +761,7 @@ pub fn dispatch(
         CanonicalCommand::JoinTable => dispatch_join_table(context, table, args, &mut events),
         CanonicalCommand::LeaveTable => dispatch_leave_table(context, table, args, &mut events),
         CanonicalCommand::StartHand => dispatch_start_hand(context, table, args, &mut events),
-        CanonicalCommand::Tick => dispatch_tick(context, table, args, &mut events),
+        CanonicalCommand::Tick => dispatch_tick(context, table, selector, args, &mut events),
         CanonicalCommand::AutoFold => dispatch_auto_fold(context, table, args, &mut events),
         CanonicalCommand::ForceFold => dispatch_force_fold(context, table, args, &mut events),
         CanonicalCommand::KickPlayer => dispatch_kick_player(context, table, args, &mut events),
@@ -778,7 +795,9 @@ pub fn dispatch(
         *table = pre_table.clone();
         return Err(error);
     }
-    if let Err(error) = state_machine::normalize_until_blocked(table, &mut events) {
+    if let Err(error) =
+        state_machine::normalize_until_blocked(table, context.block_timestamp, &mut events)
+    {
         *table = pre_table.clone();
         return Err(error);
     }
@@ -959,6 +978,14 @@ fn build_method_input(
     if selector == &selectors::start_hand() {
         return Ok((K_START_HAND, MethodInput::Empty));
     }
+    if selector == &selectors::advance_deadline() {
+        if !args.is_empty() {
+            return Err(PokerL1Error::Serialization(
+                "advance_deadline does not accept arguments".into(),
+            ));
+        }
+        return Ok((K_TICK, MethodInput::Empty));
+    }
     if selector == &selectors::tick() {
         if !args.is_empty() {
             let _: TickArgs = decode_args(args, "tick prove task")?;
@@ -1135,6 +1162,97 @@ pub fn derive_method_input(
     Ok(input)
 }
 
+/// Derive the proof-facing command view from authenticated context and canonical pre-state.
+///
+/// Historical ABI payloads retain redundant `player`/`seat_index` fields. This lowering first
+/// decodes those bytes, then treats them only as equality assertions against the signed caller or
+/// the canonical current actor. The returned [`MethodInput`](super::prove_task::MethodInput) never
+/// takes a self-directed actor identity from unauthenticated payload data.
+pub fn derive_authenticated_method_input(
+    method_tag: u8,
+    canonical_args: &[u8],
+    context: &DispatchContext,
+    pre_table: &TexasPokerTable,
+) -> PokerL1Result<super::prove_task::MethodInput> {
+    use super::prove_task::MethodInput;
+
+    let command = CanonicalCommand::from_u8(method_tag).ok_or_else(|| {
+        PokerL1Error::Serialization(format!("unknown canonical Texas command tag {method_tag}"))
+    })?;
+    let mut input = derive_method_input(method_tag, canonical_args)?;
+
+    match (&command, &mut input) {
+        (CanonicalCommand::JoinTable, MethodInput::Join { player, .. }) => {
+            if *player != context.caller {
+                return Err(PokerL1Error::Serialization(format!(
+                    "join_table: legacy player {:?} does not match authenticated caller {:?}",
+                    *player, context.caller
+                )));
+            }
+            *player = context.caller;
+        }
+        (CanonicalCommand::JoinAndShuffle, MethodInput::JoinAndShuffle { player, .. }) => {
+            if *player != context.caller {
+                return Err(PokerL1Error::Serialization(format!(
+                    "join_and_shuffle: legacy player {:?} does not match authenticated caller {:?}",
+                    *player, context.caller
+                )));
+            }
+            *player = context.caller;
+        }
+        (
+            CanonicalCommand::LeaveTable
+            | CanonicalCommand::Fold
+            | CanonicalCommand::Check
+            | CanonicalCommand::Call,
+            MethodInput::SeatOnly { seat_index },
+        ) => {
+            *seat_index =
+                resolve_caller_seat(context, pre_table, *seat_index, "canonical command")?;
+        }
+        (CanonicalCommand::Raise, MethodInput::Raise { seat_index, .. })
+        | (CanonicalCommand::Bet, MethodInput::Bet { seat_index, .. })
+        | (
+            CanonicalCommand::Addon | CanonicalCommand::Rebuy,
+            MethodInput::Funds { seat_index, .. },
+        ) => {
+            *seat_index =
+                resolve_caller_seat(context, pre_table, *seat_index, "canonical command")?;
+        }
+        (CanonicalCommand::LeaveWithProof, MethodInput::LeaveWithProof { seat_index })
+        | (CanonicalCommand::SubmitShuffleV2, MethodInput::SubmitShuffleV2 { seat_index })
+        | (
+            CanonicalCommand::SubmitPlayerRevealTokens,
+            MethodInput::SubmitPlayerRevealTokens { seat_index },
+        )
+        | (
+            CanonicalCommand::SubmitReconstructDeck,
+            MethodInput::SubmitReconstructDeck { seat_index },
+        )
+        | (
+            CanonicalCommand::RequestLeaveAfterHand,
+            MethodInput::RequestLeaveAfterHand { seat_index },
+        )
+        | (CanonicalCommand::FoldWithProof, MethodInput::FoldWithProof { seat_index }) => {
+            *seat_index =
+                resolve_caller_seat(context, pre_table, *seat_index, "canonical command")?;
+        }
+        (CanonicalCommand::AutoFold, MethodInput::SeatOnly { seat_index }) => {
+            let current_turn = pre_table.current_turn();
+            if *seat_index != current_turn {
+                return Err(PokerL1Error::Serialization(format!(
+                    "auto_fold: legacy seat_index {} does not match canonical current turn {current_turn}",
+                    *seat_index
+                )));
+            }
+            *seat_index = current_turn;
+        }
+        _ => {}
+    }
+
+    Ok(input)
+}
+
 /// Normalize one legacy ABI call into the unique persisted tagged-command representation.
 ///
 /// The returned tag is the stable `CanonicalCommand` discriminant. The payload is the exact
@@ -1193,32 +1311,61 @@ fn decode_args<T: BorshDeserialize>(args: &[u8], method: &str) -> PokerL1Result<
 // 选择 dispatch 层（而非 routing 层）的原因：caller 校验可被 poker_texas_air
 // 电路直接约束，与同步电路目标契合；且合约自包含，不引入跨对象同步负担。
 
-/// 校验 caller 是指定座位的玩家。
-fn require_caller_is_seat_player(
+/// Resolve the authenticated caller to its unique occupied seat.
+///
+/// Legacy wire payloads still carry `seat_index`; that value is only a compatibility assertion.
+/// The returned seat is derived from the signed [`DispatchContext`] and canonical pre-state, so
+/// state-machine execution never trusts a caller-selected actor index.
+fn resolve_caller_seat(
     context: &DispatchContext,
     table: &TexasPokerTable,
-    seat_index: u8,
+    claimed_seat_index: u8,
     method: &str,
-) -> PokerL1Result<()> {
-    if seat_index >= table.max_players {
+) -> PokerL1Result<u8> {
+    if claimed_seat_index >= table.max_players {
         return Err(PokerL1Error::Serialization(format!(
-            "{method}: seat_index {seat_index} out of range (max_players={})",
+            "{method}: seat_index {claimed_seat_index} out of range (max_players={})",
             table.max_players
         )));
     }
-    let seat = &table.seats[seat_index as usize];
-    if !seat.is_occupied() {
+    if table.seats.len() != usize::from(table.max_players) {
         return Err(PokerL1Error::Serialization(format!(
-            "{method}: seat {seat_index} not occupied"
+            "{method}: non-canonical seat layout: max_players={}, seats={}",
+            table.max_players,
+            table.seats.len()
         )));
     }
-    if seat.player != context.caller {
-        return Err(PokerL1Error::Serialization(format!(
-            "{method}: caller {:?} is not seat {seat_index} player",
+
+    let mut resolved = None;
+    for (seat_index, seat) in table.seats.iter().enumerate() {
+        if seat.is_occupied() && seat.player == context.caller {
+            let seat_index = u8::try_from(seat_index).map_err(|_| {
+                PokerL1Error::Serialization(format!(
+                    "{method}: caller seat index does not fit canonical u8"
+                ))
+            })?;
+            if let Some(previous) = resolved {
+                return Err(PokerL1Error::Serialization(format!(
+                    "{method}: caller {:?} occupies multiple seats ({previous}, {seat_index})",
+                    context.caller
+                )));
+            }
+            resolved = Some(seat_index);
+        }
+    }
+
+    let resolved = resolved.ok_or_else(|| {
+        PokerL1Error::Serialization(format!(
+            "{method}: caller {:?} does not occupy a seat",
             context.caller
+        ))
+    })?;
+    if claimed_seat_index != resolved {
+        return Err(PokerL1Error::Serialization(format!(
+            "{method}: legacy seat_index {claimed_seat_index} does not match authenticated caller seat {resolved}"
         )));
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// 校验 caller 是桌台创建者（管理类方法）。
@@ -1304,7 +1451,7 @@ fn dispatch_join_and_shuffle(
     state_machine::apply_join_and_shuffle(
         table,
         input.seat_index,
-        input.player,
+        context.caller,
         input.buy_in,
         pk,
         input.pk_ownership_proof,
@@ -1324,10 +1471,10 @@ fn dispatch_leave_with_proof(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: LeaveWithProofArgs = decode_args(args, "leave_with_proof")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "leave_with_proof")?;
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "leave_with_proof")?;
     state_machine::apply_leave_with_proof(
         table,
-        input.seat_index,
+        seat_index,
         input.output_cards,
         input.leave_proof,
         events,
@@ -1349,10 +1496,10 @@ fn dispatch_fold_with_proof(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: FoldWithProofArgs = decode_args(args, "fold_with_proof")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "fold_with_proof")?;
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "fold_with_proof")?;
     state_machine::apply_fold_with_proof(
         table,
-        input.seat_index,
+        seat_index,
         input.output_cards,
         input.fold_proof,
         events,
@@ -1410,7 +1557,7 @@ fn dispatch_join_table(
     table.set_seat_acted_this_round(seat_idx, false);
     table.set_seat_wants_leave(seat_idx, false);
     let seat = &mut table.seats[seat_idx as usize];
-    seat.player = input.player;
+    seat.player = context.caller;
     seat.stack = input.buy_in;
     seat.pk = ECPoint::from(pk);
     seat.set_status(SeatStatus::Active); // WAITING 状态加入，立即参与下一局
@@ -1428,7 +1575,7 @@ fn dispatch_join_table(
     events.push(TexasPokerEvent::PlayerJoined {
         table_id: table.id,
         seat_index: seat_idx,
-        player: input.player,
+        player: context.caller,
         buy_in: input.buy_in,
         is_waiting: false,
         active_count_after,
@@ -1445,19 +1592,13 @@ fn dispatch_leave_table(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: LeaveTableArgs = decode_args(args, "leave_table")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "leave_table")?;
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "leave_table")?;
     if !state_machine::can_leave_state(table) {
         return Err(PokerL1Error::Serialization(
             "not in WAITING state, cannot leave_table".into(),
         ));
     }
-    if input.seat_index >= table.max_players {
-        return Err(PokerL1Error::Serialization(format!(
-            "seat_index {} out of range",
-            input.seat_index
-        )));
-    }
-    let seat = &table.seats[input.seat_index as usize];
+    let seat = &table.seats[seat_index as usize];
     if !seat.is_occupied() {
         return Err(PokerL1Error::Serialization(
             "seat not occupied, cannot leave".into(),
@@ -1483,13 +1624,13 @@ fn dispatch_leave_table(
         // chip_pool 是总锁仓，必须扣除 stack + pending_addon 的完整退款。
         table.chip_pool = post_chip_pool;
     }
-    table.seats[input.seat_index as usize] = super::types::Seat::empty();
-    table.remove_deck_contributor(input.seat_index)?;
+    table.seats[seat_index as usize] = super::types::Seat::empty();
+    table.remove_deck_contributor(seat_index)?;
 
     if refund_amt > 0 {
         events.push(TexasPokerEvent::PlayerRefund {
             table_id: table.id,
-            seat_index: input.seat_index,
+            seat_index,
             player,
             amount: refund_amt,
             refund_type: super::constants::REFUND_TYPE_STACK_ONLY,
@@ -1497,7 +1638,7 @@ fn dispatch_leave_table(
     }
     events.push(TexasPokerEvent::PlayerLeft {
         table_id: table.id,
-        seat_index: input.seat_index,
+        seat_index,
         player,
     });
     table.bump_version();
@@ -1526,11 +1667,17 @@ fn dispatch_start_hand(
 fn dispatch_tick(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
+    selector: &[u8; 32],
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    if selector == &selectors::advance_deadline() && !args.is_empty() {
+        return Err(PokerL1Error::Serialization(
+            "advance_deadline does not accept arguments".into(),
+        ));
+    }
     // 时间属于共识上下文，不能由 permissionless 调用者选择。为兼容旧 wire
-    // format，非空 args 仍可解析，但仅接受与区块时间完全一致的值。
+    // format，legacy tick 的非空 args 仍可解析，但仅接受与区块时间完全一致的值。
     if !args.is_empty() {
         let supplied = decode_args::<TickArgs>(args, "tick")?.now_ms;
         if supplied != context.block_timestamp {
@@ -1618,10 +1765,10 @@ fn dispatch_submit_shuffle_v2(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitShuffleV2Args = decode_args(args, "submit_shuffle_v2")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "submit_shuffle_v2")?;
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "submit_shuffle_v2")?;
     state_machine::apply_submit_shuffle_v2(
         table,
-        input.seat_index,
+        seat_index,
         input.output_cards,
         input.shuffle_proof,
         events,
@@ -1636,7 +1783,7 @@ fn dispatch_submit_player_reveal_tokens(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitRevealTokensArgs = decode_args(args, "submit_player_reveal_tokens")?;
-    require_caller_is_seat_player(
+    let seat_index = resolve_caller_seat(
         context,
         table,
         input.seat_index,
@@ -1647,7 +1794,7 @@ fn dispatch_submit_player_reveal_tokens(
         input.reveal_tokens.into_iter().map(Into::into).collect();
     state_machine::apply_submit_player_reveal_tokens(
         table,
-        input.seat_index,
+        seat_index,
         input.assignment_indices,
         reveal_tokens,
         input.proofs,
@@ -1663,10 +1810,11 @@ fn dispatch_submit_reconstruct_deck(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SubmitReconstructDeckArgs = decode_args(args, "submit_reconstruct_deck")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "submit_reconstruct_deck")?;
+    let seat_index =
+        resolve_caller_seat(context, table, input.seat_index, "submit_reconstruct_deck")?;
     state_machine::apply_submit_reconstruct_deck(
         table,
-        input.seat_index,
+        seat_index,
         input.statement,
         input.proof,
         events,
@@ -1681,8 +1829,8 @@ fn dispatch_fold(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "fold")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "fold")?;
-    state_machine::apply_fold(table, input.seat_index, events)
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "fold")?;
+    state_machine::apply_fold(table, seat_index, events)
 }
 
 /// `check` — 玩家过牌。
@@ -1693,8 +1841,8 @@ fn dispatch_check(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "check")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "check")?;
-    state_machine::apply_check(table, input.seat_index, events)
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "check")?;
+    state_machine::apply_check(table, seat_index, events)
 }
 
 /// `call` — 玩家跟注。
@@ -1705,8 +1853,8 @@ fn dispatch_call(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "call")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "call")?;
-    state_machine::apply_call(table, input.seat_index, events)
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "call")?;
+    state_machine::apply_call(table, seat_index, events)
 }
 
 /// `raise` — 玩家加注。
@@ -1717,8 +1865,8 @@ fn dispatch_raise(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: RaiseArgs = decode_args(args, "raise")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "raise")?;
-    state_machine::apply_raise(table, input.seat_index, input.total_bet, events)
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "raise")?;
+    state_machine::apply_raise(table, seat_index, input.total_bet, events)
 }
 
 /// `bet` — 玩家主动下注（postflop 第一个下注者）。
@@ -1731,8 +1879,8 @@ fn dispatch_bet(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: BetArgs = decode_args(args, "bet")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "bet")?;
-    state_machine::apply_bet(table, input.seat_index, input.amount, events)
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "bet")?;
+    state_machine::apply_bet(table, seat_index, input.amount, events)
 }
 
 /// `reset_for_next_hand` — 显式重置桌台到 WAITING 状态。
@@ -1770,8 +1918,8 @@ fn dispatch_addon(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: AddonArgs = decode_args(args, "addon")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "addon")?;
-    state_machine::apply_addon(table, input.seat_index, input.amount, events)
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "addon")?;
+    state_machine::apply_addon(table, seat_index, input.amount, events)
 }
 
 /// `rebuy` — 玩家重购（立即生效）。
@@ -1788,8 +1936,8 @@ fn dispatch_rebuy(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: RebuyArgs = decode_args(args, "rebuy")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "rebuy")?;
-    state_machine::apply_rebuy(table, input.seat_index, input.amount, events)
+    let seat_index = resolve_caller_seat(context, table, input.seat_index, "rebuy")?;
+    state_machine::apply_rebuy(table, seat_index, input.amount, events)
 }
 
 /// `request_leave_after_hand` — 玩家请求「下局开始前离场」（toggle）。
@@ -1806,8 +1954,9 @@ fn dispatch_request_leave_after_hand(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "request_leave_after_hand")?;
-    require_caller_is_seat_player(context, table, input.seat_index, "request_leave_after_hand")?;
-    state_machine::apply_request_leave(table, input.seat_index, events)
+    let seat_index =
+        resolve_caller_seat(context, table, input.seat_index, "request_leave_after_hand")?;
+    state_machine::apply_request_leave(table, seat_index, events)
 }
 
 // ========== 单元测试 ==========
@@ -1888,13 +2037,22 @@ mod tests {
         let mut tags = std::collections::BTreeSet::new();
         for selector in selectors::active() {
             let command = CanonicalCommand::from_selector(&selector).expect("known selector");
-            assert!(tags.insert(command.method_tag()), "duplicate command tag");
+            tags.insert(command.method_tag());
         }
-        assert_eq!(tags.len(), 21);
+        assert_eq!(selectors::active().len(), 20);
+        assert_eq!(tags.len(), 19, "tick and advance_deadline share one tag");
         assert!(!tags.contains(&(CanonicalCommand::JoinAndShuffle as u8)));
         assert!(!tags.contains(&(CanonicalCommand::LeaveWithProof as u8)));
+        assert!(!tags.contains(&(CanonicalCommand::AutoFold as u8)));
+        assert!(!tags.contains(&(CanonicalCommand::ResetForNextHand as u8)));
+        assert_eq!(
+            CanonicalCommand::from_selector(&selectors::advance_deadline()),
+            Some(CanonicalCommand::Tick)
+        );
         assert!(CanonicalCommand::from_selector(&selectors::join_and_shuffle()).is_none());
         assert!(CanonicalCommand::from_selector(&selectors::leave_with_proof()).is_none());
+        assert!(CanonicalCommand::from_selector(&selectors::auto_fold()).is_none());
+        assert!(CanonicalCommand::from_selector(&selectors::reset_for_next_hand()).is_none());
         assert!(CanonicalCommand::from_selector(&[0xFF; 32]).is_none());
     }
 
@@ -1907,6 +2065,14 @@ mod tests {
         assert_eq!(
             CanonicalCommand::from_archive_selector(&selectors::leave_with_proof()),
             Some(CanonicalCommand::LeaveWithProof)
+        );
+        assert_eq!(
+            CanonicalCommand::from_archive_selector(&selectors::auto_fold()),
+            Some(CanonicalCommand::AutoFold)
+        );
+        assert_eq!(
+            CanonicalCommand::from_archive_selector(&selectors::reset_for_next_hand()),
+            Some(CanonicalCommand::ResetForNextHand)
         );
         assert!(CanonicalCommand::from_selector(&selectors::join_and_shuffle()).is_none());
         assert!(CanonicalCommand::from_selector(&selectors::leave_with_proof()).is_none());
@@ -2208,6 +2374,7 @@ mod tests {
                 0,
             )
             .unwrap();
+        table.arm_betting_deadline(ctx.block_timestamp).unwrap();
         table.chip_pool = 1_500;
 
         let args = KickPlayerArgs {
@@ -2256,7 +2423,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_tick_timestamp_change_produces_task() {
+    fn dispatch_tick_rejects_unarmed_active_state() {
         let ctx = make_context();
         let mut table = make_table();
         table
@@ -2268,15 +2435,13 @@ mod tests {
                 0,
             )
             .unwrap();
-        let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
-        let task = decode_output(&result)
-            .prove_task
-            .expect("tick 修改超时起点后必须产生 task");
-        assert_eq!(table.timestamps().shuffle_started_at, ctx.block_timestamp);
-        assert_eq!(table.version, 1);
-        assert_eq!(table.call_seq, 1);
-        assert_eq!(task.method_kind, 4);
-        assert_eq!(task.call_seq, 1);
+        let pre = table.clone();
+        let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]);
+        assert!(result.is_err());
+        assert_eq!(
+            table, pre,
+            "deadline consumption must never arm legacy state"
+        );
     }
 
     #[test]
@@ -2364,6 +2529,44 @@ mod tests {
         assert_eq!(table.call_seq, 1);
     }
 
+    #[test]
+    fn dispatch_advance_deadline_lowers_to_the_tick_proof_tag() {
+        let ctx = make_context();
+        let mut table = make_auto_fold_table();
+        table.arm_betting_deadline(1).unwrap();
+        table.seats[0].time_bank_ms = 0;
+
+        let result = dispatch(&ctx, &mut table, &selectors::advance_deadline(), &[]).unwrap();
+        let task = decode_output(&result)
+            .prove_task
+            .expect("expired deadline must emit a proof task");
+
+        assert!(table.seats[0].is_folded());
+        assert_eq!(task.method_kind, CanonicalCommand::Tick as u8);
+        assert!(task.raw_args.is_empty());
+    }
+
+    #[test]
+    fn dispatch_advance_deadline_rejects_legacy_timestamp_payload() {
+        let ctx = make_context();
+        let mut table = make_auto_fold_table();
+        table.arm_betting_deadline(1).unwrap();
+        table.seats[0].time_bank_ms = 0;
+        let pre = table.clone();
+        let args = borsh::to_vec(&TickArgs {
+            now_ms: ctx.block_timestamp,
+        })
+        .unwrap();
+
+        let result = dispatch(&ctx, &mut table, &selectors::advance_deadline(), &args);
+
+        assert!(result.is_err());
+        assert_eq!(
+            table, pre,
+            "non-canonical payload must be rejected atomically"
+        );
+    }
+
     // ========== P0-1 / P0-2 回归测试 ==========
 
     /// P0-2：非座位玩家调用 fold 应被拒绝。
@@ -2394,6 +2597,60 @@ mod tests {
             &args_bytes,
         );
         assert!(result.is_err(), "非座位玩家不应能 fold 别人的牌");
+    }
+
+    #[test]
+    fn player_command_rejects_claimed_seat_different_from_authenticated_caller_seat() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].stack = 1_000;
+        table.seats[0].set_status(SeatStatus::Active);
+        table.seats[1].player = [0x02; 20];
+        table.seats[1].stack = 1_000;
+        table.seats[1].set_status(SeatStatus::Active);
+        table
+            .enter_betting(
+                super::super::constants::ROUND_PREFLOP,
+                super::super::betting::BettingRound::new(100, 100),
+                0,
+                0,
+            )
+            .unwrap();
+        table.arm_betting_deadline(1).unwrap();
+        let before = table.clone();
+
+        let error = dispatch(
+            &make_context_as([0x01; 20]),
+            &mut table,
+            &selectors::fold(),
+            &borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("authenticated caller seat 0"));
+        assert_eq!(table, before, "actor mismatch must be rejected atomically");
+    }
+
+    #[test]
+    fn proof_input_lowering_rejects_a_validly_encoded_but_spoofed_actor() {
+        let mut table = make_table();
+        table.seats[0].player = [0x01; 20];
+        table.seats[0].set_status(SeatStatus::Active);
+        let context = make_context_as([0x01; 20]);
+        let raw_args = borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap();
+
+        assert!(
+            derive_method_input(CanonicalCommand::Fold as u8, &raw_args).is_ok(),
+            "legacy payload remains independently decodable for archive migration"
+        );
+        let error = derive_authenticated_method_input(
+            CanonicalCommand::Fold as u8,
+            &raw_args,
+            &context,
+            &table,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("authenticated caller seat 0"));
     }
 
     /// P0-2：非 creator 调用 kick_player 应被拒绝。
@@ -2538,6 +2795,7 @@ mod tests {
             .unwrap();
 
         let ctx_p1 = make_context_as([0x11; 20]);
+        table.arm_betting_deadline(ctx_p1.block_timestamp).unwrap();
         let args = SeatIndexArgs { seat_index: 0 };
         let args_bytes = borsh::to_vec(&args).unwrap();
         let result = dispatch(
@@ -2707,6 +2965,9 @@ mod tests {
                 turn,
                 0,
             )
+            .unwrap();
+        table
+            .arm_betting_deadline(make_context().block_timestamp)
             .unwrap();
 
         // 3 名玩家，pk 都用 generator；lineage 是 canonical fact，aggregate 由其派生。
@@ -3292,6 +3553,9 @@ mod tests {
                 0,
                 0,
             )
+            .unwrap();
+        table
+            .arm_betting_deadline(make_context().block_timestamp)
             .unwrap();
         table.seats[0].player = [0x11; 20];
         table.seats[0].set_status(SeatStatus::Active);

@@ -384,8 +384,11 @@ mod tests {
         assert!(precompile.supports_selector(&selectors::join_table()));
         assert!(precompile.supports_selector(&selectors::fold()));
         assert!(precompile.supports_selector(&selectors::tick()));
+        assert!(precompile.supports_selector(&selectors::advance_deadline()));
         assert!(!precompile.supports_selector(&selectors::join_and_shuffle()));
         assert!(!precompile.supports_selector(&selectors::leave_with_proof()));
+        assert!(!precompile.supports_selector(&selectors::auto_fold()));
+        assert!(!precompile.supports_selector(&selectors::reset_for_next_hand()));
     }
 
     #[test]
@@ -574,8 +577,7 @@ mod tests {
         buy_in: u64,
         tx_hash: [u8; 32],
     ) -> ObjectID {
-        let join_args = borsh::to_vec(&join_args(*caller, buy_in, 1))
-        .unwrap();
+        let join_args = borsh::to_vec(&join_args(*caller, buy_in, 1)).unwrap();
         precompile
             .call(
                 caller,
@@ -666,8 +668,7 @@ mod tests {
             tx_hash: join_hash,
             ..make_env()
         };
-        let join_args = borsh::to_vec(&join_args(caller, 100, 1))
-        .unwrap();
+        let join_args = borsh::to_vec(&join_args(caller, 100, 1)).unwrap();
 
         let result = precompile
             .call(
@@ -750,8 +751,7 @@ mod tests {
             [0x71; 32],
         );
         let b_coin = list_owned_native_coins(&object_db, player_b).unwrap()[0].id;
-        let b_join_args = borsh::to_vec(&join_args(player_b, 100, 2))
-        .unwrap();
+        let b_join_args = borsh::to_vec(&join_args(player_b, 100, 2)).unwrap();
         precompile
             .call(
                 &player_b,
@@ -775,6 +775,7 @@ mod tests {
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(50, 100), 0, 0)
             .unwrap();
+        table.arm_betting_deadline(1).unwrap();
         table.pot = 200;
         table.rake_mode = crate::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         table.rake_bps = 500;
@@ -908,8 +909,7 @@ mod tests {
         create_test_table(&precompile, &caller, &caller_pk, &mut object_db);
         let table_id = reserved::texas_poker_contract_id();
         let table_before = object_db.read(&table_id).unwrap();
-        let join_args = borsh::to_vec(&join_args(caller, 100, 1))
-        .unwrap();
+        let join_args = borsh::to_vec(&join_args(caller, 100, 1)).unwrap();
 
         let error = precompile
             .call(

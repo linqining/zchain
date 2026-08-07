@@ -35,92 +35,117 @@ pub const SETTLEMENT_SEATS: usize = MAX_PLAYERS as usize;
 ///
 /// With two runouts, `shared_board_len` cards at the beginning of both boards must be identical.
 /// Cards after that prefix must be distinct across both runouts.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct SettlementBoards {
-    /// Number of active boards (`1` or `2`).
-    pub runout_count: u8,
-    /// Prefix length shared by both boards when `runout_count == 2`.
-    pub shared_board_len: u8,
-    /// First board. A completed showdown always contains exactly five cards.
-    pub board1: Vec<Card>,
-    /// Second board; empty for a normal single-runout hand.
-    pub board2: Vec<Card>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementBoards {
+    /// One complete five-card board.
+    Single {
+        /// Canonical board.
+        board: Vec<Card>,
+    },
+    /// Two complete boards with one shared prefix.
+    Twice {
+        /// Prefix length shared by both boards.
+        shared_board_len: u8,
+        /// First canonical board.
+        board1: Vec<Card>,
+        /// Second canonical board.
+        board2: Vec<Card>,
+    },
 }
 
 impl SettlementBoards {
     /// Construct the normal single-board settlement input.
     #[must_use]
     pub fn single(board: Vec<Card>) -> Self {
-        Self {
-            runout_count: 1,
-            shared_board_len: 0,
-            board1: board,
-            board2: vec![],
-        }
+        Self::Single { board }
     }
 
     /// Construct a two-runout settlement input.
     #[must_use]
     pub fn twice(shared_board_len: u8, board1: Vec<Card>, board2: Vec<Card>) -> Self {
-        Self {
-            runout_count: 2,
+        Self::Twice {
             shared_board_len,
             board1,
             board2,
         }
     }
 
+    #[must_use]
+    const fn runout_count(&self) -> u8 {
+        match self {
+            Self::Single { .. } => 1,
+            Self::Twice { .. } => 2,
+        }
+    }
+
+    #[must_use]
+    const fn shared_board_len(&self) -> u8 {
+        match self {
+            Self::Single { .. } => 0,
+            Self::Twice {
+                shared_board_len, ..
+            } => *shared_board_len,
+        }
+    }
+
+    fn board1(&self) -> &[Card] {
+        match self {
+            Self::Single { board } => board,
+            Self::Twice { board1, .. } => board1,
+        }
+    }
+
+    fn board2(&self) -> &[Card] {
+        match self {
+            Self::Single { .. } => &[],
+            Self::Twice { board2, .. } => board2,
+        }
+    }
+
     fn board(&self, runout_index: usize) -> &[Card] {
         if runout_index == 0 {
-            &self.board1
+            self.board1()
         } else {
-            &self.board2
+            self.board2()
         }
     }
 
     fn validate(&self) -> PokerL1Result<()> {
-        if self.runout_count != 1 && self.runout_count != 2 {
-            return Err(PokerL1Error::Serialization(format!(
-                "settlement: runout_count must be 1 or 2, got {}",
-                self.runout_count
-            )));
-        }
-        if self.board1.len() != 5 {
+        if self.board1().len() != 5 {
             return Err(PokerL1Error::Serialization(format!(
                 "settlement: board 1 must contain exactly 5 cards, got {}",
-                self.board1.len()
+                self.board1().len()
             )));
         }
-        if self.runout_count == 1 {
-            if self.shared_board_len != 0 || !self.board2.is_empty() {
-                return Err(PokerL1Error::Serialization(
-                    "settlement: single runout must not carry a shared prefix or board 2".into(),
-                ));
-            }
-        } else {
-            if self.board2.len() != 5 {
+        if let Self::Twice {
+            shared_board_len,
+            board1,
+            board2,
+        } = self
+        {
+            if board2.len() != 5 {
                 return Err(PokerL1Error::Serialization(format!(
                     "settlement: board 2 must contain exactly 5 cards, got {}",
-                    self.board2.len()
+                    board2.len()
                 )));
             }
-            if self.shared_board_len > 4 {
+            if *shared_board_len > 4 {
                 return Err(PokerL1Error::Serialization(format!(
                     "settlement: shared board prefix must be <= 4, got {}",
-                    self.shared_board_len
+                    shared_board_len
                 )));
             }
-            let shared = usize::from(self.shared_board_len);
-            if self.board1[..shared] != self.board2[..shared] {
+            let shared = usize::from(*shared_board_len);
+            if board1[..shared] != board2[..shared] {
                 return Err(PokerL1Error::Serialization(
                     "settlement: runout boards disagree on their shared prefix".into(),
                 ));
             }
         }
         if self
-            .board1
+            .board1()
             .iter()
-            .chain(&self.board2)
+            .chain(self.board2())
             .any(|card| !card.is_valid())
         {
             return Err(PokerL1Error::Serialization(
@@ -129,16 +154,21 @@ impl SettlementBoards {
         }
 
         let mut seen = HashSet::new();
-        for card in &self.board1 {
+        for card in self.board1() {
             if !seen.insert(card.to_index()) {
                 return Err(PokerL1Error::Serialization(
                     "settlement: duplicate card within board 1".into(),
                 ));
             }
         }
-        if self.runout_count == 2 {
-            let shared = usize::from(self.shared_board_len);
-            for card in self.board2.iter().skip(shared) {
+        if let Self::Twice {
+            shared_board_len,
+            board2,
+            ..
+        } = self
+        {
+            let shared = usize::from(*shared_board_len);
+            for card in board2.iter().skip(shared) {
                 if !seen.insert(card.to_index()) {
                     return Err(PokerL1Error::Serialization(
                         "settlement: duplicate non-shared card across runouts".into(),
@@ -150,11 +180,49 @@ impl SettlementBoards {
     }
 }
 
+// Keep the historical struct layout (`runout_count, shared_board_len, board1, board2`) while the
+// runtime uses a tagged union that cannot represent single/twice payload conflicts.
+impl BorshSerialize for SettlementBoards {
+    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        self.runout_count().serialize(writer)?;
+        self.shared_board_len().serialize(writer)?;
+        self.board1().serialize(writer)?;
+        self.board2().serialize(writer)
+    }
+}
+
+impl BorshDeserialize for SettlementBoards {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let runout_count = u8::deserialize_reader(reader)?;
+        let shared_board_len = u8::deserialize_reader(reader)?;
+        let board1 = Vec::<Card>::deserialize_reader(reader)?;
+        let board2 = Vec::<Card>::deserialize_reader(reader)?;
+        let boards = match runout_count {
+            1 if shared_board_len == 0 && board2.is_empty() => Self::single(board1),
+            1 => {
+                return Err(borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    "single settlement runout carries board-2 payload",
+                ));
+            }
+            2 => Self::twice(shared_board_len, board1, board2),
+            _ => {
+                return Err(borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    "settlement runout_count must be 1 or 2",
+                ));
+            }
+        };
+        boards.validate().map_err(|error| {
+            borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        Ok(boards)
+    }
+}
+
 /// Settlement details for one pot on one runout.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunoutPotPlan {
-    /// Whether this runout slot is active.
-    pub active: bool,
     /// Amount of this pot assigned to the runout.
     pub amount: u64,
     /// Winning seats for this runout/pot.
@@ -168,25 +236,67 @@ pub struct RunoutPotPlan {
 impl RunoutPotPlan {
     fn inactive() -> Self {
         Self {
-            active: false,
             amount: 0,
             winner_mask: 0,
             ranks: [None; SETTLEMENT_SEATS],
             awards: [0; SETTLEMENT_SEATS],
         }
     }
+
+    /// Whether this fixed runout slot participates in settlement.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.winner_mask != 0
+    }
+}
+
+// Preserve the v1 leading `active` byte while deriving it from the canonical winner set.
+impl BorshSerialize for RunoutPotPlan {
+    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        self.is_active().serialize(writer)?;
+        self.amount.serialize(writer)?;
+        self.winner_mask.serialize(writer)?;
+        self.ranks.serialize(writer)?;
+        self.awards.serialize(writer)
+    }
+}
+
+impl BorshDeserialize for RunoutPotPlan {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let encoded_active = bool::deserialize_reader(reader)?;
+        let amount = u64::deserialize_reader(reader)?;
+        let winner_mask = u16::deserialize_reader(reader)?;
+        let ranks = <[Option<HandRank>; SETTLEMENT_SEATS]>::deserialize_reader(reader)?;
+        let awards = <[u64; SETTLEMENT_SEATS]>::deserialize_reader(reader)?;
+        let derived_active = winner_mask != 0;
+        if encoded_active != derived_active {
+            return Err(borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "settlement runout active bit does not match winner_mask",
+            ));
+        }
+        if !derived_active
+            && (amount != 0 || ranks.iter().any(Option::is_some) || awards.iter().any(|v| *v != 0))
+        {
+            return Err(borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "inactive settlement runout carries non-zero payload",
+            ));
+        }
+        Ok(Self {
+            amount,
+            winner_mask,
+            ranks,
+            awards,
+        })
+    }
 }
 
 /// Canonical settlement details for one main/side-pot layer.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementPotPlan {
     /// Stable layer index (`0` is the main pot).
     pub pot_index: u8,
-    /// Whether at least two seats are eligible to contest this layer.
-    ///
-    /// A one-seat outer layer is an uncalled/uncontested return. It is never raked and is paid
-    /// directly to that seat without depending on either runout board.
-    pub contested: bool,
     /// Amount before rake.
     pub gross_amount: u64,
     /// Rake allocated to this layer.
@@ -197,6 +307,61 @@ pub struct SettlementPotPlan {
     pub eligible_mask: u16,
     /// Fixed two-slot runout projection.
     pub runouts: [RunoutPotPlan; MAX_RUNOUTS],
+}
+
+impl SettlementPotPlan {
+    /// Whether at least two seats are eligible to contest this layer.
+    ///
+    /// A one-seat outer layer is an uncalled return. It is never raked and is paid directly to
+    /// that seat without depending on either runout board. This bit is derived from the sole
+    /// canonical eligibility set and is not stored as a second runtime fact.
+    #[must_use]
+    pub const fn is_contested(&self) -> bool {
+        self.eligible_mask.count_ones() >= 2
+    }
+}
+
+// Preserve the v1 settlement-plan byte layout and digest while removing the duplicated runtime
+// bool. Historical encoding placed `contested` immediately after `pot_index`; serialization writes
+// the derived bit, and deserialization rejects any legacy byte stream whose bit disagrees with the
+// canonical eligibility mask.
+impl BorshSerialize for SettlementPotPlan {
+    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        self.pot_index.serialize(writer)?;
+        self.is_contested().serialize(writer)?;
+        self.gross_amount.serialize(writer)?;
+        self.rake.serialize(writer)?;
+        self.net_amount.serialize(writer)?;
+        self.eligible_mask.serialize(writer)?;
+        self.runouts.serialize(writer)
+    }
+}
+
+impl BorshDeserialize for SettlementPotPlan {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let pot_index = u8::deserialize_reader(reader)?;
+        let encoded_contested = bool::deserialize_reader(reader)?;
+        let gross_amount = u64::deserialize_reader(reader)?;
+        let rake = u64::deserialize_reader(reader)?;
+        let net_amount = u64::deserialize_reader(reader)?;
+        let eligible_mask = u16::deserialize_reader(reader)?;
+        let runouts = <[RunoutPotPlan; MAX_RUNOUTS]>::deserialize_reader(reader)?;
+        let derived_contested = eligible_mask.count_ones() >= 2;
+        if eligible_mask == 0 || encoded_contested != derived_contested {
+            return Err(borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "settlement pot contested bit does not match eligible_mask",
+            ));
+        }
+        Ok(Self {
+            pot_index,
+            gross_amount,
+            rake,
+            net_amount,
+            eligible_mask,
+            runouts,
+        })
+    }
 }
 
 /// Fully normalized settlement output.
@@ -283,12 +448,13 @@ impl SettlementPlan {
                 ));
             }
             let eligible_count = pot.eligible_mask.count_ones();
-            if pot.contested != (eligible_count >= 2) || eligible_count == 0 {
+            if eligible_count == 0 {
                 return Err(PokerL1Error::Serialization(
-                    "settlement: pot contested flag does not match eligible seats".into(),
+                    "settlement: pot has no eligible seats".into(),
                 ));
             }
-            if !pot.contested && pot.rake != 0 {
+            let contested = pot.is_contested();
+            if !contested && pot.rake != 0 {
                 return Err(PokerL1Error::Serialization(
                     "settlement: uncontested pot must not be raked".into(),
                 ));
@@ -300,7 +466,7 @@ impl SettlementPlan {
                 PokerL1Error::Serialization("settlement: rake sum overflow".into())
             })?;
             let mut runout_total = 0u64;
-            let active_runouts = if pot.contested {
+            let active_runouts = if contested {
                 usize::from(self.runout_count)
             } else {
                 1
@@ -314,7 +480,7 @@ impl SettlementPlan {
                     }
                     continue;
                 }
-                if !runout.active || runout.winner_mask == 0 {
+                if !runout.is_active() {
                     return Err(PokerL1Error::Serialization(
                         "settlement: active runout has no winners".into(),
                     ));
@@ -324,7 +490,7 @@ impl SettlementPlan {
                         "settlement: runout winner is not eligible for the pot".into(),
                     ));
                 }
-                if !pot.contested
+                if !contested
                     && (runout.winner_mask != pot.eligible_mask
                         || runout.amount != pot.net_amount
                         || runout.ranks.iter().any(Option::is_some))
@@ -429,8 +595,8 @@ pub fn derive_settlement_plan_for_boards(
 
     let mut plan = SettlementPlan {
         version: SETTLEMENT_PLAN_VERSION,
-        runout_count: boards.runout_count,
-        shared_board_len: boards.shared_board_len,
+        runout_count: boards.runout_count(),
+        shared_board_len: boards.shared_board_len(),
         gross_pot,
         rake,
         total_awards: 0,
@@ -452,8 +618,8 @@ pub fn derive_settlement_plan_for_boards(
         let contested = side_pot.eligible_seats.count_ones() >= 2;
         let mut runouts = [RunoutPotPlan::inactive(), RunoutPotPlan::inactive()];
         if contested {
-            let runout_amounts = split_across_runouts(net_amount, boards.runout_count);
-            for runout_index in 0..usize::from(boards.runout_count) {
+            let runout_amounts = split_across_runouts(net_amount, boards.runout_count());
+            for runout_index in 0..usize::from(boards.runout_count()) {
                 let (winner_mask, ranks) =
                     find_winners(table, side_pot.eligible_seats, boards.board(runout_index))?;
                 let awards = split_among_winners(
@@ -463,7 +629,6 @@ pub fn derive_settlement_plan_for_boards(
                     table.seats.len(),
                 )?;
                 runouts[runout_index] = RunoutPotPlan {
-                    active: true,
                     amount: runout_amounts[runout_index],
                     winner_mask,
                     ranks,
@@ -484,7 +649,6 @@ pub fn derive_settlement_plan_for_boards(
             let awards =
                 split_among_winners(net_amount, winner_mask, table.button, table.seats.len())?;
             runouts[0] = RunoutPotPlan {
-                active: true,
                 amount: net_amount,
                 winner_mask,
                 ranks: [None; SETTLEMENT_SEATS],
@@ -501,7 +665,6 @@ pub fn derive_settlement_plan_for_boards(
             pot_index: u8::try_from(pot_index).map_err(|_| {
                 PokerL1Error::Serialization("settlement: pot index exceeds u8".into())
             })?,
-            contested,
             gross_amount: side_pot.amount,
             rake: pot_rake,
             net_amount,
@@ -536,18 +699,18 @@ fn validate_exposed_cards(table: &TexasPokerTable, boards: &SettlementBoards) ->
             }
         }
     }
-    for card in &boards.board1 {
+    for card in boards.board1() {
         if seen_hole_cards.contains(&card.to_index()) {
             return Err(PokerL1Error::Serialization(
                 "settlement: board card duplicates an exposed hole card".into(),
             ));
         }
     }
-    if boards.runout_count == 2 {
+    if boards.runout_count() == 2 {
         for card in boards
-            .board2
+            .board2()
             .iter()
-            .skip(usize::from(boards.shared_board_len))
+            .skip(usize::from(boards.shared_board_len()))
         {
             if seen_hole_cards.contains(&card.to_index()) {
                 return Err(PokerL1Error::Serialization(
@@ -714,6 +877,34 @@ mod tests {
     use crate::object_model::ObjectID;
     use crate::vm::contracts::texas_poker::types::SeatStatus;
 
+    #[derive(BorshSerialize)]
+    struct LegacySettlementBoardsV1 {
+        runout_count: u8,
+        shared_board_len: u8,
+        board1: Vec<Card>,
+        board2: Vec<Card>,
+    }
+
+    #[derive(BorshSerialize)]
+    struct LegacyRunoutPotPlanV1 {
+        active: bool,
+        amount: u64,
+        winner_mask: u16,
+        ranks: [Option<HandRank>; SETTLEMENT_SEATS],
+        awards: [u64; SETTLEMENT_SEATS],
+    }
+
+    #[derive(BorshSerialize)]
+    struct LegacySettlementPotPlanV1 {
+        pot_index: u8,
+        contested: bool,
+        gross_amount: u64,
+        rake: u64,
+        net_amount: u64,
+        eligible_mask: u16,
+        runouts: [RunoutPotPlan; MAX_RUNOUTS],
+    }
+
     fn table() -> TexasPokerTable {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
@@ -744,6 +935,91 @@ mod tests {
         .try_into()
         .unwrap();
         table
+    }
+
+    #[test]
+    fn settlement_pot_derives_contested_without_changing_v1_bytes() {
+        let plan = derive_settlement_plan(&table()).unwrap();
+        let pot = plan.pots[0].clone();
+        let legacy = LegacySettlementPotPlanV1 {
+            pot_index: pot.pot_index,
+            contested: pot.is_contested(),
+            gross_amount: pot.gross_amount,
+            rake: pot.rake,
+            net_amount: pot.net_amount,
+            eligible_mask: pot.eligible_mask,
+            runouts: pot.runouts.clone(),
+        };
+
+        let canonical_bytes = borsh::to_vec(&pot).unwrap();
+        assert_eq!(canonical_bytes, borsh::to_vec(&legacy).unwrap());
+        let decoded: SettlementPotPlan = borsh::from_slice(&canonical_bytes).unwrap();
+        assert_eq!(decoded, pot);
+
+        let mismatched = LegacySettlementPotPlanV1 {
+            contested: !legacy.contested,
+            ..legacy
+        };
+        assert!(
+            borsh::from_slice::<SettlementPotPlan>(&borsh::to_vec(&mismatched).unwrap()).is_err(),
+            "legacy duplicate bit must fail closed when it disagrees with eligible_mask"
+        );
+    }
+
+    #[test]
+    fn settlement_boards_union_preserves_v1_bytes_and_rejects_conflicts() {
+        let board = table().community_cards.to_vec();
+        let boards = SettlementBoards::single(board.clone());
+        let legacy = LegacySettlementBoardsV1 {
+            runout_count: 1,
+            shared_board_len: 0,
+            board1: board.clone(),
+            board2: vec![],
+        };
+        let canonical_bytes = borsh::to_vec(&boards).unwrap();
+        assert_eq!(canonical_bytes, borsh::to_vec(&legacy).unwrap());
+        assert_eq!(
+            borsh::from_slice::<SettlementBoards>(&canonical_bytes).unwrap(),
+            boards
+        );
+
+        let conflicting = LegacySettlementBoardsV1 {
+            runout_count: 1,
+            shared_board_len: 1,
+            board1: board.clone(),
+            board2: board,
+        };
+        assert!(
+            borsh::from_slice::<SettlementBoards>(&borsh::to_vec(&conflicting).unwrap()).is_err(),
+            "single-runout legacy bytes must not carry shared-prefix or board-2 payload"
+        );
+    }
+
+    #[test]
+    fn settlement_runout_derives_active_without_changing_v1_bytes() {
+        let plan = derive_settlement_plan(&table()).unwrap();
+        let runout = plan.pots[0].runouts[0].clone();
+        let legacy = LegacyRunoutPotPlanV1 {
+            active: runout.is_active(),
+            amount: runout.amount,
+            winner_mask: runout.winner_mask,
+            ranks: runout.ranks,
+            awards: runout.awards,
+        };
+
+        let canonical_bytes = borsh::to_vec(&runout).unwrap();
+        assert_eq!(canonical_bytes, borsh::to_vec(&legacy).unwrap());
+        let decoded: RunoutPotPlan = borsh::from_slice(&canonical_bytes).unwrap();
+        assert_eq!(decoded, runout);
+
+        let mismatched = LegacyRunoutPotPlanV1 {
+            active: !legacy.active,
+            ..legacy
+        };
+        assert!(
+            borsh::from_slice::<RunoutPotPlan>(&borsh::to_vec(&mismatched).unwrap()).is_err(),
+            "legacy duplicate bit must fail closed when it disagrees with winner_mask"
+        );
     }
 
     #[test]
@@ -827,10 +1103,10 @@ mod tests {
                 .unwrap();
 
         assert_eq!(plan.pots.len(), 2);
-        assert!(plan.pots[0].contested);
+        assert!(plan.pots[0].is_contested());
         assert_eq!(plan.pots[0].gross_amount, 100);
         assert_eq!(plan.pots[0].rake, 10);
-        assert!(!plan.pots[1].contested);
+        assert!(!plan.pots[1].is_contested());
         assert_eq!(plan.pots[1].gross_amount, 50);
         assert_eq!(plan.pots[1].rake, 0);
         assert_eq!(plan.pots[1].runouts[0].amount, 50);
@@ -883,12 +1159,12 @@ mod tests {
         assert_eq!(plan.rake, 25);
         assert_eq!(plan.total_awards, 581);
         assert_eq!(plan.pots.len(), 3);
-        assert!(plan.pots[0].contested);
-        assert!(plan.pots[1].contested);
-        assert!(!plan.pots[2].contested);
+        assert!(plan.pots[0].is_contested());
+        assert!(plan.pots[1].is_contested());
+        assert!(!plan.pots[2].is_contested());
         assert_eq!(plan.pots[2].rake, 0);
         assert_eq!(plan.pots[2].runouts[0].awards[2], 101);
-        assert!(!plan.pots[2].runouts[1].active);
+        assert!(!plan.pots[2].runouts[1].is_active());
         assert_eq!(plan.pots[0].runouts[0].winner_mask, 0b111);
         assert_eq!(plan.pots[0].runouts[1].winner_mask, 0b111);
         assert_eq!(plan.pots[1].runouts[0].winner_mask, 0b110);

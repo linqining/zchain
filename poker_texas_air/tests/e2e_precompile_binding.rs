@@ -59,6 +59,8 @@ use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method_against;
 use rand::rngs::OsRng;
 
+const FIXTURE_TIMESTAMP_MS: u64 = 1_900_000;
+
 fn context(caller: poker_l1::Address) -> DispatchContext {
     DispatchContext {
         caller,
@@ -68,7 +70,7 @@ fn context(caller: poker_l1::Address) -> DispatchContext {
         },
         chain_id: 377,
         block_height: 9_001,
-        block_timestamp: 1_900_000,
+        block_timestamp: FIXTURE_TIMESTAMP_MS,
     }
 }
 
@@ -171,7 +173,7 @@ fn fixture(
                 pending_mask: 1u16 << seat_index,
                 completed_mask: 0,
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let raw_args = borsh::to_vec(&SubmitShuffleV2Args {
@@ -367,7 +369,7 @@ fn leave_fixture(
                 pending_mask: (1u16 << 0) | (1u16 << 2),
                 completed_mask: 1u16 << seat_index,
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let raw_args = borsh::to_vec(&LeaveWithProofArgs {
@@ -586,7 +588,7 @@ fn reveal_fixture(
                     },
                 ],
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let args = SubmitRevealTokensArgs {
@@ -859,7 +861,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
                     })
                     .collect(),
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
     let raw_args = borsh::to_vec(&SubmitRevealTokensArgs {

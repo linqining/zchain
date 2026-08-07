@@ -4,9 +4,7 @@ use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, SubmitShuffleV2Args};
-use poker_l1::vm::contracts::texas_poker::types::{
-    SeatStatus, ShuffleState, TexasPokerTable,
-};
+use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState, TexasPokerTable};
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
@@ -25,6 +23,7 @@ use poker_texas_air::verified_chain::ExpectedChainAnchor;
 use rand::rngs::OsRng;
 
 const HEADER_LEN: usize = 144;
+const FIXTURE_TIMESTAMP_MS: u64 = 2_000_000;
 
 fn context(caller: poker_l1::Address) -> DispatchContext {
     DispatchContext {
@@ -35,7 +34,7 @@ fn context(caller: poker_l1::Address) -> DispatchContext {
         },
         chain_id: 377,
         block_height: 12_345,
-        block_timestamp: 2_000_000,
+        block_timestamp: FIXTURE_TIMESTAMP_MS,
     }
 }
 
@@ -151,7 +150,7 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
                 pending_mask: 0b1111,
                 completed_mask: 0,
             },
-            0,
+            FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
 

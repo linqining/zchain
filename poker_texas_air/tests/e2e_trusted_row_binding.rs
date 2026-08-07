@@ -9,10 +9,8 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, JoinTableArgs, KickPlayerArgs, LeaveTableArgs,
 };
 use poker_l1::vm::contracts::texas_poker::state_machine;
+use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
 use poker_l1::vm::contracts::texas_poker::utils;
-use poker_l1::vm::contracts::texas_poker::types::{
-    EMPTY_PLAYER, SeatStatus, TexasPokerTable,
-};
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
 use poker_texas_air::airs::actions::end_betting_round::BettingOutcome;
 use poker_texas_air::airs::actions::end_without_showdown::{EndWithoutShowdownInput, FoldOutcome};
@@ -40,6 +38,8 @@ use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::{verify_create_table_against, verify_method_against};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
+
+const FIXTURE_TIMESTAMP_MS: u64 = 1_000_000;
 
 /// Minimal AIR with a deliberately unconstrained second business column.
 /// `BoundAir` must still bind that column to the trusted row.
@@ -206,8 +206,13 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
         50,
         100,
     );
-    pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
-        .unwrap();
+    pre.enter_betting(
+        ROUND_PREFLOP,
+        BettingRound::new(100, 100),
+        0,
+        FIXTURE_TIMESTAMP_MS,
+    )
+    .unwrap();
     pre.pot = 25;
     pre.hand_id = 5;
     pre.call_seq = 8;
@@ -225,6 +230,7 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
 
     let mut post = pre.clone();
     state_machine::apply_call(&mut post, 0, &mut vec![]).unwrap();
+    state_machine::normalize_until_blocked(&mut post, FIXTURE_TIMESTAMP_MS, &mut vec![]).unwrap();
     post.call_seq = pre.call_seq + 1;
     assert_eq!(post.seats[0].bet, 100);
     assert_eq!(post.current_turn(), 1);
@@ -324,8 +330,13 @@ fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
         50,
         100,
     );
-    pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
-        .unwrap();
+    pre.enter_betting(
+        ROUND_PREFLOP,
+        BettingRound::new(100, 100),
+        0,
+        FIXTURE_TIMESTAMP_MS,
+    )
+    .unwrap();
     pre.pot = 200;
     pre.hand_id = 6;
     pre.call_seq = 9;
@@ -525,7 +536,7 @@ fn dispatch_context(caller: [u8; 20]) -> DispatchContext {
         },
         chain_id: poker_l1::DEFAULT_CHAIN_ID,
         block_height: 100,
-        block_timestamp: 1_000_000,
+        block_timestamp: FIXTURE_TIMESTAMP_MS,
     }
 }
 
@@ -542,8 +553,13 @@ fn make_kick_player_transition() -> (DispatchContext, TexasPokerTable, TexasPoke
     );
     pre.hand_id = 5;
     pre.call_seq = 19;
-    pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
-        .unwrap();
+    pre.enter_betting(
+        ROUND_PREFLOP,
+        BettingRound::new(100, 100),
+        0,
+        FIXTURE_TIMESTAMP_MS,
+    )
+    .unwrap();
     pre.pot = 75;
     for seat_index in 0..3 {
         pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];

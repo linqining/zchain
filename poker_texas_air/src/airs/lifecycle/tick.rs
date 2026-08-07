@@ -6,17 +6,17 @@
 //! 3. **Time Bank**：下注超时时若 `time_bank_ms > 0`，消耗等量时间延长截止
 //! 4. **Rake**：reveal 阶段完成触发 settle_hand 时抽水（`pot_after = pot_before - rake`）
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::airs::common::{
-    u64_to_m31_limbs, CommonConstraints, CommonRow, COMMON_NUM_COLUMNS, ZERO,
+    COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u64_to_m31_limbs,
 };
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::precompile_binding::{digest_to_m31_limbs, DIGEST_LIMBS};
+use crate::precompile_binding::{DIGEST_LIMBS, digest_to_m31_limbs};
 use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
@@ -26,7 +26,7 @@ use poker_l1::vm::contracts::texas_poker::constants::{
 };
 use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
 use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::{TexasPokerTable, NO_SEAT};
+use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
 
 /// `timeout_kind` values used in the tick statement.  The value denotes the
 /// highest-priority timer family visible in the pre-state; `5` is a non-timer
@@ -45,7 +45,8 @@ pub const TICK_KIND_NON_TIMER: u8 = 5;
 
 /// Canonical Tick lifecycle receipt ABI.
 pub const TICK_LIFECYCLE_ABI_VERSION: u8 = 1;
-/// Tick started a previously unset shuffle/reveal/betting/showdown timer.
+/// Reserved legacy ABI value. Schema v15 never commits an active phase with
+/// an unset deadline, so canonical Tick receipts must never issue this branch.
 pub const TICK_BRANCH_TIMER_STARTED: u8 = 1;
 /// Tick started a new hand from WAITING.
 pub const TICK_BRANCH_HAND_STARTED: u8 = 2;
@@ -202,8 +203,8 @@ impl Default for TickInput {
 /// Canonically reconstruct all business constants for a state-changing `tick`.
 ///
 /// The native VM deliberately has several `tick` branches that are not timer
-/// expirations (start a timer, advance a completed protocol phase, start a
-/// hand, or repair an inconsistent table).  This helper follows the same
+/// expirations (advance a completed protocol phase, start a hand, or repair an
+/// inconsistent table). This helper follows the same
 /// priority order as [`state_machine::tick`], replays it, and derives the
 /// input constants from the resulting VM events and post-state.  It is shared
 /// by the prover and production verifier so no Tick witness is selected by the
@@ -366,8 +367,6 @@ fn issue_lifecycle_binding(
     };
 
     let has = |predicate: fn(&TexasPokerEvent) -> bool| events.iter().any(predicate);
-    let pre_timestamps = pre.timestamps();
-    let post_timestamps = post.timestamps();
     let pre_reveal = pre.reveal_token_state();
     let branch_kind = if has(|event| matches!(event, TexasPokerEvent::ReconstructTimeout { .. })) {
         TICK_BRANCH_RECONSTRUCT_TIMEOUT
@@ -404,27 +403,6 @@ fn issue_lifecycle_binding(
             || has(|event| matches!(event, TexasPokerEvent::HandEndedWithoutShowdown { .. })))
     {
         TICK_BRANCH_SHOWDOWN_SETTLED
-    } else if pre_timestamps.shuffle_started_at == 0
-        && post_timestamps.shuffle_started_at == current_time
-        && pre.shuffle_phase() != 0
-    {
-        TICK_BRANCH_TIMER_STARTED
-    } else if pre_timestamps.reveal_started_at == 0
-        && post_timestamps.reveal_started_at == current_time
-        && pre_reveal.reveal_phase != 0
-    {
-        TICK_BRANCH_TIMER_STARTED
-    } else if pre_timestamps.betting_started_at == 0
-        && post_timestamps.betting_started_at == current_time
-        && state_machine::is_betting_round(pre)
-    {
-        TICK_BRANCH_TIMER_STARTED
-    } else if pre.round_state() == ROUND_SHOWDOWN
-        && pre_timestamps.showdown_at == 0
-        && post_timestamps.showdown_at
-            == current_time.saturating_add(u64::from(pre.timeout_config.showdown_display_ms))
-    {
-        TICK_BRANCH_TIMER_STARTED
     } else if matches!(
         pre.shuffle_phase(),
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
@@ -1119,8 +1097,8 @@ pub fn validate_public_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_input, TICK_BRANCH_BETTING_TIMEOUT, TICK_BRANCH_TIME_BANK_CONSUMED,
-        TICK_KIND_BETTING,
+        TICK_BRANCH_BETTING_TIMEOUT, TICK_BRANCH_TIME_BANK_CONSUMED, TICK_KIND_BETTING,
+        canonical_input,
     };
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::{
@@ -1184,12 +1162,7 @@ mod tests {
         occupy(&mut table, 2, 3, 1_000);
         table.timeout_config.betting_timeout_ms = 30_000;
         table
-            .enter_betting(
-                ROUND_PREFLOP,
-                BettingRound::new(100, 100),
-                0,
-                1_000_000,
-            )
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1_000_000)
             .unwrap();
         table.seats[0].time_bank_ms = time_bank_ms;
         table.chip_pool = 3_000;
@@ -1202,13 +1175,8 @@ mod tests {
     fn canonical_input_binds_betting_time_bank_at_maximum_legal_deadline() {
         let mut pre = betting_table(10);
         pre.timeout_config.betting_timeout_ms = 10;
-        pre.enter_betting(
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            u64::MAX - 20,
-        )
-        .unwrap();
+        pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, u64::MAX - 20)
+            .unwrap();
         let now_ms = u64::MAX - 10;
         let (post, events) = execute_tick(&pre, now_ms);
 

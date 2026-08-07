@@ -73,8 +73,13 @@ impl L1ProveTask {
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
-        super::dispatch::derive_method_input(method_kind, &raw_args)
-            .expect("L1ProveTask requires a validated canonical command");
+        super::dispatch::derive_authenticated_method_input(
+            method_kind,
+            &raw_args,
+            &context,
+            &pre_table,
+        )
+        .expect("L1ProveTask requires a validated canonical command");
         super::dispatch::CanonicalCommand::from_u8(method_kind)
             .expect("L1ProveTask requires a known canonical command tag");
         Self {
@@ -99,7 +104,12 @@ impl L1ProveTask {
 
     /// Decode the transient typed command view from the sole command payload.
     pub fn method_input(&self) -> crate::error::PokerL1Result<MethodInput> {
-        super::dispatch::derive_method_input(self.method_kind, &self.raw_args)
+        super::dispatch::derive_authenticated_method_input(
+            self.method_kind,
+            &self.raw_args,
+            &self.context,
+            &self.pre_table,
+        )
     }
 }
 
@@ -126,7 +136,13 @@ impl BorshDeserialize for L1ProveTask {
         let table_id = u64::deserialize_reader(reader)?;
         let hand_id = u32::deserialize_reader(reader)?;
         let call_seq = u32::deserialize_reader(reader)?;
-        super::dispatch::derive_method_input(method_kind, &raw_args).map_err(|error| {
+        super::dispatch::derive_authenticated_method_input(
+            method_kind,
+            &raw_args,
+            &context,
+            &pre_table,
+        )
+        .map_err(|error| {
             borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
         })?;
         super::dispatch::CanonicalCommand::from_u8(method_kind).ok_or_else(|| {
@@ -186,14 +202,17 @@ mod tests {
     use crate::signature::TaggedPubkey;
 
     fn dummy_table(name: &str) -> TexasPokerTable {
-        TexasPokerTable::new(
+        let mut table = TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
             name.into(),
             [0u8; 20],
             6,
             50,
             100,
-        )
+        );
+        table.seats[2].player = [0xAA; 20];
+        table.seats[2].set_status(super::super::types::SeatStatus::Active);
+        table
     }
 
     fn dummy_context() -> DispatchContext {

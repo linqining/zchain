@@ -513,6 +513,8 @@ mod tests {
     use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, FiatShamirTranscript};
     use rand::rngs::OsRng;
 
+    const FIXTURE_TIMESTAMP_MS: u64 = 2_000_000;
+
     fn context(caller: poker_l1::Address) -> DispatchContext {
         DispatchContext {
             caller,
@@ -522,7 +524,7 @@ mod tests {
             },
             chain_id: 377,
             block_height: 12_345,
-            block_timestamp: 2_000_000,
+            block_timestamp: FIXTURE_TIMESTAMP_MS,
         }
     }
 
@@ -623,7 +625,7 @@ mod tests {
                     pending_mask: 0b11,
                     completed_mask: 0,
                 },
-                0,
+                FIXTURE_TIMESTAMP_MS,
             )
             .unwrap();
 

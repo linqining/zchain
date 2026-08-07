@@ -235,10 +235,18 @@ per-task bundle 的现有 v2 package 静默当作完整证明。
   双 bump cascade；其他未来出现的 multi-version advance/settlement 继续 fail-closed。
 - `tick` 已接入四段 archive。下注超时 fold 会派生 SeatUpdate，终局/当前轮完成会派生
   BetCollection、RoundAdvance、WithoutShowdown/Showdown/ResetOnly Settlement，并由 restart
-  verifier 重建后重验。`tick` 的 start-hand、仅启动 timer、shuffle/reconstruct/reveal 修复等
-  非四段业务分支仍主要依赖 canonical native replay 与 plan/table digest；若要求这些分支在
+  verifier 重建后重验。schema v15 已删除仅启动 timer 的状态分支，且 WAITING 不允许 tick 隐式
+  start-hand；shuffle/reconstruct/reveal timeout 等 lifecycle 分支仍主要依赖 canonical native replay
+  与 plan/table digest；若要求这些分支在
   恶意 host 下也能由 STARK 独立执行验证，需要新增专门 lifecycle component，而不能把 inactive
   四段 header 当作 start-hand/shuffle 执行证明。
+- production precompile 已新增 canonical `advance_deadline` selector，并让 legacy `tick` 降低到同一
+  proof tag；专用 `auto_fold` 与普通 public `reset_for_next_hand` 已从 active selector 集移除。历史
+  selector 仍由 archive decoder 精确重放，避免通过“删除入口”破坏旧 proof package。
+- 普通玩家命令的 actor 已改为从 authenticated caller 和 canonical pre-state 唯一派生。
+  legacy `seat_index` 与 join `player` 只做相等断言；L1/AIR prove-task 在反序列化和消费时
+  也执行同一 lowering。canonical table 拒绝同一地址占用多个 seat，避免后续
+  method batch 仍把 caller 与 seat 当成两份可错配事实。管理员 target seat 仍保留显式输入。
 - `reset_for_next_hand` 的完整座位/资金重置语义由 durable 四段 component bundle
   承担；单独拿 method STARK 只证明方法级投影。`join_and_shuffle` / `leave_with_proof`
   使用的是 method STARK + crypto dual-proof package，不携带这四份 component proof；其
