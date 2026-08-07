@@ -127,10 +127,10 @@ pub const ANTE_MODE_BBA: u8 = 2;
 // ===== Time Bank（玩家思考时间银行）=====
 
 /// 默认 Time Bank 初始额度（毫秒，30 秒）。
-pub const DEFAULT_TIME_BANK_MS: u64 = 30_000;
+pub const DEFAULT_TIME_BANK_MS: u32 = 30_000;
 
 /// Time Bank 每手补充额度（毫秒，每手开始时 +10 秒，最多到初始额度）。
-pub const TIME_BANK_REFILL_PER_HAND_MS: u64 = 10_000;
+pub const TIME_BANK_REFILL_PER_HAND_MS: u32 = 10_000;
 
 // ===== Rake 模式（settle 时抽水）=====
 
@@ -140,7 +140,7 @@ pub const RAKE_MODE_NONE: u8 = 0;
 pub const RAKE_MODE_PERCENTAGE: u8 = 1;
 
 /// 默认 rake 比例（500 = 5%）。
-pub const DEFAULT_RAKE_BPS: u64 = 500;
+pub const DEFAULT_RAKE_BPS: u16 = 500;
 
 /// 默认 rake 上限（按 BB 倍数，通常 1-3 BB；此处用绝对值）。
 pub const DEFAULT_RAKE_CAP: u64 = 1_000;

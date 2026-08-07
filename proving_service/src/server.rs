@@ -1133,8 +1133,6 @@ mod tests {
     use super::*;
 
     use axum::body::{Body, to_bytes};
-    use blstrs::G1Projective;
-    use group::Group;
     use poker_l1::account::derive_address;
     use poker_l1::block::BlockHeader;
     use poker_l1::consensus::ValidatorEntry;
@@ -1147,7 +1145,7 @@ mod tests {
     use poker_l1::vm::contracts::texas_poker::dispatch::{
         CreateTableArgs, JoinTableArgs, SeatIndexArgs, selectors,
     };
-    use poker_protocol::crypto::types::ECPoint;
+    use poker_l1::vm::contracts::texas_poker::utils;
     use poker_texas_air::consensus_anchor::{ConsensusDispatchCall, TableSnapshot};
     use secp256k1::{Message, Secp256k1, SecretKey};
     use tower::ServiceExt;
@@ -1580,11 +1578,15 @@ mod tests {
             block_timestamp_ms: None,
             selector_hex: hex::encode(selectors::join_table()),
             args_hex: hex::encode(
-                borsh::to_vec(&JoinTableArgs {
-                    player,
-                    buy_in: 1_000,
-                    pk: ECPoint(G1Projective::generator()),
-                })
+                borsh::to_vec(
+                    &JoinTableArgs::with_key(
+                        player,
+                        1_000,
+                        utils::scalar_from_u64(1),
+                        utils::scalar_from_u64(901),
+                    )
+                    .unwrap(),
+                )
                 .unwrap(),
             ),
             idempotency_key: Some("join".into()),
@@ -1720,11 +1722,15 @@ mod tests {
             block_timestamp_ms: None,
             selector_hex: hex::encode(selectors::join_table()),
             args_hex: hex::encode(
-                borsh::to_vec(&JoinTableArgs {
-                    player,
-                    buy_in: 1_000,
-                    pk: ECPoint(G1Projective::generator()),
-                })
+                borsh::to_vec(
+                    &JoinTableArgs::with_key(
+                        player,
+                        1_000,
+                        utils::scalar_from_u64(1),
+                        utils::scalar_from_u64(902),
+                    )
+                    .unwrap(),
+                )
                 .unwrap(),
             ),
             idempotency_key: Some("join".into()),

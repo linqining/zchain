@@ -115,11 +115,18 @@ impl HandRunner {
 
         // ===== Step 1-2: join_table × 2 =====
         for (idx, &player) in self.players.iter().enumerate() {
-            let join_args = JoinTableArgs {
+            let secret = poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(
+                idx as u64 + 1,
+            );
+            let join_args = JoinTableArgs::with_key(
                 player,
-                buy_in: 1_000,
-                pk: dummy_pk(idx as u8),
-            };
+                1_000,
+                secret,
+                poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(
+                    40_000 + idx as u64,
+                ),
+            )
+            .expect("deterministic runner join key proof");
             dispatch_and_prove(
                 &mut plugin,
                 player,
@@ -234,24 +241,4 @@ fn dispatch_and_prove<A: BorshSerialize>(
 fn make_placeholder_table(_creator: Address) -> TexasPokerTable {
     let id = ObjectID::new([0xFF; 20], 0);
     TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1)
-}
-
-/// 构造测试用占位公钥（join_table 用；skip 模式下不参与真实 ZK 验证）。
-///
-/// `idx` 为玩家序号；用 generator 的倍数产生**互不相同**的点，避免触发
-/// "pk already registered"。
-fn dummy_pk(idx: u8) -> ECPoint {
-    let g = G1Projective::generator();
-    let pk = match idx {
-        0 => g,
-        _ => {
-            // g * (idx + 1) —— 通过反复自加实现（避免构造 Scalar）
-            let mut p = g;
-            for _ in 0..idx {
-                p += g;
-            }
-            p
-        }
-    };
-    ECPoint(pk)
 }

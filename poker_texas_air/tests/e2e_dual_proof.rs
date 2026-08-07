@@ -6,7 +6,7 @@ use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 use poker_l1::vm::contracts::texas_poker::constants::{
     RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_TURN, ROUND_PREFLOP,
-    ROUND_TURN, SHUFFLE_PHASE_WAITING,
+    ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs,
@@ -14,7 +14,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
 };
 use poker_l1::vm::contracts::texas_poker::types::{
     DecryptedCard, ReconstructState, RevealAssignment, RevealProgress, RevealTarget,
-    RevealTokenState, SeatStatus, ShuffleState, TexasPokerTable,
+    RevealTokenState, SeatStatus, ShuffleState, ShufflingPurpose, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -118,11 +118,18 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
     table.deck_state.encrypted = input_cards;
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
-    table.shuffle_state = ShuffleState {
-        phase: SHUFFLE_PHASE_WAITING,
-        pending_mask: (1u16 << (0)),
-        completed_mask: 0,
-    };
+    table
+        .enter_shuffling(
+            ShufflingPurpose::Initial,
+            ROUND_WAITING,
+            ShuffleState {
+                pending_mask: 1u16 << 0,
+                completed_mask: 0,
+            },
+            None,
+            0,
+        )
+        .unwrap();
     let raw_args = borsh::to_vec(&SubmitShuffleV2Args {
         seat_index: 0,
         output_cards,
@@ -189,11 +196,18 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
     table.call_seq = call_seq;
     table.hand_id = 6;
     table.version = u64::from(call_seq) + 20;
-    table.shuffle_state = ShuffleState {
-        phase: SHUFFLE_PHASE_WAITING,
-        pending_mask: 0,
-        completed_mask: 0,
-    };
+    table
+        .enter_shuffling(
+            ShufflingPurpose::Initial,
+            ROUND_WAITING,
+            ShuffleState {
+                pending_mask: 0,
+                completed_mask: 0,
+            },
+            None,
+            0,
+        )
+        .unwrap();
     let raw_args = borsh::to_vec(&JoinAndShuffleArgs {
         seat_index: 1,
         player,
@@ -255,20 +269,26 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
         .enumerate()
         .map(|(index, ciphertext)| DecryptedCard::partial(index as u8, 0, ciphertext))
         .collect();
-    table.round_state = ROUND_TURN;
-    table.reveal_token_state.reveal_phase = REVEAL_PHASE_TURN;
-    table.timestamps.reconstruct_started_at = 7_000 + nonce;
-    table.reconstruct_state = ReconstructState {
-        phase: RECONSTRUCT_PHASE_COLLECTING,
-        pending_mask: (1u16 << (0)) | (1u16 << (1)),
-        coefficient: None,
-        accumulated_deck: None,
-    };
+    let epoch_ms = 7_000 + nonce;
+    table
+        .enter_reconstructing(
+            ROUND_TURN,
+            ReconstructState {
+                pending_mask: (1u16 << 0) | (1u16 << 1),
+                accumulated_deck: None,
+            },
+            RevealTokenState {
+                reveal_phase: REVEAL_PHASE_TURN,
+                assignments: vec![],
+            },
+            epoch_ms,
+        )
+        .unwrap();
     let context_digest = utils::reconstruction_v3_context_digest(&table);
     let prior_state_digest = utils::reconstruction_v3_prior_state_digest(&table, 0).unwrap();
     let (statement, proof) = ReconstructProofV3::prove(
         context_digest,
-        table.timestamps.reconstruct_started_at,
+        epoch_ms,
         prior_state_digest,
         cards,
         readable_cards,
@@ -340,11 +360,18 @@ fn leave_task(nonce: u64) -> ProveTask {
     table.deck_state.encrypted = input_cards;
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
-    table.shuffle_state = ShuffleState {
-        phase: SHUFFLE_PHASE_WAITING,
-        pending_mask: 0,
-        completed_mask: (1u16 << (1)),
-    };
+    table
+        .enter_shuffling(
+            ShufflingPurpose::Initial,
+            ROUND_WAITING,
+            ShuffleState {
+                pending_mask: 0,
+                completed_mask: 1u16 << 1,
+            },
+            None,
+            0,
+        )
+        .unwrap();
     let raw_args = borsh::to_vec(&LeaveWithProofArgs {
         seat_index: 1,
         output_cards,
@@ -401,9 +428,9 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
     table.call_seq = 12;
     table.hand_id = 14;
     table.version = 40;
-    table.round_state = ROUND_PREFLOP;
-    table.betting_round = Some(BettingRound::new(100, 100));
-    table.current_turn = 0;
+    table
+        .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+        .unwrap();
     for index in 0..active_players {
         table.seats[usize::from(index)].player = if index == 0 {
             player
@@ -486,35 +513,41 @@ fn reveal_task(nonce: u64) -> ProveTask {
     table.deck_state.encrypted = encrypted_cards;
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
-    table.reveal_token_state = RevealTokenState {
-        reveal_phase: REVEAL_PHASE_PREFLOP,
-        assignments: vec![
-            RevealAssignment {
-                encrypted_card_index: 0,
-                target: RevealTarget::Hole {
-                    seat_index: 0,
-                    card_slot: 0,
-                },
-                progress: RevealProgress::Collecting {
-                    pending_mask: 1u16 << 1,
-                    submitted_mask: 0,
-                    reveal_tokens: vec![],
-                },
+    table
+        .enter_revealing(
+            ROUND_PREFLOP,
+            RevealTokenState {
+                reveal_phase: REVEAL_PHASE_PREFLOP,
+                assignments: vec![
+                    RevealAssignment {
+                        encrypted_card_index: 0,
+                        target: RevealTarget::Hole {
+                            seat_index: 0,
+                            card_slot: 0,
+                        },
+                        progress: RevealProgress::Collecting {
+                            pending_mask: 1u16 << 1,
+                            submitted_mask: 0,
+                            reveal_tokens: vec![],
+                        },
+                    },
+                    RevealAssignment {
+                        encrypted_card_index: 1,
+                        target: RevealTarget::Hole {
+                            seat_index: 1,
+                            card_slot: 0,
+                        },
+                        progress: RevealProgress::Collecting {
+                            pending_mask: 1u16,
+                            submitted_mask: 0,
+                            reveal_tokens: vec![],
+                        },
+                    },
+                ],
             },
-            RevealAssignment {
-                encrypted_card_index: 1,
-                target: RevealTarget::Hole {
-                    seat_index: 1,
-                    card_slot: 0,
-                },
-                progress: RevealProgress::Collecting {
-                    pending_mask: 1u16,
-                    submitted_mask: 0,
-                    reveal_tokens: vec![],
-                },
-            },
-        ],
-    };
+            0,
+        )
+        .unwrap();
     let raw_args = borsh::to_vec(&SubmitRevealTokensArgs {
         seat_index: 1,
         assignment_indices: vec![0],

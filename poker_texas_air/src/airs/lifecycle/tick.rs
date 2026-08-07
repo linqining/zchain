@@ -368,7 +368,6 @@ fn issue_lifecycle_binding(
     let has = |predicate: fn(&TexasPokerEvent) -> bool| events.iter().any(predicate);
     let pre_timestamps = pre.timestamps();
     let post_timestamps = post.timestamps();
-    let pre_shuffle = pre.shuffle_state();
     let pre_reveal = pre.reveal_token_state();
     let branch_kind = if has(|event| matches!(event, TexasPokerEvent::ReconstructTimeout { .. })) {
         TICK_BRANCH_RECONSTRUCT_TIMEOUT
@@ -407,7 +406,7 @@ fn issue_lifecycle_binding(
         TICK_BRANCH_SHOWDOWN_SETTLED
     } else if pre_timestamps.shuffle_started_at == 0
         && post_timestamps.shuffle_started_at == current_time
-        && pre_shuffle.phase != 0
+        && pre.shuffle_phase() != 0
     {
         TICK_BRANCH_TIMER_STARTED
     } else if pre_timestamps.reveal_started_at == 0
@@ -423,11 +422,11 @@ fn issue_lifecycle_binding(
     } else if pre.round_state() == ROUND_SHOWDOWN
         && pre_timestamps.showdown_at == 0
         && post_timestamps.showdown_at
-            == current_time.saturating_add(pre.timeout_config.showdown_display_ms)
+            == current_time.saturating_add(u64::from(pre.timeout_config.showdown_display_ms))
     {
         TICK_BRANCH_TIMER_STARTED
     } else if matches!(
-        pre_shuffle.phase,
+        pre.shuffle_phase(),
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
         TICK_BRANCH_SHUFFLE_ADVANCED
@@ -484,28 +483,27 @@ fn tick_lifecycle_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 
 /// Return the canonical timer family that has priority in the pre-state.
 fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, bool, Option<u8>)> {
-    let reconstruct = table.reconstruct_state();
     let shuffle = table.shuffle_state();
     let reveal = table.reveal_token_state();
     let timestamps = table.timestamps();
-    if reconstruct.phase != RECONSTRUCT_PHASE_NONE {
+    if table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE {
         return Ok((
             TICK_KIND_RECONSTRUCT,
             timestamps.reconstruct_started_at,
-            table.timeout_config.reconstruct_timeout_ms,
+            u64::from(table.timeout_config.reconstruct_timeout_ms),
             true,
             None,
         ));
     }
     if matches!(
-        shuffle.phase,
+        table.shuffle_phase(),
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
         let pending = shuffle.pending_mask != 0 && shuffle.derived_current_shuffler() != NO_SEAT;
         return Ok((
             TICK_KIND_SHUFFLE,
             timestamps.shuffle_started_at,
-            table.timeout_config.shuffle_timeout_ms,
+            u64::from(table.timeout_config.shuffle_timeout_ms),
             pending,
             None,
         ));
@@ -518,7 +516,7 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
         return Ok((
             TICK_KIND_REVEAL,
             timestamps.reveal_started_at,
-            table.timeout_config.reveal_timeout_ms,
+            u64::from(table.timeout_config.reveal_timeout_ms),
             pending,
             None,
         ));
@@ -532,7 +530,7 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
             return Ok((
                 TICK_KIND_BETTING,
                 timestamps.betting_started_at,
-                table.timeout_config.betting_timeout_ms,
+                u64::from(table.timeout_config.betting_timeout_ms),
                 true,
                 Some(seat),
             ));
@@ -556,7 +554,7 @@ fn seat_time_bank(table: &TexasPokerTable, seat: u8, label: &str) -> TexasAirRes
     table
         .seats
         .get(usize::from(seat))
-        .map(|entry| entry.time_bank_ms)
+        .map(|entry| u64::from(entry.time_bank_ms))
         .ok_or_else(|| {
             TexasAirError::SpecViolation(format!(
                 "tick: {label}-state current_turn {seat} is outside the table seats"
@@ -1179,16 +1177,20 @@ mod tests {
         (post, events)
     }
 
-    fn betting_table(time_bank_ms: u64) -> TexasPokerTable {
+    fn betting_table(time_bank_ms: u32) -> TexasPokerTable {
         let mut table = table();
         occupy(&mut table, 0, 1, 1_000);
         occupy(&mut table, 1, 2, 1_000);
         occupy(&mut table, 2, 3, 1_000);
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
-        table.timestamps.betting_started_at = 1_000_000;
         table.timeout_config.betting_timeout_ms = 30_000;
+        table
+            .enter_betting(
+                ROUND_PREFLOP,
+                BettingRound::new(100, 100),
+                0,
+                1_000_000,
+            )
+            .unwrap();
         table.seats[0].time_bank_ms = time_bank_ms;
         table.chip_pool = 3_000;
         table.hand_id = 7;
@@ -1199,8 +1201,14 @@ mod tests {
     #[test]
     fn canonical_input_binds_betting_time_bank_at_maximum_legal_deadline() {
         let mut pre = betting_table(10);
-        pre.timestamps.betting_started_at = u64::MAX - 20;
         pre.timeout_config.betting_timeout_ms = 10;
+        pre.enter_betting(
+            ROUND_PREFLOP,
+            BettingRound::new(100, 100),
+            0,
+            u64::MAX - 20,
+        )
+        .unwrap();
         let now_ms = u64::MAX - 10;
         let (post, events) = execute_tick(&pre, now_ms);
 
@@ -1212,7 +1220,7 @@ mod tests {
                 ..
             }
         )));
-        assert_eq!(post.timestamps.betting_started_at, now_ms);
+        assert_eq!(post.timestamps().betting_started_at, now_ms);
         assert!(!post.seats[0].is_folded());
 
         let input = canonical_input(&pre, &post, now_ms).expect("canonical betting tick");
@@ -1294,7 +1302,13 @@ mod tests {
     fn canonical_input_rejects_post_state_not_produced_by_native_tick() {
         let pre = betting_table(30_000);
         let (mut post, _) = execute_tick(&pre, 1_030_000);
-        post.timestamps.betting_started_at = 123;
+        post.enter_betting(
+            ROUND_PREFLOP,
+            post.betting_round().unwrap(),
+            post.current_turn(),
+            123,
+        )
+        .unwrap();
 
         assert!(canonical_input(&pre, &post, 1_030_000).is_err());
     }

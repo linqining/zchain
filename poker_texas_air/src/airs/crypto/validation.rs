@@ -221,7 +221,7 @@ pub(crate) fn validate_join_and_shuffle(
         seat_index: args.seat_index,
         old_deck_commitment: deck_commitment(&canonical.pre),
         new_deck_commitment: deck_commitment(&canonical.post),
-        shuffle_phase: canonical.pre.shuffle_state().phase,
+        shuffle_phase: canonical.pre.shuffle_phase(),
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
@@ -347,7 +347,7 @@ pub(crate) fn validate_leave_with_proof(
         // row keeps its historical zero discriminator until the DLEq verifier
         // AIR replaces this placeholder column.
         leave_kind: 0,
-        shuffle_phase: canonical.pre.shuffle_state().phase,
+        shuffle_phase: canonical.pre.shuffle_phase(),
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
@@ -516,7 +516,7 @@ pub(crate) fn validate_submit_shuffle_v2(
     let input = SubmitShuffleV2Input {
         seat_index: args.seat_index,
         new_deck_commitment: deck_commitment(&canonical.post),
-        shuffle_phase: canonical.pre.shuffle_state().phase,
+        shuffle_phase: canonical.pre.shuffle_phase(),
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
@@ -584,7 +584,7 @@ pub(crate) fn validate_submit_reconstruct_deck(
     })?;
     let input = SubmitReconstructDeckInput {
         seat_index: args.seat_index,
-        reconstruct_phase: canonical.pre.reconstruct_state().phase,
+        reconstruct_phase: canonical.pre.reconstruct_phase(),
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index

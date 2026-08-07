@@ -14,9 +14,10 @@
 //!
 //! 本模块的类型与 `poker_texas_air::prove_task` 的对应类型字段对齐：
 //! - `TexasPokerTable` / `TexasPokerEvent` 都是 poker_l1 类型，两端可见同一类型
-//! - `MethodInput` 共享自 `vm-common`
 //! - `method_kind: u8` ↔ `poker_texas_air::MethodKind`（`use_discriminant=true`，
 //!   单字节 borsh 布局一致）
+//! - `method_kind + canonical_args` 是唯一持久化命令表示；selector 与 typed input
+//!   均由该 tagged payload 确定性派生
 //!
 //! ## 与 poker_texas_air 的关系
 //!
@@ -25,7 +26,8 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-// MethodInput 共享自 vm-common（poker_l1 与 poker_texas_air 的 borsh 契约边界）。
+// Transient decoded command view shared with the AIR crate. It is deliberately not a field of
+// L1ProveTask; consumers derive it from `method_kind + canonical_args`.
 pub use vm_common::prove_task::MethodInput;
 
 use super::events::TexasPokerEvent;
@@ -35,17 +37,20 @@ use crate::vm::contracts::dispatch::DispatchContext;
 /// 单次 method 调用的证明任务（L1 侧定义）。
 ///
 /// borsh 布局与 `poker_texas_air::prove_task::ProveTask` 完全一致。
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone)]
 pub struct L1ProveTask {
     /// 方法种类（u8 discriminant，与 poker_texas_air::MethodKind 兼容）。
     pub method_kind: u8,
-    /// 方法业务输入（共享自 vm-common）。
+    /// Transient typed view derived from `method_kind + raw_args`; not serialized.
     pub method_input: MethodInput,
     /// 执行该调用时经过交易层认证的完整 dispatch 上下文。
     pub context: DispatchContext,
-    /// VM 实际路由的原始 selector。
+    /// Transient legacy ABI selector derived from `method_kind`; not serialized.
     pub selector: [u8; 32],
-    /// VM 实际解码和执行的原始 Borsh 参数。
+    /// 规范化后的 Borsh command payload。
+    ///
+    /// `method_kind` 是 tag，本字段是唯一 payload。selector、typed input 和 dispatch digest
+    /// 必须从二者派生，不能在 task 中保存第二份可错配表示。
     pub raw_args: Vec<u8>,
     /// 调用前表台快照。
     pub pre_table: TexasPokerTable,
@@ -64,9 +69,7 @@ impl L1ProveTask {
     #[must_use]
     pub fn new(
         method_kind: u8,
-        method_input: MethodInput,
         context: DispatchContext,
-        selector: [u8; 32],
         raw_args: Vec<u8>,
         pre_table: TexasPokerTable,
         post_table: TexasPokerTable,
@@ -74,6 +77,11 @@ impl L1ProveTask {
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
+        let method_input = super::dispatch::derive_method_input(method_kind, &raw_args)
+            .expect("L1ProveTask requires a validated canonical command");
+        let selector = super::dispatch::CanonicalCommand::from_u8(method_kind)
+            .expect("L1ProveTask requires a known canonical command tag")
+            .selector();
         Self {
             method_kind,
             method_input,
@@ -86,6 +94,56 @@ impl L1ProveTask {
             hand_id,
             call_seq,
         }
+    }
+}
+
+impl BorshSerialize for L1ProveTask {
+    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        self.method_kind.serialize(writer)?;
+        self.context.serialize(writer)?;
+        self.raw_args.serialize(writer)?;
+        self.pre_table.serialize(writer)?;
+        self.post_table.serialize(writer)?;
+        self.table_id.serialize(writer)?;
+        self.hand_id.serialize(writer)?;
+        self.call_seq.serialize(writer)
+    }
+}
+
+impl BorshDeserialize for L1ProveTask {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let method_kind = u8::deserialize_reader(reader)?;
+        let context = DispatchContext::deserialize_reader(reader)?;
+        let raw_args = Vec::<u8>::deserialize_reader(reader)?;
+        let pre_table = TexasPokerTable::deserialize_reader(reader)?;
+        let post_table = TexasPokerTable::deserialize_reader(reader)?;
+        let table_id = u64::deserialize_reader(reader)?;
+        let hand_id = u32::deserialize_reader(reader)?;
+        let call_seq = u32::deserialize_reader(reader)?;
+        let method_input = super::dispatch::derive_method_input(method_kind, &raw_args)
+            .map_err(|error| {
+                borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
+            })?;
+        let selector = super::dispatch::CanonicalCommand::from_u8(method_kind)
+            .ok_or_else(|| {
+                borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    format!("unknown canonical Texas command tag {method_kind}"),
+                )
+            })?
+            .selector();
+        Ok(Self {
+            method_kind,
+            method_input,
+            context,
+            selector,
+            raw_args,
+            pre_table,
+            post_table,
+            table_id,
+            hand_id,
+            call_seq,
+        })
     }
 }
 
@@ -154,9 +212,7 @@ mod tests {
     fn l1_prove_task_borsh_roundtrip() {
         let task = L1ProveTask::new(
             6, // MethodKind::Fold = 6
-            MethodInput::SeatOnly { seat_index: 2 },
             dummy_context(),
-            [0xCC; 32],
             vec![2],
             dummy_table("pre"),
             dummy_table("post"),
@@ -168,12 +224,7 @@ mod tests {
         let recovered: L1ProveTask = borsh::from_slice(&bytes).unwrap();
         assert_eq!(recovered.method_kind, 6);
         assert_eq!(recovered.table_id, 42);
-        assert_eq!(
-            recovered.method_input,
-            MethodInput::SeatOnly { seat_index: 2 }
-        );
         assert_eq!(recovered.context, dummy_context());
-        assert_eq!(recovered.selector, [0xCC; 32]);
         assert_eq!(recovered.raw_args, vec![2]);
     }
 }

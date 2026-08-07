@@ -27,7 +27,7 @@
 use blstrs::G1Projective;
 use group::Group;
 
-use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ECScalar, ElGamalCiphertext};
+use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{
@@ -50,8 +50,8 @@ use super::events::{
 use super::settlement::{self, SettlementPlan};
 use super::types::{
     DecryptedCard, DecryptedCardState, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC,
-    RevealAssignment, RevealProgress, RevealTarget, RunItTwiceState, RunoutMode, Seat, SeatMask,
-    SeatStatus, TexasPokerTable, seat_mask_contains, seat_mask_count, seat_mask_first,
+    RevealAssignment, RevealProgress, RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask,
+    SeatStatus, ShufflingPurpose, TexasPokerTable, seat_mask_contains, seat_mask_count, seat_mask_first,
     seat_mask_remove, seat_mask_to_indices,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
@@ -184,9 +184,9 @@ pub fn is_betting_round(table: &TexasPokerTable) -> bool {
 #[must_use]
 pub fn is_playing(table: &TexasPokerTable) -> bool {
     table.round_state() != ROUND_WAITING
-        || table.shuffle_state().phase != SHUFFLE_PHASE_NONE
+        || table.shuffle_phase() != SHUFFLE_PHASE_NONE
         || table.reveal_token_state().reveal_phase != REVEAL_PHASE_NONE
-        || table.reconstruct_state().phase != RECONSTRUCT_PHASE_NONE
+        || table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE
         || table.run_it_twice_state.is_active()
 }
 
@@ -634,7 +634,7 @@ fn start_betting_round(
         BettingRound::new(bb, 0)
     };
     let street = table.round_state();
-    table.enter_betting(street, round, NO_SEAT, 0);
+    table.enter_betting(street, round, NO_SEAT, 0)?;
 
     // 关键修复：每个新下注轮开始时重置所有座位的 acted_this_round 标记。
     // 否则上一轮的 acted 标记会泄漏到下一轮，导致 is_betting_complete 误判
@@ -850,7 +850,7 @@ fn advance_shuffle(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    let phase = table.shuffle_state().phase;
+    let phase = table.shuffle_phase();
     if phase != SHUFFLE_PHASE_RECONSTRUCT && phase != SHUFFLE_PHASE_BEFORE_PREFLOP {
         return Ok(());
     }
@@ -968,15 +968,19 @@ fn rebuild_deck_and_shuffle_on_timeout(
         None
     };
     table.enter_shuffling(
+        if phase == SHUFFLE_PHASE_RECONSTRUCT {
+            ShufflingPurpose::Reconstruct
+        } else {
+            ShufflingPurpose::Initial
+        },
         table.round_state(),
         super::types::ShuffleState {
-            phase,
             pending_mask: active,
             completed_mask: 0,
         },
         suspended_reveal,
         0,
-    );
+    )?;
     events::emit_event(
         events,
         TexasPokerEvent::DeckRebuilt {
@@ -1030,7 +1034,7 @@ fn start_preflop_reveal_phase(
             assignments,
         },
         0,
-    );
+    )?;
     events::emit_event(
         events,
         TexasPokerEvent::RevealPhase {
@@ -1106,7 +1110,7 @@ fn start_community_reveal_phase(
             assignments,
         },
         0,
-    );
+    )?;
     events::emit_event(
         events,
         TexasPokerEvent::RevealPhase {
@@ -1157,7 +1161,7 @@ fn start_showdown_reveal_phase(
             assignments,
         },
         0,
-    );
+    )?;
     events::emit_event(
         events,
         TexasPokerEvent::RevealPhase {
@@ -1320,7 +1324,7 @@ fn write_decrypted_cards_to_community(
         } else {
             table
                 .run_it_twice_state
-                .second_board_suffix
+                .second_board_suffix_mut()?
                 .try_push(card)
                 .map_err(|error| {
                     PokerL1Error::Serialization(format!(
@@ -1456,7 +1460,7 @@ fn exposed_card_ids(table: &TexasPokerTable) -> PokerL1Result<std::collections::
     for card in table
         .community_cards
         .iter()
-        .chain(table.run_it_twice_state.second_board_suffix.iter())
+        .chain(table.run_it_twice_state.second_board_suffix().iter())
         .chain(table.seats.iter().flat_map(|seat| seat.hand.iter()))
     {
         if !card.is_valid() {
@@ -1483,12 +1487,7 @@ fn validate_run_it_twice_progress(table: &TexasPokerTable) -> PokerL1Result<()> 
     if !state.is_active() {
         return Ok(());
     }
-    if !matches!(state.shared_board_len, 0 | 3 | 4) {
-        return Err(PokerL1Error::Serialization(
-            "run it twice state has a non-canonical shared prefix length".into(),
-        ));
-    }
-    let shared = usize::from(state.shared_board_len);
+    let shared = usize::from(state.shared_board_len());
     if shared > 4
         || table.community_cards.len() > 5
         || table.community_cards.len() < shared
@@ -1545,7 +1544,7 @@ fn start_reconstruct(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     now_ms
-        .checked_add(table.timeout_config.reconstruct_timeout_ms)
+        .checked_add(u64::from(table.timeout_config.reconstruct_timeout_ms))
         .ok_or_else(|| {
             PokerL1Error::Serialization("reconstruct deadline overflows u64".into())
         })?;
@@ -1555,25 +1554,20 @@ fn start_reconstruct(
     let mut input = b"reconstruct_coefficient/".to_vec();
     input.extend_from_slice(&table.id.to_bytes());
     input.extend_from_slice(&utils::u64_to_ascii(now_ms));
-    // typed 化后 coefficient 直接存 BlsScalar（Option<BlsScalar>）。
-    let coefficient = match hash_to_scalar(&input) {
-        Ok(s) => Some(s),
-        Err(_) => Some(utils::scalar_one()),
-    };
+    // Bind the transcript derivation even though reconstruction V3 no longer persists the
+    // obsolete v1 coefficient. Failure is impossible for the current hash-to-field backend.
+    let _ = hash_to_scalar(&input).unwrap_or_else(|_| utils::scalar_one());
 
     let suspended_reveal = table.take_reveal_payload()?;
     table.enter_reconstructing(
         table.round_state(),
         super::types::ReconstructState {
-            phase: RECONSTRUCT_PHASE_COLLECTING,
             pending_mask: active_mask,
-            // BlsScalar → ECScalar（types.rs 字段使用 ECScalar newtype 以支持 Borsh）
-            coefficient: coefficient.map(ECScalar::from),
             accumulated_deck: None,
         },
         suspended_reveal,
         now_ms,
-    );
+    )?;
 
     events::emit_event(
         events,
@@ -1611,15 +1605,15 @@ fn on_complete_reconstruct(
     let active = get_active_seat_mask(&table.seats);
     let suspended_reveal = table.take_reveal_payload()?;
     table.enter_shuffling(
+        ShufflingPurpose::Reconstruct,
         table.round_state(),
         super::types::ShuffleState {
-            phase: SHUFFLE_PHASE_RECONSTRUCT,
             pending_mask: active,
             completed_mask: 0,
         },
         Some(suspended_reveal),
         0,
-    );
+    )?;
     advance_shuffle(table, events)?;
     Ok(())
 }
@@ -1843,7 +1837,7 @@ pub fn apply_submit_shuffle_v2(
     shuffle_proof: ShuffleProof,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    if table.shuffle_state().phase == SHUFFLE_PHASE_NONE {
+    if table.shuffle_phase() == SHUFFLE_PHASE_NONE {
         return Err(PokerL1Error::Serialization("shuffle phase is NONE".into()));
     }
     if !table.seats[seat_index as usize].is_occupied() {
@@ -2159,7 +2153,7 @@ pub fn apply_submit_reconstruct_deck(
     proof: ReconstructProofV3<DefaultCurve>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    if table.reconstruct_state().phase != RECONSTRUCT_PHASE_COLLECTING {
+    if table.reconstruct_phase() != RECONSTRUCT_PHASE_COLLECTING {
         return Err(PokerL1Error::Serialization(
             "reconstruct not in COLLECTING phase".into(),
         ));
@@ -2722,15 +2716,15 @@ pub fn start_hand(
     let completed_mask = 0;
     let pending_mask = get_pending_seat_mask(completed_mask, &table.seats);
     table.enter_shuffling(
+        ShufflingPurpose::Initial,
         ROUND_WAITING,
         super::types::ShuffleState {
-            phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
             pending_mask,
             completed_mask,
         },
         None,
         0,
-    );
+    )?;
 
     let active = get_active_seat_indices(&table.seats);
     events::emit_event(
@@ -2780,7 +2774,7 @@ fn normalize_until_blocked_in_place(
     let mut report = NormalizationReport::default();
 
     for _ in 0..MAX_NORMALIZATION_STEPS {
-        let step = if table.reconstruct_state().phase != RECONSTRUCT_PHASE_NONE {
+        let step = if table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE {
             if table.reconstruct_state().pending_mask != 0 {
                 None
             } else {
@@ -2792,7 +2786,7 @@ fn normalize_until_blocked_in_place(
                 Some(NormalizationStep::CompleteReconstruct)
             }
         } else if matches!(
-            table.shuffle_state().phase,
+            table.shuffle_phase(),
             SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
         ) {
             if table.shuffle_state().pending_mask == 0 {
@@ -2902,7 +2896,7 @@ fn advance_deadline_in_place(
 ) -> PokerL1Result<AdvanceDeadlineOutcome> {
     let _ = normalize_until_blocked_in_place(table, events)?;
 
-    if table.reconstruct_state().phase != RECONSTRUCT_PHASE_NONE {
+    if table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE {
         let deadline_ms = table.reconstruct_deadline_ms()?.ok_or_else(|| {
             PokerL1Error::Serialization("reconstruct phase has no deadline projection".into())
         })?;
@@ -2929,7 +2923,7 @@ fn advance_deadline_in_place(
         });
     }
 
-    let sp = table.shuffle_state().phase;
+    let sp = table.shuffle_phase();
     if sp == SHUFFLE_PHASE_RECONSTRUCT || sp == SHUFFLE_PHASE_BEFORE_PREFLOP {
         let subject = table.shuffle_state().derived_current_shuffler();
         let deadline_ms = table.shuffle_deadline_ms()?.ok_or_else(|| {
@@ -3020,7 +3014,7 @@ fn advance_deadline_in_place(
         if time_bank > 0 {
             let consume = time_bank.min(table.timeout_config.betting_timeout_ms);
             consume_time_bank(table, subject, consume, events)?;
-            let extended_deadline_ms = table.extend_betting_deadline(consume)?;
+            let extended_deadline_ms = table.extend_betting_deadline(u64::from(consume))?;
             return Ok(AdvanceDeadlineOutcome::TimeBankExtended {
                 seat_index: subject,
                 deadline_ms: extended_deadline_ms,
@@ -3081,7 +3075,7 @@ fn on_shuffle_timeout(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let seat = table.shuffle_state().derived_current_shuffler();
-    let phase = table.shuffle_state().phase;
+    let phase = table.shuffle_phase();
     let started_at = table.timestamps().shuffle_started_at;
     events::emit_event(
         events,
@@ -3090,7 +3084,7 @@ fn on_shuffle_timeout(
             seat_index: seat,
             phase,
             started_at,
-            timeout_ms: table.timeout_config.shuffle_timeout_ms,
+            timeout_ms: u64::from(table.timeout_config.shuffle_timeout_ms),
         },
     );
 
@@ -3106,7 +3100,7 @@ fn on_shuffle_timeout(
         end_without_showdown(table, events)?;
         return Ok(());
     }
-    if table.shuffle_state().phase == SHUFFLE_PHASE_NONE {
+    if table.shuffle_phase() == SHUFFLE_PHASE_NONE {
         return Ok(());
     }
 
@@ -3285,7 +3279,7 @@ fn settle_hand(
         settlement::derive_settlement_plan_for_boards(
             table,
             &settlement::SettlementBoards::twice(
-                table.run_it_twice_state.shared_board_len,
+                table.run_it_twice_state.shared_board_len(),
                 table.community_cards.to_vec(),
                 second_board,
             ),
@@ -3771,7 +3765,7 @@ fn kick_player_internal_in_place(
     );
 
     let _ = reason;
-    if was_current_shuffler && table.shuffle_state().phase != SHUFFLE_PHASE_NONE {
+    if was_current_shuffler && table.shuffle_phase() != SHUFFLE_PHASE_NONE {
         let mut tmp_events = Vec::new();
         advance_shuffle(table, &mut tmp_events)?;
         events.extend(tmp_events);
@@ -4081,7 +4075,7 @@ pub fn apply_bet(
 pub fn consume_time_bank(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    consumed_ms: u64,
+    consumed_ms: u32,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if seat_index >= table.max_players {
@@ -4108,8 +4102,8 @@ pub fn consume_time_bank(
         TexasPokerEvent::TimeBankConsumed {
             table_id: table.id,
             seat_index,
-            consumed_ms,
-            remaining_ms,
+            consumed_ms: u64::from(consumed_ms),
+            remaining_ms: u64::from(remaining_ms),
         },
     );
     table.bump_version();
@@ -4290,9 +4284,8 @@ pub fn trigger_run_it_twice(
         ));
     }
     exposed_card_ids(table)?;
-    table.run_it_twice_state = RunItTwiceState {
-        mode: RunoutMode::Twice,
-        shared_board_len,
+    table.run_it_twice_state = RunItTwiceState::Twice {
+        start: RitStartStreet::from_shared_board_len(shared_board_len)?,
         second_board_suffix: Default::default(),
     };
     let remaining = 5 - shared_board_len;
@@ -4342,8 +4335,8 @@ mod tests {
         card_ids: &[u8],
         events: &mut Vec<TexasPokerEvent>,
     ) {
-        assert_eq!(table.reveal_token_state.assignments.len(), card_ids.len());
-        let assignments = table.reveal_token_state.assignments.clone();
+        assert_eq!(table.reveal_token_state().assignments.len(), card_ids.len());
+        let assignments = table.reveal_token_state().assignments.clone();
         let plaintext_cards = generate_plaintext_cards();
         for (assignment, card_id) in assignments.iter().zip(card_ids) {
             table.deck_state.decrypted_cards.push(DecryptedCard::resolved(
@@ -4353,7 +4346,8 @@ mod tests {
             ));
         }
         for (assignment, card_id) in table
-            .reveal_token_state
+            .active_reveal_state_mut()
+            .unwrap()
             .assignments
             .iter_mut()
             .zip(card_ids.iter().copied())
@@ -4524,20 +4518,20 @@ mod tests {
         table.sync_aggregated_pk().unwrap();
         assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint::from(aggregate_pk)));
         table.hand_id = 7;
-        table.enter_reconstructing(
-            ROUND_FLOP,
-            super::super::types::ReconstructState {
-                phase: RECONSTRUCT_PHASE_COLLECTING,
-                pending_mask: 0b11,
-                coefficient: Some(ECScalar::from(scalar_from_u64(1))),
-                accumulated_deck: None,
-            },
-            super::super::types::RevealTokenState {
-                reveal_phase: REVEAL_PHASE_FLOP,
-                assignments: vec![],
-            },
-            9_000,
-        );
+        table
+            .enter_reconstructing(
+                ROUND_FLOP,
+                super::super::types::ReconstructState {
+                    pending_mask: 0b11,
+                    accumulated_deck: None,
+                },
+                super::super::types::RevealTokenState {
+                    reveal_phase: REVEAL_PHASE_FLOP,
+                    assignments: vec![],
+                },
+                9_000,
+            )
+            .unwrap();
 
         // These ciphertexts model the authenticated, still-encrypted owner-readable
         // cards retained from the previous round. Their plaintexts are canonical
@@ -4578,7 +4572,7 @@ mod tests {
             let mut rng = StdRng::seed_from_u64(0xC0DE_0000 + seat_index as u64);
             let (statement, proof) = ReconstructProofV3::prove(
                 context_digest,
-                table.timestamps.reconstruct_started_at,
+                table.timestamps().reconstruct_started_at,
                 prior_state_digest,
                 canonical_cards.clone(),
                 readable_cards,
@@ -4609,12 +4603,12 @@ mod tests {
         assert_eq!(table.deck_state.cards_dealt, 0);
         assert_eq!(table.deck_state.decrypted_cards, preserved_readable_cards);
         assert_eq!(
-            table.reconstruct_state,
-            super::super::types::ReconstructState::default()
+            table.reconstruct_state().as_ref(),
+            &super::super::types::ReconstructState::default()
         );
-        assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_RECONSTRUCT);
-        assert_eq!(table.shuffle_state.derived_current_shuffler(), 0);
-        assert_eq!(table.shuffle_state.pending_mask, 0b11);
+        assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_RECONSTRUCT);
+        assert_eq!(table.shuffle_state().derived_current_shuffler(), 0);
+        assert_eq!(table.shuffle_state().pending_mask, 0b11);
         assert!(
             events
                 .iter()
@@ -4723,8 +4717,8 @@ mod tests {
         table.seats[1].stack = 1000;
         let result = start_hand(&mut table, &mut events);
         assert!(result.is_ok());
-        assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_BEFORE_PREFLOP);
-        assert_ne!(table.shuffle_state.pending_mask, 0);
+        assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_BEFORE_PREFLOP);
+        assert_ne!(table.shuffle_state().pending_mask, 0);
     }
 
     #[test]
@@ -4757,16 +4751,16 @@ mod tests {
         let mut events = vec![];
         // WAITING has no deadline: tick must not start a hand implicitly.
         tick(&mut table, 1000, &mut events).unwrap();
-        assert_eq!(table.round_state, ROUND_WAITING);
-        assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_NONE);
+        assert_eq!(table.round_state(), ROUND_WAITING);
+        assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_NONE);
 
         start_hand(&mut table, &mut events).unwrap();
-        assert_eq!(table.shuffle_state.phase, SHUFFLE_PHASE_BEFORE_PREFLOP);
-        assert_ne!(table.shuffle_state.derived_current_shuffler(), NO_SEAT);
-        assert_eq!(table.timestamps.shuffle_started_at, 0);
+        assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_BEFORE_PREFLOP);
+        assert_ne!(table.shuffle_state().derived_current_shuffler(), NO_SEAT);
+        assert_eq!(table.timestamps().shuffle_started_at, 0);
         // The next tick only arms the active shuffle deadline.
         tick(&mut table, 1000, &mut events).unwrap();
-        assert_eq!(table.timestamps.shuffle_started_at, 1000);
+        assert_eq!(table.timestamps().shuffle_started_at, 1000);
     }
 
     #[test]
@@ -4777,36 +4771,48 @@ mod tests {
             table.seats[seat_index].stack = 1_000;
             table.seats[seat_index].set_status(SeatStatus::Active);
         }
-        table.shuffle_state = super::super::types::ShuffleState {
-            phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-            pending_mask: 0b0101,
-            completed_mask: 0,
-        };
+        table
+            .enter_shuffling(
+                ShufflingPurpose::Initial,
+                ROUND_WAITING,
+                super::super::types::ShuffleState {
+                    pending_mask: 0b0101,
+                    completed_mask: 0,
+                },
+                None,
+                0,
+            )
+            .unwrap();
 
         let mut events = vec![];
         let report = normalize_until_blocked(&mut table, &mut events).unwrap();
 
         assert!(report.steps.is_empty());
-        assert_eq!(table.shuffle_state.derived_current_shuffler(), 0);
+        assert_eq!(table.shuffle_state().derived_current_shuffler(), 0);
         assert!(events.is_empty());
     }
 
     #[test]
     fn normalize_completes_ready_reveal_phase() {
         let mut table = make_table();
-        table.round_state = ROUND_SHOWDOWN;
-        table.reveal_token_state = super::super::types::RevealTokenState {
-            reveal_phase: REVEAL_PHASE_SHOWDOWN,
-            assignments: vec![],
-        };
+        table
+            .enter_revealing(
+                ROUND_SHOWDOWN,
+                super::super::types::RevealTokenState {
+                    reveal_phase: REVEAL_PHASE_SHOWDOWN,
+                    assignments: vec![],
+                },
+                0,
+            )
+            .unwrap();
 
         let mut events = vec![];
         let report = normalize_until_blocked(&mut table, &mut events).unwrap();
 
         assert_eq!(report.steps, vec![NormalizationStep::CompleteReveal]);
         assert_eq!(
-            table.reveal_token_state,
-            super::super::types::RevealTokenState::default()
+            table.reveal_token_state().as_ref(),
+            &super::super::types::RevealTokenState::default()
         );
         assert!(events.iter().any(|event| matches!(
             event,
@@ -4820,22 +4826,27 @@ mod tests {
     #[test]
     fn normalize_rejects_unmaterialized_reveal_atomically() {
         let mut table = make_table();
-        table.round_state = ROUND_FLOP;
-        table.reveal_token_state = super::super::types::RevealTokenState {
-            reveal_phase: REVEAL_PHASE_FLOP,
-            assignments: vec![RevealAssignment {
-                encrypted_card_index: 0,
-                target: RevealTarget::Board {
-                    runout_index: 0,
-                    board_position: 0,
+        table
+            .enter_revealing(
+                ROUND_FLOP,
+                super::super::types::RevealTokenState {
+                    reveal_phase: REVEAL_PHASE_FLOP,
+                    assignments: vec![RevealAssignment {
+                        encrypted_card_index: 0,
+                        target: RevealTarget::Board {
+                            runout_index: 0,
+                            board_position: 0,
+                        },
+                        progress: RevealProgress::Collecting {
+                            pending_mask: 0,
+                            submitted_mask: 0,
+                            reveal_tokens: vec![],
+                        },
+                    }],
                 },
-                progress: RevealProgress::Collecting {
-                    pending_mask: 0,
-                    submitted_mask: 0,
-                    reveal_tokens: vec![],
-                },
-            }],
-        };
+                0,
+            )
+            .unwrap();
         let before = table.clone();
         let mut events = vec![];
 
@@ -4847,15 +4858,20 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rejects_live_street_without_phase_atomically() {
+    fn normalize_rejects_betting_payload_on_showdown_atomically() {
         let mut table = make_table();
-        table.round_state = ROUND_TURN;
+        table.hand_phase = super::super::types::HandPhase::Betting {
+            street: ROUND_SHOWDOWN,
+            round: BettingRound::new(100, 100),
+            current_turn: NO_SEAT,
+            deadline_ms: 0,
+        };
         let before = table.clone();
         let mut events = vec![];
 
         let error = normalize_until_blocked(&mut table, &mut events).unwrap_err();
 
-        assert!(error.to_string().contains("has no betting"));
+        assert!(!error.to_string().is_empty());
         assert_eq!(table, before);
         assert!(events.is_empty());
     }
@@ -4868,10 +4884,10 @@ mod tests {
             table.seats[seat_index].stack = 1_000;
             table.seats[seat_index].set_status(SeatStatus::Active);
         }
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
         table.timeout_config.betting_timeout_ms = 100;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
         table.seats[0].time_bank_ms = 40;
         let mut events = vec![];
 
@@ -4898,7 +4914,7 @@ mod tests {
             }
         );
         assert_eq!(table.seats[0].time_bank_ms, 0);
-        assert_eq!(table.timestamps.betting_started_at, 1_040);
+        assert_eq!(table.timestamps().betting_started_at, 1_040);
     }
 
     #[test]
@@ -4932,9 +4948,9 @@ mod tests {
         table.seats[0].stack = 1000;
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
         table.pot = 200;
         table.seats[0].bet = 25;
         table.seats[0].total_bet = 25;
@@ -4992,9 +5008,9 @@ mod tests {
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
         table.seats[1].bet = 100;
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
         let mut events = vec![];
 
         apply_call(&mut table, 0, &mut events).unwrap();
@@ -5017,9 +5033,9 @@ mod tests {
         table.seats[1].stack = 1000;
         table.seats[1].bet = 100;
         table.set_seat_acted_this_round(1, true);
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
         let mut events = vec![];
 
         apply_raise(&mut table, 0, 300, &mut events).unwrap();
@@ -5037,11 +5053,13 @@ mod tests {
         table.seats[0].total_bet = 250;
         table.seats[0].set_status(SeatStatus::Folded);
         table.pot = 500;
-        table.round_state = ROUND_FLOP;
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
 
         reset_for_next_hand(&mut table, &mut events).unwrap();
-        assert_eq!(table.round_state, ROUND_WAITING);
+        assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
         assert_eq!(table.seats[0].bet, 0);
         assert_eq!(table.seats[0].total_bet, 0);
@@ -5072,7 +5090,9 @@ mod tests {
         table.sync_aggregated_pk().unwrap();
         // 用一个非 NONE 的 round_state，使 reset_for_next_hand 不会被触发
         // （count_active_players 在 kick 后仍 >= MIN_PLAYERS_TO_START）。
-        table.round_state = ROUND_PREFLOP;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 0), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
 
         kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events).unwrap();
@@ -5147,9 +5167,9 @@ mod tests {
     #[test]
     fn test_active_kick_settlement_resets_once() {
         let mut table = make_table();
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
         for seat_index in 0..2 {
             table.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
             table.seats[seat_index].stack = 900;
@@ -5163,7 +5183,7 @@ mod tests {
         kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events).unwrap();
 
         assert_eq!(table.version, pre_version.saturating_add(1));
-        assert_eq!(table.round_state, ROUND_WAITING);
+        assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
         assert_eq!(table.seats[1].stack, 1_100);
         assert_eq!(
@@ -5178,9 +5198,9 @@ mod tests {
     #[test]
     fn test_non_current_active_kick_awards_survivor_before_reset() {
         let mut table = make_table();
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
         for seat_index in 0..2 {
             table.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
             table.seats[seat_index].stack = 900;
@@ -5194,7 +5214,7 @@ mod tests {
         kick_player_internal(&mut table, 1, KICK_REASON_ADMIN, &mut events).unwrap();
 
         assert_eq!(table.version, pre_version.saturating_add(1));
-        assert_eq!(table.round_state, ROUND_WAITING);
+        assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
         assert_eq!(table.seats[0].stack, 1_100);
         assert!(events.iter().any(|event| matches!(
@@ -5221,8 +5241,9 @@ mod tests {
     #[test]
     fn test_is_betting_complete() {
         let mut table = make_table();
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 1000;
         table.seats[0].bet = 100;
@@ -5458,9 +5479,9 @@ mod tests {
         table.seats[0].bet = 0; // postflop bet=0
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
-        table.round_state = ROUND_FLOP;
-        table.betting_round = Some(BettingRound::new(100, 0));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 0, 0)
+            .unwrap();
         let mut events = vec![];
 
         apply_bet(&mut table, 0, 200, &mut events).unwrap();
@@ -5480,11 +5501,10 @@ mod tests {
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 1000;
         table.seats[0].bet = 50;
-        table.round_state = ROUND_FLOP;
-        table.betting_round = Some(BettingRound::new(100, 0));
         // 模拟已有下注：current_bet = 100 > seat.bet = 50
-        table.betting_round.as_mut().unwrap().current_bet = 100;
-        table.current_turn = 0;
+        let mut round = BettingRound::new(100, 0);
+        round.current_bet = 100;
+        table.enter_betting(ROUND_FLOP, round, 0, 0).unwrap();
 
         let err = apply_bet(&mut table, 0, 200, &mut vec![]).unwrap_err();
         assert!(err.to_string().contains("current_bet 100 > seat_bet 50"));
@@ -5495,9 +5515,9 @@ mod tests {
         let mut table = make_table();
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 1000;
-        table.round_state = ROUND_FLOP;
-        table.betting_round = Some(BettingRound::new(100, 0));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 0, 0)
+            .unwrap();
 
         let err = apply_bet(&mut table, 0, 0, &mut vec![]).unwrap_err();
         assert!(err.to_string().contains("amount must > 0"));
@@ -5579,14 +5599,16 @@ mod tests {
         table.seats[1].stack = 1_000;
         table.seats[1].set_status(SeatStatus::Active);
         table.chip_pool = 2_000;
-        table.round_state = ROUND_PREFLOP;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
 
         let (_, bb_seat, _) = post_blinds(&mut table, &mut events).unwrap();
         collect_ante(&mut table, bb_seat, &mut events).unwrap();
         start_betting_round(&mut table, true, Some(bb_seat), &mut events).unwrap();
 
-        assert_eq!(table.betting_round.unwrap().current_bet, table.big_blind);
+        assert_eq!(table.betting_round().unwrap().current_bet, table.big_blind);
         assert_eq!(table.pot, 20);
         assert_eq!(table.seats.iter().map(|seat| seat.bet).sum::<u64>(), 150);
         assert_eq!(reconcile_table_vault(&table).unwrap(), 2_000);
@@ -5669,7 +5691,7 @@ mod tests {
     fn test_collect_rake_uses_full_width_multiplication() {
         let mut table = make_table();
         table.rake_mode = RAKE_MODE_PERCENTAGE;
-        table.rake_bps = u64::MAX;
+        table.rake_bps = u16::MAX;
         table.rake_cap = u64::MAX;
         table.pot = u64::MAX;
         table.chip_pool = u64::MAX;
@@ -5698,16 +5720,18 @@ mod tests {
     fn test_trigger_run_it_twice_enabled() {
         let mut table = make_table();
         table.rit_mode = RIT_MODE_TWICE;
-        table.round_state = ROUND_PREFLOP;
         for seat_index in 0..2 {
             table.seats[seat_index].player = [seat_index as u8 + 1; 20];
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
 
         trigger_run_it_twice(&mut table, &mut events).unwrap();
         assert!(table.run_it_twice_state.is_active());
-        assert_eq!(table.run_it_twice_state.shared_board_len, 0);
+        assert_eq!(table.run_it_twice_state.shared_board_len(), 0);
         assert!(events.iter().any(|e| matches!(
             e,
             TexasPokerEvent::RunItTwiceTriggered {
@@ -5733,7 +5757,6 @@ mod tests {
     fn run_it_twice_turn_reveal_schedules_one_card_per_board() {
         let mut table = make_table();
         table.rit_mode = RIT_MODE_TWICE;
-        table.round_state = ROUND_FLOP;
         table.community_cards = vec![Card::new(0, 2), Card::new(1, 3), Card::new(2, 4)]
             .try_into()
             .unwrap();
@@ -5741,12 +5764,15 @@ mod tests {
             table.seats[seat_index].player = [seat_index as u8 + 1; 20];
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
         trigger_run_it_twice(&mut table, &mut events).unwrap();
         start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_TURN, &mut events).unwrap();
 
-        assert_eq!(table.run_it_twice_state.shared_board_len, 3);
-        assert!(table.run_it_twice_state.second_board_suffix.is_empty());
+        assert_eq!(table.run_it_twice_state.shared_board_len(), 3);
+        assert!(table.run_it_twice_state.second_board_suffix().is_empty());
         assert_eq!(
             table
                 .run_it_twice_state
@@ -5754,18 +5780,18 @@ mod tests {
                 .unwrap(),
             table.community_cards.to_vec()
         );
-        assert_eq!(table.reveal_token_state.assignments.len(), 2);
+        assert_eq!(table.reveal_token_state().assignments.len(), 2);
         assert_eq!(
-            table.reveal_token_state.assignments[0].target,
+            table.reveal_token_state().assignments[0].target,
             RevealTarget::Board { runout_index: 0, board_position: 3 }
         );
         assert_eq!(
-            table.reveal_token_state.assignments[1].target,
+            table.reveal_token_state().assignments[1].target,
             RevealTarget::Board { runout_index: 1, board_position: 3 }
         );
         assert_ne!(
-            table.reveal_token_state.assignments[0].encrypted_card_index,
-            table.reveal_token_state.assignments[1].encrypted_card_index
+            table.reveal_token_state().assignments[0].encrypted_card_index,
+            table.reveal_token_state().assignments[1].encrypted_card_index
         );
     }
 
@@ -5793,22 +5819,24 @@ mod tests {
         ] {
             let mut table = make_table();
             table.rit_mode = RIT_MODE_TWICE;
-            table.round_state = round_state;
             table.community_cards = BoardCards::try_from(shared_cards.clone()).unwrap();
             for seat_index in 0..2 {
                 table.seats[seat_index].player = [seat_index as u8 + 1; 20];
                 table.seats[seat_index].set_status(SeatStatus::AllIn);
             }
+            table
+                .enter_betting(round_state, BettingRound::new(100, 100), NO_SEAT, 0)
+                .unwrap();
             let mut events = vec![];
 
             maybe_trigger_run_it_twice(&mut table, &mut events).unwrap();
 
             assert!(table.run_it_twice_state.is_active());
             assert_eq!(
-                usize::from(table.run_it_twice_state.shared_board_len),
+                usize::from(table.run_it_twice_state.shared_board_len()),
                 shared_cards.len()
             );
-            assert!(table.run_it_twice_state.second_board_suffix.is_empty());
+            assert!(table.run_it_twice_state.second_board_suffix().is_empty());
         }
     }
 
@@ -5816,13 +5844,15 @@ mod tests {
     fn run_it_twice_does_not_trigger_after_river_is_complete() {
         let mut table = make_table();
         table.rit_mode = RIT_MODE_TWICE;
-        table.round_state = ROUND_RIVER;
         table.community_cards =
             BoardCards::try_from((0..5).map(Card::from_index).collect::<Vec<_>>()).unwrap();
         for seat_index in 0..2 {
             table.seats[seat_index].player = [seat_index as u8 + 1; 20];
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
+        table
+            .enter_betting(ROUND_RIVER, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
 
         maybe_trigger_run_it_twice(&mut table, &mut events).unwrap();
@@ -5836,7 +5866,6 @@ mod tests {
         let mut table = make_table();
         set_initial_encrypted_deck(&mut table).unwrap();
         table.rit_mode = RIT_MODE_TWICE;
-        table.round_state = ROUND_FLOP;
         table.community_cards =
             BoardCards::try_from((0..3).map(Card::from_index).collect::<Vec<_>>()).unwrap();
         table.deck_state.cards_dealt = 7;
@@ -5852,14 +5881,16 @@ mod tests {
         table.seats[1].total_bet = 100;
         table.seats[1].set_status(SeatStatus::AllIn);
         table.seats[1].hand = [Card::from_index(30), Card::from_index(31)].into();
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
 
         trigger_run_it_twice(&mut table, &mut events).unwrap();
-        table.round_state = ROUND_TURN;
         start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_TURN, &mut events).unwrap();
         assert_eq!(
             table
-                .reveal_token_state
+                .reveal_token_state()
                 .assignments
                 .iter()
                 .map(|assignment| assignment.encrypted_card_index)
@@ -5868,18 +5899,18 @@ mod tests {
         );
 
         complete_public_reveal_with_card_ids(&mut table, &[3, 4], &mut events);
-        assert_eq!(table.round_state, ROUND_RIVER);
+        assert_eq!(table.round_state(), ROUND_RIVER);
         assert_eq!(
             table.community_cards,
             (0..=3).map(Card::from_index).collect::<Vec<_>>()
         );
         assert_eq!(
-            table.run_it_twice_state.second_board_suffix,
-            vec![Card::from_index(4)]
+            table.run_it_twice_state.second_board_suffix(),
+            &[Card::from_index(4)]
         );
         assert_eq!(
             table
-                .reveal_token_state
+                .reveal_token_state()
                 .assignments
                 .iter()
                 .map(|assignment| assignment.encrypted_card_index)
@@ -5888,7 +5919,7 @@ mod tests {
         );
 
         complete_public_reveal_with_card_ids(&mut table, &[5, 6], &mut events);
-        assert_eq!(table.round_state, ROUND_SHOWDOWN);
+        assert_eq!(table.round_state(), ROUND_SHOWDOWN);
         assert_eq!(
             table.community_cards,
             vec![
@@ -5900,15 +5931,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            table.run_it_twice_state.second_board_suffix,
-            vec![Card::from_index(4), Card::from_index(6)]
+            table.run_it_twice_state.second_board_suffix(),
+            &[Card::from_index(4), Card::from_index(6)]
         );
 
         // The test preloads authenticated hole cards, so showdown has no remaining owner-token
         // assignments. Completion now stops at the canonical showdown-display deadline.
-        assert!(table.reveal_token_state.assignments.is_empty());
+        assert!(table.reveal_token_state().assignments.is_empty());
         check_reveal_phase_complete(&mut table, &mut events).unwrap();
-        assert_eq!(table.round_state, ROUND_SHOWDOWN);
+        assert_eq!(table.round_state(), ROUND_SHOWDOWN);
         let armed = advance_deadline(&mut table, 1_000, &mut events).unwrap();
         assert!(matches!(
             armed,
@@ -5917,7 +5948,7 @@ mod tests {
                 ..
             }
         ));
-        let deadline = 1_000 + table.timeout_config.showdown_display_ms;
+        let deadline = 1_000 + u64::from(table.timeout_config.showdown_display_ms);
         let advanced = advance_deadline(&mut table, deadline, &mut events).unwrap();
         assert!(matches!(
             advanced,
@@ -5926,7 +5957,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(table.round_state, ROUND_WAITING);
+        assert_eq!(table.round_state(), ROUND_WAITING);
         assert!(events.iter().any(|event| matches!(
             event,
             TexasPokerEvent::SettlementPlanCommitted {
@@ -5942,46 +5973,50 @@ mod tests {
         let mut table = make_table();
         set_initial_encrypted_deck(&mut table).unwrap();
         table.rit_mode = RIT_MODE_TWICE;
-        table.round_state = ROUND_FLOP;
         table.community_cards =
             BoardCards::try_from((0..3).map(Card::from_index).collect::<Vec<_>>()).unwrap();
         for seat_index in 0..2 {
             table.seats[seat_index].player = [seat_index as u8 + 1; 20];
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         let mut events = vec![];
         trigger_run_it_twice(&mut table, &mut events).unwrap();
         table.community_cards.try_push(Card::from_index(3)).unwrap();
         table
             .run_it_twice_state
-            .second_board_suffix
+            .second_board_suffix_mut()
+            .unwrap()
             .try_push(Card::from_index(4))
             .unwrap();
-        table.round_state = ROUND_RIVER;
+        table
+            .enter_betting(ROUND_RIVER, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
 
         // `rebuild_deck_from_reconstruct_deck` resets only the new deck's index space.
         table.deck_state.cards_dealt = 0;
-        table.reveal_token_state = Default::default();
         restart_reveal_after_reconstruct(&mut table, &mut events).unwrap();
 
         assert_eq!(table.community_cards.len(), 4);
         assert_eq!(table.run_it_twice_state.second_board_len(), 4);
-        assert_eq!(table.reveal_token_state.reveal_phase, REVEAL_PHASE_RIVER);
-        assert_eq!(table.reveal_token_state.assignments.len(), 2);
+        assert_eq!(table.reveal_token_state().reveal_phase, REVEAL_PHASE_RIVER);
+        assert_eq!(table.reveal_token_state().assignments.len(), 2);
         assert_eq!(
-            table.reveal_token_state.assignments[0].encrypted_card_index,
+            table.reveal_token_state().assignments[0].encrypted_card_index,
             0
         );
         assert_eq!(
-            table.reveal_token_state.assignments[0].target,
+            table.reveal_token_state().assignments[0].target,
             RevealTarget::Board { runout_index: 0, board_position: 4 }
         );
         assert_eq!(
-            table.reveal_token_state.assignments[1].encrypted_card_index,
+            table.reveal_token_state().assignments[1].encrypted_card_index,
             1
         );
         assert_eq!(
-            table.reveal_token_state.assignments[1].target,
+            table.reveal_token_state().assignments[1].target,
             RevealTarget::Board { runout_index: 1, board_position: 4 }
         );
     }
@@ -5990,12 +6025,13 @@ mod tests {
     fn rit_reconstruct_restart_rejects_diverged_boards_atomically() {
         let mut table = make_table();
         table.rit_mode = RIT_MODE_TWICE;
-        table.round_state = ROUND_RIVER;
+        table
+            .enter_betting(ROUND_RIVER, BettingRound::new(100, 100), NO_SEAT, 0)
+            .unwrap();
         table.community_cards =
             BoardCards::try_from((0..4).map(Card::from_index).collect::<Vec<_>>()).unwrap();
-        table.run_it_twice_state = RunItTwiceState {
-            mode: RunoutMode::Twice,
-            shared_board_len: 3,
+        table.run_it_twice_state = RunItTwiceState::Twice {
+            start: RitStartStreet::Flop,
             second_board_suffix: BoardCards::empty(),
         };
         let before = table.clone();
@@ -6010,11 +6046,10 @@ mod tests {
 
     fn complete_rit_showdown_table() -> TexasPokerTable {
         let mut table = make_table();
-        table.round_state = ROUND_SHOWDOWN;
+        table.enter_showdown_display(0);
         table.rit_mode = RIT_MODE_TWICE;
-        table.run_it_twice_state = RunItTwiceState {
-            mode: RunoutMode::Twice,
-            shared_board_len: 0,
+        table.run_it_twice_state = RunItTwiceState::Twice {
+            start: RitStartStreet::Preflop,
             second_board_suffix: vec![
                 Card::new(2, 13),
                 Card::new(3, 13),
@@ -6056,7 +6091,7 @@ mod tests {
 
         settle_hand(&mut table, &mut events).unwrap();
 
-        assert_eq!(table.round_state, ROUND_WAITING);
+        assert_eq!(table.round_state(), ROUND_WAITING);
         assert!(!table.run_it_twice_state.is_active());
         assert_eq!(table.seats[0].stack, 1_000);
         assert_eq!(table.seats[1].stack, 1_000);

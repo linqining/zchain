@@ -772,7 +772,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 seat_index: *seat_index,
                 old_deck_commitment: deck_commitment(&task.pre_table),
                 new_deck_commitment: deck_commitment(&task.post_table),
-                shuffle_phase: task.pre_table.shuffle_state().phase,
+                shuffle_phase: task.pre_table.shuffle_phase(),
                 precompile: binding.air_binding(),
             };
             let mut row = JoinAndShuffleRow::active(
@@ -872,7 +872,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 new_deck_commitment: deck_commitment(&task.post_table),
                 // Admission is determined by the pre-dispatch shuffle phase. The final shuffler
                 // legitimately drives the post-state to NONE after `advance_shuffle`.
-                shuffle_phase: task.pre_table.shuffle_state().phase,
+                shuffle_phase: task.pre_table.shuffle_phase(),
                 precompile: binding.air_binding(),
             };
             let mut row = SubmitShuffleV2Row::active(
@@ -957,7 +957,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let binding = PrecompileCallBinding::verify_reconstruction_v3(&request)?;
             let input = SubmitReconstructDeckInput {
                 seat_index: *seat_index,
-                reconstruct_phase: task.pre_table.reconstruct_state().phase,
+                reconstruct_phase: task.pre_table.reconstruct_phase(),
                 precompile: binding.air_binding(),
             };
             let row = SubmitReconstructDeckRow::active(
@@ -1036,7 +1036,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let input = LeaveWithProofInput {
                 seat_index: *seat_index,
                 leave_kind: 0,
-                shuffle_phase: task.pre_table.shuffle_state().phase,
+                shuffle_phase: task.pre_table.shuffle_phase(),
                 precompile: binding.air_binding(),
             };
             let post_completed_count = u8::try_from(

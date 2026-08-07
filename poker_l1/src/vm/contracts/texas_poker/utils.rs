@@ -9,7 +9,8 @@
 //! - **Transcript 工厂**：shuffle V2、legacy reconstruction 与 production reconstruction V3
 //!   使用各自固定的 Move-compatible SHA3 transcript domain
 //! - **ZK skip 回退**：`verify_or_skip` 保留 dev chain 友好的跳过逻辑
-//! - **PK 所有权证明**：`verify_pk_ownership` 保留 80 字节 Schnorr 自定义格式
+//! - **PK 所有权证明**：`create_pk_ownership_proof` / `verify_pk_ownership` 保留 80 字节
+//!   Schnorr 自定义格式
 //!   （poker_protocol 的 `GeneralizedSchnorrProof` 是不同格式，不替换）
 //!
 //! # 字节序约定
@@ -539,6 +540,38 @@ pub fn extract_c2s(ciphertexts: &[ElGamalCiphertext]) -> Vec<G1Projective> {
 }
 
 // ========== PK 所有权证明（80 字节 Schnorr，自定义格式保留） ==========
+
+/// Create a PK-ownership proof for `pk = G * secret_key` using caller-supplied nonce entropy.
+///
+/// Production callers must sample a fresh unpredictable non-zero `nonce` for every proof.
+/// Accepting the nonce explicitly keeps RNG policy outside consensus code while sharing the exact
+/// transcript encoding with [`verify_pk_ownership`].
+pub fn create_pk_ownership_proof(
+    secret_key: &BlsScalar,
+    nonce: &BlsScalar,
+) -> PokerL1Result<Vec<u8>> {
+    if bool::from(secret_key.is_zero()) || bool::from(nonce.is_zero()) {
+        return Err(PokerL1Error::Serialization(
+            "PK ownership secret key and nonce must be non-zero".into(),
+        ));
+    }
+    let generator = g1_generator();
+    let pk = generator * secret_key;
+    let commitment = generator * nonce;
+    let generator_bytes = serialize_g1(&generator);
+    let pk_bytes = serialize_g1(&pk);
+    let commitment_bytes = serialize_g1(&commitment);
+    let mut challenge_input = Vec::with_capacity(48 * 3);
+    challenge_input.extend_from_slice(&generator_bytes);
+    challenge_input.extend_from_slice(&pk_bytes);
+    challenge_input.extend_from_slice(&commitment_bytes);
+    let challenge = hash_to_scalar(&challenge_input)?;
+    let response = nonce + challenge * secret_key;
+    let mut proof = Vec::with_capacity(80);
+    proof.extend_from_slice(&commitment_bytes);
+    proof.extend_from_slice(&serialize_scalar(&response));
+    Ok(proof)
+}
 
 /// 验证 PK 所有权证明（Schnorr proof of knowledge of sk where pk = G · sk）。
 ///

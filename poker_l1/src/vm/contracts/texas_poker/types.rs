@@ -8,7 +8,7 @@
 //!
 //! # typed 化说明
 //!
-//! 密码学相关字段（pk、token、coefficient、ciphertext_bytes、plaintext_bytes、aggregated_pk、
+//! 密码学相关字段（pk、token、ciphertext_bytes、plaintext_bytes、aggregated_pk、
 //! plaintext）已从 `Vec<u8>` 改为 typed `poker_protocol` 类型（`ECPoint` / `ECScalar` /
 //! `ElGamalCiphertext`），消除 state_machine.rs 中的 bytes↔G1 转换样板代码。
 //! `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
@@ -27,7 +27,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
 use blstrs::G1Projective;
-use poker_protocol::crypto::types::{ECPoint, ECScalar};
+use poker_protocol::crypto::types::ECPoint;
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
 use crate::Address;
@@ -38,8 +38,12 @@ use super::betting::BettingRound;
 use super::card::{BoardCards, Card, HoleCards};
 // 复用 constants.rs 中与 Move 端逐字节一致的 phase 常量（避免本地重复定义导致语义分叉）
 use super::constants::{
-    RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_NONE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER,
-    ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_NONE, SHUFFLE_PHASE_RECONSTRUCT,
+    ANTE_MODE_BBA, ANTE_MODE_NONE, ANTE_MODE_NORMAL, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE,
+    RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE, REVEAL_PHASE_PREFLOP,
+    REVEAL_PHASE_REDEAL, REVEAL_PHASE_RIVER, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN,
+    RIT_MODE_DISABLED, RIT_MODE_TWICE,
+    ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING,
+    SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_NONE, SHUFFLE_PHASE_RECONSTRUCT,
 };
 
 // ========== 常量 ==========
@@ -210,7 +214,7 @@ pub struct Seat {
     /// 业务语义：玩家在 betting 阶段超时后，若 time_bank_ms > 0，
     /// 系统自动消耗 time_bank 续命（而非直接 auto_fold）。
     /// 每手开始时按 `TIME_BANK_REFILL_PER_HAND_MS` 补充（上限 DEFAULT_TIME_BANK_MS）。
-    pub time_bank_ms: u64,
+    pub time_bank_ms: u32,
 }
 
 impl Seat {
@@ -292,13 +296,29 @@ impl Seat {
 
 // ========== 洗牌状态 ==========
 
-/// 洗牌状态（镜像 Move `ShuffleState`，table.move:124-129）。
-///
-/// `phase` 取值见 `constants::SHUFFLE_PHASE_*`（与 Move 端逐字节一致）。
+/// Typed reason for the single active shuffle phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum ShufflingPurpose {
+    /// Fresh per-hand shuffle before private cards are dealt.
+    Initial,
+    /// Shuffle of a reconstructed deck before the suspended reveal resumes.
+    Reconstruct,
+}
+
+impl ShufflingPurpose {
+    /// Legacy numeric projection retained for events and the current AIR boundary.
+    #[must_use]
+    pub const fn legacy_phase(self) -> u8 {
+        match self {
+            Self::Initial => SHUFFLE_PHASE_BEFORE_PREFLOP,
+            Self::Reconstruct => SHUFFLE_PHASE_RECONSTRUCT,
+        }
+    }
+}
+
+/// Canonical progress payload of an active shuffle.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ShuffleState {
-    /// 洗牌阶段（SHUFFLE_PHASE_NONE/WAITING/RECONSTRUCT/BEFORE_PREFLOP）。
-    pub phase: u8,
     /// 等待洗牌的玩家集合。
     pub pending_mask: SeatMask,
     /// 已完成洗牌的玩家集合。
@@ -308,7 +328,6 @@ pub struct ShuffleState {
 impl Default for ShuffleState {
     fn default() -> Self {
         Self {
-            phase: SHUFFLE_PHASE_NONE,
             pending_mask: 0,
             completed_mask: 0,
         }
@@ -444,18 +463,38 @@ impl RevealAssignment {
     }
 }
 
-/// Number of active public-board runouts for the current hand.
+/// Street at which a two-runout schedule started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub enum RunoutMode {
-    /// Normal single-board play.
-    Single,
-    /// Two runouts sharing the already exposed first-board prefix.
-    Twice,
+pub enum RitStartStreet {
+    /// No public cards were exposed; both boards receive five independent cards.
+    Preflop,
+    /// The flop is shared; both boards receive an independent turn and river.
+    Flop,
+    /// Flop and turn are shared; both boards receive an independent river.
+    Turn,
 }
 
-impl Default for RunoutMode {
-    fn default() -> Self {
-        Self::Single
+impl RitStartStreet {
+    /// Number of first-board cards shared by both runouts.
+    #[must_use]
+    pub const fn shared_board_len(self) -> u8 {
+        match self {
+            Self::Preflop => 0,
+            Self::Flop => 3,
+            Self::Turn => 4,
+        }
+    }
+
+    /// Recover the only canonical start street for a shared prefix length.
+    pub fn from_shared_board_len(shared_board_len: u8) -> PokerL1Result<Self> {
+        match shared_board_len {
+            0 => Ok(Self::Preflop),
+            3 => Ok(Self::Flop),
+            4 => Ok(Self::Turn),
+            value => Err(PokerL1Error::Serialization(format!(
+                "Texas RIT shared prefix {value} has no canonical start street"
+            ))),
+        }
     }
 }
 
@@ -464,22 +503,21 @@ impl Default for RunoutMode {
 /// `community_cards` is the canonical first board. The second board stores only cards after the
 /// shared prefix; the prefix is reconstructed from the first board.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct RunItTwiceState {
-    /// Single or double runout mode.
-    pub mode: RunoutMode,
-    /// Number of already exposed community cards shared by both boards.
-    pub shared_board_len: u8,
-    /// Canonical second-board suffix after `shared_board_len` cards.
-    pub second_board_suffix: BoardCards,
+pub enum RunItTwiceState {
+    /// Normal single-board play; no inactive RIT payload can be encoded.
+    Single,
+    /// Two runouts with the shared prefix derived solely from `start`.
+    Twice {
+        /// Street at which all remaining players became all-in.
+        start: RitStartStreet,
+        /// Canonical second-board suffix after the shared first-board prefix.
+        second_board_suffix: BoardCards,
+    },
 }
 
 impl Default for RunItTwiceState {
     fn default() -> Self {
-        Self {
-            mode: RunoutMode::Single,
-            shared_board_len: 0,
-            second_board_suffix: BoardCards::empty(),
-        }
+        Self::Single
     }
 }
 
@@ -487,52 +525,82 @@ impl RunItTwiceState {
     /// Whether this hand has two active runouts.
     #[must_use]
     pub const fn is_active(&self) -> bool {
-        matches!(self.mode, RunoutMode::Twice)
+        matches!(self, Self::Twice { .. })
+    }
+
+    /// Shared first-board prefix length derived from the active variant.
+    #[must_use]
+    pub const fn shared_board_len(&self) -> u8 {
+        match self {
+            Self::Single => 0,
+            Self::Twice { start, .. } => start.shared_board_len(),
+        }
+    }
+
+    /// Canonical second-board suffix, empty for single-runout play.
+    #[must_use]
+    pub fn second_board_suffix(&self) -> &[Card] {
+        match self {
+            Self::Single => &[],
+            Self::Twice {
+                second_board_suffix,
+                ..
+            } => second_board_suffix,
+        }
+    }
+
+    /// Mutable second-board suffix for an active two-runout schedule.
+    pub fn second_board_suffix_mut(&mut self) -> PokerL1Result<&mut BoardCards> {
+        match self {
+            Self::Twice {
+                second_board_suffix,
+                ..
+            } => Ok(second_board_suffix),
+            Self::Single => Err(PokerL1Error::Serialization(
+                "Texas single runout has no second-board suffix".into(),
+            )),
+        }
     }
 
     /// Current second-board length including its shared first-board prefix.
     #[must_use]
     pub fn second_board_len(&self) -> usize {
-        usize::from(self.shared_board_len) + self.second_board_suffix.len()
+        usize::from(self.shared_board_len()) + self.second_board_suffix().len()
     }
 
     /// Materialize the full second board for settlement or event output.
     pub fn full_second_board(&self, first_board: &BoardCards) -> PokerL1Result<Vec<Card>> {
-        if usize::from(self.shared_board_len) > first_board.len() {
+        let shared_board_len = self.shared_board_len();
+        if usize::from(shared_board_len) > first_board.len() {
             return Err(PokerL1Error::Serialization(
                 "Texas RIT shared prefix exceeds first board".into(),
             ));
         }
-        let mut board = first_board[..usize::from(self.shared_board_len)].to_vec();
-        board.extend_from_slice(&self.second_board_suffix);
+        let mut board = first_board[..usize::from(shared_board_len)].to_vec();
+        board.extend_from_slice(self.second_board_suffix());
         Ok(board)
     }
 
     /// Validate the canonical single/twice tagged representation.
     pub fn validate_canonical(&self, first_board: &BoardCards) -> PokerL1Result<()> {
-        self.second_board_suffix
-            .validate_canonical()
-            .map_err(|error| {
-                PokerL1Error::Serialization(format!(
-                    "Texas RIT second-board suffix is non-canonical: {error}"
-                ))
-            })?;
-        match self.mode {
-            RunoutMode::Single => {
-                if self.shared_board_len != 0 || !self.second_board_suffix.is_empty() {
-                    return Err(PokerL1Error::Serialization(
-                        "Texas single runout carries RIT state".into(),
-                    ));
-                }
-            }
-            RunoutMode::Twice => {
-                let shared = usize::from(self.shared_board_len);
+        match self {
+            Self::Single => {}
+            Self::Twice {
+                start,
+                second_board_suffix,
+            } => {
+                second_board_suffix.validate_canonical().map_err(|error| {
+                    PokerL1Error::Serialization(format!(
+                        "Texas RIT second-board suffix is non-canonical: {error}"
+                    ))
+                })?;
+                let shared = usize::from(start.shared_board_len());
                 if shared > 4 || shared > first_board.len() {
                     return Err(PokerL1Error::Serialization(
                         "Texas RIT shared prefix is outside the first board".into(),
                     ));
                 }
-                if shared + self.second_board_suffix.len() > 5 {
+                if shared + second_board_suffix.len() > 5 {
                     return Err(PokerL1Error::Serialization(
                         "Texas RIT second board exceeds five cards".into(),
                     ));
@@ -565,17 +633,11 @@ impl Default for RevealTokenState {
 
 // ========== Reconstruct 状态 ==========
 
-/// Reconstruct 状态（镜像 Move `ReconstructState`，table.move:158-164）。
-///
-/// `phase` 取值见 `constants::RECONSTRUCT_PHASE_*`（与 Move 端逐字节一致）。
+/// Canonical progress payload of an active reconstruction phase.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ReconstructState {
-    /// Reconstruct 阶段（RECONSTRUCT_PHASE_NONE/COLLECTING/COMPLETE）。
-    pub phase: u8,
     /// 待提交 reconstruct deck 的玩家列表。
     pub pending_mask: SeatMask,
-    /// 随机系数（None = 未设置，使用 ECScalar newtype 以支持 Borsh）。
-    pub coefficient: Option<ECScalar>,
     /// 已验证 contribution 逐次合入 canonical aggregate-key base deck 后的结果。
     ///
     /// `None` 表示尚无玩家提交；`Some` 始终恰好包含 52 张密文。这样无论参与者数量
@@ -586,9 +648,7 @@ pub struct ReconstructState {
 impl Default for ReconstructState {
     fn default() -> Self {
         Self {
-            phase: RECONSTRUCT_PHASE_NONE,
             pending_mask: 0,
-            coefficient: None,
             accumulated_deck: None,
         }
     }
@@ -596,23 +656,22 @@ impl Default for ReconstructState {
 
 // ========== 超时配置 ==========
 
-/// 超时配置（镜像 Move `TimeoutConfig`，table.move:167-175）。
+/// Canonical production timeout durations.
+///
+/// Durations are bounded `u32`; absolute consensus deadlines remain `u64` in [`HandPhase`].
+/// The retired ready/hand-complete waits were never read by production execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct TimeoutConfig {
     /// 洗牌超时（默认 10000ms）。
-    pub shuffle_timeout_ms: u64,
+    pub shuffle_timeout_ms: u32,
     /// 揭牌超时（默认 10000ms）。
-    pub reveal_timeout_ms: u64,
+    pub reveal_timeout_ms: u32,
     /// 下注超时（默认 30000ms）。
-    pub betting_timeout_ms: u64,
+    pub betting_timeout_ms: u32,
     /// 重构投票超时（默认 10000ms）。
-    pub reconstruct_timeout_ms: u64,
+    pub reconstruct_timeout_ms: u32,
     /// 摊牌展示时间（默认 3000ms）。
-    pub showdown_display_ms: u64,
-    /// 一手结束后等待时间（默认 5000ms）。
-    pub hand_complete_wait_ms: u64,
-    /// 开始倒计时（默认 5000ms）。
-    pub ready_wait_ms: u64,
+    pub showdown_display_ms: u32,
 }
 
 impl Default for TimeoutConfig {
@@ -623,8 +682,6 @@ impl Default for TimeoutConfig {
             betting_timeout_ms: 30_000,
             reconstruct_timeout_ms: 10_000,
             showdown_display_ms: 3_000,
-            hand_complete_wait_ms: 5_000,
-            ready_wait_ms: 5_000,
         }
     }
 }
@@ -671,14 +728,16 @@ pub enum HandPhaseTag {
 ///
 /// Reconstruction and reconstruct-shuffle temporarily suspend the reveal assignments that will
 /// be restarted after the deck is rebuilt; that suspended payload belongs to the same variant and
-/// is not treated as a second simultaneously active phase. Persisted schema v7+ stores this union
-/// directly; the runtime flattened fields are temporary compatibility caches being removed.
+/// is not treated as a second simultaneously active phase. Persisted schema v7+ and the runtime
+/// table both store this union directly; legacy flattened layouts exist only in codec mirrors.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum HandPhase {
     /// No hand transition is active.
     Waiting,
     /// Active shuffle state, optionally carrying a suspended reveal during reconstruction.
     Shuffling {
+        /// Why the active deck must be shuffled.
+        purpose: ShufflingPurpose,
         /// Betting street that will resume after shuffling.
         street: u8,
         /// Canonical shuffle payload.
@@ -745,13 +804,13 @@ impl HandPhase {
 
 fn canonical_absolute_deadline(
     started_at: u64,
-    timeout_ms: u64,
+    timeout_ms: u32,
     label: &str,
 ) -> PokerL1Result<u64> {
     if started_at == 0 {
         return Ok(0);
     }
-    started_at.checked_add(timeout_ms).ok_or_else(|| {
+    started_at.checked_add(u64::from(timeout_ms)).ok_or_else(|| {
         PokerL1Error::Serialization(format!(
             "Texas {label} deadline overflows u64: started_at={started_at}, timeout_ms={timeout_ms}"
         ))
@@ -945,7 +1004,7 @@ pub struct TexasPokerTable {
     /// `rake = min(pot * rake_bps / 10000, rake_cap)`
     pub rake_mode: u8,
     /// Rake 比例（基点 bps，500 = 5%）。
-    pub rake_bps: u64,
+    pub rake_bps: u16,
     /// Rake 上限（单手最多抽水金额）。
     pub rake_cap: u64,
     /// 本次结算已抽水金额。
@@ -1021,6 +1080,24 @@ impl TexasPokerTable {
         }
     }
 
+    /// Typed purpose of the active shuffle phase.
+    #[must_use]
+    pub const fn shuffling_purpose(&self) -> Option<ShufflingPurpose> {
+        match &self.hand_phase {
+            HandPhase::Shuffling { purpose, .. } => Some(*purpose),
+            _ => None,
+        }
+    }
+
+    /// Legacy numeric shuffle-phase projection used by existing event/AIR schemas.
+    #[must_use]
+    pub const fn shuffle_phase(&self) -> u8 {
+        match self.shuffling_purpose() {
+            Some(purpose) => purpose.legacy_phase(),
+            None => SHUFFLE_PHASE_NONE,
+        }
+    }
+
     /// Read-only compatibility projection of the active or suspended reveal payload.
     #[must_use]
     pub fn reveal_token_state(&self) -> Cow<'_, RevealTokenState> {
@@ -1046,6 +1123,22 @@ impl TexasPokerTable {
         }
     }
 
+    /// Whether reconstruction collection is the active hand phase.
+    #[must_use]
+    pub const fn is_reconstructing(&self) -> bool {
+        matches!(self.hand_phase, HandPhase::Reconstructing { .. })
+    }
+
+    /// Legacy numeric reconstruction-phase projection used by the current AIR schema.
+    #[must_use]
+    pub const fn reconstruct_phase(&self) -> u8 {
+        if self.is_reconstructing() {
+            RECONSTRUCT_PHASE_COLLECTING
+        } else {
+            RECONSTRUCT_PHASE_NONE
+        }
+    }
+
     /// Read-only compatibility projection of phase timing data.
     #[must_use]
     pub fn timestamps(&self) -> Cow<'_, Timestamps> {
@@ -1053,18 +1146,18 @@ impl TexasPokerTable {
         match &self.hand_phase {
             HandPhase::Shuffling { deadline_ms, .. } => {
                 timestamps.shuffle_started_at =
-                    deadline_ms.saturating_sub(self.timeout_config.shuffle_timeout_ms);
+                    deadline_ms.saturating_sub(u64::from(self.timeout_config.shuffle_timeout_ms));
             }
             HandPhase::Revealing { deadline_ms, .. } => {
                 timestamps.reveal_started_at =
-                    deadline_ms.saturating_sub(self.timeout_config.reveal_timeout_ms);
+                    deadline_ms.saturating_sub(u64::from(self.timeout_config.reveal_timeout_ms));
             }
             HandPhase::Reconstructing { epoch_ms, .. } => {
                 timestamps.reconstruct_started_at = *epoch_ms;
             }
             HandPhase::Betting { deadline_ms, .. } => {
                 timestamps.betting_started_at =
-                    deadline_ms.saturating_sub(self.timeout_config.betting_timeout_ms);
+                    deadline_ms.saturating_sub(u64::from(self.timeout_config.betting_timeout_ms));
             }
             HandPhase::ShowdownDisplay { deadline_ms } => {
                 timestamps.showdown_at = *deadline_ms;
@@ -1136,87 +1229,99 @@ impl TexasPokerTable {
 
     /// Absolute deadline of the active reconstruction phase, or zero while unarmed.
     pub fn reconstruct_deadline_ms(&self) -> PokerL1Result<Option<u64>> {
-        if self.reconstruct_state.phase == RECONSTRUCT_PHASE_NONE {
-            return Ok(None);
+        match &self.hand_phase {
+            HandPhase::Reconstructing {
+                epoch_ms,
+                deadline_ms,
+                ..
+            } => {
+                let expected = canonical_absolute_deadline(
+                    *epoch_ms,
+                    self.timeout_config.reconstruct_timeout_ms,
+                    "reconstruct",
+                )?;
+                if *deadline_ms != expected {
+                    return Err(PokerL1Error::Serialization(format!(
+                        "Texas reconstruct deadline mismatch: encoded={deadline_ms}, expected={expected}"
+                    )));
+                }
+                Ok(Some(*deadline_ms))
+            }
+            _ => Ok(None),
         }
-        canonical_absolute_deadline(
-            self.timestamps.reconstruct_started_at,
-            self.timeout_config.reconstruct_timeout_ms,
-            "reconstruct",
-        )
-        .map(Some)
     }
 
     /// Arm the active reconstruction deadline from consensus time.
     pub fn arm_reconstruct_deadline(&mut self, now_ms: u64) -> PokerL1Result<u64> {
-        if self.reconstruct_state.phase == RECONSTRUCT_PHASE_NONE {
-            return Err(PokerL1Error::Serialization(
-                "cannot arm reconstruct deadline outside phase".into(),
-            ));
-        }
         let deadline_ms = canonical_absolute_deadline(
             now_ms,
             self.timeout_config.reconstruct_timeout_ms,
             "reconstruct",
         )?;
-        self.timestamps.reconstruct_started_at = now_ms;
-        Ok(deadline_ms)
+        match &mut self.hand_phase {
+            HandPhase::Reconstructing {
+                epoch_ms,
+                deadline_ms: stored,
+                ..
+            } => {
+                *epoch_ms = now_ms;
+                *stored = deadline_ms;
+                Ok(deadline_ms)
+            }
+            _ => Err(PokerL1Error::Serialization(
+                "cannot arm reconstruct deadline outside phase".into(),
+            )),
+        }
     }
 
     /// Absolute deadline of the active shuffle phase, or zero while unarmed.
     pub fn shuffle_deadline_ms(&self) -> PokerL1Result<Option<u64>> {
-        if self.shuffle_state.phase == SHUFFLE_PHASE_NONE {
-            return Ok(None);
+        match &self.hand_phase {
+            HandPhase::Shuffling { deadline_ms, .. } => Ok(Some(*deadline_ms)),
+            _ => Ok(None),
         }
-        canonical_absolute_deadline(
-            self.timestamps.shuffle_started_at,
-            self.timeout_config.shuffle_timeout_ms,
-            "shuffle",
-        )
-        .map(Some)
     }
 
     /// Arm the active shuffle deadline from consensus time.
     pub fn arm_shuffle_deadline(&mut self, now_ms: u64) -> PokerL1Result<u64> {
-        if self.shuffle_state.phase == SHUFFLE_PHASE_NONE {
-            return Err(PokerL1Error::Serialization(
-                "cannot arm shuffle deadline outside phase".into(),
-            ));
-        }
         let deadline_ms = canonical_absolute_deadline(
             now_ms,
             self.timeout_config.shuffle_timeout_ms,
             "shuffle",
         )?;
-        self.timestamps.shuffle_started_at = now_ms;
-        Ok(deadline_ms)
+        match &mut self.hand_phase {
+            HandPhase::Shuffling {
+                deadline_ms: stored,
+                ..
+            } => {
+                *stored = deadline_ms;
+                Ok(deadline_ms)
+            }
+            _ => Err(PokerL1Error::Serialization(
+                "cannot arm shuffle deadline outside phase".into(),
+            )),
+        }
     }
 
     /// Disarm the active shuffle deadline when its canonical actor changes.
     pub fn disarm_shuffle_deadline(&mut self) -> PokerL1Result<()> {
-        if self.shuffle_state.phase == SHUFFLE_PHASE_NONE {
-            return Err(PokerL1Error::Serialization(
+        match &mut self.hand_phase {
+            HandPhase::Shuffling { deadline_ms, .. } => {
+                *deadline_ms = 0;
+                Ok(())
+            }
+            _ => Err(PokerL1Error::Serialization(
                 "cannot disarm shuffle deadline outside phase".into(),
-            ));
+            )),
         }
-        self.timestamps.shuffle_started_at = 0;
-        Ok(())
     }
 
     /// Absolute deadline of the active reveal phase, or zero while unarmed.
     pub fn reveal_deadline_ms(&self) -> PokerL1Result<Option<u64>> {
-        if self.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
-            || self.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE
-            || self.shuffle_state.phase == SHUFFLE_PHASE_RECONSTRUCT
-        {
-            return Ok(None);
+        match &self.hand_phase {
+            HandPhase::Revealing { deadline_ms, .. } => Ok(Some(*deadline_ms)),
+            _ => Ok(None),
         }
-        canonical_absolute_deadline(
-            self.timestamps.reveal_started_at,
-            self.timeout_config.reveal_timeout_ms,
-            "reveal",
-        )
-        .map(Some)
     }
 
     /// Arm the active reveal deadline from consensus time.
@@ -1231,73 +1336,72 @@ impl TexasPokerTable {
             self.timeout_config.reveal_timeout_ms,
             "reveal",
         )?;
-        self.timestamps.reveal_started_at = now_ms;
-        Ok(deadline_ms)
+        match &mut self.hand_phase {
+            HandPhase::Revealing {
+                deadline_ms: stored,
+                ..
+            } => {
+                *stored = deadline_ms;
+                Ok(deadline_ms)
+            }
+            _ => Err(PokerL1Error::Serialization(
+                "cannot arm reveal deadline outside phase".into(),
+            )),
+        }
     }
 
     /// Absolute deadline of the active betting phase, or zero while unarmed.
     pub fn betting_deadline_ms(&self) -> PokerL1Result<Option<u64>> {
-        if self.betting_round.is_none() {
-            return Ok(None);
+        match &self.hand_phase {
+            HandPhase::Betting { deadline_ms, .. } => Ok(Some(*deadline_ms)),
+            _ => Ok(None),
         }
-        canonical_absolute_deadline(
-            self.timestamps.betting_started_at,
-            self.timeout_config.betting_timeout_ms,
-            "betting",
-        )
-        .map(Some)
     }
 
     /// Arm the active betting deadline from consensus time.
     pub fn arm_betting_deadline(&mut self, now_ms: u64) -> PokerL1Result<u64> {
-        if self.betting_round.is_none() {
-            return Err(PokerL1Error::Serialization(
-                "cannot arm betting deadline outside phase".into(),
-            ));
-        }
         let deadline_ms = canonical_absolute_deadline(
             now_ms,
             self.timeout_config.betting_timeout_ms,
             "betting",
         )?;
-        self.timestamps.betting_started_at = now_ms;
-        Ok(deadline_ms)
+        match &mut self.hand_phase {
+            HandPhase::Betting {
+                deadline_ms: stored,
+                ..
+            } => {
+                *stored = deadline_ms;
+                Ok(deadline_ms)
+            }
+            _ => Err(PokerL1Error::Serialization(
+                "cannot arm betting deadline outside phase".into(),
+            )),
+        }
     }
 
     /// Extend the active betting deadline after consuming time bank.
     pub fn extend_betting_deadline(&mut self, extension_ms: u64) -> PokerL1Result<u64> {
-        if self.betting_round.is_none() || self.timestamps.betting_started_at == 0 {
-            return Err(PokerL1Error::Serialization(
+        match &mut self.hand_phase {
+            HandPhase::Betting { deadline_ms, .. } if *deadline_ms != 0 => {
+                *deadline_ms = deadline_ms.checked_add(extension_ms).ok_or_else(|| {
+                    PokerL1Error::Serialization(
+                        "Texas betting deadline extension overflows u64".into(),
+                    )
+                })?;
+                Ok(*deadline_ms)
+            }
+            _ => Err(PokerL1Error::Serialization(
                 "cannot extend an unarmed betting deadline".into(),
-            ));
+            )),
         }
-        let started_at_ms = self
-            .timestamps
-            .betting_started_at
-            .checked_add(extension_ms)
-            .ok_or_else(|| {
-                PokerL1Error::Serialization(
-                    "Texas betting deadline extension overflows u64".into(),
-                )
-            })?;
-        let deadline_ms = canonical_absolute_deadline(
-            started_at_ms,
-            self.timeout_config.betting_timeout_ms,
-            "betting",
-        )?;
-        self.timestamps.betting_started_at = started_at_ms;
-        Ok(deadline_ms)
     }
 
     /// Absolute showdown-display settlement deadline, or zero while unarmed.
     #[must_use]
     pub const fn showdown_deadline_ms(&self) -> Option<u64> {
-        if self.round_state == ROUND_SHOWDOWN
-            && self.reveal_token_state.reveal_phase == REVEAL_PHASE_NONE
-        {
-            Some(self.timestamps.showdown_at)
-        } else {
-            None
+        match &self.hand_phase {
+            HandPhase::ShowdownDisplay { deadline_ms } => Some(*deadline_ms),
+            _ => None,
         }
     }
 
@@ -1309,48 +1413,68 @@ impl TexasPokerTable {
             ));
         }
         let deadline_ms = now_ms
-            .checked_add(self.timeout_config.showdown_display_ms)
+            .checked_add(u64::from(self.timeout_config.showdown_display_ms))
             .ok_or_else(|| {
                 PokerL1Error::Serialization("Texas showdown deadline overflows u64".into())
             })?;
-        self.timestamps.showdown_at = deadline_ms;
-        Ok(deadline_ms)
+        match &mut self.hand_phase {
+            HandPhase::ShowdownDisplay {
+                deadline_ms: stored,
+            } => {
+                *stored = deadline_ms;
+                Ok(deadline_ms)
+            }
+            _ => Err(PokerL1Error::Serialization(
+                "cannot arm showdown deadline outside display phase".into(),
+            )),
+        }
     }
 
     /// Mutable payload of the active betting variant.
     pub fn active_betting_round_mut(&mut self) -> PokerL1Result<&mut BettingRound> {
-        self.betting_round.as_mut().ok_or_else(|| {
-            PokerL1Error::Serialization("Texas table is not in an active betting phase".into())
-        })
+        match &mut self.hand_phase {
+            HandPhase::Betting { round, .. } => Ok(round),
+            _ => Err(PokerL1Error::Serialization(
+                "Texas table is not in an active betting phase".into(),
+            )),
+        }
     }
 
     /// Update the actor inside the current betting variant and disarm its deadline.
     pub fn set_betting_turn(&mut self, current_turn: u8) -> PokerL1Result<()> {
-        if self.betting_round.is_none() {
-            return Err(PokerL1Error::Serialization(
-                "cannot set current turn outside betting".into(),
-            ));
-        }
         if current_turn != NO_SEAT && current_turn >= self.max_players {
             return Err(PokerL1Error::Serialization(format!(
                 "Texas current turn {current_turn} is outside max_players {}",
                 self.max_players
             )));
         }
-        self.current_turn = current_turn;
-        self.disarm_betting_deadline()?;
-        Ok(())
+        match &mut self.hand_phase {
+            HandPhase::Betting {
+                current_turn: stored,
+                deadline_ms,
+                ..
+            } => {
+                *stored = current_turn;
+                *deadline_ms = 0;
+                Ok(())
+            }
+            _ => Err(PokerL1Error::Serialization(
+                "cannot set current turn outside betting".into(),
+            )),
+        }
     }
 
     /// Disarm the current betting actor's deadline after an accepted action/turn change.
     pub fn disarm_betting_deadline(&mut self) -> PokerL1Result<()> {
-        if self.betting_round.is_none() {
-            return Err(PokerL1Error::Serialization(
+        match &mut self.hand_phase {
+            HandPhase::Betting { deadline_ms, .. } => {
+                *deadline_ms = 0;
+                Ok(())
+            }
+            _ => Err(PokerL1Error::Serialization(
                 "cannot disarm betting deadline outside betting".into(),
-            ));
+            )),
         }
-        self.timestamps.betting_started_at = 0;
-        Ok(())
     }
 
     /// Remove one seat from the payload of the single active protocol variant.
@@ -1363,20 +1487,14 @@ impl TexasPokerTable {
                 "cannot remove out-of-range seat {seat_index} from Texas phase"
             )));
         }
-        if self.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE {
-            seat_mask_remove(&mut self.reconstruct_state.pending_mask, seat_index);
-            for assignment in &mut self.reveal_token_state.assignments {
-                if let RevealProgress::Collecting { pending_mask, .. } = &mut assignment.progress {
-                    seat_mask_remove(pending_mask, seat_index);
-                }
-            }
-            return Ok(());
-        }
-        if self.shuffle_state.phase != SHUFFLE_PHASE_NONE {
-            seat_mask_remove(&mut self.shuffle_state.pending_mask, seat_index);
-            seat_mask_remove(&mut self.shuffle_state.completed_mask, seat_index);
-            if self.shuffle_state.phase == SHUFFLE_PHASE_RECONSTRUCT {
-                for assignment in &mut self.reveal_token_state.assignments {
+        match &mut self.hand_phase {
+            HandPhase::Reconstructing {
+                state,
+                suspended_reveal,
+                ..
+            } => {
+                seat_mask_remove(&mut state.pending_mask, seat_index);
+                for assignment in &mut suspended_reveal.assignments {
                     if let RevealProgress::Collecting { pending_mask, .. } =
                         &mut assignment.progress
                     {
@@ -1384,51 +1502,66 @@ impl TexasPokerTable {
                     }
                 }
             }
-            return Ok(());
-        }
-        if self.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE {
-            for assignment in &mut self.reveal_token_state.assignments {
-                if let RevealProgress::Collecting { pending_mask, .. } = &mut assignment.progress {
-                    seat_mask_remove(pending_mask, seat_index);
+            HandPhase::Shuffling {
+                state,
+                suspended_reveal,
+                ..
+            } => {
+                seat_mask_remove(&mut state.pending_mask, seat_index);
+                seat_mask_remove(&mut state.completed_mask, seat_index);
+                if let Some(reveal) = suspended_reveal {
+                    for assignment in &mut reveal.assignments {
+                        if let RevealProgress::Collecting { pending_mask, .. } =
+                            &mut assignment.progress
+                        {
+                            seat_mask_remove(pending_mask, seat_index);
+                        }
+                    }
                 }
             }
+            HandPhase::Revealing { state, .. } => {
+                for assignment in &mut state.assignments {
+                    if let RevealProgress::Collecting { pending_mask, .. } =
+                        &mut assignment.progress
+                    {
+                        seat_mask_remove(pending_mask, seat_index);
+                    }
+                }
+            }
+            HandPhase::Waiting
+            | HandPhase::Betting { .. }
+            | HandPhase::ShowdownDisplay { .. } => {}
         }
         Ok(())
     }
 
-    /// Atomically enter the idle phase and clear every phase-local compatibility payload.
-    ///
-    /// These helpers are the only supported boundary for cross-phase state-machine writes. The
-    /// flattened fields remain temporarily for schema migration, but are updated as one logical
-    /// tagged union so an intermediate reveal/shuffle/betting overlap cannot escape.
+    /// Atomically enter the idle phase.
     pub fn enter_waiting(&mut self) {
-        self.round_state = ROUND_WAITING;
-        self.betting_round = None;
-        self.current_turn = NO_SEAT;
-        self.shuffle_state = ShuffleState::default();
-        self.reveal_token_state = RevealTokenState::default();
-        self.reconstruct_state = ReconstructState::default();
-        self.timestamps = Timestamps::default();
+        self.hand_phase = HandPhase::Waiting;
     }
 
     /// Atomically enter a shuffle phase.
     pub fn enter_shuffling(
         &mut self,
+        purpose: ShufflingPurpose,
         street: u8,
         state: ShuffleState,
         suspended_reveal: Option<RevealTokenState>,
         started_at_ms: u64,
-    ) {
-        self.round_state = street;
-        self.betting_round = None;
-        self.current_turn = NO_SEAT;
-        self.shuffle_state = state;
-        self.reveal_token_state = suspended_reveal.unwrap_or_default();
-        self.reconstruct_state = ReconstructState::default();
-        self.timestamps = Timestamps {
-            shuffle_started_at: started_at_ms,
-            ..Timestamps::default()
+    ) -> PokerL1Result<()> {
+        let deadline_ms = canonical_absolute_deadline(
+            started_at_ms,
+            self.timeout_config.shuffle_timeout_ms,
+            "shuffle",
+        )?;
+        self.hand_phase = HandPhase::Shuffling {
+            purpose,
+            street,
+            state,
+            suspended_reveal,
+            deadline_ms,
         };
+        Ok(())
     }
 
     /// Atomically enter a reveal-token phase.
@@ -1437,17 +1570,18 @@ impl TexasPokerTable {
         street: u8,
         state: RevealTokenState,
         started_at_ms: u64,
-    ) {
-        self.round_state = street;
-        self.betting_round = None;
-        self.current_turn = NO_SEAT;
-        self.shuffle_state = ShuffleState::default();
-        self.reveal_token_state = state;
-        self.reconstruct_state = ReconstructState::default();
-        self.timestamps = Timestamps {
-            reveal_started_at: started_at_ms,
-            ..Timestamps::default()
+    ) -> PokerL1Result<()> {
+        let deadline_ms = canonical_absolute_deadline(
+            started_at_ms,
+            self.timeout_config.reveal_timeout_ms,
+            "reveal",
+        )?;
+        self.hand_phase = HandPhase::Revealing {
+            street,
+            state,
+            deadline_ms,
         };
+        Ok(())
     }
 
     /// Atomically suspend a reveal and enter reconstruction collection.
@@ -1457,17 +1591,20 @@ impl TexasPokerTable {
         state: ReconstructState,
         suspended_reveal: RevealTokenState,
         epoch_ms: u64,
-    ) {
-        self.round_state = street;
-        self.betting_round = None;
-        self.current_turn = NO_SEAT;
-        self.shuffle_state = ShuffleState::default();
-        self.reveal_token_state = suspended_reveal;
-        self.reconstruct_state = state;
-        self.timestamps = Timestamps {
-            reconstruct_started_at: epoch_ms,
-            ..Timestamps::default()
+    ) -> PokerL1Result<()> {
+        let deadline_ms = canonical_absolute_deadline(
+            epoch_ms,
+            self.timeout_config.reconstruct_timeout_ms,
+            "reconstruct",
+        )?;
+        self.hand_phase = HandPhase::Reconstructing {
+            street,
+            state,
+            suspended_reveal,
+            epoch_ms,
+            deadline_ms,
         };
+        Ok(())
     }
 
     /// Atomically enter an actionable betting round.
@@ -1477,31 +1614,24 @@ impl TexasPokerTable {
         round: BettingRound,
         current_turn: u8,
         started_at_ms: u64,
-    ) {
-        self.round_state = street;
-        self.betting_round = Some(round);
-        self.current_turn = current_turn;
-        self.shuffle_state = ShuffleState::default();
-        self.reveal_token_state = RevealTokenState::default();
-        self.reconstruct_state = ReconstructState::default();
-        self.timestamps = Timestamps {
-            betting_started_at: started_at_ms,
-            ..Timestamps::default()
+    ) -> PokerL1Result<()> {
+        let deadline_ms = canonical_absolute_deadline(
+            started_at_ms,
+            self.timeout_config.betting_timeout_ms,
+            "betting",
+        )?;
+        self.hand_phase = HandPhase::Betting {
+            street,
+            round,
+            current_turn,
+            deadline_ms,
         };
+        Ok(())
     }
 
     /// Atomically enter the showdown display wait after all hole cards are materialized.
     pub fn enter_showdown_display(&mut self, deadline_ms: u64) {
-        self.round_state = ROUND_SHOWDOWN;
-        self.betting_round = None;
-        self.current_turn = NO_SEAT;
-        self.shuffle_state = ShuffleState::default();
-        self.reveal_token_state = RevealTokenState::default();
-        self.reconstruct_state = ReconstructState::default();
-        self.timestamps = Timestamps {
-            showdown_at: deadline_ms,
-            ..Timestamps::default()
-        };
+        self.hand_phase = HandPhase::ShowdownDisplay { deadline_ms };
     }
 
     fn aggregated_pk_for_contributor_mask(
@@ -1608,15 +1738,9 @@ impl TexasPokerTable {
             button: 0,
             pot: 0,
             community_cards: BoardCards::empty(),
-            round_state: super::constants::ROUND_WAITING,
-            betting_round: None,
-            current_turn: NO_SEAT,
+            hand_phase: HandPhase::Waiting,
             deck_state: DeckState::default(),
-            shuffle_state: ShuffleState::default(),
-            reveal_token_state: RevealTokenState::default(),
-            reconstruct_state: ReconstructState::default(),
             timeout_config: TimeoutConfig::default(),
-            timestamps: Timestamps::default(),
             chip_pool: 0,
             addon_pool: 0,
             ante_mode: super::constants::ANTE_MODE_NONE,
@@ -1702,107 +1826,156 @@ impl TexasPokerTable {
     /// Decode the canonical current-turn sentinel.
     #[must_use]
     pub fn current_turn_option(&self) -> Option<u8> {
-        (self.current_turn != NO_SEAT).then_some(self.current_turn)
+        let current_turn = self.current_turn();
+        (current_turn != NO_SEAT).then_some(current_turn)
     }
 
-    /// Project the temporary flattened runtime cache into one fail-closed canonical hand phase.
+    /// Clone the canonical runtime hand phase after fail-closed validation.
     pub fn canonical_hand_phase(&self) -> PokerL1Result<HandPhase> {
-        let reconstruct_active = self.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE;
-        let shuffle_active = self.shuffle_state.phase != SHUFFLE_PHASE_NONE;
-        let reveal_active = self.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE;
-        let betting_active = self.betting_round.is_some();
+        self.validate_hand_phase()?;
+        Ok(self.hand_phase.clone())
+    }
 
-        if reconstruct_active {
-            if shuffle_active || betting_active || !reveal_active {
-                return Err(PokerL1Error::Serialization(
-                    "Texas reconstruct phase has an invalid active-phase combination".into(),
-                ));
+    fn validate_hand_phase(&self) -> PokerL1Result<()> {
+        let validate_deadline = |deadline_ms: u64, timeout_ms: u32, label: &str| {
+            if deadline_ms != 0 && deadline_ms < u64::from(timeout_ms) {
+                Err(PokerL1Error::Serialization(format!(
+                    "Texas {label} deadline {deadline_ms} is smaller than timeout {timeout_ms}"
+                )))
+            } else {
+                Ok(())
             }
-            return Ok(HandPhase::Reconstructing {
-                street: self.round_state,
-                state: self.reconstruct_state.clone(),
-                suspended_reveal: self.reveal_token_state.clone(),
-                epoch_ms: self.timestamps.reconstruct_started_at,
-                deadline_ms: canonical_absolute_deadline(
-                    self.timestamps.reconstruct_started_at,
-                    self.timeout_config.reconstruct_timeout_ms,
-                    "reconstruct",
-                )?,
-            });
-        }
+        };
+        let validate_reveal = |state: &RevealTokenState| {
+            if !matches!(
+                state.reveal_phase,
+                REVEAL_PHASE_PREFLOP
+                    | REVEAL_PHASE_REDEAL
+                    | REVEAL_PHASE_FLOP
+                    | REVEAL_PHASE_TURN
+                    | REVEAL_PHASE_RIVER
+                    | REVEAL_PHASE_SHOWDOWN
+            ) {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas reveal phase {} is not active/canonical",
+                    state.reveal_phase
+                )));
+            }
+            Ok(())
+        };
 
-        if shuffle_active {
-            if betting_active
-                || (reveal_active && self.shuffle_state.phase != SHUFFLE_PHASE_RECONSTRUCT)
-            {
-                return Err(PokerL1Error::Serialization(
-                    "Texas shuffle phase has an invalid active-phase combination".into(),
-                ));
-            }
-            return Ok(HandPhase::Shuffling {
-                street: self.round_state,
-                state: self.shuffle_state.clone(),
-                suspended_reveal: reveal_active.then(|| self.reveal_token_state.clone()),
-                deadline_ms: canonical_absolute_deadline(
-                    self.timestamps.shuffle_started_at,
+        match &self.hand_phase {
+            HandPhase::Waiting => Ok(()),
+            HandPhase::Shuffling {
+                purpose,
+                street,
+                state: _,
+                suspended_reveal,
+                deadline_ms,
+            } => {
+                match purpose {
+                    ShufflingPurpose::Initial
+                        if *street == ROUND_WAITING && suspended_reveal.is_none() => {}
+                    ShufflingPurpose::Reconstruct
+                        if matches!(
+                            *street,
+                            ROUND_PREFLOP
+                                | ROUND_FLOP
+                                | ROUND_TURN
+                                | ROUND_RIVER
+                                | ROUND_SHOWDOWN
+                        ) && suspended_reveal.is_some() => {}
+                    _ => {
+                        return Err(PokerL1Error::Serialization(
+                            "Texas shuffle purpose/street/suspended reveal combination is invalid"
+                                .into(),
+                        ));
+                    }
+                }
+                if let Some(reveal) = suspended_reveal {
+                    validate_reveal(reveal)?;
+                }
+                validate_deadline(
+                    *deadline_ms,
                     self.timeout_config.shuffle_timeout_ms,
                     "shuffle",
-                )?,
-            });
-        }
-
-        if reveal_active {
-            if betting_active {
-                return Err(PokerL1Error::Serialization(
-                    "Texas reveal and betting phases cannot both be active".into(),
-                ));
+                )
             }
-            return Ok(HandPhase::Revealing {
-                street: self.round_state,
-                state: self.reveal_token_state.clone(),
-                deadline_ms: canonical_absolute_deadline(
-                    self.timestamps.reveal_started_at,
+            HandPhase::Revealing {
+                street,
+                state,
+                deadline_ms,
+            } => {
+                if !matches!(
+                    *street,
+                    ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER | ROUND_SHOWDOWN
+                ) {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas reveal phase is outside a live street".into(),
+                    ));
+                }
+                validate_reveal(state)?;
+                validate_deadline(
+                    *deadline_ms,
                     self.timeout_config.reveal_timeout_ms,
                     "reveal",
-                )?,
-            });
-        }
-
-        if let Some(round) = self.betting_round {
-            if !matches!(
-                self.round_state,
-                ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
-            ) {
-                return Err(PokerL1Error::Serialization(
-                    "Texas betting phase is outside a live street".into(),
-                ));
+                )
             }
-            return Ok(HandPhase::Betting {
-                street: self.round_state,
-                round,
-                current_turn: self.current_turn,
-                deadline_ms: canonical_absolute_deadline(
-                    self.timestamps.betting_started_at,
+            HandPhase::Reconstructing {
+                street,
+                state: _,
+                suspended_reveal,
+                epoch_ms,
+                deadline_ms,
+            } => {
+                if !matches!(
+                    *street,
+                    ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER | ROUND_SHOWDOWN
+                ) {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas reconstruct phase is not active on a live street".into(),
+                    ));
+                }
+                validate_reveal(suspended_reveal)?;
+                let expected = canonical_absolute_deadline(
+                    *epoch_ms,
+                    self.timeout_config.reconstruct_timeout_ms,
+                    "reconstruct",
+                )?;
+                if *deadline_ms != expected {
+                    return Err(PokerL1Error::Serialization(format!(
+                        "Texas reconstruct deadline mismatch: encoded={deadline_ms}, expected={expected}"
+                    )));
+                }
+                Ok(())
+            }
+            HandPhase::Betting {
+                street,
+                current_turn,
+                deadline_ms,
+                ..
+            } => {
+                if !matches!(
+                    *street,
+                    ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
+                ) {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas betting phase is outside a live street".into(),
+                    ));
+                }
+                if *current_turn != NO_SEAT && *current_turn >= self.max_players {
+                    return Err(PokerL1Error::Serialization(format!(
+                        "Texas current_turn {current_turn} is outside max_players {}",
+                        self.max_players
+                    )));
+                }
+                validate_deadline(
+                    *deadline_ms,
                     self.timeout_config.betting_timeout_ms,
                     "betting",
-                )?,
-            });
-        }
-
-        match self.round_state {
-            ROUND_WAITING => Ok(HandPhase::Waiting),
-            ROUND_SHOWDOWN => Ok(HandPhase::ShowdownDisplay {
-                deadline_ms: self.timestamps.showdown_at,
-            }),
-            ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER => {
-                Err(PokerL1Error::Serialization(format!(
-                    "Texas live street {} has no active phase",
-                    self.round_state
-                )))
+                )
             }
-            round => Err(PokerL1Error::Serialization(format!(
-                "Texas table contains unknown round_state {round}"
-            ))),
+            HandPhase::ShowdownDisplay { .. } => Ok(()),
         }
     }
 
@@ -1831,12 +2004,27 @@ impl TexasPokerTable {
                 "Texas table contains out-of-range seat flag bits".into(),
             ));
         }
-        if self.current_turn != NO_SEAT && self.current_turn >= self.max_players {
+        if !matches!(self.ante_mode, ANTE_MODE_NONE | ANTE_MODE_NORMAL | ANTE_MODE_BBA) {
             return Err(PokerL1Error::Serialization(format!(
-                "Texas current_turn {} is outside max_players {}",
-                self.current_turn, self.max_players
+                "Texas ante mode {} is not canonical",
+                self.ante_mode
             )));
         }
+        if !matches!(self.rake_mode, RAKE_MODE_NONE | RAKE_MODE_PERCENTAGE)
+            || self.rake_bps > 10_000
+        {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas rake configuration mode={} bps={} is not canonical",
+                self.rake_mode, self.rake_bps
+            )));
+        }
+        if !matches!(self.rit_mode, RIT_MODE_DISABLED | RIT_MODE_TWICE) {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas RIT mode {} is not canonical",
+                self.rit_mode
+            )));
+        }
+        self.validate_hand_phase()?;
         for (seat_index, seat) in self.seats.iter().enumerate() {
             seat.validate_canonical()?;
             if seat.status == SeatStatus::Empty
@@ -1863,7 +2051,7 @@ impl TexasPokerTable {
         for card in self
             .community_cards
             .iter()
-            .chain(self.run_it_twice_state.second_board_suffix.iter())
+            .chain(self.run_it_twice_state.second_board_suffix().iter())
             .chain(self.seats.iter().flat_map(|seat| seat.hand.iter()))
         {
             let card_id = usize::from(card.to_index());
@@ -1911,7 +2099,7 @@ impl TexasPokerTable {
                 }
                 DecryptedCardState::Plaintext { .. } => {
                     let matching_ready =
-                        self.reveal_token_state
+                        self.reveal_token_state()
                             .assignments
                             .iter()
                             .any(|assignment| {
@@ -1949,21 +2137,20 @@ impl TexasPokerTable {
                 )))
             }
         };
-        validate_mask(self.shuffle_state.pending_mask, "shuffle pending mask")?;
-        validate_mask(self.shuffle_state.completed_mask, "shuffle completed mask")?;
-        if self.shuffle_state.pending_mask & self.shuffle_state.completed_mask != 0 {
+        let shuffle_state = self.shuffle_state();
+        validate_mask(shuffle_state.pending_mask, "shuffle pending mask")?;
+        validate_mask(shuffle_state.completed_mask, "shuffle completed mask")?;
+        if shuffle_state.pending_mask & shuffle_state.completed_mask != 0 {
             return Err(PokerL1Error::Serialization(
                 "Texas shuffle pending/completed masks overlap".into(),
             ));
         }
-        for assignment in &self.reveal_token_state.assignments {
+        for assignment in &self.reveal_token_state().assignments {
             validate_mask(assignment.pending_mask(), "reveal pending mask")?;
         }
-        validate_mask(
-            self.reconstruct_state.pending_mask,
-            "reconstruct pending mask",
-        )?;
-        match &self.reconstruct_state.accumulated_deck {
+        let reconstruct_state = self.reconstruct_state();
+        validate_mask(reconstruct_state.pending_mask, "reconstruct pending mask")?;
+        match &reconstruct_state.accumulated_deck {
             Some(deck) => {
                 if deck.len() != 52 {
                     return Err(PokerL1Error::Serialization(format!(
@@ -2004,7 +2191,7 @@ mod tests {
         assert_eq!(table.seats.len(), 6);
         assert_eq!(table.small_blind, 50);
         assert_eq!(table.big_blind, 100);
-        assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
+        assert_eq!(table.round_state(), super::super::constants::ROUND_WAITING);
         assert_eq!(table.active_count(), 0);
         assert_eq!(table.occupied_count(), 0);
         assert_eq!(
@@ -2014,23 +2201,42 @@ mod tests {
     }
 
     #[test]
-    fn canonical_hand_phase_rejects_reveal_and_betting_overlap() {
+    fn canonical_hand_phase_variant_replaces_incompatible_payload() {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
-        table.round_state = ROUND_FLOP;
-        table.reveal_token_state.reveal_phase = super::super::constants::REVEAL_PHASE_FLOP;
-        table.betting_round = Some(BettingRound::new(100, 0));
+        table
+            .enter_revealing(
+                ROUND_FLOP,
+                RevealTokenState {
+                    reveal_phase: super::super::constants::REVEAL_PHASE_FLOP,
+                    assignments: vec![],
+                },
+                0,
+            )
+            .unwrap();
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 1, 0)
+            .unwrap();
 
-        assert!(table.canonical_hand_phase().is_err());
+        assert!(matches!(table.hand_phase, HandPhase::Betting { .. }));
+        assert_eq!(table.reveal_token_state().as_ref(), &RevealTokenState::default());
     }
 
     #[test]
     fn canonical_hand_phase_carries_suspended_reveal_during_reconstruct() {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
-        table.round_state = ROUND_TURN;
-        table.reveal_token_state.reveal_phase = super::super::constants::REVEAL_PHASE_TURN;
-        table.reconstruct_state.phase = super::super::constants::RECONSTRUCT_PHASE_COLLECTING;
+        table
+            .enter_reconstructing(
+                ROUND_TURN,
+                ReconstructState::default(),
+                RevealTokenState {
+                    reveal_phase: super::super::constants::REVEAL_PHASE_TURN,
+                    assignments: vec![],
+                },
+                0,
+            )
+            .unwrap();
 
         let phase = table.canonical_hand_phase().unwrap();
         assert_eq!(phase.tag(), HandPhaseTag::Reconstructing);
@@ -2051,19 +2257,23 @@ mod tests {
     fn phase_helpers_clear_incompatible_payloads_and_deadline_overflow_is_atomic() {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
-        table.enter_revealing(
-            ROUND_FLOP,
-            RevealTokenState {
-                reveal_phase: super::super::constants::REVEAL_PHASE_FLOP,
-                assignments: vec![],
-            },
-            0,
-        );
-        table.enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 1, 0);
+        table
+            .enter_revealing(
+                ROUND_FLOP,
+                RevealTokenState {
+                    reveal_phase: super::super::constants::REVEAL_PHASE_FLOP,
+                    assignments: vec![],
+                },
+                0,
+            )
+            .unwrap();
+        table
+            .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 1, 0)
+            .unwrap();
 
-        assert_eq!(table.reveal_token_state, RevealTokenState::default());
-        assert_eq!(table.shuffle_state, ShuffleState::default());
-        assert_eq!(table.reconstruct_state, ReconstructState::default());
+        assert_eq!(table.reveal_token_state().as_ref(), &RevealTokenState::default());
+        assert_eq!(table.shuffle_state().as_ref(), &ShuffleState::default());
+        assert_eq!(table.reconstruct_state().as_ref(), &ReconstructState::default());
         assert_eq!(
             table.canonical_hand_phase().unwrap().tag(),
             HandPhaseTag::Betting
@@ -2215,7 +2425,6 @@ mod tests {
     #[test]
     fn test_shuffle_state_default() {
         let state = ShuffleState::default();
-        assert_eq!(state.phase, SHUFFLE_PHASE_NONE);
         assert_eq!(state.derived_current_shuffler(), NO_SEAT);
         assert_eq!(state.pending_mask, 0);
         assert_eq!(state.completed_mask, 0);
@@ -2231,9 +2440,7 @@ mod tests {
     #[test]
     fn test_reconstruct_state_default() {
         let state = ReconstructState::default();
-        assert_eq!(state.phase, RECONSTRUCT_PHASE_NONE);
         assert_eq!(state.pending_mask, 0);
-        assert!(state.coefficient.is_none());
         assert!(state.accumulated_deck.is_none());
     }
 
@@ -2245,8 +2452,6 @@ mod tests {
         assert_eq!(cfg.betting_timeout_ms, 30_000);
         assert_eq!(cfg.reconstruct_timeout_ms, 10_000);
         assert_eq!(cfg.showdown_display_ms, 3_000);
-        assert_eq!(cfg.hand_complete_wait_ms, 5_000);
-        assert_eq!(cfg.ready_wait_ms, 5_000);
     }
 
     #[test]

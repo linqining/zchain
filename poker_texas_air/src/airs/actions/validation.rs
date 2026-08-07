@@ -516,10 +516,11 @@ pub(crate) fn validate_auto_fold(
     let pre_timestamps = tables.pre.timestamps();
     let deadline = pre_timestamps
         .betting_started_at
-        .saturating_add(tables.pre.timeout_config.betting_timeout_ms);
+        .saturating_add(u64::from(tables.pre.timeout_config.betting_timeout_ms));
     if air.input.pre_betting_started_at != pre_timestamps.betting_started_at
-        || air.input.betting_timeout_ms != tables.pre.timeout_config.betting_timeout_ms
-        || air.input.pre_time_bank_ms != pre_seat.time_bank_ms
+        || air.input.betting_timeout_ms
+            != u64::from(tables.pre.timeout_config.betting_timeout_ms)
+        || air.input.pre_time_bank_ms != u64::from(pre_seat.time_bank_ms)
         || air.input.pre_betting_started_at == 0
         || air.input.pre_time_bank_ms != 0
         || air.input.current_time < deadline

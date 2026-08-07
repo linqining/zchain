@@ -3,9 +3,13 @@
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
+use poker_l1::vm::contracts::texas_poker::constants::{
+    ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP,
+};
 use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, SubmitShuffleV2Args};
-use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{
+    SeatStatus, ShuffleState, ShufflingPurpose, TexasPokerTable,
+};
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
@@ -144,15 +148,22 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     table.deck_state.contributor_mask = 0b1111;
     table.sync_aggregated_pk().unwrap();
     assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
-    table.shuffle_state = ShuffleState {
-        phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-        pending_mask: (1u16 << (0)) | (1u16 << (1)) | (1u16 << (2)) | (1u16 << (3)),
-        completed_mask: 0,
-    };
+    table
+        .enter_shuffling(
+            ShufflingPurpose::Initial,
+            ROUND_WAITING,
+            ShuffleState {
+                pending_mask: 0b1111,
+                completed_mask: 0,
+            },
+            None,
+            0,
+        )
+        .unwrap();
 
     let mut tasks = Vec::new();
     for round in 0..3 {
-        let seat_index = table.shuffle_state.derived_current_shuffler();
+        let seat_index = table.shuffle_state().derived_current_shuffler();
         assert_ne!(seat_index, u8::MAX, "three shufflers should remain");
         let (task, post) = next_shuffle_task(table, seat_index, aggregated_pk, round);
         tasks.push(task);

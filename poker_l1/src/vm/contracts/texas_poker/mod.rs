@@ -58,7 +58,7 @@ pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
 /// persisted optional seat indices with `NO_SEAT`. Versions 2 through 4 are decoded through
 /// explicit fail-closed migrations in
 /// [`state_codec`].
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 11;
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 13;
 
 /// Versioned persisted-state codec and v2/v3/v4 -> v5 migration.
 pub mod state_codec;

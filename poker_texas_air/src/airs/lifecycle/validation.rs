@@ -113,7 +113,7 @@ pub(crate) fn validate_reset_for_next_hand(
     }
 
     let input = ResetForNextHandInput {
-        shuffle_phase: canonical.pre.shuffle_state().phase,
+        shuffle_phase: canonical.pre.shuffle_phase(),
         authorization: AdminAuthorizationBinding::verify_table_creator(
             MethodKind::ResetForNextHand,
             &canonical.call.context,

@@ -287,14 +287,12 @@ impl Precompile for TexasPokerPrecompile {
     }
 
     fn supports_selector(&self, selector: &[u8; 32]) -> bool {
-        selectors::all().contains(selector)
+        selectors::active().contains(selector)
     }
 
     fn gas_cost(&self, selector: &[u8; 32], args: &[u8]) -> u64 {
         let dispatch_cost = crate::vm::gas_table::precompile_gas(args.len() as u64);
-        let performs_native_crypto = *selector == selectors::join_and_shuffle()
-            || *selector == selectors::leave_with_proof()
-            || *selector == selectors::submit_shuffle_v2()
+        let performs_native_crypto = *selector == selectors::submit_shuffle_v2()
             || *selector == selectors::submit_player_reveal_tokens()
             || *selector == selectors::submit_reconstruct_deck()
             || *selector == selectors::fold_with_proof();
@@ -356,6 +354,16 @@ mod tests {
         )
     }
 
+    fn join_args(player: Address, buy_in: u64, secret: u64) -> JoinTableArgs {
+        JoinTableArgs::with_key(
+            player,
+            buy_in,
+            crate::vm::contracts::texas_poker::utils::scalar_from_u64(secret),
+            crate::vm::contracts::texas_poker::utils::scalar_from_u64(secret + 20_000),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_texas_poker_precompile_id() {
         let precompile = TexasPokerPrecompile::new(1);
@@ -376,6 +384,8 @@ mod tests {
         assert!(precompile.supports_selector(&selectors::join_table()));
         assert!(precompile.supports_selector(&selectors::fold()));
         assert!(precompile.supports_selector(&selectors::tick()));
+        assert!(!precompile.supports_selector(&selectors::join_and_shuffle()));
+        assert!(!precompile.supports_selector(&selectors::leave_with_proof()));
     }
 
     #[test]
@@ -564,11 +574,7 @@ mod tests {
         buy_in: u64,
         tx_hash: [u8; 32],
     ) -> ObjectID {
-        let join_args = borsh::to_vec(&JoinTableArgs {
-            player: *caller,
-            buy_in,
-            pk: ECPoint(G1Projective::identity()),
-        })
+        let join_args = borsh::to_vec(&join_args(*caller, buy_in, 1))
         .unwrap();
         precompile
             .call(
@@ -660,11 +666,7 @@ mod tests {
             tx_hash: join_hash,
             ..make_env()
         };
-        let join_args = borsh::to_vec(&JoinTableArgs {
-            player: caller,
-            buy_in: 100,
-            pk: ECPoint(G1Projective::identity()),
-        })
+        let join_args = borsh::to_vec(&join_args(caller, 100, 1))
         .unwrap();
 
         let result = precompile
@@ -748,11 +750,7 @@ mod tests {
             [0x71; 32],
         );
         let b_coin = list_owned_native_coins(&object_db, player_b).unwrap()[0].id;
-        let b_join_args = borsh::to_vec(&JoinTableArgs {
-            player: player_b,
-            buy_in: 100,
-            pk: ECPoint(G1Projective::generator()),
-        })
+        let b_join_args = borsh::to_vec(&join_args(player_b, 100, 2))
         .unwrap();
         precompile
             .call(
@@ -774,9 +772,9 @@ mod tests {
         let table_id = reserved::texas_poker_contract_id();
         let mut table: TexasPokerTable =
             borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(50, 100));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(50, 100), 0, 0)
+            .unwrap();
         table.pot = 200;
         table.rake_mode = crate::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         table.rake_bps = 500;
@@ -910,11 +908,7 @@ mod tests {
         create_test_table(&precompile, &caller, &caller_pk, &mut object_db);
         let table_id = reserved::texas_poker_contract_id();
         let table_before = object_db.read(&table_id).unwrap();
-        let join_args = borsh::to_vec(&JoinTableArgs {
-            player: caller,
-            buy_in: 100,
-            pk: ECPoint(G1Projective::identity()),
-        })
+        let join_args = borsh::to_vec(&join_args(caller, 100, 1))
         .unwrap();
 
         let error = precompile

@@ -1,7 +1,5 @@
 //! Regression tests for verifier-trusted complete business-row binding.
 
-use blstrs::G1Projective;
-use group::Group;
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
@@ -11,10 +9,10 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, JoinTableArgs, KickPlayerArgs, LeaveTableArgs,
 };
 use poker_l1::vm::contracts::texas_poker::state_machine;
+use poker_l1::vm::contracts::texas_poker::utils;
 use poker_l1::vm::contracts::texas_poker::types::{
     EMPTY_PLAYER, SeatStatus, TexasPokerTable,
 };
-use poker_protocol::crypto::types::ECPoint;
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
 use poker_texas_air::airs::actions::end_betting_round::BettingOutcome;
 use poker_texas_air::airs::actions::end_without_showdown::{EndWithoutShowdownInput, FoldOutcome};
@@ -208,9 +206,8 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
         50,
         100,
     );
-    pre.round_state = ROUND_PREFLOP;
-    pre.betting_round = Some(BettingRound::new(100, 100));
-    pre.current_turn = 0;
+    pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+        .unwrap();
     pre.pot = 25;
     pre.hand_id = 5;
     pre.call_seq = 8;
@@ -230,7 +227,7 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
     state_machine::apply_call(&mut post, 0, &mut vec![]).unwrap();
     post.call_seq = pre.call_seq + 1;
     assert_eq!(post.seats[0].bet, 100);
-    assert_eq!(post.current_turn, 1);
+    assert_eq!(post.current_turn(), 1);
     (pre, post)
 }
 
@@ -271,8 +268,8 @@ fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_table
         public_inputs.call_seq,
         pre.version,
         post.version,
-        pre.round_state,
-        post.round_state,
+        pre.round_state(),
+        post.round_state(),
         pre.pot,
         post.pot,
         980,
@@ -327,9 +324,8 @@ fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
         50,
         100,
     );
-    pre.round_state = ROUND_PREFLOP;
-    pre.betting_round = Some(BettingRound::new(100, 100));
-    pre.current_turn = 0;
+    pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+        .unwrap();
     pre.pot = 200;
     pre.hand_id = 6;
     pre.call_seq = 9;
@@ -381,8 +377,8 @@ fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
         public_inputs.call_seq,
         pre.version,
         post.version,
-        pre.round_state,
-        post.round_state,
+        pre.round_state(),
+        post.round_state(),
         pre.pot,
         post.pot,
     );
@@ -456,8 +452,8 @@ fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
         public_inputs.call_seq,
         pre.version,
         post.version,
-        pre.round_state,
-        post.round_state,
+        pre.round_state(),
+        post.round_state(),
         pre.pot,
         post.pot,
         post.seats[0].stack,
@@ -546,9 +542,8 @@ fn make_kick_player_transition() -> (DispatchContext, TexasPokerTable, TexasPoke
     );
     pre.hand_id = 5;
     pre.call_seq = 19;
-    pre.round_state = ROUND_PREFLOP;
-    pre.betting_round = Some(BettingRound::new(100, 100));
-    pre.current_turn = 0;
+    pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+        .unwrap();
     pre.pot = 75;
     for seat_index in 0..3 {
         pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
@@ -612,8 +607,8 @@ fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
         public_inputs.call_seq,
         pre.version,
         canonical_post.version,
-        pre.round_state,
-        canonical_post.round_state,
+        pre.round_state(),
+        canonical_post.round_state(),
         pre.pot,
         canonical_post.pot,
     );
@@ -777,7 +772,7 @@ fn production_verifier_rejects_reset_row_attached_to_unrelated_post_table() {
     )
     .unwrap();
     let input = ResetForNextHandInput {
-        shuffle_phase: pre.shuffle_state.phase,
+        shuffle_phase: pre.shuffle_phase(),
         authorization: synthetic_admin_authorization(),
     };
 
@@ -809,7 +804,7 @@ fn production_verifier_rejects_reset_row_attached_to_unrelated_post_table() {
         public_inputs.call_seq,
         pre.version,
         canonical_post.version,
-        pre.round_state,
+        pre.round_state(),
     );
     public_inputs
         .bind_expected_trace_row(&row.to_vec())
@@ -848,11 +843,13 @@ fn production_verifier_rejects_reset_row_attached_to_unrelated_post_table() {
 fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
     let player = [0x51; 20];
     let context = dispatch_context(player);
-    let args = JoinTableArgs {
+    let args = JoinTableArgs::with_key(
         player,
-        buy_in: 500,
-        pk: ECPoint(G1Projective::generator()),
-    };
+        500,
+        utils::scalar_from_u64(1),
+        utils::scalar_from_u64(801),
+    )
+    .unwrap();
     let raw_args = borsh::to_vec(&args).unwrap();
     let mut pre = TexasPokerTable::new(
         ObjectID::new([0xE1; 20], 23),
@@ -946,11 +943,13 @@ fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
 fn production_verifier_rejects_leave_row_attached_to_unrelated_post_table() {
     let player = [0x61; 20];
     let context = dispatch_context(player);
-    let join_args = JoinTableArgs {
+    let join_args = JoinTableArgs::with_key(
         player,
-        buy_in: 700,
-        pk: ECPoint(G1Projective::generator()),
-    };
+        700,
+        utils::scalar_from_u64(1),
+        utils::scalar_from_u64(802),
+    )
+    .unwrap();
     let mut pre = TexasPokerTable::new(
         ObjectID::new([0xE2; 20], 24),
         "canonical-leave".to_owned(),
@@ -1090,8 +1089,8 @@ fn production_verifier_rejects_addon_row_attached_to_unrelated_post_table() {
         public_inputs.call_seq,
         pre.version,
         canonical_post.version,
-        pre.round_state,
-        canonical_post.round_state,
+        pre.round_state(),
+        canonical_post.round_state(),
     );
     public_inputs
         .bind_expected_trace_row(&row.to_vec())
@@ -1168,8 +1167,8 @@ fn production_verifier_rejects_rebuy_row_attached_to_unrelated_post_table() {
         public_inputs.call_seq,
         pre.version,
         canonical_post.version,
-        pre.round_state,
-        canonical_post.round_state,
+        pre.round_state(),
+        canonical_post.round_state(),
     );
     public_inputs
         .bind_expected_trace_row(&row.to_vec())

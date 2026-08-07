@@ -1325,7 +1325,7 @@ mod tests {
     use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
     use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
     use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
-    use poker_l1::vm::contracts::texas_poker::types::SeatStatus;
+    use poker_l1::vm::contracts::texas_poker::types::{RevealTokenState, SeatStatus};
 
     use super::*;
 
@@ -1343,9 +1343,9 @@ mod tests {
             seat.stack = 1_000;
             seat.set_status(SeatStatus::Active);
         }
-        table.round_state = ROUND_PREFLOP;
-        table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = 0;
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .unwrap();
         table.hand_id = 3;
         table.call_seq = 8;
         table
@@ -1356,7 +1356,7 @@ mod tests {
         let pre = table();
         let mut post = pre.clone();
         post.set_seat_acted_this_round(0, true);
-        post.current_turn = 1;
+        post.set_betting_turn(1).unwrap();
         post.call_seq += 1;
         let events = vec![TexasPokerEvent::PlayerChecked {
             table_id: pre.id,
@@ -1376,16 +1376,21 @@ mod tests {
     #[test]
     fn zero_bet_round_advance_still_has_collection_stage() {
         let mut pre = table();
-        pre.round_state = ROUND_FLOP;
-        pre.betting_round = Some(BettingRound::new(100, 0));
+        pre.enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 0, 0)
+            .unwrap();
         pre.set_seat_acted_this_round(1, true);
         let mut post = pre.clone();
         post.set_seat_acted_this_round(0, true);
-        post.round_state = poker_l1::vm::contracts::texas_poker::constants::ROUND_TURN;
-        post.betting_round = None;
-        post.current_turn = u8::MAX;
-        post.reveal_token_state.reveal_phase =
-            poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN;
+        post.enter_revealing(
+            poker_l1::vm::contracts::texas_poker::constants::ROUND_TURN,
+            RevealTokenState {
+                reveal_phase:
+                    poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN,
+                assignments: vec![],
+            },
+            0,
+        )
+        .unwrap();
         post.call_seq += 1;
         let events = vec![
             TexasPokerEvent::PlayerChecked {
@@ -1396,7 +1401,7 @@ mod tests {
             TexasPokerEvent::RoundAdvanced {
                 table_id: pre.id,
                 from_round: ROUND_FLOP,
-                to_round: post.round_state,
+                to_round: post.round_state(),
                 pot: 0,
                 community_cards_count: 0,
             },
@@ -1421,7 +1426,7 @@ mod tests {
         pre.seats[0].total_bet = 25;
         pre.seats[1].bet = 25;
         pre.seats[1].total_bet = 25;
-        pre.betting_round = Some(BettingRound::new(100, 25));
+        *pre.active_betting_round_mut().unwrap() = BettingRound::new(100, 25);
         pre.chip_pool = pre
             .seats
             .iter()

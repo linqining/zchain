@@ -144,11 +144,15 @@ impl FullHandRunner {
         for (seat, &player) in self.players.iter().enumerate() {
             let sp = ShufflePlayer::deterministic(seat as u64 + 1);
             ctx.players[seat] = Some(sp.clone());
-            let join_args = JoinTableArgs {
+            let join_args = JoinTableArgs::with_key(
                 player,
-                buy_in: 1_000,
-                pk: ECPoint(sp.pk),
-            };
+                1_000,
+                sp.sk,
+                poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(
+                    30_000 + seat as u64,
+                ),
+            )
+            .expect("deterministic join key proof");
             dispatch_and_prove(
                 &mut plugin,
                 &mut ctx,

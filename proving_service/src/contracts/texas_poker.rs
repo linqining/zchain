@@ -503,7 +503,9 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
 mod tests {
     use super::*;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
+    use poker_l1::vm::contracts::texas_poker::constants::{
+        ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP,
+    };
     use poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args;
     use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState};
     use poker_protocol::crypto::curve::{
@@ -618,11 +620,18 @@ mod tests {
         table.deck_state.contributor_mask = 0b11;
         table.sync_aggregated_pk().unwrap();
         assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
-        table.shuffle_state = ShuffleState {
-            phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-            pending_mask: 0b11,
-            completed_mask: 0,
-        };
+        table
+            .enter_shuffling(
+                poker_l1::vm::contracts::texas_poker::types::ShufflingPurpose::Initial,
+                ROUND_WAITING,
+                ShuffleState {
+                    pending_mask: 0b11,
+                    completed_mask: 0,
+                },
+                None,
+                0,
+            )
+            .unwrap();
 
         let (first, table) = next_shuffle_task(table, aggregated_pk, &[3, 0, 7, 1, 6, 2, 5, 4]);
         let (second, table) = next_shuffle_task(table, aggregated_pk, &[1, 7, 3, 5, 0, 6, 4, 2]);
