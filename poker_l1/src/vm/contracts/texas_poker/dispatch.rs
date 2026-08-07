@@ -1391,10 +1391,11 @@ fn dispatch_auto_fold(
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "auto_fold")?;
     require_caller_is_creator(context, table, "auto_fold")?;
-    if table.current_turn != input.seat_index {
+    if table.current_turn() != input.seat_index {
         return Err(PokerL1Error::Other(format!(
             "auto_fold seat is not current turn: requested={}, current={:?}",
-            input.seat_index, table.current_turn
+            input.seat_index,
+            table.current_turn()
         )));
     }
     let outcome = state_machine::advance_deadline(table, context.block_timestamp, events)?;

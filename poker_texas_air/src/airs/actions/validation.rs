@@ -174,9 +174,10 @@ fn validate_native_mid_round(
         &events,
     )?;
 
-    let completes_betting_round =
-        post.round_state != pre.round_state || post.betting_round.is_none() || post.pot != pre.pot;
-    if pre.betting_round.is_none() || (completes_betting_round && !allow_round_completion) {
+    let completes_betting_round = post.round_state() != pre.round_state()
+        || post.betting_round().is_none()
+        || post.pot != pre.pot;
+    if pre.betting_round().is_none() || (completes_betting_round && !allow_round_completion) {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
             "{method} triggered an unsupported betting-round completion; this AIR only accepts the canonical mid-round branch or its explicitly modeled clean collection branch"
         )));
@@ -244,8 +245,8 @@ pub(crate) fn validate_fold(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
         tables.pre.pot,
         tables.post.pot,
     );
@@ -265,11 +266,7 @@ pub(crate) fn validate_check(
         true,
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "check")?;
-    let pre_round = tables
-        .pre
-        .betting_round
-        .as_ref()
-        .expect("mid-round checked");
+    let pre_round = tables.pre.betting_round().expect("mid-round checked");
     let outcome = derive_betting_outcome(&tables.pre, &tables.post, 0, "check")?;
     if air.input.current_bet != pre_round.current_bet
         || air.input.seat_bet != pre_seat.bet
@@ -288,8 +285,8 @@ pub(crate) fn validate_check(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
         tables.pre.pot,
         tables.post.pot,
     );
@@ -310,11 +307,7 @@ pub(crate) fn validate_call(
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "call")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "call")?;
-    let pre_round = tables
-        .pre
-        .betting_round
-        .as_ref()
-        .expect("mid-round checked");
+    let pre_round = tables.pre.betting_round().expect("mid-round checked");
     let call_amount = pre_round.process_call(pre_seat.bet, pre_seat.stack);
     let outcome = derive_betting_outcome(&tables.pre, &tables.post, call_amount, "call")?;
     let action_post_bet = pre_seat
@@ -341,8 +334,8 @@ pub(crate) fn validate_call(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
         tables.pre.pot,
         tables.post.pot,
         post_seat.stack,
@@ -371,17 +364,13 @@ pub(crate) fn validate_raise(
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "raise")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "raise")?;
-    let pre_round = tables
-        .pre
-        .betting_round
-        .as_ref()
-        .expect("mid-round checked");
+    let pre_round = tables.pre.betting_round().expect("mid-round checked");
     let action_delta = air
         .input
         .raise_to
         .checked_sub(pre_seat.bet)
         .ok_or_else(|| TexasAirError::SpecViolation("raise: action bet decreased".into()))?;
-    let mut action_round = pre_round.clone();
+    let mut action_round = pre_round;
     action_round
         .process_raise(air.input.raise_to, pre_seat.bet, pre_seat.stack)
         .map_err(|error| {
@@ -410,8 +399,8 @@ pub(crate) fn validate_raise(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
         tables.pre.pot,
         tables.post.pot,
         pre_seat.stack,
@@ -439,16 +428,12 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "bet")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "bet")?;
-    let pre_round = tables
-        .pre
-        .betting_round
-        .as_ref()
-        .expect("mid-round checked");
+    let pre_round = tables.pre.betting_round().expect("mid-round checked");
     let action_post_bet = pre_seat
         .bet
         .checked_add(air.input.amount)
         .ok_or_else(|| TexasAirError::SpecViolation("bet: action seat.bet overflow".into()))?;
-    let mut action_round = pre_round.clone();
+    let mut action_round = pre_round;
     action_round
         .process_raise(action_post_bet, pre_seat.bet, pre_seat.stack)
         .map_err(|error| {
@@ -477,8 +462,8 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
         tables.pre.pot,
         tables.post.pot,
         action_post_bet,
@@ -528,12 +513,11 @@ pub(crate) fn validate_auto_fold(
         Some(&tables.composition.settlement),
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "auto_fold")?;
-    let deadline = tables
-        .pre
-        .timestamps
+    let pre_timestamps = tables.pre.timestamps();
+    let deadline = pre_timestamps
         .betting_started_at
         .saturating_add(tables.pre.timeout_config.betting_timeout_ms);
-    if air.input.pre_betting_started_at != tables.pre.timestamps.betting_started_at
+    if air.input.pre_betting_started_at != pre_timestamps.betting_started_at
         || air.input.betting_timeout_ms != tables.pre.timeout_config.betting_timeout_ms
         || air.input.pre_time_bank_ms != pre_seat.time_bank_ms
         || air.input.pre_betting_started_at == 0
@@ -555,8 +539,8 @@ pub(crate) fn validate_auto_fold(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
@@ -613,8 +597,8 @@ pub(crate) fn validate_force_fold(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
@@ -658,7 +642,7 @@ pub(crate) fn validate_kick_player(
         ));
     }
     let version_increment = 1;
-    let reset_cascade = if canonical.post.round_state
+    let reset_cascade = if canonical.post.round_state()
         == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
         && canonical.post.pot == 0
     {
@@ -671,7 +655,7 @@ pub(crate) fn validate_kick_player(
             && match composition.settlement.kind {
                 crate::airs::composition::SettlementKind::WithoutShowdown => true,
                 crate::airs::composition::SettlementKind::ResetOnly => {
-                    canonical.pre.round_state
+                    canonical.pre.round_state()
                         == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
                         && canonical.pre.pot == 0
                         && pre_seat.bet == 0
@@ -683,7 +667,7 @@ pub(crate) fn validate_kick_player(
         false
     };
     let simple = !reset_cascade
-        && canonical.post.round_state == canonical.pre.round_state
+        && canonical.post.round_state() == canonical.pre.round_state()
         && canonical.post.pot == expected_post_pot;
     if !simple && !reset_cascade {
         return Err(TexasAirError::UnsupportedBettingTransition(
@@ -742,8 +726,8 @@ pub(crate) fn validate_kick_player(
         public_inputs.call_seq,
         canonical.pre.version,
         canonical.post.version,
-        canonical.pre.round_state,
-        canonical.post.round_state,
+        canonical.pre.round_state(),
+        canonical.post.round_state(),
         canonical.pre.pot,
         canonical.post.pot,
     );
@@ -837,8 +821,8 @@ pub(crate) fn validate_request_leave_after_hand(
         public_inputs.call_seq,
         pre.version,
         post.version,
-        pre.round_state,
-        post.round_state,
+        pre.round_state(),
+        post.round_state(),
         pre.pot,
         post.pot,
     );

@@ -366,6 +366,10 @@ fn issue_lifecycle_binding(
     };
 
     let has = |predicate: fn(&TexasPokerEvent) -> bool| events.iter().any(predicate);
+    let pre_timestamps = pre.timestamps();
+    let post_timestamps = post.timestamps();
+    let pre_shuffle = pre.shuffle_state();
+    let pre_reveal = pre.reveal_token_state();
     let branch_kind = if has(|event| matches!(event, TexasPokerEvent::ReconstructTimeout { .. })) {
         TICK_BRANCH_RECONSTRUCT_TIMEOUT
     } else if has(|event| matches!(event, TexasPokerEvent::ShuffleTimeout { .. })) {
@@ -396,40 +400,40 @@ fn issue_lifecycle_binding(
         )
     }) {
         TICK_BRANCH_INCONSISTENT_RESET
-    } else if pre.round_state == ROUND_SHOWDOWN
+    } else if pre.round_state() == ROUND_SHOWDOWN
         && (has(|event| matches!(event, TexasPokerEvent::SettlementPlanCommitted { .. }))
             || has(|event| matches!(event, TexasPokerEvent::HandEndedWithoutShowdown { .. })))
     {
         TICK_BRANCH_SHOWDOWN_SETTLED
-    } else if pre.timestamps.shuffle_started_at == 0
-        && post.timestamps.shuffle_started_at == current_time
-        && pre.shuffle_state.phase != 0
+    } else if pre_timestamps.shuffle_started_at == 0
+        && post_timestamps.shuffle_started_at == current_time
+        && pre_shuffle.phase != 0
     {
         TICK_BRANCH_TIMER_STARTED
-    } else if pre.timestamps.reveal_started_at == 0
-        && post.timestamps.reveal_started_at == current_time
-        && pre.reveal_token_state.reveal_phase != 0
+    } else if pre_timestamps.reveal_started_at == 0
+        && post_timestamps.reveal_started_at == current_time
+        && pre_reveal.reveal_phase != 0
     {
         TICK_BRANCH_TIMER_STARTED
-    } else if pre.timestamps.betting_started_at == 0
-        && post.timestamps.betting_started_at == current_time
+    } else if pre_timestamps.betting_started_at == 0
+        && post_timestamps.betting_started_at == current_time
         && state_machine::is_betting_round(pre)
     {
         TICK_BRANCH_TIMER_STARTED
-    } else if pre.round_state == ROUND_SHOWDOWN
-        && pre.timestamps.showdown_at == 0
-        && post.timestamps.showdown_at
+    } else if pre.round_state() == ROUND_SHOWDOWN
+        && pre_timestamps.showdown_at == 0
+        && post_timestamps.showdown_at
             == current_time.saturating_add(pre.timeout_config.showdown_display_ms)
     {
         TICK_BRANCH_TIMER_STARTED
     } else if matches!(
-        pre.shuffle_state.phase,
+        pre_shuffle.phase,
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
         TICK_BRANCH_SHUFFLE_ADVANCED
-    } else if pre.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE {
+    } else if pre_reveal.reveal_phase != REVEAL_PHASE_NONE {
         TICK_BRANCH_REVEAL_ADVANCED
-    } else if state_machine::is_betting_round(pre) && pre.current_turn == NO_SEAT {
+    } else if state_machine::is_betting_round(pre) && pre.current_turn() == NO_SEAT {
         TICK_BRANCH_BETTING_ROUND_ADVANCED
     } else {
         return Err(TexasAirError::SpecViolation(
@@ -480,66 +484,68 @@ fn tick_lifecycle_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 
 /// Return the canonical timer family that has priority in the pre-state.
 fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, bool, Option<u8>)> {
-    if table.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE {
+    let reconstruct = table.reconstruct_state();
+    let shuffle = table.shuffle_state();
+    let reveal = table.reveal_token_state();
+    let timestamps = table.timestamps();
+    if reconstruct.phase != RECONSTRUCT_PHASE_NONE {
         return Ok((
             TICK_KIND_RECONSTRUCT,
-            table.timestamps.reconstruct_started_at,
+            timestamps.reconstruct_started_at,
             table.timeout_config.reconstruct_timeout_ms,
             true,
             None,
         ));
     }
     if matches!(
-        table.shuffle_state.phase,
+        shuffle.phase,
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
-        let pending = table.shuffle_state.pending_mask != 0
-            && table.shuffle_state.derived_current_shuffler() != NO_SEAT;
+        let pending = shuffle.pending_mask != 0 && shuffle.derived_current_shuffler() != NO_SEAT;
         return Ok((
             TICK_KIND_SHUFFLE,
-            table.timestamps.shuffle_started_at,
+            timestamps.shuffle_started_at,
             table.timeout_config.shuffle_timeout_ms,
             pending,
             None,
         ));
     }
-    if table.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE {
-        let pending = !table
-            .reveal_token_state
+    if reveal.reveal_phase != REVEAL_PHASE_NONE {
+        let pending = !reveal
             .assignments
             .iter()
             .all(|assignment| assignment.pending_mask() == 0);
         return Ok((
             TICK_KIND_REVEAL,
-            table.timestamps.reveal_started_at,
+            timestamps.reveal_started_at,
             table.timeout_config.reveal_timeout_ms,
             pending,
             None,
         ));
     }
     if state_machine::is_betting_round(table) {
-        if table.current_turn != NO_SEAT {
-            let seat = table.current_turn;
+        if table.current_turn() != NO_SEAT {
+            let seat = table.current_turn();
             // Validate this now rather than letting an out-of-range index reach
             // the native state machine's indexing path later.
             let _ = seat_time_bank(table, seat, "pre")?;
             return Ok((
                 TICK_KIND_BETTING,
-                table.timestamps.betting_started_at,
+                timestamps.betting_started_at,
                 table.timeout_config.betting_timeout_ms,
                 true,
                 Some(seat),
             ));
         }
     }
-    if table.round_state == ROUND_SHOWDOWN {
+    if table.round_state() == ROUND_SHOWDOWN {
         // `showdown_at` is already a deadline in the native VM. Model it as
         // `started_at + 0` so the common 64-bit comparison AIR remains exact.
         return Ok((
             TICK_KIND_NON_TIMER,
-            table.timestamps.showdown_at,
+            timestamps.showdown_at,
             0,
-            table.timestamps.showdown_at != 0,
+            timestamps.showdown_at != 0,
             None,
         ));
     }
@@ -1097,8 +1103,8 @@ pub fn validate_public_inputs(
         public_inputs.call_seq,
         pre.version,
         post.version,
-        pre.round_state,
-        post.round_state,
+        pre.round_state(),
+        post.round_state(),
     );
     expected_row.common.pre_pot = u64_to_m31_limbs(pre.pot);
     expected_row.common.post_pot = u64_to_m31_limbs(post.pot);

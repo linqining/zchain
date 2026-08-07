@@ -659,8 +659,8 @@ impl Orchestrator {
         };
         let pre_version = task.pre_table.version;
         let post_version = task.post_table.version;
-        let pre_round_state = task.pre_table.round_state;
-        let post_round_state = task.post_table.round_state;
+        let pre_round_state = task.pre_table.round_state();
+        let post_round_state = task.post_table.round_state();
 
         let row = FoldRow::active(
             &input,
@@ -895,8 +895,8 @@ impl Orchestrator {
             task.call_seq,
             pre_v,
             post_v,
-            task.pre_table.round_state,
-            task.post_table.round_state,
+            task.pre_table.round_state(),
+            task.post_table.round_state(),
             task.pre_table.pot,
             task.post_table.pot,
         );
@@ -1014,7 +1014,7 @@ impl Orchestrator {
             task.context.block_timestamp,
         )?;
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = TickRow::active(
             &input,
             srm(pre_root),
@@ -1065,7 +1065,7 @@ impl Orchestrator {
             ));
         };
         let input = ResetForNextHandInput {
-            shuffle_phase: task.pre_table.shuffle_state.phase,
+            shuffle_phase: task.pre_table.shuffle_state().phase,
             authorization: AdminAuthorizationBinding::verify_table_creator(
                 MethodKind::ResetForNextHand,
                 &task.context,
@@ -1084,7 +1084,7 @@ impl Orchestrator {
             .air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let pre_r = task.pre_table.round_state;
+        let pre_r = task.pre_table.round_state();
         let mut row = ResetForNextHandRow::active(
             &input,
             0, // _pre_pending_addon（未用）
@@ -1138,11 +1138,7 @@ impl Orchestrator {
             true,
         )?;
         let seat = Self::seat(&task.pre_table, *seat_index)?;
-        let current_bet = task
-            .pre_table
-            .betting_round
-            .as_ref()
-            .map_or(0, |b| b.current_bet);
+        let current_bet = task.pre_table.betting_round().map_or(0, |b| b.current_bet);
         let outcome = derive_betting_outcome(&task.pre_table, &task.post_table, 0, "check")?;
         let input = CheckInput {
             seat_index: *seat_index,
@@ -1151,7 +1147,7 @@ impl Orchestrator {
             outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = CheckRow::active(
             &input,
@@ -1209,8 +1205,7 @@ impl Orchestrator {
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
         let pre_round = task
             .pre_table
-            .betting_round
-            .as_ref()
+            .betting_round()
             .expect("betting validator requires betting_round");
         let pre_current_bet = pre_round.current_bet;
         let call_amount = pre_round.process_call(pre_seat.bet, pre_seat.stack);
@@ -1230,7 +1225,7 @@ impl Orchestrator {
             outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = CallRow::active(
             &input,
@@ -1300,14 +1295,13 @@ impl Orchestrator {
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
         let pre_round = task
             .pre_table
-            .betting_round
-            .as_ref()
+            .betting_round()
             .expect("betting validator requires betting_round");
         let min_raise = pre_round.min_raise;
         let action_delta = total_bet
             .checked_sub(pre_seat.bet)
             .ok_or_else(|| TexasAirError::SpecViolation("raise: action bet decreased".into()))?;
-        let mut action_round = pre_round.clone();
+        let mut action_round = pre_round;
         action_round
             .process_raise(*total_bet, pre_seat.bet, pre_seat.stack)
             .map_err(|error| {
@@ -1328,7 +1322,7 @@ impl Orchestrator {
             outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = RaiseRow::active(
             &input,
@@ -1396,8 +1390,7 @@ impl Orchestrator {
         let post_seat = Self::seat(&task.post_table, *seat_index)?;
         let pre_round = task
             .pre_table
-            .betting_round
-            .as_ref()
+            .betting_round()
             .expect("betting validator requires betting_round");
         let action_post_bet = pre_seat
             .bet
@@ -1415,7 +1408,7 @@ impl Orchestrator {
             outcome,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = BetRow::active(
             &input,
@@ -1507,7 +1500,7 @@ impl Orchestrator {
             // placeholder), otherwise the AIR has no timeout statement to
             // prove.
             current_time: task.context.block_timestamp,
-            pre_betting_started_at: task.pre_table.timestamps.betting_started_at,
+            pre_betting_started_at: task.pre_table.timestamps().betting_started_at,
             betting_timeout_ms: task.pre_table.timeout_config.betting_timeout_ms,
             pre_time_bank_ms: task
                 .pre_table
@@ -1523,7 +1516,7 @@ impl Orchestrator {
             authorization,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = AutoFoldRow::active(
             &input,
             srm(pre_root),
@@ -1607,7 +1600,7 @@ impl Orchestrator {
             authorization,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = ForceFoldRow::active(
             &input,
             srm(pre_root),
@@ -1672,7 +1665,7 @@ impl Orchestrator {
             ));
         }
         let version_increment = 1;
-        let reset_cascade = if task.post_table.round_state
+        let reset_cascade = if task.post_table.round_state()
             == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
             && task.post_table.pot == 0
         {
@@ -1683,7 +1676,7 @@ impl Orchestrator {
                 && match composition.settlement.kind {
                     crate::airs::composition::SettlementKind::WithoutShowdown => true,
                     crate::airs::composition::SettlementKind::ResetOnly => {
-                        task.pre_table.round_state
+                        task.pre_table.round_state()
                             == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
                             && task.pre_table.pot == 0
                             && pre_seat.bet == 0
@@ -1695,7 +1688,7 @@ impl Orchestrator {
             false
         };
         let simple = !reset_cascade
-            && task.post_table.round_state == task.pre_table.round_state
+            && task.post_table.round_state() == task.pre_table.round_state()
             && task.post_table.pot == expected_post_pot;
         if !simple && !reset_cascade {
             return Err(TexasAirError::UnsupportedBettingTransition(
@@ -1734,7 +1727,7 @@ impl Orchestrator {
             .air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = KickPlayerRow::active(
             &input,
@@ -1787,7 +1780,7 @@ impl Orchestrator {
             amount: *amount,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = AddonRow::active(
             &input,
             pre_seat.pending_addon,
@@ -1844,7 +1837,7 @@ impl Orchestrator {
             amount: *amount,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let (pre_r, post_r) = (task.pre_table.round_state, task.post_table.round_state);
+        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = RebuyRow::active(
             &input,
             pre_seat.stack,
@@ -1938,12 +1931,12 @@ impl Orchestrator {
             // The phase is an admission precondition. `advance_shuffle` may complete the last
             // participant and reset the post-state phase to NONE, so deriving it from post-state
             // rejects a valid terminal shuffle.
-            shuffle_phase: task.pre_table.shuffle_state.phase,
+            shuffle_phase: task.pre_table.shuffle_state().phase,
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let pre_cc = task.pre_table.shuffle_state.completed_mask.count_ones() as u8;
-        let post_cc = task.post_table.shuffle_state.completed_mask.count_ones() as u8;
+        let pre_cc = task.pre_table.shuffle_state().completed_mask.count_ones() as u8;
+        let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
         let mut row = JoinAndShuffleRow::active(
             &input,
             srm(pre_root),
@@ -2043,11 +2036,11 @@ impl Orchestrator {
         let input = LeaveWithProofInput {
             seat_index: *seat_index,
             leave_kind: 0,
-            shuffle_phase: task.pre_table.shuffle_state.phase,
+            shuffle_phase: task.pre_table.shuffle_state().phase,
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let post_cc = task.post_table.shuffle_state.completed_mask.count_ones() as u8;
+        let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
         let mut row = LeaveWithProofRow::active(
             &input,
             srm(pre_root),
@@ -2170,8 +2163,8 @@ impl Orchestrator {
             task.call_seq,
             pre_version,
             post_version,
-            task.pre_table.round_state,
-            task.post_table.round_state,
+            task.pre_table.round_state(),
+            task.post_table.round_state(),
             task.pre_table.pot,
             task.post_table.pot,
         );
@@ -2267,11 +2260,11 @@ impl Orchestrator {
         let input = SubmitShuffleV2Input {
             seat_index: *seat_index,
             new_deck_commitment: deck_commitment(&task.post_table),
-            shuffle_phase: task.pre_table.shuffle_state.phase,
+            shuffle_phase: task.pre_table.shuffle_state().phase,
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let post_cc = task.post_table.shuffle_state.completed_mask.count_ones() as u8;
+        let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
         let mut row = SubmitShuffleV2Row::active(
             &input,
             srm(pre_root),
@@ -2359,13 +2352,13 @@ impl Orchestrator {
             // Admission is determined by the pre-dispatch reveal phase. The final player in a
             // reveal round legitimately advances the post-state to NONE after all assigned
             // tokens have been received.
-            reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
+            reveal_phase: task.pre_table.reveal_token_state().reveal_phase,
             version_increment,
             precompile: binding.air_binding(),
             settlement,
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let post_rc = task.post_table.reveal_token_state.assignments.len() as u8;
+        let post_rc = task.post_table.reveal_token_state().assignments.len() as u8;
         let mut row = SubmitPlayerRevealTokensRow::active(
             &input,
             srm(pre_root),
@@ -2458,7 +2451,7 @@ impl Orchestrator {
         let binding = PrecompileCallBinding::verify_reconstruction_v3(&request)?;
         let input = SubmitReconstructDeckInput {
             seat_index: *seat_index,
-            reconstruct_phase: task.pre_table.reconstruct_state.phase,
+            reconstruct_phase: task.pre_table.reconstruct_state().phase,
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
@@ -2649,7 +2642,7 @@ fn validate_native_betting_action(
     let pre = &task.pre_table;
     let post = &task.post_table;
 
-    if pre.betting_round.is_none() {
+    if pre.betting_round().is_none() {
         return Err(TexasAirError::SpecViolation(format!(
             "{method}: pre-state is not a betting round"
         )));
@@ -2733,8 +2726,9 @@ fn validate_native_betting_action(
         )));
     }
 
-    let completes_betting_round =
-        post.round_state != pre.round_state || post.betting_round.is_none() || post.pot != pre.pot;
+    let completes_betting_round = post.round_state() != pre.round_state()
+        || post.betting_round().is_none()
+        || post.pot != pre.pot;
     if completes_betting_round && !allow_round_completion {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
             "{method} triggered collect_bets_to_pot / advance_round / settlement; \

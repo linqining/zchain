@@ -162,8 +162,8 @@ pub(crate) fn validate_addon(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
@@ -210,8 +210,8 @@ pub(crate) fn validate_rebuy(
         public_inputs.call_seq,
         tables.pre.version,
         tables.post.version,
-        tables.pre.round_state,
-        tables.post.round_state,
+        tables.pre.round_state(),
+        tables.post.round_state(),
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);

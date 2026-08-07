@@ -772,7 +772,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 seat_index: *seat_index,
                 old_deck_commitment: deck_commitment(&task.pre_table),
                 new_deck_commitment: deck_commitment(&task.post_table),
-                shuffle_phase: task.pre_table.shuffle_state.phase,
+                shuffle_phase: task.pre_table.shuffle_state().phase,
                 precompile: binding.air_binding(),
             };
             let mut row = JoinAndShuffleRow::active(
@@ -784,8 +784,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.call_seq,
                 task.pre_table.version,
                 task.post_table.version,
-                task.pre_table.shuffle_state.completed_mask.count_ones() as u8,
-                task.post_table.shuffle_state.completed_mask.count_ones() as u8,
+                task.pre_table.shuffle_state().completed_mask.count_ones() as u8,
+                task.post_table.shuffle_state().completed_mask.count_ones() as u8,
             );
             row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
             row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
@@ -872,7 +872,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 new_deck_commitment: deck_commitment(&task.post_table),
                 // Admission is determined by the pre-dispatch shuffle phase. The final shuffler
                 // legitimately drives the post-state to NONE after `advance_shuffle`.
-                shuffle_phase: task.pre_table.shuffle_state.phase,
+                shuffle_phase: task.pre_table.shuffle_state().phase,
                 precompile: binding.air_binding(),
             };
             let mut row = SubmitShuffleV2Row::active(
@@ -884,7 +884,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.call_seq,
                 task.pre_table.version,
                 task.post_table.version,
-                task.post_table.shuffle_state.completed_mask.count_ones() as u8,
+                task.post_table.shuffle_state().completed_mask.count_ones() as u8,
             );
             row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
             row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
@@ -957,7 +957,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let binding = PrecompileCallBinding::verify_reconstruction_v3(&request)?;
             let input = SubmitReconstructDeckInput {
                 seat_index: *seat_index,
-                reconstruct_phase: task.pre_table.reconstruct_state.phase,
+                reconstruct_phase: task.pre_table.reconstruct_state().phase,
                 precompile: binding.air_binding(),
             };
             let row = SubmitReconstructDeckRow::active(
@@ -1036,11 +1036,11 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let input = LeaveWithProofInput {
                 seat_index: *seat_index,
                 leave_kind: 0,
-                shuffle_phase: task.pre_table.shuffle_state.phase,
+                shuffle_phase: task.pre_table.shuffle_state().phase,
                 precompile: binding.air_binding(),
             };
             let post_completed_count = u8::try_from(
-                task.post_table.shuffle_state.completed_mask.count_ones(),
+                task.post_table.shuffle_state().completed_mask.count_ones(),
             )
             .map_err(|_| {
                 TexasAirError::SpecViolation(
@@ -1148,8 +1148,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.call_seq,
                 task.pre_table.version,
                 task.post_table.version,
-                task.pre_table.round_state,
-                task.post_table.round_state,
+                task.pre_table.round_state(),
+                task.post_table.round_state(),
                 task.pre_table.pot,
                 task.post_table.pot,
             );
@@ -1204,13 +1204,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let version_increment = reveal_version_increment(task)?;
             let input = SubmitPlayerRevealTokensInput {
                 seat_index: *seat_index,
-                reveal_phase: task.pre_table.reveal_token_state.reveal_phase,
+                reveal_phase: task.pre_table.reveal_token_state().reveal_phase,
                 version_increment,
                 precompile: binding.air_binding(),
                 settlement: replay_reveal_settlement_binding(task)?,
             };
             let post_revealed_count = u8::try_from(
-                task.post_table.reveal_token_state.assignments.len(),
+                task.post_table.reveal_token_state().assignments.len(),
             )
             .map_err(|_| {
                 TexasAirError::SpecViolation(

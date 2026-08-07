@@ -302,7 +302,8 @@ impl RevealTokenVerifyRequest {
                 "reveal-token seat is not occupied in the canonical pre-table".into(),
             ));
         }
-        let reveal_phase = pre_table.reveal_token_state.reveal_phase;
+        let reveal_state = pre_table.reveal_token_state();
+        let reveal_phase = reveal_state.reveal_phase;
         if reveal_phase == REVEAL_PHASE_NONE {
             return Err(TexasAirError::SpecViolation(
                 "reveal-token request cannot target the NONE phase".into(),
@@ -324,8 +325,7 @@ impl RevealTokenVerifyRequest {
                 )));
             }
             seen[slot] = true;
-            let assignment = pre_table
-                .reveal_token_state
+            let assignment = reveal_state
                 .assignments
                 .get(slot)
                 .ok_or_else(|| {

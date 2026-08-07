@@ -146,8 +146,8 @@ pub(crate) fn validate_fold_with_proof(
         public_inputs.call_seq,
         canonical.pre.version,
         canonical.post.version,
-        canonical.pre.round_state,
-        canonical.post.round_state,
+        canonical.pre.round_state(),
+        canonical.post.round_state(),
         canonical.pre.pot,
         canonical.post.pot,
     );
@@ -221,7 +221,7 @@ pub(crate) fn validate_join_and_shuffle(
         seat_index: args.seat_index,
         old_deck_commitment: deck_commitment(&canonical.pre),
         new_deck_commitment: deck_commitment(&canonical.post),
-        shuffle_phase: canonical.pre.shuffle_state.phase,
+        shuffle_phase: canonical.pre.shuffle_state().phase,
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
@@ -236,12 +236,12 @@ pub(crate) fn validate_join_and_shuffle(
     }
 
     let pre_completed_count = count_as_u8(
-        canonical.pre.shuffle_state.completed_mask.count_ones() as usize,
+        canonical.pre.shuffle_state().completed_mask.count_ones() as usize,
         METHOD,
         "pre completed player",
     )?;
     let post_completed_count = count_as_u8(
-        canonical.post.shuffle_state.completed_mask.count_ones() as usize,
+        canonical.post.shuffle_state().completed_mask.count_ones() as usize,
         METHOD,
         "post completed player",
     )?;
@@ -347,7 +347,7 @@ pub(crate) fn validate_leave_with_proof(
         // row keeps its historical zero discriminator until the DLEq verifier
         // AIR replaces this placeholder column.
         leave_kind: 0,
-        shuffle_phase: canonical.pre.shuffle_state.phase,
+        shuffle_phase: canonical.pre.shuffle_state().phase,
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
@@ -361,7 +361,7 @@ pub(crate) fn validate_leave_with_proof(
     }
 
     let post_completed_count = count_as_u8(
-        canonical.post.shuffle_state.completed_mask.count_ones() as usize,
+        canonical.post.shuffle_state().completed_mask.count_ones() as usize,
         METHOD,
         "post completed player",
     )?;
@@ -445,7 +445,7 @@ pub(crate) fn validate_submit_player_reveal_tokens(
         crate::settlement_binding::SettlementPlanBinding::from_replay(&canonical.events)?;
     let input = SubmitPlayerRevealTokensInput {
         seat_index: args.seat_index,
-        reveal_phase: canonical.pre.reveal_token_state.reveal_phase,
+        reveal_phase: canonical.pre.reveal_token_state().reveal_phase,
         version_increment,
         precompile: binding.air_binding(),
         settlement,
@@ -462,7 +462,7 @@ pub(crate) fn validate_submit_player_reveal_tokens(
     }
 
     let post_revealed_count = count_as_u8(
-        canonical.post.reveal_token_state.assignments.len(),
+        canonical.post.reveal_token_state().assignments.len(),
         METHOD,
         "post reveal assignment",
     )?;
@@ -516,7 +516,7 @@ pub(crate) fn validate_submit_shuffle_v2(
     let input = SubmitShuffleV2Input {
         seat_index: args.seat_index,
         new_deck_commitment: deck_commitment(&canonical.post),
-        shuffle_phase: canonical.pre.shuffle_state.phase,
+        shuffle_phase: canonical.pre.shuffle_state().phase,
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index
@@ -530,7 +530,7 @@ pub(crate) fn validate_submit_shuffle_v2(
     }
 
     let post_completed_count = count_as_u8(
-        canonical.post.shuffle_state.completed_mask.count_ones() as usize,
+        canonical.post.shuffle_state().completed_mask.count_ones() as usize,
         METHOD,
         "post completed player",
     )?;
@@ -584,7 +584,7 @@ pub(crate) fn validate_submit_reconstruct_deck(
     })?;
     let input = SubmitReconstructDeckInput {
         seat_index: args.seat_index,
-        reconstruct_phase: canonical.pre.reconstruct_state.phase,
+        reconstruct_phase: canonical.pre.reconstruct_state().phase,
         precompile: binding.air_binding(),
     };
     if air.input.seat_index != input.seat_index

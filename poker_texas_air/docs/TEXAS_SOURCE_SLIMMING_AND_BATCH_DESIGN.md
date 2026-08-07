@@ -55,6 +55,18 @@ deadline 小于 timeout、reconstruct epoch 溢出、timeout 超过 `u32` 等输
 运行时 `TexasPokerTable` 暂时仍保留 v6 flattened phase 字段作为迁移期兼容缓存，但自定义 Borsh
 codec 保证这些缓存不会进入共识编码。后续物理删除缓存字段不再需要升级 persisted schema。
 
+运行时物理删除的第一批边界现已落地：AIR、composition、orchestrator、precompile binding、
+proving service 以及状态机的 phase 判定改为通过 typed accessor 读取；跨 phase 的生产写入开始统一
+经过 `enter_waiting/enter_shuffling/enter_revealing/enter_reconstructing/enter_betting/
+enter_showdown_display`。这些 helper 会原子清除互斥 payload 和旧 timer，避免迁移期缓存产生
+reveal + betting 或 reconstruct + shuffle 的短暂重叠。剩余工作是把同 variant 内的 mask、assignment、
+turn 与 deadline 原地更新改成 variant-aware mutable API。
+
+同 variant 更新现也已通过 `active_*_mut`、`set_betting_turn`、`remove_seat_from_active_phase` 和
+phase-specific deadline API 收口；deadline arm/extend 使用 checked `u64` 并在写状态前预检溢出。
+踢出当前 shuffler 时先记录 actor 身份、再清 participant bit，避免从更新后的 pending mask 反推旧 actor
+而漏掉推进。下一批可以直接替换 runtime 字段为 `hand_phase: HandPhase`，不再需要改状态机调用边界。
+
 schema v9 已完成 reveal ledger 的 fail-closed 类型迁移。v2-v8 的旧
 `ciphertext: Option<_> + plaintext: Option<_>` 使用精确 legacy mirror 解码：`Some/None` 迁移为
 `Partial`，`None/Some` 迁移为 `Plaintext`，旧 `None/None` tombstone 被清除，`Some/Some` 非法组合
@@ -73,6 +85,13 @@ schema v11 已物理删除运行时与持久化 `ShuffleState.current_shuffler`�
 `first(pending_mask)`，因此不再需要写同步字段，也不再需要 normalize 为“选择 actor”单独产生一个
 micro-step。v5-v10 的精确 legacy phase mirror 仍读取旧字段；迁移只接受它等于 pending mask 的最低
 seat（空 mask 时必须为 `NO_SEAT`），随后丢弃，任何错配均 fail-closed。
+
+WAITING 状态不再用隐藏的 `ShuffleState.completed_mask` 镜像长期 contributor lineage。
+`DeckState.contributor_mask` 只描述 aggregate-key 成员并派生验证公钥；active shuffle variant 内的
+completed mask 则只描述当前手牌新牌组的提交进度。由于 `start_hand` 会重新生成 canonical
+plaintext-base deck，新一手的 completed mask 必须从零开始、pending mask 覆盖所有 active seat；
+不能从长期 contributor mask 复制，否则会把尚未应用到新 deck 的加密层误判为已提交。
+`leave_with_proof` 仍依据 contributor lineage 验证成员资格。
 
 外部命令序号也已完成收口。所有真正改变状态的 dispatch 在原子提交边界统一写入
 `post.version = pre.version + 1` 与 `post.call_seq = pre.call_seq + 1`；内部 normalize、reset、settlement
@@ -141,7 +160,7 @@ Tagged-union Stage 已稳定且 status 列确认为热点后再做。
 | `state_schema_version` | 中期移到 codec envelope | schema 版本属于编码层，不是扑克业务状态；state-root domain 仍必须包含版本，迁移入口继续 fail-closed。|
 | `max_players` | 与 `seats` 表示二选一 | 若继续使用长度永久不变的 `Vec<Seat>`，容量可由 `seats.len()` 派生；若改固定 `[Seat; 9]`，则必须保留独立 `seat_capacity`。不要同时保存两份容量事实。|
 | `ShuffleState.current_shuffler` | schema v11 已删除 | 当前洗牌者是 `first(pending_mask)`，不再产生仅用于同步缓存的 normalize step。|
-| `ShuffleState.completed_mask` | shuffle 内只表示本轮已提交者；完成后移入 `DeckState.contributor_mask` | `HandPhase::Shuffling` 结束后 shuffle payload 会消失，因此 deck 贡献者 lineage 不能只存在于 shuffle variant。|
+| `ShuffleState.completed_mask` | 仅表示当前手牌 freshly initialized deck 的本轮已提交者 | 它不能与 `DeckState.contributor_mask` 合并：后者是长期 aggregate-key 成员，前者在每次 `start_hand` 重建 deck 后必须从零开始。|
 | `DeckState.aggregated_pk` | schema v10 已由持久化 `contributor_mask + seat.pk` 派生 | host-native verifier 最多做 9 次 G1 加法；join 置 bit，leave/fold proof 清 bit，跨局 reset 为仍占座玩家重建 mask。|
 | `DeckState.cards_dealt` | 暂时保留 | reconstruct 会开启新的 deck epoch，旧 hole/board 仍存在，不能只用已公开牌数量推导新 deck 游标。引入显式 deck epoch 和 lineage 后才可重新评估。|
 | `RevealAssignment.encrypted_card_index/runout_index/board_position` | 合并成 `RevealTarget` tagged payload + deck index | `Hole { seat, slot }` 与 `Board { runout_bit, position }` 消灭 `board_position=0xff` 等哨兵组合；deck index 仍是独立 lineage。|
@@ -263,6 +282,29 @@ flags word。这样能减少常驻列而不会把 AIR 的选择性拆位成本�
 并分别校验 seat signature、deadline 或 creator authorization。
 
 ### 可以舍弃的方法
+
+先冻结牌组生命周期。当前源码同时存在两套互相冲突的模型：
+
+1. `join_and_shuffle` 在 WAITING 时把加入者的 layer 写入 deck；
+2. `start_hand` 又调用 `set_initial_encrypted_deck` 重建 plaintext-base deck，并要求 active seat
+   对新 deck 执行本手 shuffle。
+
+第二步会丢弃第一步的牌组输出，所以不能再把 WAITING 的 contributor membership 当作“本手已
+shuffle”。推荐明确采用 **fresh deck per hand**：
+
+- canonical join 只做 seat/funding、非 identity key 与 key-ownership proof；不携带两副 52-card
+  deck、remask proof 或 shuffle proof；
+- `start_hand` 初始化 canonical deck，并令 `pending_mask = active contributor mask`、
+  `completed_mask = 0`；
+- 每个参与者仅通过本手 `SubmitShuffle` 应用一次 layer；
+- WAITING 下没有需要保全的 live hand deck，因此普通 `LeaveNow` 直接删除 contributor membership，
+  不再要求 `leave_with_proof`；
+- 对局中的物理退出仍保留 `fold_with_proof/RemoveLayer`，因为这时移除 live deck layer 会影响后续
+  reveal/reconstruct。
+
+这样可从 canonical method 集合删除 `JoinAndShuffle` 与 WAITING-only `LeaveWithProof`，并删除对应的
+大体积 deck/proof args。旧 selector 可在兼容期拒绝新建调用或转换为 `JoinWithKeyProof`；不能继续
+验证一份随后被 `start_hand` 丢弃的 shuffle output。
 
 - `bet`：内部完全等价于 `RaiseTo`；旧 selector 只做参数换算与“postflop、尚无下注”的附加校验。
 - `check` 与 `call` 的独立内部实现：合并为 `MatchBet`。`current_bet == seat.bet` 时金额为 0，产生

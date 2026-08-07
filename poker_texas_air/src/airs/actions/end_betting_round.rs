@@ -61,28 +61,28 @@ pub(crate) fn derive_betting_outcome(
     action_bet_delta: u64,
     method: &str,
 ) -> TexasAirResult<BettingOutcome> {
-    if pre.betting_round.is_none() {
+    if pre.betting_round().is_none() {
         return Err(TexasAirError::SpecViolation(format!(
             "{method}: pre-state is not a betting round"
         )));
     }
 
-    if post.betting_round.is_some()
-        && post.round_state == pre.round_state
+    if post.betting_round().is_some()
+        && post.round_state() == pre.round_state()
         && post.pot == pre.pot
-        && post.current_turn != NO_CURRENT_TURN
+        && post.current_turn() != NO_CURRENT_TURN
     {
-        let post_current_turn = post.current_turn;
+        let post_current_turn = post.current_turn();
         return Ok(BettingOutcome::MidRound { post_current_turn });
     }
 
-    if post.betting_round.is_some() || post.current_turn != NO_CURRENT_TURN {
+    if post.betting_round().is_some() || post.current_turn() != NO_CURRENT_TURN {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
             "{method}: transition is neither mid-round nor bet collection plus round advancement"
         )));
     }
 
-    let expected_post_round = match pre.round_state {
+    let expected_post_round = match pre.round_state() {
         ROUND_PREFLOP => ROUND_FLOP,
         ROUND_FLOP => ROUND_TURN,
         ROUND_TURN => ROUND_RIVER,
@@ -90,14 +90,14 @@ pub(crate) fn derive_betting_outcome(
         _ => {
             return Err(TexasAirError::UnsupportedBettingTransition(format!(
                 "{method}: unsupported pre-round {} for round completion",
-                pre.round_state
+                pre.round_state()
             )));
         }
     };
-    if post.round_state != expected_post_round {
+    if post.round_state() != expected_post_round {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
             "{method}: round completion expected post round {expected_post_round}, got {}",
-            post.round_state
+            post.round_state()
         )));
     }
 

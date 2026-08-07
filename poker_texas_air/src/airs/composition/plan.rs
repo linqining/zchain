@@ -575,7 +575,7 @@ fn derive_seat_update(
             method_kind.method_name()
         )));
     };
-    if *event_table != pre.id || *event_seat != seat_index || *event_round != pre.round_state {
+    if *event_table != pre.id || *event_seat != seat_index || *event_round != pre.round_state() {
         return Err(TexasAirError::SpecViolation(
             "primary betting action event does not match dispatch scope".into(),
         ));
@@ -784,7 +784,7 @@ fn derive_bet_collection(
         [] if event_collected_bets == 0 => {}
         [(table_id, round_state, pot_after, seats)]
             if *table_id == pre.id
-                && *round_state == pre.round_state
+                && *round_state == pre.round_state()
                 && *pot_after == post_pot
                 && **seats == expected_seats => {}
         _ => {
@@ -834,12 +834,12 @@ fn derive_round_advance(
             ));
         };
         if *table_id != pre.id
-            || *from_round != pre.round_state
-            || *to_round != post.round_state
+            || *from_round != pre.round_state()
+            || *to_round != post.round_state()
             || *pot != post.pot
             || *community_cards_count != post.community_cards.len() as u64
-            || post.betting_round.is_some()
-            || post.current_turn != NO_CURRENT_TURN
+            || post.betting_round().is_some()
+            || post.current_turn() != NO_CURRENT_TURN
         {
             return Err(TexasAirError::SpecViolation(
                 "RoundAdvanced event does not match canonical post table".into(),
@@ -849,9 +849,9 @@ fn derive_round_advance(
             active: true,
             pre_round_state: *from_round,
             post_round_state: *to_round,
-            pre_reveal_phase: pre.reveal_token_state.reveal_phase,
-            post_reveal_phase: post.reveal_token_state.reveal_phase,
-            pre_current_turn: pre.current_turn,
+            pre_reveal_phase: pre.reveal_token_state().reveal_phase,
+            post_reveal_phase: post.reveal_token_state().reveal_phase,
+            pre_current_turn: pre.current_turn(),
             post_current_turn: NO_CURRENT_TURN,
             post_pot: *pot,
             community_cards_count: *community_cards_count,
@@ -949,9 +949,9 @@ fn derive_settlement(
             method_kind,
             MethodKind::KickPlayer | MethodKind::ResetForNextHand | MethodKind::Tick
         ) && !tick_started_hand
-            && post.round_state == ROUND_WAITING
-            && post.betting_round.is_none()
-            && post.current_turn == NO_CURRENT_TURN
+            && post.round_state() == ROUND_WAITING
+            && post.betting_round().is_none()
+            && post.current_turn() == NO_CURRENT_TURN
             && post.pot == 0;
         if !reset_only {
             return Ok(SettlementStagePlan::inactive());
@@ -1261,9 +1261,9 @@ fn require_canonical_reset(
     events: &[TexasPokerEvent],
     expected_reason: Option<u8>,
 ) -> TexasAirResult<()> {
-    if post.round_state != ROUND_WAITING
-        || post.betting_round.is_some()
-        || post.current_turn != NO_CURRENT_TURN
+    if post.round_state() != ROUND_WAITING
+        || post.betting_round().is_some()
+        || post.current_turn() != NO_CURRENT_TURN
         || post.pot != 0
     {
         return Err(TexasAirError::SpecViolation(

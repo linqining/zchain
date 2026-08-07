@@ -532,7 +532,7 @@ mod tests {
         aggregated_pk: <Bls12381Curve as Curve>::Point,
         permutation: &[usize],
     ) -> (ProveTask, TexasPokerTable) {
-        let seat_index = pre_table.shuffle_state.derived_current_shuffler();
+        let seat_index = pre_table.shuffle_state().derived_current_shuffler();
         assert_ne!(seat_index, u8::MAX, "a shuffler should remain");
         let input_cards = pre_table.deck_state.encrypted.clone();
         let rerandomizers: Vec<_> = (0..input_cards.len())

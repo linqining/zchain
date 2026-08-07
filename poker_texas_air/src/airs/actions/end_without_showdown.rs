@@ -78,7 +78,7 @@ pub(crate) fn derive_fold_outcome(
     method: &str,
     settlement: Option<&SettlementStagePlan>,
 ) -> TexasAirResult<FoldOutcome> {
-    if pre.betting_round.is_none() {
+    if pre.betting_round().is_none() {
         return Err(TexasAirError::SpecViolation(format!(
             "{method}: pre-state is not a betting round"
         )));
@@ -89,18 +89,18 @@ pub(crate) fn derive_fold_outcome(
         )));
     }
 
-    if post.betting_round.is_some()
-        && post.round_state == pre.round_state
+    if post.betting_round().is_some()
+        && post.round_state() == pre.round_state()
         && post.pot == pre.pot
-        && post.current_turn != NO_CURRENT_TURN
+        && post.current_turn() != NO_CURRENT_TURN
     {
-        let post_current_turn = post.current_turn;
+        let post_current_turn = post.current_turn();
         return Ok(FoldOutcome::MidRound { post_current_turn });
     }
 
-    if post.round_state != ROUND_WAITING
-        || post.betting_round.is_some()
-        || post.current_turn != NO_CURRENT_TURN
+    if post.round_state() != ROUND_WAITING
+        || post.betting_round().is_some()
+        || post.current_turn() != NO_CURRENT_TURN
         || post.pot != 0
     {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(

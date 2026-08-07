@@ -589,9 +589,8 @@ fn submit_reveal_round(
             if ctx.stopped_at.is_none() {
                 let sp = ctx.players[submitter_seat as usize].clone();
                 if let Some(sp) = sp {
-                    let Some(card_idx) = plugin
-                        .table()
-                        .reveal_token_state
+                    let reveal_state = plugin.table().reveal_token_state();
+                    let Some(card_idx) = reveal_state
                         .assignments
                         .get(assignment_idx)
                         .map(|assignment| usize::from(assignment.encrypted_card_index))
@@ -612,8 +611,7 @@ fn submit_reveal_round(
                     // At showdown the contract verifies against the partial ciphertext
                     // persisted after the preflop reveals, rather than the current deck.
                     // This also remains correct if a later reconstruction replaced the deck.
-                    let card = if plugin.table().reveal_token_state.reveal_phase
-                        == REVEAL_PHASE_SHOWDOWN
+                    let card = if reveal_state.reveal_phase == REVEAL_PHASE_SHOWDOWN
                     {
                         plugin
                             .table()
@@ -689,9 +687,8 @@ fn submit_community_reveal(
             if ctx.stopped_at.is_none() {
                 let sp = ctx.players[seat as usize].clone();
                 if let Some(sp) = sp {
-                    let Some(card_idx) = plugin
-                        .table()
-                        .reveal_token_state
+                    let reveal_state = plugin.table().reveal_token_state();
+                    let Some(card_idx) = reveal_state
                         .assignments
                         .get(assignment_idx)
                         .map(|assignment| usize::from(assignment.encrypted_card_index))

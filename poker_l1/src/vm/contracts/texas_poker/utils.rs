@@ -162,7 +162,7 @@ pub fn reconstruction_v3_prior_state_digest(
     material.extend_from_slice(&table.id.to_bytes());
     material.extend_from_slice(&table.hand_id.to_le_bytes());
     material.push(seat_index);
-    material.extend_from_slice(&table.timestamps.reconstruct_started_at.to_le_bytes());
+    material.extend_from_slice(&table.timestamps().reconstruct_started_at.to_le_bytes());
     material.extend_from_slice(&aggregate_pk.0.to_compressed());
     let plaintext_cards = generate_plaintext_cards();
     material.extend_from_slice(&(plaintext_cards.len() as u32).to_le_bytes());
