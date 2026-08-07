@@ -11,18 +11,16 @@ use poker_l1::vm::contracts::texas_poker::{
     constants::{
         ACTION_CALL, ACTION_CHECK, ACTION_FOLD, ACTION_RAISE, ANTE_MODE_BBA, ANTE_MODE_NONE,
         ANTE_MODE_NORMAL, MAX_PLAYERS, MAX_TOTAL_BET, MIN_PLAYERS_TO_START, RAKE_MODE_NONE,
-        RAKE_MODE_PERCENTAGE, RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_NONE,
-        REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER,
-        ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP,
-        SHUFFLE_PHASE_NONE,
+        RAKE_MODE_PERCENTAGE, REVEAL_PHASE_FLOP, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER,
+        ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_NONE,
     },
     hand_evaluator::{
         FLUSH, FOUR_OF_A_KIND, FULL_HOUSE, HIGH_CARD, HandRank, ONE_PAIR, ROYAL_FLUSH, STRAIGHT,
         STRAIGHT_FLUSH, THREE_OF_A_KIND, TWO_PAIR, evaluate_best, find_winners,
     },
-    side_pot::{SidePot, SidePotError, SidePotResult, calculate_side_pots},
+    side_pot::{SidePot, SidePotError, calculate_side_pots},
     types::{
-        ReconstructState, RevealTokenState, Seat, SeatStatus, ShuffleState, ShufflingPurpose,
+        ReconstructState, RevealTokenState, Seat, SeatStatus, ShuffleState,
         seat_mask_remove,
     },
 };
@@ -1836,14 +1834,11 @@ fn test_is_playing_different_phases() {
 
     // 回到 WAITING，但 shuffle phase 非 NONE
     table
-        .enter_shuffling(
-            ShufflingPurpose::Initial,
-            ROUND_WAITING,
+        .enter_initial_shuffling(
             ShuffleState {
                 pending_mask: 1,
                 completed_mask: 0,
             },
-            None,
             0,
         )
         .unwrap();

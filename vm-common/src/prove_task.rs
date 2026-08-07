@@ -80,11 +80,7 @@ pub enum MethodInput {
         /// 大盲注。
         big_blind: u64,
     },
-    /// `join_and_shuffle` 的完整调用输入。
-    ///
-    /// `raw_args` 是经过 L1 按真实 `JoinAndShuffleArgs` 完整反序列化校验后的
-    /// 原始 borsh 字节。共享层不依赖 `poker_protocol`，消费侧可据此重新解码并
-    /// 验证 pk ownership / remask / shuffle proof，而不是只信任派生字段。
+    /// `join_and_shuffle` 的窄派生输入。完整密码学载荷只保存在 task `raw_args`。
     JoinAndShuffle {
         /// 请求中指定的座位索引。
         seat_index: u8,
@@ -92,48 +88,36 @@ pub enum MethodInput {
         player: [u8; 20],
         /// 买入金额。
         buy_in: u64,
-        /// 完整原始 `JoinAndShuffleArgs` borsh 字节。
-        raw_args: Vec<u8>,
     },
-    /// `leave_with_proof` 的完整调用输入。
+    /// `leave_with_proof` 的窄派生输入。
     LeaveWithProof {
         /// 离场玩家座位索引。
         seat_index: u8,
-        /// 完整原始 `LeaveWithProofArgs` borsh 字节。
-        raw_args: Vec<u8>,
     },
-    /// `submit_shuffle_v2` 的完整调用输入。
+    /// `submit_shuffle_v2` 的窄派生输入。
     SubmitShuffleV2 {
         /// 提交洗牌的座位索引。
         seat_index: u8,
-        /// 完整原始 `SubmitShuffleV2Args` borsh 字节。
-        raw_args: Vec<u8>,
     },
-    /// `submit_player_reveal_tokens` 的完整调用输入。
+    /// `submit_player_reveal_tokens` 的窄派生输入。
     SubmitPlayerRevealTokens {
         /// 提交 reveal token 的座位索引。
         seat_index: u8,
-        /// 完整原始 `SubmitRevealTokensArgs` borsh 字节。
-        raw_args: Vec<u8>,
     },
-    /// `submit_reconstruct_deck` 的完整调用输入。
+    /// `submit_reconstruct_deck` 的窄派生输入。
     SubmitReconstructDeck {
         /// 提交重构牌组的座位索引。
         seat_index: u8,
-        /// 完整原始 `SubmitReconstructDeckArgs` borsh 字节。
-        raw_args: Vec<u8>,
     },
     /// `request_leave_after_hand`（切换下一手前离场标记）。
     RequestLeaveAfterHand {
         /// 玩家座位索引。
         seat_index: u8,
     },
-    /// `fold_with_proof` 的完整调用输入。
+    /// `fold_with_proof` 的窄派生输入。
     FoldWithProof {
         /// fold 玩家座位索引。
         seat_index: u8,
-        /// 完整原始 `FoldWithProofArgs` borsh 字节。
-        raw_args: Vec<u8>,
     },
     /// 无业务参数的方法（start_hand / tick / reset_for_next_hand）。
     Empty,
@@ -177,29 +161,13 @@ mod tests {
                 seat_index: 1,
                 player: [0xCD; 20],
                 buy_in: 3000,
-                raw_args: vec![1, 2, 3],
             },
-            MethodInput::LeaveWithProof {
-                seat_index: 1,
-                raw_args: vec![4, 5],
-            },
-            MethodInput::SubmitShuffleV2 {
-                seat_index: 2,
-                raw_args: vec![6],
-            },
-            MethodInput::SubmitPlayerRevealTokens {
-                seat_index: 3,
-                raw_args: vec![7, 8],
-            },
-            MethodInput::SubmitReconstructDeck {
-                seat_index: 4,
-                raw_args: vec![9],
-            },
+            MethodInput::LeaveWithProof { seat_index: 1 },
+            MethodInput::SubmitShuffleV2 { seat_index: 2 },
+            MethodInput::SubmitPlayerRevealTokens { seat_index: 3 },
+            MethodInput::SubmitReconstructDeck { seat_index: 4 },
             MethodInput::RequestLeaveAfterHand { seat_index: 5 },
-            MethodInput::FoldWithProof {
-                seat_index: 0,
-                raw_args: vec![10, 11],
-            },
+            MethodInput::FoldWithProof { seat_index: 0 },
             MethodInput::Empty,
         ];
         for input in &inputs {

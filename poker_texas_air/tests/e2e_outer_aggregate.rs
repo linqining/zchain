@@ -3,12 +3,9 @@
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::constants::{
-    ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP,
-};
 use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, SubmitShuffleV2Args};
 use poker_l1::vm::contracts::texas_poker::types::{
-    SeatStatus, ShuffleState, ShufflingPurpose, TexasPokerTable,
+    SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
@@ -149,14 +146,11 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     table.sync_aggregated_pk().unwrap();
     assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
     table
-        .enter_shuffling(
-            ShufflingPurpose::Initial,
-            ROUND_WAITING,
+        .enter_initial_shuffling(
             ShuffleState {
                 pending_mask: 0b1111,
                 completed_mask: 0,
             },
-            None,
             0,
         )
         .unwrap();

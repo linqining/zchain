@@ -41,12 +41,8 @@ use crate::vm::contracts::dispatch::DispatchContext;
 pub struct L1ProveTask {
     /// 方法种类（u8 discriminant，与 poker_texas_air::MethodKind 兼容）。
     pub method_kind: u8,
-    /// Transient typed view derived from `method_kind + raw_args`; not serialized.
-    pub method_input: MethodInput,
     /// 执行该调用时经过交易层认证的完整 dispatch 上下文。
     pub context: DispatchContext,
-    /// Transient legacy ABI selector derived from `method_kind`; not serialized.
-    pub selector: [u8; 32],
     /// 规范化后的 Borsh command payload。
     ///
     /// `method_kind` 是 tag，本字段是唯一 payload。selector、typed input 和 dispatch digest
@@ -77,16 +73,13 @@ impl L1ProveTask {
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
-        let method_input = super::dispatch::derive_method_input(method_kind, &raw_args)
+        super::dispatch::derive_method_input(method_kind, &raw_args)
             .expect("L1ProveTask requires a validated canonical command");
-        let selector = super::dispatch::CanonicalCommand::from_u8(method_kind)
-            .expect("L1ProveTask requires a known canonical command tag")
-            .selector();
+        super::dispatch::CanonicalCommand::from_u8(method_kind)
+            .expect("L1ProveTask requires a known canonical command tag");
         Self {
             method_kind,
-            method_input,
             context,
-            selector,
             raw_args,
             pre_table,
             post_table,
@@ -94,6 +87,19 @@ impl L1ProveTask {
             hand_id,
             call_seq,
         }
+    }
+
+    /// Selector deterministically derived from the canonical command tag.
+    #[must_use]
+    pub fn selector(&self) -> [u8; 32] {
+        super::dispatch::CanonicalCommand::from_u8(self.method_kind)
+            .expect("validated L1ProveTask command tag")
+            .selector()
+    }
+
+    /// Decode the transient typed command view from the sole command payload.
+    pub fn method_input(&self) -> crate::error::PokerL1Result<MethodInput> {
+        super::dispatch::derive_method_input(self.method_kind, &self.raw_args)
     }
 }
 
@@ -120,23 +126,18 @@ impl BorshDeserialize for L1ProveTask {
         let table_id = u64::deserialize_reader(reader)?;
         let hand_id = u32::deserialize_reader(reader)?;
         let call_seq = u32::deserialize_reader(reader)?;
-        let method_input = super::dispatch::derive_method_input(method_kind, &raw_args)
-            .map_err(|error| {
-                borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
-            })?;
-        let selector = super::dispatch::CanonicalCommand::from_u8(method_kind)
-            .ok_or_else(|| {
-                borsh::io::Error::new(
-                    borsh::io::ErrorKind::InvalidData,
-                    format!("unknown canonical Texas command tag {method_kind}"),
-                )
-            })?
-            .selector();
+        super::dispatch::derive_method_input(method_kind, &raw_args).map_err(|error| {
+            borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        super::dispatch::CanonicalCommand::from_u8(method_kind).ok_or_else(|| {
+            borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                format!("unknown canonical Texas command tag {method_kind}"),
+            )
+        })?;
         Ok(Self {
             method_kind,
-            method_input,
             context,
-            selector,
             raw_args,
             pre_table,
             post_table,

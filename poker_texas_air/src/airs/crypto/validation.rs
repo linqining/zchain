@@ -22,8 +22,8 @@ use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{
-    precompile_call_context, JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest,
-    PokerPrecompileId, RevealTokenVerifyRequest,
+    JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PokerPrecompileId,
+    RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::prove_task::MethodInput;
 use crate::public_inputs::TexasPublicInputs;
@@ -44,16 +44,12 @@ pub(crate) fn validate_fold_with_proof(
     let args: FoldWithProofArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
         TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
     })?;
-    let MethodInput::FoldWithProof {
-        seat_index,
-        raw_args,
-    } = &canonical.task.method_input
-    else {
+    let MethodInput::FoldWithProof { seat_index } = &canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "fold_with_proof: replayed task has the wrong MethodInput variant".into(),
         ));
     };
-    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+    if *seat_index != args.seat_index {
         return Err(TexasAirError::SpecViolation(
             "fold_with_proof: replayed MethodInput does not match raw args".into(),
         ));
@@ -169,18 +165,13 @@ pub(crate) fn validate_join_and_shuffle(
         seat_index,
         player,
         buy_in,
-        raw_args,
-    } = &canonical.task.method_input
+    } = &canonical.method_input
     else {
         return Err(TexasAirError::SpecViolation(
             "join_and_shuffle: replayed task has the wrong MethodInput variant".into(),
         ));
     };
-    if *seat_index != args.seat_index
-        || *player != args.player
-        || *buy_in != args.buy_in
-        || raw_args != &canonical.call.raw_args
-    {
+    if *seat_index != args.seat_index || *player != args.player || *buy_in != args.buy_in {
         return Err(TexasAirError::SpecViolation(
             "join_and_shuffle: replayed MethodInput does not match raw args".into(),
         ));
@@ -273,16 +264,12 @@ pub(crate) fn validate_leave_with_proof(
         borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
             TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
         })?;
-    let MethodInput::LeaveWithProof {
-        seat_index,
-        raw_args,
-    } = &canonical.task.method_input
-    else {
+    let MethodInput::LeaveWithProof { seat_index } = &canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "leave_with_proof: replayed task has the wrong MethodInput variant".into(),
         ));
     };
-    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+    if *seat_index != args.seat_index {
         return Err(TexasAirError::SpecViolation(
             "leave_with_proof: replayed MethodInput does not match raw args".into(),
         ));
@@ -393,16 +380,12 @@ pub(crate) fn validate_submit_player_reveal_tokens(
         borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
             TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
         })?;
-    let MethodInput::SubmitPlayerRevealTokens {
-        seat_index,
-        raw_args,
-    } = &canonical.task.method_input
-    else {
+    let MethodInput::SubmitPlayerRevealTokens { seat_index } = &canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "submit_player_reveal_tokens: replayed task has the wrong MethodInput variant".into(),
         ));
     };
-    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+    if *seat_index != args.seat_index {
         return Err(TexasAirError::SpecViolation(
             "submit_player_reveal_tokens: replayed MethodInput does not match raw args".into(),
         ));
@@ -493,16 +476,12 @@ pub(crate) fn validate_submit_shuffle_v2(
         borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
             TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
         })?;
-    let MethodInput::SubmitShuffleV2 {
-        seat_index,
-        raw_args,
-    } = &canonical.task.method_input
-    else {
+    let MethodInput::SubmitShuffleV2 { seat_index } = &canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "submit_shuffle_v2: replayed task has the wrong MethodInput variant".into(),
         ));
     };
-    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+    if *seat_index != args.seat_index {
         return Err(TexasAirError::SpecViolation(
             "submit_shuffle_v2: replayed MethodInput does not match raw args".into(),
         ));
@@ -562,16 +541,12 @@ pub(crate) fn validate_submit_reconstruct_deck(
         borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
             TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
         })?;
-    let MethodInput::SubmitReconstructDeck {
-        seat_index,
-        raw_args,
-    } = &canonical.task.method_input
-    else {
+    let MethodInput::SubmitReconstructDeck { seat_index } = &canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "submit_reconstruct_deck: replayed task has the wrong MethodInput variant".into(),
         ));
     };
-    if *seat_index != args.seat_index || raw_args != &canonical.call.raw_args {
+    if *seat_index != args.seat_index {
         return Err(TexasAirError::SpecViolation(
             "submit_reconstruct_deck: replayed MethodInput does not match raw args".into(),
         ));

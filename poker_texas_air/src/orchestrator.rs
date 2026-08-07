@@ -86,23 +86,23 @@ use crate::airs::lifecycle::reset_for_next_hand::{
     ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
-use crate::airs::lifecycle::tick::{canonical_input as canonical_tick_input, TickAir, TickRow};
+use crate::airs::lifecycle::tick::{TickAir, TickRow, canonical_input as canonical_tick_input};
 use crate::authorization_binding::AdminAuthorizationBinding;
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{
-    precompile_call_context, JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest,
-    PrecompileCallBinding, RevealTokenVerifyRequest,
+    JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PrecompileCallBinding,
+    RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
-use crate::prover::{prove_method, MethodProof};
-use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
-use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
+use crate::prover::{MethodProof, prove_method};
+use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
+use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verified_chain::{
-    verify_method_against_and_issue_receipt, ExpectedChainAnchor, VerificationReceipt,
-    VerifiedChain, VerifiedChainBuilder,
+    ExpectedChainAnchor, VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
+    verify_method_against_and_issue_receipt,
 };
 
 fn state_root_to_m31_limbs(root: StateRoot) -> [M31; 4] {
@@ -394,7 +394,7 @@ impl Orchestrator {
             expected_trace_row: None,
             component: None,
         };
-        pi.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
+        pi.bind_dispatch_call(task.context.clone(), task.selector(), task.raw_args.clone())?;
         let summary = ProvenTask {
             method_kind: task.method_kind,
             pre_state_root: pre_root,
@@ -567,16 +567,17 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
+        let method_input = task.method_input()?;
         let MethodInput::CreateTable {
             name,
             max_players,
             small_blind,
             big_blind,
-        } = &task.method_input
+        } = &method_input
         else {
             return Err(TexasAirError::SpecViolation(format!(
                 "create_table 任务的 method_input 应为 CreateTable，实际：{:?}",
-                task.method_input
+                method_input
             )));
         };
 
@@ -631,10 +632,11 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
+        let method_input = task.method_input()?;
+        let MethodInput::SeatOnly { seat_index } = &method_input else {
             return Err(TexasAirError::SpecViolation(format!(
                 "fold 任务的 method_input 应为 SeatOnly，实际：{:?}",
-                task.method_input
+                method_input
             )));
         };
         validate_native_betting_action(
@@ -730,8 +732,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::Join { player, buy_in } = &task.method_input else {
-            return Err(input_mismatch("join_table", "Join", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::Join { player, buy_in } = &method_input else {
+            return Err(input_mismatch("join_table", "Join", &method_input));
         };
         let input = JoinTableInput {
             seat_index: find_join_seat(&task.post_table, player)?,
@@ -782,12 +785,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch(
-                "leave_table",
-                "SeatOnly",
-                &task.method_input,
-            ));
+        let method_input = task.method_input()?;
+        let MethodInput::SeatOnly { seat_index } = &method_input else {
+            return Err(input_mismatch("leave_table", "SeatOnly", &method_input));
         };
         let input = LeaveTableInput {
             seat_index: *seat_index,
@@ -865,11 +865,12 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::RequestLeaveAfterHand { seat_index } = &task.method_input else {
+        let method_input = task.method_input()?;
+        let MethodInput::RequestLeaveAfterHand { seat_index } = &method_input else {
             return Err(input_mismatch(
                 "request_leave_after_hand",
                 "RequestLeaveAfterHand",
-                &task.method_input,
+                &method_input,
             ));
         };
         let _ = Self::seat(&task.pre_table, *seat_index)?;
@@ -931,7 +932,7 @@ impl Orchestrator {
         let authorization = AdminAuthorizationBinding::verify_table_creator(
             MethodKind::StartHand,
             &task.context,
-            &task.selector,
+            &task.selector(),
             &task.raw_args,
             task.pre_table.creator,
             task.table_id,
@@ -1001,8 +1002,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::Empty = &task.method_input else {
-            return Err(input_mismatch("tick", "Empty", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::Empty = &method_input else {
+            return Err(input_mismatch("tick", "Empty", &method_input));
         };
         // Time and every Tick branch witness are reconstructed from the same
         // consensus timestamp and canonical pre/post tables used by the VM
@@ -1057,11 +1059,12 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::Empty = &task.method_input else {
+        let method_input = task.method_input()?;
+        let MethodInput::Empty = &method_input else {
             return Err(input_mismatch(
                 "reset_for_next_hand",
                 "Empty",
-                &task.method_input,
+                &method_input,
             ));
         };
         let input = ResetForNextHandInput {
@@ -1069,7 +1072,7 @@ impl Orchestrator {
             authorization: AdminAuthorizationBinding::verify_table_creator(
                 MethodKind::ResetForNextHand,
                 &task.context,
-                &task.selector,
+                &task.selector(),
                 &task.raw_args,
                 task.pre_table.creator,
                 task.table_id,
@@ -1127,8 +1130,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("check", "SeatOnly", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::SeatOnly { seat_index } = &method_input else {
+            return Err(input_mismatch("check", "SeatOnly", &method_input));
         };
         validate_native_betting_action(
             task,
@@ -1191,8 +1195,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("call", "SeatOnly", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::SeatOnly { seat_index } = &method_input else {
+            return Err(input_mismatch("call", "SeatOnly", &method_input));
         };
         validate_native_betting_action(
             task,
@@ -1276,12 +1281,13 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
+        let method_input = task.method_input()?;
         let MethodInput::Raise {
             seat_index,
             total_bet,
-        } = &task.method_input
+        } = &method_input
         else {
-            return Err(input_mismatch("raise", "Raise", &task.method_input));
+            return Err(input_mismatch("raise", "Raise", &method_input));
         };
         validate_native_betting_action(
             task,
@@ -1375,8 +1381,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::Bet { seat_index, amount } = &task.method_input else {
-            return Err(input_mismatch("bet", "Bet", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::Bet { seat_index, amount } = &method_input else {
+            return Err(input_mismatch("bet", "Bet", &method_input));
         };
         validate_native_betting_action(
             task,
@@ -1458,8 +1465,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("auto_fold", "SeatOnly", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::SeatOnly { seat_index } = &method_input else {
+            return Err(input_mismatch("auto_fold", "SeatOnly", &method_input));
         };
         validate_native_betting_action(
             task,
@@ -1480,7 +1488,7 @@ impl Orchestrator {
         let authorization = AdminAuthorizationBinding::verify_table_creator(
             MethodKind::AutoFold,
             &task.context,
-            &task.selector,
+            &task.selector(),
             &task.raw_args,
             task.pre_table.creator,
             task.table_id,
@@ -1560,8 +1568,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SeatOnly { seat_index } = &task.method_input else {
-            return Err(input_mismatch("force_fold", "SeatOnly", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::SeatOnly { seat_index } = &method_input else {
+            return Err(input_mismatch("force_fold", "SeatOnly", &method_input));
         };
         validate_native_betting_action(
             task,
@@ -1582,7 +1591,7 @@ impl Orchestrator {
         let authorization = AdminAuthorizationBinding::verify_table_creator(
             MethodKind::ForceFold,
             &task.context,
-            &task.selector,
+            &task.selector(),
             &task.raw_args,
             task.pre_table.creator,
             task.table_id,
@@ -1644,12 +1653,13 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
+        let method_input = task.method_input()?;
         let MethodInput::Kick {
             seat_index,
             reason: _,
-        } = &task.method_input
+        } = &method_input
         else {
-            return Err(input_mismatch("kick_player", "Kick", &task.method_input));
+            return Err(input_mismatch("kick_player", "Kick", &method_input));
         };
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let expected_post_pot = task
@@ -1713,7 +1723,7 @@ impl Orchestrator {
             authorization: AdminAuthorizationBinding::verify_table_creator(
                 MethodKind::KickPlayer,
                 &task.context,
-                &task.selector,
+                &task.selector(),
                 &task.raw_args,
                 task.pre_table.creator,
                 task.table_id,
@@ -1772,8 +1782,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::Funds { seat_index, amount } = &task.method_input else {
-            return Err(input_mismatch("addon", "Funds", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::Funds { seat_index, amount } = &method_input else {
+            return Err(input_mismatch("addon", "Funds", &method_input));
         };
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let input = AddonInput {
@@ -1829,8 +1840,9 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::Funds { seat_index, amount } = &task.method_input else {
-            return Err(input_mismatch("rebuy", "Funds", &task.method_input));
+        let method_input = task.method_input()?;
+        let MethodInput::Funds { seat_index, amount } = &method_input else {
+            return Err(input_mismatch("rebuy", "Funds", &method_input));
         };
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let input = RebuyInput {
@@ -1886,21 +1898,21 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
+        let method_input = task.method_input()?;
         let MethodInput::JoinAndShuffle {
             seat_index,
             player: _,
             buy_in: _,
-            raw_args,
-        } = &task.method_input
+        } = &method_input
         else {
             return Err(input_mismatch(
                 "join_and_shuffle",
                 "JoinAndShuffle",
-                &task.method_input,
+                &method_input,
             ));
         };
         let args: poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs =
-            borsh::from_slice(raw_args).map_err(|error| {
+            borsh::from_slice(&task.raw_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "join_and_shuffle raw args borsh: {error}"
                 ))
@@ -1982,19 +1994,16 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::LeaveWithProof {
-            seat_index,
-            raw_args,
-        } = &task.method_input
-        else {
+        let method_input = task.method_input()?;
+        let MethodInput::LeaveWithProof { seat_index } = &method_input else {
             return Err(input_mismatch(
                 "leave_with_proof",
                 "LeaveWithProof",
-                &task.method_input,
+                &method_input,
             ));
         };
         let args: poker_l1::vm::contracts::texas_poker::dispatch::LeaveWithProofArgs =
-            borsh::from_slice(raw_args).map_err(|error| {
+            borsh::from_slice(&task.raw_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "leave_with_proof raw args borsh: {error}"
                 ))
@@ -2085,19 +2094,16 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::FoldWithProof {
-            seat_index,
-            raw_args,
-        } = &task.method_input
-        else {
+        let method_input = task.method_input()?;
+        let MethodInput::FoldWithProof { seat_index } = &method_input else {
             return Err(input_mismatch(
                 "fold_with_proof",
                 "FoldWithProof",
-                &task.method_input,
+                &method_input,
             ));
         };
         let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
-            borsh::from_slice(raw_args).map_err(|error| {
+            borsh::from_slice(&task.raw_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "fold_with_proof raw args borsh: {error}"
                 ))
@@ -2199,19 +2205,16 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SubmitShuffleV2 {
-            seat_index,
-            raw_args,
-        } = &task.method_input
-        else {
+        let method_input = task.method_input()?;
+        let MethodInput::SubmitShuffleV2 { seat_index } = &method_input else {
             return Err(input_mismatch(
                 "submit_shuffle_v2",
                 "SubmitShuffleV2",
-                &task.method_input,
+                &method_input,
             ));
         };
         let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
-            borsh::from_slice(raw_args).map_err(|error| {
+            borsh::from_slice(&task.raw_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_shuffle_v2 raw args borsh: {error}"
                 ))
@@ -2309,19 +2312,16 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SubmitPlayerRevealTokens {
-            seat_index,
-            raw_args,
-        } = &task.method_input
-        else {
+        let method_input = task.method_input()?;
+        let MethodInput::SubmitPlayerRevealTokens { seat_index } = &method_input else {
             return Err(input_mismatch(
                 "submit_player_reveal_tokens",
                 "SubmitPlayerRevealTokens",
-                &task.method_input,
+                &method_input,
             ));
         };
         let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
-            borsh::from_slice(raw_args).map_err(|error| {
+            borsh::from_slice(&task.raw_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_player_reveal_tokens raw args borsh: {error}"
                 ))
@@ -2403,19 +2403,16 @@ impl Orchestrator {
         pi: &crate::public_inputs::TexasPublicInputs,
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
-        let MethodInput::SubmitReconstructDeck {
-            seat_index,
-            raw_args,
-        } = &task.method_input
-        else {
+        let method_input = task.method_input()?;
+        let MethodInput::SubmitReconstructDeck { seat_index } = &method_input else {
             return Err(input_mismatch(
                 "submit_reconstruct_deck",
                 "SubmitReconstructDeck",
-                &task.method_input,
+                &method_input,
             ));
         };
         let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
-            borsh::from_slice(raw_args).map_err(|error| {
+            borsh::from_slice(&task.raw_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_reconstruct_deck raw args borsh: {error}"
                 ))
@@ -2501,18 +2498,11 @@ impl Orchestrator {
 /// arguments, then requires the complete post table and task metadata to match.
 /// Authentication of the task source remains an external consensus responsibility.
 pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()> {
-    if task.selector != task.method_kind.selector() {
-        return Err(TexasAirError::SpecViolation(format!(
-            "{}: task selector does not match MethodKind",
-            task.method_kind.method_name()
-        )));
-    }
-
     let mut replayed_post = task.pre_table.clone();
     let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replayed_post,
-        &task.selector,
+        &task.selector(),
         &task.raw_args,
     )
     .map_err(|e| {
@@ -2543,9 +2533,8 @@ pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()
     })?;
 
     let task_matches = replayed_task.method_kind == task.method_kind
-        && replayed_task.method_input == task.method_input
+        && replayed_task.canonical_command_bytes()? == task.canonical_command_bytes()?
         && replayed_task.context == task.context
-        && replayed_task.selector == task.selector
         && replayed_task.raw_args == task.raw_args
         && replayed_task.pre_table == task.pre_table
         && replayed_task.post_table == task.post_table
@@ -2585,7 +2574,7 @@ pub(crate) fn replay_reveal_settlement_binding(
     let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replayed_post,
-        &task.selector,
+        &task.selector(),
         &task.raw_args,
     )
     .map_err(|error| {
@@ -2962,7 +2951,7 @@ mod tests {
         RebuyArgs, SeatIndexArgs,
     };
     use poker_l1::vm::contracts::texas_poker::state_machine;
-    use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable, EMPTY_PLAYER};
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
 
     fn make_table(name: &str) -> TexasPokerTable {
         TexasPokerTable::new(
@@ -3039,7 +3028,7 @@ mod tests {
         assert_eq!(task.pre_table, pre_table);
         assert_eq!(task.post_table, post_table);
         assert_eq!(task.context, context);
-        assert_eq!(task.selector, selector);
+        assert_eq!(task.selector(), selector);
         assert_eq!(task.raw_args, raw_args);
         (task, post_table)
     }
@@ -3197,13 +3186,7 @@ mod tests {
     fn orchestrator_prove_fold() {
         let mut pre = make_table("pre");
         pre.version = 1;
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
             pre.seats[i].stack = 1000;
@@ -3227,13 +3210,7 @@ mod tests {
     #[test]
     fn orchestrator_proves_auto_fold_with_consensus_timestamp() {
         let mut pre = make_table("auto-fold-consensus-time");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            1,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1);
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
             pre.seats[i].stack = 1_000;
@@ -3258,13 +3235,7 @@ mod tests {
 
     fn terminal_admin_fold_table(name: &str) -> TexasPokerTable {
         let mut pre = make_table(name);
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            1,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1);
         pre.pot = 250;
         pre.hand_id = 17;
         pre.call_seq = 70;
@@ -3444,13 +3415,7 @@ mod tests {
     #[test]
     fn orchestrator_accepts_kick_player_pot_ripple_carry() {
         let mut pre = make_table("kick-ripple-carry");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 65_535;
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
@@ -3479,13 +3444,7 @@ mod tests {
     #[test]
     fn orchestrator_binds_force_fold_creator_authorization_receipt() {
         let mut pre = make_table("force-fold-admin-binding");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for index in 0..3 {
             pre.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
             pre.seats[index].stack = 1_000;
@@ -3584,13 +3543,7 @@ mod tests {
     #[test]
     fn orchestrator_accepts_nonzero_mid_round_call() {
         let mut pre = make_table("mid-round-call");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 25;
         pre.hand_id = 7;
         pre.call_seq = 11;
@@ -3621,13 +3574,7 @@ mod tests {
     #[test]
     fn orchestrator_proves_end_round_call_collection() {
         let mut pre = make_table("end-round-call");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            1,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 1, 0);
         pre.pot = 25;
         pre.hand_id = 7;
         pre.call_seq = 12;
@@ -3667,13 +3614,7 @@ mod tests {
     #[test]
     fn orchestrator_proves_end_round_raise_collection() {
         let mut pre = make_table("end-round-raise");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            1,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 1, 0);
         pre.pot = 25;
         pre.hand_id = 13;
         pre.call_seq = 60;
@@ -3715,13 +3656,7 @@ mod tests {
     #[test]
     fn orchestrator_accepts_normal_mid_round_raise() {
         let mut pre = make_table("normal-mid-round-raise");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 55;
         pre.hand_id = 8;
         pre.call_seq = 20;
@@ -3812,13 +3747,7 @@ mod tests {
     #[test]
     fn orchestrator_accepts_postflop_mid_round_bet() {
         let mut pre = make_table("postflop-bet");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_FLOP,
-            BettingRound::new(100, 0),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_FLOP, BettingRound::new(100, 0), 0, 0);
         pre.pot = 300;
         pre.hand_id = 10;
         pre.call_seq = 40;
@@ -3838,9 +3767,7 @@ mod tests {
             })
             .expect("bet args should serialize"),
         );
-        let post_round = post
-            .betting_round()
-            .expect("bet remains in betting round");
+        let post_round = post.betting_round().expect("bet remains in betting round");
         assert_eq!(post_round.current_bet, 200);
         assert_eq!(post_round.min_raise, 200);
         assert_eq!(post.seats[0].bet, 200);
@@ -3856,13 +3783,7 @@ mod tests {
     #[test]
     fn orchestrator_proves_end_round_bet_collection() {
         let mut pre = make_table("end-round-bet");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_FLOP,
-            BettingRound::new(100, 0),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_FLOP, BettingRound::new(100, 0), 0, 0);
         pre.pot = 300;
         pre.hand_id = 14;
         pre.call_seq = 61;
@@ -3899,13 +3820,7 @@ mod tests {
     #[test]
     fn orchestrator_proves_last_opponent_fold_settlement() {
         let mut pre = make_table("fold-settlement");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 250;
         pre.hand_id = 11;
         pre.call_seq = 50;
@@ -3973,13 +3888,7 @@ mod tests {
     #[test]
     fn orchestrator_proves_heads_up_end_round_check() {
         let mut pre = make_table("end-round-check");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            1,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 1, 0);
         pre.hand_id = 3;
         pre.call_seq = 4;
         for i in 0..2 {
@@ -4036,13 +3945,7 @@ mod tests {
     #[test]
     fn orchestrator_proves_active_kick_settlement_cascade() {
         let mut pre = make_table("kick-active-settlement");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 9;
         pre.call_seq = 17;
         for seat_index in 0..2 {
@@ -4091,13 +3994,7 @@ mod tests {
     #[test]
     fn active_kick_plan_accepts_immediate_collection_without_pot_event() {
         let mut pre = make_table("kick-immediate-collection-only");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for seat_index in 0..2 {
             pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
             pre.seats[seat_index].stack = 900;
@@ -4200,13 +4097,7 @@ mod tests {
     #[test]
     fn orchestrator_chain_two_tasks() {
         let mut pre = make_table("two-real-dispatches");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 7;
         pre.call_seq = 11;
         for i in 0..3 {
@@ -4253,13 +4144,7 @@ mod tests {
     #[test]
     fn orchestrator_chain_matches_exact_external_anchor_shape() {
         let mut pre = make_table("anchored-two-dispatches");
-        enter_betting_fixture(
-            &mut pre,
-            ROUND_PREFLOP,
-            BettingRound::new(100, 100),
-            0,
-            0,
-        );
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 9;
         pre.call_seq = 20;
         for i in 0..3 {
@@ -4297,13 +4182,13 @@ mod tests {
             vec![
                 crate::prove_task::dispatch_call_digest(
                     &task1.context,
-                    &task1.selector,
+                    &task1.selector(),
                     &task1.raw_args,
                 )
                 .unwrap(),
                 crate::prove_task::dispatch_call_digest(
                     &task2.context,
-                    &task2.selector,
+                    &task2.selector(),
                     &task2.raw_args,
                 )
                 .unwrap(),

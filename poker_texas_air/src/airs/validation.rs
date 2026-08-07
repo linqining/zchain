@@ -12,7 +12,7 @@ use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
-use crate::prove_task::{DispatchOutput, ProveTask};
+use crate::prove_task::{DispatchOutput, MethodInput};
 use crate::public_inputs::{DispatchCallPublicInput, TexasPublicInputs};
 use crate::state_root::table_from_state_preimage;
 
@@ -24,8 +24,8 @@ pub(crate) struct CanonicalDispatch {
     pub(crate) post: TexasPokerTable,
     /// Transcript-bound dispatch context, selector and raw arguments.
     pub(crate) call: DispatchCallPublicInput,
-    /// Prove task emitted by the replayed VM dispatch.
-    pub(crate) task: ProveTask,
+    /// One transient decode of the canonical command payload for stage validators.
+    pub(crate) method_input: MethodInput,
     /// Events emitted by the canonical native replay.
     pub(crate) events: Vec<poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent>,
 }
@@ -96,9 +96,10 @@ pub(crate) fn validate_canonical_dispatch(
             "{method}: replayed state-changing dispatch produced no prove task"
         ))
     })?;
+    let method_input = task.method_input()?;
     if task.method_kind != expected_kind
         || task.context != call.context
-        || task.selector != call.selector
+        || task.selector() != call.selector
         || task.raw_args != call.raw_args
         || task.pre_table != pre
         || task.post_table != post
@@ -115,7 +116,7 @@ pub(crate) fn validate_canonical_dispatch(
         pre,
         post,
         call,
-        task,
+        method_input,
         events: output.events,
     })
 }

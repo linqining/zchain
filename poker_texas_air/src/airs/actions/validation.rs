@@ -518,8 +518,7 @@ pub(crate) fn validate_auto_fold(
         .betting_started_at
         .saturating_add(u64::from(tables.pre.timeout_config.betting_timeout_ms));
     if air.input.pre_betting_started_at != pre_timestamps.betting_started_at
-        || air.input.betting_timeout_ms
-            != u64::from(tables.pre.timeout_config.betting_timeout_ms)
+        || air.input.betting_timeout_ms != u64::from(tables.pre.timeout_config.betting_timeout_ms)
         || air.input.pre_time_bank_ms != u64::from(pre_seat.time_bank_ms)
         || air.input.pre_betting_started_at == 0
         || air.input.pre_time_bank_ms != 0
@@ -616,7 +615,7 @@ pub(crate) fn validate_kick_player(
     let args: KickPlayerArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
         TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
     })?;
-    let MethodInput::Kick { seat_index, reason } = canonical.task.method_input else {
+    let MethodInput::Kick { seat_index, reason } = canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "kick_player: replayed task has the wrong MethodInput variant".into(),
         ));

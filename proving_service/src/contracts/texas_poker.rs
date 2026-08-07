@@ -503,9 +503,6 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
 mod tests {
     use super::*;
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::constants::{
-        ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP,
-    };
     use poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args;
     use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState};
     use poker_protocol::crypto::curve::{
@@ -621,14 +618,11 @@ mod tests {
         table.sync_aggregated_pk().unwrap();
         assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
         table
-            .enter_shuffling(
-                poker_l1::vm::contracts::texas_poker::types::ShufflingPurpose::Initial,
-                ROUND_WAITING,
+            .enter_initial_shuffling(
                 ShuffleState {
                     pending_mask: 0b11,
                     completed_mask: 0,
                 },
-                None,
                 0,
             )
             .unwrap();

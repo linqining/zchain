@@ -49,10 +49,10 @@ use super::events::{
 };
 use super::settlement::{self, SettlementPlan};
 use super::types::{
-    DecryptedCard, DecryptedCardState, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC,
-    RevealAssignment, RevealProgress, RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask,
-    SeatStatus, ShufflingPurpose, TexasPokerTable, seat_mask_contains, seat_mask_count, seat_mask_first,
-    seat_mask_remove, seat_mask_to_indices,
+    DecryptedCard, DecryptedCardState, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC, RevealAssignment,
+    RevealProgress, RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus,
+    TexasPokerTable, seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove,
+    seat_mask_to_indices,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -962,25 +962,17 @@ fn rebuild_deck_and_shuffle_on_timeout(
 ) -> PokerL1Result<()> {
     set_initial_encrypted_deck(table)?;
     let active = get_active_seat_mask(&table.seats);
-    let suspended_reveal = if phase == SHUFFLE_PHASE_RECONSTRUCT {
-        Some(table.take_reveal_payload()?)
-    } else {
-        None
+    let state = super::types::ShuffleState {
+        pending_mask: active,
+        completed_mask: 0,
     };
-    table.enter_shuffling(
-        if phase == SHUFFLE_PHASE_RECONSTRUCT {
-            ShufflingPurpose::Reconstruct
-        } else {
-            ShufflingPurpose::Initial
-        },
-        table.round_state(),
-        super::types::ShuffleState {
-            pending_mask: active,
-            completed_mask: 0,
-        },
-        suspended_reveal,
-        0,
-    )?;
+    if phase == SHUFFLE_PHASE_RECONSTRUCT {
+        let street = table.round_state();
+        let suspended_reveal = table.take_reveal_payload()?;
+        table.enter_reconstruct_shuffling(street, state, suspended_reveal, 0)?;
+    } else {
+        table.enter_initial_shuffling(state, 0)?;
+    }
     events::emit_event(
         events,
         TexasPokerEvent::DeckRebuilt {
@@ -1142,7 +1134,9 @@ fn start_showdown_reveal_phase(
                     target: RevealTarget::Hole {
                         seat_index: seat,
                         card_slot: u8::try_from(table.seats[usize::from(seat)].hand.len())
-                            .map_err(|_| PokerL1Error::Serialization("hole-card slot overflow".into()))?,
+                            .map_err(|_| {
+                                PokerL1Error::Serialization("hole-card slot overflow".into())
+                            })?,
                     },
                     progress: RevealProgress::Collecting {
                         pending_mask: 1u16 << seat,
@@ -1299,9 +1293,7 @@ fn write_decrypted_cards_to_community(
             )));
         }
         let (decrypted_index, dc) = matches[0];
-        let plaintext = dc
-            .plaintext()
-            .expect("filtered for a plaintext record");
+        let plaintext = dc.plaintext().expect("filtered for a plaintext record");
         let (card_id, card) = card_from_plaintext(&plaintext.0, &canonical_cards)?;
         if !seen.insert(card_id) {
             return Err(PokerL1Error::Serialization(format!(
@@ -1545,9 +1537,7 @@ fn start_reconstruct(
 ) -> PokerL1Result<()> {
     now_ms
         .checked_add(u64::from(table.timeout_config.reconstruct_timeout_ms))
-        .ok_or_else(|| {
-            PokerL1Error::Serialization("reconstruct deadline overflows u64".into())
-        })?;
+        .ok_or_else(|| PokerL1Error::Serialization("reconstruct deadline overflows u64".into()))?;
     let active_seats = get_active_seat_indices(&table.seats);
     let active_mask = get_active_seat_mask(&table.seats);
     // 生成 coefficient = hash_to_scalar("reconstruct_coefficient/" || table_id_bytes || timestamp_ascii)
@@ -1603,15 +1593,15 @@ fn on_complete_reconstruct(
 
     // 重新洗牌（RECONSTRUCT phase）
     let active = get_active_seat_mask(&table.seats);
+    let street = table.round_state();
     let suspended_reveal = table.take_reveal_payload()?;
-    table.enter_shuffling(
-        ShufflingPurpose::Reconstruct,
-        table.round_state(),
+    table.enter_reconstruct_shuffling(
+        street,
         super::types::ShuffleState {
             pending_mask: active,
             completed_mask: 0,
         },
-        Some(suspended_reveal),
+        suspended_reveal,
         0,
     )?;
     advance_shuffle(table, events)?;
@@ -2037,11 +2027,13 @@ pub fn apply_submit_player_reveal_tokens(
         // 若 pending 为空，执行链上解密
         let pending_empty = table.reveal_token_state().assignments[ai].pending_mask() == 0;
         if pending_empty {
-            let tokens: Vec<G1Projective> = match &table.reveal_token_state().assignments[ai].progress {
-                RevealProgress::Collecting { reveal_tokens, .. } =>
-                    reveal_tokens.iter().map(|token| token.0).collect(),
-                _ => unreachable!("pending mask is only zero after collection"),
-            };
+            let tokens: Vec<G1Projective> =
+                match &table.reveal_token_state().assignments[ai].progress {
+                    RevealProgress::Collecting { reveal_tokens, .. } => {
+                        reveal_tokens.iter().map(|token| token.0).collect()
+                    }
+                    _ => unreachable!("pending mask is only zero after collection"),
+                };
 
             if phase == REVEAL_PHASE_SHOWDOWN {
                 // 升级已存在的 partial decrypted_card 为 plaintext。
@@ -2074,21 +2066,27 @@ pub fn apply_submit_player_reveal_tokens(
                     let c1 = table.deck_state.encrypted[card_index as usize].c1;
                     let owner =
                         find_hand_card_owner(table, card_index).unwrap_or(OWNER_SEAT_PUBLIC);
-                    table.deck_state.decrypted_cards.push(DecryptedCard::partial(
-                        card_index,
-                        owner,
-                        ElGamalCiphertext {
-                            c1,
-                            c2: decrypted_c2,
-                        },
-                    ));
+                    table
+                        .deck_state
+                        .decrypted_cards
+                        .push(DecryptedCard::partial(
+                            card_index,
+                            owner,
+                            ElGamalCiphertext {
+                                c1,
+                                c2: decrypted_c2,
+                            },
+                        ));
                 } else {
                     // 公共牌：完全解密
-                    table.deck_state.decrypted_cards.push(DecryptedCard::resolved(
-                        card_index,
-                        OWNER_SEAT_PUBLIC,
-                        ECPoint::from(decrypted_c2),
-                    ));
+                    table
+                        .deck_state
+                        .decrypted_cards
+                        .push(DecryptedCard::resolved(
+                            card_index,
+                            OWNER_SEAT_PUBLIC,
+                            ECPoint::from(decrypted_c2),
+                        ));
                 }
             } // 闭合非 showdown 的 else 块
 
@@ -2099,10 +2097,14 @@ pub fn apply_submit_player_reveal_tokens(
                     .iter()
                     .find(|dc| dc.encrypted_card_index == card_index && dc.ciphertext().is_some())
                     .and_then(|dc| dc.ciphertext().cloned())
-                    .ok_or_else(|| PokerL1Error::Serialization(
-                        "preflop reveal did not create a partial ciphertext".into(),
-                    ))?;
-                RevealProgress::ReadyPartial { ciphertext: partial }
+                    .ok_or_else(|| {
+                        PokerL1Error::Serialization(
+                            "preflop reveal did not create a partial ciphertext".into(),
+                        )
+                    })?;
+                RevealProgress::ReadyPartial {
+                    ciphertext: partial,
+                }
             } else {
                 let card = table
                     .deck_state
@@ -2110,11 +2112,15 @@ pub fn apply_submit_player_reveal_tokens(
                     .iter()
                     .find(|dc| dc.encrypted_card_index == card_index && dc.plaintext().is_some())
                     .and_then(|dc| dc.plaintext())
-                    .and_then(|point| card_from_plaintext(&point.0, &generate_plaintext_cards()).ok())
+                    .and_then(|point| {
+                        card_from_plaintext(&point.0, &generate_plaintext_cards()).ok()
+                    })
                     .map(|(_, card)| card)
-                    .ok_or_else(|| PokerL1Error::Serialization(
-                        "resolved reveal did not create a plaintext card".into(),
-                    ))?;
+                    .ok_or_else(|| {
+                        PokerL1Error::Serialization(
+                            "resolved reveal did not create a plaintext card".into(),
+                        )
+                    })?;
                 RevealProgress::ReadyCard { card }
             };
             table.active_reveal_state_mut()?.assignments[ai].progress = progress;
@@ -2514,12 +2520,15 @@ pub fn apply_player_action(
             table.seats[seat_index as usize].set_status(SeatStatus::Folded);
             table.set_seat_acted_this_round(seat_index, true);
             table.disarm_betting_deadline()?;
-            events::emit_event(events, TexasPokerEvent::PlayerFolded {
-                table_id: table.id,
-                seat_index,
-                reason,
-                round_state: table.round_state(),
-            });
+            events::emit_event(
+                events,
+                TexasPokerEvent::PlayerFolded {
+                    table_id: table.id,
+                    seat_index,
+                    reason,
+                    round_state: table.round_state(),
+                },
+            );
         }
         PlayerAction::MatchBet => {
             let round = table.betting_round().expect("checked above");
@@ -2531,19 +2540,24 @@ pub fn apply_player_action(
             if seat.bet >= current_bet {
                 table.set_seat_acted_this_round(seat_index, true);
                 table.disarm_betting_deadline()?;
-                events::emit_event(events, TexasPokerEvent::PlayerChecked {
-                    table_id: table.id,
-                    seat_index,
-                    round_state: table.round_state(),
-                });
+                events::emit_event(
+                    events,
+                    TexasPokerEvent::PlayerChecked {
+                        table_id: table.id,
+                        seat_index,
+                        round_state: table.round_state(),
+                    },
+                );
             } else {
                 let call_amt = round.process_call(seat.bet, seat.stack);
-                seat.stack = seat.stack.checked_sub(call_amt).ok_or_else(|| {
-                    PokerL1Error::Serialization("stack underflow on call".into())
-                })?;
-                seat.bet = seat.bet.checked_add(call_amt).ok_or_else(|| {
-                    PokerL1Error::Serialization("bet overflow on call".into())
-                })?;
+                seat.stack = seat
+                    .stack
+                    .checked_sub(call_amt)
+                    .ok_or_else(|| PokerL1Error::Serialization("stack underflow on call".into()))?;
+                seat.bet = seat
+                    .bet
+                    .checked_add(call_amt)
+                    .ok_or_else(|| PokerL1Error::Serialization("bet overflow on call".into()))?;
                 seat.total_bet = seat.total_bet.checked_add(call_amt).ok_or_else(|| {
                     PokerL1Error::Serialization("total_bet overflow on call".into())
                 })?;
@@ -2553,20 +2567,26 @@ pub fn apply_player_action(
                 }
                 table.set_seat_acted_this_round(seat_index, true);
                 table.disarm_betting_deadline()?;
-                events::emit_event(events, TexasPokerEvent::PlayerCalled {
-                    table_id: table.id,
-                    seat_index,
-                    call_delta: call_amt,
-                    round_state: table.round_state(),
-                });
-                if is_all_in {
-                    events::emit_event(events, TexasPokerEvent::PlayerAllIn {
+                events::emit_event(
+                    events,
+                    TexasPokerEvent::PlayerCalled {
                         table_id: table.id,
                         seat_index,
-                        trigger_action: TRIGGER_ACTION_CALL_ALL_IN,
-                        amount: call_amt,
+                        call_delta: call_amt,
                         round_state: table.round_state(),
-                    });
+                    },
+                );
+                if is_all_in {
+                    events::emit_event(
+                        events,
+                        TexasPokerEvent::PlayerAllIn {
+                            table_id: table.id,
+                            seat_index,
+                            trigger_action: TRIGGER_ACTION_CALL_ALL_IN,
+                            amount: call_amt,
+                            round_state: table.round_state(),
+                        },
+                    );
                 }
             }
         }
@@ -2576,13 +2596,15 @@ pub fn apply_player_action(
             let round = table.active_betting_round_mut()?;
             let needed = round.process_raise(total_bet, seat_bet, seat_stack)?;
             let seat = &mut table.seats[seat_index as usize];
-            seat.stack = seat.stack.checked_sub(needed).ok_or_else(|| {
-                PokerL1Error::Serialization("stack underflow on raise".into())
-            })?;
+            seat.stack = seat
+                .stack
+                .checked_sub(needed)
+                .ok_or_else(|| PokerL1Error::Serialization("stack underflow on raise".into()))?;
             seat.bet = total_bet;
-            seat.total_bet = seat.total_bet.checked_add(needed).ok_or_else(|| {
-                PokerL1Error::Serialization("total_bet overflow on raise".into())
-            })?;
+            seat.total_bet = seat
+                .total_bet
+                .checked_add(needed)
+                .ok_or_else(|| PokerL1Error::Serialization("total_bet overflow on raise".into()))?;
             let is_all_in = seat.stack == 0;
             if is_all_in {
                 seat.set_status(SeatStatus::AllIn);
@@ -2599,21 +2621,27 @@ pub fn apply_player_action(
                     table.acted_mask &= !(1u16 << i);
                 }
             }
-            events::emit_event(events, TexasPokerEvent::PlayerRaised {
-                table_id: table.id,
-                seat_index,
-                raise_delta: needed,
-                total_bet,
-                round_state: table.round_state(),
-            });
-            if is_all_in {
-                events::emit_event(events, TexasPokerEvent::PlayerAllIn {
+            events::emit_event(
+                events,
+                TexasPokerEvent::PlayerRaised {
                     table_id: table.id,
                     seat_index,
-                    trigger_action: TRIGGER_ACTION_RAISE_ALL_IN,
-                    amount: needed,
+                    raise_delta: needed,
+                    total_bet,
                     round_state: table.round_state(),
-                });
+                },
+            );
+            if is_all_in {
+                events::emit_event(
+                    events,
+                    TexasPokerEvent::PlayerAllIn {
+                        table_id: table.id,
+                        seat_index,
+                        trigger_action: TRIGGER_ACTION_RAISE_ALL_IN,
+                        amount: needed,
+                        round_state: table.round_state(),
+                    },
+                );
             }
         }
     }
@@ -2715,14 +2743,11 @@ pub fn start_hand(
     // phase-local mask records submissions for the freshly initialized hand.
     let completed_mask = 0;
     let pending_mask = get_pending_seat_mask(completed_mask, &table.seats);
-    table.enter_shuffling(
-        ShufflingPurpose::Initial,
-        ROUND_WAITING,
+    table.enter_initial_shuffling(
         super::types::ShuffleState {
             pending_mask,
             completed_mask,
         },
-        None,
         0,
     )?;
 
@@ -3849,7 +3874,9 @@ fn apply_fund_seat(
         )));
     }
     if amount == 0 {
-        return Err(PokerL1Error::Serialization(format!("{label}: amount must > 0")));
+        return Err(PokerL1Error::Serialization(format!(
+            "{label}: amount must > 0"
+        )));
     }
 
     if !table.seats[seat_index as usize].is_occupied() {
@@ -3879,35 +3906,43 @@ fn apply_fund_seat(
                 (seat.player, Some(seat.pending_addon), None)
             }
             FundTiming::Immediate => {
-                seat.stack = seat.stack.checked_add(amount).ok_or_else(|| {
-                    PokerL1Error::Serialization("rebuy: stack overflow".into())
-                })?;
+                seat.stack = seat
+                    .stack
+                    .checked_add(amount)
+                    .ok_or_else(|| PokerL1Error::Serialization("rebuy: stack overflow".into()))?;
                 (seat.player, None, Some(seat.stack))
             }
         }
     };
     if matches!(timing, FundTiming::NextHand) {
-        table.addon_pool = table.addon_pool.checked_add(amount).ok_or_else(|| {
-            PokerL1Error::Serialization("addon: addon_pool overflow".into())
-        })?;
+        table.addon_pool = table
+            .addon_pool
+            .checked_add(amount)
+            .ok_or_else(|| PokerL1Error::Serialization("addon: addon_pool overflow".into()))?;
     }
     table.chip_pool = total_chips;
 
     match timing {
-        FundTiming::NextHand => events::emit_event(events, TexasPokerEvent::AddonRequested {
-            table_id: table.id,
-            seat_index,
-            player,
-            amount,
-            pending_after: pending_after.expect("next-hand funding has pending balance"),
-        }),
-        FundTiming::Immediate => events::emit_event(events, TexasPokerEvent::RebuyProcessed {
-            table_id: table.id,
-            seat_index,
-            player,
-            amount,
-            stack_after: stack_after.expect("immediate funding has stack balance"),
-        }),
+        FundTiming::NextHand => events::emit_event(
+            events,
+            TexasPokerEvent::AddonRequested {
+                table_id: table.id,
+                seat_index,
+                player,
+                amount,
+                pending_after: pending_after.expect("next-hand funding has pending balance"),
+            },
+        ),
+        FundTiming::Immediate => events::emit_event(
+            events,
+            TexasPokerEvent::RebuyProcessed {
+                table_id: table.id,
+                seat_index,
+                player,
+                amount,
+                stack_after: stack_after.expect("immediate funding has stack balance"),
+            },
+        ),
     }
     table.bump_version();
     Ok(())
@@ -4339,11 +4374,14 @@ mod tests {
         let assignments = table.reveal_token_state().assignments.clone();
         let plaintext_cards = generate_plaintext_cards();
         for (assignment, card_id) in assignments.iter().zip(card_ids) {
-            table.deck_state.decrypted_cards.push(DecryptedCard::resolved(
-                assignment.encrypted_card_index,
-                OWNER_SEAT_PUBLIC,
-                ECPoint(plaintext_cards[usize::from(*card_id)]),
-            ));
+            table
+                .deck_state
+                .decrypted_cards
+                .push(DecryptedCard::resolved(
+                    assignment.encrypted_card_index,
+                    OWNER_SEAT_PUBLIC,
+                    ECPoint(plaintext_cards[usize::from(*card_id)]),
+                ));
         }
         for (assignment, card_id) in table
             .active_reveal_state_mut()
@@ -4387,11 +4425,14 @@ mod tests {
         let plaintext_id = 3u8;
         let encrypted_card_index = 41u8;
         let plaintext_cards = generate_plaintext_cards();
-        table.deck_state.decrypted_cards.push(DecryptedCard::resolved(
-            encrypted_card_index,
-            OWNER_SEAT_PUBLIC,
-            ECPoint(plaintext_cards[usize::from(plaintext_id)]),
-        ));
+        table
+            .deck_state
+            .decrypted_cards
+            .push(DecryptedCard::resolved(
+                encrypted_card_index,
+                OWNER_SEAT_PUBLIC,
+                ECPoint(plaintext_cards[usize::from(plaintext_id)]),
+            ));
         let mut events = vec![];
 
         write_decrypted_cards_to_community(
@@ -4421,11 +4462,14 @@ mod tests {
     fn test_unknown_community_plaintext_is_rejected_atomically() {
         let mut table = make_table();
         set_initial_encrypted_deck(&mut table).unwrap();
-        table.deck_state.decrypted_cards.push(DecryptedCard::resolved(
-            7,
-            OWNER_SEAT_PUBLIC,
-            ECPoint::from(utils::hash_to_g1(b"not-a-canonical-card")),
-        ));
+        table
+            .deck_state
+            .decrypted_cards
+            .push(DecryptedCard::resolved(
+                7,
+                OWNER_SEAT_PUBLIC,
+                ECPoint::from(utils::hash_to_g1(b"not-a-canonical-card")),
+            ));
         let before = table.clone();
         let mut events = vec![];
 
@@ -4452,11 +4496,14 @@ mod tests {
         set_initial_encrypted_deck(&mut table).unwrap();
         let plaintext = ECPoint(generate_plaintext_cards()[9]);
         for encrypted_card_index in [2u8, 38u8] {
-            table.deck_state.decrypted_cards.push(DecryptedCard::resolved(
-                encrypted_card_index,
-                OWNER_SEAT_PUBLIC,
-                plaintext,
-            ));
+            table
+                .deck_state
+                .decrypted_cards
+                .push(DecryptedCard::resolved(
+                    encrypted_card_index,
+                    OWNER_SEAT_PUBLIC,
+                    plaintext,
+                ));
         }
         let before = table.clone();
         let mut events = vec![];
@@ -4485,11 +4532,14 @@ mod tests {
             .community_cards
             .try_push(Card::from_index(duplicate_id))
             .unwrap();
-        table.deck_state.decrypted_cards.push(DecryptedCard::resolved(
-            44,
-            0,
-            ECPoint(plaintext_cards[usize::from(duplicate_id)]),
-        ));
+        table
+            .deck_state
+            .decrypted_cards
+            .push(DecryptedCard::resolved(
+                44,
+                0,
+                ECPoint(plaintext_cards[usize::from(duplicate_id)]),
+            ));
         let before = table.clone();
         let mut events = vec![];
 
@@ -4516,7 +4566,10 @@ mod tests {
         set_initial_encrypted_deck(&mut table).unwrap();
         table.deck_state.contributor_mask = 0b11;
         table.sync_aggregated_pk().unwrap();
-        assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint::from(aggregate_pk)));
+        assert_eq!(
+            table.deck_state.aggregated_pk,
+            Some(ECPoint::from(aggregate_pk))
+        );
         table.hand_id = 7;
         table
             .enter_reconstructing(
@@ -4544,15 +4597,18 @@ mod tests {
                 let plaintext = canonical_cards[*card_index];
                 let randomness =
                     scalar_from_u64(1_000 + (seat_index as u64) * 10 + record_index as u64);
-                table.deck_state.decrypted_cards.push(DecryptedCard::partial(
-                    (20 + seat_index * 2 + record_index) as u8,
-                    seat_index as u8,
-                    ElGamalCiphertext::encrypt(
-                        &plaintext,
-                        &owner_public_keys[seat_index],
-                        &randomness,
-                    ),
-                ));
+                table
+                    .deck_state
+                    .decrypted_cards
+                    .push(DecryptedCard::partial(
+                        (20 + seat_index * 2 + record_index) as u8,
+                        seat_index as u8,
+                        ElGamalCiphertext::encrypt(
+                            &plaintext,
+                            &owner_public_keys[seat_index],
+                            &randomness,
+                        ),
+                    ));
             }
         }
 
@@ -4607,6 +4663,8 @@ mod tests {
             &super::super::types::ReconstructState::default()
         );
         assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_RECONSTRUCT);
+        assert_eq!(table.round_state(), ROUND_FLOP);
+        assert_eq!(table.reveal_token_state().reveal_phase, REVEAL_PHASE_FLOP);
         assert_eq!(table.shuffle_state().derived_current_shuffler(), 0);
         assert_eq!(table.shuffle_state().pending_mask, 0b11);
         assert!(
@@ -4618,6 +4676,59 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, TexasPokerEvent::DeckRebuilt { .. }))
+        );
+    }
+
+    #[test]
+    fn reconstruct_shuffle_timeout_preserves_resume_street_and_reveal() {
+        let mut table = make_table();
+        for seat_index in 0..3usize {
+            table.seats[seat_index].player = [(seat_index as u8) + 1; 20];
+            table.seats[seat_index].stack = 100;
+            table.seats[seat_index].set_status(SeatStatus::Active);
+        }
+        table.chip_pool = 300;
+        table.hand_id = 9;
+        set_initial_encrypted_deck(&mut table).unwrap();
+
+        let suspended_reveal = super::super::types::RevealTokenState {
+            reveal_phase: REVEAL_PHASE_TURN,
+            assignments: vec![],
+        };
+        table
+            .enter_reconstruct_shuffling(
+                ROUND_TURN,
+                super::super::types::ShuffleState {
+                    pending_mask: 0b111,
+                    completed_mask: 0,
+                },
+                suspended_reveal.clone(),
+                1_000,
+            )
+            .unwrap();
+
+        let deadline_ms = table.shuffle_deadline_ms().unwrap().unwrap();
+        let mut events = vec![];
+        let outcome = advance_deadline(&mut table, deadline_ms, &mut events).unwrap();
+
+        assert!(matches!(
+            outcome,
+            AdvanceDeadlineOutcome::Advanced {
+                kind: DeadlineKind::Shuffle,
+                subject: 0,
+            }
+        ));
+        assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_RECONSTRUCT);
+        assert_eq!(table.round_state(), ROUND_TURN);
+        assert_eq!(table.reveal_token_state().as_ref(), &suspended_reveal);
+        assert_eq!(table.shuffle_state().pending_mask, 0b110);
+        assert_eq!(table.shuffle_state().derived_current_shuffler(), 1);
+        assert_eq!(table.shuffle_deadline_ms().unwrap(), Some(0));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TexasPokerEvent::ShuffleTimeout { seat_index: 0, .. }
+            ))
         );
     }
 
@@ -4772,14 +4883,11 @@ mod tests {
             table.seats[seat_index].set_status(SeatStatus::Active);
         }
         table
-            .enter_shuffling(
-                ShufflingPurpose::Initial,
-                ROUND_WAITING,
+            .enter_initial_shuffling(
                 super::super::types::ShuffleState {
                     pending_mask: 0b0101,
                     completed_mask: 0,
                 },
-                None,
                 0,
             )
             .unwrap();
@@ -5783,11 +5891,17 @@ mod tests {
         assert_eq!(table.reveal_token_state().assignments.len(), 2);
         assert_eq!(
             table.reveal_token_state().assignments[0].target,
-            RevealTarget::Board { runout_index: 0, board_position: 3 }
+            RevealTarget::Board {
+                runout_index: 0,
+                board_position: 3
+            }
         );
         assert_eq!(
             table.reveal_token_state().assignments[1].target,
-            RevealTarget::Board { runout_index: 1, board_position: 3 }
+            RevealTarget::Board {
+                runout_index: 1,
+                board_position: 3
+            }
         );
         assert_ne!(
             table.reveal_token_state().assignments[0].encrypted_card_index,
@@ -6009,7 +6123,10 @@ mod tests {
         );
         assert_eq!(
             table.reveal_token_state().assignments[0].target,
-            RevealTarget::Board { runout_index: 0, board_position: 4 }
+            RevealTarget::Board {
+                runout_index: 0,
+                board_position: 4
+            }
         );
         assert_eq!(
             table.reveal_token_state().assignments[1].encrypted_card_index,
@@ -6017,7 +6134,10 @@ mod tests {
         );
         assert_eq!(
             table.reveal_token_state().assignments[1].target,
-            RevealTarget::Board { runout_index: 1, board_position: 4 }
+            RevealTarget::Board {
+                runout_index: 1,
+                board_position: 4
+            }
         );
     }
 

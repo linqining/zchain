@@ -19,8 +19,8 @@ use poker_protocol::precompile::{
     build_bls12381_reconstruction_v3_request, build_bls12381_shuffle_request,
 };
 use poker_protocol::precompile_abi::{
-    ReconstructionV3VerifyRequest, ShuffleVerifyRequest, TranscriptId,
-    RECONSTRUCTION_V3_ABI_VERSION, SHUFFLE_ABI_VERSION,
+    RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3VerifyRequest, SHUFFLE_ABI_VERSION,
+    ShuffleVerifyRequest, TranscriptId,
 };
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::poseidon252_merkle::Poseidon252MerkleHasher;
@@ -49,17 +49,17 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::{replay_reveal_settlement_binding, validate_full_dispatch_task};
 use crate::precompile_binding::{
-    precompile_call_context, JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest,
-    PokerPrecompileId, PrecompileCallBinding, RevealTokenVerifyRequest,
-    JOIN_AND_SHUFFLE_ABI_VERSION, LEAVE_DLEQ_ABI_VERSION, REVEAL_TOKEN_ABI_VERSION,
+    JOIN_AND_SHUFFLE_ABI_VERSION, JoinAndShuffleVerifyRequest, LEAVE_DLEQ_ABI_VERSION,
+    LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding, REVEAL_TOKEN_ABI_VERSION,
+    RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{MethodInput, ProveTask};
-use crate::prover::{prove_method, MethodProof};
+use crate::prover::{MethodProof, prove_method};
 use crate::public_inputs::TexasPublicInputs;
-use crate::state_root::{state_root_to_air_limbs, table_state_preimage, StateRoot};
-use crate::trace_gen::generic_trace::{gen_method_trace, MIN_LOG_SIZE};
-use crate::verified_chain::{verify_method_against_and_issue_receipt, VerificationReceipt};
+use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
+use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
+use crate::verified_chain::{VerificationReceipt, verify_method_against_and_issue_receipt};
 
 /// Wire-format magic for a stage-3 dual proof package.
 pub const DUAL_PROOF_MAGIC: [u8; 8] = *b"ZPDUAL03";
@@ -734,22 +734,22 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
         expected_trace_row: None,
         component: None,
     };
-    public_inputs.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
+    public_inputs.bind_dispatch_call(
+        task.context.clone(),
+        task.selector(),
+        task.raw_args.clone(),
+    )?;
+    let method_input = task.method_input()?;
 
     match task.method_kind {
         MethodKind::JoinAndShuffle => {
-            let MethodInput::JoinAndShuffle {
-                seat_index,
-                raw_args,
-                ..
-            } = &task.method_input
-            else {
+            let MethodInput::JoinAndShuffle { seat_index, .. } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
                     "join_and_shuffle task has the wrong MethodInput variant".into(),
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs =
-                borsh::from_slice(raw_args).map_err(|error| {
+                borsh::from_slice(&task.raw_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "join_and_shuffle raw args borsh: {error}"
                     ))
@@ -810,17 +810,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             })
         }
         MethodKind::SubmitShuffleV2 => {
-            let MethodInput::SubmitShuffleV2 {
-                seat_index,
-                raw_args,
-            } = &task.method_input
-            else {
+            let MethodInput::SubmitShuffleV2 { seat_index } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
                     "submit_shuffle_v2 task has the wrong MethodInput variant".into(),
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
-                borsh::from_slice(raw_args).map_err(|error| {
+                borsh::from_slice(&task.raw_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_shuffle_v2 raw args borsh: {error}"
                     ))
@@ -909,17 +905,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             })
         }
         MethodKind::SubmitReconstructDeck => {
-            let MethodInput::SubmitReconstructDeck {
-                seat_index,
-                raw_args,
-            } = &task.method_input
-            else {
+            let MethodInput::SubmitReconstructDeck { seat_index } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
                     "submit_reconstruct_deck task has the wrong MethodInput variant".into(),
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
-                borsh::from_slice(raw_args).map_err(|error| {
+                borsh::from_slice(&task.raw_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_reconstruct_deck raw args borsh: {error}"
                     ))
@@ -991,17 +983,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             })
         }
         MethodKind::LeaveWithProof => {
-            let MethodInput::LeaveWithProof {
-                seat_index,
-                raw_args,
-            } = &task.method_input
-            else {
+            let MethodInput::LeaveWithProof { seat_index } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
                     "leave_with_proof task has the wrong MethodInput variant".into(),
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::LeaveWithProofArgs =
-                borsh::from_slice(raw_args).map_err(|error| {
+                borsh::from_slice(&task.raw_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "leave_with_proof raw args borsh: {error}"
                     ))
@@ -1081,17 +1069,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             })
         }
         MethodKind::FoldWithProof => {
-            let MethodInput::FoldWithProof {
-                seat_index,
-                raw_args,
-            } = &task.method_input
-            else {
+            let MethodInput::FoldWithProof { seat_index } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
                     "fold_with_proof task has the wrong MethodInput variant".into(),
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
-                borsh::from_slice(raw_args).map_err(|error| {
+                borsh::from_slice(&task.raw_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "fold_with_proof raw args borsh: {error}"
                     ))
@@ -1174,17 +1158,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             })
         }
         MethodKind::SubmitPlayerRevealTokens => {
-            let MethodInput::SubmitPlayerRevealTokens {
-                seat_index,
-                raw_args,
-            } = &task.method_input
-            else {
+            let MethodInput::SubmitPlayerRevealTokens { seat_index } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
                     "submit_player_reveal_tokens task has the wrong MethodInput variant".into(),
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
-                borsh::from_slice(raw_args).map_err(|error| {
+                borsh::from_slice(&task.raw_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_player_reveal_tokens raw args borsh: {error}"
                     ))

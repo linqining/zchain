@@ -140,6 +140,13 @@ schema v13 已把 `Seat.time_bank_ms` 收窄为 checked `u32`，把 `rake_bps` �
 绝对 `deadline_ms` 保持 `u64`，因为它表示共识时间点而不是时长。v2-v12 的旧 `u64` 字段由 exact
 legacy mirror 解码，越界对象 fail-closed；`rake_bps > 10000` 也不再是 canonical 配置。
 
+schema v14 已把 `HandPhase::Shuffling` 改成二级 tagged union：`Initial` 只保存 shuffle progress 与
+deadline，`Reconstruct` 必须同时保存 live street、shuffle progress 和 suspended reveal。旧 v13
+`purpose + street + Option<reveal>` 布局只存在于 exact migration mirror；迁移拒绝 `Initial + reveal`、
+`Reconstruct + None` 等非法组合。Initial 不再重复保存恒定的 `ROUND_WAITING`，purpose 也完全由
+variant 派生。reconstruct complete 与 reconstruct-shuffle timeout 均有回归测试绑定恢复 street/reveal，
+避免 phase take/replace 期间把恢复目标退化成 WAITING。
+
 `SeatStatus` 应保留为互斥 enum，而不是退回多个 bool。若后续还需压列，可以把九个 3-bit status
 打包到一个 27-bit word，但这是偏激进方案：每次 seat update 都要做选择性 bit extraction，只有
 Tagged-union Stage 已稳定且 status 列确认为热点后再做。
@@ -221,9 +228,11 @@ hash；不要让每个 method row重复携带所有 rules 位。
 5. 不可变配置（name、blinds、timeouts、ante/rake/RIT rules）拆到 `TableRules`，hot table 只绑定
    `rules_hash/rules_id`。这主要减少每个 transition 的 state-root preimage，而不是业务信息。
 
-6. `ProveTask` 不再同时持有 `method_input + selector + raw_args` 三份等价命令事实。迁移后的 canonical
-   command bytes 是唯一输入；`method_tag`、typed payload 和 dispatch digest 都从它派生。兼容 selector
-   只在 L1 边界解码，不能继续进入 proof archive 形成三份可错配表示。
+6. 已完成：`ProveTask` 不再同时持有 `method_input + selector + raw_args` 三份等价命令事实。
+   `method_kind + raw_args` 是唯一持久化/内存命令表示；selector、typed payload、canonical command
+   bytes 和 dispatch digest 均从它派生。六个 crypto typed variant 也已删除内嵌的完整 `raw_args`，
+   52-card deck 与 proof blob 不再被复制到 transient enum。service v2 归档使用独立 exact legacy enum
+   解码，并继续拒绝 selector、typed input 或内嵌 raw args 的任何错配。
 
 ## 方法归一化
 
@@ -351,7 +360,7 @@ shuffle”。推荐明确采用 **fresh deck per hand**：
 | 已完成 | `ReconstructState.coefficient: Option<_>` | 删除 | reconstruction V3 verifier 不读取该 retired V1 transcript 字段；legacy bytes 精确解码后丢弃 |
 | 立即 | `TimeoutConfig.ready_wait_ms/hand_complete_wait_ms` 与 runtime `Timestamps` 兼容类型 | 删除生产 runtime 表示 | persisted v7+ 已不保存；迁移 mirror 独立保留 |
 | schema v13 已完成 | `RunItTwiceState.mode + shared_board_len` | `RunItTwiceState::Single | Twice { start, second_board_suffix }` | 共享长度只允许由 `Preflop/Flop/Turn -> 0/3/4` 映射 |
-| 下一 schema 优先 | `HandPhase::Shuffling { purpose, suspended_reveal: Option<_> }` | `InitialShuffling { ... } | ReconstructShuffling { suspended_reveal, ... }`，或等价的二级 tagged payload | 从类型上消灭 `Initial + Some`、`Reconstruct + None`；迁移只接受当前 canonical 搭配 |
+| schema v14 已完成 | `HandPhase::Shuffling { purpose, street, suspended_reveal: Option<_> }` | `ShufflingPhase::Initial { ... } | Reconstruct { street, suspended_reveal, ... }` | 从类型上消灭 `Initial + Some`、`Reconstruct + None`；v13 migration 只接受 canonical 搭配 |
 | 下一 schema 优先 | active phase 的 `deadline_ms == 0` 哨兵 | active variant 必带已认证的非零绝对 deadline | `enter_*` 必须在同一原子 transition 内用 consensus timestamp 完成 arm；旧未 armed 状态迁移时 fail-closed 或确定性补齐 |
 | 下一 schema 优先 | `Vec<ElGamalCiphertext>` 表示的 52-card deck | `CipherDeck([ElGamalCiphertext; 52])`，外层用 `Absent | Active` tag | 所有生产 deck 长度已经只能是 0/52；固定数组删除 Vec length、容量与非 52 长度状态 |
 | 立即 | `NO_SEAT = 0xff` | 下一 schema 改为 4-bit canonical sentinel `0x0f` | seat index 全部统一 range-check 为 `0..8` 或 `15` |
@@ -443,9 +452,9 @@ status packing。
 | `TickArgs.now_ms` | 删除 | 使用认证的 block timestamp。|
 | `selector + method_kind + typed input + raw_args` | 单一 `canonical_command_bytes` | tag、payload 与 digest 均从同一字节串派生；重型 crypto request 只保存一次。|
 
-特别是当前 `ProveTask` 同时保存顶层 `raw_args`，部分 crypto `MethodInput` 内又保存一份
-`raw_args`，还额外保存 selector/method kind。这不仅增大 archive，也制造多份可错配事实，应在
-method batch 前优先消除。
+该项已完成：当前 `ProveTask` 只保存 `method_kind + raw_args`，crypto `MethodInput` 只保留 seat、player、
+buy-in 等窄派生值。历史 service v2 package 的重复字段只存在于 legacy mirror 中，并在迁移时逐项
+校验后丢弃。
 
 ### `tick` 为什么不能直接消失
 
@@ -574,5 +583,6 @@ Borsh 字节更贵，所以优先删除重复事实和变长容器，再考虑 b
 9. 已完成 throughput 路径的 Tagged-union Stage proof，并支持异构 composite method task 输入；
    下一步实现原始 method AIR batch 与 durable batch-id/row-index。
 10. method batch 前按顺序完成：已完成 reveal ledger canonicalization、
-    `DeckState.contributor_mask` 与 `aggregated_pk` 派生；继续完成 `bump_version` 收口并删除桌内 version；TableRules/metadata 分离；单一
-    canonical command bytes 与连续 state stream。
+    `DeckState.contributor_mask` 与 `aggregated_pk` 派生、schema v14 shuffle 二级 tagged union；继续完成
+    单一 canonical command 表示与 crypto payload 去重；下一步完成 active deadline 哨兵消除、删除桌内
+    version、TableRules/metadata 分离与连续 state stream。

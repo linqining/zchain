@@ -7,14 +7,14 @@
 //! every trusted statement before decoding the proofs.
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use poker_l1::vm::contracts::dispatch::DispatchContext;
+use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 use poker_texas_air::airs::composition::{
     ArchivedCompositionProofBundle, supports_composite_proof,
 };
-use poker_texas_air::proof_archive::ArchivedMethodProof;
 use poker_texas_air::method_kind::MethodKind;
+use poker_texas_air::proof_archive::ArchivedMethodProof;
 use poker_texas_air::prove_task::{MethodInput, ProveTask};
-use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
 use crate::repository::StoredProofMetadata;
 use crate::{ServiceError, ServiceResult};
@@ -24,6 +24,196 @@ pub const SERVICE_PROOF_PACKAGE_VERSION: u8 = 3;
 const LEGACY_SERVICE_PROOF_PACKAGE_VERSION: u8 = 2;
 /// Maximum accepted task-plus-proof package size.
 pub const MAX_SERVICE_PROOF_PACKAGE_BYTES: usize = 128 * 1024 * 1024;
+
+/// Exact transient-input layout persisted by service proof package v2.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+enum LegacyMethodInputV2 {
+    SeatOnly {
+        seat_index: u8,
+    },
+    Raise {
+        seat_index: u8,
+        total_bet: u64,
+    },
+    Bet {
+        seat_index: u8,
+        amount: u64,
+    },
+    Funds {
+        seat_index: u8,
+        amount: u64,
+    },
+    Kick {
+        seat_index: u8,
+        reason: u8,
+    },
+    Join {
+        player: [u8; 20],
+        buy_in: u64,
+    },
+    CreateTable {
+        name: String,
+        max_players: u8,
+        small_blind: u64,
+        big_blind: u64,
+    },
+    JoinAndShuffle {
+        seat_index: u8,
+        player: [u8; 20],
+        buy_in: u64,
+        raw_args: Vec<u8>,
+    },
+    LeaveWithProof {
+        seat_index: u8,
+        raw_args: Vec<u8>,
+    },
+    SubmitShuffleV2 {
+        seat_index: u8,
+        raw_args: Vec<u8>,
+    },
+    SubmitPlayerRevealTokens {
+        seat_index: u8,
+        raw_args: Vec<u8>,
+    },
+    SubmitReconstructDeck {
+        seat_index: u8,
+        raw_args: Vec<u8>,
+    },
+    RequestLeaveAfterHand {
+        seat_index: u8,
+    },
+    FoldWithProof {
+        seat_index: u8,
+        raw_args: Vec<u8>,
+    },
+    Empty,
+}
+
+impl LegacyMethodInputV2 {
+    fn matches_current(&self, current: &MethodInput, canonical_args: &[u8]) -> bool {
+        match (self, current) {
+            (Self::SeatOnly { seat_index: a }, MethodInput::SeatOnly { seat_index: b }) => a == b,
+            (
+                Self::Raise {
+                    seat_index: a,
+                    total_bet: x,
+                },
+                MethodInput::Raise {
+                    seat_index: b,
+                    total_bet: y,
+                },
+            ) => a == b && x == y,
+            (
+                Self::Bet {
+                    seat_index: a,
+                    amount: x,
+                },
+                MethodInput::Bet {
+                    seat_index: b,
+                    amount: y,
+                },
+            )
+            | (
+                Self::Funds {
+                    seat_index: a,
+                    amount: x,
+                },
+                MethodInput::Funds {
+                    seat_index: b,
+                    amount: y,
+                },
+            ) => a == b && x == y,
+            (
+                Self::Kick {
+                    seat_index: a,
+                    reason: x,
+                },
+                MethodInput::Kick {
+                    seat_index: b,
+                    reason: y,
+                },
+            ) => a == b && x == y,
+            (
+                Self::Join {
+                    player: a,
+                    buy_in: x,
+                },
+                MethodInput::Join {
+                    player: b,
+                    buy_in: y,
+                },
+            ) => a == b && x == y,
+            (
+                Self::CreateTable {
+                    name: a,
+                    max_players: b,
+                    small_blind: c,
+                    big_blind: d,
+                },
+                MethodInput::CreateTable {
+                    name: w,
+                    max_players: x,
+                    small_blind: y,
+                    big_blind: z,
+                },
+            ) => a == w && b == x && c == y && d == z,
+            (
+                Self::JoinAndShuffle {
+                    seat_index: a,
+                    player: b,
+                    buy_in: c,
+                    raw_args,
+                },
+                MethodInput::JoinAndShuffle {
+                    seat_index: x,
+                    player: y,
+                    buy_in: z,
+                },
+            ) => a == x && b == y && c == z && raw_args == canonical_args,
+            (
+                Self::LeaveWithProof {
+                    seat_index: a,
+                    raw_args,
+                },
+                MethodInput::LeaveWithProof { seat_index: b },
+            )
+            | (
+                Self::SubmitShuffleV2 {
+                    seat_index: a,
+                    raw_args,
+                },
+                MethodInput::SubmitShuffleV2 { seat_index: b },
+            )
+            | (
+                Self::SubmitPlayerRevealTokens {
+                    seat_index: a,
+                    raw_args,
+                },
+                MethodInput::SubmitPlayerRevealTokens { seat_index: b },
+            )
+            | (
+                Self::SubmitReconstructDeck {
+                    seat_index: a,
+                    raw_args,
+                },
+                MethodInput::SubmitReconstructDeck { seat_index: b },
+            )
+            | (
+                Self::FoldWithProof {
+                    seat_index: a,
+                    raw_args,
+                },
+                MethodInput::FoldWithProof { seat_index: b },
+            ) => a == b && raw_args == canonical_args,
+            (
+                Self::RequestLeaveAfterHand { seat_index: a },
+                MethodInput::RequestLeaveAfterHand { seat_index: b },
+            ) => a == b,
+            (Self::Empty, MethodInput::Empty) => true,
+            _ => false,
+        }
+    }
+}
 
 /// Durable package required to reverify one completed proving job.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -38,7 +228,7 @@ pub struct ServiceProofPackage {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct LegacyProveTaskV2 {
     method_kind: MethodKind,
-    method_input: MethodInput,
+    method_input: LegacyMethodInputV2,
     context: DispatchContext,
     selector: [u8; 32],
     raw_args: Vec<u8>,
@@ -79,17 +269,19 @@ impl LegacyProveTaskV2 {
                 "legacy proof package task tag mismatch".into(),
             ));
         }
-        let derived_input =
-            poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
-                method_tag,
-                &canonical_args,
-            )
-            .map_err(|error| {
-                ServiceError::Prover(format!(
-                    "legacy proof package typed input migration: {error}"
-                ))
-            })?;
-        if derived_input != self.method_input {
+        let derived_input = poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
+            method_tag,
+            &canonical_args,
+        )
+        .map_err(|error| {
+            ServiceError::Prover(format!(
+                "legacy proof package typed input migration: {error}"
+            ))
+        })?;
+        if !self
+            .method_input
+            .matches_current(&derived_input, &canonical_args)
+        {
             return Err(ServiceError::Prover(
                 "legacy proof package carries mismatched duplicate method input".into(),
             ));
@@ -141,15 +333,18 @@ impl ServiceProofPackage {
             ));
         }
         let package = match bytes.first().copied() {
-            Some(SERVICE_PROOF_PACKAGE_VERSION) => Self::try_from_slice(bytes).map_err(|error| {
-                ServiceError::Prover(format!("decode proving-service proof package: {error}"))
-            })?,
+            Some(SERVICE_PROOF_PACKAGE_VERSION) => {
+                Self::try_from_slice(bytes).map_err(|error| {
+                    ServiceError::Prover(format!("decode proving-service proof package: {error}"))
+                })?
+            }
             Some(LEGACY_SERVICE_PROOF_PACKAGE_VERSION) => {
-                let legacy = LegacyServiceProofPackageV2::try_from_slice(bytes).map_err(|error| {
-                    ServiceError::Prover(format!(
-                        "decode legacy proving-service proof package v2: {error}"
-                    ))
-                })?;
+                let legacy =
+                    LegacyServiceProofPackageV2::try_from_slice(bytes).map_err(|error| {
+                        ServiceError::Prover(format!(
+                            "decode legacy proving-service proof package v2: {error}"
+                        ))
+                    })?;
                 if legacy.version != LEGACY_SERVICE_PROOF_PACKAGE_VERSION {
                     return Err(ServiceError::Prover(
                         "legacy proving-service package version mismatch".into(),
@@ -319,7 +514,7 @@ mod tests {
     fn legacy_fold_task() -> LegacyProveTaskV2 {
         LegacyProveTaskV2 {
             method_kind: MethodKind::Fold,
-            method_input: MethodInput::SeatOnly { seat_index: 2 },
+            method_input: LegacyMethodInputV2::SeatOnly { seat_index: 2 },
             context: context(),
             selector: texas_dispatch::selectors::fold(),
             raw_args: borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap(),
@@ -335,9 +530,9 @@ mod tests {
     fn legacy_v2_task_migrates_to_single_canonical_command() {
         let current = legacy_fold_task().into_current().unwrap();
         assert_eq!(current.method_kind, MethodKind::Fold);
-        assert_eq!(current.selector, texas_dispatch::selectors::fold());
+        assert_eq!(current.selector(), texas_dispatch::selectors::fold());
         assert_eq!(
-            current.method_input,
+            current.method_input().unwrap(),
             MethodInput::SeatOnly { seat_index: 2 }
         );
         assert_eq!(
@@ -349,7 +544,7 @@ mod tests {
     #[test]
     fn legacy_v2_task_rejects_mismatched_duplicate_input() {
         let mut legacy = legacy_fold_task();
-        legacy.method_input = MethodInput::SeatOnly { seat_index: 3 };
+        legacy.method_input = LegacyMethodInputV2::SeatOnly { seat_index: 3 };
         assert!(legacy.into_current().is_err());
     }
 }

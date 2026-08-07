@@ -28,7 +28,7 @@ pub(crate) fn validate_start_hand(
 ) -> TexasAirResult<()> {
     const METHOD: &str = "start_hand";
     let canonical = validate_canonical_dispatch(public_inputs, MethodKind::StartHand)?;
-    if !matches!(canonical.task.method_input, MethodInput::Empty) {
+    if !matches!(canonical.method_input, MethodInput::Empty) {
         return Err(TexasAirError::SpecViolation(
             "start_hand: replayed task has the wrong MethodInput variant".into(),
         ));
@@ -106,7 +106,7 @@ pub(crate) fn validate_reset_for_next_hand(
 ) -> TexasAirResult<()> {
     const METHOD: &str = "reset_for_next_hand";
     let canonical = validate_canonical_dispatch(public_inputs, MethodKind::ResetForNextHand)?;
-    if !matches!(canonical.task.method_input, MethodInput::Empty) {
+    if !matches!(canonical.method_input, MethodInput::Empty) {
         return Err(TexasAirError::SpecViolation(
             "reset_for_next_hand: replayed task has the wrong MethodInput variant".into(),
         ));
@@ -166,7 +166,7 @@ pub(crate) fn validate_join_table(
     let args: JoinTableArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
         TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
     })?;
-    let MethodInput::Join { player, buy_in } = canonical.task.method_input else {
+    let MethodInput::Join { player, buy_in } = canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "join_table: replayed task has the wrong MethodInput variant".into(),
         ));
@@ -232,7 +232,7 @@ pub(crate) fn validate_leave_table(
     let args: LeaveTableArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
         TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
     })?;
-    let MethodInput::SeatOnly { seat_index } = canonical.task.method_input else {
+    let MethodInput::SeatOnly { seat_index } = canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "leave_table: replayed task has the wrong MethodInput variant".into(),
         ));

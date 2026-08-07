@@ -731,21 +731,91 @@ pub enum HandPhaseTag {
 /// is not treated as a second simultaneously active phase. Persisted schema v7+ and the runtime
 /// table both store this union directly; legacy flattened layouts exist only in codec mirrors.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum ShufflingPhase {
+    /// Fresh per-hand shuffle. The outer round is canonically WAITING and no reveal is suspended.
+    Initial {
+        /// Canonical shuffle progress.
+        state: ShuffleState,
+        /// Absolute timeout deadline, or zero while the timer is not armed.
+        deadline_ms: u64,
+    },
+    /// Shuffle after reconstruction, carrying the reveal that must resume afterwards.
+    Reconstruct {
+        /// Betting street that will resume after shuffling.
+        street: u8,
+        /// Canonical shuffle progress.
+        state: ShuffleState,
+        /// Reveal payload suspended while the reconstructed deck is shuffled.
+        suspended_reveal: RevealTokenState,
+        /// Absolute timeout deadline, or zero while the timer is not armed.
+        deadline_ms: u64,
+    },
+}
+
+impl ShufflingPhase {
+    /// Typed shuffle purpose derived from the union variant.
+    #[must_use]
+    pub const fn purpose(&self) -> ShufflingPurpose {
+        match self {
+            Self::Initial { .. } => ShufflingPurpose::Initial,
+            Self::Reconstruct { .. } => ShufflingPurpose::Reconstruct,
+        }
+    }
+
+    /// Canonical outer betting street.
+    #[must_use]
+    pub const fn street(&self) -> u8 {
+        match self {
+            Self::Initial { .. } => ROUND_WAITING,
+            Self::Reconstruct { street, .. } => *street,
+        }
+    }
+
+    /// Borrow the common shuffle progress payload.
+    #[must_use]
+    pub const fn state(&self) -> &ShuffleState {
+        match self {
+            Self::Initial { state, .. } | Self::Reconstruct { state, .. } => state,
+        }
+    }
+
+    /// Mutably borrow the common shuffle progress payload.
+    pub const fn state_mut(&mut self) -> &mut ShuffleState {
+        match self {
+            Self::Initial { state, .. } | Self::Reconstruct { state, .. } => state,
+        }
+    }
+
+    /// Borrow the active absolute deadline.
+    #[must_use]
+    pub const fn deadline_ms(&self) -> u64 {
+        match self {
+            Self::Initial { deadline_ms, .. } | Self::Reconstruct { deadline_ms, .. } => {
+                *deadline_ms
+            }
+        }
+    }
+
+    /// Mutably borrow the active absolute deadline.
+    pub const fn deadline_ms_mut(&mut self) -> &mut u64 {
+        match self {
+            Self::Initial { deadline_ms, .. } | Self::Reconstruct { deadline_ms, .. } => {
+                deadline_ms
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+/// Single active hand phase. Shuffle uses a nested union so fresh and reconstruct payloads cannot
+/// encode each other's fields.
 pub enum HandPhase {
     /// No hand transition is active.
     Waiting,
-    /// Active shuffle state, optionally carrying a suspended reveal during reconstruction.
+    /// Active shuffle state with a second-level tag distinguishing fresh and reconstruct shuffle.
     Shuffling {
-        /// Why the active deck must be shuffled.
-        purpose: ShufflingPurpose,
-        /// Betting street that will resume after shuffling.
-        street: u8,
-        /// Canonical shuffle payload.
-        state: ShuffleState,
-        /// Reveal payload suspended while a reconstructed deck is shuffled.
-        suspended_reveal: Option<RevealTokenState>,
-        /// Absolute timeout deadline, or zero while the timer is not armed.
-        deadline_ms: u64,
+        /// Type-safe shuffle payload; invalid purpose/reveal combinations are unrepresentable.
+        phase: ShufflingPhase,
     },
     /// Active reveal-token collection/materialization.
     Revealing {
@@ -1045,8 +1115,8 @@ impl TexasPokerTable {
     pub const fn round_state(&self) -> u8 {
         match &self.hand_phase {
             HandPhase::Waiting => ROUND_WAITING,
-            HandPhase::Shuffling { street, .. }
-            | HandPhase::Revealing { street, .. }
+            HandPhase::Shuffling { phase } => phase.street(),
+            HandPhase::Revealing { street, .. }
             | HandPhase::Reconstructing { street, .. }
             | HandPhase::Betting { street, .. } => *street,
             HandPhase::ShowdownDisplay { .. } => ROUND_SHOWDOWN,
@@ -1075,7 +1145,7 @@ impl TexasPokerTable {
     #[must_use]
     pub fn shuffle_state(&self) -> Cow<'_, ShuffleState> {
         match &self.hand_phase {
-            HandPhase::Shuffling { state, .. } => Cow::Borrowed(state),
+            HandPhase::Shuffling { phase } => Cow::Borrowed(phase.state()),
             _ => Cow::Owned(ShuffleState::default()),
         }
     }
@@ -1084,7 +1154,7 @@ impl TexasPokerTable {
     #[must_use]
     pub const fn shuffling_purpose(&self) -> Option<ShufflingPurpose> {
         match &self.hand_phase {
-            HandPhase::Shuffling { purpose, .. } => Some(*purpose),
+            HandPhase::Shuffling { phase } => Some(phase.purpose()),
             _ => None,
         }
     }
@@ -1107,9 +1177,11 @@ impl TexasPokerTable {
                 suspended_reveal, ..
             } => Cow::Borrowed(suspended_reveal),
             HandPhase::Shuffling {
-                suspended_reveal: Some(state),
-                ..
-            } => Cow::Borrowed(state),
+                phase:
+                    ShufflingPhase::Reconstruct {
+                        suspended_reveal, ..
+                    },
+            } => Cow::Borrowed(suspended_reveal),
             _ => Cow::Owned(RevealTokenState::default()),
         }
     }
@@ -1144,9 +1216,9 @@ impl TexasPokerTable {
     pub fn timestamps(&self) -> Cow<'_, Timestamps> {
         let mut timestamps = Timestamps::default();
         match &self.hand_phase {
-            HandPhase::Shuffling { deadline_ms, .. } => {
+            HandPhase::Shuffling { phase } => {
                 timestamps.shuffle_started_at =
-                    deadline_ms.saturating_sub(u64::from(self.timeout_config.shuffle_timeout_ms));
+                    phase.deadline_ms().saturating_sub(u64::from(self.timeout_config.shuffle_timeout_ms));
             }
             HandPhase::Revealing { deadline_ms, .. } => {
                 timestamps.reveal_started_at =
@@ -1170,7 +1242,7 @@ impl TexasPokerTable {
     /// Mutable payload of the active shuffle variant.
     pub fn active_shuffle_state_mut(&mut self) -> PokerL1Result<&mut ShuffleState> {
         match &mut self.hand_phase {
-            HandPhase::Shuffling { state, .. } => Ok(state),
+            HandPhase::Shuffling { phase } => Ok(phase.state_mut()),
             _ => Err(PokerL1Error::Serialization(
                 "Texas table is not in an active shuffle phase".into(),
             )),
@@ -1196,9 +1268,11 @@ impl TexasPokerTable {
                 suspended_reveal, ..
             } => Ok(suspended_reveal),
             HandPhase::Shuffling {
-                suspended_reveal: Some(state),
-                ..
-            } => Ok(state),
+                phase:
+                    ShufflingPhase::Reconstruct {
+                        suspended_reveal, ..
+                    },
+            } => Ok(suspended_reveal),
             other => {
                 self.hand_phase = other;
                 Err(PokerL1Error::Serialization(
@@ -1277,7 +1351,7 @@ impl TexasPokerTable {
     /// Absolute deadline of the active shuffle phase, or zero while unarmed.
     pub fn shuffle_deadline_ms(&self) -> PokerL1Result<Option<u64>> {
         match &self.hand_phase {
-            HandPhase::Shuffling { deadline_ms, .. } => Ok(Some(*deadline_ms)),
+            HandPhase::Shuffling { phase } => Ok(Some(phase.deadline_ms())),
             _ => Ok(None),
         }
     }
@@ -1290,11 +1364,8 @@ impl TexasPokerTable {
             "shuffle",
         )?;
         match &mut self.hand_phase {
-            HandPhase::Shuffling {
-                deadline_ms: stored,
-                ..
-            } => {
-                *stored = deadline_ms;
+            HandPhase::Shuffling { phase } => {
+                *phase.deadline_ms_mut() = deadline_ms;
                 Ok(deadline_ms)
             }
             _ => Err(PokerL1Error::Serialization(
@@ -1306,8 +1377,8 @@ impl TexasPokerTable {
     /// Disarm the active shuffle deadline when its canonical actor changes.
     pub fn disarm_shuffle_deadline(&mut self) -> PokerL1Result<()> {
         match &mut self.hand_phase {
-            HandPhase::Shuffling { deadline_ms, .. } => {
-                *deadline_ms = 0;
+            HandPhase::Shuffling { phase } => {
+                *phase.deadline_ms_mut() = 0;
                 Ok(())
             }
             _ => Err(PokerL1Error::Serialization(
@@ -1502,14 +1573,15 @@ impl TexasPokerTable {
                     }
                 }
             }
-            HandPhase::Shuffling {
-                state,
-                suspended_reveal,
-                ..
-            } => {
+            HandPhase::Shuffling { phase } => {
+                let state = phase.state_mut();
                 seat_mask_remove(&mut state.pending_mask, seat_index);
                 seat_mask_remove(&mut state.completed_mask, seat_index);
-                if let Some(reveal) = suspended_reveal {
+                if let ShufflingPhase::Reconstruct {
+                    suspended_reveal: reveal,
+                    ..
+                } = phase
+                {
                     for assignment in &mut reveal.assignments {
                         if let RevealProgress::Collecting { pending_mask, .. } =
                             &mut assignment.progress
@@ -1540,13 +1612,10 @@ impl TexasPokerTable {
         self.hand_phase = HandPhase::Waiting;
     }
 
-    /// Atomically enter a shuffle phase.
-    pub fn enter_shuffling(
+    /// Atomically enter the fresh per-hand shuffle phase.
+    pub fn enter_initial_shuffling(
         &mut self,
-        purpose: ShufflingPurpose,
-        street: u8,
         state: ShuffleState,
-        suspended_reveal: Option<RevealTokenState>,
         started_at_ms: u64,
     ) -> PokerL1Result<()> {
         let deadline_ms = canonical_absolute_deadline(
@@ -1555,11 +1624,39 @@ impl TexasPokerTable {
             "shuffle",
         )?;
         self.hand_phase = HandPhase::Shuffling {
-            purpose,
+            phase: ShufflingPhase::Initial { state, deadline_ms },
+        };
+        Ok(())
+    }
+
+    /// Atomically enter a reconstruct shuffle with the reveal that must resume afterwards.
+    pub fn enter_reconstruct_shuffling(
+        &mut self,
+        street: u8,
+        state: ShuffleState,
+        suspended_reveal: RevealTokenState,
+        started_at_ms: u64,
+    ) -> PokerL1Result<()> {
+        if !matches!(
             street,
-            state,
-            suspended_reveal,
-            deadline_ms,
+            ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER | ROUND_SHOWDOWN
+        ) {
+            return Err(PokerL1Error::Serialization(
+                "Texas reconstruct shuffle is outside a live street".into(),
+            ));
+        }
+        let deadline_ms = canonical_absolute_deadline(
+            started_at_ms,
+            self.timeout_config.shuffle_timeout_ms,
+            "shuffle",
+        )?;
+        self.hand_phase = HandPhase::Shuffling {
+            phase: ShufflingPhase::Reconstruct {
+                street,
+                state,
+                suspended_reveal,
+                deadline_ms,
+            },
         };
         Ok(())
     }
@@ -1866,37 +1963,29 @@ impl TexasPokerTable {
 
         match &self.hand_phase {
             HandPhase::Waiting => Ok(()),
-            HandPhase::Shuffling {
-                purpose,
-                street,
-                state: _,
-                suspended_reveal,
-                deadline_ms,
-            } => {
-                match purpose {
-                    ShufflingPurpose::Initial
-                        if *street == ROUND_WAITING && suspended_reveal.is_none() => {}
-                    ShufflingPurpose::Reconstruct
-                        if matches!(
-                            *street,
-                            ROUND_PREFLOP
-                                | ROUND_FLOP
-                                | ROUND_TURN
-                                | ROUND_RIVER
-                                | ROUND_SHOWDOWN
-                        ) && suspended_reveal.is_some() => {}
-                    _ => {
+            HandPhase::Shuffling { phase } => {
+                if let ShufflingPhase::Reconstruct {
+                    street,
+                    suspended_reveal,
+                    ..
+                } = phase
+                {
+                    if !matches!(
+                        *street,
+                        ROUND_PREFLOP
+                            | ROUND_FLOP
+                            | ROUND_TURN
+                            | ROUND_RIVER
+                            | ROUND_SHOWDOWN
+                    ) {
                         return Err(PokerL1Error::Serialization(
-                            "Texas shuffle purpose/street/suspended reveal combination is invalid"
-                                .into(),
+                            "Texas reconstruct shuffle is outside a live street".into(),
                         ));
                     }
-                }
-                if let Some(reveal) = suspended_reveal {
-                    validate_reveal(reveal)?;
+                    validate_reveal(suspended_reveal)?;
                 }
                 validate_deadline(
-                    *deadline_ms,
+                    phase.deadline_ms(),
                     self.timeout_config.shuffle_timeout_ms,
                     "shuffle",
                 )
@@ -2251,6 +2340,60 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn shuffle_sub_union_separates_initial_and_reconstruct_payloads() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+        table
+            .enter_initial_shuffling(
+                ShuffleState {
+                    pending_mask: 0b11,
+                    completed_mask: 0,
+                },
+                1_000,
+            )
+            .unwrap();
+        assert!(matches!(
+            table.hand_phase,
+            HandPhase::Shuffling {
+                phase: ShufflingPhase::Initial { .. }
+            }
+        ));
+        assert_eq!(table.round_state(), ROUND_WAITING);
+        assert_eq!(table.shuffling_purpose(), Some(ShufflingPurpose::Initial));
+
+        let reveal = RevealTokenState {
+            reveal_phase: super::super::constants::REVEAL_PHASE_TURN,
+            assignments: vec![],
+        };
+        table
+            .enter_reconstruct_shuffling(
+                ROUND_TURN,
+                ShuffleState {
+                    pending_mask: 0b10,
+                    completed_mask: 0b01,
+                },
+                reveal.clone(),
+                2_000,
+            )
+            .unwrap();
+        assert!(matches!(
+            &table.hand_phase,
+            HandPhase::Shuffling {
+                phase: ShufflingPhase::Reconstruct {
+                    street: ROUND_TURN,
+                    suspended_reveal,
+                    ..
+                }
+            } if suspended_reveal == &reveal
+        ));
+        assert_eq!(table.round_state(), ROUND_TURN);
+        assert_eq!(
+            table.shuffling_purpose(),
+            Some(ShufflingPurpose::Reconstruct)
+        );
     }
 
     #[test]

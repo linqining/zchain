@@ -1,6 +1,6 @@
 //! Versioned persisted-state codec for Texas Poker tables.
 //!
-//! The live persisted table type is schema v13. Schemas v2-v12 are decoded into exact legacy
+//! The live persisted table type is schema v14. Schemas v2-v13 are decoded into exact legacy
 //! mirrors and migrated with fail-closed validation for every removed or compacted field.
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -17,7 +17,7 @@ use super::side_pot::SidePot;
 use super::types::{
     DeckState, EMPTY_PLAYER, HandPhase, NO_SEAT, ReconstructState, RevealAssignment,
     RevealProgress, RevealTarget, RevealTokenState, RitStartStreet, RunItTwiceState, Seat, SeatMask,
-    SeatStatus, ShuffleState, ShufflingPurpose, TexasPokerTable, TimeoutConfig, Timestamps, seat_mask_contains,
+    SeatStatus, ShuffleState, ShufflingPhase, ShufflingPurpose, TexasPokerTable, TimeoutConfig, Timestamps, seat_mask_contains,
     seat_mask_from_indices,
 };
 use super::utils::generate_plaintext_cards;
@@ -36,6 +36,7 @@ const LEGACY_V9_SCHEMA_VERSION: u8 = 9;
 const LEGACY_V10_SCHEMA_VERSION: u8 = 10;
 const LEGACY_V11_SCHEMA_VERSION: u8 = 11;
 const LEGACY_V12_SCHEMA_VERSION: u8 = 12;
+const LEGACY_V13_SCHEMA_VERSION: u8 = 13;
 
 fn time_bank_u32(value: u64, label: &str) -> PokerL1Result<u32> {
     u32::try_from(value).map_err(|_| {
@@ -313,6 +314,43 @@ fn migrate_shuffling_purpose(
     }
 }
 
+fn migrate_shuffling_phase(
+    purpose: ShufflingPurpose,
+    street: u8,
+    state: ShuffleState,
+    suspended_reveal: Option<RevealTokenState>,
+    deadline_ms: u64,
+) -> PokerL1Result<HandPhase> {
+    let phase = match (purpose, suspended_reveal) {
+        (ShufflingPurpose::Initial, None) if street == super::constants::ROUND_WAITING => {
+            ShufflingPhase::Initial { state, deadline_ms }
+        }
+        (ShufflingPurpose::Reconstruct, Some(suspended_reveal))
+            if matches!(
+                street,
+                super::constants::ROUND_PREFLOP
+                    | super::constants::ROUND_FLOP
+                    | super::constants::ROUND_TURN
+                    | super::constants::ROUND_RIVER
+                    | super::constants::ROUND_SHOWDOWN
+            ) =>
+        {
+            ShufflingPhase::Reconstruct {
+                street,
+                state,
+                suspended_reveal,
+                deadline_ms,
+            }
+        }
+        _ => {
+            return Err(PokerL1Error::Serialization(
+                "legacy shuffle has an invalid purpose/street/reveal combination".into(),
+            ));
+        }
+    };
+    Ok(HandPhase::Shuffling { phase })
+}
+
 fn migrate_reveal_state(
     value: LegacyRevealTokenStateV4,
     max_players: u8,
@@ -464,13 +502,7 @@ fn migrate_hand_phase_v11(
             let (phase, state) = migrate_shuffle_state_v11(state, max_players)?;
             let purpose =
                 migrate_shuffling_purpose(phase, street, suspended_reveal.is_some())?;
-            HandPhase::Shuffling {
-                purpose,
-                street,
-                state,
-                suspended_reveal,
-                deadline_ms,
-            }
+            migrate_shuffling_phase(purpose, street, state, suspended_reveal, deadline_ms)?
         }
         LegacyHandPhaseV11::Revealing {
             street,
@@ -515,6 +547,55 @@ fn migrate_hand_phase_v11(
     })
 }
 
+fn migrate_hand_phase_v13(phase: LegacyHandPhaseV13) -> PokerL1Result<HandPhase> {
+    Ok(match phase {
+        LegacyHandPhaseV13::Waiting => HandPhase::Waiting,
+        LegacyHandPhaseV13::Shuffling {
+            purpose,
+            street,
+            state,
+            suspended_reveal,
+            deadline_ms,
+        } => migrate_shuffling_phase(purpose, street, state, suspended_reveal, deadline_ms)?,
+        LegacyHandPhaseV13::Revealing {
+            street,
+            state,
+            deadline_ms,
+        } => HandPhase::Revealing {
+            street,
+            state,
+            deadline_ms,
+        },
+        LegacyHandPhaseV13::Reconstructing {
+            street,
+            state,
+            suspended_reveal,
+            epoch_ms,
+            deadline_ms,
+        } => HandPhase::Reconstructing {
+            street,
+            state,
+            suspended_reveal,
+            epoch_ms,
+            deadline_ms,
+        },
+        LegacyHandPhaseV13::Betting {
+            street,
+            round,
+            current_turn,
+            deadline_ms,
+        } => HandPhase::Betting {
+            street,
+            round,
+            current_turn,
+            deadline_ms,
+        },
+        LegacyHandPhaseV13::ShowdownDisplay { deadline_ms } => {
+            HandPhase::ShowdownDisplay { deadline_ms }
+        }
+    })
+}
+
 fn migrate_hand_phase_v10(
     phase: LegacyHandPhaseV10,
     max_players: u8,
@@ -530,13 +611,7 @@ fn migrate_hand_phase_v10(
             let (phase, state) = migrate_shuffle_state_v10(state, max_players)?;
             let purpose =
                 migrate_shuffling_purpose(phase, street, suspended_reveal.is_some())?;
-            HandPhase::Shuffling {
-                purpose,
-                street,
-                state,
-                suspended_reveal,
-                deadline_ms,
-            }
+            migrate_shuffling_phase(purpose, street, state, suspended_reveal, deadline_ms)?
         }
         LegacyHandPhaseV10::Revealing {
             street,
@@ -596,13 +671,7 @@ fn migrate_hand_phase_v7(phase: LegacyHandPhaseV7, max_players: u8) -> PokerL1Re
             let (phase, state) = migrate_shuffle_state_v10(state, max_players)?;
             let purpose =
                 migrate_shuffling_purpose(phase, street, suspended_reveal.is_some())?;
-            HandPhase::Shuffling {
-                purpose,
-                street,
-                state,
-                suspended_reveal,
-                deadline_ms,
-            }
+            migrate_shuffling_phase(purpose, street, state, suspended_reveal, deadline_ms)?
         }
         LegacyHandPhaseV7::Revealing {
             street,
@@ -1766,13 +1835,13 @@ struct LegacyTimeoutConfigV6 {
     ready_wait_ms: u64,
 }
 
-/// Canonical schema-v13 table encoding.
+/// Canonical schema-v14 table encoding.
 ///
 /// The runtime table temporarily retains schema-v6 phase fields as compatibility caches while
 /// call sites are migrated. They are deliberately absent here: persisted state, state roots and
 /// nested prove tasks bind only this single tagged phase representation.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-struct PersistedTexasPokerTableV13 {
+struct PersistedTexasPokerTableV14 {
     id: ObjectID,
     state_schema_version: u8,
     name: String,
@@ -1787,6 +1856,75 @@ struct PersistedTexasPokerTableV13 {
     pot: u64,
     community_cards: BoardCards,
     hand_phase: HandPhase,
+    deck_state: PersistedDeckStateV10,
+    timeout_config: PersistedTimeoutConfigV7,
+    chip_pool: u64,
+    addon_pool: u64,
+    ante_mode: u8,
+    ante_amount: u64,
+    ante_collected: u64,
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+    rake_collected: u64,
+    rit_mode: u8,
+    run_it_twice_state: RunItTwiceState,
+    hand_id: u32,
+    call_seq: u32,
+    version: u64,
+}
+
+/// Exact schema-v13 hand phase before shuffle purpose became a second-level tagged union.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+enum LegacyHandPhaseV13 {
+    Waiting,
+    Shuffling {
+        purpose: ShufflingPurpose,
+        street: u8,
+        state: ShuffleState,
+        suspended_reveal: Option<RevealTokenState>,
+        deadline_ms: u64,
+    },
+    Revealing {
+        street: u8,
+        state: RevealTokenState,
+        deadline_ms: u64,
+    },
+    Reconstructing {
+        street: u8,
+        state: ReconstructState,
+        suspended_reveal: RevealTokenState,
+        epoch_ms: u64,
+        deadline_ms: u64,
+    },
+    Betting {
+        street: u8,
+        round: BettingRound,
+        current_turn: u8,
+        deadline_ms: u64,
+    },
+    ShowdownDisplay {
+        deadline_ms: u64,
+    },
+}
+
+/// Exact schema-v13 table before the type-safe shuffle sub-union.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct LegacyPersistedTexasPokerTableV13 {
+    id: ObjectID,
+    state_schema_version: u8,
+    name: String,
+    creator: Address,
+    max_players: u8,
+    small_blind: u64,
+    big_blind: u64,
+    seats: Vec<Seat>,
+    acted_mask: SeatMask,
+    leave_after_hand_mask: SeatMask,
+    button: u8,
+    pot: u64,
+    community_cards: BoardCards,
+    hand_phase: LegacyHandPhaseV13,
     deck_state: PersistedDeckStateV10,
     timeout_config: PersistedTimeoutConfigV7,
     chip_pool: u64,
@@ -1821,7 +1959,7 @@ struct LegacyPersistedTexasPokerTableV12 {
     button: u8,
     pot: u64,
     community_cards: BoardCards,
-    hand_phase: HandPhase,
+    hand_phase: LegacyHandPhaseV13,
     deck_state: PersistedDeckStateV10,
     timeout_config: PersistedTimeoutConfigV7,
     chip_pool: u64,
@@ -2034,7 +2172,7 @@ struct LegacyPersistedTexasPokerTableV7 {
 // Kept as a source-compatible name for older codec fixtures. It denotes the current canonical
 // encoding; actual schema-v7 bytes use `LegacyPersistedTexasPokerTableV7` above.
 #[cfg(test)]
-type PersistedTexasPokerTableV7 = PersistedTexasPokerTableV13;
+type PersistedTexasPokerTableV7 = PersistedTexasPokerTableV14;
 
 /// Exact schema-v10 mirror. It is identical to v11 except the shuffle actor was persisted.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -2249,17 +2387,17 @@ fn collapse_legacy_hand_phase(
         }
         let purpose =
             migrate_shuffling_purpose(shuffle_phase, round_state, reveal_active)?;
-        return Ok(HandPhase::Shuffling {
+        return migrate_shuffling_phase(
             purpose,
-            street: round_state,
-            state: shuffle_state,
-            suspended_reveal: reveal_active.then_some(reveal_token_state),
-            deadline_ms: deadline_from_started_at(
+            round_state,
+            shuffle_state,
+            reveal_active.then_some(reveal_token_state),
+            deadline_from_started_at(
                 timestamps.shuffle_started_at,
                 timeout.shuffle_timeout_ms,
                 "shuffle",
             )?,
-        });
+        );
     }
     if reveal_active {
         if betting_active {
@@ -2300,7 +2438,7 @@ fn collapse_legacy_hand_phase(
     }
 }
 
-impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV13 {
+impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV14 {
     type Error = PokerL1Error;
 
     fn try_from(value: &TexasPokerTable) -> Result<Self, Self::Error> {
@@ -2345,10 +2483,10 @@ impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV13 {
     }
 }
 
-impl TryFrom<PersistedTexasPokerTableV13> for TexasPokerTable {
+impl TryFrom<PersistedTexasPokerTableV14> for TexasPokerTable {
     type Error = PokerL1Error;
 
-    fn try_from(value: PersistedTexasPokerTableV13) -> Result<Self, Self::Error> {
+    fn try_from(value: PersistedTexasPokerTableV14) -> Result<Self, Self::Error> {
         if value.state_schema_version != TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
             return Err(PokerL1Error::Serialization(format!(
                 "unsupported canonical Texas schema {}",
@@ -2379,6 +2517,55 @@ impl TryFrom<PersistedTexasPokerTableV13> for TexasPokerTable {
             hand_phase,
             deck_state,
             timeout_config,
+            chip_pool: value.chip_pool,
+            addon_pool: value.addon_pool,
+            ante_mode: value.ante_mode,
+            ante_amount: value.ante_amount,
+            ante_collected: value.ante_collected,
+            rake_mode: value.rake_mode,
+            rake_bps: value.rake_bps,
+            rake_cap: value.rake_cap,
+            rake_collected: value.rake_collected,
+            rit_mode: value.rit_mode,
+            run_it_twice_state: value.run_it_twice_state,
+            hand_id: value.hand_id,
+            call_seq: value.call_seq,
+            version: value.version,
+        };
+        table.validate_state_schema()?;
+        Ok(table)
+    }
+}
+
+impl TryFrom<LegacyPersistedTexasPokerTableV13> for TexasPokerTable {
+    type Error = PokerL1Error;
+
+    fn try_from(value: LegacyPersistedTexasPokerTableV13) -> Result<Self, Self::Error> {
+        if value.state_schema_version != LEGACY_V13_SCHEMA_VERSION {
+            return Err(PokerL1Error::Serialization(format!(
+                "unsupported legacy Texas schema {}",
+                value.state_schema_version
+            )));
+        }
+        let deck_state =
+            restore_deck_state_v10(value.deck_state, &value.seats, value.max_players)?;
+        let table = Self {
+            id: value.id,
+            state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
+            name: value.name,
+            creator: value.creator,
+            max_players: value.max_players,
+            small_blind: value.small_blind,
+            big_blind: value.big_blind,
+            seats: value.seats,
+            acted_mask: value.acted_mask,
+            leave_after_hand_mask: value.leave_after_hand_mask,
+            button: value.button,
+            pot: value.pot,
+            community_cards: value.community_cards,
+            hand_phase: migrate_hand_phase_v13(value.hand_phase)?,
+            deck_state,
+            timeout_config: value.timeout_config.into(),
             chip_pool: value.chip_pool,
             addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
@@ -2432,7 +2619,7 @@ impl TryFrom<LegacyPersistedTexasPokerTableV12> for TexasPokerTable {
             button: value.button,
             pot: value.pot,
             community_cards: value.community_cards,
-            hand_phase: value.hand_phase,
+            hand_phase: migrate_hand_phase_v13(value.hand_phase)?,
             deck_state,
             timeout_config: value.timeout_config.into(),
             chip_pool: value.chip_pool,
@@ -2743,7 +2930,7 @@ impl TryFrom<LegacyPersistedTexasPokerTableV8> for TexasPokerTable {
 
 impl BorshSerialize for TexasPokerTable {
     fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        let persisted = PersistedTexasPokerTableV13::try_from(self)
+        let persisted = PersistedTexasPokerTableV14::try_from(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         persisted.serialize(writer)
     }
@@ -2751,7 +2938,7 @@ impl BorshSerialize for TexasPokerTable {
 
 impl BorshDeserialize for TexasPokerTable {
     fn deserialize_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let persisted = PersistedTexasPokerTableV13::deserialize_reader(reader)?;
+        let persisted = PersistedTexasPokerTableV14::deserialize_reader(reader)?;
         persisted.try_into().map_err(|error: PokerL1Error| {
             io::Error::new(io::ErrorKind::InvalidData, error.to_string())
         })
@@ -3135,12 +3322,18 @@ pub fn encode_table_state(table: &TexasPokerTable) -> PokerL1Result<Vec<u8>> {
         .map_err(|error| PokerL1Error::Serialization(format!("TexasPokerTable borsh: {error}")))
 }
 
-/// Decode current v13 bytes or migrate exact v2-v12 bytes into the canonical v13 model.
+/// Decode current v14 bytes or migrate exact v2-v13 bytes into the canonical v14 model.
 pub fn decode_table_state(bytes: &[u8]) -> PokerL1Result<TexasPokerTable> {
     if let Ok(table) = TexasPokerTable::try_from_slice(bytes) {
         if table.state_schema_version == TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
             table.validate_state_schema()?;
             return Ok(table);
+        }
+    }
+
+    if let Ok(legacy) = LegacyPersistedTexasPokerTableV13::try_from_slice(bytes) {
+        if legacy.state_schema_version == LEGACY_V13_SCHEMA_VERSION {
+            return legacy.try_into();
         }
     }
 
@@ -3206,7 +3399,7 @@ pub fn decode_table_state(bytes: &[u8]) -> PokerL1Result<TexasPokerTable> {
 
     let legacy = LegacyTexasPokerTableV2::try_from_slice(bytes).map_err(|error| {
         PokerL1Error::Serialization(format!(
-            "TexasPokerTable is neither canonical v13 nor migratable v2-v12: {error}"
+            "TexasPokerTable is neither canonical v14 nor migratable v2-v13: {error}"
         ))
     })?;
     legacy.try_into()
@@ -3241,26 +3434,56 @@ mod tests {
         }
     }
 
-    fn legacy_hand_phase_v10(phase: HandPhase) -> LegacyHandPhaseV10 {
+    fn legacy_shuffle_phase_parts(
+        phase: ShufflingPhase,
+    ) -> (
+        ShufflingPurpose,
+        u8,
+        ShuffleState,
+        Option<RevealTokenState>,
+        u64,
+    ) {
         match phase {
-            HandPhase::Waiting => LegacyHandPhaseV10::Waiting,
-            HandPhase::Shuffling {
-                purpose,
+            ShufflingPhase::Initial { state, deadline_ms } => (
+                ShufflingPurpose::Initial,
+                ROUND_WAITING,
+                state,
+                None,
+                deadline_ms,
+            ),
+            ShufflingPhase::Reconstruct {
                 street,
                 state,
                 suspended_reveal,
                 deadline_ms,
-            } => LegacyHandPhaseV10::Shuffling {
+            } => (
+                ShufflingPurpose::Reconstruct,
                 street,
-                state: LegacyShuffleStateV10 {
-                    phase: purpose.legacy_phase(),
-                    current_shuffler: state.derived_current_shuffler(),
-                    pending_mask: state.pending_mask,
-                    completed_mask: state.completed_mask,
-                },
-                suspended_reveal,
+                state,
+                Some(suspended_reveal),
                 deadline_ms,
-            },
+            ),
+        }
+    }
+
+    fn legacy_hand_phase_v10(phase: HandPhase) -> LegacyHandPhaseV10 {
+        match phase {
+            HandPhase::Waiting => LegacyHandPhaseV10::Waiting,
+            HandPhase::Shuffling { phase } => {
+                let (purpose, street, state, suspended_reveal, deadline_ms) =
+                    legacy_shuffle_phase_parts(phase);
+                LegacyHandPhaseV10::Shuffling {
+                    street,
+                    state: LegacyShuffleStateV10 {
+                        phase: purpose.legacy_phase(),
+                        current_shuffler: state.derived_current_shuffler(),
+                        pending_mask: state.pending_mask,
+                        completed_mask: state.completed_mask,
+                    },
+                    suspended_reveal,
+                    deadline_ms,
+                }
+            }
             HandPhase::Revealing {
                 street,
                 state,
@@ -3308,22 +3531,20 @@ mod tests {
     fn legacy_hand_phase_v11(phase: HandPhase) -> LegacyHandPhaseV11 {
         match phase {
             HandPhase::Waiting => LegacyHandPhaseV11::Waiting,
-            HandPhase::Shuffling {
-                purpose,
-                street,
-                state,
-                suspended_reveal,
-                deadline_ms,
-            } => LegacyHandPhaseV11::Shuffling {
-                street,
-                state: LegacyShuffleStateV11 {
-                    phase: purpose.legacy_phase(),
-                    pending_mask: state.pending_mask,
-                    completed_mask: state.completed_mask,
-                },
-                suspended_reveal,
-                deadline_ms,
-            },
+            HandPhase::Shuffling { phase } => {
+                let (purpose, street, state, suspended_reveal, deadline_ms) =
+                    legacy_shuffle_phase_parts(phase);
+                LegacyHandPhaseV11::Shuffling {
+                    street,
+                    state: LegacyShuffleStateV11 {
+                        phase: purpose.legacy_phase(),
+                        pending_mask: state.pending_mask,
+                        completed_mask: state.completed_mask,
+                    },
+                    suspended_reveal,
+                    deadline_ms,
+                }
+            }
             HandPhase::Revealing {
                 street,
                 state,
@@ -3364,6 +3585,59 @@ mod tests {
             },
             HandPhase::ShowdownDisplay { deadline_ms } => {
                 LegacyHandPhaseV11::ShowdownDisplay { deadline_ms }
+            }
+        }
+    }
+
+    fn legacy_hand_phase_v13(phase: HandPhase) -> LegacyHandPhaseV13 {
+        match phase {
+            HandPhase::Waiting => LegacyHandPhaseV13::Waiting,
+            HandPhase::Shuffling { phase } => {
+                let (purpose, street, state, suspended_reveal, deadline_ms) =
+                    legacy_shuffle_phase_parts(phase);
+                LegacyHandPhaseV13::Shuffling {
+                    purpose,
+                    street,
+                    state,
+                    suspended_reveal,
+                    deadline_ms,
+                }
+            }
+            HandPhase::Revealing {
+                street,
+                state,
+                deadline_ms,
+            } => LegacyHandPhaseV13::Revealing {
+                street,
+                state,
+                deadline_ms,
+            },
+            HandPhase::Reconstructing {
+                street,
+                state,
+                suspended_reveal,
+                epoch_ms,
+                deadline_ms,
+            } => LegacyHandPhaseV13::Reconstructing {
+                street,
+                state,
+                suspended_reveal,
+                epoch_ms,
+                deadline_ms,
+            },
+            HandPhase::Betting {
+                street,
+                round,
+                current_turn,
+                deadline_ms,
+            } => LegacyHandPhaseV13::Betting {
+                street,
+                round,
+                current_turn,
+                deadline_ms,
+            },
+            HandPhase::ShowdownDisplay { deadline_ms } => {
+                LegacyHandPhaseV13::ShowdownDisplay { deadline_ms }
             }
         }
     }
@@ -3643,6 +3917,46 @@ mod tests {
         }
     }
 
+    fn legacy_v13(table: &TexasPokerTable) -> LegacyPersistedTexasPokerTableV13 {
+        LegacyPersistedTexasPokerTableV13 {
+            id: table.id,
+            state_schema_version: LEGACY_V13_SCHEMA_VERSION,
+            name: table.name.clone(),
+            creator: table.creator,
+            max_players: table.max_players,
+            small_blind: table.small_blind,
+            big_blind: table.big_blind,
+            seats: table.seats.clone(),
+            acted_mask: table.acted_mask,
+            leave_after_hand_mask: table.leave_after_hand_mask,
+            button: table.button,
+            pot: table.pot,
+            community_cards: table.community_cards.clone(),
+            hand_phase: legacy_hand_phase_v13(table.canonical_hand_phase().unwrap()),
+            deck_state: PersistedDeckStateV10 {
+                encrypted: table.deck_state.encrypted.clone(),
+                contributor_mask: table.deck_state.contributor_mask,
+                cards_dealt: table.deck_state.cards_dealt,
+                decrypted_cards: table.deck_state.decrypted_cards.clone(),
+            },
+            timeout_config: table.timeout_config.try_into().unwrap(),
+            chip_pool: table.chip_pool,
+            addon_pool: table.addon_pool,
+            ante_mode: table.ante_mode,
+            ante_amount: table.ante_amount,
+            ante_collected: table.ante_collected,
+            rake_mode: table.rake_mode,
+            rake_bps: table.rake_bps,
+            rake_cap: table.rake_cap,
+            rake_collected: table.rake_collected,
+            rit_mode: table.rit_mode,
+            run_it_twice_state: table.run_it_twice_state.clone(),
+            hand_id: table.hand_id,
+            call_seq: table.call_seq,
+            version: table.version,
+        }
+    }
+
     fn legacy_v12(table: &TexasPokerTable) -> LegacyPersistedTexasPokerTableV12 {
         LegacyPersistedTexasPokerTableV12 {
             id: table.id,
@@ -3658,7 +3972,7 @@ mod tests {
             button: table.button,
             pot: table.pot,
             community_cards: table.community_cards.clone(),
-            hand_phase: table.canonical_hand_phase().unwrap(),
+            hand_phase: legacy_hand_phase_v13(table.canonical_hand_phase().unwrap()),
             deck_state: PersistedDeckStateV10 {
                 encrypted: table.deck_state.encrypted.clone(),
                 contributor_mask: table.deck_state.contributor_mask,
@@ -4051,6 +4365,97 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v13_shuffle_subtypes_migrate_to_v14_and_new_bytes_do_not_alias() {
+        let mut initial = TexasPokerTable::new(
+            ObjectID::new([0xC0; 20], 13),
+            "legacy-v13-initial".into(),
+            [0x13; 20],
+            2,
+            5,
+            10,
+        );
+        initial
+            .enter_initial_shuffling(
+                ShuffleState {
+                    pending_mask: 0b11,
+                    completed_mask: 0,
+                },
+                1_000,
+            )
+            .unwrap();
+
+        let initial_bytes = borsh::to_vec(&legacy_v13(&initial)).unwrap();
+        assert!(TexasPokerTable::try_from_slice(&initial_bytes).is_err());
+        assert_eq!(decode_table_state(&initial_bytes).unwrap(), initial);
+
+        let mut reconstruct = initial.clone();
+        reconstruct
+            .enter_reconstruct_shuffling(
+                ROUND_TURN,
+                ShuffleState {
+                    pending_mask: 0b10,
+                    completed_mask: 0b01,
+                },
+                RevealTokenState {
+                    reveal_phase: REVEAL_PHASE_TURN,
+                    assignments: vec![],
+                },
+                2_000,
+            )
+            .unwrap();
+        let reconstruct_bytes = borsh::to_vec(&legacy_v13(&reconstruct)).unwrap();
+        assert_eq!(decode_table_state(&reconstruct_bytes).unwrap(), reconstruct);
+
+        let canonical = encode_table_state(&reconstruct).unwrap();
+        assert!(PersistedTexasPokerTableV14::try_from_slice(&canonical).is_ok());
+        assert!(LegacyPersistedTexasPokerTableV13::try_from_slice(&canonical).is_err());
+    }
+
+    #[test]
+    fn legacy_v13_invalid_shuffle_combinations_fail_closed() {
+        let table = TexasPokerTable::new(
+            ObjectID::new([0xCF; 20], 13),
+            "legacy-v13-invalid".into(),
+            [0x13; 20],
+            2,
+            5,
+            10,
+        );
+        let state = ShuffleState {
+            pending_mask: 0b11,
+            completed_mask: 0,
+        };
+        let reveal = RevealTokenState {
+            reveal_phase: REVEAL_PHASE_TURN,
+            assignments: vec![],
+        };
+
+        let mut initial_with_reveal = legacy_v13(&table);
+        initial_with_reveal.hand_phase = LegacyHandPhaseV13::Shuffling {
+            purpose: ShufflingPurpose::Initial,
+            street: ROUND_WAITING,
+            state: state.clone(),
+            suspended_reveal: Some(reveal.clone()),
+            deadline_ms: 10_000,
+        };
+        assert!(
+            decode_table_state(&borsh::to_vec(&initial_with_reveal).unwrap()).is_err()
+        );
+
+        let mut reconstruct_without_reveal = legacy_v13(&table);
+        reconstruct_without_reveal.hand_phase = LegacyHandPhaseV13::Shuffling {
+            purpose: ShufflingPurpose::Reconstruct,
+            street: ROUND_TURN,
+            state,
+            suspended_reveal: None,
+            deadline_ms: 10_000,
+        };
+        assert!(
+            decode_table_state(&borsh::to_vec(&reconstruct_without_reveal).unwrap()).is_err()
+        );
+    }
+
+    #[test]
     fn legacy_v12_migrates_bounded_fields_and_tagged_rit() {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xC1; 20], 12),
@@ -4077,7 +4482,7 @@ mod tests {
         assert_eq!(migrated, table);
 
         let canonical = encode_table_state(&migrated).unwrap();
-        assert!(PersistedTexasPokerTableV13::try_from_slice(&canonical).is_ok());
+        assert!(PersistedTexasPokerTableV14::try_from_slice(&canonical).is_ok());
         assert!(LegacyPersistedTexasPokerTableV12::try_from_slice(&canonical).is_err());
     }
 
@@ -4247,14 +4652,11 @@ mod tests {
             10,
         );
         table
-            .enter_shuffling(
-                ShufflingPurpose::Initial,
-                ROUND_WAITING,
+            .enter_initial_shuffling(
                 ShuffleState {
                     pending_mask: 0b110,
                     completed_mask: 0b001,
                 },
-                None,
                 0,
             )
             .unwrap();
@@ -4313,7 +4715,7 @@ mod tests {
         assert_eq!(migrated.state_schema_version, TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION);
 
         let canonical = encode_table_state(&migrated).unwrap();
-        assert!(PersistedTexasPokerTableV13::try_from_slice(&canonical).is_ok());
+        assert!(PersistedTexasPokerTableV14::try_from_slice(&canonical).is_ok());
         assert!(LegacyPersistedTexasPokerTableV11::try_from_slice(&canonical).is_err());
     }
 
@@ -4461,7 +4863,7 @@ mod tests {
         table.sync_aggregated_pk().unwrap();
 
         let bytes = encode_table_state(&table).unwrap();
-        let persisted = PersistedTexasPokerTableV13::try_from_slice(&bytes).unwrap();
+        let persisted = PersistedTexasPokerTableV14::try_from_slice(&bytes).unwrap();
         assert_eq!(persisted.deck_state.contributor_mask, 1);
         assert!(LegacyPersistedTexasPokerTableV9::try_from_slice(&bytes).is_err());
 
@@ -4539,14 +4941,11 @@ mod tests {
 
         let mut shuffling = base();
         shuffling
-            .enter_shuffling(
-                ShufflingPurpose::Initial,
-                ROUND_WAITING,
+            .enter_initial_shuffling(
                 ShuffleState {
                     pending_mask: 1,
                     completed_mask: 0,
                 },
-                None,
                 1_000,
             )
             .unwrap();
@@ -4624,14 +5023,13 @@ mod tests {
         );
         let mut persisted = PersistedTexasPokerTableV7::try_from(&table).unwrap();
         persisted.hand_phase = HandPhase::Shuffling {
-            purpose: ShufflingPurpose::Initial,
-            street: ROUND_WAITING,
-            state: ShuffleState {
-                pending_mask: 1,
-                completed_mask: 0,
+            phase: ShufflingPhase::Initial {
+                state: ShuffleState {
+                    pending_mask: 1,
+                    completed_mask: 0,
+                },
+                deadline_ms: u64::from(persisted.timeout_config.shuffle_timeout_ms) - 1,
             },
-            suspended_reveal: None,
-            deadline_ms: u64::from(persisted.timeout_config.shuffle_timeout_ms) - 1,
         };
 
         assert!(decode_table_state(&borsh::to_vec(&persisted).unwrap()).is_err());
@@ -4846,14 +5244,11 @@ mod tests {
         table.set_seat_acted_this_round(1, true);
         table.set_seat_wants_leave(2, true);
         table
-            .enter_shuffling(
-                ShufflingPurpose::Initial,
-                ROUND_WAITING,
+            .enter_initial_shuffling(
                 ShuffleState {
                     pending_mask: 0b011,
                     completed_mask: 0b100,
                 },
-                None,
                 0,
             )
             .unwrap();

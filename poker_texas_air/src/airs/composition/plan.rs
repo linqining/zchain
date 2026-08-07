@@ -362,7 +362,7 @@ pub fn derive_composite_transition_plan_from_task(
     let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replay,
-        &task.selector,
+        &task.selector(),
         &task.raw_args,
     )
     .map_err(|error| {
@@ -381,7 +381,7 @@ pub fn derive_composite_transition_plan_from_task(
         task.method_kind,
         &task.pre_table,
         &task.post_table,
-        acting_seat(task.method_kind, &task.method_input, &task.pre_table)?,
+        acting_seat(task.method_kind, &task.method_input()?, &task.pre_table)?,
         &output.events,
     )
 }
@@ -401,11 +401,7 @@ pub(crate) fn derive_composite_transition_plan_from_public_inputs(
         public_inputs.kind,
         &canonical.pre,
         &canonical.post,
-        acting_seat(
-            public_inputs.kind,
-            &canonical.task.method_input,
-            &canonical.pre,
-        )?,
+        acting_seat(public_inputs.kind, &canonical.method_input, &canonical.pre)?,
         &canonical.events,
     )
 }
@@ -1384,8 +1380,7 @@ mod tests {
         post.enter_revealing(
             poker_l1::vm::contracts::texas_poker::constants::ROUND_TURN,
             RevealTokenState {
-                reveal_phase:
-                    poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN,
+                reveal_phase: poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN,
                 assignments: vec![],
             },
             0,

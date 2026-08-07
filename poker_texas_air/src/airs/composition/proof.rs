@@ -469,7 +469,11 @@ fn base_public_inputs(task: &crate::prove_task::ProveTask) -> TexasAirResult<Tex
         task.hand_id,
         task.call_seq,
     )?;
-    public_inputs.bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())?;
+    public_inputs.bind_dispatch_call(
+        task.context.clone(),
+        task.selector(),
+        task.raw_args.clone(),
+    )?;
     Ok(public_inputs)
 }
 

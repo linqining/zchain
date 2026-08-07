@@ -5,8 +5,7 @@ use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_TURN, ROUND_PREFLOP,
-    ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_WAITING,
+    REVEAL_PHASE_PREFLOP, REVEAL_PHASE_TURN, ROUND_PREFLOP, ROUND_TURN,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs,
@@ -14,7 +13,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
 };
 use poker_l1::vm::contracts::texas_poker::types::{
     DecryptedCard, ReconstructState, RevealAssignment, RevealProgress, RevealTarget,
-    RevealTokenState, SeatStatus, ShuffleState, ShufflingPurpose, TexasPokerTable,
+    RevealTokenState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -119,14 +118,11 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
     table
-        .enter_shuffling(
-            ShufflingPurpose::Initial,
-            ROUND_WAITING,
+        .enter_initial_shuffling(
             ShuffleState {
                 pending_mask: 1u16 << 0,
                 completed_mask: 0,
             },
-            None,
             0,
         )
         .unwrap();
@@ -183,6 +179,9 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
         &mut utils::new_mask_shuffle_transcript(),
     )
     .expect("join shuffle proof should build");
+    let ownership_nonce = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let pk_ownership_proof = utils::create_pk_ownership_proof(&secret_key, &ownership_nonce)
+        .expect("join PK ownership proof should build");
 
     let player = [0x41; 20];
     let mut table = TexasPokerTable::new(
@@ -197,14 +196,11 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
     table.hand_id = 6;
     table.version = u64::from(call_seq) + 20;
     table
-        .enter_shuffling(
-            ShufflingPurpose::Initial,
-            ROUND_WAITING,
+        .enter_initial_shuffling(
             ShuffleState {
                 pending_mask: 0,
                 completed_mask: 0,
             },
-            None,
             0,
         )
         .unwrap();
@@ -213,7 +209,7 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
         player,
         buy_in: 2_000,
         pk: ECPoint(public_key),
-        pk_ownership_proof: vec![],
+        pk_ownership_proof,
         mask_cards,
         output_cards,
         remask_proof,
@@ -357,18 +353,19 @@ fn leave_task(nonce: u64) -> ProveTask {
     table.seats[1].player = player;
     table.seats[1].set_status(SeatStatus::Active);
     table.seats[1].pk = ECPoint(public_key);
+    for other_seat in [0usize, 2usize] {
+        table.seats[other_seat].player = [(other_seat as u8) + 1; 20];
+        table.seats[other_seat].set_status(SeatStatus::Active);
+    }
     table.deck_state.encrypted = input_cards;
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
     table
-        .enter_shuffling(
-            ShufflingPurpose::Initial,
-            ROUND_WAITING,
+        .enter_initial_shuffling(
             ShuffleState {
-                pending_mask: 0,
+                pending_mask: (1u16 << 0) | (1u16 << 2),
                 completed_mask: 1u16 << 1,
             },
-            None,
             0,
         )
         .unwrap();
@@ -762,23 +759,13 @@ fn reconstruction_v3_rejects_prior_state_or_readable_hand_substitution() {
     let mut changed_digest = task.clone();
     let mut args: SubmitReconstructDeckArgs = borsh::from_slice(&changed_digest.raw_args).unwrap();
     args.statement.prior_state_digest[0] ^= 1;
-    let raw_args = borsh::to_vec(&args).unwrap();
-    changed_digest.raw_args = raw_args.clone();
-    changed_digest.method_input = poker_texas_air::prove_task::MethodInput::SubmitReconstructDeck {
-        seat_index: args.seat_index,
-        raw_args,
-    };
+    changed_digest.raw_args = borsh::to_vec(&args).unwrap();
     assert!(prove_dual_proof(&changed_digest).is_err());
 
     let mut changed_hand = task;
     let mut args: SubmitReconstructDeckArgs = borsh::from_slice(&changed_hand.raw_args).unwrap();
     args.statement.user_readable_cards.swap(0, 1);
-    let raw_args = borsh::to_vec(&args).unwrap();
-    changed_hand.raw_args = raw_args.clone();
-    changed_hand.method_input = poker_texas_air::prove_task::MethodInput::SubmitReconstructDeck {
-        seat_index: args.seat_index,
-        raw_args,
-    };
+    changed_hand.raw_args = borsh::to_vec(&args).unwrap();
     assert!(prove_dual_proof(&changed_hand).is_err());
 }
 

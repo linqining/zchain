@@ -5,9 +5,8 @@ use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::card::{BoardCards, Card};
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN,
-    RIT_MODE_TWICE, ROUND_PREFLOP, ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING,
-    SHUFFLE_PHASE_WAITING,
+    REVEAL_PHASE_PREFLOP, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN, RIT_MODE_TWICE, ROUND_PREFLOP,
+    ROUND_SHOWDOWN, ROUND_TURN,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
@@ -15,8 +14,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
 };
 use poker_l1::vm::contracts::texas_poker::types::{
     DecryptedCard, ReconstructState, RevealAssignment, RevealProgress, RevealTarget,
-    RevealTokenState, RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, ShufflingPurpose,
-    TexasPokerTable,
+    RevealTokenState, RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -99,7 +97,7 @@ fn canonical_public_inputs(task: &ProveTask) -> TexasPublicInputs {
     )
     .expect("canonical public inputs should build");
     public_inputs
-        .bind_dispatch_call(task.context.clone(), task.selector, task.raw_args.clone())
+        .bind_dispatch_call(task.context.clone(), task.selector(), task.raw_args.clone())
         .expect("dispatch call should bind");
     public_inputs
 }
@@ -168,14 +166,11 @@ fn fixture(
     table.deck_state.contributor_mask = 1u16 << seat_index;
     table.sync_aggregated_pk().unwrap();
     table
-        .enter_shuffling(
-            ShufflingPurpose::Initial,
-            ROUND_WAITING,
+        .enter_initial_shuffling(
             ShuffleState {
                 pending_mask: 1u16 << seat_index,
                 completed_mask: 0,
             },
-            None,
             0,
         )
         .unwrap();
@@ -356,18 +351,22 @@ fn leave_fixture(
     table.seats[usize::from(seat_index)].player = player;
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
+    // Keep two canonical participants pending after the legacy completed shuffler leaves.
+    // Otherwise normalization would observe an empty completed shuffle and attempt to deal a
+    // hand with zero players, which is not a valid archive fixture.
+    for other_seat in [0usize, 2usize] {
+        table.seats[other_seat].player = [(other_seat as u8) + 1; 20];
+        table.seats[other_seat].set_status(SeatStatus::Active);
+    }
     table.deck_state.encrypted = input_cards.clone();
     table.deck_state.contributor_mask = 1u16 << seat_index;
     table.sync_aggregated_pk().unwrap();
     table
-        .enter_shuffling(
-            ShufflingPurpose::Initial,
-            ROUND_WAITING,
+        .enter_initial_shuffling(
             ShuffleState {
-                pending_mask: 0,
+                pending_mask: (1u16 << 0) | (1u16 << 2),
                 completed_mask: 1u16 << seat_index,
             },
-            None,
             0,
         )
         .unwrap();
@@ -837,11 +836,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
         .iter()
         .enumerate()
         .map(|(index, ciphertext)| {
-            DecryptedCard::partial(
-                u8::try_from(index).unwrap(),
-                seat_index,
-                ciphertext.clone(),
-            )
+            DecryptedCard::partial(u8::try_from(index).unwrap(), seat_index, ciphertext.clone())
         })
         .collect();
     table
@@ -886,9 +881,13 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     assert!(task.post_table.reveal_token_state().assignments.is_empty());
 
     let mut replayed = task.pre_table.clone();
-    let result =
-        texas_dispatch::dispatch(&task.context, &mut replayed, &task.selector, &task.raw_args)
-            .unwrap();
+    let result = texas_dispatch::dispatch(
+        &task.context,
+        &mut replayed,
+        &task.selector(),
+        &task.raw_args,
+    )
+    .unwrap();
     let output: DispatchOutput = borsh::from_slice(&result.return_value).unwrap();
     assert!(
         poker_texas_air::settlement_binding::SettlementPlanBinding::from_events(&output.events)

@@ -23,17 +23,17 @@
 //! dispatch 层目前仅记录日志（tracing::debug!）并丢弃，后续 Precompile
 //! 实现可在 Phase 3.3 / Phase 4 中扩展 DispatchResult 携带 events 字段。
 
-use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use blake2::digest::{Update, VariableOutput};
 use blstrs::{G1Projective, Scalar as BlsScalar};
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
+use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
-use poker_protocol::zk_shuffle::ShuffleProof;
 
 use super::constants::FOLD_REASON_FORCE_ADMIN;
 use super::events::TexasPokerEvent;
@@ -239,9 +239,7 @@ pub mod selectors {
     pub fn active() -> Vec<[u8; 32]> {
         all()
             .into_iter()
-            .filter(|selector| {
-                selector != &join_and_shuffle() && selector != &leave_with_proof()
-            })
+            .filter(|selector| selector != &join_and_shuffle() && selector != &leave_with_proof())
             .collect()
     }
 }
@@ -927,7 +925,6 @@ fn build_method_input(
                 seat_index: a.seat_index,
                 player: a.player,
                 buy_in: a.buy_in,
-                raw_args: args.to_vec(),
             },
         ));
     }
@@ -937,7 +934,6 @@ fn build_method_input(
             K_LEAVE_PROOF,
             MethodInput::LeaveWithProof {
                 seat_index: a.seat_index,
-                raw_args: args.to_vec(),
             },
         ));
     }
@@ -1003,7 +999,6 @@ fn build_method_input(
             K_SUBMIT_SHUFFLE,
             MethodInput::SubmitShuffleV2 {
                 seat_index: a.seat_index,
-                raw_args: args.to_vec(),
             },
         ));
     }
@@ -1014,7 +1009,6 @@ fn build_method_input(
             K_SUBMIT_REVEAL,
             MethodInput::SubmitPlayerRevealTokens {
                 seat_index: a.seat_index,
-                raw_args: args.to_vec(),
             },
         ));
     }
@@ -1024,7 +1018,6 @@ fn build_method_input(
             K_SUBMIT_RECONSTRUCT,
             MethodInput::SubmitReconstructDeck {
                 seat_index: a.seat_index,
-                raw_args: args.to_vec(),
             },
         ));
     }
@@ -1113,7 +1106,6 @@ fn build_method_input(
             K_FOLD_WITH_PROOF,
             MethodInput::FoldWithProof {
                 seat_index: a.seat_index,
-                raw_args: args.to_vec(),
             },
         ));
     }
@@ -1149,10 +1141,7 @@ pub fn derive_method_input(
 /// validated Borsh argument bytes, except for legacy `tick(now_ms)`: its redundant timestamp is
 /// authenticated by `DispatchContext`, so both accepted ABI encodings normalize to an empty
 /// payload. Unknown selectors and malformed arguments fail closed.
-pub fn canonical_command_parts(
-    selector: &[u8; 32],
-    args: &[u8],
-) -> PokerL1Result<(u8, Vec<u8>)> {
+pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Result<(u8, Vec<u8>)> {
     let command = CanonicalCommand::from_archive_selector(selector).ok_or(
         PokerL1Error::UnknownContractMethod {
             selector: *selector,
@@ -2271,14 +2260,11 @@ mod tests {
         let ctx = make_context();
         let mut table = make_table();
         table
-            .enter_shuffling(
-                super::super::types::ShufflingPurpose::Initial,
-                super::super::constants::ROUND_WAITING,
+            .enter_initial_shuffling(
                 super::super::types::ShuffleState {
                     pending_mask: 1,
                     completed_mask: 0,
                 },
-                None,
                 0,
             )
             .unwrap();
@@ -2489,7 +2475,7 @@ mod tests {
             .expect("request_leave_after_hand 状态变化必须产生 task");
         assert_eq!(first_task.method_kind, 21);
         assert_eq!(
-            first_task.method_input,
+            first_task.method_input().unwrap(),
             super::super::prove_task::MethodInput::RequestLeaveAfterHand { seat_index: 0 }
         );
         assert_eq!(first_task.call_seq, 1);
@@ -2634,8 +2620,7 @@ mod tests {
             &make_context_as(p1),
             &mut table,
             &selectors::join_table(),
-            &borsh::to_vec(&join_args(p1, 1500, 1))
-            .unwrap(),
+            &borsh::to_vec(&join_args(p1, 1500, 1)).unwrap(),
         )
         .unwrap();
         assert_eq!(table.chip_pool, 1500);
@@ -2646,8 +2631,7 @@ mod tests {
             &make_context_as(p2),
             &mut table,
             &selectors::join_table(),
-            &borsh::to_vec(&join_args(p2, 2500, 2))
-            .unwrap(),
+            &borsh::to_vec(&join_args(p2, 2500, 2)).unwrap(),
         )
         .unwrap();
         assert_eq!(table.chip_pool, 4000);
@@ -2767,8 +2751,8 @@ mod tests {
         DLEqProof::from_parts(vec![], G1Projective::identity(), zero, zero)
     }
 
-    fn empty_schnorr_proof(
-    ) -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
+    fn empty_schnorr_proof()
+    -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
     {
         poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
             commitment: G1Projective::identity(),
@@ -2979,8 +2963,7 @@ mod tests {
             ),
             (
                 selectors::join_table(),
-                borsh::to_vec(&join_args([0x41; 20], 1_000, 1))
-                .unwrap(),
+                borsh::to_vec(&join_args([0x41; 20], 1_000, 1)).unwrap(),
                 1,
             ),
             (
@@ -3080,40 +3063,24 @@ mod tests {
     }
 
     #[test]
-    fn crypto_method_inputs_preserve_validated_raw_args() {
+    fn crypto_method_inputs_are_narrow_views_of_validated_raw_args() {
         for (selector, raw_args, expected_kind) in crypto_args() {
             let (kind, input) = build_method_input(&selector, &raw_args).unwrap();
             assert_eq!(kind, expected_kind);
-            let (seat_index, preserved) = match input {
-                super::super::prove_task::MethodInput::JoinAndShuffle {
-                    seat_index,
-                    raw_args,
-                    ..
-                }
-                | super::super::prove_task::MethodInput::LeaveWithProof {
-                    seat_index,
-                    raw_args,
-                }
-                | super::super::prove_task::MethodInput::SubmitShuffleV2 {
-                    seat_index,
-                    raw_args,
-                }
-                | super::super::prove_task::MethodInput::SubmitPlayerRevealTokens {
-                    seat_index,
-                    raw_args,
-                }
-                | super::super::prove_task::MethodInput::SubmitReconstructDeck {
-                    seat_index,
-                    raw_args,
-                }
-                | super::super::prove_task::MethodInput::FoldWithProof {
-                    seat_index,
-                    raw_args,
-                } => (seat_index, raw_args),
+            let seat_index = match input {
+                super::super::prove_task::MethodInput::JoinAndShuffle { seat_index, .. }
+                | super::super::prove_task::MethodInput::LeaveWithProof { seat_index }
+                | super::super::prove_task::MethodInput::SubmitShuffleV2 { seat_index }
+                | super::super::prove_task::MethodInput::SubmitPlayerRevealTokens { seat_index }
+                | super::super::prove_task::MethodInput::SubmitReconstructDeck { seat_index }
+                | super::super::prove_task::MethodInput::FoldWithProof { seat_index } => seat_index,
                 other => panic!("crypto selector 映射到了错误 variant: {other:?}"),
             };
             assert!(seat_index < 6);
-            assert_eq!(preserved, raw_args);
+            assert_eq!(
+                canonical_command_parts(&selector, &raw_args).unwrap().1,
+                raw_args
+            );
         }
     }
 
@@ -3164,11 +3131,8 @@ mod tests {
         assert_eq!(task.method_kind, 22);
         assert_eq!(task.call_seq, 1);
         assert_eq!(
-            task.method_input,
-            super::super::prove_task::MethodInput::FoldWithProof {
-                seat_index: 0,
-                raw_args: args_bytes,
-            }
+            task.method_input().unwrap(),
+            super::super::prove_task::MethodInput::FoldWithProof { seat_index: 0 }
         );
 
         // folded 标记

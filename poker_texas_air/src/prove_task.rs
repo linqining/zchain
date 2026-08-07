@@ -43,14 +43,12 @@ pub fn dispatch_call_digest(
     raw_args: &[u8],
 ) -> crate::error::TexasAirResult<[u8; 32]> {
     let (method_tag, canonical_args) =
-        poker_l1::vm::contracts::texas_poker::dispatch::canonical_command_parts(
-            selector, raw_args,
-        )
-        .map_err(|error| {
-            crate::error::TexasAirError::SerializationError(format!(
-                "canonical dispatch command: {error}"
-            ))
-        })?;
+        poker_l1::vm::contracts::texas_poker::dispatch::canonical_command_parts(selector, raw_args)
+            .map_err(|error| {
+                crate::error::TexasAirError::SerializationError(format!(
+                    "canonical dispatch command: {error}"
+                ))
+            })?;
     let encoded = borsh::to_vec(&(context.clone(), method_tag, canonical_args)).map_err(|e| {
         crate::error::TexasAirError::SerializationError(format!("dispatch call context borsh: {e}"))
     })?;
@@ -69,15 +67,11 @@ pub fn dispatch_call_digest(
 pub struct ProveTask {
     /// 方法种类（选 AIR）。
     pub method_kind: MethodKind,
-    /// Transient typed input derived from the canonical command; not serialized.
-    pub method_input: MethodInput,
     /// VM dispatch 记录的完整调用上下文。
     ///
     /// Orchestrator 会据此重放权限和业务逻辑，但不会独立证明该上下文已被交易层或
     /// 共识层认证；生产调用方必须通过外部 block/receipt 锚提供来源保证。
     pub context: poker_l1::vm::contracts::dispatch::DispatchContext,
-    /// Transient legacy ABI selector derived from `method_kind`; not serialized.
-    pub selector: [u8; 32],
     /// Canonical Borsh command payload selected by `method_kind`.
     ///
     /// Selector and typed [`MethodInput`] are derived views and are deliberately not stored.
@@ -107,17 +101,14 @@ impl ProveTask {
         hand_id: u32,
         call_seq: u32,
     ) -> Self {
-        let method_input = poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
+        poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
             method_kind as u8,
             &raw_args,
         )
         .expect("ProveTask requires a validated canonical command");
-        let selector = method_kind.selector();
         Self {
             method_kind,
-            method_input,
             context,
-            selector,
             raw_args,
             pre_table,
             post_table,
@@ -130,7 +121,7 @@ impl ProveTask {
     /// Selector deterministically derived from the canonical command tag.
     #[must_use]
     pub fn selector(&self) -> [u8; 32] {
-        self.selector
+        self.method_kind.selector()
     }
 
     /// Decode the transient typed input from the only persisted command payload.
@@ -172,26 +163,30 @@ impl BorshSerialize for ProveTask {
 impl BorshDeserialize for ProveTask {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
         let method_kind = MethodKind::deserialize_reader(reader)?;
-        let context = poker_l1::vm::contracts::dispatch::DispatchContext::deserialize_reader(reader)?;
+        let context =
+            poker_l1::vm::contracts::dispatch::DispatchContext::deserialize_reader(reader)?;
         let raw_args = Vec::<u8>::deserialize_reader(reader)?;
-        let pre_table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(reader)?;
-        let post_table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(reader)?;
+        let pre_table =
+            poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(
+                reader,
+            )?;
+        let post_table =
+            poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::deserialize_reader(
+                reader,
+            )?;
         let table_id = u64::deserialize_reader(reader)?;
         let hand_id = u32::deserialize_reader(reader)?;
         let call_seq = u32::deserialize_reader(reader)?;
-        let method_input = poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
+        poker_l1::vm::contracts::texas_poker::dispatch::derive_method_input(
             method_kind as u8,
             &raw_args,
         )
         .map_err(|error| {
             borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
         })?;
-        let selector = method_kind.selector();
         Ok(Self {
             method_kind,
-            method_input,
             context,
-            selector,
             raw_args,
             pre_table,
             post_table,
@@ -296,8 +291,8 @@ mod tests {
     }
 
     #[test]
-    fn transient_command_views_are_not_serialized() {
-        let mut task = ProveTask::new(
+    fn command_views_are_derived_from_the_canonical_payload() {
+        let task = ProveTask::new(
             MethodKind::Fold,
             dummy_context(),
             borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap(),
@@ -308,16 +303,34 @@ mod tests {
             3,
         );
         let canonical = borsh::to_vec(&task).unwrap();
-        task.selector = [0xCC; 32];
-        task.method_input = MethodInput::SeatOnly { seat_index: 8 };
-        assert_eq!(borsh::to_vec(&task).unwrap(), canonical);
-
         let recovered: ProveTask = borsh::from_slice(&canonical).unwrap();
-        assert_eq!(recovered.selector, MethodKind::Fold.selector());
+        assert_eq!(recovered.selector(), MethodKind::Fold.selector());
         assert_eq!(
-            recovered.method_input,
+            recovered.method_input().unwrap(),
             MethodInput::SeatOnly { seat_index: 2 }
         );
+        assert_eq!(
+            recovered.canonical_command_bytes().unwrap(),
+            task.canonical_command_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_canonical_payload_fails_deserialization() {
+        let task = ProveTask::new(
+            MethodKind::Fold,
+            dummy_context(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap(),
+            dummy_table("pre"),
+            dummy_table("post"),
+            42,
+            1,
+            3,
+        );
+        let mut malformed = task;
+        malformed.raw_args.clear();
+        let bytes = borsh::to_vec(&malformed).unwrap();
+        assert!(borsh::from_slice::<ProveTask>(&bytes).is_err());
     }
 
     #[test]
