@@ -92,14 +92,15 @@ pub(crate) fn derive_fold_outcome(
     if post.betting_round.is_some()
         && post.round_state == pre.round_state
         && post.pot == pre.pot
-        && let Some(post_current_turn) = post.current_turn
+        && post.current_turn != NO_CURRENT_TURN
     {
+        let post_current_turn = post.current_turn;
         return Ok(FoldOutcome::MidRound { post_current_turn });
     }
 
     if post.round_state != ROUND_WAITING
         || post.betting_round.is_some()
-        || post.current_turn.is_some()
+        || post.current_turn != NO_CURRENT_TURN
         || post.pot != 0
     {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
@@ -111,7 +112,7 @@ pub(crate) fn derive_fold_outcome(
         .seats
         .iter()
         .enumerate()
-        .filter(|(_, seat)| seat.is_occupied() && !seat.folded && !seat.is_waiting)
+        .filter(|(_, seat)| seat.is_occupied() && !seat.is_folded() && !seat.is_waiting())
         .map(|(index, _)| index)
         .collect();
     if active.len() != 2 || !active.contains(&usize::from(acting_seat)) {

@@ -143,9 +143,8 @@ impl Precompile for TexasPokerPrecompile {
         // 读已有 table；不存在则按 create_table 首次调用处理
         let (mut table, is_new) = match object_db.read(&table_id) {
             Ok(obj) => {
-                let table: TexasPokerTable = borsh::from_slice(&obj.data).map_err(|e| {
-                    PokerL1Error::Serialization(format!("TexasPokerTable borsh: {e}"))
-                })?;
+                let table =
+                    crate::vm::contracts::texas_poker::state_codec::decode_table_state(&obj.data)?;
                 (table, false)
             }
             Err(PokerL1Error::ObjectNotFound(_)) => {
@@ -253,9 +252,8 @@ impl Precompile for TexasPokerPrecompile {
         }
 
         // 持久化
-        let table_data = borsh::to_vec(&table).map_err(|e| {
-            PokerL1Error::Serialization(format!("TexasPokerTable borsh write: {e}"))
-        })?;
+        let table_data =
+            crate::vm::contracts::texas_poker::state_codec::encode_table_state(&table)?;
         if is_new {
             let obj = Object::new(
                 table_id,
@@ -335,6 +333,7 @@ mod tests {
     use crate::vm::contracts::texas_poker::dispatch::{
         AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs, SeatIndexArgs,
     };
+    use crate::vm::contracts::texas_poker::types::SeatStatus;
     use crate::vm::contracts::texas_poker::{betting::BettingRound, constants::ROUND_PREFLOP};
 
     fn make_env() -> ExecutionEnvironment {
@@ -777,7 +776,7 @@ mod tests {
             borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
         table.round_state = ROUND_PREFLOP;
         table.betting_round = Some(BettingRound::new(50, 100));
-        table.current_turn = Some(0);
+        table.current_turn = 0;
         table.pot = 200;
         table.rake_mode = crate::vm::contracts::texas_poker::constants::RAKE_MODE_PERCENTAGE;
         table.rake_bps = 500;
@@ -786,7 +785,7 @@ mod tests {
             seat.stack = 0;
             seat.bet = 0;
             seat.total_bet = 100;
-            seat.is_waiting = false;
+            seat.set_status(SeatStatus::Active);
         }
         object_db
             .update(&table_id, &player_a, borsh::to_vec(&table).unwrap())

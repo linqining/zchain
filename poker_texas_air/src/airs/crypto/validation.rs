@@ -239,12 +239,12 @@ pub(crate) fn validate_join_and_shuffle(
     }
 
     let pre_completed_count = count_as_u8(
-        canonical.pre.shuffle_state.completed_players.len(),
+        canonical.pre.shuffle_state.completed_mask.count_ones() as usize,
         METHOD,
         "pre completed player",
     )?;
     let post_completed_count = count_as_u8(
-        canonical.post.shuffle_state.completed_players.len(),
+        canonical.post.shuffle_state.completed_mask.count_ones() as usize,
         METHOD,
         "post completed player",
     )?;
@@ -364,7 +364,7 @@ pub(crate) fn validate_leave_with_proof(
     }
 
     let post_completed_count = count_as_u8(
-        canonical.post.shuffle_state.completed_players.len(),
+        canonical.post.shuffle_state.completed_mask.count_ones() as usize,
         METHOD,
         "post completed player",
     )?;
@@ -535,7 +535,7 @@ pub(crate) fn validate_submit_shuffle_v2(
     }
 
     let post_completed_count = count_as_u8(
-        canonical.post.shuffle_state.completed_players.len(),
+        canonical.post.shuffle_state.completed_mask.count_ones() as usize,
         METHOD,
         "post completed player",
     )?;
@@ -601,11 +601,6 @@ pub(crate) fn validate_submit_reconstruct_deck(
         ));
     }
 
-    let post_submitted_count = count_as_u8(
-        canonical.post.reconstruct_state.player_decks.len(),
-        METHOD,
-        "post submitted deck",
-    )?;
     let mut row = SubmitReconstructDeckRow::active(
         &input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
@@ -615,7 +610,6 @@ pub(crate) fn validate_submit_reconstruct_deck(
         public_inputs.call_seq,
         canonical.pre.version,
         canonical.post.version,
-        post_submitted_count,
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);

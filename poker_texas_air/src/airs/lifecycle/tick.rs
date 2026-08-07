@@ -26,7 +26,7 @@ use poker_l1::vm::contracts::texas_poker::constants::{
 };
 use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
 use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
 
 /// `timeout_kind` values used in the tick statement.  The value denotes the
 /// highest-priority timer family visible in the pre-state; `5` is a non-timer
@@ -425,7 +425,7 @@ fn issue_lifecycle_binding(
         TICK_BRANCH_SHUFFLE_ADVANCED
     } else if pre.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE {
         TICK_BRANCH_REVEAL_ADVANCED
-    } else if state_machine::is_betting_round(pre) && pre.current_turn.is_none() {
+    } else if state_machine::is_betting_round(pre) && pre.current_turn == NO_SEAT {
         TICK_BRANCH_BETTING_ROUND_ADVANCED
     } else {
         return Err(TexasAirError::SpecViolation(
@@ -489,8 +489,8 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
         table.shuffle_state.phase,
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
-        let pending = !table.shuffle_state.pending_players.is_empty()
-            && table.shuffle_state.current_shuffler.is_some();
+        let pending = table.shuffle_state.pending_mask != 0
+            && table.shuffle_state.current_shuffler != NO_SEAT;
         return Ok((
             TICK_KIND_SHUFFLE,
             table.timestamps.shuffle_started_at,
@@ -504,7 +504,7 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
             .reveal_token_state
             .assignments
             .iter()
-            .all(|assignment| assignment.pending_players.is_empty());
+            .all(|assignment| assignment.pending_mask() == 0);
         return Ok((
             TICK_KIND_REVEAL,
             table.timestamps.reveal_started_at,
@@ -514,7 +514,8 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
         ));
     }
     if state_machine::is_betting_round(table) {
-        if let Some(seat) = table.current_turn {
+        if table.current_turn != NO_SEAT {
+            let seat = table.current_turn;
             // Validate this now rather than letting an out-of-range index reach
             // the native state machine's indexing path later.
             let _ = seat_time_bank(table, seat, "pre")?;
@@ -1119,7 +1120,7 @@ mod tests {
         constants::{FOLD_REASON_AUTO_TIMEOUT, RAKE_MODE_PERCENTAGE, ROUND_PREFLOP},
         events::TexasPokerEvent,
         state_machine,
-        types::TexasPokerTable,
+        types::{SeatStatus, TexasPokerTable},
     };
 
     fn table() -> TexasPokerTable {
@@ -1134,14 +1135,11 @@ mod tests {
     }
 
     fn occupy(table: &mut TexasPokerTable, index: usize, player: u8, stack: u64) {
+        table.set_seat_acted_this_round(index as u8, false);
         let seat = &mut table.seats[index];
         seat.player = [player; 20];
         seat.stack = stack;
-        seat.folded = false;
-        seat.all_in = false;
-        seat.acted_this_round = false;
-        seat.is_waiting = false;
-        seat.left_during_hand = false;
+        seat.set_status(SeatStatus::Active);
         seat.bet = 0;
         seat.total_bet = 0;
         seat.pending_addon = 0;
@@ -1174,7 +1172,7 @@ mod tests {
         occupy(&mut table, 2, 3, 1_000);
         table.round_state = ROUND_PREFLOP;
         table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = Some(0);
+        table.current_turn = 0;
         table.timestamps.betting_started_at = 1_000_000;
         table.timeout_config.betting_timeout_ms = 30_000;
         table.seats[0].time_bank_ms = time_bank_ms;
@@ -1200,7 +1198,7 @@ mod tests {
             }
         )));
         assert_eq!(post.timestamps.betting_started_at, u64::MAX);
-        assert!(!post.seats[0].folded);
+        assert!(!post.seats[0].is_folded());
 
         let input = canonical_input(&pre, &post, u64::MAX).expect("canonical betting tick");
         assert_eq!(input.timeout_kind, TICK_KIND_BETTING);

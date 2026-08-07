@@ -79,8 +79,8 @@ pub struct ShuffleV2Step {
 /// - `input_cards`：当前牌组（= 合约 `deck_state.encrypted`，即上一步变换后的 deck）。
 /// - `player_sk`：当前洗牌玩家的私钥（用于 re_encrypt 的随机性不依赖它，但保留接口一致性）。
 /// - `player_pk`：当前洗牌玩家的公钥——合约 `add_pk_to_c2` 会把它加到每张 c2。
-/// - `aggregated_pk`：shuffle proof 绑定的共享公钥；本驱动始终为 `G1Projective::identity()`
-///   （因为玩家经 `join_table` 入座，`deck_state.aggregated_pk == None`）。
+/// - `aggregated_pk`：shuffle proof 绑定的共享公钥；必须等于桌台 contributor mask 与
+///   seat public keys 派生的非 identity aggregate cache。
 /// - `seed`：确定性 RNG 种子（便于复现）。
 ///
 /// # Errors

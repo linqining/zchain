@@ -22,6 +22,7 @@ use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
+use poker_l1::vm::contracts::texas_poker::types::seat_mask_contains;
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -63,8 +64,20 @@ impl JoinAndShuffleVerifyRequest {
         pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
         args: &poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs,
     ) -> TexasAirResult<Self> {
-        use poker_l1::vm::contracts::texas_poker::utils::{g1_generator, g1_is_identity};
+        use poker_l1::vm::contracts::texas_poker::utils::{
+            g1_generator, g1_is_identity, generate_plaintext_cards,
+        };
 
+        pre_table.validate_state_schema().map_err(|error| {
+            TexasAirError::SpecViolation(format!(
+                "join-and-shuffle pre-table has invalid contributor lineage: {error}"
+            ))
+        })?;
+        let prior_aggregate_pk = pre_table.derived_aggregated_pk().map_err(|error| {
+            TexasAirError::SpecViolation(format!(
+                "join-and-shuffle cannot derive prior aggregate key: {error}"
+            ))
+        })?;
         let first_player = pre_table.deck_state.encrypted.is_empty()
             || pre_table
                 .deck_state
@@ -73,13 +86,11 @@ impl JoinAndShuffleVerifyRequest {
                 .all(|card| g1_is_identity(&card.c1) && g1_is_identity(&card.c2));
         let input_cards = if first_player {
             let generator = g1_generator();
-            pre_table
-                .deck_state
-                .plaintext
-                .iter()
+            generate_plaintext_cards()
+                .into_iter()
                 .map(|plaintext| ElGamalCiphertext {
                     c1: generator,
-                    c2: plaintext.0,
+                    c2: plaintext,
                 })
                 .collect()
         } else {
@@ -89,7 +100,7 @@ impl JoinAndShuffleVerifyRequest {
             abi_version: JOIN_AND_SHUFFLE_ABI_VERSION,
             call_context,
             first_player,
-            prior_aggregate_pk: pre_table.deck_state.aggregated_pk,
+            prior_aggregate_pk,
             player_pk: args.pk,
             pk_ownership_proof: args.pk_ownership_proof.clone(),
             input_cards,
@@ -322,12 +333,12 @@ impl RevealTokenVerifyRequest {
                         "reveal assignment index {assignment_index} is outside the canonical pre-table"
                     ))
                 })?;
-            if assignment.decrypted {
+            if assignment.is_ready() {
                 return Err(TexasAirError::SpecViolation(format!(
-                    "reveal assignment index {assignment_index} is already decrypted"
+                    "reveal assignment index {assignment_index} is already resolved"
                 )));
             }
-            if !assignment.pending_players.contains(&args.seat_index) {
+            if !seat_mask_contains(assignment.pending_mask(), args.seat_index) {
                 return Err(TexasAirError::SpecViolation(format!(
                     "reveal seat {} is not pending for assignment {assignment_index}",
                     args.seat_index
@@ -341,9 +352,9 @@ impl RevealTokenVerifyRequest {
                     .iter()
                     .find(|card| {
                         usize::from(card.encrypted_card_index) == card_index
-                            && card.ciphertext.is_some()
+                            && card.ciphertext().is_some()
                     })
-                    .and_then(|card| card.ciphertext)
+                    .and_then(|card| card.ciphertext().cloned())
                     .or_else(|| pre_table.deck_state.encrypted.get(card_index).copied())
             } else {
                 pre_table.deck_state.encrypted.get(card_index).copied()

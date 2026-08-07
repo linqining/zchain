@@ -857,17 +857,7 @@ fn test_e2e_submit_reconstruct_deck_prove_verify() {
         reconstruct_phase: 1, // ReconstructPhase::Started
         precompile: PrecompileAirBinding::synthetic_unverified(),
     };
-    let row = SubmitReconstructDeckRow::active(
-        &input,
-        zero_root(),
-        one_root(),
-        42,
-        1,
-        5,
-        0,
-        1,
-        1, // post_submitted_count
-    );
+    let row = SubmitReconstructDeckRow::active(&input, zero_root(), one_root(), 42, 1, 5, 0, 1);
     let trace = gen_method_trace(
         SubmitReconstructDeckAir::num_columns(),
         &row.to_vec(),
@@ -905,7 +895,7 @@ fn test_soundness_submit_reconstruct_deck_tampered_phase() {
         reconstruct_phase: 1,
         precompile: PrecompileAirBinding::synthetic_unverified(),
     };
-    let row = SubmitReconstructDeckRow::active(&input, zero_root(), one_root(), 42, 1, 5, 0, 1, 1);
+    let row = SubmitReconstructDeckRow::active(&input, zero_root(), one_root(), 42, 1, 5, 0, 1);
     let trace = gen_method_trace(
         SubmitReconstructDeckAir::num_columns(),
         &row.to_vec(),

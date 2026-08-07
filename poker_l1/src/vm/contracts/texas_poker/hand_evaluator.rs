@@ -146,7 +146,7 @@ pub fn evaluate_best(cards: &[Card]) -> HandRank {
 /// 校验无重复牌（调试用）。
 fn assert_no_duplicates(cards: &[Card]) {
     use std::collections::HashSet;
-    let set: HashSet<_> = cards.iter().map(|c| (c.suit, c.rank)).collect();
+    let set: HashSet<_> = cards.iter().map(|card| card.to_index()).collect();
     debug_assert_eq!(set.len(), cards.len(), "牌组中存在重复牌");
 }
 
@@ -162,17 +162,19 @@ fn evaluate_five(cards: &[Card; 5]) -> HandRank {
     // 1. counts[13]（索引 0=点数2, 12=点数14）
     let mut counts = [0u8; 13];
     for c in &all {
-        if c.rank >= 2 && c.rank <= 14 {
-            counts[(c.rank - 2) as usize] += 1;
+        if c.rank() >= 2 && c.rank() <= 14 {
+            counts[(c.rank() - 2) as usize] += 1;
         }
     }
 
     // 2. 同花检测
-    let is_flush =
-        c0.suit == c1.suit && c1.suit == c2.suit && c2.suit == c3.suit && c3.suit == c4.suit;
+    let is_flush = c0.suit() == c1.suit()
+        && c1.suit() == c2.suit()
+        && c2.suit() == c3.suit()
+        && c3.suit() == c4.suit();
 
     // 3. 点数降序排序
-    let mut ranks = [c0.rank, c1.rank, c2.rank, c3.rank, c4.rank];
+    let mut ranks = [c0.rank(), c1.rank(), c2.rank(), c3.rank(), c4.rank()];
     ranks.sort_unstable_by(|a, b| b.cmp(a));
 
     // 4. 顺子检测（返回顺子最高点数）

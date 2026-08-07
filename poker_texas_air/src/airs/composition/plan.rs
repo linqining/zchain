@@ -437,7 +437,7 @@ fn acting_seat(
         // Tick has no seat argument. Its only SeatUpdate-compatible branch is
         // the betting-timeout auto-fold, whose actor is the canonical pre-state
         // current turn. Other Tick branches leave SeatUpdate inactive.
-        (MethodKind::Tick, MethodInput::Empty) => pre.current_turn,
+        (MethodKind::Tick, MethodInput::Empty) => pre.current_turn_option(),
         _ => {
             return Err(TexasAirError::SpecViolation(format!(
                 "{} method input does not match composite-plan routing",
@@ -640,21 +640,21 @@ fn derive_seat_update(
     let post_total_bet = seat.total_bet.checked_add(*amount).ok_or_else(|| {
         TexasAirError::SpecViolation("seat-update total_bet credit overflow".into())
     })?;
-    let post_all_in = seat.all_in || (*amount > 0 && post_stack == 0);
+    let post_all_in = seat.is_all_in() || (*amount > 0 && post_stack == 0);
     let mut acted_before = [false; COMPOSITION_SEATS];
     let mut acted_after = [false; COMPOSITION_SEATS];
-    for (index, table_seat) in pre.seats.iter().enumerate() {
-        acted_before[index] = table_seat.acted_this_round;
-        acted_after[index] = table_seat.acted_this_round;
+    for (index, _) in pre.seats.iter().enumerate() {
+        acted_before[index] = pre.seat_acted_this_round(index as u8);
+        acted_after[index] = pre.seat_acted_this_round(index as u8);
     }
     acted_after[usize::from(seat_index)] = true;
     if matches!(method_kind, MethodKind::Raise | MethodKind::Bet) {
         for (index, table_seat) in pre.seats.iter().enumerate() {
             if index != usize::from(seat_index)
                 && table_seat.is_occupied()
-                && !table_seat.folded
-                && !table_seat.all_in
-                && !table_seat.is_waiting
+                && !table_seat.is_folded()
+                && !table_seat.is_all_in()
+                && !table_seat.is_waiting()
             {
                 acted_after[index] = false;
             }
@@ -673,9 +673,9 @@ fn derive_seat_update(
         pre_total_bet: seat.total_bet,
         post_total_bet,
         total_bet_credit: *amount,
-        pre_folded: seat.folded,
-        post_folded: seat.folded || *folded,
-        pre_all_in: seat.all_in,
+        pre_folded: seat.is_folded(),
+        post_folded: seat.is_folded() || *folded,
+        pre_all_in: seat.is_all_in(),
         post_all_in,
         acted_before,
         acted_after,
@@ -839,7 +839,7 @@ fn derive_round_advance(
             || *pot != post.pot
             || *community_cards_count != post.community_cards.len() as u64
             || post.betting_round.is_some()
-            || post.current_turn.is_some()
+            || post.current_turn != NO_CURRENT_TURN
         {
             return Err(TexasAirError::SpecViolation(
                 "RoundAdvanced event does not match canonical post table".into(),
@@ -851,7 +851,7 @@ fn derive_round_advance(
             post_round_state: *to_round,
             pre_reveal_phase: pre.reveal_token_state.reveal_phase,
             post_reveal_phase: post.reveal_token_state.reveal_phase,
-            pre_current_turn: pre.current_turn.unwrap_or(NO_CURRENT_TURN),
+            pre_current_turn: pre.current_turn,
             post_current_turn: NO_CURRENT_TURN,
             post_pot: *pot,
             community_cards_count: *community_cards_count,
@@ -951,7 +951,7 @@ fn derive_settlement(
         ) && !tick_started_hand
             && post.round_state == ROUND_WAITING
             && post.betting_round.is_none()
-            && post.current_turn.is_none()
+            && post.current_turn == NO_CURRENT_TURN
             && post.pot == 0;
         if !reset_only {
             return Ok(SettlementStagePlan::inactive());
@@ -1032,7 +1032,9 @@ fn derive_settlement(
                 "no-showdown award/addon credit does not match winner post stack".into(),
             ));
         }
-    } else if !pre_winner.want_leave || reset.refunds[winner_index] != winner_after_credit {
+    } else if !pre.seat_wants_leave(winner_index as u8)
+        || reset.refunds[winner_index] != winner_after_credit
+    {
         return Err(TexasAirError::SpecViolation(
             "removed no-showdown winner is not bound to its complete reset refund".into(),
         ));
@@ -1261,7 +1263,7 @@ fn require_canonical_reset(
 ) -> TexasAirResult<()> {
     if post.round_state != ROUND_WAITING
         || post.betting_round.is_some()
-        || post.current_turn.is_some()
+        || post.current_turn != NO_CURRENT_TURN
         || post.pot != 0
     {
         return Err(TexasAirError::SpecViolation(
@@ -1323,6 +1325,7 @@ mod tests {
     use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
     use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
     use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
+    use poker_l1::vm::contracts::texas_poker::types::SeatStatus;
 
     use super::*;
 
@@ -1338,11 +1341,11 @@ mod tests {
         for (index, seat) in table.seats.iter_mut().enumerate() {
             seat.player = [index as u8 + 1; 20];
             seat.stack = 1_000;
-            seat.is_waiting = false;
+            seat.set_status(SeatStatus::Active);
         }
         table.round_state = ROUND_PREFLOP;
         table.betting_round = Some(BettingRound::new(100, 100));
-        table.current_turn = Some(0);
+        table.current_turn = 0;
         table.hand_id = 3;
         table.call_seq = 8;
         table
@@ -1352,8 +1355,8 @@ mod tests {
     fn mid_round_action_has_only_seat_stage_active() {
         let pre = table();
         let mut post = pre.clone();
-        post.seats[0].acted_this_round = true;
-        post.current_turn = Some(1);
+        post.set_seat_acted_this_round(0, true);
+        post.current_turn = 1;
         post.call_seq += 1;
         let events = vec![TexasPokerEvent::PlayerChecked {
             table_id: pre.id,
@@ -1375,12 +1378,12 @@ mod tests {
         let mut pre = table();
         pre.round_state = ROUND_FLOP;
         pre.betting_round = Some(BettingRound::new(100, 0));
-        pre.seats[1].acted_this_round = true;
+        pre.set_seat_acted_this_round(1, true);
         let mut post = pre.clone();
-        post.seats[0].acted_this_round = true;
+        post.set_seat_acted_this_round(0, true);
         post.round_state = poker_l1::vm::contracts::texas_poker::constants::ROUND_TURN;
         post.betting_round = None;
-        post.current_turn = None;
+        post.current_turn = u8::MAX;
         post.reveal_token_state.reveal_phase =
             poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN;
         post.call_seq += 1;

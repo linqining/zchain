@@ -30,9 +30,8 @@
 //!
 //! # ZK 跳过回退（仅 crate 内单元测试）
 //!
-//! 为了兼容已有状态，`TableConfig` 仍保留 `zk_skip_*` 字段；但它们只在
-//! `poker_l1` crate 自身的 `cfg(test)` 单元测试构建中生效。生产、普通库和
-//! 集成测试构建始终执行真实密码学验证，不依赖尚未实现的 governance 强制。
+//! 单元测试的密码学跳过是编译期 `cfg(test)` 行为，不属于桌台状态。生产、普通库和
+//! 集成测试构建始终执行真实密码学验证，状态/preimage 无法携带运行时绕过开关。
 
 pub mod betting;
 pub mod card;
@@ -53,10 +52,16 @@ pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
 
 /// Persisted Borsh schema version for [`types::TexasPokerTable`].
 ///
-/// Version 2 adds explicit runout routing to reveal assignments and per-hand two-board state.
-/// Version-1 table bytes are intentionally not accepted as version 2; deployments must migrate
-/// or recreate the singleton table object at an upgrade boundary.
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 2;
+/// Version 3 removed persisted derived/transient fields while preserving the complete game state.
+/// Version 4 replaces redundant seat lifecycle booleans with one status enum and packs orthogonal
+/// booleans into flags. Version 5 moves all seat-set state to canonical u16 masks and replaces
+/// persisted optional seat indices with `NO_SEAT`. Versions 2 through 4 are decoded through
+/// explicit fail-closed migrations in
+/// [`state_codec`].
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 10;
+
+/// Versioned persisted-state codec and v2/v3/v4 -> v5 migration.
+pub mod state_codec;
 
 // Phase 3: 状态机 + dispatch
 pub mod dispatch;

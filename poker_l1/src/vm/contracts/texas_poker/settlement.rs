@@ -21,7 +21,7 @@ use super::card::Card;
 use super::constants::{MAX_PLAYERS, MAX_TOTAL_BET, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE};
 use super::hand_evaluator::{HandRank, evaluate_best};
 use super::side_pot::{self, SidePot};
-use super::types::TexasPokerTable;
+use super::types::{Seat, TexasPokerTable};
 use crate::error::{PokerL1Error, PokerL1Result};
 
 /// Canonical settlement-plan encoding version.
@@ -376,7 +376,7 @@ impl SettlementPlan {
 pub fn derive_settlement_plan(table: &TexasPokerTable) -> PokerL1Result<SettlementPlan> {
     derive_settlement_plan_for_boards(
         table,
-        &SettlementBoards::single(table.community_cards.clone()),
+        &SettlementBoards::single(table.community_cards.to_vec()),
     )
 }
 
@@ -397,9 +397,9 @@ pub fn derive_settlement_plan_for_boards(
     let folded: Vec<bool> = table
         .seats
         .iter()
-        .map(|seat| seat.folded || seat.left_during_hand)
+        .map(|seat| seat.is_folded() || seat.has_left_hand())
         .collect();
-    let all_in: Vec<bool> = table.seats.iter().map(|seat| seat.all_in).collect();
+    let all_in: Vec<bool> = table.seats.iter().map(Seat::is_all_in).collect();
     let result = side_pot::calculate_side_pots(&bets, &folded, &all_in).map_err(|error| {
         PokerL1Error::Serialization(format!("settlement: side-pot calculation failed: {error}"))
     })?;
@@ -520,7 +520,7 @@ pub fn derive_settlement_plan_for_boards(
 fn validate_exposed_cards(table: &TexasPokerTable, boards: &SettlementBoards) -> PokerL1Result<()> {
     let mut seen_hole_cards = HashSet::new();
     for (seat_index, seat) in table.seats.iter().enumerate() {
-        if !seat.is_occupied() || seat.folded || seat.left_during_hand {
+        if !seat.is_occupied() || seat.is_folded() || seat.has_left_hand() {
             continue;
         }
         if seat.hand.len() != 2 || seat.hand.iter().any(|card| !card.is_valid()) {
@@ -528,7 +528,7 @@ fn validate_exposed_cards(table: &TexasPokerTable, boards: &SettlementBoards) ->
                 "settlement: eligible seat {seat_index} must expose exactly two valid cards"
             )));
         }
-        for card in &seat.hand {
+        for card in seat.hand.iter() {
             if !seen_hole_cards.insert(card.to_index()) {
                 return Err(PokerL1Error::Serialization(
                     "settlement: duplicate exposed hole card".into(),
@@ -712,6 +712,7 @@ fn split_among_winners(
 mod tests {
     use super::*;
     use crate::object_model::ObjectID;
+    use crate::vm::contracts::texas_poker::types::SeatStatus;
 
     fn table() -> TexasPokerTable {
         let mut table = TexasPokerTable::new(
@@ -726,11 +727,11 @@ mod tests {
             table.seats[index].player = [index as u8 + 1; 20];
             table.seats[index].stack = stack;
             table.seats[index].total_bet = [100, 200, 300][index];
-            table.seats[index].all_in = true;
+            table.seats[index].set_status(SeatStatus::AllIn);
         }
-        table.seats[0].hand = vec![Card::new(0, 14), Card::new(1, 14)];
-        table.seats[1].hand = vec![Card::new(0, 13), Card::new(1, 13)];
-        table.seats[2].hand = vec![Card::new(0, 12), Card::new(1, 12)];
+        table.seats[0].hand = [Card::new(0, 14), Card::new(1, 14)].into();
+        table.seats[1].hand = [Card::new(0, 13), Card::new(1, 13)].into();
+        table.seats[2].hand = [Card::new(0, 12), Card::new(1, 12)].into();
         table.pot = 600;
         table.chip_pool = 3_000;
         table.community_cards = vec![
@@ -739,7 +740,9 @@ mod tests {
             Card::new(2, 6),
             Card::new(3, 8),
             Card::new(2, 10),
-        ];
+        ]
+        .try_into()
+        .unwrap();
         table
     }
 
@@ -759,7 +762,7 @@ mod tests {
     #[test]
     fn two_runouts_split_each_side_pot_before_selecting_winners() {
         let table = table();
-        let board1 = table.community_cards.clone();
+        let board1 = table.community_cards.to_vec();
         let board2 = vec![
             Card::new(2, 2),
             Card::new(3, 4),
@@ -786,7 +789,7 @@ mod tests {
     #[test]
     fn duplicate_cross_runout_card_is_rejected() {
         let table = table();
-        let board1 = table.community_cards.clone();
+        let board1 = table.community_cards.to_vec();
         let board2 = vec![
             board1[0],
             board1[1],
@@ -811,7 +814,7 @@ mod tests {
         table.rake_bps = 1_000;
         table.rake_cap = u64::MAX;
 
-        let board1 = table.community_cards.clone();
+        let board1 = table.community_cards.to_vec();
         let board2 = vec![
             Card::new(2, 2),
             Card::new(3, 4),
@@ -850,9 +853,9 @@ mod tests {
         table.rake_mode = RAKE_MODE_PERCENTAGE;
         table.rake_bps = 500;
         table.rake_cap = 29;
-        table.seats[0].hand = vec![Card::new(0, 2), Card::new(1, 7)];
-        table.seats[1].hand = vec![Card::new(0, 3), Card::new(1, 8)];
-        table.seats[2].hand = vec![Card::new(0, 4), Card::new(1, 9)];
+        table.seats[0].hand = [Card::new(0, 2), Card::new(1, 7)].into();
+        table.seats[1].hand = [Card::new(0, 3), Card::new(1, 8)].into();
+        table.seats[2].hand = [Card::new(0, 4), Card::new(1, 9)].into();
 
         // Both boards play entirely from the board, so every eligible seat ties. This makes the
         // button-relative odd-chip order observable at every side-pot depth.

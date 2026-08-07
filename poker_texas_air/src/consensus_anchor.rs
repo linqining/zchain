@@ -84,7 +84,7 @@ impl TableSnapshot {
     ///
     /// `Object.data` 不是合法 borsh 编码的 `TexasPokerTable` 时返回错误。
     pub fn table(&self) -> TexasAirResult<TexasPokerTable> {
-        borsh::from_slice::<TexasPokerTable>(&self.object.data)
+        poker_l1::vm::contracts::texas_poker::state_codec::decode_table_state(&self.object.data)
             .map_err(|e| TexasAirError::SerializationError(format!("TexasPokerTable borsh: {e}")))
     }
 }

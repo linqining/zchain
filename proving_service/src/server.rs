@@ -148,11 +148,7 @@ impl ServiceRuntime {
                     job.table_id
                 ))
             })?;
-            plugin.restore_archived_task(
-                task,
-                package.archive(),
-                package.composition_archive(),
-            )?;
+            plugin.restore_archived_task(task, package.archive(), package.composition_archive())?;
         }
 
         for stored in repository.tables() {
@@ -1111,9 +1107,9 @@ fn decode_fixed_hex<const N: usize>(value: &str, name: &str) -> Result<[u8; N], 
 
 fn new_service_plugin(table_id: u64) -> TexasPokerPlugin {
     use poker_l1::object_model::ObjectID;
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TableConfig, TexasPokerTable};
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 
-    let mut table = TexasPokerTable::new(
+    let table = TexasPokerTable::new(
         ObjectID::new([0xFF; 20], table_id),
         String::new(),
         EMPTY_PLAYER,
@@ -1121,7 +1117,6 @@ fn new_service_plugin(table_id: u64) -> TexasPokerPlugin {
         1,
         1,
     );
-    table.config = TableConfig::default();
     TexasPokerPlugin::new(table)
 }
 
@@ -1183,7 +1178,7 @@ mod tests {
             steps
                 .last()
                 .and_then(|step| step["method"].as_str())
-                .is_some_and(|method| method.starts_with("composition_batch[1x4 proofs]"))
+                .is_some_and(|method| method.starts_with("composition_batch[1 tagged proofs/"))
         );
         assert_eq!(report["chain_ok"], true);
         assert_eq!(report["dispatch_count"], 32);
@@ -1756,7 +1751,14 @@ mod tests {
             .0;
         assert_eq!(leave.call_seq, 3);
         let runtime = state.runtime.lock().await;
-        assert!(runtime.plugins.get(&LEGACY_TABLE_ID).unwrap().table().seats[0].want_leave);
+        assert!(
+            runtime
+                .plugins
+                .get(&LEGACY_TABLE_ID)
+                .unwrap()
+                .table()
+                .seat_wants_leave(0)
+        );
     }
 
     #[tokio::test]

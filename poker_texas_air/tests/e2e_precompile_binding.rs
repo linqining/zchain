@@ -3,18 +3,18 @@
 use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::card::Card;
+use poker_l1::vm::contracts::texas_poker::card::{BoardCards, Card};
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_SHOWDOWN, RIT_MODE_TWICE,
-    ROUND_PREFLOP, ROUND_SHOWDOWN, SHUFFLE_PHASE_WAITING,
+    RECONSTRUCT_PHASE_COLLECTING, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN,
+    RIT_MODE_TWICE, ROUND_SHOWDOWN, ROUND_TURN, SHUFFLE_PHASE_WAITING,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
     SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealTokenState, RunItTwiceState,
-    ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealProgress, RevealTarget,
+    RevealTokenState, RunItTwiceState, RunoutMode, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -159,15 +159,17 @@ fn fixture(
     table.hand_id = hand_id;
     table.version = 10;
     table.seats[usize::from(seat_index)].player = player;
+    table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].stack = 1_000;
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
     table.deck_state.encrypted = input_cards.clone();
-    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.deck_state.contributor_mask = 1u16 << seat_index;
+    table.sync_aggregated_pk().unwrap();
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_WAITING,
-        current_shuffler: Some(seat_index),
-        pending_players: vec![seat_index],
-        completed_players: vec![],
+        current_shuffler: seat_index,
+        pending_mask: (1u16 << (seat_index)),
+        completed_mask: 0,
     };
     let raw_args = borsh::to_vec(&SubmitShuffleV2Args {
         seat_index,
@@ -224,7 +226,7 @@ fn fixture(
         statement_call_seq,
         public_inputs.pre_version,
         public_inputs.post_version,
-        u8::try_from(task.post_table.shuffle_state.completed_players.len())
+        u8::try_from(task.post_table.shuffle_state.completed_mask.count_ones())
             .expect("completed player count should fit u8"),
     );
     let trace = gen_method_trace(
@@ -344,14 +346,16 @@ fn leave_fixture(
     table.hand_id = hand_id;
     table.version = 21;
     table.seats[usize::from(seat_index)].player = player;
+    table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
     table.deck_state.encrypted = input_cards.clone();
-    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.deck_state.contributor_mask = 1u16 << seat_index;
+    table.sync_aggregated_pk().unwrap();
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_WAITING,
-        current_shuffler: None,
-        pending_players: vec![],
-        completed_players: vec![seat_index],
+        current_shuffler: u8::MAX,
+        pending_mask: 0,
+        completed_mask: (1u16 << (seat_index)),
     };
     let raw_args = borsh::to_vec(&LeaveWithProofArgs {
         seat_index,
@@ -405,7 +409,7 @@ fn leave_fixture(
         statement_call_seq,
         public_inputs.pre_version,
         public_inputs.post_version,
-        u8::try_from(task.post_table.shuffle_state.completed_players.len())
+        u8::try_from(task.post_table.shuffle_state.completed_mask.count_ones())
             .expect("completed player count should fit u8"),
     );
     let trace = gen_method_trace(
@@ -531,28 +535,38 @@ fn reveal_fixture(
     table.hand_id = hand_id;
     table.version = 31;
     table.seats[usize::from(seat_index)].player = player;
+    table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].stack = 1_000;
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
     table.deck_state.encrypted = encrypted_cards.clone();
-    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.deck_state.contributor_mask = 1u16 << seat_index;
+    table.sync_aggregated_pk().unwrap();
     table.reveal_token_state = RevealTokenState {
         reveal_phase: REVEAL_PHASE_PREFLOP,
         assignments: vec![
             RevealAssignment {
                 encrypted_card_index: 0,
-                runout_index: 0,
-                board_position: u8::MAX,
-                pending_players: vec![seat_index],
-                reveal_tokens: vec![],
-                decrypted: false,
+                target: RevealTarget::Hole {
+                    seat_index: 0,
+                    card_slot: 0,
+                },
+                progress: RevealProgress::Collecting {
+                    pending_mask: 1u16 << seat_index,
+                    submitted_mask: 0,
+                    reveal_tokens: vec![],
+                },
             },
             RevealAssignment {
                 encrypted_card_index: 1,
-                runout_index: 0,
-                board_position: u8::MAX,
-                pending_players: vec![0],
-                reveal_tokens: vec![],
-                decrypted: false,
+                target: RevealTarget::Hole {
+                    seat_index: 1,
+                    card_slot: 0,
+                },
+                progress: RevealProgress::Collecting {
+                    pending_mask: 1u16,
+                    submitted_mask: 0,
+                    reveal_tokens: vec![],
+                },
             },
         ],
     };
@@ -606,7 +620,12 @@ fn reveal_fixture(
             request_args.proofs[0] = proof;
         }
         RevealRequestVariant::OtherAssignment => {
-            request_table.reveal_token_state.assignments[1].pending_players = vec![seat_index];
+            request_table.reveal_token_state.assignments[1].progress =
+                RevealProgress::Collecting {
+                    pending_mask: 1u16 << seat_index,
+                    submitted_mask: 0,
+                    reveal_tokens: vec![],
+                };
             let (token, proof) = prove_reveal_token(&secret_key, &public_key, &encrypted_cards[1]);
             request_args.assignment_indices[0] = 1;
             request_args.reveal_tokens[0] = token;
@@ -732,7 +751,7 @@ fn non_terminal_reveal_cannot_claim_an_active_settlement() {
 }
 
 #[test]
-fn terminal_rit_replay_binds_the_canonical_settlement_and_proves() {
+fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     let table_id = 72;
     let hand_id = 12;
     let seat_index = 1;
@@ -770,34 +789,41 @@ fn terminal_rit_replay_binds_the_canonical_settlement_and_proves() {
     table.round_state = ROUND_SHOWDOWN;
     table.rit_mode = RIT_MODE_TWICE;
     table.run_it_twice_state = RunItTwiceState {
-        active: true,
-        trigger_round: ROUND_PREFLOP,
+        mode: RunoutMode::Twice,
         shared_board_len: 0,
-        second_board_cards: (5u8..10).map(Card::from_index).collect(),
+        second_board_suffix: BoardCards::try_from(
+            (5u8..10).map(Card::from_index).collect::<Vec<_>>(),
+        )
+        .unwrap(),
     };
-    table.community_cards = (0u8..5).map(Card::from_index).collect();
+    table.community_cards =
+        BoardCards::try_from((0u8..5).map(Card::from_index).collect::<Vec<_>>()).unwrap();
     table.pot = 200;
     table.chip_pool = 2_000;
     table.seats[0].player = player0;
+    table.seats[0].set_status(SeatStatus::Active);
     table.seats[0].stack = 900;
     table.seats[0].total_bet = 100;
-    table.seats[0].all_in = true;
-    table.seats[0].hand = vec![Card::from_index(20), Card::from_index(21)];
+    table.seats[0].set_status(SeatStatus::AllIn);
+    table.seats[0].hand = [Card::from_index(20), Card::from_index(21)].into();
     table.seats[1].player = player1;
+    table.seats[1].set_status(SeatStatus::Active);
     table.seats[1].stack = 900;
     table.seats[1].total_bet = 100;
-    table.seats[1].all_in = true;
+    table.seats[1].set_status(SeatStatus::AllIn);
     table.seats[1].pk = ECPoint(public_key);
     table.deck_state.encrypted = encrypted_cards.clone();
-    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.deck_state.contributor_mask = 1u16 << 1;
+    table.sync_aggregated_pk().unwrap();
     table.deck_state.decrypted_cards = encrypted_cards
         .iter()
         .enumerate()
-        .map(|(index, ciphertext)| DecryptedCard {
-            encrypted_card_index: u8::try_from(index).unwrap(),
-            owner_seat_index: seat_index,
-            ciphertext: Some(ciphertext.clone()),
-            plaintext: None,
+        .map(|(index, ciphertext)| {
+            DecryptedCard::partial(
+                u8::try_from(index).unwrap(),
+                seat_index,
+                ciphertext.clone(),
+            )
         })
         .collect();
     table.reveal_token_state = RevealTokenState {
@@ -805,11 +831,15 @@ fn terminal_rit_replay_binds_the_canonical_settlement_and_proves() {
         assignments: (0u8..2)
             .map(|encrypted_card_index| RevealAssignment {
                 encrypted_card_index,
-                runout_index: 0,
-                board_position: u8::MAX,
-                pending_players: vec![seat_index],
-                reveal_tokens: vec![],
-                decrypted: false,
+                target: RevealTarget::Hole {
+                    seat_index,
+                    card_slot: encrypted_card_index,
+                },
+                progress: RevealProgress::Collecting {
+                    pending_mask: 1u16 << seat_index,
+                    submitted_mask: 0,
+                    reveal_tokens: vec![],
+                },
             })
             .collect(),
     };
@@ -826,28 +856,24 @@ fn terminal_rit_replay_binds_the_canonical_settlement_and_proves() {
         texas_dispatch::selectors::submit_player_reveal_tokens(),
         raw_args,
     );
-    assert_eq!(task.post_table.version - task.pre_table.version, 2);
-    assert_eq!(task.post_table.pot, 0);
+    assert_eq!(task.post_table.version - task.pre_table.version, 1);
+    assert_eq!(task.post_table.pot, 200);
+    assert_eq!(task.post_table.round_state, ROUND_SHOWDOWN);
+    assert!(task.post_table.reveal_token_state.assignments.is_empty());
 
     let mut replayed = task.pre_table.clone();
     let result =
         texas_dispatch::dispatch(&task.context, &mut replayed, &task.selector, &task.raw_args)
             .unwrap();
     let output: DispatchOutput = borsh::from_slice(&result.return_value).unwrap();
-    let settlement =
+    assert!(
         poker_texas_air::settlement_binding::SettlementPlanBinding::from_events(&output.events)
-            .unwrap();
-    assert_eq!(settlement.runout_count, 2);
-    assert_eq!(settlement.gross_pot, 200);
-    assert_eq!(settlement.rake + settlement.total_awards, 200);
-    assert_eq!(
-        settlement.awards.iter().sum::<u64>(),
-        settlement.total_awards
+            .is_err()
     );
 
     Orchestrator::new()
         .prove_and_verify_task(&task)
-        .expect("terminal RIT reveal settlement should prove and verify");
+        .expect("terminal RIT reveal should prove and verify before deadline settlement");
 }
 
 #[test]
@@ -858,9 +884,7 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     let seat_index = 1;
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
-    let cards: Vec<_> = (0..8)
-        .map(|i| Bls12381Curve::hash_to_curve(format!("air-reconstruct/card/{i}").as_bytes()))
-        .collect();
+    let cards = utils::generate_plaintext_cards();
     let readable_cards: Vec<_> = [2usize, 5]
         .iter()
         .map(|&i| {
@@ -885,29 +909,28 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     table.hand_id = hand_id;
     table.version = 44;
     table.seats[0].player = [0x52; 20];
+    table.seats[0].set_status(SeatStatus::Active);
     table.seats[0].stack = 1_000;
     table.seats[1].player = player;
+    table.seats[1].set_status(SeatStatus::Active);
     table.seats[1].stack = 1_000;
     table.seats[1].pk = ECPoint(public_key);
-    table.deck_state.plaintext = cards.iter().copied().map(ECPoint).collect();
-    table.deck_state.aggregated_pk = Some(ECPoint(public_key));
+    table.deck_state.contributor_mask = 1u16 << 1;
+    table.sync_aggregated_pk().unwrap();
     table.deck_state.decrypted_cards = readable_cards
         .iter()
         .cloned()
         .enumerate()
-        .map(|(index, ciphertext)| DecryptedCard {
-            encrypted_card_index: index as u8,
-            owner_seat_index: seat_index,
-            ciphertext: Some(ciphertext),
-            plaintext: None,
-        })
+        .map(|(index, ciphertext)| DecryptedCard::partial(index as u8, seat_index, ciphertext))
         .collect();
+    table.round_state = ROUND_TURN;
+    table.reveal_token_state.reveal_phase = REVEAL_PHASE_TURN;
     table.timestamps.reconstruct_started_at = 9;
     table.reconstruct_state = ReconstructState {
         phase: RECONSTRUCT_PHASE_COLLECTING,
-        pending_players: vec![0, seat_index],
+        pending_mask: (1u16 << (0)) | (1u16 << (seat_index)),
         coefficient: None,
-        player_decks: vec![],
+        accumulated_deck: None,
     };
     let context_digest = utils::reconstruction_v3_context_digest(&table);
     let prior_state_digest =
@@ -977,8 +1000,6 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
         call_seq,
         public_inputs.pre_version,
         public_inputs.post_version,
-        u8::try_from(task.post_table.reconstruct_state.player_decks.len())
-            .expect("submitted deck count should fit u8"),
     );
     let trace = gen_method_trace(
         SubmitReconstructDeckAir::num_columns(),

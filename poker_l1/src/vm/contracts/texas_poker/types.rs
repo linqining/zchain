@@ -33,16 +33,12 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 
 use super::betting::BettingRound;
-use super::card::Card;
+use super::card::{BoardCards, Card, HoleCards};
 // 复用 constants.rs 中与 Move 端逐字节一致的 phase 常量（避免本地重复定义导致语义分叉）
 use super::constants::{
-    RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_COMPLETE, RECONSTRUCT_PHASE_NONE,
-    REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_REDEAL,
-    REVEAL_PHASE_RIVER, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN, ROUND_WAITING,
-    SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_NONE, SHUFFLE_PHASE_RECONSTRUCT,
-    SHUFFLE_PHASE_WAITING,
+    RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_NONE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER,
+    ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_NONE, SHUFFLE_PHASE_RECONSTRUCT,
 };
-use super::side_pot::SidePot;
 
 // ========== 常量 ==========
 
@@ -55,6 +51,100 @@ pub const OWNER_SEAT_PUBLIC: u8 = u8::MAX;
 
 /// 空座位标识（player = [0; 20]）。
 pub const EMPTY_PLAYER: Address = [0u8; 20];
+
+/// Maximum supported seat count. Seat membership is encoded in a [`SeatMask`].
+pub const MAX_SEATS: u8 = 9;
+
+/// Canonical sentinel for a missing seat index in persisted state and AIR projections.
+pub const NO_SEAT: u8 = u8::MAX;
+
+/// Bit `i` denotes seat `i`. Only the low `max_players` bits may be set.
+pub type SeatMask = u16;
+
+#[must_use]
+/// Return the mask containing only `seat_index`.
+pub const fn seat_mask_bit(seat_index: u8) -> SeatMask {
+    1u16 << seat_index
+}
+
+#[must_use]
+/// Return whether `seat_index` is present in a canonical seat mask.
+pub const fn seat_mask_contains(mask: SeatMask, seat_index: u8) -> bool {
+    seat_index < MAX_SEATS && mask & seat_mask_bit(seat_index) != 0
+}
+
+/// Insert `seat_index`, rejecting indices outside the supported table size.
+pub fn seat_mask_insert(mask: &mut SeatMask, seat_index: u8) -> PokerL1Result<()> {
+    if seat_index >= MAX_SEATS {
+        return Err(PokerL1Error::Serialization(format!(
+            "Texas seat index {seat_index} exceeds mask capacity {MAX_SEATS}"
+        )));
+    }
+    *mask |= seat_mask_bit(seat_index);
+    Ok(())
+}
+
+/// Remove `seat_index`; out-of-range indices are harmless no-ops.
+pub fn seat_mask_remove(mask: &mut SeatMask, seat_index: u8) {
+    if seat_index < MAX_SEATS {
+        *mask &= !seat_mask_bit(seat_index);
+    }
+}
+
+#[must_use]
+/// Count the seats present in `mask`.
+pub const fn seat_mask_count(mask: SeatMask) -> u8 {
+    mask.count_ones() as u8
+}
+
+#[must_use]
+/// Return the lowest-numbered seat in `mask`.
+pub fn seat_mask_first(mask: SeatMask) -> Option<u8> {
+    (mask != 0).then(|| mask.trailing_zeros() as u8)
+}
+
+#[must_use]
+/// Expand a canonical mask into ascending seat indices below `max_players`.
+pub fn seat_mask_to_indices(mask: SeatMask, max_players: u8) -> Vec<u8> {
+    (0..max_players)
+        .filter(|seat| seat_mask_contains(mask, *seat))
+        .collect()
+}
+
+/// Build a canonical seat mask, rejecting duplicates and out-of-range indices.
+pub fn seat_mask_from_indices(
+    indices: &[u8],
+    max_players: u8,
+    label: &str,
+) -> PokerL1Result<SeatMask> {
+    if max_players > MAX_SEATS {
+        return Err(PokerL1Error::Serialization(format!(
+            "{label}: max_players {max_players} exceeds {MAX_SEATS}"
+        )));
+    }
+    let mut mask = 0;
+    for &seat_index in indices {
+        if seat_index >= max_players {
+            return Err(PokerL1Error::Serialization(format!(
+                "{label}: seat index {seat_index} outside max_players {max_players}"
+            )));
+        }
+        let bit = seat_mask_bit(seat_index);
+        if mask & bit != 0 {
+            return Err(PokerL1Error::Serialization(format!(
+                "{label}: duplicate seat index {seat_index}"
+            )));
+        }
+        mask |= bit;
+    }
+    Ok(mask)
+}
+
+#[must_use]
+/// Return whether `mask` contains only seats below `max_players`.
+pub const fn seat_mask_is_canonical(mask: SeatMask, max_players: u8) -> bool {
+    max_players <= MAX_SEATS && (max_players == MAX_SEATS || mask < (1u16 << max_players))
+}
 
 // ========== ElGamal 密文 ==========
 
@@ -97,25 +187,15 @@ pub struct Seat {
     /// 玩家筹码栈。
     pub stack: u64,
     /// 玩家手牌（最多 2 张）。
-    pub hand: Vec<Card>,
+    pub hand: HoleCards,
     /// 本轮已下注（每轮开始时清零，累加到 total_bet）。
     pub bet: u64,
     /// 本局总下注（用于 side pot 计算）。
     pub total_bet: u64,
-    /// 是否已弃牌。
-    pub folded: bool,
-    /// 是否 all-in。
-    pub all_in: bool,
-    /// 本轮是否已行动（用于判断是否需要等待行动）。
-    pub acted_this_round: bool,
-    /// 本局不参与，等下一局开始（对应 Move `is_waiting`）。
-    pub is_waiting: bool,
-    /// 本局中途离开（被踢），total_bet 保留供 side pot 计算。
-    pub left_during_hand: bool,
+    /// 互斥的座位生命周期状态。
+    pub status: SeatStatus,
     /// 玩家 ElGamal 公钥（G1 点，使用 ECPoint newtype 以支持 Borsh）。
     pub pk: ECPoint,
-    /// total_bet 是否已退款（避免重复退款）。
-    pub refunded: bool,
     /// 待入账的 addon 金额（下一手 `reset_for_next_hand` 时合并到 `stack`）。
     ///
     /// 业务语义：玩家可在任意时刻调用 `addon(amount)` 追加筹码，但**不影响当前手牌**：
@@ -129,18 +209,6 @@ pub struct Seat {
     /// 系统自动消耗 time_bank 续命（而非直接 auto_fold）。
     /// 每手开始时按 `TIME_BANK_REFILL_PER_HAND_MS` 补充（上限 DEFAULT_TIME_BANK_MS）。
     pub time_bank_ms: u64,
-    /// 玩家请求「下局开始前离场」（sit out next hand / stand up next hand）。
-    ///
-    /// 业务语义：玩家可在**任意时刻**（含对局进行中）通过
-    /// `request_leave_after_hand` 方法切换此标志（toggle，再次调用取消）。
-    /// 当下一手在 `reset_for_next_hand`（由 settle_hand / end_without_showdown /
-    /// 超时路径触发）时，所有 `want_leave=true` 的 occupied seat 会被强制
-    /// 踢出并退还 stack + pending_addon。
-    ///
-    /// 解决的问题：`leave_table` 仅在 WAITING 状态可用，而 creator / `tick`
-    /// 可能在 settle 后立即 `start_hand`，玩家来不及离场。此标志让玩家
-    /// 在对局中即可预约离场，由 reset 强制执行（在线扑克标准模式）。
-    pub want_leave: bool,
 }
 
 impl Seat {
@@ -150,44 +218,73 @@ impl Seat {
         Self {
             player: EMPTY_PLAYER,
             stack: 0,
-            hand: vec![],
+            hand: HoleCards::empty(),
             bet: 0,
             total_bet: 0,
-            folded: false,
-            all_in: false,
-            acted_this_round: false,
-            is_waiting: false,
-            left_during_hand: false,
+            status: SeatStatus::Empty,
             pk: ECPoint(G1Projective::identity()),
-            refunded: false,
             pending_addon: 0,
             time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
-            want_leave: false,
         }
     }
 
     /// 判断座位是否被活跃占用（player != [0;20] 且未中途离开）。
     #[must_use]
     pub fn is_occupied(&self) -> bool {
-        self.player != EMPTY_PLAYER && !self.left_during_hand
+        self.player != EMPTY_PLAYER && self.status != SeatStatus::Out
     }
 
     /// 获取座位状态枚举。
     #[must_use]
     pub fn status(&self) -> SeatStatus {
-        if self.player == EMPTY_PLAYER {
-            SeatStatus::Empty
-        } else if self.left_during_hand {
-            SeatStatus::Out
-        } else if self.is_waiting {
-            SeatStatus::Waiting
-        } else if self.folded {
-            SeatStatus::Folded
-        } else if self.all_in {
-            SeatStatus::AllIn
-        } else {
-            SeatStatus::Active
+        self.status
+    }
+
+    /// Whether the seat has folded this hand.
+    #[must_use]
+    pub fn is_folded(&self) -> bool {
+        self.status == SeatStatus::Folded
+    }
+
+    /// Whether the seat is all-in this hand.
+    #[must_use]
+    pub fn is_all_in(&self) -> bool {
+        self.status == SeatStatus::AllIn
+    }
+
+    /// Whether the occupied seat is waiting for the next hand.
+    #[must_use]
+    pub fn is_waiting(&self) -> bool {
+        self.status == SeatStatus::Waiting
+    }
+
+    /// Whether the player left or was removed during the current hand.
+    #[must_use]
+    pub fn has_left_hand(&self) -> bool {
+        self.status == SeatStatus::Out
+    }
+
+    /// Replace the mutually-exclusive lifecycle state.
+    pub fn set_status(&mut self, status: SeatStatus) {
+        self.status = status;
+    }
+
+    /// 校验可持久化的 canonical seat 表达。
+    pub fn validate_canonical(&self) -> PokerL1Result<()> {
+        if (self.player == EMPTY_PLAYER) != (self.status == SeatStatus::Empty) {
+            return Err(PokerL1Error::Serialization(
+                "Texas seat player/status mismatch".into(),
+            ));
         }
+        self.hand.validate_canonical().map_err(|error| {
+            PokerL1Error::Serialization(format!("Texas seat hand is non-canonical: {error}"))
+        })?;
+        if self.status == SeatStatus::Empty && !self.hand.is_empty() {
+            return Err(PokerL1Error::Serialization(
+                "Texas empty seat contains hole cards".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -201,77 +298,249 @@ pub struct ShuffleState {
     /// 洗牌阶段（SHUFFLE_PHASE_NONE/WAITING/RECONSTRUCT/BEFORE_PREFLOP）。
     pub phase: u8,
     /// 当前洗牌者 seat_index（None 表示未开始或已完成）。
-    pub current_shuffler: Option<u8>,
-    /// 等待洗牌的玩家列表（按顺序）。
-    pub pending_players: Vec<u8>,
-    /// 已完成洗牌的玩家列表。
-    pub completed_players: Vec<u8>,
+    pub current_shuffler: u8,
+    /// 等待洗牌的玩家集合。
+    pub pending_mask: SeatMask,
+    /// 已完成洗牌的玩家集合。
+    pub completed_mask: SeatMask,
 }
 
 impl Default for ShuffleState {
     fn default() -> Self {
         Self {
             phase: SHUFFLE_PHASE_NONE,
-            current_shuffler: None,
-            pending_players: vec![],
-            completed_players: vec![],
+            current_shuffler: NO_SEAT,
+            pending_mask: 0,
+            completed_mask: 0,
         }
+    }
+}
+
+impl ShuffleState {
+    /// Canonical actor is always the lowest pending seat; no independent scheduling fact exists.
+    #[must_use]
+    pub fn derived_current_shuffler(&self) -> u8 {
+        seat_mask_first(self.pending_mask).unwrap_or(NO_SEAT)
     }
 }
 
 // ========== Reveal Token 状态 ==========
 
-/// 单个玩家的 reveal token 数据（镜像 Move `RevealTokenData`，table.move:140-143）。
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct RevealTokenData {
-    /// 提交者 seat_index。
-    pub seat_index: u8,
-    /// token = c1 * sk（G1 点，使用 ECPoint newtype 以支持 Borsh）。
-    pub token: ECPoint,
+/// Canonical destination of one encrypted card reveal.
+///
+/// Hole-card and public-board targets are mutually exclusive. Encoding them as a tagged union
+/// removes the legacy `board_position = 0xff` sentinel and prevents a hole assignment from also
+/// carrying a runout/board position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum RevealTarget {
+    /// One private card belonging to `seat_index` at canonical slot `0..=1`.
+    Hole {
+        /// Owning seat.
+        seat_index: u8,
+        /// Hole-card slot in dealing order.
+        card_slot: u8,
+    },
+    /// One public card on runout zero or one at canonical board position `0..=4`.
+    Board {
+        /// Public runout (`0` for the first board, `1` for the RIT second board).
+        runout_index: u8,
+        /// Position in the full target board.
+        board_position: u8,
+    },
 }
 
-/// Reveal 分配（镜像 Move `RevealAssignment`，table.move:132-137）。
+impl RevealTarget {
+    /// Stable sort key used to keep assignment order canonical after completed entries are drained.
+    #[must_use]
+    pub const fn canonical_key(self) -> (u8, u8, u8) {
+        match self {
+            Self::Hole {
+                seat_index,
+                card_slot,
+            } => (0, seat_index, card_slot),
+            Self::Board {
+                runout_index,
+                board_position,
+            } => (1, runout_index, board_position),
+        }
+    }
+}
+
+/// Canonical reveal collection/resolution state.
+///
+/// Submitted tokens are stored in ascending seat order. `submitted_mask` is the only seat-to-token
+/// index: token `n` belongs to the `n`th set bit. Ready values normally exist only transiently while
+/// deterministic normalization drains them; the tagged variants are retained so legacy states with
+/// out-of-order completed board positions can migrate without losing a valid reveal result.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum RevealProgress {
+    /// More authenticated reveal-token submissions are required.
+    Collecting {
+        /// Seats that still owe a token.
+        pending_mask: SeatMask,
+        /// Seats whose tokens are already present in `reveal_tokens`.
+        submitted_mask: SeatMask,
+        /// Verified tokens in ascending seat-index order.
+        reveal_tokens: Vec<ECPoint>,
+    },
+    /// A preflop private card has been partially decrypted for its owner.
+    ReadyPartial {
+        /// Self-contained partial ciphertext used later by the showdown owner proof.
+        ciphertext: ElGamalCiphertext,
+    },
+    /// A public or showdown card has resolved to a canonical card id.
+    ReadyCard {
+        /// Resolved canonical card.
+        card: Card,
+    },
+}
+
+impl RevealProgress {
+    /// Pending seats, or zero after the cryptographic collection has resolved.
+    #[must_use]
+    pub const fn pending_mask(&self) -> SeatMask {
+        match self {
+            Self::Collecting { pending_mask, .. } => *pending_mask,
+            Self::ReadyPartial { .. } | Self::ReadyCard { .. } => 0,
+        }
+    }
+
+    /// Whether this assignment already contains its deterministic reveal result.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        matches!(
+            self,
+            Self::ReadyPartial { .. }
+                | Self::ReadyCard { .. }
+                | Self::Collecting {
+                    pending_mask: 0,
+                    ..
+                }
+        )
+    }
+}
+
+/// Reveal assignment with one typed target and one canonical progress variant.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RevealAssignment {
     /// 牌组中的加密牌索引。
     pub encrypted_card_index: u8,
-    /// Runout index for a public board card (`0` for normal play and hole-card phases).
-    pub runout_index: u8,
-    /// Position in the target board (`0..=4`), or `u8::MAX` for hole-card assignments.
-    pub board_position: u8,
-    /// 待提交 reveal token 的玩家 seat_index 列表。
-    pub pending_players: Vec<u8>,
-    /// 已收集的 reveal tokens。
-    pub reveal_tokens: Vec<RevealTokenData>,
-    /// 是否已解密。
-    pub decrypted: bool,
+    /// Typed destination of this reveal.
+    pub target: RevealTarget,
+    /// Collection or ready-to-materialize result.
+    pub progress: RevealProgress,
+}
+
+impl RevealAssignment {
+    /// Seats that still owe a reveal token.
+    #[must_use]
+    pub const fn pending_mask(&self) -> SeatMask {
+        self.progress.pending_mask()
+    }
+
+    /// Whether the assignment has resolved and can be drained by normalization.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        self.progress.is_ready()
+    }
+}
+
+/// Number of active public-board runouts for the current hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum RunoutMode {
+    /// Normal single-board play.
+    Single,
+    /// Two runouts sharing the already exposed first-board prefix.
+    Twice,
+}
+
+impl Default for RunoutMode {
+    fn default() -> Self {
+        Self::Single
+    }
 }
 
 /// Per-hand Run It Twice state.
 ///
-/// `community_cards` remains the canonical first board. When active,
-/// `second_board_cards` starts with the already exposed shared prefix and receives the second
-/// runout's remaining cards.
+/// `community_cards` is the canonical first board. The second board stores only cards after the
+/// shared prefix; the prefix is reconstructed from the first board.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RunItTwiceState {
-    /// Whether this hand is currently using two runouts.
-    pub active: bool,
-    /// Betting round at which further betting became impossible.
-    pub trigger_round: u8,
+    /// Single or double runout mode.
+    pub mode: RunoutMode,
     /// Number of already exposed community cards shared by both boards.
     pub shared_board_len: u8,
-    /// Canonical second board, including the shared prefix.
-    pub second_board_cards: Vec<Card>,
+    /// Canonical second-board suffix after `shared_board_len` cards.
+    pub second_board_suffix: BoardCards,
 }
 
 impl Default for RunItTwiceState {
     fn default() -> Self {
         Self {
-            active: false,
-            trigger_round: super::constants::ROUND_WAITING,
+            mode: RunoutMode::Single,
             shared_board_len: 0,
-            second_board_cards: vec![],
+            second_board_suffix: BoardCards::empty(),
         }
+    }
+}
+
+impl RunItTwiceState {
+    /// Whether this hand has two active runouts.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        matches!(self.mode, RunoutMode::Twice)
+    }
+
+    /// Current second-board length including its shared first-board prefix.
+    #[must_use]
+    pub fn second_board_len(&self) -> usize {
+        usize::from(self.shared_board_len) + self.second_board_suffix.len()
+    }
+
+    /// Materialize the full second board for settlement or event output.
+    pub fn full_second_board(&self, first_board: &BoardCards) -> PokerL1Result<Vec<Card>> {
+        if usize::from(self.shared_board_len) > first_board.len() {
+            return Err(PokerL1Error::Serialization(
+                "Texas RIT shared prefix exceeds first board".into(),
+            ));
+        }
+        let mut board = first_board[..usize::from(self.shared_board_len)].to_vec();
+        board.extend_from_slice(&self.second_board_suffix);
+        Ok(board)
+    }
+
+    /// Validate the canonical single/twice tagged representation.
+    pub fn validate_canonical(&self, first_board: &BoardCards) -> PokerL1Result<()> {
+        self.second_board_suffix
+            .validate_canonical()
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!(
+                    "Texas RIT second-board suffix is non-canonical: {error}"
+                ))
+            })?;
+        match self.mode {
+            RunoutMode::Single => {
+                if self.shared_board_len != 0 || !self.second_board_suffix.is_empty() {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas single runout carries RIT state".into(),
+                    ));
+                }
+            }
+            RunoutMode::Twice => {
+                let shared = usize::from(self.shared_board_len);
+                if shared > 4 || shared > first_board.len() {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas RIT shared prefix is outside the first board".into(),
+                    ));
+                }
+                if shared + self.second_board_suffix.len() > 5 {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas RIT second board exceeds five cards".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -297,15 +566,6 @@ impl Default for RevealTokenState {
 
 // ========== Reconstruct 状态 ==========
 
-/// 单个玩家提交的 reconstruct 输出（镜像 Move `ReconstructPlayerDeck`，table.move:153-156）。
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct ReconstructPlayerDeck {
-    /// 提交者 seat_index。
-    pub seat_index: u8,
-    /// 该玩家重建后的牌组（52 个 ElGamalCiphertext）。
-    pub output_cts: Vec<ElGamalCiphertext>,
-}
-
 /// Reconstruct 状态（镜像 Move `ReconstructState`，table.move:158-164）。
 ///
 /// `phase` 取值见 `constants::RECONSTRUCT_PHASE_*`（与 Move 端逐字节一致）。
@@ -314,20 +574,23 @@ pub struct ReconstructState {
     /// Reconstruct 阶段（RECONSTRUCT_PHASE_NONE/COLLECTING/COMPLETE）。
     pub phase: u8,
     /// 待提交 reconstruct deck 的玩家列表。
-    pub pending_players: Vec<u8>,
+    pub pending_mask: SeatMask,
     /// 随机系数（None = 未设置，使用 ECScalar newtype 以支持 Borsh）。
     pub coefficient: Option<ECScalar>,
-    /// 所有玩家提交的重建牌组。
-    pub player_decks: Vec<ReconstructPlayerDeck>,
+    /// 已验证 contribution 逐次合入 canonical aggregate-key base deck 后的结果。
+    ///
+    /// `None` 表示尚无玩家提交；`Some` 始终恰好包含 52 张密文。这样无论参与者数量
+    /// 是 2 还是 9，hot state 都只保存一副 deck，而不是每位玩家各保存一副 deck。
+    pub accumulated_deck: Option<Vec<ElGamalCiphertext>>,
 }
 
 impl Default for ReconstructState {
     fn default() -> Self {
         Self {
             phase: RECONSTRUCT_PHASE_NONE,
-            pending_players: vec![],
+            pending_mask: 0,
             coefficient: None,
-            player_decks: vec![],
+            accumulated_deck: None,
         }
     }
 }
@@ -372,8 +635,6 @@ impl Default for TimeoutConfig {
 /// 时间戳集合（镜像 Move `Timestamps`，table.move:178-186）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, BorshSerialize, BorshDeserialize)]
 pub struct Timestamps {
-    /// 准备好开始的时间戳（0=未设置）。
-    pub ready_at: u64,
     /// 当前洗牌者开始时间。
     pub shuffle_started_at: u64,
     /// 当前 reveal 阶段开始时间。
@@ -384,23 +645,195 @@ pub struct Timestamps {
     pub reconstruct_started_at: u64,
     /// 摊牌展示结束时间。
     pub showdown_at: u64,
-    /// 一手结束时间。
-    pub hand_complete_at: u64,
 }
 
-// ========== 已解密牌 ==========
+// ========== Canonical hand phase projection ==========
 
-/// 已解密牌（镜像 Move `DecryptedCard`，table.move:194-199）。
+/// Stable tag used by source normalization and the future persisted `HandPhase` union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum HandPhaseTag {
+    /// Waiting for an explicit start-hand command.
+    Waiting = 0,
+    /// One shuffle/remask participant must submit a proof.
+    Shuffling = 1,
+    /// Reveal-token assignments are being collected or materialized.
+    Revealing = 2,
+    /// Reconstruction contributions are being collected.
+    Reconstructing = 3,
+    /// A signed betting action is required.
+    Betting = 4,
+    /// Hole cards are visible and settlement waits for the display deadline.
+    ShowdownDisplay = 5,
+}
+
+/// Canonical tagged projection of the currently flattened schema-v6 phase fields.
+///
+/// Reconstruction and reconstruct-shuffle temporarily suspend the reveal assignments that will
+/// be restarted after the deck is rebuilt; that suspended payload belongs to the same variant and
+/// is not treated as a second simultaneously active phase. Schema v7 will persist this union
+/// directly and remove the flattened compatibility fields.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum HandPhase {
+    /// No hand transition is active.
+    Waiting,
+    /// Active shuffle state, optionally carrying a suspended reveal during reconstruction.
+    Shuffling {
+        /// Betting street that will resume after shuffling.
+        street: u8,
+        /// Canonical shuffle payload.
+        state: ShuffleState,
+        /// Reveal payload suspended while a reconstructed deck is shuffled.
+        suspended_reveal: Option<RevealTokenState>,
+        /// Absolute timeout deadline, or zero while the timer is not armed.
+        deadline_ms: u64,
+    },
+    /// Active reveal-token collection/materialization.
+    Revealing {
+        /// Current betting street.
+        street: u8,
+        /// Canonical reveal payload.
+        state: RevealTokenState,
+        /// Absolute timeout deadline, or zero while the timer is not armed.
+        deadline_ms: u64,
+    },
+    /// Active reconstruct collection with its resume target.
+    Reconstructing {
+        /// Betting street that will resume after reconstruction.
+        street: u8,
+        /// Canonical reconstruct payload.
+        state: ReconstructState,
+        /// Reveal payload suspended until reconstruction and reshuffle finish.
+        suspended_reveal: RevealTokenState,
+        /// Transcript epoch used by reconstruction proofs.
+        epoch_ms: u64,
+        /// Absolute timeout deadline for the reconstruction collection.
+        deadline_ms: u64,
+    },
+    /// Active betting round.
+    Betting {
+        /// Preflop/flop/turn/river discriminator.
+        street: u8,
+        /// Current bet and minimum raise.
+        round: BettingRound,
+        /// Current actor or `NO_SEAT` while deterministic normalization is pending.
+        current_turn: u8,
+        /// Absolute timeout deadline, including any consumed time bank extension.
+        deadline_ms: u64,
+    },
+    /// Canonical showdown-display wait before settlement.
+    ShowdownDisplay {
+        /// Absolute settlement deadline, or zero before the display timer is armed.
+        deadline_ms: u64,
+    },
+}
+
+impl HandPhase {
+    /// Stable union tag used by AIR projections.
+    #[must_use]
+    pub const fn tag(&self) -> HandPhaseTag {
+        match self {
+            Self::Waiting => HandPhaseTag::Waiting,
+            Self::Shuffling { .. } => HandPhaseTag::Shuffling,
+            Self::Revealing { .. } => HandPhaseTag::Revealing,
+            Self::Reconstructing { .. } => HandPhaseTag::Reconstructing,
+            Self::Betting { .. } => HandPhaseTag::Betting,
+            Self::ShowdownDisplay { .. } => HandPhaseTag::ShowdownDisplay,
+        }
+    }
+}
+
+fn canonical_absolute_deadline(
+    started_at: u64,
+    timeout_ms: u64,
+    label: &str,
+) -> PokerL1Result<u64> {
+    if started_at == 0 {
+        return Ok(0);
+    }
+    started_at.checked_add(timeout_ms).ok_or_else(|| {
+        PokerL1Error::Serialization(format!(
+            "Texas {label} deadline overflows u64: started_at={started_at}, timeout_ms={timeout_ms}"
+        ))
+    })
+}
+
+// ========== 解密牌账本 ==========
+
+/// Mutually-exclusive state of one reveal-ledger record.
+///
+/// A record is either a self-contained partial ciphertext that still needs the
+/// owner reveal, or a resolved plaintext waiting for the same normalization
+/// step to materialize it. The enum prevents the old illegal combinations
+/// `(ciphertext = Some, plaintext = Some)` and `(None, None)` at the type level.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum DecryptedCardState {
+    /// Partial ciphertext retained across reconstruct until showdown.
+    Partial {
+        /// Ciphertext after all non-owner reveal layers were removed.
+        ciphertext: ElGamalCiphertext,
+    },
+    /// Canonical plaintext card waiting to be materialized and removed.
+    Plaintext {
+        /// Decrypted point in the protocol's canonical 52-card domain.
+        plaintext: ECPoint,
+    },
+}
+
+/// One authenticated reveal-ledger record.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DecryptedCard {
-    /// 原始加密牌组中的索引。
+    /// Original encrypted deck index (lineage only; not a card identity).
     pub encrypted_card_index: u8,
-    /// 牌主 seat_index（公共牌为 `OWNER_SEAT_PUBLIC` = 255）。
+    /// Owner seat (`OWNER_SEAT_PUBLIC` for community cards).
     pub owner_seat_index: u8,
-    /// 部分解密密文（None = 已完全解密）。
-    pub ciphertext: Option<ElGamalCiphertext>,
-    /// 完全解密明文（None = 仅部分解密，使用 ECPoint newtype 以支持 Borsh）。
-    pub plaintext: Option<ECPoint>,
+    /// Exactly one partial/plaintext payload.
+    pub state: DecryptedCardState,
+}
+
+impl DecryptedCard {
+    /// Construct a partial owner-readable record.
+    #[must_use]
+    pub fn partial(
+        encrypted_card_index: u8,
+        owner_seat_index: u8,
+        ciphertext: ElGamalCiphertext,
+    ) -> Self {
+        Self {
+            encrypted_card_index,
+            owner_seat_index,
+            state: DecryptedCardState::Partial { ciphertext },
+        }
+    }
+
+    /// Construct a resolved plaintext record.
+    #[must_use]
+    pub fn resolved(encrypted_card_index: u8, owner_seat_index: u8, plaintext: ECPoint) -> Self {
+        Self {
+            encrypted_card_index,
+            owner_seat_index,
+            state: DecryptedCardState::Plaintext { plaintext },
+        }
+    }
+
+    /// Borrow the partial ciphertext, if this record is still owner-readable.
+    #[must_use]
+    pub fn ciphertext(&self) -> Option<&ElGamalCiphertext> {
+        match &self.state {
+            DecryptedCardState::Partial { ciphertext } => Some(ciphertext),
+            DecryptedCardState::Plaintext { .. } => None,
+        }
+    }
+
+    /// Borrow the resolved plaintext, if this record is ready to materialize.
+    #[must_use]
+    pub fn plaintext(&self) -> Option<&ECPoint> {
+        match &self.state {
+            DecryptedCardState::Partial { .. } => None,
+            DecryptedCardState::Plaintext { plaintext } => Some(plaintext),
+        }
+    }
 }
 
 // ========== 牌组状态 ==========
@@ -412,8 +845,8 @@ pub struct DeckState {
     pub encrypted: Vec<ElGamalCiphertext>,
     /// 聚合公钥（None = 未初始化，使用 ECPoint newtype 以支持 Borsh）。
     pub aggregated_pk: Option<ECPoint>,
-    /// 52 张明文牌（G1 点，由合约生成；使用 ECPoint newtype 以支持 Borsh）。
-    pub plaintext: Vec<ECPoint>,
+    /// Seats whose public-key encryption layer is still present in the deck lineage.
+    pub contributor_mask: SeatMask,
     /// 已从牌组发出的牌数量。
     pub cards_dealt: u8,
     /// 已解密的合法牌列表。
@@ -425,82 +858,10 @@ impl Default for DeckState {
         Self {
             encrypted: vec![],
             aggregated_pk: None,
-            plaintext: vec![],
+            contributor_mask: 0,
             cards_dealt: 0,
             decrypted_cards: vec![],
         }
-    }
-}
-
-// ========== 桌台配置 ==========
-
-/// 桌台配置（保留 ZK skip 字段以兼容已有序列化状态）。
-///
-/// `zk_skip_*` 只能在 `poker_l1` crate 自身的单元测试构建中生效。
-/// 普通库、集成测试和生产二进制中的 `skip_*()` 始终返回 `false`，
-/// 避免一个可被 state/preimage 携带的运行时开关绕过共识执行的
-/// shuffle / reveal / reconstruct / remask 密码学验证。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct TableConfig {
-    /// 是否在 crate 内单元测试中启用 ZK skip 模式。
-    /// 非 `cfg(test)` 构建会忽略此字段。
-    pub zk_skip_enabled: bool,
-    /// 是否跳过 shuffle proof 验证。
-    pub zk_skip_shuffle: bool,
-    /// 是否跳过 reveal token proof 验证。
-    pub zk_skip_reveal: bool,
-    /// 是否跳过 reconstruct proof 验证。
-    pub zk_skip_reconstruct: bool,
-    /// 是否跳过 remask proof 验证。
-    pub zk_skip_remask: bool,
-}
-
-impl Default for TableConfig {
-    fn default() -> Self {
-        // 保留旧的序列化默认值，供 crate 内单元测试跑通协议流程。
-        // 非 cfg(test) 构建的 skip_*() 无条件返回 false。
-        Self {
-            zk_skip_enabled: true,
-            zk_skip_shuffle: true,
-            zk_skip_reveal: true,
-            zk_skip_reconstruct: true,
-            zk_skip_remask: true,
-        }
-    }
-}
-
-impl TableConfig {
-    /// 测试构建中是否请求跳过某项密码学验证。
-    ///
-    /// `cfg!(test)` 在 crate 内单元测试时为 true；当 `poker_l1` 被生产
-    /// 二进制或其他 crate（包括集成测试）链接时为 false。
-    #[must_use]
-    const fn test_only_skip(&self, requested: bool) -> bool {
-        cfg!(test) && self.zk_skip_enabled && requested
-    }
-
-    /// 是否跳过 shuffle proof 验证。
-    #[must_use]
-    pub const fn skip_shuffle(&self) -> bool {
-        self.test_only_skip(self.zk_skip_shuffle)
-    }
-
-    /// 是否跳过 reveal token proof 验证。
-    #[must_use]
-    pub const fn skip_reveal(&self) -> bool {
-        self.test_only_skip(self.zk_skip_reveal)
-    }
-
-    /// 是否跳过 reconstruct proof 验证。
-    #[must_use]
-    pub const fn skip_reconstruct(&self) -> bool {
-        self.test_only_skip(self.zk_skip_reconstruct)
-    }
-
-    /// 是否跳过 remask proof 验证。
-    #[must_use]
-    pub const fn skip_remask(&self) -> bool {
-        self.test_only_skip(self.zk_skip_remask)
     }
 }
 
@@ -510,7 +871,7 @@ impl TableConfig {
 ///
 /// 这是预编译合约的核心状态对象，borsh 编码后存入 ObjectDb，
 /// ObjectID = `reserved::texas_poker_contract_id()`（`0xFF..02`）。
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TexasPokerTable {
     /// 桌台 ObjectID（保留 `0xFF..02`）。
     pub id: ObjectID,
@@ -534,22 +895,24 @@ pub struct TexasPokerTable {
 
     /// 座位列表（长度 = max_players）。
     pub seats: Vec<Seat>,
+    /// 本轮已经完成行动的座位集合。
+    pub acted_mask: SeatMask,
+    /// 请求在本手结束后离场的座位集合。
+    pub leave_after_hand_mask: SeatMask,
     /// 庄家位（button seat_index）。
     pub button: u8,
 
     /// 当前底池。
     pub pot: u64,
-    /// 边池列表（side pot 分层结果）。
-    pub side_pots: Vec<SidePot>,
     /// 公共牌（最多 5 张：flop 3 + turn 1 + river 1）。
-    pub community_cards: Vec<Card>,
+    pub community_cards: BoardCards,
 
     /// 当前回合状态（ROUND_*，见 constants.rs）。
     pub round_state: u8,
     /// 当前下注轮状态（None = 未在下注阶段）。
     pub betting_round: Option<BettingRound>,
     /// 当前行动玩家 seat_index（None = 无需行动）。
-    pub current_turn: Option<u8>,
+    pub current_turn: u8,
 
     /// 加密牌组状态。
     pub deck_state: DeckState,
@@ -615,9 +978,6 @@ pub struct TexasPokerTable {
     /// Current hand's two-runout state. Empty outside an active RIT hand.
     pub run_it_twice_state: RunItTwiceState,
 
-    /// 桌台配置（ZK skip 等）。
-    pub config: TableConfig,
-
     /// 当前手牌序号。
     ///
     /// 初始为 0；每当一次成功 dispatch 产生 `HandStarted` 事件时递增。
@@ -635,6 +995,77 @@ pub struct TexasPokerTable {
 }
 
 impl TexasPokerTable {
+    fn aggregated_pk_for_contributor_mask(
+        &self,
+        contributor_mask: SeatMask,
+    ) -> PokerL1Result<Option<ECPoint>> {
+        if !seat_mask_is_canonical(contributor_mask, self.max_players) {
+            return Err(PokerL1Error::Serialization(
+                "Texas deck contributor mask contains out-of-range bits".into(),
+            ));
+        }
+        let mut aggregate: Option<ECPoint> = None;
+        for seat_index in 0..self.max_players {
+            if !seat_mask_contains(contributor_mask, seat_index) {
+                continue;
+            }
+            let seat = &self.seats[usize::from(seat_index)];
+            if !seat.is_occupied() || super::utils::g1_is_identity(&seat.pk) {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas deck contributor seat {seat_index} is empty, out, or has identity pk"
+                )));
+            }
+            aggregate = Some(match aggregate {
+                None => seat.pk,
+                Some(current) => ECPoint::from(super::utils::g1_add(&current.0, &seat.pk.0)),
+            });
+        }
+        if aggregate
+            .as_ref()
+            .is_some_and(|point| super::utils::g1_is_identity(&point.0))
+        {
+            return Err(PokerL1Error::Serialization(
+                "Texas non-empty contributor set has identity aggregate pk".into(),
+            ));
+        }
+        Ok(aggregate)
+    }
+
+    /// Derive the aggregate deck key from the canonical contributor lineage.
+    pub fn derived_aggregated_pk(&self) -> PokerL1Result<Option<ECPoint>> {
+        self.aggregated_pk_for_contributor_mask(self.deck_state.contributor_mask)
+    }
+
+    /// Rebuild the runtime aggregate-key cache from the contributor mask.
+    pub fn sync_aggregated_pk(&mut self) -> PokerL1Result<()> {
+        self.deck_state.aggregated_pk = self.derived_aggregated_pk()?;
+        Ok(())
+    }
+
+    /// Add a seat to the deck-key lineage and refresh the aggregate cache.
+    pub fn add_deck_contributor(&mut self, seat_index: u8) -> PokerL1Result<()> {
+        if seat_index >= self.max_players {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas contributor seat {seat_index} is out of range"
+            )));
+        }
+        let contributor_mask = self.deck_state.contributor_mask | seat_mask_bit(seat_index);
+        let aggregated_pk = self.aggregated_pk_for_contributor_mask(contributor_mask)?;
+        self.deck_state.contributor_mask = contributor_mask;
+        self.deck_state.aggregated_pk = aggregated_pk;
+        Ok(())
+    }
+
+    /// Remove a seat from the deck-key lineage and refresh the aggregate cache.
+    pub fn remove_deck_contributor(&mut self, seat_index: u8) -> PokerL1Result<()> {
+        let mut contributor_mask = self.deck_state.contributor_mask;
+        seat_mask_remove(&mut contributor_mask, seat_index);
+        let aggregated_pk = self.aggregated_pk_for_contributor_mask(contributor_mask)?;
+        self.deck_state.contributor_mask = contributor_mask;
+        self.deck_state.aggregated_pk = aggregated_pk;
+        Ok(())
+    }
+
     /// 构造新桌台（空座位，WAITING 状态）。
     #[must_use]
     pub fn new(
@@ -663,13 +1094,14 @@ impl TexasPokerTable {
             small_blind,
             big_blind,
             seats,
+            acted_mask: 0,
+            leave_after_hand_mask: 0,
             button: 0,
             pot: 0,
-            side_pots: vec![],
-            community_cards: vec![],
+            community_cards: BoardCards::empty(),
             round_state: super::constants::ROUND_WAITING,
             betting_round: None,
-            current_turn: None,
+            current_turn: NO_SEAT,
             deck_state: DeckState::default(),
             shuffle_state: ShuffleState::default(),
             reveal_token_state: RevealTokenState::default(),
@@ -687,7 +1119,6 @@ impl TexasPokerTable {
             rake_collected: 0,
             rit_mode: super::constants::RIT_MODE_DISABLED,
             run_it_twice_state: RunItTwiceState::default(),
-            config: TableConfig::default(),
             hand_id: 0,
             call_seq: 0,
             version: 0,
@@ -699,7 +1130,7 @@ impl TexasPokerTable {
     pub fn active_count(&self) -> u8 {
         self.seats
             .iter()
-            .filter(|s| s.is_occupied() && !s.folded)
+            .filter(|s| s.is_occupied() && !s.is_folded())
             .count() as u8
     }
 
@@ -727,6 +1158,152 @@ impl TexasPokerTable {
             .map(|i| i as u8)
     }
 
+    /// Whether `seat_index` has completed its current betting action.
+    #[must_use]
+    pub fn seat_acted_this_round(&self, seat_index: u8) -> bool {
+        seat_mask_contains(self.acted_mask, seat_index)
+    }
+
+    /// Set or clear the current-round acted bit for one seat.
+    pub fn set_seat_acted_this_round(&mut self, seat_index: u8, value: bool) {
+        if value {
+            debug_assert!(seat_index < self.max_players);
+            self.acted_mask |= seat_mask_bit(seat_index);
+        } else {
+            seat_mask_remove(&mut self.acted_mask, seat_index);
+        }
+    }
+
+    /// Whether `seat_index` requested removal after the current hand.
+    #[must_use]
+    pub fn seat_wants_leave(&self, seat_index: u8) -> bool {
+        seat_mask_contains(self.leave_after_hand_mask, seat_index)
+    }
+
+    /// Set or clear the leave-after-hand bit for one seat.
+    pub fn set_seat_wants_leave(&mut self, seat_index: u8, value: bool) {
+        if value {
+            debug_assert!(seat_index < self.max_players);
+            self.leave_after_hand_mask |= seat_mask_bit(seat_index);
+        } else {
+            seat_mask_remove(&mut self.leave_after_hand_mask, seat_index);
+        }
+    }
+
+    /// Decode the canonical current-turn sentinel.
+    #[must_use]
+    pub fn current_turn_option(&self) -> Option<u8> {
+        (self.current_turn != NO_SEAT).then_some(self.current_turn)
+    }
+
+    /// Project schema-v6 flattened fields into one fail-closed canonical hand phase.
+    pub fn canonical_hand_phase(&self) -> PokerL1Result<HandPhase> {
+        let reconstruct_active = self.reconstruct_state.phase != RECONSTRUCT_PHASE_NONE;
+        let shuffle_active = self.shuffle_state.phase != SHUFFLE_PHASE_NONE;
+        let reveal_active = self.reveal_token_state.reveal_phase != REVEAL_PHASE_NONE;
+        let betting_active = self.betting_round.is_some();
+
+        if reconstruct_active {
+            if shuffle_active || betting_active || !reveal_active {
+                return Err(PokerL1Error::Serialization(
+                    "Texas reconstruct phase has an invalid active-phase combination".into(),
+                ));
+            }
+            return Ok(HandPhase::Reconstructing {
+                street: self.round_state,
+                state: self.reconstruct_state.clone(),
+                suspended_reveal: self.reveal_token_state.clone(),
+                epoch_ms: self.timestamps.reconstruct_started_at,
+                deadline_ms: canonical_absolute_deadline(
+                    self.timestamps.reconstruct_started_at,
+                    self.timeout_config.reconstruct_timeout_ms,
+                    "reconstruct",
+                )?,
+            });
+        }
+
+        if shuffle_active {
+            if betting_active
+                || (reveal_active && self.shuffle_state.phase != SHUFFLE_PHASE_RECONSTRUCT)
+            {
+                return Err(PokerL1Error::Serialization(
+                    "Texas shuffle phase has an invalid active-phase combination".into(),
+                ));
+            }
+            let expected_shuffler = self.shuffle_state.derived_current_shuffler();
+            if self.shuffle_state.current_shuffler != expected_shuffler {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas persisted current shuffler {} is not canonical; expected {}",
+                    self.shuffle_state.current_shuffler, expected_shuffler
+                )));
+            }
+            return Ok(HandPhase::Shuffling {
+                street: self.round_state,
+                state: self.shuffle_state.clone(),
+                suspended_reveal: reveal_active.then(|| self.reveal_token_state.clone()),
+                deadline_ms: canonical_absolute_deadline(
+                    self.timestamps.shuffle_started_at,
+                    self.timeout_config.shuffle_timeout_ms,
+                    "shuffle",
+                )?,
+            });
+        }
+
+        if reveal_active {
+            if betting_active {
+                return Err(PokerL1Error::Serialization(
+                    "Texas reveal and betting phases cannot both be active".into(),
+                ));
+            }
+            return Ok(HandPhase::Revealing {
+                street: self.round_state,
+                state: self.reveal_token_state.clone(),
+                deadline_ms: canonical_absolute_deadline(
+                    self.timestamps.reveal_started_at,
+                    self.timeout_config.reveal_timeout_ms,
+                    "reveal",
+                )?,
+            });
+        }
+
+        if let Some(round) = self.betting_round {
+            if !matches!(
+                self.round_state,
+                ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER
+            ) {
+                return Err(PokerL1Error::Serialization(
+                    "Texas betting phase is outside a live street".into(),
+                ));
+            }
+            return Ok(HandPhase::Betting {
+                street: self.round_state,
+                round,
+                current_turn: self.current_turn,
+                deadline_ms: canonical_absolute_deadline(
+                    self.timestamps.betting_started_at,
+                    self.timeout_config.betting_timeout_ms,
+                    "betting",
+                )?,
+            });
+        }
+
+        match self.round_state {
+            ROUND_WAITING => Ok(HandPhase::Waiting),
+            ROUND_SHOWDOWN => Ok(HandPhase::ShowdownDisplay {
+                deadline_ms: self.timestamps.showdown_at,
+            }),
+            ROUND_PREFLOP | ROUND_FLOP | ROUND_TURN | ROUND_RIVER => {
+                Err(PokerL1Error::Serialization(format!(
+                    "Texas live street {} has no active phase",
+                    self.round_state
+                )))
+            }
+            round => Err(PokerL1Error::Serialization(format!(
+                "Texas table contains unknown round_state {round}"
+            ))),
+        }
+    }
+
     /// Reject a table encoded for a different persisted state schema.
     pub fn validate_state_schema(&self) -> PokerL1Result<()> {
         if self.state_schema_version != super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
@@ -735,6 +1312,175 @@ impl TexasPokerTable {
                 self.state_schema_version,
                 super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION
             )));
+        }
+        if !(2..=MAX_SEATS).contains(&self.max_players)
+            || self.seats.len() != usize::from(self.max_players)
+        {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas seat layout mismatch: max_players={}, seats={}",
+                self.max_players,
+                self.seats.len()
+            )));
+        }
+        if !seat_mask_is_canonical(self.acted_mask, self.max_players)
+            || !seat_mask_is_canonical(self.leave_after_hand_mask, self.max_players)
+        {
+            return Err(PokerL1Error::Serialization(
+                "Texas table contains out-of-range seat flag bits".into(),
+            ));
+        }
+        if self.current_turn != NO_SEAT && self.current_turn >= self.max_players {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas current_turn {} is outside max_players {}",
+                self.current_turn, self.max_players
+            )));
+        }
+        for (seat_index, seat) in self.seats.iter().enumerate() {
+            seat.validate_canonical()?;
+            if seat.status == SeatStatus::Empty
+                && (seat_mask_contains(self.acted_mask, seat_index as u8)
+                    || seat_mask_contains(self.leave_after_hand_mask, seat_index as u8))
+            {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas empty seat {seat_index} contains live table flags"
+                )));
+            }
+        }
+        let derived_aggregate = self.derived_aggregated_pk()?;
+        if self.deck_state.aggregated_pk != derived_aggregate {
+            return Err(PokerL1Error::Serialization(
+                "Texas cached aggregate pk does not match contributor mask".into(),
+            ));
+        }
+        self.community_cards.validate_canonical().map_err(|error| {
+            PokerL1Error::Serialization(format!("Texas first board is non-canonical: {error}"))
+        })?;
+        self.run_it_twice_state
+            .validate_canonical(&self.community_cards)?;
+        let mut seen_cards = [false; 52];
+        for card in self
+            .community_cards
+            .iter()
+            .chain(self.run_it_twice_state.second_board_suffix.iter())
+            .chain(self.seats.iter().flat_map(|seat| seat.hand.iter()))
+        {
+            let card_id = usize::from(card.to_index());
+            if card_id >= seen_cards.len() || seen_cards[card_id] {
+                return Err(PokerL1Error::Serialization(
+                    "Texas table contains an invalid or duplicate materialized card".into(),
+                ));
+            }
+            seen_cards[card_id] = true;
+        }
+        for (record_index, record) in self.deck_state.decrypted_cards.iter().enumerate() {
+            if usize::from(record.encrypted_card_index) >= 52 {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas reveal ledger record {record_index} has out-of-range deck index {}",
+                    record.encrypted_card_index
+                )));
+            }
+            if record.owner_seat_index != OWNER_SEAT_PUBLIC
+                && record.owner_seat_index >= self.max_players
+            {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas reveal ledger record {record_index} has out-of-range owner {}",
+                    record.owner_seat_index
+                )));
+            }
+            if self.deck_state.decrypted_cards[..record_index]
+                .iter()
+                .any(|prior| {
+                    prior.encrypted_card_index == record.encrypted_card_index
+                        && prior.owner_seat_index == record.owner_seat_index
+                })
+            {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas reveal ledger contains duplicate lineage owner={} deck_index={}",
+                    record.owner_seat_index, record.encrypted_card_index
+                )));
+            }
+            match &record.state {
+                DecryptedCardState::Partial { .. } => {
+                    if record.owner_seat_index == OWNER_SEAT_PUBLIC {
+                        return Err(PokerL1Error::Serialization(
+                            "Texas public reveal ledger record cannot remain partial".into(),
+                        ));
+                    }
+                }
+                DecryptedCardState::Plaintext { .. } => {
+                    let matching_ready =
+                        self.reveal_token_state
+                            .assignments
+                            .iter()
+                            .any(|assignment| {
+                                if assignment.encrypted_card_index != record.encrypted_card_index
+                                    || !matches!(
+                                        assignment.progress,
+                                        RevealProgress::ReadyCard { .. }
+                                    )
+                                {
+                                    return false;
+                                }
+                                match assignment.target {
+                                    RevealTarget::Hole { seat_index, .. } => {
+                                        record.owner_seat_index == seat_index
+                                    }
+                                    RevealTarget::Board { .. } => {
+                                        record.owner_seat_index == OWNER_SEAT_PUBLIC
+                                    }
+                                }
+                            });
+                    if !matching_ready {
+                        return Err(PokerL1Error::Serialization(format!(
+                            "Texas plaintext reveal ledger record {record_index} has no matching ready assignment"
+                        )));
+                    }
+                }
+            }
+        }
+        let validate_mask = |mask: SeatMask, label: &str| -> PokerL1Result<()> {
+            if seat_mask_is_canonical(mask, self.max_players) {
+                Ok(())
+            } else {
+                Err(PokerL1Error::Serialization(format!(
+                    "Texas {label} contains out-of-range seat bits"
+                )))
+            }
+        };
+        validate_mask(self.shuffle_state.pending_mask, "shuffle pending mask")?;
+        validate_mask(self.shuffle_state.completed_mask, "shuffle completed mask")?;
+        if self.shuffle_state.pending_mask & self.shuffle_state.completed_mask != 0 {
+            return Err(PokerL1Error::Serialization(
+                "Texas shuffle pending/completed masks overlap".into(),
+            ));
+        }
+        if self.shuffle_state.current_shuffler != NO_SEAT
+            && !seat_mask_contains(
+                self.shuffle_state.pending_mask,
+                self.shuffle_state.current_shuffler,
+            )
+        {
+            return Err(PokerL1Error::Serialization(
+                "Texas current shuffler is not pending".into(),
+            ));
+        }
+        for assignment in &self.reveal_token_state.assignments {
+            validate_mask(assignment.pending_mask(), "reveal pending mask")?;
+        }
+        validate_mask(
+            self.reconstruct_state.pending_mask,
+            "reconstruct pending mask",
+        )?;
+        match &self.reconstruct_state.accumulated_deck {
+            Some(deck) => {
+                if deck.len() != 52 {
+                    return Err(PokerL1Error::Serialization(format!(
+                        "Texas reconstruct accumulator has {} cards, expected 52",
+                        deck.len()
+                    )));
+                }
+            }
+            None => {}
         }
         Ok(())
     }
@@ -769,6 +1515,44 @@ mod tests {
         assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
         assert_eq!(table.active_count(), 0);
         assert_eq!(table.occupied_count(), 0);
+        assert_eq!(
+            table.canonical_hand_phase().unwrap().tag(),
+            HandPhaseTag::Waiting
+        );
+    }
+
+    #[test]
+    fn canonical_hand_phase_rejects_reveal_and_betting_overlap() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+        table.round_state = ROUND_FLOP;
+        table.reveal_token_state.reveal_phase = super::super::constants::REVEAL_PHASE_FLOP;
+        table.betting_round = Some(BettingRound::new(100, 0));
+
+        assert!(table.canonical_hand_phase().is_err());
+    }
+
+    #[test]
+    fn canonical_hand_phase_carries_suspended_reveal_during_reconstruct() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+        table.round_state = ROUND_TURN;
+        table.reveal_token_state.reveal_phase = super::super::constants::REVEAL_PHASE_TURN;
+        table.reconstruct_state.phase = super::super::constants::RECONSTRUCT_PHASE_COLLECTING;
+
+        let phase = table.canonical_hand_phase().unwrap();
+        assert_eq!(phase.tag(), HandPhaseTag::Reconstructing);
+        assert!(matches!(
+            phase,
+            HandPhase::Reconstructing {
+                street: ROUND_TURN,
+                suspended_reveal: RevealTokenState {
+                    reveal_phase: super::super::constants::REVEAL_PHASE_TURN,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -812,21 +1596,19 @@ mod tests {
         let mut seat = Seat::empty();
         seat.player = [0xAB; 20];
         seat.stack = 1000;
+        seat.set_status(SeatStatus::Active);
         assert_eq!(seat.status(), SeatStatus::Active);
 
-        seat.folded = true;
+        seat.set_status(SeatStatus::Folded);
         assert_eq!(seat.status(), SeatStatus::Folded);
 
-        seat.folded = false;
-        seat.all_in = true;
+        seat.set_status(SeatStatus::AllIn);
         assert_eq!(seat.status(), SeatStatus::AllIn);
 
-        seat.all_in = false;
-        seat.is_waiting = true;
+        seat.set_status(SeatStatus::Waiting);
         assert_eq!(seat.status(), SeatStatus::Waiting);
 
-        seat.is_waiting = false;
-        seat.left_during_hand = true;
+        seat.set_status(SeatStatus::Out);
         assert_eq!(seat.status(), SeatStatus::Out);
     }
 
@@ -859,9 +1641,12 @@ mod tests {
         table.seats[0].player = [0x01; 20];
         table.seats[1].player = [0x02; 20];
         table.seats[2].player = [0x03; 20];
+        table.seats[0].set_status(SeatStatus::Active);
+        table.seats[1].set_status(SeatStatus::Active);
+        table.seats[2].set_status(SeatStatus::Active);
         assert_eq!(table.active_count(), 3);
 
-        table.seats[1].folded = true;
+        table.seats[1].set_status(SeatStatus::Folded);
         assert_eq!(table.active_count(), 2);
     }
 
@@ -876,9 +1661,10 @@ mod tests {
             100,
         );
         table.seats[0].player = [0xAB; 20];
+        table.seats[0].set_status(SeatStatus::Active);
         table.seats[0].stack = 1_000_000;
         table.pot = 200;
-        table.community_cards.push(Card::new(0, 14)); // A♠
+        table.community_cards.try_push(Card::new(0, 14)).unwrap(); // A♠
         table.version = 42;
 
         let bytes = borsh::to_vec(&table).unwrap();
@@ -896,25 +1682,6 @@ mod tests {
     }
 
     #[test]
-    fn test_table_config_skip_flags() {
-        let cfg = TableConfig::default();
-        assert!(cfg.skip_shuffle());
-        assert!(cfg.skip_reveal());
-        assert!(cfg.skip_reconstruct());
-        assert!(cfg.skip_remask());
-
-        let strict = TableConfig {
-            zk_skip_enabled: false,
-            zk_skip_shuffle: true,
-            zk_skip_reveal: true,
-            zk_skip_reconstruct: true,
-            zk_skip_remask: true,
-        };
-        assert!(!strict.skip_shuffle());
-        assert!(!strict.skip_reveal());
-    }
-
-    #[test]
     fn test_table_bump_version() {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
@@ -929,9 +1696,9 @@ mod tests {
     fn test_shuffle_state_default() {
         let state = ShuffleState::default();
         assert_eq!(state.phase, SHUFFLE_PHASE_NONE);
-        assert!(state.current_shuffler.is_none());
-        assert!(state.pending_players.is_empty());
-        assert!(state.completed_players.is_empty());
+        assert_eq!(state.current_shuffler, NO_SEAT);
+        assert_eq!(state.pending_mask, 0);
+        assert_eq!(state.completed_mask, 0);
     }
 
     #[test]
@@ -945,9 +1712,9 @@ mod tests {
     fn test_reconstruct_state_default() {
         let state = ReconstructState::default();
         assert_eq!(state.phase, RECONSTRUCT_PHASE_NONE);
-        assert!(state.pending_players.is_empty());
+        assert_eq!(state.pending_mask, 0);
         assert!(state.coefficient.is_none());
-        assert!(state.player_decks.is_empty());
+        assert!(state.accumulated_deck.is_none());
     }
 
     #[test]
@@ -967,19 +1734,13 @@ mod tests {
         let seat = Seat {
             player: [0xCD; 20],
             stack: 5_000,
-            hand: vec![Card::new(0, 14), Card::new(1, 13)],
+            hand: [Card::new(0, 14), Card::new(1, 13)].into(),
             bet: 100,
             total_bet: 250,
-            folded: false,
-            all_in: false,
-            acted_this_round: true,
-            is_waiting: false,
-            left_during_hand: false,
+            status: SeatStatus::Active,
             pk: ECPoint(G1Projective::identity()),
-            refunded: false,
             pending_addon: 0,
             time_bank_ms: super::super::constants::DEFAULT_TIME_BANK_MS,
-            want_leave: false,
         };
         let bytes = borsh::to_vec(&seat).unwrap();
         let recovered: Seat = borsh::from_slice(&bytes).unwrap();

@@ -12,7 +12,7 @@
 //! 3. 提交 ReconstructProofV3；完整 statement 必须匹配 aggregate/owner key、固定
 //!    `init_deck` 明文点、重构 epoch，以及 pre-state 中该 seat 的上一轮未解手牌密文
 //! 4. 状态变更：
-//!    - `reconstruct_state.player_decks[seat_index] = contributions`
+//!    - verified contributions are folded into one 52-card streaming accumulator
 //!    - 若所有玩家都已提交，调用 `rebuild_deck_from_reconstruct_deck`
 //!    - 进入 settle 阶段
 //!    - `version += 1`
@@ -39,14 +39,12 @@ pub mod cols {
     pub const INPUT_SEAT_INDEX: usize = COMMON_NUM_COLUMNS + 0;
     /// `INPUT_RECONSTRUCT_PHASE` 列。
     pub const INPUT_RECONSTRUCT_PHASE: usize = COMMON_NUM_COLUMNS + 1;
-    /// `OUTPUT_SUBMITTED_COUNT` 列。
-    pub const OUTPUT_SUBMITTED_COUNT: usize = COMMON_NUM_COLUMNS + 2;
     /// Precompile selector column.
-    pub const PRECOMPILE_ID: usize = COMMON_NUM_COLUMNS + 3;
+    pub const PRECOMPILE_ID: usize = COMMON_NUM_COLUMNS + 2;
     /// Canonical request ABI version column.
-    pub const PRECOMPILE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 4;
+    pub const PRECOMPILE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 3;
     /// Full request digest columns.
-    pub const REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 5;
+    pub const REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 4;
     /// Full verifier receipt digest columns.
     pub const RECEIPT_DIGEST_BASE: usize = REQUEST_DIGEST_BASE + super::DIGEST_LIMBS;
     /// `submit_reconstruct_deck` AIR 总列数。
@@ -109,7 +107,6 @@ impl FrameworkEval for SubmitReconstructDeckAir {
 
         let input_seat_index = eval.next_trace_mask();
         let input_reconstruct_phase = eval.next_trace_mask();
-        let _output_submitted_count = eval.next_trace_mask();
         let precompile_id = eval.next_trace_mask();
         let precompile_abi_version = eval.next_trace_mask();
         let request_digest: Vec<_> = (0..DIGEST_LIMBS).map(|_| eval.next_trace_mask()).collect();
@@ -164,8 +161,6 @@ pub struct SubmitReconstructDeckRow {
     pub input_seat_index: M31,
     /// `INPUT_RECONSTRUCT_PHASE`。
     pub input_reconstruct_phase: M31,
-    /// `OUTPUT_SUBMITTED_COUNT`。
-    pub output_submitted_count: M31,
     /// Precompile selector.
     pub precompile_id: M31,
     /// Canonical request ABI version.
@@ -188,7 +183,6 @@ impl SubmitReconstructDeckRow {
         call_seq: u32,
         pre_version: u64,
         post_version: u64,
-        post_submitted_count: u8,
     ) -> Self {
         Self {
             common: CommonRow::active(
@@ -210,7 +204,6 @@ impl SubmitReconstructDeckRow {
             ),
             input_seat_index: u8_to_m31(input.seat_index),
             input_reconstruct_phase: u8_to_m31(input.reconstruct_phase),
-            output_submitted_count: u8_to_m31(post_submitted_count),
             precompile_id: u8_to_m31(input.precompile.precompile_id),
             precompile_abi_version: u8_to_m31(input.precompile.abi_version),
             request_digest: input.precompile.request_digest,
@@ -225,7 +218,6 @@ impl SubmitReconstructDeckRow {
             common: CommonRow::padding(),
             input_seat_index: ZERO,
             input_reconstruct_phase: ZERO,
-            output_submitted_count: ZERO,
             precompile_id: ZERO,
             precompile_abi_version: ZERO,
             request_digest: [ZERO; DIGEST_LIMBS],
@@ -239,7 +231,6 @@ impl SubmitReconstructDeckRow {
         let mut v = self.common.to_vec();
         v.push(self.input_seat_index);
         v.push(self.input_reconstruct_phase);
-        v.push(self.output_submitted_count);
         v.push(self.precompile_id);
         v.push(self.precompile_abi_version);
         v.extend_from_slice(&self.request_digest);

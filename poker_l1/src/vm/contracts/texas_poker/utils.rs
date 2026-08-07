@@ -37,6 +37,16 @@ use poker_protocol::zk_shuffle::transcript_ext::{
 use crate::crypto_precompiles::bls::BLS_G1_DST;
 use crate::error::{PokerL1Error, PokerL1Result};
 
+/// Whether crate-internal unit tests may bypass expensive Mental Poker verification.
+///
+/// This is deliberately a compile-time property rather than persisted table state. Integration
+/// tests and every production build link `poker_l1` without `cfg(test)`, so they always return
+/// `false` and execute the real verifier.
+#[must_use]
+pub const fn test_only_crypto_skip() -> bool {
+    cfg!(test)
+}
+
 // ========== 常量 ==========
 
 /// G1 compressed bytes 长度（48 字节）。
@@ -114,7 +124,7 @@ pub fn reconstruction_v3_user_readable_cards(
         .decrypted_cards
         .iter()
         .filter(|card| card.owner_seat_index == seat_index)
-        .filter_map(|card| card.ciphertext.clone())
+        .filter_map(|card| card.ciphertext().cloned())
         .collect()
 }
 
@@ -154,16 +164,17 @@ pub fn reconstruction_v3_prior_state_digest(
     material.push(seat_index);
     material.extend_from_slice(&table.timestamps.reconstruct_started_at.to_le_bytes());
     material.extend_from_slice(&aggregate_pk.0.to_compressed());
-    material.extend_from_slice(&(table.deck_state.plaintext.len() as u32).to_le_bytes());
-    for card in &table.deck_state.plaintext {
-        material.extend_from_slice(&card.0.to_compressed());
+    let plaintext_cards = generate_plaintext_cards();
+    material.extend_from_slice(&(plaintext_cards.len() as u32).to_le_bytes());
+    for card in &plaintext_cards {
+        material.extend_from_slice(&card.to_compressed());
     }
 
     let readable_records = table
         .deck_state
         .decrypted_cards
         .iter()
-        .filter(|card| card.owner_seat_index == seat_index && card.ciphertext.is_some())
+        .filter(|card| card.owner_seat_index == seat_index && card.ciphertext().is_some())
         .collect::<Vec<_>>();
     if readable_records.is_empty() {
         return Err(PokerL1Error::Serialization(
@@ -175,8 +186,7 @@ pub fn reconstruction_v3_prior_state_digest(
         material.push(card.encrypted_card_index);
         material.push(card.owner_seat_index);
         let ciphertext = card
-            .ciphertext
-            .as_ref()
+            .ciphertext()
             .expect("filter requires an owner-readable ciphertext");
         material.extend_from_slice(&ciphertext.c1.to_compressed());
         material.extend_from_slice(&ciphertext.c2.to_compressed());

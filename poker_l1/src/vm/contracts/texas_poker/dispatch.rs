@@ -35,10 +35,10 @@ use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 
-use super::constants::{FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN};
+use super::constants::FOLD_REASON_FORCE_ADMIN;
 use super::events::TexasPokerEvent;
 use super::state_machine;
-use super::types::TexasPokerTable;
+use super::types::{SeatStatus, TexasPokerTable};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
@@ -229,6 +229,156 @@ pub mod selectors {
             request_leave_after_hand(),
             fold_with_proof(),
         ]
+    }
+}
+
+/// Stable canonical command tag shared by source dispatch and heterogeneous method batches.
+///
+/// Legacy selectors are only wire-level aliases. Once decoded, all routing and proof metadata
+/// use this enum so selector order or spelling cannot silently change the method discriminant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+#[allow(missing_docs)]
+pub enum CanonicalCommand {
+    CreateTable = 0,
+    JoinTable = 1,
+    LeaveTable = 2,
+    StartHand = 3,
+    Tick = 4,
+    ResetForNextHand = 5,
+    Fold = 6,
+    Check = 7,
+    Call = 8,
+    Raise = 9,
+    AutoFold = 10,
+    ForceFold = 11,
+    KickPlayer = 12,
+    Addon = 13,
+    Rebuy = 14,
+    JoinAndShuffle = 15,
+    LeaveWithProof = 16,
+    SubmitShuffleV2 = 17,
+    SubmitPlayerRevealTokens = 18,
+    SubmitReconstructDeck = 19,
+    Bet = 20,
+    RequestLeaveAfterHand = 21,
+    FoldWithProof = 22,
+}
+
+/// Narrow top-level tag used by heterogeneous method batches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CanonicalCommandFamily {
+    /// Table creation and immutable initialization.
+    Create = 0,
+    /// Seat membership and leave-policy changes.
+    Seat = 1,
+    /// Checked chip custody updates.
+    Funds = 2,
+    /// Ordinary betting actions.
+    Action = 3,
+    /// Mental Poker proof-bearing operations.
+    Crypto = 4,
+    /// Hand start, deadline consumption and governance reset.
+    Lifecycle = 5,
+}
+
+/// Two-level method-batch discriminator. Wire selectors never enter the proof row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalBatchTag {
+    /// Broad command family selecting the tagged method constraints.
+    pub family: CanonicalCommandFamily,
+    /// Family-local canonical operation tag.
+    pub subtag: u8,
+}
+
+impl CanonicalCommand {
+    /// Decode a legacy method selector into its stable command tag.
+    #[must_use]
+    pub fn from_selector(selector: &[u8; 32]) -> Option<Self> {
+        Some(if selector == &selectors::create_table() {
+            Self::CreateTable
+        } else if selector == &selectors::join_table() {
+            Self::JoinTable
+        } else if selector == &selectors::leave_table() {
+            Self::LeaveTable
+        } else if selector == &selectors::start_hand() {
+            Self::StartHand
+        } else if selector == &selectors::tick() {
+            Self::Tick
+        } else if selector == &selectors::reset_for_next_hand() {
+            Self::ResetForNextHand
+        } else if selector == &selectors::fold() {
+            Self::Fold
+        } else if selector == &selectors::check() {
+            Self::Check
+        } else if selector == &selectors::call() {
+            Self::Call
+        } else if selector == &selectors::raise() {
+            Self::Raise
+        } else if selector == &selectors::auto_fold() {
+            Self::AutoFold
+        } else if selector == &selectors::force_fold() {
+            Self::ForceFold
+        } else if selector == &selectors::kick_player() {
+            Self::KickPlayer
+        } else if selector == &selectors::addon() {
+            Self::Addon
+        } else if selector == &selectors::rebuy() {
+            Self::Rebuy
+        } else if selector == &selectors::join_and_shuffle() {
+            Self::JoinAndShuffle
+        } else if selector == &selectors::leave_with_proof() {
+            Self::LeaveWithProof
+        } else if selector == &selectors::submit_shuffle_v2() {
+            Self::SubmitShuffleV2
+        } else if selector == &selectors::submit_player_reveal_tokens() {
+            Self::SubmitPlayerRevealTokens
+        } else if selector == &selectors::submit_reconstruct_deck() {
+            Self::SubmitReconstructDeck
+        } else if selector == &selectors::bet() {
+            Self::Bet
+        } else if selector == &selectors::request_leave_after_hand() {
+            Self::RequestLeaveAfterHand
+        } else if selector == &selectors::fold_with_proof() {
+            Self::FoldWithProof
+        } else {
+            return None;
+        })
+    }
+
+    /// Stable method-batch tag.
+    #[must_use]
+    pub const fn method_tag(self) -> u8 {
+        self as u8
+    }
+
+    /// Collapse compatibility selectors onto the narrow command family/subtag used by batching.
+    #[must_use]
+    pub const fn batch_tag(self) -> CanonicalBatchTag {
+        use CanonicalCommandFamily::{Action, Create, Crypto, Funds, Lifecycle, Seat};
+        let (family, subtag) = match self {
+            Self::CreateTable => (Create, 0),
+            Self::JoinTable => (Seat, 0),
+            Self::LeaveTable => (Seat, 1),
+            Self::RequestLeaveAfterHand => (Seat, 2),
+            Self::KickPlayer => (Seat, 3),
+            Self::Addon => (Funds, 0),
+            Self::Rebuy => (Funds, 1),
+            Self::Fold | Self::ForceFold => (Action, 0),
+            Self::Check | Self::Call => (Action, 1),
+            Self::Raise | Self::Bet => (Action, 2),
+            Self::JoinAndShuffle => (Crypto, 0),
+            Self::LeaveWithProof => (Crypto, 1),
+            Self::SubmitShuffleV2 => (Crypto, 2),
+            Self::SubmitPlayerRevealTokens => (Crypto, 3),
+            Self::SubmitReconstructDeck => (Crypto, 4),
+            Self::FoldWithProof => (Crypto, 5),
+            Self::StartHand => (Lifecycle, 0),
+            Self::Tick | Self::AutoFold => (Lifecycle, 1),
+            Self::ResetForNextHand => (Lifecycle, 2),
+        };
+        CanonicalBatchTag { family, subtag }
     }
 }
 
@@ -474,65 +624,59 @@ pub fn dispatch(
     // clone 成本可接受（TexasPokerTable ~KB 级，且 prove_task 是异步消费的离线数据）。
     let pre_table = table.clone();
     let mut events: Vec<TexasPokerEvent> = Vec::new();
-    let result = match selector {
-        s if s == &selectors::create_table() => {
-            dispatch_create_table(context, table, args, &mut events)
-        }
-        s if s == &selectors::join_and_shuffle() => {
+    let command =
+        CanonicalCommand::from_selector(selector).ok_or(PokerL1Error::UnknownContractMethod {
+            selector: *selector,
+        })?;
+    let result = match command {
+        CanonicalCommand::CreateTable => dispatch_create_table(context, table, args, &mut events),
+        CanonicalCommand::JoinAndShuffle => {
             dispatch_join_and_shuffle(context, table, args, &mut events)
         }
-        s if s == &selectors::leave_with_proof() => {
+        CanonicalCommand::LeaveWithProof => {
             dispatch_leave_with_proof(context, table, args, &mut events)
         }
-        s if s == &selectors::join_table() => {
-            dispatch_join_table(context, table, args, &mut events)
-        }
-        s if s == &selectors::leave_table() => {
-            dispatch_leave_table(context, table, args, &mut events)
-        }
-        s if s == &selectors::start_hand() => {
-            dispatch_start_hand(context, table, args, &mut events)
-        }
-        s if s == &selectors::tick() => dispatch_tick(context, table, args, &mut events),
-        s if s == &selectors::auto_fold() => dispatch_auto_fold(context, table, args, &mut events),
-        s if s == &selectors::force_fold() => {
-            dispatch_force_fold(context, table, args, &mut events)
-        }
-        s if s == &selectors::kick_player() => {
-            dispatch_kick_player(context, table, args, &mut events)
-        }
-        s if s == &selectors::submit_shuffle_v2() => {
+        CanonicalCommand::JoinTable => dispatch_join_table(context, table, args, &mut events),
+        CanonicalCommand::LeaveTable => dispatch_leave_table(context, table, args, &mut events),
+        CanonicalCommand::StartHand => dispatch_start_hand(context, table, args, &mut events),
+        CanonicalCommand::Tick => dispatch_tick(context, table, args, &mut events),
+        CanonicalCommand::AutoFold => dispatch_auto_fold(context, table, args, &mut events),
+        CanonicalCommand::ForceFold => dispatch_force_fold(context, table, args, &mut events),
+        CanonicalCommand::KickPlayer => dispatch_kick_player(context, table, args, &mut events),
+        CanonicalCommand::SubmitShuffleV2 => {
             dispatch_submit_shuffle_v2(context, table, args, &mut events)
         }
-        s if s == &selectors::submit_player_reveal_tokens() => {
+        CanonicalCommand::SubmitPlayerRevealTokens => {
             dispatch_submit_player_reveal_tokens(context, table, args, &mut events)
         }
-        s if s == &selectors::submit_reconstruct_deck() => {
+        CanonicalCommand::SubmitReconstructDeck => {
             dispatch_submit_reconstruct_deck(context, table, args, &mut events)
         }
-        s if s == &selectors::fold() => dispatch_fold(context, table, args, &mut events),
-        s if s == &selectors::check() => dispatch_check(context, table, args, &mut events),
-        s if s == &selectors::call() => dispatch_call(context, table, args, &mut events),
-        s if s == &selectors::raise() => dispatch_raise(context, table, args, &mut events),
-        s if s == &selectors::bet() => dispatch_bet(context, table, args, &mut events),
-        s if s == &selectors::reset_for_next_hand() => {
+        CanonicalCommand::Fold => dispatch_fold(context, table, args, &mut events),
+        CanonicalCommand::Check => dispatch_check(context, table, args, &mut events),
+        CanonicalCommand::Call => dispatch_call(context, table, args, &mut events),
+        CanonicalCommand::Raise => dispatch_raise(context, table, args, &mut events),
+        CanonicalCommand::Bet => dispatch_bet(context, table, args, &mut events),
+        CanonicalCommand::ResetForNextHand => {
             dispatch_reset_for_next_hand(context, table, args, &mut events)
         }
-        s if s == &selectors::addon() => dispatch_addon(context, table, args, &mut events),
-        s if s == &selectors::rebuy() => dispatch_rebuy(context, table, args, &mut events),
-        s if s == &selectors::request_leave_after_hand() => {
+        CanonicalCommand::Addon => dispatch_addon(context, table, args, &mut events),
+        CanonicalCommand::Rebuy => dispatch_rebuy(context, table, args, &mut events),
+        CanonicalCommand::RequestLeaveAfterHand => {
             dispatch_request_leave_after_hand(context, table, args, &mut events)
         }
-        s if s == &selectors::fold_with_proof() => {
+        CanonicalCommand::FoldWithProof => {
             dispatch_fold_with_proof(context, table, args, &mut events)
         }
-        _ => {
-            return Err(PokerL1Error::UnknownContractMethod {
-                selector: *selector,
-            });
-        }
     };
-    result?;
+    if let Err(error) = result {
+        *table = pre_table.clone();
+        return Err(error);
+    }
+    if let Err(error) = state_machine::normalize_until_blocked(table, &mut events) {
+        *table = pre_table.clone();
+        return Err(error);
+    }
 
     // 证明任务元数据只在成功且真正改变状态的 dispatch 上推进。
     // 使用 pre_table 作为计数基准，防止 create_table 覆写结构时把序号重置为 0。
@@ -626,29 +770,29 @@ fn build_method_input(
 ) -> PokerL1Result<(u8, super::prove_task::MethodInput)> {
     use super::prove_task::MethodInput;
     // method_kind discriminant（与 poker_texas_air::MethodKind 对齐）
-    const K_CREATE_TABLE: u8 = 0;
-    const K_JOIN_TABLE: u8 = 1;
-    const K_LEAVE_TABLE: u8 = 2;
-    const K_START_HAND: u8 = 3;
-    const K_TICK: u8 = 4;
-    const K_RESET: u8 = 5;
-    const K_FOLD: u8 = 6;
-    const K_CHECK: u8 = 7;
-    const K_CALL: u8 = 8;
-    const K_RAISE: u8 = 9;
-    const K_AUTO_FOLD: u8 = 10;
-    const K_FORCE_FOLD: u8 = 11;
-    const K_KICK: u8 = 12;
-    const K_ADDON: u8 = 13;
-    const K_REBUY: u8 = 14;
-    const K_JOIN_SHUFFLE: u8 = 15;
-    const K_LEAVE_PROOF: u8 = 16;
-    const K_SUBMIT_SHUFFLE: u8 = 17;
-    const K_SUBMIT_REVEAL: u8 = 18;
-    const K_SUBMIT_RECONSTRUCT: u8 = 19;
-    const K_BET: u8 = 20;
-    const K_REQUEST_LEAVE_AFTER_HAND: u8 = 21;
-    const K_FOLD_WITH_PROOF: u8 = 22;
+    const K_CREATE_TABLE: u8 = CanonicalCommand::CreateTable as u8;
+    const K_JOIN_TABLE: u8 = CanonicalCommand::JoinTable as u8;
+    const K_LEAVE_TABLE: u8 = CanonicalCommand::LeaveTable as u8;
+    const K_START_HAND: u8 = CanonicalCommand::StartHand as u8;
+    const K_TICK: u8 = CanonicalCommand::Tick as u8;
+    const K_RESET: u8 = CanonicalCommand::ResetForNextHand as u8;
+    const K_FOLD: u8 = CanonicalCommand::Fold as u8;
+    const K_CHECK: u8 = CanonicalCommand::Check as u8;
+    const K_CALL: u8 = CanonicalCommand::Call as u8;
+    const K_RAISE: u8 = CanonicalCommand::Raise as u8;
+    const K_AUTO_FOLD: u8 = CanonicalCommand::AutoFold as u8;
+    const K_FORCE_FOLD: u8 = CanonicalCommand::ForceFold as u8;
+    const K_KICK: u8 = CanonicalCommand::KickPlayer as u8;
+    const K_ADDON: u8 = CanonicalCommand::Addon as u8;
+    const K_REBUY: u8 = CanonicalCommand::Rebuy as u8;
+    const K_JOIN_SHUFFLE: u8 = CanonicalCommand::JoinAndShuffle as u8;
+    const K_LEAVE_PROOF: u8 = CanonicalCommand::LeaveWithProof as u8;
+    const K_SUBMIT_SHUFFLE: u8 = CanonicalCommand::SubmitShuffleV2 as u8;
+    const K_SUBMIT_REVEAL: u8 = CanonicalCommand::SubmitPlayerRevealTokens as u8;
+    const K_SUBMIT_RECONSTRUCT: u8 = CanonicalCommand::SubmitReconstructDeck as u8;
+    const K_BET: u8 = CanonicalCommand::Bet as u8;
+    const K_REQUEST_LEAVE_AFTER_HAND: u8 = CanonicalCommand::RequestLeaveAfterHand as u8;
+    const K_FOLD_WITH_PROOF: u8 = CanonicalCommand::FoldWithProof as u8;
 
     if selector == &selectors::create_table() {
         let a: CreateTableArgs = decode_args(args, "create_table prove task")?;
@@ -1091,15 +1235,13 @@ fn dispatch_join_table(
     let seat_idx = table
         .find_empty_seat()
         .ok_or_else(|| PokerL1Error::Serialization("no empty seat available".into()))?;
+    table.set_seat_acted_this_round(seat_idx, false);
+    table.set_seat_wants_leave(seat_idx, false);
     let seat = &mut table.seats[seat_idx as usize];
     seat.player = input.player;
     seat.stack = input.buy_in;
     seat.pk = ECPoint::from(pk);
-    seat.is_waiting = false; // WAITING 状态加入，立即参与下一局
-    seat.folded = false;
-    seat.left_during_hand = false;
-    seat.all_in = false;
-    seat.acted_this_round = false;
+    seat.set_status(SeatStatus::Active); // WAITING 状态加入，立即参与下一局
     seat.bet = 0;
     seat.total_bet = 0;
     seat.hand.clear();
@@ -1241,41 +1383,22 @@ fn dispatch_auto_fold(
 ) -> PokerL1Result<()> {
     let input: SeatIndexArgs = decode_args(args, "auto_fold")?;
     require_caller_is_creator(context, table, "auto_fold")?;
-    if !state_machine::is_betting_round(table) {
-        return Err(PokerL1Error::Other(
-            "auto_fold requires an active betting round".into(),
-        ));
-    }
-    if table.current_turn != Some(input.seat_index) {
+    if table.current_turn != input.seat_index {
         return Err(PokerL1Error::Other(format!(
             "auto_fold seat is not current turn: requested={}, current={:?}",
             input.seat_index, table.current_turn
         )));
     }
-    let seat = table
-        .seats
-        .get(input.seat_index as usize)
-        .ok_or_else(|| PokerL1Error::Other("auto_fold seat index out of range".into()))?;
-    if seat.time_bank_ms > 0 {
-        return Err(PokerL1Error::Other(format!(
-            "auto_fold cannot bypass time bank: remaining_ms={}",
-            seat.time_bank_ms
-        )));
+    let outcome = state_machine::advance_deadline(table, context.block_timestamp, events)?;
+    match outcome {
+        state_machine::AdvanceDeadlineOutcome::Advanced {
+            kind: state_machine::DeadlineKind::Betting,
+            subject,
+        } if subject == input.seat_index => Ok(()),
+        other => Err(PokerL1Error::Other(format!(
+            "auto_fold did not consume the requested betting deadline: {other:?}"
+        ))),
     }
-    let started = table.timestamps.betting_started_at;
-    if started == 0 {
-        return Err(PokerL1Error::Other(
-            "auto_fold betting timer has not started".into(),
-        ));
-    }
-    let deadline = started.saturating_add(table.timeout_config.betting_timeout_ms);
-    if context.block_timestamp < deadline {
-        return Err(PokerL1Error::Other(format!(
-            "auto_fold before timeout: block_timestamp={}, deadline={deadline}",
-            context.block_timestamp
-        )));
-    }
-    state_machine::apply_fold_internal(table, input.seat_index, FOLD_REASON_AUTO_TIMEOUT, events)
 }
 
 /// `force_fold` — 管理员强制 fold。
@@ -1579,6 +1702,48 @@ mod tests {
     }
 
     #[test]
+    fn canonical_command_tags_cover_all_selectors() {
+        let mut tags = std::collections::BTreeSet::new();
+        for selector in selectors::all() {
+            let command = CanonicalCommand::from_selector(&selector).expect("known selector");
+            assert!(tags.insert(command.method_tag()), "duplicate command tag");
+        }
+        assert_eq!(
+            tags.into_iter().collect::<Vec<_>>(),
+            (0u8..=22).collect::<Vec<_>>()
+        );
+        assert!(CanonicalCommand::from_selector(&[0xFF; 32]).is_none());
+    }
+
+    #[test]
+    fn batch_tags_collapse_compatibility_selectors() {
+        assert_eq!(
+            CanonicalCommand::Check.batch_tag(),
+            CanonicalCommand::Call.batch_tag()
+        );
+        assert_eq!(
+            CanonicalCommand::Raise.batch_tag(),
+            CanonicalCommand::Bet.batch_tag()
+        );
+        assert_eq!(
+            CanonicalCommand::Fold.batch_tag(),
+            CanonicalCommand::ForceFold.batch_tag()
+        );
+        assert_eq!(
+            CanonicalCommand::Tick.batch_tag(),
+            CanonicalCommand::AutoFold.batch_tag()
+        );
+        assert_ne!(
+            CanonicalCommand::Addon.batch_tag(),
+            CanonicalCommand::Rebuy.batch_tag()
+        );
+        assert_ne!(
+            CanonicalCommand::Fold.batch_tag(),
+            CanonicalCommand::FoldWithProof.batch_tag()
+        );
+    }
+
+    #[test]
     fn dispatch_unknown_method_returns_error() {
         let ctx = make_context();
         let mut table = make_table();
@@ -1807,7 +1972,6 @@ mod tests {
         assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
         assert_eq!(table.pot, 0, "reset 后 pot 应清零");
         assert_eq!(table.community_cards.len(), 0);
-        assert!(table.side_pots.is_empty());
         assert_eq!(
             table.deck_state.encrypted.len(),
             52,
@@ -1845,10 +2009,15 @@ mod tests {
         table.round_state = super::super::constants::ROUND_PREFLOP;
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 500;
+        table.seats[0].set_status(SeatStatus::Active);
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 500;
+        table.seats[1].set_status(SeatStatus::Active);
         table.seats[2].player = [0x03; 20];
         table.seats[2].stack = 500;
+        table.seats[2].set_status(SeatStatus::Active);
+        table.betting_round = Some(super::super::betting::BettingRound::new(100, 0));
+        table.current_turn = 1;
         table.chip_pool = 1_500;
 
         let args = KickPlayerArgs {
@@ -1857,37 +2026,31 @@ mod tests {
         };
         let args_bytes = borsh::to_vec(&args).unwrap();
         dispatch(&ctx, &mut table, &selectors::kick_player(), &args_bytes).unwrap();
-        assert!(table.seats[0].folded);
-        assert!(table.seats[0].left_during_hand);
+        assert!(table.seats[0].is_folded() || table.seats[0].has_left_hand());
+        assert!(table.seats[0].has_left_hand());
         assert_eq!(table.seats[0].stack, 0);
     }
 
     #[test]
-    fn dispatch_tick_with_empty_args_uses_consensus_timestamp() {
+    fn dispatch_tick_does_not_start_hand_without_a_deadline() {
         let ctx = make_context();
         let mut table = make_table();
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 1000;
+        table.seats[0].set_status(SeatStatus::Active);
         table.seats[1].player = [0x02; 20];
         table.seats[1].stack = 1000;
-        // 空 args 调用 tick：时间来自共识 context，并可触发无需等待的 start_hand。
+        table.seats[1].set_status(SeatStatus::Active);
+        // WAITING is blocked on the explicit StartHand command, not on time.
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
         let output = decode_output(&result);
-        let task = output
-            .prove_task
-            .expect("自动 start_hand 的 tick 必须产生 task");
-        assert_eq!(task.method_kind, 4);
-        assert_eq!(
-            task.method_input,
-            super::super::prove_task::MethodInput::Empty
-        );
-        assert_eq!(task.hand_id, 1);
-        assert_eq!(task.call_seq, 1);
-        assert_eq!(table.hand_id, 1);
-        assert_eq!(table.call_seq, 1);
+        assert!(output.prove_task.is_none());
+        assert_eq!(table.hand_id, 0);
+        assert_eq!(table.call_seq, 0);
+        assert_eq!(table.round_state, super::super::constants::ROUND_WAITING);
         assert_eq!(
             table.shuffle_state.phase,
-            super::super::constants::SHUFFLE_PHASE_BEFORE_PREFLOP
+            super::super::constants::SHUFFLE_PHASE_NONE
         );
     }
 
@@ -1907,8 +2070,8 @@ mod tests {
         let ctx = make_context();
         let mut table = make_table();
         table.shuffle_state.phase = super::super::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
-        table.shuffle_state.pending_players = vec![0];
-        table.shuffle_state.current_shuffler = Some(0);
+        table.shuffle_state.pending_mask = 1;
+        table.shuffle_state.current_shuffler = 0;
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
         let task = decode_output(&result)
             .prove_task
@@ -1947,10 +2110,11 @@ mod tests {
         let mut table = make_table();
         table.round_state = super::super::constants::ROUND_PREFLOP;
         table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
-        table.current_turn = Some(0);
+        table.current_turn = 0;
         for index in 0..3 {
             table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
             table.seats[index].stack = 1_000;
+            table.seats[index].set_status(SeatStatus::Active);
         }
         table
     }
@@ -1995,7 +2159,7 @@ mod tests {
         let result = dispatch(&ctx, &mut table, &selectors::auto_fold(), &args);
 
         assert!(result.is_ok());
-        assert!(table.seats[0].folded);
+        assert!(table.seats[0].is_folded());
         assert_eq!(table.call_seq, 1);
     }
 
@@ -2011,7 +2175,7 @@ mod tests {
         table.seats[1].stack = 1000;
         table.round_state = super::super::constants::ROUND_PREFLOP;
         table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
-        table.current_turn = Some(0);
+        table.current_turn = 0;
 
         // seat 0 的玩家是 [0x01;20]，用 [0x99;20] 冒充调用应失败
         let ctx_impersonator = make_context_as([0x99; 20]);
@@ -2073,9 +2237,12 @@ mod tests {
     fn make_table_with_two_players() -> TexasPokerTable {
         let mut table = make_table();
         table.seats[0].player = [0x11; 20];
+        table.seats[0].set_status(SeatStatus::Active);
         table.seats[0].stack = 1000;
+        table.seats[0].set_status(SeatStatus::Active);
         table.seats[1].player = [0x22; 20];
         table.seats[1].stack = 2000;
+        table.seats[1].set_status(SeatStatus::Active);
         // 同步 chip_pool（join 时 buy_in 计入），便于后续资金账断言
         table.chip_pool = 3000;
         table
@@ -2107,7 +2274,7 @@ mod tests {
         );
         assert_eq!(first_task.call_seq, 1);
         assert!(
-            table.seats[0].want_leave,
+            table.seat_wants_leave(0),
             "第一次调用后 want_leave 应为 true"
         );
 
@@ -2121,12 +2288,12 @@ mod tests {
         .unwrap();
         assert_eq!(table.call_seq, 2);
         assert!(
-            !table.seats[0].want_leave,
+            !table.seat_wants_leave(0),
             "第二次调用后 want_leave 应回到 false（toggle）"
         );
 
         // 其余座位不受影响
-        assert!(!table.seats[1].want_leave);
+        assert!(!table.seat_wants_leave(1));
     }
 
     /// 权限校验：非 seat player 调用应失败。
@@ -2145,7 +2312,7 @@ mod tests {
         );
         assert!(result.is_err(), "非座位玩家不应能为他人的座位预约离场");
         assert!(
-            !table.seats[0].want_leave,
+            !table.seat_wants_leave(0),
             "失败调用不应改变 want_leave 标志"
         );
     }
@@ -2157,7 +2324,7 @@ mod tests {
         // 模拟对局进行中
         table.round_state = super::super::constants::ROUND_PREFLOP;
         table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
-        table.current_turn = Some(0);
+        table.current_turn = 0;
 
         let ctx_p1 = make_context_as([0x11; 20]);
         let args = SeatIndexArgs { seat_index: 0 };
@@ -2169,7 +2336,7 @@ mod tests {
             &args_bytes,
         );
         assert!(result.is_ok(), "对局中应可预约离场: {result:?}");
-        assert!(table.seats[0].want_leave);
+        assert!(table.seat_wants_leave(0));
         // 对局状态不被破坏
         assert_eq!(table.round_state, super::super::constants::ROUND_PREFLOP);
     }
@@ -2195,7 +2362,7 @@ mod tests {
     fn reset_for_next_hand_enforces_want_leave() {
         let mut table = make_table_with_two_players();
         // p1 预约离场
-        table.seats[0].want_leave = true;
+        table.set_seat_wants_leave(0, true);
 
         // reset 前：2 名玩家，chip_pool = 3000
         assert_eq!(table.occupied_count(), 2);
@@ -2276,7 +2443,7 @@ mod tests {
             &borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap(),
         )
         .unwrap();
-        assert!(table.seats[0].want_leave);
+        assert!(table.seat_wants_leave(0));
 
         // reset：强制执行 p1 离场
         let mut events = Vec::new();
@@ -2313,8 +2480,8 @@ mod tests {
     fn reset_does_not_remove_players_without_leave_request() {
         let mut table = make_table_with_two_players();
         // 无人预约离场
-        assert!(!table.seats[0].want_leave);
-        assert!(!table.seats[1].want_leave);
+        assert!(!table.seat_wants_leave(0));
+        assert!(!table.seat_wants_leave(1));
 
         state_machine::reset_for_next_hand(&mut table, &mut Vec::new()).unwrap();
 
@@ -2329,23 +2496,25 @@ mod tests {
     /// 辅助：构造一个处于下注轮、3 名玩家的桌台。
     /// - seat 0/1/2 各有 stack 与已下注 total_bet
     /// - round_state = PREFLOP，betting_round 已设置，current_turn = turn
-    /// - aggregated_pk = generator（= seat.pk，方便验证「移除后变为 None」）
+    /// - contributor mask covers every protocol participant and derives the aggregate cache
     fn make_betting_table_with_players(turn: u8, set_aggregated_pk: bool) -> TexasPokerTable {
         let mut table = make_table();
         table.round_state = super::super::constants::ROUND_PREFLOP;
         table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
-        table.current_turn = Some(turn);
+        table.current_turn = turn;
 
-        // 3 名玩家，pk 都用 generator（aggregated_pk = generator 时移除任一 pk → None）
+        // 3 名玩家，pk 都用 generator；lineage 是 canonical fact，aggregate 由其派生。
         let g = G1Projective::generator();
         for i in 0..3u8 {
             table.seats[i as usize].player = [0x11 + i; 20];
             table.seats[i as usize].stack = 1000;
             table.seats[i as usize].total_bet = 100;
             table.seats[i as usize].pk = ECPoint(g);
+            table.seats[i as usize].set_status(SeatStatus::Active);
         }
         if set_aggregated_pk {
-            table.deck_state.aggregated_pk = Some(ECPoint(g));
+            table.deck_state.contributor_mask = 0b111;
+            table.sync_aggregated_pk().unwrap();
         }
         // 模拟已发牌（52 张加密牌），c1 = generator（DLEq verify 强制 c1 不变）
         table.deck_state.encrypted = (0..52)
@@ -2785,8 +2954,8 @@ mod tests {
         );
 
         // folded 标记
-        assert!(table.seats[0].folded, "folded 应为 true");
-        assert!(table.seats[0].acted_this_round);
+        assert!(table.seats[0].is_folded(), "folded 应为 true");
+        assert!(table.seat_acted_this_round(0));
         // 关键：total_bet / bet / stack / pk 保留（side-pot 记账）
         assert_eq!(table.seats[0].total_bet, 100, "total_bet 应保留");
         assert_eq!(table.seats[0].stack, 1000, "stack 应保留");
@@ -2795,10 +2964,7 @@ mod tests {
             ECPoint(G1Projective::generator()),
             "seat.pk 应保留（不置 identity）"
         );
-        assert!(
-            !table.seats[0].left_during_hand,
-            "left_during_hand 不应设置"
-        );
+        assert!(!table.seats[0].has_left_hand(), "left_during_hand 不应设置");
 
         // aggregated_pk 已移除 p1.pk（移除后可能为 None 或不同点）
         assert_ne!(
@@ -2822,7 +2988,7 @@ mod tests {
         // reveal_token_state.assignments 中无 p1（下注轮本就为空）
         for a in &table.reveal_token_state.assignments {
             assert!(
-                !super::super::state_machine::is_in_list(&a.pending_players, 0),
+                !super::super::state_machine::is_in_mask(a.pending_mask(), 0),
                 "p1 不应在任何 reveal pending_players 中"
             );
         }
@@ -2845,7 +3011,7 @@ mod tests {
             &borsh::to_vec(&args).unwrap(),
         );
         assert!(result.is_err(), "非座位玩家不应能 fold_with_proof");
-        assert!(!table.seats[0].folded, "失败调用不应改变 folded 标志");
+        assert!(!table.seats[0].is_folded(), "失败调用不应改变 folded 标志");
     }
 
     /// 非下注轮拒绝：在 WAITING 状态调用应失败。
@@ -2915,7 +3081,7 @@ mod tests {
     #[test]
     fn fold_with_proof_rejects_already_folded() {
         let mut table = make_betting_table_with_players(0, true);
-        table.seats[0].folded = true; // 预设已 folded
+        table.seats[0].set_status(SeatStatus::Folded); // 预设已 folded
 
         let ctx_p1 = make_context_as([0x11; 20]);
         let args = FoldWithProofArgs {
@@ -2939,16 +3105,19 @@ mod tests {
         let mut table = make_table();
         table.round_state = super::super::constants::ROUND_PREFLOP;
         table.betting_round = Some(super::super::betting::BettingRound::new(100, 100));
-        table.current_turn = Some(0);
+        table.current_turn = 0;
         table.seats[0].player = [0x11; 20];
+        table.seats[0].set_status(SeatStatus::Active);
         table.seats[0].stack = 1000;
         table.seats[0].total_bet = 100;
         table.seats[0].pk = ECPoint(G1Projective::generator());
         table.seats[1].player = [0x22; 20];
+        table.seats[1].set_status(SeatStatus::Active);
         table.seats[1].stack = 1000;
         table.seats[1].total_bet = 100;
         table.seats[1].pk = ECPoint(G1Projective::generator());
-        table.deck_state.aggregated_pk = Some(table.seats[0].pk);
+        table.deck_state.contributor_mask = 0b11;
+        table.sync_aggregated_pk().unwrap();
         let g = G1Projective::generator();
         table.deck_state.encrypted = (0..52)
             .map(|_| ElGamalCiphertext { c1: g, c2: g })
@@ -2986,5 +3155,7 @@ mod tests {
         // p1 仍在座位上（reset 不踢有筹码的玩家），stack 不变（未参与底池分配）
         assert_eq!(table.seats[0].player, [0x11; 20]);
         assert_eq!(table.seats[0].stack, 1000);
+        assert_eq!(table.deck_state.contributor_mask, 0b11);
+        assert_eq!(table.deck_state.aggregated_pk, table.derived_aggregated_pk().unwrap());
     }
 }

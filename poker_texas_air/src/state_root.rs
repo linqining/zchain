@@ -33,8 +33,7 @@ use blake2::digest::{Update, VariableOutput};
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 #[cfg(test)]
 use poker_l1::vm::contracts::texas_poker::types::{
-    DeckState, ReconstructState, RevealTokenState, ShuffleState, TableConfig, TimeoutConfig,
-    Timestamps,
+    DeckState, ReconstructState, RevealTokenState, ShuffleState, TimeoutConfig, Timestamps,
 };
 
 /// 表台状态根（Starknet Fr 元素）。
@@ -125,7 +124,7 @@ pub fn bool_to_field(b: bool) -> FieldElement {
 pub fn table_state_preimage(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<FieldElement>> {
-    canonical_borsh_preimage("zchain.texas_poker.table.v2", table)
+    canonical_borsh_preimage("zchain.texas_poker.table.v10", table)
 }
 
 /// 从 canonical table preimage 反解完整 `TexasPokerTable`。
@@ -137,15 +136,19 @@ pub fn table_state_preimage(
 pub fn table_from_state_preimage(
     image: &[FieldElement],
 ) -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::TexasPokerTable> {
-    const TAG: &str = "zchain.texas_poker.table.v2";
+    const TAG: &str = "zchain.texas_poker.table.v10";
     let payload = decode_canonical_borsh_preimage(image, TAG)?;
-    poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload).map_err(
-        |e| {
-            TexasAirError::SerializationError(format!(
-                "TexasPokerTable canonical Borsh decode failed: {e}"
-            ))
-        },
-    )
+    let table =
+        poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
+            .map_err(|e| {
+                TexasAirError::SerializationError(format!(
+                    "TexasPokerTable canonical Borsh decode failed: {e}"
+                ))
+            })?;
+    table.validate_state_schema().map_err(|e| {
+        TexasAirError::SerializationError(format!("TexasPokerTable schema validation: {e}"))
+    })?;
+    Ok(table)
 }
 
 /// 计算 `TexasPokerTable` 的 state_root = Poseidon252(preimage)。
@@ -443,11 +446,6 @@ fn poseidon_timestamps(ts: &Timestamps) -> FieldElement {
 }
 
 #[cfg(test)]
-fn poseidon_table_config(cfg: &TableConfig) -> FieldElement {
-    poseidon_borsh("table_config", cfg)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -483,6 +481,7 @@ mod tests {
         table.seats[2].player = [0x22; 20];
         table.seats[2].stack = 1_000_000;
         table.seats[2].bet = 65_536;
+        table.seats[2].set_status(poker_l1::vm::contracts::texas_poker::types::SeatStatus::Active);
 
         let image = table_state_preimage(&table).expect("canonical table should encode");
         let decoded = table_from_state_preimage(&image).expect("canonical table should decode");
@@ -491,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_table_state_preimage_rejects_noncanonical_chunk_prefix() {
-        const TAG: &str = "zchain.texas_poker.table.v2";
+        const TAG: &str = "zchain.texas_poker.table.v10";
         let table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0x11; 20], 3),
             "noncanonical-prefix".into(),
@@ -586,28 +585,11 @@ mod tests {
         let reconstruct = poseidon_reconstruct_state(&ReconstructState::default());
         let timeout = poseidon_timeout_config(&TimeoutConfig::default());
         let timestamps = poseidon_timestamps(&Timestamps::default());
-        let config = poseidon_table_config(&TableConfig::default());
-        for h in [
-            deck,
-            shuffle,
-            reveal,
-            reconstruct,
-            timeout,
-            timestamps,
-            config,
-        ] {
+        for h in [deck, shuffle, reveal, reconstruct, timeout, timestamps] {
             assert_ne!(h, FieldElement::ZERO, "默认子结构哈希应非零");
         }
         // 默认值两两不同（它们 borsh 序列化不同）
-        let all = [
-            deck,
-            shuffle,
-            reveal,
-            reconstruct,
-            timeout,
-            timestamps,
-            config,
-        ];
+        let all = [deck, shuffle, reveal, reconstruct, timeout, timestamps];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
                 assert_ne!(all[i], all[j], "默认子结构哈希应两两不同 ({i},{j})");

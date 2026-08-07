@@ -166,24 +166,30 @@ Stage 列数线性增长：65 列 `RoundAdvance` 与 610 列 `Settlement` 相差
 prove 时间却只相差约 36%；旧路径 32 次 dispatch 共启动 104 次 component prove，四类 Stage
 累计约 800s CPU span。
 
-因此新增 throughput-oriented `ArchivedCompositionBatchProofBundle`：同一 table/hand 下，最多
-1024 个 call-seq/state-root 连续的 composite transition 按行写入同一 Stage trace，剩余行使用
-Stage-specific canonical padding。四类 Stage 仍分别拥有独立 trace commitment、Fiat–Shamir
-transcript 和 STARK proof，只把 transition 维度从 `4N` 份 proof 改为
-`4 * ceil(N / 1024)` 份 proof。
+因此先新增 throughput-oriented `ArchivedCompositionBatchProofBundle`，把同类 Stage 的连续
+transition 放进四份固定 1024 行 proof。该版本把 26 个连续 composite transition 从 104 次
+Stage prove 降为 4 次，完整牌局 wall-clock 从基准 335.99s 降至 168.14s。
+
+随后 batch archive v2 已进一步改为单份 Tagged-union Stage proof：按 task 顺序、再按
+`SeatUpdate -> BetCollection -> RoundAdvance -> Settlement` 顺序，仅写入实际 active Stage 行，
+inactive Stage 不占行，剩余行全部为零。`stage_tag` 使用两个 bit 列约束为 `0..3`，各 variant
+复用最大 Stage 的列区间，较窄 variant 的尾部由 verifier 重建为零。最坏一笔 transition 激活
+四个 Stage，因此服务端保守按 256 task/chunk 分批；实际 row 数单独进入 archive 与 transcript。
+这把每个 batch 的 Stwo prover/PCS/FRI 启动数从 4 降为 1，archive 最大 proof 预算也从四份降为
+一份。当前完整 32-transition hand 的真实 prove/verify 回归通过，wall-clock 为 134.91s。
 
 批量路径没有沿用只能固定单行的 `BoundAir`。verifier 会重放完整 task 列表，重建每个 canonical
-Stage row 和 1024 行 padding，独立重算 Stwo original-trace commitment，并要求它与 proof 的
-trace commitment 完全一致；batch ABI version、Stage kind、task count、table/hand/call range 和
-完整有序 task digest 也进入 transcript。空 batch、超过 1024、unsupported method、跨 table/hand、
-call-seq 不连续、state-root 不连续、task digest/Stage 顺序/trace commitment 不符均 fail-closed。
-这避免了再复制一套 119/165/65/610 列 preprocessed tree，保持 verifier-owned 逐行绑定的同时
-控制列与 commitment 开销。
+tagged Stage row 和 1024 行 padding，独立重算 Stwo original-trace commitment，并要求它与 proof
+的 trace commitment 完全一致；batch ABI version、task/stage-row count、table/hand/call range 和
+完整有序 task digest 也进入 transcript。空 batch、超过保守 task 上限、超过 1024 Stage 行、
+unsupported method、跨 table/hand、call-seq 不连续、state-root 不连续、task digest/tag/trace
+commitment 不符均 fail-closed。当前 batch AIR 本身只约束 active bit、tag bits、tag/index 一致性和
+零 padding；完整业务行仍由 verifier-owned replay commitment 绑定，与旧四 batch proof 的安全模型
+一致。
 
-最终 full-hand 复测把 26 个连续 composite transition 从 104 次 Stage prove 降为 4 次：
-完整牌局 wall-clock 由基准 335.99s 降至 168.14s（约 -50%）。批量四 Stage 的 prove span为
-6.00s / 6.04s / 7.28s / 8.33s，且每类只执行一次 host verify；batch step wall-clock 为
-20.36s。不同轮次受机器负载影响曾测得 154.48s，但 proof 启动数从 104 降至 4 是稳定结果。
+旧四-batch 版本的分项 prove span 为 6.00s / 6.04s / 7.28s / 8.33s，batch step wall-clock
+为 20.36s。Tagged-union v2 不再产生四份分项 proof；后续基准应读取单条
+`batch-stage:Tagged[task/row]` timing，并把它与 method proofs 分开统计。
 
 当前 durable service package v2 和 server/job 恢复路径仍保留每 task 四份 component archive，
 以兼容低延迟和独立任务下载；批量 archive 已用于 full-hand/in-memory throughput 路径。把 batch
@@ -260,3 +266,9 @@ per-task bundle 的现有 v2 package 静默当作完整证明。
 当前主线适合“不追求链上压缩”的目标：host-native crypto/Stwo 验证性能最高，digest 与
 canonical context 防止 proof、receipt、table 或 call scope 被替换。它提供可信 host acceptance，
 但不声称递归压缩；剩余产品功能缺口仍需后续独立设计。
+
+## Tagged-union Stage proof 前的 Texas 源码重构
+
+字段删除/合并、Seat bit/status、phase tagged union、`normalize_until_blocked`、tick/auto-fold
+归一化和 heterogeneous method batch 的实施边界，见
+[`TEXAS_SOURCE_SLIMMING_AND_BATCH_DESIGN.md`](TEXAS_SOURCE_SLIMMING_AND_BATCH_DESIGN.md)。

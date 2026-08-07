@@ -784,8 +784,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.call_seq,
                 task.pre_table.version,
                 task.post_table.version,
-                task.pre_table.shuffle_state.completed_players.len() as u8,
-                task.post_table.shuffle_state.completed_players.len() as u8,
+                task.pre_table.shuffle_state.completed_mask.count_ones() as u8,
+                task.post_table.shuffle_state.completed_mask.count_ones() as u8,
             );
             row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
             row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
@@ -884,7 +884,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.call_seq,
                 task.pre_table.version,
                 task.post_table.version,
-                task.post_table.shuffle_state.completed_players.len() as u8,
+                task.post_table.shuffle_state.completed_mask.count_ones() as u8,
             );
             row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
             row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
@@ -969,7 +969,6 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.call_seq,
                 task.pre_table.version,
                 task.post_table.version,
-                task.post_table.reconstruct_state.player_decks.len() as u8,
             );
             let air = SubmitReconstructDeckAir {
                 log_size: MIN_LOG_SIZE,
@@ -1041,7 +1040,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 precompile: binding.air_binding(),
             };
             let post_completed_count = u8::try_from(
-                task.post_table.shuffle_state.completed_players.len(),
+                task.post_table.shuffle_state.completed_mask.count_ones(),
             )
             .map_err(|_| {
                 TexasAirError::SpecViolation(

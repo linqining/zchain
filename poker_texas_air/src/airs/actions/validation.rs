@@ -347,7 +347,7 @@ pub(crate) fn validate_call(
         tables.post.pot,
         post_seat.stack,
         action_post_bet,
-        post_seat.all_in,
+        post_seat.is_all_in(),
         pre_seat.bet,
         pre_seat.stack,
         post_seat.total_bet,
@@ -422,7 +422,7 @@ pub(crate) fn validate_raise(
         post_seat.total_bet,
         action_round.current_bet,
         action_round.min_raise,
-        post_seat.all_in,
+        post_seat.is_all_in(),
     );
     validate_row(public_inputs, &row.to_vec(), "raise")
 }
@@ -818,9 +818,9 @@ pub(crate) fn validate_request_leave_after_hand(
         )));
     }
 
-    let post_seat = seat(&post, air.input.seat_index, METHOD)?;
-    if air.input.pre_want_leave != pre_seat.want_leave
-        || air.input.post_want_leave != post_seat.want_leave
+    let _ = seat(&post, air.input.seat_index, METHOD)?;
+    if air.input.pre_want_leave != pre.seat_wants_leave(air.input.seat_index)
+        || air.input.post_want_leave != post.seat_wants_leave(air.input.seat_index)
         || air.input.post_want_leave == air.input.pre_want_leave
     {
         return Err(TexasAirError::SpecViolation(format!(

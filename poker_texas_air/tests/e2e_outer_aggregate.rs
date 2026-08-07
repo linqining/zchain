@@ -5,7 +5,7 @@ use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
 use poker_l1::vm::contracts::texas_poker::dispatch::{self as texas_dispatch, SubmitShuffleV2Args};
-use poker_l1::vm::contracts::texas_poker::types::{ShuffleState, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState, TexasPokerTable};
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
 use poker_protocol::crypto::types::ECPoint;
 use poker_protocol::zk_shuffle::ShuffleProof;
@@ -136,24 +136,25 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     table.version = 30;
     for (index, key) in seat_keys.into_iter().enumerate() {
         table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
+        table.seats[index].set_status(SeatStatus::Active);
         table.seats[index].stack = 1_000;
         table.seats[index].pk = ECPoint(key);
     }
     table.deck_state.encrypted = input_cards;
-    table.deck_state.aggregated_pk = Some(ECPoint(aggregated_pk));
+    table.deck_state.contributor_mask = 0b1111;
+    table.sync_aggregated_pk().unwrap();
+    assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
     table.shuffle_state = ShuffleState {
         phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-        current_shuffler: Some(0),
-        pending_players: vec![0, 1, 2, 3],
-        completed_players: vec![],
+        current_shuffler: 0,
+        pending_mask: (1u16 << (0)) | (1u16 << (1)) | (1u16 << (2)) | (1u16 << (3)),
+        completed_mask: 0,
     };
 
     let mut tasks = Vec::new();
     for round in 0..3 {
-        let seat_index = table
-            .shuffle_state
-            .current_shuffler
-            .expect("three shufflers should remain");
+        let seat_index = table.shuffle_state.current_shuffler;
+        assert_ne!(seat_index, u8::MAX, "three shufflers should remain");
         let (task, post) = next_shuffle_task(table, seat_index, aggregated_pk, round);
         tasks.push(task);
         table = post;

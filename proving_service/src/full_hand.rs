@@ -48,7 +48,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
     selectors,
 };
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TableConfig, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 use poker_protocol::crypto::{ECPoint, ElGamalCiphertext};
 
 use crate::contracts::TexasPokerPlugin;
@@ -168,7 +168,9 @@ impl FullHandRunner {
             .iter()
             .filter_map(|p| p.as_ref().map(|p| p.pk))
             .fold(G1Projective::identity(), |acc, pk| acc + pk);
-        plugin.register_aggregated_pk(ECPoint(agg_pk));
+        if let Err(error) = plugin.register_aggregated_pk(ECPoint(agg_pk)) {
+            ctx.stopped_at = Some(format!("register_aggregated_pk: {error}"));
+        }
 
         // start_hand 使 hand_id 0→1；verified receipt 链以单局 hand_id 为边界，
         // 必须在 prove start_hand 前开新链片段，否则 crosses-hands 校验失败。
@@ -358,20 +360,31 @@ impl FullHandRunner {
             "reveal_showdown",
         );
 
-        // All composite transitions after the shuffle phase are contiguous. Pack their four
-        // Stage projections into four 1024-row proofs instead of proving four components per
+        // All composite transitions after the shuffle phase are contiguous. Pack every active
+        // tagged Stage projection into one 1024-row proof instead of proving four components per
         // dispatch. Method proofs remain immediate so the verified receipt chain is unchanged.
         if ctx.stopped_at.is_none() {
             let p_start = Instant::now();
             let _drained_before = poker_texas_air::prove_timing::take_drain();
             match plugin.finalize_composition_batches() {
-                Ok(batch_count) => ctx.steps.push(StepTiming {
-                    method: format!("composition_batch[{batch_count}x4 proofs]"),
-                    dispatch: Duration::ZERO,
-                    prove: p_start.elapsed(),
-                    ok: true,
-                    proof_breakdown: poker_texas_air::prove_timing::take_drain(),
-                }),
+                Ok(batch_count) => {
+                    let stage_rows = plugin
+                        .composition_batches()
+                        .iter()
+                        .rev()
+                        .take(batch_count)
+                        .map(|bundle| usize::from(bundle.stage_row_count()))
+                        .sum::<usize>();
+                    ctx.steps.push(StepTiming {
+                        method: format!(
+                            "composition_batch[{batch_count} tagged proofs/{stage_rows} rows]"
+                        ),
+                        dispatch: Duration::ZERO,
+                        prove: p_start.elapsed(),
+                        ok: true,
+                        proof_breakdown: poker_texas_air::prove_timing::take_drain(),
+                    });
+                }
                 Err(error) => {
                     ctx.stopped_at = Some(format!("composition batch prove/verify: {error}"));
                     ctx.steps.push(StepTiming {
@@ -527,7 +540,7 @@ fn dispatch_current_turn(
         return;
     }
 
-    let Some(seat_index) = plugin.table().current_turn else {
+    let Some(seat_index) = plugin.table().current_turn_option() else {
         ctx.stopped_at = Some(format!("{name}: table has no current_turn"));
         ctx.steps.push(StepTiming {
             method: name.to_string(),
@@ -609,9 +622,9 @@ fn submit_reveal_round(
                             .iter()
                             .find(|card| {
                                 card.encrypted_card_index == card_idx as u8
-                                    && card.ciphertext.is_some()
+                                    && card.ciphertext().is_some()
                             })
-                            .and_then(|card| card.ciphertext.clone())
+                            .and_then(|card| card.ciphertext().cloned())
                     } else {
                         ctx.deck_view.get(card_idx).cloned()
                     };
@@ -754,9 +767,7 @@ fn observe_winner(table: &TexasPokerTable) -> Option<u8> {
 /// 构造占位桌台（create_table 会覆写）。
 fn make_placeholder_table(_creator: Address) -> TexasPokerTable {
     let id = ObjectID::new([0xFF; 20], 0);
-    let mut table = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
-    table.config = TableConfig::default();
-    table
+    TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1)
 }
 
 /// 构造 canonical 初始 deck：52 张 (G, plaintext_i)，与合约 set_initial_encrypted_deck 一致。

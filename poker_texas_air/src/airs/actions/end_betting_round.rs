@@ -70,12 +70,13 @@ pub(crate) fn derive_betting_outcome(
     if post.betting_round.is_some()
         && post.round_state == pre.round_state
         && post.pot == pre.pot
-        && let Some(post_current_turn) = post.current_turn
+        && post.current_turn != NO_CURRENT_TURN
     {
+        let post_current_turn = post.current_turn;
         return Ok(BettingOutcome::MidRound { post_current_turn });
     }
 
-    if post.betting_round.is_some() || post.current_turn.is_some() {
+    if post.betting_round.is_some() || post.current_turn != NO_CURRENT_TURN {
         return Err(TexasAirError::UnsupportedBettingTransition(format!(
             "{method}: transition is neither mid-round nor bet collection plus round advancement"
         )));

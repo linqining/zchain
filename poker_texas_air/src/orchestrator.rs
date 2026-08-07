@@ -217,7 +217,8 @@ impl Orchestrator {
     /// proofs to [`crate::airs::composition::prove_composition_batch`].
     ///
     /// This entry point exists for throughput-oriented callers that collect a contiguous run of
-    /// composite transitions and later finalize it as four batched Stage proofs. Callers must not
+    /// composite transitions and later finalize it as one tagged batched Stage proof. Callers
+    /// must not
     /// persist or publish the returned archive as a complete composite proof package until the
     /// corresponding batch has also been proved and verified.
     pub fn prove_verify_and_archive_method_only(
@@ -871,12 +872,12 @@ impl Orchestrator {
                 &task.method_input,
             ));
         };
-        let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
-        let post_seat = Self::seat(&task.post_table, *seat_index)?;
+        let _ = Self::seat(&task.pre_table, *seat_index)?;
+        let _ = Self::seat(&task.post_table, *seat_index)?;
         let input = RequestLeaveAfterHandInput {
             seat_index: *seat_index,
-            pre_want_leave: pre_seat.want_leave,
-            post_want_leave: post_seat.want_leave,
+            pre_want_leave: task.pre_table.seat_wants_leave(*seat_index),
+            post_want_leave: task.post_table.seat_wants_leave(*seat_index),
         };
         if input.pre_want_leave == input.post_want_leave {
             return Err(TexasAirError::SpecViolation(
@@ -1246,7 +1247,7 @@ impl Orchestrator {
             post_pot,
             post_seat.stack,
             action_post_bet,
-            post_seat.all_in,
+            post_seat.is_all_in(),
             pre_seat.bet,
             pre_seat.stack,
             post_seat.total_bet,
@@ -1350,7 +1351,7 @@ impl Orchestrator {
             post_seat.total_bet,
             action_round.current_bet,
             action_round.min_raise,
-            post_seat.all_in,
+            post_seat.is_all_in(),
         );
         run(
             backend,
@@ -1943,8 +1944,8 @@ impl Orchestrator {
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let pre_cc = task.pre_table.shuffle_state.completed_players.len() as u8;
-        let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
+        let pre_cc = task.pre_table.shuffle_state.completed_mask.count_ones() as u8;
+        let post_cc = task.post_table.shuffle_state.completed_mask.count_ones() as u8;
         let mut row = JoinAndShuffleRow::active(
             &input,
             srm(pre_root),
@@ -2048,7 +2049,7 @@ impl Orchestrator {
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
+        let post_cc = task.post_table.shuffle_state.completed_mask.count_ones() as u8;
         let mut row = LeaveWithProofRow::active(
             &input,
             srm(pre_root),
@@ -2272,7 +2273,7 @@ impl Orchestrator {
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let post_cc = task.post_table.shuffle_state.completed_players.len() as u8;
+        let post_cc = task.post_table.shuffle_state.completed_mask.count_ones() as u8;
         let mut row = SubmitShuffleV2Row::active(
             &input,
             srm(pre_root),
@@ -2463,7 +2464,6 @@ impl Orchestrator {
             precompile: binding.air_binding(),
         };
         let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
-        let post_sc = task.post_table.reconstruct_state.player_decks.len() as u8;
         let mut row = SubmitReconstructDeckRow::active(
             &input,
             srm(pre_root),
@@ -2473,7 +2473,6 @@ impl Orchestrator {
             task.call_seq,
             pre_v,
             post_v,
-            post_sc,
         );
         row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
         row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
@@ -2994,7 +2993,7 @@ mod tests {
         RebuyArgs, SeatIndexArgs,
     };
     use poker_l1::vm::contracts::texas_poker::state_machine;
-    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
 
     fn make_table(name: &str) -> TexasPokerTable {
         TexasPokerTable::new(
@@ -3035,11 +3034,18 @@ mod tests {
     /// `return_value`. Tests must not hand-maintain task metadata in parallel
     /// with the VM wire format, because that would bypass the boundary under test.
     fn dispatch_task(
-        pre_table: TexasPokerTable,
+        mut pre_table: TexasPokerTable,
         caller: poker_l1::Address,
         selector: [u8; 32],
         raw_args: Vec<u8>,
     ) -> (ProveTask, TexasPokerTable) {
+        // Older fixtures populated `player` directly. Schema v4 makes lifecycle status explicit,
+        // so canonicalize only that legacy test shorthand before crossing the codec boundary.
+        for seat in &mut pre_table.seats {
+            if seat.player != EMPTY_PLAYER && seat.status() == SeatStatus::Empty {
+                seat.set_status(SeatStatus::Active);
+            }
+        }
         let context = test_context(caller);
         let mut post_table = pre_table.clone();
         let result = texas_dispatch::dispatch(&context, &mut post_table, &selector, &raw_args)
@@ -3070,7 +3076,7 @@ mod tests {
             texas_dispatch::selectors::request_leave_after_hand(),
             raw_args,
         );
-        assert!(post.seats[0].want_leave);
+        assert!(post.seat_wants_leave(0));
         let mut orchestrator = Orchestrator::new();
         let summary = orchestrator
             .prove_and_verify_task(&task)
@@ -3083,7 +3089,7 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
                 .expect("request_leave_after_hand args should serialize"),
         );
-        assert!(!cancelled.seats[0].want_leave);
+        assert!(!cancelled.seat_wants_leave(0));
         orchestrator
             .prove_and_verify_task(&cancel_task)
             .expect("cancelling request_leave_after_hand should also prove");
@@ -3212,7 +3218,7 @@ mod tests {
         pre.version = 1;
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
             pre.seats[i].stack = 1000;
@@ -3238,7 +3244,7 @@ mod tests {
         let mut pre = make_table("auto-fold-consensus-time");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.timestamps.betting_started_at = 1;
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
@@ -3254,7 +3260,7 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
                 .expect("auto_fold args should serialize"),
         );
-        assert!(post.seats[0].folded);
+        assert!(post.seats[0].is_folded());
         assert_eq!(task.context.block_timestamp, 1_000_000);
 
         Orchestrator::new()
@@ -3266,7 +3272,7 @@ mod tests {
         let mut pre = make_table(name);
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.timestamps.betting_started_at = 1;
         pre.pot = 250;
         pre.hand_id = 17;
@@ -3286,7 +3292,7 @@ mod tests {
             post.round_state,
             poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
         );
-        assert!(post.current_turn.is_none());
+        assert!(post.current_turn_option().is_none());
         assert!(post.betting_round.is_none());
         assert_eq!(post.pot, 0);
         assert_eq!(post.seats[1].stack, 1_450);
@@ -3460,7 +3466,7 @@ mod tests {
         let mut pre = make_table("kick-ripple-carry");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.pot = 65_535;
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
@@ -3491,7 +3497,7 @@ mod tests {
         let mut pre = make_table("force-fold-admin-binding");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         for index in 0..3 {
             pre.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
             pre.seats[index].stack = 1_000;
@@ -3505,7 +3511,7 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
                 .expect("force_fold args should serialize"),
         );
-        assert!(post.seats[0].folded);
+        assert!(post.seats[0].is_folded());
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("creator-authorized force_fold should prove and verify");
@@ -3592,7 +3598,7 @@ mod tests {
         let mut pre = make_table("mid-round-call");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.pot = 25;
         pre.hand_id = 7;
         pre.call_seq = 11;
@@ -3612,7 +3618,7 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("call args should serialize"),
         );
         assert_eq!(post.pot, pre.pot, "mid-round call must not collect bets");
-        assert_eq!(post.current_turn, Some(1));
+        assert_eq!(post.current_turn, 1);
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("nonzero mid-round call should prove and verify");
@@ -3625,7 +3631,7 @@ mod tests {
         let mut pre = make_table("end-round-call");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(1);
+        pre.current_turn = 1;
         pre.pot = 25;
         pre.hand_id = 7;
         pre.call_seq = 12;
@@ -3635,7 +3641,7 @@ mod tests {
         pre.seats[0].stack = 900;
         pre.seats[0].bet = 100;
         pre.seats[0].total_bet = 100;
-        pre.seats[0].acted_this_round = true;
+        pre.set_seat_acted_this_round(0, true);
         pre.seats[1].stack = 950;
         pre.seats[1].bet = 50;
         pre.seats[1].total_bet = 50;
@@ -3654,7 +3660,7 @@ mod tests {
         assert_eq!(post.pot, 225);
         assert_ne!(post.round_state, pre.round_state);
         assert!(post.betting_round.is_none());
-        assert!(post.current_turn.is_none());
+        assert!(post.current_turn_option().is_none());
 
         Orchestrator::new()
             .prove_and_verify_task(&task)
@@ -3667,7 +3673,7 @@ mod tests {
         let mut pre = make_table("end-round-raise");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(1);
+        pre.current_turn = 1;
         pre.pot = 25;
         pre.hand_id = 13;
         pre.call_seq = 60;
@@ -3677,8 +3683,8 @@ mod tests {
         pre.seats[0].stack = 0;
         pre.seats[0].bet = 100;
         pre.seats[0].total_bet = 100;
-        pre.seats[0].all_in = true;
-        pre.seats[0].acted_this_round = true;
+        pre.seats[0].set_status(SeatStatus::AllIn);
+        pre.set_seat_acted_this_round(0, true);
         pre.seats[1].stack = 100;
         pre.seats[1].bet = 50;
         pre.seats[1].total_bet = 50;
@@ -3699,7 +3705,7 @@ mod tests {
         assert_eq!(post.pot, 275);
         assert_ne!(post.round_state, pre.round_state);
         assert!(post.betting_round.is_none());
-        assert!(post.current_turn.is_none());
+        assert!(post.current_turn_option().is_none());
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("end-of-round raise should prove and verify");
@@ -3711,7 +3717,7 @@ mod tests {
         let mut pre = make_table("normal-mid-round-raise");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.pot = 55;
         pre.hand_id = 8;
         pre.call_seq = 20;
@@ -3737,7 +3743,7 @@ mod tests {
         assert_eq!(post_round.current_bet, 300);
         assert_eq!(post_round.min_raise, 200);
         assert_eq!(post.pot, pre.pot);
-        assert_eq!(post.current_turn, Some(1));
+        assert_eq!(post.current_turn, 1);
 
         Orchestrator::new()
             .prove_and_verify_task(&task)
@@ -3753,7 +3759,7 @@ mod tests {
             current_bet: 300,
             min_raise: 200,
         });
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.pot = 77;
         pre.hand_id = 9;
         pre.call_seq = 30;
@@ -3782,7 +3788,7 @@ mod tests {
             post_round.min_raise, 200,
             "short all-in must not reopen action"
         );
-        assert!(post.seats[0].all_in);
+        assert!(post.seats[0].is_all_in());
         assert_eq!(post.pot, pre.pot);
 
         Orchestrator::new()
@@ -3796,7 +3802,7 @@ mod tests {
         let mut pre = make_table("postflop-bet");
         pre.round_state = ROUND_FLOP;
         pre.betting_round = Some(BettingRound::new(100, 0));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.pot = 300;
         pre.hand_id = 10;
         pre.call_seq = 40;
@@ -3821,7 +3827,7 @@ mod tests {
         assert_eq!(post_round.min_raise, 200);
         assert_eq!(post.seats[0].bet, 200);
         assert_eq!(post.pot, pre.pot);
-        assert_eq!(post.current_turn, Some(1));
+        assert_eq!(post.current_turn, 1);
 
         Orchestrator::new()
             .prove_and_verify_task(&task)
@@ -3834,7 +3840,7 @@ mod tests {
         let mut pre = make_table("end-round-bet");
         pre.round_state = ROUND_FLOP;
         pre.betting_round = Some(BettingRound::new(100, 0));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.pot = 300;
         pre.hand_id = 14;
         pre.call_seq = 61;
@@ -3843,7 +3849,7 @@ mod tests {
         }
         pre.seats[0].stack = 100;
         pre.seats[1].stack = 0;
-        pre.seats[1].all_in = true;
+        pre.seats[1].set_status(SeatStatus::AllIn);
         state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
 
         let caller = pre.seats[0].player;
@@ -3861,7 +3867,7 @@ mod tests {
         assert_eq!(post.pot, 400);
         assert_ne!(post.round_state, pre.round_state);
         assert!(post.betting_round.is_none());
-        assert!(post.current_turn.is_none());
+        assert!(post.current_turn_option().is_none());
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("end-of-round bet should prove and verify");
@@ -3873,7 +3879,7 @@ mod tests {
         let mut pre = make_table("fold-settlement");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.pot = 250;
         pre.hand_id = 11;
         pre.call_seq = 50;
@@ -3892,7 +3898,7 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("fold args should serialize"),
         );
         assert_ne!(post.round_state, pre.round_state);
-        assert!(post.current_turn.is_none());
+        assert!(post.current_turn_option().is_none());
         assert!(post.betting_round.is_none());
         assert_eq!(post.pot, 0);
         assert_eq!(post.seats[1].stack, 1_450);
@@ -3916,7 +3922,7 @@ mod tests {
             .expect("terminal fold with pending addon should prove through Settlement/Reset");
 
         let mut leave_pre = task.pre_table.clone();
-        leave_pre.seats[1].want_leave = true;
+        leave_pre.set_seat_wants_leave(1, true);
         leave_pre.chip_pool = leave_pre
             .seats
             .iter()
@@ -3943,7 +3949,7 @@ mod tests {
         let mut pre = make_table("end-round-check");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(1);
+        pre.current_turn = 1;
         pre.hand_id = 3;
         pre.call_seq = 4;
         for i in 0..2 {
@@ -3952,7 +3958,7 @@ mod tests {
             pre.seats[i].bet = 100;
             pre.seats[i].total_bet = 100;
         }
-        pre.seats[0].acted_this_round = true;
+        pre.set_seat_acted_this_round(0, true);
         state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
 
         let caller = pre.seats[1].player;
@@ -3963,7 +3969,7 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).expect("check args should serialize"),
         );
         assert_ne!(post.round_state, pre.round_state);
-        assert!(post.current_turn.is_none());
+        assert!(post.current_turn_option().is_none());
         assert!(post.pot > pre.pot);
 
         Orchestrator::new()
@@ -4002,7 +4008,7 @@ mod tests {
         let mut pre = make_table("kick-active-settlement");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.hand_id = 9;
         pre.call_seq = 17;
         for seat_index in 0..2 {
@@ -4053,7 +4059,7 @@ mod tests {
         let mut pre = make_table("kick-immediate-collection-only");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         for seat_index in 0..2 {
             pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
             pre.seats[seat_index].stack = 900;
@@ -4090,7 +4096,7 @@ mod tests {
         let mut pre = make_table("pre");
         pre.round_state = poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
             pre.seats[i].stack = 1_000;
@@ -4154,7 +4160,7 @@ mod tests {
         let mut pre = make_table("two-real-dispatches");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.hand_id = 7;
         pre.call_seq = 11;
         for i in 0..3 {
@@ -4170,7 +4176,7 @@ mod tests {
             texas_dispatch::selectors::call(),
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("call args should serialize"),
         );
-        assert_eq!(after_call.current_turn, Some(1));
+        assert_eq!(after_call.current_turn, 1);
         let (task2, _) = dispatch_task(
             after_call,
             [2; 20],
@@ -4203,7 +4209,7 @@ mod tests {
         let mut pre = make_table("anchored-two-dispatches");
         pre.round_state = ROUND_PREFLOP;
         pre.betting_round = Some(BettingRound::new(100, 100));
-        pre.current_turn = Some(0);
+        pre.current_turn = 0;
         pre.hand_id = 9;
         pre.call_seq = 20;
         for i in 0..3 {

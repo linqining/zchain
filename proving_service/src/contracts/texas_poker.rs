@@ -50,7 +50,7 @@ pub struct TexasPokerPlugin {
     segment_start: usize,
     /// Composite tasks whose method proofs are complete but Stage proofs are deferred.
     deferred_composition_tasks: Vec<ProveTask>,
-    /// Verified four-proof batches produced for deferred composite transitions.
+    /// Verified tagged Stage batches produced for deferred composite transitions.
     composition_batches: Vec<ArchivedCompositionBatchProofBundle>,
 }
 
@@ -116,18 +116,39 @@ impl TexasPokerPlugin {
         self.segment_start = self.proved_tasks.len();
     }
 
-    /// 注册聚合公钥（`aggregated_pk`）到桌台 deck_state。
+    /// Register the occupied seats as the canonical deck-key contributor lineage.
     ///
-    /// 真实协议中每个玩家经 `join_and_shuffle` 入座时会把自己的 pk 累加进
-    /// `deck_state.aggregated_pk`；该值是后续 `submit_shuffle_v2` 的 shuffle proof
-    /// 绑定的共享公钥（proof 把它作为广义 Schnorr 的基点之一，禁止 identity）。
+    /// 真实协议中每个玩家经 `join_and_shuffle` 入座时会设置 contributor bit；
+    /// `aggregated_pk` 只是由 contributor mask + seat pk 派生的 runtime cache。
     ///
-    /// 本驱动用 `join_table`（不设 aggregated_pk）入座以便 `start_hand` 后能洗牌，
-    /// 故需在 `start_hand` 前显式注册聚合 pk（= Σ player pk），使 shuffle proof
-    /// 可生成。仅在 WAITING 态、对局未开始时调用；`start_hand` 会保留该值
-    /// （`set_initial_encrypted_deck` 不清 aggregated_pk）。
-    pub fn register_aggregated_pk(&mut self, pk: poker_protocol::crypto::ECPoint) {
-        self.table.deck_state.aggregated_pk = Some(pk);
+    /// 本驱动用兼容 `join_table` 入座，所以在 `start_hand` 前把所有 occupied、
+    /// non-identity seat 纳入 lineage，并要求调用方给出的总公钥与派生结果一致。
+    pub fn register_aggregated_pk(
+        &mut self,
+        pk: poker_protocol::crypto::ECPoint,
+    ) -> PluginResult<()> {
+        let mut contributor_mask = 0u16;
+        for (seat_index, seat) in self.table.seats.iter().enumerate() {
+            if seat.is_occupied()
+                && !poker_l1::vm::contracts::texas_poker::utils::g1_is_identity(&seat.pk.0)
+            {
+                contributor_mask |= 1u16 << seat_index;
+            }
+        }
+        let mut candidate = self.table.clone();
+        candidate.deck_state.contributor_mask = contributor_mask;
+        candidate.sync_aggregated_pk().map_err(|error| {
+            PluginError::Precondition(format!(
+                "cannot derive aggregate public key from occupied contributor seats: {error}"
+            ))
+        })?;
+        if candidate.deck_state.aggregated_pk != Some(pk) {
+            return Err(PluginError::Precondition(
+                "registered aggregate public key does not match contributor seat lineage".into(),
+            ));
+        }
+        self.table = candidate;
+        Ok(())
     }
 
     /// Prove, verify, and archive one canonical task for durable service storage.
@@ -156,7 +177,7 @@ impl TexasPokerPlugin {
     }
 
     /// Prove one method immediately while collecting composite Stage transitions for one later
-    /// 1024-row batch proof per Stage.
+    /// one 1024-row tagged-union Stage batch proof.
     ///
     /// Non-composite methods keep the ordinary complete proving path. Composite methods are not
     /// durable-package complete until [`Self::finalize_composition_batches`] succeeds.
@@ -192,7 +213,7 @@ impl TexasPokerPlugin {
         Ok(archived.summary)
     }
 
-    /// Finalize all collected composite transitions as four proofs per 1024-task chunk.
+    /// Finalize all collected composite transitions as one tagged Stage proof per chunk.
     ///
     /// The generated bundles are immediately replay-verified before pending tasks are cleared.
     /// On any error, the pending task list remains available for a retry.
@@ -484,7 +505,7 @@ mod tests {
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::constants::SHUFFLE_PHASE_BEFORE_PREFLOP;
     use poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args;
-    use poker_l1::vm::contracts::texas_poker::types::ShuffleState;
+    use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState};
     use poker_protocol::crypto::curve::{
         Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric,
     };
@@ -511,10 +532,8 @@ mod tests {
         aggregated_pk: <Bls12381Curve as Curve>::Point,
         permutation: &[usize],
     ) -> (ProveTask, TexasPokerTable) {
-        let seat_index = pre_table
-            .shuffle_state
-            .current_shuffler
-            .expect("a shuffler should remain");
+        let seat_index = pre_table.shuffle_state.current_shuffler;
+        assert_ne!(seat_index, u8::MAX, "a shuffler should remain");
         let input_cards = pre_table.deck_state.encrypted.clone();
         let rerandomizers: Vec<_> = (0..input_cards.len())
             .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
@@ -591,16 +610,19 @@ mod tests {
         table.version = 30;
         for (index, key) in seat_keys.into_iter().enumerate() {
             table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
+            table.seats[index].set_status(SeatStatus::Active);
             table.seats[index].stack = 1_000;
             table.seats[index].pk = ECPoint(key);
         }
         table.deck_state.encrypted = input_cards;
-        table.deck_state.aggregated_pk = Some(ECPoint(aggregated_pk));
+        table.deck_state.contributor_mask = 0b11;
+        table.sync_aggregated_pk().unwrap();
+        assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
         table.shuffle_state = ShuffleState {
             phase: SHUFFLE_PHASE_BEFORE_PREFLOP,
-            current_shuffler: Some(0),
-            pending_players: vec![0, 1],
-            completed_players: vec![],
+            current_shuffler: 0,
+            pending_mask: 0b11,
+            completed_mask: 0,
         };
 
         let (first, table) = next_shuffle_task(table, aggregated_pk, &[3, 0, 7, 1, 6, 2, 5, 4]);

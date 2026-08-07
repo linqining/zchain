@@ -41,7 +41,7 @@ use poker_l1::object_model::ObjectID;
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs, selectors,
 };
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TableConfig, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
 use poker_protocol::crypto::types::ECPoint;
 
 use crate::contracts::TexasPokerPlugin;
@@ -233,10 +233,7 @@ fn dispatch_and_prove<A: BorshSerialize>(
 /// 构造占位桌台（create_table 会在其上覆写真实配置）。
 fn make_placeholder_table(_creator: Address) -> TexasPokerTable {
     let id = ObjectID::new([0xFF; 20], 0);
-    let mut table = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
-    // 默认 config（skip 所有 ZK）便于流程跑通
-    table.config = TableConfig::default();
-    table
+    TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1)
 }
 
 /// 构造测试用占位公钥（join_table 用；skip 模式下不参与真实 ZK 验证）。

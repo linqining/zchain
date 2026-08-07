@@ -11,7 +11,9 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, JoinTableArgs, KickPlayerArgs, LeaveTableArgs,
 };
 use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{
+    EMPTY_PLAYER, SeatStatus, TexasPokerTable,
+};
 use poker_protocol::crypto::types::ECPoint;
 use poker_texas_air::airs::actions::call::{CallAir, CallInput, CallRow};
 use poker_texas_air::airs::actions::end_betting_round::BettingOutcome;
@@ -208,12 +210,13 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
     );
     pre.round_state = ROUND_PREFLOP;
     pre.betting_round = Some(BettingRound::new(100, 100));
-    pre.current_turn = Some(0);
+    pre.current_turn = 0;
     pre.pot = 25;
     pre.hand_id = 5;
     pre.call_seq = 8;
     for i in 0..3 {
         pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        pre.seats[i].set_status(SeatStatus::Active);
         pre.seats[i].stack = 1_000;
     }
     pre.seats[0].bet = 50;
@@ -227,7 +230,7 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
     state_machine::apply_call(&mut post, 0, &mut vec![]).unwrap();
     post.call_seq = pre.call_seq + 1;
     assert_eq!(post.seats[0].bet, 100);
-    assert_eq!(post.current_turn, Some(1));
+    assert_eq!(post.current_turn, 1);
     (pre, post)
 }
 
@@ -326,12 +329,13 @@ fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
     );
     pre.round_state = ROUND_PREFLOP;
     pre.betting_round = Some(BettingRound::new(100, 100));
-    pre.current_turn = Some(0);
+    pre.current_turn = 0;
     pre.pot = 200;
     pre.hand_id = 6;
     pre.call_seq = 9;
     for i in 0..2 {
         pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        pre.seats[i].set_status(SeatStatus::Active);
         pre.seats[i].stack = 1_000;
     }
     pre.seats[0].bet = 25;
@@ -458,7 +462,7 @@ fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
         post.pot,
         post.seats[0].stack,
         post.seats[0].bet,
-        post.seats[0].all_in,
+        post.seats[0].is_all_in(),
         pre.seats[0].bet,
         pre.seats[0].stack,
         post.seats[0].total_bet,
@@ -510,6 +514,7 @@ fn make_funds_pre_table() -> TexasPokerTable {
     table.hand_id = 3;
     table.call_seq = 11;
     table.seats[0].player = [0x31; 20];
+    table.seats[0].set_status(SeatStatus::Active);
     table.seats[0].stack = 1_000;
     table.chip_pool = 1_000;
     table
@@ -543,10 +548,11 @@ fn make_kick_player_transition() -> (DispatchContext, TexasPokerTable, TexasPoke
     pre.call_seq = 19;
     pre.round_state = ROUND_PREFLOP;
     pre.betting_round = Some(BettingRound::new(100, 100));
-    pre.current_turn = Some(0);
+    pre.current_turn = 0;
     pre.pot = 75;
     for seat_index in 0..3 {
         pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+        pre.seats[seat_index].set_status(SeatStatus::Active);
         pre.seats[seat_index].stack = 1_000;
     }
     pre.seats[2].bet = 25;
@@ -659,8 +665,10 @@ fn make_start_hand_transition() -> (DispatchContext, TexasPokerTable, TexasPoker
     pre.call_seq = 20;
     pre.button = 0;
     pre.seats[0].player = [0x72; 20];
+    pre.seats[0].set_status(SeatStatus::Active);
     pre.seats[0].stack = 1_000;
     pre.seats[2].player = [0x73; 20];
+    pre.seats[2].set_status(SeatStatus::Active);
     pre.seats[2].stack = 1_000;
     pre.chip_pool = 2_000;
 
