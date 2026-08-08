@@ -5,7 +5,8 @@
 `FullHandRunner` 现在会完成一局双人 Texas Hold'em 的真实 VM dispatch：建桌、两人入座、
 开局、两次 shuffle、preflop/flop/turn/river/showdown reveal，以及四轮下注。每个状态变更都
 由 `poker_texas_air::Orchestrator` 重放 canonical VM dispatch、生成 Stwo proof 并进行 host
-verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
+verify；reveal 采用每个 seat 一次覆盖其全部 pending assignment 的 canonical 批量提交，完整
+流程产生 24 个连续 receipt，最终再生成一份 tagged method proof 与一份 tagged Stage proof。
 
 ## 已修复的终态转换
 
@@ -15,9 +16,10 @@ verify；完整流程产生 32 个连续 receipt，state-root 链可验证。
   `current_turn: None`（进入 reveal phase）。
 - terminal `call` / `raise` / `bet` 同样支持 clean round completion：按 native replay
   重建动作后的 `seat.bet`，约束 live bet 总和收池、pot 加法、下注清零和下一 reveal phase。
-- 最后一个 showdown reveal 同时执行结算和 `reset_for_next_hand`，因此版本从 pre-state
-  递增两次；仅该 canonical terminal transition 被允许使用 version increment 2。
-- showdown 结算先生成并原子应用规范化 `SettlementPlan`。verifier 从 canonical replay
+- 最后一个 showdown reveal 同时执行结算和内部 reset；外部事实始终只递增一次 `call_seq`，
+  结算与 reset 的顺序由 tagged Stage rows 绑定。
+- showdown 结算先生成并原子应用规范化 `SettlementPlan` v2。runout shape 由 typed
+  `Single | Twice { RitStartStreet }` 唯一表达；verifier 从 canonical replay
   事件提取完整 plan digest、1/2 runout、gross/rake/total awards 和固定 9 座位 award；
   submit-reveal AIR 绑定这些字段并约束 `total_awards + rake = gross_pot`。非终局 reveal
   携带 settlement 投影、缺少 plan event、重复 plan event 或 award 汇总不一致都会拒绝。
@@ -94,6 +96,9 @@ throughput，不会放宽现有持久化 fail-closed 规则。
   BLS12-381 verifier，再签发字段私有、无反序列化入口的 binding；AIR verifier 只重算
   canonical bytes、ABI/backend、request/receipt digest 与 table/hand/call/state scope，
   不重复同一昂贵密码学验证。这不是 BLS12-381 verifier AIR，也不是递归 proof。
+- reveal wire/canonical payload 不再携带 `assignment_indices`。service/full-hand producer 与 verifier
+  都从 authenticated pre-table 派生该 seat 的全部 pending assignment；派生索引仍进入 native
+  BLS12-381 request statement，所以缩短 payload 不会放松 ciphertext/proof lineage 绑定。
 - GameTurn / CheckpointAnchor 的 gas-free 仅表示不扣 caller fee、不推进 account nonce；
   成功或失败的 native crypto 调用仍按确定性 `gas_cost` 计入 block resource gas，超过
   block limit 的后续调用会在执行昂贵 verifier 前被 admission 拒绝。

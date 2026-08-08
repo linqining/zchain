@@ -528,10 +528,10 @@ payload，也应按同一规则处理：
 
 | 当前 plan 字段 | 建议 | 理由 |
 |---|---|---|
-| ~~`RunoutPotPlan.active: bool`~~ | 已从 runtime 删除，由 `winner_mask != 0` 派生 | 自定义 Borsh 仍按 v1 原位置写 derived bit；旧 bit 错配或 inactive 非零 payload 解码时 fail-closed |
-| ~~`SettlementPotPlan.contested: bool`~~ | 已从 runtime 删除，由 `eligible_mask.count_ones() >= 2` 派生 | 自定义 Borsh 保持 v1 bytes/digest；旧重复 bit 与 mask 错配时 fail-closed |
-| `SettlementBoards.runout_count + shared_board_len + board2` | runtime 已改成 `Single { board } | Twice { shared_board_len, board1, board2 }` | 自定义 Borsh 保持旧 struct bytes；single 不再能携带 board2/shared prefix |
-| `SettlementPlan.runout_count + shared_board_len` | 下一步改为 typed runout summary，或仅作为 checked public summary | plan digest v1 必须继续可重放，不能无版本直接改变编码 |
+| ~~`RunoutPotPlan.active: bool`~~ | 已从 runtime 与 settlement-plan v2 Borsh 删除，由 `winner_mask != 0` 派生 | inactive slot 的 amount/rank/award 非零仍在解码与 plan validation 时 fail-closed |
+| ~~`SettlementPotPlan.contested: bool`~~ | 已从 runtime 与 settlement-plan v2 Borsh 删除，由 `eligible_mask.count_ones() >= 2` 派生 | 每层减少一个重复 bit byte；空 eligible mask 与不规范 runout payload继续拒绝 |
+| ~~`SettlementBoards.runout_count + shared_board_len + board2`~~ | 已改成 `Single { board } | Twice { start: RitStartStreet, board1, board2 }` | single/twice 与共享前缀由一个 tag 决定；`0/3/4` 之外的非街道边界无法构造 |
+| ~~`SettlementPlan.runout_count + shared_board_len`~~ | settlement plan v2 已改成 `SettlementRunoutSchedule::{Single, Twice { start }}` | plan Borsh 与 digest domain 升级为 v2；event/AIR 使用的 runout count 从 schedule 派生，旧 v1 digest fail-closed |
 | `gross_pot/rake/total_awards/winner_mask/awards` 汇总 | 明细为唯一事实，汇总只作为 checked commitment/output | batch witness 可携带汇总，但 verifier 必须从 pot/runout awards 重算，不能同时信任两份 |
 
 plan-local bit 在 AIR 中仍要约束 `b * (b - 1) = 0`；这不意味着 Rust 源码也应长期保留可与
@@ -556,7 +556,7 @@ payload 冲突的 bool。对互斥存在性优先使用 union tag，对正交资
 | `player`（join） | 从 authenticated `context.caller` 派生 | 避免 caller/player 两份可错配身份；旧 ABI 只校验相等。|
 | 玩家命令的 `seat_index` | 从唯一 `caller -> occupied seat` 映射或 `current_turn/current_shuffler` 派生 | table 已禁止同一 player 重复入座；admin target seat 仍必须显式携带。|
 | `KickPlayerArgs.reason` | external `kick_player_v2(seat)` 与 canonical payload 均已删除该字段 | admin kick 固定 `KickCause::Admin`，deadline path 固定 `Timeout/ReconstructTimeout`；legacy `kick_player` 仅接受 `Admin` 并在 lowering 后丢弃 reason，任意其他值 fail-closed。|
-| reveal `assignment_indices` | 默认要求一次提交 caller 当前全部 pending assignment，按 canonical assignment 顺序匹配 | 删除任意索引列表、重复/乱序检查并减少 reveal 调用数；若必须分片，仅保留连续 `start/count`。|
+| reveal `assignment_indices` | 已物理删除；一次提交 caller 当前全部 pending assignment，索引由 authenticated pre-state 按 canonical assignment 顺序派生 | 删除调用方可重复声明的索引列表、重复/乱序检查与 batch payload 字节；token/proof 数量少于或多于 pending assignment 均在 mutation 前 fail-closed。|
 | `bet.amount` | wrapper 转成 `RaiseTo(total_bet)` | command 层只保留一种加注金额语义。|
 | `selector + method_kind + typed input + raw_args` | 单一 `canonical_command_bytes` | tag、payload 与 digest 均从同一字节串派生；重型 crypto request 只保存一次。|
 
@@ -703,6 +703,13 @@ AIR/orchestrator/tagged/dual-proof
 统一解码 authenticated replay ABI。为避免旧 payload 与新语义混用，continuous stream、method row、
 method archive、composition bundle、service package 和 repository 已同步升级为 v4/v4/v3/v6/v7/v6，
 dispatch digest domain 升为 `dispatch_call.v4`。
+
+reveal payload 进一步删除了 `assignment_indices`。状态机此前已经要求每次提交 caller 在当前 reveal
+state 中的全部 pending assignment，且顺序必须等于 canonical assignment 顺序；因此该向量从来不是
+独立选择。L1 dispatch、canonical command、replay ABI、full-hand driver 与 precompile request builder
+现在统一从 authenticated pre-state 派生索引，只在 native crypto request 的逐项 statement 中保留派生
+后的 index 以绑定 ciphertext lineage。旧含索引 wire shape 无迁移入口并 fail-closed；少交、多交或
+token/proof 数量不一致均在状态 mutation 前拒绝。
 
 共识锚不会只把已认证交易参数“删字段后哈希”：它现在从 authenticated pre snapshot 开始，按调用
 顺序用原始交易 ABI 重放完整 native dispatch，要求每次都产生 canonical proof task、legacy 与

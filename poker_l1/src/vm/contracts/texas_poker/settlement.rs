@@ -21,11 +21,11 @@ use super::card::Card;
 use super::constants::{MAX_PLAYERS, MAX_TOTAL_BET, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE};
 use super::hand_evaluator::{HandRank, evaluate_best};
 use super::side_pot::{self, SidePot};
-use super::types::{Seat, TexasPokerTable};
+use super::types::{RitStartStreet, Seat, TexasPokerTable};
 use crate::error::{PokerL1Error, PokerL1Result};
 
 /// Canonical settlement-plan encoding version.
-pub const SETTLEMENT_PLAN_VERSION: u8 = 1;
+pub const SETTLEMENT_PLAN_VERSION: u8 = 2;
 /// Maximum number of independent boards supported by the protocol.
 pub const MAX_RUNOUTS: usize = 2;
 /// Fixed number of award/rank slots in every plan.
@@ -35,7 +35,7 @@ pub const SETTLEMENT_SEATS: usize = MAX_PLAYERS as usize;
 ///
 /// With two runouts, `shared_board_len` cards at the beginning of both boards must be identical.
 /// Cards after that prefix must be distinct across both runouts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub enum SettlementBoards {
     /// One complete five-card board.
     Single {
@@ -44,13 +44,39 @@ pub enum SettlementBoards {
     },
     /// Two complete boards with one shared prefix.
     Twice {
-        /// Prefix length shared by both boards.
-        shared_board_len: u8,
+        /// Street at which the two-runout schedule started.
+        start: RitStartStreet,
         /// First canonical board.
         board1: Vec<Card>,
         /// Second canonical board.
         board2: Vec<Card>,
     },
+}
+
+impl BorshDeserialize for SettlementBoards {
+    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let variant = u8::deserialize_reader(reader)?;
+        let boards = match variant {
+            0 => Self::Single {
+                board: Vec::<Card>::deserialize_reader(reader)?,
+            },
+            1 => Self::Twice {
+                start: RitStartStreet::deserialize_reader(reader)?,
+                board1: Vec::<Card>::deserialize_reader(reader)?,
+                board2: Vec::<Card>::deserialize_reader(reader)?,
+            },
+            _ => {
+                return Err(borsh::io::Error::new(
+                    borsh::io::ErrorKind::InvalidData,
+                    "invalid settlement boards variant",
+                ));
+            }
+        };
+        boards.validate().map_err(|error| {
+            borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        Ok(boards)
+    }
 }
 
 impl SettlementBoards {
@@ -62,9 +88,9 @@ impl SettlementBoards {
 
     /// Construct a two-runout settlement input.
     #[must_use]
-    pub fn twice(shared_board_len: u8, board1: Vec<Card>, board2: Vec<Card>) -> Self {
+    pub fn twice(start: RitStartStreet, board1: Vec<Card>, board2: Vec<Card>) -> Self {
         Self::Twice {
-            shared_board_len,
+            start,
             board1,
             board2,
         }
@@ -82,9 +108,15 @@ impl SettlementBoards {
     const fn shared_board_len(&self) -> u8 {
         match self {
             Self::Single { .. } => 0,
-            Self::Twice {
-                shared_board_len, ..
-            } => *shared_board_len,
+            Self::Twice { start, .. } => start.shared_board_len(),
+        }
+    }
+
+    #[must_use]
+    const fn schedule(&self) -> SettlementRunoutSchedule {
+        match self {
+            Self::Single { .. } => SettlementRunoutSchedule::Single,
+            Self::Twice { start, .. } => SettlementRunoutSchedule::Twice { start: *start },
         }
     }
 
@@ -118,7 +150,7 @@ impl SettlementBoards {
             )));
         }
         if let Self::Twice {
-            shared_board_len,
+            start,
             board1,
             board2,
         } = self
@@ -129,13 +161,7 @@ impl SettlementBoards {
                     board2.len()
                 )));
             }
-            if *shared_board_len > 4 {
-                return Err(PokerL1Error::Serialization(format!(
-                    "settlement: shared board prefix must be <= 4, got {}",
-                    shared_board_len
-                )));
-            }
-            let shared = usize::from(*shared_board_len);
+            let shared = usize::from(start.shared_board_len());
             if board1[..shared] != board2[..shared] {
                 return Err(PokerL1Error::Serialization(
                     "settlement: runout boards disagree on their shared prefix".into(),
@@ -161,13 +187,8 @@ impl SettlementBoards {
                 ));
             }
         }
-        if let Self::Twice {
-            shared_board_len,
-            board2,
-            ..
-        } = self
-        {
-            let shared = usize::from(*shared_board_len);
+        if let Self::Twice { start, board2, .. } = self {
+            let shared = usize::from(start.shared_board_len());
             for card in board2.iter().skip(shared) {
                 if !seen.insert(card.to_index()) {
                     return Err(PokerL1Error::Serialization(
@@ -180,48 +201,43 @@ impl SettlementBoards {
     }
 }
 
-// Keep the historical struct layout (`runout_count, shared_board_len, board1, board2`) while the
-// runtime uses a tagged union that cannot represent single/twice payload conflicts.
-impl BorshSerialize for SettlementBoards {
-    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        self.runout_count().serialize(writer)?;
-        self.shared_board_len().serialize(writer)?;
-        self.board1().serialize(writer)?;
-        self.board2().serialize(writer)
-    }
+/// Canonical number and shared-prefix shape of a settlement's runouts.
+///
+/// The enum makes invalid pairs such as `(runout_count=1, shared_board_len=3)` and non-street
+/// prefixes such as `2` unrepresentable in the normalized plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum SettlementRunoutSchedule {
+    /// One normal board with no duplicated runout suffix.
+    Single,
+    /// Two boards that diverge at a canonical Hold'em street boundary.
+    Twice {
+        /// Street at which both boards begin receiving independent cards.
+        start: RitStartStreet,
+    },
 }
 
-impl BorshDeserialize for SettlementBoards {
-    fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let runout_count = u8::deserialize_reader(reader)?;
-        let shared_board_len = u8::deserialize_reader(reader)?;
-        let board1 = Vec::<Card>::deserialize_reader(reader)?;
-        let board2 = Vec::<Card>::deserialize_reader(reader)?;
-        let boards = match runout_count {
-            1 if shared_board_len == 0 && board2.is_empty() => Self::single(board1),
-            1 => {
-                return Err(borsh::io::Error::new(
-                    borsh::io::ErrorKind::InvalidData,
-                    "single settlement runout carries board-2 payload",
-                ));
-            }
-            2 => Self::twice(shared_board_len, board1, board2),
-            _ => {
-                return Err(borsh::io::Error::new(
-                    borsh::io::ErrorKind::InvalidData,
-                    "settlement runout_count must be 1 or 2",
-                ));
-            }
-        };
-        boards.validate().map_err(|error| {
-            borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, error.to_string())
-        })?;
-        Ok(boards)
+impl SettlementRunoutSchedule {
+    /// Number of active boards.
+    #[must_use]
+    pub const fn count(self) -> u8 {
+        match self {
+            Self::Single => 1,
+            Self::Twice { .. } => 2,
+        }
+    }
+
+    /// Number of first-board cards shared by both runouts.
+    #[must_use]
+    pub const fn shared_board_len(self) -> u8 {
+        match self {
+            Self::Single => 0,
+            Self::Twice { start } => start.shared_board_len(),
+        }
     }
 }
 
 /// Settlement details for one pot on one runout.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct RunoutPotPlan {
     /// Amount of this pot assigned to the runout.
     pub amount: u64,
@@ -250,31 +266,13 @@ impl RunoutPotPlan {
     }
 }
 
-// Preserve the v1 leading `active` byte while deriving it from the canonical winner set.
-impl BorshSerialize for RunoutPotPlan {
-    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        self.is_active().serialize(writer)?;
-        self.amount.serialize(writer)?;
-        self.winner_mask.serialize(writer)?;
-        self.ranks.serialize(writer)?;
-        self.awards.serialize(writer)
-    }
-}
-
 impl BorshDeserialize for RunoutPotPlan {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let encoded_active = bool::deserialize_reader(reader)?;
         let amount = u64::deserialize_reader(reader)?;
         let winner_mask = u16::deserialize_reader(reader)?;
         let ranks = <[Option<HandRank>; SETTLEMENT_SEATS]>::deserialize_reader(reader)?;
         let awards = <[u64; SETTLEMENT_SEATS]>::deserialize_reader(reader)?;
         let derived_active = winner_mask != 0;
-        if encoded_active != derived_active {
-            return Err(borsh::io::Error::new(
-                borsh::io::ErrorKind::InvalidData,
-                "settlement runout active bit does not match winner_mask",
-            ));
-        }
         if !derived_active
             && (amount != 0 || ranks.iter().any(Option::is_some) || awards.iter().any(|v| *v != 0))
         {
@@ -293,7 +291,7 @@ impl BorshDeserialize for RunoutPotPlan {
 }
 
 /// Canonical settlement details for one main/side-pot layer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
 pub struct SettlementPotPlan {
     /// Stable layer index (`0` is the main pot).
     pub pot_index: u8,
@@ -321,36 +319,18 @@ impl SettlementPotPlan {
     }
 }
 
-// Preserve the v1 settlement-plan byte layout and digest while removing the duplicated runtime
-// bool. Historical encoding placed `contested` immediately after `pot_index`; serialization writes
-// the derived bit, and deserialization rejects any legacy byte stream whose bit disagrees with the
-// canonical eligibility mask.
-impl BorshSerialize for SettlementPotPlan {
-    fn serialize<W: borsh::io::Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        self.pot_index.serialize(writer)?;
-        self.is_contested().serialize(writer)?;
-        self.gross_amount.serialize(writer)?;
-        self.rake.serialize(writer)?;
-        self.net_amount.serialize(writer)?;
-        self.eligible_mask.serialize(writer)?;
-        self.runouts.serialize(writer)
-    }
-}
-
 impl BorshDeserialize for SettlementPotPlan {
     fn deserialize_reader<R: borsh::io::Read>(reader: &mut R) -> borsh::io::Result<Self> {
         let pot_index = u8::deserialize_reader(reader)?;
-        let encoded_contested = bool::deserialize_reader(reader)?;
         let gross_amount = u64::deserialize_reader(reader)?;
         let rake = u64::deserialize_reader(reader)?;
         let net_amount = u64::deserialize_reader(reader)?;
         let eligible_mask = u16::deserialize_reader(reader)?;
         let runouts = <[RunoutPotPlan; MAX_RUNOUTS]>::deserialize_reader(reader)?;
-        let derived_contested = eligible_mask.count_ones() >= 2;
-        if eligible_mask == 0 || encoded_contested != derived_contested {
+        if eligible_mask == 0 {
             return Err(borsh::io::Error::new(
                 borsh::io::ErrorKind::InvalidData,
-                "settlement pot contested bit does not match eligible_mask",
+                "settlement pot has no eligible seats",
             ));
         }
         Ok(Self {
@@ -369,10 +349,8 @@ impl BorshDeserialize for SettlementPotPlan {
 pub struct SettlementPlan {
     /// Encoding/domain version.
     pub version: u8,
-    /// Number of active runouts.
-    pub runout_count: u8,
-    /// Number of board cards shared by both runouts.
-    pub shared_board_len: u8,
+    /// Typed single/twice schedule and canonical shared-prefix boundary.
+    pub schedule: SettlementRunoutSchedule,
     /// Sum of all wager contributions before rake.
     pub gross_pot: u64,
     /// Total rake removed from table custody.
@@ -394,7 +372,7 @@ impl SettlementPlan {
             PokerL1Error::Serialization(format!("settlement plan borsh: {error}"))
         })?;
         let mut hasher = Blake2bVar::new(32).expect("32 <= Blake2b maximum output");
-        hasher.update(b"zchain.texas_poker.settlement_plan.v1");
+        hasher.update(b"zchain.texas_poker.settlement_plan.v2");
         hasher.update(&encoded);
         let mut digest = [0u8; 32];
         hasher
@@ -410,11 +388,6 @@ impl SettlementPlan {
                 "settlement: unsupported plan version {}",
                 self.version
             )));
-        }
-        if !(1..=MAX_RUNOUTS as u8).contains(&self.runout_count) {
-            return Err(PokerL1Error::Serialization(
-                "settlement: invalid plan runout count".into(),
-            ));
         }
         if seat_count > SETTLEMENT_SEATS || self.pots.len() > SETTLEMENT_SEATS {
             return Err(PokerL1Error::Serialization(
@@ -467,7 +440,7 @@ impl SettlementPlan {
             })?;
             let mut runout_total = 0u64;
             let active_runouts = if contested {
-                usize::from(self.runout_count)
+                usize::from(self.schedule.count())
             } else {
                 1
             };
@@ -595,8 +568,7 @@ pub fn derive_settlement_plan_for_boards(
 
     let mut plan = SettlementPlan {
         version: SETTLEMENT_PLAN_VERSION,
-        runout_count: boards.runout_count(),
-        shared_board_len: boards.shared_board_len(),
+        schedule: boards.schedule(),
         gross_pot,
         rake,
         total_awards: 0,
@@ -887,15 +859,7 @@ mod tests {
     use crate::object_model::ObjectID;
     use crate::vm::contracts::texas_poker::types::SeatStatus;
 
-    #[derive(BorshSerialize)]
-    struct LegacySettlementBoardsV1 {
-        runout_count: u8,
-        shared_board_len: u8,
-        board1: Vec<Card>,
-        board2: Vec<Card>,
-    }
-
-    #[derive(BorshSerialize)]
+    #[derive(BorshSerialize, Clone)]
     struct LegacyRunoutPotPlanV1 {
         active: bool,
         amount: u64,
@@ -912,7 +876,7 @@ mod tests {
         rake: u64,
         net_amount: u64,
         eligible_mask: u16,
-        runouts: [RunoutPotPlan; MAX_RUNOUTS],
+        runouts: [LegacyRunoutPotPlanV1; MAX_RUNOUTS],
     }
 
     fn table() -> TexasPokerTable {
@@ -948,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_pot_derives_contested_without_changing_v1_bytes() {
+    fn settlement_pot_v2_omits_contested_and_rejects_v1_bytes() {
         let plan = derive_settlement_plan(&table()).unwrap();
         let pot = plan.pots[0].clone();
         let legacy = LegacySettlementPotPlanV1 {
@@ -958,55 +922,52 @@ mod tests {
             rake: pot.rake,
             net_amount: pot.net_amount,
             eligible_mask: pot.eligible_mask,
-            runouts: pot.runouts.clone(),
+            runouts: std::array::from_fn(|index| {
+                let runout = &pot.runouts[index];
+                LegacyRunoutPotPlanV1 {
+                    active: runout.is_active(),
+                    amount: runout.amount,
+                    winner_mask: runout.winner_mask,
+                    ranks: runout.ranks,
+                    awards: runout.awards,
+                }
+            }),
         };
 
         let canonical_bytes = borsh::to_vec(&pot).unwrap();
-        assert_eq!(canonical_bytes, borsh::to_vec(&legacy).unwrap());
+        let legacy_bytes = borsh::to_vec(&legacy).unwrap();
+        assert_eq!(legacy_bytes.len(), canonical_bytes.len() + 3);
         let decoded: SettlementPotPlan = borsh::from_slice(&canonical_bytes).unwrap();
         assert_eq!(decoded, pot);
-
-        let mismatched = LegacySettlementPotPlanV1 {
-            contested: !legacy.contested,
-            ..legacy
-        };
         assert!(
-            borsh::from_slice::<SettlementPotPlan>(&borsh::to_vec(&mismatched).unwrap()).is_err(),
-            "legacy duplicate bit must fail closed when it disagrees with eligible_mask"
+            borsh::from_slice::<SettlementPotPlan>(&legacy_bytes).is_err(),
+            "v1 pot bytes with contested plus two nested active bits must fail closed"
         );
     }
 
     #[test]
-    fn settlement_boards_union_preserves_v1_bytes_and_rejects_conflicts() {
+    fn settlement_boards_and_plan_use_one_typed_runout_schedule() {
         let board = table().community_cards.to_vec();
         let boards = SettlementBoards::single(board.clone());
-        let legacy = LegacySettlementBoardsV1 {
-            runout_count: 1,
-            shared_board_len: 0,
-            board1: board.clone(),
-            board2: vec![],
-        };
         let canonical_bytes = borsh::to_vec(&boards).unwrap();
-        assert_eq!(canonical_bytes, borsh::to_vec(&legacy).unwrap());
         assert_eq!(
             borsh::from_slice::<SettlementBoards>(&canonical_bytes).unwrap(),
             boards
         );
+        assert_eq!(boards.schedule(), SettlementRunoutSchedule::Single);
+        assert!(RitStartStreet::from_shared_board_len(2).is_err());
 
-        let conflicting = LegacySettlementBoardsV1 {
-            runout_count: 1,
-            shared_board_len: 1,
-            board1: board.clone(),
-            board2: board,
-        };
-        assert!(
-            borsh::from_slice::<SettlementBoards>(&borsh::to_vec(&conflicting).unwrap()).is_err(),
-            "single-runout legacy bytes must not carry shared-prefix or board-2 payload"
+        let twice = SettlementBoards::twice(RitStartStreet::Flop, board.clone(), board);
+        assert_eq!(
+            twice.schedule(),
+            SettlementRunoutSchedule::Twice {
+                start: RitStartStreet::Flop
+            }
         );
     }
 
     #[test]
-    fn settlement_runout_derives_active_without_changing_v1_bytes() {
+    fn settlement_runout_v2_omits_active_and_rejects_v1_bytes() {
         let plan = derive_settlement_plan(&table()).unwrap();
         let runout = plan.pots[0].runouts[0].clone();
         let legacy = LegacyRunoutPotPlanV1 {
@@ -1018,17 +979,13 @@ mod tests {
         };
 
         let canonical_bytes = borsh::to_vec(&runout).unwrap();
-        assert_eq!(canonical_bytes, borsh::to_vec(&legacy).unwrap());
+        let legacy_bytes = borsh::to_vec(&legacy).unwrap();
+        assert_eq!(legacy_bytes.len(), canonical_bytes.len() + 1);
         let decoded: RunoutPotPlan = borsh::from_slice(&canonical_bytes).unwrap();
         assert_eq!(decoded, runout);
-
-        let mismatched = LegacyRunoutPotPlanV1 {
-            active: !legacy.active,
-            ..legacy
-        };
         assert!(
-            borsh::from_slice::<RunoutPotPlan>(&borsh::to_vec(&mismatched).unwrap()).is_err(),
-            "legacy duplicate bit must fail closed when it disagrees with winner_mask"
+            borsh::from_slice::<RunoutPotPlan>(&legacy_bytes).is_err(),
+            "v1 runout bytes with the duplicated active bit must fail closed"
         );
     }
 
@@ -1036,6 +993,7 @@ mod tests {
     fn single_runout_plan_is_canonical_and_conserves_funds() {
         let table = table();
         let plan = derive_settlement_plan(&table).expect("derive plan");
+        assert_eq!(plan.schedule, SettlementRunoutSchedule::Single);
         assert_eq!(plan.gross_pot, 600);
         assert_eq!(plan.rake, 0);
         assert_eq!(plan.total_awards, 600);
@@ -1052,13 +1010,18 @@ mod tests {
         let board2 = vec![
             Card::new(2, 2),
             Card::new(3, 4),
-            Card::new(3, 12),
+            Card::new(2, 6),
             Card::new(2, 12),
             Card::new(3, 10),
         ];
-        let boards = SettlementBoards::twice(2, board1, board2);
+        let boards = SettlementBoards::twice(RitStartStreet::Flop, board1, board2);
         let plan = derive_settlement_plan_for_boards(&table, &boards).expect("derive RIT plan");
-        assert_eq!(plan.runout_count, 2);
+        assert_eq!(
+            plan.schedule,
+            SettlementRunoutSchedule::Twice {
+                start: RitStartStreet::Flop
+            }
+        );
         assert_eq!(plan.total_awards, 600);
         assert_eq!(plan.pots[0].runouts[0].amount, 150);
         assert_eq!(plan.pots[0].runouts[1].amount, 150);
@@ -1076,16 +1039,12 @@ mod tests {
     fn duplicate_cross_runout_card_is_rejected() {
         let table = table();
         let board1 = table.community_cards.to_vec();
-        let board2 = vec![
-            board1[0],
-            board1[1],
-            board1[2],
-            Card::new(2, 12),
-            Card::new(3, 10),
-        ];
-        let error =
-            derive_settlement_plan_for_boards(&table, &SettlementBoards::twice(2, board1, board2))
-                .unwrap_err();
+        let board2 = vec![board1[0], board1[1], board1[2], board1[3], Card::new(3, 10)];
+        let error = derive_settlement_plan_for_boards(
+            &table,
+            &SettlementBoards::twice(RitStartStreet::Flop, board1, board2),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("duplicate non-shared card"));
     }
 
@@ -1104,13 +1063,15 @@ mod tests {
         let board2 = vec![
             Card::new(2, 2),
             Card::new(3, 4),
-            Card::new(3, 9),
+            Card::new(2, 6),
             Card::new(2, 11),
             Card::new(3, 12),
         ];
-        let plan =
-            derive_settlement_plan_for_boards(&table, &SettlementBoards::twice(2, board1, board2))
-                .unwrap();
+        let plan = derive_settlement_plan_for_boards(
+            &table,
+            &SettlementBoards::twice(RitStartStreet::Flop, board1, board2),
+        )
+        .unwrap();
 
         assert_eq!(plan.pots.len(), 2);
         assert!(plan.pots[0].is_contested());
@@ -1146,7 +1107,7 @@ mod tests {
         // Both boards play entirely from the board, so every eligible seat ties. This makes the
         // button-relative odd-chip order observable at every side-pot depth.
         let boards = SettlementBoards::twice(
-            0,
+            RitStartStreet::Preflop,
             vec![
                 Card::new(2, 10),
                 Card::new(2, 11),

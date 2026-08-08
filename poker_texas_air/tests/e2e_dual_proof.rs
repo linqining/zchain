@@ -392,7 +392,6 @@ fn reveal_task(nonce: u64) -> ProveTask {
         .unwrap();
     let raw_args = borsh::to_vec(&SubmitRevealTokensArgs {
         seat_index: 1,
-        assignment_indices: vec![0],
         reveal_tokens: vec![ECPoint(reveal_token)],
         proofs: vec![proof],
     })

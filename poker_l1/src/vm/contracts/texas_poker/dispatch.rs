@@ -535,9 +535,8 @@ pub struct SubmitShuffleV2Args {
 pub struct SubmitRevealTokensArgs {
     /// 座位索引。
     pub seat_index: u8,
-    /// 揭牌分配索引列表（每张待揭示牌在 deck 中的位置）。
-    pub assignment_indices: Vec<u8>,
-    /// 揭牌令牌列表（typed ECPoint，Borsh 兼容的 G1 点包装）。
+    /// 揭牌令牌列表（typed ECPoint，Borsh 兼容的 G1 点包装）。令牌按认证前态中该
+    /// seat 的全部 pending assignment 的 canonical 顺序排列；调用方不再重复提交索引。
     pub reveal_tokens: Vec<ECPoint>,
     /// 揭牌 proof 列表（typed RevealTokenProof，与 reveal_tokens 一一对应）。
     pub proofs: Vec<RevealTokenProof<DefaultCurve>>,
@@ -626,7 +625,6 @@ struct CanonicalSubmitShuffleV2Args {
 /// Canonical actor-less payload for `submit_player_reveal_tokens`.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct CanonicalSubmitRevealTokensArgs {
-    assignment_indices: Vec<u8>,
     reveal_tokens: Vec<ECPoint>,
     proofs: Vec<RevealTokenProof<DefaultCurve>>,
 }
@@ -1262,7 +1260,6 @@ pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Resul
             let input: SubmitRevealTokensArgs =
                 decode_args(args, "submit_player_reveal_tokens canonical payload")?;
             borsh::to_vec(&CanonicalSubmitRevealTokensArgs {
-                assignment_indices: input.assignment_indices,
                 reveal_tokens: input.reveal_tokens,
                 proofs: input.proofs,
             })
@@ -1411,7 +1408,6 @@ pub fn replay_dispatch_args(
             )?;
             borsh::to_vec(&SubmitRevealTokensArgs {
                 seat_index,
-                assignment_indices: canonical.assignment_indices,
                 reveal_tokens: canonical.reveal_tokens,
                 proofs: canonical.proofs,
             })
@@ -1909,7 +1905,6 @@ fn dispatch_submit_player_reveal_tokens(
     state_machine::apply_submit_player_reveal_tokens(
         table,
         seat_index,
-        input.assignment_indices,
         reveal_tokens,
         input.proofs,
         events,
@@ -3389,7 +3384,6 @@ mod tests {
         };
         let reveal = SubmitRevealTokensArgs {
             seat_index: 4,
-            assignment_indices: vec![],
             reveal_tokens: vec![],
             proofs: vec![],
         };
@@ -3585,6 +3579,37 @@ mod tests {
                 other => panic!("canonical crypto payload 映射到了错误 variant: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn reveal_wire_physically_omits_assignment_indices_and_rejects_old_shape() {
+        #[derive(BorshSerialize)]
+        struct RetiredRevealArgs {
+            seat_index: u8,
+            assignment_indices: Vec<u8>,
+            reveal_tokens: Vec<ECPoint>,
+            proofs: Vec<RevealTokenProof<DefaultCurve>>,
+        }
+
+        let current = borsh::to_vec(&SubmitRevealTokensArgs {
+            seat_index: 4,
+            reveal_tokens: vec![],
+            proofs: vec![],
+        })
+        .unwrap();
+        assert_eq!(current.len(), 1 + 4 + 4);
+
+        let retired = borsh::to_vec(&RetiredRevealArgs {
+            seat_index: 4,
+            assignment_indices: vec![0],
+            reveal_tokens: vec![],
+            proofs: vec![],
+        })
+        .unwrap();
+        assert!(
+            build_method_input(&selectors::submit_player_reveal_tokens(), &retired).is_err(),
+            "retired reveal payload with caller-selected assignment indices must fail closed"
+        );
     }
 
     #[test]

@@ -415,7 +415,7 @@ pub enum TexasPokerEvent {
     SettlementPlanCommitted {
         /// Settled table.
         table_id: ObjectID,
-        /// Domain-separated digest of the canonical Borsh plan.
+        /// Domain-separated digest of the canonical Borsh settlement plan v2.
         plan_digest: [u8; 32],
         /// Number of independent runouts (`1` or `2`).
         runout_count: u8,

@@ -415,7 +415,6 @@ fn reveal_fixture(
         .unwrap();
     let args = SubmitRevealTokensArgs {
         seat_index,
-        assignment_indices: vec![0],
         reveal_tokens: vec![reveal_token],
         proofs: vec![reveal_proof],
     };
@@ -463,12 +462,14 @@ fn reveal_fixture(
             request_args.proofs[0] = proof;
         }
         RevealRequestVariant::OtherAssignment => {
-            let assignment = &mut request_table.active_reveal_state_mut().unwrap().assignments[1];
-            assignment.pending_mask = 1u16 << seat_index;
-            assignment.submitted_mask = 0;
-            assignment.reveal_tokens.clear();
+            let assignments = &mut request_table.active_reveal_state_mut().unwrap().assignments;
+            assignments[0].pending_mask = 0;
+            assignments[0].submitted_mask = 1u16 << seat_index;
+            assignments[0].reveal_tokens = vec![request_args.reveal_tokens[0]];
+            assignments[1].pending_mask = 1u16 << seat_index;
+            assignments[1].submitted_mask = 0;
+            assignments[1].reveal_tokens.clear();
             let (token, proof) = prove_reveal_token(&secret_key, &public_key, &encrypted_cards[1]);
-            request_args.assignment_indices[0] = 1;
             request_args.reveal_tokens[0] = token;
             request_args.proofs[0] = proof;
         }
@@ -692,9 +693,27 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
             FIXTURE_TIMESTAMP_MS,
         )
         .unwrap();
+
+    let mut rejected_table = table.clone();
+    let rejected_pre = rejected_table.clone();
+    let short_args = borsh::to_vec(&SubmitRevealTokensArgs {
+        seat_index,
+        reveal_tokens: vec![submissions[0].0],
+        proofs: vec![submissions[0].1],
+    })
+    .unwrap();
+    let error = texas_dispatch::dispatch(
+        &context(player1),
+        &mut rejected_table,
+        &texas_dispatch::selectors::submit_player_reveal_tokens(),
+        &short_args,
+    )
+    .expect_err("reveal submission must cover every pending assignment");
+    assert!(error.to_string().contains("expected 2 token/proof pairs"));
+    assert_eq!(rejected_table, rejected_pre, "failed reveal must be atomic");
+
     let raw_args = borsh::to_vec(&SubmitRevealTokensArgs {
         seat_index,
-        assignment_indices: vec![0, 1],
         reveal_tokens: submissions.iter().map(|(token, _)| *token).collect(),
         proofs: submissions.into_iter().map(|(_, proof)| proof).collect(),
     })

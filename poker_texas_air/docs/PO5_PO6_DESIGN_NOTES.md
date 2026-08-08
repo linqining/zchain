@@ -59,10 +59,13 @@ native crypto 验证即可。
   `pre_winner_stack + award = post_winner_stack`，最后 reset 到 `WAITING`。生产 verifier 仍从
   canonical VM replay 派生 winner 与完整 pre/post table；`fold_with_proof` 同时保留 native
   DLEq request/receipt digest 和调用上下文绑定。
-- terminal showdown reveal 的 settlement + reset 双 version bump 已有专门允许路径。
+- terminal showdown reveal 的 settlement + reset 级联已由一次外部 `call_seq + 1` 和内部 stage
+  顺序表达，不再依赖旧的双 version bump 特判。
 - showdown 已先在 `poker_l1::texas_poker` 规范化为确定性的 `SettlementPlan`：固定 9 座位、
   最多 9 层 side pot、1/2 个 runout、完整 hand rank/winner mask、按 button 顺时针分配奇数
-  筹码，并对完整 Borsh plan 做 domain-separated Blake2b digest。单座位外层 pot 被视为
+  筹码，并对完整 Borsh plan v2 做 domain-separated Blake2b digest。runout shape 使用
+  `SettlementRunoutSchedule::{Single, Twice { start: RitStartStreet }}`，因此 count 与共享前缀
+  不再是两份可冲突事实。单座位外层 pot 被视为
   uncalled return，不抽水且不拆成两次 runout。
 - 最后一个 showdown reveal 的 canonical replay 必须恰好产生一个
   `SettlementPlanCommitted`。verifier 从事件重建 plan digest、runout count、gross/rake/
@@ -298,6 +301,9 @@ Stage-only batching 路径，主要节省来自删除 18 次 legacy method prove
   method batch 仍把 caller 与 seat 当成两份可错配事实。管理员 target seat 仍保留显式输入。
 - proof-bearing Mental Poker command 也已改为 actor-less canonical payload；完整密码学 statement/proof
   不做摘要替代或删减，只有可由 authenticated caller 唯一恢复的 player/seat 字段被删除。
+  reveal command 还删除了 caller 自报的 `assignment_indices`：每次必须覆盖该 seat 的全部 pending
+  assignment，index 与 ciphertext statement 由 authenticated pre-state 按 canonical 顺序派生；
+  token/proof 少交、多交或旧含索引 payload 均 fail-closed。
 - 内部 `reset_for_next_hand` 的完整座位/资金重置语义由触发 settlement/normalize 的 durable 四段
   component bundle 承担，不再存在可单独提交的 reset method STARK。旧 `join_and_shuffle` / `leave_with_proof` package
   路由已删除：加入与 fresh-deck shuffle 分别由 `join_table`、`start_hand`、`submit_shuffle_v2`

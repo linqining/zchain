@@ -657,10 +657,9 @@ fn submit_reveal_batch_for_seat(
         return;
     }
 
-    let mut assignment_indices = Vec::with_capacity(assignment_cards.len());
     let mut reveal_tokens = Vec::with_capacity(assignment_cards.len());
     let mut proofs = Vec::with_capacity(assignment_cards.len());
-    for (batch_offset, (assignment_index, card_index)) in assignment_cards.into_iter().enumerate() {
+    for (batch_offset, (_, card_index)) in assignment_cards.into_iter().enumerate() {
         // Showdown binds the owner proof to the self-contained partial ciphertext retained from
         // preflop. Every other phase binds to the current encrypted deck view.
         let card = if reveal_phase == REVEAL_PHASE_SHOWDOWN {
@@ -692,24 +691,11 @@ fn submit_reveal_batch_for_seat(
             &card,
             u64::from(step_no) * 256 + batch_offset as u64 + 1,
         );
-        let Ok(assignment_index) = u8::try_from(assignment_index) else {
-            ctx.stopped_at = Some(format!("{method}: assignment index exceeds u8"));
-            ctx.steps.push(StepTiming {
-                method,
-                dispatch: Duration::ZERO,
-                prove: Duration::ZERO,
-                proof_breakdown: Vec::new(),
-                ok: false,
-            });
-            return;
-        };
-        assignment_indices.push(assignment_index);
         reveal_tokens.push(ECPoint(rstep.reveal_token));
         proofs.push(rstep.proof);
     }
     let args = SubmitRevealTokensArgs {
         seat_index: submitter_seat,
-        assignment_indices,
         reveal_tokens,
         proofs,
     };

@@ -146,14 +146,12 @@ impl RevealTokenVerifyRequest {
     ) -> TexasAirResult<Self> {
         use poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
 
-        if args.assignment_indices.len() != args.reveal_tokens.len()
-            || args.assignment_indices.len() != args.proofs.len()
-        {
+        if args.reveal_tokens.len() != args.proofs.len() {
             return Err(TexasAirError::SpecViolation(
-                "reveal-token request vectors have different lengths".into(),
+                "reveal-token/proof request vectors have different lengths".into(),
             ));
         }
-        if args.assignment_indices.is_empty() || args.assignment_indices.len() > N_CARDS {
+        if args.reveal_tokens.is_empty() || args.reveal_tokens.len() > N_CARDS {
             return Err(TexasAirError::SpecViolation(format!(
                 "reveal-token request requires 1..={N_CARDS} statements"
             )));
@@ -178,21 +176,30 @@ impl RevealTokenVerifyRequest {
         })?;
         let reveal_phase = pre_table.reveal_phase();
 
-        let mut seen = [false; 256];
-        let mut items = Vec::with_capacity(args.assignment_indices.len());
-        for ((assignment_index, reveal_token), proof) in args
-            .assignment_indices
+        let assignment_indices = reveal_state
+            .assignments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, assignment)| {
+                seat_mask_contains(assignment.pending_mask(), args.seat_index)
+                    .then_some(index as u8)
+            })
+            .collect::<Vec<_>>();
+        if assignment_indices.len() != args.reveal_tokens.len() {
+            return Err(TexasAirError::SpecViolation(format!(
+                "reveal-token request must cover all {} pending assignments, got {} token/proof pairs",
+                assignment_indices.len(),
+                args.reveal_tokens.len()
+            )));
+        }
+
+        let mut items = Vec::with_capacity(assignment_indices.len());
+        for ((assignment_index, reveal_token), proof) in assignment_indices
             .iter()
             .zip(&args.reveal_tokens)
             .zip(&args.proofs)
         {
             let slot = usize::from(*assignment_index);
-            if seen[slot] {
-                return Err(TexasAirError::SpecViolation(format!(
-                    "duplicate reveal assignment index {assignment_index}"
-                )));
-            }
-            seen[slot] = true;
             let assignment = reveal_state.assignments.get(slot).ok_or_else(|| {
                 TexasAirError::SpecViolation(format!(
                     "reveal assignment index {assignment_index} is outside the canonical pre-table"

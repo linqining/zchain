@@ -1506,7 +1506,6 @@ pub fn apply_submit_shuffle_v2(
 pub fn apply_submit_player_reveal_tokens(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    assignment_indices: Vec<u8>,
     reveal_tokens: Vec<G1Projective>,
     proofs: Vec<RevealTokenProof<DefaultCurve>>,
     events: &mut Vec<TexasPokerEvent>,
@@ -1514,12 +1513,12 @@ pub fn apply_submit_player_reveal_tokens(
     if table.reveal_token_state().is_none() {
         return Err(PokerL1Error::Serialization("reveal phase is NONE".into()));
     }
-    if assignment_indices.len() != reveal_tokens.len() || assignment_indices.len() != proofs.len() {
+    if reveal_tokens.len() != proofs.len() {
         return Err(PokerL1Error::Serialization(
-            "assignment_indices/reveal_tokens/proofs length mismatch".into(),
+            "reveal_tokens/proofs length mismatch".into(),
         ));
     }
-    if assignment_indices.is_empty() {
+    if reveal_tokens.is_empty() {
         return Err(PokerL1Error::Serialization(
             "reveal token submission must not be empty".into(),
         ));
@@ -1529,7 +1528,7 @@ pub fn apply_submit_player_reveal_tokens(
     }
 
     let phase = table.reveal_phase();
-    let expected_assignment_indices = table
+    let assignment_indices = table
         .reveal_token_state()
         .expect("checked active reveal above")
         .assignments
@@ -1539,9 +1538,11 @@ pub fn apply_submit_player_reveal_tokens(
             is_in_mask(assignment.pending_mask(), seat_index).then_some(index as u8)
         })
         .collect::<Vec<_>>();
-    if assignment_indices != expected_assignment_indices {
+    if assignment_indices.len() != reveal_tokens.len() {
         return Err(PokerL1Error::Serialization(format!(
-            "reveal submission must contain every pending assignment in canonical order: expected {expected_assignment_indices:?}, got {assignment_indices:?}"
+            "reveal submission must contain every pending assignment in canonical order: expected {} token/proof pairs, got {}",
+            assignment_indices.len(),
+            reveal_tokens.len()
         )));
     }
     // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
@@ -2969,13 +2970,16 @@ fn settle_hand(
     // Derive the complete plan before touching balances. Apply and reset on a scratch table so a
     // corrupt addon/leave ledger cannot leave a partially paid showdown when reset fails.
     let plan = if table.run_it_twice_state.is_active() {
+        let RunItTwiceState::Twice { start, .. } = &table.run_it_twice_state else {
+            unreachable!("is_active only matches the twice variant")
+        };
         let second_board = table
             .run_it_twice_state
             .full_second_board(&table.community_cards)?;
         settlement::derive_settlement_plan_for_boards(
             table,
             &settlement::SettlementBoards::twice(
-                table.run_it_twice_state.shared_board_len(),
+                *start,
                 table.community_cards.to_vec(),
                 second_board,
             ),
@@ -3038,7 +3042,7 @@ fn apply_settlement_plan(
         TexasPokerEvent::SettlementPlanCommitted {
             table_id: table.id,
             plan_digest,
-            runout_count: plan.runout_count,
+            runout_count: plan.schedule.count(),
             gross_pot: plan.gross_pot,
             rake: plan.rake,
             total_awards: plan.total_awards,
@@ -3062,7 +3066,7 @@ fn apply_settlement_plan(
         } else {
             POT_TYPE_SIDE
         };
-        for runout in pot.runouts.iter().take(usize::from(plan.runout_count)) {
+        for runout in pot.runouts.iter().take(usize::from(plan.schedule.count())) {
             for seat_index in 0..table.seats.len() {
                 let amount = runout.awards[seat_index];
                 if amount == 0 {
