@@ -41,18 +41,11 @@ use crate::verifier::verify_method_against;
 /// Durable composition-proof bundle schema version.
 pub const COMPOSITION_PROOF_BUNDLE_VERSION: u8 = 1;
 
-/// Legacy tagged-union batch bundle whose statement hashed complete `ProveTask` images.
-const LEGACY_COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 2;
-
 /// Durable tagged-union batched composition-proof bundle schema version.
 ///
-/// Version 3 introduces the method-batch v2 commitment: the statement hashes compact
-/// authenticated task commitments instead of serializing full pre/post tables and crypto proof
-/// bytes a second time. Version-2 archives remain verifiable.
-pub const COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 3;
-
-/// Version of the compact canonical method-batch task commitment.
-const METHOD_BATCH_TASK_COMMITMENT_VERSION: u8 = 2;
+/// Version 4 binds the proof to a continuous method-batch v2 stream and durable batch id. Older
+/// task-list layouts are intentionally rejected.
+pub const COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 4;
 
 /// Conservative maximum transitions packed into one 1024-row tagged Stage proof.
 ///
@@ -234,6 +227,7 @@ impl ArchivedCompositionProofBundle {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ArchivedCompositionBatchProofBundle {
     version: u8,
+    batch_id: [u8; 32],
     table_id: u64,
     hand_id: u32,
     first_call_seq: u32,
@@ -311,6 +305,12 @@ impl ArchivedTaggedStageProof {
 }
 
 impl ArchivedCompositionBatchProofBundle {
+    /// Domain-separated identifier shared by tagged method and Stage proofs.
+    #[must_use]
+    pub const fn batch_id(&self) -> [u8; 32] {
+        self.batch_id
+    }
+
     /// Number of canonical transitions packed into each Stage proof.
     #[must_use]
     pub const fn task_count(&self) -> u16 {
@@ -335,12 +335,70 @@ impl ArchivedCompositionBatchProofBundle {
         &self.stage_proof
     }
 
+    /// Rebuild durable per-method references into this batch.
+    ///
+    /// References are never trusted from the archive alone: every Stage span is recomputed from
+    /// canonical VM replay and the normalized transition plan.
+    pub fn method_references(
+        &self,
+        tasks: &[crate::prove_task::ProveTask],
+    ) -> TexasAirResult<Vec<crate::prove_task::MethodBatchReferenceV2>> {
+        self.validate()?;
+        validate_batch_tasks(tasks)?;
+        let row_count = u16::try_from(tasks.len()).map_err(|_| {
+            TexasAirError::SpecViolation("method batch row count exceeds u16".into())
+        })?;
+        let mut stage_start_row = 0u16;
+        let mut references = Vec::with_capacity(tasks.len());
+        for (row_index, task) in tasks.iter().enumerate() {
+            let plan = derive_composite_transition_plan_from_task(task)?;
+            let stage_row_count = [
+                plan.seat_update.active,
+                plan.bet_collection.active,
+                plan.round_advance.active,
+                plan.settlement.active,
+            ]
+            .into_iter()
+            .filter(|active| *active)
+            .count();
+            let stage_row_count = u8::try_from(stage_row_count).expect("four fixed stages");
+            let reference = crate::prove_task::MethodBatchReferenceV2 {
+                batch_id: self.batch_id,
+                row_index: u16::try_from(row_index).map_err(|_| {
+                    TexasAirError::SpecViolation("method batch row index exceeds u16".into())
+                })?,
+                row_count,
+                stage_start_row,
+                stage_row_count,
+            };
+            reference.validate()?;
+            stage_start_row = stage_start_row
+                .checked_add(u16::from(stage_row_count))
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation("tagged Stage row offset overflow".into())
+                })?;
+            references.push(reference);
+        }
+        let (_, batch_id, _) =
+            crate::prove_task::MethodBatchV2::commitment_from_replayed_tasks(tasks)?;
+        if batch_id != self.batch_id || row_count != self.task_count {
+            return Err(TexasAirError::SpecViolation(
+                "method-batch reference scope does not match the Stage archive".into(),
+            ));
+        }
+        if stage_start_row != self.stage_row_count {
+            return Err(TexasAirError::SpecViolation(
+                "reconstructed Stage spans do not cover the archived Stage row count".into(),
+            ));
+        }
+        Ok(references)
+    }
+
     /// Validate the bounded archive envelope without trusting proof-carried task scope.
     pub fn validate(&self) -> TexasAirResult<()> {
-        if !matches!(
-            self.version,
-            LEGACY_COMPOSITION_BATCH_PROOF_BUNDLE_VERSION | COMPOSITION_BATCH_PROOF_BUNDLE_VERSION
-        ) || self.task_count == 0
+        if self.version != COMPOSITION_BATCH_PROOF_BUNDLE_VERSION
+            || self.batch_id == [0; 32]
+            || self.task_count == 0
             || usize::from(self.task_count) > MAX_COMPOSITION_BATCH_TASKS
             || usize::from(self.stage_row_count) > (1 << MIN_LOG_SIZE)
             || usize::from(self.stage_row_count) > usize::from(self.task_count) * 4
@@ -611,6 +669,7 @@ pub fn prove_composition_batch(
     let stage_proof = prove_tagged_batch_stage(&statement, &trace)?;
     let bundle = ArchivedCompositionBatchProofBundle {
         version: COMPOSITION_BATCH_PROOF_BUNDLE_VERSION,
+        batch_id: statement.batch_id,
         table_id: statement.table_id,
         hand_id: statement.hand_id,
         first_call_seq: statement.first_call_seq,
@@ -636,7 +695,8 @@ pub fn verify_composition_batch(
     bundle.validate()?;
     let (trace, stage_row_count) = build_tagged_batch_trace(tasks)?;
     let statement = CompositionBatchStatement::from_tasks(tasks, stage_row_count, bundle.version)?;
-    if bundle.table_id != statement.table_id
+    if bundle.batch_id != statement.batch_id
+        || bundle.table_id != statement.table_id
         || bundle.hand_id != statement.hand_id
         || bundle.first_call_seq != statement.first_call_seq
         || bundle.last_call_seq != statement.last_call_seq
@@ -654,6 +714,7 @@ pub fn verify_composition_batch(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompositionBatchStatement {
     version: u8,
+    batch_id: [u8; 32],
     table_id: u64,
     hand_id: u32,
     first_call_seq: u32,
@@ -670,10 +731,7 @@ impl CompositionBatchStatement {
         version: u8,
     ) -> TexasAirResult<Self> {
         validate_batch_tasks(tasks)?;
-        if !matches!(
-            version,
-            LEGACY_COMPOSITION_BATCH_PROOF_BUNDLE_VERSION | COMPOSITION_BATCH_PROOF_BUNDLE_VERSION
-        ) {
+        if version != COMPOSITION_BATCH_PROOF_BUNDLE_VERSION {
             return Err(TexasAirError::SpecViolation(format!(
                 "unsupported composition batch statement version {version}"
             )));
@@ -685,29 +743,11 @@ impl CompositionBatchStatement {
         }
         let first = tasks.first().expect("non-empty batch validated");
         let last = tasks.last().expect("non-empty batch validated");
-        let encoded = if version == LEGACY_COMPOSITION_BATCH_PROOF_BUNDLE_VERSION {
-            borsh::to_vec(&tasks).map_err(|error| {
-                TexasAirError::SerializationError(format!(
-                    "legacy composition batch task encoding failed: {error}"
-                ))
-            })?
-        } else {
-            let compact = tasks
-                .iter()
-                .map(CompactMethodBatchTaskV2::from_task)
-                .collect::<TexasAirResult<Vec<_>>>()?;
-            borsh::to_vec(&compact).map_err(|error| {
-                TexasAirError::SerializationError(format!(
-                    "compact method-batch task encoding failed: {error}"
-                ))
-            })?
-        };
+        let (_, batch_id, encoded) =
+            crate::prove_task::MethodBatchV2::commitment_from_replayed_tasks(tasks)?;
         let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
-        if version == LEGACY_COMPOSITION_BATCH_PROOF_BUNDLE_VERSION {
-            hasher.update(b"zchain.texas.composition_batch.v1");
-        } else {
-            hasher.update(b"zchain.texas.composition_batch.v2");
-        }
+        hasher.update(b"zchain.texas.composition_batch.v3");
+        hasher.update(&batch_id);
         hasher.update(&encoded);
         let mut batch_digest = [0u8; 32];
         hasher
@@ -715,6 +755,7 @@ impl CompositionBatchStatement {
             .expect("32 <= 64");
         Ok(Self {
             version,
+            batch_id,
             table_id: first.table_id,
             hand_id: first.hand_id,
             first_call_seq: first.call_seq,
@@ -743,65 +784,18 @@ impl CompositionBatchStatement {
         channel.mix_u64(self.table_id);
         channel.mix_u32s(
             &self
+                .batch_id
+                .chunks_exact(4)
+                .map(|chunk| u32::from_be_bytes(chunk.try_into().expect("4-byte batch-id word")))
+                .collect::<Vec<_>>(),
+        );
+        channel.mix_u32s(
+            &self
                 .batch_digest
                 .chunks_exact(4)
                 .map(|chunk| u32::from_be_bytes(chunk.try_into().expect("4-byte digest word")))
                 .collect::<Vec<_>>(),
         );
-    }
-}
-
-/// Compact authenticated task image used by method-batch v2.
-///
-/// The full command bytes remain available to the verifier for native replay and crypto proof
-/// verification.  The batch statement stores only their authenticated digest, so large shuffle,
-/// reveal, reconstruct and fold proofs are not serialized again merely to derive the Stage batch
-/// Fiat--Shamir statement.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize)]
-struct CompactMethodBatchTaskV2 {
-    version: u8,
-    family: u8,
-    subtag: u8,
-    actor: [u8; 20],
-    dispatch_digest: [u8; 32],
-    pre_root: [u8; 32],
-    post_root: [u8; 32],
-    table_id: u64,
-    hand_id: u32,
-    call_seq: u32,
-}
-
-impl CompactMethodBatchTaskV2 {
-    fn from_task(task: &crate::prove_task::ProveTask) -> TexasAirResult<Self> {
-        let command = poker_l1::vm::contracts::texas_poker::dispatch::CanonicalCommand::from_u8(
-            task.method_kind as u8,
-        )
-        .ok_or_else(|| {
-            TexasAirError::SpecViolation(format!(
-                "unknown canonical method-batch tag {}",
-                task.method_kind as u8
-            ))
-        })?;
-        let tag = command.batch_tag();
-        let selector = task.selector();
-        let dispatch_digest =
-            crate::prove_task::dispatch_call_digest(&task.context, &selector, &task.raw_args)?;
-        Ok(Self {
-            version: METHOD_BATCH_TASK_COMMITMENT_VERSION,
-            family: tag.family as u8,
-            subtag: tag.subtag,
-            actor: task.context.caller,
-            dispatch_digest,
-            pre_root: crate::state_root::compute_state_root(&task.pre_table)?
-                .field()
-                .to_bytes_be(),
-            post_root: crate::state_root::compute_state_root(&task.post_table)?
-                .field()
-                .to_bytes_be(),
-            table_id: task.table_id,
-            hand_id: task.hand_id,
-            call_seq: task.call_seq,
-        })
     }
 }
 
@@ -1115,6 +1109,7 @@ mod tests {
     fn batch_envelope() -> ArchivedCompositionBatchProofBundle {
         ArchivedCompositionBatchProofBundle {
             version: COMPOSITION_BATCH_PROOF_BUNDLE_VERSION,
+            batch_id: [7; 32],
             table_id: 7,
             hand_id: 3,
             first_call_seq: 9,
@@ -1157,16 +1152,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_full_task_batch_envelope_remains_archive_decodable() {
+    fn old_batch_versions_are_rejected() {
         let mut bundle = batch_envelope();
-        bundle.version = LEGACY_COMPOSITION_BATCH_PROOF_BUNDLE_VERSION;
-        let bytes = bundle.to_bytes().unwrap();
-        let decoded = ArchivedCompositionBatchProofBundle::from_bytes(&bytes).unwrap();
-        assert_eq!(
-            decoded.version,
-            LEGACY_COMPOSITION_BATCH_PROOF_BUNDLE_VERSION
-        );
-        assert_eq!(decoded, bundle);
+        bundle.version = COMPOSITION_BATCH_PROOF_BUNDLE_VERSION - 1;
+        assert!(bundle.to_bytes().is_err());
     }
 
     #[test]

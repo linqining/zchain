@@ -273,9 +273,7 @@ impl RevealTokenVerifyRequest {
         pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
         args: &poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs,
     ) -> TexasAirResult<Self> {
-        use poker_l1::vm::contracts::texas_poker::constants::{
-            REVEAL_PHASE_NONE, REVEAL_PHASE_SHOWDOWN,
-        };
+        use poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_SHOWDOWN;
 
         if args.assignment_indices.len() != args.reveal_tokens.len()
             || args.assignment_indices.len() != args.proofs.len()
@@ -302,13 +300,12 @@ impl RevealTokenVerifyRequest {
                 "reveal-token seat is not occupied in the canonical pre-table".into(),
             ));
         }
-        let reveal_state = pre_table.reveal_token_state();
-        let reveal_phase = reveal_state.reveal_phase;
-        if reveal_phase == REVEAL_PHASE_NONE {
-            return Err(TexasAirError::SpecViolation(
-                "reveal-token request cannot target the NONE phase".into(),
-            ));
-        }
+        let reveal_state = pre_table.reveal_token_state().ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "reveal-token request requires an active or suspended reveal".into(),
+            )
+        })?;
+        let reveal_phase = pre_table.reveal_phase();
 
         let mut seen = [false; 256];
         let mut items = Vec::with_capacity(args.assignment_indices.len());
@@ -375,7 +372,11 @@ impl RevealTokenVerifyRequest {
             call_context,
             seat_index: args.seat_index,
             reveal_phase,
-            player_pk: seat.pk,
+            player_pk: seat.pk().copied().ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "reveal-token seat has no live Mental Poker key".into(),
+                )
+            })?,
             items,
         };
         request.validate_shape()?;

@@ -4,16 +4,14 @@ use poker_l1::object_model::ObjectID;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
-use poker_l1::vm::contracts::texas_poker::constants::{
-    REVEAL_PHASE_PREFLOP, REVEAL_PHASE_TURN, ROUND_PREFLOP, ROUND_TURN,
-};
+use poker_l1::vm::contracts::texas_poker::constants::{ROUND_PREFLOP, ROUND_TURN};
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, FoldWithProofArgs, JoinAndShuffleArgs, LeaveWithProofArgs,
     SubmitReconstructDeckArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealTarget, RevealTokenState, SeatStatus,
-    ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealPurpose, RevealTarget,
+    RevealTokenState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -34,6 +32,7 @@ use poker_texas_air::dual_proof::{
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
+use poker_texas_air::test_support as seat_fixture;
 use rand::rngs::OsRng;
 
 const HEADER_LEN: usize = 20;
@@ -111,13 +110,13 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
     );
     table.call_seq = call_seq;
     table.hand_id = 7;
-    table.seats[0].player = player;
+    seat_fixture::set_player(&mut table.seats[0], player);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 1_000;
-    table.seats[0].pk = ECPoint(public_key);
-    table.seats[1].player = [0x32; 20];
+    seat_fixture::set_stack(&mut table.seats[0], 1_000);
+    seat_fixture::set_pk(&mut table.seats[0], ECPoint(public_key));
+    seat_fixture::set_player(&mut table.seats[1], [0x32; 20]);
     table.seats[1].set_status(SeatStatus::Active);
-    table.seats[1].stack = 1_000;
+    seat_fixture::set_stack(&mut table.seats[1], 1_000);
     table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
@@ -198,9 +197,9 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
     );
     table.call_seq = call_seq;
     table.hand_id = 6;
-    table.seats[0].player = [0x42; 20];
+    seat_fixture::set_player(&mut table.seats[0], [0x42; 20]);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 2_000;
+    seat_fixture::set_stack(&mut table.seats[0], 2_000);
     table
         .enter_initial_shuffling(
             ShuffleState {
@@ -255,13 +254,13 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
     );
     table.call_seq = 12;
     table.hand_id = 8;
-    table.seats[0].player = player;
+    seat_fixture::set_player(&mut table.seats[0], player);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 1_000;
-    table.seats[0].pk = ECPoint(public_key);
-    table.seats[1].player = [0x52; 20];
+    seat_fixture::set_stack(&mut table.seats[0], 1_000);
+    seat_fixture::set_pk(&mut table.seats[0], ECPoint(public_key));
+    seat_fixture::set_player(&mut table.seats[1], [0x52; 20]);
     table.seats[1].set_status(SeatStatus::Active);
-    table.seats[1].stack = 1_000;
+    seat_fixture::set_stack(&mut table.seats[1], 1_000);
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
     table.deck_state.decrypted_cards = readable_cards
@@ -279,7 +278,7 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
                 accumulated_deck: None,
             },
             RevealTokenState {
-                reveal_phase: REVEAL_PHASE_TURN,
+                purpose: RevealPurpose::Board,
                 assignments: vec![],
             },
             epoch_ms,
@@ -354,11 +353,11 @@ fn leave_task(nonce: u64) -> ProveTask {
     );
     table.call_seq = 4;
     table.hand_id = 9;
-    table.seats[1].player = player;
+    seat_fixture::set_player(&mut table.seats[1], player);
     table.seats[1].set_status(SeatStatus::Active);
-    table.seats[1].pk = ECPoint(public_key);
+    seat_fixture::set_pk(&mut table.seats[1], ECPoint(public_key));
     for other_seat in [0usize, 2usize] {
-        table.seats[other_seat].player = [(other_seat as u8) + 1; 20];
+        seat_fixture::set_player(&mut table.seats[other_seat], [(other_seat as u8) + 1; 20]);
         table.seats[other_seat].set_status(SeatStatus::Active);
     }
     table.deck_state.encrypted = input_cards.try_into().unwrap();
@@ -437,26 +436,29 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
         )
         .unwrap();
     for index in 0..active_players {
-        table.seats[usize::from(index)].player = if index == 0 {
-            player
-        } else {
-            [0x81 + index; 20]
-        };
+        seat_fixture::set_player(
+            &mut table.seats[usize::from(index)],
+            if index == 0 {
+                player
+            } else {
+                [0x81 + index; 20]
+            },
+        );
         table.seats[usize::from(index)].set_status(SeatStatus::Active);
-        table.seats[usize::from(index)].stack = 1_000;
+        seat_fixture::set_stack(&mut table.seats[usize::from(index)], 1_000);
     }
     if active_players == 2 {
         table.pot = 200;
-        table.seats[0].bet = 25;
-        table.seats[0].total_bet = 25;
-        table.seats[1].bet = 75;
-        table.seats[1].total_bet = 75;
+        seat_fixture::set_bet(&mut table.seats[0], 25);
+        seat_fixture::set_total_bet(&mut table.seats[0], 25);
+        seat_fixture::set_bet(&mut table.seats[1], 75);
+        seat_fixture::set_total_bet(&mut table.seats[1], 75);
     }
     if compound_reset {
         assert_eq!(active_players, 2);
-        table.seats[1].pending_addon = 20;
+        seat_fixture::set_pending_addon(&mut table.seats[1], 20);
     }
-    table.seats[0].pk = ECPoint(public_key);
+    seat_fixture::set_pk(&mut table.seats[0], ECPoint(public_key));
     table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
@@ -509,10 +511,10 @@ fn reveal_task(nonce: u64) -> ProveTask {
     );
     table.call_seq = 7;
     table.hand_id = 11;
-    table.seats[1].player = player;
+    seat_fixture::set_player(&mut table.seats[1], player);
     table.seats[1].set_status(SeatStatus::Active);
-    table.seats[1].stack = 1_000;
-    table.seats[1].pk = ECPoint(public_key);
+    seat_fixture::set_stack(&mut table.seats[1], 1_000);
+    seat_fixture::set_pk(&mut table.seats[1], ECPoint(public_key));
     table.deck_state.encrypted = encrypted_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
@@ -520,7 +522,7 @@ fn reveal_task(nonce: u64) -> ProveTask {
         .enter_revealing(
             ROUND_PREFLOP,
             RevealTokenState {
-                reveal_phase: REVEAL_PHASE_PREFLOP,
+                purpose: RevealPurpose::DealHole,
                 assignments: vec![
                     RevealAssignment {
                         encrypted_card_index: 0,
@@ -697,7 +699,7 @@ fn terminal_fold_with_proof_proves_clean_and_compound_settlement() {
     let task = fold_with_proof_task(311, 2, false);
     assert_eq!(task.pre_table.pot, 200);
     assert_eq!(task.post_table.pot, 0);
-    assert_eq!(task.post_table.seats[1].stack, 1_300);
+    assert_eq!(task.post_table.seats[1].stack(), 1_300);
 
     let bundle = prove_dual_proof(&task).expect("terminal fold package should prove");
     let accepted = verify_dual_proof(&task, &bundle)

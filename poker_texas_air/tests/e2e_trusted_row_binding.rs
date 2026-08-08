@@ -33,6 +33,7 @@ use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::{prove_create_table, prove_method};
 use poker_texas_air::public_inputs::TexasPublicInputs;
 use poker_texas_air::state_root::state_root_to_air_limbs;
+use poker_texas_air::test_support as seat_fixture;
 use poker_texas_air::trace_gen::create_table_trace::gen_create_table_trace;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::{verify_create_table_against, verify_method_against};
@@ -218,22 +219,22 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
     pre.hand_id = 5;
     pre.call_seq = 8;
     for i in 0..3 {
-        pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
         pre.seats[i].set_status(SeatStatus::Active);
-        pre.seats[i].stack = 1_000;
+        seat_fixture::set_stack(&mut pre.seats[i], 1_000);
     }
-    pre.seats[0].bet = 50;
-    pre.seats[0].total_bet = 50;
-    pre.seats[1].bet = 100;
-    pre.seats[1].total_bet = 100;
-    pre.seats[2].bet = 100;
-    pre.seats[2].total_bet = 100;
+    seat_fixture::set_bet(&mut pre.seats[0], 50);
+    seat_fixture::set_total_bet(&mut pre.seats[0], 50);
+    seat_fixture::set_bet(&mut pre.seats[1], 100);
+    seat_fixture::set_total_bet(&mut pre.seats[1], 100);
+    seat_fixture::set_bet(&mut pre.seats[2], 100);
+    seat_fixture::set_total_bet(&mut pre.seats[2], 100);
 
     let mut post = pre.clone();
     state_machine::apply_call(&mut post, 0, &mut vec![]).unwrap();
     state_machine::normalize_until_blocked(&mut post, FIXTURE_TIMESTAMP_MS, &mut vec![]).unwrap();
     post.call_seq = pre.call_seq + 1;
-    assert_eq!(post.seats[0].bet, 100);
+    assert_eq!(post.seats[0].bet(), 100);
     assert_eq!(post.current_turn(), 1);
     (pre, post)
 }
@@ -342,19 +343,19 @@ fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
     pre.hand_id = 6;
     pre.call_seq = 9;
     for i in 0..2 {
-        pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+        seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
         pre.seats[i].set_status(SeatStatus::Active);
-        pre.seats[i].stack = 1_000;
+        seat_fixture::set_stack(&mut pre.seats[i], 1_000);
     }
-    pre.seats[0].bet = 25;
-    pre.seats[0].total_bet = 25;
-    pre.seats[1].bet = 75;
-    pre.seats[1].total_bet = 75;
+    seat_fixture::set_bet(&mut pre.seats[0], 25);
+    seat_fixture::set_total_bet(&mut pre.seats[0], 25);
+    seat_fixture::set_bet(&mut pre.seats[1], 75);
+    seat_fixture::set_total_bet(&mut pre.seats[1], 75);
 
     let mut post = pre.clone();
     state_machine::apply_fold(&mut post, 0, &mut vec![]).unwrap();
     post.call_seq = pre.call_seq + 1;
-    assert_eq!(post.seats[1].stack, 1_300);
+    assert_eq!(post.seats[1].stack(), 1_300);
 
     // The arithmetic is self-consistent, but seat 2 is not the canonical
     // last player standing. The low-level AIR intentionally cannot discover
@@ -468,13 +469,13 @@ fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
         post.round_state(),
         pre.pot,
         post.pot,
-        post.seats[0].stack,
-        post.seats[0].bet,
+        post.seats[0].stack(),
+        post.seats[0].bet(),
         post.seats[0].is_all_in(),
-        pre.seats[0].bet,
-        pre.seats[0].stack,
-        post.seats[0].total_bet,
-        pre.seats[0].total_bet,
+        pre.seats[0].bet(),
+        pre.seats[0].stack(),
+        post.seats[0].total_bet(),
+        pre.seats[0].total_bet(),
     );
     public_inputs
         .bind_expected_trace_row(&row.to_vec())
@@ -521,9 +522,9 @@ fn make_funds_pre_table() -> TexasPokerTable {
     );
     table.hand_id = 3;
     table.call_seq = 11;
-    table.seats[0].player = [0x31; 20];
+    seat_fixture::set_player(&mut table.seats[0], [0x31; 20]);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 1_000;
+    seat_fixture::set_stack(&mut table.seats[0], 1_000);
     table.chip_pool = 1_000;
     table
 }
@@ -563,12 +564,15 @@ fn make_kick_player_transition() -> (DispatchContext, TexasPokerTable, TexasPoke
     .unwrap();
     pre.pot = 75;
     for seat_index in 0..3 {
-        pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
+        seat_fixture::set_player(
+            &mut pre.seats[seat_index],
+            [u8::try_from(seat_index + 1).unwrap(); 20],
+        );
         pre.seats[seat_index].set_status(SeatStatus::Active);
-        pre.seats[seat_index].stack = 1_000;
+        seat_fixture::set_stack(&mut pre.seats[seat_index], 1_000);
     }
-    pre.seats[2].bet = 25;
-    pre.seats[2].total_bet = 25;
+    seat_fixture::set_bet(&mut pre.seats[2], 25);
+    seat_fixture::set_total_bet(&mut pre.seats[2], 25);
     pre.chip_pool = 3_000;
 
     let raw_args = borsh::to_vec(&KickPlayerArgs {
@@ -592,10 +596,10 @@ fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
     let (context, pre, canonical_post, raw_args) = make_kick_player_transition();
     let input = KickPlayerInput {
         seat_index: 2,
-        refund: pre.seats[2].stack,
-        pre_stack: pre.seats[2].stack,
-        pre_pending_addon: pre.seats[2].pending_addon,
-        kicked_bet: pre.seats[2].bet,
+        refund: pre.seats[2].stack(),
+        pre_stack: pre.seats[2].stack(),
+        pre_pending_addon: pre.seats[2].pending_addon(),
+        kicked_bet: pre.seats[2].bet(),
         version_increment: 1,
         reset_cascade: false,
         authorization: poker_texas_air::authorization_binding::AdminAuthorizationAirBinding::synthetic_unverified(),
@@ -676,12 +680,12 @@ fn make_start_hand_transition() -> (DispatchContext, TexasPokerTable, TexasPoker
     pre.hand_id = 6;
     pre.call_seq = 20;
     pre.button = 0;
-    pre.seats[0].player = [0x72; 20];
+    seat_fixture::set_player(&mut pre.seats[0], [0x72; 20]);
     pre.seats[0].set_status(SeatStatus::Active);
-    pre.seats[0].stack = 1_000;
-    pre.seats[2].player = [0x73; 20];
+    seat_fixture::set_stack(&mut pre.seats[0], 1_000);
+    seat_fixture::set_player(&mut pre.seats[2], [0x73; 20]);
     pre.seats[2].set_status(SeatStatus::Active);
-    pre.seats[2].stack = 1_000;
+    seat_fixture::set_stack(&mut pre.seats[2], 1_000);
     pre.chip_pool = 2_000;
 
     let raw_args = vec![];
@@ -1021,8 +1025,8 @@ fn production_verifier_rejects_leave_row_attached_to_unrelated_post_table() {
         public_inputs.call_seq,
         u64::from(pre.call_seq),
         u64::from(canonical_post.call_seq),
-        pre_seat.stack,
-        pre_seat.pending_addon,
+        pre_seat.stack(),
+        pre_seat.pending_addon(),
         pre.chip_pool,
         canonical_post.chip_pool,
     );
@@ -1091,7 +1095,7 @@ fn production_verifier_rejects_addon_row_attached_to_unrelated_post_table() {
     .unwrap();
     let row = AddonRow::active(
         &input,
-        pre.seats[0].pending_addon,
+        pre.seats[0].pending_addon(),
         pre.chip_pool,
         canonical_post.chip_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),
@@ -1167,7 +1171,7 @@ fn production_verifier_rejects_rebuy_row_attached_to_unrelated_post_table() {
     .unwrap();
     let row = RebuyRow::active(
         &input,
-        pre.seats[0].stack,
+        pre.seats[0].stack(),
         pre.chip_pool,
         canonical_post.chip_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),

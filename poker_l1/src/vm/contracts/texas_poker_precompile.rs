@@ -61,7 +61,7 @@ pub struct TexasPokerPrecompile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextStorageState {
-    /// The table was already encoded as hot v24 and all three openings were loaded.
+    /// The table was already encoded as hot v28 and all three openings were loaded.
     Existing,
     /// This is the first create-table call.
     NewTable,
@@ -233,7 +233,7 @@ impl Precompile for TexasPokerPrecompile {
 
         let table_id = reserved::texas_poker_contract_id();
 
-        // ObjectDb production state is hot v24 only.  Resolved v23 snapshots remain valid proof
+        // ObjectDb production state is hot v28 only. Resolved-v27 snapshots remain valid proof
         // payloads, but accepting them here would silently bypass independently authenticated
         // metadata/rules/governance openings.
         let (mut table, context_state) = match object_db.read(&table_id) {
@@ -247,7 +247,7 @@ impl Precompile for TexasPokerPrecompile {
                 }
                 if !crate::vm::contracts::texas_poker::state_codec::is_hot_table_state(&obj.data) {
                     return Err(PokerL1Error::Serialization(
-                        "Texas ObjectDb table must use hot v24 state".into(),
+                        "Texas ObjectDb table must use hot v28 state".into(),
                     ));
                 }
                 let openings = Self::read_context_openings(object_db, table_id)?;
@@ -917,7 +917,7 @@ mod tests {
                 &mut legacy_db,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("must use hot v24 state"));
+        assert!(error.to_string().contains("must use hot v28 state"));
 
         let mut failed_create_db = ObjectDb::open_inmemory().unwrap();
         let invalid_args = borsh::to_vec(&CreateTableArgs {
@@ -1088,7 +1088,7 @@ mod tests {
         let table_id = reserved::texas_poker_contract_id();
         let table = read_resolved_table(&object_db, table_id);
         assert_eq!(table.chip_pool, 100);
-        assert_eq!(table.seats[0].stack, 100);
+        assert_eq!(table.seats[0].stack(), 100);
 
         let leave_hash = [0x22; 32];
         let leave_env = ExecutionEnvironment {
@@ -1173,9 +1173,9 @@ mod tests {
         table.rake_bps = 500;
         table.rake_cap = 100;
         for seat in table.seats.iter_mut().take(2) {
-            seat.stack = 0;
-            seat.bet = 0;
-            seat.total_bet = 100;
+            seat.set_stack(0).unwrap();
+            seat.fixture_set_bet(0);
+            seat.fixture_set_total_bet(100);
             seat.set_status(SeatStatus::Active);
         }
         replace_resolved_table_fixture(&mut object_db, &player_a, &table);
@@ -1259,7 +1259,7 @@ mod tests {
             .expect("settling fold must issue a proof task");
         assert_eq!(prove_task.post_table, stored);
         assert_eq!(stored.chip_pool, 190);
-        assert_eq!(stored.seats[1].stack, 190);
+        assert_eq!(stored.seats[1].stack(), 190);
         reconcile_table_vault(&stored).unwrap();
         reconcile_native_supply(&object_db, 0).unwrap();
 
@@ -1366,14 +1366,14 @@ mod tests {
             140
         );
         let table = read_resolved_table(&object_db, reserved::texas_poker_contract_id());
-        assert_eq!(table.seats[0].stack, 100);
-        assert_eq!(table.seats[0].pending_addon, 60);
+        assert_eq!(table.seats[0].stack(), 100);
+        assert_eq!(table.seats[0].pending_addon(), 60);
         assert_eq!(table.chip_pool, 160);
         assert_eq!(
             table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             60
         );
@@ -1427,14 +1427,14 @@ mod tests {
             130
         );
         let table = read_resolved_table(&object_db, reserved::texas_poker_contract_id());
-        assert_eq!(table.seats[0].stack, 170);
-        assert_eq!(table.seats[0].pending_addon, 0);
+        assert_eq!(table.seats[0].stack(), 170);
+        assert_eq!(table.seats[0].pending_addon(), 0);
         assert_eq!(table.chip_pool, 170);
         assert_eq!(
             table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             0
         );
@@ -1513,7 +1513,7 @@ mod tests {
             table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             0
         );
@@ -1605,14 +1605,14 @@ mod tests {
 
         let table_id = reserved::texas_poker_contract_id();
         let table = read_resolved_table(&object_db, table_id);
-        assert_eq!(table.seats[0].stack, 170);
-        assert_eq!(table.seats[0].pending_addon, 60);
+        assert_eq!(table.seats[0].stack(), 170);
+        assert_eq!(table.seats[0].pending_addon(), 60);
         assert_eq!(table.chip_pool, 230);
         assert_eq!(
             table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             60
         );
@@ -1646,7 +1646,7 @@ mod tests {
             final_table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             0
         );

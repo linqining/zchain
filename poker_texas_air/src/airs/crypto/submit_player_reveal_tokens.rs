@@ -5,7 +5,7 @@
 //!
 //! ## 业务规约
 //!
-//! 1. 阶段守卫在 `reveal_token_state.reveal_phase != NONE`（**不是** `round_state`）；
+//! 1. 阶段守卫绑定由 `RevealPurpose + HandPhase.street` 唯一投影的 numeric phase；
 //!    `round_state` 在 reveal 期间可为 WAITING（preflop reveal）或 PREFLOP..SHOWDOWN，
 //!    且单次 submit 不改变 `round_state`（pre == post）。真正的相位约束由
 //!    `INPUT_REVEAL_PHASE` 列承载（见 evaluate）。

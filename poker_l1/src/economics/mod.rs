@@ -209,7 +209,7 @@ fn audit_native_supply_objects<'a>(
             };
             if !is_hot_table_state(&object.data) {
                 return Err(PokerL1Error::Serialization(format!(
-                    "Texas Poker table {:?} must use hot v24 state during supply reconciliation",
+                    "Texas Poker table {:?} must use hot v28 state during supply reconciliation",
                     object.id
                 )));
             }
@@ -273,7 +273,7 @@ fn audit_native_supply_objects<'a>(
                 )));
             }
             let pending_addons = table.seats.iter().try_fold(0u64, |sum, seat| {
-                sum.checked_add(seat.pending_addon).ok_or_else(|| {
+                sum.checked_add(seat.pending_addon()).ok_or_else(|| {
                     PokerL1Error::Other(format!(
                         "Texas Poker table {:?} pending-addon sum overflow",
                         object.id
@@ -1107,10 +1107,10 @@ mod tests {
         let mut table = TexasPokerTable::new(id, "reconciliation".into(), [0x77; 20], 6, 50, 100);
         table.chip_pool = chip_pool;
         if addon_pool > 0 {
-            table.seats[0].player = [0x55; 20];
-            table.seats[0].status = SeatStatus::Waiting;
-            table.seats[0].pk = ECPoint(G1Projective::generator());
-            table.seats[0].pending_addon = addon_pool;
+            table.seats[0].fixture_set_player([0x55; 20]);
+            table.seats[0].set_status(SeatStatus::Waiting);
+            table.seats[0].fixture_set_pk(ECPoint(G1Projective::generator()));
+            table.seats[0].set_pending_addon(addon_pool).unwrap();
         }
         table_storage_objects(&table).unwrap().into_iter().collect()
     }

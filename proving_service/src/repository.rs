@@ -4,9 +4,10 @@
 //! Borsh snapshot contains all table snapshots and dispatch job records.  A
 //! write is staged to a sibling temporary file and renamed only after it has
 //! been flushed, so a failed write never makes the in-memory state authoritative.
-//! Complete proof packages are stored as atomic per-job sidecars before the job
-//! journal can mark the corresponding transition completed. This remains a local
-//! service repository, not a consensus database.
+//! Complete proof packages are stored as atomic sidecars before the job journal
+//! can mark the corresponding transition completed. Tagged jobs share one
+//! sidecar by batch ID; tentative rows remain explicit `PendingProof` records.
+//! This remains a local service repository, not a consensus database.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -16,11 +17,12 @@ use std::path::{Path, PathBuf};
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_l1::Address;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_texas_air::prove_task::ProveTask;
 
 use crate::proof_package::MAX_SERVICE_PROOF_PACKAGE_BYTES;
 use crate::{ServiceError, ServiceResult};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 3;
 
 /// A table state that can be rehydrated into a `TexasPokerPlugin` after a restart.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -33,7 +35,7 @@ pub struct StoredTable {
 
 /// Metadata retained in the journal for an accepted native proof.
 ///
-/// The complete task and Stwo archive live in the job's proof sidecar. These
+/// The complete task and Stwo archive live in the referenced proof sidecar. These
 /// compact fields bind that sidecar to the completed journal record and support
 /// inexpensive job listing without loading a potentially large proof package.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -41,6 +43,37 @@ pub struct StoredProofMetadata {
     pub task_digest: [u8; 32],
     pub pre_state_root: [u8; 32],
     pub post_state_root: [u8; 32],
+}
+
+/// Durable location of one job's proof inside either a private or shared sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum StoredProofReference {
+    /// One legacy method archive owned only by this job.
+    Single { package_id: [u8; 32] },
+    /// One row in a shared tagged method + Stage package.
+    Tagged {
+        batch_id: [u8; 32],
+        row_index: u16,
+        row_count: u16,
+    },
+}
+
+impl StoredProofReference {
+    #[must_use]
+    pub const fn package_id(self) -> [u8; 32] {
+        match self {
+            Self::Single { package_id } => package_id,
+            Self::Tagged { batch_id, .. } => batch_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn row_index(self) -> u16 {
+        match self {
+            Self::Single { .. } => 0,
+            Self::Tagged { row_index, .. } => row_index,
+        }
+    }
 }
 
 /// JSON-independent response data stored with a completed job.
@@ -64,6 +97,9 @@ pub enum StoredJobStatus {
     /// table snapshot after a process interruption because the table transition
     /// has not been committed yet.
     Running,
+    /// The VM transition is durable and may feed later transitions, but its
+    /// receipt is withheld until the shared tagged package verifies.
+    PendingProof,
     Completed,
     Failed,
 }
@@ -82,6 +118,7 @@ pub struct StoredDispatchJob {
     pub attempts: u32,
     pub result: Option<StoredDispatchResult>,
     pub proof: Option<StoredProofMetadata>,
+    pub proof_reference: Option<StoredProofReference>,
     pub error: Option<String>,
 }
 
@@ -98,6 +135,15 @@ struct RepositorySnapshot {
     next_job_nonce: u64,
     tables: Vec<StoredTable>,
     jobs: Vec<StoredDispatchJob>,
+    pending_tagged_batches: Vec<StoredPendingTaggedBatch>,
+}
+
+/// Canonical tasks retained only until one shared tagged package becomes durable.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct StoredPendingTaggedBatch {
+    pub table_id: u64,
+    pub tasks: Vec<ProveTask>,
+    pub job_ids: Vec<[u8; 32]>,
 }
 
 impl Default for RepositorySnapshot {
@@ -107,6 +153,7 @@ impl Default for RepositorySnapshot {
             next_job_nonce: 0,
             tables: Vec::new(),
             jobs: Vec::new(),
+            pending_tagged_batches: Vec::new(),
         }
     }
 }
@@ -114,7 +161,7 @@ impl Default for RepositorySnapshot {
 /// Result of reserving a request's idempotency slot.
 #[derive(Debug, Clone)]
 pub enum JobReservation {
-    /// A prior completed or failed request has an immutable result.
+    /// A prior pending, completed, or failed request has an immutable result.
     Existing(StoredDispatchJob),
     /// The request should be processed.  A stale `Running` record was resumed,
     /// or this is a newly persisted job.
@@ -210,26 +257,39 @@ impl ServiceRepository {
         &self.snapshot.jobs
     }
 
+    #[must_use]
+    pub fn pending_tagged_batch(&self, table_id: u64) -> Option<&StoredPendingTaggedBatch> {
+        self.snapshot
+            .pending_tagged_batches
+            .iter()
+            .find(|batch| batch.table_id == table_id)
+    }
+
+    #[must_use]
+    pub fn pending_tagged_batches(&self) -> &[StoredPendingTaggedBatch] {
+        &self.snapshot.pending_tagged_batches
+    }
+
     /// Persist the complete proof package before marking its job completed.
     ///
-    /// Disk repositories use one atomic sidecar per job. An orphan sidecar is
+    /// Disk repositories use one atomic sidecar per single job or tagged batch. An orphan sidecar is
     /// acceptable after a later journal failure, but a completed job must never
     /// be committed before its proof is durable.
-    pub fn store_proof_package(&mut self, job_id: [u8; 32], bytes: &[u8]) -> ServiceResult<()> {
+    pub fn store_proof_package(&mut self, package_id: [u8; 32], bytes: &[u8]) -> ServiceResult<()> {
         if bytes.is_empty() || bytes.len() > MAX_SERVICE_PROOF_PACKAGE_BYTES {
             return Err(RepositoryError::Corruption("invalid proof package length".into()).into());
         }
-        if let Some(path) = self.proof_path(job_id) {
+        if let Some(path) = self.proof_path(package_id) {
             write_atomic(&path, bytes)?;
         } else {
-            self.in_memory_proofs.insert(job_id, bytes.to_vec());
+            self.in_memory_proofs.insert(package_id, bytes.to_vec());
         }
         Ok(())
     }
 
     /// Load the complete proof package for a job, if present.
-    pub fn load_proof_package(&self, job_id: [u8; 32]) -> ServiceResult<Option<Vec<u8>>> {
-        if let Some(path) = self.proof_path(job_id) {
+    pub fn load_proof_package(&self, package_id: [u8; 32]) -> ServiceResult<Option<Vec<u8>>> {
+        if let Some(path) = self.proof_path(package_id) {
             return match fs::read(&path) {
                 Ok(bytes) => {
                     if bytes.is_empty() || bytes.len() > MAX_SERVICE_PROOF_PACKAGE_BYTES {
@@ -248,12 +308,12 @@ impl ServiceRepository {
                 }
             };
         }
-        Ok(self.in_memory_proofs.get(&job_id).cloned())
+        Ok(self.in_memory_proofs.get(&package_id).cloned())
     }
 
     /// Whether a complete proof package is available for the job.
-    pub fn has_proof_package(&self, job_id: [u8; 32]) -> ServiceResult<bool> {
-        if let Some(path) = self.proof_path(job_id) {
+    pub fn has_proof_package(&self, package_id: [u8; 32]) -> ServiceResult<bool> {
+        if let Some(path) = self.proof_path(package_id) {
             return match fs::metadata(&path) {
                 Ok(metadata) => Ok(metadata.is_file()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -262,7 +322,26 @@ impl ServiceRepository {
                 }
             };
         }
-        Ok(self.in_memory_proofs.contains_key(&job_id))
+        Ok(self.in_memory_proofs.contains_key(&package_id))
+    }
+
+    /// Resolve and load the package referenced by a completed job.
+    pub fn load_job_proof_package(
+        &self,
+        job: &StoredDispatchJob,
+    ) -> ServiceResult<Option<Vec<u8>>> {
+        let Some(reference) = job.proof_reference else {
+            return Ok(None);
+        };
+        self.load_proof_package(reference.package_id())
+    }
+
+    /// Whether the package referenced by a completed job is durable.
+    pub fn has_job_proof_package(&self, job: &StoredDispatchJob) -> ServiceResult<bool> {
+        let Some(reference) = job.proof_reference else {
+            return Ok(false);
+        };
+        self.has_proof_package(reference.package_id())
     }
 
     /// Persist a table only after it has a fully verified transition to commit.
@@ -294,9 +373,9 @@ impl ServiceRepository {
                     return Err(RepositoryError::IdempotencyConflict);
                 }
                 return match existing.status {
-                    StoredJobStatus::Completed | StoredJobStatus::Failed => {
-                        Ok(JobReservation::Existing(existing.clone()))
-                    }
+                    StoredJobStatus::PendingProof
+                    | StoredJobStatus::Completed
+                    | StoredJobStatus::Failed => Ok(JobReservation::Existing(existing.clone())),
                     StoredJobStatus::Running => {
                         let mut candidate = self.snapshot.clone();
                         let resumed = candidate
@@ -328,8 +407,17 @@ impl ServiceRepository {
         mut job: StoredDispatchJob,
         result: StoredDispatchResult,
         proof: Option<StoredProofMetadata>,
+        proof_reference: Option<StoredProofReference>,
     ) -> ServiceResult<()> {
-        if proof.is_some() && !self.has_proof_package(job.job_id)? {
+        if proof.is_some() != proof_reference.is_some() {
+            return Err(RepositoryError::Corruption(
+                "completed proof metadata/reference presence differs".into(),
+            )
+            .into());
+        }
+        if let Some(reference) = proof_reference
+            && !self.has_proof_package(reference.package_id())?
+        {
             return Err(RepositoryError::Corruption(
                 "cannot complete a proof job before its archive is durable".into(),
             )
@@ -346,6 +434,7 @@ impl ServiceRepository {
         job.status = StoredJobStatus::Completed;
         job.result = Some(result);
         job.proof = proof;
+        job.proof_reference = proof_reference;
         job.error = None;
         *target = job;
         if let Some(existing) = candidate
@@ -358,6 +447,122 @@ impl ServiceRepository {
             candidate.tables.push(table);
         }
         self.commit(candidate)
+    }
+
+    /// Atomically persist one tentative composite transition and append it to
+    /// the table's open tagged batch.
+    pub fn queue_pending_tagged_job(
+        &mut self,
+        table: StoredTable,
+        mut job: StoredDispatchJob,
+        result: StoredDispatchResult,
+        proof: StoredProofMetadata,
+        task: ProveTask,
+    ) -> ServiceResult<()> {
+        let mut candidate = self.snapshot.clone();
+        let target = candidate
+            .jobs
+            .iter_mut()
+            .find(|candidate| candidate.job_id == job.job_id)
+            .ok_or_else(|| RepositoryError::Corruption("pending job is missing".into()))?;
+        job.status = StoredJobStatus::PendingProof;
+        job.result = Some(result);
+        job.proof = Some(proof);
+        job.proof_reference = None;
+        job.error = None;
+        *target = job.clone();
+
+        if let Some(batch) = candidate
+            .pending_tagged_batches
+            .iter_mut()
+            .find(|batch| batch.table_id == table.table_id)
+        {
+            if batch.job_ids.contains(&job.job_id) {
+                return Err(RepositoryError::Corruption(
+                    "pending tagged job was inserted twice".into(),
+                )
+                .into());
+            }
+            batch.tasks.push(task);
+            batch.job_ids.push(job.job_id);
+        } else {
+            candidate
+                .pending_tagged_batches
+                .push(StoredPendingTaggedBatch {
+                    table_id: table.table_id,
+                    tasks: vec![task],
+                    job_ids: vec![job.job_id],
+                });
+        }
+        upsert_table(&mut candidate.tables, table);
+        self.commit(candidate)
+    }
+
+    /// Bind every pending job row to one durable shared tagged package and
+    /// atomically advance the verified table counters.
+    pub fn complete_pending_tagged_batch(
+        &mut self,
+        table: StoredTable,
+        batch_id: [u8; 32],
+        row_count: u16,
+        chain_length: u64,
+    ) -> ServiceResult<Vec<StoredDispatchJob>> {
+        if !self.has_proof_package(batch_id)? {
+            return Err(RepositoryError::Corruption(
+                "cannot complete tagged jobs before the shared package is durable".into(),
+            )
+            .into());
+        }
+        let mut candidate = self.snapshot.clone();
+        let batch_index = candidate
+            .pending_tagged_batches
+            .iter()
+            .position(|batch| batch.table_id == table.table_id)
+            .ok_or_else(|| RepositoryError::Corruption("pending tagged batch is missing".into()))?;
+        let batch = candidate.pending_tagged_batches.remove(batch_index);
+        if batch.tasks.len() != batch.job_ids.len() || usize::from(row_count) != batch.job_ids.len()
+        {
+            return Err(RepositoryError::Corruption(
+                "pending tagged batch row count mismatch".into(),
+            )
+            .into());
+        }
+        let mut completed = Vec::with_capacity(batch.job_ids.len());
+        for (row_index, job_id) in batch.job_ids.into_iter().enumerate() {
+            let job = candidate
+                .jobs
+                .iter_mut()
+                .find(|job| job.job_id == job_id)
+                .ok_or_else(|| RepositoryError::Corruption("pending row job is missing".into()))?;
+            if job.status != StoredJobStatus::PendingProof
+                || job.proof.is_none()
+                || job.proof_reference.is_some()
+            {
+                return Err(RepositoryError::Corruption(
+                    "pending tagged job has inconsistent proof state".into(),
+                )
+                .into());
+            }
+            let row_index = u16::try_from(row_index).map_err(|_| {
+                RepositoryError::Corruption("pending tagged row index exceeds u16".into())
+            })?;
+            job.status = StoredJobStatus::Completed;
+            job.proof_reference = Some(StoredProofReference::Tagged {
+                batch_id,
+                row_index,
+                row_count,
+            });
+            let result = job.result.as_mut().ok_or_else(|| {
+                RepositoryError::Corruption("pending tagged job result is missing".into())
+            })?;
+            result.proof_verified = true;
+            result.prove_count = table.prove_count;
+            result.chain_length = chain_length;
+            completed.push(job.clone());
+        }
+        upsert_table(&mut candidate.tables, table);
+        self.commit(candidate)?;
+        Ok(completed)
     }
 
     /// Persist a proof/dispatch failure without changing the table snapshot.
@@ -378,6 +583,7 @@ impl ServiceRepository {
         job.error = Some(error);
         job.result = None;
         job.proof = None;
+        job.proof_reference = None;
         let result = job.clone();
         self.commit(candidate)?;
         Ok(result)
@@ -409,12 +615,23 @@ impl ServiceRepository {
         Ok(())
     }
 
-    fn proof_path(&self, job_id: [u8; 32]) -> Option<PathBuf> {
+    fn proof_path(&self, package_id: [u8; 32]) -> Option<PathBuf> {
         self.path.as_ref().map(|repository_path| {
             repository_path
                 .with_extension("proofs")
-                .join(format!("{}.proof", hex::encode(job_id)))
+                .join(format!("{}.proof", hex::encode(package_id)))
         })
+    }
+}
+
+fn upsert_table(tables: &mut Vec<StoredTable>, table: StoredTable) {
+    if let Some(existing) = tables
+        .iter_mut()
+        .find(|existing| existing.table_id == table.table_id)
+    {
+        *existing = table;
+    } else {
+        tables.push(table);
     }
 }
 
@@ -464,6 +681,7 @@ mod tests {
             attempts: 0,
             result: None,
             proof: None,
+            proof_reference: None,
             error: None,
         };
         assert!(matches!(

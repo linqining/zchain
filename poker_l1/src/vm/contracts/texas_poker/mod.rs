@@ -72,14 +72,17 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// delta. Versions 2 through 18 are decoded through explicit fail-closed migrations in
 /// [`state_codec`]. Version 23 physically groups immutable/low-frequency poker parameters into
 /// one canonical `TableRules` value, preparing it to move behind a rules hash without keeping
-/// duplicate flat fields in the hot table state.
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 23;
+/// duplicate flat fields in the hot table state. Version 25 makes the tagged `Seat` enum the
+/// physical runtime and resolved-snapshot representation; version 27 replaces the redundant
+/// numeric reveal phase with a typed purpose whose exact board street comes from `HandPhase`.
+/// Incompatible older layouts are deliberately unsupported.
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 27;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots remain resolved schema v23 values.  The v24 ObjectDb encoding replaces
-/// metadata, rules and governance values with immutable object IDs plus exact opening digests.
-pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 24;
+/// Runtime/proof snapshots use resolved schema v27. The v28 ObjectDb encoding combines immutable
+/// context commitments with the same physical tagged-seat and typed-reveal representation.
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 28;
 
 /// Versioned persisted-state codec and fail-closed legacy migrations.
 pub mod state_codec;

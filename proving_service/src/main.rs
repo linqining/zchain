@@ -224,13 +224,20 @@ fn run_full_hand() -> ExitCode {
         for r in report.steps.iter().flat_map(|s| s.proof_breakdown.iter()) {
             let (p, v, n) = agg.entry(r.label.clone()).or_insert((0.0, 0.0, 0));
             match r.kind {
-                poker_texas_air::prove_timing::TimingKind::Prove => *p += r.elapsed.as_secs_f64() * 1000.0,
-                poker_texas_air::prove_timing::TimingKind::Verify => *v += r.elapsed.as_secs_f64() * 1000.0,
+                poker_texas_air::prove_timing::TimingKind::Prove => {
+                    *p += r.elapsed.as_secs_f64() * 1000.0
+                }
+                poker_texas_air::prove_timing::TimingKind::Verify => {
+                    *v += r.elapsed.as_secs_f64() * 1000.0
+                }
             }
             *n += 1;
         }
         println!("===== 按标签聚合（全手）=====");
-        println!("  {:<28} {:>5} {:>10} {:>10} {:>10}", "label", "calls", "prove_ms", "verify_ms", "total_ms");
+        println!(
+            "  {:<28} {:>5} {:>10} {:>10} {:>10}",
+            "label", "calls", "prove_ms", "verify_ms", "total_ms"
+        );
         for (label, (p, v, n)) in &agg {
             println!(
                 "  {:<28} {:>5} {:>10.2} {:>10.2} {:>10.2}",

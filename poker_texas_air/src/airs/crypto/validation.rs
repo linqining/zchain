@@ -88,7 +88,11 @@ pub(crate) fn validate_fold_with_proof(
                 "fold_with_proof seat is outside the canonical pre-table".into(),
             )
         })?
-        .pk;
+        .pk()
+        .copied()
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation("fold_with_proof seat has no live Mental Poker key".into())
+        })?;
     let expected_context = precompile_call_context(
         MethodKind::FoldWithProof,
         args.seat_index,
@@ -301,7 +305,13 @@ pub(crate) fn validate_leave_with_proof(
                 "leave_with_proof seat is outside the canonical pre-table".into(),
             )
         })?
-        .pk;
+        .pk()
+        .copied()
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "leave_with_proof seat has no live Mental Poker key".into(),
+            )
+        })?;
     let expected_context = precompile_call_context(
         MethodKind::LeaveWithProof,
         args.seat_index,
@@ -428,7 +438,7 @@ pub(crate) fn validate_submit_player_reveal_tokens(
         crate::settlement_binding::SettlementPlanBinding::from_replay(&canonical.events)?;
     let input = SubmitPlayerRevealTokensInput {
         seat_index: args.seat_index,
-        reveal_phase: canonical.pre.reveal_token_state().reveal_phase,
+        reveal_phase: canonical.pre.reveal_phase(),
         version_increment,
         precompile: binding.air_binding(),
         settlement,
@@ -445,7 +455,7 @@ pub(crate) fn validate_submit_player_reveal_tokens(
     }
 
     let post_revealed_count = count_as_u8(
-        canonical.post.reveal_token_state().assignments.len(),
+        canonical.post.reveal_assignments().len(),
         METHOD,
         "post reveal assignment",
     )?;

@@ -202,7 +202,7 @@ pub(crate) fn validate_join_table(
         .seats
         .get(usize::from(seat_index))
         .ok_or_else(|| TexasAirError::SpecViolation("join_table: post seat missing".into()))?;
-    if post_seat.player != args.player || post_seat.stack != args.buy_in {
+    if post_seat.player() != args.player || post_seat.stack() != args.buy_in {
         return Err(TexasAirError::SpecViolation(
             "join_table: canonical post seat does not match the dispatch args".into(),
         ));
@@ -268,8 +268,8 @@ pub(crate) fn validate_leave_table(
         public_inputs.call_seq,
         u64::from(canonical.pre.call_seq),
         u64::from(canonical.post.call_seq),
-        pre_seat.stack,
-        pre_seat.pending_addon,
+        pre_seat.stack(),
+        pre_seat.pending_addon(),
         canonical.pre.chip_pool,
         canonical.post.chip_pool,
     );

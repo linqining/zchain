@@ -40,7 +40,7 @@ pub struct DispatchCallPublicInput {
 /// state_root 而证明仍验证通过）。
 ///
 /// 修复（路径 A）：把 pre/post table 的完整、变长 canonical Borsh **resolved image** +
-/// hot-v24 `pre_state_root`/`post_state_root` + 元数据，按**固定顺序** mix 进 channel。
+/// hot-v28 `pre_state_root`/`post_state_root` + 元数据，按**固定顺序** mix 进 channel。
 /// 验证方先从 image 解码完整 table，再生成与 ObjectDb 相同的 hot projection 并重算 root。
 ///
 /// `pre_image` / `post_image` 必须与 `table_state_preimage(table)` 的输出逐字段一致
@@ -51,9 +51,9 @@ pub struct TexasPublicInputs {
     pub pre_image: Vec<FieldElement>,
     /// 调用后表台的完整 canonical state-root preimage（变长）。
     pub post_image: Vec<FieldElement>,
-    /// 调用前 ObjectDb hot-v24 state root（从 `pre_image` 解码后重算）。
+    /// 调用前 ObjectDb hot-v28 state root（从 `pre_image` 解码后重算）。
     pub pre_state_root: StateRoot,
-    /// 调用后 ObjectDb hot-v24 state root（从 `post_image` 解码后重算）。
+    /// 调用后 ObjectDb hot-v28 state root（从 `post_image` 解码后重算）。
     pub post_state_root: StateRoot,
     /// 方法种类。
     pub kind: MethodKind,
@@ -420,7 +420,7 @@ impl TexasPublicInputs {
         channel.mix_u64(self.post_version);
     }
 
-    /// 验证方从完整 resolved image 解码 table，再按 ObjectDb hot-v24 projection 重算 root。
+    /// 验证方从完整 resolved-v27 image 解码 table，再按 ObjectDb hot-v28 projection 重算 root。
     ///
     /// 这是 state_root 绑定的「验证」半边（mix_into 是「承诺」半边）。
     /// 验证方拿到公开输入后，用被审计的 Starknet Poseidon252 重算哈希，确保公开输入

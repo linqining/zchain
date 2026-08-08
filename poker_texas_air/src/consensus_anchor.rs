@@ -80,7 +80,7 @@ pub struct AuthenticatedObjectSnapshot {
 /// Complete four-object snapshot of one resolved Texas table endpoint.
 #[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct TableSnapshot {
-    /// Mutable hot-v24 table object.
+    /// Mutable hot-v28 table object.
     pub hot_table: AuthenticatedObjectSnapshot,
     /// Immutable display metadata opening.
     pub metadata: AuthenticatedObjectSnapshot,

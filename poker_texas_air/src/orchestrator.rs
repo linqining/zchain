@@ -171,6 +171,85 @@ impl Orchestrator {
         Self::default()
     }
 
+    /// Prove a contiguous composite transition run with one tagged method proof and one tagged
+    /// Stage proof. This throughput path does not generate legacy per-task method/component
+    /// proofs and does not mutate this orchestrator's single-proof receipt chain.
+    pub fn prove_tagged_batch(
+        &self,
+        tasks: &[ProveTask],
+    ) -> TexasAirResult<crate::tagged_method::ArchivedTaggedBatchProofPackage> {
+        crate::tagged_method::prove_verified_tagged_composite_batch(tasks)
+    }
+
+    /// Prove and verify one tagged composite batch, then atomically append one receipt per row.
+    pub fn prove_verify_and_accept_tagged_batch(
+        &mut self,
+        tasks: &[ProveTask],
+    ) -> TexasAirResult<crate::tagged_method::ArchivedTaggedBatchProofPackage> {
+        let (package, receipts) =
+            crate::tagged_method::prove_verified_tagged_composite_batch_with_receipts(tasks)?;
+        let mut next_chain = self.verified_chain_builder.clone();
+        for receipt in receipts {
+            next_chain.push_receipt(receipt)?;
+        }
+        let summaries = tasks
+            .iter()
+            .map(|task| {
+                Ok(ProvenTask {
+                    method_kind: task.method_kind,
+                    pre_state_root: compute_state_root(&task.pre_table)?,
+                    post_state_root: compute_state_root(&task.post_table)?,
+                    call_seq: task.call_seq,
+                })
+            })
+            .collect::<TexasAirResult<Vec<_>>>()?;
+        self.verified_chain_builder = next_chain;
+        self.proven.extend(summaries);
+        Ok(package)
+    }
+
+    /// Restart-safe verification for a two-proof tagged batch package.
+    pub fn verify_tagged_batch(
+        tasks: &[ProveTask],
+        package: &crate::tagged_method::ArchivedTaggedBatchProofPackage,
+    ) -> TexasAirResult<()> {
+        crate::tagged_method::verify_verified_tagged_composite_batch(tasks, package)
+    }
+
+    /// Restart-safe verification using the package's embedded continuous command stream.
+    pub fn verify_tagged_package(
+        package: &crate::tagged_method::ArchivedTaggedBatchProofPackage,
+    ) -> TexasAirResult<()> {
+        crate::tagged_method::verify_verified_tagged_composite_package(package)
+    }
+
+    /// Replay, verify, and atomically restore a self-contained tagged package after restart.
+    pub fn restore_verified_tagged_batch(
+        &mut self,
+        package: &crate::tagged_method::ArchivedTaggedBatchProofPackage,
+    ) -> TexasAirResult<Vec<ProvenTask>> {
+        let tasks = package.replay_tasks()?;
+        let receipts = crate::tagged_method::verify_and_issue_tagged_receipts(&tasks, package)?;
+        let mut next_chain = self.verified_chain_builder.clone();
+        for receipt in receipts {
+            next_chain.push_receipt(receipt)?;
+        }
+        let summaries = tasks
+            .iter()
+            .map(|task| {
+                Ok(ProvenTask {
+                    method_kind: task.method_kind,
+                    pre_state_root: compute_state_root(&task.pre_table)?,
+                    post_state_root: compute_state_root(&task.post_table)?,
+                    call_seq: task.call_seq,
+                })
+            })
+            .collect::<TexasAirResult<Vec<_>>>()?;
+        self.verified_chain_builder = next_chain;
+        self.proven.extend(summaries.iter().cloned());
+        Ok(summaries)
+    }
+
     /// 处理一个证明任务：prove + 立即 verify，返回任务摘要。
     ///
     /// # Errors
@@ -212,30 +291,6 @@ impl Orchestrator {
             summary,
             archive: output.archive,
             composition_archive,
-        })
-    }
-
-    /// Prove and verify only the original method proof, deferring required composition Stage
-    /// proofs to [`crate::airs::composition::prove_composition_batch`].
-    ///
-    /// This entry point exists for throughput-oriented callers that collect a contiguous run of
-    /// composite transitions and later finalize it as one tagged batched Stage proof. Callers
-    /// must not
-    /// persist or publish the returned archive as a complete composite proof package until the
-    /// corresponding batch has also been proved and verified.
-    pub fn prove_verify_and_archive_method_only(
-        &mut self,
-        task: &ProveTask,
-    ) -> TexasAirResult<ArchivedProvenTask> {
-        let current = &*self;
-        let mut backend = NativeMethodProofBackend;
-        let (summary, output) = current.process_task(task, &mut backend)?;
-        self.verified_chain_builder.push_receipt(output.receipt)?;
-        self.proven.push(summary.clone());
-        Ok(ArchivedProvenTask {
-            summary,
-            archive: output.archive,
-            composition_archive: None,
         })
     }
 
@@ -802,8 +857,8 @@ impl Orchestrator {
         );
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let refund = pre_seat
-            .stack
-            .checked_add(pre_seat.pending_addon)
+            .stack()
+            .checked_add(pre_seat.pending_addon())
             .ok_or_else(|| TexasAirError::SpecViolation("leave_table refund overflow".into()))?;
         let expected_post_chip_pool =
             task.pre_table
@@ -826,8 +881,8 @@ impl Orchestrator {
             task.call_seq,
             pre_v,
             post_v,
-            pre_seat.stack,
-            pre_seat.pending_addon,
+            pre_seat.stack(),
+            pre_seat.pending_addon(),
             task.pre_table.chip_pool,
             task.post_table.chip_pool,
         );
@@ -1164,7 +1219,7 @@ impl Orchestrator {
         let input = CheckInput {
             seat_index: *seat_index,
             current_bet,
-            seat_bet: seat.bet,
+            seat_bet: seat.bet(),
             outcome,
         };
         let (pre_v, post_v) = (
@@ -1233,20 +1288,19 @@ impl Orchestrator {
             .betting_round()
             .expect("betting validator requires betting_round");
         let pre_current_bet = pre_round.current_bet;
-        let call_amount = pre_round.process_call(pre_seat.bet, pre_seat.stack);
-        let action_post_bet = pre_seat
-            .bet
-            .checked_add(call_amount)
-            .ok_or_else(|| TexasAirError::SpecViolation("call: action seat.bet overflow".into()))?;
+        let call_amount = pre_round.process_call(pre_seat.bet(), pre_seat.stack());
+        let action_post_bet = pre_seat.bet().checked_add(call_amount).ok_or_else(|| {
+            TexasAirError::SpecViolation("call: action seat.bet() overflow".into())
+        })?;
         let outcome =
             derive_betting_outcome(&task.pre_table, &task.post_table, call_amount, "call")?;
         let input = CallInput {
             seat_index: *seat_index,
             call_amount,
             pre_current_bet,
-            pre_seat_bet: pre_seat.bet,
-            pre_seat_stack: pre_seat.stack,
-            pre_seat_total_bet: pre_seat.total_bet,
+            pre_seat_bet: pre_seat.bet(),
+            pre_seat_stack: pre_seat.stack(),
+            pre_seat_total_bet: pre_seat.total_bet(),
             outcome,
         };
         let (pre_v, post_v) = (
@@ -1268,13 +1322,13 @@ impl Orchestrator {
             post_r,
             pre_pot,
             post_pot,
-            post_seat.stack,
+            post_seat.stack(),
             action_post_bet,
             post_seat.is_all_in(),
-            pre_seat.bet,
-            pre_seat.stack,
-            post_seat.total_bet,
-            pre_seat.total_bet,
+            pre_seat.bet(),
+            pre_seat.stack(),
+            post_seat.total_bet(),
+            pre_seat.total_bet(),
         );
         run(
             backend,
@@ -1328,11 +1382,11 @@ impl Orchestrator {
             .expect("betting validator requires betting_round");
         let min_raise = pre_round.min_raise;
         let action_delta = total_bet
-            .checked_sub(pre_seat.bet)
+            .checked_sub(pre_seat.bet())
             .ok_or_else(|| TexasAirError::SpecViolation("raise: action bet decreased".into()))?;
         let mut action_round = pre_round;
         action_round
-            .process_raise(*total_bet, pre_seat.bet, pre_seat.stack)
+            .process_raise(*total_bet, pre_seat.bet(), pre_seat.stack())
             .map_err(|error| {
                 TexasAirError::SpecViolation(format!(
                     "raise: cannot reconstruct action-round state: {error}"
@@ -1345,9 +1399,9 @@ impl Orchestrator {
             raise_to: *total_bet,
             min_raise,
             pre_current_bet: pre_round.current_bet,
-            pre_seat_stack: pre_seat.stack,
-            pre_seat_bet: pre_seat.bet,
-            pre_seat_total_bet: pre_seat.total_bet,
+            pre_seat_stack: pre_seat.stack(),
+            pre_seat_bet: pre_seat.bet(),
+            pre_seat_total_bet: pre_seat.total_bet(),
             outcome,
         };
         let (pre_v, post_v) = (
@@ -1369,12 +1423,12 @@ impl Orchestrator {
             post_r,
             pre_pot,
             post_pot,
-            pre_seat.stack,
-            pre_seat.bet,
-            pre_seat.total_bet,
-            post_seat.stack,
+            pre_seat.stack(),
+            pre_seat.bet(),
+            pre_seat.total_bet(),
+            post_seat.stack(),
             *total_bet,
-            post_seat.total_bet,
+            post_seat.total_bet(),
             action_round.current_bet,
             action_round.min_raise,
             post_seat.is_all_in(),
@@ -1425,19 +1479,18 @@ impl Orchestrator {
             .pre_table
             .betting_round()
             .expect("betting validator requires betting_round");
-        let action_post_bet = pre_seat
-            .bet
-            .checked_add(*amount)
-            .ok_or_else(|| TexasAirError::SpecViolation("bet: action seat.bet overflow".into()))?;
+        let action_post_bet = pre_seat.bet().checked_add(*amount).ok_or_else(|| {
+            TexasAirError::SpecViolation("bet: action seat.bet() overflow".into())
+        })?;
         let outcome = derive_betting_outcome(&task.pre_table, &task.post_table, *amount, "bet")?;
         let input = BetInput {
             seat_index: *seat_index,
             amount: *amount,
             pre_current_bet: pre_round.current_bet,
             pre_min_raise: pre_round.min_raise,
-            pre_seat_bet: pre_seat.bet,
-            pre_seat_stack: pre_seat.stack,
-            pre_seat_total_bet: pre_seat.total_bet,
+            pre_seat_bet: pre_seat.bet(),
+            pre_seat_stack: pre_seat.stack(),
+            pre_seat_total_bet: pre_seat.total_bet(),
             outcome,
         };
         let (pre_v, post_v) = (
@@ -1460,11 +1513,11 @@ impl Orchestrator {
             pre_pot,
             post_pot,
             action_post_bet,
-            pre_seat.bet,
-            pre_seat.stack,
-            post_seat.stack,
-            pre_seat.total_bet,
-            post_seat.total_bet,
+            pre_seat.bet(),
+            pre_seat.stack(),
+            post_seat.stack(),
+            pre_seat.total_bet(),
+            post_seat.total_bet(),
         );
         run(
             backend,
@@ -1548,7 +1601,7 @@ impl Orchestrator {
                         "auto_fold: seat_index {seat_index} is outside pre_table"
                     ))
                 })?
-                .time_bank_ms
+                .time_bank_ms()
                 .into(),
             outcome,
             authorization,
@@ -1700,7 +1753,7 @@ impl Orchestrator {
         let expected_post_pot = task
             .pre_table
             .pot
-            .checked_add(pre_seat.bet)
+            .checked_add(pre_seat.bet())
             .ok_or_else(|| TexasAirError::SpecViolation("kick_player pot overflow".into()))?;
         let expected_version = u64::from(task.pre_table.call_seq)
             .checked_add(1)
@@ -1727,7 +1780,7 @@ impl Orchestrator {
                         task.pre_table.round_state()
                             == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
                             && task.pre_table.pot == 0
-                            && pre_seat.bet == 0
+                            && pre_seat.bet() == 0
                     }
                     crate::airs::composition::SettlementKind::None
                     | crate::airs::composition::SettlementKind::Showdown => false,
@@ -1747,14 +1800,14 @@ impl Orchestrator {
         let input = KickPlayerInput {
             seat_index: *seat_index,
             refund: pre_seat
-                .stack
-                .checked_add(pre_seat.pending_addon)
+                .stack()
+                .checked_add(pre_seat.pending_addon())
                 .ok_or_else(|| {
                     TexasAirError::SpecViolation("kick_player refund overflow".into())
                 })?,
-            pre_stack: pre_seat.stack,
-            pre_pending_addon: pre_seat.pending_addon,
-            kicked_bet: pre_seat.bet,
+            pre_stack: pre_seat.stack(),
+            pre_pending_addon: pre_seat.pending_addon(),
+            kicked_bet: pre_seat.bet(),
             version_increment,
             reset_cascade,
             authorization: AdminAuthorizationBinding::verify_table_creator(
@@ -1838,7 +1891,7 @@ impl Orchestrator {
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = AddonRow::active(
             &input,
-            pre_seat.pending_addon,
+            pre_seat.pending_addon(),
             task.pre_table.chip_pool,
             task.post_table.chip_pool,
             srm(pre_root),
@@ -1897,7 +1950,7 @@ impl Orchestrator {
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = RebuyRow::active(
             &input,
-            pre_seat.stack,
+            pre_seat.stack(),
             task.pre_table.chip_pool,
             task.post_table.chip_pool,
             srm(pre_root),
@@ -2067,7 +2120,13 @@ impl Orchestrator {
                     "leave_with_proof seat is outside the canonical pre-table".into(),
                 )
             })?
-            .pk;
+            .pk()
+            .copied()
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "leave_with_proof seat has no live Mental Poker key".into(),
+                )
+            })?;
         let call_context = precompile_call_context(
             MethodKind::LeaveWithProof,
             *seat_index,
@@ -2180,7 +2239,13 @@ impl Orchestrator {
                     "fold_with_proof seat is outside the canonical pre-table".into(),
                 )
             })?
-            .pk;
+            .pk()
+            .copied()
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "fold_with_proof seat has no live Mental Poker key".into(),
+                )
+            })?;
         let call_context = precompile_call_context(
             MethodKind::FoldWithProof,
             *seat_index,
@@ -2407,7 +2472,7 @@ impl Orchestrator {
             // Admission is determined by the pre-dispatch reveal phase. The final player in a
             // reveal round legitimately advances the post-state to NONE after all assigned
             // tokens have been received.
-            reveal_phase: task.pre_table.reveal_token_state().reveal_phase,
+            reveal_phase: task.pre_table.reveal_phase(),
             version_increment,
             precompile: binding.air_binding(),
             settlement,
@@ -2416,7 +2481,7 @@ impl Orchestrator {
             u64::from(task.pre_table.call_seq),
             u64::from(task.post_table.call_seq),
         );
-        let post_rc = task.post_table.reveal_token_state().assignments.len() as u8;
+        let post_rc = task.post_table.reveal_assignments().len() as u8;
         let mut row = SubmitPlayerRevealTokensRow::active(
             &input,
             srm(pre_root),
@@ -2999,7 +3064,7 @@ fn find_join_seat(
     table
         .seats
         .iter()
-        .position(|s| &s.player == player)
+        .position(|s| &s.player() == player)
         .map(|i| i as u8)
         .ok_or_else(|| {
             TexasAirError::SpecViolation(format!("join 后未在 seats 中找到 player {player:?}"))
@@ -3016,6 +3081,7 @@ fn count_active_occupied(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support as seat_fixture;
     use poker_l1::object_model::ObjectID;
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::vm::contracts::dispatch::DispatchContext;
@@ -3087,7 +3153,7 @@ mod tests {
         // Older fixtures populated `player` directly. Schema v4 makes lifecycle status explicit,
         // so canonicalize only that legacy test shorthand before crossing the codec boundary.
         for seat in &mut pre_table.seats {
-            if seat.player != EMPTY_PLAYER && seat.status() == SeatStatus::Empty {
+            if seat.player() != EMPTY_PLAYER && seat.status() == SeatStatus::Empty {
                 seat.set_status(SeatStatus::Active);
             }
         }
@@ -3122,8 +3188,8 @@ mod tests {
     #[test]
     fn request_leave_after_hand_dispatch_proves_and_issues_receipt() {
         let mut pre = make_table("request-leave");
-        pre.seats[0].player = [0x11; 20];
-        pre.seats[0].stack = 1_000;
+        seat_fixture::set_player(&mut pre.seats[0], [0x11; 20]);
+        seat_fixture::set_stack(&mut pre.seats[0], 1_000);
         let raw_args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
             .expect("request_leave_after_hand args should serialize");
         let (task, post) = dispatch_task(
@@ -3273,10 +3339,10 @@ mod tests {
         pre.call_seq = 1;
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1000;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1000);
         }
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, _) = dispatch_task(
             pre,
             caller,
@@ -3297,9 +3363,9 @@ mod tests {
         let mut pre = make_table("auto-fold-consensus-time");
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1);
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
-            pre.seats[i].time_bank_ms = 0;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
+            seat_fixture::set_time_bank_ms(&mut pre.seats[i], 0);
         }
 
         let creator = pre.creator;
@@ -3325,11 +3391,11 @@ mod tests {
         pre.hand_id = 17;
         pre.call_seq = 70;
         for i in 0..2 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
-            pre.seats[i].bet = 100;
-            pre.seats[i].total_bet = 100;
-            pre.seats[i].time_bank_ms = 0;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
+            seat_fixture::set_bet(&mut pre.seats[i], 100);
+            seat_fixture::set_total_bet(&mut pre.seats[i], 100);
+            seat_fixture::set_time_bank_ms(&mut pre.seats[i], 0);
         }
         pre
     }
@@ -3342,7 +3408,7 @@ mod tests {
         assert!(post.current_turn_option().is_none());
         assert!(post.betting_round().is_none());
         assert_eq!(post.pot, 0);
-        assert_eq!(post.seats[1].stack, 1_450);
+        assert_eq!(post.seats[1].stack(), 1_450);
 
         let archived = Orchestrator::new()
             .prove_verify_and_archive_task(task)
@@ -3403,7 +3469,7 @@ mod tests {
             poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
         );
         assert_eq!(post.pot, 0);
-        assert_eq!(post.seats[1].stack, 1_450);
+        assert_eq!(post.seats[1].stack(), 1_450);
 
         let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
             .expect("terminal tick should have a canonical composite plan");
@@ -3428,8 +3494,8 @@ mod tests {
     fn orchestrator_omits_proof_for_waiting_noop_tick() {
         let mut pre = make_table("waiting-tick-start-hand");
         for i in 0..2 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
             pre.seats[i].set_status(SeatStatus::Active);
         }
         pre.chip_pool = 2_000;
@@ -3449,11 +3515,11 @@ mod tests {
     #[test]
     fn orchestrator_accepts_addon_ripple_carry() {
         let mut pre = make_table("addon-ripple-carry");
-        pre.seats[0].player = [0x41; 20];
-        pre.seats[0].stack = 100;
-        pre.seats[0].pending_addon = 65_535;
+        seat_fixture::set_player(&mut pre.seats[0], [0x41; 20]);
+        seat_fixture::set_stack(&mut pre.seats[0], 100);
+        seat_fixture::set_pending_addon(&mut pre.seats[0], 65_535);
         pre.chip_pool = 65_635;
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre,
             caller,
@@ -3464,7 +3530,7 @@ mod tests {
             })
             .expect("addon args should serialize"),
         );
-        assert_eq!(post.seats[0].pending_addon, 65_536);
+        assert_eq!(post.seats[0].pending_addon(), 65_536);
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept addon carry");
@@ -3473,10 +3539,10 @@ mod tests {
     #[test]
     fn orchestrator_accepts_rebuy_ripple_carry() {
         let mut pre = make_table("rebuy-ripple-carry");
-        pre.seats[0].player = [0x42; 20];
-        pre.seats[0].stack = 65_535;
+        seat_fixture::set_player(&mut pre.seats[0], [0x42; 20]);
+        seat_fixture::set_stack(&mut pre.seats[0], 65_535);
         pre.chip_pool = 65_535;
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre,
             caller,
@@ -3487,7 +3553,7 @@ mod tests {
             })
             .expect("rebuy args should serialize"),
         );
-        assert_eq!(post.seats[0].stack, 65_536);
+        assert_eq!(post.seats[0].stack(), 65_536);
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept rebuy carry");
@@ -3499,11 +3565,11 @@ mod tests {
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.pot = 65_535;
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
         }
-        pre.seats[2].bet = 1;
-        pre.seats[2].total_bet = 1;
+        seat_fixture::set_bet(&mut pre.seats[2], 1);
+        seat_fixture::set_total_bet(&mut pre.seats[2], 1);
         pre.chip_pool = 3_000;
         let creator = pre.creator;
         let (task, post) = dispatch_task(
@@ -3527,8 +3593,11 @@ mod tests {
         let mut pre = make_table("force-fold-admin-binding");
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for index in 0..3 {
-            pre.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
-            pre.seats[index].stack = 1_000;
+            seat_fixture::set_player(
+                &mut pre.seats[index],
+                [u8::try_from(index + 1).unwrap(); 20],
+            );
+            seat_fixture::set_stack(&mut pre.seats[index], 1_000);
         }
         pre.chip_pool = 3_000;
         let creator = pre.creator;
@@ -3549,8 +3618,11 @@ mod tests {
     fn orchestrator_binds_start_hand_creator_authorization_receipt() {
         let mut pre = make_table("start-hand-admin-binding");
         for seat_index in [0usize, 2] {
-            pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
-            pre.seats[seat_index].stack = 1_000;
+            seat_fixture::set_player(
+                &mut pre.seats[seat_index],
+                [u8::try_from(seat_index + 1).unwrap(); 20],
+            );
+            seat_fixture::set_stack(&mut pre.seats[seat_index], 1_000);
         }
         pre.chip_pool = 2_000;
         let creator = pre.creator;
@@ -3571,8 +3643,11 @@ mod tests {
     fn orchestrator_binds_reset_for_next_hand_creator_authorization_receipt() {
         let mut waiting = make_table("reset-admin-binding");
         for seat_index in [0usize, 2] {
-            waiting.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
-            waiting.seats[seat_index].stack = 1_000;
+            seat_fixture::set_player(
+                &mut waiting.seats[seat_index],
+                [u8::try_from(seat_index + 1).unwrap(); 20],
+            );
+            seat_fixture::set_stack(&mut waiting.seats[seat_index], 1_000);
         }
         waiting.chip_pool = 2_000;
         let creator = waiting.creator;
@@ -3601,11 +3676,11 @@ mod tests {
     #[test]
     fn orchestrator_accepts_leave_table_funds_ripple_carry() {
         let mut pre = make_table("leave-ripple-carry");
-        pre.seats[0].player = [0x43; 20];
-        pre.seats[0].stack = 65_535;
-        pre.seats[0].pending_addon = 1;
+        seat_fixture::set_player(&mut pre.seats[0], [0x43; 20]);
+        seat_fixture::set_stack(&mut pre.seats[0], 65_535);
+        seat_fixture::set_pending_addon(&mut pre.seats[0], 1);
         pre.chip_pool = 65_536;
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre,
             caller,
@@ -3627,14 +3702,14 @@ mod tests {
         pre.hand_id = 7;
         pre.call_seq = 11;
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
         }
-        pre.seats[0].bet = 50;
-        pre.seats[1].bet = 100;
-        pre.seats[2].bet = 100;
+        seat_fixture::set_bet(&mut pre.seats[0], 50);
+        seat_fixture::set_bet(&mut pre.seats[1], 100);
+        seat_fixture::set_bet(&mut pre.seats[2], 100);
 
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -3658,27 +3733,27 @@ mod tests {
         pre.hand_id = 7;
         pre.call_seq = 12;
         for i in 0..2 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
         }
-        pre.seats[0].stack = 900;
-        pre.seats[0].bet = 100;
-        pre.seats[0].total_bet = 100;
+        seat_fixture::set_stack(&mut pre.seats[0], 900);
+        seat_fixture::set_bet(&mut pre.seats[0], 100);
+        seat_fixture::set_total_bet(&mut pre.seats[0], 100);
         pre.set_seat_acted_this_round(0, true);
-        pre.seats[1].stack = 950;
-        pre.seats[1].bet = 50;
-        pre.seats[1].total_bet = 50;
+        seat_fixture::set_stack(&mut pre.seats[1], 950);
+        seat_fixture::set_bet(&mut pre.seats[1], 50);
+        seat_fixture::set_total_bet(&mut pre.seats[1], 50);
         state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
 
-        let caller = pre.seats[1].player;
+        let caller = pre.seats[1].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
             texas_dispatch::selectors::call(),
             borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).expect("call args should serialize"),
         );
-        assert_eq!(post.seats[1].stack, 900);
-        assert_eq!(post.seats[1].total_bet, 100);
-        assert!(post.seats.iter().all(|seat| seat.bet == 0));
+        assert_eq!(post.seats[1].stack(), 900);
+        assert_eq!(post.seats[1].total_bet(), 100);
+        assert!(post.seats.iter().all(|seat| seat.bet() == 0));
         assert_eq!(post.pot, 225);
         assert_ne!(post.round_state(), pre.round_state());
         assert!(post.betting_round().is_none());
@@ -3698,19 +3773,19 @@ mod tests {
         pre.hand_id = 13;
         pre.call_seq = 60;
         for i in 0..2 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
         }
-        pre.seats[0].stack = 0;
-        pre.seats[0].bet = 100;
-        pre.seats[0].total_bet = 100;
+        seat_fixture::set_stack(&mut pre.seats[0], 0);
+        seat_fixture::set_bet(&mut pre.seats[0], 100);
+        seat_fixture::set_total_bet(&mut pre.seats[0], 100);
         pre.seats[0].set_status(SeatStatus::AllIn);
         pre.set_seat_acted_this_round(0, true);
-        pre.seats[1].stack = 100;
-        pre.seats[1].bet = 50;
-        pre.seats[1].total_bet = 50;
+        seat_fixture::set_stack(&mut pre.seats[1], 100);
+        seat_fixture::set_bet(&mut pre.seats[1], 50);
+        seat_fixture::set_total_bet(&mut pre.seats[1], 50);
         state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
 
-        let caller = pre.seats[1].player;
+        let caller = pre.seats[1].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -3721,7 +3796,7 @@ mod tests {
             })
             .expect("raise args should serialize"),
         );
-        assert!(post.seats.iter().all(|seat| seat.bet == 0));
+        assert!(post.seats.iter().all(|seat| seat.bet() == 0));
         assert_eq!(post.pot, 275);
         assert_ne!(post.round_state(), pre.round_state());
         assert!(post.betting_round().is_none());
@@ -3740,13 +3815,13 @@ mod tests {
         pre.hand_id = 8;
         pre.call_seq = 20;
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
         }
-        pre.seats[1].bet = 100;
-        pre.seats[2].bet = 100;
+        seat_fixture::set_bet(&mut pre.seats[1], 100);
+        seat_fixture::set_bet(&mut pre.seats[2], 100);
 
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -3788,14 +3863,14 @@ mod tests {
         pre.hand_id = 9;
         pre.call_seq = 30;
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
         }
-        pre.seats[0].stack = 400;
-        pre.seats[1].bet = 300;
-        pre.seats[2].bet = 300;
+        seat_fixture::set_stack(&mut pre.seats[0], 400);
+        seat_fixture::set_bet(&mut pre.seats[1], 300);
+        seat_fixture::set_bet(&mut pre.seats[2], 300);
 
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -3831,11 +3906,11 @@ mod tests {
         pre.hand_id = 10;
         pre.call_seq = 40;
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
         }
 
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -3849,7 +3924,7 @@ mod tests {
         let post_round = post.betting_round().expect("bet remains in betting round");
         assert_eq!(post_round.current_bet, 200);
         assert_eq!(post_round.min_raise, 200);
-        assert_eq!(post.seats[0].bet, 200);
+        assert_eq!(post.seats[0].bet(), 200);
         assert_eq!(post.pot, pre.pot);
         assert_eq!(post.current_turn(), 1);
 
@@ -3867,14 +3942,14 @@ mod tests {
         pre.hand_id = 14;
         pre.call_seq = 61;
         for i in 0..2 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
         }
-        pre.seats[0].stack = 100;
-        pre.seats[1].stack = 0;
+        seat_fixture::set_stack(&mut pre.seats[0], 100);
+        seat_fixture::set_stack(&mut pre.seats[1], 0);
         pre.seats[1].set_status(SeatStatus::AllIn);
         state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
 
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -3885,7 +3960,7 @@ mod tests {
             })
             .expect("bet args should serialize"),
         );
-        assert!(post.seats.iter().all(|seat| seat.bet == 0));
+        assert!(post.seats.iter().all(|seat| seat.bet() == 0));
         assert_eq!(post.pot, 400);
         assert_ne!(post.round_state(), pre.round_state());
         assert!(post.betting_round().is_none());
@@ -3904,13 +3979,13 @@ mod tests {
         pre.hand_id = 11;
         pre.call_seq = 50;
         for i in 0..2 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
-            pre.seats[i].bet = 100;
-            pre.seats[i].total_bet = 100;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
+            seat_fixture::set_bet(&mut pre.seats[i], 100);
+            seat_fixture::set_total_bet(&mut pre.seats[i], 100);
         }
 
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -3921,19 +3996,19 @@ mod tests {
         assert!(post.current_turn_option().is_none());
         assert!(post.betting_round().is_none());
         assert_eq!(post.pot, 0);
-        assert_eq!(post.seats[1].stack, 1_450);
+        assert_eq!(post.seats[1].stack(), 1_450);
 
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("last-opponent fold settlement should prove and verify");
 
         let mut compound_pre = pre;
-        compound_pre.seats[1].pending_addon = 25;
+        seat_fixture::set_pending_addon(&mut compound_pre.seats[1], 25);
         compound_pre.chip_pool = compound_pre
             .chip_pool
             .checked_add(25)
             .expect("compound pending addon should fit in chip_pool");
-        let caller = compound_pre.seats[0].player;
+        let caller = compound_pre.seats[0].player();
         let (compound_task, _) = dispatch_task(
             compound_pre,
             caller,
@@ -3949,10 +4024,10 @@ mod tests {
         leave_pre.chip_pool = leave_pre
             .seats
             .iter()
-            .map(|seat| seat.stack + seat.bet + seat.pending_addon)
+            .map(|seat| seat.stack() + seat.bet() + seat.pending_addon())
             .sum::<u64>()
             + leave_pre.pot;
-        let caller = leave_pre.seats[0].player;
+        let caller = leave_pre.seats[0].player();
         let (leave_task, leave_post) = dispatch_task(
             leave_pre,
             caller,
@@ -3974,15 +4049,15 @@ mod tests {
         pre.hand_id = 3;
         pre.call_seq = 4;
         for i in 0..2 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 900;
-            pre.seats[i].bet = 100;
-            pre.seats[i].total_bet = 100;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 900);
+            seat_fixture::set_bet(&mut pre.seats[i], 100);
+            seat_fixture::set_total_bet(&mut pre.seats[i], 100);
         }
         pre.set_seat_acted_this_round(0, true);
         state_machine::set_initial_encrypted_deck(&mut pre).unwrap();
 
-        let caller = pre.seats[1].player;
+        let caller = pre.seats[1].player();
         let (task, post) = dispatch_task(
             pre.clone(),
             caller,
@@ -4002,8 +4077,8 @@ mod tests {
     #[test]
     fn orchestrator_proves_kick_that_triggers_nested_reset() {
         let mut pre = make_table("kick-nested-reset");
-        pre.seats[0].player = [0x31; 20];
-        pre.seats[0].stack = 1_000;
+        seat_fixture::set_player(&mut pre.seats[0], [0x31; 20]);
+        seat_fixture::set_stack(&mut pre.seats[0], 1_000);
         pre.chip_pool = 1_000;
         let creator = pre.creator;
         let (task, post) = dispatch_task(
@@ -4031,10 +4106,13 @@ mod tests {
         pre.hand_id = 9;
         pre.call_seq = 17;
         for seat_index in 0..2 {
-            pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
-            pre.seats[seat_index].stack = 900;
-            pre.seats[seat_index].bet = 100;
-            pre.seats[seat_index].total_bet = 100;
+            seat_fixture::set_player(
+                &mut pre.seats[seat_index],
+                [u8::try_from(seat_index + 1).unwrap(); 20],
+            );
+            seat_fixture::set_stack(&mut pre.seats[seat_index], 900);
+            seat_fixture::set_bet(&mut pre.seats[seat_index], 100);
+            seat_fixture::set_total_bet(&mut pre.seats[seat_index], 100);
         }
         pre.chip_pool = 2_000;
 
@@ -4055,7 +4133,7 @@ mod tests {
             poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
         );
         assert_eq!(post.pot, 0);
-        assert_eq!(post.seats[1].stack, 1_100);
+        assert_eq!(post.seats[1].stack(), 1_100);
 
         let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
             .expect("active kick should normalize into the four-stage plan");
@@ -4078,11 +4156,14 @@ mod tests {
         let mut pre = make_table("kick-immediate-collection-only");
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for seat_index in 0..2 {
-            pre.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
-            pre.seats[seat_index].stack = 900;
+            seat_fixture::set_player(
+                &mut pre.seats[seat_index],
+                [u8::try_from(seat_index + 1).unwrap(); 20],
+            );
+            seat_fixture::set_stack(&mut pre.seats[seat_index], 900);
         }
-        pre.seats[1].bet = 100;
-        pre.seats[1].total_bet = 100;
+        seat_fixture::set_bet(&mut pre.seats[1], 100);
+        seat_fixture::set_total_bet(&mut pre.seats[1], 100);
         pre.chip_pool = 1_900;
 
         let creator = pre.creator;
@@ -4096,7 +4177,7 @@ mod tests {
             })
             .expect("kick args should serialize"),
         );
-        assert_eq!(post.seats[0].stack, 1_000);
+        assert_eq!(post.seats[0].stack(), 1_000);
         let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
             .expect("immediate kick collection should not require a PotCollected marker");
         assert!(plan.bet_collection.active);
@@ -4119,11 +4200,11 @@ mod tests {
             0,
         );
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
-            pre.seats[i].bet = 100;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
+            seat_fixture::set_bet(&mut pre.seats[i], 100);
         }
-        let caller = pre.seats[0].player;
+        let caller = pre.seats[0].player();
         let (task, _) = dispatch_task(
             pre,
             caller,
@@ -4183,11 +4264,11 @@ mod tests {
         pre.hand_id = 7;
         pre.call_seq = 11;
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
-            pre.seats[i].bet = 100;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
+            seat_fixture::set_bet(&mut pre.seats[i], 100);
         }
-        pre.seats[0].bet = 50;
+        seat_fixture::set_bet(&mut pre.seats[0], 50);
 
         let (task1, after_call) = dispatch_task(
             pre,
@@ -4221,6 +4302,105 @@ mod tests {
         orch.verify_chain().expect("state_root 链应衔接");
     }
 
+    #[test]
+    fn tagged_stage_batch_v4_binds_continuous_stream_and_row_references() {
+        let mut pre = make_table("tagged-stage-batch-v4");
+        enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
+        pre.hand_id = 12;
+        pre.call_seq = 30;
+        for i in 0..3 {
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
+            seat_fixture::set_bet(&mut pre.seats[i], 100);
+            seat_fixture::set_total_bet(&mut pre.seats[i], 100);
+        }
+        seat_fixture::set_bet(&mut pre.seats[0], 50);
+        seat_fixture::set_total_bet(&mut pre.seats[0], 50);
+
+        let (task1, after_call) = dispatch_task(
+            pre,
+            [1; 20],
+            texas_dispatch::selectors::call(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("call args should serialize"),
+        );
+        let (task2, _) = dispatch_task(
+            after_call,
+            [2; 20],
+            texas_dispatch::selectors::raise(),
+            borsh::to_vec(&RaiseArgs {
+                seat_index: 1,
+                total_bet: 300,
+            })
+            .expect("raise args should serialize"),
+        );
+        let tasks = vec![task1, task2];
+        let stream = crate::prove_task::MethodBatchV2::from_tasks(&tasks)
+            .expect("continuous state stream should replay");
+        let package = crate::tagged_method::prove_verified_tagged_composite_batch(&tasks)
+            .expect("two-proof tagged batch package should prove");
+        let bundle = package.stages();
+        assert_eq!(bundle.batch_id(), stream.batch_id().unwrap());
+        let references = bundle
+            .method_references(&tasks)
+            .expect("method-to-Stage references should rebuild");
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].row_index, 0);
+        assert_eq!(references[1].row_index, 1);
+        assert_eq!(
+            u16::from(references[0].stage_row_count),
+            references[1].stage_start_row
+        );
+
+        let method_bundle = package.method();
+        assert_eq!(method_bundle.batch_id(), bundle.batch_id());
+        assert_eq!(method_bundle.row_count(), 2);
+        let method_wire = method_bundle
+            .to_bytes()
+            .expect("tagged method proof should encode");
+        let method_decoded =
+            crate::tagged_method::ArchivedTaggedMethodProofBundle::from_bytes(&method_wire)
+                .expect("tagged method proof should decode");
+        let package_wire = package
+            .to_bytes()
+            .expect("tagged batch package should encode");
+        let package_decoded =
+            crate::tagged_method::ArchivedTaggedBatchProofPackage::from_bytes(&package_wire)
+                .expect("tagged batch package should decode");
+        assert_eq!(package_decoded.stream(), &stream);
+        let replayed = package_decoded
+            .replay_tasks()
+            .expect("self-contained package stream should replay");
+        assert_eq!(replayed.len(), tasks.len());
+        crate::tagged_method::verify_verified_tagged_composite_package(&package_decoded)
+            .expect("self-contained package should verify without external task snapshots");
+        crate::tagged_method::verify_verified_tagged_composite_batch(&tasks, &package_decoded)
+            .expect("decoded two-proof tagged batch package should verify");
+
+        let mut restored = Orchestrator::new();
+        let restored_summaries = restored
+            .restore_verified_tagged_batch(&package_decoded)
+            .expect("restart should replay the stream and restore tagged receipts");
+        assert_eq!(restored_summaries.len(), 2);
+        assert_eq!(restored.verified_chain().unwrap().len(), 2);
+
+        let payloads = crate::tagged_method::build_verified_payloads(
+            &tasks,
+            package_decoded.stages(),
+            &[None, None],
+            &[None, None],
+        )
+        .expect("ordinary actions should rebuild narrow verified method payloads");
+        crate::tagged_method::verify_tagged_method_batch(&payloads, &method_decoded)
+            .expect("standalone decoded tagged method proof should verify");
+
+        let wire = bundle.to_bytes().expect("v4 Stage batch should encode");
+        let decoded =
+            crate::airs::composition::ArchivedCompositionBatchProofBundle::from_bytes(&wire)
+                .expect("v4 Stage batch should decode");
+        crate::airs::composition::verify_composition_batch(&tasks, &decoded)
+            .expect("decoded v4 Stage batch should verify");
+    }
+
     /// P05-H-core 回归：完整 VM replay + native verify 产出的链可由精确范围 anchor
     /// 约束。测试中的 anchor 为了夹具方便从 task 计算；生产中必须来自已认证 block/receipt。
     #[test]
@@ -4230,11 +4410,11 @@ mod tests {
         pre.hand_id = 9;
         pre.call_seq = 20;
         for i in 0..3 {
-            pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
-            pre.seats[i].stack = 1_000;
-            pre.seats[i].bet = 100;
+            seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
+            seat_fixture::set_stack(&mut pre.seats[i], 1_000);
+            seat_fixture::set_bet(&mut pre.seats[i], 100);
         }
-        pre.seats[0].bet = 50;
+        seat_fixture::set_bet(&mut pre.seats[0], 50);
 
         let (task1, after_call) = dispatch_task(
             pre,

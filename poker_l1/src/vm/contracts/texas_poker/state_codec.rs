@@ -1,7 +1,7 @@
 //! Canonical persisted-state codec for Texas Poker tables.
 //!
-//! Production deliberately supports only the current resolved snapshot (v23) and the ObjectDb
-//! hot-table layout (v24). Historical schemas are not consensus inputs and fail closed instead of
+//! Production deliberately supports only the current resolved snapshot (v27) and the ObjectDb
+//! hot-table layout (v28). Historical schemas are not consensus inputs and fail closed instead of
 //! carrying an ever-growing migration surface in the execution path.
 
 use std::io::{self, Read, Write};
@@ -11,9 +11,9 @@ use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol::crypto::types::ECPoint;
 
-use super::card::{BoardCards, HoleCards};
+use super::card::BoardCards;
 use super::types::{
-    DeckState, HandPhase, RunItTwiceState, Seat, SeatMask, SeatStatus, TableContextBinding,
+    DeckState, HandPhase, RunItTwiceState, Seat, SeatMask, TableContextBinding,
     TableContextBindings, TableContextOpenings, TableRules, TexasPokerTable, seat_mask_contains,
     seat_mask_is_canonical,
 };
@@ -39,199 +39,14 @@ struct PersistedDeckStateV21 {
     decrypted_cards: Vec<super::types::DecryptedCard>,
 }
 
-#[derive(Debug, Clone, Copy, BorshSerialize, BorshDeserialize)]
-enum PersistedPlayingSeatStatusV22 {
-    Active,
-    Folded,
-    AllIn,
-}
-
-/// A seat's physical payload follows its lifecycle state, so impossible combinations cannot be
-/// persisted even while the runtime state machine still uses the flat [`Seat`] projection.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-enum PersistedSeatSlotV22 {
-    Vacant {
-        time_bank_ms: u32,
-    },
-    Waiting {
-        player: Address,
-        stack: u64,
-        pk: ECPoint,
-        pending_addon: u64,
-        time_bank_ms: u32,
-    },
-    Playing {
-        player: Address,
-        stack: u64,
-        hand: HoleCards,
-        bet: u64,
-        total_bet: u64,
-        status: PersistedPlayingSeatStatusV22,
-        pk: ECPoint,
-        pending_addon: u64,
-        time_bank_ms: u32,
-    },
-    DepartedThisHand {
-        player: Address,
-        total_bet: u64,
-        time_bank_ms: u32,
-    },
-}
-
-impl TryFrom<&Seat> for PersistedSeatSlotV22 {
-    type Error = PokerL1Error;
-
-    fn try_from(value: &Seat) -> Result<Self, Self::Error> {
-        value.validate_canonical()?;
-        match value.status {
-            SeatStatus::Empty => {
-                if value.stack != 0
-                    || !value.hand.is_empty()
-                    || value.bet != 0
-                    || value.total_bet != 0
-                    || !g1_is_identity(&value.pk.0)
-                    || value.pending_addon != 0
-                {
-                    return Err(PokerL1Error::Serialization(
-                        "Texas vacant seat carries non-canonical payload".into(),
-                    ));
-                }
-                Ok(Self::Vacant {
-                    time_bank_ms: value.time_bank_ms,
-                })
-            }
-            SeatStatus::Waiting => {
-                if !value.hand.is_empty() || value.bet != 0 || value.total_bet != 0 {
-                    return Err(PokerL1Error::Serialization(
-                        "Texas waiting seat carries in-hand cards or wagers".into(),
-                    ));
-                }
-                Ok(Self::Waiting {
-                    player: value.player,
-                    stack: value.stack,
-                    pk: value.pk,
-                    pending_addon: value.pending_addon,
-                    time_bank_ms: value.time_bank_ms,
-                })
-            }
-            SeatStatus::Active | SeatStatus::Folded | SeatStatus::AllIn => Ok(Self::Playing {
-                player: value.player,
-                stack: value.stack,
-                hand: value.hand.clone(),
-                bet: value.bet,
-                total_bet: value.total_bet,
-                status: match value.status {
-                    SeatStatus::Active => PersistedPlayingSeatStatusV22::Active,
-                    SeatStatus::Folded => PersistedPlayingSeatStatusV22::Folded,
-                    SeatStatus::AllIn => PersistedPlayingSeatStatusV22::AllIn,
-                    _ => unreachable!("playing status matched above"),
-                },
-                pk: value.pk,
-                pending_addon: value.pending_addon,
-                time_bank_ms: value.time_bank_ms,
-            }),
-            SeatStatus::Out => {
-                if value.stack != 0
-                    || !value.hand.is_empty()
-                    || value.bet != 0
-                    || !g1_is_identity(&value.pk.0)
-                    || value.pending_addon != 0
-                {
-                    return Err(PokerL1Error::Serialization(
-                        "Texas departed seat carries live custody or card payload".into(),
-                    ));
-                }
-                Ok(Self::DepartedThisHand {
-                    player: value.player,
-                    total_bet: value.total_bet,
-                    time_bank_ms: value.time_bank_ms,
-                })
-            }
-        }
-    }
-}
-
-impl TryFrom<PersistedSeatSlotV22> for Seat {
-    type Error = PokerL1Error;
-
-    fn try_from(value: PersistedSeatSlotV22) -> Result<Self, Self::Error> {
-        let seat = match value {
-            PersistedSeatSlotV22::Vacant { time_bank_ms } => {
-                let mut seat = Seat::empty();
-                seat.time_bank_ms = time_bank_ms;
-                seat
-            }
-            PersistedSeatSlotV22::Waiting {
-                player,
-                stack,
-                pk,
-                pending_addon,
-                time_bank_ms,
-            } => Self {
-                player,
-                stack,
-                hand: HoleCards::empty(),
-                bet: 0,
-                total_bet: 0,
-                status: SeatStatus::Waiting,
-                pk,
-                pending_addon,
-                time_bank_ms,
-            },
-            PersistedSeatSlotV22::Playing {
-                player,
-                stack,
-                hand,
-                bet,
-                total_bet,
-                status,
-                pk,
-                pending_addon,
-                time_bank_ms,
-            } => Self {
-                player,
-                stack,
-                hand,
-                bet,
-                total_bet,
-                status: match status {
-                    PersistedPlayingSeatStatusV22::Active => SeatStatus::Active,
-                    PersistedPlayingSeatStatusV22::Folded => SeatStatus::Folded,
-                    PersistedPlayingSeatStatusV22::AllIn => SeatStatus::AllIn,
-                },
-                pk,
-                pending_addon,
-                time_bank_ms,
-            },
-            PersistedSeatSlotV22::DepartedThisHand {
-                player,
-                total_bet,
-                time_bank_ms,
-            } => Self {
-                player,
-                stack: 0,
-                hand: HoleCards::empty(),
-                bet: 0,
-                total_bet,
-                status: SeatStatus::Out,
-                pk: Seat::empty().pk,
-                pending_addon: 0,
-                time_bank_ms,
-            },
-        };
-        seat.validate_canonical()?;
-        Ok(seat)
-    }
-}
-
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-struct PersistedTexasPokerTableV23 {
+struct PersistedTexasPokerTableV27 {
     id: ObjectID,
     state_schema_version: u8,
     name: String,
     creator: Address,
     rules: TableRules,
-    seats: Vec<PersistedSeatSlotV22>,
+    seats: Vec<Seat>,
     acted_mask: SeatMask,
     leave_after_hand_mask: SeatMask,
     button: u8,
@@ -246,11 +61,11 @@ struct PersistedTexasPokerTableV23 {
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-struct PersistedTexasPokerHotTableV24 {
+struct PersistedTexasPokerHotTableV28 {
     id: ObjectID,
     state_schema_version: u8,
     context: TableContextBindings,
-    seats: Vec<PersistedSeatSlotV22>,
+    seats: Vec<Seat>,
     acted_mask: SeatMask,
     leave_after_hand_mask: SeatMask,
     button: u8,
@@ -264,12 +79,18 @@ struct PersistedTexasPokerHotTableV24 {
     call_seq: u32,
 }
 
-fn persisted_seats(seats: &[Seat]) -> PokerL1Result<Vec<PersistedSeatSlotV22>> {
-    seats.iter().map(PersistedSeatSlotV22::try_from).collect()
+fn persisted_seats(seats: &[Seat]) -> PokerL1Result<Vec<Seat>> {
+    for seat in seats {
+        seat.validate_canonical()?;
+    }
+    Ok(seats.to_vec())
 }
 
-fn restore_seats(seats: Vec<PersistedSeatSlotV22>) -> PokerL1Result<Vec<Seat>> {
-    seats.into_iter().map(Seat::try_from).collect()
+fn restore_seats(seats: Vec<Seat>) -> PokerL1Result<Vec<Seat>> {
+    for seat in &seats {
+        seat.validate_canonical()?;
+    }
+    Ok(seats)
 }
 
 fn persisted_deck(table: &TexasPokerTable) -> PersistedDeckStateV21 {
@@ -297,14 +118,19 @@ fn aggregate_pk_for_mask(
             continue;
         }
         let seat = &seats[usize::from(seat_index)];
-        if !seat.is_occupied() || g1_is_identity(&seat.pk.0) {
+        let pk = seat.pk().ok_or_else(|| {
+            PokerL1Error::Serialization(format!(
+                "Texas contributor seat {seat_index} has no live key"
+            ))
+        })?;
+        if !seat.is_occupied() || g1_is_identity(&pk.0) {
             return Err(PokerL1Error::Serialization(format!(
                 "Texas contributor seat {seat_index} is not a live non-identity key"
             )));
         }
         aggregate = Some(match aggregate {
-            None => seat.pk,
-            Some(current) => ECPoint::from(g1_add(&current.0, &seat.pk.0)),
+            None => *pk,
+            Some(current) => ECPoint::from(g1_add(&current.0, &pk.0)),
         });
     }
     if aggregate
@@ -323,7 +149,7 @@ fn restore_table(
     rules: TableRules,
     name: String,
     creator: Address,
-    seats: Vec<PersistedSeatSlotV22>,
+    seats: Vec<Seat>,
     acted_mask: SeatMask,
     leave_after_hand_mask: SeatMask,
     button: u8,
@@ -368,7 +194,7 @@ fn restore_table(
     Ok(table)
 }
 
-impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV23 {
+impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV27 {
     type Error = PokerL1Error;
 
     fn try_from(value: &TexasPokerTable) -> Result<Self, Self::Error> {
@@ -395,10 +221,10 @@ impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV23 {
     }
 }
 
-impl TryFrom<PersistedTexasPokerTableV23> for TexasPokerTable {
+impl TryFrom<PersistedTexasPokerTableV27> for TexasPokerTable {
     type Error = PokerL1Error;
 
-    fn try_from(value: PersistedTexasPokerTableV23) -> Result<Self, Self::Error> {
+    fn try_from(value: PersistedTexasPokerTableV27) -> Result<Self, Self::Error> {
         if value.state_schema_version != TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
             return Err(PokerL1Error::Serialization(format!(
                 "unsupported canonical Texas schema {}",
@@ -428,7 +254,7 @@ impl TryFrom<PersistedTexasPokerTableV23> for TexasPokerTable {
 
 impl BorshSerialize for TexasPokerTable {
     fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        PersistedTexasPokerTableV23::try_from(self)
+        PersistedTexasPokerTableV27::try_from(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
             .serialize(writer)
     }
@@ -448,7 +274,7 @@ impl BorshDeserialize for TexasPokerTable {
         id.serialize(&mut prefix)?;
         schema.serialize(&mut prefix)?;
         let mut replay = prefix.as_slice().chain(reader);
-        PersistedTexasPokerTableV23::deserialize_reader(&mut replay)?
+        PersistedTexasPokerTableV27::deserialize_reader(&mut replay)?
             .try_into()
             .map_err(|error: PokerL1Error| {
                 io::Error::new(io::ErrorKind::InvalidData, error.to_string())
@@ -536,7 +362,7 @@ pub fn is_hot_table_state(bytes: &[u8]) -> bool {
 pub fn encode_hot_table_state(table: &TexasPokerTable) -> PokerL1Result<Vec<u8>> {
     table.validate_state_schema()?;
     let openings = TableContextOpenings::from_table(table);
-    let persisted = PersistedTexasPokerHotTableV24 {
+    let persisted = PersistedTexasPokerHotTableV28 {
         id: table.id,
         state_schema_version: TEXAS_POKER_HOT_STATE_SCHEMA_VERSION,
         context: table_context_bindings(table.id, &openings)?,
@@ -562,8 +388,8 @@ pub fn decode_hot_table_state(
     bytes: &[u8],
     openings: &TableContextOpenings,
 ) -> PokerL1Result<TexasPokerTable> {
-    let value = PersistedTexasPokerHotTableV24::try_from_slice(bytes).map_err(|error| {
-        PokerL1Error::Serialization(format!("Texas hot table v24 borsh: {error}"))
+    let value = PersistedTexasPokerHotTableV28::try_from_slice(bytes).map_err(|error| {
+        PokerL1Error::Serialization(format!("Texas hot table v28 borsh: {error}"))
     })?;
     if value.state_schema_version != TEXAS_POKER_HOT_STATE_SCHEMA_VERSION {
         return Err(PokerL1Error::Serialization(format!(
@@ -679,9 +505,10 @@ mod tests {
 
     #[test]
     fn vacant_seat_keeps_only_time_bank() {
-        let mut seat = Seat::empty();
-        seat.time_bank_ms = DEFAULT_TIME_BANK_MS / 2;
-        let restored = Seat::try_from(PersistedSeatSlotV22::try_from(&seat).unwrap()).unwrap();
+        let seat = Seat::Vacant {
+            time_bank_ms: DEFAULT_TIME_BANK_MS / 2,
+        };
+        let restored = Seat::try_from_slice(&borsh::to_vec(&seat).unwrap()).unwrap();
         assert_eq!(restored, seat);
     }
 }

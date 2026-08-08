@@ -41,9 +41,9 @@ use super::card::{BoardCards, Card, HoleCards};
 use super::constants::{
     ANTE_MODE_BBA, ANTE_MODE_NONE, ANTE_MODE_NORMAL, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE,
     RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE,
-    REVEAL_PHASE_PREFLOP, REVEAL_PHASE_REDEAL, REVEAL_PHASE_RIVER, REVEAL_PHASE_SHOWDOWN,
-    REVEAL_PHASE_TURN, RIT_MODE_DISABLED, RIT_MODE_TWICE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER,
-    ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_NONE,
+    REVEAL_PHASE_PREFLOP, REVEAL_PHASE_RIVER, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN,
+    RIT_MODE_DISABLED, RIT_MODE_TWICE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN,
+    ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_NONE,
     SHUFFLE_PHASE_RECONSTRUCT,
 };
 
@@ -189,51 +189,85 @@ impl Default for SeatStatus {
     }
 }
 
-/// 玩家座位（镜像 Move `Seat` struct，table.move:102-115）。
+/// Common custody and identity payload of a live occupied seat.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct Seat {
-    /// 玩家地址（[0; 20] 表示空座位）。
+pub struct OccupiedSeat {
+    /// Player address.
     pub player: Address,
-    /// 玩家筹码栈。
+    /// Chips currently available to wager.
     pub stack: u64,
-    /// 玩家手牌（最多 2 张）。
-    pub hand: HoleCards,
-    /// 本轮已下注（每轮开始时清零，累加到 total_bet）。
-    pub bet: u64,
-    /// 本局总下注（用于 side pot 计算）。
-    pub total_bet: u64,
-    /// 互斥的座位生命周期状态。
-    pub status: SeatStatus,
-    /// 玩家 ElGamal 公钥（G1 点，使用 ECPoint newtype 以支持 Borsh）。
+    /// Mental Poker public key.
     pub pk: ECPoint,
-    /// 待入账的 addon 金额（下一手 `reset_for_next_hand` 时合并到 `stack`）。
-    ///
-    /// 业务语义：玩家可在任意时刻调用 `addon(amount)` 追加筹码，但**不影响当前手牌**：
-    /// - 调用时只累加 `pending_addon`，不动 `stack`（避免破坏当前 pot/side_pot）
-    /// - 在 `reset_for_next_hand` 第一阶段合并：`stack += pending_addon; pending_addon = 0`
-    /// - 合并发生在清理 stack==0 的 seat 之前（确保 addon 后玩家不会被误踢）
+    /// Addon held until the next-hand reset boundary.
     pub pending_addon: u64,
-    /// 玩家 Time Bank 剩余额度（毫秒）。
-    ///
-    /// 业务语义：玩家在 betting 阶段超时后，若 time_bank_ms > 0，
-    /// 系统自动消耗 time_bank 续命（而非直接 auto_fold）。
-    /// 每手开始时按 `TIME_BANK_REFILL_PER_HAND_MS` 补充（上限 DEFAULT_TIME_BANK_MS）。
+    /// Remaining time-bank allowance in milliseconds.
     pub time_bank_ms: u32,
+}
+
+/// Mutually exclusive status of a player participating in the current hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum PlayingSeatStatus {
+    /// May act in the current betting round.
+    Active,
+    /// Folded, but contribution remains eligible for side-pot accounting.
+    Folded,
+    /// Has no remaining stack and cannot act again.
+    AllIn,
+}
+
+/// Hand-local payload that only exists while a player participates in the current hand.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct PlayingSeat {
+    /// Live identity/custody payload.
+    pub occupied: OccupiedSeat,
+    /// Private hole cards, materialized by the reveal protocol.
+    pub hand: HoleCards,
+    /// Amount committed in the current betting round.
+    pub bet: u64,
+    /// Total amount committed in this hand, retained for side pots.
+    pub total_bet: u64,
+    /// In-hand lifecycle state.
+    pub status: PlayingSeatStatus,
+}
+
+/// Canonical runtime seat representation.
+///
+/// Each lifecycle variant carries only meaningful data. This is also the canonical Borsh/state-root
+/// representation; impossible flat combinations such as an empty seat with chips or a waiting seat
+/// with hole cards cannot be constructed.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum Seat {
+    /// Unoccupied slot. Time-bank is retained as a slot policy counter.
+    Vacant {
+        /// Remaining time-bank allowance for the slot.
+        time_bank_ms: u32,
+    },
+    /// Occupied player waiting for the next hand.
+    Waiting {
+        /// Live identity/custody payload.
+        occupied: OccupiedSeat,
+    },
+    /// Player participating in the current hand.
+    Playing {
+        /// Hand-local player payload.
+        playing: PlayingSeat,
+    },
+    /// Player removed during a hand whose contribution must remain for settlement.
+    DepartedThisHand {
+        /// Address retained for deterministic events and audit output.
+        player: Address,
+        /// Hand contribution retained for side-pot construction.
+        total_bet: u64,
+        /// Remaining time-bank allowance.
+        time_bank_ms: u32,
+    },
 }
 
 impl Seat {
     /// 构造空座位。
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            player: EMPTY_PLAYER,
-            stack: 0,
-            hand: HoleCards::empty(),
-            bet: 0,
-            total_bet: 0,
-            status: SeatStatus::Empty,
-            pk: ECPoint(G1Projective::identity()),
-            pending_addon: 0,
+        Self::Vacant {
             time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
         }
     }
@@ -260,16 +294,25 @@ impl Seat {
                 "Texas newly occupied seat cannot use an identity public key".into(),
             ));
         }
-        Ok(Self {
+        let occupied = OccupiedSeat {
             player,
             stack,
-            hand: HoleCards::empty(),
-            bet: 0,
-            total_bet: 0,
-            status,
             pk,
             pending_addon: 0,
             time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
+        };
+        Ok(match status {
+            SeatStatus::Waiting => Self::Waiting { occupied },
+            SeatStatus::Active => Self::Playing {
+                playing: PlayingSeat {
+                    occupied,
+                    hand: HoleCards::empty(),
+                    bet: 0,
+                    total_bet: 0,
+                    status: PlayingSeatStatus::Active,
+                },
+            },
+            _ => unreachable!("occupied status validated above"),
         })
     }
 
@@ -283,128 +326,506 @@ impl Seat {
     /// `player`, `total_bet`, and `time_bank_ms` remain available for side-pot settlement and
     /// audit events. Live custody, cards, the encryption key, and pending funding are cleared.
     pub fn depart_this_hand(&mut self) -> PokerL1Result<()> {
-        if self.player == EMPTY_PLAYER {
-            return Err(PokerL1Error::Serialization(
-                "Texas cannot depart a vacant seat".into(),
-            ));
-        }
-        self.stack = 0;
-        self.hand.clear();
-        self.bet = 0;
-        self.status = SeatStatus::Out;
-        self.pk = ECPoint(G1Projective::identity());
-        self.pending_addon = 0;
+        let (player, total_bet, time_bank_ms) = match self {
+            Self::Waiting { occupied } => (occupied.player, 0, occupied.time_bank_ms),
+            Self::Playing { playing } => (
+                playing.occupied.player,
+                playing.total_bet,
+                playing.occupied.time_bank_ms,
+            ),
+            Self::Vacant { .. } => {
+                return Err(PokerL1Error::Serialization(
+                    "Texas cannot depart a vacant seat".into(),
+                ));
+            }
+            Self::DepartedThisHand { .. } => return Ok(()),
+        };
+        *self = Self::DepartedThisHand {
+            player,
+            total_bet,
+            time_bank_ms,
+        };
         Ok(())
     }
 
     /// Clear hand-local payload and project a retained player into the next-hand ready state.
     pub fn prepare_next_hand(&mut self) {
-        self.hand.clear();
-        self.bet = 0;
-        self.total_bet = 0;
-        self.status = match self.status {
-            SeatStatus::Empty => SeatStatus::Empty,
-            // A departed seat has no live key or stack, so it cannot become Active again.  Keep
-            // the tombstone until reset emits PlayerLeft and vacates the slot.
-            SeatStatus::Out => SeatStatus::Out,
-            SeatStatus::Waiting | SeatStatus::Active | SeatStatus::Folded | SeatStatus::AllIn => {
-                SeatStatus::Active
+        match self {
+            Self::Vacant { .. } | Self::DepartedThisHand { .. } => {}
+            Self::Waiting { occupied } => {
+                let occupied = occupied.clone();
+                *self = Self::Playing {
+                    playing: PlayingSeat {
+                        occupied,
+                        hand: HoleCards::empty(),
+                        bet: 0,
+                        total_bet: 0,
+                        status: PlayingSeatStatus::Active,
+                    },
+                };
             }
-        };
+            Self::Playing { playing } => {
+                playing.hand.clear();
+                playing.bet = 0;
+                playing.total_bet = 0;
+                playing.status = PlayingSeatStatus::Active;
+            }
+        }
     }
 
     /// 判断座位是否被活跃占用（player != [0;20] 且未中途离开）。
     #[must_use]
     pub fn is_occupied(&self) -> bool {
-        self.player != EMPTY_PLAYER && self.status != SeatStatus::Out
+        matches!(self, Self::Waiting { .. } | Self::Playing { .. })
     }
 
     /// 获取座位状态枚举。
     #[must_use]
     pub fn status(&self) -> SeatStatus {
-        self.status
+        match self {
+            Self::Vacant { .. } => SeatStatus::Empty,
+            Self::Waiting { .. } => SeatStatus::Waiting,
+            Self::Playing { playing } => match playing.status {
+                PlayingSeatStatus::Active => SeatStatus::Active,
+                PlayingSeatStatus::Folded => SeatStatus::Folded,
+                PlayingSeatStatus::AllIn => SeatStatus::AllIn,
+            },
+            Self::DepartedThisHand { .. } => SeatStatus::Out,
+        }
     }
 
     /// Whether the seat has folded this hand.
     #[must_use]
     pub fn is_folded(&self) -> bool {
-        self.status == SeatStatus::Folded
+        self.status() == SeatStatus::Folded
     }
 
     /// Whether the seat is all-in this hand.
     #[must_use]
     pub fn is_all_in(&self) -> bool {
-        self.status == SeatStatus::AllIn
+        self.status() == SeatStatus::AllIn
     }
 
     /// Whether the occupied seat is waiting for the next hand.
     #[must_use]
     pub fn is_waiting(&self) -> bool {
-        self.status == SeatStatus::Waiting
+        matches!(self, Self::Waiting { .. })
     }
 
     /// Whether the player left or was removed during the current hand.
     #[must_use]
     pub fn has_left_hand(&self) -> bool {
-        self.status == SeatStatus::Out
+        matches!(self, Self::DepartedThisHand { .. })
     }
 
     /// Replace the mutually-exclusive lifecycle state.
     pub fn set_status(&mut self, status: SeatStatus) {
-        self.status = status;
+        match status {
+            SeatStatus::Empty => self.vacate(),
+            SeatStatus::Out => self
+                .depart_this_hand()
+                .expect("only occupied seats may transition to Out"),
+            SeatStatus::Waiting => match self {
+                Self::Waiting { .. } => {}
+                Self::Playing { playing }
+                    if playing.hand.is_empty() && playing.bet == 0 && playing.total_bet == 0 =>
+                {
+                    let occupied = playing.occupied.clone();
+                    *self = Self::Waiting { occupied };
+                }
+                _ => panic!("only a clean live seat may transition to Waiting"),
+            },
+            SeatStatus::Active => match self {
+                Self::Waiting { occupied } => {
+                    let occupied = occupied.clone();
+                    *self = Self::Playing {
+                        playing: PlayingSeat {
+                            occupied,
+                            hand: HoleCards::empty(),
+                            bet: 0,
+                            total_bet: 0,
+                            status: PlayingSeatStatus::Active,
+                        },
+                    };
+                }
+                Self::Playing { playing } => playing.status = PlayingSeatStatus::Active,
+                _ => panic!("only a live occupied seat may transition to Active"),
+            },
+            SeatStatus::Folded | SeatStatus::AllIn => match self {
+                Self::Playing { playing } => {
+                    playing.status = if status == SeatStatus::Folded {
+                        PlayingSeatStatus::Folded
+                    } else {
+                        PlayingSeatStatus::AllIn
+                    };
+                }
+                _ => panic!("only an in-hand seat may fold or become all-in"),
+            },
+        }
+    }
+
+    /// Player address, or the canonical empty address for a vacant slot.
+    #[must_use]
+    pub const fn player(&self) -> Address {
+        match self {
+            Self::Vacant { .. } => EMPTY_PLAYER,
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => occupied.player,
+            Self::DepartedThisHand { player, .. } => *player,
+        }
+    }
+
+    /// Available stack; zero for vacant or departed seats.
+    #[must_use]
+    pub const fn stack(&self) -> u64 {
+        match self {
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => occupied.stack,
+            Self::Vacant { .. } | Self::DepartedThisHand { .. } => 0,
+        }
+    }
+
+    /// Current-round wager; zero outside an active hand.
+    #[must_use]
+    pub const fn bet(&self) -> u64 {
+        match self {
+            Self::Playing { playing } => playing.bet,
+            _ => 0,
+        }
+    }
+
+    /// Total hand contribution retained for side-pot accounting.
+    #[must_use]
+    pub const fn total_bet(&self) -> u64 {
+        match self {
+            Self::Playing { playing } => playing.total_bet,
+            Self::DepartedThisHand { total_bet, .. } => *total_bet,
+            Self::Vacant { .. } | Self::Waiting { .. } => 0,
+        }
+    }
+
+    /// Pending addon; zero for vacant or departed seats.
+    #[must_use]
+    pub const fn pending_addon(&self) -> u64 {
+        match self {
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => occupied.pending_addon,
+            Self::Vacant { .. } | Self::DepartedThisHand { .. } => 0,
+        }
+    }
+
+    /// Remaining time bank.
+    #[must_use]
+    pub const fn time_bank_ms(&self) -> u32 {
+        match self {
+            Self::Vacant { time_bank_ms } | Self::DepartedThisHand { time_bank_ms, .. } => {
+                *time_bank_ms
+            }
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => occupied.time_bank_ms,
+        }
+    }
+
+    /// Live Mental Poker key, absent for vacant and departed seats.
+    #[must_use]
+    pub const fn pk(&self) -> Option<&ECPoint> {
+        match self {
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => Some(&occupied.pk),
+            Self::Vacant { .. } | Self::DepartedThisHand { .. } => None,
+        }
+    }
+
+    /// Hole cards when participating in the current hand.
+    #[must_use]
+    pub const fn hand(&self) -> Option<&HoleCards> {
+        match self {
+            Self::Playing { playing } => Some(&playing.hand),
+            _ => None,
+        }
+    }
+
+    /// Mutable in-hand payload.
+    pub fn playing_mut(&mut self) -> PokerL1Result<&mut PlayingSeat> {
+        match self {
+            Self::Playing { playing } => Ok(playing),
+            _ => Err(PokerL1Error::Serialization(
+                "Texas seat is not participating in the current hand".into(),
+            )),
+        }
+    }
+
+    /// Mutable occupied payload, available to waiting and playing seats.
+    pub fn occupied_mut(&mut self) -> PokerL1Result<&mut OccupiedSeat> {
+        match self {
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => Ok(occupied),
+            _ => Err(PokerL1Error::Serialization(
+                "Texas seat has no live occupied payload".into(),
+            )),
+        }
+    }
+
+    /// Set the available stack of a live occupied seat.
+    pub fn set_stack(&mut self, stack: u64) -> PokerL1Result<()> {
+        match self {
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => {
+                occupied.stack = stack;
+            }
+            _ if stack == 0 => {}
+            _ => {
+                return Err(PokerL1Error::Serialization(
+                    "Texas vacant/departed seat cannot carry a stack".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the current-round wager of an in-hand seat.
+    pub fn set_bet(&mut self, bet: u64) -> PokerL1Result<()> {
+        match self {
+            Self::Playing { playing } => playing.bet = bet,
+            _ if bet == 0 => {}
+            _ => {
+                return Err(PokerL1Error::Serialization(
+                    "Texas non-playing seat cannot carry a round wager".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the total hand contribution used by side-pot accounting.
+    pub fn set_total_bet(&mut self, total_bet: u64) -> PokerL1Result<()> {
+        match self {
+            Self::Playing { playing } => playing.total_bet = total_bet,
+            Self::DepartedThisHand {
+                total_bet: current, ..
+            } => *current = total_bet,
+            _ if total_bet == 0 => {}
+            _ => {
+                return Err(PokerL1Error::Serialization(
+                    "Texas non-playing seat cannot carry a hand contribution".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Set a live occupied seat's pending addon.
+    pub fn set_pending_addon(&mut self, pending_addon: u64) -> PokerL1Result<()> {
+        match self {
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => {
+                occupied.pending_addon = pending_addon;
+            }
+            _ if pending_addon == 0 => {}
+            _ => {
+                return Err(PokerL1Error::Serialization(
+                    "Texas vacant/departed seat cannot carry a pending addon".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the slot's remaining time bank.
+    pub fn set_time_bank_ms(&mut self, value: u32) {
+        match self {
+            Self::Vacant { time_bank_ms } | Self::DepartedThisHand { time_bank_ms, .. } => {
+                *time_bank_ms = value
+            }
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => {
+                occupied.time_bank_ms = value;
+            }
+        }
+    }
+
+    /// Replace the hole cards of an in-hand seat.
+    pub fn set_hand(&mut self, hand: HoleCards) -> PokerL1Result<()> {
+        hand.validate_canonical().map_err(|error| {
+            PokerL1Error::Serialization(format!("Texas seat hand is non-canonical: {error}"))
+        })?;
+        self.playing_mut()?.hand = hand;
+        Ok(())
+    }
+
+    /// Mutable hole-card payload of an in-hand seat.
+    pub fn hand_mut(&mut self) -> PokerL1Result<&mut HoleCards> {
+        Ok(&mut self.playing_mut()?.hand)
+    }
+
+    /// Replace a slot with an exact in-hand fixture/state payload.
+    pub fn replace_playing(
+        &mut self,
+        player: Address,
+        stack: u64,
+        pk: ECPoint,
+        hand: HoleCards,
+        bet: u64,
+        total_bet: u64,
+        status: PlayingSeatStatus,
+        pending_addon: u64,
+        time_bank_ms: u32,
+    ) -> PokerL1Result<()> {
+        if player == EMPTY_PLAYER || bool::from(pk.0.is_identity()) {
+            return Err(PokerL1Error::Serialization(
+                "Texas playing seat requires a live identity and key".into(),
+            ));
+        }
+        hand.validate_canonical().map_err(|error| {
+            PokerL1Error::Serialization(format!("Texas seat hand is non-canonical: {error}"))
+        })?;
+        *self = Self::Playing {
+            playing: PlayingSeat {
+                occupied: OccupiedSeat {
+                    player,
+                    stack,
+                    pk,
+                    pending_addon,
+                    time_bank_ms,
+                },
+                hand,
+                bet,
+                total_bet,
+                status,
+            },
+        };
+        Ok(())
+    }
+
+    /// Test-fixture helper that installs or replaces the player identity without ever creating a
+    /// partially occupied flat seat. Production transitions must use `occupied`/`replace_playing`.
+    #[cfg(test)]
+    pub(crate) fn fixture_set_player(&mut self, player: Address) {
+        assert_ne!(player, EMPTY_PLAYER, "fixture player must be non-empty");
+        match self {
+            Self::Vacant { time_bank_ms } => {
+                let time_bank_ms = *time_bank_ms;
+                *self = Self::Playing {
+                    playing: PlayingSeat {
+                        occupied: OccupiedSeat {
+                            player,
+                            stack: 0,
+                            pk: ECPoint(G1Projective::generator()),
+                            pending_addon: 0,
+                            time_bank_ms,
+                        },
+                        hand: HoleCards::empty(),
+                        bet: 0,
+                        total_bet: 0,
+                        status: PlayingSeatStatus::Active,
+                    },
+                };
+            }
+            Self::Waiting { occupied }
+            | Self::Playing {
+                playing: PlayingSeat { occupied, .. },
+            } => {
+                occupied.player = player;
+            }
+            Self::DepartedThisHand {
+                player: current, ..
+            } => *current = player,
+        }
+    }
+
+    /// Test-fixture helper that promotes a waiting seat before installing a hand-local wager.
+    #[cfg(test)]
+    pub(crate) fn fixture_set_bet(&mut self, bet: u64) {
+        if matches!(self, Self::Waiting { .. }) {
+            self.set_status(SeatStatus::Active);
+        }
+        self.set_bet(bet)
+            .expect("fixture bet requires a playing seat");
+    }
+
+    /// Test-fixture helper that promotes a waiting seat before installing a hand contribution.
+    #[cfg(test)]
+    pub(crate) fn fixture_set_total_bet(&mut self, total_bet: u64) {
+        if matches!(self, Self::Waiting { .. }) {
+            self.set_status(SeatStatus::Active);
+        }
+        self.set_total_bet(total_bet)
+            .expect("fixture total_bet requires a playing/departed seat");
+    }
+
+    /// Test-fixture helper that promotes a waiting seat before installing hole cards.
+    #[cfg(test)]
+    pub(crate) fn fixture_set_hand(&mut self, hand: HoleCards) {
+        if matches!(self, Self::Waiting { .. }) {
+            self.set_status(SeatStatus::Active);
+        }
+        self.set_hand(hand)
+            .expect("fixture hand requires a playing seat");
+    }
+
+    /// Test-fixture helper for explicit Mental Poker key replacement.
+    #[cfg(test)]
+    pub(crate) fn fixture_set_pk(&mut self, pk: ECPoint) {
+        self.occupied_mut()
+            .expect("fixture key requires a live occupied seat")
+            .pk = pk;
     }
 
     /// 校验可持久化的 canonical seat 表达。
     pub fn validate_canonical(&self) -> PokerL1Result<()> {
-        if (self.player == EMPTY_PLAYER) != (self.status == SeatStatus::Empty) {
-            return Err(PokerL1Error::Serialization(
-                "Texas seat player/status mismatch".into(),
-            ));
-        }
-        self.hand.validate_canonical().map_err(|error| {
-            PokerL1Error::Serialization(format!("Texas seat hand is non-canonical: {error}"))
-        })?;
-        if self.status == SeatStatus::Empty && !self.hand.is_empty() {
-            return Err(PokerL1Error::Serialization(
-                "Texas empty seat contains hole cards".into(),
-            ));
-        }
-        match self.status {
-            SeatStatus::Empty => {
-                if self.stack != 0
-                    || self.bet != 0
-                    || self.total_bet != 0
-                    || !bool::from(self.pk.0.is_identity())
-                    || self.pending_addon != 0
-                {
+        match self {
+            Self::Vacant { .. } => {}
+            Self::Waiting { occupied } => validate_occupied_seat(occupied)?,
+            Self::Playing { playing } => {
+                validate_occupied_seat(&playing.occupied)?;
+                playing.hand.validate_canonical().map_err(|error| {
+                    PokerL1Error::Serialization(format!(
+                        "Texas seat hand is non-canonical: {error}"
+                    ))
+                })?;
+            }
+            Self::DepartedThisHand { player, .. } => {
+                if *player == EMPTY_PLAYER {
                     return Err(PokerL1Error::Serialization(
-                        "Texas empty seat carries live custody or key payload".into(),
+                        "Texas departed seat cannot use the empty player address".into(),
                     ));
                 }
             }
-            SeatStatus::Waiting => {
-                if !self.hand.is_empty() || self.bet != 0 || self.total_bet != 0 {
-                    return Err(PokerL1Error::Serialization(
-                        "Texas waiting seat carries in-hand cards or wagers".into(),
-                    ));
-                }
-            }
-            SeatStatus::Out => {
-                if self.stack != 0
-                    || !self.hand.is_empty()
-                    || self.bet != 0
-                    || !bool::from(self.pk.0.is_identity())
-                    || self.pending_addon != 0
-                {
-                    return Err(PokerL1Error::Serialization(
-                        "Texas departed seat carries live custody, card, or key payload".into(),
-                    ));
-                }
-            }
-            SeatStatus::Active | SeatStatus::Folded | SeatStatus::AllIn => {}
         }
         Ok(())
     }
+}
+
+fn validate_occupied_seat(occupied: &OccupiedSeat) -> PokerL1Result<()> {
+    if occupied.player == EMPTY_PLAYER {
+        return Err(PokerL1Error::Serialization(
+            "Texas occupied seat cannot use the empty player address".into(),
+        ));
+    }
+    if bool::from(occupied.pk.0.is_identity()) {
+        return Err(PokerL1Error::Serialization(
+            "Texas occupied seat cannot use an identity public key".into(),
+        ));
+    }
+    Ok(())
 }
 
 // ========== 洗牌状态 ==========
@@ -678,23 +1099,95 @@ impl RunItTwiceState {
     }
 }
 
-/// Reveal Token 状态（镜像 Move `RevealTokenState`，table.move:146-149）。
+/// Typed purpose of an active or reconstruction-suspended reveal collection.
 ///
-/// `reveal_phase` 取值见 `constants::REVEAL_PHASE_*`（与 Move 端逐字节一致）。
+/// There is deliberately no `None` variant. Absence of reveal work is represented by the outer
+/// [`HandPhase`], so a persisted `NONE + assignments` combination is unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum RevealPurpose {
+    /// Remove every non-owner layer while initially dealing private hole cards.
+    DealHole = 1,
+    /// Reveal public board cards for the outer flop/turn/river street.
+    Board = 2,
+    /// Let each remaining owner remove the final layer from their private cards.
+    ShowdownOwner = 3,
+}
+
+impl RevealPurpose {
+    /// Project the typed purpose plus its outer street into the stable event/AIR phase ABI.
+    #[must_use]
+    pub const fn legacy_phase(self, street: u8) -> u8 {
+        match (self, street) {
+            (Self::DealHole, ROUND_PREFLOP) => REVEAL_PHASE_PREFLOP,
+            (Self::Board, ROUND_FLOP) => REVEAL_PHASE_FLOP,
+            (Self::Board, ROUND_TURN) => REVEAL_PHASE_TURN,
+            (Self::Board, ROUND_RIVER) => REVEAL_PHASE_RIVER,
+            (Self::ShowdownOwner, ROUND_SHOWDOWN) => REVEAL_PHASE_SHOWDOWN,
+            _ => REVEAL_PHASE_NONE,
+        }
+    }
+}
+
+/// Canonical reveal-token collection payload.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RevealTokenState {
-    /// Reveal 阶段（REVEAL_PHASE_NONE/PREFLOP/REDEAL/FLOP/TURN/RIVER/SHOWDOWN）。
-    pub reveal_phase: u8,
+    /// Type-safe protocol purpose; the exact board street lives once in the outer [`HandPhase`].
+    pub purpose: RevealPurpose,
     /// 当前阶段的分配列表。
     pub assignments: Vec<RevealAssignment>,
 }
 
-impl Default for RevealTokenState {
-    fn default() -> Self {
-        Self {
-            reveal_phase: REVEAL_PHASE_NONE,
-            assignments: vec![],
+impl RevealTokenState {
+    /// Validate purpose/street and target-shape invariants without consulting table seats.
+    pub fn validate_for_street(&self, street: u8) -> PokerL1Result<()> {
+        if self.purpose.legacy_phase(street) == REVEAL_PHASE_NONE {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas reveal purpose {:?} is incompatible with street {street}",
+                self.purpose
+            )));
         }
+        let mut prior_key = None;
+        let mut encrypted_indices = [false; 52];
+        for (assignment_index, assignment) in self.assignments.iter().enumerate() {
+            let target_matches = match (self.purpose, assignment.target) {
+                (
+                    RevealPurpose::DealHole | RevealPurpose::ShowdownOwner,
+                    RevealTarget::Hole { card_slot, .. },
+                ) => card_slot < 2,
+                (
+                    RevealPurpose::Board,
+                    RevealTarget::Board {
+                        runout_index,
+                        board_position,
+                    },
+                ) => runout_index < 2 && board_position < 5,
+                _ => false,
+            };
+            if !target_matches {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas reveal assignment {assignment_index} target is incompatible with purpose {:?}",
+                    self.purpose
+                )));
+            }
+            let target_key = assignment.target.canonical_key();
+            if prior_key.is_some_and(|prior| prior >= target_key) {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas reveal assignment {assignment_index} target order is not canonical"
+                )));
+            }
+            prior_key = Some(target_key);
+            let encrypted_index = usize::from(assignment.encrypted_card_index);
+            if encrypted_index >= encrypted_indices.len() || encrypted_indices[encrypted_index] {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas reveal assignment {assignment_index} has duplicate/out-of-range encrypted card index {}",
+                    assignment.encrypted_card_index
+                )));
+            }
+            encrypted_indices[encrypted_index] = true;
+        }
+        Ok(())
     }
 }
 
@@ -1480,22 +1973,51 @@ impl TexasPokerTable {
         }
     }
 
-    /// Read-only compatibility projection of the active or suspended reveal payload.
+    /// Read-only projection of the active or reconstruction-suspended reveal payload.
     #[must_use]
-    pub fn reveal_token_state(&self) -> Cow<'_, RevealTokenState> {
+    pub const fn reveal_token_state(&self) -> Option<&RevealTokenState> {
         match &self.hand_phase {
-            HandPhase::Revealing { state, .. } => Cow::Borrowed(state),
+            HandPhase::Revealing { state, .. } => Some(state),
             HandPhase::Reconstructing {
                 suspended_reveal, ..
-            } => Cow::Borrowed(suspended_reveal),
+            } => Some(suspended_reveal),
             HandPhase::Shuffling {
                 phase:
                     ShufflingPhase::Reconstruct {
                         suspended_reveal, ..
                     },
-            } => Cow::Borrowed(suspended_reveal),
-            _ => Cow::Owned(RevealTokenState::default()),
+            } => Some(suspended_reveal),
+            _ => None,
         }
+    }
+
+    /// Stable numeric reveal phase used by current events and AIR public inputs.
+    #[must_use]
+    pub const fn reveal_phase(&self) -> u8 {
+        match &self.hand_phase {
+            HandPhase::Revealing { street, state, .. }
+            | HandPhase::Reconstructing {
+                street,
+                suspended_reveal: state,
+                ..
+            }
+            | HandPhase::Shuffling {
+                phase:
+                    ShufflingPhase::Reconstruct {
+                        street,
+                        suspended_reveal: state,
+                        ..
+                    },
+            } => state.purpose.legacy_phase(*street),
+            _ => REVEAL_PHASE_NONE,
+        }
+    }
+
+    /// Canonical reveal assignments, or an empty slice when no reveal is active or suspended.
+    #[must_use]
+    pub fn reveal_assignments(&self) -> &[RevealAssignment] {
+        self.reveal_token_state()
+            .map_or(&[], |state| state.assignments.as_slice())
     }
 
     /// Read-only compatibility projection of the active reconstruct payload.
@@ -1983,6 +2505,7 @@ impl TexasPokerTable {
                 "Texas reconstruct shuffle is outside a live street".into(),
             ));
         }
+        suspended_reveal.validate_for_street(street)?;
         let deadline_ms = canonical_absolute_deadline(
             started_at_ms,
             self.timeout_config.shuffle_timeout_ms,
@@ -2006,6 +2529,7 @@ impl TexasPokerTable {
         state: RevealTokenState,
         started_at_ms: u64,
     ) -> PokerL1Result<()> {
+        state.validate_for_street(street)?;
         let deadline_ms = canonical_absolute_deadline(
             started_at_ms,
             self.timeout_config.reveal_timeout_ms,
@@ -2027,6 +2551,7 @@ impl TexasPokerTable {
         suspended_reveal: RevealTokenState,
         epoch_ms: u64,
     ) -> PokerL1Result<()> {
+        suspended_reveal.validate_for_street(street)?;
         let deadline_ms = canonical_absolute_deadline(
             epoch_ms,
             self.timeout_config.reconstruct_timeout_ms,
@@ -2084,14 +2609,19 @@ impl TexasPokerTable {
                 continue;
             }
             let seat = &self.seats[usize::from(seat_index)];
-            if !seat.is_occupied() || super::utils::g1_is_identity(&seat.pk) {
+            let pk = seat.pk().ok_or_else(|| {
+                PokerL1Error::Serialization(format!(
+                    "Texas deck contributor seat {seat_index} has no live key"
+                ))
+            })?;
+            if !seat.is_occupied() || super::utils::g1_is_identity(&pk.0) {
                 return Err(PokerL1Error::Serialization(format!(
                     "Texas deck contributor seat {seat_index} is empty, out, or has identity pk"
                 )));
             }
             aggregate = Some(match aggregate {
-                None => seat.pk,
-                Some(current) => ECPoint::from(super::utils::g1_add(&current.0, &seat.pk.0)),
+                None => *pk,
+                Some(current) => ECPoint::from(super::utils::g1_add(&current.0, &pk.0)),
             });
         }
         if aggregate
@@ -2200,7 +2730,7 @@ impl TexasPokerTable {
     pub fn find_seat(&self, player: &Address) -> Option<u8> {
         self.seats
             .iter()
-            .position(|s| &s.player == player)
+            .position(|s| &s.player() == player)
             .map(|i| i as u8)
     }
 
@@ -2209,7 +2739,7 @@ impl TexasPokerTable {
     pub fn find_empty_seat(&self) -> Option<u8> {
         self.seats
             .iter()
-            .position(|s| s.player == EMPTY_PLAYER)
+            .position(|s| matches!(s, Seat::Vacant { .. }))
             .map(|i| i as u8)
     }
 
@@ -2272,20 +2802,16 @@ impl TexasPokerTable {
                 Ok(())
             }
         };
-        let validate_reveal = |state: &RevealTokenState| {
-            if !matches!(
-                state.reveal_phase,
-                REVEAL_PHASE_PREFLOP
-                    | REVEAL_PHASE_REDEAL
-                    | REVEAL_PHASE_FLOP
-                    | REVEAL_PHASE_TURN
-                    | REVEAL_PHASE_RIVER
-                    | REVEAL_PHASE_SHOWDOWN
-            ) {
-                return Err(PokerL1Error::Serialization(format!(
-                    "Texas reveal phase {} is not active/canonical",
-                    state.reveal_phase
-                )));
+        let validate_reveal = |street: u8, state: &RevealTokenState| {
+            state.validate_for_street(street)?;
+            for (assignment_index, assignment) in state.assignments.iter().enumerate() {
+                if let RevealTarget::Hole { seat_index, .. } = assignment.target
+                    && seat_index >= self.max_players
+                {
+                    return Err(PokerL1Error::Serialization(format!(
+                        "Texas reveal assignment {assignment_index} targets out-of-range seat {seat_index}"
+                    )));
+                }
             }
             Ok(())
         };
@@ -2307,7 +2833,7 @@ impl TexasPokerTable {
                             "Texas reconstruct shuffle is outside a live street".into(),
                         ));
                     }
-                    validate_reveal(suspended_reveal)?;
+                    validate_reveal(*street, suspended_reveal)?;
                 }
                 validate_deadline(
                     phase.deadline_ms(),
@@ -2328,7 +2854,7 @@ impl TexasPokerTable {
                         "Texas reveal phase is outside a live street".into(),
                     ));
                 }
-                validate_reveal(state)?;
+                validate_reveal(*street, state)?;
                 validate_deadline(
                     *deadline_ms,
                     self.timeout_config.reveal_timeout_ms,
@@ -2350,7 +2876,7 @@ impl TexasPokerTable {
                         "Texas reconstruct phase is not active on a live street".into(),
                     ));
                 }
-                validate_reveal(suspended_reveal)?;
+                validate_reveal(*street, suspended_reveal)?;
                 if *epoch_ms == 0 || *deadline_ms == 0 {
                     return Err(PokerL1Error::Serialization(
                         "Texas active reconstruct epoch/deadline is not armed".into(),
@@ -2436,14 +2962,14 @@ impl TexasPokerTable {
             if seat.is_occupied()
                 && self.seats[..seat_index]
                     .iter()
-                    .any(|prior| prior.is_occupied() && prior.player == seat.player)
+                    .any(|prior| prior.is_occupied() && prior.player() == seat.player())
             {
                 return Err(PokerL1Error::Serialization(format!(
                     "Texas player {:?} occupies more than one seat",
-                    seat.player
+                    seat.player()
                 )));
             }
-            if seat.status == SeatStatus::Empty
+            if matches!(seat, Seat::Vacant { .. })
                 && (seat_mask_contains(self.acted_mask, seat_index as u8)
                     || seat_mask_contains(self.leave_after_hand_mask, seat_index as u8))
             {
@@ -2468,7 +2994,11 @@ impl TexasPokerTable {
             .community_cards
             .iter()
             .chain(self.run_it_twice_state.second_board_suffix().iter())
-            .chain(self.seats.iter().flat_map(|seat| seat.hand.iter()))
+            .chain(
+                self.seats
+                    .iter()
+                    .flat_map(|seat| seat.hand().into_iter().flat_map(|hand| hand.iter())),
+            )
         {
             let card_id = usize::from(card.to_index());
             if card_id >= seen_cards.len() || seen_cards[card_id] {
@@ -2528,8 +3058,19 @@ impl TexasPokerTable {
                 "Texas shuffle pending/completed masks overlap".into(),
             ));
         }
-        for assignment in &self.reveal_token_state().assignments {
+        for assignment in self.reveal_assignments() {
             validate_mask(assignment.pending_mask(), "reveal pending mask")?;
+            validate_mask(assignment.submitted_mask, "reveal submitted mask")?;
+            if assignment.pending_mask & assignment.submitted_mask != 0 {
+                return Err(PokerL1Error::Serialization(
+                    "Texas reveal pending/submitted masks overlap".into(),
+                ));
+            }
+            if assignment.submitted_mask.count_ones() as usize != assignment.reveal_tokens.len() {
+                return Err(PokerL1Error::Serialization(
+                    "Texas reveal submitted mask/token vector length mismatch".into(),
+                ));
+            }
         }
         let reconstruct_state = self.reconstruct_state();
         validate_mask(reconstruct_state.pending_mask, "reconstruct pending mask")?;
@@ -2584,7 +3125,7 @@ mod tests {
             .enter_revealing(
                 ROUND_FLOP,
                 RevealTokenState {
-                    reveal_phase: super::super::constants::REVEAL_PHASE_FLOP,
+                    purpose: RevealPurpose::Board,
                     assignments: vec![],
                 },
                 0,
@@ -2595,10 +3136,56 @@ mod tests {
             .unwrap();
 
         assert!(matches!(table.hand_phase, HandPhase::Betting { .. }));
-        assert_eq!(
-            table.reveal_token_state().as_ref(),
-            &RevealTokenState::default()
-        );
+        assert!(table.reveal_token_state().is_none());
+    }
+
+    #[test]
+    fn enter_revealing_rejects_purpose_street_mismatch_atomically() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+        let before = table.hand_phase.clone();
+        let error = table
+            .enter_revealing(
+                ROUND_PREFLOP,
+                RevealTokenState {
+                    purpose: RevealPurpose::Board,
+                    assignments: vec![],
+                },
+                1,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("incompatible with street"));
+        assert_eq!(table.hand_phase, before);
+    }
+
+    #[test]
+    fn enter_revealing_rejects_purpose_target_mismatch_atomically() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
+        let before = table.hand_phase.clone();
+        let error = table
+            .enter_revealing(
+                ROUND_FLOP,
+                RevealTokenState {
+                    purpose: RevealPurpose::Board,
+                    assignments: vec![RevealAssignment {
+                        encrypted_card_index: 0,
+                        target: RevealTarget::Hole {
+                            seat_index: 0,
+                            card_slot: 0,
+                        },
+                        pending_mask: 0,
+                        submitted_mask: 0,
+                        reveal_tokens: vec![],
+                    }],
+                },
+                1,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("incompatible with purpose"));
+        assert_eq!(table.hand_phase, before);
     }
 
     #[test]
@@ -2610,7 +3197,7 @@ mod tests {
                 ROUND_TURN,
                 ReconstructState::default(),
                 RevealTokenState {
-                    reveal_phase: super::super::constants::REVEAL_PHASE_TURN,
+                    purpose: RevealPurpose::Board,
                     assignments: vec![],
                 },
                 1,
@@ -2624,7 +3211,7 @@ mod tests {
             HandPhase::Reconstructing {
                 street: ROUND_TURN,
                 suspended_reveal: RevealTokenState {
-                    reveal_phase: super::super::constants::REVEAL_PHASE_TURN,
+                    purpose: RevealPurpose::Board,
                     ..
                 },
                 ..
@@ -2655,7 +3242,7 @@ mod tests {
         assert_eq!(table.shuffling_purpose(), Some(ShufflingPurpose::Initial));
 
         let reveal = RevealTokenState {
-            reveal_phase: super::super::constants::REVEAL_PHASE_TURN,
+            purpose: RevealPurpose::Board,
             assignments: vec![],
         };
         table
@@ -2694,7 +3281,7 @@ mod tests {
             .enter_revealing(
                 ROUND_FLOP,
                 RevealTokenState {
-                    reveal_phase: super::super::constants::REVEAL_PHASE_FLOP,
+                    purpose: RevealPurpose::Board,
                     assignments: vec![],
                 },
                 0,
@@ -2704,10 +3291,7 @@ mod tests {
             .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 1, 1)
             .unwrap();
 
-        assert_eq!(
-            table.reveal_token_state().as_ref(),
-            &RevealTokenState::default()
-        );
+        assert!(table.reveal_token_state().is_none());
         assert_eq!(table.shuffle_state().as_ref(), &ShuffleState::default());
         assert_eq!(
             table.reconstruct_state().as_ref(),
@@ -2754,8 +3338,8 @@ mod tests {
     #[test]
     fn test_seat_empty() {
         let seat = Seat::empty();
-        assert_eq!(seat.player, EMPTY_PLAYER);
-        assert_eq!(seat.stack, 0);
+        assert_eq!(seat.player(), EMPTY_PLAYER);
+        assert_eq!(seat.stack(), 0);
         assert!(!seat.is_occupied());
         assert_eq!(seat.status(), SeatStatus::Empty);
     }
@@ -2763,8 +3347,8 @@ mod tests {
     #[test]
     fn test_seat_status_transitions() {
         let mut seat = Seat::empty();
-        seat.player = [0xAB; 20];
-        seat.stack = 1000;
+        seat.fixture_set_player([0xAB; 20]);
+        seat.set_stack(1000).unwrap();
         seat.set_status(SeatStatus::Active);
         assert_eq!(seat.status(), SeatStatus::Active);
 
@@ -2788,13 +3372,16 @@ mod tests {
         let mut seat = Seat::occupied(player, 1_000, pk, SeatStatus::Active).unwrap();
         assert!(seat.validate_canonical().is_ok());
 
-        seat.bet = 100;
-        seat.total_bet = 250;
-        seat.hand.try_push(Card::from_index(7)).unwrap();
-        seat.pending_addon = 400;
+        seat.fixture_set_bet(100);
+        seat.fixture_set_total_bet(250);
+        seat.hand_mut()
+            .unwrap()
+            .try_push(Card::from_index(7))
+            .unwrap();
+        seat.set_pending_addon(400).unwrap();
         seat.depart_this_hand().unwrap();
-        assert_eq!(seat.player, player);
-        assert_eq!(seat.total_bet, 250);
+        assert_eq!(seat.player(), player);
+        assert_eq!(seat.total_bet(), 250);
         assert!(seat.has_left_hand());
         assert!(seat.validate_canonical().is_ok());
 
@@ -2812,8 +3399,8 @@ mod tests {
     fn test_table_find_seat() {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
-        table.seats[0].player = [0x01; 20];
-        table.seats[2].player = [0x02; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[2].fixture_set_player([0x02; 20]);
 
         assert_eq!(table.find_seat(&[0x01; 20]), Some(0));
         assert_eq!(table.find_seat(&[0x02; 20]), Some(2));
@@ -2824,8 +3411,8 @@ mod tests {
     fn test_table_find_empty_seat() {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
-        table.seats[0].player = [0x01; 20];
-        table.seats[1].player = [0x02; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[1].fixture_set_player([0x02; 20]);
 
         assert_eq!(table.find_empty_seat(), Some(2));
     }
@@ -2834,9 +3421,9 @@ mod tests {
     fn test_table_active_count() {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
-        table.seats[0].player = [0x01; 20];
-        table.seats[1].player = [0x02; 20];
-        table.seats[2].player = [0x03; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[2].fixture_set_player([0x03; 20]);
         table.seats[0].set_status(SeatStatus::Active);
         table.seats[1].set_status(SeatStatus::Active);
         table.seats[2].set_status(SeatStatus::Active);
@@ -2856,9 +3443,9 @@ mod tests {
             50,
             100,
         );
-        table.seats[0].player = [0xAB; 20];
+        table.seats[0].fixture_set_player([0xAB; 20]);
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[0].stack = 1_000_000;
+        table.seats[0].set_stack(1_000_000).unwrap();
         table.pot = 200;
         table.community_cards.try_push(Card::new(0, 14)).unwrap(); // A♠
         table.call_seq = 42;
@@ -2882,7 +3469,7 @@ mod tests {
         let mut table =
             TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100);
         for seat_index in [0usize, 2] {
-            table.seats[seat_index].player = [0xAB; 20];
+            table.seats[seat_index].fixture_set_player([0xAB; 20]);
             table.seats[seat_index].set_status(SeatStatus::Active);
         }
 
@@ -2899,10 +3486,23 @@ mod tests {
     }
 
     #[test]
-    fn test_reveal_token_state_default() {
-        let state = RevealTokenState::default();
-        assert_eq!(state.reveal_phase, REVEAL_PHASE_NONE);
-        assert!(state.assignments.is_empty());
+    fn reveal_purpose_projects_only_on_compatible_streets() {
+        assert_eq!(
+            RevealPurpose::DealHole.legacy_phase(ROUND_PREFLOP),
+            REVEAL_PHASE_PREFLOP
+        );
+        assert_eq!(
+            RevealPurpose::Board.legacy_phase(ROUND_TURN),
+            REVEAL_PHASE_TURN
+        );
+        assert_eq!(
+            RevealPurpose::ShowdownOwner.legacy_phase(ROUND_SHOWDOWN),
+            REVEAL_PHASE_SHOWDOWN
+        );
+        assert_eq!(
+            RevealPurpose::Board.legacy_phase(ROUND_PREFLOP),
+            REVEAL_PHASE_NONE
+        );
     }
 
     #[test]
@@ -2924,17 +3524,16 @@ mod tests {
 
     #[test]
     fn test_seat_borsh_roundtrip() {
-        let seat = Seat {
-            player: [0xCD; 20],
-            stack: 5_000,
-            hand: [Card::new(0, 14), Card::new(1, 13)].into(),
-            bet: 100,
-            total_bet: 250,
-            status: SeatStatus::Active,
-            pk: ECPoint(G1Projective::identity()),
-            pending_addon: 0,
-            time_bank_ms: super::super::constants::DEFAULT_TIME_BANK_MS,
-        };
+        let mut seat = Seat::occupied(
+            [0xCD; 20],
+            5_000,
+            ECPoint(G1Projective::generator()),
+            SeatStatus::Active,
+        )
+        .unwrap();
+        seat.fixture_set_hand([Card::new(0, 14), Card::new(1, 13)].into());
+        seat.fixture_set_bet(100);
+        seat.fixture_set_total_bet(250);
         let bytes = borsh::to_vec(&seat).unwrap();
         let recovered: Seat = borsh::from_slice(&bytes).unwrap();
         assert_eq!(seat, recovered);

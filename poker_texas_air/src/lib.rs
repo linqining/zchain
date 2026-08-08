@@ -47,6 +47,7 @@ pub mod prove_timing;
 pub mod public_inputs;
 pub mod settlement_binding;
 pub mod state_root;
+pub mod tagged_method;
 pub mod verified_chain;
 
 // ===== Post-commit Prover =====
@@ -62,6 +63,10 @@ pub mod aggregator_air;
 pub mod aggregator_prover;
 pub mod aggregator_verifier;
 pub mod authorization_binding;
+
+/// Canonical tagged-seat fixture operations, available only to tests and debug test helpers.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_support;
 
 // P05-H-source：从已认证共识材料构造 ExpectedChainAnchor。
 pub mod consensus_anchor;

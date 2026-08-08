@@ -353,7 +353,7 @@ mod tests {
             50,
             100,
         );
-        table.seats[2].player = [0xAA; 20];
+        table.seats[2].fixture_set_player([0xAA; 20]);
         table.seats[2].set_status(super::super::types::SeatStatus::Active);
         table
     }

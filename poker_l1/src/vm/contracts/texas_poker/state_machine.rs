@@ -40,7 +40,7 @@ use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscr
 use super::betting::BettingRound;
 #[cfg(test)]
 use super::card::BoardCards;
-use super::card::Card;
+use super::card::{Card, HoleCards};
 use super::constants::*;
 use super::events::{
     self, DECK_REBUILT_REASON_RECONSTRUCT_COMPLETE, DECK_REBUILT_REASON_SHUFFLE_TIMEOUT,
@@ -49,9 +49,10 @@ use super::events::{
 };
 use super::settlement::{self, SettlementPlan};
 use super::types::{
-    CipherDeck, DecryptedCard, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC, RevealAssignment,
-    RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus, TexasPokerTable,
-    seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove, seat_mask_to_indices,
+    CipherDeck, DecryptedCard, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC, PlayingSeatStatus,
+    RevealAssignment, RevealPurpose, RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask,
+    SeatStatus, TexasPokerTable, seat_mask_contains, seat_mask_count, seat_mask_first,
+    seat_mask_remove, seat_mask_to_indices,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -182,7 +183,7 @@ pub fn is_betting_round(table: &TexasPokerTable) -> bool {
 pub fn is_playing(table: &TexasPokerTable) -> bool {
     table.round_state() != ROUND_WAITING
         || table.shuffle_phase() != SHUFFLE_PHASE_NONE
-        || table.reveal_token_state().reveal_phase != REVEAL_PHASE_NONE
+        || table.reveal_token_state().is_some()
         || table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE
         || table.run_it_twice_state.is_active()
 }
@@ -200,25 +201,18 @@ pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
     let mut pending_addons = 0u64;
     let mut current_bets = 0u64;
     let mut total_bets = 0u64;
-    for (index, seat) in table.seats.iter().enumerate() {
-        if seat.player == EMPTY_PLAYER
-            && (seat.stack != 0 || seat.bet != 0 || seat.total_bet != 0 || seat.pending_addon != 0)
-        {
-            return Err(PokerL1Error::Other(format!(
-                "Texas TableVault has monetary value in empty seat {index}"
-            )));
-        }
+    for seat in &table.seats {
         stacks = stacks
-            .checked_add(seat.stack)
+            .checked_add(seat.stack())
             .ok_or_else(|| PokerL1Error::Other("Texas seat stack sum overflow".into()))?;
         pending_addons = pending_addons
-            .checked_add(seat.pending_addon)
+            .checked_add(seat.pending_addon())
             .ok_or_else(|| PokerL1Error::Other("Texas pending addon sum overflow".into()))?;
         current_bets = current_bets
-            .checked_add(seat.bet)
+            .checked_add(seat.bet())
             .ok_or_else(|| PokerL1Error::Other("Texas current bet sum overflow".into()))?;
         total_bets = total_bets
-            .checked_add(seat.total_bet)
+            .checked_add(seat.total_bet())
             .ok_or_else(|| PokerL1Error::Other("Texas total bet sum overflow".into()))?;
     }
     let wagers_in_custody = table
@@ -259,7 +253,9 @@ pub fn is_in_mask(mask: SeatMask, value: u8) -> bool {
 /// 是否已注册 pk（occupied 且 pk 匹配）。
 #[must_use]
 pub fn is_pk_registered(seats: &[Seat], pk: &G1Projective) -> bool {
-    seats.iter().any(|s| s.is_occupied() && &s.pk.0 == pk)
+    seats
+        .iter()
+        .any(|s| s.pk().is_some_and(|registered| &registered.0 == pk))
 }
 
 // ========== 座位/玩家辅助 ==========
@@ -520,42 +516,36 @@ fn post_blinds(
     // first_to_act 仅作事件参考，实际由 start_betting_round 基于 BB 精确定位。
     let first_to_act = bb_seat;
 
-    let sb_amt = table.small_blind.min(table.seats[sb_seat as usize].stack);
-    let bb_amt = table.big_blind.min(table.seats[bb_seat as usize].stack);
+    let sb_amt = table.small_blind.min(table.seats[sb_seat as usize].stack());
+    let bb_amt = table.big_blind.min(table.seats[bb_seat as usize].stack());
 
     let sb_seat_idx = sb_seat as usize;
     let bb_seat_idx = bb_seat as usize;
-    table.seats[sb_seat_idx].stack = table.seats[sb_seat_idx]
-        .stack
-        .checked_sub(sb_amt)
-        .ok_or_else(|| {
+    {
+        let seat = table.seats[sb_seat_idx].playing_mut()?;
+        seat.occupied.stack = seat.occupied.stack.checked_sub(sb_amt).ok_or_else(|| {
             PokerL1Error::Serialization("post_blinds: sb stack -= sb_amt underflow".into())
         })?;
-    table.seats[sb_seat_idx].bet = sb_amt;
-    table.seats[sb_seat_idx].total_bet = table.seats[sb_seat_idx]
-        .total_bet
-        .checked_add(sb_amt)
-        .ok_or_else(|| {
+        seat.bet = sb_amt;
+        seat.total_bet = seat.total_bet.checked_add(sb_amt).ok_or_else(|| {
             PokerL1Error::Serialization("post_blinds: sb total_bet += sb_amt overflow".into())
         })?;
-    if table.seats[sb_seat_idx].stack == 0 {
+    }
+    if table.seats[sb_seat_idx].stack() == 0 {
         table.seats[sb_seat_idx].set_status(SeatStatus::AllIn);
     }
 
-    table.seats[bb_seat_idx].stack = table.seats[bb_seat_idx]
-        .stack
-        .checked_sub(bb_amt)
-        .ok_or_else(|| {
+    {
+        let seat = table.seats[bb_seat_idx].playing_mut()?;
+        seat.occupied.stack = seat.occupied.stack.checked_sub(bb_amt).ok_or_else(|| {
             PokerL1Error::Serialization("post_blinds: bb stack -= bb_amt underflow".into())
         })?;
-    table.seats[bb_seat_idx].bet = bb_amt;
-    table.seats[bb_seat_idx].total_bet = table.seats[bb_seat_idx]
-        .total_bet
-        .checked_add(bb_amt)
-        .ok_or_else(|| {
+        seat.bet = bb_amt;
+        seat.total_bet = seat.total_bet.checked_add(bb_amt).ok_or_else(|| {
             PokerL1Error::Serialization("post_blinds: bb total_bet += bb_amt overflow".into())
         })?;
-    if table.seats[bb_seat_idx].stack == 0 {
+    }
+    if table.seats[bb_seat_idx].stack() == 0 {
         table.seats[bb_seat_idx].set_status(SeatStatus::AllIn);
     }
 
@@ -603,7 +593,7 @@ fn start_betting_round(
         let max_bet = table
             .seats
             .iter()
-            .map(|s| s.bet)
+            .map(Seat::bet)
             .max()
             .unwrap_or(bb)
             .max(bb);
@@ -611,9 +601,11 @@ fn start_betting_round(
         r.current_bet = max_bet;
         r
     } else {
-        // postflop 清零 seat.bet
+        // postflop 清零 seat.bet()
         for s in &mut table.seats {
-            s.bet = 0;
+            if let Ok(playing) = s.playing_mut() {
+                playing.bet = 0;
+            }
         }
         BettingRound::new(bb, 0)
     };
@@ -703,7 +695,7 @@ fn is_betting_complete(table: &TexasPokerTable) -> bool {
     };
     for (seat_index, s) in table.seats.iter().enumerate() {
         if s.is_occupied() && !s.is_folded() && !s.is_all_in() && !s.is_waiting() {
-            if !table.seat_acted_this_round(seat_index as u8) || s.bet != cb {
+            if !table.seat_acted_this_round(seat_index as u8) || s.bet() != cb {
                 return false;
             }
         }
@@ -735,7 +727,7 @@ fn collect_bets_to_pot(
     // Preflight the complete collection so an overflow cannot leave an earlier
     // seat collected while a later seat still carries its bet.
     let total_to_collect = table.seats.iter().try_fold(0u64, |total, seat| {
-        total.checked_add(seat.bet).ok_or_else(|| {
+        total.checked_add(seat.bet()).ok_or_else(|| {
             PokerL1Error::Serialization("collect_bets_to_pot: bet sum overflow".into())
         })
     })?;
@@ -745,8 +737,8 @@ fn collect_bets_to_pot(
 
     let mut collected_seats = Vec::new();
     for (i, s) in table.seats.iter_mut().enumerate() {
-        if s.bet > 0 {
-            s.bet = 0;
+        if s.bet() > 0 {
+            s.set_bet(0)?;
             collected_seats.push(i as u8);
         }
     }
@@ -784,15 +776,15 @@ fn advance_round(
     let old_turn = table.current_turn_option();
     let to = match from {
         ROUND_PREFLOP => {
-            start_community_reveal_phase(table, 3, REVEAL_PHASE_FLOP, events)?;
+            start_community_reveal_phase(table, 3, ROUND_FLOP, events)?;
             ROUND_FLOP
         }
         ROUND_FLOP => {
-            start_community_reveal_phase(table, 1, REVEAL_PHASE_TURN, events)?;
+            start_community_reveal_phase(table, 1, ROUND_TURN, events)?;
             ROUND_TURN
         }
         ROUND_TURN => {
-            start_community_reveal_phase(table, 1, REVEAL_PHASE_RIVER, events)?;
+            start_community_reveal_phase(table, 1, ROUND_RIVER, events)?;
             ROUND_RIVER
         }
         ROUND_RIVER => {
@@ -917,19 +909,19 @@ fn restart_reveal_after_reconstruct(
         ROUND_FLOP => {
             let have = table.community_cards.len() as u8;
             if have < 3 {
-                start_community_reveal_phase(table, 3 - have, REVEAL_PHASE_FLOP, events)?;
+                start_community_reveal_phase(table, 3 - have, ROUND_FLOP, events)?;
             }
         }
         ROUND_TURN => {
             let have = table.community_cards.len() as u8;
             if have < 4 {
-                start_community_reveal_phase(table, 4 - have, REVEAL_PHASE_TURN, events)?;
+                start_community_reveal_phase(table, 4 - have, ROUND_TURN, events)?;
             }
         }
         ROUND_RIVER => {
             let have = table.community_cards.len() as u8;
             if have < 5 {
-                start_community_reveal_phase(table, 5 - have, REVEAL_PHASE_RIVER, events)?;
+                start_community_reveal_phase(table, 5 - have, ROUND_RIVER, events)?;
             }
         }
         ROUND_SHOWDOWN => start_showdown_reveal_phase(table, events)?,
@@ -1004,7 +996,7 @@ fn start_preflop_reveal_phase(
     table.enter_revealing(
         ROUND_PREFLOP,
         super::types::RevealTokenState {
-            reveal_phase: REVEAL_PHASE_PREFLOP,
+            purpose: RevealPurpose::DealHole,
             assignments,
         },
         0,
@@ -1025,9 +1017,14 @@ fn start_preflop_reveal_phase(
 fn start_community_reveal_phase(
     table: &mut TexasPokerTable,
     count: u8,
-    phase: u8,
+    street: u8,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
+    if !matches!(street, ROUND_FLOP | ROUND_TURN | ROUND_RIVER) {
+        return Err(PokerL1Error::Serialization(format!(
+            "community reveal cannot start on street {street}"
+        )));
+    }
     validate_run_it_twice_progress(table)?;
     let active_mask = get_active_seat_mask(&table.seats);
     let runout_count = if table.run_it_twice_state.is_active() {
@@ -1069,16 +1066,11 @@ fn start_community_reveal_phase(
     }
 
     table.deck_state.cards_dealt = card_idx;
-    let street = match phase {
-        REVEAL_PHASE_FLOP => ROUND_FLOP,
-        REVEAL_PHASE_TURN => ROUND_TURN,
-        REVEAL_PHASE_RIVER => ROUND_RIVER,
-        _ => table.round_state(),
-    };
+    let phase = RevealPurpose::Board.legacy_phase(street);
     table.enter_revealing(
         street,
         super::types::RevealTokenState {
-            reveal_phase: phase,
+            purpose: RevealPurpose::Board,
             assignments,
         },
         0,
@@ -1114,7 +1106,9 @@ fn start_showdown_reveal_phase(
         // Partial records may have materialized in different dispatches. Deck lineage, rather than
         // ledger insertion order, defines the canonical two-card dealing order for this seat.
         partial_cards.sort_unstable_by_key(|dc| dc.encrypted_card_index);
-        let first_slot = table.seats[usize::from(seat)].hand.len();
+        let first_slot = table.seats[usize::from(seat)]
+            .hand()
+            .map_or(0, HoleCards::len);
         for (offset, dc) in partial_cards.into_iter().enumerate() {
             let card_slot = first_slot
                 .checked_add(offset)
@@ -1137,7 +1131,7 @@ fn start_showdown_reveal_phase(
     table.enter_revealing(
         ROUND_SHOWDOWN,
         super::types::RevealTokenState {
-            reveal_phase: REVEAL_PHASE_SHOWDOWN,
+            purpose: RevealPurpose::ShowdownOwner,
             assignments,
         },
         0,
@@ -1161,11 +1155,15 @@ fn check_reveal_phase_complete(
 ) -> PokerL1Result<()> {
     // Every completed assignment is materialized and drained in the same dispatch. An empty
     // assignment list is therefore the only persisted phase-complete representation.
-    if !table.reveal_token_state().assignments.is_empty() {
+    let reveal = table.reveal_token_state().ok_or_else(|| {
+        PokerL1Error::Serialization("reveal completion checked outside reveal state".into())
+    })?;
+    if !reveal.assignments.is_empty() {
         return Ok(());
     }
 
-    let phase = table.reveal_token_state().reveal_phase;
+    let purpose = reveal.purpose;
+    let phase = table.reveal_phase();
     events::emit_event(
         events,
         TexasPokerEvent::RevealPhaseComplete {
@@ -1174,21 +1172,20 @@ fn check_reveal_phase_complete(
         },
     );
 
-    match phase {
-        REVEAL_PHASE_PREFLOP => {
+    match purpose {
+        RevealPurpose::DealHole => {
             // 投盲注并启动 preflop 下注轮
             let (_, bb_seat, _) = post_blinds(table, events)?;
             // 投 ante（若配置）— 在盲注之后、下注轮启动之前
             collect_ante(table, bb_seat, events)?;
             start_betting_round(table, true, Some(bb_seat), events)?;
         }
-        REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
+        RevealPurpose::Board => {
             start_betting_round(table, false, None, events)?;
         }
-        REVEAL_PHASE_SHOWDOWN => {
+        RevealPurpose::ShowdownOwner => {
             table.enter_showdown_display(0);
         }
-        _ => {}
     }
     Ok(())
 }
@@ -1218,7 +1215,12 @@ fn exposed_card_ids(table: &TexasPokerTable) -> PokerL1Result<std::collections::
         .community_cards
         .iter()
         .chain(table.run_it_twice_state.second_board_suffix().iter())
-        .chain(table.seats.iter().flat_map(|seat| seat.hand.iter()))
+        .chain(
+            table
+                .seats
+                .iter()
+                .flat_map(|seat| seat.hand().into_iter().flat_map(|hand| hand.iter())),
+        )
     {
         if !card.is_valid() {
             return Err(PokerL1Error::Serialization(format!(
@@ -1624,7 +1626,10 @@ pub fn apply_submit_shuffle_v2(
 
     // 链上注入：new_cts[i] = add_pk_to_c2(output_cts[i], player_pk)
     // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
-    let player_pk: G1Projective = table.seats[seat_index as usize].pk.into();
+    let player_pk: G1Projective = (*table.seats[seat_index as usize]
+        .pk()
+        .ok_or_else(|| PokerL1Error::Serialization("shuffle seat has no live key".into()))?)
+    .into();
     let new_cts: Vec<ElGamalCiphertext> = output_cts
         .iter()
         .map(|ct| utils::add_pk_to_c2(ct, &player_pk))
@@ -1640,7 +1645,7 @@ pub fn apply_submit_shuffle_v2(
         TexasPokerEvent::ShuffleVerified {
             table_id: table.id,
             seat_index,
-            player: table.seats[seat_index as usize].player,
+            player: table.seats[seat_index as usize].player(),
         },
     );
 
@@ -1660,7 +1665,7 @@ pub fn apply_submit_player_reveal_tokens(
     proofs: Vec<RevealTokenProof<DefaultCurve>>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    if table.reveal_token_state().reveal_phase == REVEAL_PHASE_NONE {
+    if table.reveal_token_state().is_none() {
         return Err(PokerL1Error::Serialization("reveal phase is NONE".into()));
     }
     if assignment_indices.len() != reveal_tokens.len() || assignment_indices.len() != proofs.len() {
@@ -1677,9 +1682,10 @@ pub fn apply_submit_player_reveal_tokens(
         return Err(PokerL1Error::Serialization("seat not occupied".into()));
     }
 
-    let phase = table.reveal_token_state().reveal_phase;
+    let phase = table.reveal_phase();
     let expected_assignment_indices = table
         .reveal_token_state()
+        .expect("checked active reveal above")
         .assignments
         .iter()
         .enumerate()
@@ -1693,18 +1699,23 @@ pub fn apply_submit_player_reveal_tokens(
         )));
     }
     // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
-    let expected_pk: G1Projective = table.seats[seat_index as usize].pk.into();
+    let expected_pk: G1Projective = (*table.seats[seat_index as usize]
+        .pk()
+        .ok_or_else(|| PokerL1Error::Serialization("reveal seat has no live key".into()))?)
+    .into();
 
     for k in 0..assignment_indices.len() {
         let ai = assignment_indices[k] as usize;
-        if ai >= table.reveal_token_state().assignments.len() {
+        if ai >= table.reveal_assignments().len() {
             return Err(PokerL1Error::Serialization(format!(
                 "assignment_index {ai} out of range"
             )));
         }
         // 取 assignment 的可变引用前先检查
         {
-            let reveal_state = table.reveal_token_state();
+            let reveal_state = table
+                .reveal_token_state()
+                .expect("checked active reveal above");
             let assignment = &reveal_state.assignments[ai];
             if assignment.is_ready() {
                 return Err(PokerL1Error::Serialization(format!(
@@ -1718,7 +1729,7 @@ pub fn apply_submit_player_reveal_tokens(
             }
         }
 
-        let card_index = table.reveal_token_state().assignments[ai].encrypted_card_index;
+        let card_index = table.reveal_assignments()[ai].encrypted_card_index;
 
         // 取用于 proof 验证的密文。
         // - showdown：手牌已部分解密，密文存于 decrypted_cards 的 ciphertext 字段
@@ -1818,9 +1829,14 @@ fn materialize_completed_reveal_assignments(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    let phase = table.reveal_token_state().reveal_phase;
+    let reveal = table.reveal_token_state().ok_or_else(|| {
+        PokerL1Error::Serialization("cannot materialize outside reveal state".into())
+    })?;
+    let purpose = reveal.purpose;
+    let phase = table.reveal_phase();
     let completed = table
         .reveal_token_state()
+        .expect("checked active reveal above")
         .assignments
         .iter()
         .enumerate()
@@ -1833,8 +1849,8 @@ fn materialize_completed_reveal_assignments(
 
     let mut next = table.clone();
     let mut staged_events = Vec::new();
-    match phase {
-        REVEAL_PHASE_PREFLOP => {
+    match purpose {
+        RevealPurpose::DealHole => {
             for (_, assignment) in &completed {
                 let RevealTarget::Hole { seat_index, .. } = assignment.target else {
                     return Err(PokerL1Error::Serialization(
@@ -1870,8 +1886,8 @@ fn materialize_completed_reveal_assignments(
                 ));
             }
         }
-        REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
-            if completed.len() != next.reveal_token_state().assignments.len() {
+        RevealPurpose::Board => {
+            if completed.len() != next.reveal_assignments().len() {
                 return Err(PokerL1Error::Serialization(
                     "community reveal assignments did not complete as one canonical batch".into(),
                 ));
@@ -1883,13 +1899,8 @@ fn materialize_completed_reveal_assignments(
                 &mut staged_events,
             )?;
         }
-        REVEAL_PHASE_SHOWDOWN => {
+        RevealPurpose::ShowdownOwner => {
             materialize_completed_showdown_assignments(&mut next, &completed, &mut staged_events)?;
-        }
-        _ => {
-            return Err(PokerL1Error::Serialization(format!(
-                "cannot materialize reveal assignments in phase {phase}"
-            )));
         }
     }
 
@@ -2047,7 +2058,7 @@ fn materialize_completed_showdown_assignments(
     let mut next_slot = table
         .seats
         .iter()
-        .map(|seat| seat.hand.len())
+        .map(|seat| seat.hand().map_or(0, HoleCards::len))
         .collect::<Vec<_>>();
     let mut consumed_ledger = Vec::with_capacity(materialized.len());
     for (ledger_index, seat_index, card_slot, encrypted_card_index, card) in materialized {
@@ -2060,7 +2071,7 @@ fn materialize_completed_showdown_assignments(
                 "showdown hole-card slot {card_slot} is not canonical for seat {seat_index}"
             )));
         }
-        seat.hand.try_push(card).map_err(|error| {
+        seat.hand_mut()?.try_push(card).map_err(|error| {
             PokerL1Error::Serialization(format!(
                 "cannot append hole card for seat {seat_index}: {error}"
             ))
@@ -2072,7 +2083,7 @@ fn materialize_completed_showdown_assignments(
                 TexasPokerEvent::ShowdownHoleCardsRevealed {
                     table_id: table.id,
                     seat_index,
-                    player: seat.player,
+                    player: seat.player(),
                     card_indices: vec![encrypted_card_index],
                     card_ranks: vec![card.rank()],
                     card_suits: vec![card.suit()],
@@ -2133,7 +2144,10 @@ pub fn apply_submit_reconstruct_deck(
     let aggregate_pk = table.deck_state.aggregated_pk.as_ref().ok_or_else(|| {
         PokerL1Error::Serialization("reconstruction V3 requires aggregate public key".into())
     })?;
-    let expected_owner_pk = table.seats[seat_index as usize].pk.0;
+    let expected_owner_pk = table.seats[seat_index as usize]
+        .pk()
+        .ok_or_else(|| PokerL1Error::Serialization("reconstruct seat has no live key".into()))?
+        .0;
     let expected_cards = generate_plaintext_cards();
     let expected_readable = utils::reconstruction_v3_user_readable_cards(table, seat_index);
     let expected_context_digest = utils::reconstruction_v3_context_digest(table);
@@ -2226,8 +2240,8 @@ pub fn apply_leave_with_proof(
     // 先计算完整资金转移，再修改牌组/公钥/座位状态。
     // 这与 leave_table 的 checked-u64 语义一致，避免 saturating
     // arithmetic 在账户池不足时静默造币，也避免报错时留下部分状态变更。
-    let stack_refund = table.seats[seat_index as usize].stack;
-    let pending_refund = table.seats[seat_index as usize].pending_addon;
+    let stack_refund = table.seats[seat_index as usize].stack();
+    let pending_refund = table.seats[seat_index as usize].pending_addon();
     let refund = stack_refund
         .checked_add(pending_refund)
         .ok_or_else(|| PokerL1Error::Serialization("leave_with_proof: refund overflow".into()))?;
@@ -2238,7 +2252,9 @@ pub fn apply_leave_with_proof(
     let output_cts = output_cards;
     // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）。
     let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
-    let player_pk = table.seats[seat_index as usize].pk;
+    let player_pk = *table.seats[seat_index as usize]
+        .pk()
+        .ok_or_else(|| PokerL1Error::Serialization("leave seat has no live key".into()))?;
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_leave_transcript();
         let ok = DLEqProof::<DefaultCurve, LeaveKind>::verify(
@@ -2262,7 +2278,7 @@ pub fn apply_leave_with_proof(
 
     // P1-9 修复：退还 stack + 未入账的 pending_addon（与 dispatch_leave_table 一致），
     // 并同步扣减 chip_pool（join/addon 时均计入完整锁仓）。
-    let player_addr = table.seats[seat_index as usize].player;
+    let player_addr = table.seats[seat_index as usize].player();
     if refund > 0 {
         events::emit_event(
             events,
@@ -2358,7 +2374,9 @@ pub fn apply_fold_with_proof(
     // typed 化后无需反序列化。
     let output_cts = output_cards;
     let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
-    let player_pk = table.seats[seat_index as usize].pk;
+    let player_pk = *table.seats[seat_index as usize]
+        .pk()
+        .ok_or_else(|| PokerL1Error::Serialization("fold seat has no live key".into()))?;
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_leave_transcript();
         let ok = DLEqProof::<DefaultCurve, LeaveKind>::verify(
@@ -2480,7 +2498,7 @@ pub fn apply_player_action(
             if seat.is_folded() || seat.is_all_in() {
                 return Err(PokerL1Error::Serialization("player inactive".into()));
             }
-            if seat.bet >= current_bet {
+            if seat.bet() >= current_bet {
                 table.set_seat_acted_this_round(seat_index, true);
                 table.disarm_betting_deadline()?;
                 events::emit_event(
@@ -2492,21 +2510,23 @@ pub fn apply_player_action(
                     },
                 );
             } else {
-                let call_amt = round.process_call(seat.bet, seat.stack);
-                seat.stack = seat
+                let playing = seat.playing_mut()?;
+                let call_amt = round.process_call(playing.bet, playing.occupied.stack);
+                playing.occupied.stack = playing
+                    .occupied
                     .stack
                     .checked_sub(call_amt)
                     .ok_or_else(|| PokerL1Error::Serialization("stack underflow on call".into()))?;
-                seat.bet = seat
+                playing.bet = playing
                     .bet
                     .checked_add(call_amt)
                     .ok_or_else(|| PokerL1Error::Serialization("bet overflow on call".into()))?;
-                seat.total_bet = seat.total_bet.checked_add(call_amt).ok_or_else(|| {
+                playing.total_bet = playing.total_bet.checked_add(call_amt).ok_or_else(|| {
                     PokerL1Error::Serialization("total_bet overflow on call".into())
                 })?;
-                let is_all_in = seat.stack == 0 && call_amt > 0;
+                let is_all_in = playing.occupied.stack == 0 && call_amt > 0;
                 if is_all_in {
-                    seat.set_status(SeatStatus::AllIn);
+                    playing.status = PlayingSeatStatus::AllIn;
                 }
                 table.set_seat_acted_this_round(seat_index, true);
                 table.disarm_betting_deadline()?;
@@ -2534,23 +2554,23 @@ pub fn apply_player_action(
             }
         }
         PlayerAction::RaiseTo(total_bet) => {
-            let seat_bet = table.seats[seat_index as usize].bet;
-            let seat_stack = table.seats[seat_index as usize].stack;
+            let seat_bet = table.seats[seat_index as usize].bet();
+            let seat_stack = table.seats[seat_index as usize].stack();
             let round = table.active_betting_round_mut()?;
             let needed = round.process_raise(total_bet, seat_bet, seat_stack)?;
-            let seat = &mut table.seats[seat_index as usize];
-            seat.stack = seat
-                .stack
-                .checked_sub(needed)
-                .ok_or_else(|| PokerL1Error::Serialization("stack underflow on raise".into()))?;
+            let seat = table.seats[seat_index as usize].playing_mut()?;
+            seat.occupied.stack =
+                seat.occupied.stack.checked_sub(needed).ok_or_else(|| {
+                    PokerL1Error::Serialization("stack underflow on raise".into())
+                })?;
             seat.bet = total_bet;
             seat.total_bet = seat
                 .total_bet
                 .checked_add(needed)
                 .ok_or_else(|| PokerL1Error::Serialization("total_bet overflow on raise".into()))?;
-            let is_all_in = seat.stack == 0;
+            let is_all_in = seat.occupied.stack == 0;
             if is_all_in {
-                seat.set_status(SeatStatus::AllIn);
+                seat.status = PlayingSeatStatus::AllIn;
             }
             table.set_seat_acted_this_round(seat_index, true);
             table.disarm_betting_deadline()?;
@@ -2611,7 +2631,7 @@ pub fn apply_check(
         .seats
         .get(usize::from(seat_index))
         .ok_or_else(|| PokerL1Error::Serialization("seat index out of range".into()))?
-        .bet;
+        .bet();
     if seat_bet < current_bet {
         return Err(PokerL1Error::Serialization(
             "cannot check: bet < current_bet".into(),
@@ -2634,7 +2654,7 @@ pub fn apply_call(
         .seats
         .get(usize::from(seat_index))
         .ok_or_else(|| PokerL1Error::Serialization("seat index out of range".into()))?
-        .bet;
+        .bet();
     if seat_bet >= round_bet {
         return Err(PokerL1Error::Serialization(
             "cannot call when no chips are owed; use check".into(),
@@ -2763,15 +2783,13 @@ fn normalize_until_blocked_in_place(
             } else {
                 None
             }
-        } else if table.reveal_token_state().reveal_phase != REVEAL_PHASE_NONE {
+        } else if table.reveal_token_state().is_some() {
             let all_pending_empty = table
-                .reveal_token_state()
-                .assignments
+                .reveal_assignments()
                 .iter()
                 .all(|assignment| assignment.pending_mask() == 0);
             let all_ready = table
-                .reveal_token_state()
-                .assignments
+                .reveal_assignments()
                 .iter()
                 .all(RevealAssignment::is_ready);
             if all_pending_empty && !all_ready {
@@ -2906,10 +2924,9 @@ fn advance_deadline_in_place(
         });
     }
 
-    if table.reveal_token_state().reveal_phase != REVEAL_PHASE_NONE {
+    if table.reveal_token_state().is_some() {
         let pending_mask = table
-            .reveal_token_state()
-            .assignments
+            .reveal_assignments()
             .iter()
             .fold(0u16, |mask, assignment| mask | assignment.pending_mask());
         let subject = seat_mask_first(pending_mask).unwrap_or(NO_SEAT);
@@ -2948,7 +2965,7 @@ fn advance_deadline_in_place(
                 deadline_ms,
             });
         }
-        let time_bank = table.seats[usize::from(subject)].time_bank_ms;
+        let time_bank = table.seats[usize::from(subject)].time_bank_ms();
         if time_bank > 0 {
             let consume = time_bank.min(table.timeout_config.betting_timeout_ms);
             consume_time_bank(table, subject, consume, events)?;
@@ -3059,10 +3076,9 @@ fn on_reveal_timeout(
     now_ms: u64,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    let phase = table.reveal_token_state().reveal_phase;
+    let phase = table.reveal_phase();
     let pending_mask = table
-        .reveal_token_state()
-        .assignments
+        .reveal_assignments()
         .iter()
         .fold(0, |mask, assignment| mask | assignment.pending_mask());
     let pending = seat_mask_to_indices(pending_mask, table.max_players);
@@ -3161,14 +3177,15 @@ fn end_without_showdown(
             );
         }
         let pot = table.pot;
-        table.seats[winner_seat as usize].stack = table.seats[winner_seat as usize]
-            .stack
+        let post_stack = table.seats[winner_seat as usize]
+            .stack()
             .checked_add(pot)
             .ok_or_else(|| {
                 PokerL1Error::Serialization(
                     "end_without_showdown: winner stack += pot overflow".into(),
                 )
             })?;
+        table.seats[winner_seat as usize].set_stack(post_stack)?;
         table.pot = 0;
 
         events::emit_event(
@@ -3176,7 +3193,7 @@ fn end_without_showdown(
             TexasPokerEvent::HandEndedWithoutShowdown {
                 table_id: table.id,
                 winner_seat,
-                winner_player: table.seats[winner_seat as usize].player,
+                winner_player: table.seats[winner_seat as usize].player(),
                 pot,
             },
         );
@@ -3196,7 +3213,7 @@ fn settle_hand(
     if table.round_state() != ROUND_SHOWDOWN {
         return Ok(());
     }
-    if table.reveal_token_state().reveal_phase != REVEAL_PHASE_NONE {
+    if table.reveal_token_state().is_some() {
         return Ok(());
     }
 
@@ -3250,7 +3267,7 @@ fn apply_settlement_plan(
     let mut post_stacks = Vec::with_capacity(table.seats.len());
     for (seat_index, seat) in table.seats.iter().enumerate() {
         post_stacks.push(
-            seat.stack
+            seat.stack()
                 .checked_add(plan.awards[seat_index])
                 .ok_or_else(|| {
                     PokerL1Error::Serialization(format!(
@@ -3263,7 +3280,7 @@ fn apply_settlement_plan(
 
     table.chip_pool = post_chip_pool;
     for (seat, post_stack) in table.seats.iter_mut().zip(post_stacks) {
-        seat.stack = post_stack;
+        seat.set_stack(post_stack)?;
     }
     table.pot = 0;
 
@@ -3307,7 +3324,7 @@ fn apply_settlement_plan(
                     TexasPokerEvent::WinnerAwarded {
                         table_id: table.id,
                         seat_index: seat_index as u8,
-                        player: table.seats[seat_index].player,
+                        player: table.seats[seat_index].player(),
                         amount,
                         pot_type,
                         hand_rank: runout.ranks[seat_index].map(|rank| rank.category),
@@ -3351,23 +3368,25 @@ fn refund_all_bets(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     for (i, s) in table.seats.iter_mut().enumerate() {
-        if s.is_occupied() && !s.is_folded() && !s.has_left_hand() && s.total_bet > 0 {
-            s.stack = s.stack.checked_add(s.total_bet).ok_or_else(|| {
+        if s.is_occupied() && !s.is_folded() && !s.has_left_hand() && s.total_bet() > 0 {
+            let amount = s.total_bet();
+            let post_stack = s.stack().checked_add(amount).ok_or_else(|| {
                 PokerL1Error::Serialization("refund_all_bets: stack += total_bet overflow".into())
             })?;
+            s.set_stack(post_stack)?;
             events::emit_event(
                 events,
                 TexasPokerEvent::PlayerRefund {
                     table_id: table.id,
                     seat_index: i as u8,
-                    player: s.player,
-                    amount: s.total_bet,
+                    player: s.player(),
+                    amount,
                     refund_type: REFUND_TYPE_BET_ONLY,
                 },
             );
         }
-        s.bet = 0;
-        s.total_bet = 0;
+        s.set_bet(0)?;
+        s.set_total_bet(0)?;
     }
     table.pot = 0;
     Ok(())
@@ -3390,14 +3409,14 @@ pub fn reset_for_next_hand(
     let mut to_remove_leave: Vec<u8> = vec![];
     let mut total_leave_refund = 0u64;
     for (i, s) in table.seats.iter().enumerate() {
-        if s.pending_addon > 0 && s.is_occupied() {
-            s.stack.checked_add(s.pending_addon).ok_or_else(|| {
+        if s.pending_addon() > 0 && s.is_occupied() {
+            s.stack().checked_add(s.pending_addon()).ok_or_else(|| {
                 PokerL1Error::Serialization(
                     "reset_for_next_hand: stack += pending_addon overflow".into(),
                 )
             })?;
             total_pending_addon = total_pending_addon
-                .checked_add(s.pending_addon)
+                .checked_add(s.pending_addon())
                 .ok_or_else(|| {
                     PokerL1Error::Serialization(
                         "reset_for_next_hand: total pending addon overflow".into(),
@@ -3405,7 +3424,7 @@ pub fn reset_for_next_hand(
                 })?;
         }
         if s.is_occupied() && table.seat_wants_leave(i as u8) {
-            let refund = s.stack.checked_add(s.pending_addon).ok_or_else(|| {
+            let refund = s.stack().checked_add(s.pending_addon()).ok_or_else(|| {
                 PokerL1Error::Serialization("reset_for_next_hand: leave refund overflow".into())
             })?;
             total_leave_refund = total_leave_refund.checked_add(refund).ok_or_else(|| {
@@ -3429,11 +3448,16 @@ pub fn reset_for_next_hand(
     // 关键不变量：addon 在下一手生效，合并发生在任何清理之前，
     // 确保 addon 后玩家不会被误踢（即使上一手结束时 stack==0）。
     for (i, s) in table.seats.iter_mut().enumerate() {
-        if s.pending_addon > 0 && s.is_occupied() {
-            let player = s.player;
-            let amount = s.pending_addon;
-            s.stack += amount;
-            s.pending_addon = 0;
+        if s.pending_addon() > 0 && s.is_occupied() {
+            let player = s.player();
+            let amount = s.pending_addon();
+            let post_stack = s.stack().checked_add(amount).ok_or_else(|| {
+                PokerL1Error::Serialization(
+                    "reset_for_next_hand: stack += pending_addon overflow".into(),
+                )
+            })?;
+            s.set_stack(post_stack)?;
+            s.set_pending_addon(0)?;
             events::emit_event(
                 events,
                 TexasPokerEvent::AddonCredited {
@@ -3441,7 +3465,7 @@ pub fn reset_for_next_hand(
                     seat_index: i as u8,
                     player,
                     amount,
-                    stack_after: s.stack,
+                    stack_after: s.stack(),
                 },
             );
         }
@@ -3453,7 +3477,7 @@ pub fn reset_for_next_hand(
     let cap = super::constants::DEFAULT_TIME_BANK_MS;
     for s in &mut table.seats {
         if s.is_occupied() {
-            s.time_bank_ms = s.time_bank_ms.saturating_add(refill).min(cap);
+            s.set_time_bank_ms(s.time_bank_ms().saturating_add(refill).min(cap));
         }
     }
 
@@ -3463,7 +3487,7 @@ pub fn reset_for_next_hand(
     table.acted_mask = 0;
     table.deck_state.contributor_mask = 0;
     for (seat_index, s) in table.seats.iter_mut().enumerate() {
-        if s.is_occupied() && !g1_is_identity(&s.pk) {
+        if s.pk().is_some_and(|pk| !g1_is_identity(&pk.0)) {
             table.deck_state.contributor_mask |= 1u16 << seat_index;
         }
         s.prepare_next_hand();
@@ -3484,13 +3508,13 @@ pub fn reset_for_next_hand(
     // 之前。理由：第二阶段已把 pending_addon 合并到 stack（退款金额正确），
     // 第三阶段的 stack==0 判定不会误清已退款的座位。
     for &i in &to_remove_leave {
-        let stack_refund = table.seats[i as usize].stack;
-        let pending_refund = table.seats[i as usize].pending_addon;
+        let stack_refund = table.seats[i as usize].stack();
+        let pending_refund = table.seats[i as usize].pending_addon();
         let refund = stack_refund + pending_refund;
-        let player = table.seats[i as usize].player;
+        let player = table.seats[i as usize].player();
         if refund > 0 {
-            table.seats[i as usize].stack = 0;
-            table.seats[i as usize].pending_addon = 0;
+            table.seats[i as usize].set_stack(0)?;
+            table.seats[i as usize].set_pending_addon(0)?;
             events::emit_event(
                 events,
                 TexasPokerEvent::PlayerRefund {
@@ -3520,12 +3544,12 @@ pub fn reset_for_next_hand(
     // 第三阶段：清理 stack==0 的 occupied seat
     let mut to_remove: Vec<u8> = vec![];
     for (i, s) in table.seats.iter().enumerate() {
-        if s.has_left_hand() || (s.is_occupied() && s.stack == 0) {
+        if s.has_left_hand() || (s.is_occupied() && s.stack() == 0) {
             to_remove.push(i as u8);
         }
     }
     for &i in &to_remove {
-        let player = table.seats[i as usize].player;
+        let player = table.seats[i as usize].player();
         seat_mask_remove(&mut table.deck_state.contributor_mask, i);
         table.seats[i as usize].vacate();
         table.set_seat_wants_leave(i, false);
@@ -3600,26 +3624,26 @@ fn kick_player_internal_in_place(
     let was_current_shuffler = table.shuffle_state().derived_current_shuffler() == seat_index;
     let was_current_turn = table.current_turn() == seat_index && is_betting_round(table);
     let seat = &table.seats[seat_index as usize];
-    let stack_refund = seat.stack;
-    let pending_refund = seat.pending_addon;
+    let stack_refund = seat.stack();
+    let pending_refund = seat.pending_addon();
     let refund_amt = stack_refund
         .checked_add(pending_refund)
         .ok_or_else(|| PokerL1Error::Serialization("kick_player: refund overflow".into()))?;
-    let player = seat.player;
+    let player = seat.player();
 
     // Preflight every fallible monetary transition before mutating the seat, pot or aggregate key.
     let post_pot = table
         .pot
-        .checked_add(seat.bet)
+        .checked_add(seat.bet())
         .ok_or_else(|| PokerL1Error::Serialization("kick_player: pot overflow".into()))?;
     let post_chip_pool = table
         .chip_pool
         .checked_sub(refund_amt)
         .ok_or_else(|| PokerL1Error::Serialization("kick_player: chip_pool underflow".into()))?;
     // P1-2 语义说明：被踢玩家的 bet 立即并入 pot（区别于 fold/auto_fold/force_fold，
-    // 后者保留 seat.bet，等下注轮结束由 collect_bets_to_pot 统一收集）。
+    // 后者保留 seat.bet()，等下注轮结束由 collect_bets_to_pot 统一收集）。
     // 这是 kick 的特殊路径：被踢玩家立即离开，其本轮已下注金额不参与后续轮次，
-    // 故提前单独收集。资金账安全：collect_bets_to_pot 后续不会再收（seat.bet 已为 0）；
+    // 故提前单独收集。资金账安全：collect_bets_to_pot 后续不会再收（seat.bet() 已为 0）；
     // side_pot 分层依据 total_bet（不受 bet 清零影响）。
     table.pot = post_pot;
     table.seats[seat_index as usize].depart_this_hand()?;
@@ -3694,8 +3718,8 @@ fn kick_player_internal_in_place(
 /// `addon` — 玩家追加筹码，**下一手生效**。
 ///
 /// 业务语义：玩家可在任意时刻（包括牌局进行中）追加筹码，但追加金额
-/// **不影响当前手牌**，只累加 `seat.pending_addon`，在下一手
-/// [`reset_for_next_hand`] 第一阶段合并到 `seat.stack`。
+/// **不影响当前手牌**，只累加 `seat.pending_addon()`，在下一手
+/// [`reset_for_next_hand`] 第一阶段合并到 `seat.stack()`。
 ///
 /// 这样设计的关键不变量：
 /// - 不破坏当前 `side_pot` 分层（all-in 后的钱不能凭空增加）
@@ -3767,17 +3791,21 @@ fn apply_fund_seat(
         let seat = &mut table.seats[seat_index as usize];
         match timing {
             FundTiming::NextHand => {
-                seat.pending_addon = seat.pending_addon.checked_add(amount).ok_or_else(|| {
+                let pending_after = seat.pending_addon().checked_add(amount).ok_or_else(|| {
                     PokerL1Error::Serialization("addon: pending_addon overflow".into())
                 })?;
-                (seat.player, Some(seat.pending_addon), None)
+                let player = seat.player();
+                seat.set_pending_addon(pending_after)?;
+                (player, Some(pending_after), None)
             }
             FundTiming::Immediate => {
-                seat.stack = seat
-                    .stack
+                let stack_after = seat
+                    .stack()
                     .checked_add(amount)
                     .ok_or_else(|| PokerL1Error::Serialization("rebuy: stack overflow".into()))?;
-                (seat.player, None, Some(seat.stack))
+                let player = seat.player();
+                seat.set_stack(stack_after)?;
+                (player, None, Some(stack_after))
             }
         }
     };
@@ -3815,7 +3843,7 @@ fn apply_fund_seat(
 /// - `rebuy` 立即生效，直接改 `stack`，可用于玩家筹码不足时继续游戏
 ///
 /// 业务约束（调用方负责）：
-/// - MTT 中通常要求 `seat.stack < big_blind` 才允许 rebuy
+/// - MTT 中通常要求 `seat.stack() < big_blind` 才允许 rebuy
 /// - 现金桌通常不使用 rebuy，而用 addon
 /// - 通常在 rebuy 期内（盲注升阶到某级别前）才允许
 ///
@@ -3873,7 +3901,7 @@ pub fn apply_set_leave_after_hand(
         return Ok(false);
     }
 
-    let player = seat.player;
+    let player = seat.player();
     table.set_seat_wants_leave(seat_index, want_leave);
     events::emit_event(
         events,
@@ -3906,7 +3934,7 @@ pub fn apply_set_leave_after_hand(
 ///
 /// # 权限
 ///
-/// dispatch 层校验 `caller == seat.player`（与 leave_table / addon 一致）。
+/// dispatch 层校验 `caller == seat.player()`（与 leave_table / addon 一致）。
 ///
 /// # Errors
 ///
@@ -3963,10 +3991,10 @@ pub fn apply_bet(
             "bet: not allowed in preflop, use raise instead".into(),
         ));
     }
-    // 验证当前轮无已有下注（bet 只能在 current_bet == seat.bet 时使用）
+    // 验证当前轮无已有下注（bet 只能在 current_bet == seat.bet() 时使用）
     let round = table.betting_round().expect("checked above");
     let current_bet = round.current_bet;
-    let seat_bet = table.seats[seat_index as usize].bet;
+    let seat_bet = table.seats[seat_index as usize].bet();
     if current_bet > seat_bet {
         return Err(PokerL1Error::Serialization(format!(
             "bet: current_bet {current_bet} > seat_bet {seat_bet}, 应使用 call/raise"
@@ -4012,14 +4040,15 @@ pub fn consume_time_bank(
             "consume_time_bank: seat {seat_index} not occupied"
         )));
     }
-    if seat.time_bank_ms < consumed_ms {
+    if seat.time_bank_ms() < consumed_ms {
         return Err(PokerL1Error::Serialization(format!(
             "consume_time_bank: time_bank_ms {} < consumed_ms {}",
-            seat.time_bank_ms, consumed_ms
+            seat.time_bank_ms(),
+            consumed_ms
         )));
     }
-    seat.time_bank_ms -= consumed_ms;
-    let remaining_ms = seat.time_bank_ms;
+    let remaining_ms = seat.time_bank_ms() - consumed_ms;
+    seat.set_time_bank_ms(remaining_ms);
     events::emit_event(
         events,
         TexasPokerEvent::TimeBankConsumed {
@@ -4067,7 +4096,12 @@ pub fn collect_ante(
 
     let antes = seats_to_ante
         .iter()
-        .map(|seat_idx| (*seat_idx, amount.min(table.seats[*seat_idx as usize].stack)))
+        .map(|seat_idx| {
+            (
+                *seat_idx,
+                amount.min(table.seats[*seat_idx as usize].stack()),
+            )
+        })
         .collect::<Vec<_>>();
     let total_ante = antes.iter().try_fold(0u64, |total, (_, actual)| {
         total
@@ -4080,7 +4114,7 @@ pub fn collect_ante(
         .ok_or_else(|| PokerL1Error::Serialization("collect_ante: pot overflow".into()))?;
     for (seat_idx, actual) in &antes {
         table.seats[*seat_idx as usize]
-            .total_bet
+            .total_bet()
             .checked_add(*actual)
             .ok_or_else(|| {
                 PokerL1Error::Serialization("collect_ante: total_bet overflow".into())
@@ -4089,13 +4123,13 @@ pub fn collect_ante(
 
     table.pot += total_ante;
     for (seat_idx, actual) in antes {
-        let seat = &mut table.seats[seat_idx as usize];
-        seat.stack -= actual;
+        let seat = table.seats[seat_idx as usize].playing_mut()?;
+        seat.occupied.stack -= actual;
         // An ante is dead money: it contributes to side-pot eligibility through total_bet and is
-        // held directly by the pot, but it must not reduce the price of a call via seat.bet.
+        // held directly by the pot, but it must not reduce the price of a call via seat.bet().
         seat.total_bet += actual;
-        if seat.stack == 0 {
-            seat.set_status(SeatStatus::AllIn);
+        if seat.occupied.stack == 0 {
+            seat.status = PlayingSeatStatus::AllIn;
         }
         events::emit_event(
             events,
@@ -4246,11 +4280,10 @@ mod tests {
         card_ids: &[u8],
         events: &mut Vec<TexasPokerEvent>,
     ) {
-        assert_eq!(table.reveal_token_state().assignments.len(), card_ids.len());
+        assert_eq!(table.reveal_assignments().len(), card_ids.len());
         let plaintext_cards = generate_plaintext_cards();
         let card_indices = table
-            .reveal_token_state()
-            .assignments
+            .reveal_assignments()
             .iter()
             .map(|assignment| assignment.encrypted_card_index)
             .collect::<Vec<_>>();
@@ -4367,7 +4400,7 @@ mod tests {
     fn test_hole_card_duplicate_with_community_is_rejected_atomically() {
         let mut table = make_table();
         set_initial_encrypted_deck(&mut table).unwrap();
-        table.seats[0].player = [1; 20];
+        table.seats[0].fixture_set_player([1; 20]);
         let duplicate_id = 12u8;
         let plaintext_cards = generate_plaintext_cards();
         table
@@ -4412,9 +4445,9 @@ mod tests {
         let aggregate_pk = owner_public_keys[0] + owner_public_keys[1];
 
         for (seat_index, owner_pk) in owner_public_keys.iter().enumerate() {
-            table.seats[seat_index].player = [(seat_index as u8) + 1; 20];
-            table.seats[seat_index].stack = 1_000;
-            table.seats[seat_index].pk = ECPoint::from(*owner_pk);
+            table.seats[seat_index].fixture_set_player([(seat_index as u8) + 1; 20]);
+            table.seats[seat_index].set_stack(1_000).unwrap();
+            table.seats[seat_index].fixture_set_pk(ECPoint::from(*owner_pk));
         }
         set_initial_encrypted_deck(&mut table).unwrap();
         table.deck_state.contributor_mask = 0b11;
@@ -4432,7 +4465,7 @@ mod tests {
                     accumulated_deck: None,
                 },
                 super::super::types::RevealTokenState {
-                    reveal_phase: REVEAL_PHASE_FLOP,
+                    purpose: RevealPurpose::Board,
                     assignments: vec![],
                 },
                 9_000,
@@ -4517,7 +4550,7 @@ mod tests {
         );
         assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_RECONSTRUCT);
         assert_eq!(table.round_state(), ROUND_FLOP);
-        assert_eq!(table.reveal_token_state().reveal_phase, REVEAL_PHASE_FLOP);
+        assert_eq!(table.reveal_phase(), REVEAL_PHASE_FLOP);
         assert_eq!(table.shuffle_state().derived_current_shuffler(), 0);
         assert_eq!(table.shuffle_state().pending_mask, 0b11);
         assert!(
@@ -4536,8 +4569,8 @@ mod tests {
     fn reconstruct_shuffle_timeout_preserves_resume_street_and_reveal() {
         let mut table = make_table();
         for seat_index in 0..3usize {
-            table.seats[seat_index].player = [(seat_index as u8) + 1; 20];
-            table.seats[seat_index].stack = 100;
+            table.seats[seat_index].fixture_set_player([(seat_index as u8) + 1; 20]);
+            table.seats[seat_index].set_stack(100).unwrap();
             table.seats[seat_index].set_status(SeatStatus::Active);
         }
         table.chip_pool = 300;
@@ -4545,7 +4578,7 @@ mod tests {
         set_initial_encrypted_deck(&mut table).unwrap();
 
         let suspended_reveal = super::super::types::RevealTokenState {
-            reveal_phase: REVEAL_PHASE_TURN,
+            purpose: RevealPurpose::Board,
             assignments: vec![],
         };
         table
@@ -4573,7 +4606,7 @@ mod tests {
         ));
         assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_RECONSTRUCT);
         assert_eq!(table.round_state(), ROUND_TURN);
-        assert_eq!(table.reveal_token_state().as_ref(), &suspended_reveal);
+        assert_eq!(table.reveal_token_state(), Some(&suspended_reveal));
         assert_eq!(table.shuffle_state().pending_mask, 0b110);
         assert_eq!(table.shuffle_state().derived_current_shuffler(), 1);
         assert_eq!(
@@ -4594,8 +4627,8 @@ mod tests {
         let g = g1_generator();
         let pk = g * scalar_from_u64(0xAB);
         assert!(!is_pk_registered(&table.seats, &pk));
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].pk = ECPoint::from(pk);
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].fixture_set_pk(ECPoint::from(pk));
         assert!(is_pk_registered(&table.seats, &pk));
         let other_pk = g * scalar_from_u64(0xCD);
         assert!(!is_pk_registered(&table.seats, &other_pk));
@@ -4606,8 +4639,8 @@ mod tests {
         let mut table = make_table();
         assert_eq!(count_active_players(&table.seats), 0);
 
-        table.seats[0].player = [0x01; 20];
-        table.seats[1].player = [0x02; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[1].fixture_set_player([0x02; 20]);
         assert_eq!(count_active_players(&table.seats), 2);
 
         table.seats[0].set_status(SeatStatus::Folded);
@@ -4620,8 +4653,8 @@ mod tests {
     #[test]
     fn test_get_active_seat_indices() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[2].player = [0x03; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[2].fixture_set_player([0x03; 20]);
         let active = get_active_seat_indices(&table.seats);
         assert_eq!(active, vec![0, 2]);
     }
@@ -4629,10 +4662,10 @@ mod tests {
     #[test]
     fn test_find_next_active_seat() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[1].player = [0x02; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[1].fixture_set_player([0x02; 20]);
         table.seats[1].set_status(SeatStatus::Folded);
-        table.seats[2].player = [0x03; 20];
+        table.seats[2].fixture_set_player([0x03; 20]);
         let next = find_next_active_seat(&table.seats, 0, 4);
         assert_eq!(next, Some(2));
     }
@@ -4675,13 +4708,13 @@ mod tests {
         let result = start_hand(&mut table, &mut events);
         assert!(result.is_err());
 
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
         let result = start_hand(&mut table, &mut events);
         assert!(result.is_err());
 
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         let result = start_hand(&mut table, &mut events);
         assert!(result.is_ok());
         assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_BEFORE_PREFLOP);
@@ -4691,10 +4724,10 @@ mod tests {
     #[test]
     fn test_start_hand_initializes_deck() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         let mut events = vec![];
         start_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.deck_state.encrypted.len(), 52);
@@ -4709,11 +4742,11 @@ mod tests {
     #[test]
     fn test_tick_only_consumes_deadline_after_explicit_start() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         table.seats[1].set_status(SeatStatus::Active);
         let mut events = vec![];
         // WAITING has no deadline: tick must not start a hand implicitly.
@@ -4740,8 +4773,8 @@ mod tests {
     fn shuffle_actor_is_derived_without_normalization_step() {
         let mut table = make_table();
         for (seat_index, player) in [(0usize, [0x01; 20]), (2usize, [0x03; 20])] {
-            table.seats[seat_index].player = player;
-            table.seats[seat_index].stack = 1_000;
+            table.seats[seat_index].fixture_set_player(player);
+            table.seats[seat_index].set_stack(1_000).unwrap();
             table.seats[seat_index].set_status(SeatStatus::Active);
         }
         table
@@ -4769,7 +4802,7 @@ mod tests {
             .enter_revealing(
                 ROUND_SHOWDOWN,
                 super::super::types::RevealTokenState {
-                    reveal_phase: REVEAL_PHASE_SHOWDOWN,
+                    purpose: RevealPurpose::ShowdownOwner,
                     assignments: vec![],
                 },
                 0,
@@ -4780,10 +4813,7 @@ mod tests {
         let report = normalize_until_blocked(&mut table, 1_000, &mut events).unwrap();
 
         assert_eq!(report.steps, vec![NormalizationStep::CompleteReveal]);
-        assert_eq!(
-            table.reveal_token_state().as_ref(),
-            &super::super::types::RevealTokenState::default()
-        );
+        assert!(table.reveal_token_state().is_none());
         assert!(events.iter().any(|event| matches!(
             event,
             TexasPokerEvent::RevealPhaseComplete {
@@ -4800,7 +4830,7 @@ mod tests {
             .enter_revealing(
                 ROUND_FLOP,
                 super::super::types::RevealTokenState {
-                    reveal_phase: REVEAL_PHASE_FLOP,
+                    purpose: RevealPurpose::Board,
                     assignments: vec![RevealAssignment {
                         encrypted_card_index: 0,
                         target: RevealTarget::Board {
@@ -4848,15 +4878,15 @@ mod tests {
     fn advance_betting_deadline_normalizes_then_reports_not_due_and_extends_time_bank() {
         let mut table = make_table();
         for (seat_index, player) in [(0usize, [0x01; 20]), (1usize, [0x02; 20])] {
-            table.seats[seat_index].player = player;
-            table.seats[seat_index].stack = 1_000;
+            table.seats[seat_index].fixture_set_player(player);
+            table.seats[seat_index].set_stack(1_000).unwrap();
             table.seats[seat_index].set_status(SeatStatus::Active);
         }
         table.timeout_config.betting_timeout_ms = 100;
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1_000)
             .unwrap();
-        table.seats[0].time_bank_ms = 40;
+        table.seats[0].set_time_bank_ms(40);
         let mut events = vec![];
 
         assert_eq!(
@@ -4874,27 +4904,27 @@ mod tests {
                 deadline_ms: 1_140,
             }
         );
-        assert_eq!(table.seats[0].time_bank_ms, 0);
+        assert_eq!(table.seats[0].time_bank_ms(), 0);
         assert_eq!(table.timestamps().betting_started_at, 1_040);
     }
 
     #[test]
     fn test_post_blinds_heads_up() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         table.button = 0;
         let mut events = vec![];
         let (sb, bb, first) = post_blinds(&mut table, &mut events).unwrap();
         assert_eq!(sb, 0);
         assert_eq!(bb, 1);
         assert_eq!(first, 1);
-        assert_eq!(table.seats[0].bet, 50);
-        assert_eq!(table.seats[1].bet, 100);
-        assert_eq!(table.seats[0].stack, 950);
-        assert_eq!(table.seats[1].stack, 900);
+        assert_eq!(table.seats[0].bet(), 50);
+        assert_eq!(table.seats[1].bet(), 100);
+        assert_eq!(table.seats[0].stack(), 950);
+        assert_eq!(table.seats[1].stack(), 900);
         assert!(
             events
                 .iter()
@@ -4905,18 +4935,18 @@ mod tests {
     #[test]
     fn test_apply_fold_ends_without_showdown() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
             .unwrap();
         table.pot = 200;
-        table.seats[0].bet = 25;
-        table.seats[0].total_bet = 25;
-        table.seats[1].bet = 75;
-        table.seats[1].total_bet = 75;
+        table.seats[0].fixture_set_bet(25);
+        table.seats[0].fixture_set_total_bet(25);
+        table.seats[1].fixture_set_bet(75);
+        table.seats[1].fixture_set_total_bet(75);
         let mut events = vec![];
 
         apply_fold(&mut table, 0, &mut events).unwrap();
@@ -4937,14 +4967,15 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, TexasPokerEvent::PotCollected { pot_after: 300, .. }))
         );
-        assert_eq!(table.seats[1].stack, 1300);
+        assert_eq!(table.seats[1].stack(), 1300);
     }
 
     #[test]
     fn test_collect_bets_to_pot_overflow_is_atomic() {
         let mut pot_overflow = make_table();
         pot_overflow.pot = u64::MAX;
-        pot_overflow.seats[0].bet = 1;
+        pot_overflow.seats[0].fixture_set_player([0x01; 20]);
+        pot_overflow.seats[0].fixture_set_bet(1);
         let before = pot_overflow.clone();
         let mut events = vec![];
         assert!(collect_bets_to_pot(&mut pot_overflow, &mut events).is_err());
@@ -4952,8 +4983,10 @@ mod tests {
         assert!(events.is_empty());
 
         let mut sum_overflow = make_table();
-        sum_overflow.seats[0].bet = u64::MAX;
-        sum_overflow.seats[1].bet = 1;
+        sum_overflow.seats[0].fixture_set_player([0x01; 20]);
+        sum_overflow.seats[1].fixture_set_player([0x02; 20]);
+        sum_overflow.seats[0].fixture_set_bet(u64::MAX);
+        sum_overflow.seats[1].fixture_set_bet(1);
         let before = sum_overflow.clone();
         assert!(collect_bets_to_pot(&mut sum_overflow, &mut events).is_err());
         assert_eq!(sum_overflow, before);
@@ -4963,20 +4996,20 @@ mod tests {
     #[test]
     fn test_apply_call_deducts_stack() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[0].bet = 0;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
-        table.seats[1].bet = 100;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[0].fixture_set_bet(0);
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_bet(100);
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
             .unwrap();
         let mut events = vec![];
 
         apply_call(&mut table, 0, &mut events).unwrap();
-        assert_eq!(table.seats[0].stack, 900);
-        assert_eq!(table.seats[0].bet, 100);
+        assert_eq!(table.seats[0].stack(), 900);
+        assert_eq!(table.seats[0].bet(), 100);
         assert!(table.seat_acted_this_round(0));
         assert!(
             events
@@ -4988,11 +5021,11 @@ mod tests {
     #[test]
     fn test_apply_raise_resets_others_acted() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
-        table.seats[1].bet = 100;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_bet(100);
         table.set_seat_acted_this_round(1, true);
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
@@ -5000,18 +5033,18 @@ mod tests {
         let mut events = vec![];
 
         apply_raise(&mut table, 0, 300, &mut events).unwrap();
-        assert_eq!(table.seats[0].bet, 300);
-        assert_eq!(table.seats[0].stack, 700);
+        assert_eq!(table.seats[0].bet(), 300);
+        assert_eq!(table.seats[0].stack(), 700);
         assert!(!table.seat_acted_this_round(1));
     }
 
     #[test]
     fn test_reset_for_next_hand_clears_state() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[0].bet = 100;
-        table.seats[0].total_bet = 250;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[0].fixture_set_bet(100);
+        table.seats[0].fixture_set_total_bet(250);
         table.seats[0].set_status(SeatStatus::Folded);
         table.pot = 500;
         table
@@ -5022,8 +5055,8 @@ mod tests {
         reset_for_next_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
-        assert_eq!(table.seats[0].bet, 0);
-        assert_eq!(table.seats[0].total_bet, 0);
+        assert_eq!(table.seats[0].bet(), 0);
+        assert_eq!(table.seats[0].total_bet(), 0);
         assert!(!table.seats[0].is_folded());
         assert!(table.community_cards.is_empty());
         assert_eq!(table.deck_state.encrypted.len(), 52);
@@ -5037,16 +5070,16 @@ mod tests {
         let pk0 = g * scalar_from_u64(42);
         let pk1 = g * scalar_from_u64(43);
         let pk2 = g * scalar_from_u64(44);
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 500;
-        table.seats[0].pk = ECPoint::from(pk0);
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 500;
-        table.seats[1].pk = ECPoint::from(pk1);
-        table.seats[2].player = [0x03; 20];
-        table.seats[2].stack = 500;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(500).unwrap();
+        table.seats[0].fixture_set_pk(ECPoint::from(pk0));
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(500).unwrap();
+        table.seats[1].fixture_set_pk(ECPoint::from(pk1));
+        table.seats[2].fixture_set_player([0x03; 20]);
+        table.seats[2].set_stack(500).unwrap();
         table.chip_pool = 1_500;
-        table.seats[2].pk = ECPoint::from(pk2);
+        table.seats[2].fixture_set_pk(ECPoint::from(pk2));
         table.deck_state.contributor_mask = 0b111;
         table.sync_aggregated_pk().unwrap();
         // 用一个非 NONE 的 round_state，使 reset_for_next_hand 不会被触发
@@ -5060,9 +5093,9 @@ mod tests {
         // kick 后 active=2（seat1+seat2），不会触发 reset_for_next_hand。
         assert!(table.seats[0].has_left_hand());
         assert_eq!(table.seats[0].status(), SeatStatus::Out);
-        assert_eq!(table.seats[0].stack, 0);
-        // Seat::empty() 后 pk 为 G1Projective::identity()（默认值）。
-        assert!(g1_is_identity(&table.seats[0].pk));
+        assert_eq!(table.seats[0].stack(), 0);
+        // Departed seat no longer carries a live Mental Poker key.
+        assert!(table.seats[0].pk().is_none());
         // aggregated_pk 应 = pk1 + pk2（移除 pk0）。
         let new_agg = table.deck_state.aggregated_pk.unwrap();
         let expected = pk1 + pk2;
@@ -5082,8 +5115,8 @@ mod tests {
     #[test]
     fn test_kick_player_pool_underflow_is_atomic() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 10;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(10).unwrap();
         table.chip_pool = 9;
         let before = table.clone();
         let mut events = vec![];
@@ -5099,14 +5132,14 @@ mod tests {
     #[test]
     fn test_kick_player_nested_reset_failure_is_atomic() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 10;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(10).unwrap();
         // A waiting seat is not counted as active, so kicking seat 0 triggers reset. Make the
         // pending-addon merge overflow so reset fails after the kick candidate mutates.
-        table.seats[1].player = [0x02; 20];
+        table.seats[1].fixture_set_player([0x02; 20]);
         table.seats[1].set_status(SeatStatus::Waiting);
-        table.seats[1].stack = u64::MAX;
-        table.seats[1].pending_addon = 1;
+        table.seats[1].set_stack(u64::MAX).unwrap();
+        table.seats[1].set_pending_addon(1).unwrap();
         table.chip_pool = 10;
         let before = table.clone();
         let mut events = vec![];
@@ -5136,10 +5169,10 @@ mod tests {
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
             .unwrap();
         for seat_index in 0..2 {
-            table.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
-            table.seats[seat_index].stack = 900;
-            table.seats[seat_index].bet = 100;
-            table.seats[seat_index].total_bet = 100;
+            table.seats[seat_index].fixture_set_player([u8::try_from(seat_index + 1).unwrap(); 20]);
+            table.seats[seat_index].set_stack(900).unwrap();
+            table.seats[seat_index].fixture_set_bet(100);
+            table.seats[seat_index].fixture_set_total_bet(100);
         }
         table.chip_pool = 2_000;
         let pre_call_seq = table.call_seq;
@@ -5150,7 +5183,7 @@ mod tests {
         assert_eq!(table.call_seq, pre_call_seq);
         assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
-        assert_eq!(table.seats[1].stack, 1_100);
+        assert_eq!(table.seats[1].stack(), 1_100);
         assert_eq!(
             events
                 .iter()
@@ -5167,10 +5200,10 @@ mod tests {
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
             .unwrap();
         for seat_index in 0..2 {
-            table.seats[seat_index].player = [u8::try_from(seat_index + 1).unwrap(); 20];
-            table.seats[seat_index].stack = 900;
-            table.seats[seat_index].bet = 100;
-            table.seats[seat_index].total_bet = 100;
+            table.seats[seat_index].fixture_set_player([u8::try_from(seat_index + 1).unwrap(); 20]);
+            table.seats[seat_index].set_stack(900).unwrap();
+            table.seats[seat_index].fixture_set_bet(100);
+            table.seats[seat_index].fixture_set_total_bet(100);
         }
         table.chip_pool = 2_000;
         let pre_call_seq = table.call_seq;
@@ -5181,7 +5214,7 @@ mod tests {
         assert_eq!(table.call_seq, pre_call_seq);
         assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
-        assert_eq!(table.seats[0].stack, 1_100);
+        assert_eq!(table.seats[0].stack(), 1_100);
         assert!(events.iter().any(|event| matches!(
             event,
             TexasPokerEvent::HandEndedWithoutShowdown { winner_seat: 0, .. }
@@ -5209,13 +5242,13 @@ mod tests {
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), NO_SEAT, 0)
             .unwrap();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[0].bet = 100;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[0].fixture_set_bet(100);
         table.set_seat_acted_this_round(0, true);
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
-        table.seats[1].bet = 100;
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_bet(100);
         table.set_seat_acted_this_round(1, true);
         assert!(is_betting_complete(&table));
 
@@ -5228,19 +5261,19 @@ mod tests {
     #[test]
     fn test_apply_addon_basic() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 500;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(500).unwrap();
         let mut events = vec![];
 
         apply_addon(&mut table, 0, 200, &mut events).unwrap();
         // 关键不变量：stack 不变（不影响当前手牌）
-        assert_eq!(table.seats[0].stack, 500);
-        assert_eq!(table.seats[0].pending_addon, 200);
+        assert_eq!(table.seats[0].stack(), 500);
+        assert_eq!(table.seats[0].pending_addon(), 200);
         assert_eq!(
             table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             200
         );
@@ -5259,21 +5292,21 @@ mod tests {
     #[test]
     fn test_apply_addon_accumulates() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 500;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(500).unwrap();
 
         apply_addon(&mut table, 0, 100, &mut vec![]).unwrap();
         apply_addon(&mut table, 0, 50, &mut vec![]).unwrap();
-        assert_eq!(table.seats[0].pending_addon, 150);
+        assert_eq!(table.seats[0].pending_addon(), 150);
         assert_eq!(
             table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             150
         );
-        assert_eq!(table.seats[0].stack, 500); // 仍不变
+        assert_eq!(table.seats[0].stack(), 500); // 仍不变
     }
 
     #[test]
@@ -5283,7 +5316,7 @@ mod tests {
         let err = apply_addon(&mut table, 99, 100, &mut vec![]).unwrap_err();
         assert!(err.to_string().contains("seat_index 99 out of range"));
         // amount == 0
-        table.seats[0].player = [0x01; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
         let err = apply_addon(&mut table, 0, 0, &mut vec![]).unwrap_err();
         assert!(err.to_string().contains("amount must > 0"));
         // 未占用座位
@@ -5294,7 +5327,7 @@ mod tests {
     #[test]
     fn test_set_leave_after_hand_is_idempotent() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
         table.seats[0].set_status(SeatStatus::Waiting);
         let mut events = vec![];
 
@@ -5324,18 +5357,18 @@ mod tests {
     #[test]
     fn test_reset_for_next_hand_merges_addon() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 0; // stack==0 触发清理
-        table.seats[0].pending_addon = 500; // 但有 addon
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(0).unwrap(); // stack==0 触发清理
+        table.seats[0].set_pending_addon(500).unwrap(); // 但有 addon
         table.chip_pool = 500;
 
         let mut events = vec![];
         reset_for_next_hand(&mut table, &mut events).unwrap();
 
         // addon 合并后 stack > 0，玩家不应被踢
-        assert_eq!(table.seats[0].stack, 500);
-        assert_eq!(table.seats[0].pending_addon, 0);
-        assert_eq!(table.seats[0].player, [0x01; 20]);
+        assert_eq!(table.seats[0].stack(), 500);
+        assert_eq!(table.seats[0].pending_addon(), 0);
+        assert_eq!(table.seats[0].player(), [0x01; 20]);
         // AddonCredited 事件应触发
         assert!(events.iter().any(|e| matches!(
             e,
@@ -5350,10 +5383,10 @@ mod tests {
     #[test]
     fn test_reset_for_next_hand_pending_sum_overflow_is_atomic() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].pending_addon = u64::MAX;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].pending_addon = 1;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_pending_addon(u64::MAX).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_pending_addon(1).unwrap();
         table.chip_pool = u64::MAX;
         let before = table.clone();
         let mut events = vec![];
@@ -5368,8 +5401,8 @@ mod tests {
     #[test]
     fn test_reset_for_next_hand_leave_underflow_is_atomic() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 10;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(10).unwrap();
         table.set_seat_wants_leave(0, true);
         table.chip_pool = 9;
         let before = table.clone();
@@ -5386,13 +5419,13 @@ mod tests {
     fn test_reset_for_next_hand_addon_then_cleanup() {
         // addon=0 且 stack=0 的玩家应被清理（不能误保留）
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 0;
-        table.seats[0].pending_addon = 0;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(0).unwrap();
+        table.seats[0].set_pending_addon(0).unwrap();
 
         let mut events = vec![];
         reset_for_next_hand(&mut table, &mut events).unwrap();
-        assert_eq!(table.seats[0].player, [0u8; 20]); // EMPTY_PLAYER
+        assert_eq!(table.seats[0].player(), [0u8; 20]); // EMPTY_PLAYER
         assert!(
             events
                 .iter()
@@ -5403,20 +5436,20 @@ mod tests {
     #[test]
     fn test_apply_rebuy_immediate() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 100;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(100).unwrap();
         table.chip_pool = 100;
 
         let mut events = vec![];
         apply_rebuy(&mut table, 0, 500, &mut events).unwrap();
         // 立即生效
-        assert_eq!(table.seats[0].stack, 600);
+        assert_eq!(table.seats[0].stack(), 600);
         assert_eq!(table.chip_pool, 600);
         assert_eq!(
             table
                 .seats
                 .iter()
-                .map(|seat| seat.pending_addon)
+                .map(|seat| seat.pending_addon())
                 .sum::<u64>(),
             0
         );
@@ -5434,7 +5467,7 @@ mod tests {
     fn test_apply_rebuy_invalid() {
         let mut table = make_table();
         // amount == 0
-        table.seats[0].player = [0x01; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
         let err = apply_rebuy(&mut table, 0, 0, &mut vec![]).unwrap_err();
         assert!(err.to_string().contains("amount must > 0"));
         // 未占用
@@ -5449,9 +5482,9 @@ mod tests {
 
     fn make_leave_with_proof_table(stack: u64, pending_addon: u64) -> TexasPokerTable {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = stack;
-        table.seats[0].pending_addon = pending_addon;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(stack).unwrap();
+        table.seats[0].set_pending_addon(pending_addon).unwrap();
         table.deck_state.contributor_mask = 1;
         table
     }
@@ -5491,19 +5524,19 @@ mod tests {
     #[test]
     fn test_apply_bet_postflop() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[0].bet = 0; // postflop bet=0
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[0].fixture_set_bet(0); // postflop bet=0
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         table
             .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 0, 0)
             .unwrap();
         let mut events = vec![];
 
         apply_bet(&mut table, 0, 200, &mut events).unwrap();
-        assert_eq!(table.seats[0].bet, 200);
-        assert_eq!(table.seats[0].stack, 800);
+        assert_eq!(table.seats[0].bet(), 200);
+        assert_eq!(table.seats[0].stack(), 800);
         assert!(table.seat_acted_this_round(0));
         assert!(
             events
@@ -5515,9 +5548,9 @@ mod tests {
     #[test]
     fn test_apply_bet_rejects_when_current_bet_exists() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[0].bet = 50;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[0].fixture_set_bet(50);
         // 模拟已有下注：current_bet = 100 > seat.bet = 50
         let mut round = BettingRound::new(100, 0);
         round.current_bet = 100;
@@ -5530,8 +5563,8 @@ mod tests {
     #[test]
     fn test_apply_bet_rejects_zero_amount() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
         table
             .enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 0, 0)
             .unwrap();
@@ -5545,12 +5578,12 @@ mod tests {
     #[test]
     fn test_consume_time_bank_basic() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].time_bank_ms = 30_000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_time_bank_ms(30_000);
         let mut events = vec![];
 
         consume_time_bank(&mut table, 0, 10_000, &mut events).unwrap();
-        assert_eq!(table.seats[0].time_bank_ms, 20_000);
+        assert_eq!(table.seats[0].time_bank_ms(), 20_000);
         assert!(events.iter().any(|e| matches!(
             e,
             TexasPokerEvent::TimeBankConsumed {
@@ -5564,8 +5597,8 @@ mod tests {
     #[test]
     fn test_consume_time_bank_insufficient() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].time_bank_ms = 5_000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_time_bank_ms(5_000);
         let err = consume_time_bank(&mut table, 0, 10_000, &mut vec![]).unwrap_err();
         assert!(
             err.to_string()
@@ -5580,20 +5613,20 @@ mod tests {
         let mut table = make_table();
         table.ante_mode = ANTE_MODE_NORMAL;
         table.ante_amount = 10;
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         let mut events = vec![];
 
         collect_ante(&mut table, 1, &mut events).unwrap();
         assert_eq!(table.pot, 20);
-        assert_eq!(table.seats[0].stack, 990);
-        assert_eq!(table.seats[1].stack, 990);
-        assert_eq!(table.seats[0].bet, 0);
-        assert_eq!(table.seats[1].bet, 0);
-        assert_eq!(table.seats[0].total_bet, 10);
-        assert_eq!(table.seats[1].total_bet, 10);
+        assert_eq!(table.seats[0].stack(), 990);
+        assert_eq!(table.seats[1].stack(), 990);
+        assert_eq!(table.seats[0].bet(), 0);
+        assert_eq!(table.seats[1].bet(), 0);
+        assert_eq!(table.seats[0].total_bet(), 10);
+        assert_eq!(table.seats[1].total_bet(), 10);
         assert_eq!(
             events
                 .iter()
@@ -5608,11 +5641,11 @@ mod tests {
         let mut table = make_table();
         table.ante_mode = ANTE_MODE_NORMAL;
         table.ante_amount = 10;
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1_000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1_000).unwrap();
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1_000;
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1_000).unwrap();
         table.seats[1].set_status(SeatStatus::Active);
         table.chip_pool = 2_000;
         table
@@ -5627,7 +5660,7 @@ mod tests {
 
         assert_eq!(table.betting_round().unwrap().current_bet, table.big_blind);
         assert_eq!(table.pot, 20);
-        assert_eq!(table.seats.iter().map(|seat| seat.bet).sum::<u64>(), 150);
+        assert_eq!(table.seats.iter().map(|seat| seat.bet()).sum::<u64>(), 150);
         assert_eq!(reconcile_table_vault(&table).unwrap(), 2_000);
     }
 
@@ -5636,17 +5669,17 @@ mod tests {
         let mut table = make_table();
         table.ante_mode = ANTE_MODE_BBA;
         table.ante_amount = 20;
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         let mut events = vec![];
 
         // BBA 模式：仅 bb_seat=1 投 ante
         collect_ante(&mut table, 1, &mut events).unwrap();
         assert_eq!(table.pot, 20);
-        assert_eq!(table.seats[0].stack, 1000); // SB 不投 ante
-        assert_eq!(table.seats[1].stack, 980); // BB 投 ante
+        assert_eq!(table.seats[0].stack(), 1000); // SB 不投 ante
+        assert_eq!(table.seats[1].stack(), 980); // BB 投 ante
         assert_eq!(
             events
                 .iter()
@@ -5660,8 +5693,8 @@ mod tests {
     fn test_collect_ante_none_mode() {
         let mut table = make_table();
         table.ante_mode = ANTE_MODE_NONE;
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
         let mut events = vec![];
 
         collect_ante(&mut table, 0, &mut events).unwrap();
@@ -5736,7 +5769,7 @@ mod tests {
         let mut table = make_table();
         table.rit_mode = RIT_MODE_TWICE;
         for seat_index in 0..2 {
-            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].fixture_set_player([seat_index as u8 + 1; 20]);
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
         table
@@ -5776,7 +5809,7 @@ mod tests {
             .try_into()
             .unwrap();
         for seat_index in 0..2 {
-            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].fixture_set_player([seat_index as u8 + 1; 20]);
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
         table
@@ -5784,7 +5817,7 @@ mod tests {
             .unwrap();
         let mut events = vec![];
         trigger_run_it_twice(&mut table, &mut events).unwrap();
-        start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_TURN, &mut events).unwrap();
+        start_community_reveal_phase(&mut table, 1, ROUND_TURN, &mut events).unwrap();
 
         assert_eq!(table.run_it_twice_state.shared_board_len(), 3);
         assert!(table.run_it_twice_state.second_board_suffix().is_empty());
@@ -5795,24 +5828,24 @@ mod tests {
                 .unwrap(),
             table.community_cards.to_vec()
         );
-        assert_eq!(table.reveal_token_state().assignments.len(), 2);
+        assert_eq!(table.reveal_assignments().len(), 2);
         assert_eq!(
-            table.reveal_token_state().assignments[0].target,
+            table.reveal_assignments()[0].target,
             RevealTarget::Board {
                 runout_index: 0,
                 board_position: 3
             }
         );
         assert_eq!(
-            table.reveal_token_state().assignments[1].target,
+            table.reveal_assignments()[1].target,
             RevealTarget::Board {
                 runout_index: 1,
                 board_position: 3
             }
         );
         assert_ne!(
-            table.reveal_token_state().assignments[0].encrypted_card_index,
-            table.reveal_token_state().assignments[1].encrypted_card_index
+            table.reveal_assignments()[0].encrypted_card_index,
+            table.reveal_assignments()[1].encrypted_card_index
         );
     }
 
@@ -5842,7 +5875,7 @@ mod tests {
             table.rit_mode = RIT_MODE_TWICE;
             table.community_cards = BoardCards::try_from(shared_cards.clone()).unwrap();
             for seat_index in 0..2 {
-                table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+                table.seats[seat_index].fixture_set_player([seat_index as u8 + 1; 20]);
                 table.seats[seat_index].set_status(SeatStatus::AllIn);
             }
             table
@@ -5868,7 +5901,7 @@ mod tests {
         table.community_cards =
             BoardCards::try_from((0..5).map(Card::from_index).collect::<Vec<_>>()).unwrap();
         for seat_index in 0..2 {
-            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].fixture_set_player([seat_index as u8 + 1; 20]);
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
         table
@@ -5892,27 +5925,26 @@ mod tests {
         table.deck_state.cards_dealt = 7;
         table.pot = 200;
         table.chip_pool = 2_000;
-        table.seats[0].player = [1; 20];
-        table.seats[0].stack = 900;
-        table.seats[0].total_bet = 100;
+        table.seats[0].fixture_set_player([1; 20]);
+        table.seats[0].set_stack(900).unwrap();
+        table.seats[0].fixture_set_total_bet(100);
         table.seats[0].set_status(SeatStatus::AllIn);
-        table.seats[0].hand = [Card::from_index(20), Card::from_index(21)].into();
-        table.seats[1].player = [2; 20];
-        table.seats[1].stack = 900;
-        table.seats[1].total_bet = 100;
+        table.seats[0].fixture_set_hand([Card::from_index(20), Card::from_index(21)].into());
+        table.seats[1].fixture_set_player([2; 20]);
+        table.seats[1].set_stack(900).unwrap();
+        table.seats[1].fixture_set_total_bet(100);
         table.seats[1].set_status(SeatStatus::AllIn);
-        table.seats[1].hand = [Card::from_index(30), Card::from_index(31)].into();
+        table.seats[1].fixture_set_hand([Card::from_index(30), Card::from_index(31)].into());
         table
             .enter_betting(ROUND_FLOP, BettingRound::new(100, 100), NO_SEAT, 0)
             .unwrap();
         let mut events = vec![];
 
         trigger_run_it_twice(&mut table, &mut events).unwrap();
-        start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_TURN, &mut events).unwrap();
+        start_community_reveal_phase(&mut table, 1, ROUND_TURN, &mut events).unwrap();
         assert_eq!(
             table
-                .reveal_token_state()
-                .assignments
+                .reveal_assignments()
                 .iter()
                 .map(|assignment| assignment.encrypted_card_index)
                 .collect::<Vec<_>>(),
@@ -5931,8 +5963,7 @@ mod tests {
         );
         assert_eq!(
             table
-                .reveal_token_state()
-                .assignments
+                .reveal_assignments()
                 .iter()
                 .map(|assignment| assignment.encrypted_card_index)
                 .collect::<Vec<_>>(),
@@ -5958,7 +5989,7 @@ mod tests {
 
         // The test preloads authenticated hole cards, so showdown has no remaining owner-token
         // assignments. Completion now stops at the canonical showdown-display deadline.
-        assert!(table.reveal_token_state().assignments.is_empty());
+        assert!(table.reveal_assignments().is_empty());
         check_reveal_phase_complete(&mut table, &mut events).unwrap();
         assert_eq!(table.round_state(), ROUND_SHOWDOWN);
         normalize_until_blocked(&mut table, 1_000, &mut events).unwrap();
@@ -5990,7 +6021,7 @@ mod tests {
         table.community_cards =
             BoardCards::try_from((0..3).map(Card::from_index).collect::<Vec<_>>()).unwrap();
         for seat_index in 0..2 {
-            table.seats[seat_index].player = [seat_index as u8 + 1; 20];
+            table.seats[seat_index].fixture_set_player([seat_index as u8 + 1; 20]);
             table.seats[seat_index].set_status(SeatStatus::AllIn);
         }
         table
@@ -6015,25 +6046,19 @@ mod tests {
 
         assert_eq!(table.community_cards.len(), 4);
         assert_eq!(table.run_it_twice_state.second_board_len(), 4);
-        assert_eq!(table.reveal_token_state().reveal_phase, REVEAL_PHASE_RIVER);
-        assert_eq!(table.reveal_token_state().assignments.len(), 2);
+        assert_eq!(table.reveal_phase(), REVEAL_PHASE_RIVER);
+        assert_eq!(table.reveal_assignments().len(), 2);
+        assert_eq!(table.reveal_assignments()[0].encrypted_card_index, 0);
         assert_eq!(
-            table.reveal_token_state().assignments[0].encrypted_card_index,
-            0
-        );
-        assert_eq!(
-            table.reveal_token_state().assignments[0].target,
+            table.reveal_assignments()[0].target,
             RevealTarget::Board {
                 runout_index: 0,
                 board_position: 4
             }
         );
+        assert_eq!(table.reveal_assignments()[1].encrypted_card_index, 1);
         assert_eq!(
-            table.reveal_token_state().assignments[1].encrypted_card_index,
-            1
-        );
-        assert_eq!(
-            table.reveal_token_state().assignments[1].target,
+            table.reveal_assignments()[1].target,
             RevealTarget::Board {
                 runout_index: 1,
                 board_position: 4
@@ -6091,16 +6116,16 @@ mod tests {
         .unwrap();
         table.pot = 200;
         table.chip_pool = 2_000;
-        table.seats[0].player = [1; 20];
-        table.seats[0].stack = 900;
-        table.seats[0].total_bet = 100;
+        table.seats[0].fixture_set_player([1; 20]);
+        table.seats[0].set_stack(900).unwrap();
+        table.seats[0].fixture_set_total_bet(100);
         table.seats[0].set_status(SeatStatus::AllIn);
-        table.seats[0].hand = [Card::new(0, 14), Card::new(1, 14)].into();
-        table.seats[1].player = [2; 20];
-        table.seats[1].stack = 900;
-        table.seats[1].total_bet = 100;
+        table.seats[0].fixture_set_hand([Card::new(0, 14), Card::new(1, 14)].into());
+        table.seats[1].fixture_set_player([2; 20]);
+        table.seats[1].set_stack(900).unwrap();
+        table.seats[1].fixture_set_total_bet(100);
         table.seats[1].set_status(SeatStatus::AllIn);
-        table.seats[1].hand = [Card::new(0, 13), Card::new(1, 13)].into();
+        table.seats[1].fixture_set_hand([Card::new(0, 13), Card::new(1, 13)].into());
         table
     }
 
@@ -6113,8 +6138,8 @@ mod tests {
 
         assert_eq!(table.round_state(), ROUND_WAITING);
         assert!(!table.run_it_twice_state.is_active());
-        assert_eq!(table.seats[0].stack, 1_000);
-        assert_eq!(table.seats[1].stack, 1_000);
+        assert_eq!(table.seats[0].stack(), 1_000);
+        assert_eq!(table.seats[1].stack(), 1_000);
         assert!(events.iter().any(|event| matches!(
             event,
             TexasPokerEvent::SettlementPlanCommitted {
@@ -6130,8 +6155,8 @@ mod tests {
     #[test]
     fn settlement_reset_failure_leaves_table_and_events_unchanged() {
         let mut table = complete_rit_showdown_table();
-        table.seats[0].pending_addon = u64::MAX;
-        table.seats[1].pending_addon = 1;
+        table.seats[0].set_pending_addon(u64::MAX).unwrap();
+        table.seats[1].set_pending_addon(1).unwrap();
         let before = table.clone();
         let mut events = vec![];
 

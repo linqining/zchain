@@ -165,6 +165,18 @@ impl AdminAuthorizationBinding {
             receipt_digest: digest_to_m31_limbs(self.receipt_digest),
         }
     }
+
+    /// Full canonical authorization-request digest.
+    #[must_use]
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request_digest
+    }
+
+    /// Full verifier-issued successful-receipt digest.
+    #[must_use]
+    pub const fn receipt_digest(&self) -> [u8; 32] {
+        self.receipt_digest
+    }
 }
 
 fn hash256(domain: &[u8], payload: &[u8]) -> [u8; 32] {

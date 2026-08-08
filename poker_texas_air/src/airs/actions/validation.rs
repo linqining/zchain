@@ -281,7 +281,7 @@ pub(crate) fn validate_check(
     let pre_round = tables.pre.betting_round().expect("mid-round checked");
     let outcome = derive_betting_outcome(&tables.pre, &tables.post, 0, "check")?;
     if air.input.current_bet != pre_round.current_bet
-        || air.input.seat_bet != pre_seat.bet
+        || air.input.seat_bet != pre_seat.bet()
         || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
@@ -320,17 +320,17 @@ pub(crate) fn validate_call(
     let pre_seat = seat(&tables.pre, air.input.seat_index, "call")?;
     let post_seat = seat(&tables.post, air.input.seat_index, "call")?;
     let pre_round = tables.pre.betting_round().expect("mid-round checked");
-    let call_amount = pre_round.process_call(pre_seat.bet, pre_seat.stack);
+    let call_amount = pre_round.process_call(pre_seat.bet(), pre_seat.stack());
     let outcome = derive_betting_outcome(&tables.pre, &tables.post, call_amount, "call")?;
     let action_post_bet = pre_seat
-        .bet
+        .bet()
         .checked_add(call_amount)
-        .ok_or_else(|| TexasAirError::SpecViolation("call: action seat.bet overflow".into()))?;
+        .ok_or_else(|| TexasAirError::SpecViolation("call: action seat.bet() overflow".into()))?;
     if air.input.call_amount != call_amount
         || air.input.pre_current_bet != pre_round.current_bet
-        || air.input.pre_seat_bet != pre_seat.bet
-        || air.input.pre_seat_stack != pre_seat.stack
-        || air.input.pre_seat_total_bet != pre_seat.total_bet
+        || air.input.pre_seat_bet != pre_seat.bet()
+        || air.input.pre_seat_stack != pre_seat.stack()
+        || air.input.pre_seat_total_bet != pre_seat.total_bet()
         || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
@@ -350,13 +350,13 @@ pub(crate) fn validate_call(
         tables.post.round_state(),
         tables.pre.pot,
         tables.post.pot,
-        post_seat.stack,
+        post_seat.stack(),
         action_post_bet,
         post_seat.is_all_in(),
-        pre_seat.bet,
-        pre_seat.stack,
-        post_seat.total_bet,
-        pre_seat.total_bet,
+        pre_seat.bet(),
+        pre_seat.stack(),
+        post_seat.total_bet(),
+        pre_seat.total_bet(),
     );
     validate_row(public_inputs, &row.to_vec(), "call")
 }
@@ -380,11 +380,11 @@ pub(crate) fn validate_raise(
     let action_delta = air
         .input
         .raise_to
-        .checked_sub(pre_seat.bet)
+        .checked_sub(pre_seat.bet())
         .ok_or_else(|| TexasAirError::SpecViolation("raise: action bet decreased".into()))?;
     let mut action_round = pre_round;
     action_round
-        .process_raise(air.input.raise_to, pre_seat.bet, pre_seat.stack)
+        .process_raise(air.input.raise_to, pre_seat.bet(), pre_seat.stack())
         .map_err(|error| {
             TexasAirError::SpecViolation(format!(
                 "raise: cannot reconstruct action-round state: {error}"
@@ -393,9 +393,9 @@ pub(crate) fn validate_raise(
     let outcome = derive_betting_outcome(&tables.pre, &tables.post, action_delta, "raise")?;
     if air.input.min_raise != pre_round.min_raise
         || air.input.pre_current_bet != pre_round.current_bet
-        || air.input.pre_seat_stack != pre_seat.stack
-        || air.input.pre_seat_bet != pre_seat.bet
-        || air.input.pre_seat_total_bet != pre_seat.total_bet
+        || air.input.pre_seat_stack != pre_seat.stack()
+        || air.input.pre_seat_bet != pre_seat.bet()
+        || air.input.pre_seat_total_bet != pre_seat.total_bet()
         || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
@@ -415,12 +415,12 @@ pub(crate) fn validate_raise(
         tables.post.round_state(),
         tables.pre.pot,
         tables.post.pot,
-        pre_seat.stack,
-        pre_seat.bet,
-        pre_seat.total_bet,
-        post_seat.stack,
+        pre_seat.stack(),
+        pre_seat.bet(),
+        pre_seat.total_bet(),
+        post_seat.stack(),
         air.input.raise_to,
-        post_seat.total_bet,
+        post_seat.total_bet(),
         action_round.current_bet,
         action_round.min_raise,
         post_seat.is_all_in(),
@@ -442,12 +442,12 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
     let post_seat = seat(&tables.post, air.input.seat_index, "bet")?;
     let pre_round = tables.pre.betting_round().expect("mid-round checked");
     let action_post_bet = pre_seat
-        .bet
+        .bet()
         .checked_add(air.input.amount)
-        .ok_or_else(|| TexasAirError::SpecViolation("bet: action seat.bet overflow".into()))?;
+        .ok_or_else(|| TexasAirError::SpecViolation("bet: action seat.bet() overflow".into()))?;
     let mut action_round = pre_round;
     action_round
-        .process_raise(action_post_bet, pre_seat.bet, pre_seat.stack)
+        .process_raise(action_post_bet, pre_seat.bet(), pre_seat.stack())
         .map_err(|error| {
             TexasAirError::SpecViolation(format!(
                 "bet: cannot reconstruct action-round state: {error}"
@@ -456,9 +456,9 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
     let outcome = derive_betting_outcome(&tables.pre, &tables.post, air.input.amount, "bet")?;
     if air.input.pre_current_bet != pre_round.current_bet
         || air.input.pre_min_raise != pre_round.min_raise
-        || air.input.pre_seat_bet != pre_seat.bet
-        || air.input.pre_seat_stack != pre_seat.stack
-        || air.input.pre_seat_total_bet != pre_seat.total_bet
+        || air.input.pre_seat_bet != pre_seat.bet()
+        || air.input.pre_seat_stack != pre_seat.stack()
+        || air.input.pre_seat_total_bet != pre_seat.total_bet()
         || air.input.outcome != outcome
     {
         return Err(TexasAirError::SpecViolation(
@@ -479,11 +479,11 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
         tables.pre.pot,
         tables.post.pot,
         action_post_bet,
-        pre_seat.bet,
-        pre_seat.stack,
-        post_seat.stack,
-        pre_seat.total_bet,
-        post_seat.total_bet,
+        pre_seat.bet(),
+        pre_seat.stack(),
+        post_seat.stack(),
+        pre_seat.total_bet(),
+        post_seat.total_bet(),
     );
     validate_row(public_inputs, &row.to_vec(), "bet")
 }
@@ -531,7 +531,7 @@ pub(crate) fn validate_auto_fold(
         .saturating_add(u64::from(tables.pre.timeout_config.betting_timeout_ms));
     if air.input.pre_betting_started_at != pre_timestamps.betting_started_at
         || air.input.betting_timeout_ms != u64::from(tables.pre.timeout_config.betting_timeout_ms)
-        || air.input.pre_time_bank_ms != u64::from(pre_seat.time_bank_ms)
+        || air.input.pre_time_bank_ms != u64::from(pre_seat.time_bank_ms())
         || air.input.pre_betting_started_at == 0
         || air.input.pre_time_bank_ms != 0
         || air.input.current_time < deadline
@@ -642,7 +642,7 @@ pub(crate) fn validate_kick_player(
     let expected_post_pot = canonical
         .pre
         .pot
-        .checked_add(pre_seat.bet)
+        .checked_add(pre_seat.bet())
         .ok_or_else(|| TexasAirError::SpecViolation("kick_player: pot overflow".into()))?;
     let expected_version = u64::from(canonical.pre.call_seq)
         .checked_add(1)
@@ -669,7 +669,7 @@ pub(crate) fn validate_kick_player(
                     canonical.pre.round_state()
                         == poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
                         && canonical.pre.pot == 0
-                        && pre_seat.bet == 0
+                        && pre_seat.bet() == 0
                 }
                 crate::airs::composition::SettlementKind::None
                 | crate::airs::composition::SettlementKind::Showdown => false,
@@ -689,12 +689,12 @@ pub(crate) fn validate_kick_player(
     let input = KickPlayerInput {
         seat_index: args.seat_index,
         refund: pre_seat
-            .stack
-            .checked_add(pre_seat.pending_addon)
+            .stack()
+            .checked_add(pre_seat.pending_addon())
             .ok_or_else(|| TexasAirError::SpecViolation("kick_player refund overflow".into()))?,
-        pre_stack: pre_seat.stack,
-        pre_pending_addon: pre_seat.pending_addon,
-        kicked_bet: pre_seat.bet,
+        pre_stack: pre_seat.stack(),
+        pre_pending_addon: pre_seat.pending_addon(),
+        kicked_bet: pre_seat.bet(),
         version_increment,
         reset_cascade,
         authorization: AdminAuthorizationBinding::verify_table_creator(

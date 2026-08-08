@@ -280,6 +280,37 @@ where
     })
 }
 
+/// Issue one receipt after the caller has verified a heterogeneous tagged batch proof.
+///
+/// This constructor is crate-private because the proof verification and the opaque receipt
+/// issuance must remain one operation at the public API boundary.
+pub(crate) fn issue_tagged_batch_receipt(
+    task: &crate::prove_task::ProveTask,
+    proof_commitments: Vec<FieldElement>,
+    log_size: u32,
+    num_columns: usize,
+) -> TexasAirResult<VerificationReceipt> {
+    crate::orchestrator::validate_full_dispatch_task(task)?;
+    Ok(VerificationReceipt {
+        kind: task.method_kind,
+        pre_state_root: crate::state_root::compute_state_root(&task.pre_table)?,
+        post_state_root: crate::state_root::compute_state_root(&task.post_table)?,
+        table_id: task.table_id,
+        hand_id: task.hand_id,
+        call_seq: task.call_seq,
+        pre_version: u64::from(task.pre_table.call_seq),
+        post_version: u64::from(task.post_table.call_seq),
+        dispatch_call_digest: crate::prove_task::dispatch_call_digest(
+            &task.context,
+            &task.selector(),
+            &task.raw_args,
+        )?,
+        proof_commitments,
+        log_size,
+        num_columns,
+    })
+}
+
 /// A sequence of natively verified method proofs with checked metadata continuity.
 ///
 /// Construction validates that all receipts belong to the same table and hand,

@@ -32,9 +32,7 @@
 //! 数据。Orchestrator 已为这 6 个方法接线 trace 构造（见
 //! `poker_texas_air::orchestrator`），待 crypto 数据构造器就绪后即可纳入 runner。
 
-use blstrs::G1Projective;
 use borsh::BorshSerialize;
-use group::Group;
 
 use poker_l1::Address;
 use poker_l1::object_model::ObjectID;
@@ -42,7 +40,6 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     AddonArgs, CreateTableArgs, JoinTableArgs, LeaveTableArgs, RebuyArgs, selectors,
 };
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
-use poker_protocol::crypto::types::ECPoint;
 
 use crate::contracts::TexasPokerPlugin;
 use crate::plugin::{ContractPlugin, PluginError};
@@ -115,16 +112,13 @@ impl HandRunner {
 
         // ===== Step 1-2: join_table × 2 =====
         for (idx, &player) in self.players.iter().enumerate() {
-            let secret = poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(
-                idx as u64 + 1,
-            );
+            let secret =
+                poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(idx as u64 + 1);
             let join_args = JoinTableArgs::with_key(
                 player,
                 1_000,
                 secret,
-                poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(
-                    40_000 + idx as u64,
-                ),
+                poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(40_000 + idx as u64),
             )
             .expect("deterministic runner join key proof");
             dispatch_and_prove(

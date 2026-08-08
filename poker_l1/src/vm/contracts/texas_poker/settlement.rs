@@ -559,7 +559,7 @@ pub fn derive_settlement_plan_for_boards(
     }
     validate_exposed_cards(table, boards)?;
 
-    let bets: Vec<u64> = table.seats.iter().map(|seat| seat.total_bet).collect();
+    let bets: Vec<u64> = table.seats.iter().map(Seat::total_bet).collect();
     let folded: Vec<bool> = table
         .seats
         .iter()
@@ -686,12 +686,17 @@ fn validate_exposed_cards(table: &TexasPokerTable, boards: &SettlementBoards) ->
         if !seat.is_occupied() || seat.is_folded() || seat.has_left_hand() {
             continue;
         }
-        if seat.hand.len() != 2 || seat.hand.iter().any(|card| !card.is_valid()) {
+        let hand = seat.hand().ok_or_else(|| {
+            PokerL1Error::Serialization(format!(
+                "settlement: eligible seat {seat_index} has no in-hand payload"
+            ))
+        })?;
+        if hand.len() != 2 || hand.iter().any(|card| !card.is_valid()) {
             return Err(PokerL1Error::Serialization(format!(
                 "settlement: eligible seat {seat_index} must expose exactly two valid cards"
             )));
         }
-        for card in seat.hand.iter() {
+        for card in hand.iter() {
             if !seen_hole_cards.insert(card.to_index()) {
                 return Err(PokerL1Error::Serialization(
                     "settlement: duplicate exposed hole card".into(),
@@ -811,13 +816,18 @@ fn find_winners(
             continue;
         }
         let seat = &table.seats[seat_index];
-        if seat.hand.len() != 2 {
+        let hand = seat.hand().ok_or_else(|| {
+            PokerL1Error::Serialization(format!(
+                "settlement: eligible seat {seat_index} has no in-hand payload"
+            ))
+        })?;
+        if hand.len() != 2 {
             return Err(PokerL1Error::Serialization(format!(
                 "settlement: eligible seat {seat_index} has no complete hand"
             )));
         }
         let mut cards = Vec::with_capacity(7);
-        cards.extend_from_slice(&seat.hand);
+        cards.extend_from_slice(hand);
         cards.extend_from_slice(board);
         let rank = evaluate_best(&cards);
         ranks[seat_index] = Some(rank);
@@ -915,14 +925,14 @@ mod tests {
             2,
         );
         for (index, stack) in [900u64, 800, 700].into_iter().enumerate() {
-            table.seats[index].player = [index as u8 + 1; 20];
-            table.seats[index].stack = stack;
-            table.seats[index].total_bet = [100, 200, 300][index];
+            table.seats[index].fixture_set_player([index as u8 + 1; 20]);
+            table.seats[index].set_stack(stack).unwrap();
+            table.seats[index].fixture_set_total_bet([100, 200, 300][index]);
             table.seats[index].set_status(SeatStatus::AllIn);
         }
-        table.seats[0].hand = [Card::new(0, 14), Card::new(1, 14)].into();
-        table.seats[1].hand = [Card::new(0, 13), Card::new(1, 13)].into();
-        table.seats[2].hand = [Card::new(0, 12), Card::new(1, 12)].into();
+        table.seats[0].fixture_set_hand([Card::new(0, 14), Card::new(1, 14)].into());
+        table.seats[1].fixture_set_hand([Card::new(0, 13), Card::new(1, 13)].into());
+        table.seats[2].fixture_set_hand([Card::new(0, 12), Card::new(1, 12)].into());
         table.pot = 600;
         table.chip_pool = 3_000;
         table.community_cards = vec![
@@ -1082,8 +1092,8 @@ mod tests {
     #[test]
     fn uncalled_outer_layer_is_returned_without_rake_or_runout_dependency() {
         let mut table = table();
-        table.seats[0].total_bet = 50;
-        table.seats[1].total_bet = 100;
+        table.seats[0].fixture_set_total_bet(50);
+        table.seats[1].fixture_set_total_bet(100);
         table.seats[2] = super::super::types::Seat::empty();
         table.pot = 150;
         table.rake_mode = RAKE_MODE_PERCENTAGE;
@@ -1123,15 +1133,15 @@ mod tests {
         let mut table = table();
         table.button = 0;
         for (seat, bet) in table.seats.iter_mut().zip([101u64, 202, 303]) {
-            seat.total_bet = bet;
+            seat.fixture_set_total_bet(bet);
         }
         table.pot = 606;
         table.rake_mode = RAKE_MODE_PERCENTAGE;
         table.rake_bps = 500;
         table.rake_cap = 29;
-        table.seats[0].hand = [Card::new(0, 2), Card::new(1, 7)].into();
-        table.seats[1].hand = [Card::new(0, 3), Card::new(1, 8)].into();
-        table.seats[2].hand = [Card::new(0, 4), Card::new(1, 9)].into();
+        table.seats[0].fixture_set_hand([Card::new(0, 2), Card::new(1, 7)].into());
+        table.seats[1].fixture_set_hand([Card::new(0, 3), Card::new(1, 8)].into());
+        table.seats[2].fixture_set_hand([Card::new(0, 4), Card::new(1, 9)].into());
 
         // Both boards play entirely from the board, so every eligible seat ties. This makes the
         // button-relative odd-chip order observable at every side-pot depth.

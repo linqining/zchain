@@ -5,16 +5,15 @@ use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::card::{BoardCards, Card};
 use poker_l1::vm::contracts::texas_poker::constants::{
-    REVEAL_PHASE_PREFLOP, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN, RIT_MODE_TWICE, ROUND_PREFLOP,
-    ROUND_SHOWDOWN, ROUND_TURN,
+    RIT_MODE_TWICE, ROUND_PREFLOP, ROUND_SHOWDOWN, ROUND_TURN,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
     SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealTarget, RevealTokenState,
-    RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealPurpose, RevealTarget,
+    RevealTokenState, RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -55,6 +54,7 @@ use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::prover::{MethodProof, prove_method};
 use poker_texas_air::public_inputs::TexasPublicInputs;
 use poker_texas_air::state_root::state_root_to_air_limbs;
+use poker_texas_air::test_support as seat_fixture;
 use poker_texas_air::trace_gen::generic_trace::gen_method_trace;
 use poker_texas_air::verifier::verify_method_against;
 use rand::rngs::OsRng;
@@ -163,14 +163,17 @@ fn fixture(
         .checked_sub(1)
         .expect("statement call sequence must be non-zero");
     table.hand_id = hand_id;
-    table.seats[0].player = [0x30; 20];
+    seat_fixture::set_player(&mut table.seats[0], [0x30; 20]);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 1_000;
-    table.seats[0].pk = ECPoint(prior_public_key);
-    table.seats[usize::from(seat_index)].player = player;
+    seat_fixture::set_stack(&mut table.seats[0], 1_000);
+    seat_fixture::set_pk(&mut table.seats[0], ECPoint(prior_public_key));
+    seat_fixture::set_player(&mut table.seats[usize::from(seat_index)], player);
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
-    table.seats[usize::from(seat_index)].stack = 1_000;
-    table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
+    seat_fixture::set_stack(&mut table.seats[usize::from(seat_index)], 1_000);
+    seat_fixture::set_pk(
+        &mut table.seats[usize::from(seat_index)],
+        ECPoint(public_key),
+    );
     table.deck_state.encrypted = input_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 | (1u16 << seat_index);
     table.sync_aggregated_pk().unwrap();
@@ -356,14 +359,17 @@ fn leave_fixture(
         .checked_sub(1)
         .expect("statement call sequence must be non-zero");
     table.hand_id = hand_id;
-    table.seats[usize::from(seat_index)].player = player;
+    seat_fixture::set_player(&mut table.seats[usize::from(seat_index)], player);
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
-    table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
+    seat_fixture::set_pk(
+        &mut table.seats[usize::from(seat_index)],
+        ECPoint(public_key),
+    );
     // Keep two canonical participants pending after the legacy completed shuffler leaves.
     // Otherwise normalization would observe an empty completed shuffle and attempt to deal a
     // hand with zero players, which is not a valid archive fixture.
     for other_seat in [0usize, 2usize] {
-        table.seats[other_seat].player = [(other_seat as u8) + 1; 20];
+        seat_fixture::set_player(&mut table.seats[other_seat], [(other_seat as u8) + 1; 20]);
         table.seats[other_seat].set_status(SeatStatus::Active);
     }
     table.deck_state.encrypted = input_cards.clone().try_into().unwrap();
@@ -556,14 +562,17 @@ fn reveal_fixture(
     table.hand_id = hand_id;
     let other_secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let other_public_key = <Bls12381Curve as Curve>::base_g() * other_secret_key;
-    table.seats[0].player = [0x70; 20];
+    seat_fixture::set_player(&mut table.seats[0], [0x70; 20]);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 1_000;
-    table.seats[0].pk = ECPoint(other_public_key);
-    table.seats[usize::from(seat_index)].player = player;
+    seat_fixture::set_stack(&mut table.seats[0], 1_000);
+    seat_fixture::set_pk(&mut table.seats[0], ECPoint(other_public_key));
+    seat_fixture::set_player(&mut table.seats[usize::from(seat_index)], player);
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
-    table.seats[usize::from(seat_index)].stack = 1_000;
-    table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
+    seat_fixture::set_stack(&mut table.seats[usize::from(seat_index)], 1_000);
+    seat_fixture::set_pk(
+        &mut table.seats[usize::from(seat_index)],
+        ECPoint(public_key),
+    );
     table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 | (1u16 << seat_index);
     table.sync_aggregated_pk().unwrap();
@@ -571,7 +580,7 @@ fn reveal_fixture(
         .enter_revealing(
             ROUND_PREFLOP,
             RevealTokenState {
-                reveal_phase: REVEAL_PHASE_PREFLOP,
+                purpose: RevealPurpose::DealHole,
                 assignments: vec![
                     RevealAssignment {
                         encrypted_card_index: 0,
@@ -662,7 +671,10 @@ fn reveal_fixture(
             let other_public_key = <Bls12381Curve as Curve>::base_g() * other_secret_key;
             let (token, proof) =
                 prove_reveal_token(&other_secret_key, &other_public_key, &encrypted_cards[0]);
-            request_table.seats[usize::from(seat_index)].pk = ECPoint(other_public_key);
+            seat_fixture::set_pk(
+                &mut request_table.seats[usize::from(seat_index)],
+                ECPoint(other_public_key),
+            );
             request_args.reveal_tokens[0] = token;
             request_args.proofs[0] = proof;
         }
@@ -677,7 +689,7 @@ fn reveal_fixture(
     let binding = PrecompileCallBinding::verify_reveal_tokens(&request).unwrap();
     let input = SubmitPlayerRevealTokensInput {
         seat_index,
-        reveal_phase: task.pre_table.reveal_token_state().reveal_phase,
+        reveal_phase: task.pre_table.reveal_phase(),
         version_increment: u8::try_from(task.post_table.call_seq - task.pre_table.call_seq)
             .expect("reveal call-sequence delta should fit u8"),
         precompile: binding.air_binding(),
@@ -694,7 +706,7 @@ fn reveal_fixture(
         call_seq,
         public_inputs.pre_version,
         public_inputs.post_version,
-        u8::try_from(task.post_table.reveal_token_state().assignments.len())
+        u8::try_from(task.post_table.reveal_assignments().len())
             .expect("reveal assignment count should fit u8"),
     );
     let trace = gen_method_trace(
@@ -827,18 +839,21 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
         BoardCards::try_from((0u8..5).map(Card::from_index).collect::<Vec<_>>()).unwrap();
     table.pot = 200;
     table.chip_pool = 2_000;
-    table.seats[0].player = player0;
+    seat_fixture::set_player(&mut table.seats[0], player0);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 900;
-    table.seats[0].total_bet = 100;
+    seat_fixture::set_stack(&mut table.seats[0], 900);
+    seat_fixture::set_total_bet(&mut table.seats[0], 100);
     table.seats[0].set_status(SeatStatus::AllIn);
-    table.seats[0].hand = [Card::from_index(20), Card::from_index(21)].into();
-    table.seats[1].player = player1;
+    seat_fixture::set_hand(
+        &mut table.seats[0],
+        [Card::from_index(20), Card::from_index(21)].into(),
+    );
+    seat_fixture::set_player(&mut table.seats[1], player1);
     table.seats[1].set_status(SeatStatus::Active);
-    table.seats[1].stack = 900;
-    table.seats[1].total_bet = 100;
+    seat_fixture::set_stack(&mut table.seats[1], 900);
+    seat_fixture::set_total_bet(&mut table.seats[1], 100);
     table.seats[1].set_status(SeatStatus::AllIn);
-    table.seats[1].pk = ECPoint(public_key);
+    seat_fixture::set_pk(&mut table.seats[1], ECPoint(public_key));
     table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
@@ -854,7 +869,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
         .enter_revealing(
             ROUND_SHOWDOWN,
             RevealTokenState {
-                reveal_phase: REVEAL_PHASE_SHOWDOWN,
+                purpose: RevealPurpose::ShowdownOwner,
                 assignments: (0u8..2)
                     .map(|encrypted_card_index| RevealAssignment {
                         encrypted_card_index,
@@ -887,7 +902,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     assert_eq!(task.post_table.call_seq - task.pre_table.call_seq, 1);
     assert_eq!(task.post_table.pot, 200);
     assert_eq!(task.post_table.round_state(), ROUND_SHOWDOWN);
-    assert!(task.post_table.reveal_token_state().assignments.is_empty());
+    assert!(task.post_table.reveal_assignments().is_empty());
 
     let mut replayed = task.pre_table.clone();
     let result = texas_dispatch::dispatch(
@@ -939,13 +954,13 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     );
     table.call_seq = call_seq - 1;
     table.hand_id = hand_id;
-    table.seats[0].player = [0x52; 20];
+    seat_fixture::set_player(&mut table.seats[0], [0x52; 20]);
     table.seats[0].set_status(SeatStatus::Active);
-    table.seats[0].stack = 1_000;
-    table.seats[1].player = player;
+    seat_fixture::set_stack(&mut table.seats[0], 1_000);
+    seat_fixture::set_player(&mut table.seats[1], player);
     table.seats[1].set_status(SeatStatus::Active);
-    table.seats[1].stack = 1_000;
-    table.seats[1].pk = ECPoint(public_key);
+    seat_fixture::set_stack(&mut table.seats[1], 1_000);
+    seat_fixture::set_pk(&mut table.seats[1], ECPoint(public_key));
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
     table.deck_state.decrypted_cards = readable_cards
@@ -963,7 +978,7 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
                 accumulated_deck: None,
             },
             RevealTokenState {
-                reveal_phase: REVEAL_PHASE_TURN,
+                purpose: RevealPurpose::Board,
                 assignments: vec![],
             },
             epoch_ms,

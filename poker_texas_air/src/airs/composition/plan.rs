@@ -626,14 +626,14 @@ fn derive_seat_update(
     }
 
     let post_stack = seat
-        .stack
+        .stack()
         .checked_sub(*amount)
         .ok_or_else(|| TexasAirError::SpecViolation("seat-update stack debit underflow".into()))?;
     let post_bet = seat
-        .bet
+        .bet()
         .checked_add(*amount)
         .ok_or_else(|| TexasAirError::SpecViolation("seat-update bet credit overflow".into()))?;
-    let post_total_bet = seat.total_bet.checked_add(*amount).ok_or_else(|| {
+    let post_total_bet = seat.total_bet().checked_add(*amount).ok_or_else(|| {
         TexasAirError::SpecViolation("seat-update total_bet credit overflow".into())
     })?;
     let post_all_in = seat.is_all_in() || (*amount > 0 && post_stack == 0);
@@ -660,13 +660,13 @@ fn derive_seat_update(
     Ok(SeatUpdatePlan {
         active: true,
         seat_index,
-        pre_stack: seat.stack,
+        pre_stack: seat.stack(),
         post_stack,
         stack_debit: *amount,
-        pre_bet: seat.bet,
+        pre_bet: seat.bet(),
         post_bet,
         bet_credit: *amount,
-        pre_total_bet: seat.total_bet,
+        pre_total_bet: seat.total_bet(),
         post_total_bet,
         total_bet_credit: *amount,
         pre_folded: seat.is_folded(),
@@ -698,7 +698,7 @@ fn derive_bet_collection(
     }
     let mut seat_bets = [0u64; COMPOSITION_SEATS];
     for (index, seat) in pre.seats.iter().enumerate() {
-        seat_bets[index] = seat.bet;
+        seat_bets[index] = seat.bet();
     }
     if seat_update.active {
         seat_bets[usize::from(seat_update.seat_index)] = seat_update.post_bet;
@@ -845,8 +845,8 @@ fn derive_round_advance(
             active: true,
             pre_round_state: *from_round,
             post_round_state: *to_round,
-            pre_reveal_phase: pre.reveal_token_state().reveal_phase,
-            post_reveal_phase: post.reveal_token_state().reveal_phase,
+            pre_reveal_phase: pre.reveal_phase(),
+            post_reveal_phase: post.reveal_phase(),
             pre_current_turn: pre.current_turn(),
             post_current_turn: NO_CURRENT_TURN,
             post_pot: *pot,
@@ -1012,12 +1012,13 @@ fn derive_settlement(
         TexasAirError::SpecViolation("no-showdown award exceeds gross pot".into())
     })?;
     let winner_after_credit = pre_winner
-        .stack
+        .stack()
         .checked_add(*award)
         .and_then(|value| value.checked_add(reset.addon_credits[winner_index]))
         .ok_or_else(|| TexasAirError::SpecViolation("winner reset stack overflow".into()))?;
     if post_winner.is_occupied() {
-        if post_winner.player != pre_winner.player || post_winner.stack != winner_after_credit {
+        if post_winner.player() != pre_winner.player() || post_winner.stack() != winner_after_credit
+        {
             return Err(TexasAirError::SpecViolation(
                 "no-showdown award/addon credit does not match winner post stack".into(),
             ));
@@ -1173,7 +1174,7 @@ fn derive_reset_projection(
     let mut addon_refunds = [0u64; COMPOSITION_SEATS];
     for index in 0..COMPOSITION_SEATS.min(pre.seats.len()) {
         if kicked[index] && addon_credits[index] == 0 {
-            addon_refunds[index] = pre.seats[index].pending_addon;
+            addon_refunds[index] = pre.seats[index].pending_addon();
         }
     }
     let sum = |values: &[u64; COMPOSITION_SEATS], name: &str| {
@@ -1209,7 +1210,7 @@ fn derive_reset_projection(
     }
     let pending_total = |table: &TexasPokerTable| {
         table.seats.iter().try_fold(0u64, |total, seat| {
-            total.checked_add(seat.pending_addon).ok_or_else(|| {
+            total.checked_add(seat.pending_addon()).ok_or_else(|| {
                 TexasAirError::SpecViolation("reset pending-addon sum overflow".into())
             })
         })
@@ -1229,8 +1230,8 @@ fn derive_reset_projection(
     let mut post_pending_addons = [0u64; COMPOSITION_SEATS];
     let mut post_occupied = [false; COMPOSITION_SEATS];
     for (index, seat) in post.seats.iter().enumerate() {
-        post_stacks[index] = seat.stack;
-        post_pending_addons[index] = seat.pending_addon;
+        post_stacks[index] = seat.stack();
+        post_pending_addons[index] = seat.pending_addon();
         post_occupied[index] = seat.is_occupied();
     }
     Ok(ResetProjection {
@@ -1313,6 +1314,7 @@ fn hash_bytes(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support as seat_fixture;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
     use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
@@ -1331,8 +1333,8 @@ mod tests {
             100,
         );
         for (index, seat) in table.seats.iter_mut().enumerate() {
-            seat.player = [index as u8 + 1; 20];
-            seat.stack = 1_000;
+            seat_fixture::set_player(seat, [index as u8 + 1; 20]);
+            seat_fixture::set_stack(seat, 1_000);
             seat.set_status(SeatStatus::Active);
         }
         table
@@ -1377,7 +1379,7 @@ mod tests {
         post.enter_revealing(
             poker_l1::vm::contracts::texas_poker::constants::ROUND_TURN,
             RevealTokenState {
-                reveal_phase: poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN,
+                purpose: poker_l1::vm::contracts::texas_poker::types::RevealPurpose::Board,
                 assignments: vec![],
             },
             1,
@@ -1414,15 +1416,15 @@ mod tests {
     fn native_terminal_fold_splits_collection_and_settlement() {
         let mut pre = table();
         pre.pot = 50;
-        pre.seats[0].bet = 25;
-        pre.seats[0].total_bet = 25;
-        pre.seats[1].bet = 25;
-        pre.seats[1].total_bet = 25;
+        seat_fixture::set_bet(&mut pre.seats[0], 25);
+        seat_fixture::set_total_bet(&mut pre.seats[0], 25);
+        seat_fixture::set_bet(&mut pre.seats[1], 25);
+        seat_fixture::set_total_bet(&mut pre.seats[1], 25);
         *pre.active_betting_round_mut().unwrap() = BettingRound::new(100, 25);
         pre.chip_pool = pre
             .seats
             .iter()
-            .map(|seat| seat.stack + seat.bet)
+            .map(|seat| seat.stack() + seat.bet())
             .sum::<u64>()
             + pre.pot;
         let mut post = pre.clone();

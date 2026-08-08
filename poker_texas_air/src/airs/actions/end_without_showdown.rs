@@ -27,7 +27,7 @@ pub const NUM_COLUMNS: usize = 34;
 pub struct EndWithoutShowdownInput {
     /// The only non-folded player before reset.
     pub winner_seat: u8,
-    /// Sum of live `seat.bet` values collected by the terminal fold.
+    /// Sum of live `seat.bet()` values collected by the terminal fold.
     pub collected_bets: u64,
     /// Pot after live bets are collected and before rake.
     pub gross_pot: u64,
@@ -130,7 +130,7 @@ pub(crate) fn derive_fold_outcome(
 
     let collected_bets = pre.seats.iter().try_fold(0u64, |total, seat| {
         total
-            .checked_add(seat.bet)
+            .checked_add(seat.bet())
             .ok_or_else(|| TexasAirError::SpecViolation(format!("{method}: live bet sum overflow")))
     })?;
     let gross_pot = pre
@@ -155,14 +155,14 @@ pub(crate) fn derive_fold_outcome(
         let post_winner = post.seats.get(winner_index).ok_or_else(|| {
             TexasAirError::SpecViolation(format!("{method}: post winner seat is missing"))
         })?;
-        if !post_winner.is_occupied() || post_winner.player != pre_winner.player {
+        if !post_winner.is_occupied() || post_winner.player() != pre_winner.player() {
             return Err(TexasAirError::UnsupportedBettingTransition(format!(
                 "{method}: terminal reset removed or replaced the winner seat"
             )));
         }
         post_winner
-            .stack
-            .checked_sub(pre_winner.stack)
+            .stack()
+            .checked_sub(pre_winner.stack())
             .ok_or_else(|| {
                 TexasAirError::SpecViolation(format!("{method}: winner stack decreased"))
             })?
@@ -171,7 +171,7 @@ pub(crate) fn derive_fold_outcome(
         TexasAirError::SpecViolation(format!("{method}: winner award exceeds gross pot"))
     })?;
     let winner_after_award = pre_winner
-        .stack
+        .stack()
         .checked_add(award)
         .ok_or_else(|| TexasAirError::SpecViolation(format!("{method}: winner stack overflow")))?;
 
@@ -181,7 +181,7 @@ pub(crate) fn derive_fold_outcome(
         gross_pot,
         rake,
         award,
-        pre_winner_stack: pre_winner.stack,
+        pre_winner_stack: pre_winner.stack(),
         post_winner_stack: winner_after_award,
     }))
 }

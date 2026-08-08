@@ -1008,7 +1008,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                         "leave_with_proof seat is outside the canonical pre-table".into(),
                     )
                 })?
-                .pk;
+                .pk()
+                .copied()
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation(
+                        "leave_with_proof seat has no live Mental Poker key".into(),
+                    )
+                })?;
             let call_context = call_context(task, *seat_index, &public_inputs);
             let expected_request = LeaveDleqVerifyRequest::new(
                 call_context,
@@ -1104,7 +1110,13 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                         "fold_with_proof seat is outside the canonical pre-table".into(),
                     )
                 })?
-                .pk;
+                .pk()
+                .copied()
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation(
+                        "fold_with_proof seat has no live Mental Poker key".into(),
+                    )
+                })?;
             let expected_request = LeaveDleqVerifyRequest::new(
                 call_context(task, *seat_index, &public_inputs),
                 task.pre_table.deck_state.encrypted.to_vec(),
@@ -1184,19 +1196,17 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let version_increment = reveal_version_increment(task)?;
             let input = SubmitPlayerRevealTokensInput {
                 seat_index: *seat_index,
-                reveal_phase: task.pre_table.reveal_token_state().reveal_phase,
+                reveal_phase: task.pre_table.reveal_phase(),
                 version_increment,
                 precompile: binding.air_binding(),
                 settlement: replay_reveal_settlement_binding(task)?,
             };
-            let post_revealed_count = u8::try_from(
-                task.post_table.reveal_token_state().assignments.len(),
-            )
-            .map_err(|_| {
-                TexasAirError::SpecViolation(
-                    "submit_player_reveal_tokens assignment count exceeds u8".into(),
-                )
-            })?;
+            let post_revealed_count = u8::try_from(task.post_table.reveal_assignments().len())
+                .map_err(|_| {
+                    TexasAirError::SpecViolation(
+                        "submit_player_reveal_tokens assignment count exceeds u8".into(),
+                    )
+                })?;
             let mut row = SubmitPlayerRevealTokensRow::active(
                 &input,
                 state_root_to_air_limbs(pre_root),

@@ -103,7 +103,7 @@ pub(crate) fn derive_betting_outcome(
 
     let pre_live_bets = pre.seats.iter().try_fold(0u64, |total, seat| {
         total
-            .checked_add(seat.bet)
+            .checked_add(seat.bet())
             .ok_or_else(|| TexasAirError::SpecViolation(format!("{method}: live bet sum overflow")))
     })?;
     let collected_bets = pre_live_bets.checked_add(action_bet_delta).ok_or_else(|| {
@@ -118,7 +118,7 @@ pub(crate) fn derive_betting_outcome(
             post.pot
         )));
     }
-    if post.seats.iter().any(|seat| seat.bet != 0) {
+    if post.seats.iter().any(|seat| seat.bet() != 0) {
         return Err(TexasAirError::SpecViolation(format!(
             "{method}: completed round did not clear every live bet"
         )));

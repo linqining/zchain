@@ -18,7 +18,7 @@ use poker_l1::network::{
 use poker_texas_air::orchestrator::Orchestrator;
 
 use crate::proof_package::{ServiceProofPackage, stored_proof_metadata};
-use crate::repository::{ServiceRepository, StoredJobStatus};
+use crate::repository::{ServiceRepository, StoredJobStatus, StoredProofReference};
 use crate::{ServiceError, ServiceResult};
 
 /// Result of one fully verified package synchronization.
@@ -241,18 +241,23 @@ pub fn sync_proof_package(
         assembler.insert(chunk).map_err(network_error)?;
     }
     let bytes = assembler.finish().map_err(network_error)?;
-    let receipt = verify_downloaded_package(repository, job_id, &bytes)?;
-    repository.store_proof_package(job_id, &bytes)?;
+    let task = verify_downloaded_package(repository, job_id, &bytes)?;
+    let package_id = repository
+        .job(job_id)
+        .and_then(|job| job.proof_reference)
+        .ok_or_else(|| ServiceError::Runner("proof package job is missing reference".into()))?
+        .package_id();
+    repository.store_proof_package(package_id, &bytes)?;
 
     Ok(ProofPackageSyncReport {
         job_id,
         package_hash: manifest.package_hash,
         total_len: manifest.total_len,
         chunk_count: manifest.chunk_count,
-        method: receipt.kind().method_name(),
-        table_id: receipt.table_id(),
-        hand_id: receipt.hand_id(),
-        call_seq: receipt.call_seq(),
+        method: task.method_kind.method_name(),
+        table_id: task.table_id,
+        hand_id: task.hand_id,
+        call_seq: task.call_seq,
     })
 }
 
@@ -260,7 +265,7 @@ fn verify_downloaded_package(
     repository: &ServiceRepository,
     job_id: Hash,
     bytes: &[u8],
-) -> ServiceResult<poker_texas_air::verified_chain::VerificationReceipt> {
+) -> ServiceResult<poker_texas_air::prove_task::ProveTask> {
     let job = repository
         .job(job_id)
         .ok_or_else(|| ServiceError::Runner("proof package job not found locally".into()))?;
@@ -280,9 +285,13 @@ fn verify_downloaded_package(
     let stored = job.proof.as_ref().ok_or_else(|| {
         ServiceError::Runner("completed proof package job is missing proof metadata".into())
     })?;
+    let reference = job.proof_reference.ok_or_else(|| {
+        ServiceError::Runner("completed proof package job is missing proof reference".into())
+    })?;
 
     let package = ServiceProofPackage::from_bytes(bytes)?;
-    let expected = stored_proof_metadata(package.task())?;
+    let task = package.task_at(reference.row_index())?;
+    let expected = stored_proof_metadata(&task)?;
     if stored.task_digest != expected.task_digest
         || stored.pre_state_root != expected.pre_state_root
         || stored.post_state_root != expected.post_state_root
@@ -292,21 +301,39 @@ fn verify_downloaded_package(
         ));
     }
 
-    let receipt = Orchestrator::verify_archived_task_parts(
-        package.task(),
-        package.archive(),
-        package.composition_archive(),
-    )
-    .map_err(|error| ServiceError::Prover(error.to_string()))?;
-    if receipt.table_id() != job.table_id
-        || receipt.hand_id() != result.hand_id
-        || receipt.call_seq() != result.call_seq
+    match reference {
+        StoredProofReference::Single { .. } => {
+            let (single_task, archive, composition) = package.single_parts().ok_or_else(|| {
+                ServiceError::Prover("single reference targets tagged package".into())
+            })?;
+            Orchestrator::verify_archived_task_parts(single_task, archive, composition)
+                .map_err(|error| ServiceError::Prover(error.to_string()))?;
+        }
+        StoredProofReference::Tagged {
+            batch_id,
+            row_count,
+            ..
+        } => {
+            if package.batch_id() != Some(batch_id) || package.row_count()? != row_count {
+                return Err(ServiceError::Prover(
+                    "tagged reference scope differs from downloaded package".into(),
+                ));
+            }
+            Orchestrator::verify_tagged_package(package.tagged().ok_or_else(|| {
+                ServiceError::Prover("tagged reference targets single package".into())
+            })?)
+            .map_err(|error| ServiceError::Prover(error.to_string()))?;
+        }
+    }
+    if task.table_id != job.table_id
+        || task.hand_id != result.hand_id
+        || task.call_seq != result.call_seq
     {
         return Err(ServiceError::Prover(
             "downloaded proof receipt does not match local completed result".into(),
         ));
     }
-    Ok(receipt)
+    Ok(task)
 }
 
 fn network_error(error: poker_l1::error::PokerL1Error) -> ServiceError {

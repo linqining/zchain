@@ -16,8 +16,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch as texas_dispatch;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
 use poker_texas_air::airs::composition::{
-    ArchivedCompositionBatchProofBundle, ArchivedCompositionProofBundle,
-    MAX_COMPOSITION_BATCH_TASKS, prove_composition_batch, supports_composite_proof,
+    ArchivedCompositionProofBundle, supports_composite_proof,
 };
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
 use poker_texas_air::dual_proof::dual_proof_from_archived;
@@ -27,6 +26,7 @@ use poker_texas_air::outer_aggregate::{
 };
 use poker_texas_air::proof_archive::ArchivedMethodProof;
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
+use poker_texas_air::tagged_method::ArchivedTaggedBatchProofPackage;
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
 
 use crate::plugin::{DispatchOutcome, PluginError, PluginResult, PluginStats};
@@ -48,10 +48,10 @@ pub struct TexasPokerPlugin {
     proved_archives: Vec<poker_texas_air::proof_archive::ArchivedMethodProof>,
     /// First task index in the currently active hand segment.
     segment_start: usize,
-    /// Composite tasks whose method proofs are complete but Stage proofs are deferred.
-    deferred_composition_tasks: Vec<ProveTask>,
-    /// Verified tagged Stage batches produced for deferred composite transitions.
-    composition_batches: Vec<ArchivedCompositionBatchProofBundle>,
+    /// Composite tasks waiting for one heterogeneous method + Stage proof package.
+    deferred_tagged_tasks: Vec<ProveTask>,
+    /// Verified two-proof packages produced for completed composite batches.
+    tagged_batches: Vec<ArchivedTaggedBatchProofPackage>,
 }
 
 impl TexasPokerPlugin {
@@ -66,8 +66,8 @@ impl TexasPokerPlugin {
             proved_tasks: Vec::new(),
             proved_archives: Vec::new(),
             segment_start: 0,
-            deferred_composition_tasks: Vec::new(),
-            composition_batches: Vec::new(),
+            deferred_tagged_tasks: Vec::new(),
+            tagged_batches: Vec::new(),
         }
     }
 
@@ -91,8 +91,8 @@ impl TexasPokerPlugin {
             proved_tasks: Vec::new(),
             proved_archives: Vec::new(),
             segment_start: 0,
-            deferred_composition_tasks: Vec::new(),
-            composition_batches: Vec::new(),
+            deferred_tagged_tasks: Vec::new(),
+            tagged_batches: Vec::new(),
         }
     }
 
@@ -130,7 +130,9 @@ impl TexasPokerPlugin {
         let mut contributor_mask = 0u16;
         for (seat_index, seat) in self.table.seats.iter().enumerate() {
             if seat.is_occupied()
-                && !poker_l1::vm::contracts::texas_poker::utils::g1_is_identity(&seat.pk.0)
+                && seat.pk().is_some_and(|pk| {
+                    !poker_l1::vm::contracts::texas_poker::utils::g1_is_identity(&pk.0)
+                })
             {
                 contributor_mask |= 1u16 << seat_index;
             }
@@ -157,9 +159,9 @@ impl TexasPokerPlugin {
     /// trait method. The prove counter advances only after proof generation,
     /// native verification, archive encoding, and receipt insertion all succeed.
     pub fn prove_task_archived(&mut self, task: &ProveTask) -> PluginResult<ArchivedProvenTask> {
-        if !self.deferred_composition_tasks.is_empty() {
+        if !self.deferred_tagged_tasks.is_empty() {
             return Err(PluginError::Precondition(
-                "cannot use per-task composition proving while a batch is pending".into(),
+                "cannot use per-task proving while a tagged batch is pending".into(),
             ));
         }
         if task.pre_table.hand_id != task.post_table.hand_id {
@@ -176,70 +178,103 @@ impl TexasPokerPlugin {
         Ok(archived)
     }
 
-    /// Prove one method immediately while collecting composite Stage transitions for one later
-    /// one 1024-row tagged-union Stage batch proof.
+    /// Queue a composite transition without starting a per-task prover.
     ///
-    /// Non-composite methods keep the ordinary complete proving path. Composite methods are not
-    /// durable-package complete until [`Self::finalize_composition_batches`] succeeds.
-    pub fn prove_task_deferred_components(&mut self, task: &ProveTask) -> PluginResult<ProvenTask> {
+    /// A later [`Self::finalize_tagged_batches`] call proves the entire contiguous run with one
+    /// narrow heterogeneous method proof and one tagged Stage proof.
+    pub fn queue_tagged_batch_task(&mut self, task: &ProveTask) -> PluginResult<()> {
         if !supports_composite_proof(task.method_kind) {
-            self.finalize_composition_batches()?;
-            return Ok(self.prove_task_archived(task)?.summary);
+            return Err(PluginError::Precondition(format!(
+                "method {} is outside the tagged composition pipeline",
+                task.method_kind.method_name()
+            )));
         }
         if task.pre_table.hand_id != task.post_table.hand_id {
             return Err(PluginError::Precondition(
                 "composite batch task must not cross a hand boundary".into(),
             ));
         }
-        if let Some(previous) = self.deferred_composition_tasks.last() {
+        if let Some(previous) = self.deferred_tagged_tasks.last() {
             let expected_call_seq = previous.call_seq.checked_add(1).ok_or_else(|| {
-                PluginError::Precondition("deferred composition call_seq overflow".into())
+                PluginError::Precondition("deferred tagged batch call_seq overflow".into())
             })?;
             if task.table_id != previous.table_id
                 || task.hand_id != previous.hand_id
                 || task.call_seq != expected_call_seq
+                || task.pre_table != previous.post_table
             {
-                self.finalize_composition_batches()?;
+                return Err(PluginError::Precondition(
+                    "tagged batch tasks must be exact-state contiguous".into(),
+                ));
             }
         }
-        let archived = self
-            .orchestrator
-            .prove_verify_and_archive_method_only(task)
-            .map_err(|error| PluginError::Prover(error.to_string()))?;
-        self.proved_tasks.push(task.clone());
-        self.proved_archives.push(archived.archive);
-        self.deferred_composition_tasks.push(task.clone());
-        self.prove_count += 1;
-        Ok(archived.summary)
+        self.deferred_tagged_tasks.push(task.clone());
+        Ok(())
     }
 
-    /// Finalize all collected composite transitions as one tagged Stage proof per chunk.
+    /// Finalize all queued transitions as two-proof tagged packages.
     ///
-    /// The generated bundles are immediately replay-verified before pending tasks are cleared.
-    /// On any error, the pending task list remains available for a retry.
-    pub fn finalize_composition_batches(&mut self) -> PluginResult<usize> {
-        if self.deferred_composition_tasks.is_empty() {
+    /// Orchestrator and plugin histories are committed only after every chunk succeeds. On error,
+    /// the original pending list and receipt chain remain available for a retry.
+    pub fn finalize_tagged_batches(&mut self) -> PluginResult<usize> {
+        if self.deferred_tagged_tasks.is_empty() {
             return Ok(0);
         }
+        let mut staged_orchestrator = self.orchestrator.clone();
         let mut completed = Vec::new();
         for tasks in self
-            .deferred_composition_tasks
-            .chunks(MAX_COMPOSITION_BATCH_TASKS)
+            .deferred_tagged_tasks
+            .chunks(poker_texas_air::prove_task::MAX_METHOD_BATCH_ROWS)
         {
-            let bundle = prove_composition_batch(tasks)
+            let package = staged_orchestrator
+                .prove_verify_and_accept_tagged_batch(tasks)
                 .map_err(|error| PluginError::Prover(error.to_string()))?;
-            completed.push(bundle);
+            completed.push(package);
         }
         let count = completed.len();
-        self.composition_batches.extend(completed);
-        self.deferred_composition_tasks.clear();
+        self.orchestrator = staged_orchestrator;
+        self.prove_count = self
+            .prove_count
+            .checked_add(
+                u64::try_from(self.deferred_tagged_tasks.len()).map_err(|_| {
+                    PluginError::Precondition("tagged task count does not fit u64".into())
+                })?,
+            )
+            .ok_or_else(|| PluginError::Precondition("prove counter overflow".into()))?;
+        self.tagged_batches.extend(completed);
+        self.deferred_tagged_tasks.clear();
         Ok(count)
     }
 
-    /// Verified throughput-oriented composition batches retained by this plugin instance.
+    /// Verified throughput-oriented two-proof packages retained by this plugin instance.
     #[must_use]
-    pub fn composition_batches(&self) -> &[ArchivedCompositionBatchProofBundle] {
-        &self.composition_batches
+    pub fn tagged_batches(&self) -> &[ArchivedTaggedBatchProofPackage] {
+        &self.tagged_batches
+    }
+
+    /// Canonical composite tasks currently waiting for one shared package.
+    #[must_use]
+    pub fn pending_tagged_tasks(&self) -> &[ProveTask] {
+        &self.deferred_tagged_tasks
+    }
+
+    /// Reverify and restore one self-contained tagged package without changing
+    /// persisted counters or the already recovered table snapshot.
+    pub fn restore_tagged_batch(
+        &mut self,
+        package: &ArchivedTaggedBatchProofPackage,
+    ) -> PluginResult<Vec<ProvenTask>> {
+        if !self.deferred_tagged_tasks.is_empty() {
+            return Err(PluginError::Precondition(
+                "cannot restore a completed tagged package while tasks are pending".into(),
+            ));
+        }
+        let summaries = self
+            .orchestrator
+            .restore_verified_tagged_batch(package)
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        self.tagged_batches.push(package.clone());
+        Ok(summaries)
     }
 
     /// Reverify and restore one durable proof without changing persisted counters.
@@ -425,6 +460,11 @@ impl TexasPokerPlugin {
     ///
     /// 链不连续或任一 anchored 字段/digest 不匹配时返回错误。
     pub fn verify_chain_against_consensus(&self, anchor: &ExpectedChainAnchor) -> PluginResult<()> {
+        if !self.deferred_tagged_tasks.is_empty() {
+            return Err(PluginError::Precondition(
+                "cannot verify a receipt chain while tagged tasks are pending".into(),
+            ));
+        }
         let chain = self
             .orchestrator
             .verified_chain()
@@ -476,6 +516,11 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
     }
 
     fn verify_chain(&self) -> PluginResult<()> {
+        if !self.deferred_tagged_tasks.is_empty() {
+            return Err(PluginError::Precondition(
+                "cannot verify a receipt chain while tagged tasks are pending".into(),
+            ));
+        }
         // 只检查本地 receipt 的相邻连续性（O(N) host 接受产物）。
         // 生产路径应改用 [`TexasPokerPlugin::verify_chain_against_consensus`]，
         // 传入由 `build_anchor_from_consensus` 从已认证 block/receipt 构造的 anchor，
@@ -560,7 +605,7 @@ mod tests {
             shuffle_proof,
         })
         .expect("shuffle args should encode");
-        let caller = pre_table.seats[usize::from(seat_index)].player;
+        let caller = pre_table.seats[usize::from(seat_index)].player();
         let mut post_table = pre_table;
         let result = texas_dispatch::dispatch(
             &context(caller),
@@ -609,10 +654,13 @@ mod tests {
         table.call_seq = 20;
         table.hand_id = 9;
         for (index, key) in seat_keys.into_iter().enumerate() {
-            table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
-            table.seats[index].set_status(SeatStatus::Active);
-            table.seats[index].stack = 1_000;
-            table.seats[index].pk = ECPoint(key);
+            table.seats[index] = poker_l1::vm::contracts::texas_poker::types::Seat::occupied(
+                [u8::try_from(index + 1).unwrap(); 20],
+                1_000,
+                ECPoint(key),
+                SeatStatus::Active,
+            )
+            .expect("shuffle fixture seat should be canonical");
         }
         table.deck_state.encrypted = input_cards.try_into().unwrap();
         table.deck_state.contributor_mask = 0b11;

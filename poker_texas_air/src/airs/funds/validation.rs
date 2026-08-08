@@ -150,7 +150,7 @@ pub(crate) fn validate_addon(
         })?;
     let mut row = AddonRow::active(
         &input,
-        pre_seat.pending_addon,
+        pre_seat.pending_addon(),
         tables.pre.chip_pool,
         tables.post.chip_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),
@@ -196,7 +196,7 @@ pub(crate) fn validate_rebuy(
         })?;
     let mut row = RebuyRow::active(
         &input,
-        pre_seat.stack,
+        pre_seat.stack(),
         tables.pre.chip_pool,
         tables.post.chip_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),

@@ -15,8 +15,8 @@
 //! ```
 //!
 //! 每步经 [`crate::contracts::TexasPokerPlugin`] 真实 dispatch，产出的 `ProveTask`
-//! 由 Orchestrator 立即生成并验证 method proof；连续 composite transition 在牌局结束时按
-//! Stage 批量装入四份 1024 行 proof。报告同时记录每步 dispatch/method prove 与最终 batch 耗时。
+//! 非 composite 方法仍立即生成并验证 method proof；连续 composite transition 仅入队，
+//! 在牌局结束时统一生成一份 narrow tagged method proof 和一份 tagged Stage proof。
 //!
 //! # 容错与覆盖范围
 //!
@@ -186,7 +186,7 @@ impl FullHandRunner {
                     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
                         let p_start = Instant::now();
                         let _drained_before = poker_texas_air::prove_timing::take_drain();
-                        let ok = plugin.prove_task_deferred_components(task).is_ok();
+                        let ok = plugin.prove_task_archived(task).is_ok();
                         if !ok {
                             ctx.stopped_at = Some("start_hand prove/verify failed".to_string());
                         }
@@ -362,24 +362,23 @@ impl FullHandRunner {
             "reveal_showdown",
         );
 
-        // All composite transitions after the shuffle phase are contiguous. Pack every active
-        // tagged Stage projection into one 1024-row proof instead of proving four components per
-        // dispatch. Method proofs remain immediate so the verified receipt chain is unchanged.
+        // All composite transitions after the shuffle phase are contiguous. Generate exactly one
+        // narrow tagged method proof plus one tagged Stage proof for the whole run.
         if ctx.stopped_at.is_none() {
             let p_start = Instant::now();
             let _drained_before = poker_texas_air::prove_timing::take_drain();
-            match plugin.finalize_composition_batches() {
+            match plugin.finalize_tagged_batches() {
                 Ok(batch_count) => {
                     let stage_rows = plugin
-                        .composition_batches()
+                        .tagged_batches()
                         .iter()
                         .rev()
                         .take(batch_count)
-                        .map(|bundle| usize::from(bundle.stage_row_count()))
+                        .map(|package| usize::from(package.stages().stage_row_count()))
                         .sum::<usize>();
                     ctx.steps.push(StepTiming {
                         method: format!(
-                            "composition_batch[{batch_count} tagged proofs/{stage_rows} rows]"
+                            "tagged_batch[{batch_count} packages/2 proofs each/{stage_rows} Stage rows]"
                         ),
                         dispatch: Duration::ZERO,
                         prove: p_start.elapsed(),
@@ -388,9 +387,9 @@ impl FullHandRunner {
                     });
                 }
                 Err(error) => {
-                    ctx.stopped_at = Some(format!("composition batch prove/verify: {error}"));
+                    ctx.stopped_at = Some(format!("tagged batch prove/verify: {error}"));
                     ctx.steps.push(StepTiming {
-                        method: "composition_batch".into(),
+                        method: "tagged_batch".into(),
                         dispatch: Duration::ZERO,
                         prove: p_start.elapsed(),
                         ok: false,
@@ -492,8 +491,14 @@ fn dispatch_and_prove<A: BorshSerialize>(
     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
         let p_start = Instant::now();
         let _drained_before = poker_texas_air::prove_timing::take_drain();
-        match plugin.prove_task_deferred_components(task) {
-            Ok(_) => (p_start.elapsed(), true),
+        let prove_result =
+            if poker_texas_air::airs::composition::supports_composite_proof(task.method_kind) {
+                plugin.queue_tagged_batch_task(task)
+            } else {
+                plugin.prove_task_archived(task).map(|_| ())
+            };
+        match prove_result {
+            Ok(()) => (p_start.elapsed(), true),
             Err(error) => {
                 ctx.stopped_at = Some(format!("{name} prove/verify: {error}"));
                 ctx.steps.push(StepTiming {
@@ -621,8 +626,18 @@ fn submit_reveal_batch_for_seat(
         return;
     };
 
-    let reveal_state = plugin.table().reveal_token_state();
-    let reveal_phase = reveal_state.reveal_phase;
+    let Some(reveal_state) = plugin.table().reveal_token_state() else {
+        ctx.stopped_at = Some(format!("{method}: table has no active reveal state"));
+        ctx.steps.push(StepTiming {
+            method,
+            dispatch: Duration::ZERO,
+            prove: Duration::ZERO,
+            proof_breakdown: Vec::new(),
+            ok: false,
+        });
+        return;
+    };
+    let reveal_phase = plugin.table().reveal_phase();
     let assignment_cards = reveal_state
         .assignments
         .iter()
@@ -719,11 +734,16 @@ fn submit_community_reveal(
     count: usize,
     name: &str,
 ) {
-    if ctx.stopped_at.is_none() && plugin.table().reveal_token_state().assignments.len() != count {
-        ctx.stopped_at = Some(format!(
-            "{name}: expected {count} canonical assignments, got {}",
-            plugin.table().reveal_token_state().assignments.len()
-        ));
+    if ctx.stopped_at.is_none() {
+        let actual = plugin
+            .table()
+            .reveal_token_state()
+            .map(|state| state.assignments.len());
+        if actual != Some(count) {
+            ctx.stopped_at = Some(format!(
+                "{name}: expected {count} canonical assignments, got {actual:?}"
+            ));
+        }
     }
     for seat in 0..2u8 {
         submit_reveal_batch_for_seat(plugin, ctx, players, seat, u32::from(seat), name);
@@ -732,8 +752,8 @@ fn submit_community_reveal(
 
 /// 观察赢家：比较两手 stack，较大者为赢家（settle 后 pot 已分配）。
 fn observe_winner(table: &TexasPokerTable) -> Option<u8> {
-    let s0 = table.seats[0].stack;
-    let s1 = table.seats[1].stack;
+    let s0 = table.seats[0].stack();
+    let s1 = table.seats[1].stack();
     match s0.cmp(&s1) {
         std::cmp::Ordering::Greater => Some(0),
         std::cmp::Ordering::Less => Some(1),

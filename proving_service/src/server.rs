@@ -9,7 +9,7 @@
 //! `poker_texas_air::consensus_anchor::build_anchor_from_consensus` before it
 //! persists an externally usable receipt.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,13 +31,16 @@ use crate::plugin::ContractPlugin;
 use crate::proof_package::{ServiceProofPackage, stored_proof_metadata};
 use crate::repository::{
     JobReservation, RepositoryError, ServiceRepository, StoredDispatchJob, StoredDispatchResult,
-    StoredJobStatus, StoredTable,
+    StoredJobStatus, StoredProofReference, StoredTable,
 };
 use crate::runner::HandRunner;
 use crate::{ServiceError, ServiceResult};
 use poker_l1::vm::contracts::dispatch::DispatchContext;
+use poker_texas_air::airs::composition::supports_composite_proof;
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
+use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::orchestrator::Orchestrator;
+use poker_texas_air::prove_task::MAX_METHOD_BATCH_ROWS;
 
 const LEGACY_TABLE_ID: u64 = 0;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
@@ -83,7 +86,8 @@ impl ServiceRuntime {
         // sidecar makes startup fail closed instead of silently shortening the
         // chain that a later consensus anchor would inspect.
         let jobs = repository.jobs().to_vec();
-        for job in jobs {
+        let mut restored_tagged = BTreeSet::new();
+        for job in &jobs {
             let Some(result) = job.result.as_ref() else {
                 if job.status == StoredJobStatus::Completed {
                     return Err(ServiceError::Runner(format!(
@@ -111,36 +115,21 @@ impl ServiceRuntime {
                     hex::encode(job.job_id())
                 ))
             })?;
-            let bytes = repository
-                .load_proof_package(job.job_id())?
-                .ok_or_else(|| {
-                    ServiceError::Runner(format!(
-                        "completed proof job {} is missing its durable proof package",
-                        hex::encode(job.job_id())
-                    ))
-                })?;
+            let reference = job.proof_reference.ok_or_else(|| {
+                ServiceError::Runner(format!(
+                    "completed proof job {} is missing its package reference",
+                    hex::encode(job.job_id())
+                ))
+            })?;
+            let bytes = repository.load_job_proof_package(job)?.ok_or_else(|| {
+                ServiceError::Runner(format!(
+                    "completed proof job {} is missing its durable proof package",
+                    hex::encode(job.job_id())
+                ))
+            })?;
             let package = ServiceProofPackage::from_bytes(&bytes)?;
-            let expected_metadata = stored_proof_metadata(package.task())?;
-            if stored_metadata.task_digest != expected_metadata.task_digest
-                || stored_metadata.pre_state_root != expected_metadata.pre_state_root
-                || stored_metadata.post_state_root != expected_metadata.post_state_root
-            {
-                return Err(ServiceError::Prover(format!(
-                    "durable proof package for job {} does not match journal metadata",
-                    hex::encode(job.job_id())
-                )));
-            }
-            let task = package.task();
-            if task.table_id != job.table_id
-                || task.hand_id != result.hand_id
-                || task.call_seq != result.call_seq
-                || u64::from(task.post_table.call_seq) != result.table_version
-            {
-                return Err(ServiceError::Prover(format!(
-                    "durable proof package for job {} does not match completed result",
-                    hex::encode(job.job_id())
-                )));
-            }
+            let task = package.task_at(reference.row_index())?;
+            validate_job_task(job, result, stored_metadata, &task)?;
             let plugin = plugins.get_mut(&job.table_id).ok_or_else(|| {
                 ServiceError::Runner(format!(
                     "completed proof job {} references missing table {}",
@@ -148,7 +137,46 @@ impl ServiceRuntime {
                     job.table_id
                 ))
             })?;
-            plugin.restore_archived_task(task, package.archive(), package.composition_archive())?;
+            match reference {
+                StoredProofReference::Single { package_id } => {
+                    if package_id != job.job_id || package.row_count()? != 1 {
+                        return Err(ServiceError::Prover(
+                            "single proof reference does not own exactly one package row".into(),
+                        ));
+                    }
+                    let (task, archive, composition) = package.single_parts().ok_or_else(|| {
+                        ServiceError::Prover(
+                            "single proof reference targets a tagged package".into(),
+                        )
+                    })?;
+                    plugin.restore_archived_task(task, archive, composition)?;
+                }
+                StoredProofReference::Tagged {
+                    batch_id,
+                    row_index,
+                    row_count,
+                } => {
+                    if package.batch_id() != Some(batch_id) || package.row_count()? != row_count {
+                        return Err(ServiceError::Prover(
+                            "tagged proof reference scope differs from shared package".into(),
+                        ));
+                    }
+                    if restored_tagged.insert(batch_id) {
+                        if row_index != 0 {
+                            return Err(ServiceError::Prover(
+                                "first journal reference to a tagged package is not row zero"
+                                    .into(),
+                            ));
+                        }
+                        validate_complete_tagged_job_set(&jobs, batch_id, &package)?;
+                        plugin.restore_tagged_batch(package.tagged().ok_or_else(|| {
+                            ServiceError::Prover(
+                                "tagged proof reference targets a single package".into(),
+                            )
+                        })?)?;
+                    }
+                }
+            }
         }
 
         for stored in repository.tables() {
@@ -166,6 +194,44 @@ impl ServiceRuntime {
             }
         }
 
+        // Tentative composite streams survive restart but remain excluded from
+        // the verified receipt chain until explicit or automatic finalization.
+        for pending in repository.pending_tagged_batches() {
+            let plugin = plugins.get_mut(&pending.table_id).ok_or_else(|| {
+                ServiceError::Runner(format!(
+                    "pending tagged batch references missing table {}",
+                    pending.table_id
+                ))
+            })?;
+            if pending.tasks.len() != pending.job_ids.len() || pending.tasks.is_empty() {
+                return Err(ServiceError::Runner(
+                    "pending tagged batch has inconsistent row storage".into(),
+                ));
+            }
+            for (job_id, task) in pending.job_ids.iter().zip(&pending.tasks) {
+                let job = repository.job(*job_id).ok_or_else(|| {
+                    ServiceError::Runner("pending tagged row references a missing job".into())
+                })?;
+                let result = job.result.as_ref().ok_or_else(|| {
+                    ServiceError::Runner("pending tagged job is missing result metadata".into())
+                })?;
+                let metadata = job.proof.as_ref().ok_or_else(|| {
+                    ServiceError::Runner("pending tagged job is missing proof metadata".into())
+                })?;
+                if job.status != StoredJobStatus::PendingProof
+                    || job.proof_reference.is_some()
+                    || !result.had_prove_task
+                    || result.proof_verified
+                {
+                    return Err(ServiceError::Runner(
+                        "pending tagged job has inconsistent lifecycle flags".into(),
+                    ));
+                }
+                validate_job_task(job, result, metadata, task)?;
+                plugin.queue_tagged_batch_task(task)?;
+            }
+        }
+
         Ok(Self {
             repository,
             plugins,
@@ -178,6 +244,74 @@ impl ServiceRuntime {
             .or_insert_with(|| new_service_plugin(table_id))
             .clone()
     }
+}
+
+fn validate_job_task(
+    job: &StoredDispatchJob,
+    result: &StoredDispatchResult,
+    stored: &crate::repository::StoredProofMetadata,
+    task: &poker_texas_air::prove_task::ProveTask,
+) -> ServiceResult<()> {
+    let expected = stored_proof_metadata(task)?;
+    if stored.task_digest != expected.task_digest
+        || stored.pre_state_root != expected.pre_state_root
+        || stored.post_state_root != expected.post_state_root
+        || task.table_id != job.table_id
+        || task.hand_id != result.hand_id
+        || task.call_seq != result.call_seq
+        || u64::from(task.post_table.call_seq) != result.table_version
+    {
+        return Err(ServiceError::Prover(format!(
+            "durable proof row for job {} does not match journal metadata",
+            hex::encode(job.job_id())
+        )));
+    }
+    Ok(())
+}
+
+fn validate_complete_tagged_job_set(
+    jobs: &[StoredDispatchJob],
+    batch_id: [u8; 32],
+    package: &ServiceProofPackage,
+) -> ServiceResult<()> {
+    let tasks = package.tasks()?;
+    let batch_jobs = jobs
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.proof_reference,
+                Some(StoredProofReference::Tagged { batch_id: id, .. }) if id == batch_id
+            )
+        })
+        .collect::<Vec<_>>();
+    if batch_jobs.len() != tasks.len() {
+        return Err(ServiceError::Prover(
+            "shared tagged package does not have exactly one journal job per row".into(),
+        ));
+    }
+    for (expected_index, (job, task)) in batch_jobs.iter().zip(&tasks).enumerate() {
+        let Some(StoredProofReference::Tagged {
+            row_index,
+            row_count,
+            ..
+        }) = job.proof_reference
+        else {
+            unreachable!("batch_jobs contains only tagged references")
+        };
+        if usize::from(row_index) != expected_index || usize::from(row_count) != tasks.len() {
+            return Err(ServiceError::Prover(
+                "tagged package journal rows are reordered, duplicated, or incomplete".into(),
+            ));
+        }
+        let result = job.result.as_ref().ok_or_else(|| {
+            ServiceError::Runner("completed tagged job is missing result metadata".into())
+        })?;
+        let metadata = job.proof.as_ref().ok_or_else(|| {
+            ServiceError::Runner("completed tagged job is missing proof metadata".into())
+        })?;
+        validate_job_task(job, result, metadata, task)?;
+    }
+    Ok(())
 }
 
 impl ServerState {
@@ -356,6 +490,9 @@ pub struct JobResponse {
     pub task_digest_hex: Option<String>,
     pub pre_state_root_hex: Option<String>,
     pub post_state_root_hex: Option<String>,
+    pub proof_package_id_hex: Option<String>,
+    pub proof_row_index: Option<u16>,
+    pub proof_row_count: Option<u16>,
     pub proof_archive_available: bool,
     pub error: Option<String>,
 }
@@ -371,6 +508,16 @@ pub struct ProofVerificationResponse {
     pub call_seq: u32,
     pub pre_state_root_hex: String,
     pub post_state_root_hex: String,
+}
+
+/// Result of explicitly flushing one table's pending tagged rows.
+#[derive(Debug, Serialize)]
+pub struct FinalizeProofsResponse {
+    pub table_id: u64,
+    pub finalized_rows: usize,
+    pub batch_id_hex: Option<String>,
+    pub prove_count: u64,
+    pub chain_length: usize,
 }
 
 /// Result of anchoring the current live receipt segment to authenticated consensus data.
@@ -434,6 +581,10 @@ fn router(state: ServerState) -> axum::Router {
         // Legacy single-table compatibility route.
         .route("/dispatch", post(dispatch_legacy))
         .route("/tables/:table_id/dispatch", post(dispatch_table))
+        .route(
+            "/tables/:table_id/finalize-proofs",
+            post(finalize_table_proofs),
+        )
         .route(
             "/tables/:table_id/verify-chain-consensus",
             post(verify_table_chain_consensus),
@@ -594,6 +745,7 @@ async fn dispatch_for_table(
         attempts: 0,
         result: None,
         proof: None,
+        proof_reference: None,
         error: None,
     };
     let job = match runtime.repository.reserve_job(job) {
@@ -607,6 +759,21 @@ async fn dispatch_for_table(
         }
         Err(error) => return Err(internal_error(error.to_string())),
     };
+
+    let selector_is_tagged = MethodKind::all()
+        .into_iter()
+        .find(|kind| kind.selector() == selector)
+        .is_some_and(supports_composite_proof);
+    let pending_rows = runtime
+        .repository
+        .pending_tagged_batch(table_id)
+        .map_or(0, |batch| batch.tasks.len());
+    if pending_rows != 0
+        && (!selector_is_tagged || pending_rows >= MAX_METHOD_BATCH_ROWS)
+        && let Err(error) = finalize_pending_tagged_batch(&mut runtime, table_id)
+    {
+        return fail_reserved_job(&mut runtime, job, error.to_string());
+    }
 
     let mut staged = runtime.staged_plugin(table_id);
     let context = match (caller_pubkey, consensus_context) {
@@ -637,6 +804,55 @@ async fn dispatch_for_table(
         Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
     };
     let had_prove_task = outcome.prove_task.is_some();
+    if let Some(task) = &outcome.prove_task
+        && supports_composite_proof(task.method_kind)
+    {
+        if let Err(error) = staged.queue_tagged_batch_task(task) {
+            return fail_reserved_job(&mut runtime, job, error.to_string());
+        }
+        let metadata = match stored_proof_metadata(task) {
+            Ok(proof) => proof,
+            Err(error) => return fail_reserved_job(&mut runtime, job, error.to_string()),
+        };
+        let stats = staged.stats();
+        let table = staged.table();
+        let result = StoredDispatchResult {
+            had_prove_task: true,
+            proof_verified: false,
+            events_count: u64::try_from(outcome.output.events.len())
+                .map_err(|_| internal_error("events count does not fit u64".into()))?,
+            dispatch_count: stats.dispatch_count,
+            prove_count: stats.prove_count,
+            chain_length: u64::try_from(stats.chain_length)
+                .map_err(|_| internal_error("chain length does not fit u64".into()))?,
+            table_version: u64::from(table.call_seq),
+            hand_id: table.hand_id,
+            call_seq: table.call_seq,
+        };
+        let stored_table = StoredTable {
+            table_id,
+            table: table.clone(),
+            dispatch_count: stats.dispatch_count,
+            prove_count: stats.prove_count,
+        };
+        runtime
+            .repository
+            .queue_pending_tagged_job(
+                stored_table,
+                job.clone(),
+                result.clone(),
+                metadata,
+                task.clone(),
+            )
+            .map_err(|error| internal_error(error.to_string()))?;
+        runtime.plugins.insert(table_id, staged);
+        return Ok(Json(response_from_result(
+            job.job_id(),
+            table_id,
+            result,
+            false,
+        )?));
+    }
     let (proof, proof_package) = if let Some(task) = &outcome.prove_task {
         let archived = match staged.prove_task_archived(task) {
             Ok(archived) => archived,
@@ -690,9 +906,18 @@ async fn dispatch_for_table(
             .store_proof_package(job.job_id(), package)
             .map_err(|error| internal_error(error.to_string()))?;
     }
+    let proof_reference = proof.as_ref().map(|_| StoredProofReference::Single {
+        package_id: job.job_id(),
+    });
     runtime
         .repository
-        .complete_job(stored_table, job.clone(), result.clone(), proof)
+        .complete_job(
+            stored_table,
+            job.clone(),
+            result.clone(),
+            proof,
+            proof_reference,
+        )
         .map_err(|error| internal_error(error.to_string()))?;
     runtime.plugins.insert(table_id, staged);
     Ok(Json(response_from_result(
@@ -701,6 +926,94 @@ async fn dispatch_for_table(
         result,
         false,
     )?))
+}
+
+async fn finalize_table_proofs(
+    State(state): State<ServerState>,
+    AxumPath(table_id): AxumPath<u64>,
+) -> Result<Json<FinalizeProofsResponse>, HttpError> {
+    let mut runtime = state.runtime.lock().await;
+    let finalized = finalize_pending_tagged_batch(&mut runtime, table_id)
+        .map_err(|error| unprocessable(error.to_string()))?;
+    let plugin = runtime.plugins.get(&table_id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "table was not found".to_string(),
+        )
+    })?;
+    let stats = plugin.stats();
+    Ok(Json(FinalizeProofsResponse {
+        table_id,
+        finalized_rows: finalized.as_ref().map_or(0, |result| result.1),
+        batch_id_hex: finalized.map(|result| hex::encode(result.0)),
+        prove_count: stats.prove_count,
+        chain_length: stats.chain_length,
+    }))
+}
+
+fn finalize_pending_tagged_batch(
+    runtime: &mut ServiceRuntime,
+    table_id: u64,
+) -> ServiceResult<Option<([u8; 32], usize)>> {
+    let Some(pending) = runtime.repository.pending_tagged_batch(table_id).cloned() else {
+        return Ok(None);
+    };
+    if pending.tasks.is_empty()
+        || pending.tasks.len() > MAX_METHOD_BATCH_ROWS
+        || pending.tasks.len() != pending.job_ids.len()
+    {
+        return Err(ServiceError::Runner(
+            "pending tagged batch has an invalid row set".into(),
+        ));
+    }
+    let mut staged = runtime.staged_plugin(table_id);
+    let runtime_pending = borsh::to_vec(staged.pending_tagged_tasks())
+        .map_err(|error| ServiceError::Runner(format!("encode runtime pending rows: {error}")))?;
+    let durable_pending = borsh::to_vec(&pending.tasks)
+        .map_err(|error| ServiceError::Runner(format!("encode durable pending rows: {error}")))?;
+    if runtime_pending != durable_pending {
+        return Err(ServiceError::Runner(
+            "runtime and repository pending tagged rows differ".into(),
+        ));
+    }
+    let previous_packages = staged.tagged_batches().len();
+    let package_count = staged.finalize_tagged_batches()?;
+    if package_count != 1 || staged.tagged_batches().len() != previous_packages + 1 {
+        return Err(ServiceError::Runner(
+            "one bounded pending stream did not produce exactly one tagged package".into(),
+        ));
+    }
+    let package = staged
+        .tagged_batches()
+        .last()
+        .expect("one finalized package was appended")
+        .clone();
+    let batch_id = package.method().batch_id();
+    let row_count = package.method().row_count();
+    if usize::from(row_count) != pending.tasks.len() {
+        return Err(ServiceError::Runner(
+            "tagged package row count differs from pending journal".into(),
+        ));
+    }
+    let bytes = ServiceProofPackage::new_tagged(package)?.to_bytes()?;
+    runtime.repository.store_proof_package(batch_id, &bytes)?;
+
+    let stats = staged.stats();
+    let stored_table = StoredTable {
+        table_id,
+        table: staged.table().clone(),
+        dispatch_count: stats.dispatch_count,
+        prove_count: stats.prove_count,
+    };
+    runtime.repository.complete_pending_tagged_batch(
+        stored_table,
+        batch_id,
+        row_count,
+        u64::try_from(stats.chain_length)
+            .map_err(|_| ServiceError::Runner("chain length does not fit u64".into()))?,
+    )?;
+    runtime.plugins.insert(table_id, staged);
+    Ok(Some((batch_id, pending.tasks.len())))
 }
 
 fn fail_reserved_job(
@@ -729,7 +1042,7 @@ async fn get_job(
     })?;
     let archive_available = runtime
         .repository
-        .has_proof_package(job.job_id())
+        .has_job_proof_package(&job)
         .map_err(|error| internal_error(error.to_string()))?;
     Ok(Json(job_response(job, archive_available)?))
 }
@@ -753,8 +1066,14 @@ async fn verify_job_proof(
     let (job, bytes) = completed_job_proof(&runtime.repository, job_id)?;
     let package = ServiceProofPackage::from_bytes(&bytes)
         .map_err(|error| unprocessable(error.to_string()))?;
+    let reference = job
+        .proof_reference
+        .ok_or_else(|| internal_error("completed proof job is missing reference".into()))?;
+    let task = package
+        .task_at(reference.row_index())
+        .map_err(|error| unprocessable(error.to_string()))?;
     let expected_metadata =
-        stored_proof_metadata(package.task()).map_err(|error| unprocessable(error.to_string()))?;
+        stored_proof_metadata(&task).map_err(|error| unprocessable(error.to_string()))?;
     let stored_metadata = job
         .proof
         .as_ref()
@@ -767,21 +1086,43 @@ async fn verify_job_proof(
             "stored proof package does not match completed job metadata".into(),
         ));
     }
-    let receipt = Orchestrator::verify_archived_task_parts(
-        package.task(),
-        package.archive(),
-        package.composition_archive(),
-    )
-    .map_err(|error| unprocessable(error.to_string()))?;
+    match reference {
+        StoredProofReference::Single { .. } => {
+            let (single_task, archive, composition) = package.single_parts().ok_or_else(|| {
+                unprocessable("single proof reference targets a tagged package".into())
+            })?;
+            Orchestrator::verify_archived_task_parts(single_task, archive, composition)
+                .map_err(|error| unprocessable(error.to_string()))?;
+        }
+        StoredProofReference::Tagged {
+            batch_id,
+            row_count,
+            ..
+        } => {
+            if package.batch_id() != Some(batch_id) || package.row_count().ok() != Some(row_count) {
+                return Err(unprocessable(
+                    "tagged proof reference differs from shared package".into(),
+                ));
+            }
+            Orchestrator::verify_tagged_package(package.tagged().ok_or_else(|| {
+                unprocessable("tagged proof reference targets a single package".into())
+            })?)
+            .map_err(|error| unprocessable(error.to_string()))?;
+        }
+    }
+    let pre_state_root = poker_texas_air::state_root::compute_state_root(&task.pre_table)
+        .map_err(|error| unprocessable(error.to_string()))?;
+    let post_state_root = poker_texas_air::state_root::compute_state_root(&task.post_table)
+        .map_err(|error| unprocessable(error.to_string()))?;
     Ok(Json(ProofVerificationResponse {
         job_id: hex::encode(job_id),
         verified: true,
-        method: receipt.kind().method_name(),
-        table_id: receipt.table_id(),
-        hand_id: receipt.hand_id(),
-        call_seq: receipt.call_seq(),
-        pre_state_root_hex: hex::encode(receipt.pre_state_root().field().to_bytes_be()),
-        post_state_root_hex: hex::encode(receipt.post_state_root().field().to_bytes_be()),
+        method: task.method_kind.method_name(),
+        table_id: task.table_id,
+        hand_id: task.hand_id,
+        call_seq: task.call_seq,
+        pre_state_root_hex: hex::encode(pre_state_root.field().to_bytes_be()),
+        post_state_root_hex: hex::encode(post_state_root.field().to_bytes_be()),
     }))
 }
 
@@ -903,13 +1244,15 @@ fn completed_job_response(
     replayed: bool,
 ) -> Result<Json<DispatchResponse>, HttpError> {
     match job.status {
-        StoredJobStatus::Completed => Ok(Json(response_from_result(
-            job.job_id,
-            job.table_id,
-            job.result
-                .ok_or_else(|| internal_error("completed job is missing its result".into()))?,
-            replayed,
-        )?)),
+        StoredJobStatus::PendingProof | StoredJobStatus::Completed => {
+            Ok(Json(response_from_result(
+                job.job_id,
+                job.table_id,
+                job.result
+                    .ok_or_else(|| internal_error("completed job is missing its result".into()))?,
+                replayed,
+            )?))
+        }
         StoredJobStatus::Failed => Err((
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             job.error
@@ -927,6 +1270,7 @@ fn job_response(
 ) -> Result<JobResponse, HttpError> {
     let status = match job.status {
         StoredJobStatus::Running => "running",
+        StoredJobStatus::PendingProof => "pending_proof",
         StoredJobStatus::Completed => "completed",
         StoredJobStatus::Failed => "failed",
     };
@@ -943,6 +1287,21 @@ fn job_response(
         ),
         None => (None, None, None),
     };
+    let (proof_package_id_hex, proof_row_index, proof_row_count) = match job.proof_reference {
+        Some(StoredProofReference::Single { package_id }) => {
+            (Some(hex::encode(package_id)), Some(0), Some(1))
+        }
+        Some(StoredProofReference::Tagged {
+            batch_id,
+            row_index,
+            row_count,
+        }) => (
+            Some(hex::encode(batch_id)),
+            Some(row_index),
+            Some(row_count),
+        ),
+        None => (None, None, None),
+    };
     Ok(JobResponse {
         job_id: hex::encode(job.job_id),
         table_id: job.table_id,
@@ -952,6 +1311,9 @@ fn job_response(
         task_digest_hex,
         pre_state_root_hex,
         post_state_root_hex,
+        proof_package_id_hex,
+        proof_row_index,
+        proof_row_count,
         proof_archive_available,
         error: job.error,
     })
@@ -974,7 +1336,7 @@ fn completed_job_proof(
         ));
     }
     let bytes = repository
-        .load_proof_package(job_id)
+        .load_job_proof_package(&job)
         .map_err(|error| internal_error(error.to_string()))?
         .ok_or_else(|| internal_error("completed job is missing its proof archive".into()))?;
     Ok((job, bytes))
@@ -1140,17 +1502,203 @@ mod tests {
     use poker_l1::consensus::ValidatorEntry;
     use poker_l1::consensus::bullshark::assemble_commit_certificate;
     use poker_l1::network::InMemoryTransport;
-    use poker_l1::object_model::{Object, ObjectStore, Ownership, SparseMerkleTree};
+    use poker_l1::object_model::{ObjectStore, SparseMerkleTree};
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
     use poker_l1::transaction::{ContractCall, Gas, RouteHint, Transaction, TxLane};
+    use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
+    use poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
     use poker_l1::vm::contracts::texas_poker::dispatch::{
         CreateTableArgs, JoinTableArgs, SeatIndexArgs, selectors,
     };
+    use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
     use poker_l1::vm::contracts::texas_poker::utils;
-    use poker_texas_air::consensus_anchor::{ConsensusDispatchCall, TableSnapshot};
+    use poker_texas_air::consensus_anchor::{
+        AuthenticatedObjectSnapshot, ConsensusDispatchCall, TableSnapshot,
+    };
     use secp256k1::{Message, Secp256k1, SecretKey};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn composite_jobs_share_one_tagged_package_and_recover_pending_rows() {
+        use blstrs::G1Projective;
+        use group::Group;
+        use poker_l1::object_model::ObjectID;
+        use poker_l1::vm::contracts::texas_poker::types::{Seat, SeatStatus};
+        use poker_protocol::crypto::types::ECPoint;
+
+        let dir = std::env::temp_dir().join(format!(
+            "zchain_proving_service_tagged_proof_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = dir.join("state.borsh");
+        let table_id = 808;
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xFF; 20], table_id),
+            "tagged-http".into(),
+            [0xA0; 20],
+            6,
+            50,
+            100,
+        );
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1_000_000)
+            .unwrap();
+        for index in 0..3 {
+            table.seats[index] = Seat::occupied(
+                [u8::try_from(index + 1).unwrap(); 20],
+                1_000,
+                ECPoint(G1Projective::generator()),
+                SeatStatus::Active,
+            )
+            .unwrap();
+            table.seats[index].set_bet(100).unwrap();
+        }
+        let mut repository = ServiceRepository::open(&path).unwrap();
+        repository
+            .store_table(StoredTable {
+                table_id,
+                table,
+                dispatch_count: 0,
+                prove_count: 0,
+            })
+            .unwrap();
+        let state = ServerState::from_repository(repository).unwrap();
+
+        let check_request = |seat_index: u8, key: &str, caller: [u8; 20]| DispatchRequest {
+            caller_hex: hex::encode(caller),
+            caller_pubkey_hex: None,
+            chain_id: None,
+            block_height: None,
+            block_timestamp_ms: None,
+            selector_hex: hex::encode(selectors::check()),
+            args_hex: hex::encode(borsh::to_vec(&SeatIndexArgs { seat_index }).unwrap()),
+            idempotency_key: Some(key.into()),
+        };
+        let first = dispatch_for_table(
+            state.clone(),
+            table_id,
+            check_request(0, "check-0", [1; 20]),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!first.proof_verified);
+
+        // A restart must recover the tentative table and exact pending command
+        // stream without manufacturing a receipt.
+        let recovered_repository = state.runtime.lock().await.repository.clone();
+        let recovered = ServerState::from_repository(recovered_repository).unwrap();
+        assert_eq!(
+            recovered
+                .runtime
+                .lock()
+                .await
+                .plugins
+                .get(&table_id)
+                .unwrap()
+                .pending_tagged_tasks()
+                .len(),
+            1
+        );
+        let second = dispatch_for_table(
+            recovered.clone(),
+            table_id,
+            check_request(1, "check-1", [2; 20]),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!second.proof_verified);
+
+        let finalized = finalize_table_proofs(State(recovered.clone()), AxumPath(table_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(finalized.finalized_rows, 2);
+        assert!(finalized.batch_id_hex.is_some());
+
+        let runtime = recovered.runtime.lock().await;
+        let first_id = decode_fixed_hex::<32>(&first.job_id, "job_id").unwrap();
+        let second_id = decode_fixed_hex::<32>(&second.job_id, "job_id").unwrap();
+        let first_job = runtime.repository.job(first_id).unwrap();
+        let second_job = runtime.repository.job(second_id).unwrap();
+        assert_eq!(first_job.status, StoredJobStatus::Completed);
+        assert_eq!(second_job.status, StoredJobStatus::Completed);
+        let Some(StoredProofReference::Tagged {
+            batch_id: first_batch,
+            row_index: 0,
+            row_count: 2,
+        }) = first_job.proof_reference
+        else {
+            panic!("first job must reference tagged row zero")
+        };
+        let Some(StoredProofReference::Tagged {
+            batch_id: second_batch,
+            row_index: 1,
+            row_count: 2,
+        }) = second_job.proof_reference
+        else {
+            panic!("second job must reference tagged row one")
+        };
+        assert_eq!(first_batch, second_batch);
+        let shared_package = runtime
+            .repository
+            .load_job_proof_package(first_job)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Some(shared_package.clone()),
+            runtime
+                .repository
+                .load_job_proof_package(second_job)
+                .unwrap()
+        );
+        let durable = runtime.repository.clone();
+        drop(runtime);
+
+        let restarted = ServiceRuntime::new(durable).unwrap();
+        assert_eq!(restarted.plugins.get(&table_id).unwrap().proven().len(), 2);
+        assert!(
+            restarted
+                .plugins
+                .get(&table_id)
+                .unwrap()
+                .pending_tagged_tasks()
+                .is_empty()
+        );
+
+        // A peer may serve the same shared package under either job ID. Repairing
+        // from row one must restore the batch-ID sidecar used by both jobs.
+        let transport = InMemoryTransport::new();
+        transport
+            .inject_proof_package(second_id, shared_package)
+            .expect("remote peer should retain the shared tagged package");
+        let proof_path = path
+            .with_extension("proofs")
+            .join(format!("{}.proof", hex::encode(first_batch)));
+        std::fs::remove_file(&proof_path).expect("test should remove shared batch sidecar");
+        assert!(
+            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).is_err(),
+            "startup must fail closed while a completed tagged sidecar is missing"
+        );
+
+        let mut repository = ServiceRepository::open(&path).unwrap();
+        let report = crate::proof_sync::sync_proof_package(&mut repository, &transport, second_id)
+            .expect("P2P sync from any tagged row should repair the shared sidecar");
+        assert_eq!(report.job_id, second_id);
+        assert_eq!(report.table_id, table_id);
+        assert_eq!(report.call_seq, 2);
+        let first_job = repository.job(first_id).unwrap();
+        let second_job = repository.job(second_id).unwrap();
+        assert!(repository.has_job_proof_package(first_job).unwrap());
+        assert!(repository.has_job_proof_package(second_job).unwrap());
+
+        let repaired = ServiceRuntime::new(repository).unwrap();
+        assert_eq!(repaired.plugins.get(&table_id).unwrap().proven().len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[tokio::test]
     async fn full_hand_http_route_proves_and_reports_all_transitions() {
@@ -1173,17 +1721,17 @@ mod tests {
         let steps = report["steps"]
             .as_array()
             .expect("full-hand response must carry step records");
-        assert_eq!(steps.len(), 33);
+        assert_eq!(steps.len(), 25);
         assert!(
             steps
                 .last()
                 .and_then(|step| step["method"].as_str())
-                .is_some_and(|method| method.starts_with("composition_batch[1 tagged proofs/"))
+                .is_some_and(|method| method.starts_with("tagged_batch[1 packages/2 proofs each/"))
         );
         assert_eq!(report["chain_ok"], true);
-        assert_eq!(report["dispatch_count"], 32);
-        assert_eq!(report["prove_count"], 32);
-        assert_eq!(report["chain_length"], 32);
+        assert_eq!(report["dispatch_count"], 24);
+        assert_eq!(report["prove_count"], 24);
+        assert_eq!(report["chain_length"], 24);
         assert!(report["stopped_at"].is_null());
     }
 
@@ -1272,24 +1820,28 @@ mod tests {
     fn snapshot(
         table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
     ) -> ([u8; 32], TableSnapshot) {
-        let object = Object::new(
-            table.id,
-            Ownership::Shared,
-            "TexasPokerTable",
-            borsh::to_vec(table).expect("table must serialize"),
-            None,
-        );
+        let [hot_table, metadata, rules, governance] =
+            poker_l1::vm::contracts::texas_poker::state_codec::table_storage_objects(table)
+                .expect("table storage objects must encode");
         let mut store = ObjectStore::new();
-        store
-            .create(object.clone())
-            .expect("table object must store");
+        for object in [&hot_table, &metadata, &rules, &governance] {
+            store
+                .create(object.clone())
+                .expect("table object must store");
+        }
+        let authenticated = |object: poker_l1::object_model::Object| AuthenticatedObjectSnapshot {
+            inclusion_path: store
+                .prove(&object.id)
+                .expect("stored object has inclusion proof"),
+            object,
+        };
         (
             store.state_root(),
             TableSnapshot {
-                object,
-                inclusion_path: store
-                    .prove(&table.id)
-                    .expect("stored object has inclusion proof"),
+                hot_table: authenticated(hot_table),
+                metadata: authenticated(metadata),
+                rules: authenticated(rules),
+                governance: authenticated(governance),
             },
         )
     }
@@ -1797,37 +2349,65 @@ mod tests {
             rand::random::<u64>()
         ));
         let path = dir.join("state.borsh");
-        let initial =
-            ServerState::from_repository(ServiceRepository::open(&path).unwrap()).unwrap();
         let table_id = 91;
         let sender_secret =
             SecretKey::from_slice(&[9; 32]).expect("fixed sender secret scalar is valid");
         let sender = test_tagged_pubkey(&sender_secret);
         let caller = derive_address(&sender);
-        let mut create = create_request(caller, "anchored-create");
-        create.caller_pubkey_hex = Some(hex::encode(sender.to_bytes()));
-        create.chain_id = Some(poker_l1::DEFAULT_CHAIN_ID);
-        create.block_height = Some(777);
-        create.block_timestamp_ms = Some(9_876_543);
-        let create_args = hex::decode(&create.args_hex).expect("create args are hex");
-        let selector = selectors::create_table();
+        let pre_table = TexasPokerTable::new(
+            poker_l1::object_model::ObjectID::new([0xFF; 20], table_id),
+            "anchored-table".into(),
+            [0xA0; 20],
+            2,
+            50,
+            100,
+        );
+        let mut repository = ServiceRepository::open(&path).unwrap();
+        repository
+            .store_table(StoredTable {
+                table_id,
+                table: pre_table.clone(),
+                dispatch_count: 0,
+                prove_count: 0,
+            })
+            .unwrap();
+        let initial = ServerState::from_repository(repository).unwrap();
+        let join_args = borsh::to_vec(
+            &JoinTableArgs::with_key(
+                caller,
+                1_000,
+                utils::scalar_from_u64(1),
+                utils::scalar_from_u64(777),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let selector = selectors::join_table();
+        let join = DispatchRequest {
+            caller_hex: hex::encode(caller),
+            caller_pubkey_hex: Some(hex::encode(sender.to_bytes())),
+            chain_id: Some(poker_l1::DEFAULT_CHAIN_ID),
+            block_height: Some(777),
+            block_timestamp_ms: Some(9_876_543),
+            selector_hex: hex::encode(selector),
+            args_hex: hex::encode(&join_args),
+            idempotency_key: Some("anchored-join".into()),
+        };
 
-        let response = dispatch_for_table(initial.clone(), table_id, create)
+        let response = dispatch_for_table(initial.clone(), table_id, join)
             .await
             .expect("dispatch with an address-bound public key must prove")
             .0;
         assert!(response.proof_verified);
 
-        let (pre_table, post_table) = {
+        let post_table = {
             let runtime = initial.runtime.lock().await;
-            let pre_table = new_service_plugin(table_id).table().clone();
-            let post_table = runtime
+            runtime
                 .plugins
                 .get(&table_id)
                 .expect("dispatched table is loaded")
                 .table()
-                .clone();
-            (pre_table, post_table)
+                .clone()
         };
         drop(initial);
         let recovered =
@@ -1837,7 +2417,7 @@ mod tests {
             &post_table,
             &sender_secret,
             selector,
-            create_args,
+            join_args,
             777,
             9_876_543,
         );

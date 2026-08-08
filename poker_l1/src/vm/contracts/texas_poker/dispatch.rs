@@ -1383,7 +1383,7 @@ fn resolve_caller_seat(
 
     let mut resolved = None;
     for (seat_index, seat) in table.seats.iter().enumerate() {
-        if seat.is_occupied() && seat.player == context.caller {
+        if seat.is_occupied() && seat.player() == context.caller {
             let seat_index = u8::try_from(seat_index).map_err(|_| {
                 PokerL1Error::Serialization(format!(
                     "{method}: caller seat index does not fit canonical u8"
@@ -1473,7 +1473,7 @@ fn dispatch_join_and_shuffle(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: JoinAndShuffleArgs = decode_args(args, "join_and_shuffle")?;
-    // 入座方法：校验 caller == input.player（此时座位尚空，无法用 seat.player 校验）
+    // 入座方法：校验 caller == input.player（此时座位尚空，无法用 seat.player() 校验）
     if input.player != context.caller {
         return Err(PokerL1Error::Serialization(format!(
             "join_and_shuffle: caller {:?} != player {:?}",
@@ -1527,7 +1527,7 @@ fn dispatch_leave_with_proof(
 
 /// `fold_with_proof` — 带 proof 的局中 fold（剥离加密层 + 退出后续 reveal）。
 ///
-/// 权限：`caller == seat.player`（与 leave_with_proof / fold 一致）。
+/// 权限：`caller == seat.player()`（与 leave_with_proof / fold 一致）。
 /// 仅在下注轮可用（`is_betting_round`）；与 `leave_with_proof`（仅 WAITING）互补。
 ///
 /// 调用 `state_machine::apply_fold_with_proof`：验证 DLEqProof（LeaveKind）→
@@ -1560,7 +1560,7 @@ fn dispatch_join_table(
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     let input: JoinTableArgs = decode_args(args, "join_table")?;
-    // 入座方法：校验 caller == input.player（座位尚空，无法用 seat.player 校验）
+    // 入座方法：校验 caller == input.player（座位尚空，无法用 seat.player() 校验）
     if input.player != context.caller {
         return Err(PokerL1Error::Serialization(format!(
             "join_table: caller {:?} != player {:?}",
@@ -1647,14 +1647,14 @@ fn dispatch_leave_table(
     }
     // 退还 stack + pending_addon（玩家离开时未入账的 addon 也必须退还）
     let refund_amt = seat
-        .stack
-        .checked_add(seat.pending_addon)
+        .stack()
+        .checked_add(seat.pending_addon())
         .ok_or_else(|| PokerL1Error::Serialization("leave_table refund overflow".into()))?;
     let post_chip_pool = table
         .chip_pool
         .checked_sub(refund_amt)
         .ok_or_else(|| PokerL1Error::Serialization("leave_table chip_pool underflow".into()))?;
-    let player = seat.player;
+    let player = seat.player();
     if refund_amt > 0 {
         // chip_pool 是总锁仓，必须扣除 stack + pending_addon 的完整退款。
         table.chip_pool = post_chip_pool;
@@ -1912,7 +1912,7 @@ fn dispatch_raise(
 
 /// `bet` — 玩家主动下注（postflop 第一个下注者）。
 ///
-/// 调用 `state_machine::apply_bet`：内部复用 `apply_raise(total_bet = seat.bet + amount)`。
+/// 调用 `state_machine::apply_bet`：内部复用 `apply_raise(total_bet = seat.bet() + amount)`。
 fn dispatch_bet(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
@@ -1983,7 +1983,7 @@ fn dispatch_rebuy(
 
 /// `request_leave_after_hand` — 玩家请求「下局开始前离场」（toggle）。
 ///
-/// 权限：`caller == seat.player`（与 leave_table / addon 一致）。
+/// 权限：`caller == seat.player()`（与 leave_table / addon 一致）。
 /// 允许在任意 round_state 调用（玩家可在对局进行中预约离场）。
 ///
 /// 实际离场（座位清空 + 退款）在下一手 `reset_for_next_hand` 内强制执行；
@@ -2250,7 +2250,7 @@ mod tests {
         let join_bytes = borsh::to_vec(&join_args).unwrap();
         dispatch(&ctx_p1, &mut table, &selectors::join_table(), &join_bytes).unwrap();
         assert_eq!(table.occupied_count(), 1);
-        assert_eq!(table.seats[0].stack, 1000);
+        assert_eq!(table.seats[0].stack(), 1000);
 
         // leave_table（seat 0 的玩家本人调用）
         let leave_args = LeaveTableArgs { seat_index: 0 };
@@ -2264,9 +2264,9 @@ mod tests {
         let player: Address = [0x11; 20];
         let context = make_context_as(player);
         let mut table = make_table();
-        table.seats[0].player = player;
-        table.seats[0].stack = 10;
-        table.seats[0].pending_addon = 5;
+        table.seats[0].fixture_set_player(player);
+        table.seats[0].set_stack(10).unwrap();
+        table.seats[0].set_pending_addon(5).unwrap();
         table.chip_pool = 9;
         let before = table.clone();
         let mut events = vec![];
@@ -2332,8 +2332,8 @@ mod tests {
         assert_eq!(table.hand_id, 0);
         assert_eq!(table.call_seq, 2);
         assert_eq!(table.occupied_count(), 1);
-        assert_eq!(table.seats[0].player, [0x11; 20]);
-        assert_eq!(table.seats[0].stack, 1000);
+        assert_eq!(table.seats[0].player(), [0x11; 20]);
+        assert_eq!(table.seats[0].stack(), 1000);
 
         // ========== Step 2b: join_table player 2（pk 必须不同）==========
         let p2: Address = [0x22; 20];
@@ -2348,8 +2348,8 @@ mod tests {
         assert_eq!(table.hand_id, 0);
         assert_eq!(table.call_seq, 3);
         assert_eq!(table.occupied_count(), 2);
-        assert_eq!(table.seats[1].player, [0x22; 20]);
-        assert_eq!(table.seats[1].stack, 2000);
+        assert_eq!(table.seats[1].player(), [0x22; 20]);
+        assert_eq!(table.seats[1].stack(), 2000);
 
         // ========== Step 3: start_hand（creator 发起）==========
         dispatch(&ctx_creator, &mut table, &selectors::start_hand(), &[]).unwrap();
@@ -2399,7 +2399,7 @@ mod tests {
             "reset 后 shuffle 阶段应清零"
         );
         assert_eq!(
-            table.reveal_token_state().reveal_phase,
+            table.reveal_phase(),
             super::super::constants::REVEAL_PHASE_NONE
         );
         assert_eq!(
@@ -2408,13 +2408,13 @@ mod tests {
         );
         // 玩家仍在座位上（reset 不踢人，除非 stack=0）
         assert_eq!(table.occupied_count(), 2, "reset 不应踢出有筹码的玩家");
-        assert_eq!(table.seats[0].stack, 1000);
-        assert_eq!(table.seats[1].stack, 2000);
+        assert_eq!(table.seats[0].stack(), 1000);
+        assert_eq!(table.seats[1].stack(), 2000);
         // bet/total_bet 应清零
-        assert_eq!(table.seats[0].bet, 0);
-        assert_eq!(table.seats[0].total_bet, 0);
-        assert_eq!(table.seats[1].bet, 0);
-        assert_eq!(table.seats[1].total_bet, 0);
+        assert_eq!(table.seats[0].bet(), 0);
+        assert_eq!(table.seats[0].total_bet(), 0);
+        assert_eq!(table.seats[1].bet(), 0);
+        assert_eq!(table.seats[1].total_bet(), 0);
     }
 
     #[test]
@@ -2422,14 +2422,14 @@ mod tests {
         let ctx = make_context();
         let mut table = make_table();
         // 设置 3 个玩家，确保 kick 后不触发 reset_for_next_hand
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 500;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(500).unwrap();
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 500;
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(500).unwrap();
         table.seats[1].set_status(SeatStatus::Active);
-        table.seats[2].player = [0x03; 20];
-        table.seats[2].stack = 500;
+        table.seats[2].fixture_set_player([0x03; 20]);
+        table.seats[2].set_stack(500).unwrap();
         table.seats[2].set_status(SeatStatus::Active);
         table
             .enter_betting(
@@ -2450,18 +2450,18 @@ mod tests {
         dispatch(&ctx, &mut table, &selectors::kick_player(), &args_bytes).unwrap();
         assert!(table.seats[0].is_folded() || table.seats[0].has_left_hand());
         assert!(table.seats[0].has_left_hand());
-        assert_eq!(table.seats[0].stack, 0);
+        assert_eq!(table.seats[0].stack(), 0);
     }
 
     #[test]
     fn dispatch_tick_does_not_start_hand_without_a_deadline() {
         let ctx = make_context();
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         table.seats[1].set_status(SeatStatus::Active);
         // WAITING is blocked on the explicit StartHand command, not on time.
         let result = dispatch(&ctx, &mut table, &selectors::tick(), &[]).unwrap();
@@ -2543,8 +2543,8 @@ mod tests {
             )
             .unwrap();
         for index in 0..3 {
-            table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
-            table.seats[index].stack = 1_000;
+            table.seats[index].fixture_set_player([u8::try_from(index + 1).unwrap(); 20]);
+            table.seats[index].set_stack(1_000).unwrap();
             table.seats[index].set_status(SeatStatus::Active);
         }
         table
@@ -2569,7 +2569,7 @@ mod tests {
         let ctx = make_context();
         let mut table = make_auto_fold_table();
         table.arm_betting_deadline(1).unwrap();
-        table.seats[0].time_bank_ms = 1;
+        table.seats[0].set_time_bank_ms(1);
         let pre = table.clone();
         let args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap();
 
@@ -2584,7 +2584,7 @@ mod tests {
         let ctx = make_context();
         let mut table = make_auto_fold_table();
         table.arm_betting_deadline(1).unwrap();
-        table.seats[0].time_bank_ms = 0;
+        table.seats[0].set_time_bank_ms(0);
         let args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap();
 
         let result = dispatch(&ctx, &mut table, &selectors::auto_fold(), &args);
@@ -2599,7 +2599,7 @@ mod tests {
         let ctx = make_context();
         let mut table = make_auto_fold_table();
         table.arm_betting_deadline(1).unwrap();
-        table.seats[0].time_bank_ms = 0;
+        table.seats[0].set_time_bank_ms(0);
 
         let result = dispatch(&ctx, &mut table, &selectors::advance_deadline(), &[]).unwrap();
         let task = decode_output(&result)
@@ -2616,7 +2616,7 @@ mod tests {
         let ctx = make_context();
         let mut table = make_auto_fold_table();
         table.arm_betting_deadline(1).unwrap();
-        table.seats[0].time_bank_ms = 0;
+        table.seats[0].set_time_bank_ms(0);
         let pre = table.clone();
         let args = borsh::to_vec(&TickArgs {
             now_ms: ctx.block_timestamp,
@@ -2638,10 +2638,10 @@ mod tests {
     #[test]
     fn dispatch_fold_rejects_non_seat_player() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1000;
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1000).unwrap();
         table
             .enter_betting(
                 super::super::constants::ROUND_PREFLOP,
@@ -2667,11 +2667,11 @@ mod tests {
     #[test]
     fn player_command_rejects_claimed_seat_different_from_authenticated_caller_seat() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 1_000;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(1_000).unwrap();
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[1].player = [0x02; 20];
-        table.seats[1].stack = 1_000;
+        table.seats[1].fixture_set_player([0x02; 20]);
+        table.seats[1].set_stack(1_000).unwrap();
         table.seats[1].set_status(SeatStatus::Active);
         table
             .enter_betting(
@@ -2699,7 +2699,7 @@ mod tests {
     #[test]
     fn proof_input_lowering_rejects_a_validly_encoded_but_spoofed_actor() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
+        table.seats[0].fixture_set_player([0x01; 20]);
         table.seats[0].set_status(SeatStatus::Active);
         let context = make_context_as([0x01; 20]);
         let raw_args = borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap();
@@ -2722,8 +2722,8 @@ mod tests {
     #[test]
     fn dispatch_kick_rejects_non_creator() {
         let mut table = make_table();
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 500;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(500).unwrap();
 
         // make_table 的 creator = [0xAA;20]，用 [0x99;20] 调用应失败
         let ctx_non_creator = make_context_as([0x99; 20]);
@@ -2746,8 +2746,8 @@ mod tests {
     fn dispatch_kick_rejects_out_of_range_seat() {
         let ctx = make_context(); // caller = [0xAA;20] = creator
         let mut table = make_table(); // max_players = 6
-        table.seats[0].player = [0x01; 20];
-        table.seats[0].stack = 500;
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_stack(500).unwrap();
 
         // seat_index=200 远超 max_players=6，应返回 Err 而非 panic
         let args = KickPlayerArgs {
@@ -2764,12 +2764,12 @@ mod tests {
     /// 辅助：构造一个已入座的 table（seat 0 = p1，seat 1 = p2）。
     fn make_table_with_two_players() -> TexasPokerTable {
         let mut table = make_table();
-        table.seats[0].player = [0x11; 20];
+        table.seats[0].fixture_set_player([0x11; 20]);
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[0].stack = 1000;
+        table.seats[0].set_stack(1000).unwrap();
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[1].player = [0x22; 20];
-        table.seats[1].stack = 2000;
+        table.seats[1].fixture_set_player([0x22; 20]);
+        table.seats[1].set_stack(2000).unwrap();
         table.seats[1].set_status(SeatStatus::Active);
         // 同步 chip_pool（join 时 buy_in 计入），便于后续资金账断言
         table.chip_pool = 3000;
@@ -2906,10 +2906,10 @@ mod tests {
 
         // reset 后：seat 0 被清空（退款 1000），seat 1 保留
         assert_eq!(table.occupied_count(), 1, "want_leave 玩家应被踢出");
-        assert_eq!(table.seats[0].player, super::super::types::EMPTY_PLAYER);
-        assert_eq!(table.seats[0].stack, 0);
-        assert_eq!(table.seats[1].player, [0x22; 20], "未预约的玩家应保留");
-        assert_eq!(table.seats[1].stack, 2000);
+        assert_eq!(table.seats[0].player(), super::super::types::EMPTY_PLAYER);
+        assert_eq!(table.seats[0].stack(), 0);
+        assert_eq!(table.seats[1].player(), [0x22; 20], "未预约的玩家应保留");
+        assert_eq!(table.seats[1].stack(), 2000);
         // chip_pool 扣减退款（3000 - 1000 = 2000）
         assert_eq!(table.chip_pool, 2000, "chip_pool 应扣减已退款的 stack");
     }
@@ -2975,8 +2975,8 @@ mod tests {
 
         // 资金账：chip_pool 扣减退款 1500 → 4000 - 1500 = 2500
         assert_eq!(table.chip_pool, 2500);
-        assert_eq!(table.seats[0].player, super::super::types::EMPTY_PLAYER);
-        assert_eq!(table.seats[1].player, p2);
+        assert_eq!(table.seats[0].player(), super::super::types::EMPTY_PLAYER);
+        assert_eq!(table.seats[1].player(), p2);
 
         // 事件：应包含 PlayerRefund(seat 0, 1500) + PlayerLeft(seat 0)
         let has_refund = events.iter().any(|e| {
@@ -3011,8 +3011,8 @@ mod tests {
 
         // 两名玩家都应保留（stack > 0）
         assert_eq!(table.occupied_count(), 2);
-        assert_eq!(table.seats[0].player, [0x11; 20]);
-        assert_eq!(table.seats[1].player, [0x22; 20]);
+        assert_eq!(table.seats[0].player(), [0x11; 20]);
+        assert_eq!(table.seats[1].player(), [0x22; 20]);
     }
 
     // ========== fold_with_proof 单元测试 ==========
@@ -3038,10 +3038,10 @@ mod tests {
         // 3 名玩家，pk 都用 generator；lineage 是 canonical fact，aggregate 由其派生。
         let g = G1Projective::generator();
         for i in 0..3u8 {
-            table.seats[i as usize].player = [0x11 + i; 20];
-            table.seats[i as usize].stack = 1000;
-            table.seats[i as usize].total_bet = 100;
-            table.seats[i as usize].pk = ECPoint(g);
+            table.seats[i as usize].fixture_set_player([0x11 + i; 20]);
+            table.seats[i as usize].set_stack(1000).unwrap();
+            table.seats[i as usize].fixture_set_total_bet(100);
+            table.seats[i as usize].fixture_set_pk(ECPoint(g));
             table.seats[i as usize].set_status(SeatStatus::Active);
         }
         if set_aggregated_pk {
@@ -3467,11 +3467,11 @@ mod tests {
         assert!(table.seats[0].is_folded(), "folded 应为 true");
         assert!(table.seat_acted_this_round(0));
         // 关键：total_bet / bet / stack / pk 保留（side-pot 记账）
-        assert_eq!(table.seats[0].total_bet, 100, "total_bet 应保留");
-        assert_eq!(table.seats[0].stack, 1000, "stack 应保留");
+        assert_eq!(table.seats[0].total_bet(), 100, "total_bet 应保留");
+        assert_eq!(table.seats[0].stack(), 1000, "stack 应保留");
         assert_eq!(
-            table.seats[0].pk,
-            ECPoint(G1Projective::generator()),
+            table.seats[0].pk().copied(),
+            Some(ECPoint(G1Projective::generator())),
             "seat.pk 应保留（不置 identity）"
         );
         assert!(!table.seats[0].has_left_hand(), "left_during_hand 不应设置");
@@ -3496,7 +3496,7 @@ mod tests {
         assert_eq!(table.deck_state.encrypted[0].c1, deck_before[0].c1);
 
         // reveal_token_state.assignments 中无 p1（下注轮本就为空）
-        for a in &table.reveal_token_state().assignments {
+        for a in table.reveal_assignments() {
             assert!(
                 !super::super::state_machine::is_in_mask(a.pending_mask(), 0),
                 "p1 不应在任何 reveal pending_players 中"
@@ -3624,16 +3624,16 @@ mod tests {
         table
             .arm_betting_deadline(make_context().block_timestamp)
             .unwrap();
-        table.seats[0].player = [0x11; 20];
+        table.seats[0].fixture_set_player([0x11; 20]);
         table.seats[0].set_status(SeatStatus::Active);
-        table.seats[0].stack = 1000;
-        table.seats[0].total_bet = 100;
-        table.seats[0].pk = ECPoint(G1Projective::generator());
-        table.seats[1].player = [0x22; 20];
+        table.seats[0].set_stack(1000).unwrap();
+        table.seats[0].fixture_set_total_bet(100);
+        table.seats[0].fixture_set_pk(ECPoint(G1Projective::generator()));
+        table.seats[1].fixture_set_player([0x22; 20]);
         table.seats[1].set_status(SeatStatus::Active);
-        table.seats[1].stack = 1000;
-        table.seats[1].total_bet = 100;
-        table.seats[1].pk = ECPoint(G1Projective::generator());
+        table.seats[1].set_stack(1000).unwrap();
+        table.seats[1].fixture_set_total_bet(100);
+        table.seats[1].fixture_set_pk(ECPoint(G1Projective::generator()));
         table.deck_state.contributor_mask = 0b11;
         table.sync_aggregated_pk().unwrap();
         let g = G1Projective::generator();
@@ -3645,8 +3645,8 @@ mod tests {
         // Prior-round pot plus live current-round bets. Terminal fold must
         // collect the live bets before payout instead of clearing them in reset.
         table.pot = 200;
-        table.seats[0].bet = 25;
-        table.seats[1].bet = 75;
+        table.seats[0].fixture_set_bet(25);
+        table.seats[1].fixture_set_bet(75);
 
         let ctx_p1 = make_context_as([0x11; 20]);
         let args = FoldWithProofArgs {
@@ -3665,7 +3665,7 @@ mod tests {
         // end_without_showdown：p2（seat 1）独得 pot，随后 reset_for_next_hand 清理 folded 标志。
         // （reset 第二阶段会把所有 seat.folded 重置为 false，故此处不能断言 folded=true）
         assert_eq!(
-            table.seats[1].stack,
+            table.seats[1].stack(),
             1000 + 300,
             "p2 应独得 prior pot + current-round bets（end_without_showdown）"
         );
@@ -3673,8 +3673,8 @@ mod tests {
         // reset 后回到 WAITING
         assert_eq!(table.round_state(), super::super::constants::ROUND_WAITING);
         // p1 仍在座位上（reset 不踢有筹码的玩家），stack 不变（未参与底池分配）
-        assert_eq!(table.seats[0].player, [0x11; 20]);
-        assert_eq!(table.seats[0].stack, 1000);
+        assert_eq!(table.seats[0].player(), [0x11; 20]);
+        assert_eq!(table.seats[0].stack(), 1000);
         assert_eq!(table.deck_state.contributor_mask, 0b11);
         assert_eq!(
             table.deck_state.aggregated_pk,

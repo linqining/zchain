@@ -191,10 +191,30 @@ commitment 不符均 fail-closed。当前 batch AIR 本身只约束 active bit�
 为 20.36s。Tagged-union v2 不再产生四份分项 proof；后续基准应读取单条
 `batch-stage:Tagged[task/row]` timing，并把它与 method proofs 分开统计。
 
-当前 durable service package v2 和 server/job 恢复路径仍保留每 task 四份 component archive，
-以兼容低延迟和独立任务下载；批量 archive 已用于 full-hand/in-memory throughput 路径。把 batch
-作为持久化一等对象还需增加“task package -> batch id/row index”引用和原子恢复语义，不能把缺少
-per-task bundle 的现有 v2 package 静默当作完整证明。
+同步 durable service 已接入共享 batch sidecar。service package schema 已破坏性升级为 v5，
+repository schema 升为 v3，旧 package/repository 直接拒绝且不执行迁移。package payload 是严格
+single/tagged union：非 composite 方法仍保存单任务 archive；composite dispatch 先进入
+`PendingProof`，repository 持久化连续 canonical tasks 和 tentative table，随后在显式
+`POST /tables/:id/finalize-proofs`、遇到非 batch 方法或达到 batch 上限时生成一份 tagged method
+STARK + 一份 tagged Stage STARK。成功后整批 job 原子切换为 completed，每个 job 只保存
+`batch_id + row_index + row_count`，并共同引用同一 sidecar。restart 会对同一 package 只恢复一次
+receipt batch；pending stream 也会重建但继续排除在 verified chain 之外。package、row reference、
+job metadata 或 pending lifecycle 任一错配均 fail-closed。P2P repair 已覆盖共享 sidecar：peer 可按
+任一 row 的 job ID 返回完整 tagged package，本地验证对应 row 和整份 two-proof package 后按
+`batch_id` 只落一份 sidecar，批内所有 job 同时恢复可用。
+
+原始 method 层的 tagged batch 也已实现。`ArchivedTaggedBatchProofPackage` 对一段连续 composite
+transition 只包含一份 177-column tagged method STARK 和一份 tagged Stage STARK，并内嵌唯一的
+`initial_state + commands + final_state` 连续流，不再要求 durable verifier 额外保存逐 task table
+快照。生产入口会先完整
+VM replay，再重新执行所需管理员授权与 BLS12-381 native verifier，最后把 request/receipt digest、
+command digest、pre/post root/call_seq 和 Stage span 写入窄 method row。call→raise 两步真实 dispatch
+已通过 package encode/decode、自包含 restart replay、两份 proof 重建验证和逐 row receipt 签发。
+full-hand driver 已改为 composite task 只入队，末尾原子生成该 two-proof package；旧 per-task archive
+仅保留给非 batch 的同步 service 路径。debug profile 的真实 24-transition heads-up full-hand 基准为
+约 36.30s：前 6 个非 composite legacy proof 合计约 15.42s，18 个连续 composite transition 的
+two-proof package（16 个 active Stage row）prove+verify 约 20.50s。相对先前约 134.91s 的
+Stage-only batching 路径，主要节省来自删除 18 次 legacy method prover startup。
 
 现有 `DualProofBundle` 仍是“method STARK + native crypto request”的两部分传输格式；对
 `fold_with_proof` / terminal reveal 这类 composite method，它不能替代 durable v2 package 中的
@@ -261,8 +281,10 @@ per-task bundle 的现有 v2 package 静默当作完整证明。
 - consensus anchor 的 tx-root 是 order-independent SMT；某 table/hand 的完整有序调用范围仍
   依赖 `call_seq`、端点 snapshot 和 Bullshark projection 一致性。
 - 当前没有 sound recursive/succinct aggregate proof；descriptor-only Aggregator 生产入口仍拒绝。
-- `TexasPokerTable` Borsh ABI 已升级为 schema v2 并显式校验；旧 v1 singleton table 不会被
-  静默解释为 v2，部署升级时必须迁移或重建。
+- `TexasPokerTable` resolved Borsh ABI 已破坏性升级为 v27，ObjectDb hot ABI 为 v28；runtime 与
+  persisted seat 共用同一个 tagged union，reveal 使用无 `None` 的 typed purpose；旧 flat-seat 与
+  numeric-reveal bytes 在 schema 检查处直接拒绝。
+  当前明确不提供历史 production 数据迁移，部署升级必须重建 table state。
 - 多 validator `CommitVote` 已接入 P2P 签名校验、按 signer 去重、2/3 quorum 收集、
   certificate 组装与成功提交后的清理；它不再属于“消息结构存在但未收集”的缺口。
 - PEX 目前会校验、去重并传播发现地址，但尚无针对新地址的后台主动拨号、失败退避与

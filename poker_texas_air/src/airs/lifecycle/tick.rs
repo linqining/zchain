@@ -21,8 +21,7 @@ use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_NONE, ROUND_SHOWDOWN, SHUFFLE_PHASE_BEFORE_PREFLOP,
-    SHUFFLE_PHASE_RECONSTRUCT,
+    RECONSTRUCT_PHASE_NONE, ROUND_SHOWDOWN, SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_RECONSTRUCT,
 };
 use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
 use poker_l1::vm::contracts::texas_poker::state_machine;
@@ -407,7 +406,7 @@ fn issue_lifecycle_binding(
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
         TICK_BRANCH_SHUFFLE_ADVANCED
-    } else if pre_reveal.reveal_phase != REVEAL_PHASE_NONE {
+    } else if pre_reveal.is_some() {
         TICK_BRANCH_REVEAL_ADVANCED
     } else if state_machine::is_betting_round(pre) && pre.current_turn() == NO_SEAT {
         TICK_BRANCH_BETTING_ROUND_ADVANCED
@@ -485,9 +484,9 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
             None,
         ));
     }
-    if reveal.reveal_phase != REVEAL_PHASE_NONE {
-        let pending = !reveal
-            .assignments
+    if reveal.is_some() {
+        let pending = !table
+            .reveal_assignments()
             .iter()
             .all(|assignment| assignment.pending_mask() == 0);
         return Ok((
@@ -531,7 +530,7 @@ fn seat_time_bank(table: &TexasPokerTable, seat: u8, label: &str) -> TexasAirRes
     table
         .seats
         .get(usize::from(seat))
-        .map(|entry| u64::from(entry.time_bank_ms))
+        .map(|entry| u64::from(entry.time_bank_ms()))
         .ok_or_else(|| {
             TexasAirError::SpecViolation(format!(
                 "tick: {label}-state current_turn {seat} is outside the table seats"
@@ -1099,6 +1098,7 @@ mod tests {
         TICK_BRANCH_BETTING_TIMEOUT, TICK_BRANCH_TIME_BANK_CONSUMED, TICK_KIND_BETTING,
         canonical_input,
     };
+    use crate::test_support as seat_fixture;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::{
         betting::BettingRound,
@@ -1122,12 +1122,12 @@ mod tests {
     fn occupy(table: &mut TexasPokerTable, index: usize, player: u8, stack: u64) {
         table.set_seat_acted_this_round(index as u8, false);
         let seat = &mut table.seats[index];
-        seat.player = [player; 20];
-        seat.stack = stack;
+        seat_fixture::set_player(seat, [player; 20]);
+        seat_fixture::set_stack(seat, stack);
         seat.set_status(SeatStatus::Active);
-        seat.bet = 0;
-        seat.total_bet = 0;
-        seat.pending_addon = 0;
+        seat_fixture::set_bet(seat, 0);
+        seat_fixture::set_total_bet(seat, 0);
+        seat_fixture::set_pending_addon(seat, 0);
     }
 
     /// The state machine owns call/hand sequence maintenance at the dispatch
@@ -1159,7 +1159,7 @@ mod tests {
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1_000_000)
             .unwrap();
-        table.seats[0].time_bank_ms = time_bank_ms;
+        seat_fixture::set_time_bank_ms(&mut table.seats[0], time_bank_ms);
         table.chip_pool = 3_000;
         table.hand_id = 7;
         table.call_seq = 11;
@@ -1206,10 +1206,10 @@ mod tests {
         // table vault is therefore stacks (1,800) + pot (200) = 2,000.
         pre.seats.truncate(2);
         pre.max_players = 2;
-        pre.seats[0].stack = 900;
-        pre.seats[1].stack = 900;
-        pre.seats[0].total_bet = 100;
-        pre.seats[1].total_bet = 100;
+        seat_fixture::set_stack(&mut pre.seats[0], 900);
+        seat_fixture::set_stack(&mut pre.seats[1], 900);
+        seat_fixture::set_total_bet(&mut pre.seats[0], 100);
+        seat_fixture::set_total_bet(&mut pre.seats[1], 100);
         pre.pot = 200;
         pre.chip_pool = 2_000;
         pre.rake_mode = RAKE_MODE_PERCENTAGE;

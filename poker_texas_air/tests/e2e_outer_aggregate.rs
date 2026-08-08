@@ -19,6 +19,7 @@ use poker_texas_air::outer_precompile::{
     verify_host_verified_outer_aggregate,
 };
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
+use poker_texas_air::test_support as seat_fixture;
 use poker_texas_air::verified_chain::ExpectedChainAnchor;
 use rand::rngs::OsRng;
 
@@ -95,7 +96,7 @@ fn next_shuffle_task(
         shuffle_proof: proof,
     })
     .expect("shuffle args should encode");
-    let caller = table.seats[seat_index as usize].player;
+    let caller = table.seats[seat_index as usize].player();
     dispatch_task(table, caller, raw_args)
 }
 
@@ -136,10 +137,13 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     table.call_seq = 20;
     table.hand_id = 9;
     for (index, key) in seat_keys.into_iter().enumerate() {
-        table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
+        seat_fixture::set_player(
+            &mut table.seats[index],
+            [u8::try_from(index + 1).unwrap(); 20],
+        );
         table.seats[index].set_status(SeatStatus::Active);
-        table.seats[index].stack = 1_000;
-        table.seats[index].pk = ECPoint(key);
+        seat_fixture::set_stack(&mut table.seats[index], 1_000);
+        seat_fixture::set_pk(&mut table.seats[index], ECPoint(key));
     }
     table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 0b1111;

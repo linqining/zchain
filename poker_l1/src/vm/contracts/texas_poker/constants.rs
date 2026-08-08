@@ -41,7 +41,7 @@ pub const SHUFFLE_PHASE_WAITING: u8 = 1;
 pub const SHUFFLE_PHASE_RECONSTRUCT: u8 = 2;
 pub const SHUFFLE_PHASE_BEFORE_PREFLOP: u8 = 3;
 
-// ===== Reveal Phase（reveal_token_state.reveal_phase 字段）=====
+// ===== Legacy reveal phase ABI（由 RevealPurpose + HandPhase.street 唯一投影）=====
 
 pub const REVEAL_PHASE_NONE: u8 = 0;
 pub const REVEAL_PHASE_PREFLOP: u8 = 1;
