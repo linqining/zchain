@@ -11,7 +11,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     self as texas_dispatch, SubmitReconstructDeckArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealPurpose, RevealTarget,
+    PartialHoleCard, ReconstructState, RevealAssignment, RevealPurpose, RevealTarget,
     RevealTokenState, RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
@@ -664,14 +664,17 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << 1;
     table.derived_aggregated_pk().unwrap();
-    table.deck_state.decrypted_cards = encrypted_cards
-        .iter()
-        .take(2)
-        .enumerate()
-        .map(|(index, ciphertext)| {
-            DecryptedCard::partial(u8::try_from(index).unwrap(), seat_index, ciphertext.clone())
-        })
-        .collect();
+    for (index, ciphertext) in encrypted_cards.iter().take(2).copied().enumerate() {
+        table
+            .deck_state
+            .owner_readable_hole_cards
+            .insert(
+                seat_index,
+                u8::try_from(index).unwrap(),
+                PartialHoleCard::new(u8::try_from(index).unwrap(), ciphertext),
+            )
+            .unwrap();
+    }
     table
         .enter_revealing(
             ROUND_SHOWDOWN,
@@ -791,12 +794,17 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     seat_fixture::set_pk(&mut table.seats[1], ECPoint(public_key));
     table.deck_state.contributor_mask = 1u16 << 1;
     table.derived_aggregated_pk().unwrap();
-    table.deck_state.decrypted_cards = readable_cards
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, ciphertext)| DecryptedCard::partial(index as u8, seat_index, ciphertext))
-        .collect();
+    for (index, ciphertext) in readable_cards.iter().copied().enumerate() {
+        table
+            .deck_state
+            .owner_readable_hole_cards
+            .insert(
+                seat_index,
+                index as u8,
+                PartialHoleCard::new(index as u8, ciphertext),
+            )
+            .unwrap();
+    }
     let epoch_ms = 9;
     table
         .enter_reconstructing(

@@ -49,8 +49,8 @@ native crypto 验证即可。
 
 ### 已完成
 
-- fold/check/call/raise/bet/auto-fold/force-fold 都会从 canonical pre/post table 重放真实 VM
-  action，并把 trusted row 绑定进 STARK transcript。
+- fold/check/call/raise/bet、permissionless `advance_deadline` 与管理员 `force_fold` 都会从
+  canonical pre/post table 重放真实 VM action，并把 trusted row 绑定进 STARK transcript。
 - mid-round 路径约束 actor 的 stack/bet/total_bet、pot/round 不变和下一行动座位。
 - heads-up 最后一个 `check` 已支持 terminal end-of-round：可收池、清零 seat bets、推进
   round、令 `current_turn = None`，并用 sentinel trace encoding 与 canonical post-state 对齐。
@@ -99,10 +99,12 @@ terminal `call` / `raise` / `bet` 的 clean round completion 已支持：native 
 的下注状态，再约束所有 live `seat.bet` 收池、`pre_pot + collected_bets = post_pot`、清零
 seat bets 和下一 reveal phase。这些此前未覆盖的分支不能只增加一个布尔列完成：VM transition
 会同时扫描多个 seat、推进 round/reveal phase，甚至执行 settlement/reset。因此现通过下述
-四段可组合 AIR；现有 method AIR 仍作为兼容层保留，但完整生产 archive 还必须携带四段独立
-proof bundle，不能只提交 method proof 绕过 component 验证。
+四段可组合 transition plan 建模。孤立 single-task archive 仍把四段分别证明，不能只提交 legacy
+method proof 绕过 component 验证；当前 hand-stream throughput 路径则把同一 canonical plan 的
+active rows 收敛进一份 tagged Stage proof，并与一份 tagged method proof 组成唯一可接受的
+two-proof package。
 
-### 可组合 transition plan / 四份独立 STARK proof
+### 可组合 transition plan / legacy single-task 四份独立 STARK proof
 
 新增 `airs::composition`，canonical native replay 会把一个原子 dispatch 规范化为固定顺序：
 
@@ -142,8 +144,9 @@ commitment 和独立 Fiat–Shamir transcript；bundle 验证固定检查
   addons 和 post occupancy 均进入 AIR，并约束 chip pool / addon pool / rake 守恒和 reset。
 
 production verifier 已在 fold/check/call/raise/bet/advance-deadline/force-fold、`fold_with_proof`、
-`kick_player` 和 `submit_player_reveal_tokens` 的 canonical replay 后派生并
-验证该 plan，因而旧 method row 与新 component ABI 迁移期间不会形成第二套可自由选择的业务解释。
+`kick_player` 和 `submit_player_reveal_tokens` 的 canonical replay 后派生并验证该 plan。single-task
+归档按四个 component 验证，tagged hand stream 则从同一 plan 重建 Stage rows；两条存储路径不会
+形成第二套可自由选择的业务解释。
 
 `kick_player_v2` 的证明输入也已收窄为 seat-only canonical admin command：目标 seat 仍由管理员显式
 选择，`Admin` cause 由该 typed command 决定；deadline 与 reconstruct deadline 路径分别只能产生
@@ -151,18 +154,21 @@ production verifier 已在 fold/check/call/raise/bet/advance-deadline/force-fold
 replay 分支已物理删除；proof task、native replay 与 AIR 都只解码 `SeatIndexArgs`。
 
 `AirStatement` / `TexasPublicInputs` 已加入完整 `ComponentStatement`，把 component kind、plan
-digest、stage index、input/output boundary commitment 混入 transcript。`ArchivedCompositionProofBundle`
-固定保存 SeatUpdate、BetCollection、RoundAdvance、Settlement 四份 proof；缺失、重复、重排、
-plan digest 不符或 task scope 不符都会拒绝。proving service durable package 已升级为 schema v2，
-启动恢复、下载验证和 P2P proof repair 都同时验证 method archive 与所需 component bundle。
+digest、stage index、input/output boundary commitment 混入 transcript。legacy
+`ArchivedCompositionProofBundle` 固定保存 SeatUpdate、BetCollection、RoundAdvance、Settlement
+四份 proof；缺失、重复、重排、plan digest 不符或 task scope 不符都会拒绝。当前 tagged service
+package 不再内嵌这四份 proof，而是严格保存并验证一份 tagged method proof、一份 tagged Stage
+proof 及其唯一 continuous state stream。
 
-这仍不是 recursive/succinct aggregation：验证一个 composite transition 需要验证原 method proof
-和四份 component proof，成本与包体均增加。它解决的是职责拆分、可组合性和 fail-closed 边界，
-不解决链上常数成本压缩。
+这仍不是 recursive/succinct aggregation：legacy single-task composite archive 需要验证原 method
+proof 和四份 component proof；tagged hand stream 则整批验证两份 proof，但验证成本仍随 batch
+规模和 trace 大小增长。两者解决的是职责拆分、可组合性、吞吐和 fail-closed 边界，不解决链上
+常数成本压缩。
 
 ### 证明时间优化
 
-四份 proof 的独立性现在也用于本地并行执行：method proof 与 component bundle 并行，四个
+以下数据描述 tagged batch 落地前的 legacy 优化阶段。四份 proof 的独立性曾用于本地并行执行：
+method proof 与 component bundle 并行，四个
 component proof/verify 以两层 Rayon join 并行，durable method archive 与 component archive 的
 恢复验证同样并行。proof 数量、每份 trace commitment、Fiat–Shamir transcript、stage 顺序与
 plan digest 均未改变。参考开发机上，单个 composite check 从约 22.97s 降至约 7.2s；完整牌局
@@ -216,7 +222,7 @@ job metadata 或 pending lifecycle 任一错配均 fail-closed。P2P repair 已�
 `start_hand`，restart 会在 staged Orchestrator 上先切换 receipt segment，再原子验证/恢复整包。
 
 普通玩家命令的 task payload 已不再重复保存 actor：`join_table.player` 由 authenticated caller
-确定，fold/check/call/leave/request-leave/auto-fold 的 seat 由 caller/current actor 确定，
+确定，fold/check/call/leave/request-leave 的 seat 由 caller/current actor 确定，
 raise/bet/addon/rebuy 只保存金额。verifier 使用 canonical pre-state 重建 legacy dispatch ABI 后再
 进入同一个 native 状态机。四类 active proof-bearing Mental Poker payload 也已完成同样收缩：
 fold/shuffle/reveal/reconstruct 删除 caller seat，但完整 proof statement、deck、tokens 与 proof 字节
@@ -253,8 +259,9 @@ create/join×2 和 hand stream 外的同步 service 路径。2026-08-09 debug te
 仍单独证明 start/shuffle 的版本约 36.30s；更早的 Stage-only batching 路径约 134.91s。
 
 现有 `DualProofBundle` 仍是“method STARK + native crypto request”的两部分传输格式；对
-`fold_with_proof` / terminal reveal 这类 composite method，它不能替代 durable v2 package 中的
-四份 component proof，也不能单独作为完整 composite archive。
+`fold_with_proof` / terminal reveal 这类 composite method，它不能替代当前 durable tagged
+package 中的 tagged Stage proof；若走孤立 legacy single-task archive，也不能替代四份 component
+proof，因此不能单独作为完整 composite archive。
 
 ## 本轮关闭的管理员授权与金额缺口
 
@@ -284,12 +291,14 @@ create/join×2 和 hand stream 外的同步 service 路径。2026-08-09 debug te
   receipt digest，不提供“恶意 host 下仍可独立验证”的执行证明。
 - terminal timeout fold 统一由 `advance_deadline` 证明，terminal `force_fold` 复用
   `FoldOutcome::EndWithoutShowdown`；两者都强制携带 SeatUpdate/BetCollection/RoundAdvance/
-  Settlement 四段 archive。
+  Settlement 四段 canonical plan。hand stream 将 active rows 放入 tagged Stage proof；孤立
+  single-task archive 才保存四份 component proof。
 - `kick_player` 只接受普通 `version + 1` 路径，以及已规范化的 `WithoutShowdown` / `ResetOnly`
   双 bump cascade；其他未来出现的 multi-version advance/settlement 继续 fail-closed。
-- `advance_deadline` 已接入四段 archive。下注超时 fold 会派生 SeatUpdate，终局/当前轮完成会派生
-  BetCollection、RoundAdvance、WithoutShowdown/Showdown/ResetOnly Settlement，并由 restart
-  verifier 重建后重验。schema v15 已删除仅启动 timer 的状态分支，且 WAITING 不允许 deadline 推进隐式
+- `advance_deadline` 已接入四段 canonical plan。下注超时 fold 会派生 SeatUpdate，终局/当前轮完成会
+  派生 BetCollection、RoundAdvance、WithoutShowdown/Showdown/ResetOnly Settlement，并由 restart
+  verifier 重建后重验 tagged package 或 legacy component bundle。schema v15 已删除仅启动 timer 的
+  状态分支，且 WAITING 不允许 deadline 推进隐式
   start-hand；shuffle/reconstruct/reveal timeout 等 lifecycle 分支仍主要依赖 canonical native replay
   与 plan/table digest；若要求这些分支在
   恶意 host 下也能由 STARK 独立执行验证，需要新增专门 lifecycle component，而不能把 inactive
@@ -308,8 +317,9 @@ create/join×2 和 hand stream 外的同步 service 路径。2026-08-09 debug te
   reveal command 还删除了 caller 自报的 `assignment_indices`：每次必须覆盖该 seat 的全部 pending
   assignment，index 与 ciphertext statement 由 authenticated pre-state 按 canonical 顺序派生；
   token/proof 少交、多交或旧含索引 payload 均 fail-closed。
-- 内部 `reset_for_next_hand` 的完整座位/资金重置语义由触发 settlement/normalize 的 durable 四段
-  component bundle 承担，不再存在可单独提交的 reset method STARK。旧 `join_and_shuffle` / `leave_with_proof` package
+- 内部 `reset_for_next_hand` 的完整座位/资金重置语义由触发 settlement/normalize 的 canonical
+  Stage plan 承担；hand stream 使用 tagged Stage proof，孤立 single-task archive 使用四段 component
+  bundle，不再存在可单独提交的 reset method STARK。旧 `join_and_shuffle` / `leave_with_proof` package
   路由已删除：加入与 fresh-deck shuffle 分别由 `join_table`、`start_hand`、`submit_shuffle_v2`
   证明，WAITING 离场走 `leave_table`，active layer removal 走 `fold_with_proof`。
 - `start_hand` 的零参数 ABI 在 L1 dispatch 边界拒绝任意尾随 bytes；退休 reset selector 则在参数
@@ -321,9 +331,11 @@ create/join×2 和 hand stream 外的同步 service 路径。2026-08-09 debug te
 - consensus anchor 的 tx-root 是 order-independent SMT；某 table/hand 的完整有序调用范围仍
   依赖 `call_seq`、端点 snapshot 和 Bullshark projection 一致性。
 - 当前没有 sound recursive/succinct aggregate proof；descriptor-only Aggregator 生产入口仍拒绝。
-- `TexasPokerTable` resolved Borsh ABI 已破坏性升级为 v28，ObjectDb hot ABI 为 v29；runtime 与
+- `TexasPokerTable` resolved Borsh ABI 已破坏性升级为 v29，ObjectDb hot ABI 为 v30；runtime 与
   persisted seat 共用同一个 tagged union，reveal 使用无 `None` 的 typed purpose，missing-seat
-  统一为 4-bit `0x0f`；旧 flat-seat、numeric-reveal、`0xff` sentinel bytes 在 schema 检查处直接拒绝。
+  统一为 4-bit `0x0f`；owner-readable hole partial 使用固定 `(seat, slot)` ledger，showdown
+  密文只能按 exact assignment target 取得。旧 flat-seat、numeric-reveal、`0xff` sentinel 和
+  `decrypted_cards Vec` bytes 在 schema 检查处直接拒绝。
   当前明确不提供历史 production 数据迁移，部署升级必须重建 table state。
 - 多 validator `CommitVote` 已接入 P2P 签名校验、按 signer 去重、2/3 quorum 收集、
   certificate 组装与成功提交后的清理；它不再属于“消息结构存在但未收集”的缺口。

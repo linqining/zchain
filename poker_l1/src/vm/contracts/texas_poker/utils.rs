@@ -110,7 +110,7 @@ pub fn new_reconstruct_v3_transcript() -> FiatShamirTranscript {
 }
 
 /// Return the previous-round owner-readable ciphertexts authenticated by the
-/// current table state, preserving their canonical `decrypted_cards` order.
+/// current table state, preserving canonical hole-slot order (slot 0, then slot 1).
 ///
 /// These records arise only after reveal-token processing of cards drawn from
 /// the shuffled `init_deck` lineage. Their deck indices do not reveal the
@@ -122,10 +122,9 @@ pub fn reconstruction_v3_user_readable_cards(
 ) -> Vec<ElGamalCiphertext> {
     table
         .deck_state
-        .decrypted_cards
-        .iter()
-        .filter(|card| card.owner_seat_index == seat_index)
-        .map(|card| card.ciphertext)
+        .owner_readable_hole_cards
+        .iter_for_seat(seat_index)
+        .map(|(_, card)| card.ciphertext)
         .collect()
 }
 
@@ -159,7 +158,7 @@ pub fn reconstruction_v3_prior_state_digest(
         )
     })?;
     let mut material = Vec::new();
-    material.extend_from_slice(b"zchain.texas_poker.reconstruction_v3.prior_state.v1");
+    material.extend_from_slice(b"zchain.texas_poker.reconstruction_v3.prior_state.v2");
     material.extend_from_slice(&table.id.to_bytes());
     material.extend_from_slice(&table.hand_id.to_le_bytes());
     material.push(seat_index);
@@ -178,9 +177,8 @@ pub fn reconstruction_v3_prior_state_digest(
 
     let readable_records = table
         .deck_state
-        .decrypted_cards
-        .iter()
-        .filter(|card| card.owner_seat_index == seat_index)
+        .owner_readable_hole_cards
+        .iter_for_seat(seat_index)
         .collect::<Vec<_>>();
     if readable_records.is_empty() {
         return Err(PokerL1Error::Serialization(
@@ -188,10 +186,10 @@ pub fn reconstruction_v3_prior_state_digest(
         ));
     }
     material.extend_from_slice(&(readable_records.len() as u32).to_le_bytes());
-    for card in readable_records {
+    for (card_slot, card) in readable_records {
+        material.push(card_slot);
         material.push(card.encrypted_card_index);
-        material.push(card.owner_seat_index);
-        let ciphertext = card.ciphertext();
+        let ciphertext = &card.ciphertext;
         material.extend_from_slice(&ciphertext.c1.to_compressed());
         material.extend_from_slice(&ciphertext.c2.to_compressed());
     }

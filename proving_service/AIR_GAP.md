@@ -30,17 +30,21 @@ method proof 与一份 tagged Stage proof，其中仅 16 个 active Stage row �
   继续。终局 RIT canonical replay + Orchestrator prove/verify 已有集成测试。
 - last-opponent `fold` / `fold_with_proof` 会先收集 live bets，再证明 gross pot、rake、winner
   award 与 winner stack 的三条资金等式并 reset 到 `WAITING`；pending addon credit、leave
-  refund 和 seat removal 由独立 Settlement/Reset component proof 绑定。
-- terminal timeout fold 由 `advance_deadline` 使用 `EndWithoutShowdown` projection 和四段
-  component bundle；`force_fold` 绑定 canonical table-creator authorization request/receipt
-  digest，归档重启后会同时重验 method 与四份 component proof。
-- `tick` 已进入四段 durable archive：betting-timeout fold、收池/round advance、无摊牌、showdown
-  与 reset-only 分支会激活对应 component，不能再只持久化 Tick method proof。
+  refund 和 seat removal 由 canonical Settlement/Reset Stage row 绑定。孤立 single-task archive
+  仍使用独立 component proof。
+- terminal timeout fold 由 `advance_deadline` 使用 `EndWithoutShowdown` projection；`force_fold`
+  绑定 canonical table-creator authorization request/receipt digest。hand stream 归档重启会重验
+  tagged method + tagged Stage package，孤立 single-task archive 才重验 method 与四份 component
+  proof。
+- retired `tick` 已从 fresh/archive decoder 删除；betting-timeout fold、收池/round advance、
+  无摊牌、showdown 与 reset-only 分支统一由 `advance_deadline` 激活对应 canonical Stage，不能只
+  持久化一个 method proof。
 - active heads-up `kick_player`（无论是否踢当前行动者）已消除 native 双 reset/version bump
   或 bare reset 丢失底池的分支，并规范化为一次
   `BetCollection -> WithoutShowdown -> reset`：method AIR 绑定 `reset_cascade`、最终 WAITING/零
-  pot 和双 version bump，四段 proof 再绑定被踢下注、其余 live bets、winner award、refund 与
-  完整 reset。WAITING nested kick 继续使用 `ResetOnly`；其他未知 multi-version kick fail-closed。
+  pot 和双 version bump，Stage rows 再绑定被踢下注、其余 live bets、winner award、refund 与
+  完整 reset。legacy single-task archive 将这些 rows 分为四份 proof；WAITING nested kick 继续
+  使用 `ResetOnly`，其他未知 multi-version kick fail-closed。
 - runner 按每个 reveal phase 的 assignment（局部索引）读取加密牌索引，并在 showdown 对
   保存的 partial ciphertext 构造 DLEq token proof。
 
@@ -77,21 +81,23 @@ Orchestrator 上切换 receipt segment；proof/stream 校验失败不会提前�
   submit-shuffle/fold-with-proof 的真实 pot 投影；不改变 pot 的路径使用完整
   4-limb equality，create 的 canonical post pot 必须为零。
 - `advance_deadline` 的 shuffle/reconstruct/reveal 修复分支仍依赖 canonical
-  native replay 与完整 table/plan digest；当前四段 AIR 对这些 lifecycle 变化保持 inactive，不能
+  native replay 与完整 table/plan digest；当前四类 Stage variant 对这些 lifecycle 变化保持 inactive，不能
   解释成独立执行了 start-hand、deck rebuild 或 reconstruct 算法。若要消除恶意 host 信任，需新增
   lifecycle-specific component/verifier program。
-- 内部 `reset_for_next_hand` 的完整座位与资金约束位于触发 settlement/normalize 的 durable 四段
-  component bundle；独立 reset MethodKind/AIR 已删除。退休的 `join_and_shuffle` / `leave_with_proof`
+- 内部 `reset_for_next_hand` 的完整座位与资金约束位于触发 settlement/normalize 的 canonical
+  Stage plan；tagged hand stream 使用一份 Stage proof，孤立 single-task archive 使用四段 component
+  bundle。独立 reset MethodKind/AIR 已删除。退休的 `join_and_shuffle` / `leave_with_proof`
   已从 source/task/AIR/package 全链路删除；加入、fresh-deck shuffle、WAITING 离场与 active layer
   removal 分别由 `join_table`、`submit_shuffle_v2`、`leave_table`、`fold_with_proof` 承担。
 - `start_hand` 的零参数 dispatch 已 fail-closed 拒绝尾随 bytes；退休 reset selector 在解码前拒绝。
 - showdown settlement projection 严格校验唯一 `HandSettled` marker、固定升序 winners 与
   award 聚合，以及 `RakeCollected` 的唯一性和 pot/rake 数值；不完整或错配的事件集合不会
-  进入四段 component plan。
+  进入 canonical Stage plan。
 - `set_leave_after_hand` 已有可签发 receipt 的独立幂等 AIR；`fold_with_proof`
   的 mid-round 与 clean last-opponent settlement 路径均绑定 native DLEq receipt、前后牌组
   commitment 与 canonical fold outcome。terminal reset 同时处理 pending addon/leave 时，
-  完整生产 archive 必须携带四段 component proof bundle。
+  完整 hand-stream archive 必须携带 tagged method + tagged Stage package；孤立 single-task archive
+  必须携带四段 component proof bundle。
 - stage-3 dual-proof package 已覆盖全部四条 active crypto route：`fold_with_proof`、
   `submit_shuffle_v2`、`submit_player_reveal_tokens` 与 `submit_reconstruct_deck`。每条 route
   都先对 canonical request 执行一次 host-native
@@ -106,5 +112,7 @@ Orchestrator 上切换 receipt segment；proof/stream 校验失败不会提前�
   block limit 的后续调用会在执行昂贵 verifier 前被 admission 拒绝。
 - 聚合器仅维护 descriptor 链，不验证 child proof；递归聚合生产入口保持 fail-closed。
 - 本地 receipt 链不等同于区块包含或共识锚定；调用方仍需提供经认证的任务来源与链端锚点。
-- `TexasPokerTable` 当前 Borsh schema version 为 v2；旧 v1 table 需要在部署升级边界显式
-  迁移或重建，不能直接按 v2 解码继续运行。
+- `TexasPokerTable` 当前 resolved Borsh schema 为 v29，ObjectDb hot schema 为 v30；历史
+  production table 不提供在线迁移，部署升级需重建 table state。v29 已把 owner-readable
+  partial ciphertext 固定为 `(seat, hole_slot)` ledger；showdown/reveal native request 与 AIR binding
+  均按 exact target 取密文，不得扫描 lineage 或 fallback 到 reconstruct 后的新 deck。

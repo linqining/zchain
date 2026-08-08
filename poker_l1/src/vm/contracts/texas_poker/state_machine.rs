@@ -49,7 +49,7 @@ use super::events::{
 };
 use super::settlement::{self, SettlementPlan};
 use super::types::{
-    CipherDeck, DecryptedCard, NO_SEAT, PlayingSeatStatus, RevealAssignment, RevealPurpose,
+    CipherDeck, NO_SEAT, PartialHoleCard, PlayingSeatStatus, RevealAssignment, RevealPurpose,
     RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus, TexasPokerTable,
     seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove, seat_mask_to_indices,
 };
@@ -425,7 +425,7 @@ pub fn set_initial_encrypted_deck(table: &mut TexasPokerTable) -> PokerL1Result<
             .collect::<Vec<_>>(),
     )?;
     table.deck_state.cards_dealt = 0;
-    table.deck_state.decrypted_cards.clear();
+    table.deck_state.owner_readable_hole_cards.clear();
     Ok(())
 }
 
@@ -458,10 +458,10 @@ fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Res
     //
     // 已发出的旧牌不依赖新 deck 的 index：
     // - 已解出的公共牌明文存于 community_cards（不依赖 index）
-    // - 已部分解密的手牌记录（decrypted_cards 中 ciphertext.is_some() 者）
+    // - 固定 `(seat, hole_slot)` 账本中已部分解密的手牌记录
     //   自包含 partial c2，showdown 解密时不访问 deck_state.encrypted（见
     //   apply_submit_player_reveal_tokens 的 showdown 分支）
-    // 因此保留 decrypted_cards（不清空），仅重置 cards_dealt。
+    // 因此保留 owner_readable_hole_cards（不清空），仅重置 cards_dealt。
     table.deck_state.cards_dealt = 0;
     Ok(())
 }
@@ -882,7 +882,7 @@ fn advance_shuffle(
 /// 重置为 0）让牌局继续。重启 reveal phase 的原则：
 ///
 /// 1. **已解出的牌不动**：已写入 `community_cards` 的公共牌、已部分解密存于
-///    `decrypted_cards`（`ciphertext.is_some()`）的手牌，都不依赖新 deck 的 index，
+///    固定 owner-readable ledger 的手牌，都不依赖新 deck 的 index，
 ///    原样保留。手牌的 partial 记录自包含 c2，showdown 时牌主公开 token 即可解开。
 /// 2. **补发缺失的牌**：以 `community_cards.len()` 为基准补齐到当前轮次所需张数，
 ///    新发的牌从新 deck 的 index=0 开始顺序发出（`cards_dealt` 已被 rebuild 重置）。
@@ -891,9 +891,9 @@ fn advance_shuffle(
 ///
 /// - PREFLOP：正常流程下 preflop 超时走 refund+reset（见 `on_reveal_timeout`），
 ///   不会进 reconstruct；此分支为防御性兜底。若走到这里，说明手牌从未成功发出，
-///   需清空 `decrypted_cards` 中残留的旧 partial 手牌记录后从新 deck 重发。
+///   需清空残留的旧 partial 手牌记录后从新 deck 重发。
 /// - FLOP/TURN/RIVER：按 `community_cards.len()` 补发缺失的公共牌。
-/// - SHOWDOWN：不补发新牌，直接让各牌主从 `decrypted_cards` 的 partial 记录解手牌。
+/// - SHOWDOWN：不补发新牌，直接让各牌主从固定 partial ledger 解手牌。
 fn restart_reveal_after_reconstruct(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
@@ -902,7 +902,7 @@ fn restart_reveal_after_reconstruct(
     match table.round_state() {
         ROUND_PREFLOP => {
             // 防御性：清空残留的旧 partial 手牌记录，避免 showdown 时新旧记录并存。
-            table.deck_state.decrypted_cards.clear();
+            table.deck_state.owner_readable_hole_cards.clear();
             start_preflop_reveal_phase(table, events)?;
         }
         ROUND_FLOP => {
@@ -1095,27 +1095,24 @@ fn start_showdown_reveal_phase(
     let active_seats = get_active_seat_indices(&table.seats);
 
     for &seat in &active_seats {
-        // 在 decrypted_cards 中找属于该玩家且 ciphertext 仍存在的部分解密手牌
-        let mut partial_cards = table
+        // Ledger position already defines canonical owner and dealing slot.
+        let partial_cards = table
             .deck_state
-            .decrypted_cards
-            .iter()
-            .filter(|dc| dc.owner_seat_index == seat)
+            .owner_readable_hole_cards
+            .iter_for_seat(seat)
             .collect::<Vec<_>>();
-        // Partial records may have materialized in different dispatches. Deck lineage, rather than
-        // ledger insertion order, defines the canonical two-card dealing order for this seat.
-        partial_cards.sort_unstable_by_key(|dc| dc.encrypted_card_index);
         let first_slot = table.seats[usize::from(seat)]
             .hand()
             .map_or(0, HoleCards::len);
-        for (offset, dc) in partial_cards.into_iter().enumerate() {
-            let card_slot = first_slot
-                .checked_add(offset)
-                .and_then(|slot| u8::try_from(slot).ok())
-                .ok_or_else(|| PokerL1Error::Serialization("hole-card slot overflow".into()))?;
+        for (card_slot, card) in partial_cards {
+            if usize::from(card_slot) < first_slot {
+                return Err(PokerL1Error::Serialization(format!(
+                    "showdown partial ledger overlaps materialized hand: seat={seat}, slot={card_slot}"
+                )));
+            }
             // pending = [seat]（只牌主自己提交）
             assignments.push(RevealAssignment {
-                encrypted_card_index: dc.encrypted_card_index,
+                encrypted_card_index: card.encrypted_card_index,
                 target: RevealTarget::Hole {
                     seat_index: seat,
                     card_slot,
@@ -1579,19 +1576,42 @@ pub fn apply_submit_player_reveal_tokens(
         let card_index = table.reveal_assignments()[ai].encrypted_card_index;
 
         // 取用于 proof 验证的密文。
-        // - showdown：手牌已部分解密，密文存于 decrypted_cards 的 ciphertext 字段
+        // - showdown：手牌已部分解密，密文存于固定 `(seat, slot)` ledger
         //   （自包含，与 deck_state.encrypted 解耦）。这点对 reconstruct 后的场景
         //   至关重要：rebuild 后 deck_state.encrypted 是全新 deck，旧 card_index 在
         //   其中指向不同密文，但 partial 记录自包含，proof 验证仍基于原 partial 密文。
         // - 其他阶段（preflop/公共牌）：直接用当前 deck 的密文。
         let encrypted_card = if phase == REVEAL_PHASE_SHOWDOWN {
-            table
+            let RevealTarget::Hole {
+                seat_index: owner_seat,
+                card_slot,
+            } = table.reveal_assignments()[ai].target
+            else {
+                return Err(PokerL1Error::Serialization(
+                    "showdown reveal assignment must target a hole-card slot".into(),
+                ));
+            };
+            if owner_seat != seat_index {
+                return Err(PokerL1Error::Serialization(format!(
+                    "showdown reveal submitter {seat_index} does not own target seat {owner_seat}"
+                )));
+            }
+            let partial = table
                 .deck_state
-                .decrypted_cards
-                .iter()
-                .find(|dc| dc.encrypted_card_index == card_index)
-                .map(|dc| dc.ciphertext)
-                .unwrap_or_else(|| table.deck_state.encrypted[card_index as usize])
+                .owner_readable_hole_cards
+                .get(owner_seat, card_slot)
+                .ok_or_else(|| {
+                    PokerL1Error::Serialization(format!(
+                        "showdown partial ciphertext is missing: seat={owner_seat}, slot={card_slot}"
+                    ))
+                })?;
+            if partial.encrypted_card_index != card_index {
+                return Err(PokerL1Error::Serialization(format!(
+                    "showdown assignment/ledger lineage mismatch: assignment={card_index}, ledger={}",
+                    partial.encrypted_card_index
+                )));
+            }
+            partial.ciphertext
         } else {
             if card_index as usize >= table.deck_state.encrypted.len() {
                 return Err(PokerL1Error::Serialization(format!(
@@ -1699,7 +1719,11 @@ fn materialize_completed_reveal_assignments(
     match purpose {
         RevealPurpose::DealHole => {
             for (_, assignment) in &completed {
-                let RevealTarget::Hole { seat_index, .. } = assignment.target else {
+                let RevealTarget::Hole {
+                    seat_index,
+                    card_slot,
+                } = assignment.target
+                else {
                     return Err(PokerL1Error::Serialization(
                         "preflop reveal completed a non-hole assignment".into(),
                     ));
@@ -1714,23 +1738,18 @@ fn materialize_completed_reveal_assignments(
                             "preflop reveal card index {card_index} is out of range"
                         ))
                     })?;
-                if next.deck_state.decrypted_cards.iter().any(|record| {
-                    record.encrypted_card_index == card_index
-                        && record.owner_seat_index == seat_index
-                }) {
-                    return Err(PokerL1Error::Serialization(format!(
-                        "preflop reveal duplicates partial ledger card {card_index}"
-                    )));
-                }
                 let tokens = completed_reveal_tokens(assignment)?;
-                next.deck_state.decrypted_cards.push(DecryptedCard::partial(
-                    card_index,
+                next.deck_state.owner_readable_hole_cards.insert(
                     seat_index,
-                    ElGamalCiphertext {
-                        c1: encrypted.c1,
-                        c2: partial_decrypt_c2(&encrypted.c2, &tokens),
-                    },
-                ));
+                    card_slot,
+                    PartialHoleCard::new(
+                        card_index,
+                        ElGamalCiphertext {
+                            c1: encrypted.c1,
+                            c2: partial_decrypt_c2(&encrypted.c2, &tokens),
+                        },
+                    ),
+                )?;
             }
         }
         RevealPurpose::Board => {
@@ -1867,24 +1886,21 @@ fn materialize_completed_showdown_assignments(
                 "showdown reveal completed a board assignment".into(),
             ));
         };
-        let matches = table
+        let record = table
             .deck_state
-            .decrypted_cards
-            .iter()
-            .enumerate()
-            .filter(|(_, record)| {
-                record.encrypted_card_index == assignment.encrypted_card_index
-                    && record.owner_seat_index == seat_index
-            })
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
+            .owner_readable_hole_cards
+            .get(seat_index, card_slot)
+            .ok_or_else(|| {
+                PokerL1Error::Serialization(format!(
+                    "showdown partial ledger slot is missing: seat={seat_index}, slot={card_slot}"
+                ))
+            })?;
+        if record.encrypted_card_index != assignment.encrypted_card_index {
             return Err(PokerL1Error::Serialization(format!(
-                "showdown card {} has {} partial ledger records",
-                assignment.encrypted_card_index,
-                matches.len()
+                "showdown assignment/ledger lineage mismatch: assignment={}, ledger={}",
+                assignment.encrypted_card_index, record.encrypted_card_index
             )));
         }
-        let (ledger_index, record) = matches[0];
         let plaintext =
             partial_decrypt_c2(&record.ciphertext.c2, &completed_reveal_tokens(assignment)?);
         let (card_id, card) = card_from_plaintext(&plaintext, &canonical_cards)?;
@@ -1893,13 +1909,7 @@ fn materialize_completed_showdown_assignments(
                 "duplicate decrypted card id {card_id} while writing hole cards"
             )));
         }
-        materialized.push((
-            ledger_index,
-            seat_index,
-            card_slot,
-            assignment.encrypted_card_index,
-            card,
-        ));
+        materialized.push((seat_index, card_slot, assignment.encrypted_card_index, card));
     }
 
     let mut next_slot = table
@@ -1907,8 +1917,7 @@ fn materialize_completed_showdown_assignments(
         .iter()
         .map(|seat| seat.hand().map_or(0, HoleCards::len))
         .collect::<Vec<_>>();
-    let mut consumed_ledger = Vec::with_capacity(materialized.len());
-    for (ledger_index, seat_index, card_slot, encrypted_card_index, card) in materialized {
+    for (seat_index, card_slot, encrypted_card_index, card) in materialized {
         let seat = table
             .seats
             .get_mut(usize::from(seat_index))
@@ -1937,30 +1946,12 @@ fn materialize_completed_showdown_assignments(
                 },
             );
         }
-        consumed_ledger.push(ledger_index);
-    }
-    consumed_ledger.sort_unstable();
-    consumed_ledger.dedup();
-    for ledger_index in consumed_ledger.into_iter().rev() {
-        table.deck_state.decrypted_cards.remove(ledger_index);
+        table
+            .deck_state
+            .owner_readable_hole_cards
+            .remove(seat_index, card_slot)?;
     }
     Ok(())
-}
-
-/// 查找手牌归属（preflop 按 active_seats 顺序）。
-fn find_hand_card_owner(table: &TexasPokerTable, card_index: u8) -> Option<u8> {
-    let active = get_active_seat_indices(&table.seats);
-    // 简化：每次新局从 cards_dealt=0 开始；preflop 发 2*n 张
-    let hole_cards_start = 0u8;
-    if card_index < hole_cards_start {
-        return None;
-    }
-    let offset = (card_index - hole_cards_start) / CARDS_PER_PLAYER;
-    if (offset as usize) < active.len() {
-        Some(active[offset as usize])
-    } else {
-        None
-    }
 }
 
 /// 玩家提交 reconstruct deck。
@@ -3322,7 +3313,7 @@ pub fn reset_for_next_hand(
     table.leave_after_hand_mask = 0;
     table.deck_state.encrypted.clear();
     table.deck_state.cards_dealt = 0;
-    table.deck_state.decrypted_cards.clear();
+    table.deck_state.owner_readable_hole_cards.clear();
     table.run_it_twice_state = RunItTwiceState::default();
     table.enter_waiting();
 
@@ -4114,12 +4105,13 @@ mod tests {
         start_showdown_reveal_phase(&mut table, &mut vec![]).unwrap();
         table
             .deck_state
-            .decrypted_cards
-            .push(DecryptedCard::partial(
-                44,
+            .owner_readable_hole_cards
+            .insert(
                 0,
-                table.deck_state.encrypted[44],
-            ));
+                0,
+                PartialHoleCard::new(44, table.deck_state.encrypted[44]),
+            )
+            .unwrap();
         table.active_reveal_state_mut().unwrap().assignments = vec![RevealAssignment {
             encrypted_card_index: 44,
             target: RevealTarget::Hole {
@@ -4187,20 +4179,24 @@ mod tests {
                     scalar_from_u64(1_000 + (seat_index as u64) * 10 + record_index as u64);
                 table
                     .deck_state
-                    .decrypted_cards
-                    .push(DecryptedCard::partial(
-                        (20 + seat_index * 2 + record_index) as u8,
+                    .owner_readable_hole_cards
+                    .insert(
                         seat_index as u8,
-                        ElGamalCiphertext::encrypt(
-                            &plaintext,
-                            &owner_public_keys[seat_index],
-                            &randomness,
+                        record_index as u8,
+                        PartialHoleCard::new(
+                            (20 + seat_index * 2 + record_index) as u8,
+                            ElGamalCiphertext::encrypt(
+                                &plaintext,
+                                &owner_public_keys[seat_index],
+                                &randomness,
+                            ),
                         ),
-                    ));
+                    )
+                    .unwrap();
             }
         }
 
-        let preserved_readable_cards = table.deck_state.decrypted_cards.clone();
+        let preserved_readable_cards = table.deck_state.owner_readable_hole_cards.clone();
         let mut expected_deck =
             canonical_base_deck::<DefaultCurve>(&canonical_cards, &aggregate_pk)
                 .expect("canonical aggregate-key base deck");
@@ -4245,7 +4241,10 @@ mod tests {
 
         assert_eq!(table.deck_state.encrypted.to_vec(), expected_deck);
         assert_eq!(table.deck_state.cards_dealt, 0);
-        assert_eq!(table.deck_state.decrypted_cards, preserved_readable_cards);
+        assert_eq!(
+            table.deck_state.owner_readable_hole_cards,
+            preserved_readable_cards
+        );
         assert_eq!(
             table.reconstruct_state().as_ref(),
             &super::super::types::ReconstructState::default()

@@ -247,7 +247,7 @@ fn run_showdown_hand() -> Result<(), String> {
     table.seats[1].hand.push(Card::new(HEARTS, KING));
     println!("[patch] 跳过 reveal + Alice 手牌: A♠ A♥, Bob 手牌: K♠ K♥");
 
-    // tick → check_reveal_phase_complete → write_decrypted_cards_to_hands (no-op) + settle_hand
+    // normalization materializes exact hole slots and then settles the hand
     state_machine::tick(&mut table, 5_000, &mut events).map_err(|e| format!("tick: {e:?}"))?;
     print_events(&events);
     events.clear();

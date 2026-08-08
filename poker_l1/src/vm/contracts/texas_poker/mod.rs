@@ -76,15 +76,16 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// physical runtime and resolved-snapshot representation; version 27 replaces the redundant
 /// numeric reveal phase with a typed purpose whose exact board street comes from `HandPhase`.
 /// Version 28 replaces the byte-wide `0xff` missing-seat marker with the canonical four-bit
-/// sentinel `0x0f`.
+/// sentinel `0x0f`. Version 29 replaces the variable-length reveal ledger with a fixed
+/// `(seat, hole_slot)` owner-readable partial-ciphertext ledger.
 /// Incompatible older layouts are deliberately unsupported.
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 28;
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 29;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots use resolved schema v28. The v29 ObjectDb encoding combines immutable
+/// Runtime/proof snapshots use resolved schema v29. The v30 ObjectDb encoding combines immutable
 /// context commitments with the same physical tagged-seat and typed-reveal representation.
-pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 29;
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 30;
 
 /// Versioned persisted-state codec and fail-closed legacy migrations.
 pub mod state_codec;

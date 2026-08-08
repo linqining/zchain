@@ -49,7 +49,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     CreateTableArgs, JoinTableArgs, SeatIndexArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
     selectors,
 };
-use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, RevealTarget, TexasPokerTable};
 use poker_protocol::crypto::{ECPoint, ElGamalCiphertext};
 
 use crate::contracts::TexasPokerPlugin;
@@ -643,7 +643,7 @@ fn submit_reveal_batch_for_seat(
         .iter()
         .enumerate()
         .filter(|(_, assignment)| assignment.pending_mask() & (1u16 << submitter_seat) != 0)
-        .map(|(index, assignment)| (index, assignment.encrypted_card_index))
+        .map(|(index, assignment)| (index, assignment.encrypted_card_index, assignment.target))
         .collect::<Vec<_>>();
     if assignment_cards.is_empty() {
         ctx.stopped_at = Some(format!("{method}: seat has no pending reveal assignments"));
@@ -659,17 +659,23 @@ fn submit_reveal_batch_for_seat(
 
     let mut reveal_tokens = Vec::with_capacity(assignment_cards.len());
     let mut proofs = Vec::with_capacity(assignment_cards.len());
-    for (batch_offset, (_, card_index)) in assignment_cards.into_iter().enumerate() {
+    for (batch_offset, (_, card_index, target)) in assignment_cards.into_iter().enumerate() {
         // Showdown binds the owner proof to the self-contained partial ciphertext retained from
         // preflop. Every other phase binds to the current encrypted deck view.
         let card = if reveal_phase == REVEAL_PHASE_SHOWDOWN {
-            plugin
-                .table()
-                .deck_state
-                .decrypted_cards
-                .iter()
-                .find(|card| card.encrypted_card_index == card_index)
-                .map(|card| card.ciphertext)
+            match target {
+                RevealTarget::Hole {
+                    seat_index,
+                    card_slot,
+                } if seat_index == submitter_seat => plugin
+                    .table()
+                    .deck_state
+                    .owner_readable_hole_cards
+                    .get(seat_index, card_slot)
+                    .filter(|card| card.encrypted_card_index == card_index)
+                    .map(|card| card.ciphertext),
+                RevealTarget::Hole { .. } | RevealTarget::Board { .. } => None,
+            }
         } else {
             ctx.deck_view.get(usize::from(card_index)).cloned()
         };

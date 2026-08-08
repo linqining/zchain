@@ -10,7 +10,7 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealPurpose, RevealTarget,
+    PartialHoleCard, ReconstructState, RevealAssignment, RevealPurpose, RevealTarget,
     RevealTokenState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
@@ -177,12 +177,17 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
     seat_fixture::set_stack(&mut table.seats[1], 1_000);
     table.deck_state.contributor_mask = 1;
     table.derived_aggregated_pk().unwrap();
-    table.deck_state.decrypted_cards = readable_cards
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, ciphertext)| DecryptedCard::partial(index as u8, 0, ciphertext))
-        .collect();
+    for (index, ciphertext) in readable_cards.iter().copied().enumerate() {
+        table
+            .deck_state
+            .owner_readable_hole_cards
+            .insert(
+                0,
+                index as u8,
+                PartialHoleCard::new(index as u8, ciphertext),
+            )
+            .unwrap();
+    }
     let epoch_ms = 7_000 + nonce;
     table
         .enter_reconstructing(

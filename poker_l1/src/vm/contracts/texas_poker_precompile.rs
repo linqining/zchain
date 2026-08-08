@@ -61,7 +61,7 @@ pub struct TexasPokerPrecompile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextStorageState {
-    /// The table was already encoded as hot v29 and all three openings were loaded.
+    /// The table was already encoded as hot v30 and all three openings were loaded.
     Existing,
     /// This is the first create-table call.
     NewTable,
@@ -233,7 +233,7 @@ impl Precompile for TexasPokerPrecompile {
 
         let table_id = reserved::texas_poker_contract_id();
 
-        // ObjectDb production state is hot v29 only. Resolved-v28 snapshots remain valid proof
+        // ObjectDb production state is hot v30 only. Resolved-v29 snapshots remain valid proof
         // payloads, but accepting them here would silently bypass independently authenticated
         // metadata/rules/governance openings.
         let (mut table, context_state) = match object_db.read(&table_id) {
@@ -247,7 +247,7 @@ impl Precompile for TexasPokerPrecompile {
                 }
                 if !crate::vm::contracts::texas_poker::state_codec::is_hot_table_state(&obj.data) {
                     return Err(PokerL1Error::Serialization(
-                        "Texas ObjectDb table must use hot v29 state".into(),
+                        "Texas ObjectDb table must use hot v30 state".into(),
                     ));
                 }
                 let openings = Self::read_context_openings(object_db, table_id)?;
@@ -932,7 +932,7 @@ mod tests {
                 &mut legacy_db,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("must use hot v29 state"));
+        assert!(error.to_string().contains("must use hot v30 state"));
 
         let mut failed_create_db = ObjectDb::open_inmemory().unwrap();
         let invalid_args = borsh::to_vec(&CreateTableArgs {

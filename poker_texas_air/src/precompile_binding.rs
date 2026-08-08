@@ -10,7 +10,7 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
-use poker_l1::vm::contracts::texas_poker::types::seat_mask_contains;
+use poker_l1::vm::contracts::texas_poker::types::{RevealTarget, seat_mask_contains};
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext, N_CARDS};
 use poker_protocol::precompile::{
     NativeBls12381ReconstructionV3Verifier, NativeBls12381ShuffleVerifier,
@@ -218,16 +218,27 @@ impl RevealTokenVerifyRequest {
             }
             let card_index = usize::from(assignment.encrypted_card_index);
             let encrypted_card = if reveal_phase == REVEAL_PHASE_SHOWDOWN {
+                let RevealTarget::Hole {
+                    seat_index: owner_seat,
+                    card_slot,
+                } = assignment.target
+                else {
+                    return Err(TexasAirError::SpecViolation(format!(
+                        "showdown reveal assignment {assignment_index} does not target a hole card"
+                    )));
+                };
+                if owner_seat != args.seat_index {
+                    return Err(TexasAirError::SpecViolation(format!(
+                        "showdown reveal seat {} does not own target seat {owner_seat}",
+                        args.seat_index
+                    )));
+                }
                 pre_table
                     .deck_state
-                    .decrypted_cards
-                    .iter()
-                    .find(|card| {
-                        usize::from(card.encrypted_card_index) == card_index
-                            && card.owner_seat_index == args.seat_index
-                    })
+                    .owner_readable_hole_cards
+                    .get(owner_seat, card_slot)
+                    .filter(|card| usize::from(card.encrypted_card_index) == card_index)
                     .map(|card| card.ciphertext)
-                    .or_else(|| pre_table.deck_state.encrypted.get(card_index).copied())
             } else {
                 pre_table.deck_state.encrypted.get(card_index).copied()
             }

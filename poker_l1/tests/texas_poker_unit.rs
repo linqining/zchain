@@ -2016,7 +2016,7 @@ fn test_set_initial_encrypted_deck() {
     assert_eq!(table.deck_state.encrypted.len(), 52);
     assert_eq!(utils::generate_plaintext_cards().len(), 52);
     assert_eq!(table.deck_state.cards_dealt, 0);
-    assert!(table.deck_state.decrypted_cards.is_empty());
+    assert!(table.deck_state.owner_readable_hole_cards.is_empty());
 }
 
 // ========== state_machine.rs 补充边缘场景 — 状态谓词 ==========

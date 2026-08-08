@@ -1,9 +1,9 @@
-//! State root 计算 — Poseidon252 over ObjectDb hot-v29 projection。
+//! State root 计算 — Poseidon252 over ObjectDb hot-v30 projection。
 //!
 //! ## 设计
 //!
 //! proof transcript 仍携带完整 resolved `TexasPokerTable` preimage，供 verifier 重放业务
-//! 逻辑；公开 state root 则承诺与 ObjectDb 完全相同的 hot-v29 bytes。metadata、rules、
+//! 逻辑；公开 state root 则承诺与 ObjectDb 完全相同的 hot-v30 bytes。metadata、rules、
 //! governance 通过三个固定宽度 opening digest 进入 hot state，而不是在每个 hand-local
 //! transition 中重复展开低频字段。
 //!
@@ -125,7 +125,7 @@ pub fn bool_to_field(b: bool) -> FieldElement {
 pub fn table_state_preimage(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<FieldElement>> {
-    canonical_borsh_preimage("zchain.texas_poker.table.v10", table)
+    canonical_borsh_preimage("zchain.texas_poker.table.v11", table)
 }
 
 /// 从 canonical table preimage 反解完整 `TexasPokerTable`。
@@ -137,7 +137,7 @@ pub fn table_state_preimage(
 pub fn table_from_state_preimage(
     image: &[FieldElement],
 ) -> TexasAirResult<poker_l1::vm::contracts::texas_poker::types::TexasPokerTable> {
-    const TAG: &str = "zchain.texas_poker.table.v10";
+    const TAG: &str = "zchain.texas_poker.table.v11";
     let payload = decode_canonical_borsh_preimage(image, TAG)?;
     let table =
         poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::try_from_slice(&payload)
@@ -152,16 +152,16 @@ pub fn table_from_state_preimage(
     Ok(table)
 }
 
-/// Canonical preimage of the exact ObjectDb hot-v29 table projection.
+/// Canonical preimage of the exact ObjectDb hot-v30 table projection.
 pub fn hot_table_state_preimage(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<FieldElement>> {
     let bytes = poker_l1::vm::contracts::texas_poker::state_codec::encode_hot_table_state(table)
         .map_err(|e| TexasAirError::StateRootError(format!("encode Texas hot table: {e}")))?;
-    canonical_bytes_preimage("zchain.texas_poker.hot_table.v29", &bytes)
+    canonical_bytes_preimage("zchain.texas_poker.hot_table.v30", &bytes)
 }
 
-/// Compute the ObjectDb-compatible hot-v29 state root.
+/// Compute the ObjectDb-compatible hot-v30 state root.
 ///
 /// # Errors
 ///
@@ -171,7 +171,7 @@ pub fn compute_state_root(
 ) -> TexasAirResult<StateRoot> {
     // `create_table` proves transition from ObjectDb absence.  The VM represents that absence
     // with one exact in-memory placeholder; it has no governance opening and therefore maps to
-    // the distinguished zero root rather than a hot-v29 object commitment.
+    // the distinguished zero root rather than a hot-v30 object commitment.
     use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
     let absent = TexasPokerTable::new(table.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
     if table == &absent {
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_table_state_preimage_rejects_noncanonical_chunk_prefix() {
-        const TAG: &str = "zchain.texas_poker.table.v10";
+        const TAG: &str = "zchain.texas_poker.table.v11";
         let table = poker_l1::vm::contracts::texas_poker::types::TexasPokerTable::new(
             poker_l1::object_model::ObjectID::new([0x11; 20], 3),
             "noncanonical-prefix".into(),

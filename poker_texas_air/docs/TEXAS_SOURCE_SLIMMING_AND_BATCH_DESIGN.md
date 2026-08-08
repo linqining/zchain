@@ -94,18 +94,20 @@ plaintext-base deck，新一手的 completed mask 必须从零开始、pending m
 
 外部命令序号也已完成收口。schema v17 已物理删除桌内逻辑 `version`；所有真正改变状态的
 dispatch 只在原子提交边界写入 `post.call_seq = pre.call_seq + 1`，内部 normalize、reset、settlement
-执行多少个 micro-stage 都不再改变该事实。no-op `tick` 不递增序号、也不产生 proof task。
-Kick/reveal/tick 的复合分支改由 canonical replay events 与四阶段 composition plan 判定，禁止再用
+执行多少个 micro-stage 都不再改变该事实。历史 no-op `tick` 不递增序号、也不产生 proof task，
+当前 selector 已不再接受它。Kick/reveal/advance-deadline 的复合分支改由 canonical replay events 与
+四阶段 composition plan 判定，禁止再用
 `version + 2/+N` 猜测 settlement。这使 method batch 的每一行都能使用固定的命令序号约束，Stage
 顺序只由 batch id/row index 表达。ObjectDb 的 `Object.version` 继续承担 CAS/乐观锁职责；现有 proof
-ABI 中仍名为 `pre_version/post_version` 的兼容槽位暂时承载 `call_seq`，待 method-batch v2 再物理改名。
+ABI 中仍名为 `pre_version/post_version` 的 legacy 兼容槽位承载 `call_seq`；tagged method ABI 已直接
+使用 `pre_call_seq/post_call_seq`。
 
 schema v18/v19/v20 已依次完成三项 custody 去重：v18 删除 `addon_pool`，以九个
 `Seat.pending_addon` 的 checked sum 作为唯一 pending 明细；v19 删除 `ante_collected`，StartHand AIR
 只接受由 `post_pot - pre_pot` 与逐 seat debit 确定性派生的 transition-local ante；v20 删除
 `rake_collected`，Treasury 出金改由 `DispatchOutput` 事件导出的唯一
 `SettlementTreasuryReceipt` 驱动。历史 production 数据已明确不再支持，v2-v22 migration codec
-已从执行 crate 删除；任何非当前 resolved-v28 / ObjectDb hot-v29 输入都直接 fail-closed，不再把
+已从执行 crate 删除；任何非当前 resolved-v29 / ObjectDb hot-v30 输入都直接 fail-closed，不再把
 旧 schema 的冗余镜像带入生产二进制。Receipt 同时绑定 showdown 的 `SettlementPlanCommitted` 或无摊牌的
 `HandEndedWithoutShowdown`，重复、缺失或金额不匹配均在创建 UTXO 前拒绝。
 
@@ -129,7 +131,7 @@ root 已只编码一份 `rules`。v23 对非法 capacity/blinds/mode tag 和 `ra
 v22 及更早 bytes 统一拒绝。该步骤只是“规则字段去重并建立对象边界”，还不等于 rules 已移出 hot table；真正
 降低每个 transition state-root preimage，仍需后续独立 `TableRules` object/opening/hash binding。
 
-当前 ObjectDb hot schema v29（低频对象拆分首次落地于 v24）只保存 hand-local mutable state
+当前 ObjectDb hot schema v30（低频对象拆分首次落地于 v24）只保存 hand-local mutable state
 与三组 `{object_id, digest}`；`TableMetadata`、`TableRules`、`GovernancePolicy` 作为确定性 ID 的
 immutable object 独立存储。precompile 每次执行先认证 type/ownership/ID/opening digest 再 hydrate
 resolved runtime table；旧 full-v23 ObjectDb object、缺失 opening、替换 opening、错误 object type 或
@@ -137,7 +139,7 @@ ownership 均 fail-closed。create-table 以同一 capture/batch 创建四个对
 table，三个 context object 只进入 read set。
 
 AIR 的 resolved image 继续携带完整 table，供 host-native verifier 重放业务与密码学 binding；公开
-state root 已切换为 `Poseidon252(canonical(hot-v29 bytes))`。因此 low-frequency value 只通过固定宽度
+state root 已切换为 `Poseidon252(canonical(hot-v30 bytes))`。因此 low-frequency value 只通过固定宽度
 digest 进入每个 transition root，不再重复展开。consensus anchor wire 已直接破坏旧布局：每个 endpoint
 必须提供 hot table、metadata、rules、governance 四份独立 SMT inclusion proof，并证明四者属于同一
 authenticated block state root 后才可 hydrate。create-table 前态是 ObjectDb absence，只允许一个精确
@@ -178,8 +180,8 @@ placeholder 并映射为零 root。
 | 已删除 | `ShuffleState.current_shuffler` | schema v11 使用 `first(pending_mask)`；v5-v10 迁移校验后丢弃旧字段。|
 | 可立即派生 | `RevealTokenData.seat_index` | token 按 seat slot 或 seat-index 升序存放后，提交者由 slot/bitmap 决定。|
 | normalize 后可删 | `RevealAssignment.decrypted` | `pending_mask == 0` 时立即 materialize card 并移除 assignment，不持久化“已完成但未消费”状态。|
-| normalize 后可删 | 已 materialize 的 `DecryptedCard` | 明文已经写入 hole/board 后不再重复保存在 deck ledger；只保留仍需继续部分解密的记录。|
-| hot v29 当前表示（拆分自 v28） | `name`、rules、creator/governance | 已拆成三个 immutable object；hot table 只保存确定性 ID 与 domain-separated digest，事件/RPC/proof replay 使用认证 opening 展开。|
+| schema v29 已完成 | `DeckState.decrypted_cards: Vec<DecryptedCard>` | 改为固定 `(seat, hole_slot)` 的 `PartialHoleCardLedger`；owner/slot 由数组位置唯一表示，只保留 lineage deck index 和 owner-private ciphertext。|
+| hot v30 当前表示（拆分自 resolved v29） | `name`、rules、creator/governance | 已拆成三个 immutable object；hot table 只保存确定性 ID 与 domain-separated digest，事件/RPC/proof replay 使用认证 opening 展开。|
 | schema v20 已完成 | `rake_collected` | 已改成由 settlement events 唯一派生的 `SettlementTreasuryReceipt`；table/state root 不再保存“写入后立刻清零”的中转。|
 | schema v18 已完成 | `addon_pool` | 已删除；唯一事实是 `sum(seat.pending_addon)`，所有 custody delta 使用 checked plan。|
 | schema v19 已完成 | `ante_collected` | 已删除；start-hand amount 由逐 seat debit 与 pot delta 确定性派生。|
@@ -226,7 +228,7 @@ Tagged-union Stage 已稳定且 status 列确认为热点后再做。
 |---|---|---|
 | `TimeoutConfig.ready_wait_ms/hand_complete_wait_ms` | schema v7 直接删除 | 当前生产状态机没有读取；显式 `start_hand` 和 normalize 后的原子 reset 已取代这两个计时器。|
 | `TexasPokerTable.id` | 中期移出 table payload | ObjectDb key、dispatch context 和 AIR 公共输入已经绑定 table id；前提是对象存储层保证 key/payload 不可错配。事件从执行上下文取 id。|
-| `state_schema_version` | 已移到 codec envelope | runtime table 不再保存可变版本字段；resolved v28/hot v29 envelope 与 state-root domain 继续绑定并严格拒绝错误版本。|
+| `state_schema_version` | 已移到 codec envelope | runtime table 不再保存可变版本字段；resolved v29/hot v30 envelope 与 state-root domain 继续绑定并严格拒绝错误版本。|
 | `creator` | hot schema 已移入 `GovernancePolicy` | runtime/proof snapshot 的 `creator` 来自 authenticated opening；生产 ObjectDb 不再重复保存。未来扩展 admin set 必须同时升级 policy、receipt 与 AIR role semantics。|
 | flat rules fields | schema v23 已收口为 `rules: TableRules`，hot schema 已移入独立 ObjectDb opening | hot table 只保存 metadata/rules/governance 的 typed ID + digest binding；precompile、consensus anchor 和 AIR state root 都要求 exact opening。|
 | `max_players` | 与 `seats` 表示二选一 | 若继续使用长度永久不变的 `Vec<Seat>`，容量可由 `seats.len()` 派生；若改固定 `[Seat; 9]`，则必须保留独立 `seat_capacity`。不要同时保存两份容量事实。|
@@ -237,7 +239,7 @@ Tagged-union Stage 已稳定且 status 列确认为热点后再做。
 | `RevealAssignment.encrypted_card_index/runout_index/board_position` | 合并成 `RevealTarget` tagged payload + deck index | `Hole { seat, slot }` 与 `Board { runout_bit, position }` 消灭 `board_position=0xff` 等哨兵组合；deck index 仍是独立 lineage。|
 | `RevealTokenData.seat_index` | 删除 | 保存 `submitted_mask` 和按 seat 升序排列的 token；提交者由 mask 中第 n 个 bit 唯一确定。若 required participant mask 可由 deck lineage 和 target 推导，则只需保存 pending/submitted 二者之一。|
 | `RevealAssignment.decrypted` | 删除 | `pending_mask == 0` 后必须在同一 normalize 中验证、materialize 并移除 assignment，不能持久化完成但未消费的 bool。|
-| `DeckState.decrypted_cards` 的 completed record | 删除 | plaintext 写入 hole/board 后立即移除；ledger 改成只允许 `PartialHole { target, deck_epoch, ciphertext }`，从类型上消灭 ciphertext/plaintext 两个 Option 的非法组合。|
+| schema v29 已完成 | `DeckState.decrypted_cards` 可变 ledger | 改为 9 座位 × 2 hole slot 的固定 ledger；plaintext 写入 hand/board 后立即移除，public card 不得进入该 ledger。|
 | `RunItTwiceState.shared_board_len` | schema v13 已改成 `RitStartStreet::{Preflop, Flop, Turn}` | 合法值只有 `0/3/4`；street tag 确定性映射到共享前缀长度，旧非法组合 fail-closed。|
 
 `bool -> bit` 只适合正交、经常一起扫描的开关，例如九个 seat 的 acted/leave flags。互斥状态必须用
@@ -293,8 +295,10 @@ method-batch ABI 应直接使用 `pre_call_seq/post_call_seq`，不再延续这�
    contributor、越界 seat 或非 52-card 输入均拒绝。原 `OUTPUT_SUBMITTED_COUNT` AIR 列未参与
    任何约束，现已连同重复的 runtime count 字段删除。
 
-4. `decrypted_cards` 只保留尚需用于 owner/showdown/reconstruct 的 partial ciphertext。
-   已写入 `hand/board` 的 plaintext record 立即删除；assignment id 与目标位置提供 lineage。
+4. 已完成：`owner_readable_hole_cards` 仅保留尚需用于 owner/showdown/reconstruct
+   的 partial ciphertext。owner seat 与 hole slot 由固定数组位置唯一决定，重复 slot、重复
+   lineage index、越界 index 和与已 materialize hand 重叠均 fail-closed。reconstruct V3 readable
+   cards 与 prior-state digest 统一按 slot 0 -> 1 编码。
 
 5. 已完成：schema v23 先把 blinds、timeouts、ante/rake/RIT rules 收口到单一 `TableRules`；hot
    v28 再把它与 `TableMetadata { name }`、`GovernancePolicy { creator/admin set }` 分别保存为
@@ -447,7 +451,7 @@ fail-closed，避免验证一份随后被 `start_hand` 丢弃的 shuffle output�
 | schema v14 已完成 | `HandPhase::Shuffling { purpose, street, suspended_reveal: Option<_> }` | `ShufflingPhase::Initial { ... } | Reconstruct { street, suspended_reveal, ... }` | 从类型上消灭 `Initial + Some`、`Reconstruct + None`；v13 migration 只接受 canonical 搭配 |
 | schema v15 已完成 | active phase 的 `deadline_ms == 0` 哨兵 | active variant 必带已认证的非零绝对 deadline | command 尾部 `normalize_until_blocked(consensus_timestamp)` 原子 arm；v14 未 armed active state fail-closed |
 | schema v16 已完成 | `Vec<ElGamalCiphertext>` 表示的 52-card deck | `CipherDeck::Absent | Active([ElGamalCiphertext; 52])` | runtime/new bytes 无法表达非法长度；v15 的 0/52 精确迁移，其他长度 fail-closed |
-| 已完成（resolved v28 / hot v29） | `NO_SEAT = 0xff` | 4-bit canonical sentinel `0x0f` | runtime、resolved/hot codec 与 AIR stage sentinel 已统一；seat index 只接受 `0..8` 或 `15`，旧 `0xff` 状态 fail-closed。|
+| 已完成（resolved v28 / hot v29） | `NO_SEAT = 0xff` | 4-bit canonical sentinel `0x0f` | runtime、resolved/hot codec 与 AIR stage sentinel 已统一；seat index 只接受 `0..8` 或 `15`，旧 `0xff` 状态 fail-closed。当前 schema 已继续升级为 resolved v29 / hot v30。|
 | 已完成 | `TickArgs.now_ms` | 物理删除，deadline command 使用空 payload | fresh `advance_deadline` 与 retired `tick` replay 都只使用 authenticated `DispatchContext.block_timestamp`；任何 timestamp payload fail-closed。|
 | 已完成 | `join_table.player`、普通玩家动作/资金/离场请求的 `seat_index`、四类 active Mental Poker 的可派生 actor | 从 caller/当前 actor 派生 | canonical task/batch payload 不再编码这些字段；join 的 PK ownership proof 已进入 `join_table`，四类 active crypto statement/proof 原样保留，verifier 从 authenticated context + pre-state 重建边界 ABI。|
 | 已完成 | `KickPlayerArgs.reason` | typed `KickCause` + seat-only canonical admin command | external admin selector 与 canonical payload 都只携带目标 seat；legacy selector 仅接受 `Admin`，其他值 fail-closed；timeout/reconstruct timeout 只能由对应状态机路径产生。|
@@ -500,14 +504,15 @@ seat union 对证明宽度的收益会明显大于 27-bit status packing。
 
 ### Reveal 与 deck 中还可消除的重复表示
 
-- resolved-v28/hot-v29 延续 typed reveal 表示：已删除 `RevealTokenState.reveal_phase`，改为
+- resolved-v29/hot-v30 延续 typed reveal 表示：已删除 `RevealTokenState.reveal_phase`，改为
   `RevealPurpose::{DealHole, Board, ShowdownOwner}`。公共牌的 flop/turn/river 只保存在外层
   `HandPhase.street`，numeric phase 仅在 event/AIR ABI 边界唯一投影；`RevealPurpose` 没有 `None`
   variant，因此 persisted `NONE + assignments` 已不可表达。旧 `REDEAL` 常量只保留在稳定 ABI
   常量表中，生产状态机没有第二套 redeal 状态。
-- `DeckState.decrypted_cards: Vec<_>` 不应继续混放 private partial ciphertext 与已经 resolved 的
-  plaintext。resolved card 必须由同一 normalize suffix 直接写入 hole/board 并删除；跨命令只保留
-  owner-private partial，按固定 `(seat, hole_slot)` 索引表示，消除 Vec 长度、重复 index 与扫描成本。
+- schema v29 已把 `DeckState.decrypted_cards: Vec<_>` 替换为
+  `PartialHoleCardLedger[seat][hole_slot]`。跨命令只保留 owner-private partial；owner/slot 不再
+  重复编码。showdown 的 proof request 必须精确匹配 assignment target 的 `(seat, slot, lineage)`，
+  不再按 deck index 扫描，也不得 fallback 到 reconstruct 后的新 deck。
 - `DeckState.cards_dealt` 暂时保留。它是加密牌组的 canonical allocation cursor；在 reveal assignment、
   private partial 与 RIT 双 runout 都完成固定槽位化之前，单纯用 hole/board 长度反推会漏掉尚未
   materialize 的已分配牌。
@@ -781,7 +786,8 @@ Borsh 字节更贵，所以优先删除重复事实和变长容器，再考虑 b
     schema v21 已清理 reveal 临时完成态；schema v22 完成 persisted seat union，resolved-v25/hot-v26
     又完成 runtime `Seat` 物理 tagged union 与 codec mirror 删除；resolved-v27/hot-v28 完成 typed
     reveal purpose 并删除持久化 numeric reveal phase，resolved-v28/hot-v29 再统一 missing-seat 为
-    4-bit `0x0f` sentinel；schema v23 已把所有规则字段物理
+    4-bit `0x0f` sentinel；resolved-v29/hot-v30 又把 owner-readable partial ledger 固定为
+    `(seat, hole_slot)` 表示，旧 Vec 编码直接 fail-closed；schema v23 已把所有规则字段物理
     收口为单一 `TableRules`。三个 immutable context opening 已完成，v2-v24 historical migration code
     已从 production crate 删除。durable batch statement 已收敛为连续 state stream，并完成原始
     method payload 的 batch-id/row-index/Stage span 数据契约；单份 tagged method proof 已生成并与

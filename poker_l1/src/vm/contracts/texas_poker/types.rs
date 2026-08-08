@@ -50,13 +50,6 @@ use super::constants::{
 
 // ========== 常量 ==========
 
-/// 公共牌 owner_seat_index 特殊值（u8 域：表示该牌不属于任何玩家）。
-///
-/// 注意：constants.rs 中的 `COMMUNITY_CARD_OWNER` 是 u64（与 Move 一致），
-/// 但 `DecryptedCard.owner_seat_index` 在 Rust 端使用 u8（座位数最多 9），
-/// 因此这里用 `u8::MAX` 作为等价哨兵。
-pub const OWNER_SEAT_PUBLIC: u8 = u8::MAX;
-
 /// 空座位标识（player = [0; 20]）。
 pub const EMPTY_PLAYER: Address = [0u8; 20];
 
@@ -1431,38 +1424,170 @@ fn canonical_absolute_deadline(
     })
 }
 
-// ========== 解密牌账本 ==========
+// ========== Owner-readable hole-card ledger ==========
 
-/// One authenticated partial-ciphertext reveal-ledger record retained until owner reveal.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub struct DecryptedCard {
-    /// Original encrypted deck index (lineage only; not a card identity).
+/// Fixed number of private hole-card slots retained for each seat.
+pub const HOLE_CARD_SLOTS: usize = 2;
+
+/// One authenticated partial ciphertext retained until its owner reveal.
+///
+/// Owner seat and hole-card slot are deliberately absent: the enclosing fixed ledger position is
+/// their canonical representation. `encrypted_card_index` is lineage metadata only and never a
+/// plaintext card identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct PartialHoleCard {
+    /// Original encrypted-deck index in the deck lineage that produced this partial.
     pub encrypted_card_index: u8,
-    /// Owner seat (`OWNER_SEAT_PUBLIC` for community cards).
-    pub owner_seat_index: u8,
-    /// Ciphertext after every non-owner reveal layer was removed.
+    /// Ciphertext after every non-owner reveal layer has been removed.
     pub ciphertext: ElGamalCiphertext,
 }
 
-impl DecryptedCard {
-    /// Construct a partial owner-readable record.
+impl PartialHoleCard {
+    /// Construct one lineage-bound owner-readable partial ciphertext.
     #[must_use]
-    pub fn partial(
-        encrypted_card_index: u8,
-        owner_seat_index: u8,
-        ciphertext: ElGamalCiphertext,
-    ) -> Self {
+    pub const fn new(encrypted_card_index: u8, ciphertext: ElGamalCiphertext) -> Self {
         Self {
             encrypted_card_index,
-            owner_seat_index,
             ciphertext,
         }
     }
+}
 
-    /// Borrow the partial ciphertext.
+/// The two fixed partial-ciphertext slots belonging to one seat.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+struct SeatPartialHoleCards {
+    slots: [Option<PartialHoleCard>; HOLE_CARD_SLOTS],
+}
+
+impl Default for SeatPartialHoleCards {
+    fn default() -> Self {
+        Self {
+            slots: [None; HOLE_CARD_SLOTS],
+        }
+    }
+}
+
+/// Fixed `(seat, hole_slot)` owner-readable ciphertext ledger.
+///
+/// This removes variable-length state, duplicate owner fields and insertion-order semantics from
+/// the consensus representation. All iteration is canonical: ascending seat, then slot 0 -> 1.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct PartialHoleCardLedger {
+    seats: [SeatPartialHoleCards; MAX_SEATS as usize],
+}
+
+impl Default for PartialHoleCardLedger {
+    fn default() -> Self {
+        Self {
+            seats: std::array::from_fn(|_| SeatPartialHoleCards::default()),
+        }
+    }
+}
+
+impl PartialHoleCardLedger {
+    /// Borrow the partial at one exact owner/slot position.
     #[must_use]
-    pub const fn ciphertext(&self) -> &ElGamalCiphertext {
-        &self.ciphertext
+    pub fn get(&self, seat_index: u8, card_slot: u8) -> Option<&PartialHoleCard> {
+        self.seats
+            .get(usize::from(seat_index))?
+            .slots
+            .get(usize::from(card_slot))?
+            .as_ref()
+    }
+
+    /// Insert exactly one owner-readable partial, rejecting invalid positions, duplicate slots and
+    /// duplicate deck lineage indices anywhere in the hand.
+    pub fn insert(
+        &mut self,
+        seat_index: u8,
+        card_slot: u8,
+        card: PartialHoleCard,
+    ) -> PokerL1Result<()> {
+        if seat_index >= MAX_SEATS || usize::from(card_slot) >= HOLE_CARD_SLOTS {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas partial hole-card position is out of range: seat={seat_index}, slot={card_slot}"
+            )));
+        }
+        if usize::from(card.encrypted_card_index) >= CIPHER_DECK_SIZE {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas partial hole card has out-of-range deck index {}",
+                card.encrypted_card_index
+            )));
+        }
+        if self
+            .iter()
+            .any(|(_, _, prior)| prior.encrypted_card_index == card.encrypted_card_index)
+        {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas partial hole-card ledger duplicates deck index {}",
+                card.encrypted_card_index
+            )));
+        }
+        let slot = &mut self.seats[usize::from(seat_index)].slots[usize::from(card_slot)];
+        if slot.is_some() {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas partial hole-card slot is already occupied: seat={seat_index}, slot={card_slot}"
+            )));
+        }
+        *slot = Some(card);
+        Ok(())
+    }
+
+    /// Remove one exact ledger position.
+    pub fn remove(&mut self, seat_index: u8, card_slot: u8) -> PokerL1Result<PartialHoleCard> {
+        let slot = self
+            .seats
+            .get_mut(usize::from(seat_index))
+            .and_then(|seat| seat.slots.get_mut(usize::from(card_slot)))
+            .ok_or_else(|| {
+                PokerL1Error::Serialization(format!(
+                    "Texas partial hole-card position is out of range: seat={seat_index}, slot={card_slot}"
+                ))
+            })?;
+        slot.take().ok_or_else(|| {
+            PokerL1Error::Serialization(format!(
+                "Texas partial hole-card slot is empty: seat={seat_index}, slot={card_slot}"
+            ))
+        })
+    }
+
+    #[must_use]
+    /// Iterate one seat's live partials in canonical slot order.
+    pub fn iter_for_seat(&self, seat_index: u8) -> impl Iterator<Item = (u8, &PartialHoleCard)> {
+        self.seats
+            .get(usize::from(seat_index))
+            .into_iter()
+            .flat_map(|seat| seat.slots.iter())
+            .enumerate()
+            .filter_map(|(slot, card)| card.as_ref().map(|card| (slot as u8, card)))
+    }
+
+    #[must_use]
+    /// Iterate every live partial in canonical seat/slot order.
+    pub fn iter(&self) -> impl Iterator<Item = (u8, u8, &PartialHoleCard)> {
+        self.seats
+            .iter()
+            .enumerate()
+            .flat_map(|(seat_index, seat)| {
+                seat.slots
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(card_slot, card)| {
+                        card.as_ref()
+                            .map(|card| (seat_index as u8, card_slot as u8, card))
+                    })
+            })
+    }
+
+    #[must_use]
+    /// Return whether every fixed ledger slot is empty.
+    pub fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+
+    /// Clear every owner/slot position.
+    pub fn clear(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -1607,8 +1732,8 @@ pub struct DeckState {
     pub contributor_mask: SeatMask,
     /// 已从牌组发出的牌数量。
     pub cards_dealt: u8,
-    /// 已解密的合法牌列表。
-    pub decrypted_cards: Vec<DecryptedCard>,
+    /// Owner-private partial ciphertexts at canonical `(seat, hole_slot)` positions.
+    pub owner_readable_hole_cards: PartialHoleCardLedger,
 }
 
 impl Default for DeckState {
@@ -1617,7 +1742,7 @@ impl Default for DeckState {
             encrypted: CipherDeck::Absent,
             contributor_mask: 0,
             cards_dealt: 0,
-            decrypted_cards: vec![],
+            owner_readable_hole_cards: PartialHoleCardLedger::default(),
         }
     }
 }
@@ -2946,37 +3071,34 @@ impl TexasPokerTable {
             }
             seen_cards[card_id] = true;
         }
-        for (record_index, record) in self.deck_state.decrypted_cards.iter().enumerate() {
+        let mut seen_lineage = [false; CIPHER_DECK_SIZE];
+        for (seat_index, card_slot, record) in self.deck_state.owner_readable_hole_cards.iter() {
             if usize::from(record.encrypted_card_index) >= 52 {
                 return Err(PokerL1Error::Serialization(format!(
-                    "Texas reveal ledger record {record_index} has out-of-range deck index {}",
+                    "Texas partial hole card seat={seat_index} slot={card_slot} has out-of-range deck index {}",
                     record.encrypted_card_index
                 )));
             }
-            if record.owner_seat_index != OWNER_SEAT_PUBLIC
-                && record.owner_seat_index >= self.max_players
-            {
+            if seat_index >= self.max_players {
                 return Err(PokerL1Error::Serialization(format!(
-                    "Texas reveal ledger record {record_index} has out-of-range owner {}",
-                    record.owner_seat_index
+                    "Texas partial hole-card ledger has out-of-range owner seat {seat_index}"
                 )));
             }
-            if self.deck_state.decrypted_cards[..record_index]
-                .iter()
-                .any(|prior| {
-                    prior.encrypted_card_index == record.encrypted_card_index
-                        && prior.owner_seat_index == record.owner_seat_index
-                })
-            {
+            let lineage_index = usize::from(record.encrypted_card_index);
+            if seen_lineage[lineage_index] {
                 return Err(PokerL1Error::Serialization(format!(
-                    "Texas reveal ledger contains duplicate lineage owner={} deck_index={}",
-                    record.owner_seat_index, record.encrypted_card_index
+                    "Texas partial hole-card ledger contains duplicate deck index {}",
+                    record.encrypted_card_index
                 )));
             }
-            if record.owner_seat_index == OWNER_SEAT_PUBLIC {
-                return Err(PokerL1Error::Serialization(
-                    "Texas public reveal ledger record cannot persist".into(),
-                ));
+            seen_lineage[lineage_index] = true;
+            if self.seats[usize::from(seat_index)]
+                .hand()
+                .is_some_and(|hand| usize::from(card_slot) < hand.len())
+            {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas partial hole-card ledger overlaps materialized hand: seat={seat_index}, slot={card_slot}"
+                )));
             }
         }
         let validate_mask = |mask: SeatMask, label: &str| -> PokerL1Result<()> {
@@ -3033,6 +3155,94 @@ mod tests {
 
     fn dummy_table_id() -> ObjectID {
         ObjectID::new([0xFF; 20], 0)
+    }
+
+    fn partial_hole_card(deck_index: u8) -> PartialHoleCard {
+        PartialHoleCard::new(
+            deck_index,
+            ElGamalCiphertext {
+                c1: G1Projective::generator(),
+                c2: G1Projective::generator(),
+            },
+        )
+    }
+
+    #[test]
+    fn partial_hole_ledger_is_fixed_and_iterates_by_seat_then_slot() {
+        let mut ledger = PartialHoleCardLedger::default();
+        ledger.insert(2, 1, partial_hole_card(19)).unwrap();
+        ledger.insert(0, 1, partial_hole_card(7)).unwrap();
+        ledger.insert(0, 0, partial_hole_card(11)).unwrap();
+
+        assert_eq!(
+            ledger
+                .iter()
+                .map(|(seat, slot, card)| (seat, slot, card.encrypted_card_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 11), (0, 1, 7), (2, 1, 19)]
+        );
+        assert_eq!(
+            ledger
+                .iter_for_seat(0)
+                .map(|(slot, card)| (slot, card.encrypted_card_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 11), (1, 7)]
+        );
+        assert_eq!(ledger.remove(0, 0).unwrap().encrypted_card_index, 11);
+        assert!(ledger.get(0, 0).is_none());
+    }
+
+    #[test]
+    fn partial_hole_ledger_rejects_duplicate_slots_lineage_and_bounds() {
+        let mut ledger = PartialHoleCardLedger::default();
+        ledger.insert(0, 0, partial_hole_card(3)).unwrap();
+
+        assert!(ledger.insert(0, 0, partial_hole_card(4)).is_err());
+        assert!(ledger.insert(1, 1, partial_hole_card(3)).is_err());
+        assert!(ledger.insert(MAX_SEATS, 0, partial_hole_card(5)).is_err());
+        assert!(ledger.insert(0, 2, partial_hole_card(6)).is_err());
+        assert!(
+            ledger
+                .insert(0, 1, partial_hole_card(CIPHER_DECK_SIZE as u8))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn table_schema_rejects_partial_slots_outside_table_and_materialized_overlap() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 2, 50, 100);
+        table
+            .deck_state
+            .owner_readable_hole_cards
+            .insert(2, 0, partial_hole_card(3))
+            .unwrap();
+        assert!(
+            table
+                .validate_state_schema()
+                .unwrap_err()
+                .to_string()
+                .contains("out-of-range owner seat 2")
+        );
+
+        table.deck_state.owner_readable_hole_cards.clear();
+        table.seats[0].fixture_set_player([0xAB; 20]);
+        table.seats[0].set_status(SeatStatus::Active);
+        let mut hand = HoleCards::empty();
+        hand.try_push(Card::from_index(1)).unwrap();
+        table.seats[0].fixture_set_hand(hand);
+        table
+            .deck_state
+            .owner_readable_hole_cards
+            .insert(0, 0, partial_hole_card(3))
+            .unwrap();
+        assert!(
+            table
+                .validate_state_schema()
+                .unwrap_err()
+                .to_string()
+                .contains("overlaps materialized hand")
+        );
     }
 
     #[test]
