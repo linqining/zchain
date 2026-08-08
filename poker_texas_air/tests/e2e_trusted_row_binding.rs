@@ -40,6 +40,7 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 const FIXTURE_TIMESTAMP_MS: u64 = 1_000_000;
+const FIXTURE_CREATOR: [u8; 20] = [0xA7; 20];
 
 /// Minimal AIR with a deliberately unconstrained second business column.
 /// `BoundAir` must still bind that column to the trusted row.
@@ -141,7 +142,7 @@ fn generic_verifier_does_not_fallback_to_the_proof_carried_row() {
 fn make_create_tables() -> (TexasPokerTable, TexasPokerTable) {
     let id = ObjectID::new([0xAA; 20], 42);
     let pre = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
-    let mut post = TexasPokerTable::new(id, "test_table".to_owned(), EMPTY_PLAYER, 6, 10, 20);
+    let mut post = TexasPokerTable::new(id, "test_table".to_owned(), FIXTURE_CREATOR, 6, 10, 20);
     post.call_seq = pre.call_seq.checked_add(1).unwrap();
     post.call_seq = 1;
     (pre, post)
@@ -201,7 +202,7 @@ fn make_canonical_call_tables() -> (TexasPokerTable, TexasPokerTable) {
     let mut pre = TexasPokerTable::new(
         ObjectID::new([0xCC; 20], 7),
         "canonical-call".to_owned(),
-        EMPTY_PLAYER,
+        FIXTURE_CREATOR,
         6,
         50,
         100,
@@ -325,7 +326,7 @@ fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
     let mut pre = TexasPokerTable::new(
         ObjectID::new([0xCF; 20], 17),
         "canonical-terminal-fold".to_owned(),
-        EMPTY_PLAYER,
+        FIXTURE_CREATOR,
         6,
         50,
         100,
@@ -513,7 +514,7 @@ fn make_funds_pre_table() -> TexasPokerTable {
     let mut table = TexasPokerTable::new(
         ObjectID::new([0xDD; 20], 19),
         "canonical-funds".to_owned(),
-        EMPTY_PLAYER,
+        FIXTURE_CREATOR,
         6,
         50,
         100,
@@ -870,7 +871,7 @@ fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
     let mut pre = TexasPokerTable::new(
         ObjectID::new([0xE1; 20], 23),
         "canonical-join".to_owned(),
-        EMPTY_PLAYER,
+        FIXTURE_CREATOR,
         6,
         50,
         100,
@@ -968,7 +969,7 @@ fn production_verifier_rejects_leave_row_attached_to_unrelated_post_table() {
     let mut pre = TexasPokerTable::new(
         ObjectID::new([0xE2; 20], 24),
         "canonical-leave".to_owned(),
-        EMPTY_PLAYER,
+        FIXTURE_CREATOR,
         6,
         50,
         100,

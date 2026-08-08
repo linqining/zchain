@@ -1,10 +1,11 @@
-//! State root 计算 — Poseidon252 over `TexasPokerTable` 全字段。
+//! State root 计算 — Poseidon252 over ObjectDb hot-v24 projection。
 //!
 //! ## 设计
 //!
-//! `state_root = Poseidon252(TABLE_PREIMAGE)`，其中 `TABLE_PREIMAGE` 是带版本和域分隔的
-//! canonical Borsh 编码。其长度随完整 `TexasPokerTable` 序列化内容变化，不维护易漂移的
-//! 手写字段列表。
+//! proof transcript 仍携带完整 resolved `TexasPokerTable` preimage，供 verifier 重放业务
+//! 逻辑；公开 state root 则承诺与 ObjectDb 完全相同的 hot-v24 bytes。metadata、rules、
+//! governance 通过三个固定宽度 opening digest 进入 hot state，而不是在每个 hand-local
+//! transition 中重复展开低频字段。
 //!
 //! ## AIR 内验证
 //!
@@ -113,14 +114,14 @@ pub fn bool_to_field(b: bool) -> FieldElement {
     FieldElement::from(u64::from(b))
 }
 
-/// Canonical, complete `TexasPokerTable` state-root preimage.
+/// Canonical, complete resolved `TexasPokerTable` transcript image.
 ///
 /// The old hand-maintained 24-field list omitted consensus fields whenever the
 /// VM table grew (addon/ante/rake/RIT and sequence metadata were all missed).
-/// This encoding commits to the exact Borsh serialization of the *entire* table,
+/// This encoding carries the exact Borsh serialization of the *entire* table,
 /// with an explicit schema/domain tag, injective 31-byte field chunks, and byte
 /// lengths.  Adding or changing any serialized VM field therefore changes the
-/// state root without requiring a second manual field list to be kept in sync.
+/// verifier replay input without requiring a second manual field list to be kept in sync.
 pub fn table_state_preimage(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<Vec<FieldElement>> {
@@ -151,7 +152,16 @@ pub fn table_from_state_preimage(
     Ok(table)
 }
 
-/// 计算 `TexasPokerTable` 的 state_root = Poseidon252(preimage)。
+/// Canonical preimage of the exact ObjectDb hot-v24 table projection.
+pub fn hot_table_state_preimage(
+    table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
+) -> TexasAirResult<Vec<FieldElement>> {
+    let bytes = poker_l1::vm::contracts::texas_poker::state_codec::encode_hot_table_state(table)
+        .map_err(|e| TexasAirError::StateRootError(format!("encode Texas hot table: {e}")))?;
+    canonical_bytes_preimage("zchain.texas_poker.hot_table.v24", &bytes)
+}
+
+/// Compute the ObjectDb-compatible hot-v24 state root.
 ///
 /// # Errors
 ///
@@ -159,7 +169,15 @@ pub fn table_from_state_preimage(
 pub fn compute_state_root(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<StateRoot> {
-    let preimage = table_state_preimage(table)?;
+    // `create_table` proves transition from ObjectDb absence.  The VM represents that absence
+    // with one exact in-memory placeholder; it has no governance opening and therefore maps to
+    // the distinguished zero root rather than a hot-v24 object commitment.
+    use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, TexasPokerTable};
+    let absent = TexasPokerTable::new(table.id, String::new(), EMPTY_PLAYER, 2, 1, 1);
+    if table == &absent {
+        return Ok(StateRoot::zero());
+    }
+    let preimage = hot_table_state_preimage(table)?;
     Ok(StateRoot(poseidon_hash_many(&preimage)))
 }
 
@@ -221,6 +239,11 @@ fn canonical_borsh_preimage<T: borsh::BorshSerialize>(
 ) -> TexasAirResult<Vec<FieldElement>> {
     let bytes = borsh::to_vec(value)
         .map_err(|e| TexasAirError::StateRootError(format!("borsh serialization: {e}")))?;
+    canonical_bytes_preimage(tag, &bytes)
+}
+
+/// Build a domain-separated, injective field preimage for already-canonical bytes.
+fn canonical_bytes_preimage(tag: &str, bytes: &[u8]) -> TexasAirResult<Vec<FieldElement>> {
     let tag_bytes = tag.as_bytes();
     let mut fields =
         Vec::with_capacity(3 + tag_bytes.len().div_ceil(31) + bytes.len().div_ceil(31));

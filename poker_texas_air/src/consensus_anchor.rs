@@ -43,11 +43,15 @@ use poker_l1::consensus::bullshark::{
 };
 use poker_l1::consensus::cert_verification::verify_commit_certificate_signatures;
 use poker_l1::consensus::{DagCommitCertificate, ValidatorEntry};
-use poker_l1::object_model::{MerklePath, Object, SparseMerkleTree};
+use poker_l1::object_model::{MerklePath, Object, Ownership, SparseMerkleTree};
 use poker_l1::signature::unified::verify_signature;
 use poker_l1::transaction::{Transaction, TxLane};
 use poker_l1::vm::contracts::dispatch::DispatchContext;
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::vm::contracts::texas_poker::types::{TableContextOpenings, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::{
+    TEXAS_POKER_GOVERNANCE_OBJECT_TYPE, TEXAS_POKER_METADATA_OBJECT_TYPE,
+    TEXAS_POKER_RULES_OBJECT_TYPE, TEXAS_POKER_TABLE_OBJECT_TYPE,
+};
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
@@ -64,28 +68,102 @@ pub struct ConsensusDispatchCall {
     pub inclusion_path: MerklePath,
 }
 
-/// 单桌 snapshot 及其在全局 `state_root` SMT 中的包含证明。
-///
-/// `object` 的 `data` 字段是 `borsh::to_vec(&TexasPokerTable)`；SMT leaf value 是
-/// `borsh::to_vec(&Object)`（完整包装器），与 [`poker_l1::object_model::ObjectDb`] 的
-/// 存储口径一致。
+/// One authenticated ObjectDb object and its inclusion proof.
 #[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
-pub struct TableSnapshot {
-    /// 包装 table 的 `Object`（其 `data` 反序列化为 `TexasPokerTable`）。
+pub struct AuthenticatedObjectSnapshot {
+    /// Exact object wrapper committed by the global state tree.
     pub object: Object,
-    /// 该 object 在对应 block `state_root` SMT 中的包含证明。
+    /// Inclusion proof under the corresponding block state root.
     pub inclusion_path: MerklePath,
 }
 
+/// Complete four-object snapshot of one resolved Texas table endpoint.
+#[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
+pub struct TableSnapshot {
+    /// Mutable hot-v24 table object.
+    pub hot_table: AuthenticatedObjectSnapshot,
+    /// Immutable display metadata opening.
+    pub metadata: AuthenticatedObjectSnapshot,
+    /// Immutable rules opening.
+    pub rules: AuthenticatedObjectSnapshot,
+    /// Immutable governance opening.
+    pub governance: AuthenticatedObjectSnapshot,
+}
+
 impl TableSnapshot {
-    /// 反序列化并返回内部的 `TexasPokerTable`。
+    /// Hydrate the resolved runtime table after validating all four object wrappers and digests.
     ///
     /// # Errors
     ///
-    /// `Object.data` 不是合法 borsh 编码的 `TexasPokerTable` 时返回错误。
+    /// Any wrong ID/type/ownership/opening or hot binding fails closed.
     pub fn table(&self) -> TexasAirResult<TexasPokerTable> {
-        poker_l1::vm::contracts::texas_poker::state_codec::decode_table_state(&self.object.data)
-            .map_err(|e| TexasAirError::SerializationError(format!("TexasPokerTable borsh: {e}")))
+        use poker_l1::vm::contracts::texas_poker::state_codec::{
+            decode_hot_table_state, is_hot_table_state, table_governance_object_id,
+            table_metadata_object_id, table_rules_object_id,
+        };
+        let table_id = self.hot_table.object.id;
+        if self.hot_table.object.object_type != TEXAS_POKER_TABLE_OBJECT_TYPE
+            || self.hot_table.object.owner != Ownership::Shared
+            || !is_hot_table_state(&self.hot_table.object.data)
+        {
+            return Err(TexasAirError::ConsensusAnchor(
+                "hot table object has non-canonical type, ownership, or schema".into(),
+            ));
+        }
+        let validate_opening = |snapshot: &AuthenticatedObjectSnapshot,
+                                expected_id,
+                                expected_type: &str,
+                                label: &str|
+         -> TexasAirResult<()> {
+            if snapshot.object.id != expected_id
+                || snapshot.object.object_type != expected_type
+                || snapshot.object.owner != Ownership::Immutable
+            {
+                return Err(TexasAirError::ConsensusAnchor(format!(
+                    "{label} object has non-canonical ID, type, or ownership"
+                )));
+            }
+            Ok(())
+        };
+        validate_opening(
+            &self.metadata,
+            table_metadata_object_id(table_id),
+            TEXAS_POKER_METADATA_OBJECT_TYPE,
+            "metadata",
+        )?;
+        validate_opening(
+            &self.rules,
+            table_rules_object_id(table_id),
+            TEXAS_POKER_RULES_OBJECT_TYPE,
+            "rules",
+        )?;
+        validate_opening(
+            &self.governance,
+            table_governance_object_id(table_id),
+            TEXAS_POKER_GOVERNANCE_OBJECT_TYPE,
+            "governance",
+        )?;
+        let openings = TableContextOpenings {
+            metadata: borsh::from_slice(&self.metadata.object.data).map_err(|error| {
+                TexasAirError::SerializationError(format!("Texas metadata opening: {error}"))
+            })?,
+            rules: borsh::from_slice(&self.rules.object.data).map_err(|error| {
+                TexasAirError::SerializationError(format!("Texas rules opening: {error}"))
+            })?,
+            governance: borsh::from_slice(&self.governance.object.data).map_err(|error| {
+                TexasAirError::SerializationError(format!("Texas governance opening: {error}"))
+            })?,
+        };
+        let table =
+            decode_hot_table_state(&self.hot_table.object.data, &openings).map_err(|error| {
+                TexasAirError::SerializationError(format!("Texas hot table: {error}"))
+            })?;
+        if table.id != table_id {
+            return Err(TexasAirError::ConsensusAnchor(
+                "hot table embedded ID does not match object ID".into(),
+            ));
+        }
+        Ok(table)
     }
 }
 
@@ -140,18 +218,34 @@ impl ConsensusAnchorMaterial {
 /// 验证一个 table snapshot 属于给定 block 的全局 `state_root`。
 ///
 /// SMT key = `object.id.merkle_key()`，value = `borsh::to_vec(&object)`。
-fn verify_table_inclusion(
-    snapshot: &TableSnapshot,
+fn verify_object_inclusion(
+    label: &str,
+    snapshot: &AuthenticatedObjectSnapshot,
     state_root: &Hash,
-) -> TexasAirResult<TexasPokerTable> {
+) -> TexasAirResult<()> {
     let key = snapshot.object.id.merkle_key();
     let value = borsh::to_vec(&snapshot.object)
         .map_err(|e| TexasAirError::SerializationError(format!("Object borsh encode: {e}")))?;
     if !SparseMerkleTree::verify(state_root, &key, Some(&value), &snapshot.inclusion_path) {
         return Err(TexasAirError::ConsensusAnchor(format!(
-            "table object {:?} not proved in block state_root",
+            "{label} object {:?} not proved in block state_root",
             snapshot.object.id
         )));
+    }
+    Ok(())
+}
+
+fn verify_table_inclusion(
+    snapshot: &TableSnapshot,
+    state_root: &Hash,
+) -> TexasAirResult<TexasPokerTable> {
+    for (label, object) in [
+        ("hot table", &snapshot.hot_table),
+        ("metadata", &snapshot.metadata),
+        ("rules", &snapshot.rules),
+        ("governance", &snapshot.governance),
+    ] {
+        verify_object_inclusion(label, object, state_root)?;
     }
     snapshot.table()
 }
@@ -523,49 +617,70 @@ mod tests {
         .unwrap()
     }
 
+    fn build_table_snapshot(table: &TexasPokerTable) -> (Hash, TableSnapshot) {
+        let [hot_table, metadata, rules, governance] =
+            poker_l1::vm::contracts::texas_poker::state_codec::table_storage_objects(table)
+                .unwrap();
+        let mut store = ObjectStore::new();
+        for object in [&hot_table, &metadata, &rules, &governance] {
+            store.create(object.clone()).unwrap();
+        }
+        let authenticated = |object: Object| AuthenticatedObjectSnapshot {
+            inclusion_path: store.prove(&object.id).unwrap(),
+            object,
+        };
+        let snapshot = TableSnapshot {
+            hot_table: authenticated(hot_table),
+            metadata: authenticated(metadata),
+            rules: authenticated(rules),
+            governance: authenticated(governance),
+        };
+        (store.state_root(), snapshot)
+    }
+
+    fn reauthenticate_table_snapshot(snapshot: TableSnapshot) -> (Hash, TableSnapshot) {
+        let objects = [
+            snapshot.hot_table.object,
+            snapshot.metadata.object,
+            snapshot.rules.object,
+            snapshot.governance.object,
+        ];
+        let mut store = ObjectStore::new();
+        for object in &objects {
+            store.create(object.clone()).unwrap();
+        }
+        let authenticated = |object: Object| AuthenticatedObjectSnapshot {
+            inclusion_path: store.prove(&object.id).unwrap(),
+            object,
+        };
+        let [hot_table, metadata, rules, governance] = objects;
+        (
+            store.state_root(),
+            TableSnapshot {
+                hot_table: authenticated(hot_table),
+                metadata: authenticated(metadata),
+                rules: authenticated(rules),
+                governance: authenticated(governance),
+            },
+        )
+    }
+
     fn build_fixture(selector_a: [u8; 32], args_a: Vec<u8>) -> ConsensusFixture {
         let (validators, secrets) = make_validators(5); // 2/3 of 5 = 4
         let table_id = ObjectID::new([0u8; 20], 1);
 
         // 构造两个 table snapshot（pre/post），call_seq 不同。
-        let mut table = TexasPokerTable::new(
-            table_id,
-            "test".into(),
-            poker_l1::vm::contracts::texas_poker::types::EMPTY_PLAYER,
-            2,
-            50,
-            100,
-        );
+        let mut table = TexasPokerTable::new(table_id, "test".into(), [0x77; 20], 2, 50, 100);
         table.hand_id = 1;
         table.call_seq = 10;
 
-        // pre snapshot：插入 ObjectDb 取 state_root + inclusion path。
-        let mut pre_db = ObjectStore::new();
-        let pre_obj = Object::new(
-            table_id,
-            Ownership::Shared,
-            "TexasPokerTable",
-            borsh::to_vec(&table).unwrap(),
-            None,
-        );
-        pre_db.create(pre_obj.clone()).unwrap();
-        let pre_state_root = pre_db.state_root();
-        let pre_path = pre_db.prove(&table_id).unwrap();
+        // pre snapshot：四个对象共享同一个 authenticated global state root。
+        let (pre_state_root, pre_snapshot) = build_table_snapshot(&table);
 
         // post snapshot：call_seq +1，单独 ObjectDb。
         let mut post_table = table.clone();
         post_table.call_seq += 1;
-        let mut post_db = ObjectStore::new();
-        let post_obj = Object::new(
-            table_id,
-            Ownership::Shared,
-            "TexasPokerTable",
-            borsh::to_vec(&post_table).unwrap(),
-            None,
-        );
-        post_db.create(post_obj.clone()).unwrap();
-        let post_state_root = post_db.state_root();
-        let post_path = post_db.prove(&table_id).unwrap();
+        let (post_state_root, post_snapshot) = build_table_snapshot(&post_table);
 
         // 一个 dispatch call（GameTurn 通道）。
         let caller_tagged = validators[0].pubkey.clone();
@@ -616,14 +731,8 @@ mod tests {
             cert,
             validators,
             secrets,
-            pre_snapshot: TableSnapshot {
-                object: pre_obj,
-                inclusion_path: pre_path,
-            },
-            post_snapshot: TableSnapshot {
-                object: post_obj,
-                inclusion_path: post_path,
-            },
+            pre_snapshot,
+            post_snapshot,
             calls: vec![ConsensusDispatchCall {
                 tx,
                 lane: TxLane::GameTurn,
@@ -680,6 +789,41 @@ mod tests {
         assert_eq!(anchor.first_call_seq(), f.table.call_seq + 1);
         // dispatch digests 与独立重算一致。
         assert_eq!(anchor.dispatch_call_digests(), &f.expected_digests[..]);
+    }
+
+    #[test]
+    fn authenticated_but_unbound_context_opening_is_rejected() {
+        let mut f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
+        *f.pre_snapshot.metadata.object.data.last_mut().unwrap() ^= 1;
+        let (state_root, snapshot) = reauthenticate_table_snapshot(f.pre_snapshot);
+        f.pre_snapshot = snapshot;
+        f.pre_header.state_root = state_root;
+        f.cert = sign_cert(
+            &f.validators,
+            &f.secrets,
+            (
+                state_root,
+                f.pre_header.public_tx_root,
+                f.pre_header.gameturn_tx_root,
+            ),
+        );
+        f.pre_header.dag_commit_certificate = f.cert.clone();
+
+        let error = build_anchor_from_consensus(
+            &f.pre_header,
+            &f.pre_snapshot,
+            &f.cert,
+            poker_l1::DEFAULT_CHAIN_ID,
+            &f.validators,
+            &f.post_header,
+            &f.post_snapshot,
+            &f.calls,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("binding/opening mismatch"));
     }
 
     #[test]
@@ -773,16 +917,8 @@ mod tests {
         let mut post_table = f.post_snapshot.table().unwrap();
         post_table.call_seq += 1;
 
-        let mut post_db = ObjectStore::new();
-        let post_obj = Object::new(
-            post_table.id,
-            Ownership::Shared,
-            "TexasPokerTable",
-            borsh::to_vec(&post_table).unwrap(),
-            None,
-        );
-        post_db.create(post_obj.clone()).unwrap();
-        f.post_header.state_root = post_db.state_root();
+        let (post_state_root, post_snapshot) = build_table_snapshot(&post_table);
+        f.post_header.state_root = post_state_root;
         f.post_header.dag_commit_certificate = sign_cert(
             &f.validators,
             &f.secrets,
@@ -792,10 +928,7 @@ mod tests {
                 f.post_header.gameturn_tx_root,
             ),
         );
-        f.post_snapshot = TableSnapshot {
-            object: post_obj,
-            inclusion_path: post_db.prove(&post_table.id).unwrap(),
-        };
+        f.post_snapshot = post_snapshot;
 
         let result = build_anchor_from_consensus(
             &f.pre_header,
@@ -921,9 +1054,11 @@ mod tests {
         // 注意：必须保留合法 borsh 以便 table() 解析，故只改不影响 canonicality 的
         // call_seq 字段，再把不同 table 重新编码塞进同一 object。
         let mut tampered = f.pre_snapshot.clone();
-        let mut bad_table = borsh::from_slice::<TexasPokerTable>(&tampered.object.data).unwrap();
+        let mut bad_table = tampered.table().unwrap();
         bad_table.call_seq = 999; // 与 pre-root 里记录的 call_seq 不同
-        tampered.object.data = borsh::to_vec(&bad_table).unwrap();
+        tampered.hot_table.object.data =
+            poker_l1::vm::contracts::texas_poker::state_codec::encode_hot_table_state(&bad_table)
+                .unwrap();
         let result = build_anchor_from_consensus(
             &f.pre_header,
             &tampered,

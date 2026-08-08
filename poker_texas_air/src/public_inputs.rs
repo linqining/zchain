@@ -39,11 +39,9 @@ pub struct DispatchCallPublicInput {
 /// 从未被 mix 进 Fiat-Shamir channel，导致证明与这些值之间无密码学绑定（攻击者可替换
 /// state_root 而证明仍验证通过）。
 ///
-/// 修复（路径 A）：把 pre/post table 的完整、变长 canonical Borsh **preimage** +
-/// 重算的 `pre_state_root`/`post_state_root` + 元数据，按**固定顺序** mix 进 channel。
-/// 验证方（链下/L1）随后用被审计的 `starknet_crypto::poseidon_hash_many` 重算
-/// `Poseidon252(pre_image)` 并与 `pre_state_root` 比对——密码学绑定由 Fiat-Shamir +
-/// 审计过的哈希共同保证，state_root 哈希本身是唯一信任根（非电路内自造）。
+/// 修复（路径 A）：把 pre/post table 的完整、变长 canonical Borsh **resolved image** +
+/// hot-v24 `pre_state_root`/`post_state_root` + 元数据，按**固定顺序** mix 进 channel。
+/// 验证方先从 image 解码完整 table，再生成与 ObjectDb 相同的 hot projection 并重算 root。
 ///
 /// `pre_image` / `post_image` 必须与 `table_state_preimage(table)` 的输出逐字段一致
 /// （阶段 1 已补全所有 9 个 stub，preimage 含完整状态）。
@@ -53,9 +51,9 @@ pub struct TexasPublicInputs {
     pub pre_image: Vec<FieldElement>,
     /// 调用后表台的完整 canonical state-root preimage（变长）。
     pub post_image: Vec<FieldElement>,
-    /// 调用前 state_root = `Poseidon252(pre_image)`（验证方重算并比对）。
+    /// 调用前 ObjectDb hot-v24 state root（从 `pre_image` 解码后重算）。
     pub pre_state_root: StateRoot,
-    /// 调用后 state_root = `Poseidon252(post_image)`（验证方重算并比对）。
+    /// 调用后 ObjectDb hot-v24 state root（从 `post_image` 解码后重算）。
     pub post_state_root: StateRoot,
     /// 方法种类。
     pub kind: MethodKind,
@@ -422,13 +420,13 @@ impl TexasPublicInputs {
         channel.mix_u64(self.post_version);
     }
 
-    /// 验证方重算并比对：`pre_state_root == Poseidon252(pre_image)` 且
-    /// `post_state_root == Poseidon252(post_image)`。
+    /// 验证方从完整 resolved image 解码 table，再按 ObjectDb hot-v24 projection 重算 root。
     ///
     /// 这是 state_root 绑定的「验证」半边（mix_into 是「承诺」半边）。
     /// 验证方拿到公开输入后，用被审计的 Starknet Poseidon252 重算哈希，确保公开输入
     /// 与承诺的 root 自洽。canonical table 解码由需要业务语义绑定的 verifier hook
-    /// 或 Orchestrator 完整 dispatch replay 完成；本函数只验证非空 image/root 自洽。
+    /// 或 Orchestrator 完整 dispatch replay 完成。仅没有 dispatch call 的 synthetic mechanism
+    /// tests 保留 arbitrary-image 的直接 Poseidon fallback。
     ///
     /// # Errors
     ///
@@ -440,8 +438,19 @@ impl TexasPublicInputs {
                 "state-root preimage must not be empty".into(),
             ));
         }
-        let pre_recomputed = StateRoot(starknet_crypto::poseidon_hash_many(&self.pre_image));
-        let post_recomputed = StateRoot(starknet_crypto::poseidon_hash_many(&self.post_image));
+        let recompute = |image: &[FieldElement], label: &str| -> TexasAirResult<StateRoot> {
+            match crate::state_root::table_from_state_preimage(image) {
+                Ok(table) => crate::state_root::compute_state_root(&table),
+                Err(_) if self.dispatch_call.is_none() => {
+                    Ok(StateRoot(starknet_crypto::poseidon_hash_many(image)))
+                }
+                Err(error) => Err(TexasAirError::StateRootError(format!(
+                    "{label} state image is not a canonical resolved Texas table: {error}"
+                ))),
+            }
+        };
+        let pre_recomputed = recompute(&self.pre_image, "pre")?;
+        let post_recomputed = recompute(&self.post_image, "post")?;
         if pre_recomputed != self.pre_state_root {
             return Err(TexasAirError::StateRootError(
                 "pre_state_root 与 pre_image 重算不符（state_root 绑定失败）".into(),

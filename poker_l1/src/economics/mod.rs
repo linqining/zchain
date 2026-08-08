@@ -14,8 +14,11 @@ use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};
 use crate::storage::object_db::ObjectMutation;
 use crate::storage::{ObjectBackend, ObjectDb};
-use crate::vm::contracts::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
-use crate::vm::contracts::texas_poker::types::TexasPokerTable;
+use crate::vm::contracts::texas_poker::types::{TableContextOpenings, TexasPokerTable};
+use crate::vm::contracts::texas_poker::{
+    TEXAS_POKER_GOVERNANCE_OBJECT_TYPE, TEXAS_POKER_METADATA_OBJECT_TYPE,
+    TEXAS_POKER_RULES_OBJECT_TYPE, TEXAS_POKER_TABLE_OBJECT_TYPE,
+};
 use crate::{Address, ChainId, Hash};
 
 /// Reserved object type for the native ZCN coin.
@@ -148,11 +151,12 @@ fn audit_native_supply_objects<'a>(
     objects: impl IntoIterator<Item = &'a Object>,
     staking_escrow: u64,
 ) -> PokerL1Result<Option<NativeSupplyReconciliation>> {
+    let objects = objects.into_iter().collect::<Vec<_>>();
     let mut cap = None;
 
     let mut live_utxo = 0u64;
     let mut texas_table_escrow = 0u64;
-    for object in objects {
+    for object in &objects {
         if object.id == TREASURY_CAP_OBJECT_ID || object.object_type == TREASURY_CAP_OBJECT_TYPE {
             // Reject duplicate/wrongly-addressed TreasuryCap objects instead of ignoring them.
             let decoded = decode_treasury_cap(object)?;
@@ -199,12 +203,68 @@ fn audit_native_supply_objects<'a>(
                     object.id
                 )));
             }
-            let table: TexasPokerTable = borsh::from_slice(&object.data).map_err(|error| {
-                PokerL1Error::Serialization(format!(
-                    "decode TexasPokerTable {:?} during supply reconciliation: {error}",
+            use crate::vm::contracts::texas_poker::state_codec::{
+                decode_hot_table_state, is_hot_table_state, table_governance_object_id,
+                table_metadata_object_id, table_rules_object_id,
+            };
+            if !is_hot_table_state(&object.data) {
+                return Err(PokerL1Error::Serialization(format!(
+                    "Texas Poker table {:?} must use hot v24 state during supply reconciliation",
                     object.id
-                ))
-            })?;
+                )));
+            }
+            let find_opening = |id: ObjectID, expected_type: &str, label: &str| {
+                let opening = objects
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.id == id)
+                    .ok_or(PokerL1Error::ObjectNotFound(id))?;
+                if opening.object_type != expected_type || opening.owner != Ownership::Immutable {
+                    return Err(PokerL1Error::Serialization(format!(
+                        "Texas {label} object has non-canonical type or ownership during supply reconciliation"
+                    )));
+                }
+                Ok(opening)
+            };
+            let metadata = find_opening(
+                table_metadata_object_id(object.id),
+                TEXAS_POKER_METADATA_OBJECT_TYPE,
+                "metadata",
+            )?;
+            let rules = find_opening(
+                table_rules_object_id(object.id),
+                TEXAS_POKER_RULES_OBJECT_TYPE,
+                "rules",
+            )?;
+            let governance = find_opening(
+                table_governance_object_id(object.id),
+                TEXAS_POKER_GOVERNANCE_OBJECT_TYPE,
+                "governance",
+            )?;
+            let openings = TableContextOpenings {
+                metadata: borsh::from_slice(&metadata.data).map_err(|error| {
+                    PokerL1Error::Serialization(format!(
+                        "decode Texas metadata during supply reconciliation: {error}"
+                    ))
+                })?,
+                rules: borsh::from_slice(&rules.data).map_err(|error| {
+                    PokerL1Error::Serialization(format!(
+                        "decode Texas rules during supply reconciliation: {error}"
+                    ))
+                })?,
+                governance: borsh::from_slice(&governance.data).map_err(|error| {
+                    PokerL1Error::Serialization(format!(
+                        "decode Texas governance during supply reconciliation: {error}"
+                    ))
+                })?,
+            };
+            let table: TexasPokerTable =
+                decode_hot_table_state(&object.data, &openings).map_err(|error| {
+                    PokerL1Error::Serialization(format!(
+                        "decode TexasPokerTable {:?} during supply reconciliation: {error}",
+                        object.id
+                    ))
+                })?;
             table.validate_state_schema()?;
             if table.id != object.id {
                 return Err(PokerL1Error::Other(format!(
@@ -1042,7 +1102,8 @@ mod tests {
             .sum()
     }
 
-    fn texas_table_object(id: ObjectID, chip_pool: u64, addon_pool: u64) -> Object {
+    fn texas_table_objects(id: ObjectID, chip_pool: u64, addon_pool: u64) -> Vec<Object> {
+        use crate::vm::contracts::texas_poker::state_codec::table_storage_objects;
         let mut table = TexasPokerTable::new(id, "reconciliation".into(), [0x77; 20], 6, 50, 100);
         table.chip_pool = chip_pool;
         if addon_pool > 0 {
@@ -1051,13 +1112,7 @@ mod tests {
             table.seats[0].pk = ECPoint(G1Projective::generator());
             table.seats[0].pending_addon = addon_pool;
         }
-        Object::new(
-            id,
-            Ownership::Shared,
-            TEXAS_POKER_TABLE_OBJECT_TYPE,
-            borsh::to_vec(&table).unwrap(),
-            None,
-        )
+        table_storage_objects(&table).unwrap().into_iter().collect()
     }
 
     #[test]
@@ -1070,7 +1125,9 @@ mod tests {
         consume_native_coin_selection(&mut db, &selection, owner, 300, &[0xCD; 32], 0).unwrap();
 
         let table_id = ObjectID::new([0x88; 20], 9);
-        db.create(texas_table_object(table_id, 200, 50)).unwrap();
+        for object in texas_table_objects(table_id, 200, 50) {
+            db.create(object).unwrap();
+        }
 
         let report = reconcile_native_supply(&db, 100).unwrap();
         assert_eq!(report.treasury_total_supply, 1_000);
@@ -1086,7 +1143,9 @@ mod tests {
         let mut db = ObjectDb::open_inmemory().unwrap();
         genesis_mint(&mut db, 7, &[([0x11; 20], 1_000)]).unwrap();
         let table_id = ObjectID::new([0x88; 20], 10);
-        db.create(texas_table_object(table_id, 25, 0)).unwrap();
+        for object in texas_table_objects(table_id, 25, 0) {
+            db.create(object).unwrap();
+        }
 
         let report = audit_native_supply(&db, 0).unwrap();
         assert_eq!(report.delta, 25);
@@ -1102,7 +1161,9 @@ mod tests {
         );
 
         let table_id = ObjectID::new([0x88; 20], 110);
-        db.create(texas_table_object(table_id, 1, 0)).unwrap();
+        for object in texas_table_objects(table_id, 1, 0) {
+            db.create(object).unwrap();
+        }
         let error = reconcile_native_supply_if_initialized(&db, 0).unwrap_err();
         assert!(
             error
@@ -1119,7 +1180,9 @@ mod tests {
 
         let mut snapshot = db.create_snapshot();
         let table_id = ObjectID::new([0x88; 20], 111);
-        snapshot.create(texas_table_object(table_id, 1, 0)).unwrap();
+        for object in texas_table_objects(table_id, 1, 0) {
+            snapshot.create(object).unwrap();
+        }
         assert!(reconcile_native_supply_snapshot_if_initialized(&snapshot, 0).is_err());
         snapshot.discard();
 
@@ -1146,9 +1209,11 @@ mod tests {
         let mut malformed_table_db = ObjectDb::open_inmemory().unwrap();
         genesis_mint(&mut malformed_table_db, 7, &[([0x11; 20], 100)]).unwrap();
         let table_id = ObjectID::new([0x88; 20], 11);
-        let mut table = texas_table_object(table_id, 5, 6);
-        table.owner = Ownership::AddressOwned { owner: [0x88; 20] };
-        malformed_table_db.create(table).unwrap();
+        let mut objects = texas_table_objects(table_id, 5, 6);
+        objects[0].owner = Ownership::AddressOwned { owner: [0x88; 20] };
+        for object in objects {
+            malformed_table_db.create(object).unwrap();
+        }
         assert!(audit_native_supply(&malformed_table_db, 0).is_err());
     }
 

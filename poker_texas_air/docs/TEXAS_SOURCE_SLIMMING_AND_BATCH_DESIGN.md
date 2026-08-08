@@ -102,9 +102,9 @@ schema v18/v19/v20 已依次完成三项 custody 去重：v18 删除 `addon_pool
 `Seat.pending_addon` 的 checked sum 作为唯一 pending 明细；v19 删除 `ante_collected`，StartHand AIR
 只接受由 `post_pot - pre_pot` 与逐 seat debit 确定性派生的 transition-local ante；v20 删除
 `rake_collected`，Treasury 出金改由 `DispatchOutput` 事件导出的唯一
-`SettlementTreasuryReceipt` 驱动。旧 v2-v19 对象仍精确解码，但 addon/ante 镜像必须与 canonical
-明细一致，且旧 `rake_collected` 必须为零；非零值表示尚未认领的 Treasury receipt，迁移直接
-fail-closed。Receipt 同时绑定 showdown 的 `SettlementPlanCommitted` 或无摊牌的
+`SettlementTreasuryReceipt` 驱动。历史 production 数据已明确不再支持，v2-v22 migration codec
+已从执行 crate 删除；任何非当前 resolved-v23 / ObjectDb hot-v24 输入都直接 fail-closed，不再把
+旧 schema 的冗余镜像带入生产二进制。Receipt 同时绑定 showdown 的 `SettlementPlanCommitted` 或无摊牌的
 `HandEndedWithoutShowdown`，重复、缺失或金额不匹配均在创建 UTXO 前拒绝。
 
 schema v21 已把 reveal 的完成态彻底降为 dispatch-local：canonical assignment 只保存
@@ -115,11 +115,35 @@ ledger。旧 v20 完成态因无法证明它仍与当前 authenticated crypto re
 schema v22 已完成 `SeatSlot` tagged-union 的第一阶段（共识编码/state-root 层）：`Vacant`、`Waiting`、
 `Playing` 与 `DepartedThisHand` 只编码各自有意义的 payload。空座位不再重复编码 empty address、零
 stack/bet/total_bet、空 hand、identity pk 与零 pending addon；局中已离场座位只保留 player、仍参与
-side-pot 的 `total_bet` 和 time bank。v21 flat-seat bytes 可精确迁移，tag 与 payload 冲突会在编码前
-fail-closed。runtime 暂时继续投影为 flat `Seat`，但生产 join/leave/kick/reset 已全部收口到
+side-pot 的 `total_bet` 和 time bank。tag 与 payload 冲突会在编码前 fail-closed；旧 flat-seat bytes
+不再进入 production decode path。runtime 暂时继续投影为 flat `Seat`，但生产 join/leave/kick/reset 已全部收口到
 `Seat::occupied/vacate/depart_this_hand/prepare_next_hand` 四个 variant-aware mutation；尤其 reset 不再
 把 `DepartedThisHand` 短暂恢复成 `Active + identity pk`。这使下一阶段物理替换 runtime `SeatSlot`
 enum 时，生命周期构造/销毁路径已有稳定边界，不必重新审计分散字段写入。
+
+schema v23 已把 `max_players`、blinds、timeouts、ante、rake 与 RIT policy 物理收口为一个
+`TableRules` 值，并从 `TexasPokerTable` 删除对应 flat fields。runtime 暂时通过
+`Deref/DerefMut<Target = TableRules>` 保持 `table.big_blind` 等旧调用点可编译，但 canonical Borsh/state
+root 已只编码一份 `rules`。v23 对非法 capacity/blinds/mode tag 和 `rake_bps > 10000` fail-closed；
+v22 及更早 bytes 统一拒绝。该步骤只是“规则字段去重并建立对象边界”，还不等于 rules 已移出 hot table；真正
+降低每个 transition state-root preimage，仍需后续独立 `TableRules` object/opening/hash binding。
+
+ObjectDb hot schema v24 已完成低频对象物理分离。生产 table object 只保存 hand-local mutable state
+与三组 `{object_id, digest}`；`TableMetadata`、`TableRules`、`GovernancePolicy` 作为确定性 ID 的
+immutable object 独立存储。precompile 每次执行先认证 type/ownership/ID/opening digest 再 hydrate
+resolved runtime table；旧 full-v23 ObjectDb object、缺失 opening、替换 opening、错误 object type 或
+ownership 均 fail-closed。create-table 以同一 capture/batch 创建四个对象，普通 transition 只修改 hot
+table，三个 context object 只进入 read set。
+
+AIR 的 resolved image 继续携带完整 table，供 host-native verifier 重放业务与密码学 binding；公开
+state root 已切换为 `Poseidon252(canonical(hot-v24 bytes))`。因此 low-frequency value 只通过固定宽度
+digest 进入每个 transition root，不再重复展开。consensus anchor wire 已直接破坏旧布局：每个 endpoint
+必须提供 hot table、metadata、rules、governance 四份独立 SMT inclusion proof，并证明四者属于同一
+authenticated block state root 后才可 hydrate。create-table 前态是 ObjectDb absence，只允许一个精确
+placeholder 并映射为零 root。
+
+当前决策是不支持旧 production ObjectDb/consensus-material 在线迁移。legacy codec mirror 可暂留用于
+离线回归，但不得重新进入 production load path，也不得阻止后续 runtime tagged-union 重构。
 
 ## 下一步字段处理
 
@@ -154,7 +178,7 @@ enum 时，生命周期构造/销毁路径已有稳定边界，不必重新审�
 | 可立即派生 | `RevealTokenData.seat_index` | token 按 seat slot 或 seat-index 升序存放后，提交者由 slot/bitmap 决定。|
 | normalize 后可删 | `RevealAssignment.decrypted` | `pending_mask == 0` 时立即 materialize card 并移除 assignment，不持久化“已完成但未消费”状态。|
 | normalize 后可删 | 已 materialize 的 `DecryptedCard` | 明文已经写入 hole/board 后不再重复保存在 deck ledger；只保留仍需继续部分解密的记录。|
-| 可移出 hot state | `name` 与不变 rules | 拆成 `TableRules`，hot table 只保存 `rules_id/rules_hash`；事件/RPC 仍可展开。|
+| hot v24 已完成 | `name`、rules、creator/governance | 已拆成三个 immutable object；hot table 只保存确定性 ID 与 domain-separated digest，事件/RPC/proof replay 使用认证 opening 展开。|
 | schema v20 已完成 | `rake_collected` | 已改成由 settlement events 唯一派生的 `SettlementTreasuryReceipt`；table/state root 不再保存“写入后立刻清零”的中转。|
 | schema v18 已完成 | `addon_pool` | 已删除；唯一事实是 `sum(seat.pending_addon)`，所有 custody delta 使用 checked plan。|
 | schema v19 已完成 | `ante_collected` | 已删除；start-hand amount 由逐 seat debit 与 pot delta 确定性派生。|
@@ -202,7 +226,8 @@ Tagged-union Stage 已稳定且 status 列确认为热点后再做。
 | `TimeoutConfig.ready_wait_ms/hand_complete_wait_ms` | schema v7 直接删除 | 当前生产状态机没有读取；显式 `start_hand` 和 normalize 后的原子 reset 已取代这两个计时器。|
 | `TexasPokerTable.id` | 中期移出 table payload | ObjectDb key、dispatch context 和 AIR 公共输入已经绑定 table id；前提是对象存储层保证 key/payload 不可错配。事件从执行上下文取 id。|
 | `state_schema_version` | 中期移到 codec envelope | schema 版本属于编码层，不是扑克业务状态；state-root domain 仍必须包含版本，迁移入口继续 fail-closed。|
-| `creator` | 移入 `GovernancePolicy`，hot state 只绑定 `governance_hash` | creator/admin set 是低频静态授权事实；管理员命令必须提供对应 policy opening/signature，不能只相信 host 传入的角色位。|
+| `creator` | hot v24 已移入 `GovernancePolicy` | runtime/proof snapshot 的 `creator` 来自 authenticated opening；生产 ObjectDb 不再重复保存。未来扩展 admin set 必须同时升级 policy、receipt 与 AIR role semantics。|
+| flat rules fields | schema v23 已收口为 `rules: TableRules` | 当前不再存在 table/rules 两套配置事实；下一步再移动到独立 ObjectDb object，并让 prove task/AIR 绑定 exact opening 与 `rules_hash`。|
 | `max_players` | 与 `seats` 表示二选一 | 若继续使用长度永久不变的 `Vec<Seat>`，容量可由 `seats.len()` 派生；若改固定 `[Seat; 9]`，则必须保留独立 `seat_capacity`。不要同时保存两份容量事实。|
 | `ShuffleState.current_shuffler` | schema v11 已删除 | 当前洗牌者是 `first(pending_mask)`，不再产生仅用于同步缓存的 normalize step。|
 | `ShuffleState.completed_mask` | 仅表示当前手牌 freshly initialized deck 的本轮已提交者 | 它不能与 `DeckState.contributor_mask` 合并：后者是长期 aggregate-key 成员，前者在每次 `start_hand` 重建 deck 后必须从零开始。|
@@ -218,7 +243,7 @@ Tagged-union Stage 已稳定且 status 列确认为热点后再做。
 enum/tagged union。不要为了 Borsh 少几个字节把 `SeatStatus`、phase tag、runout mode 和各种 rule mode
 塞进同一个整数：AIR 每次使用仍要拆位和 range-check，可能减少状态字节却增加证明列。
 
-规则字段应先类型化并移出 hot state，再考虑压位：`AnteMode` 需要 2 bit，`RakeMode`/RIT enabled
+规则字段已在 schema v23 先物理分组、hot v24 移出 hot state，再考虑压位：`AnteMode` 需要 2 bit，`RakeMode`/RIT enabled
 各需 1 bit，但把它们压成 `rules_flags` 只节省几个状态字节，不会像 `TableRules -> rules_hash` 那样
 减少每个 transition 的 state-root preimage。故推荐在 rules object 内保留清晰 enum，AIR 只绑定 rules
 hash；不要让每个 method row重复携带所有 rules 位。
@@ -270,8 +295,10 @@ method-batch ABI 应直接使用 `pre_call_seq/post_call_seq`，不再延续这�
 4. `decrypted_cards` 只保留尚需用于 owner/showdown/reconstruct 的 partial ciphertext。
    已写入 `hand/board` 的 plaintext record 立即删除；assignment id 与目标位置提供 lineage。
 
-5. 不可变配置（name、blinds、timeouts、ante/rake/RIT rules）拆到 `TableRules`，hot table 只绑定
-   `rules_hash/rules_id`。这主要减少每个 transition 的 state-root preimage，而不是业务信息。
+5. schema v23 已把 blinds、timeouts、ante/rake/RIT rules 收口到单一 `TableRules`，消除了 flat-field
+   重复边界。下一步把它与 `TableMetadata { name }`、`GovernancePolicy { creator/admin set }` 分别保存为
+   ObjectDb object，hot table 只绑定 `rules_hash/rules_id`、`metadata_hash/id` 与
+   `governance_hash/id`。这主要减少每个 transition 的 state-root preimage，而不是删除业务信息。
 
 6. 已完成：`ProveTask` 不再同时持有 `method_input + selector + raw_args` 三份等价命令事实。
    `method_kind + raw_args` 是唯一持久化/内存命令表示；selector、typed payload、canonical command
@@ -433,7 +460,7 @@ shuffle”。推荐明确采用 **fresh deck per hand**：
 | schema v20 已完成 | `rake_collected` | settlement treasury receipt | precompile 直接消费 fail-closed receipt，不再借 table 字段中转 |
 | schema v17 已完成 | 桌内 `version` | ObjectDb CAS version；扑克状态只保留 `call_seq` | proof ABI 的 legacy version 槽暂承载 call_seq，method-batch v2 再改名 |
 | 中期 | `id`、`state_schema_version` | 分别移到 object key/dispatch context 与 codec envelope | crypto transcript、event、state root 仍必须绑定 table id/schema domain |
-| 中期 | `name`、blinds、timeouts、ante/rake/RIT 配置与 creator/admin policy | `TableRules/Metadata/GovernancePolicy` object + hash | 每个 transition 公开绑定相同 rules/governance hash；管理员命令额外验证 policy opening/signature |
+| schema v23 已完成第一步，后续 ObjectDb 分离 | `name`、blinds、timeouts、ante/rake/RIT 配置与 creator/admin policy | flat rules 已收口；最终使用 `TableRules/Metadata/GovernancePolicy` object + hash | 每个 transition 公开绑定相同 rules/governance hash；管理员命令额外验证 policy opening/signature |
 | 条件性 | `max_players` | `seats.len()` 或固定 `[Seat; 9] + seat_capacity` 二选一 | 禁止同时保存两份容量事实 |
 
 以下字段暂不删除：`stack/bet/total_bet/pot/chip_pool`、`acted_mask`、`leave_after_hand_mask`、`button`、
@@ -678,7 +705,9 @@ Borsh 字节更贵，所以优先删除重复事实和变长容器，再考虑 b
     canonical command 表示、crypto payload 去重、schema v15 active deadline 哨兵消除和 authenticated
     caller/seat lowering，以及 fresh `kick_player_v2(seat)` 删除调用者可选 reason；schema v17 已删除
     桌内 `version`；schema v18/v19/v20 又依次删除 `addon_pool/ante_collected/rake_collected`。
-    schema v21 已清理 reveal 临时完成态；schema v22 已实施 persisted `SeatSlot` tagged union 与 v21
-    exact migration，生产 seat 生命周期 mutation 也已全部收口到 variant-aware API。下一步优先分离
-    `TableRules/Metadata/GovernancePolicy`，再物理替换 runtime `SeatSlot` enum，并把 durable archive
+    schema v21 已清理 reveal 临时完成态；schema v22 已实施 persisted `SeatSlot` tagged union，生产 seat
+    生命周期 mutation 也已全部收口到 variant-aware API；schema v23 已把所有规则字段物理收口为单一
+    `TableRules`。ObjectDb hot-v24 与三个 immutable context opening 已完成，v2-v22 migration code 也已
+    从 production crate 删除，codec 从约 8k 行收敛为约 700 行。下一步物理替换 runtime `SeatSlot`
+    enum、将 reveal phase 改成不可表达 `NONE + assignments` 的 tagged union，再把 durable archive
     收敛为连续 state stream。

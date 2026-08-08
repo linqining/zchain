@@ -98,7 +98,9 @@ use crate::precompile_binding::{
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
 use crate::prover::{MethodProof, prove_method};
-use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
+use crate::state_root::{
+    StateRoot, compute_state_root, state_root_to_air_limbs, table_state_preimage,
+};
 use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verified_chain::{
     ExpectedChainAnchor, VerificationReceipt, VerifiedChain, VerifiedChainBuilder,
@@ -374,8 +376,8 @@ impl Orchestrator {
         validate_full_dispatch_task(task)?;
         let pre_image = table_state_preimage(&task.pre_table)?;
         let post_image = table_state_preimage(&task.post_table)?;
-        let pre_root = StateRoot(starknet_crypto::poseidon_hash_many(&pre_image));
-        let post_root = StateRoot(starknet_crypto::poseidon_hash_many(&post_image));
+        let pre_root = compute_state_root(&task.pre_table)?;
+        let post_root = compute_state_root(&task.post_table)?;
         // 完整公开输入（preimage + 重算 root + 元数据），用于 state_root 绑定。
         let mut pi = crate::public_inputs::TexasPublicInputs {
             pre_image,
@@ -3030,7 +3032,7 @@ mod tests {
         TexasPokerTable::new(
             ObjectID::new([0xFF; 20], 0),
             name.into(),
-            [0u8; 20],
+            [0xA0; 20],
             6,
             50,
             100,
@@ -3162,7 +3164,7 @@ mod tests {
         };
         let (task, _) = dispatch_task(
             pre,
-            [0u8; 20],
+            [0xC0; 20],
             texas_dispatch::selectors::create_table(),
             borsh::to_vec(&args).expect("create args should serialize"),
         );
@@ -3188,7 +3190,7 @@ mod tests {
     fn archived_method_proof_rejects_wrong_task_and_tampering() {
         let (task, _) = dispatch_task(
             make_create_placeholder(),
-            [0u8; 20],
+            [0xC0; 20],
             texas_dispatch::selectors::create_table(),
             borsh::to_vec(&CreateTableArgs {
                 name: "original".into(),
@@ -3204,7 +3206,7 @@ mod tests {
 
         let (wrong_task, _) = dispatch_task(
             make_create_placeholder(),
-            [0u8; 20],
+            [0xC0; 20],
             texas_dispatch::selectors::create_table(),
             borsh::to_vec(&CreateTableArgs {
                 name: "different".into(),

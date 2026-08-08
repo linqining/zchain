@@ -1178,6 +1178,111 @@ pub struct TableRules {
     pub rit_mode: u8,
 }
 
+/// Low-frequency display metadata opened alongside the hot table state.
+///
+/// The value is stored in its own immutable ObjectDb object.  Runtime/proof snapshots retain the
+/// resolved string so events, RPCs and create-table verification do not lose information.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct TableMetadata {
+    /// Human-readable table name.
+    pub name: String,
+}
+
+impl TableMetadata {
+    /// Reject metadata that cannot be represented by the existing create-table ABI.
+    pub fn validate_canonical(&self) -> PokerL1Result<()> {
+        if self.name.len() > u32::MAX as usize {
+            return Err(PokerL1Error::Serialization(
+                "Texas table name exceeds canonical Borsh length".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Low-frequency administrator policy opened alongside the hot table state.
+///
+/// The current production ABI has exactly one administrator: the authenticated creator.  Keeping
+/// it in a typed policy object establishes the correct hash/opening boundary without inventing an
+/// unaudited multi-admin mutation path.  A future policy version can add a canonical admin set.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct GovernancePolicy {
+    /// Address authorized for creator/admin commands in the current policy version.
+    pub creator: Address,
+}
+
+impl GovernancePolicy {
+    /// Return whether `caller` is authorized by this policy version.
+    #[must_use]
+    pub fn authorizes(&self, caller: &Address) -> bool {
+        self.creator == *caller
+    }
+
+    /// Reject an uninitialized policy opening.
+    pub fn validate_canonical(&self) -> PokerL1Result<()> {
+        if self.creator == EMPTY_PLAYER {
+            return Err(PokerL1Error::Serialization(
+                "Texas governance creator is empty".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One immutable context object committed by the hot table state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct TableContextBinding {
+    /// Deterministically derived ObjectDb ID of the opening.
+    pub object_id: ObjectID,
+    /// Domain-separated digest of `(table_id, opening)`.
+    pub digest: [u8; 32],
+}
+
+/// The three low-frequency openings committed by a hot Texas table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct TableContextBindings {
+    /// Display metadata binding.
+    pub metadata: TableContextBinding,
+    /// Poker rules binding.
+    pub rules: TableContextBinding,
+    /// Administrator policy binding.
+    pub governance: TableContextBinding,
+}
+
+/// Resolved low-frequency values supplied when opening a hot table object.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct TableContextOpenings {
+    /// Display metadata opening.
+    pub metadata: TableMetadata,
+    /// Poker rules opening.
+    pub rules: TableRules,
+    /// Administrator policy opening.
+    pub governance: GovernancePolicy,
+}
+
+impl TableContextOpenings {
+    /// Construct the openings represented by a resolved runtime table.
+    #[must_use]
+    pub fn from_table(table: &TexasPokerTable) -> Self {
+        Self {
+            metadata: TableMetadata {
+                name: table.name.clone(),
+            },
+            rules: table.rules.clone(),
+            governance: GovernancePolicy {
+                creator: table.creator,
+            },
+        }
+    }
+
+    /// Validate every opening before hashing or hydrating runtime state.
+    pub fn validate_canonical(&self) -> PokerL1Result<()> {
+        self.metadata.validate_canonical()?;
+        self.rules.validate_canonical()?;
+        self.governance.validate_canonical()
+    }
+}
+
 impl TableRules {
     /// Construct the default optional rules around a validated seat/blind configuration.
     #[must_use]

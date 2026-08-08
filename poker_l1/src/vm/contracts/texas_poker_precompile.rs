@@ -22,7 +22,6 @@
 
 use std::sync::Arc;
 
-use super::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE;
 use super::texas_poker::dispatch as tp_dispatch;
 use super::texas_poker::dispatch::selectors;
 use super::texas_poker::events::{
@@ -30,14 +29,20 @@ use super::texas_poker::events::{
 };
 use super::texas_poker::prove_task::L1DispatchOutput;
 use super::texas_poker::state_machine::reconcile_table_vault;
-use super::texas_poker::types::TexasPokerTable;
+use super::texas_poker::types::{TableContextOpenings, TexasPokerTable};
+use super::texas_poker::{
+    TEXAS_POKER_GOVERNANCE_OBJECT_TYPE, TEXAS_POKER_METADATA_OBJECT_TYPE,
+    TEXAS_POKER_RULES_OBJECT_TYPE, TEXAS_POKER_TABLE_OBJECT_TYPE,
+};
 use crate::Address;
 use crate::economics::{
     NativeCoinSelection, TREASURY_SYSTEM_ADDRESS, coin_output_nonce, consume_native_coin_selection,
     create_native_coin_output, native_coin_object, select_owned_native_coins,
 };
 use crate::error::{PokerL1Error, PokerL1Result};
-use crate::object_model::{Object, ObjectID, Ownership};
+#[cfg(test)]
+use crate::object_model::Object;
+use crate::object_model::{ObjectID, Ownership};
 use crate::signature::TaggedPubkey;
 use crate::storage::ObjectBackend;
 #[cfg(test)]
@@ -54,6 +59,14 @@ pub struct TexasPokerPrecompile {
     version: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextStorageState {
+    /// The table was already encoded as hot v24 and all three openings were loaded.
+    Existing,
+    /// This is the first create-table call.
+    NewTable,
+}
+
 impl TexasPokerPrecompile {
     /// 创建 Texas Poker 合约预编译实例。
     #[must_use]
@@ -65,6 +78,86 @@ impl TexasPokerPrecompile {
     #[must_use]
     pub fn new_arc(version: u32) -> Arc<dyn Precompile> {
         Arc::new(Self::new(version))
+    }
+
+    fn decode_context_object<T: borsh::BorshDeserialize>(
+        object_db: &dyn ObjectBackend,
+        id: ObjectID,
+        expected_type: &str,
+        label: &str,
+    ) -> PokerL1Result<T> {
+        let object = object_db.read(&id)?;
+        if object.object_type != expected_type || object.owner != Ownership::Immutable {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas {label} object has non-canonical type or ownership"
+            )));
+        }
+        borsh::from_slice(&object.data).map_err(|error| {
+            PokerL1Error::Serialization(format!("decode Texas {label} opening: {error}"))
+        })
+    }
+
+    fn read_context_openings(
+        object_db: &dyn ObjectBackend,
+        table_id: ObjectID,
+    ) -> PokerL1Result<TableContextOpenings> {
+        use super::texas_poker::state_codec::{
+            table_governance_object_id, table_metadata_object_id, table_rules_object_id,
+        };
+
+        let openings = TableContextOpenings {
+            metadata: Self::decode_context_object(
+                object_db,
+                table_metadata_object_id(table_id),
+                TEXAS_POKER_METADATA_OBJECT_TYPE,
+                "metadata",
+            )?,
+            rules: Self::decode_context_object(
+                object_db,
+                table_rules_object_id(table_id),
+                TEXAS_POKER_RULES_OBJECT_TYPE,
+                "rules",
+            )?,
+            governance: Self::decode_context_object(
+                object_db,
+                table_governance_object_id(table_id),
+                TEXAS_POKER_GOVERNANCE_OBJECT_TYPE,
+                "governance",
+            )?,
+        };
+        openings.validate_canonical()?;
+        Ok(openings)
+    }
+
+    #[cfg(test)]
+    fn context_objects(table: &TexasPokerTable) -> PokerL1Result<Vec<Object>> {
+        Ok(
+            super::texas_poker::state_codec::table_storage_objects(table)?
+                .into_iter()
+                .skip(1)
+                .collect(),
+        )
+    }
+
+    fn ensure_context_slots_absent(
+        object_db: &dyn ObjectBackend,
+        table_id: ObjectID,
+    ) -> PokerL1Result<()> {
+        use super::texas_poker::state_codec::{
+            table_governance_object_id, table_metadata_object_id, table_rules_object_id,
+        };
+        for id in [
+            table_metadata_object_id(table_id),
+            table_rules_object_id(table_id),
+            table_governance_object_id(table_id),
+        ] {
+            match object_db.read(&id) {
+                Err(PokerL1Error::ObjectNotFound(_)) => {}
+                Ok(_) => return Err(PokerL1Error::ObjectIDCollision(id)),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Decode every native Coin output that must leave the Texas TableVault.
@@ -140,18 +233,37 @@ impl Precompile for TexasPokerPrecompile {
 
         let table_id = reserved::texas_poker_contract_id();
 
-        // 读已有 table；不存在则按 create_table 首次调用处理
-        let (mut table, is_new) = match object_db.read(&table_id) {
+        // ObjectDb production state is hot v24 only.  Resolved v23 snapshots remain valid proof
+        // payloads, but accepting them here would silently bypass independently authenticated
+        // metadata/rules/governance openings.
+        let (mut table, context_state) = match object_db.read(&table_id) {
             Ok(obj) => {
-                let table =
-                    crate::vm::contracts::texas_poker::state_codec::decode_table_state(&obj.data)?;
-                (table, false)
+                if obj.object_type != TEXAS_POKER_TABLE_OBJECT_TYPE
+                    || obj.owner != Ownership::Shared
+                {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas hot table has non-canonical type or ownership".into(),
+                    ));
+                }
+                if !crate::vm::contracts::texas_poker::state_codec::is_hot_table_state(&obj.data) {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas ObjectDb table must use hot v24 state".into(),
+                    ));
+                }
+                let openings = Self::read_context_openings(object_db, table_id)?;
+                let table = crate::vm::contracts::texas_poker::state_codec::decode_hot_table_state(
+                    &obj.data, &openings,
+                )?;
+                (table, ContextStorageState::Existing)
             }
             Err(PokerL1Error::ObjectNotFound(_)) => {
                 // 首次调用：仅 create_table 允许在无对象时执行
                 if method_selector != &selectors::create_table() {
                     return Err(PokerL1Error::ContractNotFound(table_id));
                 }
+                // These IDs are deterministic.  Reject a partial/colliding context namespace
+                // before dispatch or any economic mutation.
+                Self::ensure_context_slots_absent(object_db, table_id)?;
                 // 构造占位空表（dispatch_create_table 会用 args 覆写，含 creator 字段）
                 let placeholder = TexasPokerTable::new(
                     table_id,
@@ -161,7 +273,7 @@ impl Precompile for TexasPokerPrecompile {
                     1,
                     1,
                 );
-                (placeholder, true)
+                (placeholder, ContextStorageState::NewTable)
             }
             Err(e) => return Err(e),
         };
@@ -251,36 +363,54 @@ impl Precompile for TexasPokerPrecompile {
             )?);
         }
 
-        // 持久化
-        let table_data =
-            crate::vm::contracts::texas_poker::state_codec::encode_table_state(&table)?;
-        if is_new {
-            let obj = Object::new(
-                table_id,
-                Ownership::Shared,
-                TEXAS_POKER_TABLE_OBJECT_TYPE,
-                table_data,
-                None,
-            );
-            object_db.create(obj)?;
+        // Persist only the hot projection.  Immutable context openings are created once and are
+        // never rewritten by hand-local transitions.
+        let context_ids = crate::vm::contracts::texas_poker::state_codec::table_context_bindings(
+            table.id,
+            &TableContextOpenings::from_table(&table),
+        )?;
+        if context_state == ContextStorageState::NewTable {
+            let objects =
+                crate::vm::contracts::texas_poker::state_codec::table_storage_objects(&table)?;
+            object_db.replace_objects(&[], objects.into_iter().collect())?;
         } else {
+            let table_data =
+                crate::vm::contracts::texas_poker::state_codec::encode_hot_table_state(&table)?;
             object_db.update(&table_id, caller, table_data)?;
         }
 
         let mut final_result = DispatchResult {
             created_objects: result.created_objects,
             modified_objects: result.modified_objects,
-            // 报告读集：仅当读到既有 table（is_new == false）时才存在真实读。
-            // 首次 create_table（is_new == true）走 placeholder 分支，无真实读。
-            read_objects: if is_new { vec![] } else { vec![table_id] },
+            // Existing execution reads the hot state plus all immutable openings.  Creation only
+            // performs absence checks, so it has no successful object reads.
+            read_objects: if context_state == ContextStorageState::NewTable {
+                vec![]
+            } else {
+                vec![
+                    table_id,
+                    context_ids.metadata.object_id,
+                    context_ids.rules.object_id,
+                    context_ids.governance.object_id,
+                ]
+            },
             return_value: result.return_value,
         };
         final_result.created_objects.extend(economic_created);
         final_result
             .read_objects
             .extend(env.tx_inputs.iter().copied());
-        if is_new && !final_result.created_objects.contains(&table_id) {
-            final_result.created_objects.push(table_id);
+        if context_state == ContextStorageState::NewTable {
+            for id in [
+                table_id,
+                context_ids.metadata.object_id,
+                context_ids.rules.object_id,
+                context_ids.governance.object_id,
+            ] {
+                if !final_result.created_objects.contains(&id) {
+                    final_result.created_objects.push(id);
+                }
+            }
         }
 
         Ok(final_result)
@@ -362,6 +492,49 @@ mod tests {
             crate::vm::contracts::texas_poker::utils::scalar_from_u64(secret + 20_000),
         )
         .unwrap()
+    }
+
+    fn read_resolved_table(object_db: &dyn ObjectBackend, table_id: ObjectID) -> TexasPokerTable {
+        let object = object_db.read(&table_id).unwrap();
+        let openings = TexasPokerPrecompile::read_context_openings(object_db, table_id).unwrap();
+        crate::vm::contracts::texas_poker::state_codec::decode_hot_table_state(
+            &object.data,
+            &openings,
+        )
+        .unwrap()
+    }
+
+    fn write_resolved_table(
+        object_db: &mut dyn ObjectBackend,
+        actor: &Address,
+        table: &TexasPokerTable,
+    ) {
+        let bytes =
+            crate::vm::contracts::texas_poker::state_codec::encode_hot_table_state(table).unwrap();
+        object_db.update(&table.id, actor, bytes).unwrap();
+    }
+
+    /// Test-only fixture replacement for cases that need non-default immutable rules.  Production
+    /// has no context mutation path: these values are fixed by table creation/governance design.
+    fn replace_resolved_table_fixture(
+        object_db: &mut ObjectDb,
+        actor: &Address,
+        table: &TexasPokerTable,
+    ) {
+        use crate::vm::contracts::texas_poker::state_codec::{
+            table_governance_object_id, table_metadata_object_id, table_rules_object_id,
+        };
+        for id in [
+            table_metadata_object_id(table.id),
+            table_rules_object_id(table.id),
+            table_governance_object_id(table.id),
+        ] {
+            object_db.delete(&id).unwrap();
+        }
+        for object in TexasPokerPrecompile::context_objects(table).unwrap() {
+            object_db.create(object).unwrap();
+        }
+        write_resolved_table(object_db, actor, table);
     }
 
     #[test]
@@ -553,10 +726,27 @@ mod tests {
             )
             .unwrap();
 
-        assert!(result.created_objects.contains(&table_id));
-        // 验证对象已写入 ObjectDb
+        use crate::vm::contracts::texas_poker::state_codec::{
+            is_hot_table_state, table_governance_object_id, table_metadata_object_id,
+            table_rules_object_id,
+        };
+        let context_ids = [
+            table_metadata_object_id(table_id),
+            table_rules_object_id(table_id),
+            table_governance_object_id(table_id),
+        ];
+        for id in [table_id, context_ids[0], context_ids[1], context_ids[2]] {
+            assert!(result.created_objects.contains(&id));
+        }
+        // ObjectDb stores only hot mutable state.  Full values are recovered from immutable
+        // context openings and are deliberately not decodable from the hot object alone.
         let obj = object_db.read(&table_id).unwrap();
-        let table: TexasPokerTable = borsh::from_slice(&obj.data).unwrap();
+        assert!(is_hot_table_state(&obj.data));
+        assert!(borsh::from_slice::<TexasPokerTable>(&obj.data).is_err());
+        for id in context_ids {
+            assert_eq!(object_db.read(&id).unwrap().owner, Ownership::Immutable);
+        }
+        let table = read_resolved_table(&object_db, table_id);
         assert_eq!(table.name, "first_game");
         assert_eq!(table.max_players, 6);
         assert_eq!(table.big_blind, 50);
@@ -605,6 +795,158 @@ mod tests {
                 object_db,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn context_openings_are_required_and_digest_bound() {
+        use crate::vm::contracts::texas_poker::state_codec::{
+            table_governance_object_id, table_metadata_object_id, table_rules_object_id,
+        };
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let table_id = reserved::texas_poker_contract_id();
+        let context_ids = [
+            table_metadata_object_id(table_id),
+            table_rules_object_id(table_id),
+            table_governance_object_id(table_id),
+        ];
+
+        for context_id in context_ids {
+            let mut object_db = ObjectDb::open_inmemory().unwrap();
+            create_test_table(&precompile, &caller, &caller_pk, &mut object_db);
+            let mut context = object_db.delete(&context_id).unwrap();
+            *context.data.last_mut().unwrap() ^= 1;
+            object_db.create(context).unwrap();
+
+            let error = precompile
+                .call(
+                    &caller,
+                    &caller_pk,
+                    &selectors::start_hand(),
+                    &[],
+                    &make_env(),
+                    &mut object_db,
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("binding/opening mismatch"),
+                "unexpected error for {context_id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_non_canonical_context_objects_fail_closed() {
+        use crate::vm::contracts::texas_poker::state_codec::table_rules_object_id;
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let table_id = reserved::texas_poker_contract_id();
+        let rules_id = table_rules_object_id(table_id);
+
+        let mut missing_db = ObjectDb::open_inmemory().unwrap();
+        create_test_table(&precompile, &caller, &caller_pk, &mut missing_db);
+        missing_db.delete(&rules_id).unwrap();
+        assert!(matches!(
+            precompile.call(
+                &caller,
+                &caller_pk,
+                &selectors::start_hand(),
+                &[],
+                &make_env(),
+                &mut missing_db,
+            ),
+            Err(PokerL1Error::ObjectNotFound(id)) if id == rules_id
+        ));
+
+        for corrupt_owner in [false, true] {
+            let mut object_db = ObjectDb::open_inmemory().unwrap();
+            create_test_table(&precompile, &caller, &caller_pk, &mut object_db);
+            let mut rules = object_db.delete(&rules_id).unwrap();
+            if corrupt_owner {
+                rules.owner = Ownership::Shared;
+            } else {
+                rules.object_type = "WrongTexasRulesType".into();
+            }
+            object_db.create(rules).unwrap();
+            let error = precompile
+                .call(
+                    &caller,
+                    &caller_pk,
+                    &selectors::start_hand(),
+                    &[],
+                    &make_env(),
+                    &mut object_db,
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("non-canonical type or ownership")
+            );
+        }
+    }
+
+    #[test]
+    fn old_resolved_objectdb_layout_and_failed_create_are_rejected_without_partial_context() {
+        use crate::vm::contracts::texas_poker::state_codec::{
+            encode_table_state, table_governance_object_id, table_metadata_object_id,
+            table_rules_object_id,
+        };
+        let precompile = TexasPokerPrecompile::new(1);
+        let (caller, caller_pk) = make_caller();
+        let table_id = reserved::texas_poker_contract_id();
+
+        let mut legacy_db = ObjectDb::open_inmemory().unwrap();
+        let legacy = TexasPokerTable::new(table_id, "legacy".into(), caller, 6, 25, 50);
+        legacy_db
+            .create(Object::new(
+                table_id,
+                Ownership::Shared,
+                TEXAS_POKER_TABLE_OBJECT_TYPE,
+                encode_table_state(&legacy).unwrap(),
+                None,
+            ))
+            .unwrap();
+        let error = precompile
+            .call(
+                &caller,
+                &caller_pk,
+                &selectors::start_hand(),
+                &[],
+                &make_env(),
+                &mut legacy_db,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("must use hot v24 state"));
+
+        let mut failed_create_db = ObjectDb::open_inmemory().unwrap();
+        let invalid_args = borsh::to_vec(&CreateTableArgs {
+            name: "invalid".into(),
+            max_players: 1,
+            small_blind: 25,
+            big_blind: 50,
+        })
+        .unwrap();
+        assert!(
+            precompile
+                .call(
+                    &caller,
+                    &caller_pk,
+                    &selectors::create_table(),
+                    &invalid_args,
+                    &make_env(),
+                    &mut failed_create_db,
+                )
+                .is_err()
+        );
+        for id in [
+            table_id,
+            table_metadata_object_id(table_id),
+            table_rules_object_id(table_id),
+            table_governance_object_id(table_id),
+        ] {
+            assert!(failed_create_db.read(&id).is_err());
+        }
     }
 
     fn create_funded_table(
@@ -744,8 +1086,7 @@ mod tests {
             50
         );
         let table_id = reserved::texas_poker_contract_id();
-        let table: TexasPokerTable =
-            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        let table = read_resolved_table(&object_db, table_id);
         assert_eq!(table.chip_pool, 100);
         assert_eq!(table.seats[0].stack, 100);
 
@@ -774,8 +1115,7 @@ mod tests {
                 .amount,
             100
         );
-        let table: TexasPokerTable =
-            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        let table = read_resolved_table(&object_db, table_id);
         assert_eq!(table.chip_pool, 0);
         assert!(!table.seats[0].is_occupied());
     }
@@ -823,8 +1163,7 @@ mod tests {
         // Build a valid two-player all-in pot from the funded table. Folding player A ends the
         // hand, charges 5% rake, and exercises the same precompile path as production settlement.
         let table_id = reserved::texas_poker_contract_id();
-        let mut table: TexasPokerTable =
-            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        let mut table = read_resolved_table(&object_db, table_id);
         table
             .enter_betting(ROUND_PREFLOP, BettingRound::new(50, 100), 0, 0)
             .unwrap();
@@ -839,9 +1178,7 @@ mod tests {
             seat.total_bet = 100;
             seat.set_status(SeatStatus::Active);
         }
-        object_db
-            .update(&table_id, &player_a, borsh::to_vec(&table).unwrap())
-            .unwrap();
+        replace_resolved_table_fixture(&mut object_db, &player_a, &table);
 
         // A later persistence failure must roll back the Treasury output together with the
         // state transition.  This exercises the failure point after the rake UTXO has been
@@ -915,8 +1252,7 @@ mod tests {
                 .amount,
             10
         );
-        let stored: TexasPokerTable =
-            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        let stored = read_resolved_table(&object_db, table_id);
         let prove_task = borsh::from_slice::<L1DispatchOutput>(&result.return_value)
             .unwrap()
             .prove_task
@@ -1029,13 +1365,7 @@ mod tests {
                 .amount,
             140
         );
-        let table: TexasPokerTable = borsh::from_slice(
-            &object_db
-                .read(&reserved::texas_poker_contract_id())
-                .unwrap()
-                .data,
-        )
-        .unwrap();
+        let table = read_resolved_table(&object_db, reserved::texas_poker_contract_id());
         assert_eq!(table.seats[0].stack, 100);
         assert_eq!(table.seats[0].pending_addon, 60);
         assert_eq!(table.chip_pool, 160);
@@ -1096,13 +1426,7 @@ mod tests {
                 .amount,
             130
         );
-        let table: TexasPokerTable = borsh::from_slice(
-            &object_db
-                .read(&reserved::texas_poker_contract_id())
-                .unwrap()
-                .data,
-        )
-        .unwrap();
+        let table = read_resolved_table(&object_db, reserved::texas_poker_contract_id());
         assert_eq!(table.seats[0].stack, 170);
         assert_eq!(table.seats[0].pending_addon, 0);
         assert_eq!(table.chip_pool, 170);
@@ -1183,13 +1507,7 @@ mod tests {
                 .amount,
             140
         );
-        let table: TexasPokerTable = borsh::from_slice(
-            &object_db
-                .read(&reserved::texas_poker_contract_id())
-                .unwrap()
-                .data,
-        )
-        .unwrap();
+        let table = read_resolved_table(&object_db, reserved::texas_poker_contract_id());
         assert_eq!(table.chip_pool, 0);
         assert_eq!(
             table
@@ -1286,8 +1604,7 @@ mod tests {
         );
 
         let table_id = reserved::texas_poker_contract_id();
-        let table: TexasPokerTable =
-            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        let table = read_resolved_table(&object_db, table_id);
         assert_eq!(table.seats[0].stack, 170);
         assert_eq!(table.seats[0].pending_addon, 60);
         assert_eq!(table.chip_pool, 230);
@@ -1323,8 +1640,7 @@ mod tests {
                 .amount,
             230
         );
-        let final_table: TexasPokerTable =
-            borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
+        let final_table = read_resolved_table(&object_db, table_id);
         assert_eq!(final_table.chip_pool, 0);
         assert_eq!(
             final_table

@@ -57,7 +57,7 @@ use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{MethodInput, ProveTask};
 use crate::prover::{MethodProof, prove_method};
 use crate::public_inputs::TexasPublicInputs;
-use crate::state_root::{StateRoot, state_root_to_air_limbs, table_state_preimage};
+use crate::state_root::{compute_state_root, state_root_to_air_limbs, table_state_preimage};
 use crate::trace_gen::generic_trace::{MIN_LOG_SIZE, gen_method_trace};
 use crate::verified_chain::{VerificationReceipt, verify_method_against_and_issue_receipt};
 
@@ -715,8 +715,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
     validate_full_dispatch_task(task)?;
     let pre_image = table_state_preimage(&task.pre_table)?;
     let post_image = table_state_preimage(&task.post_table)?;
-    let pre_root = StateRoot(starknet_crypto::poseidon_hash_many(&pre_image));
-    let post_root = StateRoot(starknet_crypto::poseidon_hash_many(&post_image));
+    let pre_root = compute_state_root(&task.pre_table)?;
+    let post_root = compute_state_root(&task.post_table)?;
     let mut public_inputs = TexasPublicInputs {
         pre_image,
         post_image,

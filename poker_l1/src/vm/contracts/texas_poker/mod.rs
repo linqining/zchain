@@ -50,6 +50,15 @@ pub mod utils;
 /// store its single table at the precompile ID.
 pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
 
+/// Object type tag for immutable table display metadata.
+pub const TEXAS_POKER_METADATA_OBJECT_TYPE: &str = "TexasPokerTableMetadata";
+
+/// Object type tag for immutable poker rules.
+pub const TEXAS_POKER_RULES_OBJECT_TYPE: &str = "TexasPokerTableRules";
+
+/// Object type tag for immutable creator/admin policy.
+pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy";
+
 /// Persisted Borsh schema version for [`types::TexasPokerTable`].
 ///
 /// Version 3 removed persisted derived/transient fields while preserving the complete game state.
@@ -65,6 +74,12 @@ pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
 /// one canonical `TableRules` value, preparing it to move behind a rules hash without keeping
 /// duplicate flat fields in the hot table state.
 pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 23;
+
+/// ObjectDb-only hot-state schema.
+///
+/// Runtime/proof snapshots remain resolved schema v23 values.  The v24 ObjectDb encoding replaces
+/// metadata, rules and governance values with immutable object IDs plus exact opening digests.
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 24;
 
 /// Versioned persisted-state codec and fail-closed legacy migrations.
 pub mod state_codec;

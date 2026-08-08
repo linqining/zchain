@@ -16,19 +16,17 @@ use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::prove_create_table;
 use poker_texas_air::public_inputs::TexasPublicInputs;
 use poker_texas_air::trace_gen::create_table_trace::gen_create_table_trace;
-use poker_texas_air::verifier::{verify_create_table, verify_create_table_against};
+use poker_texas_air::verifier::verify_create_table;
 
 /// 构造测试用 `TexasPokerTable`（pre-state，placeholder）。
 fn make_pre_table() -> TexasPokerTable {
-    // Historical synthetic placeholder retained for test-only verifier compatibility.
-    // It deliberately differs from the production placeholder (empty name, blinds 1/1).
     TexasPokerTable::new(
         ObjectID::new([0xAA; 20], 42),
-        "pre_placeholder".to_string(),
+        String::new(),
         EMPTY_PLAYER,
         2,
         1,
-        2,
+        1,
     )
 }
 
@@ -37,7 +35,7 @@ fn make_post_table() -> TexasPokerTable {
     let mut t = TexasPokerTable::new(
         ObjectID::new([0xAA; 20], 42),
         "test_table".to_string(),
-        EMPTY_PLAYER,
+        [0xCC; 20],
         6,
         10,
         20,
@@ -85,39 +83,23 @@ fn test_e2e_create_table_prove_verify() {
     verify_create_table(proof).expect("verify 失败");
 }
 
-/// The production verifier must reject the historical synthetic placeholder even when the
-/// proof, AIR constants and trusted trace row are mutually self-consistent. Only the canonical
-/// first-call placeholder used by `TexasPokerPrecompile` is a valid create-table pre-state.
+/// Historical synthetic placeholders are no longer admitted even as proof fixtures.  Only the
+/// exact ObjectDb-absence placeholder maps to the distinguished zero root.
 #[test]
 fn production_verifier_rejects_noncanonical_create_placeholder() {
-    let pre_table = make_pre_table();
-    let post_table = make_post_table();
-    let trace = gen_create_table_trace(
-        CreateTableInput {
-            name: "test_table".to_string(),
-            max_players: 6,
-            small_blind: 10,
-            big_blind: 20,
-        },
-        &pre_table,
-        &post_table,
-        42,
-        0,
+    let pre_table = TexasPokerTable::new(
+        ObjectID::new([0xAA; 20], 42),
+        "legacy-placeholder".into(),
+        EMPTY_PLAYER,
+        2,
         1,
-    )
-    .expect("trace 生成失败");
-    let proof = prove_create_table(
-        &trace,
+        2,
+    );
+    let post_table = make_post_table();
+    let error =
         TexasPublicInputs::from_tables(&pre_table, &post_table, MethodKind::CreateTable, 42, 0, 1)
-            .expect("PI 构造失败"),
-    )
-    .expect("prove 失败");
-    let expected_air = proof.air.clone();
-    let expected_public_inputs = proof.public_inputs.clone();
-
-    let error = verify_create_table_against(proof, expected_air, &expected_public_inputs)
-        .expect_err("production verifier must reject a noncanonical create placeholder");
-    assert!(error.to_string().contains("first-call placeholder"));
+            .expect_err("noncanonical create placeholder must not produce public inputs");
+    assert!(error.to_string().contains("governance creator is empty"));
 }
 
 /// Soundness: 篡改 AIR 的 `max_players` 公开输入后，verify 应失败。

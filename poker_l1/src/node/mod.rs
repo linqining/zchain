@@ -4220,14 +4220,13 @@ mod tests {
             100,
         );
         table.chip_pool = 1;
-        let object = Object::new(
-            table_id,
-            Ownership::Shared,
-            crate::vm::contracts::texas_poker::TEXAS_POKER_TABLE_OBJECT_TYPE,
-            borsh::to_vec(&table).unwrap(),
-            None,
-        );
-        node.object_db.lock().unwrap().create(object).unwrap();
+        let objects =
+            crate::vm::contracts::texas_poker::state_codec::table_storage_objects(&table).unwrap();
+        let mut object_db = node.object_db.lock().unwrap();
+        for object in objects {
+            object_db.create(object).unwrap();
+        }
+        drop(object_db);
         drop(node);
 
         let error = match Node::open(config) {

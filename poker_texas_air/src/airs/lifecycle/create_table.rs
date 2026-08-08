@@ -518,6 +518,7 @@ mod tests {
     fn public_input_validation_rejects_table_reinitialisation() {
         let (air, _, mut pre, post) = canonical_transition();
         pre.name = "already-created".into();
+        pre.creator = [0xA5; 20];
         let mut public_inputs = TexasPublicInputs::from_tables(
             &pre,
             &post,
