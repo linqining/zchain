@@ -65,12 +65,14 @@ fn next_shuffle_task(
     aggregated_pk: <Bls12381Curve as Curve>::Point,
     round: usize,
 ) -> (ProveTask, TexasPokerTable) {
-    let input_cards = table.deck_state.encrypted.clone();
-    let permutation = match round % 3 {
+    let input_cards = table.deck_state.encrypted.to_vec();
+    let first_eight = match round % 3 {
         0 => [3, 0, 7, 1, 6, 2, 5, 4],
         1 => [1, 7, 3, 5, 0, 6, 4, 2],
         _ => [6, 4, 2, 0, 7, 5, 3, 1],
     };
+    let mut permutation: Vec<usize> = (0..52).collect();
+    permutation[..8].copy_from_slice(&first_eight);
     let rerandomizers: Vec<_> = (0..input_cards.len())
         .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
         .collect();
@@ -110,7 +112,7 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
         .copied()
         .reduce(|left, right| left + right)
         .expect("four keys");
-    let input_cards: Vec<_> = (0..8)
+    let input_cards: Vec<_> = (0..52)
         .map(|i| {
             let card = Bls12381Curve::hash_to_curve(
                 format!("outer-aggregate/{nonce}/card/{i}").as_bytes(),
@@ -133,14 +135,13 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     );
     table.call_seq = 20;
     table.hand_id = 9;
-    table.version = 30;
     for (index, key) in seat_keys.into_iter().enumerate() {
         table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
         table.seats[index].set_status(SeatStatus::Active);
         table.seats[index].stack = 1_000;
         table.seats[index].pk = ECPoint(key);
     }
-    table.deck_state.encrypted = input_cards;
+    table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 0b1111;
     table.sync_aggregated_pk().unwrap();
     assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));

@@ -55,20 +55,22 @@ mod tests {
         let g = G1Projective::generator();
         table.deck_state.encrypted = (0..count)
             .map(|_| ElGamalCiphertext { c1: g, c2: second })
-            .collect();
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
         table
     }
 
     #[test]
     fn commitment_changes_when_ciphertext_changes_at_same_length() {
-        let first = table_with_ciphertexts(2, G1Projective::generator());
-        let second = table_with_ciphertexts(2, G1Projective::identity());
+        let first = table_with_ciphertexts(52, G1Projective::generator());
+        let second = table_with_ciphertexts(52, G1Projective::identity());
         assert_ne!(deck_commitment(&first), deck_commitment(&second));
     }
 
     #[test]
     fn commitment_is_order_sensitive_and_deterministic() {
-        let mut first = table_with_ciphertexts(2, G1Projective::generator());
+        let mut first = table_with_ciphertexts(52, G1Projective::generator());
         first.deck_state.encrypted[1].c1 = G1Projective::identity();
         let mut second = first.clone();
         second.deck_state.encrypted.swap(0, 1);

@@ -148,9 +148,7 @@ impl FullHandRunner {
                 player,
                 1_000,
                 sp.sk,
-                poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(
-                    30_000 + seat as u64,
-                ),
+                poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(30_000 + seat as u64),
             )
             .expect("deterministic join key proof");
             dispatch_and_prove(
@@ -275,7 +273,7 @@ impl FullHandRunner {
             &mut plugin,
             &mut ctx,
             &self.players,
-            &[(1, vec![0, 1]), (0, vec![2, 3])],
+            &[1, 0],
             "reveal_preflop",
         );
 
@@ -360,7 +358,7 @@ impl FullHandRunner {
             &mut plugin,
             &mut ctx,
             &self.players,
-            &[(0, vec![0, 1]), (1, vec![2, 3])],
+            &[0, 1],
             "reveal_showdown",
         );
 
@@ -579,99 +577,135 @@ fn dispatch_current_turn(
     );
 }
 
-/// 提交一轮 reveal token：`submissions` 是 `(submitter_seat, assignment_indices)`。
+/// 提交一轮 reveal token：每个 seat 一次批量提交当前所有欠下的 assignment。
 fn submit_reveal_round(
     plugin: &mut TexasPokerPlugin,
     ctx: &mut HandCtx,
     players: &[Address; 2],
-    submissions: &[(u8, Vec<usize>)],
+    submitter_seats: &[u8],
     name: &str,
 ) {
-    let mut step_no = 0u32;
-    for &(submitter_seat, ref assignment_indices) in submissions {
-        for &assignment_idx in assignment_indices {
-            if ctx.stopped_at.is_none() {
-                let sp = ctx.players[submitter_seat as usize].clone();
-                if let Some(sp) = sp {
-                    let reveal_state = plugin.table().reveal_token_state();
-                    let Some(card_idx) = reveal_state
-                        .assignments
-                        .get(assignment_idx)
-                        .map(|assignment| usize::from(assignment.encrypted_card_index))
-                    else {
-                        ctx.stopped_at = Some(format!(
-                            "{name}[{step_no}]: assignment {assignment_idx} is absent from canonical table state"
-                        ));
-                        ctx.steps.push(StepTiming {
-                            method: format!("{name}[{step_no}]"),
-                            dispatch: Duration::ZERO,
-                            prove: Duration::ZERO,
-                            proof_breakdown: Vec::new(),
-                            ok: false,
-                        });
-                        step_no += 1;
-                        continue;
-                    };
-                    // At showdown the contract verifies against the partial ciphertext
-                    // persisted after the preflop reveals, rather than the current deck.
-                    // This also remains correct if a later reconstruction replaced the deck.
-                    let card = if reveal_state.reveal_phase == REVEAL_PHASE_SHOWDOWN
-                    {
-                        plugin
-                            .table()
-                            .deck_state
-                            .decrypted_cards
-                            .iter()
-                            .find(|card| {
-                                card.encrypted_card_index == card_idx as u8
-                                    && card.ciphertext().is_some()
-                            })
-                            .and_then(|card| card.ciphertext().cloned())
-                    } else {
-                        ctx.deck_view.get(card_idx).cloned()
-                    };
-                    let Some(card) = card else {
-                        ctx.stopped_at = Some(format!(
-                            "{name}[{step_no}]: proof ciphertext for card {card_idx} is absent from canonical table state"
-                        ));
-                        ctx.steps.push(StepTiming {
-                            method: format!("{name}[{step_no}]"),
-                            dispatch: Duration::ZERO,
-                            prove: Duration::ZERO,
-                            proof_breakdown: Vec::new(),
-                            ok: false,
-                        });
-                        step_no += 1;
-                        continue;
-                    };
-                    let rstep = build_reveal_token(&sp, &card, step_no as u64 + 1);
-                    let args = SubmitRevealTokensArgs {
-                        seat_index: submitter_seat,
-                        assignment_indices: vec![assignment_idx as u8],
-                        reveal_tokens: vec![ECPoint(rstep.reveal_token)],
-                        proofs: vec![rstep.proof],
-                    };
-                    dispatch_and_prove(
-                        plugin,
-                        ctx,
-                        players[submitter_seat as usize],
-                        &selectors::submit_player_reveal_tokens(),
-                        &args,
-                        &format!("{name}[{step_no}]"),
-                    );
-                }
-            } else {
-                ctx.steps.push(StepTiming {
-                    method: format!("{name}[{step_no}]"),
-                    dispatch: Duration::ZERO,
-                    prove: Duration::ZERO,
-                    proof_breakdown: Vec::new(),
-                    ok: false,
-                });
-            }
-            step_no += 1;
-        }
+    for (step_no, &submitter_seat) in submitter_seats.iter().enumerate() {
+        submit_reveal_batch_for_seat(plugin, ctx, players, submitter_seat, step_no as u32, name);
     }
+}
+
+fn submit_reveal_batch_for_seat(
+    plugin: &mut TexasPokerPlugin,
+    ctx: &mut HandCtx,
+    players: &[Address; 2],
+    submitter_seat: u8,
+    step_no: u32,
+    name: &str,
+) {
+    let method = format!("{name}[{step_no}]");
+    if ctx.stopped_at.is_some() {
+        ctx.steps.push(StepTiming {
+            method,
+            dispatch: Duration::ZERO,
+            prove: Duration::ZERO,
+            proof_breakdown: Vec::new(),
+            ok: false,
+        });
+        return;
+    }
+    let Some(sp) = ctx.players[usize::from(submitter_seat)].clone() else {
+        ctx.stopped_at = Some(format!("{method}: missing shuffle player"));
+        ctx.steps.push(StepTiming {
+            method,
+            dispatch: Duration::ZERO,
+            prove: Duration::ZERO,
+            proof_breakdown: Vec::new(),
+            ok: false,
+        });
+        return;
+    };
+
+    let reveal_state = plugin.table().reveal_token_state();
+    let reveal_phase = reveal_state.reveal_phase;
+    let assignment_cards = reveal_state
+        .assignments
+        .iter()
+        .enumerate()
+        .filter(|(_, assignment)| assignment.pending_mask() & (1u16 << submitter_seat) != 0)
+        .map(|(index, assignment)| (index, assignment.encrypted_card_index))
+        .collect::<Vec<_>>();
+    if assignment_cards.is_empty() {
+        ctx.stopped_at = Some(format!("{method}: seat has no pending reveal assignments"));
+        ctx.steps.push(StepTiming {
+            method,
+            dispatch: Duration::ZERO,
+            prove: Duration::ZERO,
+            proof_breakdown: Vec::new(),
+            ok: false,
+        });
+        return;
+    }
+
+    let mut assignment_indices = Vec::with_capacity(assignment_cards.len());
+    let mut reveal_tokens = Vec::with_capacity(assignment_cards.len());
+    let mut proofs = Vec::with_capacity(assignment_cards.len());
+    for (batch_offset, (assignment_index, card_index)) in assignment_cards.into_iter().enumerate() {
+        // Showdown binds the owner proof to the self-contained partial ciphertext retained from
+        // preflop. Every other phase binds to the current encrypted deck view.
+        let card = if reveal_phase == REVEAL_PHASE_SHOWDOWN {
+            plugin
+                .table()
+                .deck_state
+                .decrypted_cards
+                .iter()
+                .find(|card| card.encrypted_card_index == card_index)
+                .map(|card| card.ciphertext)
+        } else {
+            ctx.deck_view.get(usize::from(card_index)).cloned()
+        };
+        let Some(card) = card else {
+            ctx.stopped_at = Some(format!(
+                "{method}: proof ciphertext for card {card_index} is absent from canonical table state"
+            ));
+            ctx.steps.push(StepTiming {
+                method,
+                dispatch: Duration::ZERO,
+                prove: Duration::ZERO,
+                proof_breakdown: Vec::new(),
+                ok: false,
+            });
+            return;
+        };
+        let rstep = build_reveal_token(
+            &sp,
+            &card,
+            u64::from(step_no) * 256 + batch_offset as u64 + 1,
+        );
+        let Ok(assignment_index) = u8::try_from(assignment_index) else {
+            ctx.stopped_at = Some(format!("{method}: assignment index exceeds u8"));
+            ctx.steps.push(StepTiming {
+                method,
+                dispatch: Duration::ZERO,
+                prove: Duration::ZERO,
+                proof_breakdown: Vec::new(),
+                ok: false,
+            });
+            return;
+        };
+        assignment_indices.push(assignment_index);
+        reveal_tokens.push(ECPoint(rstep.reveal_token));
+        proofs.push(rstep.proof);
+    }
+    let args = SubmitRevealTokensArgs {
+        seat_index: submitter_seat,
+        assignment_indices,
+        reveal_tokens,
+        proofs,
+    };
+    dispatch_and_prove(
+        plugin,
+        ctx,
+        players[usize::from(submitter_seat)],
+        &selectors::submit_player_reveal_tokens(),
+        &args,
+        &method,
+    );
 }
 
 /// 提交公共牌 reveal：每个 phase 的 assignment 索引从零开始，每张牌两人都提交。
@@ -685,72 +719,14 @@ fn submit_community_reveal(
     count: usize,
     name: &str,
 ) {
-    let mut step_no = 0u32;
-    for assignment_idx in 0..count {
-        for seat in 0..2u8 {
-            if ctx.stopped_at.is_none() {
-                let sp = ctx.players[seat as usize].clone();
-                if let Some(sp) = sp {
-                    let reveal_state = plugin.table().reveal_token_state();
-                    let Some(card_idx) = reveal_state
-                        .assignments
-                        .get(assignment_idx)
-                        .map(|assignment| usize::from(assignment.encrypted_card_index))
-                    else {
-                        ctx.stopped_at = Some(format!(
-                            "{name}[{step_no}]: assignment {assignment_idx} is absent from canonical table state"
-                        ));
-                        ctx.steps.push(StepTiming {
-                            method: format!("{name}[{step_no}]"),
-                            dispatch: Duration::ZERO,
-                            prove: Duration::ZERO,
-                            proof_breakdown: Vec::new(),
-                            ok: false,
-                        });
-                        step_no += 1;
-                        continue;
-                    };
-                    let Some(card) = ctx.deck_view.get(card_idx) else {
-                        ctx.stopped_at = Some(format!(
-                            "{name}[{step_no}]: encrypted card {card_idx} is absent from runner deck view"
-                        ));
-                        ctx.steps.push(StepTiming {
-                            method: format!("{name}[{step_no}]"),
-                            dispatch: Duration::ZERO,
-                            prove: Duration::ZERO,
-                            proof_breakdown: Vec::new(),
-                            ok: false,
-                        });
-                        step_no += 1;
-                        continue;
-                    };
-                    let rstep = build_reveal_token(&sp, card, step_no as u64 + 1);
-                    let args = SubmitRevealTokensArgs {
-                        seat_index: seat,
-                        assignment_indices: vec![assignment_idx as u8],
-                        reveal_tokens: vec![ECPoint(rstep.reveal_token)],
-                        proofs: vec![rstep.proof],
-                    };
-                    dispatch_and_prove(
-                        plugin,
-                        ctx,
-                        players[seat as usize],
-                        &selectors::submit_player_reveal_tokens(),
-                        &args,
-                        &format!("{name}[{step_no}]"),
-                    );
-                }
-            } else {
-                ctx.steps.push(StepTiming {
-                    method: format!("{name}[{step_no}]"),
-                    dispatch: Duration::ZERO,
-                    prove: Duration::ZERO,
-                    proof_breakdown: Vec::new(),
-                    ok: false,
-                });
-            }
-            step_no += 1;
-        }
+    if ctx.stopped_at.is_none() && plugin.table().reveal_token_state().assignments.len() != count {
+        ctx.stopped_at = Some(format!(
+            "{name}: expected {count} canonical assignments, got {}",
+            plugin.table().reveal_token_state().assignments.len()
+        ));
+    }
+    for seat in 0..2u8 {
+        submit_reveal_batch_for_seat(plugin, ctx, players, seat, u32::from(seat), name);
     }
 }
 

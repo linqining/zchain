@@ -125,7 +125,7 @@ pub fn reconstruction_v3_user_readable_cards(
         .decrypted_cards
         .iter()
         .filter(|card| card.owner_seat_index == seat_index)
-        .filter_map(|card| card.ciphertext().cloned())
+        .map(|card| card.ciphertext)
         .collect()
 }
 
@@ -175,7 +175,7 @@ pub fn reconstruction_v3_prior_state_digest(
         .deck_state
         .decrypted_cards
         .iter()
-        .filter(|card| card.owner_seat_index == seat_index && card.ciphertext().is_some())
+        .filter(|card| card.owner_seat_index == seat_index)
         .collect::<Vec<_>>();
     if readable_records.is_empty() {
         return Err(PokerL1Error::Serialization(
@@ -186,9 +186,7 @@ pub fn reconstruction_v3_prior_state_digest(
     for card in readable_records {
         material.push(card.encrypted_card_index);
         material.push(card.owner_seat_index);
-        let ciphertext = card
-            .ciphertext()
-            .expect("filter requires an owner-readable ciphertext");
+        let ciphertext = card.ciphertext();
         material.extend_from_slice(&ciphertext.c1.to_compressed());
         material.extend_from_slice(&ciphertext.c2.to_compressed());
     }

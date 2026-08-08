@@ -93,8 +93,8 @@ fn validate_native_mid_round(
 
     let pre = table_from_state_preimage(&public_inputs.pre_image)?;
     let post = table_from_state_preimage(&public_inputs.post_image)?;
-    if public_inputs.pre_version != pre.version
-        || public_inputs.post_version != post.version
+    if public_inputs.pre_version != u64::from(pre.call_seq)
+        || public_inputs.post_version != u64::from(post.call_seq)
         || public_inputs.table_id != pre.id.creation_nonce
         || public_inputs.table_id != post.id.creation_nonce
         || public_inputs.hand_id != post.hand_id
@@ -255,8 +255,8 @@ pub(crate) fn validate_fold(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
         tables.pre.pot,
@@ -295,8 +295,8 @@ pub(crate) fn validate_check(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
         tables.pre.pot,
@@ -344,8 +344,8 @@ pub(crate) fn validate_call(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
         tables.pre.pot,
@@ -409,8 +409,8 @@ pub(crate) fn validate_raise(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
         tables.pre.pot,
@@ -472,8 +472,8 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
         tables.pre.pot,
@@ -502,8 +502,8 @@ pub(crate) fn validate_auto_fold(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         public_inputs.pre_state_root,
         public_inputs.post_state_root,
         public_inputs.dispatch_call_digest,
@@ -549,8 +549,8 @@ pub(crate) fn validate_auto_fold(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
     );
@@ -573,8 +573,8 @@ pub(crate) fn validate_force_fold(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         public_inputs.pre_state_root,
         public_inputs.post_state_root,
         public_inputs.dispatch_call_digest,
@@ -607,8 +607,8 @@ pub(crate) fn validate_force_fold(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
     );
@@ -644,11 +644,10 @@ pub(crate) fn validate_kick_player(
         .pot
         .checked_add(pre_seat.bet)
         .ok_or_else(|| TexasAirError::SpecViolation("kick_player: pot overflow".into()))?;
-    let expected_version =
-        canonical.pre.version.checked_add(1).ok_or_else(|| {
-            TexasAirError::SpecViolation("kick_player: pre-version overflow".into())
-        })?;
-    if canonical.post.version != expected_version {
+    let expected_version = u64::from(canonical.pre.call_seq)
+        .checked_add(1)
+        .ok_or_else(|| TexasAirError::SpecViolation("kick_player: pre-version overflow".into()))?;
+    if u64::from(canonical.post.call_seq) != expected_version {
         return Err(TexasAirError::UnsupportedBettingTransition(
             "kick_player must increment the external-command version exactly once".into(),
         ));
@@ -707,8 +706,8 @@ pub(crate) fn validate_kick_player(
             public_inputs.table_id,
             public_inputs.hand_id,
             public_inputs.call_seq,
-            canonical.pre.version,
-            canonical.post.version,
+            u64::from(canonical.pre.call_seq),
+            u64::from(canonical.post.call_seq),
             public_inputs.pre_state_root,
             public_inputs.post_state_root,
             public_inputs.dispatch_call_digest,
@@ -736,8 +735,8 @@ pub(crate) fn validate_kick_player(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         canonical.pre.round_state(),
         canonical.post.round_state(),
         canonical.pre.pot,
@@ -768,8 +767,8 @@ pub(crate) fn validate_request_leave_after_hand(
 
     let pre = table_from_state_preimage(&public_inputs.pre_image)?;
     let post = table_from_state_preimage(&public_inputs.post_image)?;
-    if public_inputs.pre_version != pre.version
-        || public_inputs.post_version != post.version
+    if public_inputs.pre_version != u64::from(pre.call_seq)
+        || public_inputs.post_version != u64::from(post.call_seq)
         || public_inputs.table_id != pre.id.creation_nonce
         || public_inputs.table_id != post.id.creation_nonce
         || public_inputs.hand_id != pre.hand_id
@@ -831,8 +830,8 @@ pub(crate) fn validate_request_leave_after_hand(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        post.version,
+        u64::from(pre.call_seq),
+        u64::from(post.call_seq),
         pre.round_state(),
         post.round_state(),
         pre.pot,

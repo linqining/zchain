@@ -61,8 +61,6 @@ fn test_e2e_addon_prove_verify() {
         pre_pending,
         0,   // pre_chip_pool
         200, // post_chip_pool
-        0,   // pre_addon_pool
-        200, // post_addon_pool
         zero_root(),
         one_root(),
         42, // table_id
@@ -114,8 +112,6 @@ fn test_e2e_addon_from_zero_pending() {
         0,   // pre_pending = 0
         0,   // pre_chip_pool
         500, // post_chip_pool
-        0,   // pre_addon_pool
-        500, // post_addon_pool
         zero_root(),
         one_root(),
         1,
@@ -167,8 +163,6 @@ fn test_e2e_addon_high_limb_amount() {
         0,
         0,
         65_536,
-        0,
-        65_536,
         zero_root(),
         one_root(),
         1,
@@ -206,7 +200,7 @@ fn test_e2e_addon_high_limb_amount() {
     verify_method(proof).expect("高 limb addon 应可验证");
 }
 
-/// 回归：pending_addon 与 addon_pool 都跨过 16-bit limb 边界时仍可证明。
+/// 回归：pending_addon 跨过 16-bit limb 边界时仍可证明。
 #[test]
 fn test_e2e_addon_ripple_carry() {
     let input = AddonInput {
@@ -218,8 +212,6 @@ fn test_e2e_addon_ripple_carry() {
         65_535,
         0,
         1,
-        65_535,
-        65_536,
         zero_root(),
         one_root(),
         1,
@@ -274,8 +266,6 @@ fn test_soundness_addon_tampered_amount() {
         pre_pending,
         0,   // pre_chip_pool
         200, // post_chip_pool
-        0,   // pre_addon_pool
-        200, // post_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -342,8 +332,6 @@ fn test_soundness_addon_tampered_seat() {
         100,
         0,   // pre_chip_pool
         200, // post_chip_pool
-        0,   // pre_addon_pool
-        200, // post_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -408,8 +396,6 @@ fn test_soundness_addon_tampered_high_amount_limb() {
         0,
         0,
         200,
-        0,
-        200,
         zero_root(),
         one_root(),
         1,
@@ -459,8 +445,6 @@ fn test_soundness_addon_tampered_post_chip_pool() {
     let row = AddonRow::active(
         &input,
         0,
-        0,
-        200,
         0,
         200,
         zero_root(),
@@ -521,8 +505,6 @@ fn test_e2e_rebuy_prove_verify() {
         pre_stack,
         0,   // pre_chip_pool
         500, // post_chip_pool
-        0,   // pre_addon_pool
-        0,   // post_addon_pool
         zero_root(),
         one_root(),
         42, // table_id
@@ -562,7 +544,7 @@ fn test_e2e_rebuy_prove_verify() {
     verify_method(proof).expect("verify 失败");
 }
 
-/// 回归：stack 与 addon_pool 都跨过 16-bit limb 边界时仍可证明。
+/// 回归：stack 跨过 16-bit limb 边界时仍可证明。
 #[test]
 fn test_e2e_rebuy_ripple_carry() {
     let input = RebuyInput {
@@ -574,8 +556,6 @@ fn test_e2e_rebuy_ripple_carry() {
         65_535,
         0,
         1,
-        65_535,
-        65_535,
         zero_root(),
         one_root(),
         1,
@@ -629,8 +609,6 @@ fn test_soundness_rebuy_tampered_amount() {
         pre_stack,
         0,   // pre_chip_pool
         500, // post_chip_pool
-        0,   // pre_addon_pool
-        0,   // post_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -697,8 +675,6 @@ fn test_soundness_rebuy_range_violation() {
         1000, // pre_stack
         0,    // pre_chip_pool
         500,  // post_chip_pool
-        0,    // pre_addon_pool
-        0,    // post_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -756,8 +732,6 @@ fn test_soundness_rebuy_tampered_seat() {
         1000,
         0,   // pre_chip_pool
         500, // post_chip_pool
-        0,   // pre_addon_pool
-        0,   // post_addon_pool
         zero_root(),
         one_root(),
         42,
@@ -822,8 +796,6 @@ fn test_soundness_rebuy_tampered_post_chip_pool() {
         1_000,
         0,
         500,
-        0,
-        0,
         zero_root(),
         one_root(),
         1,

@@ -117,7 +117,7 @@ fn fixture(
     let seat_index = 2;
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
-    let input_cards: Vec<_> = (0..8)
+    let input_cards: Vec<_> = (0..52)
         .map(|i| {
             let card = Bls12381Curve::hash_to_curve(format!("air-binding/card/{i}").as_bytes());
             ElGamalCiphertextGeneric::encrypt(
@@ -127,7 +127,8 @@ fn fixture(
             )
         })
         .collect();
-    let permutation = [3, 0, 7, 1, 6, 2, 5, 4];
+    let mut permutation: Vec<usize> = (0..52).collect();
+    permutation[..8].copy_from_slice(&[3, 0, 7, 1, 6, 2, 5, 4]);
     let rerandomizers: Vec<_> = (0..input_cards.len())
         .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
         .collect();
@@ -159,12 +160,11 @@ fn fixture(
         .checked_sub(1)
         .expect("statement call sequence must be non-zero");
     table.hand_id = hand_id;
-    table.version = 10;
     table.seats[usize::from(seat_index)].player = player;
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].stack = 1_000;
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
-    table.deck_state.encrypted = input_cards.clone();
+    table.deck_state.encrypted = input_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << seat_index;
     table.sync_aggregated_pk().unwrap();
     table
@@ -349,7 +349,6 @@ fn leave_fixture(
         .checked_sub(1)
         .expect("statement call sequence must be non-zero");
     table.hand_id = hand_id;
-    table.version = 21;
     table.seats[usize::from(seat_index)].player = player;
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
@@ -360,7 +359,7 @@ fn leave_fixture(
         table.seats[other_seat].player = [(other_seat as u8) + 1; 20];
         table.seats[other_seat].set_status(SeatStatus::Active);
     }
-    table.deck_state.encrypted = input_cards.clone();
+    table.deck_state.encrypted = input_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << seat_index;
     table.sync_aggregated_pk().unwrap();
     table
@@ -524,7 +523,7 @@ fn reveal_fixture(
     let seat_index = 1;
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
-    let encrypted_cards: Vec<_> = (0..2)
+    let encrypted_cards: Vec<_> = (0..52)
         .map(|i| {
             let plaintext = Bls12381Curve::hash_to_curve(format!("air-reveal/card/{i}").as_bytes());
             ElGamalCiphertextGeneric::encrypt(
@@ -548,12 +547,11 @@ fn reveal_fixture(
     );
     table.call_seq = call_seq - 1;
     table.hand_id = hand_id;
-    table.version = 31;
     table.seats[usize::from(seat_index)].player = player;
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].stack = 1_000;
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
-    table.deck_state.encrypted = encrypted_cards.clone();
+    table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << seat_index;
     table.sync_aggregated_pk().unwrap();
     table
@@ -673,8 +671,8 @@ fn reveal_fixture(
     let input = SubmitPlayerRevealTokensInput {
         seat_index,
         reveal_phase: task.pre_table.reveal_token_state().reveal_phase,
-        version_increment: u8::try_from(task.post_table.version - task.pre_table.version)
-            .expect("reveal version delta should fit u8"),
+        version_increment: u8::try_from(task.post_table.call_seq - task.pre_table.call_seq)
+            .expect("reveal call-sequence delta should fit u8"),
         precompile: binding.air_binding(),
         settlement: poker_texas_air::settlement_binding::SettlementPlanBinding::inactive(),
     };
@@ -806,7 +804,6 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     );
     table.call_seq = 8;
     table.hand_id = hand_id;
-    table.version = 40;
     table.rit_mode = RIT_MODE_TWICE;
     table.run_it_twice_state = RunItTwiceState::Twice {
         start: RitStartStreet::Preflop,
@@ -831,11 +828,12 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     table.seats[1].total_bet = 100;
     table.seats[1].set_status(SeatStatus::AllIn);
     table.seats[1].pk = ECPoint(public_key);
-    table.deck_state.encrypted = encrypted_cards.clone();
+    table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
     table.deck_state.decrypted_cards = encrypted_cards
         .iter()
+        .take(2)
         .enumerate()
         .map(|(index, ciphertext)| {
             DecryptedCard::partial(u8::try_from(index).unwrap(), seat_index, ciphertext.clone())
@@ -877,7 +875,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
         texas_dispatch::selectors::submit_player_reveal_tokens(),
         raw_args,
     );
-    assert_eq!(task.post_table.version - task.pre_table.version, 1);
+    assert_eq!(task.post_table.call_seq - task.pre_table.call_seq, 1);
     assert_eq!(task.post_table.pot, 200);
     assert_eq!(task.post_table.round_state(), ROUND_SHOWDOWN);
     assert!(task.post_table.reveal_token_state().assignments.is_empty());
@@ -932,7 +930,6 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     );
     table.call_seq = call_seq - 1;
     table.hand_id = hand_id;
-    table.version = 44;
     table.seats[0].player = [0x52; 20];
     table.seats[0].set_status(SeatStatus::Active);
     table.seats[0].stack = 1_000;

@@ -57,8 +57,8 @@ pub fn gen_create_table_trace(
         table_id,
         hand_id,
         call_seq,
-        pre_table.version,
-        post_table.version,
+        u64::from(pre_table.call_seq),
+        u64::from(post_table.call_seq),
     );
 
     // 4. 构造 trace
@@ -75,8 +75,8 @@ pub fn gen_create_table_trace(
         table_id,
         hand_id,
         call_seq,
-        pre_table.version,
-        post_table.version,
+        u64::from(pre_table.call_seq),
+        u64::from(post_table.call_seq),
     );
 
     Ok(CreateTableTrace { trace, air })

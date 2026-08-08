@@ -60,8 +60,8 @@ fn validate_native_funds_transition(
     if pre.id != post.id
         || public_inputs.table_id != pre.id.creation_nonce
         || public_inputs.table_id != post.id.creation_nonce
-        || public_inputs.pre_version != pre.version
-        || public_inputs.post_version != post.version
+        || public_inputs.pre_version != u64::from(pre.call_seq)
+        || public_inputs.post_version != u64::from(post.call_seq)
         || public_inputs.hand_id != pre.hand_id
         || public_inputs.hand_id != post.hand_id
         || public_inputs.call_seq != post.call_seq
@@ -153,15 +153,13 @@ pub(crate) fn validate_addon(
         pre_seat.pending_addon,
         tables.pre.chip_pool,
         tables.post.chip_pool,
-        tables.pre.addon_pool,
-        tables.post.addon_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
     );
@@ -201,15 +199,13 @@ pub(crate) fn validate_rebuy(
         pre_seat.stack,
         tables.pre.chip_pool,
         tables.post.chip_pool,
-        tables.pre.addon_pool,
-        tables.post.addon_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        tables.pre.version,
-        tables.post.version,
+        u64::from(tables.pre.call_seq),
+        u64::from(tables.post.call_seq),
         tables.pre.round_state(),
         tables.post.round_state(),
     );

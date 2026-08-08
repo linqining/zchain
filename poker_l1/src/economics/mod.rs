@@ -80,7 +80,7 @@ impl TreasuryCap {
 
 /// Global reconciliation of every currently modelled native ZCN custody domain.
 ///
-/// `addon_pool` is an accounting subset of a table's `chip_pool`. A Texas rake is moved to a
+/// Seat `pending_addon` balances are accounting subsets of a table's `chip_pool`. A Texas rake is moved to a
 /// Treasury-owned native Coin in the same precompile call, so it is counted as a live UTXO rather
 /// than table escrow. Legacy [`crate::account::Account::balance`] is a resource credit and is
 /// intentionally absent from this report.
@@ -212,16 +212,18 @@ fn audit_native_supply_objects<'a>(
                     table.id, object.id
                 )));
             }
-            if table.addon_pool > table.chip_pool {
+            let pending_addons = table.seats.iter().try_fold(0u64, |sum, seat| {
+                sum.checked_add(seat.pending_addon).ok_or_else(|| {
+                    PokerL1Error::Other(format!(
+                        "Texas Poker table {:?} pending-addon sum overflow",
+                        object.id
+                    ))
+                })
+            })?;
+            if pending_addons > table.chip_pool {
                 return Err(PokerL1Error::Other(format!(
-                    "Texas Poker table {:?} addon_pool {} exceeds chip_pool {}",
-                    object.id, table.addon_pool, table.chip_pool
-                )));
-            }
-            if table.rake_collected != 0 {
-                return Err(PokerL1Error::Other(format!(
-                    "Texas Poker table {:?} retained an unfinalized rake receipt {}",
-                    object.id, table.rake_collected
+                    "Texas Poker table {:?} pending addons {} exceed chip_pool {}",
+                    object.id, pending_addons, table.chip_pool
                 )));
             }
             texas_table_escrow = texas_table_escrow
@@ -1028,7 +1030,10 @@ pub fn create_native_coin_output(
 mod tests {
     use super::*;
     use crate::storage::object_db::ObjectDb;
-    use crate::vm::contracts::texas_poker::types::TexasPokerTable;
+    use crate::vm::contracts::texas_poker::types::{SeatStatus, TexasPokerTable};
+    use blstrs::G1Projective;
+    use group::Group;
+    use poker_protocol::crypto::types::ECPoint;
 
     fn live_native_supply(db: &ObjectDb) -> u64 {
         db.iter()
@@ -1040,7 +1045,12 @@ mod tests {
     fn texas_table_object(id: ObjectID, chip_pool: u64, addon_pool: u64) -> Object {
         let mut table = TexasPokerTable::new(id, "reconciliation".into(), [0x77; 20], 6, 50, 100);
         table.chip_pool = chip_pool;
-        table.addon_pool = addon_pool;
+        if addon_pool > 0 {
+            table.seats[0].player = [0x55; 20];
+            table.seats[0].status = SeatStatus::Waiting;
+            table.seats[0].pk = ECPoint(G1Projective::generator());
+            table.seats[0].pending_addon = addon_pool;
+        }
         Object::new(
             id,
             Ownership::Shared,

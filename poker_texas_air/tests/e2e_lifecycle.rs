@@ -70,7 +70,6 @@ fn test_e2e_join_table_prove_verify() {
         1,  // post_version
         10, // big_blind
         0,  // pre_chip_pool
-        0,  // pre_addon_pool
     );
     let trace = gen_method_trace(
         JoinTableAir::num_columns(),
@@ -101,10 +100,9 @@ fn test_e2e_join_table_prove_verify() {
     verify_method(proof).expect("verify 失败");
 }
 
-/// 资金语义回归：addon_pool 是 chip_pool 的子集，join 上界不能重复计入；同时
-/// `chip_pool + buy_in` 跨 16-bit limb 时必须由 ripple carry 正确证明。
+/// 资金语义回归：`chip_pool + buy_in` 跨 16-bit limb 时必须由 ripple carry 正确证明。
 #[test]
-fn test_e2e_join_table_nonzero_addon_pool_and_cross_limb_carry() {
+fn test_e2e_join_table_cross_limb_carry() {
     let buy_in = 65_536;
     let pre_chip_pool = MAX_TOTAL_BET - buy_in;
     let input = JoinTableInput {
@@ -123,7 +121,6 @@ fn test_e2e_join_table_nonzero_addon_pool_and_cross_limb_carry() {
         1,
         10,
         pre_chip_pool,
-        1, // 非零 addon_pool；旧语义会把它重复计入并错误超界
     );
     let trace = gen_method_trace(
         JoinTableAir::num_columns(),
@@ -160,7 +157,7 @@ fn test_soundness_join_table_tampered_seat() {
         buy_in: 1_000,
         player_addr: [0u8; 20],
     };
-    let row = JoinTableRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1, 10, 0, 0);
+    let row = JoinTableRow::active(&input, zero_root(), one_root(), 42, 0, 1, 0, 1, 10, 0);
     let trace = gen_method_trace(
         JoinTableAir::num_columns(),
         &row.to_vec(),
@@ -222,8 +219,6 @@ fn test_e2e_leave_table_prove_verify() {
         0,
         5000,
         4000,
-        0,
-        0,
     );
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
@@ -271,8 +266,6 @@ fn test_soundness_leave_table_tampered_seat() {
         0,
         5000,
         4000,
-        0,
-        0,
     );
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
@@ -313,7 +306,7 @@ fn test_soundness_leave_table_tampered_seat() {
     );
 }
 
-/// E2E: 退款加法和两条资金池减法均接受跨 16-bit limb carry/borrow。
+/// E2E: 退款加法和资金池减法均接受跨 16-bit limb carry/borrow。
 #[test]
 fn test_e2e_leave_table_funds_ripple_carry() {
     let input = LeaveTableInput { seat_index: 0 };
@@ -330,8 +323,6 @@ fn test_e2e_leave_table_funds_ripple_carry() {
         1,
         65_536,
         0,
-        65_536,
-        65_535,
     );
     let trace = gen_method_trace(
         LeaveTableAir::num_columns(),
@@ -360,7 +351,7 @@ fn test_e2e_leave_table_funds_ripple_carry() {
     verify_method(proof).expect("跨 limb leave_table verify 失败");
 }
 
-/// Soundness: refund/chip_pool/addon_pool 任一资金 witness 被篡改时 prove 必须失败。
+/// Soundness: refund/chip_pool 任一资金 witness 被篡改时 prove 必须失败。
 #[test]
 fn test_soundness_leave_table_tampered_funds_rejected() {
     use poker_texas_air::airs::lifecycle::leave_table::cols;
@@ -379,13 +370,10 @@ fn test_soundness_leave_table_tampered_funds_rejected() {
         1,
         65_536,
         0,
-        65_536,
-        65_535,
     );
     for (name, column) in [
         ("refund", cols::OUTPUT_REFUND_BASE),
         ("chip_pool", cols::OUTPUT_POST_CHIP_POOL_BASE),
-        ("addon_pool", cols::OUTPUT_POST_ADDON_POOL_BASE),
     ] {
         let mut trace_row = row.to_vec();
         trace_row[column] += M31::from(1u32);
@@ -1238,21 +1226,20 @@ fn test_lifecycle_air_column_consistency() {
         join_table, leave_table, reset_for_next_hand, start_hand, tick,
     };
 
-    // join_table: 通用 + 50 业务
+    // join_table: 通用 + 46 业务
     //   原始 14 列（seat_index + buy_in 4 + player_addr 4 + seat_stack 4 + seat_empty 1）
     //   + 12 列（big_blind 4 + pre_chip_pool 4 + post_chip_pool 4）用于 buy_in >= big_blind 和 chip_pool 守恒
-    //   + 14 列（pre_addon_pool 4 + bound_diff 4 + carry_lo 3 + carry_hi 3）用于全局上界 range check
+    //   + 10 列（bound_diff 4 + carry_lo 3 + carry_hi 3）用于全局上界 range check
     //   + 7 列（阶段 3 新增：ge_diff 4 + ge_borrow 3）用于 buy_in >= big_blind
     //   + 3 列 chip_pool ripple carry
-    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 50);
+    assert_eq!(join_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 46);
     assert_eq!(JoinTableAir::num_columns(), join_table::cols::NUM_COLUMNS);
 
-    // leave_table: 通用 + 39 业务
+    // leave_table: 通用 + 28 业务
     //   原始 6 列（seat_index + refund 4 + seat_occupied 1）
-    //   + 24 新列（seat_stack 4 + pending_addon 4 + pre_chip_pool 4 + post_chip_pool 4
-    //              + pre_addon_pool 4 + post_addon_pool 4）用于退款和资金守恒
-    //   + 9 carry bit（退款加法、chip_pool 减法、addon_pool 减法各 3）
-    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 39);
+    //   + 16 新列（seat_stack 4 + pending_addon 4 + pre_chip_pool 4 + post_chip_pool 4）
+    //   + 6 carry bit（退款加法、chip_pool 减法各 3）
+    assert_eq!(leave_table::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 28);
     assert_eq!(LeaveTableAir::num_columns(), leave_table::cols::NUM_COLUMNS);
 
     // start_hand: 通用 + 17 业务（完整 ante 金额、active_count witnesses、pot add carries）

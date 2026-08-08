@@ -370,8 +370,8 @@ pub fn validate_public_inputs(
     if pre.id != post.id
         || public_inputs.table_id != pre.id.creation_nonce
         || public_inputs.table_id != post.id.creation_nonce
-        || public_inputs.pre_version != pre.version
-        || public_inputs.post_version != post.version
+        || public_inputs.pre_version != u64::from(pre.call_seq)
+        || public_inputs.post_version != u64::from(post.call_seq)
         || public_inputs.hand_id != post.hand_id
         || public_inputs.call_seq != post.call_seq
     {
@@ -410,7 +410,6 @@ pub fn validate_public_inputs(
         air.input.small_blind,
         air.input.big_blind,
     );
-    expected_post.bump_version();
     expected_post.call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
         TexasAirError::SpecViolation("create_table: call_seq overflow during replay".into())
     })?;
@@ -428,8 +427,8 @@ pub fn validate_public_inputs(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        post.version,
+        u64::from(pre.call_seq),
+        u64::from(post.call_seq),
     );
     expected_row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(pre.pot);
     expected_row.common.post_pot = crate::airs::common::u64_to_m31_limbs(post.pot);
@@ -472,7 +471,6 @@ mod tests {
             input.small_blind,
             input.big_blind,
         );
-        post.bump_version();
         post.call_seq = 1;
         let mut public_inputs = TexasPublicInputs::from_tables(
             &pre,
@@ -490,8 +488,8 @@ mod tests {
             id.creation_nonce,
             0,
             1,
-            pre.version,
-            post.version,
+            u64::from(pre.call_seq),
+            u64::from(post.call_seq),
         );
         public_inputs
             .bind_expected_trace_row(&row.to_vec())
@@ -504,8 +502,8 @@ mod tests {
             id.creation_nonce,
             0,
             1,
-            pre.version,
-            post.version,
+            u64::from(pre.call_seq),
+            u64::from(post.call_seq),
         );
         (air, public_inputs, pre, post)
     }
@@ -536,8 +534,8 @@ mod tests {
             public_inputs.table_id,
             public_inputs.hand_id,
             public_inputs.call_seq,
-            pre.version,
-            post.version,
+            u64::from(pre.call_seq),
+            u64::from(post.call_seq),
         );
         public_inputs
             .bind_expected_trace_row(&row.to_vec())
@@ -567,8 +565,8 @@ mod tests {
             public_inputs.table_id,
             public_inputs.hand_id,
             public_inputs.call_seq,
-            pre.version,
-            post.version,
+            u64::from(pre.call_seq),
+            u64::from(post.call_seq),
         );
         public_inputs
             .bind_expected_trace_row(&row.to_vec())

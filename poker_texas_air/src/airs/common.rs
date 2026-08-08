@@ -60,7 +60,7 @@ pub const COMMON_NUM_COLUMNS: usize = 37;
 
 /// MAX_TOTAL_BET = 10^18，全局筹码上界。
 /// 对齐 `poker_l1/src/vm/contracts/texas_poker/constants.rs:MAX_TOTAL_BET`。
-/// 用于 addon/rebuy/join 的全局上界检查：`chip_pool + addon_pool + amount <= MAX_TOTAL_BET`。
+/// 用于 addon/rebuy/join 的全局上界检查：`chip_pool + amount <= MAX_TOTAL_BET`。
 pub const MAX_TOTAL_BET: u64 = 1_000_000_000_000_000_000;
 
 /// MAX_TOTAL_BET 的 4-limb M31 表示（host 端 / AIR 约束用）。
@@ -124,42 +124,33 @@ pub fn compute_add_carries(lhs: u64, rhs: u64) -> [M31; 3] {
     out
 }
 
-/// 计算 4-limb 加法 `cp + ap + am + df = mx` 的进位（host 端用）。
+/// 计算 4-limb 加法 `cp + am + df = mx` 的进位（host 端用）。
 ///
 /// 返回 `(carry_lo: [M31; 3], carry_hi: [M31; 3])`，其中
 /// `carry = lo + 2*hi`（2-bit 分解，carry ∈ {0,1,2,3}）。
 ///
 /// 调用方需保证 `cp + ap + am + df = mx`（u64 意义下成立，无 5th limb 溢出）。
 #[must_use]
-pub fn compute_bound_carries(
-    chip_pool: u64,
-    addon_pool: u64,
-    amount: u64,
-    diff: u64,
-) -> ([M31; 3], [M31; 3]) {
+pub fn compute_bound_carries(chip_pool: u64, amount: u64, diff: u64) -> ([M31; 3], [M31; 3]) {
     let cp = u64_to_m31_limbs(chip_pool);
-    let ap = u64_to_m31_limbs(addon_pool);
     let am = u64_to_m31_limbs(amount);
     let df = u64_to_m31_limbs(diff);
     let mx = u64_to_m31_limbs(MAX_TOTAL_BET);
 
-    // Limb 0: cp0 + ap0 + am0 + df0 = mx0 + c0 * 65536
-    let sum0 = u64::from(cp[0].0) + u64::from(ap[0].0) + u64::from(am[0].0) + u64::from(df[0].0);
+    // Limb 0: cp0 + am0 + df0 = mx0 + c0 * 65536
+    let sum0 = u64::from(cp[0].0) + u64::from(am[0].0) + u64::from(df[0].0);
     let c0 = (sum0 - u64::from(mx[0].0)) / 65536;
 
     // Limb 1: cp1 + ap1 + am1 + df1 + c0 = mx1 + c1 * 65536
-    let sum1 =
-        u64::from(cp[1].0) + u64::from(ap[1].0) + u64::from(am[1].0) + u64::from(df[1].0) + c0;
+    let sum1 = u64::from(cp[1].0) + u64::from(am[1].0) + u64::from(df[1].0) + c0;
     let c1 = (sum1 - u64::from(mx[1].0)) / 65536;
 
     // Limb 2: cp2 + ap2 + am2 + df2 + c1 = mx2 + c2 * 65536
-    let sum2 =
-        u64::from(cp[2].0) + u64::from(ap[2].0) + u64::from(am[2].0) + u64::from(df[2].0) + c1;
+    let sum2 = u64::from(cp[2].0) + u64::from(am[2].0) + u64::from(df[2].0) + c1;
     let c2 = (sum2 - u64::from(mx[2].0)) / 65536;
 
     // Limb 3: cp3 + ap3 + am3 + df3 + c2 = mx3 (c3 = 0, no overflow)
-    let sum3 =
-        u64::from(cp[3].0) + u64::from(ap[3].0) + u64::from(am[3].0) + u64::from(df[3].0) + c2;
+    let sum3 = u64::from(cp[3].0) + u64::from(am[3].0) + u64::from(df[3].0) + c2;
     debug_assert_eq!(
         sum3,
         u64::from(mx[3].0),
@@ -445,18 +436,18 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         self.is_active.clone() * (self.post_button.clone() - self.pre_button.clone())
     }
 
-    /// 约束全局上界 `chip_pool + addon_pool + amount + diff = MAX_TOTAL_BET`，
-    /// 其中 `diff = MAX_TOTAL_BET - (chip_pool + addon_pool + amount) ≥ 0`。
+    /// 约束全局上界 `chip_pool + amount + diff = MAX_TOTAL_BET`，
+    /// 其中 `diff = MAX_TOTAL_BET - (chip_pool + amount) ≥ 0`。
     ///
     /// 使用 2-bit carry 分解处理 4 数 limb 加法的进位（carry ∈ {0,1,2,3}）。
     /// 每个 carry 分解为 `lo + 2*hi`，lo/hi 为 boolean（独立 degree-2 约束）。
     ///
     /// # 参数
-    /// - `chip_pool`/`addon_pool`/`amount`/`diff`: 4-limb 输入（每 limb 16-bit）
+    /// - `chip_pool`/`amount`/`diff`: 4-limb 输入（每 limb 16-bit）
     /// - `carry_lo`/`carry_hi`: 3 个进位的 2-bit 分解（limb 0→1, 1→2, 2→3 的进位）
     ///
     /// # 约束
-    /// 1. 逐 limb: `cp[i] + ap[i] + am[i] + df[i] + carry_in = mx[i] + carry_out * 65536`
+    /// 1. 逐 limb: `cp[i] + am[i] + df[i] + carry_in = mx[i] + carry_out * 65536`
     /// 2. 进位 boolean: `lo*(lo-1)=0`, `hi*(hi-1)=0`（6 个 degree-2 约束）
     /// 3. 最终 carry_out = 0（limb 3 方程中 carry_out 项为 0）
     ///
@@ -467,11 +458,10 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// 由于每 limb < 65536 且 carry ∈ {0,1,2,3}，4 数 limb 之和 < 4×65536 = 262144
     /// < M31_P = 2^31−1，M31 运算无取模，limb 方程等价于 Nat 方程。
     /// 配合 `Limb4Range16` range constraint（diff 全 limb < 65536）可推出
-    /// `decodeU64(cp) + decodeU64(ap) + decodeU64(am) ≤ MAX_TOTAL_BET`。
+    /// `decodeU64(cp) + decodeU64(am) ≤ MAX_TOTAL_BET`。
     pub fn bound_check_4limb(
         &self,
         chip_pool: &[E::F; 4],
-        addon_pool: &[E::F; 4],
         amount: &[E::F; 4],
         diff: &[E::F; 4],
         carry_lo: &[E::F; 3],
@@ -493,43 +483,28 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
         // Limb 0: cp0 + ap0 + am0 + df0 - mx0 - c0*65536 = 0 (carry_in = 0)
         out.push(
             self.is_active.clone()
-                * (chip_pool[0].clone()
-                    + addon_pool[0].clone()
-                    + amount[0].clone()
-                    + diff[0].clone()
+                * (chip_pool[0].clone() + amount[0].clone() + diff[0].clone()
                     - mx_f[0].clone()
                     - c0.clone() * base.clone()),
         );
         // Limb 1: cp1 + ap1 + am1 + df1 + c0 - mx1 - c1*65536 = 0
         out.push(
             self.is_active.clone()
-                * (chip_pool[1].clone()
-                    + addon_pool[1].clone()
-                    + amount[1].clone()
-                    + diff[1].clone()
-                    + c0.clone()
+                * (chip_pool[1].clone() + amount[1].clone() + diff[1].clone() + c0.clone()
                     - mx_f[1].clone()
                     - c1.clone() * base.clone()),
         );
         // Limb 2: cp2 + ap2 + am2 + df2 + c1 - mx2 - c2*65536 = 0
         out.push(
             self.is_active.clone()
-                * (chip_pool[2].clone()
-                    + addon_pool[2].clone()
-                    + amount[2].clone()
-                    + diff[2].clone()
-                    + c1.clone()
+                * (chip_pool[2].clone() + amount[2].clone() + diff[2].clone() + c1.clone()
                     - mx_f[2].clone()
                     - c2.clone() * base.clone()),
         );
         // Limb 3: cp3 + ap3 + am3 + df3 + c2 - mx3 = 0 (carry_out = 0)
         out.push(
             self.is_active.clone()
-                * (chip_pool[3].clone()
-                    + addon_pool[3].clone()
-                    + amount[3].clone()
-                    + diff[3].clone()
-                    + c2.clone()
+                * (chip_pool[3].clone() + amount[3].clone() + diff[3].clone() + c2.clone()
                     - mx_f[3].clone()),
         );
         // carry bit booleanity（6 条独立）

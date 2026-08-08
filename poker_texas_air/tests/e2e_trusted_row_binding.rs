@@ -142,7 +142,7 @@ fn make_create_tables() -> (TexasPokerTable, TexasPokerTable) {
     let id = ObjectID::new([0xAA; 20], 42);
     let pre = TexasPokerTable::new(id, String::new(), EMPTY_PLAYER, 2, 1, 1);
     let mut post = TexasPokerTable::new(id, "test_table".to_owned(), EMPTY_PLAYER, 6, 10, 20);
-    post.bump_version();
+    post.call_seq = pre.call_seq.checked_add(1).unwrap();
     post.call_seq = 1;
     (pre, post)
 }
@@ -272,8 +272,8 @@ fn production_verifier_rejects_action_row_not_reconstructed_from_canonical_table
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        post.version,
+        u64::from(pre.call_seq),
+        u64::from(post.call_seq),
         pre.round_state(),
         post.round_state(),
         pre.pot,
@@ -386,8 +386,8 @@ fn production_verifier_derives_terminal_fold_winner_from_canonical_tables() {
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        post.version,
+        u64::from(pre.call_seq),
+        u64::from(post.call_seq),
         pre.round_state(),
         post.round_state(),
         pre.pot,
@@ -461,8 +461,8 @@ fn production_verifier_rejects_action_table_id_not_bound_to_canonical_table() {
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        post.version,
+        u64::from(pre.call_seq),
+        u64::from(post.call_seq),
         pre.round_state(),
         post.round_state(),
         pre.pot,
@@ -621,8 +621,8 @@ fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        canonical_post.version,
+        u64::from(pre.call_seq),
+        u64::from(canonical_post.call_seq),
         pre.round_state(),
         canonical_post.round_state(),
         pre.pot,
@@ -702,7 +702,7 @@ fn start_hand_input(pre: &TexasPokerTable, post: &TexasPokerTable) -> StartHandI
         new_button: post.button,
         ante_mode: post.ante_mode,
         ante_amount: post.ante_amount,
-        ante_collected: post.ante_collected,
+        ante_collected: post.pot.checked_sub(pre.pot).unwrap(),
         pre_pot: pre.pot,
         post_pot: post.pot,
         authorization: synthetic_admin_authorization(),
@@ -739,8 +739,8 @@ fn production_verifier_rejects_start_hand_row_attached_to_unrelated_post_table()
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        canonical_post.version,
+        u64::from(pre.call_seq),
+        u64::from(canonical_post.call_seq),
     );
     public_inputs
         .bind_expected_trace_row(&row.to_vec())
@@ -818,8 +818,8 @@ fn production_verifier_rejects_reset_row_attached_to_unrelated_post_table() {
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        canonical_post.version,
+        u64::from(pre.call_seq),
+        u64::from(canonical_post.call_seq),
         pre.round_state(),
     );
     public_inputs
@@ -916,11 +916,10 @@ fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        canonical_post.version,
+        u64::from(pre.call_seq),
+        u64::from(canonical_post.call_seq),
         pre.big_blind,
         pre.chip_pool,
-        pre.addon_pool,
     );
     public_inputs
         .bind_expected_trace_row(&row.to_vec())
@@ -1019,14 +1018,12 @@ fn production_verifier_rejects_leave_row_attached_to_unrelated_post_table() {
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        canonical_post.version,
+        u64::from(pre.call_seq),
+        u64::from(canonical_post.call_seq),
         pre_seat.stack,
         pre_seat.pending_addon,
         pre.chip_pool,
         canonical_post.chip_pool,
-        pre.addon_pool,
-        canonical_post.addon_pool,
     );
     public_inputs
         .bind_expected_trace_row(&row.to_vec())
@@ -1096,15 +1093,13 @@ fn production_verifier_rejects_addon_row_attached_to_unrelated_post_table() {
         pre.seats[0].pending_addon,
         pre.chip_pool,
         canonical_post.chip_pool,
-        pre.addon_pool,
-        canonical_post.addon_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        canonical_post.version,
+        u64::from(pre.call_seq),
+        u64::from(canonical_post.call_seq),
         pre.round_state(),
         canonical_post.round_state(),
     );
@@ -1174,15 +1169,13 @@ fn production_verifier_rejects_rebuy_row_attached_to_unrelated_post_table() {
         pre.seats[0].stack,
         pre.chip_pool,
         canonical_post.chip_pool,
-        pre.addon_pool,
-        canonical_post.addon_pool,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        canonical_post.version,
+        u64::from(pre.call_seq),
+        u64::from(canonical_post.call_seq),
         pre.round_state(),
         canonical_post.round_state(),
     );

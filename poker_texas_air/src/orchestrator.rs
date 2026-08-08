@@ -386,8 +386,8 @@ impl Orchestrator {
             table_id: task.table_id,
             hand_id: task.hand_id,
             call_seq: task.call_seq,
-            pre_version: task.pre_table.version,
-            post_version: task.post_table.version,
+            pre_version: u64::from(task.pre_table.call_seq),
+            post_version: u64::from(task.post_table.call_seq),
             dispatch_call_digest: [0u8; 32],
             dispatch_call: None,
             precompile_binding: None,
@@ -587,8 +587,8 @@ impl Orchestrator {
             small_blind: *small_blind,
             big_blind: *big_blind,
         };
-        let pre_version = task.pre_table.version;
-        let post_version = task.post_table.version;
+        let pre_version = u64::from(task.pre_table.call_seq);
+        let post_version = u64::from(task.post_table.call_seq);
 
         let mut row = CreateTableRow::active(
             &input,
@@ -659,8 +659,8 @@ impl Orchestrator {
             seat_index: *seat_index,
             outcome,
         };
-        let pre_version = task.pre_table.version;
-        let post_version = task.post_table.version;
+        let pre_version = u64::from(task.pre_table.call_seq);
+        let post_version = u64::from(task.post_table.call_seq);
         let pre_round_state = task.pre_table.round_state();
         let post_round_state = task.post_table.round_state();
 
@@ -741,7 +741,10 @@ impl Orchestrator {
             buy_in: *buy_in,
             player_addr: *player,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let mut row = JoinTableRow::active(
             &input,
             srm(pre_root),
@@ -753,7 +756,6 @@ impl Orchestrator {
             post_v,
             task.pre_table.big_blind,
             task.pre_table.chip_pool,
-            task.pre_table.addon_pool,
         );
         row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
         row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
@@ -792,7 +794,10 @@ impl Orchestrator {
         let input = LeaveTableInput {
             seat_index: *seat_index,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
         let refund = pre_seat
             .stack
@@ -805,16 +810,7 @@ impl Orchestrator {
                 .ok_or_else(|| {
                     TexasAirError::SpecViolation("leave_table chip_pool underflow".into())
                 })?;
-        let expected_post_addon_pool = task
-            .pre_table
-            .addon_pool
-            .checked_sub(pre_seat.pending_addon)
-            .ok_or_else(|| {
-                TexasAirError::SpecViolation("leave_table addon_pool underflow".into())
-            })?;
-        if task.post_table.chip_pool != expected_post_chip_pool
-            || task.post_table.addon_pool != expected_post_addon_pool
-        {
+        if task.post_table.chip_pool != expected_post_chip_pool {
             return Err(TexasAirError::SpecViolation(
                 "leave_table post funds do not match non-underflowing pool subtraction".into(),
             ));
@@ -832,8 +828,6 @@ impl Orchestrator {
             pre_seat.pending_addon,
             task.pre_table.chip_pool,
             task.post_table.chip_pool,
-            task.pre_table.addon_pool,
-            task.post_table.addon_pool,
         );
         row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
         row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
@@ -886,7 +880,10 @@ impl Orchestrator {
             ));
         }
 
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let row = RequestLeaveAfterHandRow::active(
             &input,
             srm(pre_root),
@@ -938,19 +935,28 @@ impl Orchestrator {
             task.table_id,
             task.hand_id,
             task.call_seq,
-            task.pre_table.version,
-            task.post_table.version,
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
             pre_root,
             post_root,
             pi.dispatch_call_digest,
         )?
         .air_binding();
+        let ante_collected = task
+            .post_table
+            .pot
+            .checked_sub(task.pre_table.pot)
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "start_hand post pot is below pre pot while deriving ante total".into(),
+                )
+            })?;
         let input = StartHandInput {
             active_count: count_active_occupied(&task.pre_table),
             new_button: task.post_table.button,
             ante_mode: task.post_table.ante_mode,
             ante_amount: task.post_table.ante_amount,
-            ante_collected: task.post_table.ante_collected,
+            ante_collected,
             pre_pot: task.pre_table.pot,
             post_pot: task.post_table.pot,
             authorization,
@@ -961,7 +967,10 @@ impl Orchestrator {
         let count_minus_one = count_m31 - M31::from(1u32);
         let active_count_prod = count_m31 * count_minus_one;
         let active_count_inv = active_count_prod.inverse();
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let row = StartHandRow::active(
             &input,
             active_count_inv,
@@ -1015,7 +1024,10 @@ impl Orchestrator {
             &task.post_table,
             task.context.block_timestamp,
         )?;
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = TickRow::active(
             &input,
@@ -1078,15 +1090,18 @@ impl Orchestrator {
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
                 pre_root,
                 post_root,
                 pi.dispatch_call_digest,
             )?
             .air_binding(),
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let pre_r = task.pre_table.round_state();
         let mut row = ResetForNextHandRow::active(
             &input,
@@ -1150,7 +1165,10 @@ impl Orchestrator {
             seat_bet: seat.bet,
             outcome,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = CheckRow::active(
@@ -1229,7 +1247,10 @@ impl Orchestrator {
             pre_seat_total_bet: pre_seat.total_bet,
             outcome,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = CallRow::active(
@@ -1327,7 +1348,10 @@ impl Orchestrator {
             pre_seat_total_bet: pre_seat.total_bet,
             outcome,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = RaiseRow::active(
@@ -1414,7 +1438,10 @@ impl Orchestrator {
             pre_seat_total_bet: pre_seat.total_bet,
             outcome,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = BetRow::active(
@@ -1494,8 +1521,8 @@ impl Orchestrator {
             task.table_id,
             task.hand_id,
             task.call_seq,
-            task.pre_table.version,
-            task.post_table.version,
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
             pre_root,
             post_root,
             pi.dispatch_call_digest,
@@ -1524,7 +1551,10 @@ impl Orchestrator {
             outcome,
             authorization,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = AutoFoldRow::active(
             &input,
@@ -1597,8 +1627,8 @@ impl Orchestrator {
             task.table_id,
             task.hand_id,
             task.call_seq,
-            task.pre_table.version,
-            task.post_table.version,
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
             pre_root,
             post_root,
             pi.dispatch_call_digest,
@@ -1609,7 +1639,10 @@ impl Orchestrator {
             outcome,
             authorization,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = ForceFoldRow::active(
             &input,
@@ -1667,10 +1700,12 @@ impl Orchestrator {
             .pot
             .checked_add(pre_seat.bet)
             .ok_or_else(|| TexasAirError::SpecViolation("kick_player pot overflow".into()))?;
-        let expected_version = task.pre_table.version.checked_add(1).ok_or_else(|| {
-            TexasAirError::SpecViolation("kick_player pre-version overflow".into())
-        })?;
-        if task.post_table.version != expected_version {
+        let expected_version = u64::from(task.pre_table.call_seq)
+            .checked_add(1)
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation("kick_player pre-version overflow".into())
+            })?;
+        if u64::from(task.post_table.call_seq) != expected_version {
             return Err(TexasAirError::UnsupportedBettingTransition(
                 "kick_player must increment the external-command version exactly once".into(),
             ));
@@ -1729,15 +1764,18 @@ impl Orchestrator {
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
                 pre_root,
                 post_root,
                 pi.dispatch_call_digest,
             )?
             .air_binding(),
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let (pre_pot, post_pot) = (task.pre_table.pot, task.post_table.pot);
         let row = KickPlayerRow::active(
@@ -1791,15 +1829,16 @@ impl Orchestrator {
             seat_index: *seat_index,
             amount: *amount,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = AddonRow::active(
             &input,
             pre_seat.pending_addon,
             task.pre_table.chip_pool,
             task.post_table.chip_pool,
-            task.pre_table.addon_pool,
-            task.post_table.addon_pool,
             srm(pre_root),
             srm(post_root),
             task.table_id,
@@ -1849,15 +1888,16 @@ impl Orchestrator {
             seat_index: *seat_index,
             amount: *amount,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
         let mut row = RebuyRow::active(
             &input,
             pre_seat.stack,
             task.pre_table.chip_pool,
             task.post_table.chip_pool,
-            task.pre_table.addon_pool,
-            task.post_table.addon_pool,
             srm(pre_root),
             srm(post_root),
             task.table_id,
@@ -1947,7 +1987,10 @@ impl Orchestrator {
             shuffle_phase: task.pre_table.shuffle_phase(),
             precompile: binding.air_binding(),
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let pre_cc = task.pre_table.shuffle_state().completed_mask.count_ones() as u8;
         let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
         let mut row = JoinAndShuffleRow::active(
@@ -2037,7 +2080,7 @@ impl Orchestrator {
         );
         let request = LeaveDleqVerifyRequest::new(
             call_context,
-            task.pre_table.deck_state.encrypted.clone(),
+            task.pre_table.deck_state.encrypted.to_vec(),
             args.output_cards,
             player_pk,
             args.leave_proof,
@@ -2049,7 +2092,10 @@ impl Orchestrator {
             shuffle_phase: task.pre_table.shuffle_phase(),
             precompile: binding.air_binding(),
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
         let mut row = LeaveWithProofRow::active(
             &input,
@@ -2147,7 +2193,7 @@ impl Orchestrator {
         );
         let request = LeaveDleqVerifyRequest::new(
             call_context,
-            task.pre_table.deck_state.encrypted.clone(),
+            task.pre_table.deck_state.encrypted.to_vec(),
             args.output_cards,
             player_pk,
             args.fold_proof,
@@ -2160,7 +2206,10 @@ impl Orchestrator {
             new_deck_commitment: deck_commitment(&task.post_table),
             precompile: binding.air_binding(),
         };
-        let (pre_version, post_version) = (task.pre_table.version, task.post_table.version);
+        let (pre_version, post_version) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let row = FoldWithProofRow::active(
             &input,
             srm(pre_root),
@@ -2267,7 +2316,10 @@ impl Orchestrator {
             shuffle_phase: task.pre_table.shuffle_phase(),
             precompile: binding.air_binding(),
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
         let mut row = SubmitShuffleV2Row::active(
             &input,
@@ -2358,7 +2410,10 @@ impl Orchestrator {
             precompile: binding.air_binding(),
             settlement,
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let post_rc = task.post_table.reveal_token_state().assignments.len() as u8;
         let mut row = SubmitPlayerRevealTokensRow::active(
             &input,
@@ -2452,7 +2507,10 @@ impl Orchestrator {
             reconstruct_phase: task.pre_table.reconstruct_phase(),
             precompile: binding.air_binding(),
         };
-        let (pre_v, post_v) = (task.pre_table.version, task.post_table.version);
+        let (pre_v, post_v) = (
+            u64::from(task.pre_table.call_seq),
+            u64::from(task.post_table.call_seq),
+        );
         let mut row = SubmitReconstructDeckRow::active(
             &input,
             srm(pre_root),
@@ -2551,17 +2609,17 @@ pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()
     Ok(())
 }
 
-/// Require one external-command version increment for a reveal-token dispatch.
+/// Require one external-command sequence increment for a reveal-token dispatch.
 fn reveal_version_increment(task: &ProveTask) -> TexasAirResult<u8> {
     let pre = &task.pre_table;
     let post = &task.post_table;
-    let expected_post_version = pre.version.checked_add(1).ok_or_else(|| {
-        TexasAirError::SpecViolation("submit_player_reveal_tokens pre-version overflow".into())
+    let expected_post_call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation("submit_player_reveal_tokens pre-call-seq overflow".into())
     })?;
-    if post.version != expected_post_version {
+    if post.call_seq != expected_post_call_seq {
         return Err(TexasAirError::SpecViolation(format!(
-            "submit_player_reveal_tokens: expected one external-command version increment to {}, got {}",
-            expected_post_version, post.version
+            "submit_player_reveal_tokens: expected one external-command call_seq increment to {}, got {}",
+            expected_post_call_seq, post.call_seq
         )));
     }
     Ok(1)
@@ -3032,6 +3090,17 @@ mod tests {
             }
         }
         let context = test_context(caller);
+        // Schema-v15 requires every active timed phase to carry an absolute deadline.
+        // Older shorthand fixtures used zero as "start now"; arm that phase at the
+        // authenticated test consensus timestamp before crossing the codec boundary.
+        if matches!(
+            pre_table.hand_phase,
+            poker_l1::vm::contracts::texas_poker::types::HandPhase::Betting { deadline_ms: 0, .. }
+        ) {
+            pre_table
+                .arm_betting_deadline(context.block_timestamp)
+                .expect("betting fixture deadline must arm");
+        }
         let mut post_table = pre_table.clone();
         let result = texas_dispatch::dispatch(&context, &mut post_table, &selector, &raw_args)
             .expect("test dispatch should succeed");
@@ -3111,8 +3180,8 @@ mod tests {
         assert_eq!(receipt.table_id(), task.table_id);
         assert_eq!(receipt.hand_id(), task.hand_id);
         assert_eq!(receipt.call_seq(), task.call_seq);
-        assert_eq!(receipt.pre_version(), task.pre_table.version);
-        assert_eq!(receipt.post_version(), task.post_table.version);
+        assert_eq!(receipt.pre_version(), u64::from(task.pre_table.call_seq));
+        assert_eq!(receipt.post_version(), u64::from(task.post_table.call_seq));
     }
 
     #[test]
@@ -3187,7 +3256,6 @@ mod tests {
             texas_dispatch::selectors::create_table(),
             raw_args,
         );
-        assert_eq!(post.version, 1);
         assert_eq!(post.call_seq, 1);
         let mut orch = Orchestrator::new();
         let summary = orch
@@ -3200,7 +3268,7 @@ mod tests {
     #[test]
     fn orchestrator_prove_fold() {
         let mut pre = make_table("pre");
-        pre.version = 1;
+        pre.call_seq = 1;
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         for i in 0..3 {
             pre.seats[i].player = [u8::try_from(i + 1).unwrap(); 20];
@@ -3382,8 +3450,7 @@ mod tests {
         pre.seats[0].player = [0x41; 20];
         pre.seats[0].stack = 100;
         pre.seats[0].pending_addon = 65_535;
-        pre.chip_pool = 100;
-        pre.addon_pool = 65_535;
+        pre.chip_pool = 65_635;
         let caller = pre.seats[0].player;
         let (task, post) = dispatch_task(
             pre,
@@ -3396,7 +3463,6 @@ mod tests {
             .expect("addon args should serialize"),
         );
         assert_eq!(post.seats[0].pending_addon, 65_536);
-        assert_eq!(post.addon_pool, 65_536);
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept addon carry");
@@ -3408,7 +3474,6 @@ mod tests {
         pre.seats[0].player = [0x42; 20];
         pre.seats[0].stack = 65_535;
         pre.chip_pool = 65_535;
-        pre.addon_pool = 65_535;
         let caller = pre.seats[0].player;
         let (task, post) = dispatch_task(
             pre,
@@ -3421,7 +3486,6 @@ mod tests {
             .expect("rebuy args should serialize"),
         );
         assert_eq!(post.seats[0].stack, 65_536);
-        assert_eq!(post.addon_pool, 65_535);
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept rebuy carry");
@@ -3539,7 +3603,6 @@ mod tests {
         pre.seats[0].stack = 65_535;
         pre.seats[0].pending_addon = 1;
         pre.chip_pool = 65_536;
-        pre.addon_pool = 65_536;
         let caller = pre.seats[0].player;
         let (task, post) = dispatch_task(
             pre,
@@ -3548,7 +3611,6 @@ mod tests {
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("leave args should serialize"),
         );
         assert_eq!(post.chip_pool, 0);
-        assert_eq!(post.addon_pool, 65_535);
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("native replay and AIR must accept leave_table refund/subtraction carry");
@@ -3865,7 +3927,10 @@ mod tests {
 
         let mut compound_pre = pre;
         compound_pre.seats[1].pending_addon = 25;
-        compound_pre.addon_pool = 25;
+        compound_pre.chip_pool = compound_pre
+            .chip_pool
+            .checked_add(25)
+            .expect("compound pending addon should fit in chip_pool");
         let caller = compound_pre.seats[0].player;
         let (compound_task, _) = dispatch_task(
             compound_pre,
@@ -3949,7 +4014,7 @@ mod tests {
             })
             .expect("kick args should serialize"),
         );
-        assert_eq!(post.version, pre.version.saturating_add(1));
+        assert_eq!(post.call_seq, pre.call_seq.saturating_add(1));
         Orchestrator::new()
             .prove_and_verify_task(&task)
             .expect("WAITING kick nested reset should prove as a ResetOnly component");
@@ -3982,7 +4047,7 @@ mod tests {
             })
             .expect("kick args should serialize"),
         );
-        assert_eq!(post.version, pre.version.saturating_add(1));
+        assert_eq!(post.call_seq, pre.call_seq.saturating_add(1));
         assert_eq!(
             post.round_state(),
             poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
@@ -4192,8 +4257,8 @@ mod tests {
             task1.call_seq,
             crate::state_root::compute_state_root(&task1.pre_table).unwrap(),
             crate::state_root::compute_state_root(&task2.post_table).unwrap(),
-            task1.pre_table.version,
-            task2.post_table.version,
+            u64::from(task1.pre_table.call_seq),
+            u64::from(task2.post_table.call_seq),
             vec![
                 crate::prove_task::dispatch_call_digest(
                     &task1.context,

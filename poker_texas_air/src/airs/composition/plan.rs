@@ -910,8 +910,6 @@ fn derive_settlement(
             awards: binding.awards,
             pre_chip_pool: reset.pre_chip_pool,
             post_chip_pool: reset.post_chip_pool,
-            pre_addon_pool: reset.pre_addon_pool,
-            post_addon_pool: reset.post_addon_pool,
             addon_credits: reset.addon_credits,
             refunds: reset.refunds,
             addon_refunds: reset.addon_refunds,
@@ -961,8 +959,6 @@ fn derive_settlement(
                 post.call_seq,
                 reset.pre_chip_pool,
                 reset.post_chip_pool,
-                reset.pre_addon_pool,
-                reset.post_addon_pool,
                 reset.addon_credits,
                 reset.refunds,
                 reset.addon_refunds,
@@ -981,8 +977,6 @@ fn derive_settlement(
             awards: [0; COMPOSITION_SEATS],
             pre_chip_pool: reset.pre_chip_pool,
             post_chip_pool: reset.post_chip_pool,
-            pre_addon_pool: reset.pre_addon_pool,
-            post_addon_pool: reset.post_addon_pool,
             addon_credits: reset.addon_credits,
             refunds: reset.refunds,
             addon_refunds: reset.addon_refunds,
@@ -1087,8 +1081,6 @@ fn derive_settlement(
         awards,
         pre_chip_pool: reset.pre_chip_pool,
         post_chip_pool: reset.post_chip_pool,
-        pre_addon_pool: reset.pre_addon_pool,
-        post_addon_pool: reset.post_addon_pool,
         addon_credits: reset.addon_credits,
         refunds: reset.refunds,
         addon_refunds: reset.addon_refunds,
@@ -1105,8 +1097,6 @@ fn derive_settlement(
 struct ResetProjection {
     pre_chip_pool: u64,
     post_chip_pool: u64,
-    pre_addon_pool: u64,
-    post_addon_pool: u64,
     addon_credits: [u64; COMPOSITION_SEATS],
     refunds: [u64; COMPOSITION_SEATS],
     addon_refunds: [u64; COMPOSITION_SEATS],
@@ -1217,11 +1207,19 @@ fn derive_reset_projection(
             "reset TableVault conservation does not match refunds plus rake".into(),
         ));
     }
-    if post
-        .addon_pool
+    let pending_total = |table: &TexasPokerTable| {
+        table.seats.iter().try_fold(0u64, |total, seat| {
+            total.checked_add(seat.pending_addon).ok_or_else(|| {
+                TexasAirError::SpecViolation("reset pending-addon sum overflow".into())
+            })
+        })
+    };
+    let pre_pending_total = pending_total(pre)?;
+    let post_pending_total = pending_total(post)?;
+    if post_pending_total
         .checked_add(total_addon_credits)
         .and_then(|value| value.checked_add(total_addon_refunds))
-        != Some(pre.addon_pool)
+        != Some(pre_pending_total)
     {
         return Err(TexasAirError::SpecViolation(
             "reset addon-pool conservation does not match credits/refunds".into(),
@@ -1238,8 +1236,6 @@ fn derive_reset_projection(
     Ok(ResetProjection {
         pre_chip_pool: pre.chip_pool,
         post_chip_pool: post.chip_pool,
-        pre_addon_pool: pre.addon_pool,
-        post_addon_pool: post.addon_pool,
         addon_credits,
         refunds,
         addon_refunds,
@@ -1340,7 +1336,7 @@ mod tests {
             seat.set_status(SeatStatus::Active);
         }
         table
-            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0)
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1)
             .unwrap();
         table.hand_id = 3;
         table.call_seq = 8;
@@ -1353,6 +1349,7 @@ mod tests {
         let mut post = pre.clone();
         post.set_seat_acted_this_round(0, true);
         post.set_betting_turn(1).unwrap();
+        post.arm_betting_deadline(1).unwrap();
         post.call_seq += 1;
         let events = vec![TexasPokerEvent::PlayerChecked {
             table_id: pre.id,
@@ -1372,7 +1369,7 @@ mod tests {
     #[test]
     fn zero_bet_round_advance_still_has_collection_stage() {
         let mut pre = table();
-        pre.enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 0, 0)
+        pre.enter_betting(ROUND_FLOP, BettingRound::new(100, 0), 0, 1)
             .unwrap();
         pre.set_seat_acted_this_round(1, true);
         let mut post = pre.clone();
@@ -1383,7 +1380,7 @@ mod tests {
                 reveal_phase: poker_l1::vm::contracts::texas_poker::constants::REVEAL_PHASE_TURN,
                 assignments: vec![],
             },
-            0,
+            1,
         )
         .unwrap();
         post.call_seq += 1;

@@ -83,7 +83,7 @@ pub(crate) fn derive_fold_outcome(
             "{method}: pre-state is not a betting round"
         )));
     }
-    if post.version != pre.version.saturating_add(1) {
+    if u64::from(post.call_seq) != u64::from(pre.call_seq).saturating_add(1) {
         return Err(TexasAirError::SpecViolation(format!(
             "{method}: transition must perform exactly one version bump"
         )));

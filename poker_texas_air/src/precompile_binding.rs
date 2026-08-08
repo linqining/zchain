@@ -10,6 +10,7 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
+use poker_l1::vm::contracts::texas_poker::types::seat_mask_contains;
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext, N_CARDS};
 use poker_protocol::precompile::{
     NativeBls12381ReconstructionV3Verifier, NativeBls12381ShuffleVerifier,
@@ -22,7 +23,6 @@ use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
-use poker_l1::vm::contracts::texas_poker::types::seat_mask_contains;
 use stwo::core::fields::m31::M31;
 
 use crate::error::{TexasAirError, TexasAirResult};
@@ -92,9 +92,9 @@ impl JoinAndShuffleVerifyRequest {
                     c1: generator,
                     c2: plaintext,
                 })
-                .collect()
+                .collect::<Vec<_>>()
         } else {
-            pre_table.deck_state.encrypted.clone()
+            pre_table.deck_state.encrypted.to_vec()
         };
         let request = Self {
             abi_version: JOIN_AND_SHUFFLE_ABI_VERSION,
@@ -325,14 +325,11 @@ impl RevealTokenVerifyRequest {
                 )));
             }
             seen[slot] = true;
-            let assignment = reveal_state
-                .assignments
-                .get(slot)
-                .ok_or_else(|| {
-                    TexasAirError::SpecViolation(format!(
-                        "reveal assignment index {assignment_index} is outside the canonical pre-table"
-                    ))
-                })?;
+            let assignment = reveal_state.assignments.get(slot).ok_or_else(|| {
+                TexasAirError::SpecViolation(format!(
+                    "reveal assignment index {assignment_index} is outside the canonical pre-table"
+                ))
+            })?;
             if assignment.is_ready() {
                 return Err(TexasAirError::SpecViolation(format!(
                     "reveal assignment index {assignment_index} is already resolved"
@@ -352,9 +349,9 @@ impl RevealTokenVerifyRequest {
                     .iter()
                     .find(|card| {
                         usize::from(card.encrypted_card_index) == card_index
-                            && card.ciphertext().is_some()
+                            && card.owner_seat_index == seat_index
                     })
-                    .and_then(|card| card.ciphertext().cloned())
+                    .map(|card| card.ciphertext)
                     .or_else(|| pre_table.deck_state.encrypted.get(card_index).copied())
             } else {
                 pre_table.deck_state.encrypted.get(card_index).copied()

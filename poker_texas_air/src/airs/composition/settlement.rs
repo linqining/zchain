@@ -17,12 +17,12 @@ pub const NUM_COLUMNS: usize = STAGE_HEADER_NUM_COLUMNS
     + 1
     + DIGEST_LIMBS
     + 1
-    + 12 * 4
+    + 9 * 4
     + 6 * COMPOSITION_SEATS * 4
     + COMPOSITION_SEATS
     + 4 * COMPOSITION_SEATS * 4
     + 4 * COMPOSITION_SEATS * 3
-    + 5 * 3
+    + 3 * 3
     + 1;
 
 /// Settlement/reset algorithm selected by canonical native replay.
@@ -63,10 +63,6 @@ pub struct SettlementStagePlan {
     pub pre_chip_pool: u64,
     /// TableVault balance after settlement/reset/refunds.
     pub post_chip_pool: u64,
-    /// Pending-addon sub-ledger before the complete dispatch.
-    pub pre_addon_pool: u64,
-    /// Pending-addon sub-ledger after reset/refunds.
-    pub post_addon_pool: u64,
     /// Fixed-seat addon amounts merged into stacks during reset.
     pub addon_credits: [u64; COMPOSITION_SEATS],
     /// Fixed-seat refunds leaving TableVault custody.
@@ -104,8 +100,6 @@ impl SettlementStagePlan {
             awards: [0; COMPOSITION_SEATS],
             pre_chip_pool: 0,
             post_chip_pool: 0,
-            pre_addon_pool: 0,
-            post_addon_pool: 0,
             addon_credits: [0; COMPOSITION_SEATS],
             refunds: [0; COMPOSITION_SEATS],
             addon_refunds: [0; COMPOSITION_SEATS],
@@ -154,12 +148,12 @@ pub struct SettlementRow {
     kind: M31,
     native_plan_digest: [M31; DIGEST_LIMBS],
     runout_count: M31,
-    scalars: [Limbs; 12],
+    scalars: [Limbs; 9],
     arrays: [[[M31; 4]; COMPOSITION_SEATS]; 6],
     post_occupied: [M31; COMPOSITION_SEATS],
     accumulators: [[[M31; 4]; COMPOSITION_SEATS]; 4],
     sum_carries: [[[M31; 3]; COMPOSITION_SEATS]; 4],
-    equation_carries: [[M31; 3]; 5],
+    equation_carries: [[M31; 3]; 3],
     reset_applied: M31,
 }
 
@@ -175,10 +169,6 @@ impl SettlementRow {
             .post_chip_pool
             .checked_add(plan.total_refunds)
             .unwrap_or(0);
-        let addon_after_credits = plan
-            .post_addon_pool
-            .checked_add(plan.total_addon_credits)
-            .unwrap_or(0);
         Self {
             header: StageHeaderRow::new(link),
             kind: M31::from(u32::from(plan.kind as u8)),
@@ -190,13 +180,10 @@ impl SettlementRow {
                 u64_to_m31_limbs(plan.total_awards),
                 u64_to_m31_limbs(plan.pre_chip_pool),
                 u64_to_m31_limbs(plan.post_chip_pool),
-                u64_to_m31_limbs(plan.pre_addon_pool),
-                u64_to_m31_limbs(plan.post_addon_pool),
                 u64_to_m31_limbs(plan.total_addon_credits),
                 u64_to_m31_limbs(plan.total_refunds),
                 u64_to_m31_limbs(plan.total_addon_refunds),
                 u64_to_m31_limbs(chip_after_refunds),
-                u64_to_m31_limbs(addon_after_credits),
             ],
             arrays: [
                 plan.awards.map(u64_to_m31_limbs),
@@ -218,16 +205,6 @@ impl SettlementRow {
                 add_carries(plan.total_awards, plan.rake, plan.gross_pot),
                 add_carries(plan.post_chip_pool, plan.total_refunds, chip_after_refunds),
                 add_carries(chip_after_refunds, plan.rake, plan.pre_chip_pool),
-                add_carries(
-                    plan.post_addon_pool,
-                    plan.total_addon_credits,
-                    addon_after_credits,
-                ),
-                add_carries(
-                    addon_after_credits,
-                    plan.total_addon_refunds,
-                    plan.pre_addon_pool,
-                ),
             ],
             reset_applied: M31::from(u32::from(plan.reset_applied)),
         }
@@ -275,7 +252,7 @@ pub fn evaluate<E: EvalAtRow>(eval: &mut E, plan: &SettlementStagePlan, link: &s
     let kind = eval.next_trace_mask();
     let native_plan_digest: [E::F; DIGEST_LIMBS] = std::array::from_fn(|_| eval.next_trace_mask());
     let runout_count = eval.next_trace_mask();
-    let scalars: [[E::F; 4]; 12] =
+    let scalars: [[E::F; 4]; 9] =
         std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
     let arrays: [[[E::F; 4]; COMPOSITION_SEATS]; 6] = std::array::from_fn(|_| {
         std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()))
@@ -287,7 +264,7 @@ pub fn evaluate<E: EvalAtRow>(eval: &mut E, plan: &SettlementStagePlan, link: &s
     let sum_carries: [[[E::F; 3]; COMPOSITION_SEATS]; 4] = std::array::from_fn(|_| {
         std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()))
     });
-    let equation_carries: [[E::F; 3]; 5] =
+    let equation_carries: [[E::F; 3]; 3] =
         std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
     let reset_applied = eval.next_trace_mask();
 
@@ -305,16 +282,11 @@ pub fn evaluate<E: EvalAtRow>(eval: &mut E, plan: &SettlementStagePlan, link: &s
         plan.total_awards,
         plan.pre_chip_pool,
         plan.post_chip_pool,
-        plan.pre_addon_pool,
-        plan.post_addon_pool,
         plan.total_addon_credits,
         plan.total_refunds,
         plan.total_addon_refunds,
         plan.post_chip_pool
             .checked_add(plan.total_refunds)
-            .unwrap_or(0),
-        plan.post_addon_pool
-            .checked_add(plan.total_addon_credits)
             .unwrap_or(0),
     ];
     for (actual, expected) in scalars.iter().zip(expected_scalars) {
@@ -360,13 +332,13 @@ pub fn evaluate<E: EvalAtRow>(eval: &mut E, plan: &SettlementStagePlan, link: &s
             accumulators[0][COMPOSITION_SEATS - 1][limb].clone() - scalars[2][limb].clone(),
         );
         eval.add_constraint(
-            accumulators[1][COMPOSITION_SEATS - 1][limb].clone() - scalars[7][limb].clone(),
+            accumulators[1][COMPOSITION_SEATS - 1][limb].clone() - scalars[5][limb].clone(),
         );
         eval.add_constraint(
-            accumulators[2][COMPOSITION_SEATS - 1][limb].clone() - scalars[8][limb].clone(),
+            accumulators[2][COMPOSITION_SEATS - 1][limb].clone() - scalars[6][limb].clone(),
         );
         eval.add_constraint(
-            accumulators[3][COMPOSITION_SEATS - 1][limb].clone() - scalars[9][limb].clone(),
+            accumulators[3][COMPOSITION_SEATS - 1][limb].clone() - scalars[7][limb].clone(),
         );
     }
     evaluate_u64_add(
@@ -379,30 +351,16 @@ pub fn evaluate<E: EvalAtRow>(eval: &mut E, plan: &SettlementStagePlan, link: &s
     evaluate_u64_add(
         eval,
         &scalars[4],
+        &scalars[6],
         &scalars[8],
-        &scalars[10],
         &equation_carries[1],
     );
     evaluate_u64_add(
         eval,
-        &scalars[10],
+        &scalars[8],
         &scalars[1],
         &scalars[3],
         &equation_carries[2],
-    );
-    evaluate_u64_add(
-        eval,
-        &scalars[6],
-        &scalars[7],
-        &scalars[11],
-        &equation_carries[3],
-    );
-    evaluate_u64_add(
-        eval,
-        &scalars[11],
-        &scalars[9],
-        &scalars[5],
-        &equation_carries[4],
     );
 
     if plan.reset_applied {
@@ -452,8 +410,6 @@ mod tests {
             awards: [95, 0, 0, 0, 95, 0, 0, 0, 0],
             pre_chip_pool: 1_000,
             post_chip_pool: 965,
-            pre_addon_pool: 25,
-            post_addon_pool: 0,
             addon_credits: [0, 25, 0, 0, 0, 0, 0, 0, 0],
             refunds: [0, 0, 0, 25, 0, 0, 0, 0, 0],
             addon_refunds: [0; COMPOSITION_SEATS],

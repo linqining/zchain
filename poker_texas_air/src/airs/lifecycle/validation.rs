@@ -43,12 +43,15 @@ pub(crate) fn validate_start_hand(
             .count(),
     )
     .map_err(|_| TexasAirError::SpecViolation("start_hand: active count exceeds u8".into()))?;
+    let ante_collected = canonical.post.pot.checked_sub(canonical.pre.pot).ok_or_else(|| {
+        TexasAirError::SpecViolation("start_hand: canonical pot decreased while collecting ante".into())
+    })?;
     let input = StartHandInput {
         active_count,
         new_button: canonical.post.button,
         ante_mode: canonical.post.ante_mode,
         ante_amount: canonical.post.ante_amount,
-        ante_collected: canonical.post.ante_collected,
+        ante_collected,
         pre_pot: canonical.pre.pot,
         post_pot: canonical.post.pot,
         authorization: AdminAuthorizationBinding::verify_table_creator(
@@ -60,8 +63,8 @@ pub(crate) fn validate_start_hand(
             public_inputs.table_id,
             public_inputs.hand_id,
             public_inputs.call_seq,
-            canonical.pre.version,
-            canonical.post.version,
+            u64::from(canonical.pre.call_seq),
+            u64::from(canonical.post.call_seq),
             public_inputs.pre_state_root,
             public_inputs.post_state_root,
             public_inputs.dispatch_call_digest,
@@ -93,8 +96,8 @@ pub(crate) fn validate_start_hand(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
     );
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }
@@ -123,8 +126,8 @@ pub(crate) fn validate_reset_for_next_hand(
             public_inputs.table_id,
             public_inputs.hand_id,
             public_inputs.call_seq,
-            canonical.pre.version,
-            canonical.post.version,
+            u64::from(canonical.pre.call_seq),
+            u64::from(canonical.post.call_seq),
             public_inputs.pre_state_root,
             public_inputs.post_state_root,
             public_inputs.dispatch_call_digest,
@@ -147,8 +150,8 @@ pub(crate) fn validate_reset_for_next_hand(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         canonical.pre.round_state(),
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
@@ -211,11 +214,10 @@ pub(crate) fn validate_join_table(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         canonical.pre.big_blind,
         canonical.pre.chip_pool,
-        canonical.pre.addon_pool,
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
@@ -258,14 +260,12 @@ pub(crate) fn validate_leave_table(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         pre_seat.stack,
         pre_seat.pending_addon,
         canonical.pre.chip_pool,
         canonical.post.chip_pool,
-        canonical.pre.addon_pool,
-        canonical.post.addon_pool,
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);

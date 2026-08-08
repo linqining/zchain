@@ -54,8 +54,8 @@ pub(crate) fn validate_canonical_dispatch(
     if pre.id != post.id
         || public_inputs.table_id != pre.id.creation_nonce
         || public_inputs.table_id != post.id.creation_nonce
-        || public_inputs.pre_version != pre.version
-        || public_inputs.post_version != post.version
+        || public_inputs.pre_version != u64::from(pre.call_seq)
+        || public_inputs.post_version != u64::from(post.call_seq)
         || public_inputs.hand_id != post.hand_id
         || public_inputs.call_seq != post.call_seq
     {

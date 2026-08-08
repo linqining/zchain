@@ -103,7 +103,7 @@ pub(crate) fn validate_fold_with_proof(
     );
     let expected_request = LeaveDleqVerifyRequest::new(
         expected_context,
-        canonical.pre.deck_state.encrypted.clone(),
+        canonical.pre.deck_state.encrypted.to_vec(),
         args.output_cards,
         player_pk,
         args.fold_proof,
@@ -140,8 +140,8 @@ pub(crate) fn validate_fold_with_proof(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         canonical.pre.round_state(),
         canonical.post.round_state(),
         canonical.pre.pot,
@@ -194,8 +194,8 @@ pub(crate) fn validate_join_and_shuffle(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         public_inputs.pre_state_root,
         public_inputs.post_state_root,
         public_inputs.dispatch_call_digest,
@@ -243,8 +243,8 @@ pub(crate) fn validate_join_and_shuffle(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         pre_completed_count,
         post_completed_count,
     );
@@ -316,7 +316,7 @@ pub(crate) fn validate_leave_with_proof(
     );
     let expected_request = LeaveDleqVerifyRequest::new(
         expected_context,
-        canonical.pre.deck_state.encrypted.clone(),
+        canonical.pre.deck_state.encrypted.to_vec(),
         args.output_cards.clone(),
         player_pk,
         args.leave_proof.clone(),
@@ -359,8 +359,8 @@ pub(crate) fn validate_leave_with_proof(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         post_completed_count,
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
@@ -456,8 +456,8 @@ pub(crate) fn validate_submit_player_reveal_tokens(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         post_revealed_count,
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
@@ -520,8 +520,8 @@ pub(crate) fn validate_submit_shuffle_v2(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
         post_completed_count,
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
@@ -578,8 +578,8 @@ pub(crate) fn validate_submit_reconstruct_deck(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        canonical.pre.version,
-        canonical.post.version,
+        u64::from(canonical.pre.call_seq),
+        u64::from(canonical.post.call_seq),
     );
     row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
     row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
@@ -591,13 +591,13 @@ fn reveal_version_increment(
     pre: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
     post: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
 ) -> TexasAirResult<u8> {
-    let expected_post_version = pre.version.checked_add(1).ok_or_else(|| {
+    let expected_post_version = u64::from(pre.call_seq).checked_add(1).ok_or_else(|| {
         TexasAirError::SpecViolation("submit_player_reveal_tokens: pre-version overflow".into())
     })?;
-    if post.version != expected_post_version {
+    if u64::from(post.call_seq) != expected_post_version {
         return Err(TexasAirError::SpecViolation(format!(
             "submit_player_reveal_tokens: expected one external-command version increment to {expected_post_version}, got {}",
-            post.version
+            u64::from(post.call_seq)
         )));
     }
     Ok(1)

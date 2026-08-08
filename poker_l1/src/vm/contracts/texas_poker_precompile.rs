@@ -78,18 +78,18 @@ impl TexasPokerPrecompile {
             PokerL1Error::Serialization(format!("decode Texas dispatch funding output: {error}"))
         })?;
         let mut outputs = Vec::new();
-        for event in output.events {
+        for event in &output.events {
             match event {
                 TexasPokerEvent::PlayerRefund {
                     player,
                     amount,
                     refund_type,
                     ..
-                } => match refund_type {
+                } => match *refund_type {
                     // STACK refunds leave the TableVault and therefore become wallet-owned
                     // UTXOs.
-                    REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET if amount > 0 => {
-                        outputs.push((player, amount));
+                    REFUND_TYPE_STACK_ONLY | REFUND_TYPE_STACK_AND_BET if *amount > 0 => {
+                        outputs.push((*player, *amount));
                     }
                     // BET_ONLY is an in-table rollback: state_machine puts the value back into
                     // the seat stack while chip_pool remains unchanged. Creating a UTXO here
@@ -102,11 +102,11 @@ impl TexasPokerPrecompile {
                         )));
                     }
                 },
-                TexasPokerEvent::RakeCollected { rake_amount, .. } if rake_amount > 0 => {
-                    outputs.push((TREASURY_SYSTEM_ADDRESS, rake_amount));
-                }
                 _ => {}
             }
+        }
+        if let Some(receipt) = output.settlement_treasury_receipt()? {
+            outputs.push((TREASURY_SYSTEM_ADDRESS, receipt.amount));
         }
         Ok(outputs)
     }
@@ -383,8 +383,10 @@ mod tests {
         assert!(precompile.supports_selector(&selectors::create_table()));
         assert!(precompile.supports_selector(&selectors::join_table()));
         assert!(precompile.supports_selector(&selectors::fold()));
-        assert!(precompile.supports_selector(&selectors::tick()));
+        assert!(!precompile.supports_selector(&selectors::tick()));
         assert!(precompile.supports_selector(&selectors::advance_deadline()));
+        assert!(!precompile.supports_selector(&selectors::kick_player()));
+        assert!(precompile.supports_selector(&selectors::kick_player_v2()));
         assert!(!precompile.supports_selector(&selectors::join_and_shuffle()));
         assert!(!precompile.supports_selector(&selectors::leave_with_proof()));
         assert!(!precompile.supports_selector(&selectors::auto_fold()));
@@ -458,18 +460,69 @@ mod tests {
     #[test]
     fn rake_event_creates_a_treasury_escrow_output() {
         let table_id = reserved::texas_poker_contract_id();
-        let output = L1DispatchOutput::events_only(vec![TexasPokerEvent::RakeCollected {
-            table_id,
-            pot_before: 200,
-            rake_amount: 10,
-            pot_after: 190,
-            rake_mode: 1,
-        }]);
+        let output = L1DispatchOutput::events_only(vec![
+            TexasPokerEvent::SettlementPlanCommitted {
+                table_id,
+                plan_digest: [7; 32],
+                runout_count: 1,
+                gross_pot: 200,
+                rake: 10,
+                total_awards: 190,
+            },
+            TexasPokerEvent::RakeCollected {
+                table_id,
+                pot_before: 200,
+                rake_amount: 10,
+                pot_after: 190,
+                rake_mode: 1,
+            },
+        ]);
 
         assert_eq!(
             TexasPokerPrecompile::escrow_outputs(&borsh::to_vec(&output).unwrap()).unwrap(),
             vec![(TREASURY_SYSTEM_ADDRESS, 10)]
         );
+    }
+
+    #[test]
+    fn rake_receipt_must_be_unique_and_match_the_settlement_plan() {
+        let table_id = reserved::texas_poker_contract_id();
+        let plan = TexasPokerEvent::SettlementPlanCommitted {
+            table_id,
+            plan_digest: [9; 32],
+            runout_count: 1,
+            gross_pot: 200,
+            rake: 10,
+            total_awards: 190,
+        };
+        let rake = TexasPokerEvent::RakeCollected {
+            table_id,
+            pot_before: 200,
+            rake_amount: 10,
+            pot_after: 190,
+            rake_mode: 1,
+        };
+
+        for events in [
+            vec![rake.clone()],
+            vec![plan.clone()],
+            vec![plan.clone(), rake.clone(), rake.clone()],
+            vec![
+                plan,
+                TexasPokerEvent::RakeCollected {
+                    table_id,
+                    pot_before: 200,
+                    rake_amount: 9,
+                    pot_after: 190,
+                    rake_mode: 1,
+                },
+            ],
+        ] {
+            let output = L1DispatchOutput::events_only(events);
+            assert!(
+                TexasPokerPrecompile::escrow_outputs(&borsh::to_vec(&output).unwrap()).is_err()
+            );
+        }
     }
 
     #[test]
@@ -870,7 +923,6 @@ mod tests {
             .expect("settling fold must issue a proof task");
         assert_eq!(prove_task.post_table, stored);
         assert_eq!(stored.chip_pool, 190);
-        assert_eq!(stored.rake_collected, 0);
         assert_eq!(stored.seats[1].stack, 190);
         reconcile_table_vault(&stored).unwrap();
         reconcile_native_supply(&object_db, 0).unwrap();
@@ -987,12 +1039,19 @@ mod tests {
         assert_eq!(table.seats[0].stack, 100);
         assert_eq!(table.seats[0].pending_addon, 60);
         assert_eq!(table.chip_pool, 160);
-        assert_eq!(table.addon_pool, 60);
+        assert_eq!(
+            table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            60
+        );
         assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
     }
 
     #[test]
-    fn funded_rebuy_consumes_input_creates_change_and_preserves_addon_pool() {
+    fn funded_rebuy_consumes_input_creates_change_and_preserves_pending_addons() {
         let precompile = TexasPokerPrecompile::new(1);
         let (caller, caller_pk) = make_caller();
         let (mut object_db, genesis_coin) =
@@ -1047,7 +1106,14 @@ mod tests {
         assert_eq!(table.seats[0].stack, 170);
         assert_eq!(table.seats[0].pending_addon, 0);
         assert_eq!(table.chip_pool, 170);
-        assert_eq!(table.addon_pool, 0);
+        assert_eq!(
+            table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            0
+        );
         assert_eq!(read_treasury(&object_db).unwrap(), treasury_before);
     }
 
@@ -1125,7 +1191,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(table.chip_pool, 0);
-        assert_eq!(table.addon_pool, 0);
+        assert_eq!(
+            table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            0
+        );
         assert!(!table.seats[0].is_occupied());
         assert_eq!(
             read_treasury(&object_db).unwrap().unwrap().total_supply,
@@ -1218,7 +1291,14 @@ mod tests {
         assert_eq!(table.seats[0].stack, 170);
         assert_eq!(table.seats[0].pending_addon, 60);
         assert_eq!(table.chip_pool, 230);
-        assert_eq!(table.addon_pool, 60);
+        assert_eq!(
+            table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            60
+        );
         reconcile_table_vault(&table).unwrap();
 
         let leave_hash = [0x84; 32];
@@ -1246,7 +1326,14 @@ mod tests {
         let final_table: TexasPokerTable =
             borsh::from_slice(&object_db.read(&table_id).unwrap().data).unwrap();
         assert_eq!(final_table.chip_pool, 0);
-        assert_eq!(final_table.addon_pool, 0);
+        assert_eq!(
+            final_table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            0
+        );
         assert!(!final_table.seats[0].is_occupied());
         reconcile_table_vault(&final_table).unwrap();
 

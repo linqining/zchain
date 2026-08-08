@@ -42,8 +42,7 @@ fn make_post_table() -> TexasPokerTable {
         10,
         20,
     );
-    // create_table 语义：post_version = pre_version(0) + 1 = 1。
-    t.version = 1;
+    // create_table 语义：post call_seq = pre call_seq(0) + 1 = 1。
     t.call_seq = 1;
     t
 }

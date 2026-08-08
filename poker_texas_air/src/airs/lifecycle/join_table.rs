@@ -42,23 +42,20 @@ pub mod cols {
     pub const INPUT_PRE_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 18;
     /// `OUTPUT_POST_CHIP_POOL` 起始列（4 limb）：post chip_pool，用于资金守恒。
     pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 22;
-    /// PRE_ADDON_POOL 起始列（4 limb）— 调用前 addon_pool，用于状态绑定；
-    /// addon_pool 已包含在完整锁仓 chip_pool 中，不参与全局上界的重复求和。
-    pub const INPUT_PRE_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 26;
     /// BOUND_DIFF 起始列（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + buy_in)。
-    pub const BOUND_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 30;
+    pub const BOUND_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 26;
     /// BOUND_CARRY_LO 起始列（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
-    pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 34;
+    pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 30;
     /// BOUND_CARRY_HI 起始列（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
-    pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 37;
+    pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 33;
     /// GE_DIFF 起始列（4 limb）— buy_in - big_blind 差值（阶段 3 新增：buy_in >= big_blind）。
-    pub const GE_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 40;
+    pub const GE_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 36;
     /// GE_BORROW 起始列（3 个 boolean）— 减法借位 witness（阶段 3 新增）。
-    pub const GE_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 44;
+    pub const GE_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 40;
     /// chip_pool 加法的 3 个 ripple-carry bit。
-    pub const CHIP_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 47;
+    pub const CHIP_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 43;
     /// `join_table` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 50;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 46;
 }
 
 /// `join_table` AIR 输入参数。
@@ -149,12 +146,6 @@ impl FrameworkEval for JoinTableAir {
         let output_post_chip_pool_2 = eval.next_trace_mask();
         let output_post_chip_pool_3 = eval.next_trace_mask();
 
-        // pre addon_pool 仍进入 trace/state 绑定，但它是 chip_pool 的 pending-addon 子集，
-        // 不参与全局上界的重复求和。
-        let _pre_addon_pool_0 = eval.next_trace_mask();
-        let _pre_addon_pool_1 = eval.next_trace_mask();
-        let _pre_addon_pool_2 = eval.next_trace_mask();
-        let _pre_addon_pool_3 = eval.next_trace_mask();
         // bound check witness：diff (4 limb) + carry_lo (3) + carry_hi (3)
         let bound_diff_0 = eval.next_trace_mask();
         let bound_diff_1 = eval.next_trace_mask();
@@ -226,16 +217,9 @@ impl FrameworkEval for JoinTableAir {
         let diff = [bound_diff_0, bound_diff_1, bound_diff_2, bound_diff_3];
         let carry_lo = [carry_lo_0, carry_lo_1, carry_lo_2];
         let carry_hi = [carry_hi_0, carry_hi_1, carry_hi_2];
-        let zero: E::F = M31::from(0u32).into();
-        let zero = [zero.clone(), zero.clone(), zero.clone(), zero];
-        for __c in common.bound_check_4limb(
-            &pre_chip_pool,
-            &zero,
-            &buy_in_limbs,
-            &diff,
-            &carry_lo,
-            &carry_hi,
-        ) {
+        for __c in
+            common.bound_check_4limb(&pre_chip_pool, &buy_in_limbs, &diff, &carry_lo, &carry_hi)
+        {
             eval.add_constraint(__c);
         }
         // 约束 9（阶段 3 soundness 新增）：buy_in >= big_blind（全 4-limb ≥ 检查）。
@@ -300,8 +284,6 @@ pub struct JoinTableRow {
     pub input_pre_chip_pool: [M31; 4],
     /// `OUTPUT_POST_CHIP_POOL`（4 limb）— post chip_pool，用于资金守恒。
     pub output_post_chip_pool: [M31; 4],
-    /// PRE_ADDON_POOL（4 limb）— 状态绑定用，不重复计入资金上界。
-    pub pre_addon_pool: [M31; 4],
     /// BOUND_DIFF（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + buy_in)。
     pub bound_diff: [M31; 4],
     /// BOUND_CARRY_LO（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
@@ -330,17 +312,15 @@ impl JoinTableRow {
         post_version: u64,
         big_blind: u64,
         pre_chip_pool: u64,
-        pre_addon_pool: u64,
     ) -> Self {
-        // 全局上界检查：chip_pool + buy_in <= MAX_TOTAL_BET。addon_pool 已包含在
-        // chip_pool 中，只保留为状态 witness，不能重复计数。
+        // 全局上界检查：chip_pool + buy_in <= MAX_TOTAL_BET。
         let total = pre_chip_pool
             .checked_add(input.buy_in)
             .expect("join_table: chip_pool + buy_in overflow");
         debug_assert!(total <= MAX_TOTAL_BET, "join_table: global bound exceeded");
         let bound_diff = MAX_TOTAL_BET - total;
         let (bound_carry_lo, bound_carry_hi) =
-            compute_bound_carries(pre_chip_pool, 0, input.buy_in, bound_diff);
+            compute_bound_carries(pre_chip_pool, input.buy_in, bound_diff);
         let chip_pool_add_carry = compute_add_carries(pre_chip_pool, input.buy_in);
 
         // 阶段 3：buy_in >= big_blind 的减法借位分解。
@@ -394,7 +374,6 @@ impl JoinTableRow {
             // Gap 4：pre/post chip_pool（守恒：post = pre + buy_in）。
             input_pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
             output_post_chip_pool: u64_to_m31_limbs(total),
-            pre_addon_pool: u64_to_m31_limbs(pre_addon_pool),
             bound_diff: u64_to_m31_limbs(bound_diff),
             bound_carry_lo,
             bound_carry_hi,
@@ -418,7 +397,6 @@ impl JoinTableRow {
             input_big_blind: [ZERO; 4],
             input_pre_chip_pool: [ZERO; 4],
             output_post_chip_pool: [ZERO; 4],
-            pre_addon_pool: [ZERO; 4],
             bound_diff: [ZERO; 4],
             bound_carry_lo: [ZERO; 3],
             bound_carry_hi: [ZERO; 3],
@@ -440,7 +418,6 @@ impl JoinTableRow {
         v.extend_from_slice(&self.input_big_blind);
         v.extend_from_slice(&self.input_pre_chip_pool);
         v.extend_from_slice(&self.output_post_chip_pool);
-        v.extend_from_slice(&self.pre_addon_pool);
         v.extend_from_slice(&self.bound_diff);
         v.extend_from_slice(&self.bound_carry_lo);
         v.extend_from_slice(&self.bound_carry_hi);

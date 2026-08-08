@@ -134,7 +134,7 @@ impl ServiceRuntime {
             if task.table_id != job.table_id
                 || task.hand_id != result.hand_id
                 || task.call_seq != result.call_seq
-                || task.post_table.version != result.table_version
+                || u64::from(task.post_table.call_seq) != result.table_version
             {
                 return Err(ServiceError::Prover(format!(
                     "durable proof package for job {} does not match completed result",
@@ -672,7 +672,9 @@ async fn dispatch_for_table(
         prove_count: stats.prove_count,
         chain_length: u64::try_from(stats.chain_length)
             .map_err(|_| internal_error("chain length does not fit u64".into()))?,
-        table_version: table.version,
+        // Legacy response/journal field retained for schema-v1 compatibility. Texas schema v17
+        // has no table-local version, so this alias is derived from the sole command sequence.
+        table_version: u64::from(table.call_seq),
         hand_id: table.hand_id,
         call_seq: table.call_seq,
     };

@@ -328,13 +328,12 @@ pub fn canonical_input(
         ));
     }
 
-    let expected_version = pre
-        .version
+    let expected_version = u64::from(pre.call_seq)
         .checked_add(1)
-        .ok_or_else(|| TexasAirError::SpecViolation("tick: pre-version overflow".into()))?;
-    if post.version != expected_version {
+        .ok_or_else(|| TexasAirError::SpecViolation("tick: pre-call-seq overflow".into()))?;
+    if u64::from(post.call_seq) != expected_version {
         return Err(TexasAirError::SpecViolation(
-            "tick: a committed external command must increment version exactly once".into(),
+            "tick: a committed external command must increment call_seq exactly once".into(),
         ));
     }
     let version_increment = 1;
@@ -1054,8 +1053,8 @@ pub fn validate_public_inputs(
     if pre.id != post.id
         || public_inputs.table_id != pre.id.creation_nonce
         || public_inputs.table_id != post.id.creation_nonce
-        || public_inputs.pre_version != pre.version
-        || public_inputs.post_version != post.version
+        || public_inputs.pre_version != u64::from(pre.call_seq)
+        || public_inputs.post_version != u64::from(post.call_seq)
         || public_inputs.hand_id != post.hand_id
         || public_inputs.call_seq != post.call_seq
     {
@@ -1077,8 +1076,8 @@ pub fn validate_public_inputs(
         public_inputs.table_id,
         public_inputs.hand_id,
         public_inputs.call_seq,
-        pre.version,
-        post.version,
+        u64::from(pre.call_seq),
+        u64::from(post.call_seq),
         pre.round_state(),
         post.round_state(),
     );
@@ -1140,10 +1139,6 @@ mod tests {
         state_machine::tick(&mut post, now_ms, &mut events).expect("fixture tick must succeed");
         assert_ne!(post, *pre, "fixture tick must change the table");
         post.call_seq = pre.call_seq.checked_add(1).expect("fixture call sequence");
-        post.version = pre
-            .version
-            .checked_add(1)
-            .expect("fixture version sequence");
         post.hand_id = if events
             .iter()
             .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }))

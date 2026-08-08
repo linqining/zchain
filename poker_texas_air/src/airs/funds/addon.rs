@@ -8,8 +8,8 @@
 //! 2. `amount > 0`
 //! 3. 状态变更（**关键：不动 stack**）：
 //!    - `seats[seat].pending_addon += amount`
-//!    - `table.addon_pool += amount`
-//!    - `version += 1`
+//!    - `table.chip_pool += amount`
+//!    - `call_seq += 1`
 //!
 //! ## 为什么不动 stack
 //!
@@ -29,15 +29,14 @@
 //!   - `INPUT_SEAT_OCCUPIED`（Gap 3 boolean witness）
 //!   - `INPUT_AMOUNT_INV`（Gap 9 invertibility witness）
 //!   - `INPUT_PRE_CHIP_POOL_BASE[4]`（4 limb，调用前 chip_pool，用于全局上界检查）
-//!   - `INPUT_PRE_ADDON_POOL_BASE[4]`（4 limb，调用前 addon_pool，用于全局上界检查）
 //!   - `BOUND_DIFF_BASE[4]`（4 limb，diff = MAX_TOTAL_BET - total，用于全局上界 range check）
 //!   - `BOUND_CARRY_LO_BASE[3]`（3 个进位低位 bit，2-bit carry 分解）
 //!   - `BOUND_CARRY_HI_BASE[3]`（3 个进位高位 bit，2-bit carry 分解）
-//!   - `OUTPUT_POST_ADDON_POOL_BASE[4]`
 //!   - `PENDING_ADD_CARRY_BASE[3]`（pending_addon 的 ripple carry）
-//!   - `ADDON_POOL_ADD_CARRY_BASE[3]`（addon_pool 的 ripple carry）
+//!   - `OUTPUT_POST_CHIP_POOL_BASE[4]`
+//!   - `CHIP_POOL_ADD_CARRY_BASE[3]`
 //!
-//! 共 37 + 43 = 80 列。
+//! 共 37 + 39 = 76 列。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
@@ -65,26 +64,20 @@ pub mod cols {
     pub const INPUT_AMOUNT_INV: usize = COMMON_NUM_COLUMNS + 14;
     /// PRE_CHIP_POOL 起始列（4 limb）— 调用前 chip_pool，用于全局上界检查。
     pub const INPUT_PRE_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 15;
-    /// PRE_ADDON_POOL 起始列（4 limb）— 调用前 pending addon 总额，用于守恒约束。
-    pub const INPUT_PRE_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 19;
     /// BOUND_DIFF 起始列（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + amount)。
-    pub const BOUND_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 23;
+    pub const BOUND_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 19;
     /// BOUND_CARRY_LO 起始列（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
-    pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 27;
+    pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 23;
     /// BOUND_CARRY_HI 起始列（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
-    pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 30;
-    /// OUTPUT_POST_ADDON_POOL 起始列（4 limb）— 调用后 addon_pool（阶段 3 新增：addon_pool 守恒）。
-    pub const OUTPUT_POST_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 33;
+    pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 26;
     /// pending_addon 加法的 3 个 ripple-carry bit。
-    pub const PENDING_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 37;
-    /// addon_pool 加法的 3 个 ripple-carry bit。
-    pub const ADDON_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 40;
+    pub const PENDING_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 29;
     /// OUTPUT_POST_CHIP_POOL 起始列（4 limb）— 调用后完整桌台锁仓。
-    pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 43;
+    pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 32;
     /// chip_pool 加法的 3 个 ripple-carry bit。
-    pub const CHIP_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 47;
+    pub const CHIP_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 36;
     /// `addon` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 50;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 39;
 }
 
 /// `addon` 输入参数。
@@ -192,15 +185,11 @@ impl FrameworkEval for AddonAir {
         eval.add_constraint(is_active.clone() * (amount_sum * input_amount_inv - one.clone()));
 
         // 全局上界检查（对齐合约 apply_addon 的 chip_pool + amount <= MAX_TOTAL_BET）
-        // 读取 pre_chip_pool / pre_addon_pool 全 4 limb
+        // 读取 pre_chip_pool 全 4 limb
         let pre_chip_pool_0 = eval.next_trace_mask();
         let pre_chip_pool_1 = eval.next_trace_mask();
         let pre_chip_pool_2 = eval.next_trace_mask();
         let pre_chip_pool_3 = eval.next_trace_mask();
-        let pre_addon_pool_0 = eval.next_trace_mask();
-        let pre_addon_pool_1 = eval.next_trace_mask();
-        let pre_addon_pool_2 = eval.next_trace_mask();
-        let pre_addon_pool_3 = eval.next_trace_mask();
         // 读取 bound check witness：diff (4 limb) + carry_lo (3) + carry_hi (3)
         let bound_diff_0 = eval.next_trace_mask();
         let bound_diff_1 = eval.next_trace_mask();
@@ -221,37 +210,16 @@ impl FrameworkEval for AddonAir {
             pre_chip_pool_2,
             pre_chip_pool_3,
         ];
-        let pre_addon_pool = [
-            pre_addon_pool_0,
-            pre_addon_pool_1,
-            pre_addon_pool_2,
-            pre_addon_pool_3,
-        ];
         let amount = input_amount.clone();
         let diff = [bound_diff_0, bound_diff_1, bound_diff_2, bound_diff_3];
         let carry_lo = [carry_lo_0, carry_lo_1, carry_lo_2];
         let carry_hi = [carry_hi_0, carry_hi_1, carry_hi_2];
-        let zero: E::F = M31::from(0u32).into();
-        let zero = [zero.clone(), zero.clone(), zero.clone(), zero];
-        for __c in common.bound_check_4limb(&chip_pool, &zero, &amount, &diff, &carry_lo, &carry_hi)
-        {
+        for __c in common.bound_check_4limb(&chip_pool, &amount, &diff, &carry_lo, &carry_hi) {
             eval.add_constraint(__c);
         }
 
-        // 约束 8（阶段 3 新增，soundness 关键）：addon_pool 守恒。
-        // post_addon_pool = pre_addon_pool + amount（全 4-limb，对齐合约 `table.addon_pool += amount`）。
-        let post_addon_pool: [E::F; 4] = [
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-        ];
+        // 约束 8：座位 pending_addon 增加 amount。
         let pending_add_carry: [E::F; 3] = [
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-        ];
-        let addon_pool_add_carry: [E::F; 3] = [
             eval.next_trace_mask(),
             eval.next_trace_mask(),
             eval.next_trace_mask(),
@@ -264,15 +232,6 @@ impl FrameworkEval for AddonAir {
         ) {
             eval.add_constraint(__c);
         }
-        for __c in common.limb4_delta(
-            &pre_addon_pool,
-            &post_addon_pool,
-            &amount,
-            &addon_pool_add_carry,
-        ) {
-            eval.add_constraint(__c);
-        }
-
         // 约束 9：chip_pool 是完整 TableVault 锁仓，addon 到账后同步增加 amount。
         let post_chip_pool: [E::F; 4] = [
             eval.next_trace_mask(),
@@ -312,20 +271,14 @@ pub struct AddonRow {
     pub input_amount_inv: M31,
     /// PRE_CHIP_POOL（4 limb）— 全局上界检查用。
     pub pre_chip_pool: [M31; 4],
-    /// PRE_ADDON_POOL（4 limb）— 全局上界检查用。
-    pub pre_addon_pool: [M31; 4],
     /// BOUND_DIFF（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + amount)。
     pub bound_diff: [M31; 4],
     /// BOUND_CARRY_LO（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
     pub bound_carry_lo: [M31; 3],
     /// BOUND_CARRY_HI（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
     pub bound_carry_hi: [M31; 3],
-    /// OUTPUT_POST_ADDON_POOL（4 limb）— 调用后 addon_pool（阶段 3 新增：守恒）。
-    pub post_addon_pool: [M31; 4],
     /// pending_addon 加法的 3 个 ripple-carry bit。
     pub pending_add_carry: [M31; 3],
-    /// addon_pool 加法的 3 个 ripple-carry bit。
-    pub addon_pool_add_carry: [M31; 3],
     /// OUTPUT_POST_CHIP_POOL（4 limb）— 调用后完整桌台锁仓。
     pub post_chip_pool: [M31; 4],
     /// chip_pool 加法的 3 个 ripple-carry bit。
@@ -339,7 +292,6 @@ impl AddonRow {
     /// - `input`: addon 输入（seat_index + amount）
     /// - `pre_pending_addon`: 调用前的 pending_addon 值
     /// - `pre_chip_pool` / `post_chip_pool`: 调用前后的完整桌台锁仓
-    /// - `pre_addon_pool` / `post_addon_pool`: 调用前后的 pending addon 总额
     /// - 其他通用字段（state_root / table_id / hand_id / version / round_state / pot）
     #[must_use]
     pub fn active(
@@ -347,8 +299,6 @@ impl AddonRow {
         pre_pending_addon: u64,
         pre_chip_pool: u64,
         post_chip_pool: u64,
-        pre_addon_pool: u64,
-        post_addon_pool: u64,
         pre_state_root: [M31; 4],
         post_state_root: [M31; 4],
         table_id: u64,
@@ -376,15 +326,8 @@ impl AddonRow {
         );
         let diff = MAX_TOTAL_BET - total;
         debug_assert_eq!(post_chip_pool, total, "addon post chip_pool mismatch");
-        let expected_post_addon_pool = pre_addon_pool
-            .checked_add(input.amount)
-            .expect("addon addon_pool addition must not overflow");
-        debug_assert_eq!(
-            post_addon_pool, expected_post_addon_pool,
-            "addon post addon_pool mismatch"
-        );
         let (bound_carry_lo, bound_carry_hi) =
-            compute_bound_carries(pre_chip_pool, 0, input.amount, diff);
+            compute_bound_carries(pre_chip_pool, input.amount, diff);
         Self {
             common: CommonRow::active(
                 MethodKind::Addon,
@@ -411,13 +354,10 @@ impl AddonRow {
             // Gap 9：amount 四个 limb 之和的乘法逆元。
             input_amount_inv,
             pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
-            pre_addon_pool: u64_to_m31_limbs(pre_addon_pool),
             bound_diff: u64_to_m31_limbs(diff),
             bound_carry_lo,
             bound_carry_hi,
-            post_addon_pool: u64_to_m31_limbs(post_addon_pool),
             pending_add_carry: compute_add_carries(pre_pending_addon, input.amount),
-            addon_pool_add_carry: compute_add_carries(pre_addon_pool, input.amount),
             post_chip_pool: u64_to_m31_limbs(post_chip_pool),
             chip_pool_add_carry: compute_add_carries(pre_chip_pool, input.amount),
         }
@@ -435,13 +375,10 @@ impl AddonRow {
             input_seat_occupied: ZERO,
             input_amount_inv: ZERO,
             pre_chip_pool: [ZERO; 4],
-            pre_addon_pool: [ZERO; 4],
             bound_diff: [ZERO; 4],
             bound_carry_lo: [ZERO; 3],
             bound_carry_hi: [ZERO; 3],
-            post_addon_pool: [ZERO; 4],
             pending_add_carry: [ZERO; 3],
-            addon_pool_add_carry: [ZERO; 3],
             post_chip_pool: [ZERO; 4],
             chip_pool_add_carry: [ZERO; 3],
         }
@@ -458,13 +395,10 @@ impl AddonRow {
         v.push(self.input_seat_occupied);
         v.push(self.input_amount_inv);
         v.extend_from_slice(&self.pre_chip_pool);
-        v.extend_from_slice(&self.pre_addon_pool);
         v.extend_from_slice(&self.bound_diff);
         v.extend_from_slice(&self.bound_carry_lo);
         v.extend_from_slice(&self.bound_carry_hi);
-        v.extend_from_slice(&self.post_addon_pool);
         v.extend_from_slice(&self.pending_add_carry);
-        v.extend_from_slice(&self.addon_pool_add_carry);
         v.extend_from_slice(&self.post_chip_pool);
         v.extend_from_slice(&self.chip_pool_add_carry);
         debug_assert_eq!(v.len(), cols::NUM_COLUMNS);

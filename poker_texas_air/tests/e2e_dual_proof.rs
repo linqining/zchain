@@ -69,7 +69,7 @@ fn dispatch_task(
 fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
-    let input_cards: Vec<_> = (0..8)
+    let input_cards: Vec<_> = (0..52)
         .map(|i| {
             let card = Bls12381Curve::hash_to_curve(
                 format!("dual-proof/shuffle/{nonce}/card/{i}").as_bytes(),
@@ -81,7 +81,8 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
             )
         })
         .collect();
-    let permutation = [3, 0, 7, 1, 6, 2, 5, 4];
+    let mut permutation: Vec<usize> = (0..52).collect();
+    permutation[..8].copy_from_slice(&[3, 0, 7, 1, 6, 2, 5, 4]);
     let rerandomizers: Vec<_> = (0..input_cards.len())
         .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
         .collect();
@@ -110,12 +111,11 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
     );
     table.call_seq = call_seq;
     table.hand_id = 7;
-    table.version = u64::from(call_seq) + 10;
     table.seats[0].player = player;
     table.seats[0].set_status(SeatStatus::Active);
     table.seats[0].stack = 1_000;
     table.seats[0].pk = ECPoint(public_key);
-    table.deck_state.encrypted = input_cards;
+    table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
     table
@@ -195,7 +195,6 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
     );
     table.call_seq = call_seq;
     table.hand_id = 6;
-    table.version = u64::from(call_seq) + 20;
     table
         .enter_initial_shuffling(
             ShuffleState {
@@ -250,7 +249,6 @@ fn reconstruction_task(nonce: u64) -> ProveTask {
     );
     table.call_seq = 12;
     table.hand_id = 8;
-    table.version = 44;
     table.seats[0].player = player;
     table.seats[0].set_status(SeatStatus::Active);
     table.seats[0].stack = 1_000;
@@ -350,7 +348,6 @@ fn leave_task(nonce: u64) -> ProveTask {
     );
     table.call_seq = 4;
     table.hand_id = 9;
-    table.version = 21;
     table.seats[1].player = player;
     table.seats[1].set_status(SeatStatus::Active);
     table.seats[1].pk = ECPoint(public_key);
@@ -358,7 +355,7 @@ fn leave_task(nonce: u64) -> ProveTask {
         table.seats[other_seat].player = [(other_seat as u8) + 1; 20];
         table.seats[other_seat].set_status(SeatStatus::Active);
     }
-    table.deck_state.encrypted = input_cards;
+    table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
     table
@@ -425,7 +422,6 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
     );
     table.call_seq = 12;
     table.hand_id = 14;
-    table.version = 40;
     table
         .enter_betting(
             ROUND_PREFLOP,
@@ -453,10 +449,9 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
     if compound_reset {
         assert_eq!(active_players, 2);
         table.seats[1].pending_addon = 20;
-        table.addon_pool = 20;
     }
     table.seats[0].pk = ECPoint(public_key);
-    table.deck_state.encrypted = input_cards;
+    table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
     let raw_args = borsh::to_vec(&FoldWithProofArgs {
@@ -476,7 +471,7 @@ fn fold_with_proof_task(nonce: u64, active_players: u8, compound_reset: bool) ->
 fn reveal_task(nonce: u64) -> ProveTask {
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
-    let encrypted_cards: Vec<_> = (0..2)
+    let encrypted_cards: Vec<_> = (0..52)
         .map(|i| {
             let card = Bls12381Curve::hash_to_curve(
                 format!("dual-proof/reveal/{nonce}/card/{i}").as_bytes(),
@@ -508,12 +503,11 @@ fn reveal_task(nonce: u64) -> ProveTask {
     );
     table.call_seq = 7;
     table.hand_id = 11;
-    table.version = 31;
     table.seats[1].player = player;
     table.seats[1].set_status(SeatStatus::Active);
     table.seats[1].stack = 1_000;
     table.seats[1].pk = ECPoint(public_key);
-    table.deck_state.encrypted = encrypted_cards;
+    table.deck_state.encrypted = encrypted_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << 1;
     table.sync_aggregated_pk().unwrap();
     table

@@ -32,6 +32,8 @@ pub use vm_common::prove_task::MethodInput;
 
 use super::events::TexasPokerEvent;
 use super::types::TexasPokerTable;
+use crate::error::{PokerL1Error, PokerL1Result};
+use crate::object_model::ObjectID;
 use crate::vm::contracts::dispatch::DispatchContext;
 
 /// 单次 method 调用的证明任务（L1 侧定义）。
@@ -175,6 +177,24 @@ pub struct L1DispatchOutput {
     pub prove_task: Option<L1ProveTask>,
 }
 
+/// Canonical Treasury transfer derived from one settlement in a dispatch output.
+///
+/// This is deliberately not serialized as a second wire fact. It is a fail-closed view of the
+/// canonical settlement-plan and rake events already committed by the proof task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementTreasuryReceipt {
+    /// Settled table.
+    pub table_id: ObjectID,
+    /// Canonical showdown plan digest, absent for an uncontested settlement.
+    pub plan_digest: Option<[u8; 32]>,
+    /// Pot before rake.
+    pub gross_pot: u64,
+    /// Treasury transfer amount.
+    pub amount: u64,
+    /// Pot awarded after rake.
+    pub post_rake_pot: u64,
+}
+
 impl L1DispatchOutput {
     /// 仅含 events（无证明任务）的便捷构造。
     #[must_use]
@@ -191,6 +211,129 @@ impl L1DispatchOutput {
         Self {
             events,
             prove_task: Some(prove_task),
+        }
+    }
+
+    /// Derive the unique Treasury receipt, rejecting duplicate or detached rake events.
+    pub fn settlement_treasury_receipt(&self) -> PokerL1Result<Option<SettlementTreasuryReceipt>> {
+        let mut plan = None;
+        let mut uncontested_award = None;
+        let mut rake_event = None;
+        for event in &self.events {
+            match event {
+                TexasPokerEvent::SettlementPlanCommitted {
+                    table_id,
+                    plan_digest,
+                    gross_pot,
+                    rake,
+                    total_awards,
+                    ..
+                } => {
+                    if plan
+                        .replace((*table_id, *plan_digest, *gross_pot, *rake, *total_awards))
+                        .is_some()
+                    {
+                        return Err(PokerL1Error::Other(
+                            "Texas dispatch contains multiple settlement plans".into(),
+                        ));
+                    }
+                }
+                TexasPokerEvent::RakeCollected {
+                    table_id,
+                    pot_before,
+                    rake_amount,
+                    pot_after,
+                    ..
+                } => {
+                    if rake_event
+                        .replace((*table_id, *pot_before, *rake_amount, *pot_after))
+                        .is_some()
+                    {
+                        return Err(PokerL1Error::Other(
+                            "Texas dispatch contains multiple rake receipts".into(),
+                        ));
+                    }
+                }
+                TexasPokerEvent::HandEndedWithoutShowdown { table_id, pot, .. } => {
+                    if uncontested_award.replace((*table_id, *pot)).is_some() {
+                        return Err(PokerL1Error::Other(
+                            "Texas dispatch contains multiple uncontested settlements".into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if plan.is_some() && uncontested_award.is_some() {
+            return Err(PokerL1Error::Other(
+                "Texas dispatch mixes showdown and uncontested settlement anchors".into(),
+            ));
+        }
+
+        if let Some((table_id, award)) = uncontested_award {
+            return match rake_event {
+                None => Ok(None),
+                Some((rake_table_id, gross_pot, rake, post_rake_pot)) => {
+                    if rake_table_id != table_id
+                        || post_rake_pot != award
+                        || award.checked_add(rake) != Some(gross_pot)
+                    {
+                        return Err(PokerL1Error::Other(
+                            "Texas rake receipt does not match its uncontested settlement".into(),
+                        ));
+                    }
+                    Ok(Some(SettlementTreasuryReceipt {
+                        table_id,
+                        plan_digest: None,
+                        gross_pot,
+                        amount: rake,
+                        post_rake_pot,
+                    }))
+                }
+            };
+        }
+
+        match (plan, rake_event) {
+            (None, None) => Ok(None),
+            (None, Some(_)) => Err(PokerL1Error::Other(
+                "Texas rake receipt is detached from a settlement anchor".into(),
+            )),
+            (Some((_, _, gross_pot, rake, total_awards)), _)
+                if total_awards.checked_add(rake) != Some(gross_pot) =>
+            {
+                Err(PokerL1Error::Other(
+                    "Texas settlement plan violates gross = awards + rake".into(),
+                ))
+            }
+            (Some((_, _, _, 0, _)), None) => Ok(None),
+            (Some((_, _, _, 0, _)), Some(_)) => Err(PokerL1Error::Other(
+                "Texas zero-rake settlement contains a rake receipt".into(),
+            )),
+            (Some((_, _, _, _, _)), None) => Err(PokerL1Error::Other(
+                "Texas positive-rake settlement is missing its Treasury receipt".into(),
+            )),
+            (
+                Some((table_id, plan_digest, gross_pot, rake, total_awards)),
+                Some((rake_table_id, pot_before, rake_amount, pot_after)),
+            ) => {
+                if rake_table_id != table_id
+                    || pot_before != gross_pot
+                    || rake_amount != rake
+                    || pot_after != total_awards
+                {
+                    return Err(PokerL1Error::Other(
+                        "Texas rake receipt does not match its settlement plan".into(),
+                    ));
+                }
+                Ok(Some(SettlementTreasuryReceipt {
+                    table_id,
+                    plan_digest: Some(plan_digest),
+                    gross_pot,
+                    amount: rake,
+                    post_rake_pot: total_awards,
+                }))
+            }
         }
     }
 }

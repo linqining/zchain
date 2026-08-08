@@ -22,6 +22,7 @@
 //! `poker_protocol::borsh_impls` 中实现（48B G1 compressed / 32B scalar big-endian）。
 
 use std::borrow::Cow;
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
@@ -63,6 +64,9 @@ pub const MAX_SEATS: u8 = 9;
 
 /// Canonical sentinel for a missing seat index in persisted state and AIR projections.
 pub const NO_SEAT: u8 = u8::MAX;
+
+/// Fixed number of ciphertexts in an active mental-poker deck.
+pub const CIPHER_DECK_SIZE: usize = 52;
 
 /// Bit `i` denotes seat `i`. Only the low `max_players` bits may be set.
 pub type SeatMask = u16;
@@ -384,82 +388,36 @@ impl RevealTarget {
     }
 }
 
-/// Canonical reveal collection/resolution state.
+/// Reveal assignment with one typed target and canonical in-flight token collection.
 ///
-/// Submitted tokens are stored in ascending seat order. `submitted_mask` is the only seat-to-token
-/// index: token `n` belongs to the `n`th set bit. Ready values normally exist only transiently while
-/// deterministic normalization drains them; the tagged variants are retained so legacy states with
-/// out-of-order completed board positions can migrate without losing a valid reveal result.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub enum RevealProgress {
-    /// More authenticated reveal-token submissions are required.
-    Collecting {
-        /// Seats that still owe a token.
-        pending_mask: SeatMask,
-        /// Seats whose tokens are already present in `reveal_tokens`.
-        submitted_mask: SeatMask,
-        /// Verified tokens in ascending seat-index order.
-        reveal_tokens: Vec<ECPoint>,
-    },
-    /// A preflop private card has been partially decrypted for its owner.
-    ReadyPartial {
-        /// Self-contained partial ciphertext used later by the showdown owner proof.
-        ciphertext: ElGamalCiphertext,
-    },
-    /// A public or showdown card has resolved to a canonical card id.
-    ReadyCard {
-        /// Resolved canonical card.
-        card: Card,
-    },
-}
-
-impl RevealProgress {
-    /// Pending seats, or zero after the cryptographic collection has resolved.
-    #[must_use]
-    pub const fn pending_mask(&self) -> SeatMask {
-        match self {
-            Self::Collecting { pending_mask, .. } => *pending_mask,
-            Self::ReadyPartial { .. } | Self::ReadyCard { .. } => 0,
-        }
-    }
-
-    /// Whether this assignment already contains its deterministic reveal result.
-    #[must_use]
-    pub const fn is_ready(&self) -> bool {
-        matches!(
-            self,
-            Self::ReadyPartial { .. }
-                | Self::ReadyCard { .. }
-                | Self::Collecting {
-                    pending_mask: 0,
-                    ..
-                }
-        )
-    }
-}
-
-/// Reveal assignment with one typed target and one canonical progress variant.
+/// Completed results are materialized in the same dispatch and the assignment is removed, so the
+/// persisted representation has no `Ready*` variant. Tokens are stored in ascending seat order;
+/// `submitted_mask` is the only seat-to-token index.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct RevealAssignment {
     /// 牌组中的加密牌索引。
     pub encrypted_card_index: u8,
     /// Typed destination of this reveal.
     pub target: RevealTarget,
-    /// Collection or ready-to-materialize result.
-    pub progress: RevealProgress,
+    /// Seats that still owe a token.
+    pub pending_mask: SeatMask,
+    /// Seats whose tokens are already present in `reveal_tokens`.
+    pub submitted_mask: SeatMask,
+    /// Verified tokens in ascending seat-index order.
+    pub reveal_tokens: Vec<ECPoint>,
 }
 
 impl RevealAssignment {
     /// Seats that still owe a reveal token.
     #[must_use]
     pub const fn pending_mask(&self) -> SeatMask {
-        self.progress.pending_mask()
+        self.pending_mask
     }
 
     /// Whether the assignment has resolved and can be drained by normalization.
     #[must_use]
     pub const fn is_ready(&self) -> bool {
-        self.progress.is_ready()
+        self.pending_mask == 0
     }
 }
 
@@ -889,35 +847,15 @@ fn canonical_absolute_deadline(
 
 // ========== 解密牌账本 ==========
 
-/// Mutually-exclusive state of one reveal-ledger record.
-///
-/// A record is either a self-contained partial ciphertext that still needs the
-/// owner reveal, or a resolved plaintext waiting for the same normalization
-/// step to materialize it. The enum prevents the old illegal combinations
-/// `(ciphertext = Some, plaintext = Some)` and `(None, None)` at the type level.
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub enum DecryptedCardState {
-    /// Partial ciphertext retained across reconstruct until showdown.
-    Partial {
-        /// Ciphertext after all non-owner reveal layers were removed.
-        ciphertext: ElGamalCiphertext,
-    },
-    /// Canonical plaintext card waiting to be materialized and removed.
-    Plaintext {
-        /// Decrypted point in the protocol's canonical 52-card domain.
-        plaintext: ECPoint,
-    },
-}
-
-/// One authenticated reveal-ledger record.
+/// One authenticated partial-ciphertext reveal-ledger record retained until owner reveal.
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DecryptedCard {
     /// Original encrypted deck index (lineage only; not a card identity).
     pub encrypted_card_index: u8,
     /// Owner seat (`OWNER_SEAT_PUBLIC` for community cards).
     pub owner_seat_index: u8,
-    /// Exactly one partial/plaintext payload.
-    pub state: DecryptedCardState,
+    /// Ciphertext after every non-owner reveal layer was removed.
+    pub ciphertext: ElGamalCiphertext,
 }
 
 impl DecryptedCard {
@@ -931,46 +869,154 @@ impl DecryptedCard {
         Self {
             encrypted_card_index,
             owner_seat_index,
-            state: DecryptedCardState::Partial { ciphertext },
+            ciphertext,
         }
     }
 
-    /// Construct a resolved plaintext record.
+    /// Borrow the partial ciphertext.
     #[must_use]
-    pub fn resolved(encrypted_card_index: u8, owner_seat_index: u8, plaintext: ECPoint) -> Self {
-        Self {
-            encrypted_card_index,
-            owner_seat_index,
-            state: DecryptedCardState::Plaintext { plaintext },
-        }
-    }
-
-    /// Borrow the partial ciphertext, if this record is still owner-readable.
-    #[must_use]
-    pub fn ciphertext(&self) -> Option<&ElGamalCiphertext> {
-        match &self.state {
-            DecryptedCardState::Partial { ciphertext } => Some(ciphertext),
-            DecryptedCardState::Plaintext { .. } => None,
-        }
-    }
-
-    /// Borrow the resolved plaintext, if this record is ready to materialize.
-    #[must_use]
-    pub fn plaintext(&self) -> Option<&ECPoint> {
-        match &self.state {
-            DecryptedCardState::Partial { .. } => None,
-            DecryptedCardState::Plaintext { plaintext } => Some(plaintext),
-        }
+    pub const fn ciphertext(&self) -> &ElGamalCiphertext {
+        &self.ciphertext
     }
 }
 
 // ========== 牌组状态 ==========
 
+/// Runtime and persisted representation of the encrypted deck.
+///
+/// A table either has no active encrypted deck, or has the complete canonical 52-card deck.
+/// Encoding this as a tagged union prevents partial or oversized decks from entering the state
+/// machine and removes a variable-length witness dimension from downstream AIR projections.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum CipherDeck {
+    /// No encrypted deck exists for the current hand lifecycle.
+    Absent,
+    /// Complete encrypted deck for an active hand.
+    Active(Box<[ElGamalCiphertext; CIPHER_DECK_SIZE]>),
+}
+
+impl CipherDeck {
+    /// Borrow the active deck, or an empty slice when absent.
+    #[must_use]
+    pub fn as_slice(&self) -> &[ElGamalCiphertext] {
+        match self {
+            Self::Absent => &[],
+            Self::Active(cards) => cards.as_slice(),
+        }
+    }
+
+    /// Copy the deck into the variable-length form required by host-native crypto APIs.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<ElGamalCiphertext> {
+        self.as_slice().to_vec()
+    }
+
+    /// Number of ciphertexts: always zero or [`CIPHER_DECK_SIZE`].
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Whether the encrypted deck is absent.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+
+    /// Remove the active deck.
+    pub fn clear(&mut self) {
+        *self = Self::Absent;
+    }
+
+    /// Borrow one ciphertext by canonical deck index.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&ElGamalCiphertext> {
+        self.as_slice().get(index)
+    }
+
+    /// Iterate over the active deck.
+    pub fn iter(&self) -> std::slice::Iter<'_, ElGamalCiphertext> {
+        self.as_slice().iter()
+    }
+}
+
+impl Default for CipherDeck {
+    fn default() -> Self {
+        Self::Absent
+    }
+}
+
+impl TryFrom<Vec<ElGamalCiphertext>> for CipherDeck {
+    type Error = PokerL1Error;
+
+    fn try_from(cards: Vec<ElGamalCiphertext>) -> Result<Self, Self::Error> {
+        if cards.is_empty() {
+            return Ok(Self::Absent);
+        }
+        let actual = cards.len();
+        let cards = cards.into_boxed_slice().try_into().map_err(|_| {
+            PokerL1Error::Serialization(format!(
+                "Texas encrypted deck has {actual} cards, expected 0 or {CIPHER_DECK_SIZE}"
+            ))
+        })?;
+        Ok(Self::Active(cards))
+    }
+}
+
+impl From<[ElGamalCiphertext; CIPHER_DECK_SIZE]> for CipherDeck {
+    fn from(cards: [ElGamalCiphertext; CIPHER_DECK_SIZE]) -> Self {
+        Self::Active(Box::new(cards))
+    }
+}
+
+impl Deref for CipherDeck {
+    type Target = [ElGamalCiphertext];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for CipherDeck {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Absent => panic!("cannot mutably borrow an absent Texas encrypted deck"),
+            Self::Active(cards) => cards.as_mut_slice(),
+        }
+    }
+}
+
+impl Index<usize> for CipherDeck {
+    type Output = ElGamalCiphertext;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.as_slice()[index]
+    }
+}
+
+impl IndexMut<usize> for CipherDeck {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        match self {
+            Self::Absent => panic!("cannot index an absent Texas encrypted deck"),
+            Self::Active(cards) => &mut cards[index],
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a CipherDeck {
+    type Item = &'a ElGamalCiphertext;
+    type IntoIter = std::slice::Iter<'a, ElGamalCiphertext>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// 牌组状态（镜像 Move `DeckState`，table.move:211-217）。
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct DeckState {
     /// 加密牌组（52 个 ElGamalCiphertext）。
-    pub encrypted: Vec<ElGamalCiphertext>,
+    pub encrypted: CipherDeck,
     /// 聚合公钥（None = 未初始化，使用 ECPoint newtype 以支持 Borsh）。
     pub aggregated_pk: Option<ECPoint>,
     /// Seats whose public-key encryption layer is still present in the deck lineage.
@@ -984,7 +1030,7 @@ pub struct DeckState {
 impl Default for DeckState {
     fn default() -> Self {
         Self {
-            encrypted: vec![],
+            encrypted: CipherDeck::Absent,
             aggregated_pk: None,
             contributor_mask: 0,
             cards_dealt: 0,
@@ -1051,12 +1097,6 @@ pub struct TexasPokerTable {
     /// 创建 Coin 输出前必须先减少该值。
     pub chip_pool: u64,
 
-    /// 尚未并入玩家 stack 的 pending addon 总额。
-    ///
-    /// 该值是 `chip_pool` 的子集而不是第二份资产：addon 时两者同时增加；下一手
-    /// pending_addon 合并进 stack 时本字段减少、chip_pool 不变。
-    pub addon_pool: u64,
-
     /// Ante 模式（`ANTE_MODE_NONE/NORMAL/BBA`）。
     ///
     /// 默认 NONE。设置后在 `start_hand` 时按模式投 ante：
@@ -1065,8 +1105,6 @@ pub struct TexasPokerTable {
     pub ante_mode: u8,
     /// Ante 金额（每手投注的 ante 数额）。
     pub ante_amount: u64,
-    /// 本手已累积的 ante 总额（settle 时统一分配，或计入 pot）。
-    pub ante_collected: u64,
 
     /// Rake 模式（`RAKE_MODE_NONE/PERCENTAGE`）。
     ///
@@ -1077,13 +1115,6 @@ pub struct TexasPokerTable {
     pub rake_bps: u16,
     /// Rake 上限（单手最多抽水金额）。
     pub rake_cap: u64,
-    /// 本次结算已抽水金额。
-    ///
-    /// 此字段不是 TableVault 余额；它是状态机在同一 dispatch 中留给
-    /// `TexasPokerPrecompile` 的 Treasury Coin 出金收据。结算的
-    /// `reset_for_next_hand` 会在持久化前将其清零。
-    pub rake_collected: u64,
-
     /// Run It Twice 模式（`RIT_MODE_DISABLED/TWICE`）。
     ///
     /// 默认 DISABLED。设置为 TWICE 后，无进一步争议下注时，已公开公共牌成为共享前缀，
@@ -1104,9 +1135,6 @@ pub struct TexasPokerTable {
     /// 初始为 0；每次成功且 `pre_table != post_table` 的 dispatch 严格递增一次。
     /// 无状态变化的 permissionless `tick` 不消耗序号，保证证明任务连续。
     pub call_seq: u32,
-
-    /// 状态版本号（每次更新 +1，用于乐观锁）。
-    pub version: u64,
 }
 
 impl TexasPokerTable {
@@ -1606,11 +1634,7 @@ impl TexasPokerTable {
             } => {
                 seat_mask_remove(&mut state.pending_mask, seat_index);
                 for assignment in &mut suspended_reveal.assignments {
-                    if let RevealProgress::Collecting { pending_mask, .. } =
-                        &mut assignment.progress
-                    {
-                        seat_mask_remove(pending_mask, seat_index);
-                    }
+                    seat_mask_remove(&mut assignment.pending_mask, seat_index);
                 }
             }
             HandPhase::Shuffling { phase } => {
@@ -1623,21 +1647,13 @@ impl TexasPokerTable {
                 } = phase
                 {
                     for assignment in &mut reveal.assignments {
-                        if let RevealProgress::Collecting { pending_mask, .. } =
-                            &mut assignment.progress
-                        {
-                            seat_mask_remove(pending_mask, seat_index);
-                        }
+                        seat_mask_remove(&mut assignment.pending_mask, seat_index);
                     }
                 }
             }
             HandPhase::Revealing { state, .. } => {
                 for assignment in &mut state.assignments {
-                    if let RevealProgress::Collecting { pending_mask, .. } =
-                        &mut assignment.progress
-                    {
-                        seat_mask_remove(pending_mask, seat_index);
-                    }
+                    seat_mask_remove(&mut assignment.pending_mask, seat_index);
                 }
             }
             HandPhase::Waiting | HandPhase::Betting { .. } | HandPhase::ShowdownDisplay { .. } => {}
@@ -1877,19 +1893,15 @@ impl TexasPokerTable {
             deck_state: DeckState::default(),
             timeout_config: TimeoutConfig::default(),
             chip_pool: 0,
-            addon_pool: 0,
             ante_mode: super::constants::ANTE_MODE_NONE,
             ante_amount: 0,
-            ante_collected: 0,
             rake_mode: super::constants::RAKE_MODE_NONE,
             rake_bps: super::constants::DEFAULT_RAKE_BPS,
             rake_cap: super::constants::DEFAULT_RAKE_CAP,
-            rake_collected: 0,
             rit_mode: super::constants::RIT_MODE_DISABLED,
             run_it_twice_state: RunItTwiceState::default(),
             hand_id: 0,
             call_seq: 0,
-            version: 0,
         }
     }
 
@@ -2242,43 +2254,10 @@ impl TexasPokerTable {
                     record.owner_seat_index, record.encrypted_card_index
                 )));
             }
-            match &record.state {
-                DecryptedCardState::Partial { .. } => {
-                    if record.owner_seat_index == OWNER_SEAT_PUBLIC {
-                        return Err(PokerL1Error::Serialization(
-                            "Texas public reveal ledger record cannot remain partial".into(),
-                        ));
-                    }
-                }
-                DecryptedCardState::Plaintext { .. } => {
-                    let matching_ready =
-                        self.reveal_token_state()
-                            .assignments
-                            .iter()
-                            .any(|assignment| {
-                                if assignment.encrypted_card_index != record.encrypted_card_index
-                                    || !matches!(
-                                        assignment.progress,
-                                        RevealProgress::ReadyCard { .. }
-                                    )
-                                {
-                                    return false;
-                                }
-                                match assignment.target {
-                                    RevealTarget::Hole { seat_index, .. } => {
-                                        record.owner_seat_index == seat_index
-                                    }
-                                    RevealTarget::Board { .. } => {
-                                        record.owner_seat_index == OWNER_SEAT_PUBLIC
-                                    }
-                                }
-                            });
-                    if !matching_ready {
-                        return Err(PokerL1Error::Serialization(format!(
-                            "Texas plaintext reveal ledger record {record_index} has no matching ready assignment"
-                        )));
-                    }
-                }
+            if record.owner_seat_index == OWNER_SEAT_PUBLIC {
+                return Err(PokerL1Error::Serialization(
+                    "Texas public reveal ledger record cannot persist".into(),
+                ));
             }
         }
         let validate_mask = |mask: SeatMask, label: &str| -> PokerL1Result<()> {
@@ -2315,13 +2294,6 @@ impl TexasPokerTable {
             None => {}
         }
         Ok(())
-    }
-
-    /// 状态版本号自增（每次 mutation 后调用）。
-    pub fn bump_version(&mut self) {
-        // 用 saturating_add 避免 version 达到 u64::MAX 时 panic（DoS）。
-        // version 仅用于乐观锁，溢出后仍单调，语义不受影响。
-        self.version = self.version.saturating_add(1);
     }
 }
 
@@ -2611,7 +2583,7 @@ mod tests {
         table.seats[0].stack = 1_000_000;
         table.pot = 200;
         table.community_cards.try_push(Card::new(0, 14)).unwrap(); // A♠
-        table.version = 42;
+        table.call_seq = 42;
 
         let bytes = borsh::to_vec(&table).unwrap();
         let recovered: TexasPokerTable = borsh::from_slice(&bytes).unwrap();
@@ -2638,17 +2610,6 @@ mod tests {
 
         let error = table.validate_state_schema().unwrap_err();
         assert!(error.to_string().contains("occupies more than one seat"));
-    }
-
-    #[test]
-    fn test_table_bump_version() {
-        let mut table =
-            TexasPokerTable::new(dummy_table_id(), "t".into(), EMPTY_PLAYER, 4, 50, 100);
-        assert_eq!(table.version, 0);
-        table.bump_version();
-        assert_eq!(table.version, 1);
-        table.bump_version();
-        assert_eq!(table.version, 2);
     }
 
     #[test]

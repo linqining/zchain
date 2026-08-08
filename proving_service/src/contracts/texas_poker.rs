@@ -535,7 +535,7 @@ mod tests {
     ) -> (ProveTask, TexasPokerTable) {
         let seat_index = pre_table.shuffle_state().derived_current_shuffler();
         assert_ne!(seat_index, u8::MAX, "a shuffler should remain");
-        let input_cards = pre_table.deck_state.encrypted.clone();
+        let input_cards = pre_table.deck_state.encrypted.to_vec();
         let rerandomizers: Vec<_> = (0..input_cards.len())
             .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
             .collect();
@@ -586,7 +586,7 @@ mod tests {
             .map(|secret| <Bls12381Curve as Curve>::base_g() * secret)
             .collect();
         let aggregated_pk = seat_keys[0] + seat_keys[1];
-        let input_cards: Vec<_> = (0..8)
+        let input_cards: Vec<_> = (0..52)
             .map(|index| {
                 let card = Bls12381Curve::hash_to_curve(
                     format!("restart-aggregate/card/{index}").as_bytes(),
@@ -608,14 +608,13 @@ mod tests {
         );
         table.call_seq = 20;
         table.hand_id = 9;
-        table.version = 30;
         for (index, key) in seat_keys.into_iter().enumerate() {
             table.seats[index].player = [u8::try_from(index + 1).unwrap(); 20];
             table.seats[index].set_status(SeatStatus::Active);
             table.seats[index].stack = 1_000;
             table.seats[index].pk = ECPoint(key);
         }
-        table.deck_state.encrypted = input_cards;
+        table.deck_state.encrypted = input_cards.try_into().unwrap();
         table.deck_state.contributor_mask = 0b11;
         table.sync_aggregated_pk().unwrap();
         assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
@@ -629,8 +628,12 @@ mod tests {
             )
             .unwrap();
 
-        let (first, table) = next_shuffle_task(table, aggregated_pk, &[3, 0, 7, 1, 6, 2, 5, 4]);
-        let (second, table) = next_shuffle_task(table, aggregated_pk, &[1, 7, 3, 5, 0, 6, 4, 2]);
+        let mut first_permutation: Vec<usize> = (0..52).collect();
+        first_permutation[..8].copy_from_slice(&[3, 0, 7, 1, 6, 2, 5, 4]);
+        let (first, table) = next_shuffle_task(table, aggregated_pk, &first_permutation);
+        let mut second_permutation: Vec<usize> = (0..52).collect();
+        second_permutation[..8].copy_from_slice(&[1, 7, 3, 5, 0, 6, 4, 2]);
+        let (second, table) = next_shuffle_task(table, aggregated_pk, &second_permutation);
         (vec![first, second], table)
     }
 

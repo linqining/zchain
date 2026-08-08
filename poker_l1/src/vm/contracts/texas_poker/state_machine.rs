@@ -21,7 +21,7 @@
 //! fn apply_xxx(table: &mut TexasPokerTable, ..., events: &mut Vec<TexasPokerEvent>) -> PokerL1Result<T>
 //! ```
 //! - `events` 由调用方（dispatch.rs）创建并传入，函数内通过 `events::emit_event` 追加
-//! - 任何状态变更后调用 `table.bump_version()`
+//! - 外部命令序号仅由 dispatch 原子提交边界递增 `call_seq`
 //! - 错误用 `PokerL1Error::Serialization` 包裹（带上下文 message）
 
 use blstrs::G1Projective;
@@ -49,10 +49,9 @@ use super::events::{
 };
 use super::settlement::{self, SettlementPlan};
 use super::types::{
-    DecryptedCard, DecryptedCardState, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC, RevealAssignment,
-    RevealProgress, RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus,
-    TexasPokerTable, seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove,
-    seat_mask_to_indices,
+    CipherDeck, DecryptedCard, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC, RevealAssignment,
+    RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus, TexasPokerTable,
+    seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove, seat_mask_to_indices,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
@@ -190,11 +189,10 @@ pub fn is_playing(table: &TexasPokerTable) -> bool {
 
 /// Reconcile the embedded TableVault against every canonical custody bucket.
 ///
-/// `total_bet`, `ante_collected` and `addon_pool` are accounting views, not
-/// additional assets. The actual locked value is represented exactly once by seat stacks,
-/// pending addons, current-round bets and the collected pot. `rake_collected` is a transient
-/// settlement receipt: its matching value has already left `chip_pool` for the Treasury output
-/// and it must be cleared by `reset_for_next_hand` before the table is persisted.
+/// `total_bet` is an accounting view, not an additional asset. The actual locked value is
+/// represented exactly once by seat stacks,
+/// pending addons, current-round bets and the collected pot. Settlement rake is not table state:
+/// its matching value leaves `chip_pool` and is carried by the dispatch settlement receipt.
 pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
     table.validate_state_schema()?;
     let _ = table.canonical_hand_phase()?;
@@ -223,13 +221,6 @@ pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
             .checked_add(seat.total_bet)
             .ok_or_else(|| PokerL1Error::Other("Texas total bet sum overflow".into()))?;
     }
-    if pending_addons != table.addon_pool {
-        return Err(PokerL1Error::Other(format!(
-            "Texas addon ledger mismatch: seats={pending_addons}, addon_pool={}",
-            table.addon_pool
-        )));
-    }
-
     let wagers_in_custody = table
         .pot
         .checked_add(current_bets)
@@ -240,13 +231,6 @@ pub fn reconcile_table_vault(table: &TexasPokerTable) -> PokerL1Result<u64> {
             table.pot
         )));
     }
-    if table.ante_collected > table.pot {
-        return Err(PokerL1Error::Other(format!(
-            "Texas ante ledger {} exceeds collected pot {}",
-            table.ante_collected, table.pot
-        )));
-    }
-
     let accounted = stacks
         .checked_add(pending_addons)
         .and_then(|value| value.checked_add(wagers_in_custody))
@@ -436,13 +420,15 @@ pub fn set_initial_encrypted_deck(table: &mut TexasPokerTable) -> PokerL1Result<
     let plaintexts = generate_plaintext_cards(); // 52 个 G1
     let g = g1_generator();
 
-    table.deck_state.encrypted = plaintexts
-        .iter()
-        .map(|m| {
-            // c1 = G, c2 = m
-            ElGamalCiphertext { c1: g, c2: *m }
-        })
-        .collect();
+    table.deck_state.encrypted = CipherDeck::try_from(
+        plaintexts
+            .iter()
+            .map(|m| {
+                // c1 = G, c2 = m
+                ElGamalCiphertext { c1: g, c2: *m }
+            })
+            .collect::<Vec<_>>(),
+    )?;
     table.deck_state.cards_dealt = 0;
     table.deck_state.decrypted_cards.clear();
     Ok(())
@@ -470,7 +456,7 @@ fn rebuild_deck_from_reconstruct_deck(table: &mut TexasPokerTable) -> PokerL1Res
         )));
     }
 
-    table.deck_state.encrypted.clone_from(&new_cts);
+    table.deck_state.encrypted = CipherDeck::try_from(new_cts)?;
     // reconstruct 重建的是一副全新牌组，与旧 deck 的 index 空间无关。
     // 新 deck 必须从 index=0 开始顺序发牌（见 restart_reveal_after_reconstruct
     // 的注释），因此重置 cards_dealt=0。
@@ -1006,11 +992,9 @@ fn start_preflop_reveal_phase(
                     seat_index: seat,
                     card_slot: card_idx % CARDS_PER_PLAYER,
                 },
-                progress: RevealProgress::Collecting {
-                    pending_mask,
-                    submitted_mask: 0,
-                    reveal_tokens: vec![],
-                },
+                pending_mask,
+                submitted_mask: 0,
+                reveal_tokens: vec![],
             });
             card_idx += 1;
         }
@@ -1074,11 +1058,9 @@ fn start_community_reveal_phase(
                     runout_index,
                     board_position,
                 },
-                progress: RevealProgress::Collecting {
-                    pending_mask: active_mask,
-                    submitted_mask: 0,
-                    reveal_tokens: vec![],
-                },
+                pending_mask: active_mask,
+                submitted_mask: 0,
+                reveal_tokens: vec![],
             });
             card_idx = card_idx.checked_add(1).ok_or_else(|| {
                 PokerL1Error::Serialization("community reveal card index overflow".into())
@@ -1123,26 +1105,32 @@ fn start_showdown_reveal_phase(
 
     for &seat in &active_seats {
         // 在 decrypted_cards 中找属于该玩家且 ciphertext 仍存在的部分解密手牌
-        for dc in &table.deck_state.decrypted_cards {
-            // typed 化后 ciphertext 是 Option<ElGamalCiphertext>；is_some 等价于旧的 !is_empty()。
-            if dc.owner_seat_index == seat && dc.ciphertext().is_some() {
-                // pending = [seat]（只牌主自己提交）
-                assignments.push(RevealAssignment {
-                    encrypted_card_index: dc.encrypted_card_index,
-                    target: RevealTarget::Hole {
-                        seat_index: seat,
-                        card_slot: u8::try_from(table.seats[usize::from(seat)].hand.len())
-                            .map_err(|_| {
-                                PokerL1Error::Serialization("hole-card slot overflow".into())
-                            })?,
-                    },
-                    progress: RevealProgress::Collecting {
-                        pending_mask: 1u16 << seat,
-                        submitted_mask: 0,
-                        reveal_tokens: vec![],
-                    },
-                });
-            }
+        let mut partial_cards = table
+            .deck_state
+            .decrypted_cards
+            .iter()
+            .filter(|dc| dc.owner_seat_index == seat)
+            .collect::<Vec<_>>();
+        // Partial records may have materialized in different dispatches. Deck lineage, rather than
+        // ledger insertion order, defines the canonical two-card dealing order for this seat.
+        partial_cards.sort_unstable_by_key(|dc| dc.encrypted_card_index);
+        let first_slot = table.seats[usize::from(seat)].hand.len();
+        for (offset, dc) in partial_cards.into_iter().enumerate() {
+            let card_slot = first_slot
+                .checked_add(offset)
+                .and_then(|slot| u8::try_from(slot).ok())
+                .ok_or_else(|| PokerL1Error::Serialization("hole-card slot overflow".into()))?;
+            // pending = [seat]（只牌主自己提交）
+            assignments.push(RevealAssignment {
+                encrypted_card_index: dc.encrypted_card_index,
+                target: RevealTarget::Hole {
+                    seat_index: seat,
+                    card_slot,
+                },
+                pending_mask: 1u16 << seat,
+                submitted_mask: 0,
+                reveal_tokens: vec![],
+            });
         }
     }
 
@@ -1164,20 +1152,6 @@ fn start_showdown_reveal_phase(
     Ok(())
 }
 
-/// 统计已解密但未写入 community 的公共牌数。
-#[allow(dead_code)] // P1-7 重构后重启逻辑改为完整重发，此函数暂无调用方，保留供未来增量补发使用。
-fn count_pending_community_cards(table: &TexasPokerTable) -> u8 {
-    table
-        .deck_state
-        .decrypted_cards
-        .iter()
-        .filter(|dc| {
-            // typed 化后 plaintext 是 Option<G1Projective>；is_some 等价于旧的 !is_empty()。
-            dc.owner_seat_index == OWNER_SEAT_PUBLIC && dc.plaintext().is_some()
-        })
-        .count() as u8
-}
-
 /// 检查 reveal phase 是否完成，并推进状态。
 ///
 /// 镜像 `table.move::check_reveal_phase_complete`（line 3106-3156）。
@@ -1185,20 +1159,13 @@ fn check_reveal_phase_complete(
     table: &mut TexasPokerTable,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    // A completed cryptographic collection is represented by a ready progress variant.
-    if table
-        .reveal_token_state()
-        .assignments
-        .iter()
-        .any(|assignment| !assignment.is_ready())
-    {
+    // Every completed assignment is materialized and drained in the same dispatch. An empty
+    // assignment list is therefore the only persisted phase-complete representation.
+    if !table.reveal_token_state().assignments.is_empty() {
         return Ok(());
     }
 
-    let (phase, completed_assignments) = {
-        let reveal_state = table.reveal_token_state();
-        (reveal_state.reveal_phase, reveal_state.assignments.clone())
-    };
+    let phase = table.reveal_token_state().reveal_phase;
     events::emit_event(
         events,
         TexasPokerEvent::RevealPhaseComplete {
@@ -1216,212 +1183,12 @@ fn check_reveal_phase_complete(
             start_betting_round(table, true, Some(bb_seat), events)?;
         }
         REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
-            write_decrypted_cards_to_community(table, phase, &completed_assignments, events)?;
             start_betting_round(table, false, None, events)?;
         }
         REVEAL_PHASE_SHOWDOWN => {
-            write_decrypted_cards_to_hands(table, events)?;
             table.enter_showdown_display(0);
         }
         _ => {}
-    }
-    Ok(())
-}
-
-/// 将解密的公共牌写入 community_cards。
-fn write_decrypted_cards_to_community(
-    table: &mut TexasPokerTable,
-    reveal_phase: u8,
-    assignments: &[RevealAssignment],
-    events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<()> {
-    let canonical_cards = generate_plaintext_cards();
-    let mut seen = exposed_card_ids(table)?;
-    let mut pending = Vec::new();
-    let mut expected_positions = [
-        table.community_cards.len(),
-        table.run_it_twice_state.second_board_len(),
-    ];
-
-    for assignment in assignments {
-        let (runout_index, board_position) = match assignment.target {
-            RevealTarget::Board {
-                runout_index,
-                board_position,
-            } => (usize::from(runout_index), usize::from(board_position)),
-            RevealTarget::Hole { .. } => {
-                return Err(PokerL1Error::Serialization(
-                    "hole reveal assignment present in community phase".into(),
-                ));
-            }
-        };
-        if runout_index
-            >= if table.run_it_twice_state.is_active() {
-                2
-            } else {
-                1
-            }
-        {
-            return Err(PokerL1Error::Serialization(format!(
-                "community reveal targets inactive runout {runout_index}"
-            )));
-        }
-        if board_position != expected_positions[runout_index] {
-            return Err(PokerL1Error::Serialization(format!(
-                "community reveal position {} is not canonical next position {} for runout {runout_index}",
-                board_position, expected_positions[runout_index]
-            )));
-        }
-        let matches = table
-            .deck_state
-            .decrypted_cards
-            .iter()
-            .enumerate()
-            .filter(|(_, card)| {
-                card.owner_seat_index == OWNER_SEAT_PUBLIC
-                    && card.encrypted_card_index == assignment.encrypted_card_index
-                    && card.plaintext().is_some()
-            })
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
-            return Err(PokerL1Error::Serialization(format!(
-                "community reveal assignment for encrypted card {} has {} plaintext records",
-                assignment.encrypted_card_index,
-                matches.len()
-            )));
-        }
-        let (decrypted_index, dc) = matches[0];
-        let plaintext = dc.plaintext().expect("filtered for a plaintext record");
-        let (card_id, card) = card_from_plaintext(&plaintext.0, &canonical_cards)?;
-        if !seen.insert(card_id) {
-            return Err(PokerL1Error::Serialization(format!(
-                "duplicate decrypted card id {card_id} while writing community cards"
-            )));
-        }
-        pending.push((decrypted_index, dc.encrypted_card_index, runout_index, card));
-        expected_positions[runout_index] += 1;
-    }
-
-    let mut indices = Vec::new();
-    let mut ranks = Vec::new();
-    let mut suits = Vec::new();
-    let mut consumed_indices = Vec::new();
-    for (decrypted_index, encrypted_card_index, runout_index, card) in pending {
-        if runout_index == 0 {
-            table.community_cards.try_push(card).map_err(|error| {
-                PokerL1Error::Serialization(format!("cannot append first-board card: {error}"))
-            })?;
-        } else {
-            table
-                .run_it_twice_state
-                .second_board_suffix_mut()?
-                .try_push(card)
-                .map_err(|error| {
-                    PokerL1Error::Serialization(format!(
-                        "cannot append second-board suffix card: {error}"
-                    ))
-                })?;
-        }
-        indices.push(encrypted_card_index);
-        ranks.push(card.rank());
-        suits.push(card.suit());
-        consumed_indices.push(decrypted_index);
-    }
-
-    consumed_indices.sort_unstable();
-    consumed_indices.dedup();
-    for decrypted_index in consumed_indices.into_iter().rev() {
-        table.deck_state.decrypted_cards.remove(decrypted_index);
-    }
-
-    if !indices.is_empty() {
-        events::emit_event(
-            events,
-            TexasPokerEvent::CommunityCardRevealed {
-                table_id: table.id,
-                phase: reveal_phase,
-                card_indices: indices,
-                card_ranks: ranks,
-                card_suits: suits,
-            },
-        );
-    }
-    Ok(())
-}
-
-/// 将解密的手牌写入 seat.hand。
-fn write_decrypted_cards_to_hands(
-    table: &mut TexasPokerTable,
-    events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<()> {
-    let canonical_cards = generate_plaintext_cards();
-    let mut seen = exposed_card_ids(table)?;
-    let mut pending = Vec::new();
-
-    for (decrypted_index, dc) in table.deck_state.decrypted_cards.iter().enumerate() {
-        if dc.owner_seat_index == OWNER_SEAT_PUBLIC {
-            continue;
-        }
-        let Some(plaintext) = dc.plaintext() else {
-            continue;
-        };
-        let seat_index = usize::from(dc.owner_seat_index);
-        let seat = table.seats.get(seat_index).ok_or_else(|| {
-            PokerL1Error::Serialization(format!(
-                "decrypted hole card owner seat {} is out of range",
-                dc.owner_seat_index
-            ))
-        })?;
-        if !seat.is_occupied() {
-            return Err(PokerL1Error::Serialization(format!(
-                "decrypted hole card owner seat {} is not occupied",
-                dc.owner_seat_index
-            )));
-        }
-        let (card_id, card) = card_from_plaintext(&plaintext.0, &canonical_cards)?;
-        if !seen.insert(card_id) {
-            return Err(PokerL1Error::Serialization(format!(
-                "duplicate decrypted card id {card_id} while writing hole cards"
-            )));
-        }
-        pending.push((
-            decrypted_index,
-            dc.owner_seat_index,
-            dc.encrypted_card_index,
-            card,
-        ));
-    }
-
-    let mut consumed_indices = Vec::new();
-    for (decrypted_index, owner_seat_index, encrypted_card_index, card) in pending {
-        let seat_index = usize::from(owner_seat_index);
-        table.seats[seat_index]
-            .hand
-            .try_push(card)
-            .map_err(|error| {
-                PokerL1Error::Serialization(format!(
-                    "cannot append hole card for seat {owner_seat_index}: {error}"
-                ))
-            })?;
-        if !table.seats[seat_index].is_folded() {
-            events::emit_event(
-                events,
-                TexasPokerEvent::ShowdownHoleCardsRevealed {
-                    table_id: table.id,
-                    seat_index: owner_seat_index,
-                    player: table.seats[seat_index].player,
-                    card_indices: vec![encrypted_card_index],
-                    card_ranks: vec![card.rank()],
-                    card_suits: vec![card.suit()],
-                },
-            );
-        }
-        consumed_indices.push(decrypted_index);
-    }
-    consumed_indices.sort_unstable();
-    consumed_indices.dedup();
-    for decrypted_index in consumed_indices.into_iter().rev() {
-        table.deck_state.decrypted_cards.remove(decrypted_index);
     }
     Ok(())
 }
@@ -1743,7 +1510,7 @@ pub fn apply_join_and_shuffle(
             .map(|m| ElGamalCiphertext { c1: g, c2: *m })
             .collect()
     } else {
-        table.deck_state.encrypted.clone()
+        table.deck_state.encrypted.to_vec()
     };
 
     // ZK verify remask (input → mask_cts)
@@ -1782,7 +1549,7 @@ pub fn apply_join_and_shuffle(
     })?;
 
     // 应用状态变更。Aggregate cache is refreshed from contributor lineage after the seat exists.
-    table.deck_state.encrypted = output_cts;
+    table.deck_state.encrypted = CipherDeck::try_from(output_cts)?;
 
     // 初始化座位
     table.seats[seat_index as usize] = Seat {
@@ -1811,7 +1578,6 @@ pub fn apply_join_and_shuffle(
             active_count_after: active_after as u64,
         },
     );
-    table.bump_version();
     Ok(())
 }
 
@@ -1848,7 +1614,7 @@ pub fn apply_submit_shuffle_v2(
     let output_cts = output_cards;
 
     // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）
-    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.clone();
+    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
 
     // ECPoint → G1Projective（aggregated_pk 字段为 Option<ECPoint>）
     let agg_pk_pt: G1Projective = table
@@ -1872,7 +1638,7 @@ pub fn apply_submit_shuffle_v2(
         .iter()
         .map(|ct| utils::add_pk_to_c2(ct, &player_pk))
         .collect();
-    table.deck_state.encrypted = new_cts;
+    table.deck_state.encrypted = CipherDeck::try_from(new_cts)?;
 
     let shuffle_state = table.active_shuffle_state_mut()?;
     shuffle_state.completed_mask |= 1u16 << seat_index;
@@ -1888,7 +1654,6 @@ pub fn apply_submit_shuffle_v2(
     );
 
     advance_shuffle(table, events)?;
-    table.bump_version();
     Ok(())
 }
 
@@ -1922,6 +1687,20 @@ pub fn apply_submit_player_reveal_tokens(
     }
 
     let phase = table.reveal_token_state().reveal_phase;
+    let expected_assignment_indices = table
+        .reveal_token_state()
+        .assignments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, assignment)| {
+            is_in_mask(assignment.pending_mask(), seat_index).then_some(index as u8)
+        })
+        .collect::<Vec<_>>();
+    if assignment_indices != expected_assignment_indices {
+        return Err(PokerL1Error::Serialization(format!(
+            "reveal submission must contain every pending assignment in canonical order: expected {expected_assignment_indices:?}, got {assignment_indices:?}"
+        )));
+    }
     // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
     let expected_pk: G1Projective = table.seats[seat_index as usize].pk.into();
 
@@ -1961,8 +1740,8 @@ pub fn apply_submit_player_reveal_tokens(
                 .deck_state
                 .decrypted_cards
                 .iter()
-                .find(|dc| dc.encrypted_card_index == card_index && dc.ciphertext().is_some())
-                .and_then(|dc| dc.ciphertext().cloned())
+                .find(|dc| dc.encrypted_card_index == card_index)
+                .map(|dc| dc.ciphertext)
                 .unwrap_or_else(|| table.deck_state.encrypted[card_index as usize])
         } else {
             if card_index as usize >= table.deck_state.encrypted.len() {
@@ -1991,25 +1770,17 @@ pub fn apply_submit_player_reveal_tokens(
         // Add the token at the canonical position implied by the submitted-seat mask.
         {
             let assignment = &mut table.active_reveal_state_mut()?.assignments[ai];
-            let RevealProgress::Collecting {
-                pending_mask,
-                submitted_mask,
-                reveal_tokens,
-            } = &mut assignment.progress
-            else {
-                return Err(PokerL1Error::Serialization(format!(
-                    "assignment {ai} is not collecting"
-                )));
-            };
-            let insert_index = submitted_mask.count_ones() as usize;
-            if insert_index != reveal_tokens.len() {
+            let insert_index = assignment.submitted_mask.count_ones() as usize;
+            if insert_index != assignment.reveal_tokens.len() {
                 return Err(PokerL1Error::Serialization(format!(
                     "assignment {ai} token vector is not canonical"
                 )));
             }
-            reveal_tokens.insert(insert_index, ECPoint::from(token));
-            seat_mask_remove(pending_mask, seat_index);
-            *submitted_mask |= 1u16 << seat_index;
+            assignment
+                .reveal_tokens
+                .insert(insert_index, ECPoint::from(token));
+            seat_mask_remove(&mut assignment.pending_mask, seat_index);
+            assignment.submitted_mask |= 1u16 << seat_index;
         }
 
         events::emit_event(
@@ -2021,112 +1792,307 @@ pub fn apply_submit_player_reveal_tokens(
                 phase,
             },
         );
+    }
 
-        // 若 pending 为空，执行链上解密
-        let pending_empty = table.reveal_token_state().assignments[ai].pending_mask() == 0;
-        if pending_empty {
-            let tokens: Vec<G1Projective> =
-                match &table.reveal_token_state().assignments[ai].progress {
-                    RevealProgress::Collecting { reveal_tokens, .. } => {
-                        reveal_tokens.iter().map(|token| token.0).collect()
-                    }
-                    _ => unreachable!("pending mask is only zero after collection"),
+    materialize_completed_reveal_assignments(table, events)?;
+    check_reveal_phase_complete(table, events)?;
+    Ok(())
+}
+
+fn completed_reveal_tokens(assignment: &RevealAssignment) -> PokerL1Result<Vec<G1Projective>> {
+    if assignment.pending_mask != 0 {
+        return Err(PokerL1Error::Serialization(
+            "reveal assignment is not a freshly completed collection".into(),
+        ));
+    }
+    if assignment.submitted_mask.count_ones() as usize != assignment.reveal_tokens.len() {
+        Err(PokerL1Error::Serialization(
+            "completed reveal assignment has a non-canonical token vector".into(),
+        ))
+    } else {
+        Ok(assignment.reveal_tokens.iter().map(|token| token.0).collect())
+    }
+}
+
+/// Materialize every freshly completed assignment before the dispatch may persist.
+///
+/// Preflop results become the one partial-ciphertext ledger needed for owner reveal. Public cards
+/// and showdown cards are written directly to their final board/hand slots, so fresh execution
+/// never creates `Ready*` progress or plaintext ledger records.
+fn materialize_completed_reveal_assignments(
+    table: &mut TexasPokerTable,
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let phase = table.reveal_token_state().reveal_phase;
+    let completed = table
+        .reveal_token_state()
+        .assignments
+        .iter()
+        .enumerate()
+        .filter(|(_, assignment)| assignment.pending_mask == 0)
+        .map(|(index, assignment)| (index, assignment.clone()))
+        .collect::<Vec<_>>();
+    if completed.is_empty() {
+        return Ok(());
+    }
+
+    let mut next = table.clone();
+    let mut staged_events = Vec::new();
+    match phase {
+        REVEAL_PHASE_PREFLOP => {
+            for (_, assignment) in &completed {
+                let RevealTarget::Hole { seat_index, .. } = assignment.target else {
+                    return Err(PokerL1Error::Serialization(
+                        "preflop reveal completed a non-hole assignment".into(),
+                    ));
                 };
-
-            if phase == REVEAL_PHASE_SHOWDOWN {
-                // 升级已存在的 partial decrypted_card 为 plaintext。
-                //
-                // 关键（P1-7 续）：partial 手牌记录自包含 `ciphertext.c2`（preflop 时已扣除
-                // 其他玩家的 reveal token），showdown 只需在此基础上减去本轮 token
-                // （牌主自己的 token）即可得明文：
-                //   plaintext = partial_c2 - Σ(本轮 token)
-                //             = (原始c2 - Σ(他人 preflop token)) - 牌主 token
-                // 因此**不依赖** `deck_state.encrypted[card_index]`。这点对 reconstruct
-                // 后的场景至关重要：reconstruct 重建了整个 deck，旧 card_index 在新 deck
-                // 中指向不同的 c2，但 partial 记录自包含，旧手牌依然能由牌主自己解开。
-                for dc in &mut table.deck_state.decrypted_cards {
-                    if dc.encrypted_card_index == card_index && dc.ciphertext().is_some() {
-                        let partial_c2 = dc.ciphertext().expect("checked above").c2;
-                        let p = partial_decrypt_c2(&partial_c2, &tokens);
-                        dc.state = DecryptedCardState::Plaintext {
-                            plaintext: ECPoint::from(p),
-                        };
-                        break;
-                    }
-                }
-            } else {
-                // preflop / 公共牌：从当前 deck_state.encrypted 取 c2 做部分/完全解密。
-                let c2 = table.deck_state.encrypted[card_index as usize].c2;
-                let decrypted_c2 = partial_decrypt_c2(&c2, &tokens);
-
-                if phase == REVEAL_PHASE_PREFLOP {
-                    // 部分解密：ciphertext = Some(ElGamalCiphertext { c1, c2: partial })，plaintext = None
-                    let c1 = table.deck_state.encrypted[card_index as usize].c1;
-                    let owner =
-                        find_hand_card_owner(table, card_index).unwrap_or(OWNER_SEAT_PUBLIC);
-                    table
-                        .deck_state
-                        .decrypted_cards
-                        .push(DecryptedCard::partial(
-                            card_index,
-                            owner,
-                            ElGamalCiphertext {
-                                c1,
-                                c2: decrypted_c2,
-                            },
-                        ));
-                } else {
-                    // 公共牌：完全解密
-                    table
-                        .deck_state
-                        .decrypted_cards
-                        .push(DecryptedCard::resolved(
-                            card_index,
-                            OWNER_SEAT_PUBLIC,
-                            ECPoint::from(decrypted_c2),
-                        ));
-                }
-            } // 闭合非 showdown 的 else 块
-
-            let progress = if phase == REVEAL_PHASE_PREFLOP {
-                let partial = table
+                let card_index = assignment.encrypted_card_index;
+                let encrypted = next
                     .deck_state
-                    .decrypted_cards
-                    .iter()
-                    .find(|dc| dc.encrypted_card_index == card_index && dc.ciphertext().is_some())
-                    .and_then(|dc| dc.ciphertext().cloned())
+                    .encrypted
+                    .get(usize::from(card_index))
                     .ok_or_else(|| {
-                        PokerL1Error::Serialization(
-                            "preflop reveal did not create a partial ciphertext".into(),
-                        )
+                        PokerL1Error::Serialization(format!(
+                            "preflop reveal card index {card_index} is out of range"
+                        ))
                     })?;
-                RevealProgress::ReadyPartial {
-                    ciphertext: partial,
+                if next.deck_state.decrypted_cards.iter().any(|record| {
+                    record.encrypted_card_index == card_index
+                        && record.owner_seat_index == seat_index
+                }) {
+                    return Err(PokerL1Error::Serialization(format!(
+                        "preflop reveal duplicates partial ledger card {card_index}"
+                    )));
                 }
-            } else {
-                let card = table
-                    .deck_state
-                    .decrypted_cards
-                    .iter()
-                    .find(|dc| dc.encrypted_card_index == card_index && dc.plaintext().is_some())
-                    .and_then(|dc| dc.plaintext())
-                    .and_then(|point| {
-                        card_from_plaintext(&point.0, &generate_plaintext_cards()).ok()
-                    })
-                    .map(|(_, card)| card)
-                    .ok_or_else(|| {
-                        PokerL1Error::Serialization(
-                            "resolved reveal did not create a plaintext card".into(),
-                        )
-                    })?;
-                RevealProgress::ReadyCard { card }
-            };
-            table.active_reveal_state_mut()?.assignments[ai].progress = progress;
+                let tokens = completed_reveal_tokens(assignment)?;
+                next.deck_state.decrypted_cards.push(DecryptedCard::partial(
+                    card_index,
+                    seat_index,
+                    ElGamalCiphertext {
+                        c1: encrypted.c1,
+                        c2: partial_decrypt_c2(&encrypted.c2, &tokens),
+                    },
+                ));
+            }
+        }
+        REVEAL_PHASE_FLOP | REVEAL_PHASE_TURN | REVEAL_PHASE_RIVER => {
+            if completed.len() != next.reveal_token_state().assignments.len() {
+                return Err(PokerL1Error::Serialization(
+                    "community reveal assignments did not complete as one canonical batch".into(),
+                ));
+            }
+            materialize_completed_community_assignments(
+                &mut next,
+                phase,
+                &completed,
+                &mut staged_events,
+            )?;
+        }
+        REVEAL_PHASE_SHOWDOWN => {
+            materialize_completed_showdown_assignments(&mut next, &completed, &mut staged_events)?;
+        }
+        _ => {
+            return Err(PokerL1Error::Serialization(format!(
+                "cannot materialize reveal assignments in phase {phase}"
+            )));
         }
     }
 
-    check_reveal_phase_complete(table, events)?;
-    table.bump_version();
+    for (assignment_index, _) in completed.iter().rev() {
+        next.active_reveal_state_mut()?
+            .assignments
+            .remove(*assignment_index);
+    }
+    *table = next;
+    events.extend(staged_events);
+    Ok(())
+}
+
+fn materialize_completed_community_assignments(
+    table: &mut TexasPokerTable,
+    reveal_phase: u8,
+    completed: &[(usize, RevealAssignment)],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let canonical_cards = generate_plaintext_cards();
+    let mut seen = exposed_card_ids(table)?;
+    let mut expected_positions = [
+        table.community_cards.len(),
+        table.run_it_twice_state.second_board_len(),
+    ];
+    let mut materialized = Vec::with_capacity(completed.len());
+    for (_, assignment) in completed {
+        let RevealTarget::Board {
+            runout_index,
+            board_position,
+        } = assignment.target
+        else {
+            return Err(PokerL1Error::Serialization(
+                "community reveal completed a hole assignment".into(),
+            ));
+        };
+        let runout = usize::from(runout_index);
+        let active_runouts = if table.run_it_twice_state.is_active() {
+            2
+        } else {
+            1
+        };
+        if runout >= active_runouts || usize::from(board_position) != expected_positions[runout] {
+            return Err(PokerL1Error::Serialization(format!(
+                "community reveal target is not the canonical next position for runout {runout}"
+            )));
+        }
+        let encrypted = table
+            .deck_state
+            .encrypted
+            .get(usize::from(assignment.encrypted_card_index))
+            .ok_or_else(|| {
+                PokerL1Error::Serialization("community reveal card index is out of range".into())
+            })?;
+        let plaintext = partial_decrypt_c2(&encrypted.c2, &completed_reveal_tokens(assignment)?);
+        let (card_id, card) = card_from_plaintext(&plaintext, &canonical_cards)?;
+        if !seen.insert(card_id) {
+            return Err(PokerL1Error::Serialization(format!(
+                "duplicate decrypted card id {card_id} while writing community cards"
+            )));
+        }
+        expected_positions[runout] += 1;
+        materialized.push((assignment.encrypted_card_index, runout, card));
+    }
+
+    let mut indices = Vec::with_capacity(materialized.len());
+    let mut ranks = Vec::with_capacity(materialized.len());
+    let mut suits = Vec::with_capacity(materialized.len());
+    for (encrypted_card_index, runout, card) in materialized {
+        if runout == 0 {
+            table.community_cards.try_push(card).map_err(|error| {
+                PokerL1Error::Serialization(format!("cannot append first-board card: {error}"))
+            })?;
+        } else {
+            table
+                .run_it_twice_state
+                .second_board_suffix_mut()?
+                .try_push(card)
+                .map_err(|error| {
+                    PokerL1Error::Serialization(format!(
+                        "cannot append second-board suffix card: {error}"
+                    ))
+                })?;
+        }
+        indices.push(encrypted_card_index);
+        ranks.push(card.rank());
+        suits.push(card.suit());
+    }
+    events::emit_event(
+        events,
+        TexasPokerEvent::CommunityCardRevealed {
+            table_id: table.id,
+            phase: reveal_phase,
+            card_indices: indices,
+            card_ranks: ranks,
+            card_suits: suits,
+        },
+    );
+    Ok(())
+}
+
+fn materialize_completed_showdown_assignments(
+    table: &mut TexasPokerTable,
+    completed: &[(usize, RevealAssignment)],
+    events: &mut Vec<TexasPokerEvent>,
+) -> PokerL1Result<()> {
+    let canonical_cards = generate_plaintext_cards();
+    let mut seen = exposed_card_ids(table)?;
+    let mut materialized = Vec::with_capacity(completed.len());
+    for (_, assignment) in completed {
+        let RevealTarget::Hole {
+            seat_index,
+            card_slot,
+        } = assignment.target
+        else {
+            return Err(PokerL1Error::Serialization(
+                "showdown reveal completed a board assignment".into(),
+            ));
+        };
+        let matches = table
+            .deck_state
+            .decrypted_cards
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| {
+                record.encrypted_card_index == assignment.encrypted_card_index
+                    && record.owner_seat_index == seat_index
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(PokerL1Error::Serialization(format!(
+                "showdown card {} has {} partial ledger records",
+                assignment.encrypted_card_index,
+                matches.len()
+            )));
+        }
+        let (ledger_index, record) = matches[0];
+        let plaintext = partial_decrypt_c2(
+            &record.ciphertext.c2,
+            &completed_reveal_tokens(assignment)?,
+        );
+        let (card_id, card) = card_from_plaintext(&plaintext, &canonical_cards)?;
+        if !seen.insert(card_id) {
+            return Err(PokerL1Error::Serialization(format!(
+                "duplicate decrypted card id {card_id} while writing hole cards"
+            )));
+        }
+        materialized.push((
+            ledger_index,
+            seat_index,
+            card_slot,
+            assignment.encrypted_card_index,
+            card,
+        ));
+    }
+
+    let mut next_slot = table
+        .seats
+        .iter()
+        .map(|seat| seat.hand.len())
+        .collect::<Vec<_>>();
+    let mut consumed_ledger = Vec::with_capacity(materialized.len());
+    for (ledger_index, seat_index, card_slot, encrypted_card_index, card) in materialized {
+        let seat = table
+            .seats
+            .get_mut(usize::from(seat_index))
+            .ok_or_else(|| PokerL1Error::Serialization("showdown owner is out of range".into()))?;
+        if !seat.is_occupied() || usize::from(card_slot) != next_slot[usize::from(seat_index)] {
+            return Err(PokerL1Error::Serialization(format!(
+                "showdown hole-card slot {card_slot} is not canonical for seat {seat_index}"
+            )));
+        }
+        seat.hand.try_push(card).map_err(|error| {
+            PokerL1Error::Serialization(format!(
+                "cannot append hole card for seat {seat_index}: {error}"
+            ))
+        })?;
+        next_slot[usize::from(seat_index)] += 1;
+        if !seat.is_folded() {
+            events::emit_event(
+                events,
+                TexasPokerEvent::ShowdownHoleCardsRevealed {
+                    table_id: table.id,
+                    seat_index,
+                    player: seat.player,
+                    card_indices: vec![encrypted_card_index],
+                    card_ranks: vec![card.rank()],
+                    card_suits: vec![card.suit()],
+                },
+            );
+        }
+        consumed_ledger.push(ledger_index);
+    }
+    consumed_ledger.sort_unstable();
+    consumed_ledger.dedup();
+    for ledger_index in consumed_ledger.into_iter().rev() {
+        table.deck_state.decrypted_cards.remove(ledger_index);
+    }
     Ok(())
 }
 
@@ -2234,7 +2200,6 @@ pub fn apply_submit_reconstruct_deck(
     if table.reconstruct_state().pending_mask == 0 {
         on_complete_reconstruct(table, events)?;
     }
-    table.bump_version();
     Ok(())
 }
 
@@ -2276,17 +2241,10 @@ pub fn apply_leave_with_proof(
     let post_chip_pool = table.chip_pool.checked_sub(refund).ok_or_else(|| {
         PokerL1Error::Serialization("leave_with_proof: chip_pool underflow".into())
     })?;
-    let post_addon_pool = table
-        .addon_pool
-        .checked_sub(pending_refund)
-        .ok_or_else(|| {
-            PokerL1Error::Serialization("leave_with_proof: addon_pool underflow".into())
-        })?;
-
     // typed 化后无需反序列化。
     let output_cts = output_cards;
     // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）。
-    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.clone();
+    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
     let player_pk = table.seats[seat_index as usize].pk;
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_leave_transcript();
@@ -2307,15 +2265,14 @@ pub fn apply_leave_with_proof(
     })?;
 
     table.remove_deck_contributor(seat_index)?;
-    table.deck_state.encrypted = output_cts;
+    table.deck_state.encrypted = CipherDeck::try_from(output_cts)?;
 
     // P1-9 修复：退还 stack + 未入账的 pending_addon（与 dispatch_leave_table 一致），
-    // 并同步扣减 chip_pool（join 时 buy_in 计入）与 addon_pool（addon 时计入）。
+    // 并同步扣减 chip_pool（join/addon 时均计入完整锁仓）。
     if refund > 0 {
         table.seats[seat_index as usize].stack = 0;
         table.seats[seat_index as usize].pending_addon = 0;
         table.chip_pool = post_chip_pool;
-        table.addon_pool = post_addon_pool;
         events::emit_event(
             events,
             TexasPokerEvent::PlayerRefund {
@@ -2338,7 +2295,6 @@ pub fn apply_leave_with_proof(
             player: player_addr,
         },
     );
-    table.bump_version();
     Ok(())
 }
 
@@ -2411,7 +2367,7 @@ pub fn apply_fold_with_proof(
     // 2. 验证 DLEq proof（复制 apply_leave_with_proof 1696-1710）
     // typed 化后无需反序列化。
     let output_cts = output_cards;
-    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.clone();
+    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
     let player_pk = table.seats[seat_index as usize].pk;
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_leave_transcript();
@@ -2433,7 +2389,7 @@ pub fn apply_fold_with_proof(
 
     // 3. 剥离 pk + 替换 deck；mask is the canonical lineage, aggregate is a cache.
     table.remove_deck_contributor(seat_index)?;
-    table.deck_state.encrypted = output_cts;
+    table.deck_state.encrypted = CipherDeck::try_from(output_cts)?;
 
     // 4. 标记 fold（对齐 apply_fold_internal 1787-1788）。Betting is mutually exclusive
     // with shuffle/reveal/reconstruct, so there are no hidden protocol masks to scrub.
@@ -2459,7 +2415,6 @@ pub fn apply_fold_with_proof(
         return Ok(());
     }
     advance_turn(table, events)?;
-    table.bump_version();
     Ok(())
 }
 
@@ -2649,7 +2604,6 @@ pub fn apply_player_action(
         return Ok(());
     }
     advance_turn(table, events)?;
-    table.bump_version();
     Ok(())
 }
 
@@ -2762,7 +2716,6 @@ pub fn start_hand(
     );
 
     advance_shuffle(table, events)?;
-    table.bump_version();
     Ok(())
 }
 
@@ -2887,9 +2840,6 @@ fn normalize_until_blocked_in_place(
             return Err(PokerL1Error::Serialization(format!(
                 "normalize: stage {step:?} made no progress"
             )));
-        }
-        if table.version == before.version {
-            table.bump_version();
         }
         table.arm_active_deadline_if_needed(now_ms)?;
         table.validate_state_schema()?;
@@ -3303,10 +3253,6 @@ fn apply_settlement_plan(
             plan.gross_pot, table.pot
         )));
     }
-    let post_rake_collected = table
-        .rake_collected
-        .checked_add(plan.rake)
-        .ok_or_else(|| PokerL1Error::Serialization("settlement: rake receipt overflow".into()))?;
     let post_chip_pool = table
         .chip_pool
         .checked_sub(plan.rake)
@@ -3325,7 +3271,6 @@ fn apply_settlement_plan(
     }
     let plan_digest = plan.digest()?;
 
-    table.rake_collected = post_rake_collected;
     table.chip_pool = post_chip_pool;
     for (seat, post_stack) in table.seats.iter_mut().zip(post_stacks) {
         seat.stack = post_stack;
@@ -3481,12 +3426,6 @@ pub fn reset_for_next_hand(
             to_remove_leave.push(i as u8);
         }
     }
-    let post_addon_pool = table
-        .addon_pool
-        .checked_sub(total_pending_addon)
-        .ok_or_else(|| {
-            PokerL1Error::Serialization("reset_for_next_hand: pending addon pool underflow".into())
-        })?;
     let post_leave_chip_pool =
         table
             .chip_pool
@@ -3517,8 +3456,6 @@ pub fn reset_for_next_hand(
             );
         }
     }
-    table.addon_pool = post_addon_pool;
-
     // P2-11 修复：每手开始时补充 Time Bank（按 TIME_BANK_REFILL_PER_HAND_MS，
     // 上限 DEFAULT_TIME_BANK_MS）。此前 constants 定义了 refill 常量但 reset
     // 未实现补充逻辑，导致 time_bank 仅会单调下降，无法跨手恢复。
@@ -3556,7 +3493,7 @@ pub fn reset_for_next_hand(
     // 对局中预约离场后，下一手 reset 时强制踢出并退款。资金账对齐
     // `kick_player_internal` / `dispatch_leave_table`：
     // - 退 stack + pending_addon（refund_amt）
-    // - 同步扣 chip_pool（join 时 buy_in 计入）与 addon_pool（addon 时计入）
+    // - 同步扣 chip_pool；pending addon 只由 seat ledger 派生
     // - 从 aggregated_pk 移除该 pk（若非 identity）
     // - 清空座位 + 发 PlayerRefund + PlayerLeft 事件
     //
@@ -3626,10 +3563,6 @@ pub fn reset_for_next_hand(
     }
 
     table.pot = 0;
-    // `rake_collected` is only a same-dispatch receipt for the Treasury UTXO. No persisted
-    // table may retain it as unclaimed money.
-    table.rake_collected = 0;
-    table.ante_collected = 0;
     table.community_cards.clear();
     table.acted_mask = 0;
     table.leave_after_hand_mask = 0;
@@ -3640,7 +3573,6 @@ pub fn reset_for_next_hand(
     table.enter_waiting();
 
     set_initial_encrypted_deck(table)?;
-    table.bump_version();
     Ok(())
 }
 
@@ -3702,11 +3634,6 @@ fn kick_player_internal_in_place(
         .chip_pool
         .checked_sub(refund_amt)
         .ok_or_else(|| PokerL1Error::Serialization("kick_player: chip_pool underflow".into()))?;
-    let post_addon_pool = table
-        .addon_pool
-        .checked_sub(pending_refund)
-        .ok_or_else(|| PokerL1Error::Serialization("kick_player: addon_pool underflow".into()))?;
-
     // P1-2 语义说明：被踢玩家的 bet 立即并入 pot（区别于 fold/auto_fold/force_fold，
     // 后者保留 seat.bet，等下注轮结束由 collect_bets_to_pot 统一收集）。
     // 这是 kick 的特殊路径：被踢玩家立即离开，其本轮已下注金额不参与后续轮次，
@@ -3726,9 +3653,8 @@ fn kick_player_internal_in_place(
     table.sync_aggregated_pk()?;
 
     if refund_amt > 0 {
-        // chip_pool 是完整 TableVault 锁仓；pending addon 同时是 addon_pool 子集。
+        // chip_pool 是完整 TableVault 锁仓；pending addon 只保存在 seat ledger。
         table.chip_pool = post_chip_pool;
-        table.addon_pool = post_addon_pool;
         table.seats[seat_index as usize].pending_addon = 0;
         events::emit_event(
             events,
@@ -3879,12 +3805,6 @@ fn apply_fund_seat(
             }
         }
     };
-    if matches!(timing, FundTiming::NextHand) {
-        table.addon_pool = table
-            .addon_pool
-            .checked_add(amount)
-            .ok_or_else(|| PokerL1Error::Serialization("addon: addon_pool overflow".into()))?;
-    }
     table.chip_pool = total_chips;
 
     match timing {
@@ -3909,7 +3829,6 @@ fn apply_fund_seat(
             },
         ),
     }
-    table.bump_version();
     Ok(())
 }
 
@@ -3989,7 +3908,6 @@ pub fn apply_set_leave_after_hand(
             want_leave,
         },
     );
-    table.bump_version();
     Ok(true)
 }
 
@@ -4135,7 +4053,6 @@ pub fn consume_time_bank(
             remaining_ms: u64::from(remaining_ms),
         },
     );
-    table.bump_version();
     Ok(())
 }
 
@@ -4147,7 +4064,7 @@ pub fn consume_time_bank(
 /// - `ANTE_MODE_BBA`：仅大盲位投 `ante_amount`
 /// - `ANTE_MODE_NONE`：不做任何操作
 ///
-/// 投注的 ante 累积到 `table.ante_collected`，并直接加入 `table.pot`。
+/// 投注的 ante 直接加入 `table.pot`；本手总 ante 由逐 seat debit / pot delta 派生。
 pub fn collect_ante(
     table: &mut TexasPokerTable,
     bb_seat: u8,
@@ -4182,10 +4099,6 @@ pub fn collect_ante(
             .ok_or_else(|| PokerL1Error::Serialization("collect_ante: total overflow".into()))
     })?;
     table
-        .ante_collected
-        .checked_add(total_ante)
-        .ok_or_else(|| PokerL1Error::Serialization("collect_ante: ante ledger overflow".into()))?;
-    table
         .pot
         .checked_add(total_ante)
         .ok_or_else(|| PokerL1Error::Serialization("collect_ante: pot overflow".into()))?;
@@ -4198,7 +4111,6 @@ pub fn collect_ante(
             })?;
     }
 
-    table.ante_collected += total_ante;
     table.pot += total_ante;
     for (seat_idx, actual) in antes {
         let seat = &mut table.seats[seat_idx as usize];
@@ -4230,7 +4142,6 @@ pub fn collect_ante(
 /// - `RAKE_MODE_PERCENTAGE`：`rake = min(pot * rake_bps / 10000, rake_cap)`
 ///
 /// 抽水后：
-/// - `table.rake_collected += rake`（本次 dispatch 的 Treasury 出金收据）
 /// - `table.pot -= rake`（从奖池中扣除）
 /// - `table.chip_pool -= rake`（资金已离开桌台，预编译将创建 Treasury Coin 输出）
 ///
@@ -4241,10 +4152,6 @@ pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
     }
     let pot = table.pot;
     let rake = compute_rake_amount(table, pot)?;
-    let post_rake_receipt = table
-        .rake_collected
-        .checked_add(rake)
-        .ok_or_else(|| PokerL1Error::Serialization("collect_rake: rake receipt overflow".into()))?;
     let post_pot = table
         .pot
         .checked_sub(rake)
@@ -4252,7 +4159,6 @@ pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
     let post_chip_pool = table.chip_pool.checked_sub(rake).ok_or_else(|| {
         PokerL1Error::Serialization("collect_rake: rake exceeds TableVault".into())
     })?;
-    table.rake_collected = post_rake_receipt;
     table.pot = post_pot;
     table.chip_pool = post_chip_pool;
     Ok(rake)
@@ -4649,7 +4555,7 @@ mod tests {
             .expect("state machine accepts honest reconstruction V3 submission");
         }
 
-        assert_eq!(table.deck_state.encrypted, expected_deck);
+        assert_eq!(table.deck_state.encrypted.to_vec(), expected_deck);
         assert_eq!(table.deck_state.cards_dealt, 0);
         assert_eq!(table.deck_state.decrypted_cards, preserved_readable_cards);
         assert_eq!(
@@ -5244,20 +5150,24 @@ mod tests {
         let mut table = make_table();
         table.seats[0].player = [0x01; 20];
         table.seats[0].stack = 10;
-        // A waiting seat is not counted as active, so kicking seat 0 triggers reset. Keep the
-        // addon pool deliberately inconsistent so reset fails after the kick candidate mutates.
+        // A waiting seat is not counted as active, so kicking seat 0 triggers reset. Make the
+        // pending-addon merge overflow so reset fails after the kick candidate mutates.
         table.seats[1].player = [0x02; 20];
         table.seats[1].set_status(SeatStatus::Waiting);
-        table.seats[1].pending_addon = 5;
+        table.seats[1].stack = u64::MAX;
+        table.seats[1].pending_addon = 1;
         table.chip_pool = 10;
-        table.addon_pool = 4;
         let before = table.clone();
         let mut events = vec![];
 
         let error = kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events)
             .expect_err("nested reset failure must propagate");
 
-        assert!(error.to_string().contains("pending addon pool underflow"));
+        assert!(
+            error
+                .to_string()
+                .contains("stack += pending_addon overflow")
+        );
         assert_eq!(
             table, before,
             "nested reset failure must not commit the kick"
@@ -5281,12 +5191,12 @@ mod tests {
             table.seats[seat_index].total_bet = 100;
         }
         table.chip_pool = 2_000;
-        let pre_version = table.version;
+        let pre_call_seq = table.call_seq;
         let mut events = vec![];
 
         kick_player_internal(&mut table, 0, KICK_REASON_ADMIN, &mut events).unwrap();
 
-        assert_eq!(table.version, pre_version.saturating_add(1));
+        assert_eq!(table.call_seq, pre_call_seq);
         assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
         assert_eq!(table.seats[1].stack, 1_100);
@@ -5312,12 +5222,12 @@ mod tests {
             table.seats[seat_index].total_bet = 100;
         }
         table.chip_pool = 2_000;
-        let pre_version = table.version;
+        let pre_call_seq = table.call_seq;
         let mut events = vec![];
 
         kick_player_internal(&mut table, 1, KICK_REASON_ADMIN, &mut events).unwrap();
 
-        assert_eq!(table.version, pre_version.saturating_add(1));
+        assert_eq!(table.call_seq, pre_call_seq);
         assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.pot, 0);
         assert_eq!(table.seats[0].stack, 1_100);
@@ -5375,8 +5285,18 @@ mod tests {
         // 关键不变量：stack 不变（不影响当前手牌）
         assert_eq!(table.seats[0].stack, 500);
         assert_eq!(table.seats[0].pending_addon, 200);
-        assert_eq!(table.addon_pool, 200);
-        assert_eq!(table.version, 1);
+        assert_eq!(
+            table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            200
+        );
+        assert_eq!(
+            table.call_seq, 0,
+            "business helper does not commit a command"
+        );
         // 事件
         assert!(
             events
@@ -5394,7 +5314,14 @@ mod tests {
         apply_addon(&mut table, 0, 100, &mut vec![]).unwrap();
         apply_addon(&mut table, 0, 50, &mut vec![]).unwrap();
         assert_eq!(table.seats[0].pending_addon, 150);
-        assert_eq!(table.addon_pool, 150);
+        assert_eq!(
+            table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            150
+        );
         assert_eq!(table.seats[0].stack, 500); // 仍不变
     }
 
@@ -5422,12 +5349,15 @@ mod tests {
 
         assert!(apply_set_leave_after_hand(&mut table, 0, true, &mut events).unwrap());
         assert!(table.seat_wants_leave(0));
-        assert_eq!(table.version, 1);
+        assert_eq!(table.call_seq, 0);
         assert_eq!(events.len(), 1);
 
         assert!(!apply_set_leave_after_hand(&mut table, 0, true, &mut events).unwrap());
         assert!(table.seat_wants_leave(0));
-        assert_eq!(table.version, 1, "idempotent retry must not bump version");
+        assert_eq!(
+            table.call_seq, 0,
+            "idempotent retry must not commit a command"
+        );
         assert_eq!(
             events.len(),
             1,
@@ -5436,7 +5366,7 @@ mod tests {
 
         assert!(apply_set_leave_after_hand(&mut table, 0, false, &mut events).unwrap());
         assert!(!table.seat_wants_leave(0));
-        assert_eq!(table.version, 2);
+        assert_eq!(table.call_seq, 0);
         assert_eq!(events.len(), 2);
     }
 
@@ -5447,7 +5377,6 @@ mod tests {
         table.seats[0].stack = 0; // stack==0 触发清理
         table.seats[0].pending_addon = 500; // 但有 addon
         table.chip_pool = 500;
-        table.addon_pool = 500;
 
         let mut events = vec![];
         reset_for_next_hand(&mut table, &mut events).unwrap();
@@ -5468,18 +5397,19 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_for_next_hand_pool_underflow_is_atomic() {
+    fn test_reset_for_next_hand_pending_sum_overflow_is_atomic() {
         let mut table = make_table();
         table.seats[0].player = [0x01; 20];
-        table.seats[0].pending_addon = 5;
-        table.chip_pool = 5;
-        table.addon_pool = 4;
+        table.seats[0].pending_addon = u64::MAX;
+        table.seats[1].player = [0x02; 20];
+        table.seats[1].pending_addon = 1;
+        table.chip_pool = u64::MAX;
         let before = table.clone();
         let mut events = vec![];
 
         let error = reset_for_next_hand(&mut table, &mut events).unwrap_err();
 
-        assert!(error.to_string().contains("pending addon pool underflow"));
+        assert!(error.to_string().contains("total pending addon overflow"));
         assert_eq!(table, before, "failed addon merge must be atomic");
         assert!(events.is_empty());
     }
@@ -5531,7 +5461,14 @@ mod tests {
         // 立即生效
         assert_eq!(table.seats[0].stack, 600);
         assert_eq!(table.chip_pool, 600);
-        assert_eq!(table.addon_pool, 0);
+        assert_eq!(
+            table
+                .seats
+                .iter()
+                .map(|seat| seat.pending_addon)
+                .sum::<u64>(),
+            0
+        );
         assert!(events.iter().any(|e| matches!(
             e,
             TexasPokerEvent::RebuyProcessed {
@@ -5572,7 +5509,6 @@ mod tests {
     fn test_leave_with_proof_rejects_refund_overflow_without_mutation() {
         let mut table = make_leave_with_proof_table(u64::MAX, 1);
         table.chip_pool = u64::MAX;
-        table.addon_pool = 1;
         let before = table.clone();
         let mut events = vec![];
 
@@ -5585,17 +5521,16 @@ mod tests {
     }
 
     #[test]
-    fn test_leave_with_proof_rejects_pool_underflow_without_mutation() {
+    fn test_leave_with_proof_rejects_chip_pool_underflow_without_mutation() {
         let mut table = make_leave_with_proof_table(10, 5);
-        table.chip_pool = 15;
-        table.addon_pool = 4;
+        table.chip_pool = 14;
         let before = table.clone();
         let mut events = vec![];
 
         let error = apply_leave_with_proof(&mut table, 0, vec![], empty_leave_proof(), &mut events)
             .unwrap_err();
 
-        assert!(error.to_string().contains("addon_pool underflow"));
+        assert!(error.to_string().contains("chip_pool underflow"));
         assert_eq!(table, before, "failed refund must be atomic");
         assert!(events.is_empty());
     }
@@ -5701,7 +5636,6 @@ mod tests {
         let mut events = vec![];
 
         collect_ante(&mut table, 1, &mut events).unwrap();
-        assert_eq!(table.ante_collected, 20); // 2 个玩家各投 10
         assert_eq!(table.pot, 20);
         assert_eq!(table.seats[0].stack, 990);
         assert_eq!(table.seats[1].stack, 990);
@@ -5759,7 +5693,7 @@ mod tests {
 
         // BBA 模式：仅 bb_seat=1 投 ante
         collect_ante(&mut table, 1, &mut events).unwrap();
-        assert_eq!(table.ante_collected, 20);
+        assert_eq!(table.pot, 20);
         assert_eq!(table.seats[0].stack, 1000); // SB 不投 ante
         assert_eq!(table.seats[1].stack, 980); // BB 投 ante
         assert_eq!(
@@ -5780,7 +5714,7 @@ mod tests {
         let mut events = vec![];
 
         collect_ante(&mut table, 0, &mut events).unwrap();
-        assert_eq!(table.ante_collected, 0);
+        assert_eq!(table.pot, 0);
         assert!(events.is_empty());
     }
 
@@ -5800,7 +5734,6 @@ mod tests {
         assert_eq!(rake, 50); // 1000 * 5% = 50
         assert_eq!(table.pot, 950);
         assert_eq!(table.chip_pool, 950);
-        assert_eq!(table.rake_collected, 50);
         assert_eq!(pot_before, 1000);
     }
 
@@ -5832,7 +5765,6 @@ mod tests {
         assert_eq!(rake, u64::MAX);
         assert_eq!(table.pot, 0);
         assert_eq!(table.chip_pool, 0);
-        assert_eq!(table.rake_collected, u64::MAX);
     }
 
     #[test]
@@ -6247,14 +6179,14 @@ mod tests {
     #[test]
     fn settlement_reset_failure_leaves_table_and_events_unchanged() {
         let mut table = complete_rit_showdown_table();
-        table.seats[0].pending_addon = 5;
-        table.addon_pool = 0;
+        table.seats[0].pending_addon = u64::MAX;
+        table.seats[1].pending_addon = 1;
         let before = table.clone();
         let mut events = vec![];
 
         let error = settle_hand(&mut table, &mut events).unwrap_err();
 
-        assert!(error.to_string().contains("pending addon pool underflow"));
+        assert!(error.to_string().contains("pending_addon overflow"));
         assert_eq!(table, before);
         assert!(events.is_empty());
     }

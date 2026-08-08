@@ -1,6 +1,6 @@
 //! Versioned persisted-state codec for Texas Poker tables.
 //!
-//! The live persisted table type is schema v15. Schemas v2-v14 are decoded into exact legacy
+//! The live persisted table type is schema v20. Schemas v2-v19 are decoded into exact legacy
 //! mirrors and migrated with fail-closed validation for every removed or compacted field.
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -15,10 +15,10 @@ use super::betting::BettingRound;
 use super::card::{BoardCards, Card, HoleCards};
 use super::side_pot::SidePot;
 use super::types::{
-    DeckState, EMPTY_PLAYER, HandPhase, NO_SEAT, ReconstructState, RevealAssignment,
-    RevealProgress, RevealTarget, RevealTokenState, RitStartStreet, RunItTwiceState, Seat,
-    SeatMask, SeatStatus, ShuffleState, ShufflingPhase, ShufflingPurpose, TexasPokerTable,
-    TimeoutConfig, Timestamps, seat_mask_contains, seat_mask_from_indices,
+    CipherDeck, DeckState, EMPTY_PLAYER, HandPhase, NO_SEAT, ReconstructState, RevealAssignment,
+    RevealTarget, RevealTokenState, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus,
+    ShuffleState, ShufflingPhase, ShufflingPurpose, TexasPokerTable, TimeoutConfig, Timestamps,
+    seat_mask_contains, seat_mask_from_indices,
 };
 use super::utils::generate_plaintext_cards;
 use crate::Address;
@@ -38,6 +38,321 @@ const LEGACY_V11_SCHEMA_VERSION: u8 = 11;
 const LEGACY_V12_SCHEMA_VERSION: u8 = 12;
 const LEGACY_V13_SCHEMA_VERSION: u8 = 13;
 const LEGACY_V14_SCHEMA_VERSION: u8 = 14;
+const LEGACY_V15_SCHEMA_VERSION: u8 = 15;
+const LEGACY_V16_SCHEMA_VERSION: u8 = 16;
+const LEGACY_V17_SCHEMA_VERSION: u8 = 17;
+const LEGACY_V18_SCHEMA_VERSION: u8 = 18;
+const LEGACY_V19_SCHEMA_VERSION: u8 = 19;
+const LEGACY_V20_SCHEMA_VERSION: u8 = 20;
+
+/// Exact reveal progress persisted by schemas v9-v20.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+enum LegacyRevealProgressV20 {
+    Collecting {
+        pending_mask: SeatMask,
+        submitted_mask: SeatMask,
+        reveal_tokens: Vec<ECPoint>,
+    },
+    ReadyPartial {
+        ciphertext: ElGamalCiphertext,
+    },
+    ReadyCard {
+        card: Card,
+    },
+}
+
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct LegacyRevealAssignmentV20 {
+    encrypted_card_index: u8,
+    target: RevealTarget,
+    progress: LegacyRevealProgressV20,
+}
+
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct LegacyRevealTokenStateV20 {
+    reveal_phase: u8,
+    assignments: Vec<LegacyRevealAssignmentV20>,
+}
+
+/// Exact nested shuffle union persisted by schemas v14-v20.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+enum LegacyShufflingPhaseV20 {
+    Initial {
+        state: ShuffleState,
+        deadline_ms: u64,
+    },
+    Reconstruct {
+        street: u8,
+        state: ShuffleState,
+        suspended_reveal: LegacyRevealTokenStateV20,
+        deadline_ms: u64,
+    },
+}
+
+/// Exact outer phase union persisted by schemas v14-v20.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+enum LegacyHandPhaseV20 {
+    Waiting,
+    Shuffling {
+        phase: LegacyShufflingPhaseV20,
+    },
+    Revealing {
+        street: u8,
+        state: LegacyRevealTokenStateV20,
+        deadline_ms: u64,
+    },
+    Reconstructing {
+        street: u8,
+        state: ReconstructState,
+        suspended_reveal: LegacyRevealTokenStateV20,
+        epoch_ms: u64,
+        deadline_ms: u64,
+    },
+    Betting {
+        street: u8,
+        round: BettingRound,
+        current_turn: u8,
+        deadline_ms: u64,
+    },
+    ShowdownDisplay {
+        deadline_ms: u64,
+    },
+}
+
+/// Exact typed reveal-ledger payload persisted by schemas v9-v20.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+enum LegacyDecryptedCardStateV20 {
+    Partial { ciphertext: ElGamalCiphertext },
+    Plaintext { plaintext: ECPoint },
+}
+
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct LegacyDecryptedCardV20 {
+    encrypted_card_index: u8,
+    owner_seat_index: u8,
+    state: LegacyDecryptedCardStateV20,
+}
+
+fn legacy_reveal_from_current(value: &RevealTokenState) -> LegacyRevealTokenStateV20 {
+    LegacyRevealTokenStateV20 {
+        reveal_phase: value.reveal_phase,
+        assignments: value
+            .assignments
+            .iter()
+            .map(|assignment| LegacyRevealAssignmentV20 {
+                encrypted_card_index: assignment.encrypted_card_index,
+                target: assignment.target,
+                progress: LegacyRevealProgressV20::Collecting {
+                    pending_mask: assignment.pending_mask,
+                    submitted_mask: assignment.submitted_mask,
+                    reveal_tokens: assignment.reveal_tokens.clone(),
+                },
+            })
+            .collect(),
+    }
+}
+
+fn legacy_hand_phase_from_current(value: &HandPhase) -> LegacyHandPhaseV20 {
+    match value {
+        HandPhase::Waiting => LegacyHandPhaseV20::Waiting,
+        HandPhase::Shuffling { phase } => LegacyHandPhaseV20::Shuffling {
+            phase: match phase {
+                ShufflingPhase::Initial { state, deadline_ms } => {
+                    LegacyShufflingPhaseV20::Initial {
+                        state: state.clone(),
+                        deadline_ms: *deadline_ms,
+                    }
+                }
+                ShufflingPhase::Reconstruct {
+                    street,
+                    state,
+                    suspended_reveal,
+                    deadline_ms,
+                } => LegacyShufflingPhaseV20::Reconstruct {
+                    street: *street,
+                    state: state.clone(),
+                    suspended_reveal: legacy_reveal_from_current(suspended_reveal),
+                    deadline_ms: *deadline_ms,
+                },
+            },
+        },
+        HandPhase::Revealing {
+            street,
+            state,
+            deadline_ms,
+        } => LegacyHandPhaseV20::Revealing {
+            street: *street,
+            state: legacy_reveal_from_current(state),
+            deadline_ms: *deadline_ms,
+        },
+        HandPhase::Reconstructing {
+            street,
+            state,
+            suspended_reveal,
+            epoch_ms,
+            deadline_ms,
+        } => LegacyHandPhaseV20::Reconstructing {
+            street: *street,
+            state: state.clone(),
+            suspended_reveal: legacy_reveal_from_current(suspended_reveal),
+            epoch_ms: *epoch_ms,
+            deadline_ms: *deadline_ms,
+        },
+        HandPhase::Betting {
+            street,
+            round,
+            current_turn,
+            deadline_ms,
+        } => LegacyHandPhaseV20::Betting {
+            street: *street,
+            round: *round,
+            current_turn: *current_turn,
+            deadline_ms: *deadline_ms,
+        },
+        HandPhase::ShowdownDisplay { deadline_ms } => LegacyHandPhaseV20::ShowdownDisplay {
+            deadline_ms: *deadline_ms,
+        },
+    }
+}
+
+fn legacy_decrypted_from_current(
+    records: &[super::types::DecryptedCard],
+) -> Vec<LegacyDecryptedCardV20> {
+    records
+        .iter()
+        .map(|record| LegacyDecryptedCardV20 {
+            encrypted_card_index: record.encrypted_card_index,
+            owner_seat_index: record.owner_seat_index,
+            state: LegacyDecryptedCardStateV20::Partial {
+                ciphertext: record.ciphertext,
+            },
+        })
+        .collect()
+}
+
+fn migrate_legacy_reveal_state_v20(
+    value: LegacyRevealTokenStateV20,
+) -> PokerL1Result<RevealTokenState> {
+    let assignments = value
+        .assignments
+        .into_iter()
+        .enumerate()
+        .map(|(index, assignment)| match assignment.progress {
+            LegacyRevealProgressV20::Collecting {
+                pending_mask,
+                submitted_mask,
+                reveal_tokens,
+            } if pending_mask != 0 => Ok(RevealAssignment {
+                encrypted_card_index: assignment.encrypted_card_index,
+                target: assignment.target,
+                pending_mask,
+                submitted_mask,
+                reveal_tokens,
+            }),
+            LegacyRevealProgressV20::Collecting { .. }
+            | LegacyRevealProgressV20::ReadyPartial { .. }
+            | LegacyRevealProgressV20::ReadyCard { .. } => Err(PokerL1Error::Serialization(
+                format!(
+                    "Texas v20 reveal assignment {index} contains a completed result that requires table-level normalization"
+                ),
+            )),
+        })
+        .collect::<PokerL1Result<Vec<_>>>()?;
+    Ok(RevealTokenState {
+        reveal_phase: value.reveal_phase,
+        assignments,
+    })
+}
+
+fn migrate_legacy_hand_phase_v20(value: LegacyHandPhaseV20) -> PokerL1Result<HandPhase> {
+    Ok(match value {
+        LegacyHandPhaseV20::Waiting => HandPhase::Waiting,
+        LegacyHandPhaseV20::Shuffling { phase } => HandPhase::Shuffling {
+            phase: match phase {
+                LegacyShufflingPhaseV20::Initial { state, deadline_ms } => {
+                    ShufflingPhase::Initial { state, deadline_ms }
+                }
+                LegacyShufflingPhaseV20::Reconstruct {
+                    street,
+                    state,
+                    suspended_reveal,
+                    deadline_ms,
+                } => ShufflingPhase::Reconstruct {
+                    street,
+                    state,
+                    suspended_reveal: migrate_legacy_reveal_state_v20(suspended_reveal)?,
+                    deadline_ms,
+                },
+            },
+        },
+        LegacyHandPhaseV20::Revealing {
+            street,
+            state,
+            deadline_ms,
+        } => HandPhase::Revealing {
+            street,
+            state: migrate_legacy_reveal_state_v20(state)?,
+            deadline_ms,
+        },
+        LegacyHandPhaseV20::Reconstructing {
+            street,
+            state,
+            suspended_reveal,
+            epoch_ms,
+            deadline_ms,
+        } => HandPhase::Reconstructing {
+            street,
+            state,
+            suspended_reveal: migrate_legacy_reveal_state_v20(suspended_reveal)?,
+            epoch_ms,
+            deadline_ms,
+        },
+        LegacyHandPhaseV20::Betting {
+            street,
+            round,
+            current_turn,
+            deadline_ms,
+        } => HandPhase::Betting {
+            street,
+            round,
+            current_turn,
+            deadline_ms,
+        },
+        LegacyHandPhaseV20::ShowdownDisplay { deadline_ms } => {
+            HandPhase::ShowdownDisplay { deadline_ms }
+        }
+    })
+}
+
+fn migrate_legacy_decrypted_cards_v20(
+    records: Vec<LegacyDecryptedCardV20>,
+) -> PokerL1Result<Vec<super::types::DecryptedCard>> {
+    records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| match record.state {
+            LegacyDecryptedCardStateV20::Partial { ciphertext }
+                if record.owner_seat_index != super::types::OWNER_SEAT_PUBLIC =>
+            {
+                Ok(super::types::DecryptedCard::partial(
+                    record.encrypted_card_index,
+                    record.owner_seat_index,
+                    ciphertext,
+                ))
+            }
+            LegacyDecryptedCardStateV20::Partial { .. } => Err(
+                PokerL1Error::Serialization(format!(
+                    "Texas v20 reveal ledger record {index} is a public partial"
+                )),
+            ),
+            LegacyDecryptedCardStateV20::Plaintext { .. } => Err(
+                PokerL1Error::Serialization(format!(
+                    "Texas v20 reveal ledger record {index} contains unmaterialized plaintext"
+                )),
+            ),
+        })
+        .collect()
+}
 
 fn time_bank_u32(value: u64, label: &str) -> PokerL1Result<u32> {
     u32::try_from(value).map_err(|_| {
@@ -53,6 +368,49 @@ fn rake_bps_u16(value: u64, label: &str) -> PokerL1Result<u16> {
             "Texas {label} rake bps {value} exceeds canonical u16 range"
         ))
     })
+}
+
+fn checked_pending_addon_total(
+    pending_addons: impl IntoIterator<Item = u64>,
+    label: &str,
+) -> PokerL1Result<u64> {
+    pending_addons.into_iter().try_fold(0u64, |sum, amount| {
+        sum.checked_add(amount).ok_or_else(|| {
+            PokerL1Error::Serialization(format!("Texas {label} pending-addon sum overflows u64"))
+        })
+    })
+}
+
+fn validate_legacy_addon_pool(
+    pending_addons: impl IntoIterator<Item = u64>,
+    addon_pool: u64,
+    label: &str,
+) -> PokerL1Result<()> {
+    let derived = checked_pending_addon_total(pending_addons, label)?;
+    if derived != addon_pool {
+        return Err(PokerL1Error::Serialization(format!(
+            "Texas {label} addon_pool mismatch: persisted={addon_pool}, derived={derived}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_legacy_ante_collected(pot: u64, ante_collected: u64, label: &str) -> PokerL1Result<()> {
+    if ante_collected > pot {
+        return Err(PokerL1Error::Serialization(format!(
+            "Texas {label} ante ledger {ante_collected} exceeds collected pot {pot}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_legacy_rake_collected(rake_collected: u64, label: &str) -> PokerL1Result<()> {
+    if rake_collected != 0 {
+        return Err(PokerL1Error::Serialization(format!(
+            "Texas {label} contains an unclaimed rake receipt {rake_collected}"
+        )));
+    }
+    Ok(())
 }
 
 /// Exact two-byte card layout used by table schemas v2-v5.
@@ -403,11 +761,9 @@ fn migrate_reveal_state(
             Ok(RevealAssignment {
                 encrypted_card_index: assignment.encrypted_card_index,
                 target,
-                progress: RevealProgress::Collecting {
-                    pending_mask: if assignment.decrypted { 0 } else { pending_mask },
-                    submitted_mask,
-                    reveal_tokens: tokens,
-                },
+                pending_mask: if assignment.decrypted { 0 } else { pending_mask },
+                submitted_mask,
+                reveal_tokens: tokens,
             })
         })
         .collect::<PokerL1Result<Vec<_>>>()?;
@@ -470,15 +826,13 @@ fn migrate_reveal_state_v7(
             Ok(RevealAssignment {
                 encrypted_card_index: assignment.encrypted_card_index,
                 target,
-                progress: RevealProgress::Collecting {
-                    pending_mask: if assignment.decrypted {
-                        0
-                    } else {
-                        assignment.pending_mask
-                    },
-                    submitted_mask,
-                    reveal_tokens: tokens.into_iter().map(|(_, token)| token).collect(),
+                pending_mask: if assignment.decrypted {
+                    0
+                } else {
+                    assignment.pending_mask
                 },
+                submitted_mask,
+                reveal_tokens: tokens.into_iter().map(|(_, token)| token).collect(),
             })
         })
         .collect::<PokerL1Result<Vec<_>>>()?;
@@ -1332,13 +1686,31 @@ struct LegacyDeckStateV9 {
     encrypted: Vec<ElGamalCiphertext>,
     aggregated_pk: Option<ECPoint>,
     cards_dealt: u8,
-    decrypted_cards: Vec<super::types::DecryptedCard>,
+    decrypted_cards: Vec<LegacyDecryptedCardV20>,
 }
 
 /// Canonical schema-v10 deck encoding. The aggregate key is derived after decode.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct PersistedDeckStateV10 {
     encrypted: Vec<ElGamalCiphertext>,
+    contributor_mask: SeatMask,
+    cards_dealt: u8,
+    decrypted_cards: Vec<LegacyDecryptedCardV20>,
+}
+
+/// Canonical schema-v16 deck encoding. The deck cardinality is enforced by its tagged type.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedDeckStateV16 {
+    encrypted: CipherDeck,
+    contributor_mask: SeatMask,
+    cards_dealt: u8,
+    decrypted_cards: Vec<LegacyDecryptedCardV20>,
+}
+
+/// Canonical schema-v21 deck encoding. Only owner-readable partial ciphertexts persist.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedDeckStateV21 {
+    encrypted: CipherDeck,
     contributor_mask: SeatMask,
     cards_dealt: u8,
     decrypted_cards: Vec<super::types::DecryptedCard>,
@@ -1394,7 +1766,7 @@ fn migrate_deck_state(value: LegacyDeckStateV8, max_players: u8) -> PokerL1Resul
         });
     }
     Ok(DeckState {
-        encrypted: value.encrypted,
+        encrypted: CipherDeck::try_from(value.encrypted)?,
         aggregated_pk: value.aggregated_pk,
         contributor_mask: 0,
         cards_dealt: value.cards_dealt,
@@ -1492,12 +1864,29 @@ fn restore_deck_state_v10(
     max_players: u8,
 ) -> PokerL1Result<DeckState> {
     let aggregated_pk = aggregate_pk_for_mask(seats, max_players, value.contributor_mask)?;
+    let decrypted_cards = migrate_legacy_decrypted_cards_v20(value.decrypted_cards)?;
+    Ok(DeckState {
+        encrypted: CipherDeck::try_from(value.encrypted)?,
+        aggregated_pk,
+        contributor_mask: value.contributor_mask,
+        cards_dealt: value.cards_dealt,
+        decrypted_cards,
+    })
+}
+
+fn restore_deck_state_v16(
+    value: PersistedDeckStateV16,
+    seats: &[Seat],
+    max_players: u8,
+) -> PokerL1Result<DeckState> {
+    let aggregated_pk = aggregate_pk_for_mask(seats, max_players, value.contributor_mask)?;
+    let decrypted_cards = migrate_legacy_decrypted_cards_v20(value.decrypted_cards)?;
     Ok(DeckState {
         encrypted: value.encrypted,
         aggregated_pk,
         contributor_mask: value.contributor_mask,
         cards_dealt: value.cards_dealt,
-        decrypted_cards: value.decrypted_cards,
+        decrypted_cards,
     })
 }
 
@@ -1824,7 +2213,212 @@ struct LegacyTimeoutConfigV6 {
     ready_wait_ms: u64,
 }
 
-/// Canonical schema-v14 table encoding.
+/// Canonical schema-v21 table encoding.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedTexasPokerTableV21 {
+    id: ObjectID,
+    state_schema_version: u8,
+    name: String,
+    creator: Address,
+    max_players: u8,
+    small_blind: u64,
+    big_blind: u64,
+    seats: Vec<Seat>,
+    acted_mask: SeatMask,
+    leave_after_hand_mask: SeatMask,
+    button: u8,
+    pot: u64,
+    community_cards: BoardCards,
+    hand_phase: HandPhase,
+    deck_state: PersistedDeckStateV21,
+    timeout_config: PersistedTimeoutConfigV7,
+    chip_pool: u64,
+    ante_mode: u8,
+    ante_amount: u64,
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+    rit_mode: u8,
+    run_it_twice_state: RunItTwiceState,
+    hand_id: u32,
+    call_seq: u32,
+}
+
+/// Exact schema-v20 table encoding before completed reveal values became dispatch-local only.
+///
+/// Pending addon custody is represented exactly once by `Seat::pending_addon`; its checked sum is
+/// derived when validating funding/reset transitions instead of persisting a second table total.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedTexasPokerTableV20 {
+    id: ObjectID,
+    state_schema_version: u8,
+    name: String,
+    creator: Address,
+    max_players: u8,
+    small_blind: u64,
+    big_blind: u64,
+    seats: Vec<Seat>,
+    acted_mask: SeatMask,
+    leave_after_hand_mask: SeatMask,
+    button: u8,
+    pot: u64,
+    community_cards: BoardCards,
+    hand_phase: LegacyHandPhaseV20,
+    deck_state: PersistedDeckStateV16,
+    timeout_config: PersistedTimeoutConfigV7,
+    chip_pool: u64,
+    ante_mode: u8,
+    ante_amount: u64,
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+    rit_mode: u8,
+    run_it_twice_state: RunItTwiceState,
+    hand_id: u32,
+    call_seq: u32,
+}
+
+/// Exact schema-v19 table encoding before the same-dispatch rake receipt left table state.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedTexasPokerTableV19 {
+    id: ObjectID,
+    state_schema_version: u8,
+    name: String,
+    creator: Address,
+    max_players: u8,
+    small_blind: u64,
+    big_blind: u64,
+    seats: Vec<Seat>,
+    acted_mask: SeatMask,
+    leave_after_hand_mask: SeatMask,
+    button: u8,
+    pot: u64,
+    community_cards: BoardCards,
+    hand_phase: LegacyHandPhaseV20,
+    deck_state: PersistedDeckStateV16,
+    timeout_config: PersistedTimeoutConfigV7,
+    chip_pool: u64,
+    ante_mode: u8,
+    ante_amount: u64,
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+    rake_collected: u64,
+    rit_mode: u8,
+    run_it_twice_state: RunItTwiceState,
+    hand_id: u32,
+    call_seq: u32,
+}
+
+/// Exact schema-v18 table encoding.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedTexasPokerTableV18 {
+    id: ObjectID,
+    state_schema_version: u8,
+    name: String,
+    creator: Address,
+    max_players: u8,
+    small_blind: u64,
+    big_blind: u64,
+    seats: Vec<Seat>,
+    acted_mask: SeatMask,
+    leave_after_hand_mask: SeatMask,
+    button: u8,
+    pot: u64,
+    community_cards: BoardCards,
+    hand_phase: LegacyHandPhaseV20,
+    deck_state: PersistedDeckStateV16,
+    timeout_config: PersistedTimeoutConfigV7,
+    chip_pool: u64,
+    ante_mode: u8,
+    ante_amount: u64,
+    ante_collected: u64,
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+    rake_collected: u64,
+    rit_mode: u8,
+    run_it_twice_state: RunItTwiceState,
+    hand_id: u32,
+    call_seq: u32,
+}
+
+/// Exact schema-v17 table encoding.
+///
+/// ObjectDb owns optimistic-concurrency versioning. Poker state keeps only `call_seq`, so the
+/// same command-order fact is no longer persisted twice or hashed twice into the state root.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedTexasPokerTableV17 {
+    id: ObjectID,
+    state_schema_version: u8,
+    name: String,
+    creator: Address,
+    max_players: u8,
+    small_blind: u64,
+    big_blind: u64,
+    seats: Vec<Seat>,
+    acted_mask: SeatMask,
+    leave_after_hand_mask: SeatMask,
+    button: u8,
+    pot: u64,
+    community_cards: BoardCards,
+    hand_phase: LegacyHandPhaseV20,
+    deck_state: PersistedDeckStateV16,
+    timeout_config: PersistedTimeoutConfigV7,
+    chip_pool: u64,
+    addon_pool: u64,
+    ante_mode: u8,
+    ante_amount: u64,
+    ante_collected: u64,
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+    rake_collected: u64,
+    rit_mode: u8,
+    run_it_twice_state: RunItTwiceState,
+    hand_id: u32,
+    call_seq: u32,
+}
+
+/// Exact schema-v16 table encoding.
+///
+/// Schema v16 changes only the encrypted-deck representation: a tagged absent/active union with
+/// a fixed 52-ciphertext active payload. It still persisted the now-retired table-local version.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct PersistedTexasPokerTableV16 {
+    id: ObjectID,
+    state_schema_version: u8,
+    name: String,
+    creator: Address,
+    max_players: u8,
+    small_blind: u64,
+    big_blind: u64,
+    seats: Vec<Seat>,
+    acted_mask: SeatMask,
+    leave_after_hand_mask: SeatMask,
+    button: u8,
+    pot: u64,
+    community_cards: BoardCards,
+    hand_phase: LegacyHandPhaseV20,
+    deck_state: PersistedDeckStateV16,
+    timeout_config: PersistedTimeoutConfigV7,
+    chip_pool: u64,
+    addon_pool: u64,
+    ante_mode: u8,
+    ante_amount: u64,
+    ante_collected: u64,
+    rake_mode: u8,
+    rake_bps: u16,
+    rake_cap: u64,
+    rake_collected: u64,
+    rit_mode: u8,
+    run_it_twice_state: RunItTwiceState,
+    hand_id: u32,
+    call_seq: u32,
+    version: u64,
+}
+
+/// Exact schema-v14/v15 table encoding.
 ///
 /// The runtime table temporarily retains schema-v6 phase fields as compatibility caches while
 /// call sites are migrated. They are deliberately absent here: persisted state, state roots and
@@ -1844,7 +2438,7 @@ struct PersistedTexasPokerTableV14 {
     button: u8,
     pot: u64,
     community_cards: BoardCards,
-    hand_phase: HandPhase,
+    hand_phase: LegacyHandPhaseV20,
     deck_state: PersistedDeckStateV10,
     timeout_config: PersistedTimeoutConfigV7,
     chip_pool: u64,
@@ -2161,7 +2755,7 @@ struct LegacyPersistedTexasPokerTableV7 {
 // Kept as a source-compatible name for older codec fixtures. It denotes the current canonical
 // encoding; actual schema-v7 bytes use `LegacyPersistedTexasPokerTableV7` above.
 #[cfg(test)]
-type PersistedTexasPokerTableV7 = PersistedTexasPokerTableV14;
+type PersistedTexasPokerTableV7 = PersistedTexasPokerTableV20;
 
 /// Exact schema-v10 mirror. It is identical to v11 except the shuffle actor was persisted.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -2427,6 +3021,298 @@ fn collapse_legacy_hand_phase(
     }
 }
 
+impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV21 {
+    type Error = PokerL1Error;
+
+    fn try_from(value: &TexasPokerTable) -> Result<Self, Self::Error> {
+        value.validate_state_schema()?;
+        Ok(Self {
+            id: value.id,
+            state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
+            name: value.name.clone(),
+            creator: value.creator,
+            max_players: value.max_players,
+            small_blind: value.small_blind,
+            big_blind: value.big_blind,
+            seats: value.seats.clone(),
+            acted_mask: value.acted_mask,
+            leave_after_hand_mask: value.leave_after_hand_mask,
+            button: value.button,
+            pot: value.pot,
+            community_cards: value.community_cards.clone(),
+            hand_phase: value.canonical_hand_phase()?,
+            deck_state: PersistedDeckStateV21 {
+                encrypted: value.deck_state.encrypted.clone(),
+                contributor_mask: value.deck_state.contributor_mask,
+                cards_dealt: value.deck_state.cards_dealt,
+                decrypted_cards: value.deck_state.decrypted_cards.clone(),
+            },
+            timeout_config: value.timeout_config.try_into()?,
+            chip_pool: value.chip_pool,
+            ante_mode: value.ante_mode,
+            ante_amount: value.ante_amount,
+            rake_mode: value.rake_mode,
+            rake_bps: value.rake_bps,
+            rake_cap: value.rake_cap,
+            rit_mode: value.rit_mode,
+            run_it_twice_state: value.run_it_twice_state.clone(),
+            hand_id: value.hand_id,
+            call_seq: value.call_seq,
+        })
+    }
+}
+
+impl TryFrom<PersistedTexasPokerTableV21> for TexasPokerTable {
+    type Error = PokerL1Error;
+
+    fn try_from(value: PersistedTexasPokerTableV21) -> Result<Self, Self::Error> {
+        if value.state_schema_version != TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
+            return Err(PokerL1Error::Serialization(format!(
+                "unsupported canonical Texas schema {}",
+                value.state_schema_version
+            )));
+        }
+        let timeout_config: TimeoutConfig = value.timeout_config.into();
+        let aggregated_pk =
+            aggregate_pk_for_mask(&value.seats, value.max_players, value.deck_state.contributor_mask)?;
+        let deck_state = DeckState {
+            encrypted: value.deck_state.encrypted,
+            aggregated_pk,
+            contributor_mask: value.deck_state.contributor_mask,
+            cards_dealt: value.deck_state.cards_dealt,
+            decrypted_cards: value.deck_state.decrypted_cards,
+        };
+        let table = Self {
+            id: value.id,
+            state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
+            name: value.name,
+            creator: value.creator,
+            max_players: value.max_players,
+            small_blind: value.small_blind,
+            big_blind: value.big_blind,
+            seats: value.seats,
+            acted_mask: value.acted_mask,
+            leave_after_hand_mask: value.leave_after_hand_mask,
+            button: value.button,
+            pot: value.pot,
+            community_cards: value.community_cards,
+            hand_phase: value.hand_phase,
+            deck_state,
+            timeout_config,
+            chip_pool: value.chip_pool,
+            ante_mode: value.ante_mode,
+            ante_amount: value.ante_amount,
+            rake_mode: value.rake_mode,
+            rake_bps: value.rake_bps,
+            rake_cap: value.rake_cap,
+            rit_mode: value.rit_mode,
+            run_it_twice_state: value.run_it_twice_state,
+            hand_id: value.hand_id,
+            call_seq: value.call_seq,
+        };
+        table.validate_state_schema()?;
+        Ok(table)
+    }
+}
+
+impl TryFrom<PersistedTexasPokerTableV19> for TexasPokerTable {
+    type Error = PokerL1Error;
+
+    fn try_from(value: PersistedTexasPokerTableV19) -> Result<Self, Self::Error> {
+        if value.state_schema_version != LEGACY_V19_SCHEMA_VERSION {
+            return Err(PokerL1Error::Serialization(format!(
+                "unsupported legacy Texas schema {}",
+                value.state_schema_version
+            )));
+        }
+        validate_legacy_rake_collected(value.rake_collected, "v19")?;
+        let timeout_config: TimeoutConfig = value.timeout_config.into();
+        let deck_state = restore_deck_state_v16(value.deck_state, &value.seats, value.max_players)?;
+        let table = Self {
+            id: value.id,
+            state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
+            name: value.name,
+            creator: value.creator,
+            max_players: value.max_players,
+            small_blind: value.small_blind,
+            big_blind: value.big_blind,
+            seats: value.seats,
+            acted_mask: value.acted_mask,
+            leave_after_hand_mask: value.leave_after_hand_mask,
+            button: value.button,
+            pot: value.pot,
+            community_cards: value.community_cards,
+            hand_phase: value.hand_phase,
+            deck_state,
+            timeout_config,
+            chip_pool: value.chip_pool,
+            ante_mode: value.ante_mode,
+            ante_amount: value.ante_amount,
+            rake_mode: value.rake_mode,
+            rake_bps: value.rake_bps,
+            rake_cap: value.rake_cap,
+            rit_mode: value.rit_mode,
+            run_it_twice_state: value.run_it_twice_state,
+            hand_id: value.hand_id,
+            call_seq: value.call_seq,
+        };
+        table.validate_state_schema()?;
+        Ok(table)
+    }
+}
+
+impl TryFrom<PersistedTexasPokerTableV18> for TexasPokerTable {
+    type Error = PokerL1Error;
+
+    fn try_from(value: PersistedTexasPokerTableV18) -> Result<Self, Self::Error> {
+        if value.state_schema_version != LEGACY_V18_SCHEMA_VERSION {
+            return Err(PokerL1Error::Serialization(format!(
+                "unsupported legacy Texas schema {}",
+                value.state_schema_version
+            )));
+        }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v18")?;
+        validate_legacy_rake_collected(value.rake_collected, "v18")?;
+        let timeout_config: TimeoutConfig = value.timeout_config.into();
+        let deck_state = restore_deck_state_v16(value.deck_state, &value.seats, value.max_players)?;
+        let table = Self {
+            id: value.id,
+            state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
+            name: value.name,
+            creator: value.creator,
+            max_players: value.max_players,
+            small_blind: value.small_blind,
+            big_blind: value.big_blind,
+            seats: value.seats,
+            acted_mask: value.acted_mask,
+            leave_after_hand_mask: value.leave_after_hand_mask,
+            button: value.button,
+            pot: value.pot,
+            community_cards: value.community_cards,
+            hand_phase: value.hand_phase,
+            deck_state,
+            timeout_config,
+            chip_pool: value.chip_pool,
+            ante_mode: value.ante_mode,
+            ante_amount: value.ante_amount,
+            rake_mode: value.rake_mode,
+            rake_bps: value.rake_bps,
+            rake_cap: value.rake_cap,
+            rit_mode: value.rit_mode,
+            run_it_twice_state: value.run_it_twice_state,
+            hand_id: value.hand_id,
+            call_seq: value.call_seq,
+        };
+        table.validate_state_schema()?;
+        Ok(table)
+    }
+}
+
+impl TryFrom<PersistedTexasPokerTableV17> for TexasPokerTable {
+    type Error = PokerL1Error;
+
+    fn try_from(value: PersistedTexasPokerTableV17) -> Result<Self, Self::Error> {
+        if value.state_schema_version != LEGACY_V17_SCHEMA_VERSION {
+            return Err(PokerL1Error::Serialization(format!(
+                "unsupported legacy Texas schema {}",
+                value.state_schema_version
+            )));
+        }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v17")?;
+        validate_legacy_rake_collected(value.rake_collected, "v17")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v17",
+        )?;
+        let timeout_config: TimeoutConfig = value.timeout_config.into();
+        let deck_state = restore_deck_state_v16(value.deck_state, &value.seats, value.max_players)?;
+        let table = Self {
+            id: value.id,
+            state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
+            name: value.name,
+            creator: value.creator,
+            max_players: value.max_players,
+            small_blind: value.small_blind,
+            big_blind: value.big_blind,
+            seats: value.seats,
+            acted_mask: value.acted_mask,
+            leave_after_hand_mask: value.leave_after_hand_mask,
+            button: value.button,
+            pot: value.pot,
+            community_cards: value.community_cards,
+            hand_phase: value.hand_phase,
+            deck_state,
+            timeout_config,
+            chip_pool: value.chip_pool,
+            ante_mode: value.ante_mode,
+            ante_amount: value.ante_amount,
+            rake_mode: value.rake_mode,
+            rake_bps: value.rake_bps,
+            rake_cap: value.rake_cap,
+            rit_mode: value.rit_mode,
+            run_it_twice_state: value.run_it_twice_state,
+            hand_id: value.hand_id,
+            call_seq: value.call_seq,
+        };
+        table.validate_state_schema()?;
+        Ok(table)
+    }
+}
+
+impl TryFrom<PersistedTexasPokerTableV16> for TexasPokerTable {
+    type Error = PokerL1Error;
+
+    fn try_from(value: PersistedTexasPokerTableV16) -> Result<Self, Self::Error> {
+        if value.state_schema_version != LEGACY_V16_SCHEMA_VERSION {
+            return Err(PokerL1Error::Serialization(format!(
+                "unsupported legacy Texas schema {}",
+                value.state_schema_version
+            )));
+        }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v16")?;
+        validate_legacy_rake_collected(value.rake_collected, "v16")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v16",
+        )?;
+        let timeout_config: TimeoutConfig = value.timeout_config.into();
+        let deck_state = restore_deck_state_v16(value.deck_state, &value.seats, value.max_players)?;
+        let table = Self {
+            id: value.id,
+            state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
+            name: value.name,
+            creator: value.creator,
+            max_players: value.max_players,
+            small_blind: value.small_blind,
+            big_blind: value.big_blind,
+            seats: value.seats,
+            acted_mask: value.acted_mask,
+            leave_after_hand_mask: value.leave_after_hand_mask,
+            button: value.button,
+            pot: value.pot,
+            community_cards: value.community_cards,
+            hand_phase: value.hand_phase,
+            deck_state,
+            timeout_config,
+            chip_pool: value.chip_pool,
+            ante_mode: value.ante_mode,
+            ante_amount: value.ante_amount,
+            rake_mode: value.rake_mode,
+            rake_bps: value.rake_bps,
+            rake_cap: value.rake_cap,
+            rit_mode: value.rit_mode,
+            run_it_twice_state: value.run_it_twice_state,
+            hand_id: value.hand_id,
+            call_seq: value.call_seq,
+        };
+        table.validate_state_schema()?;
+        Ok(table)
+    }
+}
+
+/// Test/archive encoder for the exact schema-v14/v15 physical layout.
 impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV14 {
     type Error = PokerL1Error;
 
@@ -2448,26 +3334,29 @@ impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV14 {
             community_cards: value.community_cards.clone(),
             hand_phase: value.canonical_hand_phase()?,
             deck_state: PersistedDeckStateV10 {
-                encrypted: value.deck_state.encrypted.clone(),
+                encrypted: value.deck_state.encrypted.to_vec(),
                 contributor_mask: value.deck_state.contributor_mask,
                 cards_dealt: value.deck_state.cards_dealt,
                 decrypted_cards: value.deck_state.decrypted_cards.clone(),
             },
             timeout_config: value.timeout_config.try_into()?,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
+            addon_pool: checked_pending_addon_total(
+                value.seats.iter().map(|seat| seat.pending_addon),
+                "v14 archive encode",
+            )?,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
+            ante_collected: 0,
             rake_mode: value.rake_mode,
             rake_bps: value.rake_bps,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
+            rake_collected: 0,
             rit_mode: value.rit_mode,
             run_it_twice_state: value.run_it_twice_state.clone(),
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
+            version: u64::from(value.call_seq),
         })
     }
 }
@@ -2476,12 +3365,22 @@ impl TryFrom<PersistedTexasPokerTableV14> for TexasPokerTable {
     type Error = PokerL1Error;
 
     fn try_from(value: PersistedTexasPokerTableV14) -> Result<Self, Self::Error> {
-        if value.state_schema_version != TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
+        if !matches!(
+            value.state_schema_version,
+            LEGACY_V14_SCHEMA_VERSION | LEGACY_V15_SCHEMA_VERSION
+        ) {
             return Err(PokerL1Error::Serialization(format!(
-                "unsupported canonical Texas schema {}",
+                "unsupported legacy Texas schema {}",
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v14/v15")?;
+        validate_legacy_rake_collected(value.rake_collected, "v14/v15")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v14/v15",
+        )?;
         let timeout_config: TimeoutConfig = value.timeout_config.into();
         let deck_state = restore_deck_state_v10(value.deck_state, &value.seats, value.max_players)?;
         let hand_phase = value.hand_phase;
@@ -2503,19 +3402,15 @@ impl TryFrom<PersistedTexasPokerTableV14> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: value.rake_bps,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state: value.run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2532,6 +3427,13 @@ impl TryFrom<LegacyPersistedTexasPokerTableV13> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v13")?;
+        validate_legacy_rake_collected(value.rake_collected, "v13")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v13",
+        )?;
         let deck_state = restore_deck_state_v10(value.deck_state, &value.seats, value.max_players)?;
         let table = Self {
             id: value.id,
@@ -2551,19 +3453,15 @@ impl TryFrom<LegacyPersistedTexasPokerTableV13> for TexasPokerTable {
             deck_state,
             timeout_config: value.timeout_config.into(),
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: value.rake_bps,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state: value.run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2584,6 +3482,13 @@ impl TryFrom<LegacyPersistedTexasPokerTableV12> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v12")?;
+        validate_legacy_rake_collected(value.rake_collected, "v12")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v12",
+        )?;
         let seats = migrate_legacy_seats_v12(value.seats)?;
         let deck_state = restore_deck_state_v10(value.deck_state, &seats, value.max_players)?;
         let run_it_twice_state = value.run_it_twice_state.migrate(&value.community_cards)?;
@@ -2605,19 +3510,15 @@ impl TryFrom<LegacyPersistedTexasPokerTableV12> for TexasPokerTable {
             deck_state,
             timeout_config: value.timeout_config.into(),
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v12")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2634,6 +3535,13 @@ impl TryFrom<LegacyPersistedTexasPokerTableV11> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v11")?;
+        validate_legacy_rake_collected(value.rake_collected, "v11")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v11",
+        )?;
         let timeout_config: TimeoutConfig = value.timeout_config.into();
         let seats = migrate_legacy_seats_v12(value.seats)?;
         let deck_state = restore_deck_state_v10(value.deck_state, &seats, value.max_players)?;
@@ -2657,19 +3565,15 @@ impl TryFrom<LegacyPersistedTexasPokerTableV11> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v11")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2686,6 +3590,13 @@ impl TryFrom<LegacyPersistedTexasPokerTableV10> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v10")?;
+        validate_legacy_rake_collected(value.rake_collected, "v10")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v10",
+        )?;
         let timeout_config: TimeoutConfig = value.timeout_config.into();
         let seats = migrate_legacy_seats_v12(value.seats)?;
         let deck_state = restore_deck_state_v10(value.deck_state, &seats, value.max_players)?;
@@ -2709,19 +3620,15 @@ impl TryFrom<LegacyPersistedTexasPokerTableV10> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v10")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2738,6 +3645,8 @@ impl TryFrom<LegacyPersistedTexasPokerTableV7> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v7")?;
+        validate_legacy_rake_collected(value.rake_collected, "v7")?;
         if value.max_players > super::types::MAX_SEATS
             || value.seats.len() != usize::from(value.max_players)
         {
@@ -2745,6 +3654,11 @@ impl TryFrom<LegacyPersistedTexasPokerTableV7> for TexasPokerTable {
                 "Texas v7 seat capacity/length is not canonical".into(),
             ));
         }
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v7",
+        )?;
         let timeout_config: TimeoutConfig = value.timeout_config.into();
         let hand_phase = migrate_hand_phase_v7(value.hand_phase, value.max_players)?;
         let mut deck_state = migrate_deck_state(value.deck_state, value.max_players)?;
@@ -2769,19 +3683,15 @@ impl TryFrom<LegacyPersistedTexasPokerTableV7> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v7")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2798,9 +3708,16 @@ impl TryFrom<LegacyPersistedTexasPokerTableV9> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v9")?;
+        validate_legacy_rake_collected(value.rake_collected, "v9")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v9",
+        )?;
         let timeout_config: TimeoutConfig = value.timeout_config.into();
         let mut deck_state = DeckState {
-            encrypted: value.deck_state.encrypted,
+            encrypted: CipherDeck::try_from(value.deck_state.encrypted)?,
             aggregated_pk: value.deck_state.aggregated_pk,
             contributor_mask: 0,
             cards_dealt: value.deck_state.cards_dealt,
@@ -2828,19 +3745,15 @@ impl TryFrom<LegacyPersistedTexasPokerTableV9> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v9")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2857,6 +3770,13 @@ impl TryFrom<LegacyPersistedTexasPokerTableV8> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v8")?;
+        validate_legacy_rake_collected(value.rake_collected, "v8")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v8",
+        )?;
         let timeout_config: TimeoutConfig = value.timeout_config.into();
         let mut deck_state = migrate_deck_state(value.deck_state, value.max_players)?;
         let seats = migrate_legacy_seats_v12(value.seats)?;
@@ -2881,19 +3801,15 @@ impl TryFrom<LegacyPersistedTexasPokerTableV8> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v8")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2902,7 +3818,7 @@ impl TryFrom<LegacyPersistedTexasPokerTableV8> for TexasPokerTable {
 
 impl BorshSerialize for TexasPokerTable {
     fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        let persisted = PersistedTexasPokerTableV14::try_from(self)
+        let persisted = PersistedTexasPokerTableV21::try_from(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         persisted.serialize(writer)
     }
@@ -2910,8 +3826,40 @@ impl BorshSerialize for TexasPokerTable {
 
 impl BorshDeserialize for TexasPokerTable {
     fn deserialize_reader<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let persisted = PersistedTexasPokerTableV14::deserialize_reader(reader)?;
-        persisted.try_into().map_err(|error: PokerL1Error| {
+        // Tables are also nested inside prove tasks and durable service snapshots, where there is
+        // no outer byte length available to `decode_table_state`. Peek only the self-describing
+        // table prefix, replay it into the matching exact decoder, and leave the reader positioned
+        // immediately after this table for the enclosing Borsh object.
+        let id = ObjectID::deserialize_reader(reader)?;
+        let schema = u8::deserialize_reader(reader)?;
+        let mut prefix = Vec::new();
+        id.serialize(&mut prefix)?;
+        schema.serialize(&mut prefix)?;
+        let mut replay = prefix.as_slice().chain(reader);
+        let table = match schema {
+            TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION => {
+                PersistedTexasPokerTableV21::deserialize_reader(&mut replay)?.try_into()
+            }
+            LEGACY_V20_SCHEMA_VERSION => {
+                PersistedTexasPokerTableV20::deserialize_reader(&mut replay)?.try_into()
+            }
+            LEGACY_V19_SCHEMA_VERSION => {
+                PersistedTexasPokerTableV19::deserialize_reader(&mut replay)?.try_into()
+            }
+            LEGACY_V18_SCHEMA_VERSION => {
+                PersistedTexasPokerTableV18::deserialize_reader(&mut replay)?.try_into()
+            }
+            LEGACY_V17_SCHEMA_VERSION => {
+                PersistedTexasPokerTableV17::deserialize_reader(&mut replay)?.try_into()
+            }
+            LEGACY_V16_SCHEMA_VERSION => {
+                PersistedTexasPokerTableV16::deserialize_reader(&mut replay)?.try_into()
+            }
+            value => Err(PokerL1Error::Serialization(format!(
+                "nested Texas table schema {value} is unsupported; expected v16 through v21"
+            ))),
+        };
+        table.map_err(|error: PokerL1Error| {
             io::Error::new(io::ErrorKind::InvalidData, error.to_string())
         })
     }
@@ -2927,6 +3875,13 @@ impl TryFrom<LegacyTexasPokerTableV6> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v6")?;
+        validate_legacy_rake_collected(value.rake_collected, "v6")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v6",
+        )?;
         // Canonicalize legacy timeout state immediately. Schema v7 persists only the five
         // production timers as u32 values; the unused ready/hand-complete timers must not leak
         // into the migrated runtime object before its first re-serialization.
@@ -2968,19 +3923,15 @@ impl TryFrom<LegacyTexasPokerTableV6> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v6")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -2997,6 +3948,8 @@ impl TryFrom<LegacyTexasPokerTableV5> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v5")?;
+        validate_legacy_rake_collected(value.rake_collected, "v5")?;
         if value.seats.len() != usize::from(value.max_players) {
             return Err(PokerL1Error::Serialization(format!(
                 "Texas v5 seat length {} does not match max_players {}",
@@ -3004,6 +3957,11 @@ impl TryFrom<LegacyTexasPokerTableV5> for TexasPokerTable {
                 value.max_players
             )));
         }
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v5",
+        )?;
         let community_cards = migrate_board_cards(value.community_cards, "Texas v5 first board")?;
         let run_it_twice_state =
             finalize_legacy_runout(value.run_it_twice_state.migrate()?, &community_cards)?;
@@ -3048,19 +4006,15 @@ impl TryFrom<LegacyTexasPokerTableV5> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v5")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -3077,6 +4031,13 @@ impl TryFrom<LegacyTexasPokerTableV4> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v4")?;
+        validate_legacy_rake_collected(value.rake_collected, "v4")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v4",
+        )?;
         let max_players = value.max_players;
         let (seats, acted_mask, leave_after_hand_mask) =
             migrate_v4_seats(value.seats, max_players)?;
@@ -3120,19 +4081,15 @@ impl TryFrom<LegacyTexasPokerTableV4> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v4")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -3149,6 +4106,13 @@ impl TryFrom<LegacyTexasPokerTableV3> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v3")?;
+        validate_legacy_rake_collected(value.rake_collected, "v3")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v3",
+        )?;
         let max_players = value.max_players;
         let legacy_seats = value.seats.into_iter().map(LegacySeatV2::from).collect();
         let (seats, acted_mask, leave_after_hand_mask) =
@@ -3193,19 +4157,15 @@ impl TryFrom<LegacyTexasPokerTableV3> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v3")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -3222,6 +4182,13 @@ impl TryFrom<LegacyTexasPokerTableV2> for TexasPokerTable {
                 value.state_schema_version
             )));
         }
+        validate_legacy_ante_collected(value.pot, value.ante_collected, "v2")?;
+        validate_legacy_rake_collected(value.rake_collected, "v2")?;
+        validate_legacy_addon_pool(
+            value.seats.iter().map(|seat| seat.pending_addon),
+            value.addon_pool,
+            "v2",
+        )?;
         let max_players = value.max_players;
         let (seats, acted_mask, leave_after_hand_mask) =
             migrate_bool_seats(value.seats, max_players)?;
@@ -3266,19 +4233,15 @@ impl TryFrom<LegacyTexasPokerTableV2> for TexasPokerTable {
             deck_state,
             timeout_config,
             chip_pool: value.chip_pool,
-            addon_pool: value.addon_pool,
             ante_mode: value.ante_mode,
             ante_amount: value.ante_amount,
-            ante_collected: value.ante_collected,
             rake_mode: value.rake_mode,
             rake_bps: rake_bps_u16(value.rake_bps, "v2")?,
             rake_cap: value.rake_cap,
-            rake_collected: value.rake_collected,
             rit_mode: value.rit_mode,
             run_it_twice_state,
             hand_id: value.hand_id,
             call_seq: value.call_seq,
-            version: value.version,
         };
         table.validate_state_schema()?;
         Ok(table)
@@ -3292,7 +4255,7 @@ pub fn encode_table_state(table: &TexasPokerTable) -> PokerL1Result<Vec<u8>> {
         .map_err(|error| PokerL1Error::Serialization(format!("TexasPokerTable borsh: {error}")))
 }
 
-/// Decode current v15 bytes or migrate exact v2-v14 bytes into the canonical v15 model.
+/// Decode current v20 bytes or migrate exact v2-v19 bytes into the canonical v20 model.
 pub fn decode_table_state(bytes: &[u8]) -> PokerL1Result<TexasPokerTable> {
     if let Ok(table) = TexasPokerTable::try_from_slice(bytes) {
         if table.state_schema_version == TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
@@ -3301,13 +4264,40 @@ pub fn decode_table_state(bytes: &[u8]) -> PokerL1Result<TexasPokerTable> {
         }
     }
 
-    // Schema v15 keeps the v14 physical layout but strengthens the invariant: every active
+    if let Ok(legacy) = PersistedTexasPokerTableV19::try_from_slice(bytes) {
+        if legacy.state_schema_version == LEGACY_V19_SCHEMA_VERSION {
+            return legacy.try_into();
+        }
+    }
+
+    if let Ok(legacy) = PersistedTexasPokerTableV18::try_from_slice(bytes) {
+        if legacy.state_schema_version == LEGACY_V18_SCHEMA_VERSION {
+            return legacy.try_into();
+        }
+    }
+
+    if let Ok(legacy) = PersistedTexasPokerTableV17::try_from_slice(bytes) {
+        if legacy.state_schema_version == LEGACY_V17_SCHEMA_VERSION {
+            return legacy.try_into();
+        }
+    }
+
+    if let Ok(legacy) = PersistedTexasPokerTableV16::try_from_slice(bytes) {
+        if legacy.state_schema_version == LEGACY_V16_SCHEMA_VERSION {
+            return legacy.try_into();
+        }
+    }
+
+    // Schemas v14 and v15 share one physical layout. Schema v15 strengthened the invariant that
+    // every active
     // phase must already carry a non-zero authenticated deadline. A v14 active table whose timer
     // was never armed has no trustworthy timestamp from which to reconstruct one, so migration
     // rejects it instead of silently choosing a new timeout origin.
-    if let Ok(mut legacy) = PersistedTexasPokerTableV14::try_from_slice(bytes) {
-        if legacy.state_schema_version == LEGACY_V14_SCHEMA_VERSION {
-            legacy.state_schema_version = TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION;
+    if let Ok(legacy) = PersistedTexasPokerTableV14::try_from_slice(bytes) {
+        if matches!(
+            legacy.state_schema_version,
+            LEGACY_V14_SCHEMA_VERSION | LEGACY_V15_SCHEMA_VERSION
+        ) {
             return legacy.try_into();
         }
     }
@@ -3380,7 +4370,7 @@ pub fn decode_table_state(bytes: &[u8]) -> PokerL1Result<TexasPokerTable> {
 
     let legacy = LegacyTexasPokerTableV2::try_from_slice(bytes).map_err(|error| {
         PokerL1Error::Serialization(format!(
-            "TexasPokerTable is neither canonical v15 nor migratable v2-v14: {error}"
+            "TexasPokerTable is neither canonical v17 nor migratable v2-v16: {error}"
         ))
     })?;
     legacy.try_into()
@@ -3667,6 +4657,14 @@ mod tests {
         }
     }
 
+    fn legacy_addon_pool(table: &TexasPokerTable) -> u64 {
+        checked_pending_addon_total(
+            table.seats.iter().map(|seat| seat.pending_addon),
+            "legacy test encode",
+        )
+        .unwrap()
+    }
+
     fn legacy_reconstruct(table: &TexasPokerTable) -> LegacyReconstructStateV4 {
         let reconstruct_state = table.reconstruct_state();
         assert!(reconstruct_state.accumulated_deck.is_none());
@@ -3694,7 +4692,7 @@ mod tests {
 
     fn legacy_deck(table: &TexasPokerTable) -> LegacyDeckStateV8 {
         LegacyDeckStateV8 {
-            encrypted: table.deck_state.encrypted.clone(),
+            encrypted: table.deck_state.encrypted.to_vec(),
             aggregated_pk: table.deck_state.aggregated_pk,
             cards_dealt: table.deck_state.cards_dealt,
             decrypted_cards: table
@@ -3765,19 +4763,19 @@ mod tests {
             deck_state: legacy_deck(table),
             timeout_config: table.timeout_config.try_into().unwrap(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v12(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -3798,26 +4796,26 @@ mod tests {
             community_cards: table.community_cards.clone(),
             hand_phase: legacy_hand_phase_v10(table.canonical_hand_phase().unwrap()),
             deck_state: LegacyDeckStateV9 {
-                encrypted: table.deck_state.encrypted.clone(),
+                encrypted: table.deck_state.encrypted.to_vec(),
                 aggregated_pk: table.deck_state.aggregated_pk,
                 cards_dealt: table.deck_state.cards_dealt,
                 decrypted_cards: table.deck_state.decrypted_cards.clone(),
             },
             timeout_config: table.timeout_config.try_into().unwrap(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(&table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v12(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -3838,26 +4836,26 @@ mod tests {
             community_cards: table.community_cards.clone(),
             hand_phase: legacy_hand_phase_v10(table.canonical_hand_phase().unwrap()),
             deck_state: PersistedDeckStateV10 {
-                encrypted: table.deck_state.encrypted.clone(),
+                encrypted: table.deck_state.encrypted.to_vec(),
                 contributor_mask: table.deck_state.contributor_mask,
                 cards_dealt: table.deck_state.cards_dealt,
                 decrypted_cards: table.deck_state.decrypted_cards.clone(),
             },
             timeout_config: table.timeout_config.try_into().unwrap(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v12(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -3878,6 +4876,46 @@ mod tests {
             community_cards: table.community_cards.clone(),
             hand_phase: legacy_hand_phase_v11(table.canonical_hand_phase().unwrap()),
             deck_state: PersistedDeckStateV10 {
+                encrypted: table.deck_state.encrypted.to_vec(),
+                contributor_mask: table.deck_state.contributor_mask,
+                cards_dealt: table.deck_state.cards_dealt,
+                decrypted_cards: table.deck_state.decrypted_cards.clone(),
+            },
+            timeout_config: table.timeout_config.try_into().unwrap(),
+            chip_pool: table.chip_pool,
+            addon_pool: legacy_addon_pool(table),
+            ante_mode: table.ante_mode,
+            ante_amount: table.ante_amount,
+            ante_collected: 0,
+            rake_mode: table.rake_mode,
+            rake_bps: u64::from(table.rake_bps),
+            rake_cap: table.rake_cap,
+            rake_collected: 0,
+            rit_mode: table.rit_mode,
+            run_it_twice_state: legacy_runout_v12(table),
+            hand_id: table.hand_id,
+            call_seq: table.call_seq,
+            version: u64::from(table.call_seq),
+        }
+    }
+
+    fn legacy_v16(table: &TexasPokerTable, version: u64) -> PersistedTexasPokerTableV16 {
+        PersistedTexasPokerTableV16 {
+            id: table.id,
+            state_schema_version: LEGACY_V16_SCHEMA_VERSION,
+            name: table.name.clone(),
+            creator: table.creator,
+            max_players: table.max_players,
+            small_blind: table.small_blind,
+            big_blind: table.big_blind,
+            seats: table.seats.clone(),
+            acted_mask: table.acted_mask,
+            leave_after_hand_mask: table.leave_after_hand_mask,
+            button: table.button,
+            pot: table.pot,
+            community_cards: table.community_cards.clone(),
+            hand_phase: table.canonical_hand_phase().unwrap(),
+            deck_state: PersistedDeckStateV16 {
                 encrypted: table.deck_state.encrypted.clone(),
                 contributor_mask: table.deck_state.contributor_mask,
                 cards_dealt: table.deck_state.cards_dealt,
@@ -3885,19 +4923,133 @@ mod tests {
             },
             timeout_config: table.timeout_config.try_into().unwrap(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
-            rake_bps: u64::from(table.rake_bps),
+            rake_bps: table.rake_bps,
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
-            run_it_twice_state: legacy_runout_v12(table),
+            run_it_twice_state: table.run_it_twice_state.clone(),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version,
+        }
+    }
+
+    fn legacy_v17(table: &TexasPokerTable) -> PersistedTexasPokerTableV17 {
+        PersistedTexasPokerTableV17 {
+            id: table.id,
+            state_schema_version: LEGACY_V17_SCHEMA_VERSION,
+            name: table.name.clone(),
+            creator: table.creator,
+            max_players: table.max_players,
+            small_blind: table.small_blind,
+            big_blind: table.big_blind,
+            seats: table.seats.clone(),
+            acted_mask: table.acted_mask,
+            leave_after_hand_mask: table.leave_after_hand_mask,
+            button: table.button,
+            pot: table.pot,
+            community_cards: table.community_cards.clone(),
+            hand_phase: table.canonical_hand_phase().unwrap(),
+            deck_state: PersistedDeckStateV16 {
+                encrypted: table.deck_state.encrypted.clone(),
+                contributor_mask: table.deck_state.contributor_mask,
+                cards_dealt: table.deck_state.cards_dealt,
+                decrypted_cards: table.deck_state.decrypted_cards.clone(),
+            },
+            timeout_config: table.timeout_config.try_into().unwrap(),
+            chip_pool: table.chip_pool,
+            addon_pool: legacy_addon_pool(table),
+            ante_mode: table.ante_mode,
+            ante_amount: table.ante_amount,
+            ante_collected: 0,
+            rake_mode: table.rake_mode,
+            rake_bps: table.rake_bps,
+            rake_cap: table.rake_cap,
+            rake_collected: 0,
+            rit_mode: table.rit_mode,
+            run_it_twice_state: table.run_it_twice_state.clone(),
+            hand_id: table.hand_id,
+            call_seq: table.call_seq,
+        }
+    }
+
+    fn legacy_v18(table: &TexasPokerTable, ante_collected: u64) -> PersistedTexasPokerTableV18 {
+        PersistedTexasPokerTableV18 {
+            id: table.id,
+            state_schema_version: LEGACY_V18_SCHEMA_VERSION,
+            name: table.name.clone(),
+            creator: table.creator,
+            max_players: table.max_players,
+            small_blind: table.small_blind,
+            big_blind: table.big_blind,
+            seats: table.seats.clone(),
+            acted_mask: table.acted_mask,
+            leave_after_hand_mask: table.leave_after_hand_mask,
+            button: table.button,
+            pot: table.pot,
+            community_cards: table.community_cards.clone(),
+            hand_phase: table.canonical_hand_phase().unwrap(),
+            deck_state: PersistedDeckStateV16 {
+                encrypted: table.deck_state.encrypted.clone(),
+                contributor_mask: table.deck_state.contributor_mask,
+                cards_dealt: table.deck_state.cards_dealt,
+                decrypted_cards: table.deck_state.decrypted_cards.clone(),
+            },
+            timeout_config: table.timeout_config.try_into().unwrap(),
+            chip_pool: table.chip_pool,
+            ante_mode: table.ante_mode,
+            ante_amount: table.ante_amount,
+            ante_collected,
+            rake_mode: table.rake_mode,
+            rake_bps: table.rake_bps,
+            rake_cap: table.rake_cap,
+            rake_collected: 0,
+            rit_mode: table.rit_mode,
+            run_it_twice_state: table.run_it_twice_state.clone(),
+            hand_id: table.hand_id,
+            call_seq: table.call_seq,
+        }
+    }
+
+    fn legacy_v19(table: &TexasPokerTable, rake_collected: u64) -> PersistedTexasPokerTableV19 {
+        PersistedTexasPokerTableV19 {
+            id: table.id,
+            state_schema_version: LEGACY_V19_SCHEMA_VERSION,
+            name: table.name.clone(),
+            creator: table.creator,
+            max_players: table.max_players,
+            small_blind: table.small_blind,
+            big_blind: table.big_blind,
+            seats: table.seats.clone(),
+            acted_mask: table.acted_mask,
+            leave_after_hand_mask: table.leave_after_hand_mask,
+            button: table.button,
+            pot: table.pot,
+            community_cards: table.community_cards.clone(),
+            hand_phase: table.canonical_hand_phase().unwrap(),
+            deck_state: PersistedDeckStateV16 {
+                encrypted: table.deck_state.encrypted.clone(),
+                contributor_mask: table.deck_state.contributor_mask,
+                cards_dealt: table.deck_state.cards_dealt,
+                decrypted_cards: table.deck_state.decrypted_cards.clone(),
+            },
+            timeout_config: table.timeout_config.try_into().unwrap(),
+            chip_pool: table.chip_pool,
+            ante_mode: table.ante_mode,
+            ante_amount: table.ante_amount,
+            rake_mode: table.rake_mode,
+            rake_bps: table.rake_bps,
+            rake_cap: table.rake_cap,
+            rake_collected,
+            rit_mode: table.rit_mode,
+            run_it_twice_state: table.run_it_twice_state.clone(),
+            hand_id: table.hand_id,
+            call_seq: table.call_seq,
         }
     }
 
@@ -3918,26 +5070,26 @@ mod tests {
             community_cards: table.community_cards.clone(),
             hand_phase: legacy_hand_phase_v13(table.canonical_hand_phase().unwrap()),
             deck_state: PersistedDeckStateV10 {
-                encrypted: table.deck_state.encrypted.clone(),
+                encrypted: table.deck_state.encrypted.to_vec(),
                 contributor_mask: table.deck_state.contributor_mask,
                 cards_dealt: table.deck_state.cards_dealt,
                 decrypted_cards: table.deck_state.decrypted_cards.clone(),
             },
             timeout_config: table.timeout_config.try_into().unwrap(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: table.rake_bps,
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: table.run_it_twice_state.clone(),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -3958,26 +5110,26 @@ mod tests {
             community_cards: table.community_cards.clone(),
             hand_phase: legacy_hand_phase_v13(table.canonical_hand_phase().unwrap()),
             deck_state: PersistedDeckStateV10 {
-                encrypted: table.deck_state.encrypted.clone(),
+                encrypted: table.deck_state.encrypted.to_vec(),
                 contributor_mask: table.deck_state.contributor_mask,
                 cards_dealt: table.deck_state.cards_dealt,
                 decrypted_cards: table.deck_state.decrypted_cards.clone(),
             },
             timeout_config: table.timeout_config.try_into().unwrap(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v12(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -4032,7 +5184,7 @@ mod tests {
             betting_round: table.betting_round(),
             current_turn: legacy_current_turn(table),
             deck_state: LegacyDeckStateV2 {
-                encrypted: table.deck_state.encrypted.clone(),
+                encrypted: table.deck_state.encrypted.to_vec(),
                 aggregated_pk: table.deck_state.aggregated_pk,
                 plaintext: generate_plaintext_cards()
                     .into_iter()
@@ -4075,14 +5227,14 @@ mod tests {
                 hand_complete_at: 9,
             },
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: LegacyRunItTwiceStateV2 {
                 active: table.run_it_twice_state.is_active(),
@@ -4102,7 +5254,7 @@ mod tests {
             config: LegacyTableConfigV2::default(),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -4149,19 +5301,19 @@ mod tests {
             timeout_config: legacy_timeout_v6(table.timeout_config),
             timestamps: *table.timestamps(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v5(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -4207,19 +5359,19 @@ mod tests {
             timeout_config: legacy_timeout_v6(table.timeout_config),
             timestamps: *table.timestamps(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v5(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -4266,19 +5418,19 @@ mod tests {
             timeout_config: legacy_timeout_v6(table.timeout_config),
             timestamps: *table.timestamps(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v5(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -4311,19 +5463,19 @@ mod tests {
             timeout_config: legacy_timeout_v6(table.timeout_config),
             timestamps: *table.timestamps(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v12(table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         }
     }
 
@@ -4346,6 +5498,210 @@ mod tests {
         assert_eq!(persisted.hand_phase, HandPhase::Waiting);
         assert_eq!(bytes, borsh::to_vec(&persisted).unwrap());
         assert_eq!(decode_table_state(&bytes).unwrap(), table);
+    }
+
+    #[test]
+    fn schema_v16_redundant_fields_are_dropped_when_migrating_to_v20() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF1; 20], 17),
+            "v16-version-removal".into(),
+            [0x11; 20],
+            6,
+            50,
+            100,
+        );
+        table.call_seq = 7;
+        let legacy_bytes = borsh::to_vec(&legacy_v16(&table, 9_999)).unwrap();
+        let migrated = decode_table_state(&legacy_bytes).unwrap();
+        assert_eq!(migrated, table);
+        assert_eq!(
+            migrated.state_schema_version,
+            TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION
+        );
+
+        let canonical_bytes = encode_table_state(&migrated).unwrap();
+        assert_eq!(legacy_bytes.len(), canonical_bytes.len() + 32);
+        assert!(PersistedTexasPokerTableV17::try_from_slice(&legacy_bytes).is_err());
+        assert!(PersistedTexasPokerTableV16::try_from_slice(&canonical_bytes).is_err());
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&canonical_bytes).is_ok());
+    }
+
+    #[test]
+    fn schema_v17_redundant_fields_are_removed_when_migrating_to_v20() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF3; 20], 18),
+            "v17-addon-pool-removal".into(),
+            [0x11; 20],
+            4,
+            25,
+            50,
+        );
+        table.seats[0].pending_addon = 125;
+        table.chip_pool = 125;
+        table.call_seq = 13;
+
+        let legacy_bytes = borsh::to_vec(&legacy_v17(&table)).unwrap();
+        let migrated = decode_table_state(&legacy_bytes).unwrap();
+        assert_eq!(migrated, table);
+
+        let canonical_bytes = encode_table_state(&migrated).unwrap();
+        assert_eq!(legacy_bytes.len(), canonical_bytes.len() + 24);
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&canonical_bytes).is_ok());
+        assert!(PersistedTexasPokerTableV17::try_from_slice(&canonical_bytes).is_err());
+        assert!(PersistedTexasPokerTableV18::try_from_slice(&legacy_bytes).is_err());
+    }
+
+    #[test]
+    fn schema_v18_ante_and_rake_receipts_are_removed_when_migrating_to_v20() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF6; 20], 19),
+            "v18-ante-removal".into(),
+            [0x11; 20],
+            2,
+            5,
+            10,
+        );
+        table.pot = 40;
+        table.call_seq = 15;
+
+        let legacy_bytes = borsh::to_vec(&legacy_v18(&table, 40)).unwrap();
+        assert_eq!(decode_table_state(&legacy_bytes).unwrap(), table);
+        let canonical_bytes = encode_table_state(&table).unwrap();
+        assert_eq!(legacy_bytes.len(), canonical_bytes.len() + 16);
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&canonical_bytes).is_ok());
+        assert!(PersistedTexasPokerTableV18::try_from_slice(&canonical_bytes).is_err());
+        assert!(PersistedTexasPokerTableV19::try_from_slice(&legacy_bytes).is_err());
+    }
+
+    #[test]
+    fn schema_v18_ante_collected_mismatch_fails_closed() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF7; 20], 19),
+            "v18-ante-mismatch".into(),
+            [0x11; 20],
+            2,
+            5,
+            10,
+        );
+        table.pot = 9;
+        let bytes = borsh::to_vec(&legacy_v18(&table, 10)).unwrap();
+        assert!(decode_table_state(&bytes).is_err());
+        assert!(TexasPokerTable::try_from_slice(&bytes).is_err());
+    }
+
+    #[test]
+    fn nested_borsh_stream_migrates_v18_without_consuming_following_fields() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF8; 20], 19),
+            "nested-v18".into(),
+            [0x11; 20],
+            2,
+            5,
+            10,
+        );
+        table.pot = 7;
+        let mut bytes = borsh::to_vec(&0xA7u8).unwrap();
+        bytes.extend_from_slice(&borsh::to_vec(&legacy_v18(&table, 7)).unwrap());
+        bytes.extend_from_slice(&borsh::to_vec(&0xABCD_1234u32).unwrap());
+        let mut reader = std::io::Cursor::new(bytes);
+        assert_eq!(u8::deserialize_reader(&mut reader).unwrap(), 0xA7);
+        assert_eq!(
+            TexasPokerTable::deserialize_reader(&mut reader).unwrap(),
+            table
+        );
+        assert_eq!(u32::deserialize_reader(&mut reader).unwrap(), 0xABCD_1234);
+    }
+
+    #[test]
+    fn nested_borsh_stream_migrates_v19_without_consuming_following_fields() {
+        let table = TexasPokerTable::new(
+            ObjectID::new([0xFA; 20], 20),
+            "nested-v19".into(),
+            [0x11; 20],
+            2,
+            5,
+            10,
+        );
+        let mut bytes = borsh::to_vec(&0xB7u8).unwrap();
+        bytes.extend_from_slice(&borsh::to_vec(&legacy_v19(&table, 0)).unwrap());
+        bytes.extend_from_slice(&borsh::to_vec(&0xBCDE_2345u32).unwrap());
+        let mut reader = std::io::Cursor::new(bytes);
+        assert_eq!(u8::deserialize_reader(&mut reader).unwrap(), 0xB7);
+        assert_eq!(
+            TexasPokerTable::deserialize_reader(&mut reader).unwrap(),
+            table
+        );
+        assert_eq!(u32::deserialize_reader(&mut reader).unwrap(), 0xBCDE_2345);
+    }
+
+    #[test]
+    fn schema_v17_addon_pool_mismatch_fails_closed() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF4; 20], 18),
+            "v17-addon-pool-mismatch".into(),
+            [0x11; 20],
+            2,
+            5,
+            10,
+        );
+        table.seats[0].pending_addon = 9;
+        let mut legacy = legacy_v17(&table);
+        legacy.addon_pool = 10;
+        let bytes = borsh::to_vec(&legacy).unwrap();
+        assert!(decode_table_state(&bytes).is_err());
+        assert!(TexasPokerTable::try_from_slice(&bytes).is_err());
+    }
+
+    #[test]
+    fn nested_borsh_stream_migrates_v17_without_consuming_following_fields() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF5; 20], 18),
+            "nested-v17".into(),
+            [0x11; 20],
+            4,
+            25,
+            50,
+        );
+        table.seats[1].pending_addon = 77;
+        table.chip_pool = 77;
+        table.call_seq = 14;
+
+        let mut bytes = borsh::to_vec(&0xA6u8).unwrap();
+        bytes.extend_from_slice(&borsh::to_vec(&legacy_v17(&table)).unwrap());
+        bytes.extend_from_slice(&borsh::to_vec(&0xCAFE_BABEu32).unwrap());
+
+        let mut reader = std::io::Cursor::new(bytes);
+        assert_eq!(u8::deserialize_reader(&mut reader).unwrap(), 0xA6);
+        assert_eq!(
+            TexasPokerTable::deserialize_reader(&mut reader).unwrap(),
+            table
+        );
+        assert_eq!(u32::deserialize_reader(&mut reader).unwrap(), 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn nested_borsh_stream_migrates_v16_without_consuming_following_fields() {
+        let mut table = TexasPokerTable::new(
+            ObjectID::new([0xF2; 20], 17),
+            "nested-v16".into(),
+            [0x11; 20],
+            4,
+            25,
+            50,
+        );
+        table.call_seq = 12;
+
+        let mut bytes = borsh::to_vec(&0xA5u8).unwrap();
+        bytes.extend_from_slice(&borsh::to_vec(&legacy_v16(&table, 77)).unwrap());
+        bytes.extend_from_slice(&borsh::to_vec(&0xDEAD_BEEFu32).unwrap());
+
+        let mut reader = std::io::Cursor::new(bytes);
+        assert_eq!(u8::deserialize_reader(&mut reader).unwrap(), 0xA5);
+        assert_eq!(
+            TexasPokerTable::deserialize_reader(&mut reader).unwrap(),
+            table
+        );
+        assert_eq!(u32::deserialize_reader(&mut reader).unwrap(), 0xDEAD_BEEF);
     }
 
     #[test]
@@ -4457,10 +5813,10 @@ mod tests {
     }
 
     #[test]
-    fn schema_v15_roundtrip_and_zero_deadline_encoding_are_fail_closed() {
+    fn schema_v16_roundtrip_and_zero_deadline_encoding_are_fail_closed() {
         let mut table = TexasPokerTable::new(
             ObjectID::new([0xE3; 20], 15),
-            "v15-roundtrip".into(),
+            "v16-roundtrip".into(),
             [0x15; 20],
             2,
             5,
@@ -4484,6 +5840,41 @@ mod tests {
         };
         *phase.deadline_ms_mut() = 0;
         assert!(encode_table_state(&invalid).is_err());
+    }
+
+    #[test]
+    fn schema_v15_cipher_deck_migrates_only_absent_or_complete() {
+        let table = TexasPokerTable::new(
+            ObjectID::new([0xE4; 20], 15),
+            "v15-cipher-deck".into(),
+            [0x15; 20],
+            2,
+            5,
+            10,
+        );
+
+        let mut absent = PersistedTexasPokerTableV14::try_from(&table).unwrap();
+        absent.state_schema_version = LEGACY_V15_SCHEMA_VERSION;
+        let migrated_absent = decode_table_state(&borsh::to_vec(&absent).unwrap()).unwrap();
+        assert!(migrated_absent.deck_state.encrypted.is_empty());
+
+        let placeholder = ElGamalCiphertext::new_placeholder_card();
+        let mut complete = absent.clone();
+        complete.deck_state.encrypted = vec![placeholder; super::super::types::CIPHER_DECK_SIZE];
+        let migrated_complete = decode_table_state(&borsh::to_vec(&complete).unwrap()).unwrap();
+        assert_eq!(
+            migrated_complete.deck_state.encrypted.len(),
+            super::super::types::CIPHER_DECK_SIZE
+        );
+
+        for invalid_len in [1, 51, 53] {
+            let mut invalid = absent.clone();
+            invalid.deck_state.encrypted = vec![placeholder; invalid_len];
+            assert!(
+                decode_table_state(&borsh::to_vec(&invalid).unwrap()).is_err(),
+                "schema-v15 deck length {invalid_len} must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -4529,7 +5920,7 @@ mod tests {
         assert_eq!(decode_table_state(&reconstruct_bytes).unwrap(), reconstruct);
 
         let canonical = encode_table_state(&reconstruct).unwrap();
-        assert!(PersistedTexasPokerTableV14::try_from_slice(&canonical).is_ok());
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&canonical).is_ok());
         assert!(LegacyPersistedTexasPokerTableV13::try_from_slice(&canonical).is_err());
     }
 
@@ -4600,7 +5991,7 @@ mod tests {
         assert_eq!(migrated, table);
 
         let canonical = encode_table_state(&migrated).unwrap();
-        assert!(PersistedTexasPokerTableV14::try_from_slice(&canonical).is_ok());
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&canonical).is_ok());
         assert!(LegacyPersistedTexasPokerTableV12::try_from_slice(&canonical).is_err());
     }
 
@@ -4836,7 +6227,7 @@ mod tests {
         );
 
         let canonical = encode_table_state(&migrated).unwrap();
-        assert!(PersistedTexasPokerTableV14::try_from_slice(&canonical).is_ok());
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&canonical).is_ok());
         assert!(LegacyPersistedTexasPokerTableV11::try_from_slice(&canonical).is_err());
     }
 
@@ -4983,7 +6374,7 @@ mod tests {
         table.sync_aggregated_pk().unwrap();
 
         let bytes = encode_table_state(&table).unwrap();
-        let persisted = PersistedTexasPokerTableV14::try_from_slice(&bytes).unwrap();
+        let persisted = PersistedTexasPokerTableV20::try_from_slice(&bytes).unwrap();
         assert_eq!(persisted.deck_state.contributor_mask, 1);
         assert!(LegacyPersistedTexasPokerTableV9::try_from_slice(&bytes).is_err());
 
@@ -5020,19 +6411,19 @@ mod tests {
             deck_state: legacy_deck(&table),
             timeout_config: table.timeout_config.try_into().unwrap(),
             chip_pool: table.chip_pool,
-            addon_pool: table.addon_pool,
+            addon_pool: legacy_addon_pool(&table),
             ante_mode: table.ante_mode,
             ante_amount: table.ante_amount,
-            ante_collected: table.ante_collected,
+            ante_collected: 0,
             rake_mode: table.rake_mode,
             rake_bps: u64::from(table.rake_bps),
             rake_cap: table.rake_cap,
-            rake_collected: table.rake_collected,
+            rake_collected: 0,
             rit_mode: table.rit_mode,
             run_it_twice_state: legacy_runout_v12(&table),
             hand_id: table.hand_id,
             call_seq: table.call_seq,
-            version: table.version,
+            version: u64::from(table.call_seq),
         };
         let migrated = decode_table_state(&borsh::to_vec(&legacy).unwrap()).unwrap();
         assert_eq!(
@@ -5494,5 +6885,40 @@ mod tests {
         legacy.deck_state.plaintext.clear();
         let bytes = borsh::to_vec(&legacy).unwrap();
         assert!(decode_table_state(&bytes).is_err());
+    }
+
+    #[test]
+    fn schema_v19_rake_receipt_is_removed_when_migrating_to_v20() {
+        let table = TexasPokerTable::new(
+            ObjectID::new([0xF8; 20], 20),
+            "v19-rake-receipt-removal".into(),
+            [0x11; 20],
+            2,
+            5,
+            10,
+        );
+        let legacy_bytes = borsh::to_vec(&legacy_v19(&table, 0)).unwrap();
+        assert_eq!(decode_table_state(&legacy_bytes).unwrap(), table);
+
+        let canonical_bytes = encode_table_state(&table).unwrap();
+        assert_eq!(legacy_bytes.len(), canonical_bytes.len() + 8);
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&canonical_bytes).is_ok());
+        assert!(PersistedTexasPokerTableV19::try_from_slice(&canonical_bytes).is_err());
+        assert!(PersistedTexasPokerTableV20::try_from_slice(&legacy_bytes).is_err());
+    }
+
+    #[test]
+    fn schema_v19_unclaimed_rake_receipt_fails_closed() {
+        let table = TexasPokerTable::new(
+            ObjectID::new([0xF9; 20], 20),
+            "v19-unclaimed-rake".into(),
+            [0x11; 20],
+            2,
+            5,
+            10,
+        );
+        let bytes = borsh::to_vec(&legacy_v19(&table, 1)).unwrap();
+        let error = decode_table_state(&bytes).unwrap_err();
+        assert!(error.to_string().contains("unclaimed rake receipt"));
     }
 }

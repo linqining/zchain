@@ -55,12 +55,16 @@ pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
 /// Version 3 removed persisted derived/transient fields while preserving the complete game state.
 /// Version 4 replaces redundant seat lifecycle booleans with one status enum and packs orthogonal
 /// booleans into flags. Version 5 moves all seat-set state to canonical u16 masks and replaces
-/// persisted optional seat indices with `NO_SEAT`. Versions 2 through 4 are decoded through
-/// explicit fail-closed migrations in
+/// persisted optional seat indices with `NO_SEAT`. Version 16 replaces the variable-length
+/// encrypted deck with an absent-or-fixed-52 tagged union. Version 17 removes the duplicate
+/// table-local command version. Version 18 removes `addon_pool`, which is uniquely derived from
+/// the checked sum of every occupied seat's `pending_addon`. Version 19 removes
+/// `ante_collected`; the start-hand transition derives it from checked per-seat debits and the pot
+/// delta. Versions 2 through 18 are decoded through explicit fail-closed migrations in
 /// [`state_codec`].
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 15;
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 21;
 
-/// Versioned persisted-state codec and v2/v3/v4 -> v5 migration.
+/// Versioned persisted-state codec and fail-closed legacy migrations.
 pub mod state_codec;
 
 // Phase 3: 状态机 + dispatch

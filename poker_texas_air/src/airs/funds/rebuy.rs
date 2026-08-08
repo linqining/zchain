@@ -9,8 +9,7 @@
 //! 3. 状态变更（**立即改 stack**）：
 //!    - `seats[seat].stack += amount`
 //!    - `table.chip_pool += amount`
-//!    - `table.addon_pool` 不变（rebuy 不属于 pending addon）
-//!    - `version += 1`
+//!    - `call_seq += 1`
 //!
 //! ## 与 `addon` 的关键差异
 //!
@@ -32,16 +31,13 @@
 //!   - `INPUT_SEAT_OCCUPIED`（Gap 3 boolean witness）
 //!   - `INPUT_AMOUNT_INV`（Gap 9 invertibility witness）
 //!   - `INPUT_PRE_CHIP_POOL_BASE[4]`（4 limb，调用前 chip_pool，用于全局上界检查）
-//!   - `INPUT_PRE_ADDON_POOL_BASE[4]`（4 limb，调用前 addon_pool，用于不变性约束）
 //!   - `BOUND_DIFF_BASE[4]`（4 limb，diff = MAX_TOTAL_BET - (chip_pool + amount)）
 //!   - `BOUND_CARRY_LO_BASE[3]`（3 个进位低位 bit，2-bit carry 分解）
 //!   - `BOUND_CARRY_HI_BASE[3]`（3 个进位高位 bit，2-bit carry 分解）
-//!   - `OUTPUT_POST_ADDON_POOL_BASE[4]`（必须等于 pre addon_pool）
 //!   - `STACK_ADD_CARRY_BASE[3]`（stack 的 ripple carry）
-//!   - `ADDON_POOL_ADD_CARRY_BASE[3]`（兼容保留列，active 行必须为 0）
 //!   - `RANGE_AMOUNT_BITS_BASE[64]`
 //!
-//! 共 37 + 107 = 144 列。
+//! 共 37 + 103 = 140 列。
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
@@ -90,28 +86,22 @@ pub mod cols {
     pub const INPUT_AMOUNT_INV: usize = COMMON_NUM_COLUMNS + 14;
     /// PRE_CHIP_POOL 起始列（4 limb）— 调用前 chip_pool，用于全局上界检查。
     pub const INPUT_PRE_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 15;
-    /// PRE_ADDON_POOL 起始列（4 limb）— 调用前 addon_pool，用于不变性约束。
-    pub const INPUT_PRE_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 19;
     /// BOUND_DIFF 起始列（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + amount)。
-    pub const BOUND_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 23;
+    pub const BOUND_DIFF_BASE: usize = COMMON_NUM_COLUMNS + 19;
     /// BOUND_CARRY_LO 起始列（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
-    pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 27;
+    pub const BOUND_CARRY_LO_BASE: usize = COMMON_NUM_COLUMNS + 23;
     /// BOUND_CARRY_HI 起始列（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
-    pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 30;
-    /// OUTPUT_POST_ADDON_POOL 起始列（4 limb）— 调用后 addon_pool，必须与 pre 相同。
-    pub const OUTPUT_POST_ADDON_POOL_BASE: usize = COMMON_NUM_COLUMNS + 33;
+    pub const BOUND_CARRY_HI_BASE: usize = COMMON_NUM_COLUMNS + 26;
     /// stack 加法的 3 个 ripple-carry bit。
-    pub const STACK_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 37;
-    /// 兼容保留列；rebuy 不修改 addon_pool，因此 active 行必须为 0。
-    pub const ADDON_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 40;
+    pub const STACK_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 29;
     /// RANGE_AMOUNT_BITS 起始列（4×16=64 个 boolean witness）— input_amount 各 limb 的 16-bit 分解（阶段 3 range-check 接线）。
-    pub const RANGE_AMOUNT_BITS_BASE: usize = COMMON_NUM_COLUMNS + 43;
+    pub const RANGE_AMOUNT_BITS_BASE: usize = COMMON_NUM_COLUMNS + 32;
     /// OUTPUT_POST_CHIP_POOL 起始列（4 limb）— 调用后完整桌台锁仓。
-    pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 107;
+    pub const OUTPUT_POST_CHIP_POOL_BASE: usize = COMMON_NUM_COLUMNS + 96;
     /// chip_pool 加法的 3 个 ripple-carry bit。
-    pub const CHIP_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 111;
+    pub const CHIP_POOL_ADD_CARRY_BASE: usize = COMMON_NUM_COLUMNS + 100;
     /// `rebuy` AIR 总列数。
-    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 114;
+    pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 103;
 }
 
 /// `rebuy` 输入参数。
@@ -225,10 +215,6 @@ impl FrameworkEval for RebuyAir {
         let pre_chip_pool_1 = eval.next_trace_mask();
         let pre_chip_pool_2 = eval.next_trace_mask();
         let pre_chip_pool_3 = eval.next_trace_mask();
-        let pre_addon_pool_0 = eval.next_trace_mask();
-        let pre_addon_pool_1 = eval.next_trace_mask();
-        let pre_addon_pool_2 = eval.next_trace_mask();
-        let pre_addon_pool_3 = eval.next_trace_mask();
         // 读取 bound check witness：diff (4 limb) + carry_lo (3) + carry_hi (3)
         let bound_diff_0 = eval.next_trace_mask();
         let bound_diff_1 = eval.next_trace_mask();
@@ -248,51 +234,22 @@ impl FrameworkEval for RebuyAir {
             pre_chip_pool_2,
             pre_chip_pool_3,
         ];
-        let pre_addon_pool = [
-            pre_addon_pool_0,
-            pre_addon_pool_1,
-            pre_addon_pool_2,
-            pre_addon_pool_3,
-        ];
         let amount = input_amount.clone();
         let diff = [bound_diff_0, bound_diff_1, bound_diff_2, bound_diff_3];
         let carry_lo = [carry_lo_0, carry_lo_1, carry_lo_2];
         let carry_hi = [carry_hi_0, carry_hi_1, carry_hi_2];
-        let zero: E::F = M31::from(0u32).into();
-        let zero = [zero.clone(), zero.clone(), zero.clone(), zero];
-        for __c in common.bound_check_4limb(&chip_pool, &zero, &amount, &diff, &carry_lo, &carry_hi)
-        {
+        for __c in common.bound_check_4limb(&chip_pool, &amount, &diff, &carry_lo, &carry_hi) {
             eval.add_constraint(__c);
         }
 
-        // 约束 8：addon_pool 不变。rebuy 立即进入 stack，不属于 pending addon。
-        let post_addon_pool: [E::F; 4] = [
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-        ];
+        // 约束 8：stack 增加 amount。
         let stack_add_carry: [E::F; 3] = [
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-            eval.next_trace_mask(),
-        ];
-        let addon_pool_add_carry: [E::F; 3] = [
             eval.next_trace_mask(),
             eval.next_trace_mask(),
             eval.next_trace_mask(),
         ];
         for __c in common.limb4_delta(&pre_stack, &post_stack, &input_amount, &stack_add_carry) {
             eval.add_constraint(__c);
-        }
-        for i in 0..4 {
-            eval.add_constraint(
-                is_active.clone() * (post_addon_pool[i].clone() - pre_addon_pool[i].clone()),
-            );
-        }
-        // 旧布局保留的 carry 列不得成为自由 witness。
-        for carry in addon_pool_add_carry {
-            eval.add_constraint(is_active.clone() * carry);
         }
 
         // 约束 9（阶段 3 range-check 接线样例）：input_amount 各 limb ∈ [0, 65536)。
@@ -361,20 +318,14 @@ pub struct RebuyRow {
     pub input_amount_inv: M31,
     /// PRE_CHIP_POOL（4 limb）— 全局上界检查用。
     pub pre_chip_pool: [M31; 4],
-    /// PRE_ADDON_POOL（4 limb）— addon_pool 不变性约束用。
-    pub pre_addon_pool: [M31; 4],
     /// BOUND_DIFF（4 limb）— diff = MAX_TOTAL_BET - (chip_pool + amount)。
     pub bound_diff: [M31; 4],
     /// BOUND_CARRY_LO（3 个低位 bit）— 2-bit carry 分解的 lo 部分。
     pub bound_carry_lo: [M31; 3],
     /// BOUND_CARRY_HI（3 个高位 bit）— 2-bit carry 分解的 hi 部分。
     pub bound_carry_hi: [M31; 3],
-    /// OUTPUT_POST_ADDON_POOL（4 limb）— 调用后 addon_pool，必须与 pre 相同。
-    pub post_addon_pool: [M31; 4],
     /// stack 加法的 3 个 ripple-carry bit。
     pub stack_add_carry: [M31; 3],
-    /// 兼容保留列；active 行固定为 0。
-    pub addon_pool_add_carry: [M31; 3],
     /// RANGE_AMOUNT_BITS（4×16 个 boolean）— input_amount 各 limb 的 16-bit 分解（阶段 3 range-check 接线）。
     pub range_amount_bits: [[M31; 16]; 4],
     /// OUTPUT_POST_CHIP_POOL（4 limb）— 调用后完整桌台锁仓。
@@ -390,7 +341,6 @@ impl RebuyRow {
     /// - `input`: rebuy 输入（seat_index + amount）
     /// - `pre_stack`: 调用前的 stack 值
     /// - `pre_chip_pool` / `post_chip_pool`: 调用前后的完整桌台锁仓
-    /// - `pre_addon_pool` / `post_addon_pool`: 调用前后的 pending addon 总额（rebuy 中不变）
     /// - 其他通用字段（state_root / table_id / hand_id / version / round_state / pot）
     #[must_use]
     pub fn active(
@@ -398,8 +348,6 @@ impl RebuyRow {
         pre_stack: u64,
         pre_chip_pool: u64,
         post_chip_pool: u64,
-        pre_addon_pool: u64,
-        post_addon_pool: u64,
         pre_state_root: [M31; 4],
         post_state_root: [M31; 4],
         table_id: u64,
@@ -422,17 +370,13 @@ impl RebuyRow {
             .checked_add(input.amount)
             .expect("rebuy chip_pool addition must not overflow");
         debug_assert_eq!(post_chip_pool, total, "rebuy post chip_pool mismatch");
-        debug_assert_eq!(
-            post_addon_pool, pre_addon_pool,
-            "rebuy must not change addon_pool"
-        );
         debug_assert!(
             total <= MAX_TOTAL_BET,
             "rebuy bound check failed: {total} > {MAX_TOTAL_BET}"
         );
         let diff = MAX_TOTAL_BET - total;
         let (bound_carry_lo, bound_carry_hi) =
-            compute_bound_carries(pre_chip_pool, 0, input.amount, diff);
+            compute_bound_carries(pre_chip_pool, input.amount, diff);
         Self {
             common: CommonRow::active(
                 MethodKind::Rebuy,
@@ -459,14 +403,11 @@ impl RebuyRow {
             // Gap 9：amount 四个 limb 之和的乘法逆元。
             input_amount_inv,
             pre_chip_pool: u64_to_m31_limbs(pre_chip_pool),
-            pre_addon_pool: u64_to_m31_limbs(pre_addon_pool),
             bound_diff: u64_to_m31_limbs(diff),
             bound_carry_lo,
             bound_carry_hi,
             // rebuy 不修改 pending addon 记账。
-            post_addon_pool: u64_to_m31_limbs(post_addon_pool),
             stack_add_carry: compute_add_carries(pre_stack, input.amount),
-            addon_pool_add_carry: [ZERO; 3],
             // 阶段 3 range-check 接线：input_amount 的 16-bit 分解
             range_amount_bits: u64_to_bits4x16(input.amount),
             post_chip_pool: u64_to_m31_limbs(post_chip_pool),
@@ -486,13 +427,10 @@ impl RebuyRow {
             input_seat_occupied: ZERO,
             input_amount_inv: ZERO,
             pre_chip_pool: [ZERO; 4],
-            pre_addon_pool: [ZERO; 4],
             bound_diff: [ZERO; 4],
             bound_carry_lo: [ZERO; 3],
             bound_carry_hi: [ZERO; 3],
-            post_addon_pool: [ZERO; 4],
             stack_add_carry: [ZERO; 3],
-            addon_pool_add_carry: [ZERO; 3],
             range_amount_bits: [[ZERO; 16]; 4],
             post_chip_pool: [ZERO; 4],
             chip_pool_add_carry: [ZERO; 3],
@@ -510,13 +448,10 @@ impl RebuyRow {
         v.push(self.input_seat_occupied);
         v.push(self.input_amount_inv);
         v.extend_from_slice(&self.pre_chip_pool);
-        v.extend_from_slice(&self.pre_addon_pool);
         v.extend_from_slice(&self.bound_diff);
         v.extend_from_slice(&self.bound_carry_lo);
         v.extend_from_slice(&self.bound_carry_hi);
-        v.extend_from_slice(&self.post_addon_pool);
         v.extend_from_slice(&self.stack_add_carry);
-        v.extend_from_slice(&self.addon_pool_add_carry);
         // 阶段 3 range-check：4×16 = 64 个 bit witness
         for limb_bits in &self.range_amount_bits {
             v.extend_from_slice(limb_bits);

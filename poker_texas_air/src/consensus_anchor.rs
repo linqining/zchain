@@ -367,8 +367,8 @@ pub fn build_anchor_from_consensus(
         first_call_seq,
         pre_state_root,
         post_state_root,
-        pre_table.version,
-        post_table.version,
+        u64::from(pre_table.call_seq),
+        u64::from(post_table.call_seq),
         dispatch_call_digests,
     )
 }
@@ -527,7 +527,7 @@ mod tests {
         let (validators, secrets) = make_validators(5); // 2/3 of 5 = 4
         let table_id = ObjectID::new([0u8; 20], 1);
 
-        // 构造两个 table snapshot（pre/post），version 不同。
+        // 构造两个 table snapshot（pre/post），call_seq 不同。
         let mut table = TexasPokerTable::new(
             table_id,
             "test".into(),
@@ -537,8 +537,7 @@ mod tests {
             100,
         );
         table.hand_id = 1;
-        table.call_seq = 5;
-        table.version = 10;
+        table.call_seq = 10;
 
         // pre snapshot：插入 ObjectDb 取 state_root + inclusion path。
         let mut pre_db = ObjectStore::new();
@@ -553,9 +552,8 @@ mod tests {
         let pre_state_root = pre_db.state_root();
         let pre_path = pre_db.prove(&table_id).unwrap();
 
-        // post snapshot：version +1，单独 ObjectDb。
+        // post snapshot：call_seq +1，单独 ObjectDb。
         let mut post_table = table.clone();
-        post_table.version = 11;
         post_table.call_seq += 1;
         let mut post_db = ObjectStore::new();
         let post_obj = Object::new(
@@ -638,7 +636,10 @@ mod tests {
 
     #[test]
     fn empty_calls_rejected() {
-        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         let result = build_anchor_from_consensus(
             &f.pre_header,
             &f.pre_snapshot,
@@ -657,7 +658,10 @@ mod tests {
 
     #[test]
     fn valid_consensus_anchor_builds_and_matches() {
-        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         let anchor = build_anchor_from_consensus(
             &f.pre_header,
             &f.pre_snapshot,
@@ -680,7 +684,10 @@ mod tests {
 
     #[test]
     fn serialized_consensus_material_rebuilds_the_same_authenticated_anchor() {
-        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         let material = ConsensusAnchorMaterial {
             pre_block_header: f.pre_header.clone(),
             pre_snapshot: f.pre_snapshot.clone(),
@@ -707,7 +714,10 @@ mod tests {
 
     #[test]
     fn declared_lane_mismatch_is_rejected() {
-        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let mut f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         f.calls[0].lane = TxLane::Public;
 
         let result = build_anchor_from_consensus(
@@ -728,7 +738,10 @@ mod tests {
 
     #[test]
     fn non_texas_contract_is_rejected_even_with_valid_tx_inclusion() {
-        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         let mut tx = f.calls[0].tx.clone();
         tx.contract_call.as_mut().unwrap().contract_id = ObjectID::new([0xEE; 20], 99);
         let (gameturn_tx_root, paths) = build_tx_smt(std::slice::from_ref(&tx));
@@ -753,7 +766,10 @@ mod tests {
 
     #[test]
     fn post_call_sequence_mismatch_is_rejected() {
-        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let mut f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         let mut post_table = f.post_snapshot.table().unwrap();
         post_table.call_seq += 1;
 
@@ -799,7 +815,10 @@ mod tests {
 
     #[test]
     fn unauthenticated_post_header_is_rejected() {
-        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let mut f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         // A caller must not be able to select a different terminal root while
         // reusing the original post-block certificate.
         f.post_header.state_root = [0xA5; 32];
@@ -825,7 +844,10 @@ mod tests {
         // 这里直接验证：构造时 digest 会被重算，所以 anchor 本身会「成功」但 digest 不同。
         // 真正的安全门在 Orchestrator::prove_and_verify_chain_against（见下个测试）。
         // 本测试验证：传入与 selector/args 一致的 tx 时 digest 正确。
-        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         let anchor = build_anchor_from_consensus(
             &f.pre_header,
             &f.pre_snapshot,
@@ -844,7 +866,10 @@ mod tests {
 
     #[test]
     fn included_transaction_with_invalid_signature_is_rejected() {
-        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let mut f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         f.calls[0].tx.signature = vec![0u8; 65];
 
         // Rebuild the authenticated tx-root around the malformed transaction.
@@ -887,14 +912,17 @@ mod tests {
 
     #[test]
     fn tampered_pre_table_inclusion_rejected() {
-        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         // SMT inclusion 证明 = (root, key, value, path)；path 不含 leaf value，value 由
         // verifier 现算。因此篡改 snapshot 的 data（改变 leaf_hash）会让 verify 失败。
-        // 注意：必须保留合法 borsh 以便 table() 解析，故只改不影响解析的 version 字段
-        // 的副本——这里直接换一个版本不同的 table 重新编码塞进同一 object。
+        // 注意：必须保留合法 borsh 以便 table() 解析，故只改不影响 canonicality 的
+        // call_seq 字段，再把不同 table 重新编码塞进同一 object。
         let mut tampered = f.pre_snapshot.clone();
         let mut bad_table = borsh::from_slice::<TexasPokerTable>(&tampered.object.data).unwrap();
-        bad_table.version = 999; // 与 pre-root 里记录的 version 不同
+        bad_table.call_seq = 999; // 与 pre-root 里记录的 call_seq 不同
         tampered.object.data = borsh::to_vec(&bad_table).unwrap();
         let result = build_anchor_from_consensus(
             &f.pre_header,
@@ -914,7 +942,10 @@ mod tests {
 
     #[test]
     fn cert_signature_failure_rejected() {
-        let f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         // 用错误的 validator 集（签名对不上）。
         let (wrong_validators, _) = make_validators(5);
         let result = build_anchor_from_consensus(
@@ -935,7 +966,10 @@ mod tests {
 
     #[test]
     fn cert_field_mismatch_rejected() {
-        let mut f = build_fixture([0xCCu8; 32], vec![1u8]);
+        let mut f = build_fixture(
+            poker_l1::vm::contracts::texas_poker::dispatch::selectors::start_hand(),
+            vec![],
+        );
         // 篡改 header 的 gameturn_tx_root（与 cert 不一致）。
         f.pre_header.gameturn_tx_root = [0xFFu8; 32];
         let result = build_anchor_from_consensus(

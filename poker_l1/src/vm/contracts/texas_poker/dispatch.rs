@@ -35,7 +35,7 @@ use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 
-use super::constants::FOLD_REASON_FORCE_ADMIN;
+use super::constants::{FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
 use super::events::TexasPokerEvent;
 use super::state_machine;
 use super::types::{SeatStatus, TexasPokerTable};
@@ -60,7 +60,7 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
     out
 }
 
-/// 17 个方法选择器常量。
+/// Historical archive selectors plus fresh canonical selector aliases.
 ///
 /// 所有方法名使用 snake_case，与 Move 端 entry function 名一一对应。
 pub mod selectors {
@@ -103,8 +103,8 @@ pub mod selectors {
 
     /// `advance_deadline` — canonical permissionless timeout entry.
     ///
-    /// The legacy `tick` selector remains accepted as an ABI alias and both selectors lower to
-    /// the same canonical `Tick` archive/proof tag.
+    /// The legacy `tick` selector remains archive-decodable and both selectors lower to the same
+    /// canonical `Tick` proof tag, but fresh precompile calls accept only this selector.
     pub fn advance_deadline() -> [u8; 32] {
         compute_method_selector("advance_deadline")
     }
@@ -122,6 +122,14 @@ pub mod selectors {
     /// `kick_player` — 踢出玩家（管理员操作）。
     pub fn kick_player() -> [u8; 32] {
         compute_method_selector("kick_player")
+    }
+
+    /// `kick_player_v2` — canonical administrator removal with an implicit `Admin` cause.
+    ///
+    /// The historical selector allowed the caller to choose timeout/reconstruct event causes.
+    /// Fresh consensus calls carry only the target seat; archive replay keeps the old payload.
+    pub fn kick_player_v2() -> [u8; 32] {
+        compute_method_selector("kick_player_v2")
     }
 
     /// `submit_shuffle_v2` — 玩家提交洗牌结果（第二手及以后）。
@@ -242,9 +250,9 @@ pub mod selectors {
     /// Selectors accepted for new consensus execution under fresh-deck-per-hand semantics.
     ///
     /// Retired selectors remain in [`all`] for archive decoding. New consensus execution rejects
-    /// `join_and_shuffle`, WAITING-only `leave_with_proof`, `auto_fold`, and the unsafe ordinary
-    /// public `reset_for_next_hand`. `advance_deadline` is the canonical timeout entry; `tick`
-    /// remains an accepted wire alias during migration.
+    /// `join_and_shuffle`, WAITING-only `leave_with_proof`, `auto_fold`, the legacy `tick` wire
+    /// alias, and the unsafe ordinary public `reset_for_next_hand`. `advance_deadline` is the only
+    /// canonical timeout entry for fresh consensus calls; historical `tick` remains archive-only.
     #[must_use]
     pub fn active() -> Vec<[u8; 32]> {
         let mut selectors: Vec<_> = all()
@@ -252,11 +260,14 @@ pub mod selectors {
             .filter(|selector| {
                 selector != &join_and_shuffle()
                     && selector != &leave_with_proof()
+                    && selector != &tick()
                     && selector != &auto_fold()
+                    && selector != &kick_player()
                     && selector != &reset_for_next_hand()
             })
             .collect();
         selectors.push(advance_deadline());
+        selectors.push(kick_player_v2());
         selectors
     }
 }
@@ -394,7 +405,7 @@ impl CanonicalCommand {
             Self::LeaveTable
         } else if selector == &selectors::start_hand() {
             Self::StartHand
-        } else if selector == &selectors::tick() || selector == &selectors::advance_deadline() {
+        } else if selector == &selectors::advance_deadline() {
             Self::Tick
         } else if selector == &selectors::fold() {
             Self::Fold
@@ -406,7 +417,7 @@ impl CanonicalCommand {
             Self::Raise
         } else if selector == &selectors::force_fold() {
             Self::ForceFold
-        } else if selector == &selectors::kick_player() {
+        } else if selector == &selectors::kick_player_v2() {
             Self::KickPlayer
         } else if selector == &selectors::addon() {
             Self::Addon
@@ -438,8 +449,12 @@ impl CanonicalCommand {
             Some(Self::LeaveWithProof)
         } else if selector == &selectors::auto_fold() {
             Some(Self::AutoFold)
+        } else if selector == &selectors::tick() {
+            Some(Self::Tick)
         } else if selector == &selectors::reset_for_next_hand() {
             Some(Self::ResetForNextHand)
+        } else if selector == &selectors::kick_player() {
+            Some(Self::KickPlayer)
         } else {
             Self::from_selector(selector)
         }
@@ -764,7 +779,9 @@ pub fn dispatch(
         CanonicalCommand::Tick => dispatch_tick(context, table, selector, args, &mut events),
         CanonicalCommand::AutoFold => dispatch_auto_fold(context, table, args, &mut events),
         CanonicalCommand::ForceFold => dispatch_force_fold(context, table, args, &mut events),
-        CanonicalCommand::KickPlayer => dispatch_kick_player(context, table, args, &mut events),
+        CanonicalCommand::KickPlayer => {
+            dispatch_kick_player(context, table, selector, args, &mut events)
+        }
         CanonicalCommand::SubmitShuffleV2 => {
             dispatch_submit_shuffle_v2(context, table, args, &mut events)
         }
@@ -802,6 +819,21 @@ pub fn dispatch(
         return Err(error);
     }
 
+    // Action transitions intentionally disarm the previous actor's deadline while
+    // changing the turn.  The persisted tagged-union phase must never cross the
+    // codec boundary with an unarmed active deadline, so re-arm the newly active
+    // betting actor from the authenticated consensus timestamp before serializing
+    // the dispatch output.
+    if matches!(
+        table.hand_phase,
+        super::types::HandPhase::Betting { deadline_ms: 0, .. }
+    ) {
+        if let Err(error) = table.arm_betting_deadline(context.block_timestamp) {
+            *table = pre_table.clone();
+            return Err(error);
+        }
+    }
+
     // 证明任务元数据只在成功且真正改变状态的 dispatch 上推进。
     // 使用 pre_table 作为计数基准，防止 create_table 覆写结构时把序号重置为 0。
     let state_changed = *table != pre_table;
@@ -810,10 +842,6 @@ pub fn dispatch(
             .call_seq
             .checked_add(1)
             .ok_or_else(|| PokerL1Error::Serialization("texas_poker call_seq overflow".into()))?;
-        let next_version = pre_table
-            .version
-            .checked_add(1)
-            .ok_or_else(|| PokerL1Error::Serialization("texas_poker version overflow".into()))?;
         let hand_started = events
             .iter()
             .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }));
@@ -826,10 +854,6 @@ pub fn dispatch(
             pre_table.hand_id
         };
         table.call_seq = next_call_seq;
-        // Version is an external-command sequence, not a count of deterministic micro-stages.
-        // Internal helpers may still bump while the migration is in progress; the atomic
-        // dispatch boundary canonicalizes every committed command to exactly one increment.
-        table.version = next_version;
         table.hand_id = next_hand_id;
     }
     log_events(&events);
@@ -1017,6 +1041,16 @@ fn build_method_input(
             MethodInput::Kick {
                 seat_index: a.seat_index,
                 reason: a.reason,
+            },
+        ));
+    }
+    if selector == &selectors::kick_player_v2() {
+        let a: SeatIndexArgs = decode_args(args, "kick_player_v2 prove task")?;
+        return Ok((
+            K_KICK,
+            MethodInput::Kick {
+                seat_index: a.seat_index,
+                reason: KICK_REASON_ADMIN,
             },
         ));
     }
@@ -1272,10 +1306,21 @@ pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Resul
             command as u8
         )));
     }
-    let canonical_args = if command == CanonicalCommand::Tick {
-        Vec::new()
-    } else {
-        args.to_vec()
+    let canonical_args = match command {
+        CanonicalCommand::Tick => Vec::new(),
+        CanonicalCommand::KickPlayer if selector == &selectors::kick_player_v2() => {
+            let input: SeatIndexArgs = decode_args(args, "kick_player_v2 canonical payload")?;
+            borsh::to_vec(&KickPlayerArgs {
+                seat_index: input.seat_index,
+                reason: KICK_REASON_ADMIN,
+            })
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!(
+                    "kick_player_v2 canonical payload borsh: {error}"
+                ))
+            })?
+        }
+        _ => args.to_vec(),
     };
     Ok((derived_tag, canonical_args))
 }
@@ -1417,7 +1462,6 @@ fn dispatch_create_table(
         input.small_blind,
         input.big_blind,
     );
-    table.bump_version();
     Ok(())
 }
 
@@ -1580,7 +1624,6 @@ fn dispatch_join_table(
         is_waiting: false,
         active_count_after,
     });
-    table.bump_version();
     Ok(())
 }
 
@@ -1613,14 +1656,8 @@ fn dispatch_leave_table(
         .chip_pool
         .checked_sub(refund_amt)
         .ok_or_else(|| PokerL1Error::Serialization("leave_table chip_pool underflow".into()))?;
-    let post_addon_pool = table
-        .addon_pool
-        .checked_sub(seat.pending_addon)
-        .ok_or_else(|| PokerL1Error::Serialization("leave_table addon_pool underflow".into()))?;
     let player = seat.player;
     if refund_amt > 0 {
-        // 同步扣减 addon_pool（资金流出）
-        table.addon_pool = post_addon_pool;
         // chip_pool 是总锁仓，必须扣除 stack + pending_addon 的完整退款。
         table.chip_pool = post_chip_pool;
     }
@@ -1641,7 +1678,6 @@ fn dispatch_leave_table(
         seat_index,
         player,
     });
-    table.bump_version();
     Ok(())
 }
 
@@ -1732,20 +1768,28 @@ fn dispatch_force_fold(
     state_machine::apply_fold_internal(table, input.seat_index, FOLD_REASON_FORCE_ADMIN, events)
 }
 
-/// `kick_player` — 踢出玩家。
+/// Kick one player through the canonical administrator path or legacy archive path.
 ///
-/// P2-1 修复：reason 透传，不再把 `0`（KICK_REASON_TIMEOUT）改写为 KICK_REASON_ADMIN。
-/// 调用方应显式传入正确的 reason 常量。
+/// Fresh `kick_player_v2` calls derive `Admin` here and cannot select an event cause. The
+/// historical selector still replays its persisted reason byte exactly for archive compatibility.
 fn dispatch_kick_player(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
+    selector: &[u8; 32],
     args: &[u8],
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
-    let input: KickPlayerArgs = decode_args(args, "kick_player")?;
-    // P0-2 权限校验：仅 creator 可执行管理类操作。
-    // 注意：reason==0 是合法的 KICK_REASON_TIMEOUT，但在非超时路径由 creator 主动踢人时，
-    // 调用方应传 KICK_REASON_ADMIN。此处不再做 0→ADMIN 的隐式改写。
+    let input = if selector == &selectors::kick_player_v2() {
+        let input: SeatIndexArgs = decode_args(args, "kick_player_v2")?;
+        KickPlayerArgs {
+            seat_index: input.seat_index,
+            reason: KICK_REASON_ADMIN,
+        }
+    } else {
+        decode_args(args, "kick_player")?
+    };
+    // P0-2 权限校验：仅 creator 可执行管理类操作。 Legacy archive replay preserves the
+    // original reason byte; fresh calls always arrive through the fixed Admin branch above.
     if context.caller != table.creator {
         return Err(PokerL1Error::Serialization(format!(
             "kick_player: caller {:?} is not table creator",
@@ -1753,7 +1797,6 @@ fn dispatch_kick_player(
         )));
     }
     state_machine::kick_player_internal(table, input.seat_index, input.reason, events)?;
-    table.bump_version();
     Ok(())
 }
 
@@ -1927,8 +1970,8 @@ fn dispatch_addon(
 /// 调用 `state_machine::apply_rebuy`：直接改 `stack`（影响下一动作可用筹码）。
 ///
 /// 资金来源与 `addon` 一样由 Texas Poker precompile 消费 NativeCoin UTXO；
-/// rebuy 金额立即进入 `stack` 和完整 TableVault `chip_pool`，不进入
-/// 仅记录 pending addon 子集的 `addon_pool`。
+/// rebuy 金额立即进入 `stack` 和完整 TableVault `chip_pool`；pending addon
+/// 总额由 seat ledger 唯一派生，不再保存独立汇总。
 fn dispatch_rebuy(
     context: &DispatchContext,
     table: &mut TexasPokerTable,
@@ -2039,8 +2082,8 @@ mod tests {
             let command = CanonicalCommand::from_selector(&selector).expect("known selector");
             tags.insert(command.method_tag());
         }
-        assert_eq!(selectors::active().len(), 20);
-        assert_eq!(tags.len(), 19, "tick and advance_deadline share one tag");
+        assert_eq!(selectors::active().len(), 19);
+        assert_eq!(tags.len(), 19);
         assert!(!tags.contains(&(CanonicalCommand::JoinAndShuffle as u8)));
         assert!(!tags.contains(&(CanonicalCommand::LeaveWithProof as u8)));
         assert!(!tags.contains(&(CanonicalCommand::AutoFold as u8)));
@@ -2049,6 +2092,12 @@ mod tests {
             CanonicalCommand::from_selector(&selectors::advance_deadline()),
             Some(CanonicalCommand::Tick)
         );
+        assert_eq!(
+            CanonicalCommand::from_selector(&selectors::kick_player_v2()),
+            Some(CanonicalCommand::KickPlayer)
+        );
+        assert!(CanonicalCommand::from_selector(&selectors::tick()).is_none());
+        assert!(CanonicalCommand::from_selector(&selectors::kick_player()).is_none());
         assert!(CanonicalCommand::from_selector(&selectors::join_and_shuffle()).is_none());
         assert!(CanonicalCommand::from_selector(&selectors::leave_with_proof()).is_none());
         assert!(CanonicalCommand::from_selector(&selectors::auto_fold()).is_none());
@@ -2071,11 +2120,30 @@ mod tests {
             Some(CanonicalCommand::AutoFold)
         );
         assert_eq!(
+            CanonicalCommand::from_archive_selector(&selectors::tick()),
+            Some(CanonicalCommand::Tick)
+        );
+        assert_eq!(
+            CanonicalCommand::from_archive_selector(&selectors::kick_player()),
+            Some(CanonicalCommand::KickPlayer)
+        );
+        assert_eq!(
             CanonicalCommand::from_archive_selector(&selectors::reset_for_next_hand()),
             Some(CanonicalCommand::ResetForNextHand)
         );
         assert!(CanonicalCommand::from_selector(&selectors::join_and_shuffle()).is_none());
         assert!(CanonicalCommand::from_selector(&selectors::leave_with_proof()).is_none());
+    }
+
+    #[test]
+    fn kick_player_v2_removes_caller_selected_reason_from_canonical_payload() {
+        let args = borsh::to_vec(&SeatIndexArgs { seat_index: 3 }).unwrap();
+        let (tag, canonical) =
+            canonical_command_parts(&selectors::kick_player_v2(), &args).unwrap();
+        assert_eq!(tag, CanonicalCommand::KickPlayer as u8);
+        let canonical: KickPlayerArgs = borsh::from_slice(&canonical).unwrap();
+        assert_eq!(canonical.seat_index, 3);
+        assert_eq!(canonical.reason, KICK_REASON_ADMIN);
     }
 
     #[test]
@@ -2202,7 +2270,6 @@ mod tests {
         table.seats[0].stack = 10;
         table.seats[0].pending_addon = 5;
         table.chip_pool = 9;
-        table.addon_pool = 5;
         let before = table.clone();
         let mut events = vec![];
         let args = borsh::to_vec(&LeaveTableArgs { seat_index: 0 }).unwrap();
@@ -2989,7 +3056,9 @@ mod tests {
                 c1: g,
                 c2: g, // 占位，skip_remask=true 不验证
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
         table
     }
 
@@ -3572,7 +3641,9 @@ mod tests {
         let g = G1Projective::generator();
         table.deck_state.encrypted = (0..52)
             .map(|_| ElGamalCiphertext { c1: g, c2: g })
-            .collect();
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
         // Prior-round pot plus live current-round bets. Terminal fold must
         // collect the live bets before payout instead of clearing them in reset.
         table.pot = 200;

@@ -726,8 +726,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
         table_id: task.table_id,
         hand_id: task.hand_id,
         call_seq: task.call_seq,
-        pre_version: task.pre_table.version,
-        post_version: task.post_table.version,
+        pre_version: u64::from(task.pre_table.call_seq),
+        post_version: u64::from(task.post_table.call_seq),
         dispatch_call_digest: [0u8; 32],
         dispatch_call: None,
         precompile_binding: None,
@@ -782,8 +782,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
                 task.pre_table.shuffle_state().completed_mask.count_ones() as u8,
                 task.post_table.shuffle_state().completed_mask.count_ones() as u8,
             );
@@ -797,8 +797,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 table_id: task.table_id,
                 hand_id: task.hand_id,
                 call_seq: task.call_seq,
-                pre_version: task.pre_table.version,
-                post_version: task.post_table.version,
+                pre_version: u64::from(task.pre_table.call_seq),
+                post_version: u64::from(task.post_table.call_seq),
             };
             public_inputs.precompile_binding = Some(binding.clone());
             Ok(PreparedMethod::Join {
@@ -878,8 +878,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
                 task.post_table.shuffle_state().completed_mask.count_ones() as u8,
             );
             row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
@@ -892,8 +892,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 table_id: task.table_id,
                 hand_id: task.hand_id,
                 call_seq: task.call_seq,
-                pre_version: task.pre_table.version,
-                post_version: task.post_table.version,
+                pre_version: u64::from(task.pre_table.call_seq),
+                post_version: u64::from(task.post_table.call_seq),
             };
             public_inputs.precompile_binding = Some(binding.clone());
             Ok(PreparedMethod::Shuffle {
@@ -959,8 +959,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
             );
             let air = SubmitReconstructDeckAir {
                 log_size: MIN_LOG_SIZE,
@@ -970,8 +970,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 table_id: task.table_id,
                 hand_id: task.hand_id,
                 call_seq: task.call_seq,
-                pre_version: task.pre_table.version,
-                post_version: task.post_table.version,
+                pre_version: u64::from(task.pre_table.call_seq),
+                post_version: u64::from(task.post_table.call_seq),
             };
             public_inputs.precompile_binding = Some(binding.clone());
             Ok(PreparedMethod::Reconstruction {
@@ -1012,7 +1012,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             let call_context = call_context(task, *seat_index, &public_inputs);
             let expected_request = LeaveDleqVerifyRequest::new(
                 call_context,
-                task.pre_table.deck_state.encrypted.clone(),
+                task.pre_table.deck_state.encrypted.to_vec(),
                 args.output_cards,
                 player_pk,
                 args.leave_proof,
@@ -1042,8 +1042,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
                 post_completed_count,
             );
             row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
@@ -1056,8 +1056,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 table_id: task.table_id,
                 hand_id: task.hand_id,
                 call_seq: task.call_seq,
-                pre_version: task.pre_table.version,
-                post_version: task.post_table.version,
+                pre_version: u64::from(task.pre_table.call_seq),
+                post_version: u64::from(task.post_table.call_seq),
             };
             public_inputs.precompile_binding = Some(binding.clone());
             Ok(PreparedMethod::Leave {
@@ -1107,7 +1107,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 .pk;
             let expected_request = LeaveDleqVerifyRequest::new(
                 call_context(task, *seat_index, &public_inputs),
-                task.pre_table.deck_state.encrypted.clone(),
+                task.pre_table.deck_state.encrypted.to_vec(),
                 args.output_cards,
                 player_pk,
                 args.fold_proof,
@@ -1130,8 +1130,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
                 task.pre_table.round_state(),
                 task.post_table.round_state(),
                 task.pre_table.pot,
@@ -1145,8 +1145,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 table_id: task.table_id,
                 hand_id: task.hand_id,
                 call_seq: task.call_seq,
-                pre_version: task.pre_table.version,
-                post_version: task.post_table.version,
+                pre_version: u64::from(task.pre_table.call_seq),
+                post_version: u64::from(task.post_table.call_seq),
             };
             public_inputs.precompile_binding = Some(binding.clone());
             Ok(PreparedMethod::Fold {
@@ -1204,8 +1204,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 task.table_id,
                 task.hand_id,
                 task.call_seq,
-                task.pre_table.version,
-                task.post_table.version,
+                u64::from(task.pre_table.call_seq),
+                u64::from(task.post_table.call_seq),
                 post_revealed_count,
             );
             row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
@@ -1218,8 +1218,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 table_id: task.table_id,
                 hand_id: task.hand_id,
                 call_seq: task.call_seq,
-                pre_version: task.pre_table.version,
-                post_version: task.post_table.version,
+                pre_version: u64::from(task.pre_table.call_seq),
+                post_version: u64::from(task.post_table.call_seq),
             };
             public_inputs.precompile_binding = Some(binding.clone());
             Ok(PreparedMethod::Reveal {
@@ -1345,13 +1345,15 @@ fn validate_route(
 }
 
 fn reveal_version_increment(task: &ProveTask) -> TexasAirResult<u8> {
-    let expected_post_version = task.pre_table.version.checked_add(1).ok_or_else(|| {
-        TexasAirError::SpecViolation("submit_player_reveal_tokens pre-version overflow".into())
-    })?;
-    if task.post_table.version != expected_post_version {
+    let expected_post_version = u64::from(task.pre_table.call_seq)
+        .checked_add(1)
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation("submit_player_reveal_tokens pre-version overflow".into())
+        })?;
+    if u64::from(task.post_table.call_seq) != expected_post_version {
         return Err(TexasAirError::SpecViolation(format!(
             "submit_player_reveal_tokens: expected one external-command version increment to {expected_post_version}, got {}",
-            task.post_table.version
+            u64::from(task.post_table.call_seq)
         )));
     }
     Ok(1)

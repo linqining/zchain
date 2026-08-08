@@ -476,7 +476,7 @@ mod tests {
         );
         table.hand_id = 9;
         table.call_seq = 17;
-        table.version = 23;
+        table.call_seq = 23;
         table.pot = 65_537;
         table.seats[2].player = [0x22; 20];
         table.seats[2].stack = 1_000_000;
