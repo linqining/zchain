@@ -1,11 +1,11 @@
 //! # poker_texas_air — Texas Poker method AIR + host verification
 //!
-//! VM 当前注册 19 个 active selector；AIR 层保留 21 个稳定 MethodKind（含两个仅内部兼容 tag）。批量
+//! VM 与 AIR 当前统一保留 19 个 active MethodKind；退休 discriminant 5/10/15/16 均 fail-closed。批量
 //! Aggregator 仍是 descriptor-only PoC，不能作为递归压缩证明使用。
 //!
 //! ## 架构分层
 //!
-//! - **Layer 0**: Method AIRs（21 个稳定 discriminant）
+//! - **Layer 0**: Method AIRs（19 个 active stable discriminant）
 //! - **Layer 1**: Host verification receipts（完整 VM dispatch replay 后逐 proof 原生验证）
 //! - **Layer 2**: Host-verified outer precompile（O(N) child replay + final digest AIR）
 //! - **Layer 3**: Texas 自有递归协议（尚未实现，生产验证入口保持关闭）

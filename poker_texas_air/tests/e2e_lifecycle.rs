@@ -1,4 +1,4 @@
-//! E2E 测试 — lifecycle 模块（join_table/leave_table/start_hand/advance_deadline/reset_for_next_hand）
+//! E2E 测试 — lifecycle 模块（join_table/leave_table/start_hand/advance_deadline）
 //! prove + verify + soundness。
 //!
 //! 验证流程：
@@ -17,9 +17,6 @@ use poker_texas_air::airs::lifecycle::advance_deadline::{
 use poker_texas_air::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use poker_texas_air::airs::lifecycle::leave_table::{
     LeaveTableAir, LeaveTableInput, LeaveTableRow,
-};
-use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
-    ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use poker_texas_air::authorization_binding::AdminAuthorizationAirBinding;
@@ -1087,137 +1084,6 @@ fn test_soundness_tick_tampered_rake() {
     );
 }
 
-// ========== reset_for_next_hand AIR ==========
-
-/// E2E: reset_for_next_hand → trace → prove → verify（happy path）。
-#[test]
-fn test_e2e_reset_for_next_hand_prove_verify() {
-    // VM 允许显式重置尚未开局的 WAITING/NONE 桌台。
-    let input = ResetForNextHandInput {
-        shuffle_phase: 0,
-        authorization: synthetic_admin_authorization(),
-    };
-    let row = ResetForNextHandRow::active(
-        &input,
-        0, // pre_pending_addon
-        zero_root(),
-        one_root(),
-        42,
-        0,
-        5,
-        0,
-        1,
-        8, // pre = SHOWDOWN
-    );
-    let trace = gen_method_trace(
-        ResetForNextHandAir::num_columns(),
-        &row.to_vec(),
-        &ResetForNextHandRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = ResetForNextHandAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 0,
-        call_seq: 5,
-        pre_version: 0,
-        post_version: 1,
-    };
-
-    let proof = prove_method(
-        &trace,
-        air,
-        ResetForNextHandAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5),
-    )
-    .expect("prove 失败");
-    verify_method(proof).expect("verify 失败");
-}
-
-/// Soundness: reset_for_next_hand 无业务输入篡改点（只有空 Input），
-/// 验证 AIR 对 trace 本身的约束（output_new_round_state == 0）有效：
-/// 用正确 AIR 生成 proof 后 verify 应通过 — 这本身已覆盖 happy path。
-/// 由于 reset 的公开输入为空，soundness 通过 happy-path 间接覆盖。
-#[test]
-fn test_soundness_reset_for_next_hand_via_happy_path() {
-    let input = ResetForNextHandInput {
-        shuffle_phase: 1,
-        authorization: synthetic_admin_authorization(),
-    }; // Gap 6：∈ {1,2,3}（非 NONE）
-    let row = ResetForNextHandRow::active(&input, 0, zero_root(), one_root(), 42, 0, 5, 0, 1, 8);
-    let trace = gen_method_trace(
-        ResetForNextHandAir::num_columns(),
-        &row.to_vec(),
-        &ResetForNextHandRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = ResetForNextHandAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 0,
-        call_seq: 5,
-        pre_version: 0,
-        post_version: 1,
-    };
-    let proof = prove_method(
-        &trace,
-        air,
-        ResetForNextHandAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5),
-    )
-    .expect("prove 失败");
-    // happy path 验证通过即表明约束系统正常工作
-    verify_method(proof).expect("verify 失败");
-}
-
-/// Soundness: creator authorization receipt digests are constrained by the
-/// reset_for_next_hand AIR rather than trusted as host-only metadata.
-#[test]
-fn test_soundness_reset_for_next_hand_tampered_authorization_digest() {
-    let input = ResetForNextHandInput {
-        shuffle_phase: 1,
-        authorization: synthetic_admin_authorization(),
-    };
-    let mut row =
-        ResetForNextHandRow::active(&input, 0, zero_root(), one_root(), 42, 0, 5, 0, 1, 8);
-    row.authorization.receipt_digest[7] = M31::from(1u32);
-    let trace = gen_method_trace(
-        ResetForNextHandAir::num_columns(),
-        &row.to_vec(),
-        &ResetForNextHandRow::padding().to_vec(),
-    )
-    .expect("trace generation failed");
-
-    let result = prove_method(
-        &trace,
-        ResetForNextHandAir {
-            log_size: trace.log_size,
-            input,
-            pre_state_root: zero_root(),
-            post_state_root: one_root(),
-            table_id: 42,
-            hand_id: 0,
-            call_seq: 5,
-            pre_version: 0,
-            post_version: 1,
-        },
-        ResetForNextHandAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::ResetForNextHand, 42, 0, 5),
-    );
-    assert!(
-        result.is_err(),
-        "tampered reset authorization receipt must not prove"
-    );
-}
-
 // ========== 列数一致性 ==========
 
 /// 单元测试：所有 lifecycle AIR 的列数与常量声明一致。
@@ -1225,7 +1091,7 @@ fn test_soundness_reset_for_next_hand_tampered_authorization_digest() {
 fn test_lifecycle_air_column_consistency() {
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
     use poker_texas_air::airs::lifecycle::{
-        advance_deadline as tick, join_table, leave_table, reset_for_next_hand, start_hand,
+        advance_deadline as tick, join_table, leave_table, start_hand,
     };
 
     // join_table: 通用 + 46 业务
@@ -1252,16 +1118,6 @@ fn test_lifecycle_air_column_consistency() {
     // 再加 lifecycle ABI/branch 两列和完整 request/receipt digest 各 16 列。
     assert_eq!(tick::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 87);
     assert_eq!(TickAir::num_columns(), tick::cols::NUM_COLUMNS);
-
-    // reset_for_next_hand: 通用 + 7 业务（含 POST_PENDING_ADDON 4 limb + Gap 6 shuffle_phase + q witness）= 44
-    assert_eq!(
-        reset_for_next_hand::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 41
-    );
-    assert_eq!(
-        ResetForNextHandAir::num_columns(),
-        reset_for_next_hand::cols::NUM_COLUMNS
-    );
 }
 
 /// 单元测试：MethodKind 的 lifecycle 档位分类正确。
@@ -1274,5 +1130,4 @@ fn test_lifecycle_method_kinds() {
     assert_eq!(MethodKind::LeaveTable.tier(), MethodTier::Lifecycle);
     assert_eq!(MethodKind::StartHand.tier(), MethodTier::Lifecycle);
     assert_eq!(MethodKind::AdvanceDeadline.tier(), MethodTier::Lifecycle);
-    assert_eq!(MethodKind::ResetForNextHand.tier(), MethodTier::Lifecycle);
 }

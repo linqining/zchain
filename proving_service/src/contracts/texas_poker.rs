@@ -718,9 +718,9 @@ mod tests {
         for selector in [
             texas_dispatch::compute_method_selector("join_and_shuffle"),
             texas_dispatch::compute_method_selector("leave_with_proof"),
-            texas_dispatch::selectors::auto_fold(),
+            texas_dispatch::compute_method_selector("auto_fold"),
             texas_dispatch::compute_method_selector("kick_player"),
-            texas_dispatch::selectors::reset_for_next_hand(),
+            texas_dispatch::compute_method_selector("reset_for_next_hand"),
         ] {
             let error = match plugin.dispatch_with_context(&context(creator), &selector, &[]) {
                 Ok(_) => panic!("fresh service calls must reject retired selectors"),

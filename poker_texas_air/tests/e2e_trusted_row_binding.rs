@@ -779,24 +779,10 @@ fn production_verifier_rejects_start_hand_row_attached_to_unrelated_post_table()
 
 #[test]
 fn production_verifier_rejects_retired_reset_selector_before_proving() {
-    let (context, _, pre, _) = make_start_hand_transition();
-    let mut public_inputs = TexasPublicInputs::from_tables(
-        &pre,
-        &pre,
-        MethodKind::ResetForNextHand,
-        pre.id.creation_nonce,
-        pre.hand_id,
-        pre.call_seq,
-    )
-    .unwrap();
-    let error = public_inputs
-        .bind_dispatch_call(
-            context,
-            texas_dispatch::selectors::reset_for_next_hand(),
-            vec![],
-        )
-        .expect_err("retired reset selector must fail before any proof can bind it");
-    assert!(error.to_string().contains("unknown selector"));
+    let selector = texas_dispatch::compute_method_selector("reset_for_next_hand");
+    assert!(texas_dispatch::CanonicalCommand::from_u8(5).is_none());
+    assert!(texas_dispatch::CanonicalCommand::from_selector(&selector).is_none());
+    assert!(MethodKind::from_u8(5).is_none());
 }
 
 #[test]

@@ -6,15 +6,12 @@
 //! module decodes the canonical table preimages, replays the native VM action,
 //! and reconstructs the exact AIR row before Stwo verification.
 
-use poker_l1::vm::contracts::texas_poker::constants::{
-    FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN,
-};
+use poker_l1::vm::contracts::texas_poker::constants::FOLD_REASON_FORCE_ADMIN;
 use poker_l1::vm::contracts::texas_poker::dispatch::SeatIndexArgs;
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{Seat, TexasPokerTable};
 use stwo::core::fields::m31::M31;
 
-use super::auto_fold::{AutoFoldAir, AutoFoldRow};
 use super::bet::{BetAir, BetRow};
 use super::call::{CallAir, CallRow};
 use super::check::{CheckAir, CheckRow};
@@ -42,7 +39,6 @@ enum NativeAction {
     Call { seat_index: u8 },
     Raise { seat_index: u8, total_bet: u64 },
     Bet { seat_index: u8, amount: u64 },
-    AutoFold { seat_index: u8 },
     ForceFold { seat_index: u8 },
 }
 
@@ -54,7 +50,6 @@ impl NativeAction {
             Self::Call { .. } => "call",
             Self::Raise { .. } => "raise",
             Self::Bet { .. } => "bet",
-            Self::AutoFold { .. } => "auto_fold",
             Self::ForceFold { .. } => "force_fold",
         }
     }
@@ -66,7 +61,6 @@ impl NativeAction {
             | Self::Call { seat_index }
             | Self::Raise { seat_index, .. }
             | Self::Bet { seat_index, .. }
-            | Self::AutoFold { seat_index }
             | Self::ForceFold { seat_index } => seat_index,
         }
     }
@@ -134,12 +128,6 @@ fn validate_native_mid_round(
         NativeAction::Bet { seat_index, amount } => {
             state_machine::apply_bet(&mut replay, seat_index, amount, &mut events)
         }
-        NativeAction::AutoFold { seat_index } => state_machine::apply_fold_internal(
-            &mut replay,
-            seat_index,
-            FOLD_REASON_AUTO_TIMEOUT,
-            &mut events,
-        ),
         NativeAction::ForceFold { seat_index } => state_machine::apply_fold_internal(
             &mut replay,
             seat_index,
@@ -486,86 +474,6 @@ pub(crate) fn validate_bet(air: &BetAir, public_inputs: &TexasPublicInputs) -> T
         post_seat.total_bet(),
     );
     validate_row(public_inputs, &row.to_vec(), "bet")
-}
-
-pub(crate) fn validate_auto_fold(
-    air: &AutoFoldAir,
-    public_inputs: &TexasPublicInputs,
-) -> TexasAirResult<()> {
-    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::AutoFold)?;
-    let authorization = AdminAuthorizationBinding::verify_table_creator(
-        MethodKind::AutoFold,
-        &canonical.call.context,
-        &canonical.call.selector,
-        &canonical.call.raw_args,
-        canonical.pre.creator,
-        public_inputs.table_id,
-        public_inputs.hand_id,
-        public_inputs.call_seq,
-        u64::from(canonical.pre.call_seq),
-        u64::from(canonical.post.call_seq),
-        public_inputs.pre_state_root,
-        public_inputs.post_state_root,
-        public_inputs.dispatch_call_digest,
-    )?
-    .air_binding();
-    let tables = validate_native_mid_round(
-        public_inputs,
-        MethodKind::AutoFold,
-        NativeAction::AutoFold {
-            seat_index: air.input.seat_index,
-        },
-        true,
-    )?;
-    let expected_outcome = derive_fold_outcome(
-        &tables.pre,
-        &tables.post,
-        air.input.seat_index,
-        "auto_fold",
-        Some(&tables.composition.settlement),
-    )?;
-    let pre_seat = seat(&tables.pre, air.input.seat_index, "auto_fold")?;
-    let betting_timeout_ms = u64::from(tables.pre.timeout_config.betting_timeout_ms);
-    let deadline = tables
-        .pre
-        .betting_deadline_ms()
-        .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
-        .ok_or_else(|| {
-            TexasAirError::SpecViolation("auto_fold requires an active betting deadline".into())
-        })?;
-    let betting_started_at = deadline.checked_sub(betting_timeout_ms).ok_or_else(|| {
-        TexasAirError::SpecViolation(
-            "auto_fold betting deadline is earlier than its configured timeout".into(),
-        )
-    })?;
-    if air.input.pre_betting_started_at != betting_started_at
-        || air.input.betting_timeout_ms != u64::from(tables.pre.timeout_config.betting_timeout_ms)
-        || air.input.pre_time_bank_ms != u64::from(pre_seat.time_bank_ms())
-        || air.input.pre_betting_started_at == 0
-        || air.input.pre_time_bank_ms != 0
-        || air.input.current_time < deadline
-        || air.input.outcome != expected_outcome
-        || air.input.authorization != authorization
-    {
-        return Err(TexasAirError::SpecViolation(
-            "auto_fold: AIR timeout inputs do not match the canonical table transition".into(),
-        ));
-    }
-    let mut row = AutoFoldRow::active(
-        &air.input,
-        state_root_to_air_limbs(public_inputs.pre_state_root),
-        state_root_to_air_limbs(public_inputs.post_state_root),
-        public_inputs.table_id,
-        public_inputs.hand_id,
-        public_inputs.call_seq,
-        u64::from(tables.pre.call_seq),
-        u64::from(tables.post.call_seq),
-        tables.pre.round_state(),
-        tables.post.round_state(),
-    );
-    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(tables.pre.pot);
-    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(tables.post.pot);
-    validate_row(public_inputs, &row.to_vec(), "auto_fold")
 }
 
 pub(crate) fn validate_force_fold(

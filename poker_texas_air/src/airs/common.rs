@@ -1,6 +1,6 @@
 //! Method AIR 通用列布局与约束宏。
 //!
-//! 所有 21 个稳定 method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
+//! 所有 19 个 active method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
 //! 业务特定列在每个 AIR 的 `*Air` 结构里定义。
 //!
 //! ## 列布局策略
@@ -380,7 +380,7 @@ impl<E: stwo_constraint_framework::EvalAtRow> CommonConstraints<E> {
     /// 3. 再调用本函数传入 `q` 的 trace 值
     ///
     /// 闭合 Lean 审计 Gap 1（RoundStateIsBetting）：阻止恶意 prover 在 `ROUND_WAITING=0`
-    /// 状态下构造 fold/check/call/raise/bet/auto_fold/force_fold 的 trace。
+    /// 状态下构造 fold/check/call/raise/bet/force_fold 的 trace。
     pub fn round_state_is_betting(&self, q: E::F) -> E::F {
         let rs = self.pre_round_state.clone();
         let fourteen: E::F = M31::from(14u32).into();

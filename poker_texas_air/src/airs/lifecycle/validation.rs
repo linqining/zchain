@@ -11,7 +11,6 @@ use stwo::core::fields::m31::M31;
 
 use super::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use super::leave_table::{LeaveTableAir, LeaveTableInput, LeaveTableRow};
-use super::reset_for_next_hand::{ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow};
 use super::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use crate::airs::validation::{validate_canonical_dispatch, validate_row};
 use crate::authorization_binding::AdminAuthorizationBinding;
@@ -105,63 +104,6 @@ pub(crate) fn validate_start_hand(
         u64::from(canonical.pre.call_seq),
         u64::from(canonical.post.call_seq),
     );
-    validate_row(public_inputs, &row.to_vec(), METHOD)
-}
-
-/// Replay canonical `reset_for_next_hand` and reconstruct its complete trusted row.
-pub(crate) fn validate_reset_for_next_hand(
-    air: &ResetForNextHandAir,
-    public_inputs: &TexasPublicInputs,
-) -> TexasAirResult<()> {
-    const METHOD: &str = "reset_for_next_hand";
-    let canonical = validate_canonical_dispatch(public_inputs, MethodKind::ResetForNextHand)?;
-    if !matches!(canonical.method_input, MethodInput::Empty) {
-        return Err(TexasAirError::SpecViolation(
-            "reset_for_next_hand: replayed task has the wrong MethodInput variant".into(),
-        ));
-    }
-
-    let input = ResetForNextHandInput {
-        shuffle_phase: canonical.pre.shuffle_phase(),
-        authorization: AdminAuthorizationBinding::verify_table_creator(
-            MethodKind::ResetForNextHand,
-            &canonical.call.context,
-            &canonical.call.selector,
-            &canonical.call.raw_args,
-            canonical.pre.creator,
-            public_inputs.table_id,
-            public_inputs.hand_id,
-            public_inputs.call_seq,
-            u64::from(canonical.pre.call_seq),
-            u64::from(canonical.post.call_seq),
-            public_inputs.pre_state_root,
-            public_inputs.post_state_root,
-            public_inputs.dispatch_call_digest,
-        )?
-        .air_binding(),
-    };
-    if air.input.shuffle_phase != input.shuffle_phase
-        || air.input.authorization != input.authorization
-    {
-        return Err(TexasAirError::SpecViolation(
-            "reset_for_next_hand: AIR input does not match the canonical dispatch".into(),
-        ));
-    }
-
-    let mut row = ResetForNextHandRow::active(
-        &input,
-        0,
-        state_root_to_air_limbs(public_inputs.pre_state_root),
-        state_root_to_air_limbs(public_inputs.post_state_root),
-        public_inputs.table_id,
-        public_inputs.hand_id,
-        public_inputs.call_seq,
-        u64::from(canonical.pre.call_seq),
-        u64::from(canonical.post.call_seq),
-        canonical.pre.round_state(),
-    );
-    row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(canonical.pre.pot);
-    row.common.post_pot = crate::airs::common::u64_to_m31_limbs(canonical.post.pot);
     validate_row(public_inputs, &row.to_vec(), METHOD)
 }
 

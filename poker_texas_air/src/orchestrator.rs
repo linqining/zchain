@@ -36,7 +36,7 @@
 //!
 //! ## 当前覆盖
 //!
-//! 19 个 active VM selector 与 2 个内部兼容 MethodKind 进入统一 trace/prove/verify 路径。
+//! 19 个 active VM selector 进入统一 trace/prove/verify 路径。
 //! `fold_with_proof` 的 mid-round 与 clean last-opponent settlement 路径会绑定 native
 //! DLEq receipt；复合状态变更另外绑定四段独立的 component STARK proof。
 
@@ -46,7 +46,6 @@ use poker_protocol::precompile::{
 use poker_protocol::precompile_abi::TranscriptId;
 use stwo::core::fields::m31::M31;
 
-use crate::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
 use crate::airs::actions::bet::{BetAir, BetInput, BetRow};
 use crate::airs::actions::call::{CallAir, CallInput, CallRow};
 use crate::airs::actions::check::{CheckAir, CheckInput, CheckRow};
@@ -79,9 +78,6 @@ use crate::airs::lifecycle::advance_deadline::{
 use crate::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput, CreateTableRow};
 use crate::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use crate::airs::lifecycle::leave_table::{LeaveTableAir, LeaveTableInput, LeaveTableRow};
-use crate::airs::lifecycle::reset_for_next_hand::{
-    ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
-};
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use crate::authorization_binding::AdminAuthorizationBinding;
 use crate::deck_commitment::deck_commitment;
@@ -494,16 +490,10 @@ impl Orchestrator {
             MethodKind::AdvanceDeadline => {
                 self.prove_advance_deadline(task, pre_root, post_root, &pi, backend)?
             }
-            MethodKind::ResetForNextHand => {
-                self.prove_reset_for_next_hand(task, pre_root, post_root, &pi, backend)?
-            }
             MethodKind::Fold => self.prove_fold(task, pre_root, post_root, &pi, backend)?,
             MethodKind::Check => self.prove_check(task, pre_root, post_root, &pi, backend)?,
             MethodKind::Call => self.prove_call(task, pre_root, post_root, &pi, backend)?,
             MethodKind::Raise => self.prove_raise(task, pre_root, post_root, &pi, backend)?,
-            MethodKind::AutoFold => {
-                self.prove_auto_fold(task, pre_root, post_root, &pi, backend)?
-            }
             MethodKind::ForceFold => {
                 self.prove_force_fold(task, pre_root, post_root, &pi, backend)?
             }
@@ -1141,80 +1131,6 @@ impl Orchestrator {
         )
     }
 
-    fn prove_reset_for_next_hand<B: MethodBackend>(
-        &self,
-        task: &ProveTask,
-        pre_root: StateRoot,
-        post_root: StateRoot,
-        pi: &crate::public_inputs::TexasPublicInputs,
-        backend: &mut B,
-    ) -> TexasAirResult<B::Output> {
-        let method_input = task.method_input()?;
-        let MethodInput::Empty = &method_input else {
-            return Err(input_mismatch(
-                "reset_for_next_hand",
-                "Empty",
-                &method_input,
-            ));
-        };
-        let input = ResetForNextHandInput {
-            shuffle_phase: task.pre_table.shuffle_phase(),
-            authorization: AdminAuthorizationBinding::verify_table_creator(
-                MethodKind::ResetForNextHand,
-                &task.context,
-                &task.selector(),
-                &task.raw_args,
-                task.pre_table.creator,
-                task.table_id,
-                task.hand_id,
-                task.call_seq,
-                u64::from(task.pre_table.call_seq),
-                u64::from(task.post_table.call_seq),
-                pre_root,
-                post_root,
-                pi.dispatch_call_digest,
-            )?
-            .air_binding(),
-        };
-        let (pre_v, post_v) = (
-            u64::from(task.pre_table.call_seq),
-            u64::from(task.post_table.call_seq),
-        );
-        let pre_r = task.pre_table.round_state();
-        let mut row = ResetForNextHandRow::active(
-            &input,
-            0, // _pre_pending_addon（未用）
-            srm(pre_root),
-            srm(post_root),
-            task.table_id,
-            task.hand_id,
-            task.call_seq,
-            pre_v,
-            post_v,
-            pre_r,
-        );
-        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
-        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
-        run(
-            backend,
-            ResetForNextHandAir::num_columns(),
-            &row,
-            &ResetForNextHandRow::padding(),
-            pi,
-            move || ResetForNextHandAir {
-                log_size: MIN_LOG_SIZE,
-                input,
-                pre_state_root: srm(pre_root),
-                post_state_root: srm(post_root),
-                table_id: task.table_id,
-                hand_id: task.hand_id,
-                call_seq: task.call_seq,
-                pre_version: pre_v,
-                post_version: post_v,
-            },
-        )
-    }
-
     fn prove_check<B: MethodBackend>(
         &self,
         task: &ProveTask,
@@ -1547,129 +1463,6 @@ impl Orchestrator {
             &BetRow::padding(),
             pi,
             move || BetAir {
-                log_size: MIN_LOG_SIZE,
-                input,
-                pre_state_root: srm(pre_root),
-                post_state_root: srm(post_root),
-                table_id: task.table_id,
-                hand_id: task.hand_id,
-                call_seq: task.call_seq,
-                pre_version: pre_v,
-                post_version: post_v,
-            },
-        )
-    }
-
-    fn prove_auto_fold<B: MethodBackend>(
-        &self,
-        task: &ProveTask,
-        pre_root: StateRoot,
-        post_root: StateRoot,
-        pi: &crate::public_inputs::TexasPublicInputs,
-        backend: &mut B,
-    ) -> TexasAirResult<B::Output> {
-        let method_input = task.method_input()?;
-        let MethodInput::SeatOnly { seat_index } = &method_input else {
-            return Err(input_mismatch("auto_fold", "SeatOnly", &method_input));
-        };
-        validate_native_betting_action(
-            task,
-            NativeMidRoundAction::AutoFold {
-                seat_index: *seat_index,
-            },
-            true,
-        )?;
-        let composition =
-            crate::airs::composition::derive_composite_transition_plan_from_task(task)?;
-        let outcome = derive_fold_outcome(
-            &task.pre_table,
-            &task.post_table,
-            *seat_index,
-            "auto_fold",
-            Some(&composition.settlement),
-        )?;
-        let authorization = AdminAuthorizationBinding::verify_table_creator(
-            MethodKind::AutoFold,
-            &task.context,
-            &task.selector(),
-            &task.raw_args,
-            task.pre_table.creator,
-            task.table_id,
-            task.hand_id,
-            task.call_seq,
-            u64::from(task.pre_table.call_seq),
-            u64::from(task.post_table.call_seq),
-            pre_root,
-            post_root,
-            pi.dispatch_call_digest,
-        )?
-        .air_binding();
-        let betting_timeout_ms = u64::from(task.pre_table.timeout_config.betting_timeout_ms);
-        let betting_deadline_ms = task
-            .pre_table
-            .betting_deadline_ms()
-            .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
-            .ok_or_else(|| {
-                TexasAirError::SpecViolation(
-                    "auto_fold task requires an active betting deadline".into(),
-                )
-            })?;
-        let pre_betting_started_at = betting_deadline_ms
-            .checked_sub(betting_timeout_ms)
-            .ok_or_else(|| {
-                TexasAirError::SpecViolation(
-                    "auto_fold deadline is earlier than its configured timeout".into(),
-                )
-            })?;
-        let input = AutoFoldInput {
-            seat_index: *seat_index,
-            // The timestamp is consensus data carried by the dispatch task.
-            // Never replace it with a local wall clock (or the previous zero
-            // placeholder), otherwise the AIR has no timeout statement to
-            // prove.
-            current_time: task.context.block_timestamp,
-            pre_betting_started_at,
-            betting_timeout_ms,
-            pre_time_bank_ms: task
-                .pre_table
-                .seats
-                .get(usize::from(*seat_index))
-                .ok_or_else(|| {
-                    TexasAirError::SpecViolation(format!(
-                        "auto_fold: seat_index {seat_index} is outside pre_table"
-                    ))
-                })?
-                .time_bank_ms()
-                .into(),
-            outcome,
-            authorization,
-        };
-        let (pre_v, post_v) = (
-            u64::from(task.pre_table.call_seq),
-            u64::from(task.post_table.call_seq),
-        );
-        let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
-        let mut row = AutoFoldRow::active(
-            &input,
-            srm(pre_root),
-            srm(post_root),
-            task.table_id,
-            task.hand_id,
-            task.call_seq,
-            pre_v,
-            post_v,
-            pre_r,
-            post_r,
-        );
-        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
-        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
-        run(
-            backend,
-            AutoFoldAir::num_columns(),
-            &row,
-            &AutoFoldRow::padding(),
-            pi,
-            move || AutoFoldAir {
                 log_size: MIN_LOG_SIZE,
                 input,
                 pre_state_root: srm(pre_root),
@@ -2580,7 +2373,6 @@ enum NativeMidRoundAction {
     Call { seat_index: u8 },
     Raise { seat_index: u8, total_bet: u64 },
     Bet { seat_index: u8, amount: u64 },
-    AutoFold { seat_index: u8 },
     ForceFold { seat_index: u8 },
 }
 
@@ -2592,7 +2384,6 @@ impl NativeMidRoundAction {
             Self::Call { .. } => "call",
             Self::Raise { .. } => "raise",
             Self::Bet { .. } => "bet",
-            Self::AutoFold { .. } => "auto_fold",
             Self::ForceFold { .. } => "force_fold",
         }
     }
@@ -2652,14 +2443,6 @@ fn validate_native_betting_action(
                 &mut expected,
                 seat_index,
                 amount,
-                &mut events,
-            )
-        }
-        NativeMidRoundAction::AutoFold { seat_index } => {
-            poker_l1::vm::contracts::texas_poker::state_machine::apply_fold_internal(
-                &mut expected,
-                seat_index,
-                poker_l1::vm::contracts::texas_poker::constants::FOLD_REASON_AUTO_TIMEOUT,
                 &mut events,
             )
         }
@@ -2882,12 +2665,10 @@ impl_row_to_vec!(
     LeaveTableRow,
     StartHandRow,
     AdvanceDeadlineRow,
-    ResetForNextHandRow,
     CheckRow,
     CallRow,
     RaiseRow,
     BetRow,
-    AutoFoldRow,
     ForceFoldRow,
     KickPlayerRow,
     SetLeaveAfterHandRow,
@@ -3517,7 +3298,7 @@ mod tests {
         let error = texas_dispatch::dispatch(
             &test_context(creator),
             &mut post,
-            &texas_dispatch::selectors::reset_for_next_hand(),
+            &texas_dispatch::compute_method_selector("reset_for_next_hand"),
             &[],
         )
         .expect_err("retired reset_for_next_hand must not create a proof task");
@@ -4033,7 +3814,7 @@ mod tests {
 
     /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
     ///
-    /// 之前 Check 是"未实现"的代表；保留的 21 个 MethodKind 接线后，此测试确认 Check
+    /// 之前 Check 是"未实现"的代表；当前 19 个 MethodKind 接线后，此测试确认 Check
     /// 走完了 trace 构造路径（成功或返回非 NotImplemented 的业务错误均算通过）。
     #[test]
     fn orchestrator_check_is_now_supported() {

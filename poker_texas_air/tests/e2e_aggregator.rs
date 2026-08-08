@@ -188,7 +188,7 @@ fn test_e2e_aggregate_eight_children() {
         MethodKind::Check,
         MethodKind::Call,
         MethodKind::Raise,
-        MethodKind::AutoFold,
+        MethodKind::Bet,
     ];
     let roots: Vec<u32> = (0..8).map(|i| 10 * (i + 1)).collect();
     let seqs: Vec<u32> = (0..8).collect();

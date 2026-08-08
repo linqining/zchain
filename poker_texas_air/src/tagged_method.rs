@@ -604,8 +604,6 @@ pub fn verify_method_receipts(task: &ProveTask) -> TexasAirResult<VerifiedMethod
     let admin = if matches!(
         task.method_kind,
         crate::method_kind::MethodKind::StartHand
-            | crate::method_kind::MethodKind::ResetForNextHand
-            | crate::method_kind::MethodKind::AutoFold
             | crate::method_kind::MethodKind::ForceFold
             | crate::method_kind::MethodKind::KickPlayer
     ) {

@@ -40,11 +40,9 @@ pub const fn supports_composite_proof(method_kind: MethodKind) -> bool {
             | MethodKind::Call
             | MethodKind::Raise
             | MethodKind::Bet
-            | MethodKind::AutoFold
             | MethodKind::ForceFold
             | MethodKind::AdvanceDeadline
             | MethodKind::KickPlayer
-            | MethodKind::ResetForNextHand
             | MethodKind::FoldWithProof
             | MethodKind::SubmitPlayerRevealTokens
     )
@@ -425,11 +423,7 @@ fn acting_seat(
 ) -> TexasAirResult<Option<u8>> {
     let seat = match (method_kind, input) {
         (
-            MethodKind::Fold
-            | MethodKind::Check
-            | MethodKind::Call
-            | MethodKind::AutoFold
-            | MethodKind::ForceFold,
+            MethodKind::Fold | MethodKind::Check | MethodKind::Call | MethodKind::ForceFold,
             MethodInput::SeatOnly { seat_index },
         )
         | (MethodKind::Raise, MethodInput::Raise { seat_index, .. })
@@ -438,7 +432,6 @@ fn acting_seat(
             Some(*seat_index)
         }
         (MethodKind::KickPlayer, MethodInput::Kick { .. })
-        | (MethodKind::ResetForNextHand, MethodInput::Empty)
         | (MethodKind::SubmitPlayerRevealTokens, MethodInput::SubmitPlayerRevealTokens { .. }) => {
             None
         }
@@ -480,7 +473,6 @@ fn derive_seat_update(
                 | MethodKind::Call
                 | MethodKind::Raise
                 | MethodKind::Bet
-                | MethodKind::AutoFold
                 | MethodKind::ForceFold
                 | MethodKind::FoldWithProof
         );
@@ -501,7 +493,6 @@ fn derive_seat_update(
         let candidate = match (method_kind, event) {
             (
                 MethodKind::Fold
-                | MethodKind::AutoFold
                 | MethodKind::ForceFold
                 | MethodKind::AdvanceDeadline
                 | MethodKind::FoldWithProof,
@@ -590,7 +581,6 @@ fn derive_seat_update(
     }
     let expected_fold_reason = match method_kind {
         MethodKind::Fold | MethodKind::FoldWithProof => Some(FOLD_REASON_MANUAL),
-        MethodKind::AutoFold => Some(FOLD_REASON_AUTO_TIMEOUT),
         MethodKind::AdvanceDeadline => Some(FOLD_REASON_AUTO_TIMEOUT),
         MethodKind::ForceFold => Some(FOLD_REASON_FORCE_ADMIN),
         _ => None,
@@ -605,7 +595,6 @@ fn derive_seat_update(
     let expected_money_kind = match method_kind {
         MethodKind::Check
         | MethodKind::Fold
-        | MethodKind::AutoFold
         | MethodKind::ForceFold
         | MethodKind::AdvanceDeadline
         | MethodKind::FoldWithProof => *amount == 0,
@@ -955,7 +944,7 @@ fn derive_settlement(
                 .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }));
         let reset_only = matches!(
             method_kind,
-            MethodKind::KickPlayer | MethodKind::ResetForNextHand | MethodKind::AdvanceDeadline
+            MethodKind::KickPlayer | MethodKind::AdvanceDeadline
         ) && !tick_started_hand
             && post.round_state() == ROUND_WAITING
             && post.betting_round().is_none()

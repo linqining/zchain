@@ -57,7 +57,7 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
     out
 }
 
-/// Selector hash helpers for active calls and a small set of retired internal AIR tags.
+/// Selector hash helpers for active consensus calls.
 ///
 /// 所有方法名使用 snake_case，与 Move 端 entry function 名一一对应。
 pub mod selectors {
@@ -86,11 +86,6 @@ pub mod selectors {
     /// `advance_deadline` — canonical permissionless timeout entry.
     pub fn advance_deadline() -> [u8; 32] {
         compute_method_selector("advance_deadline")
-    }
-
-    /// `auto_fold` — 玩家超时自动 fold。
-    pub fn auto_fold() -> [u8; 32] {
-        compute_method_selector("auto_fold")
     }
 
     /// `force_fold` — 管理员强制 fold 玩家。
@@ -144,14 +139,6 @@ pub mod selectors {
     /// `bet` — 玩家主动下注（postflop 第一个下注者，语义等同于 raise 但更清晰）。
     pub fn bet() -> [u8; 32] {
         compute_method_selector("bet")
-    }
-
-    /// `reset_for_next_hand` — 显式重置桌台到 WAITING（管理员/测试场景）。
-    ///
-    /// 正常对局流程中由 `settle_hand` / `end_without_showdown` / 超时路径内部调用；
-    /// 暴露为 dispatch selector 便于端到端测试与异常恢复。
-    pub fn reset_for_next_hand() -> [u8; 32] {
-        compute_method_selector("reset_for_next_hand")
     }
 
     /// `addon` — 玩家追加筹码（下一手生效）。
@@ -237,12 +224,10 @@ pub enum CanonicalCommand {
     LeaveTable = 2,
     StartHand = 3,
     AdvanceDeadline = 4,
-    ResetForNextHand = 5,
     Fold = 6,
     Check = 7,
     Call = 8,
     Raise = 9,
-    AutoFold = 10,
     ForceFold = 11,
     KickPlayer = 12,
     Addon = 13,
@@ -269,7 +254,7 @@ pub enum CanonicalCommandFamily {
     Action = 3,
     /// Mental Poker proof-bearing operations.
     Crypto = 4,
-    /// Hand start, deadline consumption and governance reset.
+    /// Hand start and permissionless deadline consumption.
     Lifecycle = 5,
 }
 
@@ -292,12 +277,10 @@ impl CanonicalCommand {
             Self::LeaveTable => "leave_table",
             Self::StartHand => "start_hand",
             Self::AdvanceDeadline => "advance_deadline",
-            Self::ResetForNextHand => "reset_for_next_hand",
             Self::Fold => "fold",
             Self::Check => "check",
             Self::Call => "call",
             Self::Raise => "raise",
-            Self::AutoFold => "auto_fold",
             Self::ForceFold => "force_fold",
             Self::KickPlayer => "kick_player",
             Self::Addon => "addon",
@@ -320,12 +303,12 @@ impl CanonicalCommand {
             2 => Self::LeaveTable,
             3 => Self::StartHand,
             4 => Self::AdvanceDeadline,
-            5 => Self::ResetForNextHand,
+            5 => return None,
             6 => Self::Fold,
             7 => Self::Check,
             8 => Self::Call,
             9 => Self::Raise,
-            10 => Self::AutoFold,
+            10 => return None,
             11 => Self::ForceFold,
             12 => Self::KickPlayer,
             13 => Self::Addon,
@@ -350,12 +333,10 @@ impl CanonicalCommand {
             Self::LeaveTable => selectors::leave_table(),
             Self::StartHand => selectors::start_hand(),
             Self::AdvanceDeadline => selectors::advance_deadline(),
-            Self::ResetForNextHand => selectors::reset_for_next_hand(),
             Self::Fold => selectors::fold(),
             Self::Check => selectors::check(),
             Self::Call => selectors::call(),
             Self::Raise => selectors::raise(),
-            Self::AutoFold => selectors::auto_fold(),
             Self::ForceFold => selectors::force_fold(),
             Self::KickPlayer => selectors::kick_player_v2(),
             Self::Addon => selectors::addon(),
@@ -450,8 +431,7 @@ impl CanonicalCommand {
             Self::SubmitReconstructDeck => (Crypto, 4),
             Self::FoldWithProof => (Crypto, 5),
             Self::StartHand => (Lifecycle, 0),
-            Self::AdvanceDeadline | Self::AutoFold => (Lifecycle, 1),
-            Self::ResetForNextHand => (Lifecycle, 2),
+            Self::AdvanceDeadline => (Lifecycle, 1),
         };
         CanonicalBatchTag { family, subtag }
     }
@@ -737,9 +717,6 @@ pub fn dispatch(
         CanonicalCommand::AdvanceDeadline => {
             dispatch_advance_deadline(context, table, args, &mut events)
         }
-        CanonicalCommand::AutoFold => Err(PokerL1Error::UnknownContractMethod {
-            selector: *selector,
-        }),
         CanonicalCommand::ForceFold => dispatch_force_fold(context, table, args, &mut events),
         CanonicalCommand::KickPlayer => dispatch_kick_player(context, table, args, &mut events),
         CanonicalCommand::SubmitShuffleV2 => {
@@ -756,9 +733,6 @@ pub fn dispatch(
         CanonicalCommand::Call => dispatch_call(context, table, args, &mut events),
         CanonicalCommand::Raise => dispatch_raise(context, table, args, &mut events),
         CanonicalCommand::Bet => dispatch_bet(context, table, args, &mut events),
-        CanonicalCommand::ResetForNextHand => Err(PokerL1Error::UnknownContractMethod {
-            selector: *selector,
-        }),
         CanonicalCommand::Addon => dispatch_addon(context, table, args, &mut events),
         CanonicalCommand::Rebuy => dispatch_rebuy(context, table, args, &mut events),
         CanonicalCommand::SetLeaveAfterHand => {
@@ -1108,7 +1082,6 @@ pub fn derive_method_input(
             | CanonicalCommand::Addon
             | CanonicalCommand::Rebuy
             | CanonicalCommand::SetLeaveAfterHand
-            | CanonicalCommand::AutoFold
     ) {
         return Err(PokerL1Error::Serialization(format!(
             "{} canonical input requires authenticated context and pre-state",
@@ -1226,12 +1199,6 @@ pub fn derive_authenticated_method_input(
                 seat_index: caller_seat("submit_reconstruct_deck")?,
             }
         }
-        CanonicalCommand::AutoFold => {
-            require_empty_canonical_payload(canonical_args, "auto_fold")?;
-            MethodInput::SeatOnly {
-                seat_index: pre_table.current_turn(),
-            }
-        }
         _ => derive_method_input(method_tag, canonical_args)?,
     };
 
@@ -1321,8 +1288,7 @@ pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Resul
         CanonicalCommand::LeaveTable
         | CanonicalCommand::Fold
         | CanonicalCommand::Check
-        | CanonicalCommand::Call
-        | CanonicalCommand::AutoFold => {
+        | CanonicalCommand::Call => {
             let _: SeatIndexArgs = decode_args(args, "actor-only canonical payload")?;
             Vec::new()
         }
@@ -1468,8 +1434,7 @@ pub fn replay_dispatch_args(
             CanonicalCommand::LeaveTable
             | CanonicalCommand::Fold
             | CanonicalCommand::Check
-            | CanonicalCommand::Call
-            | CanonicalCommand::AutoFold,
+            | CanonicalCommand::Call,
             MethodInput::SeatOnly { seat_index },
         ) => borsh::to_vec(&SeatIndexArgs { seat_index }),
         (
@@ -2095,6 +2060,7 @@ mod tests {
     use super::*;
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
+    use group::Group;
 
     fn make_table() -> TexasPokerTable {
         // creator 设为 [0xAA;20]，与 make_context().caller 一致，
@@ -2170,10 +2136,10 @@ mod tests {
         }
         assert_eq!(selectors::active().len(), 19);
         assert_eq!(tags.len(), 19);
-        assert!(CanonicalCommand::from_u8(15).is_none());
-        assert!(CanonicalCommand::from_u8(16).is_none());
-        assert!(!tags.contains(&(CanonicalCommand::AutoFold as u8)));
-        assert!(!tags.contains(&(CanonicalCommand::ResetForNextHand as u8)));
+        for retired_tag in [5, 10, 15, 16] {
+            assert!(CanonicalCommand::from_u8(retired_tag).is_none());
+            assert!(!tags.contains(&retired_tag));
+        }
         assert_eq!(
             CanonicalCommand::from_selector(&selectors::advance_deadline()),
             Some(CanonicalCommand::AdvanceDeadline)
@@ -2189,8 +2155,11 @@ mod tests {
         assert!(
             CanonicalCommand::from_selector(&compute_method_selector("leave_with_proof")).is_none()
         );
-        assert!(CanonicalCommand::from_selector(&selectors::auto_fold()).is_none());
-        assert!(CanonicalCommand::from_selector(&selectors::reset_for_next_hand()).is_none());
+        assert!(CanonicalCommand::from_selector(&compute_method_selector("auto_fold")).is_none());
+        assert!(
+            CanonicalCommand::from_selector(&compute_method_selector("reset_for_next_hand"))
+                .is_none()
+        );
         assert!(CanonicalCommand::from_selector(&[0xFF; 32]).is_none());
     }
 
@@ -2199,25 +2168,28 @@ mod tests {
         for selector in [
             compute_method_selector("join_and_shuffle"),
             compute_method_selector("leave_with_proof"),
-            selectors::auto_fold(),
+            compute_method_selector("auto_fold"),
             compute_method_selector("kick_player"),
-            selectors::reset_for_next_hand(),
+            compute_method_selector("reset_for_next_hand"),
         ] {
             assert!(CanonicalCommand::from_archive_selector(&selector).is_none());
         }
     }
 
     #[test]
-    fn source_dispatch_rejects_retired_crypto_selectors_before_mutation() {
+    fn source_dispatch_rejects_every_retired_selector_before_mutation() {
         let context = make_context();
         for selector in [
             compute_method_selector("join_and_shuffle"),
             compute_method_selector("leave_with_proof"),
+            compute_method_selector("auto_fold"),
+            compute_method_selector("kick_player"),
+            compute_method_selector("reset_for_next_hand"),
         ] {
             let mut table = make_table();
             let before = table.clone();
             let error = dispatch(&context, &mut table, &selector, &[])
-                .expect_err("retired crypto selector must fail at the source boundary");
+                .expect_err("retired selector must fail at the source boundary");
             assert!(matches!(error, PokerL1Error::UnknownContractMethod { .. }));
             assert_eq!(table, before);
             assert!(canonical_command_parts(&selector, &[]).is_err());
@@ -2254,8 +2226,8 @@ mod tests {
             CanonicalCommand::ForceFold.batch_tag()
         );
         assert_eq!(
-            CanonicalCommand::AdvanceDeadline.batch_tag(),
-            CanonicalCommand::AutoFold.batch_tag()
+            CanonicalCommand::AdvanceDeadline.batch_tag().family,
+            CanonicalCommandFamily::Lifecycle
         );
         assert_ne!(
             CanonicalCommand::Addon.batch_tag(),

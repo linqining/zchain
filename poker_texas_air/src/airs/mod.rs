@@ -1,9 +1,9 @@
-//! Method AIRs — 21 个稳定 discriminant 对应的专用 AIR。
+//! Method AIRs — 19 个 active stable discriminant 对应的专用 AIR。
 //!
 //! ## 分类
 //!
-//! - [`lifecycle`] — A 档：6 个表台生命周期方法
-//! - [`actions`] — B 档：9 个已启用玩家动作方法
+//! - [`lifecycle`] — A 档：5 个表台生命周期方法
+//! - [`actions`] — B 档：8 个已启用玩家动作方法
 //! - [`funds`] — B+ 档：2 个资金动作方法（addon/rebuy）
 //! - [`crypto`] — C 档：4 个 active 密码学协议方法
 //!
@@ -137,11 +137,6 @@ impl_validated_texas_air!(
     lifecycle::advance_deadline::validate_public_inputs
 );
 impl_validated_texas_air!(
-    lifecycle::reset_for_next_hand::ResetForNextHandAir,
-    MethodKind::ResetForNextHand,
-    lifecycle::validation::validate_reset_for_next_hand
-);
-impl_validated_texas_air!(
     actions::fold::FoldAir,
     MethodKind::Fold,
     actions::validation::validate_fold
@@ -165,11 +160,6 @@ impl_validated_texas_air!(
     actions::bet::BetAir,
     MethodKind::Bet,
     actions::validation::validate_bet
-);
-impl_validated_texas_air!(
-    actions::auto_fold::AutoFoldAir,
-    MethodKind::AutoFold,
-    actions::validation::validate_auto_fold
 );
 impl_validated_texas_air!(
     actions::force_fold::ForceFoldAir,

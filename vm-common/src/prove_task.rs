@@ -28,7 +28,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 /// 两侧完全一致，是 return_value 字节流的核心契约。
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub enum MethodInput {
-    /// 仅含 seat_index 的非密码学方法（fold/check/call/auto_fold/force_fold/
+    /// 仅含 seat_index 的非密码学方法（fold/check/call/force_fold/
     /// leave_table）。
     SeatOnly {
         /// 座位索引。
@@ -105,7 +105,7 @@ pub enum MethodInput {
         /// fold 玩家座位索引。
         seat_index: u8,
     },
-    /// 无业务参数的方法（start_hand / tick / reset_for_next_hand）。
+    /// 无业务参数的方法（start_hand / advance_deadline）。
     Empty,
 }
 

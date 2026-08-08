@@ -47,10 +47,10 @@ schema v6 已完成以下 canonical 化，并提供 v5 -> v6 精确迁移：
 - WAITING 状态没有隐式 deadline，`tick` 不再启动牌局；当前生产语义要求显式 `start_hand`。
 
 生产 selector 集已按该模型冻结：新增 canonical `advance_deadline`，旧 `tick` 已从 fresh 与
-archive/replay 解码面物理删除；`auto_fold` 与普通 public `reset_for_next_hand` 也不再接受外部调用，
-只暂留内部 Method AIR discriminant。`join_and_shuffle` 与 WAITING `leave_with_proof` 已进一步从
+archive/replay 解码面物理删除；`auto_fold` 与普通 public `reset_for_next_hand` 也已从
+CanonicalCommand、MethodKind、独立 AIR 与证明编排器物理删除。`join_and_shuffle` 与 WAITING `leave_with_proof` 已进一步从
 source dispatch、canonical/task decoder、AIR、precompile、dual-proof package 和 proving service
-物理删除；稳定 discriminant 15/16 不重排，但在所有入口 fail-closed。
+物理删除；稳定 discriminant 5/10/15/16 不重排，但在所有入口 fail-closed。
 
 schema v7 已把持久化/state-root/prove-task 编码收敛为唯一 `HandPhase` tagged union：每个 active
 variant 只保存一个绝对 `deadline_ms`，reconstruct 额外保存 proof transcript 所需的 `epoch_ms`。
@@ -331,7 +331,7 @@ method-batch ABI 应直接使用 `pre_call_seq/post_call_seq`，不再延续这�
 | 可合并入口 | `check`/`call`/`raise`/`bet` | canonical `PlayerAction::{MatchBet,RaiseTo}`；旧 selector 只做参数转换和严格语义断言 |
 | 可合并入口 | `auto_fold`/`force_fold`/手动 `fold` | canonical `Fold { cause }`；timeout、admin、player 授权在 wrapper 校验 |
 | 可合并入口 | `addon`/`rebuy` | canonical `FundSeat { timing }`；金额仍必须 checked-u64 且绑定 coin receipt |
-| 可合并入口 | `tick`/`auto_fold`/`reset_for_next_hand` | `AdvanceDeadline` 与 normalize 内部步骤；当前生产只保留 `advance_deadline`，旧 selector 均从 fresh/archive source 边界删除，`auto_fold`/普通 reset 仅暂留内部 AIR discriminant |
+| 已合并入口 | `tick`/`auto_fold`/`reset_for_next_hand` | `AdvanceDeadline` 与 normalize 内部步骤；当前生产只保留 `advance_deadline`，旧 selector、MethodKind 与独立 AIR 均已删除 |
 
 `bool -> bit` 只用于正交 seat flags；`SeatStatus`、phase、RIT mode 等互斥值不能硬塞进同一个
 flags word。这样能减少常驻列而不会把 AIR 的选择性拆位成本转移到每一行。
@@ -351,18 +351,16 @@ flags word。这样能减少常驻列而不会把 AIR 的选择性拆位成本�
 
 最终 proof 层不需要按 selector 拆分 `MethodKind`。建议保留 6 个顶层 command tag：
 `Create`、`Seat`、`Funds`、`Action`、`Crypto`、`Lifecycle`；具体语义放在二级 tag。
-RPC/ABI registry 现在只枚举 19 个 active selector，`all() == active()`；retired selector 不再混入
-能力发现结果。尚未物理删除的 retired AIR discriminant 只服务后续分步收缩，不能作为 fresh 或
-archive proof 输入。
+RPC/ABI registry 与 AIR registry 现在都只枚举 19 个 active method，`all() == active()`；retired
+selector/discriminant 不再混入能力发现、archive 或 method batch。
 
 源码现已增加 `CanonicalCommandFamily + CanonicalBatchTag { family, subtag }`，并把兼容入口实际
 折叠到上述六个 family：`check/call` 共用 `Action/MatchBet`，`raise/bet` 共用
 `Action/RaiseTo`，`fold/force_fold` 共用 `Action/Fold`，历史 `tick/auto_fold` 共用
 `Lifecycle/AdvanceDeadline`。生产 active wire set 现为 19 个 selector、19 个 canonical
 `CanonicalCommand` tag；折叠 `check/call`、`raise/bet`、`fold/force_fold` 后是 16 个 active
-`CanonicalBatchTag`。稳定的 `0..=22` discriminant 空间不重排：15/16 已物理退休并始终拒绝，
-`auto_fold`/普通 reset 只暂留现有 Method AIR 兼容；archive 解码与新的 method batch 都不接受
-retired tag 作为外部 trace tag。
+`CanonicalBatchTag`。稳定的 `0..=22` discriminant 空间不重排：5/10/15/16 已物理退休并始终拒绝；
+archive 解码与新的 method batch 都不接受 retired tag 作为外部 trace tag。
 
 归一化不等于取消授权：`Fold` payload 仍携带 canonical `FoldCause::{Player, Timeout, Admin}`，
 并分别校验 seat signature、deadline 或 creator authorization。
@@ -401,8 +399,8 @@ fail-closed，避免验证一份随后被 `start_hand` 丢弃的 shuffle output�
 - `start_hand`：当前保留为显式 canonical command。WAITING 没有 permissionless deadline，避免任意
   caller 在玩家刚入座时隐式开局。若未来需要自动开局，应新增已签名/共识化的 table policy 与
   `ReadyToStart` deadline，而不是恢复 `tick` 的隐式启动职责。
-- public `reset_for_next_hand`：正常 settlement/reset 是 normalize 的内部步骤；只保留显式的
-  emergency/governance 路径。
+- public `reset_for_next_hand`：已删除；正常 settlement/reset 是 normalize 的内部步骤。未来若需要
+  emergency/governance abort，必须以 checked refund plan 新建窄命令，不能复活无计划 reset。
 - `force_fold` 的独立业务实现：保留兼容 selector 和管理员授权，但映射到统一 `Fold` transition。
 - `addon/rebuy`、`fold/MatchBet/RaiseTo` 的重复 dispatch/state-machine 骨架：保留不同 action tag，
   共享一套 command validation 与 transition plan。
@@ -753,7 +751,8 @@ Borsh 字节更贵，所以优先删除重复事实和变长容器，再考虑 b
    `join_and_shuffle` 与 WAITING `leave_with_proof` 的 source-internal dispatch、canonical/task 类型、
    AIR/precompile/package/service 路由也已物理删除。替代链分别由
    `join_table + start_hand + submit_shuffle_v2`、WAITING `leave_table` 和 active-hand
-   `fold_with_proof` 覆盖；discriminant 15/16 在所有 decoder 保持 fail-closed。
+   `fold_with_proof` 覆盖；discriminant 5/10/15/16 在所有 decoder 保持 fail-closed，且旧
+   `auto_fold`/普通 reset 独立 AIR 与 orchestrator route 已删除。
 8. 已完成 schema v7 persisted/runtime `HandPhase` tagged union、单 deadline 与 reconstruct streaming
    accumulator；schema v9 已完成 reveal ledger enum，schema v10 已完成 contributor lineage，且
    aggregate key 已改为使用点现场派生；runtime flattened phase caches 已删除。

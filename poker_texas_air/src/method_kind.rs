@@ -1,12 +1,12 @@
 //! 当前 method AIR 的枚举与 selector 计算。
 //!
 //! 保留与 [`poker_l1::vm::contracts::texas_poker::dispatch`] 一致的稳定 discriminant 空间，
-//! 当前包含 19 个 active selector 与 2 个仅内部兼容 tag；15/16 已退休且不重排。
+//! 当前包含 19 个 active selector；5/10/15/16 已退休且不重排。
 //!
 //! # 分类
 //!
-//! - **A 档（生命周期，6 个）**：表台创建/入座/离座/开局/超时/重置
-//! - **B 档（玩家动作，9 个）**：9 个启用 AIR
+//! - **A 档（生命周期，5 个）**：表台创建/入座/离座/开局/超时
+//! - **B 档（玩家动作，8 个）**：8 个启用 AIR
 //! - **B+ 档（资金动作，2 个）**：addon（下一手生效）/rebuy（立即生效）
 //! - **C 档（密码学协议，4 个）**：4 个启用 AIR
 
@@ -34,12 +34,12 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
 
 /// 当前方法种类的枚举。
 ///
-/// Active variant 对应 `poker_l1` 的公开 dispatch selector；内部兼容 variant 只保留专用 AIR。
+/// 每个 variant 都对应 `poker_l1` 的公开 dispatch selector。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
 pub enum MethodKind {
-    // ===== A 档：表台生命周期（6 个）=====
+    // ===== A 档：表台生命周期（5 个）=====
     /// `create_table` — 创建新桌台。
     CreateTable = 0,
     /// `join_table` — 简单入座（不参与本局，等下一局）。
@@ -50,10 +50,7 @@ pub enum MethodKind {
     StartHand = 3,
     /// `advance_deadline` — 超时驱动（permissionless）。
     AdvanceDeadline = 4,
-    /// `reset_for_next_hand` — 显式重置桌台到 WAITING。
-    ResetForNextHand = 5,
-
-    // ===== B 档：玩家动作（7 个）=====
+    // ===== B 档：玩家动作 =====
     /// `fold` — 玩家主动 fold。
     Fold = 6,
     /// `check` — 玩家过牌。
@@ -62,8 +59,6 @@ pub enum MethodKind {
     Call = 8,
     /// `raise` — 玩家加注。
     Raise = 9,
-    /// `auto_fold` — 玩家超时自动 fold。
-    AutoFold = 10,
     /// `force_fold` — 管理员强制 fold 玩家。
     ForceFold = 11,
     /// `kick_player_v2` — 踢出玩家（管理员操作，原因固定为 Admin）。
@@ -94,11 +89,11 @@ pub enum MethodKind {
 
 impl MethodKind {
     /// 当前方法总数。
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 19;
 
     /// Whether the repository ships an enabled production AIR for this selector.
     ///
-    /// All 21 retained MethodKind variants currently have an enabled production AIR.
+    /// All 19 retained MethodKind variants currently have an enabled production AIR.
     #[must_use]
     pub const fn is_production_air_enabled(self) -> bool {
         true
@@ -113,12 +108,10 @@ impl MethodKind {
             Self::LeaveTable => "leave_table",
             Self::StartHand => "start_hand",
             Self::AdvanceDeadline => "advance_deadline",
-            Self::ResetForNextHand => "reset_for_next_hand",
             Self::Fold => "fold",
             Self::Check => "check",
             Self::Call => "call",
             Self::Raise => "raise",
-            Self::AutoFold => "auto_fold",
             Self::ForceFold => "force_fold",
             Self::KickPlayer => "kick_player_v2",
             Self::Addon => "addon",
@@ -146,13 +139,11 @@ impl MethodKind {
             | Self::JoinTable
             | Self::LeaveTable
             | Self::StartHand
-            | Self::AdvanceDeadline
-            | Self::ResetForNextHand => MethodTier::Lifecycle,
+            | Self::AdvanceDeadline => MethodTier::Lifecycle,
             Self::Fold
             | Self::Check
             | Self::Call
             | Self::Raise
-            | Self::AutoFold
             | Self::ForceFold
             | Self::KickPlayer
             | Self::Bet
@@ -178,12 +169,12 @@ impl MethodKind {
             2 => Some(Self::LeaveTable),
             3 => Some(Self::StartHand),
             4 => Some(Self::AdvanceDeadline),
-            5 => Some(Self::ResetForNextHand),
+            5 => None,
             6 => Some(Self::Fold),
             7 => Some(Self::Check),
             8 => Some(Self::Call),
             9 => Some(Self::Raise),
-            10 => Some(Self::AutoFold),
+            10 => None,
             11 => Some(Self::ForceFold),
             12 => Some(Self::KickPlayer),
             13 => Some(Self::Addon),
@@ -208,12 +199,10 @@ impl MethodKind {
             Self::LeaveTable,
             Self::StartHand,
             Self::AdvanceDeadline,
-            Self::ResetForNextHand,
             Self::Fold,
             Self::Check,
             Self::Call,
             Self::Raise,
-            Self::AutoFold,
             Self::ForceFold,
             Self::KickPlayer,
             Self::Addon,
@@ -231,9 +220,9 @@ impl MethodKind {
 /// 方法所属档位（用于实施阶段控制）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MethodTier {
-    /// A 档：表台生命周期（6 个，阶段 1-2 实现）。
+    /// A 档：表台生命周期（5 个，阶段 1-2 实现）。
     Lifecycle,
-    /// B 档：玩家动作（9 个，全部启用 AIR）。
+    /// B 档：玩家动作（8 个，全部启用 AIR）。
     Action,
     /// B+ 档：资金动作（2 个：addon/rebuy）。
     Funds,
@@ -260,8 +249,8 @@ mod tests {
 
     #[test]
     fn test_method_count() {
-        assert_eq!(MethodKind::COUNT, 21);
-        assert_eq!(MethodKind::all().len(), 21);
+        assert_eq!(MethodKind::COUNT, 19);
+        assert_eq!(MethodKind::all().len(), 19);
     }
 
     #[test]
@@ -288,8 +277,9 @@ mod tests {
         }
         assert_eq!(MethodKind::from_u8(21), Some(MethodKind::SetLeaveAfterHand));
         assert_eq!(MethodKind::from_u8(22), Some(MethodKind::FoldWithProof));
-        assert_eq!(MethodKind::from_u8(15), None);
-        assert_eq!(MethodKind::from_u8(16), None);
+        for retired in [5, 10, 15, 16] {
+            assert_eq!(MethodKind::from_u8(retired), None);
+        }
         assert_eq!(MethodKind::from_u8(23), None);
         assert_eq!(MethodKind::from_u8(255), None);
     }

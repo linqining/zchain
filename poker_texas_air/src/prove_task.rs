@@ -628,11 +628,7 @@ impl MethodPayloadV2 {
         let tag = command.batch_tag();
         let admin_expected = matches!(
             task.method_kind,
-            MethodKind::StartHand
-                | MethodKind::ResetForNextHand
-                | MethodKind::AutoFold
-                | MethodKind::ForceFold
-                | MethodKind::KickPlayer
+            MethodKind::StartHand | MethodKind::ForceFold | MethodKind::KickPlayer
         );
         let crypto_expected = matches!(
             task.method_kind,

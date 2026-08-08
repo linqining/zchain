@@ -571,8 +571,14 @@ mod tests {
                 "leave_with_proof",
             )
         ));
-        assert!(!precompile.supports_selector(&selectors::auto_fold()));
-        assert!(!precompile.supports_selector(&selectors::reset_for_next_hand()));
+        assert!(!precompile.supports_selector(
+            &crate::vm::contracts::texas_poker::dispatch::compute_method_selector("auto_fold")
+        ));
+        assert!(!precompile.supports_selector(
+            &crate::vm::contracts::texas_poker::dispatch::compute_method_selector(
+                "reset_for_next_hand",
+            )
+        ));
     }
 
     #[test]

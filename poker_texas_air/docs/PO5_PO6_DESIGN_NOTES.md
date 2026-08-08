@@ -139,7 +139,7 @@ commitment 和独立 Fiat–Shamir transcript；bundle 验证固定检查
   addons 和 post occupancy 均进入 AIR，并约束 chip pool / addon pool / rake 守恒和 reset。
 
 production verifier 已在 fold/check/call/raise/bet/advance-deadline/force-fold、`fold_with_proof`、
-`kick_player`、`reset_for_next_hand` 和 `submit_player_reveal_tokens` 的 canonical replay 后派生并
+`kick_player` 和 `submit_player_reveal_tokens` 的 canonical replay 后派生并
 验证该 plan，因而旧 method row 与新 component ABI 迁移期间不会形成第二套可自由选择的业务解释。
 
 `kick_player_v2` 的证明输入也已收窄为 seat-only canonical admin command：目标 seat 仍由管理员显式
@@ -251,8 +251,7 @@ Stage-only batching 路径，主要节省来自删除 18 次 legacy method prove
 
 ## 本轮关闭的管理员授权与金额缺口
 
-- `start_hand` / `reset_for_next_hand` / `kick_player` / `force_fold` / creator-only
-  `auto_fold` 使用独立
+- `start_hand` / `kick_player` / `force_fold` 使用独立
   `AdminAuthorizationBinding`。production prover 与
   verifier 都从 canonical dispatch 重建 table-creator 权限，并把 ABI、role、完整 256-bit
   request digest 与 receipt digest 放入 AIR。request 覆盖 caller/pubkey、creator、链/块/时间、
@@ -276,10 +275,9 @@ Stage-only batching 路径，主要节省来自删除 18 次 legacy method prove
   算法本身、Mental Poker BLS12-381 proof、state-root Poseidon preimage hash、showdown hand
   evaluator/side-pot planner 仍由 host-native verifier 执行；AIR 绑定其 canonical 输入、输出或
   receipt digest，不提供“恶意 host 下仍可独立验证”的执行证明。
-- terminal `auto_fold` / `force_fold` 已复用 `FoldOutcome::EndWithoutShowdown`：method AIR
-  约束收池、rake、唯一 winner award、winner stack 与 WAITING/zero-pot reset，并强制携带
-  SeatUpdate/BetCollection/RoundAdvance/Settlement 四段 archive；creator authorization 的完整
-  request/receipt digest 也进入 `auto_fold` AIR。
+- terminal timeout fold 统一由 `advance_deadline` 证明，terminal `force_fold` 复用
+  `FoldOutcome::EndWithoutShowdown`；两者都强制携带 SeatUpdate/BetCollection/RoundAdvance/
+  Settlement 四段 archive。
 - `kick_player` 只接受普通 `version + 1` 路径，以及已规范化的 `WithoutShowdown` / `ResetOnly`
   双 bump cascade；其他未来出现的 multi-version advance/settlement 继续 fail-closed。
 - `advance_deadline` 已接入四段 archive。下注超时 fold 会派生 SeatUpdate，终局/当前轮完成会派生
@@ -291,8 +289,8 @@ Stage-only batching 路径，主要节省来自删除 18 次 legacy method prove
   四段 header 当作 start-hand/shuffle 执行证明。
 - production precompile 已新增 canonical `advance_deadline` selector，legacy `tick` 已从 fresh 与
   archive 解码面删除；专用 `auto_fold` 与普通 public `reset_for_next_hand` 已从 active selector 集移除。
-  所有 retired source selector 均在 strict archive decoder fail-closed；仅 `auto_fold`/普通 reset 的
-  内部 Method AIR discriminant 暂留。proving service 现在也在进入 VM 前使用 active
+  所有 retired source selector 均在 strict archive decoder fail-closed；`auto_fold`/普通 reset 的
+  MethodKind、独立 AIR 与 orchestrator route 也已物理删除。proving service 现在也在进入 VM 前使用 active
   `CanonicalCommand` 集过滤请求，不能再绕过 precompile 直接调用 retired reset/tick/auto-fold。
 - 普通玩家命令的 actor 已改为从 authenticated caller 和 canonical pre-state 唯一派生。
   legacy `seat_index` 与 join `player` 只做相等断言；L1/AIR prove-task 在反序列化和消费时
@@ -300,12 +298,12 @@ Stage-only batching 路径，主要节省来自删除 18 次 legacy method prove
   method batch 仍把 caller 与 seat 当成两份可错配事实。管理员 target seat 仍保留显式输入。
 - proof-bearing Mental Poker command 也已改为 actor-less canonical payload；完整密码学 statement/proof
   不做摘要替代或删减，只有可由 authenticated caller 唯一恢复的 player/seat 字段被删除。
-- `reset_for_next_hand` 的完整座位/资金重置语义由 durable 四段 component bundle
-  承担；单独拿 method STARK 只证明方法级投影。旧 `join_and_shuffle` / `leave_with_proof` package
+- 内部 `reset_for_next_hand` 的完整座位/资金重置语义由触发 settlement/normalize 的 durable 四段
+  component bundle 承担，不再存在可单独提交的 reset method STARK。旧 `join_and_shuffle` / `leave_with_proof` package
   路由已删除：加入与 fresh-deck shuffle 分别由 `join_table`、`start_hand`、`submit_shuffle_v2`
   证明，WAITING 离场走 `leave_table`，active layer removal 走 `fold_with_proof`。
-- `start_hand` / `reset_for_next_hand` 的零参数 ABI 现在在 L1 dispatch 边界拒绝任意尾随
-  bytes，拒绝发生在任何状态变更前，避免同一管理操作存在多个非 canonical 调用编码。
+- `start_hand` 的零参数 ABI 在 L1 dispatch 边界拒绝任意尾随 bytes；退休 reset selector 则在参数
+  解码前直接按 unknown method 拒绝。
 - showdown settlement binding 现在要求唯一 `HandSettled` marker，且其 table、gross pot 和
   固定升序 winners 列表必须与 `WinnerAwarded` 聚合一致；`RakeCollected` 也必须按
   `gross_pot/rake/total_awards` 恰好出现一次或在零 rake 时完全缺失。截断、重复或错配的

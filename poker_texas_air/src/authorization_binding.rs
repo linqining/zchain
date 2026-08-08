@@ -82,11 +82,7 @@ impl AdminAuthorizationBinding {
     ) -> TexasAirResult<Self> {
         if !matches!(
             kind,
-            MethodKind::StartHand
-                | MethodKind::ResetForNextHand
-                | MethodKind::AutoFold
-                | MethodKind::ForceFold
-                | MethodKind::KickPlayer
+            MethodKind::StartHand | MethodKind::ForceFold | MethodKind::KickPlayer
         ) {
             return Err(TexasAirError::SpecViolation(format!(
                 "administrator authorization is not defined for {}",

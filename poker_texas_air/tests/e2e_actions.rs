@@ -49,82 +49,6 @@ fn mid_round_fold(post_current_turn: u8) -> FoldOutcome {
     FoldOutcome::MidRound { post_current_turn }
 }
 
-/// Build an auto-fold trace using the same complete timeout columns as the
-/// production method.  The negative tests deliberately use this direct path:
-/// an invalid timeout predicate must be rejected by the AIR before any host
-/// canonical-table replay is involved.
-fn auto_fold_timeout_trace_proves(
-    input: poker_texas_air::airs::actions::auto_fold::AutoFoldInput,
-) -> bool {
-    use poker_texas_air::airs::actions::auto_fold::{AutoFoldAir, AutoFoldRow};
-
-    let row = AutoFoldRow::active(&input, zero_root(), one_root(), 42, 0, 5, 0, 1, 4, 4);
-    let trace = gen_method_trace(
-        AutoFoldAir::num_columns(),
-        &row.to_vec(),
-        &AutoFoldRow::padding().to_vec(),
-    )
-    .expect("auto_fold trace should generate");
-    let air = AutoFoldAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 0,
-        call_seq: 5,
-        pre_version: 0,
-        post_version: 1,
-    };
-    prove_method(
-        &trace,
-        air,
-        AutoFoldAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::AutoFold, 42, 0, 5),
-    )
-    .is_ok()
-}
-
-fn terminal_auto_fold_trace_proves(settlement: EndWithoutShowdownInput) -> bool {
-    use poker_texas_air::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
-
-    let input = AutoFoldInput {
-        seat_index: 0,
-        current_time: 1_700_000_000,
-        pre_betting_started_at: 1_699_970_000,
-        betting_timeout_ms: 30_000,
-        pre_time_bank_ms: 0,
-        outcome: FoldOutcome::EndWithoutShowdown(settlement),
-        authorization: synthetic_admin_authorization(),
-    };
-    let mut row = AutoFoldRow::active(&input, zero_root(), one_root(), 42, 0, 5, 0, 1, 2, 0);
-    row.common.pre_pot = poker_texas_air::airs::common::u64_to_m31_limbs(200);
-    row.common.post_pot = poker_texas_air::airs::common::u64_to_m31_limbs(0);
-    let trace = gen_method_trace(
-        AutoFoldAir::num_columns(),
-        &row.to_vec(),
-        &AutoFoldRow::padding().to_vec(),
-    )
-    .expect("terminal auto_fold trace should generate");
-    prove_method(
-        &trace,
-        AutoFoldAir {
-            log_size: trace.log_size,
-            input,
-            pre_state_root: zero_root(),
-            post_state_root: one_root(),
-            table_id: 42,
-            hand_id: 0,
-            call_seq: 5,
-            pre_version: 0,
-            post_version: 1,
-        },
-        AutoFoldAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::AutoFold, 42, 0, 5),
-    )
-    .is_ok()
-}
-
 fn terminal_force_fold_trace_proves(settlement: EndWithoutShowdownInput) -> bool {
     use poker_texas_air::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 
@@ -1216,250 +1140,14 @@ fn test_soundness_terminal_raise_rejects_tampered_collection() {
     assert!(verify_method(proof).is_err());
 }
 
-// ========== auto_fold AIR ==========
-
-/// E2E: auto_fold → trace → prove → verify（happy path）。
-#[test]
-fn test_e2e_auto_fold_prove_verify() {
-    use poker_texas_air::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
-
-    let input = AutoFoldInput {
-        seat_index: 1,
-        current_time: 1_700_000_000,
-        pre_betting_started_at: 1_699_970_000,
-        betting_timeout_ms: 30_000,
-        pre_time_bank_ms: 0,
-        outcome: mid_round_fold(2),
-        authorization: synthetic_admin_authorization(),
-    };
-    let row = AutoFoldRow::active(
-        &input,
-        zero_root(),
-        one_root(),
-        42,
-        0,
-        5,
-        0,
-        1,
-        4, // PREFLOP
-        4,
-    );
-    let trace = gen_method_trace(
-        AutoFoldAir::num_columns(),
-        &row.to_vec(),
-        &AutoFoldRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = AutoFoldAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 0,
-        call_seq: 5,
-        pre_version: 0,
-        post_version: 1,
-    };
-
-    let proof = prove_method(
-        &trace,
-        air,
-        AutoFoldAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::AutoFold, 42, 0, 5),
-    )
-    .expect("prove 失败");
-    verify_method(proof).expect("verify 失败");
-}
-
-/// Soundness: 篡改 auto_fold 的 `current_time` 公开输入后，verify 应失败。
-#[test]
-fn test_soundness_auto_fold_tampered_time() {
-    use poker_texas_air::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
-
-    let input = AutoFoldInput {
-        seat_index: 1,
-        current_time: 1_700_000_000,
-        pre_betting_started_at: 1_699_970_000,
-        betting_timeout_ms: 30_000,
-        pre_time_bank_ms: 0,
-        outcome: mid_round_fold(2),
-        authorization: synthetic_admin_authorization(),
-    };
-    let row = AutoFoldRow::active(&input, zero_root(), one_root(), 42, 0, 5, 0, 1, 4, 4);
-    let trace = gen_method_trace(
-        AutoFoldAir::num_columns(),
-        &row.to_vec(),
-        &AutoFoldRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = AutoFoldAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 0,
-        call_seq: 5,
-        pre_version: 0,
-        post_version: 1,
-    };
-    let mut proof = prove_method(
-        &trace,
-        air,
-        AutoFoldAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::AutoFold, 42, 0, 5),
-    )
-    .expect("prove 失败");
-
-    // 篡改 current_time：trace 中是 1_700_000_000，AIR 声明 0
-    proof.air = AutoFoldAir {
-        input: AutoFoldInput {
-            current_time: 0, // 篡改！
-            ..proof.air.input.clone()
-        },
-        ..proof.air.clone()
-    };
-
-    let result = verify_method(proof);
-    assert!(
-        result.is_err(),
-        "篡改 current_time 后 verify 应失败，但成功了 — soundness 漏洞！"
-    );
-}
-
-/// Soundness: creator authorization is part of the auto_fold AIR statement.
-#[test]
-fn test_soundness_auto_fold_tampered_authorization_digest() {
-    use poker_texas_air::airs::actions::auto_fold::{AutoFoldAir, AutoFoldInput, AutoFoldRow};
-
-    let input = AutoFoldInput {
-        seat_index: 1,
-        current_time: 1_700_000_000,
-        pre_betting_started_at: 1_699_970_000,
-        betting_timeout_ms: 30_000,
-        pre_time_bank_ms: 0,
-        outcome: mid_round_fold(2),
-        authorization: synthetic_admin_authorization(),
-    };
-    let mut row = AutoFoldRow::active(&input, zero_root(), one_root(), 42, 0, 5, 0, 1, 4, 4);
-    row.authorization.receipt_digest[7] = M31::from(1u32);
-    let trace = gen_method_trace(
-        AutoFoldAir::num_columns(),
-        &row.to_vec(),
-        &AutoFoldRow::padding().to_vec(),
-    )
-    .unwrap();
-    assert!(
-        prove_method(
-            &trace,
-            AutoFoldAir {
-                log_size: trace.log_size,
-                input,
-                pre_state_root: zero_root(),
-                post_state_root: one_root(),
-                table_id: 42,
-                hand_id: 0,
-                call_seq: 5,
-                pre_version: 0,
-                post_version: 1,
-            },
-            AutoFoldAir::num_columns(),
-            TexasPublicInputs::synthetic_for_test(MethodKind::AutoFold, 42, 0, 5),
-        )
-        .is_err(),
-        "tampered auto_fold creator receipt must fail in AIR"
-    );
-}
-
 #[test]
 fn terminal_admin_folds_constrain_settlement_money() {
     let settlement = valid_terminal_settlement();
-    assert!(terminal_auto_fold_trace_proves(settlement.clone()));
     assert!(terminal_force_fold_trace_proves(settlement.clone()));
-
-    let mut bad_auto = settlement.clone();
-    bad_auto.award -= 1;
-    assert!(!terminal_auto_fold_trace_proves(bad_auto));
 
     let mut bad_force = settlement;
     bad_force.post_winner_stack -= 1;
     assert!(!terminal_force_fold_trace_proves(bad_force));
-}
-
-/// The timeout predicate itself must reject an action before the consensus
-/// deadline, rather than relying on the host dispatch's prior rejection.
-#[test]
-fn test_soundness_auto_fold_rejects_before_deadline() {
-    use poker_texas_air::airs::actions::auto_fold::AutoFoldInput;
-
-    assert!(
-        !auto_fold_timeout_trace_proves(AutoFoldInput {
-            seat_index: 1,
-            current_time: 1_699_999_999,
-            pre_betting_started_at: 1_699_970_000,
-            betting_timeout_ms: 30_000,
-            pre_time_bank_ms: 0,
-            outcome: mid_round_fold(2),
-            authorization: synthetic_admin_authorization(),
-        }),
-        "auto_fold before deadline must make the AIR unsatisfiable"
-    );
-}
-
-/// A nonzero time bank—especially one outside limb 0—must not be bypassable
-/// by an auto-fold proof.  L1 requires a tick that consumes it first.
-#[test]
-fn test_soundness_auto_fold_rejects_high_limb_time_bank() {
-    use poker_texas_air::airs::actions::auto_fold::AutoFoldInput;
-
-    assert!(
-        !auto_fold_timeout_trace_proves(AutoFoldInput {
-            seat_index: 1,
-            current_time: 1_700_000_000,
-            pre_betting_started_at: 1_699_970_000,
-            betting_timeout_ms: 30_000,
-            pre_time_bank_ms: 1_u64 << 32,
-            outcome: mid_round_fold(2),
-            authorization: synthetic_admin_authorization(),
-        }),
-        "a high-limb time bank must make auto_fold unsatisfiable"
-    );
-}
-
-/// Exercise both a 16-bit borrow cascade and Rust's `saturating_add` deadline
-/// semantics.  The first input is one millisecond early across a high-limb
-/// boundary; the second reaches a saturated u64::MAX deadline exactly.
-#[test]
-fn test_soundness_auto_fold_handles_high_limb_boundary_and_saturation() {
-    use poker_texas_air::airs::actions::auto_fold::AutoFoldInput;
-
-    assert!(
-        !auto_fold_timeout_trace_proves(AutoFoldInput {
-            seat_index: 1,
-            current_time: 0x0000_0002_0000_001F,
-            pre_betting_started_at: 0x0000_0001_FFFF_FFF0,
-            betting_timeout_ms: 0x30,
-            pre_time_bank_ms: 0,
-            outcome: mid_round_fold(2),
-            authorization: synthetic_admin_authorization(),
-        }),
-        "a borrow that reaches the high limb must reject a pre-deadline proof"
-    );
-    assert!(
-        auto_fold_timeout_trace_proves(AutoFoldInput {
-            seat_index: 1,
-            current_time: u64::MAX,
-            pre_betting_started_at: u64::MAX - 4,
-            betting_timeout_ms: 10,
-            pre_time_bank_ms: 0,
-            outcome: mid_round_fold(2),
-            authorization: synthetic_admin_authorization(),
-        }),
-        "deadline overflow must follow saturating_add and accept u64::MAX"
-    );
 }
 
 // ========== force_fold AIR ==========
@@ -1863,8 +1551,8 @@ fn test_soundness_kick_player_tampered_refund() {
 #[test]
 fn test_action_air_column_consistency() {
     use poker_texas_air::airs::actions::{
-        auto_fold, bet, call, check, end_betting_round, end_without_showdown, fold, force_fold,
-        kick_player, raise,
+        bet, call, check, end_betting_round, end_without_showdown, fold, force_fold, kick_player,
+        raise,
     };
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
 
@@ -1911,12 +1599,6 @@ fn test_action_air_column_consistency() {
         COMMON_NUM_COLUMNS + 34 + end_betting_round::NUM_COLUMNS
     );
 
-    // auto_fold: timeout 42 + authorization 34 + terminal settlement 34。
-    assert_eq!(
-        auto_fold::cols::NUM_COLUMNS,
-        COMMON_NUM_COLUMNS + 42 + 34 + end_without_showdown::NUM_COLUMNS
-    );
-
     // force_fold: 原 39 业务/授权列 + terminal settlement 34。
     assert_eq!(
         force_fold::cols::NUM_COLUMNS,
@@ -1937,7 +1619,6 @@ fn test_action_method_kinds() {
     assert_eq!(MethodKind::Call.tier(), MethodTier::Action);
     assert_eq!(MethodKind::Raise.tier(), MethodTier::Action);
     assert_eq!(MethodKind::Bet.tier(), MethodTier::Action);
-    assert_eq!(MethodKind::AutoFold.tier(), MethodTier::Action);
     assert_eq!(MethodKind::ForceFold.tier(), MethodTier::Action);
     assert_eq!(MethodKind::KickPlayer.tier(), MethodTier::Action);
 }

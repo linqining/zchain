@@ -1826,7 +1826,7 @@ pub struct TexasPokerTable {
     pub id: ObjectID,
     /// 桌台名称。
     pub name: String,
-    /// 桌台创建者（管理类方法权限基准：kick_player/force_fold/reset_for_next_hand）。
+    /// 桌台创建者（管理类方法权限基准：start_hand/kick_player/force_fold）。
     ///
     /// P0-2：在 `dispatch_create_table` 时记录为 `context.caller`。
     /// 管理类方法在 dispatch 层校验 `caller == creator`，使权限可被
