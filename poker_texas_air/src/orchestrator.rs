@@ -3930,7 +3930,7 @@ mod tests {
     }
 
     #[test]
-    fn tagged_stage_batch_v4_binds_continuous_stream_and_row_references() {
+    fn tagged_stage_batch_v4_mixes_zero_stage_and_composite_method_rows() {
         let mut pre = make_table("tagged-stage-batch-v4");
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 0);
         pre.hand_id = 12;
@@ -3944,13 +3944,24 @@ mod tests {
         seat_fixture::set_bet(&mut pre.seats[0], 50);
         seat_fixture::set_total_bet(&mut pre.seats[0], 50);
 
-        let (task1, after_call) = dispatch_task(
+        let (task1, after_addon) = dispatch_task(
             pre,
+            [1; 20],
+            texas_dispatch::selectors::addon(),
+            borsh::to_vec(&AddonArgs {
+                seat_index: 0,
+                amount: 1,
+            })
+            .expect("addon args should serialize"),
+        );
+        assert_eq!(task1.method_kind, MethodKind::Addon);
+        let (task2, after_call) = dispatch_task(
+            after_addon,
             [1; 20],
             texas_dispatch::selectors::call(),
             borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).expect("call args should serialize"),
         );
-        let (task2, _) = dispatch_task(
+        let (task3, _) = dispatch_task(
             after_call,
             [2; 20],
             texas_dispatch::selectors::raise(),
@@ -3960,7 +3971,7 @@ mod tests {
             })
             .expect("raise args should serialize"),
         );
-        let tasks = vec![task1, task2];
+        let tasks = vec![task1, task2, task3];
         let stream = crate::prove_task::MethodBatchV2::from_tasks(&tasks)
             .expect("continuous state stream should replay");
         let package = crate::tagged_method::prove_verified_tagged_composite_batch(&tasks)
@@ -3970,17 +3981,20 @@ mod tests {
         let references = bundle
             .method_references(&tasks)
             .expect("method-to-Stage references should rebuild");
-        assert_eq!(references.len(), 2);
+        assert_eq!(references.len(), 3);
         assert_eq!(references[0].row_index, 0);
         assert_eq!(references[1].row_index, 1);
+        assert_eq!(references[2].row_index, 2);
+        assert_eq!(references[0].stage_row_count, 0);
+        assert_eq!(references[1].stage_start_row, 0);
         assert_eq!(
-            u16::from(references[0].stage_row_count),
-            references[1].stage_start_row
+            u16::from(references[1].stage_row_count),
+            references[2].stage_start_row
         );
 
         let method_bundle = package.method();
         assert_eq!(method_bundle.batch_id(), bundle.batch_id());
-        assert_eq!(method_bundle.row_count(), 2);
+        assert_eq!(method_bundle.row_count(), 3);
         let method_wire = method_bundle
             .to_bytes()
             .expect("tagged method proof should encode");
@@ -4007,14 +4021,14 @@ mod tests {
         let restored_summaries = restored
             .restore_verified_tagged_batch(&package_decoded)
             .expect("restart should replay the stream and restore tagged receipts");
-        assert_eq!(restored_summaries.len(), 2);
-        assert_eq!(restored.verified_chain().unwrap().len(), 2);
+        assert_eq!(restored_summaries.len(), 3);
+        assert_eq!(restored.verified_chain().unwrap().len(), 3);
 
         let payloads = crate::tagged_method::build_verified_payloads(
             &tasks,
             package_decoded.stages(),
-            &[None, None],
-            &[None, None],
+            &[None, None, None],
+            &[None, None, None],
         )
         .expect("ordinary actions should rebuild narrow verified method payloads");
         crate::tagged_method::verify_tagged_method_batch(&payloads, &method_decoded)

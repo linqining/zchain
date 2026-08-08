@@ -964,6 +964,18 @@ mod tests {
                 start: RitStartStreet::Flop
             }
         );
+
+        let mut mismatched_board = table().community_cards.to_vec();
+        mismatched_board[0] = Card::new(0, 3);
+        let malformed = SettlementBoards::twice(
+            RitStartStreet::Flop,
+            table().community_cards.to_vec(),
+            mismatched_board,
+        );
+        assert!(
+            borsh::from_slice::<SettlementBoards>(&borsh::to_vec(&malformed).unwrap()).is_err(),
+            "typed tags still require both boards to agree on the street-derived shared prefix"
+        );
     }
 
     #[test]
@@ -1001,6 +1013,10 @@ mod tests {
         assert_eq!(plan.awards, [300, 200, 100, 0, 0, 0, 0, 0, 0]);
         assert_eq!(plan.digest().unwrap(), plan.clone().digest().unwrap());
         plan.validate(table.seats.len()).unwrap();
+
+        let mut retired = plan;
+        retired.version = 1;
+        assert!(retired.validate(table.seats.len()).is_err());
     }
 
     #[test]

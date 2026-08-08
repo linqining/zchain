@@ -294,7 +294,7 @@ impl ServiceRuntime {
             }
         }
 
-        // Tentative composite streams survive restart but remain excluded from
+        // Tentative same-hand tagged streams survive restart but remain excluded from
         // the verified receipt chain until explicit or automatic finalization.
         for pending in repository.pending_tagged_batches() {
             let plugin = plugins.get_mut(&pending.table_id).ok_or_else(|| {
@@ -908,20 +908,24 @@ async fn dispatch_for_table(
         Err(error) => return Err(internal_error(error.to_string())),
     };
 
-    let selector_is_tagged = MethodKind::all()
+    let selector_kind = MethodKind::all()
         .into_iter()
-        .find(|kind| kind.selector() == selector)
-        .is_some_and(supports_composite_proof);
+        .find(|kind| kind.selector() == selector);
     let pending_rows = runtime
         .repository
         .pending_tagged_batch(table_id)
         .map_or(0, |batch| batch.tasks.len());
+    // A pending stream may absorb any recognized method that stays in the same hand. start_hand
+    // is the only retained selector that advances hand_id, so it must close a prior hand first.
+    let selector_can_extend_pending =
+        selector_kind.is_some_and(|kind| kind != MethodKind::StartHand);
     if pending_rows != 0
-        && (!selector_is_tagged || pending_rows >= MAX_METHOD_BATCH_ROWS)
+        && (!selector_can_extend_pending || pending_rows >= MAX_METHOD_BATCH_ROWS)
         && let Err(error) = finalize_pending_tagged_batch(&mut runtime, table_id)
     {
         return fail_reserved_job(&mut runtime, job, error.to_string());
     }
+    let extends_pending_stream = runtime.repository.pending_tagged_batch(table_id).is_some();
 
     let mut staged = runtime.staged_plugin(table_id);
     let context = match (caller_pubkey, consensus_context) {
@@ -953,7 +957,9 @@ async fn dispatch_for_table(
     };
     let had_prove_task = outcome.prove_task.is_some();
     if let Some(task) = &outcome.prove_task
-        && supports_composite_proof(task.method_kind)
+        && (supports_composite_proof(task.method_kind)
+            || task.method_kind == MethodKind::StartHand
+            || extends_pending_stream)
     {
         if let Err(error) = staged.queue_tagged_batch_task(task) {
             return fail_reserved_job(&mut runtime, job, error.to_string());
@@ -1700,7 +1706,7 @@ mod tests {
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn composite_jobs_share_one_tagged_package_and_recover_pending_rows() {
+    async fn mixed_zero_stage_jobs_share_one_tagged_package_and_recover_pending_rows() {
         use blstrs::G1Projective;
         use group::Group;
         use poker_l1::object_model::ObjectID;
@@ -1756,6 +1762,23 @@ mod tests {
             args_hex: hex::encode(borsh::to_vec(&SeatIndexArgs { seat_index }).unwrap()),
             idempotency_key: Some(key.into()),
         };
+        let leave_after_hand_request =
+            |seat_index: u8, key: &str, caller: [u8; 20]| DispatchRequest {
+                caller_hex: hex::encode(caller),
+                caller_pubkey_hex: None,
+                chain_id: None,
+                block_height: None,
+                block_timestamp_ms: None,
+                selector_hex: hex::encode(selectors::set_leave_after_hand()),
+                args_hex: hex::encode(
+                    borsh::to_vec(&SetLeaveAfterHandArgs {
+                        seat_index,
+                        want_leave: true,
+                    })
+                    .unwrap(),
+                ),
+                idempotency_key: Some(key.into()),
+            };
         let first = dispatch_for_table(
             state.clone(),
             table_id,
@@ -1785,7 +1808,7 @@ mod tests {
         let second = dispatch_for_table(
             recovered.clone(),
             table_id,
-            check_request(1, "check-1", [2; 20]),
+            leave_after_hand_request(1, "leave-after-hand-1", [2; 20]),
         )
         .await
         .unwrap()
@@ -1854,6 +1877,10 @@ mod tests {
             .load_job_proof_package(first_job)
             .unwrap()
             .unwrap();
+        let decoded = ServiceProofPackage::decode_bytes(&shared_package).unwrap();
+        let tagged = decoded.package().tagged().unwrap();
+        assert_eq!(tagged.method().row_count(), 2);
+        assert_eq!(tagged.stages().stage_row_count(), 1);
         assert_eq!(
             Some(shared_package.clone()),
             runtime

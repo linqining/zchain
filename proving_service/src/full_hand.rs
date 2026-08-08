@@ -15,8 +15,9 @@
 //! ```
 //!
 //! 每步经 [`crate::contracts::TexasPokerPlugin`] 真实 dispatch，产出的 `ProveTask`
-//! 非 composite 方法仍立即生成并验证 method proof；连续 composite transition 仅入队，
-//! 在牌局结束时统一生成一份 narrow tagged method proof 和一份 tagged Stage proof。
+//! 建桌/入座仍立即生成并验证 method proof；`start_hand` 之后同一 hand scope 内的 shuffle、
+//! reveal 与下注 transition 全部入队，在牌局结束时统一生成一份 narrow tagged method proof
+//! 和一份 tagged Stage proof。非-composite row 在共享 Stage proof 中占零行。
 //!
 //! # 容错与覆盖范围
 //!
@@ -69,8 +70,7 @@ pub struct StepTiming {
     /// 是否成功（dispatch + 可选 prove 均成功）。
     pub ok: bool,
     /// Per-proof breakdown collected during `prove` (empty unless
-    /// `TEXAS_PROVE_TIMING` is set): legacy method prove/verify plus up to
-    /// four component stage prove/verify records.
+    /// `TEXAS_PROVE_TIMING` is set): legacy setup method prove/verify or the shared tagged proofs.
     pub proof_breakdown: Vec<poker_texas_air::prove_timing::TimingRecord>,
 }
 
@@ -174,21 +174,20 @@ impl FullHandRunner {
             ctx.stopped_at = Some(format!("register_aggregated_pk: {error}"));
         }
 
-        // start_hand 使 hand_id 0→1；verified receipt 链以单局 hand_id 为边界，
-        // 必须在 prove start_hand 前开新链片段，否则 crosses-hands 校验失败。
+        // start_hand 使 hand_id 0→1；queue_tagged_batch_task 会在首 row 跨 hand 时
+        // 自动开启新的 verified receipt 链片段。
         if ctx.stopped_at.is_none() {
             let args_bytes = borsh::to_vec(&()).unwrap_or_default();
             let d_start = Instant::now();
             match plugin.dispatch(self.creator, &selectors::start_hand(), &args_bytes) {
                 Ok(outcome) => {
                     let d_dur = d_start.elapsed();
-                    plugin.start_new_chain_segment();
                     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
                         let p_start = Instant::now();
                         let _drained_before = poker_texas_air::prove_timing::take_drain();
-                        let ok = plugin.prove_task_archived(task).is_ok();
+                        let ok = plugin.queue_tagged_batch_task(task).is_ok();
                         if !ok {
-                            ctx.stopped_at = Some("start_hand prove/verify failed".to_string());
+                            ctx.stopped_at = Some("start_hand tagged queue failed".to_string());
                         }
                         (p_start.elapsed(), ok)
                     } else {
@@ -491,12 +490,13 @@ fn dispatch_and_prove<A: BorshSerialize>(
     let (prove_dur, ok) = if let Some(task) = &outcome.prove_task {
         let p_start = Instant::now();
         let _drained_before = poker_texas_air::prove_timing::take_drain();
-        let prove_result =
-            if poker_texas_air::airs::composition::supports_composite_proof(task.method_kind) {
-                plugin.queue_tagged_batch_task(task)
-            } else {
-                plugin.prove_task_archived(task).map(|_| ())
-            };
+        let prove_result = if task.hand_id != 0
+            || poker_texas_air::airs::composition::supports_composite_proof(task.method_kind)
+        {
+            plugin.queue_tagged_batch_task(task)
+        } else {
+            plugin.prove_task_archived(task).map(|_| ())
+        };
         match prove_result {
             Ok(()) => (p_start.elapsed(), true),
             Err(error) => {

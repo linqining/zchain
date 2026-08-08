@@ -15,9 +15,7 @@ use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::dispatch as texas_dispatch;
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 
-use poker_texas_air::airs::composition::{
-    ArchivedCompositionProofBundle, supports_composite_proof,
-};
+use poker_texas_air::airs::composition::ArchivedCompositionProofBundle;
 use poker_texas_air::consensus_anchor::ConsensusAnchorMaterial;
 use poker_texas_air::dual_proof::dual_proof_from_archived;
 use poker_texas_air::orchestrator::{ArchivedProvenTask, Orchestrator, ProvenTask};
@@ -48,9 +46,9 @@ pub struct TexasPokerPlugin {
     proved_archives: Vec<poker_texas_air::proof_archive::ArchivedMethodProof>,
     /// First task index in the currently active hand segment.
     segment_start: usize,
-    /// Composite tasks waiting for one heterogeneous method + Stage proof package.
+    /// Same-hand tasks waiting for one heterogeneous method + Stage proof package.
     deferred_tagged_tasks: Vec<ProveTask>,
-    /// Verified two-proof packages produced for completed composite batches.
+    /// Verified two-proof packages produced for completed same-hand batches.
     tagged_batches: Vec<ArchivedTaggedBatchProofPackage>,
 }
 
@@ -178,22 +176,13 @@ impl TexasPokerPlugin {
         Ok(archived)
     }
 
-    /// Queue a composite transition without starting a per-task prover.
+    /// Queue one transition without starting a per-task prover.
     ///
     /// A later [`Self::finalize_tagged_batches`] call proves the entire contiguous run with one
-    /// narrow heterogeneous method proof and one tagged Stage proof.
+    /// narrow heterogeneous method proof and one tagged Stage proof. Methods outside the
+    /// composition pipeline own zero Stage rows and can share the package with later composite
+    /// transitions in the same post-dispatch hand scope.
     pub fn queue_tagged_batch_task(&mut self, task: &ProveTask) -> PluginResult<()> {
-        if !supports_composite_proof(task.method_kind) {
-            return Err(PluginError::Precondition(format!(
-                "method {} is outside the tagged composition pipeline",
-                task.method_kind.method_name()
-            )));
-        }
-        if task.pre_table.hand_id != task.post_table.hand_id {
-            return Err(PluginError::Precondition(
-                "composite batch task must not cross a hand boundary".into(),
-            ));
-        }
         if let Some(previous) = self.deferred_tagged_tasks.last() {
             let expected_call_seq = previous.call_seq.checked_add(1).ok_or_else(|| {
                 PluginError::Precondition("deferred tagged batch call_seq overflow".into())
@@ -207,6 +196,9 @@ impl TexasPokerPlugin {
                     "tagged batch tasks must be exact-state contiguous".into(),
                 ));
             }
+        } else if task.pre_table.hand_id != task.post_table.hand_id {
+            self.orchestrator.start_new_chain_segment();
+            self.segment_start = self.proved_tasks.len();
         }
         self.deferred_tagged_tasks.push(task.clone());
         Ok(())
@@ -281,10 +273,20 @@ impl TexasPokerPlugin {
                 "cannot restore a completed tagged package while tasks are pending".into(),
             ));
         }
-        let summaries = self
-            .orchestrator
+        let starts_new_hand = tasks
+            .first()
+            .is_some_and(|task| task.pre_table.hand_id != task.post_table.hand_id);
+        let mut staged_orchestrator = self.orchestrator.clone();
+        if starts_new_hand {
+            staged_orchestrator.start_new_chain_segment();
+        }
+        let summaries = staged_orchestrator
             .restore_verified_tagged_batch_with_replayed_tasks(tasks, package)
             .map_err(|error| PluginError::Prover(error.to_string()))?;
+        self.orchestrator = staged_orchestrator;
+        if starts_new_hand {
+            self.segment_start = self.proved_tasks.len();
+        }
         self.tagged_batches.push(package.clone());
         Ok(summaries)
     }
@@ -563,6 +565,7 @@ impl crate::plugin::ContractPlugin for TexasPokerPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::full_hand::FullHandRunner;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args;
     use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, SeatStatus, ShuffleState};
@@ -810,5 +813,44 @@ mod tests {
         assert_eq!(aggregate.children().len(), 2);
         assert_eq!(aggregate.hand_id(), tasks[0].hand_id);
         assert_eq!(restored.proven().len(), 2);
+    }
+
+    #[test]
+    fn tagged_restore_resets_the_receipt_chain_when_start_hand_is_the_first_row() {
+        let (completed, report) = FullHandRunner::new().run();
+        assert!(report.stopped_at.is_none());
+        assert_eq!(
+            completed.proved_tasks.len(),
+            3,
+            "only create/join remain legacy"
+        );
+        assert_eq!(completed.proved_archives.len(), 3);
+        assert_eq!(completed.tagged_batches.len(), 1);
+
+        let mut restored = TexasPokerPlugin::from_persisted_state(
+            completed.table.clone(),
+            completed.dispatch_count,
+            completed.prove_count,
+        );
+        for (task, archive) in completed
+            .proved_tasks
+            .iter()
+            .zip(&completed.proved_archives)
+        {
+            restored
+                .restore_archived_task(task, archive, None)
+                .expect("legacy setup receipt should restore");
+        }
+        assert_eq!(restored.orchestrator.verified_chain().unwrap().len(), 3);
+
+        let package = &completed.tagged_batches[0];
+        let tasks = package.validate_and_replay_tasks().unwrap();
+        assert_ne!(tasks[0].pre_table.hand_id, tasks[0].post_table.hand_id);
+        let summaries = restored
+            .restore_tagged_batch_with_replayed_tasks(&tasks, package)
+            .expect("start-hand tagged package should open a new receipt segment on restart");
+        assert_eq!(summaries.len(), 21);
+        assert_eq!(restored.orchestrator.verified_chain().unwrap().len(), 21);
+        assert_eq!(restored.proven().len(), 24);
     }
 }

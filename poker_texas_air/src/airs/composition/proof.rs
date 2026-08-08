@@ -351,16 +351,20 @@ impl ArchivedCompositionBatchProofBundle {
         let mut stage_start_row = 0u16;
         let mut references = Vec::with_capacity(tasks.len());
         for (row_index, task) in tasks.iter().enumerate() {
-            let plan = derive_composite_transition_plan_from_task(task)?;
-            let stage_row_count = [
-                plan.seat_update.active,
-                plan.bet_collection.active,
-                plan.round_advance.active,
-                plan.settlement.active,
-            ]
-            .into_iter()
-            .filter(|active| *active)
-            .count();
+            let stage_row_count = if supports_composite_proof(task.method_kind) {
+                let plan = derive_composite_transition_plan_from_task(task)?;
+                [
+                    plan.seat_update.active,
+                    plan.bet_collection.active,
+                    plan.round_advance.active,
+                    plan.settlement.active,
+                ]
+                .into_iter()
+                .filter(|active| *active)
+                .count()
+            } else {
+                0
+            };
             let stage_row_count = u8::try_from(stage_row_count).expect("four fixed stages");
             let reference = crate::prove_task::MethodBatchReferenceV2 {
                 batch_id: self.batch_id,
@@ -655,8 +659,10 @@ fn verify_stage<A: ComponentTexasAir>(
 ///
 /// # Errors
 ///
-/// Rejects empty, oversized, unsupported, cross-table, cross-hand, out-of-order, or state-chain
-/// discontinuous batches. Every task is fully replayed before proving.
+/// Rejects empty, oversized, cross-table, cross-hand, out-of-order, or state-chain discontinuous
+/// batches. Methods outside the four-stage pipeline own zero Stage rows but remain committed by
+/// the shared stream statement and tagged method proof. Every task is fully replayed before
+/// proving.
 pub fn prove_composition_batch(
     tasks: &[crate::prove_task::ProveTask],
 ) -> TexasAirResult<ArchivedCompositionBatchProofBundle> {
@@ -807,12 +813,6 @@ fn validate_batch_tasks(tasks: &[crate::prove_task::ProveTask]) -> TexasAirResul
     }
     let first = &tasks[0];
     for (index, task) in tasks.iter().enumerate() {
-        if !supports_composite_proof(task.method_kind) {
-            return Err(TexasAirError::SpecViolation(format!(
-                "composition batch task {index} uses unsupported method {}",
-                task.method_kind.method_name()
-            )));
-        }
         if task.table_id != first.table_id || task.hand_id != first.hand_id {
             return Err(TexasAirError::SpecViolation(
                 "composition batch crosses table or hand scope".into(),
@@ -847,6 +847,9 @@ fn build_tagged_batch_trace(
     let mut trace = MethodTrace::new(MIN_LOG_SIZE, TAGGED_STAGE_NUM_COLUMNS);
     let mut row_index = 0usize;
     for task in tasks {
+        if !supports_composite_proof(task.method_kind) {
+            continue;
+        }
         let plan = derive_composite_transition_plan_from_task(task)?;
         let base = base_public_inputs(task)?;
         let airs = build_airs(&plan, &base);

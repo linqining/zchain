@@ -656,15 +656,16 @@ archive 已破坏性升级为 v4，不再接受旧的完整 task list 或 compac
 承诺改为 `MethodBatchV2 = initial_state + commands + final_state`，解码时从初态逐条重放并拒绝任何
 中间状态、table/hand/call 序列或最终状态错配。
 
-这里的 “heterogeneous method” 已在 composition batch 输入层成立：同一连续 batch 可混合
-fold/check/call/raise/bet/tick/crypto reveal 等所有 `supports_composite_proof` 方法。原始 method 层也已
+这里的 “heterogeneous method” 已在 composition batch 输入层成立：同一 hand 的连续 batch 可混合
+所有 MethodKind。`supports_composite_proof` 方法派生并占用 canonical Stage rows；start/shuffle 等
+pipeline 外方法拥有 `stage_row_count = 0`，但仍进入连续 stream 和 tagged method proof。原始 method 层也已
 新增固定宽度 tagged method STARK：它只承诺窄授权/编排行，不再生成每 task 一份旧 Method AIR。
-throughput 入口因而对一段连续 composite transition 固定只启动两份 Stwo proof：一份 tagged
-method proof + 一份 tagged Stage proof。full-hand driver 已切到该路径：composite dispatch 期间不再
-启动 legacy method prover，末尾通过 `prove_verify_and_accept_tagged_batch` 原子验证 package、签发
-逐 row receipt 并接入原有 host-verified chain。当前 debug profile 的真实 heads-up full-hand 为
-24 个 transition、18 个 composite method row、16 个 active Stage row：two-proof batch 约 20.50s，
-全局约 36.30s；此前仍逐 task 启动 method prover 的 Stage-only batch 路径约 134.91s。
+throughput 入口因而对一段同 hand transition 固定只启动两份 Stwo proof：一份 tagged method proof
++ 一份 tagged Stage proof。full-hand driver 已切到 mixed zero-Stage 路径：create/join×2 仍是 3 个
+legacy setup proofs；`start_hand + shuffle×2 + 18 composite transition` 形成 21-row method proof，
+其中只有 16 个 active Stage row。末尾通过 `prove_verify_and_accept_tagged_batch` 原子验证 package、
+签发逐 row receipt 并接入原有 host-verified chain。2026-08-09 debug test profile 端到端回归为
+26.55–26.92s；此前只批量化 18 个 composite rows 的版本约 36.30s，Stage-only batching 路径约 134.91s。
 
 method payload 的窄行契约已经落地：`MethodPayloadV2` 当前 schema version 为 v4，直接使用六类 `family + subtag`、
 `pre_call_seq/post_call_seq`、pre/post root、canonical command digest、admin/crypto tagged receipt、
@@ -675,13 +676,15 @@ absence、crypto one-hot tag 和 checked `post_call_seq = pre_call_seq + 1`；ve
 commitment。管理员与 Mental Poker receipt 由生产 convenience path 从 canonical task 重新签发，
 不会信任 archive 自报 digest。tagged package 已自带 `MethodBatchV2` 连续流，restart verifier 可
 直接重放恢复 tasks；同步 service package/repository 已分别破坏性升级为 v7/v6 并拒绝历史格式。
-HTTP composite job 现在先进入 `pending_proof`，多次 dispatch 共享一段持久化 continuous stream；
-显式 finalize、非 batch 边界或满 batch 才启动 two-proof prover。完成后每个 job 只保存
+HTTP 的 `start_hand` 或 composite job 现在可开启 `pending_proof`；已有 stream 内，同 hand 的
+shuffle、资金、离场标记等 non-composite job 以 zero-Stage row 继续共享持久化 continuous stream。
+显式 finalize、下一次 `start_hand` 或满 batch 才启动 two-proof prover。完成后每个 job 只保存
 `batch_id + row_index + row_count`，下载、重验和 P2P repair 均解析到同一共享 sidecar。service
 restart 对同一 tagged package 只验证/恢复一次，并严格校验所有 row job 的顺序、数量、task digest、
 state root 和 result metadata；未 finalize 的 stream 仅恢复 pending queue，不签发 receipt。共享
 sidecar repair 回归还验证了从非零 row job 下载后按 `batch_id` 恢复一次，即可让批内全部 job
-重新读取并在 restart 中恢复 receipt chain。
+重新读取并在 restart 中恢复 receipt chain。首 row 跨 hand 的 completed package 会在 staged
+Orchestrator 上先开启新 receipt segment；验证失败保持原恢复链不变。
 
 验证侧的重复开销也已收口：service package decode 会把严格校验时唯一一次 continuous-stream
 replay 的 canonical tasks 与 immutable package 一起保留；restart 遇到共享 tagged reference 时由
@@ -766,7 +769,9 @@ Borsh 字节更贵，所以优先删除重复事实和变长容器，再考虑 b
 9. 已完成 throughput 路径的 Tagged-union Stage proof、原始 tagged method STARK，以及 durable
    service batch job。continuous `MethodBatchV2`、method payload v2、共享 sidecar、
    batch-id/row-index/Stage span、pending restart 与逐 row job recovery 均已接入；composite HTTP
-   dispatch 不再生产 per-task method/component archive。
+   dispatch 不再生产 per-task method/component archive。full-hand 与 production HTTP 都已允许
+   start/shuffle 等 zero-Stage methods 与后续 composite rows 共用 package；create/join 等 hand
+   stream 外孤立 setup jobs 仍保留 single archive。
 10. method batch 前按顺序完成：已完成 reveal ledger canonicalization、
     `DeckState.contributor_mask` 与 `aggregated_pk` 派生、schema v14 shuffle 二级 tagged union、单一
     canonical command 表示、crypto payload 去重、schema v15 active deadline 哨兵消除和 authenticated

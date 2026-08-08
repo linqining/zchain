@@ -190,8 +190,9 @@ inactive Stage 不占行，剩余行全部为零。`stage_tag` 使用两个 bit 
 tagged Stage row 和 1024 行 padding，独立重算 Stwo original-trace commitment，并要求它与 proof
 的 trace commitment 完全一致；batch ABI version、task/stage-row count、table/hand/call range 和
 完整有序 task digest 也进入 transcript。空 batch、超过保守 task 上限、超过 1024 Stage 行、
-unsupported method、跨 table/hand、call-seq 不连续、state-root 不连续、task digest/tag/trace
-commitment 不符均 fail-closed。当前 batch AIR 本身只约束 active bit、tag bits、tag/index 一致性和
+跨 table/hand、call-seq 不连续、state-root 不连续、task digest/tag/trace commitment 不符均
+fail-closed。Stage pipeline 外的方法允许作为 zero-Stage method row 混入同 hand 连续流，但必须
+声明 `stage_row_count = 0`，且不会跳过 tagged method proof。当前 batch AIR 本身只约束 active bit、tag bits、tag/index 一致性和
 零 padding；完整业务行仍由 verifier-owned replay commitment 绑定，与旧四 batch proof 的安全模型
 一致。
 
@@ -202,15 +203,17 @@ commitment 不符均 fail-closed。当前 batch AIR 本身只约束 active bit�
 同步 durable service 已接入共享 batch sidecar。完整 actor-less canonical command payload 落地后，
 service package schema 已破坏性升级为 v7，repository schema 升为 v6，旧 package/repository
 直接拒绝且不执行迁移。package payload 是严格
-single/tagged union：非 composite 方法仍保存单任务 archive；composite dispatch 先进入
-`PendingProof`，repository 持久化连续 canonical tasks 和 tentative table，随后在显式
-`POST /tables/:id/finalize-proofs`、遇到非 batch 方法或达到 batch 上限时生成一份 tagged method
+single/tagged union：create/join 等 hand stream 外的孤立方法仍保存单任务 archive；`start_hand`
+或 composite dispatch 可开启 `PendingProof`，已有 stream 内的同 hand non-composite 方法继续以
+zero-Stage row 入队。repository 持久化连续 canonical tasks 和 tentative table，随后在显式
+`POST /tables/:id/finalize-proofs`、下一次 `start_hand` 或达到 batch 上限时生成一份 tagged method
 STARK + 一份 tagged Stage STARK。成功后整批 job 原子切换为 completed，每个 job 只保存
 `batch_id + row_index + row_count`，并共同引用同一 sidecar。restart 会对同一 package 只恢复一次
 receipt batch；pending stream 也会重建但继续排除在 verified chain 之外。package、row reference、
 job metadata 或 pending lifecycle 任一错配均 fail-closed。P2P repair 已覆盖共享 sidecar：peer 可按
 任一 row 的 job ID 返回完整 tagged package，本地验证对应 row 和整份 two-proof package 后按
-`batch_id` 只落一份 sidecar，批内所有 job 同时恢复可用。
+`batch_id` 只落一份 sidecar，批内所有 job 同时恢复可用。若 completed package 首 row 是
+`start_hand`，restart 会在 staged Orchestrator 上先切换 receipt segment，再原子验证/恢复整包。
 
 普通玩家命令的 task payload 已不再重复保存 actor：`join_table.player` 由 authenticated caller
 确定，fold/check/call/leave/request-leave/auto-fold 的 seat 由 caller/current actor 确定，
@@ -235,18 +238,19 @@ tagged batch 完成时每个 job 的 `prove_count/chain_length` 也按 row 精�
 复制给所有 row；repository 会校验 pending rows 共享同一历史基线、最终计数恰好增加 row count，
 restart 再校验批内计数位置连续。
 
-原始 method 层的 tagged batch 也已实现。`ArchivedTaggedBatchProofPackage` 对一段连续 composite
+原始 method 层的 tagged batch 也已实现。`ArchivedTaggedBatchProofPackage` 对一段同 hand 连续
 transition 只包含一份 177-column tagged method STARK 和一份 tagged Stage STARK，并内嵌唯一的
 `initial_state + commands + final_state` 连续流，不再要求 durable verifier 额外保存逐 task table
 快照。生产入口会先完整
 VM replay，再重新执行所需管理员授权与 BLS12-381 native verifier，最后把 request/receipt digest、
 command digest、pre/post root/call_seq 和 Stage span 写入窄 method row。call→raise 两步真实 dispatch
 已通过 package encode/decode、自包含 restart replay、两份 proof 重建验证和逐 row receipt 签发。
-full-hand driver 已改为 composite task 只入队，末尾原子生成该 two-proof package；旧 per-task archive
-仅保留给非 batch 的同步 service 路径。debug profile 的真实 24-transition heads-up full-hand 基准为
-约 36.30s：前 6 个非 composite legacy proof 合计约 15.42s，18 个连续 composite transition 的
-two-proof package（16 个 active Stage row）prove+verify 约 20.50s。相对先前约 134.91s 的
-Stage-only batching 路径，主要节省来自删除 18 次 legacy method prover startup。
+full-hand driver 已把 `start_hand`、两次 shuffle 与后续 composite tasks 一起入队，末尾原子生成
+该 two-proof package；Stage pipeline 外的三行拥有零 Stage rows。旧 per-task archive 目前只保留给
+create/join×2 和 hand stream 外的同步 service 路径。2026-08-09 debug test profile 的真实
+24-transition heads-up full-hand 只剩 3 个 legacy setup proofs，加一个 21-row tagged method /
+16-row tagged Stage package，端到端 prove/verify 为 26.55–26.92s。此前只批量化 18 个 composite rows、
+仍单独证明 start/shuffle 的版本约 36.30s；更早的 Stage-only batching 路径约 134.91s。
 
 现有 `DualProofBundle` 仍是“method STARK + native crypto request”的两部分传输格式；对
 `fold_with_proof` / terminal reveal 这类 composite method，它不能替代 durable v2 package 中的

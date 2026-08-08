@@ -449,8 +449,9 @@ impl ServiceRepository {
         self.commit(candidate)
     }
 
-    /// Atomically persist one tentative composite transition and append it to
-    /// the table's open tagged batch.
+    /// Atomically persist one tentative same-hand transition and append it to
+    /// the table's open tagged batch. Methods outside the Stage pipeline are
+    /// represented by zero-Stage tagged rows.
     pub fn queue_pending_tagged_job(
         &mut self,
         table: StoredTable,

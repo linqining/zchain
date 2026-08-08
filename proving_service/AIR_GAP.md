@@ -6,7 +6,9 @@
 开局、两次 shuffle、preflop/flop/turn/river/showdown reveal，以及四轮下注。每个状态变更都
 由 `poker_texas_air::Orchestrator` 重放 canonical VM dispatch、生成 Stwo proof 并进行 host
 verify；reveal 采用每个 seat 一次覆盖其全部 pending assignment 的 canonical 批量提交，完整
-流程产生 24 个连续 receipt，最终再生成一份 tagged method proof 与一份 tagged Stage proof。
+流程产生 24 个连续 receipt。建桌与两次入座仍各自生成 legacy Method proof；从 `start_hand`
+开始的 21 个同 hand transition（含两次 shuffle 与 18 个 composite transition）共享一份 tagged
+method proof 与一份 tagged Stage proof，其中仅 16 个 active Stage row 进入 Stage trace。
 
 ## 已修复的终态转换
 
@@ -44,24 +46,24 @@ verify；reveal 采用每个 seat 一次覆盖其全部 pending assignment 的 c
 
 ## 证明时间
 
-composite dispatch 的 method proof 与四段 bundle 已并行生成；四个 component proof/verify、
-method archive 与 component archive 的验证也并行执行。参考开发机上，单个 composite check
-约由 22.97s 降至 7.2s，完整牌局约由 425.03s 降至 213.46s。设置
-`TEXAS_PROVE_TIMING=1` 后，`--full-hand` 会额外打印 method/SeatUpdate/BetCollection/
-RoundAdvance/Settlement 的 prove/verify 明细；默认不启用计时。
+分项基准确认主要开销是每份 Stwo proof 的固定启动成本。优化路径先把每类 Stage 的连续 rows
+装入四份 1024 行 proof，再收敛为一份 Tagged-union Stage proof，最后加入一份窄 tagged method
+proof，删除 batch 内逐 task legacy Method prover。`TEXAS_PROVE_TIMING=1` 可打印 legacy setup、
+tagged method 与 tagged Stage 的 prove/verify 明细；默认不启用计时。
 
-进一步分项显示固定 prover 启动成本占主导：完整牌局旧路径有 26 个连续 composite transition，
-即 104 次 component prove。`--full-hand` 现使用 batch throughput 路径，把同种 Stage 的 26 行
-canonical transition 写入一份 1024 行 trace，最终只生成 4 份 Stage proof。verifier 重放 task、
-重建完整 trace 并独立重算 original-trace commitment，拒绝 proof 自报行；batch/task digest、
-table/hand/call range 和 Stage kind 同时进入 transcript。
+当前 `--full-hand` 共 24 个 dispatch：create/join×2 保留 3 次 legacy Method proof；其余
+`start_hand + shuffle×2 + 18 composite transition` 形成一个 21-row tagged method proof，并只把
+16 个 active Stage row 写入同一 tagged Stage proof。非 composite method row 的
+`stage_row_count = 0`，但仍由连续 state stream、method row、batch transcript 与逐 row receipt
+绑定。2026-08-09 debug test profile 的端到端 prove/verify 回归耗时 26.55–26.92s；此前只批量化
+18 个 composite rows、仍单独证明 start/shuffle 的版本约 36.30s。
 
-2026-08-06 最终复测：完整牌局由 335.99s 降至 168.14s（约 -50%），四份 batch Stage prove
-分别约 6.00s、6.04s、7.28s、8.33s，batch step wall-clock 20.36s；每类 Stage 只执行一次
-host verify。不同轮次受机器负载影响曾测得 154.48s，但 component prove 启动数从 104 降到 4
-是稳定结果。生产 server 的 durable package v2 暂时仍使用 per-task component bundle，batch
-archive 尚未接入 job/package 引用与重启恢复，所以该优化当前针对 full-hand/in-memory
-throughput，不会放宽现有持久化 fail-closed 规则。
+durable service 已支持同 hand mixed HTTP jobs 的共享 tagged sidecar、重启恢复、P2P repair 与
+validated-package cache：`start_hand` 开启 stream，后续 shuffle、资金/离场标记等 zero-Stage 方法
+可与 composite rows 连续入队；下一次 `start_hand` 或 batch 满时先原子 finalize。create/join 等
+未进入 hand stream 的孤立 setup job 仍走 single archive，因此不能声称所有 production legacy
+Method route 已经退休。completed package 在重启恢复时也会从首 row 检测 hand 边界，并在 staged
+Orchestrator 上切换 receipt segment；proof/stream 校验失败不会提前破坏已恢复链。
 
 ## 仍需解决的安全与产品边界
 

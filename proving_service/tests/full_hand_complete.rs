@@ -51,15 +51,27 @@ fn full_hand_proves_complete_game() {
     );
     assert!(report.chain_ok, "state_root 链应衔接");
 
-    let aggregate = plugin
-        .aggregate_crypto_proofs()
-        .expect("两次独立归档的 shuffle proof 应生成 host-verified outer aggregate");
+    let tagged_batches = plugin.tagged_batches();
     assert_eq!(
-        aggregate.children().len(),
-        2,
-        "reveal 已进入 tagged batch，outer aggregate 只包含两个独立归档的 shuffle proof"
+        tagged_batches.len(),
+        1,
+        "完整牌局应只启动一个 tagged package"
     );
-    assert_eq!(aggregate.hand_id(), 1);
+    assert_eq!(
+        tagged_batches[0].method().row_count(),
+        21,
+        "start_hand、两次 shuffle 与 18 个 composite transition 应共享 21-row method proof"
+    );
+    assert_eq!(
+        tagged_batches[0].stages().stage_row_count(),
+        16,
+        "非 composite rows 不应占用 Stage row"
+    );
+
+    assert!(
+        plugin.aggregate_crypto_proofs().is_err(),
+        "shuffle 已进入 self-contained tagged package，不应再生成 legacy per-task dual-proof aggregate"
+    );
 
     let has_dispatch_timing = report.steps.iter().any(|s| s.dispatch.as_micros() > 0);
     assert!(has_dispatch_timing, "应有非零 dispatch 计时");
